@@ -265,6 +265,7 @@ impl StyleBatchDto {
             collapsed: self.collapsed,
             color: delta.color,
             fill: delta.fill,
+            fill_slot: None,
             width: delta
                 .width
                 .map(WidthEdit::Set)
@@ -415,6 +416,7 @@ impl PatchDto {
             properties: None,
             settings: None,
             prepared_layers: None,
+            fill_slot_edit: None,
         })
     }
 }
@@ -671,6 +673,8 @@ mod tests {
             json!({"pairs":[[3,1]],"width":3,"collapsed":null}),
             json!({"pairs":[[3,1]],"width":3,"out":"secret"}),
             json!({"pairs":[[3,1]],"fill":{"kind":"pattern","rows":[1,2]}}),
+            // Core groundwork is not an advertised slot-edit transport yet.
+            json!({"pairs":[[3,1]],"fill_slot":"brick"}),
         ] {
             assert!(
                 serde_json::from_value::<PatchDto>(json!({"style_batch":body}))
@@ -685,6 +689,10 @@ mod tests {
         )
         .is_err());
         assert!(serde_json::from_str::<PatchDto>(r#"{"style_batch":null}"#).is_err());
+        assert!(serde_json::from_value::<PatchDto>(json!({
+            "fill_slot_edit":{"name":"brick","rows":vec![1;16]}
+        }))
+        .is_err());
     }
     #[test]
     fn palette_batch_wire_is_strict_and_bounded() {

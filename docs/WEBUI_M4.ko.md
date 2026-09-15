@@ -5048,3 +5048,57 @@ exit0/ALL OK로 자동 저장 opt-in/read-prepare-approve 경합과 전체 ES201
 대조, 실제 브라우저 입력/저장/복구/화면 및 Python-free Linux 실행은 남는다. M2 공유/
 원격은 미구현, M0/M3 현장 검증은 보류, M5 world-tile은 조건부다. 단계를 세분화한
 커밋 수를 전체 완료율로 바꾸지 않는다. main/feature/jobdeck은 수정하지 않았다.
+
+## 67. M4g-16b — Rust 슬롯 참조와 lossless 설정 v2
+
+2026-09-16. [슬롯 계약 §4](WEBUI_BITMAP_SLOTS.ko.md)의 native 모델/설정 단계다.
+슬롯 편집 API·launcher 개발 opt-in·브라우저 편집기는 다음 단계이며, 이 커밋을
+UI-03 전체 완료로 세지 않는다. reviewer legacy 읽기 권한 연결과는 독립적이다.
+
+- `Assignments`가 직접 Fill과 이름 있는 슬롯 참조를 구별한다. 기존 complete style/
+  delta/값 batch는 직접 값으로 남고 참조를 해제하며, color/width만 바꾸면 참조는
+  유지한다. 시작/라이브 layerprops의 유효 fill 이름은 참조다. 내장 bitmap은 한 번
+  파싱해 재사용하고 sparse 슬롯 override만 저장한다.
+- native `StyleBatch.fill_slot`과 `Patch.fill_slot_edit`이 슬롯 할당·편집을 수행한다.
+  같은 bitmap인 다른 슬롯/직접 값은 함께 바뀌지 않는다. 상속 자식을 포함해4096행을
+  넘으면 전체 거부, 고정 solid/clear·무효 이름·설정/다른 style 명령과의 혼합도 거부한다.
+  stale CAS는 기존 view controller에서 거부한다. unused 슬롯/동일 pixels의 참조만
+  바뀌면 state revision만 바뀌며, 해석된 style이 바뀌면 render key와 margin이 무효화된다.
+- Native JSON v2는 전체20슬롯 bitmap과 행별 `fill_slot`을 저장한다. 필수 `fill`과
+  `width`의 기존 null/상속 의미는 유지하고 참조와 직접 값을 동시에 지정할 수 없다.
+  unused 슬롯 편집도 보존한다. v1은 계속 읽고 직접 값으로 복원하며 slot override를
+  초기화한다. 참조/override가 없으면 v1으로 내보내므로 기존 값 문서는 같은 형식이다.
+- v2 누락/중복/고정 슬롯 변경/미정의 필드/잘못된 bitmap은 원자 거부한다. 기존 설정
+  owner 인증·4MiB/65,536행·read-only prepare→승인/CAS 경로만 사용한다. 파일 경로/
+  게시 권한은 추가하지 않는다. Calibre text가 custom bitmap을 손실 없이 표현하지
+  못하면 계속 오류와 Native JSON 경로를 제공한다.
+- renderer wire/cache 형식·Raster 규칙·renderer/index 버전은 바꾸지 않는다.
+  현재 웹 프리셋은 여전히 값 기반이고 `view.set`의 새 slot 필드는 명시 거부한다.
+  shared default 게시의 `FLOE_FILL_EDIT`와 별도 승인은 그대로다. 이후 API/UI가
+  연결되기 전에 개발 editor가 이미 동작한다고 표시하지 않는다.
+
+집중 검증:
+
+- 실제 GTK 슬롯324사례의 전체 표/참조/해석 bitmap·나중의 접힌 그룹 할당과
+  Native JSON 왕복을 Rust와 대조했다. 기존 GTK+adapter 스타일10,584개와49색/20패턴
+  오라클도 통과했다(`/private/tmp/floe-fill-slots-palette.log`).
+- workspace 단위 검사에서 새 core6검사(상속/직접 값·unused·v1·v2·4096/4097·
+  controller CAS/margin)를 포함해 통과했다. 기존 reviewer native 미커밋 검사도
+  실행된 작업 트리 기준이며 그 별도 변경은 슬롯 커밋에 포함하지 않는다.
+- 실제 renderer15 PNG 쌍(기존13 + 슬롯 할당/편집2), owner HTTP의 v2 준비/승인/
+  다운로드·Calibre 손실 거부·v1 복원 및 원본/cache 무변경이 통과했다.
+- core/app/web all-targets strict clippy 통과
+  (`/private/tmp/floe-fill-slots-clippy-core.log`; app/web 선행 검사는 `floe-fill-slots-clippy.log`).
+  기존 tiler unused-mut/VFS dead-code warning은 범위 밖이며 숨기지 않았다.
+
+최종 `sh tools/validate_rust.sh`는 **exit0 / RUST VALIDATION: ALL OK**로 끝났다
+(`/private/tmp/floe-fill-slots-battery.log`). 위 오라클/실제 renderer·HTTP 검사와
+전체 ES2017/UI·자동 저장/DRC 전송·occupancy27·잡덱83·렌더러46·VFS H1-H5/L1-L9,
+KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과했다. 검증용 `.venv` 링크만
+정리하며 원래 환경과 main/feature/jobdeck은 보존한다. 실제 브라우저 slot drag/
+키보드·화면 수용이나 Python-free Linux 실행을 위 검사로 대신하지 않는다.
+
+목표 잔여: 슬롯 API/UI·개발 모드 연결, reviewer legacy 읽기와 G4 최종 대조가 로컬
+구현에 남는다. 실제 브라우저 입력/저장/복구/화면, Python-free Linux와 G1/G4 수용도
+남는다. M2 공유/원격은 미구현, M0/M3 현장은 보류, M5 world-tile은 조건부다.
+index hot reload/revision은 사용자 유보 범위다. 전체 목표는 아직 완료가 아니다.

@@ -311,6 +311,12 @@ POST 결과의 `prepared_token`만 기존 `view.apply`로 보내 같은 revision
 cookie+CSRF·Origin 정책은 기존 owner 규칙이다. 등록된 view의 설정 text만 최대4MiB,
 한 준비/내보내기를 별도 semaphore로 허용하며, 일반16KiB body·8KiB control 한계는
 유지한다. 임의 경로·레이아웃 upload·source/default 쓰기 권한은 아니다(`uploads:false`).
+M4g-16b에서 native 설정은 기존 `floe.layers` v1과 슬롯 보존 v2를 읽는다. v2는
+`fill_slots:[{name,rows:[u16;16]},…]` 전체20항목과 행의 선택적 `fill_slot` 참조를
+포함한다. 참조 행은 필수 `fill`이 null이며 직접 값과 동시에 지정하지 않는다.
+v1은 값만 복원하고 v2는 미사용 슬롯 편집까지 보존한다. 누락/중복/고정 슬롯 변경은
+문서 전체 오류다. slot 편집용 view.set/API는 아직 없고 현재 프리셋은 계속 값 기반이다.
+기존 prepare/승인·한계·권한을 유지한다([슬롯 계약 §4](WEBUI_BITMAP_SLOTS.ko.md)).
 `view.set.body.style_deltas`는 `{pair,color?,fill?,width?}`의 필드별 수정이다.
 omitted는 유지, null은 오류이며 기존 완전한 `styles`와 한 요청에서 혼용하지 않는다.
 M4d-4a의 `layer_defaults::Publisher`에 M4d-4b의 owner API를 연결했다.

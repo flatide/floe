@@ -50,7 +50,7 @@ def main(fixture):
         run = subprocess.run([tests[0], "--ignored", "--nocapture"], env=env,
                              text=True, capture_output=True, timeout=90)
         assert run.returncode == 0, (run.stdout, run.stderr)
-        assert "13 PNG pairs" in run.stdout, run.stdout
+        assert "15 PNG pairs including fill slots" in run.stdout, run.stdout
         assert "RUST VIEW MARGIN: ALL OK" in run.stdout, run.stdout
         assert digest(cache) == before, "view modified cache bytes/mtime"
         assert not list(workers.iterdir()), "worker temporary files leaked"

@@ -1156,6 +1156,61 @@ fn complete_margin_crops_pan_without_another_foreground_and_invalidates_policy()
     assert_eq!(r.usage(), Usage::default());
 }
 #[test]
+fn slot_edits_use_cas_and_only_visible_value_changes_invalidate_margin() {
+    use crate::view::{FillSlotEdit, StyleBatch};
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    let initial = ViewState::initial(&m, 800, 640)
+        .unwrap()
+        .edit(
+            &m,
+            Patch {
+                style_batch: Some(StyleBatch {
+                    pairs: vec![(1, 0)],
+                    fill_slot: Some("brick".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut v = start_configured(&r, m, initial, Arc::clone(&c), margin_options());
+    wait(|| v.margin().is_some());
+    let margin = v.margin().unwrap();
+    let p = |name: &str| Patch {
+        fill_slot_edit: Some(FillSlotEdit {
+            name: name.into(),
+            rows: [0x1234; 16],
+        }),
+        ..Default::default()
+    };
+    let unused = v.edit(1, p("diagonal_1")).unwrap();
+    assert_eq!(
+        (unused.state_rev, unused.render_rev, unused.render_key),
+        (2, 1, 1)
+    );
+    assert!(margin.matches(&unused));
+    assert_eq!(v.edit(1, p("brick")).unwrap_err().kind, ErrorKind::Busy);
+    assert_eq!(v.snapshot().state_rev, 2);
+    c.frame.store(false, Ordering::Relaxed);
+    let changed = v.edit(2, p("brick")).unwrap();
+    assert_eq!(
+        (changed.state_rev, changed.render_rev, changed.render_key),
+        (3, 2, 2)
+    );
+    assert!(changed.margin.is_none());
+    assert!(!margin.matches(&changed));
+    c.frame.store(true, Ordering::Relaxed);
+    wait(|| v.latest().is_some_and(|f| f.render_rev == 2));
+    assert_eq!(
+        c.styles.lock().unwrap().last().unwrap()[0].fill,
+        Fill::Pattern([0x1234; 16])
+    );
+    v.close().unwrap();
+    assert_eq!(r.usage(), Usage::default());
+}
+#[test]
 fn margin_cancel_ack_is_not_terminal_and_never_delays_new_foreground() {
     let r = Resources::new(Limits::default()).unwrap();
     let m = model(false);

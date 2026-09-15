@@ -6,15 +6,35 @@ use floe_worker_client::Fill;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Assignments {
-    pub fills: BTreeMap<(u32, u32), Fill>,
+    pub fills: BTreeMap<(u32, u32), AssignedFill>,
     pub widths: BTreeMap<(u32, u32), u8>,
+    pub slots: BTreeMap<&'static str, [u16; 16]>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum AssignedFill {
+    Direct(Fill),
+    Slot(&'static str),
 }
 impl Assignments {
+    pub fn slot_rows(&self, name: &'static str) -> [u16; 16] {
+        self.slots.get(name).copied().unwrap_or_else(|| {
+            let Some(Fill::Pattern(rows)) = styles::pattern(name) else {
+                unreachable!("slot identity comes from the bundled table")
+            };
+            rows
+        })
+    }
+    pub fn resolve(&self, fill: &AssignedFill) -> Fill {
+        match fill {
+            AssignedFill::Direct(fill) => fill.clone(),
+            AssignedFill::Slot(name) => Fill::Pattern(self.slot_rows(name)),
+        }
+    }
     pub fn initial(props: &[styles::LayerProps], pairs: &BTreeSet<(u32, u32)>) -> Self {
         let mut out = Self::default();
         for p in props.iter().filter(|p| pairs.contains(&p.layer)) {
-            if let Some(fill) = styles::pattern(&p.fill) {
-                out.fills.insert(p.layer, fill);
+            if let Some(name) = styles::pattern_slot(&p.fill) {
+                out.fills.insert(p.layer, AssignedFill::Slot(name));
             }
             // Startup retains the last >1 assignment. Live import clears it
             // for <=1, matching the separate GTK startup/load policies.
@@ -77,7 +97,9 @@ impl ViewState {
         let assignments = Arc::make_mut(&mut self.assignments);
         for (key, d) in &expanded {
             if let Some(fill) = &d.fill {
-                assignments.fills.insert(*key, fill.clone());
+                assignments
+                    .fills
+                    .insert(*key, AssignedFill::Direct(fill.clone()));
             }
             if let Some(width) = d.width {
                 if width > 1 {
@@ -137,8 +159,10 @@ impl ViewState {
             if let Some(color) = styles::color(&row.color) {
                 colors.insert(row.layer, color);
             }
-            if let Some(fill) = styles::pattern(&row.fill) {
-                assignments.fills.insert(row.layer, fill);
+            if let Some(name) = styles::pattern_slot(&row.fill) {
+                assignments
+                    .fills
+                    .insert(row.layer, AssignedFill::Slot(name));
             }
             if let Some(width) = row.line_width() {
                 if width > 1 {
@@ -177,7 +201,7 @@ impl ViewState {
                         .fills
                         .get(&old.layer)
                         .or_else(|| parent.and_then(|p| assignments.fills.get(&p)))
-                        .cloned()
+                        .map(|f| assignments.resolve(f))
                         .unwrap_or(Fill::Speckle);
                     let width = assignments
                         .widths
@@ -250,9 +274,16 @@ impl ViewState {
             Layers::None => false,
             Layers::Only(p) => p.binary_search(&pair).is_ok(),
         };
+        let slotted = !self.assignments.slots.is_empty()
+            || self
+                .assignments
+                .fills
+                .values()
+                .any(|f| matches!(f, AssignedFill::Slot(_)));
         layerprops::Settings {
             format: "floe.layers".into(),
-            version: 1,
+            version: if slotted { 2 } else { 1 },
+            fill_slots: slotted.then(|| self.fill_slots()),
             groups: model.groups.iter().map(|(k, v)| (*k, v.clone())).collect(),
             rows: self
                 .styles
@@ -260,11 +291,14 @@ impl ViewState {
                 .map(|s| layerprops::Setting {
                     pair: s.layer,
                     color: styles::color_text(s.color),
-                    fill: self
-                        .assignments
-                        .fills
-                        .get(&s.layer)
-                        .map(layerprops::Bitmap::from),
+                    fill: self.assignments.fills.get(&s.layer).and_then(|f| match f {
+                        AssignedFill::Direct(fill) => Some(layerprops::Bitmap::from(fill)),
+                        AssignedFill::Slot(_) => None,
+                    }),
+                    fill_slot: self.assignments.fills.get(&s.layer).and_then(|f| match f {
+                        AssignedFill::Slot(name) => Some((*name).into()),
+                        AssignedFill::Direct(_) => None,
+                    }),
                     width: self.assignments.widths.get(&s.layer).copied(),
                     visible: model
                         .groups
@@ -299,9 +333,25 @@ impl ViewState {
             ));
         }
         let mut assignments = Assignments::default();
+        if let Some(slots) = &settings.fill_slots {
+            for slot in slots {
+                let name = styles::pattern_slot(&slot.name).expect("validated slot name");
+                if assignments.slot_rows(name) != slot.rows {
+                    assignments.slots.insert(name, slot.rows);
+                }
+            }
+        }
         for r in rows.values() {
             if let Some(fill) = &r.fill {
-                assignments.fills.insert(r.pair, fill.into());
+                assignments
+                    .fills
+                    .insert(r.pair, AssignedFill::Direct(fill.into()));
+            }
+            if let Some(name) = &r.fill_slot {
+                assignments.fills.insert(
+                    r.pair,
+                    AssignedFill::Slot(styles::pattern_slot(name).expect("validated slot name")),
+                );
             }
             if let Some(width) = r.width {
                 assignments.widths.insert(r.pair, width);
@@ -701,7 +751,7 @@ mod tests {
             assert!(layerprops::parse_settings(&missing.to_string()).is_err());
         }
         assert!(
-            layerprops::parse_settings(&text.replace("\"version\":1", "\"version\":2")).is_err()
+            layerprops::parse_settings(&text.replace("\"version\":2", "\"version\":3")).is_err()
         );
     }
     #[test]

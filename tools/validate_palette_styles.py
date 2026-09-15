@@ -93,7 +93,7 @@ def cases():
 
 def main():
     from validate_bitmap_slots import validate as validate_slots
-    validate_slots()
+    slot_cases = validate_slots()
     cargo = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo")
     build = subprocess.run([cargo, "test", "--offline", "--locked", "-j2", "-p", "floe-app-core", "--lib",
                             "--no-run", "--message-format=json"], cwd=ROOT / "rust", capture_output=True, text=True, timeout=240)
@@ -110,6 +110,14 @@ def main():
                               env=env, capture_output=True, text=True, timeout=60)
         assert test.returncode == 0, (test.stdout, test.stderr)
         assert "GTK PALETTE STYLE: ALL OK (10584 GTK + adapter cases)" in test.stdout
+        print(test.stdout.strip())
+        slots = Path(td) / "slots.json"
+        slots.write_text(json.dumps(slot_cases))
+        env["FLOE_BITMAP_SLOT_ORACLE"] = str(slots)
+        test = subprocess.run([bins[0], "view::fill_slots::tests::gtk_bitmap_slots_match", "--ignored", "--nocapture"],
+                              env=env, capture_output=True, text=True, timeout=30)
+        assert test.returncode == 0, (test.stdout, test.stderr)
+        assert "GTK BITMAP SLOTS: ALL OK (324 native cases)" in test.stdout
         print(test.stdout.strip())
         presets = Path(td) / "presets.json"
         presets.write_text(json.dumps(dict(

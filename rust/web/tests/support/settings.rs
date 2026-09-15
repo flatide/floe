@@ -215,6 +215,60 @@ async fn owner_settings_prepare_apply_restore_download_and_no_writes() {
     assert_eq!(document["rows"][0]["fill"]["rows"], json!(pattern));
     assert_eq!(document["rows"][0]["width"], 2);
     assert_eq!(document["rows"][0]["color"], "#123456");
+    assert_eq!(document["version"], 1);
+    // Existing approved settings transport, no new file path or slot editor.
+    // Both the bitmap and its reference must survive download/reload.
+    let mut v2 = document.clone();
+    v2["version"] = 2.into();
+    v2["fill_slots"] =
+        serde_json::to_value(floe_app_core::styles::presets::bundled().unwrap().fills).unwrap();
+    let brick = v2["fill_slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|p| p["name"] == "brick")
+        .unwrap();
+    v2["fill_slots"][brick]["rows"] = json!(vec![0x4321; 16]);
+    v2["rows"][0]["fill"] = Value::Null;
+    v2["rows"][0]["fill_slot"] = "brick".into();
+    let mut invalid = v2.clone();
+    invalid["fill_slots"][18]["rows"][0] = 0.into();
+    assert_eq!(
+        request(
+            &h,
+            &login,
+            "POST",
+            &path(&s, "native"),
+            &invalid.to_string()
+        )
+        .await
+        .0,
+        400
+    );
+    let prepared = request(&h, &login, "POST", &path(&s, "native"), &v2.to_string()).await;
+    assert_eq!(prepared.0, 200, "{}", prepared.2);
+    assert_eq!(
+        request(&h, &login, "GET", &path(&s, "native"), "").await.2,
+        custom.2
+    );
+    let prepared: Value = serde_json::from_str(&prepared.2).unwrap();
+    s.apply(&prepared["prepared_token"], None).await;
+    let saved = request(&h, &login, "GET", &path(&s, "native"), "").await;
+    assert_eq!(saved.0, 200);
+    assert_eq!(serde_json::from_str::<Value>(&saved.2).unwrap(), v2);
+    assert_eq!(
+        request(&h, &login, "GET", &path(&s, "calibre"), "").await.0,
+        400
+    );
+    let prepared = request(&h, &login, "POST", &path(&s, "native"), &custom.2).await;
+    assert_eq!(prepared.0, 200);
+    let prepared: Value = serde_json::from_str(&prepared.2).unwrap();
+    s.apply(&prepared["prepared_token"], None).await;
+    assert_eq!(
+        request(&h, &login, "GET", &path(&s, "native"), "").await.2,
+        custom.2,
+        "v1 load must discard slot references and retain literal values"
+    );
     assert_eq!(
         request(
             &h,

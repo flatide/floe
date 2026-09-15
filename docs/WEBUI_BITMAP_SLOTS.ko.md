@@ -1,10 +1,10 @@
 # 웹 bitmap 슬롯 이관 계약
 
-2026-09-16, M4g-16a. [G4 잔여 감사](WEBUI_G4_AUDIT.ko.md)의 UI-03 개발 도구
-항목을 구현 전에 구체화한 기록이다. **슬롯 편집은 아직 웹에 연결하지 않았다.**
-이 문서와 source-side 오라클 추가를 기능 완료나 실제 브라우저 수용으로 세지 않는다.
+2026-09-16, M4g-16b. [G4 잔여 감사](WEBUI_G4_AUDIT.ko.md)의 UI-03 개발 도구
+계약과 이관 기록이다. §1~3은 M4g-16a 감사 시점, §4가 현재 구현 상태다.
+**Rust 모델·설정 v2는 연결했고 슬롯 편집 API/UI는 아직 연결하지 않았다.**
 
-## 1. 현재 코드에서 확인한 의미
+## 1. 이관 전 코드에서 확인한 의미(M4g-16a)
 
 | 항목 | GTK의 실제 코드 | 웹/Rust 현재 상태 |
 |---|---|---|
@@ -85,8 +85,62 @@ inert widget/worker spy와 합성 행만 사용하며 Python GTK import, 실제 
 .venv/bin/python -B tools/validate_bitmap_slots.py
 ```
 
-현재 검사는 **source-side 계약**이다. 아직 Rust 슬롯 모델과 비교하지 않는다.
-후속 구현은 이 source-side 사례를 Rust 결과와 직접 대조하고 추가로 값 문서의 역호환,
+M4g-16a 시점 검사는 **source-side 계약**이었다. M4g-16b에서 아래와 같이 Rust
+직접 대조를 추가했다. 전체 이관 수용에는 추가로 값 문서의 역호환,
 고정 슬롯 서버 거부, stale CAS/대형 fan-out의 원자 거부, JSON round-trip·Calibre 저장
 거부, 실제 프레임 픽셀·스타일 캐시 무효화, 브라우저 pointer cancel/드래그/키보드를
 검사해야 한다. 실제 브라우저 수용은 이 AST/DOM 검사를 통과해도 별도로 남는다.
+
+## 4. M4g-16b — Rust 슬롯 모델과 Native JSON v2
+
+`Assignments.fills`는 이제 `Direct(Fill)`과 `Slot(내장 정본 이름)`을 구별한다.
+슬롯 표에는 내장 기본값과 다른 override만 보관하며 기본 bitmap은 한 번 파싱한
+불변 표를 재사용한다. 행별로 hex를 재파싱하거나 매 snapshot에서 할당을 복제하지 않는다.
+
+- 시작/라이브 Calibre layerprops의 유효 fill 이름은 슬롯 참조다. 같은 세션에서
+  편집한 슬롯 이름을 다시 불러오면 편집된 값이 적용된다. 미정의 이름은 이전처럼 무시한다.
+- 기존 완전한 `styles`·`style_deltas`·값 기반 `StyleBatch.fill`은 **직접 값**이며
+  해당 행의 슬롯 참조를 해제한다. color/width만 바꾸면 참조는 유지한다.
+- native `StyleBatch.fill_slot`이 명시 참조를 할당하며, `fill`과 동시 지정은 오류다.
+  `Patch.fill_slot_edit`은 고정 solid/clear·미정의 이름·다른 스타일/설정 편집 혼합을
+  거부한다. 영향 행과 상속 자식 합계4096 초과는 변경 전 전체 거부다. 상속하지 않는
+  자식 override나 값이 같은 직접 bitmap은 함께 변경하지 않는다.
+- 슬롯 참조 변경은 상태 revision에 포함한다. 해석된 스타일이 바뀐 경우에만 기존
+  render key/margin 무효화·style 전송 경로가 작동한다. 미사용 슬롯 편집은 상태만
+  바꾸며 geometry 재렌더를 요청하지 않는다. 실제 값이 같은 Apply를 무조건 재렌더하는
+  GTK 동작은 복제하지 않고 기존 native no-op 최적화를 유지한다.
+- renderer wire·Raster 규칙·cache 형식은 바꾸지 않는다. renderer는 해석된
+  bitmap만 받으며 새 slot 이름이나 JSON을 해석하지 않는다.
+
+Native JSON의 `format`은 계속 `floe.layers`다.
+
+| 필드 | v1 | v2 |
+|---|---|---|
+| `fill_slots` | 없음 | 전체20항목 `{name,rows:[u16;16]}` 필수, 편집하지 않은 슬롯도 포함 |
+| 행 `fill` | 직접 bitmap 또는 null | 직접 bitmap 또는 null; 필드 자체는 계속 필수 |
+| 행 `fill_slot` | 없음 | 선택적 정본 슬롯 이름; 지정 시 `fill:null`이어야 함 |
+| 상속 | `fill:null` | `fill:null`과 `fill_slot` 생략 |
+
+슬롯 참조/override가 없으면 v1을 그대로 내보낸다. 하나라도 있으면 v2를 내보내며
+미사용 슬롯의 편집도 보존한다. v1 읽기는 값을 참조로 역추정하지 않고 슬롯 override를
+초기화한다. v2는 누락/중복/모르는 슬롯·고정 슬롯의 값 변경·fill과 참조 동시 지정·
+16행이 아닌 bitmap·새 경로 필드를 오류로 거부한다. 기존4MiB/65,536행·unknown field·
+view 모델 일치/원자 적용 검사를 유지한다. 더 오래된 프로그램은 v2를 읽지 못하며
+버전 오류로 거부한다. 임의 bitmap을 Calibre 이름으로 손실 저장하지 않는다.
+
+**현재 연결 경계:** JSON v2는 기존 owner 설정의 GET/POST prepare→`view.apply`와
+브라우저 Native JSON Load/Save를 통해 읽고 보존한다. 새 파일 읽기·쓰기 권한은 없다.
+반면 `view.set`의 `fill_slot`/`fill_slot_edit`는 여전히 미정의 필드로 거부한다.
+브라우저 프리셋은 아직 값 기반이다. 슬롯용 launcher opt-in·세션 표 읽기·프리셋 참조
+할당·편집 UI를 다음 단계에서 연결해야 하며 `FLOE_FILL_EDIT`로 이미 가능하다고
+광고하지 않는다. 공유 설계 기본값 게시의 별도 승인도 유지한다.
+
+검증은 실제 GTK 324사례의 전/후 슬롯 표·참조·해석 bitmap·나중의 접힌 그룹 할당을
+Rust와 직접 대조한다. 모든 사례에서 Native JSON 왕복을 추가하고, 기존
+GTK/adapter 스타일10,584개는 이제 명시 슬롯 할당으로도 대조한다. 별도 단위 검사는
+직접 값 분리·잡덱 상속·4096/4097 경계·고정 슬롯·v1/v2 거부/복원을 다룬다.
+controller 검사는 stale CAS·미사용 슬롯의 margin 유지·사용 슬롯의 render key 변경을,
+실제 native renderer 검사는 슬롯 할당/편집을 포함한15개 PNG 쌍을 대조한다.
+기존 owner HTTP gate에는 v2 준비의 무변경·승인 적용/다운로드·고정 슬롯 거부·
+Calibre 손실 거부·v1 복원·source/cache 무변경을 추가했다. 최종 실행 결과는
+[M4 §67](WEBUI_M4.ko.md)에 기록한다. API/UI·실제 브라우저 수용은 여전히 미완료다.

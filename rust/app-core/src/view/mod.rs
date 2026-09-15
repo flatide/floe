@@ -3,6 +3,7 @@
 //! browser floating-point world math.
 mod controller;
 pub mod deck_mode;
+mod fill_slots;
 pub mod margin;
 pub mod minimap;
 mod palette;
@@ -20,6 +21,7 @@ pub use controller::{
     ControllerOptions, DisplayFrame, MarginStatus, Phase, PreparedReplacement, Purpose, Snapshot,
     ViewController,
 };
+pub use fill_slots::FillSlotEdit;
 use floe_worker_client::{Layers, RenderRequest, Style};
 pub use floe_worker_client::{QueryKind, QueryOperation};
 pub use palette::{LayerAction, LayerBatch};
@@ -295,6 +297,7 @@ pub struct Patch {
     pub style_changes: Vec<Style>,
     pub style_deltas: Vec<StyleDelta>,
     pub style_batch: Option<StyleBatch>,
+    pub fill_slot_edit: Option<FillSlotEdit>,
     /// Parsed settings are prepared off the control channel, then committed
     /// under the same revision CAS as all other view edits.
     pub properties: Option<crate::layerprops::Document>,
@@ -545,6 +548,7 @@ impl ViewState {
                 || patch.layer_isolation.is_some()
                 || !patch.style_deltas.is_empty()
                 || patch.style_batch.is_some()
+                || patch.fill_slot_edit.is_some()
                 || !patch.style_changes.is_empty())
         {
             return Err(Error::input(
@@ -561,6 +565,13 @@ impl ViewState {
             ));
         }
         let mut s = self.clone();
+        if patch.fill_slot_edit.is_some()
+            && (patch.style_batch.is_some()
+                || !patch.style_deltas.is_empty()
+                || !patch.style_changes.is_empty())
+        {
+            return Err(Error::input("slot edit conflicts with other style edits"));
+        }
         if patch.layer_batch.is_some() && (patch.layers.is_some() || patch.layer_change.is_some()) {
             return Err(Error::input("batch conflicts with other layer edits"));
         }
@@ -709,7 +720,9 @@ impl ViewState {
             let assignments = Arc::make_mut(&mut s.assignments);
             for (key, style) in &expanded {
                 // Existing complete-style edits remain complete overrides.
-                assignments.fills.insert(*key, style.fill.clone());
+                assignments
+                    .fills
+                    .insert(*key, properties::AssignedFill::Direct(style.fill.clone()));
                 assignments.widths.insert(*key, style.width);
             }
             let styles = s
@@ -727,6 +740,9 @@ impl ViewState {
         }
         if let Some(batch) = patch.style_batch {
             s.apply_style_batch(model, batch)?;
+        }
+        if let Some(edit) = patch.fill_slot_edit {
+            s.apply_fill_slot_edit(model, edit)?;
         }
         if let Some(settings) = patch.settings {
             s.apply_settings(model, &settings)?;

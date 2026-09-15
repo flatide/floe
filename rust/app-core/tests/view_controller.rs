@@ -5,7 +5,9 @@ use floe_app_core::{
     managed::{Limits, ManagedDataset, Resources, Usage},
     render::{RenderOptions, RenderSession},
     shots::{Detail, Thin},
-    view::{Depth, Model, Navigation, Patch, Phase, ViewController, ViewState},
+    view::{
+        Depth, FillSlotEdit, Model, Navigation, Patch, Phase, StyleBatch, ViewController, ViewState,
+    },
 };
 use floe_worker_client::{Fill, Layers, Style};
 use std::{
@@ -50,6 +52,7 @@ fn actual_worker_frames_and_leases() {
     let mut view =
         ViewController::start(&resource, Arc::clone(&data), options.clone(), initial).unwrap();
     let first = model.styles[0].clone();
+    let pair = first.layer;
     let patches = vec![
         Patch::default(),
         Patch {
@@ -126,10 +129,38 @@ fn actual_worker_frames_and_leases() {
             mono: Some(true),
             ..Default::default()
         },
+        Patch {
+            style_batch: Some(StyleBatch {
+                pairs: vec![pair],
+                fill_slot: Some("brick".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        Patch {
+            fill_slot_edit: Some(FillSlotEdit {
+                name: "brick".into(),
+                rows: [0x1234; 16],
+            }),
+            ..Default::default()
+        },
     ];
     for (i, patch) in patches.into_iter().enumerate() {
         let before = view.snapshot();
         let snapshot = view.edit(before.state_rev, patch).unwrap();
+        if i == 14 {
+            assert_eq!(snapshot.render_key, before.render_key + 1);
+            assert_eq!(
+                snapshot
+                    .state
+                    .styles
+                    .iter()
+                    .find(|s| s.layer == pair)
+                    .unwrap()
+                    .fill,
+                Fill::Pattern([0x1234; 16])
+            );
+        }
         reference.set_styles(&snapshot.state.styles).unwrap();
         let want = reference
             .capture(snapshot.state.request(&model, reference.base_request()))
@@ -193,7 +224,9 @@ fn actual_worker_frames_and_leases() {
             .index([cache::cache_path(&source).unwrap()], 4)
             .unwrap(),
     );
-    println!("RUST VIEW CONTROLLER: ALL OK (13 PNG pairs, leases, startup failure)");
+    println!(
+        "RUST VIEW CONTROLLER: ALL OK (15 PNG pairs including fill slots, leases, startup failure)"
+    );
 }
 
 #[test]

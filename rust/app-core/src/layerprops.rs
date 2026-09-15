@@ -4,6 +4,7 @@
 use crate::{styles, Error, ErrorKind, Result};
 use floe_worker_client::{Fill, Style};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt::Write;
 
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -90,6 +91,8 @@ pub struct Document {
 pub struct Settings {
     pub format: String,
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_slots: Option<Vec<FillSlot>>,
     pub groups: Vec<LayerGroup>,
     pub rows: Vec<Setting>,
 }
@@ -101,9 +104,17 @@ pub struct Setting {
     pub color: String,
     #[serde(deserialize_with = "required_optional")]
     pub fill: Option<Bitmap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_slot: Option<String>,
     #[serde(deserialize_with = "required_optional")]
     pub width: Option<u8>,
     pub visible: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FillSlot {
+    pub name: String,
+    pub rows: [u16; 16],
 }
 fn required_optional<'de, D, T>(d: D) -> std::result::Result<Option<T>, D::Error>
 where
@@ -152,7 +163,7 @@ pub fn parse_settings(text: &str) -> Result<Settings> {
 impl Settings {
     pub fn validate(&self) -> Result<()> {
         if self.format != "floe.layers"
-            || self.version != 1
+            || !matches!(self.version, 1 | 2)
             || self.rows.len() > MAX_ROWS
             || self.groups.len() > MAX_ROWS
             || self
@@ -167,6 +178,39 @@ impl Settings {
             })
         {
             return Err(Error::input("invalid floe layer settings"));
+        }
+        if self.version == 1 {
+            if self.fill_slots.is_some() || self.rows.iter().any(|r| r.fill_slot.is_some()) {
+                return Err(Error::input("version 1 cannot contain fill slots"));
+            }
+        } else {
+            let slots = self
+                .fill_slots
+                .as_ref()
+                .ok_or_else(|| Error::input("version 2 requires the complete fill slot table"))?;
+            let defaults = styles::presets::bundled()?;
+            let mut names = BTreeSet::new();
+            if slots.len() != defaults.fills.len() {
+                return Err(Error::input("incomplete fill slot table"));
+            }
+            for slot in slots {
+                let name = styles::pattern_slot(&slot.name)
+                    .filter(|n| *n == slot.name)
+                    .ok_or_else(|| Error::input("invalid fill slot name"))?;
+                if !names.insert(name)
+                    || (matches!(name, "solid" | "clear")
+                        && styles::pattern(name) != Some(Fill::Pattern(slot.rows)))
+                {
+                    return Err(Error::input("duplicate or changed fixed fill slot"));
+                }
+            }
+            if self.rows.iter().any(|r| {
+                r.fill_slot
+                    .as_ref()
+                    .is_some_and(|name| r.fill.is_some() || !names.contains(name.as_str()))
+            }) {
+                return Err(Error::input("invalid or conflicting fill slot assignment"));
+            }
         }
         Ok(())
     }

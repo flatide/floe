@@ -1,5 +1,6 @@
 //! Palette assignments, not resolved-style replacement. GTK submits only
 //! selected colors but the entire sparse fill/width maps to the deck adapter.
+use super::properties::AssignedFill;
 use super::{Model, ViewState};
 use crate::{Error, Result};
 use floe_worker_client::{Fill, Style};
@@ -18,6 +19,7 @@ pub struct StyleBatch {
     pub collapsed: Vec<(u32, u32)>,
     pub color: Option<[u8; 4]>,
     pub fill: Option<Fill>,
+    pub fill_slot: Option<String>,
     pub width: Option<WidthEdit>,
 }
 impl StyleBatch {
@@ -30,7 +32,15 @@ impl StyleBatch {
                 WidthEdit::Set(n) => !(1..=8).contains(&n),
                 WidthEdit::Step(n) => ![-1, 1].contains(&n),
             })
-            || (self.color.is_none() && self.fill.is_none() && self.width.is_none())
+            || (self.fill.is_some() && self.fill_slot.is_some())
+            || self
+                .fill_slot
+                .as_ref()
+                .is_some_and(|s| crate::styles::pattern_slot(s).is_none())
+            || (self.color.is_none()
+                && self.fill.is_none()
+                && self.fill_slot.is_none()
+                && self.width.is_none())
         {
             return Err(Error::input("invalid palette style batch"));
         }
@@ -74,11 +84,16 @@ impl ViewState {
                 }
             }
         }
-        let repattern = batch.fill.is_some() || batch.width.is_some();
+        let fill = batch.fill.map(AssignedFill::Direct).or_else(|| {
+            batch.fill_slot.as_deref().map(|name| {
+                AssignedFill::Slot(crate::styles::pattern_slot(name).expect("validated slot"))
+            })
+        });
+        let repattern = fill.is_some() || batch.width.is_some();
         if repattern {
             let assignments = Arc::make_mut(&mut self.assignments);
             for p in &targets {
-                if let Some(fill) = &batch.fill {
+                if let Some(fill) = &fill {
                     assignments.fills.insert(*p, fill.clone());
                 }
                 if let Some(edit) = batch.width {
@@ -121,7 +136,7 @@ impl ViewState {
                                         .then(|| self.assignments.fills.get(&parent))
                                         .flatten()
                                 })
-                                .cloned()
+                                .map(|f| self.assignments.resolve(f))
                                 .unwrap_or(Fill::Speckle)
                         } else {
                             old.fill.clone()
@@ -481,7 +496,12 @@ mod tests {
             a.fills = c
                 .fills
                 .iter()
-                .map(|(p, f)| (*p, crate::styles::pattern(f).unwrap()))
+                .map(|(p, f)| {
+                    (
+                        *p,
+                        AssignedFill::Slot(crate::styles::pattern_slot(f).unwrap()),
+                    )
+                })
                 .collect();
             a.widths = c.widths.iter().copied().collect();
             s.apply_properties(&m, &crate::layerprops::parse("").unwrap())
@@ -493,7 +513,7 @@ mod tests {
             };
             match c.action.as_str() {
                 "color" => b.color = Some(crate::styles::color(c.value.as_str().unwrap()).unwrap()),
-                "fill" => b.fill = Some(crate::styles::pattern(c.value.as_str().unwrap()).unwrap()),
+                "fill" => b.fill_slot = Some(c.value.as_str().unwrap().into()),
                 "width" => b.width = Some(WidthEdit::Set(c.value.as_u64().unwrap() as u8)),
                 "step" => b.width = Some(WidthEdit::Step(c.value.as_i64().unwrap() as i8)),
                 _ => panic!(),
@@ -518,7 +538,7 @@ mod tests {
                 out.assignments
                     .fills
                     .iter()
-                    .map(|(p, f)| (*p, wire(f)))
+                    .map(|(p, f)| (*p, wire(&out.assignments.resolve(f))))
                     .collect::<BTreeMap<_, _>>(),
                 c.assigned_fills.iter().cloned().collect(),
                 "fill assignments {i}"

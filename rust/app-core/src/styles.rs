@@ -123,18 +123,40 @@ pub fn load_props(source: &Path) -> Result<Vec<LayerProps>> {
     Ok(vec![])
 }
 pub(crate) fn pattern(name: &str) -> Option<Fill> {
-    for line in PATTERNS.lines() {
-        let mut parts = line.split_whitespace();
-        if !parts.next().is_some_and(|s| s.eq_ignore_ascii_case(name)) {
-            continue;
-        }
-        let rows = parts
-            .map(|p| u16::from_str_radix(p, 16))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .ok()?;
-        return rows.try_into().ok().map(Fill::Pattern);
+    pattern_definitions()
+        .iter()
+        .find_map(|(n, rows)| n.eq_ignore_ascii_case(name).then_some(Fill::Pattern(*rows)))
+}
+/// Canonical identity, never inferred from bitmap equality.
+pub(crate) fn pattern_slot(name: &str) -> Option<&'static str> {
+    if name.len() > 64 || !name.is_ascii() {
+        return None;
     }
-    None
+    pattern_definitions()
+        .iter()
+        .find_map(|(candidate, _)| candidate.eq_ignore_ascii_case(name).then_some(*candidate))
+}
+fn pattern_definitions() -> &'static [(&'static str, [u16; 16])] {
+    static TABLE: std::sync::OnceLock<Vec<(&'static str, [u16; 16])>> = std::sync::OnceLock::new();
+    // Resolve thousands of slot references without reparsing the compiled
+    // immutable bitmap words per row. Invalid definitions cannot be slots.
+    TABLE.get_or_init(|| {
+        PATTERNS
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let name = parts.next()?;
+                if name.starts_with('#') {
+                    return None;
+                }
+                let mut rows = [0; 16];
+                for row in &mut rows {
+                    *row = u16::from_str_radix(parts.next()?, 16).ok()?;
+                }
+                parts.next().is_none().then_some((name, rows))
+            })
+            .collect()
+    })
 }
 pub fn layout_styles(layout: &Layout, archival: bool) -> Result<Vec<Style>> {
     if layout.metadata.layers.is_empty() {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Freeze GTK bitmap SLOT behavior before its native migration.
+"""Extract GTK bitmap SLOT behavior for the native migration oracle.
 
 Execute the actual GTK methods with inert widgets and synthetic in-memory rows.
 No GTK import, browser, worker process, design file or file publication occurs.
@@ -115,6 +115,16 @@ def words(pattern):
     return [int(w, 16) for w in fillpat.rows_to_hex(pattern).split()]
 
 
+def state(gui):
+    pairs = [(r["layer"], r["datatype"]) for r in gui.meta["layers"]]
+    return dict(
+        slots=[dict(name=name, rows=words(gui._fill_patterns[i]))
+               for i, name in enumerate(fillpat.FILL_NAMES)],
+        bindings=[(p, fillpat.FILL_NAMES[i]) for p, i in sorted(gui._layer_patterns.items())],
+        fills=[(p, words(gui._fill_patterns[gui._layer_patterns[p]]
+                        if p in gui._layer_patterns else fillpat.pattern("speckle"))) for p in pairs])
+
+
 def variants(original):
     painted = original.copy()
     on = not bool(original[0] & 0x8000)
@@ -142,13 +152,16 @@ def validate():
     assert len(defaults) == 20 and fixed == {18, 19}, (
         "identify fixed slots by NAME, not first two indices")
     edits = 0
+    cases = []
     for slot in range(18):
         for label, events, expected, applied in variants(words(defaults[slot])):
             for used in (False, True):
                 widgets = Widgets(events)
                 gui, messages, swatches, redraws = gui_for(methods(widgets), slot, used)
                 before = copy.deepcopy(gui._layer_patterns)
+                record = dict(name=fillpat.FILL_NAMES[slot], initial=state(gui), later=None)
                 gui._edit_fill_pattern(slot)
+                record.update(edit=words(gui._fill_patterns[slot]) if applied else None, after=state(gui))
                 assert widgets.destroyed, label
                 assert [name for name, _code in widgets.buttons] == [
                     "clear", "solid", "invert", "reset", "Cancel", "Apply"]
@@ -170,6 +183,8 @@ def validate():
                 # parent expansion is the real GTK method, not a replica here.
                 gui._selected_layers = {(7, 0)}
                 gui._apply_fill_slot(slot)
+                record["later"] = state(gui)
+                cases.append(record)
                 assert gui._layer_patterns[(7, 0)] == gui._layer_patterns[(7, 1)] == slot
                 sent = {tuple(p): words(bitmap) for p, bitmap in messages[-1]["fills"]}
                 assert sent[(7, 0)] == sent[(7, 1)] == expected
@@ -179,7 +194,10 @@ def validate():
         gui, messages, _swatches, _redraws = gui_for(methods(widgets), slot)
         other = (slot + 1) % 18
         gui._fill_patterns[other] = defaults[slot]
+        record = dict(name=fillpat.FILL_NAMES[slot], initial=state(gui), later=None)
         gui._edit_fill_pattern(slot)
+        record.update(edit=words(gui._fill_patterns[slot]), after=state(gui))
+        cases.append(record)
         sent = {tuple(p): words(bitmap) for p, bitmap in messages[-1]["fills"]}
         assert sent[(3, 0)] == [w ^ 65535 for w in words(defaults[slot])]
         assert sent[(7, 0)] == words(defaults[slot])
@@ -189,7 +207,10 @@ def validate():
         gui, _messages, _swatches, _redraws = gui_for(methods(widgets), slot)
         gui._fill_patterns[slot] = fillpat.hex_to_rows(" ".join(
             "%04X" % (w ^ 65535) for w in words(defaults[slot])))
+        record = dict(name=fillpat.FILL_NAMES[slot], initial=state(gui), later=None)
         gui._edit_fill_pattern(slot)
+        record.update(edit=words(gui._fill_patterns[slot]), after=state(gui))
+        cases.append(record)
         assert gui._fill_patterns[slot] == defaults[slot]
         edits += 1
     menus = 0
@@ -210,6 +231,8 @@ def validate():
         "editing a session must not mutate bundled defaults")
     assert edits == 324 and menus == 80
     print("GTK BITMAP SLOT CONTRACT: ALL OK (324 edits + 80 menu gates; source oracle only)")
+    assert len(cases) == 324
+    return cases
 
 
 if __name__ == "__main__":
