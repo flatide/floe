@@ -26,6 +26,7 @@ impl Drop for Temp {
         fs::remove_dir_all(&self.0).unwrap();
     }
 }
+#[track_caller]
 fn owner(endpoint: &Endpoint) -> Owner {
     match endpoint.claim("build-A").unwrap() {
         Claim::Owner(o) => o,
@@ -153,6 +154,52 @@ fn cleanup_only_removes_the_owned_socket_inode() {
     fs::write(&endpoint.socket, b"replacement").unwrap();
     drop(o);
     assert_eq!(fs::read(&endpoint.socket).unwrap(), b"replacement");
+}
+#[test]
+fn owner_drop_releases_lease_even_while_its_open_description_is_duplicated() {
+    let temp = Temp::new();
+    let endpoint = temp.endpoint(":lease-dup");
+    let first = owner(&endpoint);
+    // dup and fork refer to the same flock. This models a concurrent child's
+    // short fork-to-exec interval, which FD_CLOEXEC does not cover yet.
+    let inherited = first.lock.try_clone().unwrap();
+    assert!(matches!(
+        endpoint.claim("build-A").unwrap(),
+        Claim::Running(_)
+    ));
+    drop(first);
+    let next = owner(&endpoint);
+    drop(inherited);
+    // Closing the old description must not release the new owner's lease.
+    assert!(matches!(
+        endpoint.claim("build-A").unwrap(),
+        Claim::Running(_)
+    ));
+    drop(next);
+    drop(owner(&endpoint));
+}
+#[test]
+fn foreign_process_drop_does_not_release_the_creators_lease_or_socket() {
+    let temp = Temp::new();
+    let endpoint = temp.endpoint(":lease-foreign");
+    let mut inherited = owner(&endpoint);
+    let creators_description = inherited.lock.try_clone().unwrap();
+    let socket_id = inherited.socket_id;
+    // Exercise the fork-child destructor branch without running Rust cleanup
+    // after a multithreaded fork. The current process can never have PID 0.
+    inherited.creator_pid = 0;
+    drop(inherited);
+    assert_eq!(
+        identity(&fs::metadata(&endpoint.socket).unwrap()),
+        socket_id
+    );
+    assert!(matches!(
+        endpoint.claim("build-A").unwrap(),
+        Claim::Running(_)
+    ));
+    drop(creators_description);
+    // Once all descriptors close, the ordinary stale-socket probe can reclaim.
+    drop(owner(&endpoint));
 }
 #[test]
 fn wire_lost_ack_and_replays_do_not_repeat_the_handler() {

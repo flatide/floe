@@ -4,8 +4,15 @@ use floe_app_core::instance::{Claim, Endpoint, Key, Outcome, Reject};
 use serde_json::json;
 use std::{
     fs::{self, DirBuilder},
-    io::{BufRead, BufReader, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt},
+    io::{BufRead, BufReader, Read, Write},
+    os::{
+        fd::AsRawFd,
+        unix::{
+            fs::{DirBuilderExt, MetadataExt},
+            net::UnixStream,
+            process::CommandExt,
+        },
+    },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -22,10 +29,15 @@ fn main() {
         fixture(Path::new(&args[2]), &args[3]);
         return;
     }
+    if args.get(1).is_some_and(|s| s == "--preexec-window") {
+        owner_release_during_a_childs_preexec_window();
+        return;
+    }
     roundtrip_and_crash();
     owner_race();
     lock_is_not_inherited_by_exec();
-    println!("INSTANCE LIFECYCLE: ALL OK (native peer identity, cross-process lease, concurrent claims, same-intent replay, build refusal, SIGKILL recovery, changed epoch, inode-safe cleanup, close-on-exec)");
+    owner_release_during_a_childs_preexec_window();
+    println!("INSTANCE LIFECYCLE: ALL OK (native peer identity, cross-process lease, concurrent claims, same-intent replay, build refusal, SIGKILL recovery, changed epoch, inode-safe cleanup, pre-exec lease release, close-on-exec)");
 }
 fn endpoint(path: &Path, display: &str) -> Endpoint {
     Endpoint::in_directory(path, &Key::new("floe2-web", Some(display)).unwrap()).unwrap()
@@ -254,4 +266,97 @@ fn lock_is_not_inherited_by_exec() {
     drop(next);
     fs::write(temp.0.join("stop"), b"stop").unwrap();
     child.wait(true);
+}
+
+fn owner_release_during_a_childs_preexec_window() {
+    let temp = Temp::new("preexec");
+    let endpoint = endpoint(&temp.0, ":11");
+    let Claim::Owner(owner) = endpoint.claim(BUILD).unwrap() else {
+        panic!("owned")
+    };
+    let (_, lock) = temp.socket_and_lock();
+    let inode = fs::metadata(&lock).unwrap().ino();
+    let (mut ready_rx, ready_tx) = UnixStream::pair().unwrap();
+    let (mut release_tx, release_rx) = UnixStream::pair().unwrap();
+    for socket in [&ready_rx, &ready_tx, &release_tx, &release_rx] {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+    }
+    let exe = std::env::current_exe().unwrap();
+    let path = temp.0.clone();
+    let spawn = thread::spawn(move || {
+        let mut command = Command::new(exe);
+        command
+            .arg("--owner")
+            .arg(path)
+            .arg("hold")
+            .env("PATH", "")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        // SAFETY: the child hook only calls read/write on valid, pre-created
+        // descriptors with kernel timeouts. No allocation, Rust locks or I/O
+        // formatting occurs between fork and exec. CLOEXEC is left untouched.
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = 1u8;
+                for (fd, send) in [
+                    (ready_tx.as_raw_fd(), true),
+                    (release_rx.as_raw_fd(), false),
+                ] {
+                    loop {
+                        let n = if send {
+                            libc::write(fd, (&byte as *const u8).cast(), 1)
+                        } else {
+                            libc::read(fd, (&mut byte as *mut u8).cast(), 1)
+                        };
+                        if n == 1 {
+                            break;
+                        }
+                        let error = if n == 0 {
+                            std::io::Error::from_raw_os_error(libc::EIO)
+                        } else {
+                            std::io::Error::last_os_error()
+                        };
+                        if error.raw_os_error() != Some(libc::EINTR) {
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(())
+            });
+        }
+        command.spawn()
+    });
+    let mut ready = [0u8];
+    let readiness = ready_rx.read_exact(&mut ready);
+    // The child now holds inherited lock/listener descriptors but has not
+    // executed its program. Do not release it until AFTER probing reclaim.
+    drop(owner);
+    let reclaimed = if readiness.is_ok() {
+        Some(endpoint.claim(BUILD))
+    } else {
+        None
+    };
+    let released = release_tx.write_all(&[1]);
+    let child = spawn.join().unwrap();
+    // Reap the fixture before assertions, including the expected pre-fix failure.
+    let mut child = Fixture(child.unwrap());
+    let state = child.state();
+    fs::write(temp.0.join("stop"), b"stop").unwrap();
+    child.wait(true);
+    readiness.unwrap();
+    released.unwrap();
+    assert_eq!(state, "hold");
+    let Claim::Owner(next) = reclaimed.unwrap().unwrap() else {
+        panic!("owner lease survived its drop during another thread's pre-exec window");
+    };
+    assert_eq!(fs::metadata(&lock).unwrap().ino(), inode);
+    assert!(matches!(endpoint.claim(BUILD).unwrap(), Claim::Running(_)));
+    drop(next);
+    assert!(matches!(endpoint.claim(BUILD).unwrap(), Claim::Owner(_)));
 }

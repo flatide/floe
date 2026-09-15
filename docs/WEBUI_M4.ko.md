@@ -5388,3 +5388,58 @@ GTK 개발 게이트 경고는 유지한다. 실제 브라우저/현장 수용�
 승인·연결, CLI/G4 최종 대조. 실제 브라우저 입력/저장/복구/화면·Python-free Linux·G1/G4,
 M2 공유/원격, M0/M3 현장, M5 world-tile 조건부, hot reload/revision 사용자 유보를
 이 입력 기능 하나로 완료 처리하지 않는다.
+
+## 73. M4g-18 — IPC 소유자 종료와 fork→exec 잠금 수명
+
+2026-09-16. §72의 단발 `already owned` 실패 후 소유자 종료 경계를 검사했다.
+기존 `Owner::drop`은 자기 socket을 정리하고 File의 close에만 의존했다. 같은 open
+description을 상속한 자식이 fork→exec 구간에 있으면 close-on-exec가 아직 실행되지
+않아 flock이 남는다. macOS SDK의 `flock(2)` 명세와 두 독립 재현에서 확인했다.
+
+- dup 단위 검사: owner가 살아 있을 때 중복 claim은 Running, owner를 drop한 직후
+  복제 FD가 남아 있어도 새 owner를 획득해야 한다. 이전 FD를 나중에 닫아도 새 owner의
+  잠금은 유지돼야 한다. 수정 전 `already owned`로 exit101, 수정 뒤 통과했다.
+- native 검사: 실제 자식의 pre-exec hook을 미리 만든 Unix socket 두 쌍으로 동기화한다.
+  child ready→부모 owner drop→재획득 시도→child exec 허용 순서를 고정한다. fork 뒤
+  hook은 timeout이 설정된 FD의 read/write와 errno 처리만 수행하고 allocation/formatting/
+  Rust mutex를 쓰지 않는다. CLOEXEC는 끄지 않으며 assertion 전에 자식을 수거한다.
+  수정 전 잠금 잔류로 exit101, 수정 뒤 기존 lifecycle 전체와 함께 통과했다.
+- owner Drop은 자기 socket inode 정리 뒤 살아 있는 FD로 `LOCK_UN`을 수행한다.
+  EINTR만 재시도하고, persistent lock inode는 지우지 않는다. timeout/불명확한 socket을
+  재획득 허가로 바꾸거나 replay ledger·epoch·build/UID 규칙을 완화하지 않는다.
+- fork된 Owner 복사본은 creator PID가 다르면 자기 FD만 닫는다. 부모 socket 삭제/
+  shared flock unlock은 금지하며 PID를 파일에 저장하거나 신호 대상으로 사용하지 않는다.
+  단위 검사는 이 destructor 분기를 모사해 부모 측 복제 FD와 socket이 보존됨을 확인한다.
+- SIGKILL 등 Drop 자체를 실행하지 못하는 종료에서, 아직 exec하지 않은 자식의 참조까지
+  즉시 없애는 보장은 아니다. claim 도중 Owner 생성 전에 실패하는 경로의 File도 기존
+  close 수명을 유지한다. 기존 fail-closed 동작을 임의 대기로 숨기지 않는다.
+
+최초 배터리 단발 실패에는 backtrace가 없어서 첫 claim과 재시작 claim 중 어느 쪽인지
+확인할 수 없다. **위 결함 재현/수정과 최초 실패의 인과 확정을 구분**한다.
+테스트 owner helper에 `track_caller`를 추가해 재발 시 호출 위치를 기록한다.
+별도 reviewer 수정8파일은 보존하며 이번 단계에 포함하지 않는다.
+
+집중 검증: instance 단위12개(별도 GTK oracle ignored1), native IPC lifecycle 전체,
+동기화한 pre-exec 검사10회와 app-core 전체 병렬 검사3회(각273 passed/7 ignored),
+app-core/web/app all-target scoped strict clippy(`-- --no-deps -D warnings`) 통과.
+Rust1.89에서도 instance 단위/native lifecycle을 실행해 통과했으며 app-core all-target
+Linux x86-64 musl check도 통과했다. Linux에서 실행한 결과는 아니다.
+로그는 `/private/tmp/floe-ipc-lease-clippy.log`, `floe-ipc-lease-msrv.log`,
+`floe-ipc-lease-linux-check.log`다.
+
+전체 `sh tools/validate_rust.sh`는 **실제 exit0 / RUST VALIDATION: ALL OK**로 끝났다
+(`/private/tmp/floe-ipc-lease-battery.log`). app24/core273/web88 단위, 새 native IPC
+회귀와 기존 HTTP/WS·CLI 수명주기, reviewer 자동 저장의 실제 note/waive 게시·재조회와
+opt-out, ES2017/UI·표시 진단, VFS H1-H5/L1-L9·마커 복구, occupancy27/jobdeck83/
+renderer46, KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과했다.
+scoped rustfmt·diff-check도 통과했으며 기존 dependency/GTK 개발 게이트 경고는 남는다.
+실제 브라우저 또는 Linux/현장 실행을 검증한 것은 아니다.
+
+검증용 `.venv` 링크만 정리했다. main의 기존5항목 변경과 feature/jobdeck worktree,
+reviewer8파일의 diff를 보존했다. core 검사 수는 별도 reviewer 미커밋 검사도 포함한
+작업 트리 기준이며 그 파일들은 이 커밋에 넣지 않는다. renderer/protocol은 바꾸지 않는다.
+
+커밋 시 목표 잔여: `--dump`/GTK 진단의 제품 경계, reviewer legacy 읽기 승인·연결과
+CLI/G4 최종 재대조. 실제 브라우저 입력/저장/복구/화면·Python-free Linux·G1/G4,
+M2 공유/원격 미구현, M0/M3 현장 보류, M5 world-tile 조건부와 hot reload/revision
+사용자 유보는 별도다. 이번 잠금 수정으로 전체 전환 완료를 선언하지 않는다.

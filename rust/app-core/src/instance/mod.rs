@@ -180,7 +180,8 @@ impl Endpoint {
         let owner = Owner {
             endpoint: self.clone(),
             socket_id,
-            _lock: lock,
+            lock,
+            creator_pid: std::process::id(),
             listener,
             epoch,
             build: build.to_owned(),
@@ -272,7 +273,8 @@ pub enum Claim {
 pub struct Owner {
     endpoint: Endpoint,
     socket_id: (u64, u64),
-    _lock: File,
+    lock: File,
+    creator_pid: u32,
     listener: Socket,
     epoch: String,
     build: String,
@@ -333,6 +335,12 @@ impl Owner {
 }
 impl Drop for Owner {
     fn drop(&mut self) {
+        // A forked copy may close its own descriptors, but must not unlink the
+        // parent's socket or explicitly unlock their shared open description.
+        // This is local destructor identity, never persisted signalling authority.
+        if std::process::id() != self.creator_pid {
+            return;
+        }
         // Keep the lock inode forever: unlinking an unlocked lock can create
         // two different inodes owned by two concurrent cooperating launchers.
         if self.endpoint.validate().is_ok()
@@ -341,6 +349,10 @@ impl Drop for Owner {
         {
             let _ = fs::remove_file(&self.endpoint.socket);
         }
+        // close alone leaves flock held if a concurrent child inherited this
+        // description and has not reached exec/CLOEXEC yet. Release the logical
+        // owner's lease after socket cleanup, while the descriptor is still valid.
+        let _ = unix::unlock(&self.lock);
     }
 }
 

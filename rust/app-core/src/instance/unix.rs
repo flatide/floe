@@ -21,6 +21,18 @@ pub(super) fn try_lock(file: &File) -> Result<bool> {
         }
     }
 }
+pub(super) fn unlock(file: &File) -> Result<()> {
+    loop {
+        // SAFETY: borrowed live file descriptor and valid flock operation.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e.into());
+        }
+    }
+}
 pub(super) fn same_user(socket: &Socket) -> Result<()> {
     #[cfg(target_os = "linux")]
     let peer = {
