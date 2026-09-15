@@ -89,6 +89,9 @@ impl Ledger {
     pub fn snapshot(&self) -> Value {
         json!({"last_seq":self.high_water.to_string(),"active":self.active.map(|n|n.to_string()),"history":self.history.iter().map(|r|r.state.clone()).collect::<Vec<_>>()})
     }
+    pub fn cursor(&self) -> Value {
+        json!({"last_seq":self.high_water.to_string(),"active":self.active.map(|n|n.to_string())})
+    }
 }
 
 #[cfg(test)]

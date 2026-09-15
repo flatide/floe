@@ -7,10 +7,10 @@
         function paint(){
             el('launch-panel').hidden=!pending&&!attempt;
             el('launch-status').textContent=error||readError||(attempt?'Request outcome needs confirmation. Check the same request; do not launch it again.':
-                pending&&pending.phase==='preparing'?'CLI request queued · reading source headers…':
-                pending&&pending.phase==='failed'?'CLI preparation failed: '+pending.error:
+                pending&&pending.phase==='preparing'?'Open request queued · reading source headers…':
+                pending&&pending.phase==='failed'?'Open preparation failed: '+pending.error:
                 pending&&pending.confirm_levels?'Choose the requested jobdeck levels, then Open requested layout.':
-                pending?'CLI request ready · waiting for pending view inputs.':'');
+                pending?'Open request ready · waiting for pending view inputs.':'');
             el('launch-open').hidden=!pending||pending.phase!=='ready'||!pending.request||!!attempt||prepared!==pending.id;
             el('launch-open').disabled=busy||!env.ready();
             el('launch-check').hidden=!attempt;el('launch-check').disabled=busy;

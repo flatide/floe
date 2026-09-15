@@ -284,6 +284,30 @@ impl Service {
         paths: &[std::path::PathBuf],
         stop: &AtomicUsize,
     ) -> Result<Vec<String>> {
+        self.register_sources_guarded(scope, paths, stop, || Ok(()))
+    }
+    /// A picker selection carries an inode witness, not an HTTP path. Validate
+    /// before reads and again after metadata preparation, before publication.
+    pub(crate) fn register_selected(
+        &self,
+        selected: &floe_app_core::browse::SelectedFile,
+        stop: &AtomicUsize,
+    ) -> Result<String> {
+        self.register_sources_guarded(
+            selected.scope(),
+            &[selected.path().to_owned()],
+            stop,
+            || selected.validate(stop),
+        )
+        .map(|mut ids| ids.remove(0))
+    }
+    fn register_sources_guarded(
+        &self,
+        scope: Arc<AccessScope>,
+        paths: &[std::path::PathBuf],
+        stop: &AtomicUsize,
+        validate: impl Fn() -> Result<()>,
+    ) -> Result<Vec<String>> {
         if paths.is_empty() || paths.len() > MAX_SOURCES {
             return Err(Error::input("register 1..32 sources"));
         }
@@ -298,6 +322,7 @@ impl Service {
             state.registering = true;
         }
         let _registering = Registering(&self.inner);
+        validate()?;
         let mut registration = self.inner.source_set.begin(stop)?;
         let registered = paths
             .iter()
@@ -308,6 +333,7 @@ impl Service {
                 Ok(Entry { id, source })
             })
             .collect::<Result<Vec<_>>>()?;
+        validate()?;
         let state = self.inner.state.lock().unwrap();
         if state.closed || self.is_finished() {
             return Err(Error::new(ErrorKind::Cancelled, "owner service closed"));

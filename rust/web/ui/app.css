@@ -28,6 +28,14 @@ input[type="color"] { padding: 1px; width: 26px; height: 25px; min-height: 25px;
 .about-card pre { white-space: pre-wrap; overflow-wrap: break-word; user-select: text; padding: 12px; background: #111720; line-height: 1.5; }
 .about-card p { line-height: 1.6; }
 .session-exit-card { width: 440px; }
+.browse-card { width: 850px; }
+.browse-tools { display:flex; flex-wrap:wrap; gap:10px; align-items:end; margin-top:12px; }
+.browse-tools label { display:flex; flex-direction:column; gap:5px; }
+#browse-crumbs { display:flex; flex-wrap:wrap; gap:4px; margin-top:10px; }
+#browse-entries { list-style:none; padding:4px; margin:8px 0; height:36vh; min-height:120px; overflow-y:auto; border:1px solid #343d4c; background:#111720; }
+#browse-entries button { display:block; width:100%; text-align:left; border:0; border-radius:2px; background:transparent; white-space:normal; overflow-wrap:break-word; }
+#browse-entries button[aria-pressed="true"] { background:#314969; color:white; }
+#browse-selection { overflow-wrap:break-word; }
 #notice-files { max-height: 240px; overflow-y: auto; }
 #notice-files button { display: block; width: 100%; text-align: left; margin: 3px 0; white-space: normal; overflow-wrap: break-word; }
 .notice-pages { flex-wrap: wrap; align-items: center; }

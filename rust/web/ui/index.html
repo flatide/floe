@@ -29,6 +29,7 @@
   <script defer src="/assets/@@BUNDLE@@/about.js"></script>
   <script defer src="/assets/@@BUNDLE@@/session-exit.js"></script>
   <script defer src="/assets/@@BUNDLE@@/launcher.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/browse.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body>
@@ -44,6 +45,7 @@
     <aside class="sidebar" aria-label="Layout controls">
       <section class="source-panel">
         <h2>Source</h2>
+        <button id="browse-open" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Browse server files…</button>
         <label for="source" class="sr-only">Registered source</label>
         <select id="source"><option>Loading catalog…</option></select>
         <div class="source-mode"><label for="mode">Open mode</label><select id="mode"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div>
@@ -319,6 +321,21 @@
       <p id="drc-sync-status" class="note" role="status"></p>
       <button id="drc-reload" class="quiet" title="Discard unsynchronized local panel changes and restore this view's server state">Reload review</button>
     </aside>
+  </div>
+  <div id="browse-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="browse-title" tabindex="-1" hidden>
+    <section class="about-card browse-card">
+      <div class="about-heading"><h2 id="browse-title">Open server layout</h2><button id="browse-close" type="button">Close</button></div>
+      <p class="note">Approved folders on the server, not this browser's computer. No upload or automatic indexing. Hidden files, *.floe, *.ice and symbolic links are not listed.</p>
+      <label>Approved folder <select id="browse-root"></select></label>
+      <nav id="browse-crumbs" aria-label="Folder breadcrumbs"></nav>
+      <div class="browse-tools"><label>File type <select id="browse-filter"><option value="layouts">OASIS layouts</option><option value="jobdecks">Jobdecks (*.jb)</option><option value="all_files">All files (including extensionless OASIS)</option></select></label><label>Name contains <input id="browse-query" type="search" maxlength="128" autocomplete="off"></label><button id="browse-refresh" type="button">Refresh / search</button></div>
+      <p id="browse-status" class="note" role="status"></p>
+      <ul id="browse-entries" aria-label="Server files"></ul>
+      <div class="button-row"><button id="browse-prev" type="button">Previous 128</button><button id="browse-next" type="button">Next 128</button><button id="browse-check" type="button" hidden>Check / retry same request</button><button id="browse-cancel" type="button" hidden>Cancel work</button></div>
+      <p id="browse-selection" class="note">No file selected</p>
+      <button id="browse-select" type="button" class="primary" disabled>Open selected layout</button>
+      <p class="note">Jobdecks with multiple levels ask before opening. Cancel stops preparation before the open request is published; after publication use Dismiss request. GDS/gzip support remains pending.</p>
+    </section>
   </div>
   <div id="about-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="about-title" hidden>
     <section class="about-card">

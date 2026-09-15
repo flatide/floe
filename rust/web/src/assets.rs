@@ -24,6 +24,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
         return transport::error(StatusCode::NOT_FOUND);
     }
     let (mime, body) = match name.as_str() {
+        "browse.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/browse.js"),
+        ),
         "launcher.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/launcher.js"),

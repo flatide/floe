@@ -51,7 +51,7 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --frame-cache on|off      Retained frame reuse + layout margin (default on)
   --refinement off         Explicit direct-final render (overrides round env)
   --perf-baseline           Frames/labels/refinement/frame reuse off; caches stay
-  --root DIRECTORY         Additional approved dependency root, repeatable
+  --root DIRECTORY         Additional approved dependency/file-picker root, repeatable
   --drc RESULTS.db|PACK.ice Register DRC on first source; pack build needs owner approval
   --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
   --drc-rules FILE         Explicit existing SVRF rules.json (requires --drc)
@@ -68,9 +68,13 @@ Default instance: same UID + DISPLAY (headless supported), separate from GTK.
 Later calls queue an open in that window; acceptance is not a rendered-frame ACK.
 Explicit process/DRC/session options start independently. --no-open alone may own the instance.
 No automatic indexing or Python fallback. Paths are local-launcher inputs only.
+The file picker lists source parents and --root directories (launch directory
+when both are absent), never arbitrary server paths. Hidden/cache files and
+symlinks are not listed. Roots stay fixed for the lifetime of this workspace.
 Binds only 127.0.0.1; stops on Ctrl+C or End session.
 Managed capacity: 16 CPU slots, 4 reserved for foreground; index jobs <=12.
-Decode+raster reservation must fit 16 slots (DRC reserves 1 extra slot + 256 MiB;
+Decode+raster plus file catalogue (1 slot + 192 MiB) must fit 16 slots
+(DRC reserves 1 extra slot + 256 MiB;
 SVRF metadata reserves another 256 MiB, with no extra CPU worker).
 DRC reads the explicit ASCII or ICE file; no adjacent-pack/reviewer discovery or implicit indexing.
 Refinement off; deck margin unsupported.
@@ -525,6 +529,21 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     }
     roots.sort();
     roots.dedup();
+    let browse_roots = if roots.is_empty() {
+        vec![std::env::current_dir()?]
+    } else {
+        let mut browse_roots = roots.clone();
+        // Match GTK's initial directory when a source was supplied.
+        if let Some(source) = c.sources.first() {
+            let parent = cache::absolute(source)?
+                .parent()
+                .expect("validated source parent")
+                .to_owned();
+            browse_roots.retain(|p| p != &parent);
+            browse_roots.insert(0, parent);
+        }
+        browse_roots
+    };
     let scope = if c.sources.is_empty() {
         None
     } else {
@@ -666,6 +685,9 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     if owner.is_some() {
         Gateway::attach_launches(&mut gate, Arc::clone(&launches)).map_err(Error::input)?;
     }
+    Gateway::enable_browse(&mut gate, &browse_roots, &resources).map_err(Error::input)?;
+    // Verify the combined reservation before advertising a usable workspace.
+    drop(resources.render(&options)?);
     let mut instance = owner
         .map(|owner| handoff::Runtime::start(owner, Arc::clone(&service), launches))
         .transpose()?;

@@ -137,6 +137,8 @@ pub struct Gateway {
     pub(crate) view: Option<Arc<Attachment>>,
     pub(crate) service: Option<Arc<crate::service::Service>>,
     pub(crate) launch: Option<Arc<crate::launch::Launches>>,
+    cli_owner: bool,
+    pub(crate) browse: Option<Arc<crate::browse::Picker>>,
     pub(crate) drc: Option<Arc<crate::drc::Registry>>,
     pub(crate) defaults: Option<Arc<crate::defaults::Service>>,
     startup: Option<serde_json::Value>,
@@ -169,6 +171,8 @@ impl Gateway {
                 view: None,
                 service: None,
                 launch: None,
+                cli_owner: false,
+                browse: None,
                 drc: None,
                 defaults: None,
                 startup: None,
@@ -232,6 +236,33 @@ impl Gateway {
             return Err("launch proposals require an owner service and one broker".into());
         }
         g.launch = Some(launches);
+        g.cli_owner = true;
+        Ok(())
+    }
+    /// Approved server roots only. Independent workspaces get the same safe
+    /// open-proposal broker, but do not acquire a CLI single-instance endpoint.
+    pub fn enable_browse(
+        gate: &mut Gate,
+        roots: &[std::path::PathBuf],
+        resources: &Arc<floe_app_core::managed::Resources>,
+    ) -> Result<(), String> {
+        let g = Arc::get_mut(gate).ok_or("gateway already published")?;
+        if g.browse.is_some() {
+            return Err("file picker already attached".into());
+        }
+        let service = Arc::clone(
+            g.service
+                .as_ref()
+                .ok_or("picker requires an owner service")?,
+        );
+        let launch = g
+            .launch
+            .clone()
+            .unwrap_or_else(crate::launch::Launches::new);
+        let picker = crate::browse::Picker::start(roots, resources, service, Arc::clone(&launch))
+            .map_err(|e| e.to_string())?;
+        g.launch = Some(launch);
+        g.browse = Some(picker);
         Ok(())
     }
     pub(crate) fn active_view(&self) -> Option<Arc<Attachment>> {
@@ -287,6 +318,9 @@ impl Gateway {
         Ok((gate, secret))
     }
     fn stop_services(&self) {
+        if let Some(browse) = &self.browse {
+            browse.request_stop();
+        }
         if let Some(launch) = &self.launch {
             launch.stop();
         }
@@ -431,6 +465,7 @@ pub fn router(gate: Gate) -> Router {
         .route("/api/v1/startup", get(startup))
         .merge(crate::owner::routes())
         .merge(crate::launch::routes())
+        .merge(crate::browse::routes())
         .merge(crate::drc::routes())
         .merge(crate::exports::routes())
         .merge(crate::defaults::routes())
@@ -587,7 +622,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     }
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
-        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"launcher":gate.launch.is_some(),"jobdeck_modes":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"drc_waives":gate.drc.as_ref().is_some_and(|r|r.waives_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
+        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"launcher":gate.cli_owner,"file_picker":gate.browse.is_some(),"jobdeck_modes":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"drc_waives":gate.drc.as_ref().is_some_and(|r|r.waives_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
         "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }
@@ -755,6 +790,7 @@ pub async fn serve(
         tokio::select! {
             _ = &mut shutdown => break Ok(()),
             _ = maintenance.tick()=>{
+                if gate.browse.as_ref().is_some_and(|b|b.has_failed()) {break Err(io::Error::other("file catalogue stopped"));}
                 if let Some(defaults)=&gate.defaults {defaults.maintain();}
                 if let Some(drc)=&gate.drc {drc.maintain();}
                 if gate.auth.lock().is_ok_and(|a|a.expired(Instant::now())) {gate.stop_services();}
@@ -827,6 +863,20 @@ pub async fn serve(
         .is_err()
         {
             return Err(io::Error::other("DRC service shutdown deadline exceeded"));
+        }
+    }
+    if let Some(browse) = &gate.browse {
+        if timeout(Duration::from_secs(4), async {
+            while !browse.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_err()
+        {
+            return Err(io::Error::other(
+                "file catalogue shutdown deadline exceeded",
+            ));
         }
     }
     if let Some(defaults) = &gate.defaults {

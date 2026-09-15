@@ -163,6 +163,7 @@ window.FloeSessionExit=require('./session-exit.js');
 window.FloeNotices=require('./notices.js');
 window.FloeMinimap=require('./minimap.js');
 window.FloeLauncher=require('./launcher.js');
+window.FloeBrowse=require('./browse.js');
 window.FloeDRCNotes=require('./drc-notes.js');
 window.FloeDRCNoteDisplay=require('./drc-note-display.js');
 window.FloeDRCWaives=require('./drc-waives.js');

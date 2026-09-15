@@ -4042,3 +4042,81 @@ workspace 단위·owner13·GTK startup144/native8·CLI handoff·ES2017/UI·잡�
 로그: `/private/tmp/floe-forward-{unit,clippy,msrv,linux-check,ui,native}.log`,
 `floe-forward-battery.log`, `floe-forward-worker-recheck.log`,
 `floe-forward-battery-retry.log`.
+
+## 51. M4g-8 — 허가된 서버 폴더 파일 선택기
+
+[사용법/제약](WEBUI_FILE_PICKER.ko.md). 빈 창에서 Browse server files로 파일을
+선택할 수 있다. GTK 실행기나 실칩 `feature/jobdeck`를 변경하지 않았다. 별도
+`--multi` 창도 파일 선택을 지원하되 CLI single-instance owner가 되지는 않는다.
+capabilities의 `file_picker`와 `launcher`는 그 차이를 따로 표시한다.
+
+### 탐색과 선택 경계
+
+- `app-core::browse`: trusted root를 고정하고 불투명 handle만 발급한다. root에서
+  각 ancestor를 descriptor-relative/non-following으로 다시 열어 inode를 검사한다.
+  디렉터리/파일 교체, symlink 탈출, 손상/만료 handle을 정상 빈 결과로 처리하지 않는다.
+  선택한 regular file의 inode·size·mtime·ctime를 등록 전후 검사한다. 이후 native 경로
+  접근 전체를 불변 revision으로 고정하는 OS sandbox라는 뜻은 아니다.
+- 폴더 우선·대소문자 무시 정렬, dot/cache/ICE 숨김, OASIS/jobdeck/All files 필터,
+  부분 문자열 검색과 128행 페이지다. 디렉터리를 한 번 조사/정렬하고 재사용한다.
+  최대100k matches/1M examined, handle2,048, 깊이64/경로4,096 bytes다. 한도 초과는
+  명시 오류이며 잘린 목록을 완전한 목록으로 표시하지 않는다. symlink/special과
+  비UTF8/metadata 실패 항목은 각 건수를 표시한다. APFS의 비UTF8 이름 생성 거부와
+  Linux의 허용 차이를 합성 gate가 구분한다.
+- roots는 초기 소스 부모 + `--root`, 둘 다 없으면 실행 폴더다. home/`/` 전체로
+  확장하거나 CLI 전달 때 새 탐색 root를 부여하지 않는다. 추가 scope는 새 세션의
+  명시 `--root`로만 정한다. TC 의존성 등록도 같은 허가 범위 안이어야 한다.
+
+### 비동기 API와 기존 열기 재사용
+
+전용 단일 actor/active1개가 파일 읽기를 담당한다. HTTP는 seq/요청을 유계 ledger에
+접수하고 즉시202를 반환한다. `GET /browse`는 roots와 cursor만, `GET /browse/{seq}`는
+최대32개 이력 중 하나만 조회하므로 매 poll에서 전체 디렉터리 이력을 복제하지 않는다.
+응답은 요청 본문도 포함해 연결 간 seq 충돌을 판별한다. 경로·파일 내용·argv를 응답하지
+않으며 브라우저 파일 upload endpoint를 추가하지 않았다.
+
+`select`는 §48의 원자적/게시 보호 등록을 거쳐 §49의 열기 제안 ID를 만든다.
+그 단계에서 색인·native worker·설정 파일 쓰기를 실행하지 않는다. 제안 consumer가
+실제 viewport와 현재 view/revision으로 열기를 접수한다. 같은 source는 worker/캐시를
+재사용하며, 다른 source는 기존 교체/취소 경계를 따른다. 미색인 파일은 기존 화면을
+보존하고 별도 Index 조작을 안내한다. 덱2레벨 이상은 선택 확인 후 연다.
+
+취소와 제안 게시를 같은 actor state 잠금으로 직렬화한다. 취소가 늦으면 cancelled로
+꾸미지 않고 성공 receipt/launch ID를 반환한다. 그 이후의 취소는 제안 Dismiss다.
+등록 metadata만 카탈로그에 남을 수 있지만 소스·캐시에 쓰지는 않는다. 네트워크
+유실 전 sessionStorage에 요청을 저장하며 재개는 조회만, 명시 Check만 동일 요청을
+재전송한다. pagehide 늦은 응답·만료 이력·다른 요청의 같은 seq를 새 선택으로 적용하지
+않는다. record가 손상/충돌하면 새 세션이 필요한 현재 복구 한계를 표시한다.
+
+자원 admission은 1 CPU slot + 192 MiB다(정렬 임시 키/handle/응답 이력 포함 추정;
+강제 RSS 상한 아님). 다른 작업과 총16 slots 안에서 나눈다. NFS blocked syscall은
+취소 flag로 중단할 수 없으며 이 부분의 현장 지연/종료 보장은 아직 없다.
+
+### 검증과 남은 parity
+
+- core10개: 정렬/필터/숨김·pagination·reader offset 독립·handle/breadcrumb 만료,
+  root/ancestor symlink 교체·변경 파일·FIFO·취소/한도·깊이·경로 없는 DTO.
+- actor4개: 동일 요청 재접수/seq 충돌/이력 만료, 등록 후 무색인·무렌더, 변경 소스,
+  취소·종료·자원 회수·HTTP용 strict DTO.
+- `validate_web_browse.py`: private 합성 OASIS/덱으로 auth/두 root/paging·숨김,
+  원본 변경 거부, 최초 열기·동일 worker 재사용·다른 파일 교체, 미색인 실패 시 기존
+  화면 보존, 덱 레벨 질문, source/cache digest 불변·정상 종료를 검사한다.
+- ES2017 및 전체 UI gate 통과. 별도 picker gate는 literal filename, 페이지 이동,
+  저장 후 전송·읽기 전용 복구·동일 요청 재전송·seq 충돌·취소·늦은 응답을 고정한다.
+- Rust1.89 app-core248(web와 무관한 기존 ignored3개)·web70 통과, 3패키지 Linux
+  musl all-target check 및 호스트 all-target clippy 통과. renderer ABI/버전0.12.87 불변.
+- Chrome 실제 확인: 빈 창 목록, 미색인 선택의 명시 오류/Index 안내, 정상 파일로
+  전환 시 오류 해제·실제 full-depth 픽셀, 하위 폴더 빈 목록과 기존 렌더 유지.
+  이름 검색으로 정확히 한 파일을 반환하고 End session 뒤 exit0·session file 제거·
+  worker 디렉터리 비움을 확인했다. 테스트 탭도 닫았다.
+  설정 게시/다운로드/clipboard는 추가 수행하지 않았다.
+
+현재 새 선택은 CLI 기본 표시값을 사용한다. GTK의 마지막 표시 옵션 유지, GDS/gzip,
+임의 home/path 탐색, 색인 동의→자동 재열기 UX·bare FILE/나머지 CLI 옵션과 현장
+Firefox/ETX 수용은 남아 있다. 파일 선택기를 전체 웹 이관 완료로 계산하지 않는다.
+전체 배터리는 exit0, `RUST VALIDATION: ALL OK`로 완료했다. workspace 단위·새 picker
+gate·owner/CLI 전달·GTK startup144/native8·ES2017/UI·잡덱80·렌더러46 및
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다. 기존 dependency/GTK/Pillow
+경고는 별도다. 검증용 `.venv` 링크만 제거했고 main/feature/jobdeck 변경은 보존했다.
+전체 로그: `/private/tmp/floe-browse-battery.log`.
+집중 gate 로그: `floe-browse-{unit,api-unit,clippy,ui,msrv,linux-check,native}.log`.

@@ -231,6 +231,11 @@ viewport로 open한다. `view --multi` 및 명시 process/DRC 옵션은 독립 �
 소스·cache를 자동 생성/교체하지 않으며 같은 소스·모드·레벨은 worker를 재사용한다.
 현재 빈 창의 입력 경로는 별도 CLI 전달이다. 브라우저 파일 선택기, bare FILE shorthand,
 전체 미이관 옵션, Firefox/ETX의 창 foreground 수용은 아직 미완료다([M4 §50](WEBUI_M4.ko.md)).
+M4g-8은 빈 창→허가된 서버 폴더 선택→등록/레벨 확인→열기를 연결했다
+([M4 §51](WEBUI_M4.ko.md)). 미색인 선택은 암묵 색인 없이 오류와 별도 Index 조작을
+제공한다. 임의 home/path 탐색, GDS/gzip 변환, 마지막 표시 옵션의 GTK 동일 유지와
+미색인 파일의 단일 동의→색인→자동 재열기 UX는 아직 별도다. 현 시점 선택기의
+열기 기본값은 CLI 제안 기본값이며 이 차이를 전체 GTK parity 완료로 세지 않는다.
 
 ### 2.10 jobdeck — M1a (10개 옵션)
 

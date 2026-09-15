@@ -4,6 +4,7 @@
 pub mod about;
 mod assets;
 pub mod auth;
+pub mod browse;
 mod defaults;
 pub mod drc;
 mod exports;

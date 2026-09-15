@@ -14,7 +14,7 @@
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
     let settings = null, defaults = null, about = null, sessionExit = null;
-    let minimap = null, launcher = null;
+    let minimap = null, launcher = null, picker = null;
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
@@ -76,7 +76,7 @@
                     if (xhr.responseText) { value = JSON.parse(xhr.responseText); }
                 } catch (e) { reject(e); return; }
                 if (xhr.status < 200 || xhr.status >= 300) {
-                    if (xhr.status === 401) { stopped = true; if (launcher) { launcher.stop(); } connection('Session expired', false); }
+                    if (xhr.status === 401) { stopped = true; if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
                     const failure = new Error(message(value && value.error || ('HTTP ' + xhr.status)));
                     failure.status = xhr.status; failure.code = value && value.error;
                     reject(failure);
@@ -219,6 +219,7 @@
         if (clipper) { clipper.changed(); }
         if (snapshots) { snapshots.changed(); }
         if (launcher) { launcher.changed(); }
+        if (picker) { picker.changed(); }
     }
     function queryContext() {
         if (!state || !currentId || !lastPlacement) { return null; }
@@ -659,9 +660,10 @@
                     connection('Local · choose levels', true); el('open').focus();
                 } else { await openSource(startup); }
             }
-            else { el('empty-message').textContent = catalog.length ? 'Choose a registered source and open its index.' : caps.launcher ? 'Workspace ready. Run floe2-web view FILE to open a layout here.' : 'No registered sources. Restart this independent workspace with FILE.'; connection('Local · ready', true); }
+            else { el('empty-message').textContent = catalog.length ? 'Choose a registered source and open its index.' : caps.file_picker ? 'Choose a server file with Browse server files. Indexing requires separate approval.' : caps.launcher ? 'Workspace ready. Run floe2-web view FILE to open a layout here.' : 'No registered sources. Restart this independent workspace with FILE.'; connection('Local · ready', true); }
         }
-        await launcher.init(caps.launcher);
+        await picker.init(caps.file_picker, !catalog.length);
+        await launcher.init(caps.launcher || caps.file_picker);
     }
     el('source').onchange = sourceSelection;
     el('open').onclick = function () { openSource(null).catch(report); };
@@ -672,6 +674,7 @@
     };
     async function endSession() {
         if (launcher) { launcher.stop(); }
+        if (picker) { picker.stop(); }
         if (minimap) { minimap.stop(); }
         about.stop();
         if (drcPanel) { drcPanel.stop(); }
@@ -925,7 +928,7 @@
         ready:function(){return !!epoch&&live()&&!inflight&&!accepted&&queue.length===0&&!(gesture&&gesture.active())&&!document.hidden;},
         navigate:nav,focus:function(){viewport.focus();}});
     function launchReady() {
-        return !stopped && !document.hidden && !startupWaiting && !submitting && !ownerBusy && !inflight && !accepted && !queue.length &&
+        return !stopped && !document.hidden && (!picker || !picker.blocked()) && !startupWaiting && !submitting && !ownerBusy && !inflight && !accepted && !queue.length &&
             !(gesture && gesture.active()) && (!live() || ['idle','rendering'].includes(state.status));
     }
     launcher=window.FloeLauncher.bind({el:el,http:http,protocol:P,ready:launchReady,changed:controls,
@@ -946,12 +949,18 @@
                 ownerBusy=true;controls();notice('');await send(input);
             }finally{try{await operationState();}finally{submitting=false;controls();pump();}}
         }});
+    picker=window.FloeBrowse.bind({el:el,document:document,http:http,protocol:P,changed:controls,
+        available:function(){return !stopped&&!submitting&&!ownerBusy&&(!launcher||!launcher.blocked());},
+        selected:function(){startupWaiting=false;pendingStartup=null;notice('File selected. Preparing the open request; indexing requires separate approval.');},
+        loadPending:function(){return sessionStorage.getItem('floe-browse-pending:'+auth.session_id);},
+        savePending:function(value){const key='floe-browse-pending:'+auth.session_id;if(value===null){sessionStorage.removeItem(key);}else{sessionStorage.setItem(key,value);}},
+        setTimeout:function(fn,ms){return setTimeout(fn,ms);},clearTimeout:function(id){clearTimeout(id);}});
     document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (live() && !stopped) { connect(); } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { picker.stop(); launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).then(function(){return launcher.resume();}).catch(report); }
+        if (event.persisted && auth && !stopped) { minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).then(function(){return picker.resume();}).then(function(){return launcher.resume();}).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

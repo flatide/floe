@@ -105,6 +105,20 @@ impl Resources {
     pub fn read(self: &Arc<Self>, caches: impl IntoIterator<Item = PathBuf>) -> Result<Permit> {
         self.acquire(Usage::default(), keys(caches)?, false)
     }
+    /// One bounded directory catalogue actor. This admission estimate includes
+    /// sorting keys, opaque handle ancestry and response history, not a hard RSS
+    /// ceiling or an NFS latency guarantee. No dataset lease is needed to list.
+    pub fn browse(self: &Arc<Self>) -> Result<Permit> {
+        self.acquire(
+            Usage {
+                cpu_slots: 1,
+                decoded_mb: 192,
+                ..Usage::default()
+            },
+            BTreeSet::new(),
+            false,
+        )
+    }
     /// Dedicated exact export worker. The dataset's separate read permit must
     /// remain alive through child reap; this reserves CPU and decoded memory,
     /// not the native geometry/writer's total RSS or temporary disk footprint.

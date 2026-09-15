@@ -343,7 +343,15 @@ renderd argv, 임의 환경변수, 임의 출력 경로를 받는 endpoint는 �
 
 로컬 CLI의 자유로운 파일 경로는 **trusted local boundary**에만 허용한다.
 웹의 파일 선택은 서버 catalog handle을 사용한다. 브라우저 local file upload와
-서버 파일 열기는 다르며, 업로드 지원을 M1에 암묵적으로 넣지 않는다.
+혼동하지 않는다. 구현된 owner 경계(M4g-8)는 [M4 §51](WEBUI_M4.ko.md)을 따른다:
+`GET /api/v1/browse`(허가된 roots와 seq cursor), `POST /api/v1/browse`
+(list/page/select), `GET /api/v1/browse/{seq}`(최대32개 이력),
+`POST /api/v1/browse/{seq}/cancel`. source 경로·argv·추가 root는 HTTP에 없다.
+목록/선택은 전용 단일 작업자가 수행하고 접수는 즉시202를 반환한다. seq와 요청
+내용을 결과에 함께 실어 다른 연결의 같은 seq 응답을 내 선택 결과로 채택하지 않는다.
+선택 결과의 `launch_id`는 기존 owner 열기 제안이며 파일 읽기 capability가 아니다.
+
+업로드 지원을 M1에 암묵적으로 넣지 않는다.
 DRC import는 등록된 입력/artifact로 처리하고 include 탈출을 막는다. M4d-3 설정만은
 사용자가 선택한 UTF-8 text의 유계 import를 명시적으로 추가했다. 설정 문서에는
 서버 경로/include 명령이 없으며 source나 sidecar를 자동으로 쓰지 않는다.
