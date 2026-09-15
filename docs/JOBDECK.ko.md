@@ -314,6 +314,11 @@ floe2 index deck.jb --force --lod --jobs 16
   `IndexOnOpenTests.test_deck_asks_levels_then_opens_them`.
 - File > **load jobdeck…**(2026-09-09; `.jb` 필터가 앞에 오는 같은 대화상자) 또는 File > load layout… 의 `jobdecks (*.jb)` 필터. 소스 중 인덱스 없는 것이
   있으면 "지금 인덱싱할까요?" → `floe2 index deck.jb`를 모달 로그로 실행 후 연다.
+  여는 동안(덱 계획·캐시 로드·레이어 패널 재구성·렌더 서비스 open)은 캔버스
+  중앙에 배너 `loading jobdeck X…` → `opening render service…`와 wait 커서가
+  뜨고 렌더 서비스가 열리면 사라진다(2026-09-15, `Viewer._loading_show`; 레이아웃
+  로드는 `loading X…`). Jobdeck 뷰 전환(Ctrl+, / colour by …)도 `switching to
+  chip view…` 배너를 띄운다. gate `LoadingBannerTests`, 뷰 전환 GUI 테스트.
   `floe2 view deck.jb`도 같다(2026-09-09: 인덱스 없는 파일은 레이아웃·덱·DRC db
   모두 뷰어가 묻고 인덱싱한 뒤 연다 — `Viewer._open_or_index`,
   `FLOE_INDEX_ON_OPEN=yes|no`로 자동 응답).

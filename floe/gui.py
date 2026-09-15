@@ -139,6 +139,10 @@ PANEL_CSS = (
     # the slightest pointer move during the click). List mode selects
     # on a plain row click and never times out.
     b"combobox { -GtkComboBox-appears-as-list: true; } "
+    # centred loading banner over the canvas (user call 2026-09-15)
+    b".floe-loading { background-color: rgba(0, 0, 0, 0.75); "
+    b"color: #ffffff; padding: 12px 22px; border-radius: 8px; "
+    b"font-size: 15px; } "
     # Calibre-style layer panel: black background, white text (scoped
     # hooks, never a universal `*` on a ScrolledWindow subtree - see
     # the retina clip note where the classes are attached).
@@ -1626,6 +1630,16 @@ class Viewer:
         self.image.set_valign(Gtk.Align.START)
         self.scroller.add(self.image)
         self.overlay.add(self.scroller)
+        # loading banner (user call 2026-09-15): centred over the
+        # canvas while a deck loads or a jobdeck view switches; shown
+        # and hidden by _loading_show / _loading_hide only
+        self._loading = Gtk.Label(label="")
+        self._loading.set_halign(Gtk.Align.CENTER)
+        self._loading.set_valign(Gtk.Align.CENTER)
+        self._loading.set_no_show_all(True)
+        self._loading.get_style_context().add_class("floe-loading")
+        self.overlay.add_overlay(self._loading)
+        self.overlay.set_overlay_pass_through(self._loading, True)
         main.pack_start(self.overlay, True, True, 0)
 
         # Two-tier status area. Upper: cursor/interaction plus persistent
@@ -1868,6 +1882,7 @@ class Viewer:
                 worker = self.worker
                 self._worker_starting = True
                 self._set_live_status("opening Rust render cache...")
+                self._loading_update("opening render service…")
                 worker.start_async(
                     lambda error: GLib.idle_add(
                         self._worker_start_finished, worker, error))
@@ -1879,6 +1894,7 @@ class Viewer:
         if worker is not self.worker:
             return False
         self._worker_starting = False
+        self._loading_hide()
         if error is not None:
             self._set_live_status("render service open failed: %s" % error)
             return False
@@ -2019,6 +2035,25 @@ class Viewer:
                 and not self.cache.is_stale() \
                 and getattr(self.cache, "ids", None) == ids:
             return None
+        # the loading banner from the first blocking step until the
+        # render service has opened (_worker_start_finished); a
+        # refusal or an exception before that takes it down here
+        self._loading_show("loading %s%s…" % (
+            "jobdeck " if _is_deck_path(path) else "",
+            os.path.basename(path)))
+        applied = False
+        try:
+            err = self._open_file_load(path, ids)
+            applied = err is None
+            return err
+        finally:
+            if not applied:
+                self._loading_hide()
+
+    def _open_file_load(self, path, ids):
+        """open_file's loading half: the cache (a DeckCache plans the
+        deck and writes its spec), then _apply_cache (layer panel,
+        render service); an error string for the known refusals."""
         if _is_deck_path(path):
             # a jobdeck (docs/JOBDECK.ko.md M3): every source's
             # <src>.floe must exist; renderd composites them
@@ -3691,6 +3726,41 @@ class Viewer:
         self.pstatus.set_text(mode)
         self.pstatus.set_tooltip_text(mode)
 
+    def _loading_show(self, text):
+        """A centred banner over the canvas plus the wait cursor while
+        a load blocks the main loop (planning a deck's placements,
+        loading a cache, rebuilding the layer panel) and then while
+        the render service opens; _worker_start_finished hides it.
+        The main loop is pumped so the banner paints before the
+        blocking work (user call 2026-09-15: a 667-source deck gave
+        no sign of life while it loaded or switched to the chip
+        view). A redraw debounce that fires during the pump submits
+        against the current worker or, mid-open, nothing."""
+        banner = getattr(self, "_loading", None)
+        if banner is None:
+            return
+        banner.set_text(text)
+        banner.show()
+        self._set_live_status(text)
+        self._set_cursor("wait")
+        for _ in range(3):
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+    def _loading_update(self, text):
+        """A later phase's text, only while the banner is up."""
+        banner = getattr(self, "_loading", None)
+        if banner is not None and banner.get_visible():
+            self._loading_show(text)
+
+    def _loading_hide(self):
+        banner = getattr(self, "_loading", None)
+        if banner is None or not banner.get_visible():
+            return
+        banner.hide()
+        self._set_cursor("move" if self._drag is not None
+                         else self._idle_cursor())
+
     def _set_live_status(self, text):
         """Upper-row message; cursor motion may replace it."""
         self.status.set_text(text)
@@ -5358,9 +5428,12 @@ class Viewer:
             return
         view = (self.cx, self.cy, self.spp)
         cache.save_visibility(self.visible)
+        self._loading_show("switching to %s view…" % {
+            "layer": "source layer"}.get(mode, mode))
         try:
             cache.set_mode(mode)
         except Exception as exc:
+            self._loading_hide()
             self._set_live_status("jobdeck colour mode: %s" % exc)
             self._restore_keys()
             return

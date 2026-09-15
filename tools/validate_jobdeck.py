@@ -1402,10 +1402,23 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
                 wanted = set(v.visible)
                 pose = v.cx, v.cy, v.spp
                 self.assertIsNotNone(v._debounce)
+                shown = []
+                orig_show = v._loading_show
+
+                def show(text):
+                    shown.append(text)
+                    orig_show(text)
+                v._loading_show = show
                 for mode in ("level", "chip"):
                     v._jobdeck_set_mode(mode)
                     self.assertIsNone(v._debounce)
+                    # the loading banner (user call 2026-09-15) is up
+                    # from the re-plan until the render service opened
+                    self.assertTrue(v._loading.get_visible(), mode)
+                    self.assertIn("switching to %s view" % mode,
+                                  [t for t in shown if "switching" in t][-1])
                     landed()
+                    self.assertFalse(v._loading.get_visible(), mode)
                     self.assertEqual(v.visible, wanted)
                     self.assertEqual((v.cx, v.cy, v.spp), pose)
                     self.assertTrue(v._layer_rows[(2, 0)]._partial)
@@ -1413,6 +1426,27 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
             finally:
                 v._quit()
                 v.window.destroy()
+
+
+class LoadingBannerTests(unittest.TestCase):
+    """The loading banner (user call 2026-09-15) comes down when an
+    open is refused before the render service is involved."""
+
+    def test_an_open_that_refuses_hides_the_banner(self):
+        import tempfile
+        from floe import gui
+        gui.import_gtk()
+        calls = []
+        v = gui.Viewer.__new__(gui.Viewer)
+        v.cache = None
+        v._loading_show = lambda text: calls.append(("show", text))
+        v._loading_hide = lambda: calls.append(("hide",))
+        missing = os.path.join(tempfile.mkdtemp(prefix="floe-banner-"),
+                               "nothing.oas")
+        err = v.open_file(missing)
+        self.assertTrue(err and err.startswith("ERR no VFS cache"), err)
+        self.assertEqual([c[0] for c in calls], ["show", "hide"])
+        self.assertIn("loading nothing.oas", calls[0][1])
 
 
 class JobdeckShortcutTests(unittest.TestCase):
