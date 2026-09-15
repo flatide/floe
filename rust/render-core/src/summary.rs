@@ -5,8 +5,10 @@
 //! pyramid level whose cell is at most one screen pixel are projected
 //! to a screen mask and styled (raster.rs `paint_summary_plane`). The
 //! selection is per request and per layer: every one of the five
-//! conditions must hold (keep policy, not exact, full depth, a valid
-//! design.ovo matching the cache, level-0 cell <= 1 px) and the
+//! conditions must hold (keep policy, not exact, a depth that draws
+//! the layer whole - unlimited, at least the hierarchy height, or at
+//! least the layer's deepest page-holding cell - a valid design.ovo
+//! matching the cache, level-0 cell <= 1 px) and the
 //! layer's status in the file must be ok; anything else takes the
 //! exact page path unchanged. FLOE_RUST_OCCUPANCY=off is the kill
 //! switch (renderd passes it as `disabled`).

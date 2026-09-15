@@ -791,6 +791,14 @@ def write_thinwide(path):
         P(200 * UM, 1200 * UM), P(300 * UM, 1200 * UM), P(300 * UM, 1230 * UM),
         P(230 * UM, 1230 * UM), P(230 * UM, 1300 * UM), P(200 * UM, 1300 * UM)]))
     top.shapes(l3).insert(db.Box(100 * UM, 100 * UM, 1600 * UM, 1600 * UM))
+    # one child (hierarchy height 1) with a 2/0 box inside the top's
+    # 2/0 block, so every depth draws the same pixels: 2/0's pages
+    # reach depth 1, 1/0's stay at depth 0 - the summary's per-layer
+    # depth condition is tested on both (2026-09-15)
+    deep = ly.create_cell("DEEP")
+    deep.shapes(l2).insert(db.Box(0, 0, 50 * UM, 50 * UM))
+    top.insert(db.CellInstArray(deep.cell_index(),
+                                db.Trans(db.Vector(1250 * UM, 1250 * UM))))
     ly.write(str(path))
     ly._destroy()
 
@@ -969,13 +977,31 @@ class RenderTests(unittest.TestCase):
         self.assertTrue((21, 78) in lit2 and (28, 79) in lit2, "the L's arms")
 
     def test_cull_exact_and_limited_depth_requests_are_untouched(self):
-        for kw, reason in (({"thin": "cull"}, "policy"),
-                           ({"cut_px": 0.0}, "exact"),
-                           ({"depth": 0}, "depth")):
-            lit, summ, _ = self._render(self.worker, visible=[(1, 0)], **kw)
-            off, s_off, _ = self._render(self.worker_off, visible=[(1, 0)], **kw)
+        # the depth case uses 2/0, whose pages reach the DEEP child at
+        # depth 1: at depth 0 that layer is not drawn whole, no summary
+        for kw, vis, reason in (({"thin": "cull"}, [(1, 0)], "policy"),
+                                ({"cut_px": 0.0}, [(1, 0)], "exact"),
+                                ({"depth": 0}, [(2, 0)], "depth")):
+            lit, summ, _ = self._render(self.worker, visible=vis, **kw)
+            off, s_off, _ = self._render(self.worker_off, visible=vis, **kw)
             self.assertEqual((summ["layers"], summ["none"]), (0, reason), kw)
             self.assertEqual(lit, off, kw)
+        # the depth condition is per layer (user 2026-09-15: the depth
+        # is a free control): 1/0's pages all sit in the top, so depth
+        # 0 draws it whole and its summary is on with the pixels of
+        # the unlimited depth; 2/0 needs depth 1 (= the hierarchy
+        # height, also full); with both visible at depth 0 only 1/0
+        # is summarized
+        full1, s_full1, _ = self._render(self.worker, visible=[(1, 0)])
+        d0, s_d0, _ = self._render(self.worker, visible=[(1, 0)], depth=0)
+        self.assertEqual((s_full1["layers"], s_d0["layers"], s_d0["none"]), (1, 1, "-"), s_d0)
+        self.assertEqual(d0, full1)
+        full2, s_full2, _ = self._render(self.worker, visible=[(2, 0)])
+        d1, s_d1, _ = self._render(self.worker, visible=[(2, 0)], depth=1)
+        self.assertEqual((s_full2["layers"], s_d1["layers"]), (1, 1), s_d1)
+        self.assertEqual(d1, full2)
+        _, s_both, _ = self._render(self.worker, visible=[(1, 0), (2, 0)], depth=0)
+        self.assertEqual((s_both["layers"], s_both["none"]), (1, "-"), s_both)
         # the kill switch: same pixels as a cache without the file
         off, s_off, _ = self._render(self.worker_off, visible=[(1, 0)])
         self.assertEqual(s_off["none"], "off")
@@ -1249,10 +1275,15 @@ class DeckRenderTests(unittest.TestCase):
         self.assertEqual(off, single_off)
         on, _ = render_settled(self.deck, self._next(), self.bbox, 200)
         self.assertNotEqual(on, off)
-        shallow, res = render_settled(self.deck, self._next(), self.bbox,
-                                      200, depth=0)
-        self.assertEqual((res["deck"]["summary_passes"],
-                          res["deck"]["summary_none_passes"]), (0, 0), res["deck"])
+        # the deck places 1/0, whose pages all sit in the top: depth 0
+        # draws that layer whole, so its pass is summarized even there
+        # (per-layer depth condition, 2026-09-15); depth 1 is the
+        # source's hierarchy height
+        for depth in (0, 1):
+            at, res_d = render_settled(self.deck, self._next(), self.bbox,
+                                       200, depth=depth)
+            self.assertEqual(res_d["deck"]["summary_passes"], 1, (depth, res_d["deck"]))
+            self.assertEqual(at, on, depth)
 
     def test_a_source_without_the_file_counts_as_none(self):
         ovo = self.dir / "thinwide.oas.floe" / "design.ovo"

@@ -65,8 +65,10 @@
   있음"을 도형 교차로 판정한다. rect는 셀 범위, polygon/path는 셀 격자 위 보수적
   스캔 변환(§5), 반복은 §5의 닫힌형 조건을 만족할 때만 footprint, 아니면 멤버마다.
   처리 한계를 넘는 레이어는 근사로 저장하지 않고 "요약 없음(이유)"로 기록한다.
-- **적용 조건(5개)**: 요청이 `thin=keep`이고, exact 요청이 아니고, 유효 depth가
-  full이고, `.ovo`가 기록한 top·소스·레이어 테이블이 현재 캐시와 일치하고, 뷰의
+- **적용 조건(5개)**: 요청이 `thin=keep`이고, exact 요청이 아니고, depth가 그
+  레이어를 통째로 그리는 값(무제한, 소스 계층 높이 이상, 또는 그 레이어의 페이지를
+  가진 가장 깊은 셀의 깊이 이상 — 레이어 단위, 2026-09-15)이고, `.ovo`가 기록한
+  top·소스·레이어 테이블이 현재 캐시와 일치하고, 뷰의
   µm/px ≥ base cell(level 0 셀이 1 px 이하)일 때만. 하나라도 아니면 현행 경로
   (리뷰 2: depth 0/1에서 깊은 자식 도형이 요약으로 보이거나 `render --detail exact
   --thin keep`이 근사로 바뀌면 안 된다).
@@ -178,8 +180,11 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 
 요청 단위로 정해진다(2026-09-11 정책 분리와 같은 원칙).
 
-1. 조건: §3의 5개(`thin=keep`, exact 아님, 유효 depth full, `.ovo` 유효·일치, µm/px
-   ≥ base cell) 모두 참이고 킬 스위치가 아닐 때. 레이어 단위로 `.ovo`의 status가
+1. 조건: §3의 5개(`thin=keep`, exact 아님, depth가 레이어를 통째로 그리는 값
+   (`Cache::depth_is_full_for`: 무제한·계층 높이 이상·레이어별 최대 깊이 이상),
+   `.ovo` 유효·일치, µm/px ≥ base cell) 모두 참이고 킬 스위치가 아닐 때. depth
+   조건은 레이어 단위라 보이는 레이어 중 일부만 요약될 수 있고, 하나도 안 되면
+   `summary: none (depth)`. 레이어 단위로 `.ovo`의 status가
    ok인 레이어만 요약, none인 레이어는 현행 경로.
 2. 레벨: 셀 ≤ 1 px인 가장 굵은 레벨 L. 덱은 소스 뷰 기준(덱 µm/px ÷ scale).
 3. 플랜: 요약으로 그릴 레이어를 `vis` 마스크에서 뺀 채 기존 플랜을 돈다 → 그
@@ -500,6 +505,28 @@ layer 3/300 status=ok work=729081740 set=4342426,1220836,338091,94074,27163,8105
   5,724 s / 코어 수 + 쓰기(절반). 실측 8-c로 확인: `floe2 index <src>
   --occupancy-only --jobs N`의 `[vfs] occupancy … ok=2 empty=2 jobs=N 17M (Ts)` 줄,
   덱 `time`, `floe-index scan` 출력.
+
+### 실측 8-d: 뷰어 depth 7/7에서 요약이 꺼짐 (2026-09-15, RENDERD 0.12.88)
+
+사용자 실측(0.12.86): depth 6/7과 7/7 모두 150,735 × 103,444 µm 뷰(1414 × 971 px,
+medium)에서 16.7 s — `thin pages 15k kept`, `14851/14851 pages`, `dec sum 18974 ms`,
+`paints 23.6M`, `raster wall 11704 ms`, 요약 항목 없음; depth 99(무제한)로 두면
+요약이 켜지고 빨라짐(사용자 확인). 원인: 뷰어의 depth 값은 999 이상일 때만
+"full"로 보내고 슬라이더의 최대(7)는 숫자 7로 가는데, 요약 조건이 `depth ==
+FULL_DEPTH`(무제한 표식)여서 7/7이 `summary: none (depth)`로 떨어졌다. 플래너는
+높이 이상의 유한 depth를 REM_FULL로 접어 모든 도형을 그리므로 결과는 같다.
+
+조치(사용자 결정: depth는 자유롭게 바꾸는 값이므로 레이어별 조건까지): 캐시를 열
+때 셀 DAG를 한 번 훑어(top에서의 최장 경로, 배치 레코드 순회) 레이어마다 "그
+레이어의 페이지를 가진 가장 깊은 셀의 깊이"를 구하고(`Cache::layer_depth`), 요청
+depth가 무제한이거나 소스 계층 높이 이상이거나 그 레이어의 최대 깊이 이상이면 그
+레이어의 요약을 허용한다(`depth_is_full_for`). 요청 depth 안의 셀만 그리는 exact와
+전체 깊이 평탄화인 요약이 그 조건에서 같은 도형 집합이기 때문이다. 덱은 pass마다
+그 소스에서 판정. 보이는 레이어 중 하나도 못 넘으면 `none (depth)`, 일부만 넘으면
+그 레이어만 요약(상태줄 `summary N layers`가 보이는 수보다 작다). gate: thinwide에
+2/0 상자를 가진 자식(높이 1)을 두고 — 1/0은 depth 0에서도 요약 on·픽셀 동일, 2/0은
+depth 0에서 none(depth)·depth 1에서 on, 둘 다 보이면 depth 0에서 1/0만; 덱(1/0)은
+depth 0·1 모두 요약 pass 1·픽셀 동일.
 
 ### 실측 8-c: 단일 소스 재생성 (2026-09-15, 0.12.120 / RENDERD 0.12.85)
 
