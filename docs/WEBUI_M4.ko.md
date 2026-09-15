@@ -4866,3 +4866,88 @@ undo grouping은 별도 입력 수용이며 deterministic fake textarea로 증�
 reviewer별 opt-in, reviewer 읽기 선택과 개발 도구 경계 정리다. 그 뒤에도 브라우저/
 Linux 실제 실행·G1/G4 수용, 미구현 공유/원격, 보류 M0/M3, 조건부 M5가 남는다.
 이 입력기 한 건의 완료를 전체 목표의 완료 또는 임의 퍼센트로 보고하지 않는다.
+
+## 64. M4g-14 — reviewer별 확정 시 자동 저장 opt-in
+
+2026-09-16. 사용자 선택에 따라 GTK의 확정 시 저장을 웹에 연결한다. 기본은 여전히
+off이며 **편집 중 주기 저장**이 아니다. 서버의 기존 snapshot/prepare/승인 API,
+reviewer·target·DRC/revision·CAS·원자 게시·receipt와 자원 admission은 변경하지 않는다.
+
+```sh
+floe2-web view layout.oas --drc checks.db.ice --drc-reviewer kim --drc-edit-waives
+```
+
+`--drc-reviewer`는 기존 note 쓰기 등록이고 `--drc-edit-waives`가 waive 쓰기를
+추가한다. 등록/CLI 실행만으로 자동 저장을 켜지 않는다. Notes/Waives 패널의
+`Automatically save confirmed … (this tab)`을 종류별로 명시적으로 켜야 한다.
+
+### 동작과 동의 범위
+
+- note: 선택 snapshot을 읽고 내용을 편집한 다음 `Save note` 또는 Ctrl/Cmd+Enter.
+  prepare가 정규화한 정확한 문구에 대한 승인 요청을 이어 보낸다. 빈 문구 확정은
+  선택 note를 지우는 기존 의미다. 입력/OS IME 조합/blur/단순 조회는 저장하지 않는다.
+- waive: snapshot에서 `Waive`/`Clear waive`를 선택하면 저장한다. 새 편집을 여는
+  canvas `w`는 현재 선택의 상태를 읽어 toggle→prepare→승인으로 연결한다.
+  이미 열린 선택 편집기는 `w`로 덮어쓰거나 제출하지 않고 포커스만 옮긴다.
+- 켜기 자체는 HTTP 요청을 만들지 않고, 이미 만들어 둔 미리보기를 승인하지 않는다.
+  off에서는 기존 미리보기·별도 체크/승인 경로를 유지한다.
+- 동의는 **탭·고정 reviewer·인증 세션·실제 연결 epoch**에 결합한 메모리 객체다.
+  확정 시 포착한 객체와 승인 직전 객체가 같아야 한다. 해제→재활성화로 옛 준비가
+  되살아나지 않는다. 바쁜 동안도 opt-out은 가능하나 새 opt-in은 막는다.
+  정상 waive reader revision 변경은 동의를 해제하지 않는다.
+- WebSocket 단절은 editor stop과 별개다. 실제 `drc.js` 연결 callback과 epoch를
+  연결해 단절/재접속/다른 창 상태에서 새 opt-in을 요구한다. checkbox/설정/storage
+  자동 복원은 없다. 기존 pending storage에도 문구나 opt-in은 넣지 않는다.
+- legacy binding 확인과 note 파싱 경고 검토는 자동 승인하지 않는다. import/export와
+  설계 공유 기본값 게시는 별도 동의다. reserved waive status는 명시한 Waive/Clear
+  동작에 따라 기존처럼1/0으로 바뀌며 preview/receipt의 기존 계수 의미를 유지한다.
+
+### 경합·실패·비용
+
+snapshot 이후 선택/DRC/revision/connection/만료가 달라지면 제출하지 않는다.
+사용자가 opt-out해도 이미 제출된 파일을 되돌렸다고 표시하지 않는다. 실패/충돌/
+결과 불명은 기존 receipt로 표시하며 열린 편집기의 원문/선택을 보존한다. 종료/
+pagehide의 기존 초안 삭제 계약은 그대로다. 단절에 의한 선택 무효화는 원문을
+유지하지만 새 동의와 snapshot 없이 재저장하지 않는다. 읽기·refresh·재연결은
+새 저장을 재시도하지 않으며 명시 Resolve만 동일 요청을 재전송한다.
+
+카탈로그 `autosave:false`는 서버의 독자적 배경 저장 없음이다. UI가 사용자 확정에
+대해 기존 `approve:true` 요청을 보내는 것이며 서버권한·RBAC를 UI boolean으로
+대체하지 않는다. 세션의 등록된 reviewer 이외 이름/경로는 요청으로 받지 않는다.
+한 저장 진행 중 추가 큐를 만들지 않는다. sidecar 전체 해시/재작성 비용은 그대로이며
+GTK pwrite와 같은 성능 또는 대형 파일 연속 클릭 성능을 보장하지 않는다.
+
+### 검증
+
+- `review-save-mode.test.cjs`: 기본 off, reviewer/세션 분리, 객체 동일성,
+  준비 중 opt-out, 해제→재활성화의 옛 동의 거부, checkbox 자동 복원이 동의가
+  되지 않음, 초기화/저장 부재. 연결 상태 제공이 빠진 호출자도 opt-in 불가다.
+- `review-autosave.test.cjs`: 실제 notes/waives 모듈에서 확정·단축키·IME,
+  read/prepare/승인 전 GET 지연, 해제·선택/revision/만료/종료, legacy/파싱 경고,
+  CAS 실패·이미 commit된 opt-out, 응답 유실/동일 요청 복구, 탭 분리.
+- 기존 실제 DRC/notes/waives 통합은 reader fence/이전 callback 취소·일치하는
+  revision까지 조회 정지·note 보존을 계속 검사한다. 여기에 실제 연결 false와
+  새 epoch에서 두 opt-in이 모두 꺼지고 재연결로 복원되지 않는 단언을 추가했다.
+- `validate_web_autosave.py`: private 합성 OASIS/DRC/ICE로 실제 Rust 서버와 실제
+  JS 편집 모듈을 연결한다. 한글 note 파일 저장/재조회, waive→clear와 reader ACK,
+  opt-out 후 수동 미리보기, 원본 source/pack/cache hash·mtime 불변, 종료를 검증한다.
+  credential은 자식 stdin으로만 전달하고 출력에 없는지 검사한다. Node/가짜 text
+  control은 개발 하네스이며 실제 브라우저 클릭/표시 수용이 아니다.
+- 전체 UI ES2017/회귀와 위 집중 검사는 통과했다. `floe-web` all-targets
+  `cargo clippy --offline --locked --no-deps -j2 -- -D warnings`도 통과했다.
+  의존 VFS의 기존 dead-code 경고는 남으며 workspace 전체 lint 통과 주장은 아니다.
+- 전체 `sh tools/validate_rust.sh`는 exit0 / `RUST VALIDATION: ALL OK`로 완료했다
+  (`/private/tmp/floe-autosave-battery.log`). app22/core261/web84 단위, 실제
+  note/waive 저장·복구 및 새 자동 저장 연결, 전체 UI/GTK 한글 대조, occupancy27·
+  잡덱83·렌더러46, VFS H1-H5/L1-L9 및 KLayout jobs1/8 각각13 PX+2 phase-exact+
+  14 style을 통과했다. 최종 연결 기본 거부/안내 보강 후에도 전체 UI·실제 Rust
+  저장 연결과 embedded-asset HTTP 검사를 재실행해 통과했다
+  (`/private/tmp/floe-autosave-ui-final.log`, `floe-autosave-assets-final.log`).
+  checkbox 복원 불변식도 별도로 재검증했다. 실제 Linux/브라우저/현장 수용은
+  별도이며 브라우저 도구 제한을 우회하지 않았다.
+
+목표 잔여: 자동 저장 **로컬 실행 경로**를 연결한 단계다. 다음은 reviewer 읽기
+선택의 별도 이관, 개발 bitmap 슬롯/CLI 경계와 G4 최종 대조다. 실제 브라우저의
+입력·저장·복구/시각 수용, Python-free Linux 실행과 G1/G4 판정은 남는다. 공유/원격은
+미구현, M0/M3 현장은 보류, M5 world-tile은 조건부다. 커밋 보고도 이 전체 잔여를
+유지하며 이 opt-in 한 건을 전체 완료나 임의 완료율로 바꾸지 않는다.

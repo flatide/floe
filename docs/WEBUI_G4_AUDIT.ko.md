@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-16, M4g-13. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-16, M4g-14. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -19,7 +19,7 @@
 | UI-04 pick/snap/측정 | query/inspect/measure/rulers + Rust query/export, 숫자·scene 유효성·stale gate | 실제 포인터/클립보드·시각적 측정 검증 |
 | UI-05 입력·복사·종료 | snapshot/session-exit와 단축키 보호. **M4g-13 두벌식 fallback**: `hangul.js`/`drc-notes.js`, GTK 원본 조합 oracle | OS IME와 fallback의 실제 입력·스크롤·키보드/브라우저별 수용. DOM gate로 대체하지 않음 |
 | DRC-01 조회·선택 | `app-core/drc`, `web/src/drc`, `drc*.js`; lazy paging/selection/CD/isolation/query gate | 현장 대형 결과와 실제 브라우저 조작 수용 |
-| DRC-02 저장·전송 | reviewer 고정 sidecar, snapshot/prepare/approve·CAS·receipt, notes/waives/transfer HTTP와 UI gate | **확정 시 자동 저장 opt-in 구현**(아래 사용자 결정), reviewer 읽기 선택; 실제 저장/충돌/복구 UI 수용 |
+| DRC-02 저장·전송 | reviewer 고정 sidecar, snapshot/prepare/approve·CAS·receipt, notes/waives/transfer HTTP와 UI gate. **M4g-14 확정 시 자동 저장 opt-in** 연결 | reviewer 읽기 선택; 실제 브라우저 저장/충돌/복구 수용, 대형 sidecar 연속 저장 비용 실측 |
 | EXPORT-01 | Rust capture/mosaic/PNG metadata/clip + snapshot; raster/metadata/DRC-capture gate | 실제 브라우저 copy/download/승인 표시 수용 |
 | SYS-01/02 | Rust worker 발견·수거·cache freshness·selfcheck·portable/ELF/고지; native/포장/전송 gate | Python-free **Linux에서 실행**, 현장 Firefox/ETX, G4 전체 end-to-end 판정 |
 
@@ -27,10 +27,11 @@
 KLayout, Node를 다시 넣지 않는다. 브라우저의 입력 조합·표시 일시 상태는 계획대로
 정적 JS에 두고, geometry/조회/파일 저장·권한·충돌 판정은 Rust에 둔다.
 
-## 2. 자동 저장 — 사용자 결정, 다음 구현
+## 2. 자동 저장 — 사용자 결정과 M4g-14 구현
 
 2026-09-16 사용자 선택: **reviewer별 자동 저장을 먼저 명시적으로 켜는 opt-in**.
-현재 M4g-13까지는 여전히 매번 prepare/approve이며 이 결정만으로 켜지지 않는다.
+M4g-14에서 연결했다([M4 §64](WEBUI_M4.ko.md)). 아래 동작은 집중/연결 검사에서
+통과했으며 전체 배터리 결과는 해당 절에 기록한다. 실제 브라우저 수용은 별도다.
 
 - 기본 off. 서버가 등록한 reviewer와 허용된 note/waive sidecar 범위 안에서만 동작.
   reviewer 선택 자체를 쓰기 동의로 간주하지 않는다.
@@ -41,17 +42,23 @@ KLayout, Node를 다시 넣지 않는다. 브라우저의 입력 조합·표시 
 - 실패/만료/결과 불명은 사용자에게 표시하고 초안을 보존한다. 자동 재시도·자동
   legacy sidecar 채택·in-pack fallback을 추가하지 않는다. import/export와 공유
   기본값 게시의 동의는 이 opt-in에 포함하지 않는다.
-- 첫 구현은 **현재 탭·등록된 reviewer 범위**의 로컬 opt-in으로 한다. notes/waives를
+- 기존 note 파일에 파싱 경고가 있으면 수동 미리보기/승인을 요구한다. 자동 저장
+  동의가 무효 행 정리까지 암묵 승인하지 않는다. 창/편집기를 닫으면 기존처럼
+  메모리 초안이 지워지며, 원문을 storage에 저장하거나 재연결 때 재작성하지 않는다.
+- 구현은 **현재 탭·등록된 reviewer·연결 epoch 범위**의 로컬 opt-in이다. notes/waives를
   각각 켤 수 있게 하며 서버의 기존 `--drc-reviewer`/`--drc-edit-waives` 권한이 없으면
   활성화하지 못한다. 설정 파일·sessionStorage로 opt-in을 자동 복원하지 않는다.
 - 사용자 확정 시 opt-in 세대를 포착하고 read/prepare/승인 직전 다시 확인한다.
   도중 해제 또는 해제→재활성화는 이미 시작한 준비에 새 승인을 주지 않는다.
   이미 제출된 저장을 opt-out으로 되돌렸다고 표시하지 않는다. disconnect/종료는
   opt-in을 해제하며 미확인 receipt의 기존 명시 복구 경로를 유지한다.
+  실제 WebSocket 단절은 `stop()`과 다르므로 DRC 패널의 연결 상태/epoch에 직접 결합한다.
+  정상 waive 저장에 따른 reader revision 변경만으로는 opt-in을 해제하지 않는다.
 - 서버의 read/prepare/submit API를 유지하고 UI 확정 동작만 기존 승인 요청에
   연결하는 범위다. 서버 배경 저장기·주기 저장·새 공유 권한을 추가하지 않는다.
   파일 게시와 waive reader refresh 결과는 계속 별도로 표시한다. 기존 수동 경로도
-  유지한다. 이 세부 규칙은 다음 구현과 지연 응답/해제/충돌 gate로 검증한다.
+  유지한다. 지연 read/prepare/승인 직전 GET·해제/충돌 gate와 실제 Rust HTTP 저장으로
+  검증했다. 카탈로그 `autosave:false`는 서버의 독자적 배경 저장이 없다는 의미로 유지한다.
 
 성능 주의: 현재 sidecar CAS는 파일 전체 해시/재작성 비용이 있다. 단일 operation
 진행 중 추가 저장을 쌓지 않으며 대형 waive 파일의 연속 클릭 성능은 실측 대상이다.
@@ -64,7 +71,7 @@ view에서 이를 `--drc-reviewer` 쓰기 등록으로 단순 치환하면 권�
 
 ## 3. 로컬 기능 완성과 구별할 목표 잔여
 
-1. 위 자동 저장·reviewer 읽기 선택, 개발 bitmap 슬롯/무효 CLI 경계의 마감과
+1. reviewer 읽기 선택, 개발 bitmap 슬롯/무효 CLI 경계의 마감과
    G4 목록의 최종 재대조.
 2. 실제 브라우저 입력·저장·복구·화면 수용, Python-free Linux 실행, G1/G4 판정.
    이전 브라우저 시작 파일의 도구 제한을 우회하지 않는다.

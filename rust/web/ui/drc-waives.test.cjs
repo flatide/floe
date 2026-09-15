@@ -40,13 +40,14 @@ function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
         shared.model=catalog(shared.model.operations.history.concat([result]).slice(-32));return clone(result);
     }
     panel=W.bind({el,protocol:P,session:()=>session,now:()=>now,
+        connection:()=>c.connected===false?null:c.epoch,
         selection:()=>c.ready&&!(panel&&panel.suspended())?{context:clone(c.context),epoch:c.epoch,key:c.key,caption:c.caption,count:c.rows.length,references:()=>clone(c.rows)}:null,
         changed(){if(panel){pauses.push(panel.suspended());panel.changed();}},refreshReview(){reviewReads++;},
         setTimeout(fn,ms){timers.set(++serial,{fn,at:now+ms});return serial;},clearTimeout:id=>timers.delete(id),
         loadPending(){if(storageError)throw Error('no storage');return shared.raw;},savePending(v){if(storageError)throw Error('no storage');shared.raw=v;},
         async http(method,path,body,missing,token){const r={method,path,body,token};calls.push(r);if(override){const v=override(r);if(v!==undefined)return await v;}return execute(r);}});
     return {panel,el,c,reader,calls,timers,shared,pauses,execute,init:()=>panel.attach(clone(shared.model),clone(reader)),read:()=>el('waives-read').onclick(),prepare:()=>el('waives-prepare').onclick(),
-        choose(v){el('waives-action').value=v;el('waives-action').onchange();},approve(legacy=false){el('waives-consent').checked=true;el('waives-legacy').checked=legacy;el('waives-consent').onchange();return el('waives-approve').onclick();},
+        choose(v){el('waives-action').value=v;return el('waives-action').onchange();},approve(legacy=false){el('waives-consent').checked=true;el('waives-legacy').checked=legacy;el('waives-consent').onchange();return el('waives-approve').onclick();},
         sync(){reader.revision=shared.model.operations.history.at(-1).reader_revision||reader.revision;c.context.revision=reader.revision;panel.attach(clone(shared.model),clone(reader));},
         tick(ms){now+=ms;for(const[id,t]of[...timers])if(t.at<=now){timers.delete(id);t.fn();}},
         get reviewReads(){return reviewReads;},set override(v){override=v;},set session(v){session=v;},set storageError(v){storageError=v;}};

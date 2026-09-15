@@ -1,7 +1,8 @@
-/* ES2017 owner waives. Frozen selection + one-use preview + explicit approval.
+/* ES2017 owner waives. Frozen selection + one-use preview + confirmed edit.
  * Publication and reader refresh are separate receipts, never optimistic edits. */
 (function(root) {
     'use strict';
+    const SaveMode=typeof module==='object'&&module.exports?require('./review-save-mode.js'):root.FloeReviewSaveMode;
     const API='/api/v1/drc/review/waives';
     const phases={queued:'Queued',publishing:'Saving',cancelling:'Cancelling',refreshing_reader:'Saved · refreshing review',succeeded:'Save completed',failed:'Save failed',cancelled:'Cancelled before saving'};
     const errors={review_changed:'The waive file changed or its lock is held. Read a new snapshot before preparing again.',
@@ -83,6 +84,7 @@
         let enabled=false,stopped=false,stale=true,model=null,reader=null,editor=null,draft=null,expiry=null,timer=null;
         let io=null,poll=null,write=null,approving=null,cancelling=null,revokeTask=null,revokeNext=null;
         let pending=null,uncertain=false,notice='',storageWarning='',notified=false,refreshKey='',transferLocked=false;
+        const saveMode=SaveMode.bind({toggle:el('waives-autosave'),hint:el('waives-autosave-status'),kind:'waive',changed:changed});
         function abort(t){if(t){t.cancelled=true;if(t.abort){t.abort();}}}
         function active(){return model&&model.operations.active;}
         function latest(){const a=model&&model.operations.history;return a&&a[a.length-1];}
@@ -127,9 +129,16 @@
             if(c&&!same(c)){invalidate('Selection, connection or review context changed.');}
             else if(editor&&!editor.invalid&&o.now()>=editor.until){invalidate('Snapshot or preview expired.');}render();}
         function action(){return el('waives-action').value==='waive'?true:el('waives-action').value==='clear'?false:null;}
+        function approvalReady(grant){return !!draft&&!!editor&&!editor.invalid&&permitted()&&!busy()&&!io&&!model.preparing&&
+            (grant?saveMode.valid(grant)&&!draft.legacy_unverified:el('waives-consent').checked&&(!draft.legacy_unverified||el('waives-legacy').checked));}
         function render(){
-            notify();el('waives-panel').hidden=!enabled;el('waives-owner').textContent=model?'Reviewer: '+model.reviewer+' · explicit saves only':'';
+            notify();el('waives-panel').hidden=!enabled;el('waives-owner').textContent=model?'Reviewer: '+model.reviewer:'';
             const c=selection(),ok=permitted()&&!busy()&&!io&&!model.preparing;
+            const connection=o.connection?o.connection():null;
+            saveMode.sync(enabled&&!stopped&&model?model.reviewer:'',o.session()+'\n'+(connection||''),!!ok&&!!connection);
+            el('waives-prepare').textContent=saveMode.on()?'Save status':'Preview save';
+            el('waives-local').textContent=saveMode.on()?'Choosing an action saves it. The w key opens a new toggle-and-save action; an existing choice stays unchanged. Escape discards an unsent choice.':
+                'No automatic save. Ctrl/Cmd+Enter previews; Escape discards the local choice.';
             el('waives-selection').textContent=c?c.caption:'Select errors in a ready ICE review to edit waives.';
             el('waives-read').disabled=!ok||!c||!!editor;el('waives-editor').hidden=!editor;
             el('waives-action').disabled=!!io||!!draft||busy()||stopped;
@@ -137,7 +146,7 @@
             el('waives-prepare').disabled=!ok||!editor||editor.invalid||!!draft||!editor.token||action()===null;
             el('waives-discard').disabled=!editor&&!io;el('waives-review').hidden=!draft;
             el('waives-consent').disabled=el('waives-legacy').disabled=!draft||!ok;
-            el('waives-approve').disabled=!draft||!ok||!el('waives-consent').checked||(draft.legacy_unverified&&!el('waives-legacy').checked);
+            el('waives-approve').disabled=!approvalReady(null);
             el('waives-cancel').hidden=!active();el('waives-cancel').disabled=!permitted()||!!cancelling;
             el('waives-refresh').disabled=stopped||!enabled||!!poll;el('waives-uncertain').hidden=!uncertain;
             el('waives-resolve').disabled=!pending||stopped||!!write||!!cancelling;
@@ -162,7 +171,7 @@
             try{const v=catalog(await o.http('GET',API,undefined,false,t),P);if(t.cancelled||poll!==t||stopped){return;}install(v);}
             catch(e){if(!t.cancelled&&poll===t){stale=true;notice='Waive status unavailable. '+(errors[e.code]||e.message);}}
             finally{if(poll===t){poll=null;changed();schedule();refreshReview();}}}
-        async function read(keep,toggle){changed();const c=selection();if(!permitted()||busy()||io||!c||model.preparing||(editor&&!keep)||(keep&&(!editor||!same(editor.selection)))){return;}
+        async function read(keep,toggle,grant){changed();const c=selection();if(!permitted()||busy()||io||!c||model.preparing||(editor&&!keep)||(keep&&(!editor||!same(editor.selection)))){return;}
             let rows;try{rows=refs(c.references(),P);if(rows.length!==c.count){fail();}}catch(e){notice=e.message;render();return;}
             const saved=keep?el('waives-action').value:'';if(editor){invalidate('Reloading snapshot.');}
             const t={selection:c,cancelled:false,abort:null,sent:o.now()};let focus=false;io=t;notice='Reading selected statuses. No file is changed.';render();
@@ -170,15 +179,19 @@
                 if(t.cancelled||io!==t||!same(c)){revoke(v.token);return;}if(v.reviewer!==model.reviewer){fail();}
                 editor={selection:c,token:v.token,until:Math.min(t.sent+120000,o.now()+Number(v.expires_in_ms)),invalid:false};draft=null;el('waives-action').value=toggle?(v.waived_count===v.selected_count?'clear':'waive'):saved;
                 el('waives-target').textContent=c.caption+'\n'+v.name+'\n'+v.waived_count+' already waived · '+v.reserved_count+' reserved statuses';
-                notice=toggle?'Toggle selected from current statuses. Preview and explicit approval are still required.':'Snapshot loaded. Choose Waive or Clear waive; no per-click autosave.';expiry=o.setTimeout(changed,Math.max(0,editor.until-o.now()));focus=true;
+                notice=toggle?'Toggle selected from current statuses. Preparing is separate from saving.':'Snapshot loaded. Choose Waive or Clear waive.';expiry=o.setTimeout(changed,Math.max(0,editor.until-o.now()));focus=true;
             }catch(e){if(!t.cancelled&&io===t){notice=errors[e.code]||e.message;}}
             // Hidden/disabled controls cannot receive browser focus. Render after releasing IO first.
-            finally{if(io===t){io=null;changed();if(focus&&editor&&!editor.invalid&&!el('waives-action').disabled){el('waives-action').focus();}}}}
-        async function prepare(){changed();if(el('waives-prepare').disabled){return;}const e=editor,c=e.selection,token=e.token,waived=action();
-            e.token=null;e.invalid=true;o.clearTimeout(expiry);expiry=null;const t={selection:c,cancelled:false,abort:null,sent:o.now()};let focus=false;io=t;notice='Preparing this selection. No file is changed.';render();
+            finally{if(io===t){io=null;changed();if(focus&&editor&&!editor.invalid&&!el('waives-action').disabled&&!(grant&&saveMode.valid(grant))){el('waives-action').focus();}}}
+            if(focus&&grant&&editor&&!editor.invalid&&same(c)){
+                if(saveMode.valid(grant)){await prepare(grant);}else{notice='Automatic save permission changed. The local choice was not saved.';render();}
+            }
+        }
+        async function prepare(grant){changed();if(el('waives-prepare').disabled){return;}const e=editor,c=e.selection,token=e.token,waived=action();
+            e.token=null;e.invalid=true;o.clearTimeout(expiry);expiry=null;const t={selection:c,cancelled:false,abort:null,sent:o.now()};let prepared=null,focus=false;io=t;notice='Preparing this selection. No file is changed yet.';render();
             try{const v=preview(await o.http('POST',API+'/prepare',{context:c.context,token:token,waived:waived},false,t),c.context,c.count,P,true);
                 if(t.cancelled||io!==t||editor!==e||!same(c)){revoke(v.token);return;}if(v.reviewer!==model.reviewer||v.waived!==waived){fail();}
-                draft=v;e.invalid=false;e.until=Math.min(t.sent+30000,o.now()+Number(v.expires_in_ms));
+                draft=prepared=v;e.invalid=false;e.until=Math.min(t.sent+30000,o.now()+Number(v.expires_in_ms));
                 el('waives-preview').textContent=(v.waived?'Waive':'Clear waive on')+' '+v.selected_count+' selected errors · '+v.changed_count+' statuses change';
                 el('waives-preview-target').textContent=c.caption+'\n'+v.name+'\n'+(v.replaces_existing?'Replace existing waive sidecar':'Create waive sidecar')+' · unselected statuses preserved';
                 el('waives-reserved').textContent=v.reserved_count==='0'?'':v.reserved_count+' selected reserved statuses will be replaced with '+(v.waived?'1 (waived).':'0 (not waived).');
@@ -186,7 +199,14 @@
                 notice='Approve only the action shown above. Preview expires after 30 seconds. The geometry pack is not changed.';
                 expiry=o.setTimeout(changed,Math.max(0,e.until-o.now()));focus=true;
             }catch(error){if(!t.cancelled&&io===t){notice=(errors[error.code]||error.message)+' Read a new snapshot before preparing again.';}}
-            finally{if(io===t){io=null;changed();if(focus&&draft&&!el('waives-consent').disabled){el('waives-consent').focus();}}}}
+            finally{if(io===t){io=null;changed();if(focus&&draft&&!el('waives-consent').disabled&&!(grant&&saveMode.valid(grant)&&!draft.legacy_unverified)){el('waives-consent').focus();}}}
+            if(grant&&prepared&&draft===prepared){
+                if(saveMode.valid(grant)&&!prepared.legacy_unverified){await approve(grant);}else{
+                    notice=prepared.legacy_unverified?'Legacy file confirmation is required; automatic save did not approve it.':
+                        'Automatic save permission changed. Review and approve this preview explicitly; no save was submitted.';render();}
+            }
+        }
+        function confirm(){changed();return prepare(saveMode.capture());}
         function clearEditor(discard){if(discard){invalidate('Draft discarded.');}else{o.clearTimeout(expiry);expiry=null;}
             editor=draft=null;el('waives-action').value='';el('waives-preview').textContent='';el('waives-consent').checked=el('waives-legacy').checked=false;}
         async function send(request){pending=request;uncertain=false;el('waives-checked').checked=false;store(request);abort(poll);poll=null;
@@ -198,9 +218,10 @@
                 uncertain=!rejected;if(rejected){pending=null;store(null);notice=errors[e.code]||e.message;}
                 else{notice=errors[e.code]||'Outcome unknown. Resolve resends only the SAME approved request, never a new edit.';}}
             finally{if(write===t){write=null;if(!stopped){await refresh();}else{render();}}}}
-        async function approve(){changed();if(el('waives-approve').disabled){return;}const d=draft,e=editor,t={};approving=t;render();await refresh();
-            if(approving!==t){return;}approving=null;changed();if(draft!==d||editor!==e||el('waives-approve').disabled){render();return;}
-            try{const request={seq:P.next(model.operations.last_seq),context:d.context,token:d.token,approve:true,confirm_legacy:el('waives-legacy').checked};
+        async function approve(grant){changed();if(!approvalReady(grant)){return;}const d=draft,e=editor,t={};approving=t;render();await refresh();
+            if(approving!==t){return;}approving=null;changed();if(draft!==d||editor!==e||!approvalReady(grant)){
+                if(grant){notice='Automatic save stopped before submission. Check the selection and preview.';}render();return;}
+            try{const request={seq:P.next(model.operations.last_seq),context:d.context,token:d.token,approve:true,confirm_legacy:grant?false:el('waives-legacy').checked};
                 o.clearTimeout(expiry);expiry=null;e.token=null;e.invalid=true;e.approvedSeq=request.seq;e.accepted=false;draft=null;
                 el('waives-consent').checked=el('waives-legacy').checked=false;await send(request);
             }catch(error){notice=error.message;render();}}
@@ -210,19 +231,20 @@
             finally{if(cancelling===t){cancelling=null;if(!stopped){await refresh();}}}}
         function discard(){clearEditor(true);notice='Local choice discarded. Previously approved saves are not undone.';render();el('waives-read').focus();}
         el('waives-read').onclick=function(){return read(false);};el('waives-reload').onclick=function(){return read(true);};
-        el('waives-action').onchange=changed;el('waives-prepare').onclick=prepare;el('waives-discard').onclick=discard;
-        el('waives-consent').onchange=el('waives-legacy').onchange=changed;el('waives-approve').onclick=approve;
-        el('waives-editor').onkeydown=function(e){if(e.isComposing){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();discard();}
-            else if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.stopPropagation();if(!draft){prepare();}}};
+        el('waives-action').onchange=function(){changed();const grant=saveMode.capture();if(grant){return prepare(grant);}};
+        el('waives-prepare').onclick=confirm;el('waives-discard').onclick=discard;
+        el('waives-consent').onchange=el('waives-legacy').onchange=changed;el('waives-approve').onclick=function(){return approve(null);};
+        el('waives-editor').onkeydown=function(e){if(e.isComposing||e.keyCode===229){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();discard();}
+            else if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.stopPropagation();if(!draft){confirm();}}};
         el('waives-refresh').onclick=function(){refreshKey='';return refresh();};el('waives-cancel').onclick=cancel;
         el('waives-resolve').onclick=function(){if(pending&&uncertain&&!stopped&&!write&&!cancelling){return send(pending);}};
         el('waives-checked').onchange=render;el('waives-forget').onclick=function(){if(!el('waives-forget').disabled){pending=null;uncertain=false;store(null);el('waives-checked').checked=false;notice='Local recovery record cleared after your check. No request was sent.';render();}};
         render();return {attach:function(value,currentReader){reader=currentReader||null;if(!value){if(enabled){stale=true;notice='Waive registration unavailable. Refresh before relying on review statuses.';}render();return;}
                 try{if(!enabled){enabled=true;recover();}const v=catalog(value,P);install(v);changed();schedule();}
                 catch(e){stale=true;notice=e.message;render();}},changed:changed,refresh:refresh,suspended:suspended,
-            open:function(){if(!enabled||stopped){return false;}changed();if(editor){el('waives-action').focus();}else{read(false,true);}return true;},
+            open:function(){if(!enabled||stopped){return false;}changed();if(editor){el('waives-action').focus();}else{read(false,true,saveMode.capture());}return true;},
             transferReady:transferReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
-            stop:function(final){stopped=true;stale=true;approving=null;clearEditor(false);if(write){uncertain=true;}
+            stop:function(final){stopped=true;stale=true;saveMode.reset();approving=null;clearEditor(false);if(write){uncertain=true;}
                 [io,poll,write,cancelling,revokeTask].forEach(abort);io=poll=write=cancelling=revokeTask=null;revokeNext=null;o.clearTimeout(timer);timer=null;
                 if(final){store(null);}notice=final?'Session ended. Earlier committed saves are not undone.':'Review disconnected. Check the receipt after reconnecting.';render();},resume:function(){stopped=false;return enabled?refresh():Promise.resolve();}};
     }

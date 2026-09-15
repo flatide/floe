@@ -8,6 +8,11 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
+acorn.parse(fs.readFileSync(path.join(ui, 'review-save-mode.js'), 'utf8'), options);
+for(const file of ['review-save-mode.test.cjs','review-autosave.test.cjs']){
+    const run=spawnSync(process.execPath,[path.join(ui,file)],{stdio:'inherit',timeout:15000});
+    assert.equal(run.status,0,file+': '+run.error);
+}
 acorn.parse(fs.readFileSync(path.join(ui, 'hangul.js'), 'utf8'), options);
 const hangul=spawnSync(process.execPath,[path.join(ui,'hangul.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(hangul.status,0,'hangul.test.cjs: '+hangul.error);

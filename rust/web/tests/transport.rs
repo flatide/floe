@@ -330,6 +330,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
         ("drc.js", "text/javascript"),
         ("drc-notes.js", "text/javascript"),
         ("hangul.js", "text/javascript"),
+        ("review-save-mode.js", "text/javascript"),
         ("drc-note-display.js", "text/javascript"),
         ("drc-waives.js", "text/javascript"),
         ("drc-transfer.js", "text/javascript"),

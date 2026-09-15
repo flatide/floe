@@ -109,6 +109,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../ui/drc-build.js"),
         ),
+        "review-save-mode.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/review-save-mode.js"),
+        ),
         "hangul.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/hangul.js"),

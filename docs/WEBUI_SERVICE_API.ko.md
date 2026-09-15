@@ -207,6 +207,15 @@ prepare는 검증한 check/local 선택에 `waived:bool`만 적용한다. native
 승인과 동일 요청 복구를 제공하고, 게시 성공뿐 아니라 reader ACK와 일치하는 ready
 revision을 확인한 뒤 DRC 조회를 재개한다([M4 §30](WEBUI_M4.ko.md)). 새 endpoint는
 없으며 실제 브라우저 게시·현장 수용은 후속이다.
+
+M4g-14는 **웹의 확정 시 자동 저장 opt-in**을 추가한다([M4 §64](WEBUI_M4.ko.md)).
+서버 API/권한/sidecar CAS는 그대로이며 카탈로그 `autosave:false`는 서버가 독자적으로
+배경 저장하지 않는다는 뜻이다. 탭에서 등록된 reviewer·현재 연결에 대해 켠 경우,
+사용자 확정 동작이 기존 read/prepare/승인 요청을 연결한다. opt-in 자체·단순 조회·
+입력·blur·pan·restore는 저장하지 않는다. 해제/연결 변경은 미제출 승인 자격을
+폐기하고, 이미 제출된 요청의 취소/receipt는 기존 의미를 유지한다. legacy 파일과
+note 파싱 경고는 별도 확인이며 import/기본값 게시 승인도 자동화하지 않는다.
+이 UI opt-in은 실사용자 인증/RBAC 또는 새로운 파일 쓰기 권한이 아니다.
 M4e-5a는 기존 주석 owner 등록에 `POST /api/v1/drc/review/notes/display`를 추가한다.
 최대512개의 check/local 배지와 focus 하나의 본문만 반환하고 편집/게시 token을 만들지
 않는다. context+notes review_rev에 고정한 admitted snapshot 하나를 재사용하며,

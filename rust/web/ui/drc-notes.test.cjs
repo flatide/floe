@@ -39,6 +39,7 @@ function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
         shared.model=catalog(shared.model.operations.history.concat([result]).slice(-32));return clone(result);
     }
     const panel=N.bind({el,protocol:P,session:()=>session,now:()=>now,
+        connection:()=>c.connected===false?null:c.epoch,
         displayState:s=>displayStates.push(clone(s)),
         selection:()=>c.ready?{context:clone(c.context),epoch:c.epoch,key:c.key,caption:c.caption,count:c.rows.length,references:()=>clone(c.rows)}:null,
         setTimeout(fn,ms){timers.set(++serial,{fn,at:now+ms});return serial;},clearTimeout:id=>timers.delete(id),
@@ -139,5 +140,5 @@ async function test(){
     assert.equal(N.refs(Array.from({length:5000},(_,i)=>({check:'0',error:String(i)})),P).length,5000);
     console.log('WEB DRC NOTES UI: ALL OK (selection, explicit consent, text retention, expiry/context, legacy, failure/unknown, replay-only recovery, cancel/commit, u64/UTF8, lifecycle)');
 }
-module.exports={catalog,op,snapshot,prepared,context,report};
+module.exports={catalog,op,snapshot,prepared,context,report,harness};
 if(require.main===module)test().catch(e=>{console.error(e);process.exitCode=1;});

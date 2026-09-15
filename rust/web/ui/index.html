@@ -19,6 +19,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-build.js"></script>
   <script defer src="/assets/@@BUNDLE@@/hangul.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/review-save-mode.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-notes.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-note-display.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-waives.js"></script>
@@ -270,6 +271,8 @@
           <details id="drc-note-body" class="drc-description" hidden><summary>Last jumped error · full saved note</summary><pre id="drc-note-text"></pre></details>
         </section>
         <h3>Notes</h3><p id="notes-owner" class="note"></p><p id="notes-selection" class="note"></p>
+        <label class="check"><input id="notes-autosave" type="checkbox" disabled> Automatically save confirmed note edits for this reviewer (this tab)</label>
+        <p id="notes-autosave-status" class="note" role="status"></p>
         <button id="notes-read" disabled>Read selected notes</button>
         <div id="notes-editor" hidden>
           <p id="notes-target" class="note"></p>
@@ -296,12 +299,14 @@
       </section>
       <section id="waives-panel" class="notes-panel" aria-label="Owner DRC waives" hidden>
         <h3>Waives</h3><p id="waives-owner" class="note"></p><p id="waives-selection" class="note"></p>
+        <label class="check"><input id="waives-autosave" type="checkbox" disabled> Automatically save confirmed waive changes for this reviewer (this tab)</label>
+        <p id="waives-autosave-status" class="note" role="status"></p>
         <button id="waives-read" disabled>Read selected statuses</button>
         <div id="waives-editor" hidden>
           <p id="waives-target" class="note"></p>
           <label for="waives-action">Action on this selection</label>
           <select id="waives-action"><option value="">Choose an action…</option><option value="waive">Waive</option><option value="clear">Clear waive</option></select>
-          <p class="note">No autosave. Ctrl/Cmd+Enter previews; Escape discards the local choice.</p>
+          <p id="waives-local" class="note">No automatic save. Ctrl/Cmd+Enter previews; Escape discards the local choice.</p>
           <div class="button-row"><button id="waives-prepare">Preview save</button><button id="waives-reload">Reload snapshot</button><button id="waives-discard">Discard choice</button></div>
           <div id="waives-review" hidden>
             <strong id="waives-preview-target"></strong><p id="waives-preview"></p><p id="waives-reserved" class="note"></p>

@@ -6,7 +6,8 @@
 
 현재 구현·수용 잔여는 [G4 감사](WEBUI_G4_AUDIT.ko.md)에서 대조한다.
 아래는 원래 범위와 단계별 누적 기록이며 작성 시점의 미구현 설명을 현재 상태로
-그대로 읽지 않는다. M4g-13은 두벌식 fallback을 연결했고 DRC 자동 저장 opt-in은 다음이다.
+그대로 읽지 않는다. M4g-13은 두벌식 fallback, M4g-14는 DRC 확정 시 자동 저장
+opt-in을 연결했다. 실제 브라우저/현장 수용과 reviewer 읽기 선택은 별도 잔여다.
 
 **로컬 조사/설계 결과이며 이관 완료표가 아니다.** 아래 Rust 서비스와 웹 UI는
 아직 전체 미구현이다. 2026-09-13에 M1a-1 worker client와 M1a-2a/b 일반 index·info/render/probe

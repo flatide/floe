@@ -103,7 +103,8 @@
                 el('drc-summary').textContent = 'Review paused · checking pack build state';
                 info('Previous DRC selection and outlines are not active.');
             }}) : null;
-        if (o.notes) { notes = o.notes.bind({el: el, protocol: P, http: o.http, selection: noteSelection,
+        function reviewConnection(){const c=o.context();return c&&c.connected&&c.state?c.state.connection_epoch:null;}
+        if (o.notes) { notes = o.notes.bind({el: el, protocol: P, http: o.http, selection: noteSelection,connection:reviewConnection,
             displayState: function (s) { noteState = s; if (noteDisplay) { noteDisplay.sync(); } },
             session: o.session, loadPending: o.loadNotePending, savePending: o.saveNotePending,
             now: o.now || function () { return Date.now(); },
@@ -129,7 +130,7 @@
             el('drc-note-body').hidden=!noteDisplay.text();
             markErrors();paintLater();
         }
-        if (o.waives) { waives = o.waives.bind({el: el, protocol: P, http: o.http, selection: noteSelection,
+        if (o.waives) { waives = o.waives.bind({el: el, protocol: P, http: o.http, selection: noteSelection,connection:reviewConnection,
             session: o.session, loadPending: o.loadWaivePending, savePending: o.saveWaivePending,
             now: o.now || function () { return Date.now(); },
             changed: contextChanged, refreshReview: refresh,
@@ -951,7 +952,7 @@
                     if (m.truncated_records !== undefined && cursor(m.truncated_records) !== '0') { el('drc-summary').textContent += ' · ' + m.truncated_records + ' truncated records'; }
                 }
                 if (!before || before.id !== registration.id || before.phase !== registration.phase) {
-                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : v.waives ? 'Notes and waives require explicit preview and approval. Geometry is read-only.' : v.notes ? 'Geometry and waive statuses are read-only; notes require explicit approval.' : 'Read-only review'));
+                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : v.waives ? 'Geometry is read-only. Notes/waives use approval by default; automatic save of confirmed edits is a separate reviewer opt-in.' : v.notes ? 'Geometry and waive statuses are read-only. Confirmed note edits can use the separate reviewer save opt-in.' : 'Read-only review'));
                 }
             }
             // The catalog is polled while idle too. Rebinding/restarting an

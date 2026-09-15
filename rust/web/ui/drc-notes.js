@@ -1,8 +1,9 @@
-/* ES2017 owner notes. Reads/previews never publish. Selection is frozen before
- * reading; only an explicit approval sends a write. No note text in storage. */
+/* ES2017 owner notes. Reads/typing never publish. Selection is frozen before
+ * reading; confirmed edits use per-edit consent or a tab-local opt-in. */
 (function(root) {
     'use strict';
     const H=typeof module==='object'&&module.exports?require('./hangul.js'):root.FloeHangul;
+    const SaveMode=typeof module==='object'&&module.exports?require('./review-save-mode.js'):root.FloeReviewSaveMode;
     const API='/api/v1/drc/review/notes', LIMIT=65536;
     const phases={queued:'Queued',publishing:'Saving',cancelling:'Cancelling',succeeded:'Saved',failed:'Save failed',cancelled:'Cancelled before saving'};
     const errors={review_changed:'The note file changed or another writer holds its lock. Reload the snapshot before preparing again.',
@@ -82,6 +83,7 @@
         let io=null,poll=null,write=null,cancelling=null,approving=null,revokeTask=null,revokeNext=null;
         let pending=null,uncertain=false,notice='',storageWarning='',readTurn=0,transferLocked=false;
         const hangul=H.bind({input:el('notes-text'),toggle:el('notes-hangul'),hint:el('notes-hangul-status'),changed:changed});
+        const saveMode=SaveMode.bind({toggle:el('notes-autosave'),hint:el('notes-autosave-status'),kind:'note',changed:changed});
         function abort(t){if(t){t.cancelled=true;if(t.abort){t.abort();}}}
         function selection(){try{const c=o.selection();if(stopped||!c){return null;}context(c.context);id(c.epoch);text(c.key,256);text(c.caption,4096);
             if(!Number.isInteger(c.count)||c.count<1||c.count>5000){return null;}return c;}catch(_){return null;}}
@@ -122,10 +124,22 @@
             else if(editor&&!editor.invalid&&o.now()>=editor.until){invalidate('Snapshot or preview expired.');}
             render();
         }
+        function automaticWarning(d){return d.legacy_unverified?'Legacy file confirmation is required':
+            reportText(d.import_report)?'Existing note file has parse warnings; explicit review is required':'';}
+        function approvalReady(grant){
+            return !!draft&&!!editor&&!editor.invalid&&permitted()&&!busy()&&!io&&!model.preparing&&
+                (grant?saveMode.valid(grant)&&!automaticWarning(draft):
+                    el('notes-consent').checked&&(!draft.legacy_unverified||el('notes-legacy').checked));
+        }
         function render(){
             el('notes-panel').hidden=!enabled;
-            el('notes-owner').textContent=model?'Reviewer: '+model.reviewer+' · explicit saves only':'';
+            el('notes-owner').textContent=model?'Reviewer: '+model.reviewer:'';
             const c=selection(),ok=permitted()&&!busy()&&!io&&!model.preparing;
+            const connection=o.connection?o.connection():null;
+            saveMode.sync(enabled&&!stopped&&model?model.reviewer:'',o.session()+'\n'+(connection||''),!!ok&&!!connection);
+            el('notes-prepare').textContent=saveMode.on()?'Save note':'Preview save';
+            el('notes-local').textContent='Local draft only until confirmed · lost on page reload. Ctrl/Cmd+Enter '+
+                (saveMode.on()?'saves the note':'previews')+'; Escape discards. Browser IME is supported.';
             el('notes-selection').textContent=c?c.caption:'Select errors in a ready ICE review to edit notes.';
             el('notes-read').disabled=!ok||!c||!!editor;
             el('notes-editor').hidden=!editor;el('notes-text').disabled=!!io||!!draft||busy()||stopped;
@@ -135,7 +149,7 @@
             el('notes-discard').disabled=!editor&&!io;
             el('notes-review').hidden=!draft;
             el('notes-consent').disabled=!draft||!ok;el('notes-legacy').disabled=!draft||!ok;
-            el('notes-approve').disabled=!draft||!ok||!el('notes-consent').checked||(draft.legacy_unverified&&!el('notes-legacy').checked);
+            el('notes-approve').disabled=!approvalReady(null);
             el('notes-cancel').hidden=!active();el('notes-cancel').disabled=!permitted()||!!cancelling;
             el('notes-refresh').disabled=stopped||!enabled||!!poll;
             el('notes-uncertain').hidden=!uncertain;el('notes-resolve').disabled=!pending||stopped||!!write||!!cancelling;
@@ -185,13 +199,13 @@
             // Hidden/disabled controls cannot receive browser focus. Render after releasing IO first.
             finally{if(io===t){io=null;changed();if(focus&&editor&&!editor.invalid&&!el('notes-text').disabled){el('notes-text').focus();}}}
         }
-        async function prepare(){
+        async function prepare(grant){
             changed();if(el('notes-prepare').disabled){return;}const e=editor,c=e.selection,token=e.token;
             e.token=null;e.invalid=true;o.clearTimeout(expiry);expiry=null;
-            const t={selection:c,cancelled:false,abort:null,sent:o.now()};let focus=false;io=t;notice='Preparing the selected edit. No file is changed.';render();
+            const t={selection:c,cancelled:false,abort:null,sent:o.now()};let prepared=null,focus=false;io=t;notice='Preparing the selected edit. No file is changed yet.';render();
             try{const v=preview(await o.http('POST',API+'/prepare',{context:c.context,token:token,text:el('notes-text').value},false,t),c.context,c.count,P,true);
                 if(t.cancelled||io!==t||editor!==e||!same(c)){revoke(v.token);return;}if(v.reviewer!==model.reviewer){fail();}
-                draft=v;e.invalid=false;e.until=Math.min(t.sent+30000,o.now()+Number(v.expires_in_ms));
+                draft=prepared=v;e.invalid=false;e.until=Math.min(t.sent+30000,o.now()+Number(v.expires_in_ms));
                 el('notes-preview').textContent=v.clears?'(Clear notes on these errors)':v.text;
                 el('notes-preview-target').textContent=c.caption+'\n'+v.name+'\n'+(v.replaces_existing?'Replace existing note sidecar':'Create note sidecar')+' · unrelated note groups preserved';
                 el('notes-report').textContent=reportText(v.import_report)?'Existing file parse report: '+reportText(v.import_report):'';
@@ -199,8 +213,14 @@
                 notice='Review the exact text above. Approval expires after 30 seconds. Layout and waive files are not changed.';
                 expiry=o.setTimeout(changed,Math.max(0,e.until-o.now()));focus=true;
             }catch(error){if(!t.cancelled&&io===t){notice=(errors[error.code]||error.message)+' Your text is retained. Reload the snapshot to prepare again.';}}
-            finally{if(io===t){io=null;changed();if(focus&&draft&&!el('notes-consent').disabled){el('notes-consent').focus();}}}
+            finally{if(io===t){io=null;changed();if(focus&&draft&&!el('notes-consent').disabled&&!(grant&&saveMode.valid(grant)&&!automaticWarning(draft))){el('notes-consent').focus();}}}
+            if(grant&&prepared&&draft===prepared){
+                if(saveMode.valid(grant)&&!automaticWarning(prepared)){await approve(grant);}
+                else{notice=automaticWarning(prepared)?automaticWarning(prepared)+'; automatic save did not approve it.':
+                    'Automatic save permission changed. Review and approve this preview explicitly; no save was submitted.';render();}
+            }
         }
+        function confirm(){changed();return prepare(saveMode.capture());}
         function clearEditor(notify){if(notify){invalidate('Draft discarded.');}else{o.clearTimeout(expiry);expiry=null;}
             editor=draft=null;hangul.close();el('notes-text').value='';el('notes-preview').textContent='';el('notes-consent').checked=el('notes-legacy').checked=false;}
         async function send(request){
@@ -215,10 +235,11 @@
                 else{notice=errors[e.code]||'Outcome unknown. Resolve only resends the SAME approved request, never a new edit.';}}
             finally{if(write===t){write=null;if(!stopped){await refresh();}else{render();}}}
         }
-        async function approve(){
-            changed();if(el('notes-approve').disabled){return;}const d=draft,e=editor,t={};approving=t;render();await refresh();
-            if(approving!==t){return;}approving=null;changed();if(draft!==d||editor!==e||el('notes-approve').disabled){render();return;}
-            try{const request={seq:P.next(model.operations.last_seq),context:d.context,token:d.token,approve:true,confirm_legacy:el('notes-legacy').checked};
+        async function approve(grant){
+            changed();if(!approvalReady(grant)){return;}const d=draft,e=editor,t={};approving=t;render();await refresh();
+            if(approving!==t){return;}approving=null;changed();if(draft!==d||editor!==e||!approvalReady(grant)){
+                if(grant){notice='Automatic save stopped before submission. Your text is retained; check the selection and preview.';}render();return;}
+            try{const request={seq:P.next(model.operations.last_seq),context:d.context,token:d.token,approve:true,confirm_legacy:grant?false:el('notes-legacy').checked};
                 o.clearTimeout(expiry);expiry=null;e.token=null;e.invalid=true;e.approvedSeq=request.seq;e.accepted=false;draft=null;
                 el('notes-consent').checked=el('notes-legacy').checked=false;await send(request);
             }catch(error){notice=error.message;render();}
@@ -230,10 +251,10 @@
         }
         function discard(){clearEditor(true);notice='Local draft discarded. Previously approved saves are not undone.';render();el('notes-read').focus();}
         el('notes-read').onclick=function(){return read(false);};el('notes-reload').onclick=function(){return read(true);};
-        el('notes-prepare').onclick=prepare;el('notes-discard').onclick=discard;
-        el('notes-consent').onchange=el('notes-legacy').onchange=changed;el('notes-approve').onclick=approve;
+        el('notes-prepare').onclick=confirm;el('notes-discard').onclick=discard;
+        el('notes-consent').onchange=el('notes-legacy').onchange=changed;el('notes-approve').onclick=function(){return approve(null);};
         el('notes-editor').onkeydown=function(e){if(hangul.composing(e)){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();discard();}
-            else if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.stopPropagation();if(!draft){prepare();}}};
+            else if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.stopPropagation();if(!draft){confirm();}}};
         el('notes-refresh').onclick=refresh;el('notes-cancel').onclick=cancel;
         el('notes-resolve').onclick=function(){if(pending&&uncertain&&!stopped&&!write&&!cancelling){return send(pending);}};
         el('notes-checked').onchange=render;el('notes-forget').onclick=function(){if(!el('notes-forget').disabled){pending=null;uncertain=false;store(null);el('notes-checked').checked=false;notice='Local recovery record cleared after your check. No request was sent.';render();}};
@@ -242,7 +263,7 @@
                 catch(e){stale=true;notice=e.message;render();}},changed:changed,refresh:refresh,
             open:function(){if(!enabled||stopped){return false;}changed();if(editor){el('notes-text').focus();}else{read(false);}return true;},
             transferReady:transferReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
-            stop:function(final){stopped=true;stale=true;approving=null;clearEditor(false);if(write){uncertain=true;}
+            stop:function(final){stopped=true;stale=true;saveMode.reset();approving=null;clearEditor(false);if(write){uncertain=true;}
                 [io,poll,write,cancelling,revokeTask].forEach(abort);io=poll=write=cancelling=revokeTask=null;revokeNext=null;o.clearTimeout(timer);timer=null;
                 if(final){store(null);}render();},resume:function(){stopped=false;return enabled?refresh():Promise.resolve();}};
     }
