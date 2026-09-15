@@ -124,6 +124,11 @@ white, purple, cyan, magenta, green). 대상의 **순서 목록**을 만들고 i
 
 ## 3. floe2 구현 방향 (결정)
 
+> **예정 개명(2026-09-15, 미적용)**: 인덱스 폴더 `<src>.floe/` → 숨김
+> `.<src>.ice/`, DRC pack `<db>.ice` → 숨김 `.<db>.tray`. 다른 워킹트리에서
+> 진행 중이며 어느 브랜치에도 아직 없다. 이 문서의 이름은 현행이다. 정본:
+> `CACHE-NAMING.ko.md`(의존 지점 목록·결정 필요 항목).
+
 KLayout 툴은 "소스 → 하나의 flat-ish layout 재작성" 구조였다. floe2에서는
 **런타임 합성**으로 간다:
 - 각 TC 소스는 기존 `<src>.floe` 캐시 그대로 사용(Calibre의 `.fvi` 유사).

@@ -91,7 +91,8 @@
 
 (계획 원문. 구현된 형식은 SPEC-FORMATS `design.ovo`, 계획과 다른 세부는 §12.)
 
-캐시 디렉터리(`<src>.floe/`)의 선택적 sidecar. 소스 좌표계(world dbu, 캐시의 top 셀
+캐시 디렉터리(`<src>.floe/`; 폴더 이름은 개명 예정 — `CACHE-NAMING.ko.md`)의
+선택적 sidecar. 소스 좌표계(world dbu, 캐시의 top 셀
 기준으로 전체 계층을 평탄화)에서 레이어마다 피라미드.
 
 ```

@@ -1,5 +1,10 @@
 # SPEC: 캐시 포맷 (.floe 디렉토리)
 
+> **예정 개명(2026-09-15, 미적용)**: 인덱스 폴더 `<src>.floe/` → 숨김
+> `.<src>.ice/`, DRC pack `<db>.ice` → 숨김 `.<db>.tray`. 다른 워킹트리에서
+> 진행 중이며 어느 브랜치에도 아직 없다. 이 문서의 이름은 현행이다. 정본:
+> `CACHE-NAMING.ko.md`(의존 지점 목록·결정 필요 항목).
+
 정본 코드: `rust/ovm/src/lib.rs` (Builder/Ovm), 검증:
 `tools/validate_vfs.py`(오픈 검증), `rust/VFS_HIER.md` par.1~2.
 

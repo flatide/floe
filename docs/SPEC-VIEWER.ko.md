@@ -1,5 +1,10 @@
 # SPEC: 뷰어 (floe/gui.py · service.py · viewport.py · render.py)
 
+> **예정 개명(2026-09-15, 미적용)**: 인덱스 폴더 `<src>.floe/` → 숨김
+> `.<src>.ice/`, DRC pack `<db>.ice` → 숨김 `.<db>.tray`. 다른 워킹트리에서
+> 진행 중이며 어느 브랜치에도 아직 없다. 이 문서의 이름은 현행이다. 정본:
+> `CACHE-NAMING.ko.md`(의존 지점 목록·결정 필요 항목).
+
 ## 1. 프로세스/스레드 모델
 
 - GUI(GTK 메인루프)와 RenderWorker(spawn 프로세스, klayout 소유)가
