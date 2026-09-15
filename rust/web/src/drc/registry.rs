@@ -133,6 +133,13 @@ impl Registry {
             ));
         }
         let r = &self.inner.registration;
+        if let Some((tag, _)) = &r.readonly {
+            if editable || reviewer != tag {
+                return Err(floe_app_core::Error::input(
+                    "read-only reviewer registration cannot grant writes or change reviewer",
+                ));
+            }
+        }
         store::paths(&r.path, reviewer, store::Kind::Notes)?;
         let waive_target = store::paths(&r.path, reviewer, store::Kind::Waives)?;
         if edit_waives && r.waives.as_ref().is_some_and(|p| *p != waive_target[0]) {
@@ -150,6 +157,10 @@ impl Registry {
         *notes = Some(super::review::Service::start(super::review::Config {
             kind: store::Kind::Notes,
             editable,
+            read_target: r
+                .readonly
+                .as_ref()
+                .map(|(_, targets)| targets.notes.clone()),
             reader_id: if editable {
                 None
             } else {
@@ -175,6 +186,7 @@ impl Registry {
                 Some(super::review::Service::start(super::review::Config {
                     kind: store::Kind::Waives,
                     editable: true,
+                    read_target: None,
                     reader_id: None,
                     reviewer: reviewer.into(),
                     files: files
@@ -691,6 +703,7 @@ mod tests {
             path: std::env::temp_dir().join("revision-test-not-opened.db"),
             waives: None,
             rules: None,
+            readonly: None,
             source_id: "source".into(),
         };
         let reader = Service::unavailable(reg, "drc_read_error").unwrap();
@@ -719,6 +732,7 @@ mod tests {
             path: std::env::temp_dir().join("registry-test-not-opened.db"),
             waives: None,
             rules: None,
+            readonly: None,
             source_id: "source".into(),
         };
         let old = Service::unavailable(reg.clone(), "drc_read_error").unwrap();

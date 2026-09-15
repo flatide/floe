@@ -160,6 +160,7 @@ impl Snapshot {
         file: File,
         stop: &AtomicUsize,
     ) -> Result<(Draft, WaiveStats)> {
+        self.store.require_editor()?;
         if self.store.kind != Kind::Waives {
             return Err(Error::input("not a waive snapshot"));
         }

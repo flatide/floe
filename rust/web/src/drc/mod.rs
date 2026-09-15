@@ -65,6 +65,7 @@ struct Registration {
     path: PathBuf,
     waives: Option<PathBuf>,
     rules: Option<PathBuf>,
+    readonly: Option<(String, floe_app_core::drc::review::store::ReadTargets)>,
     source_id: String,
 }
 /// Cancelling a handler (including timeout/disconnect) cancels its queued or
@@ -218,6 +219,38 @@ impl Service {
         rules: Option<&Path>,
         source_id: &str,
     ) -> Result<Arc<Self>> {
+        Self::start_registered(resources, scope, path, waives, rules, source_id, None)
+    }
+    /// Trusted launch registration only. No path or reviewer is accepted over HTTP.
+    pub fn start_readonly_review(
+        resources: &Arc<Resources>,
+        scope: Arc<AccessScope>,
+        path: &Path,
+        rules: Option<&Path>,
+        source_id: &str,
+        reviewer: &str,
+        targets: floe_app_core::drc::review::store::ReadTargets,
+    ) -> Result<Arc<Self>> {
+        targets.validate(path, reviewer)?;
+        Self::start_registered(
+            resources,
+            scope,
+            path,
+            None,
+            rules,
+            source_id,
+            Some((reviewer.into(), targets)),
+        )
+    }
+    fn start_registered(
+        resources: &Arc<Resources>,
+        scope: Arc<AccessScope>,
+        path: &Path,
+        waives: Option<&Path>,
+        rules: Option<&Path>,
+        source_id: &str,
+        readonly: Option<(String, floe_app_core::drc::review::store::ReadTargets)>,
+    ) -> Result<Arc<Self>> {
         if source_id.is_empty() || source_id.len() > 128 {
             return Err(Error::input("invalid registered DRC source"));
         }
@@ -227,6 +260,7 @@ impl Service {
         let permit = resources.drc_with_rules(
             std::iter::once(path.clone())
                 .chain(waives.clone())
+                .chain(readonly.as_ref().map(|(_, targets)| targets.waives.clone()))
                 .chain(rules.clone()),
             rules.is_some(),
         )?;
@@ -255,6 +289,7 @@ impl Service {
                 path: path.clone(),
                 waives: waives.clone(),
                 rules: rules.clone(),
+                readonly: readonly.clone(),
                 source_id: source_id.into(),
             },
             title: path
@@ -267,6 +302,7 @@ impl Service {
             inner: Arc::clone(&inner),
             thread: Mutex::new(None),
         });
+        let resources = Arc::clone(resources);
         let handle = thread::Builder::new()
             .name("floe-drc-read".into())
             .spawn(move || {
@@ -276,7 +312,23 @@ impl Service {
                     if let Some(p) = &waives {
                         scope.check(p)?;
                     }
-                    let pack = Database::open_explicit(&path, waives.as_deref(), &stop)?;
+                    let mut pack = Database::open_explicit(&path, waives.as_deref(), &stop)?;
+                    if let Some((reviewer, targets)) = &readonly {
+                        use floe_app_core::drc::review::{store, managed};
+                        // Capture via directory-relative O_NOFOLLOW and retain the
+                        // checked descriptor. Never reopen the temporary pathname
+                        // through Database's ordinary explicit-waive reader.
+                        let store = managed::ManagedStore::open_readonly_catalog(
+                            &resources, managed::Registration {
+                                scope: scope.clone(), pack: path.clone(), reviewer: reviewer.clone(),
+                                kind: store::Kind::Waives,
+                                protected_files: rules.iter().cloned().collect(), protected_trees: vec![],
+                            },
+                            floe_app_core::registered::SourceSet::new(vec![])?,
+                            &targets.waives, &stop,
+                        )?;
+                        store.snapshot(Arc::clone(&stop))?.apply_waives(&mut pack, &stop)?;
+                    }
                     let metadata = rules
                         .as_ref()
                         .map(|p| {
@@ -294,7 +346,7 @@ impl Service {
                             "cell":pack.cell().chars().take(256).collect::<String>(),
                             "cell_truncated":pack.cell().chars().count()>256,
                             "precision":pack.precision().to_string(),"errors":pack.total().to_string(),
-                            "checks":pack.check_count().to_string(),"waives":waives.is_some(),
+                            "checks":pack.check_count().to_string(),"waives":pack.has_waives(),
                             "format":pack.format(),"truncated_records":pack.truncated_records().to_string(),
                             "svrf":metadata.as_ref().map(metadata::Metadata::summary),
                         }));

@@ -7,6 +7,7 @@ fn configured_service(editable: bool) -> Arc<Service> {
     Service::start(Config {
         kind: store::Kind::Notes,
         editable,
+        read_target: None,
         reader_id: None,
         reviewer: "fixed".into(),
         files: vec![],
@@ -27,6 +28,20 @@ fn read_registration_cannot_submit_or_acquire_editor_authority() {
     ));
     assert_eq!(s.status()["operations"]["last_seq"], "0");
     stop(&s);
+}
+#[test]
+fn selected_read_target_cannot_be_used_as_an_editor() {
+    assert!(Service::start(Config {
+        kind: store::Kind::Notes,
+        editable: true,
+        read_target: Some(std::env::temp_dir().join("not-opened")),
+        reader_id: None,
+        reviewer: "fixed".into(),
+        files: vec![],
+        trees: vec![],
+        sources: SourceSet::new(vec![]).unwrap(),
+    })
+    .is_err());
 }
 fn owner() -> SessionId {
     let (mut auth, secret) = crate::auth::Auth::new(

@@ -30,6 +30,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub(super) struct Config {
     pub kind: store::Kind,
     pub editable: bool,
+    pub read_target: Option<PathBuf>,
     // Read-only selection does not follow an approved pack replacement.
     pub reader_id: Option<String>,
     pub reviewer: String,
@@ -166,15 +167,26 @@ impl Service {
         kind_name(self.inner.config.kind)
     }
     pub(super) fn protected_targets(&self, pack: &std::path::Path) -> Result<Vec<PathBuf>> {
-        Ok([store::Kind::Notes, store::Kind::Waives]
+        let mut paths: Vec<PathBuf> = [store::Kind::Notes, store::Kind::Waives]
             .into_iter()
             .map(|kind| store::paths(pack, &self.inner.config.reviewer, kind))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()
-            .collect())
+            .collect();
+        if !self.inner.config.editable {
+            for kind in [store::Kind::Notes, store::Kind::Waives] {
+                paths.extend(store::read_paths(pack, &self.inner.config.reviewer, kind)?);
+            }
+        }
+        Ok(paths)
     }
     pub(super) fn start(config: Config) -> Result<Arc<Self>> {
+        if config.editable && config.read_target.is_some() {
+            return Err(floe_app_core::Error::input(
+                "a selected read target cannot grant editor authority",
+            ));
+        }
         let inner = Arc::new(Inner {
             config,
             state: Mutex::new(State {
@@ -532,19 +544,25 @@ impl Service {
             .chain(r.waives.clone().filter(|_| c.kind == store::Kind::Notes))
             .chain(r.rules.clone())
             .collect();
-        managed::ManagedStore::open_catalog(
-            &r.resources,
-            managed::Registration {
-                scope: Arc::clone(&r.scope),
-                pack: r.path.clone(),
-                reviewer: c.reviewer.clone(),
-                kind: c.kind,
-                protected_files: files,
-                protected_trees: c.trees.clone(),
-            },
-            c.sources.clone(),
-            stop,
-        )
+        let registration = managed::Registration {
+            scope: Arc::clone(&r.scope),
+            pack: r.path.clone(),
+            reviewer: c.reviewer.clone(),
+            kind: c.kind,
+            protected_files: files,
+            protected_trees: c.trees.clone(),
+        };
+        if let Some(target) = &c.read_target {
+            managed::ManagedStore::open_readonly_catalog(
+                &r.resources,
+                registration,
+                c.sources.clone(),
+                target,
+                stop,
+            )
+        } else {
+            managed::ManagedStore::open_catalog(&r.resources, registration, c.sources.clone(), stop)
+        }
     }
 }
 impl Drop for Service {

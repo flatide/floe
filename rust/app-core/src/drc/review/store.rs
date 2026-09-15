@@ -1,5 +1,5 @@
-//! Explicit local review publication. No ambient reviewer lookup, temp fallback,
-//! in-pack pwrite, automatic stale-file migration or web authority is provided.
+//! Explicit local review publication. Legacy temporary files are read-only and
+//! selected by a trusted caller; no ambient reviewer, pwrite or migration.
 //! Snapshots are opaque expected revisions; a draft consumes one and publishes
 //! only after pack, directory, sidecar and permissions are revalidated.
 use super::{rewrite_waives, ImportReport, Layout, Notes, WaiveStats, EDIT_ITEMS, SIDECAR_BYTES};
@@ -68,10 +68,60 @@ pub fn paths(pack: &Path, reviewer: &str, kind: Kind) -> Result<[PathBuf; 2]> {
     lock.push(".lock");
     Ok([target, lock.into()])
 }
+/// The only two allowed read names. The legacy hash uses lexical abspath,
+/// matching GTK, not canonicalized source/pack names. No directory listing.
+pub fn read_paths(pack: &Path, reviewer: &str, kind: Kind) -> Result<[PathBuf; 2]> {
+    if kind == Kind::Waives {
+        return waive_paths(pack, reviewer);
+    }
+    let adjacent = paths(pack, reviewer, kind)?[0].clone();
+    let pack = crate::cache::absolute(pack)?;
+    let hash = format!("{:x}", Sha1::digest(pack.as_os_str().as_bytes()));
+    let name = adjacent.file_name().unwrap().to_str().unwrap();
+    let temporary = std::env::temp_dir().join(format!(
+        "{}-{}.fe",
+        name.strip_suffix(".fe").unwrap(),
+        &hash[..12]
+    ));
+    Ok([adjacent, temporary])
+}
+#[derive(Clone)]
+pub struct ReadTargets {
+    pub notes: PathBuf,
+    pub waives: PathBuf,
+}
+impl ReadTargets {
+    pub fn select(pack: &Path, reviewer: &str) -> Result<Self> {
+        let select = |kind| -> Result<PathBuf> {
+            let paths = read_paths(pack, reviewer, kind)?;
+            for path in &paths {
+                match fs::symlink_metadata(path) {
+                    Ok(_) => return Ok(path.clone()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Ok(paths[0].clone())
+        };
+        Ok(Self {
+            notes: select(Kind::Notes)?,
+            waives: select(Kind::Waives)?,
+        })
+    }
+    pub fn validate(&self, pack: &Path, reviewer: &str) -> Result<()> {
+        for (kind, target) in [(Kind::Notes, &self.notes), (Kind::Waives, &self.waives)] {
+            if !read_paths(pack, reviewer, kind)?.contains(target) {
+                return Err(Error::input("review read target is not a derived sidecar"));
+            }
+        }
+        Ok(())
+    }
+}
 /// A local capability for exactly one pack/reviewer/kind. Reviewer is a trusted
 /// caller-selected tag, not authentication. A future server must authorize it
 /// before constructing this object; request text cannot choose an output path.
 pub struct Store {
+    editable: bool,
     scope: Arc<AccessScope>,
     pack: Mutex<Pack>,
     pack_path: PathBuf,
@@ -142,6 +192,56 @@ impl Store {
         sources: Arc<crate::registered::SourceSet>,
         stop: &AtomicUsize,
     ) -> Result<Arc<Self>> {
+        Self::open_selected(
+            scope,
+            pack_path,
+            reviewer,
+            kind,
+            protected_files,
+            protected_trees,
+            sources,
+            None,
+            stop,
+        )
+    }
+    /// Fixed trusted read target, including a legacy temporary sidecar. This
+    /// object can read snapshots but cannot prepare or publish any replacement.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_readonly_catalog(
+        scope: Arc<AccessScope>,
+        pack_path: &Path,
+        reviewer: &str,
+        kind: Kind,
+        protected_files: Vec<PathBuf>,
+        protected_trees: Vec<PathBuf>,
+        sources: Arc<crate::registered::SourceSet>,
+        target: &Path,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
+        Self::open_selected(
+            scope,
+            pack_path,
+            reviewer,
+            kind,
+            protected_files,
+            protected_trees,
+            sources,
+            Some(target),
+            stop,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn open_selected(
+        scope: Arc<AccessScope>,
+        pack_path: &Path,
+        reviewer: &str,
+        kind: Kind,
+        protected_files: Vec<PathBuf>,
+        protected_trees: Vec<PathBuf>,
+        sources: Arc<crate::registered::SourceSet>,
+        read_target: Option<&Path>,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
         check_cancelled(stop)?;
         if protected_files.len() > 128 || protected_trees.len() > 128 {
             return Err(Error::input("too many protected review paths"));
@@ -151,7 +251,17 @@ impl Store {
         let layout = Layout::from_pack(&pack)?;
         let binding = pack.review_binding()?;
         let [target, _] = paths(&pack_path, reviewer, kind)?;
-        scope.check(&target)?;
+        let target = read_target
+            .map(crate::cache::absolute)
+            .transpose()?
+            .unwrap_or(target);
+        if read_target.is_some() {
+            if !read_paths(&pack_path, reviewer, kind)?.contains(&target) {
+                return Err(Error::input("review read target is not a derived sidecar"));
+            }
+        } else {
+            scope.check(&target)?;
+        }
         let directory = Directory::open(target.parent().unwrap())?;
         let name = leaf(target.file_name().unwrap())?;
         let target = directory.path.join(target.file_name().unwrap());
@@ -161,6 +271,7 @@ impl Store {
         let mut files = protected_files;
         files.push(pack_path.clone());
         let store = Arc::new(Self {
+            editable: read_target.is_none(),
             scope,
             pack: Mutex::new(pack),
             pack_path,
@@ -176,11 +287,23 @@ impl Store {
             sources,
         });
         store.validate(stop)?;
-        store.protect(&store.lock_path())?;
+        if store.editable {
+            store.protect(&store.lock_path())?;
+        }
         Ok(store)
     }
     pub fn target(&self) -> &Path {
         &self.target
+    }
+    fn require_editor(&self) -> Result<()> {
+        if self.editable {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "read-only review cannot prepare or publish edits",
+            ))
+        }
     }
     pub fn kind(&self) -> Kind {
         self.kind
@@ -194,7 +317,11 @@ impl Store {
             .join(std::ffi::OsStr::from_bytes(self.lock_name.as_bytes()))
     }
     fn protect(&self, path: &Path) -> Result<()> {
-        self.scope.check(path)?;
+        if self.editable {
+            self.scope.check(path)?;
+        } else if path != self.target {
+            return Err(Error::input("read-only review has no other path authority"));
+        }
         artifact::protected_output(path, &self.protected_files, &self.protected_trees)?;
         reject_aliases(path, &self.protected_files)?;
         for source in self.sources.snapshot() {
@@ -527,6 +654,7 @@ impl Snapshot {
         Ok(())
     }
     pub fn prepare_waives(self, changes: &[(u64, u8)], stop: &AtomicUsize) -> Result<Draft> {
+        self.store.require_editor()?;
         if self.store.kind != Kind::Waives
             || changes.len() > EDIT_ITEMS
             || changes
@@ -545,6 +673,7 @@ impl Snapshot {
         })
     }
     pub fn prepare_note(mut self, gids: &[u64], text: &str, stop: &AtomicUsize) -> Result<Draft> {
+        self.store.require_editor()?;
         self.notes
             .as_mut()
             .ok_or_else(|| Error::input("not a note store"))?
@@ -558,6 +687,7 @@ impl Snapshot {
         text: &str,
         stop: &AtomicUsize,
     ) -> Result<(Draft, ImportReport)> {
+        self.store.require_editor()?;
         if self.store.kind != Kind::Notes {
             return Err(Error::input("not a note store"));
         }
@@ -673,6 +803,7 @@ impl Draft {
         before_commit: impl FnOnce() -> Result<()>,
         sync: impl FnOnce(&File) -> std::io::Result<()>,
     ) -> Result<Published> {
+        self.snapshot.store.require_editor()?;
         let _registration = self.snapshot.store.sources.publication(stop)?;
         if Instant::now() >= self.expires {
             return Err(conflict());

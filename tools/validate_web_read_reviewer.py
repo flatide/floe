@@ -2,7 +2,8 @@
 """Explicit ICE reviewer reading: real Rust HTTP, no review write authority.
 
 Synthetic data only. This does not stand in for browser/field acceptance or
-legacy ASCII/cache/temp-sidecar selection, which remain separate work.
+ASCII/cache selection, which remains separate work. Legacy temporary reads use
+exact GTK-derived names in a separate directory, outside the source roots.
 """
 import os
 from pathlib import Path
@@ -13,7 +14,7 @@ import tempfile
 import urllib.error
 import urllib.request
 
-from validate_web_drc_notes import Session, fingerprint, INDEX, DB, API, wait, APP
+from validate_web_drc_notes import Session, fingerprint, INDEX, DB, API, wait, APP, drc
 
 
 def read_records(s, refs):
@@ -25,10 +26,10 @@ def read_records(s, refs):
 
 
 def main(fixture):
-    with tempfile.TemporaryDirectory(prefix="floe-read-reviewer-") as td:
+    with tempfile.TemporaryDirectory(prefix="floe-read-reviewer-") as td, \
+            tempfile.TemporaryDirectory(prefix="floe-legacy-sidecars-") as legacy_td:
         work = Path(td)
-        temps = work / "temps"
-        temps.mkdir()
+        temps = Path(legacy_td)
         source = work / "synthetic.oas"
         shutil.copy2(fixture, source)
         subprocess.run([str(INDEX), "vfs", str(source), str(source) + ".floe", "--jobs", "2"],
@@ -41,6 +42,24 @@ def main(fixture):
         inputs = [source, db, pack] + [p for p in Path(str(source) + ".floe").rglob("*") if p.is_file()]
         before = fingerprint(inputs)
         live = []
+
+        def paths(tag):
+            old_tag, old_temp = os.environ.get("FLOE_REVIEWER"), tempfile.tempdir
+            os.environ["FLOE_REVIEWER"], tempfile.tempdir = tag, str(temps)
+            try:
+                return {"notes": [Path(drc.notes_autosave_path(str(pack))),
+                                  Path(drc._notes_tmp_fallback(str(pack)))],
+                        "waives": [Path(drc.waive_autosave_path(str(pack))),
+                                   Path(drc._waive_tmp_fallback(str(pack)))]}
+            finally:
+                tempfile.tempdir = old_temp
+                if old_tag is None:
+                    os.environ.pop("FLOE_REVIEWER", None)
+                else:
+                    os.environ["FLOE_REVIEWER"] = old_tag
+
+        def sidecar_files():
+            return list(work.glob(".synthetic.db.*")) + list(temps.glob(".synthetic.db.*"))
 
         def session(tag=None, **options):
             s = Session(source, pack, temps, tag, work / "session.json", **options)
@@ -79,23 +98,48 @@ def main(fixture):
                 legacy = work / (".synthetic.db." + suffix.format(tag="legacy-read"))
                 legacy.write_bytes(original.read_bytes())
                 legacy.chmod(0o444)
-            sidecars = list(work.glob(".synthetic.db.*"))
+            original = paths("read-test")
+            for tag in ["temporary-read", "adjacent-wins", "mixed"]:
+                for kind in ["notes", "waives"]:
+                    adjacent, temporary = paths(tag)[kind]
+                    target = adjacent if tag == "adjacent-wins" or tag == "mixed" and kind == "notes" else temporary
+                    target.write_bytes(original[kind][0].read_bytes())
+                    target.chmod(0o444)
+                    if tag == "adjacent-wins":
+                        # A corrupt temporary file must not override a valid adjacent one.
+                        temporary.write_bytes(b"not a valid sidecar")
+            for kind in ["notes", "waives"]:
+                # Similar names for another pack hash must never be considered.
+                wrong_hash = paths("wrong-hash")[kind][1].with_name(paths("wrong-hash")[kind][1].name + "-other")
+                wrong_hash.write_bytes(original[kind][0].read_bytes())
+            sidecars = sidecar_files()
             assert len(sidecars) >= 2
             saved = fingerprint(sidecars)
 
-            for tag, exists in [("read-test", True), ("legacy-read", True), ("uncreated", False)]:
+            for tag, exists in [("read-test", True), ("legacy-read", True), ("uncreated", False),
+                                ("temporary-read", True), ("adjacent-wins", True), ("mixed", True), ("wrong-hash", False)]:
                 reader = session(read_reviewer=tag)
+                roots = reader.client.call("GET", "/api/v1/browse")["roots"]
+                assert len(roots) == 1 and roots[0]["name"] == f"1 · {work.name}", roots
+                reader.client.call("POST", "/api/v1/browse",
+                                   dict(kind="list", seq="1", directory=str(temps), filter="all_files", query=""), 409)
                 model = reader.client.call("GET", API)
                 assert model["available"] and model["editable"] is False and model["reviewer"] == tag
                 assert model["operations"]["last_seq"] == "0" and model["autosave"] is False
                 catalog = reader.client.call("GET", "/api/v1/drc")
                 assert catalog["waives"] is None
                 display = reader.display(refs, focus=refs[0])
-                assert display["exists"] is exists and display["reviewer"] == tag
-                assert display["legacy_unverified"] is (tag == "legacy-read")
+                assert str(temps) not in str(display), "full temporary path exposed"
+                assert display["exists"] is exists and display["reviewer"] == tag, (tag, display)
+                assert display["legacy_unverified"] is (exists and tag != "read-test")
                 assert display["focus"]["text"] == ("읽기 전용 saved note" if exists else None)
                 assert [r["noted"] for r in display["rows"]] == [exists, exists]
                 assert [r["status"] for r in read_records(reader, refs)["rows"]] == ([1, 1] if exists else [0, 0])
+                # Wire DTOs cannot choose another file or reviewer.
+                for field, value in [("path", str(original["notes"][0])), ("reviewer", "read-test"),
+                                     ("target", str(temps))]:
+                    reader.client.call("POST", API + "/display",
+                                       dict(context=reader.context, errors=refs, **{field: value}), 400)
                 # Exercise all editor/transfer/artifact entry points, including
                 # POST download and recovery, with authenticated owner credentials.
                 for root in [API, waives]:
@@ -120,8 +164,36 @@ def main(fixture):
                 reader.client.call("GET", waives, code=403)
                 close(reader)
                 assert fingerprint(sidecars) == saved, "read-only review changed sidecars or metadata"
-                assert set(work.glob(".synthetic.db.*")) == set(sidecars), "read created a sidecar/lock"
+                assert set(sidecar_files()) == set(sidecars), "read created a sidecar/lock"
                 assert fingerprint(inputs) == before
+
+            # Fixed read selection must not fall through a broken adjacent note,
+            # follow symlinks, read a FIFO, or grant a hardlink alias.
+            for bad in ["symlink", "broken-symlink", "fifo", "hardlink"]:
+                tag = "bad-" + bad
+                adjacent, temporary = paths(tag)["notes"]
+                temporary.write_bytes(original["notes"][0].read_bytes())
+                if bad == "symlink":
+                    adjacent.symlink_to(temporary)
+                elif bad == "broken-symlink":
+                    adjacent.symlink_to(work / "missing")
+                elif bad == "fifo":
+                    os.mkfifo(adjacent)
+                else:
+                    os.link(temporary, adjacent)
+                reader = session(read_reviewer=tag)
+                assert reader.display(refs, focus=refs[0], code=400)["error"] == "invalid_drc_request"
+                close(reader)
+                adjacent.unlink()
+                temporary.unlink()
+            reader = session(read_reviewer="temporary-read")
+            reader.display(refs, focus=refs[0])
+            target = paths("temporary-read")["notes"][1]
+            content = target.read_bytes()
+            target.chmod(0o600)
+            target.write_bytes(content.replace(b"saved note", b"edited externally"))
+            assert reader.display(refs, focus=refs[0], code=409)["error"] == "review_changed"
+            close(reader)
 
             # Unsupported source selection fails early instead of silently
             # showing no notes, parsing ASCII, or enabling a different writer.
@@ -146,7 +218,7 @@ def main(fixture):
                 except subprocess.TimeoutExpired:
                     s.proc.kill()
                     s.proc.communicate(timeout=5)
-    print("WEB READ REVIEWER: ALL OK (explicit ICE/adjacent notes+waives; all write/transfer routes denied; no sidecar/pack/cache mutation; native shutdown)")
+    print("WEB READ REVIEWER: ALL OK (GTK-derived adjacent/temporary names outside roots; precedence/mixed/missing; bad aliases rejected; no path DTOs, writes, locks or input changes; native shutdown)")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,92 @@ use std::{
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn selected_readonly_review_cannot_create_drafts_or_publish() {
+    for review_kind in [Kind::Notes, Kind::Waives] {
+        let f = Fixture::new();
+        let writer = f.store(review_kind);
+        if review_kind == Kind::Notes {
+            f.note(&writer, "saved legacy note")
+                .publish(&f.stop)
+                .unwrap();
+        } else {
+            writer
+                .snapshot(&f.stop)
+                .unwrap()
+                .prepare_waives(&[(0, 1)], &f.stop)
+                .unwrap()
+                .publish(&f.stop)
+                .unwrap();
+        }
+        let target = read_paths(&f.pack, "reader", review_kind).unwrap()[1].clone();
+        let bytes = fs::read(writer.target()).unwrap();
+        fs::write(&target, &bytes).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+        let reader = Store::open_readonly_catalog(
+            f.scope.clone(),
+            &f.pack,
+            "reader",
+            review_kind,
+            vec![],
+            vec![],
+            crate::registered::SourceSet::new(vec![]).unwrap(),
+            &target,
+            &f.stop,
+        )
+        .unwrap();
+        let snap = || reader.snapshot(&f.stop).unwrap();
+        assert!(snap().legacy_unverified());
+        if review_kind == Kind::Notes {
+            assert_eq!(snap().notes().unwrap().get(0), Some("saved legacy note"));
+            snap().check_note_display(&f.stop).unwrap();
+            assert_eq!(
+                kind(snap().prepare_note(&[0], "denied", &f.stop)),
+                ErrorKind::Unsupported
+            );
+            assert_eq!(
+                kind(snap().prepare_notes_import("", &f.stop)),
+                ErrorKind::Unsupported
+            );
+        } else {
+            assert_eq!(snap().selected_statuses(&[0], &f.stop).unwrap(), vec![1]);
+            assert_eq!(
+                kind(snap().prepare_waives(&[(0, 0)], &f.stop)),
+                ErrorKind::Unsupported
+            );
+            assert_eq!(
+                kind(snap().prepare_waives_import(File::open(&target).unwrap(), &f.stop)),
+                ErrorKind::Unsupported
+            );
+        }
+        // Defense in depth even if a future internal caller constructs a draft.
+        let forged = Draft {
+            snapshot: snap(),
+            change: Change::Notes(vec![]),
+            expires: Instant::now() + TTL,
+            accept_legacy: true,
+            imported: false,
+        };
+        assert_eq!(kind(forged.publish(&f.stop)), ErrorKind::Unsupported);
+        assert_eq!(fs::read(&target).unwrap(), bytes);
+        assert!(!reader.lock_path().exists());
+        assert!(Store::open_readonly_catalog(
+            f.scope.clone(),
+            &f.pack,
+            "reader",
+            review_kind,
+            vec![],
+            vec![],
+            crate::registered::SourceSet::new(vec![]).unwrap(),
+            &f.root.join("arbitrary"),
+            &f.stop,
+        )
+        .is_err());
+        fs::remove_file(target).unwrap();
+        f.clean();
+    }
+}
+
+#[test]
 fn dynamic_sources_fence_old_note_and_waive_drafts_and_staging() {
     for review_kind in [Kind::Notes, Kind::Waives] {
         for lock_target in [false, true] {

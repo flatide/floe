@@ -71,23 +71,66 @@ impl ManagedStore {
         sources: Arc<crate::registered::SourceSet>,
         stop: &AtomicUsize,
     ) -> Result<Arc<Self>> {
+        Self::open_selected(resources, r, sources, None, stop)
+    }
+    /// The target grants only read access; snapshots reject all edit drafts.
+    pub fn open_readonly_catalog(
+        resources: &Arc<Resources>,
+        r: Registration,
+        sources: Arc<crate::registered::SourceSet>,
+        target: &Path,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
+        Self::open_selected(resources, r, sources, Some(target), stop)
+    }
+    fn open_selected(
+        resources: &Arc<Resources>,
+        r: Registration,
+        sources: Arc<crate::registered::SourceSet>,
+        target: Option<&Path>,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
         check_cancelled(stop)?;
         if r.protected_files.len() > 128 || r.protected_trees.len() > 128 {
             return Err(Error::input("too many protected review paths"));
         }
         let pack = r.scope.check(&r.pack)?;
-        let permit = resources
-            .drc(std::iter::once(pack.clone()).chain(r.protected_files.iter().cloned()))?;
-        let store = store::Store::open_catalog(
-            r.scope,
-            &pack,
-            &r.reviewer,
-            r.kind,
-            r.protected_files,
-            r.protected_trees,
-            sources,
-            stop,
+        if let Some(target) = target {
+            if !store::read_paths(&pack, &r.reviewer, r.kind)?
+                .contains(&crate::cache::absolute(target)?)
+            {
+                return Err(Error::input("review read target is not a derived sidecar"));
+            }
+        }
+        let permit = resources.drc(
+            std::iter::once(pack.clone())
+                .chain(r.protected_files.iter().cloned())
+                .chain(target.map(Path::to_owned)),
         )?;
+        let store = if let Some(target) = target {
+            store::Store::open_readonly_catalog(
+                r.scope,
+                &pack,
+                &r.reviewer,
+                r.kind,
+                r.protected_files,
+                r.protected_trees,
+                sources,
+                target,
+                stop,
+            )?
+        } else {
+            store::Store::open_catalog(
+                r.scope,
+                &pack,
+                &r.reviewer,
+                r.kind,
+                r.protected_files,
+                r.protected_trees,
+                sources,
+                stop,
+            )?
+        };
         check_cancelled(stop)?;
         Ok(Arc::new(Self {
             store,

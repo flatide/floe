@@ -58,8 +58,8 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --drc RESULTS.db|PACK.ice Register DRC on first source; pack build needs owner approval
   --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
   --drc-rules FILE         Explicit existing SVRF rules.json (requires --drc)
-  --floe-reviewer TAG      Read adjacent reviewer notes/waives for an explicit ICE; no writes
-                          No ASCII cache or legacy temporary-file discovery in this stage
+  --floe-reviewer TAG      Read derived adjacent/legacy temporary notes and waives; no writes
+                          Requires explicit ICE; no ASCII cache discovery in this stage
   --drc-reviewer TAG       Enable owner note publication for this fixed tag (requires --drc)
   --drc-edit-waives        Also enable approved waive writes for --drc-reviewer
   --port N                 Loopback port (default random)
@@ -520,31 +520,28 @@ impl Drop for SessionFile {
     }
 }
 // Read selection is intentionally narrower than the CLI's legacy discovery:
-// an explicit ICE and fixed adjacent files only. Never create/repair sidecars.
-fn readonly_waives(path: &std::path::Path, reviewer: &str) -> Result<Option<PathBuf>> {
+// an explicit ICE and two derived names per kind. Never create/repair sidecars.
+fn readonly_targets(
+    path: &std::path::Path,
+    reviewer: &str,
+) -> Result<floe_app_core::drc::review::store::ReadTargets> {
     if !floe_app_core::drc::is_packed_source(path)? {
         return Err(Error::input("--floe-reviewer currently requires an explicit ICE via --drc; ASCII cache discovery is not migrated"));
     }
-    let target = floe_app_core::drc::waive_paths(path, reviewer)?[0].clone();
-    Ok(if target.try_exists()? {
-        Some(target)
-    } else {
-        None
-    })
+    floe_app_core::drc::review::store::ReadTargets::select(path, reviewer)
 }
 pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     if c.help {
         println!("{HELP}");
         return Ok(0);
     }
-    let read_waives = c
+    let read_targets = c
         .read_reviewer
         .as_ref()
-        .map(|tag| readonly_waives(c.drc.as_ref().unwrap(), tag))
-        .transpose()?
-        .flatten();
+        .map(|tag| readonly_targets(c.drc.as_ref().unwrap(), tag))
+        .transpose()?;
     if c.read_reviewer.is_some() {
-        eprintln!("[floe2-web] read-only reviewer: explicit ICE and adjacent sidecars only; no legacy temporary-file discovery or review writes");
+        eprintln!("[floe2-web] read-only reviewer: explicit ICE and derived adjacent/legacy sidecars only; no directory browsing or review writes");
     }
     // Claim/forward before Firefox or native discovery. A stale/busy owner is
     // an explicit error, never permission to create a second default instance.
@@ -725,19 +722,29 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         } else {
             None
         };
-        let drc = floe_web::drc::Service::start_with_rules(
-            &resources,
-            drc_scope.expect("DRC-specific registration scope"),
-            path,
-            c.drc_waives
-                .as_deref()
-                .or(default_waives.as_deref())
-                .or(read_waives.as_deref()),
-            c.drc_rules.as_deref(),
-            service.catalog()["sources"][0]["source_id"]
-                .as_str()
-                .unwrap(),
-        )?;
+        let catalog = service.catalog();
+        let source_id = catalog["sources"][0]["source_id"].as_str().unwrap();
+        let drc_scope = drc_scope.expect("DRC-specific registration scope");
+        let drc = if let Some(targets) = read_targets {
+            floe_web::drc::Service::start_readonly_review(
+                &resources,
+                drc_scope,
+                path,
+                c.drc_rules.as_deref(),
+                source_id,
+                c.read_reviewer.as_deref().unwrap(),
+                targets,
+            )?
+        } else {
+            floe_web::drc::Service::start_with_rules(
+                &resources,
+                drc_scope,
+                path,
+                c.drc_waives.as_deref().or(default_waives.as_deref()),
+                c.drc_rules.as_deref(),
+                source_id,
+            )?
+        };
         // Check combined capacity before publishing a URL or starting a browser.
         // The actual view acquires its own reservation when opened by the UI.
         drop(resources.render(&options)?);

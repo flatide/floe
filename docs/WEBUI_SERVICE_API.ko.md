@@ -278,6 +278,11 @@ submit/recovery와 전체 transfer/artifact API는 `review_disabled`로 거부�
 두 CLI 옵션을 동시에 써서 읽기 대상을 다른 쓰기 대상으로 해석하지 않는다.
 `drc_notes` capability는 조회 기능의 존재도 포함하므로 쓰기 허용은 notes의
 `editable`로 판단한다. 공유/게스트/RBAC 구현을 뜻하지 않는다.
+M4g-20은 승인된 유도 legacy 임시 이름을 인접 파일 다음 읽기 후보로 연결한다
+([M4 §75](WEBUI_M4.ko.md)). 경로는 launch에서 고정하며 HTTP 필드를 추가하지 않는다.
+임시 디렉터리는 browse/쓰기 root가 아니고 read-only store는 native 초안/게시도
+거부한다. waive는 검증된 FD를 reader에 설치하고, note는 기존 display 경로로만
+읽는다. ASCII/cache 선택과 다른 reviewer/pack으로의 자동 승계는 여전히 없다.
 M4e-5a는 기존 주석 owner 등록에 `POST /api/v1/drc/review/notes/display`를 추가한다.
 최대512개의 check/local 배지와 focus 하나의 본문만 반환하고 편집/게시 token을 만들지
 않는다. context+notes review_rev에 고정한 admitted snapshot 하나를 재사용하며,

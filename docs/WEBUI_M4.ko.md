@@ -5495,3 +5495,53 @@ margin crop·background 비차단과 키보드 줌 불변을 통과했다. 전�
 G4 최종 대조. 실제 브라우저/Linux/G1/G4 수용, 공유/원격 권한 경로의 승인·구현,
 M0/M3 현장 보류와 M5 world-tile 조건부는 계속 남는다. hot reload/revision은 사용자
 유보 범위다. 휠 정책 대조를 전체 UI parity나 현장 성능 합격으로 확대하지 않는다.
+
+## 75. M4g-20 — 승인된 legacy 임시 sidecar 읽기
+
+2026-09-16. 사용자는 선택한 DRC pack과 reviewer에서 정확히 유도되는 임시
+note/waive 파일의 읽기만 승인했다. M4g-15a의 `view --drc PACK.ice --floe-reviewer TAG`
+읽기에 이 후보를 연결한다. 기존 `--drc-reviewer` 쓰기 모드와 자동 저장 opt-in은
+그대로이며 이 변경이 쓰기 동의나 reviewer 자동 발견을 뜻하지 않는다.
+
+- note와 waive 각각 **인접 파일 우선, 없을 때 유도된 임시 파일**, 둘 다 없으면
+  기존 인접 대상의 빈 메모/pack 내 waive 상태를 사용한다. 경로를 시작 시 고정하고
+  열린 탭에서 새 후보를 계속 검색하지 않는다. 잘못된 인접 파일을 임시 파일로
+  대체하거나 stale 파일을 이동/삭제/수정하지 않는다.
+- 이름은 GTK `notes_autosave_path`/`_notes_tmp_fallback`,
+  `waive_autosave_path`/`_waive_tmp_fallback`과 같다. hash는 pack의 lexical abspath를
+  SHA-1한 앞12자리다. source 경로나 canonicalized symlink 이름으로 바꾸지 않는다.
+- `ReadTargets`와 읽기 전용 store는 pack/reviewer에서 유도되는 두 이름을 다시
+  검증한다. 일반 AccessScope/browse root를 확장하지 않는다. 임시 디렉터리 전체를
+  허용하거나 HTTP 요청에 경로/reviewer 선택 필드를 만들지 않는다.
+- read-only store는 초안 생성·import·게시를 native 층에서도 거부한다. 파일은
+  디렉터리 FD에 대한 `O_NOFOLLOW` 읽기로 열며 단일 hardlink·regular file·크기·pack
+  binding을 검증한다. 기존 미확인 legacy 표시는 유지한다. lock도 만들지 않는다.
+- waive는 이 검증으로 포착한 FD를 이미 열린 DRC에 설치한다. 확인 뒤 pathname을
+  다시 열지 않는다. 초기 조회도 기존 자원 예약과 취소 경로를 사용하고 읽기 lease는
+  DRC 수명 동안 유지한다. note display의 외부 변경·pack 교체 시 재open 요구는 유지한다.
+- 초기 waive snapshot은 전체 파일 hash와 상태 검증을 수행한다. 큰 legacy 파일의
+  cold-open 비용은 실측 과제이며 기존 explicit-waive header 읽기와 동일 비용이라고
+  주장하지 않는다. 웹 요청당 다시 전량 로드하는 구조는 아니다.
+- 기존 미커밋 native 준비 중 read-only store/managed store/거부 gate4파일을 검토해
+  필요한 기반으로 포함했다. 별도 ASCII/cache 선택의4파일은 수정·커밋하지 않는다.
+  이번 경로는 여전히 명시 ICE만 지원하며 fresh ICE 자동 선택은 다음 과제다.
+
+집중 검증: `validate_web_read_reviewer.py`는 별도 임시 디렉터리(소스 root 밖)의
+합성 파일과 GTK 실제 경로 함수를 사용한다. 수정 전 release는 `temporary-read`의
+메모가 없다고 반환해 exit1(`floe-legacy-read-red.log`), 수정 후 동일 HTTP 검사는
+통과(`floe-legacy-read-http.log`)했다. 인접/임시/mixed/없는 reviewer·다른 hash,
+손상 임시 파일보다 인접 파일 우선, symlink/끊어진 symlink/FIFO/hardlink 거부,
+외부 메모 변경409, 경로 DTO와 모든 쓰기/전송 거부, 파일/pack/cache 불변을 검증한다.
+단위는 임시 read-only store가 초안·import·위조 draft 게시를 거부함과 임의 이름
+거부를 고정한다. 웹 단위89통과/3오라클별도, scoped strict clippy exit0.
+추가 browse 단언은 기존 루트 이름의 번호 접두사를 반영한 뒤 통과했고 임시 root가
+등록되지 않음과 경로로 탐색할 수 없음을 확인했다. 전체 `sh tools/validate_rust.sh`는
+실제 exit0, `RUST VALIDATION: ALL OK`로 끝났다
+(`/private/tmp/floe-legacy-read-battery.log`). 새 읽기 gate·기존 자동 저장·jobdeck83·
+KLayout13 PX+2 phase-exact+14 style이 함께 통과했다. 선택 파일 rustfmt와 diff 검사도
+통과했다. 별도 ASCII/cache4파일·main·feature/jobdeck 상태는 보존했다.
+
+커밋 시 목표 잔여: reviewer ASCII/cache 선택, 승인된 브라우저 dump 구현과 CLI/G4
+마감. 실제 브라우저 입력/저장/복구·Linux 실행·G1/G4, 공유/원격 승인·구현,
+M0/M3 현장 보류·M5 world-tile 조건부는 별도이며 hot reload/revision은 사용자 유보다.
+이번 읽기 연결을 전체 웹 전환 완료로 세지 않는다.
