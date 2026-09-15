@@ -3865,3 +3865,91 @@ UI/DRC·잡덱80·렌더러46과 KLayout13 PX+2 phase-exact+14 style(jobs1/8)을
 `floe-registration-msrv.log`, `floe-registration-linux-check.log`.
 1.89 clippy의 도구 부재 기록은 `floe-registration-msrv-clippy.log`다.
 native renderd protocol/RENDERD_VERSION0.12.87과 vendor는 불변이다.
+
+## 49. M4g-7c — 유계 전달 제안과 안전한 view 교체
+
+기존 IPC와 source registration 사이에 놓일 `launch::Launches` 및 owner API를
+추가했다. 이 커밋은 서버 경계까지다. 제품 CLI의 IPC callback/준비 작업자와
+브라우저의 빈 창·레벨 선택/자동 open 소비자는 아직 연결하지 않는다. 기본 launcher의
+동작, Python/GTK 경로 및 현장 수용 상태는 불변이다.
+
+### 접수와 완료의 구분
+
+- trusted launcher만 `reserve`로 임의 ID를 만들고, off-reactor 작업에서 등록을 마친
+  뒤 `ready`/`failed`를 보낸다. 진행 중 제안은1개, 보관 이력은16개, 본문은16KiB다.
+  접수한 제안 자체는 파일 열기/색인/첫 frame 완료가 아니다. 미처리 제안이 있으면
+  새 reserve는 Busy다. 실패도 owner가 dismiss하기 전까지 표시할 대상으로 남긴다.
+- trusted gateway에 명시 attach했을 때만 `launcher` capability가 켜진다.
+  `GET /api/v1/launch`는 현재 제안, `GET /api/v1/launch/poll/{revision}`은 최대4초
+  대기 후 최신 snapshot을 돌려준다. 대기2개 제한, 초과429, 종료/인증 만료 시 취소다.
+  전역5초 handler deadline, query-string 금지, exact origin/host와 cookie+CSRF를
+  완화하지 않는다. poll 반환 직전에도 인증을 검사한다.
+- `POST /api/v1/launch/{id}`는 `open`/`present`/`dismiss`만 받는다. 브라우저는
+  open의 실제 viewport pixels·레벨 선택·operation seq와 선택적으로 현재 view ID/
+  state revision만 더한다. 임의 path/등록/색인/operation body는 받지 않는다.
+  body·모드·source ID는 trusted 제안에서 온다. 오류는 안전한 코드만 반환한다.
+- 접수 성공은 기존 owner operation ledger에 **한 번** 넣었다는 뜻이다. 같은 action
+  재전송은 같은 receipt, 다른 seq/본문으로 재전송은 conflict, 이력 밖 ID는 expired다.
+  원래 operation의 성공/실패와 frame 준비 여부는 기존 operation/view 채널로 읽는다.
+  불명확한 HTTP 결과를 새 seq로 자동 재실행하면 안 된다. 실패한 open의 재시도도
+  자동 신규 요청이 아니라 UI의 명시 동작으로 구분해야 한다.
+- dismiss는 진행 중 등록 작업에 전달할 취소 flag를 올린다. 늦은 ready는 거부된다.
+  이미 commit된 등록이나 이미 접수된 open을 되돌린다고 주장하지 않는다. 접수 후
+  취소는 해당 operation의 기존 cancel 경로를 사용한다. `present`는 operation/
+  render revision을 만들지 않는다. OS 창 focus는 이후 browser 연결/현장 수용 범위다.
+
+### 여러 파일 등록과 view cutover
+
+`Service::register_sources`는1..32개 파일을 한 SourceSet transaction으로 검사하고
+commit한다. 뒤쪽 파일이 실패/취소되면 앞쪽 추가도 노출하지 않는다. 기존 파일 및
+같은 배치 안의 중복 파일은 같은 Arc/ID다. source/cache/sidecar 쓰기나 암묵 색인은
+없고, 앞 단계의 공유 게시 exclusion과 최신 보호 목록 계약을 유지한다.
+
+전달 open은 일반 HTTP open과 달리 선택적인 기존 `(view_id,state_rev)`를 바인딩한다.
+이 값도 operation replay signature에 포함한다. 현재 attachment/revision을 먼저
+확인하며, 실제 적용 직전에도 다시 확인한다.
+
+- 같은 source·모드·선택 레벨이면 기존 controller를 edit한다. 명시 patch만 적용하고
+  renderer/decoded/retained cache를 소유한 worker와 epoch를 유지한다. 요청 body에서
+  생략한 필드를 서버가 임의의 초기 기본값으로 덮지 않는다. 이후 CLI producer는
+  GTK가 포워딩에 싣는 정규화된 detail/depth/frames/labels/font 기본값도 명시적으로
+  구성해야 한다. `thin`의 미지정/명시 auto 구분과 파일 없는 present-only는 별도다.
+- 다른 source/모드/레벨이면 metadata·초기 상태·attachment를 준비한 뒤 기존
+  `PreparedReplacement`로 교체한다. 같은 worker reservation을 공유하는 dormant
+  controller이며, 이전 native worker의 완전 close/drop/reap 뒤에만 다음 것을 연다.
+  metadata/상태 검증 실패·stale·commit 전 취소는 기존 화면을 보존한다. commit 뒤
+  새 native open 실패까지 기존 화면으로 롤백하는 계약은 아니다.
+- revision이 바뀌거나 다른 창으로 전환됐다면 오래된 요청은 실패하고 새 화면을
+  닫지 않는다. 기존 일반 `POST operations` open에는 강제 교체 권한을 추가하지 않았다.
+  성공 receipt는 controller 접수/cutover이며, 첫 PNG가 도착했다는 ACK가 아니다.
+
+### 검증 및 이어갈 범위
+
+단위 gate는 pending1개·동시 reserve 단일 승자·취소/종료·bounded history/revision과
+제안/동작 스키마를 검사한다. native owner gate는 빈 service의 배치 등록 rollback/
+ID 재사용, 인증/경로 비노출, long-poll 제한과 조회 비차단, 같은 파일의 worker epoch
+보존, 중복 action의 한 번 적용, stale/미색인 실패 시 기존 화면 보존, 단일 worker
+예약으로 다른 파일 cutover, 과거 ID/receipt·dismiss·logout을 검사한다. 실제 합성
+source와 cache의 바이트 불변/worker 임시 파일 회수는 기존 하네스가 함께 확인한다.
+
+다음 단계는 CLI `--multi`/빈 실행·비동기 registration queue와 브라우저 소비자다.
+기존 작업·pan이 진행 중일 때의 대기, 레벨 질문, ACK 불명확 시 읽기 전용 확인,
+측정한 viewport를 합친 최초1회 open을 연결해야 한다. UI가 아직 소비하지 않는
+기반 API를 single-instance 사용자 기능 완료로 보고하지 않는다.
+이번 단계에는 브라우저 게시/다운로드/clipboard를 추가로 실행하지 않는다. 이전
+합성 shared-default 게시 승인·결과는 §20 그대로 보존한다. 현장 Firefox/ETX 확인은
+계속 보류이며 native renderd0.12.87/vendor도 불변이다.
+
+검증 결과: web 단위66(신규5)·owner HTTP13(신규1) 통과, 비활성 launcher/API 인증
+transport gate1개 추가. 설치된 기본 Rust의 web all-target clippy도 통과했다.
+Rust1.89에서는 app-core238·web66 단위 및 관련3패키지 Linux musl all-target check가
+통과했다(실제 Linux 실행은 아님). 전체 `sh tools/validate_rust.sh`는 exit0,
+`RUST VALIDATION: ALL OK`로 완료됐으며 GTK startup144/native8, owner13,
+VFS lifecycle/split·occupancy·DRC/SVRF·잡덱80·렌더러46과
+KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다. 초기 개발 중 schema
+테스트 기대값과 테스트 하네스 필드 누락을 고친 뒤 focused/전체 검증을 모두 통과했다.
+기존 dependency/GTK/Pillow 경고는 별도다. 검증용 `.venv` symlink만 제거하며 원본
+venv·합성 shared-default 게시 결과와 main/feature/jobdeck 작업은 보존한다.
+로그: `/private/tmp/floe-launch-battery.log`, `floe-launch-owner.log`,
+`floe-launch-unit.log`, `floe-launch-clippy.log`, `floe-launch-msrv.log`,
+`floe-launch-linux-check.log`.

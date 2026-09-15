@@ -29,6 +29,30 @@ use tokio_tungstenite::{
 };
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[tokio::test]
+async fn launcher_routes_require_trusted_attachment_and_owner_credentials() {
+    let (mut gate, _) = Gateway::new("127.0.0.1:23456".parse().unwrap()).unwrap();
+    assert!(Gateway::attach_launches(&mut gate, floe_web::launch::Launches::new()).is_err());
+    let s = Server::start().await;
+    assert_eq!(
+        s.request("GET", "/api/v1/launch", &[], "").await.status,
+        401
+    );
+    let a = s.login().await;
+    let h = [
+        ("Cookie", a.cookie.as_str()),
+        ("X-Floe-CSRF", a.csrf.as_str()),
+    ];
+    let caps = s.request("GET", "/api/v1/capabilities", &h, "").await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&caps.body).unwrap()["launcher"],
+        false
+    );
+    for path in ["/api/v1/launch", "/api/v1/launch/poll/0"] {
+        assert_eq!(s.request("GET", path, &h, "").await.status, 404);
+    }
+    s.shutdown().await;
+}
+#[tokio::test]
 async fn portable_notice_catalogue_is_authenticated_bounded_and_fail_closed() {
     use std::{
         fs,

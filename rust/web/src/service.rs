@@ -32,7 +32,7 @@ use std::{
     time::Duration,
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LevelSelection {
     All {},
@@ -151,6 +151,7 @@ enum Command {
         levels: Option<BTreeSet<i64>>,
         mode: Mode,
         patch: Box<Patch>,
+        replace: Option<(String, u64)>,
     },
     Index {
         source: Arc<RegisteredSource>,
@@ -272,6 +273,20 @@ impl Service {
         path: &std::path::Path,
         stop: &AtomicUsize,
     ) -> Result<String> {
+        self.register_sources(scope, &[path.to_owned()], stop)
+            .map(|mut ids| ids.remove(0))
+    }
+    /// One multi-file CLI invocation registers atomically. A bad later source
+    /// cannot leave earlier entries/protected-path membership partially added.
+    pub fn register_sources(
+        &self,
+        scope: Arc<AccessScope>,
+        paths: &[std::path::PathBuf],
+        stop: &AtomicUsize,
+    ) -> Result<Vec<String>> {
+        if paths.is_empty() || paths.len() > MAX_SOURCES {
+            return Err(Error::input("register 1..32 sources"));
+        }
         {
             let mut state = self.inner.state.lock().unwrap();
             if state.closed {
@@ -283,9 +298,16 @@ impl Service {
             state.registering = true;
         }
         let _registering = Registering(&self.inner);
-        let id = public_id().map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))?;
         let mut registration = self.inner.source_set.begin(stop)?;
-        let source = registration.register(scope, path, stop)?;
+        let registered = paths
+            .iter()
+            .map(|path| {
+                let source = registration.register(Arc::clone(&scope), path, stop)?;
+                let id =
+                    public_id().map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))?;
+                Ok(Entry { id, source })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let state = self.inner.state.lock().unwrap();
         if state.closed || self.is_finished() {
             return Err(Error::new(ErrorKind::Cancelled, "owner service closed"));
@@ -295,17 +317,25 @@ impl Service {
         }
         floe_app_core::check_cancelled(stop)?;
         let mut sources = self.inner.sources.lock().unwrap();
-        if let Some(entry) = sources.iter().find(|e| Arc::ptr_eq(&e.source, &source)) {
-            return Ok(entry.id.clone());
+        let mut staged: Vec<Entry> = Vec::new();
+        let mut ids = Vec::with_capacity(registered.len());
+        for entry in registered {
+            if let Some(old) = sources
+                .iter()
+                .chain(staged.iter())
+                .find(|e| Arc::ptr_eq(&e.source, &entry.source))
+            {
+                ids.push(old.id.clone());
+            } else {
+                ids.push(entry.id.clone());
+                staged.push(entry);
+            }
         }
         // No I/O under catalogue/state locks. Protection becomes visible before
         // the opaque handle, and readers cannot observe the intermediate state.
         registration.commit(stop)?;
-        sources.push(Entry {
-            id: id.clone(),
-            source,
-        });
-        Ok(id)
+        sources.extend(staged);
+        Ok(ids)
     }
     pub(crate) fn exports(&self) -> &Arc<crate::exports::Service> {
         &self.inner.exports
@@ -359,12 +389,32 @@ impl Service {
         self.inner.state.lock().unwrap().ledger.get(seq)
     }
     pub fn submit(&self, request: OperationDto) -> std::result::Result<Value, &'static str> {
+        self.submit_with(request, None)
+    }
+    pub(crate) fn submit_launch(
+        &self,
+        request: OperationDto,
+        replace: Option<(String, String)>,
+    ) -> std::result::Result<Value, &'static str> {
+        if !matches!(&request, OperationDto::Open { .. }) {
+            return Err("invalid_request");
+        }
+        let replace = replace
+            .map(|(id, rev)| view::counter(&rev).map(|rev| (id, rev)))
+            .transpose()?;
+        self.submit_with(request, replace)
+    }
+    fn submit_with(
+        &self,
+        request: OperationDto,
+        replace: Option<(String, u64)>,
+    ) -> std::result::Result<Value, &'static str> {
         if self.is_finished() {
             return Err("closed");
         }
         // Stable typed representation (field order independent), bounded by
         // the HTTP request limit and ledger cap. Never logged or sent back.
-        let signature = format!("{request:?}");
+        let signature = format!("{request:?}/{replace:?}");
         let seq = match &request {
             OperationDto::Open { seq, .. }
             | OperationDto::Mode { seq, .. }
@@ -421,6 +471,7 @@ impl Service {
                         levels,
                         mode,
                         patch: Box::new(patch),
+                        replace,
                     },
                 )
             }
@@ -670,46 +721,107 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             levels,
             mode,
             patch,
+            replace,
         } => {
-            {
+            let mode_name = match mode {
+                Mode::Level => "level",
+                Mode::Chip => "chip",
+                Mode::Layer => "layer",
+            };
+            let selected_levels: Option<Vec<String>> = levels
+                .as_ref()
+                .map(|ids| ids.iter().map(i64::to_string).collect());
+            let previous = {
                 let s = inner.state.lock().unwrap();
-                if s.view.as_ref().is_some_and(|v| !v.controller.is_finished()) {
+                if let Some((id, rev)) = &replace {
+                    let v = s
+                        .view
+                        .as_ref()
+                        .filter(|v| v.id == *id)
+                        .ok_or_else(|| Error::new(ErrorKind::Busy, "launcher view changed"))?;
+                    let snapshot = v.controller.snapshot();
+                    if snapshot.state_rev != *rev
+                        || !matches!(
+                            snapshot.phase,
+                            floe_app_core::view::Phase::Idle
+                                | floe_app_core::view::Phase::Rendering
+                        )
+                    {
+                        return Err(Error::new(
+                            ErrorKind::Busy,
+                            "launcher view revision changed",
+                        ));
+                    }
+                    Some((Arc::clone(v), *rev))
+                } else if s.view.as_ref().is_some_and(|v| !v.controller.is_finished()) {
                     return Err(Error::new(
                         ErrorKind::Busy,
                         "close the current view before opening another",
                     ));
+                } else {
+                    None
                 }
-            }
+            };
             inner.state.lock().unwrap().ledger.update(
                 seq,
                 json!({"seq":seq.to_string(),"kind":"open","phase":"opening"}),
                 false,
             );
             source.validate(&stop)?;
-            let selected_levels = levels
-                .as_ref()
-                .map(|ids| ids.iter().map(i64::to_string).collect());
+            if let Some((previous, rev)) = &previous {
+                if previous.source_id == source_id
+                    && previous.mode == mode_name
+                    && previous.levels == selected_levels
+                {
+                    let s = inner.state.lock().unwrap();
+                    if s.closed || stop.load(Ordering::Relaxed) != 0 {
+                        return Err(Error::new(ErrorKind::Cancelled, "launcher edit cancelled"));
+                    }
+                    if !s.view.as_ref().is_some_and(|v| Arc::ptr_eq(v, previous)) {
+                        return Err(Error::new(ErrorKind::Busy, "launcher view changed"));
+                    }
+                    // Preserve native/decoded/retained caches for same-source
+                    // navigation. Only explicitly supplied preferences change.
+                    let snapshot = previous.controller.edit(*rev, *patch)?;
+                    return Ok(
+                        json!({"seq":seq.to_string(),"kind":"open","phase":"succeeded",
+                        "view_id":previous.id,"reused":true,"state_rev":snapshot.state_rev.to_string()}),
+                    );
+                }
+            }
             let data = ManagedDataset::open(&inner.resources, source.path(), levels, mode, &stop)?;
             let model = Model::new(&data)?;
             let (width, height) = patch.pixels.unwrap_or((1024, 768));
             let initial = ViewState::initial(&model, width, height)?.edit(&model, *patch)?;
             let rows = LayerCatalog::dataset(&data.dataset, &model);
-            let controller = Arc::new(ViewController::start_configured(
-                &inner.resources,
-                data,
-                inner.options.clone(),
-                initial,
-                inner.view_options,
-            )?);
+            // Prepare a dormant controller with the existing reservation; the
+            // old worker is fully reaped before the new one opens. Metadata,
+            // validation or stale-revision failures leave the old view alive.
+            let mut replacement = if let Some((previous, _)) = &previous {
+                Some(
+                    previous
+                        .controller
+                        .prepare_replacement(Arc::clone(&data), initial.clone())?,
+                )
+            } else {
+                None
+            };
+            let controller = if let Some(replacement) = &replacement {
+                replacement.controller()
+            } else {
+                Arc::new(ViewController::start_configured(
+                    &inner.resources,
+                    data,
+                    inner.options.clone(),
+                    initial,
+                    inner.view_options,
+                )?)
+            };
             let mut view = Attachment::with_rows(controller, &source.title, rows)
                 .map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))?;
             view.source_id = source_id;
             view.levels = selected_levels;
-            view.mode = match mode {
-                Mode::Level => "level",
-                Mode::Chip => "chip",
-                Mode::Layer => "layer",
-            };
+            view.mode = mode_name;
             let view = Arc::new(view);
             let mut s = inner.state.lock().unwrap();
             if s.closed || stop.load(Ordering::Relaxed) != 0 {
@@ -717,6 +829,18 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                 drop(s);
                 drop(view);
                 return Err(Error::new(ErrorKind::Cancelled, "open cancelled"));
+            }
+            if let Some((previous, rev)) = previous {
+                if !s.view.as_ref().is_some_and(|v| Arc::ptr_eq(v, &previous)) {
+                    return Err(Error::new(
+                        ErrorKind::Busy,
+                        "launcher view changed before cutover",
+                    ));
+                }
+                replacement
+                    .as_mut()
+                    .expect("prepared launcher replacement")
+                    .commit(rev)?;
             }
             let id = view.id.clone();
             s.view = Some(view);

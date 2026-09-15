@@ -40,6 +40,7 @@ struct Harness {
     bootstrap: Secret,
     service: Arc<Service>,
     resources: Arc<Resources>,
+    launches: Arc<floe_web::launch::Launches>,
     drc_reader: Option<Arc<floe_web::drc::Service>>,
     stop: oneshot::Sender<()>,
     task: JoinHandle<std::io::Result<()>>,
@@ -109,6 +110,8 @@ impl Harness {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (mut gate, bootstrap) = Gateway::with_service(addr, Arc::clone(&service)).unwrap();
+        let launches = floe_web::launch::Launches::new();
+        Gateway::attach_launches(&mut gate, Arc::clone(&launches)).unwrap();
         let mut drc_reader = None;
         if let Some((pack, rules)) = drc {
             let scope = AccessScope::new(&[pack.parent().unwrap().to_owned()]).unwrap();
@@ -144,6 +147,7 @@ impl Harness {
             bootstrap,
             service,
             resources,
+            launches,
             drc_reader,
             stop,
             task,
@@ -393,6 +397,8 @@ mod defaults;
 mod drc_isolation;
 #[path = "support/exports.rs"]
 mod exports;
+#[path = "support/launch.rs"]
+mod launch;
 #[path = "support/settings.rs"]
 mod settings;
 

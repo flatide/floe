@@ -373,7 +373,9 @@ async fn fake_harness(path: &Path, binary: &Path) -> Harness {
     let service = Service::start(vec![source], Arc::clone(&resources), options, native()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let (gate, bootstrap) = Gateway::with_service(addr, Arc::clone(&service)).unwrap();
+    let (mut gate, bootstrap) = Gateway::with_service(addr, Arc::clone(&service)).unwrap();
+    let launches = floe_web::launch::Launches::new();
+    Gateway::attach_launches(&mut gate, Arc::clone(&launches)).unwrap();
     let (stop, rx) = oneshot::channel();
     let task = tokio::spawn(transport::serve(listener, Arc::clone(&gate), async {
         let _ = rx.await;
@@ -384,6 +386,7 @@ async fn fake_harness(path: &Path, binary: &Path) -> Harness {
         bootstrap,
         service,
         resources,
+        launches,
         drc_reader: None,
         stop,
         task,

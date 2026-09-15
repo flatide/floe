@@ -136,6 +136,7 @@ pub struct Gateway {
     pub(crate) stopping: watch::Sender<bool>,
     pub(crate) view: Option<Arc<Attachment>>,
     pub(crate) service: Option<Arc<crate::service::Service>>,
+    pub(crate) launch: Option<Arc<crate::launch::Launches>>,
     pub(crate) drc: Option<Arc<crate::drc::Registry>>,
     pub(crate) defaults: Option<Arc<crate::defaults::Service>>,
     startup: Option<serde_json::Value>,
@@ -167,6 +168,7 @@ impl Gateway {
                 stopping,
                 view: None,
                 service: None,
+                launch: None,
                 drc: None,
                 defaults: None,
                 startup: None,
@@ -219,6 +221,18 @@ impl Gateway {
         let (mut gate, secret) = Self::new(addr)?;
         Arc::get_mut(&mut gate).expect("new gateway").service = Some(service);
         Ok((gate, secret))
+    }
+    /// Trusted local launcher only. HTTP receives opaque proposals, not paths.
+    pub fn attach_launches(
+        gate: &mut Gate,
+        launches: Arc<crate::launch::Launches>,
+    ) -> Result<(), String> {
+        let g = Arc::get_mut(gate).ok_or("gateway already published")?;
+        if g.service.is_none() || g.launch.is_some() {
+            return Err("launch proposals require an owner service and one broker".into());
+        }
+        g.launch = Some(launches);
+        Ok(())
     }
     pub(crate) fn active_view(&self) -> Option<Arc<Attachment>> {
         self.service
@@ -273,6 +287,9 @@ impl Gateway {
         Ok((gate, secret))
     }
     fn stop_services(&self) {
+        if let Some(launch) = &self.launch {
+            launch.stop();
+        }
         if let Some(defaults) = &self.defaults {
             defaults.request_stop();
         }
@@ -413,6 +430,7 @@ pub fn router(gate: Gate) -> Router {
         .route("/api/v1/view", get(current_view))
         .route("/api/v1/startup", get(startup))
         .merge(crate::owner::routes())
+        .merge(crate::launch::routes())
         .merge(crate::drc::routes())
         .merge(crate::exports::routes())
         .merge(crate::defaults::routes())
@@ -569,7 +587,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     }
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
-        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"jobdeck_modes":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"drc_waives":gate.drc.as_ref().is_some_and(|r|r.waives_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
+        "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"launcher":gate.launch.is_some(),"jobdeck_modes":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"drc_waives":gate.drc.as_ref().is_some_and(|r|r.waives_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
         "frame_bytes":crate::view::PACKET_BYTES,"frame_credit":1,"pending_frames":1}))
     .into_response()
 }

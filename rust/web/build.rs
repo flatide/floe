@@ -38,6 +38,7 @@ fn main() {
         "src/prepared.rs",
         "src/query.rs",
         "src/service.rs",
+        "src/launch.rs",
         "src/exports/mod.rs",
         "src/exports/http.rs",
         "src/exports/prepared.rs",

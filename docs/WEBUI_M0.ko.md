@@ -222,6 +222,9 @@ M4g-7a는 이 중 로컬 통신 코어와 실제 프로세스 소유권/재전�
 M4g-7b는 trusted service 등록과 공유 게시 보호를 연결했다. 동일 source 재등록은
 변경 여부·scope를 검사하고 같은 ID를 재사용한다. 빈 service도 허용하지만 실제 CLI의
 인자 없는 실행/`--multi`/전달 요청 UI는 아직 연결하지 않았다([M4 §48](WEBUI_M4.ko.md)).
+M4g-7c는 trusted 제안→owner 접수 API, 여러 소스의 원자 등록과 live view의
+캐시 보존/안전 교체까지 추가한다. CLI producer와 브라우저 소비자를 아직 연결하지
+않았으므로 위 옵션을 제품 parity 완료로 계산하지 않는다([M4 §49](WEBUI_M4.ko.md)).
 
 ### 2.10 jobdeck — M1a (10개 옵션)
 

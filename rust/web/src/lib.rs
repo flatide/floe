@@ -8,6 +8,7 @@ mod defaults;
 pub mod drc;
 mod exports;
 mod idle_io;
+pub mod launch;
 mod layer_catalog;
 mod operations;
 pub mod origin;

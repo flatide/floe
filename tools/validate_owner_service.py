@@ -93,6 +93,7 @@ for line in sys.stdin:
         assert "RUST OWNER DEFAULTS: ALL OK" in checked.stdout
         assert "RUST OWNER DEFAULT PROTECTION: ALL OK" in checked.stdout
         assert "RUST OWNER DYNAMIC CATALOG: ALL OK" in checked.stdout
+        assert "RUST OWNER LAUNCH: ALL OK" in checked.stdout
         assert "RUST OWNER DECK DEFAULTS: ALL OK" in checked.stdout
         assert "RUST OWNER DECK MODES: ALL OK (5 native cutovers, one reservation" in checked.stdout
         assert all(digest(path) == before for path, before in mode_caches.items())
