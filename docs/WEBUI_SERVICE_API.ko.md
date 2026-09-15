@@ -22,6 +22,19 @@ M4g-10의 snapshot `camera_um`은 Rust가 현재 viewport에서 계산한
 빈 값으로 둔다(기존 geometry 상태는 유지). 이 표시는 새 navigation 요청이 아니다.
 별도 해상도·좌표 변환을 브라우저가 다시 결정하지 않는다([M4 §55](WEBUI_M4.ko.md)).
 
+M4g-11a는 live `view.set`의 `layer_batch`를 추가한다:
+`{action:"show"|"hide"|"toggle",pairs:[[layer,datatype],...],collapsed:[[layer,datatype],...]}`.
+`collapsed`는 생략하면 빈 목록이며 **선택한 일반 그룹 부모 중 접힌 것**만 전달한다.
+잡덱 부모는 항상 자식 전체를 대상으로 하므로 펼침 여부를 보내지 않아도 된다.
+Rust가 현재 model의 정렬/그룹과 가시성을 사용하며 브라우저가 자식을 전개하지 않는다.
+기존 view/epoch/base_state_rev 검사 한 번으로 전체를 원자 적용한다. 부모와 자식이
+같이 선택되면 포함된 자식을 두 번 toggle하지 않는다. 입력·펼친 대상은 각 4096개
+이하이고 기존 explicit 가시 레이어 4096개 한계/transport body 상한도 유지한다.
+무효/미지정 부모·빈 선택·초과는 전체 오류이지 부분 적용이 아니다. `layers`,
+`layer_change`, isolation/restore, properties/settings와 혼합하지 않는다. 실제 변경이
+없으면 revision/렌더도 늘지 않는다. 파일 쓰기·렌더러 wire 변경은 없다.
+브라우저의 다중 선택/접힘 UI는 아직 연결하지 않았다([M4 §56](WEBUI_M4.ko.md)).
+
 M4g-3은 live `view.set` body에 `depth_step:-1|1`을 추가한다. 절대 `depth`와
 동시 지정은 거부하고, controller가 CAS 락 안의 현재 depth와 native max_depth로
 해석한다. 초기 open body에서는 상대 depth를 거부한다. DRC 단축키는 기존 유계

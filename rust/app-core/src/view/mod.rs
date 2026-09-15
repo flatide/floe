@@ -5,6 +5,7 @@ mod controller;
 pub mod deck_mode;
 pub mod margin;
 pub mod minimap;
+mod palette;
 mod properties;
 mod query;
 mod ruler;
@@ -20,6 +21,7 @@ pub use controller::{
 };
 use floe_worker_client::{Layers, RenderRequest, Style};
 pub use floe_worker_client::{QueryKind, QueryOperation};
+pub use palette::{LayerAction, LayerBatch};
 pub use query::{QueryAnchor, QuerySnapshot, ViewQuery, ViewQueryResult};
 pub use ruler::{RulerMeasurement, RulerPoint, RulerSegment};
 use std::{
@@ -280,6 +282,9 @@ pub struct Patch {
     pub layers: Option<Layers>,
     /// A panel checkbox is a bounded delta, not a round-trip of all layer IDs.
     pub layer_change: Option<((u32, u32), bool)>,
+    /// One palette operation, including collapsed physical groups. All
+    /// targets are resolved under the same view revision before any commit.
+    pub layer_batch: Option<LayerBatch>,
     pub layer_isolation: Option<LayerIsolation>,
     pub frames: Option<bool>,
     pub labels: Option<bool>,
@@ -516,6 +521,7 @@ impl ViewState {
             || patch.prepared_layers.is_some())
             && (patch.layers.is_some()
                 || patch.layer_change.is_some()
+                || patch.layer_batch.is_some()
                 || patch.layer_isolation.is_some()
                 || !patch.style_deltas.is_empty()
                 || !patch.style_changes.is_empty())
@@ -525,13 +531,18 @@ impl ViewState {
             ));
         }
         if patch.layer_isolation.is_some()
-            && (patch.layers.is_some() || patch.layer_change.is_some())
+            && (patch.layers.is_some()
+                || patch.layer_change.is_some()
+                || patch.layer_batch.is_some())
         {
             return Err(Error::input(
                 "isolation conflicts with explicit layer edits",
             ));
         }
         let mut s = self.clone();
+        if patch.layer_batch.is_some() && (patch.layers.is_some() || patch.layer_change.is_some()) {
+            return Err(Error::input("batch conflicts with other layer edits"));
+        }
         if !patch.style_deltas.is_empty() && !patch.style_changes.is_empty() {
             return Err(Error::input("conflicting style edit forms"));
         }
@@ -601,6 +612,9 @@ impl ViewState {
             } else {
                 model.layers(&Layers::Only(selected.into_iter().collect()))?
             };
+        }
+        if let Some(batch) = patch.layer_batch {
+            s.layers = s.edit_layer_batch(model, batch)?;
         }
         if let Some(isolation) = patch.layer_isolation {
             match isolation {

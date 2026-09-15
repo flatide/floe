@@ -4385,3 +4385,51 @@ owner17, occupancy25, 잡덱80, 렌더러46, KLayout13 PX+2 phase-exact+14 style
 남음: 미이관 view 옵션(GDS/gzip/stream/진단 등의 명시 처리 포함)과 조작 parity,
 G1 지연/pacing·G4 전체 수용, 공유/원격·Firefox/ETX 현장. 이 단계의 완료를 전체
 마이그레이션 완료율로 환산하지 않는다.
+
+## 56. M4g-11a — 레이어 다중 선택의 원자적 가시성 변경
+
+UI-03 대조에서 웹의 개별 체크박스만으로 GTK의 다중 선택 show/hide/toggle을
+대체하지 못함을 확인했다. 이번 단계는 Rust 상태/API이고, 브라우저의 선택·접힘
+UI와 다중 스타일 편집은 다음 단계다. 이를 전체 레이어 조작 parity 완료로 세지 않는다.
+
+- `view.set.layer_batch`는 선택 pair와 action, 선택된 접힌 부모를 받는다.
+  실제 자식/순서는 현재 model에서 해석한다. 일반 레이어 그룹은 같은 layer의
+  최소 datatype이 부모이며 펼쳤으면 개별 행, 접었으면 자식을 포함한다.
+- 잡덱의 합성 부모는 펼침 여부와 무관하게 모든 자식을 포함한다. 부분적으로
+  보이는 부모의 toggle은 전체 hide다. 부모·자식이 함께 선택되면 palette 순서대로
+  부모를 먼저 처리하고 포함된 자식을 건너뛰어 두 번 toggle하지 않는다.
+- 요청 전체는 기존 view/epoch/revision 검사를 거쳐 한 상태로 교체한다. 대상 검사
+  실패·다른 가시성/설정 조작과 충돌하면 원래 뷰를 보존한다. 실제 변경이 없는
+  show/hide는 렌더하지 않으며, explicit-all 목록을 단지 All로 정규화하는 것도
+  새 렌더를 일으키지 않는다. 카메라·스타일·색인·raster 정책은 바꾸지 않는다.
+- 입력 선택/접힘 목록과 펼친 대상은 각 4096개 이하, 기존 explicit 가시성 목록과
+  transport body 상한도 유지한다. 상한을 넘으면 전체 오류다. 큰 그룹을 먼저 전량
+  복사하지 않고 4097개까지만 읽어 초과를 판정한다. 일반 all/none은 기존 별도 조작이다.
+
+검증:
+
+1. `validate_layer_palette.py`는 GTK의 실제 `_set_selected_layers`,
+   `_on_layer_toggled`, `_sync_jobdeck_groups`, `_is_jobdeck_head`를 AST로 읽어
+   inert row에 실행한다. 일반/잡덱·63개 선택 조합·8개 가시성·4개 접힘 상태·
+   3개 action, 총 12,096개를 Rust와 비교해 통과했다. 도형/파일/GTK 런타임은
+   필요 없고 개발용 Python oracle이며 제품 런타임 의존성이 아니다.
+2. core/wire gate는 중복/뒤집힌 선택 순서, 부분 잡덱 부모, 존재하지 않는 행,
+   자식·독립 행을 접힌 부모로 위조, 빈/초과/충돌 요청과 no-op 보존을 고정한다.
+3. 실제 native HTTP/WS에서 여러 레이어를 한 번에 숨기고 원복하여 raw 픽셀이
+   원본과 같은지, 변경당 revision/렌더가 한 번인지, no-op/stale/무효/충돌에 렌더가
+   없는지 확인했다. 처음 고른 두 레이어는 겹침 때문에 픽셀 변화가 보장되지 않아
+   전체 fixture 레이어 숨김/원복으로 강화했다. 나머지 레이어 보존은 1번에서 대조한다.
+   stream6 통과, cache bytes/mtime 불변·worker 정리도 확인했다.
+
+최종 app-core253/web75 단위, clippy `-D warnings`, Rust 1.89.0 단위 및 Linux
+musl all-targets check가 통과했다. 이번에는 화면 코드를 변경하지 않았으므로 실제
+브라우저의 다중 선택 클릭을 검사했다고 주장하지 않는다.
+집중 로그: `/private/tmp/floe-palette-{oracle,stream-final,clippy-final,msrv-final,linux-final}.log`.
+전체 `sh tools/validate_rust.sh`는 exit 0 / `RUST VALIDATION: ALL OK`로 끝났다
+(`/private/tmp/floe-palette-battery.log`). 새 palette oracle/stream과 함께 owner17,
+occupancy25, 잡덱80, 렌더러46, KLayout13 PX+2 phase-exact+14 style 대조를 통과했다.
+다음 우선순위는 `feature/jobdeck`의 로컬 `09be2ab`까지 미합류 16개 커밋을 §11에
+따라 합류하고 Rust 서비스의 occupancy 기본 생성·depth/희소 표시 대응을 검증하는
+것이다. 이 단계에서는 합류하지 않았다. 그 뒤 브라우저 다중 선택·접기/펼치기·
+페이지 간 선택과 multi-style 조작을 잇는다.
+잔여 CLI/형식·G1/G4·공유/원격·현장 수용은 계속 열려 있다.

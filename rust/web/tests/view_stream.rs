@@ -3,6 +3,100 @@ include!("support/view_harness.rs");
 
 #[tokio::test]
 #[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
+async fn native_palette_batch_is_one_revision_and_pixel_reversible() {
+    use floe_worker_client::Layers;
+    let h = Harness::start(true).await;
+    let login = h.login().await;
+    let (mut ws, hello, _) = h.connect(&login).await;
+    let (first, original) = frame(&mut ws).await;
+    ack(&mut ws, &hello, 1, &first).await;
+    let pairs: Vec<_> = h.controller.model.styles.iter().map(|s| s.layer).collect();
+    assert!(pairs.len() >= 2);
+    assert!(
+        original[16..].chunks_exact(4).any(|p| p[..3] != [0, 0, 0]),
+        "fixture must paint before batch hide"
+    );
+    let viewport = h.controller.snapshot().state.viewport;
+    for (i, action) in ["hide", "show", "toggle", "toggle", "show"]
+        .into_iter()
+        .enumerate()
+    {
+        let before = h.controller.snapshot();
+        let seq = 2 + i as u64 * 2;
+        ws.send(Message::Text(json!({"type":"view.set","seq":seq.to_string(),"view_id":hello["view_id"],
+            "connection_epoch":hello["connection_epoch"],"base_state_rev":before.state_rev.to_string(),
+            "body":{"layer_batch":{"action":action,"pairs":pairs}}}).to_string().into())).await.unwrap();
+        until_reply(&mut ws, seq, "accepted").await;
+        let after = h.controller.snapshot();
+        assert_eq!(after.state.viewport, viewport);
+        if i == 4 {
+            assert_eq!(after.state_rev, before.state_rev);
+            assert_eq!(
+                after.submitted, before.submitted,
+                "no-op batch submitted a render"
+            );
+        } else {
+            assert_eq!(after.state_rev, before.state_rev + 1);
+            assert_eq!(after.render_rev, before.render_rev + 1);
+            let (header, pixels) = frame(&mut ws).await;
+            assert_eq!(header["state_rev"], after.state_rev.to_string());
+            assert_eq!(
+                h.controller.snapshot().submitted,
+                before.submitted + 1,
+                "one frame for the whole batch"
+            );
+            if i % 2 == 1 {
+                assert!(
+                    pixels == original,
+                    "batch restore must reproduce original pixels"
+                );
+                assert_eq!(after.state.layers, Layers::All);
+            } else {
+                assert!(pixels != original, "batch hide must change pixels");
+                assert_eq!(after.state.layers, Layers::None);
+            }
+            ack(&mut ws, &hello, seq + 1, &header).await;
+        }
+    }
+    let before = h.controller.snapshot();
+    for (seq, base, body, code) in [
+        (
+            12,
+            "1".to_owned(),
+            json!({"layer_batch":{"action":"toggle","pairs":pairs}}),
+            "stale_state",
+        ),
+        (
+            13,
+            before.state_rev.to_string(),
+            json!({"layer_batch":{"action":"hide","pairs":[pairs[0],(u32::MAX,u32::MAX)]}}),
+            "invalid_request",
+        ),
+        (
+            14,
+            before.state_rev.to_string(),
+            json!({"layer_batch":{"action":"show","pairs":pairs},"layers":{"mode":"none"}}),
+            "invalid_request",
+        ),
+    ] {
+        ws.send(Message::Text(
+            json!({"type":"view.set","seq":seq.to_string(),"view_id":hello["view_id"],
+            "connection_epoch":hello["connection_epoch"],"base_state_rev":base,"body":body})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(until_reply(&mut ws, seq, "error").await["code"], code);
+        assert_eq!(h.controller.snapshot().state_rev, before.state_rev);
+        assert_eq!(h.controller.snapshot().submitted, before.submitted);
+    }
+    h.shutdown().await;
+    println!("RUST PALETTE STREAM: ALL OK (atomic batch, raw pixels, noop, stale/invalid/conflicting edits, cleanup)");
+}
+
+#[tokio::test]
+#[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
 async fn native_relative_depth_is_revision_bound_and_preserves_camera() {
     let h = Harness::start(true).await;
     let login = h.login().await;

@@ -242,6 +242,7 @@ pub struct PatchDto {
     pub thin: Field<ThinDto>,
     pub layers: Field<Selection>,
     pub layer_change: Field<LayerChange>,
+    pub layer_batch: Field<LayerBatchDto>,
     pub restore_layers: Field<bool>,
     pub frames: Field<bool>,
     pub labels: Field<bool>,
@@ -255,6 +256,37 @@ pub struct PatchDto {
 pub struct LayerChange {
     pair: (u32, u32),
     visible: bool,
+}
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LayerBatchDto {
+    action: LayerActionDto,
+    pairs: Vec<(u32, u32)>,
+    #[serde(default)]
+    collapsed: Vec<(u32, u32)>,
+}
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "snake_case")]
+enum LayerActionDto {
+    Show,
+    Hide,
+    Toggle,
+}
+impl LayerBatchDto {
+    fn core(self) -> Result<floe_app_core::view::LayerBatch, &'static str> {
+        use floe_app_core::view::{LayerAction, LayerBatch};
+        let batch = LayerBatch {
+            action: match self.action {
+                LayerActionDto::Show => LayerAction::Show,
+                LayerActionDto::Hide => LayerAction::Hide,
+                LayerActionDto::Toggle => LayerAction::Toggle,
+            },
+            pairs: self.pairs,
+            collapsed: self.collapsed,
+        };
+        batch.validate().map_err(|_| "invalid palette batch size")?;
+        Ok(batch)
+    }
 }
 impl PatchDto {
     pub fn core(self) -> Result<Patch, &'static str> {
@@ -307,6 +339,11 @@ impl PatchDto {
                 Selection::Only { pairs } => Layers::Only(pairs),
             }),
             layer_change: self.layer_change.optional().map(|c| (c.pair, c.visible)),
+            layer_batch: self
+                .layer_batch
+                .optional()
+                .map(LayerBatchDto::core)
+                .transpose()?,
             layer_isolation: self
                 .restore_layers
                 .optional()
@@ -551,6 +588,52 @@ pub fn packet(header: &[u8], payload: &[u8]) -> Result<Vec<u8>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn palette_batch_wire_is_strict_and_bounded() {
+        let patch = serde_json::from_value::<PatchDto>(json!({"layer_batch": {
+            "action":"toggle", "pairs":[[3,1],[3,2]], "collapsed":[[3,1]]
+        }}))
+        .unwrap()
+        .core()
+        .unwrap();
+        let batch = patch.layer_batch.unwrap();
+        assert!(matches!(
+            batch.action,
+            floe_app_core::view::LayerAction::Toggle
+        ));
+        assert_eq!(batch.pairs, vec![(3, 1), (3, 2)]);
+        assert_eq!(batch.collapsed, vec![(3, 1)]);
+        for value in [
+            json!({"action":"show","pairs":[]}),
+            json!({"action":"toggle","pairs":vec![(3,1);4097]}),
+            json!({"action":"hide","pairs":[[3,1]],"collapsed":vec![(3,1);4097]}),
+        ] {
+            assert!(
+                serde_json::from_value::<PatchDto>(json!({"layer_batch":value}))
+                    .unwrap()
+                    .core()
+                    .is_err()
+            );
+        }
+        for value in [
+            json!({"action":"invalid","pairs":[[3,1]]}),
+            json!({"action":"show","pairs":[[-1,0]]}),
+            json!({"action":"show","pairs":[[3,4294967296u64]]}),
+            json!({"action":"show","pairs":[[3,1]],"unexpected":true}),
+            json!({"action":"show","pairs":[[3,1]],"collapsed":null}),
+        ] {
+            assert!(serde_json::from_value::<PatchDto>(json!({"layer_batch":value})).is_err());
+        }
+        let batch = serde_json::from_value::<PatchDto>(
+            json!({"layer_batch":{"action":"hide","pairs":[[3,1]]}}),
+        )
+        .unwrap()
+        .core()
+        .unwrap()
+        .layer_batch
+        .unwrap();
+        assert!(batch.collapsed.is_empty());
+    }
     #[test]
     fn camera_text_preserves_half_dbu_phase_and_finite_units() {
         assert_eq!(

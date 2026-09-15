@@ -343,6 +343,12 @@ startup selection이 우선한다. M4d-3에서 열린 세션 Load/Save와 custom
 개인 palette cache는 현재 GTK에도 없으며
 자동 저장을 새로 만들지 않는다.
 
+UI-03의 개별 웹 체크박스만으로는 GTK의 다중 선택 일괄 변경을 대체하지 못한다.
+M4g-11a는 Rust `layer_batch`에 show/hide/toggle, 접힌 일반 그룹의 자식 포함,
+항상 자식을 포함하는 잡덱 부모, 부모·자식 중복 선택의 단일 적용을 추가한다
+([M4 §56](WEBUI_M4.ko.md)). GTK 코드로 생성한 12,096개 조합을 대조한다.
+브라우저 다중 선택·접힘/펼침·페이지 간 범위 선택과 다중 style 조작은 아직 남아 있다.
+
 `python -m floe.fe_embed` 보조 CLI도 범위에 포함한다: 위치 인자 PNG들,
 `--box`, `--ellipse`, `--line`, `--path`, `--polygon`, `--ruler`, `--text`,
 `--json`, `--legend`, `--note`, `--ppu`, `--unit`, `--append`, `--dump`,
