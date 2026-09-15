@@ -139,6 +139,7 @@ pub struct Gateway {
     pub(crate) drc: Option<Arc<crate::drc::Registry>>,
     pub(crate) defaults: Option<Arc<crate::defaults::Service>>,
     startup: Option<serde_json::Value>,
+    startup_confirm_levels: bool,
     pub(crate) build: Option<crate::about::BuildInfo>,
     pub(crate) notices: crate::about::Notices,
     pub(crate) notice_readers: Arc<Semaphore>,
@@ -169,6 +170,7 @@ impl Gateway {
                 drc: None,
                 defaults: None,
                 startup: None,
+                startup_confirm_levels: false,
                 build: None,
                 notices: crate::about::Notices::NotPackaged,
                 notice_readers: Arc::new(Semaphore::new(1)),
@@ -231,6 +233,14 @@ impl Gateway {
         service: Arc<crate::service::Service>,
         request: serde_json::Value,
     ) -> Result<(Gate, Secret), String> {
+        Self::with_startup_options(addr, service, request, false)
+    }
+    pub fn with_startup_options(
+        addr: SocketAddr,
+        service: Arc<crate::service::Service>,
+        request: serde_json::Value,
+        confirm_levels: bool,
+    ) -> Result<(Gate, Secret), String> {
         if request.to_string().len() > BODY_BYTES {
             return Err("startup request limit".into());
         }
@@ -257,7 +267,9 @@ impl Gateway {
             _ => return Err("startup must be an open, never an index".into()),
         }
         let (mut gate, secret) = Self::with_service(addr, service)?;
-        Arc::get_mut(&mut gate).expect("new gateway").startup = Some(request);
+        let gateway = Arc::get_mut(&mut gate).expect("new gateway");
+        gateway.startup = Some(request);
+        gateway.startup_confirm_levels = confirm_levels;
         Ok((gate, secret))
     }
     fn stop_services(&self) {
@@ -581,7 +593,8 @@ async fn startup(State(gate): State<Gate>, headers: HeaderMap) -> Response {
     if let Err(e) = http_session(&gate, &headers) {
         return error(e);
     }
-    Json(json!({"request":gate.startup})).into_response()
+    Json(json!({"request":gate.startup,"confirm_levels":gate.startup_confirm_levels}))
+        .into_response()
 }
 async fn logout(State(gate): State<Gate>, headers: HeaderMap) -> Response {
     let id = match http_session(&gate, &headers) {

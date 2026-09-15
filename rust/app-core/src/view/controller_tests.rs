@@ -634,7 +634,7 @@ fn isolation_and_goto_are_atomic_and_restore_only_the_first_visibility() {
     let patch = Patch {
         navigation: Some(Navigation::Goto {
             center_um: [8., 9.],
-            width_um: 2.,
+            width_um: Some(2.),
         }),
         layer_isolation: Some(LayerIsolation::Set(Layers::Only(vec![(2, 0)]))),
         ..Default::default()
@@ -796,7 +796,7 @@ fn startup_is_one_transaction_without_a_hidden_fit_render() {
             Patch {
                 navigation: Some(Navigation::Goto {
                     center_um: [13.6, 8.6],
-                    width_um: 0.5,
+                    width_um: Some(0.5),
                 }),
                 depth: Some(Depth::Levels(99)),
                 detail: Some(Detail::High),
@@ -827,12 +827,9 @@ fn hundred_relative_inputs_are_kept_while_rendering_is_coalesced() {
     let m = model(false);
     let c = Arc::new(Control::default());
     c.open.store(false, Ordering::Relaxed);
-    let mut v = start(
-        &r,
-        Arc::clone(&m),
-        ViewState::initial(&m, 80, 64).unwrap(),
-        Arc::clone(&c),
-    );
+    let mut initial = ViewState::initial(&m, 80, 64).unwrap();
+    initial.viewport = Viewport::new(m.bbox, 80, 64).unwrap();
+    let mut v = start(&r, Arc::clone(&m), initial, Arc::clone(&c));
     for rev in 1..=100 {
         assert_eq!(v.edit(rev, pan()).unwrap().state_rev, rev + 1);
     }

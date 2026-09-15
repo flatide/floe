@@ -189,7 +189,11 @@ async fn owner_selection_rulers_match_gtk_without_queries_or_redraws() {
 #[tokio::test]
 #[ignore = "run tools/validate_worker_queries.py with its private fixture"]
 async fn owner_rulers_use_native_snap_and_rust_coordinates_without_rendering() {
-    let h = Harness::start(true).await;
+    // Raw cursor coordinates are fractional, not integer-snapped. Use a binary
+    // exact projection for exact string assertions, independent of Fit padding.
+    let viewport =
+        floe_app_core::view::Viewport::new([-32768., -32768., 32768., 32768.], 256, 256).unwrap();
+    let h = Harness::start_with_viewport(true, false, false, Some(viewport)).await;
     let login = h.login().await;
     let (mut ws, hello, state) = h.connect(&login).await;
     let (f, _) = frame(&mut ws).await;

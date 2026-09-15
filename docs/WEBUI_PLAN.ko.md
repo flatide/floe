@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-15(M4g-5b 열린 잡덱 모드 전환).
+작성 2026-08-29, 갱신 2026-09-15(M4g-6 CLI 초기 표시/카메라·레벨 선택).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -86,6 +86,10 @@ M4g-5a에서 잡덱 모드 전환의 카메라·가시성 이관을 Rust 코어�
 전환과 native PNG를 비교했다([M4 §44](WEBUI_M4.ko.md)). M4g-5b에서 같은 자원 예약의
 순차 worker 교체·revision CAS·owner API와 모드 선택기/Ctrl+,를 연결했다.
 선택 레벨과 카메라는 유지하고 모드별 기본 스타일은 다시 읽는다([M4 §45](WEBUI_M4.ko.md)).
+M4g-6에서 CLI 초기 depth/frames/labels·폭 없는 goto·GTK fit 여백, 명시적
+direct-final/baseline과 잡덱 초기 레벨 선택 대기를 연결했다. 색인 재시도 중 초기
+옵션을 보존한다([M4 §46](WEBUI_M4.ko.md)). single-instance/빈 창 시작·남은 CLI 옵션은
+후속이며 GTK 기본 launcher를 교체하지 않는다.
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며

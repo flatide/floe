@@ -31,14 +31,15 @@ use std::{
 
 const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
 
-  --goto X,Y,WIDTH          Initial centre and view width in um (one render)
-  --depth full|N            Initial depth (default full)
+  --goto X,Y[,WIDTH]        Initial centre; omitted width keeps fit zoom (um)
+  --depth full|N            Default 0; goto/DRC/jobdeck default full (999 = full)
   --detail low|medium|high|exact  Initial detail (default medium)
   --thin auto|keep|cull     Thin-page policy (default auto)
-  --mode level|chip        Jobdeck view mode (default level)
-  --level N,N,...          Initial jobdeck levels (default all)
-  --no-labels / --frames   Initial display switches
-  --labels / --no-frames   Explicit display overrides
+  --mode level|chip|layer  Jobdeck view mode (default level)
+  --level N,N,...          Initial jobdeck levels (otherwise ask before open)
+  --frames [on|off]        Initial hierarchy frames (default on; bare = on)
+  --labels [on|off]        Initial labels (default on; frames off suppresses them)
+  --no-labels / --no-frames  Aliases for off
   --label-font-px N        Label size (6..96 device px, default 14)
   --mono                   Initial monochrome display
   --jobs N                 Decode workers (environment/default up to 8)
@@ -46,6 +47,8 @@ const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
   --budget-mb N            Decoded page budget (default 1024)
   --png / --raw            Frame transfer (default raw)
   --frame-cache on|off      Retained frame reuse + layout margin (default on)
+  --refinement off         Explicit direct-final render (overrides round env)
+  --perf-baseline           Frames/labels/refinement/frame reuse off; caches stay
   --root DIRECTORY         Additional approved dependency root, repeatable
   --drc RESULTS.db|PACK.ice Register DRC on first source; pack build needs owner approval
   --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
@@ -66,6 +69,8 @@ Decode+raster reservation must fit 16 slots (DRC reserves 1 extra slot + 256 MiB
 SVRF metadata reserves another 256 MiB, with no extra CPU worker).
 DRC reads the explicit ASCII or ICE file; no adjacent-pack/reviewer discovery or implicit indexing.
 Refinement off; deck margin unsupported.
+FLOE_JOBDECK_LEVELS=all|ask|N,N... supplies the default level choice (--level wins).
+--perf-baseline leaves decoded caches and geometry cut unchanged; no live LOD toggle.
 FLOE_FILL_EDIT (nonempty) explicitly enables approved shared design-default publication.
 The session link is a one-time credential; do not share or log it.";
 
@@ -82,6 +87,8 @@ pub struct Command {
     budget: Option<u64>,
     raw: Option<bool>,
     frame_cache: bool,
+    direct_final: bool,
+    perf_baseline: bool,
     port: u16,
     no_open: bool,
     session_file: Option<PathBuf>,
@@ -105,6 +112,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
         budget: None,
         raw: None,
         frame_cache: true,
+        direct_final: false,
+        perf_baseline: false,
         port: 0,
         no_open: false,
         session_file: None,
@@ -131,6 +140,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         let (key, inline) = arg
             .split_once('=')
             .map_or((arg.as_str(), None), |(k, v)| (k, Some(v)));
+        let toggle_value = inline.is_some() || args.get(i).is_some_and(|v| v == "on" || v == "off");
         let mut value = || -> Result<&str> {
             if let Some(v) = inline {
                 return Ok(v);
@@ -163,9 +173,17 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 flag()?;
                 c.initial["labels"] = json!(false);
             }
-            "--labels" => {
-                flag()?;
-                c.initial["labels"] = json!(true);
+            "--labels" | "--frames" => {
+                let on = if toggle_value {
+                    match value()? {
+                        "on" => true,
+                        "off" => false,
+                        _ => return Err(Error::input(format!("{key} must be on or off"))),
+                    }
+                } else {
+                    true
+                };
+                c.initial[&key[2..]] = json!(on);
             }
             "--no-frames" => {
                 flag()?;
@@ -173,10 +191,6 @@ pub fn parse(args: &[String]) -> Result<Command> {
             }
             "--label-font-px" => {
                 c.initial["font_px"] = json!(number(value()?, 6, 96, key)?);
-            }
-            "--frames" => {
-                flag()?;
-                c.initial["frames"] = json!(true);
             }
             "--mono" => {
                 flag()?;
@@ -191,11 +205,38 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 c.raw = Some(true);
             }
             "--goto" => {
-                let [x, y, w] = shots::lengths::<3>(value()?)?;
-                if w <= 0. {
+                let text = value()?;
+                let parts: Vec<_> = if text.contains([',', ';']) {
+                    text.split([',', ';'])
+                        .filter(|s| !s.trim().is_empty())
+                        .collect()
+                } else {
+                    text.split_whitespace().collect()
+                };
+                if !(2..=3).contains(&parts.len()) {
+                    return Err(Error::input("goto requires X,Y[,WIDTH]"));
+                }
+                let values = parts
+                    .into_iter()
+                    .map(shots::length)
+                    .collect::<Result<Vec<_>>>()?;
+                if values.get(2).is_some_and(|w| *w <= 0.) {
                     return Err(Error::input("goto width must be positive"));
                 }
-                c.initial["navigation"] = json!({"kind":"goto","center_um":[x.to_string(),y.to_string()],"width_um":w.to_string()});
+                c.initial["navigation"] = json!({"kind":"goto","center_um":[values[0].to_string(),values[1].to_string()]});
+                if let Some(w) = values.get(2) {
+                    c.initial["navigation"]["width_um"] = json!(w.to_string());
+                }
+            }
+            "--refinement" => {
+                if value()? != "off" {
+                    return Err(Error::input("web view supports --refinement off only; progressive policy is not migrated"));
+                }
+                c.direct_final = true;
+            }
+            "--perf-baseline" => {
+                flag()?;
+                c.perf_baseline = true;
             }
             "--frame-cache" => {
                 c.frame_cache = match value()? {
@@ -205,11 +246,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 };
             }
             "--depth" => {
-                let v = value()?;
-                if v != "full" && v.parse::<u32>().map_or(true, |n| n.to_string() != v) {
-                    return Err(Error::input("depth must be full or a nonnegative integer"));
-                }
-                c.initial["depth"] = json!(v);
+                c.initial["depth"] = json!(startup_depth(value()?)?);
             }
             "--detail" => {
                 let v = value()?;
@@ -227,8 +264,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
             }
             "--mode" => {
                 let v = value()?;
-                if !["level", "chip"].contains(&v) {
-                    return Err(Error::input("mode must be level or chip"));
+                if !["level", "chip", "layer"].contains(&v) {
+                    return Err(Error::input("mode must be level, chip or layer"));
                 }
                 c.mode = v.into();
             }
@@ -270,7 +307,68 @@ pub fn parse(args: &[String]) -> Result<Command> {
     if c.roots.len() > 32 {
         return Err(Error::input("too many approved roots"));
     }
+    if c.perf_baseline {
+        c.frame_cache = false;
+        c.direct_final = true;
+        c.initial["frames"] = json!(false);
+        c.initial["labels"] = json!(false);
+    }
     Ok(c)
+}
+fn startup_depth(text: &str) -> Result<String> {
+    if text == "full" {
+        return Ok(text.into());
+    }
+    let text = text.trim();
+    let digits = text.strip_prefix(['-', '+']).unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::input("depth must be full or an integer"));
+    }
+    let digits = digits.trim_start_matches('0');
+    Ok(if text.starts_with('-') || digits.is_empty() {
+        "0".into()
+    } else if digits.len() > 3 || (digits.len() == 3 && digits >= "999") {
+        "full".into()
+    } else {
+        digits.into()
+    })
+}
+fn startup_body(mut body: Value, deck: bool, drc: bool) -> Value {
+    if body.get("depth").is_none() {
+        body["depth"] = json!(if deck || drc || body.get("navigation").is_some() {
+            "full"
+        } else {
+            "0"
+        });
+    }
+    let frames = body["frames"].as_bool().unwrap_or(true);
+    body["frames"] = json!(frames);
+    body["labels"] = json!(!deck && frames && body["labels"].as_bool().unwrap_or(true));
+    body
+}
+fn startup_levels(
+    explicit: Option<BTreeSet<i64>>,
+    deck: bool,
+    count: usize,
+    policy: Option<&str>,
+) -> Result<(Option<BTreeSet<i64>>, bool)> {
+    if explicit.is_some() || !deck {
+        return Ok((explicit, false));
+    }
+    let policy = policy.unwrap_or("ask").trim();
+    if policy.eq_ignore_ascii_case("all") {
+        return Ok((None, false));
+    }
+    if policy.is_empty() || policy.eq_ignore_ascii_case("ask") {
+        return Ok((None, count > 1));
+    }
+    Ok((
+        Some(
+            parse_levels(policy)
+                .map_err(|_| Error::input("FLOE_JOBDECK_LEVELS must be all, ask or N,N..."))?,
+        ),
+        false,
+    ))
 }
 fn number(s: &str, min: u64, max: u64, key: &str) -> Result<u64> {
     s.parse::<u64>()
@@ -346,6 +444,9 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     if let Some(v) = c.raw {
         options.raw = v;
     }
+    if c.direct_final {
+        options.round_pages = 1 << 30;
+    }
     let resources = Resources::new(Limits::default())?;
     drop(resources.render(&options)?);
     let mut drc_roots = c.roots.clone();
@@ -388,10 +489,18 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         .iter()
         .map(|p| RegisteredSource::register(Arc::clone(&scope), p, cancelled))
         .collect::<Result<Vec<_>>>()?;
-    sources[0].validate_levels(c.levels.as_ref())?;
+    let level_env = std::env::var("FLOE_JOBDECK_LEVELS").ok();
+    let (levels, confirm_levels) = startup_levels(
+        c.levels,
+        sources[0].deck,
+        sources[0].levels.len(),
+        level_env.as_deref(),
+    )?;
+    sources[0].validate_levels(levels.as_ref())?;
     if !sources[0].deck && c.mode != "level" {
-        return Err(Error::input("chip mode requires a jobdeck"));
+        return Err(Error::input("chip/source-layer mode requires a jobdeck"));
     }
+    let initial = startup_body(c.initial, sources[0].deck, c.drc.is_some());
     let indexer = Indexer::discover(&Discovery::local()?)?;
     let service = Service::start_configured(
         sources,
@@ -404,12 +513,16 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         },
     )?;
     let request = json!({"kind":"open","seq":"1","source_id":service.catalog()["sources"][0]["source_id"],"mode":c.mode,
-        "levels":c.levels.map_or_else(||json!({"mode":"all"}),|ids|json!({"mode":"only","ids":ids.iter().map(i64::to_string).collect::<Vec<_>>()})),"body":c.initial});
+        "levels":levels.map_or_else(||json!({"mode":"all"}),|ids|json!({"mode":"only","ids":ids.iter().map(i64::to_string).collect::<Vec<_>>()})),"body":initial});
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, c.port))?;
     listener.set_nonblocking(true)?;
-    let (mut gate, secret) =
-        Gateway::with_startup(listener.local_addr()?, Arc::clone(&service), request)
-            .map_err(Error::input)?;
+    let (mut gate, secret) = Gateway::with_startup_options(
+        listener.local_addr()?,
+        Arc::clone(&service),
+        request,
+        confirm_levels,
+    )
+    .map_err(Error::input)?;
     Gateway::attach_build(&mut gate, crate::selfcheck::build_info()).map_err(Error::input)?;
     let notices = match crate::selfcheck::notice_catalog(cancelled) {
         Ok(Some(c)) => floe_web::about::Notices::Ready(Arc::new(c)),
@@ -533,6 +646,128 @@ mod tests {
         s.split_whitespace().map(str::to_owned).collect()
     }
     #[test]
+    fn startup_depth_display_and_levels_follow_legacy_policy() {
+        for (value, want) in [
+            ("-12", "0"),
+            ("+0099", "99"),
+            ("998", "998"),
+            ("999", "full"),
+            ("99999999999999999999999999", "full"),
+            ("full", "full"),
+        ] {
+            assert_eq!(startup_depth(value).unwrap(), want);
+        }
+        for value in ["", "+", "1.0", "NaN", "１", "1e3"] {
+            assert!(startup_depth(value).is_err());
+        }
+        for (tail, depth, frames, labels, baseline) in [
+            ("", "0", true, true, false),
+            ("--goto 1,2", "full", true, true, false),
+            ("--goto 1,2 --depth 0", "0", true, true, false),
+            ("--drc result.db", "full", true, true, false),
+            ("--frames off --labels on", "0", false, false, false),
+            ("--frames=on --labels=off", "0", true, false, false),
+            (
+                "--perf-baseline --frames on --labels on --frame-cache on --depth full",
+                "full",
+                false,
+                false,
+                true,
+            ),
+        ] {
+            let c = parse(&args(&format!("view a.oas {tail}"))).unwrap();
+            assert_eq!(c.direct_final, baseline);
+            if baseline {
+                assert!(!c.frame_cache);
+            }
+            let body = startup_body(c.initial, false, c.drc.is_some());
+            assert_eq!(body["depth"], depth, "{tail}");
+            assert_eq!(body["frames"], frames);
+            assert_eq!(body["labels"], labels);
+        }
+        assert_eq!(startup_body(json!({}), true, false)["labels"], false);
+        assert_eq!(startup_body(json!({}), true, false)["depth"], "full");
+        assert_eq!(startup_levels(None, true, 2, None).unwrap(), (None, true));
+        assert_eq!(startup_levels(None, true, 1, None).unwrap(), (None, false));
+        assert_eq!(
+            startup_levels(None, true, 2, Some("all")).unwrap(),
+            (None, false)
+        );
+        assert_eq!(
+            startup_levels(None, false, 2, Some("bad")).unwrap(),
+            (None, false)
+        );
+        let levels = Some([2, 3].into());
+        assert_eq!(
+            startup_levels(levels.clone(), true, 3, Some("bad")).unwrap(),
+            (levels, false)
+        );
+        assert_eq!(
+            startup_levels(None, true, 3, Some("2,3")).unwrap(),
+            (Some([2, 3].into()), false)
+        );
+        assert!(startup_levels(None, true, 3, Some("bad")).is_err());
+        for tail in [
+            "--goto 1",
+            "--goto 1,2,0",
+            "--goto NaN,2",
+            "--refinement on",
+            "--frames=bad",
+            "--labels=bad",
+        ] {
+            assert!(parse(&args(&format!("view a.oas {tail}"))).is_err());
+        }
+        assert!(
+            parse(&args("view a.oas --refinement off"))
+                .unwrap()
+                .direct_final
+        );
+        assert_eq!(
+            parse(&args("view a.jb --mode layer")).unwrap().mode,
+            "layer"
+        );
+    }
+    #[test]
+    #[ignore = "run tools/validate_web_startup.py for the GTK source oracle"]
+    fn gtk_startup_oracle() {
+        use floe_app_core::view::Viewport;
+        let path = std::env::var_os("FLOE_STARTUP_ORACLE").expect("startup oracle");
+        let cases: Vec<Value> = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(cases.len() >= 120);
+        for case in &cases {
+            let argv: Vec<String> = serde_json::from_value(case["argv"].clone()).unwrap();
+            let c = parse(&argv).unwrap();
+            let body = startup_body(c.initial, case["deck"].as_bool().unwrap(), c.drc.is_some());
+            for key in ["depth", "frames", "labels"] {
+                assert_eq!(body[key], case["want"][key], "{argv:?}: {key}");
+            }
+            let pixels: [u32; 2] = serde_json::from_value(case["pixels"].clone()).unwrap();
+            let bbox: [f64; 4] = serde_json::from_value(case["bbox"].clone()).unwrap();
+            let dbu = case["dbu"].as_f64().unwrap();
+            let mut viewport = Viewport::fit(bbox, pixels[0], pixels[1]).unwrap();
+            let patch: floe_web::view::PatchDto = serde_json::from_value(body).unwrap();
+            if let Some(nav) = patch.core().unwrap().navigation {
+                viewport = viewport.navigate(nav, bbox, dbu).unwrap();
+            }
+            for (got, want) in viewport
+                .bbox
+                .iter()
+                .zip(case["want"]["bbox"].as_array().unwrap())
+            {
+                let want = want.as_f64().unwrap();
+                assert!(
+                    (got - want).abs() <= 1e-8 * want.abs().max(1.),
+                    "{argv:?}: {viewport:?} vs {}",
+                    case["want"]["bbox"]
+                );
+            }
+        }
+        println!(
+            "GTK STARTUP: ALL OK ({} depth/display/fit/goto cases)",
+            cases.len()
+        );
+    }
+    #[test]
     fn initial_settings_form_one_bounded_patch() {
         let c=parse(&args("view source.oas --goto -10.9375,20,700 --depth 99 --detail high --thin keep --jobs 8 --raster-jobs 4 --no-open --label-font-px 18 --no-frames --labels")).unwrap();
         assert_eq!(c.initial["navigation"]["center_um"][0], "-10.9375");
@@ -548,7 +783,6 @@ mod tests {
             "view a --jobs 0",
             "view a --raster-jobs 17",
             "view a --goto 0,0,-1",
-            "view a --depth -1",
             "view a --thin bad",
             "view a --listen 0.0.0.0",
             "view a --no-open=yes",

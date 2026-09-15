@@ -339,7 +339,7 @@ fn native_queries_follow_display_margin_visibility_and_summary_without_rerender(
         Patch {
             navigation: Some(Navigation::Goto {
                 center_um: [0., 0.],
-                width_um: 2048.,
+                width_um: Some(2048.),
             }),
             pixels: Some((256, 256)),
             detail: Some(Detail::High),

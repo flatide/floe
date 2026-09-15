@@ -3653,3 +3653,76 @@ clippy `--no-deps -D warnings`도 통과했다. 마지막 안내 문구 정리 �
 로그는 `/private/tmp/floe-live-mode-battery.log`, `floe-live-mode-msrv.log`,
 `floe-live-mode-msrv-owner.log`, `floe-live-mode-msrv-deck.log`,
 `floe-live-mode-clippy.log`, `floe-live-mode-final-ui.log`, `floe-live-mode-final-cli.log`다.
+
+## 46. M4g-6 — CLI 초기 표시·카메라와 잡덱 레벨 선택
+
+기존 GTK `cmd_view`와 초기 `_after_allocate` 경로를 대조했다. 이 단계 전 웹 CLI는
+일반 레이아웃도 full depth/frames off로 시작하고 goto의 폭이 필수였다. 초기 표시를
+맞추되 GTK 기본 실행기·저수준 owner API의 빈 body 기본값은 변경하지 않는다.
+
+- 일반 CLI open은 depth0, goto/DRC/잡덱은 full이다. 명시한 정수 depth는 GTK처럼
+  0..999로 제한하며999 이상은 full이다. 정규 십진 문자열만 받는 wire와 달리 CLI는
+  부호/선행0도 정규화한다. 매우 큰 입력은 정수 overflow 없이 처리한다.
+- frames/labels 기본은 on이며 초기 frames off는 labels도 억제한다. 잡덱 labels는
+  계속 미지원/false다. 기존 웹의 bare `--frames`/`--labels` 및 `--no-*` 별칭과
+  GTK의 `--frames on|off`/`--labels on|off`를 모두 받는다. 이후 live 토글은 독립이다.
+- `--goto X,Y[,W]`는 폭 생략 시 초기 fit 배율을 보존한다. live goto DTO에서도
+  생략을 허용하고 null/비유한 값/0/음수 폭은 거부한다. interactive Fit은 GTK와
+  같은5% 여백과 산술 순서를 사용한다. archival render/capture bbox는 바꾸지 않는다.
+- `--refinement off`는 명시적으로 native round 환경값보다 우선한다.
+  `--perf-baseline`은 argv 순서와 무관하게 frames/labels/refinement/frame-cache를 끈다.
+  decoded cache/geometry cut은 유지한다. 웹의 live LOD 토글과 progressive on은
+  미이관이므로 `--refinement on`을 조용히 무시하지 않고 거부한다.
+- `--mode layer`를 초기 잡덱에도 허용한다. 잡덱 레벨을 명시하지 않으면 다중 레벨은
+  선택 대기, 한 레벨은 바로 연다. `--level`이 환경보다 우선하고
+  `FLOE_JOBDECK_LEVELS=all|ask|N,N...`을 지원한다. 잘못된 환경 목록은 GTK의 경고 후
+  all로 폴스루하는 동작 대신 hard error다. 실수로 전체 덱을 여는 것을 피한다.
+- startup API의 `confirm_levels`는 선택 대기 안내일 뿐 권한이 아니다. UI는 선택
+  전 렌더/색인 요청을 보내지 않는다. 초기 body를 successful open까지 보관하여
+  index-required 실패→사용자의 명시적 색인→Open 재시도에도 goto/depth 등을 유지한다.
+  다른 source 선택 또는 성공한 open에서 폐기하며 다른 소스로 누출하지 않는다.
+  실패 뒤 브라우저 새로고침까지 이 미완료 초기 제안을 보존하는 것은 아직 후속이다.
+
+### 검증과 남은 범위
+
+`validate_web_startup.py`는 GTK `cmd_view`의 초기 정책 prefix와 Viewer의 실제
+frames/labels 대입·fit/goto/view_bbox AST를 실행한다. 빈 합성 경로만 읽고 GTK 창/
+socket/index 실행 전에 멈춘다.144조합을 Rust CLI·DTO·Viewport 결과와 비교하며
+일반/덱, goto2/3좌표, depth 경계, frames/labels, baseline, DRC, 종횡비를 교차한다.
+
+별도 native8개 실행은 PATH가 빈 환경에서 전용 valmini 복사본·2레벨 덱을 쓴다.
+선택 대기1건은 작업0, 나머지7건은 고정 viewport에서 submitted1/consumed1과 초기
+옵션을 확인한다. round 환경을1로 설정해도 explicit off/baseline이 direct-final을
+유지한다. 종료 후 session/temp 제거와 source/cache 바이트 불변도 확인한다.
+전체 게이트에 필수 배선했다. JS 드라이버도 선택 대기·레벨 부분 선택·색인 실패 후
+재시도·성공 뒤 다른 source로 옵션 비누출을 단언한다. 좌표 고정 query/pan fixture는
+fit 정책과 독립적인 explicit viewport를 사용하며 기존 정확한 좌표 단언은 유지했다.
+
+로컬 Chrome에서는3레벨 합성 덱을 CLI `(103,117,311)`, depth99/detail high,
+frames/labels off로 실행했다. 자동 open 없이 선택 대기를 확인한 뒤 MASK-B만 열어
+레이어1개·노란 geometry와 카메라/옵션 보존을 DOM·screenshot으로 확인했다.
+End session 후 Session ended와 서버 exit0을 확인하고 전용 탭을 닫았다.
+이 단계에서는 파일 게시/업로드/다운로드/clipboard를 실행하지 않았다.
+
+현재 검증: core223·web61·app14, GTK144/native8, 전체 ES2017/UI, scoped rustfmt와
+app-core/web/app all-target clippy 통과. Rust1.89에서도 관련 단위와 GTK144를 통과했다.
+첫 전체 배터리는 기존 worker lifecycle의 query8개 직후 render가 송신 큐 Busy를
+받아 실패했다. 별도 lifecycle 재실행14건은 통과했으며 첫 실패를 숨기지 않는다.
+재실행에서는 native 수동 좌표 테스트가 fit 여백에서 생기는
+`1.000000000003638` DBU를 정수 문자열 `1`로 요구하는 의존성을 발견했다.
+해당 테스트만 이진수 정확 viewport로 분리해 raw 좌표와 snapped 좌표의 기존
+정확 일치 단언을 유지했다. 제품 좌표의 반올림/허용 오차는 변경하지 않았다.
+분리 뒤 native query/측정5건은 통과했다.
+최종 전체 `sh tools/validate_rust.sh`는 exit0, `RUST VALIDATION: ALL OK`다.
+owner HTTP native11, GTK/native 모드24회, jobdeck80·renderer46, KLayout13 PX+
+2 phase-exact+14 style(jobs1/8)을 포함한다. 기존 dependency·GTK/Pillow 경고는
+별도이며 main의 기존 수정과 feature/jobdeck worktree를 보존했다.
+로그는 `/private/tmp/floe-startup-battery-final.log`, `floe-startup-msrv.log`,
+`floe-startup-msrv-oracle.log`, `floe-startup-msrv-query.log`,
+`floe-startup-clippy.log`다. 앞선 실패 로그 `floe-startup-battery.log`와
+`floe-startup-battery-recheck.log`도 남겨 원인과 조치를 추적할 수 있다.
+
+CLI 전체 완료는 아니다: single-instance/`--multi`/인자 없는 빈 창, 나머지
+hairline/thin-um/debug/dump/stream/LOD 옵션 정책, 수동 source open 기본값 통합,
+현장 Firefox/ETX와 Linux portable 실행 수용은 후속이다. M5 공유 권한·실칩 jobdeck
+실측도 그대로 남는다. native 프로토콜/RENDERD_VERSION0.12.87은 변경하지 않는다.

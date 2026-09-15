@@ -24,6 +24,7 @@
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
     let catalog = [], currentId = '', currentSource = '', currentMode = 'level', ownerBusy = false, submitting = false;
     let modeReceipt = '', modeSupported = false;
+    let pendingStartup = null;
     let layerStart = 0, layerNext = null, layerLoad = 0, layerKey = '', selectedStyle = null;
     let levelNext = null, levelSource = '', levelIds = new Set(), levelLoad = 0, levelBusy = false;
     let lastDigit = '', lastDigitAt = 0;
@@ -444,6 +445,7 @@
         const changed = currentId !== current.view.view_id;
         if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; layerStart = 0; layerKey = ''; selectedStyle = null; el('style-editor').hidden = true; }
         currentId = current.view.view_id; currentSource = current.source_id; currentMode = current.mode; state = current.view;
+        if (pendingStartup && pendingStartup.source_id === currentSource) { pendingStartup = null; }
         el('document-title').textContent = current.title; document.title = current.title + ' · floe2';
         el('source').value = currentSource; el('mode').value = current.mode;
         sourceSelection();
@@ -507,6 +509,7 @@
     function sourceSelection() {
         const source = catalog.find(function (r) { return r.source_id === el('source').value; });
         if (!source) { return; }
+        if (pendingStartup && pendingStartup.source_id !== source.source_id) { pendingStartup = null; }
         el('mode').disabled = !source.deck; el('level-options').hidden = !source.deck;
         if (!source.deck) { el('mode').value = 'level'; }
         if (levelSource !== source.source_id) {
@@ -577,9 +580,25 @@
     }
     el('live-mode').onchange = function () { changeDeckMode(el('live-mode').value).catch(report); };
     async function openSource(startup) {
-        const request = startup || {kind: 'open', mode: el('mode').value, source_id: el('source').value, levels: levels(), body: {}};
-        request.body.pixels = dims().pixels;
+        const remembered = pendingStartup && pendingStartup.source_id === el('source').value ? pendingStartup : null;
+        const request = Object.assign({}, startup || {kind: 'open', mode: el('mode').value, source_id: el('source').value, levels: levels(), body: remembered ? remembered.body : {}});
+        request.body = Object.assign({}, request.body, {pixels:dims().pixels});
         await submitOperation(request);
+    }
+    function prepareStartup(request) {
+        el('source').value = request.source_id; sourceSelection();
+        pendingStartup = request;
+        el('mode').value = request.mode;
+        el('levels-all').checked = !request.levels || request.levels.mode === 'all';
+        levelIds = new Set(request.levels && request.levels.ids || []);
+        Array.from(el('level-list').querySelectorAll('input')).forEach(function (box) {
+            box.checked = levelIds.has(box.value); box.disabled = el('levels-all').checked;
+        });
+        const n = request.body.navigation;
+        if (n && n.kind === 'goto') {
+            el('goto-x').value = n.center_um[0]; el('goto-y').value = n.center_um[1];
+            if (n.width_um !== undefined) { el('goto-width').value = n.width_um; }
+        }
     }
     async function start() {
         const fragment = location.hash;
@@ -612,11 +631,14 @@
         const operations = await operationState();
         await restore();
         if (!currentId && operations.last_seq === '0') {
-            const startup = (await http('GET', '/api/v1/startup')).request;
+            const preferences = await http('GET', '/api/v1/startup'), startup = preferences.request;
             if (startup) {
-                const n = startup.body.navigation;
-                if (n && n.kind === 'goto') { el('goto-x').value = n.center_um[0]; el('goto-y').value = n.center_um[1]; el('goto-width').value = n.width_um; }
-                await openSource(startup);
+                prepareStartup(startup);
+                if (preferences.confirm_levels) {
+                    el('level-options').open = true;
+                    el('empty-message').textContent = 'Choose jobdeck levels, then Open layout. No indexing or rendering has started.';
+                    connection('Local · choose levels', true); el('open').focus();
+                } else { await openSource(startup); }
             }
             else { el('empty-message').textContent = 'Choose a registered source and open its index.'; connection('Local · ready', true); }
         }

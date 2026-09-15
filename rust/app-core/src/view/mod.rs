@@ -73,7 +73,10 @@ impl Viewport {
     }
     pub fn fit(bbox: [f64; 4], width: u32, height: u32) -> Result<Self> {
         let [x0, y0, x1, y1] = bbox;
-        let span = (x1 - x0).max((y1 - y0) / f64::from(height) * f64::from(width));
+        // GTK _fit_spp: five percent breathing room, with the same order of
+        // operations. This is interactive fit, not archival shot framing.
+        let spp = ((x1 - x0) / f64::from(width)).max((y1 - y0) / f64::from(height)) * 1.05;
+        let span = spp * f64::from(width);
         Self::centered(
             x0 + (x1 - x0) / 2.,
             y0 + (y1 - y0) / 2.,
@@ -93,8 +96,7 @@ impl Viewport {
                 width_um,
             } => {
                 if !center_um.iter().all(|v| v.is_finite())
-                    || !width_um.is_finite()
-                    || width_um <= 0.
+                    || width_um.is_some_and(|w| !w.is_finite() || w <= 0.)
                     || !dbu.is_finite()
                     || dbu <= 0.
                 {
@@ -105,7 +107,7 @@ impl Viewport {
                 Self::centered(
                     center_um[0] / dbu,
                     center_um[1] / dbu,
-                    width_um / dbu,
+                    width_um.map_or(sx, |w| w / dbu),
                     self.width,
                     self.height,
                 )
@@ -213,7 +215,8 @@ pub enum Navigation {
     },
     Goto {
         center_um: [f64; 2],
-        width_um: f64,
+        /// Omitted width preserves the current zoom (initially the fit zoom).
+        width_um: Option<f64>,
     },
     Pan {
         x: f64,
@@ -1050,7 +1053,7 @@ mod tests {
             .navigate(
                 Navigation::Goto {
                     center_um: [1e18, 1e18],
-                    width_um: 0.001
+                    width_um: Some(0.001)
                 },
                 [0.; 4],
                 1.

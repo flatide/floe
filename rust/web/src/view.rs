@@ -61,7 +61,8 @@ pub enum Nav {
     },
     Goto {
         center_um: [String; 2],
-        width_um: String,
+        #[serde(default)]
+        width_um: Field<String>,
     },
     Pan {
         x: f64,
@@ -89,7 +90,7 @@ impl Nav {
                 width_um,
             } => Navigation::Goto {
                 center_um: [decimal(&center_um[0])?, decimal(&center_um[1])?],
-                width_um: decimal(&width_um)?,
+                width_um: width_um.optional().map(|v| decimal(&v)).transpose()?,
             },
             Self::Pan { x, y, snap } => Navigation::Pan { x, y, snap },
             Self::Zoom { factor, anchor } => Navigation::Zoom { factor, anchor },
@@ -527,6 +528,23 @@ mod tests {
     use super::*;
     use floe_worker_client::{Fields, Frame, RenderRequest};
     use std::collections::BTreeMap;
+    #[test]
+    fn goto_without_width_keeps_scale_but_null_and_invalid_widths_are_rejected() {
+        use floe_app_core::view::Viewport;
+        let bbox = [0., 0., 800., 600.];
+        let view = Viewport::new(bbox, 800, 600).unwrap();
+        let nav: Nav = serde_json::from_str(r#"{"kind":"goto","center_um":["1","-2"]}"#).unwrap();
+        let moved = view.navigate(nav.core().unwrap(), bbox, 0.001).unwrap();
+        assert_eq!(moved.bbox, [600., -2300., 1400., -1700.]);
+        for width in ["null", "5", "\"NaN\"", "\"0\"", "\"-1\""] {
+            let text = format!(r#"{{"kind":"goto","center_um":["1","-2"],"width_um":{width}}}"#);
+            let result = serde_json::from_str::<Nav>(&text)
+                .map_err(|_| "invalid")
+                .and_then(Nav::core)
+                .and_then(|nav| view.navigate(nav, bbox, 0.001).map_err(|_| "invalid"));
+            assert!(result.is_err(), "{text}");
+        }
+    }
     #[test]
     fn null_unknown_fields_duplicate_fields_and_numeric_world_coordinates_are_not_patches() {
         for text in [

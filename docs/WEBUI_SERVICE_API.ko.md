@@ -26,6 +26,13 @@ commit한다. 성공 receipt는 새 view_id와 unchanged:false(동일 모드는 
 이는 첫 프레임 완료가 아닌 attachment 교체 완료이며 이후 worker 실패는 view에 표시된다.
 기존 작업 조회/cancel/replay 계약을 사용한다. old view_id의 원래 seq 재전송도 원래
 receipt만 반환하며 다시 전환하지 않는다. 파일 게시/재색인 권한은 아니다([M4 §45](WEBUI_M4.ko.md)).
+M4g-6의 인증된 `GET /api/v1/startup`은 `{request,confirm_levels}`를 반환한다.
+`request`는 기존의 등록 source ID 기반 open 제안이고 `confirm_levels:true`는 UI에서
+레벨 선택 후 명시적으로 open하도록 하는 안내다. 서버의 source 범위나 색인/게시 권한을
+확장하지 않는다. goto의 문자열 `width_um`은 생략할 수 있으며 현재 폭(초기 fit 폭)을
+유지한다. JSON null·비유한/0/음수 폭은 거부한다. CLI 초기 정책은 launcher에서
+하나의 open body로 확정하며 저수준 owner API의 빈 body 기본값을 변경하지 않는다
+([M4 §46](WEBUI_M4.ko.md)).
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는

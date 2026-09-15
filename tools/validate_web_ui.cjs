@@ -8,6 +8,8 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
+const startup=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_STARTUP:'1'}});
+assert.equal(startup.status,0,'startup client: '+startup.error);
 acorn.parse(fs.readFileSync(path.join(ui,'session-exit.js'),'utf8'),options);
 const exit=spawnSync(process.execPath,[path.join(ui,'session-exit.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(exit.status,0,'session-exit.test.cjs: '+exit.error);

@@ -5,6 +5,9 @@ fn setup(margin: bool) -> (Arc<Resources>, Arc<Control>, ViewController) {
     let r = Resources::new(Limits::default()).unwrap();
     let m = model(false);
     let mut initial = ViewState::initial(&m, 800, 640).unwrap();
+    // Query coordinates in this fixture use one DBU per pixel, independent
+    // of the interactive Fit padding policy (covered by the GTK oracle).
+    initial.viewport = Viewport::new(m.bbox, 800, 640).unwrap();
     initial.labels = false;
     let c = Arc::new(Control::default());
     let v = start_configured(

@@ -13,6 +13,9 @@ const minimapEnabled=process.env.FLOE_TEST_MINIMAP==='1';
 const exitEnabled=process.env.FLOE_TEST_EXIT==='1';
 const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
 const modeEnabled=process.env.FLOE_TEST_MODE==='1';
+const startupEnabled=process.env.FLOE_TEST_STARTUP==='1';
+let startupReceipt=null,startupFail=true;
+const startupBody={depth:'17',detail:'high',thin:'keep',frames:true,labels:false,navigation:{kind:'goto',center_um:['1.25','-2.5']}};
 let modeOperation=null,serverMode='chip',modeReadFailure=false,modeViewReadFailure=false,modeLosePost=false,modeNumber=0;
 let textSelection=null;
 let clipController,clipOp=null,clipFile=null;
@@ -82,6 +85,7 @@ class XHR {
         if(raw){value={kind:'drc_review_transfer',phase:'queued',seq:this.headers['X-Floe-Transfer-Seq']};status=202;}
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
+        else if(startupEnabled&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=204;}
         else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled};}
         else if(this.path==='/api/v1/defaults/prepare') {value={token:'d'.repeat(64),view_id:body.view_id,state_rev:body.state_rev,name:'synthetic.oas.layerprops',title:'synthetic',mode:'level',levels:null,rows:1,bytes:'24',replaces_existing:false,expires_in_ms:'30000',scope:'shared_design_default',affects:'future_opens'};}
         else if(this.path==='/api/v1/defaults/revoke') {value=null;status=204;}
@@ -98,13 +102,15 @@ class XHR {
         else if(this.method==='DELETE'&&this.path==='/api/v1/artifacts/1'){clipFile=null;clipOp.artifact.available=false;clipOp.artifact.expires_in_ms=null;value=null;status=204;}
         else if(this.path==='/api/v1/catalog') {value={sources:[{source_id:'src',title:'synthetic',deck:false,levels:0},{source_id:'deck',title:'synthetic deck',deck:true,levels:2}]};}
         else if(this.path==='/api/v1/catalog/deck/levels/0') {value={levels:[{id:'1',title:'Level 1'},{id:'2',title:'Level 2'}],next:null};}
-        else if(this.path==='/api/v1/startup') {value={request:{kind:'open',seq:'1',source_id:modeEnabled?'deck':'src',mode:modeEnabled?'chip':'level',levels:modeEnabled?{mode:'only',ids:['1']}:{mode:'all'},body:{detail:'high'}}};}
+        else if(this.path==='/api/v1/startup') {value={confirm_levels:startupEnabled,request:{kind:'open',seq:'1',source_id:modeEnabled||startupEnabled?'deck':'src',mode:modeEnabled?'chip':'level',levels:modeEnabled?{mode:'only',ids:['1']}:{mode:'all'},body:startupEnabled?startupBody:{detail:'high'}}};}
         else if(this.path==='/api/v1/operations'&&this.method==='POST') {
             open=true;lastSeq=body.seq;value={seq:lastSeq,kind:body.kind,phase:body.kind==='mode'?'preparing':'succeeded',view_id:viewId};status=202;
             if(body.kind==='mode') {assert(modeEnabled);modeOperation=value;}
+            if(startupEnabled){open=body.kind==='open'&&!startupFail;startupReceipt=value={seq:lastSeq,kind:body.kind,phase:body.kind==='open'&&startupFail?'failed':'succeeded',view_id:open?viewId:null,error:body.kind==='open'&&startupFail?'index_required':null};}
         }
         else if(this.path==='/api/v1/operations') {
             value={last_seq:lastSeq,active:modeOperation&&modeOperation.phase==='preparing'?lastSeq:null,history:modeOperation?[modeOperation]:open?[{seq:lastSeq,kind:'open',phase:'succeeded',view_id:viewId}]:[]};
+            if(startupEnabled){value.history=startupReceipt?[startupReceipt]:[];}
             if(modeReadFailure){modeReadFailure=false;status=503;value={error:'unavailable'};}
         }
         else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:modeEnabled?'deck':'src',mode:modeEnabled?serverMode:'level',levels:modeEnabled?['1']:null,view:{...snapshot,connection_epoch:''}}:null;
@@ -176,6 +182,34 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(startupEnabled){
+        const commands=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations');
+        await wait(()=>node('level-options').open);
+        assert.equal(commands().length,0);assert.equal(sockets.length,0);
+        assert.equal(node('source').value,'deck');assert.equal(node('goto-x').value,'1.25');
+        await wait(()=>node('level-list').querySelectorAll('input').length===2);
+        node('levels-all').checked=false;node('levels-all').onchange();
+        const chosen=node('level-list').querySelectorAll('input')[1];chosen.checked=true;chosen.onchange();
+        node('open').onclick();await wait(()=>commands().length===1&&!node('open').disabled);
+        assert.deepEqual(commands()[0].body.levels,{mode:'only',ids:['2']});
+        assert.deepEqual(commands()[0].body.body,{...startupBody,pixels:[100,80]});
+        assert.equal(sockets.length,0,'failed open started a frame stream');
+        node('index-jobs').value='2';node('index').onclick();
+        await wait(()=>commands().length===2&&!node('open').disabled);
+        assert.equal(commands()[1].body.kind,'index');
+        startupFail=false;node('open').onclick();await wait(()=>sockets.length===1);
+        assert.deepEqual(commands()[2].body.body,{...startupBody,pixels:[100,80]});
+        assert(!Object.hasOwn(startupBody,'pixels'),'startup request mutated');
+        hello(sockets[0]);sockets[0].receive(packet('raw','1'));
+        await node('close').onclick();
+        await wait(()=>!node('open').disabled);
+        node('source').value='src';node('source').onchange();node('open').onclick();
+        await wait(()=>commands().length===4);
+        assert.deepEqual(commands()[3].body.body,{pixels:[100,80]},'startup leaked to a new source');
+        listeners.pagehide();
+        console.log('WEB STARTUP CLIENT: ALL OK (level consent, no implicit work, selected levels, index retry preserves CLI, no source leak)');
+        return;
+    }
     await wait(()=>sockets.length===1);
     assert.equal(sandbox.location.hash,'');
     const opened=requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations');

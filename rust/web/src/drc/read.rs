@@ -324,7 +324,7 @@ pub(super) fn execute(
                     p.check(check)?.name,
                     floe_app_core::view::Navigation::Goto {
                         center_um: center,
-                        width_um: width,
+                        width_um: Some(width),
                     },
                     stop,
                 )?;

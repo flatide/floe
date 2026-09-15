@@ -49,6 +49,14 @@ impl Harness {
         Self::start_configured(raw, false, false).await
     }
     async fn start_configured(raw: bool, margin: bool, labels: bool) -> Self {
+        Self::start_with_viewport(raw, margin, labels, None).await
+    }
+    async fn start_with_viewport(
+        raw: bool,
+        margin: bool,
+        labels: bool,
+        viewport: Option<floe_app_core::view::Viewport>,
+    ) -> Self {
         let resources = Resources::new(Limits::default()).unwrap();
         let source =
             PathBuf::from(std::env::var_os("FLOE_VIEW_FIXTURE").expect("private fixture required"));
@@ -57,6 +65,9 @@ impl Harness {
                 .unwrap();
         let model = Model::new(&data).unwrap();
         let mut state = ViewState::initial(&model, 257, 191).unwrap();
+        if let Some(viewport) = viewport {
+            state.viewport = viewport;
+        }
         state.labels = labels;
         state.detail = Detail::High;
         let mut options = RenderOptions::local().unwrap();
