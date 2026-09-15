@@ -950,6 +950,10 @@
                     const m = registration.metadata;
                     if (m.format) { el('drc-summary').textContent += ' · ' + (m.format === 'ascii' ? 'ASCII' : 'ICE'); }
                     if (m.truncated_records !== undefined && cursor(m.truncated_records) !== '0') { el('drc-summary').textContent += ' · ' + m.truncated_records + ' truncated records'; }
+                    if (m.review_cache === 'cache') { el('drc-summary').textContent += ' · current adjacent ICE cache'; }
+                    if (m.review_cache === 'missing' || m.review_cache === 'ignored') {
+                        el('drc-summary').textContent += ' · reviewer notes/waives unavailable (' + (m.review_cache === 'ignored' ? 'stale or invalid ICE cache ignored' : 'no ICE cache') + ')';
+                    }
                 }
                 if (!before || before.id !== registration.id || before.phase !== registration.phase) {
                     info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : v.waives ? 'Geometry is read-only. Notes/waives use approval by default; automatic save of confirmed edits is a separate reviewer opt-in.' : v.notes&&v.notes.editable ? 'Geometry and waive statuses are read-only. Confirmed note edits can use the separate reviewer save opt-in.' : 'Read-only review'));

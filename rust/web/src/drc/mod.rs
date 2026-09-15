@@ -65,8 +65,31 @@ struct Registration {
     path: PathBuf,
     waives: Option<PathBuf>,
     rules: Option<PathBuf>,
-    readonly: Option<(String, floe_app_core::drc::review::store::ReadTargets)>,
+    readonly: Option<Readonly>,
     source_id: String,
+}
+#[derive(Clone)]
+struct Readonly {
+    reviewer: String,
+    source: PathBuf,
+    targets: Option<floe_app_core::drc::review::store::ReadTargets>,
+    // Public enum-like notice only; never expose the source/cache warning path.
+    cache_status: &'static str,
+}
+impl Readonly {
+    fn validate_open(&self, database: &Database, scope: &AccessScope) -> Result<()> {
+        scope.check(&self.source)?;
+        if (database.format() == "ice") != self.targets.is_some() {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "DRC format changed after read selection",
+            ));
+        }
+        if self.cache_status == "cache" {
+            database.validate_cache_source(&self.source)?;
+        }
+        Ok(())
+    }
 }
 /// Cancelling a handler (including timeout/disconnect) cancels its queued or
 /// active work. A reply does not keep the actor or an HTTP connection alive.
@@ -225,21 +248,47 @@ impl Service {
     pub fn start_readonly_review(
         resources: &Arc<Resources>,
         scope: Arc<AccessScope>,
-        path: &Path,
+        selected: floe_app_core::drc::ReadSelection,
         rules: Option<&Path>,
         source_id: &str,
         reviewer: &str,
-        targets: floe_app_core::drc::review::store::ReadTargets,
     ) -> Result<Arc<Self>> {
-        targets.validate(path, reviewer)?;
+        let source = scope.check(&selected.source)?;
+        let path = scope.check(&selected.path)?;
+        let mut cache = source.as_os_str().to_owned();
+        cache.push(".ice");
+        let cache = PathBuf::from(cache);
+        if path != source && (path != cache || selected.targets.is_none()) {
+            return Err(Error::input("invalid read-only DRC cache selection"));
+        }
+        floe_app_core::drc::waive_paths(&path, reviewer)?;
+        if let Some(targets) = &selected.targets {
+            targets.validate(&path, reviewer)?;
+        }
+        let cache_status = if selected.targets.is_some() {
+            if path == source {
+                "explicit"
+            } else {
+                "cache"
+            }
+        } else if selected.warning.is_some() {
+            "ignored"
+        } else {
+            "missing"
+        };
         Self::start_registered(
             resources,
             scope,
-            path,
+            &path,
             None,
             rules,
             source_id,
-            Some((reviewer.into(), targets)),
+            Some(Readonly {
+                reviewer: reviewer.into(),
+                source,
+                targets: selected.targets,
+                cache_status,
+            }),
         )
     }
     fn start_registered(
@@ -249,7 +298,7 @@ impl Service {
         waives: Option<&Path>,
         rules: Option<&Path>,
         source_id: &str,
-        readonly: Option<(String, floe_app_core::drc::review::store::ReadTargets)>,
+        readonly: Option<Readonly>,
     ) -> Result<Arc<Self>> {
         if source_id.is_empty() || source_id.len() > 128 {
             return Err(Error::input("invalid registered DRC source"));
@@ -260,7 +309,13 @@ impl Service {
         let permit = resources.drc_with_rules(
             std::iter::once(path.clone())
                 .chain(waives.clone())
-                .chain(readonly.as_ref().map(|(_, targets)| targets.waives.clone()))
+                .chain(readonly.as_ref().map(|r| r.source.clone()))
+                .chain(
+                    readonly
+                        .as_ref()
+                        .and_then(|r| r.targets.as_ref())
+                        .map(|t| t.waives.clone()),
+                )
                 .chain(rules.clone()),
             rules.is_some(),
         )?;
@@ -313,16 +368,17 @@ impl Service {
                         scope.check(p)?;
                     }
                     let mut pack = Database::open_explicit(&path, waives.as_deref(), &stop)?;
-                    if let Some((reviewer, targets)) = &readonly {
+                    if let Some(r) = &readonly { r.validate_open(&pack, &scope)?; }
+                    if let Some((r, targets)) = readonly.as_ref().and_then(|r| r.targets.as_ref().map(|t| (r,t))) {
                         use floe_app_core::drc::review::{store, managed};
                         // Capture via directory-relative O_NOFOLLOW and retain the
                         // checked descriptor. Never reopen the temporary pathname
                         // through Database's ordinary explicit-waive reader.
                         let store = managed::ManagedStore::open_readonly_catalog(
                             &resources, managed::Registration {
-                                scope: scope.clone(), pack: path.clone(), reviewer: reviewer.clone(),
+                                scope: scope.clone(), pack: path.clone(), reviewer: r.reviewer.clone(),
                                 kind: store::Kind::Waives,
-                                protected_files: rules.iter().cloned().collect(), protected_trees: vec![],
+                                protected_files: rules.iter().cloned().chain(std::iter::once(r.source.clone())).collect(), protected_trees: vec![],
                             },
                             floe_app_core::registered::SourceSet::new(vec![])?,
                             &targets.waives, &stop,
@@ -337,6 +393,7 @@ impl Service {
                         })
                         .transpose()?;
                     floe_app_core::check_cancelled(&stop)?;
+                    if let Some(r) = &readonly { r.validate_open(&pack, &scope)?; }
                     pack.unchanged()?;
                     Ok((pack, metadata))
                 })();
@@ -348,6 +405,7 @@ impl Service {
                             "precision":pack.precision().to_string(),"errors":pack.total().to_string(),
                             "checks":pack.check_count().to_string(),"waives":pack.has_waives(),
                             "format":pack.format(),"truncated_records":pack.truncated_records().to_string(),
+                            "review_cache":readonly.as_ref().map(|r| r.cache_status),
                             "svrf":metadata.as_ref().map(metadata::Metadata::summary),
                         }));
                         run(&inner, &mut pack, metadata.as_ref());

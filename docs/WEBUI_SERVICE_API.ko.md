@@ -282,7 +282,15 @@ M4g-20은 승인된 유도 legacy 임시 이름을 인접 파일 다음 읽기 �
 ([M4 §75](WEBUI_M4.ko.md)). 경로는 launch에서 고정하며 HTTP 필드를 추가하지 않는다.
 임시 디렉터리는 browse/쓰기 root가 아니고 read-only store는 native 초안/게시도
 거부한다. waive는 검증된 FD를 reader에 설치하고, note는 기존 display 경로로만
-읽는다. ASCII/cache 선택과 다른 reviewer/pack으로의 자동 승계는 여전히 없다.
+읽는다. 다른 reviewer/pack으로의 자동 승계는 없다.
+M4g-21은 명시 `--floe-reviewer`의 ASCII에서 현재 인접 ICE를 선택한다. 카탈로그
+`drc.metadata.review_cache`는 `explicit`(직접 ICE), `cache`(현재 인접 ICE),
+`missing`(캐시 없음, ASCII), `ignored`(오래되거나 무효인 캐시, ASCII), 그 외 등록은
+null이다. UI는 ASCII fallback에 notes/waives 미적용 안내를 유지한다. 전체 경로나
+원문 오류는 wire에 보내지 않는다. 새 path 입력/API·implicit build·browse root가
+없고, fallback에는 note/waive 서비스도 만들지 않는다. 최초 선택과 actor open은
+size/초 단위 mtime 일치를 검사하며 내용 hash/hot reload 보장은 아니다. writer와
+reviewer 미지정 실행의 기존 explicit-file 선택은 변경하지 않는다.
 M4e-5a는 기존 주석 owner 등록에 `POST /api/v1/drc/review/notes/display`를 추가한다.
 최대512개의 check/local 배지와 focus 하나의 본문만 반환하고 편집/게시 token을 만들지
 않는다. context+notes review_rev에 고정한 admitted snapshot 하나를 재사용하며,

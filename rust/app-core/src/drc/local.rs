@@ -104,6 +104,36 @@ pub fn waive_paths(pack: &Path, reviewer: &str) -> Result<[PathBuf; 2]> {
         env::temp_dir().join(format!(".{name}.waive.{reviewer}-{}", &tag[..12])),
     ])
 }
+/// Trusted launcher selection, not an HTTP path capability. The caller admits
+/// pack metadata and checks both source and adjacent cache access scope first.
+pub struct ReadSelection {
+    pub source: PathBuf,
+    pub path: PathBuf,
+    pub targets: Option<super::review::store::ReadTargets>,
+    pub warning: Option<String>,
+}
+pub fn select_review(source: &Path, reviewer: &str, stop: &AtomicUsize) -> Result<ReadSelection> {
+    let source = cache::absolute(source)?;
+    waive_paths(&source, reviewer)?;
+    let (pack, warning) = current_pack(&source, stop)?;
+    let path = pack
+        .as_ref()
+        .map_or_else(|| source.clone(), |p| p.path.clone());
+    let targets = if pack.is_some() {
+        Some(super::review::store::ReadTargets::select(&path, reviewer)?)
+    } else {
+        None
+    };
+    if let Some(pack) = &pack {
+        pack.unchanged()?;
+    }
+    Ok(ReadSelection {
+        source,
+        path,
+        targets,
+        warning,
+    })
+}
 /// Bounded, nonblocking type probe for trusted CLI registration. Never parses
 /// ASCII, discovers a cache, or creates a review sidecar.
 pub fn is_packed_source(source: &Path) -> Result<bool> {
@@ -121,20 +151,16 @@ pub fn is_packed_source(source: &Path) -> Result<bool> {
         Err(e) => Err(e.into()),
     }
 }
-pub fn open_current(
-    source: &Path,
-    reviewer: Option<&str>,
-    cancelled: &AtomicUsize,
-) -> Result<Database> {
+fn current_pack(source: &Path, cancelled: &AtomicUsize) -> Result<(Option<Pack>, Option<String>)> {
     crate::check_cancelled(cancelled)?;
     let packed = is_packed_source(source)?;
-    let mut pack = if packed {
+    let pack = if packed {
         Pack::open(source, cancelled)?
     } else {
         let path = PathBuf::from(format!("{}.ice", cache::utf8(source)?));
         let candidate = match fs::metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Database::ascii(Ascii::open(source, cancelled)?, None));
+                return Ok((None, None));
             }
             Err(e) => Err(e.into()),
             Ok(_) => Pack::open(&path, cancelled).and_then(|p| {
@@ -154,12 +180,20 @@ pub fn open_current(
                     path.display(),
                     source.display()
                 );
-                return Ok(Database::ascii(
-                    Ascii::open(source, cancelled)?,
-                    Some(warning),
-                ));
+                return Ok((None, Some(warning)));
             }
         }
+    };
+    Ok((Some(pack), None))
+}
+pub fn open_current(
+    source: &Path,
+    reviewer: Option<&str>,
+    cancelled: &AtomicUsize,
+) -> Result<Database> {
+    let (pack, warning) = current_pack(source, cancelled)?;
+    let Some(mut pack) = pack else {
+        return Ok(Database::ascii(Ascii::open(source, cancelled)?, warning));
     };
     for path in waive_paths(&pack.path, &reviewer_tag(reviewer))? {
         match fs::metadata(&path) {

@@ -133,10 +133,10 @@ impl Registry {
             ));
         }
         let r = &self.inner.registration;
-        if let Some((tag, _)) = &r.readonly {
-            if editable || reviewer != tag {
+        if let Some(selected) = &r.readonly {
+            if editable || reviewer != selected.reviewer || selected.targets.is_none() {
                 return Err(floe_app_core::Error::input(
-                    "read-only reviewer registration cannot grant writes or change reviewer",
+                    "read-only reviewer requires its selected ICE and fixed reviewer; no writes",
                 ));
             }
         }
@@ -152,6 +152,13 @@ impl Registry {
             .cloned()
             .chain(std::iter::once(r.path.clone()))
             .chain(r.waives.clone())
+            .chain(r.readonly.as_ref().map(|s| s.source.clone()))
+            .chain(
+                r.readonly
+                    .as_ref()
+                    .and_then(|s| s.targets.as_ref())
+                    .map(|t| t.waives.clone()),
+            )
             .chain(r.rules.clone())
             .collect();
         *notes = Some(super::review::Service::start(super::review::Config {
@@ -160,7 +167,8 @@ impl Registry {
             read_target: r
                 .readonly
                 .as_ref()
-                .map(|(_, targets)| targets.notes.clone()),
+                .and_then(|s| s.targets.as_ref())
+                .map(|targets| targets.notes.clone()),
             reader_id: if editable {
                 None
             } else {
@@ -221,6 +229,13 @@ impl Registry {
         let r = &self.inner.registration;
         let mut files: Vec<_> = std::iter::once(r.path.clone())
             .chain(r.waives.clone())
+            .chain(r.readonly.as_ref().map(|s| s.source.clone()))
+            .chain(
+                r.readonly
+                    .as_ref()
+                    .and_then(|s| s.targets.as_ref())
+                    .map(|t| t.waives.clone()),
+            )
             .chain(r.rules.clone())
             .collect();
         // Protect both an existing ICE tree and the future build target. A

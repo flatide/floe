@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Explicit ICE reviewer reading: real Rust HTTP, no review write authority.
+"""Explicit ICE / current adjacent cache reviewer reads, no write authority.
 
 Synthetic data only. This does not stand in for browser/field acceptance or
-ASCII/cache selection, which remains separate work. Legacy temporary reads use
+cache hot-reload/revision management. Legacy temporary reads use
 exact GTK-derived names in a separate directory, outside the source roots.
 """
 import os
@@ -61,8 +61,8 @@ def main(fixture):
         def sidecar_files():
             return list(work.glob(".synthetic.db.*")) + list(temps.glob(".synthetic.db.*"))
 
-        def session(tag=None, **options):
-            s = Session(source, pack, temps, tag, work / "session.json", **options)
+        def session(tag=None, *, database=pack, **options):
+            s = Session(source, database, temps, tag, work / "session.json", **options)
             live.append(s)
             return s
 
@@ -128,6 +128,7 @@ def main(fixture):
                 assert model["operations"]["last_seq"] == "0" and model["autosave"] is False
                 catalog = reader.client.call("GET", "/api/v1/drc")
                 assert catalog["waives"] is None
+                assert catalog["drc"]["metadata"]["review_cache"] == "explicit"
                 display = reader.display(refs, focus=refs[0])
                 assert str(temps) not in str(display), "full temporary path exposed"
                 assert display["exists"] is exists and display["reviewer"] == tag, (tag, display)
@@ -195,13 +196,91 @@ def main(fixture):
             assert reader.display(refs, focus=refs[0], code=409)["error"] == "review_changed"
             close(reader)
 
-            # Unsupported source selection fails early instead of silently
-            # showing no notes, parsing ASCII, or enabling a different writer.
+            # A fresh adjacent ICE is selected only for explicit read-reviewer
+            # intent. Same sidecar names/binding as an explicit pack, no writes.
+            for tag in ["read-test", "legacy-read", "mixed"]:
+                reader = session(database=db, read_reviewer=tag)
+                catalog = reader.client.call("GET", "/api/v1/drc")
+                assert catalog["drc"]["metadata"]["format"] == "ice"
+                assert catalog["drc"]["metadata"]["review_cache"] == "cache"
+                assert reader.display(refs, refs[0])["focus"]["text"] == "읽기 전용 saved note"
+                assert [r["status"] for r in read_records(reader, refs)["rows"]] == [1, 1]
+                close(reader)
+            reader = session(database=db)
+            metadata = reader.client.call("GET", "/api/v1/drc")["drc"]["metadata"]
+            assert metadata["format"] == "ascii" and metadata["review_cache"] is None
+            reader.client.call("GET", API, code=403)
+            close(reader)
+
+            def fallback(expected):
+                files = [source, db] + sidecar_files()
+                if pack.is_file():
+                    files.append(pack)
+                snapshot = fingerprint(files)
+                names = set(work.iterdir()) | set(temps.iterdir())
+                reader = session(database=db, read_reviewer="read-test")
+                catalog = reader.client.call("GET", "/api/v1/drc")
+                metadata = catalog["drc"]["metadata"]
+                assert metadata["format"] == "ascii" and metadata["review_cache"] == expected
+                assert catalog["notes"] is None and catalog["waives"] is None
+                assert not metadata["waives"]
+                assert str(work) not in str(catalog) and str(temps) not in str(catalog)
+                reader.client.call("GET", API, code=403)
+                reader.client.call("POST", API + "/display", dict(context=reader.context, errors=refs), 403)
+                assert [r["status"] for r in read_records(reader, refs)["rows"]] == [0, 0]
+                close(reader)
+                assert fingerprint(files) == snapshot, "fallback changed an input"
+                assert set(work.iterdir()) | set(temps.iterdir()) == names, "fallback created files"
+
+            packed_bytes, db_bytes = pack.read_bytes(), db.read_bytes()
+            db_stat = db.stat()
+            # GTK oracle: source-size and integer-second mtime, not a full hash.
+            assert isinstance(drc.load_db(str(db)), drc.IcePack)
+            os.utime(db, ns=(db_stat.st_atime_ns, db_stat.st_mtime_ns + 2_000_000_000))
+            assert not isinstance(drc.load_db(str(db)), drc.IcePack)
+            fallback("ignored")
+            os.utime(db, ns=(db_stat.st_atime_ns, db_stat.st_mtime_ns))
+            db.write_bytes(db_bytes + b"\n")
+            os.utime(db, ns=(db_stat.st_atime_ns, db_stat.st_mtime_ns))
+            fallback("ignored")
+            db.write_bytes(db_bytes)
+            os.utime(db, ns=(db_stat.st_atime_ns, db_stat.st_mtime_ns))
+            for corrupt in [b"broken", packed_bytes[:12], packed_bytes[:8] + (1).to_bytes(4, "little")]:
+                pack.write_bytes(corrupt)
+                assert not isinstance(drc.load_db(str(db)), drc.IcePack)
+                fallback("ignored")
+            pack.unlink()
+            fallback("missing")
+            # FIFO/directory candidates are rejected without blocking and the
+            # parser uses ASCII. Never run GTK's blocking file probe on a FIFO.
+            os.mkfifo(pack)
+            fallback("ignored")
+            pack.unlink()
+            pack.mkdir()
+            fallback("ignored")
+            pack.rmdir()
+            # Scope rejection precedes Pack::open; no new root or browse grant.
+            outside = temps / "not-authorized.ice"
+            outside.write_bytes(packed_bytes)
+            pack.symlink_to(outside)
             result = subprocess.run([str(APP), "view", str(source), "--drc", str(db),
                                      "--floe-reviewer", "read-test", "--no-open"],
                                     capture_output=True, text=True, timeout=10,
                                     env=dict(os.environ, PATH=""))
-            assert result.returncode == 2 and "explicit ICE" in result.stderr
+            assert result.returncode == 2 and "outside approved roots" in result.stderr
+            pack.unlink()
+            outside.unlink()
+            # Fractional ASCII vertices stay exact through the fallback route.
+            fractional = work / "fractional.db"
+            fractional.write_text("TOP 1\nR\np 1 2\n.125 -.5\n.375 .5\n")
+            reader = session(database=fractional, read_reviewer="read-test")
+            c = reader.context
+            geometry = reader.client.call("POST", "/api/v1/drc/" + c["drc_id"] + "/read",
+                                          dict(view_id=c["view_id"], revision=c["revision"],
+                                               body=dict(kind="geometry", check="0", error="0", start="0", limit=2)))
+            assert geometry["points_um"] == [["0.125", "-0.5"], ["0.375", "0.5"]]
+            assert "points_dbu" not in geometry
+            close(reader)
             fifo = work / "not-a-file.ice"
             os.mkfifo(fifo)
             result = subprocess.run([str(APP), "view", str(source), "--drc", str(fifo),
@@ -218,7 +297,7 @@ def main(fixture):
                 except subprocess.TimeoutExpired:
                     s.proc.kill()
                     s.proc.communicate(timeout=5)
-    print("WEB READ REVIEWER: ALL OK (GTK-derived adjacent/temporary names outside roots; precedence/mixed/missing; bad aliases rejected; no path DTOs, writes, locks or input changes; native shutdown)")
+    print("WEB READ REVIEWER: ALL OK (explicit/fresh-cache reads; stale/corrupt/missing/nonregular ASCII fallback + notices; GTK-derived sidecars; scope/alias rejection; fractional geometry; no writes/locks; native shutdown)")
 
 
 if __name__ == "__main__":

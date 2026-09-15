@@ -148,6 +148,16 @@ impl Database {
             Backend::Ascii(_) => Err(Error::input("DRC review requires a registered pack")),
         }
     }
+    /// Recheck a launcher's fresh-cache selection after the actor opens it.
+    pub fn validate_cache_source(&self, source: &std::path::Path) -> Result<()> {
+        match &self.backend {
+            Backend::Pack(pack) if pack.source_matches(source)? => Ok(()),
+            _ => Err(Error::new(
+                crate::ErrorKind::Cache,
+                "selected DRC pack no longer matches its source",
+            )),
+        }
+    }
     pub(super) fn packed(pack: Pack) -> Self {
         Self {
             backend: Backend::Pack(Box::new(pack)),

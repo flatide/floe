@@ -17,7 +17,9 @@ pub use database::{
     ReadViolation,
 };
 pub use filters::{ListPage, ListRequest};
-pub use local::{is_packed_source, open_current, reviewer_tag, waive_paths};
+pub use local::{
+    is_packed_source, open_current, reviewer_tag, select_review, waive_paths, ReadSelection,
+};
 pub use measure::{cd_segments, cd_segments_um, measured, measured_um, CdSegment};
 pub use pack::{
     Check, Cursor, Hit, InfoHit, InfoPage, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,

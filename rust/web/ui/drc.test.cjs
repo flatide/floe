@@ -64,10 +64,11 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     precision:'1000',...(ascii?{points_um:pts.map(xy=>xy.map(v=>String(Number(v)/1000+.000125)))}:{points_dbu:pts}),start:String(start),total:String(total),next});
 (async()=>{
     const initialized=panel.init();
-    reply('catalog',{drc:{id:'drc-id',revision:'r1',source_id:'source',title:'synthetic',phase:'ready',metadata:{checks:'2',errors:'9007199254740996',format:ascii?'ascii':'ice',truncated_records:ascii?'1':'0'}}});
+    reply('catalog',{drc:{id:'drc-id',revision:'r1',source_id:'source',title:'synthetic',phase:'ready',metadata:{checks:'2',errors:'9007199254740996',format:ascii?'ascii':'ice',truncated_records:ascii?'1':'0',review_cache:ascii?'ignored':'cache'}}});
     await initialized;await tick();
     assert.equal(el('drc-panel').hidden,false);
     assert(el('drc-summary').textContent.includes(ascii?'ASCII · 1 truncated records':'ICE'));
+    assert(el('drc-summary').textContent.includes(ascii?'reviewer notes/waives unavailable (stale or invalid ICE cache ignored)':'current adjacent ICE cache'));
     reply('rules',{rows:[{check:'0',name:'MASK <img src=x>',name_truncated:false,errors:'9007199254740996',waived:'1'}],next:null});
     await tick();
     assert.equal(el('drc-rules').children[0].textContent,'MASK <img src=x>  ·  9007199254740996');

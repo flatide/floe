@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-16, M4g-20(유도된 legacy 읽기). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-16, M4g-21(reviewer ASCII/cache 선택). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -12,14 +12,14 @@
 
 | 범위 | 로컬 구현/검증 근거 | 아직 닫지 않은 부분 |
 |---|---|---|
-| CLI 10종·보조 PNG 명령 | `rust/app`, `rust/app-core`; `validate_app_cli.py`, `validate_app_render.py`, `validate_app_jobdeck*.py`, `validate_fe_embed.py` 등. view 옵션/형식 대조 M4 §62; M4g-15a 명시 ICE/인접 reviewer·M4g-20 유도 legacy 읽기 | reviewer 읽기의 ASCII/cache 선택, 무효/개발 옵션의 최종 제품 경계. GDS/gzip은 기존 native 한계이며 새 지원 아님 |
+| CLI 10종·보조 PNG 명령 | `rust/app`, `rust/app-core`; `validate_app_cli.py`, `validate_app_render.py`, `validate_app_jobdeck*.py`, `validate_fe_embed.py` 등. view 옵션/형식 대조 M4 §62; M4g-15a/20/21 명시 reviewer ICE/legacy·ASCII/cache 읽기 | dump 구현, 무효/개발 옵션의 최종 제품 경계. GDS/gzip은 기존 native 한계이며 새 지원 아님 |
 | UI-01 열기·조작 | `launcher.js`, `browse.js`, `index-open.js`, `gestures.js`, `minimap.js`, `app.js`; 실제 startup/IPC·DOM gate. M4g-19 GTK 휠137입력·현재 표시/대기/drop·margin/DPR gate | 실제 브라우저 포커스·키·wheel·resize·재접속 수용, G1 input→photon/pacing·장치별 감도 |
 | UI-02 pan/margin | `view_controller`, `stream`, `app.js`의 착지 margin/16px 위상·crop/표시 base, controller/stream/client gate | GTK 대비 새 strip·라벨 지연 실제 화면 측정. 덱 margin은 기존에도 미지원 |
 | UI-03 레이어·스타일 | Rust 선택/CAS, palette/presets/settings/defaults; GTK 원본 선택·접힘·상속 oracle, HTTP/DOM gate. M4g-16d 슬롯 모델/API·JSON v2·참조 프리셋/16×16 UI와324 GTK/native/web 대조 | 실제 선택·다중 스타일·기본값 게시와 슬롯 pointer/keyboard·포커스 화면 수용([계약/gate](WEBUI_BITMAP_SLOTS.ko.md)) |
 | UI-04 pick/snap/측정 | query/inspect/measure/rulers + Rust query/export, 숫자·scene 유효성·stale gate | 실제 포인터/클립보드·시각적 측정 검증 |
 | UI-05 입력·복사·종료 | snapshot/session-exit와 단축키 보호. **M4g-13 두벌식 fallback**: `hangul.js`/`drc-notes.js`, GTK 원본 조합 oracle | OS IME와 fallback의 실제 입력·스크롤·키보드/브라우저별 수용. DOM gate로 대체하지 않음 |
 | DRC-01 조회·선택 | `app-core/drc`, `web/src/drc`, `drc*.js`; lazy paging/selection/CD/isolation/query gate | 현장 대형 결과와 실제 브라우저 조작 수용 |
-| DRC-02 저장·전송 | reviewer 고정 sidecar, snapshot/prepare/approve·CAS·receipt, notes/waives/transfer HTTP와 UI gate. **M4g-14 확정 시 자동 저장 opt-in**, M4g-15a 명시 ICE 읽기/쓰기 분리·M4g-20 유도 legacy 읽기 | reviewer ASCII/cache 선택; 실제 브라우저 저장/충돌/복구 수용, 대형 sidecar 연속 저장 비용 실측 |
+| DRC-02 저장·전송 | reviewer 고정 sidecar, snapshot/prepare/approve·CAS·receipt, notes/waives/transfer HTTP와 UI gate. **M4g-14 확정 시 자동 저장 opt-in**, M4g-15a/20/21 읽기/쓰기 분리·legacy·ASCII/cache | 실제 브라우저 저장/충돌/복구 수용, 대형 sidecar 연속 저장 및 cache 선택 cold-open 비용 실측 |
 | EXPORT-01 | Rust capture/mosaic/PNG metadata/clip + snapshot; raster/metadata/DRC-capture gate | 실제 브라우저 copy/download/승인 표시 수용 |
 | SYS-01/02 | Rust worker 발견·수거·cache freshness·selfcheck·portable/ELF/고지; native/포장/전송 gate. M4g-17a About 합성 PNG/raw/crop·GTK57600픽셀 대조; 17b 독립 `displaytest`; 17c 정적 입력 PNG snapshot/11형식 byte·픽셀 대조 | dump 및 GTK 진단/애니메이션 PNG 경계, Python-free **Linux에서 실행**, 현장 Firefox/ETX, G4 전체 end-to-end 판정 |
 
@@ -69,17 +69,20 @@ GTK `--floe-reviewer`는 표시 이름뿐 아니라 기존 reviewer waive 파일
 view에서 이를 `--drc-reviewer` 쓰기 등록으로 단순 치환하면 권한 의미가 달라진다.
 M4g-15a는 `view --drc PACK.ice --floe-reviewer TAG`로 **명시 ICE와 인접 파일**만
 연결한다. 메모 배지/본문·waive 조회는 가능하지만 edit/transfer/자동 저장은 허용하지
-않는다. writer 옵션·별도 waive 파일과 혼용은 오류다. env 태그 자동 선택,
-ASCII의 fresh ICE 선택은 아직 미이관이며 현재 help/시작 안내에서 범위를 표시한다.
+않는다. writer 옵션·별도 waive 파일과 혼용은 오류다. env 태그는 자동 선택하지 않는다.
 M4g-20은 승인된 legacy 임시 이름을 인접 파일 다음 후보로 읽는다. 디렉터리 열거,
 사용자 지정 경로, 임시 root 확장, 파일 생성/수정/이동/채택은 없다. symlink/FIFO/
 hardlink·잘못된 내용은 명시 오류이고 임시 파일로 조용히 폴스루하지 않는다.
 이를 “reviewer 전체 이관 완료”라고 세지 않는다([M4 §75](WEBUI_M4.ko.md)).
+M4g-21은 명시 reviewer의 ASCII에서 현재 인접 ICE를 선택한다. GTK와 같은 size/
+초 단위 mtime 기준이며 stale/corrupt/missing이면 sidecar 없는 ASCII로 돌아간다.
+상태는 화면에 표시하고 암묵 색인·캐시 수리·root 확대는 하지 않는다. 선택 뒤 actor
+open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 revision 보장은 아니다.
 
 ## 3. 로컬 기능 완성과 구별할 목표 잔여
 
-1. reviewer 읽기의 ASCII/cache 경로(유도된 legacy 읽기는 M4g-20에서 연결),
-   진단/무효 CLI 경계의 마감과 G4 목록의 최종 재대조. 개발 bitmap 슬롯 UI는
+1. 진단/무효 CLI 경계의 마감과 G4 목록의 최종 재대조. reviewer 읽기 경로는
+   M4g-20/21에서 연결했으며 ambient reviewer 자동 선택은 하지 않는다. 개발 bitmap 슬롯 UI는
    M4g-16d에서 로컬 연결했지만 실제 브라우저 수용은 아래2번에 남는다.
    M4g-17a~c [합성/독립/정적 PNG 표시 진단](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)은 연결했다.
    `--dump`는 브라우저 최근 프레임/합성 화면 보관과 명시적 다운로드로 사용자 결정됐다.

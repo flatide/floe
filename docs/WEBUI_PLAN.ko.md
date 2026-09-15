@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M4g-20 유도된 legacy sidecar 읽기).
+작성 2026-08-29, 갱신 2026-09-16(M4g-21 reviewer ASCII/cache 선택).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -139,7 +139,7 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 
 ## 현재 진행도와 커밋 보고
 
-2026-09-16, M4g-20 기준. **로컬 Rust/web 대체 기능은 후반부지만 전체 계획의
+2026-09-16, M4g-21 기준. **로컬 Rust/web 대체 기능은 후반부지만 전체 계획의
 완료 직전은 아니다.** 아래는 구현과 수용을 분리한 현재 상태이며, 위의 순차 기록에
 있는 과거 시점의 “미완료” 설명보다 우선한다. 세부 커밋 수는 작업량 비중이 아니므로
 이를 백분율로 환산하지 않는다. 이후 커밋 보고에도 완료 범위·남은 구현·현장 수용을
@@ -199,12 +199,16 @@ G1·현장 수용은 별도다([M4 §74](WEBUI_M4.ko.md)).
 M4g-20은 사용자가 승인한 pack/reviewer 유도 legacy 임시 note/waive 읽기를
 연결한다. 인접 파일 우선·고정 경로·읽기 전용 저장소를 사용하며 임시 디렉터리를
 browse/쓰기 root로 허용하지 않는다([M4 §75](WEBUI_M4.ko.md)).
+M4g-21은 명시 `--floe-reviewer`의 ASCII 입력에서 현재 인접 ICE를 선택하고,
+캐시가 없거나 stale/corrupt이면 sidecar 없는 ASCII로 돌아감을 화면에 표시한다.
+암묵적 색인·쓰기 권한·browse root 확장은 없다([M4 §76](WEBUI_M4.ko.md)).
 G4의 [잔여 감사](WEBUI_G4_AUDIT.ko.md)를 시작했다. M4g-13에서 GTK 두벌식 한글
 입력기의 누락을 이관했다([M4 §63](WEBUI_M4.ko.md)). M4g-14에서 사용자가 선택한
 reviewer별 확정 시 자동 저장 opt-in을 연결했다([M4 §64](WEBUI_M4.ko.md)).
 M4g-15a는 명시 ICE와 인접 reviewer 파일의 읽기 선택을 저장 권한 없이 연결한다
-([M4 §65](WEBUI_M4.ko.md)). legacy 임시 파일 읽기는 M4g-20에서 연결했으며 ASCII의
-최신 ICE 자동 선택은 아직 미이관이다. 개발 도구/CLI 경계도 별도로 남는다.
+([M4 §65](WEBUI_M4.ko.md)). legacy 임시 파일 읽기는 M4g-20, 명시 reviewer의 ASCII/
+현재 ICE 선택은 M4g-21에서 연결했다. ambient reviewer 자동 선택은 하지 않으며
+개발 도구/CLI 경계도 별도로 남는다.
 전체 목록 대조를 계속해 실행 경로가 없는 항목과 제품 경계 결정을 분리한다.
 단위/API/DOM gate를 실제 브라우저 수용으로
 계산하지 않으며 위 미지원 옵션의 안내 추가를 기능 이관 완료라고 세지 않는다.

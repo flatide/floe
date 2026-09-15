@@ -5545,3 +5545,46 @@ KLayout13 PX+2 phase-exact+14 style이 함께 통과했다. 선택 파일 rustfm
 마감. 실제 브라우저 입력/저장/복구·Linux 실행·G1/G4, 공유/원격 승인·구현,
 M0/M3 현장 보류·M5 world-tile 조건부는 별도이며 hot reload/revision은 사용자 유보다.
 이번 읽기 연결을 전체 웹 전환 완료로 세지 않는다.
+
+## 76. M4g-21 — 명시 reviewer의 ASCII/현재 ICE 선택
+
+2026-09-16. `view --drc RESULTS.db --floe-reviewer TAG`에서 GTK `load_db`와
+같이 현재 인접 `RESULTS.db.ice`를 선택한다. ICE를 직접 주는 기존 경로도 유지한다.
+
+- native `select_review`는 기존 `open_current`와 캐시 판정을 공유한다. 원본 size와
+  **초 단위 mtime**이 pack header와 같아야 한다. 내용 전체 hash나 source revision
+  수명주기를 새로 도입하지 않는다. 같아도 같은 초·같은 크기의 외부 교체까지 검출하는
+  보장은 없다. hot reload/revision 설계는 계속 사용자 유보 범위다.
+- 캐시가 없거나 stale/corrupt/retired/nonregular이면 원본 ASCII로 돌아간다. 유도된
+  note/waive는 붙이지 않고 화면 summary에 미적용 이유를 표시한다. 캐시/sidecar를
+  생성·수리·이동·삭제하지 않는다. FIFO probe는 nonblocking regular-file 검사다.
+- launcher는 원본/정확한 인접 후보의 scope와 metadata reservation을 먼저 검사한다.
+  scope 밖 symlink는 fallback으로 은폐하지 않고 명시 거부한다. 임시 sidecar 읽기는
+  M4g-20의 고정 유도 대상만 유지하며 임의 경로·browse/쓰기 root를 추가하지 않는다.
+- actor가 선택된 파일을 실제 열 때 format 및 원본/cache 일치를 재검사하고, sidecar/
+  rules 준비가 끝난 뒤 한 번 더 검사한다. 원본과 선택 cache의 managed read lease와
+  다른 export/기본값 쓰기 경로의 보호를 reader 수명 동안 유지한다. HTTP는 내부 경로나
+  cache 오류 원문 대신 `review_cache` 상태값만 받는다.
+- 명시 reviewer가 없는 실행과 `--drc-reviewer` writer는 기존 explicit-file 의미다.
+  ambient `FLOE_REVIEWER` 태그를 자동 선택하거나 읽기를 쓰기 승인으로 바꾸지 않는다.
+  ASCII fallback 뒤 명시 build가 만든 새 reader에 reviewer를 자동 승계하지 않는다.
+- selection과 actor open이 각각 pack metadata를 검증한다. 대형 cache/legacy waive의
+  cold-open 비용은 실측 과제이며 테스트 fixture 시간을 현장 성능으로 환산하지 않는다.
+
+검증: native source 변경/취소/유도 경로 테스트, 실제 HTTP의 fresh/mtime stale/
+size stale/corrupt/retired/missing/FIFO/directory/scope escape와 fractional ASCII,
+기존 legacy 읽기·쓰기 차단·입력/파일 목록 불변을 확대해 통과했다. UI simulated DOM은
+ICE 선택과 ASCII fallback 안내를 확인한다. scoped release 단위(app24/core273/web89),
+strict all-target clippy와 rustfmt/diff 검사도 통과했다. 초기 빌드에서 crate-private
+UTF-8 helper 사용 오류를 수정하고 재검증했다. HTTP/UI/정적 검사 로그는
+`/private/tmp/floe-read-cache-{http,ui,clippy,release}.log`다.
+
+전체 `sh tools/validate_rust.sh`는 실제 exit0, `RUST VALIDATION: ALL OK`로 완료됐다
+(`/private/tmp/floe-read-cache-battery.log`). 확장된 캐시 읽기와 기존 자동 저장·
+jobdeck83·renderer46·KLayout13 PX+2 phase-exact+14 style을 모두 통과했다.
+실제 브라우저/현장 수용은 이 결과에 포함하지 않는다. main의 기존 수정과
+feature/jobdeck 작업 트리는 건드리지 않았으며 검증용 `.venv` 임시 링크만 제거했다.
+
+커밋 시 목표 잔여: 승인된 브라우저 dump 구현과 진단/무효 CLI 경계, G4 최종 대조.
+실제 브라우저 입력/저장/복구·Python-free Linux·G1/G4 수용, 공유/원격 승인·구현,
+M0/M3 현장 보류·M5 world-tile 조건부는 별도다. 이 단계로 전체 goal을 완료 처리하지 않는다.

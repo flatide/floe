@@ -5,6 +5,53 @@ use std::{
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn readonly_selection_uses_only_fresh_pack_and_fixed_reviewer_paths() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new(&bytes(3));
+    let source = f.dir.join("sample");
+    fs::write(&source, "synthetic ASCII source\n").unwrap();
+    let m = fs::metadata(&source).unwrap();
+    let mut packed = bytes(3);
+    packed[24..32].copy_from_slice(&m.len().to_le_bytes());
+    packed[32..40].copy_from_slice(&(m.mtime() as u64).to_le_bytes());
+    fs::write(&f.path, &packed).unwrap();
+    let stop = AtomicUsize::new(0);
+    let selected = select_review(&source, "fixed", &stop).unwrap();
+    assert!(selected.targets.is_some() && selected.warning.is_none());
+    assert_eq!(selected.path, crate::cache::absolute(&f.path).unwrap());
+    assert_eq!(selected.source, crate::cache::absolute(&source).unwrap());
+    let targets = selected.targets.unwrap();
+    assert_eq!(
+        targets.notes,
+        review::store::read_paths(&f.path, "fixed", review::store::Kind::Notes).unwrap()[0]
+    );
+    assert_eq!(targets.waives, waive_paths(&f.path, "fixed").unwrap()[0]);
+    assert!(select_review(&source, "../escape", &stop).is_err());
+    assert!(matches!(
+        select_review(&source, "fixed", &AtomicUsize::new(1)),
+        Err(crate::Error {
+            kind: crate::ErrorKind::Cancelled,
+            ..
+        })
+    ));
+    let current = Database::open_explicit(&f.path, None, &stop).unwrap();
+    current.validate_cache_source(&source).unwrap();
+    fs::write(&source, "changed source").unwrap();
+    assert!(current.validate_cache_source(&source).is_err());
+    let stale = select_review(&source, "fixed", &stop).unwrap();
+    assert!(stale.targets.is_none() && stale.warning.is_some());
+    fs::write(&f.path, b"broken").unwrap();
+    assert!(select_review(&source, "fixed", &stop)
+        .unwrap()
+        .targets
+        .is_none());
+    assert!(select_review(&f.path, "fixed", &stop).is_ok()); // non-ICE input is an ASCII candidate
+    fs::remove_file(&f.path).unwrap();
+    let missing = select_review(&source, "fixed", &stop).unwrap();
+    assert!(missing.targets.is_none() && missing.warning.is_none());
+}
 struct Fixture {
     dir: PathBuf,
     path: PathBuf,

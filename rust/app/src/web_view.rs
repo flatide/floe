@@ -59,7 +59,7 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --drc-waives FILE        Explicit existing waive sidecar (requires --drc)
   --drc-rules FILE         Explicit existing SVRF rules.json (requires --drc)
   --floe-reviewer TAG      Read derived adjacent/legacy temporary notes and waives; no writes
-                          Requires explicit ICE; no ASCII cache discovery in this stage
+                          ASCII uses a current adjacent ICE, otherwise ASCII without sidecars
   --drc-reviewer TAG       Enable owner note publication for this fixed tag (requires --drc)
   --drc-edit-waives        Also enable approved waive writes for --drc-reviewer
   --port N                 Loopback port (default random)
@@ -83,7 +83,8 @@ Managed capacity: 16 CPU slots, 4 reserved for foreground; index jobs <=12.
 Decode+raster plus file catalogue (1 slot + 192 MiB) must fit 16 slots
 (DRC reserves 1 extra slot + 256 MiB;
 SVRF metadata reserves another 256 MiB, with no extra CPU worker).
-DRC reads the explicit ASCII or ICE file; no adjacent-pack/reviewer discovery or implicit indexing.
+DRC reads the explicit file unless --floe-reviewer selects its current adjacent ICE.
+No implicit indexing or ambient reviewer selection; read-only selection grants no writes.
 Refinement off; deck margin unsupported.
 Nonzero --stream-kb, --stream-target-ms, --lod, --hairline, --thin-um
 and GTK --dump are not migrated; they are rejected, never silently ignored.
@@ -519,29 +520,29 @@ impl Drop for SessionFile {
         let _ = fs::remove_dir(&self.directory);
     }
 }
-// Read selection is intentionally narrower than the CLI's legacy discovery:
-// an explicit ICE and two derived names per kind. Never create/repair sidecars.
-fn readonly_targets(
+// Only the trusted launcher selects a source/cache and derived review names.
+// Admit metadata first; no arbitrary paths, repair, or implicit indexing.
+fn readonly_selection(
+    resources: &Arc<Resources>,
+    scope: &AccessScope,
     path: &std::path::Path,
     reviewer: &str,
-) -> Result<floe_app_core::drc::review::store::ReadTargets> {
-    if !floe_app_core::drc::is_packed_source(path)? {
-        return Err(Error::input("--floe-reviewer currently requires an explicit ICE via --drc; ASCII cache discovery is not migrated"));
+    stop: &AtomicUsize,
+) -> Result<floe_app_core::drc::ReadSelection> {
+    let path = scope.check(path)?;
+    let mut files = vec![path.clone()];
+    if !floe_app_core::drc::is_packed_source(&path)? {
+        let mut candidate = path.as_os_str().to_owned();
+        candidate.push(".ice");
+        files.push(scope.check(&PathBuf::from(candidate))?);
     }
-    floe_app_core::drc::review::store::ReadTargets::select(path, reviewer)
+    let _permit = resources.drc(files)?;
+    floe_app_core::drc::select_review(&path, reviewer, stop)
 }
 pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     if c.help {
         println!("{HELP}");
         return Ok(0);
-    }
-    let read_targets = c
-        .read_reviewer
-        .as_ref()
-        .map(|tag| readonly_targets(c.drc.as_ref().unwrap(), tag))
-        .transpose()?;
-    if c.read_reviewer.is_some() {
-        eprintln!("[floe2-web] read-only reviewer: explicit ICE and derived adjacent/legacy sidecars only; no directory browsing or review writes");
     }
     // Claim/forward before Firefox or native discovery. A stale/busy owner is
     // an explicit error, never permission to create a second default instance.
@@ -633,6 +634,33 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     } else {
         None
     };
+    let read_selection = c
+        .read_reviewer
+        .as_ref()
+        .map(|tag| {
+            readonly_selection(
+                &resources,
+                drc_scope.as_ref().unwrap(),
+                c.drc.as_ref().unwrap(),
+                tag,
+                cancelled,
+            )
+        })
+        .transpose()?;
+    let read_sidecars = read_selection.as_ref().is_some_and(|s| s.targets.is_some());
+    if let Some(s) = &read_selection {
+        if let Some(warning) = &s.warning {
+            eprintln!("[floe2-web] {warning}");
+        }
+        eprintln!(
+            "[floe2-web] read-only reviewer: {}; no directory browsing or review writes",
+            if read_sidecars {
+                "ICE with derived adjacent/legacy sidecars"
+            } else {
+                "ASCII fallback; notes/waives unavailable without a current ICE cache"
+            }
+        );
+    }
     let sources = c
         .sources
         .iter()
@@ -725,15 +753,14 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         let catalog = service.catalog();
         let source_id = catalog["sources"][0]["source_id"].as_str().unwrap();
         let drc_scope = drc_scope.expect("DRC-specific registration scope");
-        let drc = if let Some(targets) = read_targets {
+        let drc = if let Some(selected) = read_selection {
             floe_web::drc::Service::start_readonly_review(
                 &resources,
                 drc_scope,
-                path,
+                selected,
                 c.drc_rules.as_deref(),
                 source_id,
                 c.read_reviewer.as_deref().unwrap(),
-                targets,
             )?
         } else {
             floe_web::drc::Service::start_with_rules(
@@ -766,7 +793,7 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         )
         .map_err(Error::input)?;
     }
-    if let Some(tag) = &c.read_reviewer {
+    if let Some(tag) = c.read_reviewer.as_ref().filter(|_| read_sidecars) {
         Gateway::enable_drc_readonly_review(
             &mut gate,
             tag,
