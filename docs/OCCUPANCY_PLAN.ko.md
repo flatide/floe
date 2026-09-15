@@ -252,7 +252,7 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 | M2 | renderd 전용 마스크 경로(단일 소스), 5개 조건, 레벨 선택, 레이어 순서, pick/snap 제외, 킬 스위치, gate 2·3·5 | **완료 2026-09-11(RENDERD 0.12.80, §12)**: 단일 소스 keep 광역뷰가 요약으로 그려짐, cull·근접뷰·exact·depth 제한·킬 스위치 픽셀 불변 |
 | M3 | 플래너에서 요약 레이어의 페이지·계층 생략, `--explain summary`, 카운터 | **완료 2026-09-11(RENDERD 0.12.81, §12)**: 요약 레이어의 페이지 0, 프레임 없는 요청은 요약 전용 서브트리 프루닝(wc_cells 0) |
 | M4 | 덱 통합(소스 뷰 레벨, pass 대체, wash 억제, depth/exact 조건), gate 4 | **완료 2026-09-11(RENDERD 0.12.81, §12)**: mag 0.2 덱의 fit 뷰 픽셀 == 단일 소스 요약 픽셀. 덱 fit 뷰 시간은 실칩 실측 대기 |
-| M5 | 실칩 실측 8, base cell·기본 on/off 확정, 문서(JOBDECK §10·FLOE2_OPTIMIZATION 결함 B) | 목표 시간·지표 달성 여부로 기본값 결정 |
+| M5 | 실칩 실측 8, base cell·기본 on/off 확정, 문서(JOBDECK §10·FLOE2_OPTIMIZATION 결함 B) | **진행 중(2026-09-15, §12)**: 8-a·8-c 생성(추출본 4.4 s·17 MB, 덱 667소스 9.9 분·172 MB), 8-d 뷰어(150 × 103 mm 덱 뷰 16.7 s → 0.15 s, depth 무관) 완료. 남은 것: 기본 on/off·base cell 결정, 8-b 품질 샷(5 mm 뷰 요약 vs exact), charge당 비용(scan) |
 
 각 단계는 킬 스위치와 gate를 갖추고 배터리 통과 뒤 커밋한다. 버전: Rust 변경 단계는
 RENDERD_VERSION. `CACHE_VERSION`은 불변, `.ovo`는 자체 형식 버전.
@@ -527,6 +527,14 @@ depth가 무제한이거나 소스 계층 높이 이상이거나 그 레이어�
 2/0 상자를 가진 자식(높이 1)을 두고 — 1/0은 depth 0에서도 요약 on·픽셀 동일, 2/0은
 depth 0에서 none(depth)·depth 1에서 on, 둘 다 보이면 depth 0에서 1/0만; 덱(1/0)은
 depth 0·1 모두 요약 pass 1·픽셀 동일.
+
+실칩 확인(2026-09-15, 0.12.88, 같은 뷰·509 passes): depth 6 → `10/10 pages`(깊이
+7에 페이지가 있는 레이어의 pass만 페이지 경로), depth 7 → `0/0 pages`, full →
+`0/0 pages`(전부 요약). 프레임 시간: depth 6 `10 tiles, 156 ms = 55 load + 157 draw`,
+depth 7 `0 tiles, 154 ms = 55 load + 156 draw`, full `0 tiles, 150 ms = 53 load + 157
+draw` — 0.12.86의 같은 뷰 14,851 pages·16,721 ms(3,275 load + 11,851 draw)에서 약
+100배. depth 6에 남은 10페이지는 시간에 나타나지 않는다. **8-d 종결**; fit 뷰 프레임
+시간 목표(1 s 이하, §8 gate 6)는 실칩 덱에서 충족.
 
 ### 실측 8-c: 단일 소스 재생성 (2026-09-15, 0.12.120 / RENDERD 0.12.85)
 
