@@ -9,7 +9,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
     Json, Router,
 };
 use floe_app_core::{Error, ErrorKind, Result};
@@ -247,7 +247,24 @@ pub(crate) fn routes() -> Router<transport::Gate> {
     Router::new()
         .route("/api/v1/launch", get(read))
         .route("/api/v1/launch/poll/{after}", get(poll))
-        .route("/api/v1/launch/{id}", post(submit))
+        .route("/api/v1/launch/{id}", get(receipt).post(submit))
+}
+async fn receipt(
+    State(gate): State<transport::Gate>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(e) = transport::http_session(&gate, &headers) {
+        return transport::error(e);
+    }
+    let Some(launch) = &gate.launch else {
+        return transport::error(StatusCode::NOT_FOUND);
+    };
+    let state = launch.state.lock().unwrap();
+    match state.entries.iter().find(|e|e.id==id) {
+        Some(entry)=>Json(json!({"id":entry.id,"phase":entry.phase,"receipt":entry.receipt.as_ref().map(|(_,v)|v)})).into_response(),
+        None=>transport::error(StatusCode::NOT_FOUND),
+    }
 }
 async fn read(State(gate): State<transport::Gate>, headers: HeaderMap) -> Response {
     read_after(gate, headers, None).await

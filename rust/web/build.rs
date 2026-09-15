@@ -24,6 +24,7 @@ fn main() {
         "ui/drc-groups.js",
         "ui/panel-state.js",
         "ui/app.js",
+        "ui/launcher.js",
         "ui/settings.js",
         "ui/defaults.js",
         "ui/about.js",
@@ -66,6 +67,21 @@ fn main() {
         hash.update([0]);
         hash.update(fs::read(path).expect("bundle source"));
     }
+    // The local IPC build fence must also change for dirty launcher/core
+    // changes, not just browser assets or the last Git commit. No runtime
+    // binary hashing or filesystem traversal on a warm CLI handoff.
+    for dir in ["../app/src", "../app-core/src"] {
+        hash_tree(Path::new(dir), &mut hash);
+    }
+    for path in [
+        "../Cargo.lock",
+        "../app/Cargo.toml",
+        "../app-core/Cargo.toml",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+        hash.update(path.as_bytes());
+        hash.update(fs::read(path).expect("application identity"));
+    }
     let id = format!("{:x}", hash.finalize());
     println!("cargo:rustc-env=FLOE_WEB_BUNDLE={id}");
     let html = fs::read_to_string("ui/index.html")
@@ -76,4 +92,21 @@ fn main() {
         html,
     )
     .unwrap();
+}
+fn hash_tree(dir: &Path, hash: &mut Sha1) {
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .expect("application sources")
+        .map(|e| e.expect("source entry").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            hash_tree(&path, hash);
+        } else if path.extension().is_some_and(|v| v == "rs") {
+            hash.update(path.to_string_lossy().as_bytes());
+            hash.update([0]);
+            hash.update(fs::read(path).expect("application source"));
+        }
+    }
 }

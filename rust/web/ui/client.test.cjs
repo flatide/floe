@@ -14,6 +14,8 @@ const exitEnabled=process.env.FLOE_TEST_EXIT==='1';
 const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
 const modeEnabled=process.env.FLOE_TEST_MODE==='1';
 const startupEnabled=process.env.FLOE_TEST_STARTUP==='1';
+const launchEnabled=process.env.FLOE_TEST_LAUNCH==='1';
+let launchState={revision:'0',pending:null},launchPolls=[],launchRegistered=false,launchReceipt=null;
 let startupReceipt=null,startupFail=true;
 const startupBody={depth:'17',detail:'high',thin:'keep',frames:true,labels:false,navigation:{kind:'goto',center_um:['1.25','-2.5']}};
 let modeOperation=null,serverMode='chip',modeReadFailure=false,modeViewReadFailure=false,modeLosePost=false,modeNumber=0;
@@ -74,6 +76,7 @@ const document={hidden:false,activeElement:null,title:'',body:new Element('','bo
     createTextNode:text=>Object.assign(new Element(''),{textContent:text}),
     addEventListener:(k,f)=>listen(docListeners,k,f)};
 class XHR {
+    abort(){if(this.onabort){this.onabort();}}
     open(method,path){this.method=method;this.path=path;}
     setRequestHeader(k,v) {if(!this.headers)this.headers={};this.headers[k]=v;}
     getResponseHeader() {return this.path.includes('/settings/')&&this.method==='GET'?'text/plain; charset=utf-8':'application/json';}
@@ -86,7 +89,18 @@ class XHR {
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
         else if(startupEnabled&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=204;}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled};}
+        else if(launchEnabled&&this.path==='/api/v1/launch'){value=launchState;}
+        else if(launchEnabled&&this.path.startsWith('/api/v1/launch/poll/')){launchPolls.push(this);return;}
+        else if(launchEnabled&&this.path.startsWith('/api/v1/launch/')){
+            if(this.method==='POST'){
+                if(body.action==='open'){
+                    open=true;lastSeq=body.seq;snapshot.state_rev=P.next(snapshot.state_rev);
+                    value=launchReceipt={phase:'submitted',operation:{seq:lastSeq}};
+                }else{value=launchReceipt={phase:body.action==='present'?'presented':'dismissed'};}
+                launchState={revision:P.next(launchState.revision),pending:null};
+            }else{value={phase:launchReceipt?'submitted':'ready',receipt:launchReceipt};}
+        }
         else if(this.path==='/api/v1/defaults/prepare') {value={token:'d'.repeat(64),view_id:body.view_id,state_rev:body.state_rev,name:'synthetic.oas.layerprops',title:'synthetic',mode:'level',levels:null,rows:1,bytes:'24',replaces_existing:false,expires_in_ms:'30000',scope:'shared_design_default',affects:'future_opens'};}
         else if(this.path==='/api/v1/defaults/revoke') {value=null;status=204;}
         else if(this.path==='/api/v1/defaults') {
@@ -100,7 +114,7 @@ class XHR {
             }else{value=clipState();}
         }
         else if(this.method==='DELETE'&&this.path==='/api/v1/artifacts/1'){clipFile=null;clipOp.artifact.available=false;clipOp.artifact.expires_in_ms=null;value=null;status=204;}
-        else if(this.path==='/api/v1/catalog') {value={sources:[{source_id:'src',title:'synthetic',deck:false,levels:0},{source_id:'deck',title:'synthetic deck',deck:true,levels:2}]};}
+        else if(this.path==='/api/v1/catalog') {value={sources:launchEnabled&&!launchRegistered?[]:[{source_id:'src',title:'synthetic',deck:false,levels:0},{source_id:'deck',title:'synthetic deck',deck:true,levels:2}]};}
         else if(this.path==='/api/v1/catalog/deck/levels/0') {value={levels:[{id:'1',title:'Level 1'},{id:'2',title:'Level 2'}],next:null};}
         else if(this.path==='/api/v1/startup') {value={confirm_levels:startupEnabled,request:{kind:'open',seq:'1',source_id:modeEnabled||startupEnabled?'deck':'src',mode:modeEnabled?'chip':'level',levels:modeEnabled?{mode:'only',ids:['1']}:{mode:'all'},body:startupEnabled?startupBody:{detail:'high'}}};}
         else if(this.path==='/api/v1/operations'&&this.method==='POST') {
@@ -118,6 +132,7 @@ class XHR {
         else if(this.path.endsWith('/minimap/full')){value={view_id:viewId,dataset_revision:'1',base:'full',size:180,pixels:'0'.repeat(32400)};}
         else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:1,start:0,next:null,rows:[layerRow]};}
         else {throw new Error('Unexpected HTTP '+this.path);}
+        if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
         if(body&&body.kind==='mode'&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
         setImmediate(()=>this.onload());
@@ -147,6 +162,7 @@ window.FloeAbout=require('./about.js');
 window.FloeSessionExit=require('./session-exit.js');
 window.FloeNotices=require('./notices.js');
 window.FloeMinimap=require('./minimap.js');
+window.FloeLauncher=require('./launcher.js');
 window.FloeDRCNotes=require('./drc-notes.js');
 window.FloeDRCNoteDisplay=require('./drc-note-display.js');
 window.FloeDRCWaives=require('./drc-waives.js');
@@ -182,6 +198,38 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(launchEnabled){
+        const posts=()=>requests.filter(r=>r.method==='POST'&&r.path.startsWith('/api/v1/launch/'));
+        async function push(id,confirm=false){
+            await wait(()=>launchPolls.length);
+            launchRegistered=true;launchReceipt=null;
+            launchState={revision:P.next(launchState.revision),pending:{id:id.repeat(64),phase:'ready',confirm_levels:confirm,
+                request:{kind:'open',seq:'1',source_id:confirm?'deck':'src',mode:'level',levels:{mode:'all'},body:{navigation:{kind:'goto',center_um:['1','2'],width_um:'700'}}}}};
+            const xhr=launchPolls.shift();xhr.status=200;xhr.responseText=JSON.stringify(launchState);xhr.onload();
+        }
+        await wait(()=>launchPolls.length);
+        assert(node('open').disabled&&node('index').disabled);assert.equal(sockets.length,0);
+        node('notice').textContent='previous source error';node('notice').hidden=false;
+        await push('a');await wait(()=>sockets.length===1);hello(sockets[0]);
+        assert.deepEqual(posts()[0].body,{action:'open',seq:'1',pixels:[100,80],levels:{mode:'all'}});
+        assert(node('notice').hidden,'previous source error survived successful handoff');
+        assert(!requests.some(r=>r.method==='POST'&&r.path==='/api/v1/operations'));
+        await push('b',true);await wait(()=>!node('launch-open').hidden);
+        assert.equal(posts().length,1);assert(node('source').disabled&&node('open').disabled);
+        await wait(()=>node('level-list').querySelectorAll('input').length===2);
+        node('levels-all').checked=false;node('levels-all').onchange();
+        const selected=node('level-list').querySelectorAll('input')[1];selected.checked=true;selected.onchange();
+        listeners.pagehide();listeners.pageshow({persisted:true});await wait(()=>sockets.length===2);hello(sockets[1]);
+        assert.equal(node('source').value,'deck','live view restore replaced pending CLI source');
+        assert(!node('levels-all').checked&&selected.checked,'reconnect discarded explicit levels');
+        await wait(()=>!node('launch-open').disabled);
+        node('launch-open').onclick();await wait(()=>posts().length===2&&node('launch-panel').hidden);
+        assert.equal(posts()[1].body.seq,'2');assert.equal(posts()[1].body.view_id,viewId);
+        assert.equal(posts()[1].body.state_rev,'2');assert.equal(snapshot.state_rev,'3');
+        assert.deepEqual(posts()[1].body.levels,{mode:'only',ids:['2']});
+        assert.equal(sockets.length,2,'handoff must not independently restart a frame stream');
+        listeners.pagehide();console.log('WEB LAUNCH CLIENT: ALL OK (empty workspace, catalog refresh, one measured open, level approval, same-view CAS, no ordinary open)');return;
+    }
     if(startupEnabled){
         const commands=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations');
         await wait(()=>node('level-options').open);

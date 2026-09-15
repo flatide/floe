@@ -225,6 +225,12 @@ M4g-7b는 trusted service 등록과 공유 게시 보호를 연결했다. 동일
 M4g-7c는 trusted 제안→owner 접수 API, 여러 소스의 원자 등록과 live view의
 캐시 보존/안전 교체까지 추가한다. CLI producer와 브라우저 소비자를 아직 연결하지
 않았으므로 위 옵션을 제품 parity 완료로 계산하지 않는다([M4 §49](WEBUI_M4.ko.md)).
+M4g-7d에서 위 producer/consumer를 연결했다. `floe2-web`/`floe2-web view`는 빈 창
+시작 또는 기존 창 present 요청이며, `view FILE`은 비동기 등록→레벨 선택→측정한
+viewport로 open한다. `view --multi` 및 명시 process/DRC 옵션은 독립 프로세스다.
+소스·cache를 자동 생성/교체하지 않으며 같은 소스·모드·레벨은 worker를 재사용한다.
+현재 빈 창의 입력 경로는 별도 CLI 전달이다. 브라우저 파일 선택기, bare FILE shorthand,
+전체 미이관 옵션, Firefox/ETX의 창 foreground 수용은 아직 미완료다([M4 §50](WEBUI_M4.ko.md)).
 
 ### 2.10 jobdeck — M1a (10개 옵션)
 

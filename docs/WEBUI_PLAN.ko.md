@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-15(M4g-7c 전달 제안·안전한 view 교체).
+작성 2026-08-29, 갱신 2026-09-15(M4g-7d CLI 전달·빈 웹 창 연결).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -98,8 +98,11 @@ M4g-7b에서 trusted service 소스 추가/재사용과 기본값·DRC 게시의
 CLI forwarding/`--multi`와 브라우저의 빈 창 흐름은 아직 미완료다.
 M4g-7c에서 유계 launcher 제안/owner 접수 API와 다중 소스 원자 등록,
 동일 소스 캐시 보존·revision 검사 후 단일 worker 교체를 연결했다([M4 §49](WEBUI_M4.ko.md)).
-이 단계의 gateway capability는 trusted attach 때만 켜지며, 제품 CLI와 브라우저의
-자동 전달/레벨 선택 소비자 연결은 다음 단계다. 일반 실행의 기본 동작은 아직 바뀌지 않았다.
+이 단계의 gateway capability는 trusted attach 때만 켜진다.
+M4g-7d에서 `floe2-web`의 인자 없는 빈 창/기존 창 전달과 `view --multi`, 비동기
+등록·레벨 질문·브라우저 소비자를 연결했다([M4 §50](WEBUI_M4.ko.md)). 같은 파일의
+캐시는 유지하며 불명확한 결과는 같은 요청만 확인/재시도한다. GTK 기본 실행기,
+브라우저 파일 선택기·남은 CLI 옵션·현장 창 focus 수용은 별도다.
 나머지 내보내기와 브라우저 다운로드/현장 수용은 남아 있다([M4 기록](WEBUI_M4.ko.md)).
 전체 조작 parity와 M0/Firefox/ETX 현장 검증은 아직 완료되지 않았다.
 상세 범위는 [M1b 기록](WEBUI_M1B.ko.md)과 [M2 기록](WEBUI_M2.ko.md). 여기의 M0~M5는 **웹 전환 단계**이며

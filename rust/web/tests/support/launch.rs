@@ -142,6 +142,8 @@ async fn launcher_once_only_navigation_and_atomic_worker_replacement() {
     // Owner session, same-origin and CSRF remain mandatory. There is no path
     // registration or arbitrary operation body in the browser's action DTO.
     assert_eq!(h.raw("GET", "/api/v1/launch", &[], "").await.0, 401);
+    assert_eq!(h.raw("GET", &endpoint, &[], "").await.0, 401);
+    assert!(h.call(&l, "GET", &endpoint, Value::Null).await.1["receipt"].is_null());
     assert_eq!(
         h.raw("POST", &endpoint, &[], &action(1, None).to_string())
             .await
@@ -182,6 +184,10 @@ async fn launcher_once_only_navigation_and_atomic_worker_replacement() {
     let receipt = h.call(&l, "POST", &endpoint, request.clone()).await;
     assert_eq!(receipt.0, 200, "{:?}", receipt);
     assert_eq!(receipt.1["phase"], "submitted");
+    assert_eq!(
+        h.call(&l, "GET", &endpoint, Value::Null).await.1["receipt"],
+        receipt.1
+    );
     assert_eq!(h.finished(&l, 1).await["phase"], "succeeded");
     assert_eq!(h.call(&l, "POST", &endpoint, request).await.1, receipt.1);
     assert_eq!(h.call(&l, "POST", &endpoint, action(2, None)).await.0, 409);

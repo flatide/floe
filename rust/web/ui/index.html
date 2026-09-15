@@ -28,6 +28,7 @@
   <script defer src="/assets/@@BUNDLE@@/notices.js"></script>
   <script defer src="/assets/@@BUNDLE@@/about.js"></script>
   <script defer src="/assets/@@BUNDLE@@/session-exit.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/launcher.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body>
@@ -49,6 +50,12 @@
         <details id="level-options"><summary>Levels to load</summary><label class="check"><input id="levels-all" type="checkbox" checked> All levels</label><div id="level-list"></div><button id="level-more" hidden>More levels</button></details>
         <div class="button-row"><button id="open" class="primary">Open layout</button><button id="close" disabled>Close</button></div>
         <p id="source-note" class="note">Sources are registered by the local launcher.</p>
+        <div id="launch-panel" hidden>
+          <p id="launch-status" class="note" role="status"></p>
+          <button id="launch-open" type="button" hidden>Open requested layout</button>
+          <button id="launch-check" type="button" hidden>Check / retry same request</button>
+          <button id="launch-dismiss" type="button">Dismiss request</button>
+        </div>
       </section>
       <section class="display-panel">
         <details id="minimap-panel" open hidden>

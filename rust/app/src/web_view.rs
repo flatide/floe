@@ -1,4 +1,5 @@
 //! Trusted local launcher; browser requests never choose paths/binaries.
+mod handoff;
 use floe_app_core::{
     cache,
     jobdeck::index::parse_levels,
@@ -29,8 +30,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
+const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
 
+  --multi                  Independent workspace; do not own/forward the default instance
   --goto X,Y[,WIDTH]        Initial centre; omitted width keeps fit zoom (um)
   --depth full|N            Default 0; goto/DRC/jobdeck default full (999 = full)
   --detail low|medium|high|exact  Initial detail (default medium)
@@ -62,6 +64,9 @@ const HELP: &str = "Usage: floe2-web view SOURCE [SOURCE ...] [OPTIONS]
   --help                   Show this help
 
 This development command does not replace the GTK floe2 launcher.
+Default instance: same UID + DISPLAY (headless supported), separate from GTK.
+Later calls queue an open in that window; acceptance is not a rendered-frame ACK.
+Explicit process/DRC/session options start independently. --no-open alone may own the instance.
 No automatic indexing or Python fallback. Paths are local-launcher inputs only.
 Binds only 127.0.0.1; stops on Ctrl+C or End session.
 Managed capacity: 16 CPU slots, 4 reserved for foreground; index jobs <=12.
@@ -77,6 +82,7 @@ The session link is a one-time credential; do not share or log it.";
 #[derive(Debug)]
 pub struct Command {
     help: bool,
+    independent: bool,
     sources: Vec<PathBuf>,
     roots: Vec<PathBuf>,
     initial: Value,
@@ -102,6 +108,7 @@ pub struct Command {
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command {
         help: false,
+        independent: false,
         sources: Vec::new(),
         roots: Vec::new(),
         initial: json!({}),
@@ -141,6 +148,28 @@ pub fn parse(args: &[String]) -> Result<Command> {
             .split_once('=')
             .map_or((arg.as_str(), None), |(k, v)| (k, Some(v)));
         let toggle_value = inline.is_some() || args.get(i).is_some_and(|v| v == "on" || v == "off");
+        if matches!(
+            key,
+            "--multi"
+                | "--jobs"
+                | "--raster-jobs"
+                | "--budget-mb"
+                | "--png"
+                | "--raw"
+                | "--frame-cache"
+                | "--refinement"
+                | "--perf-baseline"
+                | "--port"
+                | "--session-file"
+                | "--firefox"
+                | "--drc"
+                | "--drc-waives"
+                | "--drc-rules"
+                | "--drc-reviewer"
+                | "--drc-edit-waives"
+        ) {
+            c.independent = true;
+        }
         let mut value = || -> Result<&str> {
             if let Some(v) = inline {
                 return Ok(v);
@@ -160,6 +189,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
             }
         };
         match key {
+            "--multi" => flag()?,
             "--help" | "-h" => {
                 flag()?;
                 c.help = true;
@@ -301,8 +331,17 @@ pub fn parse(args: &[String]) -> Result<Command> {
     if c.drc_edit_waives && c.drc_reviewer.is_none() {
         return Err(Error::input("--drc-edit-waives requires --drc-reviewer"));
     }
-    if c.sources.is_empty() || c.sources.len() > 32 {
-        return Err(Error::input("view requires 1..32 registered sources"));
+    if c.sources.len() > 32 {
+        return Err(Error::input("view accepts at most 32 sources"));
+    }
+    if c.sources.is_empty()
+        && (c.drc.is_some()
+            || c.levels.is_some()
+            || c.mode != "level"
+            || c.initial != json!({})
+            || c.perf_baseline)
+    {
+        return Err(Error::input("display/DRC/level options require a source"));
     }
     if c.roots.len() > 32 {
         return Err(Error::input("too many approved roots"));
@@ -426,6 +465,18 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         println!("{HELP}");
         return Ok(0);
     }
+    // Claim/forward before Firefox or native discovery. A stale/busy owner is
+    // an explicit error, never permission to create a second default instance.
+    let owner = if c.independent {
+        None
+    } else {
+        match handoff::claim()? {
+            floe_app_core::instance::Claim::Owner(owner) => Some(owner),
+            floe_app_core::instance::Claim::Running(endpoint) => {
+                return handoff::forward(&endpoint, &c, cancelled)
+            }
+        }
+    };
     let firefox = if c.no_open {
         None
     } else {
@@ -474,7 +525,11 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     }
     roots.sort();
     roots.dedup();
-    let scope = AccessScope::new(&roots)?;
+    let scope = if c.sources.is_empty() {
+        None
+    } else {
+        Some(AccessScope::new(&roots)?)
+    };
     // An explicit review pack must not broaden a deck's TC dependency roots.
     // Only --root grants extra roots to both registrations.
     let drc_scope = if c.drc.is_some() {
@@ -487,20 +542,34 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     let sources = c
         .sources
         .iter()
-        .map(|p| RegisteredSource::register(Arc::clone(&scope), p, cancelled))
+        .map(|p| {
+            RegisteredSource::register(
+                Arc::clone(scope.as_ref().expect("source scope")),
+                p,
+                cancelled,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let level_env = std::env::var("FLOE_JOBDECK_LEVELS").ok();
-    let (levels, confirm_levels) = startup_levels(
-        c.levels,
-        sources[0].deck,
-        sources[0].levels.len(),
-        level_env.as_deref(),
-    )?;
-    sources[0].validate_levels(levels.as_ref())?;
-    if !sources[0].deck && c.mode != "level" {
-        return Err(Error::input("chip/source-layer mode requires a jobdeck"));
-    }
-    let initial = startup_body(c.initial, sources[0].deck, c.drc.is_some());
+    let preferences = if let Some(first) = sources.first() {
+        let (levels, confirm) = startup_levels(
+            c.levels,
+            first.deck,
+            first.levels.len(),
+            level_env.as_deref(),
+        )?;
+        first.validate_levels(levels.as_ref())?;
+        if !first.deck && c.mode != "level" {
+            return Err(Error::input("chip/source-layer mode requires a jobdeck"));
+        }
+        Some((
+            levels,
+            confirm,
+            startup_body(c.initial, first.deck, c.drc.is_some()),
+        ))
+    } else {
+        None
+    };
     let indexer = Indexer::discover(&Discovery::local()?)?;
     let service = Service::start_configured(
         sources,
@@ -512,17 +581,13 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             frame_cache: c.frame_cache,
         },
     )?;
-    let request = json!({"kind":"open","seq":"1","source_id":service.catalog()["sources"][0]["source_id"],"mode":c.mode,
-        "levels":levels.map_or_else(||json!({"mode":"all"}),|ids|json!({"mode":"only","ids":ids.iter().map(i64::to_string).collect::<Vec<_>>()})),"body":initial});
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, c.port))?;
     listener.set_nonblocking(true)?;
-    let (mut gate, secret) = Gateway::with_startup_options(
-        listener.local_addr()?,
-        Arc::clone(&service),
-        request,
-        confirm_levels,
-    )
-    .map_err(Error::input)?;
+    let (mut gate, secret) = if let Some((levels,confirm_levels,initial)) = preferences {
+        let request = json!({"kind":"open","seq":"1","source_id":service.catalog()["sources"][0]["source_id"],"mode":c.mode,
+            "levels":handoff::levels_json(levels),"body":initial});
+        Gateway::with_startup_options(listener.local_addr()?,Arc::clone(&service),request,confirm_levels)
+    } else { Gateway::with_service(listener.local_addr()?,Arc::clone(&service)) }.map_err(Error::input)?;
     Gateway::attach_build(&mut gate, crate::selfcheck::build_info()).map_err(Error::input)?;
     let notices = match crate::selfcheck::notice_catalog(cancelled) {
         Ok(Some(c)) => floe_web::about::Notices::Ready(Arc::new(c)),
@@ -597,6 +662,13 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         )
         .map_err(Error::input)?;
     }
+    let launches = floe_web::launch::Launches::new();
+    if owner.is_some() {
+        Gateway::attach_launches(&mut gate, Arc::clone(&launches)).map_err(Error::input)?;
+    }
+    let mut instance = owner
+        .map(|owner| handoff::Runtime::start(owner, Arc::clone(&service), launches))
+        .transpose()?;
     let mut browser = firefox
         .map(|path| floe_app_core::browser::Browser::start(&path, &session.directory, &url))
         .transpose()?;
@@ -613,6 +685,9 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         let listener = tokio::net::TcpListener::from_std(listener)?;
         transport::serve(listener, gate, async {
             while cancelled.load(Ordering::Relaxed) == 0 && !service.is_finished() {
+                if instance.as_ref().is_some_and(handoff::Runtime::is_finished) {
+                    break;
+                }
                 if let Some(browser) = &browser {
                     match browser.exited() {
                         Ok(true) => break,
@@ -628,6 +703,9 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         })
         .await
     })?;
+    if let Some(instance) = &mut instance {
+        instance.close()?;
+    }
     if let Some(browser) = &mut browser {
         browser.close()?;
     }
@@ -779,7 +857,7 @@ mod tests {
         assert_eq!(c.initial["labels"], true);
         assert_eq!(c.initial["frames"], false);
         for s in [
-            "view",
+            "view --goto 0,0,100",
             "view a --jobs 0",
             "view a --raster-jobs 17",
             "view a --goto 0,0,-1",
@@ -824,5 +902,39 @@ mod tests {
         );
         assert_eq!(c.drc, Some(PathBuf::from("b.ice")));
         assert_eq!(c.drc_waives, Some(PathBuf::from("side")));
+    }
+    #[test]
+    fn empty_window_and_process_options_have_explicit_instance_policy() {
+        assert!(parse(&args("view")).unwrap().sources.is_empty());
+        assert!(!parse(&args("view --no-open")).unwrap().independent);
+        assert!(parse(&args("view --multi --no-open")).unwrap().independent);
+        for options in [
+            "--jobs 2",
+            "--raster-jobs 1",
+            "--budget-mb 512",
+            "--png",
+            "--raw",
+            "--frame-cache off",
+            "--refinement off",
+            "--perf-baseline",
+            "--port 0",
+            "--session-file /tmp/session.json",
+            "--firefox /tmp/firefox",
+            "--drc /tmp/results.db",
+        ] {
+            assert!(
+                parse(&args(&format!("view /tmp/a.oas {options}")))
+                    .unwrap()
+                    .independent,
+                "{options}"
+            );
+        }
+        assert!(
+            !parse(&args(
+                "view a.oas --goto 1,2,100 --thin auto --depth 99 --detail high"
+            ))
+            .unwrap()
+            .independent
+        );
     }
 }

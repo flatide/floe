@@ -14,7 +14,7 @@
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
     let settings = null, defaults = null, about = null, sessionExit = null;
-    let minimap = null;
+    let minimap = null, launcher = null;
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
@@ -24,7 +24,7 @@
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
     let catalog = [], currentId = '', currentSource = '', currentMode = 'level', ownerBusy = false, submitting = false;
     let modeReceipt = '', modeSupported = false;
-    let pendingStartup = null;
+    let pendingStartup = null, startupWaiting = false;
     let layerStart = 0, layerNext = null, layerLoad = 0, layerKey = '', selectedStyle = null;
     let levelNext = null, levelSource = '', levelIds = new Set(), levelLoad = 0, levelBusy = false;
     let lastDigit = '', lastDigitAt = 0;
@@ -76,7 +76,7 @@
                     if (xhr.responseText) { value = JSON.parse(xhr.responseText); }
                 } catch (e) { reject(e); return; }
                 if (xhr.status < 200 || xhr.status >= 300) {
-                    if (xhr.status === 401) { stopped = true; connection('Session expired', false); }
+                    if (xhr.status === 401) { stopped = true; if (launcher) { launcher.stop(); } connection('Session expired', false); }
                     const failure = new Error(message(value && value.error || ('HTTP ' + xhr.status)));
                     failure.status = xhr.status; failure.code = value && value.error;
                     reject(failure);
@@ -202,9 +202,12 @@
         el('overlays').disabled=!live();
         el('labels').disabled = !enabled || !state.capabilities.labels;
         el('font-px').disabled = !enabled || !state.capabilities.labels;
-        el('open').disabled = submitting || ownerBusy || !!live();
+        const launchPending = launcher && launcher.blocked(), source = catalog.find(function (s) { return s.source_id === el('source').value; });
+        el('open').disabled = submitting || ownerBusy || !!live() || !source || launchPending;
+        el('source').disabled = !catalog.length || launchPending;
+        el('mode').disabled = !source || !source.deck || launchPending;
         el('close').disabled = !currentId || submitting || ownerBusy;
-        el('index').disabled = submitting || ownerBusy;
+        el('index').disabled = submitting || ownerBusy || !source;
         el('live-mode-row').hidden = !modeSupported || !state || !state.capabilities.mode;
         el('live-mode').disabled = !deckModeReady();
         el('live-mode').value = currentMode;
@@ -215,6 +218,7 @@
         if (measurement) { measurement.changed(); }
         if (clipper) { clipper.changed(); }
         if (snapshots) { snapshots.changed(); }
+        if (launcher) { launcher.changed(); }
     }
     function queryContext() {
         if (!state || !currentId || !lastPlacement) { return null; }
@@ -445,14 +449,18 @@
         const changed = currentId !== current.view.view_id;
         if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; layerStart = 0; layerKey = ''; selectedStyle = null; el('style-editor').hidden = true; }
         currentId = current.view.view_id; currentSource = current.source_id; currentMode = current.mode; state = current.view;
-        if (pendingStartup && pendingStartup.source_id === currentSource) { pendingStartup = null; }
         el('document-title').textContent = current.title; document.title = current.title + ' · floe2';
-        el('source').value = currentSource; el('mode').value = current.mode;
-        sourceSelection();
-        levelIds = new Set(current.levels || []); el('levels-all').checked = current.levels === null;
-        Array.from(el('level-list').querySelectorAll('input')).forEach(function (box) {
-            box.checked = levelIds.has(box.value); box.disabled = el('levels-all').checked;
-        });
+        // Reconnection restores the live view, not a different pending CLI
+        // proposal's source/level form. Its explicit selection must survive.
+        if (!launcher || !launcher.blocked()) {
+            if (pendingStartup && pendingStartup.source_id === currentSource) { pendingStartup = null; }
+            el('source').value = currentSource; el('mode').value = current.mode;
+            sourceSelection();
+            levelIds = new Set(current.levels || []); el('levels-all').checked = current.levels === null;
+            Array.from(el('level-list').querySelectorAll('input')).forEach(function (box) {
+                box.checked = levelIds.has(box.value); box.disabled = el('levels-all').checked;
+            });
+        }
         controls(); connect();
     }
     async function loadLayers() {
@@ -508,8 +516,8 @@
     }
     function sourceSelection() {
         const source = catalog.find(function (r) { return r.source_id === el('source').value; });
-        if (!source) { return; }
-        if (pendingStartup && pendingStartup.source_id !== source.source_id) { pendingStartup = null; }
+        if (!source) { el('source-note').textContent = 'No source registered in this workspace.'; el('level-options').hidden = true; controls(); return; }
+        if (pendingStartup && pendingStartup.source_id !== source.source_id) { pendingStartup = null; startupWaiting = false; }
         el('mode').disabled = !source.deck; el('level-options').hidden = !source.deck;
         if (!source.deck) { el('mode').value = 'level'; }
         if (levelSource !== source.source_id) {
@@ -518,6 +526,14 @@
             if (source.deck) { moreLevels().catch(report); }
         }
         el('source-note').textContent = source.deck ? 'Jobdeck · select levels before opening.' : 'OASIS layout · current index required.';
+        controls();
+    }
+    async function refreshCatalog() {
+        const selected = el('source').value;
+        catalog = (await http('GET', '/api/v1/catalog')).sources;
+        el('source').textContent = '';
+        catalog.forEach(function (s) { const option = document.createElement('option'); option.value = s.source_id; option.textContent = s.title; el('source').appendChild(option); });
+        el('source').value = catalog.some(function (s) { return s.source_id === selected; }) ? selected : catalog.length ? catalog[0].source_id : '';
     }
     function levels() {
         if (el('levels-all').checked) { return {mode: 'all'}; }
@@ -552,7 +568,10 @@
             if (!currentId) { el('empty-message').textContent = message(last.error || last.phase); connection('Local · ready', true); }
         }
         if (ownerBusy) { operationTimer = setTimeout(function () { operationState().catch(report); }, 500); }
-        else if (last && last.kind === 'open' && last.phase === 'succeeded' && last.view_id !== currentId) { await restore(); }
+        else if (last && last.kind === 'open' && last.phase === 'succeeded') {
+            if (last.view_id !== currentId) { await restore(); }
+            else if (pendingStartup && pendingStartup.source_id === currentSource) { pendingStartup = null; }
+        }
         else if (last && last.kind === 'mode' && last.seq !== modeReceipt) {
             await restore(); modeReceipt = last.seq;
             if (last.phase === 'succeeded') { notice(''); }
@@ -584,6 +603,7 @@
         const request = Object.assign({}, startup || {kind: 'open', mode: el('mode').value, source_id: el('source').value, levels: levels(), body: remembered ? remembered.body : {}});
         request.body = Object.assign({}, request.body, {pixels:dims().pixels});
         await submitOperation(request);
+        startupWaiting = false;
     }
     function prepareStartup(request) {
         el('source').value = request.source_id; sourceSelection();
@@ -619,9 +639,7 @@
         if (caps.protocol !== 1 || caps.bundle !== bundle) { throw new Error('Client/server version mismatch. Reload the page.'); }
         about.init(); sessionExit.init();
         modeSupported = caps.jobdeck_modes === true;
-        catalog = (await http('GET', '/api/v1/catalog')).sources;
-        el('source').textContent = '';
-        catalog.forEach(function (s) { const option = document.createElement('option'); option.value = s.source_id; option.textContent = s.title; el('source').appendChild(option); });
+        await refreshCatalog();
         if (caps.drc) { await drcPanel.init(); }
         await clipper.init(caps.exports);
         snapshots.init(caps.snapshot_png);
@@ -635,13 +653,15 @@
             if (startup) {
                 prepareStartup(startup);
                 if (preferences.confirm_levels) {
+                    startupWaiting = true;
                     el('level-options').open = true;
                     el('empty-message').textContent = 'Choose jobdeck levels, then Open layout. No indexing or rendering has started.';
                     connection('Local · choose levels', true); el('open').focus();
                 } else { await openSource(startup); }
             }
-            else { el('empty-message').textContent = 'Choose a registered source and open its index.'; connection('Local · ready', true); }
+            else { el('empty-message').textContent = catalog.length ? 'Choose a registered source and open its index.' : caps.launcher ? 'Workspace ready. Run floe2-web view FILE to open a layout here.' : 'No registered sources. Restart this independent workspace with FILE.'; connection('Local · ready', true); }
         }
+        await launcher.init(caps.launcher);
     }
     el('source').onchange = sourceSelection;
     el('open').onclick = function () { openSource(null).catch(report); };
@@ -651,6 +671,7 @@
         catch (e) { report(e); }
     };
     async function endSession() {
+        if (launcher) { launcher.stop(); }
         if (minimap) { minimap.stop(); }
         about.stop();
         if (drcPanel) { drcPanel.stop(); }
@@ -903,12 +924,34 @@
     minimap=window.FloeMinimap.bind({el:el,document:document,http:http,state:function(){return !stopped&&!document.hidden&&live()&&epoch?state:null;},
         ready:function(){return !!epoch&&live()&&!inflight&&!accepted&&queue.length===0&&!(gesture&&gesture.active())&&!document.hidden;},
         navigate:nav,focus:function(){viewport.focus();}});
+    function launchReady() {
+        return !stopped && !document.hidden && !startupWaiting && !submitting && !ownerBusy && !inflight && !accepted && !queue.length &&
+            !(gesture && gesture.active()) && (!live() || ['idle','rendering'].includes(state.status));
+    }
+    launcher=window.FloeLauncher.bind({el:el,http:http,protocol:P,ready:launchReady,changed:controls,
+        setTimeout:function(fn,ms){return setTimeout(fn,ms);},clearTimeout:function(id){clearTimeout(id);},
+        loadPending:function(){return sessionStorage.getItem('floe-launch-pending:'+auth.session_id);},
+        savePending:function(value){const key='floe-launch-pending:'+auth.session_id;if(value===null){sessionStorage.removeItem(key);}else{sessionStorage.setItem(key,value);}},
+        present:function(){window.focus();},completed:operationState,
+        prepare:async function(item){await refreshCatalog();prepareStartup(item.request);if(item.confirm_levels){el('level-options').open=true;}controls();},
+        open:async function(item,send){
+            if(!launchReady()){throw new Error('Wait for pending view inputs before opening the CLI request.');}
+            if(el('source').value!==item.request.source_id){prepareStartup(item.request);throw new Error('Requested source restored. Review its levels before opening.');}
+            submitting=true;controls();
+            try{
+                const all=await operationState();if(all.active!==null){throw new Error('An operation is already running.');}
+                const current=await http('GET','/api/v1/view',undefined,true);
+                const input={action:'open',seq:P.next(all.last_seq),pixels:dims().pixels,levels:levels()};
+                if(current&&['idle','rendering'].includes(current.view.status)){input.view_id=current.view.view_id;input.state_rev=current.view.state_rev;}
+                ownerBusy=true;controls();notice('');await send(input);
+            }finally{try{await operationState();}finally{submitting=false;controls();pump();}}
+        }});
     document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); if (document.hidden) { finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (live() && !stopped) { connect(); } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).catch(report); }
+        if (event.persisted && auth && !stopped) { minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(operationState).then(restore).then(resized).then(function(){return launcher.resume();}).catch(report); }
     });
     start().catch(function (e) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; });
 }());

@@ -3953,3 +3953,92 @@ venv·합성 shared-default 게시 결과와 main/feature/jobdeck 작업은 보�
 로그: `/private/tmp/floe-launch-battery.log`, `floe-launch-owner.log`,
 `floe-launch-unit.log`, `floe-launch-clippy.log`, `floe-launch-msrv.log`,
 `floe-launch-linux-check.log`.
+
+## 50. M4g-7d — 실제 CLI 전달과 빈 웹 창
+
+§47–49의 소유권·등록·제안 경계를 제품 CLI와 브라우저에 연결한다. GTK `floe2`의
+기본 실행기나 실측용 `feature/jobdeck`는 바꾸지 않는다. 웹 이관 전체 완료도 아니다.
+
+### 실행과 접수
+
+```sh
+floe2-web                              # 빈 창 / 기존 창 present 요청
+floe2-web view mask.oas --goto 10,20,700 --thin keep
+floe2-web view other.oas --multi        # 기본 instance와 독립된 세션
+floe2-web view --no-open                # 브라우저 없이 기본 owner, private session file 사용
+```
+
+기본 owner 키는 별도 제품명·UID·DISPLAY이며 DISPLAY 미지정도 지원한다. Firefox와
+native binary를 찾기 **전에** 기존 owner를 확인한다. busy/버전 불일치/불명확한
+ACK는 임의 새 창을 만들 권한이 아니다. CLI exit0은 `queued` 접수이며 소스 열기·
+첫 frame 완료가 아니다. 같은 실행에서 등록하는 파일은 최대32개이며 세션 source
+상한도 기존32개다. 가득 차면 새 독립 세션을 사용한다.
+
+`--multi`, jobs/raster/budget/전송형식/frame-cache/refinement/baseline,
+port/session-file/Firefox, DRC 관련 옵션을 명시하면 독립 세션으로 시작한다.
+이미 열린 worker의 프로세스 설정을 조용히 무시하거나 바꾸지 않는다. `--no-open`
+단독은 기본 owner가 될 수 있으며 이후 전달에서 기존 창 설정을 바꾸지는 않는다.
+환경변수의 worker 설정도 기존 owner에 소급하지 않는다.
+
+IPC는 절대 경로와 검증한 display argv, sender의 레벨 환경정책만 전달한다.
+경로·정책 준비는 bounded 작업자에서 수행하며 socket callback/HTTP reactor에서
+파일을 파싱하지 않는다. 등록 중에도 기존 렌더/취소는 독립적으로 동작한다.
+브라우저에는 불투명한 source ID와 표시 옵션만 보낸다. --root 밖 의존성을 임의
+승인하거나 source/cache/sidecar를 자동 생성하지 않는다. 종료 시 취소·join한다.
+
+같은 소스의 전달은 GTK와 같이 depth/detail/frames/labels/font의 정규화 기본값도
+명시한다. `thin`은 미지정과 명시 `auto`를 구분한다. 잡덱은 명시 `--level`이 sender의
+`FLOE_JOBDECK_LEVELS`보다 우선하고, 기본 다중 레벨은 질문 후에만 연다. 동일
+source/mode/levels는 worker/캐시를 보존하고 다른 요청은 §49의 안전 교체를 사용한다.
+
+### 브라우저와 불명확한 결과
+
+빈 창은 등록 소스가 없다는 안내와 비활성 Open/Index를 보인다. 파일 선택기는 아직
+없으며 별도 터미널의 `floe2-web view FILE`로 추가한다. 독립 빈 창은 forwarding 대상이
+아니므로 FILE을 지정해 다시 시작하도록 안내한다. bare FILE shorthand도 아직 없다.
+
+제안 소비자는 기존 operation·pan/입력 ACK·초기 레벨 질문이 끝날 때까지 기다린다.
+실제 device viewport와 현재 view ID/revision을 합쳐 한 번 제출한다. 준비된 레벨
+선택은 reconnect/BFCache의 live view 복원으로 덮지 않는다. 앞 요청 완료와 다음
+제안 도착의 경합, 늦은 poll snapshot의 이미 처리한 ID 재생도 차단한다.
+
+HTTP mutation 전에 sessionStorage에 ID와 전체 action을 보관한다.
+`GET /api/v1/launch/{id}`는 owner 인증 아래 receipt만 조회한다. 네트워크 오류·reload는
+읽기만 재개하며 자동으로 새 seq를 만들지 않는다. 명시 Check 버튼만 원래 action을
+재전송할 수 있고, 결과가 불명확한 동안 Dismiss로 원 요청 기록을 덮어쓰지 않는다.
+receipt 이력이 만료/손상되면 operation 상태를 확인하고 세션을 다시 시작해야 한다.
+자동 신규 open이나 성공으로의 추정은 없다. 정상 종료/인증 만료/pagehide는 poll을
+중단한다. present는 렌더를 요청하지 않으며 OS foreground 성공을 ACK로 주장하지 않는다.
+
+로컬 IPC의 dirty-build 장벽은 web bundle에 launcher/app-core Rust 소스와 Cargo
+manifest/lock을 포함해 만든다. 콘텐츠 불일치 검출이지 실행파일 서명/사용자 인증은 아니다.
+native renderd protocol/RENDERD_VERSION0.12.87과 vendor는 불변이다.
+
+### 검증
+
+- Rust app17·web66 단위 및 all-target clippy 통과. Rust1.89 app-core238·web66 단위와
+  관련3패키지 Linux musl all-target check 통과(실제 Linux 실행 수용은 아님).
+- `validate_web_handoff.py`: 빈 owner→다중 CLI→native frame, queue Busy, 첫 표시
+  viewport·옵션, 같은 view/worker epoch 유지, present 무렌더, 미색인 실패 시 기존 화면
+  유지, 다른 파일 교체, 별도 세션, receipt 재조회/재전송, source/cache 불변·종료 회수.
+  잡덱의 질문·sender 정책·명시 --level 우선순위도 합성2레벨로 검사한다.
+- ES2017 gate와 실제 app.js/launcher 통합: 초기 빈 창, 카탈로그 갱신, 한 번 측정한
+  open, 선택/재연결 보존, 저장 후 전송, ACK 유실·같은 요청 복구, 늦은 poll/연속 요청.
+- Chrome 합성 확인: 빈 창→CLI 소스 등록→미색인 오류(암묵 색인 없음)→별도 합성
+  cache를 명시 생성→CLI goto/high/keep/full 실제 그림→정상 종료. 이전 소스 오류
+  문구 잔류를 발견해 수정·회귀 고정했다. 재빌드 CLI의 구버전 owner 거부도 확인했다.
+
+전체 배터리 첫 실행은 기존 `worker-client/tests/lifecycle.rs`의 query 포화 직후
+render에서 queue Busy로 중단됐다. 해당 lifecycle14개는 단독 재검증에서 모두 통과했다.
+경쟁 빌드를 끝낸 상태의 전체 재실행은 exit0, `RUST VALIDATION: ALL OK`로 완료했다.
+workspace 단위·owner13·GTK startup144/native8·CLI handoff·ES2017/UI·잡덱80·
+렌더러46 및 KLayout13 PX+2 phase-exact+14 style(jobs1/8)을 포함한다. 기존 테스트의
+타이밍 조건을 완화하거나 worker 정책을 바꾸지는 않았다. 기존 dependency/GTK/Pillow
+경고는 별도다. 검증용 `.venv` 링크만 제거했고 main/feature/jobdeck 변경은 보존했다.
+최종 release의 Chrome에서도 미색인 오류→정상 소스 전달 시 오류 해제와 실제 그림,
+동일 파일 재방문의 좌표/배율·기본 medium·명시 thin auto 적용·정상 종료를 확인했다.
+중간 재확인용 세션1개는 연결 전에 bootstrap 기한이 끝나 정상 자동 종료됐으며,
+새 세션에서 다시 확인했다. 실제 게시/다운로드/clipboard는 추가 실행하지 않았다.
+로그: `/private/tmp/floe-forward-{unit,clippy,msrv,linux-check,ui,native}.log`,
+`floe-forward-battery.log`, `floe-forward-worker-recheck.log`,
+`floe-forward-battery-retry.log`.

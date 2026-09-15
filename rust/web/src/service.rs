@@ -379,6 +379,22 @@ impl Service {
             json!({"source_id":id,"start":start,"total":source.levels.len(),"next":if end<source.levels.len(){Some(end)}else{None},"levels":source.levels[start..end].iter().map(|r|json!({"id":r.id.to_string(),"title":r.title})).collect::<Vec<_>>()}),
         )
     }
+    /// Trusted launcher preflight; no filesystem work or operation admission.
+    pub fn validate_source_selection(
+        &self,
+        id: &str,
+        mode: &str,
+        levels: Option<&BTreeSet<i64>>,
+    ) -> Result<()> {
+        let source = self
+            .source(id)
+            .ok_or_else(|| Error::input("source unavailable"))?;
+        let mode = Mode::parse(mode)?;
+        if !source.deck && mode != Mode::Level {
+            return Err(Error::input("mode requires a jobdeck"));
+        }
+        source.validate_levels(levels)
+    }
     pub(crate) fn current(&self) -> Option<Arc<Attachment>> {
         self.inner.state.lock().unwrap().view.clone()
     }

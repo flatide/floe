@@ -28,7 +28,8 @@ use std::time::Duration;
 const HELP: &str = "floe2-web — Rust application migration CLI (web preview)
 
 Usage: floe2-web index SOURCE [OPTIONS]
-       floe2-web view SOURCE [OPTIONS]
+       floe2-web view [SOURCE ...] [OPTIONS]
+       floe2-web                 (empty workspace / present existing window)
        floe2-web info SOURCE [--json]
        floe2-web render SOURCE [OPTIONS]
        floe2-web clip SOURCE --bbox X0,Y0,X1,Y1 [OPTIONS]
@@ -101,10 +102,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         })
         .collect::<Result<_>>()?;
     if args.is_empty() {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            "a command/source is required; run floe2-web --help",
-        ));
+        return web_view::parse(&["view".into()]).map(|c| Cli::View(Box::new(c)));
     }
     match args[0].as_str() {
         "--help" | "-h" if args.len() == 1 => return Ok(Cli::Help(false)),
@@ -431,10 +429,11 @@ mod tests {
                 "0",
             ],
             &["index", "x", "--occupancy", "--occupancy-only"],
-            &["view"],
-            &[],
+            &["view", "--thin", "keep"],
         ] {
             assert!(parsed(args).is_err(), "{args:?}");
         }
+        assert!(matches!(parsed(&[]).unwrap(), Cli::View(_)));
+        assert!(matches!(parsed(&["view"]).unwrap(), Cli::View(_)));
     }
 }
