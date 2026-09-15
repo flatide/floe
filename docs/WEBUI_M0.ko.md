@@ -9,6 +9,8 @@
 그대로 읽지 않는다. M4g-13은 두벌식 fallback, M4g-14는 DRC 확정 시 자동 저장
 opt-in을 연결했다. M4g-15a는 명시 ICE/인접 reviewer 파일의 읽기 전용 선택을
 연결했다. ASCII/cache/legacy 임시 파일 선택과 실제 브라우저/현장 수용은 남는다.
+M4g-19는 실제 GTK 휠 핸들러의 이벤트당 상한·렌더 대기를 웹에 이관했다.
+장치별 물리 감도와 G1/현장 수용은 별도다([M4 §74](WEBUI_M4.ko.md)).
 
 **로컬 조사/설계 결과이며 이관 완료표가 아니다.** 아래 Rust 서비스와 웹 UI는
 아직 전체 미구현이다. 2026-09-13에 M1a-1 worker client와 M1a-2a/b 일반 index·info/render/probe
@@ -239,7 +241,7 @@ Canvas readback과 실제 화면 관찰/수용도 구분한다([표시 진단 �
 | `--render-debug` | 독립 workspace의 worker가 소비한 frame/round당 숫자 한 줄을 stderr에 출력. 원 wire/stderr/좌표·이름·경로 미전달. 아래 M4 §62의 차이 명시 |
 | view `--lod` | 기존 Rust wire에 없음. on/off 모두 이유를 포함해 오류. `index --lod`는 생성 옵션으로 지원하며 live LOD 제어와 다름 |
 | `--hairline`, `--thin-um` | 기존 Rust에서는 무효였음. 웹은 이유를 포함해 오류. `--thin keep|cull`은 페이지 정책이지 프레임 격자의 동등 대체가 아님 |
-| `--dump` | GTK/XQuartz 표시 경로 PNG 진단. 웹 표시 진단 이관/폐기 결정은 아직 없음; 숫자 진단이나 일반 Export로 대체 완료라 하지 않음 |
+| `--dump` | GTK/XQuartz 표시 경로 PNG 진단. 2026-09-16 브라우저 최근 프레임/합성 화면 보관·명시적 다운로드로 결정; 구현은 남으며 숫자 진단이나 일반 Export로 대체 완료라 하지 않음 |
 | `--floe-reviewer` | 표시 태그를 게시 권한으로 바꾸지 않고 명시 오류. `--drc-reviewer`는 trusted launcher의 쓰기 opt-in이므로 자동 alias 금지 |
 | plain OASIS / `.jb` | 기존/웹 공통 네이티브 경로. OASIS는 확장자가 아니라 magic/header로 식별해 확장자 없는 TC 파일도 읽음 |
 | GDS / gzip OASIS·GDS | Python `jobdeck/sources.py`와 Rust `jobdeck/sources.rs` 모두 header/DBU만 인식, `unsupported`로 분류. `floe-index`는 plain OASIS parser만 호출. **웹 이관으로 새로 잃은 지원이 아니라 기존 네이티브 한계** |

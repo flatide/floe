@@ -5443,3 +5443,55 @@ reviewer8파일의 diff를 보존했다. core 검사 수는 별도 reviewer 미�
 CLI/G4 최종 재대조. 실제 브라우저 입력/저장/복구/화면·Python-free Linux·G1/G4,
 M2 공유/원격 미구현, M0/M3 현장 보류, M5 world-tile 조건부와 hot reload/revision
 사용자 유보는 별도다. 이번 잠금 수정으로 전체 전환 완료를 선언하지 않는다.
+
+## 74. M4g-19 — 휠 확대율·대기 중 입력·표시 앵커
+
+2026-09-16. G4 재대조에서 실제 GTK `_on_scroll`은 `0.96 ** delta`에 delta를
+[-1,1]로 제한하고 `_pending`/pan/band/button-held 동안 휠을 버리는 반면, 웹은
+매번0.8 또는1.25를 적용하며 deltaY=0도 축소하고 렌더 중64개 용량의 큐에 입력을 쌓는
+차이를 확인했다. 기존 단위/DOM gate에 wheel 호출 자체가 없어 이 차이를 못 봤다.
+
+- 휠은 GTK와 같은 이벤트당 배율 상한0.96(확대)/1÷0.96(축소)을 적용한다.
+  보고된 Y가1 미만이면 분수를 유지한다. 0/가로 전용 이벤트, 비유한 값·잘못된 mode/
+  pointer 좌표·버튼 동시 입력은 명령을 만들지 않는다. 키보드/버튼의0.8/1.25와
+  Ctrl+Z/Shift+Z는 변경하지 않는다. GPU/새 renderer·worker protocol 변경은 없다.
+- 연결·idle·현재 크기에 맞는 final 표시 frame/ACK가 있고 입력 큐가 비었을 때만
+  휠을 받는다. 초기 화면 전, edit ACK만 도착한 상태, foreground 렌더/PNG decode,
+  오래된 frame, resize frozen base, drag, hidden/disconnect·owner/index 작업 중에는
+  버린다. 버린 입력을 재연결/렌더 완료 후 누적 실행하거나 재시도하지 않는다.
+- 착지한 margin crop도 현재 frame으로 인정한다. background margin prefetch는
+  foreground phase를 바꾸지 않으므로 휠을 막지 않는다. geometry가 불완전하다는
+  이유만으로 입력을 영구 차단하지 않으며 query capability와 navigation을 구별한다.
+- 앵커는 CSS bounding box 전체가 아니라 실제 canvas가 시작하는 device-aligned
+  inset·DPR·render pixels로 정규화한다. world 좌표 확대는 기존 Rust `Viewport`가
+  수행한다. 이벤트가 viewport 밖으로 이어지면 앵커를 가장자리로 제한한다.
+
+**이벤트 정책과 물리 감도는 다르다.** [W3C Pointer Events §12 Wheel Events](https://www.w3.org/TR/pointerevents4/)는
+pixel/line/page delta의 실제 크기를 장치·OS·앱 설정에 맡긴다. 여기서는 mode를
+검증하되 각 mode의 보고 단위를 동일한 물리 회전각이라고 가정하지 않고 이벤트
+상한과 단위 미만 분수만 적용한다. pixel↔line 변환 계수·가속 보정·관성 감지 같은
+미측정 보정을 추가하지 않는다. GTK smooth delta와 숫자가 같을 때 정책을 대조한
+것이지, 같은 손동작이 모든 Firefox/Chrome에서 같은 줌 거리를 만든다는 보장이 아니다.
+그 감도·이벤트 빈도와 실제 input→photon/pacing은 G1/G2 실측에 남는다.
+
+집중 검증: `validate_web_wheel.py`는 GTK 실제 `_on_scroll`과 `WHEEL_ZOOM_STEP`을
+AST로 읽어137개 finite smooth/discrete/button 조합을 웹과 비교한다. pending/drag
+무호출도 GTK 원본으로 고정한다. Python/Node는 개발 오라클일 뿐 제품 의존성이 아니다.
+추가 단위는 DOM3모드·0/NaN/큰 delta·DPR1/1.25/1.5/2/3·fractional inset을 확인한다.
+실제 app.js 하네스는 수정 전 첫 frame 전 wheel에서 실패했으며, 수정 후 first-frame/
+ACK/렌더/idle-old-frame/decode/resize/drag/hidden/disconnect,100회 burst의 비재생,
+margin crop·background 비차단과 키보드 줌 불변을 통과했다. 전체 ES2017/UI도 통과했다
+(`/private/tmp/floe-wheel-ui.log`). app-core/web/app all-target strict clippy도 exit0
+(`/private/tmp/floe-wheel-clippy.log`). 전체 `sh tools/validate_rust.sh`는 실제 exit0,
+`RUST VALIDATION: ALL OK`로 끝났다(`/private/tmp/floe-wheel-battery.log`).
+자동 저장 native/HTTP, jobdeck83, KLayout13 PX+2 phase-exact+14 style도 통과했다.
+기존 reviewer8파일의 미커밋 diff는 그대로 보존하고 이번 커밋에 포함하지 않는다.
+
+같은 검증 진행 중 사용자 결정 두 건을 받았다. 유도된 legacy note/waive sidecar만
+읽기는 승인됐고, dump는 브라우저 최근 프레임/합성 화면 보관·명시적 다운로드로
+확정됐다. 이번 휠 변경에 그 구현을 섞지 않으며 새 쓰기/임의 경로 권한을 뜻하지 않는다.
+
+커밋 시 목표 잔여: CLI/dump 구현·GTK 진단 정책과 승인된 reviewer legacy 읽기 연결,
+G4 최종 대조. 실제 브라우저/Linux/G1/G4 수용, 공유/원격 권한 경로의 승인·구현,
+M0/M3 현장 보류와 M5 world-tile 조건부는 계속 남는다. hot reload/revision은 사용자
+유보 범위다. 휠 정책 대조를 전체 UI parity나 현장 성능 합격으로 확대하지 않는다.

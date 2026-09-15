@@ -12,7 +12,7 @@
 | `gtktest` 합성 | 검은360×160 RGB pixbuf에 빨강/초록/파랑/노랑70×100 막대4개 | 같은 픽셀의 Rust PNG/raw, 공통 디코더와 Canvas로 대조 |
 | `gtktest` 배치 | 같은 pixbuf를 Overlay/ScrolledWindow 안에 표시 | 웹 `.viewport`의 crop/별도 투명 overlay를 표시; GTK 위젯 구조를 복제하지 않음 |
 | `view --dump` 수신 | 수신 raw/PNG를 pixbuf로 만든 뒤 `/tmp/<APP>_frame.png`에 덮어씀 | 아직 변경하지 않음; 숫자 `--render-debug`와 다른 기능 |
-| `view --dump` 합성 | overlays 후 `/tmp/<APP>_disp.png`와 widget alloc/mapped/visible 진단 | 저장 방식 결정 대기; 기존 Save view PNG만으로 대체 완료라고 세지 않음 |
+| `view --dump` 합성 | overlays 후 `/tmp/<APP>_disp.png`와 widget alloc/mapped/visible 진단 | 2026-09-16 브라우저 최근 프레임/합성 화면 보관·명시적 다운로드로 결정; 구현은 남으며 기존 Save view PNG만으로 대체 완료라고 세지 않음 |
 
 `_display`의 기존 dump는 `_update_labels/_update_note_labels` **전**에 실행된다.
 GTK dump가 항상 화면의 모든 주석을 포함한다는 가정도 맞지 않는다.

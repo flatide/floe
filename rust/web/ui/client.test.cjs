@@ -20,6 +20,7 @@ const gotoEnabled=process.env.FLOE_TEST_GOTO==='1';
 const paletteEnabled=process.env.FLOE_TEST_PALETTE==='1';
 const fillEditorEnabled=process.env.FLOE_TEST_FILL_EDITOR==='1';
 const displayTestEnabled=process.env.FLOE_TEST_DISPLAY==='1',displayReads=[];
+const wheelEnabled=process.env.FLOE_TEST_WHEEL==='1';
 function presetFixture(){
     const lines=name=>fs.readFileSync(__dirname+'/../../../floe/'+name,'utf8').split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#')).map(l=>l.split(/\s+/));
     return {version:1,colors:lines('colornames.def').map(([name,color])=>({name,color:'#'+color.toLowerCase()})),
@@ -243,6 +244,51 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(wheelEnabled){
+        await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
+        const edits=()=>ws.sent.filter(m=>m.type==='view.set');
+        const wheel=extra=>node('viewport').wheel({deltaY:-1,deltaMode:1,clientX:25,clientY:20,buttons:0,preventDefault(){},...extra});
+        wheel();assert.equal(edits().length,0,'wheel before the first displayed frame');
+        ws.receive(packet('raw','1'));
+        wheel({deltaY:0,deltaX:120});assert.equal(edits().length,0,'horizontal scroll zoomed');
+        wheel();assert.equal(edits().length,1);
+        const first=edits()[0];assert.equal(first.body.navigation.factor,.96);
+        assert.deepEqual(first.body.navigation.anchor,[.25,.25]);
+        for(let i=0;i<100;i++){wheel();}assert.equal(edits().length,1,'wheel burst was queued');
+        ws.receive({type:'accepted',seq:first.seq,state_rev:'2',render_rev:'2'});
+        snapshot.state_rev='2';snapshot.render_rev='2';snapshot.status='rendering';ws.receive(snapshot);
+        wheel();assert.equal(edits().length,1,'ACK allowed wheel before rendering');
+        snapshot.status='idle';ws.receive(snapshot);wheel();assert.equal(edits().length,1,'idle allowed an old frame');
+        ws.receive(packet('png','2','2'));wheel();assert.equal(edits().length,1,'wheel during decode');
+        images.at(-1).onload();
+        for(const extra of [{deltaY:0},{deltaY:NaN},{deltaY:Infinity},{deltaMode:3},{clientX:NaN},{buttons:1},{buttons:4}]){
+            wheel(extra);assert.equal(edits().length,1,'invalid/chord wheel');
+        }
+        document.hidden=true;wheel();document.hidden=false;assert.equal(edits().length,1);
+        viewportSize=[101,80];wheel();viewportSize=[100,80];assert.equal(edits().length,1,'wheel against a frozen resize');
+        viewportSize=[10000,10000];assert.doesNotThrow(()=>wheel());viewportSize=[100,80];assert.equal(edits().length,1);
+        node('viewport').mousedown({clientX:10,clientY:10,button:0,buttons:1,preventDefault(){}});
+        wheel();assert.equal(edits().length,1,'wheel during drag');listeners.blur();
+        wheel({deltaY:.25,deltaMode:0});assert.equal(edits().length,2);
+        assert(Math.abs(edits()[1].body.navigation.factor-Math.pow(.96,-.25))<1e-14);
+        // Dropped events must not reappear after the renderer catches up.
+        const second=edits()[1];ws.receive({type:'accepted',seq:second.seq,state_rev:'3',render_rev:'3'});
+        snapshot.state_rev='3';snapshot.render_rev='3';ws.receive(snapshot);ws.receive(packet('raw','3','3'));
+        await new Promise(r=>setTimeout(r,100));assert.equal(edits().length,2);
+        // A landed crop is a current display even without a new foreground.
+        // Background prefetch must not be mistaken for foreground rendering.
+        snapshot.margin={frame_id:'4'};snapshot.margin_working=true;ws.receive(snapshot);
+        ws.receive(packet('raw','4','3',epoch,{purpose:'margin',width:164,height:144,bbox_dbu:['-42.9375','-32','121.0625','112']}));
+        assert.equal(node('canvas').hidden,true,'fixture did not land the margin crop');
+        wheel({deltaY:1});assert.equal(edits().length,3,'background margin blocked the wheel');
+        assert.equal(edits()[2].body.navigation.factor,1/.96);
+        const third=edits()[2];ws.receive({type:'accepted',seq:third.seq,state_rev:'4',render_rev:'4'});
+        snapshot.state_rev='4';snapshot.render_rev='4';snapshot.margin=null;snapshot.margin_working=false;ws.receive(snapshot);ws.receive(packet('raw','5','4'));
+        // The keyboard's deliberate 25% zoom step is independent of the wheel.
+        node('zoom-in').onclick();assert.equal(edits().at(-1).body.navigation.factor,.8);
+        ws.close();wheel();assert.equal(edits().length,4);listeners.pagehide();
+        console.log('WEB WHEEL CLIENT: ALL OK (4% cap, zero/smooth, first-frame/ACK/decode/stale/resize/drag/hidden gates, no burst replay, keyboard unchanged)');return;
+    }
     if(displayTestEnabled){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);ws.receive(packet('raw','1'));const count=ws.sent.length;
         assert.equal(displayReads.length,0);await node('about-open').onclick();assert.equal(displayReads.length,0);

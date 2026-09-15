@@ -1,6 +1,21 @@
 /* Mouse pan/band previews are screen-only; only release submits navigation. */
 (function (root) {
     'use strict';
+    function wheelNavigation(event, size, rect) {
+        const mode = event.deltaMode === undefined ? 0 : event.deltaMode;
+        if (![0, 1, 2].includes(mode) || !Number.isFinite(event.deltaY) || !event.deltaY ||
+            event.buttons || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) { return null; }
+        // GTK caps each event, including accumulated smooth deltas, at one
+        // 0.96 step. Keep fractions of the reported unit; there is no universal
+        // DOM pixel/line/page -> GDK physical-wheel conversion. Never multiply
+        // a large pixel delta into a many-step zoom. Field sensitivity is separate.
+        const factor = Math.pow(0.96, -Math.max(-1, Math.min(1, event.deltaY)));
+        if (factor === 1) { return null; }
+        const anchor = [(event.clientX - rect.left - (size.left || 0)) * size.dpr / size.pixels[0],
+            (event.clientY - rect.top - (size.top || 0)) * size.dpr / size.pixels[1]];
+        if (!anchor.every(Number.isFinite)) { return null; }
+        return {kind: 'zoom', factor: factor, anchor: anchor.map(v => Math.max(0, Math.min(1, v)))};
+    }
     function bind(port) {
         let drag = null, paint = null;
         function draw() {
@@ -116,6 +131,6 @@
         port.document.addEventListener('visibilitychange', function () { if (port.document.hidden) { cancel(); } });
         return Object.freeze({cancel: cancel, active: function () { return drag !== null; }, bandActive:function(){return !!drag&&!!drag.band;}});
     }
-    if (typeof module !== 'undefined' && module.exports) { module.exports = {bind: bind}; }
-    else { root.FloeGestures = {bind: bind}; }
+    if (typeof module !== 'undefined' && module.exports) { module.exports = {bind: bind, wheelNavigation: wheelNavigation}; }
+    else { root.FloeGestures = {bind: bind, wheelNavigation: wheelNavigation}; }
 }(typeof window === 'undefined' ? this : window));

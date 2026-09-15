@@ -810,9 +810,18 @@
     });
     viewport.addEventListener('wheel', function (event) {
         if (!live()) { return; } event.preventDefault();
-        if ((gesture && gesture.active()) || event.buttons) { return; }
-        const rect = viewport.getBoundingClientRect();
-        zoom(event.deltaY < 0 ? 0.8 : 1.25, [Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)), Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))]);
+        // Match GTK's render-in-flight suppression. Do not queue old wheel
+        // events behind a slow frame, or zoom around an unseen/stale image.
+        // Background margin work keeps phase=idle and does not block input.
+        if (stopped || document.hidden || !displayed || state.status !== 'idle' || !epoch ||
+            !socket || socket.readyState !== WebSocket.OPEN || inflight || accepted || queue.length ||
+            ownerBusy || submitting || indexBlocked() || decode || (gesture && gesture.active()) || !lastPlacement) { return; }
+        let size; try { size = dims(); } catch (_) { return; }
+        const h = lastPlacement.full ? marginFrame : foregroundFrame;
+        if (!h || !h.final || !P.matches(h, state) || ackedFrames[h.purpose] !== h.frame_id ||
+            size.pixels.some(function (n, i) { return n !== state.pixels[i]; })) { return; }
+        const navigation = window.FloeGestures.wheelNavigation(event, size, viewport.getBoundingClientRect());
+        if (navigation) { nav(navigation); }
     }, {passive: false});
     function reviewCursor() {
         if (measurement && measurement.active() && drcPanel && drcPanel.boxActive()) { measurement.leave(); }
