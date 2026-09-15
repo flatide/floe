@@ -4503,3 +4503,53 @@ Python 변경의 Rust 대응:
 목표 잔여: 레이어 다중 선택/접힘/페이지 간 UI와 스타일 조작, 잔여 CLI·입력 형식,
 G1 지연/pacing·G4 전체 수용, Python-free Linux 실행, 공유/원격 및 Firefox/ETX 현장.
 이번 합류로 실측 코드와의 차이는 줄었지만 전체 목표 완료 직전으로 판정하지 않는다.
+
+## 58. M4g-11c — 접기·페이지 간 범위 선택의 읽기 전용 Rust API
+
+UI-03의 다중 선택을 연결하기 전, 현재64행 카탈로그가 표현하지 못하던 일반 datatype
+그룹과 페이지 간 범위 선택을 서버에 추가한다. 기존 `layer_batch`는 가시성을 한 번에
+바꾸는 쓰기 경로이고, 이번 API는 **패널 순서만 조회하는 별도 경로**다. 브라우저의
+선택/접기 버튼은 아직 추가하지 않았다. 다중 style 조작은 가시성의 항상-자식-포함
+잡덱 부모 규칙과 다르므로 후속으로 남긴다.
+
+구현:
+
+- 일반 layout과 잡덱 source-layer 모드는 layer별 최저 datatype을 부모로 묶는다.
+  datatype0이 없어도 동작한다. jobdeck level/chip의 synthetic head는 기존 의미를
+  유지하며, level 모드의 숨긴 chip은 패널 목록에 넣지 않는다.
+- `POST .../palette`는 `page`/`range`와 `fold:{closed,exceptions}`만 받는다.
+  전체 접기/펼치기에 모든 부모 ID를 실을 필요가 없으며 개별 예외는 최대4096개다.
+  기존16KiB 요청 상한은 별도로 유지한다. 잘못된 부모·중복·null/추가 필드는 오류다.
+- 접힌 자식 span을 먼저 건너뛰고 최대64행으로 페이지를 나눈다. 원래 페이지에서
+  자식을 사후 숨기는 방식의 빈 페이지가 없다. 범위는 두 anchor를 포함하며 역방향도
+  같은 순서이고 페이지 경계를 넘을 수 있다. 최대4096개; 초과/숨긴 anchor는 명시 오류다.
+- immutable catalogue의 그룹 경계를 한 번 만들고, 페이지 조회에는 실제 geometry
+  순회·decode가 없다. 펼친 목록의 총수 계산은 표시 행 수에 비례하지만 반환/임시
+  페이지 목록은64개이며 접힌 대형 그룹은 경계로 건너뛴다. 범위 열거는4097개에서
+  오류로 중단한다. 서버에 사용자 선택/접기 상태를 저장하지 않는다.
+- row의 부모/자식 수·접힘과 범위의 부모 목록을 반환해, 브라우저가 전 카탈로그를
+  미리 내려받거나 그룹 자식을 확장하지 않아도 `layer_batch`를 구성할 수 있게 한다.
+  응답 revision/render key로 지연 결과를 구분한다. 현재 UI의 구 GET schema는 보존한다.
+- renderer/VFS/색인 포맷·정확도 정책·렌더러 프로토콜 버전은 바꾸지 않는다.
+
+검증은 GTK 실제 `_selectable_layer_order`로 만든32개 일반/잡덱/숨긴 chip/450행
+목록·접기 조합과 12,096개 가시성 batch를 사용한다. Rust 단위는 비영 datatype 부모,
+150개 그룹의64행 페이지, 양방향·숨긴 anchor·빈 목록·4096 경계,10만 행 그룹 접기,
+엄격 DTO를 다룬다. native HTTP/WS는 인증·Origin/CSRF·16KiB 상한·old view 거부,
+구 GET 보존과 조회 전후 revision/render key/제출 수 불변을 단언한다. 실제 잡덱
+level/chip/layer 왕복에서도 숨긴 chip 비노출과 카메라/가시성 불변을 검사한다.
+
+집중 검증은 web82 단위(외부 oracle2개는 별도 실행), transport13, native stream6,
+owner17과 GTK32/12,096 대조를 통과했다. 최종 web all-targets strict clippy,
+Rust1.89 web 단위, Linux musl all-targets check도 통과했다. 이는 실제 Linux/Firefox
+실행 수용을 뜻하지 않는다. 기존 renderer 전체 lint 부채(§57)는 수정하지 않았다.
+전체 `sh tools/validate_rust.sh`도 exit0 / `RUST VALIDATION: ALL OK`로 끝났다
+(`/private/tmp/floe-palette-read-battery.log`). app20/core254/web82 단위,
+GTK32/12,096·native stream6·owner17, occupancy27·잡덱83·렌더러46,
+VFS H1-H5/L1-L9와 KLayout jobs1/8 각각13 PX+2 phase-exact+14 style을 통과했다.
+집중 로그는 `floe-palette-read-{tests,gtk,stream,owner,clippy-final,msrv,linux}.log`다.
+
+목표 잔여: 이번 커밋으로 UI-03의 **서버 선택·접기 조회**를 닫지만 브라우저 Ctrl/Shift
+선택·접기/펼치기·일괄 가시성 연결과 다중 스타일 조작은 남는다. 그 밖의 CLI/형식 차이,
+G1 지연/pacing·G4 최종 수용, Python-free Linux 실행, 공유/원격과 현장 Firefox/ETX도
+아직 남아 있다. 로컬 구현 후반부와 전체 목표 완료를 구분하며 백분율로 환산하지 않는다.

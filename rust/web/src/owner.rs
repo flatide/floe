@@ -27,6 +27,7 @@ pub(crate) fn routes() -> Router<Gate> {
         .route("/api/v1/operations/{seq}/cancel", post(cancel))
         .route("/api/v1/views/{id}", delete(close_view))
         .route("/api/v1/views/{id}/layers/{start}", get(layers))
+        .route("/api/v1/views/{id}/palette", post(palette))
         .route("/api/v1/views/{id}/minimap/{base}", get(minimap))
 }
 fn failure(code: &'static str) -> Response {
@@ -96,6 +97,28 @@ async fn layers(
             || transport::error(StatusCode::NOT_FOUND),
             |v| Json(v).into_response(),
         )
+}
+async fn palette(
+    State(gate): State<Gate>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<crate::layer_catalog::PaletteRead>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    // POST carries bounded fold/range arguments; it does not submit a view
+    // edit, query native geometry, or change the palette stored by another tab.
+    if let Err(e) = transport::http_session(&gate, &headers) {
+        return transport::error(e);
+    }
+    let Some(v) = gate.active_view().filter(|v| v.id == id) else {
+        return failure("view_unavailable");
+    };
+    let Ok(Json(request)) = body else {
+        return failure("invalid_request");
+    };
+    match v.rows.read(&v.controller.snapshot(), request) {
+        Ok(page) => Json(page).into_response(),
+        Err(code) => failure(code),
+    }
 }
 async fn operations(State(gate): State<Gate>, headers: HeaderMap) -> Response {
     if let Err(e) = transport::http_session(&gate, &headers) {

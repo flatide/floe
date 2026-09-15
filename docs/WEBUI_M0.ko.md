@@ -347,7 +347,10 @@ UI-03의 개별 웹 체크박스만으로는 GTK의 다중 선택 일괄 변경�
 M4g-11a는 Rust `layer_batch`에 show/hide/toggle, 접힌 일반 그룹의 자식 포함,
 항상 자식을 포함하는 잡덱 부모, 부모·자식 중복 선택의 단일 적용을 추가한다
 ([M4 §56](WEBUI_M4.ko.md)). GTK 코드로 생성한 12,096개 조합을 대조한다.
-브라우저 다중 선택·접힘/펼침·페이지 간 범위 선택과 다중 style 조작은 아직 남아 있다.
+M4g-11c는 Rust catalogue에서 일반/잡덱 그룹을 구별하고 접기 반영64행 페이지와
+4096행 이하의 페이지 간 범위 조회를 추가한다([M4 §58](WEBUI_M4.ko.md)).
+GTK 실제 선택 순서32조합을 대조하며 선택/접기 조회는 렌더하지 않는다.
+브라우저 Ctrl/Shift 다중 선택·접힘/펼침 UI 연결과 다중 style 조작은 아직 남아 있다.
 
 `python -m floe.fe_embed` 보조 CLI도 범위에 포함한다: 위치 인자 PNG들,
 `--box`, `--ellipse`, `--line`, `--path`, `--polygon`, `--ruler`, `--text`,

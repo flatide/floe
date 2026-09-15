@@ -21,6 +21,80 @@ fn request(seq: u64, s: &ReviewSocket, mode: &str) -> Value {
     json!({"kind":"mode","seq":seq.to_string(),"view_id":s.hello["view_id"],"base_state_rev":s.state["state_rev"],"mode":mode})
 }
 
+async fn palette(h: &Harness, l: &Login, s: &ReviewSocket, mode: &str) {
+    let path = format!(
+        "/api/v1/views/{}/palette",
+        s.hello["view_id"].as_str().unwrap()
+    );
+    let before = current(h, l).await;
+    let (status, open) = h
+        .call(l, "POST", &path, json!({"kind":"page","start":0}))
+        .await;
+    assert_eq!(status, 200);
+    let rows = open["rows"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    if mode == "level" {
+        assert_eq!(rows.len(), 2, "hidden chip rows entered the level palette");
+        assert!(rows
+            .iter()
+            .all(|r| r["head"] == true && r["children"] == 0 && r["closed"] == false));
+        assert_eq!(
+            h.call(
+                l,
+                "POST",
+                &path,
+                json!({"kind":"page","start":0,"fold":{"exceptions":[rows[0]["pair"]]}})
+            )
+            .await
+            .0,
+            400
+        );
+    } else if mode == "chip" {
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.iter().filter(|r| r["children"] == 2).count(), 2);
+        assert_eq!(rows.iter().filter(|r| r["parent"].is_array()).count(), 4);
+    }
+    let (status, closed) = h
+        .call(
+            l,
+            "POST",
+            &path,
+            json!({"kind":"page","start":0,"fold":{"closed":true}}),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let roots = rows
+        .iter()
+        .filter(|r| r["parent"].is_null())
+        .map(|r| &r["pair"])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        closed["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| &r["pair"])
+            .collect::<Vec<_>>(),
+        roots
+    );
+    let (status, range) = h.call(l, "POST", &path, json!({"kind":"range","first":roots[0],"last":roots.last().unwrap(),"fold":{"closed":true}})).await;
+    assert_eq!(status, 200);
+    assert_eq!(range["pairs"], json!(roots));
+    assert_eq!(
+        range["groups"].as_array().unwrap().len(),
+        rows.iter()
+            .filter(|r| r["children"].as_u64().unwrap() > 0)
+            .count()
+    );
+    let after = current(h, l).await;
+    for key in ["state_rev", "render_key", "layers", "bbox_dbu", "pixels"] {
+        assert_eq!(
+            before["view"][key], after["view"][key],
+            "palette read mutated {key}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "run tools/validate_owner_service.py with private mode fixtures"]
 async fn live_modes_preserve_camera_selection_and_use_one_worker() {
@@ -51,6 +125,7 @@ async fn live_modes_preserve_camera_selection_and_use_one_worker() {
     assert_eq!(h.finished(&l, 1).await["phase"], "succeeded");
     let mut s = ReviewSocket::new(&h, &l).await;
     ready(&h, &l, &mut s).await;
+    palette(&h, &l, &s, "chip").await;
     assert_eq!(
         h.call(&l, "GET", "/api/v1/capabilities", Value::Null)
             .await
@@ -116,6 +191,7 @@ async fn live_modes_preserve_camera_selection_and_use_one_worker() {
         ready(&h, &l, &mut s).await;
         let v = current(&h, &l).await;
         assert_eq!(v["mode"], mode);
+        palette(&h, &l, &s, mode).await;
         assert_eq!(v["levels"], json!(["1", "2"]));
         assert_eq!(v["source_id"], catalog["sources"][0]["source_id"]);
         assert_ne!(s.state["worker_epoch"], old_epoch);

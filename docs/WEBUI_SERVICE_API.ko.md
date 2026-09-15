@@ -35,6 +35,38 @@ Rust가 현재 model의 정렬/그룹과 가시성을 사용하며 브라우저�
 없으면 revision/렌더도 늘지 않는다. 파일 쓰기·렌더러 wire 변경은 없다.
 브라우저의 다중 선택/접힘 UI는 아직 연결하지 않았다([M4 §56](WEBUI_M4.ko.md)).
 
+M4g-11c는 인증된 `POST /api/v1/views/{id}/palette` **읽기 전용** 조회를 추가한다.
+요청은 다음 둘 중 하나다:
+
+```json
+{"kind":"page","start":0,"fold":{"closed":false,"exceptions":[]}}
+{"kind":"range","first":[3,1],"last":[7,9],"fold":{"closed":true,"exceptions":[[3,1]]}}
+```
+
+`fold` 생략은 모두 펼침이다. `closed`는 전체 그룹의 기본 접힘 상태이고 `exceptions`는
+그 반대로 표시할 실제 그룹 부모의 중복 없는 목록이다(최대4096, 기존16KiB HTTP body
+상한도 적용). 접기는 화면 레이어 가시성과 별개이며 ViewState/파일에 저장하지 않는다.
+일반 레이아웃과 잡덱 source-layer 모드는 같은 layer의 최저 datatype을 부모로 삼는다.
+잡덱 level 모드의 숨긴 chip 행은 조회로 노출하거나 펼칠 수 없다.
+
+- `page`: 접힌 자식을 먼저 건너뛴 뒤 표시 순서의 `start`부터 최대64행. 응답의
+  `total`은 접힘 반영 행 수, `all_total`은 접기 전 패널 행 수(숨긴 chip 제외)다.
+  기존 row 필드에 `children`·`closed`를 추가하고 `head`·`parent`로 일반 그룹도 표현한다.
+  `next`는 다음 표시 순서 offset 또는 null. `start == total`은 빈 끝 페이지이며
+  그보다 큰 offset은 `invalid_palette` 오류다.
+- `range`: 표시 순서에서 두 pair를 포함하는 구간을 방향과 무관하게 오름차순으로
+  반환한다. `pairs` 최대4096, `groups`는 그중 펼칠 수 있는 부모들이다. 접힌 자식은
+  제외하고 페이지 경계는 제한하지 않는다. 없는 pair는 `invalid_palette`, 접힘에
+  가려진 anchor는 `palette_anchor_hidden`, 4096개 초과는 `palette_range_too_large`다.
+  조용한 prefix 반환/부분 선택이나 자동 펼침은 하지 않는다.
+
+두 응답 모두 `state_rev`·`render_key` 문자열을 포함한다. 브라우저는 view/접기 상태와
+키가 바뀐 지연 응답을 버려야 한다. 소스 경로·geometry를 읽거나 native query/render를
+제출하지 않는다. 기존 host/origin/cookie/CSRF/body 방어를 그대로 적용하고, `view.set`
+또는 승인 operation으로 취급하지 않는다. 이전 `GET .../layers/{start}`는 펼친 목록과
+기존 schema를 유지한다. 이 단계는 서버 기반이며 브라우저 선택·접기 UI는 후속이다
+([M4 §58](WEBUI_M4.ko.md)).
+
 M4g-11b는 `index`/`index_open`의 `options.occupancy` 생략 기본값을 true로
 맞춘다. false는 명시 해제이며 기존 요약을 지우지 않는다. `occupancy_only:true`는
 일반 생성 기본값보다 우선하고, `occupancy_um` 지정도 요약 생성을 요청한다.

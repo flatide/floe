@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """GTK-source palette oracle, with inert rows and no GTK/source/cache I/O.
 
-The target is Rust's atomic visibility operation, not the still-unmigrated
-browser selection/collapse UI. Test data is synthetic and private.
+The targets are Rust's atomic visibility operation and read-only palette
+page/range order, not the still-unmigrated browser UI. Data is synthetic.
 """
 import ast
 import itertools
@@ -17,10 +17,37 @@ from types import MethodType, SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def order_cases(scope):
+    cases = []
+    physical = [(3, 1), (3, 2), (3, 300), (7, 4), (7, 9), (9, 0)]
+    deck = [(3, 0), (3, 1), (3, 2), (7, 0), (7, 1), (9, 0)]
+    large = [(layer, dt) for layer in range(150) for dt in (2, 3, 9)]
+    for pairs, synthetic, hide in [(physical, False, False), (deck, True, False),
+                                   (deck, True, True), (large, False, False)]:
+        groups = {}
+        for layer, members in itertools.groupby(pairs, key=lambda p: p[0]):
+            members = list(members)
+            if len(members) > 1:
+                groups[members[0]] = members[1:]
+        heads = set(groups) if synthetic else set()
+        hidden = {p for kids in groups.values() for p in kids} if hide else set()
+        for collapsed in [set(), set(groups), set(list(groups)[::2]), {next(iter(groups))}]:
+            effective = set(groups) if hide else collapsed
+            o = SimpleNamespace(_layer_order=pairs, _layer_groups=groups,
+                                _layer_expanded=set(groups) - effective)
+            expected = scope["_selectable_layer_order"](o)
+            for default in (False, True):
+                exceptions = [] if hide else sorted(set(groups) - collapsed if default else collapsed)
+                cases.append(dict(pairs=pairs, heads=sorted(heads), hidden=sorted(hidden),
+                                  fold=dict(closed=default, exceptions=exceptions), expected=expected))
+    return cases
+
+
 def main():
     tree = ast.parse((ROOT / "floe/gui.py").read_text())
     viewer = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Viewer")
-    names = ("_set_selected_layers", "_is_jobdeck_head", "_sync_jobdeck_groups", "_on_layer_toggled")
+    names = ("_set_selected_layers", "_is_jobdeck_head", "_sync_jobdeck_groups", "_on_layer_toggled",
+             "_selectable_layer_order")
     methods = {n.name: n for n in viewer.body if isinstance(n, ast.FunctionDef)}
     scope = {}
     exec(compile(ast.Module(body=[methods[n] for n in names], type_ignores=[]),
@@ -84,6 +111,19 @@ def main():
             "--ignored", "--nocapture"], env=env, text=True, capture_output=True, timeout=30)
         assert run.returncode == 0, (run.stdout, run.stderr)
         assert "GTK PALETTE: ALL OK (12096 source-derived batch cases)" in run.stdout
+        print(run.stdout.strip())
+        oracle.write_text(json.dumps(order_cases(scope)))
+        build = subprocess.run([cargo, "test", "--offline", "--locked", "-j2", "-p", "floe-web",
+            "--lib", "--no-run", "--message-format=json"], cwd=ROOT / "rust", text=True,
+            capture_output=True, timeout=240)
+        assert build.returncode == 0, build.stderr
+        bins = [r["executable"] for line in build.stdout.splitlines()
+                if (r := json.loads(line)).get("reason") == "compiler-artifact" and r.get("executable")]
+        assert len(bins) == 1
+        run = subprocess.run([bins[0], "layer_catalog::tests::gtk_selectable_order_oracle",
+            "--ignored", "--nocapture"], env=env, text=True, capture_output=True, timeout=30)
+        assert run.returncode == 0, (run.stdout, run.stderr)
+        assert "GTK PALETTE ORDER: ALL OK (32 source-derived catalogue/fold cases" in run.stdout
         print(run.stdout.strip())
 
 

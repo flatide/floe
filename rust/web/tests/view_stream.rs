@@ -12,6 +12,111 @@ async fn native_palette_batch_is_one_revision_and_pixel_reversible() {
     ack(&mut ws, &hello, 1, &first).await;
     let pairs: Vec<_> = h.controller.model.styles.iter().map(|s| s.layer).collect();
     assert!(pairs.len() >= 2);
+    // Selection/folding are read-only metadata even though POST carries the
+    // arguments. Exercise the actual host/origin/cookie/CSRF/body boundary.
+    let id = hello["view_id"].as_str().unwrap();
+    let path = format!("/api/v1/views/{id}/palette");
+    let origin = format!("http://{}", h.addr);
+    let headers = [
+        ("Origin", origin.as_str()),
+        ("Cookie", login.cookie.as_str()),
+        ("X-Floe-CSRF", login.csrf.as_str()),
+        ("Content-Type", "application/json"),
+    ];
+    let request = json!({"kind":"page","start":0}).to_string();
+    assert_eq!(h.http("POST", &path, &headers[1..], &request).await.0, 403);
+    assert_eq!(h.http("POST", &path, &headers[..1], &request).await.0, 401);
+    let mut bad = headers;
+    bad[2].1 = "invalid";
+    assert_eq!(h.http("POST", &path, &bad, &request).await.0, 401);
+    let read_before = h.controller.snapshot();
+    let (status, _, body) = h.http("POST", &path, &headers, &request).await;
+    assert_eq!(status, 200, "{body}");
+    let page: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["state_rev"], read_before.state_rev.to_string());
+    assert_eq!(page["render_key"], read_before.render_key.to_string());
+    assert_eq!(page["total"], pairs.len());
+    assert_eq!(page["all_total"], pairs.len());
+    assert!(pairs.len() <= 64, "small fixture no longer fits this page");
+    assert_eq!(
+        page["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["pair"].clone())
+            .collect::<Vec<_>>(),
+        pairs.iter().map(|p| json!(p)).collect::<Vec<_>>()
+    );
+    let mut legacy_rows = page["rows"].clone();
+    for row in legacy_rows.as_array_mut().unwrap() {
+        row.as_object_mut().unwrap().remove("closed");
+        row.as_object_mut().unwrap().remove("children");
+        row["head"] = json!(false);
+        row["parent"] = Value::Null;
+    }
+    let legacy: Value = serde_json::from_str(
+        &h.http("GET", &format!("/api/v1/views/{id}/layers/0"), &headers, "")
+            .await
+            .2,
+    )
+    .unwrap();
+    assert_eq!(legacy["rows"], legacy_rows, "old GET metadata changed");
+    for closed in [false, true] {
+        let request = json!({"kind":"page","start":0,"fold":{"closed":closed}}).to_string();
+        let (status, _, body) = h.http("POST", &path, &headers, &request).await;
+        assert_eq!(status, 200);
+        let page: Value = serde_json::from_str(&body).unwrap();
+        let rows = page["rows"].as_array().unwrap();
+        let request = json!({"kind":"range","first":rows.last().unwrap()["pair"],"last":rows[0]["pair"],"fold":{"closed":closed}}).to_string();
+        let (status, _, body) = h.http("POST", &path, &headers, &request).await;
+        assert_eq!(status, 200);
+        let range: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            range["pairs"],
+            json!(rows.iter().map(|r| &r["pair"]).collect::<Vec<_>>())
+        );
+        assert_eq!(
+            range["groups"],
+            json!(rows
+                .iter()
+                .filter(|r| r["children"].as_u64().unwrap() > 0)
+                .map(|r| &r["pair"])
+                .collect::<Vec<_>>())
+        );
+    }
+    for request in [
+        json!({"kind":"page","start":pairs.len()+1}),
+        json!({"kind":"page","start":0,"fold":null}),
+        json!({"kind":"page","start":0,"fold":{"exceptions":[[u32::MAX,u32::MAX]]}}),
+        json!({"kind":"range","first":pairs[0],"last":[u32::MAX,u32::MAX]}),
+        json!({"kind":"page","start":0,"layers":{"mode":"none"}}),
+    ] {
+        assert_eq!(
+            h.http("POST", &path, &headers, &request.to_string())
+                .await
+                .0,
+            400
+        );
+    }
+    assert_eq!(
+        h.http("POST", &path, &headers, &" ".repeat(16385)).await.0,
+        413
+    );
+    assert_eq!(
+        h.http("POST", "/api/v1/views/old/palette", &headers, &request)
+            .await
+            .0,
+        404
+    );
+    let read_after = h.controller.snapshot();
+    assert_eq!(read_after.state_rev, read_before.state_rev);
+    assert_eq!(read_after.render_rev, read_before.render_rev);
+    assert_eq!(read_after.render_key, read_before.render_key);
+    assert_eq!(
+        read_after.submitted, read_before.submitted,
+        "palette reads rendered"
+    );
+    assert_eq!(read_after.state.layers, read_before.state.layers);
     assert!(
         original[16..].chunks_exact(4).any(|p| p[..3] != [0, 0, 0]),
         "fixture must paint before batch hide"
@@ -92,6 +197,7 @@ async fn native_palette_batch_is_one_revision_and_pixel_reversible() {
         assert_eq!(h.controller.snapshot().submitted, before.submitted);
     }
     h.shutdown().await;
+    println!("RUST PALETTE READ: ALL OK (authenticated bounded read-only page/range, legacy GET, unchanged state/render)");
     println!("RUST PALETTE STREAM: ALL OK (atomic batch, raw pixels, noop, stale/invalid/conflicting edits, cleanup)");
 }
 
