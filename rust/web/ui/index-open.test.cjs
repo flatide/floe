@@ -49,6 +49,13 @@ function rig(saved=null, options={}) {
         async approve(){await el('index-open-approve').onclick();}};
 }
 (async()=>{
+    for (const phase of ['running','failed','cancelled','incomplete','succeeded']) {
+        const text=I.resultText({phase,stage:'index',index:{phase,renamed:2,rename_sync_warning:true}},String);
+        assert.match(text,/Legacy caches renamed: 2/); assert.match(text,/directory sync failed/);
+    }
+    assert.equal(I.renameText({renamed:0}),'');
+    assert.equal(I.renameText({renamed:'<img src=x>'}),'');
+    assert.match(I.resultText({phase:'succeeded',stage:'open',index:{renamed:1}},String),/renamed: 1/);
     const layout=rig(null,{preview:{...preview,occupancy_default:false}});
     await layout.api.init(true);await layout.open();assert.equal(layout.el('index-open-occupancy').checked,false);
     await layout.approve();assert.equal(JSON.parse(layout.saved).request.options.occupancy,false);layout.api.stop();

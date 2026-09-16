@@ -194,6 +194,53 @@ fn real_layout_deck_and_bounded_cancellation() {
     )
     .unwrap();
     let live = RegisteredSource::register(scope, &live_path, &flag).unwrap();
+    // Current legacy caches need a planned write even when no native build
+    // is needed. Reject the complete batch while a selected reader is live.
+    let legacy = cache::cache_paths(&source).unwrap()[1].clone();
+    fs::rename(&cache_dir, &legacy).unwrap();
+    let pinned_legacy = ManagedDataset::open(
+        &resources,
+        &live_path,
+        Some(BTreeSet::from([1])),
+        Mode::Level,
+        &flag,
+    )
+    .unwrap();
+    let mut blocked = ManagedIndex::start(
+        &resources,
+        Arc::clone(&live),
+        Some(BTreeSet::from([1, 2])),
+        options(),
+        real(),
+    )
+    .unwrap();
+    let result = wait(&mut blocked);
+    assert_eq!(
+        (result.phase, result.failure, result.renamed),
+        (Phase::Failed, Some(ErrorKind::Busy), 0)
+    );
+    assert!(legacy.exists() && !cache_dir.exists());
+    assert!(!cache::cache_path(&added).unwrap().exists());
+    drop(pinned_legacy);
+    let mut migration = ManagedIndex::start(
+        &resources,
+        Arc::clone(&live),
+        Some(BTreeSet::from([1])),
+        options(),
+        real(),
+    )
+    .unwrap();
+    let result = wait(&mut migration);
+    assert_eq!(
+        (
+            result.phase,
+            result.renamed,
+            result.kept,
+            result.native.output_bytes
+        ),
+        (Phase::Succeeded, 1, 1, 0)
+    );
+    assert!(cache_dir.is_dir() && !legacy.exists());
     let pinned_deck = ManagedDataset::open(
         &resources,
         &live_path,

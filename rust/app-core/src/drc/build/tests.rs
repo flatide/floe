@@ -29,6 +29,7 @@ fn state() -> Mutex<State> {
             outcome: None,
             native_pid: None,
             cleanup_warning: false,
+            migration: None,
         },
     })
 }

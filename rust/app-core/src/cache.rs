@@ -5,7 +5,10 @@ use std::io::BufReader;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
+mod migration;
 mod names;
+pub(crate) use migration::rename_legacy;
+pub use migration::Migration;
 pub use names::{
     cache_path, cache_paths, database_path, default_cache_path, pack_path, pack_paths,
 };

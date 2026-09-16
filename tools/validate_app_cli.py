@@ -125,14 +125,17 @@ def main(fixture):
         assert "up to date" in run("index", source, "--lod", env=env).stdout
         assert digest(cache) == before, "reuse changed data or mtime"
 
-        # Legacy names are read/reused in place, never renamed by info/open.
+        # Reads keep legacy names; explicit Index alone migrates them.
         from floe.cachepath import legacy_vfs_cache_dir
         old_cache = Path(legacy_vfs_cache_dir(source))
         cache.rename(old_cache)
         old_stamp = digest(old_cache)
         run("info", source, env=env)
-        run("index", source, env=env)
         assert not cache.exists() and digest(old_cache) == old_stamp
+        migrated = run("index", source, env=env)
+        assert "renamed legacy cache" in migrated.stderr
+        assert not old_cache.exists() and digest(cache) == old_stamp
+        cache.rename(old_cache)
         # A corrupt canonical destination must not silently select legacy data.
         cache.mkdir()
         run("index", source, env=env, code=1)

@@ -23,9 +23,11 @@ native 앱 게이트는 Python의 순수 이름 함수를 오라클로 대조한
 
 아래 자동 개명은 GTK/Python 비교 셸의 동작이다. `feature/webui`의 Rust 앱은
 새 기본 이름과 구 이름 읽기를 지원하지만, 읽기 권한으로 개명하지 않는다.
-2026-09-17 사용자는 명시 Index에서만 개명을 승인했다. 후속 구현·검증 전까지
-Index도 구 이름을 재사용하며, 열기/조회에서는 계속 개명하지 않는다.
-[웹 통합 차이와 검증 상태](WEBUI_JOBDECK_SYNC.ko.md)를 함께 본다.
+2026-09-17 사용자 승인에 따라 M4g-32는 명시 layout/deck Index 및 DRC pack
+Build에서만 개명한다. 열기/조회/profile은 계속 구 이름을 그대로 읽는다.
+양쪽 잠금·충돌·실패 후 receipt와 검증 상태는
+[웹 개명 계약](WEBUI_CACHE_MIGRATION.ko.md)을 본다. 아래 GTK의 자동 개명 실패
+시 폴백과 `FLOE_CACHE_MIGRATE` 환경변수는 Rust 앱의 계약이 아니다.
 
 - `cachepath.find_vfs_cache(src)`: `.<src>.ice/meta.json`이 있으면 그것, 없고
   `<src>.floe/meta.json`이 있으면 **그 폴더를 `.<src>.ice/`로 `os.rename`** 한 뒤

@@ -81,6 +81,7 @@ echo "== floe2 product + accuracy gates (KLayout = oracle/generator only)"
 # Rust application shell migration: private valmini copies, never the
 # caller's possibly huge/proprietary milestone source.
 .venv/bin/python tools/validate_app_cli.py "$FLOE2_SMOKE_SRC"
+.venv/bin/python -B tools/validate_cache_migration.py "$FLOE2_SMOKE_SRC"
 .venv/bin/python -B tools/validate_web_cli_inventory.py
 .venv/bin/python -B tools/validate_web_selfcheck.py
 .venv/bin/python -B tools/validate_web_portable.py

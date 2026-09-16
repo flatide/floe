@@ -108,10 +108,12 @@ impl DeckIndexPlan {
             {
                 current.occupancy = Some(false);
                 current.occupancy_only = true;
-            } else {
+            } else if info.cache_dir == cache::default_cache_path(&info.path)? {
                 kept += 1;
                 continue;
             }
+            // An otherwise-current legacy cache is still a planned write:
+            // managed admission must promote both aliases before any rename.
             todo.push(DeckIndexEntry {
                 tc: tc.clone(),
                 source: info.path.clone(),

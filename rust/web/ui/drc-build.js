@@ -35,11 +35,20 @@
                 if (op.native[k] !== null) { P.counter(op.native[k], true); }
             });
         }
+        if (op.migration !== undefined && op.migration !== null &&
+            (typeof op.migration !== 'object' || Object.keys(op.migration).join(',') !== 'directory_synced' || typeof op.migration.directory_synced !== 'boolean')) {
+            throw new Error('Invalid pack migration receipt');
+        }
         if (op.outcome) {
             ['checks', 'errors', 'bytes'].forEach(function (k) { P.counter(op.outcome[k], true); });
             if (typeof op.outcome.reused !== 'boolean' || typeof op.outcome.directory_synced !== 'boolean') { throw new Error('Invalid pack build outcome'); }
         }
         return op;
+    }
+    function migrationText(m) {
+        if (!m) { return ''; }
+        return '\nLegacy pack renamed; later failure or cancellation does not undo that name change.' +
+            (!m.directory_synced ? '\nRename committed, but directory sync failed.' : '');
     }
     function validate(v, P) {
         if (!v || v.drc === undefined) { throw new Error('Invalid DRC catalog'); }
@@ -75,6 +84,7 @@
         if (op.noninteger) { text += '\nFractional coordinates cannot be encoded. Continue with the ASCII review.'; }
         if (op.cleanup_warning) { text += '\nTemporary-file cleanup needs attention in local service diagnostics.'; }
         if (op.outcome && !op.outcome.directory_synced) { text += '\nPack published, but directory sync failed; durability is not confirmed.'; }
+        text += migrationText(op.migration);
         return text;
     }
     function bind(o) {

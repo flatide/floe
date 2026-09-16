@@ -99,6 +99,11 @@ async function submitted(v=cat()) {
         cat('1',op('1','running',{elapsed_ms:1})),cat('1',op('1','succeeded',{outcome:{}}))])assert.throws(()=>B.validate(v,P));
     const tooMany=cat('33',op('33','succeeded'));tooMany.build.operations.history=Array.from({length:33},(_,i)=>op(String(i+1),'succeeded'));assert.throws(()=>B.validate(tooMany,P));
     assert.match(B.status(op('1','failed',{noninteger:true})),/Fractional/);
+    assert.match(B.status(op('1','failed',{migration:{directory_synced:true}})),/Legacy pack renamed/);
+    assert.match(B.status(op('1','cancelled',{migration:{directory_synced:false}})),/directory sync failed/);
+    for(const migration of [{},true,{directory_synced:'yes'},{directory_synced:true,path:'/private'}]) {
+        assert.throws(()=>B.validate(cat('1',op('1','failed',{migration})),P));
+    }
     assert.match(B.status(op('1','succeeded',{outcome:{reused:true,checks:'1',errors:'2',bytes:'500',directory_synced:true}})),/reused/);
     console.log('WEB DRC BUILD UI: ALL OK (approval, u64, identity, progress, cancel/commit, unknown receipt, retry/stop/resume, read-only, malformed DTO)');
 })().catch(e=>{controller.stop();console.error(e);process.exitCode=1;});

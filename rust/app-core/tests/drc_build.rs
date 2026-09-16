@@ -58,7 +58,9 @@ fn admitted_build_reuse_and_drop_release_children_and_leases() {
         jobs: 2,
         force: false,
     };
-    for file in [source.clone(), output.clone()] {
+    for file in
+        std::iter::once(source.clone()).chain(floe_app_core::cache::pack_paths(&source).unwrap())
+    {
         let reader = resources.drc([file]).unwrap();
         let result = Build::start(&resources, scope.clone(), &source, options, binary.clone());
         assert!(matches!(result, Err(e) if e.kind == ErrorKind::Busy));
@@ -80,10 +82,21 @@ fn admitted_build_reuse_and_drop_release_children_and_leases() {
     let p = Pack::open(&output, &AtomicUsize::new(0)).unwrap();
     assert!(p.total > 0 && p.source_matches(&source).unwrap());
     drop(p);
+    let legacy = floe_app_core::cache::pack_paths(&source).unwrap()[1].clone();
+    fs::rename(&output, &legacy).unwrap();
+    let reader = resources.drc([legacy.clone()]).unwrap();
+    assert!(
+        matches!(Build::start(&resources, scope.clone(), &source, options, binary.clone()), Err(e) if e.kind == ErrorKind::Busy)
+    );
+    assert!(legacy.exists() && !output.exists());
+    drop(reader);
     let mut job = Build::start(&resources, scope.clone(), &source, options, binary).unwrap();
-    assert!(wait(&job).outcome.unwrap().reused);
+    let reused = wait(&job);
+    assert!(reused.outcome.unwrap().reused && reused.migration.is_some());
     job.close().unwrap();
+    assert!(!legacy.exists());
     assert_eq!(bytes, fs::read(&output).unwrap());
+    fs::rename(&output, &legacy).unwrap();
     let job = Build::start(
         &resources,
         scope,
@@ -100,6 +113,10 @@ fn admitted_build_reuse_and_drop_release_children_and_leases() {
         let s = job.snapshot();
         assert!(!s.terminal(), "{s:?}");
         if let Some(pid) = s.native_pid {
+            assert!(
+                s.migration.is_some(),
+                "rename receipt lost before native launch"
+            );
             break pid;
         }
         assert!(Instant::now() < deadline);
@@ -107,6 +124,10 @@ fn admitted_build_reuse_and_drop_release_children_and_leases() {
     };
     assert!(resources.read([output.clone()]).is_err());
     drop(job);
+    assert!(
+        !legacy.exists() && output.exists(),
+        "cancelled rebuild undid/hid a completed rename"
+    );
     assert_eq!(resources.usage(), Usage::default());
     // SAFETY: signal 0 only checks whether this recorded child remains alive.
     assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);

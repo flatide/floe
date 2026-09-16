@@ -543,7 +543,7 @@ fn progress(seq: u64, s: &build::Snapshot) -> Value {
         Phase::Cancelled => "cancelled",
     };
     json!({"seq":seq.to_string(),"kind":"drc_build","phase":phase,"elapsed_ms":s.elapsed_ms.to_string(),
-        "error":s.failure.map(crate::view::safe_error),"noninteger":s.native.drc_noninteger,"cleanup_warning":s.cleanup_warning,
+        "error":s.failure.map(crate::view::safe_error),"noninteger":s.native.drc_noninteger,"cleanup_warning":s.cleanup_warning,"migration":s.migration,
         "native":{"checks":s.native.drc_checks.map(|n|n.to_string()),"total_checks":s.native.drc_total_checks.map(|n|n.to_string()),"errors":s.native.drc_errors.map(|n|n.to_string()),"output_bytes":s.native.output_bytes.to_string(),"dropped_lines":s.native.dropped_lines.to_string()},
         "outcome":s.outcome.as_ref().map(|o|json!({"reused":o.reused,"checks":o.checks.to_string(),"errors":o.errors.to_string(),"bytes":o.bytes.to_string(),"directory_synced":o.directory_synced}))})
 }
@@ -552,20 +552,22 @@ fn protect_inputs(r: &Registration) -> Result<()> {
     let protected = std::iter::once(r.path.clone())
         .chain(r.rules.clone())
         .collect::<Vec<_>>();
-    let output =
-        floe_app_core::artifact::protected_output(&build::output_path(&r.path)?, &protected, &[])?;
     let metadata = |path: &std::path::Path| match std::fs::metadata(path) {
         Ok(m) => Ok(Some(m)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(floe_app_core::Error::from(e)),
     };
-    if let (Some(rules), Some(output)) = (&r.rules, metadata(&output)?) {
-        if metadata(rules)?.is_some_and(|m| (m.dev(), m.ino()) == (output.dev(), output.ino())) {
-            // A case-insensitive filesystem can alias different path strings
-            // without creating a second hard link. Compare identities too.
-            return Err(floe_app_core::Error::input(
-                "DRC output aliases registered SVRF input",
-            ));
+    for candidate in floe_app_core::cache::pack_paths(&r.path)? {
+        let output = floe_app_core::artifact::protected_output(&candidate, &protected, &[])?;
+        if let (Some(rules), Some(output)) = (&r.rules, metadata(&output)?) {
+            if metadata(rules)?.is_some_and(|m| (m.dev(), m.ino()) == (output.dev(), output.ino()))
+            {
+                // A case-insensitive filesystem can alias different path strings
+                // without creating a second hard link. Compare identities too.
+                return Err(floe_app_core::Error::input(
+                    "DRC output aliases registered SVRF input",
+                ));
+            }
         }
     }
     Ok(())

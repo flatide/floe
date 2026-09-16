@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-17(M4g-31 동기화·원격 보류·명시 Index 개명 결정).
+작성 2026-08-29, 갱신 2026-09-17(M4g-32 명시 Index 개명; 원격 단계 보류).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -125,8 +125,9 @@ M4g-11b는 실측 브랜치 `09be2ab`까지 16개 커밋을 정방향 합류하�
 M4g-31은 `45c9934`까지 추가 14개 커밋을 정방향 통합하고 로컬 전체 회귀를 통과했다.
 occupancy 기본값은 최신 계약에 따라 **layout off / jobdeck on**으로 바뀐다.
 새 캐시 이름·depth 점유·page frontier와 이관/검증 상태는
-[두 번째 동기화 기록](WEBUI_JOBDECK_SYNC.ko.md)에 둔다. 개명은 명시 Index에서만
-하도록 사용자 결정됐으며, 이 후속 구현은 별도 다음 단계로 남아 있다.
+[두 번째 동기화 기록](WEBUI_JOBDECK_SYNC.ko.md)에 둔다. M4g-32는 사용자 결정대로
+개명을 명시 Index/DRC Build에만 연결한다. 읽기/profile 비쓰기, 양쪽 이름 잠금,
+실패/취소 후 개명 receipt의 계약과 검증 상태는 [별도 기록](WEBUI_CACHE_MIGRATION.ko.md)을 본다.
 전체 배터리 PASS는 실제 브라우저·Linux 실행·현장 수용이나 첫 실행 지연 해결을 뜻하지 않는다.
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.

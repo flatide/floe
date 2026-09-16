@@ -40,6 +40,8 @@ pub struct Snapshot {
     pub completed: usize,
     pub total: usize,
     pub kept: usize,
+    pub renamed: usize,
+    pub rename_sync_warning: bool,
     pub skipped: usize,
     pub failed: usize,
     pub elapsed_ms: u64,
@@ -95,6 +97,8 @@ impl ManagedIndex {
             completed: 0,
             total: 0,
             kept: 0,
+            renamed: 0,
+            rename_sync_warning: false,
             skipped: 0,
             failed: 0,
             elapsed_ms: 0,
@@ -230,6 +234,11 @@ fn run(
         }
         let result = (|| {
             let prepared = PreparedIndex::prepare(&path, &options, indexer.clone(), flag)?;
+            if let Some(migration) = prepared.migration() {
+                let mut s = state.lock().unwrap();
+                s.renamed += 1;
+                s.rename_sync_warning |= !migration.directory_synced;
+            }
             if matches!(prepared.action(), Action::Reuse | Action::OccupancyPresent) {
                 return Ok(true);
             }

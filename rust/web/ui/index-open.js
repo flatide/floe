@@ -44,17 +44,21 @@
     }
     function sameTarget(a,b) { return a.kind === b.kind && a.view_id === b.view_id && a.state_rev === b.state_rev; }
     function samePixels(a,b) { return Array.isArray(a) && a.length === 2 && a[0] === b[0] && a[1] === b[1]; }
+    function renameText(i) {
+        if (!i || !Number.isSafeInteger(i.renamed) || i.renamed < 1) { return ''; }
+        return ' Legacy caches renamed: ' + i.renamed + '.' + (i.rename_sync_warning ? ' Rename committed, but directory sync failed.' : '');
+    }
     function resultText(v, message) {
         const i = v.index || {}, phase = i.native && i.native.phase || i.phase || v.phase;
         if (v.stage === 'open') {
             return 'Index succeeded. ' + (v.phase === 'succeeded' ? 'View attached; see canvas for rendering status.' :
-                v.phase === 'opening' ? 'Opening the indexed layout…' : 'View was not opened: ' + message(v.error || v.phase) + ' Completed cache files remain.');
+                v.phase === 'opening' ? 'Opening the indexed layout…' : 'View was not opened: ' + message(v.error || v.phase) + ' Completed cache files remain.') + renameText(i);
         }
         if (['failed','cancelled','incomplete'].includes(v.phase)) {
             return 'Index ' + v.phase + '. View not opened. ' + message(v.error || v.phase) + ' Any completed cache files remain.' +
-                (Number.isInteger(i.skipped) ? ' Skipped sources: ' + i.skipped + '.' : '');
+                (Number.isInteger(i.skipped) ? ' Skipped sources: ' + i.skipped + '.' : '') + renameText(i);
         }
-        return 'Index · ' + phase + (Number.isInteger(i.total) ? ' · ' + i.completed + '/' + i.total + ' sources' : '');
+        return 'Index · ' + phase + (Number.isInteger(i.total) ? ' · ' + i.completed + '/' + i.total + ' sources' : '') + renameText(i);
     }
     function bind(o) {
         const el = o.el, doc = o.document, P = o.protocol, panel = el('index-open-dialog'), button = el('index-open');
@@ -255,6 +259,6 @@
         return {init:init,observe:observe,changed:paint,blocked:blocked,pending:function () { return !!pending || invalid; },stop:stop,resume:resume,
             clear:function () { save(null); invalid=false; candidate=null; }};
     }
-    const api = {bind:bind,preview:preview,journal:journal,resultText:resultText};
+    const api = {bind:bind,preview:preview,journal:journal,resultText:resultText,renameText:renameText};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeIndexOpen = api; }
 }(typeof window === 'object' ? window : globalThis));

@@ -555,7 +555,7 @@
     function operationLabel(op) {
         if (op.kind === 'index_open') { return window.FloeIndexOpen.resultText(op,message); }
         const p = op.native || {};
-        return op.kind + ' · ' + op.phase + (p.phase ? ' · ' + p.phase : '') + (op.error ? ' · ' + message(op.error) : '');
+        return op.kind + ' · ' + op.phase + (p.phase ? ' · ' + p.phase : '') + (op.error ? ' · ' + message(op.error) : '') + (op.kind === 'index' ? window.FloeIndexOpen.renameText(op) : '');
     }
     async function operationState() {
         try { return await readOperationState(); }

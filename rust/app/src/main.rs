@@ -87,6 +87,10 @@ Deck profiling is unsupported; profile its source OASIS directly.
 Legacy/KLayout and retired coverage options are rejected.
 --force authorizes native replacement, not a transactional backup.
 Current caches keep their build options; use --force to change LOD.
+Explicit Index migrates a legacy cache name to the hidden .ice directory.
+Info/open/probe and cell profiling never rename. Completed renames remain
+if a later rebuild fails or is cancelled; new-name destinations are not overwritten.
+Close viewers in other processes before indexing; reader leases are app-local.
 The source path may contain spaces/Unicode. Use -- for a leading dash.";
 
 enum Cli {

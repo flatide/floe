@@ -72,6 +72,7 @@ pub struct Snapshot {
     pub outcome: Option<Outcome>,
     pub native_pid: Option<u32>,
     pub cleanup_warning: bool,
+    pub migration: Option<cache::Migration>,
 }
 impl Snapshot {
     pub fn terminal(&self) -> bool {
@@ -96,7 +97,7 @@ pub struct Build {
 }
 pub fn output_path(source: &Path) -> Result<PathBuf> {
     let source = cache::absolute(source)?;
-    let output = cache::pack_path(&source)?;
+    let output = cache::pack_paths(&source)?[0].clone();
     artifact::protected_output(&output, &[source], &[])
 }
 impl Build {
@@ -138,6 +139,7 @@ impl Build {
                 outcome: None,
                 native_pid: None,
                 cleanup_warning: false,
+                migration: None,
             },
         }));
         let (shared, flag, target) = (Arc::clone(&state), Arc::clone(&stop), output.clone());
@@ -289,10 +291,12 @@ fn run(
             "DRC build requires an ASCII source, not an ICE pack",
         ));
     }
-    let _lease = WriteLease::acquire(target)?;
-    let old = existing(target)?;
+    let _leases = WriteLease::acquire_aliases(&cache::pack_paths(source)?)?;
+    let selected = cache::pack_path(source)?;
+    scope.check(&selected)?;
+    let mut old = existing(&selected)?;
     if let Some(previous) = old.as_ref().filter(|_| !options.force) {
-        let pack = Pack::open(target, stop).map_err(|e| {
+        let pack = Pack::open(&selected, stop).map_err(|e| {
             if e.kind == ErrorKind::Cancelled {
                 e
             } else {
@@ -309,19 +313,46 @@ fn run(
             ));
         }
         input.unchanged_at(source)?;
-        unchanged_target(target, old.as_ref())?;
+        unchanged_target(&selected, old.as_ref())?;
         let mut s = state.lock().unwrap();
         check_cancelled(stop)?;
+        if selected != target {
+            s.snapshot.migration = Some(cache::rename_legacy(
+                &selected,
+                target,
+                &previous.file.metadata()?,
+                false,
+                stop,
+            )?);
+        }
         s.sealed = true;
         return Ok(Outcome {
             reused: true,
             checks: pack.checks.len(),
             errors: pack.total,
             bytes: previous.len(),
-            directory_synced: true,
+            directory_synced: s.snapshot.migration.is_none_or(|m| m.directory_synced),
         });
     }
     indexer.verify(stop)?;
+    if selected != target {
+        input.unchanged_at(source)?;
+        unchanged_target(&selected, old.as_ref())?;
+        let expected = old
+            .as_ref()
+            .ok_or_else(|| Error::new(ErrorKind::Cache, "legacy DRC pack disappeared"))?
+            .file
+            .metadata()?;
+        let mut s = state.lock().unwrap();
+        check_cancelled(stop)?;
+        s.snapshot.migration = Some(cache::rename_legacy(
+            &selected, target, &expected, false, stop,
+        )?);
+        drop(s);
+        // Rename changes ctime. Capture the new stamp, without pretending a
+        // subsequent native failure can roll the completed name change back.
+        old = existing(target)?;
+    }
     let staging = Staging::create(target.parent().expect("absolute target parent"), state)?;
     let temporary = staging.path.join("result.ice");
     phase(state, Phase::Running, stop)?;

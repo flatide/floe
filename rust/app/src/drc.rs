@@ -16,16 +16,18 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
   --errs RULE             Stream one rule's error JSON (first duplicate)
   --floe-reviewer TAG     Existing per-reviewer waive sidecar selection
   --svrf-rules FILE       Explicit rules.json metadata for --rules / --errs
-  --build                 Explicitly build/reuse .RESULTS.db.tray, no read/export
+  --build                 Explicitly build/reuse .RESULTS.db.tray, migrate legacy name
   --force                 With --build: allow atomic replacement of old pack
   --jobs N                With --build: native workers 1..16 (default 12)
 
-Without --build: read-only, no automatic indexing or autosave creation.
+Without --build: read-only, no renaming, automatic indexing or autosave creation.
 Uses a fresh layout-4 .tray pack (or legacy .ice) when available, otherwise bounded read-only
 ASCII parsing (including fractional coordinates). Stale/corrupt adjacent
 packs are reported but never overwritten by read commands.
 --build uses the existing integer-DBU pack format; fractional coordinates fail
 without changing the old pack. It preserves review files and emits JSON.
+Name migration is reported separately and is not rolled back if rebuilding fails.
+Close readers in other processes before building; reader leases are app-local.
 Interactive notes/waives use the web view's explicit reviewer/edit opt-ins;
 this drc inspection command does not edit reviews.";
 pub struct Command {
@@ -335,7 +337,7 @@ fn build_pack(
                     serde_json::json!({"source":source,"pack":job.output(),
                     "reused":outcome.reused,"checks":outcome.checks,"errors":outcome.errors,
                     "bytes":outcome.bytes,"directory_synced":outcome.directory_synced,
-                    "cleanup_warning":s.cleanup_warning})
+                    "cleanup_warning":s.cleanup_warning,"migration":s.migration})
                 );
                 return Ok(0);
             }

@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-17, M4g-31 최신 jobdeck 정책 정방향 통합. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-17, M4g-32 명시 Index 개명. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -34,9 +34,10 @@ M4g-31은 `feature/jobdeck`의 `45c9934`까지 합류하고 source별 occupancy 
 (layout off / jobdeck on), `--occupancy-balance`, 새 캐시 이름과 구 이름 읽기,
 depth 점유·page frontier를 웹에 맞춘다. CLI 목록은 공개111개·숨김 거부17개,
 native parser177회다. [동기화 기록](WEBUI_JOBDECK_SYNC.ko.md)에 검증 근거와
-자동 개명의 정책 차이를 남긴다. 사용자는 명시 Index에서만 개명을 승인했다.
-읽기 권한으로 파일 이름을 바꾸지 않으며, 후속 개명 구현과 실칩·실제 브라우저
-수용을 이번 로컬 통합 완료에 포함하지 않는다. 원격 단계(SH-10)는 사용자 보류다.
+자동 개명의 정책 차이를 남긴다. M4g-32는 사용자 승인에 따라 명시 Index/DRC
+Build에서만 개명을 추가한다([계약·검증](WEBUI_CACHE_MIGRATION.ko.md)). 읽기 권한으로
+파일 이름을 바꾸지 않는다. 별도 프로세스 reader 조정, 캐시 revision/hot reload,
+실칩·실제 브라우저 수용은 추가하지 않는다. 원격 단계(SH-10)는 사용자 보류다.
 
 ## 1. 범위별 현재 근거와 남은 일
 

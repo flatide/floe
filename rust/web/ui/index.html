@@ -217,7 +217,7 @@
       </section>
       <button id="index-open" type="button" aria-haspopup="dialog" aria-controls="index-open-dialog" hidden disabled>Index and open…</button>
       <details class="index-panel"><summary>Index this source</summary>
-        <p class="note">Explicit operation. Close the view before rebuilding its cache.</p>
+        <p class="note">Explicit operation. Close views here and in other processes before rebuilding or renaming their cache; reader leases are app-local. Legacy cache names migrate to hidden .ice directories. Completed renames remain if later work fails or is cancelled.</p>
         <div class="form-row"><label for="index-jobs">Index jobs</label><input id="index-jobs" class="short" type="number" min="1" max="16" value="12"></div>
         <label class="check"><input id="index-lod" type="checkbox"> Include LOD</label>
         <label class="check"><input id="index-occupancy" type="checkbox"> Include occupancy summary (default: jobdeck only)</label>
@@ -253,8 +253,8 @@
         <button id="drc-build-open" aria-expanded="false" aria-controls="drc-build-form" disabled>Build pack…</button>
         <form id="drc-build-form" aria-label="Approve pack build" hidden>
           <p>Current review: <strong id="drc-build-source"></strong></p>
-          <p>The registered ASCII source’s <code>.ice</code> pack will be created or reused beside that source.</p>
-          <p>DRC reads pause. Selected errors, groups and CD rulers reset, even if cancelled. Layout and layer visibility stay unchanged. Review files are not changed.</p>
+          <p>The registered ASCII source’s hidden <code>.tray</code> pack will be created or reused beside that source. This explicit build also renames a legacy <code>.ice</code> pack when no new-name pack exists. Completed renames remain if later work fails or is cancelled.</p>
+          <p>DRC reads pause. Close readers in other processes first; reader leases are app-local. Selected errors, groups and CD rulers reset, even if cancelled. Layout and layer visibility stay unchanged. Review files are not changed.</p>
           <div class="form-row"><label for="drc-build-jobs">Build jobs</label><input id="drc-build-jobs" class="short" type="number" min="1" max="16" step="1" value="4" required></div>
           <label class="check"><input id="drc-build-force" type="checkbox"> Replace existing pack</label>
           <p class="note">Unchecked: reuse a current pack; refuse a stale or corrupt pack. Checked: rebuild and atomically replace it, without a backup.</p>
@@ -411,7 +411,7 @@
       <label class="check"><input id="index-open-lod" type="checkbox"> Include LOD</label>
       <label class="check"><input id="index-open-occupancy" type="checkbox"> Include occupancy summary (default: jobdeck only)</label>
       <label class="check"><input id="index-open-force" type="checkbox"> Also approve FORCE replacement of existing cache files</label>
-      <p class="note">Existing live cache readers can block indexing. No view is silently closed. Partial indexing does not open a partial deck. Cancellation does not remove already completed cache files.</p>
+      <p class="note">This also migrates legacy cache names to hidden .ice directories. Existing live cache readers in this app can block indexing or renaming. Close viewers in other processes first. No view is silently closed. Partial indexing does not open a partial deck. Cancellation or failure does not remove completed cache files or undo completed renames.</p>
       <div class="button-row"><button id="index-open-approve" type="button" class="primary" disabled>Approve indexing and open</button><button id="index-open-check" type="button" hidden>Check / retry same approval</button><button id="index-open-cancel" type="button" hidden>Cancel approved work</button></div>
       <p id="index-open-status" class="note" role="status"></p>
       <p class="note">Close hides this dialog; it does not cancel approved work or forget its receipt. If recovery is unavailable, close this dialog and use End session. Reload only checks status; it never submits a new approval.</p>

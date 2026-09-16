@@ -243,6 +243,12 @@ fn arguments(
 
 pub(crate) struct WriteLease(File);
 impl WriteLease {
+    pub(crate) fn acquire_aliases(paths: &[PathBuf]) -> Result<Vec<Self>> {
+        // Fixed lexical order and both spellings serialize old/new writers.
+        // Keep stable lock inodes; never remove them after a rename.
+        let ordered: std::collections::BTreeSet<_> = paths.iter().collect();
+        ordered.into_iter().map(|p| Self::acquire(p)).collect()
+    }
     pub(crate) fn acquire(directory: &Path) -> Result<Self> {
         let mut path = directory.as_os_str().to_owned();
         path.push(".index.lock");
@@ -282,7 +288,8 @@ pub struct PreparedIndex {
     directory: PathBuf,
     args: Vec<OsString>,
     indexer: Indexer,
-    lease: Option<WriteLease>,
+    lease: Vec<WriteLease>,
+    migration: Option<cache::Migration>,
     cleanup_occupancy: bool,
 }
 impl PreparedIndex {
@@ -297,6 +304,9 @@ impl PreparedIndex {
     }
     pub fn arguments(&self) -> &[OsString] {
         &self.args
+    }
+    pub fn migration(&self) -> Option<cache::Migration> {
+        self.migration
     }
     pub fn prepare(
         source: &Path,
@@ -323,7 +333,7 @@ impl PreparedIndex {
         }
         cache::fingerprint(&source)?;
         indexer.verify(cancelled)?;
-        let directory = cache::cache_path(&source)?;
+        let mut directory = cache::cache_path(&source)?;
         if let Some(snapshot) = &options.profile_snapshot {
             let snapshot = cache::absolute(snapshot)?;
             let name = snapshot
@@ -347,17 +357,26 @@ impl PreparedIndex {
         }
         let profiling = options.profile_cell.is_some();
         let lease = if profiling {
-            None
+            Vec::new()
         } else {
-            Some(WriteLease::acquire(&directory)?)
+            WriteLease::acquire_aliases(&cache::cache_paths(&source)?)?
         };
+        // Resolution must be rechecked under both writer locks. Read-only
+        // profile intentionally acquires neither locks nor migration authority.
         if !profiling {
-            if let Ok(m) = fs::symlink_metadata(&directory) {
-                if !m.is_dir() || m.file_type().is_symlink() {
+            directory = cache::cache_path(&source)?;
+        }
+        let mut before = None;
+        if !profiling {
+            match fs::symlink_metadata(&directory) {
+                Ok(m) if m.is_dir() && !m.file_type().is_symlink() => before = Some(m),
+                Ok(_) => {
                     return Err(Error::input(
                         "cache destination must be a real directory, even with --force",
-                    ));
+                    ))
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.into()),
             }
         }
         let state = if profiling {
@@ -372,14 +391,35 @@ impl PreparedIndex {
                 "index cancelled during cache validation",
             ));
         }
-        let args = arguments(&source, &directory, options, &action)?;
+        let destination = if profiling {
+            directory.clone()
+        } else {
+            cache::default_cache_path(&source)?
+        };
+        let args = arguments(&source, &destination, options, &action)?;
+        let migration = if directory != destination {
+            Some(cache::rename_legacy(
+                &directory,
+                &destination,
+                before
+                    .as_ref()
+                    .ok_or_else(|| Error::new(ErrorKind::Cache, "legacy cache disappeared"))?,
+                true,
+                cancelled,
+            )?)
+        } else {
+            None
+        };
+        // No fallible preparation after this commit: callers must receive the
+        // name-change receipt even if launching/rebuilding is later cancelled.
         Ok(Self {
             action,
             source,
-            directory,
+            directory: destination,
             args,
             indexer,
             lease,
+            migration,
             cleanup_occupancy: !profiling && (options.wants_occupancy() || options.occupancy_only),
         })
     }
@@ -414,7 +454,7 @@ impl PreparedIndex {
         };
         Ok(IndexJob {
             child: Some(child),
-            lease: self.lease.take(),
+            lease: std::mem::take(&mut self.lease),
             directory: self.directory.clone(),
             cleanup_occupancy: self.cleanup_occupancy,
             finished: None,
@@ -425,7 +465,7 @@ impl PreparedIndex {
 
 pub struct IndexJob {
     child: Option<Child>,
-    lease: Option<WriteLease>,
+    lease: Vec<WriteLease>,
     directory: PathBuf,
     cleanup_occupancy: bool,
     finished: Option<i32>,
@@ -446,7 +486,7 @@ impl IndexJob {
         };
         Ok(Self {
             child: Some(child),
-            lease: None,
+            lease: Vec::new(),
             directory: PathBuf::new(),
             cleanup_occupancy: false,
             finished: None,
@@ -512,7 +552,7 @@ impl IndexJob {
                 eprintln!("[floe2-web] cannot clean occupancy temp: {e}");
             }
         }
-        self.lease.take();
+        self.lease.clear();
     }
     fn discard_occupancy_tmp(&self) -> Result<()> {
         if self.cleanup_occupancy {
