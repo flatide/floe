@@ -297,7 +297,7 @@ impl SourceCatalog {
         let seconds: f64 = infos.iter().map(|i| i.probe_s).sum();
         json!({"dir":self.directory,"probed":infos.len(),"ok":infos.iter().filter(|i|i.ok()).count(),
             "indexed":infos.iter().filter(|i|i.indexed).count(),"probe_s":(seconds*10000.).round_ties_even()/10000.,
-            "note":"dbu comes from the OASIS START / GDS UNITS record in the first bytes of each file; no geometry is read. indexed = a fresh <src>.floe cache exists.",
+            "note":"dbu comes from the OASIS START / GDS UNITS record in the first bytes of each file; no geometry is read. indexed = a fresh VFS cache exists.",
             "files":infos})
     }
 }

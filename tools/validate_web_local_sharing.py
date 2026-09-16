@@ -4,6 +4,7 @@ import http.cookiejar
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,7 @@ def main(fixture):
         result = subprocess.run([str(APP), "index", str(source), "--jobs", "2"],
                                 env=env, capture_output=True, timeout=40)
         assert result.returncode == 0, result.stderr
-        before = digest(Path(str(source) + ".floe"))
+        before = digest(vfs_cache(source))
         source_before = source.read_bytes(), source.stat().st_mtime_ns
         review = work / "synthetic.db"
         review.write_text("TOP 1000\nWIDTH\n1 1 0\np 1 4\n10.125 10\n20.125 10\n20.125 20\n10.125 20\n")
@@ -146,10 +147,10 @@ def main(fixture):
                 if proc.poll() is None:
                     proc.terminate()
                     proc.communicate(timeout=15)
-        assert digest(Path(str(source) + ".floe")) == before
+        assert digest(vfs_cache(source)) == before
         assert (source.read_bytes(), source.stat().st_mtime_ns) == source_before
         assert (review.read_bytes(), review.stat().st_mtime_ns) == review_before
-        assert not Path(str(review) + ".ice").exists(), "read-only sharing must not build a DRC pack"
+        assert not drc_pack(review).exists(), "read-only sharing must not build a DRC pack"
         assert not list(temps.iterdir()), "local-share launcher leaked private worker files"
     print("WEB LOCAL SHARING CLI: ALL OK (default off, byte-exact guest assets, native open, follow/explore, separate DRC grant + fractional ASCII read, isolated auth, revoke, no implicit index/writes/worker leaks)")
 

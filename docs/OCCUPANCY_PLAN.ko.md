@@ -8,8 +8,9 @@
 
 마스크 정책(`thin=keep`)의 광역뷰에서는 페이지 디코드·raster 대신 **소스·레이어별
 점유 비트맵 피라미드**(셀 ≤ 화면 1 px인 레벨)를 화면 마스크로 투영해 그린다.
-점유는 색인 시 **도형 교차**로 만든다(bbox 대체 없음). 근접뷰·exact·제한 depth는
-지금처럼 exact keep. 일반 레이아웃 정책(`thin=cull`)은 바꾸지 않는다.
+점유는 색인 시 **도형 교차**로 만든다(bbox 대체 없음). 근접뷰·exact는 지금처럼
+exact keep. 제한 depth는 2026-09-16(M6)부터 배치 깊이별 비트 평면으로 요약한다.
+일반 레이아웃 정책(`thin=cull`)은 바꾸지 않는다.
 
 ## 1. 왜 (실측)
 
@@ -65,13 +66,16 @@
   있음"을 도형 교차로 판정한다. rect는 셀 범위, polygon/path는 셀 격자 위 보수적
   스캔 변환(§5), 반복은 §5의 닫힌형 조건을 만족할 때만 footprint, 아니면 멤버마다.
   처리 한계를 넘는 레이어는 근사로 저장하지 않고 "요약 없음(이유)"로 기록한다.
-- **적용 조건(5개)**: 요청이 `thin=keep`이고, exact 요청이 아니고, depth가 그
-  레이어를 통째로 그리는 값(무제한, 소스 계층 높이 이상, 또는 그 레이어의 페이지를
-  가진 가장 깊은 셀의 깊이 이상 — 레이어 단위, 2026-09-15)이고, `.ovo`가 기록한
-  top·소스·레이어 테이블이 현재 캐시와 일치하고, 뷰의
-  µm/px ≥ base cell(level 0 셀이 1 px 이하)일 때만. 하나라도 아니면 현행 경로
+- **적용 조건(5개)**: 요청이 `thin=keep`이고, exact 요청이 아니고, `.ovo`가 기록한
+  top·소스·레이어 테이블이 현재 캐시와 일치하고, 뷰의 µm/px ≥ base cell(level 0
+  셀이 1 px 이하)이고, depth 조건: **v2 파일(FLOEOVO2, 2026-09-16 M6 — 배치
+  깊이별 비트 평면)이면 어떤 depth든** 요청 depth 이하의 평면들의 OR을 그린다
+  (그 depth에서 페이지 경로가 그리는 도형과 정확히 같은 집합); v1 파일(전 깊이
+  평탄화) 또는 `FLOE_RUST_OCCUPANCY_DEPTH=off`에서는 depth가 그 레이어를 통째로
+  그리는 값(무제한, 소스 계층 높이 이상, 또는 그 레이어의 페이지를 가진 가장 깊은
+  셀의 깊이 이상 — 레이어 단위, 2026-09-15)일 때만. 하나라도 아니면 현행 경로
   (리뷰 2: depth 0/1에서 깊은 자식 도형이 요약으로 보이거나 `render --detail exact
-  --thin keep`이 근사로 바뀌면 안 된다).
+  --thin keep`이 근사로 바뀌면 안 된다 — 깊이별 평면이 전자를 정확히 만족시킨다).
 - **스타일(전용 경로)**: 셀 렉트를 도형처럼 raster에 넘기지 않는다(현행 hairline
   경로는 채움 패턴을 무시하고 solid로 칠하며, 선폭 > 1이면 셀마다 외곽선을 그려
   점유가 팽창한다 — 리뷰 3). 대신 (1) 점유를 화면 **마스크**로 투영하고(픽셀 = 그
@@ -91,7 +95,7 @@
 
 (계획 원문. 구현된 형식은 SPEC-FORMATS `design.ovo`, 계획과 다른 세부는 §12.)
 
-캐시 디렉터리(`<src>.floe/`)의 선택적 sidecar. 소스 좌표계(world dbu, 캐시의 top 셀
+캐시 디렉터리(`.<src>.ice/`)의 선택적 sidecar. 소스 좌표계(world dbu, 캐시의 top 셀
 기준으로 전체 계층을 평탄화)에서 레이어마다 피라미드.
 
 ```
@@ -107,8 +111,9 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
          (level 0의 셀 (i, j) = [x0 + i·cell, x0 + (i+1)·cell) × [y0 + j·cell, …))
 ```
 
-- 기준 셀: 옵션 `--occupancy-um`(기본 4 µm). 근접뷰 경계(800 px 창에서 3.2 mm 뷰)와
-  저장량의 절충. 2 µm면 4배.
+- 기준 셀: 옵션 `--occupancy-um`(기본은 자동, 2026-09-16 — 긴 변이 2,048셀 이상이
+  되는 가장 굵은 4/2/1/0.5/0.25 µm; 8 mm 초과 칩은 4 µm). 근접뷰 경계(800 px 창에서
+  3.2 mm 뷰)와 저장량의 절충. 2 µm면 4배.
 - 레벨 수: 격자가 64 × 64 셀 이하가 될 때까지(35.8 mm·4 µm에서 9레벨, 4 µm~1 mm).
   상위 레벨은 하위의 OR-풀링이라 재생성 가능하지만 저장한다.
 - 크기: dense 비트맵은 도형 수가 아니라 **world bbox 면적**에 비례한다(멀리 떨어진
@@ -168,8 +173,11 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 - 빈 레이어(2026-09-14): 양의 면적 도형이 없는 레이어는 `empty`(비트맵 없음)로
   기록하고 렌더러는 셀 0의 요약으로 다룬다(레이어 수에 포함, 페이지 없음).
 - 취소: SIGINT·상위 취소 시 tmp 삭제, 기존 `.ovo` 보존.
-- **옵션·기본**: M5 결정(2026-09-15) — `floe2 index`는 **기본 on**(`--no-occupancy`
-  로 끔; 현재 캐시에 요약이 없으면 추가만; raw `floe-index vfs`는 명시 옵션),
+- **옵션·기본**: 2026-09-16 사용자 결정 — `floe2 index deck.jb`의 소스는 **기본
+  on**, 레이아웃 `floe2 index chip.oas`는 **기본 off**(`--occupancy`로 켬;
+  `--no-occupancy`는 둘 다 끔; `--occupancy`에 현재 캐시가 요약을 갖지 않으면
+  추가만; raw `floe-index vfs`는 명시 옵션). M5 결정(2026-09-15)의 "전부 기본
+  on"을 바꿨다: 일반 레이아웃은 `thin:cull`이라 요약을 쓰지 않는다.
   `--occupancy-um F`(기본 4), `--occupancy-only`(기존 캐시에 추가·교체, ovm/ovp
   불변). M1~M4 동안은 opt-in이었다.
 - **jobdeck 래퍼(리뷰 6)**: `_jobdeck_index()`는 argv를 직접 구성하고 이미 색인된
@@ -181,12 +189,13 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 
 요청 단위로 정해진다(2026-09-11 정책 분리와 같은 원칙).
 
-1. 조건: §3의 5개(`thin=keep`, exact 아님, depth가 레이어를 통째로 그리는 값
-   (`Cache::depth_is_full_for`: 무제한·계층 높이 이상·레이어별 최대 깊이 이상),
-   `.ovo` 유효·일치, µm/px ≥ base cell) 모두 참이고 킬 스위치가 아닐 때. depth
-   조건은 레이어 단위라 보이는 레이어 중 일부만 요약될 수 있고, 하나도 안 되면
-   `summary: none (depth)`. 레이어 단위로 `.ovo`의 status가
-   ok인 레이어만 요약, none인 레이어는 현행 경로.
+1. 조건: §3의 5개(`thin=keep`, exact 아님, `.ovo` 유효·일치, µm/px ≥ base cell,
+   depth) 모두 참이고 킬 스위치가 아닐 때. depth는 v2 파일이면 어떤 값이든 되고
+   요청 depth 이하의 평면을 OR해 그린다(`OvoFile::level_at_depth`; 조합은 캐시의
+   `(레이어, 레벨, depth)` 캐시에 남는다). v1 파일·`FLOE_RUST_OCCUPANCY_DEPTH=off`
+   에서는 `Cache::depth_is_full_for`(무제한·계층 높이 이상·레이어별 최대 깊이
+   이상)인 레이어만 요약되고, 하나도 안 되면 `summary: none (depth)`. 레이어
+   단위로 `.ovo`의 status가 ok인 레이어만 요약, none인 레이어는 현행 경로.
 2. 레벨: 셀 ≤ 1 px인 가장 굵은 레벨 L. 덱은 소스 뷰 기준(덱 µm/px ÷ scale).
 3. 플랜: 요약으로 그릴 레이어를 `vis` 마스크에서 뺀 채 기존 플랜을 돈다 → 그
    레이어의 페이지 선택·페이지 BVH·자식 순회가 생략된다. 프레임(r == 0)은 레이어와
@@ -195,7 +204,8 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
    투영하고(기존 raster 밴드 병렬화에 맞춤), §3의 경계/내부 규칙으로 스타일을
    적용한다. 페인트 위치는 `StyledGeometryRasterRequest.layers`(칠 순서, 뒤가 덮음)
    안에서 그 레이어의 차례. 셀을 도형으로 넘기지 않는다.
-5. 근접뷰(µm/px < base cell)·exact·제한 depth: 현행 exact keep. 예산 초과는 현행 거부.
+5. 근접뷰(µm/px < base cell)·exact: 현행 exact keep. 예산 초과는 현행 거부. 제한
+   depth는 v2 파일에서 그 depth의 평면 요약(M6).
 6. pick/snap: 게시된 query scene은 요약 레이어의 도형을 갖지 않으므로(생략됨)
    found=0이 된다. 요약 레이어는 그 뷰에서 pick/snap 대상에서 제외하고 상태줄에
    `summary layers: not pickable`을 표시한다(리뷰 7).
@@ -211,8 +221,9 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
   대체하면 배치 순서(= 레이어 순서)가 그대로 유지된다. 출력은 지금처럼 창 크기
   프레임으로 합성된다(step 2·3의 서브윈도·묶음·스트리밍 구조 그대로, 요약 pass는
   디코드가 없으므로 스트리밍 대상이 아니다).
-- 적용 조건은 pass 단위로 §3과 같다: 덱 요청의 depth가 full이 아니거나 exact
-  (`floe2 render --detail exact`)면 요약 없음. 뷰어의 덱 기본 depth는 M4에서 확인.
+- 적용 조건은 pass 단위로 §3과 같다: 덱 요청이 exact(`floe2 render --detail
+  exact`)면 요약 없음; depth는 pass마다 그 소스의 v2 평면으로 처리한다(M6; v1
+  파일이면 full인 레이어만). 뷰어의 덱 기본 depth는 M4에서 확인.
 - 4단계 sub-cut wash와의 관계: 요약이 그리는 레이어는 sub-cut wash를 내지 않는다.
   요약이 없는 소스·레이어는 현행 wash.
 - 카운터: 덱 프레임 줄에 `summary_passes`, `summary_cells`.
@@ -233,10 +244,11 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
    3 px 이상 빈 간격의 가운데 픽셀 보존,
    큰 rect의 채움·외곽선이 exact와 경계 1 px 이내. (c) 레이어 순서: 아래 요약 + 위
    exact fixture에서 위 레이어가 보인다.
-3. 정책 불변: `thin=cull` 픽셀 불변(A/B), keep 근접뷰·exact·depth 0/1 픽셀 불변,
-   keep 광역뷰는 요약(요약 없는 캐시에서는 현행과 동일).
+3. 정책 불변: `thin=cull` 픽셀 불변(A/B), keep 근접뷰·exact 픽셀 불변, keep
+   광역뷰는 요약(요약 없는 캐시에서는 현행과 동일; depth 0/1은 M6부터 그 depth의
+   평면 요약이 페이지 경로와 1 px 이내).
 4. 덱: 합성 순서·서브윈도·레벨 선택(scale 반영), 요약 레이어의 sub-cut wash 없음,
-   depth 제한·exact 덱 렌더에서 요약 없음.
+   exact 덱 렌더에서 요약 없음(depth 제한은 M6부터 평면 요약).
 5. 운영: 킬 스위치 A/B, `--explain` verdict, perf 카운터 파싱, 잘린 파일·헤더 불일치
    (top·레이어·identity) 거부, 취소 뒤 tmp 없음·기존 파일 보존, `--occupancy-only`
    전후 ovm/ovp 해시 불변, jobdeck 래퍼 옵션 전달, pick/snap 제외 상태줄.
@@ -253,6 +265,7 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 | M2 | renderd 전용 마스크 경로(단일 소스), 5개 조건, 레벨 선택, 레이어 순서, pick/snap 제외, 킬 스위치, gate 2·3·5 | **완료 2026-09-11(RENDERD 0.12.80, §12)**: 단일 소스 keep 광역뷰가 요약으로 그려짐, cull·근접뷰·exact·depth 제한·킬 스위치 픽셀 불변 |
 | M3 | 플래너에서 요약 레이어의 페이지·계층 생략, `--explain summary`, 카운터 | **완료 2026-09-11(RENDERD 0.12.81, §12)**: 요약 레이어의 페이지 0, 프레임 없는 요청은 요약 전용 서브트리 프루닝(wc_cells 0) |
 | M4 | 덱 통합(소스 뷰 레벨, pass 대체, wash 억제, depth/exact 조건), gate 4 | **완료 2026-09-11(RENDERD 0.12.81, §12)**: mag 0.2 덱의 fit 뷰 픽셀 == 단일 소스 요약 픽셀. 덱 fit 뷰 시간은 실칩 실측 대기 |
+| M6 | 배치 깊이별 비트 평면(FLOEOVO2): 제한 depth에서도 keep이 요약을 그림, 구간 depth 대비 | **완료 2026-09-16(RENDERD 0.12.90, §12 "M6")**: 레이어마다 도형이 있는 깊이별 평면, 요청 depth 이하의 OR; 공유 atomic 평면 마킹(스레드별 복제 없음); v1 파일은 full에서만; 킬 스위치 `FLOE_RUST_OCCUPANCY_DEPTH=off`; gate(깊이별 오라클, depth 0/1 렌더, v1·손상 테이블) |
 | M5 | 실칩 실측 8, base cell·기본 on/off 확정, 문서(JOBDECK §10·FLOE2_OPTIMIZATION 결함 B) | **완료 2026-09-15(§12 "M5 마감")**: 8-a·8-c 생성(추출본 4.4 s·17 MB, 덱 667소스 9.9 분·172 MB), 8-d 뷰어(150 × 103 mm 덱 뷰 16.7 s → 0.15 s, depth 무관). 결정: 색인 기본 on(`--no-occupancy`), base cell 4 µm, 마스크는 keep + detail medium. 후속: 8-b 품질 샷, charge당 비용(scan), cull에서의 요약 |
 
 각 단계는 킬 스위치와 gate를 갖추고 배터리 통과 뒤 커밋한다. 버전: Rust 변경 단계는
@@ -511,16 +524,25 @@ layer 3/300 status=ok work=729081740 set=4342426,1220836,338091,94074,27163,8105
 
 사용자 결정(실측 8-a·8-c·8-d 뒤):
 
-- **색인 기본 on**: `floe2 index`(소스·덱·뷰어의 자동 색인)가 옵션 없이 `design.ovo`를
-  만든다. `--no-occupancy`로 끄고, 현재 캐시에 요약이 없으면 기본 색인이 재색인
-  없이 추가한다(`--occupancy-only` 경로). 셀 프로파일 실행은 요약을 요청하지
-  않는다. raw `floe-index vfs`는 그대로 명시 옵션. 비용: 파싱은 색인과 공유,
-  마킹은 추출본 기준 48스레드 4.4 s, 파일은 빈 레이어 제외(추출본 17 MB, 덱
-  172 MB). gate `validate_index_cli`(기본 argv에 `--occupancy`, `--no-occupancy`,
-  요약 없는 캐시에 추가), `validate_occupancy`(plain/`--no-occupancy`/추가/up to
-  date).
+- **색인 기본 on** (2026-09-16에 범위 조정, 아래): `floe2 index`가 옵션 없이
+  `design.ovo`를 만든다. `--no-occupancy`로 끄고, 현재 캐시에 요약이 없으면
+  재색인 없이 추가한다(`--occupancy-only` 경로). 셀 프로파일 실행은 요약을
+  요청하지 않는다. raw `floe-index vfs`는 그대로 명시 옵션. 비용: 파싱은
+  색인과 공유, 마킹은 추출본 기준 48스레드 4.4 s, 파일은 빈 레이어 제외(추출본
+  17 MB, 덱 172 MB).
+  **2026-09-16 변경(사용자 결정)**: 기본 on은 **jobdeck의 소스만**이다.
+  레이아웃 `floe2 index chip.oas`와 뷰어의 File > load layout 색인은 요약 없이
+  색인하고(`--occupancy`로 opt-in; 요약 없는 캐시는 그대로 둠), `floe2 index
+  deck.jb`와 File > load jobdeck은 소스마다 `--occupancy`를 준다. 이유: 일반
+  레이아웃은 `thin:cull`이라 요약을 쓰지 않으므로 색인 시간·파일만 든다. gate
+  `validate_index_cli`(레이아웃 기본 argv에 `--occupancy` 없음, `--no-occupancy`,
+  `--occupancy`가 요약 없는 캐시에 추가, 기본은 그대로 둠),
+  `validate_occupancy`(plain 레이아웃 = 요약 없음, `--occupancy` 추가/up to
+  date, 덱 plain = 요약 있음, 덱 `--no-occupancy` = 없음).
 - **base cell 4 µm 유지**: 요약은 1200 px 창 기준 뷰 폭 4.8 mm부터 켜지고, 8-d의
-  뷰에서 `near` 구간의 불편이 없었다. 2 µm는 파일·생성 4배라 보류.
+  뷰에서 `near` 구간의 불편이 없었다. 2 µm는 파일·생성 4배라 보류. (2026-09-16
+  실측 9 뒤 변경: 작은 칩의 fit 뷰가 `near`라 칩 크기에서 자동 선택 — 큰 칩은 그대로
+  4 µm. 아래 "base cell 자동 선택".)
 - **마스크 소스는 keep + detail medium**: 요약이 켜진 광역뷰는 cut과 무관하게
   점유 셀을 그리므로 medium과 high가 같고, 근접뷰에서는 양축이 cut 미만인 것만
   빠진다(한 변이 긴 마크는 hairline으로 남음). 일반 레이아웃(cull)은 medium/high
@@ -625,3 +647,237 @@ occupancy cell=4um (80000 dbu) grid=6493x8243 levels=9 layers=4 ok=2 empty=2 job
 | 5 P2 | `.ovo` 유효성·게시·호환 계약 부재; `CACHE_VERSION`을 올리면서 구 캐시 호환은 `is_stale()`(버전 불일치 = 재색인)과 충돌 | 사실 | §4: identity·top·레이어 일치 검증, 오프셋·곱 검증·잘린 파일 거부, tmp + rename, meta 불일치 처리, 열린 뷰어의 stat 재오픈; `CACHE_VERSION` 불변, `.ovo` 자체 버전 |
 | 6 P2 | jobdeck 래퍼 `_jobdeck_index()`는 argv를 직접 만들고 색인된 소스를 제외하므로 옵션이 자동 전달되지 않는다 | 사실 | §5: 세 옵션 전달, `--occupancy-only` 대상 선정 변경, ovm/ovp 불변·셀 크기 검증 gate |
 | 7 P2 | 4.3 s는 상한이 아닌 추정; 레이어 병렬화는 거대 계층에서 병목을 못 푼다; dense 크기는 bbox 면적 비례; 기본 생성은 실측 뒤에; pick/snap은 게시 scene 조회라 found=0 | 사실 | §5: 셀 수·작업·파일 상한, `--jobs` 준수, 취소, M5까지 opt-in; §4 면적 비례 명시; §6 pick/snap 제외 + 상태줄 |
+
+### 2026-09-16 — 기본값 조정과 캐시 이름 개명 (0.12.134 / RENDERD 0.12.89)
+
+- **기본값**: 요약은 jobdeck의 소스에만 기본이고 레이아웃은 `--occupancy`
+  opt-in이다(위 "색인 기본 on" 항목의 변경 기록). 뷰어의 layout 로드 색인도
+  `floe2 index chip.oas`와 같은 argv(`--jobs 12 --no-lod`)를 쓴다.
+- **이름**: 캐시 폴더 `<src>.floe/` → 숨김 `.<src>.ice/`, DRC pack `<db>.ice` →
+  숨김 `.<db>.tray`. 규칙은 `floe/cachepath.py` 하나에 있고 구 이름은 발견 시
+  자동 개명된다(재색인 없음; `FLOE_CACHE_MIGRATE=off`로 끔). 상세는
+  docs/CACHE-NAMING.ko.md.
+
+### 2026-09-16 — M6 배치 깊이별 비트 평면, FLOEOVO2 (0.12.135 / RENDERD 0.12.90)
+
+현장(2026-09-16): 9.8 GB 일반 레이아웃을 `thin:keep`으로 열자 `decoded generation
+budget exceeded: 2356612414 > 1073741824` — 요약이 있어도 제한 depth에서는 쓰이지
+않아(전 깊이 평탄화라 깊은 자식 도형이 새어 나옴) keep이 페이지를 전부 디코드했다.
+사용자 결정: "full depth가 아닐 때라도 keep이 되면 좋겠음", 나중의 depth 구간
+(start~end)까지 대응하도록 **깊이별 비트 평면**.
+
+- **형식 v2**: 레이어마다 도형이 실제로 있는 배치 깊이 d(0 = top 자기 레코드)마다
+  비트 피라미드 하나. 깊이 ≥ 15는 평면 15에 접힌다(`DEPTH_CAP`). 요청 depth N은
+  평면 d ≤ N의 OR, 무제한은 전부, 나중의 구간 [s, e]는 평면 s..e의 OR. v1 파일
+  (`FLOEOVO1`)은 `depth=all` 평면 하나로 읽혀 무제한(또는 레이어별 full)에서만
+  쓰인다 — 기존 캐시는 그대로 열리고, 제한 depth의 요약을 쓰려면
+  `floe2 index … --occupancy-only`로 한 번 다시 만든다. SPEC-FORMATS `design.ovo`.
+- **마킹**: 스레드별 level-0 비트맵 복제 + OR 병합 대신 레이어당 **공유 atomic
+  평면**(깊이마다 한 장)에 `fetch_or`로 찍는다. 결과는 unit 분할과 무관해 스레드
+  수에 대해 바이트 동일(gate 유지). 메모리 = 레이어의 깊이 수 × level 0 한 장
+  (실칩 전체 35.8 × 34.6 mm, 4 µm: 평면당 9.6 MB) — 이전의 jobs × 한 장보다 작다.
+  깊이는 unit(`Unit.depth`)과 walk가 넘긴다. 파일 크기는 "레이어에 도형이 있는
+  깊이 수 × v1 크기"(도형이 없는 깊이는 평면이 없음), `none:size` 상한은 평면
+  단위로 센다.
+- **렌더러**: `summary_selection`이 v2 파일이면 보이는 레이어 전부를 요약 대상으로
+  삼고 요청 depth(무제한·계층 높이 이상은 전부)로 평면을 조합한다. 조합 비트는
+  `SummaryPlane`이 소유(`Arc<[u8]>`)하고 캐시 슬롯이 `(레이어, 레벨, depth 키)`로
+  기억한다(512개 상한). v1 파일·`FLOE_RUST_OCCUPANCY_DEPTH=off`는 2026-09-15의
+  레이어별 full 조건 그대로. `none` 이유의 판정 순서는 policy → exact → off →
+  nofile/invalid → depth → near.
+- **CLI**: `floe-index occupancy` 줄에 `planes=d:count,…`(v1은 `all`), `--depth N`
+  덤프. `version=`은 파일의 버전.
+- **gate**(`validate_occupancy`, 29 tests): 깊이별 평면 하나하나가 KLayout
+  `RecursiveShapeIterator`의 `min_depth=max_depth=d` 오라클과 셀 단위 일치(픽스처
+  3종 + valmini), 3단 계층 픽스처 `deep.oas`(1/0은 평면 0·1·2, 2/0은 1, 3/0은 2),
+  thinwide의 FAR 자식(2/0, 빈 공간)이 depth 0에서는 요약에 없고 depth 1·full에서
+  있음, depth-0 요약이 depth-0 페이지 경로와 1 px 이내, 킬 스위치에서 `none
+  (depth)` 복원, 파일 크기 = 평면 단위 테이블 + 평면별 비트맵, 스레드 수 무관
+  바이트 동일. Rust: `planes_follow_the_placement_depth…`, `depths_at_or_beyond
+  _the_cap…`, 평면 테이블 순서·cap 위반·개수 불일치 거부, v1 왕복,
+  `a_request_depth_draws_the_planes_at_or_above_it`.
+- **남은 것**: 실칩 재생성 실측(파일 크기 = 레이어별 깊이 수 배; 9.8 GB 레이아웃의
+  keep 제한 depth 광역뷰 시간), 근접뷰 예산 초과(단일 레이아웃 슬라이스 스트리밍)는
+  사용자 판단으로 보류(근접뷰는 요약 대상이 아님).
+
+### 실측 9 (2026-09-16, 150 MB 실칩, 0.12.89 = M6 이전) — 무음 5분, `none (near)`
+
+사용자 보고: `--occupancy-only`에서 `parsed 5407 cells in 29.3s (12 threads,
+source released, rss 13G)` 뒤 `occupancy cell=4um (16000 dbu) …`까지 약 5분간
+로그가 없었고, 평소 색인 50초짜리 파일의 요약이 5분 가까이 걸렸다. floe2에서
+`thin:keep`, depth */11의 광역뷰(fit)에 `summary: none (near)`.
+
+- **무음**: 마킹은 레이어 순서로 돌고 끝에 한 줄만 찍었다. 조치(0.12.136 /
+  RENDERD 0.12.91): 10 s 하트비트(`L/D marking: u/U units work xG (Ts)`)와
+  레이어 완료 줄(SPEC-INDEXER §6.5). `Opts.progress` 콜백, gate
+  `progress_lines_report_the_layers_without_a_summary`.
+- **5분**: 원인 후보는 (1) `none:work` 레이어 — 작업 상한 2^31 charge를 다 쓰고
+  포기하므로 그런 레이어 하나가 charge당 56 ns(실측 8-a 가설)면 2분을 태운다,
+  (2) 레이어 수 × 레이어당 작업(추출본은 레이어 2개에 7.3억 charge). 판정에는
+  `floe-index occupancy <cache>`의 `status=`·`work=` 줄과 새 진행 로그가 필요하다.
+  `--occupancy-max-work N`으로 상한을 낮추면 포기가 빨라지고 올리면 그 레이어가
+  요약을 얻는다. M6(공유 atomic 평면)에서의 시간은 재측정.
+- **`none (near)`**: 요약은 level 0 셀(4 µm)이 화면 1 px 이하일 때만 쓴다(§3;
+  더 굵은 셀을 픽셀 중심 투영으로 그리면 채움 안에 격자 구멍이 생긴다 — 2차
+  리뷰 P2). 즉 뷰 폭 ≥ 4 µm × 창 픽셀 폭(1,400 px 창에서 5.6 mm, 4K에서 15 mm)
+  이어야 하므로, 작은 칩의 fit 뷰나 큰 창에서는 depth와 무관하게 `near`가 된다.
+  당장은 `floe2 index <src> --occupancy-only --occupancy-um 1`(또는 2)로 셀을
+  줄이면 된다(파일·마킹 4~16배). 후속 결정 후보: 색인 시 base cell을 칩 크기로
+  자동 선택(예: min(4 µm, 칩 폭/4096), 하한 0.25 µm) — M5의 "4 µm 고정"을 바꾸는
+  일이라 사용자 결정 대기.
+- **파이프 panic**(같은 날 후속): `floe-index occupancy … | head -1`이 `failed
+  printing to stdout: Broken pipe (os error 32)` panic — Rust는 SIGPIPE를 무시한
+  채 시작해 `println!`이 EPIPE에 panic한다. `floe-index`가 시작 시 SIGPIPE를
+  기본(SIG_DFL)으로 되돌려 C 프로그램처럼 조용히 끝난다(0.12.137 / RENDERD
+  0.12.92; libc 크레이트 없이 `extern "C" signal`). gate
+  `test_a_reader_closing_the_pipe_early_does_not_panic`. renderd는 stdout이
+  프로토콜이라 건드리지 않았다.
+- **실측 9 데이터(사용자, 0.12.89)**: `cell_dbu=16000 base_um=4 grid=388x563
+  levels=5 layers=337 identity=ok`; status `313 ok / 24 empty`(`none:work` 없음);
+  work 상위 `705/59 1.18G, 685/59 0.52G, 692/59 0.32G, 502/59 0.22G, 213/192
+  0.21G`; `total_work 5.44G`.
+  - **칩 크기** 388 × 563 셀 × 4 µm = **1.55 × 2.25 mm**. fit 뷰(약 1,000 px)에서
+    4 µm 셀 = 1.8 px > 1 px → `none (near)`가 맞다. 이 칩은 `--occupancy-um 1`
+    (1,552 × 2,252 셀, 평면당 0.44 MB, 313 레이어에 대략 200~400 MB) 또는 2 µm
+    (창 1,100 px까지, 약 50~100 MB)가 필요하다. 마킹 시간은 멤버 수가 지배하므로
+    (아래) 셀을 줄여도 크게 늘지 않는다.
+  - **5분**: `none:work`가 없으므로 예산 소진이 아니다. 54억 charge를 12스레드로
+    약 270 s에 마킹 = 초당 2,000만 charge = 8-a에서 잰 **1스레드 속도(56 ns/charge)**
+    와 같다 → 병렬이 먹지 않았다. work가 셀 수(21.8만)의 5,400배이므로 charge는
+    반복 멤버가 지배한다(멤버당 1 charge + 셀). 원인: unit 분할이 개수 기준이라
+    top의 배치 수가 4 × jobs를 넘으면 확장이 멈추고, 11.8억 charge짜리 블록 하나가
+    unit 하나로 한 스레드에 남는다. 조치(0.12.138 / RENDERD 0.12.93): 작업량 기준
+    분할(SPEC-INDEXER §6.5, `--occupancy-balance 0` 킬 스위치), gate
+    `a_heavy_block_among_light_placements_is_split_by_work`(개수 분할은 블록을 unit
+    0개로 남기고, 작업량 분할은 8개 이상으로 쪼갬; 파일 바이트 동일). 기대: 12
+    스레드에서 5분 → 수십 초, 48스레드에서 10초대(효율 40% 가정). 재측정 대기.
+
+### 2026-09-16 — base cell 자동 선택 (0.12.140 / RENDERD 0.12.95, 사용자 결정)
+
+실측 9의 1.55 × 2.25 mm 칩은 4 µm 셀이 fit 뷰에서 1.8 px라 요약이 `near`로 꺼졌다.
+결정: `--occupancy-um`을 생략하면 top의 긴 변이 **2,048셀 이상**이 되는 가장 굵은
+4/2/1/0.5/0.25 µm를 고른다(`occupancy::auto_base_um_for_span`, `Opts.base_um` 0 =
+`BASE_AUTO`). 8 mm 초과 칩은 4 µm 그대로(추출본·실칩·덱은 불변), 2.25 mm 칩은 1 µm
+(1,552 × 2,252 셀, 평면당 0.44 MB), 1 mm 미만은 0.25 µm. 명시 `--occupancy-um`은
+그대로다. 마킹 시간은 반복 멤버 수가 지배하므로 셀을 줄여도 크게 늘지 않고, 큰
+사각형만 셀 수에 비례한다. 로그 `[vfs] occupancy cell=1um (4000 dbu, auto)`. gate
+`the_automatic_base_cell_follows_the_chip_size`(규칙 표, 10 × 3 mm → 4 µm, 3 × 2 µm
+→ 0.25 µm), `test_the_base_cell_follows_the_chip_size_unless_given`(CLI: 10 × 8 µm →
+0.25, 3 × 2 mm → 1, 명시 4 → 4). 덱 소스는 크기가 제각각이라 작은 소스에 가는
+셀이 붙는다 — 덱 합계 크기는 첫 재생성에서 확인(사용자: 덱은 지금 문제없음).
+
+### 2026-09-16 — 일반 레이아웃 생성 비용: 레이어 재검색·atomic 경합·종료 대기
+
+현장 보고: 9.8 GB 실칩은 공통 파싱 약 5분, 기존 인덱싱 약 30분에 비해
+`floe2 index source.oas --occupancy-only --jobs 12`가 약 100분(사용자 실행 명령
+확인). `--jobs 12`는 래퍼에서 Rust 인덱서와 occupancy 옵션까지 전달되며,
+스레드 수 누락은 아니다. 일반 레이아웃의 sub-cut wash는 drawing을 약
+1초에서 6~8초 이상으로 늘렸다. 이 실칩의 로그·입력은 이번 측정에 없으므로
+100분의 원인별 비중이나 개선 후 시간을 확정하지 않는다.
+
+코드에서 확인하고 수정한 비용:
+
+1. **다른 레이어 재검색**: 레이어별 존재·깊이·작업량 계산이 전체 도형 목록을
+   반복 검사하고, 마킹에서도 배치 멤버마다 셀의 모든 레이어 레코드를 다시
+   검사했다. 한 번의 분류로 `(layer, datatype, cell)`별 참조 목록을 만들고
+   모든 단계가 해당 레이어의 목록만 순회한다. 원본 geometry·반복은 복사하지
+   않으며 목록은 레이어 완료 때 해제한다. 참조 포인터와 Vec 여유 용량·희소 맵
+   메모리가 추가된다(SPEC-INDEXER §6.5).
+2. **포화된 비트에 반복 atomic 쓰기**: 이미 켜진 점유 셀에도 `fetch_or`를 해
+   여러 스레드가 같은 cache line의 쓰기 소유권을 주고받았다. relaxed load에서
+   필요한 비트가 모두 있으면 OR을 생략한다. 비트는 0→1로만 바뀌므로 안전하다.
+   오래된 값을 읽으면 OR이 한 번 더 발생할 뿐 누락되지 않는다. charge·도형
+   교차·깊이·빈 공간·파일 형식은 유지한다.
+3. **하트비트 종료**: 마킹 종료 후 250 ms sleep 중인 로그 스레드를 join해서
+   짧은 레이어마다 최대 250 ms를 기다렸다. 종료 채널로 즉시 깨운다. 진행 줄의
+   unit 수는 배정 수에서 **완료 수**로 바꾸고 실제 `workers=N`을 표시한다.
+   분류 시간과 느린 준비 단계도 따로 출력한다.
+
+로컬 release 빌드, 동일 입력·셀 크기·작업량, **3회 중앙값**(초). 파싱·페이지
+색인·진행 로그 없는 라이브러리 측정이다. 밀집 경합을 분리해 재현하는 합성
+입력이므로 실칩 전체에 대한 배율로 환산하면 안 된다.
+
+| 합성 입력 | jobs | 수정 전 | 수정 후 |
+|---|---:|---:|---:|
+| 셀 안 64레이어 × 256개 레코드, 배치 1,024개 | 1 | 1.637 | 0.629 |
+| 위와 같음 | 12 | 1.016 | 0.193 |
+| 1레이어 × 8,192개 레코드, 배치 8,192개, 점유 셀 3개 | 1 | 2.109 | 1.971 |
+| 위와 같음 | 12 | 2.759 | 0.519 |
+
+두 사례의 jobs 1/12, 수정 전/후 `.ovo`는 모두 **바이트 동일**. 두 번째 사례에서
+기존의 멀티스레드 역효과를 재현했으며 수정 후에는 병렬 이득이 생겼다. 재현:
+
+```sh
+cargo run --release --manifest-path rust/Cargo.toml -p floe-vfs \
+  --example bench_occupancy -- mixed 12 /tmp/mixed.ovo
+cargo run --release --manifest-path rust/Cargo.toml -p floe-vfs \
+  --example bench_occupancy -- dense 12 /tmp/dense.ovo
+```
+
+별도 CLI 사례(337레이어, 레이어당 rect 1개, 1×1 점유 셀, jobs 12, 진행 로그
+활성)는 occupancy 타이머 **85.7 s → 0.0 s**(0.1초 단위 표시), `.ovo` 바이트
+동일. 이 값은 종료 대기의 영향만 보여 주며 100분 전체를 설명하지 않는다.
+
+검증: `cargo test --manifest-path rust/Cargo.toml -p floe-vfs --lib` 65개 통과,
+`tools/validate_occupancy.py` 34개 통과(KLayout 도형 교차·깊이 오라클,
+피라미드·렌더링·캐시 교체 포함). 동시 중첩 span의 처음 쓰기와 포화 후 반복
+쓰기가 비트와 빈 공간을 보존하는 Rust 회귀 테스트를 추가했다.
+
+남은 실측: 실칩의 `grouped records`, 레이어별 `work`, `workers`, 완료 unit,
+시간과 메모리. 반복 멤버를 실제로 방문하는 비용은 여전히 남으며 하나의 거대한
+레코드 반복은 unit 내부에서 직렬이다. 이것이 지배하면 추가 작업은 반복 분할
+또는 격자 위상·변환·깊이를 보존하는 셀 요약 재사용이다. 셀 비트맵을 임의 좌표에
+단순 이동하면 격자 오차가 누적되므로 별도 정확도 검증 없이 적용하지 않는다.
+일반 레이아웃에서 생성된 요약을 사용하려면 기존대로 `thin:keep`이 필요하다.
+이번 수정은 일반 레이아웃의 thin 기본값·sub-cut 정책을 바꾸지 않는다.
+
+### 2026-09-16 — sub-cut 규칙 기본 off: 광역뷰 존재는 요약이 맡는다
+
+사용자 결정(FLOE2_OPTIMIZATION 결함 C 종결): 일반 레이아웃의 sub-cut wash는
+느려지는 부작용에 비해 여전히 다 보이지 않고, 덱은 요약이 있으므로 쓰일 일이
+없다 — 단일 레이아웃·덱 모두 기본 off(진단 `FLOE_RUST_SUB_CUT_WASH=on`,
+`FLOE_RUST_DECK_WIDE=on`). 따라서 일반 레이아웃에서 광역뷰에 작은 도형의 존재를
+보려면 `floe2 index <src> --occupancy`(또는 `--occupancy-only`) + `thin:keep`이
+유일한 길이고, 요약 생성 시간이 실사용 조건이다: 150 MB 실칩은 위 재검색 제거
+뒤 231.9 s(cell 1 µm auto), 다음 병목은 한 레코드의 거대 반복이 unit 안에서
+직렬인 것(합성 재현: 레코드 반복 1,680만 멤버 jobs 1 = 0.406 s, jobs 12 =
+0.388 s; 같은 멤버를 배치 반복으로 두면 0.569 → 0.149 s). 후속: 레코드 반복의
+멤버 범위 unit 분할(per-member 경로만, `work`·파일 바이트 동일).
+
+
+### 2026-09-16 — 레코드 반복의 멤버 범위 분할 (0.12.144 / RENDERD 0.12.99)
+
+위 진단(레코드 자신의 Grid/Pts 반복은 unit 안에서 직렬)에 대한 리뷰 조건 네 가지와
+처리:
+1. **실칩의 주된 병목인지는 추정** — work는 멤버 수 외에 켠 셀·변 행·배치 반복의
+   재방문도 세므로 1.18G charge만으로 단일 거대 레코드를 확정할 수 없다. 그래서
+   이 분할은 "안전한 다음 최적화"로 넣고 실칩 확인은 로그(`grouped records`,
+   `prepared`, `marking u/U units workers=N`, 레이어별 `ok … (Ts)`)로 한다.
+2. **charge 보존** — 레코드 반복은 멤버 수를 한 번에 charge한다. 범위 unit은
+   `m1 − m0`를 한 번에 charge하므로 정상 완료 시 합이 같다. 면적 0 rect·폭 0 path는
+   범위마다 charge 없이 끝나고, 거부되는 path의 `paths_skipped`는 멤버 0을 가진
+   범위만 세며, closed form 채움은 멤버 0의 범위만 한다. 예산 초과(`none:work`)는
+   판정이 같고 work 값만 다를 수 있다(기존 계약).
+3. **깊은 계층** — 무거운 자식의 Grid/Pts 배치(멤버 ≤ 64)는 멤버마다 자식 unit을
+   따로 만들어 배치 반복 안의 거대 레코드도 분할에 닿는다(멤버 charge는 첫 unit의
+   `extra`). 단일 배치는 기존대로 8단계까지 내려간다.
+4. **기대치** — 스레드 수만큼이 아니라 합성 배치 반복의 3.8×(12스레드)가 상한
+   근처이고, 상위 5개 레이어 2.45G는 전체 5.44G의 45 %다. 실칩 수치는 재측정으로.
+검증: Rust `a_record_repetition_is_split_by_members_and_the_file_stays_the_same`
+(rect/polygon/path × Grid/Pts × 회전·미러·깊이 × 직접 배치·Pts 배치·2×2 배열
+배치, jobs 1/4, balance on/off → 파일·work 동일; closed form·면적 0은 미분할;
+`none:work` 판정 동일), `GiantRepetitionTests`(KLayout 압축이 만든 반복 레코드,
+jobs 1/4/`--occupancy-balance 0` 파일 동일, `floe2 index --occupancy-balance 0`
+통과). 킬 스위치 `--occupancy-balance 0`을 `floe2 index`에도 노출했다.
+합성 재현(로컬 release, 1 µm 상자 4096×4096 = 1,680만 멤버, 8 µm 피치, cell 4 µm):
+레코드 반복 jobs 1/12 = 0.430/**0.102 s**(이전 0.406/0.388), 같은 멤버의 배치
+반복 0.562/0.142 s, work 33,554,432 네 경우 동일. 실칩(231.9 s) 재측정 대기.
+
+
+### 2026-09-17 — 요약 없는 광역뷰: 대표(page frontier)
+
+사용자 설계(FLOE2_OPTIMIZATION 결함 C 후속 3, SPEC-PLANNER §3): 요약이 없는
+일반 레이아웃은 컷이 버리던 페이지·배치를 대표(4^k개 중 하나, 줌 사이 포함 관계)
+로 남겨 비용을 컷 시점 수준으로 묶는다. 요약이 주는 채워진 존재와 달리 무늬이고
+빌드가 없다. 두 길은 공존: 요약이 있으면(`thin:keep`) 요약이 그리고, 없으면
+대표가 남는다. fit급에서 대표가 느리면 그 줌 대역의 캐시(사전 계산)를 검토한다.

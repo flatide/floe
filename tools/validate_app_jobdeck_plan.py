@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import subprocess
 import sys
 import tempfile
@@ -42,11 +43,11 @@ def normalized_report(report):
     sources.pop("probe_s")
     for row in sources["files"]:
         row.pop("probe_s")
-        # M1a-3b's explicit diagnostic delta: native always reports the .floe
+        # M1a-3b's explicit diagnostic delta: native always reports the VFS
         # destination of a regular source, including a corrupt cache for which
         # the Python try/load block leaves cache_dir empty.
         if row["cache_dir"].endswith(".tiles") or (not row["cache_dir"] and Path(row["path"]).is_file()):
-            row["cache_dir"] = os.path.abspath(row["path"]) + ".floe"
+            row["cache_dir"] = str(vfs_cache(row["path"]))
     return report
 
 
@@ -75,7 +76,7 @@ def run(args, env, code=0):
 
 def digest(directory):
     return {str(p.relative_to(directory)): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
-            for p in directory.rglob("*") if p.is_file() and (".floe" in str(p) or p.suffix in (".oas", ".jb"))}
+            for p in directory.rglob("*") if p.is_file() and (any(part.endswith((".ice", ".floe")) for part in p.parts) or p.suffix in (".oas", ".jb"))}
 
 
 def main():
@@ -167,7 +168,7 @@ def main():
         # Lenient syntax errors must be visible but never produce placements.
         check("lenient", DECK.replace("ROWS 85120.0/45020.0", "SF=2\nROWS 85120.0/45020.0", 1), strict=False)
         # An unselected source contributes header DBU even with corrupt cache.
-        mark_cache = Path(str(sources / "mark.oas") + ".floe")
+        mark_cache = vfs_cache(sources / "mark.oas")
         original_meta = (mark_cache / "meta.json").read_bytes()
         (mark_cache / "meta.json").write_bytes(b"bad metadata")
         check("unselected-cache", DECK, load=[1])
@@ -221,10 +222,10 @@ def main():
             # Missing color file is I/O(1); malformed CLI/spec targets input(2).
             run(common + args, env, 1 if args[-1] == "absent" else 2)
             assert report.read_bytes() == b"old report" and spec.read_bytes() == b"old spec"
-        targets = [deck, sources / "chipA.oas", sources / "chipA.oas.floe/meta.json",
-                   sources / "chipA.oas.floe.index.lock", saved]
+        targets = [deck, sources / "chipA.oas", vfs_cache(sources / "chipA.oas") / "meta.json",
+                   Path(str(vfs_cache(sources / "chipA.oas")) + ".index.lock"), saved]
         linked = work / "cache alias"
-        linked.symlink_to(sources / "chipA.oas.floe", target_is_directory=True)
+        linked.symlink_to(vfs_cache(sources / "chipA.oas"), target_is_directory=True)
         targets.append(linked / "protected.json")
         target_link = work / "output-link"
         target_link.symlink_to(report)
@@ -246,7 +247,7 @@ def main():
         after = digest(sources)
         assert {k: v[0] for k, v in after.items()} == {k: v[0] for k, v in before.items()}
         for k in before:
-            if not k.endswith("mark.oas.floe/meta.json"):
+            if not k.endswith(".mark.oas.ice/meta.json"):
                 assert before[k] == after[k], k
         assert not list(work.rglob(".floe-shot-*.tmp"))
         print("RUST APP JOBDECK ANALYSIS: ALL OK (%d reports, %d specs, 3 native PNG pairs)" % (report_count, spec_count))

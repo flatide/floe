@@ -116,7 +116,7 @@ pub fn compose(analysis: &Analysis, cancelled: &AtomicUsize) -> Result<Composite
                 skipped.push(skip(
                     p,
                     "not_indexed",
-                    "no fresh <src>.floe cache (run --index)".into(),
+                    "no fresh index cache (run --index)".into(),
                     false,
                 ));
             }

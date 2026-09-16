@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+from cache_test_paths import drc_pack
 import random
 import subprocess
 import sys
@@ -137,7 +138,7 @@ def main():
             meta = svrf.load_rules(str(side))
             legacy = Legacy()
             legacy._drc_rmeta = meta
-            pack = drc.IcePack(str(db) + ".ice") if packed else drc.load_ascii(str(db))
+            pack = drc.IcePack(str(drc_pack(db))) if packed else drc.load_ascii(str(db))
             legacy.dbu = 1.0 / pack.precision
             before = fingerprint(work)
             rows = json.loads(run([APP, "drc", db, "--rules", "--svrf-rules", side], env).stdout)
@@ -205,7 +206,7 @@ def main():
             if packed:
                 pack.close()
             else:
-                assert not Path(str(db) + ".ice").exists(), "ASCII fallback built a pack"
+                assert not drc_pack(db).exists(), "ASCII fallback built a pack"
         # Non-regular, large, malformed, missing and future sidecars must fail
         # promptly, without changing any existing input or emitting valid rows.
         db, _, _ = pairs[0]

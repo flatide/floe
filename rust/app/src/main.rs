@@ -67,10 +67,11 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --jobs N                   Native parser/planner workers (default 12)
   --page-target-mb N          Encoded page target MiB (native default 1)
   --lod / --no-lod            LOD generation opt-in / default off
-  --occupancy                Add summary, or include it in a new build (default)
+  --occupancy                Add summary (default on for decks, off for layouts)
   --no-occupancy             Leave/build the cache without adding a summary
   --occupancy-only           Rebuild only summary on a current cache
-  --occupancy-um UM          Positive base cell; implies occupancy
+  --occupancy-um UM          Positive base cell; default chip-size adaptive
+  --occupancy-balance 0|1    Marking work split; default 1, byte-neutral diagnostic
   --slow-cell-s S            Nonnegative slow-cell threshold
   --p2-shard-limit-mb N       Nonnegative shard-copy ceiling
   --profile-cell NAME        Profile one cell without writing a normal cache
@@ -212,7 +213,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
                     return Err(Error::input("occupancy mode flags are mutually exclusive"));
                 }
                 occupancy_mode = Some(flag);
-                options.occupancy = flag != "--no-occupancy";
+                options.occupancy = Some(flag != "--no-occupancy");
                 options.occupancy_only = flag == "--occupancy-only";
             }
             "--profile-snapshot-refresh" => {
@@ -222,6 +223,13 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             "--jobs" => options.jobs = number(value()?, flag)?,
             "--page-target-mb" => options.page_target_mb = Some(number(value()?, flag)?),
             "--occupancy-um" => options.occupancy_um = Some(number(value()?, flag)?),
+            "--occupancy-balance" => {
+                options.occupancy_balance = Some(match number::<u8>(value()?, flag)? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(Error::input("occupancy-balance must be 0 or 1")),
+                });
+            }
             "--slow-cell-s" => options.slow_cell_s = Some(number(value()?, flag)?),
             "--p2-shard-limit-mb" => options.p2_shard_limit_mb = Some(number(value()?, flag)?),
             "--profile-cell" => {
@@ -425,7 +433,7 @@ mod tests {
         assert_eq!(p, PathBuf::from("-source.oas"));
         assert_eq!(o.jobs, 12);
         assert!(!o.lod);
-        assert!(o.occupancy);
+        assert_eq!(o.occupancy, None);
         let Cli::Index(_, o, levels) =
             parsed(&["index", "x.JB", "--level", "2,1,2", "--lod"]).unwrap()
         else {
@@ -437,10 +445,10 @@ mod tests {
     #[test]
     fn occupancy_default_optout_only_and_profile_parse_without_writes() {
         for (flags, enabled, only) in [
-            (vec![], true, false),
-            (vec!["--no-occupancy"], false, false),
-            (vec!["--occupancy-only"], true, true),
-            (vec!["--profile-cell", "TOP"], true, false),
+            (vec![], None, false),
+            (vec!["--no-occupancy"], Some(false), false),
+            (vec!["--occupancy-only"], Some(true), true),
+            (vec!["--profile-cell", "TOP"], None, false),
         ] {
             let mut args = vec!["index", "x.oas"];
             args.extend(flags);

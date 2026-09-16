@@ -5,6 +5,7 @@ import math
 import os
 import random
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import shutil
 import signal
 import subprocess
@@ -35,7 +36,7 @@ def main(fixture, ascii=False):
         layout_dir.mkdir()
         source = layout_dir / "layout.oas"
         shutil.copy2(fixture, source)
-        index = subprocess.run([str(INDEX), "vfs", str(source), str(source) + ".floe", "--jobs", "2"],
+        index = subprocess.run([str(INDEX), "vfs", str(source), str(vfs_cache(source)), "--jobs", "2"],
                                capture_output=True, timeout=30)
         assert index.returncode == 0, index.stderr
         data = work / "DRC synthetic"
@@ -79,7 +80,7 @@ def main(fixture, ascii=False):
         db.write_text(text)
         run = subprocess.run([str(INDEX), "drc", str(db), "--jobs", "2"], capture_output=True, timeout=30)
         assert run.returncode == 0, run.stderr
-        packed = Path(str(db) + ".ice")
+        packed = drc_pack(db)
         os.environ["FLOE_REVIEWER"] = "web-gate"
         p = drc.IcePack(str(packed))
         side = Path(p._waive_path)
@@ -120,7 +121,7 @@ def main(fixture, ascii=False):
                 fractional.append(line)
             db = data / 'fractional.db'
             db.write_text('\n'.join(fractional) + '\n')
-            Path(str(db) + '.ice').write_bytes(b'not an authorized implicit input')
+            drc_pack(db).write_bytes(b'not an authorized implicit input')
             p = drc.load_ascii(str(db))
             expected = [dict(name=c.name, desc=c.desc, waived=0,
                         errors=[dict(local=str(i), glob=str(e.num), kind=e.kind, status=0,

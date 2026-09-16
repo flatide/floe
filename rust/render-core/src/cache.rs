@@ -67,6 +67,20 @@ pub struct PlanCullCounts {
     pub thin_pages: u64,
     /// pages of summarized layers left unselected (M2)
     pub summary_pages: u64,
+    /// sub-cut pages and nodes washed as footprints (2026-09-16 on a
+    /// layout too; a deck's per-pass sum)
+    pub sub_cut_washes: u64,
+    /// sub-cut pages kept and placements expanded as sparse (drawn
+    /// exactly; their decode and paint is the field's cost to read)
+    pub sub_cut_sparse: u64,
+    /// sub-cut items the planner's per-plan budgets dropped (2026-09-16)
+    pub sub_cut_sparse_over: u64,
+    pub sub_cut_wash_over: u64,
+    /// the page frontier's representatives (2026-09-17): cut pages
+    /// kept / washed, cut placements washed or expanded
+    pub rep_kept: u64,
+    pub rep_washed: u64,
+    pub rep_children: u64,
 }
 
 impl PlanCullCounts {
@@ -82,6 +96,13 @@ impl PlanCullCounts {
             thin_frames: st.thin_frames,
             thin_pages: st.thin_pages_kept,
             summary_pages: st.summary_pages,
+            sub_cut_washes: st.sub_cut_washes,
+            sub_cut_sparse: st.sub_cut_sparse,
+            sub_cut_sparse_over: st.sub_cut_sparse_over,
+            sub_cut_wash_over: st.sub_cut_wash_over,
+            rep_kept: st.rep_pages_kept,
+            rep_washed: st.rep_pages_washed,
+            rep_children: st.rep_children,
         }
     }
 
@@ -96,6 +117,17 @@ impl PlanCullCounts {
         self.thin_frames = self.thin_frames.saturating_add(other.thin_frames);
         self.thin_pages = self.thin_pages.saturating_add(other.thin_pages);
         self.summary_pages = self.summary_pages.saturating_add(other.summary_pages);
+        self.sub_cut_washes = self.sub_cut_washes.saturating_add(other.sub_cut_washes);
+        self.sub_cut_sparse = self.sub_cut_sparse.saturating_add(other.sub_cut_sparse);
+        self.sub_cut_sparse_over = self
+            .sub_cut_sparse_over
+            .saturating_add(other.sub_cut_sparse_over);
+        self.sub_cut_wash_over = self
+            .sub_cut_wash_over
+            .saturating_add(other.sub_cut_wash_over);
+        self.rep_kept = self.rep_kept.saturating_add(other.rep_kept);
+        self.rep_washed = self.rep_washed.saturating_add(other.rep_washed);
+        self.rep_children = self.rep_children.saturating_add(other.rep_children);
     }
 }
 
@@ -104,7 +136,6 @@ pub struct PlannedView {
     pub summary: PlanSummary,
     pub stats: RenderStats,
 }
-
 
 /// Display label selected by the parent VFS planner and resolved to the
 /// renderer's stable OVM layer index. Block labels have no design layer.
@@ -266,7 +297,8 @@ fn layer_max_depths(ovm: &floe_ovm::Ovm) -> Vec<u32> {
     // the reachable cells (edges back into the stack are cycles)
     let mut state = vec![0u8; n]; // 0 new, 1 on the stack, 2 done
     let mut order: Vec<usize> = Vec::new();
-    let mut stack: Vec<(usize, Vec<usize>, usize)> = vec![(ovm.top as usize, children(ovm.top as usize), 0)];
+    let mut stack: Vec<(usize, Vec<usize>, usize)> =
+        vec![(ovm.top as usize, children(ovm.top as usize), 0)];
     state[ovm.top as usize] = 1;
     while let Some(frame) = stack.last_mut() {
         if frame.2 < frame.1.len() {
@@ -318,6 +350,8 @@ struct OccupancySlot {
     stat: Option<(u64, u64)>,
     file: Option<std::sync::Arc<floe_vfs::occupancy::OvoFile>>,
     error: Option<String>,
+    /// combined planes of `file` per (layer, level, depth key)
+    planes: crate::summary::PlaneCache,
 }
 
 impl Cache {
@@ -369,6 +403,7 @@ impl Cache {
             slot.stat = stat;
             slot.file = None;
             slot.error = None;
+            slot.planes.clear();
             match stat {
                 None => slot.error = Some("no design.ovo".to_string()),
                 Some(_) => match floe_vfs::occupancy::OvoFile::open(&path) {
@@ -385,7 +420,11 @@ impl Cache {
                 }
             }
         }
-        (slot.file.clone(), slot.error.clone(), stat.unwrap_or((0, 0)))
+        (
+            slot.file.clone(),
+            slot.error.clone(),
+            stat.unwrap_or((0, 0)),
+        )
     }
 
     /// Resolves visible-layer specs (names or L/D, as `layer_mask`) to
@@ -418,7 +457,10 @@ impl Cache {
 
     /// The summary decision of one request (docs/OCCUPANCY_PLAN.ko.md
     /// §3, §6): every condition must hold or the request draws no
-    /// summary; per layer, only a file status of ok qualifies.
+    /// summary; per layer, only a file status of ok qualifies. The
+    /// planes are the file's planes at or above the request depth
+    /// (a version-2 file; 2026-09-16), so a limited depth has its own
+    /// summary.
     pub fn summary_selection(
         &self,
         request: &PlanRequest,
@@ -434,19 +476,6 @@ impl Cache {
         if request.exact || request.cut_dbu == 0 {
             return Ok(SummarySelection::none(summary::NONE_EXACT));
         }
-        // depth, per layer (field 2026-09-15: the GUI's depth 7 of 7
-        // travelled as the number 7 and lost the summary - a 150 x
-        // 103 mm deck view took 16.7 s drawing 15k thin pages; and the
-        // user changes the depth freely): a layer whose pages all sit
-        // within the requested depth is drawn whole there, so its
-        // summary stays exact; the request has no summary only when
-        // no visible layer qualifies
-        let visible = self.visible_indices(request.visible_layers.as_deref())?;
-        let eligible: Vec<u32> =
-            visible.iter().copied().filter(|&idx| self.depth_is_full_for(request.depth, idx)).collect();
-        if eligible.is_empty() && !visible.is_empty() {
-            return Ok(SummarySelection::none(summary::NONE_DEPTH));
-        }
         if disabled {
             return Ok(SummarySelection::none(summary::NONE_OFF));
         }
@@ -458,19 +487,68 @@ impl Cache {
             };
             return Ok(SummarySelection::none(reason));
         };
-        let Some(level) = summary::level_for(file.cell_dbu, request.px_per_dbu, file.n_levels, summary::max_cell_px()) else {
+        // depth, per layer. A version-2 file holds one plane per
+        // placement depth (user 2026-09-16: keep at any depth, not
+        // only full): the planes at or above the request depth are
+        // exactly the shapes the page path draws there, so every
+        // visible layer qualifies at any depth. A version-1 file (one
+        // flattening) or FLOE_RUST_OCCUPANCY_DEPTH=off keeps the
+        // 2026-09-15 rule (field: the GUI's depth 7 of 7 travelled as
+        // the number 7 and lost the summary - a 150 x 103 mm deck view
+        // took 16.7 s): a layer whose pages all sit within the request
+        // depth is drawn whole there, so its flattening stays exact;
+        // the request has no summary only when no visible layer
+        // qualifies
+        let visible = self.visible_indices(request.visible_layers.as_deref())?;
+        let full = request.depth == crate::request::FULL_DEPTH || request.depth >= self.max_depth();
+        let per_depth = file.depth_aware() && summary::depth_aware_enabled();
+        let eligible: Vec<u32> = if per_depth {
+            visible.clone()
+        } else {
+            visible
+                .iter()
+                .copied()
+                .filter(|&idx| self.depth_is_full_for(request.depth, idx))
+                .collect()
+        };
+        if eligible.is_empty() && !visible.is_empty() {
+            return Ok(SummarySelection::none(summary::NONE_DEPTH));
+        }
+        let depth = if full || !per_depth {
+            None
+        } else {
+            Some(request.depth)
+        };
+        let Some(level) = summary::level_for(
+            file.cell_dbu,
+            request.px_per_dbu,
+            file.n_levels,
+            summary::max_cell_px(),
+        ) else {
             let mut none = SummarySelection::none(summary::NONE_NEAR);
             none.base_cell_dbu = file.cell_dbu;
             none.unit = file.unit;
             none.stamp = stamp;
             return Ok(none);
         };
-        let planes = summary::planes_for(
-            &file,
-            level,
-            eligible.iter().map(|&idx| (idx, idx as usize)),
-        );
-        let none = if planes.is_empty() { Some(summary::NONE_LAYERS) } else { None };
+        let planes = {
+            let mut slot = match self.occupancy.lock() {
+                Ok(slot) => slot,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            summary::planes_for(
+                &file,
+                level,
+                eligible.iter().map(|&idx| (idx, idx as usize)),
+                depth,
+                Some(&mut slot.planes),
+            )
+        };
+        let none = if planes.is_empty() {
+            Some(summary::NONE_LAYERS)
+        } else {
+            None
+        };
         Ok(SummarySelection {
             planes,
             level,
@@ -531,7 +609,9 @@ impl Cache {
     /// deepest cell holding the layer's pages - the summary of such a
     /// layer equals its exact render.
     pub fn depth_is_full_for(&self, depth: u32, idx: u32) -> bool {
-        depth == crate::request::FULL_DEPTH || depth >= self.max_depth() || depth >= self.layer_depth(idx)
+        depth == crate::request::FULL_DEPTH
+            || depth >= self.max_depth()
+            || depth >= self.layer_depth(idx)
     }
 
     pub fn unit(&self) -> f64 {
@@ -661,7 +741,7 @@ impl Cache {
                 pages: Vec::new(),
                 page_prio: Vec::new(),
                 stats: Default::default(),
-                            explain: Vec::new(),
+                explain: Vec::new(),
             },
             summary: PlanSummary::default(),
             stats: RenderStats::default(),
@@ -746,6 +826,7 @@ impl Cache {
                 request.px_per_dbu
             },
             sub_cut_wash: request.sub_cut_wash && !request.exact,
+            page_reps: request.page_reps && !request.exact,
             page_hairline: request.page_hairline,
             prune_skipped: request.prune_summary,
             page_skip: if request.summary_layers.is_empty() {
@@ -961,9 +1042,7 @@ fn decode_payload(
     // The build probes the guard every few thousand records so a
     // stale generation stops burning CPU inside a large page.
     let index_started = Instant::now();
-    let index = crate::PageIndex::build_cancellable(&doc, &mut || {
-        check_decode_cancelled(guard)
-    })?;
+    let index = crate::PageIndex::build_cancellable(&doc, &mut || check_decode_cancelled(guard))?;
     let index_us = elapsed_us(index_started);
     Ok((
         DecodedPage {

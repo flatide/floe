@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import subprocess
 import sys
 import tempfile
@@ -123,10 +124,10 @@ def main(fixture):
         db.write_text("TOP 1000\nWIDTH\n%d %d 0\n" % (n, n) + "".join(
             "p %d 4\n%d 0\n%d 0\n%d 20\n%d 20\n" % (i + 1, i * 40, i * 40 + 20, i * 40 + 20, i * 40)
             for i in range(n)))
-        for args in [["vfs", source, str(source) + ".floe", "--jobs", "2"], ["drc", db, "--jobs", "2"]]:
+        for args in [["vfs", source, str(vfs_cache(source)), "--jobs", "2"], ["drc", db, "--jobs", "2"]]:
             run = subprocess.run([str(INDEX), *map(str, args)], capture_output=True, timeout=30)
             assert run.returncode == 0, run.stderr
-        pack = Path(str(db) + ".ice")
+        pack = drc_pack(db)
         os.environ["FLOE_REVIEWER"] = "synthetic-python-oracle"
         oracle = drc.IcePack(str(pack))
         # >1MiB FE upload and >2MiB download, never one large JSON body.
@@ -147,7 +148,7 @@ def main(fixture):
         expected_waives = waive_file.read_bytes()
         waive_input = expected_waives[:40+n] + bytes([255]) * 4
         oracle.close()
-        inputs = [source, db, pack, note_file, waive_file, *sorted(Path(str(source) + ".floe").glob("design.*"))]
+        inputs = [source, db, pack, note_file, waive_file, *sorted(vfs_cache(source).glob("design.*"))]
         before = fingerprint(inputs)
         sessions = []
 

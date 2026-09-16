@@ -131,8 +131,7 @@ impl SceneMasks {
                 let cell = &cells[index];
                 if let Some(instance) = cell.insts.get(edge) {
                     stack.last_mut().expect("stack is non-empty").1 += 1;
-                    let Ok(child) =
-                        cells.binary_search_by_key(&instance.child, |cell| cell.key)
+                    let Ok(child) = cells.binary_search_by_key(&instance.child, |cell| cell.key)
                     else {
                         continue;
                     };
@@ -179,8 +178,7 @@ impl SceneMasks {
                     .binary_search_by_key(&instance.child, |cell| cell.key)
                     .map(|child| weights[child])
                     .unwrap_or(0);
-                weight = weight
-                    .saturating_add(instance.rep.members().saturating_mul(child_weight));
+                weight = weight.saturating_add(instance.rep.members().saturating_mul(child_weight));
             }
             weights[index] = weight;
         }
@@ -411,11 +409,7 @@ impl FrameScene {
         if self.masks.full {
             return true;
         }
-        let Ok(index) = self
-            .plan
-            .wcells
-            .binary_search_by_key(&key, |cell| cell.key)
-        else {
+        let Ok(index) = self.plan.wcells.binary_search_by_key(&key, |cell| cell.key) else {
             return true;
         };
         let Some(bit) = bit else {
@@ -450,11 +444,7 @@ impl FrameScene {
         if self.masks.full {
             return true;
         }
-        let Ok(index) = self
-            .plan
-            .wcells
-            .binary_search_by_key(&key, |cell| cell.key)
-        else {
+        let Ok(index) = self.plan.wcells.binary_search_by_key(&key, |cell| cell.key) else {
             return true;
         };
         if want_frames && self.masks.frames[index] {
@@ -474,11 +464,7 @@ impl FrameScene {
         if self.masks.full {
             return u64::MAX;
         }
-        match self
-            .plan
-            .wcells
-            .binary_search_by_key(&key, |cell| cell.key)
-        {
+        match self.plan.wcells.binary_search_by_key(&key, |cell| cell.key) {
             Ok(index) => self.masks.weights[index],
             Err(_) => u64::MAX,
         }
@@ -489,11 +475,7 @@ impl FrameScene {
         if self.masks.full {
             return true;
         }
-        match self
-            .plan
-            .wcells
-            .binary_search_by_key(&key, |cell| cell.key)
-        {
+        match self.plan.wcells.binary_search_by_key(&key, |cell| cell.key) {
             Ok(index) => self.masks.frames[index],
             Err(_) => true,
         }
@@ -595,7 +577,7 @@ mod tests {
             pages: vec![2, 4],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         }
     }
 
@@ -678,15 +660,17 @@ mod tests {
             pages: vec![2, 4],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let bounds = BTreeMap::from([(top, bbox), (child, bbox)]);
-        let scene =
-            FrameScene::from_test_parts(plan, vec![layer_page(2, 3)], bounds).unwrap();
+        let scene = FrameScene::from_test_parts(plan, vec![layer_page(2, 3)], bounds).unwrap();
 
         let decoded_bit = scene.layer_mask_bit(3);
         assert!(decoded_bit.is_some());
-        assert!(scene.subtree_paints(top, decoded_bit), "child content unions up");
+        assert!(
+            scene.subtree_paints(top, decoded_bit),
+            "child content unions up"
+        );
         assert!(scene.subtree_paints(child, decoded_bit));
 
         let wash_bit = scene.layer_mask_bit(5);
@@ -714,8 +698,11 @@ mod tests {
         assert!(capped.bits.is_empty());
         scene.masks = capped;
         assert_eq!(scene.mask_bytes(), 0);
-        assert_eq!(scene.layer_mask_bit(9), Some(usize::MAX),
-                   "full masks never declare a layer absent");
+        assert_eq!(
+            scene.layer_mask_bit(9),
+            Some(usize::MAX),
+            "full masks never declare a layer absent"
+        );
         assert!(scene.subtree_paints(child, None), "full masks never prune");
         assert!(scene.subtree_has_frames(top));
     }

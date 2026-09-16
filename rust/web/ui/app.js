@@ -532,6 +532,7 @@
         el('mode').disabled = !source.deck; el('level-options').hidden = !source.deck;
         if (!source.deck) { el('mode').value = 'level'; }
         if (levelSource !== source.source_id) {
+            el('index-occupancy').checked = source.deck;
             ++levelLoad; levelBusy = false;
             levelSource = source.source_id; levelNext = null; levelIds = new Set(); el('level-list').textContent = ''; el('levels-all').checked = true;
             if (source.deck) { moreLevels().catch(report); }

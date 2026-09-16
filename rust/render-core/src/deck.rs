@@ -23,10 +23,9 @@ use floe_ovm::BBox;
 
 use crate::cache::DecodedPage;
 use crate::{
-    render_geometry_styled_cancellable_windowed, Cache,
-    CacheLayer, DecodedPageCache, FrameScene,
-    GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox,
-    RenderCancellation, RenderStats, RgbaFrame, StyledGeometryRasterRequest, ViewBox,
+    render_geometry_styled_cancellable_windowed, Cache, CacheLayer, DecodedPageCache, FrameScene,
+    GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation,
+    RenderStats, RgbaFrame, StyledGeometryRasterRequest, ViewBox,
 };
 
 /// One `placement` line of a deck spec: source `source` drawn with its
@@ -65,7 +64,7 @@ pub struct DeckLayer {
 ///
 /// ```text
 /// deck unit=2.5e-05
-/// source path_hex=<hex utf-8 path of a .floe cache>
+/// source path_hex=<hex utf-8 path of a VFS cache folder>
 /// layer out=0 key=1/0 name_hex=<hex> color=#0000ff fill=solid width=1
 /// placement source=0 layer=123/43 out=0 scale=8 dx=1640800000 dy=3200800000 order=0
 /// ```
@@ -92,7 +91,8 @@ impl DeckSpec {
             }
             let mut tokens = line.split_whitespace();
             let kind = tokens.next().unwrap_or("");
-            let fields = parse_fields(tokens).map_err(|error| format!("line {line_no}: {error}"))?;
+            let fields =
+                parse_fields(tokens).map_err(|error| format!("line {line_no}: {error}"))?;
             match kind {
                 "deck" => {
                     reject_unknown(&fields, &["unit"], line_no)?;
@@ -154,8 +154,10 @@ impl DeckSpec {
                         layer,
                         datatype,
                         name,
-                        color: parse_color(fields.get("color").map(String::as_str).unwrap_or("#ffffff"))
-                            .map_err(|error| format!("line {line_no}: {error}"))?,
+                        color: parse_color(
+                            fields.get("color").map(String::as_str).unwrap_or("#ffffff"),
+                        )
+                        .map_err(|error| format!("line {line_no}: {error}"))?,
                         fill: parse_fill(fields.get("fill").map(String::as_str).unwrap_or("solid"))
                             .map_err(|error| format!("line {line_no}: {error}"))?,
                         outline_width: width,
@@ -306,7 +308,11 @@ pub fn subwindow(bbox: &BBox, source_view: &RasterViewBox, width: u32, height: u
     // made before any cast, which would saturate)
     let w = width as f64;
     let h = height as f64;
-    if x1 + WINDOW_SLACK <= 0.0 || x0 - WINDOW_SLACK >= w || y1 + WINDOW_SLACK <= 0.0 || y0 - WINDOW_SLACK >= h {
+    if x1 + WINDOW_SLACK <= 0.0
+        || x0 - WINDOW_SLACK >= w
+        || y1 + WINDOW_SLACK <= 0.0
+        || y0 - WINDOW_SLACK >= h
+    {
         return Window::Outside;
     }
     let c0 = (x0 - WINDOW_SLACK).floor().max(0.0).min(w) as u32;
@@ -327,19 +333,32 @@ pub fn overlay_window(composite: &mut [u8], width: u32, pass: &[u8], window: (u3
     let len = w as usize * 4;
     for row in 0..h as usize {
         let at = (row0 as usize + row) * stride + col0 as usize * 4;
-        overlay(&mut composite[at..at + len], &pass[row * len..(row + 1) * len]);
+        overlay(
+            &mut composite[at..at + len],
+            &pass[row * len..(row + 1) * len],
+        );
     }
 }
 
 /// `split_frame_planes` of a window-sized pass into the full-frame
 /// under/over planes.
-pub fn split_frame_planes_window(pass: &[u8], width: u32, under: &mut [u8], over: &mut [u8], window: (u32, u32, u32, u32)) {
+pub fn split_frame_planes_window(
+    pass: &[u8],
+    width: u32,
+    under: &mut [u8],
+    over: &mut [u8],
+    window: (u32, u32, u32, u32),
+) {
     let (col0, row0, w, h) = window;
     let stride = width as usize * 4;
     let len = w as usize * 4;
     for row in 0..h as usize {
         let at = (row0 as usize + row) * stride + col0 as usize * 4;
-        split_frame_planes(&pass[row * len..(row + 1) * len], &mut under[at..at + len], &mut over[at..at + len]);
+        split_frame_planes(
+            &pass[row * len..(row + 1) * len],
+            &mut under[at..at + len],
+            &mut over[at..at + len],
+        );
     }
 }
 
@@ -496,7 +515,8 @@ impl Deck {
     pub fn open(spec: DeckSpec, budget_bytes: u64) -> Result<Self, String> {
         let mut sources = Vec::with_capacity(spec.sources.len());
         for path in &spec.sources {
-            let cache = Cache::open(path).map_err(|error| format!("deck source {path}: {error}"))?;
+            let cache =
+                Cache::open(path).map_err(|error| format!("deck source {path}: {error}"))?;
             let info = cache.info();
             let top_bbox = cache.cell_bbox(info.top_cell)?;
             sources.push(DeckSource {
@@ -513,7 +533,9 @@ impl Deck {
             let layer_idx = source
                 .layers
                 .iter()
-                .find(|layer| layer.layer == placement.layer && layer.datatype == placement.datatype)
+                .find(|layer| {
+                    layer.layer == placement.layer && layer.datatype == placement.datatype
+                })
                 .map(|layer| layer.index)
                 .ok_or_else(|| {
                     format!(
@@ -534,7 +556,11 @@ impl Deck {
             unit: spec.unit,
             sources,
             source_paths: spec.sources,
-            layers: spec.layers.into_iter().map(|layer| (layer.out, layer)).collect(),
+            layers: spec
+                .layers
+                .into_iter()
+                .map(|layer| (layer.out, layer))
+                .collect(),
             placements,
             budget_bytes,
         })
@@ -600,13 +626,21 @@ impl Deck {
             sources: self.sources.len(),
             layers: self.layers.len(),
             placements: self.placements.len(),
-            max_depth: self.sources.iter().map(|source| source.max_depth).max().unwrap_or(0),
+            max_depth: self
+                .sources
+                .iter()
+                .map(|source| source.max_depth)
+                .max()
+                .unwrap_or(0),
             bbox,
         }
     }
 
     pub fn resident_bytes(&self) -> u64 {
-        self.sources.iter().map(|source| source.pages.resident_bytes()).sum()
+        self.sources
+            .iter()
+            .map(|source| source.pages.resident_bytes())
+            .sum()
     }
 
     pub fn budget_bytes(&self) -> u64 {
@@ -726,7 +760,11 @@ impl Deck {
                 let placed = &self.placements[placed_index];
                 (placed.spec.out, placed.spec.source)
             };
-            if request.visible.as_ref().is_some_and(|visible| !visible.contains(&out)) {
+            if request
+                .visible
+                .as_ref()
+                .is_some_and(|visible| !visible.contains(&out))
+            {
                 passes_skipped += 1;
                 continue;
             }
@@ -887,7 +925,8 @@ impl Deck {
                     // is the whole-scene raster pixel for pixel.
                     let plan = Arc::new(planned.plan);
                     let slice_limit = (self.budget_bytes / STREAM_SLICE_DIV).max(1);
-                    let mut chunks = decode_chunks(&source.cache, &selected, self.budget_bytes).into_iter();
+                    let mut chunks =
+                        decode_chunks(&source.cache, &selected, self.budget_bytes).into_iter();
                     let mut decoded = Vec::with_capacity(selected.len());
                     let mut pass_bytes = 0u64;
                     let mut streamed = false;
@@ -906,9 +945,10 @@ impl Deck {
                         )?;
                         accumulate_decode(&mut stats, &decode_stats);
                         for page in chunk_pages {
-                            pass_bytes = pass_bytes
-                                .checked_add(page.estimated_bytes())
-                                .ok_or_else(|| "decoded generation byte charge overflow".to_string())?;
+                            pass_bytes =
+                                pass_bytes.checked_add(page.estimated_bytes()).ok_or_else(
+                                    || "decoded generation byte charge overflow".to_string(),
+                                )?;
                             unique_pages.insert((source_index, page.page_id));
                             decoded.push(page);
                         }
@@ -977,7 +1017,8 @@ impl Deck {
                     let scene = Arc::new(scene);
                     scene_us = scene_us.saturating_add(scene_started.elapsed().as_micros() as u64);
                     partial |= scene.is_partial();
-                    pages = pages.saturating_add(scene.available_pages().try_into().unwrap_or(u32::MAX));
+                    pages = pages
+                        .saturating_add(scene.available_pages().try_into().unwrap_or(u32::MAX));
                     // the frame's scene cache never holds more than the
                     // budget: rather than evict selectively it starts
                     // over (the pages themselves stay in the LRUs)
@@ -985,7 +1026,12 @@ impl Deck {
                         scene_cache.clear();
                         cache_bytes = 0;
                     }
-                    scene_cache.push((source_index, plan_request.clone(), Arc::clone(&scene), pass_bytes));
+                    scene_cache.push((
+                        source_index,
+                        plan_request.clone(),
+                        Arc::clone(&scene),
+                        pass_bytes,
+                    ));
                     cache_bytes = cache_bytes.saturating_add(pass_bytes);
                     (scene, pass_bytes)
                 }
@@ -1046,7 +1092,8 @@ impl Deck {
         frame_passes = frame_passes.saturating_add(tally.frame_passes);
         frame_raster_us = frame_raster_us.saturating_add(tally.frame_raster_us);
         composite_us = composite_us.saturating_add(tally.composite_us);
-        rectangle_member_paints = rectangle_member_paints.saturating_add(tally.rectangle_member_paints);
+        rectangle_member_paints =
+            rectangle_member_paints.saturating_add(tally.rectangle_member_paints);
         polygon_member_paints = polygon_member_paints.saturating_add(tally.polygon_member_paints);
         path_member_paints = path_member_paints.saturating_add(tally.path_member_paints);
         frame_member_paints = frame_member_paints.saturating_add(tally.frame_member_paints);
@@ -1184,7 +1231,9 @@ fn stream_pass(
     if request.frames {
         let scene_started = std::time::Instant::now();
         let empty = FrameScene::new_shared(&source.cache, Arc::clone(&plan), Vec::new())?;
-        report.scene_us = report.scene_us.saturating_add(scene_started.elapsed().as_micros() as u64);
+        report.scene_us = report
+            .scene_us
+            .saturating_add(scene_started.elapsed().as_micros() as u64);
         if empty.subtree_has_frames(empty.top()) {
             let frames_only = StyledGeometryRasterRequest {
                 raster,
@@ -1207,12 +1256,24 @@ fn stream_pass(
                 .saturating_add(raster_started.elapsed().as_micros() as u64);
             tally.frame_raster_us = tally.frame_raster_us.saturating_add(out.stats.raster_us);
             let split_started = std::time::Instant::now();
-            if let (Some(under), Some(over)) = (frames_under.as_deref_mut(), frames_over.as_deref_mut()) {
-                split_frame_planes_window(out.frame.pixels(), request.width, under, over, target.window);
+            if let (Some(under), Some(over)) =
+                (frames_under.as_deref_mut(), frames_over.as_deref_mut())
+            {
+                split_frame_planes_window(
+                    out.frame.pixels(),
+                    request.width,
+                    under,
+                    over,
+                    target.window,
+                );
             }
-            tally.composite_us = tally.composite_us.saturating_add(split_started.elapsed().as_micros() as u64);
+            tally.composite_us = tally
+                .composite_us
+                .saturating_add(split_started.elapsed().as_micros() as u64);
             accumulate_raster(&mut tally.stats, &out.stats);
-            tally.frame_member_paints = tally.frame_member_paints.saturating_add(out.frame_member_paints);
+            tally.frame_member_paints = tally
+                .frame_member_paints
+                .saturating_add(out.frame_member_paints);
             tally.frame_passes += 1;
         }
     }
@@ -1226,8 +1287,11 @@ fn stream_pass(
     let mut rest = rest.into_iter();
     loop {
         let scene_started = std::time::Instant::now();
-        let scene = FrameScene::new_shared(&source.cache, Arc::clone(&plan), std::mem::take(&mut slice))?;
-        report.scene_us = report.scene_us.saturating_add(scene_started.elapsed().as_micros() as u64);
+        let scene =
+            FrameScene::new_shared(&source.cache, Arc::clone(&plan), std::mem::take(&mut slice))?;
+        report.scene_us = report
+            .scene_us
+            .saturating_add(scene_started.elapsed().as_micros() as u64);
         report.pages = report
             .pages
             .saturating_add(scene.available_pages().try_into().unwrap_or(u32::MAX));
@@ -1245,12 +1309,19 @@ fn stream_pass(
         drop(scene);
         let overlay_started = std::time::Instant::now();
         overlay_window(composite, request.width, out.frame.pixels(), target.window);
-        tally.composite_us = tally.composite_us.saturating_add(overlay_started.elapsed().as_micros() as u64);
+        tally.composite_us = tally
+            .composite_us
+            .saturating_add(overlay_started.elapsed().as_micros() as u64);
         accumulate_raster(&mut tally.stats, &out.stats);
-        tally.rectangle_member_paints =
-            tally.rectangle_member_paints.saturating_add(out.rectangle_member_paints);
-        tally.polygon_member_paints = tally.polygon_member_paints.saturating_add(out.polygon_member_paints);
-        tally.path_member_paints = tally.path_member_paints.saturating_add(out.path_member_paints);
+        tally.rectangle_member_paints = tally
+            .rectangle_member_paints
+            .saturating_add(out.rectangle_member_paints);
+        tally.polygon_member_paints = tally
+            .polygon_member_paints
+            .saturating_add(out.polygon_member_paints);
+        tally.path_member_paints = tally
+            .path_member_paints
+            .saturating_add(out.path_member_paints);
         tally.slices += 1;
         drop(out);
         check_generation(target.cancellation, target.generation)?;
@@ -1401,7 +1472,11 @@ fn raster_batch(
         return Ok(());
     }
     let concurrency = usize::from(request.workers.max(1)).min(passes.len());
-    let per_pass_workers: u16 = if concurrency > 1 { 1 } else { request.workers.max(1) };
+    let per_pass_workers: u16 = if concurrency > 1 {
+        1
+    } else {
+        request.workers.max(1)
+    };
     let next = AtomicUsize::new(0);
     let results: Vec<Mutex<Option<Result<PassOutput, String>>>> =
         (0..passes.len()).map(|_| Mutex::new(None)).collect();
@@ -1419,7 +1494,13 @@ fn raster_batch(
                 if index >= passes.len() {
                     break;
                 }
-                let out = raster_pass(&passes[index], request, per_pass_workers, generation, cancellation);
+                let out = raster_pass(
+                    &passes[index],
+                    request,
+                    per_pass_workers,
+                    generation,
+                    cancellation,
+                );
                 if let Ok(mut slot) = results[index].lock() {
                     *slot = Some(out);
                 }
@@ -1429,7 +1510,9 @@ fn raster_batch(
     tally.raster_wall_us = tally
         .raster_wall_us
         .saturating_add(raster_started.elapsed().as_micros() as u64);
-    tally.pass_workers = tally.pass_workers.max(concurrency.try_into().unwrap_or(u16::MAX));
+    tally.pass_workers = tally
+        .pass_workers
+        .max(concurrency.try_into().unwrap_or(u16::MAX));
     tally.batches += 1;
     for (index, pass) in passes.iter().enumerate() {
         let out = results[index]
@@ -1440,24 +1523,49 @@ fn raster_batch(
         if let Some(report) = out.frames {
             tally.frame_raster_us = tally.frame_raster_us.saturating_add(report.stats.raster_us);
             let split_started = std::time::Instant::now();
-            if let (Some(under), Some(over)) = (frames_under.as_deref_mut(), frames_over.as_deref_mut()) {
-                split_frame_planes_window(report.frame.pixels(), request.width, under, over, pass.window);
+            if let (Some(under), Some(over)) =
+                (frames_under.as_deref_mut(), frames_over.as_deref_mut())
+            {
+                split_frame_planes_window(
+                    report.frame.pixels(),
+                    request.width,
+                    under,
+                    over,
+                    pass.window,
+                );
             }
-            tally.composite_us = tally.composite_us.saturating_add(split_started.elapsed().as_micros() as u64);
+            tally.composite_us = tally
+                .composite_us
+                .saturating_add(split_started.elapsed().as_micros() as u64);
             accumulate_raster(&mut tally.stats, &report.stats);
-            tally.frame_member_paints = tally.frame_member_paints.saturating_add(report.frame_member_paints);
+            tally.frame_member_paints = tally
+                .frame_member_paints
+                .saturating_add(report.frame_member_paints);
             tally.frame_passes += 1;
         }
         let overlay_started = std::time::Instant::now();
-        overlay_window(composite, request.width, out.geometry.frame.pixels(), pass.window);
-        tally.composite_us = tally.composite_us.saturating_add(overlay_started.elapsed().as_micros() as u64);
+        overlay_window(
+            composite,
+            request.width,
+            out.geometry.frame.pixels(),
+            pass.window,
+        );
+        tally.composite_us = tally
+            .composite_us
+            .saturating_add(overlay_started.elapsed().as_micros() as u64);
         accumulate_raster(&mut tally.stats, &out.geometry.stats);
-        tally.rectangle_member_paints =
-            tally.rectangle_member_paints.saturating_add(out.geometry.rectangle_member_paints);
-        tally.polygon_member_paints =
-            tally.polygon_member_paints.saturating_add(out.geometry.polygon_member_paints);
-        tally.path_member_paints = tally.path_member_paints.saturating_add(out.geometry.path_member_paints);
-        tally.summary_cells = tally.summary_cells.saturating_add(out.geometry.summary_cell_paints);
+        tally.rectangle_member_paints = tally
+            .rectangle_member_paints
+            .saturating_add(out.geometry.rectangle_member_paints);
+        tally.polygon_member_paints = tally
+            .polygon_member_paints
+            .saturating_add(out.geometry.polygon_member_paints);
+        tally.path_member_paints = tally
+            .path_member_paints
+            .saturating_add(out.geometry.path_member_paints);
+        tally.summary_cells = tally
+            .summary_cells
+            .saturating_add(out.geometry.summary_cell_paints);
         tally.passes += 1;
     }
     check_generation(cancellation, generation)
@@ -1473,14 +1581,21 @@ fn check_generation(cancellation: &RenderCancellation, generation: u64) -> Resul
 fn accumulate_decode(stats: &mut RenderStats, decode: &RenderStats) {
     stats.page_read_us = stats.page_read_us.saturating_add(decode.page_read_us);
     stats.page_decode_us = stats.page_decode_us.saturating_add(decode.page_decode_us);
-    stats.page_decode_sum_us = stats.page_decode_sum_us.saturating_add(decode.page_decode_sum_us);
+    stats.page_decode_sum_us = stats
+        .page_decode_sum_us
+        .saturating_add(decode.page_decode_sum_us);
     stats.page_decode_max_us = stats.page_decode_max_us.max(decode.page_decode_max_us);
     stats.page_index_us = stats.page_index_us.saturating_add(decode.page_index_us);
     stats.decode_workers_used = stats.decode_workers_used.max(decode.decode_workers_used);
-    stats.decoded_cache_hit = stats.decoded_cache_hit.saturating_add(decode.decoded_cache_hit);
-    stats.decoded_cache_miss = stats.decoded_cache_miss.saturating_add(decode.decoded_cache_miss);
-    stats.decoded_cache_evicted =
-        stats.decoded_cache_evicted.saturating_add(decode.decoded_cache_evicted);
+    stats.decoded_cache_hit = stats
+        .decoded_cache_hit
+        .saturating_add(decode.decoded_cache_hit);
+    stats.decoded_cache_miss = stats
+        .decoded_cache_miss
+        .saturating_add(decode.decoded_cache_miss);
+    stats.decoded_cache_evicted = stats
+        .decoded_cache_evicted
+        .saturating_add(decode.decoded_cache_evicted);
 }
 
 fn accumulate_raster(stats: &mut RenderStats, raster: &RenderStats) {
@@ -1492,18 +1607,30 @@ fn accumulate_raster(stats: &mut RenderStats, raster: &RenderStats) {
     stats.work_bin_overflow_items = stats
         .work_bin_overflow_items
         .max(raster.work_bin_overflow_items);
-    stats.work_bin_defer_rep = stats.work_bin_defer_rep.saturating_add(raster.work_bin_defer_rep);
+    stats.work_bin_defer_rep = stats
+        .work_bin_defer_rep
+        .saturating_add(raster.work_bin_defer_rep);
     stats.work_bin_defer_single = stats
         .work_bin_defer_single
         .saturating_add(raster.work_bin_defer_single);
     stats.work_bin_defer_weight_max = stats
         .work_bin_defer_weight_max
         .max(raster.work_bin_defer_weight_max);
-    stats.primitives_tested = stats.primitives_tested.saturating_add(raster.primitives_tested);
-    stats.primitives_drawn = stats.primitives_drawn.saturating_add(raster.primitives_drawn);
-    stats.rep_members_tested = stats.rep_members_tested.saturating_add(raster.rep_members_tested);
-    stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(raster.rep_members_drawn);
-    stats.hier_cells_visited = stats.hier_cells_visited.saturating_add(raster.hier_cells_visited);
+    stats.primitives_tested = stats
+        .primitives_tested
+        .saturating_add(raster.primitives_tested);
+    stats.primitives_drawn = stats
+        .primitives_drawn
+        .saturating_add(raster.primitives_drawn);
+    stats.rep_members_tested = stats
+        .rep_members_tested
+        .saturating_add(raster.rep_members_tested);
+    stats.rep_members_drawn = stats
+        .rep_members_drawn
+        .saturating_add(raster.rep_members_drawn);
+    stats.hier_cells_visited = stats
+        .hier_cells_visited
+        .saturating_add(raster.hier_cells_visited);
     stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(raster.subtrees_pruned);
 }
 
@@ -1541,11 +1668,17 @@ pub fn overlay(composite: &mut [u8], pass: &[u8]) {
 }
 
 /// The deck viewport in one placement's source units: `(v - d) / scale`.
-pub fn source_view(view: &RasterViewBox, placement: &DeckPlacement) -> Result<RasterViewBox, String> {
+pub fn source_view(
+    view: &RasterViewBox,
+    placement: &DeckPlacement,
+) -> Result<RasterViewBox, String> {
     source_view_of(view, placement)
 }
 
-fn source_view_of(view: &RasterViewBox, placement: &DeckPlacement) -> Result<RasterViewBox, String> {
+fn source_view_of(
+    view: &RasterViewBox,
+    placement: &DeckPlacement,
+) -> Result<RasterViewBox, String> {
     let map = |v: f64, d: f64| (v - d) / placement.scale;
     RasterViewBox::new(
         map(view.x0, placement.dx),
@@ -1610,6 +1743,8 @@ fn source_plan_request(
         px_per_dbu,
         exact: request.exact,
         sub_cut_wash: request.wide,
+        // a deck source has its occupancy summary for the wide view
+        page_reps: false,
         page_hairline: !request.thin_keep,
         summary_layers: Vec::new(),
         prune_summary: false,
@@ -1671,7 +1806,9 @@ fn boxes_intersect(a: &[f64; 4], b: &[f64; 4]) -> bool {
     a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1]
 }
 
-fn parse_fields<'a>(tokens: impl Iterator<Item = &'a str>) -> Result<BTreeMap<String, String>, String> {
+fn parse_fields<'a>(
+    tokens: impl Iterator<Item = &'a str>,
+) -> Result<BTreeMap<String, String>, String> {
     let mut fields = BTreeMap::new();
     for token in tokens {
         let (key, value) = token
@@ -1687,7 +1824,11 @@ fn parse_fields<'a>(tokens: impl Iterator<Item = &'a str>) -> Result<BTreeMap<St
     Ok(fields)
 }
 
-fn reject_unknown(fields: &BTreeMap<String, String>, allowed: &[&str], line_no: usize) -> Result<(), String> {
+fn reject_unknown(
+    fields: &BTreeMap<String, String>,
+    allowed: &[&str],
+    line_no: usize,
+) -> Result<(), String> {
     for key in fields.keys() {
         if !allowed.contains(&key.as_str()) {
             return Err(format!("line {line_no}: unknown field {key}"));
@@ -1696,18 +1837,27 @@ fn reject_unknown(fields: &BTreeMap<String, String>, allowed: &[&str], line_no: 
     Ok(())
 }
 
-fn required<'a>(fields: &'a BTreeMap<String, String>, name: &str, line_no: usize) -> Result<&'a str, String> {
+fn required<'a>(
+    fields: &'a BTreeMap<String, String>,
+    name: &str,
+    line_no: usize,
+) -> Result<&'a str, String> {
     fields
         .get(name)
         .map(String::as_str)
         .ok_or_else(|| format!("line {line_no}: missing field {name}"))
 }
 
-fn required_parse<T>(fields: &BTreeMap<String, String>, name: &str, line_no: usize) -> Result<T, String>
+fn required_parse<T>(
+    fields: &BTreeMap<String, String>,
+    name: &str,
+    line_no: usize,
+) -> Result<T, String>
 where
     T: std::str::FromStr,
 {
-    parse_value(required(fields, name, line_no)?, name).map_err(|error| format!("line {line_no}: {error}"))
+    parse_value(required(fields, name, line_no)?, name)
+        .map_err(|error| format!("line {line_no}: {error}"))
 }
 
 fn parse_value<T>(value: &str, name: &str) -> Result<T, String>
@@ -1723,7 +1873,10 @@ fn parse_layer_pair(value: &str) -> Result<(u32, u32), String> {
     let (layer, datatype) = value
         .split_once('/')
         .ok_or_else(|| format!("layer must be L/D: {value}"))?;
-    Ok((parse_value(layer, "layer")?, parse_value(datatype, "datatype")?))
+    Ok((
+        parse_value(layer, "layer")?,
+        parse_value(datatype, "datatype")?,
+    ))
 }
 
 pub fn unhex(value: &str, field: &str) -> Result<String, String> {
@@ -1751,9 +1904,15 @@ pub fn parse_color(value: &str) -> Result<[u8; 4], String> {
         return Err(format!("color must have 6 or 8 hex digits: {value}"));
     }
     let byte = |offset: usize| {
-        u8::from_str_radix(&hex[offset..offset + 2], 16).map_err(|_| format!("invalid color: {value}"))
+        u8::from_str_radix(&hex[offset..offset + 2], 16)
+            .map_err(|_| format!("invalid color: {value}"))
     };
-    Ok([byte(0)?, byte(2)?, byte(4)?, if hex.len() == 8 { byte(6)? } else { 255 }])
+    Ok([
+        byte(0)?,
+        byte(2)?,
+        byte(4)?,
+        if hex.len() == 8 { byte(6)? } else { 255 },
+    ])
 }
 
 pub fn parse_fill(value: &str) -> Result<LayerFill, String> {
@@ -1811,7 +1970,11 @@ mod tests {
         assert_eq!(spec.layers[1].fill, LayerFill::Speckle);
         assert_eq!(spec.layers[1].outline_width, 2);
         assert_eq!(spec.layers[0].color, [0, 0, 255, 255]);
-        assert_eq!((spec.layers[0].layer, spec.layers[0].datatype), (0, 0), "key defaults to out/0");
+        assert_eq!(
+            (spec.layers[0].layer, spec.layers[0].datatype),
+            (0, 0),
+            "key defaults to out/0"
+        );
         assert_eq!((spec.layers[1].layer, spec.layers[1].datatype), (2, 7));
         let ordered = spec.ordered_placements();
         assert_eq!(ordered[0].index, 1, "order 0 paints first");
@@ -1822,19 +1985,33 @@ mod tests {
     #[test]
     fn rejects_broken_specs() {
         let missing_unit = spec_text().replace("deck unit=2.5e-05\n", "");
-        assert!(DeckSpec::parse(&missing_unit).unwrap_err().contains("no deck line"));
+        assert!(DeckSpec::parse(&missing_unit)
+            .unwrap_err()
+            .contains("no deck line"));
         let bad_source = spec_text().replace("placement source=1", "placement source=7");
-        assert!(DeckSpec::parse(&bad_source).unwrap_err().contains("names source 7"));
+        assert!(DeckSpec::parse(&bad_source)
+            .unwrap_err()
+            .contains("names source 7"));
         let bad_layer = spec_text().replace("out=1 scale=2", "out=9 scale=2");
-        assert!(DeckSpec::parse(&bad_layer).unwrap_err().contains("deck layer 9"));
+        assert!(DeckSpec::parse(&bad_layer)
+            .unwrap_err()
+            .contains("deck layer 9"));
         let bad_scale = spec_text().replace("scale=8", "scale=0");
-        assert!(DeckSpec::parse(&bad_scale).unwrap_err().contains("scale must be positive"));
+        assert!(DeckSpec::parse(&bad_scale)
+            .unwrap_err()
+            .contains("scale must be positive"));
         let unknown = spec_text().replace("order=1", "rot=1");
-        assert!(DeckSpec::parse(&unknown).unwrap_err().contains("unknown field rot"));
+        assert!(DeckSpec::parse(&unknown)
+            .unwrap_err()
+            .contains("unknown field rot"));
         let dup = spec_text().replace("layer out=1", "layer out=0");
-        assert!(DeckSpec::parse(&dup).unwrap_err().contains("duplicate deck layer 0"));
+        assert!(DeckSpec::parse(&dup)
+            .unwrap_err()
+            .contains("duplicate deck layer 0"));
         let dup_key = spec_text().replace("key=2/7", "key=0/0");
-        assert!(DeckSpec::parse(&dup_key).unwrap_err().contains("duplicate deck layer key 0/0"));
+        assert!(DeckSpec::parse(&dup_key)
+            .unwrap_err()
+            .contains("duplicate deck layer key 0/0"));
     }
 
     fn placement(scale: f64, dx: f64, dy: f64) -> DeckPlacement {
@@ -1865,9 +2042,18 @@ mod tests {
             y1: 100,
         };
         assert_eq!(transform_bbox(&bbox, &p), [100.0, 200.0, 900.0, 600.0]);
-        assert!(boxes_intersect(&transform_bbox(&bbox, &p), &[0.0, 0.0, 100.0, 200.0]));
-        assert!(!boxes_intersect(&transform_bbox(&bbox, &p), &[0.0, 0.0, 99.0, 199.0]));
-        assert!(!boxes_intersect(&transform_bbox(&BBox::EMPTY, &p), &[0.0, 0.0, 1e9, 1e9]));
+        assert!(boxes_intersect(
+            &transform_bbox(&bbox, &p),
+            &[0.0, 0.0, 100.0, 200.0]
+        ));
+        assert!(!boxes_intersect(
+            &transform_bbox(&bbox, &p),
+            &[0.0, 0.0, 99.0, 199.0]
+        ));
+        assert!(!boxes_intersect(
+            &transform_bbox(&BBox::EMPTY, &p),
+            &[0.0, 0.0, 1e9, 1e9]
+        ));
     }
 
     #[test]
@@ -1894,20 +2080,40 @@ mod tests {
         let p = placement(4.0, 0.0, 0.0);
         let sv = source_view(&request.view, &p).unwrap();
         let big = bbox(-1000, -1000, 1000, 1000);
-        let plan = source_plan_request(&sv, &request, &p, &big).unwrap().unwrap();
+        let plan = source_plan_request(&sv, &request, &p, &big)
+            .unwrap()
+            .unwrap();
         // 400 px over 200 source dbu: 2 px per source dbu, 0.5 deck-dbu per px
         assert_eq!(plan.px_per_dbu, 2.0);
         assert_eq!(plan.cut_dbu, 1);
         assert_eq!(plan.visible_layers, Some(vec!["1/0".to_string()]));
-        assert_eq!((plan.view.x0, plan.view.y0, plan.view.x1, plan.view.y1), (0, 0, 200, 100));
+        assert_eq!(
+            (plan.view.x0, plan.view.y0, plan.view.x1, plan.view.y1),
+            (0, 0, 200, 100)
+        );
         // clipped to the source bounds
-        let plan = source_plan_request(&sv, &request, &p, &bbox(50, 20, 300, 300)).unwrap().unwrap();
-        assert_eq!((plan.view.x0, plan.view.y0, plan.view.x1, plan.view.y1), (50, 20, 200, 100));
+        let plan = source_plan_request(&sv, &request, &p, &bbox(50, 20, 300, 300))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (plan.view.x0, plan.view.y0, plan.view.x1, plan.view.y1),
+            (50, 20, 200, 100)
+        );
         // a view edge on the bound is still an intersection
-        assert!(source_plan_request(&sv, &request, &p, &bbox(200, 100, 300, 300)).unwrap().is_some());
+        assert!(
+            source_plan_request(&sv, &request, &p, &bbox(200, 100, 300, 300))
+                .unwrap()
+                .is_some()
+        );
         // beside the source: no plan
-        assert!(source_plan_request(&sv, &request, &p, &bbox(201, 0, 300, 300)).unwrap().is_none());
-        assert!(source_plan_request(&sv, &request, &p, &BBox::EMPTY).unwrap().is_none());
+        assert!(
+            source_plan_request(&sv, &request, &p, &bbox(201, 0, 300, 300))
+                .unwrap()
+                .is_none()
+        );
+        assert!(source_plan_request(&sv, &request, &p, &BBox::EMPTY)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1939,7 +2145,8 @@ mod tests {
         let p = placement(0.001, 1e16, 1e16);
         let sv = source_view(&request.view, &p).unwrap();
         assert!(sv.x0 < i64::MIN as f64);
-        let plan = source_plan_request(&sv, &request, &p, &bbox(0, 0, 20_000_000, 20_000_000)).unwrap();
+        let plan =
+            source_plan_request(&sv, &request, &p, &bbox(0, 0, 20_000_000, 20_000_000)).unwrap();
         assert!(plan.is_none());
     }
 
@@ -1975,17 +2182,29 @@ mod tests {
         let p = placement(1.0, -((big - 100) as f64), 0.0);
         let sv = source_view(&request.view, &p).unwrap();
         let source = bbox(big + 1, 0, big + 2, 1000);
-        let plan = source_plan_request(&sv, &request, &p, &source).unwrap().unwrap();
+        let plan = source_plan_request(&sv, &request, &p, &source)
+            .unwrap()
+            .unwrap();
         assert_eq!((plan.view.x0, plan.view.x1), (big + 1, big + 2));
         assert_eq!((plan.view.y0, plan.view.y1), (0, 400));
         // the view edge strictly inside a bound converts, and the
         // exact bound wins over a converted edge that rounded past it
         let source = bbox(big - 200, 0, big + 2, 1000);
-        let plan = source_plan_request(&sv, &request, &p, &source).unwrap().unwrap();
-        assert!(plan.view.x0 >= big - 200 && plan.view.x0 <= big - 100 + 256, "{}", plan.view.x0);
+        let plan = source_plan_request(&sv, &request, &p, &source)
+            .unwrap()
+            .unwrap();
+        assert!(
+            plan.view.x0 >= big - 200 && plan.view.x0 <= big - 100 + 256,
+            "{}",
+            plan.view.x0
+        );
         assert_eq!(plan.view.x1, big + 2);
         // a source at the other end of i64 space is a miss, not an error
-        assert!(source_plan_request(&sv, &request, &p, &bbox(-big, 0, -big + 5, 1000)).unwrap().is_none());
+        assert!(
+            source_plan_request(&sv, &request, &p, &bbox(-big, 0, -big + 5, 1000))
+                .unwrap()
+                .is_none()
+        );
         // the axis helpers themselves
         assert_eq!(clip_low(5.0, 7, "t").unwrap(), Some(7));
         assert_eq!(clip_low(9.0, 7, "t").unwrap(), Some(9));
@@ -1998,21 +2217,35 @@ mod tests {
     #[test]
     fn frame_planes_split_white_over_gray() {
         // gray hollow, white hollow, untouched, gray wash
-        let pass = [128, 128, 128, 255, 255, 255, 255, 255, 0, 0, 0, 0, 128, 128, 128, 255];
+        let pass = [
+            128, 128, 128, 255, 255, 255, 255, 255, 0, 0, 0, 0, 128, 128, 128, 255,
+        ];
         let mut under = vec![0u8; 16];
         let mut over = vec![0u8; 16];
         split_frame_planes(&pass, &mut under, &mut over);
-        assert_eq!(under, vec![128, 128, 128, 255, 0, 0, 0, 0, 0, 0, 0, 0, 128, 128, 128, 255]);
-        assert_eq!(over, vec![0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            under,
+            vec![128, 128, 128, 255, 0, 0, 0, 0, 0, 0, 0, 0, 128, 128, 128, 255]
+        );
+        assert_eq!(
+            over,
+            vec![0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
         // geometry laid between them: a placement's design covers the
         // gray wash but never the white frame - and BLACK design covers
         // the wash too (the geometry buffer keeps alpha 0 only where no
         // pass painted; review 3rd P2-1)
         let mut layered = vec![0, 0, 0, 255].repeat(4);
         overlay(&mut layered, &under);
-        overlay(&mut layered, &[0, 0, 0, 255, 9, 9, 9, 255, 0, 0, 0, 0, 0, 0, 0, 255]);
+        overlay(
+            &mut layered,
+            &[0, 0, 0, 255, 9, 9, 9, 255, 0, 0, 0, 0, 0, 0, 0, 255],
+        );
         overlay(&mut layered, &over);
-        assert_eq!(layered, vec![0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
+        assert_eq!(
+            layered,
+            vec![0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255]
+        );
     }
 
     fn bbox(x0: i64, y0: i64, x1: i64, y1: i64) -> BBox {
@@ -2031,14 +2264,26 @@ mod tests {
         let w = subwindow(&bbox(75, 75, 100, 100), &view, 100, 100);
         assert_eq!(w, Window::Part(21, 51, 28, 28));
         // the whole frame when the source covers it
-        assert_eq!(subwindow(&bbox(-1, -1, 500, 500), &view, 100, 100), Window::Part(0, 0, 100, 100));
+        assert_eq!(
+            subwindow(&bbox(-1, -1, 500, 500), &view, 100, 100),
+            Window::Part(0, 0, 100, 100)
+        );
         // outside the view: no window
-        assert_eq!(subwindow(&bbox(500, 500, 750, 750), &view, 100, 100), Window::Outside);
+        assert_eq!(
+            subwindow(&bbox(500, 500, 750, 750), &view, 100, 100),
+            Window::Outside
+        );
         assert_eq!(subwindow(&BBox::EMPTY, &view, 100, 100), Window::Outside);
         // clamped at the frame edge
-        assert_eq!(subwindow(&bbox(0, 0, 250, 12), &view, 100, 100), Window::Part(0, 86, 100, 14));
+        assert_eq!(
+            subwindow(&bbox(0, 0, 250, 12), &view, 100, 100),
+            Window::Part(0, 86, 100, 14)
+        );
         // far outside: no saturating cast decides it
-        assert_eq!(subwindow(&bbox(i64::MIN / 2, 0, i64::MIN / 4, 10), &view, 100, 100), Window::Outside);
+        assert_eq!(
+            subwindow(&bbox(i64::MIN / 2, 0, i64::MIN / 4, 10), &view, 100, 100),
+            Window::Outside
+        );
     }
 
     #[test]
@@ -2052,7 +2297,8 @@ mod tests {
         // space: 1224000 .. 1244000 over 2000 px) draws it at
         // 1140..1150. The window must contain the raster's pixels.
         let p = placement(0.001, 1e16 - 1234.0, 1e16 - 1234.0);
-        let deck_view = RasterViewBox::new(1e16 - 10.0, 1e16 - 10.0, 1e16 + 10.0, 1e16 + 10.0).unwrap();
+        let deck_view =
+            RasterViewBox::new(1e16 - 10.0, 1e16 - 10.0, 1e16 + 10.0, 1e16 + 10.0).unwrap();
         let sv = source_view(&deck_view, &p).unwrap();
         assert_eq!((sv.x0, sv.x1), (1224000.0, 1244000.0));
         let source = bbox(1235400, 1235400, 1235500, 1235500);
@@ -2061,7 +2307,10 @@ mod tests {
         // and the deck-space mapping the review reproduced does miss it
         let deck_bbox = transform_bbox(&source, &p);
         let px = (deck_bbox[0] - deck_view.x0) * 2000.0 / (deck_view.x1 - deck_view.x0);
-        assert!(px >= 1190.0, "deck-space column {px} is off by the f64 ulp at 1e16");
+        assert!(
+            px >= 1190.0,
+            "deck-space column {px} is off by the f64 ulp at 1e16"
+        );
     }
 
     #[test]
@@ -2073,19 +2322,37 @@ mod tests {
     #[test]
     fn window_overlays_place_a_window_sized_pass() {
         let mut composite = vec![0u8; 4 * 4 * 4]; // 4x4 frame
-        let pass = vec![9, 9, 9, 255].repeat(4);   // a 2x2 window pass
+        let pass = vec![9, 9, 9, 255].repeat(4); // a 2x2 window pass
         overlay_window(&mut composite, 4, &pass, (1, 2, 2, 2));
         let px = |x: usize, y: usize| composite[(y * 4 + x) * 4];
-        assert_eq!((px(1, 2), px(2, 3), px(0, 2), px(3, 3), px(1, 1)), (9, 9, 0, 0, 0));
+        assert_eq!(
+            (px(1, 2), px(2, 3), px(0, 2), px(3, 3), px(1, 1)),
+            (9, 9, 0, 0, 0)
+        );
         let mut under = vec![0u8; 64];
         let mut over = vec![0u8; 64];
         // 2x2 window pass: gray, white / nothing, gray
-        let frames = vec![128, 128, 128, 255, 255, 255, 255, 255, 0, 0, 0, 0, 128, 128, 128, 255];
+        let frames = vec![
+            128, 128, 128, 255, 255, 255, 255, 255, 0, 0, 0, 0, 128, 128, 128, 255,
+        ];
         split_frame_planes_window(&frames, 4, &mut under, &mut over, (2, 0, 2, 2));
-        assert_eq!(&under[(0 * 4 + 2) * 4..(0 * 4 + 3) * 4], &[128, 128, 128, 255]);
-        assert_eq!(&over[(0 * 4 + 3) * 4..(0 * 4 + 4) * 4], &[255, 255, 255, 255]);
-        assert_eq!(&under[(1 * 4 + 3) * 4..(1 * 4 + 4) * 4], &[128, 128, 128, 255]);
-        assert_eq!(&under[(1 * 4 + 0) * 4..(1 * 4 + 1) * 4], &[0, 0, 0, 0], "outside the window");
+        assert_eq!(
+            &under[(0 * 4 + 2) * 4..(0 * 4 + 3) * 4],
+            &[128, 128, 128, 255]
+        );
+        assert_eq!(
+            &over[(0 * 4 + 3) * 4..(0 * 4 + 4) * 4],
+            &[255, 255, 255, 255]
+        );
+        assert_eq!(
+            &under[(1 * 4 + 3) * 4..(1 * 4 + 4) * 4],
+            &[128, 128, 128, 255]
+        );
+        assert_eq!(
+            &under[(1 * 4 + 0) * 4..(1 * 4 + 1) * 4],
+            &[0, 0, 0, 0],
+            "outside the window"
+        );
     }
 
     #[test]

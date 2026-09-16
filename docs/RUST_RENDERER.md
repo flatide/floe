@@ -25,7 +25,7 @@ allocation-free fast path driven by the same phase-bound helpers.
 ```sh
 cd rust
 cargo run -p floe-render-cli -- \
-  ../data/m1/valmini.oas.floe \
+  ../data/m1/.valmini.oas.ice \
   --view 0,0,404,447 --width 1200 --height 800 \
   --depth full --cut-px 0 --decode-pages 99 --budget-mb 64 \
   --layers 1/0,2/0 --jobs 4 --tile-px 128 \
@@ -80,7 +80,7 @@ stored in one or more caches:
 
 ```sh
 cargo run --release -p floe-render-cli --bin path-inventory -- \
-  --jobs 8 --chunk-pages 256 /path/to/design.oas.floe
+  --jobs 8 --chunk-pages 256 /path/to/.design.oas.ice
 ```
 
 The current operating set found six PATH records/eight repetition members in
@@ -107,7 +107,7 @@ also a field diagnostic: an old daemon cannot masquerade as current code when a
 repetition rule changes.
 
 ```text
-open cache=/abs/valmini.oas.floe budget_mb=64 jobs=4
+open cache=/abs/.valmini.oas.ice budget_mb=64 jobs=4
 style epoch=1 path=/tmp/valmini.styles
 render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layers=1/0,2/0 frames=on labels=on font_px=14 mono=off frame_cache=1 jobs=4 decode_jobs=8 tile_px=384 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
 clip seq=12 box=0,0,404000,447000 layers=1/0,2/0 jobs=4 out=/tmp/clip.oas

@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cache_test_paths import drc_pack
+from floe.cachepath import db_name_of, db_path_of
 import random
 import shutil
 import signal
@@ -81,7 +83,7 @@ def ascii_cli(cli, sources, work, env):
 def ascii_failures(cli, work, env):
     source = work / "fallback.db"
     source.write_text("TOP 1000\nR\np 99 1\n1.25 2.5\n")
-    side = Path(str(source) + ".ice")
+    side = drc_pack(source)
     for content in (b"FLOEICE\0\1\0\0\0", b"FLOEICE\0\4\0\0\0", b"garbage"):
         side.write_bytes(content)
         before = fingerprint(work)
@@ -163,7 +165,7 @@ def main():
             result = subprocess.run([str(index), "drc", str(db), "--jobs", "2"],
                                     capture_output=True, text=True, timeout=30)
             assert result.returncode == 0, result.stderr
-            packed = Path(str(db) + ".ice")
+            packed = drc_pack(db)
             p = drc.IcePack(str(packed))
             case = {"pack": str(packed), "waives": p._waive_path, "cell": p.cell,
                     "precision": p.precision, "checks": [], "queries": []}
@@ -247,13 +249,13 @@ def main():
             assert fingerprint(work) == before
         finally:
             side.write_bytes(original)
-        # Same legacy temp fallback name, without touching the real global /tmp.
+        # DB-derived fallback name/hash, without touching the real global /tmp.
         backup = work / "review-backup"
         side.rename(backup)
         tmp = work / "private-temp"
         tmp.mkdir()
-        name = packed.name[:-4]
-        tag = hashlib.sha1(str(packed.absolute()).encode()).hexdigest()[:12]
+        name = db_name_of(packed)
+        tag = hashlib.sha1(db_path_of(packed).encode()).hexdigest()[:12]
         shutil.copyfile(backup, tmp / (".%s.waive.web-oracle-%s" % (name, tag)))
         fallback_before = fingerprint(work)
         result = subprocess.run([str(cli), "drc", str(packed), "--rules"],

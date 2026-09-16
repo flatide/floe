@@ -7,6 +7,7 @@ credentials go to the child over stdin, never argv, a committed file or logs.
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import shutil
 import subprocess
 import sys
@@ -23,14 +24,14 @@ def main(fixture):
         temps.mkdir()
         source = work / "synthetic.oas"
         shutil.copy2(fixture, source)
-        subprocess.run([str(INDEX), "vfs", str(source), str(source) + ".floe", "--jobs", "2"],
+        subprocess.run([str(INDEX), "vfs", str(source), str(vfs_cache(source)), "--jobs", "2"],
                        check=True, capture_output=True, timeout=30)
         db = work / "synthetic.db"
         db.write_text(DB)
         subprocess.run([str(INDEX), "drc", str(db), "--jobs", "2"],
                        check=True, capture_output=True, timeout=30)
-        pack = Path(str(db) + ".ice")
-        inputs = [source, db, pack] + [p for p in Path(str(source) + ".floe").rglob("*") if p.is_file()]
+        pack = drc_pack(db)
+        inputs = [source, db, pack] + [p for p in vfs_cache(source).rglob("*") if p.is_file()]
         before = fingerprint(inputs)
         session = Session(source, pack, temps, "auto-test", work / "session.json", edit_waives=True)
         try:

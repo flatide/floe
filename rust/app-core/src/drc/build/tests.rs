@@ -66,7 +66,7 @@ fn targets_reject_aliases_and_detect_source_or_destination_replacement() {
     fs::write(&source, b"TOP 1000\n").unwrap();
     let input = Input::open(&source).unwrap();
     let output = output_path(&source).unwrap();
-    assert_eq!(output, folder.0.join("input.db.ice"));
+    assert_eq!(output, folder.0.join(".input.db.tray"));
     std::os::unix::fs::symlink(&source, &output).unwrap();
     assert!(output_path(&source).is_err());
     fs::remove_file(&output).unwrap();

@@ -1,7 +1,7 @@
 'use strict';
 const assert=require('node:assert/strict'),I=require('./index-open.js'),P=require('./protocol.js');
 const id=n=>n.toString(16).padStart(64,'0'),copy=v=>JSON.parse(JSON.stringify(v));
-const preview={open_seq:'1',source_id:id(1),title:'한국 <img src=x>.oas',mode:'chip',levels:{mode:'only',ids:['1','-2']},display_policy:'window',jobs_available:3};
+const preview={open_seq:'1',source_id:id(1),title:'한국 <img src=x>.jb',mode:'chip',levels:{mode:'only',ids:['1','-2']},display_policy:'window',jobs_available:3,occupancy_default:true};
 const first={seq:'1',kind:'open',phase:'failed',error:'index_unavailable',index_open:preview};
 function rig(saved=null, options={}) {
     const proposed=options.preview||preview,original={...first,kind:options.kind||'open',index_open:proposed};
@@ -49,6 +49,10 @@ function rig(saved=null, options={}) {
         async approve(){await el('index-open-approve').onclick();}};
 }
 (async()=>{
+    const layout=rig(null,{preview:{...preview,occupancy_default:false}});
+    await layout.api.init(true);await layout.open();assert.equal(layout.el('index-open-occupancy').checked,false);
+    await layout.approve();assert.equal(JSON.parse(layout.saved).request.options.occupancy,false);layout.api.stop();
+    assert.throws(()=>I.preview({...preview,occupancy_default:null},P));
     const anchored={...preview,reselect:{target:{kind:'replace',view_id:id(8),state_rev:'7'},pixels:[137,103]}};
     for(const reselect of [null,{}, {target:{kind:'empty'},pixels:[137,103]}, {...anchored.reselect,pixels:[0,103]}, {...anchored.reselect,source_id:id(2)}]) {
         assert.throws(()=>I.preview({...preview,reselect},P));

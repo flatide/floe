@@ -25,9 +25,11 @@ pub struct IndexOptions {
     pub jobs: usize,
     pub page_target_mb: Option<u64>,
     pub lod: bool,
-    pub occupancy: bool,
+    /// None resolves to off for layouts and on for jobdeck sources.
+    pub occupancy: Option<bool>,
     pub occupancy_only: bool,
     pub occupancy_um: Option<f64>,
+    pub occupancy_balance: Option<bool>,
     pub slow_cell_s: Option<f64>,
     pub p2_shard_limit_mb: Option<u64>,
     pub profile_cell: Option<ProfileCell>,
@@ -43,9 +45,10 @@ impl Default for IndexOptions {
             jobs: 12,
             page_target_mb: None,
             lod: false,
-            occupancy: true,
+            occupancy: None,
             occupancy_only: false,
             occupancy_um: None,
+            occupancy_balance: None,
             slow_cell_s: None,
             p2_shard_limit_mb: None,
             profile_cell: None,
@@ -118,7 +121,7 @@ impl IndexOptions {
         Ok(())
     }
     fn wants_occupancy(&self) -> bool {
-        self.occupancy || self.occupancy_um.is_some()
+        self.occupancy.unwrap_or(false) || self.occupancy_um.is_some()
     }
 }
 
@@ -182,6 +185,9 @@ fn arguments(
     add(&mut a, "--jobs", o.jobs);
     if *action == Action::OccupancyOnly {
         a.push("--occupancy-only".into());
+        if let Some(v) = o.occupancy_balance {
+            add(&mut a, "--occupancy-balance", u8::from(v));
+        }
         if let Some(v) = o.occupancy_um {
             add(&mut a, "--occupancy-um", v);
         }
@@ -192,6 +198,9 @@ fn arguments(
     }
     if *action != Action::Profile && o.wants_occupancy() {
         a.push("--occupancy".into());
+        if let Some(v) = o.occupancy_balance {
+            add(&mut a, "--occupancy-balance", u8::from(v));
+        }
         if let Some(v) = o.occupancy_um {
             add(&mut a, "--occupancy-um", v);
         }
@@ -326,11 +335,14 @@ impl PreparedIndex {
                         .map(|p| p.join(name))
                 })
                 .unwrap_or_else(|_| snapshot.clone());
-            let cache_resolved = fs::canonicalize(&directory).unwrap_or_else(|_| directory.clone());
-            if snapshot.starts_with(&directory) || resolved.starts_with(&cache_resolved) {
-                return Err(Error::input(
-                    "profile snapshot must be outside the normal .floe cache",
-                ));
+            for candidate in cache::cache_paths(&source)? {
+                let cache_resolved =
+                    fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                if snapshot.starts_with(&candidate) || resolved.starts_with(&cache_resolved) {
+                    return Err(Error::input(
+                        "profile snapshot must be outside both current and legacy caches",
+                    ));
+                }
             }
         }
         let profiling = options.profile_cell.is_some();
@@ -532,7 +544,7 @@ mod tests {
     #[test]
     fn reuse_force_and_additive_policy() {
         let mut o = IndexOptions {
-            occupancy: false,
+            occupancy: Some(false),
             ..Default::default()
         };
         assert_eq!(
@@ -545,7 +557,8 @@ mod tests {
         );
         let stale = CacheState::Unusable("stale".into());
         assert!(decide(&o, &stale, false).is_err());
-        o.occupancy = true;
+        o.occupancy = Some(true);
+        o.occupancy_balance = Some(false);
         assert_eq!(
             decide(&o, &CacheState::Current, false).unwrap(),
             Action::OccupancyOnly
@@ -556,7 +569,7 @@ mod tests {
         );
         o.force = true;
         assert_eq!(decide(&o, &stale, true).unwrap(), Action::Build);
-        o.occupancy = false;
+        o.occupancy = Some(false);
         o.occupancy_only = true;
         assert!(decide(&o, &stale, true).is_err());
         assert_eq!(
@@ -586,9 +599,15 @@ mod tests {
         assert!(o.validate().is_ok());
     }
     #[test]
-    fn default_summary_is_additive_and_only_overrides_the_default() {
+    fn layout_default_is_no_summary_and_explicit_summary_is_additive() {
         let mut o = IndexOptions::default();
-        assert!(o.occupancy);
+        assert_eq!(o.occupancy, None);
+        assert_eq!(
+            decide(&o, &CacheState::Current, false).unwrap(),
+            Action::Reuse
+        );
+        o.occupancy = Some(true);
+        o.occupancy_balance = Some(false);
         assert_eq!(
             decide(&o, &CacheState::Current, false).unwrap(),
             Action::OccupancyOnly
@@ -601,6 +620,7 @@ mod tests {
         )
         .unwrap();
         assert!(a.contains(&OsString::from("--occupancy")));
+        assert!(a.windows(2).any(|w| w == ["--occupancy-balance", "0"]));
         o.occupancy_only = true;
         assert_eq!(
             decide(&o, &CacheState::Current, true).unwrap(),
@@ -614,6 +634,7 @@ mod tests {
         )
         .unwrap();
         assert!(a.contains(&OsString::from("--occupancy-only")));
+        assert!(a.windows(2).any(|w| w == ["--occupancy-balance", "0"]));
         assert!(!a.contains(&OsString::from("--occupancy")));
         o.occupancy_only = false;
         o.profile_cell = Some(ProfileCell::Index(0));

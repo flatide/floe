@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import shutil
 import signal
 import subprocess
@@ -126,18 +127,18 @@ def main(fixture):
         temps.mkdir()
         source = work / "layout.oas"
         shutil.copy2(fixture, source)
-        subprocess.run([str(INDEX), "vfs", str(source), str(source) + ".floe", "--jobs", "2"],
+        subprocess.run([str(INDEX), "vfs", str(source), str(vfs_cache(source)), "--jobs", "2"],
                        check=True, capture_output=True, timeout=30)
         db = work / "합성.db"
         db.write_text(DB)
         subprocess.run([str(INDEX), "drc", str(db), "--jobs", "2"], check=True, capture_output=True, timeout=30)
-        pack = Path(str(db) + ".ice")
+        pack = drc_pack(db)
         os.environ["FLOE_REVIEWER"] = "synthetic-notes-oracle"
         oracle = drc.IcePack(str(pack))
         references = [dict(check=str(ci), error=str(ei)) for ci, c in enumerate(oracle.checks)
                       for ei in range(len(c.errors))]
         assert len(references) >= 6
-        inputs = [source, db, pack] + [p for p in Path(str(source) + ".floe").rglob("*") if p.is_file()]
+        inputs = [source, db, pack] + [p for p in vfs_cache(source).rglob("*") if p.is_file()]
         before = fingerprint(inputs)
         target = work / ".합성.db.notes.fixed-owner.fe"
         lock = Path(str(target) + ".lock")

@@ -53,15 +53,14 @@ pub fn paths(pack: &Path, reviewer: &str, kind: Kind) -> Result<[PathBuf; 2]> {
     let target = match kind {
         Kind::Waives => waiver,
         Kind::Notes => {
-            let pack = crate::cache::absolute(pack)?;
+            let pack = crate::cache::database_path(pack)?;
             let name = pack
                 .file_name()
                 .and_then(|s| s.to_str())
                 .ok_or_else(|| Error::input("review name must be UTF-8"))?;
-            pack.parent().unwrap().join(format!(
-                ".{}.notes.{reviewer}.fe",
-                name.strip_suffix(".ice").unwrap_or(name)
-            ))
+            pack.parent()
+                .unwrap()
+                .join(format!(".{}.notes.{reviewer}.fe", name))
         }
     };
     let mut lock = target.as_os_str().to_owned();
@@ -75,7 +74,7 @@ pub fn read_paths(pack: &Path, reviewer: &str, kind: Kind) -> Result<[PathBuf; 2
         return waive_paths(pack, reviewer);
     }
     let adjacent = paths(pack, reviewer, kind)?[0].clone();
-    let pack = crate::cache::absolute(pack)?;
+    let pack = crate::cache::database_path(pack)?;
     let hash = format!("{:x}", Sha1::digest(pack.as_os_str().as_bytes()));
     let name = adjacent.file_name().unwrap().to_str().unwrap();
     let temporary = std::env::temp_dir().join(format!(

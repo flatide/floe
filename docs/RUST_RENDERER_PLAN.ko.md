@@ -184,7 +184,7 @@ M5 density coverage 폐기(2026-08-25), M7 pick/snap 완료, M8 exact clip verti
   최신 세대 3 frame, pending job 0
 - 다음: 실제 GTK GUI A/B 장기 운용
 
-부모의 `data/m1/valmini*.floe`는 현행 OVM v7로 재생성됐으며 M1 smoke/golden
+부모의 `data/m1/.valmini*.ice`(당시 이름 `valmini*.floe`)는 현행 OVM v7로 재생성됐으며 M1 smoke/golden
 fixture로 사용한다. `v_j1.floe`, `v_j8.floe`는 과거 M1 비교 산출물이라 v2 상태다.
 
 ### 부모 `floe` 연동 상태
@@ -581,7 +581,7 @@ stdin EOF와 `quit`도 frontier를 최대로 올려 현재 render/clip을 끝까
 허용하지 않는다. CLI의 micron 좌표와 달리 daemon `view`는 raw DBU다.
 
 ```text
-open cache=/abs/design.oas.floe budget_mb=1024 jobs=8
+open cache=/abs/.design.oas.ice budget_mb=1024 jobs=8
 style epoch=3 path=/tmp/floe-style-3.tsv
 render gen=42 view=x0,y0,x1,y1 w=1922 h=1082 depth=full cut=3 exact=0 layers=all frames=on mono=off frame_cache=1 jobs=4 decode_jobs=8 tile_px=384 decode_pages=512 round_pages=1024 round_paths=0 style_epoch=3 out=/tmp/floe-frame-42.png
 cancel before_gen=43

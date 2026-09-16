@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import shutil
 import signal
 import subprocess
@@ -54,7 +55,7 @@ def fixtures(work, ascii=False):
     if not ascii:
         run([INDEX, "drc", db, "--jobs", "2"])
     os.environ["FLOE_REVIEWER"] = "svrf-http"
-    p = drc.load_ascii(str(db)) if ascii else drc.IcePack(str(db)+".ice")
+    p = drc.load_ascii(str(db)) if ascii else drc.IcePack(str(drc_pack(db)))
     expected = []
     for ci, c in enumerate(p.checks):
         if not ascii:
@@ -76,9 +77,9 @@ def main(fixture, ascii=False):
         layout.mkdir()
         source = layout / "design.oas"
         shutil.copy2(fixture, source)
-        run([INDEX, "vfs", source, str(source)+".floe", "--jobs", "2"])
+        run([INDEX, "vfs", source, str(vfs_cache(source)), "--jobs", "2"])
         db, rules, empty, invalid, waive, meta, expected = fixtures(work, ascii)
-        registered = db if ascii else str(db)+".ice"
+        registered = db if ascii else str(drc_pack(db))
         temps = work / "temp"
         temps.mkdir()
         env = dict(os.environ, PATH="", TMPDIR=str(temps), FLOE_INDEX_BIN=str(INDEX), FLOE_RENDERD_BIN=str(RENDERD))

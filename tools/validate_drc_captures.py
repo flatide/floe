@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import resource
 import shutil
 import signal
@@ -151,8 +152,8 @@ def safety(source, db, work, env, unit):
         invoke([*one, *flags], fake_env, code=2)
         assert target.read_bytes() == b"previous export"
         assert not log.exists(), (flags, log.read_text() if log.exists() else "")
-    protected = [source, db, Path(str(db)+".ice"), Path(str(source)+".layerprops"),
-                 Path(str(source)+".floe")/"meta.json", Path(str(db)+".rules.json")]
+    protected = [source, db, drc_pack(db), Path(str(source)+".layerprops"),
+                 vfs_cache(source)/"meta.json", Path(str(db)+".rules.json")]
     for path in protected:
         invoke([*one, "--out", path], fake_env, code=2)
         assert not log.exists()
@@ -216,7 +217,7 @@ def main():
                    FLOE_RUST_JOBS="1", FLOE_RUST_RASTER_JOBS="4", FLOE_RUST_ROUND_PAGES=str(1 << 30),
                    TMPDIR=str(runtime), PYTHONDONTWRITEBYTECODE="1")
         invoke(["index", source, "--jobs", "2"], env)
-        cache = Path(str(source)+".floe")
+        cache = vfs_cache(source)
         before = digest(cache)
         meta = json.loads((cache/"meta.json").read_text())
         layer = meta["layers"][0]
@@ -229,7 +230,7 @@ def main():
         # Native pack and existing reviewer status, never created by Rust capture.
         subprocess.run([str(INDEX), "drc", str(db), "--jobs", "2"], check=True, env=env, capture_output=True)
         os.environ["FLOE_REVIEWER"] = env["FLOE_REVIEWER"]
-        pack = drc.IcePack(str(db)+".ice")
+        pack = drc.IcePack(str(drc_pack(db)))
         pack.set_status(0, 0, 1)
         pack.set_status(0, 2, 2)
         waive = Path(pack._waive_path)
@@ -237,10 +238,10 @@ def main():
         rules = Path(str(db)+".rules.json")
         rules.write_text(json.dumps({"format":"floe-svrf-rules", "version":1,
                                     "checks":{RULE:{"source_gds":[[layer["layer"],None]]}}}))
-        inputs = [source, db, Path(str(db)+".ice"), waive, props, rules]
+        inputs = [source, db, drc_pack(db), waive, props, rules]
         initial = fingerprint(inputs)
         compare(source, db, work, env, "pack", [])
-        compare(source, Path(str(db)+".ice"), work, env, "direct", ["--layers",key, "--drc-err","1-3"])
+        compare(source, drc_pack(db), work, env, "direct", ["--layers",key, "--drc-err","1-3"])
         for tag, flags in [
             ("cap", ["--drc-cap","2"]), ("range",["--drc-err","2-3","--drc-cap","1"]),
             ("clamp-lo",["--drc-err","3","--drc-frac","0"]),

@@ -527,6 +527,8 @@ fn all_registered_sources_and_their_caches_are_protected() {
         f.dir.join("missing.oas"),
         f.dir.join("missing.oas.floe/page.bin"),
         f.dir.join("missing.oas.floe.index.lock"),
+        f.dir.join(".missing.oas.ice/page.bin"),
+        f.dir.join(".missing.oas.ice.index.lock"),
         other,
     ] {
         assert!(p.protect(&path).is_err(), "{}", path.display());

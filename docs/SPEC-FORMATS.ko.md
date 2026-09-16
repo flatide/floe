@@ -1,4 +1,4 @@
-# SPEC: 캐시 포맷 (.floe 디렉토리)
+# SPEC: 캐시 포맷 (.<src>.ice 디렉토리)
 
 정본 코드: `rust/ovm/src/lib.rs` (Builder/Ovm), 검증:
 `tools/validate_vfs.py`(오픈 검증), `rust/VFS_HIER.md` par.1~2.
@@ -58,25 +58,37 @@ v5 텍스트 인덱스의 문자열/좌표 풀. 빈 파일 허용(mmap 0 예외 
 레이어별 밀도 비트플레인. 뷰어 `floe/coverage.py`가 컷 활성+텍셀
 ≤COV_MAX_TEXEL_PX(160) 시 빈 픽셀에만 팔레트 틴트 합성.
 
-## design.ovo — 점유 피라미드 (선택, FLOEOVO1)
+## design.ovo — 점유 피라미드 (선택, FLOEOVO2)
 
 마스크 정책 광역뷰의 요약(docs/OCCUPANCY_PLAN.ko.md). `floe-index vfs
 --occupancy`(`floe2 index --occupancy`, opt-in)가 만들고 `--occupancy-only`가
 기존 캐시에 추가·교체한다. `design.ovo.tmp`에 쓰고 rename으로 게시하므로 이름
-아래에 부분 파일이 놓이지 않는다. 자체 버전(`FLOEOVO1`)의 sidecar이며
-CACHE_VERSION과 무관하다(없거나 무효하면 "요약 없음").
+아래에 부분 파일이 놓이지 않는다. 자체 버전(`FLOEOVO2`, 2026-09-16; 리더는 v1
+`FLOEOVO1`도 읽는다)의 sidecar이며 CACHE_VERSION과 무관하다(없거나 무효하면
+"요약 없음").
 
 ```
-header  magic "FLOEOVO1" | version u32 | unit f64 | src_size u64 | src_mtime u64
+header  magic "FLOEOVO2" | version u32 (2) | unit f64 | src_size u64 | src_mtime u64
         | cell_dbu i64 | bbox x0 y0 x1 y1 i64 | n_levels u32 | n_layers u32
         | top_len u16 | top utf8
 layer k layer u32 | dt u32 | status u8 (0 ok, 1 none:cells, 2 none:work,
-        3 none:size, 4 none:unsupported, 5 empty) | work u64 | n_levels × (w u32
-        | h u32 | off u64 | len u64)
+        3 none:size, 4 none:unsupported, 5 empty) | work u64 | n_planes u8
+        (ok가 아니면 0) | n_planes × ( depth u8 | n_levels × (w u32 | h u32
+        | off u64 | len u64) )
 body    레벨 비트맵: row-major, 행은 바이트 패딩, 행의 i번째 셀 = byte i/8 의
         bit i%8. level L 셀 = cell_dbu × 2^L, 원점 = bbox x0/y0, grid =
         ceil(span / cell). 격자가 64 × 64 이하가 될 때까지 2배 레벨.
 ```
+
+**평면(plane)** = 배치 깊이 하나의 피라미드. depth 0은 top 셀 자신의 레코드,
+d는 top에서 배치 d단계 아래 셀의 레코드이며, 도형이 있는 깊이에만 평면이 있다
+(오름차순). 깊이 15 이상은 평면 15에 접힌다(`DEPTH_CAP`; 요청 depth ≥ 15는
+무제한과 같다). 요청 depth N은 depth ≤ N인 평면들의 OR을 그리고, 무제한은 전부,
+장래의 depth 구간 [s, e]는 s..e의 OR이다 — 페이지 경로가 그 depth에서 그리는 도형
+집합과 정확히 같다. **v1**(`FLOEOVO1`, version 1; 레이어 항목에 n_planes가 없고
+n_levels 항목이 바로 이어짐)은 전 깊이를 평탄화한 평면 하나(`depth=all`)로 읽히며
+무제한(또는 레이어별 full) depth에서만 쓰인다. 리더는 평면 depth의 오름차순·상한,
+ok ↔ n_planes ≥ 1을 추가로 검사한다.
 
 비트 = "셀의 열린 상자가 도형 내부와 양의 면적으로 만남"(KLayout `Region & box`
 판정). 도형 교차로만 만들며 bbox 대체가 없다(리뷰 2026-09-11 P1-1). hull이
@@ -121,7 +133,7 @@ rect·path뿐인 레이어)는 `empty`(비트맵 없음, 레벨 항목은 0)로 
 ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::open`이
 불일치 시 거부("read src"/stale). 자산 재생성 후엔 반드시 재인덱싱.
 
-## <db>.ice — Calibre DRC 결과 pack (v2, 레이아웃 버전 4)
+## .<db>.tray — Calibre DRC 결과 pack (v2, 레이아웃 버전 4)
 
 정본: `rust/cli/src/drcpack.rs`(빌더 `floe-index drc results.db
 [--jobs N]` — pack이 유일한 출력), `rust/cli/src/drcice.rs`(공유
@@ -144,8 +156,9 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
 북키핑)는 **레코드가 있어도 항상 드롭**(실덱 2026-08-20) —
 그 레코드는 위반이 아니므로 전역 파일순 번호도 소비하지 않는다
 (파이썬은 gnum 롤백, pack은 저장 체크 누적으로 유도 = 자동 일치).
-구 `.ice`(레거시 타일 캐시 디렉토리)는 2026-08-13에 `.tiles`로
-개명되어 이 확장자는 DRC 인덱스 전용이다.
+이름: 2026-09-16부터 `.<db>.tray`(db 옆 숨김 파일; `floe/cachepath.py`).
+그 전의 `<db>.ice`는 발견 시 자동 개명된다(`.ice`는 지금 VFS 인덱스
+폴더 `.<src>.ice/`의 접미사; 2026-08-13까지는 레거시 타일 캐시 이름).
 
 ```
 [헤더 40B]  version=4(레이아웃 개정 카운터), flags=1
@@ -207,7 +220,7 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
 - **손상 방어**(2026-08-18): 리더는 헤더/푸터 길이·매직에 더해
   **전 섹션 경계**(파일 내부)와 체크 dir 범위(estart+ecnt ≤
   err_total 등)를 검증하고, 파싱 중 어떤 예외(struct.error 등)든
-  단일 스토리 `ValueError("corrupt packed .ice - 재-pack 안내")`로
+  단일 스토리 `ValueError("corrupt pack - 재-pack 안내")`로
   정규화 — 열기 경로(ValueError/OSError 캐치)가 항상 ASCII 폴백/
   재빌드로 이어진다(D2 corrupt 픽스처 3종). `close()`가 pwrite
   fd·mmap을 해제(__del__ 연동; fd 누수 수정). 인코더는 시작 시

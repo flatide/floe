@@ -3,6 +3,7 @@
 import fcntl
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import subprocess
 import sys
 import tempfile
@@ -27,11 +28,11 @@ def main(fixture):
         db.write_text("TOP 1000\nWIDTH\n3 3 0\n" + "".join(
             "p %d 4\n%d 0\n%d 0\n%d 20\n%d 20\n" % (i + 1, i * 40, i * 40 + 20, i * 40 + 20, i * 40)
             for i in range(3)))
-        for args in [["vfs", source, str(source) + ".floe", "--jobs", "2"], ["drc", db, "--jobs", "2"]]:
+        for args in [["vfs", source, str(vfs_cache(source)), "--jobs", "2"], ["drc", db, "--jobs", "2"]]:
             p = subprocess.run([str(INDEX), *map(str, args)], capture_output=True, timeout=30)
             assert p.returncode == 0, p.stderr
-        pack = Path(str(db) + ".ice")
-        inputs = [source, db, pack, *sorted(Path(str(source) + ".floe").glob("design.*"))]
+        pack = drc_pack(db)
+        inputs = [source, db, pack, *sorted(vfs_cache(source).glob("design.*"))]
         before = fingerprint(inputs)
         sessions = []
 

@@ -6,6 +6,7 @@ Python/KLayout/Pillow are development oracles. Rust runs with PATH empty.
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import signal
 import subprocess
@@ -198,7 +199,7 @@ def safety(source, work, env, deck, deck_unit):
     batch.write_text("x bbox=0,0,10,10\n")
     for output, report_path in ((work / "collision", work / "collision/x.png"),
                                 (work / "report-dir", work / "report-dir"),
-                                (Path(str(source)+".floe/new-output"), report)):
+                                (vfs_cache(source) / "new-output", report)):
         reset()
         invoke(["render", source, "--batch", batch, "--out", output, "--report", report_path], fake_env, code=2)
         assert not output.exists() and not log.exists()
@@ -249,7 +250,7 @@ def main(fixture):
             invoke(["index",work/name,"--jobs=2"],env)
         deck = work / "deck.jb"; deck.write_text(DECK)
         missing = work / "missing.jb"; missing.write_text(DECK.replace("TC=mark.oas","TC=absent.oas"))
-        caches = {p: digest(p) for p in work.glob("*.floe")}
+        caches = {p: digest(p) for p in work.glob(".*.ice")}
         compare(source,work,env,"points",["--mosaic-at=0,90;90,90;90,0;0,0","--size=20,12","--px=63x47","--keep-tiles"])
         compare(source,work,env,"corners",["--corners=100,90,0,0","--size=25,15","--px=63x47","--line=1","--line-color=#123456","--keep-tiles"])
         compare(source,work,env,"half",["--corners=-10.9375,-10.9375,100,100","--size=30,20","--px=61x49","--line=0.5","--line-color=#abcDEF","--stretch","--detail=high","--frames","--labels","--depth=1"])

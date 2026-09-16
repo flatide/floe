@@ -38,7 +38,7 @@ async fn waive_refresh_fences_http_cursors_and_prepared_websocket_focus() {
         .unwrap()
         .status
         .success());
-    let pack = db.with_extension("db.ice");
+    let pack = db.with_file_name(".review.db.tray");
     let original = fs::read(&pack).unwrap();
     let h =
         Harness::start_with_drc(std::slice::from_ref(&source), native(), Some((&pack, None))).await;
@@ -280,7 +280,7 @@ async fn explicit_pack_build_retires_prepared_focus_without_reopening_layout() {
             socket.apply(&fresh["prepared_token"], None).await;
             assert_ne!(socket.state["state_rev"], before["state_rev"]);
         } else {
-            assert!(!db.with_extension("db.ice").exists());
+            assert!(!db.with_file_name(".review.db.tray").exists());
             // A denied write does not revoke the read-only owner's valid move.
             socket.apply(&token, None).await;
         }
@@ -451,7 +451,7 @@ async fn prepared_focus_is_atomic_scoped_and_restores_original_visibility_once()
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let pack = root.join("review.db.ice");
+    let pack = root.join(".review.db.tray");
     let original = fs::read(&pack).unwrap();
     let stamp = fs::metadata(&pack).unwrap().modified().unwrap();
     let rules = root.join("rules.json");

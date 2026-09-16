@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import subprocess
 import sys
@@ -45,7 +46,7 @@ def main(fixture):
                             str(source), "--jobs", "2"], env=env, cwd=ROOT,
                            text=True, capture_output=True, timeout=40)
         assert p.returncode == 0, (p.stdout, p.stderr)
-        cache = Path(str(source) + ".floe")
+        cache = vfs_cache(source)
         before = digest(cache)
         run = subprocess.run([tests[0], "--ignored", "--nocapture"], env=env,
                              text=True, capture_output=True, timeout=90)

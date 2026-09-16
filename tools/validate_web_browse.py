@@ -2,6 +2,7 @@
 """Approved-root picker -> owner proposal -> real native open, private inputs only."""
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import subprocess
 import sys
@@ -133,7 +134,7 @@ def main(fixture):
             other = open_selected(select(b.name), same)
             assert other["view_id"] != same["view_id"]
             fail = open_selected(select(missing.name), other, False)
-            assert fail["error"] == "index_unavailable" and not Path(str(missing) + ".floe").exists()
+            assert fail["error"] == "index_unavailable" and not vfs_cache(missing).exists()
             assert client.call("GET", "/api/v1/view")["view"]["view_id"] == other["view_id"]
             selected = select(deck.name)
             pending = client.call("GET", "/api/v1/launch")["pending"]

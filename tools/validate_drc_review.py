@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cache_test_paths import drc_pack
+from floe.cachepath import db_name_of
 import shutil
 import subprocess
 import sys
@@ -58,7 +60,7 @@ def main():
             run = subprocess.run([str(ROOT / "rust/target/release/floe-index"), "drc", str(source),
                                   "--jobs", "2"], capture_output=True, text=True, timeout=30)
             assert run.returncode == 0, run.stderr
-            pack_path = Path(str(source) + ".ice")
+            pack_path = drc_pack(source)
             before_pack = pack_path.read_bytes()
             pack = drc.IcePack(str(pack_path))
             try:
@@ -129,7 +131,7 @@ def main():
         assert all(after.get(p) == stamp for p, stamp in before.items()), "store modified an existing input/review"
         allowed = set()
         for case in cases:
-            name = Path(case["pack"]).name.removesuffix(".ice")
+            name = db_name_of(case["pack"])
             for target in (f".{name}.waive.synthetic-rust-store", f".{name}.notes.synthetic-rust-store.fe"):
                 allowed.update((target, target + ".lock"))
         assert set(after) - set(before) == allowed, "unexpected output or surviving staging file"
@@ -138,7 +140,7 @@ def main():
         for case in cases:
             pack = drc.IcePack(case["pack"])
             try:
-                name = Path(case["pack"]).name.removesuffix(".ice")
+                name = db_name_of(case["pack"])
                 text = (work / f".{name}.notes.synthetic-rust-store.fe").read_text()
                 assert pack._parse_notes(text, pack.total)
                 assert pack.notes_list() == []

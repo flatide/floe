@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import signal
 import subprocess
@@ -63,7 +64,7 @@ def main(fixture):
         oracle = work / "oracle.oas"
         shutil.copy2(fixture, source)
         shutil.copy2(fixture, oracle)
-        cache = Path(str(source) + ".floe")
+        cache = vfs_cache(source)
         # No Python/shell can be discovered by the Rust runtime under this PATH.
         env = dict(os.environ, FLOE_INDEX_BIN=str(INDEX), PATH="",
                    PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1")
@@ -109,18 +110,35 @@ def main(fixture):
             run("index", source, option, "0", env=env, code=2)
         for value in ("nan", "inf", "-1"):
             run("index", source, "--occupancy-um", value, env=env, code=2)
+        for value in ("2", "-1", "x"):
+            run("index", source, "--occupancy-balance", value, env=env, code=2)
         assert not cache.exists()
 
         run("index", source, "--jobs", "2", env=env)
         run("index", oracle, "--jobs", "2", env=env, python=True)
-        oracle_cache = Path(str(oracle) + ".floe")
-        assert (cache / "design.ovo").is_file(), "default build omitted summary"
-        assert (cache / "design.ovo").read_bytes() == (oracle_cache / "design.ovo").read_bytes()
+        oracle_cache = vfs_cache(oracle)
+        assert not (cache / "design.ovo").exists(), "layout default must not build summary"
+        assert not (oracle_cache / "design.ovo").exists()
         for part in PARTS:
             assert (cache / part).read_bytes() == (oracle_cache / part).read_bytes(), part
         before = digest(cache)
         assert "up to date" in run("index", source, "--lod", env=env).stdout
         assert digest(cache) == before, "reuse changed data or mtime"
+
+        # Legacy names are read/reused in place, never renamed by info/open.
+        from floe.cachepath import legacy_vfs_cache_dir
+        old_cache = Path(legacy_vfs_cache_dir(source))
+        cache.rename(old_cache)
+        old_stamp = digest(old_cache)
+        run("info", source, env=env)
+        run("index", source, env=env)
+        assert not cache.exists() and digest(old_cache) == old_stamp
+        # A corrupt canonical destination must not silently select legacy data.
+        cache.mkdir()
+        run("index", source, env=env, code=1)
+        assert digest(old_cache) == old_stamp
+        cache.rmdir()
+        old_cache.rename(cache)
 
         # Actual marker and JSON corruption, never just a fake nonzero marker.
         marker = (cache / "design.ovm").read_bytes()
@@ -157,15 +175,17 @@ def main(fixture):
 
         older = work / "older.oas"
         shutil.copy2(fixture, older)
-        older_cache = Path(str(older) + ".floe")
+        older_cache = vfs_cache(older)
         run("index", older, "--no-occupancy", "--jobs", "2", env=env)
         assert not (older_cache / "design.ovo").exists()
         legacy = digest(older_cache)
         run("index", older, "--no-occupancy", env=env)
         assert digest(older_cache) == legacy
         run("index", older, "--jobs", "2", env=env)
+        assert digest(older_cache) == legacy, "layout default unexpectedly added a summary"
+        run("index", older, "--occupancy", "--jobs", "2", env=env)
         assert (older_cache / "design.ovo").is_file()
-        assert digest(older_cache, legacy) == legacy, "default summary replaced legacy cache"
+        assert digest(older_cache, legacy) == legacy, "opt-in summary replaced base cache"
         summary_kept = digest(older_cache)
         run("index", older, "--no-occupancy", env=env)
         assert digest(older_cache) == summary_kept, "opt-out removed existing summary"
@@ -198,15 +218,15 @@ def main(fixture):
         fresh_profile = work / "profile_only.oas"
         shutil.copy2(fixture, fresh_profile)
         run("index", fresh_profile, "--profile-cell", top, "--jobs", "2", env=env)
-        assert not Path(str(fresh_profile) + ".floe").exists()
-        assert not Path(str(fresh_profile) + ".floe.index.lock").exists()
+        assert not vfs_cache(fresh_profile).exists()
+        assert not Path(str(vfs_cache(fresh_profile)) + ".index.lock").exists()
         print("app CLI: profile JSON, repeated jobs, snapshot reuse and cache non-mutation ok")
 
         missing_env = dict(env, FLOE_INDEX_BIN=str(work / "missing"))
         assert "FLOE_INDEX_BIN" in run("index", source, env=missing_env, code=2).stderr
         link_source = work / "linked.oas"
         link_source.symlink_to(source)
-        linked_cache = Path(str(link_source) + ".floe")
+        linked_cache = vfs_cache(link_source)
         linked_cache.symlink_to(cache, target_is_directory=True)
         run("index", link_source, "--force", env=env, code=2)
         assert digest(cache) == before
@@ -258,7 +278,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         run("index", fake_source, "--jobs", "16", "--page-target-mb", "2", "--slow-cell-s", "0",
             "--p2-shard-limit-mb", "1024", "--occupancy-um", "4", env=dict(fake_env, FAKE_EXIT="7"), code=7)
         call = json.loads(log.read_text().splitlines()[-1])
-        assert call[:3] == ["vfs", str(fake_source), str(fake_source) + ".floe"]
+        assert call[:3] == ["vfs", str(fake_source), str(vfs_cache(fake_source))]
         assert call[3:] == ["--jobs", "16", "--page-target-mb", "2", "--occupancy", "--occupancy-um", "4",
                             "--no-lod", "--slow-cell-s", "0", "--p2-shard-limit-mb", "1024"]
         bad_cleanup = run("index", source, "--occupancy-only",

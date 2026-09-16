@@ -55,7 +55,30 @@ fn version() -> String {
     )
 }
 
+/// A reader that closes the pipe early (`floe-index occupancy … | head
+/// -1`, field 2026-09-16) must end this process quietly, as it ends a C
+/// program: Rust starts with SIGPIPE ignored so the write fails with
+/// EPIPE and `println!` panics ("failed printing to stdout: Broken
+/// pipe"). Restoring the default disposition kills the process on the
+/// broken pipe instead. Declared here rather than through a libc crate
+/// (vendored deps only); the numbers are the same on Linux and macOS.
+#[cfg(unix)]
+fn exit_quietly_on_broken_pipe() {
+    extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn exit_quietly_on_broken_pipe() {}
+
 fn main() {
+    exit_quietly_on_broken_pipe();
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 && (args[1] == "--version" || args[1] == "-V") {
         println!("{}", version());
@@ -96,27 +119,24 @@ fn main() {
              [--plan-batch N] [--encode-batch N] \
              [--page-target-mb N] \
              [--coverage | --coverage-only] [--no-lod] [--frontier-only] \
-             [--occupancy | --occupancy-only] [--occupancy-um F] \
+             [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1] \
              [--slow-cell-s S] [--p2-shard-limit-mb N] \
              [--profile-cell NAME | --profile-cell-ci N] \
              [--profile-jobs N,N,...] [--profile-repeat N] \
              [--profile-snapshot PATH] [--profile-snapshot-refresh]\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
-             [--depth N] [--explain 1] [--page-hairline 0|1] [--sub-cut-wash 0|1] \
+             [--depth N] [--explain 1] [--page-hairline 0|1] [--sub-cut-wash 0|1] [--page-reps 0|1] \
              [--summary-layers a/b,..] [--prune-summary 0|1]\n       \
              floe-index occupancy <outdir> [--layer L/D] [--level N] \
              [--dump]\n       \
-             floe-index drc <results.db> [out.ice] \
+             floe-index drc <results.db> [out.tray] \
              [--pack] [--jobs N]"
         );
         std::process::exit(2);
     }
     let path = &args[2];
-    let jobs: usize = args
-        .get(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+    let jobs: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
     let t0 = Instant::now();
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -287,8 +307,7 @@ fn tile_cmd(args: &[String]) {
     let t_parse = t1.elapsed().as_secs_f64();
     let nbands = edges.len() + 1;
     for k in 0..nbands {
-        std::fs::create_dir_all(format!("{}/tiles_b{}", outdir, k))
-            .expect("mkdir");
+        std::fs::create_dir_all(format!("{}/tiles_b{}", outdir, k)).expect("mkdir");
     }
     // hierarchy-preserving path: per tile a variant tree, mirrored
     // into every band (klayout-parity naming: NAME[$v]__b<k>)
@@ -337,10 +356,7 @@ fn tile_cmd(args: &[String]) {
 
 /// Base cell names of a tile tree: root = "" (band/file specific),
 /// full definitions their design name, clipped variants NAME$ord.
-fn base_names(
-    doc: &floe_oasis::doc::Doc,
-    tree: &floe_tiler::hier::TileTree,
-) -> Vec<String> {
+fn base_names(doc: &floe_oasis::doc::Doc, tree: &floe_tiler::hier::TileTree) -> Vec<String> {
     tree.cells
         .iter()
         .enumerate()
@@ -396,20 +412,13 @@ fn write_band_files(
                     .places
                     .iter()
                     .filter(|p| tree.reach[k][p.var])
-                    .map(|p| {
-                        (bname[p.var].as_str(), p.x, p.y, p.rot,
-                         p.flip, &p.rep)
-                    })
+                    .map(|p| (bname[p.var].as_str(), p.x, p.y, p.rot, p.flip, &p.rep))
                     .collect(),
             })
             .collect();
-        let bytes = floe_oasis::write::write_tree(&wcells, doc.unit)
-            .expect("serialize");
-        std::fs::write(
-            format!("{}/tiles_b{}/t_{}_{}.oas", outdir, k, r, c),
-            bytes,
-        )
-        .expect("write tile");
+        let bytes = floe_oasis::write::write_tree(&wcells, doc.unit).expect("serialize");
+        std::fs::write(format!("{}/tiles_b{}/t_{}_{}.oas", outdir, k, r, c), bytes)
+            .expect("write tile");
         files += 1;
     }
     files
@@ -443,22 +452,21 @@ fn write_lod_file(
     };
     // owned merged content first (WCell borrows slices)
     #[allow(clippy::type_complexity)]
-    let merged: Vec<(usize, Vec<RectRec>, Vec<PolyRec>, Vec<PathRec>)> =
-        included
-            .iter()
-            .map(|&i| {
-                let vc = &tree.cells[i];
-                let mut rects = Vec::new();
-                let mut polys = Vec::new();
-                let mut paths = Vec::new();
-                for band in &vc.bands {
-                    rects.extend(band.rects.iter().cloned());
-                    polys.extend(band.polys.iter().cloned());
-                    paths.extend(band.paths.iter().cloned());
-                }
-                (i, rects, polys, paths)
-            })
-            .collect();
+    let merged: Vec<(usize, Vec<RectRec>, Vec<PolyRec>, Vec<PathRec>)> = included
+        .iter()
+        .map(|&i| {
+            let vc = &tree.cells[i];
+            let mut rects = Vec::new();
+            let mut polys = Vec::new();
+            let mut paths = Vec::new();
+            for band in &vc.bands {
+                rects.extend(band.rects.iter().cloned());
+                polys.extend(band.polys.iter().cloned());
+                paths.extend(band.paths.iter().cloned());
+            }
+            (i, rects, polys, paths)
+        })
+        .collect();
     let ghost_rects: Vec<(usize, Vec<RectRec>)> = if ghosts.is_empty() {
         Vec::new()
     } else {
@@ -467,20 +475,22 @@ fn write_lod_file(
             .iter()
             .map(|&i| {
                 let b = bb[i];
-                (i, vec![RectRec {
-                    layer: 254,
-                    dt: 0,
-                    x: b.0,
-                    y: b.1,
-                    w: b.2 - b.0,
-                    h: b.3 - b.1,
-                    rep: Rep::One,
-                }])
+                (
+                    i,
+                    vec![RectRec {
+                        layer: 254,
+                        dt: 0,
+                        x: b.0,
+                        y: b.1,
+                        w: b.2 - b.0,
+                        h: b.3 - b.1,
+                        rep: Rep::One,
+                    }],
+                )
             })
             .collect()
     };
-    let names: Vec<String> =
-        (0..tree.cells.len()).map(name_of).collect();
+    let names: Vec<String> = (0..tree.cells.len()).map(name_of).collect();
     let empty_polys: Vec<PolyRec> = Vec::new();
     let mut wcells: Vec<floe_oasis::write::WCell> = Vec::new();
     for (i, rects, polys, paths) in &merged {
@@ -493,10 +503,7 @@ fn write_lod_file(
             places: tree.cells[*i]
                 .places
                 .iter()
-                .map(|p| {
-                    (names[p.var].as_str(), p.x, p.y, p.rot, p.flip,
-                     &p.rep)
-                })
+                .map(|p| (names[p.var].as_str(), p.x, p.y, p.rot, p.flip, &p.rep))
                 .collect(),
         });
     }
@@ -510,13 +517,8 @@ fn write_lod_file(
             places: Vec::new(),
         });
     }
-    let bytes = floe_oasis::write::write_tree(&wcells, doc.unit)
-        .expect("serialize lod");
-    std::fs::write(
-        format!("{}/tiles_lod/t_{}_{}.oas", outdir, r, c),
-        bytes,
-    )
-    .expect("write lod");
+    let bytes = floe_oasis::write::write_tree(&wcells, doc.unit).expect("serialize lod");
+    std::fs::write(format!("{}/tiles_lod/t_{}_{}.oas", outdir, r, c), bytes).expect("write lod");
     cut.map(|lc| lc.depth)
 }
 
@@ -539,9 +541,7 @@ fn jesc(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32))
-            }
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
     }
@@ -581,12 +581,7 @@ fn proc_kv_gb(path: &str, key: &str) -> Option<f64> {
     let s = std::fs::read_to_string(path).ok()?;
     for line in s.lines() {
         if let Some(rest) = line.strip_prefix(key) {
-            let kb: f64 = rest
-                .trim()
-                .trim_end_matches("kB")
-                .trim()
-                .parse()
-                .ok()?;
+            let kb: f64 = rest.trim().trim_end_matches("kB").trim().parse().ok()?;
             return Some(kb / 1e6);
         }
     }
@@ -671,10 +666,9 @@ fn fmt_factors(factors: &[floe_oasis::doc::Rep]) -> String {
         .iter()
         .map(|f| match f {
             Rep::One => "1".to_string(),
-            Rep::Grid { na, nb, va, vb } => format!(
-                "g:{},{},{},{},{},{}",
-                na, nb, va.0, va.1, vb.0, vb.1
-            ),
+            Rep::Grid { na, nb, va, vb } => {
+                format!("g:{},{},{},{},{},{}", na, nb, va.0, va.1, vb.0, vb.1)
+            }
             Rep::Pts(p) => format!(
                 "p:{}",
                 p.iter()
@@ -707,8 +701,7 @@ fn index_cmd(args: &[String]) {
                 i += 2;
             }
             "--mem-floor" => {
-                mem_floor =
-                    Some(args[i + 1].parse().expect("mem floor GB"));
+                mem_floor = Some(args[i + 1].parse().expect("mem floor GB"));
                 i += 2;
             }
             "--tile-bytes" => {
@@ -756,11 +749,7 @@ fn index_cmd(args: &[String]) {
         .map(|d| d.as_secs())
         .expect("mtime");
     let t_read = t_all.elapsed().as_secs_f64();
-    eprintln!(
-        "[index] read {:.2} GB in {:.1}s",
-        size as f64 / 1e9,
-        t_read
-    );
+    eprintln!("[index] read {:.2} GB in {:.1}s", size as f64 / 1e9, t_read);
 
     let jobs = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -797,8 +786,7 @@ fn index_cmd(args: &[String]) {
             std::process::exit(1);
         }
     };
-    let n = (((size as f64 / tile_bytes as f64).sqrt())
-        .round_ties_even() as i64)
+    let n = (((size as f64 / tile_bytes as f64).sqrt()).round_ties_even() as i64)
         .clamp(GRID_MIN, GRID_MAX);
     let tile_w = (bbox.2 - bbox.0 + n - 1) / n;
     let tile_h = (bbox.3 - bbox.1 + n - 1) / n;
@@ -823,14 +811,11 @@ fn index_cmd(args: &[String]) {
         .collect();
     let nbands = edges.len() + 1;
     for k in 0..nbands {
-        std::fs::create_dir_all(format!("{}/tiles_b{}", outdir, k))
-            .expect("mkdir");
+        std::fs::create_dir_all(format!("{}/tiles_b{}", outdir, k)).expect("mkdir");
     }
-    std::fs::create_dir_all(format!("{}/tiles_lod", outdir))
-        .expect("mkdir lod");
+    std::fs::create_dir_all(format!("{}/tiles_lod", outdir)).expect("mkdir lod");
 
-    let hier =
-        floe_tiler::hier::HierTiler::new(&doc, grid, edges.clone());
+    let hier = floe_tiler::hier::HierTiler::new(&doc, grid, edges.clone());
     // tiles are independent (build + band files + lod + density per
     // tile): scoped threads pull coordinates off a shared counter;
     // results merge and sort by (r, c) so every output byte is
@@ -852,9 +837,8 @@ fn index_cmd(args: &[String]) {
     // Workers pause BEFORE building another tile while the box's
     // MemAvailable sits under the floor or our own RSS tops --mem;
     // at least one builder always runs.
-    let floor_gb: f64 = mem_floor.unwrap_or_else(|| {
-        mem_total_gb().map(|t| (0.05 * t).max(4.0)).unwrap_or(0.0)
-    });
+    let floor_gb: f64 =
+        mem_floor.unwrap_or_else(|| mem_total_gb().map(|t| (0.05 * t).max(4.0)).unwrap_or(0.0));
     if mem_available_gb().is_some() {
         eprintln!(
             "[index] governor: floor {:.1} GB free{}",
@@ -889,9 +873,7 @@ fn index_cmd(args: &[String]) {
                 use std::sync::atomic::Ordering::Relaxed;
                 let mut last = Instant::now();
                 loop {
-                    std::thread::sleep(
-                        std::time::Duration::from_millis(200),
-                    );
+                    std::thread::sleep(std::time::Duration::from_millis(200));
                     let f = finished.load(Relaxed);
                     if f >= total {
                         return;
@@ -948,9 +930,7 @@ fn index_cmd(args: &[String]) {
                                 hold = true;
                             }
                         }
-                        if let (Some(cap), Some(rss)) =
-                            (mem_cap, own_rss_gb())
-                        {
+                        if let (Some(cap), Some(rss)) = (mem_cap, own_rss_gb()) {
                             if rss > cap {
                                 hold = true;
                             }
@@ -963,9 +943,7 @@ fn index_cmd(args: &[String]) {
                             waiting.fetch_add(1, Relaxed);
                             mem_waits.fetch_add(1, Relaxed);
                         }
-                        std::thread::sleep(
-                            std::time::Duration::from_millis(300),
-                        );
+                        std::thread::sleep(std::time::Duration::from_millis(300));
                     }
                     if waited {
                         waiting.fetch_sub(1, Relaxed);
@@ -979,51 +957,35 @@ fn index_cmd(args: &[String]) {
                             finished.fetch_add(1, Relaxed);
                             continue;
                         }
-                        Err(e) => {
-                            return Err(format!(
-                                "tile {},{}: {}",
-                                r, c, e
-                            ))
-                        }
+                        Err(e) => return Err(format!("tile {},{}: {}", r, c, e)),
                     };
-                    let files = write_band_files(
-                        doc, &tree, outdir, r, c, nbands,
-                    );
-                    let lod = write_lod_file(
-                        doc, &tree, outdir, r, c, LOD_SHAPE_CAP,
-                    );
-                    let dens = tree.density(DENSITY_LEVELS).map(
-                        |(arrs, cells)| {
-                            let mut parts: Vec<String> = arrs
+                    let files = write_band_files(doc, &tree, outdir, r, c, nbands);
+                    let lod = write_lod_file(doc, &tree, outdir, r, c, LOD_SHAPE_CAP);
+                    let dens = tree.density(DENSITY_LEVELS).map(|(arrs, cells)| {
+                        let mut parts: Vec<String> = arrs
+                            .iter()
+                            .map(|((l, d), arr)| {
+                                format!(
+                                    "\"{}/{}\": [{}]",
+                                    l,
+                                    d,
+                                    arr.iter()
+                                        .map(|v| v.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            })
+                            .collect();
+                        parts.push(format!(
+                            "\"cells\": [{}]",
+                            cells
                                 .iter()
-                                .map(|((l, d), arr)| {
-                                    format!(
-                                        "\"{}/{}\": [{}]",
-                                        l,
-                                        d,
-                                        arr.iter()
-                                            .map(|v| v.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    )
-                                })
-                                .collect();
-                            parts.push(format!(
-                                "\"cells\": [{}]",
-                                cells
-                                    .iter()
-                                    .map(|v| v.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ));
-                            format!(
-                                "\"{},{}\": {{{}}}",
-                                r,
-                                c,
-                                parts.join(", ")
-                            )
-                        },
-                    );
+                                .map(|v| v.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                        format!("\"{},{}\": {{{}}}", r, c, parts.join(", "))
+                    });
                     out.push(TRes {
                         r,
                         c,
@@ -1063,12 +1025,9 @@ fn index_cmd(args: &[String]) {
     let members: u64 = all.iter().map(|t| t.members).sum();
     let lod_json: Vec<String> = all
         .iter()
-        .filter_map(|t| {
-            t.lod.map(|d| format!("\"{},{}\": {}", t.r, t.c, d))
-        })
+        .filter_map(|t| t.lod.map(|d| format!("\"{},{}\": {}", t.r, t.c, d)))
         .collect();
-    let dens_json: Vec<String> =
-        all.iter().filter_map(|t| t.dens.clone()).collect();
+    let dens_json: Vec<String> = all.iter().filter_map(|t| t.dens.clone()).collect();
     let t_tiles = t2.elapsed().as_secs_f64();
     eprintln!(
         "[index] {} band files ({} tiles) in {:.1}s{}; skeleton + \
@@ -1082,11 +1041,7 @@ fn index_cmd(args: &[String]) {
     // --- skeleton + full-text sidecar ---
     let t3 = Instant::now();
     let entries = floe_tiler::skel::collect_all_texts(&doc);
-    let sk = floe_tiler::skel::build_skeleton(
-        &doc,
-        &entries,
-        floe_tiler::skel::SKEL_TEXT_CAP,
-    );
+    let sk = floe_tiler::skel::build_skeleton(&doc, &entries, floe_tiler::skel::SKEL_TEXT_CAP);
     let skcell = floe_oasis::write::WCell {
         name: "SKEL_TOP".to_string(),
         rects: &sk.rects,
@@ -1095,16 +1050,10 @@ fn index_cmd(args: &[String]) {
         texts: &sk.texts,
         places: Vec::new(),
     };
-    let bytes = floe_oasis::write::write_tree(&[skcell], doc.unit)
-        .expect("serialize skeleton");
-    std::fs::write(format!("{}/skeleton.oas", outdir), bytes)
-        .expect("write skeleton");
-    let mut sidecar: Vec<&floe_tiler::skel::TextEntry> =
-        entries.iter().collect();
-    sidecar.sort_by(|a, b| {
-        (a.layer, a.dt, &a.s, a.x, a.y)
-            .cmp(&(b.layer, b.dt, &b.s, b.x, b.y))
-    });
+    let bytes = floe_oasis::write::write_tree(&[skcell], doc.unit).expect("serialize skeleton");
+    std::fs::write(format!("{}/skeleton.oas", outdir), bytes).expect("write skeleton");
+    let mut sidecar: Vec<&floe_tiler::skel::TextEntry> = entries.iter().collect();
+    sidecar.sort_by(|a, b| (a.layer, a.dt, &a.s, a.x, a.y).cmp(&(b.layer, b.dt, &b.s, b.x, b.y)));
     let mut tsv = String::new();
     let mut side_members = 0u64;
     for e in &sidecar {
@@ -1119,8 +1068,7 @@ fn index_cmd(args: &[String]) {
             tsv_esc(&e.s)
         ));
     }
-    std::fs::write(format!("{}/texts.tsv", outdir), tsv)
-        .expect("write sidecar");
+    std::fs::write(format!("{}/texts.tsv", outdir), tsv).expect("write sidecar");
     let t_skel = t3.elapsed().as_secs_f64();
     eprintln!(
         "[index] skeleton {} shapes + {} labels, sidecar {} entries \
@@ -1138,10 +1086,7 @@ fn index_cmd(args: &[String]) {
             "\"texts_thinned\": [{}],\n",
             sk.thinned
                 .iter()
-                .map(|(l, d)| format!(
-                    "{{\"layer\": {}, \"datatype\": {}}}",
-                    l, d
-                ))
+                .map(|(l, d)| format!("{{\"layer\": {}, \"datatype\": {}}}", l, d))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -1149,24 +1094,19 @@ fn index_cmd(args: &[String]) {
 
     // per-layer stored member counts (shapes + texts, no instance
     // multiplicity) - klayout Shapes.size() over every cell
-    let mut stored: std::collections::HashMap<(u32, u32), u64> =
-        std::collections::HashMap::new();
+    let mut stored: std::collections::HashMap<(u32, u32), u64> = std::collections::HashMap::new();
     for cell in &doc.cells {
         for r in &cell.rects {
-            *stored.entry((r.layer, r.dt)).or_default() +=
-                r.rep.members();
+            *stored.entry((r.layer, r.dt)).or_default() += r.rep.members();
         }
         for p in &cell.polys {
-            *stored.entry((p.layer, p.dt)).or_default() +=
-                p.rep.members();
+            *stored.entry((p.layer, p.dt)).or_default() += p.rep.members();
         }
         for pa in &cell.paths {
-            *stored.entry((pa.layer, pa.dt)).or_default() +=
-                pa.rep.members();
+            *stored.entry((pa.layer, pa.dt)).or_default() += pa.rep.members();
         }
         for t in &cell.texts {
-            *stored.entry((t.layer, t.dt)).or_default() +=
-                t.rep.members();
+            *stored.entry((t.layer, t.dt)).or_default() += t.rep.members();
         }
     }
     let layers_json: Vec<String> = doc
@@ -1266,8 +1206,7 @@ fn index_cmd(args: &[String]) {
         doc.cells.len(),
         tiles_written,
     );
-    std::fs::write(format!("{}/meta.json", outdir), meta)
-        .expect("write meta");
+    std::fs::write(format!("{}/meta.json", outdir), meta).expect("write meta");
 
     // end-of-run cache summary: the closed-network hosts otherwise
     // need a manual du sweep to report the numbers back
@@ -1294,23 +1233,14 @@ fn index_cmd(args: &[String]) {
     );
     for (name, b, n) in &rows {
         if *n > 0 {
-            eprintln!(
-                "[index]   {:<12} {:>6}  {} files",
-                name,
-                fmt_size(*b),
-                n
-            );
+            eprintln!("[index]   {:<12} {:>6}  {} files", name, fmt_size(*b), n);
         } else if !name.starts_with("tiles_") {
             eprintln!("[index]   {:<12} {:>6}", name, fmt_size(*b));
         } // band dirs that stayed empty are omitted
     }
-    let waits =
-        mem_waits.load(std::sync::atomic::Ordering::Relaxed);
+    let waits = mem_waits.load(std::sync::atomic::Ordering::Relaxed);
     if let Some(hwm) = peak_rss_gb() {
-        eprintln!(
-            "[index] peak rss {:.1} GB, mem waits {}",
-            hwm, waits
-        );
+        eprintln!("[index] peak rss {:.1} GB, mem waits {}", hwm, waits);
     }
     eprintln!(
         "[index] done in {:.1}s -> {}",

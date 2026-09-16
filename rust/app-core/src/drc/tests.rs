@@ -885,6 +885,14 @@ fn reviewer_paths_are_bounded_and_deterministic() {
     let paths = waive_paths(&p, "engineer-1").unwrap();
     assert_eq!(paths[0].file_name().unwrap(), ".한 글.db.waive.engineer-1");
     assert_eq!(paths, waive_paths(&p, "engineer-1").unwrap());
+    let new = p.with_file_name(".한 글.db.tray");
+    assert_eq!(paths, waive_paths(&new, "engineer-1").unwrap());
+    for kind in [review::store::Kind::Waives, review::store::Kind::Notes] {
+        assert_eq!(
+            review::store::read_paths(&p, "engineer-1", kind).unwrap(),
+            review::store::read_paths(&new, "engineer-1", kind).unwrap(),
+        );
+    }
     assert!(waive_paths(&p, "../other").is_err());
     assert!(waive_paths(&p, &"x".repeat(201)).is_err());
     assert_eq!(reviewer_tag(Some("  Kim / 김  ")), "Kim___김");

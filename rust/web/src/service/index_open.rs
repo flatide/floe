@@ -40,8 +40,10 @@ pub(super) fn needs_index(
     let _read = inner.resources.read(
         names
             .iter()
-            .map(|tc| cache::cache_path(&catalog.resolve(tc)))
-            .collect::<Result<Vec<_>>>()?,
+            .map(|tc| cache::cache_paths(&catalog.resolve(tc)))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten(),
     )?;
     for tc in names {
         let info = catalog.probe(&tc, stop)?;
@@ -99,6 +101,7 @@ pub(super) fn proposal(seq: u64, open: &OpenCommand) -> Value {
     };
     let mut out = json!({"open_seq":seq.to_string(),"source_id":open.source_id,"title":open.source.title,
         "mode":mode,"levels":levels,"display_policy":match open.display_policy {OpenDisplay::Window=>"window",OpenDisplay::Explicit=>"explicit"}});
+    out["occupancy_default"] = json!(floe_app_core::jobdeck::index::is_deck(open.source.path()));
     if let Some(camera) = &open.reselect {
         let (id, rev) = open.replace.as_ref().expect("reselection anchor");
         out["reselect"] = json!({"target":{"kind":"replace","view_id":id,"state_rev":rev.to_string()},

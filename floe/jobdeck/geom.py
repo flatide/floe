@@ -136,7 +136,7 @@ SKIP_MISSING = "missing"            # TC file not found
 SKIP_UNREADABLE = "unreadable"      # header broken / reader raised
 SKIP_EMPTY_LAYER = "empty_layer"    # (LY, DT) read fine but holds nothing
 SKIP_UNKNOWN_FORMAT = "unknown_format"  # no OASIS/GDS header
-SKIP_NOT_INDEXED = "not_indexed"    # floe2: no <src>.floe cache yet
+SKIP_NOT_INDEXED = "not_indexed"    # floe2: no VFS cache yet
 SKIP_UNSUPPORTED = "unsupported"    # floe-index reads plain OASIS only
 SKIP_REASONS = (SKIP_MISSING, SKIP_UNREADABLE, SKIP_EMPTY_LAYER,
                 SKIP_UNKNOWN_FORMAT, SKIP_NOT_INDEXED, SKIP_UNSUPPORTED)

@@ -269,10 +269,8 @@ impl Service {
     ) -> Result<Arc<Self>> {
         let source = scope.check(&selected.source)?;
         let path = scope.check(&selected.path)?;
-        let mut cache = source.as_os_str().to_owned();
-        cache.push(".ice");
-        let cache = PathBuf::from(cache);
-        if path != source && (path != cache || selected.targets.is_none()) {
+        let caches = floe_app_core::cache::pack_paths(&source)?;
+        if path != source && (!caches.contains(&path) || selected.targets.is_none()) {
             return Err(Error::input("invalid read-only DRC cache selection"));
         }
         floe_app_core::drc::waive_paths(&path, reviewer)?;

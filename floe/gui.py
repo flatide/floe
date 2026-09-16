@@ -611,9 +611,10 @@ def component_versions(worker):
 
 
 # what the load dialog's browser never lists (user call 2026-09-10):
-# a layout's <src>.floe cache directory and a DRC db's .ice sidecar -
-# GTK's own chooser applies no filter to folders, so .floe caches
-# cluttered every data directory
+# the pre-2026-09-16 cache/pack names <src>.floe and <db>.ice (the
+# current names .<src>.ice and .<db>.tray are dotfiles, hidden by the
+# dotfile rule) - GTK's own chooser applies no filter to folders, so
+# caches cluttered every data directory
 BROWSE_HIDDEN_SUFFIXES = (".floe", ".ice")
 
 
@@ -1272,7 +1273,7 @@ class Viewer:
         # hidden (jumped error + rulers stay), 2 = all overlays
         # hidden (the old flateyes-parity clean look)
         # prev/next walk by ARITHMETIC over cumulative counts, never
-        # a materialized per-error list: an .ice sidecar can hold
+        # a materialized per-error list: a pack can hold
         # hundreds of millions of violations
         self._drc_cum = []          # check idx -> first flat position
         self._drc_total = 0
@@ -2060,7 +2061,7 @@ class Viewer:
         render service); an error string for the known refusals."""
         if _is_deck_path(path):
             # a jobdeck (docs/JOBDECK.ko.md M3): every source's
-            # <src>.floe must exist; renderd composites them
+            # VFS cache must exist; renderd composites them
             from .jobdeck.viewer import DeckCache
             # sources without a cache (an index that failed, a
             # container floe-index cannot read) are skipped placements
@@ -3623,6 +3624,28 @@ class Viewer:
                             # measurement of the lifted rule reads
                             text += ", thin pages %s kept" % fmt_count(
                                 culls["thin_pages"])
+                        if culls.get("sub_cut_washes") or culls.get("sub_cut_sparse"):
+                            # sub-cut pages/nodes washed as footprints
+                            # and kept or expanded as sparse (2026-09-16)
+                            text += ", sub-cut washes %s/sparse %s" % (
+                                fmt_count(culls.get("sub_cut_washes", 0)),
+                                fmt_count(culls.get("sub_cut_sparse", 0)))
+                        if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
+                            # dropped by the per-plan sub-cut budgets
+                            # (sparse ink / wash area): the frame is
+                            # showing less than the rules would
+                            text += ", sub-cut over %s/%s" % (
+                                fmt_count(culls.get("sub_cut_sparse_over", 0)),
+                                fmt_count(culls.get("sub_cut_wash_over", 0)))
+                        if (culls.get("rep_kept") or culls.get("rep_washed")
+                                or culls.get("rep_children")):
+                            # the page frontier (2026-09-17): cut pages
+                            # kept as pixels / washed, cut placements
+                            # washed or expanded - one in 4^k
+                            text += ", reps %s/%s/%s" % (
+                                fmt_count(culls.get("rep_kept", 0)),
+                                fmt_count(culls.get("rep_washed", 0)),
+                                fmt_count(culls.get("rep_children", 0)))
                     summ = res.get("summary") or {}
                     if summ.get("layers"):
                         # occupancy summary (M2): these layers were
@@ -5149,8 +5172,8 @@ class Viewer:
         first (a .jb picked either way opens as a deck). The dialog is
         our own browser (user call 2026-09-10): GTK's file chooser
         lists every folder whatever the filter says, so a data
-        directory showed each layout's <src>.floe cache and every
-        .ice sidecar next to the layouts."""
+        directory showed each layout's cache folder and every
+        DRC pack next to the layouts."""
         # initial base = the folder floe was launched from (user
         # call 2026-08-22); once a layout is loaded, its own folder
         # (sibling layouts live together, same as the DRC dialog)
@@ -5175,7 +5198,7 @@ class Viewer:
     def _browse_file_dialog(self, title, folder, filters, first=0):
         """A file browser of our own: folder list first, then the files
         the current filter admits; `list_browse_entries` hides dotfiles,
-        <src>.floe caches and .ice sidecars (user call 2026-09-10 -
+        pre-rename <src>.floe caches and .ice packs (user call 2026-09-10 -
         GTK's chooser applies no filter to folders). Up / home buttons,
         an editable path (Enter navigates to a folder or accepts a
         file), type-ahead on the name column, a filter combo. Returns
@@ -5342,7 +5365,8 @@ class Viewer:
         except RuntimeError as exc:
             self._set_live_status("VFS indexing failed: %s" % exc)
             return
-        outdir = src + ".floe"
+        from . import cachepath
+        outdir = cachepath.vfs_cache_dir(src)
 
         def on_success():
             try:
@@ -5356,11 +5380,12 @@ class Viewer:
                     err[4:] if err.startswith("ERR ") else err)
 
         # jobs 12 default, LOD off (retirement) - user call 2026-08-28;
-        # the occupancy summary as `floe2 index` builds it by default
-        # (M5, 2026-09-15) - the raw binary is opt-in
+        # no occupancy summary, like `floe2 index` on a layout
+        # (2026-09-16; a jobdeck load gets it through `floe2 index
+        # deck.jb`, whose sources default to the summary)
         self._index_modal("indexing layout…",
                           [bin_, "vfs", src, outdir,
-                           "--jobs", "12", "--occupancy", "--no-lod"],
+                           "--jobs", "12", "--no-lod"],
                           on_success, "VFS indexing")
 
     def _jobdeck_index_and_load(self, path, after=None, ids=None):
@@ -5690,7 +5715,7 @@ class Viewer:
         hl = Gtk.CheckButton(label="in view")
         hl.set_active(self._drc_hl)
         hl.set_tooltip_text("list only the errors inside the "
-                            "current view (packed .ice v2 only)")
+                            "current view (pack only)")
         hl.connect("toggled", self._on_drc_hl)
         nav.add(hl)
         win._hl = hl
@@ -5846,12 +5871,13 @@ class Viewer:
 
     def _drc_open_db(self, path):
         """Dialog flow (user call 2026-08-14): the user PICKS the
-        ASCII .db, floe LOADS only its packed .ice. When no usable
+        ASCII .db, floe LOADS only its pack. When no usable
         pack exists (missing, stale or an old layout/v1 sidecar) it
         ASKS before building one (user call 2026-08-28)."""
         from . import drc as drc_mod
-        side = path + ".ice"
-        if os.path.exists(side):
+        from . import cachepath
+        side = cachepath.find_pack(path)
+        if side is not None:
             try:
                 db = drc_mod.IcePack(side, src_path=path,
                                      verify_src=True)
@@ -7000,9 +7026,8 @@ class Viewer:
         dlg.set_do_overwrite_confirmation(True)
         dlg.set_current_folder(
             os.path.dirname(os.path.abspath(db.path)))
-        base = os.path.basename(db.path)
-        if base.endswith(".ice"):
-            base = base[:-4]
+        from . import cachepath
+        base = cachepath.db_name_of(db.path)
         dlg.set_current_name(base + ".notes.fe")
         out = dlg.get_filename() \
             if dlg.run() == Gtk.ResponseType.OK else None
@@ -7081,9 +7106,8 @@ class Viewer:
         dlg.set_do_overwrite_confirmation(True)
         dlg.set_current_folder(
             os.path.dirname(os.path.abspath(db.path)))
-        base = os.path.basename(db.path)
-        if base.endswith(".ice"):
-            base = base[:-4]
+        from . import cachepath
+        base = cachepath.db_name_of(db.path)
         dlg.set_current_name(base + ".waive")
         out = dlg.get_filename() \
             if dlg.run() == Gtk.ResponseType.OK else None
@@ -9065,7 +9089,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
     # auto-select row 0 on focus-in, so --drc startups showed the first
     # rule selected (field reports 2026-08-18; a db must open with no
     # rule selected). The embedded panel is always visible - there is
-    # nothing to focus. A db without a usable .ice pack is ASKED about
+    # nothing to focus. A db without a usable pack is ASKED about
     # and packed first, as the DRC > open dialog does (user call
     # 2026-09-09).
     drc_path = os.path.abspath(drc) if drc else None

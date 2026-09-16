@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import subprocess
 import sys
 import tempfile
@@ -105,7 +106,7 @@ def main():
         build_dense_oas(work / "dense.oas")
         for source in sorted(work.glob("*.oas")):
             run(["index", source, "--jobs", "2"], env)
-        snapshots = {p: digest(p) for p in work.glob("*.floe")}
+        snapshots = {p: digest(p) for p in work.glob(".*.ice")}
         decks = {}
         for name, text in (("read", DECK), ("frames", FRAMES_DECK),
                            ("thin", THIN_DECK), ("dense", DENSE_DECK),
@@ -230,7 +231,7 @@ def main():
             run(["render", deck, *args, "--out", target], no_worker, code=2)
             assert not target.exists()
         run(["info", work / "chipA.oas", "--level", "1"], env, code=2)
-        for target in (deck, work / "chipA.oas", work / "chipA.oas.floe/design.ovm",
+        for target in (deck, work / "chipA.oas", vfs_cache(work / "chipA.oas") / "design.ovm",
                        work / "absent.oas", Path(str(deck)+".layerprops")):
             run(["render", decks["missing-source"] if target.name == "absent.oas" else deck,
                  "--out", target], no_worker, code=2)

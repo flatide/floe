@@ -2,6 +2,7 @@
 """Authenticated explicit pack build/adoption: native app, synthetic files only."""
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,7 @@ def main(fixture):
         root = Path(td).resolve()
         source = root / 'layout.oas'
         shutil.copy2(fixture, source)
-        subprocess.run([str(INDEX), 'vfs', str(source), str(source)+'.floe', '--jobs', '2'],
+        subprocess.run([str(INDEX), 'vfs', str(source), str(vfs_cache(source)), '--jobs', '2'],
                        capture_output=True, check=True, timeout=30)
         version = subprocess.check_output([str(INDEX), '--version'], text=True).split()[1]
         fake = root / 'controlled native'
@@ -59,7 +60,7 @@ while True:time.sleep(.01)
             work.mkdir()
             db = work / '공백 results.db'
             db.write_text(DB)
-            pack = Path(str(db)+'.ice')
+            pack = drc_pack(db)
             golden = work / 'golden.ice'
             subprocess.run([str(INDEX),'drc',str(db),str(golden)], capture_output=True,check=True,timeout=20)
             if mode != 'native': shutil.copy2(golden,pack)

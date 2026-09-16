@@ -171,10 +171,14 @@ impl RegisteredSource {
         Ok(())
     }
     pub fn cache_paths(&self) -> Result<Vec<PathBuf>> {
-        self.dependencies
+        Ok(self
+            .dependencies
             .iter()
-            .map(|p| cache::cache_path(p))
-            .collect()
+            .map(|p| cache::cache_paths(p))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect())
     }
     pub(crate) fn scoped_output(&self, path: &Path) -> Result<PathBuf> {
         self.scope.check(path)
@@ -263,7 +267,9 @@ fn inspect(
     for source in &dependencies {
         check_cancelled(cancelled)?;
         scope.check(source)?;
-        scope.check(&cache::cache_path(source)?)?;
+        for path in cache::cache_paths(source)? {
+            scope.check(&path)?;
+        }
     }
     Ok((levels, dependencies))
 }
@@ -306,7 +312,7 @@ mod tests {
         );
         assert_eq!(
             source.cache_paths().unwrap(),
-            [root.join("missing.oas.floe")]
+            [root.join(".missing.oas.ice"), root.join("missing.oas.floe")]
         );
         assert!(source.validate_levels(Some(&BTreeSet::from([2]))).is_err());
         fs::write(&path, "CHIP A\n$ (1,A,TC=other.oas)\n").unwrap();

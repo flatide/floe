@@ -6,7 +6,7 @@ waive 리뷰를 floe 뷰어 안에서 끝내는 것.
 
 이 문서는 **전체 그림과 사용법** 중심의 개요다. 규범(포맷 바이트
 레이아웃·뷰어 동작 계약·게이트 정의)은 각 SPEC이 정본:
-- 포맷: `SPEC-FORMATS.ko.md` (`<db>.ice` pack, `<deck>.rules.json`)
+- 포맷: `SPEC-FORMATS.ko.md` (`.<db>.tray` pack, `<deck>.rules.json`)
 - 뷰어 계약: `SPEC-VIEWER.ko.md` §8b (DRC 브라우저 대용량 규약)
 - 검증: `SPEC-VALIDATION.ko.md` (D1~D7, R1~R4+R3b)
 
@@ -16,7 +16,7 @@ waive 리뷰를 floe 뷰어 안에서 끝내는 것.
 results.db (Calibre ASCII, 정본)          deck.cal (SVRF 룰덱)
       │  floe-index drc (rust, 병렬)            │  python -m floe svrf
       ▼                                         ▼
-results.db.ice (자기완결 pack)            deck.cal.rules.json (룰 메타)
+.results.db.tray (자기완결 pack, 숨김)   deck.cal.rules.json (룰 메타)
       └───────────────┬─────────────────────────┘
                       ▼
         floe view chip.oas --drc results.db
@@ -73,7 +73,7 @@ python -m floe render chip.oas --drc results.db \
     --drc-rule M1.SPACE.1 --drc-err 1-50 --px 800 --out snap.png
 ```
 
-## 2. .ice pack (v2, 레이아웃 버전 4) — 유일한 인덱스 포맷
+## 2. pack `.<db>.tray` (v2, 레이아웃 버전 4) — 유일한 인덱스 포맷
 
 - **자기완결**: 변환 후 .db 불필요. 크기 실측 원본의 1/3~1/4.5.
 - **좌표**: 파일순 64에러 블록 varint 델타 스트림. 레코드에 서수
@@ -139,7 +139,7 @@ python -m floe render chip.oas --drc results.db \
   `.fe` 포맷, load=전체 대체·타-pack 거부). `notes_list()`가 미래
   note-list 조회 표면(각 note의 텍스트+멤버 gid). drawing 기능
   추가 시 같은 `.fe`에 flateyes 주석으로 합류.
-- **손상 방어**: 절단·오염 pack은 전부 "corrupt .ice → 재-pack
+- **손상 방어**: 절단·오염 pack은 전부 "corrupt pack → 재-pack
   안내" ValueError로 정규화(섹션 경계·체크 범위 검증), 사이드
   pack이면 ASCII 폴백. 인덱서는 시작 시 잔존 `<out>.tmp*` 청소.
 - **병렬 빌드**: 바이트 구간 분할 + 체크 헤더 투기 동기화 + 이음새
@@ -155,8 +155,10 @@ python -m floe render chip.oas --drc results.db \
 - **v1 오프셋 사이드카는 폐기**(08-19 확정): waive 저장·공간 쿼리
   불가, 원본 .db 상시 동반(139G 실측 = 20G 인덱스 + 원본 139G).
   잔존 v1 파일은 stderr 안내 후 ASCII 폴백, `floe-index drc`로
-  재변환. 구 레거시 타일 캐시의 `.ice` 확장자는 `.tiles`로 개명 —
-  `.ice`는 DRC 인덱스 전용.
+  재변환. 이름은 2026-09-16부터 db 옆 숨김 파일 `.<db>.tray`
+  (`floe/cachepath.py`; 그 전의 `<db>.ice`는 발견 시 자동 개명, waive·note
+  사이드카는 db 이름 기준이라 그대로 맞는다). `.ice`는 지금 VFS 인덱스 폴더
+  `.<src>.ice/`의 접미사다(2026-08-13까지는 레거시 타일 캐시 이름).
 
 ## 3. 뷰어 DRC 브라우저 (왼쪽 pane 상시 내장)
 

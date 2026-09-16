@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import random
 import shutil
 import subprocess
@@ -185,7 +186,7 @@ def main(fixture):
             p = subprocess.run([str(ROOT / "rust/target/release/floe2-web"), "index", str(source), "--jobs", "1"],
                                env=env, capture_output=True, text=True, timeout=30)
             assert p.returncode == 0, (p.stdout, p.stderr)
-            meta = json.loads(Path(str(source) + ".floe/meta.json").read_text())
+            meta = json.loads((vfs_cache(source) / "meta.json").read_text())
             keys = [(r["layer"], r["datatype"]) for r in meta["layers"]]
             text = "".join("%s.%s red speckle MASK %s 1\n" % (*k, "0" if i == 3 or j % 2 == 0 else "1")
                            for j, k in enumerate(keys))

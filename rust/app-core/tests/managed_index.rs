@@ -54,18 +54,21 @@ fn real_layout_deck_and_bounded_cancellation() {
     let resources = Resources::new(Limits::default()).unwrap();
     let cache_dir = cache::cache_path(&source).unwrap();
     assert!(!cache_dir.exists());
-    let read = resources.read([cache_dir.clone()]).unwrap();
-    assert!(
-        ManagedIndex::start(&resources, Arc::clone(&registered), None, options(), real()).is_err()
-    );
-    assert!(!cache_dir.exists());
-    drop(read);
+    for candidate in cache::cache_paths(&source).unwrap() {
+        let read = resources.read([candidate]).unwrap();
+        assert!(
+            ManagedIndex::start(&resources, Arc::clone(&registered), None, options(), real())
+                .is_err()
+        );
+        assert!(!cache_dir.exists());
+        drop(read);
+    }
     let mut job = ManagedIndex::start(
         &resources,
         Arc::clone(&registered),
         None,
         IndexOptions {
-            occupancy: false,
+            occupancy: Some(false),
             ..options()
         },
         real(),
@@ -107,7 +110,7 @@ fn real_layout_deck_and_bounded_cancellation() {
         Arc::clone(&registered),
         None,
         IndexOptions {
-            occupancy: false,
+            occupancy: Some(false),
             ..options()
         },
         real(),
@@ -122,8 +125,17 @@ fn real_layout_deck_and_bounded_cancellation() {
         .into_iter()
         .map(|n| (n, fs::read(cache_dir.join(n)).unwrap()))
         .collect();
-    let mut summary =
-        ManagedIndex::start(&resources, Arc::clone(&registered), None, options(), real()).unwrap();
+    let mut summary = ManagedIndex::start(
+        &resources,
+        Arc::clone(&registered),
+        None,
+        IndexOptions {
+            occupancy: Some(true),
+            ..options()
+        },
+        real(),
+    )
+    .unwrap();
     assert_eq!(wait(&mut summary).phase, Phase::Succeeded);
     assert!(cache_dir.join("design.ovo").is_file());
     for (name, bytes) in before {
@@ -227,7 +239,7 @@ fn real_layout_deck_and_bounded_cancellation() {
         );
         assert_eq!(result.native.output_bytes, 0);
         assert!(!added_cache.exists());
-        assert!(!root.join("added.oas.floe.index.lock").exists());
+        assert!(!root.join(".added.oas.ice.index.lock").exists());
         assert_eq!(resources.usage(), Usage::default());
     }
     let mut fill = ManagedIndex::start(
@@ -250,7 +262,7 @@ fn real_layout_deck_and_bounded_cancellation() {
     );
     assert!(added_cache.join("design.ovo").is_file());
     assert!(!unselected_cache.exists());
-    assert!(!root.join("unselected.oas.floe.index.lock").exists());
+    assert!(!root.join(".unselected.oas.ice.index.lock").exists());
     for (name, bytes) in &before {
         assert_eq!(
             fs::read(cache_dir.join(name)).unwrap(),

@@ -2,6 +2,7 @@
 """Actual picker -> runtime DRC replacement; private valmini/synthetic DRC only."""
 import copy
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import shutil
 import subprocess
 import sys
@@ -66,7 +67,7 @@ def main(fixture):
         temps.mkdir()
         source = work / "layout.oas"
         shutil.copy2(fixture, source)
-        subprocess.run([str(INDEX), "vfs", str(source), str(source) + ".floe", "--jobs", "2"],
+        subprocess.run([str(INDEX), "vfs", str(source), str(vfs_cache(source)), "--jobs", "2"],
                        check=True, capture_output=True, timeout=60)
         a, b, bad = [work / name for name in ("first.db", "second.db", "bad.db")]
         a.write_text(DB)
@@ -75,8 +76,12 @@ def main(fixture):
         # Use a recognized, truncated pack to exercise a genuine open failure.
         bad.write_bytes(b"FLOEICE\0\0\0\0\0")
         subprocess.run([str(INDEX), "drc", str(a), "--jobs", "2"], check=True, capture_output=True, timeout=30)
-        pack = Path(str(a) + ".ice")
-        protected = [source, a, b, bad, pack] + list(Path(str(source) + ".floe").rglob("*"))
+        pack = drc_pack(a)
+        # Default packs are hidden and intentionally absent from the picker.
+        # A separately named pack still exercises explicit pack selection.
+        explicit_pack = work / "explicit-pack.ice"
+        shutil.copyfile(pack, explicit_pack)
+        protected = [source, a, b, bad, pack, explicit_pack] + list(vfs_cache(source).rglob("*"))
         protected = [p for p in protected if p.is_file()]
         before = fingerprint(protected)
         s = Session(source, None, temps, None, work / "session.json")
@@ -108,7 +113,7 @@ def main(fixture):
             assert c.call("GET", "/api/v1/drc/review/notes", code=403)["error"] == "review_disabled"
             build = build_request(second, s.context["view_id"], 1)
             c.call("POST", "/api/v1/drc/builds", dict(build, approve=False), 400)
-            assert not Path(str(b) + ".ice").exists(), "DRC selection indexed without consent"
+            assert not drc_pack(b).exists(), "DRC selection indexed without consent"
             c.call("POST", "/api/v1/drc/builds", build, 202)
             outcome = build_done(c, s.proc, 1)
             assert outcome["phase"] == "succeeded", outcome
@@ -118,7 +123,8 @@ def main(fixture):
             s.context.update(drc_id=built["id"], revision=built["revision"])
             c.call("POST", "/api/v1/drc/" + old["drc_id"] + "/read",
                    dict(view_id=old["view_id"], revision=old["revision"], body=dict(kind="rules", start="0", search="", limit=64)), 404)
-            explicit = picker.accept(picker.open(picker.handle(pack.name)))
+            assert picker.handle(pack.name) is None, "hidden default pack was exposed by the picker"
+            explicit = picker.accept(picker.open(picker.handle(explicit_pack.name)))
             assert explicit["metadata"]["review_cache"] == "explicit"
             for _ in range(6):
                 previous = s.context["drc_id"]
@@ -137,7 +143,7 @@ def main(fixture):
 
         # A prior fixed writer keeps its receipts, never migrates authority or
         # an unapproved edit to the newly selected DB.
-        protected.append(Path(str(b) + ".ice"))
+        protected.append(drc_pack(b))
         before = fingerprint(protected)
         s = Session(source, pack, temps, "runtime-owner", work / "writer.json")
         try:

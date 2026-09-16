@@ -117,7 +117,7 @@ def deck_summary(deck, catalog, placements, stats, scheme) -> list[str]:
         "chips     : %d  levels %s  (%d complete, %d partial)"
         % (len(deck.chips), deck.levels(), cov["complete"],
            cov["partial"]),
-        "sources   : %d probed, %d ok, %d indexed (.floe)  dir %s"
+        "sources   : %d probed, %d ok, %d indexed  dir %s"
         % (src["probed"], src["ok"], src["indexed"], catalog.dir),
         "instances : %d placed%s" % (
             stats["instances"],

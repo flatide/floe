@@ -61,6 +61,8 @@ const indexOpen=spawnSync(process.execPath,[path.join(ui,'index-open.test.cjs')]
 assert.equal(indexOpen.status,0,'index-open.test.cjs: '+indexOpen.error);
 const indexClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_INDEX_OPEN:'1'}});
 assert.equal(indexClient.status,0,'index/open client: '+indexClient.error);
+const indexDefaults=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_INDEX_DEFAULTS:'1'}});
+assert.equal(indexDefaults.status,0,'index defaults client: '+indexDefaults.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'browse.js'), 'utf8'), options);
 const browse=spawnSync(process.execPath,[path.join(ui,'browse.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(browse.status,0,'browse.test.cjs: '+browse.error);

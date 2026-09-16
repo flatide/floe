@@ -10,18 +10,18 @@ use std::{
     path::PathBuf,
     sync::atomic::AtomicUsize,
 };
-const HELP: &str = "Usage: floe2-web drc RESULTS.db|RESULTS.ice [OPTIONS]
+const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
   --list                  Also list every error's centre and size
   --rules                 Rule JSON [{name,errors,waived},...]
   --errs RULE             Stream one rule's error JSON (first duplicate)
   --floe-reviewer TAG     Existing per-reviewer waive sidecar selection
   --svrf-rules FILE       Explicit rules.json metadata for --rules / --errs
-  --build                 Explicitly build/reuse RESULTS.db.ice, no read/export
+  --build                 Explicitly build/reuse .RESULTS.db.tray, no read/export
   --force                 With --build: allow atomic replacement of old pack
   --jobs N                With --build: native workers 1..16 (default 12)
 
 Without --build: read-only, no automatic indexing or autosave creation.
-Uses a fresh layout-4 .ice pack when available, otherwise bounded read-only
+Uses a fresh layout-4 .tray pack (or legacy .ice) when available, otherwise bounded read-only
 ASCII parsing (including fractional coordinates). Stale/corrupt adjacent
 packs are reported but never overwritten by read commands.
 --build uses the existing integer-DBU pack format; fractional coordinates fail

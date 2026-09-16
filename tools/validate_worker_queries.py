@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import random
 import shutil
 import subprocess
@@ -78,7 +79,7 @@ def main():
         assert polygon.num_points_hull() > 512
         top.shapes(a).insert(polygon)
         layout.write(str(source))
-        cache = Path(str(source) + ".floe")
+        cache = vfs_cache(source)
         indexer = str(ROOT / "rust/target/release/floe-index")
         index = subprocess.run([indexer, "vfs", str(source), str(cache), "--jobs", "2",
                                 "--no-lod", "--occupancy", "--occupancy-um", "1"],

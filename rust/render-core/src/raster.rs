@@ -282,7 +282,13 @@ pub fn render_geometry_styled(
     request: &StyledGeometryRasterRequest,
 ) -> Result<GeometryRasterReport, String> {
     request.validate()?;
-    render_geometry(scene, &request.raster, RenderMode::Styled(request), None, true)
+    render_geometry(
+        scene,
+        &request.raster,
+        RenderMode::Styled(request),
+        None,
+        true,
+    )
 }
 
 /// Styled render with the work bin disabled — the per-tile walk
@@ -292,7 +298,13 @@ pub fn render_geometry_styled_unbinned(
     request: &StyledGeometryRasterRequest,
 ) -> Result<GeometryRasterReport, String> {
     request.validate()?;
-    render_geometry(scene, &request.raster, RenderMode::Styled(request), None, false)
+    render_geometry(
+        scene,
+        &request.raster,
+        RenderMode::Styled(request),
+        None,
+        false,
+    )
 }
 
 pub fn render_geometry_styled_cancellable(
@@ -684,7 +696,15 @@ fn render_geometry_impl(
                 .map(|layer| layer.outline_width)
                 .max()
                 .unwrap_or(1);
-            collect_work_bin(scene, request, styled, stroke_pixels, guard, &mut stats, window)?
+            collect_work_bin(
+                scene,
+                request,
+                styled,
+                stroke_pixels,
+                guard,
+                &mut stats,
+                window,
+            )?
         }
         _ => None,
     };
@@ -759,17 +779,9 @@ fn render_geometry_impl(
                     });
                     let mut output = match reused {
                         Some(output) => output?,
-                        None => raster_tile(
-                            scene,
-                            request,
-                            mode,
-                            bin,
-                            guard,
-                            col0,
-                            col1,
-                            row0,
-                            row1,
-                        )?,
+                        None => {
+                            raster_tile(scene, request, mode, bin, guard, col0, col1, row0, row1)?
+                        }
                     };
                     output.stats.raster_tile_max_us = tile_started
                         .elapsed()
@@ -1185,15 +1197,18 @@ fn build_deferred_minis(
     let mut plane_scratch: Vec<(u64, BBox)> = vec![(0, BBox::EMPTY); bin.plane_bits.len()];
     let mut visit_seq = 0u64;
     for edge in &bin.deferred_edges {
-        let parent = scene.cell(edge.cell).ok_or_else(|| {
-            format!("internal error: binned cell {:?} left the scene", edge.cell)
-        })?;
+        let parent = scene
+            .cell(edge.cell)
+            .ok_or_else(|| format!("internal error: binned cell {:?} left the scene", edge.cell))?;
         let instance = parent.insts.get(edge.inst).ok_or_else(|| {
-            format!("internal error: binned instance {} left the scene", edge.inst)
+            format!(
+                "internal error: binned instance {} left the scene",
+                edge.inst
+            )
         })?;
-        let child_bbox = scene.cell_bbox(instance.child).ok_or_else(|| {
-            format!("invalid plan: missing bbox for child {:?}", instance.child)
-        })?;
+        let child_bbox = scene
+            .cell_bbox(instance.child)
+            .ok_or_else(|| format!("invalid plan: missing bbox for child {:?}", instance.child))?;
         let base_place =
             OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
         let base_bbox = base_place.apply_bbox(child_bbox)?;
@@ -1376,9 +1391,9 @@ fn collect_cell(
         let world_bbox = if path.len() == 1 {
             cull_view
         } else {
-            let cell_bbox = scene
-                .cell_bbox(key)
-                .ok_or_else(|| format!("invalid scene: bbox for working cell {:?} is missing", key))?;
+            let cell_bbox = scene.cell_bbox(key).ok_or_else(|| {
+                format!("invalid scene: bbox for working cell {:?} is missing", key)
+            })?;
             world_transform.apply_bbox(cell_bbox)?
         };
         bin.charge()?;
@@ -1456,8 +1471,7 @@ fn collect_cell(
                         .items
                         .saturating_add(headroom)
                         .min(bin.trial_limit.unwrap_or(u64::MAX));
-                    trial =
-                        Some((bin.checkpoint(), path.len(), bin.trial_limit.replace(limit)));
+                    trial = Some((bin.checkpoint(), path.len(), bin.trial_limit.replace(limit)));
                 }
             }
         }
@@ -1503,8 +1517,7 @@ fn collect_cell(
             }
             if !deferred {
                 let visit = attempt?;
-                stats.rep_members_tested =
-                    stats.rep_members_tested.saturating_add(visit.tested);
+                stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
                 continue;
             }
         }
@@ -1573,14 +1586,7 @@ fn raster_tile_from_bin(
     let minis = if bin.deferred_edges.is_empty() {
         Vec::new()
     } else {
-        build_deferred_minis(
-            scene,
-            bin,
-            styled.hierarchy_frames,
-            cull_view,
-            guard,
-            stats,
-        )?
+        build_deferred_minis(scene, bin, styled.hierarchy_frames, cull_view, guard, stats)?
     };
     let walk_frames = styled.hierarchy_frames && !bin.frames.is_empty();
     if styled.hierarchy_frames {
@@ -1697,8 +1703,7 @@ fn replay_plane_items(
                     let Some(page) = scene.page(page_id) else {
                         continue;
                     };
-                    if page.layer_idx != layer.layer_idx || !page.bbox.intersects(&local_view)
-                    {
+                    if page.layer_idx != layer.layer_idx || !page.bbox.intersects(&local_view) {
                         continue;
                     }
                     raster_page_records(
@@ -1801,8 +1806,7 @@ fn replay_plane_items(
                         )
                     },
                 )?;
-                stats.rep_members_tested =
-                    stats.rep_members_tested.saturating_add(visit.tested);
+                stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
             }
         }
     }
@@ -1888,12 +1892,8 @@ fn replay_frame_items(
                 let child_bbox = scene.cell_bbox(instance.child).ok_or_else(|| {
                     format!("invalid plan: missing bbox for child {:?}", instance.child)
                 })?;
-                let base_place = OrthoTransform::place(
-                    instance.x,
-                    instance.y,
-                    instance.rot,
-                    instance.flip,
-                )?;
+                let base_place =
+                    OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
                 let base_bbox = base_place.apply_bbox(child_bbox)?;
                 let local_view = inverse.apply_bbox(cull_view)?;
                 let mut deferred_path = Vec::new();
@@ -1930,7 +1930,6 @@ fn replay_frame_items(
     }
     Ok(())
 }
-
 
 /// The pre-2c styled tile path: per-plane hierarchy walks. Kept
 /// verbatim as the work-bin fallback and byte-equality reference.
@@ -2146,9 +2145,7 @@ fn render_prepared_labels(
     let group = match selection {
         LabelSelection::Block { white: true } => &labels.block_white,
         LabelSelection::Block { white: false } => &labels.block_gray,
-        LabelSelection::Layer(layer_idx) => {
-            labels.by_layer.get(&layer_idx).unwrap_or(&EMPTY)
-        }
+        LabelSelection::Layer(layer_idx) => labels.by_layer.get(&layer_idx).unwrap_or(&EMPTY),
     };
     let mut cancel_member = 0u16;
     for &row in group {
@@ -2424,7 +2421,9 @@ struct RasterCounters {
 
 impl RasterCounters {
     fn add(&mut self, other: &Self) {
-        self.summary_cells_drawn = self.summary_cells_drawn.saturating_add(other.summary_cells_drawn);
+        self.summary_cells_drawn = self
+            .summary_cells_drawn
+            .saturating_add(other.summary_cells_drawn);
         self.summary_pixels_drawn = self
             .summary_pixels_drawn
             .saturating_add(other.summary_pixels_drawn);
@@ -2716,8 +2715,7 @@ fn raster_page_records(
             stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
-            counters.polygon_members_drawn =
-                counters.polygon_members_drawn.saturating_add(drawn);
+            counters.polygon_members_drawn = counters.polygon_members_drawn.saturating_add(drawn);
             Ok(())
         })?;
 
@@ -2739,9 +2737,8 @@ fn raster_page_records(
             .map_err(|error| format!("page {}: {}", page_id, error))?;
             let centerline = checked_path_centerline(&path_record.pts)?
                 .ok_or_else(|| format!("corrupt page {}: path spine is degenerate", page_id))?;
-            let base = polygon_bbox(&outline).ok_or_else(|| {
-                format!("corrupt page {}: path outline is degenerate", page_id)
-            })?;
+            let base = polygon_bbox(&outline)
+                .ok_or_else(|| format!("corrupt page {}: path outline is degenerate", page_id))?;
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
             // One outline/centerline scratch pair per record, reused by
@@ -2767,8 +2764,7 @@ fn raster_page_records(
                         let y = checked_add(y, offset_y, "path centerline y")?;
                         world_centerline.push(world_transform.apply(x, y)?);
                     }
-                    if paint_world_path(band, request, &world_points, &world_centerline, paint)?
-                    {
+                    if paint_world_path(band, request, &world_points, &world_centerline, paint)? {
                         drawn = drawn.saturating_add(1);
                     }
                     Ok(())
@@ -2930,36 +2926,36 @@ fn raster_cell_frames(
     paint: PaintStyle,
     guard: Option<RenderGuard<'_>>,
 ) -> Result<(), String> {
-for (bbox, repetition, frame_band) in &cell.frames {
-    check_cancelled(guard)?;
-    if *frame_band > 3 {
-        return Err(format!(
-            "invalid plan: hierarchy frame band {} is outside 0..=3",
-            frame_band
-        ));
+    for (bbox, repetition, frame_band) in &cell.frames {
+        check_cancelled(guard)?;
+        if *frame_band > 3 {
+            return Err(format!(
+                "invalid plan: hierarchy frame band {} is outside 0..=3",
+                frame_band
+            ));
+        }
+        if *frame_band != selected_band {
+            continue;
+        }
+        counters.frame_records = counters.frame_records.saturating_add(1);
+        stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+        let mut drawn = 0u64;
+        let mut cancel_member = 0u16;
+        let visit =
+            for_each_visible_offset(repetition, *bbox, local_view, |offset_x, offset_y| {
+                check_member_cancelled(guard, &mut cancel_member)?;
+                let local = translate_bbox(*bbox, offset_x, offset_y)?;
+                let world = world_transform.apply_bbox(local)?;
+                if paint_world_rect(band, request, world, paint)? {
+                    drawn = drawn.saturating_add(1);
+                }
+                Ok(())
+            })?;
+        stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+        stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
+        stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
+        counters.frame_members_drawn = counters.frame_members_drawn.saturating_add(drawn);
     }
-    if *frame_band != selected_band {
-        continue;
-    }
-    counters.frame_records = counters.frame_records.saturating_add(1);
-    stats.primitives_tested = stats.primitives_tested.saturating_add(1);
-    let mut drawn = 0u64;
-    let mut cancel_member = 0u16;
-    let visit =
-        for_each_visible_offset(repetition, *bbox, local_view, |offset_x, offset_y| {
-            check_member_cancelled(guard, &mut cancel_member)?;
-            let local = translate_bbox(*bbox, offset_x, offset_y)?;
-            let world = world_transform.apply_bbox(local)?;
-            if paint_world_rect(band, request, world, paint)? {
-                drawn = drawn.saturating_add(1);
-            }
-            Ok(())
-        })?;
-    stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
-    stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
-    stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
-    counters.frame_members_drawn = counters.frame_members_drawn.saturating_add(drawn);
-}
     Ok(())
 }
 
@@ -5011,7 +5007,7 @@ mod tests {
             pages: vec![0, 1],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let mut bounds = BTreeMap::new();
         bounds.insert(
@@ -5090,7 +5086,7 @@ mod tests {
             pages: vec![0, 1],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let mut bounds = BTreeMap::new();
         bounds.insert(
@@ -5155,7 +5151,7 @@ mod tests {
             pages: vec![page_id],
             page_prio: vec![0],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let doc = Doc {
             unit: 1.0,
@@ -5338,7 +5334,7 @@ mod tests {
                 pages: vec![0],
                 page_prio: vec![0],
                 stats: HierStats::default(),
-                            explain: Vec::new(),
+                explain: Vec::new(),
             };
             FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)])).unwrap()
         };
@@ -5413,7 +5409,11 @@ mod tests {
                 WsCell {
                     key: top,
                     pages: vec![0],
-                    insts: vec![inst(child_a, 2, 2), inst(child_b, 4, 2), inst(child_c, 2, 4)],
+                    insts: vec![
+                        inst(child_a, 2, 2),
+                        inst(child_b, 4, 2),
+                        inst(child_c, 2, 4),
+                    ],
                     frames: Vec::new(),
                     washes: Vec::new(),
                 },
@@ -5442,7 +5442,7 @@ mod tests {
             pages: vec![0, 1, 2, 3],
             page_prio: vec![0, 1, 2, 3],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let page_b = if corrupt_b {
             let doc = Doc {
@@ -5581,7 +5581,7 @@ mod tests {
             pages: vec![0],
             page_prio: vec![0],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)])).unwrap()
     }
@@ -5713,7 +5713,11 @@ mod tests {
         .unwrap();
         assert_eq!(as_rect.frame.pixels(), as_poly.frame.pixels());
         assert_eq!(as_rect.frame.pixels(), as_path.frame.pixels());
-        assert_eq!(lit_pixels(&as_rect.frame).len(), 1, "non-vanish, single cell");
+        assert_eq!(
+            lit_pixels(&as_rect.frame).len(),
+            1,
+            "non-vanish, single cell"
+        );
     }
 
     #[test]
@@ -5810,12 +5814,8 @@ mod tests {
         )
         .unwrap();
         assert!(dotted.is_none(), "dotted frames keep their band styling");
-        let solid = hairline_world_bbox(
-            &request,
-            world,
-            PaintStyle::solid([255, 255, 255, 255]),
-        )
-        .unwrap();
+        let solid =
+            hairline_world_bbox(&request, world, PaintStyle::solid([255, 255, 255, 255])).unwrap();
         assert!(solid.is_some());
     }
 
@@ -5885,10 +5885,7 @@ mod tests {
                     assert!(bin.stats.work_bin_items > 0, "bin must engage");
                     assert_eq!(walk.stats.work_bin_items, 0);
                     assert_eq!(bin.frame.pixels(), walk.frame.pixels());
-                    assert_eq!(
-                        bin.rectangle_member_paints,
-                        walk.rectangle_member_paints
-                    );
+                    assert_eq!(bin.rectangle_member_paints, walk.rectangle_member_paints);
                     assert_eq!(bin.polygon_member_paints, walk.polygon_member_paints);
                     assert_eq!(bin.path_member_paints, walk.path_member_paints);
                     assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
@@ -5953,14 +5950,10 @@ mod tests {
                 pages: vec![0],
                 page_prio: vec![0],
                 stats: HierStats::default(),
-                            explain: Vec::new(),
+                explain: Vec::new(),
             };
-            FrameScene::from_test_parts(
-                plan,
-                vec![styled_page(0, 1, unit)],
-                bounds.clone(),
-            )
-            .unwrap()
+            FrameScene::from_test_parts(plan, vec![styled_page(0, 1, unit)], bounds.clone())
+                .unwrap()
         };
         let request = StyledGeometryRasterRequest {
             hierarchy_frames: true,
@@ -5977,10 +5970,7 @@ mod tests {
         assert_eq!(bin.stats.work_bin_defer_rep, 0, "nothing deferred");
         assert_eq!(bin.stats.work_bin_defer_single, 0, "nothing deferred");
         assert_eq!(bin.frame.pixels(), walk.frame.pixels());
-        assert_eq!(
-            bin.rectangle_member_paints,
-            walk.rectangle_member_paints
-        );
+        assert_eq!(bin.rectangle_member_paints, walk.rectangle_member_paints);
         assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
         assert!(bin.rectangle_member_paints > 1000, "grid must paint");
     }
@@ -6065,14 +6055,10 @@ mod tests {
                 pages: vec![0],
                 page_prio: vec![0],
                 stats: HierStats::default(),
-                            explain: Vec::new(),
+                explain: Vec::new(),
             };
-            FrameScene::from_test_parts(
-                plan,
-                vec![styled_page(0, 1, unit)],
-                bounds.clone(),
-            )
-            .unwrap()
+            FrameScene::from_test_parts(plan, vec![styled_page(0, 1, unit)], bounds.clone())
+                .unwrap()
         };
         let request = StyledGeometryRasterRequest {
             hierarchy_frames: false,
@@ -6089,10 +6075,7 @@ mod tests {
         );
         assert_eq!(bin.stats.work_bin_overflow_items, 0, "no cap fallback");
         assert_eq!(bin.frame.pixels(), walk.frame.pixels());
-        assert_eq!(
-            bin.rectangle_member_paints,
-            walk.rectangle_member_paints
-        );
+        assert_eq!(bin.rectangle_member_paints, walk.rectangle_member_paints);
     }
 
     #[test]
@@ -6178,7 +6161,7 @@ mod tests {
                 pages: vec![0, 1],
                 page_prio: vec![0, 0],
                 stats: HierStats::default(),
-                            explain: Vec::new(),
+                explain: Vec::new(),
             };
             FrameScene::from_test_parts(
                 plan,
@@ -6215,10 +6198,7 @@ mod tests {
             walk.stats.hier_cells_visited
         );
         assert_eq!(bin.frame.pixels(), walk.frame.pixels());
-        assert_eq!(
-            bin.rectangle_member_paints,
-            walk.rectangle_member_paints
-        );
+        assert_eq!(bin.rectangle_member_paints, walk.rectangle_member_paints);
         assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
         assert!(bin.frame_member_paints > 0, "frames must replay");
     }
@@ -6293,14 +6273,10 @@ mod tests {
                 pages: vec![0],
                 page_prio: vec![0],
                 stats: HierStats::default(),
-                            explain: Vec::new(),
+                explain: Vec::new(),
             };
-            FrameScene::from_test_parts(
-                plan,
-                vec![styled_page(0, 1, unit)],
-                bounds.clone(),
-            )
-            .unwrap()
+            FrameScene::from_test_parts(plan, vec![styled_page(0, 1, unit)], bounds.clone())
+                .unwrap()
         };
         let mut request = StyledGeometryRasterRequest {
             hierarchy_frames: true,
@@ -6327,10 +6303,7 @@ mod tests {
             walk.stats.hier_cells_visited
         );
         assert_eq!(bin.frame.pixels(), walk.frame.pixels());
-        assert_eq!(
-            bin.rectangle_member_paints,
-            walk.rectangle_member_paints
-        );
+        assert_eq!(bin.rectangle_member_paints, walk.rectangle_member_paints);
         assert_eq!(bin.frame_member_paints, walk.frame_member_paints);
     }
 
@@ -6380,7 +6353,7 @@ mod tests {
                 pages: vec![0, 1],
                 page_prio: vec![0, 0],
                 stats: HierStats::default(),
-                            explain: Vec::new(),
+                explain: Vec::new(),
             };
             FrameScene::from_test_parts(
                 plan,
@@ -6467,8 +6440,7 @@ mod tests {
             for col in 0..16usize {
                 let source = (row * 32 + col + 16) * 4;
                 let target = (row * 32 + col) * 4;
-                base[target..target + 4]
-                    .copy_from_slice(&geometry_a.pixels()[source..source + 4]);
+                base[target..target + 4].copy_from_slice(&geometry_a.pixels()[source..source + 4]);
             }
         }
         let reuse = FrameReuse {
@@ -6500,10 +6472,7 @@ mod tests {
         let full =
             render_geometry_styled(&masked_scene(false).with_full_masks(), &request).unwrap();
         assert_eq!(masked.frame.pixels(), full.frame.pixels());
-        assert_eq!(
-            masked.rectangle_member_paints,
-            full.rectangle_member_paints
-        );
+        assert_eq!(masked.rectangle_member_paints, full.rectangle_member_paints);
         assert_eq!(full.stats.subtrees_pruned, 0);
         assert!(
             masked.stats.subtrees_pruned > 0,
@@ -6595,7 +6564,7 @@ mod tests {
                 pages: vec![0],
                 page_prio: vec![0],
                 stats: HierStats::default(),
-                            explain: Vec::new(),
+                explain: Vec::new(),
             };
             let span = BBox {
                 x0: 0,
@@ -6603,8 +6572,7 @@ mod tests {
                 x1: 16,
                 y1: 16,
             };
-            let bounds =
-                BTreeMap::from([(top, span), (child_a, unit), (child_b, unit)]);
+            let bounds = BTreeMap::from([(top, span), (child_a, unit), (child_b, unit)]);
             FrameScene::from_test_parts(plan, vec![styled_page(0, 0, unit)], bounds).unwrap()
         };
         let request = StyledGeometryRasterRequest {
@@ -6675,7 +6643,7 @@ mod tests {
             pages: vec![0],
             page_prio: vec![0],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let bounds = BTreeMap::from([(top, unit), (child, unit)]);
         let scene =
@@ -6692,7 +6660,10 @@ mod tests {
         let error = render_geometry_styled(&scene, &request)
             .err()
             .expect("cycle must not be masked away");
-        assert!(error.contains("hierarchy cycle"), "unexpected error: {error}");
+        assert!(
+            error.contains("hierarchy cycle"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -6889,8 +6860,26 @@ mod tests {
     #[test]
     fn windowed_render_is_the_crop_of_the_full_render() {
         let scene = styled_scene(vec![
-            (BBox { x0: 3, y0: 3, x1: 7, y1: 7 }, Rep::One, 0),
-            (BBox { x0: 0, y0: 8, x1: 2, y1: 10 }, Rep::One, 3),
+            (
+                BBox {
+                    x0: 3,
+                    y0: 3,
+                    x1: 7,
+                    y1: 7,
+                },
+                Rep::One,
+                0,
+            ),
+            (
+                BBox {
+                    x0: 0,
+                    y0: 8,
+                    x1: 2,
+                    y1: 10,
+                },
+                Rep::One,
+                3,
+            ),
         ]);
         let cancellation = RenderCancellation::new();
         for tile_size in [2u16, 3, 10] {
@@ -6920,7 +6909,10 @@ mod tests {
                 )
                 .unwrap();
                 let [c0, r0, c1, r1] = window;
-                assert_eq!((part.frame.width(), part.frame.height()), (c1 - c0, r1 - r0));
+                assert_eq!(
+                    (part.frame.width(), part.frame.height()),
+                    (c1 - c0, r1 - r0)
+                );
                 for y in r0..r1 {
                     for x in c0..c1 {
                         assert_eq!(
@@ -6932,19 +6924,22 @@ mod tests {
                 }
             }
         }
-        assert!(render_geometry_styled_cancellable_windowed(
-            &scene,
-            &StyledGeometryRasterRequest {
-                raster: request(),
-                layers: Vec::new(),
-                hierarchy_frames: false,
-                mono: false,
-            },
-            1,
-            &cancellation,
-            [5, 5, 12, 6],
-        )
-        .is_err(), "a window past the frame is refused");
+        assert!(
+            render_geometry_styled_cancellable_windowed(
+                &scene,
+                &StyledGeometryRasterRequest {
+                    raster: request(),
+                    layers: Vec::new(),
+                    hierarchy_frames: false,
+                    mono: false,
+                },
+                1,
+                &cancellation,
+                [5, 5, 12, 6],
+            )
+            .is_err(),
+            "a window past the frame is refused"
+        );
     }
 
     #[test]
@@ -7089,7 +7084,7 @@ mod tests {
             pages: vec![0],
             page_prio: vec![0],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let decoded_doc = Doc {
             unit: 1000.0,
@@ -7473,7 +7468,12 @@ mod hull_parity_tests {
             (vec![(0, 0), (50, 50), (100, 0)], 6, 2, 2),
             (vec![(0, 0), (80, 10), (160, 0), (240, 30)], 3, 0, 0),
             (vec![(0, 0), (50, 50), (60, 0)], 7, 0, 0),
-            (vec![(0, 0), (0, 0), (50, 50), (100, 100), (150, 90)], 5, 1, 1),
+            (
+                vec![(0, 0), (0, 0), (50, 50), (100, 100), (150, 90)],
+                5,
+                1,
+                1,
+            ),
             (vec![(10, 10), (10, 60), (40, 60), (40, 20)], 4, 2, 0),
         ];
         for (pts, hw, es, ee) in spines {

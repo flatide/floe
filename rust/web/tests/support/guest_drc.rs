@@ -220,7 +220,7 @@ async fn independent_drc_guests_are_explicit_read_only_and_revision_bound() {
         .unwrap()
         .status
         .success());
-    let pack = db.with_extension("db.ice");
+    let pack = db.with_file_name(".review.db.tray");
     let tree_before = stamp(&root);
     let before = [&source, &db, &pack].map(|p| {
         (

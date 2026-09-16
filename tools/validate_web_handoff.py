@@ -3,6 +3,7 @@
 import hashlib
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import re
 import shutil
 import signal
@@ -37,7 +38,7 @@ def main(fixture):
                        check=True, capture_output=True, timeout=60)
         other = designs / 'other.oas'
         shutil.copy2(source, other)
-        shutil.copytree(Path(str(source) + '.floe'), Path(str(other) + '.floe'))
+        shutil.copytree(vfs_cache(source), vfs_cache(other))
         missing = designs / 'unindexed.oas'
         shutil.copy2(source, missing)
         deck = designs / 'two-levels.jb'

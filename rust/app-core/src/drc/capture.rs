@@ -461,11 +461,8 @@ pub fn run(
     let visible = layers(options, dataset, &candidates, stop)?;
     let legend = legend(dataset, &visible)?;
     let mut protected = candidates;
-    protected.extend([
-        options.database.clone(),
-        db.path().to_owned(),
-        PathBuf::from(format!("{}.ice", options.database.display())),
-    ]);
+    protected.extend([options.database.clone(), db.path().to_owned()]);
+    protected.extend(crate::cache::pack_paths(&options.database)?);
     protected.extend(waive_paths(
         db.path(),
         &reviewer_tag(options.reviewer.as_deref()),

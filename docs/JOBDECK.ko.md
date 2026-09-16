@@ -126,7 +126,7 @@ white, purple, cyan, magenta, green). 대상의 **순서 목록**을 만들고 i
 
 KLayout 툴은 "소스 → 하나의 flat-ish layout 재작성" 구조였다. floe2에서는
 **런타임 합성**으로 간다:
-- 각 TC 소스는 기존 `<src>.floe` 캐시 그대로 사용(Calibre의 `.fvi` 유사).
+- 각 TC 소스는 기존 `.<src>.ice` 캐시 그대로 사용(Calibre의 `.fvi` 유사).
   재작성·복사 없음. 소스가 1500개여도 인덱스는 한 번씩만.
 - 배율(mag)·오프셋은 **씬 루트의 배치(placement)에서만** 적용한다. floe2의
   Rust 스택은 OASIS 배율 PLACEMENT(record 18)를 거부하고 `Xf`는 정수
@@ -210,7 +210,7 @@ Gate `tools/validate_jobdeck.py` (배터리 편입, 20 tests):
 - 스펙 파일(줄 단위, Python이 씀; 경로/이름은 hex):
   ```
   deck unit=2.5e-05
-  source path_hex=<.floe 디렉터리>
+  source path_hex=<VFS 캐시 디렉터리>
   layer out=0 name_hex=<"$1 METAL1"> color=#0000ff fill=solid width=1
   placement source=0 layer=123/43 out=0 scale=8.0 dx=1640800000 dy=3200800000 order=0
   ```
@@ -273,7 +273,7 @@ floe2 index deck.jb --force --lod --jobs 16
   제공한다: `src`(덱 경로), `dir`(renderd가 여는 스펙), `meta`(`dbu`, `bbox`,
   `layers`, `src`, `grid`(1×1), `vfs`, `jobdeck{mode, chips, placements,
   skipped, colour_order}`), `exists/load/is_stale/resolve_layers`. "캐시"는
-  소스들의 `<src>.floe` 전부이며 `deck_ready()`가 그 존재를 답한다.
+  소스들의 `.<src>.ice` 전부이며 `deck_ready()`가 그 존재를 답한다.
   `service.make_render_worker`는 `is_jobdeck`을 보고 `DeckRenderWorker`를 만든다.
 - **뷰 레이어 = 색 대상**(`render.view_layers`, §1a): level view는 level당 한
   줄(MTITLE 이름, 키 `n/0`), chip view는 level 줄 아래 소스 칩 줄들
@@ -596,7 +596,11 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   재고정(1 MiB 캡처가 완전·exit 0).
 
 ### 4단계 — jobdeck 전용 광역 표시 정책 ✅ (2026-09-10, RENDERD 0.12.72, 실측 없이 사용자 결정)
-- **sub-cut wash**(`ViewReq::sub_cut_wash`, 덱 플랜 요청에만 켬): 크기 cut이
+- **sub-cut wash**(`ViewReq::sub_cut_wash`; **2026-09-16 사용자 결정으로 기본
+  off** — 덱 소스는 점유 요약이 광역뷰를 맡고, 단일 레이아웃은 느려지는 부작용에
+  비해 다 보이지 않는다; 진단 `FLOE_RUST_DECK_WIDE=on`(덱)·`FLOE_RUST_SUB_CUT_WASH=on`
+  (단일)으로만 켠다 — SPEC-PLANNER §3; 단일 레이아웃의 대표(page frontier,
+  2026-09-17)도 덱 pass에는 적용하지 않는다): 켜면 크기 cut이
   **버리던** 것을 자기 레이어의 footprint wash(렉트, 보통 채움 → 뷰어 speckle이
   얇게 함)로 남긴다.
   - 자체 페이지: cut(양축 < cut, 또는 hairline)에 걸린 페이지 → `(layer, page
@@ -627,7 +631,9 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   (예산은 pass마다이고 pass는 수백 개). 현장 2026-09-15: level 4 depth 0에서 140 × 4 µm 45° 마크 두
   개가 137 mm 떨어진 다른 마크와 한 페이지라 bbox 137,044 × 54,011 µm가 통째로
   레이어 색 블록이 됐다(뷰 31,752 µm부터 fit까지; frame off와 무관). stats
-  `sub_cut_sparse`, explain `page` `keep_sparse` / `child` `expand_sparse`. gate
+  `sub_cut_sparse`, explain `page` `keep_sparse` / `child` `expand_sparse`(플랜당
+  예산 `sub_cut_sparse_px`/`sub_cut_wash_px`를 넘은 항목은 버려져 `sub_cut_sparse_over`
+  / `sub_cut_wash_over`로 센다, SPEC-PLANNER §3). gate
   `WideViewTests.test_a_sparse_page_or_array_is_not_washed_as_its_footprint`
   (sparse.jb: 모서리 마크 두 개 페이지·2 × 2 배치는 몇 px만 켜지고 footprint wash
   없음 — 펼쳐진 마크 셀 자체의 1 µm 페이지는 blob wash 1 px, 중앙 9 µm 클러스터는
@@ -635,11 +641,12 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   단일 소스에서 같은 판정을 보려면 `floe-index plan … --page-hairline 0
   --sub-cut-wash 1 --explain 1`(SPEC-INDEXER §6).
 - 한계(문서화): wash는 페이지/배치 bbox이므로 30% 채움의 콘택 배열이 100%
-  블록으로 보인다(speckle이 완화; 채움 하한 1/256 아래만 제외). 뷰어의 일반 레이아웃 경로는 바뀌지 않는다
-  (`sub_cut_wash=false`). 킬 스위치 `FLOE_RUST_DECK_WIDE=off`. 상태줄 `N sub-cut
-  washes`, 프레임 줄 `wide_washes=`.
+  블록으로 보인다(speckle이 완화; 채움 하한 1/256 아래만 제외). 기본 off
+  (2026-09-16), `FLOE_RUST_DECK_WIDE=on`으로 켠다. 상태줄 `N sub-cut washes`,
+  프레임 줄 `wide_washes=`.
 - gate `WideViewTests`: tiny.jb(1 µm 점 4만 개의 자체 페이지 + 1 µm 자식 셀
-  200×200 배열)를 200 px 전체 뷰·cut 3 px에서 — off면 두 level 모두 0 px, on이면
+  200×200 배열)를 200 px 전체 뷰·cut 3 px에서 — 기본(off)이면 두 level 모두 0 px,
+  `FLOE_RUST_DECK_WIDE=on`이면
   네 모서리까지 칠해지고 색은 exact 렌더와 같다; test.jb(cut 위)는 wash 0·픽셀
   동일.
 
@@ -653,7 +660,7 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   우하단은 Calibre와 유사하게 동작하므로(뭉침이 빠른 건 cut 차이, Calibre는 0.5 px
   추정) 원인 확정이 먼저다. 후보는 페이지 크기 cut(`max_w/max_h < cut`), hairline
   (`max_min < 0.5 cut`), 자식 셀 생략/BVH 프루닝이며, 어느 것인지는 `floe-index
-  plan <src>.floe --view … --px-per-um … --cut-px … --explain 1`(SPEC-INDEXER §6)로
+  plan .<src>.ice --view … --px-per-um … --cut-px … --explain 1`(SPEC-INDEXER §6)로
   사라지는 뷰와 보이는 뷰를 각각 찍어 같은 셀·레이어의 판정을 비교해 정한다.
   설계 논의(밀도 사다리: 크기 cut 대신 exact/LOD 점유, hairline은 전체 길이의
   1 px 선, 자식 bbox+rep 방출; 격자 솎아내기는 프레임에만)는 판정이 나온 뒤
@@ -721,11 +728,14 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   `--jobs` 스레드로 분할(파일은 스레드 수와 무관하게 동일). 실측 8-c(2026-09-15):
   같은 추출본이 jobs 48로 4.4 s·17 MB(8-a 41.1 s·34 MB); 실측 8-d(2026-09-15,
   RENDERD 0.12.88): 뷰어 depth 7/7이 숫자 7로 가서 요약이 꺼졌던 것을 "무제한·계층
-  높이 이상·레이어별 최대 깊이 이상이면 그 레이어는 full"로 고침(계획 §12); 덱 전체 요약 생성 9.9 분·
+  높이 이상·레이어별 최대 깊이 이상이면 그 레이어는 full"로 고침(계획 §12; 2026-09-16 M6부터는 깊이별 비트 평면이라 어떤 depth든 그 depth의
+  요약); 덱 전체 요약 생성 9.9 분·
   172 MB(667 소스, 레이어 2,251 = ok 1,176 + empty 1,075; 8-a의 39.7 분·9.8 GB는
   소스 533개 재색인이 섞인 값 — ovp mtime으로 확인). **M5 마감(2026-09-15,
-  0.12.131)**: 색인 기본 on(`--no-occupancy`로 끔; 요약 없는 캐시에는 추가), base
-  cell 4 µm, 마스크는 keep + detail medium(요약이 켜진 광역뷰는 cut과 무관), View
+  0.12.131)**: 색인 기본 on(`--no-occupancy`로 끔; 요약 없는 캐시에는 추가 —
+  2026-09-16 변경: 덱의 소스만 기본 on, 레이아웃은 `--occupancy` opt-in), base
+  cell 4 µm(2026-09-16부터 칩 크기에서 자동 선택, 큰 칩은 4 µm — OCCUPANCY §12),
+  마스크는 keep + detail medium(요약이 켜진 광역뷰는 cut과 무관), View
   메뉴에 thin 정책 서브메뉴. 후속: 8-b 품질 샷, scan(charge당 비용), cull에서의
   요약. 실칩을 쓸 수 없을 때는
   `tools/gen_maskchip.py OUT.oas [--jb]`가 같은 크기(35838.4 × 34617.6 µm)에

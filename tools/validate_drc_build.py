@@ -8,6 +8,7 @@ import json
 import hashlib
 import os
 from pathlib import Path
+from cache_test_paths import drc_pack
 import signal
 import subprocess
 import sys
@@ -61,7 +62,7 @@ def parallel_native(work, env):
     for jobs in (1, 4, 16):
         built = call(source, env, "--force", f"--jobs={jobs}")
         assert built["errors"] == 520 * 256 and built["checks"] == 520
-        actual = digest(Path(str(source) + ".ice"))
+        actual = digest(drc_pack(source))
         if expected is None:
             expected = actual
         assert actual == expected
@@ -75,7 +76,7 @@ def main():
         work.mkdir()
         source = work / "results.db"
         source.write_bytes(DB.encode())
-        output = Path(str(source) + ".ice")
+        output = drc_pack(source)
         golden = work / "native.ice"
         env = dict(os.environ, PATH="", FLOE_INDEX_BIN=str(NATIVE))
         subprocess.run([str(NATIVE), "drc", str(source), str(golden), "--jobs", "1"],
@@ -126,7 +127,7 @@ if mode == "source":
     sys.exit(0)
 if mode == "target":
     dst.write_bytes(pathlib.Path(os.environ["FLOE_DRC_GOLDEN"]).read_bytes())
-    pathlib.Path(str(src)+".ice").write_bytes(b"external writer")
+    src.with_name("."+src.name+".tray").write_bytes(b"external writer")
     sys.exit(0)
 if mode == "hardhang":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)

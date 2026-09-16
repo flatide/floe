@@ -311,7 +311,7 @@ async fn reselect_index_retry_is_frozen_and_preserves_the_live_view_on_pan_and_c
     assert_eq!(stale["stage"], "index");
     assert_eq!(stale["error"], "busy");
     assert!(!dir.join("B.oas.started").exists());
-    assert!(!dir.join("B.oas.floe.index.lock").exists());
+    assert!(!dir.join(".B.oas.ice.index.lock").exists());
     let reselect = operation(&h, &login, select(4, &moved, levels)).await;
     assert_eq!(reselect["error"], "index_unavailable");
     let index = request(5, 4, target(&moved));
@@ -336,7 +336,7 @@ async fn reselect_index_retry_is_frozen_and_preserves_the_live_view_on_pan_and_c
         h.call(&login, "POST", "/api/v1/operations", index).await.1,
         stale
     );
-    assert!(dir.join("B.oas.floe/design.ovo").is_file());
+    assert!(dir.join(".B.oas.ice/design.ovo").is_file());
     let attached = operation(
         &h,
         &login,
@@ -370,7 +370,7 @@ async fn reselect_index_retry_is_frozen_and_preserves_the_live_view_on_pan_and_c
     assert_eq!(state(&h, &login).await["view_id"], current["view_id"]);
     assert_eq!(h.resources.usage().workers, 1);
     assert_eq!(h.resources.usage().index_jobs, 0);
-    assert!(!dir.join("C.oas.floe").exists());
+    assert!(!dir.join(".C.oas.ice").exists());
     // A fresh explicit retry at the unchanged anchor succeeds; it does not
     // need to close the old A/B view to build C, or fit and navigate afterward.
     fs::remove_file(dir.join("C.oas.started")).unwrap();

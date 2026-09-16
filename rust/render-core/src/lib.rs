@@ -42,14 +42,12 @@ pub use query::{
 pub use raster::{
     render_geometry_occupancy, render_geometry_occupancy_cancellable, render_geometry_styled,
     render_geometry_styled_cancellable, render_geometry_styled_cancellable_reuse,
-    render_geometry_styled_cancellable_windowed,
-    render_geometry_styled_unbinned,
+    render_geometry_styled_cancellable_windowed, render_geometry_styled_unbinned,
     render_geometry_styled_unbinned_cancellable, FrameReuse, GeometryRasterReport,
-    GeometryRasterRequest, LayerFill,
-    LayerStyle, RasterViewBox, RgbaFrame, StyledGeometryRasterRequest, DEFAULT_TILE_SIZE,
-    MAX_TILE_SIZE,
+    GeometryRasterRequest, LayerFill, LayerStyle, RasterViewBox, RgbaFrame,
+    StyledGeometryRasterRequest, DEFAULT_TILE_SIZE, MAX_TILE_SIZE,
 };
 pub use request::{PlanRequest, ViewBox, FULL_DEPTH};
 pub use scene::FrameScene;
-pub use summary::{level_for as summary_level_for, SummaryPlane, SummarySelection};
 pub use stats::RenderStats;
+pub use summary::{level_for as summary_level_for, SummaryPlane, SummarySelection};

@@ -7,6 +7,7 @@ oracles and controlled worker faults only; the product test runs PATH-empty.
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import subprocess
 import sys
@@ -43,7 +44,7 @@ def main():
             if p != source:
                 shutil.copy2(source, p)
             run(["index", p, "--jobs=2"], env)
-            originals[p] = (p.read_bytes(), digest(Path(str(p) + ".floe")))
+            originals[p] = (p.read_bytes(), digest(vfs_cache(p)))
         bbox = [0.25, 1.1, 14., 4.7]
         for name, layers in [("all", None), ("selected", "7/0"), ("none", None)]:
             path = compare(source, root, env, "empty" if name == "none" else name,
@@ -87,7 +88,7 @@ for line in sys.stdin:
             st = path.stat()
             os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
         if mode == "cache-change":
-            path = root / "cache-change.oas.floe/design.ovm"
+            path = pathlib.Path({str(vfs_cache(root / "cache-change.oas") / "design.ovm")!r})
             st = path.stat()
             with path.open("r+b") as out: out.write(b"X")
             os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
@@ -105,6 +106,8 @@ for line in sys.stdin:
                                  capture_output=True, text=True, timeout=90)
         assert checked.returncode == 0, (checked.stdout, checked.stderr)
         assert "RUST MANAGED CLIP: ALL OK" in checked.stdout
+        assert (vfs_cache(root / "cache-change.oas") / "design.ovm").read_bytes()[:1] == b"X", (
+            "cache-change fault was not injected")
         for name in ("all", "selected", "none"):
             for jobs in (1, 8):
                 assert (root / f"managed-{name}-j{jobs}.oas").read_bytes() == (
@@ -113,7 +116,7 @@ for line in sys.stdin:
         for p, (content, cache) in originals.items():
             assert p.read_bytes() == content
             if p.name != "cache-change.oas":
-                assert digest(Path(str(p) + ".floe")) == cache, p
+                assert digest(vfs_cache(p)) == cache, p
         assert not list(workers.iterdir()), "managed clip leaked native files"
         print(checked.stdout.strip())
     print("MANAGED CLIP GATE: ALL OK (Python/j1/j8 bytes + KLayout XOR, lifecycle/admission/faults)")

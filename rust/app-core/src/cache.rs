@@ -5,6 +5,10 @@ use std::io::BufReader;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
+mod names;
+pub use names::{
+    cache_path, cache_paths, database_path, default_cache_path, pack_path, pack_paths,
+};
 
 #[derive(Debug, Deserialize)]
 struct SourceIdentity {
@@ -49,11 +53,6 @@ pub fn absolute(path: &Path) -> Result<PathBuf> {
 pub(crate) fn utf8(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| Error::input("native indexer requires a UTF-8 path"))
-}
-pub fn cache_path(source: &Path) -> Result<PathBuf> {
-    let mut p = absolute(source)?.into_os_string();
-    p.push(".floe");
-    Ok(PathBuf::from(p))
 }
 pub fn fingerprint(source: &Path) -> Result<(u64, u64)> {
     let m = fs::metadata(source)?;

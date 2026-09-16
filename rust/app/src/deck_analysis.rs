@@ -236,7 +236,7 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
             .count();
         if n > 0 {
             println!(
-                "[jobdeck] {n} source(s) have no .floe cache yet; run: floe2-web index {}",
+                "[jobdeck] {n} source(s) have no VFS cache yet; run: floe2-web index {}",
                 a.source.display()
             );
         }

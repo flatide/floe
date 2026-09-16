@@ -98,7 +98,7 @@ hierarchy path 수**의 영향을 받는다. mmap은 이 평탄화 결과를 그
 ### 3.1 파일 구성
 
 ```text
-<source>.floe/
+.<source>.ice/
   design.ovp    geometry OASIS payload, 현행 유지
   design.ovt    text string/Pts 가변 payload, 신규
   design.ovm    geometry + text fixed metadata, mmap, 최종 commit marker

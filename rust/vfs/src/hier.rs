@@ -30,6 +30,113 @@ pub const REM_FULL: u32 = u32::MAX;
 /// 2.5 um/px covers 6%), while a page of a few fiducial marks whose
 /// bbox spans the mask (10^-5) must not become a block.
 pub const WASH_MIN_COVERAGE: f64 = 1.0 / 256.0;
+/// The coverage a HAIRLINE-cut page or node must reach for a wash
+/// under the cull policy (2026-09-16, user: a wide view of a design
+/// layout should show presence without the occupancy summary, whose
+/// build takes an hour on the 9.8 GB chip): a line counts its length
+/// in pixels, so three long lines in an otherwise empty page are
+/// 3-4 % and stay exact, dense routing washes. FLOE_RUST_WASH_HAIR_
+/// COVERAGE overrides (diagnostic).
+pub const WASH_MIN_COVERAGE_HAIR: f64 = 1.0 / 8.0;
+
+/// Representatives (the page frontier, user design 2026-09-17): a cut
+/// item k octaves below its cut - its measure at most 1/2^k of the
+/// threshold that cut it - keeps one in 4^k of its kind by index
+/// within the owning cell. Zooming out one octave quadruples the cut
+/// items in view and keeps a quarter of them, so the count in view
+/// stays what it was at the cut; and the sets are nested (a multiple
+/// of 4^(k+1) is a multiple of 4^k), so what survives one zoom-out
+/// survives every further one, like the frontier's lattice
+/// representatives (rev 45). The index is the page's within its
+/// (cell, layer) run or the placement's within its cell, so every
+/// run keeps its first item at any zoom. Octaves are capped so 4^k
+/// fits a u64 comfortably.
+pub const REP_OCTAVES_MAX: u32 = 15;
+
+/// octaves below the cut: 0 for a measure above half the threshold,
+/// 1 for one in (1/4, 1/2], 2 for (1/8, 1/4], ...
+pub fn rep_octaves(measure: u64, threshold: u64) -> u32 {
+    if threshold == 0 {
+        return 0;
+    }
+    let mut k = 0u32;
+    let mut m = (measure.max(1) as u128) * 2;
+    while m <= threshold as u128 && k < REP_OCTAVES_MAX {
+        k += 1;
+        m *= 2;
+    }
+    k
+}
+
+/// whether the item of `index` (within its cell) is a representative
+/// k octaves below the cut: one in 4^k
+pub fn rep_keeps(index: u64, k: u32) -> bool {
+    k == 0 || index % (1u64 << (2 * k.min(REP_OCTAVES_MAX))) == 0
+}
+
+/// whether a run [lo, hi) of indices (relative to `base`) holds a
+/// representative k octaves below the cut; true when the run is
+/// unknown (hi <= lo)
+fn rep_in_run(lo: u32, hi: u32, base: u32, k: u32) -> bool {
+    if hi <= lo || k == 0 {
+        return true;
+    }
+    let m = 1u64 << (2 * k.min(REP_OCTAVES_MAX));
+    let first = lo.saturating_sub(base) as u64;
+    let last = hi.saturating_sub(base) as u64;
+    let next = first.div_ceil(m) * m;
+    next < last
+}
+
+/// the verdict on a cut page under the sub-cut rules or as a representative
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SubCut {
+    /// sparse: kept, its members drawn as hairline pixels
+    Keep,
+    /// dense: its footprint washed in the layer colour
+    Wash,
+    /// dropped (not washable, or beyond a per-plan budget)
+    Drop,
+}
+
+fn hair_wash_coverage() -> f64 {
+    static COVERAGE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *COVERAGE.get_or_init(|| {
+        std::env::var("FLOE_RUST_WASH_HAIR_COVERAGE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0 && *v <= 1.0)
+            .unwrap_or(WASH_MIN_COVERAGE_HAIR)
+    })
+}
+
+/// Per-plan sub-cut budgets (HierOpts::sub_cut_sparse_px /
+/// sub_cut_wash_px), screen pixels: about four screens of hairline
+/// ink and sixteen screens of block fill on a 4 Mpx view - each a few
+/// tens of ms of raster - so what the sub-cut rules add to a frame is
+/// bounded whatever the chip holds. Provisional (2026-09-16) until the
+/// field's perf line of the slow frame sets them.
+pub const SUB_CUT_SPARSE_PX: f64 = 16.0e6;
+pub const SUB_CUT_WASH_PX: f64 = 64.0e6;
+
+fn env_mpx(name: &str, default_px: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .map(|v| v * 1.0e6)
+        .unwrap_or(default_px)
+}
+
+fn sub_cut_sparse_px() -> f64 {
+    static PX: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *PX.get_or_init(|| env_mpx("FLOE_RUST_SUB_CUT_SPARSE_MPX", SUB_CUT_SPARSE_PX))
+}
+
+fn sub_cut_wash_px() -> f64 {
+    static PX: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *PX.get_or_init(|| env_mpx("FLOE_RUST_SUB_CUT_WASH_MPX", SUB_CUT_WASH_PX))
+}
 
 /// A sub-cut page-BVH node whose extent is at most this many screen
 /// pixels on both sides washes whole, as it always did (a block that
@@ -59,10 +166,7 @@ pub fn frame_band(rect: &BBox, px_per_dbu: f64) -> u8 {
     if px_per_dbu <= 0.0 {
         return 0;
     }
-    let mn = (rect.x1 - rect.x0)
-        .max(0)
-        .min((rect.y1 - rect.y0).max(0)) as f64
-        * px_per_dbu;
+    let mn = (rect.x1 - rect.x0).max(0).min((rect.y1 - rect.y0).max(0)) as f64 * px_per_dbu;
     if mn >= FRAME_WHITE_PX {
         0
     } else if mn >= FRAME_GRAY_PX {
@@ -136,6 +240,23 @@ pub struct HierOpts {
     /// box on the owning cell's visible layers. Bounds the wide-view
     /// walk the rev 43 prune exists for (184M placements).
     pub sub_cut_walk_budget: u64,
+    /// Per-plan budgets on what the sub-cut rules may ADD to a frame,
+    /// both in screen pixels (field 2026-09-16: a 150 MB chip at
+    /// thin:cull detail medium drew over 6 s at mid zoom, and
+    /// FLOE_RUST_SUB_CUT_WASH=off restored the earlier speed).
+    /// `sub_cut_sparse_px`: the ink estimate of sparse pages kept and
+    /// sparse placements expanded (members x member px, each member
+    /// at least one pixel - the wash_worth measure); beyond it a
+    /// sparse item is DROPPED as the cull always did, never washed (a
+    /// sparse footprint wash is the false block of 2026-09-15).
+    /// `sub_cut_wash_px`: the visible footprint area of the washes,
+    /// one per layer; beyond it a sub-cut item is dropped. Spent in
+    /// walk order, so a plan stays deterministic. 0 drops every
+    /// sparse item / every wash (A/B in the field). Defaults
+    /// SUB_CUT_SPARSE_PX / SUB_CUT_WASH_PX; FLOE_RUST_SUB_CUT_SPARSE_MPX
+    /// / FLOE_RUST_SUB_CUT_WASH_MPX override in Mpx (diagnostic).
+    pub sub_cut_sparse_px: f64,
+    pub sub_cut_wash_px: f64,
     /// Field diagnosis (2026-09-10): record one ExplainRow per page,
     /// page-BVH node, child placement / child-BVH node and frame the
     /// walk judged INSIDE the view - kept, culled by size, hairline,
@@ -178,6 +299,8 @@ impl Default for HierOpts {
             thin_lattice_um: 7.0,
             thin_demote_px: 14.0,
             sub_cut_walk_budget: 200_000,
+            sub_cut_sparse_px: sub_cut_sparse_px(),
+            sub_cut_wash_px: sub_cut_wash_px(),
             explain: false,
         }
     }
@@ -239,6 +362,19 @@ pub struct HierStats {
     /// Calibre shows them at every zoom (field 2026-09-15: two 140 x
     /// 4 um marks 137 mm apart washed as one 137 x 54 mm block)
     pub sub_cut_sparse: u64,
+    /// sub-cut items the per-plan budgets dropped (field 2026-09-16, a
+    /// 6 s mid-zoom draw): sparse pages / placements beyond
+    /// HierOpts::sub_cut_sparse_px, washes beyond sub_cut_wash_px
+    pub sub_cut_sparse_over: u64,
+    pub sub_cut_wash_over: u64,
+    /// representatives (the page frontier, ViewReq::page_reps): cut
+    /// pages kept (sparse, drawn as pixels) / washed (dense), cut
+    /// placements washed or expanded, BVH subtrees pruned because no
+    /// index of theirs is a representative's
+    pub rep_pages_kept: u64,
+    pub rep_pages_washed: u64,
+    pub rep_children: u64,
+    pub rep_pruned: u64,
     /// pages selected whose every record is thin (max_min < hairline
     /// x cut): what the page hairline rule would have dropped
     pub thin_pages_kept: u64,
@@ -327,9 +463,7 @@ impl KBox {
                 for j in (i + 1)..self.boxes.len() {
                     let mut u = self.boxes[i];
                     u.grow(&self.boxes[j]);
-                    let w = area2(&u)
-                        - area2(&self.boxes[i])
-                        - area2(&self.boxes[j]);
+                    let w = area2(&u) - area2(&self.boxes[i]) - area2(&self.boxes[j]);
                     if w < bw {
                         (bi, bj, bw) = (i, j, w);
                     }
@@ -368,7 +502,12 @@ fn div_ceil_i128(a: i128, b: i128) -> i128 {
 pub enum GridVis {
     Empty,
     /// inclusive index rectangle, clamped to [0,na) x [0,nb)
-    Range { i0: i64, i1: i64, j0: i64, j1: i64 },
+    Range {
+        i0: i64,
+        i1: i64,
+        j0: i64,
+        j1: i64,
+    },
 }
 
 /// visible index rectangle of a grid rep against offset-region R
@@ -378,13 +517,7 @@ pub enum GridVis {
 /// while other degenerate 2-D forms use a conservative full range.
 /// Over-inclusion is cost, omission is a bug (par.2.3). All math
 /// is i128: i64 products cannot overflow it.
-pub fn grid_ranges(
-    na: i64,
-    nb: i64,
-    va: (i64, i64),
-    vb: (i64, i64),
-    r: &BBox,
-) -> GridVis {
+pub fn grid_ranges(na: i64, nb: i64, va: (i64, i64), vb: (i64, i64), r: &BBox) -> GridVis {
     if r.is_empty() || na <= 0 || nb <= 0 {
         return GridVis::Empty;
     }
@@ -408,16 +541,9 @@ pub fn grid_ranges(
     if det != 0 {
         let (mut i0, mut i1) = (i128::MAX, i128::MIN);
         let (mut j0, mut j1) = (i128::MAX, i128::MIN);
-        for &(rx, ry) in &[
-            (r.x0, r.y0),
-            (r.x0, r.y1),
-            (r.x1, r.y0),
-            (r.x1, r.y1),
-        ] {
-            let ni =
-                rx as i128 * vb.1 as i128 - ry as i128 * vb.0 as i128;
-            let nj =
-                va.0 as i128 * ry as i128 - va.1 as i128 * rx as i128;
+        for &(rx, ry) in &[(r.x0, r.y0), (r.x0, r.y1), (r.x1, r.y0), (r.x1, r.y1)] {
+            let ni = rx as i128 * vb.1 as i128 - ry as i128 * vb.0 as i128;
+            let nj = va.0 as i128 * ry as i128 - va.1 as i128 * rx as i128;
             i0 = i0.min(div_floor_i128(ni, det));
             i1 = i1.max(div_ceil_i128(ni, det));
             j0 = j0.min(div_floor_i128(nj, det));
@@ -484,22 +610,18 @@ fn axis1d(n: i64, v: (i64, i64), r: &BBox) -> Option<(i128, i128)> {
 
 /// offset bbox of the 4 index-rectangle corners (i128, saturated to
 /// i64 - saturation only widens, which is safe)
-fn grid_ovis(
-    i0: i64,
-    i1: i64,
-    j0: i64,
-    j1: i64,
-    va: (i64, i64),
-    vb: (i64, i64),
-) -> BBox {
-    let sat = |v: i128| {
-        v.clamp(i64::MIN as i128, i64::MAX as i128) as i64
-    };
+fn grid_ovis(i0: i64, i1: i64, j0: i64, j1: i64, va: (i64, i64), vb: (i64, i64)) -> BBox {
+    let sat = |v: i128| v.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
     let mut b = BBox::EMPTY;
     for &(i, j) in &[(i0, j0), (i0, j1), (i1, j0), (i1, j1)] {
         let ox = sat(i as i128 * va.0 as i128 + j as i128 * vb.0 as i128);
         let oy = sat(i as i128 * va.1 as i128 + j as i128 * vb.1 as i128);
-        b.grow(&BBox { x0: ox, y0: oy, x1: ox, y1: oy });
+        b.grow(&BBox {
+            x0: ox,
+            y0: oy,
+            x1: ox,
+            y1: oy,
+        });
     }
     b
 }
@@ -563,7 +685,10 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         explain: Vec::new(),
         explain_on: opts.explain,
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
+        reps: req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0,
         wash_walk_budget: opts.sub_cut_walk_budget,
+        sparse_px_left: opts.sub_cut_sparse_px,
+        wash_px_left: opts.sub_cut_wash_px,
         wash_nodes: HashSet::new(),
         sparse_edges: HashSet::new(),
         hair: (req.cut_dbu.max(0) as f64 * opts.hairline) as u64,
@@ -580,15 +705,18 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
             0
         },
         thin_demote: req.px_per_dbu > 0.0
-            && opts.thin_lattice_um * v.unit * req.px_per_dbu
-                < opts.thin_demote_px,
+            && opts.thin_lattice_um * v.unit * req.px_per_dbu < opts.thin_demote_px,
         thin_bins: HashSet::new(),
         frames_total: 0,
     };
     let top_ci = v.top;
     let r0 = h.norm_r(
         top_ci,
-        if req.depth == u32::MAX { REM_FULL } else { req.depth },
+        if req.depth == u32::MAX {
+            REM_FULL
+        } else {
+            req.depth
+        },
     );
     if v.n_cells > 0 {
         let tc = v.cell(top_ci);
@@ -597,7 +725,18 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         if h.explain_on {
             let sub_cut = r0 == REM_FULL && !h.sub_cut_wash && w < h.cut && hh < h.cut;
             let rb = tc.rbbox;
-            h.note("top", if sub_cut { "cull_size" } else { "keep" }, top_ci, None, 0, rb, w, hh, w.min(hh), 0);
+            h.note(
+                "top",
+                if sub_cut { "cull_size" } else { "keep" },
+                top_ci,
+                None,
+                0,
+                rb,
+                w,
+                hh,
+                w.min(hh),
+                0,
+            );
         }
         // A finite, non-folded depth has a structural frontier even
         // when no design layer is selected. Full depth (including a
@@ -616,8 +755,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
     }
     let mut st = h.st;
     st.wc_cells = h.out.len() as u64;
-    st.wc_variants =
-        h.out.keys().filter(|&&(_, r)| r != REM_FULL).count() as u64;
+    st.wc_variants = h.out.keys().filter(|&&(_, r)| r != REM_FULL).count() as u64;
     let pages: Vec<u32> = h.pages_all.into_iter().collect();
     let page_prio: Vec<u64> = pages
         .iter()
@@ -646,11 +784,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
 /// the canvas fit scale reuses the whole rev 41/43/45 ladder and
 /// matches the main view by construction.) Deterministic: WS map
 /// order, in-order rep enumeration, strict-greater replacement.
-pub fn frontier_boxes(
-    v: &Ovm,
-    plan: &HierPlan,
-    keep: usize,
-) -> (Vec<([i64; 4], u8)>, bool) {
+pub fn frontier_boxes(v: &Ovm, plan: &HierPlan, keep: usize) -> (Vec<([i64; 4], u8)>, bool) {
     const GRID: i128 = 64;
     /// per grid cell candidates kept while streaming
     const PER_CELL: usize = 4;
@@ -669,15 +803,10 @@ pub fn frontier_boxes(
         ((die.x1 - die.x0).max(1)) as i128,
         ((die.y1 - die.y0).max(1)) as i128,
     );
-    let by_key: HashMap<WsKey, &WsCell> =
-        plan.wcells.iter().map(|w| (w.key, w)).collect();
-    let mut cells: BTreeMap<
-        (i64, i64),
-        Vec<(i128, [i64; 4], u8)>,
-    > = BTreeMap::new();
+    let by_key: HashMap<WsKey, &WsCell> = plan.wcells.iter().map(|w| (w.key, w)).collect();
+    let mut cells: BTreeMap<(i64, i64), Vec<(i128, [i64; 4], u8)>> = BTreeMap::new();
     let mut budget = BUDGET;
-    let mut stack: Vec<(WsKey, Xf)> =
-        vec![(plan.top, Xf::identity())];
+    let mut stack: Vec<(WsKey, Xf)> = vec![(plan.top, Xf::identity())];
     while let Some((key, xf)) = stack.pop() {
         let wc = match by_key.get(&key) {
             Some(wc) => *wc,
@@ -693,12 +822,9 @@ pub fn frontier_boxes(
                 };
                 let wb = xf_bbox(&xf, &m);
                 let bx = [wb.x0, wb.y0, wb.x1, wb.y1];
-                let area = (wb.x1 - wb.x0).max(0) as i128
-                    * (wb.y1 - wb.y0).max(0) as i128;
-                let cx = (wb.x0 as i128 + wb.x1 as i128) / 2
-                    - die.x0 as i128;
-                let cy = (wb.y0 as i128 + wb.y1 as i128) / 2
-                    - die.y0 as i128;
+                let area = (wb.x1 - wb.x0).max(0) as i128 * (wb.y1 - wb.y0).max(0) as i128;
+                let cx = (wb.x0 as i128 + wb.x1 as i128) / 2 - die.x0 as i128;
+                let cy = (wb.y0 as i128 + wb.y1 as i128) / 2 - die.y0 as i128;
                 let g = (
                     (cx * GRID / dw).clamp(0, GRID - 1) as i64,
                     (cy * GRID / dh).clamp(0, GRID - 1) as i64,
@@ -711,8 +837,7 @@ pub fn frontier_boxes(
                     // (deterministic: ties keep the earlier box)
                     let mut mi = 0;
                     for (i, it) in cell.iter().enumerate() {
-                        if (it.0, it.1) < (cell[mi].0, cell[mi].1)
-                        {
+                        if (it.0, it.1) < (cell[mi].0, cell[mi].1) {
                             mi = i;
                         }
                     }
@@ -723,19 +848,15 @@ pub fn frontier_boxes(
             });
         }
         for inst in &wc.insts {
-            each_rep_offset(
-                &inst.rep,
-                &mut budget,
-                &mut |ox, oy| {
-                    let t = Xf::place(
-                        inst.x.saturating_add(ox),
-                        inst.y.saturating_add(oy),
-                        inst.rot,
-                        inst.flip,
-                    );
-                    stack.push((inst.child, xf.compose(&t)));
-                },
-            );
+            each_rep_offset(&inst.rep, &mut budget, &mut |ox, oy| {
+                let t = Xf::place(
+                    inst.x.saturating_add(ox),
+                    inst.y.saturating_add(oy),
+                    inst.rot,
+                    inst.flip,
+                );
+                stack.push((inst.child, xf.compose(&t)));
+            });
         }
     }
     // biggest-first round-robin across grid cells (same fairness as
@@ -769,11 +890,7 @@ pub fn frontier_boxes(
 }
 
 /// in-order rep member offsets under a shared work budget
-fn each_rep_offset(
-    rep: &Rep,
-    budget: &mut u64,
-    f: &mut impl FnMut(i64, i64),
-) {
+fn each_rep_offset(rep: &Rep, budget: &mut u64, f: &mut impl FnMut(i64, i64)) {
     match rep {
         Rep::One => {
             if *budget > 0 {
@@ -861,6 +978,12 @@ struct Hier<'a> {
     /// ViewReq::sub_cut_wash and its remaining walk budget
     sub_cut_wash: bool,
     wash_walk_budget: u64,
+    /// ViewReq::page_reps in force (cut on, sub-cut wash off)
+    reps: bool,
+    /// remaining per-plan sub-cut budgets (HierOpts::sub_cut_sparse_px
+    /// / sub_cut_wash_px), screen px
+    sparse_px_left: f64,
+    wash_px_left: f64,
     /// child-BVH nodes already washed coarsely (per expand)
     wash_nodes: HashSet<u32>,
     /// placements expanded because they were sparse (no wash could
@@ -897,11 +1020,8 @@ impl<'a> Hier<'a> {
         let first = e.boxes.is_empty();
         e.add(b, self.opts.k_boxes, &mut self.st.kbox_merges);
         if first {
-            self.heap.push(Reverse((
-                self.v.cell(key.0).topo_rank,
-                key.0,
-                key.1,
-            )));
+            self.heap
+                .push(Reverse((self.v.cell(key.0).topo_rank, key.0, key.1)));
         }
     }
 
@@ -919,9 +1039,7 @@ impl<'a> Hier<'a> {
         // ---- own pages: (cell,layer) runs, layer roots skip whole,
         // per-box queries dedup into one sorted set
         let mut psel: BTreeSet<u32> = BTreeSet::new();
-        for pri in cell.prange_start
-            ..cell.prange_start + cell.prange_count
-        {
+        for pri in cell.prange_start..cell.prange_start + cell.prange_count {
             let pr = self.v.prange(pri);
             if !bit_test(&self.req.vis, pr.layer_idx as usize) {
                 self.st.culled_page_layer_roots += 1;
@@ -948,36 +1066,60 @@ impl<'a> Hier<'a> {
                 for pi in pr.page_lo..pr.page_lo + pr.page_count {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
-                    if (p.max_w < self.cut
-                        && p.max_h < self.cut)
-                        || p.max_min < self.page_hair
-                    {
+                    let size_cut = p.max_w < self.cut && p.max_h < self.cut;
+                    if size_cut || p.max_min < self.page_hair {
                         let in_view = boxes.iter().any(|b| p.bbox.intersects(b));
-                        if self.sub_cut_wash
-                            && in_view
-                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h)
-                        {
-                            // sparse: too few members for a wash to
-                            // stand for them and cheap to draw - keep
-                            // the page; its members render as
-                            // hairline pixels, as Calibre shows them
-                            self.st.sub_cut_sparse += 1;
-                            self.note_page("keep_sparse", ci, &p, pi);
-                            psel.insert(pi);
-                            continue;
-                        }
-                        self.st.cull_page_size += 1;
-                        if in_view {
-                            let verdict = if p.max_w < self.cut && p.max_h < self.cut {
-                                "cull_size"
-                            } else {
-                                "cull_hair"
-                            };
-                            self.note_page(verdict, ci, &p, pi);
-                        }
-                        if self.sub_cut_wash && in_view {
-                            wc.washes.push((p.layer_idx, p.bbox));
-                            self.st.sub_cut_washes += 1;
+                        // washable under the sub-cut rules (a size cut
+                        // always, a hairline cut under cull with the
+                        // stricter coverage; diagnostic) or as a
+                        // representative (the page frontier: one in 4^k
+                        // by index within the run, k octaves below its cut)
+                        let rep = in_view
+                            && self.reps
+                            && rep_keeps((pi - pr.page_lo) as u64, self.page_octaves(&p, size_cut));
+                        let washable = in_view && (self.sub_cut_wash || rep);
+                        match self.sub_cut_verdict(&p, &boxes[..], size_cut, washable) {
+                            SubCut::Keep => {
+                                // sparse: too few members for a wash to
+                                // stand for them and cheap to draw - keep
+                                // the page; its members render as
+                                // hairline pixels, as Calibre shows them
+                                if rep {
+                                    self.st.rep_pages_kept += 1;
+                                    self.note_page("rep_keep", ci, &p, pi);
+                                } else {
+                                    self.st.sub_cut_sparse += 1;
+                                    self.note_page("keep_sparse", ci, &p, pi);
+                                }
+                                psel.insert(pi);
+                            }
+                            SubCut::Wash => {
+                                self.st.cull_page_size += 1;
+                                if rep {
+                                    self.st.rep_pages_washed += 1;
+                                    self.note_page("rep_wash", ci, &p, pi);
+                                } else {
+                                    self.st.sub_cut_washes += 1;
+                                    self.note_page(
+                                        if size_cut { "cull_size" } else { "cull_hair" },
+                                        ci,
+                                        &p,
+                                        pi,
+                                    );
+                                }
+                                wc.washes.push((p.layer_idx, p.bbox));
+                            }
+                            SubCut::Drop => {
+                                self.st.cull_page_size += 1;
+                                if in_view {
+                                    self.note_page(
+                                        if size_cut { "cull_size" } else { "cull_hair" },
+                                        ci,
+                                        &p,
+                                        pi,
+                                    );
+                                }
+                            }
                         }
                         continue;
                     }
@@ -993,6 +1135,7 @@ impl<'a> Hier<'a> {
                         &mut psel,
                         ci,
                         pr.layer_idx,
+                        pr.page_lo,
                         &mut wc.washes,
                     );
                 }
@@ -1020,10 +1163,8 @@ impl<'a> Hier<'a> {
             // them; strokes bypass the speckle, so exact geometry
             // saturates into a solid wall)
             if self.wash_px > 0.0 && self.px_per_dbu > 0.0 {
-                let pw = (p.bbox.x1 - p.bbox.x0).max(0) as f64
-                    * self.px_per_dbu;
-                let ph = (p.bbox.y1 - p.bbox.y0).max(0) as f64
-                    * self.px_per_dbu;
+                let pw = (p.bbox.x1 - p.bbox.x0).max(0) as f64 * self.px_per_dbu;
+                let ph = (p.bbox.y1 - p.bbox.y0).max(0) as f64 * self.px_per_dbu;
                 if pw <= self.wash_px && ph <= self.wash_px {
                     wc.washes.push((p.layer_idx, p.bbox));
                     self.st.washed_pages += 1;
@@ -1032,10 +1173,7 @@ impl<'a> Hier<'a> {
                 }
             }
             let mut eff = pi;
-            if self.lod_k > 0.0
-                && self.px_per_dbu > 0.0
-                && p.lod_page != floe_ovm::LOD_PAGE_NONE
-            {
+            if self.lod_k > 0.0 && self.px_per_dbu > 0.0 && p.lod_page != floe_ovm::LOD_PAGE_NONE {
                 let (ew, eh) = (
                     (p.bbox.x1 - p.bbox.x0).max(0),
                     (p.bbox.y1 - p.bbox.y0).max(0),
@@ -1046,19 +1184,10 @@ impl<'a> Hier<'a> {
                 // tiny pages ceil(extent/grid) collapses to 1 DBU
                 // and px_per_dbu > 1 must keep exact (review
                 // finding - the page<=128px form missed this)
-                let cw = ((ew + g - 1) / g).max(1) as f64
-                    * self.px_per_dbu;
-                let ch = ((eh + g - 1) / g).max(1) as f64
-                    * self.px_per_dbu;
-                let (pw, ph) = (
-                    ew as f64 * self.px_per_dbu,
-                    eh as f64 * self.px_per_dbu,
-                );
-                if cw <= 1.0
-                    && ch <= 1.0
-                    && p.members as f64
-                        > self.lod_k * (pw * ph).max(1.0)
-                {
+                let cw = ((ew + g - 1) / g).max(1) as f64 * self.px_per_dbu;
+                let ch = ((eh + g - 1) / g).max(1) as f64 * self.px_per_dbu;
+                let (pw, ph) = (ew as f64 * self.px_per_dbu, eh as f64 * self.px_per_dbu);
+                if cw <= 1.0 && ch <= 1.0 && p.members as f64 > self.lod_k * (pw * ph).max(1.0) {
                     eff = p.lod_page;
                     self.st.lod_swapped += 1;
                 }
@@ -1134,39 +1263,79 @@ impl<'a> Hier<'a> {
                     // walk stops paying O(boundary placements) for
                     // boxes the cut was always going to drop (150M
                     // field case: 4.5s plan for 1023 boxes)
-                    if (node.max_dim as u64) < cut
-                        || (node.max_min as u64) < hair_prune
-                    {
+                    if (node.max_dim as u64) < cut || (node.max_min as u64) < hair_prune {
                         self.st.culled_bvh_size += 1;
                         if self.explain_on && node.bbox.intersects(b) {
                             let nb = node.bbox;
                             let (md, mm) = (node.max_dim as u64, node.max_min as u64);
-                            self.note("cbvh", "prune_size", ci, None, ni as u64, nb, md, md, mm, node.count as u64);
+                            self.note(
+                                "cbvh",
+                                "prune_size",
+                                ci,
+                                None,
+                                ni as u64,
+                                nb,
+                                md,
+                                md,
+                                mm,
+                                node.count as u64,
+                            );
                         }
-                        if !self.sub_cut_wash || !node.bbox.intersects(b) {
-                            continue;
-                        }
-                        // sub-cut wash (jobdeck wide view): walk the
-                        // pruned subtree to its placements while the
-                        // budget lasts - each washes its footprint on
-                        // the layers its child really holds - and
-                        // beyond it wash the node's whole extent on
-                        // this cell's visible layers (coarse). At
-                        // r == 0 the children are outlines only
-                        // (depth exhausted): no wash either way.
-                        if r == 0 {
-                            continue;
-                        }
-                        if self.wash_walk_budget > 0 {
-                            self.wash_walk_budget -= 1;
-                        } else {
-                            if self.wash_nodes.insert(ni) {
-                                let fp = node.bbox;
-                                let mask = self.v.cell_lmask_rec(ci);
-                                self.wash_layers(&mut wc, mask, fp);
-                                self.st.sub_cut_coarse += 1;
+                        // the page frontier: a representative placement
+                        // may live below (index a multiple of 4^k within
+                        // the cell's placements, k from the node's largest
+                        // child): descend; a subtree without one is pruned
+                        let rep_descend = !self.sub_cut_wash
+                            && self.reps
+                            && r != 0
+                            && node.bbox.intersects(b)
+                            && {
+                                let mut k = 0;
+                                if (node.max_dim as u64) < cut {
+                                    k = rep_octaves(node.max_dim as u64, cut);
+                                }
+                                if (node.max_min as u64) < hair_prune {
+                                    k = k.max(rep_octaves(node.max_min as u64, hair_prune));
+                                }
+                                let (lo, hi) = self.cbvh_places(ni);
+                                rep_in_run(lo, hi, cell.place_start, k)
+                            };
+                        if !rep_descend {
+                            if !self.sub_cut_wash || !node.bbox.intersects(b) {
+                                if self.reps && r != 0 && node.bbox.intersects(b) {
+                                    self.st.rep_pruned += 1;
+                                }
+                                continue;
                             }
-                            continue;
+                            // sub-cut wash (jobdeck wide view): walk the
+                            // pruned subtree to its placements while the
+                            // budget lasts - each washes its footprint on
+                            // the layers its child really holds - and
+                            // beyond it wash the node's whole extent on
+                            // this cell's visible layers (coarse). At
+                            // r == 0 the children are outlines only
+                            // (depth exhausted): no wash either way.
+                            if r == 0 {
+                                continue;
+                            }
+                            if self.wash_walk_budget > 0 {
+                                self.wash_walk_budget -= 1;
+                            } else {
+                                if self.wash_nodes.insert(ni) {
+                                    let fp = node.bbox;
+                                    let mask = self.v.cell_lmask_rec(ci);
+                                    if self.wash_layers(
+                                        &mut wc,
+                                        mask,
+                                        fp,
+                                        std::slice::from_ref(b),
+                                        true,
+                                    ) {
+                                        self.st.sub_cut_coarse += 1;
+                                    }
+                                }
+                                continue;
+                            }
                         }
                     }
                     if !node.bbox.intersects(b) {
@@ -1180,9 +1349,7 @@ impl<'a> Hier<'a> {
                     }
                     for k in 0..node.count as u64 {
                         let pli = node.first as u64 + k;
-                        if edges.contains(&pli)
-                            || framed.contains(&pli)
-                        {
+                        if edges.contains(&pli) || framed.contains(&pli) {
                             continue;
                         }
                         let h = self.v.place_head(pli);
@@ -1205,13 +1372,9 @@ impl<'a> Hier<'a> {
                         // instead of merging; the gate lives in
                         // frame_depth_boundary.
                         if r == 0 {
-                            if self.frames_total
-                                < self.opts.frame_cap
-                            {
+                            if self.frames_total < self.opts.frame_cap {
                                 framed.insert(pli);
-                                self.frame_depth_boundary(
-                                    &mut wc, pli, &h, &rb, &boxes,
-                                );
+                                self.frame_depth_boundary(&mut wc, pli, &h, &rb, &boxes);
                             }
                             continue;
                         }
@@ -1225,9 +1388,8 @@ impl<'a> Hier<'a> {
                         // for the identical drawable page set). One
                         // outline now (frames on) or nothing.
                         if r != REM_FULL {
-                            if (cw < cut && chh < cut)
-                                || cw.min(chh) < self.hair
-                            {
+                            let size_cut = cw < cut && chh < cut;
+                            if size_cut || cw.min(chh) < self.hair {
                                 // rev 33: the fold is SILENT. A
                                 // fold box tracked the cut - it
                                 // appeared and vanished with zoom
@@ -1240,19 +1402,47 @@ impl<'a> Hier<'a> {
                                 // only the proxy box is gone,
                                 // matching the depth-full omission
                                 // rule.
-                                if self.sub_cut_wash
-                                    && !self.wash_sub_cut_child(
-                                        &mut wc, pli, &h, &rb, &boxes,
-                                    )
-                                {
-                                    // sparse (no wash could stand for
-                                    // it): walk it - few members, and
-                                    // Calibre shows them at every zoom
-                                    self.st.sub_cut_sparse += 1;
-                                    self.note_child("expand_sparse", pli, &h, &rb, &boxes);
-                                    self.sparse_edges.insert(pli);
-                                    edges.insert(pli);
-                                    continue;
+                                // the page frontier: one placement in
+                                // 4^k (by index within the cell, k
+                                // octaves below its cut) survives as the
+                                // sub-cut rules draw it
+                                let rep = !self.sub_cut_wash
+                                    && self.reps
+                                    && rep_keeps(
+                                        pli - cell.place_start as u64,
+                                        self.place_octaves(cw, chh),
+                                    );
+                                if self.sub_cut_wash || rep {
+                                    if !self.wash_sub_cut_child(
+                                        &mut wc,
+                                        pli,
+                                        &h,
+                                        &rb,
+                                        &boxes,
+                                        self.hair_cut(size_cut),
+                                        rep,
+                                    ) {
+                                        // sparse (no wash could stand for
+                                        // it): walk it - few members, and
+                                        // Calibre shows them at every zoom
+                                        if rep {
+                                            self.st.rep_children += 1;
+                                            self.note_child("rep_expand", pli, &h, &rb, &boxes);
+                                        } else {
+                                            self.st.sub_cut_sparse += 1;
+                                            self.note_child("expand_sparse", pli, &h, &rb, &boxes);
+                                        }
+                                        self.sparse_edges.insert(pli);
+                                        edges.insert(pli);
+                                        continue;
+                                    }
+                                    if rep {
+                                        self.st.rep_children += 1;
+                                        self.st.cull_size += 1;
+                                        framed.insert(pli);
+                                        self.note_child("rep_wash", pli, &h, &rb, &boxes);
+                                        continue;
+                                    }
                                 }
                                 self.st.cull_size += 1;
                                 framed.insert(pli);
@@ -1261,9 +1451,7 @@ impl<'a> Hier<'a> {
                             }
                             if self.opts.frame_cap != 0
                                 || masks_intersect(
-                                    self.v.bitset(
-                                        self.v.cell_lmask_rec(h.child),
-                                    ),
+                                    self.v.bitset(self.v.cell_lmask_rec(h.child)),
                                     &self.walk_vis,
                                 )
                             {
@@ -1286,9 +1474,7 @@ impl<'a> Hier<'a> {
                             continue;
                         }
                         if !masks_intersect(
-                            self.v.bitset(
-                                self.v.cell_lmask_rec(h.child),
-                            ),
+                            self.v.bitset(self.v.cell_lmask_rec(h.child)),
                             &self.walk_vis,
                         ) {
                             self.st.cull_layer += 1;
@@ -1303,27 +1489,56 @@ impl<'a> Hier<'a> {
                         // stripes. Until a per-(cell,layer) proxy is
                         // available, omit the below-cut child instead
                         // of displaying false geometry.
-                        if (cw < cut && chh < cut)
-                            || cw.min(chh) < self.hair
-                        {
-                            if self.sub_cut_wash
-                                && !self.wash_sub_cut_child(
-                                    &mut wc, pli, &h, &rb, &boxes,
-                                )
-                            {
-                                // sparse (no wash could stand for it):
-                                // expand - few members, and Calibre
-                                // shows them at every zoom
-                                self.st.sub_cut_sparse += 1;
-                                self.note_child("expand_sparse", pli, &h, &rb, &boxes);
-                                self.sparse_edges.insert(pli);
-                                edges.insert(pli);
-                                continue;
+                        let size_cut = cw < cut && chh < cut;
+                        if size_cut || cw.min(chh) < self.hair {
+                            let rep = !self.sub_cut_wash
+                                && self.reps
+                                && rep_keeps(
+                                    pli - cell.place_start as u64,
+                                    self.place_octaves(cw, chh),
+                                );
+                            if self.sub_cut_wash || rep {
+                                if !self.wash_sub_cut_child(
+                                    &mut wc,
+                                    pli,
+                                    &h,
+                                    &rb,
+                                    &boxes,
+                                    self.hair_cut(size_cut),
+                                    rep,
+                                ) {
+                                    // sparse (no wash could stand for it):
+                                    // expand - few members, and Calibre
+                                    // shows them at every zoom
+                                    if rep {
+                                        self.st.rep_children += 1;
+                                        self.note_child("rep_expand", pli, &h, &rb, &boxes);
+                                    } else {
+                                        self.st.sub_cut_sparse += 1;
+                                        self.note_child("expand_sparse", pli, &h, &rb, &boxes);
+                                    }
+                                    self.sparse_edges.insert(pli);
+                                    edges.insert(pli);
+                                    continue;
+                                }
+                                if rep {
+                                    self.st.rep_children += 1;
+                                    self.st.cull_size += 1;
+                                    self.note_child("rep_wash", pli, &h, &rb, &boxes);
+                                    continue;
+                                }
                             }
                             self.st.cull_size += 1;
                             self.note_child(
-                                if cw < cut && chh < cut { "omit_size" } else { "omit_hair" },
-                                pli, &h, &rb, &boxes,
+                                if cw < cut && chh < cut {
+                                    "omit_size"
+                                } else {
+                                    "omit_hair"
+                                },
+                                pli,
+                                &h,
+                                &rb,
+                                &boxes,
                             );
                             continue;
                         }
@@ -1379,7 +1594,9 @@ impl<'a> Hier<'a> {
     /// shows them at every zoom - user 2026-09-15) and a sparse
     /// placement expanded, the cost being bounded by the very
     /// sparseness that ruled the wash out.
-    fn wash_worth(&self, fp: &BBox, members: u64, w: u64, h: u64) -> bool {
+    /// `hair`: the item is hairline-cut under the cull policy, where
+    /// the stricter WASH_MIN_COVERAGE_HAIR applies.
+    fn wash_worth(&self, fp: &BBox, members: u64, w: u64, h: u64, hair: bool) -> bool {
         if self.wash_blob(fp) {
             return true;
         }
@@ -1388,7 +1605,172 @@ impl<'a> Hier<'a> {
         let fh = ((fp.y1 - fp.y0).max(0) as f64 * ppd).max(1.0);
         let mw = (w as f64 * ppd).max(1.0);
         let mh = (h as f64 * ppd).max(1.0);
-        (members as f64) * mw * mh >= WASH_MIN_COVERAGE * fw * fh
+        let min = if hair {
+            hair_wash_coverage()
+        } else {
+            WASH_MIN_COVERAGE
+        };
+        (members as f64) * mw * mh >= min * fw * fh
+    }
+
+    /// Screen px of `fp` inside the view boxes - the raster cost of a
+    /// wash there (0 when px_per_dbu is 0: a probe costs no raster).
+    fn visible_px(&self, fp: &BBox, boxes: &[BBox]) -> f64 {
+        let ppd = self.px_per_dbu;
+        if !(ppd > 0.0) {
+            return 0.0;
+        }
+        let mut px = 0.0;
+        for b in boxes {
+            let (x0, x1) = (fp.x0.max(b.x0), fp.x1.min(b.x1));
+            let (y0, y1) = (fp.y0.max(b.y0), fp.y1.min(b.y1));
+            if x1 > x0 && y1 > y0 {
+                px += ((x1 - x0) as f64 * ppd).max(1.0) * ((y1 - y0) as f64 * ppd).max(1.0);
+            }
+        }
+        px
+    }
+
+    /// Takes a sparse item's ink estimate (members x member px, each
+    /// member at least one pixel, as wash_worth measures it) from the
+    /// per-plan sparse budget; false when it does not fit - the item
+    /// is dropped as the cull always did (sub_cut_sparse_over).
+    fn take_sparse(&mut self, members: u64, w: u64, h: u64) -> bool {
+        let ppd = self.px_per_dbu;
+        let ink = if ppd > 0.0 {
+            members as f64 * (w as f64 * ppd).max(1.0) * (h as f64 * ppd).max(1.0)
+        } else {
+            members as f64
+        };
+        if ink <= self.sparse_px_left {
+            self.sparse_px_left -= ink;
+            true
+        } else {
+            self.st.sub_cut_sparse_over += 1;
+            false
+        }
+    }
+
+    /// Takes the visible area of a wash (`layers` rects of `fp`) from
+    /// the per-plan wash budget; false when it does not fit - the item
+    /// is dropped as the cull always did (sub_cut_wash_over).
+    fn take_wash(&mut self, fp: &BBox, boxes: &[BBox], layers: u64) -> bool {
+        let px = self.visible_px(fp, boxes) * layers as f64;
+        if px <= self.wash_px_left {
+            self.wash_px_left -= px;
+            true
+        } else {
+            self.st.sub_cut_wash_over += 1;
+            false
+        }
+    }
+
+    /// A cut page in view: the sub-cut verdict when `washable` (the
+    /// sub-cut rules, or the page is a representative) - sparse pages
+    /// are kept and drawn as pixels, dense ones washed, either within
+    /// the per-plan budgets - else Drop
+    fn sub_cut_verdict(
+        &mut self,
+        p: &floe_ovm::PageV,
+        boxes: &[BBox],
+        size_cut: bool,
+        washable: bool,
+    ) -> SubCut {
+        if !washable {
+            return SubCut::Drop;
+        }
+        let hair = self.hair_cut(size_cut);
+        if !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, hair) {
+            // a sparse page beyond the budget is dropped, never
+            // washed (its footprint is a false block)
+            return if self.take_sparse(p.members, p.max_w, p.max_h) {
+                SubCut::Keep
+            } else {
+                SubCut::Drop
+            };
+        }
+        if self.take_wash(&p.bbox, boxes, 1) {
+            SubCut::Wash
+        } else {
+            SubCut::Drop
+        }
+    }
+
+    /// the octaves a cut page sits below its cut: the hairline cut
+    /// under cull and the size cut, whichever cut it first (the
+    /// deeper one - it vanished at that zoom)
+    fn page_octaves(&self, p: &floe_ovm::PageV, size_cut: bool) -> u32 {
+        let mut k = 0;
+        if size_cut {
+            k = rep_octaves(p.max_w.max(p.max_h), self.cut);
+        }
+        if self.page_hair > 0 && p.max_min < self.page_hair {
+            k = k.max(rep_octaves(p.max_min, self.page_hair));
+        }
+        k
+    }
+
+    /// the octaves a cut placement (child box cw x chh) sits below its cut
+    fn place_octaves(&self, cw: u64, chh: u64) -> u32 {
+        let mut k = 0;
+        if cw < self.cut && chh < self.cut {
+            k = rep_octaves(cw.max(chh), self.cut);
+        }
+        if cw.min(chh) < self.hair {
+            k = k.max(rep_octaves(cw.min(chh), self.hair));
+        }
+        k
+    }
+
+    /// the pages of a page-BVH subtree, [lo, hi): pages are laid out in
+    /// tree order (finish_layer's leaf-order permute), so the first
+    /// leaf's first page and the last leaf's end bound the subtree
+    fn pbvh_pages(&self, ni: u32) -> (u32, u32) {
+        let mut a = ni;
+        let lo = loop {
+            let n = self.v.pbvh(a);
+            if n.leaf || n.count == 0 {
+                break n.first;
+            }
+            a = n.first;
+        };
+        let mut z = ni;
+        let hi = loop {
+            let n = self.v.pbvh(z);
+            if n.leaf || n.count == 0 {
+                break n.first + n.count as u32;
+            }
+            z = n.first + n.count as u32 - 1;
+        };
+        (lo, hi)
+    }
+
+    /// the placements of a child-BVH subtree, [lo, hi)
+    fn cbvh_places(&self, ni: u32) -> (u32, u32) {
+        let mut a = ni;
+        let lo = loop {
+            let n = self.v.bvh(a);
+            if n.leaf || n.count == 0 {
+                break n.first;
+            }
+            a = n.first;
+        };
+        let mut z = ni;
+        let hi = loop {
+            let n = self.v.bvh(z);
+            if n.leaf || n.count == 0 {
+                break n.first + n.count as u32;
+            }
+            z = n.first + n.count as u32 - 1;
+        };
+        (lo, hi)
+    }
+
+    /// Whether a culled item is a hairline cut under the cull policy
+    /// (a size cut, or any cut under keep where page_hair is 0, takes
+    /// the dense-array coverage rule).
+    fn hair_cut(&self, size_cut: bool) -> bool {
+        !size_cut && self.page_hair > 0
     }
 
     /// Returns false when the placement is sparse (no wash could
@@ -1400,6 +1782,8 @@ impl<'a> Hier<'a> {
         h: &floe_ovm::PlaceHead,
         rb: &BBox,
         boxes: &[BBox],
+        hair: bool,
+        rep: bool,
     ) -> bool {
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, rb);
@@ -1422,17 +1806,29 @@ impl<'a> Hier<'a> {
         }
         let bw = (b0.x1 - b0.x0).max(0) as u64;
         let bh = (b0.y1 - b0.y0).max(0) as u64;
-        if !self.wash_worth(&fp, members, bw, bh) {
-            return false;
+        if !self.wash_worth(&fp, members, bw, bh, hair) {
+            // sparse: expanded while the sparse budget lasts; beyond
+            // it dropped (the caller's cull), never washed
+            return !self.take_sparse(members, bw, bh);
         }
         let mask = self.v.cell_lmask_rec(h.child);
-        self.wash_layers(wc, mask, fp);
+        self.wash_layers(wc, mask, fp, boxes, !rep);
         true
     }
 
-    /// One wash rect `fp` per visible layer in bitset `mask`.
-    fn wash_layers(&mut self, wc: &mut WsCell, mask: u32, fp: BBox) {
-        let bits = self.v.bitset(mask);
+    /// One wash rect `fp` per visible layer in bitset `mask`, when the
+    /// wash budget covers them (false: dropped, sub_cut_wash_over).
+    fn wash_layers(
+        &mut self,
+        wc: &mut WsCell,
+        mask: u32,
+        fp: BBox,
+        boxes: &[BBox],
+        count: bool,
+    ) -> bool {
+        let v = self.v;
+        let bits = v.bitset(mask);
+        let mut layers: Vec<u32> = Vec::new();
         for (byte_index, (&m, &vis)) in bits.iter().zip(self.wash_vis.iter()).enumerate() {
             let both = m & vis;
             if both == 0 {
@@ -1440,11 +1836,23 @@ impl<'a> Hier<'a> {
             }
             for bit in 0..8 {
                 if both & (1 << bit) != 0 {
-                    wc.washes.push(((byte_index * 8 + bit) as u32, fp));
-                    self.st.sub_cut_washes += 1;
+                    layers.push((byte_index * 8 + bit) as u32);
                 }
             }
         }
+        if layers.is_empty() {
+            return true;
+        }
+        if !self.take_wash(&fp, boxes, layers.len() as u64) {
+            return false;
+        }
+        for layer in layers {
+            wc.washes.push((layer, fp));
+            if count {
+                self.st.sub_cut_washes += 1;
+            }
+        }
+        true
     }
 
     /// One explain row (HierOpts::explain); a no-op otherwise.
@@ -1480,7 +1888,18 @@ impl<'a> Hier<'a> {
 
     fn note_page(&mut self, verdict: &'static str, cell: u32, p: &floe_ovm::PageV, pi: u32) {
         if self.explain_on {
-            self.note("page", verdict, cell, Some(p.layer_idx), pi as u64, p.bbox, p.max_w, p.max_h, p.max_min, p.members);
+            self.note(
+                "page",
+                verdict,
+                cell,
+                Some(p.layer_idx),
+                pi as u64,
+                p.bbox,
+                p.max_w,
+                p.max_h,
+                p.max_min,
+                p.members,
+            );
         }
     }
 
@@ -1508,9 +1927,21 @@ impl<'a> Hier<'a> {
             0 => 1,
             _ => self.v.pts_ref(pli).map(|pr| pr.count as u64).unwrap_or(1),
         };
-        self.note("child", verdict, h.child, None, pli, wb, cw, chh, cw.min(chh), members);
+        self.note(
+            "child",
+            verdict,
+            h.child,
+            None,
+            pli,
+            wb,
+            cw,
+            chh,
+            cw.min(chh),
+            members,
+        );
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn walk_pbvh(
         &mut self,
@@ -1519,6 +1950,7 @@ impl<'a> Hier<'a> {
         psel: &mut BTreeSet<u32>,
         cell: u32,
         layer_idx: u32,
+        page_lo: u32,
         washes: &mut Vec<(u32, BBox)>,
     ) {
         let mut stack = vec![root];
@@ -1530,7 +1962,18 @@ impl<'a> Hier<'a> {
                 if self.explain_on && n.bbox.intersects(b) {
                     let nb = n.bbox;
                     let (mw, mh) = (n.max_w, n.max_h);
-                    self.note("pbvh", "cull_size", cell, Some(layer_idx), ni as u64, nb, mw, mh, mw.min(mh), n.count as u64);
+                    self.note(
+                        "pbvh",
+                        "cull_size",
+                        cell,
+                        Some(layer_idx),
+                        ni as u64,
+                        nb,
+                        mw,
+                        mh,
+                        mw.min(mh),
+                        n.count as u64,
+                    );
                 }
                 // sub-cut wash: a node that is one screen blob, or
                 // at most WASH_WIDE_NODE_PX on both sides, washes
@@ -1541,18 +1984,36 @@ impl<'a> Hier<'a> {
                 // beyond the budget washes its extent coarsely
                 if self.sub_cut_wash && n.bbox.intersects(b) {
                     if self.wash_blob(&n.bbox) || !self.wash_wide(&n.bbox) {
-                        washes.push((layer_idx, n.bbox));
-                        self.st.sub_cut_washes += 1;
+                        if self.take_wash(&n.bbox, std::slice::from_ref(b), 1) {
+                            washes.push((layer_idx, n.bbox));
+                            self.st.sub_cut_washes += 1;
+                        }
                         continue;
                     }
                     if self.wash_walk_budget == 0 {
-                        washes.push((layer_idx, n.bbox));
-                        self.st.sub_cut_washes += 1;
-                        self.st.sub_cut_coarse += 1;
+                        if self.take_wash(&n.bbox, std::slice::from_ref(b), 1) {
+                            washes.push((layer_idx, n.bbox));
+                            self.st.sub_cut_washes += 1;
+                            self.st.sub_cut_coarse += 1;
+                        }
                         continue;
                     }
                     self.wash_walk_budget -= 1;
+                } else if self.reps && n.bbox.intersects(b) && {
+                    // the page frontier: a representative may live below
+                    // (an index that is a multiple of 4^k within the
+                    // run, k from the node's largest page - the smallest
+                    // k of any page below): descend; a subtree without
+                    // one is pruned, so the walk costs what the
+                    // representatives cost
+                    let (lo, hi) = self.pbvh_pages(ni);
+                    rep_in_run(lo, hi, page_lo, rep_octaves(n.max_w.max(n.max_h), self.cut))
+                } {
+                    // descend
                 } else {
+                    if self.reps && n.bbox.intersects(b) {
+                        self.st.rep_pruned += 1;
+                    }
                     continue;
                 }
             }
@@ -1564,33 +2025,53 @@ impl<'a> Hier<'a> {
                 for pi in n.first..n.first + n.count as u32 {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
-                    if (p.max_w < self.cut
-                        && p.max_h < self.cut)
-                        || p.max_min < self.page_hair
-                    {
+                    let size_cut = p.max_w < self.cut && p.max_h < self.cut;
+                    if size_cut || p.max_min < self.page_hair {
                         let in_view = p.bbox.intersects(b);
-                        if self.sub_cut_wash
-                            && in_view
-                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h)
+                        // see the linear page loop
+                        let rep = in_view
+                            && self.reps
+                            && rep_keeps((pi - page_lo) as u64, self.page_octaves(&p, size_cut));
+                        let washable = in_view && (self.sub_cut_wash || rep);
+                        match self.sub_cut_verdict(&p, std::slice::from_ref(b), size_cut, washable)
                         {
-                            // sparse: kept, see the linear page loop
-                            self.st.sub_cut_sparse += 1;
-                            self.note_page("keep_sparse", cell, &p, pi);
-                            psel.insert(pi);
-                            continue;
-                        }
-                        self.st.cull_page_size += 1;
-                        if in_view {
-                            let verdict = if p.max_w < self.cut && p.max_h < self.cut {
-                                "cull_size"
-                            } else {
-                                "cull_hair"
-                            };
-                            self.note_page(verdict, cell, &p, pi);
-                        }
-                        if self.sub_cut_wash && in_view {
-                            washes.push((layer_idx, p.bbox));
-                            self.st.sub_cut_washes += 1;
+                            SubCut::Keep => {
+                                if rep {
+                                    self.st.rep_pages_kept += 1;
+                                    self.note_page("rep_keep", cell, &p, pi);
+                                } else {
+                                    self.st.sub_cut_sparse += 1;
+                                    self.note_page("keep_sparse", cell, &p, pi);
+                                }
+                                psel.insert(pi);
+                            }
+                            SubCut::Wash => {
+                                self.st.cull_page_size += 1;
+                                if rep {
+                                    self.st.rep_pages_washed += 1;
+                                    self.note_page("rep_wash", cell, &p, pi);
+                                } else {
+                                    self.st.sub_cut_washes += 1;
+                                    self.note_page(
+                                        if size_cut { "cull_size" } else { "cull_hair" },
+                                        cell,
+                                        &p,
+                                        pi,
+                                    );
+                                }
+                                washes.push((layer_idx, p.bbox));
+                            }
+                            SubCut::Drop => {
+                                self.st.cull_page_size += 1;
+                                if in_view {
+                                    self.note_page(
+                                        if size_cut { "cull_size" } else { "cull_hair" },
+                                        cell,
+                                        &p,
+                                        pi,
+                                    );
+                                }
+                            }
                         }
                         continue;
                     }
@@ -1641,7 +2122,18 @@ impl<'a> Hier<'a> {
         if bw < self.cut && bh < self.cut {
             self.st.cull_size += 1;
             if in_view {
-                self.note("frame", "cull_size", h.child, None, pli, b0, bw, bh, bw.min(bh), 0);
+                self.note(
+                    "frame",
+                    "cull_size",
+                    h.child,
+                    None,
+                    pli,
+                    b0,
+                    bw,
+                    bh,
+                    bw.min(bh),
+                    0,
+                );
             }
             return;
         }
@@ -1654,7 +2146,18 @@ impl<'a> Hier<'a> {
             if self.thin_dbu > 0 {
                 self.st.thin_frames += 1;
                 if in_view {
-                    self.note("frame", "thin_lattice", h.child, None, pli, b0, bw, bh, bw.min(bh), 0);
+                    self.note(
+                        "frame",
+                        "thin_lattice",
+                        h.child,
+                        None,
+                        pli,
+                        b0,
+                        bw,
+                        bh,
+                        bw.min(bh),
+                        0,
+                    );
                 }
                 self.frame_thin_lattice(wc, pli, h, &b0, boxes);
                 return;
@@ -1663,25 +2166,40 @@ impl<'a> Hier<'a> {
             if bw.min(bh) < self.hair {
                 self.st.cull_size += 1;
                 if in_view {
-                    self.note("frame", "cull_hair", h.child, None, pli, b0, bw, bh, bw.min(bh), 0);
+                    self.note(
+                        "frame",
+                        "cull_hair",
+                        h.child,
+                        None,
+                        pli,
+                        b0,
+                        bw,
+                        bh,
+                        bw.min(bh),
+                        0,
+                    );
                 }
                 return;
             }
         }
         if in_view {
-            self.note("frame", "keep", h.child, None, pli, b0, bw, bh, bw.min(bh), 0);
+            self.note(
+                "frame",
+                "keep",
+                h.child,
+                None,
+                pli,
+                b0,
+                bw,
+                bh,
+                bw.min(bh),
+                0,
+            );
         }
         let (rect, rep, fp) = match h.kind {
             0 => (b0, Rep::One, b0),
             1 => {
-                let ov = grid_ovis(
-                    0,
-                    h.na as i64 - 1,
-                    0,
-                    h.nb as i64 - 1,
-                    h.va,
-                    h.vb,
-                );
+                let ov = grid_ovis(0, h.na as i64 - 1, 0, h.nb as i64 - 1, h.va, h.vb);
                 let fp = grow_by_offsets(&b0, &ov);
                 let rep = Rep::Grid {
                     na: h.na as u64,
@@ -1698,8 +2216,7 @@ impl<'a> Hier<'a> {
                 if pr.count > self.opts.pts_full_rep {
                     (fp, Rep::One, fp)
                 } else {
-                    let mut pts =
-                        Vec::with_capacity(pr.count as usize);
+                    let mut pts = Vec::with_capacity(pr.count as usize);
                     for s in 0..pr.count {
                         pts.push(pr.pt(s));
                     }
@@ -1737,11 +2254,7 @@ impl<'a> Hier<'a> {
         };
         match h.kind {
             0 => {
-                let key = (
-                    h.child,
-                    b0.x0.div_euclid(t),
-                    b0.y0.div_euclid(t),
-                );
+                let key = (h.child, b0.x0.div_euclid(t), b0.y0.div_euclid(t));
                 if self.thin_bins.insert(key) {
                     self.push_frame(wc, *b0, Rep::One, b0, boxes);
                 }
@@ -1750,7 +2263,11 @@ impl<'a> Hier<'a> {
                 let (na, nb) = (h.na as i64, h.nb as i64);
                 let stride = |v: (i64, i64)| {
                     let p = v.0.abs().max(v.1.abs());
-                    if p <= 0 { 1 } else { ((t + p - 1) / p).max(1) }
+                    if p <= 0 {
+                        1
+                    } else {
+                        ((t + p - 1) / p).max(1)
+                    }
                 };
                 let (ka, kb) = (stride(h.va), stride(h.vb));
                 let demote = self.thin_demote;
@@ -1764,32 +2281,24 @@ impl<'a> Hier<'a> {
                 let (oas, obs) = (offs(ka), offs(kb));
                 // members of the axis sub-lattice i = o (mod k)
                 let cnt = |o: i64, n: i64, k: i64| {
-                    if o >= n { 0 } else { (n - o + k - 1) / k }
+                    if o >= n {
+                        0
+                    } else {
+                        (n - o + k - 1) / k
+                    }
                 };
-                let sat = |v: i128| {
-                    v.clamp(i64::MIN as i128, i64::MAX as i128)
-                        as i64
-                };
+                let sat = |v: i128| v.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
                 for &oa in &oas {
                     for &ob in &obs {
-                        let (ca, cb) =
-                            (cnt(oa, na, ka), cnt(ob, nb, kb));
+                        let (ca, cb) = (cnt(oa, na, ka), cnt(ob, nb, kb));
                         if ca == 0 || cb == 0 {
                             continue;
                         }
-                        let dx = sat(oa as i128 * h.va.0 as i128
-                            + ob as i128 * h.vb.0 as i128);
-                        let dy = sat(oa as i128 * h.va.1 as i128
-                            + ob as i128 * h.vb.1 as i128);
+                        let dx = sat(oa as i128 * h.va.0 as i128 + ob as i128 * h.vb.0 as i128);
+                        let dy = sat(oa as i128 * h.va.1 as i128 + ob as i128 * h.vb.1 as i128);
                         let base = shift(b0, dx, dy);
-                        let sva = (
-                            h.va.0.saturating_mul(ka),
-                            h.va.1.saturating_mul(ka),
-                        );
-                        let svb = (
-                            h.vb.0.saturating_mul(kb),
-                            h.vb.1.saturating_mul(kb),
-                        );
+                        let sva = (h.va.0.saturating_mul(ka), h.va.1.saturating_mul(ka));
+                        let svb = (h.vb.0.saturating_mul(kb), h.vb.1.saturating_mul(kb));
                         let rep = if ca == 1 && cb == 1 {
                             Rep::One
                         } else {
@@ -1800,14 +2309,7 @@ impl<'a> Hier<'a> {
                                 vb: svb,
                             }
                         };
-                        let ov = grid_ovis(
-                            0,
-                            ca - 1,
-                            0,
-                            cb - 1,
-                            sva,
-                            svb,
-                        );
+                        let ov = grid_ovis(0, ca - 1, 0, cb - 1, sva, svb);
                         let fp = grow_by_offsets(&base, &ov);
                         self.push_frame(wc, base, rep, &fp, boxes);
                     }
@@ -1856,14 +2358,7 @@ impl<'a> Hier<'a> {
         }
     }
 
-    fn push_frame(
-        &mut self,
-        wc: &mut WsCell,
-        rect: BBox,
-        rep: Rep,
-        fp: &BBox,
-        boxes: &[BBox],
-    ) {
+    fn push_frame(&mut self, wc: &mut WsCell, rect: BBox, rep: Rep, fp: &BBox, boxes: &[BBox]) {
         if boxes.iter().any(|b| fp.intersects(b)) {
             // band from the box actually drawn (member box for
             // per-member reps, footprint for fused ones)
@@ -1874,22 +2369,11 @@ impl<'a> Hier<'a> {
         }
     }
 
-    fn place_edge(
-        &mut self,
-        wc: &mut WsCell,
-        r: u32,
-        pli: u64,
-        boxes: &[BBox],
-    ) {
+    fn place_edge(&mut self, wc: &mut WsCell, r: u32, pli: u64, boxes: &[BBox]) {
         let h = self.v.place_head(pli);
         let child = self.v.cell(h.child);
         let structural = r != REM_FULL;
-        if !structural
-            && !masks_intersect(
-                self.v.bitset(child.lmask_rec),
-                &self.walk_vis,
-            )
-        {
+        if !structural && !masks_intersect(self.v.bitset(child.lmask_rec), &self.walk_vis) {
             self.st.cull_layer += 1;
             return;
         }
@@ -1908,8 +2392,7 @@ impl<'a> Hier<'a> {
         // washing (expand_sparse) passes the cut here on purpose
         if !structural
             && !self.sparse_edges.contains(&pli)
-            && ((cw < self.cut && ch < self.cut)
-                || cw.min(ch) < self.hair)
+            && ((cw < self.cut && ch < self.cut) || cw.min(ch) < self.hair)
         {
             self.st.cull_size += 1;
             return;
@@ -1927,8 +2410,7 @@ impl<'a> Hier<'a> {
                     if !b0.intersects(b) {
                         continue;
                     }
-                    let c = xf_bbox(&t0.invert(), b)
-                        .intersect(&child.rbbox);
+                    let c = xf_bbox(&t0.invert(), b).intersect(&child.rbbox);
                     if !c.is_empty() {
                         vis = true;
                         self.contribute(ckey, c);
@@ -1950,22 +2432,12 @@ impl<'a> Hier<'a> {
                 let mut vis = false;
                 for b in boxes {
                     let rbox = minkowski_neg(b, &b0);
-                    let (i0, i1, j0, j1) = match grid_ranges(
-                        h.na as i64,
-                        h.nb as i64,
-                        h.va,
-                        h.vb,
-                        &rbox,
-                    ) {
-                        GridVis::Empty => continue,
-                        GridVis::Range { i0, i1, j0, j1 } => {
-                            (i0, i1, j0, j1)
-                        }
-                    };
-                    if h.na > 1
-                        && h.nb > 1
-                        && grid_degenerate(h.va, h.vb)
-                    {
+                    let (i0, i1, j0, j1) =
+                        match grid_ranges(h.na as i64, h.nb as i64, h.va, h.vb, &rbox) {
+                            GridVis::Empty => continue,
+                            GridVis::Range { i0, i1, j0, j1 } => (i0, i1, j0, j1),
+                        };
+                    if h.na > 1 && h.nb > 1 && grid_degenerate(h.va, h.vb) {
                         self.st.grid_fallback_full += 1;
                     }
                     // O_vis = bbox of the visible-index corners;
@@ -1973,8 +2445,7 @@ impl<'a> Hier<'a> {
                     // clipped to rbbox (par.2.3 step 3)
                     let ovis = grid_ovis(i0, i1, j0, j1, h.va, h.vb);
                     let shifted = minkowski_neg(b, &ovis);
-                    let c = xf_bbox(&t0.invert(), &shifted)
-                        .intersect(&child.rbbox);
+                    let c = xf_bbox(&t0.invert(), &shifted).intersect(&child.rbbox);
                     if !c.is_empty() {
                         vis = true;
                         self.contribute(ckey, c);
@@ -2069,8 +2540,7 @@ impl<'a> Hier<'a> {
                     }
                     if !ovis.is_empty() {
                         let shifted = minkowski_neg(b, &ovis);
-                        let c = xf_bbox(&t0.invert(), &shifted)
-                            .intersect(&child.rbbox);
+                        let c = xf_bbox(&t0.invert(), &shifted).intersect(&child.rbbox);
                         if !c.is_empty() {
                             contribs.push(c);
                         }
@@ -2086,8 +2556,7 @@ impl<'a> Hier<'a> {
                 // selected subset. Both REBASE (par.2.3): the pool
                 // is Morton-ordered, so even "full" re-anchors on
                 // its first slot.
-                let emit: Vec<u32> = if count <= self.opts.pts_full_rep
-                {
+                let emit: Vec<u32> = if count <= self.opts.pts_full_rep {
                     (0..count).collect()
                 } else {
                     sel.into_iter().collect()
@@ -2097,8 +2566,7 @@ impl<'a> Hier<'a> {
                 }
                 self.st.pts_selected += emit.len() as u64;
                 let sub = |a: i64, b: i64| -> i64 {
-                    i64::try_from(a as i128 - b as i128)
-                        .expect("pts rebase overflow")
+                    i64::try_from(a as i128 - b as i128).expect("pts rebase overflow")
                 };
                 let (dx, dy, rep) = if emit.len() == 1 {
                     let (ox, oy) = pr.pt(emit[0]);
@@ -2130,7 +2598,12 @@ impl<'a> Hier<'a> {
 }
 
 fn pt_box(x: i64, y: i64) -> BBox {
-    BBox { x0: x, y0: y, x1: x, y1: y }
+    BBox {
+        x0: x,
+        y0: y,
+        x1: x,
+        y1: y,
+    }
 }
 
 fn grid_degenerate(va: (i64, i64), vb: (i64, i64)) -> bool {
@@ -2158,13 +2631,8 @@ fn grow_by_offsets(base: &BBox, off: &BBox) -> BBox {
 /// any layer set. The viewer derives the same value from meta's
 /// layer list with the IDENTICAL rule.
 pub fn frame_layer(v: &Ovm) -> (u32, u32) {
-    let used: HashSet<u32> =
-        (0..v.n_layers).map(|li| v.layer(li).layer).collect();
-    let mut fl = used
-        .iter()
-        .max()
-        .map_or(1, |m| m.saturating_add(1))
-        .max(1);
+    let used: HashSet<u32> = (0..v.n_layers).map(|li| v.layer(li).layer).collect();
+    let mut fl = used.iter().max().map_or(1, |m| m.saturating_add(1)).max(1);
     while used.contains(&fl) {
         fl -= 1; // only reachable when max == u32::MAX; the used
                  // set is finite, so an unused number exists below
@@ -2192,7 +2660,8 @@ impl crate::Vfs {
         match std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() {
             Ok("cull") | Ok("keep") => {
                 let mut req = req.clone();
-                req.page_hairline = std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() == Ok("cull");
+                req.page_hairline =
+                    std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() == Ok("cull");
                 plan_hier(&self.ovm, &req, &HierOpts::default())
             }
             _ => plan_hier(&self.ovm, req, &HierOpts::default()),
@@ -2213,9 +2682,7 @@ impl crate::Vfs {
         avail: Option<&std::collections::HashSet<u32>>,
     ) -> Result<Vec<u8>, String> {
         use floe_oasis::doc::RectRec;
-        use floe_oasis::write::{
-            splice_tree, tree_body, write_tree, WCell,
-        };
+        use floe_oasis::write::{splice_tree, tree_body, write_tree, WCell};
         let payloads = self.read_page_payloads(new_pages)?;
         let (frame_fl, frame_fd) = frame_layer(&self.ovm);
         // owned storage first - WCell borrows names/rects/reps
@@ -2260,8 +2727,7 @@ impl crate::Vfs {
                         }
                     }))
                     .collect();
-                let mut places =
-                    Vec::with_capacity(w.pages.len() + w.insts.len());
+                let mut places = Vec::with_capacity(w.pages.len() + w.insts.len());
                 for &pi in &w.pages {
                     // streaming (par.5 M3.5): a partial delta must
                     // only reference MATERIALIZED pages - a name
@@ -2273,14 +2739,7 @@ impl crate::Vfs {
                             continue;
                         }
                     }
-                    places.push((
-                        self.page_name(pi),
-                        0,
-                        0,
-                        0u8,
-                        false,
-                        Rep::One,
-                    ));
+                    places.push((self.page_name(pi), 0, 0, 0u8, false, Rep::One));
                 }
                 for i in &w.insts {
                     places.push((
@@ -2292,7 +2751,11 @@ impl crate::Vfs {
                         i.rep.clone(),
                     ));
                 }
-                Pre { name: ws_name(gen, w.key), rects, places }
+                Pre {
+                    name: ws_name(gen, w.key),
+                    rects,
+                    places,
+                }
             })
             .collect();
         let wcells: Vec<WCell> = pre
@@ -2306,18 +2769,14 @@ impl crate::Vfs {
                 places: p
                     .places
                     .iter()
-                    .map(|(n, x, y, r, f, rep)| {
-                        (n.as_str(), *x, *y, *r, *f, rep)
-                    })
+                    .map(|(n, x, y, r, f, rep)| (n.as_str(), *x, *y, *r, *f, rep))
                     .collect(),
             })
             .collect();
-        let mut bodies: Vec<&[u8]> =
-            payloads.iter().map(|p| tree_body(p)).collect();
+        let mut bodies: Vec<&[u8]> = payloads.iter().map(|p| tree_body(p)).collect();
         let authored;
         if !wcells.is_empty() {
-            authored = write_tree(&wcells, self.ovm.unit)
-                .map_err(|e| e.to_string())?;
+            authored = write_tree(&wcells, self.ovm.unit).map_err(|e| e.to_string())?;
             bodies.push(tree_body(&authored));
         }
         Ok(splice_tree(self.ovm.unit, &bodies))
@@ -2334,12 +2793,7 @@ mod tests {
         BBox { x0, y0, x1, y1 }
     }
 
-    fn rq_px(
-        view: BBox,
-        cut: i64,
-        depth: u32,
-        px_per_dbu: f64,
-    ) -> ViewReq {
+    fn rq_px(view: BBox, cut: i64, depth: u32, px_per_dbu: f64) -> ViewReq {
         ViewReq {
             view,
             cut_dbu: cut,
@@ -2347,9 +2801,10 @@ mod tests {
             depth,
             px_per_dbu,
             sub_cut_wash: false,
-                    page_hairline: false,
-                    page_skip: Vec::new(),
-                    prune_skipped: false,
+            page_reps: false,
+            page_hairline: false,
+            page_skip: Vec::new(),
+            prune_skipped: false,
         }
     }
 
@@ -2364,48 +2819,59 @@ mod tests {
         let m = b.bitset(&[1]);
         let pb = bx(0, 0, 100_000, 100_000);
         b.page(
-            0, 0, 0, &pb, 0, 0, 0, 1, 1_000_000, 50, 50,
-            floe_ovm::LOD_EXACT, 1,
+            0,
+            0,
+            0,
+            &pb,
+            0,
+            0,
+            0,
+            1,
+            1_000_000,
+            50,
+            50,
+            floe_ovm::LOD_EXACT,
+            1,
         );
         b.page(
-            0, 0, 0, &pb, 0, 0, 0, 1, 4_000, 1000, 1000,
-            floe_ovm::LOD_MERGED, floe_ovm::LOD_PAGE_NONE,
+            0,
+            0,
+            0,
+            &pb,
+            0,
+            0,
+            0,
+            1,
+            4_000,
+            1000,
+            1000,
+            floe_ovm::LOD_MERGED,
+            floe_ovm::LOD_PAGE_NONE,
         );
         let pr = b.prange(0, 0, 1, PBVH_NONE);
         b.cell(
-            "T", 0, 0, &pb, &pb, 0, 0, 0, 2, 0, 0, pr, 1, m, m,
-            1_000_000, 0, 0, m,
+            "T", 0, 0, &pb, &pb, 0, 0, 0, 2, 0, 0, pr, 1, m, m, 1_000_000, 0, 0, m,
         );
         let ovm = Ovm::from_bytes(b.finish(0, 0)).unwrap();
         let o = HierOpts::default();
         // zoomed OUT: page is ~100 px on screen -> 10^4 px^2,
         // members 10^6 > 4*10^4 -> LOD
-        let p1 = plan_hier(
-            &ovm,
-            &rq_px(pb, 0, u32::MAX, 0.001),
-            &o,
-        );
+        let p1 = plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 0.001), &o);
         assert_eq!(p1.pages, vec![1], "{:?}", p1.pages);
         assert_eq!(p1.stats.lod_swapped, 1);
         // zoomed IN: 10^10 px^2 -> exact
-        let p2 =
-            plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 1.0), &o);
+        let p2 = plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 1.0), &o);
         assert_eq!(p2.pages, vec![0], "{:?}", p2.pages);
         // deep zoom into a CORNER SLICE of the dense page: the old
         // gate compared whole-page members against the tiny
         // intersection's pixels and swapped to LOD exactly when
         // zoomed in (review finding) - grid cells would be ~780 px
         // blocks. Whole-page + fidelity precondition keeps exact.
-        let p2b = plan_hier(
-            &ovm,
-            &rq_px(bx(0, 0, 100, 100), 0, u32::MAX, 1.0),
-            &o,
-        );
+        let p2b = plan_hier(&ovm, &rq_px(bx(0, 0, 100, 100), 0, u32::MAX, 1.0), &o);
         assert_eq!(p2b.pages, vec![0], "{:?}", p2b.pages);
         assert_eq!(p2b.stats.lod_swapped, 0);
         // probe (px 0): exact by construction
-        let p3 =
-            plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 0.0), &o);
+        let p3 = plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 0.0), &o);
         assert_eq!(p3.pages, vec![0]);
         // tiny-DBU dense page at px_per_dbu > 1: the emitted
         // cells are 1 DBU = several px - fidelity gate keeps exact
@@ -2417,35 +2883,48 @@ mod tests {
             let m = b.bitset(&[1]);
             let tb = bx(0, 0, 20, 20);
             b.page(
-                0, 0, 0, &tb, 0, 0, 0, 1, 1_000_000, 1, 1,
-                floe_ovm::LOD_EXACT, 1,
+                0,
+                0,
+                0,
+                &tb,
+                0,
+                0,
+                0,
+                1,
+                1_000_000,
+                1,
+                1,
+                floe_ovm::LOD_EXACT,
+                1,
             );
             b.page(
-                0, 0, 0, &tb, 0, 0, 0, 1, 100, 20, 20,
-                floe_ovm::LOD_MERGED, floe_ovm::LOD_PAGE_NONE,
+                0,
+                0,
+                0,
+                &tb,
+                0,
+                0,
+                0,
+                1,
+                100,
+                20,
+                20,
+                floe_ovm::LOD_MERGED,
+                floe_ovm::LOD_PAGE_NONE,
             );
             let pr = b.prange(0, 0, 1, PBVH_NONE);
             b.cell(
-                "S", 0, 0, &tb, &tb, 0, 0, 0, 2, 0, 0, pr, 1, m,
-                m, 1_000_000, 0, 0, m,
+                "S", 0, 0, &tb, &tb, 0, 0, 0, 2, 0, 0, pr, 1, m, m, 1_000_000, 0, 0, m,
             );
             let ovm2 = Ovm::from_bytes(b.finish(0, 0)).unwrap();
-            let ps = plan_hier(
-                &ovm2,
-                &rq_px(tb, 0, u32::MAX, 4.0),
-                &HierOpts::default(),
-            );
+            let ps = plan_hier(&ovm2, &rq_px(tb, 0, u32::MAX, 4.0), &HierOpts::default());
             assert_eq!(ps.pages, vec![0], "{:?}", ps.pages);
             assert_eq!(ps.stats.lod_swapped, 0);
         }
         // kill switch (lod_k 0): exact
         let mut off = HierOpts::default();
         off.lod_k = 0.0;
-        let p4 = plan_hier(
-            &ovm,
-            &rq_px(pb, 0, u32::MAX, 0.001),
-            &off,
-        );
+        let p4 = plan_hier(&ovm, &rq_px(pb, 0, u32::MAX, 0.001), &off);
         assert_eq!(p4.pages, vec![0]);
     }
 
@@ -2460,8 +2939,9 @@ mod tests {
         b.layer(u32::MAX - 1, 0, "C", 0, 0);
         let m = b.bitset(&[1]);
         let pb = bx(0, 0, 10, 10);
-        b.cell("T", 0, 0, &pb, &pb, 0, 0, 0, 0, 0, 0, 0, 0, m, m, 0,
-               0, 0, m);
+        b.cell(
+            "T", 0, 0, &pb, &pb, 0, 0, 0, 0, 0, 0, 0, 0, m, m, 0, 0, 0, m,
+        );
         let ovm = Ovm::from_bytes(b.finish(0, 0)).unwrap();
         let (fl, _) = frame_layer(&ovm);
         for li in 0..ovm.n_layers {
@@ -2557,30 +3037,67 @@ mod tests {
 
         let child_bb = bx(0, 0, 100, 100);
         b.page(
-            0, 0, 0, &child_bb, 0, 0, 0, 1, 1, 100, 100,
-            floe_ovm::LOD_EXACT, floe_ovm::LOD_PAGE_NONE,
+            0,
+            0,
+            0,
+            &child_bb,
+            0,
+            0,
+            0,
+            1,
+            1,
+            100,
+            100,
+            floe_ovm::LOD_EXACT,
+            floe_ovm::LOD_PAGE_NONE,
         );
         let child_pr = b.prange(0, 0, 1, PBVH_NONE);
         b.cell(
-            "CHILD", 0, 1, &child_bb, &child_bb, 0, 0, 0, 1, 0, 0,
-            child_pr, 1, m0, m0, 1, 0, 0, m0,
+            "CHILD", 0, 1, &child_bb, &child_bb, 0, 0, 0, 1, 0, 0, child_pr, 1, m0, m0, 1, 0, 0, m0,
         );
 
         let place_start = b.n_places() as u32;
         b.place(0, 1000, 0, 0, false, &Rep::One);
         let placed = bx(1000, 0, 1100, 100);
-        let bvh =
-            b.bvh_node(&placed, place_start, 1, true, 100, 100);
+        let bvh = b.bvh_node(&placed, place_start, 1, true, 100, 100);
         let top_own = bx(0, 0, 10, 10);
         b.page(
-            1, 1, 0, &top_own, 0, 0, 0, 1, 1, 10, 10,
-            floe_ovm::LOD_EXACT, floe_ovm::LOD_PAGE_NONE,
+            1,
+            1,
+            0,
+            &top_own,
+            0,
+            0,
+            0,
+            1,
+            1,
+            10,
+            10,
+            floe_ovm::LOD_EXACT,
+            floe_ovm::LOD_PAGE_NONE,
         );
         let top_pr = b.prange(1, 1, 1, PBVH_NONE);
         let top_bb = bx(0, 0, 1100, 100);
         b.cell(
-            "TOP", 1, 0, &top_own, &top_bb, place_start, 1, 1, 1,
-            bvh, 1, top_pr, 1, m1, both, 2, 0, 0, both,
+            "TOP",
+            1,
+            0,
+            &top_own,
+            &top_bb,
+            place_start,
+            1,
+            1,
+            1,
+            bvh,
+            1,
+            top_pr,
+            1,
+            m1,
+            both,
+            2,
+            0,
+            0,
+            both,
         );
         let v = Ovm::from_bytes(b.finish(0, 0)).unwrap();
         let req = ViewReq {
@@ -2589,10 +3106,11 @@ mod tests {
             vis: vec![0b10],
             depth: 0,
             px_per_dbu: 0.0,
-                    sub_cut_wash: false,
-                    page_hairline: false,
-                    page_skip: Vec::new(),
-                    prune_skipped: false,
+            sub_cut_wash: false,
+            page_reps: false,
+            page_hairline: false,
+            page_skip: Vec::new(),
+            prune_skipped: false,
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
@@ -2635,16 +3153,22 @@ mod tests {
         let view = bx(0, 0, 2000, 200);
         let p0 = plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
         assert_eq!(p0.stats.frame_rects, 1);
-        assert!(p0.wcells.iter().any(|w| w.key == (2, 0)
-            && w.frames.len() == 1));
+        assert!(p0
+            .wcells
+            .iter()
+            .any(|w| w.key == (2, 0) && w.frames.len() == 1));
         assert!(!p0.wcells.iter().any(|w| w.key.0 == 1));
 
         let p1 = plan_hier(&v, &rq(view, 0, 1), &HierOpts::default());
         assert_eq!(p1.stats.frame_rects, 1);
-        assert!(p1.wcells.iter().any(|w| w.key == (1, 0)
-            && w.frames.len() == 1));
-        assert!(p1.wcells.iter().any(|w| w.key.0 == 2
-            && w.frames.is_empty()));
+        assert!(p1
+            .wcells
+            .iter()
+            .any(|w| w.key == (1, 0) && w.frames.len() == 1));
+        assert!(p1
+            .wcells
+            .iter()
+            .any(|w| w.key.0 == 2 && w.frames.is_empty()));
 
         let p2 = plan_hier(&v, &rq(view, 0, 2), &HierOpts::default());
         assert_eq!(p2.top, (2, REM_FULL));
@@ -2732,22 +3256,14 @@ mod tests {
         );
         let view = bx(-10, -10, 1100, 1100);
         // 1000 dbu * 0.001 px/dbu = 1px <= wash_px 2
-        let p = plan_hier(
-            &v,
-            &rq_px(view, 0, 0, 0.001),
-            &HierOpts::default(),
-        );
+        let p = plan_hier(&v, &rq_px(view, 0, 0, 0.001), &HierOpts::default());
         assert_eq!(p.stats.washed_pages, 1);
         assert!(p.pages.is_empty());
         let t = p.wcells.iter().find(|w| w.key.0 == 0).unwrap();
         assert_eq!(t.washes, vec![(0u32, bx(0, 0, 1000, 1000))]);
         assert!(t.pages.is_empty());
         // zoomed in (100px): geometry returns
-        let pz = plan_hier(
-            &v,
-            &rq_px(view, 0, 0, 0.1),
-            &HierOpts::default(),
-        );
+        let pz = plan_hier(&v, &rq_px(view, 0, 0, 0.1), &HierOpts::default());
         assert_eq!(pz.stats.washed_pages, 0);
         assert_eq!(pz.pages.len(), 1);
         // kill switch: wash_px 0 ships geometry even sub-pixel
@@ -2757,8 +3273,7 @@ mod tests {
         assert_eq!(pk.stats.washed_pages, 0);
         assert_eq!(pk.pages.len(), 1);
         // no screen scale (probe parity): exact
-        let pn =
-            plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
+        let pn = plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
         assert_eq!(pn.stats.washed_pages, 0);
         assert_eq!(pn.pages.len(), 1);
         // layer masked off: neither geometry nor wash
@@ -2817,8 +3332,16 @@ mod tests {
             .iter()
             .map(|r| (name(r.cell), r.kind, r.verdict))
             .collect();
-        assert!(rows.contains(&("MIX".to_string(), "page", "cull_hair")), "{:?}", rows);
-        assert!(rows.contains(&("MIX".to_string(), "page", "exact")), "{:?}", rows);
+        assert!(
+            rows.contains(&("MIX".to_string(), "page", "cull_hair")),
+            "{:?}",
+            rows
+        );
+        assert!(
+            rows.contains(&("MIX".to_string(), "page", "exact")),
+            "{:?}",
+            rows
+        );
         // the default keeps the thin page and says so
         let mut od = HierOpts::default();
         od.explain = true;
@@ -2828,10 +3351,22 @@ mod tests {
             .iter()
             .map(|r| (name(r.cell), r.kind, r.verdict))
             .collect();
-        assert!(rows_d.contains(&("MIX".to_string(), "page", "exact_thin")), "{:?}", rows_d);
+        assert!(
+            rows_d.contains(&("MIX".to_string(), "page", "exact_thin")),
+            "{:?}",
+            rows_d
+        );
         assert!(!rows_d.iter().any(|r| r.2 == "cull_hair"));
-        assert!(rows.contains(&("TINY".to_string(), "child", "omit_size")), "{:?}", rows);
-        assert!(rows.contains(&("MIX".to_string(), "child", "expand")), "{:?}", rows);
+        assert!(
+            rows.contains(&("TINY".to_string(), "child", "omit_size")),
+            "{:?}",
+            rows
+        );
+        assert!(
+            rows.contains(&("MIX".to_string(), "child", "expand")),
+            "{:?}",
+            rows
+        );
         assert!(rows.iter().any(|r| r.1 == "top" && r.2 == "keep"));
         let hair = p.explain.iter().find(|r| r.verdict == "cull_hair").unwrap();
         assert_eq!((hair.w, hair.h, hair.min), (4000, 100, 100));
@@ -2878,9 +3413,7 @@ mod tests {
         cull_req.page_hairline = true;
         let p = plan_hier(&v, &cull_req, &HierOpts::default());
         assert_eq!(p.pages.len(), 2);
-        assert!(p.pages.iter().all(
-            |&pi| v.page(pi).max_min >= 150
-        ));
+        assert!(p.pages.iter().all(|&pi| v.page(pi).max_min >= 150));
         assert!(p.stats.cull_page_size >= 1);
         assert_eq!(p.stats.thin_pages_kept, 0);
         // the default since 2026-09-10 (field: 81-124 nm lines up to
@@ -2924,23 +3457,13 @@ mod tests {
             ],
             2,
         );
-        let p2 = plan_hier(
-            &v2,
-            &rq(view, 300, 2),
-            &HierOpts::default(),
-        );
+        let p2 = plan_hier(&v2, &rq(view, 300, 2), &HierOpts::default());
         assert!(p2.pages.is_empty());
         // rev 43: the v7 node annotation prunes the uniformly-thin
         // subtree before the per-place fold even runs
-        assert!(
-            p2.stats.cull_size + p2.stats.culled_bvh_size >= 1
-        );
+        assert!(p2.stats.cull_size + p2.stats.culled_bvh_size >= 1);
         assert!(p2.stats.culled_bvh_size >= 1);
-        let p3 = plan_hier(
-            &v2,
-            &rq(view, 300, 1),
-            &HierOpts::default(),
-        );
+        let p3 = plan_hier(&v2, &rq(view, 300, 1), &HierOpts::default());
         assert_eq!(p3.stats.frame_rects, 0);
     }
 
@@ -2984,17 +3507,11 @@ mod tests {
         // cut 300: min side 100 < 300 <= max side 300 -> thin band.
         // px 0.01: one 7000-DBU lattice pitch = 70px >= demote 14 ->
         // stride-35 sub-grids at the bound offsets {0, 34}
-        let p = plan_hier(
-            &v,
-            &rq_px(view, 300, 0, 0.01),
-            &HierOpts::default(),
-        );
+        let p = plan_hier(&v, &rq_px(view, 300, 0, 0.01), &HierOpts::default());
         assert_eq!(p.stats.thin_frames, 1);
-        let top =
-            p.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        let top = p.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(top.frames.len(), 2);
-        let members: u64 =
-            top.frames.iter().map(|(_, r, _)| r.members()).sum();
+        let members: u64 = top.frames.iter().map(|(_, r, _)| r.members()).sum();
         // ceil(100/35) = 3 at offset 0 (i = 0,35,70) + 2 at
         // offset 34 (i = 34,69)
         assert_eq!(members, 5);
@@ -3008,30 +3525,19 @@ mod tests {
             assert_eq!(b.y0, 0);
             assert_eq!(*band, 3, "1px min side -> dotted");
         }
-        let mut xs: Vec<i64> =
-            top.frames.iter().map(|(b, _, _)| b.x0).collect();
+        let mut xs: Vec<i64> = top.frames.iter().map(|(b, _, _)| b.x0).collect();
         xs.sort();
         assert_eq!(xs, vec![0, 6800]); // offsets 0 and 34 * 200
-        // one lattice pitch under thin_demote_px on screen (7px):
-        // a single representative per bin (the observed 2 -> 1
-        // ladder)
-        let pd = plan_hier(
-            &v,
-            &rq_px(view, 300, 0, 0.001),
-            &HierOpts::default(),
-        );
-        let td =
-            pd.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+                                       // one lattice pitch under thin_demote_px on screen (7px):
+                                       // a single representative per bin (the observed 2 -> 1
+                                       // ladder)
+        let pd = plan_hier(&v, &rq_px(view, 300, 0, 0.001), &HierOpts::default());
+        let td = pd.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(td.frames.len(), 1);
         assert_eq!(td.frames[0].1.members(), 3);
         // cut 0: no thin band, the full rep as before
-        let p0 = plan_hier(
-            &v,
-            &rq_px(view, 0, 0, 0.01),
-            &HierOpts::default(),
-        );
-        let t0 =
-            p0.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        let p0 = plan_hier(&v, &rq_px(view, 0, 0, 0.01), &HierOpts::default());
+        let t0 = p0.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t0.frames.len(), 1);
         assert_eq!(t0.frames[0].1.members(), 100);
         // lattice off restores the rev 41 hairline cull
@@ -3042,11 +3548,7 @@ mod tests {
         assert_eq!(pf.stats.frame_rects, 0);
         assert_eq!(pf.stats.thin_frames, 0);
         // BOTH sides under the cut: gone entirely, lattice or not
-        let pb = plan_hier(
-            &v,
-            &rq_px(view, 500, 0, 0.01),
-            &HierOpts::default(),
-        );
+        let pb = plan_hier(&v, &rq_px(view, 500, 0, 0.01), &HierOpts::default());
         assert_eq!(pb.stats.frame_rects, 0);
         assert_eq!(pb.stats.thin_frames, 0);
     }
@@ -3093,16 +3595,11 @@ mod tests {
             2,
         );
         let view = bx(-10, -10, 40_000, 40_000);
-        let p = plan_hier(
-            &v,
-            &rq(view, 0, 1),
-            &HierOpts::default(),
-        );
+        let p = plan_hier(&v, &rq(view, 0, 1), &HierOpts::default());
         let (fb, trunc) = frontier_boxes(&v, &p, 6000);
         assert!(!trunc, "tiny fixture must not hit the budget");
         assert_eq!(fb.len(), 6);
-        let mut got: Vec<(i64, i64)> =
-            fb.iter().map(|(b, _)| (b[0], b[1])).collect();
+        let mut got: Vec<(i64, i64)> = fb.iter().map(|(b, _)| (b[0], b[1])).collect();
         got.sort();
         assert_eq!(
             got,
@@ -3158,17 +3655,11 @@ mod tests {
             2,
         );
         let view = bx(-10, -10, 30_000, 1_000);
-        let p = plan_hier(
-            &v,
-            &rq_px(view, 300, 0, 0.01),
-            &HierOpts::default(),
-        );
+        let p = plan_hier(&v, &rq_px(view, 300, 0, 0.01), &HierOpts::default());
         assert_eq!(p.stats.thin_frames, 5);
-        let top =
-            p.wcells.iter().find(|w| w.key.0 == 2).unwrap();
+        let top = p.wcells.iter().find(|w| w.key.0 == 2).unwrap();
         assert_eq!(top.frames.len(), 3);
-        let mut xs: Vec<i64> =
-            top.frames.iter().map(|(b, _, _)| b.x0).collect();
+        let mut xs: Vec<i64> = top.frames.iter().map(|(b, _, _)| b.x0).collect();
         xs.sort();
         assert_eq!(xs, vec![0, 100, 8_000]);
         // pts rep: per-bin representative, rebased on the first
@@ -3189,22 +3680,14 @@ mod tests {
                         0,
                         0,
                         false,
-                        Rep::Pts(
-                            vec![(0, 0), (100, 0), (7_500, 0)]
-                                .into(),
-                        ),
+                        Rep::Pts(vec![(0, 0), (100, 0), (7_500, 0)].into()),
                     )],
                 },
             ],
             1,
         );
-        let p2 = plan_hier(
-            &v2,
-            &rq_px(view, 300, 0, 0.01),
-            &HierOpts::default(),
-        );
-        let t2 =
-            p2.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        let p2 = plan_hier(&v2, &rq_px(view, 300, 0, 0.01), &HierOpts::default());
+        let t2 = p2.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t2.frames.len(), 1);
         let (b, rep, _) = &t2.frames[0];
         assert_eq!(b.x0, 0);
@@ -3263,19 +3746,13 @@ mod tests {
         let view = bx(-10, -10, 7000, 1000);
         // depth 1 boundary: B and SLEAF boxed (their parents hit
         // r==0), nothing else
-        let p1 =
-            plan_hier(&v, &rq(view, 0, 1), &HierOpts::default());
+        let p1 = plan_hier(&v, &rq(view, 0, 1), &HierOpts::default());
         assert_eq!(p1.stats.frame_rects, 2);
         // depth 2: the boundary moved down - LEAF is boxed, and
         // SLEAF's depth-1 box is GONE (S is now fully expanded)
-        let p2 =
-            plan_hier(&v, &rq(view, 0, 2), &HierOpts::default());
+        let p2 = plan_hier(&v, &rq(view, 0, 2), &HierOpts::default());
         assert_eq!(p2.stats.frame_rects, 1);
-        let b_wc = p2
-            .wcells
-            .iter()
-            .find(|w| w.key == (1, 0))
-            .unwrap();
+        let b_wc = p2.wcells.iter().find(|w| w.key == (1, 0)).unwrap();
         assert_eq!(b_wc.frames.len(), 1);
         assert!(p2
             .wcells
@@ -3355,13 +3832,8 @@ mod tests {
             7,
         );
         let view = bx(-10, -10, 20000, 1000);
-        let plan = plan_hier(
-            &v,
-            &rq_px(view, 0, 0, 0.1),
-            &HierOpts::default(),
-        );
-        let top =
-            plan.wcells.iter().find(|w| w.key.0 == 7).unwrap();
+        let plan = plan_hier(&v, &rq_px(view, 0, 0, 0.1), &HierOpts::default());
+        let top = plan.wcells.iter().find(|w| w.key.0 == 7).unwrap();
         assert_eq!(top.frames.len(), 7);
         let band = |w: i64| {
             top.frames
@@ -3378,10 +3850,8 @@ mod tests {
         assert_eq!(band(50), 2, "exactly 5px -> gray fill");
         assert_eq!(band(40), 3, "4px -> gray dotted");
         // no screen scale: everything stays band 0 (legacy plans)
-        let p0 =
-            plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
-        let t0 =
-            p0.wcells.iter().find(|w| w.key.0 == 7).unwrap();
+        let p0 = plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
+        let t0 = p0.wcells.iter().find(|w| w.key.0 == 7).unwrap();
         assert!(t0.frames.iter().all(|f| f.2 == 0));
     }
 
@@ -3414,16 +3884,13 @@ mod tests {
             2,
         );
         let view = bx(-10, -10, 2000, 1000);
-        let plan =
-            plan_hier(&v, &rq(view, 50, 0), &HierOpts::default());
+        let plan = plan_hier(&v, &rq(view, 50, 0), &HierOpts::default());
         // only BIG's boundary box survives the size cut
         assert_eq!(plan.stats.frame_rects, 1);
-        let top =
-            plan.wcells.iter().find(|w| w.key.0 == 2).unwrap();
+        let top = plan.wcells.iter().find(|w| w.key.0 == 2).unwrap();
         assert_eq!(top.frames.len(), 1);
         // cut 0 draws both boundary boxes as before
-        let all =
-            plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
+        let all = plan_hier(&v, &rq(view, 0, 0), &HierOpts::default());
         assert_eq!(all.stats.frame_rects, 2);
     }
 
@@ -3435,9 +3902,10 @@ mod tests {
             depth,
             px_per_dbu: 0.0,
             sub_cut_wash: false,
-                    page_hairline: false,
-                    page_skip: Vec::new(),
-                    prune_skipped: false,
+            page_reps: false,
+            page_hairline: false,
+            page_skip: Vec::new(),
+            prune_skipped: false,
         }
     }
 
@@ -3451,14 +3919,7 @@ mod tests {
         places: Vec<(usize, i64, i64, u8, bool, Rep)>,
     }
 
-    fn place_bbox(
-        rbb: &BBox,
-        x: i64,
-        y: i64,
-        rot: u8,
-        flip: bool,
-        rep: &Rep,
-    ) -> BBox {
+    fn place_bbox(rbb: &BBox, x: i64, y: i64, rot: u8, flip: bool, rep: &Rep) -> BBox {
         let xf = Xf::place(x, y, rot, flip);
         let base = xf_bbox(&xf, rbb);
         let (ex, ey) = rep_extent(rep);
@@ -3496,56 +3957,56 @@ mod tests {
             let mut items = BBox::EMPTY;
             for (c, x, y, rot, flip, rep) in &cells[ci].places {
                 b.place(*c as u32, *x, *y, *rot, *flip, rep);
-                items.grow(&place_bbox(
-                    &rbb[*c], *x, *y, *rot, *flip, rep,
-                ));
+                items.grow(&place_bbox(&rbb[*c], *x, *y, *rot, *flip, rep));
             }
-            let (bvh_start, bvh_count) =
-                if cells[ci].places.is_empty() {
-                    (0, 0)
-                } else {
-                    // v7 size annotations: real values, like the
-                    // production build (max over places of the
-                    // child rbbox max/min side)
-                    let (mut md, mut mn) = (0u32, 0u32);
-                    for (c, ..) in &cells[ci].places {
-                        let rb = &rbb[*c];
-                        let w = (rb.x1 - rb.x0).max(0);
-                        let h = (rb.y1 - rb.y0).max(0);
-                        let sat = |v: i64| {
-                            u32::try_from(v).unwrap_or(u32::MAX)
-                        };
-                        md = md.max(sat(w.max(h)));
-                        mn = mn.max(sat(w.min(h)));
-                    }
-                    (
-                        b.bvh_node(
-                            &items,
-                            place_base,
-                            cells[ci].places.len() as u16,
-                            true,
-                            md,
-                            mn,
-                        ),
-                        1,
-                    )
-                };
+            let (bvh_start, bvh_count) = if cells[ci].places.is_empty() {
+                (0, 0)
+            } else {
+                // v7 size annotations: real values, like the
+                // production build (max over places of the
+                // child rbbox max/min side)
+                let (mut md, mut mn) = (0u32, 0u32);
+                for (c, ..) in &cells[ci].places {
+                    let rb = &rbb[*c];
+                    let w = (rb.x1 - rb.x0).max(0);
+                    let h = (rb.y1 - rb.y0).max(0);
+                    let sat = |v: i64| u32::try_from(v).unwrap_or(u32::MAX);
+                    md = md.max(sat(w.max(h)));
+                    mn = mn.max(sat(w.min(h)));
+                }
+                (
+                    b.bvh_node(
+                        &items,
+                        place_base,
+                        cells[ci].places.len() as u16,
+                        true,
+                        md,
+                        mn,
+                    ),
+                    1,
+                )
+            };
             let page_start = b.n_pages();
-            for (k, (pb, mw, mh)) in
-                cells[ci].pages.iter().enumerate()
-            {
+            for (k, (pb, mw, mh)) in cells[ci].pages.iter().enumerate() {
                 b.page(
-                    ci as u32, 0, k as u32, pb, 0, 0, 0, 1, 1, *mw,
-                    *mh, floe_ovm::LOD_EXACT,
+                    ci as u32,
+                    0,
+                    k as u32,
+                    pb,
+                    0,
+                    0,
+                    0,
+                    1,
+                    1,
+                    *mw,
+                    *mh,
+                    floe_ovm::LOD_EXACT,
                     floe_ovm::LOD_PAGE_NONE,
                 );
             }
             let page_count = b.n_pages() - page_start;
             let (pr_start, pr_count) = if page_count > 0 {
-                (
-                    b.prange(0, page_start, page_count, PBVH_NONE),
-                    1u32,
-                )
+                (b.prange(0, page_start, page_count, PBVH_NONE), 1u32)
             } else {
                 (b.n_pranges(), 0)
             };
@@ -3616,21 +4077,15 @@ mod tests {
             }
             let inv = xf.invert();
             let lview = xf_bbox(&inv, &req.view);
-            for pi in
-                cell.page_start..cell.page_start + cell.page_count
-            {
+            for pi in cell.page_start..cell.page_start + cell.page_count {
                 let p = v.page(pi);
                 if !bit_test(&req.vis, p.layer_idx as usize) {
                     continue;
                 }
-                if !req.page_skip.is_empty()
-                    && bit_test(&req.page_skip, p.layer_idx as usize)
-                {
+                if !req.page_skip.is_empty() && bit_test(&req.page_skip, p.layer_idx as usize) {
                     continue;
                 }
-                if (p.max_w < cut && p.max_h < cut)
-                    || p.max_min < page_hair
-                {
+                if (p.max_w < cut && p.max_h < cut) || p.max_min < page_hair {
                     continue;
                 }
                 if p.bbox.intersects(&lview) {
@@ -3640,9 +4095,7 @@ mod tests {
             if r == 0 {
                 return;
             }
-            for pli in cell.place_start
-                ..cell.place_start + cell.place_count
-            {
+            for pli in cell.place_start..cell.place_start + cell.place_count {
                 let pl = v.place(pli as u64);
                 let offs: Vec<(i64, i64)> = match &pl.rep {
                     Rep::One => vec![(0, 0)],
@@ -3650,25 +4103,16 @@ mod tests {
                         let mut o = Vec::new();
                         for i in 0..*na as i64 {
                             for j in 0..*nb as i64 {
-                                o.push((
-                                    i * va.0 + j * vb.0,
-                                    i * va.1 + j * vb.1,
-                                ));
+                                o.push((i * va.0 + j * vb.0, i * va.1 + j * vb.1));
                             }
                         }
                         o
                     }
                     Rep::Pts(p) => p.to_vec(),
                 };
-                let cr =
-                    if r == REM_FULL { REM_FULL } else { r - 1 };
+                let cr = if r == REM_FULL { REM_FULL } else { r - 1 };
                 for (ox, oy) in offs {
-                    let m = xf.compose(&Xf::place(
-                        pl.x + ox,
-                        pl.y + oy,
-                        pl.rot,
-                        pl.flip,
-                    ));
+                    let m = xf.compose(&Xf::place(pl.x + ox, pl.y + oy, pl.rot, pl.flip));
                     walk(v, pl.child, &m, cr, req, cut, hair, page_hair, out);
                 }
             }
@@ -3733,9 +4177,7 @@ mod tests {
         ];
         for &va in &vas {
             for &vb in &vbs {
-                for &(na, nb) in
-                    &[(1i64, 1i64), (2, 1), (1, 3), (4, 3), (5, 5)]
-                {
+                for &(na, nb) in &[(1i64, 1i64), (2, 1), (1, 3), (4, 3), (5, 5)] {
                     for r in &rs {
                         let g = grid_ranges(na, nb, va, vb, r);
                         let mut exact = Vec::new();
@@ -3752,18 +4194,29 @@ mod tests {
                             GridVis::Empty => assert!(
                                 exact.is_empty(),
                                 "MISS va{:?} vb{:?} n{}x{} r{:?}: {:?}",
-                                va, vb, na, nb, r, exact
+                                va,
+                                vb,
+                                na,
+                                nb,
+                                r,
+                                exact
                             ),
                             GridVis::Range { i0, i1, j0, j1 } => {
                                 for &(i, j) in &exact {
                                     assert!(
-                                        i0 <= i && i <= i1
-                                            && j0 <= j && j <= j1,
+                                        i0 <= i && i <= i1 && j0 <= j && j <= j1,
                                         "member ({},{}) outside \
                                          [{},{}]x[{},{}] va{:?} \
                                          vb{:?} r{:?}",
-                                        i, j, i0, i1, j0, j1, va,
-                                        vb, r
+                                        i,
+                                        j,
+                                        i0,
+                                        i1,
+                                        j0,
+                                        j1,
+                                        va,
+                                        vb,
+                                        r
                                     );
                                 }
                                 // tightness claims only where the
@@ -3772,30 +4225,17 @@ mod tests {
                                 // and the 1-D interval forms; skew
                                 // corner bboxes may be wider (still
                                 // conservative, checked above)
-                                let det = va.0 as i128
-                                    * vb.1 as i128
-                                    - va.1 as i128 * vb.0 as i128;
-                                let axis = det != 0
-                                    && va.1 == 0
-                                    && vb.0 == 0;
-                                let oned = det == 0
-                                    && (na == 1 || nb == 1);
-                                if !exact.is_empty() && (axis || oned)
-                                {
-                                    let ti0 = exact
-                                        .iter()
-                                        .map(|e| e.0)
-                                        .min()
-                                        .unwrap();
-                                    let ti1 = exact
-                                        .iter()
-                                        .map(|e| e.0)
-                                        .max()
-                                        .unwrap();
+                                let det = va.0 as i128 * vb.1 as i128 - va.1 as i128 * vb.0 as i128;
+                                let axis = det != 0 && va.1 == 0 && vb.0 == 0;
+                                let oned = det == 0 && (na == 1 || nb == 1);
+                                if !exact.is_empty() && (axis || oned) {
+                                    let ti0 = exact.iter().map(|e| e.0).min().unwrap();
+                                    let ti1 = exact.iter().map(|e| e.0).max().unwrap();
                                     assert!(
                                         i0 >= ti0 - 1 && i1 <= ti1 + 1,
                                         "index slack va{:?} vb{:?}",
-                                        va, vb
+                                        va,
+                                        vb
                                     );
                                 }
                             }
@@ -3859,37 +4299,21 @@ mod tests {
     fn nested_grid_narrow_equality_and_shape() {
         let v = nested_grid();
         // inside member (1,1) of MID(0,0) - single leaf reached
-        let plan =
-            check(&v, &rq(bx(210, 210, 290, 290), 0, u32::MAX), true);
+        let plan = check(&v, &rq(bx(210, 210, 290, 290), 0, u32::MAX), true);
         // arrays stay arrays: ONE grid edge per level, no expansion
-        let top = plan
-            .wcells
-            .iter()
-            .find(|w| w.key == (2, REM_FULL))
-            .unwrap();
+        let top = plan.wcells.iter().find(|w| w.key == (2, REM_FULL)).unwrap();
         assert_eq!(top.insts.len(), 1);
-        assert!(matches!(
-            top.insts[0].rep,
-            Rep::Grid { na: 2, nb: 2, .. }
-        ));
-        let mid = plan
-            .wcells
-            .iter()
-            .find(|w| w.key == (1, REM_FULL))
-            .unwrap();
+        assert!(matches!(top.insts[0].rep, Rep::Grid { na: 2, nb: 2, .. }));
+        let mid = plan.wcells.iter().find(|w| w.key == (1, REM_FULL)).unwrap();
         assert_eq!(mid.insts.len(), 1);
-        assert!(matches!(
-            mid.insts[0].rep,
-            Rep::Grid { na: 3, nb: 3, .. }
-        ));
+        assert!(matches!(mid.insts[0].rep, Rep::Grid { na: 3, nb: 3, .. }));
         assert_eq!(plan.stats.inst_edges, 2);
         // member straddle
         check(&v, &rq(bx(150, 50, 450, 150), 0, u32::MAX), true);
         // whole die
         check(&v, &rq(bx(-10, -10, 2400, 2400), 0, u32::MAX), true);
         // page cut: TOP page (max 50) drops, leaf pages stay
-        let plan =
-            check(&v, &rq(bx(210, 210, 290, 290), 60, u32::MAX), true);
+        let plan = check(&v, &rq(bx(210, 210, 290, 290), 60, u32::MAX), true);
         let b = brute(&v, &rq(bx(210, 210, 290, 290), 60, u32::MAX));
         assert!(!b.iter().any(|&pi| v.page(pi).cell == 2));
         assert_eq!(hier_pages(&plan), b);
@@ -3907,14 +4331,7 @@ mod tests {
         // asymmetric leaf under every quarter-turn/flip
         let mut places = Vec::new();
         for k in 0..8u8 {
-            places.push((
-                0usize,
-                (k as i64) * 300,
-                100,
-                k % 4,
-                k >= 4,
-                Rep::One,
-            ));
+            places.push((0usize, (k as i64) * 300, 100, k % 4, k >= 4, Rep::One));
         }
         let v = fixture(
             &[
@@ -3923,18 +4340,18 @@ mod tests {
                     pages: vec![(bx(0, 0, 40, 10), 40, 10)],
                     places: vec![],
                 },
-                FCell { name: "T", pages: vec![], places },
+                FCell {
+                    name: "T",
+                    pages: vec![],
+                    places,
+                },
             ],
             1,
         );
         for k in 0..8i64 {
             check(
                 &v,
-                &rq(
-                    bx(k * 300 - 50, 40, k * 300 + 50, 70),
-                    0,
-                    u32::MAX,
-                ),
+                &rq(bx(k * 300 - 50, 40, k * 300 + 50, 70), 0, u32::MAX),
                 true,
             );
         }
@@ -3953,7 +4370,11 @@ mod tests {
         ];
         let v = fixture(
             &[
-                FCell { name: "L", pages: leaf_pages, places: vec![] },
+                FCell {
+                    name: "L",
+                    pages: leaf_pages,
+                    places: vec![],
+                },
                 FCell {
                     name: "T",
                     pages: vec![],
@@ -3974,10 +4395,11 @@ mod tests {
             vis: vec![0xff],
             depth: u32::MAX,
             px_per_dbu: 0.0,
-                    sub_cut_wash: false,
-                    page_hairline: false,
-                    page_skip: Vec::new(),
-                    prune_skipped: false,
+            sub_cut_wash: false,
+            page_reps: false,
+            page_hairline: false,
+            page_skip: Vec::new(),
+            prune_skipped: false,
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks
@@ -4014,14 +4436,7 @@ mod tests {
                 FCell {
                     name: "T",
                     pages: vec![],
-                    places: vec![(
-                        0,
-                        100,
-                        200,
-                        0,
-                        false,
-                        Rep::Pts(offs.clone().into()),
-                    )],
+                    places: vec![(0, 100, 200, 0, false, Rep::Pts(offs.clone().into()))],
                 },
             ],
             1,
@@ -4048,10 +4463,7 @@ mod tests {
                     Rep::Grid { na, nb, va, vb } => {
                         for a in 0..*na as i64 {
                             for c in 0..*nb as i64 {
-                                out.push((
-                                    i.x + a * va.0 + c * vb.0,
-                                    i.y + a * va.1 + c * vb.1,
-                                ));
+                                out.push((i.x + a * va.0 + c * vb.0, i.y + a * va.1 + c * vb.1));
                             }
                         }
                     }
@@ -4066,17 +4478,10 @@ mod tests {
     fn pts_small_full_rep_rebased() {
         let (v, offs) = pts_small();
         // window over the third member only
-        let plan = check(
-            &v,
-            &rq(bx(10_090, 3_190, 10_120, 3_220), 0, u32::MAX),
-            true,
-        );
+        let plan = check(&v, &rq(bx(10_090, 3_190, 10_120, 3_220), 0, u32::MAX), true);
         // small path emits the FULL member set, rebased: anchors
         // must equal base + every original offset (duplicate kept)
-        let mut want: Vec<(i64, i64)> = offs
-            .iter()
-            .map(|&(x, y)| (100 + x, 200 + y))
-            .collect();
+        let mut want: Vec<(i64, i64)> = offs.iter().map(|&(x, y)| (100 + x, 200 + y)).collect();
         want.sort_unstable();
         assert_eq!(emitted_anchors(&plan, 0), want);
         // rebased rep anchors at (0,0)
@@ -4090,14 +4495,9 @@ mod tests {
     fn pts_big() -> (Ovm, Vec<(i64, i64)>) {
         // three far clusters, 3000 offsets each (> PTS_FULL_REP)
         let mut offs = Vec::new();
-        for (cx, cy) in
-            [(0i64, 0i64), (500_000, 0), (1_000_000, 500_000)]
-        {
+        for (cx, cy) in [(0i64, 0i64), (500_000, 0), (1_000_000, 500_000)] {
             for i in 0..3000i64 {
-                offs.push((
-                    cx + (i * 37) % 2000,
-                    cy + (i * 91) % 2000,
-                ));
+                offs.push((cx + (i * 37) % 2000, cy + (i * 91) % 2000));
             }
         }
         let v = fixture(
@@ -4110,14 +4510,7 @@ mod tests {
                 FCell {
                     name: "T",
                     pages: vec![],
-                    places: vec![(
-                        0,
-                        0,
-                        0,
-                        0,
-                        false,
-                        Rep::Pts(offs.clone().into()),
-                    )],
+                    places: vec![(0, 0, 0, 0, false, Rep::Pts(offs.clone().into()))],
                 },
             ],
             1,
@@ -4153,11 +4546,7 @@ mod tests {
                         0,
                         0,
                         false,
-                        Rep::Pts(vec![
-                            (0, 0),
-                            (500_000, 0),
-                            (1_000_000, 0),
-                        ].into()),
+                        Rep::Pts(vec![(0, 0), (500_000, 0), (1_000_000, 0)].into()),
                     )],
                 },
             ],
@@ -4187,10 +4576,7 @@ mod tests {
             .iter()
             .copied()
             .filter(|&(x, y)| {
-                x + 10 >= view.x0
-                    && x <= view.x1
-                    && y + 10 >= view.y0
-                    && y <= view.y1
+                x + 10 >= view.x0 && x <= view.x1 && y + 10 >= view.y0 && y <= view.y1
             })
             .collect();
         want.sort_unstable();
@@ -4249,26 +4635,16 @@ mod tests {
         }
         // d=2: B via A has r=0 (pages only), direct B has r=1 which
         // folds to FULL (height(B)=1) - both variants must exist
-        let plan =
-            plan_hier(&v, &rq(view, 0, 2), &HierOpts::default());
-        let keys: Vec<WsKey> =
-            plan.wcells.iter().map(|w| w.key).collect();
+        let plan = plan_hier(&v, &rq(view, 0, 2), &HierOpts::default());
+        let keys: Vec<WsKey> = plan.wcells.iter().map(|w| w.key).collect();
         assert!(keys.contains(&(1, 0)), "{:?}", keys);
         assert!(keys.contains(&(1, REM_FULL)), "{:?}", keys);
         assert!(plan.stats.wc_variants >= 1);
         // the truncated variant must NOT reach LEAF; the full one
         // must
-        let b0 = plan
-            .wcells
-            .iter()
-            .find(|w| w.key == (1, 0))
-            .unwrap();
+        let b0 = plan.wcells.iter().find(|w| w.key == (1, 0)).unwrap();
         assert!(b0.insts.is_empty());
-        let bf = plan
-            .wcells
-            .iter()
-            .find(|w| w.key == (1, REM_FULL))
-            .unwrap();
+        let bf = plan.wcells.iter().find(|w| w.key == (1, REM_FULL)).unwrap();
         assert_eq!(bf.insts.len(), 1);
     }
 
@@ -4313,33 +4689,16 @@ mod tests {
         assert!(plan.pages.iter().all(|&pi| v.page(pi).cell != 0));
         // rev 39: the cut gates the MEMBER box - 5x5 under cut 10
         // culls the whole rep, footprint size notwithstanding
-        let pc = plan_hier(
-            &v,
-            &rq(bx(0, 0, 4000, 100), 10, 0),
-            &HierOpts::default(),
-        );
+        let pc = plan_hier(&v, &rq(bx(0, 0, 4000, 100), 10, 0), &HierOpts::default());
         assert_eq!(pc.stats.frame_rects, 0);
-        assert!(
-            pc.stats.cull_size + pc.stats.culled_bvh_size > 0
-        );
+        assert!(pc.stats.cull_size + pc.stats.culled_bvh_size > 0);
         // window over member 3 of the array only: frame still comes
         // (footprint test is per whole-rep extent)
-        let plan2 = plan_hier(
-            &v,
-            &rq(bx(2_900, 0, 3_100, 90), 3, 0),
-            &HierOpts::default(),
-        );
-        let t2 =
-            plan2.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        let plan2 = plan_hier(&v, &rq(bx(2_900, 0, 3_100, 90), 3, 0), &HierOpts::default());
+        let t2 = plan2.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t2.frames.len(), 1);
-        let plan3 = plan_hier(
-            &v,
-            &rq(bx(4_500, 0, 4_800, 90), 3, 0),
-            &HierOpts::default(),
-        );
-        if let Some(t3) =
-            plan3.wcells.iter().find(|w| w.key.0 == 1)
-        {
+        let plan3 = plan_hier(&v, &rq(bx(4_500, 0, 4_800, 90), 3, 0), &HierOpts::default());
+        if let Some(t3) = plan3.wcells.iter().find(|w| w.key.0 == 1) {
             assert_eq!(t3.frames.len(), 0);
         }
     }
@@ -4381,11 +4740,7 @@ mod tests {
         // sub-2px pitch (15 DBU at 0.1 px/DBU) with cut below the
         // member size: the rep survives AS a rep, tone from the
         // 0.5px member box (gray)
-        let plan = check(
-            &v,
-            &rq_px(bx(0, 0, 4000, 100), 3, 0, 0.1),
-            true,
-        );
+        let plan = check(&v, &rq_px(bx(0, 0, 4000, 100), 3, 0, 0.1), true);
         let t = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(t.frames.len(), 1);
         let (fb, frep, band) = &t.frames[0];
@@ -4401,9 +4756,7 @@ mod tests {
             &HierOpts::default(),
         );
         assert_eq!(pc.stats.frame_rects, 0);
-        assert!(
-            pc.stats.cull_size + pc.stats.culled_bvh_size > 0
-        );
+        assert!(pc.stats.cull_size + pc.stats.culled_bvh_size > 0);
     }
 
     #[test]
@@ -4426,19 +4779,8 @@ mod tests {
                 },
                 FCell {
                     name: "T",
-                    pages: vec![(
-                        bx(0, 0, 99_000_010, 100),
-                        99_000_010,
-                        100,
-                    )],
-                    places: vec![(
-                        0,
-                        0,
-                        0,
-                        0,
-                        false,
-                        Rep::Pts(offs.into()),
-                    )],
+                    pages: vec![(bx(0, 0, 99_000_010, 100), 99_000_010, 100)],
+                    places: vec![(0, 0, 0, 0, false, Rep::Pts(offs.into()))],
                 },
             ],
             1,
@@ -4497,8 +4839,7 @@ mod tests {
             }
             let root = if with_tree {
                 let l0 = b.pbvh_node(&bx(0, 0, 990, 50), 0, 10, true, 90, 50);
-                let _l1 =
-                    b.pbvh_node(&bx(1000, 0, 1990, 50), 10, 10, true, 90, 50);
+                let _l1 = b.pbvh_node(&bx(1000, 0, 1990, 50), 10, 10, true, 90, 50);
                 b.pbvh_node(&bx(0, 0, 1990, 50), l0, 2, false, 90, 50)
             } else {
                 PBVH_NONE
@@ -4541,21 +4882,41 @@ mod tests {
             let pt = plan_hier(&tree, &req, &o);
             assert!(pt.stats.visited_page_bvh > 0, "the tree path was walked");
             let oracle = brute_with(&lin, &req, &o);
-            assert_eq!(hier_pages(&pl), oracle, "linear, page_hairline={page_hairline}");
-            assert_eq!(hier_pages(&pt), oracle, "pbvh leaf, page_hairline={page_hairline}");
+            assert_eq!(
+                hier_pages(&pl),
+                oracle,
+                "linear, page_hairline={page_hairline}"
+            );
+            assert_eq!(
+                hier_pages(&pt),
+                oracle,
+                "pbvh leaf, page_hairline={page_hairline}"
+            );
             let thin: BTreeSet<u32> = (0..20u32).filter(|k| k % 2 == 1).collect();
             if page_hairline {
                 assert_eq!(oracle.len(), 10);
                 assert!(oracle.is_disjoint(&thin));
                 assert_eq!(pt.stats.cull_page_size, 10);
                 assert_eq!(pt.stats.thin_pages_kept, 0);
-                assert_eq!(pt.explain.iter().filter(|r| r.verdict == "cull_hair").count(), 10);
+                assert_eq!(
+                    pt.explain
+                        .iter()
+                        .filter(|r| r.verdict == "cull_hair")
+                        .count(),
+                    10
+                );
             } else {
                 assert_eq!(oracle.len(), 20);
                 assert!(oracle.is_superset(&thin));
                 assert_eq!(pt.stats.cull_page_size, 0);
                 assert_eq!(pt.stats.thin_pages_kept, 10);
-                assert_eq!(pt.explain.iter().filter(|r| r.verdict == "exact_thin").count(), 10);
+                assert_eq!(
+                    pt.explain
+                        .iter()
+                        .filter(|r| r.verdict == "exact_thin")
+                        .count(),
+                    10
+                );
             }
         }
         // the request decides: a plain-policy request culls, a mask-
@@ -4564,6 +4925,42 @@ mod tests {
         let mut cull = req.clone();
         cull.page_hairline = true;
         assert_eq!(brute(&lin, &cull).len(), 10);
+    }
+
+    #[test]
+    fn representatives_thin_by_octave_and_nest() {
+        // rep_octaves: the octaves a measure sits below its threshold
+        assert_eq!(rep_octaves(600, 1000), 0);
+        assert_eq!(rep_octaves(500, 1000), 1);
+        assert_eq!(rep_octaves(400, 1000), 1);
+        assert_eq!(rep_octaves(250, 1000), 2);
+        assert_eq!(rep_octaves(200, 1000), 2);
+        assert_eq!(rep_octaves(1, 1000), 9);
+        assert_eq!(rep_octaves(0, 1 << 40), REP_OCTAVES_MAX);
+        assert_eq!(rep_octaves(5, 0), 0);
+        // rep_keeps: one in 4^k, nested in k, index 0 always
+        for k in 0..=REP_OCTAVES_MAX {
+            assert!(rep_keeps(0, k));
+            let kept: Vec<u64> = (0..4096u64).filter(|&i| rep_keeps(i, k)).collect();
+            let expect = if k >= 6 { 1 } else { 4096 >> (2 * k) };
+            assert_eq!(kept.len(), expect, "k={}", k);
+            for &i in &kept {
+                assert!(
+                    rep_keeps(i, k.saturating_sub(1)),
+                    "nested: {} at k={}",
+                    i,
+                    k
+                );
+            }
+        }
+        // rep_in_run: a run without a representative prunes, an
+        // unknown run descends
+        assert!(rep_in_run(0, 1, 0, 3));
+        assert!(!rep_in_run(1, 64, 0, 3));
+        assert!(rep_in_run(1, 65, 0, 3));
+        assert!(rep_in_run(100, 200, 100, 5));
+        assert!(!rep_in_run(101, 200, 100, 5));
+        assert!(rep_in_run(5, 5, 0, 2));
     }
 
     #[test]
@@ -4594,22 +4991,8 @@ mod tests {
                 );
             }
             let root = if with_tree {
-                let l0 = b.pbvh_node(
-                    &bx(0, 0, 990, 50),
-                    0,
-                    10,
-                    true,
-                    90,
-                    50,
-                );
-                let _l1 = b.pbvh_node(
-                    &bx(1000, 0, 1990, 50),
-                    10,
-                    10,
-                    true,
-                    90,
-                    50,
-                );
+                let l0 = b.pbvh_node(&bx(0, 0, 990, 50), 0, 10, true, 90, 50);
+                let _l1 = b.pbvh_node(&bx(1000, 0, 1990, 50), 10, 10, true, 90, 50);
                 b.pbvh_node(&bx(0, 0, 1990, 50), l0, 2, false, 90, 50)
             } else {
                 PBVH_NONE
@@ -4680,14 +5063,7 @@ mod tests {
                 FCell {
                     name: "T",
                     pages: vec![(bx(0, 0, 80, 80), 80, 80)],
-                    places: vec![(
-                        0,
-                        100_000,
-                        100_000,
-                        0,
-                        false,
-                        Rep::One,
-                    )],
+                    places: vec![(0, 100_000, 100_000, 0, false, Rep::One)],
                 },
             ],
             1,
@@ -4695,8 +5071,7 @@ mod tests {
         // wide view covering both pages; the child's LOCAL view box
         // covers its whole page (center inside -> prio 0) while the
         // top's own page sits ~50k off the top-frame view center
-        let req =
-            rq(bx(-10, -10, 100_140, 100_140), 0, u32::MAX);
+        let req = rq(bx(-10, -10, 100_140, 100_140), 0, u32::MAX);
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![0, 1]);
         // child page: the local view box covers it -> center inside
@@ -4704,8 +5079,7 @@ mod tests {
         assert_eq!(plan.page_prio[0], 0, "{:?}", plan.page_prio);
         assert!(plan.page_prio[1] > 0, "{:?}", plan.page_prio);
         // narrow view exactly on the child: still prio 0
-        let req2 =
-            rq(bx(99_990, 99_990, 100_110, 100_110), 0, u32::MAX);
+        let req2 = rq(bx(99_990, 99_990, 100_110, 100_110), 0, u32::MAX);
         let plan2 = plan_hier(&v, &req2, &HierOpts::default());
         assert_eq!(plan2.pages, vec![0]);
         assert_eq!(plan2.page_prio, vec![0]);
@@ -4742,8 +5116,7 @@ mod tests {
         let p1 = mk_page("P1_0_0", 500);
         let mut ovp = p0.clone();
         ovp.extend_from_slice(&p1);
-        let dir = std::env::temp_dir()
-            .join(format!("floe_m2_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("floe_m2_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ovp_path = dir.join("design.ovp");
         std::fs::write(&ovp_path, &ovp).unwrap();
@@ -4790,7 +5163,12 @@ mod tests {
             100,
             0,
             false,
-            &Rep::Grid { na: 2, nb: 1, va: (200, 0), vb: (0, 0) },
+            &Rep::Grid {
+                na: 2,
+                nb: 1,
+                va: (200, 0),
+                vb: (0, 0),
+            },
         );
         let n0 = b.bvh_node(
             &bx(0, 100, 300, 120),
@@ -4802,8 +5180,7 @@ mod tests {
         );
         let pr0 = b.prange(0, 0, 1, PBVH_NONE);
         b.cell(
-            "LEAF", 0, 1, &leafbb, &leafbb, 0, 0, 0, 1, 0, 0, pr0,
-            1, m, m, 1, 0, 0, m,
+            "LEAF", 0, 1, &leafbb, &leafbb, 0, 0, 0, 1, 0, 0, pr0, 1, m, m, 1, 0, 0, m,
         );
         let pr1 = b.prange(0, 1, 1, PBVH_NONE);
         b.cell(
@@ -4834,26 +5211,17 @@ mod tests {
             ovt: floe_ovm::Backing::Vec(Vec::new()),
         };
         let req = rq(bx(-10, -10, 600, 200), 0, u32::MAX);
-        let plan =
-            plan_hier(&vfs.ovm, &req, &HierOpts::default());
+        let plan = plan_hier(&vfs.ovm, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![0, 1]);
-        let delta =
-            vfs.delta_hier(&plan, &plan.pages, 3, None).unwrap();
+        let delta = vfs.delta_hier(&plan, &plan.pages, 3, None).unwrap();
         // deterministic emission
-        assert_eq!(
-            delta,
-            vfs.delta_hier(&plan, &plan.pages, 3, None).unwrap()
-        );
+        assert_eq!(delta, vfs.delta_hier(&plan, &plan.pages, 3, None).unwrap());
         let doc = parse_doc(&delta).unwrap();
         // single-top OASIS: the gen's top WC
         assert_eq!(doc.cells[doc.top].name, "W3_F_1");
-        let mut names: Vec<&str> =
-            doc.cells.iter().map(|c| c.name.as_str()).collect();
+        let mut names: Vec<&str> = doc.cells.iter().map(|c| c.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(
-            names,
-            vec!["P0_0_0", "P1_0_0", "W3_F_0", "W3_F_1"]
-        );
+        assert_eq!(names, vec!["P0_0_0", "P1_0_0", "W3_F_0", "W3_F_1"]);
         let topc = &doc.cells[doc.top];
         assert_eq!(topc.places.len(), 2);
         // identity page instance first, then the child WC edge with
@@ -4862,27 +5230,17 @@ mod tests {
         assert!(matches!(topc.places[0].rep, Rep::One));
         let wleaf = &doc.cells[topc.places[1].cell];
         assert_eq!(wleaf.name, "W3_F_0");
-        assert!(matches!(
-            topc.places[1].rep,
-            Rep::Grid { na: 2, nb: 1, .. }
-        ));
+        assert!(matches!(topc.places[1].rep, Rep::Grid { na: 2, nb: 1, .. }));
         assert_eq!((topc.places[1].x, topc.places[1].y), (0, 100));
         assert_eq!(wleaf.places.len(), 1);
-        assert_eq!(
-            doc.cells[wleaf.places[0].cell].name,
-            "P0_0_0"
-        );
+        assert_eq!(doc.cells[wleaf.places[0].cell].name, "P0_0_0");
         // incremental delta: no page bodies, resident refs stay
         // undefined (parse_doc materializes them as empty cells,
         // klayout binds them by name - M0)
         let inc = vfs.delta_hier(&plan, &[], 4, None).unwrap();
         let doc2 = parse_doc(&inc).unwrap();
         assert_eq!(doc2.cells[doc2.top].name, "W4_F_1");
-        let ghost = doc2
-            .cells
-            .iter()
-            .find(|c| c.name == "P0_0_0")
-            .unwrap();
+        let ghost = doc2.cells.iter().find(|c| c.name == "P0_0_0").unwrap();
         assert!(ghost.rects.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4961,10 +5319,7 @@ mod tests {
         let wtop = &wdoc.cells[wdoc.top];
         assert!(wplan.stats.washed_pages > 0);
         assert!(wplan.pages.is_empty());
-        assert!(wtop
-            .rects
-            .iter()
-            .any(|r| (r.layer, r.dt) == (1, 0)));
+        assert!(wtop.rects.iter().any(|r| (r.layer, r.dt) == (1, 0)));
 
         // pts: rebased subset survives the writer/parser round trip
         let (v2, offs) = pts_small();
@@ -4994,10 +5349,7 @@ mod tests {
             r => panic!("expected pts, got {:?}", r),
         };
         got.sort_unstable();
-        let mut want: Vec<(i64, i64)> = offs
-            .iter()
-            .map(|&(x, y)| (100 + x, 200 + y))
-            .collect();
+        let mut want: Vec<(i64, i64)> = offs.iter().map(|&(x, y)| (100 + x, 200 + y)).collect();
         want.sort_unstable();
         assert_eq!(got, want);
     }
@@ -5012,14 +5364,7 @@ mod tests {
         // K overflow: 6 spread copies of one leaf force merges
         let mut places = Vec::new();
         for k in 0..6i64 {
-            places.push((
-                0usize,
-                k * 40_000,
-                (k % 2) * 25_000,
-                0u8,
-                false,
-                Rep::One,
-            ));
+            places.push((0usize, k * 40_000, (k % 2) * 25_000, 0u8, false, Rep::One));
         }
         let v2 = fixture(
             &[
@@ -5028,12 +5373,15 @@ mod tests {
                     pages: vec![(bx(0, 0, 100, 100), 100, 100)],
                     places: vec![],
                 },
-                FCell { name: "T", pages: vec![], places },
+                FCell {
+                    name: "T",
+                    pages: vec![],
+                    places,
+                },
             ],
             1,
         );
-        let req2 =
-            rq(bx(-500, -500, 250_000, 30_000), 0, u32::MAX);
+        let req2 = rq(bx(-500, -500, 250_000, 30_000), 0, u32::MAX);
         let p1 = plan_hier(&v2, &req2, &HierOpts::default());
         let p2 = plan_hier(&v2, &req2, &HierOpts::default());
         assert_eq!(p1, p2);

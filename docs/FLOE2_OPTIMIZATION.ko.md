@@ -966,11 +966,71 @@ KLayout query parity 배터리 유지.
 비용(실측 6: 덱 fit 32 s, 25k 페이지 디코드·4,170만 hairline)은 점유 요약
 (docs/OCCUPANCY_PLAN.ko.md, `design.ovo`)이 대체했다. 실칩 덱의 150 × 103 mm 뷰가
 16.7 s → 0.15 s(depth 무관), 요약 생성은 추출본 4.4 s·17 MB, 덱 667소스 9.9 분·
-172 MB. 결정: `floe2 index` 기본으로 요약 생성(`--no-occupancy`로 끔), base cell
+172 MB. 결정: `floe2 index` 기본으로 요약 생성(`--no-occupancy`로 끔; 2026-09-16부터
+덱의 소스만 기본, 레이아웃은 `--occupancy` opt-in), base cell
 4 µm, 마스크는 keep + detail medium(요약이 켜진 광역뷰는 cut과 무관), View 메뉴
 thin 정책 서브메뉴. 일반 레이아웃은 cull 그대로(요약 없음). 실칩의 level 4
 depth 0 박스(덱 sub-cut wash가 희소 페이지 bbox를 칠함)와 마크 소실은 희소
 페이지를 그리는 규칙(RENDERD 0.12.87)으로 종결.
+
+**결함 C — 일반 레이아웃의 sub-cut 페이지 소실(현장 2026-09-16, 0.12.139 /
+RENDERD 0.12.94)**: 9.8 GB 일반(마스크 아님) 레이아웃의 한 레이어가 detail
+high에서도 Calibre보다 훨씬 적게 보였다. 원인은 플래너의 `cull_size`: 모든 도형이
+cut(high = 1 px)보다 작은 페이지는 bbox가 2 px를 넘으면 wash도 받지 못하고 통째로
+버려졌다(콘택·비아·마크 배열이 도형 하나가 1 px 미만이 되는 줌부터 전부 사라짐).
+덱은 2026-09-10/15의 sub-cut 규칙(밀집 → footprint wash, 희소 → `keep_sparse`
+픽셀)으로 이미 살렸으나 단일 레이아웃 요청은 `sub_cut_wash: false`였다. 조치:
+단일 레이아웃 요청도 같은 규칙(SPEC-PLANNER §3), 킬 스위치
+`FLOE_RUST_SUB_CUT_WASH=off`. gate `SubCutTests`(0.2 µm 상자 200 × 200 배열 —
+레코드 반복과 배치 반복 각각 — 이 10 µm/px에서 블록으로, 100 µm 간격 상자 5개는
+픽셀로; 킬 스위치에서는 셋 다 없음). 광역 뷰 비용은 wash walk 예산이 막고, 실칩
+재측정 대기.
+**결함 C 후속 — cull의 hairline 페이지(사용자 결정 2026-09-16, 0.12.141 / RENDERD
+0.12.96)**: 9.8 GB 레이아웃의 점유 요약 생성이 한 시간을 넘어(마킹이 한 스레드로
+도는 별건, OCCUPANCY §12 실측 9) 요약 없이도 광역뷰에 존재가 보여야 한다는 요청.
+`thin:cull`에서 hairline 컷 페이지·노드도 sub-cut 규칙을 탄다: 선의 픽셀 채움이
+footprint의 1/8 이상이면 레이어 색 블록, 미만이면 페이지를 남겨 선을 그린다
+(`WASH_MIN_COVERAGE_HAIR`, `FLOE_RUST_WASH_HAIR_COVERAGE`). keep은 그대로 정확.
+gate `SubCutTests.test_hairline_pages_under_cull…`(0.1 × 190 µm 선 200개 = 블록,
+400 µm 간격 3개 = 선, keep은 둘 다 정확, 킬 스위치는 둘 다 없음).
+**결함 C 후속 2 — 중간 줌 draw 6 s(현장 2026-09-16, 0.12.142 / RENDERD 0.12.97)**:
+0.12.95에서 150 MB 실칩을 thin:cull detail medium으로 열자 중간 줌 구간에서 draw가
+6 s를 넘었고, 사용자가 `FLOE_RUST_SUB_CUT_WASH=off`로 이전 속도가 돌아오는 것을
+확인했다 — 원인은 위 두 규칙이 한 프레임에 보태는 양(남긴 희소 페이지의 디코드·
+hairline 픽셀, wash 블록 채움)에 상한이 없던 것. 조치: ① perf 줄·상태줄에
+`sub-cut washes A/sparse B`(wash 수, 희소로 남긴 수)를 붙여 비용을 읽게 하고,
+② 플랜당 예산 둘(SPEC-PLANNER §3 플랜당 예산): 희소 ink 16 Mpx, wash 면적 64 Mpx.
+소진 뒤의 항목은 옛 cull대로 버리고(희소를 wash로 돌리지 않는다 — 거짓 블록)
+`sub-cut over A/B`로 센다. 예산은 걷는 순서대로 쓰여 플랜이 결정적이다. 기본값은
+잠정: 실칩의 느린 프레임 perf 줄(`sub-cut washes/sparse/over`, plan/decode/raster
+µs)로 정한다. 진단 `FLOE_RUST_SUB_CUT_SPARSE_MPX=0` / `FLOE_RUST_SUB_CUT_WASH_MPX=0`
+은 각각 희소 전부·wash 전부를 버려 어느 쪽이 느린지 가른다. gate
+`SubCutTests.test_the_per_plan_budgets…`. 실칩 재측정 대기.
+**결함 C 종결 — sub-cut 규칙 기본 off(사용자 결정 2026-09-16, 0.12.143 / RENDERD
+0.12.98)**: "sub-cut wash는 속도가 느려지는 부작용과 그럼에도 완전히 보이지는
+않는 단점이 있어서 일반 레이아웃에는 적용하지 않는 것이 좋겠음. 덱도 occupancy가
+있으므로 sub-cut wash는 사용될 일이 없음." 단일 레이아웃 요청의 `sub_cut_wash`와
+덱의 wide 정책(2026-09-10 4단계) 모두 기본 off. 코드는 남기고 진단 스위치
+`FLOE_RUST_SUB_CUT_WASH=on`(단일)·`FLOE_RUST_DECK_WIDE=on`(덱)으로만 켠다. 일반
+레이아웃의 광역뷰 존재는 점유 요약(`floe2 index --occupancy`) + `thin:keep`이
+맡는다 — 그래서 요약 생성 시간(OCCUPANCY §12 실측 9 이후)이 실사용 조건이다.
+gate: `SubCutTests`(기본 워커는 셋 다 없음·카운터 0, on 워커가 규칙·예산 검증),
+`ThinPageTests`·`WideViewTests`(기본 = 옛 cull, on = 규칙), 실칩 증상 테스트
+(기본 = 증상, on = wash).
+**결함 C 후속 3 — 대표(page frontier), 사용자 설계 2026-09-17 (0.12.145 / RENDERD
+0.12.100)**: "hairline이 보이던 뷰에서 2배 축소하면 면적이 4배라 다 살리면 4배를
+그려야 하지만 4개 중 1개만 남기면 비슷한 비용으로 디테일을 살릴 수 있다. 살아남는
+hairline은 끝까지 살아남게, frontier처럼." 옛 bbox 대체가 fit 뷰에서 거대 박스
+하나로 남았던 원인은 단위(페이지 bbox)의 화면 크기에 상한이 없던 것. 구현은
+SPEC-PLANNER §3 대표: 컷 항목이 문턱의 1/2^k 이하이면 run 안 index가 4^k의 배수인
+것만 남기고 sub-cut 규칙대로 그린다(희소 → 픽셀, 밀집 → footprint wash). 뷰당
+수는 컷 시점의 수로 일정, 집합은 줌 사이에 포함 관계, BVH는 index 구간으로
+프루닝. 단일 레이아웃 요청만(덱은 요약), 킬 스위치 `FLOE_RUST_PAGE_REPS=off`.
+`thin:cull`의 기본 그림이 다시 바뀐다: 컷 아래 내용이 사라지지 않고 대표 무늬로
+남는다(요약처럼 채워진 면은 아님). 상태줄·perf 줄 `reps K/W/C`(kept/washed/
+children). 실칩 확인 항목: fit 뷰 첫 프레임의 read/decode(대표 페이지의 cold
+read), 중간 줌의 plan/draw, `reps` 카운트. fit급에서 많이 느리면 그 줌 대역용
+캐시를 미리 만드는 방안(사용자)을 그 다음에 본다. gate `PageFrontierTests`.
 
 **정책 분리(2026-09-11, 사용자·리뷰어)**: 마스크(jobdeck)는 hairline이 많을 수밖에
 없고 일반 레이아웃을 같은 기준에 맞추면 광역 뷰가 느려진다. 그래서 위 해제는
@@ -2018,7 +2078,7 @@ LRU에 남은 상태)의 load 잔량과 budget 초과 여부이며 pan-sweep tra
 기본값을 구현했다가 **철회**했다 — 뷰어가 공유 서버에서 돌므로
 RAM 절반 기본값은 이웃 프로세스에 위험하다. 기본은 1024MB 고정
 유지, floe급 보존이 필요한 세션만 `FLOE_RUST_BUDGET_MB`로 명시
-opt-in한다. budget 초과 재방문은 OS page cache가 인코드 .floe
+opt-in한다. budget 초과 재방문은 OS page cache가 인코드 캐시
 구간을 들고 있으므로 read가 아닌 **decode-only 비용**으로
 기대한다(sample9 실측 read는 decode의 0.6%). 따라서 이 축의 다음
 지렛대는 decode 절감 — index build가 decode CPU의 41%(§3.14)라

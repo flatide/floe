@@ -1,20 +1,20 @@
 # 웹 전환 CLI 재대조
 
-2026-09-16, M4g-30. 기준 `847fe28` 이후의 `feature/webui`.
+2026-09-17, M4g-31. `45c9934` jobdeck 정방향 통합·로컬 회귀 통과한 `feature/webui`.
 [M0 원래 범위](WEBUI_M0.ko.md), [전체 잔여](WEBUI_G4_AUDIT.ko.md),
 [단계 기록](WEBUI_M4.ko.md). **파서 목록의 완성과 기능·현장 수용을 구별한다.**
 
 ## 1. 범위와 검사 방식
 
 `floe.cli.main(rust_only=True)`의 실제 argparse 생성 직후, dispatch 전에 멈춰
-공개 명령10종의94개 옵션 action·위치 인자·별칭·기본값·choices·필수 여부를 읽는다.
-`floe.fe_embed.build_parser()`의 보조 명령16개도 포함해 총110개다. 숨겨진 legacy
+공개 명령10종의95개 옵션 action·위치 인자·별칭·기본값·choices·필수 여부를 읽는다.
+`floe.fe_embed.build_parser()`의 보조 명령16개도 포함해 총111개다. 숨겨진 legacy
 옵션17개는 별도로 거부를 확인한다. M0의93개/`index`17개는 이전 조사 시점 수치이며,
-현재는 `--no-occupancy`를 포함해 `index`18개다. 원래 범위를 줄인 것이 아니다.
+현재는 `--no-occupancy`와 `--occupancy-balance`를 포함해 `index`19개다. 원래 범위를 줄인 것이 아니다.
 
 `tools/validate_web_cli_inventory.py`는 새/누락 명령·옵션·별칭·기본값 변경을 실패시킨다.
 네이티브 release의 각 옵션을 **`--help` 앞에** 놓아 실제 parser가 소비/거부해야만
-통과한다. choices/별칭과 숨김 옵션을 포함해175회 실행한다. 빈 PATH와 없는 worker/
+통과한다. choices/별칭과 숨김 옵션을 포함해177회 실행한다. 빈 PATH와 없는 worker/
 browser 경로, 비공개 임시 cwd를 사용하며 source 파일·설정·세션을 만들지 않는다.
 옵션 추가/명령 삭제/별칭·기본값 변조를 주입해 목록 검사의 실패도 확인한다.
 
@@ -31,7 +31,7 @@ browser 경로, 비공개 임시 cwd를 사용하며 source 파일·설정·세�
 
 | 명령 / 공개 옵션 수 | 실제 구현·의미 근거 | 남는 차이/경계 |
 |---|---|---|
-| index /18 | `app/main.rs`, `app-core/index.rs`, `jobdeck/index.rs`; `validate_app_cli.py`의 실제 OVM/OVP/OVO bytes·force/reuse/corrupt·profile JSON/snapshot·native argv·signals, `validate_app_jobdeck_sources.py`의 선택/중복 소스·LOD/occupancy | 덱 profile은 개별 TC로 안내하며 거부. occupancy 기본 on, LOD 기본 off. legacy15개 거부 |
+| index /19 | `app/main.rs`, `app-core/index.rs`, `jobdeck/index.rs`; `validate_app_cli.py`의 실제 OVM/OVP/OVO bytes·force/reuse/corrupt·profile JSON/snapshot·native argv·signals, `validate_app_jobdeck_sources.py`의 선택/중복 소스·LOD/occupancy | 덱 profile은 개별 TC로 안내하며 거부. occupancy layout off / jobdeck on, LOD 기본 off. legacy15개 거부 |
 | info /1 | `app/read.rs`, `validate_app_render.py`의 top/DBU/bbox/레이어·stale, `validate_app_deck_render.py`의 덱 info/ledger | Rust `--json` 추가. cache 손상과 source stale 경고를 구별 |
 | render /29 | `app/read.rs/capture.rs`, `validate_app_render.py`, `validate_app_captures.py`, `validate_drc_captures.py`; Python PNG/report·batch/mosaic·metadata·DRC CD/legend·j1/j8·취소/불완료 | 파일별 원자 게시, batch 전체 트랜잭션 아님. 알려진 덱 skip은 incomplete/exit3. 화면 요약과 archival exact를 구별 |
 | clip /5 | `app/clip.rs`, `validate_app_clip.py`; Python/j1/j8 bytes·KLayout XOR·원본/기존 출력 보호·timeout/신호 | 덱 clip은 기존에도 미지원. `--exact`는 이미 exact인 호환 플래그 |
@@ -121,5 +121,5 @@ M4g-30에서 사용자는 Rust 제품의 `displaytest [PNG]` 대체를 확정했
 refinement 호환·잘못된 상태 표시를 수정하며 M4g-28은 양수 stream 호환도 연결했다.
 APNG 정적 fallback은 M4g-29, GTK 진단의 제품 경계는 M4g-30에서 닫았다.
 실제 브라우저·Python-free Linux·G1/G4·현장, M2 공유/원격
-승인·구현, 조건부 M5는 그대로 별도다. 메뉴 목록0 OPEN과110개 파서 대조를 전체
+승인·구현, 조건부 M5는 그대로 별도다. 메뉴 목록0 OPEN과111개 파서 대조를 전체
 goal 완료율로 계산하지 않는다. 전체 배터리/집중 검증 결과는 M4의 해당 단계에 기록한다.

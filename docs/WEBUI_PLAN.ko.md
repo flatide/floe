@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M4g-30 진단 대체 확정·로컬 공유 구현 승인).
+작성 2026-08-29, 갱신 2026-09-17(M4g-31 동기화·원격 보류·명시 Index 개명 결정).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -122,6 +122,12 @@ Rust/API를 추가한다([M4 §56](WEBUI_M4.ko.md)). 일반 접힘 그룹과 잡
 차이는 이관했지만 브라우저의 선택·접기 UI는 다음 단계이며 UI-03 전체 완료가 아니다.
 M4g-11b는 실측 브랜치 `09be2ab`까지 16개 커밋을 정방향 합류하고 Rust CLI/웹
 승인의 occupancy 기본 생성과 명시 opt-out을 맞춘다([M4 §57](WEBUI_M4.ko.md)).
+M4g-31은 `45c9934`까지 추가 14개 커밋을 정방향 통합하고 로컬 전체 회귀를 통과했다.
+occupancy 기본값은 최신 계약에 따라 **layout off / jobdeck on**으로 바뀐다.
+새 캐시 이름·depth 점유·page frontier와 이관/검증 상태는
+[두 번째 동기화 기록](WEBUI_JOBDECK_SYNC.ko.md)에 둔다. 개명은 명시 Index에서만
+하도록 사용자 결정됐으며, 이 후속 구현은 별도 다음 단계로 남아 있다.
+전체 배터리 PASS는 실제 브라우저·Linux 실행·현장 수용이나 첫 실행 지연 해결을 뜻하지 않는다.
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.
 M4g-11d에서 Ctrl/Shift 선택·접기/펼치기·페이지 간 범위와 선택 행의 일괄 가시성을
@@ -166,6 +172,9 @@ auto-fit/zoom lock을 따른다. 단순 마커 선택은 이동하지 않는다.
 M2b-4c는 [HTTP/wire 권한 목록·수용 근거 대조](WEBUI_SHARING_ACCEPTANCE.ko.md)를
 연결한다. API 추가/재연결을 감지하고 합성 서버의 교차 인증 거부를 검사한다.
 SH-08 실제 브라우저와 SH-10 원격 수용을 로컬 green으로 닫지 않는다.
+2026-09-17 사용자 결정으로 **원격 단계는 보류**한다. 제안했던 HTTPS 프록시 뒤
+loopback gateway의 설계·코드·합성 테스트도 착수하지 않는다. SH-10/G3를 완료 처리하거나
+삭제하지 않고 보류 상태로 남기며, 로컬 공유 범위와 현재 통합 검증은 계속한다.
 `shares=false`는 유지하고 `delivery`는 follow=`follow_frames`, explore=`explore_frames`다.
 전송 기반을 전체 공유 완료로 계산하지 않는다. 원격 공개·노트 본문·파일 탐색/쓰기는 열지 않는다.
 

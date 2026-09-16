@@ -22,7 +22,7 @@ _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 # Deliberately FIXED, not host-proportional (F2R-10, user call
 # 2026-08-28): the viewers run on shared servers where a
 # half-the-RAM default is a neighbor hazard. Revisits beyond the
-# budget re-decode, but the OS page cache holds the encoded .floe
+# budget re-decode, but the OS page cache holds the encoded cache
 # pages, so a miss costs decode only (read was 0.6% of decode on
 # sample9). Sessions that want floe-scale retention opt in with
 # FLOE_RUST_BUDGET_MB.
@@ -1087,6 +1087,21 @@ class RustRenderWorker:
                 "thin_frames": _wire_int(fields, "thin_frames"),
                 # thin pages kept (page hairline cull off, 2026-09-10)
                 "thin_pages": _wire_int(fields, "thin_pages"),
+                # sub-cut pages/nodes washed as footprints and kept or
+                # expanded as sparse (2026-09-16: on a layout too - the
+                # cost of the field's mid-zoom draw to read)
+                "sub_cut_washes": _wire_int(fields, "sub_cut_washes"),
+                "sub_cut_sparse": _wire_int(fields, "sub_cut_sparse"),
+                # sub-cut items the planner's per-plan budgets dropped
+                # (sparse ink px / wash area px, 2026-09-16: a 6 s
+                # mid-zoom draw on the 150 MB chip)
+                "sub_cut_sparse_over": _wire_int(fields, "sub_cut_sparse_over"),
+                "sub_cut_wash_over": _wire_int(fields, "sub_cut_wash_over"),
+                # the page frontier's representatives (2026-09-17): cut
+                # pages kept / washed, cut placements washed or expanded
+                "rep_kept": _wire_int(fields, "rep_kept"),
+                "rep_washed": _wire_int(fields, "rep_washed"),
+                "rep_children": _wire_int(fields, "rep_children"),
             },
             # occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): layers
             # drawn from design.ovo instead of their pages, the cells

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import signal
 import subprocess
@@ -153,7 +154,7 @@ def main(fixture):
         work = Path(td)
         source = work / "테스트 with spaces.oas"
         shutil.copy2(fixture, source)
-        cache = Path(str(source) + ".floe")
+        cache = vfs_cache(source)
         temp = work / "worker-temp"
         temp.mkdir()
         env = {k: v for k, v in os.environ.items() if not k.startswith("FLOE_")}

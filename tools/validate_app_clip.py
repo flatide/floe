@@ -7,6 +7,7 @@ empty and explicit native binary paths. No proprietary source is copied here.
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import signal
 import subprocess
@@ -175,7 +176,7 @@ def main(fixture):
         assert "--bbox" in run(["clip", "--help"], env).stdout
         run(["clip"], env, code=2)
         run(["index", source, "--jobs=2"], env)
-        cache = Path(str(source) + ".floe")
+        cache = vfs_cache(source)
         before = digest(cache)
         original = source.read_bytes()
         compare(source, work, env, "layers", [0., 0., 100., 100.], "1/0,3/0,6/0", "CLI 한 글")

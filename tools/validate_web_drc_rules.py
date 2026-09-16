@@ -3,6 +3,7 @@
 import copy
 import json
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,7 @@ def main(fixture):
             directory.mkdir()
         source = layout / "synthetic.oas"
         shutil.copy2(fixture, source)
-        subprocess.run([str(INDEX), "vfs", str(source), str(source) + ".floe", "--jobs", "2"],
+        subprocess.run([str(INDEX), "vfs", str(source), str(vfs_cache(source)), "--jobs", "2"],
                        check=True, capture_output=True, timeout=60)
         a, b, empty, bad, huge = [layout / name for name in (
             "한 글.rules.json", "space.rules.json", "unmatched.json", "invalid.json", "huge.json")]
@@ -38,13 +39,13 @@ def main(fixture):
         empty.write_text(json.dumps(metadata(name="NOT_IN_THIS_DRC")))
         bad.write_text('{"format":"floe-svrf-rules","version":2,"checks":{}}')
         huge.write_bytes(b" " * (16 * 1024 * 1024 + 1))
-        protected = [source, a, b, empty, bad, huge] + [p for p in Path(str(source) + ".floe").rglob("*") if p.is_file()]
+        protected = [source, a, b, empty, bad, huge] + [p for p in vfs_cache(source).rglob("*") if p.is_file()]
         before = fingerprint(protected)
         refs = [dict(check="0", error="0")]
         for mode in ("ascii", "writer"):
             db = data / (mode + ".db")
             db.write_text(DB)
-            pack = Path(str(db) + ".ice")
+            pack = drc_pack(db)
             if mode == "writer":
                 subprocess.run([str(INDEX), "drc", str(db), "--jobs", "2"], check=True, capture_output=True, timeout=30)
             s = Session(source, pack if mode == "writer" else db, temps,

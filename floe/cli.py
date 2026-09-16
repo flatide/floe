@@ -11,6 +11,7 @@ _builtin_print = print
 
 from . import __version__
 from .product import default_renderer, name as product_name
+from . import cachepath
 
 APP = product_name()
 
@@ -129,12 +130,12 @@ def _nonnegative_float(value):
 
 
 def open_cache(src, args):
-    # the viewer is VFS-only: it opens <src>.floe (built by
+    # the viewer is VFS-only: it opens the VFS cache (built by
     # `floe index`, backed by `floe-index vfs`) and never auto-builds a cache.
     from . import cache as cache_mod
     if _is_deck(src):
         # a jobdeck (docs/JOBDECK.ko.md M3): its "cache" is every
-        # source's <src>.floe; renderd composites them (floe2 only)
+        # source's VFS cache; renderd composites them (floe2 only)
         from .jobdeck.viewer import DeckCache
         if _renderer_backend() != "rust":
             raise SystemExit(
@@ -217,11 +218,11 @@ def _legacy_index_options(args):
 
 def _cmd_index_legacy(args):
     from . import cache as cache_mod
-    vfs_meta = os.path.abspath(args.src) + ".floe/meta.json"
-    if os.path.isfile(vfs_meta):
+    vfs_dir = cachepath.find_vfs_cache(args.src)
+    if vfs_dir is not None:
         raise SystemExit(
             "floe: --legacy cannot select <src>.tiles while a VFS cache "
-            "for the same source exists; move the .floe cache aside first")
+            "for the same source exists; move %s aside first" % vfs_dir)
     caps = dict(text_cap=args.text_cap, text_tile_cap=args.text_tile_cap,
                 skel_texts=args.skel_texts)
     if args.skeleton_only or args.texts_only or args.merge_only:
@@ -321,9 +322,16 @@ def _discard_occupancy_tmp(outdir):
 
 
 def _occupancy_args(args):
-    """`--occupancy-um` for floe-index (the base cell in microns)."""
+    """`--occupancy-um` (the base cell in microns) and
+    `--occupancy-balance` (the marking unit split) for floe-index."""
+    out = []
     um = getattr(args, "occupancy_um", None)
-    return [] if um is None else ["--occupancy-um", repr(float(um))]
+    if um is not None:
+        out += ["--occupancy-um", repr(float(um))]
+    balance = getattr(args, "occupancy_balance", None)
+    if balance is not None:
+        out += ["--occupancy-balance", str(int(balance))]
+    return out
 
 
 def _run_rust_index(args, binary, coverage_only=False,
@@ -333,7 +341,7 @@ def _run_rust_index(args, binary, coverage_only=False,
 
     profiling = (args.profile_cell is not None or
                  args.profile_cell_ci is not None)
-    outdir = os.path.abspath(args.src) + ".floe"
+    outdir = cachepath.vfs_cache_dir(args.src)
     command = [binary, "vfs", os.path.abspath(args.src)]
     if not profiling:
         command.append(outdir)
@@ -349,8 +357,9 @@ def _run_rust_index(args, binary, coverage_only=False,
             command += ["--page-target-mb", str(args.page_target_mb)]
         if args.coverage:
             command.append("--coverage")
-        # the summary is the default (M5, 2026-09-15); a cell profile
-        # never publishes, so it does not ask for one
+        # the summary: a jobdeck's sources by default, a layout only on
+        # --occupancy (2026-09-16); a cell profile never publishes, so
+        # it does not ask for one
         if getattr(args, "occupancy", False) and not profiling:
             command.append("--occupancy")
             command += _occupancy_args(args)
@@ -396,7 +405,11 @@ def _run_rust_index(args, binary, coverage_only=False,
 def cmd_index(args):
     if _is_deck(args.src):
         # `floe2 index deck.jb`: one `index` run per source the deck
-        # names (each parallel with --jobs); current caches are kept
+        # names (each parallel with --jobs); current caches are kept.
+        # The occupancy summary is the DECK default (2026-09-16): the
+        # wide view of a mask deck needs it, a plain layout does not
+        if getattr(args, "occupancy", None) is None:
+            args.occupancy = True
         from .jobdeck import parse_jobdeck, SourceCatalog
         from .jobdeck.viewer import deck_sources_dir
         if args.legacy or _legacy_index_options(args):
@@ -432,6 +445,10 @@ def cmd_index(args):
     # --occupancy-um names the cell of a summary, so it asks for one
     if getattr(args, "occupancy_um", None) is not None:
         args.occupancy = True
+    # a layout indexes WITHOUT the summary unless asked (2026-09-16;
+    # a mask layout viewed with `--thin keep` wants `--occupancy`)
+    if getattr(args, "occupancy", None) is None:
+        args.occupancy = False
     legacy_options = _legacy_index_options(args)
     if legacy_options and not args.legacy:
         raise SystemExit(
@@ -499,7 +516,8 @@ def cmd_index(args):
         # Profiling deliberately bypasses cache reuse/replacement checks: it
         # reads the source, plans one cell and never names or touches outdir.
         return _run_rust_index(args, binary)
-    outdir = src + ".floe"
+    outdir = cachepath.vfs_cache_dir(src)
+    cachepath.find_vfs_cache(src)   # a pre-rename <src>.floe/ moves to outdir
     current, reason = _current_vfs_cache(src, outdir, binary)
     if args.coverage_only:
         if not current:
@@ -525,7 +543,7 @@ def cmd_index(args):
         if args.occupancy:
             ovo = os.path.join(outdir, "design.ovo")
             if not os.path.isfile(ovo):
-                # the default summary added to an older cache
+                # the summary added to a current cache without one
                 return _run_rust_index(args, binary, occupancy_only=True)
             print(f"[floe] cache up to date: {outdir} (occupancy already "
                   "present; use --force to rebuild, --occupancy-only to "
@@ -1076,12 +1094,15 @@ def _deck_skipped(cache):
 
 def _cache_ready(src, ids=None):
     """Lightweight cache check without importing klayout: a VFS
-    cache at <src>.floe with a matching source fingerprint."""
+    cache (floe/cachepath.py) with a matching source fingerprint."""
     if _is_deck(src):
         from .jobdeck.viewer import deck_ready
         return deck_ready(src, ids=ids)
+    cache_dir = cachepath.find_vfs_cache(src)
+    if cache_dir is None:
+        return False
     try:
-        with open(src + ".floe/meta.json") as f:
+        with open(os.path.join(cache_dir, "meta.json")) as f:
             meta = json.load(f)
         st = os.stat(src)
         return (bool(meta.get("vfs"))
@@ -1616,7 +1637,7 @@ def cmd_jobdeck(args):
         if ledger:
             rc = max(rc, 3)
     elif catalog.unindexed():
-        print("[jobdeck] %d source(s) have no .floe cache yet; run: "
+        print("[jobdeck] %d source(s) have no index yet; run: "
               "floe index %s" % (len(catalog.unindexed()), args.deck))
     if rc:
         raise SystemExit(rc)
@@ -1679,8 +1700,8 @@ def _jobdeck_index(args, catalog):
                 cmd.append("--occupancy")
                 cmd += _occupancy_args(args)
             else:
-                # The child CLI also defaults on: an explicit deck opt-out
-                # must survive the wrapper boundary for new/forced sources.
+                # Keep the explicit deck opt-out across the wrapper boundary,
+                # independent of the child CLI's source-aware default.
                 cmd.append("--no-occupancy")
         label = "occupancy" if m == "occupancy" else "index    "
         print("[jobdeck] %s : (%d/%d) %s" % (label, n, len(todo), tc),
@@ -1740,7 +1761,7 @@ def main(argv=None, *, prog=None, rust_only=None):
     p.add_argument("src")
     _add_level_option(p)
     p.add_argument("--force", action="store_true",
-                   help="allow replacement of an existing <src>.floe "
+                   help="allow replacement of an existing index "
                         "cache (without this flag a current cache is "
                         "reused and a stale/incomplete cache is refused)")
     p.add_argument("--jobs", type=_positive_int, default=12, metavar="N",
@@ -1764,23 +1785,31 @@ def main(argv=None, *, prog=None, rust_only=None):
     occ.add_argument(
         "--occupancy", action="store_true",
         help="build the design.ovo occupancy pyramid (the mask-policy "
-             "wide view summary) - the default since the M5 field "
-             "measurement (2026-09-15); when a current cache lacks it, "
-             "add it without replacing the cache")
+             "wide view summary): the default for a jobdeck's sources, "
+             "opt-in for a layout (2026-09-16); when a current cache "
+             "lacks it, add it without replacing the cache")
     occ.add_argument(
         "--no-occupancy", dest="occupancy", action="store_false",
-        help="index without the occupancy summary (a current cache "
-             "without one is left as is)")
+        help="index without the occupancy summary (the layout default; "
+             "a current cache without one is left as is)")
     occ.add_argument(
         "--occupancy-only", action="store_true",
         help="add or rebuild design.ovo on a current cache without "
              "re-indexing (the cache's other files are untouched)")
     rust.add_argument(
         "--occupancy-um", type=_positive_float, default=None, metavar="UM",
-        help="occupancy base cell in microns (default: 4); implies "
-             "--occupancy")
-    # Defer the implicit default until the backend is known: legacy tiles
-    # have no occupancy format, but explicit Rust-only flags still error.
+        help="occupancy base cell in microns (default: automatic - 4 for "
+             "a chip wider than 8 mm, 2/1/0.5/0.25 for smaller ones so the "
+             "fit view keeps a cell within a pixel); implies --occupancy")
+    rust.add_argument(
+        "--occupancy-balance", type=int, choices=(0, 1), default=None,
+        metavar="0|1",
+        help="how the occupancy marking is split over --jobs threads: "
+             "1 (default) by estimated work - a record's huge repetition "
+             "in member ranges, a heavy placement member by member; 0 the "
+             "count-based split (kill switch; the file is byte-identical "
+             "either way)")
+    # Resolve the source-aware default only after the backend is known.
     p.set_defaults(occupancy=None, occupancy_only=False)
     rust.add_argument("--no-lod", action="store_true",
                       help="do not generate merged LOD page variants "
@@ -1816,7 +1845,7 @@ def main(argv=None, *, prog=None, rust_only=None):
     rust.add_argument(
         "--profile-snapshot", metavar="PATH",
         help="load or atomically save an explicit selected-cell profile "
-             "snapshot; never modifies the normal .floe cache")
+             "snapshot; never modifies the normal index cache")
     rust.add_argument(
         "--profile-snapshot-refresh", action="store_true",
         help="replace the explicit profile snapshot after parsing; required "
@@ -2041,7 +2070,7 @@ def main(argv=None, *, prog=None, rust_only=None):
 
     p = sub.add_parser("drc", help="summarize a Calibre ASCII DRC "
                                    "results database (.db; a fresh "
-                                   "packed .ice built by 'floe-index "
+                                   "pack built by 'floe-index "
                                    "drc' is used automatically)")
     p.add_argument("db")
     p.add_argument("--list", action="store_true",
@@ -2115,7 +2144,7 @@ def main(argv=None, *, prog=None, rust_only=None):
     p.add_argument("--drc", default=None, metavar="FILE.db",
                    help="preload a Calibre ASCII DRC results db and "
                         "open the error browser (new instance only; "
-                        "a fresh FILE.db.ice index built by "
+                        "a fresh pack (.FILE.db.tray) built by "
                         "'floe-index drc' is used automatically)")
     detail_help = (
         "starting detail level (default: medium; higher = finer, heavier "
@@ -2247,8 +2276,6 @@ def main(argv=None, *, prog=None, rust_only=None):
     p.set_defaults(fn=cmd_jobdeck)
 
     args = ap.parse_args(argv)
-    if args.cmd == "index" and args.occupancy is None:
-        args.occupancy = not args.legacy
     reviewer = getattr(args, "floe_reviewer", None)
     if reviewer is not None:
         reviewer = reviewer.strip()

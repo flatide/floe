@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,7 @@ def main(fixture):
                    FLOE_VIEW_SECOND_FIXTURE=str(second),
                    FLOE_RENDERD_BIN=str(ROOT / "rust/target/release/floe-renderd"),
                    FLOE_INDEX_BIN=str(ROOT / "rust/target/release/floe-index"))
-        caches = [Path(str(target) + ".floe") for target in (source, second)]
+        caches = [vfs_cache(target) for target in (source, second)]
         for target in (source, second):
             p = subprocess.run([str(ROOT / "rust/target/release/floe2-web"), "index", str(target),
                                 "--jobs", "2"], env=env, cwd=ROOT, text=True, capture_output=True, timeout=40)

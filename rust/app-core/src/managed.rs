@@ -403,22 +403,27 @@ impl ManagedDataset {
             crate::jobdeck::index::validate_levels(&deck, selected)?;
             deck.sources(selected)
                 .into_iter()
-                .map(|tc| cache::cache_path(&source.parent().unwrap().join(tc)))
+                .map(|tc| cache::cache_paths(&source.parent().unwrap().join(tc)))
                 .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
         } else {
-            vec![cache::cache_path(&source)?]
+            cache::cache_paths(&source)?.into()
         };
         let read = resources.read(caches)?;
         let dataset = Dataset::open(&source, levels, mode, cancelled)?;
         let actual = match &dataset {
-            Dataset::Layout(l) => keys([l.directory.clone()])?,
+            Dataset::Layout(l) => keys(cache::cache_paths(&l.source)?)?,
             Dataset::Deck(d) => keys(
                 d.analysis
                     .catalog
                     .infos
                     .values()
-                    .map(|i| cache::cache_path(&i.path))
-                    .collect::<Result<Vec<_>>>()?,
+                    .map(|i| cache::cache_paths(&i.path))
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten(),
             )?,
         };
         if actual != read.keys {

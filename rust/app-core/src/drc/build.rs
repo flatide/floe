@@ -96,9 +96,8 @@ pub struct Build {
 }
 pub fn output_path(source: &Path) -> Result<PathBuf> {
     let source = cache::absolute(source)?;
-    let mut output = source.as_os_str().to_owned();
-    output.push(".ice");
-    artifact::protected_output(&PathBuf::from(output), &[source], &[])
+    let output = cache::pack_path(&source)?;
+    artifact::protected_output(&output, &[source], &[])
 }
 impl Build {
     /// Trusted caller explicitly approves this operation. Browser code must
@@ -115,9 +114,16 @@ impl Build {
         let source = scope.check(source)?;
         let output = output_path(&source)?;
         scope.check(&output)?;
+        let candidates = cache::pack_paths(&source)?;
+        for path in &candidates {
+            scope.check(path)?;
+        }
         // Require the DRC reader to close first; its selections/waives must not
         // silently migrate to the newly built pack's file-order identifiers.
-        let permit = resources.index([source.clone(), output.clone()], options.jobs)?;
+        let permit = resources.index(
+            std::iter::once(source.clone()).chain(candidates),
+            options.jobs,
+        )?;
         let id = resources.next_id()?;
         let started = Instant::now();
         let stop = Arc::new(AtomicUsize::new(0));

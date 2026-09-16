@@ -79,9 +79,10 @@ pub struct IndexArgs {
     pub jobs: u16,
     pub force: bool,
     pub lod: bool,
-    pub occupancy: bool,
+    pub occupancy: Field<bool>,
     pub occupancy_only: bool,
     pub occupancy_um: Field<String>,
+    pub occupancy_balance: Field<u8>,
 }
 impl Default for IndexArgs {
     fn default() -> Self {
@@ -89,9 +90,10 @@ impl Default for IndexArgs {
             jobs: 12,
             force: false,
             lod: false,
-            occupancy: true,
+            occupancy: Field::Absent,
             occupancy_only: false,
             occupancy_um: Field::Absent,
+            occupancy_balance: Field::Absent,
         }
     }
 }
@@ -111,9 +113,18 @@ impl IndexArgs {
             jobs: usize::from(self.jobs),
             force: self.force,
             lod: self.lod,
-            occupancy: self.occupancy,
+            occupancy: match self.occupancy {
+                Field::Absent => None,
+                Field::Value(v) => Some(v),
+            },
             occupancy_only: self.occupancy_only,
             occupancy_um,
+            occupancy_balance: match self.occupancy_balance {
+                Field::Absent => None,
+                Field::Value(0) => Some(false),
+                Field::Value(1) => Some(true),
+                Field::Value(_) => return Err(Error::input("occupancy-balance must be 0 or 1")),
+            },
             ..Default::default()
         };
         o.validate()?;
@@ -1027,15 +1038,25 @@ fn index_state(seq: u64, s: &IndexSnapshot) -> Value {
 mod index_args_tests {
     use super::*;
     #[test]
-    fn summary_defaults_on_but_explicit_optout_and_summary_only_survive() {
+    fn summary_default_is_source_aware_and_explicit_modes_survive() {
         let parse = |v| {
             serde_json::from_value::<IndexArgs>(v)
                 .unwrap()
                 .core()
                 .unwrap()
         };
-        assert!(parse(json!({})).occupancy);
-        assert!(!parse(json!({"occupancy":false})).occupancy);
+        assert_eq!(parse(json!({})).occupancy, None);
+        assert_eq!(parse(json!({"occupancy":false})).occupancy, Some(false));
+        assert_eq!(
+            parse(json!({"occupancy_balance":0})).occupancy_balance,
+            Some(false)
+        );
+        assert!(
+            serde_json::from_value::<IndexArgs>(json!({"occupancy_balance":2}))
+                .unwrap()
+                .core()
+                .is_err()
+        );
         assert!(parse(json!({"occupancy_only":true})).occupancy_only);
         assert_eq!(
             parse(json!({"occupancy":false,"occupancy_um":"2"})).occupancy_um,

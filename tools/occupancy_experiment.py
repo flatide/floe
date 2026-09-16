@@ -141,7 +141,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     c = Cache(args.src)
     if not c.exists():
-        raise SystemExit("no .floe cache for %s; run: floe2 index %s"
+        raise SystemExit("no index cache for %s; run: floe2 index %s"
                          % (args.src, args.src))
     c.load()
     dbu = float(c.meta["dbu"])

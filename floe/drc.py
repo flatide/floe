@@ -1,4 +1,4 @@
-"""Calibre DRC ASCII results database (.db) parser + .ice sidecar.
+"""Calibre DRC ASCII results database (.db) parser + pack (.<db>.tray).
 
 The format Calibre writes with `DRC RESULTS DATABASE "out.db" ASCII`:
 
@@ -40,6 +40,8 @@ import os
 import struct
 import sys
 import time
+
+from . import cachepath
 
 
 EDGE_RULER_OFFSET_PX = 14
@@ -224,8 +226,10 @@ def _is_geom_header(tokens):
 
 
 def load_db(path):
-    """Open a DRC results database: packed .ice (v2) if given or
-    fresh next to the .db, full ASCII parse otherwise.
+    """Open a DRC results database: a pack if given (any name - the
+    magic decides) or the fresh pack beside the .db (`.<db>.tray`,
+    floe/cachepath.py; a pre-2026-09-16 `<db>.ice` is renamed to it on
+    first touch), full ASCII parse otherwise.
 
     The v1 offset sidecar is retired (user call 2026-08-19 - no
     review-status storage, no spatial index, and it kept the huge
@@ -241,8 +245,11 @@ def load_db(path):
         raise ValueError(
             "%s is a retired v1 offset sidecar - re-run: "
             "floe-index drc <db>" % path)
-    side = path + ".ice"
-    if os.path.exists(side):
+    side = cachepath.find_pack(path)
+    if side is None and os.path.exists(cachepath.legacy_pack_path(path)):
+        # a retired v1 sidecar (never a pack): reported below
+        side = cachepath.legacy_pack_path(path)
+    if side is not None:
         try:
             with open(side, "rb") as f:
                 shead = f.read(12)
@@ -460,10 +467,10 @@ def _waive_user():
 
 def waive_autosave_path(pack_path):
     """Working review state beside the pack: .<db>.waive.<user>
-    (the directory itself disambiguates equal db names)."""
-    name = os.path.basename(pack_path)
-    if name.endswith(".ice"):
-        name = name[:-4]
+    (the directory itself disambiguates equal db names; the name comes
+    from the .db the pack belongs to, so a hidden `.<db>.tray` pack
+    yields the same sidecar as its former `<db>.ice` name)."""
+    name = cachepath.db_name_of(pack_path)
     return os.path.join(
         os.path.dirname(os.path.abspath(pack_path)),
         ".%s.waive.%s" % (name, _waive_user()))
@@ -475,10 +482,8 @@ def _waive_tmp_fallback(pack_path):
     autosaves of equal-named dbs from different folders)."""
     import hashlib
     import tempfile
-    ap = os.path.abspath(pack_path)
-    name = os.path.basename(pack_path)
-    if name.endswith(".ice"):
-        name = name[:-4]
+    ap = cachepath.db_path_of(pack_path)
+    name = cachepath.db_name_of(pack_path)
     tag = hashlib.sha1(ap.encode("utf-8", "surrogateescape")) \
         .hexdigest()[:12]
     return os.path.join(
@@ -502,9 +507,7 @@ def _waive_tmp_fallback(pack_path):
 
 def notes_autosave_path(pack_path):
     """Per-reviewer note sidecar beside the pack, flateyes .fe format."""
-    name = os.path.basename(pack_path)
-    if name.endswith(".ice"):
-        name = name[:-4]
+    name = cachepath.db_name_of(pack_path)
     return os.path.join(
         os.path.dirname(os.path.abspath(pack_path)),
         ".%s.notes.%s.fe" % (name, _waive_user()))
@@ -515,10 +518,8 @@ def _notes_tmp_fallback(pack_path):
     read-only (path-hashed, like the waive fallback)."""
     import hashlib
     import tempfile
-    ap = os.path.abspath(pack_path)
-    name = os.path.basename(pack_path)
-    if name.endswith(".ice"):
-        name = name[:-4]
+    ap = cachepath.db_path_of(pack_path)
+    name = cachepath.db_name_of(pack_path)
     tag = hashlib.sha1(ap.encode("utf-8", "surrogateescape")) \
         .hexdigest()[:12]
     return os.path.join(

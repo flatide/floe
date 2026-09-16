@@ -29,6 +29,9 @@
 | hairline | 0.5 | rev 41 min변 컷 계수 (0=off) |
 | thin_lattice_um | 7.0 | rev 45 프레임 격자 피치 µm (0=rev 41 프레임 컬 복원) |
 | thin_demote_px | 14.0 | 격자 1피치 화면 px가 이 미만이면 빈당 2→1 강등 |
+| sub_cut_walk_budget | 200_000 | sub-cut 노드를 배치·페이지까지 내려가는 플랜당 걸음 수(소진=coarse wash) |
+| sub_cut_sparse_px | 16 Mpx | sub-cut 희소 항목의 ink 예산(플랜당 화면 px, 소진=버림; §3) |
+| sub_cut_wash_px | 64 Mpx | sub-cut wash 면적 예산(플랜당 화면 px, 소진=버림; §3) |
 
 ## 3. 컷/생략 사다리 (정확한 술어)
 
@@ -40,6 +43,59 @@
   119 µm 길이의 선 영역이 210 µm 뷰부터 지워진 것이 이 규칙이었다(4페이지 모두
   `cull_hair`, 문턱 0.128 µm에 4 nm 차이). raster는 남긴 가는 레코드를 전체
   길이의 1 px 선으로 그리고(KLayout hairline parity) `thin_pages_kept`로 센다.
+  **sub-cut 페이지**(`ViewReq::sub_cut_wash`; 덱 pass는 2026-09-10부터, 단일
+  레이아웃 요청은 2026-09-16부터 켰다가 **같은 날 사용자 결정으로 둘 다 기본 off**:
+  느려지는 부작용에 비해 여전히 다 보이지는 않고, 덱은 점유 요약이 광역뷰를
+  맡는다. 진단 `FLOE_RUST_SUB_CUT_WASH=on`(단일 레이아웃)·`FLOE_RUST_DECK_WIDE=on`
+  (덱)으로만 켠다. 켰을 때의 규칙 — 현장: 9.8 GB 일반 레이아웃이 detail high에서
+  Calibre보다 훨씬 적게 보임, 모든 도형이 cut 미만인 페이지가 통째로 `cull_size`
+  됐다): 크기 컷(`max_w<cut && max_h<cut`)에 걸린 페이지는 버리지 않고,
+  footprint 대비 멤버 채움이 1/256 이상이면 레이어 색 footprint wash
+  (`sub_cut_washes`), 미만이면 페이지를 남겨 멤버를 픽셀로 그린다(`keep_sparse`,
+  `sub_cut_sparse`; JOBDECK §11 4단계). 배치 BVH의 sub-cut 노드도 같다
+  (`wash_sub_cut_child`). hairline 컷 항목(cull 정책, `Hier::hair_cut`)도 같은
+  규칙이되 채움 문턱이 `WASH_MIN_COVERAGE_HAIR` = 1/8이다(선은 길이만큼 픽셀을
+  세므로 빈 페이지의 긴 선 셋은 3~4 %로 남아 정확히 그려지고, 밀집 배선은 wash;
+  진단 `FLOE_RUST_WASH_HAIR_COVERAGE`). 사용자 결정 2026-09-16: 9.8 GB 레이아웃의
+  요약 생성이 한 시간을 넘어, 요약 없이도 광역뷰에 존재가 보여야 한다. keep은
+  hairline 페이지를 그대로 남긴다(page_hair = 0). exact 요청은 제외. 켜는 스위치
+  `FLOE_RUST_SUB_CUT_WASH=on`(단일 레이아웃), `FLOE_RUST_DECK_WIDE=on`(덱; 둘 다
+  진단 전용, 기본 off); gate `validate_occupancy` `SubCutTests`(on 워커가 규칙을
+  검증), `validate_jobdeck` `WideViewTests`·`ThinPageTests`.
+  **대표(page frontier)**(`ViewReq::page_reps`, 사용자 설계 2026-09-17; 단일
+  레이아웃 요청에 켬, 덱 pass·exact·probe는 off): 컷이 버리던 것을 없애지 않고
+  **대표만 남긴다**. 컷에 걸린 페이지/배치가 자기 컷 문턱의 1/2^k 이하이면(k =
+  `rep_octaves`; hairline 컷은 `max_min/page_hair`, 크기 컷은 `max_dim/cut`, 둘 다면
+  먼저 잘린 쪽 = 큰 k) 소속 run(페이지: (cell, layer)의 페이지 열, 배치: 셀의 배치
+  열) 안의 index가 4^k의 배수인 것만 남기고(`rep_keeps`), 남긴 것은 sub-cut 규칙
+  대로 그린다(밀집 → footprint wash `rep_wash`, 희소 → 픽셀 `rep_keep`; 배치는
+  `rep_wash`/`rep_expand`). 한 옥타브 축소하면 뷰의 컷 항목이 4배, 남기는 비율이
+  1/4이라 **뷰당 수가 컷 시점의 수로 일정**하고, 4^(k+1)의 배수는 4^k의 배수라
+  **생존자는 더 축소해도 살아남는다**(frontier 격자 대표와 같은 성질). run의 첫
+  항목(index 0)은 언제나 대표라 내용이 있는 (cell, layer)는 어느 줌에서든 최소 한
+  페이지를 보인다. BVH는 서브트리의 index 구간([lo, hi), 페이지는 leaf-order
+  permute로 연속)에 4^k의 배수가 없으면 통째로 프루닝하므로(`rep_pruned`) 걷기 비용도
+  대표 수에 비례한다. 예산(`sub_cut_sparse_px`/`sub_cut_wash_px`)이 안전망. 대표는
+  부분만 보이는 무늬이지 요약처럼 채워진 면이 아니다. 킬 스위치
+  `FLOE_RUST_PAGE_REPS=off`(뷰어), `floe-index plan --page-reps 1`. gate
+  `PageFrontierTests`(90,000개 hairline 페이지 열: 800/400/200 px에서 대표 집합이
+  전부 → 1/4 → 1/16으로 줄고 포함 관계가 유지, 킬 스위치는 0 px), `SubCutTests`
+  (단일 페이지 레이어 = index 0 = 대표), `ThinPageTests`·`test_render_detail…`.
+  **플랜당 예산**(2026-09-16 현장: 150 MB 실칩 thin:cull detail medium의 중간
+  줌에서 draw가 6 s를 넘었고 킬 스위치로 이전 속도가 돌아옴): sub-cut 규칙이
+  한 프레임에 보태는 양을 두 예산이 막는다. ① `sub_cut_sparse_px` — 남긴 희소
+  페이지·펼친 희소 배치의 ink 추정(멤버 수 × 멤버 화면 px, 멤버당 최소 1 px;
+  `wash_worth`와 같은 척도)의 합. 소진 뒤의 희소 항목은 wash가 아니라 **버린다**
+  (옛 cull; 희소 footprint의 wash는 2026-09-15의 거짓 블록이므로). ② `sub_cut_wash_px`
+  — wash의 뷰 안 면적(레이어당 한 장)의 합. 소진 뒤의 항목은 버린다. 걷는 순서대로
+  쓰므로 같은 요청은 같은 플랜이다. stats `sub_cut_sparse_over` / `sub_cut_wash_over`
+  (perf 줄·상태줄 `sub-cut over A/B`)가 버린 수. 기본 16 Mpx / 64 Mpx(4 Mpx 뷰의
+  hairline ink 4장·블록 채움 16장, 각각 raster 수십 ms; 현장 perf 줄로 확정 전의
+  잠정값). 진단 `FLOE_RUST_SUB_CUT_SPARSE_MPX` / `FLOE_RUST_SUB_CUT_WASH_MPX`(Mpx,
+  0 = 희소 전부 / wash 전부 버림 — 어느 쪽이 느린지 가르는 A/B). gate
+  `SubCutTests.test_the_per_plan_budgets…`(10 px / 100 px 예산: 4 px짜리 희소
+  페이지는 남고 63 px짜리 선 페이지와 400 px wash는 버려져 카운터에 잡힘; 기본
+  예산은 아무것도 버리지 않음).
   **점유 요약 레이어**(`ViewReq::page_skip`, OCCUPANCY_PLAN M2): 비트셋에 든
   레이어는 페이지 범위(prange)에서 통째로 건너뛰어 선택·디코드가 없고
   `summary_pages`로 센다. 순회(자식·프레임·다른 레이어)는 `vis` 그대로이되,

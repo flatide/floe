@@ -21,7 +21,7 @@ floe 뷰어의 klayout 경로를 대체하려면 무엇을 소비하고, 무엇�
 
 ## 2. 입력 계약 (렌더러가 소비하는 것)
 
-- **.floe 캐시**: `design.ovm`(v7 메타·인덱스) + `design.ovp`(페이지
+- **VFS 캐시(`.<src>.ice/`)**: `design.ovm`(v7 메타·인덱스) + `design.ovp`(페이지
   페이로드) + `design.ovt`(텍스트 풀) + `meta.json`(뷰어 요약·미니맵
   프런티어). 구조 정본: `docs/SPEC-FORMATS.ko.md`. 오픈 검증 규칙
   (ovm이 커밋한 ovp/ovt 바이트 길이 일치)은 `floe-vfs::Vfs::open`이
@@ -220,7 +220,7 @@ P-a/P-b/P-c를 적용한다. 이 gate는 primitive 종류에 따라 fill phase�
 
 | 자산 | 위치/생성 | 용도 |
 |---|---|---|
-| valmini | `tools/gen_valmini.py` (스위트가 $TMPDIR에 생성; `data/m1/valmini*.floe`는 0.11.44로 최신화됨) | 작은 적대 자산: 회전/미러 배치, 3계층, 비맨해튼, 텍스트 |
+| valmini | `tools/gen_valmini.py` (스위트가 $TMPDIR에 생성; `data/m1/.valmini*.ice`는 0.11.44로 최신화됨) | 작은 적대 자산: 회전/미러 배치, 3계층, 비맨해튼, 텍스트 |
 | sample9 | `tools/gen_sample9.py` | 145MB depth-9, 성능/실측 |
 | repfloor / p2floor | `tools/validate_vfs_split.py`가 생성 | rep-flood(Pts/Grid 대량), 몬스터 셀 |
 | frametest / thintest | `tools/gen_frametest.py` / `gen_thintest.py` | 프레임 톤/스택, rev 45 격자 |
@@ -232,16 +232,16 @@ P-a/P-b/P-c를 적용한다. 이 gate는 primitive 종류에 따라 fill phase�
 ```sh
 # 캐시 만들기 + 플랜 확인
 rust/target/release/floe-index vfs design.oas
-rust/target/release/floe-index plan design.oas.floe --mode hier \
+rust/target/release/floe-index plan .design.oas.ice --mode hier \
     --view x0,y0,x1,y1 --px-per-um 5 --depth 0
 
 # 렌더러 브링업: floe-vfs로 페이지 바이트 직접 획득
-#   let v = floe_vfs::Vfs::open("design.oas.floe")?;
+#   let v = floe_vfs::Vfs::open(".design.oas.ice")?;
 #   let plan = floe_vfs::hier::plan_hier(&v.ovm, &req, &opts);
 #   let pages = v.read_page_batch(&plan.pages)?;  // (idx, OASIS bytes)
 
 # 오라클 게이트 (klayout 필요: .venv)
-.venv/bin/python tools/validate_vfs_render.py <src.oas> <cache.floe>
+.venv/bin/python tools/validate_vfs_render.py <src.oas> <cache-dir>
 .venv/bin/python tools/validate_render_speckle.py
 .venv/bin/python tools/validate_render_frames.py
 .venv/bin/python tools/validate_render_goldens.py            # 베이크+자기검사

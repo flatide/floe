@@ -195,8 +195,10 @@ fn run(
         permit.promote_index_writes(
             plan.todo
                 .iter()
-                .map(|e| crate::cache::cache_path(&e.source))
-                .collect::<Result<Vec<_>>>()?,
+                .map(|e| crate::cache::cache_paths(&e.source))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten(),
         )?;
         let mut s = state.lock().unwrap();
         s.kept = plan.kept;

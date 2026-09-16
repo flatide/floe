@@ -23,6 +23,7 @@ const displayTestEnabled=process.env.FLOE_TEST_DISPLAY==='1',displayReads=[];
 const wheelEnabled=process.env.FLOE_TEST_WHEEL==='1';
 const dumpEnabled=process.env.FLOE_TEST_DUMP==='1';
 const frameStatusEnabled=process.env.FLOE_TEST_FRAME_STATUS==='1';
+const indexDefaultsEnabled=process.env.FLOE_TEST_INDEX_DEFAULTS==='1';
 function presetFixture(){
     const lines=name=>fs.readFileSync(__dirname+'/../../../floe/'+name,'utf8').split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#')).map(l=>l.split(/\s+/));
     return {version:1,colors:lines('colornames.def').map(([name,color])=>({name,color:'#'+color.toLowerCase()})),
@@ -147,7 +148,7 @@ class XHR {
             if(indexOpenEnabled){
                 open=body.kind==='index_open';
                 if(open){assert(storage.has('floe-index-open:'+'c'.repeat(64)),'approval must be saved before POST');value={seq:lastSeq,kind:'index_open',request_id:body.request_id,open_seq:body.open_seq,phase:'succeeded',stage:'open',view_id:viewId,index:{phase:'succeeded'}};}
-                else{value={seq:lastSeq,kind:'open',phase:'failed',error:'index_unavailable',index_open:{open_seq:lastSeq,source_id:body.source_id,title:'synthetic',mode:body.mode,levels:body.levels,display_policy:body.display_policy||'explicit'}};}
+                else{value={seq:lastSeq,kind:'open',phase:'failed',error:'index_unavailable',index_open:{open_seq:lastSeq,source_id:body.source_id,title:'synthetic',mode:body.mode,levels:body.levels,occupancy_default:false,display_policy:body.display_policy||'explicit'}};}
                 indexOperations.push(value);
             }
         }
@@ -248,6 +249,21 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(indexDefaultsEnabled){
+        await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
+        assert.equal(node('index-occupancy').checked,false,'layout default is off');
+        const count=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations').length,before=count();
+        node('index-occupancy').checked=true;node('source').onchange();
+        assert.equal(node('index-occupancy').checked,true,'same source preserves explicit choice');
+        node('source').value='deck';node('source').onchange();
+        assert.equal(node('index-occupancy').checked,true,'new deck default is on');
+        node('index-occupancy').checked=false;node('source').onchange();
+        assert.equal(node('index-occupancy').checked,false,'same deck preserves explicit opt-out');
+        node('source').value='src';node('source').onchange();
+        assert.equal(node('index-occupancy').checked,false,'new layout selection resets the default');
+        assert.equal(count(),before,'choosing index defaults never submits a write');
+        listeners.pagehide();console.log('WEB INDEX DEFAULTS: ALL OK (source-aware defaults, explicit choices, no implicit write)');return;
+    }
     if(frameStatusEnabled){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
         const noQuery={query:false,query_scene:{generation:null,round:null,complete:false,summary_layers:'0'}};
@@ -532,7 +548,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         node('index-open-jobs').value='2';node('index-open-lod').checked=true;
         await node('index-open-approve').onclick();
         assert.equal(commands().length,2);assert.equal(commands()[1].body.kind,'index_open');assert.equal(commands()[1].body.open_seq,'1');
-        assert.equal(commands()[1].body.approved,true);assert.deepEqual(commands()[1].body.options,{jobs:2,force:false,lod:true,occupancy:true});
+        assert.equal(commands()[1].body.approved,true);assert.deepEqual(commands()[1].body.options,{jobs:2,force:false,lod:true,occupancy:false});
         assert.deepEqual(commands()[1].body.target,{kind:'empty'});assert.deepEqual(commands()[1].body.pixels,[100,80]);
         assert(storage.has('floe-index-open:'+'c'.repeat(64)));assert(node('index').disabled);assert(node('source').disabled);assert.equal(sockets.length,0);
         node('cancel-job').dataset.seq='99';const cancelReads=requests.length;node('cancel-job').onclick();

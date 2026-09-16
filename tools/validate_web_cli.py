@@ -4,6 +4,7 @@ import http.cookiejar
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import signal
 import subprocess
@@ -160,7 +161,7 @@ def main(fixture):
                 first = client.finished(1, proc)
                 if not manual:
                     assert first["error"] == "index_unavailable"
-                    assert not Path(str(source) + ".floe").exists(), "open silently indexed"
+                    assert not vfs_cache(source).exists(), "open silently indexed"
                     client.call("POST", "/api/v1/operations", dict(kind="index", seq="2",
                                 source_id=startup["source_id"], options=dict(jobs=2)), 202)
                     assert client.finished(2, proc)["phase"] == "succeeded"

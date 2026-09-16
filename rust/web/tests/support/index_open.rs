@@ -129,7 +129,7 @@ async fn deck_index_reuses_live_caches_without_replacing_the_view() {
     assert_eq!(busy["phase"], "failed", "{busy}");
     assert_eq!(busy["error"], "busy");
     assert!(!b.exists());
-    assert!(!dir.join("B.oas.floe.index.lock").exists());
+    assert!(!dir.join(".B.oas.ice.index.lock").exists());
     let request = index("4", json!(["1", "2"]), false);
     let done = operation(&h, &login, request.clone()).await;
     assert_eq!(done["phase"], "succeeded", "{done}");
@@ -137,7 +137,7 @@ async fn deck_index_reuses_live_caches_without_replacing_the_view() {
     assert_eq!(done["completed"], 2);
     assert!(b.join("design.ovo").is_file());
     assert!(!c.exists());
-    assert!(!dir.join("C.oas.floe.index.lock").exists());
+    assert!(!dir.join(".C.oas.ice.index.lock").exists());
     assert_eq!(
         h.call(&login, "POST", "/api/v1/operations", request)
             .await
@@ -385,8 +385,8 @@ async fn approved_index_open_preserves_first_frame_replays_and_explicit_force() 
     assert_eq!(done["stage"], "open");
     assert_eq!(done["index"]["phase"], "succeeded");
     assert!(
-        cache_dir(&a).join("design.ovo").is_file(),
-        "approved default omitted occupancy"
+        !cache_dir(&a).join("design.ovo").exists(),
+        "approved layout default unexpectedly built occupancy"
     );
     let mut ws = h.connect(&login).await;
     let (_, header) = frame(&mut ws).await;

@@ -7,6 +7,7 @@ exact GTK-derived names in a separate directory, outside the source roots.
 """
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache, drc_pack
 import shutil
 import subprocess
 import sys
@@ -32,14 +33,14 @@ def main(fixture):
         temps = Path(legacy_td)
         source = work / "synthetic.oas"
         shutil.copy2(fixture, source)
-        subprocess.run([str(INDEX), "vfs", str(source), str(source) + ".floe", "--jobs", "2"],
+        subprocess.run([str(INDEX), "vfs", str(source), str(vfs_cache(source)), "--jobs", "2"],
                        check=True, capture_output=True, timeout=30)
         db = work / "synthetic.db"
         db.write_text(DB)
         subprocess.run([str(INDEX), "drc", str(db), "--jobs", "2"],
                        check=True, capture_output=True, timeout=30)
-        pack = Path(str(db) + ".ice")
-        inputs = [source, db, pack] + [p for p in Path(str(source) + ".floe").rglob("*") if p.is_file()]
+        pack = drc_pack(db)
+        inputs = [source, db, pack] + [p for p in vfs_cache(source).rglob("*") if p.is_file()]
         before = fingerprint(inputs)
         live = []
 
@@ -59,7 +60,12 @@ def main(fixture):
                     os.environ["FLOE_REVIEWER"] = old_tag
 
         def sidecar_files():
-            return list(work.glob(".synthetic.db.*")) + list(temps.glob(".synthetic.db.*"))
+            # The hidden .synthetic.db.tray pack is not a review sidecar.
+            # In the nonregular-pack cases it is deliberately a FIFO/directory;
+            # including it here would block the harness before the native probe.
+            return [p for directory in (work, temps)
+                    for pattern in (".synthetic.db.notes.*", ".synthetic.db.waive.*")
+                    for p in directory.glob(pattern)]
 
         def session(tag=None, *, database=pack, **options):
             s = Session(source, database, temps, tag, work / "session.json", **options)

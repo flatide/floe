@@ -23,7 +23,7 @@ APP = ROOT / "rust/target/release/floe2-web"
 # This is deliberately explicit: new/removed flags must trigger another audit.
 SURFACE = {
     "index": """--level=1 --force --jobs=2 --page-target-mb=1
-        --occupancy --no-occupancy --occupancy-only --occupancy-um=4 --no-lod --lod
+        --occupancy --no-occupancy --occupancy-only --occupancy-um=4 --occupancy-balance=1 --no-lod --lod
         --slow-cell-s=0 --p2-shard-limit-mb=0 --profile-cell=TOP --profile-cell-ci=0
         --profile-jobs=1,2 --profile-repeat=2 --profile-snapshot=snapshot
         --profile-snapshot-refresh""",
@@ -59,7 +59,7 @@ HIDDEN = {
     "view": {"--layout-mode"}, "probe": {"--layout-mode"},
 }
 # Defaults not listed here are None (value options) or False (switches).
-# argparse occupancy=None is later resolved by cmd_index; not default-off.
+# argparse occupancy=None is later resolved by cmd_index: layout off, deck on.
 DEFAULTS = {
     "index": {"--jobs": 12, "--profile-repeat": 1, "--occupancy": None, "--no-occupancy": None},
     "render": {"--px": "1200", "--out": "view.png", "--anchor": "center", "--line": 2.,
@@ -73,6 +73,7 @@ DEFAULTS = {
     "fe-embed": {"--" + k: [] for k in ("box", "ellipse", "line", "path", "polygon", "ruler", "text")},
 }
 CHOICES = {
+    ("index", "--occupancy-balance"): (0, 1),
     ("render", "--anchor"): ("center", "lb"),
     ("render", "--thin"): ("auto", "keep", "cull"),
     ("render", "--detail"): ("exact", "low", "medium", "high"),
@@ -210,7 +211,7 @@ def native(parsers):
                 for flag in names:
                     values = CHOICES.get((cmd, names[0]), (value,))
                     for v in values:
-                        args = [cmd, "synthetic", flag] + ([] if v is None else [v]) + ["--help"]
+                        args = [cmd, "synthetic", flag] + ([] if v is None else [str(v)]) + ["--help"]
                         rejected = INACTIVE.get(flag) if cmd == "view" else None
                         call(args, 2 if rejected else 0, rejected or "Usage:")
             for action in parsers[cmd]._actions:

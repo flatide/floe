@@ -37,6 +37,7 @@ from floe.jobdeck import color as jcolor             # noqa: E402
 from floe.jobdeck import geom as jgeom               # noqa: E402
 from floe.jobdeck.sources import file_header         # noqa: E402
 from floe.cache import Cache                         # noqa: E402
+from floe.cachepath import vfs_cache_dir, pack_path  # noqa: E402
 from floe.jobdeck import render as jrender           # noqa: E402
 
 EXPECTED = json.loads((ROOT / "tools" / "jobdeck_expected.json").read_text())
@@ -730,7 +731,7 @@ class CliTests(unittest.TestCase):
                       res.stdout)
         self.assertIn("CHIP:ID001 blue, $2 yellow, CHIP:ID002 red",
                       res.stdout)
-        self.assertIn("no .floe cache yet; run: floe2 index", res.stdout)
+        self.assertIn("no index yet; run: floe2 index", res.stdout)
         r = json.loads(rep.read_text())
         self.assertEqual(r["plan"]["instances"], 5)
         self.assertEqual(len(r["placements"]), 5)
@@ -752,7 +753,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("structural error", res.stderr)
 
     def test_3_batch_index(self):
-        """runs last: it leaves .floe caches in the CLI copy."""
+        """runs last: it leaves index caches in the CLI copy."""
         binary = ROOT / "rust" / "target" / "release" / "floe-index"
         self.assertTrue(binary.is_file(), "release floe-index is not built")
         env = {"FLOE_INDEX_BIN": str(binary)}
@@ -790,7 +791,7 @@ class JobdeckIndexLodTests(unittest.TestCase):
             deck.write_text(DECK, encoding="utf-8")
 
             def marker(name):
-                return work / (name + ".floe") / "design.ovm"
+                return Path(vfs_cache_dir(work / name)) / "design.ovm"
 
             def lod_sources():
                 return {name for name in names
@@ -1503,16 +1504,19 @@ class LoadingBannerTests(unittest.TestCase):
 
 class ViewerIndexArgvTests(unittest.TestCase):
     """The viewer's own indexing (File > load layout on a layout
-    without a cache) calls the raw floe-index binary, which is opt-in
-    for the occupancy summary: it must ask for it explicitly so the
-    result matches `floe2 index`'s default (M5, 2026-09-15). A jobdeck
-    load goes through `floe2 index deck.jb` and inherits the default."""
+    without a cache) calls the raw floe-index binary with the same
+    argv shape as `floe2 index` on a layout: no occupancy summary
+    (2026-09-16; a jobdeck load goes through `floe2 index deck.jb`,
+    whose sources default to the summary) and the cache path from
+    floe/cachepath.py (the hidden .<src>.ice sibling)."""
 
-    def test_the_layout_index_asks_for_the_summary(self):
+    def test_the_layout_index_matches_floe2_index(self):
         import inspect
         from floe import gui
         src = inspect.getsource(gui)
-        self.assertIn('"--jobs", "12", "--occupancy", "--no-lod"', src)
+        self.assertIn('"--jobs", "12", "--no-lod"', src)
+        self.assertNotIn('"--occupancy"', src)
+        self.assertIn("cachepath.vfs_cache_dir(src)", src)
         self.assertIn('"-m", APP, "index", path', src)
 
 
@@ -1704,9 +1708,9 @@ class LevelSelectTests(unittest.TestCase):
         res = run_floe2("index", deck, "--level", "3", "--jobs", "2",
                         env=self.env, ok=0)
         self.assertIn("[jobdeck] levels    : 3 of 1,2,3,5", res.stdout)
-        self.assertTrue((fresh / "mark.oas.floe" / "meta.json").is_file())
-        self.assertFalse((fresh / "chipA.oas.floe").exists())
-        self.assertFalse((fresh / "chipB.oas.floe").exists())
+        self.assertTrue((Path(vfs_cache_dir(fresh / "mark.oas")) / "meta.json").is_file())
+        self.assertFalse(Path(vfs_cache_dir(fresh / "chipA.oas")).exists())
+        self.assertFalse(Path(vfs_cache_dir(fresh / "chipB.oas")).exists())
         self.assertTrue(deck_ready(str(deck), ids=[3]))
         self.assertFalse(deck_ready(str(deck), ids=[1, 3]))
         self.assertFalse(deck_ready(str(deck)))
@@ -1783,12 +1787,12 @@ class IndexOnOpenSmokeTests(unittest.TestCase):
         for name in ("chipA.oas", "chipB.oas", "mark.oas", "test.jb",
                      "test_formats.jb", "chipA.gds"):
             shutil.copy2(CLI / name, fresh / name)
-        self.assertFalse((fresh / "chipA.oas.floe").exists())
+        self.assertFalse(Path(vfs_cache_dir(fresh / "chipA.oas")).exists())
         # declined (policy no): the viewer stays empty, the smoke says so
         res = run_floe2("view", "--multi", fresh / "chipA.oas",
                         env=self._env("no"), ok=1, timeout=120)
         self.assertIn("pending open never landed", res.stderr + res.stdout)
-        self.assertFalse((fresh / "chipA.oas.floe").exists())
+        self.assertFalse(Path(vfs_cache_dir(fresh / "chipA.oas")).exists())
         # the same for a deck whose OASIS source lacks an index (it
         # used to be refused in the terminal)
         res = run_floe2("view", "--multi", fresh / "test_formats.jb",
@@ -1815,14 +1819,14 @@ class IndexOnOpenSmokeTests(unittest.TestCase):
         run_floe2("view", "--multi", fresh / "chipA.oas", "--goto",
                   "1000,1000,500", "--drc", db, env=self._env("yes"),
                   ok=0, timeout=180)
-        self.assertTrue((fresh / "chipA.oas.floe" / "meta.json").is_file())
-        self.assertTrue((fresh / "chipA.db.ice").exists(),
+        self.assertTrue((Path(vfs_cache_dir(fresh / "chipA.oas")) / "meta.json").is_file())
+        self.assertTrue(Path(pack_path(fresh / "chipA.db")).exists(),
                         "the DRC pack was built without asking (policy yes)")
         # a jobdeck: every source indexed through `floe2 index deck.jb`
         run_floe2("view", "--multi", fresh / "test.jb", env=self._env("yes"),
                   ok=0, timeout=180)
         for name in ("chipB.oas", "mark.oas"):
-            self.assertTrue((fresh / (name + ".floe") / "meta.json").is_file(),
+            self.assertTrue((Path(vfs_cache_dir(fresh / name)) / "meta.json").is_file(),
                             name)
 
 
@@ -2859,17 +2863,28 @@ class ThinPageTests(unittest.TestCase):
         # lines (40 um long) are all-thin
         exact = self._rgb("thin.oas", "exact")
         self.assertGreater(self._lit(exact), 100)
-        # the plain layout's default: the performance policy culls
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
+        # the plain layout's default: the performance policy culls the
+        # all-thin page - and the page frontier (2026-09-17) keeps a
+        # representative of what the cut drops: this single page is the
+        # first of its run, sparse (400 lines under 1/8 of the page),
+        # so it is kept and drawn exactly. FLOE_RUST_PAGE_REPS=off is
+        # the plain cull (nothing); FLOE_RUST_SUB_CUT_WASH=on the
+        # blanket sub-cut rules (the same picture here)
+        noreps = {"FLOE_RUST_PAGE_REPS": "off"}
+        wash = {"FLOE_RUST_SUB_CUT_WASH": "on"}
+        self.assertEqual(self._rgb("thin.oas", "high"), exact)
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high", noreps)), 0)
+        self.assertEqual(self._rgb("thin.oas", "high", wash), exact)
         # the mask policy on the same file: identical to exact
         self.assertEqual(self._rgb("thin.oas", "high", thin="keep"), exact)
         # explicit cull is the default; the diagnostic override wins
         # over the request either way
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high", thin="cull")), 0)
+        self.assertEqual(self._rgb("thin.oas", "high", thin="cull"), exact)
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high", dict(noreps), thin="cull")), 0)
         self.assertEqual(self._rgb("thin.oas", "high",
                                    {"FLOE_RUST_PAGE_HAIRLINE": "keep"}), exact)
         self.assertEqual(self._lit(self._rgb(
-            "thin.oas", "high", {"FLOE_RUST_PAGE_HAIRLINE": "cull"},
+            "thin.oas", "high", dict(noreps, FLOE_RUST_PAGE_HAIRLINE="cull"),
             thin="keep")), 0)
 
     def test_a_thicker_record_changes_nothing_about_the_lines(self):
@@ -2884,22 +2899,28 @@ class ThinPageTests(unittest.TestCase):
         self.assertEqual(outside, [], "lines identical away from the box")
         self.assertTrue(diff, "the box itself is drawn")
         # under the plain policy the thicker record decides the fate
-        # of every line in its page - the documented omission
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
-        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high")), 100)
+        # of every line in its page - the documented omission, visible
+        # with the page frontier off (FLOE_RUST_PAGE_REPS=off); with it
+        # (the default) the sparse all-thin page is a representative
+        # and drawn either way
+        noreps = {"FLOE_RUST_PAGE_REPS": "off"}
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high", noreps)), 0)
+        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high", noreps)), 100)
+        self.assertGreater(self._lit(self._rgb("thin.oas", "high")), 100)
 
     def test_deck_keeps_thin_pages_by_default(self):
         exact = self._rgb("thin.jb", "exact")
         self.assertGreater(self._lit(exact), 100)
         kept = self._rgb("thin.jb", "high")
         self.assertEqual(kept, exact, "a mask deck keeps its hairlines")
-        # --thin cull on a deck: the page is culled and the deck's wide
-        # policy paints its bbox wash instead of the lines (a block,
-        # not the exact image); with the wide policy off it vanishes
-        culled = self._rgb("thin.jb", "high", thin="cull")
-        self.assertNotEqual(culled, exact)
-        self.assertEqual(self._lit(self._rgb(
-            "thin.jb", "high", {"FLOE_RUST_DECK_WIDE": "off"}, thin="cull")), 0)
+        # --thin cull on a deck: the page is culled and vanishes (the
+        # deck's wide policy that stood in for it - a bbox wash until
+        # 2026-09-16, then the sparse page kept - is off by default
+        # since the user decision of that day; FLOE_RUST_DECK_WIDE=on
+        # enables it: this sparse page is then kept and drawn)
+        self.assertEqual(self._lit(self._rgb("thin.jb", "high", thin="cull")), 0)
+        self.assertEqual(self._rgb(
+            "thin.jb", "high", {"FLOE_RUST_DECK_WIDE": "on"}, thin="cull"), exact)
         rep = CLI / "thin-deck.json"
         run_floe2("render", CLI / "thin.jb", "--bbox", "0,0,2000,2000",
                   "--px", "200", "--out", CLI / "thin-deck.png",
@@ -2927,7 +2948,10 @@ class ThinPageTests(unittest.TestCase):
         self.assertGreater(len(doc["levels"]), 2)
         self.assertGreater(doc["levels"][0]["occupied"], 0)
         self.assertGreater(doc["fit_renders"]["keep"]["lit"], 100)
-        self.assertEqual(doc["fit_renders"]["cull"]["lit"], 0)
+        # the cull fit render: nothing until 2026-09-16, now the sparse
+        # thin page is kept (never more than keep draws)
+        self.assertLessEqual(doc["fit_renders"]["cull"]["lit"],
+                             doc["fit_renders"]["keep"]["lit"])
         cells = doc["comparison"]["coarser_cells"]
         self.assertEqual([c["cell_px"] for c in cells], [2, 4, 8])
         for c in cells:
@@ -2939,12 +2963,33 @@ class ThinPageTests(unittest.TestCase):
 
     def test_kept_thin_pages_are_counted(self):
         from floe.rust_render import RustRenderWorker
-        for thin, thin_pages, culled in (("keep", 1, 0), ("cull", 0, 1),
-                                         (None, 0, 1)):
+        # under cull the all-thin page is culled and counted as a size
+        # cull only with the page frontier off (FLOE_RUST_PAGE_REPS=off);
+        # by default it is a representative (the first of its run,
+        # sparse) kept as a thin page, as the sub-cut rules
+        # (FLOE_RUST_SUB_CUT_WASH=on) keep it too
+        for thin, wash, reps, thin_pages, culled in (
+                ("keep", True, True, 1, 0),
+                ("keep", False, True, 1, 0),
+                ("keep", False, False, 1, 0),
+                ("cull", True, True, 1, 0),
+                ("cull", False, True, 1, 0),
+                (None, True, True, 1, 0),
+                (None, False, True, 1, 0),
+                ("cull", False, False, 0, 1),
+                (None, False, False, 0, 1)):
             c = Cache(str(CLI / "thin.oas"))
             c.load()
-            worker = RustRenderWorker(c)
-            worker.start()
+            if wash:
+                os.environ["FLOE_RUST_SUB_CUT_WASH"] = "on"
+            if not reps:
+                os.environ["FLOE_RUST_PAGE_REPS"] = "off"
+            try:
+                worker = RustRenderWorker(c)
+                worker.start()
+            finally:
+                os.environ.pop("FLOE_RUST_SUB_CUT_WASH", None)
+                os.environ.pop("FLOE_RUST_PAGE_REPS", None)
             try:
                 _, result = _render_raw(worker, (0, 0, 2000 / 5e-5,
                                                  2000 / 5e-5), 200, 200,
@@ -2953,8 +2998,8 @@ class ThinPageTests(unittest.TestCase):
             finally:
                 worker.stop()
             culls = result["plan_culls"]
-            self.assertEqual(culls["thin_pages"], thin_pages, (thin, culls))
-            self.assertEqual(culls["pages_size"], culled, (thin, culls))
+            self.assertEqual(culls["thin_pages"], thin_pages, (thin, wash, reps, culls))
+            self.assertEqual(culls["pages_size"], culled, (thin, wash, reps, culls))
         # the deck worker's default is keep
         from floe.jobdeck.viewer import DeckCache
         d = DeckCache(str(CLI / "thin.jb"))
@@ -2972,13 +3017,18 @@ class ThinPageTests(unittest.TestCase):
         self.assertEqual(result["plan_culls"]["thin_pages"], 1)
 
 
+WIDE_ON = {"FLOE_RUST_DECK_WIDE": "on"}
+
+
 class WideViewTests(unittest.TestCase):
     """Step 4 (2026-09-10): the jobdeck wide-view policy. What the
     size cut would drop keeps its on-screen existence as a footprint
     wash on its own layer: a page of sub-cut shapes as the page's
     bbox, an array of sub-cut child cells as the placement footprint
-    on the child's visible layers. Kill switch FLOE_RUST_DECK_WIDE=off
-    restores the silent omission."""
+    on the child's visible layers. OFF by default since the user
+    decision of 2026-09-16 (deck sources carry an occupancy summary
+    that draws the wide view): the default is the silent omission,
+    FLOE_RUST_DECK_WIDE=on enables the policy."""
 
     @classmethod
     def setUpClass(cls):
@@ -3026,11 +3076,11 @@ class WideViewTests(unittest.TestCase):
         # an own page) and the 1 um BIT array (level 2, sub-cut child
         # placements) are both below the cut
         for level in (1, 2):
-            gone, r_off = self._render("tiny.jb", {"FLOE_RUST_DECK_WIDE": "off"},
+            gone, r_off = self._render("tiny.jb", {},
                                        [(level, 0)], 3.0)
             self.assertEqual(_lit(gone), 0, "level %d is culled" % level)
             self.assertEqual(r_off["deck"]["wide_washes"], 0)
-            kept, r_on = self._render("tiny.jb", {}, [(level, 0)], 3.0)
+            kept, r_on = self._render("tiny.jb", WIDE_ON, [(level, 0)], 3.0)
             self.assertGreater(_lit(kept), 0, "level %d washed" % level)
             self.assertGreater(r_on["deck"]["wide_washes"], 0)
             # the wash covers the field: its corners are lit
@@ -3041,7 +3091,7 @@ class WideViewTests(unittest.TestCase):
                 self.assertNotEqual(kept[at:at + 3], b"\0\0\0",
                                     "level %d corner %d,%d" % (level, x, y))
             # exact (no cut) draws the real geometry in the same colour
-            exact, _ = self._render("tiny.jb", {}, [(level, 0)], 0.0)
+            exact, _ = self._render("tiny.jb", WIDE_ON, [(level, 0)], 0.0)
             self.assertGreater(_lit(exact), 0)
             lit_colours = {tuple(kept[o:o + 3])
                            for o in range(0, len(kept), 4)
@@ -3067,7 +3117,7 @@ class WideViewTests(unittest.TestCase):
         # (an expanded mark cell's own 1 um page is a blob wash of one
         # pixel - allowed; the footprint wash is what must not happen)
         for level, most, washes in ((1, 8, 0), (3, 16, 4)):
-            rgba, r = self._render("sparse.jb", {}, [(level, 0)], 3.0)
+            rgba, r = self._render("sparse.jb", WIDE_ON, [(level, 0)], 3.0)
             self.assertGreater(_lit(rgba), 0, "level %d vanished" % level)
             self.assertLessEqual(_lit(rgba), most, "level %d washed" % level)
             self.assertLessEqual(r["deck"]["wide_washes"], washes, level)
@@ -3075,7 +3125,7 @@ class WideViewTests(unittest.TestCase):
             w = 200
             centre = (100 * w + 100) * 4
             self.assertEqual(rgba[centre:centre + 3], b"\0\0\0", level)
-        rgba, r = self._render("sparse.jb", {}, [(2, 0)], 3.0)
+        rgba, r = self._render("sparse.jb", WIDE_ON, [(2, 0)], 3.0)
         self.assertGreater(_lit(rgba), 0)
         self.assertLessEqual(_lit(rgba), 16, "a blob, not a field")
         self.assertGreaterEqual(r["deck"]["wide_washes"], 1)
@@ -3085,26 +3135,41 @@ class WideViewTests(unittest.TestCase):
         # rendered fine in `floe2 render` because captures are exact;
         # --detail high captures with the viewer's 1 px cut. tiny.oas
         # at 200 px over 2000 um: 1 px = 10 um, the 1 um dots page is
-        # culled by size and the 1 um BIT array is pruned - nothing
-        # lit; exact (the default) draws them
+        # size-cut and the 1 um BIT array pruned. The page frontier
+        # (2026-09-17) keeps representatives of both - the dots page
+        # (the first of its run) as a footprint wash, the array's first
+        # placement washed - so high lights them; FLOE_RUST_PAGE_REPS=off
+        # is the silent cut (nothing lit), FLOE_RUST_SUB_CUT_WASH=on the
+        # blanket sub-cut rules; exact (the default) draws everything
         src = CLI / "tiny.oas"
-        for detail, lit in (("exact", True), ("high", False)):
+        wash_on = dict(self.env, FLOE_RUST_SUB_CUT_WASH="on")
+        noreps = dict(self.env, FLOE_RUST_PAGE_REPS="off")
+        for detail, env, lit in (("exact", self.env, True),
+                                 ("high", self.env, True),
+                                 ("high", noreps, False),
+                                 ("high", wash_on, True)):
             out = CLI / ("tiny-%s.png" % detail)
             rep = CLI / ("tiny-%s.json" % detail)
             argv = ["render", src, "--bbox", "0,0,2000,2000", "--px", "200",
                     "--out", out, "--report", rep]
             if detail != "exact":
                 argv += ["--detail", detail]
-            run_floe2(*argv, env=self.env, ok=0)
+            run_floe2(*argv, env=env, ok=0)
             doc = json.loads(rep.read_text())
             self.assertEqual(doc["cut_px"], 0.0 if detail == "exact" else 1.0)
-            self.assertEqual(_png_lit_pixels(out) > 0, lit, detail)
-        # a deck capture with the viewer's cut keeps the wide policy's
-        # washes (the deck's own behaviour at that detail)
+            self.assertEqual(_png_lit_pixels(out) > 0, lit,
+                             (detail, env is wash_on, env is noreps))
+        # a deck capture with the viewer's cut follows the deck's wide
+        # policy: off by default (nothing lit without the summary, off
+        # here), its washes with FLOE_RUST_DECK_WIDE=on
         out = CLI / "tiny-deck-high.png"
         run_floe2("render", CLI / "tiny.jb", "--bbox", "0,0,2000,2000",
                   "--px", "200", "--out", out, "--detail", "high",
                   env=self.env, ok=0)
+        self.assertEqual(_png_lit_pixels(out), 0)
+        run_floe2("render", CLI / "tiny.jb", "--bbox", "0,0,2000,2000",
+                  "--px", "200", "--out", out, "--detail", "high",
+                  env=dict(self.env, **WIDE_ON), ok=0)
         self.assertGreater(_png_lit_pixels(out), 0)
 
     def test_wide_policy_is_a_no_op_above_the_cut(self):
@@ -3112,13 +3177,13 @@ class WideViewTests(unittest.TestCase):
         # policy adds no wash and changes no pixel there; the whole
         # deck holds exactly one sub-cut source, the 0.2x mark
         for visible in ([(1, 0)], [(2, 0)]):
-            on, r_on = self._render("test.jb", {}, visible, 3.0, (301, 237))
-            off, r_off = self._render("test.jb", {"FLOE_RUST_DECK_WIDE": "off"},
+            on, r_on = self._render("test.jb", WIDE_ON, visible, 3.0, (301, 237))
+            off, r_off = self._render("test.jb", {},
                                       visible, 3.0, (301, 237))
             self.assertEqual(r_on["deck"]["wide_washes"], 0)
             self.assertEqual(on, off)
             self.assertGreater(_lit(on), 0)
-        _, r_all = self._render("test.jb", {}, None, 3.0, (301, 237))
+        _, r_all = self._render("test.jb", WIDE_ON, None, 3.0, (301, 237))
         self.assertEqual(r_all["deck"]["wide_washes"], 1)
 
 
@@ -3273,7 +3338,7 @@ class ReviewFixTests5(unittest.TestCase):
         # (0 lit pixels). The window is now computed in source units
         # like the raster.
         spec = CLI / "huge-offset.spec"
-        cache = str(CLI / "chipB.oas.floe")
+        cache = vfs_cache_dir(CLI / "chipB.oas")
         hexs = lambda t: t.encode().hex()
         dx = 1e16
         spec.write_text(
@@ -3315,7 +3380,7 @@ class ReviewFixTests5(unittest.TestCase):
         # "coordinate overflow: source view x0"; it must be an empty
         # pass, and the frame equals the deck without it.
         hexs = lambda t: t.encode().hex()
-        cache = str(CLI / "chipB.oas.floe")
+        cache = vfs_cache_dir(CLI / "chipB.oas")
         head = ("deck unit=1e-06\n"
                 "source path_hex=%s\n"
                 "layer out=0 name_hex=%s color=#ffffff fill=solid width=1\n"

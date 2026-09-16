@@ -7,17 +7,21 @@
 ## 0. Python 사용자 명령
 
 기본 `floe index <src.oas>`는 `floe-index vfs <abs-src>
-<abs-src>.floe`를 shell 없이 subprocess로 실행한다. `--jobs`,
+<dir>/.<name>.ice`(소스 옆 숨김 폴더, `floe/cachepath.py`; 2026-09-16까지의
+`<src>.floe`는 발견 시 자동 개명)를 shell 없이 subprocess로 실행한다. `--jobs`,
 `--page-target-mb`, `--coverage`/`--coverage-only`, `--no-lod`,
 `--slow-cell-s`, `--p2-shard-limit-mb`, `--profile-cell`/
 `--profile-cell-ci`, `--profile-jobs`, `--profile-repeat`,
 `--profile-snapshot`/`--profile-snapshot-refresh`를 같은 이름의 Rust
 옵션으로 전달한다.
 coverage는 viewer 기본값과 맞춰 opt-in이다. **점유 요약(`--occupancy`)은
-기본**(M5 결정 2026-09-15): `floe index`는 항상 `--occupancy`를 전달하고
-`--no-occupancy`로만 끈다(raw 바이너리는 명시 옵션). 현재 캐시에 `design.ovo`가
-없으면 재색인 없이 `--occupancy-only`로 추가하고, 있으면 "cache up to date
-(occupancy already present)". 셀 프로파일 실행은 요약을 요청하지 않는다.
+jobdeck의 소스에는 기본, 레이아웃에는 opt-in**(2026-09-16; M5의 "전부 기본
+on"을 바꿈): `floe index deck.jb`는 소스마다 `--occupancy`를 전달하고 `floe
+index chip.oas`는 주지 않는다. `--no-occupancy`는 둘 다 끈다(raw 바이너리는
+명시 옵션). `--occupancy`(덱은 기본)에 현재 캐시가 `design.ovo`를 갖지 않으면
+재색인 없이 `--occupancy-only`로 추가하고, 있으면 "cache up to date (occupancy
+already present)"; 요약 없는 레이아웃 캐시는 그대로 둔다. 셀 프로파일 실행은
+요약을 요청하지 않는다.
 **기본값(2026-08-28)**: `--jobs`는 **12**(구 host parallelism — raw
 `floe-index vfs` 바이너리 자체 기본은 여전히 CPU 코어), LOD는 **끔**
 — `floe index`는 항상 `--no-lod`를 전달하고 `--lod`로만 다시 켠다(LOD
@@ -28,7 +32,7 @@ jobdeck은 `floe2 index deck.jb`라 기본이 그대로 적용)로 실행한다.
 정상 VFS cache의 cache version과 source size/mtime fingerprint가 맞고,
 `floe-index vfsd`의 `Vfs::open` 검증(OVM 구조 + OVP/OVT committed length)을
 통과하면 재사용한다. 기존 cache가 stale/incomplete/non-VFS/corrupt이면
-`--force` 없이 Rust를 실행하지 않는다. 즉 `--force`만 기존 `<src>.floe`를
+`--force` 없이 Rust를 실행하지 않는다. 즉 `--force`만 기존 `.<src>.ice`를
 교체할 권한이다. 현재 cache에 `--coverage`를 지정하면 `--coverage-only`로
 `design.ovc`만 비파괴 추가한다.
 
@@ -42,10 +46,10 @@ error다. 전체 누락도 빌드/설치 지침을 포함한 hard error다. 동�
 ## 1. 명령
 
 ```
-floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
+floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
     [--encode-batch N] [--page-target-mb N] [--no-lod]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
-    [--occupancy | --occupancy-only] [--occupancy-um F]
+    [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1]
     [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N]
     [--slow-cell-s S] [--p2-shard-limit-mb N]
     [--profile-cell NAME | --profile-cell-ci N]
@@ -90,7 +94,7 @@ arena를 먼저 drop하므로 결과는 동시에 겹치지 않으며, 첫 실�
 실행만의 wall이고 `timing_s.total`은 명령 시작부터 해당 실행 종료까지의 누적 wall이다.
 
 `--profile-snapshot PATH`는 선택 셀의 rect/poly/path/place, 공유 Pts repetition
-pool, 전체 recursive bbox와 layer order를 일반 `.floe`와 별개의 프로파일 전용
+pool, 전체 recursive bbox와 layer order를 일반 캐시와 별개의 프로파일 전용
 바이너리에 저장한다. 파일이 없으면 parse/prepare 뒤 같은 디렉터리 임시 파일을
 `0600`으로 쓰고 sync한 뒤 원자 rename하며, 있으면 mmap으로 읽어 소스 parse와
 recursive bbox 계산을 생략한다. 스키마 버전, canonical source path, size,
@@ -279,8 +283,9 @@ explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>
   fold_size(유한 깊이 폴드)|cull_layer|expand_sparse(덱: 희소해 wash 대신 펼침,
   members = 반복 수) · `frame`(r==0) keep|thin_lattice|cull_size|cull_hair · `page`
   keep_sparse(덱: 멤버가 footprint의 1/256을 못 덮어 wash 대신 페이지를 선택,
-  JOBDECK 4단계). 덱 정책의 판정을 단일 소스에서 보려면 `--sub-cut-wash 1
-  --page-hairline 0`(2026-09-15).
+  JOBDECK 4단계) · 대표(page frontier, SPEC-PLANNER §3, `--page-reps 1`): `page`
+  rep_keep|rep_wash, `child` rep_wash|rep_expand. 덱 정책의 판정을 단일 소스에서
+  보려면 `--sub-cut-wash 1 --page-hairline 0`(2026-09-15).
 - 페이지의 w/h/min은 색인 필드 max_w/max_h/max_min, bbox는 셀 로컬 dbu를 µm로;
   배치는 첫 멤버의 월드 박스, members는 반복 멤버 수. 뷰 박스와 겹치는 것만
   기록되므로 fit 뷰에서도 수천 줄 규모다.
@@ -299,7 +304,10 @@ explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>
 ```
 floe-index vfs <src> [outdir] --occupancy [--occupancy-um F]      # 색인과 함께
 floe-index vfs <src> [outdir] --occupancy-only [--occupancy-um F] # 기존 캐시에 추가·교체
-floe-index occupancy <outdir> [--layer L/D] [--level N] [--dump]  # 검사
+# --occupancy-um 생략 = 자동(2026-09-16): top의 긴 변이 2,048셀 이상이 되는 가장
+# 굵은 4/2/1/0.5/0.25 µm(8 mm 초과 칩은 4 µm, 2.25 mm 칩은 1 µm, 1 mm 미만은 0.25
+# µm; occupancy::auto_base_um_for_span). 로그 `cell=…um (… dbu, auto)`.
+floe-index occupancy <outdir> [--layer L/D] [--level N] [--depth N] [--dump]  # 검사(--depth: 그 depth 이하 평면의 OR)
 ```
 
 - 생성: 소스·레이어별로 top을 평탄화해 셀 비트맵을 만든다. rect는 셀 범위,
@@ -312,17 +320,56 @@ floe-index occupancy <outdir> [--layer L/D] [--level N] [--dump]  # 검사
   레이어는 `none:unsupported`로 게시되어 페이지 경로가 그린다(2차 리뷰 P1-2:
   건너뛰고 ok로 두면 도형이 조용히 사라진다); 개수는 `paths_skipped`로 로그.
 - 병렬(`--jobs`, 2026-09-14): 레이어는 순서대로, 한 레이어의 마킹을 `--jobs`
-  스레드가 나눠 맡는다. top 셀의 레코드 목록(조각)과 배치의 멤버 범위가 unit이고,
-  top이 단일 배치(die)뿐이면 최대 4단계 내려가 unit을 확보한다(4 × jobs개 목표).
-  스레드마다 자기 level 0 비트맵에 마킹하고 끝에 OR로 합치므로 결과 파일은
-  스레드 수와 무관하게 바이트 동일하다(unit은 레코드의 반복을 쪼개지 않고 단일
-  배치만 통과하므로 charge도 같다; `none:work`일 때의 work 값만 다를 수 있다).
-  작업 예산은 레이어 공유 카운터(스레드가 4,096 charge마다 flush, 초과 폭 ≤ jobs ×
-  4,096). 메모리 = jobs × level 0 한 장. 레이어마다 재귀 레이어 존재 집합으로
+  스레드가 나눠 맡는다. 셀의 레코드 목록(조각)과 배치의 멤버 범위가 unit이다.
+  unit은 **작업량 기준**으로 자른다(2026-09-16, `--occupancy-balance 1` 기본):
+  레이어의 셀별 추정 작업량(자기 레코드의 반복 멤버 수 + 배치 멤버 수 × 자식
+  작업량)을 구해 예산 = 전체/(4 × jobs)로 두고, 레코드 목록은 예산 단위 조각으로,
+  예산보다 무거운 단일 배치는 8단계까지 내려가 쪼개고, 배열 배치는 자식 작업량에
+  맞춘 멤버 범위로 자른다. **레코드 자신의 반복**(2026-09-16 후속): 예산보다 멤버가
+  많은 레코드는 per-member 경로에서 멤버 범위 unit(`Members`, 레코드당 최대 4,096개)
+  으로 쪼갠다 — 이전에는 레코드의 Grid/Pts 반복이 통째로 한 스레드였다(합성 재현:
+  레코드 반복 1,680만 멤버가 jobs 1/12에서 0.41/0.39 s, 같은 멤버를 배치 반복으로
+  두면 0.57/0.15 s). rect의 closed form 격자(피치 틈 < 셀, 한 번의 채움)와 면적 0
+  rect·폭 0 path는 쪼개지 않는다(생성기와 마킹이 같은 xf·셀로 같은 판정). 무거운
+  자식(작업량 > 예산)의 Grid/Pts 배치가 멤버 64개 이하면 멤버마다 자식의 unit을
+  따로 만들어(멤버의 charge 1은 그 멤버의 첫 unit이 `extra`로 셈) 그 안의 거대
+  레코드도 Members에 닿는다; 멤버가 더 많으면 기존 멤버 범위 unit이 이미 멤버
+  사이에서 병렬이다. 현장(150 MB 실칩, 337 레이어, 54억 charge): 개수 기준
+  분할(top의 배치가 4 × jobs개를 넘으면 확장을 멈춤)에서는 가장 무거운 블록
+  하나(11.8억 charge)가 unit 하나로 남아 12스레드가 1스레드 속도(약 5분)로
+  돌았다. `--occupancy-balance 0`은 옛 개수 기준(top 셀의 레코드, top이 단일
+  배치뿐이면 최대 4단계 확장)으로 되돌리는 킬 스위치다. 분할은 마킹·charge에
+  영향이 없어 파일은 어느 쪽이든 바이트 동일하다(gate).
+  스레드는 레이어의 **공유 atomic level-0 평면**(배치 깊이마다 한 장, 2026-09-16
+  M6; unit과 walk가 깊이를 넘긴다)에 atomic OR로 마킹하므로 결과 파일은 스레드
+  수와 무관하게 바이트 동일하다(charge는 멤버·행·레코드 단위이고 — 반복 범위는
+  `m1 − m0`를 한 번에, 거부된 path는 멤버 0을 가진 범위만, closed form 채움도
+  멤버 0의 범위만 — 합이 같다; `none:work`일 때의 work 값만 다를 수 있다. gate:
+  Rust `a_record_repetition_is_split_by_members…`(rect/polygon/path × Grid/Pts ×
+  회전·미러·깊이 × jobs 1/4 × balance on/off), `GiantRepetitionTests`). 작업
+  예산은 레이어 공유 카운터(스레드가 4,096 charge마다 flush, 초과 폭 ≤ jobs ×
+  4,096). 이미 켜진 비트는 relaxed load로 확인한 뒤 쓰기를 생략한다. 비트는
+  생성 중 0→1로만 바뀌므로 동시 마킹에서도 안전하며, 밀집 영역의 같은 cache
+  line에 대한 반복 쓰기 경합을 줄인다. 작업 charge는 쓰기 생략과 무관하게 유지한다.
+  마킹 평면 메모리 = 레이어의 깊이 수 × level 0 한 장(도형이 있는 깊이만 파일에
+  남고 15 이상은 한 평면). 도형은 처음 한 번 `(layer, dt, cell)`별 참조 목록으로
+  분류하고 존재 집합·깊이·작업량·unit·배치 순회가 이 목록을 공유한다. 다른
+  레이어의 도형을 매 배치마다 재검사하지 않는다. 추가 메모리는 원본 레코드당
+  포인터 하나와 Vec 여유 용량·희소 맵이며(geometry·반복 배열 복사 없음), 레이어가
+  끝나면 그 참조 목록을 해제한다. 레이어마다 재귀 레이어 존재 집합으로
   가지치기하고, 존재하지 않는 레이어는 순회 없이 `empty`. 배치 반복의 멤버는
   열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음, 2차 리뷰 P1-1). 상위 레벨은
   OR 풀링, 격자가 64 × 64 이하가 될 때까지. 로그 `[vfs] occupancy cell= … ok=K
-  empty=E jobs=N SIZE (Ts)`.
+  empty=E jobs=N SIZE (Ts)`. 진행(2026-09-16, 현장: 150 MB 실칩의 마킹 5분이
+  무음): 레이어 마킹 중 10 s마다 `[vfs] occupancy L/D marking: u/U units work
+  xG (Ts)`(u = 완료한 unit 수, `workers=N` = 실제 마킹 스레드 수,
+  work = 공유 예산에 flush된 charge), 끝나면
+  0.5 s 이상 걸린 레이어와 요약 없는 레이어마다 `L/D ok planes=… cells=… work=…
+  (Ts)` / `L/D none:… work=… (Ts)`. 요약 없는 레이어는 끝에 한 번 더 모아
+  `layer L/D none:… (work …)`로 나온다.
+  분류 단계에는 `grouping records by layer` / `grouped records in …s`, 준비가
+  0.5 s 이상이면 `L/D prepared: U units workers=N (Ts)`를 출력한다. 하트비트는
+  종료 채널로 즉시 깨운다(이전 sleep+join은 짧은 레이어마다 최대 250 ms 대기).
 - 상한(레이어 단위, 근사 저장 없음): level 0 셀 수 > `--occupancy-max-cells`
   (기본 2^30)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남김);
   마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 2^31)면 그

@@ -7,6 +7,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import subprocess
 import sys
@@ -168,7 +169,7 @@ def native(work, fixture):
     env = dict(os.environ, PATH="", FLOE_INDEX_BIN=str(INDEX), FLOE_RENDERD_BIN=str(RENDERD),
                FLOE_FILL_EDIT="", FLOE_RUST_ROUND_PAGES="1")
     env.pop("FLOE_JOBDECK_LEVELS", None)
-    cache = Path(str(source) + ".floe")
+    cache = vfs_cache(source)
     run = subprocess.run([str(INDEX), "vfs", str(source), str(cache), "--jobs", "2"],
                          env=env, capture_output=True, text=True, timeout=30)
     assert run.returncode == 0, (run.stdout, run.stderr)

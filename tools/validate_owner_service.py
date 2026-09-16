@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import subprocess
 import sys
@@ -39,7 +40,7 @@ def main(fixture):
         shutil.copy2(fixture, export_source)
         oracle_env = dict(env, PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1")
         run(["index", export_source, "--jobs=2"], oracle_env)
-        before = digest(Path(str(export_source) + ".floe"))
+        before = digest(vfs_cache(export_source))
         for name, layers in [("all", None), ("visible", "1/0"), ("none", None)]:
             golden = compare(export_source, exports, oracle_env, "empty" if name == "none" else name,
                              [1e6, 1e6, 1e6+1, 1e6+1] if name == "none" else [0, 0, 100, 100], layers, "WEB_CLIP")
@@ -77,7 +78,7 @@ for line in sys.stdin:
             mode_source = mode_dir / (name + ".oas")
             shutil.copy2(fixture, mode_source)
             run(["index", mode_source, "--jobs=2"], oracle_env)
-            cache = Path(str(mode_source) + ".floe")
+            cache = vfs_cache(mode_source)
             mode_caches[cache] = digest(cache)
         env["FLOE_OWNER_MODE_FIXTURE"] = str(mode_dir / "A.oas")
         checked = subprocess.run([tests[0], "--ignored", "--nocapture"], env=env,
@@ -112,7 +113,7 @@ for line in sys.stdin:
                 pass
             else:
                 raise AssertionError("export worker was not reaped")
-        assert digest(Path(str(export_source) + ".floe")) == before
+        assert digest(vfs_cache(export_source)) == before
         assert not list(workers.iterdir()), "owner service leaked worker files"
         print(checked.stdout.strip())
 

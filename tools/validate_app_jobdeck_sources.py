@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cache_test_paths import vfs_cache
 import shutil
 import signal
 import subprocess
@@ -52,7 +53,7 @@ def header_gate(work, env):
     (work / "badgzip").write_bytes(b"\x1f\x8b\x08\x00")
     os.mkfifo(work / "fifo")
     shutil.copy2(work / "chipA.oas", work / "unselected.oas")
-    bad_cache = Path(str(work / "unselected.oas") + ".floe")
+    bad_cache = vfs_cache(work / "unselected.oas")
     bad_cache.mkdir()
     os.mkfifo(bad_cache / "meta.json")
     names = ["chipA.oas", "chipA.gds", "chipA.oas.gz", "chipA.gds.gz",
@@ -76,11 +77,10 @@ def header_gate(work, env):
     def canonical_report(catalog):
         report = catalog.report()
         # The legacy Cache constructor reports an absent .tiles fallback when
-        # no .floe exists yet. The Rust application supports canonical VFS only
-        # and names the future .floe destination; this is an explicit delta.
+        # no VFS exists yet. Rust names the future canonical destination.
         for row in report["files"]:
             if row["cache_dir"].endswith(".tiles"):
-                row["cache_dir"] = row["path"] + ".floe"
+                row["cache_dir"] = str(vfs_cache(row["path"]))
         return report
 
     payload = {"directory": str(work), "names": names, "headers": headers,
@@ -163,7 +163,7 @@ sys.exit(7 if pathlib.Path(a[1]).name=="chipA.oas" else 0)
                 pass
             else:
                 raise AssertionError("native child not reaped")
-            assert not list(directory.glob("*.floe/design.ovo.tmp"))
+            assert not list(directory.glob(".*.ice/design.ovo.tmp"))
         finally:
             if proc.poll() is None:
                 proc.kill()
@@ -182,7 +182,7 @@ def index_gate(work, env):
         deck.write_text(DECK)
 
     def cache(directory, name):
-        return directory / (name + ".floe")
+        return vfs_cache(directory / name)
 
     def compare(args):
         for deck, python in zip(decks, (False, True)):
@@ -255,7 +255,7 @@ def index_gate(work, env):
     result = run(["index", missing, "--level", "8"], env)
     assert "MISSING" in result.stdout and "0 built, 0 failed, 0 kept" in result.stdout
     # Indexing does not create a merged cache beside the deck.
-    assert not Path(str(decks[0]) + ".floe").exists()
+    assert not vfs_cache(decks[0]).exists()
 
 
 def main():

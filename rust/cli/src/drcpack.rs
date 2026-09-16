@@ -1,5 +1,5 @@
 //! `floe-index drc --pack` - full conversion of a Calibre ASCII DRC
-//! results database into a self-contained .ice v2 (no locator, no
+//! results database into a self-contained v2 pack (.<db>.tray; no locator, no
 //! source dependency).
 //!
 //! Layout (LE; header/string sections shared with v1):
@@ -68,8 +68,7 @@
 //! (the v1 sidecar handles it).
 
 use crate::drcice::{
-    ints_prefix, is_geom_header, parse_f64, parse_i64, tokens, trim,
-    Lines, StrTab, MAGIC,
+    ints_prefix, is_geom_header, parse_f64, parse_i64, tokens, trim, Lines, StrTab, MAGIC,
 };
 use std::io::Write;
 
@@ -170,9 +169,7 @@ fn parse_span(
                 let dl = ints.get(2).copied().unwrap_or(0).max(0);
                 for _ in 0..dl {
                     match lines.peek() {
-                        Some((ds, de))
-                            if !is_geom_header(&tokens(&data[ds..de])) =>
-                        {
+                        Some((ds, de)) if !is_geom_header(&tokens(&data[ds..de])) => {
                             desc.push(trim(&data[ds..de]).to_vec());
                             lines.consume();
                         }
@@ -231,11 +228,9 @@ fn parse_span(
                 }
                 if !all_i64 {
                     if ct.len() >= 2 {
-                        return Err(
-                            "non-integer coordinate token: --pack \
+                        return Err("non-integer coordinate token: --pack \
                              stores dbu integers; use the v1 sidecar"
-                                .into(),
-                        );
+                            .into());
                     }
                     break; // single odd token: python breaks too
                 }
@@ -252,10 +247,7 @@ fn parse_span(
             if !pts.is_empty() && (kind == b'p' || kind == b'e') {
                 rec.clear();
                 let npts = (pts.len() / 2) as u64;
-                uv_push(
-                    &mut rec,
-                    (npts << 1) | u64::from(kind == b'e'),
-                );
+                uv_push(&mut rec, (npts << 1) | u64::from(kind == b'e'));
                 for v in &pts {
                     uv_push(&mut rec, zz(*v));
                 }
@@ -325,10 +317,7 @@ fn find_sync(data: &[u8], from: usize) -> usize {
         }
         let toks = tokens(line);
         let ints = ints_prefix(&toks);
-        if cand.is_some()
-            && ints.len() >= 3
-            && toks.len() > ints.len()
-        {
+        if cand.is_some() && ints.len() >= 3 && toks.len() > ints.len() {
             return cand.unwrap();
         }
         cand = Some(s);
@@ -379,13 +368,8 @@ fn span_bbox(span: &[u8], err_cnt: u64) -> (i64, i64, i64, i64) {
     (x0, y0, x1, y1)
 }
 
-pub fn pack(
-    src: &str,
-    out: &str,
-    jobs: usize,
-) -> Result<(usize, u64, u64), String> {
-    let f = std::fs::File::open(src)
-        .map_err(|e| format!("open: {}", e))?;
+pub fn pack(src: &str, out: &str, jobs: usize) -> Result<(usize, u64, u64), String> {
+    let f = std::fs::File::open(src).map_err(|e| format!("open: {}", e))?;
     let meta = f.metadata().map_err(|e| format!("stat: {}", e))?;
     let src_size = meta.len();
     let src_mtime = meta
@@ -403,15 +387,10 @@ pub fn pack(
             Some(d) if !d.as_os_str().is_empty() => d,
             _ => std::path::Path::new("."),
         };
-        if let (Some(base), Ok(rd)) =
-            (p.file_name(), std::fs::read_dir(dir))
-        {
+        if let (Some(base), Ok(rd)) = (p.file_name(), std::fs::read_dir(dir)) {
             let prefix = format!("{}.tmp", base.to_string_lossy());
             for e in rd.flatten() {
-                if e.file_name()
-                    .to_string_lossy()
-                    .starts_with(&prefix)
-                {
+                if e.file_name().to_string_lossy().starts_with(&prefix) {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
@@ -422,8 +401,7 @@ pub fn pack(
     let data: &[u8] = if src_size == 0 {
         &empty
     } else {
-        map = unsafe { memmap2::Mmap::map(&f) }
-            .map_err(|e| format!("mmap: {}", e))?;
+        map = unsafe { memmap2::Mmap::map(&f) }.map_err(|e| format!("mmap: {}", e))?;
         &map
     };
 
@@ -452,25 +430,19 @@ pub fn pack(
     } else {
         head[0].to_vec()
     };
-    let mut precision = head
-        .get(1)
-        .and_then(|t| parse_f64(t))
-        .unwrap_or(1000.0);
+    let mut precision = head.get(1).and_then(|t| parse_f64(t)).unwrap_or(1000.0);
     if precision <= 0.0 {
         precision = 1000.0;
     }
     let body = lines.pos;
 
-    let n = jobs
-        .max(1)
-        .min(((data.len() - body) / (4 << 20)).max(1));
+    let n = jobs.max(1).min(((data.len() - body) / (4 << 20)).max(1));
     let bound: Vec<usize> = (0..=n)
         .map(|k| body + (data.len() - body) * k / n)
         .collect();
 
     // phase 1: parallel speculative parse to per-worker temp files
-    let mut outs: Vec<Option<(SpanOut, u64)>> =
-        (0..n).map(|_| None).collect();
+    let mut outs: Vec<Option<(SpanOut, u64)>> = (0..n).map(|_| None).collect();
     let errs: Vec<String> = std::thread::scope(|sc| {
         let mut handles = Vec::new();
         for (k, slot) in outs.iter_mut().enumerate() {
@@ -481,10 +453,8 @@ pub fn pack(
                 } else {
                     find_sync(data, bound[k])
                 };
-                let tf = std::fs::File::create(temp_path(out, k))
-                    .map_err(|e| e.to_string())?;
-                let mut tw =
-                    std::io::BufWriter::with_capacity(4 << 20, tf);
+                let tf = std::fs::File::create(temp_path(out, k)).map_err(|e| e.to_string())?;
+                let mut tw = std::io::BufWriter::with_capacity(4 << 20, tf);
                 let mut cursor = 0u64;
                 let tag = format!("w{}", k);
                 let so = parse_span(
@@ -531,11 +501,7 @@ pub fn pack(
         if so.end_off <= trusted_end {
             continue; // segment fully covered by a prior worker
         }
-        match so
-            .checks
-            .iter()
-            .position(|c| c.name_off == trusted_end)
-        {
+        match so.checks.iter().position(|c| c.name_off == trusted_end) {
             Some(i) => {
                 let mut cs = so.checks;
                 all.extend(cs.drain(i..));
@@ -544,12 +510,8 @@ pub fn pack(
             None => {
                 if fbw.is_none() {
                     let tf =
-                        std::fs::File::create(temp_path(out, fb_id))
-                            .map_err(|e| e.to_string())?;
-                    fbw = Some(std::io::BufWriter::with_capacity(
-                        4 << 20,
-                        tf,
-                    ));
+                        std::fs::File::create(temp_path(out, fb_id)).map_err(|e| e.to_string())?;
+                    fbw = Some(std::io::BufWriter::with_capacity(4 << 20, tf));
                 }
                 let so2 = parse_span(
                     data,
@@ -570,9 +532,7 @@ pub fn pack(
     }
 
     // phase 2: sequential encode of the final file
-    let res = encode(
-        out, &all, n, precision, src_size, src_mtime, &cell,
-    );
+    let res = encode(out, &all, n, precision, src_size, src_mtime, &cell);
     for k in 0..=n {
         let _ = std::fs::remove_file(temp_path(out, k));
     }
@@ -607,10 +567,7 @@ fn encode(
                 temps.push(if m.len() == 0 {
                     None
                 } else {
-                    Some(
-                        unsafe { memmap2::Mmap::map(&tf) }
-                            .map_err(|e| e.to_string())?,
-                    )
+                    Some(unsafe { memmap2::Mmap::map(&tf) }.map_err(|e| e.to_string())?)
                 });
             }
             Err(_) => temps.push(None),
@@ -621,8 +578,7 @@ fn encode(
     // directly truncated a live pack (open viewer mmaps) and left
     // a partial file behind on any failure
     let tmp = final_tmp_path(out);
-    let wf = std::fs::File::create(&tmp)
-        .map_err(|e| format!("create {}: {}", tmp, e))?;
+    let wf = std::fs::File::create(&tmp).map_err(|e| format!("create {}: {}", tmp, e))?;
     let mut w = std::io::BufWriter::with_capacity(8 << 20, wf);
     let mut header = Vec::with_capacity(40);
     header.extend_from_slice(MAGIC);
@@ -661,11 +617,10 @@ fn encode(
     // stream their qbox rows block by block. Encoder RSS used to
     // be O(largest rule): a 100M-error rule held 3.2GB of ebb +
     // 0.4GB of q4 here. Env knob exists for the D5b byte gate.
-    let q_resident_max: u64 =
-        std::env::var("FLOE_DRC_QBOX_RESIDENT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(4 << 20);
+    let q_resident_max: u64 = std::env::var("FLOE_DRC_QBOX_RESIDENT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4 << 20);
     let mut ebb: Vec<(i64, i64, i64, i64)> = Vec::new();
     let mut q4blk: Vec<u8> = Vec::with_capacity(BLOCK * 4);
 
@@ -678,11 +633,8 @@ fn encode(
         let block_start = blk_cnt;
         let err_start = err_total;
         if c.err_cnt > 0 {
-            let t = temps[c.temp_id]
-                .as_ref()
-                .ok_or("temp file vanished")?;
-            let span =
-                &t[c.temp_off as usize..(c.temp_off + c.temp_len) as usize];
+            let t = temps[c.temp_id].as_ref().ok_or("temp file vanished")?;
+            let span = &t[c.temp_off as usize..(c.temp_off + c.temp_len) as usize];
             // delta-encode in FILE ORDER, BLOCK per block (see the
             // module doc: no spatial reorder - global numbering and
             // ascending per-rule listings fall out of the order)
@@ -774,8 +726,7 @@ fn encode(
                     cx1 = cx1.max(bx1);
                     cy1 = cy1.max(by1);
                 } else {
-                    qw.write_all(&q4blk)
-                        .map_err(|e| e.to_string())?;
+                    qw.write_all(&q4blk).map_err(|e| e.to_string())?;
                 }
             }
             if resident {
@@ -797,17 +748,13 @@ fn encode(
         let mut rec = [0u8; 64];
         rec[..4].copy_from_slice(&name_ref.to_le_bytes());
         rec[4..8].copy_from_slice(&desc_start.to_le_bytes());
-        rec[8..12].copy_from_slice(
-            &(desc_refs.len() as u32 - desc_start).to_le_bytes(),
-        );
+        rec[8..12].copy_from_slice(&(desc_refs.len() as u32 - desc_start).to_le_bytes());
         rec[16..24].copy_from_slice(&err_start.to_le_bytes());
         rec[24..32].copy_from_slice(&c.err_cnt.to_le_bytes());
         rec[32..40].copy_from_slice(&c.declared.to_le_bytes());
         rec[40..48].copy_from_slice(&c.original.to_le_bytes());
         rec[48..56].copy_from_slice(&block_start.to_le_bytes());
-        rec[56..64].copy_from_slice(
-            &(blk_cnt - block_start).to_le_bytes(),
-        );
+        rec[56..64].copy_from_slice(&(blk_cnt - block_start).to_le_bytes());
         dir.push(rec);
         if last_log.elapsed().as_secs() >= 15 {
             last_log = std::time::Instant::now();
@@ -827,8 +774,7 @@ fn encode(
     let qbox_off = blob;
     let qbox_len = err_total * 4;
     {
-        let mut qr = std::fs::File::open(&qpath)
-            .map_err(|e| e.to_string())?;
+        let mut qr = std::fs::File::open(&qpath).map_err(|e| e.to_string())?;
         std::io::copy(&mut qr, &mut w).map_err(|e| e.to_string())?;
     }
     let _ = std::fs::remove_file(&qpath);
@@ -853,8 +799,7 @@ fn encode(
     bw.flush().map_err(|e| e.to_string())?;
     drop(bw);
     {
-        let mut br = std::fs::File::open(&bpath)
-            .map_err(|e| e.to_string())?;
+        let mut br = std::fs::File::open(&bpath).map_err(|e| e.to_string())?;
         std::io::copy(&mut br, &mut w).map_err(|e| e.to_string())?;
     }
     let _ = std::fs::remove_file(&bpath);
@@ -895,8 +840,7 @@ fn encode(
     w.write_all(&foot).map_err(|e| e.to_string())?;
     w.flush().map_err(|e| e.to_string())?;
     drop(w);
-    std::fs::rename(&tmp, out)
-        .map_err(|e| format!("rename {} -> {}: {}", tmp, out, e))?;
+    std::fs::rename(&tmp, out).map_err(|e| format!("rename {} -> {}: {}", tmp, out, e))?;
     Ok((blk_cnt, err_total))
 }
 

@@ -595,9 +595,9 @@ fn readonly_selection(
     let path = scope.check(path)?;
     let mut files = vec![path.clone()];
     if !floe_app_core::drc::is_packed_source(&path)? {
-        let mut candidate = path.as_os_str().to_owned();
-        candidate.push(".ice");
-        files.push(scope.check(&PathBuf::from(candidate))?);
+        for candidate in cache::pack_paths(&path)? {
+            files.push(scope.check(&candidate)?);
+        }
     }
     let _permit = resources.drc(files)?;
     floe_app_core::drc::select_review(&path, reviewer, stop)

@@ -124,44 +124,14 @@ pub fn output_path(path: &Path, layout: &Layout) -> Result<PathBuf> {
     layout_output_mode(path, layout, false)
 }
 pub(crate) fn layout_output_mode(path: &Path, layout: &Layout, planned: bool) -> Result<PathBuf> {
-    let out = cache::absolute(path)?;
-    let parent = out
-        .parent()
-        .ok_or_else(|| Error::input("output needs a parent directory"))?;
-    let resolved = (if planned {
-        resolve_prefix(parent)?
-    } else {
-        fs::canonicalize(parent)?
-    })
-    .join(
-        out.file_name()
-            .ok_or_else(|| Error::input("output needs a filename"))?,
-    );
-    let mut lock = layout.directory.as_os_str().to_owned();
-    lock.push(".index.lock");
-    let lock = PathBuf::from(lock);
-    let resolved_lock = fs::canonicalize(lock.parent().unwrap())?.join(lock.file_name().unwrap());
-    if resolved == fs::canonicalize(&layout.source)?
-        || fs::canonicalize(&resolved).ok() == Some(fs::canonicalize(&layout.source)?)
-        || out == layout.source
-        || resolved.starts_with(fs::canonicalize(&layout.directory)?)
-        || out.starts_with(&layout.directory)
-        || resolved == resolved_lock
-    {
-        return Err(Error::input(
-            "output must be outside the source and its cache",
-        ));
+    let trees = cache::cache_paths(&layout.source)?;
+    let mut files = vec![layout.source.clone()];
+    for directory in &trees {
+        let mut lock = directory.as_os_str().to_owned();
+        lock.push(".index.lock");
+        files.push(lock.into());
     }
-    match fs::symlink_metadata(&resolved) {
-        Ok(m) if !m.is_file() => {
-            return Err(Error::input(
-                "output target is not a regular file (symlink unsupported)",
-            ))
-        }
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-        _ => (),
-    }
-    Ok(resolved)
+    protected_output_mode(path, &files, &trees, planned)
 }
 pub fn publish(path: &Path, data: &[u8], cancelled: &AtomicUsize) -> Result<()> {
     // Keep existing in-memory PNG/report publication free of extra copies.

@@ -22,10 +22,7 @@
 
 use crate::hier::{grid_ranges, GridVis, FRAME_WHITE_PX, REM_FULL};
 use crate::{xf_bbox, ViewReq};
-use floe_ovm::{
-    bit_test, masks_intersect, BBox, Ovm, TrepV, PTS_CHUNK,
-    TBVH_NONE, TREP_NONE,
-};
+use floe_ovm::{bit_test, masks_intersect, BBox, Ovm, TrepV, PTS_CHUNK, TBVH_NONE, TREP_NONE};
 use floe_tiler::Xf;
 use std::collections::HashMap;
 
@@ -238,16 +235,13 @@ impl<'a> LWalk<'a> {
         }
         if c.block {
             self.blocks.push(c);
-            if self.blocks.len() + self.bins.len()
-                >= self.opts.cand_cap
-            {
+            if self.blocks.len() + self.bins.len() >= self.opts.cand_cap {
                 self.st.truncated = true;
                 self.done = true;
             }
             return;
         }
-        let key =
-            (c.x.div_euclid(self.bin), c.y.div_euclid(self.bin));
+        let key = (c.x.div_euclid(self.bin), c.y.div_euclid(self.bin));
         match self.bins.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 if c.prio() < e.get().prio() {
@@ -264,15 +258,7 @@ impl<'a> LWalk<'a> {
         }
     }
 
-    fn emit_text(
-        &mut self,
-        li: u32,
-        soff: u64,
-        slen: u32,
-        xf: &Xf,
-        lx: i64,
-        ly: i64,
-    ) {
+    fn emit_text(&mut self, li: u32, soff: u64, slen: u32, xf: &Xf, lx: i64, ly: i64) {
         self.st.members_visible += 1;
         let (gx, gy) = xf.apply(lx, ly);
         // OASIS TEXT has no orientation field of its own, but its cell can be
@@ -286,13 +272,7 @@ impl<'a> LWalk<'a> {
             block: false,
             white: false,
             layer_pos: li,
-            hash: fnv(&[
-                gx as u64,
-                gy as u64,
-                li as u64,
-                soff,
-                slen as u64,
-            ]),
+            hash: fnv(&[gx as u64, gy as u64, li as u64, soff, slen as u64]),
             x: gx,
             y: gy,
             rot,
@@ -313,27 +293,16 @@ impl<'a> LWalk<'a> {
         if t.rep_idx == TREP_NONE {
             self.st.members_tested += 1;
             if clip.contains_pt(t.x, t.y) {
-                self.emit_text(
-                    li,
-                    t.string_off,
-                    t.string_len,
-                    xf,
-                    t.x,
-                    t.y,
-                );
+                self.emit_text(li, t.string_off, t.string_len, xf, t.x, t.y);
             }
             return;
         }
         let rbox = offset_box(clip, t.x, t.y);
         match self.v.trep(t.rep_idx) {
             TrepV::Grid { na, nb, va, vb } => {
-                let (i0, i1, j0, j1) = match grid_ranges(
-                    na as i64, nb as i64, va, vb, &rbox,
-                ) {
+                let (i0, i1, j0, j1) = match grid_ranges(na as i64, nb as i64, va, vb, &rbox) {
                     GridVis::Empty => return,
-                    GridVis::Range { i0, i1, j0, j1 } => {
-                        (i0, i1, j0, j1)
-                    }
+                    GridVis::Range { i0, i1, j0, j1 } => (i0, i1, j0, j1),
                 };
                 'grid: for j in j0..=j1 {
                     for i in i0..=i1 {
@@ -344,24 +313,13 @@ impl<'a> LWalk<'a> {
                         }
                         self.member_budget -= 1;
                         self.st.members_tested += 1;
-                        let ox = i as i128 * va.0 as i128
-                            + j as i128 * vb.0 as i128;
-                        let oy = i as i128 * va.1 as i128
-                            + j as i128 * vb.1 as i128;
-                        let (Ok(ox), Ok(oy)) =
-                            (i64::try_from(ox), i64::try_from(oy))
-                        else {
+                        let ox = i as i128 * va.0 as i128 + j as i128 * vb.0 as i128;
+                        let oy = i as i128 * va.1 as i128 + j as i128 * vb.1 as i128;
+                        let (Ok(ox), Ok(oy)) = (i64::try_from(ox), i64::try_from(oy)) else {
                             continue;
                         };
                         if rbox.contains_pt(ox, oy) {
-                            self.emit_text(
-                                li,
-                                t.string_off,
-                                t.string_len,
-                                xf,
-                                t.x + ox,
-                                t.y + oy,
-                            );
+                            self.emit_text(li, t.string_off, t.string_len, xf, t.x + ox, t.y + oy);
                         }
                         if self.done {
                             break 'grid;
@@ -382,8 +340,7 @@ impl<'a> LWalk<'a> {
                         continue;
                     }
                     let lo = k * PTS_CHUNK as u32;
-                    let hi =
-                        (lo + PTS_CHUNK as u32).min(count);
+                    let hi = (lo + PTS_CHUNK as u32).min(count);
                     for s in lo..hi {
                         if self.member_budget == 0 {
                             self.st.truncated = true;
@@ -392,18 +349,9 @@ impl<'a> LWalk<'a> {
                         }
                         self.member_budget -= 1;
                         self.st.members_tested += 1;
-                        let (ox, oy) = floe_ovm::ovt_pt(
-                            self.ovt, pts_off, s,
-                        );
+                        let (ox, oy) = floe_ovm::ovt_pt(self.ovt, pts_off, s);
                         if rbox.contains_pt(ox, oy) {
-                            self.emit_text(
-                                li,
-                                t.string_off,
-                                t.string_len,
-                                xf,
-                                t.x + ox,
-                                t.y + oy,
-                            );
+                            self.emit_text(li, t.string_off, t.string_len, xf, t.x + ox, t.y + oy);
                         }
                         if self.done {
                             break 'pts;
@@ -441,12 +389,7 @@ impl<'a> LWalk<'a> {
                     }
                     if n.leaf {
                         for k in 0..n.count as u32 {
-                            self.one_text(
-                                n.first + k,
-                                tr.layer_idx,
-                                xf,
-                                clip,
-                            );
+                            self.one_text(n.first + k, tr.layer_idx, xf, clip);
                             if self.done {
                                 return;
                             }
@@ -492,8 +435,7 @@ impl<'a> LWalk<'a> {
         }
         let cw = (rb.x1 - rb.x0).max(0) as u64;
         let chh = (rb.y1 - rb.y0).max(0) as u64;
-        let below_cut = (cw < self.cut && chh < self.cut)
-            || cw.min(chh) < self.hair;
+        let below_cut = (cw < self.cut && chh < self.cut) || cw.min(chh) < self.hair;
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, &rb);
         // Admit a block candidate exactly when either its full name
@@ -505,14 +447,11 @@ impl<'a> LWalk<'a> {
         // must not leave its name floating.
         let block = if self.opts.blocks && r == 0 && !below_cut {
             let gb = xf_bbox(xf, &b0);
-            let gw = (gb.x1 - gb.x0).max(0) as f64
-                * self.req.px_per_dbu;
-            let gh = (gb.y1 - gb.y0).max(0) as f64
-                * self.req.px_per_dbu;
+            let gw = (gb.x1 - gb.x0).max(0) as f64 * self.req.px_per_dbu;
+            let gh = (gb.y1 - gb.y0).max(0) as f64 * self.req.px_per_dbu;
             let (along, cross) = if gh > gw { (gh, gw) } else { (gw, gh) };
             let usable = (along - 2.0 * self.opts.block_pad_px).max(0.0);
-            let max_chars =
-                (usable / self.opts.block_char_px).floor() as u32;
+            let max_chars = (usable / self.opts.block_char_px).floor() as u32;
             fit_block_name(
                 &self.v.cell(h.child).name,
                 max_chars,
@@ -533,12 +472,7 @@ impl<'a> LWalk<'a> {
         let descend = r != 0
             && !below_cut
             && (r != REM_FULL
-                || masks_intersect(
-                    self.v.bitset(
-                        self.v.cell_tmask_rec(h.child),
-                    ),
-                    &self.req.vis,
-                ));
+                || masks_intersect(self.v.bitset(self.v.cell_tmask_rec(h.child)), &self.req.vis));
         if !block && !descend {
             return;
         }
@@ -568,19 +502,11 @@ impl<'a> LWalk<'a> {
             }
             if block {
                 let gb = xf_bbox(xf, &mb);
-                let gw = (gb.x1 - gb.x0).max(0) as f64
-                    * w.req.px_per_dbu;
-                let gh = (gb.y1 - gb.y0).max(0) as f64
-                    * w.req.px_per_dbu;
-                let (rot, along, cross) = if gh > gw {
-                    (1, gh, gw)
-                } else {
-                    (0, gw, gh)
-                };
-                let usable = (along - 2.0 * w.opts.block_pad_px)
-                    .max(0.0);
-                let max_chars =
-                    (usable / w.opts.block_char_px).floor() as u32;
+                let gw = (gb.x1 - gb.x0).max(0) as f64 * w.req.px_per_dbu;
+                let gh = (gb.y1 - gb.y0).max(0) as f64 * w.req.px_per_dbu;
+                let (rot, along, cross) = if gh > gw { (1, gh, gw) } else { (0, gw, gh) };
+                let usable = (along - 2.0 * w.opts.block_pad_px).max(0.0);
+                let max_chars = (usable / w.opts.block_char_px).floor() as u32;
                 // Full text and dots have separate short-axis gates:
                 // long, thin circuit blocks often cannot hold a full
                 // line but can still show the three low-ink dots.
@@ -619,12 +545,7 @@ impl<'a> LWalk<'a> {
             );
             let cclip = xf_bbox(&tm.invert(), clip).intersect(&rb);
             if !cclip.is_empty() {
-                stack.push((
-                    h.child,
-                    child_r,
-                    xf.compose(&tm),
-                    cclip,
-                ));
+                stack.push((h.child, child_r, xf.compose(&tm), cclip));
             }
         };
         match h.kind {
@@ -636,23 +557,14 @@ impl<'a> LWalk<'a> {
                     x1: clip.x1.saturating_sub(b0.x0),
                     y1: clip.y1.saturating_sub(b0.y0),
                 };
-                match grid_ranges(
-                    h.na as i64,
-                    h.nb as i64,
-                    h.va,
-                    h.vb,
-                    &mk,
-                ) {
+                match grid_ranges(h.na as i64, h.nb as i64, h.va, h.vb, &mk) {
                     GridVis::Empty => {}
                     GridVis::Range { i0, i1, j0, j1 } => {
                         'g: for j in j0..=j1 {
                             for i in i0..=i1 {
-                                let ox = i as i128 * h.va.0 as i128
-                                    + j as i128 * h.vb.0 as i128;
-                                let oy = i as i128 * h.va.1 as i128
-                                    + j as i128 * h.vb.1 as i128;
-                                let (Ok(ox), Ok(oy)) =
-                                    (i64::try_from(ox), i64::try_from(oy))
+                                let ox = i as i128 * h.va.0 as i128 + j as i128 * h.vb.0 as i128;
+                                let oy = i as i128 * h.va.1 as i128 + j as i128 * h.vb.1 as i128;
+                                let (Ok(ox), Ok(oy)) = (i64::try_from(ox), i64::try_from(oy))
                                 else {
                                     continue;
                                 };
@@ -703,18 +615,11 @@ impl<'a> LWalk<'a> {
 impl crate::Vfs {
     /// request-scoped display labels (default knobs); px_per_dbu
     /// == 0 (probes) yields no labels unless opts.raw
-    pub fn plan_labels(
-        &self,
-        req: &ViewReq,
-    ) -> Result<LabelPlan, String> {
+    pub fn plan_labels(&self, req: &ViewReq) -> Result<LabelPlan, String> {
         plan_labels(&self.ovm, self.ovt(), req, &LabelOpts::default())
     }
 
-    pub fn plan_labels_with(
-        &self,
-        req: &ViewReq,
-        opts: &LabelOpts,
-    ) -> Result<LabelPlan, String> {
+    pub fn plan_labels_with(&self, req: &ViewReq, opts: &LabelOpts) -> Result<LabelPlan, String> {
         plan_labels(&self.ovm, self.ovt(), req, opts)
     }
 }
@@ -785,7 +690,11 @@ pub fn plan_labels(
     let tc = v.cell(top);
     let r0 = w.norm_r(
         top,
-        if req.depth == u32::MAX { REM_FULL } else { req.depth },
+        if req.depth == u32::MAX {
+            REM_FULL
+        } else {
+            req.depth
+        },
     );
     let seed = view.intersect(&tc.rbbox);
     let mut stack: Vec<(u32, u32, Xf, BBox)> = Vec::new();
@@ -800,12 +709,7 @@ pub fn plan_labels(
         // If the recursive text mask misses, prune the whole cell -
         // especially the top, which has no parent edge to perform this
         // check for it.
-        if r == REM_FULL
-            && !masks_intersect(
-                v.bitset(v.cell_tmask_rec(ci)),
-                &req.vis,
-            )
-        {
+        if r == REM_FULL && !masks_intersect(v.bitset(v.cell_tmask_rec(ci)), &req.vis) {
             continue;
         }
         w.own_texts(ci, &xf, &clip);
@@ -814,16 +718,8 @@ pub fn plan_labels(
         }
         let cell = v.cell(ci);
         if cell.bvh_count == 0 {
-            for pli in cell.place_start as u64
-                ..cell.place_start as u64 + cell.place_count as u64
-            {
-                w.one_place(
-                    r,
-                    &xf,
-                    &clip,
-                    pli,
-                    &mut stack,
-                );
+            for pli in cell.place_start as u64..cell.place_start as u64 + cell.place_count as u64 {
+                w.one_place(r, &xf, &clip, pli, &mut stack);
                 if w.done {
                     break;
                 }
@@ -836,9 +732,7 @@ pub fn plan_labels(
                 // rev 43: names follow their boxes through the v7
                 // size prune - a uniformly sub-cut/hairline subtree
                 // can neither admit a block nor descend
-                if (n.max_dim as u64) < w.cut
-                    || (n.max_min as u64) < w.hair
-                {
+                if (n.max_dim as u64) < w.cut || (n.max_min as u64) < w.hair {
                     continue;
                 }
                 if !n.bbox.intersects(&clip) {
@@ -846,13 +740,7 @@ pub fn plan_labels(
                 }
                 if n.leaf {
                     for k in 0..n.count as u64 {
-                        w.one_place(
-                            r,
-                            &xf,
-                            &clip,
-                            n.first as u64 + k,
-                            &mut stack,
-                        );
+                        w.one_place(r, &xf, &clip, n.first as u64 + k, &mut stack);
                         if w.done {
                             break;
                         }
@@ -882,8 +770,7 @@ pub fn plan_labels(
         let mut c = w.blocks;
         c.extend(w.bins.into_values());
         c.sort_by_key(|c| c.prio());
-        st.budget_dropped =
-            c.len().saturating_sub(opts.view_budget) as u64;
+        st.budget_dropped = c.len().saturating_sub(opts.view_budget) as u64;
         if st.budget_dropped > 0 {
             st.truncated = true;
         }
@@ -897,13 +784,11 @@ pub fn plan_labels(
             Src::Ovt(off, len) => {
                 let lr = v.layer(c.layer_pos);
                 let end = (off + len as u64) as usize;
-                let bytes = ovt
-                    .get(off as usize..end)
-                    .ok_or_else(|| {
-                        "corrupt cache; rebuild: text string \
+                let bytes = ovt.get(off as usize..end).ok_or_else(|| {
+                    "corrupt cache; rebuild: text string \
                          beyond design.ovt"
-                            .to_string()
-                    })?;
+                        .to_string()
+                })?;
                 let s = std::str::from_utf8(bytes)
                     .map_err(|_| {
                         "corrupt cache; rebuild: text string \
@@ -964,16 +849,12 @@ mod tests {
             // layer 0 run
             let t0 = b.n_texts();
             let (o1, l1) = put(&mut ovt, "pin");
-            b.text(0, 0, 10, 20, o1, l1, TREP_NONE,
-                   &bx(10, 20, 10, 20), 0);
+            b.text(0, 0, 10, 20, o1, l1, TREP_NONE, &bx(10, 20, 10, 20), 0);
             let (o2, l2) = put(&mut ovt, "g");
             let rg = b.trep_grid(4, 2, (100, 0), (0, 200));
-            b.text(0, 0, 0, 0, o2, l2, rg,
-                   &bx(0, 0, 300, 200), 1);
+            b.text(0, 0, 0, 0, o2, l2, rg, &bx(0, 0, 300, 200), 1);
             let (o3, l3) = put(&mut ovt, "p");
-            let src: Vec<(i64, i64)> = (0..500)
-                .map(|i| ((i * 13) % 400, (i * 29) % 350))
-                .collect();
+            let src: Vec<(i64, i64)> = (0..500).map(|i| ((i * 13) % 400, (i * 29) % 350)).collect();
             let prep = floe_ovm::prepare_pts(&src);
             let po = ovt.len() as u64;
             for &(x, y) in &prep.pts {
@@ -984,8 +865,7 @@ mod tests {
             for c in &prep.chunks {
                 b.tchunk(c);
             }
-            let rp = b.trep_pts(500, po, clo,
-                                prep.chunks.len() as u32);
+            let rp = b.trep_pts(500, po, clo, prep.chunks.len() as u32);
             let mut pb = prep.extent;
             pb.x0 += 3;
             pb.y0 += 4;
@@ -996,22 +876,32 @@ mod tests {
             // layer 1 run
             let t1 = b.n_texts();
             let (o4, l4) = put(&mut ovt, "vdd");
-            b.text(0, 1, 50, 50, o4, l4, TREP_NONE,
-                   &bx(50, 50, 50, 50), 0);
+            b.text(0, 1, 50, 50, o4, l4, TREP_NONE, &bx(50, 50, 50, 50), 0);
             b.trange(1, t1, 1, TBVH_NONE);
         }
         // must CONTAIN every text member (the real build grows
         // rbbox by text extents; the planner clips to rbbox)
         let sub_bb = bx(0, 0, 402, 360);
-        b.cell("SUB", 0, 1, &sub_bb, &sub_bb, 0, 0, 0, 0, 0, 0,
-               0, 0, m_all, m_all, 0, sub_tr, 2, m_all);
+        b.cell(
+            "SUB", 0, 1, &sub_bb, &sub_bb, 0, 0, 0, 0, 0, 0, 0, 0, m_all, m_all, 0, sub_tr, 2,
+            m_all,
+        );
         // ---- TOP (ci 1): own text + three placements of SUB
         let top_tr = b.n_tranges();
         {
             let t0 = b.n_texts();
             let (o, l) = put(&mut ovt, "TOPLBL");
-            b.text(1, 0, 5000, 5000, o, l, TREP_NONE,
-                   &bx(5000, 5000, 5000, 5000), 0);
+            b.text(
+                1,
+                0,
+                5000,
+                5000,
+                o,
+                l,
+                TREP_NONE,
+                &bx(5000, 5000, 5000, 5000),
+                0,
+            );
             b.trange(0, t0, 1, TBVH_NONE);
         }
         let p0 = b.place(0, 0, 0, 0, false, &Rep::One);
@@ -1022,15 +912,21 @@ mod tests {
             3000,
             0,
             false,
-            &Rep::Grid { na: 3, nb: 1, va: (600, 0), vb: (0, 0) },
+            &Rep::Grid {
+                na: 3,
+                nb: 1,
+                va: (600, 0),
+                vb: (0, 0),
+            },
         );
         let items = bx(-400, 0, 6000, 6000);
         let n0 = b.bvh_node(&items, p0 as u32, 3, true, u32::MAX, u32::MAX);
         let top_bb = bx(-400, 0, 6000, 6000);
-        b.cell("TOP", 1, 0, &top_bb, &top_bb, p0 as u32, 3, 0, 0,
-               n0, 1, 0, 0, m_all, m_all, 0, top_tr, 1, m_all);
-        (Ovm::from_bytes(b.finish(0, ovt.len() as u64)).unwrap(),
-         ovt)
+        b.cell(
+            "TOP", 1, 0, &top_bb, &top_bb, p0 as u32, 3, 0, 0, n0, 1, 0, 0, m_all, m_all, 0,
+            top_tr, 1, m_all,
+        );
+        (Ovm::from_bytes(b.finish(0, ovt.len() as u64)).unwrap(), ovt)
     }
 
     fn rq(view: BBox, cut: i64, depth: u32, px: f64) -> ViewReq {
@@ -1041,24 +937,17 @@ mod tests {
             depth,
             px_per_dbu: px,
             sub_cut_wash: false,
-                    page_hairline: false,
-                    page_skip: Vec::new(),
-                    prune_skipped: false,
+            page_reps: false,
+            page_hairline: false,
+            page_skip: Vec::new(),
+            prune_skipped: false,
         }
     }
 
     /// brute-force oracle: expand every placement member and text
     /// member through materialized reps, same depth/cut/vis rules
-    fn brute(
-        v: &Ovm,
-        ovt: &[u8],
-        req: &ViewReq,
-    ) -> Vec<(u32, i64, i64, String)> {
-        fn rep_offs(
-            v: &Ovm,
-            ovt: &[u8],
-            t: &floe_ovm::TextV,
-        ) -> Vec<(i64, i64)> {
+    fn brute(v: &Ovm, ovt: &[u8], req: &ViewReq) -> Vec<(u32, i64, i64, String)> {
+        fn rep_offs(v: &Ovm, ovt: &[u8], t: &floe_ovm::TextV) -> Vec<(i64, i64)> {
             if t.rep_idx == TREP_NONE {
                 return vec![(0, 0)];
             }
@@ -1067,10 +956,7 @@ mod tests {
                     let mut o = Vec::new();
                     for j in 0..nb as i64 {
                         for i in 0..na as i64 {
-                            o.push((
-                                i * va.0 + j * vb.0,
-                                i * va.1 + j * vb.1,
-                            ));
+                            o.push((i * va.0 + j * vb.0, i * va.1 + j * vb.1));
                         }
                     }
                     o
@@ -1098,23 +984,15 @@ mod tests {
                 for ti in tr.text_lo..tr.text_lo + tr.text_count {
                     let t = v.text(ti);
                     for (ox, oy) in rep_offs(v, ovt, &t) {
-                        let (gx, gy) =
-                            xf.apply(t.x + ox, t.y + oy);
+                        let (gx, gy) = xf.apply(t.x + ox, t.y + oy);
                         if req.view.contains_pt(gx, gy) {
                             let s = std::str::from_utf8(
                                 &ovt[t.string_off as usize
-                                    ..(t.string_off
-                                        + t.string_len as u64)
-                                        as usize],
+                                    ..(t.string_off + t.string_len as u64) as usize],
                             )
                             .unwrap()
                             .to_string();
-                            out.push((
-                                tr.layer_idx,
-                                gx,
-                                gy,
-                                s,
-                            ));
+                            out.push((tr.layer_idx, gx, gy, s));
                         }
                     }
                 }
@@ -1123,10 +1001,7 @@ mod tests {
                 return;
             }
             let cell = v.cell(ci);
-            for pli in cell.place_start as u64
-                ..cell.place_start as u64
-                    + cell.place_count as u64
-            {
+            for pli in cell.place_start as u64..cell.place_start as u64 + cell.place_count as u64 {
                 let pl = v.place(pli);
                 let rb = v.cell_rbbox(pl.child);
                 let cw = (rb.x1 - rb.x0).max(0) as u64;
@@ -1141,37 +1016,17 @@ mod tests {
                         let mut o = Vec::new();
                         for j in 0..*nb as i64 {
                             for i in 0..*na as i64 {
-                                o.push((
-                                    i * va.0 + j * vb.0,
-                                    i * va.1 + j * vb.1,
-                                ));
+                                o.push((i * va.0 + j * vb.0, i * va.1 + j * vb.1));
                             }
                         }
                         o
                     }
                     Rep::Pts(p) => p.to_vec(),
                 };
-                let nr = if r == REM_FULL {
-                    REM_FULL
-                } else {
-                    r - 1
-                };
+                let nr = if r == REM_FULL { REM_FULL } else { r - 1 };
                 for (ox, oy) in offs {
-                    let t = Xf::place(
-                        pl.x + ox,
-                        pl.y + oy,
-                        pl.rot,
-                        pl.flip,
-                    );
-                    walk(
-                        v,
-                        ovt,
-                        pl.child,
-                        nr,
-                        &xf.compose(&t),
-                        req,
-                        out,
-                    );
+                    let t = Xf::place(pl.x + ox, pl.y + oy, pl.rot, pl.flip);
+                    walk(v, ovt, pl.child, nr, &xf.compose(&t), req, out);
                 }
             }
         }
@@ -1186,11 +1041,7 @@ mod tests {
         out
     }
 
-    fn raw_rows(
-        v: &Ovm,
-        ovt: &[u8],
-        req: &ViewReq,
-    ) -> Vec<(u32, i64, i64, String)> {
+    fn raw_rows(v: &Ovm, ovt: &[u8], req: &ViewReq) -> Vec<(u32, i64, i64, String)> {
         let mut o = LabelOpts::default();
         o.raw = true;
         o.cand_cap = usize::MAX;
@@ -1222,10 +1073,10 @@ mod tests {
     fn raw_candidates_match_brute_force() {
         let (v, ovt) = fixture();
         let views = [
-            bx(-400, 0, 6000, 6000),  // everything
-            bx(0, 0, 400, 360),       // SUB at identity only
-            bx(1400, 50, 2100, 600),  // rotated/flipped SUB
-            bx(0, 3000, 2200, 3400),  // array band
+            bx(-400, 0, 6000, 6000),    // everything
+            bx(0, 0, 400, 360),         // SUB at identity only
+            bx(1400, 50, 2100, 600),    // rotated/flipped SUB
+            bx(0, 3000, 2200, 3400),    // array band
             bx(4990, 4990, 5010, 5010), // top label point
         ];
         for view in views {
@@ -1243,10 +1094,7 @@ mod tests {
         // layer visibility: only layer 9/1 visible
         let mut req = rq(bx(-400, 0, 6000, 6000), 0, u32::MAX, 0.0);
         req.vis = vec![0b10];
-        assert_eq!(
-            raw_rows(&v, &ovt, &req),
-            brute(&v, &ovt, &req)
-        );
+        assert_eq!(raw_rows(&v, &ovt, &req), brute(&v, &ovt, &req));
         // cell-level cut: SUB (400x360) below a 500-dbu cut -> only
         // TOP's own label remains
         let req = rq(bx(-400, 0, 6000, 6000), 500, u32::MAX, 0.0);
@@ -1305,15 +1153,11 @@ mod tests {
                 viewport.x1 + 2500,
                 viewport.y1 + 2500,
             );
-            let a = plan_labels(&v, &ovt, &rq(viewport, 0, depth, px), &opts)
-                .unwrap();
-            let m = plan_labels(&v, &ovt, &rq(margin, 0, depth, px), &opts)
-                .unwrap();
+            let a = plan_labels(&v, &ovt, &rq(viewport, 0, depth, px), &opts).unwrap();
+            let m = plan_labels(&v, &ovt, &rq(margin, 0, depth, px), &opts).unwrap();
             assert!(!a.stats.truncated && !m.stats.truncated);
             assert!(!a.rows.is_empty(), "viewport {viewport:?} has labels");
-            let key = |r: &LabelRow| {
-                (r.block, r.layer, r.dt, r.x, r.y, r.rot, r.s.clone())
-            };
+            let key = |r: &LabelRow| (r.block, r.layer, r.dt, r.x, r.y, r.rot, r.s.clone());
             let aligned = align_to_bins(&viewport, bin);
             let mut expect: Vec<LabelRow> = m
                 .rows
@@ -1321,8 +1165,7 @@ mod tests {
                 .filter(|r| !r.block && aligned.contains_pt(r.x, r.y))
                 .cloned()
                 .collect();
-            let mut got: Vec<LabelRow> =
-                a.rows.iter().filter(|r| !r.block).cloned().collect();
+            let mut got: Vec<LabelRow> = a.rows.iter().filter(|r| !r.block).cloned().collect();
             expect.sort_by_key(key);
             got.sort_by_key(key);
             assert_eq!(got, expect, "texts at depth {depth}");
@@ -1347,7 +1190,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            edge.rows.iter().any(|r| (r.x, r.y, r.s.as_str()) == (55, 120, "p")),
+            edge.rows
+                .iter()
+                .any(|r| (r.x, r.y, r.s.as_str()) == (55, 120, "p")),
             "{:?}",
             edge.rows
         );
@@ -1369,16 +1214,15 @@ mod tests {
         let raw = raw_rows(&v, &ovt, &req);
         for r in a.rows.iter().filter(|r| !r.block) {
             assert!(
-                raw.iter().any(|(_, x, y, s)| (*x, *y, &r.s)
-                    == (r.x, r.y, s)),
+                raw.iter()
+                    .any(|(_, x, y, s)| (*x, *y, &r.s) == (r.x, r.y, s)),
                 "selected {:?} not in raw",
                 r
             );
         }
         // px 0 (probe): no labels at all
         let req0 = rq(bx(-400, 0, 6000, 6000), 0, u32::MAX, 0.0);
-        let p = plan_labels(&v, &ovt, &req0, &LabelOpts::default())
-            .unwrap();
+        let p = plan_labels(&v, &ovt, &req0, &LabelOpts::default()).unwrap();
         assert!(p.rows.is_empty());
     }
 
@@ -1390,15 +1234,9 @@ mod tests {
         let (v, ovt) = fixture();
         // px chosen so SUB (400 dbu) is 400 px -> passes 96 px
         let req = rq(bx(-400, 0, 6000, 6000), 0, 0, 1.0);
-        let lp = plan_labels(&v, &ovt, &req, &LabelOpts::default())
-            .unwrap();
-        let blocks: Vec<&LabelRow> =
-            lp.rows.iter().filter(|r| r.block).collect();
-        assert!(
-            blocks.iter().any(|r| r.s == "SUB"),
-            "{:?}",
-            lp.rows
-        );
+        let lp = plan_labels(&v, &ovt, &req, &LabelOpts::default()).unwrap();
+        let blocks: Vec<&LabelRow> = lp.rows.iter().filter(|r| r.block).collect();
+        assert!(blocks.iter().any(|r| r.s == "SUB"), "{:?}", lp.rows);
         assert!(lp.stats.blocks_visible >= 3, "{:?}", lp.stats);
         assert!(blocks.iter().any(|r| r.rot == 0), "{:?}", blocks);
         assert!(blocks.iter().any(|r| r.rot == 1), "{:?}", blocks);
@@ -1409,48 +1247,24 @@ mod tests {
         assert!(!lp_off.rows.is_empty(), "design text was also disabled");
         // zoomed way out: SUB is 0.4 px -> gate silences blocks
         let req2 = rq(bx(-400, 0, 6000, 6000), 0, 0, 0.001);
-        let lp2 =
-            plan_labels(&v, &ovt, &req2, &LabelOpts::default())
-                .unwrap();
+        let lp2 = plan_labels(&v, &ovt, &req2, &LabelOpts::default()).unwrap();
         assert!(lp2.rows.iter().all(|r| !r.block), "{:?}", lp2.rows);
 
         // Structural names follow the hierarchy frontier; design
         // text visibility does not gate them (layers off keeps the
         // names)...
-        let mut structural = rq(
-            bx(-400, 0, 6000, 6000),
-            0,
-            0,
-            1.0,
-        );
+        let mut structural = rq(bx(-400, 0, 6000, 6000), 0, 0, 1.0);
         structural.vis.fill(0);
-        let lp3 = plan_labels(
-            &v,
-            &ovt,
-            &structural,
-            &LabelOpts::default(),
-        )
-        .unwrap();
+        let lp3 = plan_labels(&v, &ovt, &structural, &LabelOpts::default()).unwrap();
         assert!(!lp3.rows.is_empty(), "structural names lost");
         assert!(lp3.rows.iter().all(|r| r.block), "{:?}", lp3.rows);
         assert!(lp3.rows.iter().any(|r| r.s == "SUB"));
         // ...but rev 39: they take the geometry size cut exactly
         // like their boxes - a culled box leaves no floating name
         // (SUB is 402x360, far under cut 10k)
-        let mut cut_all = rq(
-            bx(-400, 0, 6000, 6000),
-            10_000,
-            0,
-            1.0,
-        );
+        let mut cut_all = rq(bx(-400, 0, 6000, 6000), 10_000, 0, 1.0);
         cut_all.vis.fill(0);
-        let lp3b = plan_labels(
-            &v,
-            &ovt,
-            &cut_all,
-            &LabelOpts::default(),
-        )
-        .unwrap();
+        let lp3b = plan_labels(&v, &ovt, &cut_all, &LabelOpts::default()).unwrap();
         assert!(lp3b.rows.is_empty(), "{:?}", lp3b.rows);
 
         // Reproduce a long/thin screen box: full line height fails,
@@ -1460,8 +1274,7 @@ mod tests {
         thin.block_line_px = 1000.0;
         thin.block_dots_px = 1.0;
         let lp4 = plan_labels(&v, &ovt, &req, &thin).unwrap();
-        let thin_blocks: Vec<&LabelRow> =
-            lp4.rows.iter().filter(|r| r.block).collect();
+        let thin_blocks: Vec<&LabelRow> = lp4.rows.iter().filter(|r| r.block).collect();
         assert!(!thin_blocks.is_empty());
         assert!(thin_blocks.iter().all(|r| r.s == "..."));
 
@@ -1469,8 +1282,7 @@ mod tests {
         // still has room for three dots, so it must now produce rows.
         let small_req = rq(bx(-400, 0, 6000, 6000), 0, 0, 0.1);
         let small = plan_labels(&v, &ovt, &small_req, &thin).unwrap();
-        let small_blocks: Vec<&LabelRow> =
-            small.rows.iter().filter(|r| r.block).collect();
+        let small_blocks: Vec<&LabelRow> = small.rows.iter().filter(|r| r.block).collect();
         assert!(!small_blocks.is_empty());
         assert!(small_blocks.iter().all(|r| r.s == "..."));
 
@@ -1530,14 +1342,13 @@ mod tests {
         b.trange(0, ti, 1, TBVH_NONE);
         let child_bb = bx(0, 0, 10, 10);
         b.cell(
-            "TXT_CELL", 0, 2, &child_bb, &child_bb, 0, 0, 0, 0, 0, 0,
-            0, 0, txt, txt, 0, tr0, 1, txt,
+            "TXT_CELL", 0, 2, &child_bb, &child_bb, 0, 0, 0, 0, 0, 0, 0, 0, txt, txt, 0, tr0, 1,
+            txt,
         );
 
         // ci 1: geometry/fill-only leaf
         b.cell(
-            "FILL", 0, 1, &child_bb, &child_bb, 0, 0, 0, 0, 0, 0, 0,
-            0, none, none, 0, 0, 0, none,
+            "FILL", 0, 1, &child_bb, &child_bb, 0, 0, 0, 0, 0, 0, 0, 0, none, none, 0, 0, 0, none,
         );
 
         // ci 2: one nearby text edge, eight far fill edges. The two
@@ -1555,8 +1366,25 @@ mod tests {
         b.bvh_node(&near, ps as u32, 1, true, u32::MAX, u32::MAX);
         b.bvh_node(&far, ps as u32 + 1, 8, true, u32::MAX, u32::MAX);
         b.cell(
-            "TOP", 1, 0, &all, &all, ps as u32, 9, 0, 0, root, 3, 0,
-            0, txt, txt, 0, b.n_tranges(), 0, txt,
+            "TOP",
+            1,
+            0,
+            &all,
+            &all,
+            ps as u32,
+            9,
+            0,
+            0,
+            root,
+            3,
+            0,
+            0,
+            txt,
+            txt,
+            0,
+            b.n_tranges(),
+            0,
+            txt,
         );
         b.top = 2;
         let v = Ovm::from_bytes(b.finish(0, ovt.len() as u64)).unwrap();

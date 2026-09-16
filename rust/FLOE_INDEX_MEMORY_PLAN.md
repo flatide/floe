@@ -17,7 +17,7 @@ Status: first bounded-pipeline implementation on branch
 The first production comparison should use the same 16-worker baseline with:
 
 ```text
-floe-index vfs chip.oas chip.oas.floe --jobs 16 \
+floe-index vfs chip.oas .chip.oas.ice --jobs 16 \
   --plan-batch 2 --encode-batch 32
 ```
 

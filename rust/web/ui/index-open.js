@@ -5,7 +5,7 @@
     function preview(v, P) {
         if (!v || !id(v.source_id) || typeof v.title !== 'string' || v.title.length > 1024 ||
             !['level','chip','layer'].includes(v.mode) || !['window','explicit'].includes(v.display_policy) ||
-            !Number.isInteger(v.jobs_available) || v.jobs_available < 0 || v.jobs_available > 16 || !v.levels) {
+            !Number.isInteger(v.jobs_available) || v.jobs_available < 0 || v.jobs_available > 16 || !v.levels || typeof v.occupancy_default !== 'boolean') {
             throw Error('Invalid index preview');
         }
         P.counter(v.open_seq);
@@ -170,7 +170,7 @@
                 target(to,P); review = {preview:v,target:to}; details(v,to);
                 el('index-open-jobs').value = String(Math.max(1,Math.min(12,v.jobs_available)));
                 ['lod','force'].forEach(function (k) { el('index-open-'+k).checked = false; });
-                el('index-open-occupancy').checked = true;
+                el('index-open-occupancy').checked = v.occupancy_default;
                 if (!v.jobs_available) { status = 'No index slots are available. Close this dialog and review again after other work finishes.'; }
             } catch (e) { if (active(t)) { error = e.message || String(e); } }
             finally { end(t); }

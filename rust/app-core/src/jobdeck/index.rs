@@ -67,6 +67,8 @@ impl DeckIndexPlan {
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
         options.validate()?;
+        let mut options = options.clone();
+        options.occupancy = Some(options.occupancy.unwrap_or(true));
         if options.profile_cell.is_some() {
             return Err(Error::new(
                 ErrorKind::Unsupported,
@@ -97,13 +99,14 @@ impl DeckIndexPlan {
             let mut current = options.clone();
             if options.force || !info.indexed {
                 // Legacy deck occupancy-only also builds unindexed sources.
-                current.occupancy = options.occupancy || options.occupancy_only;
+                current.occupancy =
+                    Some(options.occupancy.unwrap_or(true) || options.occupancy_only);
                 current.occupancy_only = false;
             } else if options.occupancy_only
-                || ((options.occupancy || options.occupancy_um.is_some())
+                || ((options.occupancy.unwrap_or(true) || options.occupancy_um.is_some())
                     && !info.cache_dir.join("design.ovo").is_file())
             {
-                current.occupancy = false;
+                current.occupancy = Some(false);
                 current.occupancy_only = true;
             } else {
                 kept += 1;

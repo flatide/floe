@@ -44,6 +44,19 @@ pub struct ViewReq {
     /// as the node bbox (coarse). false keeps the plain viewer rule
     /// (a size cut is a silent detail omission).
     pub sub_cut_wash: bool,
+    /// The page frontier (user design 2026-09-17): what the size /
+    /// hairline cut would drop is thinned to REPRESENTATIVES instead
+    /// of vanishing - a cut page or placement k octaves below its cut
+    /// (its measure at most 1/2^k of the threshold) survives when its
+    /// index within the owning cell is a multiple of 4^k, and a
+    /// survivor is drawn as the sub-cut rules draw it (dense: its
+    /// footprint wash, sparse: its pixels). One zoom-out quadruples
+    /// the cut items in view and keeps a quarter, so the count stays
+    /// what it was at the cut, and the sets are nested: what survives
+    /// one zoom-out survives every further one, like the frontier's
+    /// lattice representatives. Ignored when sub_cut_wash is on
+    /// (that diagnostic keeps everything). Plain layouts only.
+    pub page_reps: bool,
     /// Whether the rev 41 hairline rule culls PAGES (a page whose every
     /// record has min side < hairline x cut is dropped whole). true is
     /// the plain layout's performance policy (thin shapes may be
@@ -91,9 +104,7 @@ impl Vfs {
         // marker commits an exact byte length (a no-text cache
         // commits 0 and the file may be absent)
         let ovt_path = format!("{}/design.ovt", dir);
-        let ovt_size = std::fs::metadata(&ovt_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let ovt_size = std::fs::metadata(&ovt_path).map(|m| m.len()).unwrap_or(0);
         if ovt_size != ovm.ovt_len {
             return Err(format!(
                 "corrupt cache; rebuild: design.ovt is {} bytes but \
@@ -127,10 +138,7 @@ impl Vfs {
     }
 
     /// visible-layer bitset from "l/d" or name specs (None = all)
-    pub fn layer_mask(
-        &self,
-        specs: Option<&[String]>,
-    ) -> Result<Vec<u8>, String> {
+    pub fn layer_mask(&self, specs: Option<&[String]>) -> Result<Vec<u8>, String> {
         let mut vis = vec![0u8; self.ovm.bs_width];
         match specs {
             None => vis.iter_mut().for_each(|b| *b = 0xff),
@@ -139,22 +147,13 @@ impl Vfs {
                     let mut hit = false;
                     for li in 0..self.ovm.n_layers {
                         let lr = self.ovm.layer(li);
-                        if lr.name == *spec
-                            || format!("{}/{}", lr.layer, lr.dt)
-                                == *spec
-                        {
-                            floe_ovm::bit_set(
-                                &mut vis,
-                                li as usize,
-                            );
+                        if lr.name == *spec || format!("{}/{}", lr.layer, lr.dt) == *spec {
+                            floe_ovm::bit_set(&mut vis, li as usize);
                             hit = true;
                         }
                     }
                     if !hit {
-                        return Err(format!(
-                            "layer {:?} not found",
-                            spec
-                        ));
+                        return Err(format!("layer {:?} not found", spec));
                     }
                 }
             }
@@ -169,31 +168,22 @@ impl Vfs {
     /// holding that page's single cell (see page_name()), with
     /// coordinates in cell-local dbu. IO runs in ovp file order
     /// (sequential); an out-of-range index is an Err, not a skip.
-    pub fn read_page_batch(
-        &self,
-        pages: &[u32],
-    ) -> Result<Vec<(u32, Vec<u8>)>, String> {
+    pub fn read_page_batch(&self, pages: &[u32]) -> Result<Vec<(u32, Vec<u8>)>, String> {
         let n = self.ovm.n_pages;
         for &pi in pages {
             if pi >= n {
-                return Err(format!(
-                    "page {} out of range ({} pages)",
-                    pi, n
-                ));
+                return Err(format!("page {} out of range ({} pages)", pi, n));
             }
         }
         if pages.is_empty() {
             return Ok(Vec::new());
         }
         let mut uniq: Vec<u32> = pages.to_vec();
-        uniq.sort_unstable_by_key(|&pi| {
-            self.ovm.page(pi).file_off
-        });
+        uniq.sort_unstable_by_key(|&pi| self.ovm.page(pi).file_off);
         uniq.dedup();
-        let mut f = std::fs::File::open(&self.ovp_path)
-            .map_err(|e| format!("{}: {}", self.ovp_path, e))?;
-        let mut got: HashMap<u32, Vec<u8>> =
-            HashMap::with_capacity(uniq.len());
+        let mut f =
+            std::fs::File::open(&self.ovp_path).map_err(|e| format!("{}: {}", self.ovp_path, e))?;
+        let mut got: HashMap<u32, Vec<u8>> = HashMap::with_capacity(uniq.len());
         for &pi in &uniq {
             let p = self.ovm.page(pi);
             let mut buf = vec![0u8; p.csize as usize];
@@ -202,8 +192,7 @@ impl Vfs {
             f.read_exact(&mut buf).map_err(|e| e.to_string())?;
             got.insert(pi, buf);
         }
-        let mut out: Vec<(u32, Vec<u8>)> =
-            Vec::with_capacity(pages.len());
+        let mut out: Vec<(u32, Vec<u8>)> = Vec::with_capacity(pages.len());
         for &pi in pages {
             let payload = match got.remove(&pi) {
                 Some(b) => b,
@@ -222,22 +211,16 @@ impl Vfs {
     }
 
     /// page payload files read in ovp file order (sequential IO)
-    pub(crate) fn read_page_payloads(
-        &self,
-        pages: &[u32],
-    ) -> Result<Vec<Vec<u8>>, String> {
+    pub(crate) fn read_page_payloads(&self, pages: &[u32]) -> Result<Vec<Vec<u8>>, String> {
         if pages.is_empty() {
             // authored-only incremental delta: no ovp IO at all
             return Ok(Vec::new());
         }
-        let mut f = std::fs::File::open(&self.ovp_path)
-            .map_err(|e| format!("{}: {}", self.ovp_path, e))?;
-        let mut payloads: Vec<Vec<u8>> =
-            Vec::with_capacity(pages.len());
+        let mut f =
+            std::fs::File::open(&self.ovp_path).map_err(|e| format!("{}: {}", self.ovp_path, e))?;
+        let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(pages.len());
         let mut order: Vec<u32> = pages.to_vec();
-        order.sort_unstable_by_key(|&pi| {
-            self.ovm.page(pi).file_off
-        });
+        order.sort_unstable_by_key(|&pi| self.ovm.page(pi).file_off);
         for &pi in &order {
             let p = self.ovm.page(pi);
             let mut buf = vec![0u8; p.csize as usize];
@@ -248,7 +231,6 @@ impl Vfs {
         }
         Ok(payloads)
     }
-
 }
 
 pub(crate) fn xf_bbox(xf: &Xf, b: &BBox) -> BBox {
@@ -341,10 +323,7 @@ impl HierSession {
     /// anything from the future is a protocol error.
     pub fn resolve_ack(&mut self, ack: u64) -> Result<(), String> {
         if ack > self.last_gen {
-            return Err(format!(
-                "ack {} ahead of last gen {}",
-                ack, self.last_gen
-            ));
+            return Err(format!("ack {} ahead of last gen {}", ack, self.last_gen));
         }
         let Some(p) = self.pending.take() else {
             return Ok(()); // dup ack after commit: no-op
@@ -449,8 +428,7 @@ impl HierSession {
         let mut evict_bytes = 0u64;
         let mut projected = self.committed_bytes + new_bytes;
         if projected > self.budget_bytes {
-            let current: HashSet<u32> =
-                plan_pages.iter().copied().collect();
+            let current: HashSet<u32> = plan_pages.iter().copied().collect();
             let mut cand: Vec<(u64, u32)> = self
                 .committed
                 .iter()
@@ -525,7 +503,12 @@ mod tests {
         b.top = 0;
         b.layer(1, 0, "L", 0, 0);
         let m = b.bitset(&[1]);
-        let bbx = BBox { x0: 0, y0: 0, x1: 10, y1: 10 };
+        let bbx = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 10,
+            y1: 10,
+        };
         for (k, &u) in usizes.iter().enumerate() {
             // pages sit at x = k*1000 so streaming priority is
             // testable; csize == usize for budget math
@@ -535,14 +518,23 @@ mod tests {
                 x1: k as i64 * 1000 + 10,
                 y1: 10,
             };
-            b.page(0, 0, k as u32, &pb, 0, u, u, 1, 1, 10, 10, floe_ovm::LOD_EXACT, floe_ovm::LOD_PAGE_NONE);
+            b.page(
+                0,
+                0,
+                k as u32,
+                &pb,
+                0,
+                u,
+                u,
+                1,
+                1,
+                10,
+                10,
+                floe_ovm::LOD_EXACT,
+                floe_ovm::LOD_PAGE_NONE,
+            );
         }
-        let pr = b.prange(
-            0,
-            0,
-            usizes.len() as u32,
-            floe_ovm::PBVH_NONE,
-        );
+        let pr = b.prange(0, 0, usizes.len() as u32, floe_ovm::PBVH_NONE);
         b.cell(
             "C",
             0,
@@ -603,10 +595,7 @@ mod tests {
         let mut ovp = p2.clone();
         ovp.extend_from_slice(&p0);
         ovp.extend_from_slice(&p1);
-        let dir = std::env::temp_dir().join(format!(
-            "floe_batch_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("floe_batch_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ovp_path = dir.join("design.ovp");
         std::fs::write(&ovp_path, &ovp).unwrap();
@@ -614,11 +603,7 @@ mod tests {
         b.top = 0;
         b.layer(1, 0, "L", 0, 0);
         let m = b.bitset(&[1]);
-        let offs = [
-            p2.len() as u64,
-            (p2.len() + p0.len()) as u64,
-            0u64,
-        ];
+        let offs = [p2.len() as u64, (p2.len() + p0.len()) as u64, 0u64];
         let lens = [p0.len(), p1.len(), p2.len()];
         for k in 0..3u32 {
             let pb = BBox {
@@ -644,13 +629,16 @@ mod tests {
             );
         }
         let pr = b.prange(0, 0, 3, floe_ovm::PBVH_NONE);
-        let bbx = BBox { x0: 0, y0: 0, x1: 10, y1: 10 };
+        let bbx = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 10,
+            y1: 10,
+        };
         b.cell(
-            "C", 0, 0, &bbx, &bbx, 0, 0, 0, 3, 0, 0, pr, 1, m, m,
-            1, 0, 0, m,
+            "C", 0, 0, &bbx, &bbx, 0, 0, 0, 3, 0, 0, pr, 1, m, m, 1, 0, 0, m,
         );
-        let ovm =
-            Ovm::from_bytes(b.finish(ovp.len() as u64, 0)).unwrap();
+        let ovm = Ovm::from_bytes(b.finish(ovp.len() as u64, 0)).unwrap();
         let vfs = Vfs {
             ovm,
             ovp_path: ovp_path.to_string_lossy().into_owned(),
@@ -749,9 +737,9 @@ mod tests {
         // gen2 touches p0 (plan [0]) but the client drops it
         s.apply(&ovm, &[0], &[0; 1], 2, 0).unwrap();
         s.resolve_ack(1).unwrap(); // rollback: touch undone
-        // gen3 brings p2: 20 + 10 > 25 -> evict ONE, LRU order;
-        // with the touch rolled back p0 and p1 tie on gen1 and the
-        // deterministic (gen, page) order evicts p0
+                                   // gen3 brings p2: 20 + 10 > 25 -> evict ONE, LRU order;
+                                   // with the touch rolled back p0 and p1 tie on gen1 and the
+                                   // deterministic (gen, page) order evicts p0
         let u = s.apply(&ovm, &[2], &[0; 1], 3, 0).unwrap();
         assert_eq!(u.evict, vec![0]);
         s.resolve_ack(3).unwrap();
@@ -813,5 +801,4 @@ mod tests {
         assert_eq!(u.new.len(), 3);
         assert!(!u.partial);
     }
-
 }

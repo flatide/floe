@@ -106,18 +106,18 @@ impl Registry {
         let scope = selected.scope();
         let path = selected.path().to_owned();
         pending.protection = Some(pending.owner.source_set().begin(stop)?);
-        let mut cache = path.as_os_str().to_owned();
-        cache.push(".ice");
-        let cache = std::path::PathBuf::from(cache);
+        let caches = floe_app_core::cache::pack_paths(&path)?;
         let packed = floe_app_core::drc::is_packed_source(&path)?;
         if !packed {
-            scope.check(&cache)?;
+            for cache in &caches {
+                scope.check(cache)?;
+            }
         }
         let (resources, _) = pending.owner.drc_resources();
         // Read leases also exclude managed index/export writers during cache
         // selection; the candidate retains its own leases before this is dropped.
         let files: Vec<_> = std::iter::once(path.clone())
-            .chain((!packed).then(|| cache.clone()))
+            .chain(caches.into_iter().filter(|_| !packed))
             .collect();
         let admission = resources.drc(files.clone())?;
         let chosen = floe_app_core::drc::select_current_source(&path, stop)?;

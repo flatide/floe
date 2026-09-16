@@ -6,6 +6,9 @@ __pycache__/
 *.oas
 *.oas.ice/
 *.floe.index.lock
+.*.ice/
+.*.tray
+.*.ice.index.lock
 floe-portable-*.tar.gz
 AGENTS.md
 floe_research/

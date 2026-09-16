@@ -89,12 +89,11 @@ pub fn waive_paths(pack: &Path, reviewer: &str) -> Result<[PathBuf; 2]> {
     {
         return Err(Error::input("invalid or oversized reviewer tag"));
     }
-    let path = cache::absolute(pack)?;
+    let path = cache::database_path(pack)?;
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| Error::input("DRC filename must be UTF-8"))?;
-    let name = name.strip_suffix(".ice").unwrap_or(name);
     // Identical legacy path tag, not a security fingerprint or user credential.
     let tag = format!("{:x}", Sha1::digest(path.as_os_str().as_bytes()));
     Ok([
@@ -180,7 +179,7 @@ fn current_pack(source: &Path, cancelled: &AtomicUsize) -> Result<(Option<Pack>,
     let pack = if packed {
         Pack::open(source, cancelled)?
     } else {
-        let path = PathBuf::from(format!("{}.ice", cache::utf8(source)?));
+        let path = cache::pack_path(source)?;
         let candidate = match fs::metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok((None, None));

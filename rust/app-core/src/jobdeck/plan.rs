@@ -135,12 +135,13 @@ impl Analysis {
         let mut trees = Vec::new();
         for tc in self.deck.sources(None) {
             let source = self.catalog.resolve(tc);
-            let directory = cache::cache_path(&source)?;
-            let mut lock = directory.as_os_str().to_owned();
-            lock.push(".index.lock");
+            for directory in cache::cache_paths(&source)? {
+                let mut lock = directory.as_os_str().to_owned();
+                lock.push(".index.lock");
+                files.push(lock.into());
+                trees.push(directory);
+            }
             files.push(source);
-            files.push(lock.into());
-            trees.push(directory);
         }
         artifact::protected_output_mode(path, &files, &trees, planned)
     }
@@ -171,7 +172,7 @@ impl Analysis {
                 coverage["partial"]
             ),
             format!(
-                "sources   : {} probed, {} ok, {} indexed (.floe)  dir {}",
+                "sources   : {} probed, {} ok, {} indexed  dir {}",
                 src["probed"],
                 src["ok"],
                 src["indexed"],

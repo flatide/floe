@@ -284,9 +284,7 @@ impl Registry {
         // read-only registration must not gain writes through another feature.
         let mut trees = vec![r.path.clone()];
         if self.inner.indexer.is_some() {
-            let mut target = r.path.as_os_str().to_owned();
-            target.push(".ice");
-            trees.push(target.into());
+            trees.extend(floe_app_core::cache::pack_paths(&r.path)?);
         }
         if let Some(notes) = self.notes() {
             files.extend(notes.protected_targets(&r.path)?);
