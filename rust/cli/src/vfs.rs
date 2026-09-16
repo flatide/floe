@@ -325,6 +325,10 @@ pub fn vfs_cmd(args: &[String]) {
         std::process::exit(2);
     }
     occ_opts.jobs = jobs;
+    // progress on stderr (field 2026-09-16: five silent minutes on a
+    // 150 MB chip): a heartbeat every 10 s per layer, one line per
+    // slow or summary-less layer
+    occ_opts.progress = Some(|m: &str| eprintln!("[vfs] occupancy {}", m));
     if frontier_only {
         let t0 = std::time::Instant::now();
         let v = floe_vfs::Vfs::open(&outdir).unwrap_or_else(|e| {

@@ -696,3 +696,29 @@ budget exceeded: 2356612414 > 1073741824` — 요약이 있어도 제한 depth�
 - **남은 것**: 실칩 재생성 실측(파일 크기 = 레이어별 깊이 수 배; 9.8 GB 레이아웃의
   keep 제한 depth 광역뷰 시간), 근접뷰 예산 초과(단일 레이아웃 슬라이스 스트리밍)는
   사용자 판단으로 보류(근접뷰는 요약 대상이 아님).
+
+### 실측 9 (2026-09-16, 150 MB 실칩, 0.12.89 = M6 이전) — 무음 5분, `none (near)`
+
+사용자 보고: `--occupancy-only`에서 `parsed 5407 cells in 29.3s (12 threads,
+source released, rss 13G)` 뒤 `occupancy cell=4um (16000 dbu) …`까지 약 5분간
+로그가 없었고, 평소 색인 50초짜리 파일의 요약이 5분 가까이 걸렸다. floe2에서
+`thin:keep`, depth */11의 광역뷰(fit)에 `summary: none (near)`.
+
+- **무음**: 마킹은 레이어 순서로 돌고 끝에 한 줄만 찍었다. 조치(0.12.136 /
+  RENDERD 0.12.91): 10 s 하트비트(`L/D marking: u/U units work xG (Ts)`)와
+  레이어 완료 줄(SPEC-INDEXER §6.5). `Opts.progress` 콜백, gate
+  `progress_lines_report_the_layers_without_a_summary`.
+- **5분**: 원인 후보는 (1) `none:work` 레이어 — 작업 상한 2^31 charge를 다 쓰고
+  포기하므로 그런 레이어 하나가 charge당 56 ns(실측 8-a 가설)면 2분을 태운다,
+  (2) 레이어 수 × 레이어당 작업(추출본은 레이어 2개에 7.3억 charge). 판정에는
+  `floe-index occupancy <cache>`의 `status=`·`work=` 줄과 새 진행 로그가 필요하다.
+  `--occupancy-max-work N`으로 상한을 낮추면 포기가 빨라지고 올리면 그 레이어가
+  요약을 얻는다. M6(공유 atomic 평면)에서의 시간은 재측정.
+- **`none (near)`**: 요약은 level 0 셀(4 µm)이 화면 1 px 이하일 때만 쓴다(§3;
+  더 굵은 셀을 픽셀 중심 투영으로 그리면 채움 안에 격자 구멍이 생긴다 — 2차
+  리뷰 P2). 즉 뷰 폭 ≥ 4 µm × 창 픽셀 폭(1,400 px 창에서 5.6 mm, 4K에서 15 mm)
+  이어야 하므로, 작은 칩의 fit 뷰나 큰 창에서는 depth와 무관하게 `near`가 된다.
+  당장은 `floe2 index <src> --occupancy-only --occupancy-um 1`(또는 2)로 셀을
+  줄이면 된다(파일·마킹 4~16배). 후속 결정 후보: 색인 시 base cell을 칩 크기로
+  자동 선택(예: min(4 µm, 칩 폭/4096), 하한 0.25 µm) — M5의 "4 µm 고정"을 바꾸는
+  일이라 사용자 결정 대기.

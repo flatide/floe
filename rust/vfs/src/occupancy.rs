@@ -106,6 +106,11 @@ pub struct Opts {
     pub max_cells: u64,
     pub max_work: u64,
     pub max_bytes: u64,
+    /// progress lines (field 2026-09-16: a 150 MB chip's marking ran
+    /// five minutes without a line): a heartbeat every 10 s while a
+    /// layer is marked (units done, charges, seconds), one line per
+    /// layer that took at least half a second or has no summary
+    pub progress: Option<fn(&str)>,
 }
 
 impl Default for Opts {
@@ -116,9 +121,13 @@ impl Default for Opts {
             max_cells: DEFAULT_MAX_CELLS,
             max_work: DEFAULT_MAX_WORK,
             max_bytes: DEFAULT_MAX_BYTES,
+            progress: None,
         }
     }
 }
+
+/// seconds between the heartbeat lines of a layer's marking
+pub const PROGRESS_EVERY_S: u64 = 10;
 
 /// one pyramid level: rows padded to whole bytes
 #[derive(Clone, Debug, PartialEq)]
@@ -1059,6 +1068,7 @@ fn build_layer(
     h: u32,
     max_work: u64,
     jobs: usize,
+    progress: Option<fn(&str)>,
 ) -> (Layer, u64) {
     let layer_with = |status: u8, work: u64, planes: Vec<Plane>| Layer { layer: key.0, dt: key.1, status, work, planes };
     if !has[doc.top] {
@@ -1069,7 +1079,43 @@ fn build_layer(
     let threads = jobs.max(1).min(units.len()).max(1);
     let shared = std::sync::atomic::AtomicU64::new(0);
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let done = std::sync::atomic::AtomicBool::new(false);
     let markers: Vec<Marker> = std::thread::scope(|s| {
+        if let Some(log) = progress {
+            // the heartbeat: units taken so far of the layer's units,
+            // the charges flushed to the shared budget (several
+            // threads; one thread keeps its count local), seconds
+            let (units, next, shared, done) = (&units, &next, &shared, &done);
+            s.spawn(move || {
+                use std::sync::atomic::Ordering::Relaxed;
+                let t0 = std::time::Instant::now();
+                let mut last = 0u64;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    if done.load(Relaxed) {
+                        break;
+                    }
+                    let elapsed = t0.elapsed().as_secs();
+                    if elapsed >= last + PROGRESS_EVERY_S {
+                        last = elapsed;
+                        let work = if threads > 1 {
+                            format!(" work {:.2}G", shared.load(Relaxed) as f64 / 1e9)
+                        } else {
+                            String::new()
+                        };
+                        log(&format!(
+                            "{}/{} marking: {}/{} units{} ({}s)",
+                            key.0,
+                            key.1,
+                            next.load(Relaxed).min(units.len()),
+                            units.len(),
+                            work,
+                            elapsed
+                        ));
+                    }
+                }
+            });
+        }
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 let (units, next, shared, planes) = (&units, &next, &shared, &planes);
@@ -1109,7 +1155,9 @@ fn build_layer(
                     .expect("occupancy worker")
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("occupancy worker")).collect()
+        let markers: Vec<Marker> = handles.into_iter().map(|h| h.join().expect("occupancy worker")).collect();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        markers
     });
     let mut iter = markers.into_iter();
     let mut m = iter.next().expect("one marker");
@@ -1207,10 +1255,29 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
             layers.push(Layer { layer: key.0, dt: key.1, status: STATUS_NONE_SIZE, work: 0, planes: Vec::new() });
             continue;
         }
-        let (layer, sk) = build_layer(doc, key, &has, (bbox.0, bbox.1), cell_dbu, w, h, opts.max_work, opts.jobs);
+        let t0 = std::time::Instant::now();
+        let (layer, sk) = build_layer(doc, key, &has, (bbox.0, bbox.1), cell_dbu, w, h, opts.max_work, opts.jobs, opts.progress);
         skipped += sk;
         if layer.status == STATUS_OK {
             slot += layer.planes.len();
+        }
+        if let Some(log) = opts.progress {
+            let secs = t0.elapsed().as_secs_f64();
+            if layer.status == STATUS_OK && secs >= 0.5 {
+                let cells: u64 = layer.planes.iter().map(|p| p.levels.first().map_or(0, |l| l.count())).sum();
+                let depths: Vec<String> = layer.planes.iter().map(|p| p.depth.to_string()).collect();
+                log(&format!(
+                    "{}/{} ok planes={} cells={} work={} ({:.1}s)",
+                    key.0,
+                    key.1,
+                    depths.join(","),
+                    cells,
+                    layer.work,
+                    secs
+                ));
+            } else if layer.status != STATUS_OK && layer.status != STATUS_EMPTY {
+                log(&format!("{}/{} {} work={} ({:.1}s)", key.0, key.1, status_text(layer.status), layer.work, secs));
+            }
         }
         layers.push(layer);
     }
@@ -2177,6 +2244,24 @@ mod tests {
             assert_eq!(f.layers.len(), 2);
             assert_eq!(f.layers[0].status, occ.layers[0].status);
         }
+    }
+
+    #[test]
+    fn progress_lines_report_the_layers_without_a_summary() {
+        static LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        fn collect(m: &str) {
+            LINES.lock().unwrap().push(m.to_string());
+        }
+        let mut top = cell("T");
+        top.rects.push(rect(1, 0, 0, 1000, 1000, Rep::One));
+        top.rects.push(RectRec { layer: 2, dt: 0, x: 0, y: 0, w: 50, h: 50, rep: Rep::One });
+        let d = doc_with(vec![top], 0, vec![(1, 0), (2, 0)]);
+        let occ = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: 100, progress: Some(collect), ..Opts::default() }).unwrap();
+        assert_eq!(occ.layers[0].status, STATUS_NONE_WORK);
+        let lines = LINES.lock().unwrap().clone();
+        assert!(lines.iter().any(|l| l.starts_with("1/0 none:work work=")), "{:?}", lines);
+        // a quick ok layer is not worth a line
+        assert!(!lines.iter().any(|l| l.starts_with("2/0")), "{:?}", lines);
     }
 
     #[test]

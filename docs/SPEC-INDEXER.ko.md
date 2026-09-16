@@ -328,7 +328,12 @@ floe-index occupancy <outdir> [--layer L/D] [--level N] [--depth N] [--dump]  # 
   가지치기하고, 존재하지 않는 레이어는 순회 없이 `empty`. 배치 반복의 멤버는
   열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음, 2차 리뷰 P1-1). 상위 레벨은
   OR 풀링, 격자가 64 × 64 이하가 될 때까지. 로그 `[vfs] occupancy cell= … ok=K
-  empty=E jobs=N SIZE (Ts)`.
+  empty=E jobs=N SIZE (Ts)`. 진행(2026-09-16, 현장: 150 MB 실칩의 마킹 5분이
+  무음): 레이어 마킹 중 10 s마다 `[vfs] occupancy L/D marking: u/U units work
+  xG (Ts)`(unit = 스레드가 맡는 조각, work = 공유 예산에 flush된 charge), 끝나면
+  0.5 s 이상 걸린 레이어와 요약 없는 레이어마다 `L/D ok planes=… cells=… work=…
+  (Ts)` / `L/D none:… work=… (Ts)`. 요약 없는 레이어는 끝에 한 번 더 모아
+  `layer L/D none:… (work …)`로 나온다.
 - 상한(레이어 단위, 근사 저장 없음): level 0 셀 수 > `--occupancy-max-cells`
   (기본 2^30)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남김);
   마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 2^31)면 그
