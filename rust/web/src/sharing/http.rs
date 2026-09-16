@@ -1,4 +1,4 @@
-//! Grant management only. Guest routes are an explicit allowlist and do not
+//! Guest routes are an explicit allowlist and do not
 //! dispatch owner handlers, native work, catalog/DRC reads or filesystem IO.
 use super::*;
 use crate::{
@@ -20,6 +20,7 @@ pub(crate) fn routes() -> Router<Gate> {
         .route("/api/v1/shares/{id}", delete(revoke))
         .route("/api/v1/guest/{id}/exchange", post(exchange))
         .route("/api/v1/guest/{id}/session", get(session).delete(logout))
+        .route("/api/v1/guest/{id}/events", get(super::stream::upgrade))
 }
 fn failure(error: Failure) -> StatusCode {
     match error {
@@ -43,7 +44,7 @@ fn current_scope(gate: &Gateway) -> Option<Scope> {
         layers: snapshot.state.layers,
     })
 }
-fn with_shares<T>(
+pub(super) fn with_shares<T>(
     gate: &Gateway,
     op: impl FnOnce(&mut Shares, Instant) -> Result<T, StatusCode>,
 ) -> Result<T, StatusCode> {
@@ -105,7 +106,7 @@ async fn issue(
     match result {
         Ok(invite) => Json(json!({"share_id":invite.id,"invite":invite.token.expose(),
             "mode":invite.mode.name(),"invite_seconds":INVITE_TTL.as_secs(),
-            "session_seconds":SESSION_TTL.as_secs(),"delivery":"not_connected"}))
+            "session_seconds":SESSION_TTL.as_secs(),"delivery":delivery(invite.mode)}))
         .into_response(),
         Err(e) => transport::error(e),
     }
@@ -145,7 +146,7 @@ struct Exchange {
     protocol: u32,
     bundle: String,
 }
-fn cookie_name(id: &str) -> String {
+pub(super) fn cookie_name(id: &str) -> String {
     format!("floe_guest_{id}")
 }
 fn set_cookie(response: &mut Response, id: &str, value: &str, seconds: u64) {
@@ -208,9 +209,15 @@ async fn session(State(gate): State<Gate>, headers: HeaderMap, Path(id): Path<St
         authenticate(shares, &headers, &id, now)
     }) {
         Ok(guest) => Json(json!({"share_id":guest.share_id,"mode":guest.mode.name(),
-            "read_only":true,"delivery":"not_connected"}))
+            "read_only":true,"delivery":delivery(guest.mode)}))
         .into_response(),
         Err(e) => transport::error(e),
+    }
+}
+fn delivery(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Follow => "follow_frames",
+        Mode::Explore => "not_connected",
     }
 }
 async fn logout(State(gate): State<Gate>, headers: HeaderMap, Path(id): Path<String>) -> Response {

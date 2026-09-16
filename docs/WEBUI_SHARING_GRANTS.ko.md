@@ -1,5 +1,9 @@
 # M2b-1 — 로컬 공유의 초대와 인증 경계
 
+후속 M2b-2는 [읽기 전용 follow 전송](WEBUI_SHARING_FOLLOW.ko.md)을 연결한다.
+이 문서 아래의 `not_connected`/전송 미구현은 M2b-1 시점 기록이며, 현재 follow는
+`follow_frames`, explore는 `not_connected`다. CLI/공유 UI·독립 탐색·DRC 공유는 여전히 남는다.
+
 2026-09-16, `feature/webui`. [설계/수용 기준](WEBUI_M2_SHARING.ko.md)의 첫 구현 단계.
 사용자가 승인한 **기본 off, 합성·loopback 우선** 범위다. 원격 공개·노트 본문·
 서버 export·게스트 파일 탐색/쓰기는 열지 않는다.

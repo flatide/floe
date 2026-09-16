@@ -26,11 +26,17 @@ use tokio::{
     time::timeout,
 };
 use tokio_tungstenite::{
-    connect_async,
     tungstenite::{client::IntoClientRequest, Message},
     MaybeTlsStream, WebSocketStream,
 };
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+fn image_client_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    // Match the product's bounded image envelope, not tungstenite's default
+    // 16MiB single-frame limit. Server inbound controls remain capped at8KiB.
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(floe_web::view::PACKET_BYTES))
+        .max_frame_size(Some(floe_web::view::PACKET_BYTES))
+}
 struct Harness {
     addr: SocketAddr,
     gate: Arc<Gateway>,
@@ -205,7 +211,9 @@ impl Harness {
                 .parse()
                 .unwrap(),
         );
-        let (mut ws, _) = connect_async(r).await.unwrap();
+        let (mut ws, _) = tokio_tungstenite::connect_async_with_config(
+            r, Some(image_client_config()), false,
+        ).await.unwrap();
         let hello = next_json(&mut ws).await;
         let state = next_json(&mut ws).await;
         assert_eq!(hello["type"], "hello");
@@ -230,6 +238,8 @@ impl Harness {
         let deadline = Instant::now() + Duration::from_secs(2);
         while self.gate.transport_usage().reserved_output_bytes != 0
             || self.gate.transport_usage().encoders != 0
+            || self.gate.transport_usage().guest_reserved_output_bytes != 0
+            || self.gate.transport_usage().guest_encoders != 0
         {
             assert!(
                 Instant::now() < deadline,
@@ -239,6 +249,7 @@ impl Harness {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(self.gate.transport_usage().sockets, 0);
+        assert_eq!(self.gate.transport_usage().guest_sockets, 0);
     }
 }
 async fn next(ws: &mut Socket) -> Message {

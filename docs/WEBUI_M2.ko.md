@@ -1,5 +1,9 @@
 # 웹 전환 M2 — DRC 읽기·공유 이관 기록
 
+M2b-2: [읽기 전용 follow 전송](WEBUI_SHARING_FOLLOW.ko.md)을 trusted opt-in 아래
+연결한다. PNG/raw·margin은 owner native 프레임을 재사용하며 guest 전송 credit은
+별도다. 독립 explore/DRC 공유·CLI/웹 공유 UI·실제 브라우저/원격 수용은 남는다.
+
 2026-09-16 M2b-1: 사용자 승인 뒤 [기본 off인 로컬 초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)를
 연결한다. 별도 guest credentials/일회 초대/범위·만료/개별 로그아웃만이며 화면 전송·
 독립 worker·DRC 공유·CLI/웹 공유 UI는 아직 없다. 실제 원격 공개도 하지 않는다.
@@ -1455,7 +1459,8 @@ M0/G2는 사용자 요청대로 보류이며 GTK launcher는 유지한다.
    §22~24까지 연결했다. §24의 실제 브라우저 승인 클릭 수용은 별도로 남아 있다.
    기존 notes·상세 측정/룰 매핑은
    각각 parity gate와 함께 확장한다.
-3. 공유는 설계/DRC에 묶인 읽기 capability, 발급/만료/폐기·follow/independent
-   state를 별도 구현·검증. 아직 shares=false, loopback-only다.
+3. 공유의 초대/인증과 고정 설계·레이어 follow 전송은 M2b-1/2에 연결했다.
+   독립 state/worker·DRC scope 읽기·공유 UI/URL·원격 수용은 남는다.
+   아직 shares=false, loopback-only다.
 4. 외부 HTTPS/WSS·TeeBox 접근/인증 정책은 상위 계획 §10 미결 사항이며 로컬 기반 구현과
    실제 외부 공개를 구별한다. 브라우저 주소만 외부 IP로 바꿔 노출하지 않는다.

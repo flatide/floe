@@ -113,14 +113,16 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    2026-09-16 사용자가 합성 시작 파일·다운로드를 승인한 뒤 재시도했으나 브라우저
    자체 URL 정책이 `file://` 시작 파일을 다시 차단했다. 우회하지 않았고 합성
    서버와 인증 시작 파일을 정리했다. 실제 다운로드 성공으로 기록하지 않는다.
-3. M2 공유 화면/원격은 `shares=false`, loopback-only인 **미구현**이다. M2b-1은
-   [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)만 기본 off로 연결한다. 허가 없는 원격
+3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
+   [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
+   [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격
    노출/공유 API 확장을 로컬 구현의 자연스러운 연장으로 추론하지 않는다.
    M2b-0의 [코드 기반 경계 감사](WEBUI_M2_SHARING.ko.md)는 권한표·follow/explore 분리·
    필수 수용 기준 SH-01~10을 추가했다. owner 인증6단위의 재통과는 guest 수용이 아니다.
    전체 서버 상한과 지금의 process-local 자원 관리도 구별한다. 사용자가 기본 off의
    opt-in 로컬 구현을 승인했다. 합성/loopback에서 follow와 explore를 구현하되 원격
-   공개·노트 본문·서버 export·게스트 파일 탐색/쓰기는 허용하지 않는다. 아직 미구현이다.
+   공개·노트 본문·서버 export·게스트 파일 탐색/쓰기는 허용하지 않는다.
+   독립 explore/DRC 공유·발급/guest UI·실제 브라우저/원격 수용은 아직 남는다.
 4. M0/M3 TeeBox Firefox/ETX는 현장 실행 불가로 보류. 사용자에게 같은 측정을
    반복 요청하거나 로컬 결과를 현장 PASS로 바꾸지 않는다.
 5. M5 world-tile은 성능 전제·실측에 따른 조건부 단계. 미구현을 완료로 세지 않는다.

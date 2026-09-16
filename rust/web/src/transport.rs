@@ -125,6 +125,9 @@ pub struct TransportUsage {
     pub reserved_output_bytes: usize,
     pub encoders: usize,
     pub sockets: usize,
+    pub guest_reserved_output_bytes: usize,
+    pub guest_encoders: usize,
+    pub guest_sockets: usize,
 }
 
 pub struct Gateway {
@@ -133,6 +136,7 @@ pub struct Gateway {
     cookie_name: String,
     auth: Mutex<Auth>,
     pub(crate) shares: Option<Mutex<crate::sharing::Shares>>,
+    pub(crate) share_transport: Option<crate::sharing::Transport>,
     sockets: Arc<Semaphore>,
     pub(crate) stopping: watch::Sender<bool>,
     pub(crate) view: Option<Arc<Attachment>>,
@@ -172,6 +176,7 @@ impl Gateway {
                 cookie_name: format!("floe_session_{}", addr.port()),
                 auth: Mutex::new(auth),
                 shares: None,
+                share_transport: None,
                 sockets: Arc::new(Semaphore::new(SOCKETS as usize)),
                 stopping,
                 view: None,
@@ -384,6 +389,16 @@ impl Gateway {
                 - self.output_bytes.available_permits(),
             encoders: 2 - self.encoders.available_permits(),
             sockets: SOCKETS as usize - self.sockets.available_permits(),
+            guest_reserved_output_bytes: self.share_transport.as_ref().map_or(0, |t| {
+                crate::sharing::OUTPUT_BYTES - t.bytes.available_permits()
+            }),
+            guest_encoders: self
+                .share_transport
+                .as_ref()
+                .map_or(0, |t| 1 - t.encoders.available_permits()),
+            guest_sockets: self.share_transport.as_ref().map_or(0, |t| {
+                crate::sharing::SOCKETS - t.sockets.available_permits()
+            }),
         }
     }
     /// Attach a locally authorized read-only pack before publishing the gateway.
@@ -413,14 +428,15 @@ impl Gateway {
         gate.drc = Some(drc);
         Ok(())
     }
-    /// Trusted local opt-in for grant management. Data streams and guest UI
-    /// are not connected yet; never expose the owner session as a share.
+    /// Trusted local opt-in for grants and read-only follow frames. Guest UI
+    /// and independent exploration remain separate; never share owner proofs.
     pub fn enable_local_sharing(gate: &mut Gate) -> Result<(), String> {
         let g = Arc::get_mut(gate).ok_or("gateway already published")?;
         if g.shares.is_some() || g.display_only || (g.service.is_none() && g.view.is_none()) {
             return Err("local sharing requires a view workspace and one opt-in".into());
         }
         g.shares = Some(Mutex::new(crate::sharing::Shares::default()));
+        g.share_transport = Some(crate::sharing::Transport::default());
         Ok(())
     }
     /// Memory-only developer tool. This grants no filesystem publication,
@@ -948,6 +964,23 @@ pub async fn serve(
     .await;
     if drained.is_err() {
         return Err(io::Error::other("WebSocket shutdown deadline exceeded"));
+    }
+    if let Some(transport) = &gate.share_transport {
+        let drained = timeout(Duration::from_secs(2), async {
+            let _sockets = Arc::clone(&transport.sockets)
+                .acquire_many_owned(crate::sharing::SOCKETS as u32)
+                .await;
+            let _encoder = Arc::clone(&transport.encoders).acquire_owned().await;
+            let _bytes = Arc::clone(&transport.bytes)
+                .acquire_many_owned(crate::sharing::OUTPUT_BYTES as u32)
+                .await;
+        })
+        .await;
+        if drained.is_err() {
+            return Err(io::Error::other(
+                "guest transport shutdown deadline exceeded",
+            ));
+        }
     }
     if let Some(view) = gate.active_view() {
         let stopped = timeout(Duration::from_secs(4), async {

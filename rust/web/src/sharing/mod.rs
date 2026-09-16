@@ -1,16 +1,40 @@
 //! Opt-in local guest identities. Never insert these credentials into owner
 //! Auth: every existing HTTP/WS handler must continue to reject guest proofs.
 mod http;
+mod stream;
 pub(crate) use http::routes;
 
 use crate::auth::{public_id, Auth, AuthError, Credentials, Secret, SessionId};
 use floe_worker_client::Layers;
 use serde::Deserialize;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::{watch, Semaphore};
 
 pub(crate) const INVITE_TTL: Duration = Duration::from_secs(120);
 pub(crate) const SESSION_TTL: Duration = Duration::from_secs(1800);
 const MAX_GRANTS: usize = 4;
+pub(crate) const OUTPUT_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const SOCKETS: usize = 4;
+
+/// Separate admission from owner output: a slow guest cannot consume its
+/// packet/encoder credits. This is transport accounting, not a process RSS cap.
+pub(crate) struct Transport {
+    pub bytes: Arc<Semaphore>,
+    pub encoders: Arc<Semaphore>,
+    pub sockets: Arc<Semaphore>,
+}
+impl Default for Transport {
+    fn default() -> Self {
+        Self {
+            bytes: Arc::new(Semaphore::new(OUTPUT_BYTES)),
+            encoders: Arc::new(Semaphore::new(1)),
+            sockets: Arc::new(Semaphore::new(SOCKETS)),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "String")]
@@ -38,8 +62,8 @@ impl Mode {
 }
 
 /// Server-captured binding, not a browser-selected path or unbounded catalog.
-/// In this first slice no geometry/DRC endpoint is granted. Follow/explore
-/// consumers must check this binding again before publishing any data.
+/// Frame consumers also check the actual native request, not just the latest
+/// controller snapshot: a stale frame may belong to an earlier layer scope.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Scope {
     pub view_id: String,
@@ -52,6 +76,13 @@ struct Entry {
     scope: Scope,
     mode: Mode,
     auth: Auth,
+    revoked: watch::Sender<bool>,
+    socket: Arc<Semaphore>,
+}
+impl Drop for Entry {
+    fn drop(&mut self) {
+        self.revoked.send_replace(true);
+    }
 }
 pub(crate) struct Invitation {
     pub id: String,
@@ -60,10 +91,17 @@ pub(crate) struct Invitation {
 }
 /// A distinct type from an owner SessionId; possession of public IDs is never
 /// a grant. Re-authenticate on every HTTP request / streaming publication.
+#[derive(Clone)]
 pub(crate) struct Guest {
     pub share_id: String,
     pub session: SessionId,
     pub mode: Mode,
+}
+struct Lease {
+    guest: Guest,
+    scope: Scope,
+    revoked: watch::Receiver<bool>,
+    socket: Arc<Semaphore>,
 }
 #[derive(Default)]
 pub(crate) struct Shares {
@@ -102,12 +140,15 @@ impl Shares {
         // independent entropy; invite/cookie/CSRF are never reused as IDs.
         let id = public_id()?;
         let (auth, token) = Auth::new(now, INVITE_TTL, SESSION_TTL)?;
+        let (revoked, _) = watch::channel(false);
         self.entries.push(Entry {
             id: id.clone(),
             owner,
             scope,
             mode,
             auth,
+            revoked,
+            socket: Arc::new(Semaphore::new(1)),
         });
         Ok(Invitation { id, token, mode })
     }
@@ -143,6 +184,30 @@ impl Shares {
         self.entries.retain(|e| &e.owner != owner || e.id != id);
         before != self.entries.len()
     }
+    fn lease(&self, guest: Guest, now: Instant) -> Result<Lease, Failure> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| {
+                e.id == guest.share_id && e.mode == guest.mode && e.auth.alive(&guest.session, now)
+            })
+            .ok_or(Failure::Unauthorized)?;
+        Ok(Lease {
+            guest,
+            scope: entry.scope.clone(),
+            revoked: entry.revoked.subscribe(),
+            socket: Arc::clone(&entry.socket),
+        })
+    }
+    fn valid(&self, lease: &Lease, now: Instant) -> bool {
+        !*lease.revoked.borrow()
+            && self.entries.iter().any(|e| {
+                e.id == lease.guest.share_id
+                    && e.scope == lease.scope
+                    && e.mode == lease.guest.mode
+                    && e.auth.alive(&lease.guest.session, now)
+            })
+    }
     fn logout(&mut self, guest: &Guest, now: Instant) {
         self.entries
             .retain(|e| e.id != guest.share_id || !e.auth.alive(&guest.session, now));
@@ -155,6 +220,34 @@ impl Shares {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_leases_are_revoked_on_owner_scope_logout_and_expiry() {
+        let now = Instant::now();
+        let (_, o) = owner(now);
+        for action in 0..5 {
+            let mut shares = Shares::default();
+            let a = shares
+                .issue(o.id.clone(), scope(), Mode::Follow, now)
+                .unwrap();
+            let c = shares.exchange(&a.id, &a.token.expose(), now).unwrap();
+            let guest = shares
+                .authenticate(&a.id, &c.cookie.expose(), &c.csrf.expose(), now)
+                .unwrap();
+            let lease = shares.lease(guest, now).unwrap();
+            assert!(shares.valid(&lease, now));
+            match action {
+                0 => {
+                    shares.revoke_owner(&o.id, &a.id);
+                }
+                1 => shares.logout(&lease.guest, now),
+                2 => shares.maintain(now, |_, _| false),
+                3 => shares.maintain(now + SESSION_TTL, |_, _| true),
+                _ => shares.stop(),
+            }
+            assert!(*lease.revoked.borrow());
+            assert!(!shares.valid(&lease, now));
+        }
+    }
     #[test]
     fn modes_are_strict_readonly_strings() {
         for mode in ["follow", "explore"] {
