@@ -58,25 +58,37 @@ v5 텍스트 인덱스의 문자열/좌표 풀. 빈 파일 허용(mmap 0 예외 
 레이어별 밀도 비트플레인. 뷰어 `floe/coverage.py`가 컷 활성+텍셀
 ≤COV_MAX_TEXEL_PX(160) 시 빈 픽셀에만 팔레트 틴트 합성.
 
-## design.ovo — 점유 피라미드 (선택, FLOEOVO1)
+## design.ovo — 점유 피라미드 (선택, FLOEOVO2)
 
 마스크 정책 광역뷰의 요약(docs/OCCUPANCY_PLAN.ko.md). `floe-index vfs
 --occupancy`(`floe2 index --occupancy`, opt-in)가 만들고 `--occupancy-only`가
 기존 캐시에 추가·교체한다. `design.ovo.tmp`에 쓰고 rename으로 게시하므로 이름
-아래에 부분 파일이 놓이지 않는다. 자체 버전(`FLOEOVO1`)의 sidecar이며
-CACHE_VERSION과 무관하다(없거나 무효하면 "요약 없음").
+아래에 부분 파일이 놓이지 않는다. 자체 버전(`FLOEOVO2`, 2026-09-16; 리더는 v1
+`FLOEOVO1`도 읽는다)의 sidecar이며 CACHE_VERSION과 무관하다(없거나 무효하면
+"요약 없음").
 
 ```
-header  magic "FLOEOVO1" | version u32 | unit f64 | src_size u64 | src_mtime u64
+header  magic "FLOEOVO2" | version u32 (2) | unit f64 | src_size u64 | src_mtime u64
         | cell_dbu i64 | bbox x0 y0 x1 y1 i64 | n_levels u32 | n_layers u32
         | top_len u16 | top utf8
 layer k layer u32 | dt u32 | status u8 (0 ok, 1 none:cells, 2 none:work,
-        3 none:size, 4 none:unsupported, 5 empty) | work u64 | n_levels × (w u32
-        | h u32 | off u64 | len u64)
+        3 none:size, 4 none:unsupported, 5 empty) | work u64 | n_planes u8
+        (ok가 아니면 0) | n_planes × ( depth u8 | n_levels × (w u32 | h u32
+        | off u64 | len u64) )
 body    레벨 비트맵: row-major, 행은 바이트 패딩, 행의 i번째 셀 = byte i/8 의
         bit i%8. level L 셀 = cell_dbu × 2^L, 원점 = bbox x0/y0, grid =
         ceil(span / cell). 격자가 64 × 64 이하가 될 때까지 2배 레벨.
 ```
+
+**평면(plane)** = 배치 깊이 하나의 피라미드. depth 0은 top 셀 자신의 레코드,
+d는 top에서 배치 d단계 아래 셀의 레코드이며, 도형이 있는 깊이에만 평면이 있다
+(오름차순). 깊이 15 이상은 평면 15에 접힌다(`DEPTH_CAP`; 요청 depth ≥ 15는
+무제한과 같다). 요청 depth N은 depth ≤ N인 평면들의 OR을 그리고, 무제한은 전부,
+장래의 depth 구간 [s, e]는 s..e의 OR이다 — 페이지 경로가 그 depth에서 그리는 도형
+집합과 정확히 같다. **v1**(`FLOEOVO1`, version 1; 레이어 항목에 n_planes가 없고
+n_levels 항목이 바로 이어짐)은 전 깊이를 평탄화한 평면 하나(`depth=all`)로 읽히며
+무제한(또는 레이어별 full) depth에서만 쓰인다. 리더는 평면 depth의 오름차순·상한,
+ok ↔ n_planes ≥ 1을 추가로 검사한다.
 
 비트 = "셀의 열린 상자가 도형 내부와 양의 면적으로 만남"(KLayout `Region & box`
 판정). 도형 교차로만 만들며 bbox 대체가 없다(리뷰 2026-09-11 P1-1). hull이

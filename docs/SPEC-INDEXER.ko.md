@@ -303,7 +303,7 @@ explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>
 ```
 floe-index vfs <src> [outdir] --occupancy [--occupancy-um F]      # 색인과 함께
 floe-index vfs <src> [outdir] --occupancy-only [--occupancy-um F] # 기존 캐시에 추가·교체
-floe-index occupancy <outdir> [--layer L/D] [--level N] [--dump]  # 검사
+floe-index occupancy <outdir> [--layer L/D] [--level N] [--depth N] [--dump]  # 검사(--depth: 그 depth 이하 평면의 OR)
 ```
 
 - 생성: 소스·레이어별로 top을 평탄화해 셀 비트맵을 만든다. rect는 셀 범위,
@@ -318,11 +318,13 @@ floe-index occupancy <outdir> [--layer L/D] [--level N] [--dump]  # 검사
 - 병렬(`--jobs`, 2026-09-14): 레이어는 순서대로, 한 레이어의 마킹을 `--jobs`
   스레드가 나눠 맡는다. top 셀의 레코드 목록(조각)과 배치의 멤버 범위가 unit이고,
   top이 단일 배치(die)뿐이면 최대 4단계 내려가 unit을 확보한다(4 × jobs개 목표).
-  스레드마다 자기 level 0 비트맵에 마킹하고 끝에 OR로 합치므로 결과 파일은
-  스레드 수와 무관하게 바이트 동일하다(unit은 레코드의 반복을 쪼개지 않고 단일
-  배치만 통과하므로 charge도 같다; `none:work`일 때의 work 값만 다를 수 있다).
-  작업 예산은 레이어 공유 카운터(스레드가 4,096 charge마다 flush, 초과 폭 ≤ jobs ×
-  4,096). 메모리 = jobs × level 0 한 장. 레이어마다 재귀 레이어 존재 집합으로
+  스레드는 레이어의 **공유 atomic level-0 평면**(배치 깊이마다 한 장, 2026-09-16
+  M6; unit과 walk가 깊이를 넘긴다)에 `fetch_or`로 마킹하므로 결과 파일은 스레드
+  수와 무관하게 바이트 동일하다(unit은 레코드의 반복을 쪼개지 않고 단일 배치만
+  통과하므로 charge도 같다; `none:work`일 때의 work 값만 다를 수 있다). 작업
+  예산은 레이어 공유 카운터(스레드가 4,096 charge마다 flush, 초과 폭 ≤ jobs ×
+  4,096). 메모리 = 레이어의 깊이 수 × level 0 한 장(도형이 있는 깊이만 파일에
+  남고 15 이상은 한 평면). 레이어마다 재귀 레이어 존재 집합으로
   가지치기하고, 존재하지 않는 레이어는 순회 없이 `empty`. 배치 반복의 멤버는
   열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음, 2차 리뷰 P1-1). 상위 레벨은
   OR 풀링, 격자가 64 × 64 이하가 될 때까지. 로그 `[vfs] occupancy cell= … ok=K

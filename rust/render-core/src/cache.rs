@@ -318,6 +318,8 @@ struct OccupancySlot {
     stat: Option<(u64, u64)>,
     file: Option<std::sync::Arc<floe_vfs::occupancy::OvoFile>>,
     error: Option<String>,
+    /// combined planes of `file` per (layer, level, depth key)
+    planes: crate::summary::PlaneCache,
 }
 
 impl Cache {
@@ -369,6 +371,7 @@ impl Cache {
             slot.stat = stat;
             slot.file = None;
             slot.error = None;
+            slot.planes.clear();
             match stat {
                 None => slot.error = Some("no design.ovo".to_string()),
                 Some(_) => match floe_vfs::occupancy::OvoFile::open(&path) {
@@ -418,7 +421,10 @@ impl Cache {
 
     /// The summary decision of one request (docs/OCCUPANCY_PLAN.ko.md
     /// §3, §6): every condition must hold or the request draws no
-    /// summary; per layer, only a file status of ok qualifies.
+    /// summary; per layer, only a file status of ok qualifies. The
+    /// planes are the file's planes at or above the request depth
+    /// (a version-2 file; 2026-09-16), so a limited depth has its own
+    /// summary.
     pub fn summary_selection(
         &self,
         request: &PlanRequest,
@@ -434,19 +440,6 @@ impl Cache {
         if request.exact || request.cut_dbu == 0 {
             return Ok(SummarySelection::none(summary::NONE_EXACT));
         }
-        // depth, per layer (field 2026-09-15: the GUI's depth 7 of 7
-        // travelled as the number 7 and lost the summary - a 150 x
-        // 103 mm deck view took 16.7 s drawing 15k thin pages; and the
-        // user changes the depth freely): a layer whose pages all sit
-        // within the requested depth is drawn whole there, so its
-        // summary stays exact; the request has no summary only when
-        // no visible layer qualifies
-        let visible = self.visible_indices(request.visible_layers.as_deref())?;
-        let eligible: Vec<u32> =
-            visible.iter().copied().filter(|&idx| self.depth_is_full_for(request.depth, idx)).collect();
-        if eligible.is_empty() && !visible.is_empty() {
-            return Ok(SummarySelection::none(summary::NONE_DEPTH));
-        }
         if disabled {
             return Ok(SummarySelection::none(summary::NONE_OFF));
         }
@@ -458,6 +451,30 @@ impl Cache {
             };
             return Ok(SummarySelection::none(reason));
         };
+        // depth, per layer. A version-2 file holds one plane per
+        // placement depth (user 2026-09-16: keep at any depth, not
+        // only full): the planes at or above the request depth are
+        // exactly the shapes the page path draws there, so every
+        // visible layer qualifies at any depth. A version-1 file (one
+        // flattening) or FLOE_RUST_OCCUPANCY_DEPTH=off keeps the
+        // 2026-09-15 rule (field: the GUI's depth 7 of 7 travelled as
+        // the number 7 and lost the summary - a 150 x 103 mm deck view
+        // took 16.7 s): a layer whose pages all sit within the request
+        // depth is drawn whole there, so its flattening stays exact;
+        // the request has no summary only when no visible layer
+        // qualifies
+        let visible = self.visible_indices(request.visible_layers.as_deref())?;
+        let full = request.depth == crate::request::FULL_DEPTH || request.depth >= self.max_depth();
+        let per_depth = file.depth_aware() && summary::depth_aware_enabled();
+        let eligible: Vec<u32> = if per_depth {
+            visible.clone()
+        } else {
+            visible.iter().copied().filter(|&idx| self.depth_is_full_for(request.depth, idx)).collect()
+        };
+        if eligible.is_empty() && !visible.is_empty() {
+            return Ok(SummarySelection::none(summary::NONE_DEPTH));
+        }
+        let depth = if full || !per_depth { None } else { Some(request.depth) };
         let Some(level) = summary::level_for(file.cell_dbu, request.px_per_dbu, file.n_levels, summary::max_cell_px()) else {
             let mut none = SummarySelection::none(summary::NONE_NEAR);
             none.base_cell_dbu = file.cell_dbu;
@@ -465,11 +482,19 @@ impl Cache {
             none.stamp = stamp;
             return Ok(none);
         };
-        let planes = summary::planes_for(
-            &file,
-            level,
-            eligible.iter().map(|&idx| (idx, idx as usize)),
-        );
+        let planes = {
+            let mut slot = match self.occupancy.lock() {
+                Ok(slot) => slot,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            summary::planes_for(
+                &file,
+                level,
+                eligible.iter().map(|&idx| (idx, idx as usize)),
+                depth,
+                Some(&mut slot.planes),
+            )
+        };
         let none = if planes.is_empty() { Some(summary::NONE_LAYERS) } else { None };
         Ok(SummarySelection {
             planes,

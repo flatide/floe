@@ -1,7 +1,9 @@
 //! Occupancy pyramid (design.ovo) - docs/OCCUPANCY_PLAN.ko.md M1.
 //!
-//! Per source layer, one bit per grid cell of the flattened top cell:
-//! 1 when the cell's OPEN box meets a shape's interior (a positive-area
+//! Per source layer and placement depth (0 = the top cell's own
+//! records; one bit plane per depth since 2026-09-16, so a limited
+//! depth draws its own summary), one bit per grid cell of the
+//! flattened top cell: 1 when the cell's OPEN box meets a shape's interior (a positive-area
 //! intersection - the KLayout `Region & box` reading), pooled by OR
 //! into 2x levels until the grid is at most TOP_GRID on both axes.
 //! Built from geometry, never from a bbox (review 2026-09-11 P1-1):
@@ -22,23 +24,39 @@
 //! recorded as `none:<reason>` and never as an approximation. A grid
 //! over the cell budget records every layer as `none:cells`.
 //!
-//! File (little-endian):
-//!   magic "FLOEOVO1", version u32, unit f64, src_size u64,
+//! File (little-endian), version 2:
+//!   magic "FLOEOVO2", version u32, unit f64, src_size u64,
 //!   src_mtime u64, cell_dbu i64, bbox x0 y0 x1 y1 i64, n_levels u32,
 //!   n_layers u32, top_len u16, top utf8, then per layer: layer u32,
-//!   dt u32, status u8, work u64, per level: w u32, h u32, off u64,
-//!   len u64 (absolute offsets; rows padded to whole bytes, bit i of
-//!   a row at byte i/8 bit i%8). The identity (src_size, src_mtime,
-//!   top, layer table) must match the cache's design.ovm; a file that
-//!   fails any check reads as "no summary".
+//!   dt u32, status u8, work u64, n_planes u8, per plane: depth u8
+//!   (placement depth of the shapes it holds, 0 = the top cell's own
+//!   records; DEPTH_CAP holds that depth and every deeper one), per
+//!   level: w u32, h u32, off u64, len u64 (absolute offsets; rows
+//!   padded to whole bytes, bit i of a row at byte i/8 bit i%8).
+//!   Planes are ascending by depth and only depths holding a shape
+//!   have one. A request at depth N draws the OR of the planes with
+//!   depth <= N; the unlimited depth draws them all. Version 1 files
+//!   ("FLOEOVO1": one plane per layer, every depth flattened) read as
+//!   a single plane of depth DEPTH_ALL, drawn by the unlimited depth
+//!   only. The identity (src_size, src_mtime, top, layer table) must
+//!   match the cache's design.ovm; a file that fails any check reads
+//!   as "no summary".
 
 use floe_oasis::doc::{Doc, PathRec, PolyRec, RectRec, Rep};
 use floe_ovm::Ovm;
 use floe_tiler::hier::cell_bboxes;
 use floe_tiler::{is_axis, path_outline_any, Xf};
 
-pub const MAGIC: &[u8; 8] = b"FLOEOVO1";
-pub const VERSION: u32 = 1;
+pub const MAGIC: &[u8; 8] = b"FLOEOVO2";
+pub const VERSION: u32 = 2;
+/// version 1 (until 2026-09-16): one flattened plane per layer
+pub const MAGIC_V1: &[u8; 8] = b"FLOEOVO1";
+/// planes are kept per placement depth up to this one, which holds
+/// that depth and every deeper shape (a request depth at or above it
+/// draws everything, like the unlimited depth)
+pub const DEPTH_CAP: u8 = 15;
+/// the depth of a version-1 plane: every depth flattened together
+pub const DEPTH_ALL: u8 = 255;
 /// base cell in microns unless --occupancy-um says otherwise
 pub const DEFAULT_BASE_UM: f64 = 4.0;
 /// level-0 cells per layer before the whole file is `none:cells`
@@ -127,6 +145,14 @@ impl Level {
         self.bits.iter().map(|b| b.count_ones() as u64).sum()
     }
 
+    /// OR another level of the same grid into this one
+    pub fn or_with(&mut self, other: &Level) {
+        debug_assert_eq!((self.w, self.h), (other.w, other.h));
+        for (a, b) in self.bits.iter_mut().zip(other.bits.iter()) {
+            *a |= *b;
+        }
+    }
+
     /// OR-pool 2x2 into the next level
     pub fn pool(&self) -> Level {
         let w2 = (self.w + 1) / 2;
@@ -162,6 +188,16 @@ impl Level {
     }
 }
 
+/// one placement depth's pyramid of a layer
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plane {
+    /// placement depth of the shapes (0 = the top cell's own records,
+    /// DEPTH_CAP = that depth and every deeper one, DEPTH_ALL = a
+    /// version-1 file's flattening of every depth)
+    pub depth: u8,
+    pub levels: Vec<Level>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Layer {
     pub layer: u32,
@@ -169,8 +205,43 @@ pub struct Layer {
     pub status: u8,
     /// marks charged (cells set + members + edge rows)
     pub work: u64,
+    /// one per placement depth holding a shape, ascending by depth;
     /// empty unless status == STATUS_OK
-    pub levels: Vec<Level>,
+    pub planes: Vec<Plane>,
+}
+
+impl Layer {
+    /// the flattening of every plane at one level (the version-1 view)
+    pub fn level(&self, lv: usize) -> Option<Level> {
+        self.level_at_depth(lv, None)
+    }
+
+    /// the OR of the planes a request depth draws (None = unlimited)
+    /// at one level; None when no plane has the level
+    pub fn level_at_depth(&self, lv: usize, depth: Option<u32>) -> Option<Level> {
+        let mut out: Option<Level> = None;
+        for plane in &self.planes {
+            if !plane_drawn_at(plane.depth, depth) {
+                continue;
+            }
+            let Some(level) = plane.levels.get(lv) else { continue };
+            match &mut out {
+                None => out = Some(level.clone()),
+                Some(acc) => acc.or_with(level),
+            }
+        }
+        out
+    }
+}
+
+/// whether a plane of `plane_depth` is drawn by a request depth (None
+/// = unlimited): a version-1 plane only by the unlimited depth, the
+/// DEPTH_CAP plane by any depth at or above the cap
+pub fn plane_drawn_at(plane_depth: u8, depth: Option<u32>) -> bool {
+    match depth {
+        None => true,
+        Some(d) => plane_depth != DEPTH_ALL && plane_depth as u32 <= d,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -228,50 +299,62 @@ fn ceil_div(a: i128, b: i128) -> i128 {
 
 // ------------------------------------------------------------ builder
 
-struct Bits {
+/// a level-0 bit plane shared by the marking threads: every thread
+/// ORs its cells in with atomic word updates, so the result does not
+/// depend on how the units are cut, and there is one plane per
+/// placement depth instead of one per thread (2026-09-16; before, each
+/// thread marked its own plane and they were OR-merged at the end)
+struct SharedBits {
     w: u32,
     h: u32,
     stride: usize,
-    words: Vec<u64>,
+    words: Vec<std::sync::atomic::AtomicU64>,
 }
 
-impl Bits {
-    fn new(w: u32, h: u32) -> Bits {
+impl SharedBits {
+    fn new(w: u32, h: u32) -> SharedBits {
         let stride = (w as usize + 63) / 64;
-        Bits {
+        SharedBits {
             w,
             h,
             stride,
-            words: vec![0u64; stride * h as usize],
+            words: (0..stride * h as usize).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
         }
     }
 
     /// set cells i0..=i1 of row j (callers clamp to the grid)
-    fn set_span(&mut self, j: u32, i0: u32, i1: u32) {
+    fn set_span(&self, j: u32, i0: u32, i1: u32) {
+        use std::sync::atomic::Ordering::Relaxed;
         debug_assert!(i1 < self.w && j < self.h && i0 <= i1);
         let base = j as usize * self.stride;
         let (w0, w1) = ((i0 / 64) as usize, (i1 / 64) as usize);
         let lo_mask = u64::MAX << (i0 % 64);
         let hi_mask = u64::MAX >> (63 - i1 % 64);
         if w0 == w1 {
-            self.words[base + w0] |= lo_mask & hi_mask;
+            self.words[base + w0].fetch_or(lo_mask & hi_mask, Relaxed);
         } else {
-            self.words[base + w0] |= lo_mask;
+            self.words[base + w0].fetch_or(lo_mask, Relaxed);
             for k in w0 + 1..w1 {
-                self.words[base + k] = u64::MAX;
+                self.words[base + k].store(u64::MAX, Relaxed);
             }
-            self.words[base + w1] |= hi_mask;
+            self.words[base + w1].fetch_or(hi_mask, Relaxed);
         }
     }
 
+    fn any(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.words.iter().any(|w| w.load(Relaxed) != 0)
+    }
+
     fn to_level(&self) -> Level {
+        use std::sync::atomic::Ordering::Relaxed;
         let rb = Level::row_bytes(self.w);
         let mut bits = vec![0u8; rb * self.h as usize];
         for j in 0..self.h as usize {
             let row = &self.words[j * self.stride..(j + 1) * self.stride];
             let out = &mut bits[j * rb..(j + 1) * rb];
             for (k, word) in row.iter().enumerate() {
-                let le = word.to_le_bytes();
+                let le = word.load(Relaxed).to_le_bytes();
                 let start = k * 8;
                 let end = (start + 8).min(rb);
                 if start < rb {
@@ -280,6 +363,26 @@ impl Bits {
             }
         }
         Level { w: self.w, h: self.h, bits }
+    }
+}
+
+/// a layer's level-0 planes under construction: one per placement
+/// depth 0..=min(max depth, DEPTH_CAP) the layer reaches
+struct Planes {
+    by_depth: Vec<SharedBits>,
+}
+
+impl Planes {
+    fn new(w: u32, h: u32, max_depth: u32) -> Planes {
+        let n = (max_depth.min(DEPTH_CAP as u32) + 1) as usize;
+        Planes { by_depth: (0..n).map(|_| SharedBits::new(w, h)).collect() }
+    }
+
+    /// the plane of a placement depth (the cap and anything deeper,
+    /// or a depth past the precomputed maximum, share the last one)
+    fn plane(&self, depth: u32) -> &SharedBits {
+        let k = (depth.min(DEPTH_CAP as u32) as usize).min(self.by_depth.len() - 1);
+        &self.by_depth[k]
     }
 }
 
@@ -322,6 +425,35 @@ fn layer_presence(doc: &Doc, key: (u32, u32)) -> Vec<bool> {
     state.iter().map(|&s| s == 2).collect()
 }
 
+/// the deepest placement level at which the layer has a record of
+/// its own (0 = the top cell's), which is how many planes the marking
+/// keeps; a cycle never extends a path
+fn layer_max_depth(doc: &Doc, key: (u32, u32), has: &[bool]) -> u32 {
+    fn reach(doc: &Doc, ci: usize, key: (u32, u32), has: &[bool], memo: &mut Vec<Option<Option<u32>>>) -> Option<u32> {
+        if let Some(done) = memo[ci] {
+            return done;
+        }
+        memo[ci] = Some(None); // in progress: a cycle back here adds nothing
+        let cell = &doc.cells[ci];
+        let direct = cell.rects.iter().any(|r| (r.layer, r.dt) == key)
+            || cell.polys.iter().any(|p| (p.layer, p.dt) == key)
+            || cell.paths.iter().any(|p| (p.layer, p.dt) == key);
+        let mut best: Option<u32> = if direct { Some(0) } else { None };
+        for pl in &cell.places {
+            if !has[pl.cell] {
+                continue;
+            }
+            if let Some(d) = reach(doc, pl.cell, key, has, memo) {
+                best = Some(best.map_or(d + 1, |b| b.max(d + 1)));
+            }
+        }
+        memo[ci] = Some(best);
+        best
+    }
+    let mut memo = vec![None; doc.cells.len()];
+    reach(doc, doc.top, key, has, &mut memo).unwrap_or(0)
+}
+
 struct Marker<'a> {
     doc: &'a Doc,
     key: (u32, u32),
@@ -329,7 +461,14 @@ struct Marker<'a> {
     ox: i64,
     oy: i64,
     c: i64,
-    bits: Bits,
+    w: u32,
+    h: u32,
+    /// the layer's level-0 planes, one per placement depth
+    planes: &'a Planes,
+    /// placement depth of the shapes being marked (a unit or the walk
+    /// sets it; a cell's own records are at its depth, its placements'
+    /// one deeper)
+    depth: u32,
     work: u64,
     max_work: u64,
     over: bool,
@@ -375,6 +514,7 @@ impl<'a> Marker<'a> {
         let cell = &self.doc.cells[u.ci];
         match &u.kind {
             UnitKind::Shapes { rects, polys, paths } => {
+                self.depth = u.depth;
                 for r in &cell.rects[rects.0..rects.1] {
                     if (r.layer, r.dt) == self.key && !self.mark_rect_rec(r, &u.xf) {
                         return false;
@@ -403,7 +543,7 @@ impl<'a> Marker<'a> {
                     }
                     let (dx, dy) = rep_member(&pl.rep, k);
                     let base = u.xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
-                    if !self.walk(pl.cell, &base) {
+                    if !self.walk(pl.cell, &base, u.depth + 1) {
                         return false;
                     }
                 }
@@ -430,17 +570,17 @@ impl<'a> Marker<'a> {
         if !self.charge((i1 - i0) as u64 + 1) {
             return false;
         }
-        self.bits.set_span(j, i0, i1);
+        self.planes.plane(self.depth).set_span(j, i0, i1);
         true
     }
 
     fn mark_world_rect(&mut self, x0: i128, y0: i128, x1: i128, y1: i128) -> bool {
         let (x0, x1) = (x0.min(x1), x0.max(x1));
         let (y0, y1) = (y0.min(y1), y0.max(y1));
-        let Some((i0, i1)) = self.range(x0, x1, self.ox, self.bits.w) else {
+        let Some((i0, i1)) = self.range(x0, x1, self.ox, self.w) else {
             return true;
         };
-        let Some((j0, j1)) = self.range(y0, y1, self.oy, self.bits.h) else {
+        let Some((j0, j1)) = self.range(y0, y1, self.oy, self.h) else {
             return true;
         };
         for j in j0..=j1 {
@@ -559,7 +699,7 @@ impl<'a> Marker<'a> {
         }
         let c = self.c as i128;
         let (ox, oy) = (self.ox as i128, self.oy as i128);
-        let (w, h) = (self.bits.w as i128, self.bits.h as i128);
+        let (w, h) = (self.w as i128, self.h as i128);
         let ymin = pts.iter().map(|p| p.1).min().unwrap();
         let ymax = pts.iter().map(|p| p.1).max().unwrap();
         // (1) edge cells: every open cell an edge passes through
@@ -577,7 +717,7 @@ impl<'a> Marker<'a> {
                 if j < 0 || j >= h {
                     continue;
                 }
-                if let Some((i0, i1)) = self.range(ax.min(bx), ax.max(bx), self.ox, self.bits.w) {
+                if let Some((i0, i1)) = self.range(ax.min(bx), ax.max(bx), self.ox, self.w) {
                     if !self.span(j as u32, i0, i1) {
                         return false;
                     }
@@ -592,12 +732,12 @@ impl<'a> Marker<'a> {
                 if i < 0 || i >= w {
                     continue;
                 }
-                if let Some((j0, j1)) = self.range(ay.min(by), ay.max(by), self.oy, self.bits.h) {
+                if let Some((j0, j1)) = self.range(ay.min(by), ay.max(by), self.oy, self.h) {
                     if !self.charge((j1 - j0) as u64 + 1) {
                         return false;
                     }
                     for j in j0..=j1 {
-                        self.bits.set_span(j, i as u32, i as u32);
+                        self.planes.plane(self.depth).set_span(j, i as u32, i as u32);
                     }
                 }
                 continue;
@@ -719,10 +859,12 @@ impl<'a> Marker<'a> {
         }
     }
 
-    fn walk(&mut self, ci: usize, xf: &Xf) -> bool {
+    fn walk(&mut self, ci: usize, xf: &Xf, depth: u32) -> bool {
         if self.over || !self.has[ci] {
             return !self.over;
         }
+        // the cell's own records are at `depth`, its placements' one deeper
+        self.depth = depth;
         let cell = &self.doc.cells[ci];
         for r in &cell.rects {
             if (r.layer, r.dt) == self.key && !self.mark_rect_rec(r, xf) {
@@ -746,7 +888,7 @@ impl<'a> Marker<'a> {
             match &pl.rep {
                 Rep::One => {
                     let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
-                    if !self.walk(pl.cell, &base) {
+                    if !self.walk(pl.cell, &base, depth + 1) {
                         return false;
                     }
                 }
@@ -764,7 +906,7 @@ impl<'a> Marker<'a> {
                             }
                             let (dx, dy) = (i * va.0 + j * vb.0, i * va.1 + j * vb.1);
                             let base = xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
-                            if !self.walk(pl.cell, &base) {
+                            if !self.walk(pl.cell, &base, depth + 1) {
                                 return false;
                             }
                         }
@@ -776,7 +918,7 @@ impl<'a> Marker<'a> {
                             return false;
                         }
                         let base = xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
-                        if !self.walk(pl.cell, &base) {
+                        if !self.walk(pl.cell, &base, depth + 1) {
                             return false;
                         }
                     }
@@ -796,6 +938,8 @@ impl<'a> Marker<'a> {
 struct Unit {
     ci: usize,
     xf: Xf,
+    /// placement depth of the cell (0 = the top)
+    depth: u32,
     kind: UnitKind,
 }
 
@@ -856,7 +1000,7 @@ fn collect_units(
             if rects.0 == rects.1 && polys.0 == polys.1 && paths.0 == paths.1 {
                 continue;
             }
-            out.push(Unit { ci, xf, kind: UnitKind::Shapes { rects, polys, paths } });
+            out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Shapes { rects, polys, paths } });
         }
     }
     for (pi, pl) in cell.places.iter().enumerate() {
@@ -876,7 +1020,7 @@ fn collect_units(
         let mut m0 = 0u64;
         while m0 < members {
             let m1 = (m0 + chunk).min(members);
-            out.push(Unit { ci, xf, kind: UnitKind::Place { pi, m0, m1 } });
+            out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Place { pi, m0, m1 } });
             m0 = m1;
         }
     }
@@ -900,10 +1044,10 @@ fn units_for(doc: &Doc, has: &[bool], key: (u32, u32), jobs: usize) -> Vec<Unit>
     units
 }
 
-/// build the pyramid of one layer (status + levels): the units are
-/// marked by `jobs` threads into their own level-0 bitmaps, OR-merged
-/// at the end (field 2026-09-14: one thread per layer kept two cores
-/// busy for 41 s on the real chip's two populated layers)
+/// build the planes of one layer (status + one pyramid per placement
+/// depth): the units are marked by `jobs` threads into the layer's
+/// shared level-0 planes (field 2026-09-14: one thread per layer kept
+/// two cores busy for 41 s on the real chip's two populated layers)
 #[allow(clippy::too_many_arguments)]
 fn build_layer(
     doc: &Doc,
@@ -916,18 +1060,19 @@ fn build_layer(
     max_work: u64,
     jobs: usize,
 ) -> (Layer, u64) {
-    let layer_with = |status: u8, work: u64, levels: Vec<Level>| Layer { layer: key.0, dt: key.1, status, work, levels };
+    let layer_with = |status: u8, work: u64, planes: Vec<Plane>| Layer { layer: key.0, dt: key.1, status, work, planes };
     if !has[doc.top] {
         return (layer_with(STATUS_EMPTY, 0, Vec::new()), 0);
     }
     let units = units_for(doc, has, key, jobs);
+    let planes = Planes::new(w, h, layer_max_depth(doc, key, has));
     let threads = jobs.max(1).min(units.len()).max(1);
     let shared = std::sync::atomic::AtomicU64::new(0);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let markers: Vec<Marker> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (units, next, shared) = (&units, &next, &shared);
+                let (units, next, shared, planes) = (&units, &next, &shared, &planes);
                 std::thread::Builder::new()
                     .stack_size(64 << 20)
                     .spawn_scoped(s, move || {
@@ -939,7 +1084,10 @@ fn build_layer(
                             ox: origin.0,
                             oy: origin.1,
                             c: cell_dbu,
-                            bits: Bits::new(w, h),
+                            w,
+                            h,
+                            planes,
+                            depth: 0,
                             work: 0,
                             max_work,
                             over: false,
@@ -969,9 +1117,6 @@ fn build_layer(
         m.work = m.work.saturating_add(other.work);
         m.paths_skipped += other.paths_skipped;
         m.over |= other.over;
-        for (a, b) in m.bits.words.iter_mut().zip(other.bits.words.iter()) {
-            *a |= *b;
-        }
     }
     if m.over || m.work > max_work {
         return (layer_with(STATUS_NONE_WORK, m.work, Vec::new()), m.paths_skipped);
@@ -982,21 +1127,30 @@ fn build_layer(
         // a summary with the shape missing
         return (layer_with(STATUS_NONE_UNSUPPORTED, m.work, Vec::new()), m.paths_skipped);
     }
-    if m.bits.words.iter().all(|&x| x == 0) {
+    let mut out = Vec::new();
+    for (depth, plane) in planes.by_depth.iter().enumerate() {
+        if !plane.any() {
+            // no shape at this depth (or none with positive area)
+            continue;
+        }
+        let mut levels = vec![plane.to_level()];
+        while levels.last().unwrap().w > TOP_GRID || levels.last().unwrap().h > TOP_GRID {
+            let next = levels.last().unwrap().pool();
+            levels.push(next);
+        }
+        out.push(Plane { depth: depth as u8, levels });
+    }
+    if out.is_empty() {
         // records without positive area (zero-width rects, degenerate
         // polygons): nothing to draw, no bitmap
         return (layer_with(STATUS_EMPTY, m.work, Vec::new()), 0);
     }
-    let mut levels = vec![m.bits.to_level()];
-    while levels.last().unwrap().w > TOP_GRID || levels.last().unwrap().h > TOP_GRID {
-        let next = levels.last().unwrap().pool();
-        levels.push(next);
-    }
-    (layer_with(STATUS_OK, m.work, levels), 0)
+    (layer_with(STATUS_OK, m.work, out), 0)
 }
 
-/// build every layer's pyramid; each layer's marking runs on `jobs`
-/// threads (memory: jobs x level 0 of one layer)
+/// build every layer's planes; each layer's marking runs on `jobs`
+/// threads into shared planes (memory: one level-0 plane per placement
+/// depth of the layer being marked)
 pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Occupancy, String> {
     if !(opts.base_um > 0.0) || !opts.base_um.is_finite() {
         return Err(format!("occupancy: base cell must be positive, got {}", opts.base_um));
@@ -1027,7 +1181,7 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
         occ.layers = doc
             .layer_order
             .iter()
-            .map(|&(l, d)| Layer { layer: l, dt: d, status: STATUS_NONE_CELLS, work: 0, levels: Vec::new() })
+            .map(|&(l, d)| Layer { layer: l, dt: d, status: STATUS_NONE_CELLS, work: 0, planes: Vec::new() })
             .collect();
         return Ok(occ);
     }
@@ -1038,25 +1192,25 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
     let per_layer = layer_bytes(w, h);
     let fit = if per_layer == 0 { doc.layer_order.len() } else { (opts.max_bytes / per_layer) as usize };
     // layers one after another, each marked by `jobs` threads; the
-    // byte limit counts the layers that hold a pyramid (empty and
-    // none:* layers take no room)
+    // byte limit counts the pyramids written (one per plane; empty
+    // and none:* layers take no room)
     let mut skipped = 0u64;
     let mut slot = 0usize;
     let mut layers = Vec::with_capacity(doc.layer_order.len());
     for &key in &doc.layer_order {
         let has = layer_presence(doc, key);
         if !has[doc.top] {
-            layers.push(Layer { layer: key.0, dt: key.1, status: STATUS_EMPTY, work: 0, levels: Vec::new() });
+            layers.push(Layer { layer: key.0, dt: key.1, status: STATUS_EMPTY, work: 0, planes: Vec::new() });
             continue;
         }
         if slot >= fit {
-            layers.push(Layer { layer: key.0, dt: key.1, status: STATUS_NONE_SIZE, work: 0, levels: Vec::new() });
+            layers.push(Layer { layer: key.0, dt: key.1, status: STATUS_NONE_SIZE, work: 0, planes: Vec::new() });
             continue;
         }
         let (layer, sk) = build_layer(doc, key, &has, (bbox.0, bbox.1), cell_dbu, w, h, opts.max_work, opts.jobs);
         skipped += sk;
         if layer.status == STATUS_OK {
-            slot += 1;
+            slot += layer.planes.len();
         }
         layers.push(layer);
     }
@@ -1068,7 +1222,12 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
 // ---------------------------------------------------------- serialize
 
 const HEADER_FIXED: usize = 8 + 4 + 8 + 8 + 8 + 8 + 32 + 4 + 4 + 2;
-const LAYER_FIXED: usize = 4 + 4 + 1 + 8;
+/// layer u32, dt u32, status u8, work u64, n_planes u8
+const LAYER_FIXED: usize = 4 + 4 + 1 + 8 + 1;
+/// a version-1 layer entry: no plane count
+const LAYER_FIXED_V1: usize = 4 + 4 + 1 + 8;
+/// depth u8
+const PLANE_FIXED: usize = 1;
 const LEVEL_ENTRY: usize = 4 + 4 + 8 + 8;
 
 fn put32(o: &mut Vec<u8>, v: u32) {
@@ -1078,12 +1237,24 @@ fn put64(o: &mut Vec<u8>, v: u64) {
     o.extend_from_slice(&v.to_le_bytes());
 }
 
+fn planes_written(layer: &Layer) -> &[Plane] {
+    if layer.status == STATUS_OK {
+        &layer.planes
+    } else {
+        &[]
+    }
+}
+
 pub fn write_ovo(occ: &Occupancy) -> Vec<u8> {
     let top = occ.top.as_bytes();
     let top_len = top.len().min(u16::MAX as usize);
     let nl = occ.layers.len();
     let n_levels = occ.n_levels as usize;
-    let table_len = nl * (LAYER_FIXED + n_levels * LEVEL_ENTRY);
+    let table_len: usize = occ
+        .layers
+        .iter()
+        .map(|l| LAYER_FIXED + planes_written(l).len() * (PLANE_FIXED + n_levels * LEVEL_ENTRY))
+        .sum();
     let body_start = HEADER_FIXED + top_len + table_len;
     let mut out = Vec::with_capacity(body_start);
     out.extend_from_slice(MAGIC);
@@ -1105,8 +1276,64 @@ pub fn write_ovo(occ: &Occupancy) -> Vec<u8> {
         put32(&mut out, layer.dt);
         out.push(layer.status);
         put64(&mut out, layer.work);
+        let planes = planes_written(layer);
+        out.push(planes.len() as u8);
+        for plane in planes {
+            out.push(plane.depth);
+            for lv in 0..n_levels {
+                match plane.levels.get(lv) {
+                    Some(level) => {
+                        put32(&mut out, level.w);
+                        put32(&mut out, level.h);
+                        put64(&mut out, (body_start + body.len()) as u64);
+                        put64(&mut out, level.bits.len() as u64);
+                        body.extend_from_slice(&level.bits);
+                    }
+                    None => {
+                        put32(&mut out, 0);
+                        put32(&mut out, 0);
+                        put64(&mut out, 0);
+                        put64(&mut out, 0);
+                    }
+                }
+            }
+        }
+    }
+    debug_assert_eq!(out.len(), body_start);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// a version-1 file of the flattened planes (tests: the reader keeps
+/// reading the files written before 2026-09-16)
+#[cfg(test)]
+pub fn write_ovo_v1(occ: &Occupancy) -> Vec<u8> {
+    let top = occ.top.as_bytes();
+    let nl = occ.layers.len();
+    let n_levels = occ.n_levels as usize;
+    let body_start = HEADER_FIXED + top.len() + nl * (LAYER_FIXED_V1 + n_levels * LEVEL_ENTRY);
+    let mut out = Vec::with_capacity(body_start);
+    out.extend_from_slice(MAGIC_V1);
+    put32(&mut out, 1);
+    out.extend_from_slice(&occ.unit.to_le_bytes());
+    put64(&mut out, occ.src_size);
+    put64(&mut out, occ.src_mtime);
+    out.extend_from_slice(&occ.cell_dbu.to_le_bytes());
+    for v in [occ.bbox.0, occ.bbox.1, occ.bbox.2, occ.bbox.3] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    put32(&mut out, occ.n_levels);
+    put32(&mut out, nl as u32);
+    out.extend_from_slice(&(top.len() as u16).to_le_bytes());
+    out.extend_from_slice(top);
+    let mut body: Vec<u8> = Vec::new();
+    for layer in &occ.layers {
+        put32(&mut out, layer.layer);
+        put32(&mut out, layer.dt);
+        out.push(layer.status);
+        put64(&mut out, layer.work);
         for lv in 0..n_levels {
-            match layer.levels.get(lv) {
+            match layer.level(lv) {
                 Some(level) if layer.status == STATUS_OK => {
                     put32(&mut out, level.w);
                     put32(&mut out, level.h);
@@ -1123,7 +1350,6 @@ pub fn write_ovo(occ: &Occupancy) -> Vec<u8> {
             }
         }
     }
-    debug_assert_eq!(out.len(), body_start);
     out.extend_from_slice(&body);
     out
 }
@@ -1139,18 +1365,28 @@ pub struct LevelEntry {
 }
 
 #[derive(Clone, Debug)]
+pub struct PlaneEntry {
+    /// placement depth (DEPTH_CAP = the cap and deeper, DEPTH_ALL = a
+    /// version-1 flattening)
+    pub depth: u8,
+    pub levels: Vec<LevelEntry>,
+}
+
+#[derive(Clone, Debug)]
 pub struct LayerEntry {
     pub layer: u32,
     pub dt: u32,
     pub status: u8,
     pub work: u64,
-    pub levels: Vec<LevelEntry>,
+    /// ascending by depth; empty unless status ok
+    pub planes: Vec<PlaneEntry>,
 }
 
 /// a validated design.ovo (structure only; `validate_against` checks
 /// the identity against the cache's design.ovm)
 pub struct OvoFile {
     data: floe_ovm::Backing,
+    pub version: u32,
     pub unit: f64,
     pub src_size: u64,
     pub src_mtime: u64,
@@ -1177,7 +1413,8 @@ impl std::fmt::Debug for OvoFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "OvoFile(top={:?} cell_dbu={} grid={}x{} levels={} layers={})",
+            "OvoFile(v{} top={:?} cell_dbu={} grid={}x{} levels={} layers={})",
+            self.version,
             self.top,
             self.cell_dbu,
             self.w,
@@ -1204,13 +1441,15 @@ impl OvoFile {
         if len < HEADER_FIXED {
             return Err(format!("truncated occupancy file ({} bytes)", len));
         }
-        if &b[..8] != MAGIC {
-            return Err("not an occupancy file (bad magic)".to_string());
-        }
         let version = g32(b, 8);
-        if version != VERSION {
-            return Err(format!("occupancy version {} (this build reads {})", version, VERSION));
-        }
+        let v1 = match (&b[..8], version) {
+            (m, 2) if m == MAGIC => false,
+            (m, 1) if m == MAGIC_V1 => true,
+            (m, v) if m == MAGIC || m == MAGIC_V1 => {
+                return Err(format!("occupancy version {} (this build reads 1 and {})", v, VERSION));
+            }
+            _ => return Err("not an occupancy file (bad magic)".to_string()),
+        };
         let unit = f64::from_le_bytes(b[12..20].try_into().unwrap());
         let src_size = g64(b, 20);
         let src_mtime = g64(b, 28);
@@ -1238,86 +1477,143 @@ impl OvoFile {
             .map_err(|_| "corrupt occupancy header (top name)".to_string())?
             .to_string();
         o += top_len;
-        let entry = LAYER_FIXED + n_levels as usize * LEVEL_ENTRY;
-        let table = (n_layers as usize)
-            .checked_mul(entry)
+        let level_block = n_levels as usize * LEVEL_ENTRY;
+        // the table's size is known up front for a version-1 file; a
+        // version-2 table is walked entry by entry (planes per layer)
+        let table_v1 = (n_layers as usize)
+            .checked_mul(LAYER_FIXED_V1 + level_block)
             .ok_or_else(|| "corrupt occupancy header (layer table)".to_string())?;
-        if len < o + table {
+        if v1 && len < o + table_v1 {
             return Err("truncated occupancy file (layer table)".to_string());
         }
-        // bitmaps start after the layer table and follow each other in
-        // table order without overlap (review 2026-09-11 (2nd) P2-4: an
-        // offset into the header read as a plausible bitmap)
-        let body_start = (o + table) as u64;
-        let mut prev_end = body_start;
         let mut layers = Vec::with_capacity(n_layers as usize);
-        let (mut w, mut h) = (0u32, 0u32);
+        // first pass: the table (bounds only), to know where the body
+        // starts; bitmaps must follow the table in table order without
+        // overlap (review 2026-09-11 (2nd) P2-4: an offset into the
+        // header read as a plausible bitmap)
+        let mut cursor = o;
+        let mut plane_counts = Vec::with_capacity(n_layers as usize);
         for k in 0..n_layers as usize {
+            let fixed = if v1 { LAYER_FIXED_V1 } else { LAYER_FIXED };
+            if len < cursor + fixed {
+                return Err("truncated occupancy file (layer table)".to_string());
+            }
+            let status = b[cursor + 8];
+            let n_planes = if v1 {
+                1
+            } else {
+                b[cursor + 17] as usize
+            };
+            if !v1 && (status == STATUS_OK) != (n_planes > 0) {
+                return Err(format!("corrupt occupancy layer {}: status {} with {} planes", k, status, n_planes));
+            }
+            cursor += fixed;
+            let per_plane = if v1 { level_block } else { PLANE_FIXED + level_block };
+            let planes_len = n_planes
+                .checked_mul(per_plane)
+                .ok_or_else(|| "corrupt occupancy header (layer table)".to_string())?;
+            if len < cursor + planes_len {
+                return Err("truncated occupancy file (layer table)".to_string());
+            }
+            cursor += planes_len;
+            plane_counts.push(n_planes);
+        }
+        let body_start = cursor as u64;
+        let mut prev_end = body_start;
+        let (mut w, mut h) = (0u32, 0u32);
+        for (k, &n_planes) in plane_counts.iter().enumerate() {
             let layer = g32(b, o);
             let dt = g32(b, o + 4);
             let status = b[o + 8];
             let work = g64(b, o + 9);
-            o += LAYER_FIXED;
-            let mut levels = Vec::with_capacity(n_levels as usize);
-            let (mut ew, mut eh) = (gw, gh);
-            for lv in 0..n_levels as usize {
-                let e = LevelEntry { w: g32(b, o), h: g32(b, o + 4), off: g64(b, o + 8), len: g64(b, o + 16) };
-                o += LEVEL_ENTRY;
-                if status == STATUS_OK {
-                    if e.w as i128 != ew || e.h as i128 != eh {
-                        return Err(format!(
-                            "corrupt occupancy layer {} level {}: grid {}x{}, expected {}x{}",
-                            k, lv, e.w, e.h, ew, eh
-                        ));
+            o += if v1 { LAYER_FIXED_V1 } else { LAYER_FIXED };
+            let mut planes = Vec::with_capacity(n_planes);
+            let mut last_depth: Option<u8> = None;
+            for p in 0..n_planes {
+                let depth = if v1 {
+                    DEPTH_ALL
+                } else {
+                    let d = b[o];
+                    o += PLANE_FIXED;
+                    d
+                };
+                if !v1 {
+                    if depth > DEPTH_CAP || last_depth.is_some_and(|last| depth <= last) {
+                        return Err(format!("corrupt occupancy layer {}: plane {} depth {}", k, p, depth));
                     }
-                    let need = (Level::row_bytes(e.w) as u64)
-                        .checked_mul(e.h as u64)
-                        .ok_or_else(|| "corrupt occupancy level (size overflow)".to_string())?;
-                    if e.len != need {
-                        return Err(format!(
-                            "corrupt occupancy layer {} level {}: {} bytes, expected {}",
-                            k, lv, e.len, need
-                        ));
-                    }
-                    let end = e
-                        .off
-                        .checked_add(e.len)
-                        .ok_or_else(|| "corrupt occupancy level (offset overflow)".to_string())?;
-                    if end > len as u64 {
-                        return Err(format!(
-                            "truncated occupancy file: layer {} level {} ends at {} of {} bytes",
-                            k, lv, end, len
-                        ));
-                    }
-                    if e.off < prev_end {
-                        return Err(format!(
-                            "corrupt occupancy layer {} level {}: bitmap offset {} {} {}",
-                            k,
-                            lv,
-                            e.off,
-                            if e.off < body_start { "inside the header/table ending at" } else { "overlaps the previous bitmap ending at" },
-                            prev_end
-                        ));
-                    }
-                    prev_end = end;
-                    if lv == 0 {
-                        w = e.w;
-                        h = e.h;
-                    }
-                } else if e.len != 0 || e.off != 0 {
-                    return Err(format!("corrupt occupancy layer {}: status {} with data", k, status));
+                    last_depth = Some(depth);
                 }
-                ew = (ew + 1) / 2;
-                eh = (eh + 1) / 2;
-                levels.push(e);
+                let mut levels = Vec::with_capacity(n_levels as usize);
+                let (mut ew, mut eh) = (gw, gh);
+                for lv in 0..n_levels as usize {
+                    let e = LevelEntry { w: g32(b, o), h: g32(b, o + 4), off: g64(b, o + 8), len: g64(b, o + 16) };
+                    o += LEVEL_ENTRY;
+                    if status == STATUS_OK {
+                        if e.w as i128 != ew || e.h as i128 != eh {
+                            return Err(format!(
+                                "corrupt occupancy layer {} plane {} level {}: grid {}x{}, expected {}x{}",
+                                k, p, lv, e.w, e.h, ew, eh
+                            ));
+                        }
+                        let need = (Level::row_bytes(e.w) as u64)
+                            .checked_mul(e.h as u64)
+                            .ok_or_else(|| "corrupt occupancy level (size overflow)".to_string())?;
+                        if e.len != need {
+                            return Err(format!(
+                                "corrupt occupancy layer {} plane {} level {}: {} bytes, expected {}",
+                                k, p, lv, e.len, need
+                            ));
+                        }
+                        let end = e
+                            .off
+                            .checked_add(e.len)
+                            .ok_or_else(|| "corrupt occupancy level (offset overflow)".to_string())?;
+                        if end > len as u64 {
+                            return Err(format!(
+                                "truncated occupancy file: layer {} plane {} level {} ends at {} of {} bytes",
+                                k, p, lv, end, len
+                            ));
+                        }
+                        if e.off < prev_end {
+                            return Err(format!(
+                                "corrupt occupancy layer {} plane {} level {}: bitmap offset {} {} {}",
+                                k,
+                                p,
+                                lv,
+                                e.off,
+                                if e.off < body_start { "inside the header/table ending at" } else { "overlaps the previous bitmap ending at" },
+                                prev_end
+                            ));
+                        }
+                        prev_end = end;
+                        if lv == 0 {
+                            w = e.w;
+                            h = e.h;
+                        }
+                    } else if e.len != 0 || e.off != 0 {
+                        return Err(format!("corrupt occupancy layer {}: status {} with data", k, status));
+                    }
+                    ew = (ew + 1) / 2;
+                    eh = (eh + 1) / 2;
+                    levels.push(e);
+                }
+                if status == STATUS_OK {
+                    planes.push(PlaneEntry { depth, levels });
+                }
             }
-            layers.push(LayerEntry { layer, dt, status, work, levels });
+            layers.push(LayerEntry { layer, dt, status, work, planes });
         }
         if w == 0 && h == 0 && gw <= u32::MAX as i128 && gh <= u32::MAX as i128 {
             w = gw as u32;
             h = gh as u32;
         }
-        Ok(OvoFile { data, unit, src_size, src_mtime, cell_dbu, bbox, w, h, n_levels, top, layers })
+        Ok(OvoFile { data, version, unit, src_size, src_mtime, cell_dbu, bbox, w, h, n_levels, top, layers })
+    }
+
+    /// whether the file holds one plane per placement depth (version
+    /// 2), so a limited request depth can draw its own summary
+    pub fn depth_aware(&self) -> bool {
+        self.version >= 2
     }
 
     /// the identity the cache's marker commits: same source bytes,
@@ -1352,15 +1648,51 @@ impl OvoFile {
         self.cell_dbu as f64 / self.unit
     }
 
-    /// (w, h, row-padded bits) of one level, None unless status ok
-    pub fn level(&self, k: usize, lv: usize) -> Option<(u32, u32, &[u8])> {
+    /// (w, h, row-padded bits) of one plane's level, None unless the
+    /// layer's status is ok
+    pub fn plane_level(&self, k: usize, p: usize, lv: usize) -> Option<(u32, u32, &[u8])> {
         let layer = self.layers.get(k)?;
         if layer.status != STATUS_OK {
             return None;
         }
-        let e = layer.levels.get(lv)?;
+        let e = layer.planes.get(p)?.levels.get(lv)?;
         let b: &[u8] = &self.data;
         Some((e.w, e.h, &b[e.off as usize..(e.off + e.len) as usize]))
+    }
+
+    /// (w, h, row-padded bits) of the OR of the planes a request depth
+    /// draws (None = unlimited) at one level: borrowed from the file
+    /// when one plane is drawn, owned when several, `(0, 0, empty)`
+    /// when none is (nothing of the layer at that depth); None unless
+    /// the layer's status is ok and the level exists
+    pub fn level_at_depth(&self, k: usize, lv: usize, depth: Option<u32>) -> Option<(u32, u32, std::borrow::Cow<'_, [u8]>)> {
+        let layer = self.layers.get(k)?;
+        if layer.status != STATUS_OK || !layer.planes.iter().any(|p| p.levels.len() > lv) {
+            return None;
+        }
+        let mut acc: Option<(u32, u32, std::borrow::Cow<[u8]>)> = None;
+        for (p, plane) in layer.planes.iter().enumerate() {
+            if !plane_drawn_at(plane.depth, depth) {
+                continue;
+            }
+            let Some((w, h, bits)) = self.plane_level(k, p, lv) else { continue };
+            match &mut acc {
+                None => acc = Some((w, h, std::borrow::Cow::Borrowed(bits))),
+                Some((_, _, cow)) => {
+                    let owned = cow.to_mut();
+                    for (a, b) in owned.iter_mut().zip(bits.iter()) {
+                        *a |= *b;
+                    }
+                }
+            }
+        }
+        Some(acc.unwrap_or((0, 0, std::borrow::Cow::Borrowed(&[]))))
+    }
+
+    /// (w, h, row-padded bits) of the flattening of every plane at one
+    /// level, None unless status ok
+    pub fn level(&self, k: usize, lv: usize) -> Option<(u32, u32, std::borrow::Cow<'_, [u8]>)> {
+        self.level_at_depth(k, lv, None)
     }
 
     pub fn get(&self, k: usize, lv: usize, i: u32, j: u32) -> bool {
@@ -1374,6 +1706,14 @@ impl OvoFile {
 
     pub fn count(&self, k: usize, lv: usize) -> u64 {
         match self.level(k, lv) {
+            Some((_, _, bits)) => bits.iter().map(|b| b.count_ones() as u64).sum(),
+            None => 0,
+        }
+    }
+
+    /// cells set in one plane's level
+    pub fn plane_count(&self, k: usize, p: usize, lv: usize) -> u64 {
+        match self.plane_level(k, p, lv) {
             Some((_, _, bits)) => bits.iter().map(|b| b.count_ones() as u64).sum(),
             None => 0,
         }
@@ -1469,6 +1809,7 @@ mod tests {
     }
 
     fn assert_poly_matches_oracle(pts: &[(i64, i64)], c: i64, w: u32, h: u32) {
+        let planes = Planes::new(w, h, 0);
         let mut m = Marker {
             doc: &doc_with(vec![cell("T")], 0, vec![(1, 0)]),
             key: (1, 0),
@@ -1476,7 +1817,10 @@ mod tests {
             ox: 0,
             oy: 0,
             c,
-            bits: Bits::new(w, h),
+            w,
+            h,
+            planes: &planes,
+            depth: 0,
             work: 0,
             max_work: u64::MAX,
             over: false,
@@ -1486,7 +1830,7 @@ mod tests {
         };
         let world: Vec<(i128, i128)> = pts.iter().map(|&(x, y)| (x as i128, y as i128)).collect();
         assert!(m.mark_world_poly(&world));
-        let level = m.bits.to_level();
+        let level = planes.by_depth[0].to_level();
         for j in 0..h {
             for i in 0..w {
                 assert_eq!(
@@ -1531,7 +1875,7 @@ mod tests {
         let d = doc_with(vec![Cell { name: "T".into(), rects: vec![diag], ..Default::default() }], 0, vec![(1, 0)]);
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         assert_eq!(occ.cell_dbu, 10);
-        let l0 = &occ.layers[0].levels[0];
+        let l0 = occ.layers[0].level(0).unwrap();
         // with the grid anchored at the bbox corner (0, -4) the members
         // touch 120 cells (the reviewer's 81 assumed cells centred on
         // the diagonal); the footprint would light 41 x 41 = 1,681
@@ -1549,7 +1893,7 @@ mod tests {
             vec![(1, 0)],
         );
         let oe = build(&expanded, 0, 0, &opts(0.01)).unwrap();
-        assert_eq!(oe.layers[0].levels[0], *l0);
+        assert_eq!(oe.layers[0].level(0).unwrap(), l0);
         // axis grid with gaps narrower than a cell: closed form == members
         let tight = rect(1, 5, 5, 6, 6, Rep::Grid { na: 7, nb: 5, va: (9, 0), vb: (0, 8) });
         let loose = rect(1, 5, 5, 6, 6, Rep::Grid { na: 7, nb: 5, va: (20, 0), vb: (0, 30) });
@@ -1565,7 +1909,7 @@ mod tests {
             let b = doc_with(vec![Cell { name: "T".into(), rects: members, ..Default::default() }], 0, vec![(1, 0)]);
             let oa = build(&a, 0, 0, &opts(0.01)).unwrap();
             let ob = build(&b, 0, 0, &opts(0.01)).unwrap();
-            assert_eq!(oa.layers[0].levels[0], ob.layers[0].levels[0]);
+            assert_eq!(oa.layers[0].level(0), ob.layers[0].level(0));
         }
     }
 
@@ -1580,7 +1924,9 @@ mod tests {
         top.places.push(PlaceRec { cell: 1, x: 0, y: 200, rot: 0, flip: false, rep: Rep::Grid { na: 3, nb: 1, va: (50, 0), vb: (0, 0) } });
         let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
         let occ = build(&d, 7, 9, &opts(0.01)).unwrap();
-        let l0 = &occ.layers[0].levels[0];
+        // every placement is one level down: a single plane of depth 1
+        assert_eq!(occ.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![1]);
+        let l0 = occ.layers[0].level(0).unwrap();
         assert_eq!(occ.cell_dbu, 10);
         // the grid is anchored at the bbox corner (the mirrored bar
         // pulls y0 to -10), so address cells by world point
@@ -1596,7 +1942,8 @@ mod tests {
         // 3-member x grid at y=200
         assert!(cellf(5, 205) && cellf(55, 205) && cellf(105, 205) && !cellf(35, 205));
         // pyramid: every set level-0 cell lights its parent, and only those
-        for (lv, pair) in occ.layers[0].levels.windows(2).enumerate() {
+        let levels: Vec<Level> = (0..occ.n_levels as usize).map(|lv| occ.layers[0].level(lv).unwrap()).collect();
+        for (lv, pair) in levels.windows(2).enumerate() {
             let (a, b) = (&pair[0], &pair[1]);
             for j in 0..b.h {
                 for i in 0..b.w {
@@ -1605,8 +1952,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(occ.n_levels as usize, occ.layers[0].levels.len());
-        assert!(occ.layers[0].levels.last().unwrap().w <= TOP_GRID);
+        assert_eq!(occ.n_levels as usize, occ.layers[0].planes[0].levels.len());
+        assert!(levels.last().unwrap().w <= TOP_GRID);
     }
 
     #[test]
@@ -1619,7 +1966,7 @@ mod tests {
         top.polys.push(PolyRec { layer: 1, dt: 0, pts: vec![(60, 60), (70, 70), (65, 65)], rep: Rep::One });
         let d = doc_with(vec![top], 0, vec![(1, 0)]);
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
-        let l0 = &occ.layers[0].levels[0];
+        let l0 = occ.layers[0].level(0).unwrap();
         let (ox, oy) = (occ.bbox.0, occ.bbox.1);
         let cellf = |x: i64, y: i64| l0.get(((x - ox) / 10) as u32, ((y - oy) / 10) as u32);
         assert!(cellf(5, 5) && cellf(45, 5) && !cellf(5, 15));
@@ -1706,7 +2053,7 @@ mod tests {
         let one = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 1, ..Opts::default() }).unwrap();
         let many = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 3, ..Opts::default() }).unwrap();
         assert_eq!(write_ovo(&one), write_ovo(&many));
-        assert!(one.layers[0].levels[0].count() > 20);
+        assert!(one.layers[0].level(0).unwrap().count() > 20);
     }
 
     #[test]
@@ -1748,7 +2095,7 @@ mod tests {
         let d = doc_with(vec![top], 0, vec![(2, 0), (1, 0), (3, 0)]);
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         assert_eq!(occ.layers[0].status, STATUS_EMPTY);
-        assert!(occ.layers[0].levels.is_empty());
+        assert!(occ.layers[0].planes.is_empty());
         assert_eq!(occ.layers[1].status, STATUS_OK);
         assert_eq!((occ.layers[2].status, occ.layers[2].work), (STATUS_EMPTY, 0));
         // empty layers take no room: a byte limit of one pyramid still
@@ -1761,7 +2108,8 @@ mod tests {
         assert_eq!(f.layers[0].status, STATUS_EMPTY);
         assert!(f.level(0, 0).is_none() && !f.get(0, 0, 0, 0) && f.count(0, 0) == 0);
         assert!(f.count(1, 0) > 0);
-        let table = 3 * (LAYER_FIXED + occ.n_levels as usize * LEVEL_ENTRY);
+        // three layer entries, one plane (the ok layer's depth 0)
+        let table = 3 * LAYER_FIXED + PLANE_FIXED + occ.n_levels as usize * LEVEL_ENTRY;
         assert_eq!(bytes.len(), HEADER_FIXED + 1 + table + layer_bytes(occ.w, occ.h) as usize);
         assert_eq!(status_text(STATUS_EMPTY), "empty");
     }
@@ -1778,7 +2126,7 @@ mod tests {
         let d = doc_with(vec![top], 0, vec![(1, 0), (2, 0)]);
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         assert_eq!(occ.layers[0].status, STATUS_NONE_UNSUPPORTED);
-        assert!(occ.layers[0].levels.is_empty());
+        assert!(occ.layers[0].planes.is_empty());
         assert_eq!(occ.layers[1].status, STATUS_OK);
         assert_eq!(occ.paths_skipped, 1);
         let f = OvoFile::from_bytes(write_ovo(&occ)).unwrap();
@@ -1797,7 +2145,7 @@ mod tests {
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         assert!(occ.n_levels >= 2);
         let bytes = write_ovo(&occ);
-        let table = HEADER_FIXED + 1 + LAYER_FIXED;
+        let table = HEADER_FIXED + 1 + LAYER_FIXED + PLANE_FIXED;
         let off0 = table + 8;
         let off1 = table + LEVEL_ENTRY + 8;
         let level0_off = u64::from_le_bytes(bytes[off0..off0 + 8].try_into().unwrap());
@@ -1817,7 +2165,7 @@ mod tests {
         top.rects.push(RectRec { layer: 2, dt: 0, x: 0, y: 0, w: 1000, h: 1000, rep: Rep::One });
         let d = doc_with(vec![top], 0, vec![(1, 0), (2, 0)]);
         let cells = build(&d, 0, 0, &Opts { base_um: 0.01, max_cells: 100, ..Opts::default() }).unwrap();
-        assert!(cells.layers.iter().all(|l| l.status == STATUS_NONE_CELLS && l.levels.is_empty()));
+        assert!(cells.layers.iter().all(|l| l.status == STATUS_NONE_CELLS && l.planes.is_empty()));
         let work = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: 100, ..Opts::default() }).unwrap();
         assert!(work.layers.iter().all(|l| l.status == STATUS_NONE_WORK));
         let size = build(&d, 0, 0, &Opts { base_um: 0.01, max_bytes: layer_bytes(100, 100), ..Opts::default() }).unwrap();
@@ -1843,21 +2191,137 @@ mod tests {
         assert_eq!(f.n_levels, occ.n_levels);
         assert_eq!((f.w, f.h), (occ.w, occ.h));
         for (k, layer) in occ.layers.iter().enumerate() {
-            for (lv, level) in layer.levels.iter().enumerate() {
-                let (w, h, bits) = f.level(k, lv).unwrap();
-                assert_eq!((w, h), (level.w, level.h));
-                assert_eq!(bits, &level.bits[..]);
+            for (p, plane) in layer.planes.iter().enumerate() {
+                assert_eq!(f.layers[k].planes[p].depth, plane.depth);
+                for (lv, level) in plane.levels.iter().enumerate() {
+                    let (w, h, bits) = f.plane_level(k, p, lv).unwrap();
+                    assert_eq!((w, h), (level.w, level.h));
+                    assert_eq!(bits, &level.bits[..]);
+                    let (fw, fh, flat) = f.level(k, lv).unwrap();
+                    assert_eq!((fw, fh), (w, h));
+                    assert_eq!(&flat[..], &layer.level(lv).unwrap().bits[..]);
+                }
             }
         }
+        assert!(f.depth_aware());
         assert!(OvoFile::from_bytes(bytes[..bytes.len() - 1].to_vec()).unwrap_err().contains("truncated"));
         assert!(OvoFile::from_bytes(bytes[..40].to_vec()).unwrap_err().contains("truncated"));
         let mut bad = bytes.clone();
         bad[0] = b'X';
         assert!(OvoFile::from_bytes(bad).unwrap_err().contains("magic"));
         let mut wrong_len = bytes.clone();
-        // first level entry's len sits after the layer fixed part
-        let o = HEADER_FIXED + 3 + LAYER_FIXED + 16;
+        // first level entry's len sits after the layer and plane fixed parts
+        let o = HEADER_FIXED + 3 + LAYER_FIXED + PLANE_FIXED + 16;
         wrong_len[o..o + 8].copy_from_slice(&1u64.to_le_bytes());
         assert!(OvoFile::from_bytes(wrong_len).unwrap_err().contains("expected"));
+    }
+
+    #[test]
+    fn planes_follow_the_placement_depth_and_flatten_to_the_full_view() {
+        // top: 1/0 at depth 0; A (placed twice) holds 1/0 and 2/0 at
+        // depth 1 and B (inside A) holds 1/0 and 3/0 at depth 2
+        let mut b_cell = cell("B");
+        b_cell.rects.push(rect(1, 0, 0, 20, 20, Rep::One));
+        b_cell.rects.push(RectRec { layer: 3, dt: 0, x: 30, y: 0, w: 20, h: 20, rep: Rep::One });
+        let mut a_cell = cell("A");
+        a_cell.rects.push(rect(1, 0, 0, 20, 20, Rep::One));
+        a_cell.rects.push(RectRec { layer: 2, dt: 0, x: 30, y: 0, w: 20, h: 20, rep: Rep::One });
+        a_cell.places.push(PlaceRec { cell: 2, x: 0, y: 100, rot: 0, flip: false, rep: Rep::One });
+        let mut top = cell("T");
+        top.rects.push(rect(1, 0, 0, 20, 20, Rep::One));
+        top.places.push(PlaceRec { cell: 1, x: 200, y: 0, rot: 0, flip: false, rep: Rep::One });
+        top.places.push(PlaceRec { cell: 1, x: 400, y: 0, rot: 0, flip: false, rep: Rep::One });
+        let d = doc_with(vec![top, a_cell, b_cell], 0, vec![(1, 0), (2, 0), (3, 0)]);
+        let has = layer_presence(&d, (1, 0));
+        assert_eq!(layer_max_depth(&d, (1, 0), &has), 2);
+        assert_eq!(layer_max_depth(&d, (2, 0), &layer_presence(&d, (2, 0))), 1);
+        let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
+        let depths = |k: usize| occ.layers[k].planes.iter().map(|p| p.depth).collect::<Vec<_>>();
+        assert_eq!((depths(0), depths(1), depths(2)), (vec![0, 1, 2], vec![1], vec![2]));
+        let (ox, oy) = (occ.bbox.0, occ.bbox.1);
+        let at = |k: usize, depth: Option<u32>, x: i64, y: i64| {
+            occ.layers[k]
+                .level_at_depth(0, depth)
+                .map(|l| l.get(((x - ox) / 10) as u32, ((y - oy) / 10) as u32))
+                .unwrap_or(false)
+        };
+        // depth 0: the top's own rect only; depth 1 adds A's; depth 2 B's
+        assert!(at(0, Some(0), 5, 5) && !at(0, Some(0), 205, 5) && !at(0, Some(0), 205, 105));
+        assert!(at(0, Some(1), 5, 5) && at(0, Some(1), 205, 5) && at(0, Some(1), 405, 5) && !at(0, Some(1), 205, 105));
+        assert!(at(0, Some(2), 205, 105) && at(0, None, 205, 105) && at(0, Some(9), 405, 105));
+        // 2/0 has nothing at depth 0: a plane without cells, not None
+        assert_eq!(occ.layers[1].level_at_depth(0, Some(0)), None);
+        assert!(!at(1, Some(0), 235, 5) && at(1, Some(1), 235, 5));
+        // the file round-trips the planes and answers the same depths
+        let f = OvoFile::from_bytes(write_ovo(&occ)).unwrap();
+        assert!(f.depth_aware());
+        assert_eq!(f.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![0, 1, 2]);
+        let cell_of = |x: i64, y: i64| (((x - ox) / 10) as u32, ((y - oy) / 10) as u32);
+        let fat = |k: usize, depth: Option<u32>, x: i64, y: i64| {
+            let (w, h, bits) = f.level_at_depth(k, 0, depth).unwrap();
+            let (i, j) = cell_of(x, y);
+            i < w && j < h && (bits[j as usize * Level::row_bytes(w) + (i / 8) as usize] >> (i % 8)) & 1 == 1
+        };
+        assert!(fat(0, Some(0), 5, 5) && !fat(0, Some(0), 205, 5));
+        assert!(fat(0, Some(1), 205, 5) && !fat(0, Some(1), 205, 105));
+        assert!(fat(0, None, 205, 105));
+        // a depth drawing none of a layer's planes: (0, 0, empty)
+        let (w, h, bits) = f.level_at_depth(2, 0, Some(1)).unwrap();
+        assert_eq!((w, h, bits.len()), (0, 0, 0));
+        // a version-1 file reads as one flattened plane, unlimited only
+        let v1 = OvoFile::from_bytes(write_ovo_v1(&occ)).unwrap();
+        assert!(!v1.depth_aware());
+        assert_eq!(v1.layers[0].planes.len(), 1);
+        assert_eq!(v1.layers[0].planes[0].depth, DEPTH_ALL);
+        assert_eq!(v1.level(0, 0).unwrap().2, f.level(0, 0).unwrap().2);
+        assert_eq!(v1.level_at_depth(0, 0, Some(0)).unwrap().0, 0);
+        assert_eq!(v1.count(0, 0), f.count(0, 0));
+    }
+
+    #[test]
+    fn depths_at_or_beyond_the_cap_share_the_last_plane() {
+        // a chain of 17 placements: the leaf's rect sits at depth 17
+        let mut cells = vec![cell("T")];
+        for k in 1..=17 {
+            cells[k - 1].places.push(PlaceRec { cell: k, x: 10, y: 0, rot: 0, flip: false, rep: Rep::One });
+            cells.push(cell(&format!("C{}", k)));
+        }
+        cells[17].rects.push(rect(1, 0, 0, 5, 5, Rep::One));
+        // and one at depth 15 exactly
+        cells[15].rects.push(rect(1, 0, 50, 5, 5, Rep::One));
+        let d = doc_with(cells, 0, vec![(1, 0)]);
+        let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
+        assert_eq!(occ.layers[0].status, STATUS_OK);
+        assert_eq!(occ.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![DEPTH_CAP]);
+        assert_eq!(occ.layers[0].level_at_depth(0, Some(14)), None);
+        assert!(occ.layers[0].level_at_depth(0, Some(15)).unwrap().count() == 2);
+        assert!(occ.layers[0].level_at_depth(0, Some(40)).unwrap().count() == 2);
+        let f = OvoFile::from_bytes(write_ovo(&occ)).unwrap();
+        assert_eq!(f.layers[0].planes[0].depth, DEPTH_CAP);
+    }
+
+    #[test]
+    fn a_plane_table_out_of_order_or_beyond_the_cap_is_refused() {
+        let mut child = cell("C");
+        child.rects.push(rect(1, 0, 0, 20, 20, Rep::One));
+        let mut top = cell("T");
+        top.rects.push(rect(1, 100, 0, 20, 20, Rep::One));
+        top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
+        let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
+        let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
+        assert_eq!(occ.layers[0].planes.len(), 2);
+        let bytes = write_ovo(&occ);
+        // the first plane's depth byte follows the layer fixed part
+        let o = HEADER_FIXED + 1 + LAYER_FIXED;
+        let mut swapped = bytes.clone();
+        swapped[o] = 1; // plane 0 at depth 1, plane 1 at depth 1: not ascending
+        assert!(OvoFile::from_bytes(swapped).unwrap_err().contains("depth"));
+        let mut deep = bytes.clone();
+        deep[o + PLANE_FIXED + occ.n_levels as usize * LEVEL_ENTRY] = DEPTH_CAP + 1;
+        assert!(OvoFile::from_bytes(deep).unwrap_err().contains("depth"));
+        let mut count = bytes.clone();
+        count[o - 1] = 0; // status ok with no plane
+        assert!(OvoFile::from_bytes(count).unwrap_err().contains("planes"));
+        assert!(OvoFile::from_bytes(bytes).is_ok());
     }
 }

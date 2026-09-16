@@ -8,8 +8,9 @@
 
 마스크 정책(`thin=keep`)의 광역뷰에서는 페이지 디코드·raster 대신 **소스·레이어별
 점유 비트맵 피라미드**(셀 ≤ 화면 1 px인 레벨)를 화면 마스크로 투영해 그린다.
-점유는 색인 시 **도형 교차**로 만든다(bbox 대체 없음). 근접뷰·exact·제한 depth는
-지금처럼 exact keep. 일반 레이아웃 정책(`thin=cull`)은 바꾸지 않는다.
+점유는 색인 시 **도형 교차**로 만든다(bbox 대체 없음). 근접뷰·exact는 지금처럼
+exact keep. 제한 depth는 2026-09-16(M6)부터 배치 깊이별 비트 평면으로 요약한다.
+일반 레이아웃 정책(`thin=cull`)은 바꾸지 않는다.
 
 ## 1. 왜 (실측)
 
@@ -65,13 +66,16 @@
   있음"을 도형 교차로 판정한다. rect는 셀 범위, polygon/path는 셀 격자 위 보수적
   스캔 변환(§5), 반복은 §5의 닫힌형 조건을 만족할 때만 footprint, 아니면 멤버마다.
   처리 한계를 넘는 레이어는 근사로 저장하지 않고 "요약 없음(이유)"로 기록한다.
-- **적용 조건(5개)**: 요청이 `thin=keep`이고, exact 요청이 아니고, depth가 그
-  레이어를 통째로 그리는 값(무제한, 소스 계층 높이 이상, 또는 그 레이어의 페이지를
-  가진 가장 깊은 셀의 깊이 이상 — 레이어 단위, 2026-09-15)이고, `.ovo`가 기록한
-  top·소스·레이어 테이블이 현재 캐시와 일치하고, 뷰의
-  µm/px ≥ base cell(level 0 셀이 1 px 이하)일 때만. 하나라도 아니면 현행 경로
+- **적용 조건(5개)**: 요청이 `thin=keep`이고, exact 요청이 아니고, `.ovo`가 기록한
+  top·소스·레이어 테이블이 현재 캐시와 일치하고, 뷰의 µm/px ≥ base cell(level 0
+  셀이 1 px 이하)이고, depth 조건: **v2 파일(FLOEOVO2, 2026-09-16 M6 — 배치
+  깊이별 비트 평면)이면 어떤 depth든** 요청 depth 이하의 평면들의 OR을 그린다
+  (그 depth에서 페이지 경로가 그리는 도형과 정확히 같은 집합); v1 파일(전 깊이
+  평탄화) 또는 `FLOE_RUST_OCCUPANCY_DEPTH=off`에서는 depth가 그 레이어를 통째로
+  그리는 값(무제한, 소스 계층 높이 이상, 또는 그 레이어의 페이지를 가진 가장 깊은
+  셀의 깊이 이상 — 레이어 단위, 2026-09-15)일 때만. 하나라도 아니면 현행 경로
   (리뷰 2: depth 0/1에서 깊은 자식 도형이 요약으로 보이거나 `render --detail exact
-  --thin keep`이 근사로 바뀌면 안 된다).
+  --thin keep`이 근사로 바뀌면 안 된다 — 깊이별 평면이 전자를 정확히 만족시킨다).
 - **스타일(전용 경로)**: 셀 렉트를 도형처럼 raster에 넘기지 않는다(현행 hairline
   경로는 채움 패턴을 무시하고 solid로 칠하며, 선폭 > 1이면 셀마다 외곽선을 그려
   점유가 팽창한다 — 리뷰 3). 대신 (1) 점유를 화면 **마스크**로 투영하고(픽셀 = 그
@@ -184,12 +188,13 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 
 요청 단위로 정해진다(2026-09-11 정책 분리와 같은 원칙).
 
-1. 조건: §3의 5개(`thin=keep`, exact 아님, depth가 레이어를 통째로 그리는 값
-   (`Cache::depth_is_full_for`: 무제한·계층 높이 이상·레이어별 최대 깊이 이상),
-   `.ovo` 유효·일치, µm/px ≥ base cell) 모두 참이고 킬 스위치가 아닐 때. depth
-   조건은 레이어 단위라 보이는 레이어 중 일부만 요약될 수 있고, 하나도 안 되면
-   `summary: none (depth)`. 레이어 단위로 `.ovo`의 status가
-   ok인 레이어만 요약, none인 레이어는 현행 경로.
+1. 조건: §3의 5개(`thin=keep`, exact 아님, `.ovo` 유효·일치, µm/px ≥ base cell,
+   depth) 모두 참이고 킬 스위치가 아닐 때. depth는 v2 파일이면 어떤 값이든 되고
+   요청 depth 이하의 평면을 OR해 그린다(`OvoFile::level_at_depth`; 조합은 캐시의
+   `(레이어, 레벨, depth)` 캐시에 남는다). v1 파일·`FLOE_RUST_OCCUPANCY_DEPTH=off`
+   에서는 `Cache::depth_is_full_for`(무제한·계층 높이 이상·레이어별 최대 깊이
+   이상)인 레이어만 요약되고, 하나도 안 되면 `summary: none (depth)`. 레이어
+   단위로 `.ovo`의 status가 ok인 레이어만 요약, none인 레이어는 현행 경로.
 2. 레벨: 셀 ≤ 1 px인 가장 굵은 레벨 L. 덱은 소스 뷰 기준(덱 µm/px ÷ scale).
 3. 플랜: 요약으로 그릴 레이어를 `vis` 마스크에서 뺀 채 기존 플랜을 돈다 → 그
    레이어의 페이지 선택·페이지 BVH·자식 순회가 생략된다. 프레임(r == 0)은 레이어와
@@ -198,7 +203,8 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
    투영하고(기존 raster 밴드 병렬화에 맞춤), §3의 경계/내부 규칙으로 스타일을
    적용한다. 페인트 위치는 `StyledGeometryRasterRequest.layers`(칠 순서, 뒤가 덮음)
    안에서 그 레이어의 차례. 셀을 도형으로 넘기지 않는다.
-5. 근접뷰(µm/px < base cell)·exact·제한 depth: 현행 exact keep. 예산 초과는 현행 거부.
+5. 근접뷰(µm/px < base cell)·exact: 현행 exact keep. 예산 초과는 현행 거부. 제한
+   depth는 v2 파일에서 그 depth의 평면 요약(M6).
 6. pick/snap: 게시된 query scene은 요약 레이어의 도형을 갖지 않으므로(생략됨)
    found=0이 된다. 요약 레이어는 그 뷰에서 pick/snap 대상에서 제외하고 상태줄에
    `summary layers: not pickable`을 표시한다(리뷰 7).
@@ -214,8 +220,9 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
   대체하면 배치 순서(= 레이어 순서)가 그대로 유지된다. 출력은 지금처럼 창 크기
   프레임으로 합성된다(step 2·3의 서브윈도·묶음·스트리밍 구조 그대로, 요약 pass는
   디코드가 없으므로 스트리밍 대상이 아니다).
-- 적용 조건은 pass 단위로 §3과 같다: 덱 요청의 depth가 full이 아니거나 exact
-  (`floe2 render --detail exact`)면 요약 없음. 뷰어의 덱 기본 depth는 M4에서 확인.
+- 적용 조건은 pass 단위로 §3과 같다: 덱 요청이 exact(`floe2 render --detail
+  exact`)면 요약 없음; depth는 pass마다 그 소스의 v2 평면으로 처리한다(M6; v1
+  파일이면 full인 레이어만). 뷰어의 덱 기본 depth는 M4에서 확인.
 - 4단계 sub-cut wash와의 관계: 요약이 그리는 레이어는 sub-cut wash를 내지 않는다.
   요약이 없는 소스·레이어는 현행 wash.
 - 카운터: 덱 프레임 줄에 `summary_passes`, `summary_cells`.
@@ -236,10 +243,11 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
    3 px 이상 빈 간격의 가운데 픽셀 보존,
    큰 rect의 채움·외곽선이 exact와 경계 1 px 이내. (c) 레이어 순서: 아래 요약 + 위
    exact fixture에서 위 레이어가 보인다.
-3. 정책 불변: `thin=cull` 픽셀 불변(A/B), keep 근접뷰·exact·depth 0/1 픽셀 불변,
-   keep 광역뷰는 요약(요약 없는 캐시에서는 현행과 동일).
+3. 정책 불변: `thin=cull` 픽셀 불변(A/B), keep 근접뷰·exact 픽셀 불변, keep
+   광역뷰는 요약(요약 없는 캐시에서는 현행과 동일; depth 0/1은 M6부터 그 depth의
+   평면 요약이 페이지 경로와 1 px 이내).
 4. 덱: 합성 순서·서브윈도·레벨 선택(scale 반영), 요약 레이어의 sub-cut wash 없음,
-   depth 제한·exact 덱 렌더에서 요약 없음.
+   exact 덱 렌더에서 요약 없음(depth 제한은 M6부터 평면 요약).
 5. 운영: 킬 스위치 A/B, `--explain` verdict, perf 카운터 파싱, 잘린 파일·헤더 불일치
    (top·레이어·identity) 거부, 취소 뒤 tmp 없음·기존 파일 보존, `--occupancy-only`
    전후 ovm/ovp 해시 불변, jobdeck 래퍼 옵션 전달, pick/snap 제외 상태줄.
@@ -256,6 +264,7 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 | M2 | renderd 전용 마스크 경로(단일 소스), 5개 조건, 레벨 선택, 레이어 순서, pick/snap 제외, 킬 스위치, gate 2·3·5 | **완료 2026-09-11(RENDERD 0.12.80, §12)**: 단일 소스 keep 광역뷰가 요약으로 그려짐, cull·근접뷰·exact·depth 제한·킬 스위치 픽셀 불변 |
 | M3 | 플래너에서 요약 레이어의 페이지·계층 생략, `--explain summary`, 카운터 | **완료 2026-09-11(RENDERD 0.12.81, §12)**: 요약 레이어의 페이지 0, 프레임 없는 요청은 요약 전용 서브트리 프루닝(wc_cells 0) |
 | M4 | 덱 통합(소스 뷰 레벨, pass 대체, wash 억제, depth/exact 조건), gate 4 | **완료 2026-09-11(RENDERD 0.12.81, §12)**: mag 0.2 덱의 fit 뷰 픽셀 == 단일 소스 요약 픽셀. 덱 fit 뷰 시간은 실칩 실측 대기 |
+| M6 | 배치 깊이별 비트 평면(FLOEOVO2): 제한 depth에서도 keep이 요약을 그림, 구간 depth 대비 | **완료 2026-09-16(RENDERD 0.12.90, §12 "M6")**: 레이어마다 도형이 있는 깊이별 평면, 요청 depth 이하의 OR; 공유 atomic 평면 마킹(스레드별 복제 없음); v1 파일은 full에서만; 킬 스위치 `FLOE_RUST_OCCUPANCY_DEPTH=off`; gate(깊이별 오라클, depth 0/1 렌더, v1·손상 테이블) |
 | M5 | 실칩 실측 8, base cell·기본 on/off 확정, 문서(JOBDECK §10·FLOE2_OPTIMIZATION 결함 B) | **완료 2026-09-15(§12 "M5 마감")**: 8-a·8-c 생성(추출본 4.4 s·17 MB, 덱 667소스 9.9 분·172 MB), 8-d 뷰어(150 × 103 mm 덱 뷰 16.7 s → 0.15 s, depth 무관). 결정: 색인 기본 on(`--no-occupancy`), base cell 4 µm, 마스크는 keep + detail medium. 후속: 8-b 품질 샷, charge당 비용(scan), cull에서의 요약 |
 
 각 단계는 킬 스위치와 gate를 갖추고 배터리 통과 뒤 커밋한다. 버전: Rust 변경 단계는
@@ -645,3 +654,45 @@ occupancy cell=4um (80000 dbu) grid=6493x8243 levels=9 layers=4 ok=2 empty=2 job
   숨김 `.<db>.tray`. 규칙은 `floe/cachepath.py` 하나에 있고 구 이름은 발견 시
   자동 개명된다(재색인 없음; `FLOE_CACHE_MIGRATE=off`로 끔). 상세는
   docs/CACHE-NAMING.ko.md.
+
+### 2026-09-16 — M6 배치 깊이별 비트 평면, FLOEOVO2 (0.12.135 / RENDERD 0.12.90)
+
+현장(2026-09-16): 9.8 GB 일반 레이아웃을 `thin:keep`으로 열자 `decoded generation
+budget exceeded: 2356612414 > 1073741824` — 요약이 있어도 제한 depth에서는 쓰이지
+않아(전 깊이 평탄화라 깊은 자식 도형이 새어 나옴) keep이 페이지를 전부 디코드했다.
+사용자 결정: "full depth가 아닐 때라도 keep이 되면 좋겠음", 나중의 depth 구간
+(start~end)까지 대응하도록 **깊이별 비트 평면**.
+
+- **형식 v2**: 레이어마다 도형이 실제로 있는 배치 깊이 d(0 = top 자기 레코드)마다
+  비트 피라미드 하나. 깊이 ≥ 15는 평면 15에 접힌다(`DEPTH_CAP`). 요청 depth N은
+  평면 d ≤ N의 OR, 무제한은 전부, 나중의 구간 [s, e]는 평면 s..e의 OR. v1 파일
+  (`FLOEOVO1`)은 `depth=all` 평면 하나로 읽혀 무제한(또는 레이어별 full)에서만
+  쓰인다 — 기존 캐시는 그대로 열리고, 제한 depth의 요약을 쓰려면
+  `floe2 index … --occupancy-only`로 한 번 다시 만든다. SPEC-FORMATS `design.ovo`.
+- **마킹**: 스레드별 level-0 비트맵 복제 + OR 병합 대신 레이어당 **공유 atomic
+  평면**(깊이마다 한 장)에 `fetch_or`로 찍는다. 결과는 unit 분할과 무관해 스레드
+  수에 대해 바이트 동일(gate 유지). 메모리 = 레이어의 깊이 수 × level 0 한 장
+  (실칩 전체 35.8 × 34.6 mm, 4 µm: 평면당 9.6 MB) — 이전의 jobs × 한 장보다 작다.
+  깊이는 unit(`Unit.depth`)과 walk가 넘긴다. 파일 크기는 "레이어에 도형이 있는
+  깊이 수 × v1 크기"(도형이 없는 깊이는 평면이 없음), `none:size` 상한은 평면
+  단위로 센다.
+- **렌더러**: `summary_selection`이 v2 파일이면 보이는 레이어 전부를 요약 대상으로
+  삼고 요청 depth(무제한·계층 높이 이상은 전부)로 평면을 조합한다. 조합 비트는
+  `SummaryPlane`이 소유(`Arc<[u8]>`)하고 캐시 슬롯이 `(레이어, 레벨, depth 키)`로
+  기억한다(512개 상한). v1 파일·`FLOE_RUST_OCCUPANCY_DEPTH=off`는 2026-09-15의
+  레이어별 full 조건 그대로. `none` 이유의 판정 순서는 policy → exact → off →
+  nofile/invalid → depth → near.
+- **CLI**: `floe-index occupancy` 줄에 `planes=d:count,…`(v1은 `all`), `--depth N`
+  덤프. `version=`은 파일의 버전.
+- **gate**(`validate_occupancy`, 29 tests): 깊이별 평면 하나하나가 KLayout
+  `RecursiveShapeIterator`의 `min_depth=max_depth=d` 오라클과 셀 단위 일치(픽스처
+  3종 + valmini), 3단 계층 픽스처 `deep.oas`(1/0은 평면 0·1·2, 2/0은 1, 3/0은 2),
+  thinwide의 FAR 자식(2/0, 빈 공간)이 depth 0에서는 요약에 없고 depth 1·full에서
+  있음, depth-0 요약이 depth-0 페이지 경로와 1 px 이내, 킬 스위치에서 `none
+  (depth)` 복원, 파일 크기 = 평면 단위 테이블 + 평면별 비트맵, 스레드 수 무관
+  바이트 동일. Rust: `planes_follow_the_placement_depth…`, `depths_at_or_beyond
+  _the_cap…`, 평면 테이블 순서·cap 위반·개수 불일치 거부, v1 왕복,
+  `a_request_depth_draws_the_planes_at_or_above_it`.
+- **남은 것**: 실칩 재생성 실측(파일 크기 = 레이어별 깊이 수 배; 9.8 GB 레이아웃의
+  keep 제한 depth 광역뷰 시간), 근접뷰 예산 초과(단일 레이아웃 슬라이스 스트리밍)는
+  사용자 판단으로 보류(근접뷰는 요약 대상이 아님).

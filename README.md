@@ -388,11 +388,14 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   `FLOE_RUST_PAGE_HAIRLINE=cull|keep`.
 - **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):
   캐시에 `design.ovo`(`floe2 index --occupancy-only`)가 있고 요청이 keep·
-  exact 아님·depth가 그 레이어를 통째로 그리는 값(무제한, 소스 계층 높이 이상,
-  또는 그 레이어의 가장 깊은 페이지 깊이 이상)이며 기준 셀이 화면 1 px 이하이면,
-  그 레이어는 페이지
+  exact 아님이며 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지
   대신 셀 ≤ 1 px인 피라미드 레벨의 점유 마스크로 그려진다(셀 중심이 놓인
-  픽셀; 경계 solid, 내부 채움). 오차 계약: 요약과 exact는 서로 1 px 팽창 안에
+  픽셀; 경계 solid, 내부 채움). depth는 무엇이든 된다(2026-09-16 M6: 요약은
+  배치 깊이별 비트 평면이라 요청 depth 이하의 평면만 그린다; 2026-09-16 이전
+  v1 파일은 depth가 그 레이어를 통째로 그리는 값 — 무제한, 소스 계층 높이
+  이상, 레이어의 가장 깊은 페이지 깊이 이상 — 에서만 쓰이고, 킬 스위치
+  `FLOE_RUST_OCCUPANCY_DEPTH=off`가 그 규칙으로 되돌린다; 구 파일은
+  `--occupancy-only`로 다시 만든다). 오차 계약: 요약과 exact는 서로 1 px 팽창 안에
   있다(3 px 이상 빈 간격은 항상 보존, 2 px는 위상에 따라 닫힐 수 있음; 진단
   `FLOE_RUST_OCCUPANCY_PX=0.5`로 더 가는 레벨). 실칩 없이 재 보려면
   `tools/gen_maskchip.py OUT.oas --jb`(실측 수치를 재현한 35.8 × 34.6 mm 합성

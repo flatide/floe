@@ -1882,10 +1882,15 @@ pub fn occupancy_cmd(args: &[String]) {
     let mut dir: Option<String> = None;
     let mut layer: Option<(u32, u32)> = None;
     let mut level = 0usize;
+    let mut depth: Option<u32> = None;
     let mut dump = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--depth" => {
+                depth = Some(args[i + 1].parse().expect("depth"));
+                i += 2;
+            }
             "--layer" => {
                 let v = &args[i + 1];
                 let (l, d) = v.split_once('/').unwrap_or_else(|| {
@@ -1911,7 +1916,7 @@ pub fn occupancy_cmd(args: &[String]) {
         }
     }
     let dir = dir.unwrap_or_else(|| {
-        eprintln!("usage: floe-index occupancy <cache> [--layer L/D] [--level N] [--dump]");
+        eprintln!("usage: floe-index occupancy <cache> [--layer L/D] [--level N] [--depth N] [--dump]");
         std::process::exit(2);
     });
     let path = format!("{}/design.ovo", dir);
@@ -1927,7 +1932,7 @@ pub fn occupancy_cmd(args: &[String]) {
         "occupancy file={} version={} unit={} cell_dbu={} base_um={} bbox={},{},{},{} \
          grid={}x{} levels={} layers={} src_size={} src_mtime={} identity={} top={}",
         path,
-        occ::VERSION,
+        f.version,
         f.unit,
         f.cell_dbu,
         f.base_um(),
@@ -1948,10 +1953,22 @@ pub fn occupancy_cmd(args: &[String]) {
         println!("identity_error={}", e);
     }
     for (k, l) in f.layers.iter().enumerate() {
+        // set= counts the flattening of every plane per level;
+        // planes= lists the placement depths that hold a shape (a
+        // version-1 file: `all`) with each plane's level-0 count
         let sets: Vec<String> = (0..f.n_levels as usize).map(|lv| f.count(k, lv).to_string()).collect();
-        let (w0, h0) = l.levels.first().map(|e| (e.w, e.h)).unwrap_or((0, 0));
+        let (w0, h0) = l.planes.first().and_then(|p| p.levels.first()).map(|e| (e.w, e.h)).unwrap_or((0, 0));
+        let planes: Vec<String> = l
+            .planes
+            .iter()
+            .enumerate()
+            .map(|(p, plane)| {
+                let depth = if plane.depth == occ::DEPTH_ALL { "all".to_string() } else { plane.depth.to_string() };
+                format!("{}:{}", depth, f.plane_count(k, p, 0))
+            })
+            .collect();
         println!(
-            "layer idx={} ld={}/{} status={} work={} level0={}x{} set={}",
+            "layer idx={} ld={}/{} status={} work={} level0={}x{} set={} planes={}",
             k,
             l.layer,
             l.dt,
@@ -1959,7 +1976,8 @@ pub fn occupancy_cmd(args: &[String]) {
             l.work,
             w0,
             h0,
-            sets.join(",")
+            sets.join(","),
+            if planes.is_empty() { "-".to_string() } else { planes.join(",") }
         );
     }
     if dump {
@@ -1971,7 +1989,8 @@ pub fn occupancy_cmd(args: &[String]) {
             eprintln!("occupancy: layer {}/{} not in the file", key.0, key.1);
             std::process::exit(1);
         };
-        let Some((w, h, bits)) = f.level(k, level) else {
+        // the planes the request depth draws (all without --depth), OR'd
+        let Some((w, h, bits)) = f.level_at_depth(k, level, depth) else {
             eprintln!(
                 "occupancy: layer {}/{} level {} has no bitmap ({})",
                 key.0,
@@ -1981,7 +2000,10 @@ pub fn occupancy_cmd(args: &[String]) {
             );
             std::process::exit(1);
         };
-        println!("dump ld={}/{} level={} w={} h={}", key.0, key.1, level, w, h);
+        match depth {
+            None => println!("dump ld={}/{} level={} w={} h={}", key.0, key.1, level, w, h),
+            Some(d) => println!("dump ld={}/{} level={} depth={} w={} h={}", key.0, key.1, level, d, w, h),
+        }
         let rb = occ::Level::row_bytes(w);
         let mut row = String::with_capacity(w as usize);
         for j in 0..h as usize {

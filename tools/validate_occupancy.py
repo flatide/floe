@@ -100,17 +100,51 @@ def sha(path):
 # ------------------------------------------------------------ design.ovo
 
 HDR = "<8sIdQQq4qII"     # magic version unit size mtime cell bbox levels layers
-LAYER = "<IIBQ"           # layer dt status work
+LAYER = "<IIBQB"          # v2: layer dt status work n_planes
+LAYER_V1 = "<IIBQ"        # v1: layer dt status work (one flattened plane)
 LEVEL = "<IIQQ"           # w h off len
+DEPTH_ALL = "all"         # a version-1 plane: every depth flattened
 STATUS = {0: "ok", 1: "none:cells", 2: "none:work", 3: "none:size",
           4: "none:unsupported", 5: "empty"}
 
 
+def or_levels(level_lists, nlv):
+    """the OR of several planes' levels; no plane = the zero entries a
+    none/empty layer carries"""
+    if not level_lists:
+        return [(0, 0, b"")] * nlv
+    out = []
+    for lv in range(nlv):
+        w, h, b = level_lists[0][lv]
+        acc = bytearray(b)
+        for other in level_lists[1:]:
+            ow, oh, ob = other[lv]
+            assert (ow, oh) == (w, h), ((ow, oh), (w, h))
+            for i, v in enumerate(ob):
+                acc[i] |= v
+        out.append((w, h, bytes(acc)))
+    return out
+
+
+def levels_at_depth(layer, depth, nlv):
+    """the levels a request depth draws: the OR of the planes at or
+    above it (a version-1 `all` plane only by the unlimited depth)"""
+    drawn = [p["levels"] for p in layer["planes"]
+             if depth is None or (p["depth"] != DEPTH_ALL
+                                  and p["depth"] <= depth)]
+    return or_levels(drawn, nlv)
+
+
 def read_ovo(path):
+    """The file as dicts: per layer its `planes` (placement depth +
+    levels; version 2, 2026-09-16) and the flattened `levels` (the OR
+    of every plane - the version-1 view). A version-1 file reads as
+    one plane of depth `all`."""
     d = Path(path).read_bytes()
     (magic, ver, unit, size, mtime, cell, x0, y0, x1, y1, nlv,
      nl) = struct.unpack_from(HDR, d, 0)
-    assert magic == b"FLOEOVO1" and ver == 1, (magic, ver)
+    assert (magic, ver) in ((b"FLOEOVO2", 2), (b"FLOEOVO1", 1)), (magic, ver)
+    v1 = ver == 1
     o = struct.calcsize(HDR)
     top_len = struct.unpack_from("<H", d, o)[0]
     o += 2
@@ -118,17 +152,34 @@ def read_ovo(path):
     o += top_len
     layers = []
     for _ in range(nl):
-        layer, dt, status, work = struct.unpack_from(LAYER, d, o)
-        o += struct.calcsize(LAYER)
-        levels = []
-        for _ in range(nlv):
-            w, h, off, ln = struct.unpack_from(LEVEL, d, o)
-            o += struct.calcsize(LEVEL)
-            levels.append((w, h, d[off:off + ln]))
+        if v1:
+            layer, dt, status, work = struct.unpack_from(LAYER_V1, d, o)
+            o += struct.calcsize(LAYER_V1)
+            n_planes = 1
+        else:
+            layer, dt, status, work, n_planes = struct.unpack_from(LAYER, d, o)
+            o += struct.calcsize(LAYER)
+        planes = []
+        for _ in range(n_planes):
+            if v1:
+                depth = DEPTH_ALL
+            else:
+                depth = d[o]
+                o += 1
+            levels = []
+            for _ in range(nlv):
+                w, h, off, ln = struct.unpack_from(LEVEL, d, o)
+                o += struct.calcsize(LEVEL)
+                levels.append((w, h, d[off:off + ln]))
+            planes.append(dict(depth=depth, levels=levels))
+        if status != 0:
+            planes = []   # a version-1 none/empty layer carries zero entries
         layers.append(dict(key=(layer, dt), status=STATUS.get(status),
-                           work=work, levels=levels))
-    return dict(unit=unit, src_size=size, src_mtime=mtime, cell=cell,
-                bbox=(x0, y0, x1, y1), n_levels=nlv, top=top,
+                           work=work, planes=planes,
+                           levels=or_levels([p["levels"] for p in planes],
+                                            nlv)))
+    return dict(version=ver, unit=unit, src_size=size, src_mtime=mtime,
+                cell=cell, bbox=(x0, y0, x1, y1), n_levels=nlv, top=top,
                 layers=layers)
 
 
@@ -154,8 +205,10 @@ def pool(level):
     return (w2, h2, bytes(out))
 
 
-def oracle_level0(src, key, ovo):
-    """set of (i, j) whose open cell box meets the layer with area > 0"""
+def oracle_level0(src, key, ovo, depth=None):
+    """set of (i, j) whose open cell box meets the layer with area > 0;
+    `depth` restricts the shapes to exactly that placement depth (the
+    plane of that depth), None takes every depth (the flattening)"""
     ly = db.Layout()
     ly.read(str(src))
     top = ly.top_cell()
@@ -170,7 +223,11 @@ def oracle_level0(src, key, ovo):
             for i in range(w):
                 box = db.Box(x0 + i * c, y0 + j * c, x0 + (i + 1) * c,
                              y0 + (j + 1) * c)
-                reg = db.Region(ly.begin_shapes_touching(top, li, box))
+                it = ly.begin_shapes_touching(top, li, box)
+                if depth is not None:
+                    it.min_depth = depth
+                    it.max_depth = depth
+                reg = db.Region(it)
                 if reg.is_empty():
                     continue
                 if (reg & db.Region(box)).area() > 0:
@@ -276,6 +333,29 @@ def write_reps(path):
     ly._destroy()
 
 
+def write_deep(path):
+    """three placement depths (per-depth planes, 2026-09-16): 1/0 at
+    depth 0 (the top's own box), 1 (A, placed twice) and 2 (B inside
+    A); 2/0 only at depth 1, 3/0 only at depth 2"""
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("DEEP")
+    a = ly.create_cell("A")
+    b = ly.create_cell("B")
+    l1, l2, l3 = ly.layer(1, 0), ly.layer(2, 0), ly.layer(3, 0)
+    top.shapes(l1).insert(db.Box(0, 0, 3 * UM, 3 * UM))
+    a.shapes(l1).insert(db.Box(0, 0, 2 * UM, 2 * UM))
+    a.shapes(l2).insert(db.Box(3 * UM, 0, 5 * UM, 2 * UM))
+    b.shapes(l1).insert(db.Box(0, 0, 2 * UM, 2 * UM))
+    b.shapes(l3).insert(db.Box(3 * UM, 0, 5 * UM, 2 * UM))
+    a.insert(db.CellInstArray(b.cell_index(), db.Trans(db.Vector(0, 5 * UM))))
+    for x in (10, 20):
+        top.insert(db.CellInstArray(a.cell_index(),
+                                    db.Trans(db.Vector(x * UM, 0))))
+    ly.write(str(path))
+    ly._destroy()
+
+
 def write_uturn(path):
     """1/0 holds a U-turn path the hull refuses (the raster refuses it
     too) beside a box; 2/0 a plain box."""
@@ -353,6 +433,9 @@ class GenerationOracleTests(unittest.TestCase):
         write_reps(reps)
         cls.cases.append((shapes, index_with_occupancy(shapes, 1)))
         cls.cases.append((reps, index_with_occupancy(reps, 1)))
+        deep = TMP / "deep.oas"
+        write_deep(deep)
+        cls.cases.append((deep, index_with_occupancy(deep, 1)))
         src = sys.argv[1] if len(sys.argv) > 1 else None
         if src and Path(src).is_file():
             real = TMP / Path(src).name
@@ -389,7 +472,51 @@ class GenerationOracleTests(unittest.TestCase):
                 self.assertEqual(pool(below), above,
                                  "%s %s pyramid" % (src.name, layer["key"]))
             self.assertLessEqual(max(layer["levels"][-1][:2]), 64)
+            # every plane holds exactly the shapes of its placement
+            # depth (KLayout's iterator limited to that depth) and is
+            # its own pyramid; planes ascend by depth
+            depths = [p["depth"] for p in layer["planes"]]
+            self.assertEqual(depths, sorted(depths), layer["key"])
+            self.assertGreater(len(depths), 0, layer["key"])
+            for plane in layer["planes"]:
+                _, _, lit_d = oracle_level0(src, layer["key"], ovo,
+                                            depth=plane["depth"])
+                p0 = plane["levels"][0]
+                mine_d = {(i, j) for j in range(h) for i in range(w)
+                          if bit(p0, i, j)}
+                self.assertEqual(
+                    (sorted(lit_d - mine_d)[:10], sorted(mine_d - lit_d)[:10]),
+                    ([], []),
+                    "%s layer %s depth %d: %d missing, %d extra" % (
+                        src.name, layer["key"], plane["depth"],
+                        len(lit_d - mine_d), len(mine_d - lit_d)))
+                for below, above in zip(plane["levels"], plane["levels"][1:]):
+                    self.assertEqual(pool(below), above,
+                                     "%s %s depth %d pyramid"
+                                     % (src.name, layer["key"], plane["depth"]))
         self.assertGreater(checked, 0)
+
+    def test_planes_follow_the_placement_depth(self):
+        deep = read_ovo(self.cases[2][1] / "design.ovo")
+        self.assertEqual(deep["version"], 2)
+        by_key = {l["key"]: l for l in deep["layers"]}
+        planes = lambda key: [p["depth"] for p in by_key[key]["planes"]]
+        self.assertEqual((planes((1, 0)), planes((2, 0)), planes((3, 0))),
+                         ([0, 1, 2], [1], [2]))
+        nlv = deep["n_levels"]
+        # 1 um cells: the top's box covers cells 0..2, A at x=10 um
+        # covers 10..11, B (inside A, y=5) covers rows 5..6
+        l0 = levels_at_depth(by_key[(1, 0)], 0, nlv)[0]
+        self.assertTrue(bit(l0, 1, 1) and not bit(l0, 11, 1))
+        l1 = levels_at_depth(by_key[(1, 0)], 1, nlv)[0]
+        self.assertTrue(bit(l1, 1, 1) and bit(l1, 11, 1) and bit(l1, 21, 1)
+                        and not bit(l1, 11, 6))
+        l2 = levels_at_depth(by_key[(1, 0)], 2, nlv)[0]
+        self.assertTrue(bit(l2, 11, 6))
+        self.assertEqual(l2, by_key[(1, 0)]["levels"][0])
+        # nothing of 3/0 above depth 2
+        self.assertEqual(levels_at_depth(by_key[(3, 0)], 1, nlv),
+                         [(0, 0, b"")] * nlv)
 
     def test_fixtures_and_asset_match_the_oracle_on_every_cell(self):
         for src, cache in self.cases:
@@ -444,10 +571,14 @@ class GenerationContractTests(unittest.TestCase):
         rows = self.listing(self.cache).stdout.splitlines()
         self.assertTrue(any("ld=7/0 status=empty work=0" in r for r in rows),
                         rows)
-        table = struct.calcsize(HDR) + 2 + len(ovo["top"]) + len(ovo["layers"]) * (
-            struct.calcsize(LAYER) + ovo["n_levels"] * struct.calcsize(LEVEL))
-        bitmaps = sum(len(lv[2]) for l in ovo["layers"] if l["status"] == "ok"
-                      for lv in l["levels"])
+        # version 2: a plane count per layer, a depth byte per plane, and
+        # one pyramid per plane (only the ok layers have planes)
+        table = struct.calcsize(HDR) + 2 + len(ovo["top"]) + sum(
+            struct.calcsize(LAYER)
+            + len(l["planes"]) * (1 + ovo["n_levels"] * struct.calcsize(LEVEL))
+            for l in ovo["layers"])
+        bitmaps = sum(len(lv[2]) for l in ovo["layers"]
+                      for p in l["planes"] for lv in p["levels"])
         self.assertEqual(os.path.getsize(self.cache / "design.ovo"),
                          table + bitmaps)
         outs = []
@@ -513,6 +644,9 @@ class GenerationContractTests(unittest.TestCase):
             counts = [sum(bin(b).count("1") for b in lv[2])
                       for lv in layer["levels"]]
             self.assertIn("set=" + ",".join(map(str, counts)), row)
+            # a flat source: one plane, depth 0, with the level-0 count
+            self.assertIn("planes=-" if layer["key"] == (7, 0)
+                          else "planes=0:%d" % counts[0], row)
         levels = next(l for l in ovo["layers"] if l["key"] == (1, 0))["levels"]
         top_level = len(levels) - 1
         dump = floe_index("occupancy", self.cache, "--layer", "1/0",
@@ -527,6 +661,16 @@ class GenerationContractTests(unittest.TestCase):
             self.assertEqual(row, "".join("1" if bit(level, i, j) else "0"
                                           for i in range(level[0])),
                              "row %d" % j)
+        # --depth N dumps the planes at or above N (the flat source's
+        # depth 0 is everything)
+        dump0 = floe_index("occupancy", self.cache, "--layer", "1/0",
+                           "--level", top_level, "--depth", "0",
+                           "--dump").stdout.splitlines()
+        start0 = next(i for i, l in enumerate(dump0) if l.startswith("dump "))
+        self.assertEqual(dump0[start0], "dump ld=1/0 level=%d depth=0 w=%d h=%d"
+                         % (top_level, level[0], level[1]))
+        self.assertEqual(dump0[start0 + 1:start0 + 1 + level[1]],
+                         dump[start + 1:start + 1 + level[1]])
 
     def test_identity_mismatch_and_truncation_are_refused(self):
         ovo = self.cache / "design.ovo"
@@ -833,6 +977,13 @@ def write_thinwide(path):
     deep.shapes(l2).insert(db.Box(0, 0, 50 * UM, 50 * UM))
     top.insert(db.CellInstArray(deep.cell_index(),
                                 db.Trans(db.Vector(1250 * UM, 1250 * UM))))
+    # a second child whose 2/0 box sits in empty space (600..650 x
+    # 1600..1650 um): the per-depth planes (2026-09-16) leave it out
+    # at depth 0 and draw it from depth 1
+    far = ly.create_cell("FAR")
+    far.shapes(l2).insert(db.Box(0, 0, 50 * UM, 50 * UM))
+    top.insert(db.CellInstArray(far.cell_index(),
+                                db.Trans(db.Vector(600 * UM, 1600 * UM))))
     ly.write(str(path))
     ly._destroy()
 
@@ -865,9 +1016,11 @@ def expected_mask(level, bbox_dbu, width, height, halo=0):
     return lit
 
 
-def ovo_level(ovo, key, lv):
+def ovo_level(ovo, key, lv, depth=None):
     layer = next(l for l in ovo["layers"] if l["key"] == key)
-    w, h, bits = layer["levels"][lv]
+    levels = (layer["levels"] if depth is None
+              else levels_at_depth(layer, depth, ovo["n_levels"]))
+    w, h, bits = levels[lv]
     return dict(w=w, h=h, bits=bits, cell=ovo["cell"] << lv,
                 x0=ovo["bbox"][0], y0=ovo["bbox"][1])
 
@@ -912,11 +1065,16 @@ class RenderTests(unittest.TestCase):
         os.environ["FLOE_RUST_OCCUPANCY"] = "off"
         cls.worker_off = cls._start_worker()
         del os.environ["FLOE_RUST_OCCUPANCY"]
+        # the per-depth planes' kill switch: a version-2 file used like
+        # a version-1 one (only at a depth that draws the layer whole)
+        os.environ["FLOE_RUST_OCCUPANCY_DEPTH"] = "off"
+        cls.worker_nodepth = cls._start_worker()
+        del os.environ["FLOE_RUST_OCCUPANCY_DEPTH"]
         cls.gen = 100
 
     @classmethod
     def tearDownClass(cls):
-        for w in (cls.worker, cls.worker_off):
+        for w in (cls.worker, cls.worker_off, cls.worker_nodepth):
             try:
                 w.stop()
             except Exception:
@@ -1011,31 +1169,49 @@ class RenderTests(unittest.TestCase):
         self.assertTrue((21, 78) in lit2 and (28, 79) in lit2, "the L's arms")
 
     def test_cull_exact_and_limited_depth_requests_are_untouched(self):
-        # the depth case uses 2/0, whose pages reach the DEEP child at
-        # depth 1: at depth 0 that layer is not drawn whole, no summary
         for kw, vis, reason in (({"thin": "cull"}, [(1, 0)], "policy"),
-                                ({"cut_px": 0.0}, [(1, 0)], "exact"),
-                                ({"depth": 0}, [(2, 0)], "depth")):
+                                ({"cut_px": 0.0}, [(1, 0)], "exact")):
             lit, summ, _ = self._render(self.worker, visible=vis, **kw)
             off, s_off, _ = self._render(self.worker_off, visible=vis, **kw)
             self.assertEqual((summ["layers"], summ["none"]), (0, reason), kw)
             self.assertEqual(lit, off, kw)
-        # the depth condition is per layer (user 2026-09-15: the depth
-        # is a free control): 1/0's pages all sit in the top, so depth
-        # 0 draws it whole and its summary is on with the pixels of
-        # the unlimited depth; 2/0 needs depth 1 (= the hierarchy
-        # height, also full); with both visible at depth 0 only 1/0
-        # is summarized
-        full1, s_full1, _ = self._render(self.worker, visible=[(1, 0)])
-        d0, s_d0, _ = self._render(self.worker, visible=[(1, 0)], depth=0)
-        self.assertEqual((s_full1["layers"], s_d0["layers"], s_d0["none"]), (1, 1, "-"), s_d0)
-        self.assertEqual(d0, full1)
+        # a limited depth draws the planes at or above it (per-depth
+        # planes, 2026-09-16; user: keep at any depth): 2/0's FAR child
+        # box (depth 1, at 600..650 x 1600..1650 um = pixels 60..64 x
+        # 35..39 at 10 um/px) is left out at depth 0 and drawn from
+        # depth 1; the depth-0 summary stays within a pixel of the
+        # depth-0 page path, as the full one does of the full path
+        far = {(x, y) for x in range(58, 68) for y in range(33, 43)}
+        d0, s_d0, _ = self._render(self.worker, visible=[(2, 0)], depth=0)
+        self.assertEqual((s_d0["layers"], s_d0["none"]), (1, "-"), s_d0)
+        self.assertEqual(d0 & far, set())
+        page0, s_page0, _ = self._render(self.worker_off, visible=[(2, 0)], depth=0)
+        self.assertEqual(s_page0["none"], "off")
+        self.assertEqual(page0 & far, set())
+        self.assertEqual(([p for p in page0 if not near(p, d0, 1)][:5],
+                          [p for p in d0 if not near(p, page0, 2)][:5]),
+                         ([], []), "depth-0 summary vs depth-0 page path")
         full2, s_full2, _ = self._render(self.worker, visible=[(2, 0)])
         d1, s_d1, _ = self._render(self.worker, visible=[(2, 0)], depth=1)
         self.assertEqual((s_full2["layers"], s_d1["layers"]), (1, 1), s_d1)
+        self.assertTrue(d1 & far, "the FAR box is drawn from depth 1")
         self.assertEqual(d1, full2)
+        # 1/0's pages all sit in the top: depth 0 equals the unlimited
+        # depth; both visible at depth 0: both summarized
+        full1, s_full1, _ = self._render(self.worker, visible=[(1, 0)])
+        d0_1, s_d0_1, _ = self._render(self.worker, visible=[(1, 0)], depth=0)
+        self.assertEqual((s_full1["layers"], s_d0_1["layers"], s_d0_1["none"]), (1, 1, "-"), s_d0_1)
+        self.assertEqual(d0_1, full1)
         _, s_both, _ = self._render(self.worker, visible=[(1, 0), (2, 0)], depth=0)
-        self.assertEqual((s_both["layers"], s_both["none"]), (1, "-"), s_both)
+        self.assertEqual((s_both["layers"], s_both["none"]), (2, "-"), s_both)
+        # FLOE_RUST_OCCUPANCY_DEPTH=off: the 2026-09-15 rule - 2/0 (pages
+        # down to depth 1) has no summary at depth 0 and the page path
+        # draws it; 1/0 (pages in the top only) keeps its summary
+        nd, s_nd, _ = self._render(self.worker_nodepth, visible=[(2, 0)], depth=0)
+        self.assertEqual((s_nd["layers"], s_nd["none"]), (0, "depth"), s_nd)
+        self.assertEqual(nd, page0)
+        _, s_nd1, _ = self._render(self.worker_nodepth, visible=[(1, 0)], depth=0)
+        self.assertEqual((s_nd1["layers"], s_nd1["none"]), (1, "-"), s_nd1)
         # the kill switch: same pixels as a cache without the file
         off, s_off, _ = self._render(self.worker_off, visible=[(1, 0)])
         self.assertEqual(s_off["none"], "off")
