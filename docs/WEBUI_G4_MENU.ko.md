@@ -9,9 +9,9 @@
 `tools/validate_web_menu_inventory.py`는 GTK를 import하거나 실행하지 않고
 `_build_menubar` AST에서 실제 item/check callback을 추출한다.42개 호출 지점,
 39개 handler family를 분류한다. thin/mode의 각각3항목 반복문은 호출 지점1개씩이다.
-최초 감사 당시36개가 연결됐고, M4g-24c 이후 현재37개 호출 지점은 웹 control·JS
+최초 감사 당시36개가 연결됐고, M4g-25 이후 현재38개 호출 지점은 웹 control·JS
 참조·테스트 파일에 연결된다.2개는 제품 범위 밖,1개는 기존 Rust 경로에서 무효,
-2개는 실행 중 조작이 미구현이다.
+1개는 실행 중 조작이 미구현이다.
 
 `linked`는 **연결 근거가 존재함**이지 기능 parity PASS가 아니다. 소스·테스트 파일의
 존재만으로 픽셀/행동/권한/실브라우저 수용을 증명하지 않는다. 실제 동작 검사는
@@ -20,9 +20,9 @@ callback·웹 control/테스트 링크 소실은 실패하며, 이 결함 주입
 
 ```sh
 python3 -B tools/validate_web_menu_inventory.py
-# inventory 확인: exit0, OPEN 2건을 출력. 전체 배터리에도 배선.
+# inventory 확인: exit0, OPEN 1건을 출력. 전체 배터리에도 배선.
 python3 -B tools/validate_web_menu_inventory.py --require-complete
-# 현재 exit1: 02/03 미완료. 이 결과를 전체 G4 PASS로 바꾸면 안 된다.
+# 현재 exit1: 03 미완료. 이 결과를 전체 G4 PASS로 바꾸면 안 된다.
 ```
 
 | 원본 메뉴 묶음 | 웹 연결 근거 / 제외 이유 |
@@ -83,7 +83,7 @@ receipt의 원래 binding epoch를 보존한다. draft/transfer artifact/자동 
 넘기지 않는다. 합성 실제 HTTP 및 UI gate는 [M4 §81](WEBUI_M4.ko.md)에 기록한다.
 inventory는 linked로 바꾸되 실제 브라우저/현장 수용은 별도로 남긴다.
 
-### G4-MENU-02 — 열린 DRC에 SVRF metadata 불러오기/교체
+### G4-MENU-02 — 열린 DRC에 SVRF metadata 불러오기/교체 (25 로컬 연결)
 
 GTK `_drc_rules_dialog`→`_drc_rules_load`는 JSON을 읽고 rule match/type census/
 선택 오류의 상세 metadata를 갱신한다. 웹 `--drc-rules`는 최초 등록 경로이며
@@ -94,6 +94,15 @@ metadata 교체까지 완료로 세면 안 된다.
 reader 재사용 여부와 별개로 metadata/query revision 및 filter/선택의 유효성을
 원자적으로 바꿔야 한다. 이전 type/page 응답을 새 metadata 결과로 보이지 않게 하고,
 다른 DB로 매칭하거나 실패한 입력 때문에 기존 유효 metadata를 조용히 지우지 않는다.
+
+M4g-25는 `Load SVRF metadata…`→opaque picker의 `load_drc_rules`로 구현했다.
+큰 ASCII DRC를 다시 읽지 않도록 동일 actor의 열린 Database에서 새 metadata만
+준비한다. 성공 시 snapshot/query revision을 원자 교체하며 실패·취소는 이전
+metadata와 revision을 그대로 둔다. layout/reviewer/저장 receipt는 유지하고
+type/filter/selection·미승인 preview는 초기화한다. 입력 JSON은16MiB 제한,
+원본 deck/include를 읽거나 파일을 쓰지 않는다. 나중의 명시 pack build/reviewer
+재연결에도 별도 승인 입력 scope와 metadata 선택을 보존한다. 합성 HTTP/DOM
+회귀는 [M4 §82](WEBUI_M4.ko.md); 실제 브라우저 수용과는 별개다.
 
 ### G4-MENU-03 — 카메라를 유지한 jobdeck 로드 레벨 재선택
 
@@ -111,7 +120,7 @@ metadata/cached source를 먼저 확인하고 실패·취소 시 기존 뷰를 �
 
 ## 3. 다음 구현과 판정
 
-다음 우선순위는02 metadata 교체,03 레벨 재선택이다. 분리 구현 단계에서도
+다음 우선순위는03 카메라 유지 레벨 재선택이다. 분리 구현 단계에서도
 CLI 시작만 가능한 상태를 원래 GTK 기능 전체의 대체로 다시 정의하지 않는다.
 세 항목을 모두 닫아도 actual browser·Python-free Linux·G1/G2/G3/G4, 공유/원격,
 조건부 M5가 자동 완료되지는 않는다. GTK 진단/APNG 및 무효 CLI 정책 결정도

@@ -309,6 +309,24 @@ note/waive status의 `binding_id`는 재연결마다 바뀌고 `review_rev`도 �
 terminal receipt는 조회/동일 replay할 수 있지만 새 DRC의 저장 결과로 해석하면
 안 된다. prepared token·다운로드 capability·자동 저장 opt-in은 승계하지 않는다.
 
+M4g-25는 같은 owner picker에 `load_drc_rules {seq,handle,context}`를 추가한다.
+context는 현재의 non-null DRC ID/revision과 view ID다. raw path/reviewer/권한 필드는
+받지 않는다. 선택한 `floe-svrf-rules` JSON만 읽으며 원본 SVRF/include는 따라가지
+않는다. candidate는 기존 DRC actor에서 매칭하고 같은 reader ID의 snapshot과
+새 query revision을 함께 commit한다. 실패하면 이전 revision도 유지한다.
+성공 receipt는 `{drc,view_id,metadata_replaced:true}`이며 replay는 재실행하지 않는다.
+UI는 receipt의 옛 catalog를 설치하지 않고 현재 authority를 새로 조회한다.
+type/filter/selection/CD·prepared focus/review preview는 무효화하되 reviewer binding,
+권한, 저장/전송 ledger와 terminal receipt, layout camera/layers는 유지한다.
+metadata는 리뷰 대상 변경이 아니므로 이미 켜진 reviewer 자동 저장 opt-in을 새로
+허용하거나 다른 reviewer로 옮기지 않는다. 과거 preview는 새 revision에서 저장할 수 없다.
+입력16MiB 및 기존 JSON 구조 제한, snapshot당256MiB 공유 admission/read lease를
+적용한다. 기존 reader256MiB와 별도라 교체 중 옛/new snapshot이 겹치면 각각 예약한다.
+worker는 추가하지 않으며 이는 RSS hard limit이 아니다. 300초 actor 대기 timeout/
+취소 뒤에도 실제 작업이 끝나기 전까지 그 candidate의 자원 예약은 남는다.
+입력 보호 등록은 snapshot commit에 묶이며 이후 pack build/reviewer 재연결도
+새 metadata의 전용 scope를 사용한다. DRC/layout 접근 roots 자체는 넓히지 않는다.
+
 M4g-22의 capabilities `display_dump:bool`은 viewer의 브라우저-local dump 지원,
 `dump_on_start:bool`은 trusted CLI `view --dump`의 초기 보관 선택이다. 일반 viewer는
 true/false, 명시 `--dump`는 true/true, 독립 displaytest는 false/false다. 브라우저

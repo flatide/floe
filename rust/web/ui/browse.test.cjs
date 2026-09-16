@@ -30,7 +30,7 @@ function rig(saved=null){
             if(method==='POST'&&path==='/api/v1/browse'){
                 assert(saved,'journal must precede admission');assert.equal(body.seq,JSON.parse(saved).request.seq);
                 let state=operations.get(body.seq);if(!state){last=Number(body.seq);state={seq:body.seq,kind:body.kind,request:JSON.parse(JSON.stringify(body)),phase:'succeeded',
-                    result:body.kind==='select'?{source_id:token(7),launch_id:token(8)}:['open_drc','reconnect_drc_review'].includes(body.kind)?{drc:{id:token(22),revision:token(23)},view_id:body.context.view_id,review_registration_required:body.kind==='open_drc'}:{page:listing(body.start||0,300)}};operations.set(body.seq,state);}
+                    result:body.kind==='select'?{source_id:token(7),launch_id:token(8)}:body.kind==='load_drc_rules'?{drc:{id:body.context.drc_id,revision:token(24)},view_id:body.context.view_id,metadata_replaced:true}:['open_drc','reconnect_drc_review'].includes(body.kind)?{drc:{id:token(22),revision:token(23)},view_id:body.context.view_id,review_registration_required:body.kind==='open_drc'}:{page:listing(body.start||0,300)}};operations.set(body.seq,state);}
                 if(hold){await new Promise(r=>{release=r;});}
                 if(lose){throw Error('lost ACK');}return state;
             }
@@ -104,5 +104,20 @@ function rig(saved=null){
     reconnectReload.operations.set(reconnectRequest.seq,reconnect.operations.get(reconnectRequest.seq));
     await reconnectReload.api.init(true,false);await wait(()=>reconnectReload.drcSelected===1);
     assert(!reconnectReload.calls.some(c=>c.method==='POST'));reconnectReload.api.stop();
-    console.log('WEB FILE PICKER: ALL OK (paging, literal names, journal-before-send, read-only recovery, identical retry, sequence collision, cancellation, late response, invalid storage)');
+    const rules=rig();await rules.api.init(true,false);assert(rules.el('drc-rules-load').disabled);
+    rules.drc.drc_id=token(22);rules.drc.revision=token(23);rules.api.changed();assert(!rules.el('drc-rules-load').disabled);
+    rules.el('drc-rules-load').onclick();await wait(()=>rules.el('browse-entries').children.length);
+    assert.equal(rules.el('browse-filter').value,'all_files');assert.match(rules.el('browse-purpose').textContent,/no files written/);
+    rules.el('browse-entries').children[0].children[0].onclick();rules.lose=true;rules.el('browse-select').onclick();
+    await wait(()=>/lost ACK/.test(rules.el('browse-status').textContent));
+    const rulesSaved=rules.saved,rulesRequest=JSON.parse(rulesSaved).request;
+    assert.equal(rulesRequest.kind,'load_drc_rules');assert.equal(JSON.parse(rulesSaved).drc_rules,true);
+    assert.deepEqual(Object.keys(rulesRequest).sort(),['context','handle','kind','seq']);rules.api.stop();
+    const rulesReload=rig(rulesSaved);rulesReload.operations.set(rulesRequest.seq,rules.operations.get(rulesRequest.seq));
+    await rulesReload.api.init(true,false);await wait(()=>rulesReload.drcSelected===1);
+    assert(!rulesReload.calls.some(c=>c.method==='POST'));assert.equal(rulesReload.selected,0);rulesReload.api.stop();
+    const rulesRetry=rig(rulesSaved);await rulesRetry.api.init(true,false);await wait(()=>/receipt/.test(rulesRetry.el('browse-status').textContent));
+    assert.equal(rulesRetry.el('browse-title').textContent,'Load SVRF metadata');rulesRetry.el('browse-check').onclick();await wait(()=>rulesRetry.drcSelected===1);
+    assert.deepEqual(rulesRetry.calls.find(c=>c.method==='POST').body,rulesRequest);rulesRetry.api.stop();
+    console.log('WEB FILE PICKER: ALL OK (paging, literal names, journal-before-send, read-only recovery, identical retry, sequence collision, cancellation, late response, invalid storage, runtime SVRF)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

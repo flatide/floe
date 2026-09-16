@@ -4,7 +4,7 @@
 const assert=require('node:assert/strict'),D=require('./drc.js'),P=require('./protocol.js');
 const nodes=new Map(),requests=[],moves=[],saves=[],chosen=new Map();
 let saved=null,serial=0,selectionRev='1',holdComparison=false,holdDescription=false,holdType=false,holdFocus=false;
-let heldComparison,heldDescription,heldType,heldFocus,badComparison=false,badTypes=false,mode='normal';
+let heldComparison,heldDescription,heldType,heldFocus,badComparison=false,badTypes=false,mode='normal',revision='r1';
 const ctx=new Proxy({}, {get:(t,k)=>k in t?t[k]:()=>{}});
 class Element {
     constructor(){this.children=[];this.style={};this.checked=false;this.value='';this.hidden=false;this.width=this.height=1;}
@@ -26,14 +26,14 @@ const meta={rule:{desc:'<script>not HTML</script>',constraints:[{metric:'width',
 const compared=(q)=>({check:q.check,local:q.error,global:row(Number(q.error),q.check).global,comparison:badComparison?{metric:'width',measured:'NaN'}:
     q.error==='1'?null:{constraint:'1',metric:q.check==='0'?'width':'area',op:'<',unit:q.check==='0'?'um':'um2',measured:'0.6',bound:'0.7',delta:'-0.09999999999999998',percent:'-14.285714285714283'}});
 function hold(token,v,set){return new Promise(resolve=>{set({token,q:null,v,resolve:()=>resolve(v)});token.abort=()=>{};});}
-function groups(){const rules=[...chosen].map(([check,errors])=>({check,errors}));return {revision:'r1',view_id:context.id,state:{selection_rev:selectionRev,total:String(rules.reduce((n,r)=>n+r.errors.length,0)),limit:5000,rules}};}
+function groups(){const rules=[...chosen].map(([check,errors])=>({check,errors}));return {revision,view_id:context.id,state:{selection_rev:selectionRev,total:String(rules.reduce((n,r)=>n+r.errors.length,0)),limit:5000,rules}};}
 function http(method,path,envelope,missing,token){
     const q=envelope&&envelope.body;requests.push({method,path,q,envelope,token});
     if(path.endsWith('/selection')){
         if(method==='POST'){assert.equal(envelope.base_selection_rev,selectionRev);selectionRev=P.next(selectionRev);if(q.kind==='clear_all')chosen.clear();else chosen.set(q.check,q.errors);}
         return Promise.resolve(groups());
     }
-    if(!q)return Promise.resolve({drc:{id:'drc',revision:'r1',source_id:'source',title:'SVRF sample',phase:'ready',metadata:{checks:'2',errors:'3',
+    if(!q)return Promise.resolve({drc:{id:'drc',revision,source_id:'source',title:'SVRF sample',phase:'ready',metadata:{checks:'2',errors:'3',
         svrf:mode==='none'?null:{matched:mode==='empty'?'0':'2',checks:'2',type_count:mode==='empty'?'0':String(types.length)}}}});
     if(q.kind==='types'){
         const list=mode==='empty'?[]:types, start=Number(q.start),end=Math.min(start+q.limit,list.length);
@@ -128,5 +128,11 @@ async function toggle(id,v){el(id).checked=v;el(id).onchange();await tick();}
     assert(el('drc-type').disabled);assert.match(el('drc-type-info').textContent,/no classified/);assert.equal(el('drc-type').children.length,1);
     mode='none';saved=null;context={...context,id:'none'};panel.stop();const before=count('types');await panel.resume();await tick();
     assert.equal(count('types'),before);assert(el('drc-type').disabled);assert.match(el('drc-type-info').textContent,/No SVRF/);panel.stop();
+    mode='normal';await panel.resume();await tick();holdType=true;el('drc-type-next').onclick();await tick();const retired=heldType;
+    mode='empty';revision='r2';holdType=false;saved=null;chosen.clear();selectionRev='1';
+    const camera=JSON.stringify(context),nMoves=moves.length;await panel.refresh();await tick();retired.resolve();await tick();
+    assert(retired.token.cancelled,'same-reader metadata revision did not cancel old type response');
+    assert(el('drc-type').disabled);assert.equal(el('drc-type').children.length,1);assert.match(el('drc-summary').textContent,/SVRF 0\/2 matched \(no matching checks\)/);
+    assert.equal(JSON.stringify(context),camera);assert.equal(moves.length,nMoves);panel.stop();
     console.log('WEB SVRF UI: ALL OK (bounded types, intersections/groups, plain-text metadata/comparison, stale/cancel/restore, In view jump ordering, no pan reads)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

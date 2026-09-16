@@ -1,6 +1,7 @@
 //! Owner-only, explicit DRC replacement. Registry lock linearizes retirement
 //! with HTTP panel/selection/prepared-edit commits; native I/O stays off-reactor.
 mod replace;
+mod rules;
 use super::{Failure, Registration, Service};
 use crate::{
     operations::{Admission, Ledger},
@@ -12,6 +13,7 @@ use floe_app_core::{
     ErrorKind, Result,
 };
 pub(crate) use replace::{OpenContext, PreparedOpen};
+pub(crate) use rules::PreparedRules;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -645,15 +647,11 @@ fn execute(inner: &Inner, work: Work) -> Value {
         .clone()
         .expect("build owns registration");
     let r = &registration;
-    let reopened = Service::start_with_rules(
-        &r.resources,
-        Arc::clone(&r.scope),
-        target,
-        None,
-        r.rules.as_deref(),
-        &r.source_id,
-    )
-    .or_else(|e| {
+    let mut next = r.clone();
+    next.path = target.to_owned();
+    next.waives = None;
+    next.readonly = None;
+    let reopened = Service::start_registration(next).or_else(|e| {
         let mut failed = r.clone();
         failed.path = target.to_owned();
         failed.waives = None;
@@ -842,6 +840,7 @@ mod tests {
                 },
                 waives: (field == "waives").then(|| target.clone()),
                 rules: (field == "rules").then(|| target.clone()),
+                rules_scope: None,
                 readonly: None,
                 source_id: "source".into(),
             };
@@ -867,6 +866,7 @@ mod tests {
             path: std::env::temp_dir().join("revision-test-not-opened.db"),
             waives: None,
             rules: None,
+            rules_scope: None,
             readonly: None,
             source_id: "source".into(),
         };
@@ -896,6 +896,7 @@ mod tests {
             path: std::env::temp_dir().join("registry-test-not-opened.db"),
             waives: None,
             rules: None,
+            rules_scope: None,
             readonly: None,
             source_id: "source".into(),
         };

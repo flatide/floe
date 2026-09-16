@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M4g-24c 런처 범위 reviewer 명시 재연결).
+작성 2026-08-29, 갱신 2026-09-16(M4g-25 실행 중 SVRF metadata 교체).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -145,11 +145,16 @@ M4g-24b의 레이아웃 유지 DRC 열기에 이어 M4g-24c는 `Reconnect launch
 기존 저장/전송 순번·receipt를 보존하고 자동 저장 동의는 초기화한다. G4-MENU-01은
 이 권한 정책 아래 로컬 구현·회귀를 연결했다. 실제 브라우저 수용 완료는 아니다.
 
+M4g-25는 같은 picker에서 `Load SVRF metadata…`를 연결한다([M4 §82](WEBUI_M4.ko.md)).
+열린 DRC reader를 재사용해 geometry를 재파싱하지 않고, metadata와 query revision을
+검증 후 원자 교체한다. 실패 시 기존 metadata/revision, 성공 시 layout/reviewer/저장
+receipt를 보존한다. 이전 type/filter/selection·미승인 preview는 무효화한다.
+
 2026-09-16 M4g-23 [GTK 메뉴 재대조](WEBUI_G4_MENU.ko.md): 실행 중 DRC 파일 열기/
 교체, SVRF metadata 교체, 카메라 유지 jobdeck 로드 레벨 재선택의 누락을 확인했다.
-첫 항목은 사용자 확정 권한 정책으로 연결했으며 SVRF 교체·레벨 재선택2건이 남았다. 초기 CLI 등록·일반 Open·Mode 전환만으로
+첫 두 항목은 로컬 구현·게이트를 연결했으며 카메라 유지 레벨 재선택1건이 남았다. 초기 CLI 등록·일반 Open·Mode 전환만으로
 각 기능이 완료됐다고 보지 않는다. 메뉴 inventory의 exit0는 연결 목록 검사이고,
-`--require-complete`는 현재2건 때문에 exit1이다. 실제 브라우저/G4 수용과도 별개다.
+`--require-complete`는 현재1건 때문에 exit1이다. 실제 브라우저/G4 수용과도 별개다.
 
 2026-09-16, M4g-22 기준. **로컬 Rust/web 대체 기능은 후반부지만 전체 계획의
 완료 직전은 아니다.** 아래는 구현과 수용을 분리한 현재 상태이며, 위의 순차 기록에

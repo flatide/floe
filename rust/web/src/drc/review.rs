@@ -622,7 +622,7 @@ impl Service {
             }
             (s.binding.read_target.clone(), s.binding.reader_id.clone())
         };
-        let r = &reader.registration;
+        let r = reader.current_registration();
         let c = &self.inner.config;
         if reader_id.as_ref().is_some_and(|id| *id != reader.id) {
             return Err(floe_app_core::Error::input(

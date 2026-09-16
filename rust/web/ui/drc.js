@@ -953,6 +953,7 @@
                 if (registration.metadata) {
                     const m = registration.metadata;
                     if (m.format) { el('drc-summary').textContent += ' · ' + (m.format === 'ascii' ? 'ASCII' : 'ICE'); }
+                    if (m.svrf) { el('drc-summary').textContent += ' · SVRF ' + cursor(m.svrf.matched) + '/' + cursor(m.svrf.checks) + ' matched' + (m.svrf.matched === '0' ? ' (no matching checks)' : ''); }
                     if (m.truncated_records !== undefined && cursor(m.truncated_records) !== '0') { el('drc-summary').textContent += ' · ' + m.truncated_records + ' truncated records'; }
                     if (m.review_cache === 'cache') { el('drc-summary').textContent += ' · current adjacent ICE cache'; }
                     if (m.review_cache === 'missing' || m.review_cache === 'ignored') {

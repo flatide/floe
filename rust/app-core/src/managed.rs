@@ -173,6 +173,19 @@ impl Resources {
             false,
         )
     }
+    /// Owned SVRF snapshot/input peak and its file lease. The existing picker
+    /// or DRC actor does the work; a retained snapshot needs no extra CPU slot.
+    /// Keep this permit with the snapshot, including retired in-flight reads.
+    pub fn drc_metadata(self: &Arc<Self>, path: &Path) -> Result<Permit> {
+        self.acquire(
+            Usage {
+                decoded_mb: 256,
+                ..Usage::default()
+            },
+            keys([path.to_owned()])?,
+            false,
+        )
+    }
     /// Hold this permit across prepare/start/poll/cancel AND child reap. The
     /// ordinary PreparedIndex still owns the cross-process exclusive OS lock.
     pub fn index(
@@ -447,6 +460,30 @@ mod tests {
             )
             .unwrap();
         drop((fits, with_rules));
+        assert_eq!(r.usage(), Usage::default());
+    }
+    #[test]
+    fn metadata_overlap_retains_budget_and_read_lease_without_another_worker() {
+        let r = Resources::new(Limits {
+            decoded_mb: 768,
+            ..Limits::default()
+        })
+        .unwrap();
+        let path = std::env::temp_dir().join("floe-metadata-reservation.rules.json");
+        let reader = r.drc([]).unwrap();
+        let old = r.drc_metadata(&path).unwrap();
+        let new = r.drc_metadata(&path).unwrap();
+        assert_eq!(r.usage().decoded_mb, 768);
+        assert_eq!(r.usage().cpu_slots, 1);
+        assert_eq!(r.usage().workers, 0);
+        assert!(r.drc_metadata(&path).is_err());
+        assert!(r.index([path.clone()], 1).is_err());
+        drop(old);
+        assert_eq!(r.usage().decoded_mb, 512);
+        assert!(r.index([path.clone()], 1).is_err());
+        drop(new);
+        drop(r.index([path], 1).unwrap());
+        drop(reader);
         assert_eq!(r.usage(), Usage::default());
     }
     #[test]

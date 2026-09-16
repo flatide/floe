@@ -57,6 +57,22 @@ impl Revision {
     pub(super) fn owns(&self, change: &Change) -> bool {
         Arc::ptr_eq(&self.0, &change.0)
     }
+    /// A fully prepared in-memory replacement. A failed precommit leaves even
+    /// the old revision intact; no native I/O or reentrant revision lookup in f.
+    pub(super) fn replace_at<T>(
+        &self,
+        expected: &str,
+        next: String,
+        f: impl FnOnce() -> Result<T, Failure>,
+    ) -> Result<T, Failure> {
+        let mut s = self.0.lock().unwrap();
+        if s.closed || s.changing || s.token != expected {
+            return Err("drc_context_changed");
+        }
+        let value = f()?;
+        s.token = next;
+        Ok(value)
+    }
     pub(super) fn close(&self) {
         self.0.lock().unwrap().closed = true;
     }
@@ -84,6 +100,35 @@ impl Drop for Change {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prepared_replacement_only_retires_revision_after_success() {
+        let r = Revision::new("old".into());
+        let old = r.capture("old").unwrap();
+        assert_eq!(
+            r.replace_at("old", "bad".into(), || Err::<(), _>("drc_cancelled")),
+            Err("drc_cancelled")
+        );
+        old.with_current(|| Ok(())).unwrap();
+        assert_eq!(r.snapshot().0, "old");
+        assert_eq!(
+            r.replace_at("stale", "bad".into(), || panic!("stale commit")),
+            Err::<(), _>("drc_context_changed")
+        );
+        r.replace_at("old", "new".into(), || Ok(())).unwrap();
+        assert_eq!(old.with_current(|| Ok(())), Err("drc_context_changed"));
+        r.capture("new").unwrap();
+        let change = r.begin().unwrap();
+        assert_eq!(
+            r.replace_at(&r.snapshot().0, "bad".into(), || panic!("busy commit")),
+            Err::<(), _>("drc_context_changed")
+        );
+        drop(change);
+        r.close();
+        assert_eq!(
+            r.replace_at(&r.snapshot().0, "bad".into(), || panic!("closed commit")),
+            Err::<(), _>("drc_context_changed")
+        );
+    }
     #[test]
     fn changing_cancelled_and_closed_revisions_never_revive() {
         let r = Revision::new("a".repeat(64));

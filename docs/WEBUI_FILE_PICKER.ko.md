@@ -44,6 +44,23 @@ Dismiss해야 한다. metadata 등록만 완료된 소스는 목록에 남을 �
 기록이 만료·손상됐거나 다른 요청이 같은 seq를 선점한 경우 자동 신규 선택은 하지
 않는다. 현재는 새 세션으로 복구해야 한다.
 
+## 열린 DRC와 SVRF metadata
+
+M4g-24b/c·25는 같은 승인 폴더/파일 handle/요청 이력을 DRC에도 사용한다.
+`Open DRC results…`는 현재 layout을 유지하며 읽기 전용으로 DRC를 교체한다.
+DRC 전용 필터에서는 명시 ICE도 선택할 수 있다. 파일 선택만으로 reviewer 권한을
+주지 않으며 `Reconnect launcher reviewer…`에서 런처가 고정한 범위만 별도 동의로
+재연결한다. 원본 ASCII의 pack 생성은 별도 Build pack 승인 대상이다.
+
+`Load SVRF metadata…`는 열린 DRC에 `floe-svrf-rules` JSON을 불러온다. All files에서
+`.rules.json` 이름을 검색할 수 있다. 원본 deck/include parser가 아니며 다른 파일을
+따라 읽거나 쓰지 않는다. 기존 geometry reader를 재사용하고 검증 성공 후 metadata와
+query revision만 함께 바꾼다. 실패·취소는 이전 metadata/revision을 보존한다.
+성공 시 type/filter/선택·미승인 preview는 초기화하되 카메라·레이어·reviewer 권한·
+완료된 저장 이력은 유지한다. 매칭0건도 명시하며 자동 색인은 하지 않는다.
+응답 유실은 위와 동일하게 GET/동일 요청 재확인으로 처리한다. 상세 자원·수명 계약은
+[M4 §82](WEBUI_M4.ko.md)를 따른다.
+
 ## 자원과 파일 변경
 
 한 작업자, 한 active 요청, 최대100,000개 검색 결과/1,000,000개 조사 항목,

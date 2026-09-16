@@ -32,7 +32,7 @@ impl OpenContext {
         }
         Ok(())
     }
-    fn matches(&self, s: &State) -> bool {
+    pub(super) fn matches(&self, s: &State) -> bool {
         match (&s.current, &self.drc_id, &self.revision) {
             (None, None, None) => s.registration.is_none(),
             (Some(r), Some(id), Some(rev)) => {
@@ -134,6 +134,7 @@ impl Registry {
             path,
             waives: None,
             rules: None,
+            rules_scope: None,
             readonly: None,
             source_id,
         });
@@ -206,7 +207,7 @@ impl Registry {
             protection: None,
             reconnect: None,
         };
-        let r = &old.registration;
+        let r = old.current_registration();
         pending
             .owner
             .with_current(&pending.context.view_id, |v| {
@@ -225,15 +226,10 @@ impl Registry {
         protection.protect_inputs(&inputs, &inputs, stop)?;
         protection.protect_review_targets(&notes.protected_targets(&r.path)?, stop)?;
         pending.protection = Some(protection);
-        let reader = if editable && waives.is_none() {
-            Service::start_with_rules(
-                &r.resources,
-                r.scope.clone(),
-                &r.path,
-                None,
-                r.rules.as_deref(),
-                &r.source_id,
-            )?
+        let mut registration = r.clone();
+        registration.waives = None;
+        registration.readonly = if editable && waives.is_none() {
+            None
         } else {
             let selected = if editable {
                 // Never adopt legacy-temp data for an editor, or open a
@@ -252,15 +248,15 @@ impl Registry {
             } else {
                 floe_app_core::drc::select_review(&r.path, reviewer, stop)?
             };
-            Service::start_readonly_review(
-                &r.resources,
-                r.scope.clone(),
-                selected,
-                r.rules.as_deref(),
-                &r.source_id,
-                reviewer,
-            )?
+            Some(super::super::Readonly {
+                reviewer: reviewer.into(),
+                packed: true,
+                source: selected.source,
+                targets: selected.targets,
+                cache_status: "explicit",
+            })
         };
+        let reader = Service::start_registration(registration)?;
         pending.candidate = Some(reader.clone());
         let end = Instant::now() + OPEN_TIMEOUT;
         loop {
@@ -287,7 +283,7 @@ impl Registry {
                 .map(|w| w.prepare_binding(&reader))
                 .transpose()?,
         ));
-        pending.registration = Some(reader.registration.clone());
+        pending.registration = Some(reader.current_registration());
         Ok(pending)
     }
 }
@@ -377,6 +373,7 @@ mod tests {
                 path: std::env::temp_dir().join("runtime-drc-test-not-opened.db"),
                 waives: None,
                 rules: None,
+                rules_scope: None,
                 readonly: None,
                 source_id: "source".into(),
             },

@@ -54,6 +54,11 @@ pub enum Request {
         context: crate::drc::registry::OpenContext,
         approve: bool,
     },
+    LoadDrcRules {
+        seq: String,
+        handle: String,
+        context: crate::drc::registry::OpenContext,
+    },
 }
 impl Request {
     fn identity(&self) -> (&str, &'static str) {
@@ -63,6 +68,7 @@ impl Request {
             Self::Select { seq, .. } => (seq, "select"),
             Self::OpenDrc { seq, .. } => (seq, "open_drc"),
             Self::ReconnectDrcReview { seq, .. } => (seq, "reconnect_drc_review"),
+            Self::LoadDrcRules { seq, .. } => (seq, "load_drc_rules"),
         }
     }
     fn validate(&self) -> std::result::Result<(), &'static str> {
@@ -95,6 +101,15 @@ impl Request {
                 snapshot
             }
             Self::Select { handle, .. } => handle,
+            Self::LoadDrcRules {
+                handle, context, ..
+            } => {
+                context.validate()?;
+                if context.drc_id.is_none() {
+                    return Err("invalid_request");
+                }
+                handle
+            }
             Self::OpenDrc {
                 handle, context, ..
             } => {
@@ -255,6 +270,7 @@ impl Drop for Picker {
 enum Output {
     Page(Value),
     Drc(Box<crate::drc::registry::PreparedOpen>),
+    Rules(Box<crate::drc::registry::PreparedRules>),
     Selected {
         source_id: String,
         deck: bool,
@@ -306,6 +322,14 @@ fn execute(
             .ok_or_else(|| Error::input("review reconnect unavailable"))?
             .prepare_reconnect(Arc::clone(service), context.clone(), stop)
             .map(|p| Output::Drc(Box::new(p))),
+        Request::LoadDrcRules {
+            handle, context, ..
+        } => {
+            let selected = browser.select(handle, stop)?;
+            drc.ok_or_else(|| Error::input("DRC metadata unavailable"))?
+                .prepare_rules(service.clone(), selected, context.clone(), stop)
+                .map(|p| Output::Rules(Box::new(p)))
+        }
     }
 }
 fn run(
@@ -343,6 +367,7 @@ fn run(
         let result=result.and_then(|output|match output {
             Output::Page(p)=>Ok(json!({"page":p})),
             Output::Drc(p)=>p.commit(&work.stop),
+            Output::Rules(p)=>p.commit(&work.stop),
             Output::Selected{source_id,deck,levels}=>{
                 let (id,_)=launch.reserve()?;
                 let request=json!({"kind":"open","seq":"1","source_id":source_id,"mode":"level","levels":{"mode":"all"},

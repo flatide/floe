@@ -61,6 +61,10 @@ pub(super) fn execute(
     }
     p.unchanged()?;
     let value = match request {
+        Command::PrepareMetadata(candidate) => {
+            candidate.lock().unwrap().compile(p, stop)?;
+            json!({})
+        }
         Command::ApplyWaives(_) => unreachable!(),
         Command::ReviewTargets { identity, refs } => {
             let gids = p.review_targets(&identity, &refs, stop)?;

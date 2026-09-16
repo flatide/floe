@@ -45,7 +45,7 @@ POLICIES = {
     "_ruler_pop": linked("ruler-pop", "measure", "measure"),
     "_rulers_clear": linked("ruler-clear", "measure", "measure"),
     "_drc_open_dialog": linked("drc-open", "browse", "browse"),
-    "_drc_rules_dialog": (1, "open", "Load/replace SVRF metadata in the running review", None, None),
+    "_drc_rules_dialog": linked("drc-rules-load", "browse", "browse"),
     "_drc_step": linked("drc-step-next", "drc", "drc-navigation", count=2),
     "_drc_waive_key": linked("waives-action", "drc-waives", "drc-waives"),
     "_drc_waive_save_dialog": linked("transfer-export", "drc-transfer", "drc-transfer"),

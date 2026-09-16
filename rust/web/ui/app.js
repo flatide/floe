@@ -1003,7 +1003,7 @@
         available:function(){return !indexBlocked()&&!stopped&&!submitting&&!ownerBusy&&(!launcher||!launcher.blocked());},
         drcContext:function(){return drcPanel.openContext();},
         reviewGrant:function(){return drcPanel.reviewGrant();},
-        drcSelected:async function(kind){await drcPanel.refresh();notice(kind==='reconnect_drc_review'?'Launcher reviewer reconnected; layout unchanged. Automatic saving remains off until enabled again.':'DRC opened read-only; layout unchanged. Reviewer registration and automatic saving do not transfer.');},
+        drcSelected:async function(kind){await drcPanel.refresh();notice(kind==='load_drc_rules'?'SVRF metadata replaced; layout and reviewer unchanged. Filters, selection and unapproved previews reset.':kind==='reconnect_drc_review'?'Launcher reviewer reconnected; layout unchanged. Automatic saving remains off until enabled again.':'DRC opened read-only; layout unchanged. Reviewer registration and automatic saving do not transfer.');},
         selected:function(){startupWaiting=false;pendingStartup=null;notice('File selected. Preparing the open request; indexing requires separate approval.');},
         loadPending:function(){return sessionStorage.getItem('floe-browse-pending:'+auth.session_id);},
         savePending:function(value){const key='floe-browse-pending:'+auth.session_id;if(value===null){sessionStorage.removeItem(key);}else{sessionStorage.setItem(key,value);}},

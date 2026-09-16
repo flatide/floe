@@ -44,6 +44,7 @@ struct State {
     closed: bool,
     failure: Option<Failure>,
     metadata: Option<Value>,
+    rules: Option<Arc<metadata::Snapshot>>,
 }
 struct Inner {
     state: Mutex<State>,
@@ -65,6 +66,7 @@ struct Registration {
     path: PathBuf,
     waives: Option<PathBuf>,
     rules: Option<PathBuf>,
+    rules_scope: Option<Arc<AccessScope>>,
     readonly: Option<Readonly>,
     source_id: String,
 }
@@ -105,7 +107,14 @@ impl Ticket {
         &mut self,
         stop: &AtomicUsize,
     ) -> std::result::Result<Vec<u8>, Failure> {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        self.blocking_result(stop, std::time::Duration::from_secs(30))
+    }
+    fn blocking_result(
+        &mut self,
+        stop: &AtomicUsize,
+        timeout: std::time::Duration,
+    ) -> std::result::Result<Vec<u8>, Failure> {
+        let end = std::time::Instant::now() + timeout;
         loop {
             if stop.load(Ordering::Relaxed) != 0 {
                 return Err("drc_cancelled");
@@ -217,6 +226,7 @@ impl Service {
                     closed: true,
                     failure: Some(failure),
                     metadata: None,
+                    rules: None,
                 }),
                 wake: Condvar::new(),
                 revision: revision::Revision::new(identity()?),
@@ -335,13 +345,41 @@ impl Service {
         source_id: &str,
         readonly: Option<Readonly>,
     ) -> Result<Arc<Self>> {
+        Self::start_registration(Registration {
+            resources: resources.clone(),
+            scope,
+            path: path.to_owned(),
+            waives: waives.map(Path::to_owned),
+            rules: rules.map(Path::to_owned),
+            rules_scope: None,
+            source_id: source_id.into(),
+            readonly,
+        })
+    }
+    fn start_registration(r: Registration) -> Result<Arc<Self>> {
+        let resources = &r.resources;
+        let scope = r.scope.clone();
+        let source_id = &r.source_id;
+        let readonly = r.readonly.clone();
         if source_id.is_empty() || source_id.len() > 128 {
             return Err(Error::input("invalid registered DRC source"));
         }
-        let path = scope.check(path)?;
-        let waives = waives.map(|p| scope.check(p)).transpose()?;
-        let rules = rules.map(|p| scope.check(p)).transpose()?;
-        let permit = resources.drc_with_rules(
+        let path = scope.check(&r.path)?;
+        if let Some(targets) = readonly.as_ref().and_then(|r| r.targets.as_ref()) {
+            targets.validate(&path, &readonly.as_ref().unwrap().reviewer)?;
+        }
+        let waives = r.waives.as_deref().map(|p| scope.check(p)).transpose()?;
+        let rules_scope = r.rules_scope.clone().unwrap_or_else(|| scope.clone());
+        let rules = r
+            .rules
+            .as_deref()
+            .map(|p| rules_scope.check(p))
+            .transpose()?;
+        let rules_permit = rules
+            .as_ref()
+            .map(|p| resources.drc_metadata(p))
+            .transpose()?;
+        let permit = resources.drc(
             std::iter::once(path.clone())
                 .chain(waives.clone())
                 .chain(readonly.as_ref().map(|r| r.source.clone()))
@@ -350,9 +388,7 @@ impl Service {
                         .as_ref()
                         .and_then(|r| r.targets.as_ref())
                         .map(|t| t.waives.clone()),
-                )
-                .chain(rules.clone()),
-            rules.is_some(),
+                ),
         )?;
         let id = crate::auth::public_id()
             .map_err(|_| Error::new(ErrorKind::Io, "entropy unavailable"))?;
@@ -366,21 +402,23 @@ impl Service {
                 closed: false,
                 failure: None,
                 metadata: None,
+                rules: None,
             }),
             wake: Condvar::new(),
             revision: revision::Revision::new(revision),
         });
         let service = Arc::new(Self {
             id,
-            source_id: source_id.into(),
+            source_id: source_id.clone(),
             registration: Registration {
                 resources: Arc::clone(resources),
                 scope: Arc::clone(&scope),
                 path: path.clone(),
                 waives: waives.clone(),
                 rules: rules.clone(),
+                rules_scope: Some(rules_scope.clone()),
                 readonly: readonly.clone(),
-                source_id: source_id.into(),
+                source_id: source_id.clone(),
             },
             title: path
                 .file_name()
@@ -397,7 +435,7 @@ impl Service {
             .name("floe-drc-read".into())
             .spawn(move || {
                 let _permit = permit;
-                let opened: Result<(Database, Option<metadata::Metadata>)> = (|| {
+                let opened: Result<(Database, Option<Arc<metadata::Snapshot>>)> = (|| {
                     scope.check(&path)?;
                     if let Some(p) = &waives {
                         scope.check(p)?;
@@ -420,13 +458,13 @@ impl Service {
                         )?;
                         store.snapshot(Arc::clone(&stop))?.apply_waives(&mut pack, &stop)?;
                     }
-                    let metadata = rules
-                        .as_ref()
-                        .map(|p| {
-                            scope.check(p)?;
-                            metadata::Metadata::load(p, &pack, &stop)
-                        })
-                        .transpose()?;
+                    let metadata = rules.as_ref().zip(rules_permit).map(|(path, permit)| {
+                        let input = metadata::Input { path: path.clone(), scope: rules_scope.clone() };
+                        let candidate = metadata::Candidate::load(input, permit, &stop)?;
+                        let mut candidate = candidate.lock().unwrap();
+                        candidate.compile(&pack, &stop)?;
+                        candidate.take()
+                    }).transpose()?;
                     floe_app_core::check_cancelled(&stop)?;
                     if let Some(r) = &readonly { r.validate_open(&pack, &scope)?; }
                     pack.unchanged()?;
@@ -434,16 +472,19 @@ impl Service {
                 })();
                 match opened {
                     Ok((mut pack, metadata)) => {
-                        inner.state.lock().unwrap().metadata = Some(json!({
+                        let mut state = inner.state.lock().unwrap();
+                        state.metadata = Some(json!({
                             "cell":pack.cell().chars().take(256).collect::<String>(),
                             "cell_truncated":pack.cell().chars().count()>256,
                             "precision":pack.precision().to_string(),"errors":pack.total().to_string(),
                             "checks":pack.check_count().to_string(),"waives":pack.has_waives(),
                             "format":pack.format(),"truncated_records":pack.truncated_records().to_string(),
                             "review_cache":readonly.as_ref().map(|r| r.cache_status),
-                            "svrf":metadata.as_ref().map(metadata::Metadata::summary),
+                            "svrf":metadata.as_ref().map(|m|m.data.summary()),
                         }));
-                        run(&inner, &mut pack, metadata.as_ref());
+                        state.rules = metadata;
+                        drop(state);
+                        run(&inner, &mut pack);
                     }
                     Err(e) => {
                         let mut state = inner.state.lock().unwrap();
@@ -456,6 +497,9 @@ impl Service {
                 state.closed = true;
                 state.active = None;
                 state.pending.clear();
+                let rules = state.rules.take();
+                drop(state);
+                drop(rules); // large owned metadata drops on its actor
             })?;
         *service.thread.lock().unwrap() = Some(handle);
         Ok(service)
@@ -469,6 +513,14 @@ impl Service {
     }
     pub fn revision(&self) -> String {
         self.inner.revision.snapshot().0
+    }
+    fn current_registration(&self) -> Registration {
+        let mut registration = self.registration.clone();
+        if let Some(snapshot) = &self.inner.state.lock().unwrap().rules {
+            registration.rules = Some(snapshot.input.path.clone());
+            registration.rules_scope = Some(snapshot.input.scope.clone());
+        }
+        registration
     }
     fn fence(&self, expected: &str) -> std::result::Result<revision::Fence, Failure> {
         self.inner.revision.capture(expected)
@@ -600,7 +652,7 @@ impl Drop for Service {
         }
     }
 }
-fn run(inner: &Inner, pack: &mut Database, metadata: Option<&metadata::Metadata>) {
+fn run(inner: &Inner, pack: &mut Database) {
     loop {
         let work = {
             let mut s = inner.state.lock().unwrap();
@@ -624,7 +676,14 @@ fn run(inner: &Inner, pack: &mut Database, metadata: Option<&metadata::Metadata>
             .as_ref()
             .map_or(Ok(()), |f| f.with_current(|| Ok(())));
         let result = current.and_then(|()| {
-            read::execute(pack, metadata, work.request, &work.stop).map_err(|e| code(&e))
+            let metadata = inner.state.lock().unwrap().rules.clone();
+            read::execute(
+                pack,
+                metadata.as_ref().map(|m| &m.data),
+                work.request,
+                &work.stop,
+            )
+            .map_err(|e| code(&e))
         });
         if applying && result.is_ok() {
             if let Some(m) = inner.state.lock().unwrap().metadata.as_mut() {

@@ -5852,3 +5852,56 @@ diff 검사도 확인했다. 실제 브라우저 다운로드는 §80의 도구
 레벨 재선택2건**이다. 진단/무효 CLI 경계 재대조, 실제 브라우저·Python-free Linux·
 G1/G4·현장 수용, M2 공유/원격 승인·구현 및 조건부 M5가 별도로 남는다. 메뉴
 inventory의 linked37/open2는 기능 전체 수용률이 아니다. 전체 goal은 진행 중이다.
+
+## 82. M4g-25 — 실행 중 SVRF metadata 원자 교체
+
+2026-09-16. `Load SVRF metadata…`는 현재 DRC에 `floe-svrf-rules` JSON을 불러오거나
+교체한다. 승인 폴더의 opaque 파일 handle과 현재 view/DRC/revision만 전송하며
+원본 SVRF deck/include 해석·임의 path 입력·파일 쓰기·reviewer 권한 부여는 없다.
+실패한 파일 선택이 유효한 metadata를 지우지 않으며 매칭0건은 summary에 명시한다.
+
+- 같은 DRC reader/Database를 재사용한다. picker actor가 bounded JSON을 읽고
+  기존 DRC actor가 check 이름에 매칭한 불변 snapshot을 준비한다. 큰 ASCII DRC를
+  다시 파싱하지 않는다. 준비 중 기존 조회는 유지되며 query fence가 결과를 검증한다.
+- picker 취소/receipt lock→registry→view→review services→reader state→revision 순으로
+  짧은 in-memory commit을 한다. 보호 입력 등록, metadata snapshot, 새 query revision이
+  함께 공개된다. 실패하면 이전 revision도 유지한다. 새 revision에서는 이전 query/
+  type/filter/selection/CD/prepared focus와 미승인 review/transfer preview가 무효다.
+  진행 중 review preparation/publication/transfer와는 성공 commit하지 않는다.
+- layout 카메라·레이어·렌더러, DRC reader ID·waive 상태, reviewer binding/권한은
+  유지한다. 완료된 저장/전송 receipt와 high-water도 보존한다. 같은 reviewer의 기존
+  자동 저장 opt-in을 새로 부여하지 않으며, 새 metadata가 이전 preview를 승인하지 않는다.
+  다른 DRC 열기는 기존대로 metadata를 버리고 reviewer를 detach한다.
+- startup의 reader512MiB(기존256+metadata256)를 reader256와 snapshot256 예약으로
+  분리했다. 교체 후보·이전 snapshot·진행 중 조회 참조는 각자의 예약과 read lease를
+  실제 사용 종료까지 가진다. 추가 CPU/worker를 만들지 않는다. JSON16MiB/구조 제한과
+  별개인 공유 admission이며 RSS hard limit은 아니다. actor 대기300초 timeout은
+  실제 NFS/worker 종료 확인을 뜻하지 않는다.
+- metadata 입력은 별도 scope로 보관하며 DRC/layout root를 넓히지 않는다. 이후
+  명시 pack build/reviewer 재연결에도 마지막 metadata 선택을 유지하고 기존
+  defaults/index/review 게시의 보호 입력에 포함한다. index hot reload는 추가하지 않는다.
+- 같은 picker ledger를 쓰므로 잃어버린 ACK는 GET부터 복구하고 동일 요청만 replay한다.
+  UI는 성공 receipt의 옛 catalog를 설치하지 않고 현재 catalog를 다시 조회한다.
+
+집중 검증: core280/web95 단위(외부 fixture 테스트 각각7/3개 ignored), 전체 ES2017/UI, release build,
+실제 `validate_web_drc_rules.py`가 통과했다. 새 HTTP gate는 ASCII/ICE 양쪽의 같은 reader
+교체, type/constraint 변경, malformed/version/16MiB 초과/교체된 inode/stale context의
+실패 보존, 취소 race와 동일 replay, 권한 필드 거부, 이전 preview 거부/저장 receipt 유지,
+build/reconnect metadata 유지, camera/input fingerprint와 종료 수거를 확인한다.
+DOM gate는 metadata-only revision에서 늦은 type 응답 폐기, 매칭0건 표시,
+journal-before-send·GET 복구·동일 재전송을 확인한다. 실제 브라우저 수용은 아니다.
+로그: `/private/tmp/floe-live-svrf-{unit,ui,build,http}.log`.
+strict all-target clippy도 exit0으로 통과했다(`/private/tmp/floe-live-svrf-clippy.log`).
+전체 `sh tools/validate_rust.sh`도 exit0, `RUST VALIDATION: ALL OK`로 완료했다
+(`/private/tmp/floe-live-svrf-battery.log`). 새 runtime SVRF HTTP gate와 기존 DRC
+교체/reviewer 재연결 gate를 포함하고, jobdeck83·renderer46·KLayout13 PX+
+2 phase-exact+14 style(j1/j8)을 통과했다. scoped fmt·diff 검사와 메뉴 inventory도
+통과했다. `--require-complete`는 남은 메뉴1건 때문에 의도대로 exit1이다.
+집중 검증 뒤 runtime 코드를 추가 변경하지 않았다. 검증용 `.venv` 링크만 제거했으며
+대상 가상환경과 main/jobdeck의 별도 변경·새 문서를 보존했다.
+
+커밋 시 목표 잔여: GTK 메뉴 구현 목록은 카메라 유지 jobdeck 레벨 재선택1건이다.
+inventory linked38/open1은 전체 수용률이 아니다. 진단/무효 CLI 최종 재대조,
+실제 브라우저·Python-free Linux·G1/G4·현장, M2 공유/원격 승인·구현, 조건부 M5는
+별도로 남는다. 브라우저 URL 정책 차단을 우회하지 않았으며 다운로드는 미검증이다.
+main/jobdeck 작업은 이 단계에 포함하지 않는다. 전체 goal은 진행 중이다.

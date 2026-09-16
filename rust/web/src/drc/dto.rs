@@ -102,6 +102,7 @@ pub enum Request {
     },
 }
 pub(super) enum Command {
+    PrepareMetadata(std::sync::Arc<std::sync::Mutex<super::metadata::Candidate>>),
     List {
         check: usize,
         start: u64,
