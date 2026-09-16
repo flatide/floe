@@ -3,7 +3,8 @@
 후속 M2b-2는 [읽기 전용 follow 전송](WEBUI_SHARING_FOLLOW.ko.md)을 연결한다.
 이 문서 아래의 `not_connected`/전송 미구현은 M2b-1 시점 기록이며, 현재 follow는
 `follow_frames`다. M2b-3a의 [독립 렌더 기반](WEBUI_SHARING_EXPLORE.ko.md)에서 explore는
-`explore_frames`로 연결했다. CLI/공유 UI·독립 DRC/scoped query는 여전히 남는다.
+`explore_frames`로 연결했다. M2b-3b1의 [scoped query/룰러](WEBUI_SHARING_QUERY.ko.md)도
+연결됐으며 CLI/공유 UI·독립 DRC는 여전히 남는다.
 
 2026-09-16, `feature/webui`. [설계/수용 기준](WEBUI_M2_SHARING.ko.md)의 첫 구현 단계.
 사용자가 승인한 **기본 off, 합성·loopback 우선** 범위다. 원격 공개·노트 본문·

@@ -22,6 +22,40 @@ pub(super) fn layers_within(scope: &Layers, requested: &Layers) -> bool {
         }
     }
 }
+pub(super) fn scoped_layers(
+    controller: &ViewController,
+    scope: &Scope,
+    layers: &Layers,
+) -> Result<Layers, &'static str> {
+    // Resolve group aliases BEFORE checking authority. The public All alias
+    // means all GRANTED planes for display edits, not all dataset planes.
+    let selected = if *layers == Layers::All {
+        scope.layers.clone()
+    } else {
+        controller
+            .snapshot()
+            .state
+            .edit(
+                &controller.model,
+                Patch {
+                    layers: Some(layers.clone()),
+                    ..Default::default()
+                },
+            )
+            .map_err(|_| {
+                if scope.layers == Layers::All {
+                    "invalid_request"
+                } else {
+                    "forbidden"
+                }
+            })?
+            .layers
+    };
+    if !layers_within(&scope.layers, &selected) {
+        return Err("forbidden");
+    }
+    Ok(selected)
+}
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct DisplayPatch {
@@ -55,28 +89,7 @@ impl DisplayPatch {
         }
         .core()?;
         if let Some(layers) = &patch.layers {
-            // "all" means all GRANTED planes. Resolve groups before the check:
-            // a jobdeck parent can expand to children outside a narrow grant.
-            let selected = if *layers == Layers::All {
-                scope.layers.clone()
-            } else {
-                controller
-                    .snapshot()
-                    .state
-                    .edit(
-                        &controller.model,
-                        Patch {
-                            layers: Some(layers.clone()),
-                            ..Default::default()
-                        },
-                    )
-                    .map_err(|_| "invalid_request")?
-                    .layers
-            };
-            if !layers_within(&scope.layers, &selected) {
-                return Err("forbidden");
-            }
-            patch.layers = Some(selected);
+            patch.layers = Some(scoped_layers(controller, scope, layers)?);
         }
         Ok(patch)
     }

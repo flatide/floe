@@ -2,6 +2,7 @@
 //! Auth: every existing HTTP/WS handler must continue to reject guest proofs.
 mod explore;
 mod http;
+mod query;
 mod stream;
 pub(crate) use http::maintenance;
 pub(crate) use http::routes;

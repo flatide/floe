@@ -58,7 +58,7 @@ async fn local_explore_deck_parent_cannot_expand_beyond_granted_child() {
     let a = invite(&h, &owner, "explore").await;
     let ac = exchange(&h, &a).await;
     let (mut av, ah) = guest_connect(&h, a["share_id"].as_str().unwrap(), &ac, "explore").await;
-    let (af, _) = explore_frame(&mut av).await;
+    let (af, _) = explore_frame_with_query(&mut av, false).await;
     ack(&mut av, &ah, 1, &af).await;
     let reply = edit(
         &mut av,
@@ -86,13 +86,17 @@ async fn local_explore_deck_parent_cannot_expand_beyond_granted_child() {
     println!("RUST LOCAL EXPLORE DECK SCOPE: ALL OK (normalize parent before grant check, all means granted child)");
 }
 
-async fn explore_frame(ws: &mut Socket) -> (Value, Vec<u8>) {
+pub(super) async fn explore_frame(ws: &mut Socket) -> (Value, Vec<u8>) {
+    explore_frame_with_query(ws, true).await
+}
+async fn explore_frame_with_query(ws: &mut Socket, query: bool) -> (Value, Vec<u8>) {
     loop {
         match next(ws).await {
             Message::Binary(b) => {
                 let n = u32::from_le_bytes(b[..4].try_into().unwrap()) as usize;
                 let h: Value = serde_json::from_slice(&b[4..4 + n]).unwrap();
-                assert_eq!(h["query"], false); // scoped query is a separate stage
+                assert_eq!(h["query"], query);
+                assert_eq!(h["query_scene"]["complete"], query);
                 assert!(h.get("perf").is_none());
                 assert_eq!(h["payload_length"], (b.len() - 4 - n).to_string());
                 return (h, b[4 + n..].to_vec());
@@ -116,7 +120,7 @@ async fn explore_frame(ws: &mut Socket) -> (Value, Vec<u8>) {
         }
     }
 }
-async fn edit(
+pub(super) async fn edit(
     ws: &mut Socket,
     hello: &Value,
     seq: u64,

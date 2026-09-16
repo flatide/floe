@@ -2,6 +2,8 @@ use super::*;
 use tokio_tungstenite::connect_async;
 #[path = "exploration.rs"]
 mod exploration;
+#[path = "guest_queries.rs"]
+mod guest_queries;
 
 fn headers<'a>(origin: &'a str, login: &'a Login) -> [(&'static str, &'a str); 4] {
     [

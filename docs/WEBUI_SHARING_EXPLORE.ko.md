@@ -1,5 +1,9 @@
 # M2b-3a — 로컬 게스트의 독립 렌더와 표시 상태
 
+후속 M2b-3b1은 [scoped query/룰러](WEBUI_SHARING_QUERY.ko.md)를 연결한다. 아래의
+query=false/미구현 설명은 M2b-3a 시점 기록이다. 현재 explore는 실제 native query scene을
+전달하고, follow는 계속 query=false다. 독립 DRC panel과 공유 UI는 여전히 남는다.
+
 `feature/webui`, [공유 경계](WEBUI_M2_SHARING.ko.md) · [follow 전송](WEBUI_SHARING_FOLLOW.ko.md).
 사용자가 승인한 기본 off·합성/loopback 범위다. **독립 렌더 기반이지 M2b-3 전체나
 사용자용 공유 기능 완료가 아니다.** DRC panel/범위 제한 읽기·pick/snap/룰러는 후속

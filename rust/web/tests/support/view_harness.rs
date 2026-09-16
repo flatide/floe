@@ -285,6 +285,7 @@ async fn next(ws: &mut Socket) -> Message {
 async fn next_json(ws: &mut Socket) -> Value {
     match next(ws).await {
         Message::Text(t) => serde_json::from_str(&t).unwrap(),
+        Message::Binary(b) => panic!("expected JSON, received binary frame ({} bytes)", b.len()),
         other => panic!("expected JSON, {other:?}"),
     }
 }

@@ -1,4 +1,4 @@
-//! Owner socket queries: displayed receipts and outstanding results are local
+//! Socket query core: displayed receipts and outstanding results are local
 //! to one authenticated connection. No native diagnostic/path is serialized.
 use crate::view::{self, Selection};
 use floe_app_core::view::{
@@ -84,7 +84,7 @@ pub(crate) struct Request {
     layers: Selection,
 }
 impl Request {
-    fn core(self) -> Result<ViewQuery, &'static str> {
+    pub(crate) fn core(self) -> Result<ViewQuery, &'static str> {
         let operation = match self.operation {
             Operation::Snap {} => QueryOperation::Snap,
             Operation::Pick { nth } => {
@@ -245,6 +245,15 @@ impl<'a> Queries<'a> {
     }
     pub fn submit(&mut self, sequence: String, request: Request) -> Result<u64, &'static str> {
         let input = request.core().map_err(|_| "invalid_request")?;
+        self.submit_core(sequence, input)
+    }
+    /// Typed input lets a scoped consumer restrict layers before admission.
+    /// Display receipts and controller/scene validation are never bypassed.
+    pub(crate) fn submit_core(
+        &mut self,
+        sequence: String,
+        input: ViewQuery,
+    ) -> Result<u64, &'static str> {
         if !self.displayed.accepts(input.anchor) {
             return Err("frame_not_displayed");
         }
@@ -274,7 +283,7 @@ impl<'a> Queries<'a> {
                 .cancel_query_if_current(kind.core(), ticket.id);
         }
     }
-    /// Constant-size, read-only arithmetic on the same owner/display receipt.
+    /// Constant-size, read-only arithmetic on the same controller/display receipt.
     /// A snap reference can only name a result sent on this connection.
     pub fn measure(
         &self,
@@ -348,6 +357,15 @@ impl<'a> Queries<'a> {
     /// Latest-only results, at most one per kind. A full socket queue leaves
     /// the ticket unsent for retry, never accumulates another response queue.
     pub fn ready(&self, index: usize, view_id: &str, epoch: &str) -> Option<Value> {
+        self.ready_checked(index, view_id, epoch, |_| true)
+    }
+    pub(crate) fn ready_checked(
+        &self,
+        index: usize,
+        view_id: &str,
+        epoch: &str,
+        allow: impl FnOnce(&ViewQueryResult) -> bool,
+    ) -> Option<Value> {
         let ticket = self.tickets[index].as_ref().filter(|t| !t.sent)?;
         let current = self.controller.query_snapshot();
         let (id, result) = if index == 0 {
@@ -368,7 +386,13 @@ impl<'a> Queries<'a> {
         }
         result
             .filter(|r| r.id == ticket.id && r.anchor == ticket.anchor)
-            .map(|r| response(ticket, &r, view_id, epoch))
+            .map(|r| {
+                if allow(&r) {
+                    response(ticket, &r, view_id, epoch)
+                } else {
+                    envelope(ticket, view_id, epoch, "query_failed", None)
+                }
+            })
     }
     pub fn sent(&mut self, index: usize) {
         if let Some(t) = &mut self.tickets[index] {

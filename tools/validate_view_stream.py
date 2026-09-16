@@ -60,6 +60,9 @@ def main(fixture):
         assert "RUST LOCAL EXPLORE SCOPE: ALL OK" in test.stdout
         assert "RUST LOCAL EXPLORE LIFETIME: ALL OK" in test.stdout
         assert "RUST LOCAL EXPLORE DECK SCOPE: ALL OK" in test.stdout
+        assert "RUST GUEST QUERIES: ALL OK" in test.stdout
+        assert "RUST GUEST QUERY LIFETIME: ALL OK" in test.stdout
+        assert "RUST FOLLOW QUERY DENIAL: ALL OK" in test.stdout
         assert [digest(cache) for cache in caches] == before, "stream modified cache bytes/mtime"
         assert not list(workers.iterdir()), "stream worker files leaked"
         print(test.stdout.strip())

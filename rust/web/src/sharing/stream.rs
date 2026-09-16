@@ -4,7 +4,7 @@
 use super::{explore, http, Lease, Mode, Scope};
 use crate::{
     auth::public_id,
-    origin,
+    origin, query,
     transport::{self, Gate, BUNDLE, PROTOCOL},
     view,
 };
@@ -165,7 +165,7 @@ fn state(s: &Snapshot, target: &Target, mode: Mode, epoch: &str) -> Value {
     }
     out
 }
-fn header(frame: &DisplayFrame, view_id: &str, epoch: &str) -> Result<Vec<u8>, ()> {
+fn header(frame: &DisplayFrame, view_id: &str, epoch: &str, mode: Mode) -> Result<Vec<u8>, ()> {
     // Reuse strict raw/PNG validation, but expose an allowlist so additions to
     // owner metadata (catalog, paths, query receipts, telemetry) cannot leak.
     let bytes = view::frame_header(frame, view_id, epoch).map_err(|_| ())?;
@@ -198,12 +198,16 @@ fn header(frame: &DisplayFrame, view_id: &str, epoch: &str) -> Result<Vec<u8>, (
             "deck_skipped",
             "complete",
             "approximate",
+            "query",
+            "query_scene",
         ]
         .contains(&key.as_str())
     });
-    value["query"] = json!(false);
-    value["query_scene"] =
-        json!({"generation":null,"round":null,"complete":false,"summary_layers":"0"});
+    if mode == Mode::Follow {
+        value["query"] = json!(false);
+        value["query_scene"] =
+            json!({"generation":null,"round":null,"complete":false,"summary_layers":"0"});
+    }
     serde_json::to_vec(&value).map_err(|_| ())
 }
 
@@ -212,6 +216,9 @@ fn header(frame: &DisplayFrame, view_id: &str, epoch: &str) -> Result<Vec<u8>, (
 /// controller scope is observed again every poll/tick. Bytes already handed
 /// to the socket before revocation cannot be recalled.
 async fn send(ws: &mut WebSocket, gate: &Gate, lease: &Lease, message: Message) -> Result<(), ()> {
+    if matches!(&message, Message::Text(t) if t.len() > view::CONTROL_REPLY_BYTES) {
+        return Err(());
+    }
     let mut message = Some(message);
     let mut revoked = lease.revoked.clone();
     let mut stop = gate.stopping.subscribe();
@@ -270,6 +277,7 @@ struct Packet {
 struct Flight {
     id: u64,
     since: Instant,
+    receipt: query::Receipt,
     _reservation: OwnedSemaphorePermit,
 }
 fn copy_packet(header: &[u8], body: &[u8], cancelled: impl Fn() -> bool) -> Result<Bytes, ()> {
@@ -303,6 +311,34 @@ enum Control {
         base_state_rev: String,
         body: Box<explore::DisplayPatch>,
     },
+    #[serde(rename = "explore.query")]
+    Query {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        body: Box<query::Request>,
+    },
+    #[serde(rename = "explore.query.cancel")]
+    CancelQuery {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        kind: query::Kind,
+    },
+    #[serde(rename = "explore.measure")]
+    Measure {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        body: Box<query::MeasureRequest>,
+    },
+    #[serde(rename = "explore.measure_selection")]
+    MeasureSelection {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        body: Box<query::MeasureSelectionRequest>,
+    },
     #[serde(rename = "frame.ack")]
     Ack {
         seq: String,
@@ -314,7 +350,13 @@ enum Control {
 impl Control {
     fn seq(&self) -> &str {
         match self {
-            Self::Ping { seq } | Self::Ack { seq, .. } | Self::Set { seq, .. } => seq,
+            Self::Ping { seq }
+            | Self::Ack { seq, .. }
+            | Self::Set { seq, .. }
+            | Self::Query { seq, .. }
+            | Self::CancelQuery { seq, .. }
+            | Self::Measure { seq, .. }
+            | Self::MeasureSelection { seq, .. } => seq,
         }
     }
 }
@@ -330,7 +372,8 @@ async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease, target: Target) {
     // owner's view alive beyond the existing disconnect grace period.
     let hello = json!({"type":"share.hello","protocol":1,"bundle":BUNDLE,"share_id":lease.guest.share_id,
         "view_id":target.id,"connection_epoch":epoch,"mode":lease.guest.mode.name(),"read_only":true,
-        "frame_credit":1,"pending_frames":1});
+        "frame_credit":1,"pending_frames":1,"query":lease.guest.mode == Mode::Explore && !target.controller.model.deck,
+        "measure":lease.guest.mode == Mode::Explore});
     if send(&mut ws, &gate, &lease, text(hello)).await.is_err() {
         return;
     }
@@ -343,6 +386,9 @@ async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease, target: Target) {
     let cancel = Cancel(Arc::new(AtomicBool::new(false)));
     let mut encoding: Option<JoinHandle<Result<Packet, ()>>> = None;
     let mut flight: Option<Flight> = None;
+    // Follow must never own query tickets on the owner's controller.
+    let mut queries = (lease.guest.mode == Mode::Explore)
+        .then(|| super::query::Queries::new(&target.controller, &lease.scope));
     let mut last_frames = [0, 0];
     let mut last_state = Value::Null;
     let mut seq = 0;
@@ -352,7 +398,7 @@ async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease, target: Target) {
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
     heartbeat.tick().await;
-    loop {
+    'socket: loop {
         tokio::select! {
             biased;
             _ = revoked.changed() => break,
@@ -372,7 +418,7 @@ async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease, target: Target) {
                 last_frames[usize::from(packet.margin)] = packet.id;
                 // Only enter ACK state after the write completes. An early or
                 // guessed ACK cannot free bytes while the sink still owns them.
-                flight = Some(Flight { id: packet.id, since: Instant::now(), _reservation: packet.reservation });
+                flight = Some(Flight { id: packet.id, since: Instant::now(), receipt:query::Receipt::of(&packet.frame), _reservation: packet.reservation });
             },
             input = ws.next() => {
                 if !valid(&gate, &lease) { break; }
@@ -401,7 +447,40 @@ async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease, target: Target) {
                     Control::Ack { connection_epoch, frame_id, disposition, .. } => {
                         if connection_epoch != epoch || !["displayed", "discarded"].contains(&disposition.as_str())
                             || flight.as_ref().is_none_or(|f| view::counter(&frame_id) != Ok(f.id)) { break; }
-                        flight = None;
+                        let completed = flight.take().unwrap();
+                        if disposition == "displayed" {
+                            if let Some(queries) = queries.as_mut() { queries.displayed(completed.receipt); }
+                        }
+                    },
+                    Control::Query { seq, connection_epoch, view_id, body } => {
+                        if lease.guest.mode != Mode::Explore || connection_epoch != epoch || view_id != target.id { break; }
+                        let reply = http::with_shares(&gate, |shares, now| {
+                            if !shares.valid(&lease, now) { return Err(StatusCode::UNAUTHORIZED); }
+                            Ok(match queries.as_mut().unwrap().submit(seq.clone(), *body) {
+                                Ok(id) => json!({"type":"query.accepted","seq":seq,"view_id":target.id,"connection_epoch":epoch,"query_id":id.to_string()}),
+                                Err(code) => json!({"type":"error","seq":seq,"code":code}),
+                            })
+                        });
+                        let Ok(reply) = reply else { break; };
+                        if send(&mut ws, &gate, &lease, text(reply)).await.is_err() { break; }
+                    },
+                    Control::CancelQuery { seq, connection_epoch, view_id, kind } => {
+                        if lease.guest.mode != Mode::Explore || connection_epoch != epoch || view_id != target.id { break; }
+                        queries.as_mut().unwrap().cancel(kind);
+                        let reply = json!({"type":"query.cancelled","seq":seq,"view_id":target.id,"connection_epoch":epoch,"kind":kind.name()});
+                        if send(&mut ws, &gate, &lease, text(reply)).await.is_err() { break; }
+                    },
+                    Control::Measure { seq, connection_epoch, view_id, body } => {
+                        if lease.guest.mode != Mode::Explore || connection_epoch != epoch || view_id != target.id { break; }
+                        let reply = queries.as_ref().unwrap().measure(&seq, *body, &target.id, &epoch)
+                            .unwrap_or_else(|code|json!({"type":"error","seq":seq,"code":code}));
+                        if send(&mut ws, &gate, &lease, text(reply)).await.is_err() { break; }
+                    },
+                    Control::MeasureSelection { seq, connection_epoch, view_id, body } => {
+                        if lease.guest.mode != Mode::Explore || connection_epoch != epoch || view_id != target.id { break; }
+                        let reply = queries.as_ref().unwrap().measure_selection(&seq, *body, &target.id, &epoch)
+                            .unwrap_or_else(|code|json!({"type":"error","seq":seq,"code":code}));
+                        if send(&mut ws, &gate, &lease, text(reply)).await.is_err() { break; }
                     },
                     Control::Set { seq, connection_epoch, view_id, base_state_rev, body } => {
                         if lease.guest.mode != Mode::Explore || connection_epoch != epoch || view_id != target.id { break; }
@@ -432,12 +511,21 @@ async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease, target: Target) {
                     if send(&mut ws, &gate, &lease, text(next_state.clone())).await.is_err() { break; }
                     last_state = next_state;
                 }
+                // A waiting image ACK never blocks a small query result.
+                if let Some(queries) = queries.as_mut() {
+                    for index in 0..2 {
+                        if let Some(reply) = queries.ready(index, &target.id, &epoch) {
+                            if send(&mut ws, &gate, &lease, text(reply)).await.is_err() { break 'socket; }
+                            queries.sent(index);
+                        }
+                    }
+                }
                 if encoding.is_some() || flight.is_some() { continue; }
                 let candidate = [target.controller.latest(), target.controller.margin()].into_iter().flatten()
                     .find(|f| last_frames[usize::from(f.purpose == Purpose::Margin)] != f.id
                         && allowed(f, &lease, &snapshot));
                 let Some(frame) = candidate else { continue; };
-                let Ok(header) = header(&frame, &target.id, &epoch) else { break; };
+                let Ok(header) = header(&frame, &target.id, &epoch, lease.guest.mode) else { break; };
                 let cost = 3 * frame.frame.bytes.len() + 2 * (header.len() + 4);
                 let Ok(encoder) = Arc::clone(&transport.encoders).try_acquire_owned() else { continue; };
                 let Ok(reservation) = Arc::clone(&transport.bytes).try_acquire_many_owned(cost as u32) else { continue; };
@@ -553,7 +641,8 @@ mod tests {
         assert!(frame_scope(&frame, &scope, Mode::Follow));
         assert!(frame_scope(&frame, &scope, Mode::Explore));
         let h: Value =
-            serde_json::from_slice(&header(&frame, &scope.view_id, "epoch").unwrap()).unwrap();
+            serde_json::from_slice(&header(&frame, &scope.view_id, "epoch", Mode::Follow).unwrap())
+                .unwrap();
         assert_eq!(h["query"], false);
         assert_eq!(
             h["query_scene"],
@@ -561,6 +650,14 @@ mod tests {
         );
         assert!(h.get("perf").is_none());
         assert!(!h.to_string().contains("/secret"));
+        let e: Value =
+            serde_json::from_slice(&header(&frame, "explorer", "epoch", Mode::Explore).unwrap())
+                .unwrap();
+        assert_eq!(e["query"], true);
+        assert_eq!(e["query_scene"]["generation"], "1");
+        assert_eq!(e["view_id"], "explorer");
+        assert!(e.get("perf").is_none());
+        assert!(!e.to_string().contains("/secret"));
         frame.frame.request.layers = Layers::All;
         assert!(!frame_scope(&frame, &scope, Mode::Explore));
         assert!(
