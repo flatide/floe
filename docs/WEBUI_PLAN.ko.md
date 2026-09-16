@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M2b-0 공유 경계 감사; 제품 M4g-29).
+작성 2026-08-29, 갱신 2026-09-16(M4g-30 진단 대체 확정·로컬 공유 구현 승인).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -139,28 +139,35 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 
 ## 현재 진행도와 커밋 보고
 
+M4g-30 사용자 결정: Rust 제품의 GTK 진단은 `displaytest [PNG]`로 대체 확정.
+GTK `gtktest`는 비교 패키지에만 남기고 Rust alias는 추가하지 않는다. 또한 기본 off인
+opt-in 로컬 공유 구현을 승인했다. follow/explore를 모두 유지하며 합성·loopback에서
+검증하고 원격 공개·노트 본문·서버 export·게스트 파일 탐색/쓰기는 열지 않는다.
+이 결정은 공유 구현 완료나 실제 브라우저·현장 수용을 뜻하지 않는다.
+
 M2b-0은 [공유 권한/수명/자원 경계](WEBUI_M2_SHARING.ko.md)를 현재 코드로 대조한다.
 guest를 owner 인증에 붙이는 것만으로는 부족하며, 단일 세션·현재 view·전체 로그아웃과
 process-local admission을 분리해야 한다. follow/explore 및 원격 G3를 요구사항에서
-빼지 않았다. 다음 구현의 권한 범위/운영 정책은 승인 대기이고 기능·listener는 불변이다.
+빼지 않았다. 위 범위의 로컬 구현 승인은 받았고 원격/운영 정책은 별도다.
+M2b-0 감사 자체는 기능·listener를 바꾸지 않았다.
 
 M4g-29는 `displaytest`에 APNG의 IDAT 정적 기본 이미지를 연결한다. 원본의 모든
 chunk CRC/길이/상한을 검증한 뒤 animation chunk만 메모리에서 제거하며 원본 파일과
 나머지 metadata는 보존한다. 애니메이션 재생·GTK 보간·실제 화면 수용은 아니다.
 [표시 진단 계약](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)과 CLI/HTTP·선택 GdkPixbuf 대조를
-추가했으며 GTK 위젯 진단/명령 폐기 경계, 실제 브라우저·Linux·현장 수용은 남는다.
+추가했다. GTK 진단의 제품 경계는 M4g-30에서 확정했으며 실제 브라우저·Linux·현장 수용은 남는다.
 
 M4g-28은 양수 `--stream-kb`의 기존 Rust 호환을 연결한다. 크기를 KB 예산으로
 새로 사용하지 않고 환경 page-round를 따르며, 명시 stream의 독립 workspace와
 최종 값 기준 순서/음수/off·baseline 충돌 검사를 보존한다. 원본 정책380사례와
-실제 startup/IPC gate로 대조한다. GTK 진단 경계와 실제 브라우저·Linux·
+실제 startup/IPC gate로 대조한다. 실제 브라우저·Linux·
 현장 수용, M2 공유/원격 및 조건부 M5는 별도로 남는다.
 
 M4g-27의 [CLI 원본 재대조](WEBUI_G4_CLI.ko.md)는10개 명령94개와 보조 PNG16개를
 현재 argparse/native parser로 고정한다. 사용자 결정에 따라 `--refinement on`은
 기존 환경 page-round를 따르게 복원했다. 기본 실질 off·명시 off/stream0/baseline
 우선은 유지하며 새 적응형 렌더 정책은 만들지 않는다. 상태줄은 실제 round/final을
-표시한다. 양수 stream은 M4g-28, APNG 정적 fallback은 M4g-29에서 연결했다. GTK 진단 경계와 아래 전체 수용은
+표시한다. 양수 stream은 M4g-28, APNG 정적 fallback은 M4g-29에서 연결했다. 아래 전체 수용은
 남는다. 파서175회 통과를 파일/픽셀·브라우저 기능 전체의 완료로 계산하지 않는다.
 
 M4g-24b의 레이아웃 유지 DRC 열기에 이어 M4g-24c는 `Reconnect launcher reviewer…`를
@@ -244,8 +251,8 @@ GTK 색 막대·Rust PNG/raw·웹 crop/overlay를 대조하되 실제 화면 수
 M4g-17b는 같은 검사를 독립 `displaytest` 명령으로 연결하며 index/renderd/레이아웃
 없이 기존 private Firefox/auth 수명주기를 사용한다. M4g-17c는 CLI가 고정한 정적 PNG
 하나의 읽기/인증 전송/360×160 표시를 연결한다. 브라우저 보간과 GTK의 픽셀 동일성을
-주장하지 않는다. APNG 정적 기본 이미지는 M4g-29에서 연결했으며 GTK 위젯 진단/
-명령 폐기 경계와 실제 화면 수용은 아직 남는다
+주장하지 않는다. APNG 정적 기본 이미지는 M4g-29에서 연결했고 M4g-30에서 Rust 제품은
+`displaytest`로 대체하기로 확정했다. GTK 위젯 진단은 비교 패키지에만 남으며 실제 화면 수용은 아직 남는다
 ([M4 §70~72](WEBUI_M4.ko.md)). 승인된 브라우저 `--dump`는 M4g-22에서 연결했다.
 M4g-18은 IPC owner 종료와 자식 fork→exec가 겹쳐 잠금이 남는 조건을 재현하고,
 소유자의 명시적 unlock·fork 복사본 보호와 회귀 검사를 추가한다([M4 §73](WEBUI_M4.ko.md)).
@@ -745,7 +752,8 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   jobdeck 물리 plane 격리는 남아 있다. 원본 SVRF subset parser는 M4b-5의 로컬 CLI로
   이관했으며 web API의 임의 deck/include 접근을 추가한 것은 아니다.
   공유와 고급 DRC 조작은 남아 있다.
-  공유 권한 경로 추가는 안전 검토 차단 후 승인 대기다. M4a-1/2/3은 독립적인
+  공유 권한 경로는 당시 승인 대기였으나 M4g-30에서 opt-in 로컬 구현 범위가 승인됐다.
+  실제 원격 공개는 여전히 별도다. M4a-1/2/3은 독립적인
   native/controller와 기존 owner WebSocket 질의이며 공유 권한이나 외부 공개는 추가하지 않는다.
   CLI 전체/웹 전환 완료가 아니며 GTK/실측 브랜치는 유지한다.
   M4e-1에서 DRC waive/주석 포맷과 메모리 편집 모델을 Rust로 이관했다

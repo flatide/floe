@@ -39,7 +39,16 @@ def digest(directory, names=None):
 
 def wait_file(path, process):
     end = time.monotonic() + 5
-    while not path.exists():
+    while True:
+        try:
+            text = path.read_text()
+        except FileNotFoundError:
+            text = ""
+        # Creation is not publication: write_text creates an empty file first.
+        # Return the complete record we read, not a second racing read.
+        if text.endswith("\n"):
+            assert text[:-1].isascii() and text[:-1].isdigit() and int(text) > 0
+            return int(text)
         assert process.poll() is None, process.communicate()
         assert time.monotonic() < end, "fake worker did not become ready"
         time.sleep(0.01)
@@ -80,8 +89,11 @@ def main(fixture):
             assert text in run("view", source, *args, env=env, code=2).stderr
         run("view", env=env, code=2)
         assert "--bbox" in run("clip", "--help", env=env).stdout
-        assert "not yet ported" in run("gtktest", env=env, code=2).stderr
-        assert "Run display test" in run("gtktest", env=env, code=2).stderr
+        for tail in ((), ("--help",), (str(work / "missing.png"),)):
+            rejected = run("gtktest", *tail, env=env, code=2)
+            assert "replaced by displaytest [PNG]" in rejected.stderr
+            assert "no alias" in rejected.stderr and "Run display test" in rejected.stderr
+            assert "not yet ported" not in rejected.stderr and not rejected.stdout
         assert "--follow-verbatim" in run("svrf", "--help", env=env).stdout
         assert "requires DECK" in run("svrf", env=env, code=2).stderr
         deck = work / "rules.svrf"
@@ -228,8 +240,11 @@ if os.environ.get("FAKE_WAIT"):
         sys.exit(128 + n)
     signal.signal(signal.SIGINT, interrupted)
     signal.signal(signal.SIGTERM, interrupted)
-    pathlib.Path(os.environ["FAKE_READY"]).write_text(str(os.getpid()))
     print("heartbeat", file=sys.stderr, flush=True)
+    ready = pathlib.Path(os.environ["FAKE_READY"])
+    ready.write_text("")
+    time.sleep(0.02)  # Reproduce the created-but-not-yet-published interval.
+    ready.write_text(str(os.getpid()) + "\\n")
     while True: time.sleep(0.01)
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 ''')
@@ -258,8 +273,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
                                  env=dict(fake_env, FAKE_WAIT="1"), stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, text=True, start_new_session=True)
             try:
-                wait_file(ready, p)
-                child_pid = int(ready.read_text())
+                child_pid = wait_file(ready, p)
                 assert os.getpgid(child_pid) != os.getpgid(p.pid), "child SIGINT not isolated"
                 busy = run("index", source, "--force", env=fake_env, code=1)
                 assert "another Rust application" in busy.stderr

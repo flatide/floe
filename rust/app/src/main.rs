@@ -53,7 +53,9 @@ Render: batch/mosaic + JSON reports, DRC marker/CD/legend captures; no Python ru
 Annotations: fe-embed CLI writes flateyes PNG metadata without changing pixels.
 SVRF: local subset parser/scan with diagnostics; no Tcl or macro execution.
 Web: owner notes/waives and whole-review transfers require explicit opt-ins.
-GTK-only gtktest is not ported. Full interaction/field acceptance remains open.
+GTK-only gtktest is replaced by displaytest in the Rust product (no alias).
+GTK widget diagnosis remains in the existing GTK reference package.
+Full interaction/field acceptance remains open.
 displaytest [PNG] checks synthetic PNG/raw/crop pixels and an optional frozen PNG.
 About has the synthetic test. Neither proves remote-screen acceptance.
 The existing floe2/GTK launcher is unchanged; there is no Python fallback here.
@@ -128,7 +130,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
-                    "{} is not yet ported; displaytest [PNG] provides web image diagnostics and About > Run display test provides synthetic checks. For GTK widget diagnosis, use the existing floe2 (no Python fallback)",
+                    "{} is GTK-only and replaced by displaytest [PNG] in the Rust product (no alias); About > Run display test provides synthetic checks. For GTK widget diagnosis, use the existing GTK reference package (no Python fallback)",
                     args[0]
                 ),
             ))

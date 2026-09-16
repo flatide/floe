@@ -6156,3 +6156,34 @@ fixture가 필요한 단위의 ignored와 뒤에서 실행하는 실제 연결 �
 커밋 시 목표 잔여: GTK 위젯 진단/명령 폐기의 제품 경계, 실제 브라우저·Python-free
 Linux·G1/G4·현장 수용, M2 공유/원격 승인·구현, 조건부 M5다. APNG 정적 지원을
 전체 웹 전환 완료로 계산하지 않는다. index hot reload/revision은 기존 유보를 유지한다.
+
+## 88. M4g-30 — Rust 표시 진단의 제품 경계 확정
+
+2026-09-16 사용자 결정: Rust 제품은 `displaytest [PNG]`로 대체하며 GTK `gtktest`는
+기존 비교 패키지에만 남긴다. Rust alias/GTK 실행/Python fallback을 추가하지 않는다.
+기존의 “not yet ported” 오류를 확정된 대체 명령 안내로 변경했다. 인자 없음,
+`--help`, 존재하지 않는 PNG 인자 모두 source 접근 없이 같은 exit2로 거부하며
+About의 표시 검사와 GTK 비교 패키지를 안내한다. GTK 위젯 자체 진단은 웹 이관
+범위가 아니지만 실제 브라우저·표시·현장 수용은 계속 필요하다.
+
+같은 사용자 결정으로 기본 off인 opt-in 로컬 공유 구현도 승인됐다. follow/explore는
+모두 유지하며 합성·loopback에서 먼저 검증한다. 실제 원격 공개·노트 본문 공개·서버
+내보내기·게스트 파일 탐색/쓰기는 열지 않는다. 이번 커밋은 공유 런타임 구현이 아니다.
+
+집중 검증은 CLI26단위(외부 fixture2 ignored), app strict clippy/release, CLI 실제
+실행과 inventory, display 입력16사례·선택 GdkPixbuf APNG4대조·독립 표시 CLI가
+통과했다. 첫 전체 실행은 기존 합성 indexer 테스트에서 PID 파일 생성과 쓰기 사이를
+읽어 빈 문자열을 정수로 바꾸다 실패했다. 준비 신호를 newline으로 끝나는 완전한
+PID 레코드로 바꾸고, 빈 파일 상태를20ms 강제해 해당 경합을 회귀로 고정했다.
+heartbeat도 준비 신호 전에 기록한다. 제품 프로세스/취소 정책은 변경하지 않았다.
+
+수정 뒤 CLI 집중 및 전체 `sh tools/validate_rust.sh`가 exit0 /
+`RUST VALIDATION: ALL OK`로 완료했다. KLayout j1/j8 각각13 PX+2 phase-exact+
+14 style 포함이다. 실패 로그는 `/private/tmp/floe-display-policy-battery.log`,
+최종 로그는 `/private/tmp/floe-display-policy-battery-final.log`로 각각 보존한다.
+기존 의존성/개발 오라클 경고는 남아 있다. 실제 브라우저·현장 수용을 대신하지 않는다.
+공유 코어는 이 검증/커밋에 포함하지 않으며 별도 M2b 단계에서 연결·검증한다.
+
+커밋 시 목표 잔여는 M2 로컬 공유 구현,
+별도 원격/TLS/서버 자원 정책, 실제 브라우저·Python-free Linux·G1/G4·현장 수용,
+조건부 M5다. index hot reload/revision은 기존 유보를 유지한다.

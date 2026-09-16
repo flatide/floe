@@ -200,10 +200,11 @@ sidecar 원자 저장/입력 보호와 구체적 차이는 [M4 §11](WEBUI_M4.ko
 ### 2.8 gtktest — M4에서 진단 대체 (공개 옵션 없음)
 
 선택 위치 인자 `png`. GTK 전용 진단을 웹 제품에 끌고 오지 않는다.
-전환 중 기존 명령은 GTK 비교 패키지에 남기고, Rust 셸은 명시적인 안내/오류를
-제공한다. 웹용 PNG/raw/Canvas 표시 진단과 대체 명령 이름을 정한 뒤 폐기 승인.
-M4f-1의 `selfcheck`는 native 설치 진단만 담당하므로 위 표시 진단/GTK 폐기 승인을
-대체하지 않는다. 브라우저를 실행하지 않고 항상 desktop 수용 미검증을 표시한다.
+M4g-30 사용자 결정으로 기존 명령은 GTK 비교 패키지에만 남기고 Rust 제품에서는
+`displaytest [PNG]`로 대체한다. Rust의 `gtktest`는 alias 없이 명시 안내/exit2이며
+GTK 위젯 진단은 이관 범위에서 제외한다. GTK 뷰어 전체의 폐기나 실제 화면 수용을
+뜻하지 않는다. M4f-1의 `selfcheck`는 native 설치 진단만 담당하며 브라우저를
+실행하지 않고 항상 desktop 수용 미검증을 표시한다.
 
 M4g-17a는 About의 명시 **Run display test**로 GTK 원본 색 막대와 같은 Rust
 PNG/raw 및 웹 crop/overlay를 연결한다. viewer 디코더를 공유하며 layout/worker는
