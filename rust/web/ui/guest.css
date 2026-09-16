@@ -1,5 +1,9 @@
 #guest-viewport { position: relative; flex: 1; min-width: 1px; min-height: 1px; background: #000; overflow: hidden; }
 #guest-canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
+.guest-review-list { max-height: 200px; overflow: auto; margin: 8px 0; }
+.guest-review-list button { display: block; width: 100%; text-align: left; overflow-wrap: anywhere; margin-bottom: 3px; }
+.guest-review-list button[aria-pressed="true"] { border-color: #f4cd64; }
+#gd-description { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }
 #guest-empty { position: absolute; top: 40%; left: 10%; right: 10%; text-align: center; pointer-events: none; color: #b6c3d6; }
 #guest-frame-status { padding: 7px 14px; min-height: 32px; font-size: 12px; border-top: 1px solid #343d4c; }
 #guest-controls > input { display: block; width: 100%; margin: 4px 0 10px; }

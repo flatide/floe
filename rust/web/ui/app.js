@@ -992,7 +992,7 @@
     sessionExit=window.FloeSessionExit.bind({el:el,document:document,confirm:endSession});
     sharing=window.FloeSharing.bind({el:el,document:document,http:http,origin:location.origin,
         context:function(){return !stopped&&!document.hidden&&live()&&!inflight&&!accepted&&!queue.length?
-            {view_id:currentId,state_rev:state.state_rev}:null;}});
+            {view_id:currentId,state_rev:state.state_rev,source_id:currentSource}:null;}});
     window.addEventListener('pagehide',function(){sharing.suspend();});
     minimap=window.FloeMinimap.bind({el:el,document:document,http:http,state:function(){return !stopped&&!document.hidden&&live()&&epoch?state:null;},
         ready:function(){return !!epoch&&live()&&!inflight&&!accepted&&queue.length===0&&!(gesture&&gesture.active())&&!document.hidden;},

@@ -137,7 +137,16 @@ impl Guest {
                 .unwrap()
                 .unwrap()
             {
-                Message::Text(t) => return serde_json::from_str(&t).unwrap(),
+                Message::Text(t) => {
+                    let value: Value = serde_json::from_str(&t).unwrap();
+                    if value["type"] == "share.state" {
+                        assert!(value["dbu_um"].as_str().unwrap().parse::<f64>().unwrap() > 0.);
+                        let camera = value["camera_um"].as_array().unwrap();
+                        assert_eq!(camera.len(), 3);
+                        assert!(camera[2].as_str().unwrap().parse::<f64>().unwrap() > 0.);
+                    }
+                    return value;
+                }
                 Message::Ping(p) => self.ws.send(Message::Pong(p)).await.unwrap(),
                 Message::Binary(b) => {
                     let n = u32::from_le_bytes(b[..4].try_into().unwrap()) as usize;
@@ -478,6 +487,16 @@ async fn independent_drc_guests_are_explicit_read_only_and_revision_bound() {
         json!(["2"])
     );
     // Follow has a private panel but cannot move the owner's view.
+    let mut follow_stream = Guest::connect(
+        &h,
+        fid.clone(),
+        Login {
+            cookie: fl.cookie.clone(),
+            csrf: fl.csrf.clone(),
+        },
+    )
+    .await;
+    follow_stream.ws.close(None).await.unwrap();
     let follow = call(&h, &fl, &fid, "GET", "", Value::Null).await.1;
     assert_eq!(call(&h,&fl,&fid,"POST","/panel",json!({"view_id":follow["view_id"],"revision":revision,"base_panel_rev":"1","body":panel("2")})).await.0,200);
     assert_eq!(

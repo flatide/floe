@@ -110,7 +110,8 @@ FLOE_FILL_EDIT (nonempty) enables session bitmap-slot editing and, separately,
 shared design-default publication with its own preview and explicit approval.
 --local-sharing starts an independent workspace, still bound only to loopback.
 Use Share locally to approve a separate one-use guest invitation; the current
-UI grants layout scope only. DRC/notes/files/writes are not implicitly shared.
+UI grants layout scope; DRC needs a separate whole-result approval. Notes,
+file browsing and writes are not shared.
 The owner session link is a one-time credential; never give it to guests or log it.";
 
 #[derive(Debug)]

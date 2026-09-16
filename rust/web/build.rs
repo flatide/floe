@@ -7,6 +7,8 @@ fn main() {
         "ui/index.html",
         "ui/guest.html",
         "ui/guest.js",
+        "ui/guest-drc.js",
+        "ui/drc-geometry.js",
         "ui/guest.css",
         "ui/sharing.js",
         "ui/display.html",

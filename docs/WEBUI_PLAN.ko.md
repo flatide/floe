@@ -149,6 +149,8 @@ M2b-3b1의 [scoped query/룰러](WEBUI_SHARING_QUERY.ko.md)는 자기 displayed 
 연결하며 owner+두 guest의 서로 다른 native 오류 탐색을 검증한다. 아직 guest 화면 UI는 아니다.
 M2b-4a는 [로컬 초대·전용 guest 화면](WEBUI_SHARING_UI.ko.md)을 `--local-sharing` 아래 연결한다.
 follow 프레임과 독립 탐색 조작은 연결했지만 DRC/layer/query/룰러 UI와 실제 수용은 남는다.
+M2b-4b1은 [별도 DRC 공개 승인·개인 목록/선택·윤곽/이동 UI](WEBUI_SHARING_DRC_UI.ko.md)를
+연결한다. scope 제한 layer/query/룰러·pointer, DRC 순회/마커/CD 조작과 실제 수용은 남는다.
 `shares=false`는 유지하고 `delivery`는 follow=`follow_frames`, explore=`explore_frames`다.
 전송 기반을 전체 공유 완료로 계산하지 않는다. 원격 공개·노트 본문·파일 탐색/쓰기는 열지 않는다.
 

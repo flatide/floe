@@ -29,12 +29,15 @@ def main(fixture):
         assert result.returncode == 0, result.stderr
         before = digest(Path(str(source) + ".floe"))
         source_before = source.read_bytes(), source.stat().st_mtime_ns
+        review = work / "synthetic.db"
+        review.write_text("TOP 1000\nWIDTH\n1 1 0\np 1 4\n10.125 10\n20.125 10\n20.125 20\n10.125 20\n")
+        review_before = review.read_bytes(), review.stat().st_mtime_ns
         for enabled in (False, True):
             session_file = work / ("on.json" if enabled else "off.json")
             argv = [str(APP), "view", str(source), "--multi", "--no-open", "--session-file",
                     str(session_file), "--jobs", "1", "--raster-jobs", "1", "--frame-cache", "off"]
             if enabled:
-                argv.append("--local-sharing")
+                argv.extend(["--local-sharing", "--drc", str(review)])
             proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True)
             try:
@@ -50,7 +53,7 @@ def main(fixture):
                     page = owner.call("GET", "/guest/" + "a" * 64)
                     assert b"guest.js" in page and b"app.js" not in page
                     assert session["url"].encode() not in page and b"bootstrap=" not in page
-                    for name in ("guest.js", "guest.css", "sharing.js"):
+                    for name in ("guest.js", "guest.css", "sharing.js", "guest-drc.js", "drc-geometry.js"):
                         actual = owner.call("GET", "/assets/" + session["bundle"] + "/" + name)
                         expected = Path(__file__).resolve().parents[1] / "rust/web/ui" / name
                         assert actual == expected.read_bytes(), "stale embedded guest asset: " + name
@@ -61,13 +64,20 @@ def main(fixture):
                     assert owner.finished(1, proc)["phase"] == "succeeded"
                     view = wait(lambda: (lambda v: v if v["status"] == "idle" else None)(
                         owner.call("GET", "/api/v1/view")["view"]), proc)
-                    for mode in ("follow", "explore"):
+                    drc = wait(lambda: (lambda d: d if d and d["phase"] == "ready" else None)(
+                        owner.call("GET", "/api/v1/drc")["drc"]), proc)
+                    for mode, share_drc in (("follow", False), ("explore", False), ("follow", True)):
                         body = dict(view_id=view["view_id"], base_state_rev=view["state_rev"],
                                     mode=mode, approve=False)
                         owner.call("POST", "/api/v1/shares", body, 403)
                         body["approve"] = True
+                        if share_drc:
+                            body["drc"] = dict(id=drc["id"], revision=drc["revision"], approve=True)
                         invite = owner.call("POST", "/api/v1/shares", body)
-                        assert "drc" not in invite
+                        if share_drc:
+                            assert invite["drc"] == dict(id=drc["id"], revision=drc["revision"])
+                        else:
+                            assert "drc" not in invite
                         base = "/api/v1/guest/" + invite["share_id"]
                         guest = urllib.request.build_opener(urllib.request.ProxyHandler({}),
                             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
@@ -88,7 +98,7 @@ def main(fixture):
                                 response = error
                             with response:
                                 assert response.status == code, response.status
-                                data = response.read(65536)
+                                data = response.read(1024 * 1024)
                                 return json.loads(data) if data else None
 
                         token = dict(invite=invite["invite"], protocol=1, bundle=session["bundle"])
@@ -96,7 +106,22 @@ def main(fixture):
                         call("POST", base + "/exchange", token, 401)
                         assert call("GET", base + "/session")["mode"] == mode
                         call("GET", "/api/v1/capabilities", code=401)
-                        call("GET", base + "/drc", code=403)
+                        if share_drc:
+                            meta = call("GET", base + "/drc")
+                            assert meta["data"]["format"] == "ascii" and meta["data"]["errors"] == "1"
+                            assert meta["data"]["read_only"] is True
+                            assert not {"notes", "reviewer", "svrf", "title", "source_id"} & meta["data"].keys()
+                            envelope = dict(view_id=meta["view_id"], revision=drc["revision"])
+                            rows = call("POST", base + "/drc/read", dict(envelope,
+                                body=dict(kind="list", check="0", start="0", limit=64, in_view=False)))
+                            assert len(rows["data"]["rows"]) == 1
+                            geometry = call("POST", base + "/drc/read", dict(envelope,
+                                body=dict(kind="geometry", check="0", error="0", start="0", limit=2048)))
+                            assert "points_um" in geometry["data"] and "points_dbu" not in geometry["data"]
+                            call("POST", base + "/drc/read", dict(envelope,
+                                body=dict(kind="types", start="0", limit=1)), 403)
+                        else:
+                            call("GET", base + "/drc", code=403)
                         owner.call("DELETE", "/api/v1/shares/" + invite["share_id"], code=204)
                         call("GET", base + "/session", code=401)
                     assert owner.call("GET", "/api/v1/view")["view"]["state_rev"] == view["state_rev"]
@@ -110,8 +135,10 @@ def main(fixture):
                     proc.communicate(timeout=15)
         assert digest(Path(str(source) + ".floe")) == before
         assert (source.read_bytes(), source.stat().st_mtime_ns) == source_before
+        assert (review.read_bytes(), review.stat().st_mtime_ns) == review_before
+        assert not Path(str(review) + ".ice").exists(), "read-only sharing must not build a DRC pack"
         assert not list(temps.iterdir()), "local-share launcher leaked private worker files"
-    print("WEB LOCAL SHARING CLI: ALL OK (default off, opt-in shell/assets, native open, follow/explore grants, isolated auth, no DRC, revoke, no file writes/worker leaks)")
+    print("WEB LOCAL SHARING CLI: ALL OK (default off, byte-exact guest assets, native open, follow/explore, separate DRC grant + fractional ASCII read, isolated auth, revoke, no implicit index/writes/worker leaks)")
 
 
 if __name__ == "__main__":

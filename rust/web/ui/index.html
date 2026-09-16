@@ -26,6 +26,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-note-display.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-waives.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-transfer.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc-geometry.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/settings.js"></script>
   <script defer src="/assets/@@BUNDLE@@/defaults.js"></script>
@@ -478,7 +479,11 @@
       <h2 id="share-heading">Read-only local invitation</h2>
       <p>Only loopback is enabled. This link works on this machine or an already authorized tunnel; it does not publish a remote server.</p>
       <p>The current visible layers and loaded jobdeck levels are shared, including layout labels, geometry outside the viewport, and future pan/zoom within that scope. A changed source, view or layer scope revokes the invitation.</p>
-      <p>DRC results, review notes and writes are not granted by this screen. Guest DRC/layer/query controls are separate follow-up UI work.</p>
+      <p>Layout approval does not include DRC. Review notes, SVRF metadata, file browsing and writes are never granted here.</p>
+      <div id="share-drc" hidden><p id="share-drc-title"></p>
+        <label class="check"><input id="share-drc-consent" type="checkbox"> Also expose this entire DRC result: rule names/descriptions, all error coordinates and waive statuses, including errors outside the visible layers or viewport.</label>
+        <p class="note">Review notes and separate SVRF metadata are excluded. A result/review revision change revokes this share; it does not follow new reviews.</p>
+      </div><p id="share-drc-status" class="note" role="status"></p>
       <label for="share-mode">Mode</label><select id="share-mode"><option value="follow">Follow the owner's camera</option><option value="explore">Explore independently</option></select>
       <p>Explore uses a separate admitted renderer and can be busy when capacity is full. Owner close ends the share. Received pixels can be copied and cannot be recalled by revoking access.</p>
       <label class="check"><input id="share-consent" type="checkbox"> I approve exposing this layout scope to the holder of a one-use invitation.</label>

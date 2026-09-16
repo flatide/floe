@@ -1,7 +1,8 @@
 # M2b-3b2 — 명시 DRC 공유와 독립 목록·선택 API
 
 후속 [M2b-4a 로컬 공유 UI](WEBUI_SHARING_UI.ko.md)는 layout 초대·기본 프레임 탐색을
-연결했다. 이 문서의 DRC 공개 승인/목록·overlay UI는 다음 M2b-4b에 남는다.
+연결했다. [M2b-4b1](WEBUI_SHARING_DRC_UI.ko.md)은 이 문서의 DRC 공개 승인과
+개인 목록·선택·overlay/goto UI를 연결한다. 나머지 게스트 UI/전체 수용은 남는다.
 
 `feature/webui`, [공유 경계](WEBUI_M2_SHARING.ko.md)와
 [독립 query/룰러](WEBUI_SHARING_QUERY.ko.md)의 후속 단계. 기본 off·합성/loopback만이며

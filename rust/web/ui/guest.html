@@ -6,6 +6,9 @@
   <link rel="stylesheet" href="/assets/@@BUNDLE@@/guest.css">
   <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
   <script defer src="/assets/@@BUNDLE@@/image-decode.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc-geometry.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/guest-drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest.js"></script>
 </head><body>
   <header class="topbar"><div class="brand">floe<span>2</span></div><strong id="guest-mode">Read-only guest</strong>
@@ -32,6 +35,25 @@
         <label for="guest-width">View width (optional)</label><input id="guest-width" disabled>
         <button id="guest-go" disabled>Go</button>
         <p class="note">On the canvas: arrow keys pan 50%, Shift + arrows 10%; + / − zoom, Home fits. Only your view changes.</p>
+      </section>
+      <section id="gd-panel" hidden><h2>Shared DRC · read-only</h2>
+        <p class="note">This entire result was explicitly shared. Your lists and selections are private; no notes, SVRF or review writes are available.</p>
+        <p id="gd-summary" class="note"></p><button id="gd-reload">Reload review</button>
+        <label for="gd-search">Rule name filter</label><input id="gd-search" maxlength="256"><button id="gd-filter">Filter</button>
+        <label for="gd-waived">Status</label><select id="gd-waived"><option value="all">All errors</option><option value="no">Active only</option><option value="yes">Waived only</option></select>
+        <div id="gd-rules" class="guest-review-list" aria-label="Shared DRC rules"></div>
+        <div class="button-row"><button id="gd-rule-prev">Previous rules</button><button id="gd-rule-next">Next rules</button></div>
+        <p id="gd-description" class="note"></p>
+        <label class="check"><input id="gd-in-view" type="checkbox"> Current view</label>
+        <label class="check"><input id="gd-selected-only" type="checkbox"> Selected only</label>
+        <label class="check"><input id="gd-markers" type="checkbox" checked> DRC markers and outline</label>
+        <div id="gd-errors" class="guest-review-list" aria-label="Shared DRC errors"></div>
+        <div class="button-row"><button id="gd-error-prev">Previous errors</button><button id="gd-error-next">Next errors</button></div>
+        <p class="note">Click selects; Shift adds; Ctrl/Command toggles. This never changes the owner's selection.</p>
+        <p id="gd-selection" class="note"></p><button id="gd-clear">Clear selections</button>
+        <p id="gd-selected" class="note"></p><div class="button-row"><button id="gd-go">Go · same scale</button><button id="gd-fit">Frame error</button></div>
+        <p class="note">Follow mode cannot move the owner's camera. Use Explore for your own error navigation.</p>
+        <p id="gd-status" class="note" role="status"></p>
       </section>
     </aside>
     <main id="guest-viewport" tabindex="0" aria-label="Shared layout canvas"><canvas id="guest-canvas" width="1" height="1"></canvas><p id="guest-empty">Waiting for an authorized frame…</p></main>

@@ -45,6 +45,14 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
         return transport::error(StatusCode::NOT_FOUND);
     }
     let (mime, body) = match name.as_str() {
+        "guest-drc.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/guest-drc.js"),
+        ),
+        "drc-geometry.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/drc-geometry.js"),
+        ),
         "sharing.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/sharing.js"),

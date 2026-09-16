@@ -1,5 +1,9 @@
 # 웹 전환 M2 — DRC 읽기·공유 이관 기록
 
+M2b-4b1: [게스트 DRC UI](WEBUI_SHARING_DRC_UI.ko.md)에 별도 전체 결과 공개 동의,
+개인 목록/선택·ICE/ASCII 윤곽·독립 오류 이동을 연결한다. scope 제한 레이어,
+query/룰러·pointer 및 실제 브라우저/원격 수용은 계속 남는다.
+
 M2b-4a: [로컬 초대 UI와 전용 guest 프레임 화면](WEBUI_SHARING_UI.ko.md)을 연결한다.
 기본 off `--local-sharing`, 명시 발급/폐기, follow·독립 탐색 표시/이동이다.
 guest DRC/layer/query/룰러 UI와 실제 브라우저/원격 수용은 아직이며 아래는 각 단계 당시 기록이다.

@@ -8,6 +8,8 @@ geometry 렌더/query만으로 DRC/UI 또는 SH-01~10 전체를 완료 처리하
 SH-06 native 시나리오가 추가됐으나 실제 guest UI/SH-08·원격 SH-10은 아직 남는다.
 [M2b-4a 로컬 UI](WEBUI_SHARING_UI.ko.md)는 CLI opt-in·초대/폐기·전용 프레임/탐색 화면을 연결한다.
 DRC/layer/query/룰러 guest UI와 실제 SH-08·SH-10 수용을 대체하지 않는다.
+[M2b-4b1 게스트 DRC UI](WEBUI_SHARING_DRC_UI.ko.md)는 별도 결과 공개 동의와 개인
+목록/선택·윤곽/goto를 연결한다. layer/query/룰러·pointer와 실제 수용은 남는다.
 
 2026-09-16, `feature/webui`의 `f95f890` 기준.
 [상위 계획 §4/§8/§9](WEBUI_PLAN.ko.md), [M2 기록](WEBUI_M2.ko.md),

@@ -16,6 +16,9 @@ guest별 `/drc`, `/drc/read`, `/drc/panel`, `/drc/selection`을 연결한다.
 M2b-4a의 [로컬 초대·guest 화면](WEBUI_SHARING_UI.ko.md)은 `--local-sharing` 아래
 정적 `/guest/{id}` shell과 별도 guest client를 연결한다. source/인증은 shell에 넣지 않는다.
 guest DRC/layer/query/룰러 UI·원격 API 전체가 구현된 것은 아니다.
+후속 [M2b-4b1](WEBUI_SHARING_DRC_UI.ko.md)은 기존 guest DRC API에 별도 승인/패널 UI를
+연결한다. `share.state`는 follow/explore 모두 `dbu_um`과 Rust `camera_um`을 제공하며
+owner catalog/경로/노트 metadata를 포함하지 않는다. 나머지 UI/원격 수용은 남는다.
 M4g-2의 실제 `GET /api/v1/views/{id}/minimap/{base}`는 owner 인증+CSRF로 현재 view의
 메모리 palette 베이스(180×180 ASCII 인덱스)만 반환한다. `base`는 `full` 또는 실제
 저장된 depth의 정규 십진수다. 임의 파일/geometry 조회나 새 렌더를 하지 않는다.

@@ -432,7 +432,7 @@ fn phase(p: Phase) -> &'static str {
         Phase::Failed => "failed",
     }
 }
-fn camera_um(bbox: [f64; 4], dbu: f64) -> Option<[String; 3]> {
+pub(crate) fn camera_um(bbox: [f64; 4], dbu: f64) -> Option<[String; 3]> {
     let [x0, y0, x1, y1] = bbox;
     let values = [
         (x0 + (x1 - x0) / 2.) * dbu,

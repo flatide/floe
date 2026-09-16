@@ -136,6 +136,8 @@ fn state(s: &Snapshot, target: &Target, mode: Mode, epoch: &str) -> Value {
         "dataset_revision":target.controller.model.dataset_revision.to_string(),"state_rev":s.state_rev.to_string(),
         "render_rev":s.render_rev.to_string(),"render_key":s.render_key.to_string(),
         "worker_epoch":s.worker_epoch.to_string(),"bbox_dbu":s.state.viewport.bbox.map(|v|v.to_string()),
+        "dbu_um":target.controller.model.dbu.to_string(),
+        "camera_um":view::camera_um(s.state.viewport.bbox,target.controller.model.dbu),
         "pixels":[s.state.viewport.width,s.state.viewport.height],
         "rendering":matches!(s.phase, Phase::Opening | Phase::Rendering | Phase::Cancelling),
         "margin":s.margin.map(|m|json!({"frame_id":m.frame_id.to_string(),"origin_px":m.origin_px,"crop_safe":m.crop_safe})),
@@ -160,7 +162,6 @@ fn state(s: &Snapshot, target: &Target, mode: Mode, epoch: &str) -> Value {
         out["labels"] = json!(s.state.labels);
         out["font_px"] = json!(s.state.font_px);
         out["mono"] = json!(s.state.mono);
-        out["dbu_um"] = json!(target.controller.model.dbu.to_string());
         out["failure"] = json!(s.failure.as_ref().map(|(kind, _)| view::safe_error(*kind)));
     }
     out

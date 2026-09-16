@@ -1,5 +1,9 @@
 # M2b-4a — 로컬 초대 UI와 전용 게스트 프레임 화면
 
+후속 [M2b-4b1 게스트 DRC UI](WEBUI_SHARING_DRC_UI.ko.md)는 별도 whole-result 승인과
+개인 목록/선택·윤곽·오류 이동을 연결한다. 아래의 layout-only 설명은 4a 단계 당시
+범위이며, 현재 DRC 공유도 자동이 아니라 별도 체크를 요구한다.
+
 `feature/webui`, [공유 경계](WEBUI_M2_SHARING.ko.md)의 M2b-4 첫 UI 단계다.
 앞선 follow/explore transport와 DRC/query API를 사용자용 화면에 연결하기 시작한다.
 **전체 공유 UI·SH-08 또는 원격 배포 완료가 아니다.** 뒤의 잔여 기능을 전체 목표에서
