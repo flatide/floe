@@ -3,6 +3,7 @@
 mod drc;
 mod explore;
 mod http;
+mod layers;
 mod query;
 mod stream;
 pub(crate) use http::maintenance;

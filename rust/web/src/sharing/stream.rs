@@ -38,6 +38,7 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(10);
 struct Target {
     id: String,
     controller: Arc<ViewController>,
+    rows: Arc<crate::layer_catalog::LayerCatalog>,
 }
 
 pub(super) async fn upgrade(
@@ -92,6 +93,7 @@ pub(super) async fn upgrade(
         Target {
             id: owner.id.clone(),
             controller: Arc::clone(&owner.controller),
+            rows: Arc::clone(&owner.rows),
         }
     } else {
         match http::with_shares(&gate, |shares, now| {
@@ -100,6 +102,7 @@ pub(super) async fn upgrade(
             Ok(view) => Target {
                 id: view.id.clone(),
                 controller: Arc::clone(&view.controller),
+                rows: Arc::clone(&owner.rows),
             },
             Err(status) => return transport::error(status),
         }
@@ -488,7 +491,7 @@ async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease, target: Target) {
                         let reply = http::with_shares(&gate, |shares, now| {
                             if !shares.valid(&lease, now) { return Err(StatusCode::UNAUTHORIZED); }
                             let applied = view::counter(&base_state_rev).map_err(|_| "invalid_request")
-                                .and_then(|rev| body.core(&target.controller, &lease.scope)
+                                .and_then(|rev| body.core(&target.controller, &lease.scope, &target.rows)
                                     .and_then(|patch| target.controller.edit(rev, patch).map_err(|e| match e.kind {
                                         floe_app_core::ErrorKind::Busy => "conflict", _ => view::safe_error(e.kind)
                                     })));

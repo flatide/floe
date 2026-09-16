@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 const PAGE: usize = 64;
 const SELECTION_LIMIT: usize = 4096;
 type Pair = (u32, u32);
+mod scoped;
+pub(crate) use scoped::{ScopedPage, Visibility};
 
 /// Palette-only state, not a ViewState patch. Folding never hides geometry.
 /// A default plus exceptions can fold every group without sending every row.
@@ -76,13 +78,16 @@ impl LayerCatalog {
                     pair: s.layer,
                     name: format!("{}/{}", s.layer.0, s.layer.1),
                     aliases: Vec::new(),
-                    head: false,
+                    head: model.layer_group(s.layer).is_some(),
                     parent: None,
                     style: Some(i),
                     fallback: "#ffffff".into(),
                 })
                 .collect(),
-            !model.deck,
+            model
+                .styles
+                .iter()
+                .all(|s| model.layer_group(s.layer).is_none()),
         )
     }
     pub fn dataset(dataset: &Dataset, model: &Model) -> Self {
@@ -331,7 +336,7 @@ impl LayerCatalog {
 mod tests {
     use super::*;
 
-    fn catalogue(pairs: Vec<Pair>, physical: bool) -> LayerCatalog {
+    pub(super) fn catalogue(pairs: Vec<Pair>, physical: bool) -> LayerCatalog {
         LayerCatalog::new(
             pairs
                 .into_iter()

@@ -29,7 +29,8 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
             assert(this.path.startsWith('/api/v1/guest/'+id+'/'));assert(!('X-Floe-CSRF' in this.headers));
             let v;if(this.path.endsWith('/exchange')){assert.equal(entry.body.invite,secret);v=auth;this.status=200;}
             else{assert.equal(this.headers['X-Floe-Guest-CSRF'],auth.csrf);this.status=sessionCode;
-                if(this.path.endsWith('/drc')){assert(grant);v={view_id:view,revision:'drc-rev',data:{checks:'0',errors:'0',precision:'1000',format:'ice',truncated_records:'0',read_only:true}};}
+                if(this.path.endsWith('/layers')){assert.equal(entry.body.view_id,view);v={view_id:view,data:{state_rev:entry.body.state_rev,render_key:'1',start:0,next:null,total:0,all_total:0,rows:[]}};}
+                else if(this.path.endsWith('/drc')){assert(grant);v={view_id:view,revision:'drc-rev',data:{checks:'0',errors:'0',precision:'1000',format:'ice',truncated_records:'0',read_only:true}};}
                 else if(this.path.endsWith('/drc/panel')){assert(grant);v={view_id:view,revision:'drc-rev',data:{panel_rev:'1',body:null}};}
                 else if(this.path.endsWith('/drc/selection')){assert(grant);v={view_id:view,revision:'drc-rev',data:{selection_rev:'1',total:'0',limit:5000,rules:[]}};}
                 else if(this.path.endsWith('/drc/read')){assert(grant);assert.equal(entry.body.body.kind,'rules');assert.equal(entry.body.view_id,view);v={view_id:view,revision:'drc-rev',data:{rows:[],next:null}};}
@@ -42,6 +43,7 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
     }
     const c=Guest.bind({window:win,document:doc,location,history,XHR,WebSocket:WS,protocol:P,now:()=>clock,
         drc:require('./guest-drc.js'),geometry:require('./drc-geometry.js'),selection:require('./drc-groups.js'),
+        layers:require('./guest-layers.js'),
         decode(h,data,cb){return Decode.create({ImageData:class{constructor(data){this.data=data;}},setTimeout:win.setTimeout,clearTimeout:win.clearTimeout},h,data,cb);}});
     function hello(ws=sockets.at(-1),connection=epoch){ws.onopen();ws.text({type:'share.hello',protocol:1,bundle,share_id:id,view_id:view,connection_epoch:connection,mode,read_only:true});}
     function state(extra={}){return {type:'share.state',view_id:view,connection_epoch:epoch,dataset_revision:'1',worker_epoch:'1',state_rev:'1',render_rev:'1',render_key:'1',bbox_dbu:['0','0','64','32'],dbu_um:'1',camera_um:['32','16','64'],pixels:[64,32],depth:'full',detail:'high',thin:'keep',frames:true,labels:true,mono:false,...extra};}

@@ -151,6 +151,9 @@ M2b-4a는 [로컬 초대·전용 guest 화면](WEBUI_SHARING_UI.ko.md)을 `--loc
 follow 프레임과 독립 탐색 조작은 연결했지만 DRC/layer/query/룰러 UI와 실제 수용은 남는다.
 M2b-4b1은 [별도 DRC 공개 승인·개인 목록/선택·윤곽/이동 UI](WEBUI_SHARING_DRC_UI.ko.md)를
 연결한다. scope 제한 layer/query/룰러·pointer, DRC 순회/마커/CD 조작과 실제 수용은 남는다.
+M2b-4b2는 [scope 제한 레이어 UI](WEBUI_SHARING_LAYERS.ko.md)를 연결한다. 승인 범위로
+목록 필터·부분 그룹/hidden 자식·개인 접힘과 Explore 가시성만이며 query/룰러·pointer,
+DRC 순회/마커/CD와 실제 수용은 남는다. 최종 검증 상태는 해당 기록을 따른다.
 `shares=false`는 유지하고 `delivery`는 follow=`follow_frames`, explore=`explore_frames`다.
 전송 기반을 전체 공유 완료로 계산하지 않는다. 원격 공개·노트 본문·파일 탐색/쓰기는 열지 않는다.
 

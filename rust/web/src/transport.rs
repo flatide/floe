@@ -49,7 +49,7 @@ pub(crate) struct Attachment {
     pub id: String,
     pub title: String,
     pub controller: Arc<ViewController>,
-    pub rows: crate::layer_catalog::LayerCatalog,
+    pub rows: Arc<crate::layer_catalog::LayerCatalog>,
     pub source_id: String,
     pub mode: &'static str,
     pub levels: Option<Vec<String>>,
@@ -75,7 +75,7 @@ impl Attachment {
         Ok(Self {
             id: crate::auth::public_id()?,
             title: title.chars().take(256).collect(),
-            rows,
+            rows: Arc::new(rows),
             controller,
             source_id: String::new(),
             mode: "level",

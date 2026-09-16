@@ -358,6 +358,11 @@ pub struct Model {
     property_names: Vec<((u32, u32), String)>,
 }
 impl Model {
+    /// Read-only alias expansion for scoped presentation. A group name is not
+    /// itself authority to render its children; callers must intersect scope.
+    pub fn layer_group(&self, pair: (u32, u32)) -> Option<&[(u32, u32)]> {
+        self.groups.get(&pair).map(Vec::as_slice)
+    }
     pub fn new(data: &ManagedDataset) -> Result<Arc<Self>> {
         let d = &data.dataset;
         let styles = Arc::new(d.styles(false)?);

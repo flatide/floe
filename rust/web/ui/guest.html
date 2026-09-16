@@ -9,6 +9,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-geometry.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest-drc.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/guest-layers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest.js"></script>
 </head><body>
   <header class="topbar"><div class="brand">floe<span>2</span></div><strong id="guest-mode">Read-only guest</strong>
@@ -35,6 +36,15 @@
         <label for="guest-width">View width (optional)</label><input id="guest-width" disabled>
         <button id="guest-go" disabled>Go</button>
         <p class="note">On the canvas: arrow keys pan 50%, Shift + arrows 10%; + / − zoom, Home fits. Only your view changes.</p>
+      </section>
+      <section id="gl-panel" hidden><h2>Approved layers</h2>
+        <button id="gl-reload">Reload layers</button>
+        <div class="button-row"><button id="gl-all">Show all approved</button><button id="gl-none">Hide all</button></div>
+        <div class="button-row"><button id="gl-collapse">Collapse all</button><button id="gl-expand">Expand all</button></div>
+        <div id="gl-rows" class="guest-review-list" aria-label="Approved layers"></div>
+        <p id="gl-count" class="note"></p>
+        <div class="button-row"><button id="gl-prev">Previous layers</button><button id="gl-next">Next layers</button></div>
+        <p id="gl-status" class="note" role="status"></p>
       </section>
       <section id="gd-panel" hidden><h2>Shared DRC · read-only</h2>
         <p class="note">This entire result was explicitly shared. Your lists and selections are private; no notes, SVRF or review writes are available.</p>

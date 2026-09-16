@@ -1,5 +1,9 @@
 # 웹 전환 M2 — DRC 읽기·공유 이관 기록
 
+M2b-4b2: [게스트 scope 제한 레이어 UI](WEBUI_SHARING_LAYERS.ko.md)를 연결했다.
+native/CLI·JS·전체 배터리 검증과 단발 timeout 재검사는 해당 기록을 따른다.
+query/룰러·pointer 및 실제 수용은 남는다.
+
 M2b-4b1: [게스트 DRC UI](WEBUI_SHARING_DRC_UI.ko.md)에 별도 전체 결과 공개 동의,
 개인 목록/선택·ICE/ASCII 윤곽·독립 오류 이동을 연결한다. scope 제한 레이어,
 query/룰러·pointer 및 실제 브라우저/원격 수용은 계속 남는다.

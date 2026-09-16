@@ -10,6 +10,8 @@ SH-06 native 시나리오가 추가됐으나 실제 guest UI/SH-08·원격 SH-10
 DRC/layer/query/룰러 guest UI와 실제 SH-08·SH-10 수용을 대체하지 않는다.
 [M2b-4b1 게스트 DRC UI](WEBUI_SHARING_DRC_UI.ko.md)는 별도 결과 공개 동의와 개인
 목록/선택·윤곽/goto를 연결한다. layer/query/룰러·pointer와 실제 수용은 남는다.
+후속 [M2b-4b2 레이어 UI](WEBUI_SHARING_LAYERS.ko.md)는 승인 범위의 목록/그룹·개인
+접힘·Explore 가시성을 연결한다. query/룰러·pointer와 실제 수용은 여전히 남는다.
 
 2026-09-16, `feature/webui`의 `f95f890` 기준.
 [상위 계획 §4/§8/§9](WEBUI_PLAN.ko.md), [M2 기록](WEBUI_M2.ko.md),

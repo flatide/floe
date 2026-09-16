@@ -53,7 +53,7 @@ def main(fixture):
                     page = owner.call("GET", "/guest/" + "a" * 64)
                     assert b"guest.js" in page and b"app.js" not in page
                     assert session["url"].encode() not in page and b"bootstrap=" not in page
-                    for name in ("guest.js", "guest.css", "sharing.js", "guest-drc.js", "drc-geometry.js"):
+                    for name in ("guest.js", "guest.css", "sharing.js", "guest-drc.js", "guest-layers.js", "drc-geometry.js"):
                         actual = owner.call("GET", "/assets/" + session["bundle"] + "/" + name)
                         expected = Path(__file__).resolve().parents[1] / "rust/web/ui" / name
                         assert actual == expected.read_bytes(), "stale embedded guest asset: " + name
@@ -106,6 +106,14 @@ def main(fixture):
                         call("POST", base + "/exchange", token, 401)
                         assert call("GET", base + "/session")["mode"] == mode
                         call("GET", "/api/v1/capabilities", code=401)
+                        palette_request = dict(view_id=view["view_id"], state_rev=view["state_rev"], body={})
+                        if mode == "follow":
+                            palette = call("POST", base + "/layers", palette_request)
+                            assert palette["view_id"] == view["view_id"]
+                            assert palette["data"]["total"] > 0
+                            assert all("name" in r and "parent" in r for r in palette["data"]["rows"])
+                        else:
+                            call("POST", base + "/layers", palette_request, 409)  # no implicit worker
                         if share_drc:
                             meta = call("GET", base + "/drc")
                             assert meta["data"]["format"] == "ascii" and meta["data"]["errors"] == "1"

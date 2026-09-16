@@ -23,6 +23,7 @@ pub(crate) fn routes() -> Router<Gate> {
         .route("/api/v1/guest/{id}/session", get(session).delete(logout))
         .route("/api/v1/guest/{id}/events", get(super::stream::upgrade))
         .merge(super::drc::routes())
+        .merge(super::layers::routes())
 }
 fn failure(error: Failure) -> StatusCode {
     match error {

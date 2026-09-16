@@ -1,6 +1,35 @@
 //! Independent native views, scoped display edits, and shared admission.
 use super::*;
 
+async fn palette(
+    h: &Harness,
+    guest: &Login,
+    id: &str,
+    view: &Value,
+    rev: &Value,
+    body: Value,
+    expected: u16,
+) -> Value {
+    let origin = format!("http://{}", h.addr);
+    let path = format!("/api/v1/guest/{id}/layers");
+    let data = json!({"view_id":view,"state_rev":rev,"body":body}).to_string();
+    let (code, _, reply) = h
+        .http(
+            "POST",
+            &path,
+            &[
+                ("Origin", &origin),
+                ("Content-Type", "application/json"),
+                ("Cookie", &guest.cookie),
+                ("X-Floe-Guest-CSRF", &guest.csrf),
+            ],
+            &data,
+        )
+        .await;
+    assert_eq!(code, expected, "{reply}");
+    serde_json::from_str(&reply).unwrap()
+}
+
 #[tokio::test]
 #[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]
 async fn local_explore_deck_parent_cannot_expand_beyond_granted_child() {
@@ -80,6 +109,70 @@ async fn local_explore_deck_parent_cannot_expand_beyond_granted_child() {
     )
     .await;
     assert_eq!(reply["state_rev"], af["state_rev"]);
+    let aid = a["share_id"].as_str().unwrap();
+    let page = palette(
+        &h,
+        &ac,
+        aid,
+        &ah["view_id"],
+        &af["state_rev"],
+        json!({}),
+        200,
+    )
+    .await;
+    assert_eq!(page["data"]["total"], 2);
+    assert_eq!(page["data"]["rows"][0]["pair"], json!(parent));
+    assert_eq!(page["data"]["rows"][0]["children"], 1);
+    assert_eq!(page["data"]["rows"][1]["pair"], json!(children[0]));
+    let hidden = edit(
+        &mut av,
+        &ah,
+        4,
+        &af["state_rev"],
+        json!({"layer_visibility":{"pair":parent,"group":true,"visible":false}}),
+        "accepted",
+    )
+    .await;
+    let page = palette(
+        &h,
+        &ac,
+        aid,
+        &ah["view_id"],
+        &hidden["state_rev"],
+        json!({}),
+        200,
+    )
+    .await;
+    assert_eq!(page["data"]["rows"][0]["visible"], false);
+    let (hidden_frame, _) = explore_frame_with_query(&mut av, false).await;
+    ack(&mut av, &ah, 5, &hidden_frame).await;
+    let restored = edit(
+        &mut av,
+        &ah,
+        6,
+        &hidden["state_rev"],
+        json!({"layer_visibility":{"pair":parent,"group":true,"visible":true}}),
+        "accepted",
+    )
+    .await;
+    let (restored_frame, _) = explore_frame_with_query(&mut av, false).await;
+    ack(&mut av, &ah, 7, &restored_frame).await;
+    let page = palette(
+        &h,
+        &ac,
+        aid,
+        &ah["view_id"],
+        &restored["state_rev"],
+        json!({"fold":{"closed":true}}),
+        200,
+    )
+    .await;
+    assert_eq!(page["data"]["total"], 1);
+    assert_eq!(page["data"]["rows"][0]["all_visible"], true);
+    assert_eq!(
+        h.controller.snapshot().state.layers,
+        Layers::Only(vec![children[0]])
+    );
     h.shutdown().await;
     closed(&mut av).await;
     std::fs::remove_file(deck).unwrap();
@@ -310,16 +403,101 @@ async fn local_explore_admission_and_scope_are_not_authority_expansion() {
     let bc = exchange(&h, &b).await;
     let aid = a["share_id"].as_str().unwrap();
     let bid = b["share_id"].as_str().unwrap();
+    // HTTP metadata must not implicitly admit an Explorer worker.
+    palette(
+        &h,
+        &ac,
+        aid,
+        &json!("not admitted"),
+        &json!("1"),
+        json!({}),
+        409,
+    )
+    .await;
     let (mut av, ah) = guest_connect(&h, aid, &ac, "explore").await;
     let (af, pixels) = explore_frame(&mut av).await;
     ack(&mut av, &ah, 1, &af).await;
+    let page = palette(
+        &h,
+        &ac,
+        aid,
+        &ah["view_id"],
+        &af["state_rev"],
+        json!({}),
+        200,
+    )
+    .await;
+    assert_eq!(page["data"]["total"], 1);
+    assert_eq!(page["data"]["all_total"], 1);
+    assert_eq!(page["data"]["rows"][0]["pair"], json!(planes[0]));
+    assert!(page["data"]["rows"][0]["parent"].is_null());
+    palette(
+        &h,
+        &owner,
+        aid,
+        &ah["view_id"],
+        &af["state_rev"],
+        json!({}),
+        401,
+    )
+    .await;
+    palette(
+        &h,
+        &bc,
+        aid,
+        &ah["view_id"],
+        &af["state_rev"],
+        json!({}),
+        401,
+    )
+    .await;
+    palette(
+        &h,
+        &ac,
+        aid,
+        &oh["view_id"],
+        &af["state_rev"],
+        json!({}),
+        409,
+    )
+    .await;
+    palette(
+        &h,
+        &ac,
+        aid,
+        &ah["view_id"],
+        &json!("999999"),
+        json!({}),
+        409,
+    )
+    .await;
+    palette(
+        &h,
+        &ac,
+        aid,
+        &ah["view_id"],
+        &af["state_rev"],
+        json!({"fold":{"exceptions":[planes[1]]}}),
+        400,
+    )
+    .await;
+    palette(
+        &h,
+        &ac,
+        aid,
+        &ah["view_id"],
+        &af["state_rev"],
+        json!({"start":2}),
+        400,
+    )
+    .await;
     denied(guest_request(&h, bid, &bc), 429).await;
     let denied_edit = edit(
         &mut av,
         &ah,
         2,
         &af["state_rev"],
-        json!({"layers":{"mode":"only","pairs":[planes[1]]}}),
+        json!({"layer_visibility":{"pair":planes[1],"group":false,"visible":true}}),
         "error",
     )
     .await;
@@ -329,7 +507,7 @@ async fn local_explore_admission_and_scope_are_not_authority_expansion() {
         &ah,
         3,
         &af["state_rev"],
-        json!({"layers":{"mode":"none"}}),
+        json!({"layer_visibility":{"pair":planes[0],"group":false,"visible":false}}),
         "accepted",
     )
     .await;
@@ -378,6 +556,16 @@ async fn local_explore_admission_and_scope_are_not_authority_expansion() {
         .unwrap();
     closed(&mut bv).await;
     denied(guest_request(&h, bid, &bc), 401).await;
+    palette(
+        &h,
+        &bc,
+        bid,
+        &bh["view_id"],
+        &bf["state_rev"],
+        json!({}),
+        401,
+    )
+    .await;
     usage(&h, baseline).await;
     h.shutdown().await;
     println!("RUST LOCAL EXPLORE SCOPE: ALL OK (same-manager busy/retry, granted layers/all, owner command denial, scope revoke)");

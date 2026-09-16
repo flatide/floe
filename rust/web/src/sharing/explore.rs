@@ -1,6 +1,7 @@
 //! Only presentation/navigation of this grant's own view. No owner drafts,
 //! settings, source selection, query receipts or filesystem authority.
 use super::Scope;
+use crate::layer_catalog::{LayerCatalog, Visibility};
 use crate::view::{DetailDto, Field, Nav, PatchDto, Selection, ThinDto};
 use floe_app_core::view::{Patch, ViewController};
 use floe_worker_client::Layers;
@@ -66,13 +67,25 @@ pub(super) struct DisplayPatch {
     detail: Field<DetailDto>,
     thin: Field<ThinDto>,
     layers: Field<Selection>,
+    layer_visibility: Field<Visibility>,
     frames: Field<bool>,
     labels: Field<bool>,
     font_px: Field<u32>,
     mono: Field<bool>,
 }
 impl DisplayPatch {
-    pub fn core(self, controller: &ViewController, scope: &Scope) -> Result<Patch, &'static str> {
+    pub fn core(
+        self,
+        controller: &ViewController,
+        scope: &Scope,
+        rows: &LayerCatalog,
+    ) -> Result<Patch, &'static str> {
+        if matches!(self.layers, Field::Value(_))
+            && matches!(self.layer_visibility, Field::Value(_))
+        {
+            return Err("invalid_request");
+        }
+        let visibility = self.layer_visibility;
         let mut patch = PatchDto {
             navigation: self.navigation,
             pixels: self.pixels,
@@ -88,6 +101,14 @@ impl DisplayPatch {
             ..Default::default()
         }
         .core()?;
+        if let Field::Value(change) = visibility {
+            patch.layers = Some(rows.scoped_change(
+                &controller.model,
+                &controller.snapshot(),
+                &scope.layers,
+                change,
+            )?);
+        }
         if let Some(layers) = &patch.layers {
             patch.layers = Some(scoped_layers(controller, scope, layers)?);
         }

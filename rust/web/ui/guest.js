@@ -14,6 +14,12 @@
         let ping=null,reconnect=null,resize=null,observer=null,delay=500,flushTimer=null,lastSend=-Infinity;
         const now=o.now||function(){return win.performance.now();};
         const pending=new Set();
+        function viewContext(){return !stopped&&!suspended&&hello&&state?{view_id:hello.view_id,epoch:hello.connection_epoch,
+            state_rev:state.state_rev,render_key:state.render_key,mode:session.mode,pending:!!flight||!!accepted||!!queue.length}:null;}
+        function scopedEdit(body,c){const current=viewContext();if(!current||current.mode!=='explore'||current.pending||
+            c.view_id!==current.view_id||c.epoch!==current.epoch||c.state_rev!==current.state_rev){return false;}edit(body);return true;}
+        const layers=o.layers?o.layers.bind({el:el,document:doc,protocol:P,http:request,context:viewContext,edit:scopedEdit}):null;
+        function panelsChanged(){if(drc){drc.changed();}if(layers){layers.changed();}}
         const drc=o.drc?o.drc.bind({el:el,document:doc,protocol:P,geometry:o.geometry,selection:o.selection,http:request,
             context:function(){return !stopped&&!suspended&&hello&&state&&session.drc?{view_id:hello.view_id,epoch:hello.connection_epoch,
                 state_rev:state.state_rev,mode:session.mode,drc:session.drc,pending:!!flight||!!accepted||!!queue.length}:null;},
@@ -31,6 +37,7 @@
         function clear(){foreground=margin=null;canvas.width=canvas.height=1;el('guest-empty').hidden=false;el('guest-frame-status').textContent='No displayed frame';}
         function disconnect(){serial++;joining=false;const old=socket;socket=null;hello=state=null;queue=[];flight=accepted=null;
             if(drc){drc.reset();}
+            if(layers){layers.reset();}
             if(flushTimer!==null){win.clearTimeout(flushTimer);flushTimer=null;}lastSend=-Infinity;
             if(decode){decode.cancel();decode=null;}if(raf!==null){win.cancelAnimationFrame(raf);raf=null;}
             if(ping!==null){win.clearInterval(ping);ping=null;}if(reconnect!==null){win.clearTimeout(reconnect);reconnect=null;}
@@ -40,9 +47,10 @@
         function request(method,suffix,body,token){
             // This client cannot dispatch owner paths, even via a caller option.
             const isDRC=['/drc','/drc/read','/drc/panel','/drc/selection'].includes(suffix);
-            const methods={'/exchange':['POST'],'/session':['GET','DELETE'],'/drc':['GET'],'/drc/read':['POST'],'/drc/panel':['GET','POST'],'/drc/selection':['GET','POST']};
+            const methods={'/exchange':['POST'],'/session':['GET','DELETE'],'/layers':['POST'],'/drc':['GET'],'/drc/read':['POST'],'/drc/panel':['GET','POST'],'/drc/selection':['GET','POST']};
             if(!methods[suffix]||!methods[suffix].includes(method)||isDRC&&(!session||!session.drc||!hello||!state)){return Promise.reject(Error('Unsupported guest request'));}
-            const limit=isDRC?1024*1024:65536;
+            if(suffix==='/layers'&&(!hello||!state)){return Promise.reject(Error('Guest view not ready'));}
+            const limit=isDRC?1024*1024:suffix==='/layers'?256*1024:65536;
             return new Promise(function(resolve,reject){const x=new o.XHR();pending.add(x);let done=false;
                 function end(error,value){if(done){return;}done=true;pending.delete(x);if(token){token.abort=null;}if(error){reject(error);}else{resolve(value);}}
                 if(token&&token.cancelled){end(Error('Guest request cancelled'));return;}
@@ -98,7 +106,7 @@
             const remaining=65-(now()-lastSend);if(remaining>0){flushTimer=win.setTimeout(function(){flushTimer=null;flush();},remaining);return;}lastSend=now();
             flight=send({type:'explore.set',view_id:hello.view_id,connection_epoch:hello.connection_epoch,base_state_rev:state.state_rev,body:queue.shift()});}
         function edit(body){if(stopped||suspended||!hello||!state||session.mode!=='explore'){return;}
-            if(queue.length>=16){status('Input queue full; wait for this view.');return;}queue.push(body);flush();if(drc){drc.changed();}}
+            if(queue.length>=16){status('Input queue full; wait for this view.');return;}queue.push(body);flush();panelsChanged();}
         function settle(){if(accepted&&state&&P.compare(state.state_rev,accepted)>=0){accepted=null;}flush();}
         function resized(){if(resize!==null){win.clearTimeout(resize);}resize=win.setTimeout(function(){resize=null;if(!state||!session||session.mode!=='explore'){return;}
                 try{const r=viewport.getBoundingClientRect(),d=win.devicePixelRatio||1,w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));P.pixels(w,h);
@@ -112,9 +120,9 @@
                 if(v.type==='share.hello'){if(hello||v.protocol!==1||v.bundle!==bundle||v.share_id!==id||v.mode!==session.mode||v.read_only!==true||!['view_id','connection_epoch'].every(function(k){return /^[0-9a-f]{64}$/.test(v[k]);})){throw Error('Invalid guest handshake');}
                     hello=v;delay=500;status(v.mode==='follow'?'Following owner · read-only':'Independent view · read-only');controls();return;}
                 if(!hello){throw Error('Guest handshake missing');}
-                if(v.type==='share.state'){validateState(v);state=v;sync();compose();settle();controls();resized();if(drc){drc.changed();}status((session.mode==='follow'?'Following owner':'Independent view')+' · read-only'+(v.rendering?' · rendering…':''));if(v.failure){status('Render failed: '+String(v.failure));}return;}
-                if(v.type==='accepted'){if(v.seq!==flight||v.view_id!==hello.view_id||v.connection_epoch!==hello.connection_epoch){throw Error('Wrong edit acknowledgment');}P.counter(v.state_rev);flight=null;accepted=v.state_rev;settle();if(drc){drc.changed();}return;}
-                if(v.type==='error'){if(v.seq===flight){flight=accepted=null;queue=[];status('View change rejected. No change was replayed.');}else{throw Error('Unexpected guest error');}return;}
+                if(v.type==='share.state'){validateState(v);state=v;sync();compose();settle();controls();resized();panelsChanged();status((session.mode==='follow'?'Following owner':'Independent view')+' · read-only'+(v.rendering?' · rendering…':''));if(v.failure){status('Render failed: '+String(v.failure));}return;}
+                if(v.type==='accepted'){if(v.seq!==flight||v.view_id!==hello.view_id||v.connection_epoch!==hello.connection_epoch){throw Error('Wrong edit acknowledgment');}P.counter(v.state_rev);flight=null;accepted=v.state_rev;settle();panelsChanged();return;}
+                if(v.type==='error'){if(v.seq===flight){flight=accepted=null;queue=[];panelsChanged();status('View change rejected. No change was replayed.');}else{throw Error('Unexpected guest error');}return;}
                 if(v.type!=='pong'){throw Error('Unsupported guest message');}
             }catch(_){stop('Guest protocol error. Reload with a valid invitation.',true);}
         }
@@ -165,5 +173,6 @@
     const api={bind:bind};
     if(typeof module==='object'&&module.exports){module.exports=api;}else{root.FloeGuest=api;api.bind({window:root,document:document,location:location,history:history,XHR:root.XMLHttpRequest,WebSocket:root.WebSocket,protocol:root.FloeProtocol,
         drc:root.FloeGuestDRC,geometry:root.FloeDRCGeometry,selection:root.FloeDRCGroups,
+        layers:root.FloeGuestLayers,
         decode:function(h,data,cb){return root.FloeImageDecode.create({Image:root.Image,ImageData:root.ImageData,Blob:root.Blob,URL:root.URL,setTimeout:root.setTimeout.bind(root),clearTimeout:root.clearTimeout.bind(root)},h,data,cb);}}).start();}
 }(typeof window==='object'?window:this));
