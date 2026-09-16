@@ -393,12 +393,13 @@
                     displayed = true; el('empty').hidden = true; disposition = 'displayed';
                     target.dataset.frameId = h.frame_id; target.dataset.renderRev = h.render_rev;
                     target.dataset.bboxDbu = JSON.stringify(h.bbox_dbu);
-                    el('status').textContent = (h.complete ? 'Live' : 'INCOMPLETE') + (h.approximate ? ' · summary/LOD' : '') +
+                    el('status').textContent = (!h.final ? 'Refining' : h.complete ? 'Live' : 'INCOMPLETE') + (h.approximate ? ' · summary/LOD' : '') +
                         (h.labels_truncated ? ' · labels partial' : '') + (h.deck_skipped !== '0' ? ' · skipped ' + h.deck_skipped : '') + ' · gen ' + h.generation;
                     const perf = h.perf || {}, ms = function (name) { return perf[name] ? (Number(perf[name]) / 1000).toFixed(1) : '0'; };
                     if (h.purpose === 'foreground') {
                         foregroundPerf = 'Rust foreground · plan ' + ms('plan_us') + ' ms · decode ' + ms('decode_us') + ' ms · draw ' + ms('raster_us') +
-                            ' ms · ' + (perf.pages || '0') + ' pages · ' + h.width + ' × ' + h.height + ' px · ' + h.format + ' · refinement off';
+                            ' ms · ' + (perf.pages || '0') + ' pages · ' + h.width + ' × ' + h.height + ' px · ' + h.format +
+                            ' · round ' + h.round + (h.final ? ' · final frame' : ' · refining');
                     }
                     present();
                 }

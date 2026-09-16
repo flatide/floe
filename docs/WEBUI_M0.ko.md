@@ -5,6 +5,8 @@
 서비스 계약 초안: [WEBUI_SERVICE_API.ko.md](WEBUI_SERVICE_API.ko.md).
 
 현재 구현·수용 잔여는 [G4 감사](WEBUI_G4_AUDIT.ko.md)에서 대조한다.
+M4g-27의 [CLI 재대조](WEBUI_G4_CLI.ko.md)는 현재94개 공개 옵션(보조 PNG16개 별도)을
+고정하고 명시 refinement on의 기존 환경 page-round 동작을 사용자 결정대로 복원했다.
 M4g-23은 GTK 메뉴 원본의 실행 중 DRC/SVRF 교체·카메라 유지 레벨 재선택3건을
 미구현으로 확인했다([메뉴 대조](WEBUI_G4_MENU.ko.md)). CLI 초기 등록/일반 open과
 실행 중 조작을 구별하며, 아래 누적 기록만으로 전체 UI parity를 판정하지 않는다.
@@ -242,7 +244,8 @@ Canvas readback과 실제 화면 관찰/수용도 구분한다([표시 진단 �
 | 항목 | 현재 웹 동작 / 남은 결정 |
 |---|---|
 | `--stream-kb 0` | `--refinement off`와 같은 direct-final. 둘 다 `FLOE_RUST_ROUND_PAGES`보다 우선하며 독립 workspace. decoded/frame cache는 이 옵션만으로 끄지 않음 |
-| nonzero `--stream-kb`, `--refinement on` | 명시 오류. 바이트 단위 스트리밍과 page-round는 같은 단위가 아니므로 이름만 대응하지 않음. 새 progressive 정책은 별도 |
+| `--refinement on` | M4g-27 사용자 결정: 기존처럼 환경 page-round를 따름. 환경 생략 시 실질 off, 명시 off/stream0/baseline 우선. 새 adaptive 정책 아님 |
+| nonzero `--stream-kb` | 명시 오류는 유지. 기존 Rust는 양수를 KB 배치로 쓰지 않고 환경 page-round를 따랐음. 이 호환 수용 여부와 새 byte-stream 정책은 별도 |
 | `--stream-target-ms` | 기본500도 명시 오류. 기존 Rust 어댑터가 이미 쓰지 않던 값이며 적응형 스트리밍 이관 필요 여부는 별도 |
 | `--render-debug` | 독립 workspace의 worker가 소비한 frame/round당 숫자 한 줄을 stderr에 출력. 원 wire/stderr/좌표·이름·경로 미전달. 아래 M4 §62의 차이 명시 |
 | view `--lod` | 기존 Rust wire에 없음. on/off 모두 이유를 포함해 오류. `index --lod`는 생성 옵션으로 지원하며 live LOD 제어와 다름 |

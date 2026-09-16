@@ -22,6 +22,7 @@ const fillEditorEnabled=process.env.FLOE_TEST_FILL_EDITOR==='1';
 const displayTestEnabled=process.env.FLOE_TEST_DISPLAY==='1',displayReads=[];
 const wheelEnabled=process.env.FLOE_TEST_WHEEL==='1';
 const dumpEnabled=process.env.FLOE_TEST_DUMP==='1';
+const frameStatusEnabled=process.env.FLOE_TEST_FRAME_STATUS==='1';
 function presetFixture(){
     const lines=name=>fs.readFileSync(__dirname+'/../../../floe/'+name,'utf8').split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#')).map(l=>l.split(/\s+/));
     return {version:1,colors:lines('colornames.def').map(([name,color])=>({name,color:'#'+color.toLowerCase()})),
@@ -246,6 +247,28 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(frameStatusEnabled){
+        await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
+        const noQuery={query:false,query_scene:{generation:null,round:null,complete:false,summary_layers:'0'}};
+        ws.receive(packet('raw','1','1',epoch,{...noQuery,final:false,partial:true,complete:false,deferred:'9'}));
+        assert.match(node('status').textContent,/^Refining/);assert.match(node('perf').textContent,/round 1 · refining$/);
+        assert(!node('perf').textContent.includes('refinement off'));
+        ws.receive(packet('raw','2','1',epoch,{round:'3'}));
+        assert.match(node('status').textContent,/^Live/);assert.match(node('perf').textContent,/round 3 · final frame$/);
+        ws.receive(packet('raw','3','1',epoch,{...noQuery,round:'4',partial:true,complete:false}));
+        assert.match(node('status').textContent,/^INCOMPLETE/);assert.match(node('perf').textContent,/round 4 · final frame$/);
+        ws.receive(packet('raw','4','1',epoch,{round:'9007199254740993',complete:false,labels_truncated:true}));
+        assert.match(node('status').textContent,/^INCOMPLETE · labels partial/);
+        assert.match(node('perf').textContent,/round 9007199254740993 · final frame$/,'round was rounded through Number');
+        const current=node('perf').textContent,status=node('status').textContent;
+        ws.receive(packet('raw','5','1','f'.repeat(64),{...noQuery,final:false,complete:false}));
+        assert.equal(node('perf').textContent,current);assert.equal(node('status').textContent,status);
+        snapshot.margin={frame_id:'6',origin_px:[48,48],crop_safe:false};snapshot.capabilities.margin=true;ws.receive(snapshot);
+        ws.receive(packet('raw','6','1',epoch,{purpose:'margin',width:196,height:176,bbox_dbu:['-58.9375','-48','137.0625','128'],complete:false,labels_truncated:true}));
+        assert.equal(node('perf').textContent,current,'background margin replaced foreground timing');
+        listeners.pagehide();
+        console.log('WEB FRAME STATUS: ALL OK (intermediate/final/incomplete, u64 round, stale discard, margin timing isolation)');return;
+    }
     if(dumpEnabled){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
         assert(node('dump-enabled').checked);assert(node('dump-received').disabled);

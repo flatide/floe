@@ -10,10 +10,45 @@ import subprocess
 import sys
 import tempfile
 from types import MethodType, SimpleNamespace
+from unittest.mock import patch
 
 from validate_web_cli import APP, INDEX, RENDERD, Client, read_json, wait
+from validate_web_cli_inventory import legacy_parsers
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def refinement_oracle():
+    """Run the original CLI prefix and only the real worker round assignment.
+
+    No GTK, socket, worker constructor or binary discovery is executed. This
+    retains argparse's duplicate-option rule and cmd_view's stream/baseline
+    precedence rather than reimplementing them in the native test driver.
+    """
+    sys.path.insert(0, str(ROOT))
+    from floe import cli, rust_render
+    parser = legacy_parsers()["view"]
+    tree = ast.parse((ROOT / "floe/cli.py").read_text())
+    method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "cmd_view")
+    cut = next(i for i, n in enumerate(method.body) if isinstance(n, ast.Assign)
+               and any(isinstance(t, ast.Name) and t.id == "server" for t in n.targets))
+    method.body = method.body[:cut] + ast.parse("return stream_kb").body
+    scope = dict(vars(cli))
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
+                 "GTK refinement CLI prefix", "exec"), scope)
+    tree = ast.parse((ROOT / "floe/rust_render.py").read_text())
+    worker = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "RustRenderWorker")
+    init = next(n for n in worker.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+    assignment, = [n for n in init.body if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Attribute) and t.attr == "_round_pages" for t in n.targets)]
+    code = compile(ast.Module(body=[assignment], type_ignores=[]), "GTK worker round policy", "exec")
+    def expected(args, env):
+        with patch.dict(os.environ, env, clear=True):
+            stream_kb = scope["cmd_view"](parser.parse_args(args))
+            instance = SimpleNamespace()
+            exec(code, dict(vars(rust_render), self=instance, stream_kb=stream_kb))
+            return instance._round_pages
+    return expected
 
 
 def oracle(work):
@@ -95,6 +130,7 @@ def oracle(work):
 
 
 def native(work, fixture):
+    old_rounds = refinement_oracle()
     source = work / "native.oas"
     shutil.copy2(fixture, source)
     env = dict(os.environ, PATH="", FLOE_INDEX_BIN=str(INDEX), FLOE_RENDERD_BIN=str(RENDERD),
@@ -109,6 +145,7 @@ def native(work, fixture):
     deck.write_text("MTITLE 1,ONE\nMTITLE 2,TWO\nCHIP C\n"
                    "$ (1,P1,TC=native.oas,AD=0.001,LY={1},DT={0},UX=500,UY=500)\n"
                    "$ (2,P2,TC=native.oas,AD=0.001,LY={2},DT={0},UX=500,UY=500)\nROWS 0/0\n")
+    inspection = ["--depth", "999", "--detail", "high"]
     cases = [
         (source, [], None, "0", True, True, False),
         (source, ["--goto", "1.25,-2.5"], None, "full", True, True, False),
@@ -118,17 +155,29 @@ def native(work, fixture):
         (deck, ["--mode", "layer"], "all", "full", True, False, False),
         (deck, [], "2", "full", True, False, False),
         (deck, ["--level", "1"], "invalid", "full", True, False, False),
+        (source, ["--refinement", "on", *inspection], None, "full", True, True, False),
+        (source, ["--refinement", "off", "--refinement", "on", *inspection], None, "full", True, True, False),
+        (source, ["--refinement", "on", "--refinement", "off", *inspection], None, "full", True, True, False),
+        (source, ["--stream-kb", "0", "--refinement", "on", *inspection], None, "full", True, True, False),
+        (source, ["--perf-baseline", "--refinement", "on", *inspection], None, "full", False, False, False),
+        (source, inspection, None, "full", True, True, False),
+        (source, ["--refinement", "on", *inspection], None, "full", True, True, False),
     ]
     for i, (path, extra, policy, depth, frames, labels, ask) in enumerate(cases):
         temps = work / f"temps-{i}"
         temps.mkdir()
         session_file = work / f"session-{i}.json"
         child_env = dict(env, TMPDIR=str(temps))
+        if i == 14:
+            child_env.pop("FLOE_RUST_ROUND_PAGES")
         if policy is not None:
             child_env["FLOE_JOBDECK_LEVELS"] = policy
         # Both spellings must defeat FLOE_RUST_ROUND_PAGES=1 before
         # the first frame, including deck workers. No Python runtime fallback.
-        direct_final = ["--stream-kb", "0"] if i % 2 else ["--refinement", "off"]
+        direct_final = ([] if i >= 8 else
+                        ["--stream-kb", "0"] if i % 2 else ["--refinement", "off"])
+        expected_rounds = (old_rounds([str(path), *direct_final, *extra], child_env)
+                           if i >= 8 else 1 << 30)
         debug = i in (1, 3, 5)
         args = [str(APP), "view", str(path), "--no-open", "--session-file", str(session_file),
                 "--jobs", "1", "--raster-jobs", "1", "--frame-cache", "off"] + direct_final + extra
@@ -156,7 +205,11 @@ def native(work, fixture):
                 assert client.finished(1, p)["phase"] == "succeeded"
                 view = wait(lambda: (lambda v: v if v["status"] == "idle" else None)(
                     client.call("GET", "/api/v1/view")["view"]), p)
-                assert view["submitted"] == "1" and view["consumed"] == "1", view
+                assert view["submitted"] == "1", view
+                if expected_rounds == 1:
+                    assert int(view["consumed"]) > 1, (i, expected_rounds, view)
+                else:
+                    assert expected_rounds == 1 << 30 and view["consumed"] == "1", (i, view)
                 assert view["depth"] == depth and view["frames"] is frames and view["labels"] is labels
                 assert not view["capabilities"]["margin"]
                 if i == 1:
@@ -188,7 +241,9 @@ def native(work, fixture):
                 p.communicate(timeout=15)
     assert {p.name:p.read_bytes() for p in cache.iterdir() if p.is_file()} == before
     assert source.read_bytes() == fixture.read_bytes()
-    print("WEB STARTUP NATIVE: ALL OK (8 launch cases, 7 first frames, direct-final aliases, numeric debug opt-in, no implicit index, source/cache unchanged)")
+    print(f"WEB STARTUP NATIVE: ALL OK ({len(cases)} launch cases, {len(cases)-1} first generations, "
+          "GTK source-derived refinement/env/duplicates/zero/baseline parity, direct-final aliases, "
+          "numeric debug opt-in, no implicit index, source/cache unchanged)")
 
 
 def main(fixture):

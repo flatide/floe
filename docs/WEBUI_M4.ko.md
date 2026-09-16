@@ -6008,3 +6008,60 @@ inactive1)이며 `--require-complete`를 전체 배터리에 넣었다. 이것�
 완료율이 아니다. 다음은 진단/무효 CLI 경계와 전체 G4 최종 재대조다. 실제 브라우저·
 Python-free Linux·G1/G4·현장, M2 공유/원격 승인·구현, 조건부 M5도 별도로 남는다.
 main/jobdeck의 별도 변경·현장 검증 대기는 유지하며 전체 goal은 진행 중이다.
+
+## 85. M4g-27 — CLI 원본 재대조와 refinement 호환
+
+2026-09-16. 사용자 결정대로 `--refinement on`은 기존 Rust 어댑터처럼
+`FLOE_RUST_ROUND_PAGES`를 따른다. 환경이 없으면2^30으로 실질 off이며 새 adaptive
+정책·byte/time 예산을 도입하지 않는다. 중복 refinement는 마지막 값, stream0와
+성능 기준 모드는 순서와 무관하게 direct-final 우선이다. 다른 독립 실행 옵션이 없으면
+유효한 on은 생략처럼 기존 workspace를 사용하며 기존 worker의 환경을 바꾸지 않는다.
+off/stream0/baseline은 독립 workspace다. `on` 거부를 호환이라고 부르던 상태를 해소했다.
+
+웹 상태줄은 항상 `refinement off`를 출력하던 대신 실제 `round`와 `final`을 표시한다.
+중간은 `Refining`, 최종 불완전은 `INCOMPLETE`; margin은 foreground timing을 대체하지
+않는다. 단일 final 수신만으로 설정이 off라고 단정하지 않으며 u64를 Number로 축소하지 않는다.
+
+[CLI 감사](WEBUI_G4_CLI.ko.md)는 기존10개 명령94개와 보조 PNG16개(합110), 숨김 거부17개를
+현재 argparse에서 추출한다. `validate_web_cli_inventory.py`의175개 native parser probe와
+변조 검사는 목록/별칭/기본값/choices drift를 잡는다. 의미·파일/픽셀·브라우저 수용은
+별도 실제 통합 gate에 연결해, 파서 help 성공을 전체 parity로 계산하지 않는다.
+전체 배터리에 새 목록 검사를 배선했다. M0의93개는 과거 시점 수치로 보존한다.
+
+집중 검증: Rust CLI25단위(외부 오라클1 ignored), app all-target strict clippy/release,
+전체 ES2017/DOM UI 및 새 frame-status 경로가 통과했다. startup 원본 오라클144개와
+실제 CLI/HTTP15실행·14첫 generation도 통과했다. 원본 CLI의 서버 생성 전 prefix와
+Rust 어댑터의 round 대입을 직접 실행해 on/off/환경/중복/stream0/baseline을 대조한다.
+최초 새 사례가 GTK view에는 없는 `detail exact`를 사용해 오라클에서 exit2로 거부돼,
+양쪽에 있는 `detail high`로 정정하고 재실행했다. 제품 회귀로 계산하지 않는다.
+집중 로그: `/private/tmp/floe-cli-audit-{unit,clippy,build,ui,startup-final}.log`.
+마지막 재대조에서 초안이 모든 명시 refinement를 독립 workspace로 분류한 차이를
+발견했다. 기존 cmd_view는 유효한 on을 생략처럼 취급하므로 최종 off일 때만
+독립 실행하도록 고쳤다. 실제 IPC gate에 on/`off→on` 전달을 추가했고, 수정 전
+release에서는 없는 송신자 Firefox를 발견하려다 exit2가 되어 회귀를 재현했다
+(`/private/tmp/floe-cli-audit-handoff-before.log`). 전달 요청은 기존 workspace의
+환경/렌더를 변경하지 않고 present-only이며 새 worker를 시작하지 않아야 한다.
+수정 후 같은 IPC gate가 통과했고, 최종 CLI25단위(외부 오라클1 ignored), app all-target
+strict clippy/release도 재실행해 통과했다. 기존 의존성 floe-vfs의 dead_code 경고는
+그대로이며 전체 workspace가 경고 없이 빌드된 것으로 보고하지 않는다. 최종 집중 로그는
+`/private/tmp/floe-cli-audit-{unit-final,clippy-final,build-final,handoff-final,inventory-final}.log`다.
+
+최종 수정본의 전체 `sh tools/validate_rust.sh`는 exit0 / `RUST VALIDATION: ALL OK`로
+완료했다(`/private/tmp/floe-cli-audit-battery-final.log`). core282/web96 단위, owner HTTP20,
+startup15실행/14첫 generation, CLI175 probe, 전체 UI·메뉴 linked39/open0, jobdeck83·
+renderer46, KLayout j1/j8 각각13 PX+2 phase-exact+14 style을 통과했다. 외부 fixture가
+필요한 기존 ignored 단위는 별도로 유지하며 실제 통합 gate와 혼동하지 않는다.
+초기 전체 실행도 통과했지만 이후 발견한 owner 수정의 근거는 위 최종 재실행이다.
+검증용 `.venv` symlink만 제거하고 연결 대상 환경은 보존했다. 실제 브라우저 수용/
+스크린샷은 기존 도구 URL 정책 차단을 우회하지 않아 미검증이며 HTTP/DOM으로 대신
+합격시키지 않는다.
+
+별도 읽기 관측: 로컬 GdkPixbuf2.44.7 PNG loader에 합성 APNG의 기본/별도 fallback
+두 형태를 넣었을 때 IDAT의 정적 빨강 픽셀이 나왔다. GTK 원본은 animation player가
+아니므로 남은 APNG 이관을 정적 기본 프레임으로 정정했다. 현재 웹은 여전히 APNG를
+거부하며 이 관측을 웹 지원·실제 브라우저/GTK 위젯 수용으로 계산하지 않는다.
+
+커밋 시 목표 잔여: 양수 stream 호환과 APNG 정적 fallback/GTK 진단 경계, 실제
+브라우저·Python-free Linux·G1/G4·현장 수용, M2 공유/원격 승인·구현, 조건부 M5다.
+메뉴 연결0 OPEN/110옵션 목록을 goal 완료율로 환산하지 않는다. 브라우저 URL 정책
+차단을 우회하지 않았고 TeeBox 현장 대기는 유지한다. main/jobdeck 변경은 보존한다.

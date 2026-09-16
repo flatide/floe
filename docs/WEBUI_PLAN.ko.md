@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M4g-26b 카메라 유지 레벨 재선택).
+작성 2026-08-29, 갱신 2026-09-16(M4g-27 CLI 재대조·refinement 호환).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -138,6 +138,13 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 [Rust 서비스/API 초안](WEBUI_SERVICE_API.ko.md).
 
 ## 현재 진행도와 커밋 보고
+
+M4g-27의 [CLI 원본 재대조](WEBUI_G4_CLI.ko.md)는10개 명령94개와 보조 PNG16개를
+현재 argparse/native parser로 고정한다. 사용자 결정에 따라 `--refinement on`은
+기존 환경 page-round를 따르게 복원했다. 기본 실질 off·명시 off/stream0/baseline
+우선은 유지하며 새 적응형 렌더 정책은 만들지 않는다. 상태줄은 실제 round/final을
+표시한다. 양수 stream 호환·APNG 정적 fallback/GTK 진단 경계와 아래 전체 수용은
+남는다. 파서175회 통과를 파일/픽셀·브라우저 기능 전체의 완료로 계산하지 않는다.
 
 M4g-24b의 레이아웃 유지 DRC 열기에 이어 M4g-24c는 `Reconnect launcher reviewer…`를
 연결했다([M4 §81](WEBUI_M4.ko.md)). 사용자 결정대로 런처에 고정한 reviewer·권한만

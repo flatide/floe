@@ -8,6 +8,8 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
+const frameStatus=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_FRAME_STATUS:'1'}});
+assert.equal(frameStatus.status,0,'frame status client: '+frameStatus.error);
 for(const file of ['wheel.test.cjs','client.test.cjs']){
     const run=spawnSync(process.execPath,[path.join(ui,file)],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_WHEEL:'1'}});
     assert.equal(run.status,0,'wheel '+file+': '+run.error);

@@ -50,7 +50,7 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --budget-mb N            Decoded page budget (default 1024)
   --png / --raw            Frame transfer (default raw)
   --frame-cache on|off      Retained frame reuse + layout margin (default on)
-  --refinement off         Explicit direct-final render (overrides round env)
+  --refinement on|off      On follows round env; off forces direct-final (default effectively off)
   --stream-kb 0            Compatibility spelling for --refinement off (only 0)
   --render-debug           Numeric worker-frame diagnostics to stderr; independent workspace
   --dump                   Keep recent frame/display pixels in browser memory; explicit downloads
@@ -86,7 +86,10 @@ Decode+raster plus file catalogue (1 slot + 192 MiB) must fit 16 slots
 SVRF metadata reserves another 256 MiB, with no extra CPU worker).
 DRC reads the explicit file unless --floe-reviewer selects its current adjacent ICE.
 No implicit indexing or ambient reviewer selection; read-only selection grants no writes.
-Refinement off; deck margin unsupported.
+Default round size is direct-final. --refinement on (like omission) follows
+FLOE_RUST_ROUND_PAGES; it does not invent a progressive/byte/time policy.
+--refinement off, --stream-kb 0 and --perf-baseline override that setting.
+Deck margin is unsupported.
 Nonzero --stream-kb, --stream-target-ms, --lod, --hairline and --thin-um
 are not migrated; they are rejected, never silently ignored.
 --dump starts an independent workspace. About has the capture toggle/downloads.
@@ -162,6 +165,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
     };
     let mut i = 1;
     let mut positional = false;
+    let mut refinement_off = false;
+    let mut stream_zero = false;
     while i < args.len() {
         let arg = &args[i];
         i += 1;
@@ -186,7 +191,6 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 | "--png"
                 | "--raw"
                 | "--frame-cache"
-                | "--refinement"
                 | "--stream-kb"
                 | "--render-debug"
                 | "--dump"
@@ -292,10 +296,11 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 }
             }
             "--refinement" => {
-                if value()? != "off" {
-                    return Err(Error::input("web view supports --refinement off only; progressive policy is not migrated"));
-                }
-                c.direct_final = true;
+                refinement_off = match value()? {
+                    "on" => false,
+                    "off" => true,
+                    _ => return Err(Error::input("refinement must be on or off")),
+                };
             }
             "--stream-kb" => {
                 if value()?.parse::<u64>().ok() != Some(0) {
@@ -303,7 +308,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                         "web view supports --stream-kb 0 only (same as --refinement off); progressive byte-budget policy is not migrated",
                     ));
                 }
-                c.direct_final = true;
+                stream_zero = true;
             }
             "--render-debug" => {
                 flag()?;
@@ -407,6 +412,14 @@ pub fn parse(args: &[String]) -> Result<Command> {
     if c.roots.len() > 32 {
         return Err(Error::input("too many approved roots"));
     }
+    // argparse's last explicit refinement wins, while stream_kb=0 still
+    // forces off in cmd_view regardless of ordering. "on" only preserves
+    // the existing round environment; it does not choose a new round size.
+    c.direct_final = refinement_off || stream_zero;
+    // Legacy cmd_view treats effective "on" exactly like omission: an
+    // existing owner keeps its own round environment. Only effective off
+    // introduces a construction option and requires an independent owner.
+    c.independent |= refinement_off;
     if c.perf_baseline {
         c.frame_cache = false;
         c.direct_final = true;
@@ -934,6 +947,8 @@ mod tests {
             "--stream-kb 0",
             "--stream-kb=0",
             "--stream-kb 0 --refinement off",
+            "--stream-kb 0 --refinement on",
+            "--refinement on --stream-kb 0",
         ] {
             let c = parse(&args(&format!("view {tail}"))).unwrap();
             assert!(c.direct_final && c.independent);
@@ -955,7 +970,6 @@ mod tests {
             "--stream-kb -1",
             "--stream-kb NaN",
             "--stream-kb 0.0",
-            "--stream-kb 0 --refinement on",
             "--refinement off --stream-kb 8",
             "--perf-baseline --stream-kb 8",
             "--render-debug=false",
@@ -963,6 +977,23 @@ mod tests {
         ] {
             assert!(parse(&args(&format!("view {tail}"))).is_err(), "{tail}");
         }
+    }
+    #[test]
+    fn refinement_on_preserves_environment_and_legacy_precedence() {
+        for (tail, direct_final) in [
+            ("--refinement on", false),
+            ("--refinement=on", false),
+            ("--refinement off --refinement on", false),
+            ("--refinement on --refinement off", true),
+            ("--refinement on --perf-baseline", true),
+            ("--perf-baseline --refinement on", true),
+        ] {
+            let c = parse(&args(&format!("view {tail}"))).unwrap();
+            assert_eq!(c.direct_final, direct_final, "{tail}");
+            assert_eq!(c.independent, direct_final, "{tail}");
+            assert!(!c.render_debug);
+        }
+        assert!(parse(&args("view --refinement bad")).is_err());
     }
     #[test]
     fn unmigrated_options_explain_their_actual_boundary() {
@@ -1042,7 +1073,7 @@ mod tests {
             "--goto 1",
             "--goto 1,2,0",
             "--goto NaN,2",
-            "--refinement on",
+            "--refinement bad",
             "--frames=bad",
             "--labels=bad",
         ] {

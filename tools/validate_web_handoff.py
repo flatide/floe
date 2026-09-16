@@ -115,12 +115,17 @@ def main(fixture):
                 assert (second['view_id'], second['worker_epoch']) == (first['view_id'], first['worker_epoch'])
                 assert second['effective_thin'] == 'cull'
                 assert second['detail'] == 'medium'
-                forward()  # bare no-args is present-only, no new operation/render
-                p = proposal()
-                assert p['request'] is None
-                client.call('POST', '/api/v1/launch/' + p['id'], dict(action='present'))
-                assert client.call('GET', '/api/v1/operations')['last_seq'] == '2'
-                assert client.call('GET', '/api/v1/view')['view']['render_rev'] == second['render_rev']
+                # Effective refinement on is also omission for instance
+                # ownership. Invalid sender tools prove no replacement worker
+                # or browser is discovered before the existing owner is used.
+                for present in ((), ('view', '--refinement', 'on'),
+                                ('view', '--refinement', 'off', '--refinement', 'on')):
+                    forward(*present)
+                    p = proposal()
+                    assert p['request'] is None
+                    client.call('POST', '/api/v1/launch/' + p['id'], dict(action='present'))
+                    assert client.call('GET', '/api/v1/operations')['last_seq'] == '2'
+                    assert client.call('GET', '/api/v1/view')['view']['render_rev'] == second['render_rev']
 
                 forward('view', str(missing))
                 failed = open_proposal(proposal(), 3, second, succeeds=False)

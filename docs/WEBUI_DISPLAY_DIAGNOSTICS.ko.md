@@ -132,7 +132,13 @@ DOM gate는 실제 공통 decoder와 대역 Image/Canvas로 배율·alpha readba
 전체 배터리 실행 기록은 [M4 §70~72](WEBUI_M4.ko.md)에 둔다. 이를 실제 브라우저 실행으로
 대체 보고하지 않는다. 기존 브라우저 시작 경로의 도구 거부도 우회하지 않았다.
 
-다음 잔여는 기존 GTK 진단/애니메이션 PNG의 제품 경계,
+M4g-27 재대조: GTK 원본은 pixbuf의 정적 표시이며 animation player가 아니다.
+로컬 PNG loader의 합성 APNG 검사에서도 IDAT의 기본 이미지를 정적으로 얻었다.
+따라서 APNG 잔여는 animation 재생 구현이 아니라 **정적 기본 프레임** 호환이다.
+현재는 여전히 명시 거부하며 위 결과로 웹 지원을 주장하지 않는다
+([CLI 재대조 §4](WEBUI_G4_CLI.ko.md)).
+
+다음 잔여는 기존 GTK 진단/APNG 정적 기본 프레임의 제품 경계,
 실제 Firefox/ETX의 표시/입력 수용이다. 기존 GTK 구현은 보존한다.
 
 ## 4. M4g-22 — 최근 수신/합성 화면의 브라우저 dump
