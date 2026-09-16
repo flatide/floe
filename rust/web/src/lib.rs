@@ -21,6 +21,7 @@ mod presets;
 mod query;
 pub mod service;
 mod settings;
+mod sharing;
 mod stream;
 pub mod transport;
 pub mod view;

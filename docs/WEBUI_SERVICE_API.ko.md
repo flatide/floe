@@ -5,7 +5,9 @@
 
 **아래 endpoint/message는 전체 서비스 설계안이다.** M1b-1의 일부 transport API
 (exchange/capabilities/logout/WS ping)는 [M1b 기록](WEBUI_M1B.ko.md)에 명세/구현했다.
-아래 전체 URI가 그대로 구현된 것은 아니며 공유 API는 아직 없다.
+아래 전체 URI가 그대로 구현된 것은 아니다. M2b-1은 별도
+[로컬 초대·인증 API](WEBUI_SHARING_GRANTS.ko.md)만 기본 off로 연결했으며, 공유 화면·
+독립 탐색·DRC·원격 API 전체가 구현된 것은 아니다.
 M4g-2의 실제 `GET /api/v1/views/{id}/minimap/{base}`는 owner 인증+CSRF로 현재 view의
 메모리 palette 베이스(180×180 ASCII 인덱스)만 반환한다. `base`는 `full` 또는 실제
 저장된 depth의 정규 십진수다. 임의 파일/geometry 조회나 새 렌더를 하지 않는다.

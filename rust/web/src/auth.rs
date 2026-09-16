@@ -96,8 +96,8 @@ impl Auth {
                 .is_none_or(|(_, deadline)| now >= *deadline)
         }
     }
-    /// M1 local owner session only. Shares and independent identities are a
-    /// later service; do not infer guest grants from possession of a view ID.
+    /// One credential namespace. Owner and each guest use separate instances;
+    /// scope/role checks live in the caller, never infer them from a view ID.
     pub fn new(
         now: Instant,
         bootstrap_ttl: Duration,

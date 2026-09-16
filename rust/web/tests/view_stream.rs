@@ -2,6 +2,8 @@
 include!("support/view_harness.rs");
 #[path = "support/fill_slots.rs"]
 mod fill_slots;
+#[path = "support/sharing.rs"]
+mod sharing;
 
 #[tokio::test]
 #[ignore = "run tools/validate_view_stream.py with a private synthetic fixture"]

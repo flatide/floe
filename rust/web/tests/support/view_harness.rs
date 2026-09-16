@@ -66,6 +66,16 @@ impl Harness {
         viewport: Option<floe_app_core::view::Viewport>,
         fill_edit: bool,
     ) -> Self {
+        Self::start_with_access(raw, margin, labels, viewport, fill_edit, false).await
+    }
+    async fn start_with_access(
+        raw: bool,
+        margin: bool,
+        labels: bool,
+        viewport: Option<floe_app_core::view::Viewport>,
+        fill_edit: bool,
+        sharing: bool,
+    ) -> Self {
         let resources = Resources::new(Limits::default()).unwrap();
         let source =
             PathBuf::from(std::env::var_os("FLOE_VIEW_FIXTURE").expect("private fixture required"));
@@ -103,6 +113,10 @@ impl Harness {
             Gateway::with_view(addr, Arc::clone(&controller), "synthetic <valmini>").unwrap();
         if fill_edit {
             Gateway::enable_fill_slot_edit(&mut gate).unwrap();
+        }
+        if sharing {
+            Gateway::enable_local_sharing(&mut gate).unwrap();
+            assert!(Gateway::enable_local_sharing(&mut gate).is_err());
         }
         let (stop, rx) = oneshot::channel();
         let task = tokio::spawn(transport::serve(listener, Arc::clone(&gate), async {

@@ -132,6 +132,7 @@ pub struct Gateway {
     origin: Origin,
     cookie_name: String,
     auth: Mutex<Auth>,
+    pub(crate) shares: Option<Mutex<crate::sharing::Shares>>,
     sockets: Arc<Semaphore>,
     pub(crate) stopping: watch::Sender<bool>,
     pub(crate) view: Option<Arc<Attachment>>,
@@ -170,6 +171,7 @@ impl Gateway {
                 origin,
                 cookie_name: format!("floe_session_{}", addr.port()),
                 auth: Mutex::new(auth),
+                shares: None,
                 sockets: Arc::new(Semaphore::new(SOCKETS as usize)),
                 stopping,
                 view: None,
@@ -354,6 +356,9 @@ impl Gateway {
         Ok((gate, secret))
     }
     fn stop_services(&self) {
+        if let Some(shares) = &self.shares {
+            shares.lock().unwrap().stop();
+        }
         if let Some(browse) = &self.browse {
             browse.request_stop();
         }
@@ -406,6 +411,16 @@ impl Gateway {
         drc.protect_publications(&gate.service.as_ref().unwrap().source_set())
             .map_err(|e| e.to_string())?;
         gate.drc = Some(drc);
+        Ok(())
+    }
+    /// Trusted local opt-in for grant management. Data streams and guest UI
+    /// are not connected yet; never expose the owner session as a share.
+    pub fn enable_local_sharing(gate: &mut Gate) -> Result<(), String> {
+        let g = Arc::get_mut(gate).ok_or("gateway already published")?;
+        if g.shares.is_some() || g.display_only || (g.service.is_none() && g.view.is_none()) {
+            return Err("local sharing requires a view workspace and one opt-in".into());
+        }
+        g.shares = Some(Mutex::new(crate::sharing::Shares::default()));
         Ok(())
     }
     /// Memory-only developer tool. This grants no filesystem publication,
@@ -562,6 +577,7 @@ pub fn router(gate: Gate) -> Router {
         .merge(crate::drc::routes())
         .merge(crate::exports::routes())
         .merge(crate::defaults::routes())
+        .merge(crate::sharing::routes())
         .merge(crate::assets::routes())
         .fallback(|| async { error(StatusCode::NOT_FOUND) })
         .layer(DefaultBodyLimit::max(BODY_BYTES))
@@ -716,6 +732,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
         "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"index_open":gate.service.is_some(),"launcher":gate.cli_owner,"file_picker":gate.browse.is_some(),"jobdeck_modes":gate.service.is_some(),"jobdeck_levels":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"drc_waives":gate.drc.as_ref().is_some_and(|r|r.waives_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
+        "share_grants":gate.shares.is_some(),
         "fill_slot_edit":gate.fill_slot_edit,"display_only":gate.display_only,
         "display_dump":gate.service.is_some(),"dump_on_start":gate.dump_on_start,
         "display_input":gate.display_input.as_ref().map(|p|json!({"width":p.width,"height":p.height,"bytes":p.bytes.len()})),
@@ -1000,6 +1017,16 @@ pub async fn serve(
 #[cfg(test)]
 mod lifetime_tests {
     use super::*;
+    #[test]
+    fn grants_require_a_workspace_and_are_not_enabled_by_diagnostics() {
+        let addr = "127.0.0.1:23456".parse().unwrap();
+        let (mut gate, _) = Gateway::new(addr).unwrap();
+        assert!(gate.shares.is_none());
+        assert!(Gateway::enable_local_sharing(&mut gate).is_err());
+        let (mut gate, _) = Gateway::with_display_test(addr).unwrap();
+        assert!(Gateway::enable_local_sharing(&mut gate).is_err());
+        assert!(gate.shares.is_none());
+    }
     #[tokio::test]
     async fn standalone_expiry_stops_without_an_owner_worker() {
         for exchanged in [false, true] {

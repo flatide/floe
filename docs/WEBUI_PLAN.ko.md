@@ -139,6 +139,12 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 
 ## 현재 진행도와 커밋 보고
 
+M2b-1은 [로컬 초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)를 기본 off로 연결한다.
+owner와 guest의 자격 증명·로그아웃을 분리하고 view/revision/layer scope를 고정한다.
+trusted Gateway opt-in만 있으며 CLI/공유 UI·follow 프레임·explore worker·DRC 읽기는
+아직 미연결이다. `shares=false`, `delivery=not_connected`를 유지하며 권한 코어를
+화면 공유 완료로 계산하지 않는다. 원격 공개·노트 본문·파일 탐색/쓰기는 열지 않는다.
+
 M4g-30 사용자 결정: Rust 제품의 GTK 진단은 `displaytest [PNG]`로 대체 확정.
 GTK `gtktest`는 비교 패키지에만 남기고 Rust alias는 추가하지 않는다. 또한 기본 off인
 opt-in 로컬 공유 구현을 승인했다. follow/explore를 모두 유지하며 합성·loopback에서
