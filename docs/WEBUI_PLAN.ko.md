@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M4g-28 양수 stream CLI 호환).
+작성 2026-08-29, 갱신 2026-09-16(M4g-29 APNG 정적 기본 이미지).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -139,17 +139,23 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 
 ## 현재 진행도와 커밋 보고
 
+M4g-29는 `displaytest`에 APNG의 IDAT 정적 기본 이미지를 연결한다. 원본의 모든
+chunk CRC/길이/상한을 검증한 뒤 animation chunk만 메모리에서 제거하며 원본 파일과
+나머지 metadata는 보존한다. 애니메이션 재생·GTK 보간·실제 화면 수용은 아니다.
+[표시 진단 계약](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)과 CLI/HTTP·선택 GdkPixbuf 대조를
+추가했으며 GTK 위젯 진단/명령 폐기 경계, 실제 브라우저·Linux·현장 수용은 남는다.
+
 M4g-28은 양수 `--stream-kb`의 기존 Rust 호환을 연결한다. 크기를 KB 예산으로
 새로 사용하지 않고 환경 page-round를 따르며, 명시 stream의 독립 workspace와
 최종 값 기준 순서/음수/off·baseline 충돌 검사를 보존한다. 원본 정책380사례와
-실제 startup/IPC gate로 대조한다. APNG 정적 진단/GTK 경계와 실제 브라우저·Linux·
+실제 startup/IPC gate로 대조한다. GTK 진단 경계와 실제 브라우저·Linux·
 현장 수용, M2 공유/원격 및 조건부 M5는 별도로 남는다.
 
 M4g-27의 [CLI 원본 재대조](WEBUI_G4_CLI.ko.md)는10개 명령94개와 보조 PNG16개를
 현재 argparse/native parser로 고정한다. 사용자 결정에 따라 `--refinement on`은
 기존 환경 page-round를 따르게 복원했다. 기본 실질 off·명시 off/stream0/baseline
 우선은 유지하며 새 적응형 렌더 정책은 만들지 않는다. 상태줄은 실제 round/final을
-표시한다. 양수 stream은 M4g-28에서 연결했으며 APNG 정적 fallback/GTK 진단 경계와 아래 전체 수용은
+표시한다. 양수 stream은 M4g-28, APNG 정적 fallback은 M4g-29에서 연결했다. GTK 진단 경계와 아래 전체 수용은
 남는다. 파서175회 통과를 파일/픽셀·브라우저 기능 전체의 완료로 계산하지 않는다.
 
 M4g-24b의 레이아웃 유지 DRC 열기에 이어 M4g-24c는 `Reconnect launcher reviewer…`를
@@ -233,7 +239,8 @@ GTK 색 막대·Rust PNG/raw·웹 crop/overlay를 대조하되 실제 화면 수
 M4g-17b는 같은 검사를 독립 `displaytest` 명령으로 연결하며 index/renderd/레이아웃
 없이 기존 private Firefox/auth 수명주기를 사용한다. M4g-17c는 CLI가 고정한 정적 PNG
 하나의 읽기/인증 전송/360×160 표시를 연결한다. 브라우저 보간과 GTK의 픽셀 동일성을
-주장하지 않는다. GTK 진단/애니메이션 PNG 경계와 실제 화면 수용은 아직 남는다
+주장하지 않는다. APNG 정적 기본 이미지는 M4g-29에서 연결했으며 GTK 위젯 진단/
+명령 폐기 경계와 실제 화면 수용은 아직 남는다
 ([M4 §70~72](WEBUI_M4.ko.md)). 승인된 브라우저 `--dump`는 M4g-22에서 연결했다.
 M4g-18은 IPC owner 종료와 자식 fork→exec가 겹쳐 잠금이 남는 조건을 재현하고,
 소유자의 명시적 unlock·fork 복사본 보호와 회귀 검사를 추가한다([M4 §73](WEBUI_M4.ko.md)).

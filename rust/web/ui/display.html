@@ -22,9 +22,9 @@
     <p id="display-page-status" role="status">Connecting to the local diagnostic session…</p>
     <p>No layout, indexer or renderer is involved. This is browser display diagnosis, not GTK widget testing.</p>
     <section id="display-input" hidden>
-      <h2>CLI-selected input PNG</h2>
-      <p>The file was frozen at launch, not read from a browser path. It is stretched to 360×160 pixels with browser smoothing; transparency is preserved over dark gray. GTK interpolation can differ. Embedded notes are not interpreted.</p>
-      <div class="button-row"><button id="display-input-run" type="button" disabled>Show input PNG</button><button id="display-input-cancel" type="button" disabled>Cancel input</button></div>
+      <h2>CLI-selected PNG · static image</h2>
+      <p>The file was frozen at launch, not read from a browser path. APNG shows only its static default image (IDAT), which can differ from the animation's first frame. Animation chunks are removed in memory; other metadata remains. The original file is unchanged. The image is stretched to 360×160 pixels with browser smoothing; transparency is preserved over dark gray. GTK interpolation can differ. Embedded notes are not interpreted.</p>
+      <div class="button-row"><button id="display-input-run" type="button" disabled>Show static PNG</button><button id="display-input-cancel" type="button" disabled>Cancel input</button></div>
       <p id="display-input-status" role="status"></p>
       <canvas id="display-input-canvas" class="display-input-canvas" width="1" height="1" hidden aria-label="CLI-selected PNG"></canvas>
       <label for="display-input-observed">What do you see?</label><select id="display-input-observed"><option value="unverified">Not checked</option><option value="visible">The input image looks correct</option><option value="display_problem">The input is wrong or blank</option></select>

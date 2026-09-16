@@ -119,9 +119,12 @@ Canvas readback 결과와 원격 화면 수용은 구분한다([표시 진단 �
 M4g-17c의 선택 `GET /api/v1/display-test/input`은 **CLI가 미리 읽고 검증해 고정한
 정적 PNG 하나**만 반환한다. 웹 경로/업로드/재읽기/파일명 endpoint가 아니다.
 capabilities의 `display_input`은null 또는 `{width,height,bytes}`이며 일반 view에는null이다.
-원본 PNG 바이트(metadata 포함)를 불변 `Bytes`로 owner에게만 제공하며 input 부재는404,
-인증 누락은401, 쿼리/다른 origin은403이다.80MiB/8192px축/16Mpx/65536chunks 제한과
-CRC·trailing data/APNG 거부를 CLI에서 적용하고 실제 픽셀 디코딩은 브라우저에 맡긴다.
+불변 PNG snapshot을 owner에게만 제공하며 input 부재는404, 인증 누락은401,
+쿼리/다른 origin은403이다. M4g-29는 APNG의 IDAT 정적 기본 이미지도 받는다.
+원본80MiB/8192px축/16Mpx/65536chunks 제한, 모든 chunk CRC·길이·trailing data 검증
+후 메모리에서만 `acTL/fcTL/fdAT`를 제거한다. 정적 PNG와 그 외 chunk/metadata는
+바이트 불변이다. `bytes`는 제공 snapshot 길이이며 API 스키마는 같다. 애니메이션의
+제어/순서 의미 검증·재생은 하지 않는다. 실제 픽셀 디코딩은 브라우저에 맡긴다.
 UI는 명시 Show·5초 read/decode·공통 PNG decoder·360×160 smoothing/alpha 표시를
 사용한다. 결과는 보간/원격 화면의 정확성 인증이 아니다. 기존 합성 API/일반 뷰는 불변이다.
 

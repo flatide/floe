@@ -1,6 +1,6 @@
 # 웹 표시 진단 이관
 
-2026-09-16, M4g-22. [M0 §2.8~2.9](WEBUI_M0.ko.md)의 `gtktest`/`--dump`
+2026-09-16, M4g-29. [M0 §2.8~2.9](WEBUI_M0.ko.md)의 `gtktest`/`--dump`
 미이관을 실제 코드로 분리한 계약과 현재 구현이다. **합성·정적 입력 PNG 진단은
 연결하고 승인된 브라우저 dump도 추가했지만 실제 브라우저 수용·GTK 진단 폐기는 아니다.**
 
@@ -8,7 +8,7 @@
 
 | 경로 | 원래 동작 | 웹 현재 상태 |
 |---|---|---|
-| `gtktest [png]` | 선택 PNG를360×160으로 bilinear 축소해 표시 | `displaytest [PNG]`: 정적 PNG snapshot을 브라우저 smoothing으로360×160 표시. GTK 보간 픽셀 동일성은 보장하지 않음 |
+| `gtktest [png]` | 선택 PNG를360×160으로 bilinear 축소해 표시 | `displaytest [PNG]`: 정적 PNG/APNG 기본 이미지 snapshot을 브라우저 smoothing으로360×160 표시. GTK 보간 픽셀 동일성은 보장하지 않음 |
 | `gtktest` 합성 | 검은360×160 RGB pixbuf에 빨강/초록/파랑/노랑70×100 막대4개 | 같은 픽셀의 Rust PNG/raw, 공통 디코더와 Canvas로 대조 |
 | `gtktest` 배치 | 같은 pixbuf를 Overlay/ScrolledWindow 안에 표시 | 웹 `.viewport`의 crop/별도 투명 overlay를 표시; GTK 위젯 구조를 복제하지 않음 |
 | `view --dump` 수신 | 수신 raw/PNG를 pixbuf로 만든 뒤 `/tmp/<APP>_frame.png`에 덮어씀 | M4g-22: 승인된 decoded raw/PNG 한 장을 브라우저 bitmap으로 보관; 명시 PNG 다운로드 |
@@ -60,17 +60,25 @@ M4g-17c는 선택적 PNG 인자 하나를 받는다. `--` 뒤는 옵션으로 �
 - 원본을 수정하거나 다시 읽지 않는다. 파일을 교체·삭제해도 이미 열린 세션의 bytes는
   같고, 변경한 파일을 진단하려면 새로 실행한다. symlink는 명시한 CLI 경로에서만
   정규화하며 regular-file 확인은 nonblocking/no-follow open으로 한다. FIFO는 거부한다.
-- 한 파일80MiB, 한 축8192px, 총16Mpx,65536 chunks 상한이다. 원본 encoded bytes를
-  세션 하나에 보관한다. IDAT의 실제 샘플 디코딩은 브라우저가 하며 손상 샘플은 UI 오류다.
+- 원본 파일80MiB, 한 축8192px, 총16Mpx, 원본65536 chunks 상한이다. 검증 후 정적
+  snapshot을 세션 하나에 보관한다. IDAT의 실제 샘플 디코딩은 브라우저가 하며 손상 샘플은 UI 오류다.
   네이티브 구조 검사 통과를 이미지 디코딩/화면 수용 PASS로 부르지 않는다.
 - 정적 PNG의 RGB/RGBA/회색/알파/팔레트/16-bit/Adam7 envelope를 수용한다.
-  애니메이션 APNG와 IEND 뒤 trailing data는 명시 오류다. 애니메이션 재생이나 GTK의
-  fallback-frame 동작은 이 진단에서 이관했다고 세지 않는다.
+  M4g-29는 APNG의 **IDAT 정적 기본 이미지**도 수용한다. 기본 이미지는 animation의
+  첫 프레임일 수도, animation 밖의 별도 이미지일 수도 있다. 이는 애니메이션 재생이
+  아니다([W3C PNG3 §4.9](https://www.w3.org/TR/png-3/#apng-frame-based-animation)).
+  원본 전체의 길이/CRC/chunk 수 검사를 마친 뒤 메모리에서만 `acTL/fcTL/fdAT`를
+  제거한다. 버릴 chunk의 CRC 오류·길이 초과와 IEND 뒤 trailing data도 거부한다.
+  animation 순서·제어 본문의 의미는 검증하지 않는다. 해당 의미가 무효여도 정적
+  PNG가 유효하면 표시할 수 있다. 취소 가능한1MiB 단위 in-place 이동으로 두 번째
+  대형 이미지 버퍼를 만들지 않지만, Vec의 원본 할당 용량은 세션 동안 남을 수 있다.
 - capabilities의 `display_input`은 없으면null, 있으면 `{width,height,bytes}`다.
-  **Show input PNG**를 눌러야 인증된 `GET /api/v1/display-test/input`을 읽는다.
+  `bytes`는 원본 파일 크기가 아니라 제공하는 정적 snapshot 길이다.
+  **Show static PNG**를 눌러야 인증된 `GET /api/v1/display-test/input`을 읽는다.
   HTTP는 경로·파일명·업로드·source/view ID를 받지 않는다. 일반 view/About에는 입력
-  파일이 등록되지 않으며 endpoint는404다. PNG **원본 바이트와 embedded metadata**는
-  인증된 session owner에게 전송한다. 익명화/metadata 삭제 기능이라고 오해하면 안 된다.
+  파일이 등록되지 않으며 endpoint는404다. 애니메이션 외의 **원본 chunk와 embedded
+  metadata**는 그대로 인증된 session owner에게 전송한다. 정적 PNG는 바이트 불변이며
+  익명화/metadata 삭제 기능이 아니다. 주석 편집 `fe-embed`는 APNG chunk도 계속 보존한다.
 - 웹은 공통 PNG decoder의 source dimensions 검사·5초 decode 제한을 사용한다.
   Canvas에360×160으로 늘이거나 줄이며 smoothing을 켠다. alpha는 보존하고 화면의
   바탕은 어두운 회색이다. GTK BILINEAR와 브라우저의 보간/색 관리가 같은 픽셀을
@@ -124,21 +132,21 @@ URL 회수, 명시 GET·취소·DPR·About 연결과 view 명령 무발행을 �
 검사한다. Firefox는 명시적인 테스트 대역으로만 실행하며 private argv/profile과
 대역의 자발적 종료·정리를 확인한다. bootstrap/session 만료 시 owner worker 없이
 리스너가 종료되는 Rust 검사와 인증/재로드/취소/종료의 DOM 검사를 추가했다.
-`validate_display_input.py`는11개의 static PNG 형식/팔레트/진짜 Adam7 fixture에서
-실제 CLI/HTTP의 원본 bytes와 Pillow 디코딩 픽셀을 대조한다. 실행 후 파일을 지워도
-같은 bytes가 오는지, 인증·CRC·큰 크기·trailing data/APNG/FIFO 거부를 검사한다.
+`validate_display_input.py`는11개의 static PNG 형식/팔레트/진짜 Adam7, RGBA/팔레트 ×
+기본 이미지 포함/분리의 유효 APNG4개와 opaque animation 본문1개를 대조한다.
+실제 CLI/HTTP의 보존 chunk bytes와 Pillow 정적 기본 픽셀을 검사한다. 실행 후 파일을
+지워도 같은 bytes가 오는지, 인증·삭제 chunk의 CRC·원본 chunk 수/크기·trailing data/
+FIFO 거부도 검사한다. 선택 `--gtk-oracle`은 로컬 GdkPixbuf의 정적 loader로 APNG4개
+픽셀을 추가 대조한다(개발용 GI 필요, 없으면 실패). GTK 위젯/축소/브라우저는 실행하지 않는다.
 DOM gate는 실제 공통 decoder와 대역 Image/Canvas로 배율·alpha readback 연결,
 취소/오류/미재실행을 검사한다. 브라우저의 실제 보간 픽셀 대조는 아니다.
-전체 배터리 실행 기록은 [M4 §70~72](WEBUI_M4.ko.md)에 둔다. 이를 실제 브라우저 실행으로
+전체 배터리 실행 기록은 [M4 §70~72, §87](WEBUI_M4.ko.md)에 둔다. 이를 실제 브라우저 실행으로
 대체 보고하지 않는다. 기존 브라우저 시작 경로의 도구 거부도 우회하지 않았다.
 
-M4g-27 재대조: GTK 원본은 pixbuf의 정적 표시이며 animation player가 아니다.
-로컬 PNG loader의 합성 APNG 검사에서도 IDAT의 기본 이미지를 정적으로 얻었다.
-따라서 APNG 잔여는 animation 재생 구현이 아니라 **정적 기본 프레임** 호환이다.
-현재는 여전히 명시 거부하며 위 결과로 웹 지원을 주장하지 않는다
-([CLI 재대조 §4](WEBUI_G4_CLI.ko.md)).
+M4g-27 재대조로 GTK 원본이 animation player가 아니라는 점을 확인했고,
+M4g-29에서 **정적 기본 이미지** 호환을 연결했다([CLI 재대조 §4](WEBUI_G4_CLI.ko.md)).
 
-다음 잔여는 기존 GTK 진단/APNG 정적 기본 프레임의 제품 경계,
+다음 잔여는 기존 GTK 위젯 진단/명령 폐기의 제품 경계,
 실제 Firefox/ETX의 표시/입력 수용이다. 기존 GTK 구현은 보존한다.
 
 ## 4. M4g-22 — 최근 수신/합성 화면의 브라우저 dump

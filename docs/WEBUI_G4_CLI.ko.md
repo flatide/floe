@@ -1,6 +1,6 @@
 # 웹 전환 CLI 재대조
 
-2026-09-16, M4g-28. 기준 `c6990d4` 이후의 `feature/webui`.
+2026-09-16, M4g-29. 기준 `b192154` 이후의 `feature/webui`.
 [M0 원래 범위](WEBUI_M0.ko.md), [전체 잔여](WEBUI_G4_AUDIT.ko.md),
 [단계 기록](WEBUI_M4.ko.md). **파서 목록의 완성과 기능·현장 수용을 구별한다.**
 
@@ -38,7 +38,7 @@ browser 경로, 비공개 임시 cwd를 사용하며 source 파일·설정·세�
 | probe /0 | `app/read.rs`, `validate_app_render.py/validate_app_deck_render.py`; 실제 ready/open/style/frame/실패·신호 | 덱 skip을 성공으로 숨기던 동작은 incomplete/exit3으로 정정. 숨김 `--layout-mode` 거부 |
 | drc /4 | `app/drc.rs`, `validate_app_drc.py`; ASCII/현재 ICE·소수 좌표·waive·JSON/list·빈 PATH·stale/corrupt/신호 | 명시 build/SVRF 기능은 추가 옵션. 검사 명령이 reviewer 쓰기 권한을 만들지 않음 |
 | svrf /6 | `app/svrf.rs`, `validate_app_svrf.py`; Python 전체 parser/scan·환경/include·short/long·fault/원자 게시 | subset parser이지 Tcl/Calibre 실행 아님. 검사하는 환경 이름과 include 접근은 CLI/웹에서 별개 |
-| gtktest /0 | `app/main.rs`의 명시 안내, Rust `displaytest [PNG]`와 About 합성 진단; `validate_display_test.py`, `validate_display_cli.py`, `validate_display_input.py` | GTK 위젯 진단·명령 폐기 승인과 APNG 정적 기본 프레임은 아래§4. 실제 화면 합격 아님 |
+| gtktest /0 | `app/main.rs`의 명시 안내, Rust `displaytest [PNG]`와 About 합성 진단; `validate_display_test.py`, `validate_display_cli.py`, `validate_display_input.py` | APNG 정적 기본 이미지도 M4g-29에서 연결. GTK 위젯 진단·명령 폐기 승인은 아래§4. 실제 화면 합격 아님 |
 | view /21 | `app/web_view.rs`, service/controller/UI; `validate_web_cli.py`, `validate_web_startup.py`, `validate_web_handoff.py`, reviewer/UI/HTTP 게이트 | 옵션별 경계는§3. 시작 등록과 실행 중 메뉴 교체는 서로 다른 게이트. 실제 브라우저/현장 별도 |
 | jobdeck /10 | `app/deck_analysis.rs`, `validate_app_jobdeck.py/validate_app_jobdeck_plan.py`; parser·placements·report/spec·모드·선택·missing exit | 분석 명령과 live chip/level 행 모델을 구별. 비공개 포맷을 일반화하거나 signoff로 주장하지 않음 |
 | fe-embed /16 | `app/fe_embed.rs`, `validate_fe_embed.py`; Python 전체 PNG bytes·픽셀·JSON/7종 annotation·append/dump/strip·fault | selftest는 native 메모리 검사. 전체 파일 일괄 트랜잭션/외부 프로세스 편집 잠금 아님 |
@@ -104,15 +104,20 @@ GdkPixbuf2.44.7 PNG loader에 합성3×2 APNG를 넣은 읽기 검사에서, 기
 animation의 첫 frame인 경우/별도 fallback인 경우 모두 IDAT의 빨강 정적 픽셀을 얻었다.
 이 검사는 위젯·원격 화면·다른 loader 버전의 보장이 아니며 브라우저를 실행하지 않았다.
 
-따라서 남은 APNG 차이는 **정적 기본 프레임 진단**이다. 현재 `displaytest`는 APNG
-control/data chunk를 명시 거부한다. 이를 해소하는 데 animation 재생기가 필수라고
-주장하지 않는다. 정적 fallback 추출/검증을 후속으로 검토하며, 아직 구현됐다고 세지 않는다.
+M4g-29의 `displaytest`는 원본 envelope/CRC/상한 검증 뒤 메모리에서 animation chunk만
+제거하여 **IDAT 정적 기본 이미지**를 제공한다. 별도 기본 이미지가 있으면 animation의
+첫 프레임과 다르며, animation 재생/순서 의미 검증을 구현한 것이 아니다. 정적 PNG와
+나머지 metadata는 그대로이고 원본 파일/`fe-embed`의 animation 보존도 불변이다.
+CLI/HTTP gate는 static11+APNG4+opaque animation1개와 손상·상한·불변 전송을 검사한다.
+선택 `--gtk-oracle`은 유효 APNG4개의 GdkPixbuf 정적 픽셀도 대조하되 위젯/축소/
+브라우저를 실행하지 않는다([표시 진단 계약](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)).
 GTK 위젯 자체의 진단/기존 명령 폐기 승인도 이 PNG 호환성과 별개의 제품 경계다.
 
 ## 5. 완료 판단
 
 이번 파서 목록 검사는 인자 표면의 알려진 누락·drift를 감지하고, 사용자 결정에 따른
 refinement 호환·잘못된 상태 표시를 수정하며 M4g-28은 양수 stream 호환도 연결했다.
-APNG 정적 fallback/GTK 진단 경계가 남는다. 실제 브라우저·Python-free Linux·G1/G4·현장, M2 공유/원격
+APNG 정적 fallback은 M4g-29에서 연결했고 GTK 위젯 진단/명령 폐기 경계는 남는다.
+실제 브라우저·Python-free Linux·G1/G4·현장, M2 공유/원격
 승인·구현, 조건부 M5는 그대로 별도다. 메뉴 목록0 OPEN과110개 파서 대조를 전체
 goal 완료율로 계산하지 않는다. 전체 배터리/집중 검증 결과는 M4의 해당 단계에 기록한다.

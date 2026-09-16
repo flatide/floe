@@ -209,7 +209,7 @@ M4g-17a는 About의 명시 **Run display test**로 GTK 원본 색 막대와 같�
 PNG/raw 및 웹 crop/overlay를 연결한다. viewer 디코더를 공유하며 layout/worker는
 접근하지 않는다. M4g-17b의 독립 `displaytest`는 index/renderd 없이 같은 검사를
 실행한다. M4g-17c는 선택 정적 PNG를 CLI에서 고정해 인증 전송하고360×160으로
-표시한다. GTK 보간 동일성/위젯/APNG fallback은 대체하지 않는다.
+표시한다. M4g-29는 APNG의 정적 기본 이미지도 연결한다. GTK 보간 동일성/위젯은 대체하지 않는다.
 `--dump`는 M4g-22에서 승인된 브라우저 보관/다운로드 방식으로 연결했다. GTK 명령은 폐기하지 않는다.
 Canvas readback과 실제 화면 관찰/수용도 구분한다([표시 진단 계약](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)).
 

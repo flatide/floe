@@ -24,6 +24,8 @@ function harness(){
     assert.equal(Input.metadata(null),null);
     for(const m of [{...meta,width:0},{...meta,width:8193},{...meta,width:8192,height:8192},{...meta,bytes:80*1024*1024+1},{...meta,bytes:44},{...meta,width:'4'}]){assert.throws(()=>Input.metadata(m));}
     const h=harness();h.input.init(meta);assert.equal(h.requests.length,0);assert.equal(h.el('display-input').hidden,false);
+    assert.match(h.el('display-input-status').textContent,/57 served bytes/);
+    assert.match(h.el('display-input-status').textContent,/APNG animation is excluded/);
     const p=h.input.run();h.input.run();assert.equal(h.requests.length,1);const r=h.requests[0];
     assert.equal(r.path,'/api/v1/display-test/input');assert.equal(r.method,'GET');assert.equal(r.headers['X-Floe-CSRF'],'csrf');assert.equal(r.timeout,5000);
     r.answer();await flush();assert.equal(h.images.length,1);h.images[0].onload();await p;
@@ -31,6 +33,8 @@ function harness(){
     assert.equal(h.context.imageSmoothingEnabled,true);assert.equal(h.urls.size,0);assert.equal(h.timers.size,0);
     assert.equal(h.el('display-input-canvas').style.width,'180px');assert.equal(h.el('display-input-canvas').style.height,'80px');
     const report=JSON.parse(h.el('display-input-report').textContent);assert.equal(report.nontransparent_pixels,28800);assert.equal(report.desktop_acceptance,'unverified');assert.equal(report.screen_observation,'unverified');
+    assert.equal(report.input_policy,'static-default-image');assert.equal(report.encoded_bytes,57);
+    assert.match(report.scope,/after APNG chunk removal/);assert.match(report.scope,/No animation playback/);
     h.el('display-input-observed').value='visible';h.el('display-input-observed').onchange();assert.equal(JSON.parse(h.el('display-input-report').textContent).screen_observation,'visible');
     h.input.close();assert.equal(h.el('display-input-report').textContent,'');assert.equal(h.el('display-input-canvas').width,1);assert.equal(h.requests.length,1);
     for(const stage of ['read','between','decode']){

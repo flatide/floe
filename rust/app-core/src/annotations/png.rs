@@ -29,6 +29,7 @@ struct Scan {
     chunks: usize,
     iend: u64,
     owned: Vec<Range<u64>>,
+    animation: Vec<Range<u64>>,
     text: Option<String>,
 }
 fn read_exact(input: &mut impl Read, b: &mut [u8], flag: &AtomicUsize) -> Result<()> {
@@ -119,6 +120,7 @@ fn scan_options(
     let mut pos = 8u64;
     let mut text = None;
     let mut owned = Vec::new();
+    let mut animation = Vec::new();
     let mut decoded_bytes = 0usize;
     let mut idat = false;
     let (mut width, mut height) = (0, 0);
@@ -127,11 +129,6 @@ fn scan_options(
         read_exact(input, &mut header, flag)?;
         let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as u64;
         let kind: &[u8; 4] = header[4..].try_into().unwrap();
-        if !annotations && matches!(kind, b"acTL" | b"fcTL" | b"fdAT") {
-            return Err(Error::input(
-                "animated PNG is unsupported by displaytest; provide a static frame",
-            ));
-        }
         let end = pos
             .checked_add(len + 12)
             .filter(|end| *end <= length)
@@ -203,6 +200,11 @@ fn scan_options(
         if u32::from_be_bytes(crc) != hash.finalize() {
             return Err(Error::input("PNG chunk CRC mismatch"));
         }
+        if !annotations && matches!(kind, b"acTL" | b"fcTL" | b"fdAT") {
+            // Static-only display ignores animation semantics, not source
+            // integrity: every removed chunk still passes length/CRC limits.
+            animation.push(pos..end);
+        }
         if let Some(body) = body {
             let decoded = decode_text(&body, MAX_TEXT - decoded_bytes, flag)?;
             decoded_bytes += decoded.len();
@@ -222,6 +224,7 @@ fn scan_options(
                 chunks: count + 1,
                 iend: pos,
                 owned,
+                animation,
                 text,
             });
         }
@@ -243,8 +246,9 @@ impl DisplayPng {
         (self.width, self.height, self.bytes)
     }
 }
-/// Read the explicitly selected regular file once. No annotation interpretation,
-/// image rewrite, later file lookup or background reload is performed.
+/// Read the explicitly selected regular file once. No file rewrite, annotation
+/// interpretation, later lookup or background reload is performed. APNG chunks
+/// are removed only from the validated in-memory display snapshot.
 pub fn display_snapshot(path: &Path, flag: &AtomicUsize) -> Result<DisplayPng> {
     check_cancelled(flag)?;
     let path = fs::canonicalize(path)?;
@@ -270,12 +274,42 @@ pub fn display_snapshot(path: &Path, flag: &AtomicUsize) -> Result<DisplayPng> {
             "display PNG changed while reading; restart with a stable file",
         ));
     }
+    static_display(bytes, flag)
+}
+fn static_display(mut bytes: Vec<u8>, flag: &AtomicUsize) -> Result<DisplayPng> {
     let info = scan_options(&mut std::io::Cursor::new(&bytes), flag, false)?;
+    compact_animation(&mut bytes, &info.animation, flag)?;
     Ok(DisplayPng {
         width: info.width,
         height: info.height,
         bytes,
     })
+}
+fn compact_animation(
+    bytes: &mut Vec<u8>,
+    removed: &[Range<u64>],
+    flag: &AtomicUsize,
+) -> Result<()> {
+    // Ranges come from the complete, bounded envelope scan, in source order.
+    // Compact in place so a near-limit APNG does not require two 80 MiB buffers.
+    let end = bytes.len() as u64;
+    let (mut read, mut write) = (0, 0);
+    for skip in removed.iter().cloned().chain(std::iter::once(end..end)) {
+        check_cancelled(flag)?;
+        while read < skip.start as usize {
+            check_cancelled(flag)?;
+            let n = (skip.start as usize - read).min(BLOCK);
+            if read != write {
+                bytes.copy_within(read..read + n, write);
+            }
+            read += n;
+            write += n;
+        }
+        read = skip.end as usize;
+    }
+    check_cancelled(flag)?;
+    bytes.truncate(write);
+    Ok(())
 }
 fn copy(
     input: &mut (impl Read + Seek),
@@ -509,7 +543,21 @@ mod tests {
             let mut b = png[..33].to_vec();
             b.extend(chunk(kind, &[0; 8]));
             b.extend_from_slice(&png[33..]);
-            assert!(check(&b).is_err());
+            let info = check(&b).unwrap();
+            assert_eq!(info.animation.len(), 1);
+            assert_eq!(info.animation[0], 33..53);
+            assert!(scan(&mut std::io::Cursor::new(&b), &flag)
+                .unwrap()
+                .animation
+                .is_empty());
+            let mut input = std::io::Cursor::new(&b);
+            let annotation_scan = scan(&mut input, &flag).unwrap();
+            let mut rewritten = Vec::new();
+            rewrite(&mut input, &annotation_scan, &mut rewritten, None, &flag).unwrap();
+            assert_eq!(rewritten, b); // fe-embed must preserve animation chunks.
+            assert_eq!(static_display(b.clone(), &flag).unwrap().bytes, png);
+            b[45] ^= 1;
+            assert!(check(&b).is_err()); // Do not hide corruption in a removed chunk.
         }
         let mut annotated = png[..33].to_vec();
         annotated.extend(chunk(b"iTXt", b"flateyes\0\xffbad"));
@@ -528,6 +576,62 @@ mod tests {
         assert_eq!(check(&png).err().unwrap().kind, crate::ErrorKind::Cancelled);
     }
     #[test]
+    fn static_snapshot_compacts_only_animation_without_a_second_image_buffer() {
+        let flag = AtomicUsize::new(0);
+        let chunk = |kind: &[u8; 4], body: &[u8]| {
+            let mut b = (body.len() as u32).to_be_bytes().to_vec();
+            b.extend_from_slice(kind);
+            b.extend_from_slice(body);
+            b.extend_from_slice(&crc32fast::hash(&b[4..]).to_be_bytes());
+            b
+        };
+        let mut png = std::io::Cursor::new(Vec::new());
+        crate::shots::mosaic::encode_png(&mut png, 4, 2, &[255, 0, 0, 128].repeat(8), &flag)
+            .unwrap();
+        let png = png.into_inner();
+        // Animation bodies are deliberately opaque/semantically invalid:
+        // default-image diagnosis is not an animation sequence validator.
+        let mut bytes = png[..33].to_vec();
+        bytes.extend(chunk(b"acTL", &[0; 8]));
+        bytes.extend(chunk(b"fcTL", &[0; 26]));
+        let mut text = b"note\0".to_vec();
+        text.resize(BLOCK + 19, b'a');
+        let keep = chunk(b"tEXt", &text);
+        bytes.extend_from_slice(&keep);
+        bytes.extend_from_slice(&png[33..png.len() - 12]);
+        bytes.extend(chunk(b"fdAT", &[0; 32]));
+        let note = chunk(b"iTXt", b"flateyes\0\xffnot interpreted");
+        bytes.extend_from_slice(&note);
+        bytes.extend_from_slice(&png[png.len() - 12..]);
+        let (ptr, capacity) = (bytes.as_ptr(), bytes.capacity());
+        let output = static_display(bytes, &flag).unwrap();
+        assert_eq!(
+            (output.bytes.as_ptr(), output.bytes.capacity()),
+            (ptr, capacity)
+        );
+        let mut expected = png[..33].to_vec();
+        expected.extend(keep);
+        expected.extend_from_slice(&png[33..png.len() - 12]);
+        expected.extend(note);
+        expected.extend_from_slice(&png[png.len() - 12..]);
+        assert_eq!(output.bytes, expected);
+        assert!(
+            scan_options(&mut std::io::Cursor::new(&output.bytes), &flag, false)
+                .unwrap()
+                .animation
+                .is_empty()
+        );
+        flag.store(1, std::sync::atomic::Ordering::Relaxed);
+        let mut untouched = output.bytes.clone();
+        assert_eq!(
+            compact_animation(&mut untouched, &[], &flag)
+                .unwrap_err()
+                .kind,
+            crate::ErrorKind::Cancelled
+        );
+        assert_eq!(untouched, output.bytes);
+    }
+    #[test]
     fn rewritten_output_remains_readable_within_limits() {
         let mut info = Scan {
             width: 1,
@@ -536,6 +640,7 @@ mod tests {
             chunks: 3,
             iend: MAX_PNG - 12,
             owned: vec![],
+            animation: vec![],
             text: None,
         };
         assert!(validate_rewrite(&info, Some("x")).is_err());

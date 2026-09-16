@@ -1,4 +1,4 @@
-/* ES2017. One immutable CLI-selected PNG; no browser path or upload. */
+/* ES2017. One immutable static/default PNG image; no browser path or upload. */
 (function(root){
     'use strict';
     const P=typeof module==='object'&&module.exports?require('./protocol.js'):root.FloeProtocol;
@@ -43,12 +43,12 @@
                     const dpr=Number.isFinite(o.window.devicePixelRatio)&&o.window.devicePixelRatio>0?o.window.devicePixelRatio:1;
                     canvas.style.width=(W/dpr)+'px';canvas.style.height=(H/dpr)+'px';canvas.hidden=false;
                     resolve({version:1,bundle:o.bundle,source_pixels:[m.width,m.height],encoded_bytes:m.bytes,display_pixels:[W,H],nontransparent_pixels:nontransparent,
-                        device_pixel_ratio:dpr,screen_observation:'unverified',desktop_acceptance:'unverified',scope:'Browser PNG decode and smoothed Canvas stretch; not GTK interpolation parity or remote-screen acceptance'});
+                        device_pixel_ratio:dpr,input_policy:'static-default-image',screen_observation:'unverified',desktop_acceptance:'unverified',scope:'Static/default PNG image; encoded_bytes is the served snapshot after APNG chunk removal. No animation playback. Browser smoothing is not GTK interpolation parity or remote-screen acceptance'});
                 }catch(e){reject(e);}
             });t.decode.start();
         });}
         async function run(){
-            if(!ready||!info||task){return;}reset();const t={cancelled:false,xhr:null,decode:null,info:info};task=t;controls();status('Reading the frozen input PNG…');
+            if(!ready||!info||task){return;}reset();const t={cancelled:false,xhr:null,decode:null,info:info};task=t;controls();status('Reading the frozen static/default PNG image…');
             try{const result=await decode(await read(t),t);if(!t.cancelled&&task===t&&ready){report=result;publish();status('PNG decoded. Inspect the image; this is not a pixel-parity or remote-screen pass.');}}
             catch(e){if(!t.cancelled&&task===t){reset();status(e.message||'Input PNG failed');}}
             finally{if(task===t){task=null;}controls();}
@@ -56,7 +56,7 @@
         el('display-input-run').onclick=run;
         el('display-input-cancel').onclick=function(){cancel();reset();status('Input PNG cancelled; no automatic retry.');};
         el('display-input-observed').onchange=publish;controls();
-        return {init:function(m){cancel();reset();info=metadata(m);ready=true;el('display-input').hidden=!info;if(info){status('CLI-selected PNG: '+info.width+' × '+info.height+' pixels, '+info.bytes+' bytes. Show explicitly; the server will not reread the file.');}controls();},
+        return {init:function(m){cancel();reset();info=metadata(m);ready=true;el('display-input').hidden=!info;if(info){status('Static/default PNG image: '+info.width+' × '+info.height+' pixels, '+info.bytes+' served bytes. APNG animation is excluded; the server will not reread the file.');}controls();},
             close:function(){ready=false;cancel();reset();},run:run};
     }
     const api={metadata:metadata,bind:bind};

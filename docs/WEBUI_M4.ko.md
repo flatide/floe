@@ -6111,3 +6111,48 @@ startup144+stream380 원본 오라클·실제22실행/21첫 generation·6사전 
 Linux·G1/G4·현장 수용, M2 공유/원격 승인·구현, 조건부 M5다. 메뉴 linked39/open0과
 CLI 목록을 전체 완료율로 계산하지 않는다. 기존 브라우저 URL 정책 차단을 우회하지
 않고 현장 대기를 유지한다. main/jobdeck의 병행 변경은 건드리지 않는다.
+
+## 87. M4g-29 — APNG의 정적 기본 이미지 진단
+
+2026-09-16. M4g-27에서 확인한 GTK 정적 loader 동작을 Rust `displaytest [PNG]`에
+연결한다. APNG의 IDAT 기본 이미지는 animation의 첫 프레임이거나 별도 fallback일
+수 있다. 모든 원본 chunk의 길이/CRC·개수와 PNG envelope/치수/최종 IEND를 검증한
+뒤 메모리에서만 `acTL/fcTL/fdAT`를 제거한다. 제어 본문/프레임 순서 의미는 해석하지
+않으며 animation 재생·검증 기능이 아니다. [W3C PNG3 §4.9](https://www.w3.org/TR/png-3/#apng-frame-based-animation)의
+정적 기본 이미지와 animation 구분을 따른다.
+
+- 원본80MiB/65536 chunks와8192px축/16Mpx 상한은 제거 **전**에 적용한다. 버릴
+  chunk의 CRC/길이 오류도 숨기지 않는다. 정적 PNG와 나머지 chunk/metadata는
+  바이트 그대로이며 source 파일·주석 편집의 APNG 보존은 바꾸지 않는다.
+- 취소 가능한1MiB 단위 in-place 이동으로 두 번째 대형 이미지 버퍼를 만들지
+  않는다. 원본 Vec 할당 용량이 세션 동안 남을 수 있어 출력 크기로 RSS가 줄었다고
+  주장하지 않는다. HTTP 스키마는 그대로이며 `bytes`는 제공하는 정적 snapshot 길이다.
+- UI/CLI 안내와 로컬 report의 `input_policy`로 정적 기본 이미지만 표시함을 명시한다.
+  metadata 익명화·GTK 보간 동일성·실제 브라우저/원격 화면 수용은 별개다.
+
+기존 release는 새 실제 CLI gate에서 `animated PNG is unsupported`로 exit1이었다
+(`/private/tmp/floe-apng-input-before.log`). 수정 후16개 input 사례(static11,
+RGBA/팔레트 × 기본 포함/분리 APNG4, opaque animation1)의 실제 CLI/인증 HTTP·
+보존 chunk bytes·Pillow 기본 픽셀·불변 전송·삭제 chunk CRC/원본 상한 검사가 통과했다.
+선택 `--gtk-oracle`도 로컬 GdkPixbuf2.44.7에서 APNG4개의 정적 픽셀이 일치했다.
+이는 loader만의 대조로 위젯/축소/브라우저 실행은 아니다. GI는 선택 개발 검사에만
+필요하며 기본 전체 배터리나 제품에 새 의존성을 넣지 않았다.
+
+집중 검증: PNG5단위, CLI26단위(외부 fixture2 ignored), app-core/app all-target
+strict clippy/release, 전체 ES2017/DOM UI, 독립 display CLI, GTK 원본57600픽셀
+합성/raw/PNG 대조, `fe-embed` Python bytes/metadata/7종 주석 검사가 통과했다.
+처음 clippy가 테스트의 단일 Range 배열 표기를 거부하여 길이/항목 단언으로 바꾸고
+재검증했다. 기존 의존성 경고는 남아 있으며 workspace 무경고로 보고하지 않는다.
+집중 로그는 `/private/tmp/floe-apng-{unit-final,cli-unit,clippy-final,build,ui,input-final,display-cli,display-test,embed}.log`다.
+
+최종 전체 `sh tools/validate_rust.sh`는 exit0 / `RUST VALIDATION: ALL OK`로 완료했다
+(`/private/tmp/floe-apng-battery.log`). core283/web96/CLI26 단위, 실제 input16사례,
+전체 UI·메뉴 linked39/open0, startup22실행/21첫 generation·6사전 오류,
+jobdeck83·renderer46과 KLayout j1/j8 각각13 PX+2 phase-exact+14 style을 통과했다.
+fixture가 필요한 단위의 ignored와 뒤에서 실행하는 실제 연결 게이트는 구별한다.
+검증용 `.venv` 링크만 제거하고 연결 대상 환경·다른 작업 트리는 보존했다.
+실제 브라우저 URL 정책 차단을 우회하지 않았고 HTTP/DOM 결과로 화면 합격을 대신하지 않는다.
+
+커밋 시 목표 잔여: GTK 위젯 진단/명령 폐기의 제품 경계, 실제 브라우저·Python-free
+Linux·G1/G4·현장 수용, M2 공유/원격 승인·구현, 조건부 M5다. APNG 정적 지원을
+전체 웹 전환 완료로 계산하지 않는다. index hot reload/revision은 기존 유보를 유지한다.

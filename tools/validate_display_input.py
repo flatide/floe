@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Frozen input PNG through the actual CLI/HTTP; generated files only, no browser."""
 import io
+import argparse
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,50 @@ from validate_web_cli import APP, Client, read_json, wait
 
 def chunk(kind, data):
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+
+def chunks(data):
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    at = 8
+    while at < len(data):
+        end = at + struct.unpack_from('>I', data, at)[0] + 12
+        assert end <= len(data)
+        yield data[at + 4:at + 8], data[at:end]
+        at = end
+
+
+def animations():
+    for mode in ('RGBA', 'P'):
+        for separate_default in (False, True):
+            frames = []
+            palette = [255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0] + [0] * (768 - 12)
+            for index, color in enumerate(((255, 0, 0, 128), (0, 255, 0, 255), (0, 0, 255, 255))):
+                frame = Image.new(mode, (7, 5), index if mode == 'P' else color)
+                if mode == 'P':
+                    frame.putpalette(palette)
+                    frame.info['transparency'] = bytes((128, 255, 255, 0))
+                frame.putpixel((0, 0), 3 if mode == 'P' else (0, 0, 0, 0))
+                frames.append(frame)
+            out = io.BytesIO()
+            tags = PngImagePlugin.PngInfo()
+            tags.add_itxt('comment', 'preserved synthetic APNG note', zip=True)
+            frames[0].save(out, 'PNG', save_all=True, append_images=frames[1:],
+                           default_image=separate_default, duration=100, loop=0,
+                           disposal=0, blend=0, pnginfo=tags)
+            original = out.getvalue()
+            reader = Image.open(io.BytesIO(original))
+            assert reader.is_animated and reader.n_frames == 3
+            assert reader.convert('RGBA').tobytes() == frames[0].convert('RGBA').tobytes()
+            reader.seek(1)
+            assert reader.convert('RGBA').tobytes() != frames[0].convert('RGBA').tobytes()
+            parts = list(chunks(original))
+            assert {b'acTL', b'fcTL', b'fdAT', b'iTXt'} <= {kind for kind, _ in parts}
+            if mode == 'P':
+                assert {b'PLTE', b'tRNS'} <= {kind for kind, _ in parts}
+            static = original[:8] + b''.join(body for kind, body in parts
+                                            if kind not in (b'acTL', b'fcTL', b'fdAT'))
+            assert not Image.open(io.BytesIO(static)).is_animated
+            yield f'APNG-{mode}-separate-default-{separate_default}', original, static
 
 
 def fixtures():
@@ -52,8 +97,19 @@ def fixtures():
     yield "Adam7", adam
 
 
-def main():
-    cases = list(fixtures())
+def main(gtk_oracle=False):
+    if gtk_oracle:
+        import gi
+        gi.require_version('GdkPixbuf', '2.0')
+        from gi.repository import GdkPixbuf
+    gtk_samples = 0
+    cases = [(name, data, data) for name, data in fixtures()] + list(animations())
+    # An opaque animation body can be invalid as animation yet leave a valid
+    # static PNG. Validate its envelope/CRC, not an unused animation sequence.
+    static = cases[0][1]
+    opaque = (static[:33] + chunk(b'acTL', b'') + chunk(b'fcTL', b'ignored')
+              + static[33:-12] + chunk(b'fdAT', b'not zlib') + static[-12:])
+    cases.append(('opaque-animation-bodies', opaque, static))
     with tempfile.TemporaryDirectory(prefix="floe-display-input-") as td:
         root = Path(td)
         temps = root / "temps"
@@ -63,8 +119,20 @@ def main():
         source = root / "-input 한글.png"
         session_file = root / "session.json"
         argv = [str(APP), "displaytest", "--no-open", "--session-file", str(session_file), "--", source.name]
-        for name, original in cases:
+        for name, original, static in cases:
             source.write_bytes(original)
+            if gtk_oracle and name.startswith('APNG-'):
+                # Same static loader as cmd_gtktest, before its scaling step.
+                # No GTK widget/browser/display server is started here.
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(source))
+                w, h = pixbuf.get_width(), pixbuf.get_height()
+                channels, stride = pixbuf.get_n_channels(), pixbuf.get_rowstride()
+                assert channels in (3, 4) and pixbuf.get_bits_per_sample() == 8
+                raw = bytes(pixbuf.get_pixels())
+                rows = b''.join(raw[y * stride:y * stride + w * channels] for y in range(h))
+                want = Image.open(io.BytesIO(static)).convert('RGBA' if channels == 4 else 'RGB')
+                assert (w, h) == want.size and rows == want.tobytes(), name
+                gtk_samples += 1
             with subprocess.Popen(argv, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
                 try:
                     session = wait(lambda: read_json(session_file), proc)
@@ -73,8 +141,8 @@ def main():
                     client.call("GET", "/api/v1/display-test/input", code=401)
                     client.login()
                     meta = client.call("GET", "/api/v1/capabilities")["display_input"]
-                    expected = Image.open(io.BytesIO(original))
-                    assert meta == dict(width=expected.width, height=expected.height, bytes=len(original)), name
+                    expected = Image.open(io.BytesIO(static))
+                    assert meta == dict(width=expected.width, height=expected.height, bytes=len(static)), name
                     assert source.name not in json.dumps(session)
                     assert source.name not in json.dumps(meta)
                     saved = client.csrf
@@ -86,9 +154,10 @@ def main():
                     source.write_bytes(b"not a PNG any more")
                     source.unlink()
                     received = client.call("GET", "/api/v1/display-test/input")
-                    assert received == original, name
+                    assert received == static, name
+                    assert not Image.open(io.BytesIO(received)).is_animated, name
                     assert Image.open(io.BytesIO(received)).convert("RGBA").tobytes() == expected.convert("RGBA").tobytes()
-                    assert client.call("GET", "/api/v1/display-test/input") == original
+                    assert client.call("GET", "/api/v1/display-test/input") == static
                     client.call("DELETE", "/api/v1/session", code=204)
                     stdout, stderr = proc.communicate(timeout=10)
                     assert proc.returncode == 0 and not stdout, stderr
@@ -104,8 +173,14 @@ def main():
         huge = bytearray(original)
         huge[16:20] = struct.pack(">I", 8193)
         huge[29:33] = struct.pack(">I", zlib.crc32(huge[12:29]))
-        animation = original[:33] + chunk(b"acTL", struct.pack(">II", 2, 0)) + original[33:]
-        for damaged in (b"not png", original[:30], bad_crc, huge, original + b"extra", animation):
+        broken_animation = []
+        for kind in (b'acTL', b'fcTL', b'fdAT'):
+            removed = bytearray(chunk(kind, b'opaque body'))
+            removed[-1] ^= 1
+            broken_animation.append(original[:33] + removed + original[33:])
+        broken_animation.append(original[:33] + struct.pack('>I', 0xffffffff) + b'fdAT' + original[33:])
+        broken_animation.append(original[:33] + chunk(b'fdAT', b'') * 65536 + original[33:])
+        for damaged in (b"not png", original[:30], bad_crc, huge, original + b"extra", *broken_animation):
             source.write_bytes(damaged)
             run = subprocess.run(argv, cwd=root, env=env, capture_output=True, timeout=10)
             assert run.returncode != 0 and source.read_bytes() == damaged
@@ -119,8 +194,16 @@ def main():
         run = subprocess.run(argv, cwd=root, env=env, capture_output=True, timeout=3)
         assert run.returncode != 0 and not session_file.exists() and not list(temps.iterdir())
         source.unlink()
-    print(f"DISPLAY INPUT CLI: ALL OK ({len(cases)} PNG modes/palettes/Adam7; immutable bytes/Pillow pixels, auth, limits/corruption/FIFO, no worker or browser)")
+    print(f"DISPLAY INPUT CLI: ALL OK ({len(cases)} static/APNG default/opaque-animation cases; "
+          "exact retained chunks + Pillow default pixels, immutable served bytes, auth, "
+          "source limits/CRC including removed chunks/chunk count/FIFO, no worker or browser)")
+    if gtk_oracle:
+        assert gtk_samples == 4
+        print(f"GDK PIXBUF STATIC DEFAULT: ALL OK ({gtk_samples} APNG cases, loader {GdkPixbuf.PIXBUF_VERSION}; no widget/scaling/browser acceptance)")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--gtk-oracle', action='store_true',
+                        help='also compare the local native GdkPixbuf static loader (requires GI)')
+    main(parser.parse_args().gtk_oracle)

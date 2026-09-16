@@ -23,7 +23,10 @@ const HELP: &str = "Usage: floe2-web displaytest [PNG] [OPTIONS]
 
 Independent synthetic PNG/raw/crop and optional input PNG display diagnostics.
 The explicit PNG is read once, never modified/reloaded. -- ends options.
-Static PNG only: max 80 MiB, 8192 px/axis, 16 Mpx. Native envelope/CRC validation;
+Static PNG or the APNG default image (IDAT), never animation playback.
+APNG control/frame chunks are removed from the validated in-memory snapshot;
+all other chunks/embedded metadata remain. Animation semantics are not validated.
+Max source 80 MiB, 8192 px/axis, 16 Mpx. Native envelope/CRC validation;
 the browser decodes pixels and stretches to 360x160 with smoothing and alpha.
 No layout, indexer, renderd, Python, default workspace IPC or upload is used.
 Run each test explicitly in the page. Canvas readback is not remote-screen
