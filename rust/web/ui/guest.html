@@ -10,6 +10,14 @@
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest-drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest-layers.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/query.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/inspect.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/measure.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/guest-display.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/guest-query-wire.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/guest-tools.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest.js"></script>
 </head><body>
   <header class="topbar"><div class="brand">floe<span>2</span></div><strong id="guest-mode">Read-only guest</strong>
@@ -36,6 +44,7 @@
         <label for="guest-width">View width (optional)</label><input id="guest-width" disabled>
         <button id="guest-go" disabled>Go</button>
         <p class="note">On the canvas: arrow keys pan 50%, Shift + arrows 10%; + / − zoom, Home fits. Only your view changes.</p>
+        <p class="note">Drag left/middle to pan. Right drag: zoom band (leftward zooms out). Wheel zooms about the cursor; pending views drop wheel input.</p>
       </section>
       <section id="gl-panel" hidden><h2>Approved layers</h2>
         <button id="gl-reload">Reload layers</button>
@@ -45,6 +54,22 @@
         <p id="gl-count" class="note"></p>
         <div class="button-row"><button id="gl-prev">Previous layers</button><button id="gl-next">Next layers</button></div>
         <p id="gl-status" class="note" role="status"></p>
+      </section>
+      <section id="guest-inspect" class="inspect-panel" hidden aria-label="Shared geometry inspection">
+        <h2>Inspect approved geometry</h2><p id="pick-status" role="status"></p>
+        <div class="button-row"><button id="pick-prev" disabled title="Previous overlapping shape">←</button><button id="pick-next" disabled title="Next overlapping shape">→</button><button id="pick-clear" disabled>Clear selection</button></div>
+        <pre id="pick-details"></pre>
+        <label class="check"><input id="snap-probe" type="checkbox" disabled> Snap probe (m)</label>
+        <p id="snap-status"></p><p id="query-availability" class="note"></p>
+        <p class="note">Click again: next overlap · Shift: add · Ctrl/Cmd: toggle. Only current visible approved layers are queried. Jobdeck geometry queries are unavailable.</p>
+      </section>
+      <section id="guest-rulers" class="inspect-panel" hidden aria-label="Private guest rulers">
+        <h2>Private rulers</h2>
+        <div class="button-row"><button id="ruler-mode" aria-pressed="false" disabled>Ruler (r)</button><button id="ruler-pop" disabled>Undo (k)</button><button id="ruler-clear" disabled>Clear (Shift+K)</button></div>
+        <label class="check"><input id="ruler-snap" type="checkbox" checked disabled> Edge/vertex snap (m in ruler mode)</label>
+        <p id="ruler-status" role="status"></p><pre id="ruler-details"></pre><p id="ruler-count" class="note">0 rulers</p><p id="ruler-availability" class="note"></p><pre id="ruler-auto"></pre>
+        <p class="note">Click two points · Shift: free angle · Escape: cancel, exit, then clear. Select 2+ shapes before entering Ruler for nearest bbox gaps, not contour distances.</p>
+        <p class="note">Cursor-only measurement also works in jobdeck. Annotations are private and cleared on disconnect; nothing is saved or exported.</p>
       </section>
       <section id="gd-panel" hidden><h2>Shared DRC · read-only</h2>
         <p class="note">This entire result was explicitly shared. Your lists and selections are private; no notes, SVRF or review writes are available.</p>
@@ -66,7 +91,14 @@
         <p id="gd-status" class="note" role="status"></p>
       </section>
     </aside>
-    <main id="guest-viewport" tabindex="0" aria-label="Shared layout canvas"><canvas id="guest-canvas" width="1" height="1"></canvas><p id="guest-empty">Waiting for an authorized frame…</p></main>
+    <main id="guest-viewport" tabindex="0" aria-label="Shared layout canvas">
+      <canvas id="guest-canvas" width="1" height="1"></canvas>
+      <canvas id="query-canvas" width="1" height="1" aria-label="Private shape selections and snap" hidden></canvas>
+      <canvas id="guest-drc-canvas" width="1" height="1" aria-label="Shared DRC markers and outline" hidden></canvas>
+      <canvas id="ruler-canvas" width="1" height="1" aria-label="Private manual and bbox rulers" hidden></canvas>
+      <div id="zoom-band" aria-hidden="true" hidden></div><div id="zoom-band-hint" role="status" hidden></div>
+      <p id="guest-empty">Waiting for an authorized frame…</p>
+    </main>
   </div>
   <footer id="guest-frame-status" role="status">No displayed frame</footer>
 </body></html>

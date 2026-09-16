@@ -25,7 +25,11 @@ function environment(mode='explore'){
 (async()=>{
     const e=environment();assert.equal(e.calls.length,0);e.ui.changed();await e.settle();assert.equal(e.calls.length,1);
     assert.equal(e.el('gl-rows').children.length,3);assert.match(e.el('gl-rows').children[0].children.at(-1).children[1].textContent,/<script>/);
+    const name=n=>e.el('gl-rows').children[n].children.at(-1).children[1];
+    e.ui.highlight([[3,1],[999,0]]);assert.equal(name(0).className,'guest-layer-picked');assert.equal(name(1).className,'');
+    assert.equal(e.calls.length,1,'highlight only existing authorized rows, with no extra reads');assert.equal(e.el('gl-rows').children.length,3);
     e.set({...e.get(),state_rev:'2'});await tick();assert.equal(e.calls.length,1,'camera-only pan does not rescan palette');
+    assert.equal(name(0).className,'guest-layer-picked','highlight survives local rerender');e.ui.highlight([]);assert.equal(name(0).className,'');
     e.el('gl-collapse').onclick();await e.settle();assert.equal(e.el('gl-rows').children.length,2);assert(e.box(0).indeterminate);
     e.box(0).checked=true;e.box(0).onchange();assert.deepEqual(e.edits[0],{layer_visibility:{pair:[3,1],group:true,visible:true}});
     assert(e.box(0).disabled);e.set({...e.get(),state_rev:'3',render_key:'2',pending:false});await e.settle();assert.equal(e.edits.length,1);

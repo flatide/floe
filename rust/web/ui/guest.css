@@ -1,5 +1,7 @@
 #guest-viewport { position: relative; flex: 1; min-width: 1px; min-height: 1px; background: #000; overflow: hidden; }
 #guest-canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
+#guest-drc-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+.guest-layer-picked { font-weight: 600; text-decoration: underline; }
 .guest-review-list { max-height: 200px; overflow: auto; margin: 8px 0; }
 .guest-review-list button { display: block; width: 100%; text-align: left; overflow-wrap: anywhere; margin-bottom: 3px; }
 .guest-review-list button[aria-pressed="true"] { border-color: #f4cd64; }

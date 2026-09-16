@@ -53,7 +53,8 @@ def main(fixture):
                     page = owner.call("GET", "/guest/" + "a" * 64)
                     assert b"guest.js" in page and b"app.js" not in page
                     assert session["url"].encode() not in page and b"bootstrap=" not in page
-                    for name in ("guest.js", "guest.css", "sharing.js", "guest-drc.js", "guest-layers.js", "drc-geometry.js"):
+                    for name in ("guest.js", "guest.css", "sharing.js", "guest-drc.js", "guest-layers.js", "drc-geometry.js",
+                                 "guest-display.js", "guest-query-wire.js", "guest-tools.js"):
                         actual = owner.call("GET", "/assets/" + session["bundle"] + "/" + name)
                         expected = Path(__file__).resolve().parents[1] / "rust/web/ui" / name
                         assert actual == expected.read_bytes(), "stale embedded guest asset: " + name

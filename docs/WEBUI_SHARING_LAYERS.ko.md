@@ -1,5 +1,8 @@
 # M2b-4b2 — 공유 범위 안의 게스트 레이어 UI
 
+후속 [M2b-4b3](WEBUI_SHARING_QUERY_UI.ko.md)는 query/룰러·pointer를 연결한다.
+아래의 남은 UI 설명은 M2b-4b2 시점이다.
+
 2026-09-17, `feature/webui`. [로컬 공유](WEBUI_SHARING_UI.ko.md)와
 [개인 DRC 화면](WEBUI_SHARING_DRC_UI.ko.md)의 후속이다. 기본 off·loopback 한계를
 그대로 유지하며 원격 공개·파일 탐색/쓰기·스타일/설정 편집 권한을 추가하지 않는다.

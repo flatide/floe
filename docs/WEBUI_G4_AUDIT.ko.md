@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-17, M2b-4b1 게스트 DRC UI 로컬 검증. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-17, M2b-4b3 게스트 query/룰러·pointer UI. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -129,7 +129,8 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    M2b-4b1의 [게스트 DRC 승인/개인 패널·윤곽/이동](WEBUI_SHARING_DRC_UI.ko.md)을 연결했다.
    M2b-4b2의 [범위 제한 레이어 UI](WEBUI_SHARING_LAYERS.ko.md)는 native/CLI·JS·전체
    배터리를 통과했다. 실제 브라우저 수용을 대신하지 않는다.
-   guest query/룰러·pointer 및 DRC 순회/마커/CD 조작, 실제 브라우저/원격 수용은 남는다.
+   M2b-4b3의 [표시 receipt query/룰러·pointer UI](WEBUI_SHARING_QUERY_UI.ko.md)를 연결했다.
+   DRC 순회/마커/box/CD 조작, 실제 브라우저/원격 수용은 남는다.
 4. M0/M3 TeeBox Firefox/ETX는 현장 실행 불가로 보류. 사용자에게 같은 측정을
    반복 요청하거나 로컬 결과를 현장 PASS로 바꾸지 않는다.
 5. M5 world-tile은 성능 전제·실측에 따른 조건부 단계. 미구현을 완료로 세지 않는다.

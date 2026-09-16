@@ -1,5 +1,8 @@
 # M2b-4a — 로컬 초대 UI와 전용 게스트 프레임 화면
 
+현재 query/룰러·pointer 연결은 [M2b-4b3](WEBUI_SHARING_QUERY_UI.ko.md)를 따른다.
+아래 구현/미완료 범위는 M2b-4a 시점이며 SH-08 실제 수용은 계속 남는다.
+
 후속 [M2b-4b1 게스트 DRC UI](WEBUI_SHARING_DRC_UI.ko.md)는 별도 whole-result 승인과
 개인 목록/선택·윤곽·오류 이동을 연결한다. 아래의 layout-only 설명은 4a 단계 당시
 범위이며, 현재 DRC 공유도 자동이 아니라 별도 체크를 요구한다.

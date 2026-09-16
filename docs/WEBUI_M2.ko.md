@@ -1486,7 +1486,9 @@ M0/G2는 사용자 요청대로 보류이며 GTK launcher는 유지한다.
 3. 공유의 초대/인증과 고정 설계·레이어 follow 전송은 M2b-1/2에 연결했다.
    독립 state/worker는 M2b-3a, scoped query/룰러는 M2b-3b1에 연결했다.
    독립 DRC 읽기/패널 API는 M2b-3b2, 로컬 CLI/초대·기본 guest 화면은 M2b-4a에 연결했다.
-   guest DRC/layer/query/룰러 UI·실제 브라우저/원격 수용은 남는다.
+   M2b-4b1/2/3에서 guest DRC 목록/선택·레이어와
+   [query/룰러·pointer](WEBUI_SHARING_QUERY_UI.ko.md)를 연결했다.
+   DRC 순회/마커/box/CD 및 실제 브라우저/원격 수용은 남는다.
    아직 shares=false, loopback-only다.
 4. 외부 HTTPS/WSS·TeeBox 접근/인증 정책은 상위 계획 §10 미결 사항이며 로컬 기반 구현과
    실제 외부 공개를 구별한다. 브라우저 주소만 외부 IP로 바꿔 노출하지 않는다.

@@ -45,6 +45,18 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
         return transport::error(StatusCode::NOT_FOUND);
     }
     let (mime, body) = match name.as_str() {
+        "guest-display.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/guest-display.js"),
+        ),
+        "guest-query-wire.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/guest-query-wire.js"),
+        ),
+        "guest-tools.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/guest-tools.js"),
+        ),
         "guest-layers.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/guest-layers.js"),

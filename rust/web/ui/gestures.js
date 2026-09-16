@@ -129,7 +129,8 @@
         port.window.addEventListener('resize', cancel);
         port.window.addEventListener('pagehide', cancel);
         port.document.addEventListener('visibilitychange', function () { if (port.document.hidden) { cancel(); } });
-        return Object.freeze({cancel: cancel, active: function () { return drag !== null; }, bandActive:function(){return !!drag&&!!drag.band;}});
+        return Object.freeze({cancel: cancel, active: function () { return drag !== null; },
+            moving:function(){return !!drag&&(!!drag.band||!!drag.moved);}, bandActive:function(){return !!drag&&!!drag.band;}});
     }
     if (typeof module !== 'undefined' && module.exports) { module.exports = {bind: bind, wheelNavigation: wheelNavigation}; }
     else { root.FloeGestures = {bind: bind, wheelNavigation: wheelNavigation}; }
