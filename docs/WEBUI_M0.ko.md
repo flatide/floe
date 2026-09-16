@@ -245,7 +245,7 @@ Canvas readback과 실제 화면 관찰/수용도 구분한다([표시 진단 �
 |---|---|
 | `--stream-kb 0` | `--refinement off`와 같은 direct-final. 둘 다 `FLOE_RUST_ROUND_PAGES`보다 우선하며 독립 workspace. decoded/frame cache는 이 옵션만으로 끄지 않음 |
 | `--refinement on` | M4g-27 사용자 결정: 기존처럼 환경 page-round를 따름. 환경 생략 시 실질 off, 명시 off/stream0/baseline 우선. 새 adaptive 정책 아님 |
-| nonzero `--stream-kb` | 명시 오류는 유지. 기존 Rust는 양수를 KB 배치로 쓰지 않고 환경 page-round를 따랐음. 이 호환 수용 여부와 새 byte-stream 정책은 별도 |
+| 양수 `--stream-kb` | M4g-28: 기존처럼 환경 page-round를 따르며 숫자 크기는 KB 배치로 쓰지 않음. 명시하면 독립 workspace. 최종 값 기준 중복/음수/off·baseline 충돌 검사를 보존하며 새 byte-stream 정책은 없음 |
 | `--stream-target-ms` | 기본500도 명시 오류. 기존 Rust 어댑터가 이미 쓰지 않던 값이며 적응형 스트리밍 이관 필요 여부는 별도 |
 | `--render-debug` | 독립 workspace의 worker가 소비한 frame/round당 숫자 한 줄을 stderr에 출력. 원 wire/stderr/좌표·이름·경로 미전달. 아래 M4 §62의 차이 명시 |
 | view `--lod` | 기존 Rust wire에 없음. on/off 모두 이유를 포함해 오류. `index --lod`는 생성 옵션으로 지원하며 live LOD 제어와 다름 |

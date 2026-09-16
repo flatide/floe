@@ -218,7 +218,7 @@ def native(parsers):
                     continue
                 value = [] if action.nargs == 0 else [str(next(iter(action.choices), "1")) if action.choices else "1"]
                 call([cmd, "synthetic", *action.option_strings[:1], *value, "--help"], 2, "option")
-        call(["view", "synthetic", "--stream-kb", "1", "--help"], 2, "supports --stream-kb 0 only")
+        call(["view", "synthetic", "--stream-kb", "1", "--help"])
         call(["--help"])
         call(["--version"], text="floe2-web")
     return count
@@ -231,7 +231,7 @@ def main():
     count = native(parsers)
     print(f"WEB CLI INVENTORY: ALL OK ({len(parsers) - 1} commands + fe-embed, {totals['public']} public options, "
           f"{totals['hidden']} rejected hidden options; {count} native parser probes)")
-    print("Known boundaries: gtktest/PNG diagnostic replacement; nonzero stream policy pending.")
+    print("Known boundaries: gtktest/PNG diagnostic replacement; stream-kb is legacy page-round compatibility, not a byte budget.")
     print("Parser surface/default drift checked, NOT command semantics or full G4/browser acceptance.")
 
 

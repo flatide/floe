@@ -17,6 +17,7 @@ use floe_web::{
 };
 use serde_json::{json, Value};
 use std::{
+    cmp::Ordering as NumberSign,
     collections::BTreeSet,
     fs::{self, DirBuilder, OpenOptions},
     io::{Read, Write},
@@ -51,7 +52,7 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --png / --raw            Frame transfer (default raw)
   --frame-cache on|off      Retained frame reuse + layout margin (default on)
   --refinement on|off      On follows round env; off forces direct-final (default effectively off)
-  --stream-kb 0            Compatibility spelling for --refinement off (only 0)
+  --stream-kb N            Legacy compatibility: 0 forces off; positive follows round env (not KB)
   --render-debug           Numeric worker-frame diagnostics to stderr; independent workspace
   --dump                   Keep recent frame/display pixels in browser memory; explicit downloads
   --perf-baseline           Frames/labels/refinement/frame reuse off; caches stay
@@ -89,8 +90,11 @@ No implicit indexing or ambient reviewer selection; read-only selection grants n
 Default round size is direct-final. --refinement on (like omission) follows
 FLOE_RUST_ROUND_PAGES; it does not invent a progressive/byte/time policy.
 --refinement off, --stream-kb 0 and --perf-baseline override that setting.
+Positive --stream-kb is not a byte budget; its magnitude was unused by Rust.
+It conflicts with refinement off/perf-baseline. Repeated stream values use
+the last integer. Explicit --stream-kb always starts an independent workspace.
 Deck margin is unsupported.
-Nonzero --stream-kb, --stream-target-ms, --lod, --hairline and --thin-um
+--stream-target-ms, --lod, --hairline and --thin-um
 are not migrated; they are rejected, never silently ignored.
 --dump starts an independent workspace. About has the capture toggle/downloads.
 It copies displayed pixels, affects timing/memory and never writes server /tmp PNGs.
@@ -166,7 +170,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
     let mut i = 1;
     let mut positional = false;
     let mut refinement_off = false;
-    let mut stream_zero = false;
+    let mut stream_sign = None;
     while i < args.len() {
         let arg = &args[i];
         i += 1;
@@ -303,12 +307,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 };
             }
             "--stream-kb" => {
-                if value()?.parse::<u64>().ok() != Some(0) {
-                    return Err(Error::input(
-                        "web view supports --stream-kb 0 only (same as --refinement off); progressive byte-budget policy is not migrated",
-                    ));
-                }
-                stream_zero = true;
+                stream_sign = Some(stream_kb_sign(value()?)?);
             }
             "--render-debug" => {
                 flag()?;
@@ -412,10 +411,19 @@ pub fn parse(args: &[String]) -> Result<Command> {
     if c.roots.len() > 32 {
         return Err(Error::input("too many approved roots"));
     }
-    // argparse's last explicit refinement wins, while stream_kb=0 still
-    // forces off in cmd_view regardless of ordering. "on" only preserves
-    // the existing round environment; it does not choose a new round size.
-    c.direct_final = refinement_off || stream_zero;
+    // argparse validates each integer's syntax, but cmd_view checks only the
+    // final value's sign/conflicts. A valid negative followed by zero is OK.
+    if stream_sign == Some(NumberSign::Less) {
+        return Err(Error::input("--stream-kb must be >= 0"));
+    }
+    if (refinement_off || c.perf_baseline) && stream_sign == Some(NumberSign::Greater) {
+        return Err(Error::input(
+            "--refinement off (including --perf-baseline) conflicts with nonzero --stream-kb",
+        ));
+    }
+    // The final stream=0 overrides on regardless of ordering. A positive
+    // value preserves the round environment; its magnitude is not a budget.
+    c.direct_final = refinement_off || stream_sign == Some(NumberSign::Equal);
     // Legacy cmd_view treats effective "on" exactly like omission: an
     // existing owner keeps its own round environment. Only effective off
     // introduces a construction option and requires an independent owner.
@@ -427,6 +435,35 @@ pub fn parse(args: &[String]) -> Result<Command> {
         c.initial["labels"] = json!(false);
     }
     Ok(c)
+}
+fn stream_kb_sign(text: &str) -> Result<NumberSign> {
+    // Only zero/nonzero matters to the Rust adapter. Do not overflow or invent
+    // a u64 ceiling for legacy decimal values whose magnitude is never used.
+    // Accept signed ASCII decimal with Python's between-digit separators.
+    let text = text.trim();
+    let digits = text.strip_prefix(['-', '+']).unwrap_or(text);
+    let mut zero = true;
+    let mut digit = false;
+    for byte in digits.bytes() {
+        if byte.is_ascii_digit() {
+            zero &= byte == b'0';
+            digit = true;
+        } else if byte == b'_' && digit {
+            digit = false;
+        } else {
+            return Err(Error::input("--stream-kb requires a decimal integer"));
+        }
+    }
+    if !digit {
+        return Err(Error::input("--stream-kb requires a decimal integer"));
+    }
+    Ok(if zero {
+        NumberSign::Equal
+    } else if text.starts_with('-') {
+        NumberSign::Less
+    } else {
+        NumberSign::Greater
+    })
 }
 fn startup_depth(text: &str) -> Result<String> {
     if text == "full" {
@@ -966,7 +1003,6 @@ mod tests {
         assert!(!parse(&args("view")).unwrap().dump);
         for tail in [
             "--stream-kb",
-            "--stream-kb 1",
             "--stream-kb -1",
             "--stream-kb NaN",
             "--stream-kb 0.0",
@@ -977,6 +1013,70 @@ mod tests {
         ] {
             assert!(parse(&args(&format!("view {tail}"))).is_err(), "{tail}");
         }
+    }
+    #[test]
+    fn stream_compatibility_uses_only_the_last_integer_sign() {
+        for (tail, final_only) in [
+            ("--stream-kb 1", false),
+            ("--stream-kb=65536", false),
+            ("--stream-kb +1_024", false),
+            ("--stream-kb 184467440737095516160", false),
+            ("--stream-kb -0", true),
+            ("--stream-kb 0 --stream-kb 8", false),
+            ("--stream-kb 8 --stream-kb 0", true),
+            ("--stream-kb -8 --stream-kb 0", true),
+            ("--stream-kb -8 --stream-kb 2", false),
+            ("--stream-kb 8 --refinement off --refinement on", false),
+            ("--refinement off --stream-kb 8 --stream-kb 0", true),
+            ("--perf-baseline --stream-kb 8 --stream-kb 0", true),
+        ] {
+            let c = parse(&args(&format!("view {tail}"))).unwrap();
+            assert!(c.independent, "{tail}");
+            assert_eq!(c.direct_final, final_only, "{tail}");
+        }
+        for tail in [
+            "--stream-kb 0 --stream-kb -8",
+            "--stream-kb 8 --refinement off",
+            "--stream-kb 8 --perf-baseline --refinement on",
+            "--stream-kb NaN --stream-kb 0",
+            "--stream-kb +_8",
+            "--stream-kb 8_",
+            "--stream-kb 8__0",
+            "--stream-kb 0x10",
+        ] {
+            assert!(parse(&args(&format!("view {tail}"))).is_err(), "{tail}");
+        }
+        assert_eq!(stream_kb_sign(" +00_00 ").unwrap(), NumberSign::Equal);
+        assert!(stream_kb_sign("").is_err());
+    }
+    #[test]
+    #[ignore = "requires generated GTK CLI stream/refinement oracle"]
+    fn gtk_stream_policy_oracle() {
+        let cases: Value = serde_json::from_slice(
+            &fs::read(std::env::var("FLOE_STREAM_ORACLE").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let cases = cases.as_array().unwrap();
+        for case in cases {
+            let argv: Vec<String> = serde_json::from_value(case["argv"].clone()).unwrap();
+            let result = parse(&argv);
+            if case["want"].is_null() {
+                assert!(result.is_err(), "{argv:?}");
+            } else {
+                let c = result.unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+                assert_eq!(
+                    c.direct_final,
+                    case["want"]["direct_final"].as_bool().unwrap(),
+                    "{argv:?}"
+                );
+                assert_eq!(
+                    c.independent,
+                    case["want"]["independent"].as_bool().unwrap(),
+                    "{argv:?}"
+                );
+            }
+        }
+        println!("GTK STREAM POLICY: ALL OK ({} cases)", cases.len());
     }
     #[test]
     fn refinement_on_preserves_environment_and_legacy_precedence() {

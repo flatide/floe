@@ -62,10 +62,14 @@ def main(fixture):
         assert "selfcheck" in run("--help", env=env).stdout
         assert version in run("--version", env=env).stdout
         assert "--no-open" in run("view", "--help", env=env).stdout
-        assert "--stream-kb 0" in run("view", "--help", env=env).stdout
+        assert "--stream-kb N" in run("view", "--help", env=env).stdout
+        assert "not a byte budget" in run("view", "--stream-kb", "1", "--help", env=env).stdout
         assert "never writes server /tmp PNGs" in run("view", "--help", env=env).stdout
         for args, text in [
-            (("--stream-kb", "1"), "supports --stream-kb 0 only"),
+            (("--stream-kb", "-1"), "must be >= 0"),
+            (("--stream-kb", "NaN"), "requires a decimal integer"),
+            (("--stream-kb", "1", "--refinement", "off"), "conflicts with nonzero"),
+            (("--perf-baseline", "--stream-kb", "1"), "conflicts with nonzero"),
             (("--stream-target-ms", "500"), "unused by Rust renderd"),
             (("--hairline", "0"), "legacy KLayout planner"),
             (("--thin-um", "0"), "not an equivalent frame control"),

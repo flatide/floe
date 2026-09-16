@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M4g-27 CLI 재대조·refinement 호환).
+작성 2026-08-29, 갱신 2026-09-16(M4g-28 양수 stream CLI 호환).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -139,11 +139,17 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 
 ## 현재 진행도와 커밋 보고
 
+M4g-28은 양수 `--stream-kb`의 기존 Rust 호환을 연결한다. 크기를 KB 예산으로
+새로 사용하지 않고 환경 page-round를 따르며, 명시 stream의 독립 workspace와
+최종 값 기준 순서/음수/off·baseline 충돌 검사를 보존한다. 원본 정책380사례와
+실제 startup/IPC gate로 대조한다. APNG 정적 진단/GTK 경계와 실제 브라우저·Linux·
+현장 수용, M2 공유/원격 및 조건부 M5는 별도로 남는다.
+
 M4g-27의 [CLI 원본 재대조](WEBUI_G4_CLI.ko.md)는10개 명령94개와 보조 PNG16개를
 현재 argparse/native parser로 고정한다. 사용자 결정에 따라 `--refinement on`은
 기존 환경 page-round를 따르게 복원했다. 기본 실질 off·명시 off/stream0/baseline
 우선은 유지하며 새 적응형 렌더 정책은 만들지 않는다. 상태줄은 실제 round/final을
-표시한다. 양수 stream 호환·APNG 정적 fallback/GTK 진단 경계와 아래 전체 수용은
+표시한다. 양수 stream은 M4g-28에서 연결했으며 APNG 정적 fallback/GTK 진단 경계와 아래 전체 수용은
 남는다. 파서175회 통과를 파일/픽셀·브라우저 기능 전체의 완료로 계산하지 않는다.
 
 M4g-24b의 레이아웃 유지 DRC 열기에 이어 M4g-24c는 `Reconnect launcher reviewer…`를

@@ -6065,3 +6065,49 @@ renderer46, KLayout j1/j8 각각13 PX+2 phase-exact+14 style을 통과했다. �
 브라우저·Python-free Linux·G1/G4·현장 수용, M2 공유/원격 승인·구현, 조건부 M5다.
 메뉴 연결0 OPEN/110옵션 목록을 goal 완료율로 환산하지 않는다. 브라우저 URL 정책
 차단을 우회하지 않았고 TeeBox 현장 대기는 유지한다. main/jobdeck 변경은 보존한다.
+
+## 86. M4g-28 — 양수 stream CLI 호환
+
+2026-09-16. 원본 `cmd_view`와 `RustRenderWorker._round_pages`를 재대조해,
+남아 있던 양수 `--stream-kb` 거부를 해소한다. 기존 Rust에서도 크기를 KB로 쓰지
+않았으므로0은 direct-final, 양수는 기존 환경 page-round다. 새 적응형·바이트
+스트리밍 알고리즘은 없고 기본 환경 미설정 시 실질 off도 유지한다.
+
+- 모든 명시 stream은 독립 workspace이며 현재 owner에 전달하거나 그 환경을
+  덮어쓰지 않는다. on만 지정한 경우의 M4g-27 기존 창 재사용은 그대로다.
+- 반복 stream/refinement는 각각 마지막 값이다. 최종 음수는 오류이고 양수와
+  유효한 off/baseline은 충돌한다. `-1→0`은 유효하지만 `NaN→0`은 문법 오류다.
+  ASCII 십진수의 부호/underscore를 검사하고 크기를 숫자로 축적하지 않으므로
+  기존에 사용하지 않던 값에 u64 상한/overflow를 추가하지 않는다.
+- 원본 CLI prefix에서 최종 stream/process_options를 추출한380사례 오라클을
+  추가했다. 실제 첫 generation gate는22실행/21첫 generation과6개 사전 오류로
+  확장하며, 양수1과65536이 같은 환경 정책을 쓰는지·환경 생략·중복을 대조한다.
+  IPC gate는 `--multi`/session-file/jobs 없이 stream만으로 독립 세션을 확인한다.
+  원본/캐시 불변, 세션 파일·worker·소켓 수거도 유지한다.
+
+변경 전 release는 새 IPC gate에서 양수 세션을 만들지 못해 exit1이었고,
+별도 `view --stream-kb 8 --help`도 exit2/`supports --stream-kb 0 only`로 거부됐다.
+원래의 미이관 경계를 재현한 것이며 새 테스트 실패를 통과로 세지 않는다.
+집중 검증은 CLI26단위(외부 오라클2 ignored), app all-target strict clippy/release,
+startup 원본144+stream380사례, 실제22실행/21첫 generation·6사전 오류, IPC와
+목록175 probe가 통과했다. 최초 전체 검증은 `validate_app_cli.py:76`에 남아 있던
+양수 미지원 오류 기대값 때문에 exit1이었다. 이 기대값을 양수 help 수용 및 음수/
+문법/off·baseline 충돌 검사로 바꿨다. 실제 양수 의미는 별도 startup/IPC gate로
+검사하며 help 성공으로 대체하지 않는다. 갱신된 app CLI 집중 검사도 통과했다.
+집중 로그는 `/private/tmp/floe-stream-{unit,clippy,build,startup,handoff,inventory,app-cli-final}.log`다.
+clippy는 app의 all-target/no-deps 엄격 검사이며 기존 의존성 경고까지 없다는 뜻은 아니다.
+
+최종 전체 `sh tools/validate_rust.sh`는 exit0 / `RUST VALIDATION: ALL OK`로 완료했다
+(`/private/tmp/floe-stream-battery-final.log`). CLI26/core282/web96 단위, owner HTTP20,
+startup144+stream380 원본 오라클·실제22실행/21첫 generation·6사전 오류,
+전체 UI·메뉴 linked39/open0, jobdeck83·renderer46, KLayout j1/j8 각각13 PX+
+2 phase-exact+14 style을 통과했다. fixture가 필요한 단위의 workspace ignored와
+실제 연결 게이트의 실행 결과를 구별한다. 최초 실패 로그도
+`/private/tmp/floe-stream-battery.log`로 보존하며 최종 통과로 덮지 않는다.
+검증용 `.venv` 링크만 제거했고 연결 대상 환경과 다른 작업 트리는 보존했다.
+실제 브라우저·스크린샷·현장 수용은 미검증이며 자동화 HTTP/DOM 검사로 대신 세지 않는다.
+
+커밋 시 목표 잔여: APNG 정적 기본 프레임/GTK 진단 경계, 실제 브라우저·Python-free
+Linux·G1/G4·현장 수용, M2 공유/원격 승인·구현, 조건부 M5다. 메뉴 linked39/open0과
+CLI 목록을 전체 완료율로 계산하지 않는다. 기존 브라우저 URL 정책 차단을 우회하지
+않고 현장 대기를 유지한다. main/jobdeck의 병행 변경은 건드리지 않는다.

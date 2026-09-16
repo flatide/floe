@@ -1,6 +1,6 @@
 # 웹 전환 CLI 재대조
 
-2026-09-16, M4g-27. 기준 `d7b81aa` 이후의 `feature/webui`.
+2026-09-16, M4g-28. 기준 `c6990d4` 이후의 `feature/webui`.
 [M0 원래 범위](WEBUI_M0.ko.md), [전체 잔여](WEBUI_G4_AUDIT.ko.md),
 [단계 기록](WEBUI_M4.ko.md). **파서 목록의 완성과 기능·현장 수용을 구별한다.**
 
@@ -59,11 +59,18 @@ browser 경로, 비공개 임시 cwd를 사용하며 source 파일·설정·세�
   크기·시간/바이트 예산을 정하지 않는다.
 - `--refinement off` 또는 `--stream-kb 0`: 환경보다 우선해2^30을 사용한다.
   `--stream-kb 0 --refinement on`도 off다. 중복 `--refinement`는 마지막 값이 우선한다.
+- M4g-28: **양수 `--stream-kb`도 기존처럼 환경 page-round를 따른다**. 숫자 크기는
+  Rust에서 쓰지 않으며 새 KB 예산을 뜻하지 않는다. 명시 stream은0/양수 모두 독립
+  workspace다. 반복 stream도 마지막 정수가 우선하므로 `0→8`은 환경, `8→0`은 off다.
+  최종 음수는 오류이며, 양수와 유효한 refinement off/baseline의 조합도 오류다.
+  `-1→0`처럼 유효한 음수를 뒤에서 바꾸는 경우는 허용하되 `NaN→0`은 숫자 문법 오류다.
+  ASCII 부호·십진수·숫자 사이 underscore를 읽고, 사용하지 않는 크기에 u64 상한이나
+  곱셈 overflow를 새로 도입하지 않는다. 실제 바이트 스트리밍과 시간 적응은 추가하지 않는다.
 - `--perf-baseline`: 순서와 무관하게 refinement·frame reuse·frames·labels off.
   decoded cache·geometry cut은 유지한다. 원래 무효인 live LOD를 새로 제어하지 않는다.
 - 다른 독립 실행 옵션이 없고 유효한 마지막 refinement가 on이면 생략처럼 기존
-  workspace를 사용한다. 이미 열린
-  worker의 환경은 송신자의 값으로 바꾸지 않는다. off/stream0/baseline은 별도
+  workspace를 사용한다. 이미 열린 worker의 환경은 송신자의 값으로 바꾸지 않는다.
+  off/명시 stream/baseline은 별도
   workspace다. 프로세스 옵션을 화면 patch로 forward하지 않는다.
 - 상태줄의 고정 `refinement off` 문구를 제거했다. 실제 프레임의 `round`/`final`을
   표시하고, 중간 프레임은 `Refining`, 최종 불완전 프레임은 `INCOMPLETE`다.
@@ -73,13 +80,15 @@ browser 경로, 비공개 임시 cwd를 사용하며 source 파일·설정·세�
 `validate_web_startup.py`는 원본 `cmd_view`의 서버 생성 전 prefix와
 `RustRenderWorker.__init__`의 실제 `_round_pages` 대입만 실행한다(생성자/worker/GUI 미실행).
 이를 네이티브 controller가 실제 소비한 첫 generation의 프레임 수와 대조한다.
-환경1·환경 생략, on/off·중복·stream0·baseline과 기본 표시 설정을 검사한다.
+환경1·환경 생략, on/off·양수 stream·중복·stream0·baseline과 기본 표시 설정을 검사한다.
+또한 원본의 process_options/최종 stream 값에서 도출한380개 순서·충돌 사례와
+실제22개 시작/21첫 generation,6개 오류 조합을 검사한다. IPC gate는 독립 옵션을
+겹쳐 넣지 않고 stream만으로 새 workspace가 생기며 기존 owner를 변경하지 않는지 본다.
 
 ### 그대로 유지하는 별도 경계
 
 | 옵션 | 현재 동작·판정 |
 |---|---|
-| nonzero `--stream-kb` | 웹은 명시 거부. **기존 Rust도 KB를 배치 크기로 쓰지 않았다**. 0이 아니면 환경 page round를 따르던 허용 인자다. 양수 호환 수용과 새 byte-budget 기능은 다른 결정이며 후자를 필수 이관으로 부풀리지 않는다 |
 | `--stream-target-ms` | 기존 Rust에서 쓰지 않던 값. 웹은 명시 거부. 시간 적응형 정책을 새로 만들지 않음 |
 | view `--lod` | 기존 Rust wire에 전달되지 않음. on/off 모두 명시 거부. `index --lod`는 생성 옵션으로 지원 |
 | `--hairline`/`--thin-um` | 기존 KLayout planner에만 연결. 웹은 명시 거부. `--thin keep/cull`로 같은 의미인 척 대체하지 않음 |
@@ -103,7 +112,7 @@ GTK 위젯 자체의 진단/기존 명령 폐기 승인도 이 PNG 호환성과 
 ## 5. 완료 판단
 
 이번 파서 목록 검사는 인자 표면의 알려진 누락·drift를 감지하고, 사용자 결정에 따른
-refinement 호환·잘못된 상태 표시를 수정한다. 양수 stream 호환, APNG 정적 fallback/
-GTK 진단 경계가 남는다. 실제 브라우저·Python-free Linux·G1/G4·현장, M2 공유/원격
+refinement 호환·잘못된 상태 표시를 수정하며 M4g-28은 양수 stream 호환도 연결했다.
+APNG 정적 fallback/GTK 진단 경계가 남는다. 실제 브라우저·Python-free Linux·G1/G4·현장, M2 공유/원격
 승인·구현, 조건부 M5는 그대로 별도다. 메뉴 목록0 OPEN과110개 파서 대조를 전체
 goal 완료율로 계산하지 않는다. 전체 배터리/집중 검증 결과는 M4의 해당 단계에 기록한다.

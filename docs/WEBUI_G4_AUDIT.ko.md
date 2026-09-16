@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-16, M4g-27(CLI 재대조·refinement 호환). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-16, M4g-28(양수 stream CLI 호환). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -21,7 +21,8 @@ M4g-25는 SVRF 교체, M4g-26a/b는 열린 캐시를 유지하는 인덱싱과 �
 M4g-27의 [CLI 원본 재대조](WEBUI_G4_CLI.ko.md)는10개 명령94개·보조 PNG16개,
 숨김 거부17개를 실제 argparse/native parser로 고정했다. 사용자 선택대로 명시
 `--refinement on`의 환경 page-round 호환을 복원하고 고정 off 상태 표시를 수정했다.
-양수 stream 인자의 호환과 APNG **정적 기본 프레임**/GTK 진단 경계는 계속 남는다.
+M4g-28은 양수 stream 인자의 기존 환경 round/독립 창/최종 옵션 충돌도 연결했다.
+APNG **정적 기본 프레임**/GTK 진단 경계는 계속 남는다.
 새 byte-stream 알고리즘이나 animation player를 필수 이관으로 잘못 확대하지 않는다.
 
 ## 1. 범위별 현재 근거와 남은 일
@@ -97,7 +98,7 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
 
 ## 3. 로컬 기능 완성과 구별할 목표 잔여
 
-1. [CLI 재대조](WEBUI_G4_CLI.ko.md)의 남은 양수 stream 호환·APNG 정적 fallback/
+1. [CLI 재대조](WEBUI_G4_CLI.ko.md)의 남은 APNG 정적 fallback/
    GTK 진단 경계와 G4 전체 수용. [메뉴 목록](WEBUI_G4_MENU.ko.md)은
    M4g-26b부터 모든 범위 내 handler가 로컬 연결됐지만 전체 수용은 아니다. reviewer 읽기 경로는
    M4g-20/21에서 연결했으며 ambient reviewer 자동 선택은 하지 않는다. 개발 bitmap 슬롯 UI는

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """GTK-source startup oracle + Rust CLI/native first-frame regression gate."""
 import ast
+import contextlib
+import io
 import itertools
 import json
 import os
@@ -32,7 +34,8 @@ def refinement_oracle():
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "cmd_view")
     cut = next(i for i, n in enumerate(method.body) if isinstance(n, ast.Assign)
                and any(isinstance(t, ast.Name) and t.id == "server" for t in n.targets))
-    method.body = method.body[:cut] + ast.parse("return stream_kb").body
+    method.body = method.body[:cut] + ast.parse(
+        "return dict(stream_kb=stream_kb, independent=process_options)").body
     scope = dict(vars(cli))
     exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
                  "GTK refinement CLI prefix", "exec"), scope)
@@ -44,10 +47,11 @@ def refinement_oracle():
     code = compile(ast.Module(body=[assignment], type_ignores=[]), "GTK worker round policy", "exec")
     def expected(args, env):
         with patch.dict(os.environ, env, clear=True):
-            stream_kb = scope["cmd_view"](parser.parse_args(args))
+            policy = scope["cmd_view"](parser.parse_args(args))
+            stream_kb = policy.pop("stream_kb")
             instance = SimpleNamespace()
             exec(code, dict(vars(rust_render), self=instance, stream_kb=stream_kb))
-            return instance._round_pages
+            return dict(policy, direct_final=stream_kb == 0, round_pages=instance._round_pages)
     return expected
 
 
@@ -128,6 +132,34 @@ def oracle(work):
     assert f"GTK STARTUP: ALL OK ({len(cases)} " in run.stdout
     print(run.stdout.strip())
 
+    # Source-derived final-value semantics, including overridden negative
+    # integers vs invalid syntax, conflicts, and interleaved flag ordering.
+    legacy = refinement_oracle()
+    streams = ((), ("0",), ("1",), ("65536",), ("184467440737095516160",),
+               ("0", "8"), ("8", "0"), ("8", "0", "4"), ("-1",),
+               ("-1", "0"), ("0", "-1"), ("+8",), ("-0",), ("1_024",),
+               ("NaN", "0"), ("",), ("1.0",), ("8__0",), (" +00_00 ",))
+    refinements = ((), ("on",), ("off",), ("on", "off"), ("off", "on"))
+    policies = []
+    for stream, refinement, baseline, reverse in itertools.product(
+            streams, refinements, (False, True), (False, True)):
+        s = [word for value in stream for word in ("--stream-kb", value)]
+        r = [word for value in refinement for word in ("--refinement", value)]
+        argv = (r + s if reverse else s + r) + (["--perf-baseline"] if baseline else [])
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                want = legacy(argv, {"FLOE_RUST_ROUND_PAGES": "1"})
+            except SystemExit:
+                want = None
+        policies.append(dict(argv=["view", *argv], want=want))
+    path = work / "stream-policy.json"
+    path.write_text(json.dumps(policies))
+    run = subprocess.run([bins[0], "gtk_stream_policy_oracle", "--ignored", "--nocapture"],
+        env=dict(os.environ, PATH="", FLOE_STREAM_ORACLE=str(path)), capture_output=True, text=True, timeout=30)
+    assert run.returncode == 0, (run.stdout, run.stderr)
+    assert f"GTK STREAM POLICY: ALL OK ({len(policies)} " in run.stdout
+    print(run.stdout.strip())
+
 
 def native(work, fixture):
     old_rounds = refinement_oracle()
@@ -163,12 +195,20 @@ def native(work, fixture):
         (source, inspection, None, "full", True, True, False),
         (source, ["--refinement", "on", *inspection], None, "full", True, True, False),
     ]
+    for extra in (["--stream-kb", "1"], ["--stream-kb", "65536"],
+                  ["--stream-kb", "0", "--stream-kb", "8"],
+                  ["--stream-kb", "8", "--stream-kb", "0"],
+                  ["--stream-kb", "8", "--refinement", "off", "--refinement", "on"],
+                  ["--stream-kb", "-1", "--stream-kb", "8"],
+                  ["--stream-kb", "1"]):
+        cases.append((source, [*extra, *inspection], None, "full", True, True, False))
+    no_round_env = (14, len(cases) - 1)
     for i, (path, extra, policy, depth, frames, labels, ask) in enumerate(cases):
         temps = work / f"temps-{i}"
         temps.mkdir()
         session_file = work / f"session-{i}.json"
         child_env = dict(env, TMPDIR=str(temps))
-        if i == 14:
+        if i in no_round_env:
             child_env.pop("FLOE_RUST_ROUND_PAGES")
         if policy is not None:
             child_env["FLOE_JOBDECK_LEVELS"] = policy
@@ -176,7 +216,7 @@ def native(work, fixture):
         # the first frame, including deck workers. No Python runtime fallback.
         direct_final = ([] if i >= 8 else
                         ["--stream-kb", "0"] if i % 2 else ["--refinement", "off"])
-        expected_rounds = (old_rounds([str(path), *direct_final, *extra], child_env)
+        expected_rounds = (old_rounds([str(path), *direct_final, *extra], child_env)["round_pages"]
                            if i >= 8 else 1 << 30)
         debug = i in (1, 3, 5)
         args = [str(APP), "view", str(path), "--no-open", "--session-file", str(session_file),
@@ -239,10 +279,28 @@ def native(work, fixture):
             if p.poll() is None:
                 p.terminate()
                 p.communicate(timeout=15)
+    # Invalid final values/conflicts must fail before worker/browser discovery
+    # or session publication, even with a real, already-indexed source.
+    fault_dir = work / 'invalid-stream'
+    fault_dir.mkdir()
+    fault_env = dict(env, TMPDIR=str(fault_dir), FLOE_INDEX_BIN='/invalid/index',
+                     FLOE_RENDERD_BIN='/invalid/renderd', FLOE_FIREFOX_BIN='/invalid/firefox')
+    for extra, message in [
+            (["--stream-kb", "-1"], "must be >= 0"),
+            (["--stream-kb", "0", "--stream-kb", "-1"], "must be >= 0"),
+            (["--stream-kb", "8", "--refinement", "off"], "conflicts with nonzero"),
+            (["--refinement", "off", "--stream-kb", "8"], "conflicts with nonzero"),
+            (["--perf-baseline", "--stream-kb", "8", "--refinement", "on"], "conflicts with nonzero"),
+            (["--stream-kb", "NaN", "--stream-kb", "0"], "requires a decimal integer")]:
+        result = subprocess.run([str(APP), 'view', str(source), '--no-open',
+                                 '--session-file', str(fault_dir / 'session.json'), *extra],
+                                env=fault_env, capture_output=True, text=True, timeout=8)
+        assert result.returncode == 2 and message in result.stderr, (extra, result.stderr)
+        assert not result.stdout and not list(fault_dir.iterdir()), (extra, result.stdout)
     assert {p.name:p.read_bytes() for p in cache.iterdir() if p.is_file()} == before
     assert source.read_bytes() == fixture.read_bytes()
     print(f"WEB STARTUP NATIVE: ALL OK ({len(cases)} launch cases, {len(cases)-1} first generations, "
-          "GTK source-derived refinement/env/duplicates/zero/baseline parity, direct-final aliases, "
+          "GTK source-derived refinement/positive-stream/env/duplicates/zero/baseline parity, 6 preflight faults, "
           "numeric debug opt-in, no implicit index, source/cache unchanged)")
 
 

@@ -51,8 +51,8 @@ def main(fixture):
             proc = subprocess.Popen([str(APP), 'view', '--no-open'], env=env,
                                     stdout=subprocess.PIPE, stderr=stderr, text=True)
             try:
-                def session():
-                    m = re.search(r'private session link: (.+) \(one use', log.read_text())
+                def session(path=log):
+                    m = re.search(r'private session link: (.+) \(one use', path.read_text())
                     return read_json(Path(m[1])) if m else None
                 credentials = wait(session, proc)
                 client = Client(credentials)
@@ -151,22 +151,30 @@ def main(fixture):
                     assert p['request']['label_preference'] is True
                     client.call('POST', '/api/v1/launch/' + p['id'], dict(action='dismiss'))
 
-                isolated_file = work / 'independent.json'
-                independent = subprocess.Popen([str(APP), 'view', '--multi', '--no-open',
-                    '--session-file', str(isolated_file)], env=env, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, text=True)
-                try:
-                    isolated = Client(wait(lambda: read_json(isolated_file), independent))
-                    isolated.login()
-                    assert not isolated.call('GET', '/api/v1/capabilities')['launcher']
-                    assert isolated.origin != client.origin
-                    isolated.call('DELETE', '/api/v1/session', code=204)
-                    independent.communicate(timeout=15)
-                    assert independent.returncode == 0
-                finally:
-                    if independent.poll() is None:
-                        independent.terminate()
-                        independent.communicate(timeout=15)
+                # No --session-file/jobs/other independent option may mask
+                # whether the tested construction option bypasses the owner.
+                for i, options in enumerate((['--multi'], ['--stream-kb', '8'],
+                                             ['--stream-kb', '8', '--stream-kb', '0'])):
+                    isolated_log = work / f'independent-{i}.stderr'
+                    with isolated_log.open('w') as isolated_stderr:
+                        independent = subprocess.Popen([str(APP), 'view', '--no-open', *options],
+                            env=env, stdout=subprocess.PIPE, stderr=isolated_stderr, text=True)
+                        try:
+                            try:
+                                isolated = Client(wait(lambda: session(isolated_log), independent))
+                            except AssertionError as error:
+                                raise AssertionError((options, isolated_log.read_text())) from error
+                            isolated.login()
+                            assert not isolated.call('GET', '/api/v1/capabilities')['launcher']
+                            assert isolated.origin != client.origin
+                            assert client.call('GET', '/api/v1/launch')['pending'] is None
+                            isolated.call('DELETE', '/api/v1/session', code=204)
+                            independent.communicate(timeout=15)
+                            assert independent.returncode == 0, isolated_log.read_text()
+                        finally:
+                            if independent.poll() is None:
+                                independent.terminate()
+                                independent.communicate(timeout=15)
                 assert client.call('GET', '/api/v1/operations')['last_seq'] == '4'
                 client.call('DELETE', '/api/v1/session', code=204)
                 proc.communicate(timeout=15)
