@@ -5905,3 +5905,50 @@ inventory linked38/open1은 전체 수용률이 아니다. 진단/무효 CLI 최
 실제 브라우저·Python-free Linux·G1/G4·현장, M2 공유/원격 승인·구현, 조건부 M5는
 별도로 남는다. 브라우저 URL 정책 차단을 우회하지 않았으며 다운로드는 미검증이다.
 main/jobdeck 작업은 이 단계에 포함하지 않는다. 전체 goal은 진행 중이다.
+
+## 83. M4g-26a — 열린 덱을 보존하는 선택 소스 인덱싱
+
+2026-09-16. 카메라 유지 레벨 재선택을 준비하며 선행 충돌을 확인했다.
+`ManagedIndex::start`가 선택 여부/재사용 여부와 무관하게 등록된 모든 TC 캐시에
+쓰기 잠금을 잡았다. 열린 레벨A를 재사용하고 새 레벨B만 만들려는 작업도 A의
+read lease와 충돌했다. 기존 뷰를 닫아 해제하는 것은 실패 시 기존 화면 보존
+계약과 맞지 않으므로 이 잠금 분류를 별도 단계로 수정한다.
+
+- 덱은 CPU·단일 index 예약과 전체 TC read lease를 먼저 얻고, 등록/선택/캐시를
+  검증해 `DeckIndexPlan::todo`를 만든다. read lease를 놓지 않고 해당 목적지만
+  하나의 자원 mutex 안에서 원자적으로 write로 전환한다. 모든 목적지의 충돌을
+  확인한 뒤 전환하므로 마지막 목적지의 충돌도 첫 native 쓰기 전에 실패한다.
+- 재사용·미선택 TC는 read로 남아 기존 renderer가 계속 사용할 수 있다. `force`,
+  새 occupancy 생성, `occupancy_only`가 실제로 수정할 TC는 write가 필요하며,
+  열린 캐시라면 `busy`다. 옵션을 무시하거나 현재 뷰를 닫아 우회하지 않는다.
+- canonical 부모/캐시 alias를 동일 잠금으로 처리한다. 계획 외 목적지 승격은
+  거부한다. 기존1개 index·jobs1..16·foreground reserve를 유지하며, 혼합 잠금과
+  CPU 예약은 취소/실패와 native child reap을 포함한 전체 supervisor 수명을 따른다.
+- 일반 레이아웃 managed index 및 CLI `PreparedIndex` 정책은 그대로다. 실제
+  native 소스별 쓰기 직전의 재검증/OS lock도 그대로다. 읽기 분류는 gateway 내부
+  불변만 보장하며 외부 indexer/캐시 교체에 대한 reader 보호나 hot reload는 아니다.
+- API 권한·요청 필드·선택/옵션 의미·순번/replay는 변경하지 않는다. 성공한 index도
+  열린 뷰의 로드 레벨/카메라/가시성이나 renderer를 자동 교체하지 않는다.
+
+집중 검증: core282/web95 단위(외부 fixture7/3개 ignored), 실제 managed index,
+실제 owner HTTP18개가 통과했다. 자원 단위는 atomic rollback, alias 충돌, 승격 후
+reader 차단, 실패/해제 회계 및 foreground reserve를 검사한다. native gate는 열린
+캐시 byte 보존, 선택된 새 소스 생성·미선택 미생성, force/occupancy 충돌 시 첫
+쓰기 전 거부, 혼합 잠금 취소/정지 child kill·reap를 검사한다. HTTP는 살아 있는
+뷰의 camera/revision/renderer·로드 레벨 보존, 새 cache 생성과 replay를 확인한다.
+합성 덱 fixture에 빠진 필수 AD를 보완한 후 재실행했으며 이는 제품 결함 수정이 아니다.
+로그는 `/private/tmp/floe-deck-index-leases-{unit,managed,http,clippy,build}.log`다.
+strict all-target clippy와 release build도 exit0으로 통과했다. 전체
+`sh tools/validate_rust.sh`는 exit0, `RUST VALIDATION: ALL OK`로 완료했다
+(`/private/tmp/floe-deck-index-leases-battery.log`). 새 실제 managed/HTTP gate,
+jobdeck83·renderer46·KLayout13 PX+2 phase-exact+14 style(j1/j8)을 포함한다.
+집중 검증 뒤 runtime 코드를 추가 변경하지 않았다. scoped fmt·diff 검사와 메뉴
+inventory도 통과했다. `--require-complete`는 남은 메뉴1건 때문에 의도대로 exit1이다.
+검증용 `.venv` 링크만 제거했으며 대상 가상환경·main/jobdeck의 별도 작업은 보존했다.
+
+커밋 시 목표 잔여: 카메라 유지 레벨 재선택1건은 **여전히 OPEN**이며 다음 단계에서
+서버 camera/revision 고정, 실패·취소 보존, 색인 승인 재시도와 브라우저 조작을 연결한다.
+이 선행 변경을 메뉴 완료로 세지 않는다. 진단/무효 CLI 최종 재대조, 실제 브라우저·
+Python-free Linux·G1/G4·현장 수용, M2 공유/원격 승인·구현 및 조건부 M5도 남는다.
+URL 정책 차단 이후 브라우저 검증을 우회하지 않았으며 다운로드는 미검증이다.
+main/jobdeck의 별도 변경은 보존한다. 전체 goal은 진행 중이다.

@@ -206,6 +206,26 @@ impl Resources {
             true,
         )
     }
+    /// Deck planning reads cache state while keeping the singleton/CPU
+    /// reservation. Promote only planned destinations before any writer starts.
+    pub(crate) fn index_planning(
+        self: &Arc<Self>,
+        caches: impl IntoIterator<Item = PathBuf>,
+        jobs: usize,
+    ) -> Result<Permit> {
+        if !(1..=16).contains(&jobs) {
+            return Err(Error::input("managed indexing requires 1..16 jobs"));
+        }
+        self.acquire(
+            Usage {
+                cpu_slots: jobs as u32,
+                index_jobs: 1,
+                ..Usage::default()
+            },
+            keys(caches)?,
+            false,
+        )
+    }
     fn acquire(
         self: &Arc<Self>,
         use_: Usage,
@@ -217,8 +237,8 @@ impl Resources {
         // At most one index job is admitted. Limit that job's reservation,
         // not the total including foreground work already using its reserve.
         // Otherwise render->index and index->render have different outcomes.
-        let index_borrows_reserve =
-            write && use_.cpu_slots > self.limits.cpu_slots - self.limits.foreground_reserve;
+        let index_borrows_reserve = use_.index_jobs != 0
+            && use_.cpu_slots > self.limits.cpu_slots - self.limits.foreground_reserve;
         let leases_conflict = keys.iter().any(|key| {
             s.leases
                 .get(key)
@@ -255,6 +275,7 @@ impl Resources {
             usage: use_,
             keys,
             write,
+            promoted: BTreeSet::new(),
         })
     }
 }
@@ -263,6 +284,41 @@ pub struct Permit {
     usage: Usage,
     keys: BTreeSet<PathBuf>,
     write: bool,
+    promoted: BTreeSet<PathBuf>,
+}
+impl Permit {
+    /// All-or-nothing read-to-write conversion. Kept/unselected caches retain
+    /// read leases throughout the job; a failed upgrade never releases them.
+    pub(crate) fn promote_index_writes(
+        &mut self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<()> {
+        let wanted = keys(paths)?;
+        if self.usage.index_jobs != 1
+            || self.write
+            || !self.promoted.is_empty()
+            || !wanted.is_subset(&self.keys)
+        {
+            return Err(Error::input("invalid index lease promotion"));
+        }
+        let mut s = self.resources.state.lock().unwrap();
+        if wanted.iter().any(|key| {
+            let h = s.leases.get(key).expect("owned planning lease");
+            h.writer || h.readers != 1
+        }) {
+            return Err(Error::new(
+                ErrorKind::Busy,
+                "planned index destination is in use",
+            ));
+        }
+        for key in &wanted {
+            let h = s.leases.get_mut(key).expect("owned planning lease");
+            h.readers -= 1;
+            h.writer = true;
+        }
+        self.promoted = wanted;
+        Ok(())
+    }
 }
 impl Drop for Permit {
     fn drop(&mut self) {
@@ -273,7 +329,7 @@ impl Drop for Permit {
         s.usage.index_jobs -= self.usage.index_jobs;
         for key in &self.keys {
             let h = s.leases.get_mut(key).expect("owned lease");
-            if self.write {
+            if self.write || self.promoted.contains(key) {
                 h.writer = false;
             } else {
                 h.readers -= 1;
@@ -385,6 +441,66 @@ impl ManagedDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn index_planning_keeps_reads_and_promotes_writes_atomically() {
+        let r = Resources::new(Limits::default()).unwrap();
+        let root = std::env::temp_dir().join("floe-index-promotion");
+        let (a, b, c) = (root.join("a"), root.join("b"), root.join("c"));
+        let visible = r.read([a.clone()]).unwrap();
+        let conflict = r.read([c.clone()]).unwrap();
+        assert!(r.index_planning([], 13).is_err());
+        let mut planning = r
+            .index_planning([a.clone(), b.clone(), c.clone()], 12)
+            .unwrap();
+        assert_eq!(r.usage().cpu_slots, 12);
+        assert_eq!(r.usage().index_jobs, 1);
+        assert_eq!(r.index_slots(), 0);
+        assert!(r.index([], 1).is_err());
+        assert!(planning
+            .promote_index_writes([b.clone(), c.clone()])
+            .is_err());
+        // Failed multi-destination promotion must not make b a writer either.
+        drop(r.read([a.clone(), b.clone(), c.clone()]).unwrap());
+        assert!(planning
+            .promote_index_writes([root.join("outside")])
+            .is_err());
+        drop(conflict);
+        planning
+            .promote_index_writes([b.clone(), c.clone()])
+            .unwrap();
+        drop(r.read([a.clone()]).unwrap());
+        assert!(r.read([b.clone()]).is_err());
+        assert!(r.read([c.clone()]).is_err());
+        assert!(planning.promote_index_writes([a.clone()]).is_err());
+        drop(planning);
+        assert_eq!(r.usage(), Usage::default());
+        drop(r.index([b, c], 12).unwrap());
+        assert!(r.index([a.clone()], 1).is_err());
+        drop(visible);
+        drop(r.index([a], 12).unwrap());
+        let mut read_only = r.read([]).unwrap();
+        assert!(read_only.promote_index_writes([]).is_err());
+    }
+    #[test]
+    fn index_promotion_resolves_cache_aliases() {
+        let dir = std::env::temp_dir().join(format!("floe-promote-alias-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("alias")).unwrap();
+        let r = Resources::new(Limits::default()).unwrap();
+        let a = dir.join("a.floe");
+        let alias = dir.join("alias/a.floe");
+        let visible = r.read([a.clone()]).unwrap();
+        let mut planning = r.index_planning([alias.clone()], 2).unwrap();
+        assert!(planning.promote_index_writes([a.clone()]).is_err());
+        drop(visible);
+        planning.promote_index_writes([a.clone()]).unwrap();
+        assert!(r.read([alias]).is_err());
+        drop(planning);
+        drop(r.index([a], 2).unwrap());
+        assert_eq!(r.usage(), Usage::default());
+        fs::remove_file(dir.join("alias")).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
     #[test]
     fn index_slot_advice_obeys_foreground_reserve_without_reserving() {
         let r = Resources::new(Limits::default()).unwrap();

@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M4g-25 실행 중 SVRF metadata 교체).
+작성 2026-08-29, 갱신 2026-09-16(M4g-26a 열린 덱 보존 인덱싱 잠금).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -149,6 +149,13 @@ M4g-25는 같은 picker에서 `Load SVRF metadata…`를 연결한다([M4 §82](
 열린 DRC reader를 재사용해 geometry를 재파싱하지 않고, metadata와 query revision을
 검증 후 원자 교체한다. 실패 시 기존 metadata/revision, 성공 시 layout/reviewer/저장
 receipt를 보존한다. 이전 type/filter/selection·미승인 preview는 무효화한다.
+
+M4g-26a는 레벨 재선택의 선행 충돌을 제거한다([M4 §83](WEBUI_M4.ko.md)). 덱의
+모든 캐시에 쓰기 잠금을 잡던 managed index를 읽기 예약→실제 계획된 목적지만
+원자 쓰기 전환으로 바꿨다. 열린 레벨의 캐시를 재사용하며 다른 선택 레벨을 색인할
+수 있고, 열린 캐시의 force/occupancy 수정은 여전히 첫 쓰기 전에 거부한다.
+레벨 재선택 명령·카메라 고정·브라우저 연결 자체는 아직 미구현이며 아래 OPEN1건에
+계속 포함한다. CLI/일반 레이아웃의 기존 인덱싱 잠금은 바꾸지 않는다.
 
 2026-09-16 M4g-23 [GTK 메뉴 재대조](WEBUI_G4_MENU.ko.md): 실행 중 DRC 파일 열기/
 교체, SVRF metadata 교체, 카메라 유지 jobdeck 로드 레벨 재선택의 누락을 확인했다.

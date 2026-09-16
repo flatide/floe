@@ -219,6 +219,18 @@ display_policy/open_seq, 전체 선택 레벨(`all` 또는 `only`+정규 i64 문
 묶는다. 브라우저는 승인 내용을 sessionStorage에 먼저 저장하고 결과를 seq+kind+
 request_id+open_seq로 검사한다. 조회/새로고침은 읽기 전용이며 불명확한 접수의
 재시도도 동일 payload만 사용한다. 같은 seq의 다른 요청을 채택/취소하지 않는다.
+
+M4g-26a의 managed deck index는 준비 중 등록된 모든 TC 캐시에 read lease를
+가지며, 선택 레벨·옵션으로 정한 `todo` 목적지만 하나의 임계구역에서 write로
+전환한다. 재사용/미선택 캐시는 끝까지 read다. 열린 덱의 재사용 캐시 때문에 다른
+선택 소스의 색인이 막히지는 않지만, force/occupancy 생성·재생성이 열린 캐시를
+수정하려 하면 모든 native 쓰기 전에 `busy`로 실패한다. 실패한 전환은 일부 쓰기
+잠금도 남기지 않는다. CPU/single-index 예약 및 mixed lease는 준비·순차 native
+작업·취소·child reap까지 유지한다. 기존 index 승인·레벨/옵션 의미는 바꾸지 않으며
+현재 뷰를 닫거나 로드 레벨·카메라를 자동 변경하지 않는다. 일반 레이아웃은 기존
+쓰기 admission을 유지한다. process-local 보호이며 외부 프로세스의 캐시 교체/
+hot reload 보장이 아니다([M4 §83](WEBUI_M4.ko.md)).
+
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는

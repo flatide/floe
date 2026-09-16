@@ -98,6 +98,7 @@ for line in sys.stdin:
         assert "RUST INDEX OPEN NATIVE: ALL OK" in checked.stdout
         assert "RUST INDEX OPEN DECK: ALL OK" in checked.stdout
         assert "RUST INDEX OPEN RACES: ALL OK" in checked.stdout
+        assert "RUST LIVE DECK INDEX: ALL OK" in checked.stdout
         assert "RUST OWNER DECK DEFAULTS: ALL OK" in checked.stdout
         assert "RUST OWNER DECK MODES: ALL OK (5 native cutovers, one reservation" in checked.stdout
         assert all(digest(path) == before for path, before in mode_caches.items())

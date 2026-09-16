@@ -91,6 +91,90 @@ fn signal(pid: i32, flag: &str) -> bool {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "run tools/validate_owner_service.py on private fixtures"]
+async fn deck_index_reuses_live_caches_without_replacing_the_view() {
+    let dir = area("index-live-deck");
+    let deck = dir.join("live.jb");
+    fs::write(&deck,"MTITLE 1,ONE\nMTITLE 2,TWO\nMTITLE 3,OTHER\nCHIP A\n$ (1,A,TC=A.oas,AD=0.001,LY={1},DT={0},UX=100,UY=100)\nROWS 0/0\nCHIP B\n$ (2,B,TC=B.oas,AD=0.001,LY={1},DT={0},UX=100,UY=100)\nROWS 0/0\nCHIP C\n$ (3,C,TC=C.oas,AD=0.001,LY={1},DT={0},UX=100,UY=100)\nROWS 0/0\n").unwrap();
+    let h = Harness::start(&[deck], native()).await;
+    let login = h.login().await;
+    let source = h.service.catalog()["sources"][0]["source_id"].clone();
+    let index = |seq: &str, ids: Value, force: bool| {
+        json!({"kind":"index","seq":seq,"source_id":source,
+            "levels":{"mode":"only","ids":ids},"options":{"jobs":2,"force":force}})
+    };
+    assert_eq!(
+        operation(&h, &login, index("1", json!(["1"]), false)).await["phase"],
+        "succeeded"
+    );
+    let mut request = open("2", &source, "chip", json!({"mode":"only","ids":["1"]}));
+    request["body"] = json!({"pixels":[137,103],"navigation":{"kind":"goto","center_um":["50","51"],"width_um":"120"}});
+    assert_eq!(operation(&h, &login, request).await["phase"], "succeeded");
+    let mut ws = h.connect(&login).await;
+    frame(&mut ws).await;
+    let current = state(&h, &login).await;
+    let a = cache_dir(&dir.join("A.oas"));
+    let b = cache_dir(&dir.join("B.oas"));
+    let c = cache_dir(&dir.join("C.oas"));
+    let before: Vec<_> = [
+        "design.ovm",
+        "design.ovp",
+        "design.ovt",
+        "design.ovo",
+        "meta.json",
+    ]
+    .into_iter()
+    .map(|name| (name, fs::read(a.join(name)).unwrap()))
+    .collect();
+    let busy = operation(&h, &login, index("3", json!(["1", "2"]), true)).await;
+    assert_eq!(busy["phase"], "failed", "{busy}");
+    assert_eq!(busy["error"], "busy");
+    assert!(!b.exists());
+    assert!(!dir.join("B.oas.floe.index.lock").exists());
+    let request = index("4", json!(["1", "2"]), false);
+    let done = operation(&h, &login, request.clone()).await;
+    assert_eq!(done["phase"], "succeeded", "{done}");
+    assert_eq!(done["kept"], 1);
+    assert_eq!(done["completed"], 2);
+    assert!(b.join("design.ovo").is_file());
+    assert!(!c.exists());
+    assert!(!dir.join("C.oas.floe.index.lock").exists());
+    assert_eq!(
+        h.call(&login, "POST", "/api/v1/operations", request)
+            .await
+            .1,
+        done
+    );
+    let after = state(&h, &login).await;
+    for key in [
+        "view_id",
+        "state_rev",
+        "render_key",
+        "bbox_dbu",
+        "pixels",
+        "layers",
+    ] {
+        assert_eq!(after[key], current[key], "indexing changed live {key}");
+    }
+    assert_eq!(
+        h.call(&login, "GET", "/api/v1/view", Value::Null).await.1["levels"],
+        json!(["1"])
+    );
+    assert_eq!(h.resources.usage().workers, 1);
+    assert_eq!(h.resources.usage().index_jobs, 0);
+    for (name, bytes) in before {
+        assert_eq!(
+            fs::read(a.join(name)).unwrap(),
+            bytes,
+            "indexing changed live {name}"
+        );
+    }
+    ws.close(None).await.unwrap();
+    h.shutdown().await;
+    println!("RUST LIVE DECK INDEX: ALL OK (keep visible subset, build missing selected source, atomic force rejection, camera/cache preservation, replay)");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "run tools/validate_owner_service.py on private fixtures"]
 async fn index_open_checks_revision_before_writes_and_after_index_and_reaps_on_cancel() {
     let dir = area("index-open-races");
     let a = dir.join("A.oas");

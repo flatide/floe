@@ -1,11 +1,12 @@
-//! One managed index supervisor. The all-source write/CPU reservation outlives
-//! prepare, every sequential deck source, cancellation and native child reap.
+//! One managed index supervisor. Decks retain all-source read leases during
+//! planning, then atomically promote only planned writes. The mixed leases and
+//! CPU reservation outlive every sequential source, cancel and child reap.
 use crate::{
     check_cancelled,
     index::{Action, IndexOptions, PreparedIndex},
     index_progress::Progress,
     jobdeck::index::DeckIndexPlan,
-    managed::Resources,
+    managed::{Permit, Resources},
     native::Indexer,
     registered::RegisteredSource,
     Error, ErrorKind, Result,
@@ -78,7 +79,11 @@ impl ManagedIndex {
             ));
         }
         source.validate_levels(levels.as_ref())?;
-        let permit = resources.index(source.cache_paths()?, options.jobs)?;
+        let mut permit = if source.deck {
+            resources.index_planning(source.cache_paths()?, options.jobs)?
+        } else {
+            resources.index(source.cache_paths()?, options.jobs)?
+        };
         let id = resources.next_id()?;
         let stop = Arc::new(AtomicUsize::new(0));
         let started = Instant::now();
@@ -100,7 +105,15 @@ impl ManagedIndex {
         let thread = thread::Builder::new()
             .name("floe-managed-index".into())
             .spawn(move || {
-                let result = run(&source, levels, &options, &indexer, &flag, &shared);
+                let result = run(
+                    &source,
+                    levels,
+                    &options,
+                    &indexer,
+                    &flag,
+                    &shared,
+                    &mut permit,
+                );
                 // Terminal state means all native children AND leases are released.
                 drop(permit);
                 let mut s = shared.lock().unwrap();
@@ -170,10 +183,21 @@ fn run(
     indexer: &Indexer,
     flag: &AtomicUsize,
     state: &Mutex<Snapshot>,
+    permit: &mut Permit,
 ) -> Result<()> {
     source.validate(flag)?;
     let entries = if source.deck {
         let plan = DeckIndexPlan::prepare(source.path(), levels, options, flag)?;
+        check_cancelled(flag)?;
+        // No managed writer can alter the classification while the planning
+        // reads are held. Reject *all* conflicts before the first native child;
+        // never silently skip force/occupancy writes against a visible cache.
+        permit.promote_index_writes(
+            plan.todo
+                .iter()
+                .map(|e| crate::cache::cache_path(&e.source))
+                .collect::<Result<Vec<_>>>()?,
+        )?;
         let mut s = state.lock().unwrap();
         s.kept = plan.kept;
         s.skipped = plan.catalog.infos.values().filter(|i| !i.ok()).count();
