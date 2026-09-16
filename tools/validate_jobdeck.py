@@ -3089,20 +3089,27 @@ class WideViewTests(unittest.TestCase):
         # rendered fine in `floe2 render` because captures are exact;
         # --detail high captures with the viewer's 1 px cut. tiny.oas
         # at 200 px over 2000 um: 1 px = 10 um, the 1 um dots page is
-        # culled by size and the 1 um BIT array is pruned - nothing
+        # size-cut and the 1 um BIT array pruned. Since 2026-09-16 a
+        # layout keeps such pages like a deck pass (a dense one as a
+        # footprint wash, a sparse one as pixels), so high still lights
+        # them; FLOE_RUST_SUB_CUT_WASH=off restores the cull - nothing
         # lit; exact (the default) draws them
         src = CLI / "tiny.oas"
-        for detail, lit in (("exact", True), ("high", False)):
+        no_wash = dict(self.env, FLOE_RUST_SUB_CUT_WASH="off")
+        for detail, env, lit in (("exact", self.env, True),
+                                 ("high", self.env, True),
+                                 ("high", no_wash, False)):
             out = CLI / ("tiny-%s.png" % detail)
             rep = CLI / ("tiny-%s.json" % detail)
             argv = ["render", src, "--bbox", "0,0,2000,2000", "--px", "200",
                     "--out", out, "--report", rep]
             if detail != "exact":
                 argv += ["--detail", detail]
-            run_floe2(*argv, env=self.env, ok=0)
+            run_floe2(*argv, env=env, ok=0)
             doc = json.loads(rep.read_text())
             self.assertEqual(doc["cut_px"], 0.0 if detail == "exact" else 1.0)
-            self.assertEqual(_png_lit_pixels(out) > 0, lit, detail)
+            self.assertEqual(_png_lit_pixels(out) > 0, lit,
+                             (detail, env is no_wash))
         # a deck capture with the viewer's cut keeps the wide policy's
         # washes (the deck's own behaviour at that detail)
         out = CLI / "tiny-deck-high.png"

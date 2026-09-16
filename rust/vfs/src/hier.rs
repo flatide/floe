@@ -948,13 +948,11 @@ impl<'a> Hier<'a> {
                 for pi in pr.page_lo..pr.page_lo + pr.page_count {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
-                    if (p.max_w < self.cut
-                        && p.max_h < self.cut)
-                        || p.max_min < self.page_hair
-                    {
+                    let size_cut = p.max_w < self.cut && p.max_h < self.cut;
+                    if size_cut || p.max_min < self.page_hair {
                         let in_view = boxes.iter().any(|b| p.bbox.intersects(b));
-                        if self.sub_cut_wash
-                            && in_view
+                        let washable = self.sub_cut_wash && in_view && self.sub_cut_applies(size_cut);
+                        if washable
                             && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h)
                         {
                             // sparse: too few members for a wash to
@@ -968,14 +966,10 @@ impl<'a> Hier<'a> {
                         }
                         self.st.cull_page_size += 1;
                         if in_view {
-                            let verdict = if p.max_w < self.cut && p.max_h < self.cut {
-                                "cull_size"
-                            } else {
-                                "cull_hair"
-                            };
+                            let verdict = if size_cut { "cull_size" } else { "cull_hair" };
                             self.note_page(verdict, ci, &p, pi);
                         }
-                        if self.sub_cut_wash && in_view {
+                        if washable {
                             wc.washes.push((p.layer_idx, p.bbox));
                             self.st.sub_cut_washes += 1;
                         }
@@ -1225,9 +1219,8 @@ impl<'a> Hier<'a> {
                         // for the identical drawable page set). One
                         // outline now (frames on) or nothing.
                         if r != REM_FULL {
-                            if (cw < cut && chh < cut)
-                                || cw.min(chh) < self.hair
-                            {
+                            let size_cut = cw < cut && chh < cut;
+                            if size_cut || cw.min(chh) < self.hair {
                                 // rev 33: the fold is SILENT. A
                                 // fold box tracked the cut - it
                                 // appeared and vanished with zoom
@@ -1241,6 +1234,7 @@ impl<'a> Hier<'a> {
                                 // matching the depth-full omission
                                 // rule.
                                 if self.sub_cut_wash
+                                    && self.sub_cut_applies(size_cut)
                                     && !self.wash_sub_cut_child(
                                         &mut wc, pli, &h, &rb, &boxes,
                                     )
@@ -1303,10 +1297,10 @@ impl<'a> Hier<'a> {
                         // stripes. Until a per-(cell,layer) proxy is
                         // available, omit the below-cut child instead
                         // of displaying false geometry.
-                        if (cw < cut && chh < cut)
-                            || cw.min(chh) < self.hair
-                        {
+                        let size_cut = cw < cut && chh < cut;
+                        if size_cut || cw.min(chh) < self.hair {
                             if self.sub_cut_wash
+                                && self.sub_cut_applies(size_cut)
                                 && !self.wash_sub_cut_child(
                                     &mut wc, pli, &h, &rb, &boxes,
                                 )
@@ -1393,6 +1387,17 @@ impl<'a> Hier<'a> {
 
     /// Returns false when the placement is sparse (no wash could
     /// stand for it): the caller expands it instead of dropping it.
+    /// Whether the sub-cut rules (a wash or a kept sparse item) stand
+    /// in for a culled item: always for a size cut (every shape below
+    /// the cut - the item would otherwise vanish whole; field
+    /// 2026-09-16, a design layout at detail high), for a hairline cut
+    /// only under the keep policy (page_hair == 0). Under the cull
+    /// policy thin items are dropped for speed, on a deck as on a
+    /// layout.
+    fn sub_cut_applies(&self, size_cut: bool) -> bool {
+        size_cut || self.page_hair == 0
+    }
+
     fn wash_sub_cut_child(
         &mut self,
         wc: &mut WsCell,

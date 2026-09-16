@@ -386,6 +386,12 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   정책을 고른다(auto = 소스 기본, cull = 레이아웃 정책). 남긴
   페이지는 perf 줄 `thin pages N kept`로 표시된다. 진단용 override
   `FLOE_RUST_PAGE_HAIRLINE=cull|keep`.
+- **cut 미만 페이지**(2026-09-16, 두 정책 공통): 모든 도형이 cut보다 작은
+  페이지(콘택·비아·마크 배열)는 버리지 않고 덱과 같은 규칙으로 남긴다 — 밀집
+  페이지는 레이어 색 footprint 블록, 희소 페이지는 도형을 픽셀로(Calibre가
+  sub-pixel 도형을 점으로 그리는 것과 같은 결과). 현장: 9.8 GB 일반 레이아웃이
+  detail high에서 Calibre보다 훨씬 적게 보였다. 킬 스위치
+  `FLOE_RUST_SUB_CUT_WASH=off`(SPEC-PLANNER §3).
 - **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):
   캐시에 `design.ovo`(`floe2 index --occupancy-only`)가 있고 요청이 keep·
   exact 아님이며 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지

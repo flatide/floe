@@ -1745,6 +1745,13 @@ fn run_deck_render(
     Ok(())
 }
 
+/// Whether a plain layout's plan keeps its sub-cut pages as washes or
+/// sparse pixels like a deck pass (2026-09-16); off = the pre-fix
+/// behaviour that culled them.
+fn sub_cut_wash_enabled() -> bool {
+    std::env::var("FLOE_RUST_SUB_CUT_WASH").as_deref() != Ok("off")
+}
+
 fn run_render(
     state: &mut WorkerState,
     command: &RenderCommand,
@@ -2469,7 +2476,13 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand) -> Result<PlanReque
         depth: command.depth,
         px_per_dbu,
         exact: command.exact,
-        sub_cut_wash: false,
+        // the deck's sub-cut rules on a plain layout too (field
+        // 2026-09-16: a 9.8 GB design layout showed far less than
+        // Calibre at detail high - pages whose every shape is below
+        // the cut were dropped whole; now a dense one is a footprint
+        // wash and a sparse one is kept and drawn as pixels).
+        // FLOE_RUST_SUB_CUT_WASH=off is the kill switch.
+        sub_cut_wash: !command.exact && sub_cut_wash_enabled(),
         page_hairline: !command.thin_keep,
         summary_layers: Vec::new(),
         prune_summary: false,

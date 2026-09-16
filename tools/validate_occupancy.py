@@ -1412,6 +1412,114 @@ def render_settled(worker, gen, bbox_dbu, px, cut_px=1.0, thin="keep",
         return lit_pixels(res["rgba"], px, px), res
 
 
+def write_subcut(path):
+    """a design layout whose sub-cut pages must not vanish (field
+    2026-09-16: a 9.8 GB design layout showed far less than Calibre at
+    detail high). 4/0: a 200 x 200 array of 0.2 um boxes on a 1 um
+    pitch over 200..400 um, written as one repetition record (a dense
+    page every shape of which is below a 1 px cut at 10 um/px); 7/0:
+    the same array as placements of a DOT cell; 5/0: four 0.2 um boxes
+    on a diagonal 120 um apart from (1500, 1400) um (a sparse page:
+    four pixels in a 36 x 36 px footprint, under the 1/256 wash rule);
+    6/0: a frame so the top spans 0..2000 um"""
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("SUBCUT")
+    l4, l5, l6, l7 = ly.layer(4, 0), ly.layer(5, 0), ly.layer(6, 0), ly.layer(7, 0)
+    for j in range(200):
+        for i in range(200):
+            x, y = 200 * UM + i * UM, 200 * UM + j * UM
+            top.shapes(l4).insert(db.Box(x, y, x + 200, y + 200))
+    dot = ly.create_cell("DOT")
+    dot.shapes(l7).insert(db.Box(0, 0, 200, 200))
+    top.insert(db.CellInstArray(dot.cell_index(),
+                                db.Trans(db.Vector(600 * UM, 200 * UM)),
+                                db.Vector(UM, 0), db.Vector(0, UM), 200, 200))
+    for k in range(4):
+        x, y = 1500 * UM + k * 120 * UM, 1400 * UM + k * 120 * UM
+        top.shapes(l5).insert(db.Box(x, y, x + 200, y + 200))
+    top.shapes(l6).insert(db.Box(0, 0, 2000 * UM, 2000 * UM))
+    opt = db.SaveLayoutOptions()
+    opt.format = "OASIS"
+    opt.oasis_compression_level = 10
+    opt.oasis_recompress = True
+    ly.write(str(path), opt)
+    ly._destroy()
+
+
+class SubCutTests(unittest.TestCase):
+    """A plain layout keeps its sub-cut pages like a deck pass
+    (2026-09-16): a dense page whose shapes are all below the cut is a
+    footprint wash, a sparse one is drawn as pixels, on both thin
+    policies; FLOE_RUST_SUB_CUT_WASH=off restores the cull."""
+
+    gen = 500
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = TMP / "subcut.oas"
+        write_subcut(cls.src)
+        cls.cache = Path(vfs_cache_dir(cls.src))
+        floe_index("vfs", cls.src, cls.cache, "--no-lod", "--slow-cell-s",
+                   "999", "--jobs", "2")
+        os.environ["FLOE_RENDERD_BIN"] = str(
+            ROOT / "rust" / "target" / "release" / "floe-renderd")
+        sys.path.insert(0, str(ROOT))
+        os.environ.pop("FLOE_RUST_SUB_CUT_WASH", None)
+        cls.worker = cls._worker()
+        os.environ["FLOE_RUST_SUB_CUT_WASH"] = "off"
+        cls.worker_off = cls._worker()
+        del os.environ["FLOE_RUST_SUB_CUT_WASH"]
+
+    @classmethod
+    def tearDownClass(cls):
+        for w in (cls.worker, cls.worker_off):
+            try:
+                w.stop()
+            except Exception:
+                pass
+
+    @classmethod
+    def _worker(cls):
+        from floe.cache import Cache
+        from floe.rust_render import RustRenderWorker
+        cache = Cache(str(cls.src))
+        cache.load()
+        worker = RustRenderWorker(cache)
+        worker.start()
+        return worker
+
+    def _lit(self, worker, layer, thin="cull"):
+        SubCutTests.gen += 1
+        box = (0.0, 0.0, 2000.0 * UM, 2000.0 * UM)
+        lit, _ = render_settled(worker, SubCutTests.gen, box, 200,
+                                cut_px=1.0, thin=thin, visible=[layer])
+        return lit
+
+    def test_dense_sub_cut_pages_are_washed_and_sparse_ones_drawn(self):
+        # 10 um/px, cut 1 px = 10 um: every 0.2 um box is below the cut
+        block = {(x, y) for x in range(20, 40) for y in range(160, 180)}
+        placed = {(x, y) for x in range(60, 80) for y in range(160, 180)}
+        for thin in ("cull", "keep"):
+            lit4 = self._lit(self.worker, (4, 0), thin)
+            self.assertGreaterEqual(len(lit4 & block), 300, (thin, len(lit4)))
+            self.assertLessEqual(len(lit4 - block), 90, (thin, sorted(lit4 - block)[:10]))
+            lit7 = self._lit(self.worker, (7, 0), thin)
+            self.assertGreaterEqual(len(lit7 & placed), 300, (thin, len(lit7)))
+            self.assertLessEqual(len(lit7 - placed), 90, (thin, sorted(lit7 - placed)[:10]))
+            # the sparse page: a few pixels at the boxes, nothing else
+            # (a footprint wash would light a 36 x 36 block)
+            lit5 = self._lit(self.worker, (5, 0), thin)
+            self.assertTrue(2 <= len(lit5) <= 12, (thin, sorted(lit5)))
+            spots = [(150 + 12 * k, 60 - 12 * k) for k in range(4)]
+            self.assertTrue(all(any(abs(x - sx) <= 2 and abs(y - sy) <= 2
+                                    for sx, sy in spots) for x, y in lit5),
+                            (thin, sorted(lit5)))
+        # the kill switch: the pre-fix cull drops all three
+        for layer in ((4, 0), (5, 0), (7, 0)):
+            self.assertEqual(self._lit(self.worker_off, layer), set(), layer)
+
+
 class DeckRenderTests(unittest.TestCase):
     """M4 (gate 4): a deck pass under the keep policy draws its
     source's summary on the source view, composites in pass order,

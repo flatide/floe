@@ -596,7 +596,9 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   재고정(1 MiB 캡처가 완전·exit 0).
 
 ### 4단계 — jobdeck 전용 광역 표시 정책 ✅ (2026-09-10, RENDERD 0.12.72, 실측 없이 사용자 결정)
-- **sub-cut wash**(`ViewReq::sub_cut_wash`, 덱 플랜 요청에만 켬): 크기 cut이
+- **sub-cut wash**(`ViewReq::sub_cut_wash`, 덱 플랜 요청에 켬; 2026-09-16부터
+  단일 레이아웃 요청에도 켬 — SPEC-PLANNER §3, 킬 스위치
+  `FLOE_RUST_SUB_CUT_WASH=off`): 크기 cut이
   **버리던** 것을 자기 레이어의 footprint wash(렉트, 보통 채움 → 뷰어 speckle이
   얇게 함)로 남긴다.
   - 자체 페이지: cut(양축 < cut, 또는 hairline)에 걸린 페이지 → `(layer, page

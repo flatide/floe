@@ -40,6 +40,19 @@
   119 µm 길이의 선 영역이 210 µm 뷰부터 지워진 것이 이 규칙이었다(4페이지 모두
   `cull_hair`, 문턱 0.128 µm에 4 nm 차이). raster는 남긴 가는 레코드를 전체
   길이의 1 px 선으로 그리고(KLayout hairline parity) `thin_pages_kept`로 센다.
+  **sub-cut 페이지**(`ViewReq::sub_cut_wash`; 덱 pass는 2026-09-10부터, 단일
+  레이아웃 요청도 2026-09-16부터 켬 — 현장: 9.8 GB 일반 레이아웃이 detail high에서
+  Calibre보다 훨씬 적게 보임, 모든 도형이 cut 미만인 페이지가 통째로 `cull_size`
+  됐다): 크기 컷(`max_w<cut && max_h<cut`)에 걸린 페이지는 버리지 않고,
+  footprint 대비 멤버 채움이 1/256 이상이면 레이어 색 footprint wash
+  (`sub_cut_washes`), 미만이면 페이지를 남겨 멤버를 픽셀로 그린다(`keep_sparse`,
+  `sub_cut_sparse`; JOBDECK §11 4단계). 배치 BVH의 sub-cut 노드도 같다
+  (`wash_sub_cut_child`). hairline 컷 항목은 thin 정책을 따른다
+  (`Hier::sub_cut_applies`): keep(page_hair = 0)이면 노드도 wash/expand_sparse,
+  cull이면 덱·레이아웃 모두 버린다(2026-09-16 전에는 덱이 cull에서도 hairline
+  항목을 wash했다). exact 요청은 제외. 뷰어 킬
+  스위치 `FLOE_RUST_SUB_CUT_WASH=off`(단일 레이아웃), `FLOE_RUST_DECK_WIDE=off`
+  (덱); gate `validate_occupancy` `SubCutTests`.
   **점유 요약 레이어**(`ViewReq::page_skip`, OCCUPANCY_PLAN M2): 비트셋에 든
   레이어는 페이지 범위(prange)에서 통째로 건너뛰어 선택·디코드가 없고
   `summary_pages`로 센다. 순회(자식·프레임·다른 레이어)는 `vis` 그대로이되,
