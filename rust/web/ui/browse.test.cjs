@@ -7,7 +7,8 @@ function listing(start=0,total=2,directory=token(1)){
         rows:Array.from({length:Math.min(128,total-start)},(_,n)=>({handle:token(n+start+10),name:n===0?'한국 <img src=x>.oas':String(n+start)+'.oas',kind:'file',bytes:'128',modified_seconds:'1'})),skipped_names:0,skipped_links:0};
 }
 function rig(saved=null){
-    const nodes=new Map(),listeners={},calls=[],operations=new Map(),timers=new Map();let timerId=0,last=0,lose=false,hold=false,selected=0,active=null,release=null;
+    const nodes=new Map(),listeners={},calls=[],operations=new Map(),timers=new Map();let timerId=0,last=0,lose=false,hold=false,selected=0,drcSelected=0,active=null,release=null;
+    const drc={view_id:token(21),drc_id:null,revision:null};
     const doc={activeElement:null,contains:n=>!!n,addEventListener(k,fn,capture){assert(capture);listeners[k]=fn;},createElement:tag=>new Node('',tag)};
     class Node{
         constructor(id,tag='div'){this.id=id;this.tag=tag;this.children=[];this.attrs={};this.value='';this.hidden=false;this.disabled=false;this._text='';}
@@ -21,6 +22,7 @@ function rig(saved=null){
     function el(id){if(!nodes.has(id)){nodes.set(id,new Node(id));}return nodes.get(id);}
     el('browse-filter').value='all_files';el('browse-dialog').hidden=true;
     const env={el,document:doc,protocol:P,available:()=>true,changed(){},selected(){selected++;},loadPending:()=>saved,savePending:v=>{saved=v;},
+        drcContext:()=>drc,drcSelected:async()=>{drcSelected++;},
         setTimeout(fn,ms){const id=++timerId;timers.set(id,fn);return id;},clearTimeout:id=>timers.delete(id),
         async http(method,path,body,missing,signal){
             calls.push({method,path,body:body&&JSON.parse(JSON.stringify(body))});
@@ -28,7 +30,7 @@ function rig(saved=null){
             if(method==='POST'&&path==='/api/v1/browse'){
                 assert(saved,'journal must precede admission');assert.equal(body.seq,JSON.parse(saved).request.seq);
                 let state=operations.get(body.seq);if(!state){last=Number(body.seq);state={seq:body.seq,kind:body.kind,request:JSON.parse(JSON.stringify(body)),phase:'succeeded',
-                    result:body.kind==='select'?{source_id:token(7),launch_id:token(8)}:{page:listing(body.start||0,300)}};operations.set(body.seq,state);}
+                    result:body.kind==='select'?{source_id:token(7),launch_id:token(8)}:body.kind==='open_drc'?{drc:{id:token(22),revision:token(23)},view_id:body.context.view_id,review_registration_required:true}:{page:listing(body.start||0,300)}};operations.set(body.seq,state);}
                 if(hold){await new Promise(r=>{release=r;});}
                 if(lose){throw Error('lost ACK');}return state;
             }
@@ -37,7 +39,7 @@ function rig(saved=null){
             assert.equal(method,'GET');return state||null;
         }};
     const api=B.bind(env);
-    return {api,el,env,doc,listeners,calls,operations,get saved(){return saved;},get selected(){return selected;},set lose(v){lose=v;},set hold(v){hold=v;},release:()=>release(),
+    return {api,el,env,doc,drc,listeners,calls,operations,get saved(){return saved;},get selected(){return selected;},get drcSelected(){return drcSelected;},set lose(v){lose=v;},set hold(v){hold=v;},release:()=>release(),
         async timer(){const it=timers.entries().next().value;if(it){timers.delete(it[0]);it[1]();}await tick();}};
 }
 (async()=>{
@@ -79,5 +81,14 @@ function rig(saved=null){
     assert.equal(late.el('browse-entries').children.length,0,'hidden late result must not paint');assert(late.saved);
     await late.api.resume();await wait(()=>late.el('browse-entries').children.length===128);late.api.stop();
     const invalid=rig('{');await invalid.api.init(true,false);assert(invalid.api.blocked());assert.match(invalid.el('browse-status').textContent,/invalid/);assert(invalid.el('browse-close').disabled);invalid.api.stop();
+    const drc=rig();await drc.api.init(true,false);drc.el('drc-open').onclick();await wait(()=>drc.el('browse-entries').children.length);
+    assert.equal(drc.el('browse-filter').value,'drc_files');assert(drc.el('browse-filter').disabled);assert.match(drc.el('browse-purpose').textContent,/permissions do not transfer/);
+    drc.el('browse-entries').children[0].children[0].onclick();drc.drc.drc_id=token(99);drc.drc.revision=token(98);
+    drc.lose=true;drc.el('browse-select').onclick();await wait(()=>/lost ACK/.test(drc.el('browse-status').textContent));
+    const drcSaved=drc.saved,drcRequest=JSON.parse(drcSaved).request;assert.equal(drcRequest.kind,'open_drc');assert.equal(drcRequest.context.drc_id,null,'selection context must be frozen');
+    assert.equal(drc.selected,0);assert.equal(drc.drcSelected,0);drc.api.stop();
+    const recovered=rig(drcSaved);recovered.operations.set(drcRequest.seq,drc.operations.get(drcRequest.seq));await recovered.api.init(true,false);
+    await wait(()=>recovered.drcSelected===1);assert.equal(recovered.selected,0);assert.equal(recovered.saved,null);assert.equal(recovered.calls.filter(c=>c.method==='POST').length,0);recovered.api.stop();
+    const incomplete=rig(JSON.stringify({request:drcRequest}));await incomplete.api.init(true,false);assert.match(incomplete.el('browse-status').textContent,/invalid/);assert(!incomplete.calls.some(c=>c.method==='POST'));incomplete.api.stop();
     console.log('WEB FILE PICKER: ALL OK (paging, literal names, journal-before-send, read-only recovery, identical retry, sequence collision, cancellation, late response, invalid storage)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

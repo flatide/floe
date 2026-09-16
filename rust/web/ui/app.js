@@ -1001,6 +1001,8 @@
         }});
     picker=window.FloeBrowse.bind({el:el,document:document,http:http,protocol:P,changed:controls,
         available:function(){return !indexBlocked()&&!stopped&&!submitting&&!ownerBusy&&(!launcher||!launcher.blocked());},
+        drcContext:function(){return drcPanel.openContext();},
+        drcSelected:async function(){await drcPanel.refresh();notice('DRC opened read-only; layout unchanged. Reviewer registration and automatic saving do not transfer.');},
         selected:function(){startupWaiting=false;pendingStartup=null;notice('File selected. Preparing the open request; indexing requires separate approval.');},
         loadPending:function(){return sessionStorage.getItem('floe-browse-pending:'+auth.session_id);},
         savePending:function(value){const key='floe-browse-pending:'+auth.session_id;if(value===null){sessionStorage.removeItem(key);}else{sessionStorage.setItem(key,value);}},

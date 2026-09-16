@@ -44,7 +44,8 @@
         if(terminal(v)){P.counter(v.review_rev,true);}return v;
     }
     function catalog(v,P){
-        keys(v,['available','editable','kind','reviewer','review_rev','operations','note_bytes','selection_limit','preparing','autosave']);
+        keys(v,['available','editable','kind','reviewer','review_rev','operations','note_bytes','selection_limit','preparing','autosave'],['detached']);
+        if(v.detached!==undefined&&(typeof v.detached!=='boolean'||v.detached&&(v.available||v.editable))){fail();}
         if(v.kind!=='drc_note'||typeof v.editable!=='boolean'||typeof v.available!=='boolean'||typeof v.preparing!=='boolean'||v.autosave!==false||v.note_bytes!==LIMIT||v.selection_limit!==5000){fail();}
         text(v.reviewer,200);P.counter(v.review_rev,true);
         const a=v.operations;keys(a,['last_seq','active','history']);P.counter(a.last_seq,true);if(a.active!==null){P.counter(a.active);}
@@ -134,8 +135,10 @@
         }
         function render(){
             el('notes-panel').hidden=!enabled;
-            el('notes-owner').textContent=model?'Reviewer: '+model.reviewer+(model.editable?'':' · read only'):'';
-            el('notes-authoring').hidden=!model||!model.editable;
+            el('notes-owner').textContent=model?'Reviewer: '+model.reviewer+(model.detached?' · detached; previous receipts only':model.editable?'':' · read only'):'';
+            // This container also owns the immutable receipts/recovery UI and
+            // unsaved local text. Detachment disables writes, not their display.
+            el('notes-authoring').hidden=!model||!model.editable&&!model.detached;
             const c=selection(),ok=permitted()&&!busy()&&!io&&!model.preparing;
             const connection=o.connection?o.connection():null;
             saveMode.sync(enabled&&!stopped&&model&&model.editable?model.reviewer:'',o.session()+'\n'+(connection||''),!!ok&&!!connection);
@@ -155,7 +158,7 @@
             el('notes-cancel').hidden=!active();el('notes-cancel').disabled=!permitted()||!!cancelling;
             el('notes-refresh').disabled=stopped||!enabled||!!poll;
             el('notes-uncertain').hidden=!uncertain;el('notes-resolve').disabled=!pending||stopped||!!write||!!cancelling;
-            el('notes-forget').disabled=!permitted()||!!active()||!!write||!el('notes-checked').checked;
+            el('notes-forget').disabled=!(permitted()||model&&model.detached&&!stopped&&!stale)||!!active()||!!write||!el('notes-checked').checked;
             el('notes-status').textContent=statusText(latest());el('notes-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
             el('notes-bytes').textContent=new TextEncoder().encode(el('notes-text').value).length+' / '+LIMIT+' UTF-8 bytes · empty text clears the selected notes';
             if(o.displayState){o.displayState(!enabled||!model?null:{reviewer:model.reviewer,review_rev:model.review_rev,read_turn:readTurn,
@@ -166,9 +169,10 @@
         function schedule(){o.clearTimeout(timer);timer=null;if(enabled&&!stopped&&(active()||pending)){timer=o.setTimeout(refresh,active()?500:2500);}}
         function install(v){
             const old=latest(),next=v.operations.history[v.operations.history.length-1];
-            if(model&&(v.editable!==model.editable||v.reviewer!==model.reviewer||P.compare(v.review_rev,model.review_rev)<0||P.compare(v.operations.last_seq,model.operations.last_seq)<0||
+            if(model&&(v.editable!==model.editable&&!(v.detached&&!v.editable)||model.detached&&!v.detached||v.reviewer!==model.reviewer||P.compare(v.review_rev,model.review_rev)<0||P.compare(v.operations.last_seq,model.operations.last_seq)<0||
                 old&&next&&old.seq===next.seq&&terminal(old)&&(['phase','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev'].some(function(k){return old[k]!==next[k];})||!!old.context!==!!next.context||old.context&&!equal(old.context,next.context)))){throw new Error('Older note state was ignored.');}
             if(editor&&model&&editor.approvedSeq!==v.operations.last_seq&&(v.review_rev!==model.review_rev||v.operations.last_seq!==model.operations.last_seq)){invalidate('Another save changed the note state.');}
+            if(v.detached&&(!model||!model.detached)){saveMode.reset();invalidate('DRC replaced; this reviewer is detached.');}
             model=v;stale=false;v.operations.history.forEach(settled);
         }
         function settled(v){if(editor&&editor.accepted&&editor.approvedSeq===v.seq&&v.published===true&&equal(v.context,editor.selection.context)){clearEditor(false);}}
@@ -258,10 +262,10 @@
         el('notes-editor').onkeydown=function(e){if(hangul.composing(e)){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();discard();}
             else if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.stopPropagation();if(!draft){confirm();}}};
         el('notes-refresh').onclick=refresh;el('notes-cancel').onclick=cancel;
-        el('notes-resolve').onclick=function(){if(model&&model.editable&&pending&&uncertain&&!stopped&&!write&&!cancelling){return send(pending);}};
+        el('notes-resolve').onclick=function(){if(model&&(model.editable||model.detached)&&pending&&uncertain&&!stopped&&!write&&!cancelling){return send(pending);}};
         el('notes-checked').onchange=render;el('notes-forget').onclick=function(){if(!el('notes-forget').disabled){pending=null;uncertain=false;store(null);el('notes-checked').checked=false;notice='Local recovery record cleared after your check. No request was sent.';render();}};
         render();
-        return {attach:function(value){if(!value){if(!enabled){render();}return;}try{const v=catalog(value,P);if(!enabled){enabled=true;if(v.editable){recover();}}install(v);changed();schedule();}
+        return {attach:function(value){if(!value){if(!enabled){render();}return;}try{const v=catalog(value,P);if(!enabled){enabled=true;if(v.editable||v.detached){recover();}}install(v);changed();schedule();}
                 catch(e){stale=true;notice=e.message;render();}},changed:changed,refresh:refresh,
             open:function(){if(!permitted()){return false;}changed();if(editor){el('notes-text').focus();}else{read(false);}return true;},
             transferReady:transferReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,

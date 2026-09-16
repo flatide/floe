@@ -30,6 +30,58 @@ fn read_registration_cannot_submit_or_acquire_editor_authority() {
     stop(&s);
 }
 #[test]
+fn detach_preserves_receipts_but_cannot_prepare_or_migrate_a_writer() {
+    let s = service();
+    let owner = owner();
+    let request = request();
+    let body = Arc::new(Semaphore::new(1));
+    let op = s
+        .begin(Arc::new(Arc::clone(&body).try_acquire_owned().unwrap()))
+        .unwrap();
+    assert!(matches!(s.admit_detach(|| Ok(())), Err("drc_busy")));
+    assert_eq!(s.status()["detached"], false);
+    drop(op);
+    assert!(matches!(
+        s.admit_detach(|| Err::<(), _>("drc_context_changed")),
+        Err("drc_context_changed")
+    ));
+    assert_eq!(s.status()["detached"], false);
+    let saved = json!({"seq":"1","phase":"succeeded","published":true});
+    {
+        let mut state = s.inner.state.lock().unwrap();
+        state
+            .ledger
+            .admit(1, Service::signature(&owner, &request), "drc_note")
+            .unwrap();
+        assert_eq!(state.ledger.active(), Some(1));
+    }
+    assert!(matches!(s.admit_detach(|| Ok(())), Err("drc_busy")));
+    s.inner
+        .state
+        .lock()
+        .unwrap()
+        .ledger
+        .update(1, saved.clone(), true);
+    s.admit_detach(|| Ok(())).unwrap();
+    assert_eq!(s.status()["available"], false);
+    assert_eq!(s.status()["editable"], false);
+    assert_eq!(s.operation(1), Some(saved.clone()));
+    assert_eq!(s.replay(&owner, &request).unwrap(), Some(saved.clone()));
+    assert_eq!(s.submit(&owner, request).unwrap(), saved);
+    assert!(matches!(
+        s.begin(Arc::new(Arc::clone(&body).try_acquire_owned().unwrap())),
+        Err("review_disabled")
+    ));
+    assert!(matches!(
+        s.begin_read(
+            Arc::new(Arc::clone(&body).try_acquire_owned().unwrap()),
+            true
+        ),
+        Err("review_disabled")
+    ));
+    stop(&s);
+}
+#[test]
 fn selected_read_target_cannot_be_used_as_an_editor() {
     assert!(Service::start(Config {
         kind: store::Kind::Notes,

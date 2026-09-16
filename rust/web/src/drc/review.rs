@@ -123,6 +123,7 @@ struct Work {
 }
 struct State {
     closed: bool,
+    detached: bool,
     serial: u64,
     review_rev: u64,
     preparing: Option<(u64, Arc<AtomicUsize>)>,
@@ -191,6 +192,7 @@ impl Service {
             config,
             state: Mutex::new(State {
                 closed: false,
+                detached: false,
                 serial: 0,
                 review_rev: 0,
                 preparing: None,
@@ -234,6 +236,9 @@ impl Service {
         if s.closed {
             return Err("drc_closed");
         }
+        if s.detached {
+            return Err("review_disabled");
+        }
         if s.ledger.active().is_some() || s.transfer.ledger.active().is_some() {
             return Err("drc_busy");
         }
@@ -267,6 +272,9 @@ impl Service {
         let mut s = self.inner.state.lock().unwrap();
         if s.closed {
             return Err("drc_closed");
+        }
+        if s.detached {
+            return Err("review_disabled");
         }
         if s.ledger.active().is_some() || s.transfer.ledger.active().is_some() {
             return Err("drc_busy");
@@ -369,6 +377,9 @@ impl Service {
         if let Some(v) = s.ledger.replay(seq, &signature)? {
             return Ok(v);
         }
+        if s.detached {
+            return Err("review_disabled");
+        }
         if s.preparing.is_some() {
             return Err("drc_busy");
         }
@@ -415,12 +426,12 @@ impl Service {
     }
     pub(super) fn status(&self) -> Value {
         let s = self.inner.state.lock().unwrap();
-        let mut value = json!({"available":!s.closed,"kind":self.kind(),"reviewer":self.inner.config.reviewer,
+        let mut value = json!({"available":!s.closed && !s.detached,"detached":s.detached,"kind":self.kind(),"reviewer":self.inner.config.reviewer,
             "review_rev":s.review_rev.to_string(),"operations":s.ledger.snapshot(),
             "note_bytes":NOTE_BYTES,"selection_limit":floe_app_core::drc::review::EDIT_ITEMS,
             "preparing":s.preparing.is_some(),"autosave":false});
         if self.inner.config.kind == store::Kind::Notes {
-            value["editable"] = json!(self.inner.config.editable);
+            value["editable"] = json!(self.inner.config.editable && !s.detached);
         }
         value
     }
@@ -460,6 +471,19 @@ impl Service {
         &self,
         f: impl FnOnce() -> std::result::Result<T, Failure>,
     ) -> std::result::Result<T, Failure> {
+        self.admit_change(false, f)
+    }
+    pub(super) fn admit_detach<T>(
+        &self,
+        f: impl FnOnce() -> std::result::Result<T, Failure>,
+    ) -> std::result::Result<T, Failure> {
+        self.admit_change(true, f)
+    }
+    fn admit_change<T>(
+        &self,
+        detach: bool,
+        f: impl FnOnce() -> std::result::Result<T, Failure>,
+    ) -> std::result::Result<T, Failure> {
         let mut s = self.inner.state.lock().unwrap();
         if s.preparing.is_some()
             || self.preparations.available_permits() == 0
@@ -473,6 +497,7 @@ impl Service {
             return Err("drc_busy");
         }
         let result = f()?;
+        s.detached |= detach;
         transfer::retire(&mut s);
         self.inner.wake.notify_one();
         for id in s.transfer.artifacts.keys() {
@@ -520,6 +545,11 @@ impl Service {
         Ok(value)
     }
     fn open(&self, reader: &Reader, stop: &AtomicUsize) -> Result<Arc<managed::ManagedStore>> {
+        if self.inner.state.lock().unwrap().detached {
+            return Err(floe_app_core::Error::input(
+                "review is detached from the current DRC",
+            ));
+        }
         let r = &reader.registration;
         let c = &self.inner.config;
         if c.reader_id.as_ref().is_some_and(|id| *id != reader.id) {

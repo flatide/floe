@@ -104,7 +104,7 @@ for (const file of ['protocol.test.cjs', 'gestures.test.cjs', 'client.test.cjs',
     const run = spawnSync(process.execPath, [path.join(ui, file)], {stdio: 'inherit', timeout: 15000});
     assert.equal(run.status, 0, file + ': ' + run.error);
 }
-for (const file of ['drc-build.test.cjs', 'drc-build-panel.test.cjs', 'drc-notes.test.cjs', 'drc-notes-panel.test.cjs', 'drc-waives.test.cjs', 'drc-waives-panel.test.cjs', 'clip.test.cjs', 'snapshot.test.cjs', 'defaults.test.cjs']) {
+for (const file of ['drc-build.test.cjs', 'drc-build-panel.test.cjs', 'drc-notes.test.cjs', 'drc-notes-panel.test.cjs', 'drc-waives.test.cjs', 'drc-waives-panel.test.cjs', 'drc-detach.test.cjs', 'clip.test.cjs', 'snapshot.test.cjs', 'defaults.test.cjs']) {
     const build = spawnSync(process.execPath, [path.join(ui, file)], {stdio:'inherit',timeout:15000});
     assert.equal(build.status, 0, file + ': ' + build.error);
 }

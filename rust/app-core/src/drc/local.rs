@@ -1,5 +1,5 @@
-//! Trusted CLI selection only. The web registration path supplies explicit
-//! pack/sidecar handles within its own scope; it does not accept paths from UI.
+//! Trusted source selection. CLI reviewer selection is separate from read-only
+//! web source selection, whose paths come from approved-root file witnesses.
 use super::{Ascii, Database, Pack, MAGIC};
 use crate::{cache, Error, ErrorKind, Result};
 use sha1::{Digest, Sha1};
@@ -111,6 +111,29 @@ pub struct ReadSelection {
     pub path: PathBuf,
     pub targets: Option<super::review::store::ReadTargets>,
     pub warning: Option<String>,
+}
+/// Current adjacent cache selection without reviewer/environment/sidecar lookup.
+/// The caller must admit metadata memory and scope-check both possible inputs.
+pub struct SourceSelection {
+    pub source: PathBuf,
+    pub path: PathBuf,
+    pub packed: bool,
+    pub ignored_cache: bool,
+}
+pub fn select_current_source(source: &Path, stop: &AtomicUsize) -> Result<SourceSelection> {
+    let source = cache::absolute(source)?;
+    let (pack, warning) = current_pack(&source, stop)?;
+    if let Some(p) = &pack {
+        p.unchanged()?;
+    }
+    Ok(SourceSelection {
+        path: pack
+            .as_ref()
+            .map_or_else(|| source.clone(), |p| p.path.clone()),
+        source,
+        packed: pack.is_some(),
+        ignored_cache: warning.is_some(),
+    })
 }
 pub fn select_review(source: &Path, reviewer: &str, stop: &AtomicUsize) -> Result<ReadSelection> {
     let source = cache::absolute(source)?;

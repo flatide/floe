@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-16, M4g-24a(DRC 교체 선행 게시 보호). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-16, M4g-24b(실행 중 읽기 전용 DRC 열기). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -12,8 +12,9 @@ M4g-23의 [메뉴 원본 재대조](WEBUI_G4_MENU.ko.md)에서 **실행 중 DRC 
 SVRF metadata 교체, 카메라 유지 jobdeck 레벨 재선택**3건의 구현 누락을 확인했다.
 시작 시 CLI 등록/일반 Open/Mode 전환은 동등한 대체가 아니다. 로컬 구현의 잔여를
 진단 옵션과 실제 브라우저 수용만으로 좁혀 보고한 이전 설명을 정정한다.
-M4g-24a는 새 입력 등록과 기존 저장 초안 사이의 보호 경계만 추가했다. 실행 중
-DRC/SVRF 교체와 레벨 재선택3건을 완료로 바꾸지 않는다([M4 §79](WEBUI_M4.ko.md)).
+M4g-24b는 DRC 최초 등록/교체의 읽기 전용 API/UI와 이전 reviewer 분리를 연결했다.
+새 DRC의 명시적 reviewer 재등록/저장 opt-in은 후속이다. DRC/SVRF 교체와 레벨
+재선택3건을 완료로 바꾸지 않는다([M4 §80](WEBUI_M4.ko.md)).
 
 ## 1. 범위별 현재 근거와 남은 일
 
@@ -25,7 +26,7 @@ DRC/SVRF 교체와 레벨 재선택3건을 완료로 바꾸지 않는다([M4 §7
 | UI-03 레이어·스타일 | Rust 선택/CAS, palette/presets/settings/defaults; GTK 원본 선택·접힘·상속 oracle, HTTP/DOM gate. M4g-16d 슬롯 모델/API·JSON v2·참조 프리셋/16×16 UI와324 GTK/native/web 대조 | 실제 선택·다중 스타일·기본값 게시와 슬롯 pointer/keyboard·포커스 화면 수용([계약/gate](WEBUI_BITMAP_SLOTS.ko.md)) |
 | UI-04 pick/snap/측정 | query/inspect/measure/rulers + Rust query/export, 숫자·scene 유효성·stale gate | 실제 포인터/클립보드·시각적 측정 검증 |
 | UI-05 입력·복사·종료 | snapshot/session-exit와 단축키 보호. **M4g-13 두벌식 fallback**: `hangul.js`/`drc-notes.js`, GTK 원본 조합 oracle | OS IME와 fallback의 실제 입력·스크롤·키보드/브라우저별 수용. DOM gate로 대체하지 않음 |
-| DRC-01 조회·선택 | `app-core/drc`, `web/src/drc`, `drc*.js`; lazy paging/selection/CD/isolation/query gate | G4-MENU-01/02 실행 중 DRC/SVRF 교체 미구현. 현장 대형 결과와 실제 브라우저 조작 수용 |
+| DRC-01 조회·선택 | `app-core/drc`, `web/src/drc`, `drc*.js`; lazy paging/selection/CD/isolation/query gate; M4g-24b 현재 레이아웃 유지 읽기 전용 DRC 교체 | G4-MENU-01 새 reviewer 재등록/저장 opt-in, G4-MENU-02 실행 중 SVRF 교체. 현장 대형 결과와 실제 브라우저 조작 수용 |
 | DRC-02 저장·전송 | reviewer 고정 sidecar, snapshot/prepare/approve·CAS·receipt, notes/waives/transfer HTTP와 UI gate. **M4g-14 확정 시 자동 저장 opt-in**, M4g-15a/20/21 읽기/쓰기 분리·legacy·ASCII/cache | 실제 브라우저 저장/충돌/복구 수용, 대형 sidecar 연속 저장 및 cache 선택 cold-open 비용 실측 |
 | EXPORT-01 | Rust capture/mosaic/PNG metadata/clip + snapshot; raster/metadata/DRC-capture gate | 실제 브라우저 copy/download/승인 표시 수용 |
 | SYS-01/02 | Rust worker 발견·수거·cache freshness·selfcheck·portable/ELF/고지; native/포장/전송 gate. M4g-17a~c 합성/독립/정적 PNG 진단; M4g-22 최근 수신·합성 bitmap/명시 PNG 다운로드 | 실제 dump/표시·다운로드 수용, GTK 진단/애니메이션 PNG 경계, Python-free **Linux에서 실행**, 현장 Firefox/ETX, G4 전체 end-to-end 판정 |
@@ -88,8 +89,8 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
 
 ## 3. 로컬 기능 완성과 구별할 목표 잔여
 
-1. [G4-MENU-01~03](WEBUI_G4_MENU.ko.md)의 실행 중 DRC/SVRF 교체와 카메라 유지
-   레벨 재선택 구현·검증, 진단/무효 CLI 경계와 G4 목록의 최종 재대조. reviewer 읽기 경로는
+1. [G4-MENU-01~03](WEBUI_G4_MENU.ko.md)의 DRC 교체 후 reviewer 재등록/저장 opt-in,
+   실행 중 SVRF 교체와 카메라 유지 레벨 재선택 구현·검증, 진단/무효 CLI 경계와 G4 목록의 최종 재대조. reviewer 읽기 경로는
    M4g-20/21에서 연결했으며 ambient reviewer 자동 선택은 하지 않는다. 개발 bitmap 슬롯 UI는
    M4g-16d에서 로컬 연결했지만 실제 브라우저 수용은 아래2번에 남는다.
    M4g-17a~c [합성/독립/정적 PNG 표시 진단](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)은 연결했다.
@@ -97,7 +98,9 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    M4g-22에서 로컬 연결·회귀를 추가했다. GTK 진단/애니메이션 PNG 경계는 남으며
    기존 명령을 폐기하지 않는다. Canvas 검증을 실제 화면/다운로드 수용으로 세지 않는다.
 2. 실제 브라우저 입력·저장·복구·화면 수용, Python-free Linux 실행, G1/G4 판정.
-   이전 브라우저 시작 파일의 도구 제한을 우회하지 않는다.
+   2026-09-16 사용자가 합성 시작 파일·다운로드를 승인한 뒤 재시도했으나 브라우저
+   자체 URL 정책이 `file://` 시작 파일을 다시 차단했다. 우회하지 않았고 합성
+   서버와 인증 시작 파일을 정리했다. 실제 다운로드 성공으로 기록하지 않는다.
 3. M2 공유/원격은 `shares=false`, loopback-only인 **미구현**이다. 허가 없는 원격
    노출/공유 API 확장을 로컬 구현의 자연스러운 연장으로 추론하지 않는다.
 4. M0/M3 TeeBox Firefox/ETX는 현장 실행 불가로 보류. 사용자에게 같은 측정을

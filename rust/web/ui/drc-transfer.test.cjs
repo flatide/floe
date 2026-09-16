@@ -42,7 +42,7 @@ function harness(){
         chunk(k,request,at,blob,t){return invoke({kind:k,method:'POST',path:'/api/v1/drc/review/'+k+'/transfer/chunk',body:request,at,blob,t});},
         download:(k,id)=>downloads.push({kind:k,id})});
     return {panel,el,calls,slices,models,records,publications,downloads,locks,timers,editors,execute,
-        init:()=>panel.attach({notes:{editable:true},waives:{}}),
+        init:()=>panel.attach({notes:{editable:true,available:true},waives:{available:true}}),
         file(size=CHUNK+10){el('transfer-file').files=[{size,slice(at,end){assert(end-at<=CHUNK);const blob={size:end-at,at};slices.push(blob);return blob;},text(){throw Error('whole-file read');},arrayBuffer(){throw Error('whole-file read');}}];el('transfer-file').onchange();},
         upload:()=>el('transfer-import').onclick(),export:()=>el('transfer-export').onclick(),resolve:()=>el('transfer-resolve').onclick(),discard:()=>el('transfer-discard').onclick(),
         consent(){el('transfer-run').checked=el('transfer-consent').checked=true;el('transfer-consent').onchange();},approve:()=>el('transfer-approve').onclick(),
@@ -85,6 +85,9 @@ async function tests(){
     const waiting=stale.upload();stale.scope={context:clone(C),epoch:'1'.repeat(64)};stale.panel.changed();reply();await waiting;assert.equal(stale.slices.length,0);assert.equal(stale.publications.length,0);await stale.discard();assert.equal(stale.models.notes.upload,null);stale.panel.stop(true);
 
     const limits=harness();await limits.init();limits.file(16*CHUNK+1);const n=limits.calls.length;await limits.upload();assert.equal(limits.calls.length,n);assert.match(limits.el('transfer-message').textContent,/16/);limits.panel.stop(true);
+    const detached=harness();await detached.init();await detached.export();const count=detached.calls.length;
+    detached.panel.attach({notes:{available:false,editable:false,detached:true},waives:{available:false,detached:true}});
+    assert(detached.el('transfer-export').disabled);assert(detached.el('transfer-import').disabled);await detached.export();assert.equal(detached.calls.length,count);assert.match(detached.el('transfer-message').textContent,/previous transfer receipts/);detached.panel.stop(true);
     const waive=harness();await waive.init();waive.el('transfer-kind').value='waives';await waive.el('transfer-kind').onchange();waive.file(6007);await waive.upload();waive.consent();await waive.approve();assert.equal(waive.publications[0].kind,'waives');waive.panel.stop(true);
 
     for(const k of ['notes','waives']){T.catalog(catalog(),k,P);T.preview(preview(k),k,P);for(const change of [v=>v.extra=true,v=>v.context.view_id='wrong',v=>v.action='merge',v=>v.legacy_unverified=false,v=>v.expires_in_ms='30001']){const v=preview(k);change(v);assert.throws(()=>T.preview(v,k,P));}}

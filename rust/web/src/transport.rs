@@ -282,8 +282,21 @@ impl Gateway {
             .launch
             .clone()
             .unwrap_or_else(crate::launch::Launches::new);
-        let picker = crate::browse::Picker::start(roots, resources, service, Arc::clone(&launch))
-            .map_err(|e| e.to_string())?;
+        let drc = match &g.drc {
+            Some(drc) => Arc::clone(drc),
+            None => {
+                crate::drc::Registry::empty(service.drc_resources().1).map_err(|e| e.to_string())?
+            }
+        };
+        let picker = crate::browse::Picker::start_with_drc(
+            roots,
+            resources,
+            service,
+            Arc::clone(&launch),
+            Some(Arc::clone(&drc)),
+        )
+        .map_err(|e| e.to_string())?;
+        g.drc = Some(drc);
         g.launch = Some(launch);
         g.browse = Some(picker);
         Ok(())

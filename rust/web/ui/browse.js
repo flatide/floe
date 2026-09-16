@@ -1,7 +1,9 @@
 /* ES2017. Server file handles, not browser upload or arbitrary path input. */
 (function(root){'use strict';
-    function stable(v){if(v&&typeof v==='object'&&!Array.isArray(v)){const out={};Object.keys(v).sort().forEach(function(k){out[k]=v[k];});return JSON.stringify(out);}return JSON.stringify(v);}
+    function stable(v){function ordered(x){if(Array.isArray(x)){return x.map(ordered);}if(x&&typeof x==='object'){const out={};Object.keys(x).sort().forEach(function(k){out[k]=ordered(x[k]);});return out;}return x;}return JSON.stringify(ordered(v));}
     function id(v){return typeof v==='string'&&/^[0-9a-f]{64}$/.test(v);}
+    function drcContext(v){return !!v&&Object.keys(v).length===3&&id(v.view_id)&&
+        (v.drc_id===null&&v.revision===null||id(v.drc_id)&&id(v.revision));}
     function page(v){
         if(!v||!id(v.snapshot)||!id(v.directory)||!Number.isSafeInteger(v.total)||v.total<0||v.total>100000||
             !Number.isSafeInteger(v.start)||v.start<0||v.start%128!==0||v.start>v.total||
@@ -16,14 +18,15 @@
     const errors={browse_changed:'An entry changed or its handle expired. Refresh the directory.',
         browse_busy_or_limit:'Catalogue or owner is busy, or this directory exceeds the scan/match limit. Wait, narrow the name filter, or choose a smaller approved root.',
         browse_cancelled:'File operation cancelled. No open request was published.',
-        browse_invalid_selection:'Select a supported, unchanged OASIS or jobdeck file within the approved roots. GDS/gzip are not supported yet.',
+        browse_invalid_selection:'Select a supported, unchanged file within the approved roots. Layout mode accepts OASIS/jobdeck; DRC mode accepts ASCII results or ICE packs.',
         browse_read_error:'The directory or file could not be read. Refresh or choose another approved root.'};
     function bind(o){
-        const el=o.el,doc=o.document,panel=el('browse-dialog'),button=el('browse-open');
+        const el=o.el,doc=o.document,panel=el('browse-dialog'),button=el('browse-open'),drcButton=el('drc-open');
         let enabled=false,paused=true,opened=false,prior=null,hidden=[],roots=[],current=null,selected=null;
-        let pending=null,busy=false,invalid=false,task=null,timer=null,error='';
+        let pending=null,busy=false,invalid=false,task=null,timer=null,error='',drc=null;
         function paint(){
             button.disabled=!enabled||!o.available();button.hidden=!enabled;
+            drcButton.hidden=!enabled;drcButton.disabled=!enabled||!o.available()||!o.drcContext||!drcContext(o.drcContext());
             const locked=!!pending||busy||invalid;
             ['browse-root','browse-filter','browse-query','browse-refresh'].forEach(function(k){el(k).disabled=locked;});
             el('browse-select').disabled=locked||!selected;
@@ -32,6 +35,10 @@
             el('browse-check').hidden=!pending;el('browse-check').disabled=busy||invalid;
             el('browse-cancel').hidden=!pending;el('browse-cancel').disabled=busy||invalid;
             el('browse-close').disabled=!!pending||invalid;
+            el('browse-filter').disabled=locked||!!drc;
+            el('browse-title').textContent=drc?'Open DRC results':'Open server layout';
+            el('browse-select').textContent=drc?'Open selected DRC (read-only)':'Open selected layout';
+            el('browse-purpose').textContent=drc?'Keeps the layout camera and layers. Reads a current adjacent ICE cache or ASCII; no automatic indexing. Replaces the current DRC only after a successful read. Previous reviewer and auto-save permissions do not transfer.':'Jobdecks with multiple levels ask before opening. After an open request is published use Dismiss request. GDS/gzip support remains pending.';
             el('browse-status').textContent=error||(pending?'Reading server catalogue… (cancellation does not interrupt a blocked filesystem call)':
                 current?(current.total?String(current.start+1)+'–'+String(current.start+current.rows.length)+' of '+current.total:'No matching entries')+
                 ' · '+current.skipped_links+' links/special files and '+current.skipped_names+' unreadable names skipped.':'Choose an approved server folder.');
@@ -42,12 +49,12 @@
         }
         function save(value){o.savePending(value===null?null:JSON.stringify(value));pending=value;}
         function show(){
-            if(opened){return;}opened=true;prior=doc.activeElement;panel.hidden=false;button.setAttribute('aria-expanded','true');
+            if(opened){return;}opened=true;prior=doc.activeElement;panel.hidden=false;(drc?drcButton:button).setAttribute('aria-expanded','true');
             ['app-header','app-workspace'].forEach(function(k){const n=el(k);hidden.push([n,n.getAttribute('aria-hidden')]);n.setAttribute('aria-hidden','true');});
             el('browse-query').focus();o.changed();paint();
         }
         function close(restore){
-            if(!opened){return;}opened=false;panel.hidden=true;button.setAttribute('aria-expanded','false');
+            if(!opened){return;}opened=false;panel.hidden=true;button.setAttribute('aria-expanded','false');drcButton.setAttribute('aria-expanded','false');
             hidden.forEach(function(p){if(p[1]===null){p[0].removeAttribute('aria-hidden');}else{p[0].setAttribute('aria-hidden',p[1]);}});hidden=[];
             if(restore){(prior&&doc.contains(prior)?prior:button).focus();}prior=null;o.changed();
         }
@@ -83,6 +90,10 @@
                 if(kind==='select'){
                     if(!value.result||!id(value.result.launch_id)||!id(value.result.source_id)){throw Error('Invalid selection receipt');}
                     save(null);close(true);o.selected();
+                }else if(kind==='open_drc'){
+                    const r=value.result;
+                    if(!r||!r.drc||!id(r.drc.id)||!id(r.drc.revision)||r.view_id!==pending.request.context.view_id||r.review_registration_required!==true){throw Error('Invalid DRC selection receipt');}
+                    save(null);close(true);await o.drcSelected(); // Refresh authority; never install a replayed catalogue.
                 }else{const result=page(value.result&&value.result.page);save(null);if(opened){draw(result);}}
                 error='';
             }else{save(null);error=errors[value.error]||'File operation failed; no open request was published.';}
@@ -105,7 +116,7 @@
                 const cursor=await catalogue();if(token.cancelled||paused){return;}
                 if(cursor.active!==null){throw Error('Another catalogue request is active. Wait for it to finish, then refresh.');}
                 input.seq=o.protocol.next(cursor.last_seq);
-                save({request:input}); // BEFORE any mutation: selection can publish an open proposal.
+                save(drc?{request:input,drc_context:drc}:{request:input}); // BEFORE any mutation.
                 const value=await o.http('POST','/api/v1/browse',input,false,token);
                 if(!token.cancelled&&!paused){await receive(value);}
             }catch(e){if(!token.cancelled&&!paused){
@@ -117,15 +128,23 @@
             finally{if(task===token){task=null;}busy=false;paint();o.changed();later();}
         }
         function load(directory){selected=null;submit({kind:'list',directory:directory,filter:el('browse-filter').value,query:el('browse-query').value});}
-        function choose(){if(selected){submit({kind:'select',handle:selected.handle});}}
+        function choose(){if(selected){submit(drc?{kind:'open_drc',handle:selected.handle,context:drc}:{kind:'select',handle:selected.handle});}}
         async function cancel(){
             if(!pending||busy||paused){return;}busy=true;error='';paint();const token={cancelled:false};task=token;
             try{const value=await o.http('POST','/api/v1/browse/'+pending.request.seq+'/cancel',{},false,token);if(!token.cancelled&&!paused){await receive(value);}}
             catch(e){if(!token.cancelled&&!paused){error=e.message||String(e);}}
             finally{if(task===token){task=null;}busy=false;paint();later();}
         }
-        async function open(){if(paused||!enabled||!o.available()||opened){return;}show();if(pending){check(false);}else if(!current){load(el('browse-root').value||roots[0].handle);} }
-        button.onclick=open;el('browse-close').onclick=function(){if(!pending&&!invalid){close(true);}};
+        async function open(context){
+            if(paused||!enabled||!o.available()||opened){return;}
+            if(!pending&&!invalid){
+                drc=drcContext(context)?{view_id:context.view_id,drc_id:context.drc_id,revision:context.revision}:null;
+                current=null;selected=null;el('browse-entries').textContent='';el('browse-filter').value=drc?'drc_files':'layouts';
+            }
+            show();if(pending){check(false);}else if(!invalid){load(el('browse-root').value||roots[0].handle);}
+        }
+        button.onclick=function(){open(null);};drcButton.onclick=function(){const c=o.drcContext&&o.drcContext();if(drcContext(c)){open(c);}};
+        el('browse-close').onclick=function(){if(!pending&&!invalid){close(true);}};
         el('browse-select').onclick=choose;el('browse-check').onclick=function(){check(true);};el('browse-cancel').onclick=cancel;
         el('browse-root').onchange=function(){load(el('browse-root').value);};
         el('browse-refresh').onclick=function(){load(current?current.directory:el('browse-root').value);};
@@ -148,7 +167,9 @@
         async function resume(){if(!enabled){return;}paused=false;try{await catalogue();if(pending||invalid){show();if(!invalid){check(false);}}}catch(e){error=e.message;show();}paint();}
         async function init(supported,empty){
             enabled=!!supported;paint();if(!enabled){return;}
-            try{const saved=o.loadPending();if(saved){const v=JSON.parse(saved);if(saved.length>2048||!v||!v.request||!['list','page','select'].includes(v.request.kind)){throw Error('Invalid saved file request');}o.protocol.counter(v.request.seq);pending=v;}}
+            try{const saved=o.loadPending();if(saved){const v=JSON.parse(saved);if(saved.length>2048||!v||!v.request||!['list','page','select','open_drc'].includes(v.request.kind)||
+                v.drc_context!==undefined&&!drcContext(v.drc_context)||v.request.kind==='open_drc'&&(!drcContext(v.request.context)||stable(v.request.context)!==stable(v.drc_context))||
+                v.request.kind==='select'&&v.drc_context!==undefined){throw Error('Invalid saved file request');}o.protocol.counter(v.request.seq);pending=v;drc=v.drc_context||null;if(drc){el('browse-filter').value='drc_files';}}}
             catch(e){invalid=true;error='Saved file request is invalid. Restart the workspace; no selection was retried.';}
             await resume();if(empty&&!pending&&!invalid){open();}
         }

@@ -423,6 +423,12 @@ impl Service {
     pub(crate) fn source_set(&self) -> Arc<SourceSet> {
         Arc::clone(&self.inner.source_set)
     }
+    pub(crate) fn drc_resources(&self) -> (Arc<Resources>, Indexer) {
+        (
+            Arc::clone(&self.inner.resources),
+            self.inner.indexer.clone(),
+        )
+    }
     /// Cheap admission checks only: never hold this lock across I/O or await.
     pub(crate) fn with_current<T>(
         &self,

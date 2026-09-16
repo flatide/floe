@@ -63,9 +63,12 @@ const b={check:'0',local:'9007199254740994',global:'9007199254740995',kind:'e',s
 const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.global,kind:r.kind,status:r.status,bbox_um:r.bbox_um,
     precision:'1000',...(ascii?{points_um:pts.map(xy=>xy.map(v=>String(Number(v)/1000+.000125)))}:{points_dbu:pts}),start:String(start),total:String(total),next});
 (async()=>{
+    assert.deepEqual(panel.openContext(),{view_id:view.id,drc_id:null,revision:null});
     const initialized=panel.init();
     reply('catalog',{drc:{id:'drc-id',revision:'r1',source_id:'source',title:'synthetic',phase:'ready',metadata:{checks:'2',errors:'9007199254740996',format:ascii?'ascii':'ice',truncated_records:ascii?'1':'0',review_cache:ascii?'ignored':'cache'}}});
     await initialized;await tick();
+    assert.deepEqual(panel.openContext(),{view_id:view.id,drc_id:'drc-id',revision:'r1'});
+    view.pending=true;assert.equal(panel.openContext(),null);view.pending=false;
     assert.equal(el('drc-panel').hidden,false);
     assert(el('drc-summary').textContent.includes(ascii?'ASCII · 1 truncated records':'ICE'));
     assert(el('drc-summary').textContent.includes(ascii?'reviewer notes/waives unavailable (stale or invalid ICE cache ignored)':'current adjacent ICE cache'));
@@ -173,7 +176,7 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     reply('query',{rows:[nextOther],next:null});
     reply('geometry',geom(nextOther,[['40000','10000'],['60000','30000']],0,2,null));await tick();
     assert.equal(el('drc-rule-title').textContent,'OTHER');assert.equal(nav.length,beforeRestoreNav);
-    panel.stop();assert.equal(raf.size,0);
+    panel.stop();assert.equal(raf.size,0);assert.equal(panel.openContext(),null);
     global.setTimeout=nativeSetTimeout;global.clearTimeout=nativeClearTimeout;
     console.log('WEB DRC UI: ALL OK (projection, u64, text safety, stale/cancel, complete geometry, focus/zoom, paging, in-view, cleanup)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

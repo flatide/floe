@@ -44,6 +44,11 @@ pub enum Request {
         seq: String,
         handle: String,
     },
+    OpenDrc {
+        seq: String,
+        handle: String,
+        context: crate::drc::registry::OpenContext,
+    },
 }
 impl Request {
     fn identity(&self) -> (&str, &'static str) {
@@ -51,6 +56,7 @@ impl Request {
             Self::List { seq, .. } => (seq, "list"),
             Self::Page { seq, .. } => (seq, "page"),
             Self::Select { seq, .. } => (seq, "select"),
+            Self::OpenDrc { seq, .. } => (seq, "open_drc"),
         }
     }
     fn validate(&self) -> std::result::Result<(), &'static str> {
@@ -75,6 +81,12 @@ impl Request {
                 snapshot
             }
             Self::Select { handle, .. } => handle,
+            Self::OpenDrc {
+                handle, context, ..
+            } => {
+                context.validate()?;
+                handle
+            }
         };
         if token.len() != 64
             || !token
@@ -116,6 +128,15 @@ impl Picker {
         service: Arc<Service>,
         launch: Arc<Launches>,
     ) -> Result<Arc<Self>> {
+        Self::start_with_drc(paths, resources, service, launch, None)
+    }
+    pub(crate) fn start_with_drc(
+        paths: &[PathBuf],
+        resources: &Arc<Resources>,
+        service: Arc<Service>,
+        launch: Arc<Launches>,
+        drc: Option<Arc<crate::drc::Registry>>,
+    ) -> Result<Arc<Self>> {
         let permit = resources.browse()?;
         let browser = Browser::new(paths)?;
         let roots = browser.roots();
@@ -128,7 +149,7 @@ impl Picker {
             .name("floe-file-catalogue".into())
             .spawn(move || {
                 let _permit = permit;
-                run(task, browser, service, launch);
+                run(task, browser, service, launch, drc);
             })?;
         Ok(Arc::new(Self {
             roots,
@@ -211,19 +232,27 @@ impl Drop for Picker {
     fn drop(&mut self) {
         self.request_stop();
         if let Some(thread) = self.thread.get_mut().unwrap().take() {
-            let _ = thread.join();
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
         }
     }
 }
 enum Output {
     Page(Value),
+    Drc(Box<crate::drc::registry::PreparedOpen>),
     Selected {
         source_id: String,
         deck: bool,
         levels: usize,
     },
 }
-fn execute(browser: &mut Browser, service: &Service, work: &Work) -> Result<Output> {
+fn execute(
+    browser: &mut Browser,
+    service: &Arc<Service>,
+    drc: Option<&Arc<crate::drc::Registry>>,
+    work: &Work,
+) -> Result<Output> {
     let stop = &work.stop;
     match &work.request {
         Request::List {
@@ -251,9 +280,23 @@ fn execute(browser: &mut Browser, service: &Service, work: &Work) -> Result<Outp
                 levels: source.levels.len(),
             })
         }
+        Request::OpenDrc {
+            handle, context, ..
+        } => {
+            let drc = drc.ok_or_else(|| Error::input("DRC selection unavailable"))?;
+            let selected = browser.select(handle, stop)?;
+            drc.prepare_open(Arc::clone(service), selected, context.clone(), stop)
+                .map(|p| Output::Drc(Box::new(p)))
+        }
     }
 }
-fn run(inner: Arc<Inner>, mut browser: Browser, service: Arc<Service>, launch: Arc<Launches>) {
+fn run(
+    inner: Arc<Inner>,
+    mut browser: Browser,
+    service: Arc<Service>,
+    launch: Arc<Launches>,
+    drc: Option<Arc<crate::drc::Registry>>,
+) {
     loop {
         let work = {
             let mut s = inner.state.lock().unwrap();
@@ -268,7 +311,7 @@ fn run(inner: Arc<Inner>, mut browser: Browser, service: Arc<Service>, launch: A
             }
             work
         };
-        let result = execute(&mut browser, &service, &work);
+        let result = execute(&mut browser, &service, drc.as_ref(), &work);
         // Cancellation and proposal publication share this lock. A cancelled
         // read may have completed metadata registration, but cannot auto-open.
         // Once ready is published, cancel returns success + the proposal ID;
@@ -281,6 +324,7 @@ fn run(inner: Arc<Inner>, mut browser: Browser, service: Arc<Service>, launch: A
         };
         let result=result.and_then(|output|match output {
             Output::Page(p)=>Ok(json!({"page":p})),
+            Output::Drc(p)=>p.commit(&work.stop),
             Output::Selected{source_id,deck,levels}=>{
                 let (id,_)=launch.reserve()?;
                 let request=json!({"kind":"open","seq":"1","source_id":source_id,"mode":"level","levels":{"mode":"all"},

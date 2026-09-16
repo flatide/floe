@@ -5714,3 +5714,75 @@ main의 기존 변경과 feature/jobdeck 작업은 보존했고 검증용 `.venv
 gate, 다음 SVRF 교체와 카메라 유지 레벨 재선택이다. 진단/무효 CLI 경계 최종 결정,
 실제 브라우저·Python-free Linux·G1/G4·현장 수용, 공유/원격 승인·구현과 조건부
 M5도 남는다. 이 선행 보호 단계로 G4 미구현3건이나 전체 goal을 완료 처리하지 않는다.
+
+## 80. M4g-24b — 현재 레이아웃을 유지한 읽기 전용 DRC 열기
+
+2026-09-16. Source의 `Open DRC results…`는 레이아웃을 다시 열지 않고 현재
+workspace에 DRC를 처음 등록하거나 교체한다. 승인 폴더의 opaque 파일 handle만
+받는 기존 picker를 재사용한다. DRC 모드에는 일반 모드가 숨기는 ICE 파일도
+표시하되 디렉터리 캐시·숨김 파일·symlink는 계속 제외한다. raw path, reviewer,
+write target은 요청 필드가 아니다.
+
+- `open_drc`는 선택 시작 시의 view ID·DRC ID/revision을 고정한다. 최초 등록은
+  DRC identity가 null이다. 오래된 context는 거부하고 새 reader가 준비되는 동안
+  기존 reader/레이아웃 카메라·레이어·renderer를 유지한다. 초기/기존 reader가
+  오류 또는 종료 상태여도 같은 identity로 다른 파일을 선택할 수 있다.
+- 현재 인접 ICE를 검증해 선택하고 stale/corrupt/missing이면 원본 ASCII로 읽는다.
+  직접 선택한 ICE는 그대로 검증한다. ambient reviewer/legacy sidecar는 조회하지
+  않고 색인을 암묵 실행하지 않는다. 기존 별도 Build pack 승인 경로는 유지한다.
+- 후보 준비의 파일 I/O는 picker actor에서 한다. 후보1개·draining reader 최대2개,
+  open 대기300초로 제한한다. native/NFS blocking call의 강제 중단을 보장하지는
+  않는다. 취소/실패 후보도 종료 요청 후 실제 actor가 끝날 때까지 예약을 보유한다.
+  picker drop은 block된 actor를 무기한 join하지 않으며 workspace 종료 검사는
+  기존 bounded shutdown에 포함한다.
+- picker의 취소/receipt lock→registry→현재 view→note/waive admission의 경계에서
+  입력 게시 보호를 설치하고 새 reader를 공개한다. 선택/그룹/CD/prepared focus는
+  폐기한다. 진행 중 저장·preparation·transfer는 교체를 거부한다. 이미 끝난 저장의
+  immutable receipt와 동일 요청 replay는 보존한다. 늦은 취소가 성공한 교체를
+  cancelled로 바꾸지 않는다. 실패/취소가 기존 reader를 지우지 않는다.
+- 이전 reviewer는 detached로 남아 결과 조회/미확인 승인 복구만 가능하다. 새
+  snapshot·편집·transfer를 막고 UI의 자동 저장 opt-in도 해제한다. 미승인 local
+  초안은 무효로 표시하며 다른 DB로 보내지 않는다. 새 DRC의 reviewer 재등록·
+  읽기/저장 권한·자동 저장 opt-in 연결은 **후속 구현**이다. 이 한계 때문에
+  G4-MENU-01을 완료로 바꾸지 않는다.
+- 이전 기본값/리뷰 초안의 동적 보호뿐 아니라 DRC/SVRF/sidecar가 등록된 layout
+  cache 또는 index lock과 충돌하는 경우도 양쪽 등록 순서에서 거부한다. 실패한
+  batch는 보호 목록에 일부만 설치하지 않는다. cache 재생성 권한으로 입력을
+  지우는 우회를 허용하지 않는다. append-only 보호1024개 한계는 §79 그대로다.
+- 브라우저 journal은 submit 전 저장하고, 재접속은 receipt GET부터 시작한다.
+  불명 요청은 명시적으로 같은 요청만 재시도한다. DRC 성공 receipt를 재생하더라도
+  그 안의 옛 catalog를 설치하지 않고 현재 등록을 다시 조회한다.
+
+집중 검증: core279/web92 단위 테스트와 전체 ES2017/UI가 통과했다. 실제 HTTP
+`validate_web_drc_open.py`는 DRC 없는 시작, 현재 cache/ASCII/직접 ICE, raw path·
+reviewer 거부, stale context·손상 pack·취소/성공 경계, 이전 ID 거부, 저장 receipt
+유지·미승인 초안 거부·입력 fingerprint 불변·layout 상태 불변·종료 수거를 확인한다.
+단위 테스트의 오류 reader 교체 검사는 표시용 phase보다 실제 revision 변경 flag를
+봐야 함을 잡았고 수정 후 통과했다. 기존 UI의 엄격한 review DTO에 detached 상태와
+불명 승인 복구를 추가했다. 입력이 없는 registry는 build:null로 내보내 기존
+build capability의 string source_id 계약도 유지한다.
+
+전체 `sh tools/validate_rust.sh`는 exit0, `RUST VALIDATION: ALL OK`로 끝났다
+(`/private/tmp/floe-drc-runtime-battery.log`). jobdeck83·renderer46·KLayout13 PX+
+2 phase-exact+14 style(j1/j8)을 포함한다. 그 뒤 마지막 DOM 구조 점검에서 detached
+note의 부모 authoring 영역이 receipt/복구 버튼까지 숨기는 문제를 고쳤다. 쓰기는
+차단한 채 이전 local text·receipt를 보이며 reload 후에도 부모가 보이는 gate를
+추가했다. 이 보완 후 전체 UI gate·release build·실제 CLI/HTTP·DRC 교체 HTTP·
+strict all-target clippy를 다시 통과했다. pack 생성은 별도 승인 후에만 실행되고
+승인 replay가 재색인을 하지 않는 실제 HTTP 검사도 추가해 통과했다. 이 집중
+재검증을 전체 배터리를 한 번 더 실행한 것으로 표현하지 않는다.
+집중 로그는 `/private/tmp/floe-drc-runtime-{unit,ui-final,build-final,cli-final,http-final,clippy-final}.log`다.
+메뉴 inventory와 diff 검사는 통과하며 `--require-complete`는 미완결3건으로
+의도대로 exit1이다. 검증용 `.venv` 임시 링크만 제거했으며 대상 가상환경은 보존했다.
+
+실제 브라우저는
+사용자가 합성 세션 열기/다운로드를 승인한 후 Chrome에서 재시도했으나 시작 파일이
+브라우저 URL 정책으로 다시 차단됐다. 다른 URL·CDP·대체 surface로 우회하지 않았다.
+합성 전용 서버와 비공개 시작 파일을 정리했고 실제 PNG 다운로드는 **미검증**이다.
+HTTP/DOM gate를 실제 브라우저 수용으로 세지 않는다. main과 feature/jobdeck은
+변경하지 않았다.
+
+커밋 시 목표 잔여: 우선 새 DRC의 명시적 reviewer 재등록/저장 opt-in, SVRF 교체,
+카메라 유지 jobdeck 레벨 재선택이다. 진단/무효 CLI 경계 최종 결정, 실제 브라우저·
+Python-free Linux·G1/G4·현장 수용, M2 공유/원격 승인·구현과 조건부 M5도 남는다.
+index hot reload/revision 관리는 사용자 유보다. 전체 goal은 계속 진행 중이다.

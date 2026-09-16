@@ -937,12 +937,13 @@
             if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
         }
         function applyCatalog(v) {
-            const before = registration, present = !!(v.drc || v.build);
+            const before = registration, present = !!(v.drc || v.build&&v.build.available);
             registration = v.drc; el('drc-toggle').hidden = !present; el('drc-panel').hidden = !present || !shown;
             if (notes) { notes.attach(v.notes); }
             if (waives) { waives.attach(v.waives, registration); }
             if (transfers) { transfers.attach(v); }
-            el('drc-review-mode').textContent = v.waives ? 'OWNER REVIEW' : v.notes ? (v.notes.editable ? 'OWNER NOTES' : 'READ-ONLY REVIEWER') : 'NO REVIEW WRITES';
+            const activeWaives=v.waives&&v.waives.available,activeNotes=v.notes&&v.notes.available;
+            el('drc-review-mode').textContent = activeWaives ? 'OWNER REVIEW' : activeNotes ? (v.notes.editable ? 'OWNER NOTES' : 'READ-ONLY REVIEWER') : 'NO REVIEW WRITES';
             if (registration) {
                 el('drc-title').textContent = registration.title;
                 el('drc-summary').textContent = registration.metadata ? registration.metadata.checks + ' rules · ' + registration.metadata.errors + ' errors' : registration.phase;
@@ -956,7 +957,7 @@
                     }
                 }
                 if (!before || before.id !== registration.id || before.phase !== registration.phase) {
-                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : v.waives ? 'Geometry is read-only. Notes/waives use approval by default; automatic save of confirmed edits is a separate reviewer opt-in.' : v.notes&&v.notes.editable ? 'Geometry and waive statuses are read-only. Confirmed note edits can use the separate reviewer save opt-in.' : 'Read-only review'));
+                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : activeWaives ? 'Geometry is read-only. Notes/waives use approval by default; automatic save of confirmed edits is a separate reviewer opt-in.' : activeNotes&&v.notes.editable ? 'Geometry and waive statuses are read-only. Confirmed note edits can use the separate reviewer save opt-in.' : 'Read-only review; reviewer registration does not transfer from another DRC.'));
                 }
             }
             // The catalog is polled while idle too. Rebinding/restarting an
@@ -1014,6 +1015,10 @@
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
         return {init: refresh, refresh: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
+            openContext:function(){
+                const c=o.context();if(stopped||!c||!c.connected||c.pending||!['idle','rendering'].includes(c.state.status)||registration&&['opening','updating'].includes(registration.phase)){return null;}
+                return {view_id:c.id,drc_id:registration?registration.id:null,revision:registration?registration.revision:null};
+            },
             overlayMode:function (mode) {
                 if(!['all','focus','none'].includes(mode)){throw new Error('Invalid overlay mode');}
                 overlayMode=mode;markerHits=[];hitStamp='';tooltip('');if(mode==='none'&&boxMode){boxReset(true);}paint(lastProjection,lastSize);

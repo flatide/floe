@@ -6,7 +6,7 @@ mod http;
 mod metadata;
 pub(crate) mod panel;
 mod read;
-mod registry;
+pub(crate) mod registry;
 pub(crate) mod review;
 pub(crate) mod revision;
 mod selection;
@@ -71,6 +71,7 @@ struct Registration {
 #[derive(Clone)]
 struct Readonly {
     reviewer: String,
+    packed: bool,
     source: PathBuf,
     targets: Option<floe_app_core::drc::review::store::ReadTargets>,
     // Public enum-like notice only; never expose the source/cache warning path.
@@ -79,7 +80,7 @@ struct Readonly {
 impl Readonly {
     fn validate_open(&self, database: &Database, scope: &AccessScope) -> Result<()> {
         scope.check(&self.source)?;
-        if (database.format() == "ice") != self.targets.is_some() {
+        if (database.format() == "ice") != self.packed {
             return Err(Error::new(
                 ErrorKind::Cache,
                 "DRC format changed after read selection",
@@ -285,8 +286,42 @@ impl Service {
             source_id,
             Some(Readonly {
                 reviewer: reviewer.into(),
+                packed: selected.targets.is_some(),
                 source,
                 targets: selected.targets,
+                cache_status,
+            }),
+        )
+    }
+    /// A picker selected this source under its fixed roots. No ambient reviewer
+    /// or sidecar discovery; selecting a DB grants neither note nor waive writes.
+    fn start_selected_source(
+        resources: &Arc<Resources>,
+        scope: Arc<AccessScope>,
+        selected: floe_app_core::drc::SourceSelection,
+        source_id: &str,
+    ) -> Result<Arc<Self>> {
+        let cache_status = if selected.path != selected.source {
+            "cache"
+        } else if selected.packed {
+            "explicit"
+        } else if selected.ignored_cache {
+            "ignored"
+        } else {
+            "missing"
+        };
+        Self::start_registered(
+            resources,
+            scope,
+            &selected.path,
+            None,
+            None,
+            source_id,
+            Some(Readonly {
+                reviewer: String::new(),
+                packed: selected.packed,
+                source: selected.source,
+                targets: None,
                 cache_status,
             }),
         )

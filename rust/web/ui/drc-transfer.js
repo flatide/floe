@@ -173,7 +173,9 @@
         el('transfer-consent').onchange=el('transfer-run').onchange=changed;el('transfer-file').onchange=changed;
         el('transfer-kind').onchange=function(){if(busy()){el('transfer-kind').value=selected;return;}selected=kind(el('transfer-kind').value);if(!available[selected]){selected='notes';el('transfer-kind').value=selected;}
             abort(poll);poll=null;model=null;stale=true;el('transfer-file').value='';notice='';return refresh();};
-        render();return {attach:function(v){available={notes:!!v.notes&&v.notes.editable===true,waives:!!v.waives};const first=!enabled;enabled=available.notes||available.waives;if(first&&enabled){return refresh();}changed();},changed:changed,refresh:refresh,
+        render();return {attach:function(v){available={notes:!!v.notes&&v.notes.available&&v.notes.editable===true,waives:!!v.waives&&v.waives.available};const first=!enabled;enabled=enabled||available.notes||available.waives;
+                if(v[selected]&&v[selected].detached){clearDraft();if(model){model.available=false;}notice='DRC replaced; previous transfer receipts only. No review permission transferred.';}
+                if(first&&enabled){return refresh();}changed();},changed:changed,refresh:refresh,
             stop:function(final){stopped=true;abort(io);abort(poll);poll=null;if(job){job.cancelled=true;job.file=null;}if(pending){pending.blob=null;}el('transfer-file').value='';clearDraft();publishing=null;if(final){job=pending=model=null;notice='Session ended. Temporary transfers are no longer available; earlier committed saves are not undone.';}o.clearTimeout(timer);timer=null;render();},
             resume:function(){stopped=false;notice='Refresh shows remaining temporary uploads and exports. Reload/reconnect never approves a replacement.';return refresh();}};
     }

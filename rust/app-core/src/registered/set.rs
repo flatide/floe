@@ -92,13 +92,27 @@ impl Registration {
         trees: &[PathBuf],
         stop: &AtomicUsize,
     ) -> Result<()> {
-        self.protection.inputs(files, trees, stop)
+        let mut next = self.protection.clone();
+        next.inputs(files, trees, stop)?;
+        self.check_index_targets(&next, stop)?;
+        self.protection = next;
+        Ok(())
     }
     /// Exact derived review/lock names deny design-default publication only.
     /// Review writes still require the existing fixed Store capability; this
     /// is not an exception to immutable inputs or source/cache protection.
     pub fn protect_review_targets(&mut self, files: &[PathBuf], stop: &AtomicUsize) -> Result<()> {
-        self.protection.review_targets(files, stop)
+        let mut next = self.protection.clone();
+        next.review_targets(files, stop)?;
+        self.check_index_targets(&next, stop)?;
+        self.protection = next;
+        Ok(())
+    }
+    fn check_index_targets(&self, protection: &Protection, stop: &AtomicUsize) -> Result<()> {
+        for source in self.existing.iter().chain(&self.staged) {
+            protection.check_index_targets(source, stop)?;
+        }
+        Ok(())
     }
     /// All header/dependency/scope checks run outside the short state mutex,
     /// while the reservation excludes cooperating sidecar writers.
@@ -128,6 +142,7 @@ impl Registration {
             return Err(Error::input("too many registered sources"));
         }
         let source = RegisteredSource::register(scope, &path, stop)?;
+        self.protection.check_index_targets(&source, stop)?;
         self.staged.push(Arc::clone(&source));
         Ok(source)
     }

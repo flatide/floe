@@ -119,6 +119,14 @@ fn catalogue_is_once_only_bounded_and_releases_resources() {
     assert_eq!(s.catalog()["sources"], json!([]));
     assert_eq!(s.operations()["last_seq"], "0");
     p.request_stop();
+    let end = Instant::now() + Duration::from_secs(3);
+    while !p.is_finished() {
+        assert!(
+            Instant::now() < end,
+            "picker did not release its reservation"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
     drop(p);
     assert_eq!(r.usage(), Usage::default());
 }

@@ -34,8 +34,11 @@ class Session:
         env = dict(os.environ, PATH="", TMPDIR=str(temps), FLOE_INDEX_BIN=str(INDEX),
                    FLOE_RENDERD_BIN=str(RENDERD), FLOE_REVIEWER="must-not-be-used", FLOE_FILL_EDIT="")
         args = [str(APP), "view", str(source), "--no-open", "--session-file", str(session_path),
-                "--drc", str(pack), "--jobs", "2", "--raster-jobs", "1", "--budget-mb", "64",
+                "--jobs", "2", "--raster-jobs", "1", "--budget-mb", "64",
                 "--no-labels", "--frame-cache", "off"]
+        self.initial_drc = pack is not None
+        if pack is not None:
+            args += ["--drc", str(pack)]
         if reviewer is not None:
             args += ["--drc-reviewer", reviewer]
         if read_reviewer is not None:
@@ -63,14 +66,16 @@ class Session:
         self.client.call("POST", API + "/read", {}, code=401)
         self.client.call("POST", API + "/display", {}, code=401)
         self.client.login()
-        catalog = wait(lambda: (lambda c: c if c["phase"] == "ready" else None)(
+        catalog = (wait(lambda: (lambda c: c if c["phase"] == "ready" else None)(
             self.client.call("GET", "/api/v1/drc")["drc"]), self.proc)
+            if self.initial_drc else None)
         startup = self.client.call("GET", "/api/v1/startup")["request"]
         startup["body"]["pixels"] = [257, 191]
         self.client.call("POST", "/api/v1/operations", startup, 202)
         opened = self.client.finished(1, self.proc)
         assert opened["phase"] == "succeeded", opened
-        self.context = dict(drc_id=catalog["id"], revision=catalog["revision"], view_id=opened["view_id"])
+        self.context = dict(drc_id=catalog["id"] if catalog else None,
+                            revision=catalog["revision"] if catalog else None, view_id=opened["view_id"])
 
     def close(self):
         if self.proc.poll() is None:

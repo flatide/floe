@@ -290,3 +290,48 @@ fn dynamic_input_identity_aliases_and_symlinked_trees_are_protected() {
     );
     assert_eq!(fs::read(&file).unwrap(), b"synthetic input");
 }
+
+#[test]
+fn drc_input_and_layout_cache_collisions_are_order_independent_and_atomic() {
+    for layout_first in [true, false] {
+        let f = Fixture::new();
+        let source = f.deck(0);
+        let input = f.0.join("missing.oas.floe/results.db");
+        let stop = AtomicUsize::new(0);
+        let set = SourceSet::new(vec![]).unwrap();
+        let mut registration = set.begin(&stop).unwrap();
+        if layout_first {
+            registration.register(f.scope(), &source, &stop).unwrap();
+            registration.commit(&stop).unwrap();
+            let mut next = set.begin(&stop).unwrap();
+            assert_eq!(
+                error(next.protect_inputs(std::slice::from_ref(&input), &[], &stop)),
+                ErrorKind::InvalidInput
+            );
+            next.commit(&stop).unwrap();
+            assert!(
+                set.protect_output(&input, PublicationKind::Defaults)
+                    .is_ok(),
+                "failed input batch was installed"
+            );
+            assert_eq!(set.snapshot().len(), 1);
+        } else {
+            registration
+                .protect_inputs(std::slice::from_ref(&input), &[], &stop)
+                .unwrap();
+            registration.commit(&stop).unwrap();
+            let mut next = set.begin(&stop).unwrap();
+            assert_eq!(
+                error(next.register(f.scope(), &source, &stop)),
+                ErrorKind::InvalidInput
+            );
+            next.commit(&stop).unwrap();
+            assert!(set.snapshot().is_empty());
+            assert_eq!(
+                error(set.protect_output(&input, PublicationKind::Defaults)),
+                ErrorKind::InvalidInput
+            );
+        }
+        assert!(!input.exists());
+    }
+}

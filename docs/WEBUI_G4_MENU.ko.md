@@ -38,13 +38,13 @@ python3 -B tools/validate_web_menu_inventory.py --require-complete
 | abstract / 옛 coverage | Rust abstract 미지원, density coverage 폐기. 새 occupancy는 제외 대상이 아님 |
 | LOD 토글 | 기존 GTK→Rust wire에 전달되지 않음. 웹은 무효로 수용하지 않고 설명과 함께 거부. index --lod와 다름 |
 
-## 2. 확인된 미구현3건
+## 2. 확인된 미완결3건
 
 ### G4-MENU-01 — 열린 창에서 DRC 파일 열기/교체
 
 GTK `_drc_open_dialog`→`_drc_open_db`는 사용자가 파일을 선택하고 현재 인접 ICE를
 읽거나 색인 동의를 받는다. `load_drc`는 현재 레이아웃을 유지하면서 DRC를 교체한다.
-웹은 `view --drc`로 시작할 때만 `Gateway::attach_drc_registry`를 호출한다.
+M4g-23 감사 당시 웹은 `view --drc`로 시작할 때만 `Gateway::attach_drc_registry`를 호출했다.
 이 함수는 publish 전 `Arc::get_mut`을 요구한다. browse actor의 Select는 레이아웃
 등록/launch proposal만 만들고, DRC 패널의 Reload review는 **같은 등록**을 다시
 읽는다. Build pack도 같은 등록 ASCII→ICE이지 다른 파일 열기가 아니다.
@@ -64,8 +64,14 @@ M4g-24a 선행 구현: 공유 `SourceSet`에 DB/SVRF/원본·pack tree의 게시
 등록하고, 기본값/리뷰 게시와 동일한 reservation으로 직렬화한다. 등록 전에 준비된
 초안도 게시 직전에 재검사한다. reviewer sidecar/lock은 기본값 게시만 막으며 기존
 리뷰 writer의 별도 권한을 새로 주거나 없애지 않는다. 현재 연결 지점은 시작 시 DRC
-등록/리뷰 등록이다. **실행 중 선택·교체 API/UI, reader/receipt retirement와 index
-충돌 연결은 아직 미구현**이며 이 항목은 계속 OPEN이다([M4 §79](WEBUI_M4.ko.md)).
+등록/리뷰 등록이었다([M4 §79](WEBUI_M4.ko.md)).
+
+M4g-24b: `Open DRC results…`→동일 승인 폴더 picker→`open_drc`를 연결했다.
+DRC 없는 세션의 최초 등록, 기존 DRC 유지 상태에서 후보 준비, 원자 교체와 이전
+reader 수거, 이전 저장 receipt 유지/새 편집 차단, layout cache/index 충돌을
+다룬다. **교체된 DRC의 명시적 reviewer 재등록/저장 opt-in은 아직 없다.** 새 입력은
+읽기 전용이고 예전 reviewer·SVRF·legacy sidecar 권한을 자동 승계하지 않는다.
+전체 동등 기능으로 세지 않고 이 항목은 계속 OPEN이다([M4 §80](WEBUI_M4.ko.md)).
 
 ### G4-MENU-02 — 열린 DRC에 SVRF metadata 불러오기/교체
 

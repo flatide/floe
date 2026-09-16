@@ -153,6 +153,9 @@ impl Service {
         if let Some(v) = s.transfer.ledger.replay(seq, &signature)? {
             return Ok(v);
         }
+        if s.detached {
+            return Err("review_disabled");
+        }
         if s.ledger.active().is_some() || !s.retired.is_empty() {
             return Err("drc_busy");
         }
@@ -675,7 +678,7 @@ async fn status(
     let artifacts: Vec<_> = s.transfer.artifacts.iter().filter(|(_, a)| a.owner == owner && a.review_rev == s.review_rev)
         .filter_map(|(id, a)| service.inner.artifacts.info(*id).map(|i| json!({"id":id.to_string(),"name":a.name,
             "context":a.context,"review_rev":a.review_rev.to_string(),"bytes":i.size_bytes.to_string(),"expires_in_ms":i.expires_in_ms.to_string()}))).collect();
-    Json(json!({"kind":"drc_review_transfer","available":!s.closed,"operations":s.transfer.ledger.snapshot(),"upload":upload,"artifacts":artifacts,
+    Json(json!({"kind":"drc_review_transfer","available":!s.closed && !s.detached,"operations":s.transfer.ledger.snapshot(),"upload":upload,"artifacts":artifacts,
         "limits":{"chunk_bytes":CHUNK,"file_bytes":MAX_BYTES.to_string(),"entries":2,"readers":1,"ttl_seconds":600},
         "usage":{"entries":usage.entries,"bytes":usage.bytes.to_string(),"pending":usage.pending,"readers":usage.readers}})).into_response()
 }

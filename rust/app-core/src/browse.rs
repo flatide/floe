@@ -73,6 +73,7 @@ pub enum Filter {
     Layouts,
     Jobdecks,
     AllFiles,
+    DrcFiles,
 }
 impl Filter {
     fn matches(self, name: &str) -> bool {
@@ -80,7 +81,7 @@ impl Filter {
         match self {
             Self::Layouts => n.ends_with(".oas") || n.ends_with(".oasis"),
             Self::Jobdecks => n.ends_with(".jb"),
-            Self::AllFiles => true,
+            Self::AllFiles | Self::DrcFiles => true,
         }
     }
 }
@@ -246,7 +247,7 @@ impl Browser {
             let lower = text.to_lowercase();
             if text.starts_with('.')
                 || lower.ends_with(".floe")
-                || lower.ends_with(".ice")
+                || lower.ends_with(".ice") && !matches!(filter, Filter::DrcFiles)
                 || !lower.contains(&query)
             {
                 continue;
@@ -260,6 +261,9 @@ impl Browser {
             };
             if !(s.is_dir() || s.is_file()) {
                 skipped_links += 1;
+                continue;
+            }
+            if lower.ends_with(".ice") && s.is_dir() {
                 continue;
             }
             if !s.is_dir() && !filter.matches(text) {

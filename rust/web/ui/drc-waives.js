@@ -45,7 +45,8 @@
         return v;
     }
     function catalog(v,P){
-        keys(v,['available','kind','reviewer','review_rev','operations','note_bytes','selection_limit','preparing','autosave']);
+        keys(v,['available','kind','reviewer','review_rev','operations','note_bytes','selection_limit','preparing','autosave'],['detached']);
+        if(v.detached!==undefined&&(typeof v.detached!=='boolean'||v.detached&&v.available)){fail();}
         if(v.kind!=='drc_waive'||typeof v.available!=='boolean'||typeof v.preparing!=='boolean'||v.autosave!==false||v.note_bytes!==65536||v.selection_limit!==5000){fail();}
         text(v.reviewer,200);P.counter(v.review_rev,true);const a=v.operations;keys(a,['last_seq','active','history']);P.counter(a.last_seq,true);
         if(a.active!==null){P.counter(a.active);}if(!Array.isArray(a.history)||a.history.length>32){fail();}let previous='0';
@@ -132,10 +133,10 @@
         function approvalReady(grant){return !!draft&&!!editor&&!editor.invalid&&permitted()&&!busy()&&!io&&!model.preparing&&
             (grant?saveMode.valid(grant)&&!draft.legacy_unverified:el('waives-consent').checked&&(!draft.legacy_unverified||el('waives-legacy').checked));}
         function render(){
-            notify();el('waives-panel').hidden=!enabled;el('waives-owner').textContent=model?'Reviewer: '+model.reviewer:'';
+            notify();el('waives-panel').hidden=!enabled;el('waives-owner').textContent=model?'Reviewer: '+model.reviewer+(model.detached?' · detached; previous receipts only':''):'';
             const c=selection(),ok=permitted()&&!busy()&&!io&&!model.preparing;
             const connection=o.connection?o.connection():null;
-            saveMode.sync(enabled&&!stopped&&model?model.reviewer:'',o.session()+'\n'+(connection||''),!!ok&&!!connection);
+            saveMode.sync(enabled&&!stopped&&model&&!model.detached?model.reviewer:'',o.session()+'\n'+(connection||''),!!ok&&!!connection);
             el('waives-prepare').textContent=saveMode.on()?'Save status':'Preview save';
             el('waives-local').textContent=saveMode.on()?'Choosing an action saves it. The w key opens a new toggle-and-save action; an existing choice stays unchanged. Escape discards an unsent choice.':
                 'No automatic save. Ctrl/Cmd+Enter previews; Escape discards the local choice.';
@@ -150,7 +151,7 @@
             el('waives-cancel').hidden=!active();el('waives-cancel').disabled=!permitted()||!!cancelling;
             el('waives-refresh').disabled=stopped||!enabled||!!poll;el('waives-uncertain').hidden=!uncertain;
             el('waives-resolve').disabled=!pending||stopped||!!write||!!cancelling;
-            el('waives-forget').disabled=!permitted()||!!active()||!!write||!el('waives-checked').checked;
+            el('waives-forget').disabled=!(permitted()||model&&model.detached&&!stopped&&!stale)||!!active()||!!write||!el('waives-checked').checked;
             el('waives-status').textContent=statusText(latest());el('waives-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
             el('waives-paused').hidden=!suspended();
         }
@@ -159,9 +160,10 @@
             if(key!==refreshKey&&o.refreshReview){refreshKey=key;Promise.resolve().then(function(){if(!stopped){return o.refreshReview();}}).catch(function(){/* Explicit refresh is still available. */});}}
         function settled(v){if(editor&&editor.accepted&&editor.approvedSeq===v.seq&&terminal(v)&&v.published===true&&equal(v.context,editor.selection.context)){clearEditor(false);}}
         function install(v){const old=latest(),next=v.operations.history[v.operations.history.length-1];
-            if(model&&(v.reviewer!==model.reviewer||P.compare(v.review_rev,model.review_rev)<0||P.compare(v.operations.last_seq,model.operations.last_seq)<0||
+            if(model&&(model.detached&&!v.detached||v.reviewer!==model.reviewer||P.compare(v.review_rev,model.review_rev)<0||P.compare(v.operations.last_seq,model.operations.last_seq)<0||
                 old&&next&&old.seq===next.seq&&terminal(old)&&(['phase','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev','reader_applied','reader_error','reader_revision'].some(function(k){return old[k]!==next[k];})||!equal(old.context,next.context)))){throw new Error('Older waive state was ignored.');}
             if(editor&&model&&editor.approvedSeq!==v.operations.last_seq&&(v.review_rev!==model.review_rev||v.operations.last_seq!==model.operations.last_seq)){invalidate('Another save changed the waive state.');}
+            if(v.detached&&(!model||!model.detached)){saveMode.reset();invalidate('DRC replaced; this reviewer is detached.');}
             model=v;stale=false;v.operations.history.forEach(settled);
         }
         function receipt(v){if(!model||P.compare(v.seq,model.operations.last_seq)<0){return;}const a=model.operations,old=latest();if(old&&old.seq===v.seq&&terminal(old)){return;}

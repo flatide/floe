@@ -44,7 +44,7 @@ POLICIES = {
     "_toggle_snap": linked("ruler-snap", "measure", "measure"),
     "_ruler_pop": linked("ruler-pop", "measure", "measure"),
     "_rulers_clear": linked("ruler-clear", "measure", "measure"),
-    "_drc_open_dialog": (1, "open", "Open/replace DRC in the running workspace", None, None),
+    "_drc_open_dialog": (1, "open", "Read-only live DRC open implemented; explicit reviewer re-registration remains", None, None),
     "_drc_rules_dialog": (1, "open", "Load/replace SVRF metadata in the running review", None, None),
     "_drc_step": linked("drc-step-next", "drc", "drc-navigation", count=2),
     "_drc_waive_key": linked("waives-action", "drc-waives", "drc-waives"),

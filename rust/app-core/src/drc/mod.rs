@@ -18,7 +18,8 @@ pub use database::{
 };
 pub use filters::{ListPage, ListRequest};
 pub use local::{
-    is_packed_source, open_current, reviewer_tag, select_review, waive_paths, ReadSelection,
+    is_packed_source, open_current, reviewer_tag, select_current_source, select_review,
+    waive_paths, ReadSelection, SourceSelection,
 };
 pub use measure::{cd_segments, cd_segments_um, measured, measured_um, CdSegment};
 pub use pack::{

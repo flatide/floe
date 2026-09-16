@@ -1,5 +1,6 @@
 //! Owner-only, explicit DRC replacement. Registry lock linearizes retirement
 //! with HTTP panel/selection/prepared-edit commits; native I/O stays off-reactor.
+mod replace;
 use super::{Failure, Registration, Service};
 use crate::{
     operations::{Admission, Ledger},
@@ -10,6 +11,7 @@ use floe_app_core::{
     native::Indexer,
     ErrorKind, Result,
 };
+pub(crate) use replace::{OpenContext, PreparedOpen};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -39,14 +41,16 @@ struct Work {
     stop: Arc<AtomicUsize>,
 }
 struct State {
+    registration: Option<Registration>,
     current: Option<Arc<Service>>,
     ledger: Ledger,
     pending: Option<Work>,
     stop: Option<Arc<AtomicUsize>>,
     closed: bool,
+    replacing: bool,
+    retired: Vec<Arc<Service>>,
 }
 struct Inner {
-    registration: Registration,
     indexer: Option<Indexer>,
     state: Mutex<State>,
     wake: Condvar,
@@ -65,15 +69,23 @@ impl Registry {
         Self::new(reader, Some(indexer))
     }
     fn new(reader: Arc<Service>, indexer: Option<Indexer>) -> Result<Arc<Self>> {
+        Self::initial(Some(reader), indexer)
+    }
+    pub(crate) fn empty(indexer: Indexer) -> Result<Arc<Self>> {
+        Self::initial(None, Some(indexer))
+    }
+    fn initial(reader: Option<Arc<Service>>, indexer: Option<Indexer>) -> Result<Arc<Self>> {
         let inner = Arc::new(Inner {
-            registration: reader.registration.clone(),
             indexer,
             state: Mutex::new(State {
-                current: Some(reader),
+                registration: reader.as_ref().map(|r| r.registration.clone()),
+                current: reader,
                 ledger: Ledger::default(),
                 pending: None,
                 stop: None,
                 closed: false,
+                replacing: false,
+                retired: Vec::new(),
             }),
             wake: Condvar::new(),
         });
@@ -132,7 +144,8 @@ impl Registry {
                 "invalid note review registration",
             ));
         }
-        let r = &self.inner.registration;
+        let registration = self.registration()?;
+        let r = &registration;
         if let Some(selected) = &r.readonly {
             if editable || reviewer != selected.reviewer || selected.targets.is_none() {
                 return Err(floe_app_core::Error::input(
@@ -210,23 +223,50 @@ impl Registry {
         Ok(())
     }
     pub(crate) fn maintain(&self) {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .retired
+            .retain(|r| !r.is_finished());
         for n in self.reviews() {
             n.maintain();
         }
     }
     pub(crate) fn notes_enabled(&self) -> bool {
-        self.notes().is_some()
+        self.notes()
+            .is_some_and(|n| n.status()["available"] == true)
     }
     pub(crate) fn waives_enabled(&self) -> bool {
-        self.waives.lock().unwrap().is_some()
+        self.waives
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|w| w.status()["available"] == true)
     }
-    pub(crate) fn source_id(&self) -> &str {
-        &self.inner.registration.source_id
+    pub(crate) fn source_id(&self) -> String {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .registration
+            .as_ref()
+            .map_or_else(String::new, |r| r.source_id.clone())
+    }
+    fn registration(&self) -> Result<Registration> {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .registration
+            .clone()
+            .ok_or_else(|| floe_app_core::Error::input("DRC registration unavailable"))
     }
     pub(crate) fn protected_paths(
         &self,
     ) -> Result<(Vec<std::path::PathBuf>, Vec<std::path::PathBuf>)> {
-        let r = &self.inner.registration;
+        let registration = self.registration()?;
+        let r = &registration;
         let mut files: Vec<_> = std::iter::once(r.path.clone())
             .chain(r.waives.clone())
             .chain(r.readonly.as_ref().map(|s| s.source.clone()))
@@ -263,7 +303,8 @@ impl Registry {
     ) -> Result<()> {
         let stop = AtomicUsize::new(0);
         let mut registration = sources.begin(&stop)?;
-        let r = &self.inner.registration;
+        let current = self.registration()?;
+        let r = &current;
         let inputs: Vec<_> = std::iter::once(r.path.clone())
             .chain(r.readonly.as_ref().map(|s| s.source.clone()))
             .chain(r.rules.clone())
@@ -324,11 +365,14 @@ impl Registry {
         })
     }
     fn allowed(&self, s: &State) -> bool {
+        let Some(r) = &s.registration else {
+            return false;
+        };
         self.inner.indexer.is_some()
-            && self.inner.registration.waives.is_none()
+            && !s.replacing
+            && r.waives.is_none()
             && !s.current.as_ref().is_some_and(|d| {
-                d.registration.path == self.inner.registration.path
-                    && d.catalog()["metadata"]["format"] == "ice"
+                d.registration.path == r.path && d.catalog()["metadata"]["format"] == "ice"
             })
     }
     pub fn catalog(&self) -> Value {
@@ -336,7 +380,8 @@ impl Registry {
         json!({"drc":s.current.as_ref().map(|d|d.catalog()),
             "notes":self.notes().map(|n|n.status()),
             "waives":self.review(floe_app_core::drc::review::store::Kind::Waives).map(|n|n.status()),
-            "build":{"available":!s.closed && self.allowed(&s),"source_id":self.source_id(),"jobs_min":1,"jobs_max":16,"jobs_default":4,"operations":s.ledger.snapshot()}})
+            "replacing":s.replacing,
+            "build":s.registration.as_ref().map(|r|json!({"available":!s.closed && self.allowed(&s),"source_id":r.source_id,"jobs_min":1,"jobs_max":16,"jobs_default":4,"operations":s.ledger.snapshot()}))})
     }
     fn submit(
         &self,
@@ -440,27 +485,29 @@ impl Registry {
         if let Some(d) = &s.current {
             d.request_stop();
         }
+        for r in &s.retired {
+            r.request_stop();
+        }
         for n in self.reviews() {
             n.request_stop();
         }
         self.inner.wake.notify_all();
     }
     pub fn is_finished(&self) -> bool {
+        let readers_finished = {
+            let s = self.inner.state.lock().unwrap();
+            !s.replacing
+                && s.retired.iter().all(|r| r.is_finished())
+                && s.current.as_ref().is_none_or(|r| r.is_finished())
+        };
         self.reviews().all(|n| n.is_finished())
+            && readers_finished
             && self
                 .thread
                 .lock()
                 .unwrap()
                 .as_ref()
                 .is_none_or(JoinHandle::is_finished)
-            && self
-                .inner
-                .state
-                .lock()
-                .unwrap()
-                .current
-                .as_ref()
-                .is_none_or(|d| d.is_finished())
     }
 }
 impl Drop for Registry {
@@ -536,7 +583,14 @@ fn execute(inner: &Inner, work: Work) -> Value {
     let mut pack_path = None;
     let result = (|| -> Result<Value> {
         floe_app_core::check_cancelled(&stop)?;
-        let r = &inner.registration;
+        let registration = inner
+            .state
+            .lock()
+            .unwrap()
+            .registration
+            .clone()
+            .ok_or_else(|| floe_app_core::Error::input("DRC registration unavailable"))?;
+        let r = &registration;
         // --force approves replacing a pack, never a registered SVRF input
         // which happens to occupy the fixed adjacent output path.
         protect_inputs(r)?;
@@ -576,7 +630,14 @@ fn execute(inner: &Inner, work: Work) -> Value {
     opening["phase"] = json!("opening_review");
     opening["build_phase"] = result["phase"].clone();
     update(inner, seq, opening);
-    let r = &inner.registration;
+    let registration = inner
+        .state
+        .lock()
+        .unwrap()
+        .registration
+        .clone()
+        .expect("build owns registration");
+    let r = &registration;
     let reopened = Service::start_with_rules(
         &r.resources,
         Arc::clone(&r.scope),
