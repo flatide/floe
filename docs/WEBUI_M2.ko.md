@@ -1,5 +1,10 @@
 # 웹 전환 M2 — DRC 읽기·공유 이관 기록
 
+2026-09-16 M2b-0: [공유 구현 전 경계 감사](WEBUI_M2_SHARING.ko.md)를 추가했다.
+단일 owner 인증/현재 view/로그아웃/프로세스 내부 자원 관리의 분리 지점과 follow/
+explore 권한표·미실행 수용 기준을 정리한다. 기능 구현·공유/원격 공개 승인은 아니며
+현재 `shares=false`, loopback-only는 불변이다.
+
 2026-09-13, `feature/webui`. [상위 계획](WEBUI_PLAN.ko.md),
 [기능 대조표](WEBUI_M0.ko.md), [M1b](WEBUI_M1B.ko.md).
 

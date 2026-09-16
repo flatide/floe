@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M4g-29 APNG 정적 기본 이미지).
+작성 2026-08-29, 갱신 2026-09-16(M2b-0 공유 경계 감사; 제품 M4g-29).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -138,6 +138,11 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 [Rust 서비스/API 초안](WEBUI_SERVICE_API.ko.md).
 
 ## 현재 진행도와 커밋 보고
+
+M2b-0은 [공유 권한/수명/자원 경계](WEBUI_M2_SHARING.ko.md)를 현재 코드로 대조한다.
+guest를 owner 인증에 붙이는 것만으로는 부족하며, 단일 세션·현재 view·전체 로그아웃과
+process-local admission을 분리해야 한다. follow/explore 및 원격 G3를 요구사항에서
+빼지 않았다. 다음 구현의 권한 범위/운영 정책은 승인 대기이고 기능·listener는 불변이다.
 
 M4g-29는 `displaytest`에 APNG의 IDAT 정적 기본 이미지를 연결한다. 원본의 모든
 chunk CRC/길이/상한을 검증한 뒤 animation chunk만 메모리에서 제거하며 원본 파일과
