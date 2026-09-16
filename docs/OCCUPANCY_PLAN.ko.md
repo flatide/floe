@@ -722,3 +722,10 @@ source released, rss 13G)` 뒤 `occupancy cell=4um (16000 dbu) …`까지 약 5�
   줄이면 된다(파일·마킹 4~16배). 후속 결정 후보: 색인 시 base cell을 칩 크기로
   자동 선택(예: min(4 µm, 칩 폭/4096), 하한 0.25 µm) — M5의 "4 µm 고정"을 바꾸는
   일이라 사용자 결정 대기.
+- **파이프 panic**(같은 날 후속): `floe-index occupancy … | head -1`이 `failed
+  printing to stdout: Broken pipe (os error 32)` panic — Rust는 SIGPIPE를 무시한
+  채 시작해 `println!`이 EPIPE에 panic한다. `floe-index`가 시작 시 SIGPIPE를
+  기본(SIG_DFL)으로 되돌려 C 프로그램처럼 조용히 끝난다(0.12.137 / RENDERD
+  0.12.92; libc 크레이트 없이 `extern "C" signal`). gate
+  `test_a_reader_closing_the_pipe_early_does_not_panic`. renderd는 stdout이
+  프로토콜이라 건드리지 않았다.

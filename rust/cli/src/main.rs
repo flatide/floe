@@ -55,7 +55,30 @@ fn version() -> String {
     )
 }
 
+/// A reader that closes the pipe early (`floe-index occupancy … | head
+/// -1`, field 2026-09-16) must end this process quietly, as it ends a C
+/// program: Rust starts with SIGPIPE ignored so the write fails with
+/// EPIPE and `println!` panics ("failed printing to stdout: Broken
+/// pipe"). Restoring the default disposition kills the process on the
+/// broken pipe instead. Declared here rather than through a libc crate
+/// (vendored deps only); the numbers are the same on Linux and macOS.
+#[cfg(unix)]
+fn exit_quietly_on_broken_pipe() {
+    extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn exit_quietly_on_broken_pipe() {}
+
 fn main() {
+    exit_quietly_on_broken_pipe();
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 && (args[1] == "--version" || args[1] == "-V") {
         println!("{}", version());

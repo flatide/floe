@@ -623,6 +623,21 @@ class GenerationContractTests(unittest.TestCase):
     def listing(self, cache, ok=0):
         return floe_index("occupancy", cache, ok=ok)
 
+    def test_a_reader_closing_the_pipe_early_does_not_panic(self):
+        # field 2026-09-16: `floe-index occupancy … | head -1` printed
+        # "failed printing to stdout: Broken pipe" from a panic; the
+        # process now dies quietly on the broken pipe like a C program
+        p = subprocess.Popen([str(BIN), "occupancy", str(self.cache)],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        first = p.stdout.readline()
+        p.stdout.close()
+        err = p.stderr.read()
+        p.wait(timeout=60)
+        self.assertTrue(first.startswith(b"occupancy file="), first)
+        self.assertNotIn(b"panicked", err, err)
+        self.assertNotIn(b"Broken pipe", err, err)
+        self.assertIn(p.returncode, (0, -13), (p.returncode, err))
+
     def test_listing_and_dump_match_the_file(self):
         res = self.listing(self.cache)
         head = res.stdout.splitlines()[0]
