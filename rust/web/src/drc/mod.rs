@@ -10,6 +10,7 @@ pub(crate) mod registry;
 pub(crate) mod review;
 pub(crate) mod revision;
 mod selection;
+pub(crate) mod shared;
 pub use dto::Request;
 use floe_app_core::{
     drc::Database, managed::Resources, registered::AccessScope, Error, ErrorKind, Result,
@@ -37,6 +38,8 @@ struct Work {
     reply: oneshot::Sender<std::result::Result<Vec<u8>, Failure>>,
     fence: Option<revision::Fence>,
     change: Option<revision::Change>,
+    // Owned by queued/active work, not its cancelling HTTP waiter.
+    _guest: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 struct State {
     pending: VecDeque<Work>,
@@ -583,6 +586,15 @@ impl Service {
         request: dto::Command,
         change: Option<revision::Change>,
     ) -> std::result::Result<Ticket, Failure> {
+        self.enqueue_reserved(request, change, None, None)
+    }
+    fn enqueue_reserved(
+        &self,
+        request: dto::Command,
+        change: Option<revision::Change>,
+        guest: Option<tokio::sync::OwnedSemaphorePermit>,
+        expected: Option<&str>,
+    ) -> std::result::Result<Ticket, Failure> {
         let mut s = self.inner.state.lock().unwrap();
         if let Some(code) = s.failure {
             return Err(code);
@@ -604,7 +616,10 @@ impl Service {
                 }),
             )
         } else {
-            (Some(self.fence(&self.revision())?), None)
+            (
+                Some(self.fence(expected.unwrap_or(&self.revision()))?),
+                None,
+            )
         };
         let (reply, receiver) = oneshot::channel();
         let stop = Arc::new(AtomicUsize::new(0));
@@ -614,6 +629,7 @@ impl Service {
             reply,
             fence: fence.clone(),
             change,
+            _guest: guest,
         });
         self.inner.wake.notify_one();
         Ok(Ticket {

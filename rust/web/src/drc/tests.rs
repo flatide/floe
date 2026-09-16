@@ -3,9 +3,8 @@ use serde_json::json;
 fn rules() -> Request {
     serde_json::from_value(json!({"kind":"rules","start":"0","search":"","limit":64})).unwrap()
 }
-#[test]
-fn bounded_queue_drop_cancels_and_stop_drains_without_runtime_waits() {
-    let s = Service {
+fn queued_service() -> Service {
+    Service {
         id: "id".into(),
         source_id: "source".into(),
         title: "DRC".into(),
@@ -32,7 +31,40 @@ fn bounded_queue_drop_cancels_and_stop_drains_without_runtime_waits() {
             revision: revision::Revision::new("revision".into()),
         }),
         thread: Mutex::new(None),
-    };
+    }
+}
+#[test]
+fn guest_admission_is_held_by_work_after_waiter_drop_and_preserves_owner_slots() {
+    let s = queued_service();
+    let slots = Arc::new(tokio::sync::Semaphore::new(1));
+    let ticket = s
+        .enqueue_reserved(
+            rules().core().unwrap(),
+            None,
+            Some(Arc::clone(&slots).try_acquire_owned().unwrap()),
+            Some("revision"),
+        )
+        .unwrap();
+    let work = s.inner.state.lock().unwrap().pending.pop_front().unwrap();
+    drop(ticket);
+    assert_ne!(work.stop.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        slots.available_permits(),
+        0,
+        "cancellation is not actor completion"
+    );
+    let owners = (0..QUEUE)
+        .map(|_| s.submit(rules()).unwrap())
+        .collect::<Vec<_>>();
+    s.request_stop();
+    assert_eq!(slots.available_permits(), 0);
+    drop(work);
+    assert_eq!(slots.available_permits(), 1);
+    drop(owners);
+}
+#[test]
+fn bounded_queue_drop_cancels_and_stop_drains_without_runtime_waits() {
+    let s = queued_service();
     let a = s.submit(rules()).unwrap();
     let b = s.submit(rules()).unwrap();
     let c = s.submit(rules()).unwrap();

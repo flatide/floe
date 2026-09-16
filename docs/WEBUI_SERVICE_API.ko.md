@@ -11,7 +11,9 @@
 `/api/v1/guest/{id}/events`이며 별도 guest-CSRF를 요구한다. follow는 ping/ACK만,
 M2b-3a의 [독립 explore 렌더](WEBUI_SHARING_EXPLORE.ko.md)는 제한된 `explore.set`도 허용한다.
 M2b-3b1의 [scoped query/룰러](WEBUI_SHARING_QUERY.ko.md)는 explore에만 네 개의 명시
-조회/측정 명령을 추가한다. 공유 UI·독립 DRC·원격 API 전체가 구현된 것은 아니다.
+조회/측정 명령을 추가한다. M2b-3b2의 [명시 DRC 공유 API](WEBUI_SHARING_DRC.ko.md)는
+guest별 `/drc`, `/drc/read`, `/drc/panel`, `/drc/selection`을 연결한다.
+공유 UI·원격 API 전체가 구현된 것은 아니다.
 M4g-2의 실제 `GET /api/v1/views/{id}/minimap/{base}`는 owner 인증+CSRF로 현재 view의
 메모리 palette 베이스(180×180 ASCII 인덱스)만 반환한다. `base`는 `full` 또는 실제
 저장된 depth의 정규 십진수다. 임의 파일/geometry 조회나 새 렌더를 하지 않는다.

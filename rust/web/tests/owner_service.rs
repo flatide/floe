@@ -85,6 +85,17 @@ impl Harness {
         defaults: bool,
         limits: Limits,
     ) -> Self {
+        Self::configured_sharing(paths, indexer, drc, builds, defaults, limits, false).await
+    }
+    async fn configured_sharing(
+        paths: &[PathBuf],
+        indexer: Indexer,
+        drc: Option<(&Path, Option<&Path>)>,
+        builds: bool,
+        defaults: bool,
+        limits: Limits,
+        sharing: bool,
+    ) -> Self {
         let resources = Resources::new(limits).unwrap();
         let fixture = PathBuf::from(std::env::var_os("FLOE_OWNER_FIXTURE").unwrap());
         let scope = AccessScope::new(&[paths
@@ -136,6 +147,9 @@ impl Harness {
         }
         if defaults {
             Gateway::enable_design_defaults(&mut gate, &[], &[]).unwrap();
+        }
+        if sharing {
+            Gateway::enable_local_sharing(&mut gate).unwrap();
         }
         let (stop, rx) = oneshot::channel();
         let task = tokio::spawn(transport::serve(listener, Arc::clone(&gate), async {
@@ -399,6 +413,8 @@ mod defaults;
 mod drc_isolation;
 #[path = "support/exports.rs"]
 mod exports;
+#[path = "support/guest_drc.rs"]
+mod guest_drc;
 #[path = "support/index_open.rs"]
 mod index_open;
 #[path = "support/launch.rs"]

@@ -40,11 +40,11 @@ impl Groups {
         self.check(base)?;
         Ok(self.selected.ids(check))
     }
-    fn snapshot(&self) -> Value {
+    pub(super) fn snapshot(&self) -> Value {
         let rules = self.selected.rules().map(|(check, ids)| json!({"check":check.to_string(), "errors":ids.iter().map(u64::to_string).collect::<Vec<_>>() })).collect::<Vec<_>>();
         json!({"selection_rev":self.revision.to_string(),"total":self.selected.total().to_string(),"limit":SELECTION_ITEMS,"rules":rules})
     }
-    fn apply(
+    pub(super) fn apply(
         &mut self,
         base: u64,
         check: Option<usize>,

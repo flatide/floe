@@ -4,6 +4,8 @@
 [M2b-3a 독립 렌더](WEBUI_SHARING_EXPLORE.ko.md),
 [M2b-3b1 scoped query/룰러](WEBUI_SHARING_QUERY.ko.md). 아래는 전체 요구/수용 기준이며
 geometry 렌더/query만으로 DRC/UI 또는 SH-01~10 전체를 완료 처리하지 않는다.
+[M2b-3b2 DRC API](WEBUI_SHARING_DRC.ko.md)는 명시 DRC scope와 독립 패널을 연결한다.
+SH-06 native 시나리오가 추가됐으나 실제 guest UI/SH-08·원격 SH-10은 아직 남는다.
 
 2026-09-16, `feature/webui`의 `f95f890` 기준.
 [상위 계획 §4/§8/§9](WEBUI_PLAN.ko.md), [M2 기록](WEBUI_M2.ko.md),

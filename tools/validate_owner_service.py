@@ -85,6 +85,7 @@ for line in sys.stdin:
         assert checked.returncode == 0, (checked.stdout, checked.stderr)
         assert "RUST OWNER SERVICE: ALL OK" in checked.stdout
         assert "RUST DRC ISOLATION: ALL OK" in checked.stdout
+        assert "RUST GUEST DRC: ALL OK" in checked.stdout
         assert "RUST DRC BUILD IDENTITY: ALL OK" in checked.stdout
         assert "RUST DRC WAIVE REVISION: ALL OK" in checked.stdout
         assert "RUST OWNER EXPORT: ALL OK" in checked.stdout

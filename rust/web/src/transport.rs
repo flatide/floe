@@ -429,7 +429,7 @@ impl Gateway {
         Ok(())
     }
     /// Trusted local opt-in for grants and follow/independent native views.
-    /// Guest UI/DRC are separate stages; scoped queries never share owner proofs.
+    /// Guest UI is a separate stage; scoped queries/DRC never share owner proofs.
     pub fn enable_local_sharing(gate: &mut Gate) -> Result<(), String> {
         let g = Arc::get_mut(gate).ok_or("gateway already published")?;
         if g.shares.is_some() || g.display_only || (g.service.is_none() && g.view.is_none()) {

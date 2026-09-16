@@ -1,5 +1,8 @@
 # M2b-3b1 — 독립 게스트의 scoped query와 룰러
 
+후속 [M2b-3b2 DRC API](WEBUI_SHARING_DRC.ko.md)는 명시 허가된 결과의 독립 목록·패널·선택을
+연결한다. 아래의 DRC 미구현 설명은 M2b-3b1 시점이며, 공유 CLI/guest UI는 현재도 남는다.
+
 `feature/webui`, [독립 렌더 기반](WEBUI_SHARING_EXPLORE.ko.md) 다음 단계.
 사용자가 승인한 **기본 off·합성/loopback** 범위다. 독립 DRC panel/선택/읽기(M2b-3b2),
 CLI opt-in·발급/guest UI(M2b-4)는 아직 남는다. `shares=false`를 유지한다.

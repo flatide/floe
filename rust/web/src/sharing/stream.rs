@@ -634,6 +634,7 @@ mod tests {
             },
         };
         let scope = Scope {
+            drc: None,
             view_id: "view".into(),
             dataset_revision: 2,
             layers: Layers::Only(vec![(7, 0)]),

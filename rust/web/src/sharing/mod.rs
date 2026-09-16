@@ -1,5 +1,6 @@
 //! Opt-in local guest identities. Never insert these credentials into owner
 //! Auth: every existing HTTP/WS handler must continue to reject guest proofs.
+mod drc;
 mod explore;
 mod http;
 mod query;
@@ -39,6 +40,7 @@ pub(crate) struct Transport {
     pub bytes: Arc<Semaphore>,
     pub encoders: Arc<Semaphore>,
     pub sockets: Arc<Semaphore>,
+    pub drc_work: Arc<Semaphore>,
 }
 impl Default for Transport {
     fn default() -> Self {
@@ -46,6 +48,7 @@ impl Default for Transport {
             bytes: Arc::new(Semaphore::new(OUTPUT_BYTES)),
             encoders: Arc::new(Semaphore::new(1)),
             sockets: Arc::new(Semaphore::new(SOCKETS)),
+            drc_work: Arc::new(Semaphore::new(1)),
         }
     }
 }
@@ -83,6 +86,7 @@ pub(crate) struct Scope {
     pub view_id: String,
     pub dataset_revision: u64,
     pub layers: Layers,
+    pub drc: Option<drc::Binding>,
 }
 struct Entry {
     id: String,
@@ -95,6 +99,7 @@ struct Entry {
     explore: Option<Arc<explore::Explorer>>,
     saved: Option<ViewState>,
     disconnected_since: Option<Instant>,
+    panel: Arc<std::sync::Mutex<crate::drc::shared::Panel>>,
 }
 impl Drop for Entry {
     fn drop(&mut self) {
@@ -119,6 +124,7 @@ struct Lease {
     scope: Scope,
     revoked: watch::Receiver<bool>,
     socket: Arc<Semaphore>,
+    panel: Arc<std::sync::Mutex<crate::drc::shared::Panel>>,
 }
 #[derive(Default)]
 pub(crate) struct Shares {
@@ -203,6 +209,7 @@ impl Shares {
             explore: None,
             saved: None,
             disconnected_since: None,
+            panel: Arc::new(std::sync::Mutex::new(crate::drc::shared::Panel::default())),
         });
         Ok(Invitation { id, token, mode })
     }
@@ -251,6 +258,7 @@ impl Shares {
             scope: entry.scope.clone(),
             revoked: entry.revoked.subscribe(),
             socket: Arc::clone(&entry.socket),
+            panel: Arc::clone(&entry.panel),
         })
     }
     fn valid(&self, lease: &Lease, now: Instant) -> bool {
@@ -390,6 +398,7 @@ mod tests {
     }
     fn scope() -> Scope {
         Scope {
+            drc: None,
             view_id: "synthetic-view".into(),
             dataset_revision: 1,
             layers: Layers::Only(vec![(7, 0)]),

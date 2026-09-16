@@ -1,5 +1,6 @@
 //! Guest routes are an explicit allowlist and do not
-//! dispatch owner handlers, catalog/DRC reads or arbitrary filesystem IO.
+//! dispatch owner handlers/catalogs or arbitrary filesystem IO.
+//! DRC access uses a separate explicitly scoped read-only facade.
 use super::*;
 use crate::{
     origin,
@@ -21,6 +22,7 @@ pub(crate) fn routes() -> Router<Gate> {
         .route("/api/v1/guest/{id}/exchange", post(exchange))
         .route("/api/v1/guest/{id}/session", get(session).delete(logout))
         .route("/api/v1/guest/{id}/events", get(super::stream::upgrade))
+        .merge(super::drc::routes())
 }
 fn failure(error: Failure) -> StatusCode {
     match error {
@@ -42,6 +44,7 @@ fn current_scope(gate: &Gateway) -> Option<Scope> {
         view_id: view.id.clone(),
         dataset_revision: view.controller.model.dataset_revision,
         layers: snapshot.state.layers,
+        drc: None,
     })
 }
 pub(super) fn with_shares<T>(
@@ -55,7 +58,13 @@ pub(super) fn with_shares<T>(
         .lock()
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     shares.maintain(now, |owner, s| {
-        gate.alive(owner) && scope.as_ref() == Some(s)
+        gate.alive(owner)
+            && scope.as_ref().is_some_and(|v| {
+                v.view_id == s.view_id
+                    && v.dataset_revision == s.dataset_revision
+                    && v.layers == s.layers
+            })
+            && s.drc.as_ref().is_none_or(|d| d.valid(gate))
     });
     op(&mut shares, now)
 }
@@ -71,6 +80,7 @@ struct Issue {
     base_state_rev: String,
     mode: Mode,
     approve: bool,
+    drc: Option<super::drc::Approval>,
 }
 async fn issue(
     State(gate): State<Gate>,
@@ -97,22 +107,42 @@ async fn issue(
     if crate::view::counter(&body.base_state_rev) != Ok(snapshot.state_rev) {
         return transport::error(StatusCode::CONFLICT);
     }
+    let drc = match body
+        .drc
+        .map(|d| d.capture(&gate, &view.source_id))
+        .transpose()
+    {
+        Ok(d) => d,
+        Err(e) => return transport::error(e),
+    };
     let scope = Scope {
         view_id: view.id.clone(),
         dataset_revision: view.controller.model.dataset_revision,
         layers: snapshot.state.layers,
+        drc,
     };
+    let shared_drc = scope.drc.as_ref().map(super::drc::Binding::describe);
     let result = with_shares(&gate, |shares, now| {
-        if !gate.alive(&owner) || current_scope(&gate).as_ref() != Some(&scope) {
+        let mut geometry = scope.clone();
+        geometry.drc = None;
+        if !gate.alive(&owner)
+            || current_scope(&gate).as_ref() != Some(&geometry)
+            || scope.drc.as_ref().is_some_and(|d| !d.valid(&gate))
+        {
             return Err(StatusCode::CONFLICT);
         }
         shares.issue(owner, scope, body.mode, now).map_err(failure)
     });
     match result {
-        Ok(invite) => Json(json!({"share_id":invite.id,"invite":invite.token.expose(),
+        Ok(invite) => {
+            let mut value = json!({"share_id":invite.id,"invite":invite.token.expose(),
             "mode":invite.mode.name(),"invite_seconds":INVITE_TTL.as_secs(),
-            "session_seconds":SESSION_TTL.as_secs(),"delivery":delivery(invite.mode)}))
-        .into_response(),
+            "session_seconds":SESSION_TTL.as_secs(),"delivery":delivery(invite.mode)});
+            if let Some(drc) = shared_drc {
+                value["drc"] = drc;
+            }
+            Json(value).into_response()
+        }
         Err(e) => transport::error(e),
     }
 }
@@ -126,7 +156,13 @@ async fn list(State(gate): State<Gate>, headers: HeaderMap) -> Response {
             .entries
             .iter()
             .filter(|e| e.owner == owner)
-            .map(|e| json!({"share_id":e.id,"mode":e.mode.name()}))
+            .map(|e| {
+                let mut v = json!({"share_id":e.id,"mode":e.mode.name()});
+                if let Some(d) = &e.scope.drc {
+                    v["drc"] = d.describe();
+                }
+                v
+            })
             .collect::<Vec<_>>())
     }) {
         Ok(entries) => Json(json!({"shares":entries,"max_grants":MAX_GRANTS})).into_response(),
@@ -199,7 +235,7 @@ async fn exchange(
         Err(e) => transport::error(e),
     }
 }
-fn authenticate(
+pub(super) fn authenticate(
     shares: &Shares,
     headers: &HeaderMap,
     id: &str,
@@ -211,11 +247,20 @@ fn authenticate(
 }
 async fn session(State(gate): State<Gate>, headers: HeaderMap, Path(id): Path<String>) -> Response {
     match with_shares(&gate, |shares, now| {
-        authenticate(shares, &headers, &id, now)
+        let guest = authenticate(shares, &headers, &id, now)?;
+        let lease = shares.lease(guest.clone(), now).map_err(failure)?;
+        Ok((
+            guest,
+            lease.scope.drc.as_ref().map(super::drc::Binding::describe),
+        ))
     }) {
-        Ok(guest) => Json(json!({"share_id":guest.share_id,"mode":guest.mode.name(),
-            "read_only":true,"delivery":delivery(guest.mode)}))
-        .into_response(),
+        Ok((guest, drc)) => {
+            let mut v = json!({"share_id":guest.share_id,"mode":guest.mode.name(),"read_only":true,"delivery":delivery(guest.mode)});
+            if let Some(d) = drc {
+                v["drc"] = d;
+            }
+            Json(v).into_response()
+        }
         Err(e) => transport::error(e),
     }
 }
