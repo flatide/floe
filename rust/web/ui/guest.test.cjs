@@ -12,8 +12,8 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
         constructor(name){this.id=name;this.value='';this.checked=false;this.disabled=false;this.hidden=false;this.width=1;this.height=1;this.pixels=null;this.textContent='';this.listeners={};this.children=[];this.attrs={};this.style={};}
         setAttribute(k,v){this.attrs[k]=v;}
         set textContent(v){this.text=v;this.children=[];}get textContent(){return this.text||'';}appendChild(v){this.children.push(v);}
-        getContext(){const self=this;return {save(){},restore(){},clearRect(){self.pixels=new Uint8ClampedArray(self.width*self.height*4);},beginPath(){},rect(){},clip(){},moveTo(){},lineTo(){},closePath(){},stroke(){},strokeRect(){},fill(){},setTransform(){},setLineDash(){},fillText(){},measureText(){return {width:20};},fillRect(){self.pixels=new Uint8ClampedArray(self.width*self.height*4);},
-            putImageData(image){self.pixels=image.data.slice();},drawImage(image,dx=0,dy=0){if(!self.pixels||self.pixels.length!==self.width*self.height*4){self.pixels=new Uint8ClampedArray(self.width*self.height*4);}
+        getContext(){const self=this;return {save(){},restore(){},clearRect(){self.pixels=new Uint8ClampedArray(self.width*self.height*4);},beginPath(){},rect(){},clip(){},moveTo(){},lineTo(){},closePath(){},stroke(){self.strokes=(self.strokes||0)+1;},strokeRect(){},fill(){},setTransform(){},setLineDash(){},fillText(){},measureText(){return {width:20};},fillRect(){self.pixels=new Uint8ClampedArray(self.width*self.height*4);},
+            putImageData(image){self.pixels=image.data.slice();},drawImage(image,dx=0,dy=0){self.blits=(self.blits||0)+1;if(!self.pixels||self.pixels.length!==self.width*self.height*4){self.pixels=new Uint8ClampedArray(self.width*self.height*4);}
                 for(let y=0;y<image.height;y++)for(let x=0;x<image.width;x++){const a=x+dx,b=y+dy;if(a>=0&&b>=0&&a<self.width&&b<self.height){self.pixels.set(image.pixels.slice((y*image.width+x)*4,(y*image.width+x+1)*4),(b*self.width+a)*4);}}}};}
         getBoundingClientRect(){return this.rect||{width:64,height:32,left:0,top:0};}
         addEventListener(k,f){const old=this.listeners[k];this.listeners[k]=old?function(e){old(e);f(e);}:f;}focus(){doc.activeElement=this;}
@@ -44,6 +44,7 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
                     else if(r.kind==='list'||r.kind==='records'){data={rows:[reviewRow],next:null};}
                     else if(r.kind==='geometry'){data={...reviewRow,start:'0',total:'4',next:null,precision:'1000',points_dbu:[['20000','8000'],['24000','8000'],['24000','12000'],['20000','12000']]};}
                     else if(r.kind==='focus'){data={check:'0',local:'0',navigation:{kind:'goto',center_um:['22','10'],width_um:'8'}};}
+                    else if(r.kind==='measurements'){data={check:'0',local:'0',global:'1',segments:[{distance_um:'4',endpoints_um:[['20','8'],['24','8']],offset:true},{distance_um:'4',endpoints_um:[['24','8'],['24','12']],offset:true}]};}
                     else if(r.kind==='filtered_step'){data={hit:reviewRow,next:null,scanned:'1',bbox_um:null,selection_rev:r.selection_rev};}
                     else{throw Error('unexpected guest DRC read '+r.kind);}v={view_id:view,revision:'drc-rev',data};}
                 else{v=this.method==='DELETE'?null:{share_id:id,mode,read_only:true,delivery:mode==='follow'?'follow_frames':'explore_frames',...grant&&{drc:{id:'7'.repeat(64),revision:'drc-rev'}}};}}
@@ -54,7 +55,7 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
         send(text){this.sent.push(JSON.parse(text));}close(){this.readyState=3;}text(v){this.onmessage({data:JSON.stringify(v)});}binary(b){this.onmessage({data:b});}
     }
     const c=Guest.bind({window:win,document:doc,location,history,XHR,WebSocket:WS,protocol:P,now:()=>clock,
-        drc:require('./guest-drc.js'),drcSteps:require('./guest-drc-step.js'),geometry:require('./drc-geometry.js'),selection:require('./drc-groups.js'),
+        drc:require('./guest-drc.js'),drcSteps:require('./guest-drc-step.js'),focusReceipt:require('./guest-focus.js'),geometry:require('./drc-geometry.js'),selection:require('./drc-groups.js'),
         layers:require('./guest-layers.js'),
         display:require('./guest-display.js'),tools:require('./guest-tools.js'),queryWire:require('./guest-query-wire.js'),query:require('./query.js'),
         inspect:require('./inspect.js'),measure:require('./measure.js'),rulers:require('./rulers.js'),gestures:require('./gestures.js'),
@@ -86,7 +87,8 @@ function queryReply(ws,request,index='0'){
 function measureReply(ws,request,point){ws.text({type:'measure.result',seq:request.seq,view_id:view,connection_epoch:epoch,anchor:request.body.anchor,
     point_dbu:point,snap:request.body.snap_query===null?null:'vertex',segment:request.body.start_dbu?
         {endpoints_dbu:[request.body.start_dbu,point],delta_um:['10','0'],distance_um:'10'}:null});}
-(async()=>{
+module.exports={environment,tick,packet,click,measureReply,exactScene,view,epoch};
+if(require.main===module)(async()=>{
     const invalid=environment('follow','#bootstrap='+secret);await invalid.c.start();assert.equal(invalid.requests.length,0);assert.equal(invalid.storage.get('floe-session:http://127.0.0.1:1234'),'OWNER');
     for(const mode of ['follow','explore']){
         const e=environment(mode);await e.c.start();const ws=e.sockets[0];e.hello();ws.text(e.state());

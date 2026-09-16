@@ -9,11 +9,15 @@ const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
 acorn.parse(fs.readFileSync(path.join(ui,'drc-geometry.js'),'utf8'),options);
-for(const name of ['guest','guest-drc','guest-drc-step','guest-layers','guest-display','guest-query-wire','guest-tools','sharing']){
+for(const name of ['guest','guest-drc','guest-drc-step','guest-focus','guest-layers','guest-display','guest-query-wire','guest-tools','sharing']){
     acorn.parse(fs.readFileSync(path.join(ui,name+'.js'),'utf8'),options);
     const run=spawnSync(process.execPath,[path.join(ui,name+'.test.cjs')],{stdio:'inherit',timeout:15000});
     assert.equal(run.status,0,name+' UI: '+run.error);
 }
+const guestCD=spawnSync(process.execPath,[path.join(ui,'guest-drc-cd.test.cjs')],{stdio:'inherit',timeout:15000});
+assert.equal(guestCD.status,0,'guest DRC CD: '+guestCD.error);
+const guestFocusUI=spawnSync(process.execPath,[path.join(ui,'guest-focus-ui.test.cjs')],{stdio:'inherit',timeout:15000});
+assert.equal(guestFocusUI.status,0,'guest focus UI: '+guestFocusUI.error);
 const frameStatus=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_FRAME_STATUS:'1'}});
 assert.equal(frameStatus.status,0,'frame status client: '+frameStatus.error);
 for(const file of ['wheel.test.cjs','client.test.cjs']){

@@ -182,7 +182,7 @@
             ctx.clearRect(0,0,w,h);ctx.save();ctx.beginPath();ctx.rect(0,0,w,h);ctx.clip();
             function xy(x,y) { return [(x-p.bbox[0])/p.step[0]-p.origin[0],(p.bbox[3]-y)/p.step[1]-p.origin[1]]; }
             const dbu=p.dbu;
-            const list=entries.filter(function (e) { return e.value && (e.kind!=='cd' || (el('drc-markers').checked && dbu>0)); }).map(function (e) {
+            const list=entries.filter(function (e) { return e.value && (e.kind!=='cd' || ((o.cdVisible?o.cdVisible():el('drc-markers').checked) && dbu>0)); }).map(function (e) {
                 const s=e.value;
                 return e.kind==='cd'?{ends:s.ends.map(function (p) { return p.map(function (n) { return n/dbu; }); }),offset:s.offset,label:s.label}:
                     {ends:s.endpoints_dbu.map(function (v) { return v.map(Number); }),offset:false,label:format(s.distance_um)+' µm'};

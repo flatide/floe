@@ -1489,7 +1489,8 @@ M0/G2는 사용자 요청대로 보류이며 GTK launcher는 유지한다.
    M2b-4b1/2/3에서 guest DRC 목록/선택·레이어와
    [query/룰러·pointer](WEBUI_SHARING_QUERY_UI.ko.md)를 연결했다.
    M2b-4b4의 [유계 순회·마커/box](WEBUI_SHARING_DRC_NAV.ko.md)도 연결했다.
-   DRC CD/jump-mode 및 실제 브라우저/원격 수용은 남는다.
+   M2b-4b5의 [이동 확정·CD/자동 순회](WEBUI_SHARING_DRC_CD.ko.md)도 연결했다.
+   공유 요구표 최종 대조와 실제 브라우저/원격 수용은 남는다.
    아직 shares=false, loopback-only다.
 4. 외부 HTTPS/WSS·TeeBox 접근/인증 정책은 상위 계획 §10 미결 사항이며 로컬 기반 구현과
    실제 외부 공개를 구별한다. 브라우저 주소만 외부 IP로 바꿔 노출하지 않는다.

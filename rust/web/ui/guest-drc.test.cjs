@@ -4,8 +4,8 @@ const D=require('./guest-drc.js'),G=require('./drc-geometry.js'),P=require('./pr
 const tick=()=>new Promise(r=>setImmediate(r));
 const clone=v=>JSON.parse(JSON.stringify(v));
 function environment(mode='explore',format='ice'){
-    const nodes=new Map(),calls=[],drawing=[],moves=[];let context={view_id:'view-a',epoch:'epoch1',state_rev:'1',mode,pending:false,drc:{id:'approved',revision:'rev1'}};
-    let panel=null,panelRev='1',selectionRev='1',ids=[],failedSelection=false,hold=null,active=0,maxActive=0,stepReply=null;
+    const nodes=new Map(),calls=[],drawing=[],moves=[],rulers=require('./rulers.js'),history=rulers.history();let context={view_id:'view-a',epoch:'epoch1',state_rev:'1',mode,pending:false,camera:['32','16','64'],pixels:[64,32],drc:{id:'approved',revision:'rev1'}};
+    let panel=null,panelRev='1',selectionRev='1',ids=[],failedSelection=false,failedPanel=false,hold=null,active=0,maxActive=0,stepReply=null,navHold=null,hover='';
     class Element{
         constructor(){this.children=[];this.value='';this.checked=false;this.disabled=false;this.hidden=false;this.attrs={};}
         set textContent(v){this.text=v;this.children=[];}get textContent(){return this.text||'';}set innerHTML(_){throw Error('No HTML in DRC text');}
@@ -20,12 +20,12 @@ function environment(mode='explore',format='ice'){
     async function http(method,path,body,t){
         assert(['/drc','/drc/read','/drc/panel','/drc/selection'].includes(path));assert(!t.cancelled);active++;maxActive=Math.max(maxActive,active);
         const c=clone(context),request={method,path,body:body&&clone(body)};calls.push(request);
-        try{await tick();if(hold&&path==='/drc/read'&&body.body.kind===hold.kind){const h=hold;hold=null;await new Promise((resolve,reject)=>{h.resolve=resolve;h.reject=reject;t.abort=()=>reject(Error('cancelled'));});t.abort=null;}
+        try{await tick();if(hold&&(path==='/drc/read'&&body.body.kind===hold.kind||path==='/drc/panel'&&method==='POST'&&hold.kind==='panel')){const h=hold;hold=null;await new Promise((resolve,reject)=>{h.resolve=resolve;h.reject=reject;t.abort=()=>reject(Error('cancelled'));});t.abort=null;}
             let data;
             if(path==='/drc'){data={checks:'1',errors:'2',precision:'1000',format,truncated_records:'0',read_only:true};}
             else{assert.equal(body===undefined?c.view_id:body.view_id,c.view_id);assert.equal(body===undefined?c.drc.revision:body.revision,c.drc.revision);
                 if(path==='/drc/panel'){
-                    if(method==='POST'){assert(!body.body.metric&&!body.body.note_target);assert.equal(body.base_panel_rev,panelRev);panel=clone(body.body);panelRev=P.next(panelRev);}
+                    if(method==='POST'){assert(!body.body.metric&&!body.body.note_target);assert.equal(body.base_panel_rev,panelRev);panel=clone(body.body);panelRev=P.next(panelRev);if(failedPanel){failedPanel=false;throw Error('panel reply lost');}}
                     data={panel_rev:panelRev,body:panel};
                 }else if(path==='/drc/selection'){
                     if(method==='POST'){assert.equal(body.base_selection_rev,selectionRev);const v=body.body;
@@ -34,28 +34,34 @@ function environment(mode='explore',format='ice'){
                         if(v.kind==='clear_all'){ids=[];}else if(v.mode==='replace'){ids=v.errors.slice();}else if(v.mode==='add'){ids=[...new Set([...ids,...v.errors])];}else{for(const id of v.errors){ids=ids.includes(id)?ids.filter(v=>v!==id):[...ids,id];}}
                         selectionRev=P.next(selectionRev);if(failedSelection){failedSelection=false;throw Error('reply lost');}}
                     data=selected();
-                }else{const r=body.body;assert(['rules','rule','list','records','geometry','focus','filtered_step'].includes(r.kind));
+                }else{const r=body.body;assert(['rules','rule','list','records','geometry','focus','filtered_step','measurements'].includes(r.kind));
+                    if(r.kind==='measurements'){const v=records.find(v=>v.local===r.error);data={check:r.check,local:r.error,global:v.global,segments:[
+                        {endpoints_um:[['10.000125','10'],['30.000125','10']],distance_um:'20',offset:true},
+                        {endpoints_um:[['30.000125','10'],['30.000125','30']],distance_um:'20',offset:true}]};}
                     if(r.kind==='filtered_step'){data=stepReply||{hit:r.after===a.local?b:a,next:null,scanned:'1',bbox_um:r.in_view?['0','0','64','32']:null,selection_rev:r.selection_rev};stepReply=null;}
                     if(r.kind==='rules'){data={rows:[{check:'0',name:'<script>RULE</script>',errors:'2',waived:'1'}],next:null};}
                     if(r.kind==='rule'){data={check:r.check,description:'<img src=x> rule description'};}
                     if(r.kind==='list'){data={rows:records.filter(v=>(r.waived===null||(v.status===1)===r.waived)&&(!r.selection_rev||ids.includes(v.local))),next:null,selection_rev:r.selection_rev,bbox_um:null};}
                     if(r.kind==='records'){data={rows:records.filter(v=>r.errors.includes(v.local))};}
                     if(r.kind==='geometry'){const v=records.find(v=>v.local===r.error);data={...v,start:'0',total:v.points,next:null,precision:'1000',...(format==='ice'?{points_dbu:v.kind==='p'?[['10000','10000'],['30000','10000'],['30000','30000']]:[['40000','10000'],['60000','30000']]}:{points_um:v.kind==='p'?[['10.000125','10'],['30.000125','10'],['30.000125','30']]:[['40.000125','10'],['60.000125','30']]})};}
-                    if(r.kind==='focus'){assert.equal(r.isolate,false);assert.equal(body.state_rev,c.state_rev);data={check:r.check,local:r.error,navigation:{kind:'goto',center_um:['20','20'],width_um:'64'}};}
+                    if(r.kind==='focus'){assert.equal(r.isolate,false);assert.equal(body.state_rev,c.state_rev);data={check:r.check,local:r.error,navigation:{kind:'goto',center_um:['20','20'],width_um:r.fit?'64':c.camera[2]}};}
                 }
             }return {view_id:c.view_id,revision:c.drc.revision,data:clone(data)};
         }finally{active--;}
     }
     const ctx=new Proxy({}, {get(target,k){return target[k]||((...args)=>drawing.push([k,...args]));},set(t,k,v){t[k]=v;return true;}});
-    const panelUI=D.bind({el,document:{createElement:()=>new Element()},protocol:P,geometry:G,selection,steps:require('./guest-drc-step.js'),http,context:()=>context,repaint(){},
-        navigate(n,c){if(!context||context.mode!=='explore'||context.pending||context.state_rev!==c.state_rev){return false;}moves.push(n);return true;}});
+    const panelUI=D.bind({el,document:{createElement:()=>new Element()},protocol:P,geometry:G,selection,steps:require('./guest-drc-step.js'),rulers,history,http,context:()=>context,repaint(){},hover(s){hover=s;},
+        navigate(n,c,done){if(!context||context.mode!=='explore'||context.pending||context.state_rev!==c.state_rev){done('View changed');return ()=>{};}moves.push(n);
+            const receipt={view_id:c.view_id,epoch:c.epoch,state_rev:c.state_rev};if(navHold){const h=navHold;navHold=null;h.resolve=(error=null,value=receipt)=>done(error,value);}else{done(null,receipt);}
+            return ()=>done('cancelled');}});
     const busy=()=>el('gd-filter').disabled;
     async function settle(){for(let i=0;i<80&&busy();i++){await tick();}assert(!busy(),el('gd-status').textContent);}
-    return {panelUI,el,calls,moves,drawing,a,b,settle,busy,context(v){context=v;},getContext:()=>context,
+    return {panelUI,el,calls,moves,drawing,a,b,settle,busy,history,hover:()=>hover,panel:()=>clone(panel),context(v){context=v;},getContext:()=>context,
+        holdNavigation(){navHold={};return navHold;},failPanel(){failedPanel=true;},
         fail(){failedSelection=true;},hold(kind){hold={kind};return hold;},max:()=>maxActive,stepReply(v){stepReply=v;},
         paint(rect={left:0,top:0,width:64,height:32}){drawing.length=0;panelUI.paint(ctx,G.projection({bbox_dbu:['0','0','64','32'],width:64,height:32},[0,0],'1'),[64,32],rect);}};
 }
-(async()=>{
+if(require.main===module){(async()=>{
     for(const format of ['ice','ascii']){
         const e=environment('explore',format);assert.equal(e.calls.length,0);e.panelUI.changed();await e.settle();
         assert.equal(e.el('gd-rules').children[0].textContent,'<script>RULE</script> · 2 errors');assert.equal(e.el('gd-description').textContent,'<img src=x> rule description');
@@ -116,7 +122,7 @@ function environment(mode='explore',format='ice'){
         for(let i=0;i<12&&!slow.resolve;i++){await tick();}assert(slow.resolve);assert.equal(e.el('gd-errors').children[0],button);assert.equal(button.disabled,false);
         const before=e.calls.filter(c=>c.path==='/drc/selection'&&c.method==='POST').length;
         button.onclick({detail:2,ctrlKey:true});button.ondblclick({ctrlKey:true});slow.resolve();await e.settle();
-        assert.equal(e.calls.filter(c=>c.path==='/drc/selection'&&c.method==='POST').length,before);assert.equal(e.moves.length,mode==='explore'?1:0);
+        assert.equal(e.calls.filter(c=>c.path==='/drc/selection'&&c.method==='POST').length,before);assert.equal(e.moves.length,0,'modifier double-click does not jump');
         const fast=e.el('gd-errors').children[0];fast.onclick({ctrlKey:true});await e.settle();
         const fastCount=e.calls.filter(c=>c.path==='/drc/selection'&&c.method==='POST').length;
         fast.onclick({detail:2,ctrlKey:true});fast.ondblclick({ctrlKey:true});await e.settle();
@@ -130,4 +136,5 @@ function environment(mode='explore',format='ice'){
         assert(e.busy());assert.match(e.el('gd-status').textContent,/unconfirmed/);
     }
     console.log('WEB GUEST DRC UI: ALL OK (explicit grant only, ICE/ASCII geometry, plain text/u64, independent selection/panel, follow cannot move, stale/revoke, uncertain update/no replay)');
-})().catch(e=>{console.error(e);process.exitCode=1;});
+})().catch(e=>{console.error(e);process.exitCode=1;});}
+module.exports={environment,tick};

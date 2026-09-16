@@ -16,6 +16,9 @@ DRC/layer/query/룰러 guest UI와 실제 SH-08·SH-10 수용을 대체하지 �
 같은 범위로 연결한다. DRC 순회/마커/box/CD·실제 SH-08/SH-10 수용은 남는다.
 [M2b-4b4 순회·마커/box](WEBUI_SHARING_DRC_NAV.ko.md)는 현재 페이지 후보의
 native 선택과 유계 검색을 연결한다. CD/jump-mode·실제 SH-08/SH-10은 남는다.
+후속 [M2b-4b5 이동 확정·CD/자동 순회](WEBUI_SHARING_DRC_CD.ko.md)는
+ACK+동일 revision snapshot에 측정 대상을 묶고 개인 복원/삭제를 연결한다.
+이하 요구표의 최종 대조와 실제 SH-08/SH-10 수용은 여전히 별도다.
 
 2026-09-16, `feature/webui`의 `f95f890` 기준.
 [상위 계획 §4/§8/§9](WEBUI_PLAN.ko.md), [M2 기록](WEBUI_M2.ko.md),

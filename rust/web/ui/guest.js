@@ -14,6 +14,8 @@
         let foreground=null,margin=null,flight=null,accepted=null,queue=[];
         let ackedFrames={foreground:null,margin:null},displayed=false,queryTools=null,gesture=null,dragShift=null,overlaySize='';
         let ping=null,reconnect=null,resize=null,observer=null,delay=500,flushTimer=null,lastSend=-Infinity;
+        let focusTicket=null,overlayRAF=null;
+        const rulerHistory=o.rulers?o.rulers.history():null;
         const now=o.now||function(){return win.performance.now();};
         const pending=new Set();
         function inputPending(ignoreGesture){return !!flight||!!accepted||!!queue.length||!ignoreGesture&&(!!dragShift||!!gesture&&gesture.active());}
@@ -24,25 +26,37 @@
             pending:inputPending(true)||!ignoreGesture&&(!!dragShift||!!gesture&&gesture.moving())}):null;}
         function viewContext(){return !stopped&&!suspended&&hello&&state?{view_id:hello.view_id,epoch:hello.connection_epoch,
             state_rev:state.state_rev,render_key:state.render_key,mode:session.mode,pending:inputPending()}:null;}
+        const focusReceipt=o.focusReceipt?o.focusReceipt.bind({protocol:P,setTimeout:win.setTimeout.bind(win),clearTimeout:win.clearTimeout.bind(win),
+            context:function(){const c=viewContext();return c&&Object.assign({},c,{otherInput:queue.some(function(q){return q.notice!==focusTicket;})||!!dragShift||!!gesture&&gesture.moving()});}}):null;
+        function errorNavigation(n,c,done){const current=viewContext();if(!focusReceipt||!current||current.pending||current.mode!=='explore'||
+            c.view_id!==current.view_id||c.epoch!==current.epoch||c.state_rev!==current.state_rev){done('View input changed; select Go again.');return function(){};}
+            let ticket=null;ticket=focusReceipt.begin(c,function(error,receipt){
+                if(error){queue=queue.filter(function(q){return q.notice!==ticket;});}
+                if(focusTicket===ticket){focusTicket=null;}done(error,receipt);flush();});
+            if(!ticket){return function(){};}focusTicket=ticket;edit({navigation:n},ticket);return ticket.cancel;
+        }
         function scopedEdit(body,c){const current=viewContext();if(!current||current.mode!=='explore'||current.pending||
             c.view_id!==current.view_id||c.epoch!==current.epoch||c.state_rev!==current.state_rev){return false;}edit(body);return true;}
         const layers=o.layers?o.layers.bind({el:el,document:doc,protocol:P,http:request,context:viewContext,edit:scopedEdit}):null;
         function panelsChanged(){if(drc){drc.changed();}if(layers){layers.changed();}if(queryTools){queryTools.changed();}}
-        const drc=o.drc?o.drc.bind({el:el,document:doc,protocol:P,geometry:o.geometry,selection:o.selection,steps:o.drcSteps,http:request,
+        const drc=o.drc?o.drc.bind({el:el,document:doc,protocol:P,geometry:o.geometry,selection:o.selection,steps:o.drcSteps,http:request,rulers:o.rulers,history:rulerHistory,
             rect:function(){return drcCanvas.getBoundingClientRect();},
+            hover:function(text){viewport.title=text;},
             context:function(){return !stopped&&!suspended&&hello&&state&&session.drc?{view_id:hello.view_id,epoch:hello.connection_epoch,
-                state_rev:state.state_rev,mode:session.mode,drc:session.drc,pending:inputPending(true)||!!dragShift||!!gesture&&gesture.moving()}:null;},
+                state_rev:state.state_rev,mode:session.mode,drc:session.drc,camera:state.camera_um,pixels:state.pixels,pending:inputPending(true)||!!dragShift||!!gesture&&gesture.moving()}:null;},
             modeChanged:function(active){if(active&&queryTools&&queryTools.active()){queryTools.leave();}if(active&&gesture){gesture.cancel();}
                 viewport.style.cursor=active?'crosshair':'';},
-            repaint:function(){compose();},navigate:function(n,c){if(!hello||!state||stopped||suspended||session.mode!=='explore'||flight||accepted||queue.length||
-                c.view_id!==hello.view_id||c.epoch!==hello.connection_epoch||c.state_rev!==state.state_rev){return false;}edit({navigation:n});return true;}}):null;
+            repaint:overlayLater,navigate:errorNavigation}):null;
         if(o.tools){queryTools=o.tools.bind({window:win,document:doc,protocol:P,query:o.query,wire:o.queryWire,inspect:o.inspect,measure:o.measure,rulers:o.rulers,
+            history:rulerHistory,popCD:function(all){return drc&&drc.popCD(all);},cdBusy:function(){return !!drc&&drc.restoring();},cdVisible:function(){return !!drc&&drc.visible();},
             context:function(){return queryContext(false);},now:now,send:function(v){
                 if(!socket||socket.bufferedAmount>16384||new TextEncoder().encode(JSON.stringify(Object.assign({},v,{seq:P.next(seq)}))).length>8192){throw Error('Guest query input limit');}return send(v);},
             layers:function(pairs){if(layers&&layers.highlight){layers.highlight(pairs);}},
             modeChanged:function(){if(queryTools&&queryTools.active()&&drc){drc.leave();}if(gesture){gesture.cancel();}cursor();}});}
         function cursor(){viewport.style.cursor=gesture&&gesture.bandActive()?'crosshair':gesture&&gesture.active()?'grabbing':queryTools&&queryTools.active()||drc&&drc.active()?'crosshair':'';panelsChanged();}
+        function overlayLater(){if(!state||stopped||suspended||overlayRAF!==null){return;}overlayRAF=win.requestAnimationFrame(function(){overlayRAF=null;paintOverlays(false);});}
         function paintOverlays(resizeOnly){let size=null,projection=null;
+            if(overlayRAF!==null){win.cancelAnimationFrame(overlayRAF);overlayRAF=null;}
             if(state&&displayed){try{size=o.display.size(state.pixels,canvas.getBoundingClientRect(),viewport.getBoundingClientRect());
                 projection=o.geometry.projection({bbox_dbu:state.bbox_dbu,width:state.pixels[0],height:state.pixels[1]},dragShift||[0,0],state.dbu_um);}catch(_){size=null;}}
             const key=JSON.stringify(size);if(resizeOnly&&key===overlaySize){return;}overlaySize=key;
@@ -65,6 +79,8 @@
             overlaySize='';drcCanvas.hidden=true;drcCanvas.width=drcCanvas.height=1;
             if(queryTools){queryTools.paint(null,null);}el('guest-empty').hidden=false;el('guest-frame-status').textContent='No displayed frame';}
         function disconnect(){serial++;joining=false;const old=socket;socket=null;hello=state=null;queue=[];flight=accepted=null;
+            if(focusReceipt){focusReceipt.reset();}focusTicket=null;
+            if(overlayRAF!==null){win.cancelAnimationFrame(overlayRAF);overlayRAF=null;}
             if(gesture){gesture.cancel();}dragShift=null;if(queryTools){queryTools.reset();}
             if(drc){drc.reset();}
             if(layers){layers.reset();}
@@ -136,11 +152,11 @@
             // Same edit cadence as the owner; reserve room for frame ACKs and
             // heartbeats beneath the server's 60 control messages/sec limit.
             const remaining=65-(now()-lastSend);if(remaining>0){flushTimer=win.setTimeout(function(){flushTimer=null;flush();},remaining);return;}lastSend=now();
-            flight=send({type:'explore.set',view_id:hello.view_id,connection_epoch:hello.connection_epoch,base_state_rev:state.state_rev,body:queue.shift()});}
-        function edit(body){if(stopped||suspended||!hello||!state||session.mode!=='explore'){return;}
+            const q=queue.shift();flight=send({type:'explore.set',view_id:hello.view_id,connection_epoch:hello.connection_epoch,base_state_rev:state.state_rev,body:q.body});if(q.notice){q.notice.sent(flight);}}
+        function edit(body,notice){if(stopped||suspended||!hello||!state||session.mode!=='explore'){if(notice){notice.cancel();}return;}
             if(gesture&&gesture.active()){gesture.cancel();}
-            if(queue.length>=16){status('Input queue full; wait for this view.');return;}queue.push(body);flush();panelsChanged();}
-        function settle(){if(accepted&&state&&P.compare(state.state_rev,accepted)>=0){accepted=null;}flush();}
+            if(queue.length>=16){if(notice){notice.cancel();}status('Input queue full; wait for this view.');return;}queue.push({body:body,notice:notice||null});if(focusReceipt){focusReceipt.changed();}flush();panelsChanged();}
+        function settle(){if(accepted&&state&&P.compare(state.state_rev,accepted)>=0){accepted=null;}if(focusReceipt){focusReceipt.changed();}flush();}
         function resized(){if(queryTools){queryTools.changed();}paintOverlays(true);if(resize!==null){win.clearTimeout(resize);}resize=win.setTimeout(function(){resize=null;if(!state||!session||session.mode!=='explore'){return;}
                 try{const r=viewport.getBoundingClientRect(),d=win.devicePixelRatio||1,w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));P.pixels(w,h);
                     if(w!==state.pixels[0]||h!==state.pixels[1]){edit({pixels:[w,h]});}}
@@ -155,9 +171,9 @@
                     hello=v;delay=500;status(v.mode==='follow'?'Following owner · read-only':'Independent view · read-only');controls();return;}
                 if(!hello){throw Error('Guest handshake missing');}
                 if(v.type==='share.state'){validateState(v);if(gesture&&gesture.active()&&state&&state.state_rev!==v.state_rev){gesture.cancel();}state=v;sync();compose();settle();controls();resized();panelsChanged();status((session.mode==='follow'?'Following owner':'Independent view')+' · read-only'+(v.rendering?' · rendering…':''));if(v.failure){status('Render failed: '+String(v.failure));}return;}
-                if(v.type==='accepted'){if(v.seq!==flight||v.view_id!==hello.view_id||v.connection_epoch!==hello.connection_epoch){throw Error('Wrong edit acknowledgment');}P.counter(v.state_rev);flight=null;accepted=v.state_rev;settle();panelsChanged();return;}
+                if(v.type==='accepted'){if(v.seq!==flight||v.view_id!==hello.view_id||v.connection_epoch!==hello.connection_epoch){throw Error('Wrong edit acknowledgment');}P.counter(v.state_rev);flight=null;accepted=v.state_rev;if(focusReceipt){focusReceipt.accepted(v.seq,v.state_rev);}settle();panelsChanged();return;}
                 if(queryTools&&queryTools.receive(v)){return;}
-                if(v.type==='error'){if(v.seq===flight){flight=accepted=null;queue=[];panelsChanged();status('View change rejected. No change was replayed.');}else{throw Error('Unexpected guest error');}return;}
+                if(v.type==='error'){if(v.seq===flight){flight=accepted=null;queue=[];if(focusReceipt){focusReceipt.rejected(v.seq);}panelsChanged();status('View change rejected. No change was replayed.');}else{throw Error('Unexpected guest error');}return;}
                 if(v.type!=='pong'){throw Error('Unsupported guest message');}
             }catch(_){stop('Guest protocol error. Reload with a valid invitation.',true);}
         }
@@ -223,7 +239,7 @@
                 selectionMode:function(){return !!drc&&drc.active();},
                 click:function(x,y,twice,m){if(queryTools&&queryTools.active()){queryTools.click(x,y,m);return;}if(drc&&drc.click(x,y,twice,m)){return;}if(queryTools){queryTools.click(x,y,m);}}});
             viewport.addEventListener('mousemove',function(e){if(!gesture.active()){if(drc){drc.move(e.clientX,e.clientY);}if(queryTools&&(!drc||!drc.active())){queryTools.move(e.clientX,e.clientY,e);}}});
-            viewport.addEventListener('mouseleave',function(){followDown=null;if(queryTools){queryTools.move(NaN,NaN);}});
+            viewport.addEventListener('mouseleave',function(){followDown=null;if(drc){drc.move(NaN,NaN);}if(queryTools){queryTools.move(NaN,NaN);}});
             viewport.addEventListener('wheel',function(e){if(!session||session.mode!=='explore'){return;}e.preventDefault();
                 const c=queryContext(false);if(!c||!pointerReady()||gesture.active()||state.rendering||!c.frame.final){return;}
                 const n=o.gestures.wheelNavigation(e,c.size,c.rect);if(n){nav(n);}}, {passive:false});
@@ -236,7 +252,7 @@
     }
     const api={bind:bind};
     if(typeof module==='object'&&module.exports){module.exports=api;}else{root.FloeGuest=api;api.bind({window:root,document:document,location:location,history:history,XHR:root.XMLHttpRequest,WebSocket:root.WebSocket,protocol:root.FloeProtocol,
-        drc:root.FloeGuestDRC,drcSteps:root.FloeGuestDRCStep,geometry:root.FloeDRCGeometry,selection:root.FloeDRCGroups,
+        drc:root.FloeGuestDRC,drcSteps:root.FloeGuestDRCStep,focusReceipt:root.FloeGuestFocusReceipt,geometry:root.FloeDRCGeometry,selection:root.FloeDRCGroups,
         layers:root.FloeGuestLayers,
         display:root.FloeGuestDisplay,tools:root.FloeGuestTools,queryWire:root.FloeGuestQueryWire,query:root.FloeQuery,
         inspect:root.FloeInspect,measure:root.FloeMeasure,rulers:root.FloeRulers,gestures:root.FloeGestures,

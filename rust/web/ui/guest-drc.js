@@ -8,12 +8,44 @@
         let data=null,rules=[],rows=[],selected=null,points=null,complete=false;
         let ruleNext=null,errorNext=null,listRev=null,liveDirty=false;
         let continuation=null,continuationStamp='',boxMode=false,boxStart=null,boxEnd=null,painted=null,errorNodes='';
+        let effects=0,panelEdit=0,panelSaved=0,cdSegments=null,cdGlobal=null,cdError='';
+        const book=o.history||o.rulers.history();
         const ruleBack=[],errorBack=[];
         function defaults(){return {search:'',metric:null,rule_start:'0',check:null,error_start:'0',query:null,in_view:false,selected_only:false,waived:null,selected:null,
             markers:true,shown:true,jump_scale:null,zoom_lock:false,jump_active:false,focus_visible:false,cd:null};}
         function key(c){return c&&c.drc?c.view_id+':'+c.epoch+':'+c.drc.id+':'+c.drc.revision:'';}
         function context(){const c=o.context();return c&&key(c)===bound?c:null;}
         function note(s){el('gd-status').textContent=s;}
+        function modified(e){return !!e&&!!(e.ctrlKey||e.metaKey||e.shiftKey||e.altKey);}
+        function hasCD(){return !!data&&!!data.cd&&data.cd.remaining>0&&(cdSegments===null||cdSegments.length>0);}
+        function showCD(){const cd=data&&data.cd,list=el('gd-cd-values');list.textContent='';
+            el('gd-cd-title').textContent=!cd?'Go to an error to measure it.':!cd.remaining?'CD rulers cleared.':cdError?'CD unavailable · '+cdError:
+                cdSegments===null?'Reading CD measurements…':'CD · jumped global '+cdGlobal+(cdSegments.length?'':' · no supported measurement');
+            const values=hasCD()?(cdSegments===null?new Array(cd.remaining).fill(null):cdSegments.slice(0,cd.remaining)):[];
+            values.forEach(function(s){if(s){const li=doc.createElement('li');li.textContent=s.label;li.title=s.role+': '+s.distance+' µm';list.appendChild(li);}});
+            book.set('cd',values);o.repaint();
+        }
+        function invalidateEffects(){effects++;if(task&&['focus','move','cd'].includes(task.phase)&&task.abort){task.abort();}}
+        function clearCD(){invalidateEffects();if(data){data.cd=null;}cdSegments=null;cdGlobal=null;cdError='';showCD();}
+        function endState(){clearCD();if(data){data.jump_active=false;data.focus_visible=false;data.jump_scale=null;data.zoom_lock=false;}}
+        function persistIntent(){panelEdit++;if(ready&&!task){run(save);}}
+        function popCD(all){if(!ready||!hasCD()||task&&task.initial){return false;}
+            if(task&&['focus','move'].includes(task.phase)){task.notice='CD cleared; a sent move may still complete without replacement CD.';}
+            invalidateEffects();if(task&&task.stepRead){cancel();}clearStep();
+            data.cd.remaining=all||cdSegments===null?0:Math.max(0,Math.min(data.cd.remaining,cdSegments.length)-1);
+            showCD();persistIntent();return true;
+        }
+        function endJump(){if(!ready||task&&task.initial||!data.jump_active&&!(task&&['focus','move'].includes(task.phase))){return false;}
+            if(task){task.notice='Error navigation ended; a sent move may still complete without CD.';}
+            endState();if(task&&task.stepRead){cancel();}clearStep();persistIntent();controls();return true;
+        }
+        async function loadCD(t,version){const cd=data.cd;if(!cd||!cd.remaining||version!==effects){return;}t.phase='cd';
+            try{const v=await read(t,{kind:'measurements',check:cd.target.check,error:cd.target.error});
+                if(version!==effects||data.cd!==cd||!cd.remaining){return;}const decoded=o.rulers.decode(v,cd.target,P);if(cdGlobal!==null&&decoded.global!==cdGlobal){throw Error('CD error identity changed');}
+                cdGlobal=decoded.global;cdSegments=decoded.segments;cdError='';showCD();
+            }catch(e){if(valid(t)&&version===effects&&data.cd===cd){cdSegments=[];cdError=e.message;showCD();}}
+            finally{t.phase=null;}
+        }
         function stamp(){const c=context();return c?bound+':'+c.state_rev:'';}
         function filterStamp(){return data?[bound,data.check,data.waived,data.in_view?stamp():'',data.selected_only?groups.revision:''].join(':'):'';}
         function clearStep(){continuation=null;continuationStamp='';el('gd-step-continue').hidden=true;el('gd-step-status').textContent='';}
@@ -28,12 +60,15 @@
             el('gd-rule-prev').disabled=!enabled||!ruleBack.length;el('gd-rule-next').disabled=!enabled||ruleNext===null;
             el('gd-error-prev').disabled=!enabled||!errorBack.length;el('gd-error-next').disabled=!enabled||errorNext===null;
             ['go','fit'].forEach(function(n){el('gd-'+n).disabled=!enabled||!selected||c.mode!=='explore'||c.pending;});
+            el('gd-end-jump').disabled=!c||!ready||!!task&&task.initial||!data.jump_active&&!(task&&['focus','move'].includes(task.phase));
+            el('gd-jump-status').textContent=!data?'':data.jump_active?'Error navigation on · '+(data.zoom_lock?'scale locked':'auto-fit'):'Error navigation off · stepping selects without moving.';
             el('gd-reload').disabled=!c;el('gd-panel').hidden=!bound;
         }
         function sync(){if(!data){return;}el('gd-search').value=data.search;el('gd-waived').value=data.waived===null?'all':data.waived?'yes':'no';
             ['in-view','selected-only','markers'].forEach(function(n){el('gd-'+n).checked=data[n.replace('-','_')];});}
         function cancel(){turn++;if(task){task.cancelled=true;if(task.abort){task.abort();}}task=null;}
         function reset(){cancel();bound='';ready=false;metadata=groups=data=null;rules=rows=[];selected=points=null;complete=false;listRev=null;liveDirty=false;
+            effects++;panelEdit=panelSaved=0;cdSegments=null;cdGlobal=null;cdError='';showCD();if(o.hover){o.hover('');}
             painted=null;errorNodes='';clearStep();boxReset(true);
             ruleNext=errorNext=null;ruleBack.length=errorBack.length=0;el('gd-rules').textContent=el('gd-errors').textContent=el('gd-description').textContent=el('gd-selected').textContent='';controls();o.repaint();}
         function valid(t){return task===t&&!t.cancelled&&t.turn===turn&&key(o.context())===bound;}
@@ -62,12 +97,12 @@
         function render(){
             if(!selected){el('gd-selected').textContent='';}
             el('gd-rules').textContent='';rules.forEach(function(r){const b=doc.createElement('button');b.textContent=r.name+' · '+r.errors+' errors';b.disabled=!ready||!!task;
-                b.setAttribute('aria-pressed',String(data.check===r.check));b.onclick=function(){run(async function(t){clearStep();boxReset(true);data.check=r.check;data.error_start='0';data.selected=null;errorBack.length=0;selected=points=null;complete=false;await details(t);await errors(t);await save(t);});};el('gd-rules').appendChild(b);});
+                b.setAttribute('aria-pressed',String(data.check===r.check));b.onclick=function(){run(async function(t){endState();clearStep();boxReset(true);data.check=r.check;data.error_start='0';data.selected=null;errorBack.length=0;selected=points=null;complete=false;await details(t);await errors(t);await save(t);});};el('gd-rules').appendChild(b);});
             // Preserve the node between first click and dblclick. Only the
             // in-flight target can accept a second, explicit focus intent.
             const signature=JSON.stringify(rows);if(signature!==errorNodes){el('gd-errors').textContent='';errorNodes=signature;
-                rows.forEach(function(r){const b=doc.createElement('button');b.onclick=function(e){if(!e||e.detail!==2){choose(r,e,false);}};
-                    b.ondblclick=function(e){choose(r,e,true);};el('gd-errors').appendChild(b);});}
+                rows.forEach(function(r){const b=doc.createElement('button');b.onclick=function(e){if(!e||e.detail!==2){choose(r,e,false,true);}};
+                    b.ondblclick=function(e){if(!modified(e)){choose(r,e,true,true);}};el('gd-errors').appendChild(b);});}
             rows.forEach(function(r,i){const b=el('gd-errors').children[i];b.textContent=(contains(r)?'✓ ':'')+'#'+r.global+' · '+(r.status?'waived':'active');
                 b.disabled=!ready||!!task&&!same(task.choose,r);
                 b.setAttribute('aria-pressed',String(!!selected&&selected.check===r.check&&selected.local===r.local));
@@ -75,14 +110,15 @@
             el('gd-selection').textContent=groups?groups.total+' selected · private to this guest':'';controls();o.repaint();
         }
         function mode(e){return e&&(e.ctrlKey||e.metaKey)?'toggle':e&&e.shiftKey?'add':'replace';}
-        async function selectRecord(t,r){selected=r;data.selected={check:r.check,error:r.local};points=null;complete=false;await save(t);await geometry(t);}
-        function choose(r,e,twice){const c=context();if(!ready||!c){return false;}
-            if(task){if(twice&&same(task.choose,r)&&task.view===stamp()){task.focus=true;return true;}return false;}
+        async function selectRecord(t,r){selected=r;data.selected={check:r.check,error:r.local};data.focus_visible=true;points=null;complete=false;await save(t);await geometry(t);}
+        function choose(r,e,twice,fromList){const c=context();if(!ready||!c||e&&e.altKey||twice&&modified(e)){return false;}
+            if(task){if(twice&&same(task.choose,r)&&task.view===stamp()){task.focus=true;task.fit=true;if(['focus','move'].includes(task.phase)){task.reframe=true;}return true;}return false;}
             if(twice&&same(selected,r)){run(function(t){return focusRead(t,r,true);});return true;}
-            clearStep();boxReset(true);run(async function(t){t.choose=r;t.view=stamp();t.focus=!!twice;render();
+            clearStep();boxReset(true);run(async function(t){const version=effects;t.choose=r;t.view=stamp();t.focus=!!twice||fromList&&data.jump_active&&!modified(e);t.fit=twice?true:null;render();
                 selection(await call(t,'POST','/selection',{base_selection_rev:groups.revision,body:{kind:'apply',check:r.check,errors:[r.local],mode:mode(e)}}));
                 await selectRecord(t,r);if(data.selected_only){await errors(t);}
-                if(t.focus&&t.view===stamp()&&!context().pending){await focusRead(t,r,true);}
+                if(t.focus&&version===effects&&t.view===stamp()&&!context().pending){const moved=await focusRead(t,r,t.fit);
+                    if(moved&&t.reframe&&version===effects&&!context().pending){await focusRead(t,r,true);}}
             });return true;
         }
         function step(backwards,resume){if(!ready||task||!context()||data.check===null||data.in_view&&context().pending){return false;}
@@ -90,7 +126,7 @@
             const body=resume?continuation:{kind:'filtered_step',check:data.check,backwards:backwards,
                 after:selected&&selected.check===data.check&&(data.waived===null||(selected.status===1)===data.waived)?selected.local:null,
                 cursor:null,waived:data.waived,in_view:data.in_view,selection_rev:data.selected_only?groups.revision:null};
-            clearStep();boxReset(true);const expected=filterStamp();
+            clearStep();boxReset(true);const expected=filterStamp(),version=effects,startView=stamp();
             run(async function(t){t.stepRead=true;const v=await read(t,body,body.in_view);t.stepRead=false;if(filterStamp()!==expected){return;}
                 const result=o.steps.decode(v,body,P,record,contains);continuation=result.continuation;continuationStamp=expected;
                 if(continuation){el('gd-step-status').textContent='Search incomplete · '+v.scanned+' slots checked. Continue search explicitly; no background scan.';return;}
@@ -98,11 +134,13 @@
                 const r=result.hit;if(!rows.some(function(v){return v.check===r.check&&v.local===r.local;})){data.error_start=r.local;errorBack.length=0;await errors(t);}
                 // Traversal changes the focused record, not the selected set:
                 // selected-only traversal must not destroy its own filter.
-                await selectRecord(t,r);el('gd-step-status').textContent='Error #'+r.global+' · camera unchanged; use Go or Frame error.';
+                await selectRecord(t,r);let moved=false;if(data.jump_active&&version===effects&&startView===stamp()&&!context().pending){moved=await focusRead(t,r,null);}
+                el('gd-step-status').textContent='Error #'+r.global+(moved?' · jump confirmed.':' · selected without moving.');
             });return true;
         }
-        async function save(t){const v=await call(t,'POST','/panel',{base_panel_rev:panelRev,body:data});P.counter(v.panel_rev);
-            if(P.compare(v.panel_rev,panelRev)<0||!v.body||typeof v.body!=='object'){throw Error('Invalid panel save');}panelRev=v.panel_rev;
+        async function save(t){const edited=panelEdit;t.phase='panel';try{const v=await call(t,'POST','/panel',{base_panel_rev:panelRev,body:data});P.counter(v.panel_rev);
+            if(P.compare(v.panel_rev,panelRev)<0||!v.body||typeof v.body!=='object'){throw Error('Invalid panel save');}panelRev=v.panel_rev;panelSaved=edited;
+            }catch(e){e.mutation=true;throw e;}finally{t.phase=null;}
         }
         async function details(t){if(data.check===null){el('gd-description').textContent='';return;}const v=await read(t,{kind:'rule',check:data.check});
             if(v.check!==data.check||typeof v.description!=='string'){throw Error('Invalid rule details');}el('gd-description').textContent=v.description;
@@ -137,46 +175,62 @@
             el('gd-summary').textContent=metadata.checks+' rules · '+metadata.errors+' errors · '+metadata.format+' · '+metadata.truncated_records+' truncated records';
             const p=await call(t,'GET','/panel');P.counter(p.panel_rev);panelRev=p.panel_rev;data=Object.assign(defaults(),p.body||{});
             // This controller never restores owner-only note/metadata modes.
-            data.metric=null;data.note_target=null;data.query=null;data.cd=null;data.jump_active=false;data.focus_visible=false;
+            data.metric=null;data.note_target=null;data.query=null;
+            if(typeof data.jump_active!=='boolean'||typeof data.focus_visible!=='boolean'||typeof data.zoom_lock!=='boolean'||data.jump_active&&!data.focus_visible){throw Error('Invalid restored jump state');}
+            if(data.jump_scale!==null&&!(Number(P.decimal(data.jump_scale))>0)){throw Error('Invalid restored jump scale');}
+            if(data.cd){if(!data.jump_active||!data.selected||!data.cd.target||!Number.isInteger(data.cd.remaining)||data.cd.remaining<0||data.cd.remaining>3){throw Error('Invalid restored CD');}
+                P.counter(data.cd.target.check,true);P.counter(data.cd.target.error,true);showCD();}
             selection(await call(t,'GET','/selection'));sync();await loadRules(t);
             if(data.check===null&&rules.length){data.check=rules[0].check;data.error_start='0';}
             await details(t);await errors(t);
             if(data.selected){const v=await read(t,{kind:'records',check:data.selected.check,errors:[data.selected.error]});const values=recordRows(v.rows);
                 if(values.length!==1||values[0].check!==data.selected.check||values[0].local!==data.selected.error){throw Error('Invalid restored error');}selected=values[0];await geometry(t);}
-            ready=true;
+            await loadCD(t,effects);ready=true;showCD();
         }
-        async function run(fn,initial){if(task||!context()||!initial&&!ready){return;}const t={turn:turn,cancelled:false,abort:null};task=t;render();
-            try{await fn(t);check(t);note('Read-only result · private selection/panel; no review files changed.');}
+        async function run(fn,initial){if(task||!context()||!initial&&!ready){return;}const t={turn:turn,cancelled:false,abort:null,initial:!!initial,phase:null,notice:null};task=t;render();
+            try{await fn(t);check(t);if(panelSaved!==panelEdit){await save(t);}note(t.notice||'Read-only result · private selection/panel; no review files changed.');}
             catch(e){if(valid(t)){if(e.viewChanged){liveDirty=ready&&data.in_view;if(data.in_view){rows=[];}note(liveDirty?'View changed; updating the current-view list…':'View changed; reload review or repeat the intended action.');}
                 else{ready=false;rows=[];selected=points=null;complete=false;note('Review unavailable or update unconfirmed: '+e.message+' · Reload review; nothing was replayed.');}}}
             finally{if(valid(t)){task=null;render();const again=liveDirty&&ready&&data.in_view&&context().state_rev!==listRev;liveDirty=false;
-                if(again){run(async function(next){data.error_start='0';errorBack.length=0;await errors(next);});}}}
+                if(ready&&panelSaved!==panelEdit){run(save);}else if(again){run(async function(next){data.error_start='0';errorBack.length=0;await errors(next);});}}}
         }
         function reload(){const c=o.context();reset();if(!c||!c.drc){return;}bound=key(c);data=defaults();controls();note('Restoring private review state…');run(restore,true);}
         function changed(){const c=o.context();if(key(c)!==bound){reload();return;}controls();
             if(continuation&&continuationStamp!==filterStamp()){clearStep();}
-            if(painted&&(painted.stamp!==stamp()||c.pending)){painted=null;boxReset(true);}
+            if(painted&&(painted.stamp!==stamp()||c.pending)){painted=null;boxReset(true);if(o.hover){o.hover('');}}
             if(c&&ready&&data.in_view&&listRev!==c.state_rev){if(task){liveDirty=true;}else{run(async function(t){data.error_start='0';errorBack.length=0;await errors(t);});}}
         }
-        async function focusRead(t,r,fit){const c=context();if(!c||c.mode!=='explore'||c.pending){return;}const rev=c.state_rev;
-            const v=await read(t,{kind:'focus',check:r.check,error:r.local,fit:fit,isolate:false},true);
+        function scale(c){if(!c||!Array.isArray(c.camera)||!Array.isArray(c.pixels)||!(c.pixels[0]>0)){throw Error('Missing view scale');}const n=Number(P.decimal(c.camera[2]))/c.pixels[0];if(!(n>0&&Number.isFinite(n))){throw Error('Invalid view scale');}return n;}
+        async function focusRead(t,r,fit){const c=context();if(!c||c.mode!=='explore'||c.pending){return false;}const rev=c.state_rev,version=effects;
+            const locked=fit===false||fit===null&&(data.zoom_lock||data.jump_scale!==null&&Math.abs(scale(c)/Number(data.jump_scale)-1)>1e-6);
+            t.phase='focus';try{const v=await read(t,{kind:'focus',check:r.check,error:r.local,fit:!locked,isolate:false},true);
+            if(version!==effects){return false;}
             if(v.check!==r.check||v.local!==r.local||!v.navigation||v.navigation.kind!=='goto'||!Array.isArray(v.navigation.center_um)||v.navigation.center_um.length!==2){throw Error('Invalid error navigation');}
-            v.navigation.center_um.forEach(P.decimal);if(v.navigation.width_um!==undefined){if(!(Number(P.decimal(v.navigation.width_um))>0)){throw Error('Invalid error width');}}
-            if(context().state_rev!==rev||!o.navigate(v.navigation,c)){throw Error('View input changed; select Go again.');}
+            v.navigation.center_um.forEach(P.decimal);const width=Number(P.decimal(v.navigation.width_um));if(!(width>0)){throw Error('Invalid error width');}
+            if(context().state_rev!==rev||context().pending){t.notice='View input changed; select Go again.';return false;}
+            t.phase='move';controls();const outcome=await new Promise(function(resolve){t.abort=o.navigate(v.navigation,c,function(error,receipt){resolve({error:error,receipt:receipt});});});t.abort=null;check(t);
+            if(version!==effects){return false;}if(outcome.error){t.notice=outcome.error;return false;}
+            const receipt=outcome.receipt,now=context();if(!receipt||receipt.view_id!==now.view_id||receipt.epoch!==now.epoch||receipt.state_rev!==now.state_rev||now.pending){t.notice='Error view was superseded; CD was not changed.';return false;}
+            data.jump_active=data.focus_visible=true;data.jump_scale=String(width/c.pixels[0]);data.zoom_lock=locked;
+            book.clear('cd');cdSegments=null;cdGlobal=r.global;cdError='';data.cd={target:{check:r.check,error:r.local},remaining:3};showCD();
+            if(data.in_view){data.in_view=false;sync();data.error_start=r.local;errorBack.length=0;await errors(t);}
+            await save(t);await loadCD(t,version);return true;
+            }catch(e){if(e.mutation||version===effects){throw e;}return false;}finally{t.phase=null;}
         }
         function focus(fit){if(selected){run(function(t){return focusRead(t,selected,fit);});}}
         el('gd-reload').onclick=reload;
-        el('gd-filter').onclick=function(){run(async function(t){clearStep();boxReset(true);data.search=el('gd-search').value;data.rule_start='0';data.error_start='0';data.check=null;data.selected=null;selected=points=null;complete=false;
+        el('gd-filter').onclick=function(){run(async function(t){endState();clearStep();boxReset(true);data.search=el('gd-search').value;data.rule_start='0';data.error_start='0';data.check=null;data.selected=null;selected=points=null;complete=false;
             ruleBack.length=errorBack.length=0;await loadRules(t);if(rules.length){data.check=rules[0].check;}await details(t);await errors(t);await save(t);});};
         el('gd-waived').onchange=function(){run(async function(t){clearStep();boxReset(true);const v=el('gd-waived').value;data.waived=v==='all'?null:v==='yes';data.rule_start=data.error_start='0';ruleBack.length=errorBack.length=0;await loadRules(t);await errors(t);await save(t);});};
         ['in-view','selected-only','markers'].forEach(function(n){el('gd-'+n).onchange=function(){run(async function(t){data[n.replace('-','_')]=el('gd-'+n).checked;
-            clearStep();boxReset(true);if(n!=='markers'){data.error_start='0';errorBack.length=0;await errors(t);}await save(t);});};});
+            clearStep();boxReset(true);if(n==='markers'&&o.hover){o.hover('');}if(n!=='markers'){data.error_start='0';errorBack.length=0;await errors(t);}await save(t);});};});
         [['rule',ruleBack],['error',errorBack]].forEach(function(pair){const name=pair[0],back=pair[1];
             ['prev','next'].forEach(function(direction){el('gd-'+name+'-'+direction).onclick=function(){run(async function(t){const field=name+'_start',next=name==='rule'?ruleNext:errorNext;
                 clearStep();boxReset(true);if(direction==='prev'){if(!back.length){return;}data[field]=back.pop();}else{if(next===null){return;}if(back.length===64){back.shift();}back.push(data[field]);data[field]=next;}
                 if(name==='rule'){await loadRules(t);}else{await errors(t);}await save(t);});};});});
         el('gd-clear').onclick=function(){run(async function(t){clearStep();boxReset(true);selection(await call(t,'POST','/selection',{base_selection_rev:groups.revision,body:{kind:'clear_all'}}));if(data.selected_only){data.error_start='0';await errors(t);}});};
         el('gd-go').onclick=function(){focus(false);};el('gd-fit').onclick=function(){focus(true);};
+        el('gd-end-jump').onclick=endJump;
         el('gd-step-prev').onclick=function(){step(true,false);};el('gd-step-next').onclick=function(){step(false,false);};el('gd-step-continue').onclick=function(){step(false,true);};
         function toggleBox(){if(boxMode){boxReset(true);return true;}const c=context();if(!ready||task||!c||c.pending||data.check===null||!data.markers){return false;}boxMode=true;boxReset(false);return true;}
         el('gd-box').onclick=toggleBox;
@@ -191,13 +245,17 @@
                 boxReset(false);clearStep();const body={kind:'apply',check:data.check,errors:rows.map(function(r){return r.local;}),mode:mode(e),bbox_um:area.map(String),waived:data.waived};
                 run(async function(t){selection(await call(t,'POST','/selection',{base_selection_rev:groups.revision,body:body},true));if(data.selected_only){data.error_start='0';await errors(t);}});return true;
             }
-            let best=null,distance=37;v.hits.forEach(function(h){const dx=v.rect.left+h.xy[0]/v.size[0]*v.rect.width-x,dy=v.rect.top+h.xy[1]/v.size[1]*v.rect.height-y,d=dx*dx+dy*dy;
-                if(d<=36&&d<distance){best=h.row;distance=d;}});if(!best){return false;}choose(best,e,twice);return true;
+            const best=hit(v,x,y);if(!best){return false;}choose(best,e,twice,false);return true;
         }
-        function move(x,y){if(!boxMode||!boxStart){return;}const v=hitContext(x,y),xy=v&&world(v,x,y);if(xy){boxEnd=xy;o.repaint();}}
+        function hit(v,x,y){let best=null,distance=37;v.hits.forEach(function(h){const dx=v.rect.left+h.xy[0]/v.size[0]*v.rect.width-x,dy=v.rect.top+h.xy[1]/v.size[1]*v.rect.height-y,d=dx*dx+dy*dy;
+            if(d<=36&&d<distance){best=h.row;distance=d;}});return best;}
+        function move(x,y){const v=hitContext(x,y);if(o.hover){const r=!boxMode&&v&&hit(v,x,y),rule=r&&rules.find(function(n){return n.check===r.check;});
+            o.hover(r?(rule?rule.name:'Rule '+P.next(r.check))+' #'+P.next(r.local)+' (global '+r.global+')'+(r.status?' · waived':''):'');}
+            if(!boxMode||!boxStart){return;}const xy=v&&world(v,x,y);if(xy){boxEnd=xy;o.repaint();}}
         function keyInput(k,shift){if(!ready||!context()){return false;}
             if(k==='Escape'&&boxMode){boxReset(!boxStart);return true;}if(k==='e'){return toggleBox();}
             if(k==='Escape'&&(continuation||task&&task.stepRead)){if(task){cancel();}clearStep();render();note('Error search stopped; no selection edit was replayed.');return true;}
+            if(k==='Escape'){return popCD(true)||endJump();}
             if(k===','||k==='.'||k==='Tab'){return step(k===','||k==='Tab'&&!!shift,false);}return false;
         }
         el('gd-errors').onkeydown=function(e){if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.isComposing&&(e.key==='ArrowUp'||e.key==='ArrowDown')){if(step(e.key==='ArrowUp',false)){e.preventDefault();}}};
@@ -206,14 +264,16 @@
             markers.forEach(function(r){const b=bbox(r.bbox_um),xy=G.point(p,b[0]*.5+b[2]*.5,b[1]*.5+b[3]*.5);if(!xy.every(Number.isFinite)){return;}
                 if(xy[0]<-4||xy[0]>size[0]+4||xy[1]<-4||xy[1]>size[1]+4){return;}
                 const center=xy.map(Math.round);hits.push({row:r,xy:center});ctx.fillStyle=contains(r)?'#f4cd64':r.status?'#70da9a':'#ff6969';ctx.fillRect(center[0]-3,center[1]-3,7,7);});
-            if(selected){ctx.strokeStyle=selected.status?'#70da9a':'#ff6969';ctx.lineWidth=2;
+            if(selected&&data.focus_visible){ctx.strokeStyle=selected.status?'#70da9a':'#ff6969';ctx.lineWidth=2;
                 if(complete&&points){ctx.beginPath();for(let i=0;i<points.length;i+=2){const xy=G.point(p,points[i],points[i+1]);if(i===0||selected.kind==='e'&&i%4===0){ctx.moveTo(xy[0],xy[1]);}else{ctx.lineTo(xy[0],xy[1]);}}if(selected.kind==='p'){ctx.closePath();}ctx.stroke();}
                 else{const b=bbox(selected.bbox_um),a=G.point(p,b[0],b[3]),z=G.point(p,b[2],b[1]);ctx.strokeRect(a[0],a[1],z[0]-a[0],z[1]-a[1]);}}
             if(boxMode&&boxStart&&boxEnd){const a=G.point(p,boxStart[0],boxStart[1]),b=G.point(p,boxEnd[0],boxEnd[1]);ctx.strokeStyle='#f4cd64';ctx.lineWidth=rect&&rect.width>0?size[0]/rect.width:1;
                 ctx.setLineDash([5*ctx.lineWidth,3*ctx.lineWidth]);ctx.strokeRect(a[0],a[1],b[0]-a[0],b[1]-a[1]);ctx.setLineDash([]);}
             ctx.restore();painted={p:p,size:size.slice(),rect:rect,stamp:stamp(),hits:hits};
+            if(context().mode==='follow'&&hasCD()&&cdSegments&&rect&&rect.width>0){o.rulers.paint(ctx,cdSegments.slice(0,data.cd.remaining),function(x,y){return G.point(p,x,y);},{pixels:size,dpr:size[0]/rect.width});}
         }
         controls();return {changed:changed,reset:reset,paint:paint,click:click,move:move,key:keyInput,
+            popCD:popCD,restoring:function(){return !!task&&task.initial;},visible:function(){return ready&&!!data&&data.markers&&data.shown;},
             active:function(){return boxMode;},leave:function(){boxReset(true);}};
     }
     const api={bind:bind};if(typeof module==='object'&&module.exports){module.exports=api;}else{root.FloeGuestDRC=api;}

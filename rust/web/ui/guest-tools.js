@@ -11,6 +11,7 @@
             now:o.now,setTimeout:o.window.setTimeout.bind(o.window),clearTimeout:o.window.clearTimeout.bind(o.window)};
         inspector=o.inspect.bind(Object.assign({},common,{send:wire.sender('inspect'),layers:o.layers||function(){}}));
         measurement=o.measure.bind(Object.assign({},common,{send:wire.sender('measure'),rulers:o.rulers,
+            history:o.history,popCD:o.popCD,cdBusy:o.cdBusy,cdVisible:o.cdVisible,
             selection:function(){return inspector.selection();},modeChanged:function(){
                 if(!measurement){return;}
                 const next=measurement.active();

@@ -10,6 +10,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest-drc.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest-drc-step.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/guest-focus.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest-layers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/query.js"></script>
   <script defer src="/assets/@@BUNDLE@@/inspect.js"></script>
@@ -89,9 +90,13 @@
         <button id="gd-step-continue" hidden>Continue search</button><p id="gd-step-status" class="note"></p>
         <button id="gd-box" aria-pressed="false">Box select (e)</button><p id="gd-box-status" class="note"></p>
         <p class="note">Click selects; Shift adds; Ctrl/Command toggles. This never changes the owner's selection.</p>
-        <p class="note">Canvas markers select the displayed page; double-click frames an error in Explore. Box selection uses two corners on the current page only; drag still pans. Comma/period or Tab/Shift+Tab traverse the current rule without moving the camera.</p>
+        <p class="note">Canvas markers select the displayed page; plain double-click frames an error in Explore. Box selection uses two corners on the current page only; drag still pans. Comma/period or Tab/Shift+Tab traverse the current rule; after a confirmed error jump, traversal also moves your Explore view.</p>
         <p id="gd-selection" class="note"></p><button id="gd-clear">Clear selections</button>
         <p id="gd-selected" class="note"></p><div class="button-row"><button id="gd-go">Go · same scale</button><button id="gd-fit">Frame error</button></div>
+        <p id="gd-jump-status" class="note"></p><button id="gd-end-jump">End error navigation</button>
+        <h3>CD · last confirmed jump</h3><p id="gd-cd-title" class="note"></p><ul id="gd-cd-values"></ul>
+        <p class="note">Once a jump is confirmed, rule stepping follows errors. Manual zoom locks its scale; Frame error unlocks it. Marker clicks never jump. CD stays on the last confirmed jump, not a newly selected marker.</p>
+        <p class="note">k removes the newest ruler; Shift+K clears rulers. Escape cancels a box, then CD, then error navigation. Hidden markers also hide CD. Reload restores CD without repeating a move.</p>
         <p class="note">Follow mode cannot move the owner's camera. Use Explore for your own error navigation.</p>
         <p id="gd-status" class="note" role="status"></p>
       </section>
