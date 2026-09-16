@@ -157,6 +157,8 @@ DRC 순회/마커/CD와 실제 수용은 남는다. 최종 검증 상태는 해�
 M2b-4b3는 [표시 receipt 기반 query/룰러·pointer](WEBUI_SHARING_QUERY_UI.ko.md)를
 연결한다. 실제 표시된 foreground/전체 margin만 조회하며 Follow·jobdeck capability를
 보존한다. 다음 구현은 DRC 순회/마커/box/CD이고, 실제 브라우저·현장 수용은 남는다.
+M2b-4b4는 [유계 DRC 순회·마커/박스 선택](WEBUI_SHARING_DRC_NAV.ko.md)을 연결한다.
+순회는 선택 집합·카메라를 바꾸지 않는다. CD/jump-mode 연결과 실제 수용은 남는다.
 `shares=false`는 유지하고 `delivery`는 follow=`follow_frames`, explore=`explore_frames`다.
 전송 기반을 전체 공유 완료로 계산하지 않는다. 원격 공개·노트 본문·파일 탐색/쓰기는 열지 않는다.
 
@@ -233,7 +235,7 @@ M4g-24b/c·25·26b에서 세 항목의 로컬 구현·게이트를 각각 연결
 |---|---|---|
 | M0 | 로컬 기능/API·의존성 조사 진행, 현장 감사 보류 | 실제 Firefox/ETX 환경·운영 정책 확인 |
 | M1 | Rust CLI/서비스·로컬 웹 뷰어·margin 구현 | 잔여 열기/CLI parity, G1 지연·pacing 및 최종 G4 수용 |
-| M2 | 로컬 DRC·공유 인증/권한·follow·독립 explore 렌더·명시 DRC API·CLI opt-in/초대·guest DRC 목록/선택·layer/query/룰러/pointer UI | guest DRC 순회/마커/box/CD·실제 브라우저·원격 배포 및 수용 (`shares=false`, loopback-only) |
+| M2 | 로컬 DRC·공유 인증/권한·follow·독립 explore 렌더·명시 DRC API·CLI opt-in/초대·guest DRC 목록/선택/순회/마커/box·layer/query/룰러/pointer UI | guest DRC CD/jump-mode·실제 브라우저·원격 배포 및 수용 (`shares=false`, loopback-only) |
 | M3 | 현장 실행 불가로 보류 | TeeBox Firefox-in-ETX와 GTK 비교, G2 판정 |
 | M4 | 주요 조작·내보내기·설정·Rust portable 구현 | 아래 로컬 잔여와 Linux/브라우저 수용·G4 전체 감사, GTK 은퇴 판정 |
 | M5 | world-tile 조건부 보류 | F2R-03c/10 전제와 실측으로 착수 판단. 미구현을 완료로 세지 않음 |

@@ -65,6 +65,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../ui/guest-drc.js"),
         ),
+        "guest-drc-step.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/guest-drc-step.js"),
+        ),
         "drc-geometry.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/drc-geometry.js"),

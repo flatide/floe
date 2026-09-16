@@ -424,6 +424,7 @@ struct SelectionSet {
     view_id: String,
     revision: String,
     base_selection_rev: String,
+    state_rev: Option<String>,
     body: shared::SelectionEdit,
 }
 async fn selection_set(
@@ -445,22 +446,31 @@ async fn selection_set(
         };
         let base =
             crate::view::counter(&body.base_selection_rev).map_err(|_| StatusCode::BAD_REQUEST)?;
-        fenced(&gate, &t, None, || {
+        let edit = body.body.prepare().map_err(status)?;
+        let state = body
+            .state_rev
+            .as_deref()
+            .map(crate::view::counter)
+            .transpose()
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        if edit.needs_view() && state.is_none() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        fenced(&gate, &t, state, || {
             shared::selection_base(&t.lease.panel.lock().unwrap(), base)
         })?;
-        let edit = body.body.prepare().map_err(status)?;
         let ticket = admit(&gate, &t, |permit| {
             edit.submit(&t.reader, &t.binding().revision, permit)
         })?;
         let bytes = wait(&gate, &t, ticket).await?;
-        let value = fenced(&gate, &t, None, || {
+        let value = fenced(&gate, &t, state, || {
             edit.apply(&mut t.lease.panel.lock().unwrap(), base, &bytes)
         })?;
-        encode(&t, value)
+        Ok::<_, StatusCode>((state, encode(&t, value)?))
     }
     .await;
     match result {
-        Ok(b) => response(gate, t, None, b),
+        Ok((state, b)) => response(gate, t, state, b),
         Err(e) => transport::error(e),
     }
 }

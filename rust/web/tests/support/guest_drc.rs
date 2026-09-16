@@ -400,6 +400,66 @@ async fn independent_drc_guests_are_explicit_read_only_and_revision_bound() {
         .await;
         assert_eq!(code, 200, "{focus}");
         guest.goto(focus["data"]["navigation"].clone()).await;
+        // Explicit page candidates, not a whole-pack spatial query. A stale
+        // camera/missing fence must not consume the selection CAS revision.
+        let area = if local == "1" {
+            json!(["49", "29", "52", "32"])
+        } else {
+            json!(["29", "59", "32", "62"])
+        };
+        let mut boxed = guest.body(&revision, json!({"kind":"apply","check":"0","errors":["0","1","2"],"mode":"replace","bbox_um":area,"waived":false}));
+        boxed["base_selection_rev"] = s["data"]["selection_rev"].clone();
+        let mut missing = boxed.clone();
+        missing.as_object_mut().unwrap().remove("state_rev");
+        assert_eq!(
+            call(&h, &guest.login, &guest.id, "POST", "/selection", missing)
+                .await
+                .0,
+            400
+        );
+        let mut stale_box = boxed.clone();
+        stale_box["state_rev"] = json!("1");
+        assert_ne!(stale_box["state_rev"], boxed["state_rev"]);
+        assert_eq!(
+            call(&h, &guest.login, &guest.id, "POST", "/selection", stale_box)
+                .await
+                .0,
+            409
+        );
+        let (code, picked) = call(
+            &h,
+            &guest.login,
+            &guest.id,
+            "POST",
+            "/selection",
+            boxed.clone(),
+        )
+        .await;
+        assert_eq!(code, 200, "{picked}");
+        assert_eq!(picked["data"]["rules"][0]["errors"], json!([local]));
+        assert_eq!(
+            call(&h, &guest.login, &guest.id, "POST", "/selection", boxed)
+                .await
+                .0,
+            409
+        );
+        let (code, stepped) = call(&h, &guest.login, &guest.id, "POST", "/read", guest.body(&revision,
+            json!({"kind":"filtered_step","check":"0","after":local,"backwards":false,"in_view":false,"selection_rev":picked["data"]["selection_rev"]}))).await;
+        assert_eq!(code, 200, "{stepped}");
+        assert_eq!(
+            stepped["data"]["hit"]["local"], local,
+            "single selected candidate wraps without editing its group"
+        );
+        let mut waived = guest.body(&revision, json!({"kind":"apply","check":"0","errors":["0","1","2"],"mode":"add","bbox_um":["0","0","100","100"],"waived":true}));
+        waived["base_selection_rev"] = picked["data"]["selection_rev"].clone();
+        let (code, unchanged) =
+            call(&h, &guest.login, &guest.id, "POST", "/selection", waived).await;
+        assert_eq!(code, 200, "{unchanged}");
+        assert_eq!(
+            unchanged["data"]["rules"][0]["errors"],
+            json!([local]),
+            "status filter is evaluated natively, not trusted from the browser"
+        );
         for forbidden in [
             json!({"kind":"focus","check":"0","error":local,"fit":true,"isolate":true}),
             json!({"kind":"types","start":"0","limit":1}),

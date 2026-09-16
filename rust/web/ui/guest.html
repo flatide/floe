@@ -9,6 +9,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-geometry.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest-drc.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/guest-drc-step.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest-layers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/query.js"></script>
   <script defer src="/assets/@@BUNDLE@@/inspect.js"></script>
@@ -84,7 +85,11 @@
         <label class="check"><input id="gd-markers" type="checkbox" checked> DRC markers and outline</label>
         <div id="gd-errors" class="guest-review-list" aria-label="Shared DRC errors"></div>
         <div class="button-row"><button id="gd-error-prev">Previous errors</button><button id="gd-error-next">Next errors</button></div>
+        <div class="button-row"><button id="gd-step-prev">Previous error (,)</button><button id="gd-step-next">Next error (.)</button></div>
+        <button id="gd-step-continue" hidden>Continue search</button><p id="gd-step-status" class="note"></p>
+        <button id="gd-box" aria-pressed="false">Box select (e)</button><p id="gd-box-status" class="note"></p>
         <p class="note">Click selects; Shift adds; Ctrl/Command toggles. This never changes the owner's selection.</p>
+        <p class="note">Canvas markers select the displayed page; double-click frames an error in Explore. Box selection uses two corners on the current page only; drag still pans. Comma/period or Tab/Shift+Tab traverse the current rule without moving the camera.</p>
         <p id="gd-selection" class="note"></p><button id="gd-clear">Clear selections</button>
         <p id="gd-selected" class="note"></p><div class="button-row"><button id="gd-go">Go · same scale</button><button id="gd-fit">Frame error</button></div>
         <p class="note">Follow mode cannot move the owner's camera. Use Explore for your own error navigation.</p>

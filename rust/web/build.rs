@@ -8,6 +8,7 @@ fn main() {
         "ui/guest.html",
         "ui/guest.js",
         "ui/guest-drc.js",
+        "ui/guest-drc-step.js",
         "ui/guest-layers.js",
         "ui/guest-display.js",
         "ui/guest-query-wire.js",

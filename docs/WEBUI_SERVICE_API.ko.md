@@ -24,6 +24,10 @@ M2b-4b2의 [scoped palette](WEBUI_SHARING_LAYERS.ko.md)는 guest 전용
 목록/그룹은 승인된 실제 plane만 투영하며 owner catalogue/style 쓰기 경로가 아니다.
 M2b-4b3의 [guest query/룰러·pointer UI](WEBUI_SHARING_QUERY_UI.ko.md)는 기존 네 개의
 `explore.*` 조회/측정 명령만 사용한다. endpoint·native geometry 정책·권한은 추가하지 않는다.
+M2b-4b4의 [DRC 순회·박스 선택](WEBUI_SHARING_DRC_NAV.ko.md)은 기존 guest read의
+`filtered_step`을 사용한다. guest selection Apply의 선택적 `bbox_um`/`waived`는
+명시 후보 64개 안에서 native 필터링하며 bbox에는 `state_rev`가 필수다.
+파일 쓰기/노트/SVRF·guest 카메라 권한은 확대하지 않는다.
 M4g-2의 실제 `GET /api/v1/views/{id}/minimap/{base}`는 owner 인증+CSRF로 현재 view의
 메모리 palette 베이스(180×180 ASCII 인덱스)만 반환한다. `base`는 `full` 또는 실제
 저장된 depth의 정규 십진수다. 임의 파일/geometry 조회나 새 렌더를 하지 않는다.

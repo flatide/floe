@@ -45,6 +45,7 @@
         reset();
         return {changed:changed,reset:reset,receive:wire.receive,key:key,
             active:function(){return active;},
+            leave:function(){measurement.leave();},
             click:function(x,y,m){changed();return bound?(active?measurement.click(x,y,m):inspector.click(x,y,m)):false;},
             move:function(x,y,m){changed();if(bound){if(active){measurement.move(x,y,m);}else{inspector.move(x,y);}}},
             paint:function(p,s){if(bound){inspector.paint(p,s);measurement.paint(p,s);if(!p||!s){inspector.flush();measurement.flush();}}},

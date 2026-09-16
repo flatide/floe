@@ -6,10 +6,12 @@ const auth={protocol:1,bundle,share_id:id,session_id:'e'.repeat(64),csrf:'f'.rep
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 function environment(mode='explore',hash='#invite='+secret,grant=false){
     const nodes=new Map(),events={},requests=[],sockets=[],timers=new Map(),rafs=new Map(),storage=new Map([['floe-session:http://127.0.0.1:1234','OWNER'],['floe-default-pending:OWNER','PRIVATE']]),reads=[];
-    let timerId=0,doc,sessionCode=200,clock=10000;
+    let timerId=0,doc,sessionCode=200,clock=10000,reviewRev='1',groupRev='1',group=[];
+    const reviewRow={check:'0',local:'0',global:'1',kind:'p',status:0,bbox_um:['20','8','24','12'],points:'4'};
     class Element{
         constructor(name){this.id=name;this.value='';this.checked=false;this.disabled=false;this.hidden=false;this.width=1;this.height=1;this.pixels=null;this.textContent='';this.listeners={};this.children=[];this.attrs={};this.style={};}
         setAttribute(k,v){this.attrs[k]=v;}
+        set textContent(v){this.text=v;this.children=[];}get textContent(){return this.text||'';}appendChild(v){this.children.push(v);}
         getContext(){const self=this;return {save(){},restore(){},clearRect(){self.pixels=new Uint8ClampedArray(self.width*self.height*4);},beginPath(){},rect(){},clip(){},moveTo(){},lineTo(){},closePath(){},stroke(){},strokeRect(){},fill(){},setTransform(){},setLineDash(){},fillText(){},measureText(){return {width:20};},fillRect(){self.pixels=new Uint8ClampedArray(self.width*self.height*4);},
             putImageData(image){self.pixels=image.data.slice();},drawImage(image,dx=0,dy=0){if(!self.pixels||self.pixels.length!==self.width*self.height*4){self.pixels=new Uint8ClampedArray(self.width*self.height*4);}
                 for(let y=0;y<image.height;y++)for(let x=0;x<image.width;x++){const a=x+dx,b=y+dy;if(a>=0&&b>=0&&a<self.width&&b<self.height){self.pixels.set(image.pixels.slice((y*image.width+x)*4,(y*image.width+x+1)*4),(b*self.width+a)*4);}}}};}
@@ -32,10 +34,18 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
             let v;if(this.path.endsWith('/exchange')){assert.equal(entry.body.invite,secret);v=auth;this.status=200;}
             else{assert.equal(this.headers['X-Floe-Guest-CSRF'],auth.csrf);this.status=sessionCode;
                 if(this.path.endsWith('/layers')){assert.equal(entry.body.view_id,view);v={view_id:view,data:{state_rev:entry.body.state_rev,render_key:'1',start:0,next:null,total:0,all_total:0,rows:[]}};}
-                else if(this.path.endsWith('/drc')){assert(grant);v={view_id:view,revision:'drc-rev',data:{checks:'0',errors:'0',precision:'1000',format:'ice',truncated_records:'0',read_only:true}};}
-                else if(this.path.endsWith('/drc/panel')){assert(grant);v={view_id:view,revision:'drc-rev',data:{panel_rev:'1',body:null}};}
-                else if(this.path.endsWith('/drc/selection')){assert(grant);v={view_id:view,revision:'drc-rev',data:{selection_rev:'1',total:'0',limit:5000,rules:[]}};}
-                else if(this.path.endsWith('/drc/read')){assert(grant);assert.equal(entry.body.body.kind,'rules');assert.equal(entry.body.view_id,view);v={view_id:view,revision:'drc-rev',data:{rows:[],next:null}};}
+                else if(this.path.endsWith('/drc')){assert(grant);v={view_id:view,revision:'drc-rev',data:{checks:grant==='records'?'1':'0',errors:grant==='records'?'1':'0',precision:'1000',format:'ice',truncated_records:'0',read_only:true}};}
+                else if(this.path.endsWith('/drc/panel')){assert(grant);if(this.method==='POST'){assert.equal(entry.body.base_panel_rev,reviewRev);reviewRev=P.next(reviewRev);}v={view_id:view,revision:'drc-rev',data:{panel_rev:reviewRev,body:entry.body?entry.body.body:null}};}
+                else if(this.path.endsWith('/drc/selection')){assert(grant);if(this.method==='POST'){assert.equal(entry.body.base_selection_rev,groupRev);groupRev=P.next(groupRev);group=entry.body.body.errors||[];}
+                    v={view_id:view,revision:'drc-rev',data:{selection_rev:groupRev,total:String(group.length),limit:5000,rules:group.length?[{check:'0',errors:group}]:[]}};}
+                else if(this.path.endsWith('/drc/read')){assert(grant);assert.equal(entry.body.view_id,view);const r=entry.body.body;let data;
+                    if(r.kind==='rules'){data={rows:grant==='records'?[{check:'0',name:'WIDTH',errors:'1',waived:'0'}]:[],next:null};}
+                    else if(r.kind==='rule'){data={check:'0',description:'width'};}
+                    else if(r.kind==='list'||r.kind==='records'){data={rows:[reviewRow],next:null};}
+                    else if(r.kind==='geometry'){data={...reviewRow,start:'0',total:'4',next:null,precision:'1000',points_dbu:[['20000','8000'],['24000','8000'],['24000','12000'],['20000','12000']]};}
+                    else if(r.kind==='focus'){data={check:'0',local:'0',navigation:{kind:'goto',center_um:['22','10'],width_um:'8'}};}
+                    else if(r.kind==='filtered_step'){data={hit:reviewRow,next:null,scanned:'1',bbox_um:null,selection_rev:r.selection_rev};}
+                    else{throw Error('unexpected guest DRC read '+r.kind);}v={view_id:view,revision:'drc-rev',data};}
                 else{v=this.method==='DELETE'?null:{share_id:id,mode,read_only:true,delivery:mode==='follow'?'follow_frames':'explore_frames',...grant&&{drc:{id:'7'.repeat(64),revision:'drc-rev'}}};}}
             this.responseText=v?JSON.stringify(v):'';this.onload();}
     }
@@ -44,7 +54,7 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
         send(text){this.sent.push(JSON.parse(text));}close(){this.readyState=3;}text(v){this.onmessage({data:JSON.stringify(v)});}binary(b){this.onmessage({data:b});}
     }
     const c=Guest.bind({window:win,document:doc,location,history,XHR,WebSocket:WS,protocol:P,now:()=>clock,
-        drc:require('./guest-drc.js'),geometry:require('./drc-geometry.js'),selection:require('./drc-groups.js'),
+        drc:require('./guest-drc.js'),drcSteps:require('./guest-drc-step.js'),geometry:require('./drc-geometry.js'),selection:require('./drc-groups.js'),
         layers:require('./guest-layers.js'),
         display:require('./guest-display.js'),tools:require('./guest-tools.js'),queryWire:require('./guest-query-wire.js'),query:require('./query.js'),
         inspect:require('./inspect.js'),measure:require('./measure.js'),rulers:require('./rulers.js'),gestures:require('./gestures.js'),
@@ -55,7 +65,7 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
     function timer(ms){const found=[...timers].find(([,t])=>t.ms===ms);assert(found,'timer '+ms);if(!found[1].interval){timers.delete(found[0]);}clock+=ms;found[1].f();}
     function advance(ms=100){const end=clock+ms;while(true){const entry=[...timers].sort((a,b)=>a[1].at-b[1].at)[0];if(!entry||entry[1].at>end){break;}clock=entry[1].at;if(entry[1].interval){entry[1].at+=entry[1].ms;}else{timers.delete(entry[0]);}entry[1].f();}clock=end;}
     function mouse(type,x,y,button=0,extra={}){const e={clientX:x,clientY:y,button,buttons:type==='mouseup'?0:button===0?1:button===1?4:2,preventDefault(){},...extra};
-        if(type==='mousedown'){el('guest-viewport').listeners.mousedown(e);}else if(type==='mousemove'){if(el('guest-viewport').listeners.mousemove){el('guest-viewport').listeners.mousemove(e);}events.mousemove(e);}else{events.mouseup(e);}}
+        if(type==='mousedown'){el('guest-viewport').listeners.mousedown(e);}else if(type==='mousemove'){if(el('guest-viewport').listeners.mousemove){el('guest-viewport').listeners.mousemove(e);}events.mousemove(e);}else{if(el('guest-viewport').listeners.mouseup){el('guest-viewport').listeners.mouseup(e);}events.mouseup(e);}}
     return {c,el,win,doc,events,requests,sockets,storage,reads,location,hello,state,raf,timer,advance,mouse,timers,rafs,code(n){sessionCode=n;}};
 }
 function packet(extra={},color=[1,2,3,255]){
@@ -118,6 +128,22 @@ function measureReply(ws,request,point){ws.text({type:'measure.result',seq:reque
         assert.equal(review.el('gd-panel').hidden,false);assert.equal(review.requests.filter(r=>r.path.includes('/drc')).length,4);review.sockets[0].binary(packet());review.raf();assert.equal(review.sockets[0].sent.at(-1).disposition,'displayed');
         assert(!review.el('guest-drc-canvas').hidden);assert.equal(review.el('guest-drc-canvas').style.width,'64px');
         review.sockets[0].onclose();assert(review.el('gd-panel').hidden);assert(review.el('guest-drc-canvas').hidden);assert.equal(review.el('guest-drc-canvas').width,1);}
+    // Exercise actual mouse events and the real inspection/ruler controllers,
+    // including a real DRC page: gestures may not cancel a box on mousedown.
+    for(const mode of ['follow','explore']){
+        const r=environment(mode,'#invite='+secret,'records');await r.c.start();r.hello();const w=r.sockets[0];w.text(r.state());await tick();
+        w.binary(packet(exactScene));r.raf();click(r,22,22);await tick();assert.match(r.el('gd-selection').textContent,/1 selected/);
+        assert.equal(w.sent.length,1,'marker selection must not send a geometry query or move');
+        r.el('gd-box').onclick();r.raf();click(r,19,19);r.raf();assert.equal(r.el('gd-box').attrs['aria-pressed'],'true');
+        click(r,25,25);await tick();const change=r.requests.filter(v=>v.path.endsWith('/drc/selection')&&v.method==='POST').at(-1);
+        assert.deepEqual(change.body.body.bbox_um,['19','7','25','13']);assert.equal(change.body.state_rev,'1');assert.equal(w.sent.length,1);
+        let prevented=false;r.el('guest-viewport').listeners.keydown({key:'Tab',preventDefault(){prevented=true;}});await tick();assert(prevented);
+        assert(r.requests.some(v=>v.body&&v.body.body&&v.body.body.kind==='filtered_step'));assert.equal(w.sent.length,1);
+        if(mode==='explore'){
+            r.el('gd-box').onclick();r.raf();r.mouse('mousedown',10,10);r.mouse('mousemove',30,10);r.raf();r.mouse('mouseup',30,10);assert.equal(w.sent.at(-1).type,'explore.set','box mode drag still pans');
+        }
+        w.onclose();
+    }
     // Exercise actual mouse events and the real inspection/ruler controllers,
     // not a second mock API that can skip the displayed-frame ACK boundary.
     const inspect=environment();await inspect.c.start();const iw=inspect.sockets[0];inspect.hello();iw.text(inspect.state());

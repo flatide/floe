@@ -28,17 +28,20 @@
             c.view_id!==current.view_id||c.epoch!==current.epoch||c.state_rev!==current.state_rev){return false;}edit(body);return true;}
         const layers=o.layers?o.layers.bind({el:el,document:doc,protocol:P,http:request,context:viewContext,edit:scopedEdit}):null;
         function panelsChanged(){if(drc){drc.changed();}if(layers){layers.changed();}if(queryTools){queryTools.changed();}}
-        const drc=o.drc?o.drc.bind({el:el,document:doc,protocol:P,geometry:o.geometry,selection:o.selection,http:request,
+        const drc=o.drc?o.drc.bind({el:el,document:doc,protocol:P,geometry:o.geometry,selection:o.selection,steps:o.drcSteps,http:request,
+            rect:function(){return drcCanvas.getBoundingClientRect();},
             context:function(){return !stopped&&!suspended&&hello&&state&&session.drc?{view_id:hello.view_id,epoch:hello.connection_epoch,
-                state_rev:state.state_rev,mode:session.mode,drc:session.drc,pending:inputPending()}:null;},
+                state_rev:state.state_rev,mode:session.mode,drc:session.drc,pending:inputPending(true)||!!dragShift||!!gesture&&gesture.moving()}:null;},
+            modeChanged:function(active){if(active&&queryTools&&queryTools.active()){queryTools.leave();}if(active&&gesture){gesture.cancel();}
+                viewport.style.cursor=active?'crosshair':'';},
             repaint:function(){compose();},navigate:function(n,c){if(!hello||!state||stopped||suspended||session.mode!=='explore'||flight||accepted||queue.length||
                 c.view_id!==hello.view_id||c.epoch!==hello.connection_epoch||c.state_rev!==state.state_rev){return false;}edit({navigation:n});return true;}}):null;
         if(o.tools){queryTools=o.tools.bind({window:win,document:doc,protocol:P,query:o.query,wire:o.queryWire,inspect:o.inspect,measure:o.measure,rulers:o.rulers,
             context:function(){return queryContext(false);},now:now,send:function(v){
                 if(!socket||socket.bufferedAmount>16384||new TextEncoder().encode(JSON.stringify(Object.assign({},v,{seq:P.next(seq)}))).length>8192){throw Error('Guest query input limit');}return send(v);},
             layers:function(pairs){if(layers&&layers.highlight){layers.highlight(pairs);}},
-            modeChanged:function(){if(gesture){gesture.cancel();}cursor();}});}
-        function cursor(){viewport.style.cursor=gesture&&gesture.bandActive()?'crosshair':gesture&&gesture.active()?'grabbing':queryTools&&queryTools.active()?'crosshair':'';panelsChanged();}
+            modeChanged:function(){if(queryTools&&queryTools.active()&&drc){drc.leave();}if(gesture){gesture.cancel();}cursor();}});}
+        function cursor(){viewport.style.cursor=gesture&&gesture.bandActive()?'crosshair':gesture&&gesture.active()?'grabbing':queryTools&&queryTools.active()||drc&&drc.active()?'crosshair':'';panelsChanged();}
         function paintOverlays(resizeOnly){let size=null,projection=null;
             if(state&&displayed){try{size=o.display.size(state.pixels,canvas.getBoundingClientRect(),viewport.getBoundingClientRect());
                 projection=o.geometry.projection({bbox_dbu:state.bbox_dbu,width:state.pixels[0],height:state.pixels[1]},dragShift||[0,0],state.dbu_um);}catch(_){size=null;}}
@@ -46,7 +49,8 @@
             drcCanvas.hidden=!drc||!session||!session.drc||!projection||!size;
             if(!drcCanvas.hidden){const w=size.pixels[0],h=size.pixels[1];if(drcCanvas.width!==w||drcCanvas.height!==h){drcCanvas.width=w;drcCanvas.height=h;}
                 drcCanvas.style.width=w/size.dpr+'px';drcCanvas.style.height=h/size.dpr+'px';drcCanvas.style.left=size.left+'px';drcCanvas.style.top=size.top+'px';
-                drcContext.clearRect(0,0,w,h);drc.paint(drcContext,projection,state.pixels);}
+                drcContext.clearRect(0,0,w,h);drc.paint(drcContext,projection,state.pixels,drcCanvas.getBoundingClientRect());}
+            else if(drc){drc.paint(null,null,null,null);}
             if(queryTools){queryTools.paint(projection,size);}}
         function status(s){el('guest-status').textContent=s;}
         function remove(){try{win.sessionStorage.removeItem(key);}catch(_){/* no persistent fallback */}}
@@ -190,13 +194,21 @@
         ['depth','detail','thin'].forEach(function(k){el('guest-'+k).onchange=function(){const b={};b[k]=el('guest-'+k).value;edit(b);};});
         ['frames','labels','mono'].forEach(function(k){el('guest-'+k).onchange=function(){const b={};b[k]=el('guest-'+k).checked;edit(b);};});
         el('guest-go').onclick=function(){try{const n={kind:'goto',center_um:[P.decimal(el('guest-x').value.trim()),P.decimal(el('guest-y').value.trim())]},w=el('guest-width').value.trim();if(w){n.width_um=P.decimal(w);}nav(n);}catch(e){status(e.message);}};
-        viewport.addEventListener('keydown',function(e){if(e.isComposing||e.ctrlKey||e.metaKey||e.altKey||!session||session.mode!=='explore'){return;}
+        viewport.addEventListener('keydown',function(e){if(e.isComposing||e.ctrlKey||e.metaKey||e.altKey||!session){return;}
             if(e.key==='Escape'&&gesture&&gesture.active()){e.preventDefault();gesture.cancel();return;}
+            if(drc&&(!queryTools||!queryTools.active())&&drc.key(e.key,e.shiftKey)){e.preventDefault();cursor();return;}
+            if(session.mode!=='explore'){return;}
             if(queryTools&&queryTools.key(e.key)){e.preventDefault();return;}
             const a=e.shiftKey?0.1:0.5,pan={ArrowLeft:[-a,0],ArrowRight:[a,0],ArrowUp:[0,a],ArrowDown:[0,-a]};let n;
             if(pan[e.key]){n={kind:'pan',x:pan[e.key][0],y:pan[e.key][1],snap:true};}else if(e.key==='+'||e.key==='='){n={kind:'zoom',factor:0.8};}else if(e.key==='-'){n={kind:'zoom',factor:1.25};}else if(e.key==='Home'){n={kind:'fit'};}
             if(n){e.preventDefault();nav(n);}});
         viewport.addEventListener('mousedown',function(){viewport.focus();});
+        // Follow can select its own DRC records but must never acquire the
+        // camera gesture controller (even temporarily for marker clicking).
+        let followDown=null;
+        viewport.addEventListener('mousedown',function(e){followDown=session&&session.mode==='follow'&&e.button===0&&!e.altKey?{x:e.clientX,y:e.clientY,rev:state&&state.state_rev,serial:serial}:null;});
+        viewport.addEventListener('mouseup',function(e){const d=followDown;followDown=null;if(d&&drc&&session.mode==='follow'&&state&&d.rev===state.state_rev&&e.button===0&&!e.altKey&&
+            d.serial===serial&&Math.hypot(e.clientX-d.x,e.clientY-d.y)<=3){drc.click(e.clientX,e.clientY,e.detail===2,e);}});
         if(o.gestures){
             function pointerReady(){const c=queryContext(true);return !decode&&!!c&&!!o.query.scope(c,P,true);}
             gesture=o.gestures.bind({viewport:viewport,window:win,document:doc,ready:pointerReady,
@@ -208,9 +220,10 @@
                     box.style.left=(d.left+Math.round(Math.min(x,ex))/d.dpr)+'px';box.style.top=(d.top+Math.round(Math.min(y,ey))/d.dpr)+'px';
                     box.style.width=(Math.max(1,Math.round(Math.abs(ex-x)))/d.dpr)+'px';box.style.height=(Math.max(1,Math.round(Math.abs(ey-y)))/d.dpr)+'px';
                     box.style.borderWidth=(1/d.dpr)+'px';hint.textContent=(b.outward?'Zoom out':'Zoom in')+' · release to apply · Esc cancels';},
-                click:function(x,y,twice,m){if(queryTools){queryTools.click(x,y,m);}}});
-            viewport.addEventListener('mousemove',function(e){if(queryTools&&!gesture.active()){queryTools.move(e.clientX,e.clientY,e);}});
-            viewport.addEventListener('mouseleave',function(){if(queryTools){queryTools.move(NaN,NaN);}});
+                selectionMode:function(){return !!drc&&drc.active();},
+                click:function(x,y,twice,m){if(queryTools&&queryTools.active()){queryTools.click(x,y,m);return;}if(drc&&drc.click(x,y,twice,m)){return;}if(queryTools){queryTools.click(x,y,m);}}});
+            viewport.addEventListener('mousemove',function(e){if(!gesture.active()){if(drc){drc.move(e.clientX,e.clientY);}if(queryTools&&(!drc||!drc.active())){queryTools.move(e.clientX,e.clientY,e);}}});
+            viewport.addEventListener('mouseleave',function(){followDown=null;if(queryTools){queryTools.move(NaN,NaN);}});
             viewport.addEventListener('wheel',function(e){if(!session||session.mode!=='explore'){return;}e.preventDefault();
                 const c=queryContext(false);if(!c||!pointerReady()||gesture.active()||state.rendering||!c.frame.final){return;}
                 const n=o.gestures.wheelNavigation(e,c.size,c.rect);if(n){nav(n);}}, {passive:false});
@@ -223,7 +236,7 @@
     }
     const api={bind:bind};
     if(typeof module==='object'&&module.exports){module.exports=api;}else{root.FloeGuest=api;api.bind({window:root,document:document,location:location,history:history,XHR:root.XMLHttpRequest,WebSocket:root.WebSocket,protocol:root.FloeProtocol,
-        drc:root.FloeGuestDRC,geometry:root.FloeDRCGeometry,selection:root.FloeDRCGroups,
+        drc:root.FloeGuestDRC,drcSteps:root.FloeGuestDRCStep,geometry:root.FloeDRCGeometry,selection:root.FloeDRCGroups,
         layers:root.FloeGuestLayers,
         display:root.FloeGuestDisplay,tools:root.FloeGuestTools,queryWire:root.FloeGuestQueryWire,query:root.FloeQuery,
         inspect:root.FloeInspect,measure:root.FloeMeasure,rulers:root.FloeRulers,gestures:root.FloeGestures,

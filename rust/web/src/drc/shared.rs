@@ -133,6 +133,8 @@ pub(crate) enum SelectionEdit {
         check: String,
         errors: Vec<String>,
         mode: SelectionAction,
+        bbox_um: Option<[String; 4]>,
+        waived: Option<bool>,
     },
     ClearAll {},
 }
@@ -147,6 +149,8 @@ pub(crate) struct SelectionChange {
     check: Option<usize>,
     ids: Vec<u64>,
     mode: SelectionMode,
+    bbox: Option<[f64; 4]>,
+    waived: Option<bool>,
 }
 impl SelectionEdit {
     pub fn prepare(self) -> Result<SelectionChange, Failure> {
@@ -155,11 +159,15 @@ impl SelectionEdit {
                 check: None,
                 ids: vec![],
                 mode: SelectionMode::Replace,
+                bbox: None,
+                waived: None,
             }),
             Self::Apply {
                 check,
                 errors,
                 mode,
+                bbox_um,
+                waived,
             } => {
                 if errors.len() > floe_app_core::drc::SELECTION_INPUT {
                     return Err("invalid_drc_request");
@@ -175,12 +183,17 @@ impl SelectionEdit {
                         SelectionAction::Add => SelectionMode::Add,
                         SelectionAction::Toggle => SelectionMode::Toggle,
                     },
+                    bbox: bbox_um.map(dto::bbox).transpose()?,
+                    waived,
                 })
             }
         }
     }
 }
 impl SelectionChange {
+    pub fn needs_view(&self) -> bool {
+        self.bbox.is_some()
+    }
     pub fn submit(
         &self,
         reader: &Service,
@@ -191,8 +204,8 @@ impl SelectionChange {
             dto::Command::SelectionCandidates {
                 check: self.check,
                 errors: self.ids.clone(),
-                bbox_um: None,
-                waived: None,
+                bbox_um: self.bbox,
+                waived: self.waived,
             },
             None,
             Some(permit),
@@ -297,6 +310,37 @@ fn project_value(v: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn guest_box_candidates_are_bounded_and_need_a_view() {
+        let value = json!({"kind":"apply","check":"0","errors":["9007199254740993"],"mode":"toggle","bbox_um":["-1","2","3","4"],"waived":false});
+        let edit = serde_json::from_value::<SelectionEdit>(value.clone())
+            .unwrap()
+            .prepare()
+            .unwrap();
+        assert!(edit.needs_view());
+        assert_eq!(edit.bbox, Some([-1., 2., 3., 4.]));
+        assert_eq!(edit.waived, Some(false));
+        assert_eq!(edit.ids, [9007199254740993]);
+        let mut invalid = value.clone();
+        invalid["bbox_um"] = json!(["3", "2", "-1", "4"]);
+        assert!(serde_json::from_value::<SelectionEdit>(invalid)
+            .unwrap()
+            .prepare()
+            .is_err());
+        let mut huge = value.clone();
+        huge["errors"] = json!(vec!["0"; 65]);
+        assert!(serde_json::from_value::<SelectionEdit>(huge)
+            .unwrap()
+            .prepare()
+            .is_err());
+        let mut plain = value;
+        plain.as_object_mut().unwrap().remove("bbox_um");
+        assert!(!serde_json::from_value::<SelectionEdit>(plain)
+            .unwrap()
+            .prepare()
+            .unwrap()
+            .needs_view());
+    }
     #[test]
     fn projection_never_inherits_owner_metadata_or_nested_notes() {
         let source = json!({"name":"WIDTH","description":"width rule","svrf":{"source":"private"},"reviewer":"hidden",
