@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="floe-bundle" content="@@BUNDLE@@"><title>floe2 · Read-only guest</title>
+  <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
+  <link rel="stylesheet" href="/assets/@@BUNDLE@@/guest.css">
+  <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/image-decode.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/guest.js"></script>
+</head><body>
+  <header class="topbar"><div class="brand">floe<span>2</span></div><strong id="guest-mode">Read-only guest</strong>
+    <span id="guest-status" class="document-title" role="status">Connecting…</span>
+    <button id="guest-reconnect" disabled>Reconnect</button><button id="guest-leave" disabled>Leave share</button>
+  </header>
+  <div class="workspace">
+    <aside class="sidebar" aria-label="Guest display controls">
+      <section><h2>Shared layout</h2>
+        <p class="note">This is not an owner workspace. No file browsing, indexing, review writes or server export.</p>
+        <p id="guest-scope" class="note">The invitation grants only the owner's approved layers and loaded levels.</p>
+        <p class="note">Local preview only. Owner close, expiry, or a scope change ends access. Already received pixels cannot be recalled.</p>
+      </section>
+      <section id="guest-controls" hidden><h2>Independent view</h2>
+        <div class="button-row"><button id="guest-fit" disabled>Fit</button><button id="guest-in" disabled>+</button><button id="guest-out" disabled>−</button></div>
+        <div class="form-row"><label for="guest-depth">Depth</label><input id="guest-depth" class="short" value="full" disabled></div>
+        <div class="form-row"><label for="guest-detail">Detail</label><select id="guest-detail" disabled><option value="low">Low · 5 px</option><option value="medium">Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>
+        <div class="form-row"><label for="guest-thin">Thin shapes</label><select id="guest-thin" disabled><option value="auto">Auto</option><option value="keep">Keep · mask</option><option value="cull">Cull · layout</option></select></div>
+        <label class="check"><input id="guest-frames" type="checkbox" disabled> Frames</label>
+        <label class="check"><input id="guest-labels" type="checkbox" disabled> Labels</label>
+        <label class="check"><input id="guest-mono" type="checkbox" disabled> Mono</label>
+        <h2>Go to (µm)</h2><label for="guest-x">X</label><input id="guest-x" value="0" disabled>
+        <label for="guest-y">Y</label><input id="guest-y" value="0" disabled>
+        <label for="guest-width">View width (optional)</label><input id="guest-width" disabled>
+        <button id="guest-go" disabled>Go</button>
+        <p class="note">On the canvas: arrow keys pan 50%, Shift + arrows 10%; + / − zoom, Home fits. Only your view changes.</p>
+      </section>
+    </aside>
+    <main id="guest-viewport" tabindex="0" aria-label="Shared layout canvas"><canvas id="guest-canvas" width="1" height="1"></canvas><p id="guest-empty">Waiting for an authorized frame…</p></main>
+  </div>
+  <footer id="guest-frame-status" role="status">No displayed frame</footer>
+</body></html>

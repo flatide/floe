@@ -201,6 +201,7 @@ window.FloeDefaults=require('./defaults.js');
 window.FloeAbout=require('./about.js');
 window.FloeDisplayDump=require('./display-dump.js');
 window.FloeSessionExit=require('./session-exit.js');
+window.FloeSharing=require('./sharing.js');
 window.FloeNotices=require('./notices.js');
 window.FloeMinimap=require('./minimap.js');
 window.FloeLauncher=require('./launcher.js');

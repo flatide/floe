@@ -15,6 +15,7 @@
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
     let settings = null, defaults = null, about = null, sessionExit = null, dumps = null;
     let minimap = null, launcher = null, picker = null, indexOpen = null, palette = null;
+    let sharing = null;
     const rulerHistory = window.FloeRulers.history();
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
@@ -82,7 +83,7 @@
                     if (xhr.responseText) { value = JSON.parse(xhr.responseText); }
                 } catch (e) { reject(e); return; }
                 if (xhr.status < 200 || xhr.status >= 300) {
-                    if (xhr.status === 401) { stopped = true; if (dumps) { dumps.stop(); } if (indexOpen) { indexOpen.stop(); } if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
+                    if (xhr.status === 401) { stopped = true; if (sharing) { sharing.stop(); } if (dumps) { dumps.stop(); } if (indexOpen) { indexOpen.stop(); } if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
                     const failure = new Error(message(value && value.error || ('HTTP ' + xhr.status)));
                     failure.status = xhr.status; failure.code = value && value.error;
                     reject(failure);
@@ -207,6 +208,7 @@
             !indexBlocked() && !submitting && !ownerBusy && !inflight && !accepted && !queue.length && !(gesture && gesture.active());
     }
     function controls() {
+        if(sharing){sharing.changed();}
         const enabled = live() && socket && socket.readyState === WebSocket.OPEN && !!epoch && !submitting && !ownerBusy && !indexBlocked();
         ['fit', 'zoom-in', 'zoom-out', 'goto', 'depth', 'detail', 'thin', 'frames', 'labels', 'mono', 'layers-all', 'layers-none'].forEach(function (id) { el(id).disabled = !enabled; });
         el('overlays').disabled=!live();
@@ -658,6 +660,7 @@
         }
         const caps = await http('GET', '/api/v1/capabilities');
         if (caps.protocol !== 1 || caps.bundle !== bundle) { throw new Error('Client/server version mismatch. Reload the page.'); }
+        sharing.init(caps.share_grants);
         about.init(); sessionExit.init();
         modeSupported = caps.jobdeck_modes === true;
         levelsSupported = caps.jobdeck_levels === true;
@@ -697,6 +700,7 @@
         catch (e) { report(e); }
     };
     async function endSession() {
+        sharing.stop();
         palette.stop();
         if (indexOpen) { indexOpen.stop(); }
         if (launcher) { launcher.stop(); }
@@ -986,6 +990,10 @@
         csrf:function(){return auth?auth.csrf:'';},decode:decodeImage});
     about=window.FloeAbout.bind({el:el,document:document,http:http,bundle:bundle,displayTest:displayTest});
     sessionExit=window.FloeSessionExit.bind({el:el,document:document,confirm:endSession});
+    sharing=window.FloeSharing.bind({el:el,document:document,http:http,origin:location.origin,
+        context:function(){return !stopped&&!document.hidden&&live()&&!inflight&&!accepted&&!queue.length?
+            {view_id:currentId,state_rev:state.state_rev}:null;}});
+    window.addEventListener('pagehide',function(){sharing.suspend();});
     minimap=window.FloeMinimap.bind({el:el,document:document,http:http,state:function(){return !stopped&&!document.hidden&&live()&&epoch?state:null;},
         ready:function(){return !!epoch&&live()&&!inflight&&!accepted&&queue.length===0&&!(gesture&&gesture.active())&&!document.hidden;},
         navigate:nav,focus:function(){viewport.focus();}});

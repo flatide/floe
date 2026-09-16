@@ -1,5 +1,9 @@
 # 웹 전환 M2 — DRC 읽기·공유 이관 기록
 
+M2b-4a: [로컬 초대 UI와 전용 guest 프레임 화면](WEBUI_SHARING_UI.ko.md)을 연결한다.
+기본 off `--local-sharing`, 명시 발급/폐기, follow·독립 탐색 표시/이동이다.
+guest DRC/layer/query/룰러 UI와 실제 브라우저/원격 수용은 아직이며 아래는 각 단계 당시 기록이다.
+
 M2b-3b2: [명시 DRC 공유·독립 패널/선택 API](WEBUI_SHARING_DRC.ko.md)를 연결한다.
 고정 reader/revision·whole-result opt-in, 제한된 읽기 DTO, 실제 body poll 재검사,
 guest actor admission을 적용한다. 사용자용 발급/guest UI와 실제 브라우저 수용은 아직이다.
@@ -1473,7 +1477,8 @@ M0/G2는 사용자 요청대로 보류이며 GTK launcher는 유지한다.
    각각 parity gate와 함께 확장한다.
 3. 공유의 초대/인증과 고정 설계·레이어 follow 전송은 M2b-1/2에 연결했다.
    독립 state/worker는 M2b-3a, scoped query/룰러는 M2b-3b1에 연결했다.
-   독립 DRC 읽기/패널 API는 M2b-3b2에 연결했다. 공유 CLI/UI/URL·실제 브라우저/원격 수용은 남는다.
+   독립 DRC 읽기/패널 API는 M2b-3b2, 로컬 CLI/초대·기본 guest 화면은 M2b-4a에 연결했다.
+   guest DRC/layer/query/룰러 UI·실제 브라우저/원격 수용은 남는다.
    아직 shares=false, loopback-only다.
 4. 외부 HTTPS/WSS·TeeBox 접근/인증 정책은 상위 계획 §10 미결 사항이며 로컬 기반 구현과
    실제 외부 공개를 구별한다. 브라우저 주소만 외부 IP로 바꿔 노출하지 않는다.

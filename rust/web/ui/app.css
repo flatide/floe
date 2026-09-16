@@ -1,4 +1,8 @@
 :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #dce3ec; background: #171b23; font-size: 14px; }
+#share-result { margin-top: 12px; padding: 10px; border: 1px solid #5e799d; }
+#share-link { display: block; width: 100%; margin: 8px 0; }
+#share-visit { color: #9cc4ff; }
+#share-list .button-row { align-items: center; justify-content: space-between; }
 * { box-sizing: border-box; }
 body { margin: 0; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
 button, input, select { font: inherit; color: inherit; border: 1px solid #3a4353; border-radius: 4px; background: #252c38; min-height: 30px; }

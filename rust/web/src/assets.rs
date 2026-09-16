@@ -10,7 +10,24 @@ use axum::{
 pub(crate) fn routes() -> Router<transport::Gate> {
     Router::new()
         .route("/", get(index))
+        .route("/guest/{id}", get(guest))
         .route("/assets/{bundle}/{name}", get(asset))
+}
+async fn guest(State(gate): State<transport::Gate>, Path(id): Path<String>) -> Response {
+    if gate.shares.is_none()
+        || id.len() != 64
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return transport::error(StatusCode::NOT_FOUND);
+    }
+    // Static shell only. No owner bootstrap, catalogue or data is embedded.
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!(concat!(env!("OUT_DIR"), "/guest.html")),
+    )
+        .into_response()
 }
 async fn index(State(gate): State<transport::Gate>) -> Response {
     (
@@ -28,6 +45,15 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
         return transport::error(StatusCode::NOT_FOUND);
     }
     let (mime, body) = match name.as_str() {
+        "sharing.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/sharing.js"),
+        ),
+        "guest.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/guest.js"),
+        ),
+        "guest.css" => ("text/css; charset=utf-8", include_str!("../ui/guest.css")),
         "display-input.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/display-input.js"),

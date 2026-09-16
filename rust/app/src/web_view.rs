@@ -55,6 +55,7 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --stream-kb N            Legacy compatibility: 0 forces off; positive follows round env (not KB)
   --render-debug           Numeric worker-frame diagnostics to stderr; independent workspace
   --dump                   Keep recent frame/display pixels in browser memory; explicit downloads
+  --local-sharing          Enable explicit read-only invitations (loopback only; default off)
   --perf-baseline           Frames/labels/refinement/frame reuse off; caches stay
   --root DIRECTORY         Additional approved dependency/file-picker root, repeatable
   --drc RESULTS.db|PACK.ice Register DRC on first source; pack build needs owner approval
@@ -107,7 +108,10 @@ FLOE_JOBDECK_LEVELS=all|ask|N,N... supplies the default level choice (--level wi
 It may start an independent empty window; its display settings apply to the first file choice.
 FLOE_FILL_EDIT (nonempty) enables session bitmap-slot editing and, separately,
 shared design-default publication with its own preview and explicit approval.
-The session link is a one-time credential; do not share or log it.";
+--local-sharing starts an independent workspace, still bound only to loopback.
+Use Share locally to approve a separate one-use guest invitation; the current
+UI grants layout scope only. DRC/notes/files/writes are not implicitly shared.
+The owner session link is a one-time credential; never give it to guests or log it.";
 
 #[derive(Debug)]
 pub struct Command {
@@ -126,6 +130,7 @@ pub struct Command {
     direct_final: bool,
     render_debug: bool,
     dump: bool,
+    local_sharing: bool,
     perf_baseline: bool,
     port: u16,
     no_open: bool,
@@ -155,6 +160,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         direct_final: false,
         render_debug: false,
         dump: false,
+        local_sharing: false,
         perf_baseline: false,
         port: 0,
         no_open: false,
@@ -198,6 +204,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 | "--stream-kb"
                 | "--render-debug"
                 | "--dump"
+                | "--local-sharing"
                 | "--perf-baseline"
                 | "--port"
                 | "--session-file"
@@ -323,6 +330,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 "view --lod was not sent to Rust renderd; a live LOD policy switch is not migrated (index --lod controls generation, not display)",
             )),
             "--dump" => { flag()?; c.dump = true; }
+            "--local-sharing" => { flag()?; c.local_sharing = true; }
             "--floe-reviewer" => c.read_reviewer = Some(value()?.to_owned()),
             "--perf-baseline" => {
                 flag()?;
@@ -773,6 +781,9 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     if c.dump {
         Gateway::enable_display_dump(&mut gate).map_err(Error::input)?;
     }
+    if c.local_sharing {
+        Gateway::enable_local_sharing(&mut gate).map_err(Error::input)?;
+    }
     let notices = match crate::selfcheck::notice_catalog(cancelled) {
         Ok(Some(c)) => floe_web::about::Notices::Ready(Arc::new(c)),
         Ok(None) => floe_web::about::Notices::NotPackaged,
@@ -977,6 +988,14 @@ mod tests {
     }
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
+    }
+    #[test]
+    fn local_sharing_is_explicit_default_off_and_never_forwarded() {
+        assert!(!parse(&args("view")).unwrap().local_sharing);
+        let c = parse(&args("view --local-sharing --no-open")).unwrap();
+        assert!(c.local_sharing && c.independent);
+        assert!(parse(&args("view --local-sharing=false")).is_err());
+        assert!(parse(&args("view --local-sharing=on")).is_err());
     }
     #[test]
     fn direct_final_alias_and_debug_are_independent_process_options() {

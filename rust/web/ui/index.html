@@ -39,6 +39,7 @@
   <script defer src="/assets/@@BUNDLE@@/palette.js"></script>
   <script defer src="/assets/@@BUNDLE@@/fill-editor.js"></script>
   <script defer src="/assets/@@BUNDLE@@/presets.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/sharing.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body>
@@ -46,6 +47,7 @@
     <div class="brand">floe<span>2</span><small>WEB PREVIEW</small></div>
     <div id="document-title" class="document-title">Layout workspace</div>
     <span id="connection" class="connection">Connecting</span>
+    <button id="share-open" class="quiet" aria-haspopup="dialog" aria-controls="share-dialog" aria-expanded="false" hidden disabled>Share locally…</button>
     <button id="drc-toggle" class="quiet" aria-expanded="true" aria-controls="drc-panel" hidden>DRC</button>
     <button id="logout" class="quiet" title="Confirm ending this session (q on canvas)" aria-haspopup="dialog" aria-controls="session-exit-dialog" aria-expanded="false" disabled>End session</button>
     <button id="about-open" class="quiet" aria-haspopup="dialog" aria-controls="about-dialog" aria-expanded="false" disabled>About</button>
@@ -470,6 +472,21 @@
     <button id="layer-menu-show" role="menuitem">Show selected</button><button id="layer-menu-hide" role="menuitem">Hide selected</button><button id="layer-menu-toggle" role="menuitem">Toggle selected</button>
     <button id="layer-menu-style" role="menuitem">Style selected…</button>
     <button id="layer-menu-all" role="menuitem">Show all</button><button id="layer-menu-none" role="menuitem">Hide all</button><button id="layer-menu-close" role="menuitem">Close menu</button>
+  </div>
+  <div id="share-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="share-heading" hidden>
+    <section class="about-dialog">
+      <h2 id="share-heading">Read-only local invitation</h2>
+      <p>Only loopback is enabled. This link works on this machine or an already authorized tunnel; it does not publish a remote server.</p>
+      <p>The current visible layers and loaded jobdeck levels are shared, including layout labels, geometry outside the viewport, and future pan/zoom within that scope. A changed source, view or layer scope revokes the invitation.</p>
+      <p>DRC results, review notes and writes are not granted by this screen. Guest DRC/layer/query controls are separate follow-up UI work.</p>
+      <label for="share-mode">Mode</label><select id="share-mode"><option value="follow">Follow the owner's camera</option><option value="explore">Explore independently</option></select>
+      <p>Explore uses a separate admitted renderer and can be busy when capacity is full. Owner close ends the share. Received pixels can be copied and cannot be recalled by revoking access.</p>
+      <label class="check"><input id="share-consent" type="checkbox"> I approve exposing this layout scope to the holder of a one-use invitation.</label>
+      <div class="button-row"><button id="share-create" disabled>Create invitation</button><button id="share-cancel">Close</button></div>
+      <p id="share-status" class="note" role="status"></p>
+      <div id="share-result" hidden><label for="share-link">Private guest link · copy only to the intended recipient</label><input id="share-link" readonly><a id="share-visit" target="_blank" rel="noopener noreferrer">Open guest tab</a></div>
+      <h3>Invitations / sessions (maximum 4)</h3><button id="share-refresh">Refresh list</button><div id="share-list"></div>
+    </section>
   </div>
 </body>
 </html>

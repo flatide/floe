@@ -125,7 +125,8 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    M2b-3a의 [독립 explore 렌더/표시 상태](WEBUI_SHARING_EXPLORE.ko.md)를 연결했다.
    M2b-3b1의 [scoped query/룰러](WEBUI_SHARING_QUERY.ko.md)를 연결했다.
    M2b-3b2의 [명시 DRC 읽기·독립 패널/선택](WEBUI_SHARING_DRC.ko.md)도 native로 검증했다.
-   발급/guest UI·실제 브라우저/원격 수용은 아직 남는다.
+   M2b-4a의 [로컬 CLI/발급·기본 guest 화면](WEBUI_SHARING_UI.ko.md)을 연결했다.
+   guest DRC/layer/query/룰러 UI·실제 브라우저/원격 수용은 아직 남는다.
 4. M0/M3 TeeBox Firefox/ETX는 현장 실행 불가로 보류. 사용자에게 같은 측정을
    반복 요청하거나 로컬 결과를 현장 PASS로 바꾸지 않는다.
 5. M5 world-tile은 성능 전제·실측에 따른 조건부 단계. 미구현을 완료로 세지 않는다.

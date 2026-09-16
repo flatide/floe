@@ -5,6 +5,10 @@ fn main() {
     let mut hash = Sha1::new();
     for path in [
         "ui/index.html",
+        "ui/guest.html",
+        "ui/guest.js",
+        "ui/guest.css",
+        "ui/sharing.js",
         "ui/display.html",
         "ui/display-page.js",
         "ui/display-input.js",
@@ -115,7 +119,7 @@ fn main() {
     }
     let id = format!("{:x}", hash.finalize());
     println!("cargo:rustc-env=FLOE_WEB_BUNDLE={id}");
-    for name in ["index.html", "display.html"] {
+    for name in ["index.html", "display.html", "guest.html"] {
         let html = fs::read_to_string(format!("ui/{name}"))
             .expect("HTML source")
             .replace("@@BUNDLE@@", &id);
