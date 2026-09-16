@@ -30,6 +30,25 @@ pub const REM_FULL: u32 = u32::MAX;
 /// 2.5 um/px covers 6%), while a page of a few fiducial marks whose
 /// bbox spans the mask (10^-5) must not become a block.
 pub const WASH_MIN_COVERAGE: f64 = 1.0 / 256.0;
+/// The coverage a HAIRLINE-cut page or node must reach for a wash
+/// under the cull policy (2026-09-16, user: a wide view of a design
+/// layout should show presence without the occupancy summary, whose
+/// build takes an hour on the 9.8 GB chip): a line counts its length
+/// in pixels, so three long lines in an otherwise empty page are
+/// 3-4 % and stay exact, dense routing washes. FLOE_RUST_WASH_HAIR_
+/// COVERAGE overrides (diagnostic).
+pub const WASH_MIN_COVERAGE_HAIR: f64 = 1.0 / 8.0;
+
+fn hair_wash_coverage() -> f64 {
+    static COVERAGE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *COVERAGE.get_or_init(|| {
+        std::env::var("FLOE_RUST_WASH_HAIR_COVERAGE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0 && *v <= 1.0)
+            .unwrap_or(WASH_MIN_COVERAGE_HAIR)
+    })
+}
 
 /// A sub-cut page-BVH node whose extent is at most this many screen
 /// pixels on both sides washes whole, as it always did (a block that
@@ -951,9 +970,13 @@ impl<'a> Hier<'a> {
                     let size_cut = p.max_w < self.cut && p.max_h < self.cut;
                     if size_cut || p.max_min < self.page_hair {
                         let in_view = boxes.iter().any(|b| p.bbox.intersects(b));
-                        let washable = self.sub_cut_wash && in_view && self.sub_cut_applies(size_cut);
+                        // a size cut always, a hairline cut under cull with
+                        // the stricter coverage (2026-09-16: presence at a
+                        // wide view without the summary)
+                        let washable = self.sub_cut_wash && in_view;
+                        let hair = self.hair_cut(size_cut);
                         if washable
-                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h)
+                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, hair)
                         {
                             // sparse: too few members for a wash to
                             // stand for them and cheap to draw - keep
@@ -1234,9 +1257,8 @@ impl<'a> Hier<'a> {
                                 // matching the depth-full omission
                                 // rule.
                                 if self.sub_cut_wash
-                                    && self.sub_cut_applies(size_cut)
                                     && !self.wash_sub_cut_child(
-                                        &mut wc, pli, &h, &rb, &boxes,
+                                        &mut wc, pli, &h, &rb, &boxes, self.hair_cut(size_cut),
                                     )
                                 {
                                     // sparse (no wash could stand for
@@ -1300,9 +1322,8 @@ impl<'a> Hier<'a> {
                         let size_cut = cw < cut && chh < cut;
                         if size_cut || cw.min(chh) < self.hair {
                             if self.sub_cut_wash
-                                && self.sub_cut_applies(size_cut)
                                 && !self.wash_sub_cut_child(
-                                    &mut wc, pli, &h, &rb, &boxes,
+                                    &mut wc, pli, &h, &rb, &boxes, self.hair_cut(size_cut),
                                 )
                             {
                                 // sparse (no wash could stand for it):
@@ -1373,7 +1394,9 @@ impl<'a> Hier<'a> {
     /// shows them at every zoom - user 2026-09-15) and a sparse
     /// placement expanded, the cost being bounded by the very
     /// sparseness that ruled the wash out.
-    fn wash_worth(&self, fp: &BBox, members: u64, w: u64, h: u64) -> bool {
+    /// `hair`: the item is hairline-cut under the cull policy, where
+    /// the stricter WASH_MIN_COVERAGE_HAIR applies.
+    fn wash_worth(&self, fp: &BBox, members: u64, w: u64, h: u64, hair: bool) -> bool {
         if self.wash_blob(fp) {
             return true;
         }
@@ -1382,22 +1405,19 @@ impl<'a> Hier<'a> {
         let fh = ((fp.y1 - fp.y0).max(0) as f64 * ppd).max(1.0);
         let mw = (w as f64 * ppd).max(1.0);
         let mh = (h as f64 * ppd).max(1.0);
-        (members as f64) * mw * mh >= WASH_MIN_COVERAGE * fw * fh
+        let min = if hair { hair_wash_coverage() } else { WASH_MIN_COVERAGE };
+        (members as f64) * mw * mh >= min * fw * fh
+    }
+
+    /// Whether a culled item is a hairline cut under the cull policy
+    /// (a size cut, or any cut under keep where page_hair is 0, takes
+    /// the dense-array coverage rule).
+    fn hair_cut(&self, size_cut: bool) -> bool {
+        !size_cut && self.page_hair > 0
     }
 
     /// Returns false when the placement is sparse (no wash could
     /// stand for it): the caller expands it instead of dropping it.
-    /// Whether the sub-cut rules (a wash or a kept sparse item) stand
-    /// in for a culled item: always for a size cut (every shape below
-    /// the cut - the item would otherwise vanish whole; field
-    /// 2026-09-16, a design layout at detail high), for a hairline cut
-    /// only under the keep policy (page_hair == 0). Under the cull
-    /// policy thin items are dropped for speed, on a deck as on a
-    /// layout.
-    fn sub_cut_applies(&self, size_cut: bool) -> bool {
-        size_cut || self.page_hair == 0
-    }
-
     fn wash_sub_cut_child(
         &mut self,
         wc: &mut WsCell,
@@ -1405,6 +1425,7 @@ impl<'a> Hier<'a> {
         h: &floe_ovm::PlaceHead,
         rb: &BBox,
         boxes: &[BBox],
+        hair: bool,
     ) -> bool {
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, rb);
@@ -1427,7 +1448,7 @@ impl<'a> Hier<'a> {
         }
         let bw = (b0.x1 - b0.x0).max(0) as u64;
         let bh = (b0.y1 - b0.y0).max(0) as u64;
-        if !self.wash_worth(&fp, members, bw, bh) {
+        if !self.wash_worth(&fp, members, bw, bh, hair) {
             return false;
         }
         let mask = self.v.cell_lmask_rec(h.child);
@@ -1569,14 +1590,12 @@ impl<'a> Hier<'a> {
                 for pi in n.first..n.first + n.count as u32 {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
-                    if (p.max_w < self.cut
-                        && p.max_h < self.cut)
-                        || p.max_min < self.page_hair
-                    {
+                    let size_cut = p.max_w < self.cut && p.max_h < self.cut;
+                    if size_cut || p.max_min < self.page_hair {
                         let in_view = p.bbox.intersects(b);
                         if self.sub_cut_wash
                             && in_view
-                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h)
+                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, self.hair_cut(size_cut))
                         {
                             // sparse: kept, see the linear page loop
                             self.st.sub_cut_sparse += 1;

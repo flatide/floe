@@ -835,11 +835,11 @@ class GenerationContractTests(unittest.TestCase):
         self.assertAlmostEqual((x1 - x0) * 0.0001, 35838.4, places=3)
         self.assertAlmostEqual((y1 - y0) * 0.0001, 34617.6, places=3)
 
-        def lit(detail, thin):
+        def lit(detail, thin, env=None):
             out = d / ("corner-%s-%s.png" % (detail, thin))
             floe2("render", src, "--bbox", "17300,-17309,17919,-16700",
                   "--px", "300", "--detail", detail, "--thin", thin,
-                  "--layers", "3/0", "--out", out)
+                  "--layers", "3/0", "--out", out, env=env)
             im = Image.open(out).convert("RGB")
             return sum(1 for p in im.getdata() if p != (0, 0, 0))
         exact = lit("exact", "keep")
@@ -847,8 +847,14 @@ class GenerationContractTests(unittest.TestCase):
         keep = lit("high", "keep")
         self.assertGreater(exact, 10000)
         self.assertEqual(keep, exact)
-        self.assertGreater(cull, 0)
-        self.assertLess(cull, exact // 2)
+        # 2026-09-16: under cull the dense hairline neighbours are no
+        # longer dropped but washed as blocks (presence without the
+        # summary); the kill switch reproduces the field symptom
+        self.assertGreater(cull, exact // 2)
+        symptom = lit("high", "cull",
+                      env=dict(os.environ, FLOE_RUST_SUB_CUT_WASH="off"))
+        self.assertGreater(symptom, 0)
+        self.assertLess(symptom, exact // 2)
 
     def test_limits_are_recorded_as_none_never_approximated(self):
         floe_index("vfs", self.src, self.cache, "--occupancy-only",
@@ -1448,7 +1454,11 @@ def write_subcut(path):
     the same array as placements of a DOT cell; 5/0: four 0.2 um boxes
     on a diagonal 120 um apart from (1500, 1400) um (a sparse page:
     four pixels in a 36 x 36 px footprint, under the 1/256 wash rule);
-    6/0: a frame so the top spans 0..2000 um"""
+    8/0: 200 hairlines 0.1 x 190 um on a 1 um pitch over 200..400 um
+    (a dense hairline page: washed under cull); 9/0: three such lines
+    400 um apart (3.75 % of their footprint, under the 1/8 hairline
+    rule: kept and drawn as lines); 6/0: a frame so the top spans
+    0..2000 um"""
     ly = db.Layout()
     ly.dbu = 0.001
     top = ly.create_cell("SUBCUT")
@@ -1465,6 +1475,13 @@ def write_subcut(path):
     for k in range(4):
         x, y = 1500 * UM + k * 120 * UM, 1400 * UM + k * 120 * UM
         top.shapes(l5).insert(db.Box(x, y, x + 200, y + 200))
+    l8, l9 = ly.layer(8, 0), ly.layer(9, 0)
+    for i in range(200):
+        x = 200 * UM + i * UM
+        top.shapes(l8).insert(db.Box(x, 1600 * UM, x + 100, 1790 * UM))
+    for k in range(3):
+        x = 1000 * UM + k * 400 * UM
+        top.shapes(l9).insert(db.Box(x, 1500 * UM, x + 100, 1690 * UM))
     top.shapes(l6).insert(db.Box(0, 0, 2000 * UM, 2000 * UM))
     opt = db.SaveLayoutOptions()
     opt.format = "OASIS"
@@ -1545,6 +1562,27 @@ class SubCutTests(unittest.TestCase):
         # the kill switch: the pre-fix cull drops all three
         for layer in ((4, 0), (5, 0), (7, 0)):
             self.assertEqual(self._lit(self.worker_off, layer), set(), layer)
+
+    def test_hairline_pages_under_cull_are_washed_when_dense_and_kept_when_sparse(self):
+        # 10 um/px, cut 1 px: the 0.1 um lines are hairline-cut (max_min
+        # 0.1 um < 5 um). Under cull the dense page (200 lines) is a
+        # footprint block, the sparse one (3 lines, 3.75 %) draws its
+        # lines; under keep both draw exactly; the kill switch drops
+        # both under cull (the pre-2026-09-16 cull)
+        block = {(x, y) for x in range(20, 40) for y in range(21, 40)}
+        dense = self._lit(self.worker, (8, 0), "cull")
+        self.assertGreaterEqual(len(dense & block), 250, len(dense))
+        self.assertLessEqual(len(dense - block), 90, sorted(dense - block)[:10])
+        sparse = self._lit(self.worker, (9, 0), "cull")
+        self.assertTrue(30 <= len(sparse) <= 90, sorted(sparse))
+        self.assertTrue(all(any(abs(x - cx) <= 1 for cx in (100, 140, 180))
+                            and 30 <= y <= 51 for x, y in sparse), sorted(sparse))
+        keep_sparse = self._lit(self.worker, (9, 0), "keep")
+        self.assertEqual(keep_sparse, sparse)
+        keep_dense = self._lit(self.worker, (8, 0), "keep")
+        self.assertGreaterEqual(len(keep_dense & block), 250, len(keep_dense))
+        for layer in ((8, 0), (9, 0)):
+            self.assertEqual(self._lit(self.worker_off, layer, "cull"), set(), layer)
 
 
 class DeckRenderTests(unittest.TestCase):

@@ -392,7 +392,9 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   페이지(콘택·비아·마크 배열)는 버리지 않고 덱과 같은 규칙으로 남긴다 — 밀집
   페이지는 레이어 색 footprint 블록, 희소 페이지는 도형을 픽셀로(Calibre가
   sub-pixel 도형을 점으로 그리는 것과 같은 결과). 현장: 9.8 GB 일반 레이아웃이
-  detail high에서 Calibre보다 훨씬 적게 보였다. 킬 스위치
+  detail high에서 Calibre보다 훨씬 적게 보였다. `thin:cull`의 hairline 페이지도
+  버리지 않는다: 선이 footprint의 1/8 이상을 채우면 블록, 아니면 선 그대로(요약
+  없이도 광역뷰에 존재가 보인다; 사용자 결정 2026-09-16). 킬 스위치
   `FLOE_RUST_SUB_CUT_WASH=off`(SPEC-PLANNER §3).
 - **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):
   캐시에 `design.ovo`(`floe2 index --occupancy-only`)가 있고 요청이 keep·

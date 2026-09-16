@@ -985,6 +985,14 @@ cut(high = 1 px)보다 작은 페이지는 bbox가 2 px를 넘으면 wash도 받
 레코드 반복과 배치 반복 각각 — 이 10 µm/px에서 블록으로, 100 µm 간격 상자 5개는
 픽셀로; 킬 스위치에서는 셋 다 없음). 광역 뷰 비용은 wash walk 예산이 막고, 실칩
 재측정 대기.
+**결함 C 후속 — cull의 hairline 페이지(사용자 결정 2026-09-16, 0.12.141 / RENDERD
+0.12.96)**: 9.8 GB 레이아웃의 점유 요약 생성이 한 시간을 넘어(마킹이 한 스레드로
+도는 별건, OCCUPANCY §12 실측 9) 요약 없이도 광역뷰에 존재가 보여야 한다는 요청.
+`thin:cull`에서 hairline 컷 페이지·노드도 sub-cut 규칙을 탄다: 선의 픽셀 채움이
+footprint의 1/8 이상이면 레이어 색 블록, 미만이면 페이지를 남겨 선을 그린다
+(`WASH_MIN_COVERAGE_HAIR`, `FLOE_RUST_WASH_HAIR_COVERAGE`). keep은 그대로 정확.
+gate `SubCutTests.test_hairline_pages_under_cull…`(0.1 × 190 µm 선 200개 = 블록,
+400 µm 간격 3개 = 선, keep은 둘 다 정확, 킬 스위치는 둘 다 없음).
 
 **정책 분리(2026-09-11, 사용자·리뷰어)**: 마스크(jobdeck)는 hairline이 많을 수밖에
 없고 일반 레이아웃을 같은 기준에 맞추면 광역 뷰가 느려진다. 그래서 위 해제는

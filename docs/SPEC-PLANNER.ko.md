@@ -47,10 +47,12 @@
   footprint 대비 멤버 채움이 1/256 이상이면 레이어 색 footprint wash
   (`sub_cut_washes`), 미만이면 페이지를 남겨 멤버를 픽셀로 그린다(`keep_sparse`,
   `sub_cut_sparse`; JOBDECK §11 4단계). 배치 BVH의 sub-cut 노드도 같다
-  (`wash_sub_cut_child`). hairline 컷 항목은 thin 정책을 따른다
-  (`Hier::sub_cut_applies`): keep(page_hair = 0)이면 노드도 wash/expand_sparse,
-  cull이면 덱·레이아웃 모두 버린다(2026-09-16 전에는 덱이 cull에서도 hairline
-  항목을 wash했다). exact 요청은 제외. 뷰어 킬
+  (`wash_sub_cut_child`). hairline 컷 항목(cull 정책, `Hier::hair_cut`)도 같은
+  규칙이되 채움 문턱이 `WASH_MIN_COVERAGE_HAIR` = 1/8이다(선은 길이만큼 픽셀을
+  세므로 빈 페이지의 긴 선 셋은 3~4 %로 남아 정확히 그려지고, 밀집 배선은 wash;
+  진단 `FLOE_RUST_WASH_HAIR_COVERAGE`). 사용자 결정 2026-09-16: 9.8 GB 레이아웃의
+  요약 생성이 한 시간을 넘어, 요약 없이도 광역뷰에 존재가 보여야 한다. keep은
+  hairline 페이지를 그대로 남긴다(page_hair = 0). exact 요청은 제외. 뷰어 킬
   스위치 `FLOE_RUST_SUB_CUT_WASH=off`(단일 레이아웃), `FLOE_RUST_DECK_WIDE=off`
   (덱); gate `validate_occupancy` `SubCutTests`.
   **점유 요약 레이어**(`ViewReq::page_skip`, OCCUPANCY_PLAN M2): 비트셋에 든

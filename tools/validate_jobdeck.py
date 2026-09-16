@@ -2863,18 +2863,26 @@ class ThinPageTests(unittest.TestCase):
         # lines (40 um long) are all-thin
         exact = self._rgb("thin.oas", "exact")
         self.assertGreater(self._lit(exact), 100)
-        # the plain layout's default: the performance policy culls
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
+        # the plain layout's default: the performance policy culls the
+        # all-thin page; since 2026-09-16 a culled hairline page is not
+        # dropped but washed (dense) or kept (sparse - this fixture's
+        # 400 lines cover under 1/8 of their page), so the lines are
+        # still drawn; FLOE_RUST_SUB_CUT_WASH=off is the old cull
+        no_wash = {"FLOE_RUST_SUB_CUT_WASH": "off"}
+        self.assertEqual(self._rgb("thin.oas", "high"), exact)
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high", no_wash)), 0)
         # the mask policy on the same file: identical to exact
         self.assertEqual(self._rgb("thin.oas", "high", thin="keep"), exact)
         # explicit cull is the default; the diagnostic override wins
         # over the request either way
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high", thin="cull")), 0)
+        self.assertEqual(self._rgb("thin.oas", "high", thin="cull"), exact)
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high",
+                                             dict(no_wash), thin="cull")), 0)
         self.assertEqual(self._rgb("thin.oas", "high",
                                    {"FLOE_RUST_PAGE_HAIRLINE": "keep"}), exact)
         self.assertEqual(self._lit(self._rgb(
-            "thin.oas", "high", {"FLOE_RUST_PAGE_HAIRLINE": "cull"},
-            thin="keep")), 0)
+            "thin.oas", "high",
+            dict(no_wash, FLOE_RUST_PAGE_HAIRLINE="cull"), thin="keep")), 0)
 
     def test_a_thicker_record_changes_nothing_about_the_lines(self):
         thin = self._rgb("thin.oas", "high", thin="keep")
@@ -2888,9 +2896,13 @@ class ThinPageTests(unittest.TestCase):
         self.assertEqual(outside, [], "lines identical away from the box")
         self.assertTrue(diff, "the box itself is drawn")
         # under the plain policy the thicker record decides the fate
-        # of every line in its page - the documented omission
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
-        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high")), 100)
+        # of every line in its page - the documented omission, visible
+        # with the sub-cut rules off (2026-09-16: with them on the
+        # sparse all-thin page is kept and drawn either way)
+        no_wash = {"FLOE_RUST_SUB_CUT_WASH": "off"}
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high", no_wash)), 0)
+        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high", no_wash)), 100)
+        self.assertGreater(self._lit(self._rgb("thin.oas", "high")), 100)
 
     def test_deck_keeps_thin_pages_by_default(self):
         exact = self._rgb("thin.jb", "exact")
@@ -2898,10 +2910,12 @@ class ThinPageTests(unittest.TestCase):
         kept = self._rgb("thin.jb", "high")
         self.assertEqual(kept, exact, "a mask deck keeps its hairlines")
         # --thin cull on a deck: the page is culled and the deck's wide
-        # policy paints its bbox wash instead of the lines (a block,
-        # not the exact image); with the wide policy off it vanishes
+        # policy stands in for it - until 2026-09-16 as its bbox wash
+        # (a block), now the sparse page (400 lines under 1/8 of their
+        # footprint) is kept and drawn, dense ones wash; with the wide
+        # policy off it vanishes
         culled = self._rgb("thin.jb", "high", thin="cull")
-        self.assertNotEqual(culled, exact)
+        self.assertEqual(culled, exact)
         self.assertEqual(self._lit(self._rgb(
             "thin.jb", "high", {"FLOE_RUST_DECK_WIDE": "off"}, thin="cull")), 0)
         rep = CLI / "thin-deck.json"
@@ -2931,7 +2945,10 @@ class ThinPageTests(unittest.TestCase):
         self.assertGreater(len(doc["levels"]), 2)
         self.assertGreater(doc["levels"][0]["occupied"], 0)
         self.assertGreater(doc["fit_renders"]["keep"]["lit"], 100)
-        self.assertEqual(doc["fit_renders"]["cull"]["lit"], 0)
+        # the cull fit render: nothing until 2026-09-16, now the sparse
+        # thin page is kept (never more than keep draws)
+        self.assertLessEqual(doc["fit_renders"]["cull"]["lit"],
+                             doc["fit_renders"]["keep"]["lit"])
         cells = doc["comparison"]["coarser_cells"]
         self.assertEqual([c["cell_px"] for c in cells], [2, 4, 8])
         for c in cells:
@@ -2943,12 +2960,23 @@ class ThinPageTests(unittest.TestCase):
 
     def test_kept_thin_pages_are_counted(self):
         from floe.rust_render import RustRenderWorker
-        for thin, thin_pages, culled in (("keep", 1, 0), ("cull", 0, 1),
-                                         (None, 0, 1)):
+        # under cull the all-thin page is culled; with the sub-cut rules
+        # (2026-09-16) the sparse page is kept instead and not counted as
+        # a size cull, with them off it is (the old count)
+        for thin, wash, thin_pages, culled in (("keep", True, 1, 0),
+                                               ("cull", True, 1, 0),
+                                               (None, True, 1, 0),
+                                               ("cull", False, 0, 1),
+                                               (None, False, 0, 1)):
             c = Cache(str(CLI / "thin.oas"))
             c.load()
-            worker = RustRenderWorker(c)
-            worker.start()
+            if not wash:
+                os.environ["FLOE_RUST_SUB_CUT_WASH"] = "off"
+            try:
+                worker = RustRenderWorker(c)
+                worker.start()
+            finally:
+                os.environ.pop("FLOE_RUST_SUB_CUT_WASH", None)
             try:
                 _, result = _render_raw(worker, (0, 0, 2000 / 5e-5,
                                                  2000 / 5e-5), 200, 200,
@@ -2957,8 +2985,8 @@ class ThinPageTests(unittest.TestCase):
             finally:
                 worker.stop()
             culls = result["plan_culls"]
-            self.assertEqual(culls["thin_pages"], thin_pages, (thin, culls))
-            self.assertEqual(culls["pages_size"], culled, (thin, culls))
+            self.assertEqual(culls["thin_pages"], thin_pages, (thin, wash, culls))
+            self.assertEqual(culls["pages_size"], culled, (thin, wash, culls))
         # the deck worker's default is keep
         from floe.jobdeck.viewer import DeckCache
         d = DeckCache(str(CLI / "thin.jb"))
