@@ -44,13 +44,19 @@ pub const WASH_MIN_COVERAGE_HAIR: f64 = 1.0 / 8.0;
 /// threshold that cut it - keeps one in 4^k of its kind by index
 /// within the owning cell. Zooming out one octave quadruples the cut
 /// items in view and keeps a quarter of them, so the count in view
-/// stays what it was at the cut; and the sets are nested (a multiple
-/// of 4^(k+1) is a multiple of 4^k), so what survives one zoom-out
-/// survives every further one, like the frontier's lattice
-/// representatives (rev 45). The index is the page's within its
-/// (cell, layer) run or the placement's within its cell, so every
-/// run keeps its first item at any zoom. Octaves are capped so 4^k
-/// fits a u64 comfortably.
+/// stays about what it was at the cut (when the items are spread
+/// evenly and cost alike - a page holding a giant repetition, or
+/// many short runs whose index 0 always qualifies, move the cost
+/// away from the count); and the sets are nested the way the
+/// frontier's lattice representatives are (rev 45): S(k+1) is a
+/// subset of S(k), a multiple of 4^(k+1) being a multiple of 4^k -
+/// what a wider view shows was shown at every closer view, nothing
+/// pops in as you zoom out (index 4 shows at k = 1 and is gone at
+/// k = 2). The index is the page's within its (cell, layer) run or
+/// the placement's within its cell, so a run's first item is a
+/// candidate at any zoom (shown when in view, within the budgets
+/// and under an expanded parent). Octaves are capped so 4^k fits a
+/// u64 comfortably.
 pub const REP_OCTAVES_MAX: u32 = 15;
 
 /// octaves below the cut: 0 for a measure above half the threshold,
@@ -1108,7 +1114,7 @@ impl<'a> Hier<'a> {
                             && self.reps
                             && rep_keeps((pi - pr.page_lo) as u64, self.page_octaves(&p, size_cut));
                         let washable = in_view && (self.sub_cut_wash || rep);
-                        match self.sub_cut_verdict(&p, &boxes[..], size_cut, washable) {
+                        match self.sub_cut_verdict(&p, &boxes[..], size_cut, washable, rep) {
                             SubCut::Keep => {
                                 // sparse: too few members for a wash to
                                 // stand for them and cheap to draw - keep
@@ -1599,18 +1605,27 @@ impl<'a> Hier<'a> {
     /// placement expanded, the cost being bounded by the very
     /// sparseness that ruled the wash out.
     /// `hair`: the item is hairline-cut under the cull policy, where
-    /// the stricter WASH_MIN_COVERAGE_HAIR applies.
-    fn wash_worth(&self, fp: &BBox, members: u64, w: u64, h: u64, hair: bool) -> bool {
+    /// the stricter WASH_MIN_COVERAGE_HAIR applies; `rep`: the item is
+    /// a representative (page frontier), which always takes the 1/8
+    /// rule - a sparse representative is cheap to draw, and a wash is
+    /// only worth its overstatement when the page is really dense.
+    /// The ink estimate is members x (min side) x (long side): every
+    /// member's area is at most its min side times its long side, so
+    /// this bounds the real ink from above without the max_w x max_h
+    /// overshoot that made an L of two hairlines (1000 x 1 and
+    /// 1 x 1000) look 200 % dense (review 2026-09-17).
+    #[allow(clippy::too_many_arguments)]
+    fn wash_worth(&self, fp: &BBox, members: u64, w: u64, h: u64, min_side: u64, hair: bool, rep: bool) -> bool {
         if self.wash_blob(fp) {
             return true;
         }
         let ppd = self.px_per_dbu;
         let fw = ((fp.x1 - fp.x0).max(0) as f64 * ppd).max(1.0);
         let fh = ((fp.y1 - fp.y0).max(0) as f64 * ppd).max(1.0);
-        let mw = (w as f64 * ppd).max(1.0);
-        let mh = (h as f64 * ppd).max(1.0);
-        let min = if hair { hair_wash_coverage() } else { WASH_MIN_COVERAGE };
-        (members as f64) * mw * mh >= min * fw * fh
+        let long = (w.max(h) as f64 * ppd).max(1.0);
+        let short = (min_side.min(w.max(h)) as f64 * ppd).max(1.0);
+        let min = if hair || rep { hair_wash_coverage() } else { WASH_MIN_COVERAGE };
+        (members as f64) * short * long >= min * fw * fh
     }
 
     /// Screen px of `fp` inside the view boxes - the raster cost of a
@@ -1669,12 +1684,12 @@ impl<'a> Hier<'a> {
     /// sub-cut rules, or the page is a representative) - sparse pages
     /// are kept and drawn as pixels, dense ones washed, either within
     /// the per-plan budgets - else Drop
-    fn sub_cut_verdict(&mut self, p: &floe_ovm::PageV, boxes: &[BBox], size_cut: bool, washable: bool) -> SubCut {
+    fn sub_cut_verdict(&mut self, p: &floe_ovm::PageV, boxes: &[BBox], size_cut: bool, washable: bool, rep: bool) -> SubCut {
         if !washable {
             return SubCut::Drop;
         }
         let hair = self.hair_cut(size_cut);
-        if !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, hair) {
+        if !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, p.max_min, hair, rep) {
             // a sparse page beyond the budget is dropped, never
             // washed (its footprint is a false block)
             return if self.take_sparse(p.members, p.max_w, p.max_h) { SubCut::Keep } else { SubCut::Drop };
@@ -1733,6 +1748,23 @@ impl<'a> Hier<'a> {
             z = n.first + n.count as u32 - 1;
         };
         (lo, hi)
+    }
+
+    /// a lower bound on the octaves of every page below a page-BVH
+    /// node: its size cut from the node's largest page, its hairline
+    /// cut from the smaller of max_w / max_h (at least every page's
+    /// max_min) - a bound in both, so a run without a multiple of
+    /// 4^k holds no representative
+    fn pbvh_octaves(&self, n: &floe_ovm::PbvhV) -> u32 {
+        let mut k = 0;
+        if n.max_w < self.cut && n.max_h < self.cut {
+            k = rep_octaves(n.max_w.max(n.max_h), self.cut);
+        }
+        let thin = n.max_w.min(n.max_h);
+        if self.page_hair > 0 && thin < self.page_hair {
+            k = k.max(rep_octaves(thin, self.page_hair));
+        }
+        k
     }
 
     /// the placements of a child-BVH subtree, [lo, hi)
@@ -1796,7 +1828,7 @@ impl<'a> Hier<'a> {
         }
         let bw = (b0.x1 - b0.x0).max(0) as u64;
         let bh = (b0.y1 - b0.y0).max(0) as u64;
-        if !self.wash_worth(&fp, members, bw, bh, hair) {
+        if !self.wash_worth(&fp, members, bw, bh, bw.min(bh), hair, rep) {
             // sparse: expanded while the sparse budget lasts; beyond
             // it dropped (the caller's cull), never washed
             return !self.take_sparse(members, bw, bh);
@@ -1957,13 +1989,29 @@ impl<'a> Hier<'a> {
                     // one is pruned, so the walk costs what the
                     // representatives cost
                     let (lo, hi) = self.pbvh_pages(ni);
-                    rep_in_run(lo, hi, page_lo, rep_octaves(n.max_w.max(n.max_h), self.cut))
+                    rep_in_run(lo, hi, page_lo, self.pbvh_octaves(&n))
                 } {
                     // descend
                 } else {
                     if self.reps && n.bbox.intersects(b) {
                         self.st.rep_pruned += 1;
                     }
+                    continue;
+                }
+            } else if self.reps
+                && self.page_hair > 0
+                && n.max_w.min(n.max_h) < self.page_hair
+                && n.bbox.intersects(b)
+            {
+                // every page below is hairline-cut (a page's max_min is
+                // at most the smaller of the node's max_w / max_h, so
+                // this catches the uniformly oriented routing runs; a
+                // node mixing both orientations walks on to its leaves
+                // - the index carries no max_min per node): prune the
+                // subtree when its run holds no representative
+                let (lo, hi) = self.pbvh_pages(ni);
+                if !rep_in_run(lo, hi, page_lo, self.pbvh_octaves(&n)) {
+                    self.st.rep_pruned += 1;
                     continue;
                 }
             }
@@ -1983,7 +2031,7 @@ impl<'a> Hier<'a> {
                             && self.reps
                             && rep_keeps((pi - page_lo) as u64, self.page_octaves(&p, size_cut));
                         let washable = in_view && (self.sub_cut_wash || rep);
-                        match self.sub_cut_verdict(&p, std::slice::from_ref(b), size_cut, washable) {
+                        match self.sub_cut_verdict(&p, std::slice::from_ref(b), size_cut, washable, rep) {
                             SubCut::Keep => {
                                 if rep {
                                     self.st.rep_pages_kept += 1;

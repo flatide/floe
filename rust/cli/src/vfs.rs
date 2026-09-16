@@ -6714,6 +6714,10 @@ pub fn plan_cmd(args: &[String]) {
              \"culled_page_bvh_cut\": {},\n  \
              \"visited_page_bvh\": {},\n  \
              \"page_candidates\": {},\n  \
+             \"rep_pages_kept\": {},\n  \
+             \"rep_pages_washed\": {},\n  \
+             \"rep_children\": {},\n  \
+             \"rep_pruned\": {},\n  \
              \"pts_enumerated\": {},\n  \"pts_fallback\": {},\n  \
              \"pts_offsets_scanned\": {},\n  \
              \"pts_selected\": {},\n  \
@@ -6743,6 +6747,10 @@ pub fn plan_cmd(args: &[String]) {
             st.culled_page_bvh_cut,
             st.visited_page_bvh,
             st.page_candidates,
+            st.rep_pages_kept,
+            st.rep_pages_washed,
+            st.rep_children,
+            st.rep_pruned,
             st.pts_enumerated,
             st.pts_fallback,
             st.pts_offsets_scanned,

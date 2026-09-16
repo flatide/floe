@@ -30,6 +30,7 @@ usage: python tools/validate_occupancy.py [src.oas]
 """
 import hashlib
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -1538,7 +1539,11 @@ def write_frontier(path):
     40..41 um tall (1,000 distinct heights, written uncompressed, so
     every line is its own record) on a 1.8 um lattice over 0..2000 um
     on 1/0 - about 19 MB of records, so the layer spreads over 19 or
-    so 1 MB pages and a page BVH; a frame on 6/0 spans the top"""
+    so 1 MB pages and a page BVH; on 2/0 an L of two hairlines - a
+    1 x 1000 um and a 1000 x 1 um line sharing a corner - whose page
+    bbox is 1000 x 1000 um (review 2026-09-17: the old ink estimate
+    members x max_w x max_h called this 200 % dense and washed the
+    whole square); a frame on 6/0 spans the top"""
     ly = db.Layout()
     ly.dbu = 0.001
     top = ly.create_cell("FRONTIER")
@@ -1551,6 +1556,9 @@ def write_frontier(path):
             x = i * pitch
             h = 40 * UM + ((i * 31 + j * 17) % 1000)
             shapes.insert(db.Box(x, y, x + UM, y + h))
+    l2 = ly.layer(2, 0)
+    top.shapes(l2).insert(db.Box(100 * UM, 500 * UM, 1100 * UM, 501 * UM))
+    top.shapes(l2).insert(db.Box(100 * UM, 500 * UM, 101 * UM, 1500 * UM))
     top.shapes(l6).insert(db.Box(0, 0, 2000 * UM, 2000 * UM))
     opt = db.SaveLayoutOptions()
     opt.format = "OASIS"
@@ -1591,37 +1599,61 @@ class PageFrontierTests(unittest.TestCase):
             except Exception:
                 pass
 
-    def _frame(self, worker, px):
+    def _frame(self, worker, px, layer=(1, 0)):
         PageFrontierTests.gen += 1
         box = (0.0, 0.0, 2000.0 * UM, 2000.0 * UM)
         return render_settled(worker, PageFrontierTests.gen, box, px,
-                              cut_px=1.0, thin="cull", visible=[(1, 0)])
+                              cut_px=1.0, thin="cull", visible=[layer])
 
-    def _reps(self, px_per_um):
-        res = floe_index("plan", self.cache, "--view", "0,0,2000,2000",
+    def _plan(self, px_per_um, view="0,0,2000,2000", layer="1/0"):
+        """(representative page ids, plan stats) of a plan with the
+        page frontier on, from `floe-index plan --explain 1`"""
+        res = floe_index("plan", self.cache, "--view", view,
                          "--px-per-um", px_per_um, "--cut-px", "1",
                          "--page-hairline", "1", "--page-reps", "1",
-                         "--layers", "1/0", "--explain", "1")
+                         "--layers", layer, "--explain", "1")
         rows = [l.split("\t") for l in res.stdout.splitlines()
                 if l.startswith("explain\t")]
-        return {int(r[5]) for r in rows
+        reps = {int(r[5]) for r in rows
                 if r[1] == "page" and r[2] in ("rep_keep", "rep_wash")}
+        stats = {k: int(v) for k, v in
+                 re.findall(r'"(\w+)": (\d+)', res.stdout)}
+        return reps, stats
 
     def test_representatives_thin_by_octave_and_nest_across_zooms(self):
         # the 1 um lines are hairline-cut once 1 um < 0.5 px: at 2.5
-        # um/px (800 px) the ratio is 0.8 - every cut page is a
-        # representative; at 5 um/px 0.4 (one page in 4), at 10 um/px
-        # 0.2 (one in 16). The sets nest: what survives at 400 px
-        # survives at 200 px
-        s200, s400, s800 = self._reps(0.1), self._reps(0.2), self._reps(0.4)
-        self.assertGreaterEqual(len(s800), 16, len(s800))
-        self.assertTrue(s200 <= s400 <= s800, (len(s200), len(s400), len(s800)))
-        self.assertLess(len(s200), len(s400))
-        self.assertLess(len(s400), len(s800))
-        # one in 4 per octave, within the rounding of runs and leaves
-        self.assertLessEqual(len(s400) * 2, len(s800))
-        self.assertLessEqual(len(s200) * 2, len(s400))
-        self.assertGreaterEqual(len(s200), 1)
+        # um/px (800 px) the ratio is 0.8 - every one of the N pages
+        # is a representative; at 5 um/px 0.4 (one in 4: indices 0, 4,
+        # 8, ...), at 10 um/px 0.2 (one in 16: 0, 16, ...). The sets
+        # nest downwards: what the 200 px view shows, the 400 px view
+        # showed, and the 800 px view showed everything
+        s200, st200 = self._plan(0.1)
+        s400, st400 = self._plan(0.2)
+        s800, st800 = self._plan(0.4)
+        n = len(s800)
+        self.assertGreaterEqual(n, 16, n)
+        lo = min(s800)
+        self.assertEqual(s800, set(range(lo, lo + n)), "one contiguous run")
+        self.assertEqual(s400, {lo + i for i in range(0, n, 4)})
+        self.assertEqual(s200, {lo + i for i in range(0, n, 16)})
+        self.assertTrue(s200 <= s400 <= s800)
+        # the walk costs what the representatives cost: these pages
+        # are hairline-cut only (40 um long, well above the cut), and
+        # the page BVH prunes the runs holding no representative, so
+        # fewer pages are looked at as the octaves grow
+        self.assertEqual(st800["page_candidates"], n)
+        self.assertLess(st200["page_candidates"], n)
+        # (the tree here is seven nodes: a pruned leaf is still visited,
+        # its pages are not)
+        self.assertLessEqual(st200["visited_page_bvh"], st800["visited_page_bvh"])
+        self.assertGreaterEqual(st200["rep_pruned"], 1)
+        self.assertEqual(st200["rep_pages_kept"] + st200["rep_pages_washed"], len(s200))
+        # the count in view stays about what it was at the cut: half
+        # the view at twice the scale (one octave closer, a quarter of
+        # the pages, one in 4 instead of one in 16) keeps about as many
+        half, _ = self._plan(0.2, view="0,0,1000,1000")
+        self.assertLessEqual(len(half), 2 * len(s200) + 2, (len(half), len(s200)))
+        self.assertLessEqual(len(s200), 2 * len(half) + 2, (len(half), len(s200)))
         # the frames: representatives light pixels at every zoom, the
         # counters name them, the kill switch shows the old cull
         for px in (200, 400):
@@ -1632,12 +1664,24 @@ class PageFrontierTests(unittest.TestCase):
             gone, res = self._frame(self.worker_off, px)
             self.assertEqual(gone, set(), px)
             self.assertEqual(res["plan_culls"]["rep_kept"] + res["plan_culls"]["rep_washed"], 0)
-        # and the count in view stays bounded as the view widens: the
-        # 200 px frame keeps no more representatives than the 400 px one
-        _, r200 = self._frame(self.worker, 200)
-        _, r400 = self._frame(self.worker, 400)
-        self.assertLessEqual(r200["plan_culls"]["rep_kept"] + r200["plan_culls"]["rep_washed"],
-                             r400["plan_culls"]["rep_kept"] + r400["plan_culls"]["rep_washed"])
+
+    def test_an_l_of_two_hairlines_is_drawn_as_lines_not_as_its_square(self):
+        # review 2026-09-17: the ink estimate members x max_w x max_h
+        # made an L of two hairlines look 200 % dense, so its
+        # representative would have washed the whole 100 x 100 px
+        # square. The bound is members x (min side) x (long side) now:
+        # 2 x 1 x 100 px of ink in 10,000 - sparse, kept, two lines
+        lit, res = self._frame(self.worker, 200, (2, 0))
+        culls = res["plan_culls"]
+        self.assertEqual((culls["rep_kept"], culls["rep_washed"]), (1, 0), culls)
+        self.assertTrue(150 <= len(lit) <= 450, len(lit))
+        xs = sorted({x for x, _ in lit})
+        ys = sorted({y for _, y in lit})
+        # two lines: one x column holds ~100 pixels, one y row ~100
+        self.assertGreaterEqual(max(sum(1 for x, _ in lit if x == c) for c in xs), 80)
+        self.assertGreaterEqual(max(sum(1 for _, y in lit if y == r) for r in ys), 80)
+        reps, _ = self._plan(0.1, layer="2/0")
+        self.assertEqual(len(reps), 1)
 
 
 class GiantRepetitionTests(unittest.TestCase):

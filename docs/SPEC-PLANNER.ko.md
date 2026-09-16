@@ -70,17 +70,28 @@
   열) 안의 index가 4^k의 배수인 것만 남기고(`rep_keeps`), 남긴 것은 sub-cut 규칙
   대로 그린다(밀집 → footprint wash `rep_wash`, 희소 → 픽셀 `rep_keep`; 배치는
   `rep_wash`/`rep_expand`). 한 옥타브 축소하면 뷰의 컷 항목이 4배, 남기는 비율이
-  1/4이라 **뷰당 수가 컷 시점의 수로 일정**하고, 4^(k+1)의 배수는 4^k의 배수라
-  **생존자는 더 축소해도 살아남는다**(frontier 격자 대표와 같은 성질). run의 첫
-  항목(index 0)은 언제나 대표라 내용이 있는 (cell, layer)는 어느 줌에서든 최소 한
-  페이지를 보인다. BVH는 서브트리의 index 구간([lo, hi), 페이지는 leaf-order
-  permute로 연속)에 4^k의 배수가 없으면 통째로 프루닝하므로(`rep_pruned`) 걷기 비용도
-  대표 수에 비례한다. 예산(`sub_cut_sparse_px`/`sub_cut_wash_px`)이 안전망. 대표는
-  부분만 보이는 무늬이지 요약처럼 채워진 면이 아니다. 킬 스위치
+  1/4이라 **뷰당 수는 컷 시점의 수 근처로 유지**된다 — 항목이 고르게 분포하고 비용이
+  비슷할 때의 기대치이고, 페이지 하나의 거대 반복이나 index 0이 늘 남는 짧은 run이
+  많으면 수와 비용이 어긋난다(리뷰 2026-09-17). 집합은 frontier 격자 대표처럼 **아래로
+  포함**된다: 4^(k+1)의 배수는 4^k의 배수이므로 S(k+1) ⊆ S(k), 즉 넓은 뷰에 보이는
+  것은 더 가까운 모든 뷰에도 있었고 축소 중에 새로 나타나는 것은 없다(index 4는 k=1
+  에 남고 k=2에 사라진다). run의 첫 항목(index 0)은 어느 줌에서든 대표 **후보**이고
+  실제 표시는 뷰 안·예산·상위 배치의 판정을 거친다. 대표의 wash 판정은 항상 1/8
+  채움이고, ink 추정은 멤버 수 × 최소변 × 긴변(px; `max_min`·`max(max_w, max_h)`) —
+  리뷰가 짚은 대로 예전의 멤버 수 × max_w × max_h는 1000×1 선과 1×1000 선의 L을
+  200 % 밀집으로 보아 정사각형을 통째로 wash했다. BVH는 서브트리의 index 구간
+  ([lo, hi), 페이지는 leaf-order permute로 연속)에 4^k의 배수가 없으면 통째로
+  프루닝한다(`rep_pruned`): 크기 컷 노드와, `min(max_w, max_h) < page_hair`인 노드
+  (모든 페이지의 max_min이 그 이하라 hairline 컷 — 한 방향 배선 run은 잡히고 양방향이
+  섞인 노드는 리프까지 내려간다; 노드별 max_min은 인덱스에 없다). 예산
+  (`sub_cut_sparse_px`/`sub_cut_wash_px`)이 안전망. 대표는 부분만 보이는 무늬이지
+  요약처럼 채워진 면이 아니다. 킬 스위치
   `FLOE_RUST_PAGE_REPS=off`(뷰어), `floe-index plan --page-reps 1`. gate
-  `PageFrontierTests`(90,000개 hairline 페이지 열: 800/400/200 px에서 대표 집합이
-  전부 → 1/4 → 1/16으로 줄고 포함 관계가 유지, 킬 스위치는 0 px), `SubCutTests`
-  (단일 페이지 레이어 = index 0 = 대표), `ThinPageTests`·`test_render_detail…`.
+  `PageFrontierTests`(121만 hairline이 N≈19 페이지: 800/400/200 px에서 대표 집합이
+  정확히 run 전체 → {0,4,8,…} → {0,16,…}, page_candidates·visited_page_bvh가
+  옥타브와 함께 감소, 절반 뷰·2배 배율의 대표 수가 같은 자릿수, L 두 선은 wash 없이
+  선 두 개, 킬 스위치는 0 px), `SubCutTests`(단일 페이지 레이어 = index 0 = 대표),
+  `ThinPageTests`·`test_render_detail…`.
   **플랜당 예산**(2026-09-16 현장: 150 MB 실칩 thin:cull detail medium의 중간
   줌에서 draw가 6 s를 넘었고 킬 스위치로 이전 속도가 돌아옴): sub-cut 규칙이
   한 프레임에 보태는 양을 두 예산이 막는다. ① `sub_cut_sparse_px` — 남긴 희소

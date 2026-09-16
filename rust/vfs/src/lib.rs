@@ -52,10 +52,11 @@ pub struct ViewReq {
     /// survivor is drawn as the sub-cut rules draw it (dense: its
     /// footprint wash, sparse: its pixels). One zoom-out quadruples
     /// the cut items in view and keeps a quarter, so the count stays
-    /// what it was at the cut, and the sets are nested: what survives
-    /// one zoom-out survives every further one, like the frontier's
-    /// lattice representatives. Ignored when sub_cut_wash is on
-    /// (that diagnostic keeps everything). Plain layouts only.
+    /// about what it was at the cut, and the sets are nested the way
+    /// the frontier's lattice representatives are: what a wider view
+    /// shows was shown at every closer view (S(k+1) within S(k) -
+    /// nothing pops in as you zoom out). Ignored when sub_cut_wash is
+    /// on (that diagnostic keeps everything). Plain layouts only.
     pub page_reps: bool,
     /// Whether the rev 41 hairline rule culls PAGES (a page whose every
     /// record has min side < hairline x cut is dropped whole). true is

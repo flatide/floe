@@ -1031,6 +1031,15 @@ SPEC-PLANNER §3 대표: 컷 항목이 문턱의 1/2^k 이하이면 run 안 inde
 children). 실칩 확인 항목: fit 뷰 첫 프레임의 read/decode(대표 페이지의 cold
 read), 중간 줌의 plan/draw, `reps` 카운트. fit급에서 많이 느리면 그 줌 대역용
 캐시를 미리 만드는 방안(사용자)을 그 다음에 본다. gate `PageFrontierTests`.
+리뷰 반영(2026-09-17, 0.12.146 / RENDERD 0.12.101): ① 거대 박스 — ink 추정을
+멤버 수 × 최소변 × 긴변으로 바꾸고 대표는 항상 1/8 채움(L 두 선이 200 % 밀집으로
+잡혀 정사각형이 wash되던 것; gate `test_an_l_of_two_hairlines…`). ② hairline만
+컷되는 페이지의 BVH 프루닝 — `min(max_w, max_h) < page_hair` 노드를 run 구간으로
+프루닝(한 방향 배선은 잡힘, 양방향 혼합 노드는 리프까지; 노드 max_min은 인덱스
+형식 변경이라 보류). ③ 포함 관계 방향 정정: S(k+1) ⊆ S(k) — 넓은 뷰의 대표는
+가까운 뷰에도 있었다(반대 방향 아님), index 0은 후보. ④ 뷰당 비용 일정은 조건부
+기대치로 기록. gate가 정확한 집합(N → N/4 → N/16), page_candidates 감소, 절반
+뷰의 대표 수, L을 확인한다.
 
 **정책 분리(2026-09-11, 사용자·리뷰어)**: 마스크(jobdeck)는 hairline이 많을 수밖에
 없고 일반 레이아웃을 같은 기준에 맞추면 광역 뷰가 느려진다. 그래서 위 해제는
