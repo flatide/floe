@@ -428,8 +428,8 @@ impl Gateway {
         gate.drc = Some(drc);
         Ok(())
     }
-    /// Trusted local opt-in for grants and read-only follow frames. Guest UI
-    /// and independent exploration remain separate; never share owner proofs.
+    /// Trusted local opt-in for grants and follow/independent native views.
+    /// Guest UI/DRC/query are separate stages; never share owner proofs.
     pub fn enable_local_sharing(gate: &mut Gate) -> Result<(), String> {
         let g = Arc::get_mut(gate).ok_or("gateway already published")?;
         if g.shares.is_some() || g.display_only || (g.service.is_none() && g.view.is_none()) {
@@ -922,6 +922,7 @@ pub async fn serve(
                 if gate.browse.as_ref().is_some_and(|b|b.has_failed()) {break Err(io::Error::other("file catalogue stopped"));}
                 if let Some(defaults)=&gate.defaults {defaults.maintain();}
                 if let Some(drc)=&gate.drc {drc.maintain();}
+                crate::sharing::maintenance(&gate);
                 if gate.auth.lock().is_ok_and(|a|a.expired(Instant::now())) {
                     gate.stop_services();
                     // There is no owner worker whose exit can stop this listener.
@@ -980,6 +981,25 @@ pub async fn serve(
             return Err(io::Error::other(
                 "guest transport shutdown deadline exceeded",
             ));
+        }
+    }
+    if let Some(shares) = &gate.shares {
+        let stopped = timeout(Duration::from_secs(4), async {
+            loop {
+                let finished = {
+                    let mut shares = shares.lock().unwrap();
+                    shares.stop();
+                    shares.finished()
+                };
+                if finished {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if stopped.is_err() {
+            return Err(io::Error::other("guest worker shutdown deadline exceeded"));
         }
     }
     if let Some(view) = gate.active_view() {

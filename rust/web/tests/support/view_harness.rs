@@ -82,7 +82,18 @@ impl Harness {
         fill_edit: bool,
         sharing: bool,
     ) -> Self {
-        let resources = Resources::new(Limits::default()).unwrap();
+        Self::start_with_limits(raw, margin, labels, viewport, fill_edit, sharing, Limits::default()).await
+    }
+    async fn start_with_limits(
+        raw: bool,
+        margin: bool,
+        labels: bool,
+        viewport: Option<floe_app_core::view::Viewport>,
+        fill_edit: bool,
+        sharing: bool,
+        limits: Limits,
+    ) -> Self {
+        let resources = Resources::new(limits).unwrap();
         let source =
             PathBuf::from(std::env::var_os("FLOE_VIEW_FIXTURE").expect("private fixture required"));
         let data =
@@ -113,6 +124,9 @@ impl Harness {
             )
             .unwrap(),
         );
+        Self::launch(resources, controller, fill_edit, sharing).await
+    }
+    async fn launch(resources: Arc<Resources>, controller: Arc<ViewController>, fill_edit: bool, sharing: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (mut gate, bootstrap) =
@@ -275,6 +289,9 @@ async fn next_json(ws: &mut Socket) -> Value {
     }
 }
 async fn frame(ws: &mut Socket) -> (Value, Vec<u8>) {
+    frame_with_query(ws, true).await
+}
+async fn frame_with_query(ws: &mut Socket, query: bool) -> (Value, Vec<u8>) {
     loop {
         match next(ws).await {
             Message::Binary(b) => {
@@ -286,8 +303,8 @@ async fn frame(ws: &mut Socket) -> (Value, Vec<u8>) {
                 let body = b[4 + n..].to_vec();
                 assert_eq!(body.len().to_string(), h["payload_length"]);
                 assert_eq!(h["row0"], "top");
-                assert_eq!(h["query"], true);
-                assert_eq!(h["query_scene"]["complete"], true);
+                assert_eq!(h["query"], query);
+                assert_eq!(h["query_scene"]["complete"], query);
                 return (h, body);
             }
             Message::Text(t) => {

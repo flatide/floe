@@ -1,5 +1,9 @@
 # M2b-0 — 읽기 전용 공유의 구현 전 경계 감사
 
+후속 구현: [M2b-1 grants](WEBUI_SHARING_GRANTS.ko.md), [M2b-2 follow](WEBUI_SHARING_FOLLOW.ko.md),
+[M2b-3a 독립 렌더](WEBUI_SHARING_EXPLORE.ko.md). 아래는 전체 요구/수용 기준이며 geometry
+독립 렌더만으로 DRC/query/UI 또는 SH-01~10 전체를 완료 처리하지 않는다.
+
 2026-09-16, `feature/webui`의 `f95f890` 기준.
 [상위 계획 §4/§8/§9](WEBUI_PLAN.ko.md), [M2 기록](WEBUI_M2.ko.md),
 [현재 API와 제안의 구분](WEBUI_SERVICE_API.ko.md).

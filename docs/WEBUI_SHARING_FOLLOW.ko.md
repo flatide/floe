@@ -1,5 +1,8 @@
 # M2b-2 — 로컬 읽기 전용 화면 따라보기 전송
 
+아래는 M2b-2 시점 기록이다. 후속 [M2b-3a](WEBUI_SHARING_EXPLORE.ko.md)는 explore의
+별도 worker/표시 상태와 `explore.set`을 연결한다. follow의 입력/권한은 그대로다.
+
 `feature/webui`, [공유 경계](WEBUI_M2_SHARING.ko.md) · [초대/인증 코어](WEBUI_SHARING_GRANTS.ko.md).
 사용자가 승인한 기본 off·합성/loopback 범위다. **전송 기반 구현이며 사용자용 공유 UI나
 독립 탐색 완료가 아니다.** CLI opt-in/초대 전달 UI는 M2b-4에 남긴다. 기존 제품의

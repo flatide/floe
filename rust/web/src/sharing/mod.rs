@@ -1,10 +1,13 @@
 //! Opt-in local guest identities. Never insert these credentials into owner
 //! Auth: every existing HTTP/WS handler must continue to reject guest proofs.
+mod explore;
 mod http;
 mod stream;
+pub(crate) use http::maintenance;
 pub(crate) use http::routes;
 
 use crate::auth::{public_id, Auth, AuthError, Credentials, Secret, SessionId};
+use floe_app_core::view::{ViewController, ViewState};
 use floe_worker_client::Layers;
 use serde::Deserialize;
 use std::{
@@ -18,6 +21,16 @@ pub(crate) const SESSION_TTL: Duration = Duration::from_secs(1800);
 const MAX_GRANTS: usize = 4;
 pub(crate) const OUTPUT_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const SOCKETS: usize = 4;
+const EXPLORE_IDLE: Duration = Duration::from_secs(60);
+
+fn idle_expired(since: &mut Option<Instant>, connected: bool, now: Instant) -> bool {
+    if connected {
+        *since = None;
+        false
+    } else {
+        now.saturating_duration_since(*since.get_or_insert(now)) >= EXPLORE_IDLE
+    }
+}
 
 /// Separate admission from owner output: a slow guest cannot consume its
 /// packet/encoder credits. This is transport accounting, not a process RSS cap.
@@ -78,6 +91,9 @@ struct Entry {
     auth: Auth,
     revoked: watch::Sender<bool>,
     socket: Arc<Semaphore>,
+    explore: Option<Arc<explore::Explorer>>,
+    saved: Option<ViewState>,
+    disconnected_since: Option<Instant>,
 }
 impl Drop for Entry {
     fn drop(&mut self) {
@@ -106,6 +122,9 @@ struct Lease {
 #[derive(Default)]
 pub(crate) struct Shares {
     entries: Vec<Entry>,
+    // Never drop the last controller Arc on an HTTP handler while its native
+    // thread is still running: ViewController::drop joins the thread.
+    retired: Vec<Arc<explore::Explorer>>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Failure {
@@ -123,8 +142,39 @@ impl From<AuthError> for Failure {
 }
 impl Shares {
     fn maintain(&mut self, now: Instant, valid: impl Fn(&SessionId, &Scope) -> bool) {
-        self.entries
-            .retain(|entry| !entry.auth.expired(now) && valid(&entry.owner, &entry.scope));
+        self.retired.retain(|v| !v.controller.is_finished());
+        self.remove_if(|entry| entry.auth.expired(now) || !valid(&entry.owner, &entry.scope));
+        for entry in &mut self.entries {
+            if entry.explore.is_none() {
+                continue;
+            }
+            if idle_expired(
+                &mut entry.disconnected_since,
+                entry.socket.available_permits() == 0,
+                now,
+            ) {
+                let view = entry.explore.take().unwrap();
+                entry.saved = Some(view.controller.snapshot().state);
+                view.controller.request_close();
+                self.retired.push(view);
+                entry.disconnected_since = None;
+            }
+        }
+    }
+    fn remove_if(&mut self, remove: impl Fn(&Entry) -> bool) {
+        let mut i = 0;
+        while i < self.entries.len() {
+            if remove(&self.entries[i]) {
+                let mut entry = self.entries.remove(i);
+                if let Some(view) = entry.explore.take() {
+                    view.controller.request_close();
+                    self.retired.push(view);
+                }
+                // Entry's Drop wakes all authenticated sockets/encoders.
+            } else {
+                i += 1;
+            }
+        }
     }
     fn issue(
         &mut self,
@@ -149,6 +199,9 @@ impl Shares {
             auth,
             revoked,
             socket: Arc::new(Semaphore::new(1)),
+            explore: None,
+            saved: None,
+            disconnected_since: None,
         });
         Ok(Invitation { id, token, mode })
     }
@@ -181,7 +234,7 @@ impl Shares {
     }
     fn revoke_owner(&mut self, owner: &SessionId, id: &str) -> bool {
         let before = self.entries.len();
-        self.entries.retain(|e| &e.owner != owner || e.id != id);
+        self.remove_if(|e| &e.owner == owner && e.id == id);
         before != self.entries.len()
     }
     fn lease(&self, guest: Guest, now: Instant) -> Result<Lease, Failure> {
@@ -209,17 +262,84 @@ impl Shares {
             })
     }
     fn logout(&mut self, guest: &Guest, now: Instant) {
-        self.entries
-            .retain(|e| e.id != guest.share_id || !e.auth.alive(&guest.session, now));
+        self.remove_if(|e| e.id == guest.share_id && e.auth.alive(&guest.session, now));
     }
     pub(crate) fn stop(&mut self) {
-        self.entries.clear();
+        self.remove_if(|_| true);
+        self.retired.retain(|v| !v.controller.is_finished());
+    }
+    pub(crate) fn finished(&self) -> bool {
+        self.entries.iter().all(|e| e.explore.is_none())
+            && self.retired.iter().all(|v| v.controller.is_finished())
+    }
+    fn explorer(
+        &mut self,
+        lease: &Lease,
+        owner: &ViewController,
+        now: Instant,
+    ) -> Result<Arc<explore::Explorer>, axum::http::StatusCode> {
+        use axum::http::StatusCode as S;
+        if !self.valid(lease, now) || lease.guest.mode != Mode::Explore {
+            return Err(S::UNAUTHORIZED);
+        }
+        let index = self
+            .entries
+            .iter()
+            .position(|e| e.id == lease.guest.share_id)
+            .ok_or(S::UNAUTHORIZED)?;
+        if let Some(view) = &self.entries[index].explore {
+            return Ok(Arc::clone(view));
+        }
+        if self.retired.len() + self.entries.iter().filter(|e| e.explore.is_some()).count()
+            >= MAX_GRANTS
+        {
+            return Err(S::TOO_MANY_REQUESTS);
+        }
+        let initial = self.entries[index]
+            .saved
+            .clone()
+            .unwrap_or_else(|| owner.snapshot().state);
+        if owner.model.dataset_revision != lease.scope.dataset_revision
+            || !explore::layers_within(&lease.scope.layers, &initial.layers)
+        {
+            return Err(S::CONFLICT);
+        }
+        let id = public_id().map_err(|_| S::SERVICE_UNAVAILABLE)?;
+        let controller = owner
+            .fork_view(initial, 1, 1, 128)
+            .map_err(|e| match e.kind {
+                floe_app_core::ErrorKind::Busy => S::TOO_MANY_REQUESTS,
+                _ => S::SERVICE_UNAVAILABLE,
+            })?;
+        let view = Arc::new(explore::Explorer {
+            id,
+            controller: Arc::new(controller),
+        });
+        self.entries[index].saved = None;
+        self.entries[index].explore = Some(Arc::clone(&view));
+        self.entries[index].disconnected_since = None;
+        Ok(view)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explore_idle_uses_continuous_disconnection_not_creation_age() {
+        let now = Instant::now();
+        let mut since = None;
+        assert!(!idle_expired(&mut since, false, now));
+        assert!(!idle_expired(
+            &mut since,
+            false,
+            now + EXPLORE_IDLE - Duration::from_nanos(1)
+        ));
+        assert!(idle_expired(&mut since, false, now + EXPLORE_IDLE));
+        assert!(!idle_expired(&mut since, true, now + EXPLORE_IDLE));
+        assert!(since.is_none());
+        assert!(!idle_expired(&mut since, false, now + EXPLORE_IDLE));
+    }
     #[test]
     fn live_leases_are_revoked_on_owner_scope_logout_and_expiry() {
         let now = Instant::now();

@@ -1,7 +1,7 @@
-//! Follow is a separate, read-only protocol, never owner Control dispatch.
-//! Native pixels are reused; no renderer, dataset lease, file IO or owner
-//! subscriber is created. One packet/write/ACK credit per guest connection.
-use super::{http, Lease, Mode, Scope};
+//! Guest transport is separate from owner Control dispatch. Follow reuses
+//! owner pixels; explore owns its independently admitted view. Neither is an
+//! owner subscriber. One packet/write/ACK credit per guest connection.
+use super::{explore, http, Lease, Mode, Scope};
 use crate::{
     auth::public_id,
     origin,
@@ -17,7 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use floe_app_core::view::{DisplayFrame, Phase, Purpose, Snapshot};
+use floe_app_core::view::{DisplayFrame, Phase, Purpose, Snapshot, ViewController};
 use futures_util::{Sink, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -35,6 +35,10 @@ use tokio::{sync::OwnedSemaphorePermit, task::JoinHandle, time::timeout};
 
 const CONTROL_BYTES: usize = 8 * 1024;
 const ACK_TIMEOUT: Duration = Duration::from_secs(10);
+struct Target {
+    id: String,
+    controller: Arc<ViewController>,
+}
 
 pub(super) async fn upgrade(
     State(gate): State<Gate>,
@@ -65,9 +69,6 @@ pub(super) async fn upgrade(
         let guest = shares
             .authenticate(&id, cookie, csrf, now)
             .map_err(|_| StatusCode::UNAUTHORIZED)?;
-        if guest.mode != Mode::Follow {
-            return Err(StatusCode::CONFLICT);
-        }
         shares
             .lease(guest, now)
             .map_err(|_| StatusCode::UNAUTHORIZED)
@@ -84,6 +85,25 @@ pub(super) async fn upgrade(
     let Ok(slot) = Arc::clone(&lease.socket).try_acquire_owned() else {
         return transport::error(StatusCode::TOO_MANY_REQUESTS);
     };
+    let Some(owner) = gate.active_view().filter(|v| v.id == lease.scope.view_id) else {
+        return transport::error(StatusCode::CONFLICT);
+    };
+    let target = if lease.guest.mode == Mode::Follow {
+        Target {
+            id: owner.id.clone(),
+            controller: Arc::clone(&owner.controller),
+        }
+    } else {
+        match http::with_shares(&gate, |shares, now| {
+            shares.explorer(&lease, &owner.controller, now)
+        }) {
+            Ok(view) => Target {
+                id: view.id.clone(),
+                controller: Arc::clone(&view.controller),
+            },
+            Err(status) => return transport::error(status),
+        }
+    };
     ws.protocols([PROTOCOL])
         .max_message_size(CONTROL_BYTES)
         .max_frame_size(CONTROL_BYTES)
@@ -92,7 +112,7 @@ pub(super) async fn upgrade(
         .max_write_buffer_size(view::PACKET_BYTES + 2 * CONTROL_BYTES)
         .on_upgrade(move |ws| async move {
             let (_permit, _slot) = (permit, slot);
-            socket(ws, gate, lease).await;
+            socket(ws, gate, lease, target).await;
         })
         .into_response()
 }
@@ -101,26 +121,54 @@ fn valid(gate: &Gate, lease: &Lease) -> bool {
     !*gate.stopping.borrow()
         && http::with_shares(gate, |s, now| Ok(s.valid(lease, now))).unwrap_or(false)
 }
-fn allowed(frame: &DisplayFrame, scope: &Scope, snapshot: &Snapshot) -> bool {
-    frame_scope(frame, scope) && frame.matches(snapshot)
+fn allowed(frame: &DisplayFrame, lease: &Lease, snapshot: &Snapshot) -> bool {
+    frame_scope(frame, &lease.scope, lease.guest.mode) && frame.matches(snapshot)
 }
-fn frame_scope(frame: &DisplayFrame, scope: &Scope) -> bool {
-    frame.dataset_revision == scope.dataset_revision && frame.frame.request.layers == scope.layers
+fn frame_scope(frame: &DisplayFrame, scope: &Scope, mode: Mode) -> bool {
+    frame.dataset_revision == scope.dataset_revision
+        && match mode {
+            Mode::Follow => frame.frame.request.layers == scope.layers,
+            Mode::Explore => explore::layers_within(&scope.layers, &frame.frame.request.layers),
+        }
 }
-fn state(s: &Snapshot, scope: &Scope, epoch: &str) -> Value {
-    json!({"type":"share.state","view_id":scope.view_id,"connection_epoch":epoch,
-        "dataset_revision":scope.dataset_revision.to_string(),"state_rev":s.state_rev.to_string(),
+fn state(s: &Snapshot, target: &Target, mode: Mode, epoch: &str) -> Value {
+    let mut out = json!({"type":"share.state","view_id":target.id,"connection_epoch":epoch,
+        "dataset_revision":target.controller.model.dataset_revision.to_string(),"state_rev":s.state_rev.to_string(),
         "render_rev":s.render_rev.to_string(),"render_key":s.render_key.to_string(),
         "worker_epoch":s.worker_epoch.to_string(),"bbox_dbu":s.state.viewport.bbox.map(|v|v.to_string()),
         "pixels":[s.state.viewport.width,s.state.viewport.height],
         "rendering":matches!(s.phase, Phase::Opening | Phase::Rendering | Phase::Cancelling),
         "margin":s.margin.map(|m|json!({"frame_id":m.frame_id.to_string(),"origin_px":m.origin_px,"crop_safe":m.crop_safe})),
-        "margin_working":s.margin_working})
+        "margin_working":s.margin_working});
+    if mode == Mode::Explore {
+        use floe_app_core::shots::Detail;
+        out["selection"] = match &s.state.layers {
+            floe_worker_client::Layers::All => json!({"mode":"all"}),
+            floe_worker_client::Layers::None => json!({"mode":"none"}),
+            floe_worker_client::Layers::Only(pairs) => json!({"mode":"only","pairs":pairs}),
+        };
+        out["depth"] = json!(s.state.depth.map_or("full".into(), |v| v.to_string()));
+        out["max_depth"] = json!(s.max_depth.map(|v| v.to_string()));
+        out["detail"] = json!(match s.state.detail {
+            Detail::Exact => "exact",
+            Detail::Low => "low",
+            Detail::Medium => "medium",
+            Detail::High => "high",
+        });
+        out["thin"] = json!(s.state.thin.name());
+        out["frames"] = json!(s.state.frames);
+        out["labels"] = json!(s.state.labels);
+        out["font_px"] = json!(s.state.font_px);
+        out["mono"] = json!(s.state.mono);
+        out["dbu_um"] = json!(target.controller.model.dbu.to_string());
+        out["failure"] = json!(s.failure.as_ref().map(|(kind, _)| view::safe_error(*kind)));
+    }
+    out
 }
-fn header(frame: &DisplayFrame, scope: &Scope, epoch: &str) -> Result<Vec<u8>, ()> {
+fn header(frame: &DisplayFrame, view_id: &str, epoch: &str) -> Result<Vec<u8>, ()> {
     // Reuse strict raw/PNG validation, but expose an allowlist so additions to
     // owner metadata (catalog, paths, query receipts, telemetry) cannot leak.
-    let bytes = view::frame_header(frame, &scope.view_id, epoch).map_err(|_| ())?;
+    let bytes = view::frame_header(frame, view_id, epoch).map_err(|_| ())?;
     let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
     value.as_object_mut().ok_or(())?.retain(|key, _| {
         [
@@ -247,6 +295,14 @@ fn copy_packet(header: &[u8], body: &[u8], cancelled: impl Fn() -> bool) -> Resu
 enum Control {
     #[serde(rename = "ping")]
     Ping { seq: String },
+    #[serde(rename = "explore.set")]
+    Set {
+        seq: String,
+        connection_epoch: String,
+        view_id: String,
+        base_state_rev: String,
+        body: Box<explore::DisplayPatch>,
+    },
     #[serde(rename = "frame.ack")]
     Ack {
         seq: String,
@@ -258,16 +314,13 @@ enum Control {
 impl Control {
     fn seq(&self) -> &str {
         match self {
-            Self::Ping { seq } | Self::Ack { seq, .. } => seq,
+            Self::Ping { seq } | Self::Ack { seq, .. } | Self::Set { seq, .. } => seq,
         }
     }
 }
 
-async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease) {
+async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease, target: Target) {
     let Ok(epoch) = public_id() else {
-        return;
-    };
-    let Some(attached) = gate.active_view().filter(|v| v.id == lease.scope.view_id) else {
         return;
     };
     if !valid(&gate, &lease) {
@@ -276,7 +329,7 @@ async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease) {
     // Deliberately no Attachment::subscribe(): guests must not keep an absent
     // owner's view alive beyond the existing disconnect grace period.
     let hello = json!({"type":"share.hello","protocol":1,"bundle":BUNDLE,"share_id":lease.guest.share_id,
-        "view_id":lease.scope.view_id,"connection_epoch":epoch,"mode":"follow","read_only":true,
+        "view_id":target.id,"connection_epoch":epoch,"mode":lease.guest.mode.name(),"read_only":true,
         "frame_credit":1,"pending_frames":1});
     if send(&mut ws, &gate, &lease, text(hello)).await.is_err() {
         return;
@@ -307,10 +360,10 @@ async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease) {
             result = async { encoding.as_mut().unwrap().await }, if encoding.is_some() => {
                 encoding = None;
                 let Ok(Ok(packet)) = result else { break; };
-                let snapshot = attached.controller.snapshot();
+                let snapshot = target.controller.snapshot();
                 if !valid(&gate, &lease) { break; }
-                if !allowed(&packet.frame, &lease.scope, &snapshot) { continue; }
-                let next_state = state(&snapshot, &lease.scope, &epoch);
+                if !allowed(&packet.frame, &lease, &snapshot) { continue; }
+                let next_state = state(&snapshot, &target, lease.guest.mode, &epoch);
                 if next_state != last_state {
                     if send(&mut ws, &gate, &lease, text(next_state.clone())).await.is_err() { break; }
                     last_state = next_state;
@@ -350,23 +403,41 @@ async fn socket(mut ws: WebSocket, gate: Gate, lease: Lease) {
                             || flight.as_ref().is_none_or(|f| view::counter(&frame_id) != Ok(f.id)) { break; }
                         flight = None;
                     },
+                    Control::Set { seq, connection_epoch, view_id, base_state_rev, body } => {
+                        if lease.guest.mode != Mode::Explore || connection_epoch != epoch || view_id != target.id { break; }
+                        let reply = http::with_shares(&gate, |shares, now| {
+                            if !shares.valid(&lease, now) { return Err(StatusCode::UNAUTHORIZED); }
+                            let applied = view::counter(&base_state_rev).map_err(|_| "invalid_request")
+                                .and_then(|rev| body.core(&target.controller, &lease.scope)
+                                    .and_then(|patch| target.controller.edit(rev, patch).map_err(|e| match e.kind {
+                                        floe_app_core::ErrorKind::Busy => "conflict", _ => view::safe_error(e.kind)
+                                    })));
+                            Ok(match applied {
+                                Ok(s) => json!({"type":"accepted","seq":seq,"view_id":target.id,"connection_epoch":epoch,
+                                    "state_rev":s.state_rev.to_string(),"render_rev":s.render_rev.to_string()}),
+                                Err(code) => json!({"type":"error","seq":seq,"code":code}),
+                            })
+                        });
+                        let Ok(reply) = reply else { break; };
+                        if send(&mut ws, &gate, &lease, text(reply)).await.is_err() { break; }
+                    },
                 }
             },
             _ = tick.tick() => {
                 if !valid(&gate, &lease) || received.elapsed() >= Duration::from_secs(30)
                     || flight.as_ref().is_some_and(|f| f.since.elapsed() >= ACK_TIMEOUT) { break; }
-                let snapshot = attached.controller.snapshot();
-                let next_state = state(&snapshot, &lease.scope, &epoch);
+                let snapshot = target.controller.snapshot();
+                let next_state = state(&snapshot, &target, lease.guest.mode, &epoch);
                 if next_state != last_state {
                     if send(&mut ws, &gate, &lease, text(next_state.clone())).await.is_err() { break; }
                     last_state = next_state;
                 }
                 if encoding.is_some() || flight.is_some() { continue; }
-                let candidate = [attached.controller.latest(), attached.controller.margin()].into_iter().flatten()
+                let candidate = [target.controller.latest(), target.controller.margin()].into_iter().flatten()
                     .find(|f| last_frames[usize::from(f.purpose == Purpose::Margin)] != f.id
-                        && allowed(f, &lease.scope, &snapshot));
+                        && allowed(f, &lease, &snapshot));
                 let Some(frame) = candidate else { continue; };
-                let Ok(header) = header(&frame, &lease.scope, &epoch) else { break; };
+                let Ok(header) = header(&frame, &target.id, &epoch) else { break; };
                 let cost = 3 * frame.frame.bytes.len() + 2 * (header.len() + 4);
                 let Ok(encoder) = Arc::clone(&transport.encoders).try_acquire_owned() else { continue; };
                 let Ok(reservation) = Arc::clone(&transport.bytes).try_acquire_many_owned(cost as u32) else { continue; };
@@ -479,8 +550,10 @@ mod tests {
             dataset_revision: 2,
             layers: Layers::Only(vec![(7, 0)]),
         };
-        assert!(frame_scope(&frame, &scope));
-        let h: Value = serde_json::from_slice(&header(&frame, &scope, "epoch").unwrap()).unwrap();
+        assert!(frame_scope(&frame, &scope, Mode::Follow));
+        assert!(frame_scope(&frame, &scope, Mode::Explore));
+        let h: Value =
+            serde_json::from_slice(&header(&frame, &scope.view_id, "epoch").unwrap()).unwrap();
         assert_eq!(h["query"], false);
         assert_eq!(
             h["query_scene"],
@@ -489,13 +562,15 @@ mod tests {
         assert!(h.get("perf").is_none());
         assert!(!h.to_string().contains("/secret"));
         frame.frame.request.layers = Layers::All;
+        assert!(!frame_scope(&frame, &scope, Mode::Explore));
         assert!(
-            !frame_scope(&frame, &scope),
+            !frame_scope(&frame, &scope, Mode::Follow),
             "stale all-layer frame must not inherit a narrow snapshot"
         );
         frame.frame.request.layers = scope.layers.clone();
         frame.dataset_revision += 1;
-        assert!(!frame_scope(&frame, &scope));
+        assert!(!frame_scope(&frame, &scope, Mode::Follow));
+        assert!(!frame_scope(&frame, &scope, Mode::Explore));
     }
 
     #[tokio::test]

@@ -142,8 +142,10 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 M2b-1 [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)에 이어 M2b-2는
 [읽기 전용 follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다.
 고정 view/revision/layer scope, PNG/raw·margin 재사용, 별도 guest credit·폐기를 적용한다.
-trusted Gateway opt-in만 있으며 CLI/공유 UI·explore worker·DRC 읽기는 아직 미연결이다.
-`shares=false`는 유지하고 follow만 `delivery=follow_frames`, explore는 `not_connected`다.
+M2b-3a는 [독립 explore 렌더/표시 상태](WEBUI_SHARING_EXPLORE.ko.md)를 같은 자원 관리자에
+연결한다. 별도 worker·범위 제한 표시 변경·60초 idle 회수/재접속 기반이며 DRC/query는 남는다.
+trusted Gateway opt-in만 있으며 CLI/공유 UI는 아직 미연결이다.
+`shares=false`는 유지하고 `delivery`는 follow=`follow_frames`, explore=`explore_frames`다.
 전송 기반을 전체 공유 완료로 계산하지 않는다. 원격 공개·노트 본문·파일 탐색/쓰기는 열지 않는다.
 
 M4g-30 사용자 결정: Rust 제품의 GTK 진단은 `displaytest [PNG]`로 대체 확정.
@@ -219,7 +221,7 @@ M4g-24b/c·25·26b에서 세 항목의 로컬 구현·게이트를 각각 연결
 |---|---|---|
 | M0 | 로컬 기능/API·의존성 조사 진행, 현장 감사 보류 | 실제 Firefox/ETX 환경·운영 정책 확인 |
 | M1 | Rust CLI/서비스·로컬 웹 뷰어·margin 구현 | 잔여 열기/CLI parity, G1 지연·pacing 및 최종 G4 수용 |
-| M2 | 로컬 DRC·공유 인증/권한·follow 전송 기반 구현 | 독립 explore/DRC 공유·공유 URL/UI·원격 배포 및 수용 (`shares=false`, loopback-only) |
+| M2 | 로컬 DRC·공유 인증/권한·follow 전송·독립 explore 렌더 기반 구현 | scoped query/독립 DRC 공유·공유 URL/UI·원격 배포 및 수용 (`shares=false`, loopback-only) |
 | M3 | 현장 실행 불가로 보류 | TeeBox Firefox-in-ETX와 GTK 비교, G2 판정 |
 | M4 | 주요 조작·내보내기·설정·Rust portable 구현 | 아래 로컬 잔여와 Linux/브라우저 수용·G4 전체 감사, GTK 은퇴 판정 |
 | M5 | world-tile 조건부 보류 | F2R-03c/10 전제와 실측으로 착수 판단. 미구현을 완료로 세지 않음 |

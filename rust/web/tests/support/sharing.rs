@@ -1,5 +1,7 @@
 use super::*;
 use tokio_tungstenite::connect_async;
+#[path = "exploration.rs"]
+mod exploration;
 
 fn headers<'a>(origin: &'a str, login: &'a Login) -> [(&'static str, &'a str); 4] {
     [
@@ -283,6 +285,9 @@ fn guest_request(
     r
 }
 async fn follow(h: &Harness, id: &str, guest: &Login) -> (Socket, Value) {
+    guest_connect(h, id, guest, "follow").await
+}
+async fn guest_connect(h: &Harness, id: &str, guest: &Login, mode: &str) -> (Socket, Value) {
     let (mut ws, response) = tokio_tungstenite::connect_async_with_config(
         guest_request(h, id, guest),
         Some(image_client_config()),
@@ -293,7 +298,7 @@ async fn follow(h: &Harness, id: &str, guest: &Login) -> (Socket, Value) {
     assert_eq!(response.headers()["sec-websocket-protocol"], PROTOCOL);
     let hello = next_json(&mut ws).await;
     assert_eq!(hello["type"], "share.hello");
-    assert_eq!(hello["mode"], "follow");
+    assert_eq!(hello["mode"], mode);
     assert_eq!(hello["read_only"], true);
     assert!(hello.get("title").is_none());
     (ws, hello)
@@ -413,6 +418,7 @@ async fn local_follow_reuses_pixels_has_private_credit_and_rejects_owner_command
             "view.query.cancel",
             "view.measure",
             "view.measure_selection",
+            "explore.set",
         ]
         .iter()
         .enumerate()
@@ -430,7 +436,7 @@ async fn local_follow_reuses_pixels_has_private_credit_and_rejects_owner_command
             closed(&mut guest).await;
             guest_drained(&h).await;
             assert_eq!(h.controller.snapshot().state_rev, before.state_rev);
-            if i != 7 {
+            if i != 8 {
                 let pair = follow(&h, id, &c).await;
                 guest = pair.0;
                 let (f, _) = guest_frame(&mut guest).await;
@@ -545,9 +551,6 @@ async fn local_follow_upgrade_expiry_and_revoke_are_independent() {
     let a = invite(&h, &owner, "follow").await;
     let c = exchange(&h, &a).await;
     let id = a["share_id"].as_str().unwrap();
-    let b = invite(&h, &owner, "explore").await;
-    let bc = exchange(&h, &b).await;
-    denied(guest_request(&h, b["share_id"].as_str().unwrap(), &bc), 409).await;
     for (field, value, code) in [
         ("origin", "http://bad.invalid", 403),
         (
@@ -602,7 +605,7 @@ async fn local_follow_upgrade_expiry_and_revoke_are_independent() {
     .unwrap();
     until_reply(&mut ws, 2, "pong").await;
     h.shutdown().await;
-    println!("RUST LOCAL FOLLOW LIFETIME: ALL OK (strict upgrade, explore not silently followed, no-ACK deadline, revoke, owner survives)");
+    println!("RUST LOCAL FOLLOW LIFETIME: ALL OK (strict upgrade, no-ACK deadline, revoke, owner survives)");
 }
 
 #[tokio::test]

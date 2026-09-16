@@ -24,17 +24,21 @@ def main(fixture):
     with tempfile.TemporaryDirectory(prefix="floe-view-stream-") as td:
         work = Path(td)
         source = work / "설계 with spaces.oas"
-        shutil.copy2(fixture, source)
+        second = work / "second synthetic.oas"
+        for target in (source, second):
+            shutil.copy2(fixture, target)
         workers = work / "workers"
         workers.mkdir()
         env = dict(os.environ, PATH="", TMPDIR=str(workers), FLOE_VIEW_FIXTURE=str(source),
+                   FLOE_VIEW_SECOND_FIXTURE=str(second),
                    FLOE_RENDERD_BIN=str(ROOT / "rust/target/release/floe-renderd"),
                    FLOE_INDEX_BIN=str(ROOT / "rust/target/release/floe-index"))
-        p = subprocess.run([str(ROOT / "rust/target/release/floe2-web"), "index", str(source),
-                            "--jobs", "2"], env=env, cwd=ROOT, text=True, capture_output=True, timeout=40)
-        assert p.returncode == 0, (p.stdout, p.stderr)
-        cache = Path(str(source) + ".floe")
-        before = digest(cache)
+        caches = [Path(str(target) + ".floe") for target in (source, second)]
+        for target in (source, second):
+            p = subprocess.run([str(ROOT / "rust/target/release/floe2-web"), "index", str(target),
+                                "--jobs", "2"], env=env, cwd=ROOT, text=True, capture_output=True, timeout=40)
+            assert p.returncode == 0, (p.stdout, p.stderr)
+        before = [digest(cache) for cache in caches]
         test = subprocess.run([tests[0], "--ignored", "--nocapture"], env=env,
                               text=True, capture_output=True, timeout=90)
         assert test.returncode == 0, (test.stdout, test.stderr)
@@ -52,7 +56,11 @@ def main(fixture):
         assert "RUST LOCAL FOLLOW MARGIN: ALL OK" in test.stdout
         assert "RUST LOCAL FOLLOW LIFETIME: ALL OK" in test.stdout
         assert "RUST LOCAL FOLLOW BACKPRESSURE: ALL OK" in test.stdout
-        assert digest(cache) == before, "stream modified cache bytes/mtime"
+        assert "RUST LOCAL EXPLORE ISOLATION: ALL OK" in test.stdout
+        assert "RUST LOCAL EXPLORE SCOPE: ALL OK" in test.stdout
+        assert "RUST LOCAL EXPLORE LIFETIME: ALL OK" in test.stdout
+        assert "RUST LOCAL EXPLORE DECK SCOPE: ALL OK" in test.stdout
+        assert [digest(cache) for cache in caches] == before, "stream modified cache bytes/mtime"
         assert not list(workers.iterdir()), "stream worker files leaked"
         print(test.stdout.strip())
 

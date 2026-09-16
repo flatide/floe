@@ -1,5 +1,5 @@
 //! Guest routes are an explicit allowlist and do not
-//! dispatch owner handlers, native work, catalog/DRC reads or filesystem IO.
+//! dispatch owner handlers, catalog/DRC reads or arbitrary filesystem IO.
 use super::*;
 use crate::{
     origin,
@@ -58,6 +58,11 @@ pub(super) fn with_shares<T>(
         gate.alive(owner) && scope.as_ref() == Some(s)
     });
     op(&mut shares, now)
+}
+pub(crate) fn maintenance(gate: &Gateway) {
+    if gate.shares.is_some() {
+        let _ = with_shares(gate, |_, _| Ok(()));
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -217,7 +222,7 @@ async fn session(State(gate): State<Gate>, headers: HeaderMap, Path(id): Path<St
 fn delivery(mode: Mode) -> &'static str {
     match mode {
         Mode::Follow => "follow_frames",
-        Mode::Explore => "not_connected",
+        Mode::Explore => "explore_frames",
     }
 }
 async fn logout(State(gate): State<Gate>, headers: HeaderMap, Path(id): Path<String>) -> Response {

@@ -75,6 +75,7 @@ fn main() {
         "src/sharing/mod.rs",
         "src/sharing/http.rs",
         "src/sharing/stream.rs",
+        "src/sharing/explore.rs",
         "src/drc/mod.rs",
         "src/drc/registry.rs",
         "src/drc/review.rs",

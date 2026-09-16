@@ -356,6 +356,51 @@ impl ViewController {
         next.native_options = Some(native_options);
         Ok(prepared)
     }
+    /// Independent read-only view of the same pinned dataset. Unlike a
+    /// replacement, this acquires a NEW permit from the SAME resource manager
+    /// and never stops or reuses the owner's worker/generation/query scene.
+    /// The caller authorizes initial state/layer scope before calling this.
+    pub fn fork_view(
+        &self,
+        initial: ViewState,
+        decode_jobs: u16,
+        raster_jobs: u16,
+        budget_mb: u64,
+    ) -> Result<Self> {
+        if self.stop.load(Ordering::Relaxed) != 0 || self.is_finished() {
+            return Err(Error::new(ErrorKind::Busy, "source view closed"));
+        }
+        let resources = self
+            .resources
+            .upgrade()
+            .ok_or_else(|| Error::new(ErrorKind::Busy, "resources closed"))?;
+        let dataset = self.pin_dataset()?;
+        let mut options = self.native_options.clone().ok_or_else(|| {
+            Error::new(ErrorKind::Unsupported, "view has no native configuration")
+        })?;
+        options.decode_jobs = decode_jobs;
+        options.raster_jobs = raster_jobs;
+        options.budget_mb = budget_mb;
+        options.debug = false;
+        initial.validate(&self.model)?;
+        let permit = resources.render(&options)?;
+        let weak = Arc::downgrade(&dataset);
+        let native_options = options.clone();
+        let mut next = Self::spawn(
+            &resources,
+            Arc::clone(&self.model),
+            initial,
+            permit,
+            self.configuration,
+            move |stop| {
+                let engine = RenderSession::open(&dataset.dataset, options, false, stop)?;
+                Ok((Box::new(engine) as Box<dyn Engine>, Some(dataset)))
+            },
+        )?;
+        next.dataset = weak;
+        next.native_options = Some(native_options);
+        Ok(next)
+    }
     fn prepare_engine(
         self: &Arc<Self>,
         model: Arc<Model>,
