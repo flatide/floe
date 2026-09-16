@@ -26,4 +26,6 @@ hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio
 sha1 = "=0.10.7"
 
 [dev-dependencies]
+quote = "=1.0.47"
+syn = { version = "=2.0.119", features = ["full", "visit"] }
 tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["connect", "handshake"] }

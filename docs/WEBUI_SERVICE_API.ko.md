@@ -31,6 +31,9 @@ M2b-4b4의 [DRC 순회·박스 선택](WEBUI_SHARING_DRC_NAV.ko.md)은 기존 gu
 M2b-4b5의 [CD/자동 순회](WEBUI_SHARING_DRC_CD.ko.md)는 기존 `focus`/`measurements`와
 개인 `/panel`만 사용한다. `explore.set` 승인+동일 revision snapshot 후 CD를 읽으며
 새 endpoint나 권한·geometry 계약은 추가하지 않는다. 확인 실패한 이동은 재생하지 않는다.
+M2b-4c의 [권한 inventory gate](WEBUI_SHARING_ACCEPTANCE.ko.md)는 현재 구현의
+HTTP/wire 목록과 handler/variant 연결을 고정한다. 아래 제안 endpoint를 구현한 것으로
+세지 않으며 새 목록 항목의 자동 승인이나 원격 공개도 하지 않는다.
 M4g-2의 실제 `GET /api/v1/views/{id}/minimap/{base}`는 owner 인증+CSRF로 현재 view의
 메모리 palette 베이스(180×180 ASCII 인덱스)만 반환한다. `base`는 `full` 또는 실제
 저장된 depth의 정규 십진수다. 임의 파일/geometry 조회나 새 렌더를 하지 않는다.

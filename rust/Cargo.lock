@@ -296,10 +296,12 @@ dependencies = [
  "getrandom",
  "hyper",
  "hyper-util",
+ "quote",
  "serde",
  "serde_json",
  "sha1",
  "subtle",
+ "syn 2.0.119",
  "tokio",
  "tokio-tungstenite",
 ]

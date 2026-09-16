@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-17, M2b-4b5 게스트 DRC 이동 확정·CD/자동 순회. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-17, M2b-4c 공유 권한 목록·수용 근거 대조. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -25,6 +25,10 @@ M4g-28은 양수 stream 인자의 기존 환경 round/독립 창/최종 옵션 �
 M4g-29는 APNG **정적 기본 이미지**, M4g-30은 사용자 결정에 따른 `displaytest`
 대체 경계를 확정했다. GTK 위젯 진단은 비교 패키지에만 남기며 Rust alias는 없다.
 새 byte-stream 알고리즘이나 animation player를 필수 이관으로 잘못 확대하지 않는다.
+
+M2b-4c는 [공유 SH-01~10의 근거/열린 범위](WEBUI_SHARING_ACCEPTANCE.ko.md)를
+대조하고 HTTP/wire inventory와 실제 교차 인증 거부 gate를 연결한다. 이는 로컬
+권한 회귀 근거이며 실제 브라우저 SH-08·원격 SH-10과 G4 수용을 대체하지 않는다.
 
 ## 1. 범위별 현재 근거와 남은 일
 

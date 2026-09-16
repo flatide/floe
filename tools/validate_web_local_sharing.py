@@ -13,6 +13,7 @@ import urllib.request
 
 from validate_web_cli import APP, INDEX, RENDERD, Client, read_json, wait
 from validate_view_controller import digest
+from validate_web_permissions import verify_cross_auth
 
 
 def main(fixture):
@@ -106,6 +107,9 @@ def main(fixture):
                         csrf = call("POST", base + "/exchange", token)["csrf"]
                         call("POST", base + "/exchange", token, 401)
                         assert call("GET", base + "/session")["mode"] == mode
+                        if mode == "follow" and not share_drc:
+                            verify_cross_auth(session, owner, guest, csrf, invite["share_id"], view["view_id"])
+                            assert call("GET", base + "/session")["mode"] == mode
                         call("GET", "/api/v1/capabilities", code=401)
                         palette_request = dict(view_id=view["view_id"], state_rev=view["state_rev"], body={})
                         if mode == "follow":

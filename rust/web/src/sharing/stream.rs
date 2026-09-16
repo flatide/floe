@@ -578,17 +578,25 @@ mod tests {
     }
     #[test]
     fn follow_control_allowlist_is_not_owner_dispatch() {
-        // New owner commands remain denied without a second hand-copied list.
-        for kind in include_str!("../stream.rs")
-            .lines()
-            .filter_map(|line| {
-                line.trim()
-                    .strip_prefix("#[serde(rename = \"")?
-                    .strip_suffix("\")]")
-            })
+        // The AST inventory gate binds this table to every owner command,
+        // including multiline attributes. Missing fields are not a denial:
+        // the guest enum must reject the owner namespace itself.
+        let policy: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../tools/web_permissions.json")).unwrap();
+        for kind in policy["wire"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter_map(|key| key.strip_prefix("stream.rs/Control/"))
             .filter(|kind| !["ping", "frame.ack"].contains(kind))
         {
-            assert!(serde_json::from_value::<Control>(json!({"type":kind,"seq":"1"})).is_err());
+            let error = serde_json::from_value::<Control>(json!({"type":kind,"seq":"1"}))
+                .err()
+                .expect("owner command admitted to guest enum");
+            assert!(
+                error.to_string().starts_with("unknown variant"),
+                "{kind}: {error}"
+            );
         }
         assert!(
             serde_json::from_value::<Control>(json!({"type":"ping","seq":"1","body":{}})).is_err()
