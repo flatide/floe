@@ -1006,6 +1006,17 @@ hairline 픽셀, wash 블록 채움)에 상한이 없던 것. 조치: ① perf �
 µs)로 정한다. 진단 `FLOE_RUST_SUB_CUT_SPARSE_MPX=0` / `FLOE_RUST_SUB_CUT_WASH_MPX=0`
 은 각각 희소 전부·wash 전부를 버려 어느 쪽이 느린지 가른다. gate
 `SubCutTests.test_the_per_plan_budgets…`. 실칩 재측정 대기.
+**결함 C 종결 — sub-cut 규칙 기본 off(사용자 결정 2026-09-16, 0.12.143 / RENDERD
+0.12.98)**: "sub-cut wash는 속도가 느려지는 부작용과 그럼에도 완전히 보이지는
+않는 단점이 있어서 일반 레이아웃에는 적용하지 않는 것이 좋겠음. 덱도 occupancy가
+있으므로 sub-cut wash는 사용될 일이 없음." 단일 레이아웃 요청의 `sub_cut_wash`와
+덱의 wide 정책(2026-09-10 4단계) 모두 기본 off. 코드는 남기고 진단 스위치
+`FLOE_RUST_SUB_CUT_WASH=on`(단일)·`FLOE_RUST_DECK_WIDE=on`(덱)으로만 켠다. 일반
+레이아웃의 광역뷰 존재는 점유 요약(`floe2 index --occupancy`) + `thin:keep`이
+맡는다 — 그래서 요약 생성 시간(OCCUPANCY §12 실측 9 이후)이 실사용 조건이다.
+gate: `SubCutTests`(기본 워커는 셋 다 없음·카운터 0, on 워커가 규칙·예산 검증),
+`ThinPageTests`·`WideViewTests`(기본 = 옛 cull, on = 규칙), 실칩 증상 테스트
+(기본 = 증상, on = wash).
 
 **정책 분리(2026-09-11, 사용자·리뷰어)**: 마스크(jobdeck)는 hairline이 많을 수밖에
 없고 일반 레이아웃을 같은 기준에 맞추면 광역 뷰가 느려진다. 그래서 위 해제는

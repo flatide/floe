@@ -1,7 +1,7 @@
 //! Synthetic occupancy scaling probe, without source parsing or page indexing.
 //! cargo run --release -p floe-vfs --example bench_occupancy -- mixed 12 /tmp/mixed.ovo
 use floe_oasis::doc::{Cell, Doc, PlaceRec, RectRec, Rep};
-use floe_vfs::occupancy::{build, write_ovo, Opts};
+use floe_vfs::occupancy::{build, write_ovo, Opts, STATUS_OK};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -33,6 +33,7 @@ fn main() {
     };
     let start = std::time::Instant::now();
     let occ = build(&doc, 0, 0, &Opts { jobs, base_um: 4.0, ..Opts::default() }).unwrap();
+    assert!(occ.layers.iter().all(|l| l.status == STATUS_OK));
     println!("case={case} jobs={jobs} seconds={:.6} work={} cells={}",
         start.elapsed().as_secs_f64(), occ.layers.iter().map(|l| l.work).sum::<u64>(),
         occ.layers.iter().flat_map(|l| &l.planes).map(|p| p.levels[0].count()).sum::<u64>());

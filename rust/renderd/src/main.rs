@@ -1639,7 +1639,10 @@ fn run_deck_render(
         decode_pages: command.decode_pages,
         // FLOE_RUST_DECK_WIDE=off: field kill switch back to the plain
         // size cut (sub-cut content silently omitted)
-        wide: std::env::var("FLOE_RUST_DECK_WIDE").as_deref() != Ok("off"),
+        // the deck wide-view washes are OFF by default (user decision
+        // 2026-09-16: deck sources carry an occupancy summary, which
+        // draws a wide view instead); FLOE_RUST_DECK_WIDE=on enables
+        wide: std::env::var("FLOE_RUST_DECK_WIDE").as_deref() == Ok("on"),
         // FLOE_RUST_DECK_STREAM=off: stop a pass at the budget again
         // (partial frame, pages "over budget (not drawn)")
         stream: std::env::var("FLOE_RUST_DECK_STREAM").as_deref() != Ok("off"),
@@ -1749,10 +1752,13 @@ fn run_deck_render(
 }
 
 /// Whether a plain layout's plan keeps its sub-cut pages as washes or
-/// sparse pixels like a deck pass (2026-09-16); off = the pre-fix
-/// behaviour that culled them.
+/// sparse pixels like a deck pass. OFF by default (user decision
+/// 2026-09-16: the rules slowed mid-zoom draws on a 150 MB chip and
+/// still did not show everything; presence at a wide view is the
+/// occupancy summary's job); FLOE_RUST_SUB_CUT_WASH=on enables them
+/// for a diagnosis.
 fn sub_cut_wash_enabled() -> bool {
-    std::env::var("FLOE_RUST_SUB_CUT_WASH").as_deref() != Ok("off")
+    std::env::var("FLOE_RUST_SUB_CUT_WASH").as_deref() == Ok("on")
 }
 
 fn run_render(

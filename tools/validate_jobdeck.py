@@ -2864,25 +2864,24 @@ class ThinPageTests(unittest.TestCase):
         exact = self._rgb("thin.oas", "exact")
         self.assertGreater(self._lit(exact), 100)
         # the plain layout's default: the performance policy culls the
-        # all-thin page; since 2026-09-16 a culled hairline page is not
-        # dropped but washed (dense) or kept (sparse - this fixture's
-        # 400 lines cover under 1/8 of their page), so the lines are
-        # still drawn; FLOE_RUST_SUB_CUT_WASH=off is the old cull
-        no_wash = {"FLOE_RUST_SUB_CUT_WASH": "off"}
-        self.assertEqual(self._rgb("thin.oas", "high"), exact)
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high", no_wash)), 0)
+        # all-thin page. The sub-cut rules that kept it (2026-09-16,
+        # sparse - this fixture's 400 lines cover under 1/8 of their
+        # page) are off by default since the user decision of the same
+        # day; FLOE_RUST_SUB_CUT_WASH=on enables them
+        wash = {"FLOE_RUST_SUB_CUT_WASH": "on"}
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
+        self.assertEqual(self._rgb("thin.oas", "high", wash), exact)
         # the mask policy on the same file: identical to exact
         self.assertEqual(self._rgb("thin.oas", "high", thin="keep"), exact)
         # explicit cull is the default; the diagnostic override wins
         # over the request either way
-        self.assertEqual(self._rgb("thin.oas", "high", thin="cull"), exact)
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high",
-                                             dict(no_wash), thin="cull")), 0)
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high", thin="cull")), 0)
+        self.assertEqual(self._rgb("thin.oas", "high", dict(wash), thin="cull"), exact)
         self.assertEqual(self._rgb("thin.oas", "high",
                                    {"FLOE_RUST_PAGE_HAIRLINE": "keep"}), exact)
         self.assertEqual(self._lit(self._rgb(
-            "thin.oas", "high",
-            dict(no_wash, FLOE_RUST_PAGE_HAIRLINE="cull"), thin="keep")), 0)
+            "thin.oas", "high", {"FLOE_RUST_PAGE_HAIRLINE": "cull"},
+            thin="keep")), 0)
 
     def test_a_thicker_record_changes_nothing_about_the_lines(self):
         thin = self._rgb("thin.oas", "high", thin="keep")
@@ -2896,28 +2895,27 @@ class ThinPageTests(unittest.TestCase):
         self.assertEqual(outside, [], "lines identical away from the box")
         self.assertTrue(diff, "the box itself is drawn")
         # under the plain policy the thicker record decides the fate
-        # of every line in its page - the documented omission, visible
-        # with the sub-cut rules off (2026-09-16: with them on the
-        # sparse all-thin page is kept and drawn either way)
-        no_wash = {"FLOE_RUST_SUB_CUT_WASH": "off"}
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high", no_wash)), 0)
-        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high", no_wash)), 100)
-        self.assertGreater(self._lit(self._rgb("thin.oas", "high")), 100)
+        # of every line in its page - the documented omission (with
+        # the sub-cut rules on, FLOE_RUST_SUB_CUT_WASH=on, the sparse
+        # all-thin page is kept and drawn either way)
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
+        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high")), 100)
+        self.assertGreater(self._lit(self._rgb(
+            "thin.oas", "high", {"FLOE_RUST_SUB_CUT_WASH": "on"})), 100)
 
     def test_deck_keeps_thin_pages_by_default(self):
         exact = self._rgb("thin.jb", "exact")
         self.assertGreater(self._lit(exact), 100)
         kept = self._rgb("thin.jb", "high")
         self.assertEqual(kept, exact, "a mask deck keeps its hairlines")
-        # --thin cull on a deck: the page is culled and the deck's wide
-        # policy stands in for it - until 2026-09-16 as its bbox wash
-        # (a block), now the sparse page (400 lines under 1/8 of their
-        # footprint) is kept and drawn, dense ones wash; with the wide
-        # policy off it vanishes
-        culled = self._rgb("thin.jb", "high", thin="cull")
-        self.assertEqual(culled, exact)
-        self.assertEqual(self._lit(self._rgb(
-            "thin.jb", "high", {"FLOE_RUST_DECK_WIDE": "off"}, thin="cull")), 0)
+        # --thin cull on a deck: the page is culled and vanishes (the
+        # deck's wide policy that stood in for it - a bbox wash until
+        # 2026-09-16, then the sparse page kept - is off by default
+        # since the user decision of that day; FLOE_RUST_DECK_WIDE=on
+        # enables it: this sparse page is then kept and drawn)
+        self.assertEqual(self._lit(self._rgb("thin.jb", "high", thin="cull")), 0)
+        self.assertEqual(self._rgb(
+            "thin.jb", "high", {"FLOE_RUST_DECK_WIDE": "on"}, thin="cull"), exact)
         rep = CLI / "thin-deck.json"
         run_floe2("render", CLI / "thin.jb", "--bbox", "0,0,2000,2000",
                   "--px", "200", "--out", CLI / "thin-deck.png",
@@ -2960,18 +2958,20 @@ class ThinPageTests(unittest.TestCase):
 
     def test_kept_thin_pages_are_counted(self):
         from floe.rust_render import RustRenderWorker
-        # under cull the all-thin page is culled; with the sub-cut rules
-        # (2026-09-16) the sparse page is kept instead and not counted as
-        # a size cull, with them off it is (the old count)
+        # under cull the all-thin page is culled and counted as a size
+        # cull; with the sub-cut rules on (FLOE_RUST_SUB_CUT_WASH=on,
+        # off by default since 2026-09-16) the sparse page is kept
+        # instead and not counted
         for thin, wash, thin_pages, culled in (("keep", True, 1, 0),
+                                               ("keep", False, 1, 0),
                                                ("cull", True, 1, 0),
                                                (None, True, 1, 0),
                                                ("cull", False, 0, 1),
                                                (None, False, 0, 1)):
             c = Cache(str(CLI / "thin.oas"))
             c.load()
-            if not wash:
-                os.environ["FLOE_RUST_SUB_CUT_WASH"] = "off"
+            if wash:
+                os.environ["FLOE_RUST_SUB_CUT_WASH"] = "on"
             try:
                 worker = RustRenderWorker(c)
                 worker.start()
@@ -3004,13 +3004,18 @@ class ThinPageTests(unittest.TestCase):
         self.assertEqual(result["plan_culls"]["thin_pages"], 1)
 
 
+WIDE_ON = {"FLOE_RUST_DECK_WIDE": "on"}
+
+
 class WideViewTests(unittest.TestCase):
     """Step 4 (2026-09-10): the jobdeck wide-view policy. What the
     size cut would drop keeps its on-screen existence as a footprint
     wash on its own layer: a page of sub-cut shapes as the page's
     bbox, an array of sub-cut child cells as the placement footprint
-    on the child's visible layers. Kill switch FLOE_RUST_DECK_WIDE=off
-    restores the silent omission."""
+    on the child's visible layers. OFF by default since the user
+    decision of 2026-09-16 (deck sources carry an occupancy summary
+    that draws the wide view): the default is the silent omission,
+    FLOE_RUST_DECK_WIDE=on enables the policy."""
 
     @classmethod
     def setUpClass(cls):
@@ -3058,11 +3063,11 @@ class WideViewTests(unittest.TestCase):
         # an own page) and the 1 um BIT array (level 2, sub-cut child
         # placements) are both below the cut
         for level in (1, 2):
-            gone, r_off = self._render("tiny.jb", {"FLOE_RUST_DECK_WIDE": "off"},
+            gone, r_off = self._render("tiny.jb", {},
                                        [(level, 0)], 3.0)
             self.assertEqual(_lit(gone), 0, "level %d is culled" % level)
             self.assertEqual(r_off["deck"]["wide_washes"], 0)
-            kept, r_on = self._render("tiny.jb", {}, [(level, 0)], 3.0)
+            kept, r_on = self._render("tiny.jb", WIDE_ON, [(level, 0)], 3.0)
             self.assertGreater(_lit(kept), 0, "level %d washed" % level)
             self.assertGreater(r_on["deck"]["wide_washes"], 0)
             # the wash covers the field: its corners are lit
@@ -3073,7 +3078,7 @@ class WideViewTests(unittest.TestCase):
                 self.assertNotEqual(kept[at:at + 3], b"\0\0\0",
                                     "level %d corner %d,%d" % (level, x, y))
             # exact (no cut) draws the real geometry in the same colour
-            exact, _ = self._render("tiny.jb", {}, [(level, 0)], 0.0)
+            exact, _ = self._render("tiny.jb", WIDE_ON, [(level, 0)], 0.0)
             self.assertGreater(_lit(exact), 0)
             lit_colours = {tuple(kept[o:o + 3])
                            for o in range(0, len(kept), 4)
@@ -3099,7 +3104,7 @@ class WideViewTests(unittest.TestCase):
         # (an expanded mark cell's own 1 um page is a blob wash of one
         # pixel - allowed; the footprint wash is what must not happen)
         for level, most, washes in ((1, 8, 0), (3, 16, 4)):
-            rgba, r = self._render("sparse.jb", {}, [(level, 0)], 3.0)
+            rgba, r = self._render("sparse.jb", WIDE_ON, [(level, 0)], 3.0)
             self.assertGreater(_lit(rgba), 0, "level %d vanished" % level)
             self.assertLessEqual(_lit(rgba), most, "level %d washed" % level)
             self.assertLessEqual(r["deck"]["wide_washes"], washes, level)
@@ -3107,7 +3112,7 @@ class WideViewTests(unittest.TestCase):
             w = 200
             centre = (100 * w + 100) * 4
             self.assertEqual(rgba[centre:centre + 3], b"\0\0\0", level)
-        rgba, r = self._render("sparse.jb", {}, [(2, 0)], 3.0)
+        rgba, r = self._render("sparse.jb", WIDE_ON, [(2, 0)], 3.0)
         self.assertGreater(_lit(rgba), 0)
         self.assertLessEqual(_lit(rgba), 16, "a blob, not a field")
         self.assertGreaterEqual(r["deck"]["wide_washes"], 1)
@@ -3117,16 +3122,16 @@ class WideViewTests(unittest.TestCase):
         # rendered fine in `floe2 render` because captures are exact;
         # --detail high captures with the viewer's 1 px cut. tiny.oas
         # at 200 px over 2000 um: 1 px = 10 um, the 1 um dots page is
-        # size-cut and the 1 um BIT array pruned. Since 2026-09-16 a
-        # layout keeps such pages like a deck pass (a dense one as a
-        # footprint wash, a sparse one as pixels), so high still lights
-        # them; FLOE_RUST_SUB_CUT_WASH=off restores the cull - nothing
-        # lit; exact (the default) draws them
+        # size-cut and the 1 um BIT array pruned: nothing lit at high,
+        # exact (the default) draws them. The sub-cut rules that kept
+        # such pages (2026-09-16: a dense one as a footprint wash, a
+        # sparse one as pixels) are off by default since the user
+        # decision of that day; FLOE_RUST_SUB_CUT_WASH=on lights them
         src = CLI / "tiny.oas"
-        no_wash = dict(self.env, FLOE_RUST_SUB_CUT_WASH="off")
+        wash_on = dict(self.env, FLOE_RUST_SUB_CUT_WASH="on")
         for detail, env, lit in (("exact", self.env, True),
-                                 ("high", self.env, True),
-                                 ("high", no_wash, False)):
+                                 ("high", self.env, False),
+                                 ("high", wash_on, True)):
             out = CLI / ("tiny-%s.png" % detail)
             rep = CLI / ("tiny-%s.json" % detail)
             argv = ["render", src, "--bbox", "0,0,2000,2000", "--px", "200",
@@ -3137,13 +3142,18 @@ class WideViewTests(unittest.TestCase):
             doc = json.loads(rep.read_text())
             self.assertEqual(doc["cut_px"], 0.0 if detail == "exact" else 1.0)
             self.assertEqual(_png_lit_pixels(out) > 0, lit,
-                             (detail, env is no_wash))
-        # a deck capture with the viewer's cut keeps the wide policy's
-        # washes (the deck's own behaviour at that detail)
+                             (detail, env is wash_on))
+        # a deck capture with the viewer's cut follows the deck's wide
+        # policy: off by default (nothing lit without the summary, off
+        # here), its washes with FLOE_RUST_DECK_WIDE=on
         out = CLI / "tiny-deck-high.png"
         run_floe2("render", CLI / "tiny.jb", "--bbox", "0,0,2000,2000",
                   "--px", "200", "--out", out, "--detail", "high",
                   env=self.env, ok=0)
+        self.assertEqual(_png_lit_pixels(out), 0)
+        run_floe2("render", CLI / "tiny.jb", "--bbox", "0,0,2000,2000",
+                  "--px", "200", "--out", out, "--detail", "high",
+                  env=dict(self.env, **WIDE_ON), ok=0)
         self.assertGreater(_png_lit_pixels(out), 0)
 
     def test_wide_policy_is_a_no_op_above_the_cut(self):
@@ -3151,13 +3161,13 @@ class WideViewTests(unittest.TestCase):
         # policy adds no wash and changes no pixel there; the whole
         # deck holds exactly one sub-cut source, the 0.2x mark
         for visible in ([(1, 0)], [(2, 0)]):
-            on, r_on = self._render("test.jb", {}, visible, 3.0, (301, 237))
-            off, r_off = self._render("test.jb", {"FLOE_RUST_DECK_WIDE": "off"},
+            on, r_on = self._render("test.jb", WIDE_ON, visible, 3.0, (301, 237))
+            off, r_off = self._render("test.jb", {},
                                       visible, 3.0, (301, 237))
             self.assertEqual(r_on["deck"]["wide_washes"], 0)
             self.assertEqual(on, off)
             self.assertGreater(_lit(on), 0)
-        _, r_all = self._render("test.jb", {}, None, 3.0, (301, 237))
+        _, r_all = self._render("test.jb", WIDE_ON, None, 3.0, (301, 237))
         self.assertEqual(r_all["deck"]["wide_washes"], 1)
 
 

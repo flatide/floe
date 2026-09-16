@@ -377,7 +377,7 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   A/sparse B`(cut 미만 페이지·노드의 footprint wash 수와 희소로 남긴 수, 2026-09-16),
   `sub-cut over C/D`(플랜당 예산 — 희소 ink 16 Mpx, wash 면적 64 Mpx — 를 넘어 버린
   수; 진단 `FLOE_RUST_SUB_CUT_SPARSE_MPX`/`FLOE_RUST_SUB_CUT_WASH_MPX`)가
-  붙는다. 크기·hairline
+  붙는다(sub-cut 규칙은 기본 off라 보통 0). 크기·hairline
   cut에 잘린 페이지 수, 통째로 잘린 페이지 BVH 노드 수, 크기로 프루닝된 자식 BVH
   노드 수, 크기로 생략·폴드된 자식 셀 수, 레이어 불일치로 건너뛴 배치 수, wash로
   붕괴한 페이지 수, LOD 교체 수, thin 프레임 수다(덱은 패스 합). 특정 줌부터
@@ -392,14 +392,14 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   정책을 고른다(auto = 소스 기본, cull = 레이아웃 정책). 남긴
   페이지는 perf 줄 `thin pages N kept`로 표시된다. 진단용 override
   `FLOE_RUST_PAGE_HAIRLINE=cull|keep`.
-- **cut 미만 페이지**(2026-09-16, 두 정책 공통): 모든 도형이 cut보다 작은
-  페이지(콘택·비아·마크 배열)는 버리지 않고 덱과 같은 규칙으로 남긴다 — 밀집
-  페이지는 레이어 색 footprint 블록, 희소 페이지는 도형을 픽셀로(Calibre가
-  sub-pixel 도형을 점으로 그리는 것과 같은 결과). 현장: 9.8 GB 일반 레이아웃이
-  detail high에서 Calibre보다 훨씬 적게 보였다. `thin:cull`의 hairline 페이지도
-  버리지 않는다: 선이 footprint의 1/8 이상을 채우면 블록, 아니면 선 그대로(요약
-  없이도 광역뷰에 존재가 보인다; 사용자 결정 2026-09-16). 킬 스위치
-  `FLOE_RUST_SUB_CUT_WASH=off`(SPEC-PLANNER §3).
+- **cut 미만 페이지**: 모든 도형이 cut보다 작은 페이지(콘택·비아·마크 배열)는
+  `thin:cull`에서 버려진다(9.8 GB 일반 레이아웃이 detail high에서 Calibre보다
+  적게 보이는 이유). 덱과 같은 sub-cut 규칙으로 남기는 길(밀집 = 레이어 색 블록,
+  희소 = 픽셀; 2026-09-16)은 만들었으나 **기본 off**(같은 날 사용자 결정: 중간
+  줌 draw가 느려지는 부작용에 비해 여전히 다 보이지 않는다; 덱은 점유 요약이
+  광역뷰를 맡는다). 광역뷰 존재가 필요하면 `floe2 index --occupancy` +
+  `thin:keep`. 진단 `FLOE_RUST_SUB_CUT_WASH=on`(단일 레이아웃)·
+  `FLOE_RUST_DECK_WIDE=on`(덱)(SPEC-PLANNER §3).
 - **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):
   캐시에 `design.ovo`(`floe2 index --occupancy-only`)가 있고 요청이 keep·
   exact 아님이며 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지

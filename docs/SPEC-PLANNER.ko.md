@@ -44,7 +44,10 @@
   `cull_hair`, 문턱 0.128 µm에 4 nm 차이). raster는 남긴 가는 레코드를 전체
   길이의 1 px 선으로 그리고(KLayout hairline parity) `thin_pages_kept`로 센다.
   **sub-cut 페이지**(`ViewReq::sub_cut_wash`; 덱 pass는 2026-09-10부터, 단일
-  레이아웃 요청도 2026-09-16부터 켬 — 현장: 9.8 GB 일반 레이아웃이 detail high에서
+  레이아웃 요청은 2026-09-16부터 켰다가 **같은 날 사용자 결정으로 둘 다 기본 off**:
+  느려지는 부작용에 비해 여전히 다 보이지는 않고, 덱은 점유 요약이 광역뷰를
+  맡는다. 진단 `FLOE_RUST_SUB_CUT_WASH=on`(단일 레이아웃)·`FLOE_RUST_DECK_WIDE=on`
+  (덱)으로만 켠다. 켰을 때의 규칙 — 현장: 9.8 GB 일반 레이아웃이 detail high에서
   Calibre보다 훨씬 적게 보임, 모든 도형이 cut 미만인 페이지가 통째로 `cull_size`
   됐다): 크기 컷(`max_w<cut && max_h<cut`)에 걸린 페이지는 버리지 않고,
   footprint 대비 멤버 채움이 1/256 이상이면 레이어 색 footprint wash
@@ -55,9 +58,10 @@
   세므로 빈 페이지의 긴 선 셋은 3~4 %로 남아 정확히 그려지고, 밀집 배선은 wash;
   진단 `FLOE_RUST_WASH_HAIR_COVERAGE`). 사용자 결정 2026-09-16: 9.8 GB 레이아웃의
   요약 생성이 한 시간을 넘어, 요약 없이도 광역뷰에 존재가 보여야 한다. keep은
-  hairline 페이지를 그대로 남긴다(page_hair = 0). exact 요청은 제외. 뷰어 킬
-  스위치 `FLOE_RUST_SUB_CUT_WASH=off`(단일 레이아웃), `FLOE_RUST_DECK_WIDE=off`
-  (덱); gate `validate_occupancy` `SubCutTests`.
+  hairline 페이지를 그대로 남긴다(page_hair = 0). exact 요청은 제외. 켜는 스위치
+  `FLOE_RUST_SUB_CUT_WASH=on`(단일 레이아웃), `FLOE_RUST_DECK_WIDE=on`(덱; 둘 다
+  진단 전용, 기본 off); gate `validate_occupancy` `SubCutTests`(기본 워커는 셋 다
+  없음, on 워커가 규칙을 검증), `validate_jobdeck` `WideViewTests`·`ThinPageTests`.
   **플랜당 예산**(2026-09-16 현장: 150 MB 실칩 thin:cull detail medium의 중간
   줌에서 draw가 6 s를 넘었고 킬 스위치로 이전 속도가 돌아옴): sub-cut 규칙이
   한 프레임에 보태는 양을 두 예산이 막는다. ① `sub_cut_sparse_px` — 남긴 희소

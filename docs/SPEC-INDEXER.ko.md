@@ -331,21 +331,32 @@ floe-index occupancy <outdir> [--layer L/D] [--level N] [--depth N] [--dump]  # 
   배치뿐이면 최대 4단계 확장)으로 되돌리는 킬 스위치다. 분할은 마킹·charge에
   영향이 없어 파일은 어느 쪽이든 바이트 동일하다(gate).
   스레드는 레이어의 **공유 atomic level-0 평면**(배치 깊이마다 한 장, 2026-09-16
-  M6; unit과 walk가 깊이를 넘긴다)에 `fetch_or`로 마킹하므로 결과 파일은 스레드
+  M6; unit과 walk가 깊이를 넘긴다)에 atomic OR로 마킹하므로 결과 파일은 스레드
   수와 무관하게 바이트 동일하다(unit은 레코드의 반복을 쪼개지 않고 단일 배치만
   통과하므로 charge도 같다; `none:work`일 때의 work 값만 다를 수 있다). 작업
   예산은 레이어 공유 카운터(스레드가 4,096 charge마다 flush, 초과 폭 ≤ jobs ×
-  4,096). 메모리 = 레이어의 깊이 수 × level 0 한 장(도형이 있는 깊이만 파일에
-  남고 15 이상은 한 평면). 레이어마다 재귀 레이어 존재 집합으로
+  4,096). 이미 켜진 비트는 relaxed load로 확인한 뒤 쓰기를 생략한다. 비트는
+  생성 중 0→1로만 바뀌므로 동시 마킹에서도 안전하며, 밀집 영역의 같은 cache
+  line에 대한 반복 쓰기 경합을 줄인다. 작업 charge는 쓰기 생략과 무관하게 유지한다.
+  마킹 평면 메모리 = 레이어의 깊이 수 × level 0 한 장(도형이 있는 깊이만 파일에
+  남고 15 이상은 한 평면). 도형은 처음 한 번 `(layer, dt, cell)`별 참조 목록으로
+  분류하고 존재 집합·깊이·작업량·unit·배치 순회가 이 목록을 공유한다. 다른
+  레이어의 도형을 매 배치마다 재검사하지 않는다. 추가 메모리는 원본 레코드당
+  포인터 하나와 Vec 여유 용량·희소 맵이며(geometry·반복 배열 복사 없음), 레이어가
+  끝나면 그 참조 목록을 해제한다. 레이어마다 재귀 레이어 존재 집합으로
   가지치기하고, 존재하지 않는 레이어는 순회 없이 `empty`. 배치 반복의 멤버는
   열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음, 2차 리뷰 P1-1). 상위 레벨은
   OR 풀링, 격자가 64 × 64 이하가 될 때까지. 로그 `[vfs] occupancy cell= … ok=K
   empty=E jobs=N SIZE (Ts)`. 진행(2026-09-16, 현장: 150 MB 실칩의 마킹 5분이
   무음): 레이어 마킹 중 10 s마다 `[vfs] occupancy L/D marking: u/U units work
-  xG (Ts)`(unit = 스레드가 맡는 조각, work = 공유 예산에 flush된 charge), 끝나면
+  xG (Ts)`(u = 완료한 unit 수, `workers=N` = 실제 마킹 스레드 수,
+  work = 공유 예산에 flush된 charge), 끝나면
   0.5 s 이상 걸린 레이어와 요약 없는 레이어마다 `L/D ok planes=… cells=… work=…
   (Ts)` / `L/D none:… work=… (Ts)`. 요약 없는 레이어는 끝에 한 번 더 모아
   `layer L/D none:… (work …)`로 나온다.
+  분류 단계에는 `grouping records by layer` / `grouped records in …s`, 준비가
+  0.5 s 이상이면 `L/D prepared: U units workers=N (Ts)`를 출력한다. 하트비트는
+  종료 채널로 즉시 깨운다(이전 sleep+join은 짧은 레이어마다 최대 250 ms 대기).
 - 상한(레이어 단위, 근사 저장 없음): level 0 셀 수 > `--occupancy-max-cells`
   (기본 2^30)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남김);
   마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 2^31)면 그

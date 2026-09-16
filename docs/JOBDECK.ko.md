@@ -596,9 +596,10 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   재고정(1 MiB 캡처가 완전·exit 0).
 
 ### 4단계 — jobdeck 전용 광역 표시 정책 ✅ (2026-09-10, RENDERD 0.12.72, 실측 없이 사용자 결정)
-- **sub-cut wash**(`ViewReq::sub_cut_wash`, 덱 플랜 요청에 켬; 2026-09-16부터
-  단일 레이아웃 요청에도 켬 — SPEC-PLANNER §3, 킬 스위치
-  `FLOE_RUST_SUB_CUT_WASH=off`): 크기 cut이
+- **sub-cut wash**(`ViewReq::sub_cut_wash`; **2026-09-16 사용자 결정으로 기본
+  off** — 덱 소스는 점유 요약이 광역뷰를 맡고, 단일 레이아웃은 느려지는 부작용에
+  비해 다 보이지 않는다; 진단 `FLOE_RUST_DECK_WIDE=on`(덱)·`FLOE_RUST_SUB_CUT_WASH=on`
+  (단일)으로만 켠다 — SPEC-PLANNER §3): 켜면 크기 cut이
   **버리던** 것을 자기 레이어의 footprint wash(렉트, 보통 채움 → 뷰어 speckle이
   얇게 함)로 남긴다.
   - 자체 페이지: cut(양축 < cut, 또는 hairline)에 걸린 페이지 → `(layer, page
@@ -639,11 +640,12 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   단일 소스에서 같은 판정을 보려면 `floe-index plan … --page-hairline 0
   --sub-cut-wash 1 --explain 1`(SPEC-INDEXER §6).
 - 한계(문서화): wash는 페이지/배치 bbox이므로 30% 채움의 콘택 배열이 100%
-  블록으로 보인다(speckle이 완화; 채움 하한 1/256 아래만 제외). 뷰어의 일반 레이아웃 경로는 바뀌지 않는다
-  (`sub_cut_wash=false`). 킬 스위치 `FLOE_RUST_DECK_WIDE=off`. 상태줄 `N sub-cut
-  washes`, 프레임 줄 `wide_washes=`.
+  블록으로 보인다(speckle이 완화; 채움 하한 1/256 아래만 제외). 기본 off
+  (2026-09-16), `FLOE_RUST_DECK_WIDE=on`으로 켠다. 상태줄 `N sub-cut washes`,
+  프레임 줄 `wide_washes=`.
 - gate `WideViewTests`: tiny.jb(1 µm 점 4만 개의 자체 페이지 + 1 µm 자식 셀
-  200×200 배열)를 200 px 전체 뷰·cut 3 px에서 — off면 두 level 모두 0 px, on이면
+  200×200 배열)를 200 px 전체 뷰·cut 3 px에서 — 기본(off)이면 두 level 모두 0 px,
+  `FLOE_RUST_DECK_WIDE=on`이면
   네 모서리까지 칠해지고 색은 exact 렌더와 같다; test.jb(cut 위)는 wash 0·픽셀
   동일.
 
