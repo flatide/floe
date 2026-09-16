@@ -623,6 +623,29 @@ class GenerationContractTests(unittest.TestCase):
     def listing(self, cache, ok=0):
         return floe_index("occupancy", cache, ok=ok)
 
+    def test_the_base_cell_follows_the_chip_size_unless_given(self):
+        # 2026-09-16: no --occupancy-um -> the coarsest of 4/2/1/0.5/0.25
+        # um whose longer side reaches 2,048 cells (a 10 x 8 um test chip
+        # floors at 0.25; a 3 x 2 mm one gets 1 um); an explicit cell
+        # is taken as given
+        small = TMP / "auto_small.oas"
+        write_chip(small, "SMALL", 10, 8)
+        big = TMP / "auto_big.oas"
+        write_chip(big, "BIG", 3000, 2000)
+        for src, extra, base, cell in ((small, (), 0.25, 250),
+                                       (big, (), 1.0, 1000),
+                                       (small, ("--occupancy-um", "4"), 4.0, 4000)):
+            cache = Path(vfs_cache_dir(src))
+            shutil.rmtree(cache, ignore_errors=True)
+            res = floe_index("vfs", src, cache, "--occupancy", *extra,
+                             "--no-lod", "--slow-cell-s", "999", "--jobs", "2")
+            self.assertIn("occupancy cell=%gum (%d dbu%s)"
+                          % (base, cell, "" if extra else ", auto"),
+                          res.stderr)
+            head = self.listing(cache).stdout.splitlines()[0]
+            self.assertIn("cell_dbu=%d base_um=%g " % (cell, base), head)
+            self.assertEqual(read_ovo(cache / "design.ovo")["cell"], cell)
+
     def test_a_reader_closing_the_pipe_early_does_not_panic(self):
         # field 2026-09-16: `floe-index occupancy … | head -1` printed
         # "failed printing to stdout: Broken pipe" from a panic; the
@@ -730,7 +753,9 @@ class GenerationContractTests(unittest.TestCase):
         (self.cache / "design.ovo").unlink()
         res = floe2("index", self.src, "--occupancy")
         self.assertIn("--occupancy-only", res.stdout)
-        self.assertEqual(read_ovo(self.cache / "design.ovo")["cell"], 4000)
+        # no --occupancy-um: the automatic cell (2026-09-16), 0.25 um on
+        # this tens-of-microns fixture
+        self.assertEqual(read_ovo(self.cache / "design.ovo")["cell"], 250)
         self.assertEqual({f: sha(self.cache / f) for f in before}, before)
         # --occupancy-only on a stale/missing cache is refused
         res = floe2("index", TMP / "missing.oas", "--occupancy-only", ok=1)
@@ -960,7 +985,9 @@ sys.exit(9)
         (caches[1] / "design.ovo").unlink()
         res = floe2("index", deck_dir / "occ.jb", "--occupancy", "--jobs", "2")
         self.assertIn("1 built, 0 failed, 1 kept", res.stdout)
-        self.assertEqual(read_ovo(caches[1] / "design.ovo")["cell"], 4000)
+        # rebuilt without --occupancy-um: the automatic cell (0.25 um on
+        # a 20 um source)
+        self.assertEqual(read_ovo(caches[1] / "design.ovo")["cell"], 250)
 
 
 

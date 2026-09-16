@@ -729,7 +729,8 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   소스 533개 재색인이 섞인 값 — ovp mtime으로 확인). **M5 마감(2026-09-15,
   0.12.131)**: 색인 기본 on(`--no-occupancy`로 끔; 요약 없는 캐시에는 추가 —
   2026-09-16 변경: 덱의 소스만 기본 on, 레이아웃은 `--occupancy` opt-in), base
-  cell 4 µm, 마스크는 keep + detail medium(요약이 켜진 광역뷰는 cut과 무관), View
+  cell 4 µm(2026-09-16부터 칩 크기에서 자동 선택, 큰 칩은 4 µm — OCCUPANCY §12),
+  마스크는 keep + detail medium(요약이 켜진 광역뷰는 cut과 무관), View
   메뉴에 thin 정책 서브메뉴. 후속: 8-b 품질 샷, scan(charge당 비용), cull에서의
   요약. 실칩을 쓸 수 없을 때는
   `tools/gen_maskchip.py OUT.oas [--jb]`가 같은 크기(35838.4 × 34617.6 µm)에

@@ -156,8 +156,10 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   2026-09-15의 "전부 기본 on"을 사용자 결정으로 바꿈 — 일반 레이아웃은
   `thin:cull`이라 요약을 쓰지 않는다). `--no-occupancy`는 덱에서도 끈다. 현재
   캐시에 요약이 없으면 `--occupancy`(덱은 기본)가 추가만 하고,
-  `--occupancy-only`는 현재 캐시에 추가·교체한다(`--occupancy-um` 기준 셀, 기본
-  4 µm). `--thin keep`으로 보는 단독 마스크 레이아웃은 `floe2 index chip.oas
+  `--occupancy-only`는 현재 캐시에 추가·교체한다(`--occupancy-um` 기준 셀; 기본은
+  칩 크기에서 자동 — 긴 변이 2,048셀 이상이 되는 가장 굵은 4/2/1/0.5/0.25 µm, 즉
+  8 mm보다 큰 칩은 4 µm, 2.25 mm 칩은 1 µm; 2026-09-16). `--thin keep`으로 보는
+  단독 마스크 레이아웃은 `floe2 index chip.oas
   --occupancy`. 확인은 `floe-index occupancy .<src>.ice`. 형식·규칙은
   docs/OCCUPANCY_PLAN.ko.md, 뷰어 적용은 M2~M5(완료).
 

@@ -74,6 +74,9 @@ pub fn vfs_cmd(args: &[String]) {
     let mut occupancy = false;
     let mut occupancy_only = false;
     let mut occ_opts = floe_vfs::occupancy::Opts::default();
+    // the base cell follows the chip size unless --occupancy-um says
+    // otherwise (2026-09-16; occupancy::auto_base_um_for_span)
+    occ_opts.base_um = floe_vfs::occupancy::BASE_AUTO;
     // rev 46b: recompute the meta.json minimap frontier from an
     // existing cache's design.ovm - no source parse, seconds even
     // on the 9.8G class
@@ -1851,9 +1854,10 @@ fn write_occupancy(
     let ok = built.layers.iter().filter(|l| l.status == occ::STATUS_OK).count();
     let empty = built.layers.iter().filter(|l| l.status == occ::STATUS_EMPTY).count();
     eprintln!(
-        "[vfs] occupancy cell={}um ({} dbu) grid={}x{} levels={} layers={} ok={} empty={} jobs={} {} ({:.1}s)",
-        opts.base_um,
+        "[vfs] occupancy cell={}um ({} dbu{}) grid={}x{} levels={} layers={} ok={} empty={} jobs={} {} ({:.1}s)",
+        built.cell_dbu as f64 / built.unit,
         built.cell_dbu,
+        if opts.base_um > 0.0 { "" } else { ", auto" },
         built.w,
         built.h,
         built.n_levels,

@@ -111,8 +111,9 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
          (level 0의 셀 (i, j) = [x0 + i·cell, x0 + (i+1)·cell) × [y0 + j·cell, …))
 ```
 
-- 기준 셀: 옵션 `--occupancy-um`(기본 4 µm). 근접뷰 경계(800 px 창에서 3.2 mm 뷰)와
-  저장량의 절충. 2 µm면 4배.
+- 기준 셀: 옵션 `--occupancy-um`(기본은 자동, 2026-09-16 — 긴 변이 2,048셀 이상이
+  되는 가장 굵은 4/2/1/0.5/0.25 µm; 8 mm 초과 칩은 4 µm). 근접뷰 경계(800 px 창에서
+  3.2 mm 뷰)와 저장량의 절충. 2 µm면 4배.
 - 레벨 수: 격자가 64 × 64 셀 이하가 될 때까지(35.8 mm·4 µm에서 9레벨, 4 µm~1 mm).
   상위 레벨은 하위의 OR-풀링이라 재생성 가능하지만 저장한다.
 - 크기: dense 비트맵은 도형 수가 아니라 **world bbox 면적**에 비례한다(멀리 떨어진
@@ -539,7 +540,9 @@ layer 3/300 status=ok work=729081740 set=4342426,1220836,338091,94074,27163,8105
   `validate_occupancy`(plain 레이아웃 = 요약 없음, `--occupancy` 추가/up to
   date, 덱 plain = 요약 있음, 덱 `--no-occupancy` = 없음).
 - **base cell 4 µm 유지**: 요약은 1200 px 창 기준 뷰 폭 4.8 mm부터 켜지고, 8-d의
-  뷰에서 `near` 구간의 불편이 없었다. 2 µm는 파일·생성 4배라 보류.
+  뷰에서 `near` 구간의 불편이 없었다. 2 µm는 파일·생성 4배라 보류. (2026-09-16
+  실측 9 뒤 변경: 작은 칩의 fit 뷰가 `near`라 칩 크기에서 자동 선택 — 큰 칩은 그대로
+  4 µm. 아래 "base cell 자동 선택".)
 - **마스크 소스는 keep + detail medium**: 요약이 켜진 광역뷰는 cut과 무관하게
   점유 셀을 그리므로 medium과 high가 같고, 근접뷰에서는 양축이 cut 미만인 것만
   빠진다(한 변이 긴 마크는 hairline으로 남음). 일반 레이아웃(cull)은 medium/high
@@ -748,3 +751,17 @@ source released, rss 13G)` 뒤 `occupancy cell=4um (16000 dbu) …`까지 약 5�
     `a_heavy_block_among_light_placements_is_split_by_work`(개수 분할은 블록을 unit
     0개로 남기고, 작업량 분할은 8개 이상으로 쪼갬; 파일 바이트 동일). 기대: 12
     스레드에서 5분 → 수십 초, 48스레드에서 10초대(효율 40% 가정). 재측정 대기.
+
+### 2026-09-16 — base cell 자동 선택 (0.12.140 / RENDERD 0.12.95, 사용자 결정)
+
+실측 9의 1.55 × 2.25 mm 칩은 4 µm 셀이 fit 뷰에서 1.8 px라 요약이 `near`로 꺼졌다.
+결정: `--occupancy-um`을 생략하면 top의 긴 변이 **2,048셀 이상**이 되는 가장 굵은
+4/2/1/0.5/0.25 µm를 고른다(`occupancy::auto_base_um_for_span`, `Opts.base_um` 0 =
+`BASE_AUTO`). 8 mm 초과 칩은 4 µm 그대로(추출본·실칩·덱은 불변), 2.25 mm 칩은 1 µm
+(1,552 × 2,252 셀, 평면당 0.44 MB), 1 mm 미만은 0.25 µm. 명시 `--occupancy-um`은
+그대로다. 마킹 시간은 반복 멤버 수가 지배하므로 셀을 줄여도 크게 늘지 않고, 큰
+사각형만 셀 수에 비례한다. 로그 `[vfs] occupancy cell=1um (4000 dbu, auto)`. gate
+`the_automatic_base_cell_follows_the_chip_size`(규칙 표, 10 × 3 mm → 4 µm, 3 × 2 µm
+→ 0.25 µm), `test_the_base_cell_follows_the_chip_size_unless_given`(CLI: 10 × 8 µm →
+0.25, 3 × 2 mm → 1, 명시 4 → 4). 덱 소스는 크기가 제각각이라 작은 소스에 가는
+셀이 붙는다 — 덱 합계 크기는 첫 재생성에서 확인(사용자: 덱은 지금 문제없음).

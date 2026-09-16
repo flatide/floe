@@ -1787,8 +1787,9 @@ def main(argv=None, *, prog=None, rust_only=None):
              "re-indexing (the cache's other files are untouched)")
     rust.add_argument(
         "--occupancy-um", type=_positive_float, default=None, metavar="UM",
-        help="occupancy base cell in microns (default: 4); implies "
-             "--occupancy")
+        help="occupancy base cell in microns (default: automatic - 4 for "
+             "a chip wider than 8 mm, 2/1/0.5/0.25 for smaller ones so the "
+             "fit view keeps a cell within a pixel); implies --occupancy")
     p.set_defaults(occupancy=None, occupancy_only=False)
     rust.add_argument("--no-lod", action="store_true",
                       help="do not generate merged LOD page variants "

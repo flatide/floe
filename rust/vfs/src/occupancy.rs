@@ -57,8 +57,30 @@ pub const MAGIC_V1: &[u8; 8] = b"FLOEOVO1";
 pub const DEPTH_CAP: u8 = 15;
 /// the depth of a version-1 plane: every depth flattened together
 pub const DEPTH_ALL: u8 = 255;
-/// base cell in microns unless --occupancy-um says otherwise
+/// base cell in microns unless --occupancy-um says otherwise (the
+/// library default; the CLI asks for BASE_AUTO)
 pub const DEFAULT_BASE_UM: f64 = 4.0;
+/// `Opts.base_um` of the automatic base cell (2026-09-16, user
+/// decision): the coarsest of AUTO_CANDIDATES_UM whose grid's longer
+/// side reaches AUTO_TARGET_CELLS, so a small chip's fit view still
+/// has cells within a pixel in windows up to about 2,000 px (field: a
+/// 1.55 x 2.25 mm chip at 4 um was 388 x 563 cells, 1.8 px per cell
+/// at fit, "near"); a chip wider than 8 mm keeps 4 um
+pub const BASE_AUTO: f64 = 0.0;
+pub const AUTO_CANDIDATES_UM: [f64; 5] = [4.0, 2.0, 1.0, 0.5, 0.25];
+pub const AUTO_TARGET_CELLS: f64 = 2048.0;
+
+/// the automatic base cell for a top cell whose longer side is
+/// `span_um` microns: the coarsest candidate reaching the target
+/// cell count, else the finest
+pub fn auto_base_um_for_span(span_um: f64) -> f64 {
+    for &um in &AUTO_CANDIDATES_UM {
+        if span_um / um >= AUTO_TARGET_CELLS {
+            return um;
+        }
+    }
+    AUTO_CANDIDATES_UM[AUTO_CANDIDATES_UM.len() - 1]
+}
 /// level-0 cells per layer before the whole file is `none:cells`
 pub const DEFAULT_MAX_CELLS: u64 = 1 << 30;
 /// marks (cells set + members + edge rows) per layer before `none:work`
@@ -101,6 +123,7 @@ pub fn status_text(status: u8) -> &'static str {
 
 #[derive(Clone, Debug)]
 pub struct Opts {
+    /// base cell in microns; BASE_AUTO (0) picks it from the chip size
     pub base_um: f64,
     pub jobs: usize,
     pub max_cells: u64,
@@ -1333,14 +1356,19 @@ fn build_layer(
 /// threads into shared planes (memory: one level-0 plane per placement
 /// depth of the layer being marked)
 pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Occupancy, String> {
-    if !(opts.base_um > 0.0) || !opts.base_um.is_finite() {
-        return Err(format!("occupancy: base cell must be positive, got {}", opts.base_um));
+    if opts.base_um < 0.0 || !opts.base_um.is_finite() {
+        return Err(format!("occupancy: base cell must be positive or 0 (auto), got {}", opts.base_um));
     }
-    let cell_dbu = ((opts.base_um * doc.unit).round() as i64).max(1);
     let bboxes = cell_bboxes(doc);
     let bbox = bboxes[doc.top].unwrap_or((0, 0, 0, 0));
     let span_x = (bbox.2 as i128 - bbox.0 as i128).max(0);
     let span_y = (bbox.3 as i128 - bbox.1 as i128).max(0);
+    let base_um = if opts.base_um > 0.0 {
+        opts.base_um
+    } else {
+        auto_base_um_for_span(span_x.max(span_y) as f64 / doc.unit)
+    };
+    let cell_dbu = ((base_um * doc.unit).round() as i64).max(1);
     let gw = ceil_div(span_x, cell_dbu as i128);
     let gh = ceil_div(span_y, cell_dbu as i128);
     let cells = (gw as u128) * (gh as u128);
@@ -2418,6 +2446,36 @@ mod tests {
         assert_eq!(write_ovo(&a), write_ovo(&b));
         assert_eq!(write_ovo(&a), write_ovo(&c));
         assert_eq!(a.layers[0].work, b.layers[0].work);
+    }
+
+    #[test]
+    fn the_automatic_base_cell_follows_the_chip_size() {
+        // the rule: coarsest of 4/2/1/0.5/0.25 um with >= 2048 cells
+        // on the longer side; the field chips: 35.8 mm and 26 x 33 mm
+        // keep 4 um, the 1.55 x 2.25 mm chip gets 1 um
+        assert_eq!(auto_base_um_for_span(35_838.4), 4.0);
+        assert_eq!(auto_base_um_for_span(32_969.0), 4.0);
+        assert_eq!(auto_base_um_for_span(8_192.0), 4.0);
+        assert_eq!(auto_base_um_for_span(8_191.0), 2.0);
+        assert_eq!(auto_base_um_for_span(5_000.0), 2.0);
+        assert_eq!(auto_base_um_for_span(2_252.0), 1.0);
+        assert_eq!(auto_base_um_for_span(1_000.0), 0.25);
+        assert_eq!(auto_base_um_for_span(0.0), 0.25);
+        // through build: BASE_AUTO picks by the top's longer side, an
+        // explicit cell is taken as given
+        let mut top = cell("T");
+        top.rects.push(rect(1, 0, 0, 10_000_000, 3_000_000, Rep::One)); // 10 x 3 mm at unit 1000
+        let d = doc_with(vec![top], 0, vec![(1, 0)]);
+        let auto = build(&d, 0, 0, &Opts { base_um: BASE_AUTO, jobs: 2, ..Opts::default() }).unwrap();
+        assert_eq!(auto.cell_dbu, 4000);
+        let given = build(&d, 0, 0, &Opts { base_um: 2.0, jobs: 2, ..Opts::default() }).unwrap();
+        assert_eq!(given.cell_dbu, 2000);
+        let mut small = cell("S");
+        small.rects.push(rect(1, 0, 0, 3_000, 2_000, Rep::One)); // 3 x 2 um
+        let d = doc_with(vec![small], 0, vec![(1, 0)]);
+        let auto = build(&d, 0, 0, &Opts { base_um: BASE_AUTO, jobs: 1, ..Opts::default() }).unwrap();
+        assert_eq!((auto.cell_dbu, auto.w, auto.h), (250, 12, 8));
+        assert!(build(&d, 0, 0, &Opts { base_um: -1.0, ..Opts::default() }).is_err());
     }
 
     #[test]

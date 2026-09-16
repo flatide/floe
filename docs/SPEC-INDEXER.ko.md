@@ -303,6 +303,9 @@ explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>
 ```
 floe-index vfs <src> [outdir] --occupancy [--occupancy-um F]      # 색인과 함께
 floe-index vfs <src> [outdir] --occupancy-only [--occupancy-um F] # 기존 캐시에 추가·교체
+# --occupancy-um 생략 = 자동(2026-09-16): top의 긴 변이 2,048셀 이상이 되는 가장
+# 굵은 4/2/1/0.5/0.25 µm(8 mm 초과 칩은 4 µm, 2.25 mm 칩은 1 µm, 1 mm 미만은 0.25
+# µm; occupancy::auto_base_um_for_span). 로그 `cell=…um (… dbu, auto)`.
 floe-index occupancy <outdir> [--layer L/D] [--level N] [--depth N] [--dump]  # 검사(--depth: 그 depth 이하 평면의 OR)
 ```
 
