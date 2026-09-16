@@ -5786,3 +5786,69 @@ HTTP/DOM gate를 실제 브라우저 수용으로 세지 않는다. main과 feat
 카메라 유지 jobdeck 레벨 재선택이다. 진단/무효 CLI 경계 최종 결정, 실제 브라우저·
 Python-free Linux·G1/G4·현장 수용, M2 공유/원격 승인·구현과 조건부 M5도 남는다.
 index hot reload/revision 관리는 사용자 유보다. 전체 goal은 계속 진행 중이다.
+
+## 81. M4g-24c — 런처 범위 reviewer 명시 재연결
+
+2026-09-16. 사용자 결정: **브라우저에서 reviewer·저장 권한을 새로 선택하지 않고,
+런처에서 허용한 reviewer와 권한만 새 DRC에 명시 재연결한다.** M4g-24b의 파일
+선택은 여전히 읽기 전용이다. `Reconnect launcher reviewer…`의 별도 확인 checkbox와
+버튼이 필요하다. `--floe-reviewer`는 읽기 전용, `--drc-reviewer`는 notes 편집,
+`--drc-edit-waives`는 별도 waive 편집 권한을 유지한다. 런처 grant가 없는 실행에는
+버튼/새 권한이 생기지 않는다. 새 DRC가 ASCII뿐이면 먼저 별도 Build pack을 승인해
+ready ICE로 만든다. runtime 재연결에 reviewer 입력란이나 임의 쓰기 경로는 없다.
+
+- 기존 picker actor/operation journal의 `reconnect_drc_review {seq,context,approve}`를
+  사용한다. view·DRC ID·revision을 동결하고, path/reviewer/editable/autosave 같은
+  추가 필드는 거부한다. 재접속은 receipt GET부터, 재전송은 동일 요청만 허용한다.
+  성공 receipt를 다시 받아도 그 안의 옛 reader를 설치하지 않고 현재 catalog를
+  조회한다. 취소와 commit은 같은 picker lock에서 순서가 정해진다.
+- 입력·유도 sidecar/lock 보호 등록과 후보 reader의 준비를 먼저 끝낸다. 기존
+  layout 카메라/레이어/renderer는 유지한다. 실패한 후보/잘못된 sidecar/오래된
+  context가 현재 DRC나 detached review 상태를 바꾸지 않는다. 성공 시 새 read
+  identity와 note/waive binding을 같은 commit 경계에서 공개한다. 기존 query/
+  selection/group/CD/prepared focus는 무효화된다. 후보1개·retired reader2개와
+  300초 준비 대기/실제 종료까지 자원 보유는 §80과 같다.
+- reviewer/권한/보호 roots는 immutable launcher Config에 남긴다. 바뀌는 것은
+  검증한 reader ID·읽기 전용 target·opaque binding ID뿐이다. notes-only는 다른
+  waive sidecar를 읽지 않는다. waive writer의 기존 상태는 **인접 write target만**
+  guarded descriptor로 읽으며, legacy 임시 파일은 자동 채택하지 않는다. 읽기
+  전용은 이전에 승인된 정확한 pack/reviewer 유도 sidecar 범위만 읽는다.
+- review worker/저장·transfer ledger를 교체하거나 순번을 초기화하지 않는다.
+  완료 receipt·high-water·만료된 순번 거부가 모두 유지된다. 각 receipt는 최초
+  admission의 `scope_id`를 보존해 새 binding의 결과로 다시 이름 붙이지 않는다.
+  새 note/waive status는 새 `binding_id`와 증가한 `review_rev`를 내보낸다.
+  이전 승인 재전송은 이전 receipt이며 새 파일에 저장하지 않는다.
+- 준비 중 review read/write/transfer가 있으면 재연결을 거부한다. 이전 미승인 token과
+  다운로드 capability는 폐기하고 저장/전송 영수증은 남긴다. 화면에서는 이전
+  등록의 receipt임을 표시한다. 아직 확인되지 않은 승인 복구를 숨기지 않는다.
+  미승인 local text는 무효로 남기며 다른 DRC로 옮겨 저장하지 않는다.
+- 브라우저 자동 저장 opt-in은 새 binding에서 반드시 해제한다. 중간 detached
+  catalog를 놓친 탭도 binding 변경으로 해제하고, 늦은 옛 status로 되돌아가지
+  않는다. 재연결 자체는 note/waive 저장·전체 import·다운로드가 아니다.
+
+집중 검증은 web 단위94개(별도 fixture3개 ignored), 전체 ES2017/UI, release build,
+strict all-target clippy가 통과했다. 실제 `validate_web_drc_open.py`는 grant 없는
+거부, 읽기 전용/notes-only/waives 세 정책, raw 권한 필드 거부, stale/실패 보존,
+새 DRC 저장, 이전 저장/transfer receipt 재생, 순번·epoch 보존, 읽기 전용 note
+표시, symlink sidecar 거부, 입력 fingerprint/레이아웃 불변과 종료 수거를 검증했다.
+UI gate는 명시 동의·journal-before-send·잃어버린 ACK의 GET 복구, 이전 receipt
+표시, opt-in 초기화(중간 detach 누락 포함), old catalog 거부를 고정했다.
+
+전체 `sh tools/validate_rust.sh`는 exit0, `RUST VALIDATION: ALL OK`로 완료됐다.
+core279/web94 단위 테스트, jobdeck83·renderer46·KLayout13 PX+2 phase-exact+
+14 style(j1/j8)을 포함한다. 로그는 `/private/tmp/floe-review-reconnect-battery.log`다.
+배터리 실행 중 추가 점검으로 이전 binding의 outcome-unknown receipt가 새 DRC의
+saved-note 조회까지 막던 UI 조건을 보완했다. 이전 경고는 receipt로 보존하며 새
+binding 조회는 허용한다. 마지막 UI 보완 후 전체 UI·release build·strict all-target
+clippy·실제 CLI·DRC 교체/재연결 HTTP를 별도로 재검증했다. 이 집중 재검증을 전체
+배터리를 두 번 실행한 것으로 세지 않는다. 집중 로그는
+`/private/tmp/floe-review-reconnect-{ui-final,build-final,clippy-final,cli-final,http-final}.log`다.
+메뉴 inventory37 linked/2 OPEN, `--require-complete`의 의도된 exit1, scoped fmt·
+diff 검사도 확인했다. 실제 브라우저 다운로드는 §80의 도구
+정책 차단 이후 재시도/우회하지 않았으며 여전히 **미검증**이다. main과 jobdeck의
+작업을 이 변경에 포함하지 않는다.
+
+이 단계의 목표 잔여: G4 메뉴 구현은 **SVRF metadata 교체·카메라 유지 jobdeck
+레벨 재선택2건**이다. 진단/무효 CLI 경계 재대조, 실제 브라우저·Python-free Linux·
+G1/G4·현장 수용, M2 공유/원격 승인·구현 및 조건부 M5가 별도로 남는다. 메뉴
+inventory의 linked37/open2는 기능 전체 수용률이 아니다. 전체 goal은 진행 중이다.

@@ -377,7 +377,14 @@ impl Registry {
     }
     pub fn catalog(&self) -> Value {
         let s = self.inner.state.lock().unwrap();
+        let grant = self.notes().map(|n| {
+            let (reviewer, editable) = n.grant();
+            json!({"reviewer":reviewer,"notes_editable":editable,"waives_editable":self.waives.lock().unwrap().is_some(),
+                "available":!s.closed && !s.replacing && s.ledger.active().is_none() && n.status()["detached"] == true &&
+                    s.current.as_ref().is_some_and(|r|r.catalog()["phase"] == "ready" && r.catalog()["metadata"]["format"] == "ice")})
+        });
         json!({"drc":s.current.as_ref().map(|d|d.catalog()),
+            "review_grant":grant,
             "notes":self.notes().map(|n|n.status()),
             "waives":self.review(floe_app_core::drc::review::store::Kind::Waives).map(|n|n.status()),
             "replacing":s.replacing,

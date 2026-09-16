@@ -29,8 +29,9 @@
     }
     function terminal(v){return ['succeeded','failed','cancelled'].includes(v.phase);}
     function operation(v,k,P){
-        keys(v,['kind','seq','phase'],['context','action','upload','preview','artifact','error']);P.counter(v.seq);
-        if(v.kind!=='drc_review_transfer'){fail();}if(v.phase==='queued'){if(Object.keys(v).length!==3){fail();}return v;}
+        keys(v,['kind','seq','phase'],['context','action','upload','preview','artifact','error','scope_id']);P.counter(v.seq);
+        if(v.scope_id!==undefined){id(v.scope_id);}
+        if(v.kind!=='drc_review_transfer'){fail();}if(v.phase==='queued'){if(Object.keys(v).length!==(v.scope_id===undefined?3:4)){fail();}return v;}
         if(!terminal(v)||!['import','chunk','prepare','export'].includes(v.action)){fail();}context(v.context);
         if(v.phase!=='succeeded'){text(v.error,128);if(v.upload||v.preview||v.artifact){fail();}return v;}
         if(v.error!==undefined){fail();}
@@ -59,7 +60,7 @@
         const P=o.protocol,el=o.el;
         let selected='notes',enabled=false,stopped=false,available={},model=null,stale=true,job=null,pending=null,draft=null,publishing=null;
         let io=null,poll=null,timer=null,expiry=null,running=false,cleaning=false,notice='',lastLock=false;
-        let fileKey=null;const fileRows=new Map();
+        let fileKey=null;const bindings={},fileRows=new Map();
         function api(){return BASE+selected;}
         function editor(){return o.editors[selected];}
         function scope(){try{const c=o.context();if(!c||stopped){return null;}context(c.context);id(c.epoch);return c;}catch(_){return null;}}
@@ -174,6 +175,8 @@
         el('transfer-kind').onchange=function(){if(busy()){el('transfer-kind').value=selected;return;}selected=kind(el('transfer-kind').value);if(!available[selected]){selected='notes';el('transfer-kind').value=selected;}
             abort(poll);poll=null;model=null;stale=true;el('transfer-file').value='';notice='';return refresh();};
         render();return {attach:function(v){available={notes:!!v.notes&&v.notes.available&&v.notes.editable===true,waives:!!v.waives&&v.waives.available};const first=!enabled;enabled=enabled||available.notes||available.waives;
+                const next=v[selected]&&v[selected].binding_id,previous=bindings[selected];bindings[selected]=next||previous;
+                if(next&&previous&&next!==previous){clearDraft();el('transfer-file').value='';notice='Launcher reviewer reconnected. Prior receipts do not authorize a new transfer.';return refresh();}
                 if(v[selected]&&v[selected].detached){clearDraft();if(model){model.available=false;}notice='DRC replaced; previous transfer receipts only. No review permission transferred.';}
                 if(first&&enabled){return refresh();}changed();},changed:changed,refresh:refresh,
             stop:function(final){stopped=true;abort(io);abort(poll);poll=null;if(job){job.cancelled=true;job.file=null;}if(pending){pending.blob=null;}el('transfer-file').value='';clearDraft();publishing=null;if(final){job=pending=model=null;notice='Session ended. Temporary transfers are no longer available; earlier committed saves are not undone.';}o.clearTimeout(timer);timer=null;render();},

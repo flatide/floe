@@ -17,6 +17,73 @@ fn configured_service(editable: bool) -> Arc<Service> {
     .unwrap()
 }
 #[test]
+fn reconnect_is_atomic_and_keeps_both_ledgers_without_regranting_authority() {
+    for editable in [false, true] {
+        let s = configured_service(editable);
+        let original_id = s.status()["binding_id"].as_str().unwrap().to_owned();
+        let actor = owner();
+        let req = request();
+        {
+            let mut state = s.inner.state.lock().unwrap();
+            state
+                .ledger
+                .admit_scoped(
+                    1,
+                    Service::signature(&actor, &req),
+                    "drc_note",
+                    Some(&original_id),
+                )
+                .unwrap();
+            state
+                .ledger
+                .update(1, json!({"seq":"1","phase":"succeeded"}), true);
+            state
+                .transfer
+                .ledger
+                .admit_scoped(1, "old download".into(), "transfer", Some(&original_id))
+                .unwrap();
+        }
+        assert!(matches!(s.admit_detach(|| Ok(())), Err("drc_busy")));
+        s.inner.state.lock().unwrap().transfer.ledger.update(
+            1,
+            json!({"seq":"1","phase":"succeeded"}),
+            true,
+        );
+        s.admit_detach(|| Ok(())).unwrap();
+        let before = s.status();
+        let transfers = s.inner.state.lock().unwrap().transfer.ledger.snapshot();
+        assert!(matches!(
+            s.admit_reconnect(Binding::new(None, None).unwrap(), || Err::<(), _>(
+                "drc_context_changed"
+            )),
+            Err("drc_context_changed")
+        ));
+        assert_eq!(s.status(), before);
+        s.admit_reconnect(Binding::new(None, None).unwrap(), || Ok(()))
+            .unwrap();
+        let after = s.status();
+        assert_ne!(after["binding_id"], before["binding_id"]);
+        assert_eq!(after["review_rev"], "1");
+        assert_eq!(after["operations"], before["operations"]);
+        assert_eq!(after["editable"], editable);
+        assert_eq!(after["reviewer"], "fixed");
+        assert_eq!(after["autosave"], false);
+        assert_eq!(
+            s.inner.state.lock().unwrap().transfer.ledger.snapshot(),
+            transfers
+        );
+        assert_eq!(
+            s.replay(&actor, &req).unwrap().unwrap()["scope_id"],
+            original_id
+        );
+        assert!(matches!(
+            s.admit_reconnect(Binding::new(None, None).unwrap(), || Ok(())),
+            Err("review_registration_changed")
+        ));
+        stop(&s);
+    }
+}
+#[test]
 fn read_registration_cannot_submit_or_acquire_editor_authority() {
     let s = configured_service(false);
     assert_eq!(s.status()["editable"], false);

@@ -29,11 +29,12 @@
     function equal(a,b){return !!a&&!!b&&['drc_id','revision','view_id'].every(function(k){return a[k]===b[k];});}
     function terminal(v){return !!v&&['succeeded','failed','cancelled'].includes(v.phase);}
     function operation(v,P){
-        keys(v,['seq','kind','phase'],['context','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev']);
+        keys(v,['seq','kind','phase'],['context','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev','scope_id']);
+        if(v.scope_id!==undefined){id(v.scope_id);}
         P.counter(v.seq);if(v.kind!=='drc_note'||!Object.prototype.hasOwnProperty.call(phases,v.phase)){fail();}
         if(v.context!==undefined){context(v.context);}if(v.elapsed_ms!==undefined){P.counter(v.elapsed_ms,true);}
         if(v.review_rev!==undefined){P.counter(v.review_rev,true);}
-        if(v.phase==='queued'){if(Object.keys(v).length!==3){fail();}return v;}
+        if(v.phase==='queued'){if(Object.keys(v).length!==(v.scope_id===undefined?3:4)){fail();}return v;}
         if(typeof v.outcome_unknown!=='boolean'||(!v.context&&!v.outcome_unknown)||
             (v.error!==undefined&&v.error!==null&&typeof v.error!=='string')){fail();}
         if(v.error){text(v.error,128);}
@@ -44,7 +45,8 @@
         if(terminal(v)){P.counter(v.review_rev,true);}return v;
     }
     function catalog(v,P){
-        keys(v,['available','editable','kind','reviewer','review_rev','operations','note_bytes','selection_limit','preparing','autosave'],['detached']);
+        keys(v,['available','editable','kind','reviewer','review_rev','operations','note_bytes','selection_limit','preparing','autosave'],['detached','binding_id']);
+        if(v.binding_id!==undefined){id(v.binding_id);}
         if(v.detached!==undefined&&(typeof v.detached!=='boolean'||v.detached&&(v.available||v.editable))){fail();}
         if(v.kind!=='drc_note'||typeof v.editable!=='boolean'||typeof v.available!=='boolean'||typeof v.preparing!=='boolean'||v.autosave!==false||v.note_bytes!==LIMIT||v.selection_limit!==5000){fail();}
         text(v.reviewer,200);P.counter(v.review_rev,true);
@@ -159,18 +161,20 @@
             el('notes-refresh').disabled=stopped||!enabled||!!poll;
             el('notes-uncertain').hidden=!uncertain;el('notes-resolve').disabled=!pending||stopped||!!write||!!cancelling;
             el('notes-forget').disabled=!(permitted()||model&&model.detached&&!stopped&&!stale)||!!active()||!!write||!el('notes-checked').checked;
-            el('notes-status').textContent=statusText(latest());el('notes-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
+            el('notes-status').textContent=(latest()&&latest().scope_id&&model.binding_id!==latest().scope_id?'Earlier review registration — receipt only\n':'')+statusText(latest());el('notes-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
             el('notes-bytes').textContent=new TextEncoder().encode(el('notes-text').value).length+' / '+LIMIT+' UTF-8 bytes · empty text clears the selected notes';
             if(o.displayState){o.displayState(!enabled||!model?null:{reviewer:model.reviewer,review_rev:model.review_rev,read_turn:readTurn,
-                blocked:!displayReady()?'Saved-note status is not ready.':busy(true)||latest()&&latest().outcome_unknown?'Saved-note publication is pending or unconfirmed.':
+                blocked:!displayReady()?'Saved-note status is not ready.':busy(true)||latest()&&latest().outcome_unknown&&(!latest().scope_id||latest().scope_id===model.binding_id)?'Saved-note publication is pending or unconfirmed.':
                     transferLocked?'Whole-review transfer is in progress; no save is implied.':
                     io||model.preparing?'Note snapshot preparation is in progress.':''});}
         }
         function schedule(){o.clearTimeout(timer);timer=null;if(enabled&&!stopped&&(active()||pending)){timer=o.setTimeout(refresh,active()?500:2500);}}
         function install(v){
             const old=latest(),next=v.operations.history[v.operations.history.length-1];
-            if(model&&(v.editable!==model.editable&&!(v.detached&&!v.editable)||model.detached&&!v.detached||v.reviewer!==model.reviewer||P.compare(v.review_rev,model.review_rev)<0||P.compare(v.operations.last_seq,model.operations.last_seq)<0||
-                old&&next&&old.seq===next.seq&&terminal(old)&&(['phase','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev'].some(function(k){return old[k]!==next[k];})||!!old.context!==!!next.context||old.context&&!equal(old.context,next.context)))){throw new Error('Older note state was ignored.');}
+            const rebound=model&&v.binding_id&&model.binding_id&&v.binding_id!==model.binding_id&&P.compare(v.review_rev,model.review_rev)>0;
+            if(model&&(!rebound&&(v.editable!==model.editable&&!(v.detached&&!v.editable)||model.detached&&!v.detached||v.binding_id!==model.binding_id)||v.reviewer!==model.reviewer||P.compare(v.review_rev,model.review_rev)<0||P.compare(v.operations.last_seq,model.operations.last_seq)<0||
+                old&&next&&old.seq===next.seq&&terminal(old)&&(['phase','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev','scope_id'].some(function(k){return old[k]!==next[k];})||!!old.context!==!!next.context||old.context&&!equal(old.context,next.context)))){throw new Error('Older note state was ignored.');}
+            if(rebound){saveMode.reset();invalidate('Launcher reviewer reconnected; read a new selection.');}
             if(editor&&model&&editor.approvedSeq!==v.operations.last_seq&&(v.review_rev!==model.review_rev||v.operations.last_seq!==model.operations.last_seq)){invalidate('Another save changed the note state.');}
             if(v.detached&&(!model||!model.detached)){saveMode.reset();invalidate('DRC replaced; this reviewer is detached.');}
             model=v;stale=false;v.operations.history.forEach(settled);

@@ -42,6 +42,9 @@ class Picker:
         return self.finish(self.submit("open_drc", handle=handle,
                                        context=context or self.s.context))
 
+    def reconnect(self, context=None):
+        return self.finish(self.submit("reconnect_drc_review", context=context or self.s.context, approve=True))
+
     def accept(self, result):
         assert result["phase"] == "succeeded", result
         current = self.c.call("GET", "/api/v1/drc")["drc"]
@@ -91,6 +94,9 @@ def main(fixture):
             c.call("POST", "/api/v1/browse", dict(kind="open_drc", seq="999", handle=str(a), context=initial), 409)
             first = picker.accept(picker.open(handle))
             assert first["metadata"]["format"] == "ice" and first["metadata"]["review_cache"] == "cache"
+            assert c.call("GET", "/api/v1/drc")["review_grant"] is None
+            assert picker.reconnect()["phase"] == "failed", "no launcher grant became a reviewer"
+            assert c.call("GET", "/api/v1/drc")["drc"] == first
             assert idle(s) == view, "opening DRC changed the layout camera/state"
             old = copy.deepcopy(s.context)
             rejected = picker.open(picker.handle(b.name), initial)
@@ -143,6 +149,12 @@ def main(fixture):
             c.call("POST", API, request, 202)
             saved = s.finished(1)
             assert saved["published"] is True, saved
+            binding = c.call("GET", API)["binding_id"]
+            assert saved["scope_id"] == binding
+            transfer = dict(seq="1", context=copy.deepcopy(s.context), action="export")
+            c.call("POST", API + "/transfer", transfer, 202)
+            exported = wait(lambda: (lambda r: r if r["phase"] == "succeeded" else None)(
+                c.call("GET", API + "/transfer/1")), s.proc)
             stale = s.request(s.prepare(s.read(ref), "must never migrate"), 2)
             old_context = copy.deepcopy(s.context)
             view = idle(s)
@@ -157,10 +169,94 @@ def main(fixture):
             assert not list(work.glob(".second.db.notes.*"))
             assert not list(work.glob(".second.db.waive.*"))
             assert fingerprint(protected) == before
+            for extra in (dict(reviewer="different"), dict(editable=True), dict(path=str(a)), dict(autosave=True)):
+                c.call("POST", "/api/v1/browse", dict(kind="reconnect_drc_review", seq="999", context=s.context, approve=True, **extra), 400)
+            c.call("POST", "/api/v1/browse", dict(kind="reconnect_drc_review", seq="999", context=s.context, approve=False), 409)
+            grant = c.call("GET", "/api/v1/drc")["review_grant"]
+            assert grant == dict(available=True, reviewer="runtime-owner", notes_editable=True, waives_editable=False)
+            assert picker.reconnect(old_context)["phase"] == "failed"
+            result = picker.reconnect()
+            picker.accept(result)
+            assert result["result"]["review_registration_required"] is False
+            reconnected = c.call("GET", API)
+            assert reconnected["editable"] and reconnected["available"] and not reconnected["detached"]
+            assert reconnected["binding_id"] != binding and reconnected["autosave"] is False
+            assert reconnected["operations"] == status["operations"], "reconnect reset or rewrote save history"
+            assert c.call("GET", API + "/1") == saved
+            assert c.call("POST", API, request, 202) == saved
+            assert c.call("POST", API + "/transfer", transfer, 202) == exported
+            transfers = c.call("GET", API + "/transfer")
+            assert transfers["operations"]["last_seq"] == "1" and transfers["artifacts"] == []
+            c.call("POST", API, stale, 409)
+            assert not list(work.glob(".second.db.notes.*")), "binding wrote a sidecar"
+            draft = s.prepare(s.read(ref), "synthetic saved after explicit reconnect")
+            c.call("POST", API, s.request(draft, 2), 202)
+            saved_second = s.finished(2)
+            assert saved_second["published"] and saved_second["scope_id"] == reconnected["binding_id"]
+            assert saved_second["context"]["drc_id"] == s.context["drc_id"]
+            assert c.call("POST", API, request, 202) == saved
+            assert c.call("GET", API + "/1") == saved
+            c.call("GET", "/api/v1/drc/review/waives", code=403)
+            assert not c.call("GET", "/api/v1/drc")["review_grant"]["available"]
+            assert picker.reconnect()["phase"] == "failed", "binding can only reconnect a detached reviewer"
+            assert idle(s) == view and fingerprint(protected) == before
+        finally:
+            s.close()
+
+        # Read-only launcher registration stays read-only; derived saved notes
+        # are readable, but reconnect grants no editor/transfer endpoints.
+        s = Session(source, pack, temps, None, work / "reader.json", read_reviewer="runtime-owner")
+        try:
+            c, picker = s.client, Picker(s, work.name)
+            picker.accept(picker.open(picker.handle(b.name)))
+            picker.accept(picker.reconnect())
+            status = c.call("GET", API)
+            assert status["available"] and not status["editable"] and not status["autosave"]
+            assert c.call("GET", "/api/v1/drc")["review_grant"]["reviewer"] == "runtime-owner"
+            assert s.display(ref, ref[0])["focus"]["text"] == "synthetic saved after explicit reconnect"
+            s.read(ref, 403)
+            c.call("GET", API + "/transfer", code=403)
+            c.call("GET", "/api/v1/drc/review/waives", code=403)
+        finally:
+            s.close()
+
+        # Waive authority is a separate fixed launcher grant. Reconnect loads
+        # only its adjacent target; it never creates it or adopts a temp legacy.
+        s = Session(source, pack, temps, "waive-owner", work / "waiver.json", edit_waives=True)
+        try:
+            c, picker = s.client, Picker(s, work.name)
+            picker.accept(picker.open(picker.handle(b.name)))
+            before_reader = c.call("GET", "/api/v1/drc")["drc"]
+            unsafe_sidecar = work / ".second.db.waive.waive-owner"
+            unsafe_sidecar.symlink_to(b)
+            try:
+                assert picker.reconnect()["phase"] == "failed"
+                assert c.call("GET", "/api/v1/drc")["drc"] == before_reader
+                assert c.call("GET", API)["detached"]
+            finally:
+                unsafe_sidecar.unlink()
+            picker.accept(picker.reconnect())
+            waive_api = "/api/v1/drc/review/waives"
+            assert not list(work.glob(".second.db.waive.*"))
+            snap = c.call("POST", waive_api + "/read", dict(context=s.context, errors=ref))
+            draft = c.call("POST", waive_api + "/prepare", dict(context=s.context, token=snap["token"], waived=True))
+            approve = copy.deepcopy(s.request(draft, 1))
+            c.call("POST", waive_api, approve, 202)
+            saved = wait(lambda: (lambda r: r if r["phase"] in ("succeeded", "failed", "cancelled") else None)(
+                c.call("GET", waive_api + "/1")), s.proc)
+            assert saved["published"] and saved["reader_applied"], saved
+            catalog = c.call("GET", "/api/v1/drc")["drc"]
+            s.context["revision"] = catalog["revision"]
+            picker.accept(picker.open(picker.handle(a.name)))
+            picker.accept(picker.reconnect())
+            assert c.call("POST", waive_api, approve, 202) == saved
+            assert c.call("GET", waive_api)["operations"]["last_seq"] == "1"
+            assert not list(work.glob(".first.db.waive.*"))
+            assert fingerprint(protected) == before
         finally:
             s.close()
         assert not list(temps.iterdir()), "native resources were not reaped"
-    print("WEB DRC OPEN: ALL OK (initial/cache/ASCII/explicit ICE, scoped handles, separately approved build, stale/failure/cancel/replay, unchanged layout, detached writer/receipts, no input writes, shutdown)")
+    print("WEB DRC OPEN: ALL OK (initial/cache/ASCII/explicit ICE, scoped handles, approved build, stale/failure/cancel/replay, unchanged layout, launcher-only reviewer reconnect/read-only+notes+waives, receipt epochs and both ledgers preserved, no implicit sidecar writes, shutdown)")
 
 
 if __name__ == "__main__":

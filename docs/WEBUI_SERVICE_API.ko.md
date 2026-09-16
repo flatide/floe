@@ -292,6 +292,23 @@ null이다. UI는 ASCII fallback에 notes/waives 미적용 안내를 유지한�
 size/초 단위 mtime 일치를 검사하며 내용 hash/hot reload 보장은 아니다. writer와
 reviewer 미지정 실행의 기존 explicit-file 선택은 변경하지 않는다.
 
+M4g-24b/c의 런타임 조작은 owner의 `/api/v1/browse` operation을 재사용한다.
+`open_drc {seq,handle,context}`는 선택 파일을 읽기 전용으로 교체한다.
+`reconnect_drc_review {seq,context,approve:true}`는 런처 grant만 현재의 ready ICE에
+명시 재연결한다. context는 `{view_id,drc_id,revision}`이며 raw path/reviewer/
+editable/autosave 필드는 거부한다. `/api/v1/drc`의 `review_grant`는 null 또는 고정
+reviewer, notes_editable, waives_editable, available을 내보낸다. grant 없는 실행에
+권한을 추가할 수 없다. 읽기 전용은 유도된 sidecar 읽기만, writer는 인접 write
+target만 사용하고 legacy-temp를 자동 채택하지 않는다. 선택·재연결은 파일 저장이
+아니며 별도 save/transfer 승인과 브라우저 자동 저장 opt-in은 그대로 필요하다.
+
+note/waive status의 `binding_id`는 재연결마다 바뀌고 `review_rev`도 증가한다.
+저장/전송 ledger의 순번·high-water·terminal 결과는 유지한다. 각 receipt의
+`scope_id`는 최초 admission의 binding_id이며 진행 응답/새 재연결로 바뀌지 않는다.
+재시도는 이전 context를 수정하지 않은 동일 요청이어야 한다. 재연결 후에도 이전
+terminal receipt는 조회/동일 replay할 수 있지만 새 DRC의 저장 결과로 해석하면
+안 된다. prepared token·다운로드 capability·자동 저장 opt-in은 승계하지 않는다.
+
 M4g-22의 capabilities `display_dump:bool`은 viewer의 브라우저-local dump 지원,
 `dump_on_start:bool`은 trusted CLI `view --dump`의 초기 보관 선택이다. 일반 viewer는
 true/false, 명시 `--dump`는 true/true, 독립 displaytest는 false/false다. 브라우저

@@ -9,8 +9,9 @@
 `tools/validate_web_menu_inventory.py`는 GTK를 import하거나 실행하지 않고
 `_build_menubar` AST에서 실제 item/check callback을 추출한다.42개 호출 지점,
 39개 handler family를 분류한다. thin/mode의 각각3항목 반복문은 호출 지점1개씩이다.
-현재36개 호출 지점은 웹 control·JS 참조·기존 테스트 파일에 연결되고,2개는 제품
-범위 밖,1개는 기존 Rust 경로에서 무효,3개는 실행 중 조작이 미구현이다.
+최초 감사 당시36개가 연결됐고, M4g-24c 이후 현재37개 호출 지점은 웹 control·JS
+참조·테스트 파일에 연결된다.2개는 제품 범위 밖,1개는 기존 Rust 경로에서 무효,
+2개는 실행 중 조작이 미구현이다.
 
 `linked`는 **연결 근거가 존재함**이지 기능 parity PASS가 아니다. 소스·테스트 파일의
 존재만으로 픽셀/행동/권한/실브라우저 수용을 증명하지 않는다. 실제 동작 검사는
@@ -19,9 +20,9 @@ callback·웹 control/테스트 링크 소실은 실패하며, 이 결함 주입
 
 ```sh
 python3 -B tools/validate_web_menu_inventory.py
-# inventory 확인: exit0, OPEN 3건을 출력. 전체 배터리에도 배선.
+# inventory 확인: exit0, OPEN 2건을 출력. 전체 배터리에도 배선.
 python3 -B tools/validate_web_menu_inventory.py --require-complete
-# 현재 exit1: 아래3건 미완료. 이 결과를 전체 G4 PASS로 바꾸면 안 된다.
+# 현재 exit1: 02/03 미완료. 이 결과를 전체 G4 PASS로 바꾸면 안 된다.
 ```
 
 | 원본 메뉴 묶음 | 웹 연결 근거 / 제외 이유 |
@@ -38,9 +39,9 @@ python3 -B tools/validate_web_menu_inventory.py --require-complete
 | abstract / 옛 coverage | Rust abstract 미지원, density coverage 폐기. 새 occupancy는 제외 대상이 아님 |
 | LOD 토글 | 기존 GTK→Rust wire에 전달되지 않음. 웹은 무효로 수용하지 않고 설명과 함께 거부. index --lod와 다름 |
 
-## 2. 확인된 미완결3건
+## 2. 확인된3건의 진행 상태
 
-### G4-MENU-01 — 열린 창에서 DRC 파일 열기/교체
+### G4-MENU-01 — 열린 창에서 DRC 파일 열기/교체 (24c 로컬 연결)
 
 GTK `_drc_open_dialog`→`_drc_open_db`는 사용자가 파일을 선택하고 현재 인접 ICE를
 읽거나 색인 동의를 받는다. `load_drc`는 현재 레이아웃을 유지하면서 DRC를 교체한다.
@@ -73,6 +74,15 @@ reader 수거, 이전 저장 receipt 유지/새 편집 차단, layout cache/inde
 읽기 전용이고 예전 reviewer·SVRF·legacy sidecar 권한을 자동 승계하지 않는다.
 전체 동등 기능으로 세지 않고 이 항목은 계속 OPEN이다([M4 §80](WEBUI_M4.ko.md)).
 
+M4g-24c는 위의 후속을 연결했다. 사용자 결정은 **런처에서 허용한 reviewer와 권한만
+새 DRC에 명시적으로 재연결**하는 것이다. 파일 열기는 계속 읽기 전용이며 별도
+재연결 동의가 필요하다. reviewer 미지정 실행은 쓰기 권한을 만들 수 없고, 읽기
+전용/notes 전용/notes+waives grant는 그대로다. 준비된 ICE가 필요하며 색인은 별도
+승인한다. 같은 review worker/저장·전송 ledger를 유지해 순번을 리셋하지 않고,
+receipt의 원래 binding epoch를 보존한다. draft/transfer artifact/자동 저장 동의는
+넘기지 않는다. 합성 실제 HTTP 및 UI gate는 [M4 §81](WEBUI_M4.ko.md)에 기록한다.
+inventory는 linked로 바꾸되 실제 브라우저/현장 수용은 별도로 남긴다.
+
 ### G4-MENU-02 — 열린 DRC에 SVRF metadata 불러오기/교체
 
 GTK `_drc_rules_dialog`→`_drc_rules_load`는 JSON을 읽고 rule match/type census/
@@ -101,8 +111,7 @@ metadata/cached source를 먼저 확인하고 실패·취소 시 기존 뷰를 �
 
 ## 3. 다음 구현과 판정
 
-우선순위는01의 실행 중 review 등록/교체 수명·권한 경계와 실제 HTTP gate,
-파일 선택/UI 연결,02 metadata 교체,03 레벨 재선택이다. 분리 구현 단계에서도
+다음 우선순위는02 metadata 교체,03 레벨 재선택이다. 분리 구현 단계에서도
 CLI 시작만 가능한 상태를 원래 GTK 기능 전체의 대체로 다시 정의하지 않는다.
 세 항목을 모두 닫아도 actual browser·Python-free Linux·G1/G2/G3/G4, 공유/원격,
 조건부 M5가 자동 완료되지는 않는다. GTK 진단/APNG 및 무효 CLI 정책 결정도

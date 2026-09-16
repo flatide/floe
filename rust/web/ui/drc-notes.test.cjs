@@ -35,8 +35,9 @@ function harness(shared={model:catalog(),raw:null,writes:0,records:new Map()}){
         assert.equal(r.path,API);const prior=shared.records.get(r.body.seq);
         if(prior){assert.deepEqual(r.body,prior.request,'replayed a different approval');return clone(prior.result);}
         const result=op(r.body.seq,'succeeded',{context:clone(r.body.context),review_rev:P.next(shared.model.review_rev)});
+        const binding=shared.model.binding_id;if(binding){result.scope_id=binding;}
         shared.records.set(r.body.seq,{request:clone(r.body),result});shared.writes++;
-        shared.model=catalog(shared.model.operations.history.concat([result]).slice(-32));return clone(result);
+        shared.model=catalog(shared.model.operations.history.concat([result]).slice(-32));if(binding){shared.model.binding_id=binding;}return clone(result);
     }
     const panel=N.bind({el,protocol:P,session:()=>session,now:()=>now,
         connection:()=>c.connected===false?null:c.epoch,

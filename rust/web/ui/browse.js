@@ -21,40 +21,44 @@
         browse_invalid_selection:'Select a supported, unchanged file within the approved roots. Layout mode accepts OASIS/jobdeck; DRC mode accepts ASCII results or ICE packs.',
         browse_read_error:'The directory or file could not be read. Refresh or choose another approved root.'};
     function bind(o){
-        const el=o.el,doc=o.document,panel=el('browse-dialog'),button=el('browse-open'),drcButton=el('drc-open');
+        const el=o.el,doc=o.document,panel=el('browse-dialog'),button=el('browse-open'),drcButton=el('drc-open'),reconnectButton=el('drc-reconnect');
         let enabled=false,paused=true,opened=false,prior=null,hidden=[],roots=[],current=null,selected=null;
-        let pending=null,busy=false,invalid=false,task=null,timer=null,error='',drc=null;
+        let pending=null,busy=false,invalid=false,task=null,timer=null,error='',drc=null,reconnect=false;
         function paint(){
+            const grant=o.reviewGrant&&o.reviewGrant();
             button.disabled=!enabled||!o.available();button.hidden=!enabled;
             drcButton.hidden=!enabled;drcButton.disabled=!enabled||!o.available()||!o.drcContext||!drcContext(o.drcContext());
+            reconnectButton.hidden=!enabled||!grant;reconnectButton.disabled=drcButton.disabled||!grant||!grant.available;
             const locked=!!pending||busy||invalid;
             ['browse-root','browse-filter','browse-query','browse-refresh'].forEach(function(k){el(k).disabled=locked;});
-            el('browse-select').disabled=locked||!selected;
+            el('browse-select').disabled=locked||(reconnect?!el('browse-review-consent').checked||!grant||!grant.available:!selected);
             el('browse-prev').disabled=locked||!current||current.start===0;
             el('browse-next').disabled=locked||!current||current.next===null;
             el('browse-check').hidden=!pending;el('browse-check').disabled=busy||invalid;
             el('browse-cancel').hidden=!pending;el('browse-cancel').disabled=busy||invalid;
             el('browse-close').disabled=!!pending||invalid;
             el('browse-filter').disabled=locked||!!drc;
-            el('browse-title').textContent=drc?'Open DRC results':'Open server layout';
-            el('browse-select').textContent=drc?'Open selected DRC (read-only)':'Open selected layout';
-            el('browse-purpose').textContent=drc?'Keeps the layout camera and layers. Reads a current adjacent ICE cache or ASCII; no automatic indexing. Replaces the current DRC only after a successful read. Previous reviewer and auto-save permissions do not transfer.':'Jobdecks with multiple levels ask before opening. After an open request is published use Dismiss request. GDS/gzip support remains pending.';
+            el('browse-files').hidden=el('browse-entries').hidden=el('browse-prev').hidden=el('browse-next').hidden=reconnect;
+            el('browse-review-label').hidden=!reconnect;el('browse-review-consent').disabled=locked;
+            el('browse-title').textContent=reconnect?'Reconnect launcher reviewer':drc?'Open DRC results':'Open server layout';
+            el('browse-select').textContent=reconnect?'Reconnect to current DRC':drc?'Open selected DRC (read-only)':'Open selected layout';
+            el('browse-purpose').textContent=reconnect?'Only the launcher grant shown above is reused. Requires a ready ICE pack; build separately if needed. Previous previews and automatic-save consent are discarded. Save and transfer receipts retain their original registration.':drc?'Keeps the layout camera and layers. Reads a current adjacent ICE cache or ASCII; no automatic indexing. Replaces the current DRC only after a successful read. Previous reviewer and auto-save permissions do not transfer.':'Jobdecks with multiple levels ask before opening. After an open request is published use Dismiss request. GDS/gzip support remains pending.';
             el('browse-status').textContent=error||(pending?'Reading server catalogue… (cancellation does not interrupt a blocked filesystem call)':
                 current?(current.total?String(current.start+1)+'–'+String(current.start+current.rows.length)+' of '+current.total:'No matching entries')+
                 ' · '+current.skipped_links+' links/special files and '+current.skipped_names+' unreadable names skipped.':'Choose an approved server folder.');
             panel.setAttribute('aria-busy',pending?'true':'false');
-            el('browse-selection').textContent=selected?selected.name:'No file selected';
+            el('browse-selection').textContent=reconnect?grant?'Reviewer: '+grant.reviewer+' · '+(grant.notes_editable?'notes: write':'notes/waives: read only')+(grant.waives_editable?' · waives: write':''):'No launcher review grant':selected?selected.name:'No file selected';
             Array.from(el('browse-entries').querySelectorAll('button')).forEach(function(b){b.disabled=locked||b.getAttribute('data-unavailable')==='true';b.setAttribute('aria-pressed',selected&&selected.handle===b.getAttribute('data-handle')?'true':'false');});
             Array.from(el('browse-crumbs').querySelectorAll('button')).forEach(function(b){b.disabled=locked;});
         }
         function save(value){o.savePending(value===null?null:JSON.stringify(value));pending=value;}
         function show(){
-            if(opened){return;}opened=true;prior=doc.activeElement;panel.hidden=false;(drc?drcButton:button).setAttribute('aria-expanded','true');
+            if(opened){return;}opened=true;prior=doc.activeElement;panel.hidden=false;(reconnect?reconnectButton:drc?drcButton:button).setAttribute('aria-expanded','true');
             ['app-header','app-workspace'].forEach(function(k){const n=el(k);hidden.push([n,n.getAttribute('aria-hidden')]);n.setAttribute('aria-hidden','true');});
-            el('browse-query').focus();o.changed();paint();
+            (reconnect?el('browse-review-consent'):el('browse-query')).focus();o.changed();paint();
         }
         function close(restore){
-            if(!opened){return;}opened=false;panel.hidden=true;button.setAttribute('aria-expanded','false');drcButton.setAttribute('aria-expanded','false');
+            if(!opened){return;}opened=false;panel.hidden=true;button.setAttribute('aria-expanded','false');drcButton.setAttribute('aria-expanded','false');reconnectButton.setAttribute('aria-expanded','false');
             hidden.forEach(function(p){if(p[1]===null){p[0].removeAttribute('aria-hidden');}else{p[0].setAttribute('aria-hidden',p[1]);}});hidden=[];
             if(restore){(prior&&doc.contains(prior)?prior:button).focus();}prior=null;o.changed();
         }
@@ -90,10 +94,10 @@
                 if(kind==='select'){
                     if(!value.result||!id(value.result.launch_id)||!id(value.result.source_id)){throw Error('Invalid selection receipt');}
                     save(null);close(true);o.selected();
-                }else if(kind==='open_drc'){
+                }else if(kind==='open_drc'||kind==='reconnect_drc_review'){
                     const r=value.result;
-                    if(!r||!r.drc||!id(r.drc.id)||!id(r.drc.revision)||r.view_id!==pending.request.context.view_id||r.review_registration_required!==true){throw Error('Invalid DRC selection receipt');}
-                    save(null);close(true);await o.drcSelected(); // Refresh authority; never install a replayed catalogue.
+                    if(!r||!r.drc||!id(r.drc.id)||!id(r.drc.revision)||r.view_id!==pending.request.context.view_id||r.review_registration_required!==(kind==='open_drc')){throw Error('Invalid DRC selection receipt');}
+                    save(null);close(true);await o.drcSelected(kind); // Refresh authority; never install a replayed catalogue.
                 }else{const result=page(value.result&&value.result.page);save(null);if(opened){draw(result);}}
                 error='';
             }else{save(null);error=errors[value.error]||'File operation failed; no open request was published.';}
@@ -128,22 +132,25 @@
             finally{if(task===token){task=null;}busy=false;paint();o.changed();later();}
         }
         function load(directory){selected=null;submit({kind:'list',directory:directory,filter:el('browse-filter').value,query:el('browse-query').value});}
-        function choose(){if(selected){submit(drc?{kind:'open_drc',handle:selected.handle,context:drc}:{kind:'select',handle:selected.handle});}}
+        function choose(){if(reconnect){if(!el('browse-select').disabled){submit({kind:'reconnect_drc_review',context:drc,approve:true});}}else if(selected){submit(drc?{kind:'open_drc',handle:selected.handle,context:drc}:{kind:'select',handle:selected.handle});}}
         async function cancel(){
             if(!pending||busy||paused){return;}busy=true;error='';paint();const token={cancelled:false};task=token;
             try{const value=await o.http('POST','/api/v1/browse/'+pending.request.seq+'/cancel',{},false,token);if(!token.cancelled&&!paused){await receive(value);}}
             catch(e){if(!token.cancelled&&!paused){error=e.message||String(e);}}
             finally{if(task===token){task=null;}busy=false;paint();later();}
         }
-        async function open(context){
+        async function open(context,review){
             if(paused||!enabled||!o.available()||opened){return;}
             if(!pending&&!invalid){
                 drc=drcContext(context)?{view_id:context.view_id,drc_id:context.drc_id,revision:context.revision}:null;
+                reconnect=!!review;el('browse-review-consent').checked=false;
                 current=null;selected=null;el('browse-entries').textContent='';el('browse-filter').value=drc?'drc_files':'layouts';
             }
-            show();if(pending){check(false);}else if(!invalid){load(el('browse-root').value||roots[0].handle);}
+            show();if(pending){check(false);}else if(!invalid&&!reconnect){load(el('browse-root').value||roots[0].handle);}
         }
         button.onclick=function(){open(null);};drcButton.onclick=function(){const c=o.drcContext&&o.drcContext();if(drcContext(c)){open(c);}};
+        reconnectButton.onclick=function(){const c=o.drcContext&&o.drcContext(),g=o.reviewGrant&&o.reviewGrant();if(drcContext(c)&&g&&g.available){open(c,true);}};
+        el('browse-review-consent').onchange=paint;
         el('browse-close').onclick=function(){if(!pending&&!invalid){close(true);}};
         el('browse-select').onclick=choose;el('browse-check').onclick=function(){check(true);};el('browse-cancel').onclick=cancel;
         el('browse-root').onchange=function(){load(el('browse-root').value);};
@@ -167,9 +174,9 @@
         async function resume(){if(!enabled){return;}paused=false;try{await catalogue();if(pending||invalid){show();if(!invalid){check(false);}}}catch(e){error=e.message;show();}paint();}
         async function init(supported,empty){
             enabled=!!supported;paint();if(!enabled){return;}
-            try{const saved=o.loadPending();if(saved){const v=JSON.parse(saved);if(saved.length>2048||!v||!v.request||!['list','page','select','open_drc'].includes(v.request.kind)||
-                v.drc_context!==undefined&&!drcContext(v.drc_context)||v.request.kind==='open_drc'&&(!drcContext(v.request.context)||stable(v.request.context)!==stable(v.drc_context))||
-                v.request.kind==='select'&&v.drc_context!==undefined){throw Error('Invalid saved file request');}o.protocol.counter(v.request.seq);pending=v;drc=v.drc_context||null;if(drc){el('browse-filter').value='drc_files';}}}
+            try{const saved=o.loadPending();if(saved){const v=JSON.parse(saved);if(saved.length>2048||!v||!v.request||!['list','page','select','open_drc','reconnect_drc_review'].includes(v.request.kind)||
+                v.drc_context!==undefined&&!drcContext(v.drc_context)||['open_drc','reconnect_drc_review'].includes(v.request.kind)&&(!drcContext(v.request.context)||stable(v.request.context)!==stable(v.drc_context))||
+                v.request.kind==='reconnect_drc_review'&&v.request.approve!==true||v.request.kind==='select'&&v.drc_context!==undefined){throw Error('Invalid saved file request');}o.protocol.counter(v.request.seq);pending=v;drc=v.drc_context||null;reconnect=v.request.kind==='reconnect_drc_review';if(drc){el('browse-filter').value='drc_files';}}}
             catch(e){invalid=true;error='Saved file request is invalid. Restart the workspace; no selection was retried.';}
             await resume();if(empty&&!pending&&!invalid){open();}
         }

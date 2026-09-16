@@ -185,11 +185,13 @@ impl Service {
             }
         }
         let serial = s.serial.checked_add(1).ok_or("review_limit")?;
-        match s
-            .transfer
-            .ledger
-            .admit(seq, signature, "drc_review_transfer")?
-        {
+        let binding_id = s.binding.id.clone();
+        match s.transfer.ledger.admit_scoped(
+            seq,
+            signature,
+            "drc_review_transfer",
+            Some(&binding_id),
+        )? {
             Admission::Replay(v) => return Ok(v),
             Admission::New => (),
         }

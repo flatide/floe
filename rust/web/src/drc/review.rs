@@ -38,6 +38,24 @@ pub(super) struct Config {
     pub trees: Vec<PathBuf>,
     pub sources: Arc<SourceSet>,
 }
+/// Mutable binding only; reviewer, write permissions and protected roots stay
+/// in the immutable launcher Config. The coordinator never accepts these paths
+/// or an epoch from a browser request.
+pub(super) struct Binding {
+    id: String,
+    read_target: Option<PathBuf>,
+    reader_id: Option<String>,
+}
+impl Binding {
+    fn new(read_target: Option<PathBuf>, reader_id: Option<String>) -> Result<Self> {
+        Ok(Self {
+            id: crate::auth::public_id()
+                .map_err(|_| floe_app_core::Error::new(ErrorKind::Io, "entropy unavailable"))?,
+            read_target,
+            reader_id,
+        })
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Context {
@@ -122,6 +140,7 @@ struct Work {
     _charge: Option<floe_app_core::exports::artifacts::Reservation>,
 }
 struct State {
+    binding: Binding,
     closed: bool,
     detached: bool,
     serial: u64,
@@ -189,8 +208,8 @@ impl Service {
             ));
         }
         let inner = Arc::new(Inner {
-            config,
             state: Mutex::new(State {
+                binding: Binding::new(config.read_target.clone(), config.reader_id.clone())?,
                 closed: false,
                 detached: false,
                 serial: 0,
@@ -204,6 +223,7 @@ impl Service {
                 transfer: transfer::State::default(),
                 retired: Vec::new(),
             }),
+            config,
             wake: Condvar::new(),
             artifacts: floe_app_core::exports::artifacts::Store::new(transfer::limits())?,
         });
@@ -402,7 +422,11 @@ impl Service {
         if s.review_rev == u64::MAX {
             return Err("review_limit");
         }
-        match s.ledger.admit(seq, signature, self.kind())? {
+        let binding_id = s.binding.id.clone();
+        match s
+            .ledger
+            .admit_scoped(seq, signature, self.kind(), Some(&binding_id))?
+        {
             Admission::Replay(v) => return Ok(v),
             Admission::New => (),
         }
@@ -426,7 +450,7 @@ impl Service {
     }
     pub(super) fn status(&self) -> Value {
         let s = self.inner.state.lock().unwrap();
-        let mut value = json!({"available":!s.closed && !s.detached,"detached":s.detached,"kind":self.kind(),"reviewer":self.inner.config.reviewer,
+        let mut value = json!({"available":!s.closed && !s.detached,"detached":s.detached,"kind":self.kind(),"reviewer":self.inner.config.reviewer,"binding_id":s.binding.id,
             "review_rev":s.review_rev.to_string(),"operations":s.ledger.snapshot(),
             "note_bytes":NOTE_BYTES,"selection_limit":floe_app_core::drc::review::EDIT_ITEMS,
             "preparing":s.preparing.is_some(),"autosave":false});
@@ -471,20 +495,59 @@ impl Service {
         &self,
         f: impl FnOnce() -> std::result::Result<T, Failure>,
     ) -> std::result::Result<T, Failure> {
-        self.admit_change(false, f)
+        self.admit_change(false, None, f)
     }
     pub(super) fn admit_detach<T>(
         &self,
         f: impl FnOnce() -> std::result::Result<T, Failure>,
     ) -> std::result::Result<T, Failure> {
-        self.admit_change(true, f)
+        self.admit_change(true, None, f)
+    }
+    pub(super) fn grant(&self) -> (&str, bool) {
+        (&self.inner.config.reviewer, self.inner.config.editable)
+    }
+    pub(super) fn prepare_binding(&self, reader: &Reader) -> Result<Binding> {
+        let read_target = if self.inner.config.editable {
+            None
+        } else {
+            Some(
+                reader
+                    .registration
+                    .readonly
+                    .as_ref()
+                    .and_then(|r| r.targets.as_ref())
+                    .ok_or_else(|| {
+                        floe_app_core::Error::input("selected reviewer requires an ICE pack")
+                    })?
+                    .notes
+                    .clone(),
+            )
+        };
+        Binding::new(
+            read_target,
+            (!self.inner.config.editable).then(|| reader.id.clone()),
+        )
+    }
+    pub(super) fn admit_reconnect<T>(
+        &self,
+        binding: Binding,
+        f: impl FnOnce() -> std::result::Result<T, Failure>,
+    ) -> std::result::Result<T, Failure> {
+        self.admit_change(false, Some(binding), f)
     }
     fn admit_change<T>(
         &self,
         detach: bool,
+        binding: Option<Binding>,
         f: impl FnOnce() -> std::result::Result<T, Failure>,
     ) -> std::result::Result<T, Failure> {
         let mut s = self.inner.state.lock().unwrap();
+        if s.closed {
+            return Err("drc_closed");
+        }
+        if binding.is_some() && (!s.detached || s.review_rev == u64::MAX) {
+            return Err("review_registration_changed");
+        }
         if s.preparing.is_some()
             || self.preparations.available_permits() == 0
             || s.ledger.active().is_some()
@@ -498,6 +561,11 @@ impl Service {
         }
         let result = f()?;
         s.detached |= detach;
+        if let Some(binding) = binding {
+            s.binding = binding;
+            s.detached = false;
+            s.review_rev += 1;
+        }
         transfer::retire(&mut s);
         self.inner.wake.notify_one();
         for id in s.transfer.artifacts.keys() {
@@ -545,14 +613,18 @@ impl Service {
         Ok(value)
     }
     fn open(&self, reader: &Reader, stop: &AtomicUsize) -> Result<Arc<managed::ManagedStore>> {
-        if self.inner.state.lock().unwrap().detached {
-            return Err(floe_app_core::Error::input(
-                "review is detached from the current DRC",
-            ));
-        }
+        let (read_target, reader_id) = {
+            let s = self.inner.state.lock().unwrap();
+            if s.detached || s.closed {
+                return Err(floe_app_core::Error::input(
+                    "review is detached from the current DRC",
+                ));
+            }
+            (s.binding.read_target.clone(), s.binding.reader_id.clone())
+        };
         let r = &reader.registration;
         let c = &self.inner.config;
-        if c.reader_id.as_ref().is_some_and(|id| *id != reader.id) {
+        if reader_id.as_ref().is_some_and(|id| *id != reader.id) {
             return Err(floe_app_core::Error::input(
                 "read-only review registration changed; reopen explicitly",
             ));
@@ -582,7 +654,7 @@ impl Service {
             protected_files: files,
             protected_trees: c.trees.clone(),
         };
-        if let Some(target) = &c.read_target {
+        if let Some(target) = &read_target {
             managed::ManagedStore::open_readonly_catalog(
                 &r.resources,
                 registration,

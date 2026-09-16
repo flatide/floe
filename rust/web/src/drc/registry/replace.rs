@@ -52,6 +52,10 @@ pub(crate) struct PreparedOpen {
     candidate: Option<Arc<Service>>,
     registration: Option<Registration>,
     protection: Option<registered::Registration>,
+    reconnect: Option<(
+        super::super::review::Binding,
+        Option<super::super::review::Binding>,
+    )>,
 }
 fn fail(code: Failure) -> Error {
     Error::new(ErrorKind::Busy, code)
@@ -87,6 +91,7 @@ impl Registry {
             candidate: None,
             registration: None,
             protection: None,
+            reconnect: None,
         };
         let source_id = pending
             .owner
@@ -153,6 +158,138 @@ impl Registry {
         selected.validate(stop)?;
         Ok(pending)
     }
+    /// Explicitly reattach only the immutable launcher grant. No client path,
+    /// reviewer, permission, or automatic-save flag is accepted. Keep the review
+    /// services (and both ledgers) alive instead of resetting sequence numbers.
+    pub(crate) fn prepare_reconnect(
+        self: &Arc<Self>,
+        owner: Arc<crate::service::Service>,
+        context: OpenContext,
+        stop: &AtomicUsize,
+    ) -> Result<PreparedOpen> {
+        use floe_app_core::drc::review::store;
+        context.validate().map_err(fail)?;
+        let notes = self.notes().ok_or_else(|| fail("review_disabled"))?;
+        let waives = self.review(store::Kind::Waives);
+        let (reviewer, editable) = notes.grant();
+        let old = {
+            let mut s = self.inner.state.lock().unwrap();
+            s.retired.retain(|r| !r.is_finished());
+            if s.closed
+                || s.replacing
+                || s.ledger.active().is_some()
+                || s.retired.len() >= RETIRED_READERS
+                || !context.matches(&s)
+                || notes.status()["detached"] != true
+            {
+                return Err(fail("drc_busy_or_context_changed"));
+            }
+            let old = s
+                .current
+                .as_ref()
+                .ok_or_else(|| fail("drc_context_changed"))?
+                .clone();
+            if old.catalog()["phase"] != "ready" || old.catalog()["metadata"]["format"] != "ice" {
+                return Err(Error::input(
+                    "review reconnect requires a ready ICE pack; build explicitly first",
+                ));
+            }
+            s.replacing = true;
+            old
+        };
+        let mut pending = PreparedOpen {
+            registry: self.clone(),
+            owner,
+            context,
+            candidate: None,
+            registration: None,
+            protection: None,
+            reconnect: None,
+        };
+        let r = &old.registration;
+        pending
+            .owner
+            .with_current(&pending.context.view_id, |v| {
+                if v.controller.is_finished() || v.source_id != r.source_id {
+                    Err("drc_context_changed")
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(fail)?;
+        let mut protection = pending.owner.source_set().begin(stop)?;
+        let inputs: Vec<_> = std::iter::once(r.path.clone())
+            .chain(r.readonly.as_ref().map(|s| s.source.clone()))
+            .chain(r.rules.clone())
+            .collect();
+        protection.protect_inputs(&inputs, &inputs, stop)?;
+        protection.protect_review_targets(&notes.protected_targets(&r.path)?, stop)?;
+        pending.protection = Some(protection);
+        let reader = if editable && waives.is_none() {
+            Service::start_with_rules(
+                &r.resources,
+                r.scope.clone(),
+                &r.path,
+                None,
+                r.rules.as_deref(),
+                &r.source_id,
+            )?
+        } else {
+            let selected = if editable {
+                // Never adopt legacy-temp data for an editor, or open a
+                // substituted FIFO/symlink through the ordinary waive reader.
+                // The selected-sidecar reader uses guarded descriptors even
+                // when the exact adjacent write target does not yet exist.
+                floe_app_core::drc::ReadSelection {
+                    source: r.path.clone(),
+                    path: r.path.clone(),
+                    warning: None,
+                    targets: Some(store::ReadTargets {
+                        notes: store::paths(&r.path, reviewer, store::Kind::Notes)?[0].clone(),
+                        waives: store::paths(&r.path, reviewer, store::Kind::Waives)?[0].clone(),
+                    }),
+                }
+            } else {
+                floe_app_core::drc::select_review(&r.path, reviewer, stop)?
+            };
+            Service::start_readonly_review(
+                &r.resources,
+                r.scope.clone(),
+                selected,
+                r.rules.as_deref(),
+                &r.source_id,
+                reviewer,
+            )?
+        };
+        pending.candidate = Some(reader.clone());
+        let end = Instant::now() + OPEN_TIMEOUT;
+        loop {
+            check_cancelled(stop)?;
+            if self.inner.state.lock().unwrap().closed {
+                return Err(fail("drc_closed"));
+            }
+            match reader.catalog()["phase"].as_str() {
+                Some("ready") => break,
+                Some("error" | "closed") => {
+                    return Err(Error::new(ErrorKind::Cache, "review reconnect failed"))
+                }
+                _ => (),
+            }
+            if Instant::now() >= end {
+                return Err(fail("drc_open_deadline"));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        pending.reconnect = Some((
+            notes.prepare_binding(&reader)?,
+            waives
+                .as_ref()
+                .map(|w| w.prepare_binding(&reader))
+                .transpose()?,
+        ));
+        pending.registration = Some(reader.registration.clone());
+        Ok(pending)
+    }
 }
 impl PreparedOpen {
     /// Call under the picker's cancellation/receipt lock. All I/O has finished;
@@ -165,6 +302,9 @@ impl PreparedOpen {
         }
         let notes = registry.notes();
         let waives = registry.review(floe_app_core::drc::review::store::Kind::Waives);
+        let reconnect = self.reconnect.take();
+        let reconnected = reconnect.is_some();
+        let (note_binding, waive_binding) = reconnect.map_or((None, None), |(n, w)| (Some(n), w));
         let owner = Arc::clone(&self.owner);
         let view_id = self.context.view_id.clone();
         owner
@@ -192,17 +332,17 @@ impl PreparedOpen {
                     s.registration = self.registration.take();
                     view.prepared.lock().unwrap().invalidate();
                     *view.drc_panel.lock().unwrap() = super::super::panel::Panel::default();
-                    Ok(json!({"drc":result,"view_id":view_id,"review_registration_required":true}))
+                    Ok(json!({"drc":result,"view_id":view_id,"review_registration_required":!reconnected}))
                 };
                 let waive = || {
                     if let Some(w) = &waives {
-                        w.admit_detach(commit)
+                        if let Some(binding) = waive_binding { w.admit_reconnect(binding, commit) } else { w.admit_detach(commit) }
                     } else {
                         commit()
                     }
                 };
                 if let Some(n) = &notes {
-                    n.admit_detach(waive)
+                    if let Some(binding) = note_binding { n.admit_reconnect(binding, waive) } else { n.admit_detach(waive) }
                 } else {
                     waive()
                 }

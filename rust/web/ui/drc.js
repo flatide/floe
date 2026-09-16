@@ -73,7 +73,7 @@
         const P = o.protocol, doc = o.document, el = function (id) { return doc.getElementById(id); };
         const overlay = el('drc-canvas'), ctx = overlay.getContext('2d');
         const tasks = {}, previousRules = [], previousErrors = [];
-        let registration = null, bound = '', stopped = false, timer = null, shown = true;
+        let registration = null, reviewGrant = null, bound = '', stopped = false, timer = null, shown = true;
         let rule = null, ruleRows = [], rows = [], selected = null, points = null, pointsReady = false;
         let ruleStart = '0', ruleNext = null, errorStart = '0', errorNext = null, query = null;
         let jumpScale = null, zoomLock = false, painting = null, lastProjection = null, lastSize = null;
@@ -937,6 +937,9 @@
             if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
         }
         function applyCatalog(v) {
+            const grant=v.review_grant;
+            if(grant&&(!grant.reviewer||typeof grant.reviewer!=='string'||grant.reviewer.length>200||['available','notes_editable','waives_editable'].some(function(k){return typeof grant[k]!=='boolean';})||grant.waives_editable&&!grant.notes_editable)){throw Error('Invalid launcher review grant');}
+            reviewGrant=grant||null;
             const before = registration, present = !!(v.drc || v.build&&v.build.available);
             registration = v.drc; el('drc-toggle').hidden = !present; el('drc-panel').hidden = !present || !shown;
             if (notes) { notes.attach(v.notes); }
@@ -1015,6 +1018,7 @@
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
         return {init: refresh, refresh: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
+            reviewGrant:function(){return reviewGrant;},
             openContext:function(){
                 const c=o.context();if(stopped||!c||!c.connected||c.pending||!['idle','rendering'].includes(c.state.status)||registration&&['opening','updating'].includes(registration.phase)){return null;}
                 return {view_id:c.id,drc_id:registration?registration.id:null,revision:registration?registration.revision:null};

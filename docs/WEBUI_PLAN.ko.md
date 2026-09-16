@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-16(M4g-24b 실행 중 읽기 전용 DRC 열기).
+작성 2026-08-29, 갱신 2026-09-16(M4g-24c 런처 범위 reviewer 명시 재연결).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -139,17 +139,17 @@ jobdeck/occupancy의 같은 이름 단계와 별개다. 개발 기준과 합류 
 
 ## 현재 진행도와 커밋 보고
 
-M4g-24b는 승인 폴더 picker의 `Open DRC results…`로 현재 레이아웃을 유지한
-읽기 전용 DRC 최초 등록/교체를 연결했다([M4 §80](WEBUI_M4.ko.md)). 새 reader가
-준비되기 전에는 기존 reader를 유지하고 이전 reviewer는 결과 조회만 가능하도록
-분리한다. 새 DRC의 명시적 reviewer 재등록/저장 opt-in은 후속이며 G4-MENU-01은
-계속 OPEN이다. M4g-24a의 게시 보호에 layout index/cache 충돌 보호도 추가했다.
+M4g-24b의 레이아웃 유지 DRC 열기에 이어 M4g-24c는 `Reconnect launcher reviewer…`를
+연결했다([M4 §81](WEBUI_M4.ko.md)). 사용자 결정대로 런처에 고정한 reviewer·권한만
+새 DRC에 명시적으로 재연결하며, 브라우저에서 reviewer나 권한을 추가하지 않는다.
+기존 저장/전송 순번·receipt를 보존하고 자동 저장 동의는 초기화한다. G4-MENU-01은
+이 권한 정책 아래 로컬 구현·회귀를 연결했다. 실제 브라우저 수용 완료는 아니다.
 
 2026-09-16 M4g-23 [GTK 메뉴 재대조](WEBUI_G4_MENU.ko.md): 실행 중 DRC 파일 열기/
 교체, SVRF metadata 교체, 카메라 유지 jobdeck 로드 레벨 재선택의 누락을 확인했다.
-첫 항목은 위의 읽기 전용 경로까지 진행했으며 3건 모두 아직 완결되지 않았다. 초기 CLI 등록·일반 Open·Mode 전환만으로
+첫 항목은 사용자 확정 권한 정책으로 연결했으며 SVRF 교체·레벨 재선택2건이 남았다. 초기 CLI 등록·일반 Open·Mode 전환만으로
 각 기능이 완료됐다고 보지 않는다. 메뉴 inventory의 exit0는 연결 목록 검사이고,
-`--require-complete`는 현재3건 때문에 exit1이다. 실제 브라우저/G4 수용과도 별개다.
+`--require-complete`는 현재2건 때문에 exit1이다. 실제 브라우저/G4 수용과도 별개다.
 
 2026-09-16, M4g-22 기준. **로컬 Rust/web 대체 기능은 후반부지만 전체 계획의
 완료 직전은 아니다.** 아래는 구현과 수용을 분리한 현재 상태이며, 위의 순차 기록에

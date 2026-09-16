@@ -29,9 +29,10 @@
     function equal(a,b){return !!a&&!!b&&['drc_id','revision','view_id'].every(function(k){return a[k]===b[k];});}
     function terminal(v){return !!v&&['succeeded','failed','cancelled'].includes(v.phase);}
     function operation(v,P){
-        keys(v,['seq','kind','phase'],['context','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev','reader_applied','reader_error','reader_revision']);
+        keys(v,['seq','kind','phase'],['context','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev','reader_applied','reader_error','reader_revision','scope_id']);
+        if(v.scope_id!==undefined){id(v.scope_id);}
         P.counter(v.seq);if(v.kind!=='drc_waive'||!Object.prototype.hasOwnProperty.call(phases,v.phase)){fail();}
-        if(v.phase==='queued'){if(Object.keys(v).length!==3){fail();}return v;}
+        if(v.phase==='queued'){if(Object.keys(v).length!==(v.scope_id===undefined?3:4)){fail();}return v;}
         context(v.context);if(v.elapsed_ms!==undefined){P.counter(v.elapsed_ms,true);}if(v.review_rev!==undefined){P.counter(v.review_rev,true);}
         if(typeof v.outcome_unknown!=='boolean'){fail();}if(v.error!==undefined&&v.error!==null){text(v.error,128);}
         if(v.reader_error!==undefined){text(v.reader_error,128);}if(v.reader_revision!==undefined){id(v.reader_revision);}
@@ -45,7 +46,8 @@
         return v;
     }
     function catalog(v,P){
-        keys(v,['available','kind','reviewer','review_rev','operations','note_bytes','selection_limit','preparing','autosave'],['detached']);
+        keys(v,['available','kind','reviewer','review_rev','operations','note_bytes','selection_limit','preparing','autosave'],['detached','binding_id']);
+        if(v.binding_id!==undefined){id(v.binding_id);}
         if(v.detached!==undefined&&(typeof v.detached!=='boolean'||v.detached&&v.available)){fail();}
         if(v.kind!=='drc_waive'||typeof v.available!=='boolean'||typeof v.preparing!=='boolean'||v.autosave!==false||v.note_bytes!==65536||v.selection_limit!==5000){fail();}
         text(v.reviewer,200);P.counter(v.review_rev,true);const a=v.operations;keys(a,['last_seq','active','history']);P.counter(a.last_seq,true);
@@ -152,7 +154,7 @@
             el('waives-refresh').disabled=stopped||!enabled||!!poll;el('waives-uncertain').hidden=!uncertain;
             el('waives-resolve').disabled=!pending||stopped||!!write||!!cancelling;
             el('waives-forget').disabled=!(permitted()||model&&model.detached&&!stopped&&!stale)||!!active()||!!write||!el('waives-checked').checked;
-            el('waives-status').textContent=statusText(latest());el('waives-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
+            el('waives-status').textContent=(latest()&&latest().scope_id&&model.binding_id!==latest().scope_id?'Earlier review registration — receipt only\n':'')+statusText(latest());el('waives-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
             el('waives-paused').hidden=!suspended();
         }
         function schedule(){o.clearTimeout(timer);timer=null;if(enabled&&!stopped&&(active()||pending)){timer=o.setTimeout(refresh,active()?500:2500);}}
@@ -160,8 +162,10 @@
             if(key!==refreshKey&&o.refreshReview){refreshKey=key;Promise.resolve().then(function(){if(!stopped){return o.refreshReview();}}).catch(function(){/* Explicit refresh is still available. */});}}
         function settled(v){if(editor&&editor.accepted&&editor.approvedSeq===v.seq&&terminal(v)&&v.published===true&&equal(v.context,editor.selection.context)){clearEditor(false);}}
         function install(v){const old=latest(),next=v.operations.history[v.operations.history.length-1];
-            if(model&&(model.detached&&!v.detached||v.reviewer!==model.reviewer||P.compare(v.review_rev,model.review_rev)<0||P.compare(v.operations.last_seq,model.operations.last_seq)<0||
-                old&&next&&old.seq===next.seq&&terminal(old)&&(['phase','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev','reader_applied','reader_error','reader_revision'].some(function(k){return old[k]!==next[k];})||!equal(old.context,next.context)))){throw new Error('Older waive state was ignored.');}
+            const rebound=model&&v.binding_id&&model.binding_id&&v.binding_id!==model.binding_id&&P.compare(v.review_rev,model.review_rev)>0;
+            if(model&&(!rebound&&(model.detached&&!v.detached||v.binding_id!==model.binding_id)||v.reviewer!==model.reviewer||P.compare(v.review_rev,model.review_rev)<0||P.compare(v.operations.last_seq,model.operations.last_seq)<0||
+                old&&next&&old.seq===next.seq&&terminal(old)&&(['phase','elapsed_ms','error','published','outcome_unknown','directory_synced','review_rev','reader_applied','reader_error','reader_revision','scope_id'].some(function(k){return old[k]!==next[k];})||!equal(old.context,next.context)))){throw new Error('Older waive state was ignored.');}
+            if(rebound){saveMode.reset();invalidate('Launcher reviewer reconnected; read a new selection.');}
             if(editor&&model&&editor.approvedSeq!==v.operations.last_seq&&(v.review_rev!==model.review_rev||v.operations.last_seq!==model.operations.last_seq)){invalidate('Another save changed the waive state.');}
             if(v.detached&&(!model||!model.detached)){saveMode.reset();invalidate('DRC replaced; this reviewer is detached.');}
             model=v;stale=false;v.operations.history.forEach(settled);

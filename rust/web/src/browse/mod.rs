@@ -49,6 +49,11 @@ pub enum Request {
         handle: String,
         context: crate::drc::registry::OpenContext,
     },
+    ReconnectDrcReview {
+        seq: String,
+        context: crate::drc::registry::OpenContext,
+        approve: bool,
+    },
 }
 impl Request {
     fn identity(&self) -> (&str, &'static str) {
@@ -57,10 +62,19 @@ impl Request {
             Self::Page { seq, .. } => (seq, "page"),
             Self::Select { seq, .. } => (seq, "select"),
             Self::OpenDrc { seq, .. } => (seq, "open_drc"),
+            Self::ReconnectDrcReview { seq, .. } => (seq, "reconnect_drc_review"),
         }
     }
     fn validate(&self) -> std::result::Result<(), &'static str> {
         let token = match self {
+            Self::ReconnectDrcReview {
+                context, approve, ..
+            } => {
+                if !approve || context.drc_id.is_none() {
+                    return Err("invalid_request");
+                }
+                return context.validate();
+            }
             Self::List {
                 directory, query, ..
             } => {
@@ -288,6 +302,10 @@ fn execute(
             drc.prepare_open(Arc::clone(service), selected, context.clone(), stop)
                 .map(|p| Output::Drc(Box::new(p)))
         }
+        Request::ReconnectDrcReview { context, .. } => drc
+            .ok_or_else(|| Error::input("review reconnect unavailable"))?
+            .prepare_reconnect(Arc::clone(service), context.clone(), stop)
+            .map(|p| Output::Drc(Box::new(p))),
     }
 }
 fn run(
