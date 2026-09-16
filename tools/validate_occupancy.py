@@ -1492,6 +1492,72 @@ def write_subcut(path):
     ly._destroy()
 
 
+def write_giant(path):
+    """record repetitions too big for one marking unit (2026-09-16):
+    1/0 a 300 x 300 array of 0.2 um boxes on a 2 um pitch, written as
+    one repetition record (compression); 2/0 the same array as the
+    record of a cell placed as a 2 x 2 array (rotated); 3/0 a 100 x
+    100 array of triangles"""
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("GIANT")
+    l1, l2, l3 = ly.layer(1, 0), ly.layer(2, 0), ly.layer(3, 0)
+    for j in range(300):
+        for i in range(300):
+            x, y = i * 2 * UM, j * 2 * UM
+            top.shapes(l1).insert(db.Box(x, y, x + 200, y + 200))
+    arr = ly.create_cell("ARR")
+    for j in range(200):
+        for i in range(200):
+            x, y = i * 2 * UM, j * 2 * UM
+            arr.shapes(l2).insert(db.Box(x, y, x + 200, y + 200))
+    top.insert(db.CellInstArray(arr.cell_index(),
+                                db.Trans(1, False, db.Vector(700 * UM, 0)),
+                                db.Vector(500 * UM, 0), db.Vector(0, 500 * UM),
+                                2, 2))
+    for j in range(100):
+        for i in range(100):
+            x, y = 1300 * UM + i * 2 * UM, 700 * UM + j * 2 * UM
+            top.shapes(l3).insert(db.Polygon([db.Point(x, y), db.Point(x + 200, y),
+                                              db.Point(x, y + 200)]))
+    opt = db.SaveLayoutOptions()
+    opt.format = "OASIS"
+    opt.oasis_compression_level = 10
+    ly.write(str(path), opt)
+
+
+class GiantRepetitionTests(unittest.TestCase):
+    """2026-09-16: a record's own repetition is marked by member-range
+    units under the balanced split, so a giant array record no longer
+    runs on one thread; the file is byte-identical across thread
+    counts and with the count-based split (`--occupancy-balance 0`,
+    the kill switch, also reachable through `floe2 index`)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = TMP / "giant.oas"
+        write_giant(cls.src)
+
+    def test_thread_counts_and_the_kill_switch_write_the_same_file(self):
+        shas = {}
+        for tag, extra in (("j1", ["--jobs", 1]), ("j4", ["--jobs", 4]),
+                           ("count", ["--jobs", 4, "--occupancy-balance", 0])):
+            out = TMP / ("giant_%s.floe" % tag)
+            shutil.rmtree(out, ignore_errors=True)
+            res = floe_index("vfs", self.src, out, "--occupancy",
+                             "--occupancy-um", 1, "--no-lod", "--slow-cell-s",
+                             "999", *extra)
+            self.assertIn(" ok=3 ", res.stderr)
+            shas[tag] = sha(out / "design.ovo")
+        self.assertEqual(len(set(shas.values())), 1, shas)
+        # floe2 index passes the switch through to floe-index
+        cache = Path(vfs_cache_dir(self.src))
+        shutil.rmtree(cache, ignore_errors=True)
+        floe2("index", self.src, "--occupancy", "--occupancy-um", "1",
+              "--occupancy-balance", "0", "--jobs", "2")
+        self.assertEqual(sha(cache / "design.ovo"), shas["j1"])
+
+
 class SubCutTests(unittest.TestCase):
     """The sub-cut rules of a plain layout (2026-09-16): a dense page
     whose shapes are all below the cut is a footprint wash, a sparse

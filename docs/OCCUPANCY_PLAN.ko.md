@@ -843,3 +843,32 @@ cargo run --release --manifest-path rust/Cargo.toml -p floe-vfs \
 직렬인 것(합성 재현: 레코드 반복 1,680만 멤버 jobs 1 = 0.406 s, jobs 12 =
 0.388 s; 같은 멤버를 배치 반복으로 두면 0.569 → 0.149 s). 후속: 레코드 반복의
 멤버 범위 unit 분할(per-member 경로만, `work`·파일 바이트 동일).
+
+
+### 2026-09-16 — 레코드 반복의 멤버 범위 분할 (0.12.144 / RENDERD 0.12.99)
+
+위 진단(레코드 자신의 Grid/Pts 반복은 unit 안에서 직렬)에 대한 리뷰 조건 네 가지와
+처리:
+1. **실칩의 주된 병목인지는 추정** — work는 멤버 수 외에 켠 셀·변 행·배치 반복의
+   재방문도 세므로 1.18G charge만으로 단일 거대 레코드를 확정할 수 없다. 그래서
+   이 분할은 "안전한 다음 최적화"로 넣고 실칩 확인은 로그(`grouped records`,
+   `prepared`, `marking u/U units workers=N`, 레이어별 `ok … (Ts)`)로 한다.
+2. **charge 보존** — 레코드 반복은 멤버 수를 한 번에 charge한다. 범위 unit은
+   `m1 − m0`를 한 번에 charge하므로 정상 완료 시 합이 같다. 면적 0 rect·폭 0 path는
+   범위마다 charge 없이 끝나고, 거부되는 path의 `paths_skipped`는 멤버 0을 가진
+   범위만 세며, closed form 채움은 멤버 0의 범위만 한다. 예산 초과(`none:work`)는
+   판정이 같고 work 값만 다를 수 있다(기존 계약).
+3. **깊은 계층** — 무거운 자식의 Grid/Pts 배치(멤버 ≤ 64)는 멤버마다 자식 unit을
+   따로 만들어 배치 반복 안의 거대 레코드도 분할에 닿는다(멤버 charge는 첫 unit의
+   `extra`). 단일 배치는 기존대로 8단계까지 내려간다.
+4. **기대치** — 스레드 수만큼이 아니라 합성 배치 반복의 3.8×(12스레드)가 상한
+   근처이고, 상위 5개 레이어 2.45G는 전체 5.44G의 45 %다. 실칩 수치는 재측정으로.
+검증: Rust `a_record_repetition_is_split_by_members_and_the_file_stays_the_same`
+(rect/polygon/path × Grid/Pts × 회전·미러·깊이 × 직접 배치·Pts 배치·2×2 배열
+배치, jobs 1/4, balance on/off → 파일·work 동일; closed form·면적 0은 미분할;
+`none:work` 판정 동일), `GiantRepetitionTests`(KLayout 압축이 만든 반복 레코드,
+jobs 1/4/`--occupancy-balance 0` 파일 동일, `floe2 index --occupancy-balance 0`
+통과). 킬 스위치 `--occupancy-balance 0`을 `floe2 index`에도 노출했다.
+합성 재현(로컬 release, 1 µm 상자 4096×4096 = 1,680만 멤버, 8 µm 피치, cell 4 µm):
+레코드 반복 jobs 1/12 = 0.430/**0.102 s**(이전 0.406/0.388), 같은 멤버의 배치
+반복 0.562/0.142 s, work 33,554,432 네 경우 동일. 실칩(231.9 s) 재측정 대기.

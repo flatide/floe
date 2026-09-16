@@ -322,9 +322,16 @@ def _discard_occupancy_tmp(outdir):
 
 
 def _occupancy_args(args):
-    """`--occupancy-um` for floe-index (the base cell in microns)."""
+    """`--occupancy-um` (the base cell in microns) and
+    `--occupancy-balance` (the marking unit split) for floe-index."""
+    out = []
     um = getattr(args, "occupancy_um", None)
-    return [] if um is None else ["--occupancy-um", repr(float(um))]
+    if um is not None:
+        out += ["--occupancy-um", repr(float(um))]
+    balance = getattr(args, "occupancy_balance", None)
+    if balance is not None:
+        out += ["--occupancy-balance", str(int(balance))]
+    return out
 
 
 def _run_rust_index(args, binary, coverage_only=False,
@@ -1790,6 +1797,14 @@ def main(argv=None, *, prog=None, rust_only=None):
         help="occupancy base cell in microns (default: automatic - 4 for "
              "a chip wider than 8 mm, 2/1/0.5/0.25 for smaller ones so the "
              "fit view keeps a cell within a pixel); implies --occupancy")
+    rust.add_argument(
+        "--occupancy-balance", type=int, choices=(0, 1), default=None,
+        metavar="0|1",
+        help="how the occupancy marking is split over --jobs threads: "
+             "1 (default) by estimated work - a record's huge repetition "
+             "in member ranges, a heavy placement member by member; 0 the "
+             "count-based split (kill switch; the file is byte-identical "
+             "either way)")
     p.set_defaults(occupancy=None, occupancy_only=False)
     rust.add_argument("--no-lod", action="store_true",
                       help="do not generate merged LOD page variants "

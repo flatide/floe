@@ -324,7 +324,16 @@ floe-index occupancy <outdir> [--layer L/D] [--level N] [--depth N] [--dump]  # 
   레이어의 셀별 추정 작업량(자기 레코드의 반복 멤버 수 + 배치 멤버 수 × 자식
   작업량)을 구해 예산 = 전체/(4 × jobs)로 두고, 레코드 목록은 예산 단위 조각으로,
   예산보다 무거운 단일 배치는 8단계까지 내려가 쪼개고, 배열 배치는 자식 작업량에
-  맞춘 멤버 범위로 자른다. 현장(150 MB 실칩, 337 레이어, 54억 charge): 개수 기준
+  맞춘 멤버 범위로 자른다. **레코드 자신의 반복**(2026-09-16 후속): 예산보다 멤버가
+  많은 레코드는 per-member 경로에서 멤버 범위 unit(`Members`, 레코드당 최대 4,096개)
+  으로 쪼갠다 — 이전에는 레코드의 Grid/Pts 반복이 통째로 한 스레드였다(합성 재현:
+  레코드 반복 1,680만 멤버가 jobs 1/12에서 0.41/0.39 s, 같은 멤버를 배치 반복으로
+  두면 0.57/0.15 s). rect의 closed form 격자(피치 틈 < 셀, 한 번의 채움)와 면적 0
+  rect·폭 0 path는 쪼개지 않는다(생성기와 마킹이 같은 xf·셀로 같은 판정). 무거운
+  자식(작업량 > 예산)의 Grid/Pts 배치가 멤버 64개 이하면 멤버마다 자식의 unit을
+  따로 만들어(멤버의 charge 1은 그 멤버의 첫 unit이 `extra`로 셈) 그 안의 거대
+  레코드도 Members에 닿는다; 멤버가 더 많으면 기존 멤버 범위 unit이 이미 멤버
+  사이에서 병렬이다. 현장(150 MB 실칩, 337 레이어, 54억 charge): 개수 기준
   분할(top의 배치가 4 × jobs개를 넘으면 확장을 멈춤)에서는 가장 무거운 블록
   하나(11.8억 charge)가 unit 하나로 남아 12스레드가 1스레드 속도(약 5분)로
   돌았다. `--occupancy-balance 0`은 옛 개수 기준(top 셀의 레코드, top이 단일
@@ -332,8 +341,11 @@ floe-index occupancy <outdir> [--layer L/D] [--level N] [--depth N] [--dump]  # 
   영향이 없어 파일은 어느 쪽이든 바이트 동일하다(gate).
   스레드는 레이어의 **공유 atomic level-0 평면**(배치 깊이마다 한 장, 2026-09-16
   M6; unit과 walk가 깊이를 넘긴다)에 atomic OR로 마킹하므로 결과 파일은 스레드
-  수와 무관하게 바이트 동일하다(unit은 레코드의 반복을 쪼개지 않고 단일 배치만
-  통과하므로 charge도 같다; `none:work`일 때의 work 값만 다를 수 있다). 작업
+  수와 무관하게 바이트 동일하다(charge는 멤버·행·레코드 단위이고 — 반복 범위는
+  `m1 − m0`를 한 번에, 거부된 path는 멤버 0을 가진 범위만, closed form 채움도
+  멤버 0의 범위만 — 합이 같다; `none:work`일 때의 work 값만 다를 수 있다. gate:
+  Rust `a_record_repetition_is_split_by_members…`(rect/polygon/path × Grid/Pts ×
+  회전·미러·깊이 × jobs 1/4 × balance on/off), `GiantRepetitionTests`). 작업
   예산은 레이어 공유 카운터(스레드가 4,096 charge마다 flush, 초과 폭 ≤ jobs ×
   4,096). 이미 켜진 비트는 relaxed load로 확인한 뒤 쓰기를 생략한다. 비트는
   생성 중 0→1로만 바뀌므로 동시 마킹에서도 안전하며, 밀집 영역의 같은 cache

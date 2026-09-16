@@ -160,6 +160,14 @@ impl Default for Opts {
 /// how many plain placements deep the balanced split descends looking
 /// for units of at most the budget
 pub const MAX_EXPAND_DEPTH: usize = 8;
+/// A Grid/Pts placement of a child heavier than the unit budget with
+/// at most this many members is expanded member by member (each
+/// member's units of its own, so a giant record inside reaches its
+/// Members units); with more members the per-member Place units are
+/// already parallel across the members.
+pub const EXPAND_MEMBERS_MAX: u64 = 64;
+/// at most this many Members units per record
+const MEMBERS_UNITS_MAX: u64 = 4096;
 
 /// seconds between the heartbeat lines of a layer's marking
 pub const PROGRESS_EVERY_S: u64 = 10;
@@ -607,26 +615,47 @@ impl<'a> Marker<'a> {
         if self.over {
             return false;
         }
+        if u.extra > 0 && !self.charge(u.extra) {
+            return false;
+        }
         let cell = &self.shapes[u.ci];
         match &u.kind {
-            UnitKind::Shapes { rects, polys, paths } => {
+            UnitKind::Shapes { rects, polys, paths, split_above } => {
                 self.depth = u.depth;
+                let (split, c) = (*split_above, self.c);
                 for r in &cell.rects[rects.0..rects.1] {
+                    if rect_splits(r, &u.xf, c, split) {
+                        continue; // its Members units mark it
+                    }
                     if !self.mark_rect_rec(r, &u.xf) {
                         return false;
                     }
                 }
                 for p in &cell.polys[polys.0..polys.1] {
+                    if poly_splits(p, split) {
+                        continue;
+                    }
                     if !self.mark_poly_rec(p, &u.xf) {
                         return false;
                     }
                 }
                 for p in &cell.paths[paths.0..paths.1] {
+                    if path_splits(p, split) {
+                        continue;
+                    }
                     if !self.mark_path_rec(p, &u.xf) {
                         return false;
                     }
                 }
                 true
+            }
+            UnitKind::Members { shape, idx, m0, m1 } => {
+                self.depth = u.depth;
+                match shape {
+                    0 => self.mark_rect_range(cell.rects[*idx], &u.xf, *m0, *m1),
+                    1 => self.mark_poly_range(cell.polys[*idx], &u.xf, *m0, *m1),
+                    _ => self.mark_path_range(cell.paths[*idx], &u.xf, *m0, *m1),
+                }
             }
             UnitKind::Place { pi, m0, m1 } => {
                 let pl = &self.doc.cells[u.ci].places[*pi];
@@ -692,32 +721,68 @@ impl<'a> Marker<'a> {
         &mut self,
         rep: &Rep,
         xf: &Xf,
+        f: F,
+    ) -> bool {
+        self.for_each_member_range(rep, xf, 0, u64::MAX, f)
+    }
+
+    /// members m0..m1 of `rep` in the enumeration order (Grid: i
+    /// fastest, k = j * na + i), charged as one block before the
+    /// first - so the ranges of one record charge what the whole
+    /// repetition charges (a Members unit is one range, the walk the
+    /// whole; 2026-09-16)
+    fn for_each_member_range<F: FnMut(&mut Self, i128, i128) -> bool>(
+        &mut self,
+        rep: &Rep,
+        xf: &Xf,
+        m0: u64,
+        m1: u64,
         mut f: F,
     ) -> bool {
         match rep {
-            Rep::One => f(self, 0, 0),
+            Rep::One => {
+                if m0 == 0 && m1 > 0 {
+                    f(self, 0, 0)
+                } else {
+                    true
+                }
+            }
             Rep::Grid { na, nb, va, vb } => {
-                if !self.charge(na.saturating_mul(*nb)) {
+                let n = na.saturating_mul(*nb);
+                let (m0, m1) = (m0.min(n), m1.min(n));
+                if m1 <= m0 {
+                    return true;
+                }
+                if !self.charge(m1 - m0) {
                     return false;
                 }
                 let wa = xf.apply_vec(va.0, va.1);
                 let wb = xf.apply_vec(vb.0, vb.1);
-                for j in 0..*nb as i128 {
-                    for i in 0..*na as i128 {
-                        let dx = i * wa.0 as i128 + j * wb.0 as i128;
-                        let dy = i * wa.1 as i128 + j * wb.1 as i128;
-                        if !f(self, dx, dy) {
-                            return false;
-                        }
+                let (mut i, mut j) = ((m0 % *na) as i128, (m0 / *na) as i128);
+                for _ in m0..m1 {
+                    let dx = i * wa.0 as i128 + j * wb.0 as i128;
+                    let dy = i * wa.1 as i128 + j * wb.1 as i128;
+                    if !f(self, dx, dy) {
+                        return false;
+                    }
+                    i += 1;
+                    if i == *na as i128 {
+                        i = 0;
+                        j += 1;
                     }
                 }
                 true
             }
             Rep::Pts(p) => {
-                if !self.charge(p.len() as u64) {
+                let n = p.len() as u64;
+                let (m0, m1) = (m0.min(n), m1.min(n));
+                if m1 <= m0 {
+                    return true;
+                }
+                if !self.charge(m1 - m0) {
                     return false;
                 }
-                for &(dx, dy) in p.iter() {
+                for &(dx, dy) in &p[m0 as usize..m1 as usize] {
                     let (wx, wy) = xf.apply_vec(dx, dy);
                     if !f(self, wx as i128, wy as i128) {
                         return false;
@@ -729,50 +794,22 @@ impl<'a> Marker<'a> {
     }
 
     fn mark_rect_rec(&mut self, r: &RectRec, xf: &Xf) -> bool {
+        self.mark_rect_range(r, xf, 0, u64::MAX)
+    }
+
+    /// members m0..m1 of a rect record (the whole record for 0..MAX).
+    /// A closed-form grid is one fill of its footprint, done by the
+    /// range holding member 0 - so the ranges of one record mark and
+    /// charge exactly what the whole record does.
+    fn mark_rect_range(&mut self, r: &RectRec, xf: &Xf, m0: u64, m1: u64) -> bool {
         if r.w <= 0 || r.h <= 0 {
             return true; // zero area: KLayout's region is empty
         }
-        let a = xf.apply(r.x, r.y);
-        let b = xf.apply(r.x + r.w, r.y + r.h);
-        let (mx0, mx1) = (a.0.min(b.0) as i128, a.0.max(b.0) as i128);
-        let (my0, my1) = (a.1.min(b.1) as i128, a.1.max(b.1) as i128);
-        if let Rep::Grid { na, nb, va, vb } = &r.rep {
-            let wa = xf.apply_vec(va.0, va.1);
-            let wb = xf.apply_vec(vb.0, vb.1);
-            if is_axis(&wa, &wb) {
-                // closed form: along each axis the members repeat at
-                // a pitch whose gap (pitch - member extent) is narrower
-                // than a cell, so no cell can sit in a gap - the
-                // footprint marks exactly the per-member cells
-                let (px, nx, py, ny) = if wa.1 == 0 && wb.0 == 0 {
-                    (wa.0.abs(), *na, wb.1.abs(), *nb)
-                } else {
-                    (wb.0.abs(), *nb, wa.1.abs(), *na)
-                };
-                let c = self.c as i128;
-                let gx = px as i128 - (mx1 - mx0);
-                let gy = py as i128 - (my1 - my0);
-                if (nx <= 1 || gx < c) && (ny <= 1 || gy < c) {
-                    let (na1, nb1) = (*na as i128 - 1, *nb as i128 - 1);
-                    let xs = [
-                        0,
-                        wa.0 as i128 * na1,
-                        wb.0 as i128 * nb1,
-                        wa.0 as i128 * na1 + wb.0 as i128 * nb1,
-                    ];
-                    let ys = [
-                        0,
-                        wa.1 as i128 * na1,
-                        wb.1 as i128 * nb1,
-                        wa.1 as i128 * na1 + wb.1 as i128 * nb1,
-                    ];
-                    let (ex0, ex1) = (*xs.iter().min().unwrap(), *xs.iter().max().unwrap());
-                    let (ey0, ey1) = (*ys.iter().min().unwrap(), *ys.iter().max().unwrap());
-                    return self.mark_world_rect(mx0 + ex0, my0 + ey0, mx1 + ex1, my1 + ey1);
-                }
-            }
+        if let Some((x0, y0, x1, y1)) = rect_closed_form(r, xf, self.c) {
+            return m0 > 0 || self.mark_world_rect(x0, y0, x1, y1);
         }
-        self.for_each_member(&r.rep, xf, |m, dx, dy| {
+        let (mx0, my0, mx1, my1) = rect_world(r, xf);
+        self.for_each_member_range(&r.rep, xf, m0, m1, |m, dx, dy| {
             m.mark_world_rect(mx0 + dx, my0 + dy, mx1 + dx, my1 + dy)
         })
     }
@@ -919,6 +956,10 @@ impl<'a> Marker<'a> {
     }
 
     fn mark_poly_pts(&mut self, local: &[(i64, i64)], rep: &Rep, xf: &Xf) -> bool {
+        self.mark_poly_pts_range(local, rep, xf, 0, u64::MAX)
+    }
+
+    fn mark_poly_pts_range(&mut self, local: &[(i64, i64)], rep: &Rep, xf: &Xf, m0: u64, m1: u64) -> bool {
         let world: Vec<(i128, i128)> = local
             .iter()
             .map(|&(x, y)| {
@@ -927,7 +968,7 @@ impl<'a> Marker<'a> {
             })
             .collect();
         let mut shifted = world.clone();
-        self.for_each_member(rep, xf, |m, dx, dy| {
+        self.for_each_member_range(rep, xf, m0, m1, |m, dx, dy| {
             if dx == 0 && dy == 0 {
                 return m.mark_world_poly(&world);
             }
@@ -942,14 +983,26 @@ impl<'a> Marker<'a> {
         self.mark_poly_pts(&p.pts, &p.rep, xf)
     }
 
+    fn mark_poly_range(&mut self, p: &PolyRec, xf: &Xf, m0: u64, m1: u64) -> bool {
+        self.mark_poly_pts_range(&p.pts, &p.rep, xf, m0, m1)
+    }
+
     fn mark_path_rec(&mut self, p: &PathRec, xf: &Xf) -> bool {
+        self.mark_path_range(p, xf, 0, u64::MAX)
+    }
+
+    /// a refused path (no outline) is counted once per record: by the
+    /// range holding member 0
+    fn mark_path_range(&mut self, p: &PathRec, xf: &Xf, m0: u64, m1: u64) -> bool {
         if p.hw <= 0 {
             return true; // zero width: KLayout's region is empty
         }
         match path_outline_any(&p.pts, p.hw, p.es, p.ee) {
-            Ok(hull) => self.mark_poly_pts(&hull, &p.rep, xf),
+            Ok(hull) => self.mark_poly_pts_range(&hull, &p.rep, xf, m0, m1),
             Err(_) => {
-                self.paths_skipped += 1;
+                if m0 == 0 {
+                    self.paths_skipped += 1;
+                }
                 true
             }
         }
@@ -1026,21 +1079,33 @@ impl<'a> Marker<'a> {
 }
 
 /// one parcel of a layer's marking for a worker thread: a cell's own
-/// records on the layer (a slice of each record list), or a member
-/// range of one of its placements. Units never split a record's own
-/// repetition and only descend through plain placements, so the marks
-/// and the charges do not depend on how the units are cut: the merged
-/// bits and the work are those of a single thread.
+/// records on the layer (a slice of each record list), a member range
+/// of one record's own repetition (2026-09-16, balanced split only:
+/// a record's repetition used to run on one thread however many
+/// there were), or a member range of one of its placements. The
+/// marks are ORs and every charge is per member, per row or per
+/// record (a refused path, a closed-form fill by the range holding
+/// member 0), so the merged bits and the work do not depend on how
+/// the units are cut: those of a single thread.
 struct Unit {
     ci: usize,
     xf: Xf,
     /// placement depth of the cell (0 = the top)
     depth: u32,
+    /// charges accounted before the marking: an expanded Grid/Pts
+    /// placement member's own charge (the walk charges each member
+    /// one), carried by the member's first unit
+    extra: u64,
     kind: UnitKind,
 }
 
 enum UnitKind {
-    Shapes { rects: (usize, usize), polys: (usize, usize), paths: (usize, usize) },
+    /// slices of the cell's record lists; records with more members
+    /// than `split_above` on the per-member path are skipped here and
+    /// marked by their Members units (u64::MAX: none are)
+    Shapes { rects: (usize, usize), polys: (usize, usize), paths: (usize, usize), split_above: u64 },
+    /// members m0..m1 of one record (shape 0 rect / 1 poly / 2 path)
+    Members { shape: u8, idx: usize, m0: u64, m1: u64 },
     Place { pi: usize, m0: u64, m1: u64 },
 }
 
@@ -1050,6 +1115,82 @@ fn rep_members(rep: &Rep) -> u64 {
         Rep::Grid { na, nb, .. } => na.saturating_mul(*nb),
         Rep::Pts(p) => p.len() as u64,
     }
+}
+
+/// a rect's world box under `xf` (member 0)
+fn rect_world(r: &RectRec, xf: &Xf) -> (i128, i128, i128, i128) {
+    let a = xf.apply(r.x, r.y);
+    let b = xf.apply(r.x + r.w, r.y + r.h);
+    (
+        a.0.min(b.0) as i128,
+        a.1.min(b.1) as i128,
+        a.0.max(b.0) as i128,
+        a.1.max(b.1) as i128,
+    )
+}
+
+/// The closed form of a rect grid: along each axis the members repeat
+/// at a pitch whose gap (pitch - member extent) is narrower than a
+/// cell, so no cell can sit in a gap - the footprint marks exactly
+/// the per-member cells, as one rect (x0, y0, x1, y1). The unit
+/// generator asks the same question with the same xf and cell, so a
+/// record on this path is never split (one fill, not members).
+fn rect_closed_form(r: &RectRec, xf: &Xf, c: i64) -> Option<(i128, i128, i128, i128)> {
+    let Rep::Grid { na, nb, va, vb } = &r.rep else {
+        return None;
+    };
+    let wa = xf.apply_vec(va.0, va.1);
+    let wb = xf.apply_vec(vb.0, vb.1);
+    if !is_axis(&wa, &wb) {
+        return None;
+    }
+    let (mx0, my0, mx1, my1) = rect_world(r, xf);
+    let (px, nx, py, ny) = if wa.1 == 0 && wb.0 == 0 {
+        (wa.0.abs(), *na, wb.1.abs(), *nb)
+    } else {
+        (wb.0.abs(), *nb, wa.1.abs(), *na)
+    };
+    let c = c as i128;
+    let gx = px as i128 - (mx1 - mx0);
+    let gy = py as i128 - (my1 - my0);
+    if (nx <= 1 || gx < c) && (ny <= 1 || gy < c) {
+        let (na1, nb1) = (*na as i128 - 1, *nb as i128 - 1);
+        let xs = [
+            0,
+            wa.0 as i128 * na1,
+            wb.0 as i128 * nb1,
+            wa.0 as i128 * na1 + wb.0 as i128 * nb1,
+        ];
+        let ys = [
+            0,
+            wa.1 as i128 * na1,
+            wb.1 as i128 * nb1,
+            wa.1 as i128 * na1 + wb.1 as i128 * nb1,
+        ];
+        let (ex0, ex1) = (*xs.iter().min().unwrap(), *xs.iter().max().unwrap());
+        let (ey0, ey1) = (*ys.iter().min().unwrap(), *ys.iter().max().unwrap());
+        return Some((mx0 + ex0, my0 + ey0, mx1 + ex1, my1 + ey1));
+    }
+    None
+}
+
+/// Whether a record's own repetition is marked by Members units of
+/// its own instead of inside a Shapes unit (2026-09-16: a record's
+/// repetition ran serially however many threads there were): more
+/// members than `split_above` on the per-member path. A closed-form
+/// rect grid is one fill and a zero-area rect / zero-width path marks
+/// nothing, so neither is worth splitting. The generator and the
+/// Shapes runner decide with the same xf and cell.
+fn rect_splits(r: &RectRec, xf: &Xf, c: i64, split_above: u64) -> bool {
+    r.w > 0 && r.h > 0 && rep_members(&r.rep) > split_above && rect_closed_form(r, xf, c).is_none()
+}
+
+fn poly_splits(p: &PolyRec, split_above: u64) -> bool {
+    rep_members(&p.rep) > split_above
+}
+
+fn path_splits(p: &PathRec, split_above: u64) -> bool {
+    p.hw > 0 && rep_members(&p.rep) > split_above
 }
 
 /// member k's offset in the parent frame, in the walk's enumeration
@@ -1093,7 +1234,7 @@ fn collect_units(
             if rects.0 == rects.1 && polys.0 == polys.1 && paths.0 == paths.1 {
                 continue;
             }
-            out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Shapes { rects, polys, paths } });
+            out.push(Unit { ci, xf, depth: depth as u32, extra: 0, kind: UnitKind::Shapes { rects, polys, paths, split_above: u64::MAX } });
         }
     }
     for (pi, pl) in cell.places.iter().enumerate() {
@@ -1113,7 +1254,7 @@ fn collect_units(
         let mut m0 = 0u64;
         while m0 < members {
             let m1 = (m0 + chunk).min(members);
-            out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Place { pi, m0, m1 } });
+            out.push(Unit { ci, xf, depth: depth as u32, extra: 0, kind: UnitKind::Place { pi, m0, m1 } });
             m0 = m1;
         }
     }
@@ -1162,10 +1303,14 @@ fn layer_weights(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> Vec<u64>
 }
 
 /// a cell's units under `xf`, each of at most `budget` estimated work
-/// where the hierarchy allows: its own records in slices, a plain
-/// placement heavier than the budget descended into (to
-/// MAX_EXPAND_DEPTH), any other placement's members in ranges sized
-/// by the child's weight
+/// where the hierarchy allows: its own records in slices, a record
+/// with more members than the budget (on the per-member path) in
+/// member ranges of its own (Members), a plain placement heavier than
+/// the budget descended into (to MAX_EXPAND_DEPTH), a Grid/Pts
+/// placement of a heavy child with few members (EXPAND_MEMBERS_MAX)
+/// expanded member by member, any other placement's members in
+/// ranges sized by the child's weight. `c` is the cell (dbu): the
+/// closed-form question of rect_splits.
 #[allow(clippy::too_many_arguments)]
 fn collect_units_weighted(
     doc: &Doc,
@@ -1176,12 +1321,36 @@ fn collect_units_weighted(
     depth: usize,
     budget: u64,
     weights: &[u64],
+    c: i64,
     out: &mut Vec<Unit>,
 ) {
     let cell = &doc.cells[ci];
-    let own: u64 = shapes[ci].rects.iter().map(|r| rep_members(&r.rep)).sum::<u64>()
-        + shapes[ci].polys.iter().map(|p| rep_members(&p.rep)).sum::<u64>()
-        + shapes[ci].paths.iter().map(|p| rep_members(&p.rep)).sum::<u64>();
+    let d = depth as u32;
+    // own records: the giant ones (more members than the budget on the
+    // per-member path) as member ranges of their own, the rest sliced
+    let mut own: u64 = 0;
+    let mut giants: Vec<(u8, usize, u64)> = Vec::new();
+    for (idx, r) in shapes[ci].rects.iter().enumerate() {
+        if rect_splits(r, &xf, c, budget) {
+            giants.push((0, idx, rep_members(&r.rep)));
+        } else {
+            own = own.saturating_add(rep_members(&r.rep));
+        }
+    }
+    for (idx, p) in shapes[ci].polys.iter().enumerate() {
+        if poly_splits(p, budget) {
+            giants.push((1, idx, rep_members(&p.rep)));
+        } else {
+            own = own.saturating_add(rep_members(&p.rep));
+        }
+    }
+    for (idx, p) in shapes[ci].paths.iter().enumerate() {
+        if path_splits(p, budget) {
+            giants.push((2, idx, rep_members(&p.rep)));
+        } else {
+            own = own.saturating_add(rep_members(&p.rep));
+        }
+    }
     if own > 0 {
         let pieces = ((own + budget - 1) / budget).clamp(1, 4096) as usize;
         let (nr, np, nq) = (shapes[ci].rects.len(), shapes[ci].polys.len(), shapes[ci].paths.len());
@@ -1191,7 +1360,22 @@ fn collect_units_weighted(
             if rects.0 == rects.1 && polys.0 == polys.1 && paths.0 == paths.1 {
                 continue;
             }
-            out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Shapes { rects, polys, paths } });
+            out.push(Unit {
+                ci,
+                xf,
+                depth: d,
+                extra: 0,
+                kind: UnitKind::Shapes { rects, polys, paths, split_above: budget },
+            });
+        }
+    }
+    for (shape, idx, members) in giants {
+        let per = budget.max((members + MEMBERS_UNITS_MAX - 1) / MEMBERS_UNITS_MAX).max(1);
+        let mut m0 = 0u64;
+        while m0 < members {
+            let m1 = (m0 + per).min(members);
+            out.push(Unit { ci, xf, depth: d, extra: 0, kind: UnitKind::Members { shape, idx, m0, m1 } });
+            m0 = m1;
         }
     }
     for (pi, pl) in cell.places.iter().enumerate() {
@@ -1206,17 +1390,35 @@ fn collect_units_weighted(
         if matches!(pl.rep, Rep::One) {
             if child > budget && depth < MAX_EXPAND_DEPTH {
                 let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
-                collect_units_weighted(doc, has, shapes, pl.cell, base, depth + 1, budget, weights, out);
+                collect_units_weighted(doc, has, shapes, pl.cell, base, depth + 1, budget, weights, c, out);
                 continue;
             }
-            out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Place { pi, m0: 0, m1: 1 } });
+            out.push(Unit { ci, xf, depth: d, extra: 0, kind: UnitKind::Place { pi, m0: 0, m1: 1 } });
+            continue;
+        }
+        if child > budget && members <= EXPAND_MEMBERS_MAX && depth < MAX_EXPAND_DEPTH {
+            // a few members of a heavy child: each member's units of
+            // its own, so a giant record inside reaches its Members
+            // units; the member's charge (the walk charges each Grid/
+            // Pts member one) rides on the member's first unit
+            for k in 0..members {
+                let (dx, dy) = rep_member(&pl.rep, k);
+                let base = xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
+                let start = out.len();
+                collect_units_weighted(doc, has, shapes, pl.cell, base, depth + 1, budget, weights, c, out);
+                if out.len() > start {
+                    out[start].extra += 1;
+                } else {
+                    out.push(Unit { ci, xf, depth: d, extra: 0, kind: UnitKind::Place { pi, m0: k, m1: k + 1 } });
+                }
+            }
             continue;
         }
         let per = (budget / child).max(1);
         let mut m0 = 0u64;
         while m0 < members {
             let m1 = (m0 + per).min(members);
-            out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Place { pi, m0, m1 } });
+            out.push(Unit { ci, xf, depth: d, extra: 0, kind: UnitKind::Place { pi, m0, m1 } });
             m0 = m1;
         }
     }
@@ -1231,13 +1433,13 @@ fn collect_units_weighted(
 /// for minutes). Count-based (`balanced` false): the top cell's own
 /// units, then one level deeper through plain placements (at most
 /// four) while there are fewer than 4 x jobs of them.
-fn units_for(doc: &Doc, has: &[bool], shapes: &[CellShapes<'_>], jobs: usize, balanced: bool) -> Vec<Unit> {
+fn units_for(doc: &Doc, has: &[bool], shapes: &[CellShapes<'_>], jobs: usize, balanced: bool, c: i64) -> Vec<Unit> {
     let target = jobs.max(1) * 4;
     let mut units = Vec::new();
     if balanced {
         let weights = layer_weights(doc, shapes, has);
         let budget = (weights[doc.top] / target as u64).max(1);
-        collect_units_weighted(doc, has, shapes, doc.top, Xf::identity(), 0, budget, &weights, &mut units);
+        collect_units_weighted(doc, has, shapes, doc.top, Xf::identity(), 0, budget, &weights, c, &mut units);
         if !units.is_empty() {
             return units;
         }
@@ -1276,7 +1478,7 @@ fn build_layer(
         return (layer_with(STATUS_EMPTY, 0, Vec::new()), 0);
     }
     let prepared = std::time::Instant::now();
-    let units = units_for(doc, has, shapes, jobs, balanced);
+    let units = units_for(doc, has, shapes, jobs, balanced, cell_dbu);
     let planes = Planes::new(w, h, layer_max_depth(doc, shapes, has));
     let threads = jobs.max(1).min(units.len()).max(1);
     let shared = std::sync::atomic::AtomicU64::new(0);
@@ -2317,8 +2519,8 @@ mod tests {
         assert_eq!(write_ovo(&one), write_ovo(&many));
         let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
         let has = layer_presence(&d, &shapes);
-        assert!(units_for(&d, &has, &shapes, 3, false).len() >= 12);
-        assert!(units_for(&d, &has, &shapes, 3, true).len() >= 12);
+        assert!(units_for(&d, &has, &shapes, 3, false, 10).len() >= 12);
+        assert!(units_for(&d, &has, &shapes, 3, true, 10).len() >= 12);
         // a top holding one die placement: the units come from below
         let mut leaf = cell("B");
         leaf.rects.push(rect(1, 0, 0, 7, 3, Rep::One));
@@ -2332,7 +2534,7 @@ mod tests {
         let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
         let has = layer_presence(&d, &shapes);
         for balanced in [false, true] {
-            let units = units_for(&d, &has, &shapes, 3, balanced);
+            let units = units_for(&d, &has, &shapes, 3, balanced, 10);
             assert!(units.iter().all(|u| u.ci == 2), "units should sit in the leaf");
             assert!(units.len() >= 3, "{} units", units.len());
         }
@@ -2379,6 +2581,93 @@ mod tests {
             }
         }
         assert_eq!(level.count(), expected.iter().filter(|&&b| b).count() as u64);
+    }
+
+    #[test]
+    fn a_record_repetition_is_split_by_members_and_the_file_stays_the_same() {
+        // 2026-09-16: a record's own Grid/Pts repetition ran on one
+        // thread however many there were (probe: 16.8 M members as one
+        // record 0.41 s at jobs 1 and 0.39 s at jobs 12; the same
+        // members as a placement repetition 0.57 -> 0.15 s). Giant
+        // records - rect, polygon and path, Grid and Pts, under
+        // rotation, mirroring and depth, placed plainly and inside a
+        // Pts / 2 x 2 Grid placement of a heavy child - spread over
+        // Members units. The bits and the work are those of one
+        // thread, of the count-based units and of any thread count; a
+        // closed-form rect grid stays one fill; a zero-area rect and a
+        // zero-width path charge nothing either way
+        let c = 10i64; // the 0.01 um cell at unit 1000
+        let mut leaf = cell("LEAF");
+        // per-member rect grid: 6 x 6 on a 40 pitch (gap 34 > cell)
+        leaf.rects.push(rect(1, 0, 0, 6, 6, Rep::Grid { na: 400, nb: 400, va: (40, 0), vb: (0, 40) }));
+        // closed-form rect grid: 6 x 6 on a 12 pitch (gap 6 < cell)
+        leaf.rects.push(rect(1, 17000, 0, 6, 6, Rep::Grid { na: 150, nb: 150, va: (12, 0), vb: (0, 12) }));
+        // a zero-area rect with a giant repetition: nothing, no charge
+        leaf.rects.push(rect(1, 0, 17000, 0, 6, Rep::Grid { na: 300, nb: 300, va: (40, 0), vb: (0, 40) }));
+        let pts: Vec<(i64, i64)> = (0..50_000i64).map(|k| ((k % 250) * 40, 17000 + (k / 250) * 40)).collect();
+        leaf.polys.push(PolyRec { layer: 1, dt: 0, pts: vec![(0, 0), (8, 0), (0, 8)], rep: Rep::Pts(pts.into()) });
+        leaf.paths.push(PathRec {
+            layer: 1, dt: 0, pts: vec![(17000, 17000), (17030, 17000)], hw: 3, es: 0, ee: 0,
+            rep: Rep::Grid { na: 250, nb: 250, va: (40, 0), vb: (0, 40) },
+        });
+        leaf.paths.push(PathRec {
+            layer: 1, dt: 0, pts: vec![(0, 0), (30, 0)], hw: 0, es: 0, ee: 0,
+            rep: Rep::Pts((0..3000i64).map(|k| (k * 7, k * 3)).collect()),
+        });
+        let mut heavy = cell("HEAVY");
+        heavy.rects.push(rect(1, 0, 0, 6, 6, Rep::Grid { na: 400, nb: 400, va: (40, 0), vb: (0, 40) }));
+        heavy.polys.push(PolyRec {
+            layer: 1, dt: 0, pts: vec![(0, 0), (8, 0), (4, 8)],
+            rep: Rep::Grid { na: 80, nb: 80, va: (0, 40), vb: (40, 0) },
+        });
+        let mut top = cell("T");
+        top.places.push(PlaceRec { cell: 1, x: 5000, y: 7000, rot: 1, flip: true, rep: Rep::One });
+        top.places.push(PlaceRec {
+            cell: 1, x: 40000, y: 40000, rot: 2, flip: false,
+            rep: Rep::Pts(vec![(0, 0), (30000, 0), (0, 30000)].into()),
+        });
+        top.places.push(PlaceRec {
+            cell: 2, x: 90000, y: 0, rot: 3, flip: true,
+            rep: Rep::Grid { na: 2, nb: 2, va: (30000, 0), vb: (0, 30000) },
+        });
+        let d = doc_with(vec![top, leaf, heavy], 0, vec![(1, 0)]);
+        let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
+        let has = layer_presence(&d, &shapes);
+        let units = units_for(&d, &has, &shapes, 12, true, c);
+        let members = |shape: u8| {
+            units.iter().filter(|u| matches!(u.kind, UnitKind::Members { shape: s, .. } if s == shape)).count()
+        };
+        assert!(members(0) >= 16 && members(1) >= 4 && members(2) >= 4,
+            "rect {} poly {} path {} Members units of {}", members(0), members(1), members(2), units.len());
+        // the closed-form grid (the leaf's rect 1) and the zero-area
+        // rect (rect 2) are never split; the array's child reaches its
+        // Members units through the member-wise expansion
+        assert!(!units.iter().any(|u| u.ci == 1 && matches!(u.kind, UnitKind::Members { shape: 0, idx: 1 | 2, .. })));
+        assert!(units.iter().any(|u| u.ci == 2 && matches!(u.kind, UnitKind::Members { .. })));
+        // the heavy child's Pts (3 members) and 2 x 2 Grid placements
+        // are expanded member by member, each member's charge on its
+        // first unit: 7 charges, as the walk charges them
+        assert_eq!(units.iter().map(|u| u.extra).sum::<u64>(), 7);
+        let mk = |jobs, balanced| {
+            build(&d, 0, 0, &Opts { base_um: 0.01, jobs, balanced_units: balanced, ..Opts::default() }).unwrap()
+        };
+        let (a, b, cnt) = (mk(4, true), mk(1, true), mk(4, false));
+        assert_eq!(a.layers[0].status, STATUS_OK);
+        assert!(a.layers[0].work > 1_000_000, "{}", a.layers[0].work);
+        assert_eq!(write_ovo(&a), write_ovo(&b));
+        assert_eq!(write_ovo(&a), write_ovo(&cnt));
+        assert_eq!(a.layers[0].work, cnt.layers[0].work);
+        // every shape sits at placement depth 1: one plane
+        assert_eq!(a.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![1]);
+        // over the work budget the verdict is the same on every cut
+        // (the work value at the trip point is not pinned)
+        let over = |jobs, balanced| {
+            build(&d, 0, 0, &Opts { base_um: 0.01, jobs, balanced_units: balanced, max_work: 50_000, ..Opts::default() })
+                .unwrap()
+                .layers[0]
+                .status
+        };
+        assert_eq!((over(4, true), over(1, true), over(4, false)), (STATUS_NONE_WORK, STATUS_NONE_WORK, STATUS_NONE_WORK));
     }
 
     #[test]
@@ -2529,9 +2818,9 @@ mod tests {
         let weights = layer_weights(&d, &shapes, &has);
         assert_eq!((weights[1], weights[2]), (1, 90_000 + 64));
         assert_eq!(weights[0], 60 + 90_064);
-        let by_count = units_for(&d, &has, &shapes, 4, false);
+        let by_count = units_for(&d, &has, &shapes, 4, false, 10);
         assert_eq!(by_count.iter().filter(|u| u.ci == 2).count(), 0, "count split leaves the block one unit");
-        let balanced = units_for(&d, &has, &shapes, 4, true);
+        let balanced = units_for(&d, &has, &shapes, 4, true, 10);
         let in_block = balanced.iter().filter(|u| u.ci == 2).count();
         assert!(in_block >= 8, "{} units in the block of {}", in_block, balanced.len());
         // the split changes nothing in the file

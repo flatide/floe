@@ -160,7 +160,10 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   칩 크기에서 자동 — 긴 변이 2,048셀 이상이 되는 가장 굵은 4/2/1/0.5/0.25 µm, 즉
   8 mm보다 큰 칩은 4 µm, 2.25 mm 칩은 1 µm; 2026-09-16). `--thin keep`으로 보는
   단독 마스크 레이아웃은 `floe2 index chip.oas
-  --occupancy`. 확인은 `floe-index occupancy .<src>.ice`. 형식·규칙은
+  --occupancy`. 확인은 `floe-index occupancy .<src>.ice`. 마킹은 `--jobs`
+  스레드가 작업량 기준 unit으로 나눠 맡는다(레코드의 거대 반복도 멤버 범위로,
+  2026-09-16); `--occupancy-balance 0`은 옛 개수 기준 분할로 되돌리는 킬
+  스위치이고 파일은 어느 쪽이든 바이트 동일하다. 형식·규칙은
   docs/OCCUPANCY_PLAN.ko.md, 뷰어 적용은 M2~M5(완료).
 
 ### Jobdeck (Calibre MDPView `.jb`)
