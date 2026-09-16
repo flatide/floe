@@ -18,7 +18,7 @@ fixture는 `docs/RENDERER-TESTS.ko.md`, 열린 runtime 성능 이슈와 실측 �
   `IMPLEMENTATION_PLAN.ko.md`, `README.md`를 부모로 다시 복사하지 않는다.
 - prototype의 유효 계약은 부모 문서와 `rust/render-*`, `floe/rust_render.py`,
   `tools/validate_rust_renderer.py`에 이미 포함됐고 부모 구현이 더 최신이다.
-- `target/`, 실제/합성 `.oas`, `.floe` cache, 고객 layout/profile은 인계물이
+- `target/`, 실제/합성 `.oas`, VFS cache(`.<src>.ice/`), 고객 layout/profile은 인계물이
   아니며 커밋하지 않는다.
 
 ## 2. 고정된 제품 결정
@@ -27,7 +27,7 @@ fixture는 `docs/RENDERER-TESTS.ko.md`, 열린 runtime 성능 이슈와 실측 �
   아니고 속도보다 geometry·표시 정확도가 우선이다.
 - Rust renderer 제품은 같은 저장소의 `floe2`이며 KLayout backend를 거부한다.
   안정판 `floe`는 KLayout을 기본으로 유지하고 `FLOE_RENDERER=rust` 명시 A/B만
-  허용한다. 두 제품은 같은 `rust/`와 `<src>.floe` cache를 공유한다.
+  허용한다. 두 제품은 같은 `rust/`와 `.<src>.ice` cache를 공유한다.
 - abstract는 KLayout 고유 기능이라 Rust 범위에서 제외한다. Rust worker는
   `supports_abstract = False`이고 GUI 메뉴/`a` 동작도 비활성화된다.
 - OASIS CIRCLE(record 27)은 인덱싱 시 결정적 내접 64각형 `PolyRec`으로 바뀐다.
@@ -103,7 +103,7 @@ KLayout indexer이므로 KLayout-free portable에서 그대로 호출할 수 없
 
 권장 경계:
 
-1. 완료: 기본 `floe index SRC`를 함께 배포되는 `floe-index vfs SRC SRC.floe`
+1. 완료: 기본 `floe index SRC`를 함께 배포되는 `floe-index vfs SRC .SRC.ice`
    subprocess로 위임.
 2. 완료: `--jobs`, 명시적 `--force`를 Rust 경로에 연결.
 3. 완료: LOD/page target/slow-cell/P2 shard ceiling을 Rust 의미의 옵션으로 노출.
@@ -114,7 +114,7 @@ KLayout indexer이므로 KLayout-free portable에서 그대로 호출할 수 없
 5. 완료: binary 검색은 `FLOE_INDEX_BIN`, 개발 tree의
    `rust/target/release/floe-index`, Python executable 인접 `floe-index`, PATH 순으로
    두고 누락 시 설치 지침이 포함된 hard error를 낸다.
-6. 완료: `--force`만 기존 `SRC.floe` 교체 권한으로 간주. 평상시에는 source
+6. 완료: `--force`만 기존 `.SRC.ice` 교체 권한으로 간주. 평상시에는 source
    fingerprint/cache version이 맞고 Rust `Vfs::open` 구조·pair 검증을 통과한
    cache만 재사용하며, 임의 cache 삭제를 추론하지 않는다. 명시한
    `FLOE_INDEX_BIN`이 무효면 다른 후보로 폴스루하지 않는다.
@@ -178,7 +178,7 @@ env -u FLOE_RENDERER PYTHONDONTWRITEBYTECODE=1 \
   FLOE_RENDERD_BIN="$PWD/rust/target/release/floe-renderd" \
   FLOE_RUST_ROUND_PAGES=4 \
   FLOE_INTEGRATION_SOURCE="$PWD/data/m1/valmini.oas" \
-  FLOE_INTEGRATION_CACHE="$PWD/data/m1/valmini.oas.floe" \
+  FLOE_INTEGRATION_CACHE="$PWD/data/m1/.valmini.oas.ice" \
   .venv/bin/python -B tools/validate_rust_renderer.py
 ```
 

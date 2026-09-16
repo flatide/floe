@@ -37,6 +37,7 @@ from floe.jobdeck import color as jcolor             # noqa: E402
 from floe.jobdeck import geom as jgeom               # noqa: E402
 from floe.jobdeck.sources import file_header         # noqa: E402
 from floe.cache import Cache                         # noqa: E402
+from floe.cachepath import vfs_cache_dir, pack_path  # noqa: E402
 from floe.jobdeck import render as jrender           # noqa: E402
 
 EXPECTED = json.loads((ROOT / "tools" / "jobdeck_expected.json").read_text())
@@ -730,7 +731,7 @@ class CliTests(unittest.TestCase):
                       res.stdout)
         self.assertIn("CHIP:ID001 blue, $2 yellow, CHIP:ID002 red",
                       res.stdout)
-        self.assertIn("no .floe cache yet; run: floe2 index", res.stdout)
+        self.assertIn("no index yet; run: floe2 index", res.stdout)
         r = json.loads(rep.read_text())
         self.assertEqual(r["plan"]["instances"], 5)
         self.assertEqual(len(r["placements"]), 5)
@@ -752,7 +753,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("structural error", res.stderr)
 
     def test_3_batch_index(self):
-        """runs last: it leaves .floe caches in the CLI copy."""
+        """runs last: it leaves index caches in the CLI copy."""
         binary = ROOT / "rust" / "target" / "release" / "floe-index"
         self.assertTrue(binary.is_file(), "release floe-index is not built")
         env = {"FLOE_INDEX_BIN": str(binary)}
@@ -790,7 +791,7 @@ class JobdeckIndexLodTests(unittest.TestCase):
             deck.write_text(DECK, encoding="utf-8")
 
             def marker(name):
-                return work / (name + ".floe") / "design.ovm"
+                return Path(vfs_cache_dir(work / name)) / "design.ovm"
 
             def lod_sources():
                 return {name for name in names
@@ -1503,16 +1504,19 @@ class LoadingBannerTests(unittest.TestCase):
 
 class ViewerIndexArgvTests(unittest.TestCase):
     """The viewer's own indexing (File > load layout on a layout
-    without a cache) calls the raw floe-index binary, which is opt-in
-    for the occupancy summary: it must ask for it explicitly so the
-    result matches `floe2 index`'s default (M5, 2026-09-15). A jobdeck
-    load goes through `floe2 index deck.jb` and inherits the default."""
+    without a cache) calls the raw floe-index binary with the same
+    argv shape as `floe2 index` on a layout: no occupancy summary
+    (2026-09-16; a jobdeck load goes through `floe2 index deck.jb`,
+    whose sources default to the summary) and the cache path from
+    floe/cachepath.py (the hidden .<src>.ice sibling)."""
 
-    def test_the_layout_index_asks_for_the_summary(self):
+    def test_the_layout_index_matches_floe2_index(self):
         import inspect
         from floe import gui
         src = inspect.getsource(gui)
-        self.assertIn('"--jobs", "12", "--occupancy", "--no-lod"', src)
+        self.assertIn('"--jobs", "12", "--no-lod"', src)
+        self.assertNotIn('"--occupancy"', src)
+        self.assertIn("cachepath.vfs_cache_dir(src)", src)
         self.assertIn('"-m", APP, "index", path', src)
 
 
@@ -1704,9 +1708,9 @@ class LevelSelectTests(unittest.TestCase):
         res = run_floe2("index", deck, "--level", "3", "--jobs", "2",
                         env=self.env, ok=0)
         self.assertIn("[jobdeck] levels    : 3 of 1,2,3,5", res.stdout)
-        self.assertTrue((fresh / "mark.oas.floe" / "meta.json").is_file())
-        self.assertFalse((fresh / "chipA.oas.floe").exists())
-        self.assertFalse((fresh / "chipB.oas.floe").exists())
+        self.assertTrue((Path(vfs_cache_dir(fresh / "mark.oas")) / "meta.json").is_file())
+        self.assertFalse(Path(vfs_cache_dir(fresh / "chipA.oas")).exists())
+        self.assertFalse(Path(vfs_cache_dir(fresh / "chipB.oas")).exists())
         self.assertTrue(deck_ready(str(deck), ids=[3]))
         self.assertFalse(deck_ready(str(deck), ids=[1, 3]))
         self.assertFalse(deck_ready(str(deck)))
@@ -1783,12 +1787,12 @@ class IndexOnOpenSmokeTests(unittest.TestCase):
         for name in ("chipA.oas", "chipB.oas", "mark.oas", "test.jb",
                      "test_formats.jb", "chipA.gds"):
             shutil.copy2(CLI / name, fresh / name)
-        self.assertFalse((fresh / "chipA.oas.floe").exists())
+        self.assertFalse(Path(vfs_cache_dir(fresh / "chipA.oas")).exists())
         # declined (policy no): the viewer stays empty, the smoke says so
         res = run_floe2("view", "--multi", fresh / "chipA.oas",
                         env=self._env("no"), ok=1, timeout=120)
         self.assertIn("pending open never landed", res.stderr + res.stdout)
-        self.assertFalse((fresh / "chipA.oas.floe").exists())
+        self.assertFalse(Path(vfs_cache_dir(fresh / "chipA.oas")).exists())
         # the same for a deck whose OASIS source lacks an index (it
         # used to be refused in the terminal)
         res = run_floe2("view", "--multi", fresh / "test_formats.jb",
@@ -1815,14 +1819,14 @@ class IndexOnOpenSmokeTests(unittest.TestCase):
         run_floe2("view", "--multi", fresh / "chipA.oas", "--goto",
                   "1000,1000,500", "--drc", db, env=self._env("yes"),
                   ok=0, timeout=180)
-        self.assertTrue((fresh / "chipA.oas.floe" / "meta.json").is_file())
-        self.assertTrue((fresh / "chipA.db.ice").exists(),
+        self.assertTrue((Path(vfs_cache_dir(fresh / "chipA.oas")) / "meta.json").is_file())
+        self.assertTrue(Path(pack_path(fresh / "chipA.db")).exists(),
                         "the DRC pack was built without asking (policy yes)")
         # a jobdeck: every source indexed through `floe2 index deck.jb`
         run_floe2("view", "--multi", fresh / "test.jb", env=self._env("yes"),
                   ok=0, timeout=180)
         for name in ("chipB.oas", "mark.oas"):
-            self.assertTrue((fresh / (name + ".floe") / "meta.json").is_file(),
+            self.assertTrue((Path(vfs_cache_dir(fresh / name)) / "meta.json").is_file(),
                             name)
 
 
@@ -3273,7 +3277,7 @@ class ReviewFixTests5(unittest.TestCase):
         # (0 lit pixels). The window is now computed in source units
         # like the raster.
         spec = CLI / "huge-offset.spec"
-        cache = str(CLI / "chipB.oas.floe")
+        cache = vfs_cache_dir(CLI / "chipB.oas")
         hexs = lambda t: t.encode().hex()
         dx = 1e16
         spec.write_text(
@@ -3315,7 +3319,7 @@ class ReviewFixTests5(unittest.TestCase):
         # "coordinate overflow: source view x0"; it must be an empty
         # pass, and the frame equals the deck without it.
         hexs = lambda t: t.encode().hex()
-        cache = str(CLI / "chipB.oas.floe")
+        cache = vfs_cache_dir(CLI / "chipB.oas")
         head = ("deck unit=1e-06\n"
                 "source path_hex=%s\n"
                 "layer out=0 name_hex=%s color=#ffffff fill=solid width=1\n"

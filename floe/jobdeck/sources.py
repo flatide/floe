@@ -8,7 +8,7 @@ the selection is never opened beyond one page. gzip is inflated only as
 far as that page.
 
 Every source ends with a status; the report lists them all so a skipped
-entry is never silent. floe2 draws from `<src>.floe` caches (M2+), so the
+entry is never silent. floe2 draws from the sources' VFS caches (M2+), so the
 catalog also says whether that cache exists (`indexed`).
 """
 
@@ -166,7 +166,7 @@ class SourceInfo:
     probe: str = PROBE_NONE
     probe_s: float = 0.0
     error: str = ""
-    indexed: bool = False      # <path>.floe exists and is not stale
+    indexed: bool = False      # the VFS cache exists and is not stale
     cache_dir: str = ""
 
     def ok(self) -> bool:
@@ -265,7 +265,7 @@ class SourceCatalog:
                 for tc, i in self.infos.items() if not i.ok()}
 
     def unindexed(self) -> list:
-        """Probed-ok sources that have no usable <src>.floe cache yet."""
+        """Probed-ok sources that have no usable VFS cache yet."""
         return [tc for tc, i in sorted(self.infos.items())
                 if i.ok() and not i.indexed]
 
@@ -279,6 +279,6 @@ class SourceCatalog:
             "probe_s": round(sum(i["probe_s"] for i in infos), 4),
             "note": "dbu comes from the OASIS START / GDS UNITS record in "
                     "the first bytes of each file; no geometry is read. "
-                    "indexed = a fresh <src>.floe cache exists.",
+                    "indexed = a fresh VFS cache exists.",
             "files": infos,
         }

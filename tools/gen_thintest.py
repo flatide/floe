@@ -45,7 +45,7 @@ Reference runs (after `floe-index vfs data/thintest.oas`),
 measured on 0.11.25 + rev 45:
 
   corners (cut 4um, 7um = 17.5px >= demote 14px -> bound offsets):
-    floe-index plan data/thintest.oas.floe --view -10,-40,4300,3200 \
+    floe-index plan data/.thintest.oas.ice --view -10,-40,4300,3200 \
         --px-per-um 2.5 --cut-px 10 --depth 0
     -> frame_rects 13, thin_frames 7
        (rows/column/SHORTBAR/LONGBAR 2 sub-grids each, 2D 1, all

@@ -14,7 +14,7 @@
 
 **`floe2`가 유일한 제품 라인이다(2026-09-08 브랜치 승격).** 번들 글꼴을
 사용하는 멀티코어 Rust renderer(`rust/` workspace, `floe-index`/
-`floe-renderd`, `<src>.floe` VFS 캐시)만 허용한다. KLayout 기반 셸 `floe`는
+`floe-renderd`, `.<src>.ice` VFS 캐시)만 허용한다. KLayout 기반 셸 `floe`는
 시장에 릴리즈된 적이 없고 `floe-legacy` 브랜치(`floe-frozen-2026-09-08`
 태그)에 동결됐다. KLayout은 이 저장소에서 **개발용으로만** 쓴다: 정확도
 oracle, 테스트 데이터 생성기, 그리고 새 기능을 Rust에 넣기 전 KLayout
@@ -122,11 +122,6 @@ python3 -m venv --system-site-packages .venv
 | 5/1, 7/1, 9/1, 11/1, 13/1, 15/1 | M*_FILL | 더미필 (용량 대부분) |
 | 63/63 | MARKER | 검증용 마커/라벨 |
 
-> **예정 개명(2026-09-15, 미적용)**: 인덱스 폴더 `<src>.floe/` → 숨김
-> `.<src>.ice/`, DRC pack `<db>.ice` → 숨김 `.<db>.tray`. 다른 워킹트리에서
-> 진행 중이며 어느 브랜치에도 아직 없다. 이 문서의 이름은 현행이다. 정본:
-> `docs/CACHE-NAMING.ko.md`(의존 지점 목록·결정 필요 항목).
-
 ## floe2 사용법
 
 OASIS에는 공간 인덱스가 없어 어떤 조회든 파일 전체 파싱이 필요하다.
@@ -137,7 +132,7 @@ floe2는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모�
 alias floe2=".venv/bin/python -m floe2"  # 제품 (Rust renderer)
 alias floe=".venv/bin/python -m floe"    # 개발 전용: 동결된 KLayout 셸 (oracle·선행 검증)
 
-floe2 index data/testchip_1g5.oas          # 1회: 공유 <src>.floe/ 생성
+floe2 index data/testchip_1g5.oas          # 1회: 공유 .<src>.ice/ 생성(소스 옆 숨김 폴더)
 floe2 index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
 floe2 info  data/testchip_1g5.oas
 floe2 view  data/testchip_1g5.oas
@@ -156,12 +151,15 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   `--p2-shard-limit-mb`는 Rust 빌드 옵션이다. floe2는 density coverage를
   생성·표시하지 않으며 공유 cache에 남은 `design.ovc`도 읽지 않는다. 안정판
   `floe`의 KLayout 화면만 `--coverage`/`--coverage-only`를 계속 제공한다.
-- 마스크 정책 광역뷰용 점유 피라미드 `design.ovo`는 **기본으로 함께 만든다**
-  (M5 결정 2026-09-15; `--no-occupancy`로 끔). 현재 캐시에 요약이 없으면 기본
-  색인이 추가만 하고, `--occupancy-only`는 현재 캐시에 추가·교체한다
-  (`--occupancy-um` 기준 셀, 기본 4 µm; 덱에도 적용). 확인은 `floe-index
-  occupancy <src>.floe`.
-  뷰어 사용(M2)은 아직이며 형식·규칙은 docs/OCCUPANCY_PLAN.ko.md.
+- 마스크 정책 광역뷰용 점유 피라미드 `design.ovo`는 **jobdeck의 소스에는
+  기본으로, 레이아웃에는 `--occupancy`를 줄 때만** 만든다(2026-09-16; M5 결정
+  2026-09-15의 "전부 기본 on"을 사용자 결정으로 바꿈 — 일반 레이아웃은
+  `thin:cull`이라 요약을 쓰지 않는다). `--no-occupancy`는 덱에서도 끈다. 현재
+  캐시에 요약이 없으면 `--occupancy`(덱은 기본)가 추가만 하고,
+  `--occupancy-only`는 현재 캐시에 추가·교체한다(`--occupancy-um` 기준 셀, 기본
+  4 µm). `--thin keep`으로 보는 단독 마스크 레이아웃은 `floe2 index chip.oas
+  --occupancy`. 확인은 `floe-index occupancy .<src>.ice`. 형식·규칙은
+  docs/OCCUPANCY_PLAN.ko.md, 뷰어 적용은 M2~M5(완료).
 
 ### Jobdeck (Calibre MDPView `.jb`)
 
@@ -407,9 +405,9 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
 - **로드 대화상자**(File > load layout… / load jobdeck…, 2026-09-10)는 자체
   파일 브라우저다: 폴더 먼저·필터에 맞는 파일 다음, 위/홈 버튼, 경로 입력
   (Enter로 폴더 이동 또는 파일 열기), 이름 타이핑 검색, 필터 콤보. 레이아웃의
-  `<src>.floe` 캐시 디렉터리와 DRC db의 `.ice` 사이드카, 점 파일은 목록에
-  나오지 않는다(GTK 파일 선택기는 폴더에 필터를 적용하지 않아 `.floe`가 데이터
-  폴더를 어지럽혔다). 다른 대화상자(DRC open, notes/waives)는 아직 GTK 선택기.
+  캐시 폴더 `.<src>.ice`와 DRC pack `.<db>.tray`는 점 파일이라 목록에 나오지
+  않고, 2026-09-16 이전 이름 `<src>.floe`·`<db>.ice`도 숨긴다(GTK 파일 선택기는
+  폴더에 필터를 적용하지 않아 캐시가 데이터 폴더를 어지럽혔다). 다른 대화상자(DRC open, notes/waives)는 아직 GTK 선택기.
 
 ### 네이티브 뷰어 (`floe view`) — GTK3/PyGObject (flateyes와 동일 제약)
 
@@ -781,10 +779,10 @@ alias floe="/opt/floe/venv/bin/python -m floe"
 [`rust/VECTOR_EXPORT_PLAN.md`](rust/VECTOR_EXPORT_PLAN.md)에 정리했다. FVX는 제안
 상태이며 현재 명령·캐시 포맷은 변경하지 않는다.
 
-### .ice 구조와 설계 노트
+### .tiles 구조와 설계 노트 (레거시 KLayout 셸; 2026-08-13까지의 이름 .ice)
 
 ```
-<src>.ice/
+<src>.tiles/
   meta.json      원본 지문(size/mtime), 그리드, 레이어 테이블(+색),
                  타일별 depth-밀도 테이블(auto depth용), 통계
   tiles_b<k>/t_r_c.oas  타일별 OASIS를 도형 **크기 밴드**로 분할 저장
@@ -911,7 +909,8 @@ PATH를 조용히 누락하지 않고 명시적 오류로 반환한다.
 배율/임의각 PLACEMENT(18)와 XGEOMETRY(33)는 명확한 오류로 거부한다.
 
 `rust/` 워크스페이스의 KLayout-free 네이티브 인덱서다. 사용자 명령
-`floe index`가 `floe-index vfs`로 위임하여 `<src>.floe`의 mmap OVM/OVP/OVT
+`floe index`가 `floe-index vfs`로 위임하여 `.<src>.ice`(소스 옆 숨김 폴더;
+2026-09-16까지는 `<src>.floe`, 발견 시 자동 개명)의 mmap OVM/OVP/OVT
 캐시를 만든다. Python `.tiles` 인덱서는 `--legacy`에만 남아 있다.
 
 - **순수 Rust, klayout 무관** — floe-oasis(파서/라이터), floe-tiler,
@@ -926,7 +925,7 @@ PATH를 조용히 누락하지 않고 명시적 오류로 반환한다.
 ### 사용법
 
 ```sh
-floe index chip.oas --jobs 12                # <src>.floe
+floe index chip.oas --jobs 12                # .<src>.ice (숨김 폴더)
 floe index chip.oas --coverage               # density overview 포함
 floe index chip.oas --page-target-mb 2 --p2-shard-limit-mb 4096
 floe index chip.oas --force                  # 기존 캐시 교체 권한
@@ -934,7 +933,7 @@ floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
   --profile-jobs 8,12,16 --profile-repeat 2 \
   --profile-snapshot /fast-scratch/monster.floe-profile \
   > monster-profile.json                     # parse/prepare 1회, cache 쓰기 없음
-floe-index vfs chip.oas custom.floe --jobs 12  # 저수준 직접 실행
+floe-index vfs chip.oas custom.ice --jobs 12   # 저수준 직접 실행(outdir 생략 시 .chip.oas.ice)
 floe-index scan chip.oas 16                  # JSON 인벤토리 (진단용)
 floe-index --version
 ```
@@ -950,7 +949,7 @@ floe-index --version
 - `--profile-cell NAME` 또는 slow-cell 로그의 0-based 번호를 쓰는
   `--profile-cell-ci N`은 전체 소스를 파스한 뒤 지정 셀의 planner만 격리
   실행한다. stderr에는 레이어별 P2 prefix/shard/task/merge/pbvh 시간이,
-  stdout에는 같은 결과의 JSON이 나오며 기존 `<src>.floe`는 건드리지 않는다.
+  stdout에는 같은 결과의 JSON이 나오며 기존 `.<src>.ice`는 건드리지 않는다.
   `--profile-jobs 8,12,16 --profile-repeat 2`는 한 번의 parse/recursive-bbox
   결과로 6개 planner 실행을 순차 비교한다. `--profile-snapshot PATH`는 선택
   셀의 준비된 입력을 별도 atomic/checksummed scratch 파일로 저장해 다음
@@ -984,7 +983,7 @@ sh rust/build-linux.sh
 ## 로드맵
 
 1. ✅ 테스트용 대용량 OASIS 생성기 (`tools/gen_test_oasis.py`)
-2. ✅ 공간 인덱스(.ice) + CLI (index/info/render/clip)
+2. ✅ 공간 인덱스(.tiles, 구명 .ice) + CLI (index/info/render/clip)
 3. ✅ 네이티브 뷰어 (view): 영역 줌/팬/레이어 토글/depth/clip 저장
 4. Calibre DRC 결과(.db) 파서/조회 + 에러 점프: ✅ 1차 (ASCII db 파서
    `floe/drc.py`, `e` 브라우저 + `n`/`p` 점프, `floe drc`, 합성 db 생성기

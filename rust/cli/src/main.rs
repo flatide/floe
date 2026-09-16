@@ -107,7 +107,7 @@ fn main() {
              [--summary-layers a/b,..] [--prune-summary 0|1]\n       \
              floe-index occupancy <outdir> [--layer L/D] [--level N] \
              [--dump]\n       \
-             floe-index drc <results.db> [out.ice] \
+             floe-index drc <results.db> [out.tray] \
              [--pack] [--jobs N]"
         );
         std::process::exit(2);

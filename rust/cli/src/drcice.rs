@@ -162,7 +162,7 @@ pub fn drc_cmd(args: &[String]) {
     }
     if pos.is_empty() || pos.len() > 2 {
         eprintln!(
-            "usage: floe-index drc <results.db> [out.ice] [--jobs N]"
+            "usage: floe-index drc <results.db> [out.tray] [--jobs N]"
         );
         std::process::exit(2);
     }
@@ -170,7 +170,8 @@ pub fn drc_cmd(args: &[String]) {
     let out = if pos.len() == 2 {
         pos[1].clone()
     } else {
-        format!("{}.ice", src)
+        // the hidden sibling .<db>.tray (floe/cachepath.py; 2026-09-16)
+        crate::vfs::hidden_sibling(src, ".tray")
     };
     let t0 = std::time::Instant::now();
     if jobs == 0 {

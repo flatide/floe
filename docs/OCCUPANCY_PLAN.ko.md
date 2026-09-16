@@ -91,8 +91,7 @@
 
 (계획 원문. 구현된 형식은 SPEC-FORMATS `design.ovo`, 계획과 다른 세부는 §12.)
 
-캐시 디렉터리(`<src>.floe/`; 폴더 이름은 개명 예정 — `CACHE-NAMING.ko.md`)의
-선택적 sidecar. 소스 좌표계(world dbu, 캐시의 top 셀
+캐시 디렉터리(`.<src>.ice/`)의 선택적 sidecar. 소스 좌표계(world dbu, 캐시의 top 셀
 기준으로 전체 계층을 평탄화)에서 레이어마다 피라미드.
 
 ```
@@ -169,8 +168,11 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 - 빈 레이어(2026-09-14): 양의 면적 도형이 없는 레이어는 `empty`(비트맵 없음)로
   기록하고 렌더러는 셀 0의 요약으로 다룬다(레이어 수에 포함, 페이지 없음).
 - 취소: SIGINT·상위 취소 시 tmp 삭제, 기존 `.ovo` 보존.
-- **옵션·기본**: M5 결정(2026-09-15) — `floe2 index`는 **기본 on**(`--no-occupancy`
-  로 끔; 현재 캐시에 요약이 없으면 추가만; raw `floe-index vfs`는 명시 옵션),
+- **옵션·기본**: 2026-09-16 사용자 결정 — `floe2 index deck.jb`의 소스는 **기본
+  on**, 레이아웃 `floe2 index chip.oas`는 **기본 off**(`--occupancy`로 켬;
+  `--no-occupancy`는 둘 다 끔; `--occupancy`에 현재 캐시가 요약을 갖지 않으면
+  추가만; raw `floe-index vfs`는 명시 옵션). M5 결정(2026-09-15)의 "전부 기본
+  on"을 바꿨다: 일반 레이아웃은 `thin:cull`이라 요약을 쓰지 않는다.
   `--occupancy-um F`(기본 4), `--occupancy-only`(기존 캐시에 추가·교체, ovm/ovp
   불변). M1~M4 동안은 opt-in이었다.
 - **jobdeck 래퍼(리뷰 6)**: `_jobdeck_index()`는 argv를 직접 구성하고 이미 색인된
@@ -512,14 +514,21 @@ layer 3/300 status=ok work=729081740 set=4342426,1220836,338091,94074,27163,8105
 
 사용자 결정(실측 8-a·8-c·8-d 뒤):
 
-- **색인 기본 on**: `floe2 index`(소스·덱·뷰어의 자동 색인)가 옵션 없이 `design.ovo`를
-  만든다. `--no-occupancy`로 끄고, 현재 캐시에 요약이 없으면 기본 색인이 재색인
-  없이 추가한다(`--occupancy-only` 경로). 셀 프로파일 실행은 요약을 요청하지
-  않는다. raw `floe-index vfs`는 그대로 명시 옵션. 비용: 파싱은 색인과 공유,
-  마킹은 추출본 기준 48스레드 4.4 s, 파일은 빈 레이어 제외(추출본 17 MB, 덱
-  172 MB). gate `validate_index_cli`(기본 argv에 `--occupancy`, `--no-occupancy`,
-  요약 없는 캐시에 추가), `validate_occupancy`(plain/`--no-occupancy`/추가/up to
-  date).
+- **색인 기본 on** (2026-09-16에 범위 조정, 아래): `floe2 index`가 옵션 없이
+  `design.ovo`를 만든다. `--no-occupancy`로 끄고, 현재 캐시에 요약이 없으면
+  재색인 없이 추가한다(`--occupancy-only` 경로). 셀 프로파일 실행은 요약을
+  요청하지 않는다. raw `floe-index vfs`는 그대로 명시 옵션. 비용: 파싱은
+  색인과 공유, 마킹은 추출본 기준 48스레드 4.4 s, 파일은 빈 레이어 제외(추출본
+  17 MB, 덱 172 MB).
+  **2026-09-16 변경(사용자 결정)**: 기본 on은 **jobdeck의 소스만**이다.
+  레이아웃 `floe2 index chip.oas`와 뷰어의 File > load layout 색인은 요약 없이
+  색인하고(`--occupancy`로 opt-in; 요약 없는 캐시는 그대로 둠), `floe2 index
+  deck.jb`와 File > load jobdeck은 소스마다 `--occupancy`를 준다. 이유: 일반
+  레이아웃은 `thin:cull`이라 요약을 쓰지 않으므로 색인 시간·파일만 든다. gate
+  `validate_index_cli`(레이아웃 기본 argv에 `--occupancy` 없음, `--no-occupancy`,
+  `--occupancy`가 요약 없는 캐시에 추가, 기본은 그대로 둠),
+  `validate_occupancy`(plain 레이아웃 = 요약 없음, `--occupancy` 추가/up to
+  date, 덱 plain = 요약 있음, 덱 `--no-occupancy` = 없음).
 - **base cell 4 µm 유지**: 요약은 1200 px 창 기준 뷰 폭 4.8 mm부터 켜지고, 8-d의
   뷰에서 `near` 구간의 불편이 없었다. 2 µm는 파일·생성 4배라 보류.
 - **마스크 소스는 keep + detail medium**: 요약이 켜진 광역뷰는 cut과 무관하게
@@ -626,3 +635,13 @@ occupancy cell=4um (80000 dbu) grid=6493x8243 levels=9 layers=4 ok=2 empty=2 job
 | 5 P2 | `.ovo` 유효성·게시·호환 계약 부재; `CACHE_VERSION`을 올리면서 구 캐시 호환은 `is_stale()`(버전 불일치 = 재색인)과 충돌 | 사실 | §4: identity·top·레이어 일치 검증, 오프셋·곱 검증·잘린 파일 거부, tmp + rename, meta 불일치 처리, 열린 뷰어의 stat 재오픈; `CACHE_VERSION` 불변, `.ovo` 자체 버전 |
 | 6 P2 | jobdeck 래퍼 `_jobdeck_index()`는 argv를 직접 만들고 색인된 소스를 제외하므로 옵션이 자동 전달되지 않는다 | 사실 | §5: 세 옵션 전달, `--occupancy-only` 대상 선정 변경, ovm/ovp 불변·셀 크기 검증 gate |
 | 7 P2 | 4.3 s는 상한이 아닌 추정; 레이어 병렬화는 거대 계층에서 병목을 못 푼다; dense 크기는 bbox 면적 비례; 기본 생성은 실측 뒤에; pick/snap은 게시 scene 조회라 found=0 | 사실 | §5: 셀 수·작업·파일 상한, `--jobs` 준수, 취소, M5까지 opt-in; §4 면적 비례 명시; §6 pick/snap 제외 + 상태줄 |
+
+### 2026-09-16 — 기본값 조정과 캐시 이름 개명 (0.12.134 / RENDERD 0.12.89)
+
+- **기본값**: 요약은 jobdeck의 소스에만 기본이고 레이아웃은 `--occupancy`
+  opt-in이다(위 "색인 기본 on" 항목의 변경 기록). 뷰어의 layout 로드 색인도
+  `floe2 index chip.oas`와 같은 argv(`--jobs 12 --no-lod`)를 쓴다.
+- **이름**: 캐시 폴더 `<src>.floe/` → 숨김 `.<src>.ice/`, DRC pack `<db>.ice` →
+  숨김 `.<db>.tray`. 규칙은 `floe/cachepath.py` 하나에 있고 구 이름은 발견 시
+  자동 개명된다(재색인 없음; `FLOE_CACHE_MIGRATE=off`로 끔). 상세는
+  docs/CACHE-NAMING.ko.md.

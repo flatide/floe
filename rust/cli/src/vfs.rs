@@ -1,4 +1,5 @@
-//! VFS V1: `vfs` builds <src>.floe/design.{ovm,ovp}, `plan`
+//! VFS V1: `vfs` builds .<src>.ice/design.{ovm,ovp} (the hidden cache
+//! folder beside the source; renamed from <src>.floe 2026-09-16), `plan`
 //! simulates a viewport against the metadata without loading any
 //! geometry (rust/VFS.md).
 //!
@@ -267,7 +268,7 @@ pub fn vfs_cmd(args: &[String]) {
         }
     }
     let src = src.expect("src");
-    let outdir = outdir.unwrap_or_else(|| format!("{}.floe", src));
+    let outdir = outdir.unwrap_or_else(|| default_outdir(&src));
     let jobs = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -8555,5 +8556,41 @@ mod split_tests {
         assert_eq!(b.members, 2, "right: (495,0) and (1000,0)");
         assert!(a.bbox.x1 <= 504 + 10);
         assert!(b.bbox.x0 >= 495);
+    }
+}
+
+/// The cache folder `vfs` uses when none is given: the hidden sibling
+/// `.<name>.ice` of the source (floe/cachepath.py is the Python side
+/// of the same rule; renamed from `<name>.floe` on 2026-09-16).
+pub fn default_outdir(src: &str) -> String {
+    hidden_sibling(src, ".ice")
+}
+
+/// `.<basename><suffix>` in the same directory as `path`.
+pub(crate) fn hidden_sibling(path: &str, suffix: &str) -> String {
+    let p = std::path::Path::new(path);
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    let hidden = format!(".{}{}", name, suffix);
+    match p.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => {
+            dir.join(hidden).to_string_lossy().into_owned()
+        }
+        _ => hidden,
+    }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_outdir_is_a_hidden_sibling_of_the_source() {
+        assert_eq!(default_outdir("/a/b/chip.oas"), "/a/b/.chip.oas.ice");
+        assert_eq!(default_outdir("chip.oas"), ".chip.oas.ice");
+        assert_eq!(default_outdir("rel/dir/x.oas.gz"), "rel/dir/.x.oas.gz.ice");
+        assert_eq!(hidden_sibling("/r/out.db", ".tray"), "/r/.out.db.tray");
     }
 }

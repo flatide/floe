@@ -304,7 +304,7 @@ enum WorkerCommand {
 
 #[derive(Debug, PartialEq, Eq)]
 struct OpenCommand {
-    /// One `.floe` cache (the viewer's normal open) ...
+    /// One VFS cache folder (the viewer's normal open) ...
     cache: Option<String>,
     /// ... or a jobdeck spec (docs/JOBDECK.ko.md M2): several caches
     /// composited through `floe_render_core::Deck`.

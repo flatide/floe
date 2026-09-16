@@ -27,13 +27,17 @@ mkdir -p "$(dirname "$FLOE2_SMOKE_SRC")"
 if [ ! -f "$FLOE2_SMOKE_SRC" ] || \
    [ tools/gen_valmini.py -nt "$FLOE2_SMOKE_SRC" ]; then
     # a regenerated source invalidates EVERY derived artefact: the
-    # legacy .tiles, both .floe caches (one may be a symlink to the
-    # other on a long-lived host), the .ice sidecars. Leaving a stale
-    # .floe behind made `floe index --legacy` refuse the .tiles rebuild
-    # and `floe2 index` refuse the stale cache (2026-09-09, after the
-    # temp fixture vanished from a long-lived $TMPDIR)
+    # legacy .tiles, the VFS caches (.<src>.ice since 2026-09-16,
+    # <src>.floe before; one may be a symlink to the other on a
+    # long-lived host), the DRC packs. Leaving a stale cache behind
+    # made `floe index --legacy` refuse the .tiles rebuild and `floe2
+    # index` refuse the stale cache (2026-09-09, after the temp fixture
+    # vanished from a long-lived $TMPDIR)
+    SMOKE_DIR=$(dirname "$FLOE2_SMOKE_SRC")
+    SMOKE_BASE=$(basename "$FLOE2_SMOKE_SRC")
     rm -rf "$FLOE2_SMOKE_SRC" "$FLOE2_SMOKE_SRC.tiles" \
         "${FLOE2_SMOKE_SRC%.oas}_rust.tiles" \
+        "$SMOKE_DIR/.$SMOKE_BASE.ice" "$SMOKE_DIR/.$SMOKE_BASE.tray" \
         "$FLOE2_SMOKE_SRC.floe" "${FLOE2_SMOKE_SRC%.oas}_rust.floe" \
         "$FLOE2_SMOKE_SRC.ice" "${FLOE2_SMOKE_SRC%.oas}_rust.ice"
     .venv/bin/python tools/gen_valmini.py "$FLOE2_SMOKE_SRC"
@@ -49,14 +53,22 @@ if [ "$SRC" = "$FLOE2_SMOKE_SRC" ]; then
     if [ ! -f "$SRC.tiles/meta.json" ] || \
        [ floe/cache.py -nt "$SRC.tiles/meta.json" ]; then
         rm -rf "$SRC.tiles"
-        # the legacy indexer refuses to build .tiles beside a .floe of
-        # the same source: step the VFS cache aside for the build
-        if [ -e "$SRC.floe" ]; then mv "$SRC.floe" "$SRC.floe.aside"; fi
+        # the legacy indexer refuses to build .tiles beside a VFS cache
+        # of the same source (.<src>.ice since 2026-09-16, <src>.floe
+        # before): step both aside for the build
+        VFSC="$(dirname "$SRC")/.$(basename "$SRC").ice"
+        for c in "$VFSC" "$SRC.floe"; do
+            if [ -e "$c" ]; then mv "$c" "$c.aside"; fi
+        done
         PYTHONPATH=. .venv/bin/python -m floe index --legacy "$SRC" \
             >/dev/null || {
-            [ -e "$SRC.floe.aside" ] && mv "$SRC.floe.aside" "$SRC.floe"
+            for c in "$VFSC" "$SRC.floe"; do
+                if [ -e "$c.aside" ]; then mv "$c.aside" "$c"; fi
+            done
             echo "FAIL: legacy .tiles oracle build"; exit 1; }
-        if [ -e "$SRC.floe.aside" ]; then mv "$SRC.floe.aside" "$SRC.floe"; fi
+        for c in "$VFSC" "$SRC.floe"; do
+            if [ -e "$c.aside" ]; then mv "$c.aside" "$c"; fi
+        done
     fi
 fi
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" \
@@ -72,8 +84,9 @@ OUT="${SRC%.oas}_rust.tiles"
 .venv/bin/python tools/validate_rust_depth.py "$SRC" "$OUT"
 .venv/bin/python tools/validate_rust_meta.py "$SRC" "$OUT"
 .venv/bin/python tools/validate_rust_skel.py "$SRC" "$OUT"
-# VFS V1 (rust/VFS.md): build .floe and run the G5/G6 gates
-VOUT="${SRC%.oas}_rust.floe"
+# VFS V1 (rust/VFS.md): build a VFS cache (an explicit outdir, not the
+# hidden default) and run the G5/G6 gates
+VOUT="${SRC%.oas}_rust.ice"
 rm -rf "$VOUT"
 rust/target/release/floe-index vfs "$SRC" "$VOUT" \
     --coverage --slow-cell-s 0 >/dev/null 2> "$VOUT.buildlog"
@@ -110,7 +123,7 @@ rm -f "$VOUT.buildlog"
 .venv/bin/python tools/validate_render_speckle.py
 # frame outline stacking: white over gray, 1px hollow, under design
 .venv/bin/python tools/validate_render_frames.py
-# DRC .ice index sidecar: reading through the index == ASCII parse
+# DRC pack (.<db>.tray): reading through the pack == ASCII parse
 .venv/bin/python tools/validate_drc_ice.py
 # SVRF subset parser: preprocessing / derivation closure / check
 # extraction / end-to-end vs gen_drcdb --svrf

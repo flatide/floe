@@ -11,6 +11,8 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from floe.cachepath import vfs_cache_dir, legacy_vfs_cache_dir  # noqa: E402
 
 
 def check(condition, message):
@@ -56,7 +58,7 @@ def validate_real_marker():
             "PYTHONPATH": str(ROOT),
         })
         run(env, src, "--jobs", "2")
-        (Path(str(src) + ".floe") / "design.ovm").write_bytes(b"x")
+        (Path(vfs_cache_dir(src)) / "design.ovm").write_bytes(b"x")
         rejected = run(env, src, ok=False)
         check("commit validation failed" in rejected.stderr,
               "real Vfs::open accepted a partial OVM marker")
@@ -123,22 +125,26 @@ if "--occupancy" in args or "--occupancy-only" in args:
         run(env, src, "--jobs", "3", "--page-target-mb", "2",
             "--coverage", "--no-lod", "--slow-cell-s", "0",
             "--p2-shard-limit-mb", "0")
-        # the occupancy summary is the default (M5, 2026-09-15)
+        # a layout indexes WITHOUT the occupancy summary (2026-09-16;
+        # a jobdeck's sources get it by default) into the hidden
+        # sibling .<src>.ice (renamed from <src>.floe the same day)
         expected = [
-            "vfs", str(src), str(src) + ".floe", "--jobs", "3",
-            "--page-target-mb", "2", "--coverage", "--occupancy", "--no-lod",
+            "vfs", str(src), vfs_cache_dir(src), "--jobs", "3",
+            "--page-target-mb", "2", "--coverage", "--no-lod",
             "--slow-cell-s", "0.0", "--p2-shard-limit-mb", "0",
         ]
         check(build_calls(log) == [expected],
               "Rust VFS options were not forwarded")
-        check((Path(str(src) + ".floe") / "design.ovo").is_file(),
-              "the default index did not ask for the summary")
+        check(vfs_cache_dir(src) == str(work / ".design.oas.ice"),
+              "the cache is not the hidden sibling of the source")
+        check(not (Path(vfs_cache_dir(src)) / "design.ovo").exists(),
+              "a layout index asked for the summary")
 
         reused = run(env, src)
         check("cache up to date" in reused.stdout, "current cache not reused")
         check(len(build_calls(log)) == 1,
               "reuse unexpectedly launched an index build")
-        check(calls(log)[-1] == ["vfsd", str(src) + ".floe"],
+        check(calls(log)[-1] == ["vfsd", vfs_cache_dir(src)],
               "reuse did not validate the committed Rust cache")
 
         src.write_bytes(b"fixture changed")
@@ -149,30 +155,50 @@ if "--occupancy" in args or "--occupancy-only" in args:
         run(env, src, "--force")
         check(len(build_calls(log)) == 2,
               "--force did not launch a rebuild")
-        # --no-occupancy indexes without the summary; the next default
-        # index adds it to that cache without re-indexing (counts below
-        # are relative from here on)
+        # --no-occupancy and the layout default index without the
+        # summary; a later default index leaves the cache alone and
+        # --occupancy adds it without re-indexing (counts below are
+        # relative from here on)
         noocc = work / "noocc.oas"
         noocc.write_bytes(b"fixture no summary")
         run(env, noocc, "--no-occupancy")
         check("--occupancy" not in build_calls(log)[-1],
               "--no-occupancy still asked for the summary")
-        check(not (Path(str(noocc) + ".floe") / "design.ovo").exists(),
+        check(not (Path(vfs_cache_dir(noocc)) / "design.ovo").exists(),
               "--no-occupancy produced a summary")
-        run(env, noocc)
+        builds = len(build_calls(log))
+        plain = run(env, noocc)
+        check("cache up to date" in plain.stdout
+              and len(build_calls(log)) == builds,
+              "the layout default touched a cache without a summary")
+        run(env, noocc, "--occupancy")
         check(build_calls(log)[-1] == [
-            "vfs", str(noocc), str(noocc) + ".floe", "--jobs", "12",
+            "vfs", str(noocc), vfs_cache_dir(noocc), "--jobs", "12",
             "--occupancy-only",
-        ], "the default did not add the summary to a cache without one")
-        check((Path(str(noocc) + ".floe") / "design.ovo").is_file(),
+        ], "--occupancy did not add the summary to a cache without one")
+        check((Path(vfs_cache_dir(noocc)) / "design.ovo").is_file(),
               "the added summary is missing")
+        # a pre-2026-09-16 cache <src>.floe is renamed to .<src>.ice on
+        # first touch instead of being rebuilt (a field deck's caches
+        # are 40 minutes of indexing)
+        builds = len(build_calls(log))
+        os.rename(vfs_cache_dir(noocc), legacy_vfs_cache_dir(noocc))
+        migrated = run(env, noocc)
+        check("cache up to date" in migrated.stdout
+              and len(build_calls(log)) == builds,
+              "a legacy-named cache was not reused")
+        check(Path(vfs_cache_dir(noocc)).is_dir()
+              and not Path(legacy_vfs_cache_dir(noocc)).exists(),
+              "the legacy cache was not renamed in place")
+        check("renamed" in migrated.stderr,
+              "the rename was not reported")
 
         additive = work / "additive.oas"
         additive.write_bytes(b"fixture 2")
         run(env, additive)
         run(env, additive, "--coverage")
         check(build_calls(log)[-1] == [
-            "vfs", str(additive), str(additive) + ".floe",
+            "vfs", str(additive), vfs_cache_dir(additive),
             "--jobs", "12", "--coverage-only",
         ], "coverage was not added non-destructively")
 
@@ -182,7 +208,7 @@ if "--occupancy" in args or "--occupancy-only" in args:
         check(len(build_calls(log)) == before,
               "legacy option unexpectedly launched the Rust indexer")
 
-        cache = Path(str(additive) + ".floe")
+        cache = Path(vfs_cache_dir(additive))
         meta_path = cache / "meta.json"
         meta = json.loads(meta_path.read_text())
         meta["version"] = 7

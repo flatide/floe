@@ -4,7 +4,7 @@
 and the headless paths in place of `floe.cache.Cache`: the same
 attributes they read (`src`, `dir`, `meta` with dbu/bbox/layers/src/
 grid, `exists`, `load`, `is_stale`, `resolve_layers`), backed by the
-M1 plan and the M2 spec. Its "cache" is the set of `<src>.floe` caches
+M1 plan and the M2 spec. Its "cache" is the set of the sources' VFS caches
 of the deck's sources - `deck_ready` says whether they all exist - and
 its `dir` is the spec file renderd opens (`open deck=`), written into a
 private work directory.
@@ -89,8 +89,8 @@ def level_row_text(row, keep: int = 3):
 
 def deck_ready(path, sources_dir=None, ids=None) -> bool:
     """True when every source the deck names that CAN be drawn (probes
-    ok) has a fresh <src>.floe cache - the deck's equivalent of
-    `<src>.floe` existing. A missing, unreadable or unknown-format
+    ok) has a fresh VFS cache - the deck's equivalent of a layout's
+    cache existing. A missing, unreadable or unknown-format
     source is a skipped placement in the ledger, not a reason to keep
     the deck closed (field 2026-09-09: three 'file not found' sources
     blocked the viewer after everything else was indexed); at least one

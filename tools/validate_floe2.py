@@ -12,6 +12,8 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from floe.cachepath import vfs_cache_dir  # noqa: E402
 
 
 def check(condition, message):
@@ -82,7 +84,7 @@ def validate_runtime(base, fixture):
                       "--jobs", "2", timeout=60)
         check("[floe2]" in indexed.stdout,
               "floe2 index output kept the shared floe product prefix")
-        cache = Path(str(source) + ".floe")
+        cache = Path(vfs_cache_dir(source))
         meta = json.loads((cache / "meta.json").read_text())
         bbox = meta["bbox"]
         dbu = float(meta["dbu"])
@@ -325,10 +327,11 @@ print(json.dumps([_renderer_backend(), instance.APP,
         delegated = run(env, "-m", "floe2", "index", source,
                         "--jobs", "2")
         check(delegated.returncode == 0, "floe2 Rust index delegation failed")
-        # the occupancy summary is the default (M5 decision 2026-09-15)
+        # a layout indexes without the occupancy summary into the
+        # hidden sibling .<src>.ice (2026-09-16)
         check(json.loads(log.read_text()) == [
-            "vfs", str(source), str(source) + ".floe", "--jobs", "2",
-            "--occupancy", "--no-lod",
+            "vfs", str(source), vfs_cache_dir(source), "--jobs", "2",
+            "--no-lod",
         ], "floe2 changed the canonical Rust index argv")
 
     if fixture is not None:

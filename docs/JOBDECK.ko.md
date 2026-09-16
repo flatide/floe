@@ -124,14 +124,9 @@ white, purple, cyan, magenta, green). 대상의 **순서 목록**을 만들고 i
 
 ## 3. floe2 구현 방향 (결정)
 
-> **예정 개명(2026-09-15, 미적용)**: 인덱스 폴더 `<src>.floe/` → 숨김
-> `.<src>.ice/`, DRC pack `<db>.ice` → 숨김 `.<db>.tray`. 다른 워킹트리에서
-> 진행 중이며 어느 브랜치에도 아직 없다. 이 문서의 이름은 현행이다. 정본:
-> `CACHE-NAMING.ko.md`(의존 지점 목록·결정 필요 항목).
-
 KLayout 툴은 "소스 → 하나의 flat-ish layout 재작성" 구조였다. floe2에서는
 **런타임 합성**으로 간다:
-- 각 TC 소스는 기존 `<src>.floe` 캐시 그대로 사용(Calibre의 `.fvi` 유사).
+- 각 TC 소스는 기존 `.<src>.ice` 캐시 그대로 사용(Calibre의 `.fvi` 유사).
   재작성·복사 없음. 소스가 1500개여도 인덱스는 한 번씩만.
 - 배율(mag)·오프셋은 **씬 루트의 배치(placement)에서만** 적용한다. floe2의
   Rust 스택은 OASIS 배율 PLACEMENT(record 18)를 거부하고 `Xf`는 정수
@@ -215,7 +210,7 @@ Gate `tools/validate_jobdeck.py` (배터리 편입, 20 tests):
 - 스펙 파일(줄 단위, Python이 씀; 경로/이름은 hex):
   ```
   deck unit=2.5e-05
-  source path_hex=<.floe 디렉터리>
+  source path_hex=<VFS 캐시 디렉터리>
   layer out=0 name_hex=<"$1 METAL1"> color=#0000ff fill=solid width=1
   placement source=0 layer=123/43 out=0 scale=8.0 dx=1640800000 dy=3200800000 order=0
   ```
@@ -278,7 +273,7 @@ floe2 index deck.jb --force --lod --jobs 16
   제공한다: `src`(덱 경로), `dir`(renderd가 여는 스펙), `meta`(`dbu`, `bbox`,
   `layers`, `src`, `grid`(1×1), `vfs`, `jobdeck{mode, chips, placements,
   skipped, colour_order}`), `exists/load/is_stale/resolve_layers`. "캐시"는
-  소스들의 `<src>.floe` 전부이며 `deck_ready()`가 그 존재를 답한다.
+  소스들의 `.<src>.ice` 전부이며 `deck_ready()`가 그 존재를 답한다.
   `service.make_render_worker`는 `is_jobdeck`을 보고 `DeckRenderWorker`를 만든다.
 - **뷰 레이어 = 색 대상**(`render.view_layers`, §1a): level view는 level당 한
   줄(MTITLE 이름, 키 `n/0`), chip view는 level 줄 아래 소스 칩 줄들
@@ -658,7 +653,7 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   우하단은 Calibre와 유사하게 동작하므로(뭉침이 빠른 건 cut 차이, Calibre는 0.5 px
   추정) 원인 확정이 먼저다. 후보는 페이지 크기 cut(`max_w/max_h < cut`), hairline
   (`max_min < 0.5 cut`), 자식 셀 생략/BVH 프루닝이며, 어느 것인지는 `floe-index
-  plan <src>.floe --view … --px-per-um … --cut-px … --explain 1`(SPEC-INDEXER §6)로
+  plan .<src>.ice --view … --px-per-um … --cut-px … --explain 1`(SPEC-INDEXER §6)로
   사라지는 뷰와 보이는 뷰를 각각 찍어 같은 셀·레이어의 판정을 비교해 정한다.
   설계 논의(밀도 사다리: 크기 cut 대신 exact/LOD 점유, hairline은 전체 길이의
   1 px 선, 자식 bbox+rep 방출; 격자 솎아내기는 프레임에만)는 판정이 나온 뒤
@@ -729,7 +724,8 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   높이 이상·레이어별 최대 깊이 이상이면 그 레이어는 full"로 고침(계획 §12); 덱 전체 요약 생성 9.9 분·
   172 MB(667 소스, 레이어 2,251 = ok 1,176 + empty 1,075; 8-a의 39.7 분·9.8 GB는
   소스 533개 재색인이 섞인 값 — ovp mtime으로 확인). **M5 마감(2026-09-15,
-  0.12.131)**: 색인 기본 on(`--no-occupancy`로 끔; 요약 없는 캐시에는 추가), base
+  0.12.131)**: 색인 기본 on(`--no-occupancy`로 끔; 요약 없는 캐시에는 추가 —
+  2026-09-16 변경: 덱의 소스만 기본 on, 레이아웃은 `--occupancy` opt-in), base
   cell 4 µm, 마스크는 keep + detail medium(요약이 켜진 광역뷰는 cut과 무관), View
   메뉴에 thin 정책 서브메뉴. 후속: 8-b 품질 샷, scan(charge당 비용), cull에서의
   요약. 실칩을 쓸 수 없을 때는

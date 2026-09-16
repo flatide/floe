@@ -11,7 +11,7 @@
 ## 전체 그림
 
 ```
-OASIS ──▶ floe-index vfs ──▶ <src>.floe/
+OASIS ──▶ floe-index vfs ──▶ .<src>.ice/   (2026-09-16까지 <src>.floe/)
                                design.ovm   mmap 메타 (셀/배치/BVH/페이지 디렉토리)
                                design.ovp   독립 압축 페이지 (셀-로컬 exact 지오메트리)
                                skeleton.oas, texts.tsv   (당분간 기존 그대로)
@@ -139,7 +139,7 @@ resident_mb=`. `mode=probe`(예정) = 세션 무관 정밀(cut=0) 델타 —
 픽/스냅/클립용.
 
 뷰어 교체 지점 (조사 결과, 파일:라인은 2026-08-01 기준):
-- Cache.load(cache.py:247): .floe/meta.json(빌더가 신설 생성) 분기
+- Cache.load(cache.py:247): .<src>.ice/meta.json(빌더가 신설 생성) 분기
 - Mosaic.ensure/_band_file(viewport.py:124/113): vfsd 델타
   multi-read + 배치 목록 기반 WS_TOP 재구성으로 대체 (@t 태그 불필요
   — 페이지 셀명 전역 유일; 트윈/밴드 키 소멸)
@@ -147,7 +147,7 @@ resident_mb=`. `mode=probe`(예정) = 세션 무관 정밀(cut=0) 델타 —
   vfsd가 대체 — newer()/latest 중단·코얼레싱은 유지
 - load_region(cache.py:1029)/snap/pick(service.py:126/176):
   mode=probe 정밀 델타로
-- 스켈레톤 far view(scope="skel" 분기): 그대로 — .floe에도
+- 스켈레톤 far view(scope="skel" 분기): 그대로 — VFS 캐시에도
   skeleton.oas/texts.tsv를 빌더가 생성
 - 뷰어가 요구하는 meta 필드: dbu, bbox, grid(합성 — live/skel 분기
   휴리스틱용), layers+color, src{size,mtime}, skeleton, vfs:1

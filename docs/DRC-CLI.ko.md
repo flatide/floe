@@ -27,16 +27,12 @@ floe <cmd> ... / floe-index drc ...    # floe-portable 번들
 
 ## 0. 준비: pack 인덱스
 
-> **예정 개명(2026-09-15, 미적용)**: 인덱스 폴더 `<src>.floe/` → 숨김
-> `.<src>.ice/`, DRC pack `<db>.ice` → 숨김 `.<db>.tray`. 다른 워킹트리에서
-> 진행 중이며 어느 브랜치에도 아직 없다. 이 문서의 이름은 현행이다. 정본:
-> `CACHE-NAMING.ko.md`(의존 지점 목록·결정 필요 항목).
-
 ```bash
-floe-index drc results.db [out.ice] [--jobs N]
+floe-index drc results.db [out.tray] [--jobs N]
 ```
 
-`results.db.ice`(v2 pack)를 만든다. 이후 모든 명령이 신선한
+`.results.db.tray`(v2 pack, db 옆 숨김 파일; 2026-09-16까지의 `results.db.ice`는
+발견 시 자동 개명)를 만든다. 이후 모든 명령이 신선한
 pack을 자동 사용한다(소스 size/mtime 대조). pack이 없거나 낡으면
 **ASCII 전체 파스로 폴백**(stderr 안내) — 수백 MB급부터 매우
 느리므로 스크립트는 pack을 먼저 만들 것. `--pack`은 호환용

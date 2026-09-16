@@ -966,7 +966,8 @@ KLayout query parity 배터리 유지.
 비용(실측 6: 덱 fit 32 s, 25k 페이지 디코드·4,170만 hairline)은 점유 요약
 (docs/OCCUPANCY_PLAN.ko.md, `design.ovo`)이 대체했다. 실칩 덱의 150 × 103 mm 뷰가
 16.7 s → 0.15 s(depth 무관), 요약 생성은 추출본 4.4 s·17 MB, 덱 667소스 9.9 분·
-172 MB. 결정: `floe2 index` 기본으로 요약 생성(`--no-occupancy`로 끔), base cell
+172 MB. 결정: `floe2 index` 기본으로 요약 생성(`--no-occupancy`로 끔; 2026-09-16부터
+덱의 소스만 기본, 레이아웃은 `--occupancy` opt-in), base cell
 4 µm, 마스크는 keep + detail medium(요약이 켜진 광역뷰는 cut과 무관), View 메뉴
 thin 정책 서브메뉴. 일반 레이아웃은 cull 그대로(요약 없음). 실칩의 level 4
 depth 0 박스(덱 sub-cut wash가 희소 페이지 bbox를 칠함)와 마크 소실은 희소
@@ -2018,7 +2019,7 @@ LRU에 남은 상태)의 load 잔량과 budget 초과 여부이며 pan-sweep tra
 기본값을 구현했다가 **철회**했다 — 뷰어가 공유 서버에서 돌므로
 RAM 절반 기본값은 이웃 프로세스에 위험하다. 기본은 1024MB 고정
 유지, floe급 보존이 필요한 세션만 `FLOE_RUST_BUDGET_MB`로 명시
-opt-in한다. budget 초과 재방문은 OS page cache가 인코드 .floe
+opt-in한다. budget 초과 재방문은 OS page cache가 인코드 캐시
 구간을 들고 있으므로 read가 아닌 **decode-only 비용**으로
 기대한다(sample9 실측 read는 decode의 0.6%). 따라서 이 축의 다음
 지렛대는 decode 절감 — index build가 decode CPU의 41%(§3.14)라

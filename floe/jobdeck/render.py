@@ -2,7 +2,7 @@
 
 `deck_spec_lines` turns an M1 plan into the line-based spec that
 `floe_render_core::Deck` opens (`open deck=<spec>`): one `source` per
-distinct `.floe` cache, one `layer` per deck output layer (the colour
+distinct VFS cache, one `layer` per deck output layer (the colour
 of the current mode), one `placement` per (CHIP, entry, row, LY/DT)
 with `scale` = deck dbu per source dbu and `dx`/`dy` on the deck grid.
 Magnification exists only in those lines; the caches are untouched.
@@ -101,7 +101,7 @@ def view_out_of(rows, scheme):
 
 
 def _source_layers(cache_dir_src: str):
-    """(ly, dt) pairs a .floe cache holds, via its meta.json."""
+    """(ly, dt) pairs a VFS cache holds, via its meta.json."""
     c = Cache(cache_dir_src)
     c.load()
     return {(int(l["layer"]), int(l["datatype"])) for l in c.meta["layers"]}
@@ -109,7 +109,7 @@ def _source_layers(cache_dir_src: str):
 
 def deck_spec_lines(deck, placements, stats, scheme, colormap, catalog):
     """(lines, ledger): the spec text and the placements it had to leave
-    out - a source without a fresh .floe cache (`not_indexed`) or a
+    out - a source without a fresh VFS cache (`not_indexed`) or a
     cache without the entry's LY/DT (`empty_layer`). Nothing is
     silently thinner: the ledger goes to the report and the summary."""
     dbu = float(stats["dbu"])
@@ -132,7 +132,7 @@ def deck_spec_lines(deck, placements, stats, scheme, colormap, catalog):
                 seen_skip.add(key)
                 ledger.append(skip_record(
                     p.chip, p.idx, p.tc, -1, 0, SKIP_NOT_INDEXED,
-                    "no fresh <src>.floe cache (run --index)", "spec",
+                    "no fresh index cache (run --index)", "spec",
                     [(p.jx, p.jy)]))
             continue
         if p.tc not in source_index:

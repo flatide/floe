@@ -29,6 +29,8 @@ import multiprocessing
 import os
 import time
 
+from . import cachepath
+
 # progress lines must reach the user even under `> log` / `| tee`:
 # block-buffered stdout sat on 60s heartbeats for 20+ minutes and a
 # healthy (or killed!) run looked silently hung
@@ -71,14 +73,14 @@ BAND_THRESHOLDS_UM = (0.125, 0.5, 2.0)
 
 
 def cache_dir_for(src):
-    """Cache directory for a source: the VFS cache (<src>.floe, built
-    by `floe-index vfs`) wins when present, else the classic .tiles
-    (legacy tile cache; .ice now means a DRC index sidecar)."""
-    base = os.path.abspath(src)
-    floe = base + ".floe"
-    if os.path.isfile(os.path.join(floe, "meta.json")):
-        return floe
-    return base + ".tiles"
+    """Cache directory for a source: the VFS cache (the hidden sibling
+    `.<src>.ice/` built by `floe-index vfs`; a pre-2026-09-16
+    `<src>.floe/` is renamed to it on first touch - floe/cachepath.py)
+    wins when present, else the classic .tiles (legacy tile cache)."""
+    found = cachepath.find_vfs_cache(src)
+    if found is not None:
+        return found
+    return os.path.abspath(src) + ".tiles"
 
 
 def _rss_gb(pid):

@@ -1,5 +1,5 @@
 //! `floe-index drc --pack` - full conversion of a Calibre ASCII DRC
-//! results database into a self-contained .ice v2 (no locator, no
+//! results database into a self-contained v2 pack (.<db>.tray; no locator, no
 //! source dependency).
 //!
 //! Layout (LE; header/string sections shared with v1):

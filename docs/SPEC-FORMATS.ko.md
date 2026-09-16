@@ -1,9 +1,4 @@
-# SPEC: 캐시 포맷 (.floe 디렉토리)
-
-> **예정 개명(2026-09-15, 미적용)**: 인덱스 폴더 `<src>.floe/` → 숨김
-> `.<src>.ice/`, DRC pack `<db>.ice` → 숨김 `.<db>.tray`. 다른 워킹트리에서
-> 진행 중이며 어느 브랜치에도 아직 없다. 이 문서의 이름은 현행이다. 정본:
-> `CACHE-NAMING.ko.md`(의존 지점 목록·결정 필요 항목).
+# SPEC: 캐시 포맷 (.<src>.ice 디렉토리)
 
 정본 코드: `rust/ovm/src/lib.rs` (Builder/Ovm), 검증:
 `tools/validate_vfs.py`(오픈 검증), `rust/VFS_HIER.md` par.1~2.
@@ -126,7 +121,7 @@ rect·path뿐인 레이어)는 `empty`(비트맵 없음, 레벨 항목은 0)로 
 ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::open`이
 불일치 시 거부("read src"/stale). 자산 재생성 후엔 반드시 재인덱싱.
 
-## <db>.ice — Calibre DRC 결과 pack (v2, 레이아웃 버전 4)
+## .<db>.tray — Calibre DRC 결과 pack (v2, 레이아웃 버전 4)
 
 정본: `rust/cli/src/drcpack.rs`(빌더 `floe-index drc results.db
 [--jobs N]` — pack이 유일한 출력), `rust/cli/src/drcice.rs`(공유
@@ -149,8 +144,9 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
 북키핑)는 **레코드가 있어도 항상 드롭**(실덱 2026-08-20) —
 그 레코드는 위반이 아니므로 전역 파일순 번호도 소비하지 않는다
 (파이썬은 gnum 롤백, pack은 저장 체크 누적으로 유도 = 자동 일치).
-구 `.ice`(레거시 타일 캐시 디렉토리)는 2026-08-13에 `.tiles`로
-개명되어 이 확장자는 DRC 인덱스 전용이다.
+이름: 2026-09-16부터 `.<db>.tray`(db 옆 숨김 파일; `floe/cachepath.py`).
+그 전의 `<db>.ice`는 발견 시 자동 개명된다(`.ice`는 지금 VFS 인덱스
+폴더 `.<src>.ice/`의 접미사; 2026-08-13까지는 레거시 타일 캐시 이름).
 
 ```
 [헤더 40B]  version=4(레이아웃 개정 카운터), flags=1
@@ -212,7 +208,7 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
 - **손상 방어**(2026-08-18): 리더는 헤더/푸터 길이·매직에 더해
   **전 섹션 경계**(파일 내부)와 체크 dir 범위(estart+ecnt ≤
   err_total 등)를 검증하고, 파싱 중 어떤 예외(struct.error 등)든
-  단일 스토리 `ValueError("corrupt packed .ice - 재-pack 안내")`로
+  단일 스토리 `ValueError("corrupt pack - 재-pack 안내")`로
   정규화 — 열기 경로(ValueError/OSError 캐치)가 항상 ASCII 폴백/
   재빌드로 이어진다(D2 corrupt 픽스처 3종). `close()`가 pwrite
   fd·mmap을 해제(__del__ 연동; fd 누수 수정). 인코더는 시작 시

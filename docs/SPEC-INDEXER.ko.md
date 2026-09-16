@@ -4,25 +4,24 @@
 `build_cell_plan`, `frontier_json_planned`). 이력: `rust/VFS_HIER.md`
 "빌드 병렬화 2차/3차", "phase 2-A", rev 46b.
 
-> **예정 개명(2026-09-15, 미적용)**: 인덱스 폴더 `<src>.floe/` → 숨김
-> `.<src>.ice/`, DRC pack `<db>.ice` → 숨김 `.<db>.tray`. 다른 워킹트리에서
-> 진행 중이며 어느 브랜치에도 아직 없다. 이 문서의 이름은 현행이다. 정본:
-> `CACHE-NAMING.ko.md`(의존 지점 목록·결정 필요 항목).
-
 ## 0. Python 사용자 명령
 
 기본 `floe index <src.oas>`는 `floe-index vfs <abs-src>
-<abs-src>.floe`를 shell 없이 subprocess로 실행한다. `--jobs`,
+<dir>/.<name>.ice`(소스 옆 숨김 폴더, `floe/cachepath.py`; 2026-09-16까지의
+`<src>.floe`는 발견 시 자동 개명)를 shell 없이 subprocess로 실행한다. `--jobs`,
 `--page-target-mb`, `--coverage`/`--coverage-only`, `--no-lod`,
 `--slow-cell-s`, `--p2-shard-limit-mb`, `--profile-cell`/
 `--profile-cell-ci`, `--profile-jobs`, `--profile-repeat`,
 `--profile-snapshot`/`--profile-snapshot-refresh`를 같은 이름의 Rust
 옵션으로 전달한다.
 coverage는 viewer 기본값과 맞춰 opt-in이다. **점유 요약(`--occupancy`)은
-기본**(M5 결정 2026-09-15): `floe index`는 항상 `--occupancy`를 전달하고
-`--no-occupancy`로만 끈다(raw 바이너리는 명시 옵션). 현재 캐시에 `design.ovo`가
-없으면 재색인 없이 `--occupancy-only`로 추가하고, 있으면 "cache up to date
-(occupancy already present)". 셀 프로파일 실행은 요약을 요청하지 않는다.
+jobdeck의 소스에는 기본, 레이아웃에는 opt-in**(2026-09-16; M5의 "전부 기본
+on"을 바꿈): `floe index deck.jb`는 소스마다 `--occupancy`를 전달하고 `floe
+index chip.oas`는 주지 않는다. `--no-occupancy`는 둘 다 끈다(raw 바이너리는
+명시 옵션). `--occupancy`(덱은 기본)에 현재 캐시가 `design.ovo`를 갖지 않으면
+재색인 없이 `--occupancy-only`로 추가하고, 있으면 "cache up to date (occupancy
+already present)"; 요약 없는 레이아웃 캐시는 그대로 둔다. 셀 프로파일 실행은
+요약을 요청하지 않는다.
 **기본값(2026-08-28)**: `--jobs`는 **12**(구 host parallelism — raw
 `floe-index vfs` 바이너리 자체 기본은 여전히 CPU 코어), LOD는 **끔**
 — `floe index`는 항상 `--no-lod`를 전달하고 `--lod`로만 다시 켠다(LOD
@@ -33,7 +32,7 @@ jobdeck은 `floe2 index deck.jb`라 기본이 그대로 적용)로 실행한다.
 정상 VFS cache의 cache version과 source size/mtime fingerprint가 맞고,
 `floe-index vfsd`의 `Vfs::open` 검증(OVM 구조 + OVP/OVT committed length)을
 통과하면 재사용한다. 기존 cache가 stale/incomplete/non-VFS/corrupt이면
-`--force` 없이 Rust를 실행하지 않는다. 즉 `--force`만 기존 `<src>.floe`를
+`--force` 없이 Rust를 실행하지 않는다. 즉 `--force`만 기존 `.<src>.ice`를
 교체할 권한이다. 현재 cache에 `--coverage`를 지정하면 `--coverage-only`로
 `design.ovc`만 비파괴 추가한다.
 
@@ -47,7 +46,7 @@ error다. 전체 누락도 빌드/설치 지침을 포함한 hard error다. 동�
 ## 1. 명령
 
 ```
-floe-index vfs <src.oas> [outdir=.floe] [--jobs N] [--plan-batch N]
+floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
     [--encode-batch N] [--page-target-mb N] [--no-lod]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
     [--occupancy | --occupancy-only] [--occupancy-um F]
@@ -95,7 +94,7 @@ arena를 먼저 drop하므로 결과는 동시에 겹치지 않으며, 첫 실�
 실행만의 wall이고 `timing_s.total`은 명령 시작부터 해당 실행 종료까지의 누적 wall이다.
 
 `--profile-snapshot PATH`는 선택 셀의 rect/poly/path/place, 공유 Pts repetition
-pool, 전체 recursive bbox와 layer order를 일반 `.floe`와 별개의 프로파일 전용
+pool, 전체 recursive bbox와 layer order를 일반 캐시와 별개의 프로파일 전용
 바이너리에 저장한다. 파일이 없으면 parse/prepare 뒤 같은 디렉터리 임시 파일을
 `0600`으로 쓰고 sync한 뒤 원자 rename하며, 있으면 mmap으로 읽어 소스 parse와
 recursive bbox 계산을 생략한다. 스키마 버전, canonical source path, size,

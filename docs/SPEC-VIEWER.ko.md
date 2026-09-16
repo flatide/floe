@@ -1,10 +1,5 @@
 # SPEC: 뷰어 (floe/gui.py · service.py · viewport.py · render.py)
 
-> **예정 개명(2026-09-15, 미적용)**: 인덱스 폴더 `<src>.floe/` → 숨김
-> `.<src>.ice/`, DRC pack `<db>.ice` → 숨김 `.<db>.tray`. 다른 워킹트리에서
-> 진행 중이며 어느 브랜치에도 아직 없다. 이 문서의 이름은 현행이다. 정본:
-> `CACHE-NAMING.ko.md`(의존 지점 목록·결정 필요 항목).
-
 ## 1. 프로세스/스레드 모델
 
 - GUI(GTK 메인루프)와 RenderWorker(spawn 프로세스, klayout 소유)가
@@ -140,7 +135,8 @@
   "no layout"; redraw/fit/_clamp_view/미니맵/캔버스·미니맵 입력
   핸들러가 cache None에서 조기 반환. **File > load layout…**: 픽에
   **VFS 캐시가 없으면 "Build it now?" Yes/No** → Yes면
-  `_vfs_index_and_load`가 `floe-index vfs <src> <src>.floe`를 모달
+  `_vfs_index_and_load`가 `floe-index vfs <src> .<src>.ice --jobs 12 --no-lod`
+  (레이아웃은 점유 요약 없이, `floe2 index`와 같음; 2026-09-16)를 모달
   로그(`_index_modal`, cancel=terminate)로 돌린 뒤 `open_file()`로
   로드(2026-08-28); 캐시가 있으면 곧장 `open_file()`(인스턴스
   포워딩과 동일 경로) → `_apply_cache(c)`가 워커 기동·패널 재구축,
@@ -169,7 +165,7 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 
 ## 8b. DRC 브라우저 (대용량 규약)
 
-- `drc.load_db`가 소스: 신선한 packed .ice면 IcePack(mmap, 블록
+- `drc.load_db`가 소스: 신선한 pack(`.<db>.tray`)이면 IcePack(mmap, 블록
   단위 lazy 디코드), 아니면 ASCII 전체 파스(v1 오프셋 사이드카는
   2026-08-19 폐기 — 잔존 파일은 stderr 안내 후 ASCII 폴백).
   인터페이스 동일(checks[].errors는 시퀀스 프로토콜).
@@ -183,7 +179,7 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   번호 단일클릭과 동일** — 셀 마크+디테일+포커스만, 뷰 불변,
   `_drc_pos`는 계속 전진(연속 스텝 유지).
 - **open .db… 다이얼로그**(2026-08-14): 파일 타입은 `*.db`만.
-  선택한 .db는 직접 파스하지 않고 **오직 `<db>.ice`(pack)만
+  선택한 .db는 직접 파스하지 않고 **오직 `.<db>.tray`(pack)만
   로딩** — 신선한 현-레이아웃 pack이 없으면(부재/스테일/v1/구
   레이아웃) **"Build it now?" Yes/No로 물은 뒤**(2026-08-28,
   `_ask_yes_no`) Yes면 `floe-index drc <db>`(--pack은 no-op이라
@@ -293,7 +289,7 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 - **에러 번호 = 전역 파일순 순번**(Calibre RVE와 동일, 파일의 서수
   토큰 무시): 모든 백엔드(ASCII/v1/v2)가 동일 번호를 내며, 룰별
   트리 나열은 저장순=파일순이라 자동 오름차순.
-- **in view**(체크박스, packed .ice v2 전용 — 구 filter errors in
+- **in view**(체크박스, pack 전용 — 구 filter errors in
   view/highlight): **순수 목록 필터**. **selected**(체크박스,
   2026-08-15): gold 선택 에러만 목록에 — 두 체크와 waive 콤보는
   교집합으로 합성. **선택은 룰별 보존**(`_drc_sels` dict: 룰 전환

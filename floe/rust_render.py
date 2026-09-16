@@ -22,7 +22,7 @@ _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 # Deliberately FIXED, not host-proportional (F2R-10, user call
 # 2026-08-28): the viewers run on shared servers where a
 # half-the-RAM default is a neighbor hazard. Revisits beyond the
-# budget re-decode, but the OS page cache holds the encoded .floe
+# budget re-decode, but the OS page cache holds the encoded cache
 # pages, so a miss costs decode only (read was 0.6% of decode on
 # sample9). Sessions that want floe-scale retention opt in with
 # FLOE_RUST_BUDGET_MB.

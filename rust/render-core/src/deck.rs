@@ -65,7 +65,7 @@ pub struct DeckLayer {
 ///
 /// ```text
 /// deck unit=2.5e-05
-/// source path_hex=<hex utf-8 path of a .floe cache>
+/// source path_hex=<hex utf-8 path of a VFS cache folder>
 /// layer out=0 key=1/0 name_hex=<hex> color=#0000ff fill=solid width=1
 /// placement source=0 layer=123/43 out=0 scale=8 dx=1640800000 dy=3200800000 order=0
 /// ```

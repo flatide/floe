@@ -41,6 +41,8 @@ from pathlib import Path
 import klayout.db as db
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from floe.cachepath import vfs_cache_dir  # noqa: E402
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
 TMP = Path(tempfile.mkdtemp(prefix="floe-occ-"))
 UM = 1000  # dbu per micron in the fixtures (dbu 0.001)
@@ -329,7 +331,7 @@ def write_chip(path, cellname, w_um, h_um):
 
 
 def index_with_occupancy(src, um):
-    out = str(src) + ".floe"
+    out = vfs_cache_dir(src)
     shutil.rmtree(out, ignore_errors=True)
     floe_index("vfs", src, out, "--occupancy", "--occupancy-um", um,
                "--no-lod", "--slow-cell-s", "999", "--jobs", "2")
@@ -638,7 +640,7 @@ class GenerationContractTests(unittest.TestCase):
                              capture_output=True, text=True, cwd=ROOT)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue((d / "chip.jb").is_file())
-        cache = Path(str(src) + ".floe")
+        cache = Path(vfs_cache_dir(src))
         floe_index("vfs", src, cache, "--occupancy", "--no-lod",
                    "--slow-cell-s", "999", "--jobs", "2")
         ovo = read_ovo(cache / "design.ovo")
@@ -725,25 +727,44 @@ sys.exit(9)
         write_chip(src, "FRESH", 10, 8)
         res = floe2("index", src, "--occupancy-um", "2", "--jobs", "2")
         self.assertIn("--occupancy --occupancy-um 2.0", res.stdout)
-        ovo = read_ovo(Path(str(src) + ".floe") / "design.ovo")
+        ovo = read_ovo(Path(vfs_cache_dir(src)) / "design.ovo")
         self.assertEqual((ovo["cell"], ovo["top"]), (2000, "FRESH"))
-        # the summary is the default (M5 decision 2026-09-15); a plain
-        # index makes it, --no-occupancy does not, and a later default
-        # index adds it to that cache
+        # a LAYOUT indexes without the summary (2026-09-16: the deck
+        # default is on, the layout default off); --occupancy makes it
+        # and adds it to a cache without one
         plain = TMP / "plain.oas"
         write_chip(plain, "PLAIN", 10, 8)
         floe2("index", plain, "--jobs", "2")
-        self.assertTrue((Path(str(plain) + ".floe") / "design.ovo").exists())
+        self.assertFalse((Path(vfs_cache_dir(plain)) / "design.ovo").exists())
+        res = floe2("index", plain, "--jobs", "2")
+        self.assertIn("cache up to date", res.stdout)
+        self.assertNotIn("--occupancy-only", res.stdout)
         bare = TMP / "bare.oas"
         write_chip(bare, "BARE", 10, 8)
         floe2("index", bare, "--no-occupancy", "--jobs", "2")
-        self.assertFalse((Path(str(bare) + ".floe") / "design.ovo").exists())
-        res = floe2("index", bare, "--jobs", "2")
+        self.assertFalse((Path(vfs_cache_dir(bare)) / "design.ovo").exists())
+        res = floe2("index", bare, "--occupancy", "--jobs", "2")
         self.assertIn("--occupancy-only", res.stdout)
-        self.assertTrue((Path(str(bare) + ".floe") / "design.ovo").exists())
-        res = floe2("index", bare, "--jobs", "2")
+        self.assertTrue((Path(vfs_cache_dir(bare)) / "design.ovo").exists())
+        res = floe2("index", bare, "--occupancy", "--jobs", "2")
         self.assertIn("cache up to date", res.stdout)
         self.assertIn("occupancy already present", res.stdout)
+
+    def test_a_deck_indexes_its_sources_with_the_summary_by_default(self):
+        # the deck default is ON (2026-09-16): a mask deck's wide view
+        # needs the summary; --no-occupancy still turns it off
+        for tag, extra, want in (("on", (), True),
+                                 ("off", ("--no-occupancy",), False)):
+            deck_dir = TMP / ("deck_default_" + tag)
+            deck_dir.mkdir()
+            write_chip(deck_dir / "chipA.oas", "CHIPA", 30, 30)
+            write_chip(deck_dir / "chipB.oas", "CHIPB", 20, 20)
+            (deck_dir / "occ.jb").write_text(DECK)
+            res = floe2("index", deck_dir / "occ.jb", *extra, "--jobs", "2")
+            self.assertIn("2 built, 0 failed, 0 kept", res.stdout)
+            for name in ("chipA.oas", "chipB.oas"):
+                ovo = Path(vfs_cache_dir(deck_dir / name)) / "design.ovo"
+                self.assertEqual(ovo.exists(), want, (tag, name))
 
     def test_jobdeck_wrapper_forwards_the_occupancy_options(self):
         deck_dir = TMP / "deck"
@@ -751,7 +772,8 @@ sys.exit(9)
         write_chip(deck_dir / "chipA.oas", "CHIPA", 30, 30)
         write_chip(deck_dir / "chipB.oas", "CHIPB", 20, 20)
         (deck_dir / "occ.jb").write_text(DECK)
-        caches = [deck_dir / "chipA.oas.floe", deck_dir / "chipB.oas.floe"]
+        caches = [Path(vfs_cache_dir(deck_dir / "chipA.oas")),
+                  Path(vfs_cache_dir(deck_dir / "chipB.oas"))]
         res = floe2("index", deck_dir / "occ.jb", "--occupancy",
                     "--occupancy-um", "5", "--jobs", "2")
         self.assertIn("2 built, 0 failed, 0 kept", res.stdout)
@@ -875,7 +897,7 @@ class RenderTests(unittest.TestCase):
     def setUpClass(cls):
         cls.src = TMP / "thinwide.oas"
         write_thinwide(cls.src)
-        cls.cache = Path(str(cls.src) + ".floe")
+        cls.cache = Path(vfs_cache_dir(cls.src))
         floe_index("vfs", cls.src, cls.cache, "--occupancy", "--occupancy-um",
                    "4", "--occupancy-max-work", "100000", "--no-lod",
                    "--slow-cell-s", "999", "--jobs", "2")
@@ -1298,7 +1320,7 @@ class DeckRenderTests(unittest.TestCase):
             self.assertEqual(at, on, depth)
 
     def test_a_source_without_the_file_counts_as_none(self):
-        ovo = self.dir / "thinwide.oas.floe" / "design.ovo"
+        ovo = Path(vfs_cache_dir(self.dir / "thinwide.oas")) / "design.ovo"
         keep = ovo.read_bytes()
         try:
             ovo.unlink()

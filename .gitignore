@@ -4,7 +4,8 @@ __pycache__/
 *.pyc
 .DS_Store
 *.oas
-*.oas.ice/
+.*.ice/
+.*.tray
 floe-portable-*.tar.gz
 AGENTS.md
 floe_research/

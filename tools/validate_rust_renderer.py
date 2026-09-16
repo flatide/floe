@@ -295,7 +295,7 @@ from floe.service import make_render_worker
 
 class Cache:
     src = "/tmp/source.oas"
-    dir = "/tmp/source.oas.floe"
+    dir = "/tmp/.source.oas.ice"
     meta = {"dbu": 0.001, "layers": []}
 
 worker = make_render_worker(Cache())
@@ -2017,12 +2017,14 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             for layer in layers)
         with tempfile.TemporaryDirectory() as directory:
             # The integration driver may place its generated VFS cache at
-            # FLOE_INTEGRATION_CACHE instead of the CLI's normal
-            # <source>.floe location.  Give the subprocess a conventional
-            # source/cache pair while retaining the same files and metadata.
+            # FLOE_INTEGRATION_CACHE instead of the CLI's normal hidden
+            # .<source>.ice sibling (floe/cachepath.py).  Give the
+            # subprocess a conventional source/cache pair while retaining
+            # the same files and metadata.
+            from floe.cachepath import vfs_cache_dir
             cli_source = os.path.join(directory, "CLI source.oas")
             os.symlink(source, cli_source)
-            os.symlink(cache.dir, cli_source + ".floe")
+            os.symlink(cache.dir, vfs_cache_dir(cli_source))
             # sitecustomize runs before `python -m floe2` and turns an
             # accidental KLayout import anywhere in the CLI startup path
             # into a hard failure.  The parent test process keeps KLayout as

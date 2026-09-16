@@ -16,28 +16,23 @@ KLayout 경로에서 선행 검증하는 용도. 그 용도의 KLayout 셸은 �
 | Python/KLayout legacy index | `index --legacy` | 도움말에서 제거, 실행 거부 |
 | legacy `.tiles` profile | 제공 | 명령 제거 |
 | density coverage (`design.ovc`) | KLayout에서 선택 제공 | 생성 옵션·UI·로딩·합성 제거 |
-| VFS cache | `<src>.floe` v8 | 같은 cache를 비파괴 공유 |
+| VFS cache | `.<src>.ice` v8 (2026-09-16까지 `<src>.floe`; 발견 시 자동 개명) | 같은 cache를 비파괴 공유 |
 | native binaries | `floe-index`, 선택적 `floe-renderd` | 같은 `floe-index`, `floe-renderd` |
 | GUI instance | `floe-<uid>-<display>` | `floe2-<uid>-<display>` |
 | portable | KLayout 별도 번들 | KLayout 없는 기본 번들 |
-
-> **예정 개명(2026-09-15, 미적용)**: 인덱스 폴더 `<src>.floe/` → 숨김
-> `.<src>.ice/`, DRC pack `<db>.ice` → 숨김 `.<db>.tray`. 다른 워킹트리에서
-> 진행 중이며 어느 브랜치에도 아직 없다. 이 문서의 이름은 현행이다. 정본:
-> `CACHE-NAMING.ko.md`(의존 지점 목록·결정 필요 항목).
 
 ## 실행
 
 ```sh
 .venv/bin/python -m floe2 view chip.oas      # 제품
-.venv/bin/python -m floe2 index chip.oas     # 1회: 공유 <src>.floe/ 생성
+.venv/bin/python -m floe2 index chip.oas     # 1회: 공유 .<src>.ice/ 생성(숨김 폴더)
 
 # 개발 전용: 동결된 KLayout 셸로 같은 cache를 열어 선행 검증/비교
 .venv/bin/python -m floe view chip.oas
 ```
 
 두 GUI는 socket identity가 달라 같은 DISPLAY에서 동시에 실행할 수 있다. 캐시는
-source 옆의 동일한 `<src>.floe`를 읽으므로 복사하거나 변환하지 않는다. cache와
+source 옆의 동일한 `.<src>.ice`를 읽으므로 복사하거나 변환하지 않는다. cache와
 Rust wire/OVM/OVP 버전은 계속 `floe/__init__.py`, `floe/cache.py`, `rust/`에서 한
 번만 올린다. 공유 cache에 과거 `design.ovc`가 있어도 floe2 `info`와 Rust worker는
 이를 무시한다. sample09 detail-high refinement 실측에서 화면 변화 없이

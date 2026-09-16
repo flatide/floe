@@ -65,6 +65,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from floe import drc  # noqa: E402
+from floe import cachepath  # noqa: E402
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(__file__), "..", "rust", "target", "release",
@@ -182,6 +183,48 @@ def compare(ref, ice):
             eq(re_.pts, xe.pts, tag + " err[%d] pts" % ei)
 
 
+def validate_names(tmp, db, side):
+    """2026-09-16 rename (docs/CACHE-NAMING.ko.md): the pack is
+    `.<db>.tray`; a pre-rename `<db>.ice` pack is renamed to it on first
+    touch; the reviewer sidecars are named from the .db (no `..name`
+    from the hidden pack name, and the ones written beside a `<db>.ice`
+    pack still match)."""
+    user = drc._waive_user()
+    want = os.path.join(tmp, ".results.db.waive." + user)
+    if drc.waive_autosave_path(side) != want:
+        fail("waive sidecar of the hidden pack: %r" % drc.waive_autosave_path(side))
+    if drc.waive_autosave_path(os.path.join(tmp, "results.db.ice")) != want:
+        fail("waive sidecar differs between the legacy and current pack names")
+    if drc.notes_autosave_path(side) != os.path.join(
+            tmp, ".results.db.notes.%s.fe" % user):
+        fail("notes sidecar of the hidden pack: %r" % drc.notes_autosave_path(side))
+    if os.path.basename(drc._waive_tmp_fallback(side)).startswith(".."):
+        fail("temp fallback name starts with a double dot")
+    # a legacy-named pack is renamed in place by the loader
+    legacy = os.path.join(tmp, "results.db.ice")
+    os.rename(side, legacy)
+    pk = drc.load_db(db)
+    if not isinstance(pk, drc.IcePack) or pk.path != side:
+        fail("legacy <db>.ice pack was not renamed and reopened: %r"
+             % getattr(pk, "path", None))
+    if os.path.exists(legacy) or not os.path.exists(side):
+        fail("legacy pack still present after the rename")
+    pk.close() if hasattr(pk, "close") else None
+    # the kill switch keeps the legacy name (and still reads it)
+    os.rename(side, legacy)
+    os.environ["FLOE_CACHE_MIGRATE"] = "off"
+    try:
+        pk = drc.load_db(db)
+        if not isinstance(pk, drc.IcePack) or pk.path != legacy:
+            fail("FLOE_CACHE_MIGRATE=off did not read the legacy pack in place")
+        if os.path.exists(side):
+            fail("FLOE_CACHE_MIGRATE=off renamed the pack")
+    finally:
+        del os.environ["FLOE_CACHE_MIGRATE"]
+    pk.close() if hasattr(pk, "close") else None
+    os.rename(legacy, side)
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="floe-drcice-")
     db = os.path.join(tmp, "results.db")
@@ -194,9 +237,11 @@ def main():
     r = subprocess.run([BIN, "drc", db], capture_output=True, text=True)
     if r.returncode != 0:
         fail("indexer rc=%d: %s" % (r.returncode, r.stderr.strip()))
-    side = db + ".ice"
-    if not os.path.exists(side):
-        fail("sidecar not written")
+    side = cachepath.pack_path(db)
+    if side != os.path.join(tmp, ".results.db.tray") or \
+            not os.path.exists(side):
+        fail("pack not written as the hidden sibling .<db>.tray")
+    validate_names(tmp, db, side)
 
     ref = drc.load_ascii(db)
     nums = [e.num for c in ref.checks for e in c.errors]
