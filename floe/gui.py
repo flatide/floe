@@ -3637,6 +3637,15 @@ class Viewer:
                             text += ", sub-cut over %s/%s" % (
                                 fmt_count(culls.get("sub_cut_sparse_over", 0)),
                                 fmt_count(culls.get("sub_cut_wash_over", 0)))
+                        if (culls.get("rep_kept") or culls.get("rep_washed")
+                                or culls.get("rep_children")):
+                            # the page frontier (2026-09-17): cut pages
+                            # kept as pixels / washed, cut placements
+                            # washed or expanded - one in 4^k
+                            text += ", reps %s/%s/%s" % (
+                                fmt_count(culls.get("rep_kept", 0)),
+                                fmt_count(culls.get("rep_washed", 0)),
+                                fmt_count(culls.get("rep_children", 0)))
                     summ = res.get("summary") or {}
                     if summ.get("layers"):
                         # occupancy summary (M2): these layers were

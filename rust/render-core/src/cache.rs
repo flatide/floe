@@ -76,6 +76,11 @@ pub struct PlanCullCounts {
     /// sub-cut items the planner's per-plan budgets dropped (2026-09-16)
     pub sub_cut_sparse_over: u64,
     pub sub_cut_wash_over: u64,
+    /// the page frontier's representatives (2026-09-17): cut pages
+    /// kept / washed, cut placements washed or expanded
+    pub rep_kept: u64,
+    pub rep_washed: u64,
+    pub rep_children: u64,
 }
 
 impl PlanCullCounts {
@@ -95,6 +100,9 @@ impl PlanCullCounts {
             sub_cut_sparse: st.sub_cut_sparse,
             sub_cut_sparse_over: st.sub_cut_sparse_over,
             sub_cut_wash_over: st.sub_cut_wash_over,
+            rep_kept: st.rep_pages_kept,
+            rep_washed: st.rep_pages_washed,
+            rep_children: st.rep_children,
         }
     }
 
@@ -113,6 +121,9 @@ impl PlanCullCounts {
         self.sub_cut_sparse = self.sub_cut_sparse.saturating_add(other.sub_cut_sparse);
         self.sub_cut_sparse_over = self.sub_cut_sparse_over.saturating_add(other.sub_cut_sparse_over);
         self.sub_cut_wash_over = self.sub_cut_wash_over.saturating_add(other.sub_cut_wash_over);
+        self.rep_kept = self.rep_kept.saturating_add(other.rep_kept);
+        self.rep_washed = self.rep_washed.saturating_add(other.rep_washed);
+        self.rep_children = self.rep_children.saturating_add(other.rep_children);
     }
 }
 
@@ -787,6 +798,7 @@ impl Cache {
                 request.px_per_dbu
             },
             sub_cut_wash: request.sub_cut_wash && !request.exact,
+            page_reps: request.page_reps && !request.exact,
             page_hairline: request.page_hairline,
             prune_skipped: request.prune_summary,
             page_skip: if request.summary_layers.is_empty() {

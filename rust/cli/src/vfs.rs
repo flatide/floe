@@ -2088,6 +2088,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
             depth: d,
             px_per_dbu,
             sub_cut_wash: false,
+            page_reps: false,
                     page_hairline: true,
                     page_skip: Vec::new(),
                     prune_skipped: false,
@@ -6373,6 +6374,7 @@ fn make_req(
         depth,
         px_per_dbu: px_per_um / s,
         sub_cut_wash: false,
+        page_reps: false,
             page_hairline: true,
             page_skip: Vec::new(),
             prune_skipped: false,
@@ -6664,6 +6666,12 @@ pub fn plan_cmd(args: &[String]) {
         // verdicts (wash, keep_sparse, expand_sparse) off the deck
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-wash") {
             req.sub_cut_wash = val != "0";
+        }
+        // --page-reps 1: the page frontier (representatives of what
+        // the cut drops), so `--explain` shows rep_keep / rep_wash /
+        // rep_expand; off by default here (the viewer turns it on)
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--page-reps") {
+            req.page_reps = val != "0";
         }
         // --summary-layers a/b,..: layers an occupancy summary draws
         // (OCCUPANCY_PLAN M3): their pages are skipped (verdict

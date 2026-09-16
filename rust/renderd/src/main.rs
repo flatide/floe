@@ -989,6 +989,7 @@ fn run_clip(
         px_per_dbu: 0.0,
         exact: true,
         sub_cut_wash: false,
+        page_reps: false,
         page_hairline: true,
         summary_layers: Vec::new(),
         prune_summary: false,
@@ -1670,7 +1671,7 @@ fn run_deck_render(
     respond(
         responses,
         format!(
-            "frame gen={} round=1 final=1 png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} summary_passes={} summary_none_passes={} summary_cells={}",
+            "frame gen={} round=1 final=1 png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} summary_passes={} summary_none_passes={} summary_cells={}",
             command.generation,
             command.out,
             if command.raw_frame { "raw" } else { "png" },
@@ -1743,6 +1744,9 @@ fn run_deck_render(
             report.culls.sub_cut_sparse,
             report.culls.sub_cut_sparse_over,
             report.culls.sub_cut_wash_over,
+            report.culls.rep_kept,
+            report.culls.rep_washed,
+            report.culls.rep_children,
             report.summary_passes,
             report.summary_none_passes,
             report.summary_cells,
@@ -1759,6 +1763,12 @@ fn run_deck_render(
 /// for a diagnosis.
 fn sub_cut_wash_enabled() -> bool {
     std::env::var("FLOE_RUST_SUB_CUT_WASH").as_deref() == Ok("on")
+}
+
+/// The page frontier (floe_vfs::ViewReq::page_reps) on a plain
+/// layout's frames; FLOE_RUST_PAGE_REPS=off restores the silent cut.
+fn page_reps_enabled() -> bool {
+    std::env::var("FLOE_RUST_PAGE_REPS").as_deref() != Ok("off")
 }
 
 fn run_render(
@@ -2098,7 +2108,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -2178,6 +2188,9 @@ fn run_render(
                 planned.summary.culls.sub_cut_sparse,
                 planned.summary.culls.sub_cut_sparse_over,
                 planned.summary.culls.sub_cut_wash_over,
+                planned.summary.culls.rep_kept,
+                planned.summary.culls.rep_washed,
+                planned.summary.culls.rep_children,
                 summary.planes.len(),
                 pixels.summary_cells,
                 pixels.summary_pixels,
@@ -2496,6 +2509,12 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand) -> Result<PlanReque
         // wash and a sparse one is kept and drawn as pixels).
         // FLOE_RUST_SUB_CUT_WASH=off is the kill switch.
         sub_cut_wash: !command.exact && sub_cut_wash_enabled(),
+        // the page frontier (user design 2026-09-17): what the cut
+        // drops is thinned to representatives - one in 4^k of the
+        // pages and placements k octaves below their cut, nested
+        // across zooms - instead of vanishing. FLOE_RUST_PAGE_REPS=off
+        // is the kill switch.
+        page_reps: !command.exact && page_reps_enabled(),
         page_hairline: !command.thin_keep,
         summary_layers: Vec::new(),
         prune_summary: false,

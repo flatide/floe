@@ -1610,6 +1610,8 @@ fn source_plan_request(
         px_per_dbu,
         exact: request.exact,
         sub_cut_wash: request.wide,
+        // a deck source has its occupancy summary for the wide view
+        page_reps: false,
         page_hairline: !request.thin_keep,
         summary_layers: Vec::new(),
         prune_summary: false,

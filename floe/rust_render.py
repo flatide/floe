@@ -1097,6 +1097,11 @@ class RustRenderWorker:
                 # mid-zoom draw on the 150 MB chip)
                 "sub_cut_sparse_over": _wire_int(fields, "sub_cut_sparse_over"),
                 "sub_cut_wash_over": _wire_int(fields, "sub_cut_wash_over"),
+                # the page frontier's representatives (2026-09-17): cut
+                # pages kept / washed, cut placements washed or expanded
+                "rep_kept": _wire_int(fields, "rep_kept"),
+                "rep_washed": _wire_int(fields, "rep_washed"),
+                "rep_children": _wire_int(fields, "rep_children"),
             },
             # occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): layers
             # drawn from design.ovo instead of their pages, the cells

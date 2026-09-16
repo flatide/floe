@@ -395,14 +395,16 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   정책을 고른다(auto = 소스 기본, cull = 레이아웃 정책). 남긴
   페이지는 perf 줄 `thin pages N kept`로 표시된다. 진단용 override
   `FLOE_RUST_PAGE_HAIRLINE=cull|keep`.
-- **cut 미만 페이지**: 모든 도형이 cut보다 작은 페이지(콘택·비아·마크 배열)는
-  `thin:cull`에서 버려진다(9.8 GB 일반 레이아웃이 detail high에서 Calibre보다
-  적게 보이는 이유). 덱과 같은 sub-cut 규칙으로 남기는 길(밀집 = 레이어 색 블록,
-  희소 = 픽셀; 2026-09-16)은 만들었으나 **기본 off**(같은 날 사용자 결정: 중간
-  줌 draw가 느려지는 부작용에 비해 여전히 다 보이지 않는다; 덱은 점유 요약이
-  광역뷰를 맡는다). 광역뷰 존재가 필요하면 `floe2 index --occupancy` +
-  `thin:keep`. 진단 `FLOE_RUST_SUB_CUT_WASH=on`(단일 레이아웃)·
-  `FLOE_RUST_DECK_WIDE=on`(덱)(SPEC-PLANNER §3).
+- **cut 미만의 대표(page frontier, 2026-09-17)**: 모든 도형이 cut보다 작은
+  페이지(콘택·비아·마크 배열)와 `thin:cull`의 hairline 페이지는 사라지는 대신
+  **대표만 남는다** — 컷 문턱의 1/2^k 아래면 4^k개 중 하나(run 안 index 기준)를
+  sub-cut 규칙대로 그린다(희소 = 픽셀, 밀집 = 레이어 색 footprint 블록). 한 옥타브
+  축소마다 뷰의 컷 항목은 4배, 남기는 비율은 1/4이라 뷰당 비용이 컷 시점 수준으로
+  일정하고, 살아남은 것은 더 축소해도 살아남는다(frontier와 같은 성질). 요약처럼
+  채워진 면이 아니라 무늬이므로, 채워진 광역뷰가 필요하면 `floe2 index
+  --occupancy` + `thin:keep`. 상태줄 `reps K/W/C`. 킬 스위치
+  `FLOE_RUST_PAGE_REPS=off`. 모든 sub-cut 항목을 남기는 규칙은 진단
+  `FLOE_RUST_SUB_CUT_WASH=on`(단일)·`FLOE_RUST_DECK_WIDE=on`(덱)(SPEC-PLANNER §3).
 - **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):
   캐시에 `design.ovo`(`floe2 index --occupancy-only`)가 있고 요청이 keep·
   exact 아님이며 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지

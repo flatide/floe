@@ -599,7 +599,8 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
 - **sub-cut wash**(`ViewReq::sub_cut_wash`; **2026-09-16 사용자 결정으로 기본
   off** — 덱 소스는 점유 요약이 광역뷰를 맡고, 단일 레이아웃은 느려지는 부작용에
   비해 다 보이지 않는다; 진단 `FLOE_RUST_DECK_WIDE=on`(덱)·`FLOE_RUST_SUB_CUT_WASH=on`
-  (단일)으로만 켠다 — SPEC-PLANNER §3): 켜면 크기 cut이
+  (단일)으로만 켠다 — SPEC-PLANNER §3; 단일 레이아웃의 대표(page frontier,
+  2026-09-17)도 덱 pass에는 적용하지 않는다): 켜면 크기 cut이
   **버리던** 것을 자기 레이어의 footprint wash(렉트, 보통 채움 → 뷰어 speckle이
   얇게 함)로 남긴다.
   - 자체 페이지: cut(양축 < cut, 또는 hairline)에 걸린 페이지 → `(layer, page

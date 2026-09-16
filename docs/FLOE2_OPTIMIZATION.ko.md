@@ -1017,6 +1017,20 @@ hairline 픽셀, wash 블록 채움)에 상한이 없던 것. 조치: ① perf �
 gate: `SubCutTests`(기본 워커는 셋 다 없음·카운터 0, on 워커가 규칙·예산 검증),
 `ThinPageTests`·`WideViewTests`(기본 = 옛 cull, on = 규칙), 실칩 증상 테스트
 (기본 = 증상, on = wash).
+**결함 C 후속 3 — 대표(page frontier), 사용자 설계 2026-09-17 (0.12.145 / RENDERD
+0.12.100)**: "hairline이 보이던 뷰에서 2배 축소하면 면적이 4배라 다 살리면 4배를
+그려야 하지만 4개 중 1개만 남기면 비슷한 비용으로 디테일을 살릴 수 있다. 살아남는
+hairline은 끝까지 살아남게, frontier처럼." 옛 bbox 대체가 fit 뷰에서 거대 박스
+하나로 남았던 원인은 단위(페이지 bbox)의 화면 크기에 상한이 없던 것. 구현은
+SPEC-PLANNER §3 대표: 컷 항목이 문턱의 1/2^k 이하이면 run 안 index가 4^k의 배수인
+것만 남기고 sub-cut 규칙대로 그린다(희소 → 픽셀, 밀집 → footprint wash). 뷰당
+수는 컷 시점의 수로 일정, 집합은 줌 사이에 포함 관계, BVH는 index 구간으로
+프루닝. 단일 레이아웃 요청만(덱은 요약), 킬 스위치 `FLOE_RUST_PAGE_REPS=off`.
+`thin:cull`의 기본 그림이 다시 바뀐다: 컷 아래 내용이 사라지지 않고 대표 무늬로
+남는다(요약처럼 채워진 면은 아님). 상태줄·perf 줄 `reps K/W/C`(kept/washed/
+children). 실칩 확인 항목: fit 뷰 첫 프레임의 read/decode(대표 페이지의 cold
+read), 중간 줌의 plan/draw, `reps` 카운트. fit급에서 많이 느리면 그 줌 대역용
+캐시를 미리 만드는 방안(사용자)을 그 다음에 본다. gate `PageFrontierTests`.
 
 **정책 분리(2026-09-11, 사용자·리뷰어)**: 마스크(jobdeck)는 hairline이 많을 수밖에
 없고 일반 레이아웃을 같은 기준에 맞추면 광역 뷰가 느려진다. 그래서 위 해제는

@@ -60,8 +60,27 @@
   요약 생성이 한 시간을 넘어, 요약 없이도 광역뷰에 존재가 보여야 한다. keep은
   hairline 페이지를 그대로 남긴다(page_hair = 0). exact 요청은 제외. 켜는 스위치
   `FLOE_RUST_SUB_CUT_WASH=on`(단일 레이아웃), `FLOE_RUST_DECK_WIDE=on`(덱; 둘 다
-  진단 전용, 기본 off); gate `validate_occupancy` `SubCutTests`(기본 워커는 셋 다
-  없음, on 워커가 규칙을 검증), `validate_jobdeck` `WideViewTests`·`ThinPageTests`.
+  진단 전용, 기본 off); gate `validate_occupancy` `SubCutTests`(on 워커가 규칙을
+  검증), `validate_jobdeck` `WideViewTests`·`ThinPageTests`.
+  **대표(page frontier)**(`ViewReq::page_reps`, 사용자 설계 2026-09-17; 단일
+  레이아웃 요청에 켬, 덱 pass·exact·probe는 off): 컷이 버리던 것을 없애지 않고
+  **대표만 남긴다**. 컷에 걸린 페이지/배치가 자기 컷 문턱의 1/2^k 이하이면(k =
+  `rep_octaves`; hairline 컷은 `max_min/page_hair`, 크기 컷은 `max_dim/cut`, 둘 다면
+  먼저 잘린 쪽 = 큰 k) 소속 run(페이지: (cell, layer)의 페이지 열, 배치: 셀의 배치
+  열) 안의 index가 4^k의 배수인 것만 남기고(`rep_keeps`), 남긴 것은 sub-cut 규칙
+  대로 그린다(밀집 → footprint wash `rep_wash`, 희소 → 픽셀 `rep_keep`; 배치는
+  `rep_wash`/`rep_expand`). 한 옥타브 축소하면 뷰의 컷 항목이 4배, 남기는 비율이
+  1/4이라 **뷰당 수가 컷 시점의 수로 일정**하고, 4^(k+1)의 배수는 4^k의 배수라
+  **생존자는 더 축소해도 살아남는다**(frontier 격자 대표와 같은 성질). run의 첫
+  항목(index 0)은 언제나 대표라 내용이 있는 (cell, layer)는 어느 줌에서든 최소 한
+  페이지를 보인다. BVH는 서브트리의 index 구간([lo, hi), 페이지는 leaf-order
+  permute로 연속)에 4^k의 배수가 없으면 통째로 프루닝하므로(`rep_pruned`) 걷기 비용도
+  대표 수에 비례한다. 예산(`sub_cut_sparse_px`/`sub_cut_wash_px`)이 안전망. 대표는
+  부분만 보이는 무늬이지 요약처럼 채워진 면이 아니다. 킬 스위치
+  `FLOE_RUST_PAGE_REPS=off`(뷰어), `floe-index plan --page-reps 1`. gate
+  `PageFrontierTests`(90,000개 hairline 페이지 열: 800/400/200 px에서 대표 집합이
+  전부 → 1/4 → 1/16으로 줄고 포함 관계가 유지, 킬 스위치는 0 px), `SubCutTests`
+  (단일 페이지 레이어 = index 0 = 대표), `ThinPageTests`·`test_render_detail…`.
   **플랜당 예산**(2026-09-16 현장: 150 MB 실칩 thin:cull detail medium의 중간
   줌에서 draw가 6 s를 넘었고 킬 스위치로 이전 속도가 돌아옴): sub-cut 규칙이
   한 프레임에 보태는 양을 두 예산이 막는다. ① `sub_cut_sparse_px` — 남긴 희소

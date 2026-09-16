@@ -1081,6 +1081,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "lod_swapped": "27", "thin_frames": "28", "thin_pages": "29",
                 "sub_cut_washes": "30", "sub_cut_sparse": "31",
                 "sub_cut_sparse_over": "32", "sub_cut_wash_over": "33",
+                "rep_kept": "34", "rep_washed": "35", "rep_children": "36",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
@@ -1089,7 +1090,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "children_size": 24, "layer": 25, "washed": 26,
                 "lod_swapped": 27, "thin_frames": 28, "thin_pages": 29,
                 "sub_cut_washes": 30, "sub_cut_sparse": 31,
-                "sub_cut_sparse_over": 32, "sub_cut_wash_over": 33})
+                "sub_cut_sparse_over": 32, "sub_cut_wash_over": 33,
+                "rep_kept": 34, "rep_washed": 35, "rep_children": 36})
             self.assertEqual(result["frame_format"], "raw")
             self.assertEqual(result["rgba"], raw_pixels)
             self.assertNotIn("png", result)

@@ -44,6 +44,19 @@ pub struct ViewReq {
     /// as the node bbox (coarse). false keeps the plain viewer rule
     /// (a size cut is a silent detail omission).
     pub sub_cut_wash: bool,
+    /// The page frontier (user design 2026-09-17): what the size /
+    /// hairline cut would drop is thinned to REPRESENTATIVES instead
+    /// of vanishing - a cut page or placement k octaves below its cut
+    /// (its measure at most 1/2^k of the threshold) survives when its
+    /// index within the owning cell is a multiple of 4^k, and a
+    /// survivor is drawn as the sub-cut rules draw it (dense: its
+    /// footprint wash, sparse: its pixels). One zoom-out quadruples
+    /// the cut items in view and keeps a quarter, so the count stays
+    /// what it was at the cut, and the sets are nested: what survives
+    /// one zoom-out survives every further one, like the frontier's
+    /// lattice representatives. Ignored when sub_cut_wash is on
+    /// (that diagnostic keeps everything). Plain layouts only.
+    pub page_reps: bool,
     /// Whether the rev 41 hairline rule culls PAGES (a page whose every
     /// record has min side < hairline x cut is dropped whole). true is
     /// the plain layout's performance policy (thin shapes may be
