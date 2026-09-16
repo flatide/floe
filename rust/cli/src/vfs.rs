@@ -171,6 +171,11 @@ pub fn vfs_cmd(args: &[String]) {
                 occ_opts.max_work = args[i + 1].parse().expect("occupancy max work");
                 i += 2;
             }
+            "--occupancy-balance" => {
+                // 0 = the count-based unit split (kill switch, 2026-09-16)
+                occ_opts.balanced_units = args[i + 1].as_str() != "0";
+                i += 2;
+            }
             "--occupancy-max-bytes" => {
                 occ_opts.max_bytes = args[i + 1].parse().expect("occupancy max bytes");
                 i += 2;

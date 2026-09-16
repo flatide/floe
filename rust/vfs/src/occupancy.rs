@@ -111,6 +111,12 @@ pub struct Opts {
     /// layer is marked (units done, charges, seconds), one line per
     /// layer that took at least half a second or has no summary
     pub progress: Option<fn(&str)>,
+    /// split a layer's marking into units by estimated work (field
+    /// 2026-09-16: a 150 MB chip's top held enough placements that the
+    /// count-based split never expanded the one block holding most of
+    /// the work, and 12 threads ran at one thread's speed); false =
+    /// the count-based split (`--occupancy-balance 0`, the kill switch)
+    pub balanced_units: bool,
 }
 
 impl Default for Opts {
@@ -122,9 +128,14 @@ impl Default for Opts {
             max_work: DEFAULT_MAX_WORK,
             max_bytes: DEFAULT_MAX_BYTES,
             progress: None,
+            balanced_units: true,
         }
     }
 }
+
+/// how many plain placements deep the balanced split descends looking
+/// for units of at most the budget
+pub const MAX_EXPAND_DEPTH: usize = 8;
 
 /// seconds between the heartbeat lines of a layer's marking
 pub const PROGRESS_EVERY_S: u64 = 10;
@@ -1035,14 +1046,135 @@ fn collect_units(
     }
 }
 
-/// the units of a layer for `jobs` threads: the top cell's own, then
-/// one level deeper (through plain placements, at most four levels)
-/// while there are fewer than 4 x jobs of them - a source whose top
-/// holds one die placement still spreads its placements over the
-/// threads
-fn units_for(doc: &Doc, has: &[bool], key: (u32, u32), jobs: usize) -> Vec<Unit> {
+/// per cell, the estimated marking work of the layer under it: its own
+/// records on the layer (repetition members counted) plus every
+/// placement's members times the child's weight; a cycle adds nothing
+fn layer_weights(doc: &Doc, key: (u32, u32), has: &[bool]) -> Vec<u64> {
+    fn weight(doc: &Doc, ci: usize, key: (u32, u32), has: &[bool], memo: &mut Vec<Option<u64>>, open: &mut Vec<bool>) -> u64 {
+        if let Some(w) = memo[ci] {
+            return w;
+        }
+        if open[ci] {
+            return 0;
+        }
+        open[ci] = true;
+        let cell = &doc.cells[ci];
+        let mut w: u64 = 0;
+        for r in &cell.rects {
+            if (r.layer, r.dt) == key {
+                w = w.saturating_add(rep_members(&r.rep));
+            }
+        }
+        for p in &cell.polys {
+            if (p.layer, p.dt) == key {
+                w = w.saturating_add(rep_members(&p.rep));
+            }
+        }
+        for p in &cell.paths {
+            if (p.layer, p.dt) == key {
+                w = w.saturating_add(rep_members(&p.rep));
+            }
+        }
+        for pl in &cell.places {
+            if !has[pl.cell] {
+                continue;
+            }
+            let child = weight(doc, pl.cell, key, has, memo, open);
+            w = w.saturating_add(rep_members(&pl.rep).saturating_mul(child.max(1)));
+        }
+        open[ci] = false;
+        memo[ci] = Some(w);
+        w
+    }
+    let mut memo = vec![None; doc.cells.len()];
+    let mut open = vec![false; doc.cells.len()];
+    for ci in 0..doc.cells.len() {
+        weight(doc, ci, key, has, &mut memo, &mut open);
+    }
+    memo.into_iter().map(|w| w.unwrap_or(0)).collect()
+}
+
+/// a cell's units under `xf`, each of at most `budget` estimated work
+/// where the hierarchy allows: its own records in slices, a plain
+/// placement heavier than the budget descended into (to
+/// MAX_EXPAND_DEPTH), any other placement's members in ranges sized
+/// by the child's weight
+#[allow(clippy::too_many_arguments)]
+fn collect_units_weighted(
+    doc: &Doc,
+    has: &[bool],
+    key: (u32, u32),
+    ci: usize,
+    xf: Xf,
+    depth: usize,
+    budget: u64,
+    weights: &[u64],
+    out: &mut Vec<Unit>,
+) {
+    let cell = &doc.cells[ci];
+    let own: u64 = cell.rects.iter().filter(|r| (r.layer, r.dt) == key).map(|r| rep_members(&r.rep)).sum::<u64>()
+        + cell.polys.iter().filter(|p| (p.layer, p.dt) == key).map(|p| rep_members(&p.rep)).sum::<u64>()
+        + cell.paths.iter().filter(|p| (p.layer, p.dt) == key).map(|p| rep_members(&p.rep)).sum::<u64>();
+    if own > 0 {
+        let pieces = ((own + budget - 1) / budget).clamp(1, 4096) as usize;
+        let (nr, np, nq) = (cell.rects.len(), cell.polys.len(), cell.paths.len());
+        let slice = |n: usize, t: usize| (n * t / pieces, n * (t + 1) / pieces);
+        for t in 0..pieces {
+            let (rects, polys, paths) = (slice(nr, t), slice(np, t), slice(nq, t));
+            if rects.0 == rects.1 && polys.0 == polys.1 && paths.0 == paths.1 {
+                continue;
+            }
+            out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Shapes { rects, polys, paths } });
+        }
+    }
+    for (pi, pl) in cell.places.iter().enumerate() {
+        if !has[pl.cell] {
+            continue;
+        }
+        let members = rep_members(&pl.rep);
+        if members == 0 {
+            continue;
+        }
+        let child = weights[pl.cell].max(1);
+        if matches!(pl.rep, Rep::One) {
+            if child > budget && depth < MAX_EXPAND_DEPTH {
+                let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
+                collect_units_weighted(doc, has, key, pl.cell, base, depth + 1, budget, weights, out);
+                continue;
+            }
+            out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Place { pi, m0: 0, m1: 1 } });
+            continue;
+        }
+        let per = (budget / child).max(1);
+        let mut m0 = 0u64;
+        while m0 < members {
+            let m1 = (m0 + per).min(members);
+            out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Place { pi, m0, m1 } });
+            m0 = m1;
+        }
+    }
+}
+
+/// the units of a layer for `jobs` threads. Balanced (the default,
+/// 2026-09-16): each unit holds at most about 1/(4 x jobs) of the
+/// layer's estimated work (`layer_weights`), so one heavy block among
+/// many light placements is still spread over the threads (field: a
+/// 150 MB chip's top had enough placements that the count-based split
+/// below stopped expanding, and its heaviest block ran on one thread
+/// for minutes). Count-based (`balanced` false): the top cell's own
+/// units, then one level deeper through plain placements (at most
+/// four) while there are fewer than 4 x jobs of them.
+fn units_for(doc: &Doc, has: &[bool], key: (u32, u32), jobs: usize, balanced: bool) -> Vec<Unit> {
     let target = jobs.max(1) * 4;
     let mut units = Vec::new();
+    if balanced {
+        let weights = layer_weights(doc, key, has);
+        let budget = (weights[doc.top] / target as u64).max(1);
+        collect_units_weighted(doc, has, key, doc.top, Xf::identity(), 0, budget, &weights, &mut units);
+        if !units.is_empty() {
+            return units;
+        }
+    }
     for expand in 0..=4 {
         units.clear();
         collect_units(doc, has, key, doc.top, Xf::identity(), 0, expand, target, &mut units);
@@ -1069,12 +1201,13 @@ fn build_layer(
     max_work: u64,
     jobs: usize,
     progress: Option<fn(&str)>,
+    balanced: bool,
 ) -> (Layer, u64) {
     let layer_with = |status: u8, work: u64, planes: Vec<Plane>| Layer { layer: key.0, dt: key.1, status, work, planes };
     if !has[doc.top] {
         return (layer_with(STATUS_EMPTY, 0, Vec::new()), 0);
     }
-    let units = units_for(doc, has, key, jobs);
+    let units = units_for(doc, has, key, jobs, balanced);
     let planes = Planes::new(w, h, layer_max_depth(doc, key, has));
     let threads = jobs.max(1).min(units.len()).max(1);
     let shared = std::sync::atomic::AtomicU64::new(0);
@@ -1256,7 +1389,7 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
             continue;
         }
         let t0 = std::time::Instant::now();
-        let (layer, sk) = build_layer(doc, key, &has, (bbox.0, bbox.1), cell_dbu, w, h, opts.max_work, opts.jobs, opts.progress);
+        let (layer, sk) = build_layer(doc, key, &has, (bbox.0, bbox.1), cell_dbu, w, h, opts.max_work, opts.jobs, opts.progress, opts.balanced_units);
         skipped += sk;
         if layer.status == STATUS_OK {
             slot += layer.planes.len();
@@ -2102,7 +2235,8 @@ mod tests {
         assert_eq!(one.layers[0].work, many.layers[0].work);
         assert_eq!(write_ovo(&one), write_ovo(&many));
         let has = layer_presence(&d, (1, 0));
-        assert!(units_for(&d, &has, (1, 0), 3).len() >= 12);
+        assert!(units_for(&d, &has, (1, 0), 3, false).len() >= 12);
+        assert!(units_for(&d, &has, (1, 0), 3, true).len() >= 12);
         // a top holding one die placement: the units come from below
         let mut leaf = cell("B");
         leaf.rects.push(rect(1, 0, 0, 7, 3, Rep::One));
@@ -2114,9 +2248,11 @@ mod tests {
         top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
         let d = doc_with(vec![top, die, leaf, make_child()], 0, vec![(1, 0)]);
         let has = layer_presence(&d, (1, 0));
-        let units = units_for(&d, &has, (1, 0), 3);
-        assert!(units.iter().all(|u| u.ci == 2), "units should sit in the leaf");
-        assert!(units.len() >= 3, "{} units", units.len());
+        for balanced in [false, true] {
+            let units = units_for(&d, &has, (1, 0), 3, balanced);
+            assert!(units.iter().all(|u| u.ci == 2), "units should sit in the leaf");
+            assert!(units.len() >= 3, "{} units", units.len());
+        }
         let one = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 1, ..Opts::default() }).unwrap();
         let many = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 3, ..Opts::default() }).unwrap();
         assert_eq!(write_ovo(&one), write_ovo(&many));
@@ -2244,6 +2380,44 @@ mod tests {
             assert_eq!(f.layers.len(), 2);
             assert_eq!(f.layers[0].status, occ.layers[0].status);
         }
+    }
+
+    #[test]
+    fn a_heavy_block_among_light_placements_is_split_by_work() {
+        // field 2026-09-16 (150 MB chip): the top's many placements
+        // satisfied the count target, so the one block holding most
+        // of the layer's records stayed a single unit and one thread
+        // marked it for minutes. The balanced split descends into it
+        // and slices its records; the count-based split does not.
+        let mut light = cell("L");
+        light.rects.push(rect(1, 0, 0, 3, 3, Rep::One));
+        let mut heavy = cell("H");
+        heavy.rects.push(rect(1, 0, 0, 1, 1, Rep::Grid { na: 300, nb: 300, va: (4, 0), vb: (0, 4) }));
+        for k in 0..64 {
+            heavy.rects.push(rect(1, 2000 + k * 5, 0, 2, 2, Rep::One));
+        }
+        let mut top = cell("T");
+        for k in 0..60 {
+            top.places.push(PlaceRec { cell: 1, x: k * 10, y: 5000, rot: 0, flip: false, rep: Rep::One });
+        }
+        top.places.push(PlaceRec { cell: 2, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
+        let d = doc_with(vec![top, light, heavy], 0, vec![(1, 0)]);
+        let has = layer_presence(&d, (1, 0));
+        let weights = layer_weights(&d, (1, 0), &has);
+        assert_eq!((weights[1], weights[2]), (1, 90_000 + 64));
+        assert_eq!(weights[0], 60 + 90_064);
+        let by_count = units_for(&d, &has, (1, 0), 4, false);
+        assert_eq!(by_count.iter().filter(|u| u.ci == 2).count(), 0, "count split leaves the block one unit");
+        let balanced = units_for(&d, &has, (1, 0), 4, true);
+        let in_block = balanced.iter().filter(|u| u.ci == 2).count();
+        assert!(in_block >= 8, "{} units in the block of {}", in_block, balanced.len());
+        // the split changes nothing in the file
+        let a = build(&d, 0, 0, &Opts { base_um: 0.01, jobs: 4, balanced_units: true, ..Opts::default() }).unwrap();
+        let b = build(&d, 0, 0, &Opts { base_um: 0.01, jobs: 4, balanced_units: false, ..Opts::default() }).unwrap();
+        let c = build(&d, 0, 0, &Opts { base_um: 0.01, jobs: 1, balanced_units: true, ..Opts::default() }).unwrap();
+        assert_eq!(write_ovo(&a), write_ovo(&b));
+        assert_eq!(write_ovo(&a), write_ovo(&c));
+        assert_eq!(a.layers[0].work, b.layers[0].work);
     }
 
     #[test]

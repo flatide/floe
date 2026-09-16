@@ -729,3 +729,22 @@ source released, rss 13G)` 뒤 `occupancy cell=4um (16000 dbu) …`까지 약 5�
   0.12.92; libc 크레이트 없이 `extern "C" signal`). gate
   `test_a_reader_closing_the_pipe_early_does_not_panic`. renderd는 stdout이
   프로토콜이라 건드리지 않았다.
+- **실측 9 데이터(사용자, 0.12.89)**: `cell_dbu=16000 base_um=4 grid=388x563
+  levels=5 layers=337 identity=ok`; status `313 ok / 24 empty`(`none:work` 없음);
+  work 상위 `705/59 1.18G, 685/59 0.52G, 692/59 0.32G, 502/59 0.22G, 213/192
+  0.21G`; `total_work 5.44G`.
+  - **칩 크기** 388 × 563 셀 × 4 µm = **1.55 × 2.25 mm**. fit 뷰(약 1,000 px)에서
+    4 µm 셀 = 1.8 px > 1 px → `none (near)`가 맞다. 이 칩은 `--occupancy-um 1`
+    (1,552 × 2,252 셀, 평면당 0.44 MB, 313 레이어에 대략 200~400 MB) 또는 2 µm
+    (창 1,100 px까지, 약 50~100 MB)가 필요하다. 마킹 시간은 멤버 수가 지배하므로
+    (아래) 셀을 줄여도 크게 늘지 않는다.
+  - **5분**: `none:work`가 없으므로 예산 소진이 아니다. 54억 charge를 12스레드로
+    약 270 s에 마킹 = 초당 2,000만 charge = 8-a에서 잰 **1스레드 속도(56 ns/charge)**
+    와 같다 → 병렬이 먹지 않았다. work가 셀 수(21.8만)의 5,400배이므로 charge는
+    반복 멤버가 지배한다(멤버당 1 charge + 셀). 원인: unit 분할이 개수 기준이라
+    top의 배치 수가 4 × jobs를 넘으면 확장이 멈추고, 11.8억 charge짜리 블록 하나가
+    unit 하나로 한 스레드에 남는다. 조치(0.12.138 / RENDERD 0.12.93): 작업량 기준
+    분할(SPEC-INDEXER §6.5, `--occupancy-balance 0` 킬 스위치), gate
+    `a_heavy_block_among_light_placements_is_split_by_work`(개수 분할은 블록을 unit
+    0개로 남기고, 작업량 분할은 8개 이상으로 쪼갬; 파일 바이트 동일). 기대: 12
+    스레드에서 5분 → 수십 초, 48스레드에서 10초대(효율 40% 가정). 재측정 대기.

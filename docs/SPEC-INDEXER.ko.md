@@ -49,7 +49,7 @@ error다. 전체 누락도 빌드/설치 지침을 포함한 hard error다. 동�
 floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
     [--encode-batch N] [--page-target-mb N] [--no-lod]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
-    [--occupancy | --occupancy-only] [--occupancy-um F]
+    [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1]
     [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N]
     [--slow-cell-s S] [--p2-shard-limit-mb N]
     [--profile-cell NAME | --profile-cell-ci N]
@@ -316,8 +316,17 @@ floe-index occupancy <outdir> [--layer L/D] [--level N] [--depth N] [--dump]  # 
   레이어는 `none:unsupported`로 게시되어 페이지 경로가 그린다(2차 리뷰 P1-2:
   건너뛰고 ok로 두면 도형이 조용히 사라진다); 개수는 `paths_skipped`로 로그.
 - 병렬(`--jobs`, 2026-09-14): 레이어는 순서대로, 한 레이어의 마킹을 `--jobs`
-  스레드가 나눠 맡는다. top 셀의 레코드 목록(조각)과 배치의 멤버 범위가 unit이고,
-  top이 단일 배치(die)뿐이면 최대 4단계 내려가 unit을 확보한다(4 × jobs개 목표).
+  스레드가 나눠 맡는다. 셀의 레코드 목록(조각)과 배치의 멤버 범위가 unit이다.
+  unit은 **작업량 기준**으로 자른다(2026-09-16, `--occupancy-balance 1` 기본):
+  레이어의 셀별 추정 작업량(자기 레코드의 반복 멤버 수 + 배치 멤버 수 × 자식
+  작업량)을 구해 예산 = 전체/(4 × jobs)로 두고, 레코드 목록은 예산 단위 조각으로,
+  예산보다 무거운 단일 배치는 8단계까지 내려가 쪼개고, 배열 배치는 자식 작업량에
+  맞춘 멤버 범위로 자른다. 현장(150 MB 실칩, 337 레이어, 54억 charge): 개수 기준
+  분할(top의 배치가 4 × jobs개를 넘으면 확장을 멈춤)에서는 가장 무거운 블록
+  하나(11.8억 charge)가 unit 하나로 남아 12스레드가 1스레드 속도(약 5분)로
+  돌았다. `--occupancy-balance 0`은 옛 개수 기준(top 셀의 레코드, top이 단일
+  배치뿐이면 최대 4단계 확장)으로 되돌리는 킬 스위치다. 분할은 마킹·charge에
+  영향이 없어 파일은 어느 쪽이든 바이트 동일하다(gate).
   스레드는 레이어의 **공유 atomic level-0 평면**(배치 깊이마다 한 장, 2026-09-16
   M6; unit과 walk가 깊이를 넘긴다)에 `fetch_or`로 마킹하므로 결과 파일은 스레드
   수와 무관하게 바이트 동일하다(unit은 레코드의 반복을 쪼개지 않고 단일 배치만
