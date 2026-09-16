@@ -23,7 +23,7 @@
     const editCallbacks = new WeakMap();
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
     let catalog = [], currentId = '', currentSource = '', currentMode = 'level', ownerBusy = false, submitting = false;
-    let modeReceipt = '', modeSupported = false, fillEditSupported = false;
+    let modeReceipt = '', modeSupported = false, levelsSupported = false, fillEditSupported = false;
     let pendingStartup = null, startupWaiting = false;
     let gotoDirty = false, gotoRevision = 0, gotoView = '';
     const gotoFields = ['goto-x','goto-y','goto-width'];
@@ -225,6 +225,8 @@
         el('live-mode-row').hidden = !modeSupported || !state || !state.capabilities.mode;
         el('live-mode').disabled = !deckModeReady();
         el('live-mode').value = currentMode;
+        el('reselect-levels').hidden = !levelsSupported || !state || !state.capabilities.mode || el('source').value !== currentSource;
+        el('reselect-levels').disabled = !deckModeReady() || !levelsSupported || el('source').value !== currentSource || !!launchPending;
         if (settings) { settings.changed(); }
         if (defaults) { defaults.changed(); }
         if (drcPanel) { drcPanel.contextChanged(); }
@@ -576,7 +578,7 @@
             if (!currentId) { el('empty-message').textContent = message(last.error || last.phase); connection('Local · ready', true); }
         }
         if (ownerBusy) { operationTimer = setTimeout(function () { operationState().catch(report); }, 500); }
-        else if (last && (last.kind === 'open' || last.kind === 'index_open' && !indexOpen.pending()) && last.phase === 'succeeded') {
+        else if (last && (last.kind === 'open' || last.kind === 'reselect_levels' || last.kind === 'index_open' && !indexOpen.pending()) && last.phase === 'succeeded') {
             if (last.view_id !== currentId) { await restore(); }
             else if (pendingStartup && pendingStartup.source_id === currentSource) { pendingStartup = null; }
         }
@@ -606,6 +608,14 @@
         await submitOperation({kind:'mode', view_id:currentId, base_state_rev:state.state_rev, mode:mode});
     }
     el('live-mode').onchange = function () { changeDeckMode(el('live-mode').value).catch(report); };
+    el('reselect-levels').onclick = function () {
+        if (!levelsSupported || !deckModeReady() || el('source').value !== currentSource || launcher && launcher.blocked()) {
+            report(Error('Select the open jobdeck and wait for pending inputs before changing loaded levels.')); return;
+        }
+        try {
+            submitOperation({kind:'reselect_levels',view_id:currentId,base_state_rev:state.state_rev,levels:levels()}).catch(report);
+        } catch (e) { report(e); }
+    };
     async function openSource(startup) {
         const remembered = pendingStartup && pendingStartup.source_id === el('source').value ? pendingStartup : null;
         const request = Object.assign({}, startup || {kind: 'open', mode: el('mode').value, source_id: el('source').value, levels: levels(),
@@ -649,6 +659,7 @@
         if (caps.protocol !== 1 || caps.bundle !== bundle) { throw new Error('Client/server version mismatch. Reload the page.'); }
         about.init(); sessionExit.init();
         modeSupported = caps.jobdeck_modes === true;
+        levelsSupported = caps.jobdeck_levels === true;
         fillEditSupported = caps.fill_slot_edit === true;
         await refreshCatalog();
         if (caps.drc) { await drcPanel.init(); }

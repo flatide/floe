@@ -2,6 +2,7 @@
 //! run on the HTTP reactor. View rendering and index progress are independent
 //! of browser subscriptions. No implicit indexing or destructive reopen.
 mod index_open;
+mod levels;
 mod open;
 use index_open::IndexTarget;
 
@@ -122,6 +123,12 @@ impl IndexArgs {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationDto {
+    ReselectLevels {
+        seq: String,
+        view_id: String,
+        base_state_rev: String,
+        levels: LevelSelection,
+    },
     Mode {
         seq: String,
         view_id: String,
@@ -186,6 +193,16 @@ struct OpenCommand {
     replace: Option<(String, u64)>,
     display_policy: OpenDisplay,
     label_preference: Option<bool>,
+    reselect: Option<levels::Camera>,
+}
+impl OpenCommand {
+    fn kind(&self) -> &'static str {
+        if self.reselect.is_some() {
+            "reselect_levels"
+        } else {
+            "open"
+        }
+    }
 }
 struct Work {
     seq: u64,
@@ -510,6 +527,7 @@ impl Service {
         let signature = format!("{request:?}/{replace:?}");
         let seq = match &request {
             OperationDto::Open { seq, .. }
+            | OperationDto::ReselectLevels { seq, .. }
             | OperationDto::Mode { seq, .. }
             | OperationDto::Index { seq, .. }
             | OperationDto::IndexOpen { seq, .. } => view::counter(seq)?,
@@ -527,6 +545,15 @@ impl Service {
         }
         let source = |id: &str| self.source(id).ok_or("source_unavailable");
         let (kind, command) = match request {
+            OperationDto::ReselectLevels {
+                view_id,
+                base_state_rev,
+                levels,
+                ..
+            } => {
+                let open = levels::prepare(self, view_id, base_state_rev, levels)?;
+                ("reselect_levels", Command::Open(Box::new(open)))
+            }
             OperationDto::Mode {
                 view_id,
                 base_state_rev,
@@ -573,6 +600,7 @@ impl Service {
                             Field::Absent => None,
                             Field::Value(v) => Some(v),
                         },
+                        reselect: None,
                     })),
                 )
             }
@@ -596,7 +624,7 @@ impl Service {
                 let mut open = {
                     let s = self.inner.state.lock().unwrap();
                     let old = s.ledger.get(original).ok_or("operation_expired")?;
-                    if old["kind"] != "open"
+                    if !matches!(old["kind"].as_str(), Some("open" | "reselect_levels"))
                         || old["phase"] != "failed"
                         || old["error"] != "index_unavailable"
                     {
@@ -608,8 +636,20 @@ impl Service {
                         .map(|(_, o)| o.clone())
                         .ok_or("operation_expired")?
                 };
-                open.replace = target.core()?;
-                open.patch.pixels = Some((pixels[0], pixels[1]));
+                let target = target.core()?;
+                if let Some(camera) = &open.reselect {
+                    // A new approval cannot retarget a camera captured by an
+                    // older reselection. The worker rechecks this CAS before
+                    // any indexing and again before replacing the view.
+                    if target != open.replace
+                        || pixels != [camera.viewport.width, camera.viewport.height]
+                    {
+                        return Err("invalid_request");
+                    }
+                } else {
+                    open.replace = target;
+                    open.patch.pixels = Some((pixels[0], pixels[1]));
+                }
                 (
                     "index_open",
                     Command::IndexOpen {
@@ -759,7 +799,7 @@ fn run(inner: Arc<Inner>) {
         let seq = work.seq;
         let kind = match &work.command {
             Command::Mode { .. } => "mode",
-            Command::Open(_) => "open",
+            Command::Open(open) => open.kind(),
             Command::IndexOpen { .. } => "index_open",
             Command::Index { .. } => "index",
         };

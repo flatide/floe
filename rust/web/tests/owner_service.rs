@@ -389,6 +389,8 @@ fn open(seq: &str, id: &Value, mode: &str, levels: Value) -> Value {
     json!({"kind":"open","seq":seq,"source_id":id,"mode":mode,"levels":levels,"body":{"pixels":[257,191],"labels":false,"depth":"full","detail":"high","thin":"keep"}})
 }
 
+#[path = "support/deck_levels.rs"]
+mod deck_levels;
 #[path = "support/deck_modes.rs"]
 mod deck_modes;
 #[path = "support/defaults.rs"]

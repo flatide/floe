@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-16, M4g-25(실행 중 SVRF metadata 교체). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-16, M4g-26b(카메라 유지 레벨 재선택). 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -14,15 +14,16 @@ SVRF metadata 교체, 카메라 유지 jobdeck 레벨 재선택**3건의 구현 
 진단 옵션과 실제 브라우저 수용만으로 좁혀 보고한 이전 설명을 정정한다.
 M4g-24b/c는 DRC 최초 등록/교체와 런처 권한에 한정한 reviewer 명시 재연결을
 연결했다. 자동 저장은 새로 켜야 한다. G4-MENU-01의 로컬 근거는 연결됐으며
-M4g-25는 SVRF 교체도 로컬 연결했다. 카메라 유지 레벨 재선택1건은 계속 OPEN이다
-([M4 §81~82](WEBUI_M4.ko.md)).
+M4g-25는 SVRF 교체, M4g-26a/b는 열린 캐시를 유지하는 인덱싱과 카메라 유지 레벨
+재선택을 연결했다([M4 §81~84](WEBUI_M4.ko.md)). 메뉴 inventory는 linked39/open0이며
+실제 브라우저/현장 수용 및 아래 진단/CLI 최종 대조와는 별개다.
 
 ## 1. 범위별 현재 근거와 남은 일
 
 | 범위 | 로컬 구현/검증 근거 | 아직 닫지 않은 부분 |
 |---|---|---|
 | CLI 10종·보조 PNG 명령 | `rust/app`, `rust/app-core`; `validate_app_cli.py`, `validate_app_render.py`, `validate_app_jobdeck*.py`, `validate_fe_embed.py` 등. view 옵션/형식 대조 M4 §62; M4g-15a/20/21 reviewer 읽기; M4g-22 브라우저 dump | 무효/개발 옵션의 최종 제품 경계. GDS/gzip은 기존 native 한계이며 새 지원 아님 |
-| UI-01 열기·조작 | `launcher.js`, `browse.js`, `index-open.js`, `gestures.js`, `minimap.js`, `app.js`; 실제 startup/IPC·DOM gate. M4g-19 GTK 휠137입력·현재 표시/대기/drop·margin/DPR gate | G4-MENU-03 카메라 유지 레벨 재선택 미구현. 실제 브라우저 포커스·키·wheel·resize·재접속 수용, G1 input→photon/pacing·장치별 감도 |
+| UI-01 열기·조작 | `launcher.js`, `browse.js`, `index-open.js`, `gestures.js`, `minimap.js`, `app.js`; 실제 startup/IPC·DOM gate. M4g-19 GTK 휠137입력·현재 표시/대기/drop·margin/DPR gate. M4g-26b camera/revision 고정 레벨 재선택·색인 재시도 HTTP/UI | 실제 브라우저 포커스·키·wheel·resize·재접속 수용, G1 input→photon/pacing·장치별 감도 |
 | UI-02 pan/margin | `view_controller`, `stream`, `app.js`의 착지 margin/16px 위상·crop/표시 base, controller/stream/client gate | GTK 대비 새 strip·라벨 지연 실제 화면 측정. 덱 margin은 기존에도 미지원 |
 | UI-03 레이어·스타일 | Rust 선택/CAS, palette/presets/settings/defaults; GTK 원본 선택·접힘·상속 oracle, HTTP/DOM gate. M4g-16d 슬롯 모델/API·JSON v2·참조 프리셋/16×16 UI와324 GTK/native/web 대조 | 실제 선택·다중 스타일·기본값 게시와 슬롯 pointer/keyboard·포커스 화면 수용([계약/gate](WEBUI_BITMAP_SLOTS.ko.md)) |
 | UI-04 pick/snap/측정 | query/inspect/measure/rulers + Rust query/export, 숫자·scene 유효성·stale gate | 실제 포인터/클립보드·시각적 측정 검증 |
@@ -90,8 +91,8 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
 
 ## 3. 로컬 기능 완성과 구별할 목표 잔여
 
-1. [G4-MENU-03](WEBUI_G4_MENU.ko.md)의 카메라 유지
-   레벨 재선택 구현·검증, 진단/무효 CLI 경계와 G4 목록의 최종 재대조. reviewer 읽기 경로는
+1. 진단/무효 CLI 경계와 G4 목록의 최종 재대조. [메뉴 목록](WEBUI_G4_MENU.ko.md)은
+   M4g-26b부터 모든 범위 내 handler가 로컬 연결됐지만 전체 수용은 아니다. reviewer 읽기 경로는
    M4g-20/21에서 연결했으며 ambient reviewer 자동 선택은 하지 않는다. 개발 bitmap 슬롯 UI는
    M4g-16d에서 로컬 연결했지만 실제 브라우저 수용은 아래2번에 남는다.
    M4g-17a~c [합성/독립/정적 PNG 표시 진단](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)은 연결했다.

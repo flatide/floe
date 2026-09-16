@@ -61,7 +61,7 @@
         <label for="source" class="sr-only">Registered source</label>
         <select id="source"><option>Loading catalog…</option></select>
         <div class="source-mode"><label for="mode">Open mode</label><select id="mode"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div>
-        <details id="level-options"><summary>Levels to load</summary><label class="check"><input id="levels-all" type="checkbox" checked> All levels</label><div id="level-list"></div><button id="level-more" hidden>More levels</button></details>
+        <details id="level-options"><summary>Levels to load</summary><label class="check"><input id="levels-all" type="checkbox" checked> All levels</label><div id="level-list"></div><button id="level-more" hidden>More levels</button><button id="reselect-levels" hidden disabled title="Keep camera/current mode; reload layer defaults. Indexing requires separate approval.">Apply levels · keep view</button></details>
         <div class="button-row"><button id="open" class="primary">Open layout</button><button id="close" disabled>Close</button></div>
         <p id="source-note" class="note">Sources are registered by the local launcher.</p>
         <div id="launch-panel" hidden>

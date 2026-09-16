@@ -231,6 +231,28 @@ M4g-26a의 managed deck index는 준비 중 등록된 모든 TC 캐시에 read l
 쓰기 admission을 유지한다. process-local 보호이며 외부 프로세스의 캐시 교체/
 hot reload 보장이 아니다([M4 §83](WEBUI_M4.ko.md)).
 
+M4g-26b의 owner `capabilities.jobdeck_levels`와
+`{kind:"reselect_levels",seq,view_id,base_state_rev,levels}`는 현재 jobdeck의 로드 레벨을
+바꾼다. `levels`는 필수 `all` 또는 비어 있지 않은 `only`+ids이며 source/mode/body/
+좌표/쓰기 옵션은 받지 않는다. 서버의 현재 카메라와 pixels·DBU 및 revision을
+포착하고, 같은 모드·새 layer defaults로 준비한 첫 프레임에 적용한다. 같은 선택은
+카메라 부동소수점 재계산도 없는 no-op이다. 새 선택의 미색인 소스는 암묵 skip하지
+않고 기존 뷰를 보존해 `index_unavailable`/`index_open`을 제안한다. 실제 없는 TC의
+skip/incomplete 표시 정책과 일반 Open의 기존 부분 덱 정책은 바꾸지 않는다.
+준비 중 metadata 오류·commit 전 취소·stale commit도 이전 뷰를 보존한다.
+교체 성공 receipt는 attachment commit이며 이후 native worker 실패의 자동 rollback
+또는 첫 프레임 성공을 보장하지 않는다.
+
+해당 index preview에는 `reselect:{target:{kind:"replace",view_id,state_rev},pixels}`가
+추가된다. `index_open` 승인의 target/pixels는 이 값과 정확히 같아야 하고 다른 값은
+400이다. 처음 색인하기 전·완료 후·교체 commit의 CAS를 유지한다. 첫 재선택 접수의
+stale view는 기존 Busy 계약(429), 접수 뒤 stale은 실패 receipt다. 색인 완료 후 뷰가
+바뀌면 `index.phase:succeeded`와 화면 교체 실패를 분리해 이미 생성한 파일을 보존한다.
+POST replay는 퇴역한 원래 view를 다시 검증하기 전에 기존 receipt를 반환한다.
+UI는 열려 있는 덱을 고른 경우에만 버튼을 제공하며, 승인 journal에 고정 anchor를
+포함한다. 새로고침/결과 불명은 GET부터 확인하고 동일 요청만 재전송한다. modal 중
+viewport resize는 승인 전에 거부한다([M4 §84](WEBUI_M4.ko.md)).
+
 M2a의 현재 DRC 등록/읽기 URI·페이지·취소·focus/in_view·패널 상태·필터·순회·마커·
 CD·선택 집합·SVRF metadata/비교·타입 패널·격리/원자적 focus·ASCII API 계약은 [M2 기록](WEBUI_M2.ko.md) §2~21이
 기준이다. geometry reader는 read-only이며, 명시 opt-in한 owner의 주석 저장 endpoint는

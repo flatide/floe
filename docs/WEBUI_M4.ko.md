@@ -5952,3 +5952,59 @@ inventory도 통과했다. `--require-complete`는 남은 메뉴1건 때문에 �
 Python-free Linux·G1/G4·현장 수용, M2 공유/원격 승인·구현 및 조건부 M5도 남는다.
 URL 정책 차단 이후 브라우저 검증을 우회하지 않았으며 다운로드는 미검증이다.
 main/jobdeck의 별도 변경은 보존한다. 전체 goal은 진행 중이다.
+
+## 84. M4g-26b — 카메라 유지 jobdeck 레벨 재선택
+
+2026-09-16. `Levels to load`의 `Apply levels · keep view`는 현재 열려 있는 덱을
+고른 경우에만 보인다. GTK `_jobdeck_reselect_levels`의 중심·배율 복원을 서버의
+첫 generation 상태로 준비하며, fit 후 별도 goto를 보내는 방식은 아니다.
+
+- owner `reselect_levels`는 seq/view_id/base_state_rev/필수 levels만 받는다. source,
+  현재 mode, camera, pixels, DBU는 서버의 단일 controller snapshot에서 유도한다.
+  브라우저의 bbox/source/mode/body/쓰기 옵션은 거부한다. queued 작업 시작·준비 후
+  교체 commit에서 원래 view/revision을 검사하고 DBU가 달라지면 준비를 거부한다.
+- 다른 레벨 집합은 기존 window display 정책과 새 mode별 layer defaults로 준비한다.
+  GTK generic deck reopen처럼 depth는 full, mono는 초기값으로 시작하며, detail/thin/
+  frames/font 등 창 정책은 유지한다. 옛 synthetic layer ID·visibility·isolation·style과
+  mode visibility memory는 새 선택으로 복사하지 않는다. 같은 선택은 empty patch의
+  CAS no-op이라 viewport의 부동소수점 resize 재계산도 하지 않는다.
+- 가용하지만 미색인인 선택 TC가 있으면 준비를 중단하고 이전 뷰를 유지하며 별도
+  index 승인을 제안한다. 일반 Open의 부분 덱 표시나 실제 없는 TC의 skip/incomplete
+  정책은 바꾸지 않는다. 인덱싱은 M4g-26a의 혼합 잠금으로 열린 재사용 캐시를 유지한다.
+  force/occupancy가 열린 캐시를 수정하려는 경우는 여전히 Busy이며 무시/자동 close하지 않는다.
+- index preview의 `reselect.target/pixels`를 승인 journal에 넣고, 서버도 다른
+  target/pixels로 갱신하는 승인을 거부한다. 원래 요청 뒤 pan/resize/open이 생기면
+  오래된 카메라로 덮지 않는다. 색인이 성공한 뒤 교체가 stale이면 완료된 cache는
+  보존하고 `index:succeeded`와 `open:failed`를 분리해 표시한다. 새 명시 요청으로
+  재시도할 수 있지만 새로고침 자체가 새 권한/seq/소스를 만들지는 않는다.
+- 준비 실패·commit 이전 취소는 기존 뷰를 유지하며 하나의 render 예약을 재사용한다.
+  commit 뒤 늦은 취소는 성공을 cancelled로 바꾸지 않는다. 성공 receipt는 attachment
+  교체 완료이고 첫 프레임 성공 보장은 아니다. 이후 native worker/렌더 오류는 기존
+  view failure 계약을 따르며 이 단계가 worker 실패 후 자동 rollback을 추가하지 않는다.
+- UI는 pending 입력·제스처·launch/index 동의·owner 작업 중 재선택을 막는다. 승인
+  modal 중 DOM resize도 승인 전에 거부한다. 잃은 응답은 GET부터 복구하고 같은 요청만
+  재전송하며, 완료 receipt의 퇴역한 view ID 때문에 replay를 재실행하지 않는다.
+
+집중 검증: web96 단위(외부 fixture3개 ignored), 전체 ES2017/DOM UI, 실제 owner HTTP20개,
+strict all-target clippy와 release build가 통과했다. native gate는 첫 프레임 gen1의
+bbox/pixels, chip/layer 모드·새 defaults, 동일 선택 no-op, stale/잘못된 레벨/metadata
+실패, 일반 교체 취소 race, 퇴역 view replay와 단일 worker를 검사한다. 별도의 정지
+native writer로 색인 전 pan 거부, 색인 중 resize→완료 cache 보존/교체 거부,
+취소→kill/reap→같은 anchor의 명시 재시도 성공을 확인한다. UI는 현재 소스 제한,
+빈 선택/중복/대기/상태 조회 실패, ACK 유실의 읽기 복구, 선택 표시 복원과 고정
+anchor journal/변조 거부/resize 거부를 검사한다. 최초 native 테스트의 stale HTTP
+기댓값409는 기존 Busy 계약429/`busy`로 정정했으며 제품 오류로 계산하지 않는다.
+로그: `/private/tmp/floe-levels-{unit,ui,http-final,clippy-final,build}.log`.
+전체 `sh tools/validate_rust.sh`도 exit0 / `RUST VALIDATION: ALL OK`로 완료했다.
+core282/web96 단위, owner HTTP20, 전체 UI·메뉴 linked39/open0, jobdeck83·renderer46,
+KLayout j1/j8 각각13 PX+2 phase-exact+14 style이 통과했다. 외부 fixture를 요구하는
+기존 ignored 단위는 별도로 유지하며 실제 native 통합 게이트와 혼동하지 않는다.
+전체 로그는 `/private/tmp/floe-levels-battery.log`다. 검증용 `.venv` symlink만 제거하고
+연결 대상 환경은 보존했다. 실제 브라우저 수용/스크린샷은 도구 URL 정책 차단을
+우회하지 않아 미검증이며 합성 HTTP/DOM으로 대신 합격시키지 않는다.
+
+커밋 시 목표 잔여: 감사된 GTK 메뉴의 알려진 연결 누락은 **0건**(linked39, excluded2,
+inactive1)이며 `--require-complete`를 전체 배터리에 넣었다. 이것은 전체 기능/수용
+완료율이 아니다. 다음은 진단/무효 CLI 경계와 전체 G4 최종 재대조다. 실제 브라우저·
+Python-free Linux·G1/G4·현장, M2 공유/원격 승인·구현, 조건부 M5도 별도로 남는다.
+main/jobdeck의 별도 변경·현장 검증 대기는 유지하며 전체 goal은 진행 중이다.

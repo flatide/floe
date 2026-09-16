@@ -109,9 +109,9 @@ echo "== floe2 product + accuracy gates (KLayout = oracle/generator only)"
 .venv/bin/python -B tools/validate_web_drc_transfer.py "$FLOE2_SMOKE_SRC"
 .venv/bin/python -B tools/validate_web_svrf.py "$FLOE2_SMOKE_SRC"
 node tools/validate_web_ui.cjs
-# Inventory completeness is not feature parity. Known open GTK menu paths are
-# printed here; --require-complete is a separate, currently failing G4 gate.
-.venv/bin/python -B tools/validate_web_menu_inventory.py
+# Every in-scope GTK menu path now has a linked replacement. This inventory
+# remains a linkage gate, not functional parity or actual browser acceptance.
+.venv/bin/python -B tools/validate_web_menu_inventory.py --require-complete
 .venv/bin/python -B tools/validate_web_hangul.py
 .venv/bin/python -B tools/validate_app_jobdeck.py
 .venv/bin/python -B tools/validate_app_jobdeck_sources.py

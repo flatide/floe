@@ -3,7 +3,9 @@ const assert=require('node:assert/strict'),I=require('./index-open.js'),P=requir
 const id=n=>n.toString(16).padStart(64,'0'),copy=v=>JSON.parse(JSON.stringify(v));
 const preview={open_seq:'1',source_id:id(1),title:'한국 <img src=x>.oas',mode:'chip',levels:{mode:'only',ids:['1','-2']},display_policy:'window',jobs_available:3};
 const first={seq:'1',kind:'open',phase:'failed',error:'index_unavailable',index_open:preview};
-function rig(saved=null) {
+function rig(saved=null, options={}) {
+    const proposed=options.preview||preview,original={...first,kind:options.kind||'open',index_open:proposed};
+    const currentView=options.view||{view_id:id(8),state_rev:'7',status:'idle',pixels:[137,103]};
     const nodes=new Map(),listeners={},calls=[],ops=new Map(),timers=new Map(),done=[];
     let last='1',timer=0,lose=false,drop=false,saveFail=false,held=false,release,ready=true,completionFail=false;
     const doc={activeElement:null,contains:n=>!!n,addEventListener(k,fn,capture){assert(capture);listeners[k]=fn;}};
@@ -15,7 +17,7 @@ function rig(saved=null) {
     }
     function el(k){if(!nodes.has(k)){nodes.set(k,new Node(k));}return nodes.get(k);}
     el('index-open-dialog').hidden=true;el('index-open-dialog').children=[el('index-open-close'),el('index-open-approve')];
-    function all(){return {last_seq:last,active:[...ops.values()].find(v=>!['succeeded','failed','incomplete','cancelled'].includes(v.phase))?.seq||null,history:[first,...ops.values()]};}
+    function all(){return {last_seq:last,active:[...ops.values()].find(v=>!['succeeded','failed','incomplete','cancelled'].includes(v.phase))?.seq||null,history:[original,...ops.values()]};}
     function terminal(r,phase='succeeded',stage='open'){return {seq:r.seq,kind:'index_open',open_seq:r.open_seq,request_id:r.request_id,phase,stage,view_id:id(9),error:phase==='failed'?'busy':null,index:{phase:stage==='open'?'succeeded':phase,skipped:1}};}
     const env={el,document:doc,protocol:P,message:String,session:()=>id(20),pixels:()=>[137,103],randomId:()=>id(30),ready:()=>ready,
         changed(){},loadPending:()=>saved,savePending:v=>{if(saveFail){throw Error('storage unavailable');}saved=v;},
@@ -23,8 +25,8 @@ function rig(saved=null) {
         setTimeout(fn){const n=++timer;timers.set(n,fn);return n;},clearTimeout:n=>timers.delete(n),
         async http(method,path,body,missing,signal) {
             calls.push({method,path,body:body&&copy(body)});
-            if(path.endsWith('/index-open')){assert.equal(method,'GET');return copy(preview);}
-            if(path==='/api/v1/view'){return {view:{view_id:id(8),state_rev:'7',status:'idle'}};}
+            if(path.endsWith('/index-open')){assert.equal(method,'GET');return copy(proposed);}
+            if(path==='/api/v1/view'){return {view:copy(currentView)};}
             if(path==='/api/v1/operations'&&method==='GET'){return all();}
             if(path==='/api/v1/operations'&&method==='POST'){
                 assert(saved,'journal must precede mutation');assert.deepEqual(JSON.parse(saved).request,body);
@@ -47,6 +49,34 @@ function rig(saved=null) {
         async approve(){await el('index-open-approve').onclick();}};
 }
 (async()=>{
+    const anchored={...preview,reselect:{target:{kind:'replace',view_id:id(8),state_rev:'7'},pixels:[137,103]}};
+    for(const reselect of [null,{}, {target:{kind:'empty'},pixels:[137,103]}, {...anchored.reselect,pixels:[0,103]}, {...anchored.reselect,source_id:id(2)}]) {
+        assert.throws(()=>I.preview({...preview,reselect},P));
+    }
+    const selected=rig(null,{preview:anchored,kind:'reselect_levels'});
+    await selected.api.init(true);await selected.open();assert.match(selected.el('index-open-preview').textContent,/Camera: fixed/);
+    await selected.approve();const frozen=selected.saved;
+    assert.deepEqual(JSON.parse(frozen).request.target,anchored.reselect.target);
+    assert.deepEqual(JSON.parse(frozen).request.pixels,anchored.reselect.pixels);
+    selected.api.stop();
+    for(const field of ['target','pixels']) {
+        const bad=JSON.parse(frozen);bad.request[field]=field==='target'?{...bad.request.target,state_rev:'8'}:[138,103];
+        assert.throws(()=>I.journal(bad,id(20),P));
+    }
+    for(const changed of [{state_rev:'8'},{view_id:id(9)},{pixels:[138,103]}]) {
+        const stale=rig(null,{preview:anchored,kind:'reselect_levels',view:{view_id:id(8),state_rev:'7',status:'idle',pixels:[137,103],...changed}});
+        await stale.api.init(true);await stale.open();await stale.approve();
+        assert.match(stale.el('index-open-status').textContent,/view changed/);
+        assert.equal(stale.calls.filter(c=>c.method==='POST').length,0);assert.equal(stale.saved,null);stale.api.stop();
+    }
+    const resize=rig(null,{preview:anchored,kind:'reselect_levels'});
+    await resize.api.init(true);await resize.open();resize.env.pixels=()=>[138,103];await resize.approve();
+    assert.match(resize.el('index-open-status').textContent,/resized/);assert.equal(resize.saved,null);
+    assert.equal(resize.calls.filter(c=>c.method==='POST').length,0);resize.api.stop();
+    const recovered=rig(frozen,{preview:anchored,kind:'reselect_levels',view:{view_id:id(9),state_rev:'99',status:'idle',pixels:[200,200]}});
+    await recovered.api.init(true);assert.equal(recovered.calls.filter(c=>c.method==='POST').length,0);
+    await recovered.el('index-open-check').onclick();assert.deepEqual(recovered.calls.find(c=>c.method==='POST').body,JSON.parse(frozen).request);
+    recovered.api.stop();
     for(const bad of [{jobs_available:17},{source_id:'no'},{levels:{mode:'only',ids:[]}},{levels:{mode:'only',ids:['1','1']}}]){assert.throws(()=>I.preview({...preview,...bad},P));}
     const off=rig();await off.api.init(false);assert(!off.calls.length);off.api.stop();
     const r=rig();await r.api.init(true);await r.open();assert(r.api.blocked());assert.match(r.el('index-open-preview').textContent,/<img src=x>/);

@@ -60,6 +60,7 @@ pub(super) fn execute(
     stop: Arc<AtomicUsize>,
     index: Option<&Value>,
 ) -> Result<Value> {
+    let kind = command.kind();
     let OpenCommand {
         source,
         source_id,
@@ -69,6 +70,7 @@ pub(super) fn execute(
         replace,
         display_policy,
         label_preference,
+        reselect,
     } = command;
     let mode_name = match mode {
         Mode::Level => "level",
@@ -87,7 +89,7 @@ pub(super) fn execute(
     inner.state.lock().unwrap().ledger.update(
         seq,
         super::index_open::open_state(
-            json!({"seq":seq.to_string(),"kind":"open","phase":"opening"}),
+            json!({"seq":seq.to_string(),"kind":kind,"phase":"opening"}),
             index,
         ),
         false,
@@ -107,24 +109,50 @@ pub(super) fn execute(
             }
             // Preserve native/decoded/retained caches for same-source
             // navigation. Only explicitly supplied preferences change.
-            let snapshot = previous.controller.edit(*rev, *patch)?;
+            // Identical loaded levels are a genuine no-op: even resizing to
+            // the same dimensions would round-trip the floating-point center.
+            let patch = if reselect.is_some() {
+                Patch::default()
+            } else {
+                *patch
+            };
+            let snapshot = previous.controller.edit(*rev, patch)?;
             s.window_display =
                 window_display.capture(&snapshot.state, previous.controller.model.deck);
             return Ok(
-                json!({"seq":seq.to_string(),"kind":"open","phase":"succeeded",
+                json!({"seq":seq.to_string(),"kind":kind,"phase":"succeeded",
                 "view_id":previous.id,"reused":true,"state_rev":snapshot.state_rev.to_string()}),
             );
         }
+    }
+    if reselect.is_some() && super::index_open::needs_index(inner, &source, levels.as_ref(), &stop)?
+    {
+        // Ordinary open may show an incomplete deck. A requested new level
+        // with an available but unindexed source must first offer consent.
+        return Err(Error::new(
+            ErrorKind::Cache,
+            "selected levels need indexing",
+        ));
     }
     let data = ManagedDataset::open(&inner.resources, source.path(), levels, mode, &stop)?;
     let model = Model::new(&data)?;
     let (width, height) = patch.pixels.unwrap_or((1024, 768));
     let initial = ViewState::initial(&model, width, height)?;
-    let initial = match display_policy {
+    let mut initial = match display_policy {
         OpenDisplay::Explicit => initial,
         OpenDisplay::Window => initial.edit(&model, window_display.patch(model.deck))?,
     }
     .edit(&model, *patch)?;
+    if let Some(camera) = reselect {
+        if camera.dbu != model.dbu {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "deck coordinates changed during reselection",
+            ));
+        }
+        initial.viewport = camera.viewport;
+        initial.validate(&model)?;
+    }
     let remembered = window_display.capture(&initial, model.deck);
     let rows = LayerCatalog::dataset(&data.dataset, &model);
     // Prepare a dormant controller with the existing reservation; the
@@ -178,5 +206,5 @@ pub(super) fn execute(
     let id = view.id.clone();
     s.window_display = remembered;
     s.view = Some(view);
-    Ok(json!({"seq":seq.to_string(),"kind":"open","phase":"succeeded","view_id":id}))
+    Ok(json!({"seq":seq.to_string(),"kind":kind,"phase":"succeeded","view_id":id}))
 }

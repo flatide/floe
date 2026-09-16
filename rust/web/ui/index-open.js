@@ -14,6 +14,11 @@
             new Set(l.ids).size === l.ids.length && l.ids.every(function (s) { return typeof s === 'string' && /^-?(0|[1-9][0-9]{0,18})$/.test(s) && s !== '-0'; }))) {
             throw Error('Invalid original level selection');
         }
+        if (v.reselect !== undefined) {
+            const a = v.reselect;
+            if (!a || Object.keys(a).sort().join(',') !== 'pixels,target' || !a.target || a.target.kind !== 'replace' || !Array.isArray(a.pixels) || a.pixels.length !== 2) { throw Error('Invalid reselection anchor'); }
+            target(a.target,P); P.pixels(a.pixels[0],a.pixels[1]);
+        }
         return v;
     }
     function target(v, P) {
@@ -31,11 +36,14 @@
         P.counter(r.seq); P.counter(r.open_seq); target(r.target, P);
         if (!Array.isArray(r.pixels) || r.pixels.length !== 2) { throw Error('Invalid saved pixels'); }
         P.pixels(r.pixels[0], r.pixels[1]);
+        if (v.preview.reselect && (!sameTarget(r.target,v.preview.reselect.target) || !samePixels(r.pixels,v.preview.reselect.pixels))) { throw Error('Saved approval changed the reselection anchor'); }
         const o = r.options;
         if (!o || Object.keys(o).sort().join(',') !== 'force,jobs,lod,occupancy' || !Number.isInteger(o.jobs) || o.jobs < 1 || o.jobs > 16 ||
             ['force','lod','occupancy'].some(function (k) { return typeof o[k] !== 'boolean'; })) { throw Error('Invalid saved index options'); }
         return v;
     }
+    function sameTarget(a,b) { return a.kind === b.kind && a.view_id === b.view_id && a.state_rev === b.state_rev; }
+    function samePixels(a,b) { return Array.isArray(a) && a.length === 2 && a[0] === b[0] && a[1] === b[1]; }
     function resultText(v, message) {
         const i = v.index || {}, phase = i.native && i.native.phase || i.phase || v.phase;
         if (v.stage === 'open') {
@@ -74,6 +82,7 @@
             el('index-open-preview').textContent = v.title + '\nSource ID: ' + v.source_id + '\nMode: ' + v.mode +
                 '\nLevels: ' + (v.levels.mode === 'all' ? 'all' : v.levels.ids.join(', ')) +
                 '\nDisplay: ' + (v.display_policy === 'window' ? 'inherit the current window preferences' : 'preserve the original open options') +
+                (v.reselect ? '\nCamera: fixed at the original level selection. Navigation/resize invalidates this request.' : '') +
                 '\nAfter indexing: ' + (viewTarget.kind === 'empty' ? 'open in the empty workspace' : 'replace the current view only if its revision is unchanged') +
                 '\nIndex CPU slots available now: ' + v.jobs_available + ' (advice only; not reserved).';
         }
@@ -155,6 +164,9 @@
                 if (!active(t) || !opened) { return; }
                 if (current && !['idle','rendering'].includes(current.view.status)) { throw Error('Wait for the current view to finish opening or closing.'); }
                 const to = current ? {kind:'replace',view_id:current.view.view_id,state_rev:current.view.state_rev} : {kind:'empty'};
+                if (v.reselect && (!sameTarget(to,v.reselect.target) || !samePixels(current && current.view.pixels,v.reselect.pixels) || !samePixels(o.pixels(),v.reselect.pixels))) {
+                    throw Error('The view changed after selecting levels. Close this dialog and apply the levels again. No indexing has started.');
+                }
                 target(to,P); review = {preview:v,target:to}; details(v,to);
                 el('index-open-jobs').value = String(Math.max(1,Math.min(12,v.jobs_available)));
                 ['lod','force'].forEach(function (k) { el('index-open-'+k).checked = false; });
@@ -167,6 +179,7 @@
             if (paused || busy || pending || invalid || !opened || !review || !review.preview.jobs_available || !o.ready()) { return; }
             const reviewed = review, t = begin();
             try {
+                if (reviewed.preview.reselect && !samePixels(o.pixels(),reviewed.preview.reselect.pixels)) { throw Error('The viewport resized. Close this dialog and apply the levels again.'); }
                 const jobs = Number(el('index-open-jobs').value);
                 if (!Number.isInteger(jobs) || jobs < 1 || jobs > 16) { throw Error('Index jobs must be 1–16.'); }
                 const options = {jobs:jobs,force:el('index-open-force').checked,lod:el('index-open-lod').checked,occupancy:el('index-open-occupancy').checked};
@@ -174,7 +187,7 @@
                 if (!active(t) || !opened) { return; }
                 if (all.active !== null) { throw Error('Another owner operation is running. Review and approve again after it finishes.'); }
                 const r = {kind:'index_open',seq:P.next(all.last_seq),request_id:o.randomId(),open_seq:reviewed.preview.open_seq,
-                    approved:true,target:reviewed.target,pixels:o.pixels(),options:options};
+                    approved:true,target:reviewed.target,pixels:reviewed.preview.reselect ? reviewed.preview.reselect.pixels : o.pixels(),options:options};
                 const record = journal({schema:1,session:o.session(),preview:reviewed.preview,request:r},o.session(),P);
                 save(record); // MUST succeed before any mutation is submitted.
                 o.changed(); paint();
@@ -198,10 +211,10 @@
         }
         function observe(all) {
             if (!enabled || pending || invalid) { return; }
-            const history = all.history || [], last = history.slice().reverse().find(function (v) { return v.kind === 'open' || v.kind === 'index_open'; });
-            if (last && last.kind === 'open') { candidate = last.phase === 'failed' ? last.index_open || null : null; }
+            const history = all.history || [], last = history.slice().reverse().find(function (v) { return ['open','reselect_levels','index_open'].includes(v.kind); });
+            if (last && ['open','reselect_levels'].includes(last.kind)) { candidate = last.phase === 'failed' ? last.index_open || null : null; }
             else if (last && last.kind === 'index_open') {
-                const original = history.find(function (v) { return v.seq === last.open_seq && v.kind === 'open'; });
+                const original = history.find(function (v) { return v.seq === last.open_seq && ['open','reselect_levels'].includes(v.kind); });
                 candidate = ['failed','incomplete','cancelled'].includes(last.phase) && original ? original.index_open || null : null;
             } else { candidate = null; }
             paint();

@@ -9,9 +9,9 @@
 `tools/validate_web_menu_inventory.py`는 GTK를 import하거나 실행하지 않고
 `_build_menubar` AST에서 실제 item/check callback을 추출한다.42개 호출 지점,
 39개 handler family를 분류한다. thin/mode의 각각3항목 반복문은 호출 지점1개씩이다.
-최초 감사 당시36개가 연결됐고, M4g-25 이후 현재38개 호출 지점은 웹 control·JS
-참조·테스트 파일에 연결된다.2개는 제품 범위 밖,1개는 기존 Rust 경로에서 무효,
-1개는 실행 중 조작이 미구현이다.
+최초 감사 당시36개가 연결됐고, M4g-26b 이후 현재39개 호출 지점은 웹 control·JS
+참조·테스트 파일에 연결된다.2개는 제품 범위 밖,1개는 기존 Rust 경로에서 무효이며
+이 목록의 OPEN은0개다. 이는 알려진 메뉴 연결 누락의 해소이지 전체 수용 완료가 아니다.
 
 `linked`는 **연결 근거가 존재함**이지 기능 parity PASS가 아니다. 소스·테스트 파일의
 존재만으로 픽셀/행동/권한/실브라우저 수용을 증명하지 않는다. 실제 동작 검사는
@@ -20,9 +20,9 @@ callback·웹 control/테스트 링크 소실은 실패하며, 이 결함 주입
 
 ```sh
 python3 -B tools/validate_web_menu_inventory.py
-# inventory 확인: exit0, OPEN 1건을 출력. 전체 배터리에도 배선.
+# inventory 확인: exit0, linked39/open0.
 python3 -B tools/validate_web_menu_inventory.py --require-complete
-# 현재 exit1: 03 미완료. 이 결과를 전체 G4 PASS로 바꾸면 안 된다.
+# M4g-26b부터 exit0, 전체 배터리에 배선. 전체 G4 PASS가 아니다.
 ```
 
 | 원본 메뉴 묶음 | 웹 연결 근거 / 제외 이유 |
@@ -35,6 +35,7 @@ python3 -B tools/validate_web_menu_inventory.py --require-complete
 | DRC 이동 / box 선택 / waive / note | drc/drc-notes/drc-waives 및 관련 HTTP/UI gate. note 삭제는 빈 텍스트 확정으로 제공 |
 | review import / export | drc-transfer: 등록된 reviewer의 전체 review 교체·별도 승인. 임의 서버 경로 쓰기 아님 |
 | jobdeck mode / Ctrl+, | live-mode + 서비스 Mode: 현재 카메라·로드 레벨 유지. 로드 레벨 재선택과 다름 |
+| jobdeck 로드 레벨 재선택 | reselect-levels + 서버 camera/revision 고정 요청·명시 index 재시도. 첫 프레임 카메라/실패 보존 HTTP와 UI gate |
 | About / licenses | about/notices + 배포 고지 gate |
 | abstract / 옛 coverage | Rust abstract 미지원, density coverage 폐기. 새 occupancy는 제외 대상이 아님 |
 | LOD 토글 | 기존 GTK→Rust wire에 전달되지 않음. 웹은 무효로 수용하지 않고 설명과 함께 거부. index --lod와 다름 |
@@ -104,7 +105,7 @@ type/filter/selection·미승인 preview는 초기화한다. 입력 JSON은16MiB
 재연결에도 별도 승인 입력 scope와 metadata 선택을 보존한다. 합성 HTTP/DOM
 회귀는 [M4 §82](WEBUI_M4.ko.md); 실제 브라우저 수용과는 별개다.
 
-### G4-MENU-03 — 카메라를 유지한 jobdeck 로드 레벨 재선택
+### G4-MENU-03 — 카메라를 유지한 jobdeck 로드 레벨 재선택 (26b 로컬 연결)
 
 GTK `_jobdeck_reselect_levels`는 현재 `cx,cy,spp`를 보관한 뒤 새 레벨을 열고
 `_fit_after_worker_start=False`로 복원한다. 웹의 Levels to load + Open은 일반
@@ -112,7 +113,7 @@ open이며, `service/open.rs`의 새 레벨 집합은 `ViewState::initial`에서
 window display 정책도 의도적으로 camera를 포함하지 않는다. 현재 Mode 조작은
 기존 로드 레벨만 유지하므로 이 기능을 대체하지 못한다.
 
-현재 view/revision과 서버의 카메라 snapshot에 묶인 레벨 재선택 명령이 필요하다.
+감사 당시 요구조건: 현재 view/revision과 서버의 카메라 snapshot에 묶인 명령이어야 한다.
 metadata/cached source를 먼저 확인하고 실패·취소 시 기존 뷰를 유지하며, 새
 레벨에 색인이 필요하면 원래 선택/카메라를 보존한 명시 동의 경로로 이어져야 한다.
 그 사이 pan/resize/다른 open이 발생하면 오래된 카메라로 덮어쓰지 않는다. 성공 시
@@ -121,13 +122,22 @@ metadata/cached source를 먼저 확인하고 실패·취소 시 기존 뷰를 �
 M4g-26a 선행 구현은 managed deck index의 잠금 분류다. 현재 레벨이 읽는 캐시를
 재사용하고 새 선택 소스만 만드는 작업은 열린 뷰를 유지한 채 가능하다. force나
 occupancy-only가 열린 캐시를 수정하려 하면 전체 계획을 첫 쓰기 전에 거부한다.
-카메라 고정 재선택 명령/브라우저/색인 재시도는 아직 연결하지 않았으며 이 항목은
-계속 OPEN이다([M4 §83](WEBUI_M4.ko.md)).
+26a 시점에는 카메라 고정 재선택 명령/브라우저/색인 재시도를 연결하지 않았으므로
+이 항목은 계속 OPEN이었다([M4 §83](WEBUI_M4.ko.md)).
+
+M4g-26b에서 `Levels to load` 안의 `Apply levels · keep view`를 연결했다.
+현재 view/revision과 서버 camera에 묶인 선택만 받으며 source/mode/좌표/쓰기 권한을
+브라우저에서 바꾸지 않는다. 첫 프레임부터 같은 bbox/pixels이고 새 layer defaults를
+적용한다. 같은 선택은 no-op이다. 새 선택의 미색인 소스는 이전 화면을 유지하며
+별도 index 승인으로 이어지고, 승인/replay에도 원래 view/revision/pixels를 고정한다.
+그 사이 pan/resize/open은 오래된 교체를 거부한다. metadata 실패·취소·완료된 캐시와
+실패한 화면 교체의 구분은 실제 HTTP/native gate로 확인한다([M4 §84](WEBUI_M4.ko.md)).
+이 항목을 linked로 바꾸지만 브라우저·현장 수용은 완료로 세지 않는다.
 
 ## 3. 다음 구현과 판정
 
-다음 우선순위는03 카메라 유지 레벨 재선택이다. 분리 구현 단계에서도
-CLI 시작만 가능한 상태를 원래 GTK 기능 전체의 대체로 다시 정의하지 않는다.
+다음 우선순위는 진단/무효 CLI 경계와 전체 G4 목록의 최종 재대조다.
+세 항목은 모두 실제 런타임 연결까지 진행했으며 CLI 시작만으로 대체하지 않았다.
 세 항목을 모두 닫아도 actual browser·Python-free Linux·G1/G2/G3/G4, 공유/원격,
 조건부 M5가 자동 완료되지는 않는다. GTK 진단/APNG 및 무효 CLI 정책 결정도
 기존 별도 목록대로 남는다. 현장 실행 불가·이전 도구 제한은 우회하지 않는다.

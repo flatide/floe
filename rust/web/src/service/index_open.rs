@@ -7,15 +7,24 @@ use super::*;
 /// not turn arbitrary source/format/registration failures into write proposals.
 /// This error-only probe stays off the HTTP reactor and uses selected read leases.
 pub(super) fn retryable(inner: &Inner, open: &OpenCommand, stop: &AtomicUsize) -> Result<bool> {
+    needs_index(inner, &open.source, open.levels.as_ref(), stop)
+}
+
+pub(super) fn needs_index(
+    inner: &Inner,
+    registered: &RegisteredSource,
+    levels: Option<&BTreeSet<i64>>,
+    stop: &AtomicUsize,
+) -> Result<bool> {
     use floe_app_core::{
         cache,
         jobdeck::{parser::JobDeck, sources::SourceCatalog},
     };
-    open.source.validate(stop)?;
-    let source = open.source.path();
-    let names: BTreeSet<String> = if open.source.deck {
+    registered.validate(stop)?;
+    let source = registered.path();
+    let names: BTreeSet<String> = if registered.deck {
         JobDeck::read(source, true, stop)?
-            .sources(open.levels.as_ref())
+            .sources(levels)
             .into_iter()
             .map(str::to_owned)
             .collect()
@@ -88,8 +97,14 @@ pub(super) fn proposal(seq: u64, open: &OpenCommand) -> Value {
         Some(ids) => json!({"mode":"only","count":ids.len()}),
         None => json!({"mode":"all"}),
     };
-    json!({"open_seq":seq.to_string(),"source_id":open.source_id,"title":open.source.title,
-        "mode":mode,"levels":levels,"display_policy":match open.display_policy {OpenDisplay::Window=>"window",OpenDisplay::Explicit=>"explicit"}})
+    let mut out = json!({"open_seq":seq.to_string(),"source_id":open.source_id,"title":open.source.title,
+        "mode":mode,"levels":levels,"display_policy":match open.display_policy {OpenDisplay::Window=>"window",OpenDisplay::Explicit=>"explicit"}});
+    if let Some(camera) = &open.reselect {
+        let (id, rev) = open.replace.as_ref().expect("reselection anchor");
+        out["reselect"] = json!({"target":{"kind":"replace","view_id":id,"state_rev":rev.to_string()},
+            "pixels":[camera.viewport.width,camera.viewport.height]});
+    }
+    out
 }
 
 pub(super) fn open_state(mut state: Value, index: Option<&Value>) -> Value {

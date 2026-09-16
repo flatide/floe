@@ -4,7 +4,7 @@ fn cache_dir(path: &Path) -> PathBuf {
     cache::cache_path(path).unwrap()
 }
 
-fn area(name: &str) -> PathBuf {
+pub(super) fn area(name: &str) -> PathBuf {
     let root = PathBuf::from(std::env::var_os("FLOE_OWNER_MODE_FIXTURE").unwrap());
     let dir = root.parent().unwrap().join(name);
     fs::create_dir(&dir).unwrap();
@@ -13,11 +13,11 @@ fn area(name: &str) -> PathBuf {
     }
     dir
 }
-fn request(seq: u64, original: u64, target: Value) -> Value {
+pub(super) fn request(seq: u64, original: u64, target: Value) -> Value {
     json!({"kind":"index_open","seq":seq.to_string(),"open_seq":original.to_string(),
         "request_id":format!("{seq:064x}"),"approved":true,"target":target,"pixels":[137,103],"options":{"jobs":2}})
 }
-async fn operation(h: &Harness, login: &Login, input: Value) -> Value {
+pub(super) async fn operation(h: &Harness, login: &Login, input: Value) -> Value {
     let seq = input["seq"].as_str().unwrap().parse().unwrap();
     assert_eq!(
         h.call(login, "POST", "/api/v1/operations", input).await.0,
@@ -25,10 +25,10 @@ async fn operation(h: &Harness, login: &Login, input: Value) -> Value {
     );
     h.finished(login, seq).await
 }
-async fn state(h: &Harness, login: &Login) -> Value {
+pub(super) async fn state(h: &Harness, login: &Login) -> Value {
     h.call(login, "GET", "/api/v1/view", Value::Null).await.1["view"].clone()
 }
-fn target(view: &Value) -> Value {
+pub(super) fn target(view: &Value) -> Value {
     json!({"kind":"replace","view_id":view["view_id"],"state_rev":view["state_rev"]})
 }
 async fn failed(h: &Harness, login: &Login, input: Value) -> Value {
@@ -65,7 +65,7 @@ async fn failed_replacement(h: &Harness, login: &Login, source: &Value, seq: u64
     let failure = h.finished(login, seq).await;
     assert_eq!(failure["error"], "index_unavailable", "{failure}");
 }
-async fn paused_pid(path: &Path) -> i32 {
+pub(super) async fn paused_pid(path: &Path) -> i32 {
     timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(s) = fs::read_to_string(path) {
@@ -79,7 +79,7 @@ async fn paused_pid(path: &Path) -> i32 {
     .await
     .unwrap()
 }
-fn signal(pid: i32, flag: &str) -> bool {
+pub(super) fn signal(pid: i32, flag: &str) -> bool {
     assert!(pid > 0);
     std::process::Command::new("/bin/kill")
         .args([flag, &pid.to_string()])

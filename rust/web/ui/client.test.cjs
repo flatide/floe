@@ -31,7 +31,7 @@ let liveFillRows=presetFixture().fills.map(p=>({name:p.name,rows:p.rows}));
 let launchState={revision:'0',pending:null},launchPolls=[],launchRegistered=false,launchReceipt=null;
 let startupReceipt=null,startupFail=true;
 const startupBody={depth:'17',detail:'high',thin:'keep',frames:true,labels:false,navigation:{kind:'goto',center_um:['1.25','-2.5']}};
-let modeOperation=null,serverMode='chip',modeReadFailure=false,modeViewReadFailure=false,modeLosePost=false,modeNumber=0;
+let modeOperation=null,serverMode='chip',serverLevels=['1'],modeReadFailure=false,modeViewReadFailure=false,modeLosePost=false,modeNumber=0;
 let textSelection=null;
 let clipController,clipOp=null,clipFile=null;
 function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
@@ -109,7 +109,7 @@ class XHR {
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
         else if((startupEnabled||dumpEnabled)&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=204;}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,fill_slot_edit:fillEditorEnabled,display_dump:true,dump_on_start:dumpEnabled};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,jobdeck_levels:modeEnabled,fill_slot_edit:fillEditorEnabled,display_dump:true,dump_on_start:dumpEnabled};}
         else if(launchEnabled&&this.path==='/api/v1/launch'){value=launchState;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/poll/')){launchPolls.push(this);return;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/')){
@@ -140,8 +140,8 @@ class XHR {
         else if(this.path==='/api/v1/catalog/deck/levels/0') {value={levels:[{id:'1',title:'Level 1'},{id:'2',title:'Level 2'}],next:null};}
         else if(this.path==='/api/v1/startup') {value={confirm_levels:startupEnabled,request:{kind:'open',seq:'1',source_id:modeEnabled||startupEnabled?'deck':'src',mode:modeEnabled?'chip':'level',levels:modeEnabled?{mode:'only',ids:['1']}:{mode:'all'},body:startupEnabled?startupBody:{detail:'high'},label_preference:false}};}
         else if(this.path==='/api/v1/operations'&&this.method==='POST') {
-            open=true;lastSeq=body.seq;value={seq:lastSeq,kind:body.kind,phase:body.kind==='mode'?'preparing':'succeeded',view_id:viewId};status=202;
-            if(body.kind==='mode') {assert(modeEnabled);modeOperation=value;}
+            open=true;lastSeq=body.seq;value={seq:lastSeq,kind:body.kind,phase:['mode','reselect_levels'].includes(body.kind)?'preparing':'succeeded',view_id:viewId};status=202;
+            if(['mode','reselect_levels'].includes(body.kind)) {assert(modeEnabled);modeOperation=value;}
             if(startupEnabled){open=body.kind==='open'&&!startupFail;startupReceipt=value={seq:lastSeq,kind:body.kind,phase:body.kind==='open'&&startupFail?'failed':'succeeded',view_id:open?viewId:null,error:body.kind==='open'&&startupFail?'index_required':null};}
             if(indexOpenEnabled){
                 open=body.kind==='index_open';
@@ -156,7 +156,7 @@ class XHR {
             if(indexOpenEnabled){value={last_seq:lastSeq,active:null,history:indexOperations};}
             if(modeReadFailure){modeReadFailure=false;status=503;value={error:'unavailable'};}
         }
-        else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:indexOpenEnabled?indexSource:modeEnabled?'deck':'src',mode:modeEnabled?serverMode:'level',levels:modeEnabled?['1']:null,view:{...snapshot,connection_epoch:''}}:null;
+        else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:indexOpenEnabled?indexSource:modeEnabled?'deck':'src',mode:modeEnabled?serverMode:'level',levels:modeEnabled?serverLevels:null,view:{...snapshot,connection_epoch:''}}:null;
             if(modeViewReadFailure){modeViewReadFailure=false;status=503;value={error:'unavailable'};}}
         else if(this.path.endsWith('/minimap/full')){value={view_id:viewId,dataset_revision:'1',base:'full',size:180,pixels:'0'.repeat(32400)};}
         else if(this.path.endsWith('/layers/0')) {value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:1,start:0,next:null,rows:[layerRow]};}
@@ -172,7 +172,7 @@ class XHR {
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
         if(indexOpenEnabled&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
-        if(body&&body.kind==='mode'&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
+        if(body&&['mode','reselect_levels'].includes(body.kind)&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
         if(indexOpenEnabled&&body&&body.kind==='index_open'){setImmediate(()=>this.ontimeout());return;}
         setImmediate(()=>this.onload());
     }
@@ -641,7 +641,33 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         await complete('chip',true);assert.match(node('notice').textContent,/changed/);
         assert.equal(serverMode,'level');assert.equal(commands().length,count+2);
         next.receive(packet('raw','99','1',epoch,{view_id:'a'.repeat(64)}));
-        listeners.pagehide();console.log('WEB DECK MODE CLIENT: ALL OK (scope/CAS, dropdown/Ctrl+, pending input/duplicates, raw/level/chip, stale/unknown reconciliation, no automatic replay)');return;
+        const selections=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations'&&r.body.kind==='reselect_levels');
+        assert(!node('reselect-levels').hidden);assert(!node('reselect-levels').disabled);
+        node('source').value='src';node('source').onchange();assert(node('reselect-levels').hidden);
+        node('reselect-levels').onclick();await new Promise(setImmediate);assert.equal(selections().length,0);
+        node('source').value='deck';node('source').onchange();await wait(()=>node('level-list').querySelectorAll('input').length===2);
+        node('levels-all').checked=false;node('levels-all').onchange();
+        node('reselect-levels').onclick();await new Promise(setImmediate);assert.equal(selections().length,0,'empty selection sent');
+        const boxes=node('level-list').querySelectorAll('input');boxes[1].checked=true;boxes[1].onchange();
+        const oldId=viewId,oldCamera=JSON.stringify(snapshot.bbox_dbu),prior=sockets.length;
+        modeLosePost=true;modeReadFailure=true;node('reselect-levels').onclick();
+        await wait(()=>!node('reselect-levels').disabled);assert.equal(selections().length,0,'failed preflight sent a mutation');
+        node('mode').value='layer';node('reselect-levels').onclick();await wait(()=>selections().length===1);
+        assert.deepEqual(selections()[0].body,{kind:'reselect_levels',view_id:oldId,base_state_rev:snapshot.state_rev,levels:{mode:'only',ids:['2']},seq:lastSeq});
+        node('reselect-levels').onclick();await new Promise(setImmediate);assert.equal(selections().length,1,'duplicate reselect escaped guard');
+        serverLevels=['2'];viewId=String(++modeNumber).repeat(64);snapshot.view_id=viewId;
+        modeOperation={...modeOperation,phase:'succeeded',view_id:viewId};modeViewReadFailure=true;
+        await wait(()=>sockets.length>prior);const selected=sockets.at(-1);hello(selected);selected.receive(packet('raw','20'));
+        await wait(()=>!node('reselect-levels').disabled);assert.equal(selections().length,1,'lost ACK retried mutation');
+        assert.equal(node('live-mode').value,'level','source mode form retargeted live mode');
+        assert.equal(JSON.stringify(snapshot.bbox_dbu),oldCamera);assert(!node('levels-all').checked);
+        assert.deepEqual(node('level-list').querySelectorAll('input').filter(b=>b.checked).map(b=>b.value),['2']);
+        node('levels-all').checked=true;node('levels-all').onchange();node('reselect-levels').onclick();
+        await wait(()=>selections().length===2);assert.deepEqual(selections()[1].body.levels,{mode:'all'});
+        modeOperation={...modeOperation,phase:'failed',error:'busy'};
+        await wait(()=>!node('reselect-levels').disabled);assert.equal(sockets.at(-1),selected,'failed selection replaced old view');
+        assert.equal(selections().length,2);
+        listeners.pagehide();console.log('WEB DECK MODE CLIENT: ALL OK (scope/CAS, modes, camera-bound level selection, selection guard, stale/unknown reconciliation, no automatic replay)');return;
     }
     if(exitEnabled){
         const n=requests.length,commands=ws.sent.length;

@@ -57,7 +57,7 @@ POLICIES = {
     "_esel_toggle": linked("drc-box", "drc", "drc-box"),
     "_jobdeck_set_mode": linked("live-mode"),
     "_jobdeck_toggle_view": linked("live-mode"),
-    "_jobdeck_reselect_levels": (1, "open", "Reselect loaded levels without changing camera", None, None),
+    "_jobdeck_reselect_levels": linked("reselect-levels"),
     "_about_dialog": linked("about-open", "about", "about"),
     "_licenses_dialog": linked("about-open", "about", "about"),
 }
