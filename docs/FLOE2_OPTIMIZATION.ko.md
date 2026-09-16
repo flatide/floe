@@ -993,6 +993,19 @@ footprint의 1/8 이상이면 레이어 색 블록, 미만이면 페이지를 �
 (`WASH_MIN_COVERAGE_HAIR`, `FLOE_RUST_WASH_HAIR_COVERAGE`). keep은 그대로 정확.
 gate `SubCutTests.test_hairline_pages_under_cull…`(0.1 × 190 µm 선 200개 = 블록,
 400 µm 간격 3개 = 선, keep은 둘 다 정확, 킬 스위치는 둘 다 없음).
+**결함 C 후속 2 — 중간 줌 draw 6 s(현장 2026-09-16, 0.12.142 / RENDERD 0.12.97)**:
+0.12.95에서 150 MB 실칩을 thin:cull detail medium으로 열자 중간 줌 구간에서 draw가
+6 s를 넘었고, 사용자가 `FLOE_RUST_SUB_CUT_WASH=off`로 이전 속도가 돌아오는 것을
+확인했다 — 원인은 위 두 규칙이 한 프레임에 보태는 양(남긴 희소 페이지의 디코드·
+hairline 픽셀, wash 블록 채움)에 상한이 없던 것. 조치: ① perf 줄·상태줄에
+`sub-cut washes A/sparse B`(wash 수, 희소로 남긴 수)를 붙여 비용을 읽게 하고,
+② 플랜당 예산 둘(SPEC-PLANNER §3 플랜당 예산): 희소 ink 16 Mpx, wash 면적 64 Mpx.
+소진 뒤의 항목은 옛 cull대로 버리고(희소를 wash로 돌리지 않는다 — 거짓 블록)
+`sub-cut over A/B`로 센다. 예산은 걷는 순서대로 쓰여 플랜이 결정적이다. 기본값은
+잠정: 실칩의 느린 프레임 perf 줄(`sub-cut washes/sparse/over`, plan/decode/raster
+µs)로 정한다. 진단 `FLOE_RUST_SUB_CUT_SPARSE_MPX=0` / `FLOE_RUST_SUB_CUT_WASH_MPX=0`
+은 각각 희소 전부·wash 전부를 버려 어느 쪽이 느린지 가른다. gate
+`SubCutTests.test_the_per_plan_budgets…`. 실칩 재측정 대기.
 
 **정책 분리(2026-09-11, 사용자·리뷰어)**: 마스크(jobdeck)는 hairline이 많을 수밖에
 없고 일반 레이아웃을 같은 기준에 맞추면 광역 뷰가 느려진다. 그래서 위 해제는

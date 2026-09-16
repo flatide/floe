@@ -373,7 +373,11 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   대신 답한다(기본 `ask`). 인덱싱 자체는 여전히 `floe-index` 프로세스가 하며
   GUI는 로그만 보여 준다.
 - **perf 로그의 플래너 판정**(2026-09-10): 상태줄과 터미널 perf 줄에 `cut pages
-  P/pbvh Q/cbvh R/cells S, layer L, washed W, lod X, thin T`가 붙는다. 크기·hairline
+  P/pbvh Q/cbvh R/cells S, layer L, washed W, lod X, thin T`와 `sub-cut washes
+  A/sparse B`(cut 미만 페이지·노드의 footprint wash 수와 희소로 남긴 수, 2026-09-16),
+  `sub-cut over C/D`(플랜당 예산 — 희소 ink 16 Mpx, wash 면적 64 Mpx — 를 넘어 버린
+  수; 진단 `FLOE_RUST_SUB_CUT_SPARSE_MPX`/`FLOE_RUST_SUB_CUT_WASH_MPX`)가
+  붙는다. 크기·hairline
   cut에 잘린 페이지 수, 통째로 잘린 페이지 BVH 노드 수, 크기로 프루닝된 자식 BVH
   노드 수, 크기로 생략·폴드된 자식 셀 수, 레이어 불일치로 건너뛴 배치 수, wash로
   붕괴한 페이지 수, LOD 교체 수, thin 프레임 수다(덱은 패스 합). 특정 줌부터

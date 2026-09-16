@@ -1514,10 +1514,16 @@ class SubCutTests(unittest.TestCase):
         os.environ["FLOE_RUST_SUB_CUT_WASH"] = "off"
         cls.worker_off = cls._worker()
         del os.environ["FLOE_RUST_SUB_CUT_WASH"]
+        # tight per-plan budgets: 10 px of sparse ink, 100 px of wash
+        os.environ["FLOE_RUST_SUB_CUT_SPARSE_MPX"] = "0.00001"
+        os.environ["FLOE_RUST_SUB_CUT_WASH_MPX"] = "0.0001"
+        cls.worker_tight = cls._worker()
+        del os.environ["FLOE_RUST_SUB_CUT_SPARSE_MPX"]
+        del os.environ["FLOE_RUST_SUB_CUT_WASH_MPX"]
 
     @classmethod
     def tearDownClass(cls):
-        for w in (cls.worker, cls.worker_off):
+        for w in (cls.worker, cls.worker_off, cls.worker_tight):
             try:
                 w.stop()
             except Exception:
@@ -1534,11 +1540,13 @@ class SubCutTests(unittest.TestCase):
         return worker
 
     def _lit(self, worker, layer, thin="cull"):
+        return self._frame(worker, layer, thin)[0]
+
+    def _frame(self, worker, layer, thin="cull"):
         SubCutTests.gen += 1
         box = (0.0, 0.0, 2000.0 * UM, 2000.0 * UM)
-        lit, _ = render_settled(worker, SubCutTests.gen, box, 200,
-                                cut_px=1.0, thin=thin, visible=[layer])
-        return lit
+        return render_settled(worker, SubCutTests.gen, box, 200,
+                              cut_px=1.0, thin=thin, visible=[layer])
 
     def test_dense_sub_cut_pages_are_washed_and_sparse_ones_drawn(self):
         # 10 um/px, cut 1 px = 10 um: every 0.2 um box is below the cut
@@ -1559,9 +1567,18 @@ class SubCutTests(unittest.TestCase):
             self.assertTrue(all(any(abs(x - sx) <= 2 and abs(y - sy) <= 2
                                     for sx, sy in spots) for x, y in lit5),
                             (thin, sorted(lit5)))
+        # the perf counters name the verdicts (the field reads the
+        # cost of a slow mid-zoom draw from them, 2026-09-16)
+        _, dense_res = self._frame(self.worker, (4, 0))
+        self.assertGreaterEqual(dense_res["plan_culls"]["sub_cut_washes"], 1, dense_res["plan_culls"])
+        _, sparse_res = self._frame(self.worker, (5, 0))
+        self.assertGreaterEqual(sparse_res["plan_culls"]["sub_cut_sparse"], 1, sparse_res["plan_culls"])
         # the kill switch: the pre-fix cull drops all three
         for layer in ((4, 0), (5, 0), (7, 0)):
-            self.assertEqual(self._lit(self.worker_off, layer), set(), layer)
+            lit, res = self._frame(self.worker_off, layer)
+            self.assertEqual(lit, set(), layer)
+            self.assertEqual((res["plan_culls"]["sub_cut_washes"],
+                              res["plan_culls"]["sub_cut_sparse"]), (0, 0), layer)
 
     def test_hairline_pages_under_cull_are_washed_when_dense_and_kept_when_sparse(self):
         # 10 um/px, cut 1 px: the 0.1 um lines are hairline-cut (max_min
@@ -1583,6 +1600,33 @@ class SubCutTests(unittest.TestCase):
         self.assertGreaterEqual(len(keep_dense & block), 250, len(keep_dense))
         for layer in ((8, 0), (9, 0)):
             self.assertEqual(self._lit(self.worker_off, layer, "cull"), set(), layer)
+
+    def test_the_per_plan_budgets_bound_what_the_sub_cut_rules_add(self):
+        # field 2026-09-16: a 150 MB chip at thin:cull detail medium
+        # drew over 6 s at mid zoom, restored by the kill switch. The
+        # tight worker has 10 px of sparse ink and 100 px of wash area
+        # per plan: the 4-box page (4 px of ink) still fits and is
+        # kept; the 3-line page (3 x 21 px) and every 20 x 20 px
+        # footprint wash exceed their budget and are dropped as the
+        # cull always did - never washed - and counted; the default
+        # budgets drop nothing on this chip
+        lit5, res5 = self._frame(self.worker_tight, (5, 0))
+        self.assertEqual(lit5, self._lit(self.worker, (5, 0)))
+        self.assertEqual(res5["plan_culls"]["sub_cut_sparse_over"], 0, res5["plan_culls"])
+        lit9, res9 = self._frame(self.worker_tight, (9, 0))
+        self.assertEqual(lit9, set())
+        self.assertGreaterEqual(res9["plan_culls"]["sub_cut_sparse_over"], 1, res9["plan_culls"])
+        self.assertEqual(res9["plan_culls"]["sub_cut_washes"], 0, res9["plan_culls"])
+        for layer in ((4, 0), (7, 0), (8, 0)):
+            lit, res = self._frame(self.worker_tight, layer)
+            self.assertEqual(lit, set(), layer)
+            self.assertGreaterEqual(res["plan_culls"]["sub_cut_wash_over"], 1, (layer, res["plan_culls"]))
+            self.assertEqual(res["plan_culls"]["sub_cut_washes"], 0, (layer, res["plan_culls"]))
+        for layer in ((4, 0), (5, 0), (7, 0), (8, 0), (9, 0)):
+            _, res = self._frame(self.worker, layer)
+            self.assertEqual((res["plan_culls"]["sub_cut_sparse_over"],
+                              res["plan_culls"]["sub_cut_wash_over"]), (0, 0),
+                             (layer, res["plan_culls"]))
 
 
 class DeckRenderTests(unittest.TestCase):

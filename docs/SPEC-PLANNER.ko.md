@@ -29,6 +29,9 @@
 | hairline | 0.5 | rev 41 min변 컷 계수 (0=off) |
 | thin_lattice_um | 7.0 | rev 45 프레임 격자 피치 µm (0=rev 41 프레임 컬 복원) |
 | thin_demote_px | 14.0 | 격자 1피치 화면 px가 이 미만이면 빈당 2→1 강등 |
+| sub_cut_walk_budget | 200_000 | sub-cut 노드를 배치·페이지까지 내려가는 플랜당 걸음 수(소진=coarse wash) |
+| sub_cut_sparse_px | 16 Mpx | sub-cut 희소 항목의 ink 예산(플랜당 화면 px, 소진=버림; §3) |
+| sub_cut_wash_px | 64 Mpx | sub-cut wash 면적 예산(플랜당 화면 px, 소진=버림; §3) |
 
 ## 3. 컷/생략 사다리 (정확한 술어)
 
@@ -55,6 +58,21 @@
   hairline 페이지를 그대로 남긴다(page_hair = 0). exact 요청은 제외. 뷰어 킬
   스위치 `FLOE_RUST_SUB_CUT_WASH=off`(단일 레이아웃), `FLOE_RUST_DECK_WIDE=off`
   (덱); gate `validate_occupancy` `SubCutTests`.
+  **플랜당 예산**(2026-09-16 현장: 150 MB 실칩 thin:cull detail medium의 중간
+  줌에서 draw가 6 s를 넘었고 킬 스위치로 이전 속도가 돌아옴): sub-cut 규칙이
+  한 프레임에 보태는 양을 두 예산이 막는다. ① `sub_cut_sparse_px` — 남긴 희소
+  페이지·펼친 희소 배치의 ink 추정(멤버 수 × 멤버 화면 px, 멤버당 최소 1 px;
+  `wash_worth`와 같은 척도)의 합. 소진 뒤의 희소 항목은 wash가 아니라 **버린다**
+  (옛 cull; 희소 footprint의 wash는 2026-09-15의 거짓 블록이므로). ② `sub_cut_wash_px`
+  — wash의 뷰 안 면적(레이어당 한 장)의 합. 소진 뒤의 항목은 버린다. 걷는 순서대로
+  쓰므로 같은 요청은 같은 플랜이다. stats `sub_cut_sparse_over` / `sub_cut_wash_over`
+  (perf 줄·상태줄 `sub-cut over A/B`)가 버린 수. 기본 16 Mpx / 64 Mpx(4 Mpx 뷰의
+  hairline ink 4장·블록 채움 16장, 각각 raster 수십 ms; 현장 perf 줄로 확정 전의
+  잠정값). 진단 `FLOE_RUST_SUB_CUT_SPARSE_MPX` / `FLOE_RUST_SUB_CUT_WASH_MPX`(Mpx,
+  0 = 희소 전부 / wash 전부 버림 — 어느 쪽이 느린지 가르는 A/B). gate
+  `SubCutTests.test_the_per_plan_budgets…`(10 px / 100 px 예산: 4 px짜리 희소
+  페이지는 남고 63 px짜리 선 페이지와 400 px wash는 버려져 카운터에 잡힘; 기본
+  예산은 아무것도 버리지 않음).
   **점유 요약 레이어**(`ViewReq::page_skip`, OCCUPANCY_PLAN M2): 비트셋에 든
   레이어는 페이지 범위(prange)에서 통째로 건너뛰어 선택·디코드가 없고
   `summary_pages`로 센다. 순회(자식·프레임·다른 레이어)는 `vis` 그대로이되,

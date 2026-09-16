@@ -629,7 +629,9 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   (예산은 pass마다이고 pass는 수백 개). 현장 2026-09-15: level 4 depth 0에서 140 × 4 µm 45° 마크 두
   개가 137 mm 떨어진 다른 마크와 한 페이지라 bbox 137,044 × 54,011 µm가 통째로
   레이어 색 블록이 됐다(뷰 31,752 µm부터 fit까지; frame off와 무관). stats
-  `sub_cut_sparse`, explain `page` `keep_sparse` / `child` `expand_sparse`. gate
+  `sub_cut_sparse`, explain `page` `keep_sparse` / `child` `expand_sparse`(플랜당
+  예산 `sub_cut_sparse_px`/`sub_cut_wash_px`를 넘은 항목은 버려져 `sub_cut_sparse_over`
+  / `sub_cut_wash_over`로 센다, SPEC-PLANNER §3). gate
   `WideViewTests.test_a_sparse_page_or_array_is_not_washed_as_its_footprint`
   (sparse.jb: 모서리 마크 두 개 페이지·2 × 2 배치는 몇 px만 켜지고 footprint wash
   없음 — 펼쳐진 마크 셀 자체의 1 µm 페이지는 blob wash 1 px, 중앙 9 µm 클러스터는

@@ -67,6 +67,15 @@ pub struct PlanCullCounts {
     pub thin_pages: u64,
     /// pages of summarized layers left unselected (M2)
     pub summary_pages: u64,
+    /// sub-cut pages and nodes washed as footprints (2026-09-16 on a
+    /// layout too; a deck's per-pass sum)
+    pub sub_cut_washes: u64,
+    /// sub-cut pages kept and placements expanded as sparse (drawn
+    /// exactly; their decode and paint is the field's cost to read)
+    pub sub_cut_sparse: u64,
+    /// sub-cut items the planner's per-plan budgets dropped (2026-09-16)
+    pub sub_cut_sparse_over: u64,
+    pub sub_cut_wash_over: u64,
 }
 
 impl PlanCullCounts {
@@ -82,6 +91,10 @@ impl PlanCullCounts {
             thin_frames: st.thin_frames,
             thin_pages: st.thin_pages_kept,
             summary_pages: st.summary_pages,
+            sub_cut_washes: st.sub_cut_washes,
+            sub_cut_sparse: st.sub_cut_sparse,
+            sub_cut_sparse_over: st.sub_cut_sparse_over,
+            sub_cut_wash_over: st.sub_cut_wash_over,
         }
     }
 
@@ -96,6 +109,10 @@ impl PlanCullCounts {
         self.thin_frames = self.thin_frames.saturating_add(other.thin_frames);
         self.thin_pages = self.thin_pages.saturating_add(other.thin_pages);
         self.summary_pages = self.summary_pages.saturating_add(other.summary_pages);
+        self.sub_cut_washes = self.sub_cut_washes.saturating_add(other.sub_cut_washes);
+        self.sub_cut_sparse = self.sub_cut_sparse.saturating_add(other.sub_cut_sparse);
+        self.sub_cut_sparse_over = self.sub_cut_sparse_over.saturating_add(other.sub_cut_sparse_over);
+        self.sub_cut_wash_over = self.sub_cut_wash_over.saturating_add(other.sub_cut_wash_over);
     }
 }
 

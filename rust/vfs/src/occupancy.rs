@@ -46,6 +46,7 @@ use floe_oasis::doc::{Doc, PathRec, PolyRec, RectRec, Rep};
 use floe_ovm::Ovm;
 use floe_tiler::hier::cell_bboxes;
 use floe_tiler::{is_axis, path_outline_any, Xf};
+use std::collections::HashMap;
 
 pub const MAGIC: &[u8; 8] = b"FLOEOVO2";
 pub const VERSION: u32 = 2;
@@ -355,6 +356,18 @@ struct SharedBits {
 }
 
 impl SharedBits {
+    /// Bits only transition 0 -> 1 during marking. If a relaxed load
+    /// already contains the mask, a second writer cannot invalidate it.
+    /// Avoid taking exclusive ownership of a cache line on every repeated
+    /// mark in a dense region. A stale load merely causes an extra OR.
+    fn or_word(&self, k: usize, mask: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let word = &self.words[k];
+        if word.load(Relaxed) & mask != mask {
+            word.fetch_or(mask, Relaxed);
+        }
+    }
+
     fn new(w: u32, h: u32) -> SharedBits {
         let stride = (w as usize + 63) / 64;
         SharedBits {
@@ -367,20 +380,19 @@ impl SharedBits {
 
     /// set cells i0..=i1 of row j (callers clamp to the grid)
     fn set_span(&self, j: u32, i0: u32, i1: u32) {
-        use std::sync::atomic::Ordering::Relaxed;
         debug_assert!(i1 < self.w && j < self.h && i0 <= i1);
         let base = j as usize * self.stride;
         let (w0, w1) = ((i0 / 64) as usize, (i1 / 64) as usize);
         let lo_mask = u64::MAX << (i0 % 64);
         let hi_mask = u64::MAX >> (63 - i1 % 64);
         if w0 == w1 {
-            self.words[base + w0].fetch_or(lo_mask & hi_mask, Relaxed);
+            self.or_word(base + w0, lo_mask & hi_mask);
         } else {
-            self.words[base + w0].fetch_or(lo_mask, Relaxed);
+            self.or_word(base + w0, lo_mask);
             for k in w0 + 1..w1 {
-                self.words[base + k].store(u64::MAX, Relaxed);
+                self.or_word(base + k, u64::MAX);
             }
-            self.words[base + w1].fetch_or(hi_mask, Relaxed);
+            self.or_word(base + w1, hi_mask);
         }
     }
 
@@ -429,9 +441,54 @@ impl Planes {
     }
 }
 
+/// References only: geometry and repetition vectors stay in Doc. Build once
+/// for all layers, instead of scanning every record for each layer and again
+/// at every instance. Sparse cell maps avoid a cells x layers allocation;
+/// a layer's references are released immediately after it has been marked.
+#[derive(Default)]
+struct CellShapes<'a> {
+    rects: Vec<&'a RectRec>,
+    polys: Vec<&'a PolyRec>,
+    paths: Vec<&'a PathRec>,
+}
+
+impl CellShapes<'_> {
+    fn is_empty(&self) -> bool {
+        self.rects.is_empty() && self.polys.is_empty() && self.paths.is_empty()
+    }
+}
+
+type ShapeIndex<'a> = HashMap<(u32, u32), HashMap<usize, CellShapes<'a>>>;
+
+fn index_shapes(doc: &Doc) -> ShapeIndex<'_> {
+    let mut index: ShapeIndex<'_> = HashMap::new();
+    for (ci, cell) in doc.cells.iter().enumerate() {
+        for r in &cell.rects {
+            index.entry((r.layer, r.dt)).or_default().entry(ci).or_default().rects.push(r);
+        }
+        for p in &cell.polys {
+            index.entry((p.layer, p.dt)).or_default().entry(ci).or_default().polys.push(p);
+        }
+        for p in &cell.paths {
+            index.entry((p.layer, p.dt)).or_default().entry(ci).or_default().paths.push(p);
+        }
+    }
+    index
+}
+
+fn take_layer_shapes<'a>(index: &mut ShapeIndex<'a>, key: (u32, u32), cells: usize) -> Vec<CellShapes<'a>> {
+    let mut out: Vec<_> = (0..cells).map(|_| CellShapes::default()).collect();
+    if let Some(layer) = index.remove(&key) {
+        for (ci, shapes) in layer {
+            out[ci] = shapes;
+        }
+    }
+    out
+}
+
 /// per cell: does the layer occur in the cell or its descendants
-fn layer_presence(doc: &Doc, key: (u32, u32)) -> Vec<bool> {
-    fn walk(doc: &Doc, ci: usize, key: (u32, u32), state: &mut [u8]) -> bool {
+fn layer_presence(doc: &Doc, shapes: &[CellShapes<'_>]) -> Vec<bool> {
+    fn walk(doc: &Doc, ci: usize, shapes: &[CellShapes<'_>], state: &mut [u8]) -> bool {
         match state[ci] {
             2 => return true,
             3 => return false,
@@ -440,13 +497,11 @@ fn layer_presence(doc: &Doc, key: (u32, u32)) -> Vec<bool> {
         }
         state[ci] = 1;
         let cell = &doc.cells[ci];
-        let direct = cell.rects.iter().any(|r| (r.layer, r.dt) == key)
-            || cell.polys.iter().any(|p| (p.layer, p.dt) == key)
-            || cell.paths.iter().any(|p| (p.layer, p.dt) == key);
+        let direct = !shapes[ci].is_empty();
         let mut has = direct;
         if !has {
             for pl in &cell.places {
-                if walk(doc, pl.cell, key, state) {
+                if walk(doc, pl.cell, shapes, state) {
                     has = true;
                     break;
                 }
@@ -456,13 +511,13 @@ fn layer_presence(doc: &Doc, key: (u32, u32)) -> Vec<bool> {
         has
     }
     let mut state = vec![0u8; doc.cells.len()];
-    let _ = walk(doc, doc.top, key, &mut state);
+    let _ = walk(doc, doc.top, shapes, &mut state);
     // cells only reachable through a cycle guard stay "unknown": walk
     // them on their own so every reachable cell has a verdict
     for ci in 0..doc.cells.len() {
         if state[ci] == 0 || state[ci] == 1 {
             state[ci] = 0;
-            let _ = walk(doc, ci, key, &mut state);
+            let _ = walk(doc, ci, shapes, &mut state);
         }
     }
     state.iter().map(|&s| s == 2).collect()
@@ -471,22 +526,20 @@ fn layer_presence(doc: &Doc, key: (u32, u32)) -> Vec<bool> {
 /// the deepest placement level at which the layer has a record of
 /// its own (0 = the top cell's), which is how many planes the marking
 /// keeps; a cycle never extends a path
-fn layer_max_depth(doc: &Doc, key: (u32, u32), has: &[bool]) -> u32 {
-    fn reach(doc: &Doc, ci: usize, key: (u32, u32), has: &[bool], memo: &mut Vec<Option<Option<u32>>>) -> Option<u32> {
+fn layer_max_depth(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> u32 {
+    fn reach(doc: &Doc, ci: usize, shapes: &[CellShapes<'_>], has: &[bool], memo: &mut Vec<Option<Option<u32>>>) -> Option<u32> {
         if let Some(done) = memo[ci] {
             return done;
         }
         memo[ci] = Some(None); // in progress: a cycle back here adds nothing
         let cell = &doc.cells[ci];
-        let direct = cell.rects.iter().any(|r| (r.layer, r.dt) == key)
-            || cell.polys.iter().any(|p| (p.layer, p.dt) == key)
-            || cell.paths.iter().any(|p| (p.layer, p.dt) == key);
+        let direct = !shapes[ci].is_empty();
         let mut best: Option<u32> = if direct { Some(0) } else { None };
         for pl in &cell.places {
             if !has[pl.cell] {
                 continue;
             }
-            if let Some(d) = reach(doc, pl.cell, key, has, memo) {
+            if let Some(d) = reach(doc, pl.cell, shapes, has, memo) {
                 best = Some(best.map_or(d + 1, |b| b.max(d + 1)));
             }
         }
@@ -494,12 +547,12 @@ fn layer_max_depth(doc: &Doc, key: (u32, u32), has: &[bool]) -> u32 {
         best
     }
     let mut memo = vec![None; doc.cells.len()];
-    reach(doc, doc.top, key, has, &mut memo).unwrap_or(0)
+    reach(doc, doc.top, shapes, has, &mut memo).unwrap_or(0)
 }
 
 struct Marker<'a> {
     doc: &'a Doc,
-    key: (u32, u32),
+    shapes: &'a [CellShapes<'a>],
     has: &'a [bool],
     ox: i64,
     oy: i64,
@@ -554,29 +607,29 @@ impl<'a> Marker<'a> {
         if self.over {
             return false;
         }
-        let cell = &self.doc.cells[u.ci];
+        let cell = &self.shapes[u.ci];
         match &u.kind {
             UnitKind::Shapes { rects, polys, paths } => {
                 self.depth = u.depth;
                 for r in &cell.rects[rects.0..rects.1] {
-                    if (r.layer, r.dt) == self.key && !self.mark_rect_rec(r, &u.xf) {
+                    if !self.mark_rect_rec(r, &u.xf) {
                         return false;
                     }
                 }
                 for p in &cell.polys[polys.0..polys.1] {
-                    if (p.layer, p.dt) == self.key && !self.mark_poly_rec(p, &u.xf) {
+                    if !self.mark_poly_rec(p, &u.xf) {
                         return false;
                     }
                 }
                 for p in &cell.paths[paths.0..paths.1] {
-                    if (p.layer, p.dt) == self.key && !self.mark_path_rec(p, &u.xf) {
+                    if !self.mark_path_rec(p, &u.xf) {
                         return false;
                     }
                 }
                 true
             }
             UnitKind::Place { pi, m0, m1 } => {
-                let pl = &cell.places[*pi];
+                let pl = &self.doc.cells[u.ci].places[*pi];
                 // Grid/Pts members are charged one each, exactly as the
                 // walk charges them; a plain placement is not charged
                 let charged = !matches!(pl.rep, Rep::One);
@@ -909,18 +962,18 @@ impl<'a> Marker<'a> {
         // the cell's own records are at `depth`, its placements' one deeper
         self.depth = depth;
         let cell = &self.doc.cells[ci];
-        for r in &cell.rects {
-            if (r.layer, r.dt) == self.key && !self.mark_rect_rec(r, xf) {
+        for r in &self.shapes[ci].rects {
+            if !self.mark_rect_rec(r, xf) {
                 return false;
             }
         }
-        for p in &cell.polys {
-            if (p.layer, p.dt) == self.key && !self.mark_poly_rec(p, xf) {
+        for p in &self.shapes[ci].polys {
+            if !self.mark_poly_rec(p, xf) {
                 return false;
             }
         }
-        for p in &cell.paths {
-            if (p.layer, p.dt) == self.key && !self.mark_path_rec(p, xf) {
+        for p in &self.shapes[ci].paths {
+            if !self.mark_path_rec(p, xf) {
                 return false;
             }
         }
@@ -1022,7 +1075,7 @@ fn rep_member(rep: &Rep, k: u64) -> (i64, i64) {
 fn collect_units(
     doc: &Doc,
     has: &[bool],
-    key: (u32, u32),
+    shapes: &[CellShapes<'_>],
     ci: usize,
     xf: Xf,
     depth: usize,
@@ -1032,11 +1085,8 @@ fn collect_units(
 ) {
     let cell = &doc.cells[ci];
     let pieces = pieces.max(1);
-    if cell.rects.iter().any(|r| (r.layer, r.dt) == key)
-        || cell.polys.iter().any(|p| (p.layer, p.dt) == key)
-        || cell.paths.iter().any(|p| (p.layer, p.dt) == key)
-    {
-        let (nr, np, nq) = (cell.rects.len(), cell.polys.len(), cell.paths.len());
+    if !shapes[ci].is_empty() {
+        let (nr, np, nq) = (shapes[ci].rects.len(), shapes[ci].polys.len(), shapes[ci].paths.len());
         let slice = |n: usize, t: usize| (n * t / pieces, n * (t + 1) / pieces);
         for t in 0..pieces {
             let (rects, polys, paths) = (slice(nr, t), slice(np, t), slice(nq, t));
@@ -1052,7 +1102,7 @@ fn collect_units(
         }
         if matches!(pl.rep, Rep::One) && depth < expand {
             let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
-            collect_units(doc, has, key, pl.cell, base, depth + 1, expand, pieces, out);
+            collect_units(doc, has, shapes, pl.cell, base, depth + 1, expand, pieces, out);
             continue;
         }
         let members = rep_members(&pl.rep);
@@ -1072,8 +1122,8 @@ fn collect_units(
 /// per cell, the estimated marking work of the layer under it: its own
 /// records on the layer (repetition members counted) plus every
 /// placement's members times the child's weight; a cycle adds nothing
-fn layer_weights(doc: &Doc, key: (u32, u32), has: &[bool]) -> Vec<u64> {
-    fn weight(doc: &Doc, ci: usize, key: (u32, u32), has: &[bool], memo: &mut Vec<Option<u64>>, open: &mut Vec<bool>) -> u64 {
+fn layer_weights(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> Vec<u64> {
+    fn weight(doc: &Doc, ci: usize, shapes: &[CellShapes<'_>], has: &[bool], memo: &mut Vec<Option<u64>>, open: &mut Vec<bool>) -> u64 {
         if let Some(w) = memo[ci] {
             return w;
         }
@@ -1083,26 +1133,20 @@ fn layer_weights(doc: &Doc, key: (u32, u32), has: &[bool]) -> Vec<u64> {
         open[ci] = true;
         let cell = &doc.cells[ci];
         let mut w: u64 = 0;
-        for r in &cell.rects {
-            if (r.layer, r.dt) == key {
-                w = w.saturating_add(rep_members(&r.rep));
-            }
+        for r in &shapes[ci].rects {
+            w = w.saturating_add(rep_members(&r.rep));
         }
-        for p in &cell.polys {
-            if (p.layer, p.dt) == key {
-                w = w.saturating_add(rep_members(&p.rep));
-            }
+        for p in &shapes[ci].polys {
+            w = w.saturating_add(rep_members(&p.rep));
         }
-        for p in &cell.paths {
-            if (p.layer, p.dt) == key {
-                w = w.saturating_add(rep_members(&p.rep));
-            }
+        for p in &shapes[ci].paths {
+            w = w.saturating_add(rep_members(&p.rep));
         }
         for pl in &cell.places {
             if !has[pl.cell] {
                 continue;
             }
-            let child = weight(doc, pl.cell, key, has, memo, open);
+            let child = weight(doc, pl.cell, shapes, has, memo, open);
             w = w.saturating_add(rep_members(&pl.rep).saturating_mul(child.max(1)));
         }
         open[ci] = false;
@@ -1112,7 +1156,7 @@ fn layer_weights(doc: &Doc, key: (u32, u32), has: &[bool]) -> Vec<u64> {
     let mut memo = vec![None; doc.cells.len()];
     let mut open = vec![false; doc.cells.len()];
     for ci in 0..doc.cells.len() {
-        weight(doc, ci, key, has, &mut memo, &mut open);
+        weight(doc, ci, shapes, has, &mut memo, &mut open);
     }
     memo.into_iter().map(|w| w.unwrap_or(0)).collect()
 }
@@ -1126,7 +1170,7 @@ fn layer_weights(doc: &Doc, key: (u32, u32), has: &[bool]) -> Vec<u64> {
 fn collect_units_weighted(
     doc: &Doc,
     has: &[bool],
-    key: (u32, u32),
+    shapes: &[CellShapes<'_>],
     ci: usize,
     xf: Xf,
     depth: usize,
@@ -1135,12 +1179,12 @@ fn collect_units_weighted(
     out: &mut Vec<Unit>,
 ) {
     let cell = &doc.cells[ci];
-    let own: u64 = cell.rects.iter().filter(|r| (r.layer, r.dt) == key).map(|r| rep_members(&r.rep)).sum::<u64>()
-        + cell.polys.iter().filter(|p| (p.layer, p.dt) == key).map(|p| rep_members(&p.rep)).sum::<u64>()
-        + cell.paths.iter().filter(|p| (p.layer, p.dt) == key).map(|p| rep_members(&p.rep)).sum::<u64>();
+    let own: u64 = shapes[ci].rects.iter().map(|r| rep_members(&r.rep)).sum::<u64>()
+        + shapes[ci].polys.iter().map(|p| rep_members(&p.rep)).sum::<u64>()
+        + shapes[ci].paths.iter().map(|p| rep_members(&p.rep)).sum::<u64>();
     if own > 0 {
         let pieces = ((own + budget - 1) / budget).clamp(1, 4096) as usize;
-        let (nr, np, nq) = (cell.rects.len(), cell.polys.len(), cell.paths.len());
+        let (nr, np, nq) = (shapes[ci].rects.len(), shapes[ci].polys.len(), shapes[ci].paths.len());
         let slice = |n: usize, t: usize| (n * t / pieces, n * (t + 1) / pieces);
         for t in 0..pieces {
             let (rects, polys, paths) = (slice(nr, t), slice(np, t), slice(nq, t));
@@ -1162,7 +1206,7 @@ fn collect_units_weighted(
         if matches!(pl.rep, Rep::One) {
             if child > budget && depth < MAX_EXPAND_DEPTH {
                 let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
-                collect_units_weighted(doc, has, key, pl.cell, base, depth + 1, budget, weights, out);
+                collect_units_weighted(doc, has, shapes, pl.cell, base, depth + 1, budget, weights, out);
                 continue;
             }
             out.push(Unit { ci, xf, depth: depth as u32, kind: UnitKind::Place { pi, m0: 0, m1: 1 } });
@@ -1187,20 +1231,20 @@ fn collect_units_weighted(
 /// for minutes). Count-based (`balanced` false): the top cell's own
 /// units, then one level deeper through plain placements (at most
 /// four) while there are fewer than 4 x jobs of them.
-fn units_for(doc: &Doc, has: &[bool], key: (u32, u32), jobs: usize, balanced: bool) -> Vec<Unit> {
+fn units_for(doc: &Doc, has: &[bool], shapes: &[CellShapes<'_>], jobs: usize, balanced: bool) -> Vec<Unit> {
     let target = jobs.max(1) * 4;
     let mut units = Vec::new();
     if balanced {
-        let weights = layer_weights(doc, key, has);
+        let weights = layer_weights(doc, shapes, has);
         let budget = (weights[doc.top] / target as u64).max(1);
-        collect_units_weighted(doc, has, key, doc.top, Xf::identity(), 0, budget, &weights, &mut units);
+        collect_units_weighted(doc, has, shapes, doc.top, Xf::identity(), 0, budget, &weights, &mut units);
         if !units.is_empty() {
             return units;
         }
     }
     for expand in 0..=4 {
         units.clear();
-        collect_units(doc, has, key, doc.top, Xf::identity(), 0, expand, target, &mut units);
+        collect_units(doc, has, shapes, doc.top, Xf::identity(), 0, expand, target, &mut units);
         if units.len() >= target {
             break;
         }
@@ -1216,6 +1260,7 @@ fn units_for(doc: &Doc, has: &[bool], key: (u32, u32), jobs: usize, balanced: bo
 fn build_layer(
     doc: &Doc,
     key: (u32, u32),
+    shapes: &[CellShapes<'_>],
     has: &[bool],
     origin: (i64, i64),
     cell_dbu: i64,
@@ -1230,58 +1275,56 @@ fn build_layer(
     if !has[doc.top] {
         return (layer_with(STATUS_EMPTY, 0, Vec::new()), 0);
     }
-    let units = units_for(doc, has, key, jobs, balanced);
-    let planes = Planes::new(w, h, layer_max_depth(doc, key, has));
+    let prepared = std::time::Instant::now();
+    let units = units_for(doc, has, shapes, jobs, balanced);
+    let planes = Planes::new(w, h, layer_max_depth(doc, shapes, has));
     let threads = jobs.max(1).min(units.len()).max(1);
     let shared = std::sync::atomic::AtomicU64::new(0);
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let done = std::sync::atomic::AtomicBool::new(false);
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+    if let Some(log) = progress {
+        if prepared.elapsed().as_secs_f64() >= 0.5 {
+            log(&format!("{}/{} prepared: {} units workers={} ({:.3}s)",
+                key.0, key.1, units.len(), threads, prepared.elapsed().as_secs_f64()));
+        }
+    }
     let markers: Vec<Marker> = std::thread::scope(|s| {
+        // Keep the sender inside the scope body: unwinding a failed
+        // worker also disconnects the heartbeat before scope joins it.
+        let (finished, finish) = std::sync::mpsc::sync_channel::<()>(1);
         if let Some(log) = progress {
-            // the heartbeat: units taken so far of the layer's units,
-            // the charges flushed to the shared budget (several
-            // threads; one thread keeps its count local), seconds
-            let (units, next, shared, done) = (&units, &next, &shared, &done);
+            // Wake immediately when marking ends. Sleeping then joining
+            // used to add up to 250 ms for EACH populated layer.
+            let (units, completed, shared) = (&units, &completed, &shared);
             s.spawn(move || {
                 use std::sync::atomic::Ordering::Relaxed;
                 let t0 = std::time::Instant::now();
-                let mut last = 0u64;
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                    if done.load(Relaxed) {
-                        break;
-                    }
-                    let elapsed = t0.elapsed().as_secs();
-                    if elapsed >= last + PROGRESS_EVERY_S {
-                        last = elapsed;
-                        let work = if threads > 1 {
-                            format!(" work {:.2}G", shared.load(Relaxed) as f64 / 1e9)
-                        } else {
-                            String::new()
-                        };
-                        log(&format!(
-                            "{}/{} marking: {}/{} units{} ({}s)",
-                            key.0,
-                            key.1,
-                            next.load(Relaxed).min(units.len()),
-                            units.len(),
-                            work,
-                            elapsed
-                        ));
-                    }
+                while matches!(finish.recv_timeout(std::time::Duration::from_secs(PROGRESS_EVERY_S)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout))
+                {
+                    let work = if threads > 1 {
+                        format!(" work {:.2}G", shared.load(Relaxed) as f64 / 1e9)
+                    } else {
+                        String::new()
+                    };
+                    log(&format!(
+                        "{}/{} marking: {}/{} units workers={}{} ({}s)",
+                        key.0, key.1, completed.load(Relaxed), units.len(),
+                        threads, work, t0.elapsed().as_secs()
+                    ));
                 }
             });
         }
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (units, next, shared, planes) = (&units, &next, &shared, &planes);
+                let (units, next, shared, planes, completed) = (&units, &next, &shared, &planes, &completed);
                 std::thread::Builder::new()
                     .stack_size(64 << 20)
                     .spawn_scoped(s, move || {
                         use std::sync::atomic::Ordering::Relaxed;
                         let mut m = Marker {
                             doc,
-                            key,
+                            shapes,
                             has,
                             ox: origin.0,
                             oy: origin.1,
@@ -1302,6 +1345,7 @@ fn build_layer(
                             if k >= units.len() || !m.run_unit(&units[k]) {
                                 break;
                             }
+                            completed.fetch_add(1, Relaxed);
                         }
                         if let Some(shared) = m.shared {
                             m.flush(shared);
@@ -1312,7 +1356,7 @@ fn build_layer(
             })
             .collect();
         let markers: Vec<Marker> = handles.into_iter().map(|h| h.join().expect("occupancy worker")).collect();
-        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = finished.send(());
         markers
     });
     let mut iter = markers.into_iter();
@@ -1406,8 +1450,17 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
     let mut skipped = 0u64;
     let mut slot = 0usize;
     let mut layers = Vec::with_capacity(doc.layer_order.len());
+    let indexing = std::time::Instant::now();
+    if let Some(log) = opts.progress {
+        log("grouping records by layer");
+    }
+    let mut index = index_shapes(doc);
+    if let Some(log) = opts.progress {
+        log(&format!("grouped records in {:.3}s", indexing.elapsed().as_secs_f64()));
+    }
     for &key in &doc.layer_order {
-        let has = layer_presence(doc, key);
+        let shapes = take_layer_shapes(&mut index, key, doc.cells.len());
+        let has = layer_presence(doc, &shapes);
         if !has[doc.top] {
             layers.push(Layer { layer: key.0, dt: key.1, status: STATUS_EMPTY, work: 0, planes: Vec::new() });
             continue;
@@ -1417,7 +1470,7 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
             continue;
         }
         let t0 = std::time::Instant::now();
-        let (layer, sk) = build_layer(doc, key, &has, (bbox.0, bbox.1), cell_dbu, w, h, opts.max_work, opts.jobs, opts.progress, opts.balanced_units);
+        let (layer, sk) = build_layer(doc, key, &shapes, &has, (bbox.0, bbox.1), cell_dbu, w, h, opts.max_work, opts.jobs, opts.progress, opts.balanced_units);
         skipped += sk;
         if layer.status == STATUS_OK {
             slot += layer.planes.len();
@@ -2040,7 +2093,7 @@ mod tests {
         let planes = Planes::new(w, h, 0);
         let mut m = Marker {
             doc: &doc_with(vec![cell("T")], 0, vec![(1, 0)]),
-            key: (1, 0),
+            shapes: &[],
             has: &[true],
             ox: 0,
             oy: 0,
@@ -2262,9 +2315,10 @@ mod tests {
         assert!(one.layers[0].work > 37 * 11 + 23);
         assert_eq!(one.layers[0].work, many.layers[0].work);
         assert_eq!(write_ovo(&one), write_ovo(&many));
-        let has = layer_presence(&d, (1, 0));
-        assert!(units_for(&d, &has, (1, 0), 3, false).len() >= 12);
-        assert!(units_for(&d, &has, (1, 0), 3, true).len() >= 12);
+        let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
+        let has = layer_presence(&d, &shapes);
+        assert!(units_for(&d, &has, &shapes, 3, false).len() >= 12);
+        assert!(units_for(&d, &has, &shapes, 3, true).len() >= 12);
         // a top holding one die placement: the units come from below
         let mut leaf = cell("B");
         leaf.rects.push(rect(1, 0, 0, 7, 3, Rep::One));
@@ -2275,9 +2329,10 @@ mod tests {
         let mut top = cell("T");
         top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
         let d = doc_with(vec![top, die, leaf, make_child()], 0, vec![(1, 0)]);
-        let has = layer_presence(&d, (1, 0));
+        let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
+        let has = layer_presence(&d, &shapes);
         for balanced in [false, true] {
-            let units = units_for(&d, &has, (1, 0), 3, balanced);
+            let units = units_for(&d, &has, &shapes, 3, balanced);
             assert!(units.iter().all(|u| u.ci == 2), "units should sit in the leaf");
             assert!(units.len() >= 3, "{} units", units.len());
         }
@@ -2285,6 +2340,45 @@ mod tests {
         let many = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 3, ..Opts::default() }).unwrap();
         assert_eq!(write_ovo(&one), write_ovo(&many));
         assert!(one.layers[0].level(0).unwrap().count() > 20);
+    }
+
+    #[test]
+    fn concurrent_overlapping_spans_preserve_bits_and_empty_gaps() {
+        // Simultaneous first writes and repeated saturated writes, including
+        // complete interior words, partial end words and row padding.
+        let bits = SharedBits::new(259, 7);
+        let spans: Vec<_> = (0..12u32).flat_map(|t| {
+            (0..40u32).map(move |k| {
+                let row = (t + k) % 7;
+                let lo = (t * 13 + k * 7) % 190;
+                (row, lo, (lo + k * 3).min(250))
+            })
+        }).collect();
+        let mut expected = vec![false; 259 * 7];
+        for &(row, lo, hi) in &spans {
+            for x in lo..=hi {
+                expected[(row * 259 + x) as usize] = true;
+            }
+        }
+        std::thread::scope(|s| {
+            for chunk in spans.chunks(40) {
+                let bits = &bits;
+                s.spawn(move || {
+                    for _ in 0..64 {
+                        for &(row, lo, hi) in chunk {
+                            bits.set_span(row, lo, hi);
+                        }
+                    }
+                });
+            }
+        });
+        let level = bits.to_level();
+        for row in 0..7 {
+            for x in 0..259 {
+                assert_eq!(level.get(x, row), expected[(row * 259 + x) as usize]);
+            }
+        }
+        assert_eq!(level.count(), expected.iter().filter(|&&b| b).count() as u64);
     }
 
     #[test]
@@ -2430,13 +2524,14 @@ mod tests {
         }
         top.places.push(PlaceRec { cell: 2, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
         let d = doc_with(vec![top, light, heavy], 0, vec![(1, 0)]);
-        let has = layer_presence(&d, (1, 0));
-        let weights = layer_weights(&d, (1, 0), &has);
+        let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
+        let has = layer_presence(&d, &shapes);
+        let weights = layer_weights(&d, &shapes, &has);
         assert_eq!((weights[1], weights[2]), (1, 90_000 + 64));
         assert_eq!(weights[0], 60 + 90_064);
-        let by_count = units_for(&d, &has, (1, 0), 4, false);
+        let by_count = units_for(&d, &has, &shapes, 4, false);
         assert_eq!(by_count.iter().filter(|u| u.ci == 2).count(), 0, "count split leaves the block one unit");
-        let balanced = units_for(&d, &has, (1, 0), 4, true);
+        let balanced = units_for(&d, &has, &shapes, 4, true);
         let in_block = balanced.iter().filter(|u| u.ci == 2).count();
         assert!(in_block >= 8, "{} units in the block of {}", in_block, balanced.len());
         // the split changes nothing in the file
@@ -2549,9 +2644,11 @@ mod tests {
         top.places.push(PlaceRec { cell: 1, x: 200, y: 0, rot: 0, flip: false, rep: Rep::One });
         top.places.push(PlaceRec { cell: 1, x: 400, y: 0, rot: 0, flip: false, rep: Rep::One });
         let d = doc_with(vec![top, a_cell, b_cell], 0, vec![(1, 0), (2, 0), (3, 0)]);
-        let has = layer_presence(&d, (1, 0));
-        assert_eq!(layer_max_depth(&d, (1, 0), &has), 2);
-        assert_eq!(layer_max_depth(&d, (2, 0), &layer_presence(&d, (2, 0))), 1);
+        let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
+        let has = layer_presence(&d, &shapes);
+        assert_eq!(layer_max_depth(&d, &shapes, &has), 2);
+        let second = take_layer_shapes(&mut index_shapes(&d), (2, 0), d.cells.len());
+        assert_eq!(layer_max_depth(&d, &second, &layer_presence(&d, &second)), 1);
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         let depths = |k: usize| occ.layers[k].planes.iter().map(|p| p.depth).collect::<Vec<_>>();
         assert_eq!((depths(0), depths(1), depths(2)), (vec![0, 1, 2], vec![1], vec![2]));

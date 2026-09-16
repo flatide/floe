@@ -50,6 +50,34 @@ fn hair_wash_coverage() -> f64 {
     })
 }
 
+/// Per-plan sub-cut budgets (HierOpts::sub_cut_sparse_px /
+/// sub_cut_wash_px), screen pixels: about four screens of hairline
+/// ink and sixteen screens of block fill on a 4 Mpx view - each a few
+/// tens of ms of raster - so what the sub-cut rules add to a frame is
+/// bounded whatever the chip holds. Provisional (2026-09-16) until the
+/// field's perf line of the slow frame sets them.
+pub const SUB_CUT_SPARSE_PX: f64 = 16.0e6;
+pub const SUB_CUT_WASH_PX: f64 = 64.0e6;
+
+fn env_mpx(name: &str, default_px: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .map(|v| v * 1.0e6)
+        .unwrap_or(default_px)
+}
+
+fn sub_cut_sparse_px() -> f64 {
+    static PX: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *PX.get_or_init(|| env_mpx("FLOE_RUST_SUB_CUT_SPARSE_MPX", SUB_CUT_SPARSE_PX))
+}
+
+fn sub_cut_wash_px() -> f64 {
+    static PX: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *PX.get_or_init(|| env_mpx("FLOE_RUST_SUB_CUT_WASH_MPX", SUB_CUT_WASH_PX))
+}
+
 /// A sub-cut page-BVH node whose extent is at most this many screen
 /// pixels on both sides washes whole, as it always did (a block that
 /// small overstates nothing anyone can see); a wider node walks on
@@ -155,6 +183,23 @@ pub struct HierOpts {
     /// box on the owning cell's visible layers. Bounds the wide-view
     /// walk the rev 43 prune exists for (184M placements).
     pub sub_cut_walk_budget: u64,
+    /// Per-plan budgets on what the sub-cut rules may ADD to a frame,
+    /// both in screen pixels (field 2026-09-16: a 150 MB chip at
+    /// thin:cull detail medium drew over 6 s at mid zoom, and
+    /// FLOE_RUST_SUB_CUT_WASH=off restored the earlier speed).
+    /// `sub_cut_sparse_px`: the ink estimate of sparse pages kept and
+    /// sparse placements expanded (members x member px, each member
+    /// at least one pixel - the wash_worth measure); beyond it a
+    /// sparse item is DROPPED as the cull always did, never washed (a
+    /// sparse footprint wash is the false block of 2026-09-15).
+    /// `sub_cut_wash_px`: the visible footprint area of the washes,
+    /// one per layer; beyond it a sub-cut item is dropped. Spent in
+    /// walk order, so a plan stays deterministic. 0 drops every
+    /// sparse item / every wash (A/B in the field). Defaults
+    /// SUB_CUT_SPARSE_PX / SUB_CUT_WASH_PX; FLOE_RUST_SUB_CUT_SPARSE_MPX
+    /// / FLOE_RUST_SUB_CUT_WASH_MPX override in Mpx (diagnostic).
+    pub sub_cut_sparse_px: f64,
+    pub sub_cut_wash_px: f64,
     /// Field diagnosis (2026-09-10): record one ExplainRow per page,
     /// page-BVH node, child placement / child-BVH node and frame the
     /// walk judged INSIDE the view - kept, culled by size, hairline,
@@ -197,6 +242,8 @@ impl Default for HierOpts {
             thin_lattice_um: 7.0,
             thin_demote_px: 14.0,
             sub_cut_walk_budget: 200_000,
+            sub_cut_sparse_px: sub_cut_sparse_px(),
+            sub_cut_wash_px: sub_cut_wash_px(),
             explain: false,
         }
     }
@@ -258,6 +305,11 @@ pub struct HierStats {
     /// Calibre shows them at every zoom (field 2026-09-15: two 140 x
     /// 4 um marks 137 mm apart washed as one 137 x 54 mm block)
     pub sub_cut_sparse: u64,
+    /// sub-cut items the per-plan budgets dropped (field 2026-09-16, a
+    /// 6 s mid-zoom draw): sparse pages / placements beyond
+    /// HierOpts::sub_cut_sparse_px, washes beyond sub_cut_wash_px
+    pub sub_cut_sparse_over: u64,
+    pub sub_cut_wash_over: u64,
     /// pages selected whose every record is thin (max_min < hairline
     /// x cut): what the page hairline rule would have dropped
     pub thin_pages_kept: u64,
@@ -583,6 +635,8 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         explain_on: opts.explain,
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         wash_walk_budget: opts.sub_cut_walk_budget,
+        sparse_px_left: opts.sub_cut_sparse_px,
+        wash_px_left: opts.sub_cut_wash_px,
         wash_nodes: HashSet::new(),
         sparse_edges: HashSet::new(),
         hair: (req.cut_dbu.max(0) as f64 * opts.hairline) as u64,
@@ -880,6 +934,10 @@ struct Hier<'a> {
     /// ViewReq::sub_cut_wash and its remaining walk budget
     sub_cut_wash: bool,
     wash_walk_budget: u64,
+    /// remaining per-plan sub-cut budgets (HierOpts::sub_cut_sparse_px
+    /// / sub_cut_wash_px), screen px
+    sparse_px_left: f64,
+    wash_px_left: f64,
     /// child-BVH nodes already washed coarsely (per expand)
     wash_nodes: HashSet<u32>,
     /// placements expanded because they were sparse (no wash could
@@ -975,9 +1033,9 @@ impl<'a> Hier<'a> {
                         // wide view without the summary)
                         let washable = self.sub_cut_wash && in_view;
                         let hair = self.hair_cut(size_cut);
-                        if washable
-                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, hair)
-                        {
+                        let sparse = washable
+                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, hair);
+                        if sparse && self.take_sparse(p.members, p.max_w, p.max_h) {
                             // sparse: too few members for a wash to
                             // stand for them and cheap to draw - keep
                             // the page; its members render as
@@ -987,12 +1045,14 @@ impl<'a> Hier<'a> {
                             psel.insert(pi);
                             continue;
                         }
+                        // a sparse page beyond the budget is dropped,
+                        // never washed (its footprint is a false block)
                         self.st.cull_page_size += 1;
                         if in_view {
                             let verdict = if size_cut { "cull_size" } else { "cull_hair" };
                             self.note_page(verdict, ci, &p, pi);
                         }
-                        if washable {
+                        if washable && !sparse && self.take_wash(&p.bbox, &boxes[..], 1) {
                             wc.washes.push((p.layer_idx, p.bbox));
                             self.st.sub_cut_washes += 1;
                         }
@@ -1180,8 +1240,9 @@ impl<'a> Hier<'a> {
                             if self.wash_nodes.insert(ni) {
                                 let fp = node.bbox;
                                 let mask = self.v.cell_lmask_rec(ci);
-                                self.wash_layers(&mut wc, mask, fp);
-                                self.st.sub_cut_coarse += 1;
+                                if self.wash_layers(&mut wc, mask, fp, std::slice::from_ref(b)) {
+                                    self.st.sub_cut_coarse += 1;
+                                }
                             }
                             continue;
                         }
@@ -1409,6 +1470,58 @@ impl<'a> Hier<'a> {
         (members as f64) * mw * mh >= min * fw * fh
     }
 
+    /// Screen px of `fp` inside the view boxes - the raster cost of a
+    /// wash there (0 when px_per_dbu is 0: a probe costs no raster).
+    fn visible_px(&self, fp: &BBox, boxes: &[BBox]) -> f64 {
+        let ppd = self.px_per_dbu;
+        if !(ppd > 0.0) {
+            return 0.0;
+        }
+        let mut px = 0.0;
+        for b in boxes {
+            let (x0, x1) = (fp.x0.max(b.x0), fp.x1.min(b.x1));
+            let (y0, y1) = (fp.y0.max(b.y0), fp.y1.min(b.y1));
+            if x1 > x0 && y1 > y0 {
+                px += ((x1 - x0) as f64 * ppd).max(1.0) * ((y1 - y0) as f64 * ppd).max(1.0);
+            }
+        }
+        px
+    }
+
+    /// Takes a sparse item's ink estimate (members x member px, each
+    /// member at least one pixel, as wash_worth measures it) from the
+    /// per-plan sparse budget; false when it does not fit - the item
+    /// is dropped as the cull always did (sub_cut_sparse_over).
+    fn take_sparse(&mut self, members: u64, w: u64, h: u64) -> bool {
+        let ppd = self.px_per_dbu;
+        let ink = if ppd > 0.0 {
+            members as f64 * (w as f64 * ppd).max(1.0) * (h as f64 * ppd).max(1.0)
+        } else {
+            members as f64
+        };
+        if ink <= self.sparse_px_left {
+            self.sparse_px_left -= ink;
+            true
+        } else {
+            self.st.sub_cut_sparse_over += 1;
+            false
+        }
+    }
+
+    /// Takes the visible area of a wash (`layers` rects of `fp`) from
+    /// the per-plan wash budget; false when it does not fit - the item
+    /// is dropped as the cull always did (sub_cut_wash_over).
+    fn take_wash(&mut self, fp: &BBox, boxes: &[BBox], layers: u64) -> bool {
+        let px = self.visible_px(fp, boxes) * layers as f64;
+        if px <= self.wash_px_left {
+            self.wash_px_left -= px;
+            true
+        } else {
+            self.st.sub_cut_wash_over += 1;
+            false
+        }
+    }
+
     /// Whether a culled item is a hairline cut under the cull policy
     /// (a size cut, or any cut under keep where page_hair is 0, takes
     /// the dense-array coverage rule).
@@ -1449,16 +1562,21 @@ impl<'a> Hier<'a> {
         let bw = (b0.x1 - b0.x0).max(0) as u64;
         let bh = (b0.y1 - b0.y0).max(0) as u64;
         if !self.wash_worth(&fp, members, bw, bh, hair) {
-            return false;
+            // sparse: expanded while the sparse budget lasts; beyond
+            // it dropped (the caller's cull), never washed
+            return !self.take_sparse(members, bw, bh);
         }
         let mask = self.v.cell_lmask_rec(h.child);
-        self.wash_layers(wc, mask, fp);
+        self.wash_layers(wc, mask, fp, boxes);
         true
     }
 
-    /// One wash rect `fp` per visible layer in bitset `mask`.
-    fn wash_layers(&mut self, wc: &mut WsCell, mask: u32, fp: BBox) {
-        let bits = self.v.bitset(mask);
+    /// One wash rect `fp` per visible layer in bitset `mask`, when the
+    /// wash budget covers them (false: dropped, sub_cut_wash_over).
+    fn wash_layers(&mut self, wc: &mut WsCell, mask: u32, fp: BBox, boxes: &[BBox]) -> bool {
+        let v = self.v;
+        let bits = v.bitset(mask);
+        let mut layers: Vec<u32> = Vec::new();
         for (byte_index, (&m, &vis)) in bits.iter().zip(self.wash_vis.iter()).enumerate() {
             let both = m & vis;
             if both == 0 {
@@ -1466,11 +1584,21 @@ impl<'a> Hier<'a> {
             }
             for bit in 0..8 {
                 if both & (1 << bit) != 0 {
-                    wc.washes.push(((byte_index * 8 + bit) as u32, fp));
-                    self.st.sub_cut_washes += 1;
+                    layers.push((byte_index * 8 + bit) as u32);
                 }
             }
         }
+        if layers.is_empty() {
+            return true;
+        }
+        if !self.take_wash(&fp, boxes, layers.len() as u64) {
+            return false;
+        }
+        for layer in layers {
+            wc.washes.push((layer, fp));
+            self.st.sub_cut_washes += 1;
+        }
+        true
     }
 
     /// One explain row (HierOpts::explain); a no-op otherwise.
@@ -1567,14 +1695,18 @@ impl<'a> Hier<'a> {
                 // beyond the budget washes its extent coarsely
                 if self.sub_cut_wash && n.bbox.intersects(b) {
                     if self.wash_blob(&n.bbox) || !self.wash_wide(&n.bbox) {
-                        washes.push((layer_idx, n.bbox));
-                        self.st.sub_cut_washes += 1;
+                        if self.take_wash(&n.bbox, std::slice::from_ref(b), 1) {
+                            washes.push((layer_idx, n.bbox));
+                            self.st.sub_cut_washes += 1;
+                        }
                         continue;
                     }
                     if self.wash_walk_budget == 0 {
-                        washes.push((layer_idx, n.bbox));
-                        self.st.sub_cut_washes += 1;
-                        self.st.sub_cut_coarse += 1;
+                        if self.take_wash(&n.bbox, std::slice::from_ref(b), 1) {
+                            washes.push((layer_idx, n.bbox));
+                            self.st.sub_cut_washes += 1;
+                            self.st.sub_cut_coarse += 1;
+                        }
                         continue;
                     }
                     self.wash_walk_budget -= 1;
@@ -1593,10 +1725,10 @@ impl<'a> Hier<'a> {
                     let size_cut = p.max_w < self.cut && p.max_h < self.cut;
                     if size_cut || p.max_min < self.page_hair {
                         let in_view = p.bbox.intersects(b);
-                        if self.sub_cut_wash
-                            && in_view
-                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, self.hair_cut(size_cut))
-                        {
+                        let washable = self.sub_cut_wash && in_view;
+                        let sparse = washable
+                            && !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, self.hair_cut(size_cut));
+                        if sparse && self.take_sparse(p.members, p.max_w, p.max_h) {
                             // sparse: kept, see the linear page loop
                             self.st.sub_cut_sparse += 1;
                             self.note_page("keep_sparse", cell, &p, pi);
@@ -1605,14 +1737,10 @@ impl<'a> Hier<'a> {
                         }
                         self.st.cull_page_size += 1;
                         if in_view {
-                            let verdict = if p.max_w < self.cut && p.max_h < self.cut {
-                                "cull_size"
-                            } else {
-                                "cull_hair"
-                            };
+                            let verdict = if size_cut { "cull_size" } else { "cull_hair" };
                             self.note_page(verdict, cell, &p, pi);
                         }
-                        if self.sub_cut_wash && in_view {
+                        if washable && !sparse && self.take_wash(&p.bbox, std::slice::from_ref(b), 1) {
                             washes.push((layer_idx, p.bbox));
                             self.st.sub_cut_washes += 1;
                         }

@@ -3624,6 +3624,19 @@ class Viewer:
                             # measurement of the lifted rule reads
                             text += ", thin pages %s kept" % fmt_count(
                                 culls["thin_pages"])
+                        if culls.get("sub_cut_washes") or culls.get("sub_cut_sparse"):
+                            # sub-cut pages/nodes washed as footprints
+                            # and kept or expanded as sparse (2026-09-16)
+                            text += ", sub-cut washes %s/sparse %s" % (
+                                fmt_count(culls.get("sub_cut_washes", 0)),
+                                fmt_count(culls.get("sub_cut_sparse", 0)))
+                        if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
+                            # dropped by the per-plan sub-cut budgets
+                            # (sparse ink / wash area): the frame is
+                            # showing less than the rules would
+                            text += ", sub-cut over %s/%s" % (
+                                fmt_count(culls.get("sub_cut_sparse_over", 0)),
+                                fmt_count(culls.get("sub_cut_wash_over", 0)))
                     summ = res.get("summary") or {}
                     if summ.get("layers"):
                         # occupancy summary (M2): these layers were

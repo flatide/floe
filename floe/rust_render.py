@@ -1087,6 +1087,16 @@ class RustRenderWorker:
                 "thin_frames": _wire_int(fields, "thin_frames"),
                 # thin pages kept (page hairline cull off, 2026-09-10)
                 "thin_pages": _wire_int(fields, "thin_pages"),
+                # sub-cut pages/nodes washed as footprints and kept or
+                # expanded as sparse (2026-09-16: on a layout too - the
+                # cost of the field's mid-zoom draw to read)
+                "sub_cut_washes": _wire_int(fields, "sub_cut_washes"),
+                "sub_cut_sparse": _wire_int(fields, "sub_cut_sparse"),
+                # sub-cut items the planner's per-plan budgets dropped
+                # (sparse ink px / wash area px, 2026-09-16: a 6 s
+                # mid-zoom draw on the 150 MB chip)
+                "sub_cut_sparse_over": _wire_int(fields, "sub_cut_sparse_over"),
+                "sub_cut_wash_over": _wire_int(fields, "sub_cut_wash_over"),
             },
             # occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): layers
             # drawn from design.ovo instead of their pages, the cells
