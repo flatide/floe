@@ -6330,3 +6330,50 @@ metadata 없음/다른 리뷰/분리된 등록도 검사한다. 로그는 §90 �
 시작30초 제한에서 중단됐다. 원인/제한은 그대로이며 각 구간 재실행을 단일 전체
 PASS로 합치지 않는다. 전체 목표 잔여는 §90과 같고, 다음 로컬 결함은 DRC build의
 부모 경로 alias 오인이다.
+
+## 92. M4g-37 — DRC build의 부모 경로 alias 정규화
+
+§90의 기본 macOS TMPDIR 실패를 디렉터리 symlink가 있는 작은 합성 DB로 재현했다.
+기존 release는 첫 빌드에서 `legacy DRC pack disappeared`로 실패한다. 출력은
+`protected_output`으로 부모 경로를 해석하지만, 선택 후보는 lexical path인 탓에
+동일한 새 `.tray`를 서로 다른 이름으로 판단했다. 재사용도 불필요한 migration으로
+오인할 수 있는 비교였다.
+
+명시 build 안에서 선택 후보도 같은 `protected_output` 규칙으로 정규화한다.
+소스의 논리적 basename과 옆 캐시 위치는 유지하고, cache leaf symlink는 따라가지
+않고 거부한다. 승인 root 재검사·alias write lease·원자 게시·취소 경계는 그대로다.
+열기/조회에 rename이나 쓰기를 추가하지 않는다.
+
+회귀는 실제 CLI의 parent alias에서 신규/재사용/force, legacy 재사용·force 개명,
+새/구 캐시 leaf symlink 거부, 소스 leaf symlink의 논리적 이름 보존을 검사한다.
+native 관리형 빌드의 lease/cancel 검증과 HTTP 승인 build/adoption 경로도 별도
+parent alias로 실행한다. `validate_drc_build.py`, `validate_web_drc_build.py`,
+기본 macOS TMPDIR의 `validate_web_drc_notes.py`가 모두 exit0이다. native bytes
+j1/4/16·외부 변경/fault·취소/reap·기존 리뷰/입력 보존을 포함한다. 기존 DRC build
+단위3건, app-core/web fmt 및 strict clippy도 통과했다. 로그는 §90 폴더의
+`alias-native-gate.log`, `alias-web-gate.log`, `alias-default-tmp-notes.log`,
+`alias-unit.log`, `alias-clippy.log`에 둔다.
+
+이번 release의 최초 `--version`은 wall13.40s(user/sys0.00s 표시) 후 성공했다.
+앞선 native oracle의30초 시작 제한 문제와 같은 원인인지는 확인되지 않았다.
+이후 집중 검사는 기존 timeout을 변경하지 않고 실행했다. 전체 배터리 재실행은
+`alias-validation.log`에 보존한다. workspace와 초기 CLI/캐시/패키징/읽기 검사는
+통과했지만 layerprops native oracle의30초 시작 제한에서 exit1이었다. 동일한
+제한의 단독 재실행은72문서·980스타일·4 view model을 통과했다. 전체 PASS가 아니다.
+
+시작 지연의 추가 관측: 같은 배터리의 새 debug test 프로세스를 `sample`로1초
+읽었을 때886표본이 모두 `_dyld_start + 0`이었고, 별도 `ps`에서도 실행 후34초에
+CPU0.00s인 test 프로세스가 보였다. 이 표본은 Rust test 본문 이전의 정체를
+뒷받침하지만 layerprops timeout 전체나 특정 macOS 보안/네트워크 기능의 원인을
+확정하지 않는다. 제한 연장·보안 설정 변경은 하지 않았다.
+
+사용자 지시에 따라 합성 서버를 직접 실행하고 새 Chrome 세션에서 저장된 메모와
+waive 자동 해제 결과를 읽기만 재검증했다. Global1의 본문과0 waived, Global2의
+무메모·0 waived, Reload review 후 복원, 입력7파일 및 reviewer sidecar 불변을
+확인했다([브라우저 §10.2](WEBUI_BROWSER_ACCEPTANCE.ko.md#102-직접-실행한-새-서버의-읽기-전용-복원-재검증)).
+추가 저장은 없으며 새 프로세스에 이전 save receipt가 없으므로 영수증 문구
+전환의 실제 게시 왕복까지 검증한 것은 아니다.
+
+전체 목표 잔여: 전체 배터리의 시작 제한 실패 추적, 나머지 실제 Chrome DRC
+교체/충돌/복구·입력/설정/공유 수용, Python-free Linux 실행, G1/G4 판정과 현장 Firefox/ETX.
+원격 SH-10과 index hot reload/revision은 사용자 보류, M5는 성능 조건부다.

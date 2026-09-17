@@ -292,7 +292,12 @@ fn run(
         ));
     }
     let _leases = WriteLease::acquire_aliases(&cache::pack_paths(source)?)?;
-    let selected = cache::pack_path(source)?;
+    // output_path resolves the parent but preserves the logical source name.
+    // Compare candidates in that same namespace: /var vs /private/var (or any
+    // directory symlink) is not a legacy rename. Do not resolve the cache leaf;
+    // a symlink there must still be rejected rather than adopted/replaced.
+    let selected =
+        artifact::protected_output(&cache::pack_path(source)?, &[source.to_owned()], &[])?;
     scope.check(&selected)?;
     let mut old = existing(&selected)?;
     if let Some(previous) = old.as_ref().filter(|_| !options.force) {

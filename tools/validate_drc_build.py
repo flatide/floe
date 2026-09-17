@@ -47,6 +47,49 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def parent_aliases(root, env):
+    real = root / "alias target"
+    real.mkdir()
+    alias = root / "parent alias"
+    alias.symlink_to(real, target_is_directory=True)
+    source = alias / "results.db"
+    source.write_text(DB)
+    original = fingerprint(source)
+    output = drc_pack(source)
+    legacy = Path(str(source) + ".ice")
+    for force in (False, False, True):
+        old = fingerprint(output) if output.exists() else None
+        result = call(source, env, *(["--force"] if force else []))
+        assert result["migration"] is None, "parent alias was mistaken for legacy naming"
+        assert result["reused"] is (old is not None and not force)
+        if result["reused"]:
+            assert fingerprint(output) == old
+        assert fingerprint(source) == original
+    for force in (False, True):
+        old_bytes = output.read_bytes()
+        output.rename(legacy)
+        result = call(source, env, *(["--force"] if force else []))
+        assert result["migration"] is not None and result["reused"] is not force
+        assert output.read_bytes() == old_bytes and not legacy.exists()
+
+    # Normalizing parents must not follow a cache leaf symlink, nor change the
+    # logical basename of a source leaf symlink (cache belongs beside that name).
+    for target in (output, legacy):
+        output.unlink(missing_ok=True)
+        target.symlink_to(source)
+        call(source, env, "--force", ok=False)
+        assert target.is_symlink() and fingerprint(source) == original
+        target.unlink()
+    linked_source = alias / "named.db"
+    linked_source.symlink_to(source)
+    result = call(linked_source, env)
+    assert Path(result["pack"]) == real / ".named.db.tray"
+    assert drc_pack(linked_source).is_file() and not output.exists()
+    assert linked_source.is_symlink() and fingerprint(source) == original
+    clean_stage(real)
+    print("DRC BUILD PARENT ALIAS: ALL OK (fresh/reuse/force, legacy, leaf protection)")
+
+
 def parallel_native(work, env):
     # Native uses at least 4 MiB per worker. A tiny --jobs=16 fixture would
     # silently run one worker and would not exercise parallel parsing at all.
@@ -79,6 +122,7 @@ def main():
         output = drc_pack(source)
         golden = work / "native.ice"
         env = dict(os.environ, PATH="", FLOE_INDEX_BIN=str(NATIVE))
+        parent_aliases(root, env)
         subprocess.run([str(NATIVE), "drc", str(source), str(golden), "--jobs", "1"],
                        env=env, capture_output=True, check=True, timeout=20)
         original = fingerprint(source)
@@ -194,8 +238,10 @@ while True:
         core.mkdir()
         core_source = core / "core.db"
         core_source.write_bytes(original[0])
+        core_alias = root / "core parent alias"
+        core_alias.symlink_to(core, target_is_directory=True)
         native_env = dict(os.environ, FLOE_INDEX_BIN=str(NATIVE),
-                          FLOE_DRC_BUILD_SOURCE=str(core_source), FLOE_DRC_BUILD_FAKE=str(fake),
+                          FLOE_DRC_BUILD_SOURCE=str(core_alias / core_source.name), FLOE_DRC_BUILD_FAKE=str(fake),
                           FLOE_DRC_FAULT="hang")
         subprocess.run(["cargo", "test", "--offline", "--locked", "-p", "floe-app-core",
                         "--test", "drc_build", "--", "--ignored"], cwd=ROOT / "rust",

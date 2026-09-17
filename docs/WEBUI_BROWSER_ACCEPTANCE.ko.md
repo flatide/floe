@@ -509,6 +509,36 @@ metadata 동기화 여부와 무관하게 항상 “waiting for matching review 
 합성 세션의 읽기만 재검증할지 또는 문구 수정 뒤 검증할지 요청했다. **파일·native
 재조회 통과와 최종 실제 브라우저 재조회는 구별한다.**
 
+후속 `317585e`는 실제 read barrier와 현재 metadata 상태로 이 문구를 구분하며
+unit/panel 회귀를 통과했다([M4 §91](WEBUI_M4.ko.md#91-m4g-36--waive-영수증과-현재-reader-상태-분리)).
+61638은 수정 전 bundle이므로 새 브라우저 수용으로 세지 않는다. 이후 재확인에서도
+OASIS/OVM/OVP/OVT/DRC DB/pack/SVRF7파일의 SHA-256은 모두 초기값과 같았다.
+
+### 10.2 직접 실행한 새 서버의 읽기 전용 복원 재검증
+
+사용자가 최종 읽기 재검증과 서버 직접 실행을 승인했다. 이전61638은 이미 종료된
+상태였으며, 에이전트가 같은 합성 전용 `run-review.sh`를 실행하고 Chrome의 기존
+테스트 탭에서 새 일회용 비공개 링크를 열었다. 인증값은 기록하지 않았다.
+59459의 About은 `317585e+`, web `c6d54d7d26cba3d6acabac4c9f3a072b3568f61d`였다.
+
+- Local connected, ICE23오류·SVRF8/8, M2.OVERLAP.2의2오류와0 waived를 확인했다.
+- Global1의 saved-note badge 및 Read selected notes에서 한글·줄바꿈·
+  `Global 1 only · opt-in` 본문이 그대로 복원됐다. Global2는 메모가 없다.
+- 메모 편집기를 닫고 Global1의 Read selected statuses에서 `0 already waived ·
+  0 reserved statuses`를 확인했다. Discard choice → Reload review 후에도 같은
+  결과였다. Global2 역시0 waived였다. 자동 clear의 최종 실제 UI 재조회를 닫는다.
+- 양쪽 자동 저장은off였고 새 save/preview/opt-in을 실행하지 않았다. 서버 재시작
+  뒤 receipt가 없고 note revision이0인 것은 세션 카운터이며 파일 소실이 아니다.
+  이전 #2 receipt의 같은 세션 문구 전환까지 검증한 것으로 확대하지 않는다.
+- note snapshot이 열린 동안 배경 saved-note 표시는 `review_busy`였다. 초안을
+  닫고 refresh/Reload review하면 badge가 복구됐다. §90의 예약 한도 동작이며
+  파일 충돌이나 본문 손실로 판정하지 않는다.
+
+검사 후 source/cache/DB/pack/SVRF7파일은 최초 SHA-256과 같고, note/waive의
+SHA-256도 검사 전과 같다. waive 상태23바이트는 모두0이다. 두 편집기는 닫고
+자동 저장off·Local connected로 남겼다. 신규 저장, 실제 사용자 데이터 변경,
+외부 전송은 없다. 이 검사부터 합성 서버의 실행/재시작은 에이전트가 담당한다.
+
 ## 11. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
@@ -517,8 +547,9 @@ metadata 동기화 여부와 무관하게 항상 “waiting for matching review 
 SVRF 교체·두 CD·레이어 격리/복원, §7.3의 작은 DRC 필터/순환/선택 복원과 §8의
 Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 오류 메모 수동/opt-in
 저장·reload 복원, §10.1의 waive 단일 오류 수동 저장/복원·opt-in 자동 해제/파일
-검증이다. 각 절의 미검사 범위 및 기존 DRC 교체/실패, pack 생성, 자동 해제의
-최종 실제 UI 재조회·메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
+검증과 §10.2의 새 프로세스 메모/waive 복원·자동 해제 최종 UI 재조회다.
+각 절의 미검사 범위 및 기존 DRC 교체/실패, pack 생성,
+메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
 auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
 

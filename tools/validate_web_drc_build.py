@@ -58,6 +58,10 @@ while True:time.sleep(.01)
         for mode in ('native', 'faults', 'logout', 'ice', 'collision'):
             work = root / mode
             work.mkdir()
+            if mode == 'native':
+                alias = root / 'native parent alias'
+                alias.symlink_to(work, target_is_directory=True)
+                work = alias
             db = work / '공백 results.db'
             db.write_text(DB)
             pack = drc_pack(db)
