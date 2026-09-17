@@ -141,9 +141,14 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    §5는 새 합성 owner 세션의 Shift/Cmd 레이어 선택·선택 가시성/색상, 단일 스타일
    취소/적용·reload 유지·재열기 기본값 복원과 두 수동 거리/Undo/Clear를 확인한다.
    그룹 상속·bitmap 슬롯·스냅/자유각·DRC CD·저장/복구는 이 검사에 포함되지 않는다.
-   §6은 Native JSON/Calibre layerprops의 실제 다운로드 파일을 확인했다. 승인된
-   재불러오기는 브라우저 filechooser의 `Not allowed`로 진행하지 못했고, 임시
-   설정은 뷰 재열기로 복원했다. 파일 import/roundtrip 성공으로 계산하지 않는다.
+   §6은 Native JSON/Calibre layerprops의 실제 다운로드 파일을 확인했다. 최초
+   재불러오기는 filechooser의 `Not allowed`로 차단됐다(앱 실패와 구분).
+   권한 변경 뒤 §6.1에서는 실제 Native/Calibre 업로드의 앱 거부를 관측했다.
+   서버의 charset 대소문자 완전 일치 결함을 native 회귀로 재현하고 수정했다.
+   수정 바이너리로 재시작한 Chrome에서 두 파일 각각9레이어 표시·7/0 스타일
+   복원을 확인했고 마지막 Native import로 초기 상태를 되돌렸다. 카메라와
+   소스/캐시 파일은 불변이다. flat9레이어 기본 패턴의 수용이며 그룹 상속·custom
+   bitmap/v2·슬롯 편집의 실제 브라우저 수용으로 확대하지 않는다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격

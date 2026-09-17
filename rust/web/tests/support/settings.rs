@@ -8,6 +8,16 @@ async fn request(
     path: &str,
     body: &str,
 ) -> (u16, String, String) {
+    request_with_type(h, l, method, path, body, "text/plain; charset=utf-8").await
+}
+async fn request_with_type(
+    h: &Harness,
+    l: &Login,
+    method: &str,
+    path: &str,
+    body: &str,
+    content_type: &str,
+) -> (u16, String, String) {
     let origin = format!("http://{}", h.addr);
     h.raw(
         method,
@@ -16,7 +26,7 @@ async fn request(
             ("Origin", &origin),
             ("Cookie", &l.cookie),
             ("X-Floe-CSRF", &l.csrf),
-            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Content-Type", content_type),
         ],
         body,
     )
@@ -137,7 +147,43 @@ async fn owner_settings_prepare_apply_restore_download_and_no_writes() {
         .0,
         400
     );
-    let prepared = request(&h, &login, "POST", &path(&s, "calibre"), &big).await;
+    // Chromium normalizes the charset of an XHR string body to UTF-8.
+    // Raw lowercase-only requests previously hid this browser incompatibility.
+    for format in ["native", "calibre"] {
+        let body = if format == "native" { &initial.2 } else { &big };
+        for content_type in ["text/plain; charset=UTF-8", "TEXT/PLAIN; CHARSET=Utf-8"] {
+            let reply =
+                request_with_type(&h, &login, "POST", &path(&s, format), body, content_type).await;
+            assert_eq!(reply.0, 200, "{format} {content_type}: {}", reply.2);
+            assert_eq!(
+                request(&h, &login, "GET", &path(&s, "native"), "").await.2,
+                initial.2,
+                "preparation changed the view"
+            );
+        }
+        for content_type in [
+            "text/plain",
+            "application/json; charset=UTF-8",
+            "text/plain; charset=iso-8859-1",
+            "text/plain; charset=utf-16",
+            "text/plain; charset=UTF-8x",
+            "text/plain; charset=UTF-8; charset=utf-16",
+            "text/plain; charset=UTF-8, text/plain; charset=UTF-8",
+        ] {
+            let reply =
+                request_with_type(&h, &login, "POST", &path(&s, format), body, content_type).await;
+            assert_eq!(reply.0, 400, "{format} {content_type}: {}", reply.2);
+        }
+    }
+    let prepared = request_with_type(
+        &h,
+        &login,
+        "POST",
+        &path(&s, "calibre"),
+        &big,
+        "text/plain; charset=UTF-8",
+    )
+    .await;
     assert_eq!(prepared.0, 200, "{}", prepared.2);
     let prepared: Value = serde_json::from_str(&prepared.2).unwrap();
     assert_eq!(prepared["rows"], 1);
@@ -185,9 +231,16 @@ async fn owner_settings_prepare_apply_restore_download_and_no_writes() {
     s.apply(&prepared["prepared_token"], Some("stale_state"))
         .await;
     let prepared: Value = serde_json::from_str(
-        &request(&h, &login, "POST", &path(&s, "native"), &initial.2)
-            .await
-            .2,
+        &request_with_type(
+            &h,
+            &login,
+            "POST",
+            &path(&s, "native"),
+            &initial.2,
+            "text/plain; charset=UTF-8",
+        )
+        .await
+        .2,
     )
     .unwrap();
     s.apply(&prepared["prepared_token"], None).await;

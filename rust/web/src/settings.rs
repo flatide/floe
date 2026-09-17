@@ -71,8 +71,10 @@ async fn prepare(
         Ok(v) => v,
         Err((status, code)) => return fail(code, status),
     };
-    if crate::origin::single(&headers, header::CONTENT_TYPE.as_str())
-        != Some("text/plain; charset=utf-8")
+    // Chromium XHR rewrites a string body's charset to uppercase UTF-8.
+    // Accept case variants, not other encodings or ambiguous duplicate headers.
+    if !crate::origin::single(&headers, header::CONTENT_TYPE.as_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("text/plain; charset=utf-8"))
         || permit.is_none()
     {
         return fail("invalid_request", StatusCode::BAD_REQUEST);

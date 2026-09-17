@@ -6,7 +6,8 @@
 
 이 문서는 실제 브라우저 조작·화면·저장 결과의 근거다. Node/HTTP 모형 게이트와
 구분하며, 아래 일부 통과를 G1/G4 전체나 Firefox/ETX·Linux 수용으로 바꾸지 않는다.
-제품 코드를 수정한 단계가 아니므로 전체 배터리를 다시 실행했다고 기록하지 않는다.
+문서만 갱신한 관측 단계와 실제 제품 수정·회귀 실행을 구별한다. §6.1은 실제
+브라우저에서 드러난 설정 업로드 결함의 수정이며, 로컬 회귀와 화면 수용은 별도다.
 
 ## 1. 세션과 범위
 
@@ -141,7 +142,7 @@ canvas에 포커스가 있는 상태의 `k`는 마지막 수직 ruler만 삭제�
 bitmap 슬롯, 스냅 정확도·Shift 자유각·선택 bbox gap, DRC CD, clipboard와 지연/부하
 수용은 별도다. 모형 게이트나 이 두 거리 일치만으로 전체 측정 기능을 완료 처리하지 않는다.
 
-## 6. 설정 다운로드 — 불러오기는 브라우저 권한 대기
+## 6. 설정 다운로드 — 최초 불러오기 권한 차단
 
 2026-09-17 사용자가 새 합성 valmini 세션을 열고, 다운로드한 두 설정 파일을 같은
 loopback 세션으로 다시 불러오는 검사를 명시 승인했다. 실제 설계·설계 기본값·외부
@@ -163,8 +164,8 @@ version2 직렬화 수용을 이 결과로 대신하지 않는다. 두 파일은
 이후 Load settings의 실제 filechooser로 JSON을 선택하려 했으나 브라우저 도구가
 `Not allowed`를 반환했다. 앱의 Settings applied 응답은 관측하지 못했다. 확장
 프로그램의 파일 URL 접근 설정을 확인하도록 안내했으며 우회 업로드나 권한 자동
-변경은 하지 않았다. **JSON/Calibre 불러오기·roundtrip은 미검증**이고, 앱 importer의
-실패 증거로도 집계하지 않는다. Calibre 업로드는 시도하지 않았다.
+변경은 하지 않았다. **이 최초 시도의 JSON/Calibre 불러오기·roundtrip은 미검증**이고,
+앱 importer의 실패 증거로도 집계하지 않는다. 이때 Calibre 업로드는 시도하지 않았다.
 
 뷰를 닫고 같은 등록 소스를 다시 열어9레이어 on·초기 색상·7/0 Speckle/1px를
 복원했다. X200/Y220/view500µm, depth99·High·Frames/Labels on·선택/룰러0·snap on,
@@ -172,11 +173,77 @@ Local connected/final frame 상태를 확인하고 사용자 탭과 서버는 �
 이는 파일 import를 통한 복원이 아니다. source/OVM/OVP/OVT의 SHA-256·크기·mtime는
 전후 일치한다. 제품 코드 변경이나 전체 배터리 재실행은 없었다.
 
+### 6.1. 권한 변경 뒤 발견한 XHR charset 호환성 결함
+
+사용자가 확장 프로그램의 파일 URL 접근을 허용한 뒤 같은 합성 세션에서 다시
+검사했다. filechooser가 두 파일을 모두 전달했지만 Native JSON과 Calibre 각각
+`The requested value or selection is not supported.`로 실패했다. JSON 시도 뒤
+1/0은 off인 채로 남았고 설정 버튼은 다시 활성화됐다. 다운로드 파일의 SHA-256은
+§6에서 저장한 것과 같았다. 파일 선택 거부와 앱의 HTTP 거부를 구별한다.
+
+서버 `settings::prepare`가 Content-Type을 `text/plain; charset=utf-8`과 대소문자까지
+완전히 일치시켰다. [Chromium XHR 구현](https://chromium.googlesource.com/chromium/src/third_party/+/f4bee3533965ef933f7b75f0a365c90b5f75d922/blink/renderer/core/xmlhttprequest/xml_http_request.cc)은
+문자열 body를 보낼 때 charset 값을 `UTF-8`로 교체한다. 기존 raw HTTP gate와
+JS 모형은 이 브라우저 변환을 재현하지 않았다. 새 native 회귀에서 uppercase 헤더의
+JSON 요청은 수정 전 **400 invalid_request / exit101**로 실패했다.
+
+수정은 단일 헤더 값의 ASCII 대소문자 비교만 완화한다. text/plain·UTF-8 인코딩,
+단일 헤더·기존 파라미터 형식, 인증/Origin/CSRF·4MiB cap·준비 토큰·CAS는 유지한다.
+다른 인코딩/미디어 타입, charset 누락·중복·접미사, 복수 헤더를 허용하지 않는다.
+Native/Calibre 각각 uppercase·mixed-case 허용과7종 부적합 값 거부를 추가했다.
+Chromium형 헤더로 Calibre 적용과 Native 복원도 실행하며 기존 lowercase 경로를
+유지한다. 수정 후 집중 owner settings gate는 exit0으로 통과했다(재전송/stale·
+custom bitmap/v2·파일 불변 포함). `validate_owner_service.py`의21개 native 검사와
+`node tools/validate_web_ui.cjs`도 통과했다.
+
+`sh tools/validate_rust.sh`는 macOS arm64·jobs2·offline·전용 합성 TMPDIR에서
+실행했다. 아래 native 테스트 실행이 각각30초 제한으로 중단됐다. 제한을 늘리거나
+게이트를 생략하지 않았고, 같은 제한의 재실행은 모두 통과했다.
+
+| 중단된 검사 | 동일 제한 재실행 결과 |
+| --- | --- |
+| `validate_layerprops.py` | 72 documents·980 styles·4 native view models 통과(native test0.11s) |
+| `validate_layer_defaults.py` | 20 GTK targets/bytes·native publication 통과(native test0.27s) |
+| `validate_layer_palette.py` | 12,096 batch·32 order·7,776 click cases 통과 |
+| `validate_web_startup.py` | 144 startup·380 stream cases,22 native launch cases 통과 |
+
+세 번째 전체 실행의 전반부, palette부터 원래 스크립트의 재개 구간, startup부터
+마지막까지의 재개 구간을 합쳐 **원래 배터리 전 항목을 통과**했다. 마지막 구간은
+exit0과 `RUST VALIDATION: ALL OK`로 종료했으며 jobdeck83·renderer46검사와
+KLayout jobs1/8 각각13 PX·2 phase-exact·14 style 검사를 포함한다. 이것은
+**분할 재실행 결과이지 단일 전체 실행 PASS가 아니다**. 최초 시간 초과의 원인은
+미확정이며 재실행 성공으로 해결됐다고 판단하지 않는다. 수정한 두 Rust 파일의
+`rustfmt --check`와 `git diff --check`도 통과했다.
+
+사용자가 수정 실행 파일로 서버를 재시작하고 Chrome에서 연 새 loopback 세션
+(`127.0.0.1:57643`, revision `7467c59+`, bundle
+`18deb131059086ea60eee0ea8031a52e638cad78`)에서 실제 filechooser로 재검사했다.
+§6의 다운로드 파일을 그대로 사용했고 각 변경·복원을 UI 상태와 화면으로 확인했다.
+
+| 형식 | 적용 전 의도적인 변경 | 실제 불러오기 결과 |
+| --- | --- | --- |
+| Native JSON | 1/0 off, 7/0 Outline·3px | `Settings applied · 9 rows read`;9레이어 on,7/0 Speckle·1px, geometry 복원 |
+| Calibre layerprops | 2/0 off, 7/0 Outline·5px | 같은9행 적용 응답;9레이어 on,7/0 1px·`aaaa/5555` 교대16×16 패턴, geometry 복원 |
+
+Calibre의 named `speckle`은 기존 importer에서 named fill slot의 bitmap으로
+해석되므로 편집기에는16×16 pattern으로 보인다. 원래 Native의 builtin Speckle과
+표현 방식이 다른 기존 계약이며, 화면 확인을 비트 단위 픽셀 오라클로 간주하지 않는다.
+마지막에는 Native JSON을 다시 import해 초기 상속 상태와 Speckle·1px를 복원했다.
+재열기가 아니라 파일 import로 복원한 결과다. 세 번 모두 카메라는
+X200/Y220/view500µm를 유지했고 Local connected·final frame, depth99·High,
+Frames/Labels on·선택/룰러0 상태로 탭과 서버를 열어 두었다.
+
+소스·OVM/OVP/OVT의 SHA-256·크기·mtime와 다운로드 두 파일의 SHA-256은 전후
+일치한다. 권한 자동 변경·우회 업로드·설계 기본값 게시·실제 설계 사용은 없었다.
+이 결과는 flat9레이어·기본 패턴의 실제 다운로드→import 수용이다. 그룹 상속,
+custom bitmap/v2·슬롯 편집은 집중 HTTP 게이트와 구별하며 실제 브라우저 수용으로
+확대하지 않는다.
+
 ## 7. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
-공유, §5의 일부 레이어/스타일·스냅 없는 수동 측정, §6의 두 설정 다운로드다. 설정
-불러오기·복원과 각 절의 미검사 범위 및
+공유, §5의 일부 레이어/스타일·스냅 없는 수동 측정, §6의 두 설정 다운로드와
+§6.1의 flat9레이어 Native/Calibre 불러오기·복원이다. 각 절의 미검사 범위 및
 파일/DRC 열기·저장/충돌/복구·슬롯 편집·clipboard·auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
 
