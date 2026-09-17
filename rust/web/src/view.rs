@@ -490,7 +490,7 @@ pub fn safe_error(kind: floe_app_core::ErrorKind) -> &'static str {
         K::Unsupported => "unsupported",
         K::Io => "io_error",
         K::Cache => "index_unavailable",
-        K::Busy => "busy",
+        K::Busy | K::Admission => "busy",
         K::Version => "worker_version",
         K::Worker => "worker_failed",
         K::Cancelled => "cancelled",

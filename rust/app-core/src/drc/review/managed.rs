@@ -102,11 +102,18 @@ impl ManagedStore {
                 return Err(Error::input("review read target is not a derived sidecar"));
             }
         }
-        let permit = resources.drc(
-            std::iter::once(pack.clone())
-                .chain(r.protected_files.iter().cloned())
-                .chain(target.map(Path::to_owned)),
-        )?;
+        let permit = resources
+            .drc(
+                std::iter::once(pack.clone())
+                    .chain(r.protected_files.iter().cloned())
+                    .chain(target.map(Path::to_owned)),
+            )
+            .map_err(|mut e| {
+                if e.kind == ErrorKind::Busy {
+                    e.kind = ErrorKind::Admission;
+                }
+                e
+            })?;
         let store = if let Some(target) = target {
             store::Store::open_readonly_catalog(
                 r.scope,

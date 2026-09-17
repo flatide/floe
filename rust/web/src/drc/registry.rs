@@ -203,6 +203,7 @@ impl Registry {
             files: note_files,
             trees: trees.to_vec(),
             sources: sources.clone(),
+            notes_display: std::sync::Weak::new(),
         })?);
         if edit_waives {
             *self.waives.lock().unwrap() =
@@ -220,6 +221,7 @@ impl Registry {
                         .collect(),
                     trees: trees.to_vec(),
                     sources,
+                    notes_display: Arc::downgrade(notes.as_ref().unwrap()),
                 })?);
         }
         Ok(())

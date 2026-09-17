@@ -230,7 +230,7 @@ fn admission_precedes_pack_open_and_failed_open_releases_every_reservation() {
             f.registration(store::Kind::Notes),
             &AtomicUsize::new(0)
         )),
-        ErrorKind::Busy
+        ErrorKind::Admission
     );
     assert_eq!(f.resources.usage(), prior);
     drop(write);
@@ -265,7 +265,7 @@ fn admission_precedes_pack_open_and_failed_open_releases_every_reservation() {
             f.registration(store::Kind::Notes),
             &AtomicUsize::new(0)
         )),
-        ErrorKind::Busy
+        ErrorKind::Admission
     );
     assert_eq!(limited.usage(), Usage::default());
     f.preserved();

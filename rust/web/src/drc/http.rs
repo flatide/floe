@@ -24,7 +24,7 @@ pub(crate) fn routes() -> Router<Gate> {
 }
 pub(super) fn failure(code: super::Failure) -> Response {
     let status = match code {
-        "drc_busy" => StatusCode::TOO_MANY_REQUESTS,
+        "drc_busy" | "review_busy" => StatusCode::TOO_MANY_REQUESTS,
         "drc_closed" => StatusCode::GONE,
         "drc_unavailable" => StatusCode::NOT_FOUND,
         "drc_changed_or_corrupt" | "drc_read_error" => StatusCode::UNPROCESSABLE_ENTITY,

@@ -20,7 +20,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, Weak,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -37,6 +37,9 @@ pub(super) struct Config {
     pub files: Vec<PathBuf>,
     pub trees: Vec<PathBuf>,
     pub sources: Arc<SourceSet>,
+    // Waive reads may reclaim only the idle saved-note projection, never an
+    // editor snapshot/draft. Weak avoids a registry/worker lifetime cycle.
+    pub notes_display: Weak<Service>,
 }
 /// Mutable binding only; reviewer, write permissions and protected roots stay
 /// in the immutable launcher Config. The coordinator never accepts these paths
@@ -613,6 +616,17 @@ impl Service {
         Ok(value)
     }
     fn open(&self, reader: &Reader, stop: &AtomicUsize) -> Result<Arc<managed::ManagedStore>> {
+        // Hold the note preparation gate through store admission: an in-flight
+        // display cannot reinstall its cache or race to reserve the freed slot.
+        // Active work returns a retryable busy error; its lease is never forced
+        // free. Existing edit snapshots are deliberately not reclaimed.
+        let _display_guard = self
+            .inner
+            .config
+            .notes_display
+            .upgrade()
+            .map(|notes| notes.reclaim_display())
+            .transpose()?;
         let (read_target, reader_id) = {
             let s = self.inner.state.lock().unwrap();
             if s.detached || s.closed {
@@ -681,6 +695,7 @@ fn safe(kind: ErrorKind) -> Failure {
     match kind {
         ErrorKind::InvalidInput => "invalid_drc_request",
         ErrorKind::Busy => "review_changed",
+        ErrorKind::Admission => "review_busy",
         ErrorKind::Cache => "drc_changed_or_corrupt",
         ErrorKind::Cancelled => "drc_cancelled",
         ErrorKind::Incomplete => "drc_read_limit",

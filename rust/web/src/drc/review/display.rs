@@ -27,6 +27,16 @@ pub(super) struct Cache {
     name: String,
 }
 impl Service {
+    pub(super) fn reclaim_display(&self) -> Result<OwnedSemaphorePermit> {
+        let permit = Arc::clone(&self.preparations)
+            .try_acquire_owned()
+            .map_err(|_| floe_app_core::Error::new(ErrorKind::Admission, "note read is active"))?;
+        let cached = self.inner.state.lock().unwrap().display.take();
+        // Runs off-reactor. Release potentially large note data outside State's
+        // lock, while the preparation gate prevents another display read.
+        drop(cached);
+        Ok(permit)
+    }
     fn display_cache(
         &self,
         context: &Context,
@@ -204,6 +214,31 @@ pub(super) async fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reclaim_respects_inflight_reads_and_holds_the_preparation_gate() {
+        let service = super::super::tests::service();
+        let body = Arc::new(Semaphore::new(1));
+        let op = service
+            .begin_read(Arc::new(body.try_acquire_owned().unwrap()), true)
+            .unwrap();
+        assert!(matches!(
+            service.reclaim_display(),
+            Err(floe_app_core::Error {
+                kind: ErrorKind::Admission,
+                ..
+            })
+        ));
+        assert_eq!(op.stop.load(Ordering::Relaxed), 0);
+        drop(op);
+        let guard = service.reclaim_display().unwrap();
+        assert_eq!(service.preparations.available_permits(), 0);
+        drop(guard);
+        assert_eq!(service.preparations.available_permits(), 1);
+        assert_eq!(safe(ErrorKind::Admission), "review_busy");
+        assert_eq!(safe(ErrorKind::Busy), "review_changed");
+        super::super::tests::stop(&service);
+    }
 
     #[test]
     fn display_refuses_unknown_publication_and_client_selected_authority() {

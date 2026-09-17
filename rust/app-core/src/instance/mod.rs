@@ -525,7 +525,7 @@ impl Ledger {
                         ErrorKind::Unsupported => Failure::Unsupported,
                         ErrorKind::Io => Failure::Io,
                         ErrorKind::Cache => Failure::Cache,
-                        ErrorKind::Busy => Failure::Busy,
+                        ErrorKind::Busy | ErrorKind::Admission => Failure::Busy,
                         ErrorKind::Version => Failure::Version,
                         ErrorKind::Worker => Failure::Worker,
                         ErrorKind::Cancelled => Failure::Cancelled,

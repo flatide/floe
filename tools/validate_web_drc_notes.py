@@ -31,7 +31,8 @@ def fingerprint(paths):
 
 class Session:
     def __init__(self, source, pack, temps, reviewer, session_path, *,
-                 edit_waives=False, waives=None, read_reviewer=None, budget_mb=64):
+                 edit_waives=False, waives=None, read_reviewer=None, budget_mb=64,
+                 rules=None):
         self.session_path = session_path
         env = dict(os.environ, PATH="", TMPDIR=str(temps), FLOE_INDEX_BIN=str(INDEX),
                    FLOE_RENDERD_BIN=str(RENDERD), FLOE_REVIEWER="must-not-be-used", FLOE_FILL_EDIT="")
@@ -49,6 +50,8 @@ class Session:
             args += ["--drc-edit-waives"]
         if waives is not None:
             args += ["--drc-waives", str(waives)]
+        if rules is not None:
+            args += ["--drc-rules", str(rules)]
         self.proc = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             self.connect()

@@ -62,6 +62,9 @@ pub enum ErrorKind {
     Io,
     Cache,
     Busy,
+    /// Resource/lease admission failed before opening a review model. This is
+    /// not an expected-file-version conflict or a publication-lock conflict.
+    Admission,
     Version,
     Worker,
     Cancelled,

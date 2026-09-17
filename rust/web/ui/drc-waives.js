@@ -12,6 +12,7 @@
         review_pack_required:'Waive editing requires an ICE pack. Build the pack explicitly first.',
         review_disabled:'Waive editing was not enabled by the launcher.',
         drc_busy:'Another DRC operation is active. No write is retried automatically.',
+        review_busy:'Review resources are busy or at capacity. Close another review editor or retry after the active read finishes. No save was attempted.',
         review_io_error:'The waive file could not be accessed. Check permissions and local diagnostics.',
         review_unavailable:'Check the save receipt before deciding whether to try again.',
         drc_apply_unknown:'Reader acknowledgement was lost or timed out. Reopen the review to verify the saved file.',

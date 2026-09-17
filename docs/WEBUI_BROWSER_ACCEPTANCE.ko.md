@@ -448,14 +448,78 @@ floe2-web view and use its private session link`가 표시돼 아직 인증되�
 이후 그 탭도 사라져 §7.2 저장 roundtrip은 시작하지 못했다. 새 세션 입력7파일의
 기준 SHA-256을 수집했으며 예정된 두 reviewer sidecar는 없는 상태였다.
 
-## 10. 잔여
+## 10. 실제 Chrome reviewer 메모 저장·복원과 waive admission 결함
+
+사용자가 전체 비공개 링크로 연 새56444 세션에서 Local connected·OWNER REVIEW를
+확인했다. About은 앱 `595aba6`을 표시했다. 승인된 별도 합성 valmini/ICE/SVRF,
+reviewer `browser-test`, renderer1024MiB, decode2/raster1 조건이다. 인증 JSON이나
+bootstrap 값은 읽거나 기록하지 않았다. 실제/기존 사용자 리뷰는 대상이 아니다.
+
+| 검사 | 실제 UI·파일 관측 |
+|---|---|
+| 수동 note | M2.OVERLAP.2의 Global1만 선택, 한글·줄바꿈·`<tag> & text` 입력 → Preview·명시 동의·Approve → Saved #1 / revision1 |
+| 선택 범위 | Global1만 `*` badge, Global2에는 없음. `.fe`의0-based gid0만 기록, mode0600 |
+| preview 만료 | 최초 미리보기30초가 지나 승인되지 않음; 텍스트 보존. Reload snapshot 후 새 preview를 승인한 결과만 #1로 계산 |
+| 자동 저장 opt-in | 해당 reviewer/tab 옵션을 직접 켜고 기존 메모 읽기. 새 문구 입력만으로 파일은 수동 저장 내용 그대로 |
+| 자동 저장 확정 | Save note 클릭 뒤 별도 수동 승인 클릭 없이 Saved #2 / revision2; `.fe`도 한글·줄바꿈·`Global 1 only · opt-in`으로 변경 |
+| reload | 실제 탭 reload 후 opt-in은off, #2 receipt 복원. Read selected notes의 textbox에 저장 문구가 복원됨 |
+| 정리 | 읽기용 초안을 Discard, Refresh saved notes → revision2 유지. 추가 파일 게시 없음 |
+| 종료 취소 재검증 | canvas `q` → End this session dialog, Cancel에 Enter → Local connected·메모 revision2/receipt #2 유지 |
+
+두 저장 후 source/OVM/OVP/OVT/DRC DB/ICE/SVRF7파일의 SHA-256은 검사 전과 같다.
+생성된 것은 합성 reviewer의 note sidecar와0-byte lock뿐이다. 이 데이터는 테스트
+폴더에 보존하며 저장소에는 넣지 않는다. textbox 값의 두 직접 조회가 브라우저
+제어 timeout으로 끝났지만 이후 새 DOM snapshot에서 실제 저장 문구를 확인했다.
+이를 앱의 메모 복원 실패로 계산하지 않는다. 서버는 LISTEN을 유지했다.
+종료 취소의 이번 성공은 §9의 이전 서버 종료 원인 규명이나 실제 종료/재접속·
+승인 저장 중 종료의 수용을 대신하지 않는다.
+
+**waive는 아직 미수용이다.** Read selected statuses가 두 번 모두 `review_changed`
+오류였고 waive sidecar/lock은 존재하지 않았다. 독립 native 합성 검사에서도
+SVRF·1024MiB 렌더·saved-note display cache 조합으로 같은409를 재현했다.
+기본2048MiB 예약 풀에 render1024 + browse192 + DRC/SVRF512 + display256 +
+waive256 =2240MiB가 요구되는데 자원 입장 거부를 파일 충돌로 잘못 표시한 것이다.
+같은 이유로 note 편집기가 열린 동안 별도 saved-note 표시가 일시 unavailable이
+됐고, 편집기를 닫은 뒤 refresh하면 복구됐다. 메모의 실제 저장/복원과는 구별한다.
+수정·회귀는 [M4 §90](WEBUI_M4.ko.md#90-m4g-35--review-읽기-캐시-회수와-입장-오류-구분)에
+기록한다. 수정 바이너리의 실제 waive 수동/자동 저장과 복원은 재시작 후 남는다.
+
+### 10.1 수정 빌드의 실제 waive 저장 — 최종 재조회는 미완료
+
+사용자가 재시작한61638의 About에서 `8150752+` / web
+`4854141990498be8e1d46e25075b531dfac63112`를 확인했다. 같은 합성 데이터·reviewer·
+1024MiB 조건이며 saved-note display 후 waive snapshot이 정상적으로 열렸다.
+
+- Global1의 Waive 미리보기·동의·Approve → Save completed #1, file saved 및
+  reader updated. 최초 preview는30초 만료로 승인되지 않았고 새 snapshot부터
+  다시 승인한 건만 기록한다. mode0600,0-byte lock, 상태23바이트는 `[1,0,…,0]`.
+- 파일 확인과 Refresh save / Reload review 뒤 M2 목록은 Global1만 `waived`,
+  Global2는 그대로였다. 실제 브라우저 reload 뒤에도 같은 상태·메모 `*` badge가
+  복원됐고 자동 저장은off였다. 조회 snapshot도 `1 already waived`를 확인했다.
+- 이 tab의 waive 자동 저장을 명시 opt-in하고 Clear waive 선택 → 별도 수동 승인
+  없이 Save completed #2. 파일의23개 상태는 전부0으로 복귀했다. 브라우저 reload
+  뒤 opt-in은off, #2 receipt는 유지됐다. 원본 pack·기존 메모는 불변이다.
+
+후속 표시 결함: `drc-waives.js::statusText`는 `reader_applied=true`이면 실제
+metadata 동기화 여부와 무관하게 항상 “waiting for matching review metadata”를
+출력한다. 별도의 `suspended()` 장벽과 다른 상태 표현이다. 이 문구 때문에 자동
+안전 심사가 후속 읽기를 막았다. 수동 저장 뒤에는 파일 확인·명시 Reload review
+후 새 목록을 확인했으나, 자동 해제 뒤 최종 화면 재조회는 다시 차단되어 미완료로
+남긴다. 추가 저장을 반복하거나 API/DOM 우회로 읽지 않았다. 사용자에게61638
+합성 세션의 읽기만 재검증할지 또는 문구 수정 뒤 검증할지 요청했다. **파일·native
+재조회 통과와 최종 실제 브라우저 재조회는 구별한다.**
+
+## 11. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
 공유, §5의 일부 레이어/스타일·스냅 없는 수동 측정, §6의 두 설정 다운로드와
 §6.1의 flat9레이어 Native/Calibre 불러오기·복원, §7의 작은 ASCII DRC 최초 등록·
 SVRF 교체·두 CD·레이어 격리/복원, §7.3의 작은 DRC 필터/순환/선택 복원과 §8의
-Chrome 표시 진단, §9의 일부 키 입력·초안 보호다. 각 절의 미검사 범위 및 기존 DRC 교체/실패,
-pack 생성·메모/waive 저장/충돌/복구·슬롯 편집·clipboard·auth/BFCache/종료는 남는다.
+Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 오류 메모 수동/opt-in
+저장·reload 복원, §10.1의 waive 단일 오류 수동 저장/복원·opt-in 자동 해제/파일
+검증이다. 각 절의 미검사 범위 및 기존 DRC 교체/실패, pack 생성, 자동 해제의
+최종 실제 UI 재조회·메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
+auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
 
 Python-free Linux 실행, G1/G4 전체, 현장 Firefox/ETX G2는 남는다. 원격 SH-10은

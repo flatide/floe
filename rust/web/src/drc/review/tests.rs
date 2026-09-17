@@ -13,6 +13,7 @@ fn configured_service(editable: bool) -> Arc<Service> {
         files: vec![],
         trees: vec![],
         sources: SourceSet::new(vec![]).unwrap(),
+        notes_display: Weak::new(),
     })
     .unwrap()
 }
@@ -159,6 +160,7 @@ fn selected_read_target_cannot_be_used_as_an_editor() {
         files: vec![],
         trees: vec![],
         sources: SourceSet::new(vec![]).unwrap(),
+        notes_display: Weak::new(),
     })
     .is_err());
 }

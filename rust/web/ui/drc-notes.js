@@ -13,6 +13,7 @@
         review_pack_required:'Notes require an ICE pack. Build a pack explicitly first.',
         review_disabled:'Note editing was not enabled by the launcher.',
         drc_busy:'Another DRC operation is active. Nothing is retried automatically.',
+        review_busy:'Review resources are busy or at capacity. Close another review editor or retry after the active read finishes. No save was attempted.',
         review_io_error:'The note file could not be accessed. Check permissions and local diagnostics.',
         review_unavailable:'The note operation failed. Check its receipt before trying again.',
         invalid_drc_request:'Invalid note text or target. Registered inputs and private files are protected.',

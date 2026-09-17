@@ -6247,3 +6247,64 @@ startup 최초 timeout의 원인도 미확정이다. 기존 의존성/오라클 
 브라우저 조작 수용, Python-free Linux 실행, G1/G4 최종 판정, 현장 Firefox/ETX다.
 원격 SH-10과 index hot reload/revision은 사용자 보류, M5 world-tile은 성능 조건부다.
 이번 예산 결함 수정이나 로컬 배터리를 전체 웹 전환 완료로 계산하지 않는다.
+
+## 90. M4g-35 — review 읽기 캐시 회수와 입장 오류 구분
+
+실제 Chrome 합성 저장 수용에서 메모 수동/opt-in 저장·reload 복원은 통과했으나
+waive 조회가 존재하지 않는 파일의 충돌로 거부됐다([관측 §10](WEBUI_BROWSER_ACCEPTANCE.ko.md#10-실제-chrome-reviewer-메모-저장복원과-waive-admission-결함)).
+기본 render1024 + browse192 + DRC/SVRF512 + saved-note display256 + waive256은
+2240MiB다. read-only 표시 캐시가 `managed::Snapshot`을 보관하면서256MiB 예약도
+계속 소유하는데, 기존 편집 진입은 같은 종류의 cache만 회수했다. 별도 합성 native
+회귀도 이전 release에서 같은409 `review_changed`로 실패했다. RSS 실측은 아니다.
+
+- waive 서비스는 같은 등록의 note 서비스에 weak 참조만 보유한다. 새 store를 열기
+  전에 saved-note display만 회수한다. 메모 편집 snapshot/prepared draft, 파일,
+  저장 receipt나 권한은 지우지 않는다. 전체2048MiB 한도도 그대로다.
+- note preparation semaphore를 store 입장까지 보유한다. 진행 중인 표시 읽기를
+  강제로 해제하거나 그 읽기가 늦게 cache를 다시 설치하는 경쟁을 허용하지 않는다.
+  이미 읽는 중이면 명시 busy로 끝나며 파일 게시를 자동 재시도하지 않는다.
+- 회수한 모델은 blocking worker에서 상태 mutex 밖으로 drop한다. 실제 데이터/
+  lease가 내려가기 전에 회계만 먼저 반환하지 않는다. cache는 다음 정상 표시에서
+  다시 만들어지므로 waive 조작 후 한 차례 메모 재parse 비용은 남는다.
+- native review admission의 실패는 `Admission`으로 구분하여429 `review_busy`를
+  반환한다. 실제 expected-version/lock 충돌의409 `review_changed`는 유지한다.
+  두 편집기나 편집기+배경 표시가 한도를 넘으면 초안은 보존하고 자원 부족을
+  명시한다. note/waive UI는 활성 읽기 종료 후 재시도 또는 다른 편집기 닫기를 안내한다.
+
+`validate_web_review_budget.py`를 전체 배터리에 연결했다. 제품 기본1024MiB와
+정확한 경계1088MiB에서 display cache hit → 메모 초안 보호 → cache 회수 → waive
+snapshot/preview/승인 게시/reader 적용/재조회가 성공한다. 그 사이 배경 display나
+두 번째 편집기는429이며 기존 token은 여전히 준비 가능하다.1089MiB는 display/
+note/waive 모두429이고 sidecar/lock을 만들지 않는다. 전 과정에서 합성 입력·캐시
+바이트/mtime/ctime/mode 불변, 메모 파일 미생성, waive 파일 mode0600을 단언한다.
+단위 검사는 진행 중 읽기의 무취소·semaphore 수명·충돌 오류와의 구분을 고정한다.
+
+수정 후 실제 실행 파일(floe-app의 `floe2-web`)로 경계 회귀가 통과했다. 처음 재실행은
+새 binary의 시작15초 제한으로 중단됐고 원인 미확정이다. `--version` 확인 뒤 같은
+검사를 제한 변경 없이 재실행해 통과했다. web 라이브러리만 빌드한 중간 실행은
+구 executable을 테스트한 것이므로 수정 결과로 집계하지 않는다.
+
+app-core/web 포맷·strict clippy, app-core288단위·web119단위와 통합 검사,
+ES2017/UI 회귀, 새 예산 경계 및 notes/waives/autosave 집중 회귀가 통과했다.
+`sh tools/validate_rust.sh`는 workspace와 초기 제품/CLI/캐시/패키징 검사를 통과한
+뒤 layerprops native oracle의 실행30초 제한 초과로 exit1이었다. 같은 제한으로
+그 지점부터 재실행하면 layerprops는 통과하지만 다음 layer-defaults native oracle이
+같은 제한을 초과했다. 최초 실행 지연의 원인은 미확정이며, 검사 제한을 늘리거나
+전체 PASS로 계산하지 않는다. 로그는
+`/private/tmp/floe-review-budget-battery.yF4oyM/validation.log`와
+`validation-from-layerprops.log`에 보존한다. 남은 배터리 구간은 별도 재실행으로 추적한다.
+
+후속61638의 실제 결과는 [브라우저 §10.1](WEBUI_BROWSER_ACCEPTANCE.ko.md#101-수정-빌드의-실제-waive-저장--최종-재조회는-미완료)에
+분리한다. 수동 waive 저장/복원과 자동 clear/file 복귀는 확인했으나 고정된 metadata
+대기 문구로 마지막 UI 재조회가 차단됐다. 이 안내문은 후속 표시 수정 대상이다.
+
+추가 발견: 기존 notes 집중 검사는 기본 macOS `/var/folders/...` 임시 경로에서
+첫 DRC build가 `index_unavailable`로2회 실패했다. `/private/tmp`에서 같은 notes/
+waives/autosave 검사는 모두 통과했다. build는 미개명 후보(`cache::pack_path`)의
+문자열과 parent가 canonicalize된 output을 비교하므로 부모 경로 alias를 legacy
+migration으로 오인할 수 있다. cache naming 단계의 별도 결함으로 추적하며 이번
+캐시 회수의 성공이나 canonical TMPDIR 전체 배터리로 이 실패를 해소했다고 하지 않는다.
+
+전체 목표 잔여: 실제 Chrome의 waive 저장/복원·다중 선택/충돌/불명확한 게시 복구와
+나머지 입력·설정 조작, Python-free Linux 실행, G1/G4 최종 판정, 현장 Firefox/ETX.
+원격 SH-10 및 index hot reload는 사용자 보류, M5 world-tile은 성능 조건부다.
