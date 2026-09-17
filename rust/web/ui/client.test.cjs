@@ -13,6 +13,10 @@ const minimapEnabled=process.env.FLOE_TEST_MINIMAP==='1';
 const exitEnabled=process.env.FLOE_TEST_EXIT==='1';
 const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
 const exitStartup=process.env.FLOE_TEST_EXIT_STARTUP||'';
+const startupSuspend=process.env.FLOE_TEST_STARTUP_SUSPEND||'';
+const startupBoundary=process.env.FLOE_TEST_STARTUP_BOUNDARY||'hide';
+const startupReply=process.env.FLOE_TEST_STARTUP_REPLY||'200';
+let startupSuspendReply=null,startupMatches=0;
 const resumeFence=process.env.FLOE_TEST_RESUME_FENCE||'';
 const resumeBoundary=process.env.FLOE_TEST_RESUME_BOUNDARY||'exit';
 const resumeFailure=process.env.FLOE_TEST_RESUME_FAILURE||'0';
@@ -118,7 +122,7 @@ const document={hidden:false,activeElement:null,title:'',body:new Element('','bo
     createTextNode:text=>Object.assign(new Element(''),{textContent:text}),
     addEventListener:(k,f)=>listen(docListeners,k,f)};
 class XHR {
-    abort(){if(this.onabort){this.onabort();}}
+    abort(){this.aborted=true;if(this.onabort){this.onabort();}}
     open(method,path){this.method=method;this.path=path;}
     setRequestHeader(k,v) {if(!this.headers)this.headers={};this.headers[k]=v;}
     getResponseHeader() {return this.path.includes('/settings/')&&this.method==='GET'?'text/plain; charset=utf-8':'application/json';}
@@ -137,7 +141,8 @@ class XHR {
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
         else if((startupEnabled||dumpEnabled)&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=204;}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,jobdeck_levels:modeEnabled,fill_slot_edit:fillEditorEnabled,display_dump:true,dump_on_start:dumpEnabled};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,drc:!!startupSuspend,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,jobdeck_levels:modeEnabled,fill_slot_edit:fillEditorEnabled,display_dump:true,dump_on_start:dumpEnabled};}
+        else if(startupSuspend&&this.path==='/api/v1/drc'){value={drc:null};}
         else if(launchEnabled&&this.path==='/api/v1/launch'){value=launchState;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/poll/')){launchPolls.push(this);return;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/')){
@@ -200,6 +205,7 @@ class XHR {
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
         if(indexOpenEnabled&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
+        if(this.method+' '+this.path===startupSuspend&&++startupMatches===Number(process.env.FLOE_TEST_STARTUP_MATCH||1)){startupSuspendReply=this;return;}
         if(launchExitArmed&&this.method==='GET'&&this.path===launchExit){launchExitArmed=false;launchExitReply=this;return;}
         if(body&&['mode','reselect_levels'].includes(body.kind)&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
         if(indexOpenEnabled&&body&&body.kind==='index_open'){setImmediate(()=>this.ontimeout());return;}
@@ -284,6 +290,57 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(startupSuspend){
+        await wait(()=>startupSuspendReply);
+        const posts=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations');
+        listeners.pagehide();const hiddenRequests=requests.length;
+        if(startupBoundary==='restore'){
+            listeners.pageshow({persisted:true});docListeners.visibilitychange();
+            listeners.pagehide();listeners.pageshow({persisted:true});docListeners.visibilitychange();
+        }
+        for(let i=0;i<8;i++){await new Promise(setImmediate);}
+        if(!startupSuspendReply.aborted){assert.equal(requests.length,hiddenRequests,'restore overlapped unfinished startup');}
+        if(startupReply!=='200'){
+            startupSuspendReply.status=startupReply==='unknown'?503:Number(startupReply);
+            startupSuspendReply.responseText=JSON.stringify({error:'late startup failure'});
+            if(startupReply==='unknown'){assert.equal(startupSuspend,'POST /api/v1/operations');open=false;lastSeq='0';}
+        }
+        if(startupReply==='unknown'){startupSuspendReply.ontimeout();}else{startupSuspendReply.onload();}
+        for(let i=0;i<12;i++){await new Promise(setImmediate);}
+        if(startupBoundary==='hide'){
+            assert.equal(requests.length,hiddenRequests,'hidden startup continued HTTP');
+            assert.equal(node('notice').textContent,'','obsolete startup error reached hidden UI');
+            listeners.pageshow({persisted:true});
+        }
+        if(startupSuspend==='POST /api/v1/session/exchange'&&startupReply!=='200'){
+            await wait(()=>node('connection').textContent==='Not connected');
+            assert.equal(posts().length,0);assert.equal(sockets.length,0);
+            assert(!storage.has('floe-session:'+sandbox.location.origin));
+            assert.match(node('empty-message').textContent,/private session link/);
+        }else if(startupReply==='unknown'){
+            await wait(()=>node('connection').textContent==='Local · ready');
+            assert.equal(posts().length,1,'uncertain startup mutation was replayed');
+            assert.equal(sockets.length,0);assert.match(node('empty-message').textContent,/already submitted/);
+        }else if(startupEnabled){
+            await wait(()=>node('connection').textContent==='Local · choose levels');
+            assert.equal(posts().length,0,'level approval bypassed on startup restore');
+            assert.equal(sockets.length,0);assert(!node('open').disabled);
+            assert(node('level-options').open);assert.equal(node('goto-x').value,startupBody.navigation.center_um[0]);
+        }else{
+            await wait(()=>sockets.length===1);hello(sockets[0]);sockets[0].receive(packet('raw','1'));
+            for(let i=0;i<8;i++){await new Promise(setImmediate);}
+            assert.equal(posts().length,1,'startup open must be submitted exactly once');
+            assert.equal(node('connection').textContent,'Local · connected');
+            assert.equal(node('source').children.length,2,'catalog lost while initial read was suspended');
+            assert(!node('logout').disabled);assert(!node('close').disabled);
+        }
+        assert.equal(requests.filter(r=>r.path==='/api/v1/session/exchange').length,1,'bootstrap exchanged twice');
+        if(startupSuspend!=='POST /api/v1/session/exchange'||startupReply==='200'){
+            assert(storage.has('floe-session:'+sandbox.location.origin),'bootstrap receipt lost');
+        }
+        assert.equal(observers[0].target,node('viewport'));
+        listeners.pagehide();console.log('WEB STARTUP SUSPEND: ALL OK ('+startupSuspend+' #'+(process.env.FLOE_TEST_STARTUP_MATCH||1)+(startupEnabled?' level approval':'')+', '+startupBoundary+', '+startupReply+')');return;
+    }
     if(resumeFence){
         await wait(()=>sockets.length===1);hello(sockets[0]);sockets[0].receive(packet('raw','1'));
         for(let i=0;i<4;i++){await new Promise(setImmediate);}

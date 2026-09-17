@@ -22,6 +22,7 @@
     let auth = null, stopped = false, socket = null, epoch = '', state = null;
     let pageRun = 0, pageSuspended = false;
     function currentPage(run) { return !stopped && !pageSuspended && run === pageRun; }
+    let startupTask = null, startupComplete = false, startupSent = false;
     let seq = '0', queue = [], inflight = null, accepted = null, lastSend = 0;
     const editCallbacks = new WeakMap();
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
@@ -617,18 +618,20 @@
         if (!ownerBusy && !submitting) { pump(); }
         return all;
     }
-    async function submitOperation(request) {
-        if (stopped) { return; }
+    async function submitOperation(request, beforeSend) {
+        const run = pageRun;
+        if (!currentPage(run)) { return; }
         if (ownerBusy || submitting || indexBlocked()) { throw new Error('An operation or approval is already pending.'); }
         submitting = true; controls();
         if (operationTimer) { clearTimeout(operationTimer); operationTimer = null; }
         try {
             const all = await operationState();
-            if (stopped) { return; }
+            if (!currentPage(run)) { return; }
             if (all.active !== null) { throw new Error('An operation is already running.'); }
             request.seq = P.next(all.last_seq); ownerBusy = true; controls(); notice('');
+            if (beforeSend) { beforeSend(); }
             try { await http('POST', '/api/v1/operations', request); }
-            finally { await operationState(); }
+            finally { if (currentPage(run)) { await operationState(); } }
         } finally { submitting = false; controls(); pump(); }
     }
     async function changeDeckMode(mode) {
@@ -647,13 +650,14 @@
         } catch (e) { report(e); }
     };
     async function openSource(startup) {
+        const run = pageRun;
         const remembered = pendingStartup && pendingStartup.source_id === el('source').value ? pendingStartup : null;
         const request = Object.assign({}, startup || {kind: 'open', mode: el('mode').value, source_id: el('source').value, levels: levels(),
             display_policy: remembered ? remembered.display_policy || 'explicit' : 'window', body: remembered ? remembered.body : {}});
         if (!startup && remembered && remembered.label_preference !== undefined) { request.label_preference = remembered.label_preference; }
         request.body = Object.assign({}, request.body, {pixels:dims().pixels});
-        await submitOperation(request);
-        startupWaiting = false;
+        await submitOperation(request, startup ? function () { startupSent = true; } : null);
+        if (currentPage(run)) { startupWaiting = false; }
     }
     function prepareStartup(request) {
         el('source').value = request.source_id; sourceSelection();
@@ -670,7 +674,7 @@
             if (n.width_um !== undefined) { el('goto-width').value = n.width_um; }
         }
     }
-    async function start() {
+    async function authenticate() {
         const fragment = location.hash;
         if (fragment) { history.replaceState(null, '', location.pathname); }
         if (!context || !marginContext || typeof WebSocket !== 'function' || typeof TextEncoder !== 'function' ||
@@ -679,14 +683,22 @@
             throw new Error('This browser lacks Canvas 2D/binary WebSocket/UTF-8 image APIs. Use a supported Firefox and restart the local session.');
         }
         if (/^#bootstrap=[0-9a-f]{64}$/.test(fragment)) {
-            auth = await http('POST', '/api/v1/session/exchange', {bootstrap: fragment.slice(11), protocol: 1, bundle: bundle});
+            const result = await http('POST', '/api/v1/session/exchange', {bootstrap: fragment.slice(11), protocol: 1, bundle: bundle});
+            if (stopped) { return; }
+            // Preserve the one-shot exchange receipt even if pagehide happened
+            // while waiting. It must not be submitted again after BFCache restore.
+            auth = result;
             try { sessionStorage.setItem(sessionKey, JSON.stringify(auth)); } catch (_) { notice('Session storage unavailable. Reloading requires a new local session.'); }
         } else {
             try { auth = JSON.parse(sessionStorage.getItem(sessionKey)); } catch (_) { auth = null; }
             if (!auth) { throw new Error('Launch with floe2-web view and use its private session link.'); }
         }
+    }
+    async function start(run) {
+        if (!auth) { await authenticate(); }
+        if (!currentPage(run)) { return; }
         const caps = await http('GET', '/api/v1/capabilities');
-        if (stopped) { return; }
+        if (!currentPage(run)) { return; }
         if (caps.protocol !== 1 || caps.bundle !== bundle) { throw new Error('Client/server version mismatch. Reload the page.'); }
         sharing.init(caps.share_grants);
         about.init(); sessionExit.init();
@@ -694,26 +706,27 @@
         levelsSupported = caps.jobdeck_levels === true;
         fillEditSupported = caps.fill_slot_edit === true;
         await refreshCatalog();
-        if (stopped) { return; }
-        if (caps.drc) { await drcPanel.init(); }
-        if (stopped) { return; }
+        if (!currentPage(run)) { return; }
+        if (caps.drc) { await (run === 0 ? drcPanel.init() : drcPanel.resume()); }
+        if (!currentPage(run)) { return; }
         await clipper.init(caps.exports);
-        if (stopped) { return; }
+        if (!currentPage(run)) { return; }
         snapshots.init(caps.snapshot_png);
-        dumps.init(caps.display_dump, caps.dump_on_start);
+        dumps.init(caps.display_dump, pageRun === 0 && caps.dump_on_start);
         settings.capabilities(caps.layer_settings);
         await defaults.init(caps.design_defaults);
-        if (stopped) { return; }
+        if (!currentPage(run)) { return; }
         sourceSelection();
         await indexOpen.init(caps.index_open);
-        if (stopped) { return; }
+        if (!currentPage(run)) { return; }
         const operations = await operationState();
-        if (stopped) { return; }
-        await restore();
-        if (stopped) { return; }
-        if (!currentId && operations.last_seq === '0') {
+        if (!currentPage(run)) { return; }
+        // Operation reconciliation may already have restored the submitted open.
+        if (!socket) { await restore(); }
+        if (!currentPage(run)) { return; }
+        if (!currentId && operations.last_seq === '0' && !startupSent) {
             const preferences = await http('GET', '/api/v1/startup'), startup = preferences.request;
-            if (stopped) { return; }
+            if (!currentPage(run)) { return; }
             if (startup) {
                 prepareStartup(startup);
                 if (preferences.confirm_levels) {
@@ -724,11 +737,28 @@
                 } else { await openSource(startup); }
             }
             else { el('empty-message').textContent = catalog.length ? 'Choose a registered source and open its index.' : caps.file_picker ? 'Choose a server file with Browse server files. Indexing requires separate approval.' : caps.launcher ? 'Workspace ready. Run floe2-web view FILE to open a layout here.' : 'No registered sources. Restart this independent workspace with FILE.'; connection('Local · ready', true); }
+        } else if (!currentId && operations.last_seq === '0' && startupSent) {
+            el('empty-message').textContent = 'The initial open was already submitted. Check operation status before opening again. No automatic retry.';
+            connection('Local · ready', true);
         }
-        if (stopped) { return; }
+        if (!currentPage(run)) { return; }
         await picker.init(caps.file_picker, !catalog.length);
-        if (stopped) { return; }
+        if (!currentPage(run)) { return; }
         await launcher.init(caps.launcher || caps.file_picker);
+        if (currentPage(run)) { startupComplete = true; }
+    }
+    function continueStartup() {
+        if (startupTask || startupComplete || stopped || pageSuspended) { return; }
+        const run = pageRun;
+        // One initializer owns capabilities and controller setup. A restored
+        // page waits for its predecessor to retire, then repeats only reads;
+        // an already-submitted initial open is reconciled, never replayed.
+        startupTask = start(run).catch(function (e) {
+            if (currentPage(run)) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; }
+        }).then(function () {
+            startupTask = null;
+            if (run !== pageRun && currentPage(pageRun)) { continueStartup(); }
+        });
     }
     el('source').onchange = sourceSelection;
     el('open').onclick = function () { openSource(null).catch(report); };
@@ -1086,7 +1116,7 @@
         savePending:function(value){const key='floe-index-open:'+auth.session_id;if(value===null){sessionStorage.removeItem(key);}else{sessionStorage.setItem(key,value);}},
         completed:async function(value){if(value.phase==='succeeded'){await restore();pendingStartup=null;notice('');}await operationState();},
         setTimeout:function(fn,ms){return setTimeout(fn,ms);},clearTimeout:function(id){clearTimeout(id);}});
-    document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); palette.changed(); if (document.hidden) { indexOpen.stop(); finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (!stopped) { indexOpen.resume().catch(report); if(live()){connect();} } });
+    document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); palette.changed(); if (document.hidden) { indexOpen.stop(); finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (!stopped && !pageSuspended && startupComplete) { indexOpen.resume().catch(report); if(live()){connect();} } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
     window.addEventListener('pagehide', function () { pageSuspended = true; ++pageRun; dumps.stop(); palette.suspend(); indexOpen.stop(); picker.stop(); launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
@@ -1109,12 +1139,13 @@
         } catch (e) { if (currentPage(run)) { report(e); } }
     }
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) {
+        if (event.persisted && !stopped) {
             pageSuspended = false; const run = ++pageRun;
-            dumps.resume(); palette.resume(); minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume();
+            dumps.resume(); palette.resume(); minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); snapshots.resume(); settings.resume();
             if (sizeObserver) { sizeObserver.observe(viewport); }
-            resumePage(run);
+            if (startupComplete) { clipper.resume(); defaults.resume(); resumePage(run); }
+            else { continueStartup(); }
         }
     });
-    start().catch(function (e) { if (!stopped) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; } });
+    continueStartup();
 }());

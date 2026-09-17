@@ -6801,3 +6801,51 @@ BFCache 준비 경합과 실제 브라우저의 종합 수용을 완료로 세�
 전체 목표 잔여: 실제 브라우저 입력·설정·공유/저장·충돌/결과 불명 복구, 초기화/
 복원 최종 감사, Python-free Linux 실행, G1/G4 판정, 현장 Firefox/ETX다.
 원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다.
+
+## 107. M4g-50 — 초기화 중 BFCache 중단·복귀와 자동 열기 보호
+
+2026-09-18. 초기 catalog GET을 지연하고 pagehide한 합성 회귀에서 이전 코드는
+숨김 뒤 HTTP5개를 더 보냈다. 초기화가 끝난 뒤의 resume 보호만으로는 충분하지
+않았다. pageshow의 복원 체인과 아직 끝나지 않은 start가 겹칠 수도 있었다.
+
+수정:
+
+- 초기화는 한 체인만 실행하고 각 await 뒤에 페이지 세대를 검사한다. 초기화 전에
+  BFCache로 돌아오면 기존 요청의 완료/취소를 기다린 뒤 최신 세대에서 조회와
+  컨트롤러 초기화를 재개한다. 이미 초기화된 페이지는 기존 resume 경로를 유지한다.
+- bootstrap 교환 성공은 숨김 중에도 보관하되 교환 POST를 다시 보내지 않는다.
+  성공 응답을 얻지 못하면 인증 없이 진행하지 않고 새 비공개 링크 안내로 남는다.
+- 자동 open은 실제 POST 제출 시점부터 재전송 금지다. 복귀 후 operations/view로
+  확인하며, 요청 시간 초과와 빈 이력이 함께 와도 자동 재시도하지 않는다. 아직
+  제출하지 않은 사전 조회는 새 세대에서 진행할 수 있다. jobdeck 레벨 승인은 유지한다.
+- operations 조회가 이미 뷰를 복원했다면 초기화의 추가 소켓 연결을 생략한다.
+  초기화 완료 전 visibilitychange는 별도 복원 체인을 시작하지 않는다.
+- 중단된 clip/default 컨트롤러는 새 init에서 읽기를 재개한다. 진단 dump 수집은
+  복귀 시 꺼진 상태를 유지한다. 파일 게시·index·review 저장 권한은 바꾸지 않는다.
+
+게이트는 실제 app.js의 초기 조회8곳, open 전후 operations/view, 레벨 승인,
+bootstrap/open POST에 대해 숨김/연속 복귀와 늦은200/503/401·open 시간 초과를
+조합한86건이다. 새 자동 open 최대1회, bootstrap 최대1회, 숨김 뒤 추가 요청0,
+catalog/연결 복구, 레벨 승인 우회0, 결과 불명 재제출0을 확인한다. 실제 브라우저
+BFCache 장애 주입이나 저장·복구 수용을 대신하지 않는다.
+
+검증:
+
+- `sh tools/validate_rust.sh --only web_ui`, 이후 시간 초과 주입을 포함한
+  `node tools/validate_web_ui.cjs` 최종 재실행: 모두 exit0/ALL OK.
+- `cargo build --release --offline --locked -p floe-app -j 2`: 통과. 기존 native
+  경고는 그대로이며 전체 renderer 배터리 재실행은 아니다.
+- `validate_web_startup.py valmini.oas`: 새 임시 합성 서버22개를 직접 시작/종료,
+  실제 native 첫 세대21개와 preflight 오류6개, GTK 시작144/stream 정책380개 대조
+  통과. 첫 시도는 debug oracle 실행 파일 기동에서30초 시간 초과했고 같은 명령의
+  재실행은 exit0이었다. native 자식은 PATH가 빈 상태로 실행하며 원본/캐시 불변을
+  검사한다. 이는 macOS 실행 근거이고 Python-free Linux 실행 수용은 아니다.
+
+보존 중인 합성 DRC 세션의 기존 메모·waive를 바꾸거나 새 저장 승인을 사용하지
+않았다. 서버 시작/정리는 직접 수행했고 사용자에게 재시작을 요청하지 않았다.
+실제 Chrome에서 수정본 초기화/BFCache 장애 주입은 하지 않았다.
+
+전체 목표 잔여: 실제 브라우저 입력·설정·공유/저장·충돌/결과 불명 복구 수용,
+종합 비동기/복원 감사, Python-free Linux 실행, G1/G4 최종 판정, 현장 Firefox/ETX.
+원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다. 새 합성 다중 리뷰
+저장·충돌/결과 불명 테스트는 별도 명시 승인을 기다리며 허가로 추정하지 않는다.

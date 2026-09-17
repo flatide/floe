@@ -222,7 +222,7 @@
         ['clip-layers','clip-jobs','clip-cell-name'].forEach(function(id){el(id).oninput=function(){cancelPreparation();note='Options changed. Review before approving.';render();};el(id).onchange=el(id).oninput;});
         el('clip-cancel').onclick=cancel;el('clip-refresh').onclick=refresh;el('clip-resolve').onclick=function(){if(uncertain&&pending&&!waiting&&!stopped){return send(pending);}};
         render();
-        return {init:function(available){enabled=available===true;render();return enabled?refresh():Promise.resolve();},changed:render,receive:receive,
+        return {init:function(available){stopped=false;enabled=available===true;render();return enabled?refresh():Promise.resolve();},changed:render,receive:receive,
             refresh:refresh,escape:function(){const closed=dismiss(true);render();return closed;},
             stop:function(){stopped=true;stale=true;dismiss(false);o.clearTimeout(timer);timer=null;if(writeTask){uncertain=true;}approvalTask=null;waiting=false;
                 [getTask,writeTask,cancelTask].forEach(abort);getTask=writeTask=cancelTask=null;render();},

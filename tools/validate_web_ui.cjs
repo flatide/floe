@@ -90,6 +90,17 @@ assert.equal(modeClient.status,0,'deck mode client: '+modeClient.error);
 assert.equal(exitClient.status,0,'session exit client: '+exitClient.error);
 const exitFailed=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_EXIT:'1',FLOE_TEST_EXIT_FAILURE:'1'}});
 assert.equal(exitFailed.status,0,'unconfirmed session exit client: '+exitFailed.error);
+const startupReads=['capabilities','catalog','drc','exports','defaults','operations','view','startup'].map(name=>['GET /api/v1/'+name,1,false]);
+startupReads.push(['GET /api/v1/operations',2,false],['GET /api/v1/operations',3,false],['GET /api/v1/view',2,false],['GET /api/v1/startup',1,true],
+    ['POST /api/v1/session/exchange',1,false],['POST /api/v1/operations',1,false]);
+for(const [stage,match,levels] of startupReads){
+    for(const boundary of ['hide','restore'])for(const reply of stage==='POST /api/v1/operations'?['200','503','401','unknown']:['200','503','401']){
+        const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,
+            FLOE_TEST_DEFAULTS:'1',FLOE_TEST_CLIP:'1',FLOE_TEST_STARTUP:levels?'1':'0',
+            FLOE_TEST_STARTUP_SUSPEND:stage,FLOE_TEST_STARTUP_MATCH:String(match),FLOE_TEST_STARTUP_BOUNDARY:boundary,FLOE_TEST_STARTUP_REPLY:reply}});
+        assert.equal(run.status,0,'startup suspend '+stage+'/'+match+'/'+levels+'/'+boundary+'/'+reply+': '+run.error);
+    }
+}
 for(const endpoint of ['catalog','operations','view']){
     for(const boundary of ['exit','exit-failure','hide'])for(const reply of ['200','503','401']){
         const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,

@@ -183,7 +183,7 @@
         el('default-checked').onchange=render;
         el('default-forget').onclick=function(){if(permitted()&&uncertain&&!writeTask&&!active()&&el('default-checked').checked){pending=null;uncertain=false;store(null);el('default-checked').checked=false;note='Local record cleared after your check. No request was sent. A new publication needs a new review and approval.';render();}};
         render();
-        return {init:function(value){enabled=value===true;if(enabled){recover();}render();return enabled?refresh():Promise.resolve();},changed:changed,refresh:refresh,
+        return {init:function(value){stopped=false;enabled=value===true;if(enabled){recover();}render();return enabled?refresh():Promise.resolve();},changed:changed,refresh:refresh,
             stop:function(final){stopped=true;stale=true;discard(false);approving=null;if(writeTask){uncertain=true;}
                 [readTask,prepareTask,writeTask,cancelTask,revokeTask].forEach(abort);readTask=prepareTask=writeTask=cancelTask=revokeTask=null;revokeNext=null;
                 o.clearTimeout(timer);timer=null;if(final){store(null);}render();},resume:function(){stopped=false;stale=true;return refresh();}};
