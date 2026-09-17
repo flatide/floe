@@ -160,12 +160,15 @@ def main():
             assert not marker.exists()
         license_file = crate / "LICENSE"
         license_file.rename(crate / "hidden-notice")
-        assert "missing notice" in call(repo, env, out).stderr
+        result = call(repo, env, out)
+        assert "missing notice" in result.stderr, (result.returncode, result.stdout, result.stderr)
         assert not marker.exists()
         (crate / "hidden-notice").rename(license_file)
-        assert "failed" in call(repo, env, out).stderr
+        result = call(repo, env, out)
+        assert "failed" in result.stderr, (result.returncode, result.stdout, result.stderr)
         assert marker.exists() and not out.exists()
-        assert "ELF" in call(repo, dict(env, PACKAGER_CASE="bad-elf"), out).stderr
+        result = call(repo, dict(env, PACKAGER_CASE="bad-elf"), out)
+        assert "ELF" in result.stderr, (result.returncode, result.stdout, result.stderr)
         marker.unlink()
         p = subprocess.Popen([str(PACKAGER), str(repo), "--out", str(out), "--target",
                               "x86_64-unknown-linux-musl"], env=dict(env, PACKAGER_CASE="cancel"),

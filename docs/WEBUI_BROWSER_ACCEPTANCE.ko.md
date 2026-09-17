@@ -608,6 +608,30 @@ About를 닫고 원래 리뷰 화면으로 남겼다. 추가 파일 쓰기·외�
 Chrome에서 확인했다. 파일 교체·취소·권한 위조·경계 예산 거부는 native gate 근거이며
 이번 실제 UI 수용으로 확대하지 않는다.
 
+### 10.6 재연결 뒤 메모·waive 읽기와 표시 cache 복구
+
+같은63243 서버에서 §10.5의 재연결된 reviewer로 Global1을 선택하고
+`Read selected notes`를 실행했다. 기존 두 줄 한글 메모·55 UTF-8 bytes와
+`1 selected errors already have notes`, `Note snapshot loaded`를 확인했다.
+본문은 수정하지 않고 `Discard draft`로 읽기 snapshot을 해제했다.
+
+이어 `Read selected statuses`에서 `0 already waived · 0 reserved statuses`와
+`Snapshot loaded`를 확인했다. action은 선택하지 않고 `Discard choice`로 해제했다.
+두 자동 저장은 계속off이며 두 panel 모두 현재 서버의 새 저장 receipt가 없었다.
+이는 재연결 뒤 **기존 데이터 읽기와 해제**의 실제 UI 검사이지 새 저장 검사가 아니다.
+
+메모 snapshot을 여는 동안 background saved-note 표시에는 `review_busy`가 나왔고,
+snapshot 해제만으로 그 안내가 자동으로 사라지지는 않았다. 명시 `Refresh saved notes`
+뒤 `Saved notes · browser-test · revision 1`, Global1 badge/Global2 무메모가 복구됐다.
+활성 편집기와 display가 별도 admission을 요구하는 현행 정책의 관측이다. 이를
+저장 데이터 유실이나 자동 복구 성공으로 기록하지 않으며, busy 시 명시 재시도가
+필요한 UX 한계로 남긴다. 상한 증액·편집 snapshot 강제 폐기는 하지 않았다.
+
+마지막 오류 선택은 Clear로 해제했다. Local connected와 X200/Y220/view500µm,
+8규칙·23오류·SVRF8/8을 유지했다. source/cache/DB/ICE/SVRF7파일과 기존 review
+sidecar2파일의 SHA-256은 §10.5와 모두 같다. Preview/Save·opt-in·upload/export는
+실행하지 않았고 제품 코드도 바꾸지 않았다.
+
 ## 11. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
@@ -620,6 +644,7 @@ Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 �
 §10.3은 saved-note 표시 뒤 DRC 교체·원래 ICE 복원·런처 reviewer 명시 재연결이다.
 §10.4는 같은 cache가 있는 상태의 SVRF 교체다. SVRF 선연결 후 reviewer 재연결의
 기본 예산 실패는 M4 §95에서 수정하고 §10.5의 실제 Chrome 순서로 확인했다.
+§10.6은 그 뒤 실제 note/waive 읽기·해제와 busy display의 명시 새로고침 복구다.
 각 절의 미검사 범위 및 DRC 교체 실패/진행 중 취소, pack 생성,
 메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
 auth/BFCache/종료는 남는다.

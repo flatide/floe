@@ -6499,6 +6499,10 @@ M5 world-tile은 성능 조건부다. 이번 성공은 전체 전환 완료가 �
 - [실제 Chrome §10.5](WEBUI_BROWSER_ACCEPTANCE.ko.md#105-svrf-선연결-후-launcher-reviewer-재연결)에서
   metadata 먼저 연결한 상태의 명시 재연결과 기존 메모 badge/0 waived 복원,9파일
   SHA-256 불변을 확인했다. 새 저장·권한 확대·자동 저장 opt-in은 없었다.
+- 후속 [브라우저 §10.6](WEBUI_BROWSER_ACCEPTANCE.ko.md#106-재연결-뒤-메모waive-읽기와-표시-cache-복구)은
+  같은 재연결 상태에서 note 본문·waive status 읽기와 저장 없는 snapshot 해제를
+  확인했다. 편집 중 display의 `review_busy`는 해제 뒤 명시 Refresh로 복구됐으며,
+  자동 복구나 추가 저장 수용으로 세지 않는다. 입력/sidecar9파일은 불변이다.
 
 집중 로그는 `/private/tmp/floe-drc-replace-budget.CKVGLy/reconnect-*`다. 첫 HTTP
 실행들은 새 프로세스의 session 파일 생성 전 시작 timeout으로 종료됐다. 별도
@@ -6510,3 +6514,23 @@ macOS 시작 지연 해결로 세지 않는다. 수정 후 전체 `sh tools/vali
 전체 목표 잔여: 전체 배터리/시작 제한 추적, 실제 브라우저의 충돌/불명확한 게시
 복구·다중 선택/편집·입력/설정/공유 수용, Python-free Linux 실행, G1/G4 및 현장
 Firefox/ETX. 원격 SH-10/index hot reload는 사용자 보류, M5 world-tile은 성능 조건부다.
+
+## 96. 최신 musl 교차 패키지와 실제 읽기 재검증
+
+§95 이후 제품 코드는 바꾸지 않고 실제 Chrome의 재연결 후 note/waive 읽기·해제와
+display의 명시 새로고침 복구를 확인했다([브라우저 §10.6](WEBUI_BROWSER_ACCEPTANCE.ko.md#106-재연결-뒤-메모waive-읽기와-표시-cache-복구)).
+합성 서버는 에이전트가 실행·관리하며 기존 review sidecar는 불변이다.
+
+[portable 최신 재확인](WEBUI_PORTABLE.ko.md#2026-09-17-최신-교차-빌드-재확인)은
+Linux musl3바이너리의 offline 빌드·정적 ELF·실제 archive/hash/notice/재배치/손상
+거부를 통과했다. 별도 합성 gate는 가짜 compiler의 metadata/EOF10초 timeout으로
+실패했다. 진단 없는 assertion에 실제 오류 내용을 추가했지만 제한/조건을 완화하거나
+전체 PASS로 바꾸지 않았다. 원인은 아직 확정하지 않았고 Linux 실행은 미검증이다.
+
+`reconnect-full.log`의 전체 회귀는 계속 실행 중이며 Rust core288·render-core118·
+web119단위와 실제 HTTP15를 통과했다. ignored oracle 항목은 뒤의 별도 하네스가
+실행해야 하므로 단위 실행만으로 통과 처리하지 않는다. 전체 배터리 완료 전이다.
+
+전체 목표 잔여는 전체 회귀/시작 제한 추적, 실제 브라우저의 충돌·불명확한 게시
+복구·다중 선택/편집·입력/설정/공유 수용, Python-free Linux 실행, G1/G4 및 현장
+Firefox/ETX다. 원격 SH-10/index hot reload는 사용자 보류, M5는 성능 조건부로 유지한다.

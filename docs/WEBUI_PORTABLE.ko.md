@@ -130,3 +130,26 @@ SIGTERM143·직접 자식 수거·stage 정리를 검사한다. 실제 archive�
 보고하지 않는다. 이 gate는 전체 `validate_rust.sh`에도 연결되어 있다.
 실제 compiled catalogue를 가진 macOS 앱의 HTTP 왕복은 별도 개발용
 `validate_web_notices.py`로 검사했다([M4 §39](WEBUI_M4.ko.md)).
+
+### 2026-09-17 최신 교차 빌드 재확인
+
+DRC 재연결 수정 `9df2037`의 Rust 코드를 설치된 Rust1.97.1·musl target으로
+`--offline --locked`, jobs2 빌드했다. 검증용 venv 링크 등 때문에 source stamp는
+`9df20375cde759c791c1a6a630824d69a5afe055+`다. 릴리스용 clean 산출물로 표시하지 않는다.
+
+세 ELF 모두 interpreter/DT_NEEDED/symbol-version 요구가 없고, 실제 archive의
+전체 파일 SHA-256·compiled notice ID·고지 모든 chunk·공백/한글 재배치·손상 사본
+거부는 통과했다. archive는7,679,824bytes이며 임시 검증물
+`/private/tmp/floe-web-current-musl.Lsw5QR/floe2-web-musl.tar.gz`에만 남겼다.
+SHA-256은 `977acfc31923721b3967ad5c660296c89cc39522a9625caa680fa220b544ca4f`다.
+
+**전체 portable gate PASS는 아니다.** 합성 고지 누락 테스트는 가짜 `rustc -Vv`가
+10초 metadata/EOF 제한을 넘어서, 의도한 `missing notice` 오류에 도달하지 못했다.
+단독 재현과 같은 제한의 재실행도 동일했다. assertion에 실제 stdout/stderr를 추가했으며
+기한·판정 조건·제품 정책은 바꾸지 않았다. 실제 archive 검사는 기존
+`inspect_archive` 함수를 독립 실행한 결과로 구분한다. 로그는 같은 임시 폴더의
+`build.log`, `archive-only.log`, `refusal-diagnostic.log`, `validation-with-diagnostics.log`다.
+
+macOS 교차 빌드이므로 `runtime_checked=false`, `desktop_acceptance=unverified`다.
+Docker/Podman/Lima/QEMU 실행 도구는 현재 PATH에 없었고 설치·외부 서버 접근은 하지
+않았다. 이 결과는 Python-free Linux **실행**이나 최소 Rust1.89 재검증을 대체하지 않는다.
