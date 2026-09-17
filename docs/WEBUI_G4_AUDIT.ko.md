@@ -131,6 +131,9 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    연 인증된 합성 탭에서 PNG/raw/crop 각각0차이와 화면 표시, reload·Back 후 명시 실행,
    종료 취소를 확인했다(같은 문서 §6). renderer/WS·다운로드·공유·현장 수용은 아직 남는다.
    사용자의 정상 세션 인계를 기존 시작 파일 접근 차단 해제로 간주하지 않는다.
+   후속 [실제 owner 브라우저 기록](WEBUI_BROWSER_ACCEPTANCE.ko.md)은 합성 valmini의
+   표시·goto·정렬 pan·줌·pick·레이어 전체 숨김/복원과 두 dump PNG의 실제 저장을
+   확인한다. input→photon/순간 깜빡임, clipboard·저장/복구·공유 전체 수용은 별도다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격

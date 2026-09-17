@@ -245,3 +245,7 @@ private 시작 파일·session JSON·cookie/storage credential은 읽지 않았�
 명시 실행과 종료 취소의 근거를 추가했다. layout/renderer/WS 프레임·pan/input 지연,
 선택 PNG/APNG, dump 다운로드, owner/guest SH-08, Firefox/ETX·Linux·G1/G4 전체는
 여전히 별도다. 다음 단계는 사용자가 정상 절차로 연 **합성 valmini view**의 검사다.
+
+후속 [owner 브라우저 수용 기록 §3](WEBUI_BROWSER_ACCEPTANCE.ko.md)은 합성 valmini에서
+두 dump 버튼으로 수신/합성 PNG를 실제 다운로드하고 파일 크기·합성 내용을 확인했다.
+독립 진단의 성공과 view/WS·dump 성공을 별도 근거로 남긴다.
