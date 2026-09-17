@@ -24,6 +24,8 @@
         const el=o.el,doc=o.document,panel=el('browse-dialog'),button=el('browse-open'),drcButton=el('drc-open'),reconnectButton=el('drc-reconnect'),rulesButton=el('drc-rules-load');
         let enabled=false,paused=true,opened=false,prior=null,hidden=[],roots=[],current=null,selected=null;
         let pending=null,busy=false,invalid=false,task=null,timer=null,error='',drc=null,reconnect=false,rules=false;
+        let lifetime=0;
+        function active(run){return enabled&&!paused&&run===lifetime;}
         function paint(){
             const grant=o.reviewGrant&&o.reviewGrant();
             button.disabled=!enabled||!o.available();button.hidden=!enabled;
@@ -77,7 +79,9 @@
             });paint();
         }
         async function catalogue(){
-            const v=await o.http('GET','/api/v1/browse');o.protocol.counter(v.last_seq,true);
+            const run=lifetime,v=await o.http('GET','/api/v1/browse');
+            if(!active(run)){return v;}
+            o.protocol.counter(v.last_seq,true);
             if(v.active!==null){o.protocol.counter(v.active);}
             if(!Array.isArray(v.roots)||!v.roots.length||v.roots.length>32||v.roots.some(function(r){return !id(r.handle)||typeof r.name!=='string'||r.name.length>512;})){throw Error('Invalid approved roots');}
             roots=v.roots;const was=el('browse-root').value;el('browse-root').textContent='';
@@ -173,8 +177,13 @@
             }
         },true);
         doc.addEventListener('focusin',function(e){if(opened&&!panel.contains(e.target)){panel.focus();}},true);
-        function stop(){paused=true;o.clearTimeout(timer);if(task){task.cancelled=true;if(task.abort){task.abort();}}close(false);}
-        async function resume(){if(!enabled){return;}paused=false;try{await catalogue();if(pending||invalid){show();if(!invalid){check(false);}}}catch(e){error=e.message;show();}paint();}
+        function stop(){paused=true;++lifetime;o.clearTimeout(timer);if(task){task.cancelled=true;if(task.abort){task.abort();}}close(false);}
+        async function resume(){
+            if(!enabled){return;}paused=false;const run=++lifetime;
+            try{await catalogue();if(!active(run)){return;}if(pending||invalid){show();if(!invalid){check(false);}}}
+            catch(e){if(!active(run)){return;}error=e.message;show();}
+            paint();return run;
+        }
         async function init(supported,empty){
             enabled=!!supported;paint();if(!enabled){return;}
             try{const saved=o.loadPending();if(saved){const v=JSON.parse(saved);if(saved.length>2048||!v||!v.request||!['list','page','select','open_drc','reconnect_drc_review','load_drc_rules'].includes(v.request.kind)||
@@ -183,7 +192,7 @@
                 v.request.kind==='load_drc_rules'&&v.drc_rules!==true||
                 v.request.kind==='reconnect_drc_review'&&v.request.approve!==true||v.request.kind==='select'&&v.drc_context!==undefined){throw Error('Invalid saved file request');}o.protocol.counter(v.request.seq);pending=v;drc=v.drc_context||null;rules=v.drc_rules===true;reconnect=v.request.kind==='reconnect_drc_review';if(drc){el('browse-filter').value=rules?'all_files':'drc_files';}}}
             catch(e){invalid=true;error='Saved file request is invalid. Restart the workspace; no selection was retried.';}
-            await resume();if(empty&&!pending&&!invalid){open();}
+            const run=await resume();if(active(run)&&empty&&!pending&&!invalid){open();}
         }
         return {init:init,stop:stop,resume:resume,changed:paint,blocked:function(){return opened||!!pending||invalid;}};
     }

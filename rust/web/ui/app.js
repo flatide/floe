@@ -555,8 +555,10 @@
         controls();
     }
     async function refreshCatalog() {
-        const selected = el('source').value;
-        catalog = (await http('GET', '/api/v1/catalog')).sources;
+        const run = pageRun, selected = el('source').value;
+        const result = await http('GET', '/api/v1/catalog');
+        if (!currentPage(run)) { return; }
+        catalog = result.sources;
         el('source').textContent = '';
         catalog.forEach(function (s) { const option = document.createElement('option'); option.value = s.source_id; option.textContent = s.title; el('source').appendChild(option); });
         el('source').value = catalog.some(function (s) { return s.source_id === selected; }) ? selected : catalog.length ? catalog[0].source_id : '';
@@ -1051,18 +1053,19 @@
         loadPending:function(){return sessionStorage.getItem('floe-launch-pending:'+auth.session_id);},
         savePending:function(value){const key='floe-launch-pending:'+auth.session_id;if(value===null){sessionStorage.removeItem(key);}else{sessionStorage.setItem(key,value);}},
         present:function(){window.focus();},completed:operationState,
-        prepare:async function(item){await refreshCatalog();prepareStartup(item.request);if(item.confirm_levels){el('level-options').open=true;}controls();},
+        prepare:async function(item){const run=pageRun;await refreshCatalog();if(!currentPage(run)){return;}prepareStartup(item.request);if(item.confirm_levels){el('level-options').open=true;}controls();},
         open:async function(item,send){
             if(!launchReady()){throw new Error('Wait for pending view inputs before opening the CLI request.');}
             if(el('source').value!==item.request.source_id){prepareStartup(item.request);throw new Error('Requested source restored. Review its levels before opening.');}
-            submitting=true;controls();
+            const run=pageRun;submitting=true;controls();
             try{
-                const all=await operationState();if(all.active!==null){throw new Error('An operation is already running.');}
+                const all=await operationState();if(!currentPage(run)){return;}if(all.active!==null){throw new Error('An operation is already running.');}
                 const current=await http('GET','/api/v1/view',undefined,true);
+                if(!currentPage(run)){return;}
                 const input={action:'open',seq:P.next(all.last_seq),pixels:dims().pixels,levels:levels()};
                 if(current&&['idle','rendering'].includes(current.view.status)){input.view_id=current.view.view_id;input.state_rev=current.view.state_rev;}
                 ownerBusy=true;controls();notice('');await send(input);
-            }finally{try{await operationState();}finally{submitting=false;controls();pump();}}
+            }finally{try{if(currentPage(run)){await operationState();}}finally{submitting=false;controls();pump();}}
         }});
     picker=window.FloeBrowse.bind({el:el,document:document,http:http,protocol:P,changed:controls,
         available:function(){return !indexBlocked()&&!stopped&&!submitting&&!ownerBusy&&(!launcher||!launcher.blocked());},

@@ -6764,3 +6764,40 @@ BFCache 장애 주입, 초기화 미완료 시 복원 또는 개별 picker/launc
 전체 목표 잔여: 개별 비동기 복원/입력·설정·공유 및 다중 저장·충돌/결과 불명 복구의
 실제 수용, Python-free Linux 실행, G1/G4 최종 대조, 현장 Firefox/ETX다.
 원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다.
+
+## 106. M4g-49 — 런처·파일 선택기 내부의 지연 사전 조회
+
+2026-09-18. §105의 외부 복원 체인 보호 뒤 내부 컨트롤러를 대조했다. 네트워크 없는
+회귀에서 런처의 명시 Retry GET을 지연하고 stop하자 늦은 응답이 POST1개를 제출했다.
+`env.open`의 사전 조회도 같은 문제가 있었다. 파일 선택기는 늦은 approved-roots
+응답/오류가 닫힌 modal을 다시 열고 루트·안내·포커스를 바꿨다.
+
+수정:
+
+- 런처의 prepare/recover/send/poll을 활성 세대에 묶는다. stop 뒤 재개했더라도
+  이전 사전 조회는 제출 권한을 되찾지 않는다. 불명확한 receipt는 보존하며 새 resume은
+  읽기만 한다. 명시 Check/retry만 원래 입력/seq를 재전송한다.
+- 이미 POST가 제출된 뒤 받은 성공 응답의 기존 receipt 반영은 유지한다. stop을
+  서버 작업 취소로 표시하지 않는다. 중단 중 POST 결과가 불명이면 추가 자동 조회/
+  제출 없이 journal을 유지하고 다음 활성 세션에서 확인한다.
+- 중단한 long-poll의 소유권을 즉시 반환한다. stop→resume과 연속 resume 모두 새
+  폴링을 시작하며, 오래된 prepare 성공/실패가 새 제안을 영구 정지시키지 않는다.
+- picker의 root 조회·resume·초기 빈 창 자동 열기에 같은 세대 보호를 넣는다.
+  기존 신원 고정 요청의 복구/승인과 폴더 접근 범위는 바꾸지 않는다.
+- 실제 app.js 연결에서도 catalog/operations/view 사전 조회 뒤와 finally를 검사한다.
+  컨트롤러만 고쳤을 때 남던 종료 뒤 GET2개 및 terminal notice 소거를 차단했다.
+
+검증은 launcher/browse 단위 회귀와 실제 app.js+launcher의27조합이다:
+조회3곳 × 종료 성공/불명/숨김 × 늦은200/503/401. 미제출 요청의 새 POST/journal0,
+추가 HTTP0, 종료 문구 보존을 확인한다. 단위 회귀는 stop/resume, 늦은 준비/복구
+성공·실패, 최신 루트/포커스 유지, 초기 자동 열기 억제, 이미 제출한 성공/불명 결과,
+정상 재개 및 명시적 동일 요청 재시도를 함께 대조한다.
+
+`sh tools/validate_rust.sh --only web_ui`와 offline/locked release app 빌드 통과.
+기존 native 경고는 유지했고 전체 renderer/native 배터리 재실행은 아니다. 실제
+Chrome 장애 주입/파일 쓰기/새 인증·공유 권한은 사용하지 않았다. 초기 앱 전체의
+BFCache 준비 경합과 실제 브라우저의 종합 수용을 완료로 세지 않는다.
+
+전체 목표 잔여: 실제 브라우저 입력·설정·공유/저장·충돌/결과 불명 복구, 초기화/
+복원 최종 감사, Python-free Linux 실행, G1/G4 판정, 현장 Firefox/ETX다.
+원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다.

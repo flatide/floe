@@ -90,6 +90,14 @@ assert.equal(modeClient.status,0,'deck mode client: '+modeClient.error);
 assert.equal(exitClient.status,0,'session exit client: '+exitClient.error);
 const exitFailed=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_EXIT:'1',FLOE_TEST_EXIT_FAILURE:'1'}});
 assert.equal(exitFailed.status,0,'unconfirmed session exit client: '+exitFailed.error);
+for(const endpoint of ['catalog','operations','view']){
+    for(const boundary of ['exit','exit-failure','hide'])for(const reply of ['200','503','401']){
+        const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,
+            FLOE_TEST_LAUNCH:'1',FLOE_TEST_LAUNCH_EXIT:'/api/v1/'+endpoint,FLOE_TEST_LAUNCH_BOUNDARY:boundary,
+            FLOE_TEST_EXIT_FAILURE:boundary==='exit-failure'?'1':'0',FLOE_TEST_LAUNCH_REPLY:reply}});
+        assert.equal(run.status,0,'launcher preflight '+endpoint+'/'+boundary+'/'+reply+': '+run.error);
+    }
+}
 for(const stage of ['drc','index','/api/v1/operations','/api/v1/view','picker','launcher']){
     for(const boundary of ['exit','exit-failure','hide','replace']){
         for(const failure of stage.startsWith('/api/')?['0','1','401']:['0','1']){

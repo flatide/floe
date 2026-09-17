@@ -8,6 +8,7 @@ function listing(start=0,total=2,directory=token(1)){
 }
 function rig(saved=null){
     const nodes=new Map(),listeners={},calls=[],operations=new Map(),timers=new Map();let timerId=0,last=0,lose=false,hold=false,selected=0,drcSelected=0,active=null,release=null;
+    let holdCatalogue=false,catalogueName='Approved',catalogueReply=null;
     const drc={view_id:token(21),drc_id:null,revision:null};
     const doc={activeElement:null,contains:n=>!!n,addEventListener(k,fn,capture){assert(capture);listeners[k]=fn;},createElement:tag=>new Node('',tag)};
     class Node{
@@ -26,7 +27,11 @@ function rig(saved=null){
         setTimeout(fn,ms){const id=++timerId;timers.set(id,fn);return id;},clearTimeout:id=>timers.delete(id),
         async http(method,path,body,missing,signal){
             calls.push({method,path,body:body&&JSON.parse(JSON.stringify(body))});
-            if(path==='/api/v1/browse'&&method==='GET'){return {roots:[{handle:token(1),name:'Approved'}],last_seq:String(last),active};}
+            if(path==='/api/v1/browse'&&method==='GET'){
+                const value={roots:[{handle:token(1),name:catalogueName}],last_seq:String(last),active};
+                if(holdCatalogue){return new Promise((resolve,reject)=>{catalogueReply=fail=>fail?reject(Error('late catalogue failure')):resolve(value);});}
+                return value;
+            }
             if(method==='POST'&&path==='/api/v1/browse'){
                 assert(saved,'journal must precede admission');assert.equal(body.seq,JSON.parse(saved).request.seq);
                 let state=operations.get(body.seq);if(!state){last=Number(body.seq);state={seq:body.seq,kind:body.kind,request:JSON.parse(JSON.stringify(body)),phase:'succeeded',
@@ -40,6 +45,7 @@ function rig(saved=null){
         }};
     const api=B.bind(env);
     return {api,el,env,doc,drc,listeners,calls,operations,get saved(){return saved;},get selected(){return selected;},get drcSelected(){return drcSelected;},set lose(v){lose=v;},set hold(v){hold=v;},release:()=>release(),
+        set holdCatalogue(v){holdCatalogue=v;},set catalogueName(v){catalogueName=v;},get catalogueHeld(){return !!catalogueReply;},releaseCatalogue(fail){catalogueReply(fail);},
         async timer(){const it=timers.entries().next().value;if(it){timers.delete(it[0]);it[1]();}await tick();}};
 }
 (async()=>{
@@ -81,6 +87,26 @@ function rig(saved=null){
     assert.equal(late.el('browse-entries').children.length,0,'hidden late result must not paint');assert(late.saved);
     await late.api.resume();await wait(()=>late.el('browse-entries').children.length===128);late.api.stop();
     const invalid=rig('{');await invalid.api.init(true,false);assert(invalid.api.blocked());assert.match(invalid.el('browse-status').textContent,/invalid/);assert(invalid.el('browse-close').disabled);invalid.api.stop();
+    for(const resume of [false,true])for(const fail of [false,true]){
+        const stale=rig(saved);stale.holdCatalogue=true;stale.catalogueName='Old root';
+        const loading=stale.api.init(true,false);await wait(()=>stale.catalogueHeld);stale.api.stop();
+        if(resume){stale.holdCatalogue=false;stale.catalogueName='Current root';await stale.api.resume();await tick();}
+        const before={calls:stale.calls.length,hidden:stale.el('browse-dialog').hidden,status:stale.el('browse-status').textContent,
+            roots:stale.el('browse-root').children.map(n=>n.textContent),focus:stale.doc.activeElement};
+        stale.releaseCatalogue(fail);await loading;await tick();
+        assert.equal(stale.calls.length,before.calls,'retired catalogue started a recovery read');
+        assert.equal(stale.el('browse-dialog').hidden,before.hidden,'retired catalogue reopened the picker');
+        assert.deepEqual(stale.el('browse-root').children.map(n=>n.textContent),before.roots,'retired catalogue replaced approved roots');
+        assert.equal(stale.el('browse-status').textContent,before.status,'retired catalogue replaced the current status');
+        assert.equal(stale.doc.activeElement,before.focus,'retired catalogue stole focus');assert.equal(stale.saved,saved);stale.api.stop();
+    }
+    for(const resume of [false,true]){
+        const stale=rig();stale.holdCatalogue=true;const loading=stale.api.init(true,true);await wait(()=>stale.catalogueHeld);stale.api.stop();
+        if(resume){stale.holdCatalogue=false;await stale.api.resume();}
+        const count=stale.calls.length;stale.releaseCatalogue(false);await loading;await tick();
+        assert(stale.el('browse-dialog').hidden,'retired empty-start callback reopened the picker');
+        assert.equal(stale.calls.length,count,'retired empty-start callback submitted a directory scan');assert.equal(stale.saved,null);stale.api.stop();
+    }
     const drc=rig();await drc.api.init(true,false);drc.el('drc-open').onclick();await wait(()=>drc.el('browse-entries').children.length);
     assert.equal(drc.el('browse-filter').value,'drc_files');assert(drc.el('browse-filter').disabled);assert.match(drc.el('browse-purpose').textContent,/permissions do not transfer/);
     drc.el('browse-entries').children[0].children[0].onclick();drc.drc.drc_id=token(99);drc.drc.revision=token(98);
@@ -119,5 +145,5 @@ function rig(saved=null){
     const rulesRetry=rig(rulesSaved);await rulesRetry.api.init(true,false);await wait(()=>/receipt/.test(rulesRetry.el('browse-status').textContent));
     assert.equal(rulesRetry.el('browse-title').textContent,'Load SVRF metadata');rulesRetry.el('browse-check').onclick();await wait(()=>rulesRetry.drcSelected===1);
     assert.deepEqual(rulesRetry.calls.find(c=>c.method==='POST').body,rulesRequest);rulesRetry.api.stop();
-    console.log('WEB FILE PICKER: ALL OK (paging, literal names, journal-before-send, read-only recovery, identical retry, sequence collision, cancellation, late response, invalid storage, runtime SVRF)');
+    console.log('WEB FILE PICKER: ALL OK (paging, literal names, journal-before-send, read-only recovery, identical retry, cancellation, epoch-fenced roots/resume/empty-start, invalid storage, runtime SVRF)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

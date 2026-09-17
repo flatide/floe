@@ -38,6 +38,8 @@ let heldExitRead=null,holdExitRead=false;
 const modeEnabled=process.env.FLOE_TEST_MODE==='1';
 const startupEnabled=process.env.FLOE_TEST_STARTUP==='1';
 const launchEnabled=process.env.FLOE_TEST_LAUNCH==='1';
+const launchExit=process.env.FLOE_TEST_LAUNCH_EXIT||'';
+let launchExitArmed=false,launchExitReply=null;
 const indexOpenEnabled=process.env.FLOE_TEST_INDEX_OPEN==='1',indexSource='f'.repeat(64),indexOperations=[];
 const gotoEnabled=process.env.FLOE_TEST_GOTO==='1';
 const paletteEnabled=process.env.FLOE_TEST_PALETTE==='1';
@@ -198,6 +200,7 @@ class XHR {
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
         if(indexOpenEnabled&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
+        if(launchExitArmed&&this.method==='GET'&&this.path===launchExit){launchExitArmed=false;launchExitReply=this;return;}
         if(body&&['mode','reselect_levels'].includes(body.kind)&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
         if(indexOpenEnabled&&body&&body.kind==='index_open'){setImmediate(()=>this.ontimeout());return;}
         if(this.method==='GET'&&this.path===exitStartup&&!startupExitReply){startupExitReply=this;return;}
@@ -683,6 +686,28 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         assert.deepEqual(posts()[0].body,{action:'open',seq:'1',pixels:[100,80],levels:{mode:'all'}});
         assert(node('notice').hidden,'previous source error survived successful handoff');
         assert(!requests.some(r=>r.method==='POST'&&r.path==='/api/v1/operations'));
+        if(launchExit){
+            if(launchExit==='/api/v1/catalog'){launchExitArmed=true;}
+            await push('b',true);
+            if(launchExit!=='/api/v1/catalog'){
+                await wait(()=>!node('launch-open').hidden&&!node('launch-open').disabled);
+                launchExitArmed=true;node('launch-open').onclick();
+            }
+            await wait(()=>launchExitReply);
+            const hidden=process.env.FLOE_TEST_LAUNCH_BOUNDARY==='hide';
+            if(hidden){listeners.pagehide();}else{node('logout').onclick();await node('session-exit-confirm').onclick();}
+            const after={requests:requests.length,posts:posts().length,connection:node('connection').textContent,notice:node('notice').textContent};
+            if(['503','401'].includes(process.env.FLOE_TEST_LAUNCH_REPLY)){
+                launchExitReply.status=Number(process.env.FLOE_TEST_LAUNCH_REPLY);launchExitReply.responseText=JSON.stringify({error:'late launch preflight failure'});
+            }
+            launchExitReply.onload();for(let i=0;i<8;i++){await new Promise(setImmediate);}
+            assert.equal(posts().length,after.posts,'retired launcher preflight submitted a new POST');
+            assert.equal(requests.length,after.requests,'retired launcher preflight continued HTTP');
+            assert.equal(node('connection').textContent,after.connection);assert.equal(node('notice').textContent,after.notice);
+            assert(!storage.has('floe-launch-pending:'+'c'.repeat(64)),'unsent retired request created a journal');
+            if(!hidden){assert(node('open').disabled&&node('index').disabled&&node('logout').disabled);}
+            listeners.pagehide();console.log('WEB LAUNCH EXIT: ALL OK ('+launchExit+', '+(hidden?'hidden':exitFailure?'unconfirmed':'ended')+', '+(process.env.FLOE_TEST_LAUNCH_REPLY||'200')+', no retired requests/journal)');return;
+        }
         await push('b',true);await wait(()=>!node('launch-open').hidden);
         assert.equal(posts().length,1);assert(node('source').disabled&&node('open').disabled);
         await wait(()=>node('level-list').querySelectorAll('input').length===2);

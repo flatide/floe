@@ -3,6 +3,8 @@
     function bind(env){
         const el=env.el;let enabled=false,paused=true,revision=null,pending=null,prepared='',attempt=null,busy=false;
         let polling=null,timer=null,autoTimer=null,error='',readError='',preparing=false;
+        let lifetime=0;
+        function active(run){return enabled&&!paused&&run===lifetime;}
         const retired=[];
         function paint(){
             el('launch-panel').hidden=!pending&&!attempt;
@@ -24,58 +26,65 @@
             error='';paint();env.changed();
             if(result.phase==='submitted'){await env.completed();}
         }
-        async function recover(){
+        async function recover(run){
             if(!attempt){return false;}
-            const status=await env.http('GET','/api/v1/launch/'+attempt.id,undefined,true);
+            const original=attempt;
+            const status=await env.http('GET','/api/v1/launch/'+original.id,undefined,true);
+            if(!active(run)||attempt!==original){return false;}
             if(status&&status.receipt){await finish(status.receipt);return true;}
             if(!status){throw new Error('Launch receipt expired. Check operation history; no request was replayed.');}
             if(status.phase==='dismissed'){await finish({phase:'dismissed'});return true;}
             return false;
         }
-        async function send(id,input){
+        async function send(id,input,run){
+            // A completed preflight is not fresh authority after stop/resume.
+            // An already submitted POST still keeps its receipt reconciliation.
+            if(!active(run)){return;}
             save({id:id,input:input}); // Persist BEFORE the mutation, also on reload/BFCache.
             const result=await env.http('POST','/api/v1/launch/'+id,input);
             await finish(result);
         }
         async function perform(action){
-            if(busy||paused||!enabled){return;}busy=true;error='';paint();
+            if(busy||paused||!enabled){return;}const run=lifetime;busy=true;error='';paint();
             try{
                 if(action==='retry'){
-                    if(!await recover()){
+                    if(!await recover(run)){
+                        if(!active(run)){return;}
                         const original=attempt;
                         // Explicit button only; never allocate another operation seq.
-                        await send(original.id,original.input);
+                        await send(original.id,original.input,run);
                     }
                 }else if(action==='dismiss'){
                     if(attempt){throw new Error('Check the original request before dismissing; its outcome is unknown.');}
                     const id=attempt?attempt.id:pending&&pending.id;
-                    if(id){await send(id,{action:'dismiss'});}
+                    if(id){await send(id,{action:'dismiss'},run);}
                 }else if(pending&&pending.phase==='ready'){
                     const item=pending;
-                    if(!item.request){env.present();await send(item.id,{action:'present'});}
+                    if(!item.request){env.present();await send(item.id,{action:'present'},run);}
                     else{
                         if(!env.ready()){return;}
-                        await env.open(item, function(input){return send(item.id,input);});
+                        await env.open(item, function(input){return send(item.id,input,run);});
                     }
                 }
             }catch(e){
+                if(!active(run)){return;}
                 error=e.message||String(e);
-                if(attempt){try{await recover();}catch(readError){error=readError.message||String(readError);}}
-            }finally{busy=false;paint();laterAuto();}
+                if(attempt){try{await recover(run);}catch(readError){if(active(run)){error=readError.message||String(readError);}}}
+            }finally{busy=false;if(!paused){paint();laterAuto();}}
         }
         async function laterAuto(){
             env.clearTimeout(autoTimer);autoTimer=null;
-            if(paused||busy||preparing||attempt||error||!pending||pending.phase!=='ready'){return;}
+            if(!enabled||paused||busy||preparing||attempt||error||!pending||pending.phase!=='ready'){return;}
             if(pending.request&&!env.ready()){autoTimer=env.setTimeout(laterAuto,100);return;}
-            const item=pending;
+            const item=pending,run=lifetime;
             if(item.id!==prepared){
                 preparing=true;
                 try{
                     if(item.request){await env.prepare(item);}
-                    if(paused||!pending||pending.id!==item.id){return;}
+                    if(!active(run)||!pending||pending.id!==item.id){return;}
                     prepared=item.id;env.changed();
-                }catch(e){error=e.message||String(e);paint();return;}
-                finally{preparing=false;}
+                }catch(e){if(active(run)){error=e.message||String(e);paint();}return;}
+                finally{preparing=false;if(enabled&&!paused&&!active(run)){laterAuto();}}
             }
             if(!item.confirm_levels){perform('open');}
             paint();
@@ -89,17 +98,19 @@
         }
         async function poll(){
             if(paused||!enabled||polling){return;}
-            const token={cancelled:false};polling=token;
+            const run=lifetime,token={cancelled:false};polling=token;
             try{
                 const value=await env.http('GET',revision===null?'/api/v1/launch':'/api/v1/launch/poll/'+revision,undefined,false,token);
-                if(!paused&&!token.cancelled){await accept(value);}
-            }catch(e){if(!paused&&!token.cancelled){readError=e.message||String(e);if(e.status===401){stop();}paint();}}
-            finally{if(polling===token){polling=null;}if(!paused&&enabled){timer=env.setTimeout(poll,readError?1000:0);}}
+                if(active(run)&&!token.cancelled){await accept(value);}
+            }catch(e){if(active(run)&&!token.cancelled){readError=e.message||String(e);if(e.status===401){stop();}paint();}}
+            finally{if(polling===token){polling=null;}if(active(run)){timer=env.setTimeout(poll,readError?1000:0);}}
         }
-        function stop(){paused=true;env.clearTimeout(timer);env.clearTimeout(autoTimer);if(polling){polling.cancelled=true;if(polling.abort){polling.abort();}}}
+        function stop(){paused=true;++lifetime;env.clearTimeout(timer);env.clearTimeout(autoTimer);
+            const token=polling;polling=null;if(token){token.cancelled=true;if(token.abort){token.abort();}}}
         async function resume(){
-            if(!enabled){return;}paused=false;
-            if(attempt){try{await recover();}catch(e){error=e.message;}}
+            if(!enabled){return;}stop();paused=false;const run=lifetime;
+            if(attempt){try{await recover(run);}catch(e){if(active(run)){error=e.message;}}}
+            if(!active(run)){return;}
             paint();poll();
         }
         async function init(supported){

@@ -20,6 +20,10 @@ M4g-48은 뒤로 가기 복원 중 종료/재숨김/새 복원과 늦은 응답�
 terminal 표시 덮기를 재현·수정했다([M4 §105](WEBUI_M4.ko.md#105-m4g-48--bfcache-복원-체인의-세대-분리)).
 56개 지연 조합과 현재401 대조2개는 결정적 JS gate이며 실제 브라우저 BFCache/
 초기화·개별 picker/launcher 내부 작업 전체 수용으로 계산하지 않는다.
+후속 M4g-49는 launcher의 Retry/open 사전 조회가 stop 뒤 새 POST를 보내는 경로와
+picker root 조회가 modal/포커스를 되살리는 경로를 추가로 재현·차단했다. 기존
+게시 receipt와 명시 동일 재시도는 유지한다. 단위/실제 app 연결27조합은 통과했으며
+초기 앱 전체 복원·실제 브라우저 수용은 별도다([M4 §106](WEBUI_M4.ko.md#106-m4g-49--런처파일-선택기-내부의-지연-사전-조회)).
 
 M4g-23의 [메뉴 원본 재대조](WEBUI_G4_MENU.ko.md)에서 **실행 중 DRC 파일 교체,
 SVRF metadata 교체, 카메라 유지 jobdeck 레벨 재선택**3건의 구현 누락을 확인했다.
