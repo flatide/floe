@@ -6909,3 +6909,53 @@ pageshow 전 visible 이벤트는 HTTP1개를 보냈다. 복귀 연결 완료 �
 불명 수용, Python-free Linux 실행, G1/G4, 현장 Firefox/ETX다. 새로운 합성 다중 리뷰
 저장 검사는 승인 대기이며 SH-10/index hot reload 보류·M5 실측 조건부는 유지한다.
 이번 근거는 로컬 회귀/서버 통합이며 실제 Chrome의 BFCache PASS로 바꾸지 않는다.
+
+## 111. M4g-54 — 자급식 Rust 런타임 검증
+
+2026-09-18. Python 없는 Linux에서 검증할 때 개발용 Python fixture 생성기를
+함께 옮길 필요가 없도록 `runtime_smoke`를 추가했다. 컴파일한 Rust test와 제품
+3개만 사용하며 빈 환경/PATH·새0700 임시 루트·재배치한 실행 파일로 동작한다.
+OASIS/DRC/jobdeck을 직접 생성하고 native CLI index/occupancy/info/render/clip,
+raw frame/pick/snap, DRC build/read 및 note/waive 게시·디스크 재열기·export를
+검사한다. 원본/캐시 불변과 임시 worker/자원 회수도 단언한다. 기존 사용자 설계나
+브라우저 reviewer 파일은 쓰거나 입력받지 않는다. 실제 프로세스 시작/종료를
+검증기가 수행하며 사용자에게 서버 재시작을 요청하지 않는다.
+
+정규 배터리와 web alias에 `runtime_smoke`를 연결했다. selector는91개 gate와
+20개 parser/predicate 사례를 통과했다. 독립 test는 실제 제품 바이너리가 필요해
+기본 cargo test에서는 ignored이며, 이 gate가 정확히1개를 실행했는지 확인한다.
+개발 하네스의 Python은 빌드/실행 준비에만 사용하며 런타임 환경에는 넣지 않는다.
+`--require-linux`는 Mac에서 build 전에 exit2로 거부한다.
+
+검증 근거:
+
+- `cargo fmt --check -p floe-app-core` 및 대상 integration test의
+  `cargo clippy --offline --locked -j2 ... --no-deps -- -D warnings`: 통과.
+  새 slice clone lint를 수정했으며 의존 crate의 기존 경고는 그대로다.
+- 최종 Mac 합성 실행에서 첫 index의 `--version timed out`1회가 있었다.
+  제품의5초 제한을 바꾸지 않은 동일 검사 재실행2.14초, 정규 배터리 안1.92초는
+  통과했다. 직접 version 측정은 원본0.417초/새 복사본0.179초였다. 재배치 경로만으로
+  재현되지 않았으며 원인은 미확정이다([G4 §5](WEBUI_G4_AUDIT.ko.md#5-재배치-런타임의-단발-version-시간-초과)).
+- 최종 test와 제품3개의 Linux x86-64 musl `--release --offline --locked -j2`
+  교차 빌드 및 static-pie ELF 형식 확인: 통과. 실제 Linux 실행은 아니다.
+- `sh tools/validate_rust.sh` 전체 시도는 `web_startup`의 Rust GTK 시작 대조용
+  executable에서30초 시간 초과/exit1로 중단됐다. 그 앞의 runtime smoke와
+  단위/CLI/owner/공유/파일 선택 검사 등은 통과했다. 이후 동일 제한값으로
+  `web_startup`부터 마지막 `klayout`까지50개 gate를 `--only`로 이어 실행해
+  exit0/`RUST VALIDATION: ALL OK`를 확인했다. 시작 검사는 합성 서버22개/첫 세대21개,
+  최종 오라클은 jobs1/8 각각13 PX + 2 phase-exact + 14 style을 통과했다.
+  **처음부터 끝까지 중단 없는 전체 PASS는 아니다**. 최초 실패와 후속 로그는
+  `/private/tmp/floe-runtime-battery.jG2wbe/full.log`, `resumed.log`에 보존했다.
+  원인 미확정인 시작 지연을 해결했다고 계산하지 않는다. 검증용 `.venv` 연결은
+  각 실행 뒤 정리했고 main/jobdeck의 기존 작업은 유지했다.
+
+실행 명령·검사하는 범위·한계는 [런타임 수용 계약](WEBUI_RUNTIME_ACCEPTANCE.ko.md)에
+정리했다. CLI PNG/clip smoke는 모든 픽셀/Region XOR의 기존 오라클을 대체하지
+않고 Rust review store 게이트는 실제 웹 승인/receipt 복구 수용을 대신하지 않는다.
+GitHub Actions의 합성 Linux 실행은 사용자 승인 대기여서 workflow나 원격 실행을
+추가하지 않았다.
+
+전체 목표 잔여: Python 없는 Linux **실제 실행**, 최신 브라우저의 입력·설정·공유/
+BFCache 및 저장/충돌/결과 불명 수용, G1 성능·G4 전체 최종 판정, 현장 Firefox/ETX.
+새 합성 다중 리뷰 저장 검사는 별도 승인 대기이며 원격 SH-10/index hot reload 보류,
+M5 실측 조건부는 유지한다. 이번 단계는 런타임 검증 준비이며 전체 목표 완료가 아니다.

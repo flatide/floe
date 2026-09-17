@@ -39,7 +39,14 @@ rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
 jobdeck representatives rust_renderer klayout"
-WEB_APP_GATES="app_cli cache_migration web_cli_inventory native_revision web_selfcheck web_portable app_render layerprops layer_defaults layer_palette palette_styles display_test app_clip managed_clip app_captures fe_embed drc_captures view_controller zoom_band minimap depth_keys web_wheel worker_queries view_stream managed_index owner_service web_cli web_local_sharing display_cli display_input web_handoff web_browse web_file_display web_startup instance_key web_drc web_drc_notes web_drc_waives web_review_budget web_autosave web_read_reviewer web_drc_open web_drc_rules web_drc_transfer web_svrf web_ui web_menu_inventory web_hangul app_jobdeck app_jobdeck_sources app_jobdeck_plan app_deck_render app_drc drc_review drc_build web_drc_build app_svrf svrf_native worker_client"
+WEB_APP_GATES="app_cli cache_migration web_cli_inventory native_revision web_selfcheck web_portable runtime_smoke app_render \
+layerprops layer_defaults layer_palette palette_styles display_test app_clip managed_clip app_captures \
+fe_embed drc_captures view_controller zoom_band minimap depth_keys web_wheel worker_queries \
+view_stream managed_index owner_service web_cli web_local_sharing display_cli display_input web_handoff \
+web_browse web_file_display web_startup instance_key web_drc web_drc_notes web_drc_waives web_review_budget \
+web_autosave web_read_reviewer web_drc_open web_drc_rules web_drc_transfer web_svrf web_ui web_menu_inventory \
+web_hangul app_jobdeck app_jobdeck_sources app_jobdeck_plan app_deck_render app_drc drc_review drc_build \
+web_drc_build app_svrf svrf_native worker_client"
 GATES="$GATES $WEB_APP_GATES"
 alias_gates() {
     case "$1" in
@@ -205,6 +212,8 @@ if gate web_selfcheck; then RAN="$RAN web_selfcheck"
     .venv/bin/python -B tools/validate_web_selfcheck.py; fi
 if gate web_portable; then RAN="$RAN web_portable"
     .venv/bin/python -B tools/validate_web_portable.py; fi
+if gate runtime_smoke; then RAN="$RAN runtime_smoke"
+    .venv/bin/python -B tools/validate_runtime_smoke.py; fi
 if gate app_render; then RAN="$RAN app_render"
     .venv/bin/python tools/validate_app_render.py "$FLOE2_SMOKE_SRC"; fi
 if gate layerprops; then RAN="$RAN layerprops"

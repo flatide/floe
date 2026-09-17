@@ -191,6 +191,10 @@ CD 전용 삭제의 수동 기록 보존을 확인했다. 새 저장/제품 수�
 M4g-53은 guest의 일회용 초대 성공 결과를 숨김 후에도 보존하고 pageshow 전
 재연결·복귀 후 중복 소켓을 막는다. 로컬42조합/전체 UI/native 공유 검증이며
 실제 SH-08은 별도다([M4 §110](WEBUI_M4.ko.md#110-m4g-53--게스트-초대-교환과-복귀-경합)).
+M4g-54는 Python/fixture 생성기 없이 실행되는 Rust 합성 런타임 검증기를 추가한다.
+재배치한 제품3개로 index/occupancy/layout/deck/clip/query/DRC 저장·재열기를
+검사한다. Mac 실행과 Linux musl 교차 빌드는 실제 Linux 수용과 구분한다
+([실행 계약](WEBUI_RUNTIME_ACCEPTANCE.ko.md)).
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.
 M4g-11d에서 Ctrl/Shift 선택·접기/펼치기·페이지 간 범위와 선택 행의 일괄 가시성을

@@ -32,6 +32,12 @@ M4g-53은 별도 guest 앱의 초대 성공 결과 유실·pageshow 이전 조�
 소켓을 재현·수정했다.42개 지연 조합, 전체 UI 및 실제 Rust 공유/인증 gate를
 통과했으며 실제 브라우저 SH-08/BFCache 수용은 남긴다([M4 §110](WEBUI_M4.ko.md#110-m4g-53--게스트-초대-교환과-복귀-경합)).
 
+M4g-54는 [자급식 Rust 런타임 검증기](WEBUI_RUNTIME_ACCEPTANCE.ko.md)를 정규
+배터리에 추가했다. 빈 환경/PATH와 재배치한 제품3개로 합성 index/occupancy,
+layout/deck/clip/raw render/pick/snap, DRC build/read/note/waive/export/reopen을
+검사한다. Mac 실행과 Linux musl ELF 교차 빌드까지이며, Python 없는 Linux에서의
+실제 실행·전체 픽셀 오라클·브라우저 승인/복구·G4 전체 수용으로 세지 않는다.
+
 M4g-23의 [메뉴 원본 재대조](WEBUI_G4_MENU.ko.md)에서 **실행 중 DRC 파일 교체,
 SVRF metadata 교체, 카메라 유지 jobdeck 레벨 재선택**3건의 구현 누락을 확인했다.
 시작 시 CLI 등록/일반 Open/Mode 전환은 동등한 대체가 아니다. 로컬 구현의 잔여를
@@ -271,3 +277,22 @@ fork된 복사본의 Drop은 creator PID가 다르면 자기 FD만 닫고 부모
 실패했는지는 모른다. **재현된 결함은 수정했지만 최초 실패와의 인과는 미확정**이다.
 호출 위치를 남기도록 테스트 helper에 `track_caller`를 추가했으며 재발 시 실제 실패
 위치/조건을 기록한다. 반복 PASS로 최초 실패를 환경 탓으로 단정하지 않는다.
+
+## 5. 재배치 런타임의 단발 version 시간 초과
+
+2026-09-18 M4g-54 최종 smoke 재실행에서 첫 합성 색인이
+`floe-index --version timed out`로 실패했다. 실제 테스트36.35초/exit1이며 제품의
+5초 version deadline은 바꾸지 않았다. 원본 빌드 경로와 별도 새 임시 복사본의
+`--version` 직접 측정은0.417/0.179초로 성공했다. 같은 소스·같은 제한의 smoke
+재실행2.14초와 정규 배터리 내1.92초 실행은 통과했다.
+
+복사 경로만으로 결정적으로 재현하지 못했으며, macOS 기동 지연/병렬 부하/제품
+문제 중 원인은 아직 확정하지 않았다. timeout을 늘리거나 gate를 건너뛰지 않는다.
+이전 시작/IPC 단발 실패와의 인과도 주장하지 않는다. Mac smoke의 통과 범위와
+Linux 실행 미검증 경계는 [런타임 계약](WEBUI_RUNTIME_ACCEPTANCE.ko.md)에 명시한다.
+
+같은 단계의 전체 배터리는 별도의 `web_startup` Rust GTK 시작 대조 executable에서
+30초 timeout/exit1로 중단됐다. M4g-50에서 기록한 것과 같은 검사 지점이며, 이번
+version 실패와의 인과는 미확정이다. 제한값을 바꾸지 않고 실패 지점부터 후속50개
+gate를 이어 실행한 결과는 모두 통과했다. 전체 일회 통과로 바꾸지 않으며
+실패/재실행 근거는 [M4 §111](WEBUI_M4.ko.md#111-m4g-54--자급식-rust-런타임-검증)에 남긴다.
