@@ -6187,3 +6187,59 @@ heartbeat도 준비 신호 전에 기록한다. 제품 프로세스/취소 정�
 커밋 시 목표 잔여는 M2 로컬 공유 구현,
 별도 원격/TLS/서버 자원 정책, 실제 브라우저·Python-free Linux·G1/G4·현장 수용,
 조건부 M5다. index hot reload/revision은 기존 유보를 유지한다.
+
+## 89. M4g-31 — DRC 교체 준비의 중복 예약 제거
+
+2026-09-17 실제 Chrome의 read-only DRC/SVRF 수용 뒤 작은 DRC를 교체하다
+`browse_busy_or_limit`가 재현됐다([브라우저 기록 §7.1](WEBUI_BROWSER_ACCEPTANCE.ko.md#71-후속-drc-교체-실제-실패-발견과-자원-예약-수정)).
+캐시 선택의 `resources.drc` 예약256MiB/CPU1이 실제 candidate reader의 예약과
+겹쳤다. renderer1024 + picker192 + old reader256 + SVRF256 + selection256 +
+candidate256 =2240MiB로 기본2048MiB 풀을 초과했다. 프로세스 RSS나 파일 크기
+실측이 아니라 관리 자원 예약 합계다. 기존 회귀의 renderer64MiB에는 나타나지 않았다.
+
+- source/cache 읽기 lease는 캐시 선택부터 reader 시작까지 계속 보유한다.
+  managed index/export writer와의 배타성을 약화하거나 재개방 틈을 만들지 않는다.
+- 캐시 선택에도 기존256MiB/CPU1 예약을 받는다. 선택 함수의 임시 pack metadata가
+  drop된 뒤에만 이 예약을 해제하며, 실제 reader는 기존 별도 예약으로 시작한다.
+  기본 조합의 피크는1984MiB다. 전체 풀·동시 worker 상한은 올리지 않는다.
+- 이전 DRC/SVRF는 성공적인 원자 교체 전까지 유지한다. 실패·취소·scope/witness·
+  reviewer 분리·명시 Index/게시 계약은 그대로다.
+
+`validate_web_drc_open.py`의 기본 배터리 경로에 native1024/1088/1089MiB 검사를
+추가했다. 1024는 제품 기본,1088은2048 풀에 정확히 도달,1089는1MiB 초과다.
+runtime metadata가 열린 상태에서 앞 둘은 교체 성공, 마지막은 명시 거부와 기존
+reader/metadata 보존을 요구한다. 손상 pack 실패 후 정상 교체, 카메라/입력 불변,
+reviewer 권한 미생성도 단언한다. HTTP 테스트 Session의 기본64MiB는 바꾸지 않고
+새 검사만 명시 예산을 전달한다.
+
+수정 전 실제 release는 새1024MiB 회귀에서 `browse_busy_or_limit`로 exit1이었다.
+수정 후 세 예산 경계를 포함한 DRC open/SVRF 집중 검사와 `cargo fmt -p floe-web
+-- --check`, web all-target strict clippy를 통과했다. 집중 로그는
+`/private/tmp/floe-drc-admission-battery.VBg39u/focused-open.log`다.
+
+첫 전체 실행은 새 합성 valmini의 legacy KLayout 다중 프로세스 인덱스 준비에서
+4분 이상 출력/완료 metadata 없이 정지했다. 이번 검증의 프로세스 그룹만 종료했고
+부분 `.tiles`는 `.tiles.stalled`로 보존했다. 같은 fixture의 `--legacy --jobs 1`
+준비는5초에 완료했다. 원인 미확정이며 Rust 수정의 실패나 전체 PASS로 바꾸지 않는다.
+이후 같은 디렉터리에서 `sh tools/validate_rust.sh`를 처음부터 재실행했다.
+첫/직렬 준비/재실행 로그는 위 폴더의 `validation.log`, `legacy-serial.log`,
+`validation-serial-prepared.log`로 분리한다.
+
+재실행은 workspace·owner21검사·파일 선택까지 통과한 뒤 `gtk_startup_oracle`
+자식의30초 제한 초과로 exit1이었다. 제한/검사 코드를 바꾸지 않고 원본 스크립트의
+`validate_web_startup.py`부터 나머지 구간을 같은 SRC/TMPDIR로 다시 실행했다.
+이 구간은 startup22실행/21첫 generation, 새 예산 경계 DRC open/SVRF,
+occupancy37·jobdeck83·renderer46, KLayout j1/j8 각각13 PX+2 phase-exact+14 style을
+포함해 exit0 / `RUST VALIDATION: ALL OK`로 종료했다(`validation-from-startup.log`).
+따라서 **전 항목을 재실행 포함 확인했지만 단일 무중단 전체 PASS는 아니다.**
+startup 최초 timeout의 원인도 미확정이다. 기존 의존성/오라클 경고는 남아 있다.
+
+검증용 `.venv` 링크만 정리하고 연결 대상 환경과 다른 작업 트리를 보존한다.
+현재 열린 Chrome은 구 바이너리이므로 수정 후 브라우저 교체 성공으로 세지 않는다.
+사용자가 별도 합성 reviewer 세션의 메모·waive 수동/opt-in 자동 저장·복원을
+승인했으며, 다음 실제 UI 단계에서만 그 범위로 실행한다.
+
+커밋 시 전체 목표 잔여: 수정 빌드의 실제 Chrome 교체·저장/충돌/복구 및 나머지
+브라우저 조작 수용, Python-free Linux 실행, G1/G4 최종 판정, 현장 Firefox/ETX다.
+원격 SH-10과 index hot reload/revision은 사용자 보류, M5 world-tile은 성능 조건부다.
+이번 예산 결함 수정이나 로컬 배터리를 전체 웹 전환 완료로 계산하지 않는다.

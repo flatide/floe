@@ -297,6 +297,30 @@ mtime, metadata JSON의 SHA-256이 같다. 새 테스트 폴더는 generator/변
 DB·SVRF·INCLUDE·JSON4파일뿐이며 ICE/리뷰/lock 파일이 생성되지 않았다. 제품 수정이
 없는 실제 UI 수용 기록이므로 §6.1의 배터리를 다시 실행한 것으로 기록하지 않는다.
 
+### 7.1 후속 DRC 교체: 실제 실패 발견과 자원 예약 수정
+
+같은 열린 바이너리에서 별도 합성 `replacement.db`(3규칙·5오류·1,328bytes)를
+선택했다. 선택 뒤 Close는 기존8규칙·23오류와 SVRF8/8을 보존했다. 하지만 실제
+Open selected DRC는 두 번 모두 `Catalogue or owner is busy…`로 실패했다.
+모달을 닫으면 기존 DRC/SVRF·카메라·9레이어가 그대로였다. **새 DRC 교체 성공을
+실제 Chrome 수용으로 기록하지 않는다.** 잘못된 DRC 파일을 여는 검사는 아직 안 했다.
+
+native 회귀로 같은 실패를 재현했다. `prepare_open`이 캐시 선택용 예약을 유지한
+채 실제 reader를 시작해 새 reader용256MiB/CPU1을 두 번 잡았다. 기본 렌더1024 +
+picker192 + 기존 reader256 + SVRF256 + 선택256 + 새 reader256 =2240MiB로
+기본2048MiB 풀을 넘었다. 기존 HTTP 검사는 렌더64MiB여서 이 조합을 놓쳤다.
+
+수정은 cache/source 읽기 lease를 단계 전체에 유지하고, 임시 pack metadata가
+해제되는 캐시 선택 끝에서 그 단계의 CPU/메모리 예약만 해제한다. 실제 reader는
+기존대로 별도 예약을 받아 시작한다. 이때 피크는1984MiB이며 예산 상향이나 무예약
+parse가 아니다. 이전 reader는 새 reader 준비·원자 교체 전까지 유지한다.
+테스트/실행 기록은 [M4 §89](WEBUI_M4.ko.md#89-m4g-31--drc-교체-준비의-중복-예약-제거)에 둔다.
+
+열린 Chrome은 재시작하지 않았으므로 수정 후 브라우저 재검증은 남는다. 검사 후
+DRC 패널을 접고 X200/Y220/view500µm·9레이어·0룰러·gen32 final crop 상태로 복원했다.
+원본/OVM/OVP/OVT·기존 합성 DRC/SVRF JSON·교체 후보의 hash는 불변이며,
+새 후보 폴더에도 pack/review sidecar는 생성되지 않았다.
+
 ## 8. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only

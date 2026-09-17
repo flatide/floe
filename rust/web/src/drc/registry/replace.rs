@@ -114,13 +114,17 @@ impl Registry {
             }
         }
         let (resources, _) = pending.owner.drc_resources();
-        // Read leases also exclude managed index/export writers during cache
-        // selection; the candidate retains its own leases before this is dropped.
+        // Keep file leases across cache selection -> candidate startup, without
+        // charging two readers. Selection drops its temporary pack metadata
+        // before startup; both phases still reserve their own CPU/memory.
         let files: Vec<_> = std::iter::once(path.clone())
             .chain(caches.into_iter().filter(|_| !packed))
             .collect();
-        let admission = resources.drc(files.clone())?;
-        let chosen = floe_app_core::drc::select_current_source(&path, stop)?;
+        let admission = resources.read(files.clone())?;
+        let chosen = {
+            let _selection = resources.drc(files.clone())?;
+            floe_app_core::drc::select_current_source(&path, stop)?
+        };
         scope.check(&chosen.path)?;
         let protection = pending.protection.as_mut().unwrap();
         protection.protect_inputs(&files, &files, stop)?;

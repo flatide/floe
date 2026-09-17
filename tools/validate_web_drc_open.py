@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Actual picker -> runtime DRC replacement; private valmini/synthetic DRC only."""
 import copy
+import json
 from pathlib import Path
 from cache_test_paths import vfs_cache, drc_pack
 import shutil
@@ -60,6 +61,50 @@ def idle(s):
         s.client.call("GET", "/api/v1/view")["view"]), s.proc)
 
 
+def replacement_budget(source, first, second, bad, temps, work):
+    """Keep the old reader/SVRF alive; reserve a candidate exactly once."""
+    rules = work / "replacement-budget.rules.json"
+    rules.write_text(json.dumps(dict(format="floe-svrf-rules", version=1, checks={
+        "GRGEOM.1_BFMOAT": dict(desc="synthetic budget regression", constraints=[
+            dict(metric="width", op="<", value=0.5, text="width < 0.5")])})))
+    inputs = [source, first, second, bad, rules]
+    inputs += [p for p in vfs_cache(source).rglob("*") if p.is_file()]
+    before = fingerprint(inputs)
+    # Default pool: 2048 MiB. Picker 192 + old reader 256 + SVRF 256 +
+    # candidate 256 = 960. 1024 fits; 1088 exactly fills the pool, 1089 exceeds it.
+    # The old cache-selection lease incorrectly charged another reader (256).
+    for budget, accepted in ((1024, True), (1088, True), (1089, False)):
+        s = Session(source, first, temps, None, work / ("budget-%d.session" % budget),
+                    budget_mb=budget)
+        try:
+            c, picker = s.client, Picker(s, work.name)
+            view = idle(s)
+            loaded = picker.finish(picker.submit(
+                "load_drc_rules", handle=picker.handle(rules.name, "all_files"), context=s.context))
+            old = picker.accept(loaded)
+            assert old["metadata"]["svrf"]["matched"] == "1", old
+            if accepted:
+                # A failed candidate must release its reservation/leases and
+                # preserve the old reader, before the following valid open.
+                rejected = picker.open(picker.handle(bad.name))
+                assert rejected["phase"] == "failed", rejected
+                assert c.call("GET", "/api/v1/drc")["drc"] == old
+            result = picker.open(picker.handle(second.name))
+            if accepted:
+                current = picker.accept(result)
+                assert current["id"] != old["id"]
+                assert current["metadata"].get("svrf") is None
+            else:
+                assert result["phase"] == "failed" and result["error"] == "browse_busy_or_limit", result
+                assert c.call("GET", "/api/v1/drc")["drc"] == old
+            assert c.call("GET", "/api/v1/drc")["review_grant"] is None
+            assert idle(s) == view
+            assert not drc_pack(second).exists(), "budget test indexed without consent"
+            assert fingerprint(inputs) == before
+        finally:
+            s.close()
+
+
 def main(fixture):
     with tempfile.TemporaryDirectory(prefix="floe-live-drc-") as td:
         work = Path(td).resolve()
@@ -84,6 +129,7 @@ def main(fixture):
         protected = [source, a, b, bad, pack, explicit_pack] + list(vfs_cache(source).rglob("*"))
         protected = [p for p in protected if p.is_file()]
         before = fingerprint(protected)
+        replacement_budget(source, a, b, bad, temps, work)
         s = Session(source, None, temps, None, work / "session.json")
         try:
             c, picker = s.client, Picker(s, work.name)
@@ -262,7 +308,7 @@ def main(fixture):
         finally:
             s.close()
         assert not list(temps.iterdir()), "native resources were not reaped"
-    print("WEB DRC OPEN: ALL OK (initial/cache/ASCII/explicit ICE, scoped handles, approved build, stale/failure/cancel/replay, unchanged layout, launcher-only reviewer reconnect/read-only+notes+waives, receipt epochs and both ledgers preserved, no implicit sidecar writes, shutdown)")
+    print("WEB DRC OPEN: ALL OK (metadata replacement at default/exact budget, over-budget preservation, initial/cache/ASCII/explicit ICE, scoped handles, approved build, stale/failure/cancel/replay, unchanged layout, launcher-only reviewer reconnect/read-only+notes+waives, receipt epochs and both ledgers preserved, no implicit sidecar writes, shutdown)")
 
 
 if __name__ == "__main__":

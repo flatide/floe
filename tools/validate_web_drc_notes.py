@@ -30,12 +30,13 @@ def fingerprint(paths):
 
 
 class Session:
-    def __init__(self, source, pack, temps, reviewer, session_path, *, edit_waives=False, waives=None, read_reviewer=None):
+    def __init__(self, source, pack, temps, reviewer, session_path, *,
+                 edit_waives=False, waives=None, read_reviewer=None, budget_mb=64):
         self.session_path = session_path
         env = dict(os.environ, PATH="", TMPDIR=str(temps), FLOE_INDEX_BIN=str(INDEX),
                    FLOE_RENDERD_BIN=str(RENDERD), FLOE_REVIEWER="must-not-be-used", FLOE_FILL_EDIT="")
         args = [str(APP), "view", str(source), "--no-open", "--session-file", str(session_path),
-                "--jobs", "2", "--raster-jobs", "1", "--budget-mb", "64",
+                "--jobs", "2", "--raster-jobs", "1", "--budget-mb", str(budget_mb),
                 "--no-labels", "--frame-cache", "off"]
         self.initial_drc = pack is not None
         if pack is not None:

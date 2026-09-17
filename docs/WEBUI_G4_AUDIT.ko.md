@@ -154,6 +154,9 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    교체 거부 후 기존 상태 보존을 실제 Chrome에서 확인했다. 기존 DRC의 교체·
    pack 생성·reviewer 재등록·메모/waive 저장·자동 저장 수용은 아직 아니다.
    합성 DRC는 읽기 전용 연결을 유지하고 패널/markers만 닫았으며 입력과 캐시는 불변이다.
+   §7.1의 실제 교체는 기본 예산에서 실패했다. 캐시 선택/새 reader의 중복 예약을
+   native 회귀로 재현·수정했지만, 수정 바이너리의 브라우저 교체 수용은 남는다
+   ([M4 §89](WEBUI_M4.ko.md#89-m4g-31--drc-교체-준비의-중복-예약-제거)).
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격
