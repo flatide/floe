@@ -282,8 +282,9 @@ viewport1156×735.5 CSS px, DPR2. §5.3에서 원본과 대조한 두 box는
 자동2µm 치수선과 수평20µm/대각20.2237µm 동시 표시는 screenshot으로도 확인했다.
 이미지를 읽어 길이를 추정한 것이 아니라 원본 좌표와 Rust가 반환한 DBU/거리 표시를
 대조한 것이다. bbox gap을 contour 최단 거리로 부르지 않는다. 두 도형/한 자유각의
-검사이며 다중 후보 전체, 비정형 도형, CD/수동/자동 혼합 Undo, clipboard, 모든
+검사이며 다중 후보 전체, 비정형 도형, clipboard, 모든
 DPR/Firefox/원격 입력과 성능 수용은 남는다.
+CD/수동/자동 혼합 Undo는 후속 §5.5에서 별도로 확인했다.
 
 검사 후9레이어, Frames/Labels/Markers on, DRC 패널 open, X200/Y220/view500µm,
 full/High/thin auto, 선택/룰러0·probe off·ruler snap on으로 복원했다(gen66 margin crop).
@@ -293,6 +294,37 @@ sidecar10파일 SHA-256은 기존 기준과 모두 같고 `browser-preview` side
 
 제품 코드 변경은 없다. 현재 HEAD의 `inspect.test.cjs`와 `measure.test.cjs`도
 각각 ALL OK로 재검증했지만, 이 모형 게이트를 실제 브라우저 관측과 혼합하지 않는다.
+
+### 5.5 실제 CD·수동·bbox 간격 혼합 Undo
+
+2026-09-18. §5.4와 같은 기존62804 합성 Chrome 세션에서 파일 저장 없이 검증했다.
+실행 파일은 §5.4의 이전 빌드이며 최신 CSS/초기화/BFCache 수용으로 세지 않는다.
+
+두 box의 bbox gap2µm를 먼저 만들고 수동 룰러19.9830µm를 추가했다
+(DBU39077,30000→59060,30000). 이어 M2.OVERLAP.2의 global1을 선택해
+`Frame error`로 이동하자 이전 룰러2개가 유지되고 `Gap 0.0116 µm` CD가 추가됐다.
+형상 선택은 격리된 레이어 상태에 맞게 해제됐다. snap off로 새 수동 룰러
+0.5449µm를 추가해 총4개를 만든 뒤 실제 canvas 키 입력으로 확인했다.
+
+| 입력 후 | 남은 기록 | UI 확인 |
+|---|---|---|
+| 최초 | bbox → 수동19.9830 → CD → 수동0.5449 | `4 rulers` |
+| k 한 번 | bbox → 수동19.9830 → CD | `3 rulers`, CD 값 유지 |
+| k 두 번 | bbox → 수동19.9830 | `2 rulers`, `CD rulers cleared.` |
+| k 세 번 | bbox | `1 rulers`, bbox gap2.0000µm |
+| k 네 번 | 없음 | `0 rulers`, 치수·bbox·CD 목록 비움 |
+
+CD를 다시 만든 뒤 수동0.5449µm를 추가해 `Clear CD rulers`를 눌렀을 때도
+수동 기록1개와 끝점/거리 표시는 그대로 남았다. Shift+K로 마지막 기록을 지웠다.
+이는 완료된 CD 한 선분을 섞은 실제 수용이다. 지연/실패 응답, 여러 CD 선분의
+실제 입력 경합 전체까지 확대하지 않는다. 현재 HEAD의 `rulers`, `measure`,
+`drc-cd`, `drc-navigation` Node 게이트4개는 별도로 모두 ALL OK다.
+
+검사 후 레이어 복원/DRC focus 해제, 9레이어·Frames/Labels/Markers on,
+X200/Y220/view500µm, DRC 패널 open, 선택/룰러0, ruler mode/probe off,
+ruler snap on으로 복원했다(gen88 margin crop). note/waive 자동 저장은 off다.
+원본·캐시·기존 리뷰10파일 SHA-256 불변, 새 `browser-preview` sidecar/lock 없음.
+제품 코드 변경과 새 저장/인증/권한 부여, 사용자에게 서버 재시작 요청은 없었다.
 
 ## 6. 설정 다운로드 — 최초 불러오기 권한 차단
 
@@ -905,6 +937,7 @@ auth/BFCache/종료는 남는다.
 §5.3은 원본 꼭짓점/변 스냅과 수동18/2µm, §5.4는 실제 Shift/Command 다중 선택,
 자동 bbox gap2µm와 축 정렬20µm/자유각20.2237µm 및 Undo를 확인했다. 이전 빌드의
 관측으로 범위를 고정하며 최신 hover/CSS·초기화/BFCache 수용은 남긴다.
+§5.5는 CD/수동/자동 bbox 간격의 혼합 Undo와 CD 전용 삭제의 수동 기록 보존을 확인했다.
 종료 응답 불명/복구 전체와 OS IME 수용은 별도로 남는다.
 
 Python-free Linux 실행, G1/G4 전체, 현장 Firefox/ETX G2는 남는다. 원격 SH-10은

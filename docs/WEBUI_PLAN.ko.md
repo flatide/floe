@@ -185,6 +185,9 @@ M4g-51은 기존 승인 Chrome 합성 탭에서 두 box의 Shift/Command 다중 
 자동 bbox gap2µm, 축 정렬20µm/자유각20.2237µm와 Undo를 원본 좌표·화면으로
 확인했다. 이전 실행 파일의 관측이며 최신 CSS/BFCache 및 UI-04 전체 수용은 아니다
 ([브라우저 §5.4](WEBUI_BROWSER_ACCEPTANCE.ko.md#54-실제-다중-선택자동-bbox-gapshift-자유각)).
+M4g-52는 같은 합성 Chrome에서 bbox/수동/CD/수동4개 기록의 역순 Undo와
+CD 전용 삭제의 수동 기록 보존을 확인했다. 새 저장/제품 수정은 없으며 최신 빌드
+전체 수용과 구분한다([브라우저 §5.5](WEBUI_BROWSER_ACCEPTANCE.ko.md#55-실제-cd수동bbox-간격-혼합-undo)).
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.
 M4g-11d에서 Ctrl/Shift 선택·접기/펼치기·페이지 간 범위와 선택 행의 일괄 가시성을

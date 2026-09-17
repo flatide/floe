@@ -6868,3 +6868,17 @@ BFCache 장애 주입이나 저장·복구 수용을 대신하지 않는다.
 최신 빌드의 CSS/초기화/BFCache 수용, Python-free Linux 실행, G1/G4, 현장 Firefox/ETX.
 SH-10/index hot reload 보류와 M5 실측 조건부는 그대로다. 이 단계는 관측 검증
 진전이며 UI-04 전체나 목표 완료를 선언하지 않는다.
+
+## 109. M4g-52 — 실제 Chrome 혼합 룰러 Undo
+
+2026-09-18. 기존 승인 합성 서버/Chrome을 이용해 bbox gap → 수동 → DRC CD →
+수동 순서로4개를 만들고 k4회가 역순으로 지우는지 확인했다. CD 전용 삭제는
+수동 룰러를 보존했다. [브라우저 §5.5](WEBUI_BROWSER_ACCEPTANCE.ko.md#55-실제-cd수동bbox-간격-혼합-undo)에
+수치/순서/복원 상태를 기록했다. 새 저장이나 제품 수정은 없고 입력·캐시·기존
+리뷰10파일 해시는 불변이다. 현재 HEAD의 rulers/measure/drc-cd/drc-navigation
+Node 게이트4개 ALL OK. 문서만 변경했으므로 native 전체 배터리는 재실행하지 않았다.
+
+전체 목표 잔여: 최신 빌드의 CSS/초기화/BFCache 실제 수용, 나머지 입력·설정·공유와
+승인이 필요한 다중 저장/충돌/결과 불명 복구, Python-free Linux 실행, G1/G4 및
+현장 Firefox/ETX다. SH-10/index hot reload 보류와 M5 실측 조건부는 유지한다.
+이전 실행 파일의 제한된 브라우저 수용 진전이며 전체 목표 완료가 아니다.
