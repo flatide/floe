@@ -326,6 +326,45 @@ ruler snap on으로 복원했다(gen88 margin crop). note/waive 자동 저장은
 원본·캐시·기존 리뷰10파일 SHA-256 불변, 새 `browser-preview` sidecar/lock 없음.
 제품 코드 변경과 새 저장/인증/권한 부여, 사용자에게 서버 재시작 요청은 없었다.
 
+### 5.6 실제 겹침 후보 순환·가시성·45도 PATH
+
+2026-09-18. 같은62804 합성 Chrome 세션에서 파일 저장 없이 확인했다. About은
+`aa1f0a3+`/bundle `2a10c3d9254aa79ff5c37d44a08e0d4b1e10bf55`다. 이전 실행 파일의
+관측이며 최신 CSS/초기화/BFCache 수정이나 UI-04 전체 수용으로 계산하지 않는다.
+
+Frames/Labels/DRC markers를 끄고 DRC 패널을 닫은 뒤1/0·2/0·3/0만 표시했다.
+X30.15/Y30.15/view1µm, viewport `(280,102,1156,735.5)` CSS px/DPR2에서
+`(714,614)`를 실제 클릭했다. 합성 OASIS의 LEAF1 레코드와 TOP→MID `(30000,30000)`·
+MID→LEAF1 첫 멤버의 변환을 KLayout으로 읽어 다음 원본 좌표/면적을 대조했다.
+
+| 후보 | 표시 레이어/셀 | 원본과 UI가 일치한 bbox(DBU) | 면적(DBU²) |
+|---|---|---|---:|
+| 1/3 | 1/0 · LEAF1 | 30000,30000,30050,30050 | 2500 |
+| 2/3 | 2/0 · LEAF1 | 30000,30000,30300,30300 | 90000 |
+| 3/3 | 3/0 · LEAF1 | 30000,30000,48000,33000 | 54000000 |
+
+같은 위치 재클릭은1→2, Next는2→3→1, Previous는1→3→2로 순환했다.
+2/0의 선택 윤곽이 화면의0.3µm 사각형과 일치했다. 후보 이동 중 표시 세대는
+gen102로 유지됐으며 이 상태 관측을 input→photon 측정으로 사용하지 않는다.
+2/0을 숨기면 이전 선택과 양쪽 순환 버튼이 먼저 비활성화됐고, 새 표시 후에는
+1/0·3/0 두 후보만1/2→2/2→1/2로 나왔다(gen104). 빈 영역 `(620,614)` 클릭은
+`No shape at this point.`와 선택 윤곽/후보 버튼 해제를 확인했다.
+
+이어7/0만 표시하고 X34/Y16/view20µm에서45도 PATH 중앙 `(858,470)`를 클릭했다.
+원본 PATH `(30000,12000)→(38000,20000)`, width500·양쪽 extension0의 KLayout
+polygon은 bbox `(29823,11823,38177,20177)`, 면적5664000 DBU²다. UI는
+`VALMINI_TOP`, 7/0, 같은 bbox/면적과 overlap1/1을 표시했다. screenshot에서
+선택 윤곽은 축 정렬 bbox가 아니라 실제 대각선 네 변을 따라갔다. bbox 내부지만
+PATH 밖인 `(858,354)` 클릭은 no-hit였다(gen122). 다중 segment/join·오목 다각형·
+모든 변환의 완전한 오라클이나 전체 후보 상한 검증은 아니다.
+
+검사 뒤9레이어·Frames/Labels/Markers on, DRC 패널 open/M2.OVERLAP.2,
+X200/Y220/view500µm, full/High/thin auto, 선택/룰러0·probe/ruler mode off·
+ruler snap on으로 복원했다(gen130). note/waive 자동 저장은 off, 새 receipt는 없다.
+입력/cache/DRC/기존 리뷰10파일 SHA-256 불변, 새 `browser-preview` sidecar와
+설계 기본값 파일 없음. 현재 HEAD의 inspect/query Node gate2개는 별도로 ALL OK다.
+제품 수정·새 저장·서버 재시작·인증 정보 접근은 없었으며 탭은 후속 수용용으로 보존했다.
+
 ## 6. 설정 다운로드 — 최초 불러오기 권한 차단
 
 2026-09-17 사용자가 새 합성 valmini 세션을 열고, 다운로드한 두 설정 파일을 같은

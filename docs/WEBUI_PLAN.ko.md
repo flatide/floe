@@ -195,6 +195,10 @@ M4g-54는 Python/fixture 생성기 없이 실행되는 Rust 합성 런타임 검
 재배치한 제품3개로 index/occupancy/layout/deck/clip/query/DRC 저장·재열기를
 검사한다. Mac 실행과 Linux musl 교차 빌드는 실제 Linux 수용과 구분한다
 ([실행 계약](WEBUI_RUNTIME_ACCEPTANCE.ko.md)).
+M4g-55는 기존 합성 Chrome에서3개 겹침 후보의 양방향 순환·레이어 숨김과
+45도 PATH의 bbox/면적/윤곽·bbox 안 no-hit를 원본과 대조했다. 파일 저장이나
+제품 수정 없이 화면을 복원했으며 이전 실행 파일의 제한된 수용이다
+([브라우저 §5.6](WEBUI_BROWSER_ACCEPTANCE.ko.md#56-실제-겹침-후보-순환가시성45도-path)).
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.
 M4g-11d에서 Ctrl/Shift 선택·접기/펼치기·페이지 간 범위와 선택 행의 일괄 가시성을
