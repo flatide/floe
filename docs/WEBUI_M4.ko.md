@@ -6684,3 +6684,28 @@ recovery record를 보존한다. 자동 재전송이나 새 파일 저장 권한
 전체 목표 잔여는 OS IME/나머지 입력·설정·공유, 실제 다중 저장·충돌/결과 불명 복구,
 Python-free Linux 실행·G1/G4·현장 Firefox/ETX다. 원격 SH-10/hot reload는 보류,
 M5는 실측 조건부다. 내장 한글 일부 성공으로 전체 UI-05를 닫지 않는다.
+
+## 103. M4g-46 — 시작 조회와 세션 종료의 표시 경합
+
+2026-09-18. 읽기 전용 모형에서 `/startup` 응답을 지연시키고 먼저 세션을 종료하자,
+늦은 응답이 상단을 `Local · choose levels`로, viewport 안내를 레벨 선택 문구로
+되돌렸다. 하단은 Session ended여서 표시가 모순됐다. §101의 작업 제출 보호 덕분에
+POST는0개였지만 표시 완료 조건은 충족하지 못했다.
+
+`start()`의 비동기 단계마다 stopped를 검사해 다음 초기화/안내/요청으로 진행하지
+않게 했다. 늦은 시작 오류도 종료 성공/불명 안내를 덮지 않는다. 서버 종료 API나
+파일 권한·recovery record 계약은 변경하지 않았다.
+
+회귀는 catalog/defaults/operations/view/startup GET5개 × 종료 성공/실패 × 늦은
+조회 성공/실패 =20조합이다. 종료 뒤 추가 HTTP/WS/작업0, terminal 문구 불변과
+종료 불명 시 recovery 보존을 단언한다. `sh tools/validate_rust.sh --only web_ui`
+및 offline/locked release app 빌드 통과. 기존 tiler/VFS 경고는 그대로다.
+native 전체 배터리 또는 실제 Chrome 지연 주입 결과로 주장하지 않는다.
+
+별도 [브라우저 §5.3](WEBUI_BROWSER_ACCEPTANCE.ko.md#53-도형-선택-좌표-대조--스냅복원은-연결-복구-대기)은
+원본과 사각형1개의 면적/좌표가 일치한 근거다. 제어 연결 상실로 테스트 뷰 복원이
+남아 있으며 서버를 재시작하거나 다른 방식으로 인증/파일 권한을 우회하지 않았다.
+
+전체 목표 잔여: 실제 브라우저 나머지 입력·설정·공유 및 다중 저장·충돌/불명확한
+게시 복구, Python-free Linux 실행, G1/G4 최종 대조, 현장 Firefox/ETX다.
+원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다.

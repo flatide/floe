@@ -85,6 +85,14 @@ assert.equal(modeClient.status,0,'deck mode client: '+modeClient.error);
 assert.equal(exitClient.status,0,'session exit client: '+exitClient.error);
 const exitFailed=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_EXIT:'1',FLOE_TEST_EXIT_FAILURE:'1'}});
 assert.equal(exitFailed.status,0,'unconfirmed session exit client: '+exitFailed.error);
+for(const endpoint of ['catalog','defaults','operations','view','startup']){
+    for(const failure of ['0','1'])for(const readFailure of ['0','1']){
+        const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,
+            FLOE_TEST_STARTUP:'1',FLOE_TEST_DEFAULTS:'1',FLOE_TEST_EXIT_STARTUP:'/api/v1/'+endpoint,
+            FLOE_TEST_EXIT_FAILURE:failure,FLOE_TEST_EXIT_STARTUP_FAILURE:readFailure}});
+        assert.equal(run.status,0,'startup exit '+endpoint+'/'+failure+'/'+readFailure+': '+run.error);
+    }
+}
 acorn.parse(fs.readFileSync(path.join(ui, 'minimap.js'), 'utf8'), options);
 const minimap=spawnSync(process.execPath,[path.join(ui,'minimap.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(minimap.status,0,'minimap.test.cjs: '+minimap.error);

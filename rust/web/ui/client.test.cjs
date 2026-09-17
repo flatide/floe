@@ -12,6 +12,8 @@ const defaultsEnabled=process.env.FLOE_TEST_DEFAULTS==='1';let defaultOp=null;
 const minimapEnabled=process.env.FLOE_TEST_MINIMAP==='1';
 const exitEnabled=process.env.FLOE_TEST_EXIT==='1';
 const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
+const exitStartup=process.env.FLOE_TEST_EXIT_STARTUP||'';
+let startupExitReply=null;
 let heldExitRead=null,holdExitRead=false;
 const modeEnabled=process.env.FLOE_TEST_MODE==='1';
 const startupEnabled=process.env.FLOE_TEST_STARTUP==='1';
@@ -178,6 +180,7 @@ class XHR {
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
         if(body&&['mode','reselect_levels'].includes(body.kind)&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
         if(indexOpenEnabled&&body&&body.kind==='index_open'){setImmediate(()=>this.ontimeout());return;}
+        if(this.method==='GET'&&this.path===exitStartup&&!startupExitReply){startupExitReply=this;return;}
         setImmediate(()=>this.onload());
     }
 }
@@ -251,6 +254,29 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(exitStartup){
+        await wait(()=>startupExitReply);
+        assert(!node('logout').disabled);
+        storage.set('floe-default-pending','synthetic existing recovery record');
+        node('logout').onclick();await node('session-exit-confirm').onclick();
+        const connection=node('connection').textContent,empty=node('empty-message').textContent;
+        const notice=node('notice').textContent,requestsAfterExit=requests.length;
+        assert.equal(connection,exitFailure?'Server shutdown unconfirmed':'Session ended');
+        if(process.env.FLOE_TEST_EXIT_STARTUP_FAILURE==='1'){
+            startupExitReply.status=503;startupExitReply.responseText=JSON.stringify({error:'unavailable'});
+        }
+        startupExitReply.onload();await new Promise(setImmediate);await new Promise(setImmediate);
+        assert.equal(requests.length,requestsAfterExit,'startup sent another request after shutdown');
+        assert.equal(node('connection').textContent,connection,'late startup reply replaced terminal connection');
+        assert.equal(node('empty-message').textContent,empty,'late startup reply replaced terminal viewport');
+        assert.equal(node('notice').textContent,notice,'late startup failure replaced shutdown notice');
+        assert.equal(node('status').textContent,exitFailure?'Local view stopped':'Session ended');
+        assert.equal(storage.has('floe-default-pending'),exitFailure);
+        assert.equal(storage.has('floe-session:'+sandbox.location.origin),exitFailure);
+        assert.equal(sockets.length,0);assert(node('open').disabled);assert(node('logout').disabled);
+        assert.equal(requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations').length,0);
+        listeners.pagehide();console.log('WEB STARTUP EXIT: ALL OK ('+exitStartup+', terminal UI, no continuation, recovery preserved)');return;
+    }
     if(indexDefaultsEnabled){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
         assert.equal(node('index-occupancy').checked,false,'layout default is off');

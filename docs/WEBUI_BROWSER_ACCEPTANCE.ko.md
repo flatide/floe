@@ -203,6 +203,27 @@ overlay 숨김, perf/margin/viewport 문구 비움, source/Open/Index 비활성�
 즉시 정리·recovery 보존 및 늦은 callback 차단은 결정적 회귀 근거로 구분한다.
 기존 DRC 서버나 sidecar 저장은 건드리지 않았다.
 
+### 5.3 도형 선택 좌표 대조 — 스냅·복원은 연결 복구 대기
+
+2026-09-18. 기존62804 합성 세션에서 DRC markers off/패널 닫기, 3/0만 표시,
+Frames/Labels off, X49/Y31.5/view50µm로 근접뷰를 만들었다. KLayout 읽기 전용
+조회에서 DBU0.001µm, LEAF1의18×3µm box와 MID의20µm 간격 배열 및 TOP의
+(30,30)µm 배치를 확인했다. 실제 viewport는1156×735.5 CSS px, DPR2다.
+
+실제 클릭 `(627,470)` 뒤 Inspect는 `1 selected · overlap 1/1`, LEAF1/3/0,
+`Area 54000000 DBU²`, `Bounds 30000,30000,48000,33000`으로 원본과 일치했다.
+레이아웃은 gen14 margin crop이고 screenshot에서도 해당 사각형/위 PATH가 보였다.
+이는 **사각형1개의 좌표·면적 대조**다. 모든 후보·비정형·스냅/룰러 수용이 아니다.
+
+다음 단계에서 브라우저 제어가 `Debugger unattached`로 끊겼다. 동일 Chrome의
+공식 get/claim 경로도 실패했고 네이티브 창 제어도 창을 얻지 못했다. 서버 handle은
+계속 실행 중이고 소스/cache/DRC/기존 sidecar10파일의 SHA-256은 직전 값과 같다.
+새 `browser-preview` 파일은 없다. 이 기술적 연결 실패를 제품 선택 결함으로 세지 않는다.
+
+**복원 대기:** 탭을 보존했고 사용자에게 연동 재활성화를 요청했다. 다시 연결되면
+geometry selection을 지우고9레이어/Frames/Labels on, DRC 패널·Markers on,
+X200/Y220/view500µm로 먼저 복원한다. 현재 변경한 테스트 뷰가 복원됐다고 주장하지 않는다.
+
 ## 6. 설정 다운로드 — 최초 불러오기 권한 차단
 
 2026-09-17 사용자가 새 합성 valmini 세션을 열고, 다운로드한 두 설정 파일을 같은
