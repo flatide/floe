@@ -927,6 +927,13 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             with open(silent, "w", encoding="ascii") as script:
                 script.write("#!/bin/sh\nexit 1\n")
             os.chmod(silent, 0o755)
+            # macOS scans a freshly written executable on its first
+            # launch (seconds, more on a loaded host): warm both stubs
+            # once so the probe under test measures the probe
+            import subprocess
+            for stub in (index, renderd):
+                subprocess.run([stub], stdin=subprocess.DEVNULL,
+                               capture_output=True, timeout=120)
             env = {"FLOE_INDEX_BIN": index, "FLOE_RENDERD_BIN": renderd}
             with mock.patch.dict(os.environ, env, clear=False):
                 self.assertEqual(gui.component_versions(None), [

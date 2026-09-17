@@ -563,12 +563,15 @@ def _probe_binary_version(find_binary):
     exactly the way the app would launch it. A pre-0.12.13
     floe-renderd has no --version: it greets `ready version=...` on
     stdout and exits on the closed stdin, so that shape is accepted
-    too."""
+    too. The timeout is generous: macOS scans a freshly written
+    executable on its first launch (the gate's stub scripts took
+    1.5 to 6+ s to print one line), and a loaded shared host is slow
+    to spawn anything."""
     import subprocess
     path = find_binary()
     probe = subprocess.run(
         [path, "--version"], stdin=subprocess.DEVNULL,
-        capture_output=True, text=True, timeout=5)
+        capture_output=True, text=True, timeout=30)
     for line in probe.stdout.splitlines():
         line = line.strip()
         if not line:

@@ -1769,9 +1769,13 @@ fn sub_cut_wash_enabled() -> bool {
 }
 
 /// The page frontier (floe_vfs::ViewReq::page_reps) on a plain
-/// layout's frames; FLOE_RUST_PAGE_REPS=off restores the silent cut.
+/// layout's frames. DEACTIVATED (user decision 2026-09-17: the field
+/// still saw boxes and a 60 s full-depth plan on 0.12.152, and the
+/// answer moves to representative data built at index time into a
+/// file of its own); FLOE_RUST_PAGE_REPS=on turns the planner-side
+/// representatives on for a diagnosis.
 fn page_reps_enabled() -> bool {
-    std::env::var("FLOE_RUST_PAGE_REPS").as_deref() != Ok("off")
+    std::env::var("FLOE_RUST_PAGE_REPS").as_deref() == Ok("on")
 }
 
 fn run_render(

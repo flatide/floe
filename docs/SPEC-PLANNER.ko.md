@@ -62,9 +62,13 @@
   `FLOE_RUST_SUB_CUT_WASH=on`(단일 레이아웃), `FLOE_RUST_DECK_WIDE=on`(덱; 둘 다
   진단 전용, 기본 off); gate `validate_occupancy` `SubCutTests`(on 워커가 규칙을
   검증), `validate_jobdeck` `WideViewTests`·`ThinPageTests`.
-  **대표(page frontier)**(`ViewReq::page_reps`, 사용자 설계 2026-09-17, 같은 날
-  리뷰 조건으로 단계화, 같은 날 현장 4·5·6차로 레벨을 **화면 밀도**로 결정; 단일
-  레이아웃 요청에 켬, 덱 pass·exact·probe는 off): 컷이 버리던 것을 없애지 않고
+  **대표(page frontier) — 비활성**(사용자 결정 2026-09-17 저녁: 0.12.152에서도 fit
+  뷰가 박스이고 depth 99 플랜이 60 s를 넘어, 인덱싱 때 대표 데이터를 별도 파일로
+  만드는 방식으로 전환. 뷰어 기본 off, `FLOE_RUST_PAGE_REPS=on`으로만 켠다 — 진단.
+  아래는 플래너 쪽 구현의 기록이다.)
+  (`ViewReq::page_reps`, 사용자 설계 2026-09-17, 같은 날 리뷰 조건으로 단계화, 같은
+  날 현장 4·5·6차로 레벨을 **화면 밀도**로 결정; 켜면 단일 레이아웃 요청에만, 덱
+  pass·exact·probe는 off): 컷이 버리던 것을 없애지 않고
   **2^L개 중 하나**를 남긴다. L은 항목마다 그 항목의 ink 대 화면 면적으로 정한다
   (`density_level`): ink = 멤버 수 × max(1, 최소변 px) × max(1, 긴변 px)(멤버가 칠할
   수 있는 상한), 면적 = 항목 bbox의 화면 px(축당 최소 1), ink / 2^L ≤

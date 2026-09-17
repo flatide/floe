@@ -395,7 +395,9 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   정책을 고른다(auto = 소스 기본, cull = 레이아웃 정책). 남긴
   페이지는 perf 줄 `thin pages N kept`로 표시된다. 진단용 override
   `FLOE_RUST_PAGE_HAIRLINE=cull|keep`.
-- **cut 미만의 대표(page frontier, 2026-09-17)**: 모든 도형이 cut보다 작은
+- **cut 미만의 대표(page frontier, 2026-09-17) — 비활성**(같은 날 저녁 사용자 결정:
+  인덱싱 때 대표 데이터를 별도 파일로 만드는 방식으로 전환; `FLOE_RUST_PAGE_REPS=on`
+  으로만 켠다, 진단). 켰을 때: 모든 도형이 cut보다 작은
   페이지(콘택·비아·마크 배열)와 `thin:cull`의 hairline 페이지는 사라지는 대신
   **대표만 남는다** — 항목마다 ink 대 화면 면적으로 레벨 L을 잡아(밀도 0.25,
   `FLOE_RUST_REP_DENSITY`) 2^L개 중 하나를 지오메트리 그대로 그린다: 페이지는 모두 남기고(디코드
