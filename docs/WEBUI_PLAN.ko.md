@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-17(M4g-32 명시 Index 개명; 원격 단계 보류).
+작성 2026-08-29, 갱신 2026-09-17(M4g-33 native worktree 빌드 감시; 원격 단계 보류).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -129,6 +129,8 @@ occupancy 기본값은 최신 계약에 따라 **layout off / jobdeck on**으로
 개명을 명시 Index/DRC Build에만 연결한다. 읽기/profile 비쓰기, 양쪽 이름 잠금,
 실패/취소 후 개명 receipt의 계약과 검증 상태는 [별도 기록](WEBUI_CACHE_MIGRATION.ko.md)을 본다.
 전체 배터리 PASS는 실제 브라우저·Linux 실행·현장 수용이나 첫 실행 지연 해결을 뜻하지 않는다.
+M4g-33은 [native worktree 빌드 스탬프](WEBUI_BUILD_REVISION.ko.md)의 불필요 재빌드를
+별도로 고친다. native 버전은 0.12.101이며 실제 브라우저/현장 수용을 추가로 닫지 않는다.
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.
 M4g-11d에서 Ctrl/Shift 선택·접기/펼치기·페이지 간 범위와 선택 행의 일괄 가시성을

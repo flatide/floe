@@ -138,6 +138,8 @@ DRC open 집중 검사는 기본 pack을 파일 선택 목록에서 찾던 가�
 추가 관측: native cli/renderd `build.rs`는 worktree에서 파일인 `.git` 아래의
 존재하지 않는 `.git/HEAD`를 watch한다. 반복 재빌드 비용의 후속 점검 대상이며,
 이 사실만으로 모든 프로세스 첫 실행 지연의 OS 원인을 설명하지 않는다.
+후속 [M4g-33](WEBUI_BUILD_REVISION.ko.md)에서 실제 no-op 재빌드 재현과
+worktree-aware 감시 경로 수정을 추적한다. 첫 실행 지연과는 별개의 근거다.
 
 ## 전체 목표에서 남은 범위
 

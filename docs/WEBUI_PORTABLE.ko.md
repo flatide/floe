@@ -32,6 +32,9 @@ jobs는 기본4, 허용1..16이다. `CARGO_TARGET_DIR`로 재사용 빌드 디�
 ZIP 반입은 `FLOE_SRC_REV=<승인한 revision>`을 선택적으로 명시한다. Git worktree는
 그 worktree의 revision을 사용하고 ZIP은 무관한 부모 Git의 revision을 상속하지 않는다.
 revision은 서명이 아니며 dirty `+`와 archive SHA-256을 함께 확인한다.
+native 0.12.101부터 index/renderd는 실제 worktree/common Git 경로를 감시하며,
+없는 `.git/HEAD` 때문에 매 빌드마다 재생성하던 문제를 수정한다.
+[검증 기록](WEBUI_BUILD_REVISION.ko.md). 이 수정은 Linux 실행·첫 시작 지연의 수용을 대신하지 않는다.
 
 GNU 빌드는 Linux x86_64 호스트에서만 허용하며 시스템 linker가 필요하다.
 배포 호스트보다 새로운 GLIBC가 필요한 경우 그 배포판에서 다시 빌드하거나 실제 배포
