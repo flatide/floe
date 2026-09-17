@@ -13,6 +13,26 @@ const minimapEnabled=process.env.FLOE_TEST_MINIMAP==='1';
 const exitEnabled=process.env.FLOE_TEST_EXIT==='1';
 const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
 const exitStartup=process.env.FLOE_TEST_EXIT_STARTUP||'';
+const resumeFence=process.env.FLOE_TEST_RESUME_FENCE||'';
+const resumeBoundary=process.env.FLOE_TEST_RESUME_BOUNDARY||'exit';
+const resumeFailure=process.env.FLOE_TEST_RESUME_FAILURE||'0';
+let resumeArmed=false,resumeRelease=null;
+const resumeCalls=[];
+function resumeBarrier(name,release){
+    if(!resumeArmed||resumeFence!==name){return false;}
+    resumeArmed=false;resumeRelease=release;return true;
+}
+function tracedResume(panel,name){
+    if(!resumeFence){return panel;}
+    const original=panel.resume;
+    panel.resume=async function(){
+        resumeCalls.push(name);const value=await original.apply(panel,arguments);
+        return new Promise((resolve,reject)=>{
+            if(!resumeBarrier(name,()=>resumeFailure!=='0'?reject(Error('late resume failure')):resolve(value))){resolve(value);}
+        });
+    };
+    return panel;
+}
 let startupExitReply=null;
 let heldExitRead=null,holdExitRead=false;
 const modeEnabled=process.env.FLOE_TEST_MODE==='1';
@@ -181,6 +201,10 @@ class XHR {
         if(body&&['mode','reselect_levels'].includes(body.kind)&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
         if(indexOpenEnabled&&body&&body.kind==='index_open'){setImmediate(()=>this.ontimeout());return;}
         if(this.method==='GET'&&this.path===exitStartup&&!startupExitReply){startupExitReply=this;return;}
+        if(this.method==='GET'&&resumeBarrier(this.path,()=>{
+            if(resumeFailure!=='0'){this.status=resumeFailure==='401'?401:503;this.responseText=JSON.stringify({error:'late resume failure'});}
+            this.onload();
+        })){return;}
         setImmediate(()=>this.onload());
     }
 }
@@ -197,7 +221,7 @@ class Image {
 const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require('./inspect.js'),FloeMeasure:require('./measure.js'),FloeSnapshot:require('./snapshot.js'),FloeClip:{...Clip,bind(o){clipController=Clip.bind(o);return clipController;}},FloeGestures:require('./gestures.js'),FloeRulers:require('./rulers.js'),FloeDRCGroups:require('./drc-groups.js'),FloeDRC:{...DRC,bind(o){
     drcOptions=o;const panel=DRC.bind(o),paint=panel.paint,changed=panel.contextChanged;
     panel.contextChanged=()=>{contextChanges++;changed();};panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};
-    const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return consumeDRC || click(...v);};return panel;
+    const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return consumeDRC || click(...v);};return tracedResume(panel,'drc');
 }},FloePanelState:require('./panel-state.js'),FloeDRCBuild:require('./drc-build.js'),ResizeObserver:class {constructor(fn){this.fn=fn;observers.push(this);}observe(e){this.target=e;}disconnect(){this.target=null;}},devicePixelRatio:1,
     addEventListener:(k,f)=>listen(listeners,k,f),setTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout};
 const storage=new Map();
@@ -213,6 +237,9 @@ window.FloeMinimap=require('./minimap.js');
 window.FloeLauncher=require('./launcher.js');
 window.FloeBrowse=require('./browse.js');
 window.FloeIndexOpen=require('./index-open.js');
+for(const [api,name] of [['FloeIndexOpen','index'],['FloeBrowse','picker'],['FloeLauncher','launcher']]){
+    const module=window[api];window[api]={...module,bind(options){return tracedResume(module.bind(options),name);}};
+}
 window.FloePalette=require('./palette.js');
 window.FloePresets=require('./presets.js');
 window.FloeFillEditor=require('./fill-editor.js');
@@ -254,6 +281,42 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(resumeFence){
+        await wait(()=>sockets.length===1);hello(sockets[0]);sockets[0].receive(packet('raw','1'));
+        for(let i=0;i<4;i++){await new Promise(setImmediate);}
+        storage.set('floe-default-pending','synthetic existing recovery record');
+        listeners.pagehide();resumeArmed=true;listeners.pageshow({persisted:true});
+        await wait(()=>resumeRelease);
+        if(resumeBoundary==='exit'){
+            node('logout').onclick();await node('session-exit-confirm').onclick();
+            assert.equal(node('connection').textContent,exitFailure?'Server shutdown unconfirmed':'Session ended');
+        }else if(resumeBoundary!=='current'){
+            listeners.pagehide();assert.equal(observers[0].target,null);
+            if(resumeBoundary==='replace'){
+                const before=sockets.length;listeners.pageshow({persisted:true});await wait(()=>sockets.length===before+1);
+                hello(sockets.at(-1));sockets.at(-1).receive(packet('raw','2'));
+                for(let i=0;i<4;i++){await new Promise(setImmediate);}
+            }
+        }
+        const counts={http:requests.length,ws:sockets.length,resume:resumeCalls.length};
+        const terminal=Object.fromEntries(['connection','status','notice','empty-message'].map(id=>[id,node(id).textContent]));
+        resumeRelease();for(let i=0;i<8;i++){await new Promise(setImmediate);}
+        assert.equal(requests.length,counts.http,'retired BFCache continuation sent HTTP');
+        assert.equal(sockets.length,counts.ws,'retired BFCache continuation opened a socket');
+        assert.equal(resumeCalls.length,counts.resume,'retired BFCache continuation resumed another controller');
+        for(const [id,value] of Object.entries(terminal)){
+            assert.equal(node(id).textContent,resumeBoundary==='current'&&id==='connection'?'Session expired':value,'BFCache reply changed '+id);
+        }
+        if(resumeBoundary==='exit'){
+            assert(node('logout').disabled);assert.equal(storage.has('floe-default-pending'),exitFailure);
+            assert.equal(storage.has('floe-session:'+sandbox.location.origin),exitFailure);
+        }else if(resumeBoundary==='hide'){assert.equal(observers[0].target,null);}
+        if(resumeBoundary==='current'){
+            assert.equal(resumeFailure,'401');assert(storage.has('floe-default-pending'));
+            const before=sockets.length;listeners.pageshow({persisted:true});assert.equal(sockets.length,before,'active 401 did not stop reconnection');
+        }
+        listeners.pagehide();console.log('WEB RESUME FENCE: ALL OK ('+resumeFence+', '+resumeBoundary+(exitFailure?' unconfirmed':'')+', late '+resumeFailure+')');return;
+    }
     if(exitStartup){
         await wait(()=>startupExitReply);
         assert(!node('logout').disabled);
@@ -262,8 +325,8 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         const connection=node('connection').textContent,empty=node('empty-message').textContent;
         const notice=node('notice').textContent,requestsAfterExit=requests.length;
         assert.equal(connection,exitFailure?'Server shutdown unconfirmed':'Session ended');
-        if(process.env.FLOE_TEST_EXIT_STARTUP_FAILURE==='1'){
-            startupExitReply.status=503;startupExitReply.responseText=JSON.stringify({error:'unavailable'});
+        if(['1','401'].includes(process.env.FLOE_TEST_EXIT_STARTUP_FAILURE)){
+            startupExitReply.status=process.env.FLOE_TEST_EXIT_STARTUP_FAILURE==='401'?401:503;startupExitReply.responseText=JSON.stringify({error:'unavailable'});
         }
         startupExitReply.onload();await new Promise(setImmediate);await new Promise(setImmediate);
         assert.equal(requests.length,requestsAfterExit,'startup sent another request after shutdown');

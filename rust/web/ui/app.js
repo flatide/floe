@@ -20,6 +20,8 @@
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
     let auth = null, stopped = false, socket = null, epoch = '', state = null;
+    let pageRun = 0, pageSuspended = false;
+    function currentPage(run) { return !stopped && !pageSuspended && run === pageRun; }
     let seq = '0', queue = [], inflight = null, accepted = null, lastSend = 0;
     const editCallbacks = new WeakMap();
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
@@ -65,6 +67,7 @@
     function message(error) { return errors[error] || String(error || 'Request failed'); }
     function report(error) { notice(message(error.message || error)); }
     function http(method, path, body, missing, token, upload) {
+        const run = pageRun;
         return new Promise(function (resolve, reject) {
             const xhr = new XMLHttpRequest();
             if (token && token.cancelled) { reject(new Error('Request cancelled')); return; }
@@ -83,7 +86,7 @@
                     if (xhr.responseText) { value = JSON.parse(xhr.responseText); }
                 } catch (e) { reject(e); return; }
                 if (xhr.status < 200 || xhr.status >= 300) {
-                    if (xhr.status === 401) { stopped = true; if (sharing) { sharing.stop(); } if (dumps) { dumps.stop(); } if (indexOpen) { indexOpen.stop(); } if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
+                    if (xhr.status === 401 && currentPage(run)) { stopped = true; if (sharing) { sharing.stop(); } if (dumps) { dumps.stop(); } if (indexOpen) { indexOpen.stop(); } if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
                     const failure = new Error(message(value && value.error || ('HTTP ' + xhr.status)));
                     failure.status = xhr.status; failure.code = value && value.error;
                     reject(failure);
@@ -432,7 +435,7 @@
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     }
     function connect() {
-        disconnect(); if (stopped || !currentId || !live()) { return; }
+        disconnect(); if (stopped || pageSuspended || !currentId || !live()) { return; }
         const serial = socketSerial;
         const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/api/v1/events',
             ['floe.v1', 'bundle.' + bundle, 'csrf.' + auth.csrf]);
@@ -477,9 +480,10 @@
         ws.onerror = function () { if (!stopped && socket === ws && serial === socketSerial) { connection('Connection error', false); } };
     }
     async function restore() {
-        if (stopped) { return; }
+        const run = pageRun;
+        if (!currentPage(run)) { return; }
         const current = await http('GET', '/api/v1/view', undefined, true);
-        if (stopped) { return; }
+        if (!currentPage(run)) { return; }
         if (!current) { currentId = ''; state = null; controls(); return; }
         const changed = currentId !== current.view.view_id;
         if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; selectedStyle = null; el('style-editor').hidden = true; }
@@ -570,11 +574,12 @@
             (op.kind === 'index' ? window.FloeIndexOpen.renameText(op) : '');
     }
     async function operationState() {
+        const run = pageRun;
         try { return await readOperationState(); }
         catch (e) {
             // Read-only reconciliation after an uncertain mutation response;
             // never re-submit the mutation automatically.
-            if (!stopped && !document.hidden) {
+            if (currentPage(run) && !document.hidden) {
                 clearTimeout(operationTimer);
                 operationTimer = setTimeout(function () { operationState().catch(report); }, 1000);
             }
@@ -582,8 +587,9 @@
         }
     }
     async function readOperationState() {
+        const run = pageRun;
         const all = await http('GET', '/api/v1/operations');
-        if (stopped) { return all; }
+        if (!currentPage(run)) { return all; }
         if (indexOpen) { indexOpen.observe(all); }
         ownerBusy = all.active !== null; el('cancel-job').disabled = !ownerBusy;
         el('cancel-job').dataset.seq = all.active || ''; controls();
@@ -600,9 +606,12 @@
             else if (pendingStartup && pendingStartup.source_id === currentSource) { pendingStartup = null; }
         }
         else if (last && last.kind === 'mode' && last.seq !== modeReceipt) {
-            await restore(); modeReceipt = last.seq;
+            await restore();
+            if (!currentPage(run)) { return all; }
+            modeReceipt = last.seq;
             if (last.phase === 'succeeded') { notice(''); }
         }
+        if (!currentPage(run)) { return all; }
         if (!ownerBusy && !submitting) { pump(); }
         return all;
     }
@@ -1077,9 +1086,32 @@
     document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); palette.changed(); if (document.hidden) { indexOpen.stop(); finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (!stopped) { indexOpen.resume().catch(report); if(live()){connect();} } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);
-    window.addEventListener('pagehide', function () { dumps.stop(); palette.suspend(); indexOpen.stop(); picker.stop(); launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    window.addEventListener('pagehide', function () { pageSuspended = true; ++pageRun; dumps.stop(); palette.suspend(); indexOpen.stop(); picker.stop(); launcher.stop(); minimap.suspend(); about.stop(); sessionExit.stop(); disconnect(); inspector.stop(); measurement.stop(); clipper.stop(); snapshots.stop(); settings.stop(); defaults.stop(); clearTimeout(operationTimer); clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); } drcPanel.stop(); });
+    async function resumePage(run) {
+        // A later pagehide/pageshow owns a different restore chain. Check each
+        // boundary: stop() alone cannot fence a controller resumed afterwards.
+        try {
+            await drcPanel.resume();
+            if (!currentPage(run)) { return; }
+            await indexOpen.resume();
+            if (!currentPage(run)) { return; }
+            await operationState();
+            if (!currentPage(run)) { return; }
+            await restore();
+            if (!currentPage(run)) { return; }
+            resized();
+            await picker.resume();
+            if (!currentPage(run)) { return; }
+            await launcher.resume();
+        } catch (e) { if (currentPage(run)) { report(e); } }
+    }
     window.addEventListener('pageshow', function (event) {
-        if (event.persisted && auth && !stopped) { dumps.resume(); palette.resume(); minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume(); if (sizeObserver) { sizeObserver.observe(viewport); } drcPanel.resume().then(function(){return indexOpen.resume();}).then(operationState).then(restore).then(resized).then(function(){return picker.resume();}).then(function(){return launcher.resume();}).catch(report); }
+        if (event.persisted && auth && !stopped) {
+            pageSuspended = false; const run = ++pageRun;
+            dumps.resume(); palette.resume(); minimap.resume(); about.init(); sessionExit.init(); inspector.resume(); measurement.resume(); clipper.resume(); snapshots.resume(); settings.resume(); defaults.resume();
+            if (sizeObserver) { sizeObserver.observe(viewport); }
+            resumePage(run);
+        }
     });
     start().catch(function (e) { if (!stopped) { connection('Not connected', false); report(e); el('empty-message').textContent = e.message; } });
 }());

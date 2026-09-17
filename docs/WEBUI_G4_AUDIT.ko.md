@@ -15,6 +15,12 @@ bitmap 초안/참조/Reset/reload 일부를 확인하고 레이어 스크롤바�
 정리를 추가하고 새 합성 Chrome 세션의 screenshot/DOM 및 서버exit0으로 재검증했다.
 이 잔류 표시 결함은 닫되 종료 응답 불명/복구 전체의 실제 브라우저 수용은 남긴다.
 
+M4g-48은 뒤로 가기 복원 중 종료/재숨김/새 복원과 늦은 응답이 경합하는 app-level
+복원 체인을 세대로 분리했다. 종료 뒤 HTTP·소켓·하위 resume 재시작과 오래된401의
+terminal 표시 덮기를 재현·수정했다([M4 §105](WEBUI_M4.ko.md#105-m4g-48--bfcache-복원-체인의-세대-분리)).
+56개 지연 조합과 현재401 대조2개는 결정적 JS gate이며 실제 브라우저 BFCache/
+초기화·개별 picker/launcher 내부 작업 전체 수용으로 계산하지 않는다.
+
 M4g-23의 [메뉴 원본 재대조](WEBUI_G4_MENU.ko.md)에서 **실행 중 DRC 파일 교체,
 SVRF metadata 교체, 카메라 유지 jobdeck 레벨 재선택**3건의 구현 누락을 확인했다.
 시작 시 CLI 등록/일반 Open/Mode 전환은 동등한 대체가 아니다. 로컬 구현의 잔여를

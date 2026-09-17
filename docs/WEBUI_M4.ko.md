@@ -6731,3 +6731,36 @@ URL 정책으로 차단됐다. 공개 비인증 화면의39.20px 예약 높이�
 전체 목표 잔여: 위 수정의 실제 재검증, 나머지 입력/설정/공유·다중 저장/충돌/결과 불명
 복구, Python-free Linux 실행, G1/G4 최종 대조, 현장 Firefox/ETX다.
 원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다.
+
+## 105. M4g-48 — BFCache 복원 체인의 세대 분리
+
+2026-09-18. `pageshow(persisted)`의 순차 복원에 지연 응답을 넣어 다음을 재현했다.
+
+- DRC resume 대기 중 End session: 종료 뒤 `/operations` GET1개가 추가됐다.
+- `/view` 대기 중 다시 pagehide: 숨긴 페이지가 WebSocket을 다시 열었다.
+- 그 사이 새 pageshow가 완료되면 오래된 `/view`가 정상 연결을 다시 교체했다.
+- 늦은 오류가 종료 notice를 덮었다. HTTP401이면 전역 오류 처리기가 Session ended를
+  Session expired로 바꾸는 별도 경로도 있었다.
+
+pagehide/pageshow마다 복원 세대를 갱신하고 각 비동기 경계에서 현재 세대를 확인한다.
+작업 조회와 view 복원은 응답 적용 전에도 확인하므로 오래된 결과로 카메라/연결/예약
+작업을 되살리지 않는다. HTTP401의 세션 만료 처리는 현재 세대에서만 수행한다.
+현재 요청의401은 그대로 세션을 중단하며 인증 실패를 성공으로 바꾸지 않는다.
+종료 응답 불명 시 기존 recovery record 보존, 무자동재전송 계약은 그대로다.
+
+검증은 실제 `app.js`와 컨트롤러를 사용하는 **네트워크 없는 JS 하네스**다.
+DRC/index-open/picker/launcher resume 반환4개 및 operations/view 응답2개를 지연했다.
+종료 성공·종료 불명·다시 숨김·새 복원 × 늦은 성공/실패, HTTP2곳의 추가401을 합쳐
+56조합과 현재401을 거부하는 양성 대조2개가 통과했다. 종료 뒤 추가 HTTP/소켓/
+하위 resume0, terminal 문구 불변, 불명확한 종료의 recovery 보존을 단언한다.
+기존 시작-종료 gate도 늦은401을 포함해30조합으로 확장했다.
+
+`sh tools/validate_rust.sh --only web_ui` 및 offline/locked release app 빌드 통과.
+기존 tiler/VFS 경고는 유지했다. 이는 native 전체 배터리 재실행, 실제 Chrome의
+BFCache 장애 주입, 초기화 미완료 시 복원 또는 개별 picker/launcher 내부 조회·게시의
+전체 생명주기 검증이 아니다. 그 범위와 실제 브라우저 수용은 계속 구분한다.
+기존 브라우저 세션·합성 sidecar에 쓰지 않았고 인증 차단을 우회하지 않았다.
+
+전체 목표 잔여: 개별 비동기 복원/입력·설정·공유 및 다중 저장·충돌/결과 불명 복구의
+실제 수용, Python-free Linux 실행, G1/G4 최종 대조, 현장 Firefox/ETX다.
+원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다.

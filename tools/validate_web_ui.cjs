@@ -90,8 +90,23 @@ assert.equal(modeClient.status,0,'deck mode client: '+modeClient.error);
 assert.equal(exitClient.status,0,'session exit client: '+exitClient.error);
 const exitFailed=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_EXIT:'1',FLOE_TEST_EXIT_FAILURE:'1'}});
 assert.equal(exitFailed.status,0,'unconfirmed session exit client: '+exitFailed.error);
+for(const stage of ['drc','index','/api/v1/operations','/api/v1/view','picker','launcher']){
+    for(const boundary of ['exit','exit-failure','hide','replace']){
+        for(const failure of stage.startsWith('/api/')?['0','1','401']:['0','1']){
+            const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,
+                FLOE_TEST_RESUME_FENCE:stage,FLOE_TEST_RESUME_BOUNDARY:boundary==='exit-failure'?'exit':boundary,
+                FLOE_TEST_EXIT_FAILURE:boundary==='exit-failure'?'1':'0',FLOE_TEST_RESUME_FAILURE:failure}});
+            assert.equal(run.status,0,'BFCache resume '+stage+' '+boundary+' '+failure+': '+run.error);
+        }
+    }
+}
+for(const endpoint of ['operations','view']){
+    const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,
+        FLOE_TEST_RESUME_FENCE:'/api/v1/'+endpoint,FLOE_TEST_RESUME_BOUNDARY:'current',FLOE_TEST_RESUME_FAILURE:'401'}});
+    assert.equal(run.status,0,'current BFCache 401 '+endpoint+': '+run.error);
+}
 for(const endpoint of ['catalog','defaults','operations','view','startup']){
-    for(const failure of ['0','1'])for(const readFailure of ['0','1']){
+    for(const failure of ['0','1'])for(const readFailure of ['0','1','401']){
         const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,
             FLOE_TEST_STARTUP:'1',FLOE_TEST_DEFAULTS:'1',FLOE_TEST_EXIT_STARTUP:'/api/v1/'+endpoint,
             FLOE_TEST_EXIT_FAILURE:failure,FLOE_TEST_EXIT_STARTUP_FAILURE:readFailure}});
