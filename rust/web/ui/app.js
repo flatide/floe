@@ -20,7 +20,7 @@
     let ackedFrames = {foreground: null, margin: null};
     const sessionKey = 'floe-session:' + location.origin;
     let auth = null, stopped = false, socket = null, epoch = '', state = null;
-    let pageRun = 0, pageSuspended = false;
+    let pageRun = 0, pageSuspended = false, restoreRead = 0;
     function currentPage(run) { return !stopped && !pageSuspended && run === pageRun; }
     let startupTask = null, startupComplete = false, startupSent = false;
     let seq = '0', queue = [], inflight = null, accepted = null, lastSend = 0;
@@ -483,14 +483,33 @@
     }
     async function restore() {
         const run = pageRun;
-        if (!currentPage(run)) { return; }
-        const current = await http('GET', '/api/v1/view', undefined, true);
-        if (!currentPage(run)) { return; }
-        if (!current) {
-            if (currentId || displayed) { clearClosedView(); } else { controls(); }
-            return;
+        if (!currentPage(run)) { return false; }
+        const ticket = ++restoreRead, serial = socketSerial, id = currentId, observed = state;
+        const active = function () { return currentPage(run) && ticket === restoreRead && serial === socketSerial; };
+        let current;
+        try { current = await http('GET', '/api/v1/view', undefined, true); }
+        catch (e) {
+            if (active() && id === currentId && state === observed) { throw e; }
+            return false;
         }
-        if (current.view.status === 'closed') { clearClosedView(); return; }
+        // Reconnect and operation completion can read concurrently on one page.
+        // Neither an earlier read nor a pre-snapshot revision can replace newer
+        // connection state. A current-page 401 is still handled by http().
+        if (!active()) { return false; }
+        if (current && current.view.view_id === currentId && state) {
+            const revision = P.compare(current.view.state_rev, state.state_rev);
+            // Render progress/failure can update a snapshot without changing
+            // state_rev; equal revisions cannot order those two observations.
+            if (revision < 0 || revision === 0 && state !== observed) { return false; }
+        }
+        if (!current) {
+            // A 404 has no revision to compare with a snapshot received after
+            // this read began; it cannot displace that newer live observation.
+            if (id !== currentId || state !== observed) { return false; }
+            if (currentId || displayed) { clearClosedView(); } else { controls(); }
+            return true;
+        }
+        if (current.view.status === 'closed') { clearClosedView(); return true; }
         const changed = currentId !== current.view.view_id;
         if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; selectedStyle = null; el('style-editor').hidden = true; }
         currentId = current.view.view_id; currentSource = current.source_id; currentMode = current.mode; state = current.view;
@@ -506,7 +525,7 @@
                 box.checked = levelIds.has(box.value); box.disabled = el('levels-all').checked;
             });
         }
-        syncGoto(false); controls(); connect();
+        syncGoto(false); controls(); connect(); return true;
     }
     function paletteStyle(r, scope, valid) {
         const color = document.createElement('input'); color.type = 'color'; color.value = r.color; color.setAttribute('aria-label', 'Color ' + r.name);
@@ -614,10 +633,10 @@
             else if (pendingStartup && pendingStartup.source_id === currentSource) { pendingStartup = null; }
         }
         else if (last && last.kind === 'mode' && last.seq !== modeReceipt) {
-            await restore();
-            if (!currentPage(run)) { return all; }
+            const applied = await restore();
+            if (!currentPage(run) || !applied) { return all; }
             modeReceipt = last.seq;
-            if (last.phase === 'succeeded') { notice(''); }
+            if (last.phase === 'succeeded' && (!state || !state.failure)) { notice(''); }
         }
         if (!currentPage(run)) { return all; }
         if (!ownerBusy && !submitting) { pump(); }
@@ -768,6 +787,7 @@
     el('source').onchange = sourceSelection;
     el('open').onclick = function () { openSource(null).catch(report); };
     function clearClosedView() {
+        ++restoreRead;
         disconnect(); state = null; currentId = ''; displayed = false; clearBuffers();
         selectedStyle = null; el('style-editor').hidden = true;
         controls(); el('empty').hidden = false; el('empty-message').textContent = 'View closed. Choose a source to reopen.';

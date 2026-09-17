@@ -36,6 +36,11 @@ M4g-56은 owner의 늦은 Close 응답이 복원/교체된 새 뷰를 지우는 
 native `202 → closed → 새 view_id` 대조를 통과했다. 이 수명주기 경로의
 로컬 근거이며 실제 브라우저 BFCache 종합 수용은 아니다
 ([M4 §113](WEBUI_M4.ko.md#113-m4g-56--늦은-뷰-닫기-응답과-닫힌-화면-복원)).
+M4g-57은 페이지 세대가 같아도 연결 복구/launcher 완료 조회가 겹치면 오래된
+GET이 새 연결이나 닫기를 덮는 경로를 재현·수정했다. 같은 뷰의 최신 snapshot보다
+낮은 revision과 같은 revision의 오래된 렌더 상태도 적용하지 않는다.33개 조합의 근거는
+[M4 §114](WEBUI_M4.ko.md#114-m4g-57--동일-페이지의-복원-조회-응답-역전)에 기록하며,
+원본401 거부나 더 높은 revision의 수용을 제거하는 방식으로 해결하지 않는다.
 
 M4g-54는 [자급식 Rust 런타임 검증기](WEBUI_RUNTIME_ACCEPTANCE.ko.md)를 정규
 배터리에 추가했다. 빈 환경/PATH와 재배치한 제품3개로 합성 index/occupancy,

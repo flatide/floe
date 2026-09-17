@@ -100,6 +100,13 @@ for(const boundary of ['current','hide','restore','replace','exit','exit-failure
         assert.equal(run.status,0,'view close '+boundary+'/'+reply+': '+run.error);
     }
 }
+for(const kind of ['restore','close','socket','snapshot','phase','current']){
+    for(const reply of ['old','closed','missing','503','401',...(['snapshot','phase','current'].includes(kind)?['newer']:[])]){
+        const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,
+            FLOE_TEST_VIEW_READ_RACE:kind,FLOE_TEST_VIEW_READ_REPLY:reply}});
+        assert.equal(run.status,0,'view read order '+kind+'/'+reply+': '+run.error);
+    }
+}
 const startupReads=['capabilities','catalog','drc','exports','defaults','operations','view','startup'].map(name=>['GET /api/v1/'+name,1,false]);
 startupReads.push(['GET /api/v1/operations',2,false],['GET /api/v1/operations',3,false],['GET /api/v1/view',2,false],['GET /api/v1/startup',1,true],
     ['POST /api/v1/session/exchange',1,false],['POST /api/v1/operations',1,false]);

@@ -15,6 +15,9 @@ const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
 const closeBoundary=process.env.FLOE_TEST_CLOSE_BOUNDARY||'';
 const closeReply=process.env.FLOE_TEST_CLOSE_REPLY||'202';
 let closeResponse=null;
+const viewReadRace=process.env.FLOE_TEST_VIEW_READ_RACE||'';
+const viewReadReply=process.env.FLOE_TEST_VIEW_READ_REPLY||'old';
+let viewReadArmed=false,viewReadResponse=null,launcherOptions=null;
 const exitStartup=process.env.FLOE_TEST_EXIT_STARTUP||'';
 const startupSuspend=process.env.FLOE_TEST_STARTUP_SUSPEND||'';
 const startupBoundary=process.env.FLOE_TEST_STARTUP_BOUNDARY||'hide';
@@ -143,7 +146,7 @@ class XHR {
         else if(raw){value={kind:'drc_review_transfer',phase:'queued',seq:this.headers['X-Floe-Transfer-Seq']};status=202;}
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
-        else if((startupEnabled||dumpEnabled||closeBoundary)&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=closeBoundary?202:204;}
+        else if((startupEnabled||dumpEnabled||closeBoundary||viewReadRace)&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=closeBoundary||viewReadRace?202:204;}
         else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,drc:!!startupSuspend,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,jobdeck_levels:modeEnabled,fill_slot_edit:fillEditorEnabled,display_dump:true,dump_on_start:dumpEnabled};}
         else if(startupSuspend&&this.path==='/api/v1/drc'){value={drc:null};}
         else if(launchEnabled&&this.path==='/api/v1/launch'){value=launchState;}
@@ -208,6 +211,7 @@ class XHR {
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
         if(indexOpenEnabled&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
+        if(viewReadArmed&&this.method==='GET'&&this.path==='/api/v1/view'){viewReadArmed=false;viewReadResponse=this;return;}
         if(closeBoundary&&this.method==='DELETE'&&this.path.startsWith('/api/v1/views/')){closeResponse=this;return;}
         if(this.method+' '+this.path===startupSuspend&&++startupMatches===Number(process.env.FLOE_TEST_STARTUP_MATCH||1)){startupSuspendReply=this;return;}
         if(launchExitArmed&&this.method==='GET'&&this.path===launchExit){launchExitArmed=false;launchExitReply=this;return;}
@@ -251,7 +255,7 @@ window.FloeLauncher=require('./launcher.js');
 window.FloeBrowse=require('./browse.js');
 window.FloeIndexOpen=require('./index-open.js');
 for(const [api,name] of [['FloeIndexOpen','index'],['FloeBrowse','picker'],['FloeLauncher','launcher']]){
-    const module=window[api];window[api]={...module,bind(options){return tracedResume(module.bind(options),name);}};
+    const module=window[api];window[api]={...module,bind(options){if(name==='launcher'){launcherOptions=options;}return tracedResume(module.bind(options),name);}};
 }
 window.FloePalette=require('./palette.js');
 window.FloePresets=require('./presets.js');
@@ -294,6 +298,61 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(viewReadRace){
+        await wait(()=>sockets.length===1);hello(sockets[0]);sockets[0].receive(packet('raw','1'));
+        for(let i=0;i<12;i++){await new Promise(setImmediate);}
+        viewReadArmed=true;let completed=null;
+        if(['snapshot','phase'].includes(viewReadRace)){
+            lastSeq='2';modeOperation={seq:'2',kind:'mode',phase:'succeeded',view_id:viewId};
+            completed=launcherOptions.completed();
+        }else{sockets[0].close();await new Promise(resolve=>setTimeout(resolve,550));}
+        await wait(()=>viewReadResponse);
+        if(viewReadRace==='restore'){
+            viewId='9'.repeat(64);snapshot.view_id=viewId;lastSeq='2';
+            await launcherOptions.completed();await wait(()=>sockets.length===2);hello(sockets[1]);sockets[1].receive(packet('raw','2'));
+        }else if(viewReadRace==='close'){await node('close').onclick();}
+        else if(viewReadRace==='socket'){
+            document.hidden=true;docListeners.visibilitychange();document.hidden=false;docListeners.visibilitychange();
+            await wait(()=>sockets.length===2);hello(sockets[1]);sockets[1].receive(packet('raw','2'));
+        }else if(viewReadRace==='snapshot'){
+            snapshot.state_rev='2';snapshot.render_rev='2';snapshot.render_key='2';snapshot.camera_um=['42','40','100'];snapshot.bbox_dbu=['-8','0','92','80'];
+            sockets[0].receive(snapshot);sockets[0].receive(packet('raw','2','2'));
+        }else if(viewReadRace==='phase'){
+            snapshot.status='failed';snapshot.failure='worker_failed';sockets[0].receive(snapshot);
+        }
+        for(let i=0;i<8;i++){await new Promise(setImmediate);}
+        const before={http:requests.length,ws:sockets.length,ready:sockets.at(-1).readyState,frame:node('canvas').dataset.frameId,
+            width:node('canvas').width,empty:node('empty').hidden,goto:node('goto-x').value,
+            text:Object.fromEntries(['connection','status','notice'].map(id=>[id,node(id).textContent]))};
+        if(viewReadReply==='closed'){const value=JSON.parse(viewReadResponse.responseText);value.view.status='closed';viewReadResponse.responseText=JSON.stringify(value);}
+        else if(viewReadReply==='newer'){
+            const value=JSON.parse(viewReadResponse.responseText);
+            Object.assign(value.view,{state_rev:'3',render_rev:'3',render_key:'3',camera_um:['43','40','100'],bbox_dbu:['-7','0','93','80']});
+            Object.assign(snapshot,value.view,{connection_epoch:epoch});viewReadResponse.responseText=JSON.stringify(value);
+        }
+        else if(viewReadReply==='missing'){viewReadResponse.status=404;viewReadResponse.responseText='';}
+        else if(['503','401'].includes(viewReadReply)){viewReadResponse.status=Number(viewReadReply);viewReadResponse.responseText=JSON.stringify({error:'late_view_failure'});}
+        viewReadResponse.onload();if(completed){await completed;}
+        for(let i=0;i<12;i++){await new Promise(setImmediate);}
+        if(viewReadReply==='newer'){
+            assert.equal(sockets.length,before.ws+1,'newer authoritative view was ignored');hello(sockets.at(-1));
+            assert.equal(node('goto-x').value,'43');assert.equal(node('connection').textContent,'Local · connected');
+        }else if(viewReadRace==='current'){
+            if(viewReadReply==='old'){assert.equal(sockets.length,2);hello(sockets[1]);}
+            else if(['closed','missing'].includes(viewReadReply)){assert.equal(node('status').textContent,'View closed');assert.equal(node('canvas').width,1);}
+            else if(viewReadReply==='503'){assert.match(node('notice').textContent,/late_view_failure/);}
+            else{assert.equal(node('connection').textContent,'Session expired');}
+        }else{
+            assert.equal(sockets.length,before.ws,'old view read reopened a stale connection');
+            assert.equal(sockets.at(-1).readyState,before.ready,'old view read closed the current connection');
+            assert.equal(requests.length,before.http,'old view read started another request');
+            assert.equal(node('canvas').dataset.frameId,before.frame,'old view read replaced the displayed frame');
+            assert.equal(node('canvas').width,before.width);assert.equal(node('empty').hidden,before.empty);
+            assert.equal(node('goto-x').value,before.goto,'old view read rolled back the current camera');
+            for(const [id,text] of Object.entries(before.text)){assert.equal(node(id).textContent,viewReadReply==='401'&&id==='connection'?'Session expired':text,'old view read changed '+id);}
+        }
+        listeners.pagehide();console.log('WEB VIEW READ ORDER: ALL OK ('+viewReadRace+', '+viewReadReply+', no stale state or replay)');return;
+    }
     if(closeBoundary){
         await wait(()=>sockets.length===1);hello(sockets[0]);sockets[0].receive(packet('raw','1'));
         for(let i=0;i<8;i++){await new Promise(setImmediate);}
