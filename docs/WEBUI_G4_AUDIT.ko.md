@@ -187,7 +187,9 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    조합 및 실제 실패/진행 중 취소·충돌/복구·다중 선택 저장 수용은 여전히 남는다.
    M4 §94는 동일 유휴 cache로 인한 SVRF 교체 실패를 수정하고 실제 Chrome에서
    입력/sidecar 불변으로 재검증했다. SVRF 선연결 후 reviewer 재연결은 기본1024MiB
-   렌더 예산에서 native 실패가 확인돼 별도 후속이다. §10.3은 반대 순서의 성공이었다.
+   렌더 예산에서 native 실패가 확인됐고, M4 §95에서 불변 metadata 공유와 guarded
+   pack 소유권 이전으로 수정했다. §10.5의 실제 Chrome에서도 metadata 먼저 →
+   reviewer 재연결을 확인했다. 이 성공 경로를 충돌·취소·전체 저장 수용으로 확대하지 않는다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격

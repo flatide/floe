@@ -1,13 +1,35 @@
 //! Owned immutable metadata snapshot for one DRC actor/revision. Browser DTOs
 //! contain no recorded deck/include paths and all floating values are strings.
 use floe_app_core::{
-    drc::Database, managed::Permit, registered::AccessScope, svrf::Rules, Error, Result,
+    drc::Database, managed::Permit, registered::AccessScope, svrf::Rules, Error, ErrorKind, Result,
 };
 use serde_json::{json, Value};
 use std::{
+    os::unix::fs::MetadataExt,
     path::PathBuf,
     sync::{atomic::AtomicUsize, Arc, Mutex},
 };
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SourceStamp(u64, u64, u64, i64, i64, i64, i64);
+impl SourceStamp {
+    fn read(input: &Input) -> Result<Self> {
+        input.scope.check(&input.path)?;
+        let m = std::fs::metadata(&input.path)?;
+        if !m.is_file() {
+            return Err(Error::input("SVRF metadata must be a regular file"));
+        }
+        Ok(Self(
+            m.dev(),
+            m.ino(),
+            m.len(),
+            m.mtime(),
+            m.mtime_nsec(),
+            m.ctime(),
+            m.ctime_nsec(),
+        ))
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct Input {
@@ -18,22 +40,48 @@ pub(super) struct Snapshot {
     pub data: Metadata,
     pub input: Input,
     pub _permit: Permit,
+    identity: Option<floe_app_core::drc::review::Identity>,
+    stamp: SourceStamp,
+}
+impl Snapshot {
+    pub fn validate_pack(&self, pack: &Database) -> Result<()> {
+        if SourceStamp::read(&self.input)? != self.stamp {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "metadata changed; load it explicitly before reconnecting",
+            ));
+        }
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| Error::input("metadata reuse requires an ICE pack"))?;
+        pack.validate_review_identity(identity)
+    }
 }
 pub(super) struct Candidate {
     input: Input,
     permit: Option<Permit>,
     rules: Option<Rules>,
     ready: Option<Arc<Snapshot>>,
+    stamp: SourceStamp,
 }
 impl Candidate {
     pub fn load(input: Input, permit: Permit, stop: &AtomicUsize) -> Result<Arc<Mutex<Self>>> {
         input.scope.check(&input.path)?;
+        let stamp = SourceStamp::read(&input)?;
         let rules = Rules::load(&input.path, stop)?;
+        if SourceStamp::read(&input)? != stamp {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "metadata changed while loading",
+            ));
+        }
         Ok(Arc::new(Mutex::new(Self {
             input,
             permit: Some(permit),
             rules: Some(rules),
             ready: None,
+            stamp,
         })))
     }
     /// Only the DRC actor sees pack names. No whole check-name catalogue crosses
@@ -46,10 +94,19 @@ impl Candidate {
             .ok_or_else(|| Error::input("metadata already prepared"))?;
         let data = Metadata::new(rules, pack, stop)?;
         pack.unchanged()?;
+        let identity = pack.packed_identity()?;
+        if SourceStamp::read(&self.input)? != self.stamp {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "metadata changed while preparing",
+            ));
+        }
         self.ready = Some(Arc::new(Snapshot {
             data,
             input: self.input.clone(),
             _permit: self.permit.take().unwrap(),
+            identity,
+            stamp: self.stamp,
         }));
         Ok(())
     }

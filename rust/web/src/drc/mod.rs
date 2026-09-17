@@ -358,6 +358,12 @@ impl Service {
         })
     }
     fn start_registration(r: Registration) -> Result<Arc<Self>> {
+        Self::start_registration_with_metadata(r, None)
+    }
+    fn start_registration_with_metadata(
+        r: Registration,
+        shared_rules: Option<Arc<metadata::Snapshot>>,
+    ) -> Result<Arc<Self>> {
         let resources = &r.resources;
         let scope = r.scope.clone();
         let source_id = &r.source_id;
@@ -376,8 +382,15 @@ impl Service {
             .as_deref()
             .map(|p| rules_scope.check(p))
             .transpose()?;
+        if shared_rules
+            .as_ref()
+            .is_some_and(|m| rules.as_ref() != Some(&m.input.path))
+        {
+            return Err(Error::input("metadata reuse does not match registration"));
+        }
         let rules_permit = rules
             .as_ref()
+            .filter(|_| shared_rules.is_none())
             .map(|p| resources.drc_metadata(p))
             .transpose()?;
         let permit = resources.drc(
@@ -431,7 +444,6 @@ impl Service {
             inner: Arc::clone(&inner),
             thread: Mutex::new(None),
         });
-        let resources = Arc::clone(resources);
         let handle = thread::Builder::new()
             .name("floe-drc-read".into())
             .spawn(move || {
@@ -441,31 +453,35 @@ impl Service {
                     if let Some(p) = &waives {
                         scope.check(p)?;
                     }
-                    let mut pack = Database::open_explicit(&path, waives.as_deref(), &stop)?;
-                    if let Some(r) = &readonly { r.validate_open(&pack, &scope)?; }
-                    if let Some((r, targets)) = readonly.as_ref().and_then(|r| r.targets.as_ref().map(|t| (r,t))) {
-                        use floe_app_core::drc::review::{store, managed};
+                    let pack = if let Some((r, targets)) = readonly.as_ref().and_then(|r| r.targets.as_ref().map(|t| (r,t))) {
+                        use floe_app_core::drc::review::store;
                         // Capture via directory-relative O_NOFOLLOW and retain the
                         // checked descriptor. Never reopen the temporary pathname
-                        // through Database's ordinary explicit-waive reader.
-                        let store = managed::ManagedStore::open_readonly_catalog(
-                            &resources, managed::Registration {
-                                scope: scope.clone(), pack: path.clone(), reviewer: r.reviewer.clone(),
-                                kind: store::Kind::Waives,
-                                protected_files: rules.iter().cloned().chain(std::iter::once(r.source.clone())).collect(), protected_trees: vec![],
-                            },
-                            floe_app_core::registered::SourceSet::new(vec![])?,
-                            &targets.waives, &stop,
-                        )?;
-                        store.snapshot(Arc::clone(&stop))?.apply_waives(&mut pack, &stop)?;
-                    }
-                    let metadata = rules.as_ref().zip(rules_permit).map(|(path, permit)| {
+                        // through Database's ordinary explicit-waive reader. The
+                        // guarded store transfers its ONE pack into this reader,
+                        // covered throughout by the reader's existing permit.
+                        store::Store::open_readonly_database(
+                            scope.clone(), &path, &r.reviewer, &targets.waives,
+                            rules.iter().cloned().chain(std::iter::once(r.source.clone())).collect(),
+                            &stop,
+                        )?
+                    } else {
+                        Database::open_explicit(&path, waives.as_deref(), &stop)?
+                    };
+                    if let Some(r) = &readonly { r.validate_open(&pack, &scope)?; }
+                    let metadata = if let Some(snapshot) = shared_rules {
+                        // Reconnecting a reviewer is not a metadata reload.
+                        // Share the loaded immutable model AND its admission;
+                        // a replaced/touched pack cannot inherit that model.
+                        snapshot.validate_pack(&pack)?;
+                        Some(snapshot)
+                    } else { rules.as_ref().zip(rules_permit).map(|(path, permit)| {
                         let input = metadata::Input { path: path.clone(), scope: rules_scope.clone() };
                         let candidate = metadata::Candidate::load(input, permit, &stop)?;
                         let mut candidate = candidate.lock().unwrap();
                         candidate.compile(&pack, &stop)?;
                         candidate.take()
-                    }).transpose()?;
+                    }).transpose()? };
                     floe_app_core::check_cancelled(&stop)?;
                     if let Some(r) = &readonly { r.validate_open(&pack, &scope)?; }
                     pack.unchanged()?;

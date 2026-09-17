@@ -2,6 +2,7 @@
 """Runtime SVRF replacement through the real picker/DRC actors, private fixtures."""
 import copy
 import json
+import os
 from pathlib import Path
 from cache_test_paths import vfs_cache, drc_pack
 import shutil
@@ -84,6 +85,100 @@ def replacement_budget(source, db, rules, invalid, temps, work):
             s.close()
 
 
+def reconnect_budget(source, db, rules, temps, work):
+    """Reattach the launcher grant AFTER metadata, at actual default admission."""
+    protected = [source, db, drc_pack(db), rules]
+    protected += [p for p in vfs_cache(source).rglob("*") if p.is_file()]
+    before = fingerprint(protected)
+    for mode in ("readonly", "notes", "waives"):
+        for budget, accepted in ((1024, True), (1088, True), (1089, False)):
+            s = Session(source, drc_pack(db), temps, None if mode == "readonly" else "rules-reconnect",
+                        work / ("reconnect-%s-%d.session" % (mode, budget)), budget_mb=budget,
+                        read_reviewer="rules-reconnect" if mode == "readonly" else None,
+                        edit_waives=mode == "waives")
+            try:
+                c, picker = s.client, Picker(s, db.parent.name)
+                view = idle(s)
+                grant = c.call("GET", "/api/v1/drc")["review_grant"]
+                picker.accept(picker.open(picker.handle(db.name)))
+                assert c.call("GET", API)["detached"]
+                picker = Picker(s, rules.parent.name)
+                old = picker.accept(picker.finish(picker.submit(
+                    "load_drc_rules", handle=picker.handle(rules.name, "all_files"), context=s.context)))
+                outcome = picker.reconnect()
+                if accepted:
+                    new = picker.accept(outcome)
+                    assert new["id"] != old["id"] and new["metadata"]["svrf"] == old["metadata"]["svrf"]
+                    model = c.call("GET", API)
+                    assert not model["detached"] and model["editable"] == (mode != "readonly")
+                    assert model["reviewer"] == "rules-reconnect" and not model["autosave"]
+                    assert s.display([dict(check="0", error="0")])["exists"] is False
+                    # A second round exercises release of the retired reader
+                    # and a shared metadata lease, not merely first admission.
+                    picker = Picker(s, db.parent.name)
+                    picker.accept(picker.open(picker.handle(db.name)))
+                    assert c.call("GET", API)["detached"]
+                    picker = Picker(s, rules.parent.name)
+                    reloaded = picker.accept(picker.finish(picker.submit(
+                        "load_drc_rules", handle=picker.handle(rules.name, "all_files"), context=s.context)))
+                    again = picker.accept(picker.reconnect())
+                    assert again["metadata"]["svrf"] == reloaded["metadata"]["svrf"]
+                else:
+                    assert outcome["phase"] == "failed" and outcome["error"] == "browse_busy_or_limit", outcome
+                    assert c.call("GET", "/api/v1/drc")["drc"] == old
+                    assert c.call("GET", API)["detached"]
+                assert c.call("GET", "/api/v1/drc")["review_grant"] == dict(grant, available=not accepted), (mode, budget)
+                assert idle(s) == view and fingerprint(protected) == before
+                assert not list(db.parent.glob(".*.notes.*")) and not list(db.parent.glob(".*.waive.*"))
+            finally:
+                s.close()
+
+
+def reconnect_identity(source, rules, temps, work):
+    for changed in ("metadata", "pack"):
+        db = source.parent / ("changed-" + changed + ".db")
+        db.write_text(DB)
+        subprocess.run([str(INDEX), "drc", str(db), "--jobs", "2"],
+                       check=True, capture_output=True, timeout=30)
+        selected_rules = source.parent / ("changed-" + changed + ".json")
+        selected_rules.write_bytes(rules.read_bytes())
+        original_source = fingerprint([source, db, rules])
+        s = Session(source, drc_pack(db), temps, "rules-identity", work / (changed + ".session"),
+                    budget_mb=1024, edit_waives=True)
+        try:
+            c, picker = s.client, Picker(s, source.parent.name)
+            view = idle(s)
+            picker.accept(picker.open(picker.handle(db.name)))
+
+            def load():
+                return picker.accept(picker.finish(picker.submit(
+                    "load_drc_rules", handle=picker.handle(selected_rules.name, "all_files"), context=s.context)))
+
+            old = load()
+            if changed == "metadata":
+                replacement = source.parent / "metadata-new.json"
+                replacement.write_text(json.dumps(metadata("space", 0.7)))
+                replacement.replace(selected_rules)
+            else:
+                stat = drc_pack(db).stat()
+                os.utime(drc_pack(db), ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+            rejected = picker.reconnect()
+            assert rejected["phase"] == "failed", rejected
+            assert c.call("GET", "/api/v1/drc")["drc"] == old
+            assert c.call("GET", API)["detached"]
+            # Only an explicit reload may adopt the new metadata/pack identity.
+            if changed == "pack":
+                picker.accept(picker.open(picker.handle(db.name)))
+            loaded = load()
+            new = picker.accept(picker.reconnect())
+            assert new["metadata"]["svrf"] == loaded["metadata"]["svrf"]
+            assert not c.call("GET", API)["detached"]
+            assert idle(s) == view and fingerprint([source, db, rules]) == original_source
+            assert not list(source.parent.glob(".*.notes.*")) and not list(source.parent.glob(".*.waive.*"))
+        finally:
+            s.close()
+
+
 def main(fixture):
     with tempfile.TemporaryDirectory(prefix="floe-runtime-svrf-") as td:
         work = Path(td).resolve()
@@ -104,11 +199,13 @@ def main(fixture):
         protected = [source, a, b, empty, bad, huge] + [p for p in vfs_cache(source).rglob("*") if p.is_file()]
         before = fingerprint(protected)
         refs = [dict(check="0", error="0")]
-        budget_db = data / "budget.db"
+        budget_db = layout / "budget.db"
         budget_db.write_text(DB)
         subprocess.run([str(INDEX), "drc", str(budget_db), "--jobs", "2"],
                        check=True, capture_output=True, timeout=30)
         replacement_budget(source, budget_db, a, bad, temps, work)
+        reconnect_budget(source, budget_db, a, temps, work)
+        reconnect_identity(source, a, temps, work)
         for mode in ("ascii", "writer"):
             db = data / (mode + ".db")
             db.write_text(DB)
@@ -229,7 +326,7 @@ def main(fixture):
                 assert fingerprint(protected) == before, "metadata selection modified protected inputs"
             finally:
                 s.close()
-        print("WEB RUNTIME SVRF: ALL OK (ASCII/ICE, atomic replace/failure, same reader, stale/cancel/replay, 1024/1088/1089 MiB admission, idle display vs active editor, bounds, witness, no authority expansion, saved receipts, build/reconnect persistence, camera/input invariant)")
+        print("WEB RUNTIME SVRF: ALL OK (ASCII/ICE, atomic replace/failure, same reader, stale/cancel/replay, 1024/1088/1089 MiB admission, idle display vs active editor, metadata-first reviewer reconnect readonly/notes/waives twice, pack/JSON identity refusal and explicit reload, bounds, witness, no authority expansion, saved receipts, build/reconnect persistence, camera/input invariant)")
 
 
 if __name__ == "__main__":

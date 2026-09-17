@@ -141,7 +141,9 @@ saved-note 표시 뒤 교체의 추가 예약 실패를 수정하고, 실제 Chr
 reviewer/SVRF 복원을 확인했다([수용 §10.3](WEBUI_BROWSER_ACCEPTANCE.ko.md#103-저장-메모-표시-후-drc-교체와-명시-재연결)).
 M4g-39는 같은 유휴 cache로 인한 SVRF 교체 실패를 수정하고 실제 Chrome에서도
 확인했다([M4 §94](WEBUI_M4.ko.md#94-m4g-39--저장-메모-표시-후-svrf-metadata-교체)).
-SVRF를 먼저 붙인 뒤 reviewer를 재연결하는 기본 예산 실패는 별도 미해결이다.
+M4g-40은 SVRF 선연결 후 reviewer 재연결의 중복 모델/예약을 제거하고, 세 grant의
+경계 예산·입력 identity 회귀와 실제 Chrome을 확인했다
+([M4 §95](WEBUI_M4.ko.md#95-m4g-40--svrf-선연결-후-reviewer-재연결의-중복-모델-제거)).
 다중 선택·충돌/복구·나머지 조작은 남으며 전체 DRC/G4 수용으로 계산하지 않는다.
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.

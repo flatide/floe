@@ -268,7 +268,8 @@ impl Registry {
                 cache_status: "explicit",
             })
         };
-        let reader = Service::start_registration(registration)?;
+        let metadata = old.inner.state.lock().unwrap().rules.clone();
+        let reader = Service::start_registration_with_metadata(registration, metadata)?;
         pending.candidate = Some(reader.clone());
         let end = Instant::now() + OPEN_TIMEOUT;
         loop {

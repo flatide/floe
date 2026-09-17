@@ -136,6 +136,35 @@ pub struct Store {
     sources: Arc<crate::registered::SourceSet>,
 }
 impl Store {
+    /// Open one guarded read-only waive projection and transfer its pack into
+    /// the reader. The caller holds the reader's DRC admission for this entire
+    /// operation; no second pack/model or write capability is retained.
+    pub fn open_readonly_database(
+        scope: Arc<AccessScope>,
+        pack_path: &Path,
+        reviewer: &str,
+        target: &Path,
+        protected_files: Vec<PathBuf>,
+        stop: &AtomicUsize,
+    ) -> Result<crate::drc::Database> {
+        let store = Self::open_readonly_catalog(
+            scope,
+            pack_path,
+            reviewer,
+            Kind::Waives,
+            protected_files,
+            vec![],
+            crate::registered::SourceSet::new(vec![])?,
+            target,
+            stop,
+        )?;
+        let install = store.snapshot(stop)?.waive_install(stop)?;
+        let store =
+            Arc::try_unwrap(store).map_err(|_| Error::input("read-only pack still borrowed"))?;
+        let mut pack = store.pack.into_inner().unwrap();
+        pack.install_waives(&install.identity, install.input, install.counts, stop)?;
+        Ok(crate::drc::Database::packed(pack))
+    }
     /// Read-only registration. All other registered inputs/cache/private paths
     /// must be supplied by the trusted caller as additional protection.
     pub fn open(
@@ -495,6 +524,12 @@ pub struct AppliedWaives {
     pub legacy_unverified: bool,
     pub waived: u64,
 }
+struct WaiveInstall {
+    identity: super::Identity,
+    input: Option<crate::drc::pack::Input>,
+    counts: Vec<u32>,
+    applied: AppliedWaives,
+}
 impl Snapshot {
     /// Match this captured file to an actual native commit, not merely the
     /// current contents of the same path. Not a wire token or an authorization.
@@ -527,12 +562,18 @@ impl Snapshot {
         stop: &AtomicUsize,
         before_install: impl FnOnce() -> Result<()>,
     ) -> Result<AppliedWaives> {
+        database.validate_waive_identity(&self.store.identity())?;
+        let install = self.waive_install(stop)?;
+        before_install()?;
+        database.install_waives(&install.identity, install.input, install.counts, stop)?;
+        Ok(install.applied)
+    }
+    fn waive_install(&mut self, stop: &AtomicUsize) -> Result<WaiveInstall> {
         if self.store.kind != Kind::Waives {
             return Err(Error::input("not a waive snapshot"));
         }
         check_cancelled(stop)?;
         let identity = self.store.identity();
-        database.validate_waive_identity(&identity)?;
         self.current(false, stop)?;
         let input = self
             .before
@@ -554,9 +595,12 @@ impl Snapshot {
             legacy_unverified: self.legacy_unverified(),
             waived: stats.waived,
         };
-        before_install()?;
-        database.install_waives(&identity, input, stats.per_rule, stop)?;
-        Ok(applied)
+        Ok(WaiveInstall {
+            identity,
+            input,
+            counts: stats.per_rule,
+            applied,
+        })
     }
     /// Reads this expected snapshot, never the latest sidecar silently. Missing
     /// sidecars use embedded pack bytes. Full expected-version validation still

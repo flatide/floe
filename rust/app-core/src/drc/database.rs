@@ -76,6 +76,14 @@ impl ReadViolation {
     }
 }
 impl Database {
+    /// Opaque geometry/run binding for sharing immutable derived metadata.
+    /// ASCII snapshots have no packed identity and cannot use this fast path.
+    pub fn packed_identity(&self) -> Result<Option<super::review::Identity>> {
+        match &self.backend {
+            Backend::Pack(p) => Ok(Some(super::review::Identity(p.review_binding()?))),
+            Backend::Ascii(_) => Ok(None),
+        }
+    }
     pub fn has_waives(&self) -> bool {
         matches!(&self.backend, Backend::Pack(p) if p.has_waives())
     }

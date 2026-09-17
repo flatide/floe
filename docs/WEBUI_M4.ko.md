@@ -6448,7 +6448,7 @@ target/byte와 native publication을 통과했다. 전체 PASS나 시작 지연 
 아니다. workspace 전체 fmt는 기존 dbg/oasis/tiler 등의 형식 차이를 보고했으며,
 이번 변경과 무관한 파일을 일괄 재포맷하지 않았다.
 
-**별도 확인된 미해결:** 기본 렌더1024MiB에서 DRC 교체 후 SVRF를 먼저 붙이고
+**§94 시점의 별도 미해결(후속 §95에서 수정):** 기본 렌더1024MiB에서 DRC 교체 후 SVRF를 먼저 붙이고
 런처 reviewer를 재연결하면 notes-only와 notes+waives 모두 admission으로 실패한다.
 기존 reader/metadata와 새 reader/metadata 및 sidecar 검증 예약이 겹치는 경로다.
 §10.3의 성공 순서는 reviewer 먼저 → SVRF 나중이었으므로 이 조합을 검증하지
@@ -6460,3 +6460,53 @@ target/byte와 native publication을 통과했다. 전체 PASS나 시작 지연 
 충돌/불명확한 게시 복구·다중 선택/편집·입력/설정/공유 수용, Python-free Linux 실행,
 G1/G4 판정과 현장 Firefox/ETX. 원격 SH-10/index hot reload는 사용자 보류,
 M5 world-tile은 성능 조건부다. 이번 성공은 전체 전환 완료가 아니다.
+
+## 95. M4g-40 — SVRF 선연결 후 reviewer 재연결의 중복 모델 제거
+
+§94의 재연결 실패를 read-only/notes/waives 세 grant와 실제 기본 렌더1024MiB에서
+고정했다. 이전에는 기존 reader/SVRF를 유지하며 후보 reader와 같은 SVRF를 다시
+준비했고, guarded waive 검증은 동일 pack을 한 번 더 열었다. 상한을 높이거나 기존
+리뷰를 먼저 폐기하지 않고 다음 두 중복을 없앴다.
+
+- 기존 SVRF snapshot과 그 admission/read lease를 `Arc`로 공유한다. 컴파일 당시
+  opaque pack identity와 JSON의 dev/inode/size/mtime/ctime을 재검증한다. pack 또는
+  JSON이 바뀌면 재연결을 거부하고, 명시 open/load 이후에만 새 내용을 채택한다.
+  ASCII metadata는 이 재사용 경로에 들어가지 않는다. 다른 pack에 이름만 같은
+  규칙표를 공유하거나 source lease를 조기 반환하지 않는다.
+- `Store::open_readonly_database`는 기존 guarded read-only store/snapshot 검증을
+  사용한 뒤 그 **한 pack의 소유권**을 reader로 넘긴다. 기존 reader admission이
+  열기/검증/수명 전체를 덮는다. O_NOFOLLOW directory-relative capture, derived
+  sidecar allowlist, regular/single-link/길이·binding·digest 검사와 열린 descriptor
+  설치를 유지한다. 새 `unsafe`, 임의 경로, write capability, lock/sidecar 생성은 없다.
+
+기존 review snapshot의 waive 설치도 같은 검증 준비부를 재사용한다. 아직 준비 중인
+후보만 바뀌며 registry/view/review commit 순서와 이전 reader 보존, 취소·receipt 및
+런처 grant 한정 재연결은 유지한다. 공유 snapshot은 마지막 reader가 놓을 때 예약을
+반환한다. 입력 이름·캐시 형식·renderer 버전/정책은 바꾸지 않았다.
+
+검증:
+
+- `validate_web_drc_rules.py`: 세 grant ×1024/1088MiB에서 metadata 먼저 → 재연결을
+  두 번 반복한다.1089MiB에서는 명시 거부/기존 리뷰·detached 상태 보존. JSON 교체와
+  pack touch 각각 재연결 거부 → 명시 reload → 성공. 카메라/권한/입력 불변과 암묵
+  sidecar 미생성, 기존 ASCII/ICE·metadata 교체·cancel/replay·receipt 검사 모두 통과.
+- 기존 `validate_web_drc_open.py`, `validate_web_read_reviewer.py` 통과. 실제 저장
+  receipt/rebind, 인접·legacy 임시 review 읽기, alias/symlink/FIFO 거부를 유지한다.
+- `validate_drc_review.py`:22 note 상태·5,793 status bytes,34 managed 저장(whole-waive
+  import6 포함)·export28의 Python 대조와 admission 반환 통과.
+- core288단위(oracle7 ignored), web119단위(oracle3 ignored), 두 패키지 strict clippy,
+  fmt와 ES2017/UI gate 통과. dependency의 기존 warning은 별개다.
+- [실제 Chrome §10.5](WEBUI_BROWSER_ACCEPTANCE.ko.md#105-svrf-선연결-후-launcher-reviewer-재연결)에서
+  metadata 먼저 연결한 상태의 명시 재연결과 기존 메모 badge/0 waived 복원,9파일
+  SHA-256 불변을 확인했다. 새 저장·권한 확대·자동 저장 opt-in은 없었다.
+
+집중 로그는 `/private/tmp/floe-drc-replace-budget.CKVGLy/reconnect-*`다. 첫 HTTP
+실행들은 새 프로세스의 session 파일 생성 전 시작 timeout으로 종료됐다. 별도
+`--version`은5ms에 끝났고 동일 timeout의 재실행은 위 검사를 통과했다. 이 결과를
+macOS 시작 지연 해결로 세지 않는다. 수정 후 전체 `sh tools/validate_rust.sh`는
+별도 합성 fixture로 시작했으며 `reconnect-full.log`에서 추적한다. 진행 중 결과를
+전체 PASS로 표시하지 않는다.
+
+전체 목표 잔여: 전체 배터리/시작 제한 추적, 실제 브라우저의 충돌/불명확한 게시
+복구·다중 선택/편집·입력/설정/공유 수용, Python-free Linux 실행, G1/G4 및 현장
+Firefox/ETX. 원격 SH-10/index hot reload는 사용자 보류, M5 world-tile은 성능 조건부다.

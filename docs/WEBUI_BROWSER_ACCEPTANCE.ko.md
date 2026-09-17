@@ -583,7 +583,30 @@ source/cache/DB/ICE/SVRF7파일과 reviewer sidecar2파일의 SHA-256은 검사 
 
 이 검사는 idle saved-note cache가 있는 SVRF 교체 성공 경로다. 손상 metadata와
 진행 중 취소·활성 편집은 native gate 근거이며 실제 UI 수용으로 확대하지 않는다.
-SVRF를 먼저 붙인 뒤 reviewer를 재연결하는 기본 예산 결함은 별도 미해결이다.
+SVRF를 먼저 붙인 뒤 reviewer를 재연결하는 기본 예산 결함은 당시 별도 미해결이었고,
+후속 §10.5에서 수정 빌드를 검증했다.
+
+### 10.5 SVRF 선연결 후 launcher reviewer 재연결
+
+[M4 §95](WEBUI_M4.ko.md#95-m4g-40--svrf-선연결-후-reviewer-재연결의-중복-모델-제거)의
+수정 서버를 에이전트가 직접 재시작했다.63243 About은 source `8bca04d+`, web
+`f99d02456f9672ee08fcefddd811e38434766282`, native compatibility0.12.101이다.
+
+Open DRC에서 기존 합성 `synthetic.db`를 선택해 adjacent ICE8/23을 다시 열었다.
+NO REVIEW WRITES·reviewer detached를 확인한 뒤, 먼저 `synthetic.rules.json`을
+연결해 SVRF8/8을 만들었다. 이때도 reviewer는 detached였다. 그 다음 Reconnect
+launcher reviewer에서 기존 `browser-test`, notes write/waives write만 확인·동의했다.
+
+`Launcher reviewer reconnected; layout unchanged. Automatic saving remains off`
+및8규칙·23오류·SVRF8/8을 확인했다. M2 목록의 Global1만 saved-note badge,
+Global2 무메모,0 waived가 복원됐다. X200/Y220/view500µm, 양쪽 자동 저장off,
+이 서버의 새 저장 receipt 없음, Local connected를 유지했다. source/cache/DB/
+ICE/SVRF7파일과 기존 reviewer sidecar2파일의 SHA-256은 §10.2 이후와 동일하다.
+About를 닫고 원래 리뷰 화면으로 남겼다. 추가 파일 쓰기·외부 전송은 없었다.
+
+이로써 §10.3의 반대 순서뿐 아니라 **metadata 먼저 → reviewer 재연결**도 실제
+Chrome에서 확인했다. 파일 교체·취소·권한 위조·경계 예산 거부는 native gate 근거이며
+이번 실제 UI 수용으로 확대하지 않는다.
 
 ## 11. 잔여
 
@@ -596,7 +619,7 @@ Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 �
 검증과 §10.2의 새 프로세스 메모/waive 복원·자동 해제 최종 UI 재조회다.
 §10.3은 saved-note 표시 뒤 DRC 교체·원래 ICE 복원·런처 reviewer 명시 재연결이다.
 §10.4는 같은 cache가 있는 상태의 SVRF 교체다. SVRF 선연결 후 reviewer 재연결의
-기본 예산 실패는 M4 §94에서 추적한다.
+기본 예산 실패는 M4 §95에서 수정하고 §10.5의 실제 Chrome 순서로 확인했다.
 각 절의 미검사 범위 및 DRC 교체 실패/진행 중 취소, pack 생성,
 메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
 auth/BFCache/종료는 남는다.
