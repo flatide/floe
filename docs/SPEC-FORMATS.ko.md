@@ -294,3 +294,10 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   경로는 Calibre 런 머신 기준이라 뷰잉 머신에 없기 일쑤 — 그다음
   기록된 경로·`<db>.rules.json`) + DRC 패널 `rules…` 수동 로드.
   정보줄 `svrf N/M` = 매칭된 룰 수.
+
+## 선택 대표 파일 design.ovr (OVR1)
+
+0.12.154부터 일반 레이아웃용 네이티브 대표 점을 별도 파일로 저장한다.
+OVM CRC32와 소스 식별자, 레이어·깊이 그룹, 128점 공간 디렉터리 및
+40-byte 점 레코드, 파일 CRC32로 구성한다. OVM/OVP 버전 변경 없음.
+[형식·상한·폴백 계약](REPRESENTATIVES.ko.md)을 따른다.

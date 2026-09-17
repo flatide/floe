@@ -884,3 +884,10 @@ jobs 1/4/`--occupancy-balance 0` 파일 동일, `floe2 index --occupancy-balance
 (2026-09-17 저녁: 플래너 쪽 대표는 비활성 — FLOE2_OPTIMIZATION 결함 C 종결 2. 요약
 없는 레이아웃의 광역뷰는 다시 컷 아래를 버리며, 다음 답은 인덱싱 때 만드는 별도
 파일의 대표 데이터다.)
+
+### 일반 thin:cull의 별도 대표 파일 (0.12.154)
+
+`--representatives` / `--representatives-only`는 `design.ovr`의 유한 점 샘플을
+생성한다. occupancy 마킹과 별개이며, 일반 cull 플랜의 페이지 선택을 늘리지 않는다.
+정확한 점유 요약의 대체물이 아니고 덱/keep 정책도 바꾸지 않는다.
+생성 비용, 확대 시 밀도 한계와 사용법은 [REPRESENTATIVES](REPRESENTATIVES.ko.md) 참조.

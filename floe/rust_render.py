@@ -1108,6 +1108,9 @@ class RustRenderWorker:
                 "rep_page_level": _wire_int(fields, "rep_page_level"),
                 # the frame's level: one cut item in 2^L (the item budget)
                 "rep_level": _wire_int(fields, "rep_level"),
+                "stored_rep_points": _wire_int(fields, "stored_rep_points"),
+                "stored_rep_tested": _wire_int(fields, "stored_rep_tested"),
+                "stored_rep_limited": _wire_int(fields, "stored_rep_limited"),
             },
             # occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): layers
             # drawn from design.ovo instead of their pages, the cells

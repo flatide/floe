@@ -73,6 +73,9 @@ pub fn vfs_cmd(args: &[String]) {
     // state, never the environment - same rule as --kill-at).
     let mut occupancy = false;
     let mut occupancy_only = false;
+    let mut representatives = false;
+    let mut representatives_only = false;
+    let mut representative_points = floe_vfs::representatives::DEFAULT_POINTS;
     let mut occ_opts = floe_vfs::occupancy::Opts::default();
     // the base cell follows the chip size unless --occupancy-um says
     // otherwise (2026-09-16; occupancy::auto_base_um_for_span)
@@ -139,6 +142,19 @@ pub fn vfs_cmd(args: &[String]) {
                     .expect("page target MB");
                 assert!(mb > 0, "page target MB must be positive");
                 page_target_mb = Some(mb);
+                i += 2;
+            }
+            "--representatives" => {
+                representatives = true;
+                i += 1;
+            }
+            "--representatives-only" => {
+                representatives_only = true;
+                i += 1;
+            }
+            "--representatives-points" => {
+                representative_points = args.get(i + 1).expect("representatives points").parse().expect("representatives points");
+                representatives = true;
                 i += 2;
             }
             "--coverage" => {
@@ -295,6 +311,10 @@ pub fn vfs_cmd(args: &[String]) {
     let page_target_bytes = page_target_mb
         .checked_mul(MIB)
         .expect("limit exceeded: page target bytes");
+    if representative_points == 0 || representative_points > floe_vfs::representatives::MAX_POINTS {
+        eprintln!("--representatives-points must be in 1..={}", floe_vfs::representatives::MAX_POINTS);
+        std::process::exit(2);
+    }
     if profile_cell.is_some() && profile_cell_ci.is_some() {
         eprintln!(
             "--profile-cell and --profile-cell-ci are mutually exclusive"
@@ -320,16 +340,21 @@ pub fn vfs_cmd(args: &[String]) {
             || coverage_only
             || occupancy
             || occupancy_only
+            || representatives
+            || representatives_only
             || frontier_only
             || kill_at.is_some())
     {
         eprintln!(
-            "cell profiling cannot be combined with coverage, occupancy, frontier-only, or kill-at"
+            "cell profiling cannot be combined with coverage, occupancy, representatives, frontier-only, or kill-at"
         );
         std::process::exit(2);
     }
-    if coverage_only && occupancy_only {
-        eprintln!("--coverage-only and --occupancy-only are separate additive runs");
+    if [coverage_only, occupancy_only, representatives_only, frontier_only].iter().filter(|&&b| b).count() > 1
+        || (representatives_only && (coverage || occupancy))
+        || ((coverage_only || occupancy_only || frontier_only) && representatives)
+    {
+        eprintln!("coverage-only, occupancy-only, representatives-only and frontier-only require separate additive runs");
         std::process::exit(2);
     }
     occ_opts.jobs = jobs;
@@ -554,7 +579,19 @@ pub fn vfs_cmd(args: &[String]) {
         return;
     }
     std::fs::create_dir_all(&outdir).expect("mkdir outdir");
-    if coverage_only {
+    if representatives_only {
+        let ovm = floe_ovm::Ovm::open(&format!("{}/design.ovm", outdir)).unwrap_or_else(|e| {
+            eprintln!("--representatives-only: {} (build the cache first)", e);
+            std::process::exit(1);
+        });
+        if ovm.src_size != size || ovm.src_mtime != mtime
+            || ovm.cell(ovm.top).name != doc.cells[doc.top].name
+        {
+            eprintln!("--representatives-only: cache/source identity differs; re-index first");
+            std::process::exit(1);
+        }
+        write_representatives(&doc, &outdir, &ovm, representative_points);
+    } else if coverage_only {
         // add design.ovc to an existing cache (additive op, outside
         // the marker protocol): pages/skeleton/meta stay as they are
         if !std::path::Path::new(&format!("{}/design.ovm", outdir))
@@ -612,6 +649,8 @@ pub fn vfs_cmd(args: &[String]) {
             "design.ovc",
             "design.ovo",
             "design.ovo.tmp",
+            "design.ovr",
+            "design.ovr.tmp",
             "labels.tsv",
             // legacy (pre-0.10) viewer file: scrub on rebuild so a
             // re-index actually reclaims the skeleton's bytes
@@ -654,6 +693,9 @@ pub fn vfs_cmd(args: &[String]) {
         let (frontier, ovm_bytes) = {
             let ovm = floe_ovm::Ovm::from_bytes(ovm_bytes)
                 .expect("reopen built ovm");
+            if representatives {
+                write_representatives(&doc, &outdir, &ovm, representative_points);
+            }
             let fj = frontier_json_planned(&ovm);
             match ovm.data {
                 floe_ovm::Backing::Vec(v) => (fj, v),
@@ -1814,6 +1856,31 @@ fn profile_cell_run(
     }
     writeln!(&mut out, "  ]\n}}").unwrap();
     out
+}
+
+fn write_representatives(doc: &Doc, outdir: &str, ovm: &floe_ovm::Ovm, points: usize) {
+    use floe_vfs::representatives as reps;
+    use std::io::Write;
+    let started = std::time::Instant::now();
+    let result = (|| -> Result<(), String> {
+        let mut built = reps::build(doc, points, Some(|s| eprintln!("[vfs] representatives {}", s)))?;
+        let count: usize = built.groups.iter().map(|g| g.points.len()).sum();
+        let bytes = reps::encode(&mut built, ovm);
+        let tmp = format!("{}/design.ovr.tmp", outdir);
+        let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(&bytes).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
+        std::fs::rename(&tmp, format!("{}/design.ovr", outdir)).map_err(|e| e.to_string())?;
+        eprintln!("[vfs] representatives groups={} entries={} points={} {} ({:.1}s)",
+                  built.groups.len(), built.entries, count, fmt_size(bytes.len() as u64), started.elapsed().as_secs_f64());
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(format!("{}/design.ovr.tmp", outdir));
+        eprintln!("[vfs] representatives: {}", e);
+        std::process::exit(1);
+    }
 }
 
 /// occupancy pyramid (docs/OCCUPANCY_PLAN.ko.md M1): design.ovo,

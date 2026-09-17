@@ -62,6 +62,11 @@
   `FLOE_RUST_SUB_CUT_WASH=on`(단일 레이아웃), `FLOE_RUST_DECK_WIDE=on`(덱; 둘 다
   진단 전용, 기본 off); gate `validate_occupancy` `SubCutTests`(on 워커가 규칙을
   검증), `validate_jobdeck` `WideViewTests`·`ThinPageTests`.
+  **별도 대표 파일 OVR1**(0.12.154, opt-in): 일반 뷰어의 cull 플랜 뒤에
+  `design.ovr`의 네이티브 점만 보충한다. 원본 페이지 선택은 늘리지 않으며,
+  depth·레이어·컷 필터와 화면 밀도/전역 점 수 상한을 적용한다.
+  [REPRESENTATIVES](REPRESENTATIVES.ko.md) 참조. 아래 page frontier와 독립 경로다.
+
   **대표(page frontier) — 비활성**(사용자 결정 2026-09-17 저녁: 0.12.152에서도 fit
   뷰가 박스이고 depth 99 플랜이 60 s를 넘어, 인덱싱 때 대표 데이터를 별도 파일로
   만드는 방식으로 전환. 뷰어 기본 off, `FLOE_RUST_PAGE_REPS=on`으로만 켠다 — 진단.

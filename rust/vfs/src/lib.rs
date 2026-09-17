@@ -5,6 +5,7 @@
 pub mod coverage;
 pub mod hier;
 pub mod occupancy;
+pub mod representatives;
 pub mod text;
 
 use floe_ovm::{BBox, Ovm};

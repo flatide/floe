@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "floe-index"
-version = "0.12.108"
+version = "0.12.154"
 dependencies = [
  "crc32fast",
  "floe-oasis",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "floe-renderd"
-version = "0.12.108"
+version = "0.12.154"
 dependencies = [
  "floe-render-core",
 ]
@@ -115,6 +115,7 @@ dependencies = [
 name = "floe-vfs"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "floe-oasis",
  "floe-ovm",
  "floe-tiler",

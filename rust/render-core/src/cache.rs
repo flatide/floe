@@ -41,6 +41,9 @@ pub struct PlanSummary {
     pub encoded_bytes: u64,
     pub records: u64,
     pub members: u64,
+    pub representative_points: u64,
+    pub representative_tested: u64,
+    pub representative_limited: bool,
     pub wc_cells: u64,
     pub wc_variants: u64,
     pub inst_edges: u64,
@@ -280,6 +283,8 @@ pub struct Cache {
     /// layer's summary (a full-depth flattening) equals the exact
     /// render there (user 2026-09-15: the depth is a free control)
     layer_depth: Vec<u32>,
+    // Immutable for this open cache; reopen after publishing design.ovr.
+    representatives: std::sync::OnceLock<Option<floe_vfs::representatives::File>>,
 }
 
 /// The longest top-to-cell path of every cell (None = unreachable
@@ -372,6 +377,7 @@ impl Cache {
             dir: dir.to_string(),
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
             layer_depth,
+            representatives: std::sync::OnceLock::new(),
         })
     }
 
@@ -702,6 +708,45 @@ impl Cache {
                 ..RenderStats::default()
             },
         })
+    }
+
+    /// Plain viewer only: native point representatives supplement the normal
+    /// cull plan. Exact/probe/deck callers continue to use `plan` unchanged.
+    pub fn plan_with_representatives(&self, request: &PlanRequest) -> Result<PlannedView, String> {
+        let mut planned = self.plan(request)?;
+        let req = self.view_request(request)?;
+        if request.exact || req.cut_dbu <= 0 || !req.page_hairline || req.page_reps || req.sub_cut_wash {
+            return Ok(planned);
+        }
+        let started = Instant::now();
+        let file = self.representatives.get_or_init(|| {
+            if !Path::new(&self.dir).join("design.ovr").exists() { return None; }
+            match floe_vfs::representatives::File::open(&self.dir, &self.vfs.ovm) {
+                Ok(file) => Some(file),
+                Err(error) => { eprintln!("[render] ignoring design.ovr: {}", error); None }
+            }
+        });
+        if let Some(file) = file {
+            let (points, stats) = file.query(&req);
+            planned.summary.representative_points = stats.points;
+            planned.summary.representative_tested = stats.tested;
+            planned.summary.representative_limited = stats.limited;
+            if !points.is_empty() {
+                let top = planned.plan.top;
+                if let Some(cell) = planned.plan.wcells.iter_mut().find(|c| c.key == top) {
+                    cell.washes.extend(points);
+                } else {
+                    planned.plan.wcells.push(floe_vfs::hier::WsCell {
+                        key: top, pages: Vec::new(), page_levels: Vec::new(), insts: Vec::new(),
+                        frames: Vec::new(), washes: points,
+                    });
+                    planned.plan.stats.wc_cells += 1;
+                    planned.summary.wc_cells += 1;
+                }
+            }
+        }
+        planned.stats.plan_us = planned.stats.plan_us.saturating_add(elapsed_us(started));
+        Ok(planned)
     }
 
     /// §F2R-21: the plan of a render whose geometry is reused in full

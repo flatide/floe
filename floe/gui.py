@@ -3658,6 +3658,11 @@ class Viewer:
                                 # the decode budget thinned the pages
                                 # themselves (one in 2^P by index)
                                 text += " P%d" % culls["rep_page_level"]
+                    if culls.get("stored_rep_points") or culls.get("stored_rep_limited"):
+                        text += ", stored reps %s/tested %s%s" % (
+                            fmt_count(culls.get("stored_rep_points", 0)),
+                            fmt_count(culls.get("stored_rep_tested", 0)),
+                            " (capped)" if culls.get("stored_rep_limited") else "")
                     summ = res.get("summary") or {}
                     if summ.get("layers"):
                         # occupancy summary (M2): these layers were

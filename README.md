@@ -411,6 +411,13 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   --occupancy` + `thin:keep`. 상태줄 `reps K pages/C children [L n]`. 킬 스위치
   `FLOE_RUST_PAGE_REPS=off`. 모든 sub-cut 항목을 남기는 규칙은 진단
   `FLOE_RUST_SUB_CUT_WASH=on`(단일)·`FLOE_RUST_DECK_WIDE=on`(덱)(SPEC-PLANNER §3).
+- **인덱싱 시 대표 점 파일**(0.12.154, opt-in):
+  `floe2 index source.oas --representatives-only --jobs 12`로 현재 캐시에
+  `design.ovr`를 추가한 뒤 뷰어를 다시 열면 일반 `thin:cull` 광역뷰에 점을 보충한다.
+  새 색인은 `--representatives`. 페이지 frontier를 켜지 않고 원본 페이지 추가
+  디코드 없이 그린다. `FLOE_RUST_REPRESENTATIVES=off`로 끈다.
+  유한 샘플이므로 확대 시 밀도 및 긴 선의 길이는 근사이며, 상세 조건과 상한은
+  [대표 점 파일](docs/REPRESENTATIVES.ko.md)을 참고한다.
 - **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):
   캐시에 `design.ovo`(`floe2 index --occupancy-only`)가 있고 요청이 keep·
   exact 아님이며 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지
