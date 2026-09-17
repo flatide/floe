@@ -6413,3 +6413,50 @@ strict clippy·fmt·전체 ES2017/UI gate가 통과했다. 집중 로그는
 충돌/불명확한 게시 복구·다중 선택/편집·입력/설정/공유 수용, Python-free Linux 실행,
 G1/G4 판정과 현장 Firefox/ETX. 원격 SH-10/index hot reload는 사용자 보류,
 M5 world-tile은 성능 조건부다. GTK 은퇴나 전체 전환 완료로 판정하지 않는다.
+
+## 94. M4g-39 — 저장 메모 표시 후 SVRF metadata 교체
+
+§93의63353 창에서 같은 `synthetic.rules.json`을 다시 불러와도 busy가 재현됐다.
+기존 reader256 + 기존 metadata256 + 후보 metadata256 + picker192 + 렌더1024에
+유휴 note display256이 더해져2240MiB를 요구했다. 기존8규칙·23오류·SVRF8/8은
+그대로였다. 별도 합성 HTTP 회귀도 수정 전 admission 단계에서 같은 실패를 확인했다.
+
+`PreparedRules`는 `prepare_open`과 같은 유휴 display 회수/준비 gate 수명을 사용한다.
+선택 파일 검증 뒤 후보 metadata 예약 전에 cache만 해제하고, 준비가 끝날 때까지
+재설치를 막는다. registry 잠금 아래 commit에서 gate를 돌려준 뒤 기존 `admit_build`
+검사로 이어간다. 활성 편집 snapshot, 기존 reader/SVRF, 권한, 예산 상한은 바꾸지
+않는다. 잘못된 후보·취소·실패는 기존 리뷰를 보존하고 gate를 반환한다.
+
+`validate_web_drc_rules.py`에1024/1088MiB 성공과1089MiB 명시 거부를 추가했다.
+표시 cache hit → 실제 편집 token으로 교체 거부 → 동일 token 준비/폐기 → 잘못된
+metadata 버전 거부 → cache 재생성 → 교체 성공을 검사한다. 같은 reader ID/새 revision,
+동일 reviewer binding, 카메라·입력 불변, 암묵 sidecar 미생성도 단언한다. 기존
+ASCII/ICE·cancel/replay·저장 receipt·metadata의 build/reconnect 보존 검사는 통과했다.
+별도 DRC open·review budget·web119단위(oracle3 ignored)·ES2017/UI gate와
+변경 패키지 fmt가 통과했다. 집중 로그는
+`/private/tmp/floe-drc-replace-budget.CKVGLy/rules-{gate,open-gate,review-gate,ui}.log`다.
+
+직접 재시작한53752 Chrome에서는 saved-note badge를 먼저 표시한 뒤 동일 SVRF 교체가
+성공했다([브라우저 §10.4](WEBUI_BROWSER_ACCEPTANCE.ko.md#104-저장-메모-표시-후-svrf-교체)).
+8규칙·23오류·SVRF8/8, Global1만 note badge,0 waived, 카메라/권한 유지와 양쪽
+자동 저장off를 확인했다. 기존9파일의 SHA-256은 불변이며 새 저장은 없다.
+
+전체 회귀 상태는 별개다. 수정 전9a43afd의 `sh tools/validate_rust.sh`는 workspace,
+CLI/캐시/패키징/읽기·layerprops를 통과한 뒤 `layer_defaults` native 실행의30초
+제한에서 exit1이었다(`full-validation.log`). 같은 제한의 단독 재실행은20 GTK
+target/byte와 native publication을 통과했다. 전체 PASS나 시작 지연 원인 확정은
+아니다. workspace 전체 fmt는 기존 dbg/oasis/tiler 등의 형식 차이를 보고했으며,
+이번 변경과 무관한 파일을 일괄 재포맷하지 않았다.
+
+**별도 확인된 미해결:** 기본 렌더1024MiB에서 DRC 교체 후 SVRF를 먼저 붙이고
+런처 reviewer를 재연결하면 notes-only와 notes+waives 모두 admission으로 실패한다.
+기존 reader/metadata와 새 reader/metadata 및 sidecar 검증 예약이 겹치는 경로다.
+§10.3의 성공 순서는 reviewer 먼저 → SVRF 나중이었으므로 이 조합을 검증하지
+않았다. 유휴 display가 없는 detached 상태에서도 재현되며 이번 cache 수정으로
+해결됐다고 세지 않는다. 기존 리뷰/파일은 보존된다. 후속은 상한 증액이나 기존
+리뷰 선폐기가 아니라 동일 pack 재연결의 원자성·중복 예약 구조를 검토한다.
+
+전체 목표 잔여: 위 재연결 결함, 전체 배터리 시작 제한 추적, 실제 브라우저의
+충돌/불명확한 게시 복구·다중 선택/편집·입력/설정/공유 수용, Python-free Linux 실행,
+G1/G4 판정과 현장 Firefox/ETX. 원격 SH-10/index hot reload는 사용자 보류,
+M5 world-tile은 성능 조건부다. 이번 성공은 전체 전환 완료가 아니다.

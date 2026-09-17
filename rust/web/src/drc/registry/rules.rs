@@ -12,6 +12,7 @@ pub(crate) struct PreparedRules {
     next_revision: String,
     snapshot: Option<Arc<metadata::Snapshot>>,
     protection: Option<registered::Registration>,
+    display_guard: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 fn fail(code: Failure) -> Error {
     Error::new(ErrorKind::Busy, code)
@@ -50,6 +51,7 @@ impl Registry {
             next_revision: String::new(),
             snapshot: None,
             protection: None,
+            display_guard: None,
         };
         pending
             .owner
@@ -62,6 +64,9 @@ impl Registry {
             })
             .map_err(fail)?;
         selected.validate(stop)?;
+        // Only the idle saved-note projection is expendable. Hold its gate
+        // through preparation so background display cannot pin another lease.
+        pending.display_guard = self.notes().map(|n| n.reclaim_display()).transpose()?;
         let input = metadata::Input {
             path: selected.path().to_owned(),
             scope: selected.scope(),
@@ -106,6 +111,9 @@ impl PreparedRules {
         {
             return Err(fail("drc_context_changed"));
         }
+        // Review preparations enter under this registry lock. Release our gate
+        // here before admit_build checks for genuinely active review work.
+        drop(self.display_guard.take());
         let notes = registry.notes();
         let waives = registry.review(floe_app_core::drc::review::store::Kind::Waives);
         let owner = self.owner.clone();

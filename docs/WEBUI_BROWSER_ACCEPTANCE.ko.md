@@ -565,6 +565,26 @@ source/cache/DB/ICE/SVRF7파일과 note/waive2파일의 SHA-256은 검사 전과
 교체 후보 폴더도 generator가 만든 DB1개뿐이다. 손상 후보/진행 중 취소·충돌·
 불명확한 게시 복구의 실제 UI 수용은 이 성공 경로와 구별해 남긴다.
 
+### 10.4 저장 메모 표시 후 SVRF 교체
+
+63353의 기존 reviewer 창에서 saved-note badge를 표시한 뒤 같은 SVRF를 다시
+불러오면 `Catalogue or owner is busy`로 실패했다. 기존8규칙·23오류·SVRF8/8은
+유지됐다. [M4 §94](WEBUI_M4.ko.md#94-m4g-39--저장-메모-표시-후-svrf-metadata-교체)의
+수정 후 에이전트가 자기 합성 서버를 직접 재시작했다.
+
+53752 About은 source `9a43afd+`, web `e047711a164dded836f2d20395d991d6ba9e0429`다.
+M2 오류 목록의 Global1 saved-note badge/Global2 무메모를 먼저 표시하고,
+Load SVRF metadata에서 기존 `synthetic.rules.json`을 선택해 Replace를 실행했다.
+`SVRF metadata replaced; layout and reviewer unchanged`와8/23·SVRF8/8을 확인했다.
+다시 M2 목록을 열어 동일 badge와0 waived를 확인했다. X200/Y220/view500µm,
+`browser-test` note/waive 권한, 자동 저장off, Local connected가 유지됐다.
+source/cache/DB/ICE/SVRF7파일과 reviewer sidecar2파일의 SHA-256은 검사 전과 같다.
+새 저장·pack 생성·외부 전송은 없고 About만 읽은 뒤 원래 리뷰 화면으로 돌아왔다.
+
+이 검사는 idle saved-note cache가 있는 SVRF 교체 성공 경로다. 손상 metadata와
+진행 중 취소·활성 편집은 native gate 근거이며 실제 UI 수용으로 확대하지 않는다.
+SVRF를 먼저 붙인 뒤 reviewer를 재연결하는 기본 예산 결함은 별도 미해결이다.
+
 ## 11. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
@@ -575,6 +595,8 @@ Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 �
 저장·reload 복원, §10.1의 waive 단일 오류 수동 저장/복원·opt-in 자동 해제/파일
 검증과 §10.2의 새 프로세스 메모/waive 복원·자동 해제 최종 UI 재조회다.
 §10.3은 saved-note 표시 뒤 DRC 교체·원래 ICE 복원·런처 reviewer 명시 재연결이다.
+§10.4는 같은 cache가 있는 상태의 SVRF 교체다. SVRF 선연결 후 reviewer 재연결의
+기본 예산 실패는 M4 §94에서 추적한다.
 각 절의 미검사 범위 및 DRC 교체 실패/진행 중 취소, pack 생성,
 메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
 auth/BFCache/종료는 남는다.

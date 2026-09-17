@@ -22,6 +22,68 @@ def metadata(metric="width", bound=0.5, name="WIDTH"):
         deck="/not-approved/never-open.svrf", stats=dict(includes=["/not-approved/never-open.inc"]))
 
 
+def replacement_budget(source, db, rules, invalid, temps, work):
+    """Keep the old metadata/reader; reclaim only an idle note display."""
+    inputs = [source, db, drc_pack(db), rules, invalid]
+    inputs += [p for p in vfs_cache(source).rglob("*") if p.is_file()]
+    before = fingerprint(inputs)
+    refs = [dict(check="0", error="0")]
+    # 2048 MiB pool: picker 192 + reader 256 + old/new metadata 256 each
+    # leaves 1088 for rendering. Idle display must not retain another 256.
+    for budget, accepted in ((1024, True), (1088, True), (1089, False)):
+        s = Session(source, drc_pack(db), temps, "rules-budget", work / ("budget-%d.session" % budget),
+                    budget_mb=budget, rules=rules)
+        try:
+            c, picker = s.client, Picker(s, source.parent.name)
+            view, prior = idle(s), c.call("GET", "/api/v1/drc")
+            current = prior["drc"]
+            handle = picker.handle(rules.name, "all_files")
+            invalid_handle = picker.handle(invalid.name, "all_files")
+
+            def load(selected):
+                return picker.finish(picker.submit("load_drc_rules", handle=selected, context=s.context))
+
+            if accepted:
+                assert not s.display(refs)["cache_hit"]
+                assert s.display(refs)["cache_hit"]
+                note = s.read(refs)
+                rejected = load(handle)
+                assert rejected["phase"] == "failed" and rejected["error"] == "browse_busy_or_limit", rejected
+                assert c.call("GET", "/api/v1/drc")["drc"] == current
+                draft = s.prepare(note, "unpublished draft survives metadata rejection")
+                c.call("POST", API + "/revoke", dict(token=draft["token"]), 204)
+                assert not s.display(refs)["cache_hit"]
+                assert s.display(refs)["cache_hit"]
+                rejected = load(invalid_handle)
+                assert rejected["phase"] == "failed" and rejected["error"] == "browse_invalid_selection", rejected
+                assert c.call("GET", "/api/v1/drc")["drc"] == current
+                # Failed preparation releases the gate; display may repopulate
+                # and the next successful candidate must reclaim it again.
+                assert not s.display(refs)["cache_hit"]
+                assert s.display(refs)["cache_hit"]
+            else:
+                assert s.display(refs, code=429)["error"] == "review_busy"
+            result = load(handle)
+            if accepted:
+                replaced = picker.accept(result)
+                assert replaced["id"] == current["id"] and replaced["revision"] != current["revision"]
+                assert replaced["metadata"] == current["metadata"]
+                assert result["result"]["metadata_replaced"]
+                assert not s.display(refs)["cache_hit"]
+                assert s.display(refs)["cache_hit"]
+            else:
+                assert result["phase"] == "failed" and result["error"] == "browse_busy_or_limit", result
+                assert c.call("GET", "/api/v1/drc")["drc"] == current
+            after = c.call("GET", "/api/v1/drc")
+            assert after["review_grant"] == prior["review_grant"]
+            assert after["notes"]["binding_id"] == prior["notes"]["binding_id"]
+            assert not after["notes"]["detached"]
+            assert idle(s) == view and fingerprint(inputs) == before
+            assert not list(db.parent.glob(".*.notes.*")) and not list(db.parent.glob(".*.waive.*"))
+        finally:
+            s.close()
+
+
 def main(fixture):
     with tempfile.TemporaryDirectory(prefix="floe-runtime-svrf-") as td:
         work = Path(td).resolve()
@@ -42,6 +104,11 @@ def main(fixture):
         protected = [source, a, b, empty, bad, huge] + [p for p in vfs_cache(source).rglob("*") if p.is_file()]
         before = fingerprint(protected)
         refs = [dict(check="0", error="0")]
+        budget_db = data / "budget.db"
+        budget_db.write_text(DB)
+        subprocess.run([str(INDEX), "drc", str(budget_db), "--jobs", "2"],
+                       check=True, capture_output=True, timeout=30)
+        replacement_budget(source, budget_db, a, bad, temps, work)
         for mode in ("ascii", "writer"):
             db = data / (mode + ".db")
             db.write_text(DB)
@@ -162,7 +229,7 @@ def main(fixture):
                 assert fingerprint(protected) == before, "metadata selection modified protected inputs"
             finally:
                 s.close()
-        print("WEB RUNTIME SVRF: ALL OK (ASCII/ICE, atomic replace/failure, same reader, stale/cancel/replay, bounds, witness, no authority expansion, saved receipts, build/reconnect persistence, camera/input invariant)")
+        print("WEB RUNTIME SVRF: ALL OK (ASCII/ICE, atomic replace/failure, same reader, stale/cancel/replay, 1024/1088/1089 MiB admission, idle display vs active editor, bounds, witness, no authority expansion, saved receipts, build/reconnect persistence, camera/input invariant)")
 
 
 if __name__ == "__main__":
