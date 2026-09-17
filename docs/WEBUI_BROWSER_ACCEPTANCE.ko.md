@@ -141,10 +141,42 @@ canvas에 포커스가 있는 상태의 `k`는 마지막 수직 ruler만 삭제�
 bitmap 슬롯, 스냅 정확도·Shift 자유각·선택 bbox gap, DRC CD, clipboard와 지연/부하
 수용은 별도다. 모형 게이트나 이 두 거리 일치만으로 전체 측정 기능을 완료 처리하지 않는다.
 
-## 6. 잔여
+## 6. 설정 다운로드 — 불러오기는 브라우저 권한 대기
+
+2026-09-17 사용자가 새 합성 valmini 세션을 열고, 다운로드한 두 설정 파일을 같은
+loopback 세션으로 다시 불러오는 검사를 명시 승인했다. 실제 설계·설계 기본값·외부
+서버는 범위 밖이다. `9f8544a`까지 후속 변경은 문서뿐이다.
+
+실제 Save settings 버튼으로 두 형식을 각각 다운로드했다. requested 상태만으로
+완료를 판단하지 않고 Downloads의 해당 파일 두 개만 확인했다.
+
+| 파일 | 크기 | 확인한 내용 |
+|---|---:|---|
+| `floe-layers.json` | 716 bytes | `floe.layers`, version1, groups0, rows9. 색상은 초기 UI와 일치하고 모두 visible, fill/width는 null |
+| `floe-layers.layerprops` | 262 bytes | 주석 외9행. 같은 layer/datatype·색상·이름과 speckle/가시성1/선폭1 |
+
+이 평면 fixture의 native 출력은 version1이었다. bitmap 슬롯·참조·그룹 상속이나
+version2 직렬화 수용을 이 결과로 대신하지 않는다. 두 파일은 사용자 Downloads에
+남겼으며 저장소에는 추가하지 않았다.
+
+1/0을 숨기고7/0에 Outline/3px를 적용한 뒤 편집기를 다시 열어 변경값을 확인했다.
+이후 Load settings의 실제 filechooser로 JSON을 선택하려 했으나 브라우저 도구가
+`Not allowed`를 반환했다. 앱의 Settings applied 응답은 관측하지 못했다. 확장
+프로그램의 파일 URL 접근 설정을 확인하도록 안내했으며 우회 업로드나 권한 자동
+변경은 하지 않았다. **JSON/Calibre 불러오기·roundtrip은 미검증**이고, 앱 importer의
+실패 증거로도 집계하지 않는다. Calibre 업로드는 시도하지 않았다.
+
+뷰를 닫고 같은 등록 소스를 다시 열어9레이어 on·초기 색상·7/0 Speckle/1px를
+복원했다. X200/Y220/view500µm, depth99·High·Frames/Labels on·선택/룰러0·snap on,
+Local connected/final frame 상태를 확인하고 사용자 탭과 서버는 유지했다.
+이는 파일 import를 통한 복원이 아니다. source/OVM/OVP/OVT의 SHA-256·크기·mtime는
+전후 일치한다. 제품 코드 변경이나 전체 배터리 재실행은 없었다.
+
+## 7. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
-공유, §5의 일부 레이어/스타일·스냅 없는 수동 측정이다. 각 절의 미검사 범위와
+공유, §5의 일부 레이어/스타일·스냅 없는 수동 측정, §6의 두 설정 다운로드다. 설정
+불러오기·복원과 각 절의 미검사 범위 및
 파일/DRC 열기·저장/충돌/복구·슬롯 편집·clipboard·auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
 
