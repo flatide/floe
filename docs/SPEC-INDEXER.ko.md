@@ -284,7 +284,7 @@ explain  <kind>  <verdict>  <cell>  <layer L/D | ->  <id>  <bbox um x0,y0,x1,y1>
   members = 반복 수) · `frame`(r==0) keep|thin_lattice|cull_size|cull_hair · `page`
   keep_sparse(덱: 멤버가 footprint의 1/256을 못 덮어 wash 대신 페이지를 선택,
   JOBDECK 4단계) · 대표(page frontier, SPEC-PLANNER §3, `--page-reps 1`): `page`
-  rep_keep|rep_wash, `child` rep_wash|rep_expand. 덱 정책의 판정을 단일 소스에서
+  rep_keep, `child` rep_expand(멤버를 솎아 펼침). 덱 정책의 판정을 단일 소스에서
   보려면 `--sub-cut-wash 1 --page-hairline 0`(2026-09-15).
 - 페이지의 w/h/min은 색인 필드 max_w/max_h/max_min, bbox는 셀 로컬 dbu를 µm로;
   배치는 첫 멤버의 월드 박스, members는 반복 멤버 수. 뷰 박스와 겹치는 것만

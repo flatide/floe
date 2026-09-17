@@ -94,6 +94,28 @@ fn rep_in_run(lo: u32, hi: u32, base: u32, k: u32) -> bool {
     next < last
 }
 
+/// a grid thinned by j member octaves: strides 2^ja x 2^jb with
+/// ja + jb = 2j, each at most the axis' own log2, so one member in
+/// 4^j (a 1-D array thins along its length); member 0 stays, and the
+/// survivors of j + 1 are among those of j
+pub fn thin_grid(na: u64, nb: u64, va: (i64, i64), vb: (i64, i64), j: u32) -> (u64, u64, (i64, i64), (i64, i64)) {
+    let la = na.max(1).ilog2();
+    let lb = nb.max(1).ilog2();
+    // j octaves per axis (an isotropic stipple), the axis that runs
+    // out of members handing its remainder to the other; both counts
+    // grow with j, so the survivors nest
+    let ja = j.min(la);
+    let jb = (2 * j - ja).min(lb);
+    let ja = (2 * j - jb).min(la);
+    let (sa, sb) = (1u64 << ja, 1u64 << jb);
+    (
+        na.div_ceil(sa),
+        nb.div_ceil(sb),
+        (va.0.saturating_mul(sa as i64), va.1.saturating_mul(sa as i64)),
+        (vb.0.saturating_mul(sb as i64), vb.1.saturating_mul(sb as i64)),
+    )
+}
+
 /// the verdict on a cut page under the sub-cut rules or as a representative
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum SubCut {
@@ -709,6 +731,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         explain_on: opts.explain,
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         reps: req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0,
+        rep_edges: HashMap::new(),
         wash_walk_budget: opts.sub_cut_walk_budget,
         sparse_px_left: opts.sub_cut_sparse_px,
         wash_px_left: opts.sub_cut_wash_px,
@@ -1011,6 +1034,9 @@ struct Hier<'a> {
     wash_walk_budget: u64,
     /// ViewReq::page_reps in force (cut on, sub-cut wash off)
     reps: bool,
+    /// representative placements expanded this walk: pli -> the
+    /// member octaves j their repetition is thinned by in place_edge
+    rep_edges: HashMap<u64, u32>,
     /// remaining per-plan sub-cut budgets (HierOpts::sub_cut_sparse_px
     /// / sub_cut_wash_px), screen px
     sparse_px_left: f64,
@@ -1290,6 +1316,7 @@ impl<'a> Hier<'a> {
             self.thin_bins.clear();
             self.wash_nodes.clear();
             self.sparse_edges.clear();
+            self.rep_edges.clear();
             let mut edges: BTreeSet<u64> = BTreeSet::new();
             let mut framed: HashSet<u64> = HashSet::new();
             for b in &boxes {
@@ -1433,38 +1460,33 @@ impl<'a> Hier<'a> {
                                 // only the proxy box is gone,
                                 // matching the depth-full omission
                                 // rule.
-                                // the page frontier: one placement in
-                                // 4^k (by index within the cell, k
-                                // octaves below its cut) survives as the
-                                // sub-cut rules draw it
-                                let rep = !self.sub_cut_wash
-                                    && self.reps
-                                    && rep_keeps(pli - cell.place_start as u64, self.place_octaves(cw, chh));
-                                if self.sub_cut_wash || rep {
-                                    if !self.wash_sub_cut_child(
-                                        &mut wc, pli, &h, &rb, &boxes, self.hair_cut(size_cut), rep,
-                                    ) {
-                                        // sparse (no wash could stand for
-                                        // it): walk it - few members, and
-                                        // Calibre shows them at every zoom
-                                        if rep {
-                                            self.st.rep_children += 1;
-                                            self.note_child("rep_expand", pli, &h, &rb, &boxes);
-                                        } else {
-                                            self.st.sub_cut_sparse += 1;
-                                            self.note_child("expand_sparse", pli, &h, &rb, &boxes);
-                                        }
-                                        self.sparse_edges.insert(pli);
+                                // the page frontier: a representative
+                                // placement is EXPANDED with its members
+                                // thinned (one in 4^k over members and
+                                // placement index, place_rep), never
+                                // washed as its footprint
+                                if !self.sub_cut_wash && self.reps {
+                                    if let Some(j) = self.place_rep(pli, &h, cw, chh, cell.place_start) {
+                                        self.st.rep_children += 1;
+                                        self.note_child("rep_expand", pli, &h, &rb, &boxes);
+                                        self.rep_edges.insert(pli, j);
                                         edges.insert(pli);
                                         continue;
                                     }
-                                    if rep {
-                                        self.st.rep_children += 1;
-                                        self.st.cull_size += 1;
-                                        framed.insert(pli);
-                                        self.note_child("rep_wash", pli, &h, &rb, &boxes);
-                                        continue;
-                                    }
+                                }
+                                if self.sub_cut_wash
+                                    && !self.wash_sub_cut_child(
+                                        &mut wc, pli, &h, &rb, &boxes, self.hair_cut(size_cut),
+                                    )
+                                {
+                                    // sparse (no wash could stand for
+                                    // it): walk it - few members, and
+                                    // Calibre shows them at every zoom
+                                    self.st.sub_cut_sparse += 1;
+                                    self.note_child("expand_sparse", pli, &h, &rb, &boxes);
+                                    self.sparse_edges.insert(pli);
+                                    edges.insert(pli);
+                                    continue;
                                 }
                                 self.st.cull_size += 1;
                                 framed.insert(pli);
@@ -1517,33 +1539,28 @@ impl<'a> Hier<'a> {
                         // of displaying false geometry.
                         let size_cut = cw < cut && chh < cut;
                         if size_cut || cw.min(chh) < self.hair {
-                            let rep = !self.sub_cut_wash
-                                && self.reps
-                                && rep_keeps(pli - cell.place_start as u64, self.place_octaves(cw, chh));
-                            if self.sub_cut_wash || rep {
-                                if !self.wash_sub_cut_child(
-                                    &mut wc, pli, &h, &rb, &boxes, self.hair_cut(size_cut), rep,
-                                ) {
-                                    // sparse (no wash could stand for it):
-                                    // expand - few members, and Calibre
-                                    // shows them at every zoom
-                                    if rep {
-                                        self.st.rep_children += 1;
-                                        self.note_child("rep_expand", pli, &h, &rb, &boxes);
-                                    } else {
-                                        self.st.sub_cut_sparse += 1;
-                                        self.note_child("expand_sparse", pli, &h, &rb, &boxes);
-                                    }
-                                    self.sparse_edges.insert(pli);
+                            if !self.sub_cut_wash && self.reps {
+                                if let Some(j) = self.place_rep(pli, &h, cw, chh, cell.place_start) {
+                                    self.st.rep_children += 1;
+                                    self.note_child("rep_expand", pli, &h, &rb, &boxes);
+                                    self.rep_edges.insert(pli, j);
                                     edges.insert(pli);
                                     continue;
                                 }
-                                if rep {
-                                    self.st.rep_children += 1;
-                                    self.st.cull_size += 1;
-                                    self.note_child("rep_wash", pli, &h, &rb, &boxes);
-                                    continue;
-                                }
+                            }
+                            if self.sub_cut_wash
+                                && !self.wash_sub_cut_child(
+                                    &mut wc, pli, &h, &rb, &boxes, self.hair_cut(size_cut),
+                                )
+                            {
+                                // sparse (no wash could stand for it):
+                                // expand - few members, and Calibre
+                                // shows them at every zoom
+                                self.st.sub_cut_sparse += 1;
+                                self.note_child("expand_sparse", pli, &h, &rb, &boxes);
+                                self.sparse_edges.insert(pli);
+                                edges.insert(pli);
+                                continue;
                             }
                             self.st.cull_size += 1;
                             self.note_child(
@@ -1688,8 +1705,16 @@ impl<'a> Hier<'a> {
         if !washable {
             return SubCut::Drop;
         }
+        if rep {
+            // a representative is DRAWN, never washed (field
+            // 2026-09-17: washes left one box at the fit view and
+            // boxes at the next zooms where lines were wanted); its
+            // cost is what the page cost one octave closer, and the
+            // octave thinning bounds how many there are
+            return SubCut::Keep;
+        }
         let hair = self.hair_cut(size_cut);
-        if !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, p.max_min, hair, rep) {
+        if !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, p.max_min, hair, false) {
             // a sparse page beyond the budget is dropped, never
             // washed (its footprint is a false block)
             return if self.take_sparse(p.members, p.max_w, p.max_h) { SubCut::Keep } else { SubCut::Drop };
@@ -1788,6 +1813,32 @@ impl<'a> Hier<'a> {
         (lo, hi)
     }
 
+    /// Whether a cut placement is a representative, and the member
+    /// octaves j its repetition is thinned by: k octaves below its cut
+    /// keep one item in 4^k. An array's members absorb j = min(k,
+    /// floor(log4 members)) of them - one member in 4^j, by strides
+    /// (thin_grid) or every 4^j-th point - and the placement's index
+    /// within its cell the remaining k - j (one placement in 4^(k-j));
+    /// a plain placement (one member) takes them all by index. Both
+    /// factors are powers of four growing with k, so the survivors
+    /// stay nested, and never a footprint wash: the survivors are
+    /// drawn (field 2026-09-17: the washed array footprint was the one
+    /// box left at the fit view).
+    fn place_rep(&self, pli: u64, h: &floe_ovm::PlaceHead, cw: u64, chh: u64, place_start: u32) -> Option<u32> {
+        let k = self.place_octaves(cw, chh);
+        let members: u64 = match h.kind {
+            0 => 1,
+            1 => (h.na as u64).saturating_mul(h.nb as u64),
+            _ => self.v.pts_ref(pli).map(|p| p.count as u64).unwrap_or(1),
+        };
+        let j = k.min(members.max(1).ilog2() / 2);
+        if rep_keeps(pli.saturating_sub(place_start as u64), k - j) {
+            Some(j)
+        } else {
+            None
+        }
+    }
+
     /// Whether a culled item is a hairline cut under the cull policy
     /// (a size cut, or any cut under keep where page_hair is 0, takes
     /// the dense-array coverage rule).
@@ -1805,7 +1856,6 @@ impl<'a> Hier<'a> {
         rb: &BBox,
         boxes: &[BBox],
         hair: bool,
-        rep: bool,
     ) -> bool {
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, rb);
@@ -1828,13 +1878,13 @@ impl<'a> Hier<'a> {
         }
         let bw = (b0.x1 - b0.x0).max(0) as u64;
         let bh = (b0.y1 - b0.y0).max(0) as u64;
-        if !self.wash_worth(&fp, members, bw, bh, bw.min(bh), hair, rep) {
+        if !self.wash_worth(&fp, members, bw, bh, bw.min(bh), hair, false) {
             // sparse: expanded while the sparse budget lasts; beyond
             // it dropped (the caller's cull), never washed
             return !self.take_sparse(members, bw, bh);
         }
         let mask = self.v.cell_lmask_rec(h.child);
-        self.wash_layers(wc, mask, fp, boxes, !rep);
+        self.wash_layers(wc, mask, fp, boxes, true);
         true
     }
 
@@ -2376,6 +2426,7 @@ impl<'a> Hier<'a> {
         // washing (expand_sparse) passes the cut here on purpose
         if !structural
             && !self.sparse_edges.contains(&pli)
+            && !self.rep_edges.contains_key(&pli)
             && ((cw < self.cut && ch < self.cut)
                 || cw.min(ch) < self.hair)
         {
@@ -2451,19 +2502,19 @@ impl<'a> Hier<'a> {
                 if vis {
                     // ONE CellInstArray, full na x nb: off-view
                     // members are klayout's clip problem; nesting
-                    // stays nested (zero expansion)
+                    // stays nested (zero expansion). A representative
+                    // array ships one member in 4^j (page frontier)
+                    let (na, nb, va, vb) = match self.rep_edges.get(&pli) {
+                        Some(&j) if j > 0 => thin_grid(h.na as u64, h.nb as u64, h.va, h.vb, j),
+                        _ => (h.na as u64, h.nb as u64, h.va, h.vb),
+                    };
                     wc.insts.push(WsInst {
                         child: ckey,
                         x: h.x,
                         y: h.y,
                         rot: h.rot,
                         flip: h.flip,
-                        rep: Rep::Grid {
-                            na: h.na as u64,
-                            nb: h.nb as u64,
-                            va: h.va,
-                            vb: h.vb,
-                        },
+                        rep: Rep::Grid { na, nb, va, vb },
                     });
                     self.st.inst_edges += 1;
                 }
@@ -2559,6 +2610,15 @@ impl<'a> Hier<'a> {
                     (0..count).collect()
                 } else {
                     sel.into_iter().collect()
+                };
+                // a representative point set ships every 4^j-th slot
+                // (page frontier; slot 0 stays, nested in j)
+                let emit: Vec<u32> = match self.rep_edges.get(&pli) {
+                    Some(&j) if j > 0 => {
+                        let m = 1u32 << (2 * j).min(31);
+                        emit.into_iter().filter(|s| s % m == 0).collect()
+                    }
+                    _ => emit,
                 };
                 if emit.is_empty() {
                     return;
@@ -5036,6 +5096,25 @@ mod tests {
         let mut cull = req.clone();
         cull.page_hairline = true;
         assert_eq!(brute(&lin, &cull).len(), 10);
+    }
+
+    #[test]
+    fn a_thinned_grid_keeps_one_member_in_four_per_octave_and_nests() {
+        // 64 x 64: j = 1 -> 32 x 32 on a doubled pitch; j = 3 -> 8 x 8
+        assert_eq!(thin_grid(64, 64, (10, 0), (0, 10), 1), (32, 32, (20, 0), (0, 20)));
+        assert_eq!(thin_grid(64, 64, (10, 0), (0, 10), 3), (8, 8, (80, 0), (0, 80)));
+        // a 1-D array thins along its length: one in 4^j
+        assert_eq!(thin_grid(1024, 1, (5, 0), (0, 0), 2), (64, 1, (80, 0), (0, 0)));
+        // strides never exceed the axis: 4 x 1024 at j = 3 -> 1 x 64
+        // (two octaves on the short axis, four on the long one)
+        assert_eq!(thin_grid(4, 1024, (1, 0), (0, 1), 3), (1, 64, (4, 0), (0, 16)));
+        // nested: the survivors of j + 1 sit on j's lattice
+        for j in 0..4u32 {
+            let (_, _, va1, vb1) = thin_grid(256, 256, (1, 0), (0, 1), j);
+            let (_, _, va2, vb2) = thin_grid(256, 256, (1, 0), (0, 1), j + 1);
+            assert_eq!(va2.0 % va1.0, 0);
+            assert_eq!(vb2.1 % vb1.1, 0);
+        }
     }
 
     #[test]

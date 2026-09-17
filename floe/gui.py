@@ -3640,11 +3640,12 @@ class Viewer:
                         if (culls.get("rep_kept") or culls.get("rep_washed")
                                 or culls.get("rep_children")):
                             # the page frontier (2026-09-17): cut pages
-                            # kept as pixels / washed, cut placements
-                            # washed or expanded - one in 4^k
-                            text += ", reps %s/%s/%s" % (
+                            # kept (drawn) and cut placements expanded
+                            # with thinned members - one in 4^k
+                            # (rep_washed stays 0: representatives are
+                            # never washed since the field's boxes)
+                            text += ", reps %s pages/%s children" % (
                                 fmt_count(culls.get("rep_kept", 0)),
-                                fmt_count(culls.get("rep_washed", 0)),
                                 fmt_count(culls.get("rep_children", 0)))
                     summ = res.get("summary") or {}
                     if summ.get("layers"):

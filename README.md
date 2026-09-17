@@ -398,12 +398,13 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
 - **cut 미만의 대표(page frontier, 2026-09-17)**: 모든 도형이 cut보다 작은
   페이지(콘택·비아·마크 배열)와 `thin:cull`의 hairline 페이지는 사라지는 대신
   **대표만 남는다** — 컷 문턱의 1/2^k 아래면 4^k개 중 하나(run 안 index 기준)를
-  sub-cut 규칙대로 그린다(희소 = 픽셀, 밀집 = 레이어 색 footprint 블록). 한 옥타브
+  지오메트리 그대로 그린다(페이지는 도형, 배열 배치는 멤버를 4^j분의 1로 솎아 펼침;
+  wash 블록은 쓰지 않는다). 한 옥타브
   축소마다 뷰의 컷 항목은 4배, 남기는 비율은 1/4이라 뷰당 비용이 컷 시점 수준
   근처에 머물고, 넓은 뷰에 보이는 것은 가까운 뷰에도 있었다(축소 중 새로 나타나는
   것이 없는 frontier의 성질). 요약처럼
   채워진 면이 아니라 무늬이므로, 채워진 광역뷰가 필요하면 `floe2 index
-  --occupancy` + `thin:keep`. 상태줄 `reps K/W/C`. 킬 스위치
+  --occupancy` + `thin:keep`. 상태줄 `reps K pages/C children`. 킬 스위치
   `FLOE_RUST_PAGE_REPS=off`. 모든 sub-cut 항목을 남기는 규칙은 진단
   `FLOE_RUST_SUB_CUT_WASH=on`(단일)·`FLOE_RUST_DECK_WIDE=on`(덱)(SPEC-PLANNER §3).
 - **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):

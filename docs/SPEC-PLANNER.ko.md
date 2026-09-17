@@ -67,19 +67,25 @@
   **대표만 남긴다**. 컷에 걸린 페이지/배치가 자기 컷 문턱의 1/2^k 이하이면(k =
   `rep_octaves`; hairline 컷은 `max_min/page_hair`, 크기 컷은 `max_dim/cut`, 둘 다면
   먼저 잘린 쪽 = 큰 k) 소속 run(페이지: (cell, layer)의 페이지 열, 배치: 셀의 배치
-  열) 안의 index가 4^k의 배수인 것만 남기고(`rep_keeps`), 남긴 것은 sub-cut 규칙
-  대로 그린다(밀집 → footprint wash `rep_wash`, 희소 → 픽셀 `rep_keep`; 배치는
-  `rep_wash`/`rep_expand`). 한 옥타브 축소하면 뷰의 컷 항목이 4배, 남기는 비율이
+  열) 안의 index가 4^k의 배수인 것만 남기고(`rep_keeps`), 남긴 것은 **항상
+  지오메트리로 그린다** — 페이지는 디코드해 그리고(`rep_keep`), 배치는 펼치되
+  (`rep_expand`) 배열의 멤버를 솎는다: 멤버가 j = min(k, ⌊log4 멤버 수⌋) 옥타브를
+  맡아 4^j개 중 하나(Grid는 축당 stride 2^ja × 2^jb, ja + jb = 2j, `thin_grid`;
+  Pts는 4^j번째 점)를 WsInst의 rep로 내보내고, 남은 k − j 옥타브는 셀 안 배치
+  index(4^(k−j)의 배수)가 맡는다(`place_rep`). 대표에는 wash를 쓰지 않는다(현장
+  2026-09-17 2차: 밀집 페이지의 bbox wash와 배열 footprint wash가 fit 뷰의 박스
+  하나·중간 줌의 박스들이었다). 한 옥타브 축소하면 뷰의 컷 항목이 4배, 남기는 비율이
   1/4이라 **뷰당 수는 컷 시점의 수 근처로 유지**된다 — 항목이 고르게 분포하고 비용이
   비슷할 때의 기대치이고, 페이지 하나의 거대 반복이나 index 0이 늘 남는 짧은 run이
   많으면 수와 비용이 어긋난다(리뷰 2026-09-17). 집합은 frontier 격자 대표처럼 **아래로
   포함**된다: 4^(k+1)의 배수는 4^k의 배수이므로 S(k+1) ⊆ S(k), 즉 넓은 뷰에 보이는
   것은 더 가까운 모든 뷰에도 있었고 축소 중에 새로 나타나는 것은 없다(index 4는 k=1
   에 남고 k=2에 사라진다). run의 첫 항목(index 0)은 어느 줌에서든 대표 **후보**이고
-  실제 표시는 뷰 안·예산·상위 배치의 판정을 거친다. 대표의 wash 판정은 항상 1/8
-  채움이고, ink 추정은 멤버 수 × 최소변 × 긴변(px; `max_min`·`max(max_w, max_h)`) —
-  리뷰가 짚은 대로 예전의 멤버 수 × max_w × max_h는 1000×1 선과 1×1000 선의 L을
-  200 % 밀집으로 보아 정사각형을 통째로 wash했다. BVH는 서브트리의 index 구간
+  실제 표시는 뷰 안·상위 배치의 판정을 거친다(대표는 sub-cut 예산을 타지 않는다;
+  옥타브 솎기가 곧 상한이다). 진단용 sub-cut 규칙의 wash 판정에 쓰는 ink 추정은
+  멤버 수 × 최소변 × 긴변(px; `max_min`·`max(max_w, max_h)`) — 리뷰가 짚은 대로
+  예전의 멤버 수 × max_w × max_h는 1000×1 선과 1×1000 선의 L을 200 % 밀집으로 보아
+  정사각형을 통째로 wash했다. BVH는 서브트리의 index 구간
   ([lo, hi), 페이지는 leaf-order permute로 연속)에 4^k의 배수가 없으면 통째로
   프루닝한다(`rep_pruned`): 크기 컷 노드와, `min(max_w, max_h) < page_hair`인 노드
   (모든 페이지의 max_min이 그 이하라 hairline 컷 — 한 방향 배선 run은 잡히고 양방향이

@@ -1098,7 +1098,8 @@ class RustRenderWorker:
                 "sub_cut_sparse_over": _wire_int(fields, "sub_cut_sparse_over"),
                 "sub_cut_wash_over": _wire_int(fields, "sub_cut_wash_over"),
                 # the page frontier's representatives (2026-09-17): cut
-                # pages kept / washed, cut placements washed or expanded
+                # pages kept (drawn), cut placements expanded with thinned
+                # members; rep_washed is kept on the wire but stays 0
                 "rep_kept": _wire_int(fields, "rep_kept"),
                 "rep_washed": _wire_int(fields, "rep_washed"),
                 "rep_children": _wire_int(fields, "rep_children"),

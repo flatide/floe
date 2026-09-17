@@ -1788,11 +1788,24 @@ class SubCutTests(unittest.TestCase):
         # default draws what the sub-cut rules draw and counts it as
         # reps, not as sub-cut verdicts; FLOE_RUST_PAGE_REPS=off is the
         # pre-2026-09-16 cull: nothing lit, nothing counted
+        placed = {(x, y) for x in range(58, 82) for y in range(158, 182)}
         for layer in ((4, 0), (5, 0), (7, 0), (8, 0), (9, 0)):
             lit, res = self._frame(self.worker, layer)
             lit_on, _ = self._frame(self.worker_on, layer)
-            self.assertEqual(lit, lit_on, layer)
             self.assertTrue(lit, layer)
+            if layer == (7, 0):
+                # the placement array is a representative EXPANDED with
+                # its members thinned (one in 4^j), never its footprint
+                # wash: a stipple inside the block the rules wash
+                self.assertLess(len(lit), len(lit_on), layer)
+                self.assertGreaterEqual(len(lit), 4, sorted(lit))
+                self.assertTrue(lit <= placed, sorted(lit - placed)[:10])
+            else:
+                # a representative page is drawn, never washed: for these
+                # dense pages every pixel of the wash block is lit by the
+                # shapes themselves, the sparse ones draw the same pixels
+                self.assertGreaterEqual(len(lit & lit_on), len(lit_on) * 9 // 10, layer)
+                self.assertLessEqual(len(lit - lit_on), 90, (layer, sorted(lit - lit_on)[:10]))
             culls = res["plan_culls"]
             self.assertGreaterEqual(culls["rep_kept"] + culls["rep_washed"]
                                     + culls["rep_children"], 1, (layer, culls))
