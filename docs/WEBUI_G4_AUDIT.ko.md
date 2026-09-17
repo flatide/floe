@@ -126,6 +126,9 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    2026-09-16 사용자가 합성 시작 파일·다운로드를 승인한 뒤 재시도했으나 브라우저
    자체 URL 정책이 `file://` 시작 파일을 다시 차단했다. 우회하지 않았고 합성
    서버와 인증 시작 파일을 정리했다. 실제 다운로드 성공으로 기록하지 않는다.
+   2026-09-17 브라우저 연결 복구 후 실제 Chrome에서 공개 진단 shell 표시와 미인증
+   버튼 비활성화를 확인했다([표시 진단 §5](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)). 정상 인증·
+   픽셀·다운로드 수용은 아직 남으며, 연결 복구를 기존 접근 차단 해제로 간주하지 않는다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격

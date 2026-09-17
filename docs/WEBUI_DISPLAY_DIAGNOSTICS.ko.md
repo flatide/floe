@@ -195,3 +195,22 @@ BFCache 복귀는 off여서 명시적으로 다시 켜야 한다. 새 페이지 
 선택이다. 새 서버 이미지 저장/다운로드 endpoint나 path DTO는 만들지 않는다.
 독립 displaytest 세션에서는 둘 다 false다. 실제 브라우저 PNG/다운로드·물리 화면 수용은
 기존 도구 제약을 우회하지 않고 별도 항목으로 유지한다.
+
+## 5. 2026-09-17 실제 Chrome의 미인증 진입 확인
+
+검사한 제품 revision은 `1a16379`다. 브라우저 연결 복구 후 `displaytest --no-open`의
+loopback 공개 shell만 실제 Chrome으로 열었다. 소스·입력 PNG·renderer는 등록하지
+않았으며 private session JSON/시작 파일·credential을 읽거나 브라우저에 전달하지 않았다.
+
+- 접근성 트리와 screenshot에서 Display diagnostics 화면 및 시작 링크 안내를 확인했다.
+  Run display test, Cancel test, Quit session은 모두 비활성화였다.
+- 같은 문서에 무효 fragment를 붙이는 이동은 시작 함수를 재실행하지 않았다.
+  그 뒤 reload 시에는 미인증 서버가 이미 종료되어 연결 거부가 표시됐다.
+  따라서 이 실행을 **무효 bootstrap의 HTTP 거부 검사**로 계산하지 않는다.
+- 소유한 서버 실행 handle의 exit 0을 확인하고 테스트 탭을 닫았다. 사용자 탭·권한·
+  브라우저 설정은 변경하지 않았다.
+
+이는 실제 Chrome의 **공개 shell 표시/미인증 버튼 상태** 근거만 추가한다.
+PNG/raw/crop 픽셀, 정상 인증·refresh 복구, dump 다운로드, owner/guest SH-08,
+Firefox/ETX·G1/G4는 여전히 미수용이다. 이전 `file://` 접근 차단을 우회하지 않았으며,
+다음 인증 검사는 사용자가 정상 제품 시작 절차로 연 합성 세션에서 이어가야 한다.
