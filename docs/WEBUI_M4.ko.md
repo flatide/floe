@@ -6308,3 +6308,25 @@ migration으로 오인할 수 있다. cache naming 단계의 별도 결함으로
 전체 목표 잔여: 실제 Chrome의 waive 저장/복원·다중 선택/충돌/불명확한 게시 복구와
 나머지 입력·설정 조작, Python-free Linux 실행, G1/G4 최종 판정, 현장 Firefox/ETX.
 원격 SH-10 및 index hot reload는 사용자 보류, M5 world-tile은 성능 조건부다.
+
+## 91. M4g-36 — waive 영수증과 현재 reader 상태 분리
+
+61638의 저장 성공 영수증은 `reader_applied=true`만 보면 항상 “matching metadata
+대기”를 표시했다. 실제 조회 차단은 ready/id/revision을 확인해 이미 풀렸으므로
+동작과 문구가 어긋났다. 불변인 파일/reader 게시 영수증과 현재 metadata 상태를
+분리해 표시한다. 기존 read barrier를 그대로 사용하며, 이전 등록/다른 DRC의
+영수증은 현재 리뷰를 증명하지 않는다고 안내한다. 끊김/metadata 조회 실패 시에는
+재확인이 필요하다고 표시한다. 저장·자동 저장·권한·재시도 규칙은 바꾸지 않는다.
+
+`node tools/validate_web_ui.cjs` 전체가 통과했다. unit/panel gate는 성공 receipt만
+도착한 상태에서는 reads가 계속 차단되고 대기 문구가 나오며, matching metadata가
+도착한 뒤에만 차단과 대기 문구가 함께 사라지는 것을 검증한다. loading/연결 끊김/
+metadata 없음/다른 리뷰/분리된 등록도 검사한다. 로그는 §90 폴더의
+`waive-receipt-ui.log`다. 실행 중인61638은 이전 bundle이므로 새 실제 브라우저
+검증으로 계산하지 않는다. 마지막 자동 clear 재조회는 사용자 추가 읽기 승인 또는
+수정 빌드의 재시작 후 수용으로 남는다.
+
+§90의 나머지 배터리는 layer-defaults 재실행 통과 후 layer-palette native oracle의
+시작30초 제한에서 중단됐다. 원인/제한은 그대로이며 각 구간 재실행을 단일 전체
+PASS로 합치지 않는다. 전체 목표 잔여는 §90과 같고, 다음 로컬 결함은 DRC build의
+부모 경로 alias 오인이다.

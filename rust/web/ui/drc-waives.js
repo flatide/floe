@@ -72,12 +72,15 @@
         if(v.approve!==true||typeof v.confirm_legacy!=='boolean'){fail();}return v;}
     function refs(v,P){if(!Array.isArray(v)||!v.length||v.length>5000){fail();}const seen=new Set();return v.map(function(r){keys(r,['check','error']);P.counter(r.check,true);P.counter(r.error,true);
         const k=r.check+':'+r.error;if(seen.has(k)){fail();}seen.add(k);return {check:r.check,error:r.error};});}
-    function statusText(v){
+    function statusText(v,metadata){
         if(!v){return 'No waive save in this server session.';}
         let s=(v.outcome_unknown?'Save outcome UNKNOWN':phases[v.phase])+' · #'+v.seq;
         if(v.published===true){s+='\nWaive file saved.';if(!v.directory_synced){s+=' Directory sync failed: durability is unconfirmed. Do not repeat the save to retry sync.';}
             if(v.phase==='refreshing_reader'){s+='\nWaiting for the review reader.';}
-            else if(v.reader_applied===true){s+='\nReader updated; waiting for matching review metadata before resuming.';}
+            else if(v.reader_applied===true){s+='\n'+(metadata==='matched'?'Reader updated; current review metadata matches this receipt.':
+                metadata==='waiting'?'Reader updated; waiting for matching review metadata before resuming.':
+                metadata==='earlier'?'Reader updated for an earlier review. This receipt does not describe the current review.':
+                'Reader update acknowledged. Refresh the review to verify current statuses.');}
             else{s+='\nReader '+(v.reader_applied===null?'outcome UNKNOWN':'was not updated')+'. Reopen the review before relying on its statuses. The saved file is not undone.';}}
         if(v.outcome_unknown){s+='\nThe worker may have committed. Check the file and reopen the review; no automatic retry.';}
         if(v.error){s+='\n'+(errors[v.error]||'Check local diagnostics and this receipt.');}
@@ -103,6 +106,14 @@
             return !reader||reader.phase!=='ready'||(v.reader_revision!==undefined&&v.reader_revision!==reader.revision);
         }
         function notify(){const paused=suspended();if(paused!==notified){notified=paused;if(o.changed){o.changed();}}}
+        function receiptMetadata(){
+            const v=latest();if(!v){return null;}
+            if(model.detached||v.scope_id&&model.binding_id!==v.scope_id||!affects(v.context)){return 'earlier';}
+            // A receipt is immutable; metadata readiness is live. Reuse the read
+            // barrier rather than claiming that an acknowledgement resumes reads.
+            if(!enabled||stopped||stale){return null;}
+            return suspended()?'waiting':'matched';
+        }
         function selection(){try{const c=o.selection();if(stopped||!c){return null;}context(c.context);id(c.epoch);text(c.key,256);text(c.caption,4096);
             if(!Number.isInteger(c.count)||c.count<1||c.count>5000){return null;}return c;}catch(_){return null;}}
         function same(c){const n=selection();return !!n&&equal(n.context,c.context)&&n.epoch===c.epoch&&n.key===c.key&&n.count===c.count;}
@@ -155,7 +166,7 @@
             el('waives-refresh').disabled=stopped||!enabled||!!poll;el('waives-uncertain').hidden=!uncertain;
             el('waives-resolve').disabled=!pending||stopped||!!write||!!cancelling;
             el('waives-forget').disabled=!(permitted()||model&&model.detached&&!stopped&&!stale)||!!active()||!!write||!el('waives-checked').checked;
-            el('waives-status').textContent=(latest()&&latest().scope_id&&model.binding_id!==latest().scope_id?'Earlier review registration — receipt only\n':'')+statusText(latest());el('waives-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
+            el('waives-status').textContent=(latest()&&latest().scope_id&&model.binding_id!==latest().scope_id?'Earlier review registration — receipt only\n':'')+statusText(latest(),receiptMetadata());el('waives-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
             el('waives-paused').hidden=!suspended();
         }
         function schedule(){o.clearTimeout(timer);timer=null;if(enabled&&!stopped&&(active()||pending)){timer=o.setTimeout(refresh,active()?500:2500);}}

@@ -82,7 +82,10 @@ async function test(){
     await h.el('waives-approve').onclick();assert.equal(writes(h).length,0);await h.approve();await flush();
     assert.equal(h.shared.writes,1);assert.equal(h.shared.raw,null);assert.equal(h.el('waives-action').value,'');assert(h.panel.suspended());assert(h.reviewReads>0);
     assert.match(h.el('waives-status').textContent,/file saved/);assert.match(h.el('waives-status').textContent,/Reader updated/);
+    assert.match(h.el('waives-status').textContent,/waiting for matching/);
     h.panel.attach(clone(h.shared.model),clone(h.reader));assert(h.panel.suspended(),'old catalog reopened old statuses');h.sync();assert(!h.panel.suspended());assert.deepEqual(h.pauses,[true,false]);
+    assert.match(h.el('waives-status').textContent,/current review metadata matches/);
+    assert.doesNotMatch(h.el('waives-status').textContent,/waiting/);
     await h.read();h.choose('clear');await h.prepare();assert.match(h.el('waives-preview').textContent,/Clear waive on/);
     const n=h.calls.length;h.c.pan='zoom';h.panel.changed();assert.equal(h.calls.length,n);assert(!h.el('waives-review').hidden);
     h.c.key='groups:2';h.panel.changed();await flush();assert(h.el('waives-review').hidden);assert.equal(h.el('waives-action').value,'clear');assert(h.el('waives-prepare').disabled);
@@ -92,6 +95,22 @@ async function test(){
         h.el('waives-discard').onclick();h.c.ready=true;await h.read();h.choose('waive');await h.prepare();change();h.panel.changed();assert(h.el('waives-review').hidden);assert.equal(writes(h).length,1);
     }
     h.panel.stop();assert.equal(h.timers.size,0);assert(h.el('waives-paused').hidden);assert(h.el('waives-read').disabled);
+    assert.match(h.el('waives-status').textContent,/Refresh the review to verify/);
+    assert.doesNotMatch(h.el('waives-status').textContent,/metadata matches|waiting for matching/);
+
+    const receipt=harness({model:catalog([op()]),raw:null,writes:0,records:new Map()});receipt.sync();
+    assert.match(receipt.el('waives-status').textContent,/metadata matches/);
+    receipt.reader.phase='loading';receipt.init();assert(receipt.panel.suspended());
+    assert.match(receipt.el('waives-status').textContent,/waiting for matching/);
+    receipt.reader.phase='ready';receipt.init();assert(!receipt.panel.suspended());
+    receipt.panel.attach(null,receipt.reader);assert(receipt.panel.suspended());
+    assert.match(receipt.el('waives-status').textContent,/Refresh the review to verify/);
+    receipt.reader.id='9'.repeat(64);receipt.init();assert(!receipt.panel.suspended());
+    assert.match(receipt.el('waives-status').textContent,/earlier review/);
+    assert.doesNotMatch(receipt.el('waives-status').textContent,/metadata matches|waiting for matching/);
+    receipt.reader.id=context.drc_id;receipt.shared.model.available=false;receipt.shared.model.detached=true;receipt.init();
+    assert.match(receipt.el('waives-status').textContent,/earlier review/);receipt.panel.stop();
+    assert.match(W.statusText(op()),/Refresh the review to verify/);
 
     const legacy=harness();legacy.override=r=>r.path.endsWith('/read')?snapshot(r.body.context,2,{waived_count:'1',reserved_count:'1'}):
         r.path.endsWith('/prepare')?prepared(r.body.context,2,r.body.waived,{legacy_unverified:true,replaces_existing:true,reserved_count:'1'}):undefined;
