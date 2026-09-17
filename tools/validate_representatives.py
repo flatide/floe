@@ -149,12 +149,15 @@ def main():
         opened = subprocess.run([fi, 'plan', str(cache), '--view', '0,0,1,1'],
                                 capture_output=True, text=True, timeout=60)
         assert opened.returncode == 0, opened.stderr
-        # the standalone additive run of the same failure is loud and leaves the cache alone
+        # the standalone additive run of the same failure is loud and leaves
+        # the cache alone: every file's bytes are the same after it
+        untouched = {p.name: digest(p) for p in cache.iterdir() if p.is_file()}
         loud = subprocess.run(
             [fi, 'vfs', str(src), str(cache), '--representatives-only', '--kill-at', 'representatives-fail'],
             capture_output=True, text=True, timeout=60)
         assert loud.returncode != 0 and not sidecar.exists(), (loud.returncode, loud.stderr)
-        assert (cache / 'meta.json').exists(), 'additive failure touched the cache'
+        assert untouched == {p.name: digest(p) for p in cache.iterdir() if p.is_file()}, \
+            'additive failure touched the cache'
         index(src, '--representatives-only', '--representatives-points', '65536')
         assert sidecar.read_bytes()[:8] == b'FLOEOVR1'
         print('representatives: additive preservation, normal build, depth, pixel replay, kill switch, invalid fallback, '
