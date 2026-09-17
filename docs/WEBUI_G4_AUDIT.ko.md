@@ -157,9 +157,13 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    §7.1의 실제 교체는 기본 예산에서 실패했다. 캐시 선택/새 reader의 중복 예약을
    native 회귀로 재현·수정했지만, 수정 바이너리의 브라우저 교체 수용은 남는다
    ([M4 §89](WEBUI_M4.ko.md#89-m4g-34--drc-교체-준비의-중복-예약-제거)).
-   별도 합성 reviewer의 실제 저장은 승인됐지만 브라우저 연결/새 세션 인계가
+   별도 합성 reviewer의 실제 저장은 승인됐지만 새 세션 인계가
    남아 있다. [브라우저 기록 §7.2](WEBUI_BROWSER_ACCEPTANCE.ko.md#72-합성-reviewer-저장-수용-준비미실행)의
-   체크리스트는 실행 결과가 아니다.
+   체크리스트는 실행 결과가 아니다. §7.3에서 제어 연결이 복구된 기존 읽기 전용
+   탭의 Close/Open 복구, 검색/상태/타입/In view 필터, 양방향 오류 wrap와 단축키,
+   박스 선택·reload 복원을 확인했다. 첫 worker 실패 원인은 미확정이며 새 교체 수정
+   바이너리/저장 수용은 아니다. §8은 실제 Chrome의 PNG/raw/crop 픽셀 차이0과
+   screenshot 색 막대/흰 십자 관측이다. 원격 화면·G1/G2 수용으로 확대하지 않는다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격

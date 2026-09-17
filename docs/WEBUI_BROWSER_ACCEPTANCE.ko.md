@@ -356,12 +356,66 @@ DRC 패널을 접고 X200/Y220/view500µm·9레이어·0룰러·gen32 final crop
 아니다. 브라우저 인증 파일을 다른 도구로 읽어 우회하지 않는다. 충돌·불확실 응답
 복구·프로세스 재시작 및 OS IME는 위 기본 roundtrip과 별도 수용 항목으로 남긴다.
 
-## 8. 잔여
+### 7.3 읽기 전용 DRC 필터·순환·선택 복원
+
+다음 확인에서는 브라우저 제어 연결이 복구됐다. 새 reviewer 세션이 아니라 기존
+읽기 전용 탭을 사용했다. About은 앱 `7467c59+`, web bundle
+`18deb131059086ea60eee0ea8031a52e638cad78`을 표시하므로 `595aba6`의 DRC 교체 수정
+수용으로 세지 않는다. 시작 시 `Disconnected / renderer failed`였지만 해당 포트의
+gateway가 LISTEN 중인 것을 확인했다. 화면 안내대로 Close → Open layout을 실행하자
+Local connected·새 generation1·도형이 복구됐고 기존8규칙/23오류·SVRF8/8 연결도
+유지됐다. **최초 worker 실패의 원인은 미확정**이며 제어 도구의 연결 실패와 같은
+원인이라고 단정하지 않는다. 서버 종료·재시작·새 인증값 읽기는 하지 않았다.
+
+X200/Y220/view500µm로 맞춘 뒤 DRC 패널을 열었다. 같은 배율을 유지하면서 실제
+폭은361.5916955µm가 된다(§7과 같은 viewport 축소). 아래는 이 작은 fixture에서
+실제 UI를 조작한 결과이며 대형 페이지/연속 부하 검사는 아니다.
+
+| 검사 | 관측 |
+|---|---|
+| 규칙 검색 | `M2.OVERLAP` 제출 → M2.OVERLAP.2 한 행; 선택하면 오류2건 |
+| 상태 필터 | Waived → 규칙/오류0건; Not waived → 같은 규칙/오류2건. 파일 쓰기 없음 |
+| 버튼 순환 | Global1에서 Next →2 →1, Previous →2. 현재 규칙의 양끝 wrap |
+| 키보드 순환 | 오류 행에 포커스를 둔 `.` →1, `,` →2. 순회는 카메라를 움직이지 않음 |
+| 타입 필터 | 검색/상태 초기화 후 density → M4.DENSITY.W.4 한 행, 선택하면 오류4건 |
+| 빈 Selected | M2 규칙에서 선택0개·Selected on → 오류0건 |
+| 박스 선택 | Selected off, Box select on 뒤 두 canvas 모서리 클릭 → 이 규칙2개/전체2개 선택 |
+| Selected 복원 | Selected on → 오류2건; 브라우저 reload 후 M2·Selected on·선택2개·오류2건 유지 |
+| 선택 지우기 | Clear rule selection → 선택0개, Selected 결과0건 |
+| In view 추종 | Selected off·In view on에서2건; X1000/Y1000/view200으로 이동하면0건; 기준 뷰로 복귀하면2건 |
+
+박스의 두 클릭은 screenshot 좌표(CSS px) `(470,440)`·`(930,650)`이다. 양 오류의
+위치는 §7의 source 좌표와 일치한다. 이 검사는 Shift/Cmd 그룹 연산이나 페이지를
+넘는 선택·hover·스크롤 성능을 증명하지 않는다. 팝업의 End/Return 첫 시도는 옵션을
+바꾸지 않아 관측된 Waived 메뉴 항목을 직접 선택했다. 이를 제품 실패로 세지 않는다.
+
+끝에 In view/Selected/Box select/Markers off, 검색 없음·All types/All statuses·
+첫 규칙으로 정리하고 패널을 접었다. X200/Y220/view500µm·9레이어 on·기본 색상·
+depth99/High·Frames/Labels on·선택/룰러0·Local connected·gen12 margin crop를
+AX와 screenshot으로 확인했다. 원본/OVM/OVP/OVT/DRC DB/SVRF JSON의 SHA-256은
+검사 전후 일치하며 DRC 폴더는 기존4파일만 있다(pack/review/lock 미생성).
+제품 수정이나 전체 배터리 재실행은 없었다. §7.2의 저장 검사는 여전히 새 합성
+reviewer 세션 인계를 기다린다. 브라우저 제어 연결 자체는 더 이상 차단 조건이 아니다.
+
+## 8. 실제 Chrome 표시 진단
+
+§7.3과 같은 세션의 About → Run display test를 명시 실행했다. fixture는
+`gtk-four-bars-v1`, DPR2다. Canvas readback 결과는 PNG57,600픽셀·raw57,600픽셀·
+crop/overlay40,960픽셀 각각 `different_pixels=0`이었다.
+
+screenshot에서도 A/B의 검은 바탕 위 빨강·초록·파랑·노랑 막대, C의 잘린 막대와
+가운데 흰 십자를 확인했다. 실제 관측 뒤 `All three panels look correct`를 선택해
+`screen_observation=all_visible`이 됐으며 `desktop_acceptance=unverified`는 유지됐다.
+원격 화면·Firefox/ETX·색 관리·input→photon/pacing이나 native renderer/WS 정확도의
+검증으로 확대하지 않는다. 파일 다운로드·서버 게시·설계 변경은 없고 About을 닫았다.
+
+## 9. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
 공유, §5의 일부 레이어/스타일·스냅 없는 수동 측정, §6의 두 설정 다운로드와
 §6.1의 flat9레이어 Native/Calibre 불러오기·복원, §7의 작은 ASCII DRC 최초 등록·
-SVRF 교체·두 CD·레이어 격리/복원이다. 각 절의 미검사 범위 및 기존 DRC 교체/실패,
+SVRF 교체·두 CD·레이어 격리/복원, §7.3의 작은 DRC 필터/순환/선택 복원과 §8의
+Chrome 표시 진단이다. 각 절의 미검사 범위 및 기존 DRC 교체/실패,
 pack 생성·메모/waive 저장/충돌/복구·슬롯 편집·clipboard·auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
 
