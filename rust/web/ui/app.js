@@ -334,6 +334,7 @@
     function statusSnapshot(s) {
         if (s.view_id !== currentId || s.connection_epoch !== epoch) { return; }
         if (state && state.connection_epoch === epoch && P.compare(s.state_rev, state.state_rev) < 0) { return; }
+        if (s.status === 'closed') { clearClosedView(); return; }
         if (gesture && gesture.active() && state && (s.state_rev !== state.state_rev || s.connection_epoch !== state.connection_epoch)) { gesture.cancel(); }
         if (marginFrame && !P.placement(marginFrame, s)) {
             freezeMargin(); marginFrame = null; marginCanvas.width = 1; marginCanvas.height = 1;
@@ -485,7 +486,11 @@
         if (!currentPage(run)) { return; }
         const current = await http('GET', '/api/v1/view', undefined, true);
         if (!currentPage(run)) { return; }
-        if (!current) { currentId = ''; state = null; controls(); return; }
+        if (!current) {
+            if (currentId || displayed) { clearClosedView(); } else { controls(); }
+            return;
+        }
+        if (current.view.status === 'closed') { clearClosedView(); return; }
         const changed = currentId !== current.view.view_id;
         if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; selectedStyle = null; el('style-editor').hidden = true; }
         currentId = current.view.view_id; currentSource = current.source_id; currentMode = current.mode; state = current.view;
@@ -762,10 +767,24 @@
     }
     el('source').onchange = sourceSelection;
     el('open').onclick = function () { openSource(null).catch(report); };
+    function clearClosedView() {
+        disconnect(); state = null; currentId = ''; displayed = false; clearBuffers();
+        selectedStyle = null; el('style-editor').hidden = true;
+        controls(); el('empty').hidden = false; el('empty-message').textContent = 'View closed. Choose a source to reopen.';
+        el('rendering').hidden = true; el('layers').textContent = ''; el('status').textContent = 'View closed';
+        ['perf', 'margin-info', 'viewport-info', 'max-depth'].forEach(function (id) { el(id).textContent = ''; });
+        connection('Local · ready', true);
+    }
     el('close').onclick = async function () {
-        if (!currentId) { return; }
-        try { await http('DELETE', '/api/v1/views/' + currentId); disconnect(); state = null; currentId = ''; controls(); displayed = false; clearBuffers(); el('empty').hidden = false; el('empty-message').textContent = 'View closed. Choose a source to reopen.'; el('rendering').hidden = true; el('layers').textContent = ''; }
-        catch (e) { report(e); }
+        const run = pageRun, id = currentId;
+        if (!currentPage(run) || !id) { return; }
+        try {
+            await http('DELETE', '/api/v1/views/' + id);
+            // A close can commit before its HTTP reply arrives. A restored or
+            // replacement view owns its own connection and displayed buffers.
+            if (!currentPage(run) || currentId !== id) { return; }
+            clearClosedView();
+        } catch (e) { if (currentPage(run) && currentId === id) { report(e); } }
     };
     async function endSession() {
         sharing.stop();

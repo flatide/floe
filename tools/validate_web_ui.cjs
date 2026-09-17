@@ -92,6 +92,14 @@ assert.equal(modeClient.status,0,'deck mode client: '+modeClient.error);
 assert.equal(exitClient.status,0,'session exit client: '+exitClient.error);
 const exitFailed=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_EXIT:'1',FLOE_TEST_EXIT_FAILURE:'1'}});
 assert.equal(exitFailed.status,0,'unconfirmed session exit client: '+exitFailed.error);
+for(const boundary of ['current','hide','restore','replace','exit','exit-failure','absent','closed','notify']){
+    for(const reply of ['absent','closed','notify'].includes(boundary)?['202']:['202','503','401']){
+        const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,
+            FLOE_TEST_CLOSE_BOUNDARY:boundary==='exit-failure'?'exit':boundary,FLOE_TEST_CLOSE_REPLY:reply,
+            FLOE_TEST_EXIT_FAILURE:boundary==='exit-failure'?'1':'0'}});
+        assert.equal(run.status,0,'view close '+boundary+'/'+reply+': '+run.error);
+    }
+}
 const startupReads=['capabilities','catalog','drc','exports','defaults','operations','view','startup'].map(name=>['GET /api/v1/'+name,1,false]);
 startupReads.push(['GET /api/v1/operations',2,false],['GET /api/v1/operations',3,false],['GET /api/v1/view',2,false],['GET /api/v1/startup',1,true],
     ['POST /api/v1/session/exchange',1,false],['POST /api/v1/operations',1,false]);

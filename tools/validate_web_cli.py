@@ -148,6 +148,8 @@ def main(fixture):
                 assert client.call("GET", "/api/v1/capabilities")["dump_on_start"] is manual
                 asset = client.call("GET", "/assets/" + session["bundle"] + "/display-dump.js")
                 assert b"FloeDisplayDump" in asset
+                assert client.call("GET", "/assets/" + session["bundle"] + "/app.js") == (
+                    ROOT / "rust/web/ui/app.js").read_bytes(), "server embeds a stale owner client"
                 if not manual:
                     client.call("GET", "/api/v1/defaults", code=403)
                 else:
@@ -202,6 +204,21 @@ def main(fixture):
                     assert not Path(str(source) + ".layerprops").exists()
                     proc.send_signal(signal.SIGINT)
                 else:
+                    # The native close acknowledges admission, then retains a
+                    # closed snapshot. A returning client must not paint it as
+                    # live; reopening receives a different view identity.
+                    old_id = view["view_id"]
+                    client.call("DELETE", "/api/v1/views/" + old_id, code=202)
+                    closed = wait(lambda: (lambda v: v if v["status"] == "closed" else None)(
+                        client.call("GET", "/api/v1/view")["view"]), proc)
+                    assert closed["view_id"] == old_id
+                    reopen_seq = int(client.call("GET", "/api/v1/operations")["last_seq"]) + 1
+                    client.call("POST", "/api/v1/operations", dict(startup, seq=str(reopen_seq)), 202)
+                    reopened = client.finished(reopen_seq, proc)
+                    assert reopened["phase"] == "succeeded" and reopened["view_id"] != old_id, reopened
+                    current = wait(lambda: (lambda v: v if v["status"] == "idle" else None)(
+                        client.call("GET", "/api/v1/view")["view"]), proc)
+                    assert current["view_id"] == reopened["view_id"]
                     client.call("DELETE", "/api/v1/session", code=204)
                 out, err = proc.communicate(timeout=15)
                 assert proc.returncode == (130 if manual else 0), (out, err)
@@ -234,7 +251,7 @@ def main(fixture):
             assert run.returncode != 0
             assert source.read_bytes() == original
         assert not list(temps.iterdir())
-    print("WEB CLI: ALL OK (PATH empty, first generation, explicit index, private Firefox argv, defaults opt-in/credential protection, logout/SIGINT, cleanup)")
+    print("WEB CLI: ALL OK (PATH empty, first generation, explicit index, embedded client bytes, close/closed/reopen identity, private Firefox argv, defaults opt-in/credential protection, logout/SIGINT, cleanup)")
 
 
 if __name__ == "__main__":

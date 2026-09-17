@@ -12,6 +12,9 @@ const defaultsEnabled=process.env.FLOE_TEST_DEFAULTS==='1';let defaultOp=null;
 const minimapEnabled=process.env.FLOE_TEST_MINIMAP==='1';
 const exitEnabled=process.env.FLOE_TEST_EXIT==='1';
 const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
+const closeBoundary=process.env.FLOE_TEST_CLOSE_BOUNDARY||'';
+const closeReply=process.env.FLOE_TEST_CLOSE_REPLY||'202';
+let closeResponse=null;
 const exitStartup=process.env.FLOE_TEST_EXIT_STARTUP||'';
 const startupSuspend=process.env.FLOE_TEST_STARTUP_SUSPEND||'';
 const startupBoundary=process.env.FLOE_TEST_STARTUP_BOUNDARY||'hide';
@@ -140,7 +143,7 @@ class XHR {
         else if(raw){value={kind:'drc_review_transfer',phase:'queued',seq:this.headers['X-Floe-Transfer-Seq']};status=202;}
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
-        else if((startupEnabled||dumpEnabled)&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=204;}
+        else if((startupEnabled||dumpEnabled||closeBoundary)&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=closeBoundary?202:204;}
         else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,drc:!!startupSuspend,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,jobdeck_levels:modeEnabled,fill_slot_edit:fillEditorEnabled,display_dump:true,dump_on_start:dumpEnabled};}
         else if(startupSuspend&&this.path==='/api/v1/drc'){value={drc:null};}
         else if(launchEnabled&&this.path==='/api/v1/launch'){value=launchState;}
@@ -205,6 +208,7 @@ class XHR {
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
         if(indexOpenEnabled&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
+        if(closeBoundary&&this.method==='DELETE'&&this.path.startsWith('/api/v1/views/')){closeResponse=this;return;}
         if(this.method+' '+this.path===startupSuspend&&++startupMatches===Number(process.env.FLOE_TEST_STARTUP_MATCH||1)){startupSuspendReply=this;return;}
         if(launchExitArmed&&this.method==='GET'&&this.path===launchExit){launchExitArmed=false;launchExitReply=this;return;}
         if(body&&['mode','reselect_levels'].includes(body.kind)&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
@@ -290,6 +294,59 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(closeBoundary){
+        await wait(()=>sockets.length===1);hello(sockets[0]);sockets[0].receive(packet('raw','1'));
+        for(let i=0;i<8;i++){await new Promise(setImmediate);}
+        const closing=node('close').onclick();await wait(()=>closeResponse);
+        assert.equal(requests.filter(r=>r.method==='DELETE'&&r.path.startsWith('/api/v1/views/')).length,1);
+        if(closeBoundary==='exit'){
+            node('logout').onclick();await node('session-exit-confirm').onclick();
+        }else if(['absent','closed','notify'].includes(closeBoundary)){
+            if(closeBoundary!=='absent'){open=true;snapshot.status='closed';}
+            if(closeBoundary==='notify'){sockets[0].receive(snapshot);}
+            else{listeners.pagehide();listeners.pageshow({persisted:true});}
+            for(let i=0;i<32;i++){await new Promise(setImmediate);}
+            assert.equal(node('empty').hidden,false,'authoritative closed view retained old pixels');
+            assert.equal(node('canvas').width,1);assert(node('close').disabled);
+            assert.equal(node('status').textContent,'View closed');
+        }else if(closeBoundary!=='current'){
+            if(closeBoundary!=='replace'){listeners.pagehide();}
+            if(closeBoundary==='restore'||closeBoundary==='replace'){
+                // The old DELETE has committed. A separate launcher opened a
+                // new view before this tab reconnects; its reply is still late.
+                open=true;viewId='9'.repeat(64);snapshot.view_id=viewId;
+                const before=sockets.length;
+                if(closeBoundary==='restore'){listeners.pageshow({persisted:true});}
+                else{sockets.at(-1).close();await new Promise(resolve=>setTimeout(resolve,550));}
+                await wait(()=>sockets.length===before+1);hello(sockets.at(-1));sockets.at(-1).receive(packet('raw','2'));
+                for(let i=0;i<8;i++){await new Promise(setImmediate);}
+            }
+        }
+        const before={requests:requests.length,sockets:sockets.length,ws:sockets.at(-1).readyState,
+            canvas:node('canvas').width,empty:node('empty').hidden,
+            text:Object.fromEntries(['connection','status','notice','empty-message'].map(id=>[id,node(id).textContent]))};
+        if(closeReply!=='202'){closeResponse.status=Number(closeReply);closeResponse.responseText=JSON.stringify({error:'late close failure'});}
+        closeResponse.onload();await closing;
+        for(let i=0;i<8;i++){await new Promise(setImmediate);}
+        assert.equal(requests.length,before.requests,'late view close sent another request');
+        assert.equal(sockets.length,before.sockets);
+        if(closeBoundary==='current'){
+            if(closeReply==='202'){assert(node('empty').hidden===false);assert(node('close').disabled);assert.equal(sockets.at(-1).readyState,3);assert.equal(node('status').textContent,'View closed');}
+            else if(closeReply==='401'){assert.equal(node('connection').textContent,'Session expired');}
+            else{assert.match(node('notice').textContent,/late close failure/);assert.equal(node('empty').hidden,before.empty);}
+        }else{
+            assert.equal(sockets.at(-1).readyState,before.ws,'old view close disconnected the restored view');
+            assert.equal(node('canvas').width,before.canvas,'old view close erased the restored pixels');
+            assert.equal(node('empty').hidden,before.empty);
+            for(const [id,text] of Object.entries(before.text)){
+                // A current-page 401 still invalidates session authentication,
+                // even if the requested view has since been replaced.
+                const expected=closeBoundary==='replace'&&closeReply==='401'&&id==='connection'?'Session expired':text;
+                assert.equal(node(id).textContent,expected,'old view close changed '+id);
+            }
+        }
+        listeners.pagehide();console.log('WEB VIEW CLOSE: ALL OK ('+closeBoundary+', '+closeReply+', no replay or retired UI mutation)');return;
+    }
     if(startupSuspend){
         await wait(()=>startupSuspendReply);
         const posts=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations');
