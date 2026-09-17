@@ -6640,3 +6640,34 @@ recovery를 지우거나 서버 종료 성공으로 위장해서는 안 된다.
 전체 목표 잔여: 위 종료 결함, 실제 브라우저 다중 저장·충돌/불명확한 게시 복구·
 일부 입력/설정/공유, Python-free Linux 실행, G1/G4, 현장 Firefox/ETX.
 원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다.
+
+## 101. M4g-44 — 명시 종료 후 화면·상태 잔류 수정
+
+2026-09-18. §100의 결함을 수정했다. End session 확인 즉시 foreground/margin과
+frame receipt를 초기화하고 inspection/ruler/DRC overlay, 레이어 목록, Live/perf/
+viewport 정보를 정리한다. Cancel은 화면을 유지한다. 종료한 세션의 source/Open/
+Index를 비활성화하며 늦은 PNG/WS·복원 조회·작업 조회가 화면을 되살리지 못한다.
+종료 응답 불명은 Local view stopped / Server shutdown unconfirmed로 구분하고
+recovery record를 보존한다. 자동 재전송이나 새 파일 저장 권한은 없다.
+
+추가 읽기 전용 감사는 Index의 사전 GET이 종료 뒤 완료되면 POST가 이어지는
+경합을 재현했다(모형 HTTP, 실제 파일/네트워크 없음). `submitOperation`의 진입과
+사전 조회 후에 stopped를 검사하여 미제출 작업을 멈춘다. 이미 승인·제출된 작업이
+취소되었다고 추정하거나 그 receipt를 지우지는 않는다. 성공/불명확한 종료 양쪽의
+지연 GET을 회귀에 넣었다.
+
+검증:
+
+- client 종료 gate: 표시된 foreground/margin, 응답 전 버퍼/overlay/문구 정리,
+  late PNG/WS/resize와 socket error, recovery 보존, Cancel 및 DELETE1회.
+- 최종 `sh tools/validate_rust.sh --only web_ui`와 offline/locked release app 빌드
+  통과. native 전체 배터리 재실행은 아니며 기존 tiler/VFS 경고는 그대로다.
+- [Chrome §5.2](WEBUI_BROWSER_ACCEPTANCE.ko.md#52-명시-종료--서버는-종료되지만-이전-픽셀이-남음):
+  에이전트가55105 합성 서버를 직접 시작했다. Cancel 보존→확정 종료 후 screenshot의
+  geometry/Live 잔류 없음, DOM 초기화, 서버exit0을 확인했다. late socket error와
+  지연 Index GET 보호는 결정적 회귀 근거이며 Chrome 장애 주입으로 주장하지 않는다.
+  기존 DRC 세션과 저장 파일은 변경하지 않았다.
+
+전체 목표 잔여: 실제 브라우저 다중 저장·충돌/불명확한 게시 복구와 일부 입력/설정/
+공유 수용, Python-free Linux 실행, G1/G4 최종 대조, 현장 Firefox/ETX다.
+원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다.

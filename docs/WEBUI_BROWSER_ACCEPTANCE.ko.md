@@ -193,6 +193,16 @@ receipt 보존/버튼 상태만 단언하므로 픽셀 잔류를 잡지 못한�
 추적하며 종료 화면 정리와 regression/실제 재검증이 필요하다. 종료 실패·불명확한
 게시의 recovery record 보존 계약은 이 수정과 별개로 유지해야 한다.
 
+M4g-44 수정 후55105에서 에이전트가 합성 서버를 직접 실행했다. Live gen2의
+foreground2312×1471 / margin4616×2943 표시를 확인한 뒤 Cancel은 두 버퍼와
+연결을 유지했다. 다시 명시 종료하자 screenshot에서 레이아웃이 지워지고
+`Session ended` 안내로 바뀌었다. DOM에서도 foreground/margin1×1, query/ruler/DRC
+overlay 숨김, perf/margin/viewport 문구 비움, source/Open/Index 비활성화를 확인했다.
+실행 handle은exit0이다. 이 **잔류 표시 결함은 수정·실제 재검증 완료**로 갱신한다.
+실제 네트워크 장애/종료 응답 불명은 이번 Chrome에서 유발하지 않았으며, 해당 경로의
+즉시 정리·recovery 보존 및 늦은 callback 차단은 결정적 회귀 근거로 구분한다.
+기존 DRC 서버나 sidecar 저장은 건드리지 않았다.
+
 ## 6. 설정 다운로드 — 최초 불러오기 권한 차단
 
 2026-09-17 사용자가 새 합성 valmini 세션을 열고, 다운로드한 두 설정 파일을 같은

@@ -11,8 +11,9 @@
 후속 실제 Chrome [§5.1](WEBUI_BROWSER_ACCEPTANCE.ko.md#51-bitmap-슬롯과-오버레이-스크롤바-클릭)은
 bitmap 초안/참조/Reset/reload 일부를 확인하고 레이어 스크롤바가 스타일 버튼을
 가리는 결함을 M4g-43에서 수정했다. [§5.2](WEBUI_BROWSER_ACCEPTANCE.ko.md#52-명시-종료--서버는-종료되지만-이전-픽셀이-남음)는
-서버 exit0 뒤 이전 픽셀/Live 상태줄 잔류를 발견했다. **이 종료 표시 정리는 열린
-제품 수정 항목**이며 기존 모형 종료 gate의 PASS로 닫지 않는다.
+서버 exit0 뒤 이전 픽셀/Live 상태줄 잔류를 발견했다. M4g-44에서 즉시 버퍼/상태
+정리를 추가하고 새 합성 Chrome 세션의 screenshot/DOM 및 서버exit0으로 재검증했다.
+이 잔류 표시 결함은 닫되 종료 응답 불명/복구 전체의 실제 브라우저 수용은 남긴다.
 
 M4g-23의 [메뉴 원본 재대조](WEBUI_G4_MENU.ko.md)에서 **실행 중 DRC 파일 교체,
 SVRF metadata 교체, 카메라 유지 jobdeck 레벨 재선택**3건의 구현 누락을 확인했다.

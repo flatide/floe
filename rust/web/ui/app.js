@@ -127,6 +127,7 @@
     }
     function dumpChanged() { if (dumps) { dumps.changed(); } }
     function present() {
+        if (stopped) { return; }
         const size = dims(), delta = state && pendingPan();
         const sameSize = state && size.pixels[0] === state.pixels[0] && size.pixels[1] === state.pixels[1];
         const at = function (h) { const p = sameSize && delta && P.placement(h, state); return p && [p[0] + delta[0], p[1] + delta[1]]; };
@@ -198,9 +199,12 @@
         displayProjection = null; frozenProjection = null;
         canvas.hidden = false; canvas.width = 1; canvas.height = 1;
         marginCanvas.hidden = true; marginCanvas.width = 1; marginCanvas.height = 1;
+        [canvas, marginCanvas].forEach(function (target) {
+            delete target.dataset.frameId; delete target.dataset.renderRev; delete target.dataset.bboxDbu;
+        });
         ackedFrames = {foreground: null, margin: null};
     }
-    function live() { return state && !['closed', 'failed'].includes(state.status); }
+    function live() { return !stopped && state && !['closed', 'failed'].includes(state.status); }
     function indexBlocked() { return !!indexOpen && indexOpen.blocked(); }
     function deckModeReady() {
         return modeSupported && live() && state.capabilities.mode &&
@@ -215,12 +219,12 @@
         el('labels').disabled = !enabled || !state.capabilities.labels;
         el('font-px').disabled = !enabled || !state.capabilities.labels;
         const launchPending = launcher && launcher.blocked(), source = catalog.find(function (s) { return s.source_id === el('source').value; });
-        el('open').disabled = submitting || ownerBusy || !!live() || !source || launchPending || indexBlocked();
-        el('source').disabled = !catalog.length || launchPending || ownerBusy || submitting || indexBlocked();
-        el('mode').disabled = !source || !source.deck || launchPending || ownerBusy || submitting || indexBlocked();
+        el('open').disabled = stopped || submitting || ownerBusy || !!live() || !source || launchPending || indexBlocked();
+        el('source').disabled = stopped || !catalog.length || launchPending || ownerBusy || submitting || indexBlocked();
+        el('mode').disabled = stopped || !source || !source.deck || launchPending || ownerBusy || submitting || indexBlocked();
         el('close').disabled = !currentId || submitting || ownerBusy || indexBlocked();
-        el('index').disabled = submitting || ownerBusy || !source || indexBlocked();
-        el('cancel-job').disabled = !ownerBusy || indexBlocked();
+        el('index').disabled = stopped || submitting || ownerBusy || !source || indexBlocked();
+        el('cancel-job').disabled = stopped || !ownerBusy || indexBlocked();
         el('levels-all').disabled = indexBlocked();
         el('level-more').disabled = indexBlocked() || levelBusy || levelNext === null;
         Array.from(el('level-list').querySelectorAll('input')).forEach(function (box) { box.disabled = indexBlocked() || el('levels-all').checked; });
@@ -470,10 +474,12 @@
                 reconnectDelay = Math.min(5000, reconnectDelay * 2);
             }
         };
-        ws.onerror = function () { connection('Connection error', false); };
+        ws.onerror = function () { if (!stopped && socket === ws && serial === socketSerial) { connection('Connection error', false); } };
     }
     async function restore() {
+        if (stopped) { return; }
         const current = await http('GET', '/api/v1/view', undefined, true);
+        if (stopped) { return; }
         if (!current) { currentId = ''; state = null; controls(); return; }
         const changed = currentId !== current.view.view_id;
         if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; selectedStyle = null; el('style-editor').hidden = true; }
@@ -577,6 +583,7 @@
     }
     async function readOperationState() {
         const all = await http('GET', '/api/v1/operations');
+        if (stopped) { return all; }
         if (indexOpen) { indexOpen.observe(all); }
         ownerBusy = all.active !== null; el('cancel-job').disabled = !ownerBusy;
         el('cancel-job').dataset.seq = all.active || ''; controls();
@@ -600,11 +607,13 @@
         return all;
     }
     async function submitOperation(request) {
+        if (stopped) { return; }
         if (ownerBusy || submitting || indexBlocked()) { throw new Error('An operation or approval is already pending.'); }
         submitting = true; controls();
         if (operationTimer) { clearTimeout(operationTimer); operationTimer = null; }
         try {
             const all = await operationState();
+            if (stopped) { return; }
             if (all.active !== null) { throw new Error('An operation is already running.'); }
             request.seq = P.next(all.last_seq); ownerBusy = true; controls(); notice('');
             try { await http('POST', '/api/v1/operations', request); }
@@ -721,9 +730,17 @@
         if (settings) { settings.stop(); }
         if (defaults) { defaults.stop(); }
         stopped = true; disconnect(); if (operationTimer) { clearTimeout(operationTimer); }
+        clearTimeout(resizeTimer); if (sizeObserver) { sizeObserver.disconnect(); }
+        // Stop local presentation immediately, even if shutdown times out.
+        // Recovery records are only retired after the server confirms below.
+        state = null; currentId = ''; displayed = false; clearBuffers(); controls();
+        inspector.stop(); measurement.stop(); selectedStyle = null; el('style-editor').hidden = true;
+        el('empty').hidden = false; el('empty-message').textContent = 'Local view stopped.';
+        el('rendering').hidden = true; el('layers').textContent = '';
+        el('status').textContent = 'Local view stopped';
+        ['perf', 'margin-info', 'viewport-info', 'max-depth'].forEach(function (id) { el(id).textContent = ''; });
         let failure=null;
         try { await http('DELETE', '/api/v1/session'); } catch (e) { failure=e; }
-        state = null; currentId = ''; controls();
         if(failure){
             connection('Server shutdown unconfirmed', false);
             notice('Local view stopped; server shutdown is unconfirmed. Check the local launcher before starting another session. Earlier approved writes may have completed; their recovery records are retained. No automatic retry. '+message(failure.message));
@@ -733,6 +750,7 @@
         if (defaults) { defaults.stop(true); }
         if (indexOpen) { try { indexOpen.clear(); } catch (_) { /* Confirmed ended session cannot accept this record. */ } }
         try { sessionStorage.removeItem(sessionKey); } catch (_) { /* storage may be disabled */ }
+        el('status').textContent = 'Session ended'; el('empty-message').textContent = 'Session ended. Close this tab.';
         connection('Session ended', false); notice('Session ended. Close this tab.');
     }
     el('levels-all').onchange = function () { Array.from(el('level-list').querySelectorAll('input')).forEach(function (box) { box.disabled = el('levels-all').checked; }); };

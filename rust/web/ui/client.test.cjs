@@ -12,6 +12,7 @@ const defaultsEnabled=process.env.FLOE_TEST_DEFAULTS==='1';let defaultOp=null;
 const minimapEnabled=process.env.FLOE_TEST_MINIMAP==='1';
 const exitEnabled=process.env.FLOE_TEST_EXIT==='1';
 const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
+let heldExitRead=null,holdExitRead=false;
 const modeEnabled=process.env.FLOE_TEST_MODE==='1';
 const startupEnabled=process.env.FLOE_TEST_STARTUP==='1';
 const launchEnabled=process.env.FLOE_TEST_LAUNCH==='1';
@@ -101,6 +102,7 @@ class XHR {
         const settingsPath=this.path.includes('/settings/');
         const raw=this.path.endsWith('/transfer/chunk');
         const body=text===null?null:settingsPath||raw?text:JSON.parse(text); requests.push(Object.assign({method:this.method,path:this.path,body},raw?{headers:this.headers}:{}));
+        if(holdExitRead&&this.method==='GET'&&this.path==='/api/v1/operations'){heldExitRead=this;return;}
         let value, status=200;
         if(this.path.startsWith('/api/v1/display-test/')){assert.equal(this.responseType,'arraybuffer');displayReads.push(this);return;}
         if(this.path==='/api/v1/about'){
@@ -720,6 +722,11 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         listeners.pagehide();console.log('WEB DECK MODE CLIENT: ALL OK (scope/CAS, modes, camera-bound level selection, selection guard, stale/unknown reconciliation, no automatic replay)');return;
     }
     if(exitEnabled){
+        ws.receive(packet('raw','1'));
+        snapshot.margin={frame_id:'2',origin_px:[48,48],crop_safe:true};snapshot.capabilities.margin=true;ws.receive(snapshot);
+        ws.receive(packet('raw','2','1',epoch,{purpose:'margin',width:196,height:176,bbox_dbu:['-58.9375','-48','137.0625','128']}));
+        assert.match(node('status').textContent,/Live.*margin crop/);
+        assert(node('perf').textContent);assert(node('margin-info').textContent);assert(!node('margin-canvas').hidden);
         const n=requests.length,commands=ws.sent.length;
         const key=(k,extra={})=>{let used=false;node('viewport').keydown({key:k,target:node('viewport'),preventDefault(){used=true;},...extra});return used;};
         for(const extra of [{ctrlKey:true},{metaKey:true},{altKey:true},{shiftKey:true},{isComposing:true},{target:node('goto-x')}])assert(!key('q',extra));
@@ -728,15 +735,40 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         node('session-exit-cancel').onclick();assert(node('session-exit-dialog').hidden);assert.equal(document.activeElement,node('viewport'));
         assert.equal(requests.length,n);assert(key('q'));docListeners.keydown({key:'Escape',preventDefault(){},stopPropagation(){}});
         assert(node('session-exit-dialog').hidden);assert.equal(requests.length,n);
+        assert.equal(node('canvas').width,100);assert.equal(node('margin-canvas').width,196,'Cancel keeps both displayed buffers');
         node('logout').onclick();assert(!node('session-exit-dialog').hidden);assert.equal(requests.length,n);
         storage.set('floe-default-pending','synthetic existing recovery record');
-        const ending=node('session-exit-confirm').onclick();node('session-exit-confirm').onclick();await ending;
+        holdExitRead=true;node('index').onclick();await wait(()=>heldExitRead);
+        const submittedBeforeExit=requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations').length;
+        ws.receive(packet('png','3'));const lateImage=images.at(-1).onload,lateError=ws.onerror;
+        const ending=node('session-exit-confirm').onclick();node('session-exit-confirm').onclick();
+        function cleared(){
+            for(const id of ['canvas','margin-canvas']){
+                assert.equal(node(id).width,1);assert.equal(node(id).height,1);assert.equal(node(id).dataset.frameId,undefined);
+            }
+            assert(node('margin-canvas').hidden);assert(!node('empty').hidden);assert(node('rendering').hidden);
+            for(const id of ['query-canvas','ruler-canvas','drc-canvas'])assert(node(id).hidden);
+            for(const id of ['perf','margin-info','viewport-info','max-depth'])assert.equal(node(id).textContent,'');
+            for(const id of ['open','source','index','cancel-job'])assert(node(id).disabled);
+            assert.equal(node('layers').textContent,'');
+        }
+        cleared();assert.equal(node('status').textContent,'Local view stopped','clear before DELETE response');
+        const painted=draws.length, sent=ws.sent.length;
+        lateImage();ws.receive(packet('raw','4'));ws.receive(snapshot);listeners.resize();
+        assert.equal(draws.length,painted,'late decode/WS/resize repainted a stopped view');assert.equal(ws.sent.length,sent);
+        assert.equal(urls.size,0);await ending;cleared();
         assert.equal(requests.filter(r=>r.method==='DELETE'&&r.path==='/api/v1/session').length,1);
         assert.equal(node('connection').textContent,exitFailure?'Server shutdown unconfirmed':'Session ended');
+        assert.equal(node('status').textContent,exitFailure?'Local view stopped':'Session ended');
+        lateError();assert.equal(node('connection').textContent,exitFailure?'Server shutdown unconfirmed':'Session ended','retired socket error replaced terminal status');
         assert.equal(storage.has('floe-default-pending'),exitFailure);assert.equal(storage.has('floe-session:'+sandbox.location.origin),exitFailure);
         if(exitFailure){assert.match(node('notice').textContent,/No automatic retry/);}
         assert(node('logout').disabled);assert(node('session-exit-dialog').hidden);
-        listeners.pagehide();console.log('WEB SESSION EXIT CLIENT: ALL OK (q/button wiring, modifiers, cancel no HTTP/WS, confirmed single DELETE, cleanup)');return;
+        holdExitRead=false;heldExitRead.status=200;
+        heldExitRead.responseText=JSON.stringify({last_seq:lastSeq,active:null,history:[]});heldExitRead.onload();
+        await new Promise(setImmediate);await new Promise(setImmediate);
+        assert.equal(requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations').length,submittedBeforeExit,'late preflight submitted an operation after session end');
+        listeners.pagehide();console.log('WEB SESSION EXIT CLIENT: ALL OK (cancel keeps frame, single DELETE, immediate buffer/overlay/status cleanup, late frame fence, unknown shutdown retains recovery)');return;
     }
     if(minimapEnabled){
         await wait(()=>node('minimap-note').textContent==='Die outline · current view');
