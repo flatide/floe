@@ -6188,7 +6188,11 @@ heartbeat도 준비 신호 전에 기록한다. 제품 프로세스/취소 정�
 별도 원격/TLS/서버 자원 정책, 실제 브라우저·Python-free Linux·G1/G4·현장 수용,
 조건부 M5다. index hot reload/revision은 기존 유보를 유지한다.
 
-## 89. M4g-31 — DRC 교체 준비의 중복 예약 제거
+## 89. M4g-34 — DRC 교체 준비의 중복 예약 제거
+
+단계 번호 정정: M4g-31/32는 jobdeck 동기화/명시 캐시 개명, M4g-33은 native
+worktree 빌드 감시에 이미 배정됐다. 이 절의 최초 M4g-31 표기를 M4g-34로 고친다.
+수정 커밋 `595aba6`의 범위·검증 결과는 바뀌지 않는다.
 
 2026-09-17 실제 Chrome의 read-only DRC/SVRF 수용 뒤 작은 DRC를 교체하다
 `browse_busy_or_limit`가 재현됐다([브라우저 기록 §7.1](WEBUI_BROWSER_ACCEPTANCE.ko.md#71-후속-drc-교체-실제-실패-발견과-자원-예약-수정)).

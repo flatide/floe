@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-17, M4g-32 명시 Index 개명. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-17, M4g-34 DRC 교체 예산 수정·합성 저장 수용 준비. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -156,7 +156,10 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    합성 DRC는 읽기 전용 연결을 유지하고 패널/markers만 닫았으며 입력과 캐시는 불변이다.
    §7.1의 실제 교체는 기본 예산에서 실패했다. 캐시 선택/새 reader의 중복 예약을
    native 회귀로 재현·수정했지만, 수정 바이너리의 브라우저 교체 수용은 남는다
-   ([M4 §89](WEBUI_M4.ko.md#89-m4g-31--drc-교체-준비의-중복-예약-제거)).
+   ([M4 §89](WEBUI_M4.ko.md#89-m4g-34--drc-교체-준비의-중복-예약-제거)).
+   별도 합성 reviewer의 실제 저장은 승인됐지만 브라우저 연결/새 세션 인계가
+   남아 있다. [브라우저 기록 §7.2](WEBUI_BROWSER_ACCEPTANCE.ko.md#72-합성-reviewer-저장-수용-준비미실행)의
+   체크리스트는 실행 결과가 아니다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격

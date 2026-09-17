@@ -314,12 +314,47 @@ picker192 + 기존 reader256 + SVRF256 + 선택256 + 새 reader256 =2240MiB로
 해제되는 캐시 선택 끝에서 그 단계의 CPU/메모리 예약만 해제한다. 실제 reader는
 기존대로 별도 예약을 받아 시작한다. 이때 피크는1984MiB이며 예산 상향이나 무예약
 parse가 아니다. 이전 reader는 새 reader 준비·원자 교체 전까지 유지한다.
-테스트/실행 기록은 [M4 §89](WEBUI_M4.ko.md#89-m4g-31--drc-교체-준비의-중복-예약-제거)에 둔다.
+테스트/실행 기록은 [M4 §89](WEBUI_M4.ko.md#89-m4g-34--drc-교체-준비의-중복-예약-제거)에 둔다.
 
 열린 Chrome은 재시작하지 않았으므로 수정 후 브라우저 재검증은 남는다. 검사 후
 DRC 패널을 접고 X200/Y220/view500µm·9레이어·0룰러·gen32 final crop 상태로 복원했다.
 원본/OVM/OVP/OVT·기존 합성 DRC/SVRF JSON·교체 후보의 hash는 불변이며,
 새 후보 폴더에도 pack/review sidecar는 생성되지 않았다.
+
+### 7.2 합성 reviewer 저장 수용 준비(미실행)
+
+사용자는 별도 임시 합성 DRC 세션에서 테스트 reviewer만 등록하여 메모·waive의
+수동 저장, 자동 저장 opt-in, 재불러오기를 실제 Chrome으로 확인하도록 승인했다.
+새 임시 폴더에 valmini·8규칙/23오류 DRC·native pack·SVRF metadata와 실행 스크립트를
+준비했다. 실행 파일은 `595aba6` 수정 후 빌드이며, 기존 읽기 전용 탭과 분리한다.
+새 시작 파일의 인증값은 읽지 않고 사용자가 연 탭의 포트만 인계받는다.
+
+- 런처: `--drc .synthetic.db.tray --drc-rules synthetic.rules.json`
+  `--drc-reviewer browser-test --drc-edit-waives`, jobs2/raster-jobs1/budget1024,
+  refinement off. 공유·기본값 게시 권한은 추가하지 않는다.
+- 쓰기는 새 합성 폴더에서 pack/reviewer로 유도되는 note/waive sidecar와 해당
+  lock만 대상으로 한다. 실제 설계·기존 리뷰·공유 기본값·외부 서버는 제외한다.
+- 입력 OASIS/cache/DB/pack/metadata의 fingerprint를 전후 대조하고, 저장 결과는
+  UI receipt와 해당 sidecar의 내용 모두로 확인한다. requested/preview 표시만으로
+  저장 성공이나 reader 갱신을 판정하지 않는다.
+
+다음 표는 **아직 실행하지 않은 수용 체크리스트**다.
+
+| 검사 | 확인할 조건 |
+|---|---|
+| 초기 상태 | reviewer가 browser-test이며 notes/waives 자동 저장 모두 off, 새 sidecar 없음 |
+| 수동 메모 | 선택 오류에 테스트 문구 입력·미리보기만으로 파일 미생성; 명시 승인 뒤 해당 선택에만 저장 |
+| 수동 waive | 선택·미리보기는 저장하지 않음; 승인 후 sidecar 상태와 reader 적용 결과를 따로 확인 |
+| 취소 | 미리보기 취소/초안 폐기가 기존 저장 내용·비선택 오류를 바꾸지 않음 |
+| 자동 저장 opt-in | 토글을 켜기만 해서는 저장하지 않음; 메모 확정/waive 변경 확정 때만 저장 |
+| 재불러오기 | 새로고침 후 저장 메모·waive는 재조회되지만 두 자동 저장 opt-in은 off로 복귀 |
+| 종료 상태 | 남은 초안·선택 정리, 자동 저장 off; 합성 파일은 증거로 남기되 저장소에 커밋하지 않음 |
+
+연결 확인에서 기존 합성 탭은 열려 있지만 제어 도구가 `Debugger unattached`로
+응답했다. 재연결 시도도 같아 UI 검사/저장을 진행하지 않았고 사용자에게 새 세션
+포트와 브라우저 연동 재활성화를 요청했다. 이는 제품 저장 결함이나 수용 PASS가
+아니다. 브라우저 인증 파일을 다른 도구로 읽어 우회하지 않는다. 충돌·불확실 응답
+복구·프로세스 재시작 및 OS IME는 위 기본 roundtrip과 별도 수용 항목으로 남긴다.
 
 ## 8. 잔여
 
