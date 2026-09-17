@@ -2,10 +2,12 @@
 // Real DRC navigation, editor and display modules; all input is synthetic.
 const assert=require('node:assert/strict'),fs=require('node:fs'),D=require('./drc.js'),P=require('./protocol.js');
 const F=require('./drc-notes.test.cjs'),N=require('./drc-note-display.test.cjs'),clone=v=>JSON.parse(JSON.stringify(v));
+const W=require('./drc-waives.test.cjs');
 const readonly=process.argv.includes('--read-only');
 const ids=new Set([...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]));
 const nodes=new Map(),calls=[],moves=[],saves=[],drawing=[],timers=new Map(),raf=new Map();
 let serial=0,restore=null,hold=false,ack=null,displayHold=null,holdDisplay=false,noteText='saved <script> 한글';
+let holdRevoke=false,revokeReply=null,noteHeld=false,waiveHeld=false;
 const ctx=new Proxy({measureText:s=>({width:s.length*6})},{get:(t,k)=>k in t?t[k]:(...a)=>drawing.push([k,...a])});
 class Element {
     constructor(){this.children=[];this.style={};this.value='';this.hidden=false;this.checked=false;this.width=this.height=1;}
@@ -19,18 +21,27 @@ el('drc-waived').value='all';el('drc-markers').checked=true;
 const view={id:F.context.view_id,source:'source',connected:true,pending:false,state:{connection_epoch:'e'.repeat(64),state_rev:'1',status:'idle',dbu_um:'1',bbox_dbu:['0','0','200','160'],pixels:[200,160]}};
 const cat={drc:{id:F.context.drc_id,revision:F.context.revision,source_id:'source',title:'synthetic.db',phase:'ready',metadata:{checks:'2',errors:'4',format:'ice'}},notes:F.catalog()};
 cat.notes.editable=!readonly;
+if(!readonly)cat.waives=W.catalog();
 const row=(ci='0',ei='0')=>({check:ci,local:ei,global:ei==='0'?'1':'2',kind:'p',status:0,bbox_um:ei==='0'?['10','10','70','50']:['90','50','160','70'],points:'4'});
 async function http(method,path,body,missing,t){
     calls.push({method,path,body,t});const api='/api/v1/drc/review/notes';
     if(path==='/api/v1/drc')return clone(cat);
     if(path===api){assert.equal(method,'GET','no publication in display test');return clone(cat.notes);}
     if(path===api+'/display'){
+        assert(!noteHeld&&!waiveHeld,'display read competed with a retained editor snapshot');
         const s={...cat.notes,body},v=N.reply(s,body.focus&&body.focus.error==='0'?noteText:'second note');
         if(holdDisplay)return new Promise(r=>{displayHold=()=>r(v);});return v;
     }
-    if(path===api+'/read')return F.snapshot(body.context,body.errors.length,{review_rev:cat.notes.review_rev});
+    if(path===api+'/read'){noteHeld=true;return F.snapshot(body.context,body.errors.length,{review_rev:cat.notes.review_rev});}
     if(path===api+'/prepare')return F.prepared(body.context,1,body.text,{review_rev:cat.notes.review_rev});
-    if(path===api+'/revoke')return null;
+    const waive='/api/v1/drc/review/waives';
+    if(path===waive){assert.equal(method,'GET','no publication in display test');return clone(cat.waives);}
+    if(path===waive+'/read'){waiveHeld=true;return W.snapshot(body.context,body.errors.length);}
+    if(path===waive+'/prepare')return W.prepared(body.context,1,body.waived);
+    if(path===api+'/revoke'||path===waive+'/revoke'){
+        const done=()=>{if(path===api+'/revoke')noteHeld=false;else waiveHeld=false;};
+        if(holdRevoke)return new Promise(r=>{revokeReply=()=>{done();r(null);};});done();return null;
+    }
     if(path.endsWith('/selection'))return {revision:cat.drc.revision,view_id:view.id,state:{selection_rev:'1',total:'0',limit:5000,rules:[]}};
     const q=body.body;
     if(q.kind==='rules')return {rows:[{check:'0',name:'WIDTH',errors:'2',waived:'0'},{check:'1',name:'SPACE',errors:'2',waived:'0'}],next:null};
@@ -45,6 +56,7 @@ async function http(method,path,body,missing,t){
 const panel=D.bind({document:{getElementById:el,createElement:()=>new Element()},
     window:{requestAnimationFrame:fn=>{raf.set(++serial,fn);return serial;},cancelAnimationFrame:id=>raf.delete(id)},
     protocol:P,rulers:require('./rulers.js'),groups:require('./drc-groups.js'),notes:require('./drc-notes.js'),noteDisplay:require('./drc-note-display.js'),
+    waives:readonly?null:require('./drc-waives.js'),loadWaivePending:()=>null,saveWaivePending(){},
     http,context:()=>view,session:()=>'f'.repeat(64),loadNotePending:()=>null,saveNotePending(){},now:()=>100,
     setTimeout:(fn,ms)=>{timers.set(++serial,{fn,ms});return serial;},clearTimeout:id=>timers.delete(id),
     navigate:(nav,token,callback)=>{moves.push(nav);if(hold)ack=callback;else callback(null);return ()=>{};},resize(){},
@@ -85,15 +97,34 @@ async function jump(i){el('drc-errors').children[i].ondblclick();await tick();}
         panel.stop();await tick();assert.equal(timers.size,0);assert.equal(raf.size,0);
         console.log('WEB READ REVIEWER PANEL: ALL OK (real DRC/editor/display; badges/body/canvas/restore, no pan reads or editor IO, reconnect, cleanup)');return;
     }
-    // Display must leave an editor/preview intact, then refresh after explicit reload.
-    await el('notes-read').onclick();el('notes-text').value='UNSAVED';el('notes-text').oninput();await el('notes-prepare').onclick();await tick();
+    // A snapshot/preview pauses display, including an explicit Refresh. Discard
+    // resumes exactly once, only after the held revoke request has completed.
+    const idleReads=reads();await el('notes-read').onclick();await tick();assert.equal(reads(),idleReads);
+    assert.match(el('drc-notes-status').textContent,/note editor holds or releases/);
+    el('notes-text').value='UNSAVED';el('notes-text').oninput();await el('notes-prepare').onclick();await tick();
     assert(!el('notes-review').hidden);el('drc-notes-refresh').onclick();await tick();assert(!el('notes-review').hidden);assert.equal(el('notes-text').value,'UNSAVED');
-    el('notes-discard').onclick();holdDisplay=true;el('drc-notes-refresh').onclick();await tick();const late=displayHold;
+    assert.equal(reads(),idleReads);holdRevoke=true;el('notes-discard').onclick();await tick();assert.equal(reads(),idleReads);
+    assert.match(el('drc-notes-status').textContent,/holds or releases/);holdRevoke=false;revokeReply();await tick();
+    assert.equal(reads(),idleReads+1);assert.equal(el('drc-note-text').textContent,noteText);
+    for(let i=0;i<10;i++)panel.contextChanged();await tick();assert.equal(reads(),idleReads+1,'idle/pan retried display');
+    // Waive snapshots and previews use the same pause without disabling DRC
+    // geometry/selection, or changing either editor's save approval contract.
+    const waiveReads=reads();await el('waives-read').onclick();await tick();assert.equal(reads(),waiveReads);
+    assert.match(el('drc-notes-status').textContent,/waive editor holds or releases/);assert(!el('drc-frame').disabled);
+    el('waives-action').value='waive';el('waives-action').onchange();await el('waives-prepare').onclick();await tick();
+    el('drc-notes-refresh').onclick();await tick();assert.equal(reads(),waiveReads);assert(!el('waives-review').hidden);
+    holdRevoke=true;el('waives-discard').onclick();await tick();assert.equal(reads(),waiveReads);
+    holdRevoke=false;revokeReply();await tick();assert.equal(reads(),waiveReads+1);assert.equal(el('drc-note-text').textContent,noteText);
+    // Releasing only one of two editors must not resume a display read.
+    await el('notes-read').onclick();await el('waives-read').onclick();await tick();const bothReads=reads();
+    el('notes-discard').onclick();await tick();assert.equal(reads(),bothReads);assert.match(el('drc-notes-status').textContent,/waive editor/);
+    el('waives-discard').onclick();await tick();assert.equal(reads(),bothReads+1);
+    holdDisplay=true;el('drc-notes-refresh').onclick();await tick();const late=displayHold;
     cat.notes=F.catalog([F.op('1','publishing')]);await panel.refresh();assert.equal(el('drc-note-text').textContent,'');
     cat.notes=F.catalog([F.op('1','succeeded')]);noteText='after saved revision';holdDisplay=false;await panel.refresh();late();await tick();assert.equal(el('drc-note-text').textContent,noteText);
     cat.notes=F.catalog([F.op('1','succeeded'),F.op('2','failed',{review_rev:'2',outcome_unknown:true,published:null,error:'review_unavailable'})]);
     await panel.refresh();await tick();assert.equal(el('drc-note-text').textContent,'');assert.match(el('drc-notes-status').textContent,/unconfirmed/);
     panel.stop();await tick();assert.equal(timers.size,0);assert.equal(raf.size,0);assert.equal(el('drc-note-text').textContent,'');
     assert(!JSON.stringify(saves).includes('UNSAVED'));assert(!JSON.stringify(saves).includes('saved <script>'));
-    console.log('WEB DRC NOTE DISPLAY PANEL: ALL OK (real notes/navigation, ACK target, independent selection/restore, markers/Tab/rulers, snapshot canvas, no pan reads, preview preserved, publication fences)');
+    console.log('WEB DRC NOTE DISPLAY PANEL: ALL OK (real notes/waives/navigation, ACK target, no pan reads, snapshot/preview/revoke pause, single resume, concurrent editors, publication fences)');
 })().catch(e=>{panel.stop();console.error(e);process.exitCode=1;});

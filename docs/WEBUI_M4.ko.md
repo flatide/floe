@@ -6586,3 +6586,33 @@ OS 보안 검사/네트워크/캐시 중 무엇이 원인인지 단정하지 않
 기존 세션을 보존한 별도 합성 reviewer의 다중 선택·메모 미리보기·선택 변경 무효화와
 waive 상태 읽기를 확인한다. 파일은 저장하지 않았고 기존 sidecar의 pack binding도
 제거하지 않았다. 실제 다중 저장/충돌/결과 불명 복구 수용으로 확대하지 않는다.
+
+## 99. M4g-42 — 편집 snapshot 해제 후 saved-note 표시 복구
+
+2026-09-18. §98의 별도 합성 서버에서 note Read → Discard만으로
+`Saved notes unavailable · review_busy`가 남는 것을 실제 Chrome에서 재현했다.
+editor가 잡은 제한된 snapshot 자원과 display 읽기가 경합하고, 해제 뒤 display
+identity가 같아서 명시 Refresh 전까지 오류 문구가 유지되는 경로다.
+
+- note editor의 snapshot/preview 및 revoke 요청 중에는 display를 일시 중지한다.
+  waive에도 display 전용 callback을 추가하며, 그 자체로 DRC 탐색/선택을 막지는 않는다.
+- revoke 응답 뒤 상태를 다시 계산한다. 두 editor 중 하나라도 snapshot을 보관하면
+  계속 멈추고 마지막 반환 뒤 한 번만 display를 읽는다. 편집 중 Refresh도 우회하지 않는다.
+- 선택 변경/만료로 capability를 잃은 로컬 초안은 반환 완료 뒤 표시를 재개할 수 있다.
+  본문·save 동의·opt-in·서버 API/admission/게시 경로는 바꾸지 않는다. 읽기 오류를
+  자동 반복하지 않으며, 게시 결과 불명/연결/리뷰 revision 차단을 유지한다.
+
+실제 notes/waives/navigation/display 모듈을 함께 쓰는 회귀에 snapshot·preview·
+지연 revoke·두 editor·단일 재개를 추가했다. pan의 추가 읽기 없음, 오래된 reply 및
+publication fence도 유지한다. `node tools/validate_web_ui.cjs`,
+`sh tools/validate_rust.sh --only web_ui`, offline/locked release app 빌드를 통과했다.
+이번 변경은 UI JS/테스트/문서에 한정되며 전체 native 배터리는 §97의 통합 검증 근거다.
+
+에이전트가 별도 합성 서버만54581→62804로 직접 재시작했다.
+[브라우저 §10.9](WEBUI_BROWSER_ACCEPTANCE.ko.md#109-편집-snapshot-경합-수정-후-읽기-자동-복구)에서
+다중 note/waive 읽기·취소 뒤 자동 복구를 확인했다. 기존58385 서버는 보존했고
+원본/복사본의 각9파일은 불변, 새 reviewer sidecar/lock은 없다.
+
+전체 목표 잔여: 실제 브라우저의 다중 저장·충돌/불명확한 게시 복구 및 입력/설정/
+공유 잔여 수용, Python-free Linux 실행, G1/G4, 현장 Firefox/ETX다.
+원격 SH-10/index hot reload는 사용자 보류, M5는 성능 조건부다.

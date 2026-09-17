@@ -60,6 +60,7 @@
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
         let restoring = false;
         let isolationNotice = '', notes = null, waives = null, transfers = null, noteDisplay = null, noteState = null, noteTarget = null;
+        let waiveDisplayBlocked = false;
         const groups = o.groups.bind({http: o.http, protocol: P, changed: groupsChanged,
             status: function (s) { el('drc-group-status').textContent = s; }});
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
@@ -89,7 +90,8 @@
             const c=current();
             if(!noteState||!c||!registration.metadata||registration.metadata.format!=='ice'){return null;}
             return {reviewer:noteState.reviewer,review_rev:noteState.review_rev,read_turn:noteState.read_turn,epoch:c.state.connection_epoch,
-                blocked:!c.connected||restoring?'Saved notes paused while reconnecting or restoring the review.':noteState.blocked,
+                blocked:!c.connected||restoring?'Saved notes paused while reconnecting or restoring the review.':noteState.blocked||
+                    (waiveDisplayBlocked?'Saved notes paused while the waive editor holds or releases a snapshot.':''),
                 body:{context:{drc_id:registration.id,revision:registration.revision,view_id:c.id},
                     errors:pageReady?rows.map(function(r){return {check:r.check,error:r.local};}):[],focus:noteTarget}};
         }
@@ -102,6 +104,7 @@
             markErrors();paintLater();
         }
         if (o.waives) { waives = o.waives.bind({el: el, protocol: P, http: o.http, selection: noteSelection,connection:reviewConnection,
+            displayState: function (blocked) { waiveDisplayBlocked = blocked; if (noteDisplay) { noteDisplay.sync(); } },
             session: o.session, loadPending: o.loadWaivePending, savePending: o.saveWaivePending,
             now: o.now || function () { return Date.now(); },
             changed: contextChanged, refreshReview: refresh,

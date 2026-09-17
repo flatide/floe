@@ -113,7 +113,7 @@
         async function revoke(token){
             if(stopped||!enabled){return;}if(revokeTask){revokeNext=token;return;}const t={cancelled:false,abort:null};revokeTask=t;
             try{await o.http('POST',API+'/revoke',{token:token},false,t);}catch(_){/* Server expires unapproved capabilities too. */}
-            finally{if(revokeTask===t){revokeTask=null;const next=revokeNext;revokeNext=null;if(next){revoke(next);}}}
+            finally{if(revokeTask===t){revokeTask=null;const next=revokeNext;revokeNext=null;if(next){revoke(next);}render();}}
         }
         function invalidate(reason){
             if(io){abort(io);io=null;}
@@ -167,7 +167,8 @@
             if(o.displayState){o.displayState(!enabled||!model?null:{reviewer:model.reviewer,review_rev:model.review_rev,read_turn:readTurn,
                 blocked:!displayReady()?'Saved-note status is not ready.':busy(true)||latest()&&latest().outcome_unknown&&(!latest().scope_id||latest().scope_id===model.binding_id)?'Saved-note publication is pending or unconfirmed.':
                     transferLocked?'Whole-review transfer is in progress; no save is implied.':
-                    io||model.preparing?'Note snapshot preparation is in progress.':''});}
+                    io||model.preparing?'Note snapshot preparation is in progress.':
+                    revokeTask||draft||editor&&editor.token?'Saved notes paused while the note editor holds or releases a snapshot.':''});}
         }
         function schedule(){o.clearTimeout(timer);timer=null;if(enabled&&!stopped&&(active()||pending)){timer=o.setTimeout(refresh,active()?500:2500);}}
         function install(v){

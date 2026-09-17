@@ -681,6 +681,29 @@ binding 제거·변조나 암묵 import를 하지 않고 별도 `browser-preview
 Index 실행·옵션 변경·추가 저장은 없었다. jobdeck에서의 비활성화는 이 실제
 flat-layout 검사 범위가 아니라 UI/native gate의 근거다.
 
+### 10.9 편집 snapshot 경합 수정 후 읽기 자동 복구
+
+2026-09-18. §10.8의54581에서 메모 Read → Discard만으로 `review_busy` 문구가
+남는 것을 재현한 후 [M4 §99](WEBUI_M4.ko.md#99-m4g-42--편집-snapshot-해제-후-saved-note-표시-복구)를
+적용했다. 에이전트가 그 별도 서버만 종료하고 새 실행 파일로62804에 직접 실행했다.
+기존58385/파일은 보존했고 비공개 시작 링크는 채팅/문서에 노출하지 않았다.
+
+- M2.OVERLAP.2의 Global1/2를 Shift 클릭으로 선택하고 note snapshot2개를 읽었다.
+  display는 `note editor holds or releases a snapshot` 안내로 멈췄다. 편집 중
+  Refresh saved notes를 눌러도 busy 오류 없이 안내를 유지했다.
+- Discard draft 뒤 **추가 Refresh 없이** `Saved notes · browser-preview · revision 0`으로
+  돌아왔다. note를 입력/미리보기/저장하지 않았다.
+- 같은2개 대상의 waive snapshot은0 waived/0 reserved다. display는 waive editor
+  안내로 멈췄고 Refresh도 그 상태를 유지했다. action 없이 Discard choice하면
+  추가 Refresh 없이 동일 revision0 표시로 복구됐다.
+- 선택을 해제해0/5000, 초안 없음, 두 자동 저장off, 새 save receipt 없음,
+  Local connected/Live margin crop을 확인했다. 원본과 복사본의 각9개 보호 파일
+  SHA-256은 §10.5와 같고 `browser-preview` sidecar/lock은 생성되지 않았다.
+
+실제 브라우저는 두 editor를 순차 검증했다. 둘이 동시에 열린 상태와 지연 revoke의
+읽기 횟수/단일 재개는 JS 통합 회귀의 근거이며 브라우저 계측으로 확대하지 않는다.
+다중 저장·충돌·게시 결과 불명 복구 검사는 실행하지 않았다.
+
 ## 11. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
@@ -696,6 +719,7 @@ Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 �
 §10.6은 그 뒤 실제 note/waive 읽기·해제와 busy display의 명시 새로고침 복구다.
 §10.7은 최신 native 통합 실행 파일을 에이전트가 직접 재시작한 뒤 같은 읽기 계약을 확인했다.
 §10.8은 별도 reviewer의 다중 선택·메모 미리보기/무효화·waive 읽기까지이며 저장 수용이 아니다.
+§10.9는 편집 snapshot과 display의 경합 수정 뒤 읽기/취소 자동 복구이며 새 저장은 없다.
 각 절의 미검사 범위 및 DRC 교체 실패/진행 중 취소, pack 생성,
 메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
 auth/BFCache/종료는 남는다.

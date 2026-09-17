@@ -150,6 +150,10 @@ M4g-41은 실측 `c817117`까지 추가14커밋을 정방향 통합하고 기본
 보완을 통과했으며 [세 번째 동기화 기록](WEBUI_JOBDECK_SYNC.ko.md#세-번째-통합--ovr-대표-점)에
 범위/근거를 둔다. native0.12.155, CLI 공개114개/native parser180회다.
 실제 다중 미리보기는 저장 없는 범위이며 GTK readiness 역시 G1 측정이 아니다.
+M4g-42는 note/waive 편집 snapshot과 saved-note 표시의 경합을 막고, 마지막
+snapshot 반환 뒤 읽기를 한 번 재개한다. JS 회귀와 직접 재시작한 합성 Chrome에서
+읽기/취소 복구를 확인했다([M4 §99](WEBUI_M4.ko.md#99-m4g-42--편집-snapshot-해제-후-saved-note-표시-복구)).
+새 저장·충돌/결과 불명 복구 수용은 별개로 남는다.
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.
 M4g-11d에서 Ctrl/Shift 선택·접기/펼치기·페이지 간 범위와 선택 행의 일괄 가시성을

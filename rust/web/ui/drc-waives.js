@@ -134,7 +134,7 @@
         }catch(_){uncertain=true;notice='An old approval record cannot be recovered. Check the waive file before clearing this local record.';}}
         async function revoke(token){if(stopped||!enabled){return;}if(revokeTask){revokeNext=token;return;}const t={cancelled:false,abort:null};revokeTask=t;
             try{await o.http('POST',API+'/revoke',{token:token},false,t);}catch(_){/* Server expires unused previews too. */}
-            finally{if(revokeTask===t){revokeTask=null;const next=revokeNext;revokeNext=null;if(next){revoke(next);}}}}
+            finally{if(revokeTask===t){revokeTask=null;const next=revokeNext;revokeNext=null;if(next){revoke(next);}render();}}}
         function invalidate(reason){
             if(io){abort(io);io=null;}if(editor&&editor.token){revoke(editor.token);editor.token=null;}if(draft){revoke(draft.token);draft=null;}
             o.clearTimeout(expiry);expiry=null;el('waives-consent').checked=el('waives-legacy').checked=false;
@@ -168,6 +168,10 @@
             el('waives-forget').disabled=!(permitted()||model&&model.detached&&!stopped&&!stale)||!!active()||!!write||!el('waives-checked').checked;
             el('waives-status').textContent=(latest()&&latest().scope_id&&model.binding_id!==latest().scope_id?'Earlier review registration — receipt only\n':'')+statusText(latest(),receiptMetadata());el('waives-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
             el('waives-paused').hidden=!suspended();
+            // A retained editor snapshot uses the same bounded review resources
+            // as saved-note display. Do not turn that into a whole-DRC pause.
+            if(o.displayState){o.displayState(!!(enabled&&!stopped&&model&&
+                (io||model.preparing||revokeTask||draft||editor&&editor.token)));}
         }
         function schedule(){o.clearTimeout(timer);timer=null;if(enabled&&!stopped&&(active()||pending)){timer=o.setTimeout(refresh,active()?500:2500);}}
         function refreshReview(){const v=latest();if(!v||!terminal(v)||stopped){return;}const key=v.seq+':'+v.review_rev;
