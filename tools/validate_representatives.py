@@ -133,7 +133,32 @@ def main():
         sidecar.write_bytes(saved)
         index(src, '--force', '--representatives', '--representatives-points', '65536')
         assert sidecar.read_bytes() == saved, 'normal/additive builds disagree'
-        print('representatives: additive preservation, normal build, depth, pixel replay, kill switch, invalid fallback OK')
+
+        # A combined run whose OVR build fails (simulated by the gate-only
+        # --kill-at hook of the binary) still completes the base cache:
+        # design.ovm + marker are written, no design.ovr(.tmp) remains,
+        # the warning names the additive rerun, and the cache opens.
+        fi = os.environ['FLOE_INDEX_BIN']
+        failed = subprocess.run(
+            [fi, 'vfs', str(src), str(cache), '--representatives', '--kill-at', 'representatives-fail'],
+            capture_output=True, text=True, timeout=60)
+        assert failed.returncode == 0, failed.stderr
+        assert 'representatives-fail' in failed.stderr and '--representatives-only' in failed.stderr, failed.stderr
+        assert not sidecar.exists() and not (cache / 'design.ovr.tmp').exists(), 'failed combined build left an OVR'
+        assert (cache / 'meta.json').exists() and (cache / 'design.ovm').exists(), 'combined build lost the cache'
+        opened = subprocess.run([fi, 'plan', str(cache), '--view', '0,0,1,1'],
+                                capture_output=True, text=True, timeout=60)
+        assert opened.returncode == 0, opened.stderr
+        # the standalone additive run of the same failure is loud and leaves the cache alone
+        loud = subprocess.run(
+            [fi, 'vfs', str(src), str(cache), '--representatives-only', '--kill-at', 'representatives-fail'],
+            capture_output=True, text=True, timeout=60)
+        assert loud.returncode != 0 and not sidecar.exists(), (loud.returncode, loud.stderr)
+        assert (cache / 'meta.json').exists(), 'additive failure touched the cache'
+        index(src, '--representatives-only', '--representatives-points', '65536')
+        assert sidecar.read_bytes()[:8] == b'FLOEOVR1'
+        print('representatives: additive preservation, normal build, depth, pixel replay, kill switch, invalid fallback, '
+              'combined-run failure keeps the cache OK')
 
 
 if __name__ == '__main__':

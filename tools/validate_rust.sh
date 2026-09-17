@@ -38,14 +38,14 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck rust_renderer klayout"
+jobdeck representatives rust_renderer klayout"
 alias_gates() {
     case "$1" in
         quick)    echo "unit_vfs unit_render occupancy rust_renderer" ;;
         planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle" ;;
         occ)      echo "unit_vfs occupancy" ;;
-        render)   echo "unit_render rust_renderer render_goldens render_speckle render_frames klayout" ;;
-        indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker" ;;
+        render)   echo "unit_render rust_renderer representatives render_goldens render_speckle render_frames klayout" ;;
+        indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives" ;;
         python)   echo "index_cli vfs_profile floe2 drc_ice svrf" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
@@ -279,6 +279,11 @@ if gate oasis_shapes; then RAN="$RAN oasis_shapes"
 # MDPView colour order / header probe / CLI / batch index
 if gate jobdeck; then RAN="$RAN jobdeck"
     .venv/bin/python tools/validate_jobdeck.py; fi
+# design.ovr (OVR1) end to end: additive build preserves the cache,
+# depth/kill switch/invalid fallback, and a failed OVR inside a
+# combined index run leaves a complete base cache behind
+if gate representatives; then RAN="$RAN representatives"
+    .venv/bin/python tools/validate_representatives.py; fi
 # in-tree CPU renderer: Python queue contract plus independent
 # KLayout pixel oracle at deterministic serial/parallel settings
 if gate rust_renderer; then RAN="$RAN rust_renderer"

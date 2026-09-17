@@ -590,7 +590,10 @@ pub fn vfs_cmd(args: &[String]) {
             eprintln!("--representatives-only: cache/source identity differs; re-index first");
             std::process::exit(1);
         }
-        write_representatives(&doc, &outdir, &ovm, representative_points);
+        if let Err(e) = write_representatives(&doc, &outdir, &ovm, representative_points, kill_at.as_deref()) {
+            eprintln!("[vfs] representatives: {}", e);
+            std::process::exit(1);
+        }
     } else if coverage_only {
         // add design.ovc to an existing cache (additive op, outside
         // the marker protocol): pages/skeleton/meta stay as they are
@@ -694,7 +697,14 @@ pub fn vfs_cmd(args: &[String]) {
             let ovm = floe_ovm::Ovm::from_bytes(ovm_bytes)
                 .expect("reopen built ovm");
             if representatives {
-                write_representatives(&doc, &outdir, &ovm, representative_points);
+                // an optional file never costs the cache: warn, finish
+                // design.ovm + marker, and say how to add it later
+                if let Err(e) = write_representatives(&doc, &outdir, &ovm, representative_points, kill_at.as_deref()) {
+                    eprintln!(
+                        "[vfs] representatives: {} - the cache is completed without design.ovr; add it later with --representatives-only",
+                        e
+                    );
+                }
             }
             let fj = frontier_json_planned(&ovm);
             match ovm.data {
@@ -1858,11 +1868,28 @@ fn profile_cell_run(
     out
 }
 
-fn write_representatives(doc: &Doc, outdir: &str, ovm: &floe_ovm::Ovm, points: usize) {
+/// design.ovr (docs/REPRESENTATIVES.ko.md), published by tmp + rename.
+/// Returns the build/write error instead of exiting: the standalone
+/// `--representatives-only` run fails loudly (the cache is untouched),
+/// the combined index run warns and completes the cache without the
+/// file - the directory limits can trip on a MAIN01-class layout after
+/// an hour of indexing, and losing design.ovm for an optional file is
+/// the worse outcome. `--kill-at representatives-fail` is the gate-only
+/// simulated failure (tools/validate_representatives.py).
+fn write_representatives(
+    doc: &Doc,
+    outdir: &str,
+    ovm: &floe_ovm::Ovm,
+    points: usize,
+    kill_at: Option<&str>,
+) -> Result<(), String> {
     use floe_vfs::representatives as reps;
     use std::io::Write;
     let started = std::time::Instant::now();
     let result = (|| -> Result<(), String> {
+        if kill_at == Some("representatives-fail") {
+            return Err("--kill-at representatives-fail (gate-only simulated build failure)".into());
+        }
         let mut built = reps::build(doc, points, Some(|s| eprintln!("[vfs] representatives {}", s)))?;
         let count: usize = built.groups.iter().map(|g| g.points.len()).sum();
         let bytes = reps::encode(&mut built, ovm);
@@ -1876,11 +1903,10 @@ fn write_representatives(doc: &Doc, outdir: &str, ovm: &floe_ovm::Ovm, points: u
                   built.groups.len(), built.entries, count, fmt_size(bytes.len() as u64), started.elapsed().as_secs_f64());
         Ok(())
     })();
-    if let Err(e) = result {
+    if result.is_err() {
         let _ = std::fs::remove_file(format!("{}/design.ovr.tmp", outdir));
-        eprintln!("[vfs] representatives: {}", e);
-        std::process::exit(1);
     }
+    result
 }
 
 /// occupancy pyramid (docs/OCCUPANCY_PLAN.ko.md M1): design.ovo,

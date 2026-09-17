@@ -28,6 +28,17 @@ floe2 index source.oas --representatives-only --representatives-points 524288 --
 `--representatives`를 주면 파일이 없을 때 추가하고, `--representatives-points`를 주면
 대표 파일을 재생성한다. 덱에는 적용하지 않는다.
 
+### 생성 실패 시 (0.12.155)
+
+`--representatives`를 새 인덱싱이나 `--force` 재색인과 함께 준 결합 실행에서 OVR
+생성이 실패하면(멤버 디렉터리·그룹 상한, 샘플링 작업 상한 등) 경고를 남기고 캐시를
+`design.ovr` 없이 완성한다. design.ovm과 마커는 그대로 쓰이고, 파일은 나중에
+`--representatives-only`로 추가한다. 0.12.154에서는 이 실패가 `exit(1)`이라 한 시간
+넘게 만든 인덱스가 마커 없이 남았고 `--force`였다면 기존 캐시도 이미 지워진 뒤였다.
+`--representatives-only` 자체의 실패는 종전대로 exit 1이며 기존 캐시를 건드리지 않는다.
+게이트는 바이너리의 `--kill-at representatives-fail`(게이트 전용 모의 실패)로 두 경로를
+확인한다.
+
 ## 생성 비용
 
 1. 명시 레코드·배치를 읽고 `(cell, layer, datatype, 상대 depth)`별 논리 멤버 수와

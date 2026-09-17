@@ -20,7 +20,7 @@ sh tools/validate_rust.sh --only quick path/to.oas
 - 별칭: `quick`(vfs·render 유닛, occupancy, rust_renderer — 약 2분),
   `planner`(hier.rs 변경: unit_vfs, occupancy, jobdeck, rust_renderer,
   vfs_hier, vfs_lifecycle), `occ`, `render`(render-core/renderd 변경: unit_render,
-  rust_renderer, render_goldens/speckle/frames, klayout), `indexer`(cli·인덱서
+  rust_renderer, representatives, render_goldens/speckle/frames, klayout), `indexer`(cli·인덱서
   변경), `python`(cli.py·cachepath·drc), `deck`. 모르는 이름은 exit 2.
 - 준비 단계 재사용: release 빌드는 cargo의 신선도 검사에 맡기고, 레거시 .tiles
   오라클은 rust_* 게이트를 골랐을 때만(그리고 파이썬 인덱서가 바뀌었을 때만)
@@ -29,6 +29,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
   배터리는 캐시를 매번 다시 만들어 형식 변경이 묵은 캐시 뒤에 숨지 못하게 한다.
 - 유닛 게이트: `unit`(워크스페이스 debug `cargo test`), `unit_vfs`·`unit_render`
   (release `--lib`; release 프로필의 doctest는 LTO와 어긋나 제외).
+- `representatives`(tools/validate_representatives.py, 약 10초; `render`·`indexer`
+  별칭에 포함): design.ovr 추가 생성이 캐시를 보존하는지, depth 0 제외·kill switch·
+  손상 파일 폴백, 그리고 결합 인덱스 실행에서 OVR 생성이 실패해도(`--kill-at
+  representatives-fail`, 게이트 전용 모의 실패) design.ovm·마커가 완성되고 캐시가
+  열리는지, `--representatives-only`의 같은 실패는 exit 1이며 캐시를 건드리지 않는지.
 - 마지막 줄은 같은 `RUST VALIDATION: ALL OK`이고 `--only`면 돌린 게이트 목록이
   붙는다. 커밋 규칙: 반복 커밋은 바꾼 영역의 별칭 통과, 실칩용 푸시는 전체 배터리.
 
