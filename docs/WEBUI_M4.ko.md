@@ -6849,3 +6849,22 @@ BFCache 장애 주입이나 저장·복구 수용을 대신하지 않는다.
 종합 비동기/복원 감사, Python-free Linux 실행, G1/G4 최종 판정, 현장 Firefox/ETX.
 원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다. 새 합성 다중 리뷰
 저장·충돌/결과 불명 테스트는 별도 명시 승인을 기다리며 허가로 추정하지 않는다.
+
+## 108. M4g-51 — 실제 Chrome 다중 도형 간격·자유각 수용
+
+2026-09-18. [브라우저 §5.4](WEBUI_BROWSER_ACCEPTANCE.ko.md#54-실제-다중-선택자동-bbox-gapshift-자유각)에
+기존 승인 합성 탭의 실제 입력·화면 근거를 추가했다. Shift 추가/Command 해제로
+두 box 선택을 확인하고 자동 bbox gap2µm를 원본 좌표와 대조했다. 같은 시작점과
+목표점의 기본 축 정렬20µm, Shift 자유각20.2237µm(Δx20/Δy3)를 비교하고 k/Shift+K
+삭제 순서도 확인했다. 원본 수치와 UI 응답, screenshot의 치수선을 함께 확인했다.
+
+제품 수정이나 새 파일 저장은 없다. 실제 실행 파일은 About에 `aa1f0a3+`/bundle
+`2a10c3d9254aa79ff5c37d44a08e0d4b1e10bf55`를 표시하므로 최신 BFCache/CSS 수정의
+브라우저 PASS로 세지 않는다. current HEAD의 inspect/measure 단위 회귀는 ALL OK.
+검사 후 카메라/9레이어/DRC/룰러를 기존 상태로 복원하고 입력·캐시·기존 sidecar10개
+해시 불변과 새 reviewer 파일0개를 확인했다. 서버 재시작을 사용자에게 요청하지 않았다.
+
+전체 목표 잔여: 실제 브라우저의 나머지 입력·설정·공유·저장/충돌/결과 불명 복구,
+최신 빌드의 CSS/초기화/BFCache 수용, Python-free Linux 실행, G1/G4, 현장 Firefox/ETX.
+SH-10/index hot reload 보류와 M5 실측 조건부는 그대로다. 이 단계는 관측 검증
+진전이며 UI-04 전체나 목표 완료를 선언하지 않는다.

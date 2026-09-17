@@ -255,6 +255,45 @@ CSS/접근성 source guard, 전체 JS UI 게이트와 offline/locked release app
 원본/cache/DRC/기존 sidecar10파일의 SHA-256은 불변이고 새 `browser-preview` 파일은 없다.
 메모·waive 저장/자동 저장 활성화, 기본값 게시, 설정 내보내기는 하지 않았다.
 
+### 5.4 실제 다중 선택·자동 bbox gap·Shift 자유각
+
+2026-09-18. 연결 상태를 새로 확인한 기존62804 합성 탭에서 검사했다. 새 인증 링크,
+파일 업로드/저장, 공유 또는 reviewer 권한은 사용하지 않았다. About의 실제 값은
+source revision `aa1f0a3f48cd018684ef754af09f7f8d3ad4b09d+`, web bundle
+`2a10c3d9254aa79ff5c37d44a08e0d4b1e10bf55`, target `aarch64-apple-darwin`이다.
+dirty 표시가 있는 이전 실행 파일의 관측이며 최신 초기화/BFCache 수정이나
+§5.3의 CSS 수정 후 수용으로 계산하지 않는다. 기대 native 버전은 실행 worker
+source hash의 증거가 아니다.
+
+DRC markers off/패널 닫기, 3/0만 표시, Frames/Labels off, full/High에서 검사했다.
+viewport1156×735.5 CSS px, DPR2. §5.3에서 원본과 대조한 두 box는
+(30,30)–(48,33)µm와(50,30)–(68,33)µm다.
+
+| 조작 | 실제 UI·화면 결과 |
+|---|---|
+| X59/Y31.5/view70µm에서 CSS(528,470) 클릭 | LEAF1/3/0,1 selected, bounds30000,30000,48000,33000, area54000000DBU² |
+| viewport 중앙을 Shift-click | 2 selected, 마지막 box bounds50000,30000,68000,33000 |
+| 같은 중앙을 Command-click | 두 번째만 해제,1 selected와 첫 box bounds 복원 |
+| Shift로 다시 추가한 뒤 r | `1 selected bbox gaps`, DBU(48000,31500)→(50000,31500), Length/Δx2.0000µm, Δy0; 실제 화면에 두 box 사이 치수선 |
+| X50/Y33/view70µm에서 snap on, CSS(528,519)→viewport 중앙 | 기본 축 정렬: DBU(30000,30000)→(50000,30000), Length20.0000µm |
+| 동일 첫 점, Shift를 누른 중앙 클릭 | 자유각: DBU(30000,30000)→(50000,33000), Δx20/Δy3µm, Length20.2237µm; `sqrt(20²+3²)`의4자리 표시와 일치 |
+| k, 이어 Shift+K | 마지막 자유각만 제거해20µm/1 ruler, 이후0 rulers |
+
+자동2µm 치수선과 수평20µm/대각20.2237µm 동시 표시는 screenshot으로도 확인했다.
+이미지를 읽어 길이를 추정한 것이 아니라 원본 좌표와 Rust가 반환한 DBU/거리 표시를
+대조한 것이다. bbox gap을 contour 최단 거리로 부르지 않는다. 두 도형/한 자유각의
+검사이며 다중 후보 전체, 비정형 도형, CD/수동/자동 혼합 Undo, clipboard, 모든
+DPR/Firefox/원격 입력과 성능 수용은 남는다.
+
+검사 후9레이어, Frames/Labels/Markers on, DRC 패널 open, X200/Y220/view500µm,
+full/High/thin auto, 선택/룰러0·probe off·ruler snap on으로 복원했다(gen66 margin crop).
+note/waive 자동 저장은 모두 off이며 새 저장 receipt는 없다. 원본/cache/DRC/기존
+sidecar10파일 SHA-256은 기존 기준과 모두 같고 `browser-preview` sidecar/lock은 없다.
+서버를 재시작하지 않았으며 테스트 탭을 후속 수용을 위해 보존했다.
+
+제품 코드 변경은 없다. 현재 HEAD의 `inspect.test.cjs`와 `measure.test.cjs`도
+각각 ALL OK로 재검증했지만, 이 모형 게이트를 실제 브라우저 관측과 혼합하지 않는다.
+
 ## 6. 설정 다운로드 — 최초 불러오기 권한 차단
 
 2026-09-17 사용자가 새 합성 valmini 세션을 열고, 다운로드한 두 설정 파일을 같은
@@ -863,6 +902,9 @@ auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
 §5.1은 실제 bitmap 조작·참조 일부와 스크롤바 클릭 수정을 추가한다.
 §5.2의 명시 종료 뒤 픽셀/Live 표시 잔류는 M4g-44에서 수정하고 실제 Chrome으로 재검증했다.
+§5.3은 원본 꼭짓점/변 스냅과 수동18/2µm, §5.4는 실제 Shift/Command 다중 선택,
+자동 bbox gap2µm와 축 정렬20µm/자유각20.2237µm 및 Undo를 확인했다. 이전 빌드의
+관측으로 범위를 고정하며 최신 hover/CSS·초기화/BFCache 수용은 남긴다.
 종료 응답 불명/복구 전체와 OS IME 수용은 별도로 남는다.
 
 Python-free Linux 실행, G1/G4 전체, 현장 Firefox/ETX G2는 남는다. 원격 SH-10은

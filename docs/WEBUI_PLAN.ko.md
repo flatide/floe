@@ -181,6 +181,10 @@ M4g-50은 초기화가 끝나기 전 BFCache 복귀를 별도 보호한다. 한 
 세대 검사로 숨김 뒤 추가 요청을 막고 bootstrap/자동 open을 중복 제출하지 않는다.
 레벨 승인·결과 불명·연속 복귀86조합은 합성 회귀이며 실제 브라우저 BFCache 수용은
 남긴다([M4 §107](WEBUI_M4.ko.md#107-m4g-50--초기화-중-bfcache-중단복귀와-자동-열기-보호)).
+M4g-51은 기존 승인 Chrome 합성 탭에서 두 box의 Shift/Command 다중 선택,
+자동 bbox gap2µm, 축 정렬20µm/자유각20.2237µm와 Undo를 원본 좌표·화면으로
+확인했다. 이전 실행 파일의 관측이며 최신 CSS/BFCache 및 UI-04 전체 수용은 아니다
+([브라우저 §5.4](WEBUI_BROWSER_ACCEPTANCE.ko.md#54-실제-다중-선택자동-bbox-gapshift-자유각)).
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.
 M4g-11d에서 Ctrl/Shift 선택·접기/펼치기·페이지 간 범위와 선택 행의 일괄 가시성을
