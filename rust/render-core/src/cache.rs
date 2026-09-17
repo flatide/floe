@@ -41,6 +41,9 @@ pub struct PlanSummary {
     pub encoded_bytes: u64,
     pub records: u64,
     pub members: u64,
+    pub representative_points: u64,
+    pub representative_tested: u64,
+    pub representative_limited: bool,
     pub wc_cells: u64,
     pub wc_variants: u64,
     pub inst_edges: u64,
@@ -81,6 +84,11 @@ pub struct PlanCullCounts {
     pub rep_kept: u64,
     pub rep_washed: u64,
     pub rep_children: u64,
+    /// the page level the decode budget forced (one representative
+    /// page in 2^Lp), 0 when every cut page in view was kept
+    pub rep_page_level: u64,
+    /// the frame's level (one cut item in 2^L, set by the item budget)
+    pub rep_level: u64,
 }
 
 impl PlanCullCounts {
@@ -103,6 +111,8 @@ impl PlanCullCounts {
             rep_kept: st.rep_pages_kept,
             rep_washed: st.rep_pages_washed,
             rep_children: st.rep_children,
+            rep_page_level: st.rep_page_level as u64,
+            rep_level: st.rep_level as u64,
         }
     }
 
@@ -128,6 +138,8 @@ impl PlanCullCounts {
         self.rep_kept = self.rep_kept.saturating_add(other.rep_kept);
         self.rep_washed = self.rep_washed.saturating_add(other.rep_washed);
         self.rep_children = self.rep_children.saturating_add(other.rep_children);
+        self.rep_page_level = self.rep_page_level.max(other.rep_page_level);
+        self.rep_level = self.rep_level.max(other.rep_level);
     }
 }
 
@@ -274,6 +286,8 @@ pub struct Cache {
     /// layer's summary (a full-depth flattening) equals the exact
     /// render there (user 2026-09-15: the depth is a free control)
     layer_depth: Vec<u32>,
+    // Immutable for this open cache; reopen after publishing design.ovr.
+    representatives: std::sync::OnceLock<Option<floe_vfs::representatives::File>>,
 }
 
 /// The longest top-to-cell path of every cell (None = unreachable
@@ -367,6 +381,7 @@ impl Cache {
             dir: dir.to_string(),
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
             layer_depth,
+            representatives: std::sync::OnceLock::new(),
         })
     }
 
@@ -677,6 +692,7 @@ impl Cache {
             plan.wcells.push(floe_vfs::hier::WsCell {
                 key: plan.top,
                 pages: Vec::new(),
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
@@ -722,6 +738,59 @@ impl Cache {
         })
     }
 
+    /// Plain viewer only: native point representatives supplement the normal
+    /// cull plan. Exact/probe/deck callers continue to use `plan` unchanged.
+    pub fn plan_with_representatives(&self, request: &PlanRequest) -> Result<PlannedView, String> {
+        let mut planned = self.plan(request)?;
+        let req = self.view_request(request)?;
+        if request.exact
+            || req.cut_dbu <= 0
+            || !req.page_hairline
+            || req.page_reps
+            || req.sub_cut_wash
+        {
+            return Ok(planned);
+        }
+        let started = Instant::now();
+        let file = self.representatives.get_or_init(|| {
+            if !Path::new(&self.dir).join("design.ovr").exists() {
+                return None;
+            }
+            match floe_vfs::representatives::File::open(&self.dir, &self.vfs.ovm) {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    eprintln!("[render] ignoring design.ovr: {}", error);
+                    None
+                }
+            }
+        });
+        if let Some(file) = file {
+            let (points, stats) = file.query(&req);
+            planned.summary.representative_points = stats.points;
+            planned.summary.representative_tested = stats.tested;
+            planned.summary.representative_limited = stats.limited;
+            if !points.is_empty() {
+                let top = planned.plan.top;
+                if let Some(cell) = planned.plan.wcells.iter_mut().find(|c| c.key == top) {
+                    cell.washes.extend(points);
+                } else {
+                    planned.plan.wcells.push(floe_vfs::hier::WsCell {
+                        key: top,
+                        pages: Vec::new(),
+                        page_levels: Vec::new(),
+                        insts: Vec::new(),
+                        frames: Vec::new(),
+                        washes: points,
+                    });
+                    planned.plan.stats.wc_cells += 1;
+                    planned.summary.wc_cells += 1;
+                }
+            }
+        }
+        planned.stats.plan_us = planned.stats.plan_us.saturating_add(elapsed_us(started));
+        Ok(planned)
+    }
+
     /// §F2R-21: the plan of a render whose geometry is reused in full
     /// from a retained frame - no page plan, no pages, and a working
     /// set of just the (empty) top cell so the scene validates; the
@@ -734,6 +803,7 @@ impl Cache {
                 wcells: vec![floe_vfs::hier::WsCell {
                     key: top,
                     pages: Vec::new(),
+                    page_levels: Vec::new(),
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
@@ -827,6 +897,7 @@ impl Cache {
             },
             sub_cut_wash: request.sub_cut_wash && !request.exact,
             page_reps: request.page_reps && !request.exact,
+            decode_budget: request.decode_budget,
             page_hairline: request.page_hairline,
             prune_skipped: request.prune_summary,
             page_skip: if request.summary_layers.is_empty() {

@@ -537,6 +537,11 @@ const PERF: &[&str] = &[
     "rep_kept",
     "rep_washed",
     "rep_children",
+    "rep_page_level",
+    "rep_level",
+    "stored_rep_points",
+    "stored_rep_tested",
+    "stored_rep_limited",
     "rect_paints",
     "polygon_paints",
     "path_paints",
@@ -605,6 +610,9 @@ pub fn frame_header(
         })
         .collect();
     let approximate = [
+        "stored_rep_points",
+        "rep_kept",
+        "rep_children",
         "summary_passes",
         "summary_cells",
         "summary_layers",
@@ -956,6 +964,34 @@ mod tests {
         f.deck_skipped = 1;
         let h: Value = serde_json::from_slice(&frame_header(&f, "v", "c").unwrap()).unwrap();
         assert_eq!(h["complete"], false);
+    }
+    #[test]
+    fn stored_points_are_approximate_numeric_display_telemetry_not_a_query_scene() {
+        let mut f = frame();
+        f.frame.fields.0.remove("summary_cells");
+        f.frame.fields.0.insert("scene_summary".into(), "0".into());
+        for (key, value) in [
+            ("stored_rep_points", "21"),
+            ("stored_rep_tested", "100"),
+            ("stored_rep_limited", "1"),
+            ("rep_page_level", "2"),
+            ("rep_level", "3"),
+        ] {
+            f.frame.fields.0.insert(key.into(), value.into());
+        }
+        let h: Value = serde_json::from_slice(&frame_header(&f, "v", "c").unwrap()).unwrap();
+        assert_eq!(h["approximate"], true);
+        assert_eq!(h["query"], true);
+        assert_eq!(h["query_scene"]["summary_layers"], "0");
+        assert_eq!(h["perf"]["stored_rep_points"], "21");
+        assert_eq!(h["perf"]["stored_rep_limited"], "1");
+        f.frame
+            .fields
+            .0
+            .insert("stored_rep_points".into(), "/private/path".into());
+        let h: Value = serde_json::from_slice(&frame_header(&f, "v", "c").unwrap()).unwrap();
+        assert!(h["perf"].get("stored_rep_points").is_none());
+        assert_eq!(h["approximate"], false);
     }
     #[test]
     fn query_capability_is_geometry_completion_not_label_or_summary_completion() {

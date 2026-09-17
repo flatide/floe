@@ -18,6 +18,7 @@ pub enum NativePhase {
     Building,
     Publishing,
     Occupancy,
+    Representatives,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Progress {
@@ -32,6 +33,7 @@ pub struct Progress {
     pub drc_total_checks: Option<u64>,
     pub drc_errors: Option<u64>,
     pub drc_noninteger: bool,
+    pub representatives_missing: bool,
 }
 #[derive(Default)]
 struct Line {
@@ -78,6 +80,12 @@ impl Line {
             p.phase = NativePhase::Publishing;
         } else if s.starts_with("[occupancy]") {
             p.phase = NativePhase::Occupancy;
+        } else if s.starts_with("[vfs] representatives ") || s.starts_with("[vfs] representatives:")
+        {
+            p.phase = NativePhase::Representatives;
+            if s.contains("the cache is completed without design.ovr;") {
+                p.representatives_missing = true;
+            }
         }
         if s.starts_with("[drc-pack w") && s.contains("G scanned, ") {
             p.phase = NativePhase::Parsing;
@@ -197,6 +205,17 @@ fn drain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn optional_representative_failure_is_allowlisted_not_raw_text() {
+        let mut p = Progress::default();
+        let mut l = Line::default();
+        l.feed(b"[vfs] representatives groups=1 points=64\n", &mut p, true);
+        assert_eq!(p.phase, NativePhase::Representatives);
+        assert!(!p.representatives_missing);
+        l.feed(b"[vfs] representatives: /private/source - the cache is completed without design.ovr; add it later with --representatives-only\n", &mut p, true);
+        assert!(p.representatives_missing);
+        assert!(!format!("{p:?}").contains("/private/source"));
+    }
     #[test]
     fn telemetry_is_bounded_incremental_and_never_retains_names_or_paths() {
         let mut line = Line::default();

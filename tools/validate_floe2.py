@@ -284,7 +284,8 @@ print(json.dumps([_renderer_backend(), instance.APP,
             launched = subprocess.run(
                 [str(target), "view", "chip.oas"], cwd=bundle,
                 env=dict(base, XDG_CACHE_HOME=str(bundle / "cache")),
-                capture_output=True, text=True, timeout=10)
+                # a loaded host (the battery, load 6+) took over 10 s
+                capture_output=True, text=True, timeout=30)
             check(launched.returncode == 0 and
                   launched.stdout.strip() ==
                   "-m %s view chip.oas" % product,

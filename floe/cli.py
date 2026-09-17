@@ -311,14 +311,15 @@ def _discard_occupancy_tmp(outdir):
     (floe-index publishes by rename, so the previous design.ovo is
     intact); the wrapper removes the temp file so a cache never carries
     a half-written summary (docs/OCCUPANCY_PLAN.ko.md §4)."""
-    tmp = os.path.join(outdir, "design.ovo.tmp")
-    try:
-        os.remove(tmp)
-        print(f"[floe] discarded {tmp}", file=sys.stderr)
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        print(f"[floe] cannot remove {tmp}: {exc}", file=sys.stderr)
+    for name in ("design.ovo.tmp", "design.ovr.tmp"):
+        tmp = os.path.join(outdir, name)
+        try:
+            os.remove(tmp)
+            print(f"[floe] discarded {tmp}", file=sys.stderr)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"[floe] cannot remove {tmp}: {exc}", file=sys.stderr)
 
 
 def _occupancy_args(args):
@@ -335,7 +336,7 @@ def _occupancy_args(args):
 
 
 def _run_rust_index(args, binary, coverage_only=False,
-                    occupancy_only=False):
+                    occupancy_only=False, representatives_only=False):
     import shlex
     import subprocess
 
@@ -347,12 +348,18 @@ def _run_rust_index(args, binary, coverage_only=False,
         command.append(outdir)
     if args.jobs is not None:
         command += ["--jobs", str(args.jobs)]
-    if coverage_only:
+    if representatives_only:
+        command += ["--representatives-only", "--representatives-points",
+                    str(getattr(args, "representatives_points", None) or 262144)]
+    elif coverage_only:
         command.append("--coverage-only")
     elif occupancy_only:
         command.append("--occupancy-only")
         command += _occupancy_args(args)
     else:
+        if getattr(args, "representatives", False) and not profiling:
+            command += ["--representatives", "--representatives-points",
+                        str(getattr(args, "representatives_points", None) or 262144)]
         if args.page_target_mb is not None:
             command += ["--page-target-mb", str(args.page_target_mb)]
         if args.coverage:
@@ -403,6 +410,21 @@ def _run_rust_index(args, binary, coverage_only=False,
 
 
 def cmd_index(args):
+    representatives = (getattr(args, "representatives", False) or
+                       getattr(args, "representatives_points", None) is not None)
+    representatives_only = getattr(args, "representatives_only", False)
+    args.representatives = representatives
+    if getattr(args, "representatives_points", None) is not None and args.representatives_points > 4194304:
+        raise SystemExit("floe: --representatives-points must be in 1..=4194304")
+    if representatives or representatives_only:
+        if args.legacy or _is_deck(args.src):
+            raise SystemExit("floe: representatives require a plain Rust layout cache")
+        if args.coverage_only or args.occupancy_only or (representatives_only and
+                                                       (args.coverage or args.occupancy or
+                                                        getattr(args, "occupancy_um", None) is not None)):
+            raise SystemExit("floe: representatives and other additive summaries require separate runs")
+        if args.profile_cell is not None or args.profile_cell_ci is not None:
+            raise SystemExit("floe: representatives cannot be combined with cell profiling")
     if _is_deck(args.src):
         # `floe2 index deck.jb`: one `index` run per source the deck
         # names (each parallel with --jobs); current caches are kept.
@@ -519,6 +541,11 @@ def cmd_index(args):
     outdir = cachepath.vfs_cache_dir(src)
     cachepath.find_vfs_cache(src)   # a pre-rename <src>.floe/ moves to outdir
     current, reason = _current_vfs_cache(src, outdir, binary)
+    if representatives_only:
+        if not current:
+            raise SystemExit(
+                f"floe: --representatives-only needs a current cache at {outdir} ({reason})")
+        return _run_rust_index(args, binary, representatives_only=True)
     if args.coverage_only:
         if not current:
             raise SystemExit(
@@ -539,7 +566,10 @@ def cmd_index(args):
     if current and not args.force:
         if args.coverage and not os.path.isfile(
                 os.path.join(outdir, "design.ovc")):
-            return _run_rust_index(args, binary, coverage_only=True)
+            _run_rust_index(args, binary, coverage_only=True)
+        if representatives and (getattr(args, "representatives_points", None) is not None or
+                                not os.path.isfile(os.path.join(outdir, "design.ovr"))):
+            _run_rust_index(args, binary, representatives_only=True)
         if args.occupancy:
             ovo = os.path.join(outdir, "design.ovo")
             if not os.path.isfile(ovo):
@@ -1781,6 +1811,17 @@ def main(argv=None, *, prog=None, rust_only=None):
         coverage.add_argument(
             "--coverage-only", action="store_true",
             help="add design.ovc to a current cache without rebuilding it")
+    reps = rust.add_mutually_exclusive_group()
+    reps.add_argument(
+        "--representatives", action="store_true",
+        help="build design.ovr native point samples for plain-layout thin:cull views")
+    reps.add_argument(
+        "--representatives-only", action="store_true",
+        help="add/rebuild design.ovr on a current cache; parses source once, keeps existing index")
+    rust.add_argument(
+        "--representatives-points", type=_positive_int, default=None, metavar="N",
+        help="sample cap per layer/depth group (default 262144, global cap 4194304); "
+             "implies --representatives")
     occ = rust.add_mutually_exclusive_group()
     occ.add_argument(
         "--occupancy", action="store_true",

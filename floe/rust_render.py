@@ -1098,10 +1098,19 @@ class RustRenderWorker:
                 "sub_cut_sparse_over": _wire_int(fields, "sub_cut_sparse_over"),
                 "sub_cut_wash_over": _wire_int(fields, "sub_cut_wash_over"),
                 # the page frontier's representatives (2026-09-17): cut
-                # pages kept / washed, cut placements washed or expanded
+                # pages kept (drawn), cut placements expanded with thinned
+                # members; rep_washed is kept on the wire but stays 0
                 "rep_kept": _wire_int(fields, "rep_kept"),
                 "rep_washed": _wire_int(fields, "rep_washed"),
                 "rep_children": _wire_int(fields, "rep_children"),
+                # the page level the decode budget forced (0 = all cut
+                # pages in view kept, their records thinned instead)
+                "rep_page_level": _wire_int(fields, "rep_page_level"),
+                # the frame's level: one cut item in 2^L (the item budget)
+                "rep_level": _wire_int(fields, "rep_level"),
+                "stored_rep_points": _wire_int(fields, "stored_rep_points"),
+                "stored_rep_tested": _wire_int(fields, "stored_rep_tested"),
+                "stored_rep_limited": _wire_int(fields, "stored_rep_limited"),
             },
             # occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): layers
             # drawn from design.ovo instead of their pages, the cells

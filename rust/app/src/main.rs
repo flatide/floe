@@ -72,6 +72,9 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --occupancy-only           Rebuild only summary on a current cache
   --occupancy-um UM          Positive base cell; default chip-size adaptive
   --occupancy-balance 0|1    Marking work split; default 1, byte-neutral diagnostic
+  --representatives          Add bounded representative points (plain layout only)
+  --representatives-only     Rebuild only points on a current cache
+  --representatives-points N Group sample cap, 1..4194304; implies representatives
   --slow-cell-s S            Nonnegative slow-cell threshold
   --p2-shard-limit-mb N       Nonnegative shard-copy ceiling
   --profile-cell NAME        Profile one cell without writing a normal cache
@@ -223,6 +226,17 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             "--profile-snapshot-refresh" => {
                 no_value()?;
                 options.profile_snapshot_refresh = true;
+            }
+            "--representatives" => {
+                no_value()?;
+                options.representatives = true;
+            }
+            "--representatives-only" => {
+                no_value()?;
+                options.representatives_only = true;
+            }
+            "--representatives-points" => {
+                options.representatives_points = Some(number(value()?, flag)?)
             }
             "--jobs" => options.jobs = number(value()?, flag)?,
             "--page-target-mb" => options.page_target_mb = Some(number(value()?, flag)?),

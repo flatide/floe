@@ -9,3 +9,4 @@ description = "floe VFS runtime: geometry-free view planning, working-set sessio
 floe-oasis = { path = "../oasis" }
 floe-ovm = { path = "../ovm" }
 floe-tiler = { path = "../tiler" }
+crc32fast = "1.4"

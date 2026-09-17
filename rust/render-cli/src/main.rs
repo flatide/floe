@@ -1,7 +1,8 @@
 use floe_render_core::{
-    render_geometry_occupancy, render_geometry_styled, render_geometry_styled_unbinned, Cache, CacheLayer, DecodedPageCache,
-    FrameScene, GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox,
-    StyledGeometryRasterRequest, ViewBox, DEFAULT_TILE_SIZE, MAX_TILE_SIZE,
+    render_geometry_occupancy, render_geometry_styled, render_geometry_styled_unbinned, Cache,
+    CacheLayer, DecodedPageCache, FrameScene, GeometryRasterRequest, LayerFill, LayerStyle,
+    PlanRequest, RasterViewBox, StyledGeometryRasterRequest, ViewBox, DEFAULT_TILE_SIZE,
+    MAX_TILE_SIZE,
 };
 use std::env;
 use std::process::ExitCode;
@@ -221,6 +222,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         exact: args.cut_px == 0.0,
         sub_cut_wash: false,
         page_reps: false,
+        decode_budget: 0,
         page_hairline: true,
         summary_layers: Vec::new(),
         prune_summary: false,

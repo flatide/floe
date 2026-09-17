@@ -395,13 +395,15 @@
                     displayed = true; el('empty').hidden = true; disposition = 'displayed';
                     target.dataset.frameId = h.frame_id; target.dataset.renderRev = h.render_rev;
                     target.dataset.bboxDbu = JSON.stringify(h.bbox_dbu);
-                    el('status').textContent = (!h.final ? 'Refining' : h.complete ? 'Live' : 'INCOMPLETE') + (h.approximate ? ' · summary/LOD' : '') +
+                    el('status').textContent = (!h.final ? 'Refining' : h.complete ? 'Live' : 'INCOMPLETE') + (h.approximate ? ' · approximate' : '') +
                         (h.labels_truncated ? ' · labels partial' : '') + (h.deck_skipped !== '0' ? ' · skipped ' + h.deck_skipped : '') + ' · gen ' + h.generation;
                     const perf = h.perf || {}, ms = function (name) { return perf[name] ? (Number(perf[name]) / 1000).toFixed(1) : '0'; };
                     if (h.purpose === 'foreground') {
                         foregroundPerf = 'Rust foreground · plan ' + ms('plan_us') + ' ms · decode ' + ms('decode_us') + ' ms · draw ' + ms('raster_us') +
                             ' ms · ' + (perf.pages || '0') + ' pages · ' + h.width + ' × ' + h.height + ' px · ' + h.format +
-                            ' · round ' + h.round + (h.final ? ' · final frame' : ' · refining');
+                            ' · round ' + h.round + (h.final ? ' · final frame' : ' · refining') +
+                            (Number(perf.stored_rep_points || 0) > 0 ? ' · stored reps ' + perf.stored_rep_points + '/tested ' + (perf.stored_rep_tested || '0') +
+                                (Number(perf.stored_rep_limited || 0) > 0 ? ' (capped)' : '') : '');
                     }
                     present();
                 }
@@ -530,9 +532,11 @@
         if (!source) { el('source-note').textContent = 'No source registered in this workspace.'; el('level-options').hidden = true; controls(); return; }
         if (pendingStartup && pendingStartup.source_id !== source.source_id) { pendingStartup = null; startupWaiting = false; }
         el('mode').disabled = !source.deck; el('level-options').hidden = !source.deck;
+        el('index-representatives').disabled = source.deck;
         if (!source.deck) { el('mode').value = 'level'; }
         if (levelSource !== source.source_id) {
             el('index-occupancy').checked = source.deck;
+            el('index-representatives').checked = false;
             ++levelLoad; levelBusy = false;
             levelSource = source.source_id; levelNext = null; levelIds = new Set(); el('level-list').textContent = ''; el('levels-all').checked = true;
             if (source.deck) { moreLevels().catch(report); }
@@ -555,7 +559,9 @@
     function operationLabel(op) {
         if (op.kind === 'index_open') { return window.FloeIndexOpen.resultText(op,message); }
         const p = op.native || {};
-        return op.kind + ' · ' + op.phase + (p.phase ? ' · ' + p.phase : '') + (op.error ? ' · ' + message(op.error) : '') + (op.kind === 'index' ? window.FloeIndexOpen.renameText(op) : '');
+        return op.kind + ' · ' + op.phase + (p.phase ? ' · ' + p.phase : '') + (op.error ? ' · ' + message(op.error) : '') +
+            (p.representatives_missing === true ? ' · WARNING: base cache completed without representative points; retry with --representatives-only' : '') +
+            (op.kind === 'index' ? window.FloeIndexOpen.renameText(op) : '');
     }
     async function operationState() {
         try { return await readOperationState(); }
@@ -889,7 +895,7 @@
             if (inspector) { inspector.click(x, y, modifiers); }
         }});
     el('index').onclick = function () {
-        try { submitOperation({kind: 'index', source_id: el('source').value, levels: levels(), options: {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked, occupancy: el('index-occupancy').checked}}).catch(report); }
+        try { submitOperation({kind: 'index', source_id: el('source').value, levels: levels(), options: {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked, occupancy: el('index-occupancy').checked, representatives: !el('index-representatives').disabled && el('index-representatives').checked}}).catch(report); }
         catch (e) { report(e); }
     };
     el('cancel-job').onclick = function () { const id = el('cancel-job').dataset.seq; if (id && !indexBlocked()) { http('POST', '/api/v1/operations/' + id + '/cancel', {}).then(operationState).catch(report); } };

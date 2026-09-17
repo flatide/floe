@@ -2864,27 +2864,26 @@ class ThinPageTests(unittest.TestCase):
         exact = self._rgb("thin.oas", "exact")
         self.assertGreater(self._lit(exact), 100)
         # the plain layout's default: the performance policy culls the
-        # all-thin page - and the page frontier (2026-09-17) keeps a
-        # representative of what the cut drops: this single page is the
-        # first of its run, sparse (400 lines under 1/8 of the page),
-        # so it is kept and drawn exactly. FLOE_RUST_PAGE_REPS=off is
-        # the plain cull (nothing); FLOE_RUST_SUB_CUT_WASH=on the
-        # blanket sub-cut rules (the same picture here)
-        noreps = {"FLOE_RUST_PAGE_REPS": "off"}
+        # all-thin page - nothing. The page frontier (FLOE_RUST_PAGE_REPS
+        # =on, deactivated by default since 2026-09-17) keeps a
+        # representative of what the cut drops - this single sparse
+        # page, drawn exactly - and the blanket sub-cut rules
+        # (FLOE_RUST_SUB_CUT_WASH=on) give the same picture here
+        reps = {"FLOE_RUST_PAGE_REPS": "on"}
         wash = {"FLOE_RUST_SUB_CUT_WASH": "on"}
-        self.assertEqual(self._rgb("thin.oas", "high"), exact)
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high", noreps)), 0)
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
+        self.assertEqual(self._rgb("thin.oas", "high", reps), exact)
         self.assertEqual(self._rgb("thin.oas", "high", wash), exact)
         # the mask policy on the same file: identical to exact
         self.assertEqual(self._rgb("thin.oas", "high", thin="keep"), exact)
         # explicit cull is the default; the diagnostic override wins
         # over the request either way
-        self.assertEqual(self._rgb("thin.oas", "high", thin="cull"), exact)
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high", dict(noreps), thin="cull")), 0)
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high", thin="cull")), 0)
+        self.assertEqual(self._rgb("thin.oas", "high", dict(reps), thin="cull"), exact)
         self.assertEqual(self._rgb("thin.oas", "high",
                                    {"FLOE_RUST_PAGE_HAIRLINE": "keep"}), exact)
         self.assertEqual(self._lit(self._rgb(
-            "thin.oas", "high", dict(noreps, FLOE_RUST_PAGE_HAIRLINE="cull"),
+            "thin.oas", "high", {"FLOE_RUST_PAGE_HAIRLINE": "cull"},
             thin="keep")), 0)
 
     def test_a_thicker_record_changes_nothing_about_the_lines(self):
@@ -2899,14 +2898,13 @@ class ThinPageTests(unittest.TestCase):
         self.assertEqual(outside, [], "lines identical away from the box")
         self.assertTrue(diff, "the box itself is drawn")
         # under the plain policy the thicker record decides the fate
-        # of every line in its page - the documented omission, visible
-        # with the page frontier off (FLOE_RUST_PAGE_REPS=off); with it
-        # (the default) the sparse all-thin page is a representative
-        # and drawn either way
-        noreps = {"FLOE_RUST_PAGE_REPS": "off"}
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high", noreps)), 0)
-        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high", noreps)), 100)
-        self.assertGreater(self._lit(self._rgb("thin.oas", "high")), 100)
+        # of every line in its page - the documented omission; with the
+        # page frontier switched on (FLOE_RUST_PAGE_REPS=on) the sparse
+        # all-thin page is a representative and drawn either way
+        reps = {"FLOE_RUST_PAGE_REPS": "on"}
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
+        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high")), 100)
+        self.assertGreater(self._lit(self._rgb("thin.oas", "high", reps)), 100)
 
     def test_deck_keeps_thin_pages_by_default(self):
         exact = self._rgb("thin.jb", "exact")
@@ -2982,8 +2980,8 @@ class ThinPageTests(unittest.TestCase):
             c.load()
             if wash:
                 os.environ["FLOE_RUST_SUB_CUT_WASH"] = "on"
-            if not reps:
-                os.environ["FLOE_RUST_PAGE_REPS"] = "off"
+            if reps:
+                os.environ["FLOE_RUST_PAGE_REPS"] = "on"
             try:
                 worker = RustRenderWorker(c)
                 worker.start()
@@ -3135,18 +3133,17 @@ class WideViewTests(unittest.TestCase):
         # rendered fine in `floe2 render` because captures are exact;
         # --detail high captures with the viewer's 1 px cut. tiny.oas
         # at 200 px over 2000 um: 1 px = 10 um, the 1 um dots page is
-        # size-cut and the 1 um BIT array pruned. The page frontier
-        # (2026-09-17) keeps representatives of both - the dots page
-        # (the first of its run) as a footprint wash, the array's first
-        # placement washed - so high lights them; FLOE_RUST_PAGE_REPS=off
-        # is the silent cut (nothing lit), FLOE_RUST_SUB_CUT_WASH=on the
-        # blanket sub-cut rules; exact (the default) draws everything
+        # size-cut and the 1 um BIT array pruned: the silent cut,
+        # nothing lit at high. The page frontier (FLOE_RUST_PAGE_REPS=on,
+        # deactivated by default since 2026-09-17) keeps representatives
+        # of both, the blanket sub-cut rules (FLOE_RUST_SUB_CUT_WASH=on)
+        # wash them; exact (the default) draws everything
         src = CLI / "tiny.oas"
         wash_on = dict(self.env, FLOE_RUST_SUB_CUT_WASH="on")
-        noreps = dict(self.env, FLOE_RUST_PAGE_REPS="off")
+        reps_on = dict(self.env, FLOE_RUST_PAGE_REPS="on")
         for detail, env, lit in (("exact", self.env, True),
-                                 ("high", self.env, True),
-                                 ("high", noreps, False),
+                                 ("high", self.env, False),
+                                 ("high", reps_on, True),
                                  ("high", wash_on, True)):
             out = CLI / ("tiny-%s.png" % detail)
             rep = CLI / ("tiny-%s.json" % detail)
@@ -3158,7 +3155,7 @@ class WideViewTests(unittest.TestCase):
             doc = json.loads(rep.read_text())
             self.assertEqual(doc["cut_px"], 0.0 if detail == "exact" else 1.0)
             self.assertEqual(_png_lit_pixels(out) > 0, lit,
-                             (detail, env is wash_on, env is noreps))
+                             (detail, env is wash_on, env is reps_on))
         # a deck capture with the viewer's cut follows the deck's wide
         # policy: off by default (nothing lit without the summary, off
         # here), its washes with FLOE_RUST_DECK_WIDE=on

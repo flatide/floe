@@ -938,6 +938,7 @@ mod tests {
             px_per_dbu: px,
             sub_cut_wash: false,
             page_reps: false,
+            decode_budget: 0,
             page_hairline: false,
             page_skip: Vec::new(),
             prune_skipped: false,

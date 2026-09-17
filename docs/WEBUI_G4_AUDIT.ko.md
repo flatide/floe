@@ -1,6 +1,6 @@
 # 웹 전환 G4 잔여 감사
 
-갱신: 2026-09-17, 합성 메모/waive 저장·복원과 admission/영수증/경로 수정. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
+갱신: 2026-09-18, OVR 정방향 통합·전체 회귀 및 합성 다중 미리보기. 상위 [계획](WEBUI_PLAN.ko.md), 원래 범위
 [M0 §2~3](WEBUI_M0.ko.md), 단계별 실행 기록 [M4](WEBUI_M4.ko.md).
 
 이 문서는 **로컬 구현과 전체 수용을 분리하는 잔여 목록**이다. 표의 구현/게이트는
@@ -38,6 +38,13 @@ native parser177회다. [동기화 기록](WEBUI_JOBDECK_SYNC.ko.md)에 검증 �
 Build에서만 개명을 추가한다([계약·검증](WEBUI_CACHE_MIGRATION.ko.md)). 읽기 권한으로
 파일 이름을 바꾸지 않는다. 별도 프로세스 reader 조정, 캐시 revision/hot reload,
 실칩·실제 브라우저 수용은 추가하지 않는다. 원격 단계(SH-10)는 사용자 보류다.
+
+M4g-41은 `c817117`까지 정방향 통합하고 선택 OVR 생성·가산/취소·근사 표시를 Rust
+앱/웹에 연결했다. 최신 CLI는 공개114개·숨김 거부17개/native parser180회다.
+전체 회귀와 실제 Chrome의 기본off 표시·읽기는 통과했다. 별도 reviewer의
+[다중 선택·메모 미리보기/무효화·waive 읽기](WEBUI_BROWSER_ACCEPTANCE.ko.md#108-별도-합성-복사본의-다중-읽기미리보기-저장-없음)는
+파일 저장 없이 확인했으며 다중 저장·충돌/결과 불명 복구 수용으로 세지 않는다.
+GTK readiness는 확인했지만5초 시작 실패 및 G1/G4/Python-free Linux는 남는다.
 
 ## 1. 범위별 현재 근거와 남은 일
 

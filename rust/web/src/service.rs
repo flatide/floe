@@ -83,6 +83,9 @@ pub struct IndexArgs {
     pub occupancy_only: bool,
     pub occupancy_um: Field<String>,
     pub occupancy_balance: Field<u8>,
+    pub representatives: bool,
+    pub representatives_only: bool,
+    pub representatives_points: Field<u64>,
 }
 impl Default for IndexArgs {
     fn default() -> Self {
@@ -94,6 +97,9 @@ impl Default for IndexArgs {
             occupancy_only: false,
             occupancy_um: Field::Absent,
             occupancy_balance: Field::Absent,
+            representatives: false,
+            representatives_only: false,
+            representatives_points: Field::Absent,
         }
     }
 }
@@ -118,6 +124,12 @@ impl IndexArgs {
                 Field::Value(v) => Some(v),
             },
             occupancy_only: self.occupancy_only,
+            representatives: self.representatives,
+            representatives_only: self.representatives_only,
+            representatives_points: match self.representatives_points {
+                Field::Absent => None,
+                Field::Value(n) => Some(n),
+            },
             occupancy_um,
             occupancy_balance: match self.occupancy_balance {
                 Field::Absent => None,
@@ -1029,14 +1041,46 @@ fn index_state(seq: u64, s: &IndexSnapshot) -> Value {
         NativePhase::Building => "building",
         NativePhase::Publishing => "publishing",
         NativePhase::Occupancy => "occupancy",
+        NativePhase::Representatives => "representatives",
     };
     json!({"seq":seq.to_string(),"kind":"index","phase":phase,"title":s.title,"current":s.current,"completed":s.completed,"total":s.total,"kept":s.kept,"renamed":s.renamed,"rename_sync_warning":s.rename_sync_warning,"skipped":s.skipped,"failed":s.failed,"elapsed_ms":s.elapsed_ms.to_string(),"error":s.failure.map(view::safe_error),
-        "native":{"phase":native,"output_bytes":s.native.output_bytes.to_string(),"dropped_lines":s.native.dropped_lines.to_string(),"cells":s.native.cells.map(|n|n.to_string()),"total_cells":s.native.total_cells.map(|n|n.to_string()),"planned_pages":s.native.planned_pages.map(|n|n.to_string()),"encoded_pages":s.native.encoded_pages.map(|n|n.to_string())}})
+        "native":{"phase":native,"output_bytes":s.native.output_bytes.to_string(),"dropped_lines":s.native.dropped_lines.to_string(),"representatives_missing":s.native.representatives_missing,"cells":s.native.cells.map(|n|n.to_string()),"total_cells":s.native.total_cells.map(|n|n.to_string()),"planned_pages":s.native.planned_pages.map(|n|n.to_string()),"encoded_pages":s.native.encoded_pages.map(|n|n.to_string())}})
 }
 
 #[cfg(test)]
 mod index_args_tests {
     use super::*;
+    #[test]
+    fn representatives_wire_keeps_opt_in_and_rejects_invalid_modes() {
+        let core = |v| {
+            serde_json::from_value::<IndexArgs>(v)
+                .map_err(|_| ())
+                .and_then(|v| v.core().map_err(|_| ()))
+        };
+        assert!(!core(json!({})).unwrap().wants_representatives());
+        assert!(core(json!({"representatives":true}))
+            .unwrap()
+            .wants_representatives());
+        assert!(core(json!({"representatives_points":64}))
+            .unwrap()
+            .wants_representatives());
+        assert!(
+            core(json!({"representatives_only":true}))
+                .unwrap()
+                .representatives_only
+        );
+        for v in [
+            json!({"representatives":null}),
+            json!({"representatives_points":null}),
+            json!({"representatives_points":0}),
+            json!({"representatives_points":4194305}),
+            json!({"representatives_points":"64"}),
+            json!({"representatives_only":true,"occupancy":true}),
+            json!({"representatives":true,"occupancy_only":true}),
+        ] {
+            assert!(core(v.clone()).is_err(), "{v}");
+        }
+    }
     #[test]
     fn summary_default_is_source_aware_and_explicit_modes_survive() {
         let parse = |v| {

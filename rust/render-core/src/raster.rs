@@ -10,6 +10,7 @@ use crate::page_index::RecordSet;
 use crate::repetition::{for_each_visible_offset, for_each_visible_offset_chunked};
 use crate::transform::OrthoTransform;
 use crate::{FrameScene, RenderCancellation, RenderStats, ViewBox};
+use floe_oasis::doc::Rep;
 
 const MAX_IMAGE_PIXELS: u64 = 268_435_456;
 const MAX_WORKERS: u16 = 256;
@@ -1030,6 +1031,12 @@ enum PlaneItem {
     Wash {
         world_bbox: BBox,
     },
+    // Native display points, spatially ordered in design.ovr. A tile rejects
+    // a whole chunk instead of checking every point of the frame.
+    Points {
+        world_bbox: BBox,
+        points: Vec<BBox>,
+    },
     /// An instance left unexpanded (its measured expansion overran the
     /// item budget, §3.15/§3.17). The tile resolves it through the
     /// combined mini walk for its `edge`, falling back to the walk's
@@ -1381,8 +1388,28 @@ fn collect_cell(
         if !world_bbox.intersects(&cull_view) {
             continue;
         }
-        bin.charge()?;
-        bin.planes[plane].push(PlaneItem::Wash { world_bbox });
+        if wash.x0 == wash.x1 && wash.y0 == wash.y1 {
+            if let Some(PlaneItem::Points {
+                world_bbox: bounds,
+                points,
+            }) = bin.planes[plane].last_mut()
+            {
+                if points.len() < 128 {
+                    bounds.grow(&world_bbox);
+                    points.push(world_bbox);
+                    continue;
+                }
+            }
+            check_cancelled(guard)?;
+            bin.charge()?;
+            bin.planes[plane].push(PlaneItem::Points {
+                world_bbox,
+                points: vec![world_bbox],
+            });
+        } else {
+            bin.charge()?;
+            bin.planes[plane].push(PlaneItem::Wash { world_bbox });
+        }
     }
     if want_frames && !cell.frames.is_empty() {
         // The walk reaches a non-top cell only when its bbox meets the
@@ -1699,18 +1726,20 @@ fn replay_plane_items(
                     format!("internal error: binned cell {:?} left the scene", cell)
                 })?;
                 let local_view = inverse.apply_bbox(cull_view)?;
-                for &page_id in &visited.pages {
+                for (slot, &page_id) in visited.pages.iter().enumerate() {
                     let Some(page) = scene.page(page_id) else {
                         continue;
                     };
                     if page.layer_idx != layer.layer_idx || !page.bbox.intersects(&local_view) {
                         continue;
                     }
+                    let level = visited.page_levels.get(slot).copied().unwrap_or(0);
                     raster_page_records(
                         band,
                         request,
                         page,
                         page_id,
+                        level,
                         local_view,
                         *transform,
                         stats,
@@ -1719,6 +1748,26 @@ fn replay_plane_items(
                         guard,
                         record_scratch,
                     )?;
+                }
+            }
+            PlaneItem::Points { world_bbox, points } => {
+                if !world_bbox.intersects(&cull_view) {
+                    continue;
+                }
+                check_cancelled(guard)?;
+                for &point in points {
+                    if !point.intersects(&cull_view) {
+                        continue;
+                    }
+                    counters.rect_records = counters.rect_records.saturating_add(1);
+                    stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+                    stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
+                    if paint_world_rect(band, request, point, paint)? {
+                        counters.rectangle_members_drawn =
+                            counters.rectangle_members_drawn.saturating_add(1);
+                        stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
+                        stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
+                    }
                 }
             }
             PlaneItem::Wash { world_bbox } => {
@@ -2588,11 +2637,40 @@ fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
 /// hierarchy walk and the work-bin tile path (F2R-03b 2c) so the two
 /// produce identical paint sequences.
 #[allow(clippy::too_many_arguments)]
+/// The page frontier's record thinning (floe_vfs::hier, WsCell::
+/// page_levels): a page kept `level` levels below its cut draws one
+/// item in 2^level - a record's repetition members absorb
+/// min(level, log2 members) of them (balanced strides for a grid,
+/// every 2^lm-th point) and its index within the page the rest.
+/// None: the record is skipped; Borrowed: drawn as it is.
+fn thin_record<'a>(rep: &'a Rep, level: u8, record: usize) -> Option<std::borrow::Cow<'a, Rep>> {
+    if level == 0 {
+        return Some(std::borrow::Cow::Borrowed(rep));
+    }
+    let lm = floe_vfs::hier::member_levels(rep.members(), level as u32);
+    let lr = level as u32 - lm;
+    if lr > 0 && record % (1usize << lr.min(60)) != 0 {
+        return None;
+    }
+    if lm == 0 {
+        return Some(std::borrow::Cow::Borrowed(rep));
+    }
+    Some(std::borrow::Cow::Owned(match rep {
+        Rep::One => Rep::One,
+        Rep::Grid { na, nb, va, vb } => {
+            let (na, nb, va, vb) = floe_vfs::hier::thin_grid(*na, *nb, *va, *vb, lm);
+            Rep::Grid { na, nb, va, vb }
+        }
+        Rep::Pts(p) => Rep::Pts(floe_vfs::hier::thin_pts(p, lm)),
+    }))
+}
+
 fn raster_page_records(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,
     page: &crate::DecodedPage,
     page_id: u32,
+    level: u8,
     local_view: BBox,
     world_transform: OrthoTransform,
     stats: &mut RenderStats,
@@ -2649,11 +2727,19 @@ fn raster_page_records(
                 x1,
                 y1,
             };
+            let Some(rep) = thin_record(&rect.rep, level, record as usize) else {
+                return Ok(());
+            };
+            let chunks = if matches!(rep, std::borrow::Cow::Borrowed(_)) {
+                page.index.pts_chunks(&rect.rep)
+            } else {
+                None
+            };
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
             let visit = for_each_visible_offset_chunked(
-                &rect.rep,
-                page.index.pts_chunks(&rect.rep),
+                &rep,
+                chunks,
                 base,
                 local_view,
                 |offset_x, offset_y| {
@@ -2693,9 +2779,17 @@ fn raster_page_records(
             let mut cancel_member = 0u16;
             // One scratch per record, reused by every repetition member.
             let mut world_points = Vec::with_capacity(polygon.pts.len());
+            let Some(rep) = thin_record(&polygon.rep, level, record as usize) else {
+                return Ok(());
+            };
+            let chunks = if matches!(rep, std::borrow::Cow::Borrowed(_)) {
+                page.index.pts_chunks(&polygon.rep)
+            } else {
+                None
+            };
             let visit = for_each_visible_offset_chunked(
-                &polygon.rep,
-                page.index.pts_chunks(&polygon.rep),
+                &rep,
+                chunks,
                 base,
                 local_view,
                 |offset_x, offset_y| {
@@ -2745,9 +2839,17 @@ fn raster_page_records(
             // every repetition member.
             let mut world_points = Vec::with_capacity(outline.len());
             let mut world_centerline = Vec::with_capacity(centerline.len());
+            let Some(rep) = thin_record(&path_record.rep, level, record as usize) else {
+                return Ok(());
+            };
+            let chunks = if matches!(rep, std::borrow::Cow::Borrowed(_)) {
+                page.index.pts_chunks(&path_record.rep)
+            } else {
+                None
+            };
             let visit = for_each_visible_offset_chunked(
-                &path_record.rep,
-                page.index.pts_chunks(&path_record.rep),
+                &rep,
+                chunks,
                 base,
                 local_view,
                 |offset_x, offset_y| {
@@ -2807,11 +2909,12 @@ fn render_cell(
     path.push(key);
     let local_view = world_transform.invert()?.apply_bbox(cull_view)?;
 
-    for &page_id in &cell.pages {
+    for (slot, &page_id) in cell.pages.iter().enumerate() {
         check_cancelled(guard)?;
         let Some(page) = scene.page(page_id) else {
             continue;
         };
+        let level = cell.page_levels.get(slot).copied().unwrap_or(0);
         // The planner selects pages for the whole viewport, while this hot
         // loop runs independently for every image tile. Reject a page in
         // cell-local coordinates before walking any of its records. Without
@@ -2825,6 +2928,7 @@ fn render_cell(
             request,
             page,
             page_id,
+            level,
             local_view,
             world_transform,
             stats,
@@ -5000,6 +5104,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![0, 1],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
@@ -5079,6 +5184,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![0, 1],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames,
                 washes: Vec::new(),
@@ -5144,6 +5250,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![page_id],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
@@ -5327,6 +5434,7 @@ mod tests {
                 wcells: vec![WsCell {
                     key: top,
                     pages: vec![0],
+                    page_levels: Vec::new(),
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
@@ -5409,6 +5517,7 @@ mod tests {
                 WsCell {
                     key: top,
                     pages: vec![0],
+                    page_levels: Vec::new(),
                     insts: vec![
                         inst(child_a, 2, 2),
                         inst(child_b, 4, 2),
@@ -5420,6 +5529,7 @@ mod tests {
                 WsCell {
                     key: child_a,
                     pages: vec![1],
+                    page_levels: Vec::new(),
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
@@ -5427,6 +5537,7 @@ mod tests {
                 WsCell {
                     key: child_b,
                     pages: vec![2],
+                    page_levels: Vec::new(),
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
@@ -5434,6 +5545,7 @@ mod tests {
                 WsCell {
                     key: child_c,
                     pages: vec![3],
+                    page_levels: Vec::new(),
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
@@ -5574,6 +5686,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![0],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
@@ -5923,6 +6036,7 @@ mod tests {
                     WsCell {
                         key: top,
                         pages: Vec::new(),
+                        page_levels: Vec::new(),
                         insts: vec![WsInst {
                             child,
                             x: 2,
@@ -5942,6 +6056,7 @@ mod tests {
                     WsCell {
                         key: child,
                         pages: vec![0],
+                        page_levels: Vec::new(),
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
@@ -6021,6 +6136,7 @@ mod tests {
                     WsCell {
                         key: top,
                         pages: Vec::new(),
+                        page_levels: Vec::new(),
                         insts: vec![WsInst {
                             child: mid,
                             x: 2,
@@ -6040,6 +6156,7 @@ mod tests {
                     WsCell {
                         key: mid,
                         pages: Vec::new(),
+                        page_levels: Vec::new(),
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
@@ -6047,6 +6164,7 @@ mod tests {
                     WsCell {
                         key: leaf,
                         pages: vec![0],
+                        page_levels: Vec::new(),
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: Vec::new(),
@@ -6127,6 +6245,7 @@ mod tests {
                     WsCell {
                         key: top,
                         pages: Vec::new(),
+                        page_levels: Vec::new(),
                         insts: vec![WsInst {
                             child: mid,
                             x: 2,
@@ -6146,6 +6265,7 @@ mod tests {
                     WsCell {
                         key: mid,
                         pages: Vec::new(),
+                        page_levels: Vec::new(),
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
@@ -6153,6 +6273,7 @@ mod tests {
                     WsCell {
                         key: leaf,
                         pages: vec![0, 1],
+                        page_levels: Vec::new(),
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
@@ -6244,6 +6365,7 @@ mod tests {
                     WsCell {
                         key: top,
                         pages: Vec::new(),
+                        page_levels: Vec::new(),
                         insts: vec![WsInst {
                             child: mid,
                             x: 0,
@@ -6258,6 +6380,7 @@ mod tests {
                     WsCell {
                         key: mid,
                         pages: Vec::new(),
+                        page_levels: Vec::new(),
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
@@ -6265,6 +6388,7 @@ mod tests {
                     WsCell {
                         key: leaf,
                         pages: vec![0],
+                        page_levels: Vec::new(),
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
@@ -6337,6 +6461,7 @@ mod tests {
                 wcells: vec![WsCell {
                     key: top,
                     pages: vec![0, 1],
+                    page_levels: Vec::new(),
                     insts: Vec::new(),
                     frames: vec![(
                         BBox {
@@ -6542,6 +6667,7 @@ mod tests {
                     WsCell {
                         key: top,
                         pages: Vec::new(),
+                        page_levels: Vec::new(),
                         insts: vec![inst(child_a, 2), inst(child_b, 4)],
                         frames: Vec::new(),
                         washes: Vec::new(),
@@ -6549,6 +6675,7 @@ mod tests {
                     WsCell {
                         key: child_a,
                         pages: Vec::new(),
+                        page_levels: Vec::new(),
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
@@ -6556,6 +6683,7 @@ mod tests {
                     WsCell {
                         key: child_b,
                         pages: vec![0],
+                        page_levels: Vec::new(),
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: Vec::new(),
@@ -6628,6 +6756,7 @@ mod tests {
                 WsCell {
                     key: top,
                     pages: vec![0],
+                    page_levels: Vec::new(),
                     insts: vec![inst(child)],
                     frames: Vec::new(),
                     washes: Vec::new(),
@@ -6635,6 +6764,7 @@ mod tests {
                 WsCell {
                     key: child,
                     pages: Vec::new(),
+                    page_levels: Vec::new(),
                     insts: vec![inst(top)],
                     frames: Vec::new(),
                     washes: Vec::new(),
@@ -7057,6 +7187,7 @@ mod tests {
                 WsCell {
                     key: top,
                     pages: Vec::new(),
+                    page_levels: Vec::new(),
                     insts: vec![WsInst {
                         child,
                         x: 2,
@@ -7076,6 +7207,7 @@ mod tests {
                 WsCell {
                     key: child,
                     pages: vec![0],
+                    page_levels: Vec::new(),
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),

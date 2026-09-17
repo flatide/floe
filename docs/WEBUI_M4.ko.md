@@ -6534,3 +6534,55 @@ web119단위와 실제 HTTP15를 통과했다. ignored oracle 항목은 뒤의 �
 전체 목표 잔여는 전체 회귀/시작 제한 추적, 실제 브라우저의 충돌·불명확한 게시
 복구·다중 선택/편집·입력/설정/공유 수용, Python-free Linux 실행, G1/G4 및 현장
 Firefox/ETX다. 원격 SH-10/index hot reload는 사용자 보류, M5는 성능 조건부로 유지한다.
+
+## 97. 세 번째 jobdeck 정방향 통합과 자체 서버 재시작
+
+§96의 전체 실행은 layerprops native oracle 시작30초 제한에서 멈췄다. 같은 제한의
+단독 재실행은72문서·980스타일·4뷰를 통과했고, 후반부 부분 실행의 layer-defaults
+시작 실패도 동일 제한 재실행에서20사례를 통과했다. 부분 실행/재시도를 전체 PASS나
+시작 지연 수정으로 세지 않는다. 그 실행의 portable 합성 gate는 통과했다.
+
+계획 §11에 따라 실측 `c817117`까지14커밋을 웹에 정방향 통합한다.
+[통합 기록](WEBUI_JOBDECK_SYNC.ko.md#세-번째-통합--ovr-대표-점)에
+native0.12.155, OVR의 Rust CLI/관리형 옵션·writer lease·연속 가산/취소·근사 진단을
+기록했다. core291/web121단위, UI와 실제 CLI/관리형/worker/OVR 집중 게이트는 통과했다.
+app/core/web all-target strict clippy(`--no-deps -- -D warnings`)도 통과했다.
+최종 전체 배터리는 `full.log`의 exit0/`RUST VALIDATION: ALL OK`로 통과했다.
+occupancy41/jobdeck83/renderer46과 KLayout workers1/8의 각13 PX+2 phase-exact+
+14 style을 포함한다. 제품 소스 고정 검증 뒤 선택 스크립트의 빈 `--only` 오류만
+고쳤고, 별도20사례와 실제 selector gate 진입을 통과했다. macOS 첫 실행 지연이나
+브라우저/현장 전체 수용을 해결했다는 뜻은 아니다.
+
+에이전트가 합성 서버를 직접58385로 재시작했고 새 Chrome 탭에서 기존 한글 메모·
+waive 읽기/해제/Reload review를 확인했다([§10.7](WEBUI_BROWSER_ACCEPTANCE.ko.md#107-에이전트-직접-재시작과-최신-native-통합-읽기)).
+자동 저장은off이고9개 보호 파일은 불변이다. 기존 탭 제어 장애는 새 테스트 탭에서
+복구됐으므로 현재 브라우저 작업의 blocker로 남기지 않는다.
+
+남은 전체 목표: 실제 브라우저 잔여 수용, Python-free Linux 실행,
+G1/G4 및 현장 Firefox/ETX. 원격 SH-10/index hot reload는 보류, M5는 조건부다.
+
+## 98. GTK 실행 준비와 실제 다중 미리보기의 검증 경계
+
+2026-09-18. 같은 합성 valmini로 GTK3.24.52 초기화를 확인했다. sandbox 안의
+GI 초기화는 abort134였고, 밖에서는 display 연결에 성공했다. OS/보안 설정을
+바꾸지 않았으며 이 차이를 제품 결함이나 구체적인 OS 원인의 확정으로 세지 않는다.
+
+기존 `FLOE_GUI_SMOKE_MS=5000` 검사는 `Rust render cache is still opening`으로
+실패했다. 별도의60초 readiness 검사에서는 native0.12.155/decode2/raster1,
+goto200,220,500/depth99/detail high/refinement off로 실제 GUI 프레임을 표시하고
+자동 quit/bye·exit0을 확인했다. 원본/캐시/리뷰9파일은 불변이다.5초 실패를
+지우거나60초 검사를 같은 시작 시간 기준의 PASS로 치환하지 않는다. viewport 크기와
+전체 배터리 부하도 달랐으므로 GTK/web 속도 비교나 G1 input→photon 판정은 아니다.
+
+전체 회귀 중 새 `query_stream` test executable의 시작21초 뒤1초간 읽기 전용으로
+스택을 샘플링했다.807개 표본 모두 `_dyld_start +0`, footprint112KiB이며 이후
+실제 harness는 시작해 종료됐다. 본문 실행 전 대기라는 근거만 추가한다.
+이 worktree 경로로 한정한 syspolicyd/amfid 로그 조회에는 일치 행이 없었다.
+OS 보안 검사/네트워크/캐시 중 무엇이 원인인지 단정하지 않으며 timeout은 유지한다.
+로그는 `/private/tmp/floe-web-ovr-sync.yNot41/`의 `gtk-smoke.log`,
+`gtk-readiness-60s.log`, `test-startup.sample.txt`다.
+
+[브라우저 §10.8](WEBUI_BROWSER_ACCEPTANCE.ko.md#108-별도-합성-복사본의-다중-읽기미리보기-저장-없음)은
+기존 세션을 보존한 별도 합성 reviewer의 다중 선택·메모 미리보기·선택 변경 무효화와
+waive 상태 읽기를 확인한다. 파일은 저장하지 않았고 기존 sidecar의 pack binding도
+제거하지 않았다. 실제 다중 저장/충돌/결과 불명 복구 수용으로 확대하지 않는다.

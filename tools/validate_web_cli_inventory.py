@@ -24,6 +24,7 @@ APP = ROOT / "rust/target/release/floe2-web"
 SURFACE = {
     "index": """--level=1 --force --jobs=2 --page-target-mb=1
         --occupancy --no-occupancy --occupancy-only --occupancy-um=4 --occupancy-balance=1 --no-lod --lod
+        --representatives --representatives-only --representatives-points=262144
         --slow-cell-s=0 --p2-shard-limit-mb=0 --profile-cell=TOP --profile-cell-ci=0
         --profile-jobs=1,2 --profile-repeat=2 --profile-snapshot=snapshot
         --profile-snapshot-refresh""",

@@ -544,6 +544,10 @@ fn visit_cell_layer(
         }
 
         for &(wash_layer_idx, wash) in &cell.washes {
+            // Zero-area washes encode OVR display points, never query shapes.
+            if wash.x0 == wash.x1 && wash.y0 == wash.y1 {
+                continue;
+            }
             if wash_layer_idx != layer.index {
                 continue;
             }
@@ -861,6 +865,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![page_id],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
@@ -882,6 +887,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![0, 1],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
@@ -1138,6 +1144,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![0, 1],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),

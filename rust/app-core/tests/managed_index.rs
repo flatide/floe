@@ -93,6 +93,21 @@ fn real_layout_deck_and_bounded_cancellation() {
         cache::CacheState::Current
     );
     let pinned = ManagedDataset::open(&resources, &source, None, Mode::Level, &flag).unwrap();
+    for opts in [
+        IndexOptions {
+            representatives: true,
+            ..options()
+        },
+        IndexOptions {
+            representatives_only: true,
+            ..options()
+        },
+    ] {
+        assert!(
+            ManagedIndex::start(&resources, Arc::clone(&registered), None, opts, real()).is_err()
+        );
+        assert!(!cache_dir.join("design.ovr").exists());
+    }
     assert!(ManagedIndex::start(
         &resources,
         Arc::clone(&registered),
@@ -131,6 +146,7 @@ fn real_layout_deck_and_bounded_cancellation() {
         None,
         IndexOptions {
             occupancy: Some(true),
+            representatives_points: Some(64),
             ..options()
         },
         real(),
@@ -138,6 +154,7 @@ fn real_layout_deck_and_bounded_cancellation() {
     .unwrap();
     assert_eq!(wait(&mut summary).phase, Phase::Succeeded);
     assert!(cache_dir.join("design.ovo").is_file());
+    assert!(cache_dir.join("design.ovr").is_file());
     for (name, bytes) in before {
         assert_eq!(
             fs::read(cache_dir.join(name)).unwrap(),

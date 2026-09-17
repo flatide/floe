@@ -221,6 +221,8 @@
         <div class="form-row"><label for="index-jobs">Index jobs</label><input id="index-jobs" class="short" type="number" min="1" max="16" value="12"></div>
         <label class="check"><input id="index-lod" type="checkbox"> Include LOD</label>
         <label class="check"><input id="index-occupancy" type="checkbox"> Include occupancy summary (default: jobdeck only)</label>
+        <label class="check"><input id="index-representatives" type="checkbox"> Include representative points (plain layout only)</label>
+        <p class="note">Representative points are approximate display samples, not pickable geometry. Reopen after generation. Adding both summaries to a current cache uses two passes; a completed first pass remains if the second fails.</p>
         <label class="check"><input id="index-force" type="checkbox"> Force replacement of existing cache</label>
         <div class="button-row"><button id="index">Run index</button><button id="cancel-job" disabled>Cancel</button></div>
         <p id="operation" class="note" role="status">No active operation.</p>

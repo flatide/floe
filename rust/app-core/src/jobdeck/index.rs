@@ -67,6 +67,12 @@ impl DeckIndexPlan {
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
         options.validate()?;
+        if options.wants_representatives() {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "representatives require a plain layout source, not a jobdeck",
+            ));
+        }
         let mut options = options.clone();
         options.occupancy = Some(options.occupancy.unwrap_or(true));
         if options.profile_cell.is_some() {

@@ -632,6 +632,55 @@ snapshot 해제만으로 그 안내가 자동으로 사라지지는 않았다. �
 sidecar2파일의 SHA-256은 §10.5와 모두 같다. Preview/Save·opt-in·upload/export는
 실행하지 않았고 제품 코드도 바꾸지 않았다.
 
+### 10.7 에이전트 직접 재시작과 최신 native 통합 읽기
+
+에이전트가 소유한63243 합성 서버의 PID/실행 인자를 확인하고 SIGINT로 정상 종료한
+뒤 기존 `run-review.sh`를 직접 실행했다. 새58385 세션은 native0.12.155,
+웹 `f953cf1` + 세 번째 jobdeck 통합 작업 트리다. 기존 탭은 debugger 연결이 끊겨
+있었지만 승인된 합성 비공개 링크로 새 Chrome 테스트 탭을 만들자 자동 제어가 복구됐다.
+사용자에게 서버 재시작을 넘기지 않았으며 인증값은 출력/문서화하지 않았다.
+
+- 실제 화면은 Local connected, depth full/detail high, X200/Y220/view500µm,
+  9레이어의 geometry/label,8규칙·23오류·SVRF8/8이다. screenshot으로 렌더를 확인했다.
+- M2.OVERLAP.2의 Global1에 saved-note badge가 있고 Global2에는 없다. Global1을
+  선택해 기존 두 줄 한글 본문·55 UTF-8 bytes를 읽고 수정 없이 Discard draft했다.
+  편집 snapshot 동안의 `review_busy` 표시는 §10.6처럼 명시 Refresh로 복구됐다.
+- waive snapshot은0 already waived/0 reserved다. action을 고르지 않고 Discard choice,
+  Reload review를 실행했다. saved notes revision0과 Review state synchronized가 유지된다.
+  두 자동 저장은off, 두 panel은 **이 새 서버 세션의 새 저장 receipt 없음**을 표시한다.
+  기존 디스크 파일이 없다는 의미로 해석하지 않는다.
+- 원본/cache/DB/pack/SVRF/메모/waive9파일의 SHA-256은 §10.5와 모두 같다.
+  Preview/Save·opt-in·upload/export는 하지 않았다. 새 저장 수용 검사로 세지 않는다.
+
+### 10.8 별도 합성 복사본의 다중 읽기·미리보기 (저장 없음)
+
+2026-09-18. 기존58385 세션/파일을 보존하고 private 임시 폴더에 합성 입력과
+캐시를 복사했다. 복사된 `browser-test` 메모의 pack binding 확장 속성은 원래
+pack identity에 묶여 있으므로 새 inode의 pack에서는 `drc_changed_or_corrupt`로
+거부됐다. 내용 해시/legacy header 일치만으로 이를 재연결하지 않는 현행 계약이다.
+binding 제거·변조나 암묵 import를 하지 않고 별도 `browser-preview` reviewer로
+서버를 직접 재시작했다(54581). 복사된 기존 sidecar는 그대로 남겼다.
+
+- 두 Shift 클릭으로 M2.OVERLAP.2의 Global1/2를 선택했다. 실제 UI에서
+  `2 selected in this rule · 2/5000 across all rules`와 group selection 우선을 확인했다.
+- `Read selected notes`는2개 대상/기존 메모0개를 읽었다. 두 줄 한글 초안
+  54 UTF-8 bytes를 입력하고 `Preview save`까지만 실행했다. 대상 수·생성할 파일·
+  정확한 본문과 별도 동의 checkbox가 보였고 `Approve note save`는 비활성화됐다.
+  자동 저장은off이며 동의 checkbox/Approve는 누르지 않았다.
+- Cmd 클릭으로 Global2를 선택에서 빼자 이전 미리보기와 제출 경로가 무효화됐다.
+  선택/연결/DRC context 변경 안내와 초안 보존을 확인하고 `Discard draft`했다.
+- 다시2개를 선택해 `Read selected statuses`에서0 waived/0 reserved를 확인했다.
+  waive action/Preview/Approve는 실행하지 않고 `Discard choice`했다. 선택을 모두
+  해제하고 명시 Refresh로 saved-note 표시를 revision0으로 복구했다.
+- 두 panel은 새 저장 receipt 없음, 두 자동 저장off, Local connected를 유지했다.
+  복사본9파일의 SHA-256은 원본과 같고 `browser-preview` sidecar/lock은 생성되지 않았다.
+  실제 다중 저장·충돌·게시 결과 불명 복구 검증은 별도 승인/실행 대상으로 남는다.
+
+58385에서는 최신 Index 패널의 대표 점 checkbox가 기본off이며 근사/non-pickable,
+재열기 필요, 두 가산 패스의 부분 완료 안내가 표시되는 것도 읽기만 확인했다.
+Index 실행·옵션 변경·추가 저장은 없었다. jobdeck에서의 비활성화는 이 실제
+flat-layout 검사 범위가 아니라 UI/native gate의 근거다.
+
 ## 11. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
@@ -645,6 +694,8 @@ Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 �
 §10.4는 같은 cache가 있는 상태의 SVRF 교체다. SVRF 선연결 후 reviewer 재연결의
 기본 예산 실패는 M4 §95에서 수정하고 §10.5의 실제 Chrome 순서로 확인했다.
 §10.6은 그 뒤 실제 note/waive 읽기·해제와 busy display의 명시 새로고침 복구다.
+§10.7은 최신 native 통합 실행 파일을 에이전트가 직접 재시작한 뒤 같은 읽기 계약을 확인했다.
+§10.8은 별도 reviewer의 다중 선택·메모 미리보기/무효화·waive 읽기까지이며 저장 수용이 아니다.
 각 절의 미검사 범위 및 DRC 교체 실패/진행 중 취소, pack 생성,
 메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
 auth/BFCache/종료는 남는다.

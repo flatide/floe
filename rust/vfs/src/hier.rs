@@ -39,53 +39,112 @@ pub const WASH_MIN_COVERAGE: f64 = 1.0 / 256.0;
 /// COVERAGE overrides (diagnostic).
 pub const WASH_MIN_COVERAGE_HAIR: f64 = 1.0 / 8.0;
 
-/// Representatives (the page frontier, user design 2026-09-17): a cut
-/// item k octaves below its cut - its measure at most 1/2^k of the
-/// threshold that cut it - keeps one in 4^k of its kind by index
-/// within the owning cell. Zooming out one octave quadruples the cut
-/// items in view and keeps a quarter of them, so the count in view
-/// stays what it was at the cut; and the sets are nested (a multiple
-/// of 4^(k+1) is a multiple of 4^k), so what survives one zoom-out
-/// survives every further one, like the frontier's lattice
-/// representatives (rev 45). The index is the page's within its
-/// (cell, layer) run or the placement's within its cell, so every
-/// run keeps its first item at any zoom. Octaves are capped so 4^k
-/// fits a u64 comfortably.
-pub const REP_OCTAVES_MAX: u32 = 15;
+/// Representatives (the page frontier, user design 2026-09-17,
+/// staged after the review of the same day; the level is a screen
+/// DENSITY since the field of the same day): what the cut drops is
+/// thinned to one item in 2^L instead of vanishing, L per item from
+/// its ink against its screen area (density_level): the smallest L
+/// with ink / 2^L <= rep_density x area, ink = members x max(1, min
+/// side px) x max(1, long side px) - an upper bound on what its
+/// members can paint - and area its box on screen. A dense array or
+/// hairline field thins to the density's dot pattern, a sparse page
+/// draws whole; zooming out shrinks the area four times per octave
+/// with the members clamped at a pixel, so L climbs two and a quarter
+/// survive (the user's "one in four"), and the survivors are nested
+/// the way the frontier's lattice representatives are (rev 45):
+/// S(L+1) is a subset of S(L) - what a wider view shows was shown at
+/// every closer view, nothing pops in. Per item, so a pan changes
+/// nothing (a global budget tried before let dense arrays fill their
+/// pixels while sparse regions went empty, and moved with every pan).
+/// The thinning is applied ONCE along the path: a page's level is
+/// handed (less the decode budget's page level) to the raster, where a
+/// record's members absorb min(., log2 members) and its index the
+/// rest; a cut child-BVH subtree within the density's dot pitch
+/// (1 / sqrt(density) px) is one dot at its centre and is not walked
+/// (rep_node_dot), a wider one is walked to its leaves, where a cut
+/// placement takes its footprint's level - members absorb min(L,
+/// log2 members), the placement's index the rest - and a kept member
+/// is a dot of the child's box (rep_dots). Levels are capped so 2^L
+/// fits a u64.
+pub const REP_LEVELS_MAX: u32 = 40;
 
-/// octaves below the cut: 0 for a measure above half the threshold,
-/// 1 for one in (1/4, 1/2], 2 for (1/8, 1/4], ...
-pub fn rep_octaves(measure: u64, threshold: u64) -> u32 {
+/// levels below the cut: floor(log2((threshold / measure)^2)), 0 at or
+/// above the cut, exact in integers
+pub fn rep_level(measure: u64, threshold: u64) -> u32 {
     if threshold == 0 {
         return 0;
     }
-    let mut k = 0u32;
-    let mut m = (measure.max(1) as u128) * 2;
-    while m <= threshold as u128 && k < REP_OCTAVES_MAX {
-        k += 1;
-        m *= 2;
+    let m2 = (measure.max(1) as u128) * (measure.max(1) as u128);
+    let t2 = (threshold as u128) * (threshold as u128);
+    let mut l = 0u32;
+    while (m2 << (l + 1)) <= t2 && l < REP_LEVELS_MAX {
+        l += 1;
     }
-    k
+    l
 }
 
-/// whether the item of `index` (within its cell) is a representative
-/// k octaves below the cut: one in 4^k
-pub fn rep_keeps(index: u64, k: u32) -> bool {
-    k == 0 || index % (1u64 << (2 * k.min(REP_OCTAVES_MAX))) == 0
+/// whether the item of `index` (within its run) is a representative
+/// `level` levels below the cut: one in 2^level
+pub fn rep_keeps(index: u64, level: u32) -> bool {
+    level == 0 || index % (1u64 << level.min(REP_LEVELS_MAX)) == 0
 }
 
 /// whether a run [lo, hi) of indices (relative to `base`) holds a
-/// representative k octaves below the cut; true when the run is
-/// unknown (hi <= lo)
-fn rep_in_run(lo: u32, hi: u32, base: u32, k: u32) -> bool {
-    if hi <= lo || k == 0 {
+/// representative at `level`; true when the run is unknown (hi <= lo)
+fn rep_in_run(lo: u32, hi: u32, base: u32, level: u32) -> bool {
+    if hi <= lo || level == 0 {
         return true;
     }
-    let m = 1u64 << (2 * k.min(REP_OCTAVES_MAX));
+    let m = 1u64 << level.min(REP_LEVELS_MAX);
     let first = lo.saturating_sub(base) as u64;
     let last = hi.saturating_sub(base) as u64;
     let next = first.div_ceil(m) * m;
     next < last
+}
+
+/// the levels a repetition of `members` absorbs of `level`
+pub fn member_levels(members: u64, level: u32) -> u32 {
+    level.min(members.max(1).ilog2())
+}
+
+/// a grid thinned by `level` member levels: strides 2^ja x 2^jb with
+/// ja + jb = level, balanced across the axes (an isotropic stipple),
+/// each at most the axis' own log2, the axis that runs out of members
+/// handing its remainder to the other - so one member in 2^level, a
+/// 1-D array thinning along its length; member 0 stays, and the
+/// survivors of level + 1 are among those of level
+pub fn thin_grid(
+    na: u64,
+    nb: u64,
+    va: (i64, i64),
+    vb: (i64, i64),
+    level: u32,
+) -> (u64, u64, (i64, i64), (i64, i64)) {
+    let la = na.max(1).ilog2();
+    let lb = nb.max(1).ilog2();
+    let ja = level.div_ceil(2).min(la);
+    let jb = (level - ja).min(lb);
+    let ja = (level - jb).min(la);
+    let (sa, sb) = (1u64 << ja, 1u64 << jb);
+    (
+        na.div_ceil(sa),
+        nb.div_ceil(sb),
+        (
+            va.0.saturating_mul(sa as i64),
+            va.1.saturating_mul(sa as i64),
+        ),
+        (
+            vb.0.saturating_mul(sb as i64),
+            vb.1.saturating_mul(sb as i64),
+        ),
+    )
+}
+
+/// a points repetition thinned by `level` member levels: every
+/// 2^level-th slot, slot 0 first (nested in level)
+pub fn thin_pts(pts: &[(i64, i64)], level: u32) -> std::sync::Arc<[(i64, i64)]> {
+    let step = 1usize << level.min(REP_LEVELS_MAX);
+    pts.iter().step_by(step).copied().collect()
 }
 
 /// the verdict on a cut page under the sub-cut rules or as a representative
@@ -136,6 +195,45 @@ fn sub_cut_sparse_px() -> f64 {
 fn sub_cut_wash_px() -> f64 {
     static PX: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *PX.get_or_init(|| env_mpx("FLOE_RUST_SUB_CUT_WASH_MPX", SUB_CUT_WASH_PX))
+}
+
+/// HierOpts::rep_decode_bytes default: 256 MiB
+pub const REP_DECODE_BYTES: u64 = 256 << 20;
+
+/// HierOpts::rep_density default: a quarter of the pixels of a dense
+/// field - Calibre's dot pattern at a wide view
+pub const REP_DENSITY: f64 = 0.25;
+
+fn rep_density() -> f64 {
+    static D: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var("FLOE_RUST_REP_DENSITY")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(REP_DENSITY)
+    })
+}
+
+/// the smallest level with `items / 2^L <= budget` (0 when within)
+pub fn level_for(items: u64, budget: u64) -> u32 {
+    if budget == 0 || items <= budget {
+        return 0;
+    }
+    let over = items.div_ceil(budget);
+    (u64::BITS - (over - 1).leading_zeros()).min(REP_LEVELS_MAX)
+}
+
+fn rep_decode_bytes() -> u64 {
+    static B: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *B.get_or_init(|| {
+        std::env::var("FLOE_RUST_REP_DECODE_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .map(|v| (v * 1048576.0) as u64)
+            .unwrap_or(REP_DECODE_BYTES)
+    })
 }
 
 /// A sub-cut page-BVH node whose extent is at most this many screen
@@ -257,6 +355,20 @@ pub struct HierOpts {
     /// / FLOE_RUST_SUB_CUT_WASH_MPX override in Mpx (diagnostic).
     pub sub_cut_sparse_px: f64,
     pub sub_cut_wash_px: f64,
+    /// The page frontier's decode budget per plan, decoded bytes of
+    /// the cut pages kept as representatives (a page is about 1 MiB
+    /// decoded; the render cache holds 1 GiB): beyond it the plan is
+    /// redone with the pages thinned one in 2^Lp by index (Lp the
+    /// smallest that fits), the records inside taking the rest of
+    /// their level. 0 = no budget. FLOE_RUST_REP_DECODE_MB overrides
+    /// (diagnostic).
+    pub rep_decode_bytes: u64,
+    /// The page frontier's screen density: the ink a cut item's
+    /// survivors may paint per pixel of its box on screen (0.25 = a
+    /// dot pattern of a quarter of the pixels in a dense field). Sets
+    /// every item's level (density_level). 0 = no thinning.
+    /// FLOE_RUST_REP_DENSITY overrides (diagnostic).
+    pub rep_density: f64,
     /// Field diagnosis (2026-09-10): record one ExplainRow per page,
     /// page-BVH node, child placement / child-BVH node and frame the
     /// walk judged INSIDE the view - kept, culled by size, hairline,
@@ -301,6 +413,8 @@ impl Default for HierOpts {
             sub_cut_walk_budget: 200_000,
             sub_cut_sparse_px: sub_cut_sparse_px(),
             sub_cut_wash_px: sub_cut_wash_px(),
+            rep_decode_bytes: rep_decode_bytes(),
+            rep_density: rep_density(),
             explain: false,
         }
     }
@@ -325,6 +439,9 @@ pub struct WsCell {
     pub key: WsKey,
     /// page directory indexes, sorted unique
     pub pages: Vec<u32>,
+    /// per page (parallel to `pages`): the page frontier's levels its
+    /// records are thinned by in the raster (0 = every record)
+    pub page_levels: Vec<u8>,
     pub insts: Vec<WsInst>,
     /// depth-boundary child outlines: offset-0 member bbox in
     /// WC-local coords + the placement rep (arrays outline per
@@ -375,6 +492,24 @@ pub struct HierStats {
     pub rep_pages_washed: u64,
     pub rep_children: u64,
     pub rep_pruned: u64,
+    /// decoded bytes of the representative pages kept, the page level
+    /// (one page in 2^Lp by index) the decode budget forced, and
+    /// whether the plan was redone for it
+    pub rep_decode_bytes: u64,
+    pub rep_page_level: u32,
+    pub rep_replans: u32,
+    /// the members of the cut items kept as representatives, the
+    /// highest level any of them took, and the decoded bytes of every
+    /// selected page (the decode budget is measured against what the
+    /// generation may still hold)
+    pub rep_items: u64,
+    pub rep_level: u32,
+    pub page_bytes: u64,
+    /// dots emitted for representative cut placements (kept members
+    /// in view, before the layer fan-out) and for cut child-BVH
+    /// subtrees within the dot pitch (one each)
+    pub rep_dots: u64,
+    pub rep_node_dots: u64,
     /// pages selected whose every record is thin (max_min < hairline
     /// x cut): what the page hairline rule would have dropped
     pub thin_pages_kept: u64,
@@ -666,6 +801,38 @@ pub fn walk_vis(req: &ViewReq) -> Vec<u8> {
 }
 
 pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
+    let reps = req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0;
+    let mut plan = plan_hier_pass(v, req, opts, 0);
+    if !reps || opts.rep_decode_bytes == 0 {
+        return plan;
+    }
+    // the decode budget of the representative pages: the option, and
+    // never more than half of what the generation's budget still
+    // holds after the pages the plan selects anyway (field
+    // 2026-09-17: the generation budget tripped with the option alone)
+    let normal = plan
+        .stats
+        .page_bytes
+        .saturating_sub(plan.stats.rep_decode_bytes);
+    let mut budget = opts.rep_decode_bytes;
+    if req.decode_budget > 0 {
+        budget = budget
+            .min(req.decode_budget.saturating_sub(normal) / 2)
+            .max(1);
+    }
+    if plan.stats.rep_decode_bytes > budget {
+        // redo the plan with the pages thinned one in 2^Lp by index,
+        // Lp the smallest level that fits (their records take the rest
+        // of their level in the raster). Deterministic in the view.
+        let page_level = level_for(plan.stats.rep_decode_bytes, budget);
+        let mut again = plan_hier_pass(v, req, opts, page_level);
+        again.stats.rep_replans = 1;
+        plan = again;
+    }
+    plan
+}
+
+fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32) -> HierPlan {
     let structural_frontier = opts.frame_cap != 0;
     let mut h = Hier {
         v,
@@ -686,6 +853,9 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         explain_on: opts.explain,
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         reps: req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0,
+        rep_page_level: page_level,
+        dot_lattice: HashSet::new(),
+        page_levels: HashMap::new(),
         wash_walk_budget: opts.sub_cut_walk_budget,
         sparse_px_left: opts.sub_cut_sparse_px,
         wash_px_left: opts.sub_cut_wash_px,
@@ -754,6 +924,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         h.expand(ci, r);
     }
     let mut st = h.st;
+    st.rep_page_level = page_level;
     st.wc_cells = h.out.len() as u64;
     st.wc_variants = h.out.keys().filter(|&&(_, r)| r != REM_FULL).count() as u64;
     let pages: Vec<u32> = h.pages_all.into_iter().collect();
@@ -980,6 +1151,13 @@ struct Hier<'a> {
     wash_walk_budget: u64,
     /// ViewReq::page_reps in force (cut on, sub-cut wash off)
     reps: bool,
+    /// the page level of this pass (one representative page in 2^Lp)
+    rep_page_level: u32,
+    /// the dot-pitch lattice cells (cell frame) that already hold a
+    /// node dot in the cell being walked
+    dot_lattice: HashSet<(i64, i64)>,
+    /// the levels a kept representative page hands to the raster
+    page_levels: HashMap<u32, u8>,
     /// remaining per-plan sub-cut budgets (HierOpts::sub_cut_sparse_px
     /// / sub_cut_wash_px), screen px
     sparse_px_left: f64,
@@ -1032,6 +1210,7 @@ impl<'a> Hier<'a> {
         let mut wc = WsCell {
             key,
             pages: Vec::new(),
+            page_levels: Vec::new(),
             insts: Vec::new(),
             frames: Vec::new(),
             washes: Vec::new(),
@@ -1072,19 +1251,34 @@ impl<'a> Hier<'a> {
                         // washable under the sub-cut rules (a size cut
                         // always, a hairline cut under cull with the
                         // stricter coverage; diagnostic) or as a
-                        // representative (the page frontier: one in 4^k
-                        // by index within the run, k octaves below its cut)
+                        // representative (the page frontier: every cut
+                        // page in view, one in 2^Lp by index under the
+                        // decode budget, its records thinned by the
+                        // rest of its level in the raster; a cell
+                        // reached through a representative placement
+                        // draws every page whole)
                         let rep = in_view
                             && self.reps
-                            && rep_keeps((pi - pr.page_lo) as u64, self.page_octaves(&p, size_cut));
+                            && rep_keeps((pi - pr.page_lo) as u64, self.rep_page_level);
                         let washable = in_view && (self.sub_cut_wash || rep);
-                        match self.sub_cut_verdict(&p, &boxes[..], size_cut, washable) {
+                        match self.sub_cut_verdict(&p, &boxes[..], size_cut, washable, rep) {
                             SubCut::Keep => {
                                 // sparse: too few members for a wash to
                                 // stand for them and cheap to draw - keep
                                 // the page; its members render as
                                 // hairline pixels, as Calibre shows them
                                 if rep {
+                                    let l = self.density_level(
+                                        p.members,
+                                        p.max_min,
+                                        p.max_w.max(p.max_h),
+                                        &p.bbox,
+                                    );
+                                    self.st.rep_items = self.st.rep_items.saturating_add(p.members);
+                                    self.st.rep_level = self.st.rep_level.max(l);
+                                    let level = l.saturating_sub(self.rep_page_level);
+                                    self.page_levels.insert(pi, level.min(255) as u8);
+                                    self.st.rep_decode_bytes += p.usize_ as u64;
                                     self.st.rep_pages_kept += 1;
                                     self.note_page("rep_keep", ci, &p, pi);
                                 } else {
@@ -1162,7 +1356,10 @@ impl<'a> Hier<'a> {
             // relatively-large members verbatim and cannot thin
             // them; strokes bypass the speckle, so exact geometry
             // saturates into a solid wall)
-            if self.wash_px > 0.0 && self.px_per_dbu > 0.0 {
+            // (never a representative page: the page frontier draws it
+            // thinned to the density - a bbox rect here was the solid
+            // 2 x 2 px square the field saw as boxes at the fit view)
+            if self.wash_px > 0.0 && self.px_per_dbu > 0.0 && !self.page_levels.contains_key(&pi) {
                 let pw = (p.bbox.x1 - p.bbox.x0).max(0) as f64 * self.px_per_dbu;
                 let ph = (p.bbox.y1 - p.bbox.y0).max(0) as f64 * self.px_per_dbu;
                 if pw <= self.wash_px && ph <= self.wash_px {
@@ -1225,6 +1422,17 @@ impl<'a> Hier<'a> {
         }
         self.pages_all.extend(sel.iter().copied());
         wc.pages = sel.into_iter().collect();
+        wc.page_levels = wc
+            .pages
+            .iter()
+            .map(|p| self.page_levels.get(p).copied().unwrap_or(0))
+            .collect();
+        for &p in &wc.pages {
+            self.st.page_bytes = self
+                .st
+                .page_bytes
+                .saturating_add(self.v.page(p).usize_ as u64);
+        }
         // ---- children (r = 0: depth exhausted - children render
         // as outline frames; own pages above carry the geometry)
         if cell.bvh_count != 0 {
@@ -1250,6 +1458,10 @@ impl<'a> Hier<'a> {
             self.thin_bins.clear();
             self.wash_nodes.clear();
             self.sparse_edges.clear();
+            self.dot_lattice.clear();
+            // the page frontier's run for this cell's placements (the
+            // child-BVH root's box) and the per-node heaviest-member
+            // table it prunes with
             let mut edges: BTreeSet<u64> = BTreeSet::new();
             let mut framed: HashSet<u64> = HashSet::new();
             for b in &boxes {
@@ -1281,30 +1493,31 @@ impl<'a> Hier<'a> {
                                 node.count as u64,
                             );
                         }
-                        // the page frontier: a representative placement
-                        // may live below (index a multiple of 4^k within
-                        // the cell's placements, k from the node's largest
-                        // child): descend; a subtree without one is pruned
+                        // the page frontier: a cut subtree no wider on
+                        // screen than the density's dot pitch is ONE
+                        // dot - a pixel at its centre on this cell's
+                        // visible layers (rep_node_dot); nothing below
+                        // it is visited. A wider one is walked to its
+                        // children; its leaves' placements take their
+                        // own footprint's level (place_rep). The walk
+                        // costs the nodes wider than the pitch in view -
+                        // bounded by the screen, never by the placements
+                        // below (field 2026-09-17: descending every cut
+                        // subtree took over 80 s at full depth).
                         let rep_descend = !self.sub_cut_wash
                             && self.reps
                             && r != 0
                             && node.bbox.intersects(b)
                             && {
-                                let mut k = 0;
-                                if (node.max_dim as u64) < cut {
-                                    k = rep_octaves(node.max_dim as u64, cut);
+                                if self.within_dot_pitch(&node.bbox) {
+                                    self.rep_node_dot(&mut wc, ni, &node.bbox);
+                                    false
+                                } else {
+                                    true
                                 }
-                                if (node.max_min as u64) < hair_prune {
-                                    k = k.max(rep_octaves(node.max_min as u64, hair_prune));
-                                }
-                                let (lo, hi) = self.cbvh_places(ni);
-                                rep_in_run(lo, hi, cell.place_start, k)
                             };
                         if !rep_descend {
                             if !self.sub_cut_wash || !node.bbox.intersects(b) {
-                                if self.reps && r != 0 && node.bbox.intersects(b) {
-                                    self.st.rep_pruned += 1;
-                                }
                                 continue;
                             }
                             // sub-cut wash (jobdeck wide view): walk the
@@ -1402,47 +1615,40 @@ impl<'a> Hier<'a> {
                                 // only the proxy box is gone,
                                 // matching the depth-full omission
                                 // rule.
-                                // the page frontier: one placement in
-                                // 4^k (by index within the cell, k
-                                // octaves below its cut) survives as the
-                                // sub-cut rules draw it
-                                let rep = !self.sub_cut_wash
-                                    && self.reps
-                                    && rep_keeps(
-                                        pli - cell.place_start as u64,
-                                        self.place_octaves(cw, chh),
-                                    );
-                                if self.sub_cut_wash || rep {
-                                    if !self.wash_sub_cut_child(
+                                // the page frontier: a representative
+                                // placement is EXPANDED with its members
+                                // thinned (one in 4^k over members and
+                                // placement index, place_rep), never
+                                // washed as its footprint
+                                if !self.sub_cut_wash && self.reps {
+                                    if let Some(lm) = self.place_rep(pli, &h, &rb, cell.place_start)
+                                    {
+                                        self.st.rep_children += 1;
+                                        self.note_child("rep_dots", pli, &h, &rb, &boxes);
+                                        self.rep_dots(&mut wc, pli, &h, &rb, &boxes, lm);
+                                        self.st.cull_size += 1;
+                                        framed.insert(pli);
+                                        continue;
+                                    }
+                                }
+                                if self.sub_cut_wash
+                                    && !self.wash_sub_cut_child(
                                         &mut wc,
                                         pli,
                                         &h,
                                         &rb,
                                         &boxes,
                                         self.hair_cut(size_cut),
-                                        rep,
-                                    ) {
-                                        // sparse (no wash could stand for
-                                        // it): walk it - few members, and
-                                        // Calibre shows them at every zoom
-                                        if rep {
-                                            self.st.rep_children += 1;
-                                            self.note_child("rep_expand", pli, &h, &rb, &boxes);
-                                        } else {
-                                            self.st.sub_cut_sparse += 1;
-                                            self.note_child("expand_sparse", pli, &h, &rb, &boxes);
-                                        }
-                                        self.sparse_edges.insert(pli);
-                                        edges.insert(pli);
-                                        continue;
-                                    }
-                                    if rep {
-                                        self.st.rep_children += 1;
-                                        self.st.cull_size += 1;
-                                        framed.insert(pli);
-                                        self.note_child("rep_wash", pli, &h, &rb, &boxes);
-                                        continue;
-                                    }
+                                    )
+                                {
+                                    // sparse (no wash could stand for
+                                    // it): walk it - few members, and
+                                    // Calibre shows them at every zoom
+                                    self.st.sub_cut_sparse += 1;
+                                    self.note_child("expand_sparse", pli, &h, &rb, &boxes);
+                                    self.sparse_edges.insert(pli);
+                                    edges.insert(pli);
+                                    continue;
                                 }
                                 self.st.cull_size += 1;
                                 framed.insert(pli);
@@ -1491,42 +1697,33 @@ impl<'a> Hier<'a> {
                         // of displaying false geometry.
                         let size_cut = cw < cut && chh < cut;
                         if size_cut || cw.min(chh) < self.hair {
-                            let rep = !self.sub_cut_wash
-                                && self.reps
-                                && rep_keeps(
-                                    pli - cell.place_start as u64,
-                                    self.place_octaves(cw, chh),
-                                );
-                            if self.sub_cut_wash || rep {
-                                if !self.wash_sub_cut_child(
+                            if !self.sub_cut_wash && self.reps {
+                                if let Some(lm) = self.place_rep(pli, &h, &rb, cell.place_start) {
+                                    self.st.rep_children += 1;
+                                    self.note_child("rep_dots", pli, &h, &rb, &boxes);
+                                    self.rep_dots(&mut wc, pli, &h, &rb, &boxes, lm);
+                                    self.st.cull_size += 1;
+                                    continue;
+                                }
+                            }
+                            if self.sub_cut_wash
+                                && !self.wash_sub_cut_child(
                                     &mut wc,
                                     pli,
                                     &h,
                                     &rb,
                                     &boxes,
                                     self.hair_cut(size_cut),
-                                    rep,
-                                ) {
-                                    // sparse (no wash could stand for it):
-                                    // expand - few members, and Calibre
-                                    // shows them at every zoom
-                                    if rep {
-                                        self.st.rep_children += 1;
-                                        self.note_child("rep_expand", pli, &h, &rb, &boxes);
-                                    } else {
-                                        self.st.sub_cut_sparse += 1;
-                                        self.note_child("expand_sparse", pli, &h, &rb, &boxes);
-                                    }
-                                    self.sparse_edges.insert(pli);
-                                    edges.insert(pli);
-                                    continue;
-                                }
-                                if rep {
-                                    self.st.rep_children += 1;
-                                    self.st.cull_size += 1;
-                                    self.note_child("rep_wash", pli, &h, &rb, &boxes);
-                                    continue;
-                                }
+                                )
+                            {
+                                // sparse (no wash could stand for it):
+                                // expand - few members, and Calibre
+                                // shows them at every zoom
+                                self.st.sub_cut_sparse += 1;
+                                self.note_child("expand_sparse", pli, &h, &rb, &boxes);
+                                self.sparse_edges.insert(pli);
+                                edges.insert(pli);
+                                continue;
                             }
                             self.st.cull_size += 1;
                             self.note_child(
@@ -1595,22 +1792,40 @@ impl<'a> Hier<'a> {
     /// placement expanded, the cost being bounded by the very
     /// sparseness that ruled the wash out.
     /// `hair`: the item is hairline-cut under the cull policy, where
-    /// the stricter WASH_MIN_COVERAGE_HAIR applies.
-    fn wash_worth(&self, fp: &BBox, members: u64, w: u64, h: u64, hair: bool) -> bool {
+    /// the stricter WASH_MIN_COVERAGE_HAIR applies; `rep`: the item is
+    /// a representative (page frontier), which always takes the 1/8
+    /// rule - a sparse representative is cheap to draw, and a wash is
+    /// only worth its overstatement when the page is really dense.
+    /// The ink estimate is members x (min side) x (long side): every
+    /// member's area is at most its min side times its long side, so
+    /// this bounds the real ink from above without the max_w x max_h
+    /// overshoot that made an L of two hairlines (1000 x 1 and
+    /// 1 x 1000) look 200 % dense (review 2026-09-17).
+    #[allow(clippy::too_many_arguments)]
+    fn wash_worth(
+        &self,
+        fp: &BBox,
+        members: u64,
+        w: u64,
+        h: u64,
+        min_side: u64,
+        hair: bool,
+        rep: bool,
+    ) -> bool {
         if self.wash_blob(fp) {
             return true;
         }
         let ppd = self.px_per_dbu;
         let fw = ((fp.x1 - fp.x0).max(0) as f64 * ppd).max(1.0);
         let fh = ((fp.y1 - fp.y0).max(0) as f64 * ppd).max(1.0);
-        let mw = (w as f64 * ppd).max(1.0);
-        let mh = (h as f64 * ppd).max(1.0);
-        let min = if hair {
+        let long = (w.max(h) as f64 * ppd).max(1.0);
+        let short = (min_side.min(w.max(h)) as f64 * ppd).max(1.0);
+        let min = if hair || rep {
             hair_wash_coverage()
         } else {
             WASH_MIN_COVERAGE
         };
-        (members as f64) * mw * mh >= min * fw * fh
+        (members as f64) * short * long >= min * fw * fh
     }
 
     /// Screen px of `fp` inside the view boxes - the raster cost of a
@@ -1675,12 +1890,21 @@ impl<'a> Hier<'a> {
         boxes: &[BBox],
         size_cut: bool,
         washable: bool,
+        rep: bool,
     ) -> SubCut {
         if !washable {
             return SubCut::Drop;
         }
+        if rep {
+            // a representative is DRAWN, never washed (field
+            // 2026-09-17: washes left one box at the fit view and
+            // boxes at the next zooms where lines were wanted); its
+            // cost is what the page cost one octave closer, and the
+            // octave thinning bounds how many there are
+            return SubCut::Keep;
+        }
         let hair = self.hair_cut(size_cut);
-        if !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, hair) {
+        if !self.wash_worth(&p.bbox, p.members, p.max_w, p.max_h, p.max_min, hair, false) {
             // a sparse page beyond the budget is dropped, never
             // washed (its footprint is a false block)
             return if self.take_sparse(p.members, p.max_w, p.max_h) {
@@ -1694,32 +1918,6 @@ impl<'a> Hier<'a> {
         } else {
             SubCut::Drop
         }
-    }
-
-    /// the octaves a cut page sits below its cut: the hairline cut
-    /// under cull and the size cut, whichever cut it first (the
-    /// deeper one - it vanished at that zoom)
-    fn page_octaves(&self, p: &floe_ovm::PageV, size_cut: bool) -> u32 {
-        let mut k = 0;
-        if size_cut {
-            k = rep_octaves(p.max_w.max(p.max_h), self.cut);
-        }
-        if self.page_hair > 0 && p.max_min < self.page_hair {
-            k = k.max(rep_octaves(p.max_min, self.page_hair));
-        }
-        k
-    }
-
-    /// the octaves a cut placement (child box cw x chh) sits below its cut
-    fn place_octaves(&self, cw: u64, chh: u64) -> u32 {
-        let mut k = 0;
-        if cw < self.cut && chh < self.cut {
-            k = rep_octaves(cw.max(chh), self.cut);
-        }
-        if cw.min(chh) < self.hair {
-            k = k.max(rep_octaves(cw.min(chh), self.hair));
-        }
-        k
     }
 
     /// the pages of a page-BVH subtree, [lo, hi): pages are laid out in
@@ -1766,6 +1964,254 @@ impl<'a> Hier<'a> {
         (lo, hi)
     }
 
+    /// Whether a cut placement is a representative, and the member
+    /// levels its repetition is thinned by: L levels below its cut keep
+    /// one item in 2^L. An array's members absorb min(L, log2 members)
+    /// of them - one member in 2^lm, by balanced strides (thin_grid) or
+    /// every 2^lm-th point - and the placement's index within its cell
+    /// the remaining L - lm; a plain placement (one member) takes them
+    /// all by index. Both factors are powers of two growing with L, so
+    /// the survivors stay nested; and never the array's footprint as one
+    /// wash (field 2026-09-17: that was the one box left at the fit
+    /// view) - each survivor is a dot of its own box (rep_dots).
+    fn place_rep(
+        &mut self,
+        pli: u64,
+        h: &floe_ovm::PlaceHead,
+        rb: &BBox,
+        place_start: u32,
+    ) -> Option<u32> {
+        let members = self.place_members(pli, h);
+        let (cw, chh) = ((rb.x1 - rb.x0).max(0) as u64, (rb.y1 - rb.y0).max(0) as u64);
+        let fp = self.place_footprint(pli, h, rb);
+        let l = self.density_level(members, cw.min(chh), cw.max(chh), &fp);
+        let lm = member_levels(members, l);
+        if rep_keeps(pli.saturating_sub(place_start as u64), l - lm) {
+            self.st.rep_items = self.st.rep_items.saturating_add(members);
+            self.st.rep_level = self.st.rep_level.max(l);
+            Some(lm)
+        } else {
+            None
+        }
+    }
+
+    /// the density's dot pitch in screen px (1 / sqrt(density)), and
+    /// whether a box on screen is within it on both axes
+    fn within_dot_pitch(&self, bx: &BBox) -> bool {
+        let ppd = self.px_per_dbu;
+        let d = self.opts.rep_density;
+        if !(ppd > 0.0) || !(d > 0.0) {
+            return false;
+        }
+        let pitch = (1.0 / d.sqrt()).max(1.0);
+        let w = (bx.x1 - bx.x0).max(0) as f64 * ppd;
+        let h = (bx.y1 - bx.y0).max(0) as f64 * ppd;
+        w <= pitch && h <= pitch
+    }
+
+    /// one dot for a cut child-BVH subtree: a pixel at the node's
+    /// centre on the visible recursive layers of its first placement's
+    /// child (the node holds no layer mask of its own; the first child
+    /// is its representative), at most one dot per cell of the dot
+    /// pitch's lattice in the cell's frame (sibling nodes within the
+    /// pitch would otherwise pile up: the field's block came out
+    /// three-quarters lit)
+    fn rep_node_dot(&mut self, wc: &mut WsCell, ni: u32, bx: &BBox) {
+        let ppd = self.px_per_dbu;
+        let side = if ppd > 0.0 {
+            (1.0 / ppd).ceil().max(1.0) as i64
+        } else {
+            1
+        };
+        let pitch = (1.0 / self.opts.rep_density.max(1e-9).sqrt()).max(1.0);
+        let pitch_dbu = if ppd > 0.0 {
+            (pitch / ppd).ceil().max(1.0) as i64
+        } else {
+            1
+        };
+        let cx = bx.x0 / 2 + bx.x1 / 2;
+        let cy = bx.y0 / 2 + bx.y1 / 2;
+        if !self
+            .dot_lattice
+            .insert((cx.div_euclid(pitch_dbu), cy.div_euclid(pitch_dbu)))
+        {
+            return;
+        }
+        let dot = BBox {
+            x0: cx - side / 2,
+            y0: cy - side / 2,
+            x1: cx - side / 2 + side,
+            y1: cy - side / 2 + side,
+        };
+        let v = self.v;
+        let mut a = ni;
+        let first = loop {
+            let n = v.bvh(a);
+            if n.leaf || n.count == 0 {
+                break n.first as u64;
+            }
+            a = n.first;
+        };
+        let child = v.place_head(first).child;
+        let bits = v.bitset(v.cell_lmask_rec(child));
+        for (byte_index, (&m, &vis)) in bits.iter().zip(self.wash_vis.iter()).enumerate() {
+            let both = m & vis;
+            for bit in 0..8 {
+                if both & (1 << bit) != 0 {
+                    wc.washes.push(((byte_index * 8 + bit) as u32, dot));
+                }
+            }
+        }
+        self.st.rep_node_dots += 1;
+        self.st.rep_children += 1;
+    }
+
+    /// the page frontier's level of a cut item: the smallest L with
+    /// ink / 2^L <= rep_density x area, ink = members x max(1, min side
+    /// px) x max(1, long side px) (every member paints at most that),
+    /// area the item's box on screen, at least a pixel each way
+    fn density_level(&self, members: u64, min_side: u64, long_side: u64, bx: &BBox) -> u32 {
+        let ppd = self.px_per_dbu;
+        let d = self.opts.rep_density;
+        if !(ppd > 0.0) || !(d > 0.0) || members == 0 {
+            return 0;
+        }
+        let w = (min_side as f64 * ppd).max(1.0);
+        let l = (long_side as f64 * ppd).max(1.0);
+        let ink = members as f64 * w * l;
+        let aw = ((bx.x1 - bx.x0).max(0) as f64 * ppd).max(1.0);
+        let ah = ((bx.y1 - bx.y0).max(0) as f64 * ppd).max(1.0);
+        let target = d * aw * ah;
+        if ink <= target {
+            return 0;
+        }
+        ((ink / target).log2().ceil().max(0.0) as u32).min(REP_LEVELS_MAX)
+    }
+
+    /// a placement's whole footprint (the repetition extent of the
+    /// child's box) in the parent's frame
+    fn place_footprint(&self, pli: u64, h: &floe_ovm::PlaceHead, rb: &BBox) -> BBox {
+        let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
+        let b0 = xf_bbox(&t0, rb);
+        match h.kind {
+            0 => b0,
+            1 => grow_by_offsets(
+                &b0,
+                &grid_ovis(0, h.na as i64 - 1, 0, h.nb as i64 - 1, h.va, h.vb),
+            ),
+            _ => match self.v.pts_ref(pli) {
+                Some(pr) => grow_by_offsets(&b0, &pr.extent()),
+                None => b0,
+            },
+        }
+    }
+
+    /// a placement's repetition member count
+    fn place_members(&self, pli: u64, h: &floe_ovm::PlaceHead) -> u64 {
+        match h.kind {
+            0 => 1,
+            1 => (h.na as u64).saturating_mul(h.nb as u64),
+            _ => self.v.pts_ref(pli).map(|p| p.count as u64).unwrap_or(1),
+        }
+    }
+
+    /// A representative cut placement drawn as DOTS: one rect of the
+    /// child's box per kept member (member 0 and every 2^lm-th, the
+    /// grid by thin_grid's balanced strides) on every visible layer
+    /// of the child's recursive mask - the box is at most the cut on
+    /// screen (or a hairline strip), so it is the instance's picture
+    /// at this zoom, costs no page decode and no walk into the child
+    /// (field 2026-09-17: drawing the child whole decoded every page
+    /// of every kept instance for one pixel each, and filled blocks
+    /// into boxes). Nothing off the view is emitted.
+    fn rep_dots(
+        &mut self,
+        wc: &mut WsCell,
+        pli: u64,
+        h: &floe_ovm::PlaceHead,
+        rb: &BBox,
+        boxes: &[BBox],
+        lm: u32,
+    ) -> u64 {
+        let v = self.v;
+        let bits = v.bitset(v.cell_lmask_rec(h.child));
+        let mut layers: Vec<u32> = Vec::new();
+        for (byte_index, (&m, &vis)) in bits.iter().zip(self.wash_vis.iter()).enumerate() {
+            let both = m & vis;
+            for bit in 0..8 {
+                if both & (1 << bit) != 0 {
+                    layers.push((byte_index * 8 + bit) as u32);
+                }
+            }
+        }
+        if layers.is_empty() {
+            return 0;
+        }
+        let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
+        let b0 = xf_bbox(&t0, rb);
+        let mut dots = 0u64;
+        // at most one dot per cell of the dot pitch's lattice (cell
+        // frame), whatever emits it: sparse repetitions scattered over
+        // the same area - an OASIS writer folds scattered instances of
+        // one cell into point sets - are each sparse by their own
+        // footprint yet pile up together (the field's block came out
+        // three-quarters lit)
+        let ppd = self.px_per_dbu;
+        let pitch = (1.0 / self.opts.rep_density.max(1e-9).sqrt()).max(1.0);
+        let pitch_dbu = if ppd > 0.0 {
+            (pitch / ppd).ceil().max(1.0) as i64
+        } else {
+            1
+        };
+        let lattice = &mut self.dot_lattice;
+        let mut emit = |wc: &mut WsCell, dx: i64, dy: i64| {
+            let mb = BBox {
+                x0: b0.x0.saturating_add(dx),
+                y0: b0.y0.saturating_add(dy),
+                x1: b0.x1.saturating_add(dx),
+                y1: b0.y1.saturating_add(dy),
+            };
+            if !boxes.iter().any(|b| mb.intersects(b)) {
+                return;
+            }
+            let (cx, cy) = (mb.x0 / 2 + mb.x1 / 2, mb.y0 / 2 + mb.y1 / 2);
+            if !lattice.insert((cx.div_euclid(pitch_dbu), cy.div_euclid(pitch_dbu))) {
+                return;
+            }
+            for &l in &layers {
+                wc.washes.push((l, mb));
+            }
+            dots += 1;
+        };
+        match h.kind {
+            0 => emit(wc, 0, 0),
+            1 => {
+                let (na, nb, va, vb) = thin_grid(h.na as u64, h.nb as u64, h.va, h.vb, lm);
+                for j in 0..nb as i64 {
+                    for i in 0..na as i64 {
+                        emit(wc, i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                    }
+                }
+            }
+            _ => {
+                if let Some(pr) = v.pts_ref(pli) {
+                    let step = 1u32 << lm.min(31);
+                    let mut s = 0u32;
+                    while s < pr.count {
+                        let (dx, dy) = pr.pt(s);
+                        emit(wc, dx, dy);
+                        s = s.saturating_add(step);
+                        if step == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        self.st.rep_dots = self.st.rep_dots.saturating_add(dots);
+        dots
+    }
+
     /// Whether a culled item is a hairline cut under the cull policy
     /// (a size cut, or any cut under keep where page_hair is 0, takes
     /// the dense-array coverage rule).
@@ -1783,7 +2229,6 @@ impl<'a> Hier<'a> {
         rb: &BBox,
         boxes: &[BBox],
         hair: bool,
-        rep: bool,
     ) -> bool {
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, rb);
@@ -1806,13 +2251,13 @@ impl<'a> Hier<'a> {
         }
         let bw = (b0.x1 - b0.x0).max(0) as u64;
         let bh = (b0.y1 - b0.y0).max(0) as u64;
-        if !self.wash_worth(&fp, members, bw, bh, hair) {
+        if !self.wash_worth(&fp, members, bw, bh, bw.min(bh), hair, false) {
             // sparse: expanded while the sparse budget lasts; beyond
             // it dropped (the caller's cull), never washed
             return !self.take_sparse(members, bw, bh);
         }
         let mask = self.v.cell_lmask_rec(h.child);
-        self.wash_layers(wc, mask, fp, boxes, !rep);
+        self.wash_layers(wc, mask, fp, boxes, true);
         true
     }
 
@@ -2000,20 +2445,35 @@ impl<'a> Hier<'a> {
                     }
                     self.wash_walk_budget -= 1;
                 } else if self.reps && n.bbox.intersects(b) && {
-                    // the page frontier: a representative may live below
-                    // (an index that is a multiple of 4^k within the
-                    // run, k from the node's largest page - the smallest
-                    // k of any page below): descend; a subtree without
-                    // one is pruned, so the walk costs what the
-                    // representatives cost
+                    // the page frontier: a representative page may live
+                    // below (an index that is a multiple of 2^Lp within
+                    // the run, Lp the pass' page level): descend; a
+                    // subtree without one is pruned
                     let (lo, hi) = self.pbvh_pages(ni);
-                    rep_in_run(lo, hi, page_lo, rep_octaves(n.max_w.max(n.max_h), self.cut))
+                    rep_in_run(lo, hi, page_lo, self.rep_page_level)
                 } {
                     // descend
                 } else {
                     if self.reps && n.bbox.intersects(b) {
                         self.st.rep_pruned += 1;
                     }
+                    continue;
+                }
+            } else if self.reps
+                && self.rep_page_level > 0
+                && self.page_hair > 0
+                && n.max_w.min(n.max_h) < self.page_hair
+                && n.bbox.intersects(b)
+            {
+                // every page below is hairline-cut (a page's max_min is
+                // at most the smaller of the node's max_w / max_h, so
+                // this catches the uniformly oriented routing runs; a
+                // node mixing both orientations walks on to its leaves
+                // - the index carries no max_min per node): prune the
+                // subtree when its run holds no representative page
+                let (lo, hi) = self.pbvh_pages(ni);
+                if !rep_in_run(lo, hi, page_lo, self.rep_page_level) {
+                    self.st.rep_pruned += 1;
                     continue;
                 }
             }
@@ -2031,12 +2491,28 @@ impl<'a> Hier<'a> {
                         // see the linear page loop
                         let rep = in_view
                             && self.reps
-                            && rep_keeps((pi - page_lo) as u64, self.page_octaves(&p, size_cut));
+                            && rep_keeps((pi - page_lo) as u64, self.rep_page_level);
                         let washable = in_view && (self.sub_cut_wash || rep);
-                        match self.sub_cut_verdict(&p, std::slice::from_ref(b), size_cut, washable)
-                        {
+                        match self.sub_cut_verdict(
+                            &p,
+                            std::slice::from_ref(b),
+                            size_cut,
+                            washable,
+                            rep,
+                        ) {
                             SubCut::Keep => {
                                 if rep {
+                                    let l = self.density_level(
+                                        p.members,
+                                        p.max_min,
+                                        p.max_w.max(p.max_h),
+                                        &p.bbox,
+                                    );
+                                    self.st.rep_items = self.st.rep_items.saturating_add(p.members);
+                                    self.st.rep_level = self.st.rep_level.max(l);
+                                    let level = l.saturating_sub(self.rep_page_level);
+                                    self.page_levels.insert(pi, level.min(255) as u8);
+                                    self.st.rep_decode_bytes += p.usize_ as u64;
                                     self.st.rep_pages_kept += 1;
                                     self.note_page("rep_keep", cell, &p, pi);
                                 } else {
@@ -2802,6 +3278,7 @@ mod tests {
             px_per_dbu,
             sub_cut_wash: false,
             page_reps: false,
+            decode_budget: 0,
             page_hairline: false,
             page_skip: Vec::new(),
             prune_skipped: false,
@@ -3108,6 +3585,7 @@ mod tests {
             px_per_dbu: 0.0,
             sub_cut_wash: false,
             page_reps: false,
+            decode_budget: 0,
             page_hairline: false,
             page_skip: Vec::new(),
             prune_skipped: false,
@@ -3903,6 +4381,7 @@ mod tests {
             px_per_dbu: 0.0,
             sub_cut_wash: false,
             page_reps: false,
+            decode_budget: 0,
             page_hairline: false,
             page_skip: Vec::new(),
             prune_skipped: false,
@@ -4397,6 +4876,7 @@ mod tests {
             px_per_dbu: 0.0,
             sub_cut_wash: false,
             page_reps: false,
+            decode_budget: 0,
             page_hairline: false,
             page_skip: Vec::new(),
             prune_skipped: false,
@@ -4928,39 +5408,83 @@ mod tests {
     }
 
     #[test]
-    fn representatives_thin_by_octave_and_nest() {
-        // rep_octaves: the octaves a measure sits below its threshold
-        assert_eq!(rep_octaves(600, 1000), 0);
-        assert_eq!(rep_octaves(500, 1000), 1);
-        assert_eq!(rep_octaves(400, 1000), 1);
-        assert_eq!(rep_octaves(250, 1000), 2);
-        assert_eq!(rep_octaves(200, 1000), 2);
-        assert_eq!(rep_octaves(1, 1000), 9);
-        assert_eq!(rep_octaves(0, 1 << 40), REP_OCTAVES_MAX);
-        assert_eq!(rep_octaves(5, 0), 0);
-        // rep_keeps: one in 4^k, nested in k, index 0 always
-        for k in 0..=REP_OCTAVES_MAX {
-            assert!(rep_keeps(0, k));
-            let kept: Vec<u64> = (0..4096u64).filter(|&i| rep_keeps(i, k)).collect();
-            let expect = if k >= 6 { 1 } else { 4096 >> (2 * k) };
-            assert_eq!(kept.len(), expect, "k={}", k);
+    fn a_thinned_grid_keeps_one_member_in_two_per_level_and_nests() {
+        // 64 x 64: level 2 -> 32 x 32 on a doubled pitch; level 6 -> 8 x 8
+        assert_eq!(
+            thin_grid(64, 64, (10, 0), (0, 10), 2),
+            (32, 32, (20, 0), (0, 20))
+        );
+        assert_eq!(
+            thin_grid(64, 64, (10, 0), (0, 10), 6),
+            (8, 8, (80, 0), (0, 80))
+        );
+        // an odd level puts the extra stride on the first axis
+        assert_eq!(
+            thin_grid(64, 64, (10, 0), (0, 10), 1),
+            (32, 64, (20, 0), (0, 10))
+        );
+        // a 1-D array thins along its length: one in 2^level
+        assert_eq!(
+            thin_grid(1024, 1, (5, 0), (0, 0), 4),
+            (64, 1, (80, 0), (0, 0))
+        );
+        // strides never exceed the axis: 4 x 1024 at level 6 -> 1 x 64
+        assert_eq!(
+            thin_grid(4, 1024, (1, 0), (0, 1), 6),
+            (1, 64, (4, 0), (0, 16))
+        );
+        // nested: the survivors of level + 1 sit on level's lattice
+        for l in 0..8u32 {
+            let (_, _, va1, vb1) = thin_grid(256, 256, (1, 0), (0, 1), l);
+            let (_, _, va2, vb2) = thin_grid(256, 256, (1, 0), (0, 1), l + 1);
+            assert_eq!(va2.0 % va1.0, 0);
+            assert_eq!(vb2.1 % vb1.1, 0);
+        }
+        // points: every 2^level-th slot, slot 0 first
+        let pts: Vec<(i64, i64)> = (0..100).map(|k| (k, 2 * k)).collect();
+        assert_eq!(thin_pts(&pts, 0).len(), 100);
+        assert_eq!(
+            thin_pts(&pts, 3).iter().map(|p| p.0).collect::<Vec<_>>(),
+            vec![0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96]
+        );
+        assert_eq!(member_levels(1, 5), 0);
+        assert_eq!(member_levels(1000, 5), 5);
+        assert_eq!(member_levels(1000, 12), 9);
+    }
+
+    #[test]
+    fn representatives_thin_by_level_and_nest() {
+        // rep_level: two levels per octave below the threshold
+        assert_eq!(rep_level(1000, 1000), 0);
+        assert_eq!(rep_level(708, 1000), 0);
+        assert_eq!(rep_level(707, 1000), 1);
+        assert_eq!(rep_level(500, 1000), 2);
+        assert_eq!(rep_level(250, 1000), 4);
+        assert_eq!(rep_level(1, 1000), 19);
+        assert_eq!(rep_level(0, 1 << 40), REP_LEVELS_MAX);
+        assert_eq!(rep_level(5, 0), 0);
+        // rep_keeps: one in 2^level, nested, index 0 always
+        for l in 0..=12u32 {
+            assert!(rep_keeps(0, l));
+            let kept: Vec<u64> = (0..4096u64).filter(|&i| rep_keeps(i, l)).collect();
+            assert_eq!(kept.len(), 4096 >> l, "level {}", l);
             for &i in &kept {
                 assert!(
-                    rep_keeps(i, k.saturating_sub(1)),
-                    "nested: {} at k={}",
+                    rep_keeps(i, l.saturating_sub(1)),
+                    "nested: {} at level {}",
                     i,
-                    k
+                    l
                 );
             }
         }
         // rep_in_run: a run without a representative prunes, an
         // unknown run descends
-        assert!(rep_in_run(0, 1, 0, 3));
-        assert!(!rep_in_run(1, 64, 0, 3));
-        assert!(rep_in_run(1, 65, 0, 3));
-        assert!(rep_in_run(100, 200, 100, 5));
-        assert!(!rep_in_run(101, 200, 100, 5));
-        assert!(rep_in_run(5, 5, 0, 2));
+        assert!(rep_in_run(0, 1, 0, 6));
+        assert!(!rep_in_run(1, 64, 0, 6));
+        assert!(rep_in_run(1, 65, 0, 6));
+        assert!(rep_in_run(100, 200, 100, 10));
+        assert!(!rep_in_run(101, 200, 100, 10));
+        assert!(rep_in_run(5, 5, 0, 4));
     }
 
     #[test]

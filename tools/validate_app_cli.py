@@ -204,6 +204,33 @@ def main(fixture):
         assert (cache / "design.ovo").read_bytes() != summary
         print("app CLI: occupancy add/rebuild preserves OVM/OVP/OVT and metadata ok")
 
+        reps = work / "representatives.oas"
+        reps_add = work / "representatives additive.oas"
+        for p in (reps, reps_add):
+            shutil.copy2(fixture, p)
+        run("index", reps, "--representatives-points", "64", "--occupancy", "--jobs", "2", env=env)
+        run("index", reps_add, "--jobs", "2", env=env)
+        reps_cache, additive_cache = vfs_cache(reps), vfs_cache(reps_add)
+        additive_before = digest(additive_cache)
+        run("index", reps_add, "--representatives-points", "64", "--occupancy", "--jobs", "2", env=env)
+        assert digest(additive_cache, additive_before) == additive_before
+        for name in (*PARTS, "design.ovo", "design.ovr"):
+            assert (reps_cache / name).read_bytes() == (additive_cache / name).read_bytes(), name
+        reps_before = digest(reps_cache)
+        run("index", reps, "--representatives", "--occupancy", env=env)
+        assert digest(reps_cache) == reps_before, "current summaries were regenerated"
+        run("index", reps, "--representatives-only", "--representatives-points", "32", "--jobs", "2", env=env)
+        unchanged = set(reps_before) - {"design.ovr"}
+        assert digest(reps_cache, unchanged) == {k: reps_before[k] for k in unchanged}
+        assert (reps_cache / "design.ovr").read_bytes() != (additive_cache / "design.ovr").read_bytes()
+        for flags in [("--representatives-points", "0"), ("--representatives-points", "4194305"),
+                      ("--representatives-only", "--occupancy"), ("--representatives", "--occupancy-only"),
+                      ("--representatives", "--profile-cell-ci", "0")]:
+            before_bad = digest(reps_cache)
+            run("index", reps, *flags, env=env, code=2)
+            assert digest(reps_cache) == before_bad
+        print("app CLI: representatives combined/additive byte parity, bounded options and cache preservation ok")
+
         before = digest(cache)
         top = meta["top_cell"]
         snapshot = work / "profile 한 글.bin"
@@ -257,7 +284,8 @@ if os.environ.get("FAKE_CLEANUP_ERROR"):
     sys.exit(7)
 if os.environ.get("FAKE_WAIT"):
     out = pathlib.Path(a[2])
-    (out / "design.ovo.tmp").write_bytes(b"partial")
+    temp = "design.ovr.tmp" if "--representatives-only" in a else "design.ovo.tmp"
+    (out / temp).write_bytes(b"partial")
     def interrupted(n, _):
         pathlib.Path(os.environ["FAKE_STOPPED"]).write_text(str(n))
         sys.exit(128 + n)
@@ -288,17 +316,34 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
                           env=dict(fake_env, FAKE_CLEANUP_ERROR="1"), code=7)
         assert "cannot clean" in bad_cleanup.stderr
         (cache / "design.ovo.tmp").rmdir()
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        sequence = work / "sequence.oas"
+        shutil.copy2(fixture, sequence)
+        run("index", sequence, "--jobs", "2", env=env)
+        sequence_cache = vfs_cache(sequence)
+        seq_before = digest(sequence_cache)
+        calls_before = len(log.read_text().splitlines())
+        run("index", sequence, "--representatives", "--occupancy", env=fake_env)
+        calls = [json.loads(line) for line in log.read_text().splitlines()[calls_before:]]
+        assert len(calls) == 2 and "--representatives-only" in calls[0] and "--occupancy-only" in calls[1]
+        assert digest(sequence_cache) == seq_before
+        calls_before = len(log.read_text().splitlines())
+        run("index", sequence, "--representatives", "--occupancy", env=dict(fake_env, FAKE_EXIT="7"), code=7)
+        assert len(log.read_text().splitlines()) == calls_before + 1, "failed first pass launched second"
+        cancel_cases = [(source, ("--occupancy-only",)), (source, ("--representatives-only",)),
+                        (sequence, ("--representatives", "--occupancy"))]
+        for sig, (cancel_source, cancel_args) in ((sig, case) for sig in (signal.SIGINT, signal.SIGTERM) for case in cancel_cases):
             ready.unlink(missing_ok=True)
             stopped.unlink(missing_ok=True)
-            before_cancel = digest(cache)
-            p = subprocess.Popen([str(APP), "index", str(source), "--occupancy-only"],
+            cancel_cache = vfs_cache(cancel_source)
+            before_cancel = digest(cancel_cache)
+            calls_before = len(log.read_text().splitlines())
+            p = subprocess.Popen([str(APP), "index", str(cancel_source), *cancel_args],
                                  env=dict(fake_env, FAKE_WAIT="1"), stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, text=True, start_new_session=True)
             try:
                 child_pid = wait_file(ready, p)
                 assert os.getpgid(child_pid) != os.getpgid(p.pid), "child SIGINT not isolated"
-                busy = run("index", source, "--force", env=fake_env, code=1)
+                busy = run("index", cancel_source, "--force", env=fake_env, code=1)
                 assert "another Rust application" in busy.stderr
                 p.send_signal(sig)
                 out, err = p.communicate(timeout=5)
@@ -309,8 +354,10 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
                 if p.poll() is None:
                     p.send_signal(signal.SIGTERM)
                     p.communicate(timeout=5)
-            assert digest(cache) == before_cancel, "cancel changed committed summary/cache"
-            assert not (cache / "design.ovo.tmp").exists()
+            assert digest(cancel_cache) == before_cancel, "cancel changed committed summary/cache"
+            assert not (cancel_cache / "design.ovo.tmp").exists()
+            assert not (cancel_cache / "design.ovr.tmp").exists()
+            assert len(log.read_text().splitlines()) == calls_before + 1, "cancel launched next pass"
         assert "up to date" in run("index", source, env=env).stdout, "lease leaked after cancel"
         print("app CLI: override/version, argv, exit status, writer lock and SIGINT/SIGTERM cleanup ok")
     print("RUST APP CLI: ALL OK")

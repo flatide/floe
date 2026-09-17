@@ -30,6 +30,7 @@ usage: python tools/validate_occupancy.py [src.oas]
 """
 import hashlib
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -847,19 +848,16 @@ class GenerationContractTests(unittest.TestCase):
         keep = lit("high", "keep")
         self.assertGreater(exact, 10000)
         self.assertEqual(keep, exact)
-        # under cull the dense hairline neighbours' pages are cut: the
-        # page frontier (2026-09-17) keeps representatives of them, so
-        # something shows and never more than exact; with the frontier
-        # off (FLOE_RUST_PAGE_REPS=off) the field symptom - most of
-        # the region gone; the sub-cut rules (FLOE_RUST_SUB_CUT_WASH=on,
-        # diagnostic) wash them all as blocks
-        symptom = lit("high", "cull",
-                      env=dict(os.environ, FLOE_RUST_PAGE_REPS="off"))
-        self.assertGreater(symptom, 0)
-        self.assertLess(symptom, exact // 2)
-        # representatives (washed blocks overstate a little, so more
-        # than exact is possible; the region is present)
-        self.assertGreater(cull, symptom)
+        # under cull the dense hairline neighbours' pages are cut and
+        # dropped: the field symptom is the default (the page frontier
+        # is deactivated since 2026-09-17; FLOE_RUST_PAGE_REPS=on keeps
+        # representatives of them, the sub-cut rules
+        # FLOE_RUST_SUB_CUT_WASH=on wash them all as blocks)
+        self.assertGreater(cull, 0)
+        self.assertLess(cull, exact // 2)
+        reps = lit("high", "cull",
+                   env=dict(os.environ, FLOE_RUST_PAGE_REPS="on"))
+        self.assertGreater(reps, cull)
         washed = lit("high", "cull",
                      env=dict(os.environ, FLOE_RUST_SUB_CUT_WASH="on"))
         self.assertGreater(washed, exact // 2)
@@ -1465,7 +1463,10 @@ def write_subcut(path):
     8/0: 200 hairlines 0.1 x 190 um on a 1 um pitch over 200..400 um
     (a dense hairline page: washed under cull); 9/0: three such lines
     400 um apart (3.75 % of their footprint, under the 1/8 hairline
-    rule: kept and drawn as lines); 6/0: a frame so the top spans
+    rule: kept and drawn as lines); 10/0: 40,000 plain placements of
+    a 0.2 um DOT2 cell at jittered positions over 1000..1200 um (no
+    array the writer could fold: a child BVH of thousands of leaves,
+    for the page frontier's node dots); 6/0: a frame so the top spans
     0..2000 um"""
     ly = db.Layout()
     ly.dbu = 0.001
@@ -1490,6 +1491,15 @@ def write_subcut(path):
     for k in range(3):
         x = 1000 * UM + k * 400 * UM
         top.shapes(l9).insert(db.Box(x, 1500 * UM, x + 100, 1690 * UM))
+    l10 = ly.layer(10, 0)
+    dot2 = ly.create_cell("DOT2")
+    dot2.shapes(l10).insert(db.Box(0, 0, 200, 200))
+    for j in range(200):
+        for i in range(200):
+            x = 1000 * UM + i * UM + (i * 7 + j * 3) % 5 * 100
+            y = 1000 * UM + j * UM + (i * 3 + j * 11) % 7 * 100
+            top.insert(db.CellInstArray(dot2.cell_index(),
+                                        db.Trans(db.Vector(x, y))))
     top.shapes(l6).insert(db.Box(0, 0, 2000 * UM, 2000 * UM))
     opt = db.SaveLayoutOptions()
     opt.format = "OASIS"
@@ -1538,7 +1548,13 @@ def write_frontier(path):
     40..41 um tall (1,000 distinct heights, written uncompressed, so
     every line is its own record) on a 1.8 um lattice over 0..2000 um
     on 1/0 - about 19 MB of records, so the layer spreads over 19 or
-    so 1 MB pages and a page BVH; a frame on 6/0 spans the top"""
+    so 1 MB pages and a page BVH; on 2/0 an L of two hairlines - a
+    1 x 1000 um and a 1000 x 1 um line sharing a corner - whose page
+    bbox is 1000 x 1000 um (review 2026-09-17: the old ink estimate
+    members x max_w x max_h called this 200 % dense and washed the
+    whole square); on 3/0 a sparser field of the same lines on an
+    18 um lattice (12,100 lines in one page, for the record thinning
+    of the raster to show as a density); a frame on 6/0 spans the top"""
     ly = db.Layout()
     ly.dbu = 0.001
     top = ly.create_cell("FRONTIER")
@@ -1551,6 +1567,14 @@ def write_frontier(path):
             x = i * pitch
             h = 40 * UM + ((i * 31 + j * 17) % 1000)
             shapes.insert(db.Box(x, y, x + UM, y + h))
+    l2 = ly.layer(2, 0)
+    top.shapes(l2).insert(db.Box(100 * UM, 500 * UM, 1100 * UM, 501 * UM))
+    top.shapes(l2).insert(db.Box(100 * UM, 500 * UM, 101 * UM, 1500 * UM))
+    l3 = ly.layer(3, 0)
+    for j in range(110):
+        for i in range(110):
+            x, y = i * 18 * UM, j * 18 * UM
+            top.shapes(l3).insert(db.Box(x, y, x + UM, y + 40 * UM + (i * 31 + j * 17) % 1000))
     top.shapes(l6).insert(db.Box(0, 0, 2000 * UM, 2000 * UM))
     opt = db.SaveLayoutOptions()
     opt.format = "OASIS"
@@ -1563,7 +1587,9 @@ class PageFrontierTests(unittest.TestCase):
     is thinned to representatives - a cut page k octaves below its cut
     survives when its index in its run is a multiple of 4^k - so the
     count in view stays what it was at the cut and the survivors are
-    nested across zooms; FLOE_RUST_PAGE_REPS=off is the kill switch."""
+    nested across zooms. Deactivated in the viewer since 2026-09-17
+    (the answer moves to representative data built at index time);
+    FLOE_RUST_PAGE_REPS=on switches the planner-side frontier on."""
 
     gen = 900
 
@@ -1577,11 +1603,12 @@ class PageFrontierTests(unittest.TestCase):
         os.environ["FLOE_RENDERD_BIN"] = str(
             ROOT / "rust" / "target" / "release" / "floe-renderd")
         sys.path.insert(0, str(ROOT))
-        os.environ.pop("FLOE_RUST_PAGE_REPS", None)
+        # the page frontier is opt-in (deactivated 2026-09-17): the
+        # worker under test switches it on, worker_off is the default
+        os.environ["FLOE_RUST_PAGE_REPS"] = "on"
         cls.worker = SubCutTests._worker.__func__(cls)
-        os.environ["FLOE_RUST_PAGE_REPS"] = "off"
-        cls.worker_off = SubCutTests._worker.__func__(cls)
         del os.environ["FLOE_RUST_PAGE_REPS"]
+        cls.worker_off = SubCutTests._worker.__func__(cls)
 
     @classmethod
     def tearDownClass(cls):
@@ -1591,53 +1618,137 @@ class PageFrontierTests(unittest.TestCase):
             except Exception:
                 pass
 
-    def _frame(self, worker, px):
+    def _frame(self, worker, px, layer=(1, 0)):
         PageFrontierTests.gen += 1
         box = (0.0, 0.0, 2000.0 * UM, 2000.0 * UM)
         return render_settled(worker, PageFrontierTests.gen, box, px,
-                              cut_px=1.0, thin="cull", visible=[(1, 0)])
+                              cut_px=1.0, thin="cull", visible=[layer])
 
-    def _reps(self, px_per_um):
-        res = floe_index("plan", self.cache, "--view", "0,0,2000,2000",
+    def _plan(self, px_per_um, view="0,0,2000,2000", layer="1/0", env=None):
+        """(representative page ids, plan stats) of a plan with the
+        page frontier on, from `floe-index plan --explain 1`"""
+        res = floe_index("plan", self.cache, "--view", view,
                          "--px-per-um", px_per_um, "--cut-px", "1",
                          "--page-hairline", "1", "--page-reps", "1",
-                         "--layers", "1/0", "--explain", "1")
+                         "--layers", layer, "--explain", "1", env=env)
         rows = [l.split("\t") for l in res.stdout.splitlines()
                 if l.startswith("explain\t")]
-        return {int(r[5]) for r in rows
+        reps = {int(r[5]) for r in rows
                 if r[1] == "page" and r[2] in ("rep_keep", "rep_wash")}
+        stats = {k: int(v) for k, v in
+                 re.findall(r'"(\w+)": (\d+)', res.stdout)}
+        return reps, stats
 
-    def test_representatives_thin_by_octave_and_nest_across_zooms(self):
-        # the 1 um lines are hairline-cut once 1 um < 0.5 px: at 2.5
-        # um/px (800 px) the ratio is 0.8 - every cut page is a
-        # representative; at 5 um/px 0.4 (one page in 4), at 10 um/px
-        # 0.2 (one in 16). The sets nest: what survives at 400 px
-        # survives at 200 px
-        s200, s400, s800 = self._reps(0.1), self._reps(0.2), self._reps(0.4)
-        self.assertGreaterEqual(len(s800), 16, len(s800))
-        self.assertTrue(s200 <= s400 <= s800, (len(s200), len(s400), len(s800)))
-        self.assertLess(len(s200), len(s400))
-        self.assertLess(len(s400), len(s800))
-        # one in 4 per octave, within the rounding of runs and leaves
-        self.assertLessEqual(len(s400) * 2, len(s800))
-        self.assertLessEqual(len(s200) * 2, len(s400))
-        self.assertGreaterEqual(len(s200), 1)
-        # the frames: representatives light pixels at every zoom, the
-        # counters name them, the kill switch shows the old cull
-        for px in (200, 400):
-            lit, res = self._frame(self.worker, px)
+    def test_every_cut_page_in_view_is_kept_and_levels_follow_the_screen_density(self):
+        # the 1 um lines are hairline-cut once 1 um < 0.5 px. Every cut
+        # page in view is a representative at every zoom (the run's
+        # ~8.5 MB decoded is within the decode budget: page level 0);
+        # each page's level is its ink against its box on screen, so it
+        # climbs as the view widens and the survivors thin to the
+        # density's dot pattern
+        s200, st200 = self._plan(0.1)
+        s400, st400 = self._plan(0.2)
+        s800, st800 = self._plan(0.4)
+        n = len(s800)
+        self.assertGreaterEqual(n, 16, n)
+        lo = min(s800)
+        self.assertEqual(s800, set(range(lo, lo + n)), "one contiguous run")
+        self.assertEqual(s400, s800)
+        self.assertEqual(s200, s800)
+        for st in (st200, st400, st800):
+            self.assertEqual(st["rep_page_level"], 0, st)
+            self.assertEqual(st["rep_replans"], 0, st)
+            self.assertEqual(st["rep_pages_kept"], n, st)
+            self.assertEqual(st["rep_items"], 1_210_000, st)
+            self.assertGreater(st["rep_decode_bytes"], n * 100_000, st)
+        self.assertGreater(st200["rep_level"], 0, st200)
+        self.assertGreaterEqual(st200["rep_level"], st400["rep_level"], (st200, st400))
+        self.assertGreaterEqual(st400["rep_level"], st800["rep_level"], (st400, st800))
+        # the frames: the sparse layer (12,100 lines in one page)
+        # lights every quadrant at every zoom at about the same pixel
+        # density - the survivors halve as the pixels do - and never
+        # solid; the kill switch shows the old cull
+        dens = {}
+        for px in (200, 400, 800):
+            lit, res = self._frame(self.worker, px, (3, 0))
             culls = res["plan_culls"]
-            self.assertTrue(lit, px)
-            self.assertGreaterEqual(culls["rep_kept"] + culls["rep_washed"], 1, (px, culls))
-            gone, res = self._frame(self.worker_off, px)
+            self.assertEqual(culls["rep_kept"], 1, (px, culls))
+            self.assertEqual(culls["rep_page_level"], 0, (px, culls))
+            half = px // 2
+            for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+                quad = sum(1 for x, y in lit
+                           if (x >= half) == bool(qx) and (y >= half) == bool(qy))
+                self.assertGreater(quad, 0, (px, qx, qy))
+            dens[px] = len(lit) / (px * px)
+            self.assertLess(dens[px], 0.5, (px, dens[px]))
+            gone, res = self._frame(self.worker_off, px, (3, 0))
             self.assertEqual(gone, set(), px)
-            self.assertEqual(res["plan_culls"]["rep_kept"] + res["plan_culls"]["rep_washed"], 0)
-        # and the count in view stays bounded as the view widens: the
-        # 200 px frame keeps no more representatives than the 400 px one
-        _, r200 = self._frame(self.worker, 200)
-        _, r400 = self._frame(self.worker, 400)
-        self.assertLessEqual(r200["plan_culls"]["rep_kept"] + r200["plan_culls"]["rep_washed"],
-                             r400["plan_culls"]["rep_kept"] + r400["plan_culls"]["rep_washed"])
+            self.assertEqual(res["plan_culls"]["rep_kept"], 0)
+        lo_d, hi_d = min(dens.values()), max(dens.values())
+        self.assertLess(hi_d, lo_d * 3.0, dens)
+        # the dense layer: every page kept, thinned inside, a dot field
+        # that is neither empty nor solid
+        lit_thin, res = self._frame(self.worker, 800, (1, 0))
+        self.assertGreaterEqual(res["plan_culls"]["rep_level"], 1, res["plan_culls"])
+        self.assertEqual(res["plan_culls"]["rep_kept"], n, res["plan_culls"])
+        self.assertTrue(30_000 < len(lit_thin) < 500_000, len(lit_thin))
+
+    def test_a_lower_density_raises_the_level_and_thins_the_records(self):
+        # FLOE_RUST_REP_DENSITY=0.03125 (an eighth of the default): every
+        # level climbs by three, the frame lights about an eighth of the
+        # pixels the default does, and what it draws the default drew
+        _, base = self._plan(0.4, layer="3/0")
+        _, low = self._plan(0.4, layer="3/0", env=dict(os.environ, FLOE_RUST_REP_DENSITY="0.03125"))
+        self.assertEqual(low["rep_level"], base["rep_level"] + 3, (base, low))
+        os.environ["FLOE_RUST_REP_DENSITY"] = "0.03125"
+        os.environ["FLOE_RUST_PAGE_REPS"] = "on"
+        try:
+            tight = SubCutTests._worker.__func__(self)
+        finally:
+            del os.environ["FLOE_RUST_REP_DENSITY"]
+            del os.environ["FLOE_RUST_PAGE_REPS"]
+        try:
+            lit_tight, res = self._frame(tight, 800, (3, 0))
+        finally:
+            tight.stop()
+        self.assertEqual(res["plan_culls"]["rep_level"], base["rep_level"] + 3, res["plan_culls"])
+        lit_all, _ = self._frame(self.worker, 800, (3, 0))
+        self.assertTrue(len(lit_all) / 16 <= len(lit_tight) <= len(lit_all) / 3,
+                        (len(lit_tight), len(lit_all)))
+        self.assertTrue(lit_tight <= lit_all, len(lit_tight - lit_all))
+
+    def test_the_decode_budget_thins_the_pages_by_index_and_replans(self):
+        # FLOE_RUST_REP_DECODE_MB=1 against the run's ~8.5 MB decoded
+        # (32 pages of ~265 KB): the plan is redone with the pages one
+        # in 2^Lp by index, Lp the smallest that fits (16), so the kept
+        # set is the run's every 16th page from its first, and the leaf
+        # runs holding none are pruned
+        s_all, _ = self._plan(0.1)
+        n, lo = len(s_all), min(s_all)
+        s, st = self._plan(0.1, env=dict(os.environ, FLOE_RUST_REP_DECODE_MB="1"))
+        self.assertEqual(st["rep_replans"], 1, st)
+        level = st["rep_page_level"]
+        self.assertGreaterEqual(level, 4, st)
+        self.assertEqual(s, {lo + i for i in range(0, n, 1 << level)}, (level, sorted(s)))
+        self.assertEqual(st["rep_pages_kept"], len(s), st)
+        self.assertLessEqual(st["rep_decode_bytes"], 1 << 20, st)
+        self.assertGreaterEqual(st["rep_pruned"], 1, st)
+        self.assertLess(st["page_candidates"], n, st)
+
+    def test_an_l_of_two_hairlines_is_drawn_as_lines_not_as_its_square(self):
+        # review 2026-09-17: a representative is drawn, never washed -
+        # the L page (2 records, within the budget: level 0) shows its
+        # two 100 px lines, never the 100 x 100 px square
+        lit, res = self._frame(self.worker, 200, (2, 0))
+        culls = res["plan_culls"]
+        self.assertEqual((culls["rep_kept"], culls["rep_washed"]), (1, 0), culls)
+        self.assertTrue(150 <= len(lit) <= 450, len(lit))
+        xs = sorted({x for x, _ in lit})
+        ys = sorted({y for _, y in lit})
+        self.assertGreaterEqual(max(sum(1 for x, _ in lit if x == c) for c in xs), 80)
+        self.assertGreaterEqual(max(sum(1 for _, y in lit if y == r) for r in ys), 80)
+        reps, _ = self._plan(0.1, layer="2/0")
+        self.assertEqual(len(reps), 1)
 
 
 class GiantRepetitionTests(unittest.TestCase):
@@ -1681,7 +1792,9 @@ class SubCutTests(unittest.TestCase):
     diagnostic; since 2026-09-17 the page frontier applies them to
     REPRESENTATIVES only - one page in 4^k, k octaves below the cut -
     which for this fixture's single-page layers (index 0 of every run)
-    means the same picture; FLOE_RUST_PAGE_REPS=off is its kill switch."""
+    means the same picture. Both are opt-in since 2026-09-17: the
+    default worker is the plain cull, FLOE_RUST_PAGE_REPS=on the
+    frontier."""
 
     gen = 500
 
@@ -1697,9 +1810,12 @@ class SubCutTests(unittest.TestCase):
         sys.path.insert(0, str(ROOT))
         os.environ.pop("FLOE_RUST_SUB_CUT_WASH", None)
         os.environ.pop("FLOE_RUST_PAGE_REPS", None)
+        # the default worker: the plain cull (both the sub-cut rules
+        # and the page frontier are off); worker_reps switches the
+        # frontier on, worker_on the sub-cut rules
         cls.worker = cls._worker()
-        os.environ["FLOE_RUST_PAGE_REPS"] = "off"
-        cls.worker_noreps = cls._worker()
+        os.environ["FLOE_RUST_PAGE_REPS"] = "on"
+        cls.worker_reps = cls._worker()
         del os.environ["FLOE_RUST_PAGE_REPS"]
         os.environ["FLOE_RUST_SUB_CUT_WASH"] = "on"
         cls.worker_on = cls._worker()
@@ -1713,7 +1829,7 @@ class SubCutTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        for w in (cls.worker, cls.worker_noreps, cls.worker_on, cls.worker_tight):
+        for w in (cls.worker, cls.worker_reps, cls.worker_on, cls.worker_tight):
             try:
                 w.stop()
             except Exception:
@@ -1738,30 +1854,96 @@ class SubCutTests(unittest.TestCase):
         return render_settled(worker, SubCutTests.gen, box, 200,
                               cut_px=1.0, thin=thin, visible=[layer])
 
-    def test_the_default_keeps_representatives_and_the_kill_switch_drops_all(self):
+    def test_the_frontier_switched_on_keeps_representatives_and_the_default_drops_all(self):
         # every layer here is one page (or one placement array) - the
         # first of its run, a representative at any zoom - so the
-        # default draws what the sub-cut rules draw and counts it as
-        # reps, not as sub-cut verdicts; FLOE_RUST_PAGE_REPS=off is the
-        # pre-2026-09-16 cull: nothing lit, nothing counted
+        # frontier (FLOE_RUST_PAGE_REPS=on) draws what the sub-cut rules
+        # draw thinned to the density and counts it as reps, not as
+        # sub-cut verdicts; the default is the pre-2026-09-16 cull:
+        # nothing lit, nothing counted
+        placed = {(x, y) for x in range(58, 82) for y in range(158, 182)}
         for layer in ((4, 0), (5, 0), (7, 0), (8, 0), (9, 0)):
-            lit, res = self._frame(self.worker, layer)
+            lit, res = self._frame(self.worker_reps, layer)
             lit_on, _ = self._frame(self.worker_on, layer)
-            self.assertEqual(lit, lit_on, layer)
             self.assertTrue(lit, layer)
+            # a representative is geometry thinned to the screen density:
+            # the dense array page, the placed array and the dense line
+            # page thin to a dot / line pattern inside the block the
+            # diagnostic rules wash; the sparse page and the three
+            # lines are within the density and draw whole
+            self.assertTrue(lit <= lit_on, (layer, sorted(lit - lit_on)[:10]))
+            if layer in ((4, 0), (7, 0), (8, 0)):
+                self.assertLess(len(lit), len(lit_on) * 3 // 4, (layer, len(lit), len(lit_on)))
+                self.assertGreaterEqual(res["plan_culls"]["rep_level"], 1, (layer, res["plan_culls"]))
+            else:
+                self.assertEqual(lit, lit_on, layer)
+                self.assertEqual(res["plan_culls"]["rep_level"], 0, (layer, res["plan_culls"]))
+            if layer == (7, 0):
+                # the placed array: a dot per kept member on the child's
+                # layer, no page of the child decoded, nothing walked
+                # below the placement
+                self.assertGreaterEqual(res["plan_culls"]["rep_children"], 1, res["plan_culls"])
+                self.assertEqual(res["tiles"], 0, res)  # plan_pages on the wire
+                self.assertEqual(res["plan_culls"]["rep_kept"], 0, res["plan_culls"])
+            if layer == (7, 0):
+                self.assertTrue(lit <= placed, sorted(lit - placed)[:10])
             culls = res["plan_culls"]
             self.assertGreaterEqual(culls["rep_kept"] + culls["rep_washed"]
                                     + culls["rep_children"], 1, (layer, culls))
             self.assertEqual((culls["sub_cut_washes"], culls["sub_cut_sparse"]),
                              (0, 0), (layer, culls))
-            gone, res = self._frame(self.worker_noreps, layer)
+            gone, res = self._frame(self.worker, layer)
             self.assertEqual(gone, set(), layer)
             culls = res["plan_culls"]
             self.assertEqual((culls["rep_kept"], culls["rep_washed"], culls["rep_children"],
                               culls["sub_cut_washes"], culls["sub_cut_sparse"]),
                              (0, 0, 0, 0, 0), (layer, culls))
         for layer in ((4, 0), (5, 0), (7, 0)):
-            self.assertEqual(self._lit(self.worker_noreps, layer, "keep"), set(), layer)
+            self.assertEqual(self._lit(self.worker, layer, "keep"), set(), layer)
+
+    def test_a_field_of_plain_cut_placements_is_node_dots_and_a_tiny_page_is_not_a_square(self):
+        # 10/0: 40,000 plain placements of a 0.2 um cell over a 200 um
+        # square (20 x 20 px at 10 um/px): cut subtrees within the
+        # density's 2 px pitch become one pixel each at their centre,
+        # at most one per 2 x 2 px lattice cell - up to a quarter of the
+        # block, never solid, no placement below them visited, nothing
+        # decoded, and only on the layer the dotted child holds (the
+        # 4/0 and 9/0 frames above saw no dot from this field); the
+        # kill switch culls
+        block = {(x, y) for x in range(98, 122) for y in range(78, 102)}
+        lit, res = self._frame(self.worker_reps, (10, 0))
+        self.assertTrue(lit <= block, sorted(lit - block)[:10])
+        self.assertTrue(40 <= len(lit) <= 150, len(lit))
+        self.assertEqual(res["tiles"], 0, res)
+        self.assertGreaterEqual(res["plan_culls"]["rep_children"], 40, res["plan_culls"])
+        res = floe_index("plan", self.cache, "--view", "0,0,2000,2000",
+                         "--px-per-um", "0.1", "--cut-px", "1",
+                         "--page-hairline", "1", "--page-reps", "1",
+                         "--layers", "10/0")
+        stats = {k: int(v) for k, v in re.findall(r'"(\w+)": (\d+)', res.stdout)}
+        # (the OASIS writer folded the scattered instances into point
+        # sets whose boxes exceed the pitch, so here the lattice caps
+        # the member dots; a compact subtree ends in one node dot)
+        self.assertGreaterEqual(stats["rep_dots"] + stats["rep_node_dots"], 40, stats)
+        self.assertLessEqual(stats["rep_dots"] + stats["rep_node_dots"], 150, stats)
+        self.assertLess(stats["visited_bvh"], 40_000, stats)
+        self.assertEqual(self._lit(self.worker, (10, 0)), set())
+        # a representative page that is one or two pixels on screen is
+        # drawn thinned (one dot), never as the M7-C bbox square:
+        # 4/0's 200 um array page at 100 um/px
+        SubCutTests.gen += 1
+        box = (0.0, 0.0, 2000.0 * UM, 2000.0 * UM)
+        lit, res = render_settled(self.worker_reps, SubCutTests.gen, box, 20,
+                                  cut_px=1.0, thin="cull", visible=[(4, 0)])
+        # (its two kept members straddle pixel edges: up to the page's
+        # 2 x 2 px, but as geometry - no M7-C wash, one representative)
+        self.assertTrue(1 <= len(lit) <= 4, sorted(lit))
+        self.assertEqual(res["plan_culls"]["washed"], 0, res["plan_culls"])
+        self.assertEqual(res["plan_culls"]["rep_kept"], 1, res["plan_culls"])
+        SubCutTests.gen += 1
+        gone, _ = render_settled(self.worker, SubCutTests.gen, box, 20,
+                                 cut_px=1.0, thin="cull", visible=[(4, 0)])
+        self.assertEqual(gone, set())
 
     def test_dense_sub_cut_pages_are_washed_and_sparse_ones_drawn(self):
         # with the rules on: 10 um/px, cut 1 px = 10 um, every 0.2 um

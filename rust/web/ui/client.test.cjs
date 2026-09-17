@@ -252,15 +252,22 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     if(indexDefaultsEnabled){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
         assert.equal(node('index-occupancy').checked,false,'layout default is off');
+        assert.equal(node('index-representatives').checked,false,'representatives are opt-in');
+        assert.equal(node('index-representatives').disabled,false);
+        node('index-representatives').checked=true;
         const count=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations').length,before=count();
         node('index-occupancy').checked=true;node('source').onchange();
         assert.equal(node('index-occupancy').checked,true,'same source preserves explicit choice');
+        assert.equal(node('index-representatives').checked,true);
         node('source').value='deck';node('source').onchange();
         assert.equal(node('index-occupancy').checked,true,'new deck default is on');
+        assert.equal(node('index-representatives').checked,false);
+        assert.equal(node('index-representatives').disabled,true);
         node('index-occupancy').checked=false;node('source').onchange();
         assert.equal(node('index-occupancy').checked,false,'same deck preserves explicit opt-out');
         node('source').value='src';node('source').onchange();
         assert.equal(node('index-occupancy').checked,false,'new layout selection resets the default');
+        assert.equal(node('index-representatives').disabled,false);
         assert.equal(count(),before,'choosing index defaults never submits a write');
         listeners.pagehide();console.log('WEB INDEX DEFAULTS: ALL OK (source-aware defaults, explicit choices, no implicit write)');return;
     }
@@ -283,6 +290,9 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         snapshot.margin={frame_id:'6',origin_px:[48,48],crop_safe:false};snapshot.capabilities.margin=true;ws.receive(snapshot);
         ws.receive(packet('raw','6','1',epoch,{purpose:'margin',width:196,height:176,bbox_dbu:['-58.9375','-48','137.0625','128'],complete:false,labels_truncated:true}));
         assert.equal(node('perf').textContent,current,'background margin replaced foreground timing');
+        ws.receive(packet('raw','7','1',epoch,{approximate:true,perf:{stored_rep_points:'21',stored_rep_tested:'100',stored_rep_limited:'1'}}));
+        assert.match(node('status').textContent,/Live · approximate/);
+        assert.match(node('perf').textContent,/stored reps 21\/tested 100 \(capped\)/);
         listeners.pagehide();
         console.log('WEB FRAME STATUS: ALL OK (intermediate/final/incomplete, u64 round, stale discard, margin timing isolation)');return;
     }

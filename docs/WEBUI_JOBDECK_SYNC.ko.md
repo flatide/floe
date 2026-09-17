@@ -1,6 +1,60 @@
-# 웹 전환: 두 번째 jobdeck 정방향 통합
+# 웹 전환: jobdeck 정방향 통합 기록
 
 2026-09-17, M4g-31. **정방향 통합·로컬 회귀 통과. 전체 목표/현장 수용 완료는 아니다.**
+
+## 세 번째 통합 — OVR 대표 점
+
+2026-09-18, M4g-41. **정방향 통합·로컬 전체 회귀 통과. 현장 수용 완료는 아니다.**
+
+웹 `f953cf1`에서 실측 기준 `c8171175931eaa5e980233eea6121851b6d04946`까지
+14개 커밋을 정방향 병합한다. main/실측 worktree는 변경하지 않는다. 아래 기존
+M4g-31 기록의 통과 결과는 이번 통합의 검증 결과가 아니다.
+
+- native/index/renderd는 `0.12.155`. page frontier는 기본 off, `FLOE_RUST_PAGE_REPS=on`만
+  진단용이다. OVR의 선택 조건·메모리 상한·실제 도형 위 점·query 제외·한 캐시 수명에
+  고정된 mmap 계약은 [대표 점 설계](REPRESENTATIVES.ko.md)를 따른다. hot reload는 추가하지 않는다.
+- Rust CLI/관리형 API에 `--representatives`, `--representatives-only`,
+  `--representatives-points 1..4194304`를 이관한다. 기본 off이고 jobdeck 자체는 거부한다.
+  웹의 수동 Index에는 plain layout용 opt-in만 노출한다. 자동 열기/읽기에 쓰기를 추가하지 않는다.
+- 최신 캐시에서 대표와 occupancy가 둘 다 없고 둘 다 요청하면 대표 → occupancy의 두
+  가산 패스를 실행한다. 기존 파일은 강제 재색인하지 않으며 두 패스 동안 같은 새/구
+  캐시 writer lock과 관리형 lease를 유지한다. 첫 패스 실패/취소 뒤 두 번째는 시작하지
+  않는다. 둘째 실패 시 이미 게시한 첫 요약은 남는다(다중 파일 원자 트랜잭션이 아니다).
+  대표 단독 생성은 기존 OVM/OVP/OVT/meta/OVO를 보존한다. 취소는 소유한 tmp만 정리한다.
+- 대표 점 카운터는 숫자 allowlist로 전달하고 프레임은 approximate로 표시한다. 이 표시로
+  query 권한/장면 identity를 만들거나 바꾸지 않는다. 기본 캐시는 완성됐지만 선택 대표
+  생성이 실패했다는 native 경고도 경로/원문 없이 boolean 상태로 노출한다.
+- 선택 검증 `--only`/`--list`를 받으면서 이전 83개 검증 호출을 모두 유지한다.
+  `--only web`는 Rust 앱/웹 집중 게이트이고, 기본 전체 배터리는 줄이지 않는다.
+  빈 `--only=`/쉼표·공백뿐인 선택은 exit2로 거부한다. 이를 허용해 검사0개로
+  성공하던 경로를 재현한 뒤 고쳤다. 선택 파서 자체의20사례 gate도 추가했다.
+
+추가 게이트: 결합/가산 OVR bytes 일치, 명시 상한 재생성, 기존 캐시 bytes/mtime 불변,
+활성 reader 쓰기 거부, 패스 순서/첫 실패/경계 취소/SIGINT/SIGTERM, API 불법 조합,
+근사 표시와 query-scene 분리.
+
+집중 검증 통과: workspace all-target check, core291/web121단위, ES2017/UI 전체,
+Rust CLI 실파일 대조·관리형 reader 잠금/연속 추가 생성, 공개 옵션114개/native probe180회,
+worker-client의 Python/raw 대조, native OVR의 무디코드·depth·pixel replay·손상 폴백·
+결합 생성 실패 시 base cache 보존. 선택 실행의 `RUST VALIDATION: ALL OK`는
+명시된5게이트의 결과이며 전체 배터리 PASS가 아니다. 로그는
+`/private/tmp/floe-web-ovr-sync.yNot41/`의 `unit.log`, `ui.log`, `focused.log`다.
+실제 새 서버58385/Chrome 읽기 복원은 [브라우저 §10.7](WEBUI_BROWSER_ACCEPTANCE.ko.md#107-에이전트-직접-재시작과-최신-native-통합-읽기)에 기록했다.
+
+고정된 제품 소스로 전체 `sh tools/validate_rust.sh`가 exit0/
+`RUST VALIDATION: ALL OK`로 끝났다(`full.log`). occupancy41, jobdeck83,
+renderer46, OVR 가산·실패·픽셀 대조, KLayout workers1/8 각각13 PX+2 phase-exact+
+14 style을 통과했다. 별도 fixture 하네스가 ignored oracle도 실제로 실행했다.
+strict app/core/web clippy도 통과했다(`clippy.log`; 기존 native 의존성 warning은 별개).
+그 뒤 제품 소스는 바꾸지 않고 위 선택 스크립트만 보완했다.90개 gate 목록/기본 전체
+선택/alias/중복/무효 인자20사례와 실제 `--only validation_selector` 진입은 각각
+통과했다(`selector-gate.log`). 선택 PASS와 전체 PASS의 로그/범위를 구분한다.
+
+첫 executable 시작 지연은 [M4 §98](WEBUI_M4.ko.md#98-gtk-실행-준비와-실제-다중-미리보기의-검증-경계)에
+추가 근거를 남겼으며 전체 회귀 PASS를 원인 해결로 세지 않는다.
+전체 목표의 남은 범위는 실제 브라우저 수용, Python-free Linux
+실행, G1/G4 및 현장 Firefox/ETX다. 원격 SH-10/index hot reload는 사용자 보류,
+M5 world-tile은 성능 조건부로 유지한다.
 
 ## 기준과 범위
 

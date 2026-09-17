@@ -563,12 +563,15 @@ def _probe_binary_version(find_binary):
     exactly the way the app would launch it. A pre-0.12.13
     floe-renderd has no --version: it greets `ready version=...` on
     stdout and exits on the closed stdin, so that shape is accepted
-    too."""
+    too. The timeout is generous: macOS scans a freshly written
+    executable on its first launch (the gate's stub scripts took
+    1.5 to 6+ s to print one line), and a loaded shared host is slow
+    to spawn anything."""
     import subprocess
     path = find_binary()
     probe = subprocess.run(
         [path, "--version"], stdin=subprocess.DEVNULL,
-        capture_output=True, text=True, timeout=5)
+        capture_output=True, text=True, timeout=30)
     for line in probe.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -3640,12 +3643,26 @@ class Viewer:
                         if (culls.get("rep_kept") or culls.get("rep_washed")
                                 or culls.get("rep_children")):
                             # the page frontier (2026-09-17): cut pages
-                            # kept as pixels / washed, cut placements
-                            # washed or expanded - one in 4^k
-                            text += ", reps %s/%s/%s" % (
+                            # kept (drawn) and cut placements expanded
+                            # with thinned members - one in 4^k
+                            # (rep_washed stays 0: representatives are
+                            # never washed since the field's boxes)
+                            text += ", reps %s pages/%s children" % (
                                 fmt_count(culls.get("rep_kept", 0)),
-                                fmt_count(culls.get("rep_washed", 0)),
                                 fmt_count(culls.get("rep_children", 0)))
+                            if culls.get("rep_level"):
+                                # the item budget's level: one cut item
+                                # in 2^L
+                                text += " L%d" % culls["rep_level"]
+                            if culls.get("rep_page_level"):
+                                # the decode budget thinned the pages
+                                # themselves (one in 2^P by index)
+                                text += " P%d" % culls["rep_page_level"]
+                    if culls.get("stored_rep_points") or culls.get("stored_rep_limited"):
+                        text += ", stored reps %s/tested %s%s" % (
+                            fmt_count(culls.get("stored_rep_points", 0)),
+                            fmt_count(culls.get("stored_rep_tested", 0)),
+                            " (capped)" if culls.get("stored_rep_limited") else "")
                     summ = res.get("summary") or {}
                     if summ.get("layers"):
                         # occupancy summary (M2): these layers were
