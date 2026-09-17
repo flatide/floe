@@ -1090,6 +1090,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "sub_cut_sparse_over": "32", "sub_cut_wash_over": "33",
                 "rep_kept": "34", "rep_washed": "35", "rep_children": "36",
                 "rep_page_level": "2", "rep_level": "7",
+                "stored_rep_points": "16384", "stored_rep_tested": "65536",
+                "stored_rep_limited": "1",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
@@ -1100,7 +1102,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "sub_cut_washes": 30, "sub_cut_sparse": 31,
                 "sub_cut_sparse_over": 32, "sub_cut_wash_over": 33,
                 "rep_kept": 34, "rep_washed": 35, "rep_children": 36,
-                "rep_page_level": 2, "rep_level": 7})
+                "rep_page_level": 2, "rep_level": 7,
+                "stored_rep_points": 16384, "stored_rep_tested": 65536,
+                "stored_rep_limited": 1})
             self.assertEqual(result["frame_format"], "raw")
             self.assertEqual(result["rgba"], raw_pixels)
             self.assertNotIn("png", result)
@@ -1160,6 +1164,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "deferred": "0", "final": "0", "pages": "1",
             })
             partial = worker.res.get_nowait()
+            # Old/deck replies omit OVR diagnostics; keep their stable zero
+            # defaults instead of carrying counters from another generation.
+            for key in ("stored_rep_points", "stored_rep_tested", "stored_rep_limited"):
+                self.assertEqual(partial["plan_culls"][key], 0)
             self.assertEqual(partial["refining"], 1)
             self.assertIn(9, worker._jobs)
             self.assertFalse(os.path.exists(partial_path))
