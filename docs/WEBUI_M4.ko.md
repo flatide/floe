@@ -6882,3 +6882,30 @@ Node 게이트4개 ALL OK. 문서만 변경했으므로 native 전체 배터리�
 승인이 필요한 다중 저장/충돌/결과 불명 복구, Python-free Linux 실행, G1/G4 및
 현장 Firefox/ETX다. SH-10/index hot reload 보류와 M5 실측 조건부는 유지한다.
 이전 실행 파일의 제한된 브라우저 수용 진전이며 전체 목표 완료가 아니다.
+
+## 110. M4g-53 — 게스트 초대 교환과 복귀 경합
+
+2026-09-18. owner와 별도인 `guest.js`에서 세 결함을 결정적으로 재현했다.
+성공한 exchange 직후 pagehide가 끼면 자격증명이 버려져 복귀 socket0개가 됐고,
+pageshow 전 visible 이벤트는 HTTP1개를 보냈다. 복귀 연결 완료 뒤 visible 이벤트는
+이전 연결을 포함해 기대2개 대신 socket3개를 만들었다. 회귀를 먼저 실패시켰다.
+
+이미 제출한 일회용 교환만 기존 XHR timeout 아래 보존하며, 유효한 결과를 보관한
+뒤에도 pagehide/hidden이면 후속 통신을 하지 않는다. pageshow와 visibility 상태를
+분리하고 연결 중/현재 socket이 있으면 join을 막는다. 명시 stop은 교환도 취소하며
+늦은 실패/옛 socket error가 terminal/새 상태를 덮지 않도록 했다. 권한·endpoint·
+공유 수명·쓰기/재시도 정책은 확대하지 않았다.
+
+검증: `guest-lifecycle.test.cjs`의 Follow/Explore42조합(즉시/지연 응답, 복귀 순서,
+초기 숨김, timeout/401/무효 인증, 종료/abort 경합, 옛 GET/WS)과
+`node tools/validate_web_ui.cjs` 전체 ALL OK. 최종 소스의
+`cargo build --release --offline --locked -p floe-app` 성공 후
+`validate_web_local_sharing.py data/m1/valmini.oas`도 ALL OK였다. 이 gate는
+임시 Rust 서버를 직접 실행해 제공 UI bytes 일치, 기본off·명시 grant·Follow/Explore,
+462개 교차 인증 거부, source/cache/review 불변과 종료/worker 정리를 검사한다.
+기존 native 경고는 남으며, renderer/VFS 변경이나 native 전체 배터리 재실행은 없다.
+
+전체 목표 잔여: 최신 빌드의 실제 브라우저 입력·설정·공유/BFCache 및 저장/충돌/결과
+불명 수용, Python-free Linux 실행, G1/G4, 현장 Firefox/ETX다. 새로운 합성 다중 리뷰
+저장 검사는 승인 대기이며 SH-10/index hot reload 보류·M5 실측 조건부는 유지한다.
+이번 근거는 로컬 회귀/서버 통합이며 실제 Chrome의 BFCache PASS로 바꾸지 않는다.

@@ -188,6 +188,9 @@ M4g-51은 기존 승인 Chrome 합성 탭에서 두 box의 Shift/Command 다중 
 M4g-52는 같은 합성 Chrome에서 bbox/수동/CD/수동4개 기록의 역순 Undo와
 CD 전용 삭제의 수동 기록 보존을 확인했다. 새 저장/제품 수정은 없으며 최신 빌드
 전체 수용과 구분한다([브라우저 §5.5](WEBUI_BROWSER_ACCEPTANCE.ko.md#55-실제-cd수동bbox-간격-혼합-undo)).
+M4g-53은 guest의 일회용 초대 성공 결과를 숨김 후에도 보존하고 pageshow 전
+재연결·복귀 후 중복 소켓을 막는다. 로컬42조합/전체 UI/native 공유 검증이며
+실제 SH-08은 별도다([M4 §110](WEBUI_M4.ko.md#110-m4g-53--게스트-초대-교환과-복귀-경합)).
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.
 M4g-11d에서 Ctrl/Shift 선택·접기/펼치기·페이지 간 범위와 선택 행의 일괄 가시성을

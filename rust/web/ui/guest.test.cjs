@@ -4,9 +4,10 @@ const Decode=require('./image-decode.js');
 const id='a'.repeat(64),view='b'.repeat(64),epoch='c'.repeat(64),secret='d'.repeat(64),bundle='test-bundle';
 const auth={protocol:1,bundle,share_id:id,session_id:'e'.repeat(64),csrf:'f'.repeat(64)};
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
-function environment(mode='explore',hash='#invite='+secret,grant=false){
+function environment(mode='explore',hash='#invite='+secret,grant=false,options={}){
     const nodes=new Map(),events={},requests=[],sockets=[],timers=new Map(),rafs=new Map(),storage=new Map([['floe-session:http://127.0.0.1:1234','OWNER'],['floe-default-pending:OWNER','PRIVATE']]),reads=[];
     let timerId=0,doc,sessionCode=200,clock=10000,reviewRev='1',groupRev='1',group=[];
+    const holds=[],delayed=[],observers=[];
     const reviewRow={check:'0',local:'0',global:'1',kind:'p',status:0,bbox_um:['20','8','24','12'],points:'4'};
     class Element{
         constructor(name){this.id=name;this.value='';this.checked=false;this.disabled=false;this.hidden=false;this.width=1;this.height=1;this.pixels=null;this.textContent='';this.listeners={};this.children=[];this.attrs={};this.style={};}
@@ -20,16 +21,18 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
     }
     const el=k=>{if(!nodes.has(k)){nodes.set(k,new Element(k));}return nodes.get(k);};
     function listen(k,f){const old=events[k];events[k]=old?function(e){old(e);f(e);}:f;}
-    doc={getElementById:el,querySelector:()=>({content:bundle}),createElement:k=>new Element(k),activeElement:null,addEventListener:listen};
+    doc={getElementById:el,querySelector:()=>({content:bundle}),createElement:k=>new Element(k),activeElement:null,hidden:!!options.hidden,addEventListener:listen};
     const win={devicePixelRatio:1,sessionStorage:{getItem(k){reads.push(k);return storage.get(k)||null;},setItem(k,v){storage.set(k,v);},removeItem(k){storage.delete(k);}},
         setTimeout(f,ms){const n=++timerId;timers.set(n,{f,ms,at:clock+ms});return n;},clearTimeout(n){timers.delete(n);},setInterval(f,ms){const n=++timerId;timers.set(n,{f,ms,at:clock+ms,interval:true});return n;},clearInterval(n){timers.delete(n);},
-        requestAnimationFrame(f){const n=++timerId;rafs.set(n,f);return n;},cancelAnimationFrame(n){rafs.delete(n);},addEventListener:listen};
+        requestAnimationFrame(f){const n=++timerId;rafs.set(n,f);return n;},cancelAnimationFrame(n){rafs.delete(n);},addEventListener:listen,
+        ResizeObserver:class{constructor(){this.active=false;observers.push(this);}observe(){this.active=true;}disconnect(){this.active=false;}}};
     const location={origin:'http://127.0.0.1:1234',pathname:'/guest/'+id,hash};
     const history={replaceState(a,b,path){assert.equal(path,location.pathname);location.hash='';}};
     class XHR{
         open(method,path){this.method=method;this.path=path;this.headers={};}setRequestHeader(k,v){this.headers[k]=v;}
-        abort(){if(this.onabort){this.onabort();}}
+        abort(){if(this.entry){this.entry.aborted=true;}if(this.onabort&&!options.ignoreAbort){this.onabort();}}
         send(body){assert.equal(location.hash,'','fragment must be removed before the first HTTP request');const entry={method:this.method,path:this.path,body:body?JSON.parse(body):null,headers:this.headers};requests.push(entry);
+            this.entry=entry;
             assert(this.path.startsWith('/api/v1/guest/'+id+'/'));assert(!('X-Floe-CSRF' in this.headers));
             let v;if(this.path.endsWith('/exchange')){assert.equal(entry.body.invite,secret);v=auth;this.status=200;}
             else{assert.equal(this.headers['X-Floe-Guest-CSRF'],auth.csrf);this.status=sessionCode;
@@ -48,7 +51,10 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
                     else if(r.kind==='filtered_step'){data={hit:reviewRow,next:null,scanned:'1',bbox_um:null,selection_rev:r.selection_rev};}
                     else{throw Error('unexpected guest DRC read '+r.kind);}v={view_id:view,revision:'drc-rev',data};}
                 else{v=this.method==='DELETE'?null:{share_id:id,mode,read_only:true,delivery:mode==='follow'?'follow_frames':'explore_frames',...grant&&{drc:{id:'7'.repeat(64),revision:'drc-rev'}}};}}
-            this.responseText=v?JSON.stringify(v):'';this.onload();}
+            entry.reply=(code=this.status,value=v)=>{this.status=code;this.responseText=value?JSON.stringify(value):'';this.onload();};
+            entry.fail=()=>this.ontimeout();
+            const held=holds.findIndex(h=>h.method===this.method&&this.path.endsWith(h.suffix));
+            if(held>=0){holds.splice(held,1);delayed.push(entry);}else{entry.reply();}}
     }
     class WS{
         constructor(url,protocols){assert.equal(url,'ws://127.0.0.1:1234/api/v1/guest/'+id+'/events');assert.deepEqual(protocols,['floe.v1','bundle.'+bundle,'guest-csrf.'+auth.csrf]);this.sent=[];this.readyState=1;sockets.push(this);}
@@ -67,7 +73,8 @@ function environment(mode='explore',hash='#invite='+secret,grant=false){
     function advance(ms=100){const end=clock+ms;while(true){const entry=[...timers].sort((a,b)=>a[1].at-b[1].at)[0];if(!entry||entry[1].at>end){break;}clock=entry[1].at;if(entry[1].interval){entry[1].at+=entry[1].ms;}else{timers.delete(entry[0]);}entry[1].f();}clock=end;}
     function mouse(type,x,y,button=0,extra={}){const e={clientX:x,clientY:y,button,buttons:type==='mouseup'?0:button===0?1:button===1?4:2,preventDefault(){},...extra};
         if(type==='mousedown'){el('guest-viewport').listeners.mousedown(e);}else if(type==='mousemove'){if(el('guest-viewport').listeners.mousemove){el('guest-viewport').listeners.mousemove(e);}events.mousemove(e);}else{if(el('guest-viewport').listeners.mouseup){el('guest-viewport').listeners.mouseup(e);}events.mouseup(e);}}
-    return {c,el,win,doc,events,requests,sockets,storage,reads,location,hello,state,raf,timer,advance,mouse,timers,rafs,code(n){sessionCode=n;}};
+    return {c,el,win,doc,events,requests,sockets,storage,reads,location,hello,state,raf,timer,advance,mouse,timers,rafs,delayed,observers,
+        defer(method,suffix){holds.push({method,suffix});},code(n){sessionCode=n;}};
 }
 function packet(extra={},color=[1,2,3,255]){
     const h={type:'frame',protocol:1,row0:'top',purpose:'foreground',format:'raw',view_id:view,connection_epoch:epoch,frame_id:'1',dataset_revision:'1',worker_epoch:'1',state_rev:'1',render_rev:'1',render_key:'1',generation:'1',round:'1',deferred:'0',deck_skipped:'0',final:true,partial:false,labels_truncated:false,complete:true,approximate:false,query:false,query_scene:{generation:null,round:null,complete:false,summary_layers:'0'},bbox_dbu:['0','0','64','32'],width:64,height:32,...extra};
@@ -87,7 +94,7 @@ function queryReply(ws,request,index='0'){
 function measureReply(ws,request,point){ws.text({type:'measure.result',seq:request.seq,view_id:view,connection_epoch:epoch,anchor:request.body.anchor,
     point_dbu:point,snap:request.body.snap_query===null?null:'vertex',segment:request.body.start_dbu?
         {endpoints_dbu:[request.body.start_dbu,point],delta_um:['10','0'],distance_um:'10'}:null});}
-module.exports={environment,tick,packet,click,measureReply,exactScene,view,epoch};
+module.exports={environment,tick,packet,click,measureReply,exactScene,view,epoch,auth,id};
 if(require.main===module)(async()=>{
     const invalid=environment('follow','#bootstrap='+secret);await invalid.c.start();assert.equal(invalid.requests.length,0);assert.equal(invalid.storage.get('floe-session:http://127.0.0.1:1234'),'OWNER');
     for(const mode of ['follow','explore']){

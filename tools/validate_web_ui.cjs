@@ -26,6 +26,8 @@ const guestCD=spawnSync(process.execPath,[path.join(ui,'guest-drc-cd.test.cjs')]
 assert.equal(guestCD.status,0,'guest DRC CD: '+guestCD.error);
 const guestFocusUI=spawnSync(process.execPath,[path.join(ui,'guest-focus-ui.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(guestFocusUI.status,0,'guest focus UI: '+guestFocusUI.error);
+const guestLifecycle=spawnSync(process.execPath,[path.join(ui,'guest-lifecycle.test.cjs')],{stdio:'inherit',timeout:15000});
+assert.equal(guestLifecycle.status,0,'guest lifecycle: '+guestLifecycle.error);
 const frameStatus=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_FRAME_STATUS:'1'}});
 assert.equal(frameStatus.status,0,'frame status client: '+frameStatus.error);
 for(const file of ['wheel.test.cjs','client.test.cjs']){

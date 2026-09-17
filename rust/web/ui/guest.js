@@ -10,14 +10,17 @@
         const drcCanvas=el('guest-drc-canvas'),drcContext=drcCanvas.getContext('2d');
         const edits=['fit','in','out','depth','detail','thin','frames','labels','mono','x','y','width','go'];
         let auth=null,session=null,socket=null,hello=null,state=null,seq='0',serial=0;
-        let started=false,stopped=false,suspended=false,joining=false,decode=null,raf=null;
+        let started=false,stopped=false,suspended=false,pageSuspended=false,joining=false,decode=null,raf=null;
         let foreground=null,margin=null,flight=null,accepted=null,queue=[];
         let ackedFrames={foreground:null,margin:null},displayed=false,queryTools=null,gesture=null,dragShift=null,overlaySize='';
         let ping=null,reconnect=null,resize=null,observer=null,delay=500,flushTimer=null,lastSend=-Infinity;
         let focusTicket=null,overlayRAF=null;
         const rulerHistory=o.rulers?o.rulers.history():null;
         const now=o.now||function(){return win.performance.now();};
-        const pending=new Set();
+        const pending=new Set();let exchanging=null;
+        // An invitation is single-use. Keep only its already submitted, bounded
+        // exchange alive across hiding; never replay it or start follow-up work.
+        function abortReads(){pending.forEach(function(x){if(x!==exchanging){x.abort();}});}
         function inputPending(ignoreGesture){return !!flight||!!accepted||!!queue.length||!ignoreGesture&&(!!dragShift||!!gesture&&gesture.active());}
         function queryContext(ignoreGesture){return o.display?o.display.context({protocol:P,session:session,hello:hello,state:state,
             foreground:foreground&&foreground.header,margin:margin&&margin.header,acked:ackedFrames,
@@ -97,8 +100,8 @@
             if(!methods[suffix]||!methods[suffix].includes(method)||isDRC&&(!session||!session.drc||!hello||!state)){return Promise.reject(Error('Unsupported guest request'));}
             if(suffix==='/layers'&&(!hello||!state)){return Promise.reject(Error('Guest view not ready'));}
             const limit=isDRC?1024*1024:suffix==='/layers'?256*1024:65536;
-            return new Promise(function(resolve,reject){const x=new o.XHR();pending.add(x);let done=false;
-                function end(error,value){if(done){return;}done=true;pending.delete(x);if(token){token.abort=null;}if(error){reject(error);}else{resolve(value);}}
+            return new Promise(function(resolve,reject){const x=new o.XHR();pending.add(x);if(suffix==='/exchange'){exchanging=x;}let done=false;
+                function end(error,value){if(done){return;}done=true;pending.delete(x);if(exchanging===x){exchanging=null;}if(token){token.abort=null;}if(error){reject(error);}else{resolve(value);}}
                 if(token&&token.cancelled){end(Error('Guest request cancelled'));return;}
                 if(token){token.abort=function(){x.abort();};}
                 x.open(method,base+suffix,true);x.timeout=isDRC?30000:8000;
@@ -177,14 +180,14 @@
                 if(v.type!=='pong'){throw Error('Unsupported guest message');}
             }catch(_){stop('Guest protocol error. Reload with a valid invitation.',true);}
         }
-        async function join(){if(joining||stopped||suspended||!auth){return;}joining=true;controls();const token=serial;
+        async function join(){if(joining||socket||stopped||suspended||!auth){return;}joining=true;controls();const token=serial;
             try{const s=await request('GET','/session');if(token!==serial||stopped||suspended){return;}
                 if(!s||s.share_id!==id||s.read_only!==true||!['follow','explore'].includes(s.mode)||s.delivery!==(s.mode==='follow'?'follow_frames':'explore_frames')){stop('Invalid shared session. Ask for a new invitation.',true);return;}
                 session=s;el('guest-mode').textContent=s.mode==='follow'?'Follow · read-only':'Explore · read-only';
                 if(s.drc&&(!/^[0-9a-f]{64}$/.test(s.drc.id)||typeof s.drc.revision!=='string'||!s.drc.revision||s.drc.revision.length>128)){throw Error('Invalid DRC grant');}
                 el('guest-scope').textContent='Approved layout layers and loaded levels only.'+(s.drc?' The entire named DRC result was separately approved; review notes and writes are excluded.':' DRC results are not shared.');
                 const ws=new o.WebSocket(o.location.origin.replace(/^http:/,'ws:')+base+'/events',['floe.v1','bundle.'+bundle,'guest-csrf.'+auth.csrf]);
-                socket=ws;seq='0';ws.binaryType='arraybuffer';ws.onmessage=function(e){incoming(e,token);};ws.onerror=function(){status('Guest connection unavailable.');};
+                socket=ws;seq='0';ws.binaryType='arraybuffer';ws.onmessage=function(e){incoming(e,token);};ws.onerror=function(){if(token===serial&&!stopped&&!suspended){status('Guest connection unavailable.');}};
                 ws.onclose=function(){if(token!==serial||stopped||suspended){return;}disconnect();status('Disconnected; checking this share before reconnecting…');retry();};
                 ws.onopen=function(){if(token!==serial){ws.close();return;}ping=win.setInterval(function(){if(hello){send({type:'ping'});}},10000);};
             }catch(e){if(token!==serial||stopped||suspended){return;}if([401,403,404,409].includes(e.status)){stop('Share expired, revoked, or changed. Ask the owner for a new invitation.',true);}else{status(e.message);retry();}}
@@ -194,13 +197,13 @@
         async function start(){if(started){return;}started=true;const fragment=o.location.hash;
             try{if(fragment){o.history.replaceState(null,'',o.location.pathname);}if(!id||!ctx){throw Error('Invalid guest page');}
                 if(typeof o.XHR!=='function'||typeof o.WebSocket!=='function'||typeof win.requestAnimationFrame!=='function'||typeof win.cancelAnimationFrame!=='function'){throw Error('Canvas, WebSocket and animation APIs are required.');}
-                if(/^#invite=[0-9a-f]{64}$/.test(fragment)){remove();const a=await request('POST','/exchange',{invite:fragment.slice(8),protocol:1,bundle:bundle});if(stopped||suspended){return;}if(!valid(a)){throw Error('Invalid guest credentials');}auth=a;
+                if(/^#invite=[0-9a-f]{64}$/.test(fragment)){remove();const a=await request('POST','/exchange',{invite:fragment.slice(8),protocol:1,bundle:bundle});if(stopped){return;}if(!valid(a)){throw Error('Invalid guest credentials');}auth=a;
                     try{win.sessionStorage.setItem(key,JSON.stringify(auth));}catch(_){status('Tab storage unavailable; reloading needs a new invitation.');}}
                 else{if(fragment){throw Error('Invalid invitation; owner links are not accepted here');}try{const text=win.sessionStorage.getItem(key);auth=text&&text.length<=4096?JSON.parse(text):null;}catch(_){auth=null;}if(!valid(auth)){throw Error('Open a new guest invitation from the owner.');}}
-                suspended=!!doc.hidden;controls();if(win.ResizeObserver){observer=new win.ResizeObserver(resized);observer.observe(viewport);}await join();
-            }catch(e){stop(e.message||'Guest connection failed. No invitation was retried.',true);}
+                suspended=pageSuspended||!!doc.hidden;controls();if(win.ResizeObserver){observer=new win.ResizeObserver(resized);if(!suspended){observer.observe(viewport);}}await join();
+            }catch(e){if(!stopped){stop(e.message||'Guest connection failed. No invitation was retried.',true);}}
         }
-        el('guest-reconnect').onclick=function(){if(reconnect!==null){win.clearTimeout(reconnect);reconnect=null;}suspended=!!doc.hidden;join();};
+        el('guest-reconnect').onclick=function(){if(reconnect!==null){win.clearTimeout(reconnect);reconnect=null;}suspended=pageSuspended||!!doc.hidden;join();};
         el('guest-leave').onclick=async function(){if(!auth||stopped){return;}const proof=auth;stop('Leaving share…',false);remove();
             try{await request('DELETE','/session');status('Share left. The owner and other guests remain connected.');}
             catch(_){status('Local display cleared; server logout unconfirmed. Ask the owner to revoke this share. No retry was sent.');}
@@ -245,9 +248,9 @@
                 const n=o.gestures.wheelNavigation(e,c.size,c.rect);if(n){nav(n);}}, {passive:false});
         }
         win.addEventListener('resize',resized);
-        doc.addEventListener('visibilitychange',function(){if(stopped){return;}suspended=!!doc.hidden;if(suspended){disconnect();pending.forEach(function(x){x.abort();});status('Guest paused while hidden.');}else{join();}});
-        win.addEventListener('pagehide',function(){suspended=true;disconnect();pending.forEach(function(x){x.abort();});if(observer){observer.disconnect();}});
-        win.addEventListener('pageshow',function(e){if(e.persisted&&!stopped){suspended=!!doc.hidden;if(observer){observer.observe(viewport);}status('Restored; reconnecting without replaying commands.');join();}});
+        doc.addEventListener('visibilitychange',function(){if(stopped){return;}suspended=pageSuspended||!!doc.hidden;if(suspended){disconnect();abortReads();if(observer){observer.disconnect();}status('Guest paused while hidden.');}else{if(observer){observer.observe(viewport);}join();}});
+        win.addEventListener('pagehide',function(){pageSuspended=true;if(stopped){return;}suspended=true;disconnect();abortReads();if(observer){observer.disconnect();}});
+        win.addEventListener('pageshow',function(e){if(e.persisted&&!stopped){pageSuspended=false;suspended=!!doc.hidden;if(observer&&!suspended){observer.observe(viewport);}status(suspended?'Guest paused while hidden.':'Restored; reconnecting without replaying commands.');join();}});
         return {start:start,stop:function(){stop('Guest stopped.',false);}};
     }
     const api={bind:bind};

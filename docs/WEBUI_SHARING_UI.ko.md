@@ -71,6 +71,16 @@ scope 변경이면 bitmap·저장 자격증명을 지우고 새 초대를 요청
 종료하지 않는다. 숨김 탭/pagehide에서는 연결과 미표시 프레임을 정리하며 visible/bfcache
 복귀는 현재 세션을 확인한다. idle worker 회수와 view 상태 복원은 기존 서버 계약이다.
 
+M4g-53: 숨김만으로 **이미 제출한 초대 교환**을 중단/폐기하지 않는다. 기존 XHR
+8초 timeout을 유지하고 유효한 성공 응답은 guest 전용 tab storage에 한 번 보관하되,
+숨김 중 후속 session 조회/WS/resize 관측은 시작하지 않는다. timeout·거부·잘못된
+응답은 새 초대를 요구하며 POST를 재시도하지 않는다. 명시 stop은 교환도 취소한다.
+`pagehide` 정지는 `pageshow(persisted)`에서만 해제한다. visible 이벤트나 늦은
+Reconnect handler가 이를 우회하지 않으며, 이미 연결된 소켓을 중복 생성하지 않는다.
+종료/옛 연결의 늦은 응답은 현재 상태를 덮지 않는다. 결정적42조합·전체 UI·native
+공유 gate 근거는 [M4 §110](WEBUI_M4.ko.md#110-m4g-53--게스트-초대-교환과-복귀-경합)이며
+실제 브라우저 BFCache 수용을 대신하지 않는다.
+
 ## 프레임과 입력
 
 공통 `protocol.js`/`image-decode.js`의 유계 raw/PNG 검증·decode를 재사용한다. view ID·
