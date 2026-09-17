@@ -7096,3 +7096,27 @@ timeout, launch 오류, interrupt의 동일 객체 전달·단일 호출·인자
 Python-free Linux 실행, G1 성능·G4 최종 판정, 현장 Firefox/ETX가 여전히 남는다.
 원격 SH-10/index hot reload는 보류, M5는 실측 조건부이며 합성 다중 저장/CI 승인은
 대기 상태다. main/jobdeck 작업을 보존하고 이번 단계의 로컬 회귀 근거만 갱신한다.
+
+## 116. M4g-59 — 실제 다중 review 저장·외부 변경 충돌 복구
+
+2026-09-18. 새 합성 서버/Chrome 인증 연결 및 별도 복사본의 다중 저장·복구
+검사가 승인됐다. 살아 있는62804와 기존 메모는 보존하고 새61901 서버를 직접
+시작했다. 구63243에는 서버가 없었으므로 이전 연결 안내를 정정했다.
+인증값·실제 설계는 기록하지 않는다.
+
+[브라우저 §10.10](WEBUI_BROWSER_ACCEPTANCE.ko.md#1010-별도-합성-복사본의-다중-저장외부-변경-충돌-복구)에
+실행 파일 식별·작업 순서·한계를 기록했다. 같은 규칙의2오류에 한글 메모와waive를
+각각 미리보기/승인해 파일과 reader 반영을 확인했다. note snapshot 이후 합성
+sidecar의 외부 변경은 Preview에서 거부됐고 파일/초안을 보존했다. 명시 snapshot
+재조회·새 승인 뒤 저장됐으며 Chrome reload 후 메모/2 waived를 다시 읽었다.
+이것은 준비 전 충돌이며 게시 직전 충돌/결과 불명 검사는 아니다.
+
+보호 파일18개 SHA-256 불변, 새 reviewer의 note/waive와 잠금 파일만 생성했다.
+두 자동 저장off·초안/선택 없음으로 정리하고 합성 서버/탭을 다음 검사용으로 유지했다.
+`node rust/web/ui/drc-notes.test.cjs`와 `drc-waives.test.cjs`는 모두 통과했다.
+이번 커밋은 수용 기록/결정 로그뿐이며 제품 수정이나 전체 배터리 재실행은 없다.
+
+전체 목표 잔여: 실제 결과 불명/게시 직전 충돌·다중 규칙·나머지 입력/설정/공유/
+BFCache 수용, Python-free Linux 실행, G1/G4 최종 판정, 현장 Firefox/ETX다.
+사용자는 GitHub Actions 추가/실행을 보류하고 현장 Linux 검증을 기다리기로 했다.
+원격 SH-10/index hot reload 보류와 M5 실측 조건부는 유지한다.

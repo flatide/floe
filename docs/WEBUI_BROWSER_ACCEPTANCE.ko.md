@@ -951,6 +951,57 @@ flat-layout 검사 범위가 아니라 UI/native gate의 근거다.
 읽기 횟수/단일 재개는 JS 통합 회귀의 근거이며 브라우저 계측으로 확대하지 않는다.
 다중 저장·충돌·게시 결과 불명 복구 검사는 실행하지 않았다.
 
+### 10.10 별도 합성 복사본의 다중 저장·외부 변경 충돌 복구
+
+2026-09-18. 사용자가 새 합성 서버의 일회용 loopback 인증 연결과 별도 복사본의
+다중 오류 메모·waive 저장/충돌/결과 불명 검사를 각각 승인했다.63243/58385에는
+리스너가 없었고62804는 살아 있었다. 따라서 예전63243에 대한 “서버 재시작 불필요”
+안내를 정정했다. 기존62804를 종료하거나 인증 파일을 재사용하지 않고 새 private
+임시 폴더에 합성 입력/캐시만 복사해61901 서버를 직접 실행했다. 기존 reviewer
+sidecar를 새 pack에 연결하지 않고 새 `browser-multi` reviewer를 등록했다.
+새 인증값은 채팅/로그/문서에 남기지 않았다.
+
+About 식별은 app0.1.0, source `6a30fe8e26ce6963aff005f17f841a40fae0ae2a+`,
+native 기대 호환0.12.155, web `a53f4807775dcad3e36763e0de3cd08d2225c92e`다.
+검사 시 HEAD `8a51482`와 이 revision 사이의 `rust/` diff는 없으며 그 이후 커밋은
+검증기/문서 변경뿐이다. 이 식별을 서명이나 다른 실행 파일의 내용 증명으로 쓰지 않는다.
+
+- 실제 Chrome에서 Local connected, ICE23오류·SVRF8/8, X200/Y220/view500,
+  full/high와 최종 프레임을 확인했다. 같은 M2.OVERLAP.2 규칙의 Global1/2를
+  Shift 선택해2/5000을 확인했다. 서로 다른 규칙에 걸친 다중 선택 검사는 아니다.
+- 두 오류에57 UTF-8 bytes의 두 줄 한글 메모를 입력했다. 대상2개·새 sidecar·정확한
+  본문을 미리보기에서 확인한 뒤 별도 checkbox/Approve로 저장했다. `Saved · #1`,
+  revision1과 파일의 `floe_note=0,1` 그룹/두 위치 text 행을 확인했다. 자동 저장은off다.
+- 같은2개에 Waive를 선택하고 변경 수2개를 확인한 뒤 별도 승인했다.
+  `Save completed · #1`, 파일 저장과 현재 metadata에 대한 reader 반영을 각각
+  확인했다. Reload review 후 두 행 모두 waived였고 파일의40-byte header 다음
+  23상태는 `[1,1,0,…,0]`이었다. 뒤의 규칙별 집계 영역을 상태 배열로 잘못 세지 않는다.
+- 새 note snapshot을 읽은 뒤 **새 테스트 sidecar에만** 합성 외부 편집 comment를
+  추가했다. 다음 Preview는 `The note file changed or another writer holds its lock`
+  로 거부됐고 승인 버튼/새 저장은 생기지 않았다. 기존 본문과 외부 comment가
+  파일에 남아 덮어쓰기 부재를 확인했다. 입력한67-byte 새 초안도 유지됐다.
+- `Reload snapshot, keep text`는 새 snapshot을 읽고 그 초안을 유지했다. 새
+  미리보기/별도 승인을 거쳐 `Saved · #2`, revision2로 저장했다. 이는 **준비 전
+  외부 변경**의 거부/명시 재조회 복구다. 준비 후 게시 직전 충돌이나 lock contention,
+  네트워크/worker 결과 불명 복구까지 실제 브라우저에서 검사했다고 확대하지 않는다.
+- 실제 Chrome reload 뒤 Local connected, note/waive 영수증과2개 선택이 유지됐다.
+  다시 읽은 메모 본문은 새67-byte 내용이고 waive snapshot은2 already waived /
+  0 reserved였다. 중간 두 번의 locator value 조회는3초 도구 기한에 실패했지만,
+  후속 DOM snapshot에 본문이 있고 정상 Discard/waive read가 가능했다. 이를
+  제품 저장 실패나 기동 지연의 원인 규명으로 기록하지 않는다.
+
+검사 전후 원래 입력/캐시/기존 reviewer 파일10개와 새 복사본 입력/캐시8개,
+총18개 보호 파일의 SHA-256은 같았다. 새 폴더에 note/waive와 각 lock만 생성했고
+기존 메모는 보존했다. 테스트 초안·선택을 폐기/해제하고 두 자동 저장off,
+M1.SPACE.1·Local connected로 남겼다. 서버와 테스트 탭은 다음 검사를 위해 유지한다.
+추가 JS note/waive 회귀 두 개도 모두 통과했으며 제품 코드는 변경하지 않았다.
+
+**남은 범위:** 실제 저장 결과 불명/동일 요청 복구, 게시 직전 충돌, 다중 규칙,
+나머지 opt-in/import/export·BFCache 수용은 계속 남는다. 전체 Rust 배터리를
+이번에 다시 실행했다고 세지 않으며 직전 M4g-58의 전체 실행 근거와 구분한다.
+사용자는 GitHub Actions workflow 추가/실행을 보류하고 현장 Linux 검증을 기다리기로
+했다. 새 workflow/CI 실행·원격 공개·실제 설계 사용은 없다.
+
 ## 11. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
@@ -968,9 +1019,11 @@ Chrome 표시 진단, §9의 일부 키 입력·초안 보호와 §9.1의 내장
 §10.8은 별도 reviewer의 다중 선택·메모 미리보기/무효화·waive 읽기까지이며 저장 수용이 아니다.
 §10.9는 편집 snapshot과 display의 경합 수정 뒤 읽기/취소 자동 복구이며 새 저장은 없다.
 각 절의 미검사 범위 및 DRC 교체 실패/진행 중 취소, pack 생성,
-메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
+메모/waive의 나머지 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
 auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
+§10.10은 같은 규칙의2오류 메모/waive 저장·reload 재조회와 준비 전 note 외부 변경의
+거부/명시 재조회/재승인을 확인한다. 결과 불명이나 게시 직전 충돌의 수용은 아니다.
 §5.1은 실제 bitmap 조작·참조 일부와 스크롤바 클릭 수정을 추가한다.
 §5.2의 명시 종료 뒤 픽셀/Live 표시 잔류는 M4g-44에서 수정하고 실제 Chrome으로 재검증했다.
 §5.3은 원본 꼭짓점/변 스냅과 수동18/2µm, §5.4는 실제 Shift/Command 다중 선택,
