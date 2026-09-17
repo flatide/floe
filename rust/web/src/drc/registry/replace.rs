@@ -52,6 +52,7 @@ pub(crate) struct PreparedOpen {
     candidate: Option<Arc<Service>>,
     registration: Option<Registration>,
     protection: Option<registered::Registration>,
+    display_guard: Option<tokio::sync::OwnedSemaphorePermit>,
     reconnect: Option<(
         super::super::review::Binding,
         Option<super::super::review::Binding>,
@@ -91,6 +92,7 @@ impl Registry {
             candidate: None,
             registration: None,
             protection: None,
+            display_guard: None,
             reconnect: None,
         };
         let source_id = pending
@@ -105,6 +107,11 @@ impl Registry {
         selected.validate(stop)?;
         let scope = selected.scope();
         let path = selected.path().to_owned();
+        // The old reader/SVRF remain live until commit. Its idle note-display
+        // cache must not consume the slot needed for a candidate reader. Hold
+        // the preparation gate so a concurrent display cannot reinstall it;
+        // active edits/reads keep their own reservations and may still be busy.
+        pending.display_guard = self.notes().map(|n| n.reclaim_display()).transpose()?;
         pending.protection = Some(pending.owner.source_set().begin(stop)?);
         let caches = floe_app_core::cache::pack_paths(&path)?;
         let packed = floe_app_core::drc::is_packed_source(&path)?;
@@ -209,6 +216,7 @@ impl Registry {
             candidate: None,
             registration: None,
             protection: None,
+            display_guard: None,
             reconnect: None,
         };
         let r = old.current_registration();
@@ -300,6 +308,10 @@ impl PreparedOpen {
         if s.closed || !self.context.matches(&s) || s.ledger.active().is_some() {
             return Err(fail("drc_context_changed"));
         }
+        // HTTP review preparations enter under this registry lock. Releasing
+        // our gate here cannot race a new display before admit_detach checks
+        // the normal no-active-preparation invariant and publishes the reader.
+        drop(self.display_guard.take());
         let notes = registry.notes();
         let waives = registry.review(floe_app_core::drc::review::store::Kind::Waives);
         let reconnect = self.reconnect.take();

@@ -539,6 +539,32 @@ SHA-256도 검사 전과 같다. waive 상태23바이트는 모두0이다. 두 �
 자동 저장off·Local connected로 남겼다. 신규 저장, 실제 사용자 데이터 변경,
 외부 전송은 없다. 이 검사부터 합성 서버의 실행/재시작은 에이전트가 담당한다.
 
+### 10.3 저장 메모 표시 후 DRC 교체와 명시 재연결
+
+§10.2의59459에서 saved-note cache가 있는 상태로 별도 합성 `replacement.db`
+(3규칙·6오류,1,352bytes)를 열면 busy로 실패했다. 기존8규칙·23오류·SVRF8/8과
+Global1 메모 badge는 보존됐다. [M4 §93](WEBUI_M4.ko.md#93-m4g-38--저장-메모-표시-후-drc-교체의-캐시-예약-해제)는
+이 추가 예약 조합을 native로 재현·수정한다.
+
+수정 뒤 에이전트가 자기 합성 서버만 SIGINT로 종료하고 같은 명령으로 재시작했다.
+63353의 About은 `1c888ce+`, web `e047711a164dded836f2d20395d991d6ba9e0429`다.
+원래 M2 목록의 saved-note badge를 먼저 표시한 뒤 동일 replacement를 열었다.
+`3 rules · 6 errors · ASCII`, NO REVIEW WRITES, 기존 reviewer detached 및 자동
+저장off를 확인했다. pack 생성/저장은 실행하지 않았다.
+
+복원은 원본 `synthetic.db` 선택 → current adjacent ICE8규칙·23오류 → 원래 런처의
+`browser-test` note/waive 권한만 명시 재연결 → 기존 `synthetic.rules.json` 연결
+순서였다. 원본 DB 선택은 최초 안전 검사에서 다른 입력으로 오인돼 거부됐지만,
+읽기 전용 CLI가 실제 `.synthetic.db.tray` 선택과8/23을 출력하고 두 파일 해시가
+불변임을 확인한 뒤 같은 UI 클릭으로 진행했다. 인증·API 우회나 숨김 파일 노출은 없다.
+
+최종 화면은 Local connected, X200/Y220/view500µm,9레이어 on,8규칙·23오류·SVRF8/8,
+Global1만 saved-note badge,0 waived다. 양쪽 자동 저장off이며 이번 서버의 저장
+receipt는 없다. note revision1은 재연결 카운터이며 새 파일 게시가 아니다.
+source/cache/DB/ICE/SVRF7파일과 note/waive2파일의 SHA-256은 검사 전과 같다.
+교체 후보 폴더도 generator가 만든 DB1개뿐이다. 손상 후보/진행 중 취소·충돌·
+불명확한 게시 복구의 실제 UI 수용은 이 성공 경로와 구별해 남긴다.
+
 ## 11. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
@@ -548,7 +574,8 @@ SVRF 교체·두 CD·레이어 격리/복원, §7.3의 작은 DRC 필터/순환/
 Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 오류 메모 수동/opt-in
 저장·reload 복원, §10.1의 waive 단일 오류 수동 저장/복원·opt-in 자동 해제/파일
 검증과 §10.2의 새 프로세스 메모/waive 복원·자동 해제 최종 UI 재조회다.
-각 절의 미검사 범위 및 기존 DRC 교체/실패, pack 생성,
+§10.3은 saved-note 표시 뒤 DRC 교체·원래 ICE 복원·런처 reviewer 명시 재연결이다.
+각 절의 미검사 범위 및 DRC 교체 실패/진행 중 취소, pack 생성,
 메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
 auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.

@@ -181,6 +181,10 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    receipt는 없으므로 영수증 문구 전환의 실제 게시 왕복까지 검증한 것은 아니다.
    M4 §92는 별도 native 회귀에서 발견한
    DRC build 부모 경로 alias 오인을 수정하며, 브라우저 pack 생성 수용은 아니다.
+   §10.3에서 saved-note display 예약이 있는 실제 창의 교체 실패를 추가 발견했고
+   M4 §93에서 유휴 cache 회수로 수정했다. 수정 빌드의 실제 교체·원래 ICE 복원·
+   런처 reviewer 명시 재연결·SVRF 복원과 파일 불변을 확인했다. 다른 중첩 예약
+   조합 및 실제 실패/진행 중 취소·충돌/복구·다중 선택 저장 수용은 여전히 남는다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격

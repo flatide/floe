@@ -1,6 +1,6 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-17(M4g-34~37 실제 DRC 수용 결함 수정; 원격 단계 보류).
+작성 2026-08-29, 갱신 2026-09-17(M4g-34~38 실제 DRC 수용 결함 수정; 원격 단계 보류).
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -136,7 +136,9 @@ M4g-34~37은 실제 합성 Chrome 수용에서 발견한 DRC 교체의 중복 �
 DRC build 부모 경로 alias 오인을 수정한다([M4 §89~92](WEBUI_M4.ko.md#89-m4g-34--drc-교체-준비의-중복-예약-제거)).
 단일 오류 note 수동/opt-in 저장·복원과 waive 수동 저장·복원/자동 해제는
 [실제 수용 §10~10.2](WEBUI_BROWSER_ACCEPTANCE.ko.md#10-실제-chrome-reviewer-메모-저장복원과-waive-admission-결함)에
-기록한다. 직접 실행한 새 서버에서 자동 해제의 UI 재조회도 확인했다. 교체 수정의 실제 Chrome 재검증,
+기록한다. 직접 실행한 새 서버에서 자동 해제의 UI 재조회도 확인했다. M4g-38은
+saved-note 표시 뒤 교체의 추가 예약 실패를 수정하고, 실제 Chrome 교체·원래 ICE/
+reviewer/SVRF 복원을 확인했다([수용 §10.3](WEBUI_BROWSER_ACCEPTANCE.ko.md#103-저장-메모-표시-후-drc-교체와-명시-재연결)).
 다중 선택·충돌/복구·나머지 조작은 남으며 전체 DRC/G4 수용으로 계산하지 않는다.
 M4g-11c는 접힌 그룹을 제외한 페이지·범위 선택을 Rust 읽기 전용 API로 제공한다
 ([M4 §58](WEBUI_M4.ko.md)). 브라우저의 다중 선택·접기 UI 연결은 다음 단계다.

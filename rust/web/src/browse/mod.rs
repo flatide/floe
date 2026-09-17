@@ -398,7 +398,7 @@ fn run(
 fn failure(kind: ErrorKind) -> &'static str {
     match kind {
         ErrorKind::Cache => "browse_changed",
-        ErrorKind::Busy => "browse_busy_or_limit",
+        ErrorKind::Busy | ErrorKind::Admission => "browse_busy_or_limit",
         ErrorKind::Cancelled => "browse_cancelled",
         ErrorKind::InvalidInput | ErrorKind::Unsupported => "browse_invalid_selection",
         _ => "browse_read_error",

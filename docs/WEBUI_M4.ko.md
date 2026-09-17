@@ -6377,3 +6377,39 @@ waive 자동 해제 결과를 읽기만 재검증했다. Global1의 본문과0 w
 전체 목표 잔여: 전체 배터리의 시작 제한 실패 추적, 나머지 실제 Chrome DRC
 교체/충돌/복구·입력/설정/공유 수용, Python-free Linux 실행, G1/G4 판정과 현장 Firefox/ETX.
 원격 SH-10과 index hot reload/revision은 사용자 보류, M5는 성능 조건부다.
+
+## 93. M4g-38 — 저장 메모 표시 후 DRC 교체의 캐시 예약 해제
+
+§89의 후보 reader 중복 예약 수정만으로는 실제 reviewer 창의 교체를 닫지 못했다.
+59459에서 saved-note badge가 한 번 표시된 뒤 다른 합성 ASCII DRC로 교체하면
+`Catalogue or owner is busy`가 재현됐다. 렌더1024 + picker192 + 기존 DRC/SVRF512 +
+유휴 메모 display256 + 후보 reader256 =2240MiB로2048MiB 풀을 넘었다. 기존 창,
+메모/waive 파일과 원본은 유지됐다. 새 native 회귀도 수정 전 같은 busy로 실패했다.
+
+`prepare_open`은 §90의 유휴 display 회수를 재사용한다. I/O worker에서 note
+preparation gate를 얻은 뒤 표시 snapshot만 drop하고, 후보 준비가 끝날 때까지
+그 gate를 보유한다. registry 잠금을 잡은 commit에서만 gate를 내려놓고 기존
+`admit_detach` 검사/게시로 이어간다. HTTP 준비도 같은 registry 잠금 안에 들어오므로
+그 사이 display가 다시 설치될 수 없다. 실패/취소/drop도 gate를 반환한다.
+진행 중 읽기나 실제 편집 snapshot은 강제 회수하지 않는다. admission 오류는
+picker의 기존 명시 busy로 표시하며 예산·권한·자동 저장 정책은 바꾸지 않는다.
+
+`validate_web_drc_open.py`가1024/1088MiB에서 display cache hit → 활성 초안에 의한
+교체 거부/동일 token 준비 가능 → 초안 폐기 → 손상 후보 거부/기존 리뷰 유지 →
+표시 cache 재생성 → 새 DRC 교체 성공과 reviewer 분리를 검사한다. 원본·pack·
+레이아웃/카메라 불변, 암묵 pack/sidecar 미생성을 단언한다. 기존1089MiB 거부와
+cancel/replay/명시 재연결/receipt/두 ledger 검사도 그대로 통과했다. 별도
+`validate_web_review_budget.py`, web119단위(oracle3 ignored), DRC43단위,
+strict clippy·fmt·전체 ES2017/UI gate가 통과했다. 집중 로그는
+`/private/tmp/floe-drc-replace-budget.CKVGLy/{open-gate,review-gate,web-unit,ui}.log`다.
+§92의 전체 배터리 시작 제한 실패를 이 집중 통과로 해결됐다고 세지 않는다.
+
+직접 재시작한63353의 실제 Chrome에서도 동일 교체와 원래 ICE/reviewer/SVRF 복원을
+확인했다([브라우저 §10.3](WEBUI_BROWSER_ACCEPTANCE.ko.md#103-저장-메모-표시-후-drc-교체와-명시-재연결)).
+파일은 불변이며 추가 저장은 없다. 이번 수정은 DRC open 후보의 유휴 note cache에
+한정된다. SVRF 교체·reviewer 재연결 등 다른 중첩 예약 조합까지 닫았다는 뜻은 아니다.
+
+전체 목표 잔여: 전체 배터리의 시작 제한 실패 추적, 나머지 실제 브라우저의
+충돌/불명확한 게시 복구·다중 선택/편집·입력/설정/공유 수용, Python-free Linux 실행,
+G1/G4 판정과 현장 Firefox/ETX. 원격 SH-10/index hot reload는 사용자 보류,
+M5 world-tile은 성능 조건부다. GTK 은퇴나 전체 전환 완료로 판정하지 않는다.

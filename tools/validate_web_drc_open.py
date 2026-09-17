@@ -67,7 +67,7 @@ def replacement_budget(source, first, second, bad, temps, work):
     rules.write_text(json.dumps(dict(format="floe-svrf-rules", version=1, checks={
         "GRGEOM.1_BFMOAT": dict(desc="synthetic budget regression", constraints=[
             dict(metric="width", op="<", value=0.5, text="width < 0.5")])})))
-    inputs = [source, first, second, bad, rules]
+    inputs = [source, first, drc_pack(first), second, bad, rules]
     inputs += [p for p in vfs_cache(source).rglob("*") if p.is_file()]
     before = fingerprint(inputs)
     # Default pool: 2048 MiB. Picker 192 + old reader 256 + SVRF 256 +
@@ -100,6 +100,47 @@ def replacement_budget(source, first, second, bad, temps, work):
             assert c.call("GET", "/api/v1/drc")["review_grant"] is None
             assert idle(s) == view
             assert not drc_pack(second).exists(), "budget test indexed without consent"
+            assert fingerprint(inputs) == before
+        finally:
+            s.close()
+
+    # A real owner UI has already populated saved-note display before opening
+    # the picker. This idle 256 MiB cache must not pin the old review in place.
+    refs = [dict(check="2", error="0")]
+    for budget in (1024, 1088):
+        s = Session(source, drc_pack(first), temps, "replacement-budget", work / ("notes-%d.session" % budget),
+                    budget_mb=budget, rules=rules)
+        try:
+            c, picker = s.client, Picker(s, work.name)
+            view, old = idle(s), c.call("GET", "/api/v1/drc")["drc"]
+            second_handle, bad_handle = picker.handle(second.name), picker.handle(bad.name)
+            assert not s.display(refs)["cache_hit"]
+            assert s.display(refs)["cache_hit"]
+
+            # An actual editor is not a reclaimable display cache. Failure must
+            # preserve both the current review and its still-preparable token.
+            note = s.read(refs)
+            blocked = picker.open(second_handle)
+            assert blocked["phase"] == "failed" and blocked["error"] == "browse_busy_or_limit", blocked
+            assert c.call("GET", "/api/v1/drc")["drc"] == old
+            draft = s.prepare(note, "unpublished draft survives failed replacement")
+            c.call("POST", API + "/revoke", dict(token=draft["token"]), 204)
+
+            assert not s.display(refs)["cache_hit"]
+            assert s.display(refs)["cache_hit"]
+            rejected = picker.open(bad_handle)
+            assert rejected["phase"] == "failed" and rejected["error"] == "browse_changed", rejected
+            assert c.call("GET", "/api/v1/drc")["drc"] == old
+            # A failed candidate releases the gate; old saved-note display can
+            # repopulate. It must not permanently retain the reservation either.
+            assert not s.display(refs)["cache_hit"]
+            assert s.display(refs)["cache_hit"]
+            current = picker.accept(picker.open(second_handle))
+            assert current["id"] != old["id"] and current["metadata"]["format"] == "ascii"
+            assert c.call("GET", API)["detached"] is True
+            assert idle(s) == view
+            assert not drc_pack(second).exists()
+            assert not list(work.glob(".*.notes.*")) and not list(work.glob(".*.waive.*"))
             assert fingerprint(inputs) == before
         finally:
             s.close()
@@ -308,7 +349,7 @@ def main(fixture):
         finally:
             s.close()
         assert not list(temps.iterdir()), "native resources were not reaped"
-    print("WEB DRC OPEN: ALL OK (metadata replacement at default/exact budget, over-budget preservation, initial/cache/ASCII/explicit ICE, scoped handles, approved build, stale/failure/cancel/replay, unchanged layout, launcher-only reviewer reconnect/read-only+notes+waives, receipt epochs and both ledgers preserved, no implicit sidecar writes, shutdown)")
+    print("WEB DRC OPEN: ALL OK (DRC replacement at default/exact budget with idle saved-note cache, active draft protection, over-budget preservation, initial/cache/ASCII/explicit ICE, scoped handles, approved build, stale/failure/cancel/replay, unchanged layout, launcher-only reviewer reconnect/read-only+notes+waives, receipt epochs and both ledgers preserved, no implicit sidecar writes, shutdown)")
 
 
 if __name__ == "__main__":

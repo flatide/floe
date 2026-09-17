@@ -27,7 +27,7 @@ pub(super) struct Cache {
     name: String,
 }
 impl Service {
-    pub(super) fn reclaim_display(&self) -> Result<OwnedSemaphorePermit> {
+    pub(in crate::drc) fn reclaim_display(&self) -> Result<OwnedSemaphorePermit> {
         let permit = Arc::clone(&self.preparations)
             .try_acquire_owned()
             .map_err(|_| floe_app_core::Error::new(ErrorKind::Admission, "note read is active"))?;
