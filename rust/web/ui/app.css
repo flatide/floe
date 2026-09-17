@@ -153,6 +153,8 @@ details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }
 #zoom-band-hint { position: absolute; left: 14px; top: 12px; color: #fff; background: #000b; padding: 4px 8px; pointer-events: none; }
 .inspect-panel h2, .inspect-panel .check { font-size: 1rem; }
 .inspect-panel p { margin: 8px 0 0; line-height: 1.4; overflow-wrap: anywhere; }
+/* Leaving the canvas clears the probe; keep the ruler buttons under the pointer. */
+#snap-status { height: 2.8em; overflow: auto; }
 .inspect-panel .note { font-size: .93rem; }
 .inspect-panel pre { margin: 8px 0 0; font: .93rem/1.45 monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 170px; overflow-y: auto; }
 .inspect-panel .button-row { flex-wrap: wrap; }

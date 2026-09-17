@@ -11,6 +11,11 @@ const options = {ecmaVersion: 2017, sourceType: 'script'};
 // Source guard only; actual overlay-scrollbar hit testing is a browser gate.
 const layerScroll = fs.readFileSync(path.join(ui, 'app.css'), 'utf8').match(/^\.layers\s*\{([^}]+)\}/m);
 assert(layerScroll && /padding-right:\s*16px\s*;/.test(layerScroll[1]), 'layer style buttons need an overlay-scrollbar inset');
+// Pointer exit clears this readout before the button click lands. Reserve its
+// height even when empty; long DBU values/errors remain keyboard-scrollable.
+const probeStyle = fs.readFileSync(path.join(ui, 'app.css'), 'utf8').match(/^#snap-status\s*\{([^}]+)\}/m);
+assert(probeStyle && /height:\s*2\.8em\s*;/.test(probeStyle[1]) && /overflow:\s*auto\s*;/.test(probeStyle[1]), 'snap readout must not move following controls');
+assert.match(fs.readFileSync(path.join(ui, 'index.html'), 'utf8'), /<p id="snap-status" tabindex="0" role="region" aria-label="Snap probe result"><\/p>/);
 acorn.parse(fs.readFileSync(path.join(ui,'drc-geometry.js'),'utf8'),options);
 for(const name of ['guest','guest-drc','guest-drc-step','guest-focus','guest-layers','guest-display','guest-query-wire','guest-tools','sharing']){
     acorn.parse(fs.readFileSync(path.join(ui,name+'.js'),'utf8'),options);
