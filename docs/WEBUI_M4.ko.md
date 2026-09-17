@@ -6616,3 +6616,27 @@ publication fence도 유지한다. `node tools/validate_web_ui.cjs`,
 전체 목표 잔여: 실제 브라우저의 다중 저장·충돌/불명확한 게시 복구 및 입력/설정/
 공유 잔여 수용, Python-free Linux 실행, G1/G4, 현장 Firefox/ETX다.
 원격 SH-10/index hot reload는 사용자 보류, M5는 성능 조건부다.
+
+## 100. M4g-43 — 실제 bitmap 검증과 스타일 버튼 hit area
+
+2026-09-18. [브라우저 §5.1](WEBUI_BROWSER_ACCEPTANCE.ko.md#51-bitmap-슬롯과-오버레이-스크롤바-클릭)에서
+bitmap의 실제 키보드/초안/취소·미사용 Apply·두 레이어 참조·비참조 분리·reload·
+내장 Reset·뷰 변경 무전송을 확인했다. 실제 드래그는 이벤트 샘플 사이 셀이 빠졌고
+GTK `motion`도 같은 샘플 단위이므로 연속선 보간 완료로 표시하지 않는다.
+
+macOS Chrome의 오버레이 스크롤바가 맨 오른쪽 단일 스타일 버튼과 겹쳐 일반 click은
+무응답인데 Enter/왼쪽 click은 작동했다. `.layers`의 content 우측에16px 여백을
+확보했다. 새 실행 파일/새 합성 서버에서 overflow 상태의1/0·3/0 정상 click과
+16px 실제 간격을 확인했다. 소스 guard와 `node tools/validate_web_ui.cjs`,
+offline/locked release app 빌드는 통과했다. CSS/개발 gate/문서만 변경하며 native
+전체 배터리의 이전 통합 근거를 새 전체 실행으로 주장하지 않는다.
+
+합성 테스트 서버는 에이전트가 관리했고 파일 저장·기본값 게시·DRC 저장은 없다.
+별도 종료 검사에서는 서버 exit0과 달리 화면의 마지막 픽셀/Live 문구가 남았다
+([§5.2](WEBUI_BROWSER_ACCEPTANCE.ko.md#52-명시-종료--서버는-종료되지만-이전-픽셀이-남음)).
+다음 단계는 이 종료 표시 정리와 회귀/실제 재검증이다. 종료 실패 시 pending 저장
+recovery를 지우거나 서버 종료 성공으로 위장해서는 안 된다.
+
+전체 목표 잔여: 위 종료 결함, 실제 브라우저 다중 저장·충돌/불명확한 게시 복구·
+일부 입력/설정/공유, Python-free Linux 실행, G1/G4, 현장 Firefox/ETX.
+원격 SH-10/index hot reload는 사용자 보류, M5는 실측 조건부다.

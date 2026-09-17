@@ -142,6 +142,57 @@ canvas에 포커스가 있는 상태의 `k`는 마지막 수직 ruler만 삭제�
 bitmap 슬롯, 스냅 정확도·Shift 자유각·선택 bbox gap, DRC CD, clipboard와 지연/부하
 수용은 별도다. 모형 게이트나 이 두 거리 일치만으로 전체 측정 기능을 완료 처리하지 않는다.
 
+### 5.1 bitmap 슬롯과 오버레이 스크롤바 클릭
+
+2026-09-18. 기존 DRC 세션58385/62804는 보존하고, 에이전트가 합성 valmini를 읽는
+별도 loopback 서버64803을 직접 시작했다. DRC/sharing/dump 없이 `FLOE_FILL_EDIT=1`,
+jobs2/raster1/budget1024·full/high/goto200,220,500/refinement off다. 이 env로
+공유 기본값 패널도 표시되지만 preview/게시/설정 저장·다운로드는 실행하지 않았다.
+bitmap Apply는 이 서버의 메모리 상태만 변경한다.
+
+| 검사 | 실제 관측 |
+| --- | --- |
+| 기본 편집기 | 레이어 선택0개여도 미사용 `diagonal_right_wide` 편집 가능.256셀/32on, roving tab stop1개. 고정 solid/clear는18개 편집 목록에 없음 |
+| 키보드/초안 | Space·Right·Enter로 첫 두 셀 on, Ctrl+End로16행16열 포커스. Invert222on, Reset은 처음32셀과 전부 일치 |
+| 포인터 | Clear 후 첫 행 드래그는9개 수신 위치만 on. 중간 셀은 비어 있음. GTK 원본 `motion`도 이벤트 위치만 칠하며 보간하지 않음. 연속선 페인트 성공으로 세지 않음 |
+| 취소 | Escape 후 재열면 원래32셀. 상태 gen2 유지 |
+| 미사용 Apply | Solid 적용 후 성공 안내, 기존 final/margin gen2와 timing 유지. 파일 저장 없음 |
+| 참조 | 1/0·3/0에 해당 슬롯 할당. 단일 스타일 읽기에1/0은16행 모두ffff. 슬롯 Clear 후1/0·3/0 둘 다0000, 비참조2/0은Speckle 유지 |
+| reload/Reset | reload 뒤 편집 슬롯은0on을 보존. Reset은 직전의0on이 아니라 내장32셀로 돌아가고 Apply 가능 |
+| 뷰 변경 | 수정 실행 파일의 별도50880에서 미전송 초안 중 + zoom은 초안 폐기/not replayed 안내. 재열면 내장 기본값 그대로 |
+
+참조 검사 중 단일 스타일 버튼의 일반 click이 열리지 않았다. 키보드 Enter와
+버튼 왼쪽 좌표 클릭은 열렸다. screenshot의 우측 오버레이 스크롤바가 버튼과
+겹쳤으며 버튼 오른쪽은 목록 끝과 같았다. DOM `elementFromPoint`만으로는 이
+native scrollbar 겹침을 검출하지 못했다.
+
+M4g-43에서 `.layers`에16px 우측 content inset을 넣었다. `scrollbar-gutter`에
+의존하지 않으므로 구형 브라우저에도 기존 padding 규칙으로 적용된다. 재빌드 후
+에이전트가 별도 서버만64803→50880으로 재시작하고 새 비공개 링크로 열었다.
+목록이 실제 overflow 중일 때1/0·3/0 버튼의 일반 click이 각각 편집기를 열었고,
+DOM 치수로 목록 오른쪽과 버튼 사이16px, screenshot으로 스크롤바 분리를 확인했다.
+이것은 macOS Chrome의 수용 근거이며 Firefox·모든 OS/확대율 검증은 아니다.
+
+UI 전체 ES2017/DOM gate와 release app 빌드가 통과했다. 추가 CSS source guard는
+여백 규칙의 존재만 고정하며 실제 hit-test 대체가 아니다. source/OVM/OVP/OVT와
+기존 note/waive6개 파일 SHA-256은 기존 값과 같고 `valmini.oas.layerprops`는 없다.
+새 파일 게시·DRC 저장·v2 파일 왕복은 하지 않았다. 슬롯/그룹 상속·pointer cancel/
+Firefox·pixel-exact 렌더 결과 전체 수용은 별도로 남는다.
+
+### 5.2 명시 종료 — 서버는 종료되지만 이전 픽셀이 남음
+
+50880에서 End session 확인창은 Cancel에 기본 포커스를 줬다. Cancel 뒤
+Local connected/Live gen4가 유지됐고 다시 열어 명시 End session을 선택했다.
+UI는 Session ended/Close this tab으로 바뀌었고 실행 handle은 **exit0**으로 종료됐다.
+기존 DRC 서버는 종료하지 않았다.
+
+그러나 screenshot에는 마지막 레이아웃이 그대로 남고 하단에도 Live/margin/직전
+perf가 남았다. `app.js::endSession`은 모듈/연결을 멈추지만 `clearBuffers()`와
+viewport/status 초기화가 빠져 있다. 기존 `client.test.cjs` 종료 검사는 요청1회/
+receipt 보존/버튼 상태만 단언하므로 픽셀 잔류를 잡지 못한다. **열린 제품 결함**으로
+추적하며 종료 화면 정리와 regression/실제 재검증이 필요하다. 종료 실패·불명확한
+게시의 recovery record 보존 계약은 이 수정과 별개로 유지해야 한다.
+
 ## 6. 설정 다운로드 — 최초 불러오기 권한 차단
 
 2026-09-17 사용자가 새 합성 valmini 세션을 열고, 다운로드한 두 설정 파일을 같은
@@ -724,6 +775,8 @@ Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 �
 메모/waive 충돌·불명확한 게시 복구·슬롯 편집·clipboard·
 auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
+§5.1은 실제 bitmap 조작·참조 일부와 스크롤바 클릭 수정을 추가한다.
+§5.2에서 확인한 명시 종료 뒤 픽셀/Live 표시 잔류는 다음 제품 수정 항목이다.
 
 Python-free Linux 실행, G1/G4 전체, 현장 Firefox/ETX G2는 남는다. 원격 SH-10은
 사용자 보류이며 world-tile M5는 실측 조건부다. 로컬 Chrome 성공으로 닫지 않는다.
