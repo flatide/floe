@@ -509,6 +509,30 @@ floe2-web view and use its private session link`가 표시돼 아직 인증되�
 이후 그 탭도 사라져 §7.2 저장 roundtrip은 시작하지 못했다. 새 세션 입력7파일의
 기준 SHA-256을 수집했으며 예정된 두 reviewer sidecar는 없는 상태였다.
 
+### 9.1 내장 두벌식 — 실제 키·커서·초안 폐기
+
+2026-09-18. §10.9의 보존된62804 합성 세션/`browser-preview` reviewer에서 검사했다.
+서버를 교체하지 않았으며 notes/waives 자동 저장은 모두off다. Global1만 그룹 선택하고
+Read selected notes로 빈 초안을 연 뒤 실제 키를 전달했다. textarea 값 주입만으로
+한글 조합 성공을 판정하지 않았다.
+
+| 조작 | 실제 결과 |
+|---|---|
+| Shift+Space 뒤 `g k s r m f` | `한글`, caret2; screenshot에서도 한글 표시 |
+| Backspace3회 | `한그` → `한ㄱ` → `한` |
+| `글` 재입력, Left, `r k` | `한가글`, caret2 |
+| Shift+Left로 가 선택, `s k` | `한나글` |
+| Shift+Space로off, 끝에서 ` qfb1.,` | `한나글 qfb1.,`; 종료창 안 열림, full/Frames on/Mono off/gen4 유지 |
+| emoji 초안 `🙂` 입력 후 모드on, `r k` | `🙂가`, UTF-16 caret3 |
+| Escape·재열기 | 초안 폐기, 빈 텍스트와 내장 모드off. 체크박스로on도 재확인 |
+
+끝에는 Discard draft·Clear rule selection으로0선택/초안없음, saved-note revision0,
+자동 저장off·Local connected/Live gen4로 복원했다. 미리보기·파일 저장/다운로드·
+클립보드·자동 저장 opt-in은 실행하지 않았다. 소스1개·cache4개·DB/pack/metadata·기존
+note/waive 등 총10파일의 SHA-256은 전후 일치하고 `browser-preview` sidecar/lock은 없다.
+이번 검사는 내장 fallback의 부분 수용이며 OS IME composition/후보창·Firefox/ETX나
+장문·붙여넣기·원격 키 지연의 검증은 아니다. 제품 코드 변경/전체 배터리 재실행은 없다.
+
 ## 10. 실제 Chrome reviewer 메모 저장·복원과 waive admission 결함
 
 사용자가 전체 비공개 링크로 연 새56444 세션에서 Local connected·OWNER REVIEW를
@@ -771,7 +795,7 @@ flat-layout 검사 범위가 아니라 UI/native gate의 근거다.
 공유, §5의 일부 레이어/스타일·스냅 없는 수동 측정, §6의 두 설정 다운로드와
 §6.1의 flat9레이어 Native/Calibre 불러오기·복원, §7의 작은 ASCII DRC 최초 등록·
 SVRF 교체·두 CD·레이어 격리/복원, §7.3의 작은 DRC 필터/순환/선택 복원과 §8의
-Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 오류 메모 수동/opt-in
+Chrome 표시 진단, §9의 일부 키 입력·초안 보호와 §9.1의 내장 두벌식, §10의 단일 오류 메모 수동/opt-in
 저장·reload 복원, §10.1의 waive 단일 오류 수동 저장/복원·opt-in 자동 해제/파일
 검증과 §10.2의 새 프로세스 메모/waive 복원·자동 해제 최종 UI 재조회다.
 §10.3은 saved-note 표시 뒤 DRC 교체·원래 ICE 복원·런처 reviewer 명시 재연결이다.
@@ -786,7 +810,8 @@ Chrome 표시 진단, §9의 일부 키 입력·초안 보호, §10의 단일 �
 auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
 §5.1은 실제 bitmap 조작·참조 일부와 스크롤바 클릭 수정을 추가한다.
-§5.2에서 확인한 명시 종료 뒤 픽셀/Live 표시 잔류는 다음 제품 수정 항목이다.
+§5.2의 명시 종료 뒤 픽셀/Live 표시 잔류는 M4g-44에서 수정하고 실제 Chrome으로 재검증했다.
+종료 응답 불명/복구 전체와 OS IME 수용은 별도로 남는다.
 
 Python-free Linux 실행, G1/G4 전체, 현장 Firefox/ETX G2는 남는다. 원격 SH-10은
 사용자 보류이며 world-tile M5는 실측 조건부다. 로컬 Chrome 성공으로 닫지 않는다.
