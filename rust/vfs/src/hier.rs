@@ -54,7 +54,9 @@ pub const WASH_MIN_COVERAGE_HAIR: f64 = 1.0 / 8.0;
 /// along the path and shared between the stages: a placement's
 /// repetition members absorb min(L, log2 members) levels (balanced
 /// strides, thin_grid) and its index within the cell's placements the
-/// rest, its child then drawn whole (rep_full); a page is a container,
+/// rest, each kept member drawn as a DOT of the child's box on the
+/// child's visible layers (rep_dots: at most the cut on screen, no
+/// page decode, no walk below); a page is a container,
 /// kept subject to the decode budget (rep_page_level, one page in 2^Lp
 /// by index) with L - Lp handed to the raster, where a record's
 /// members absorb min(., log2 members) and its index the rest. The
@@ -493,6 +495,9 @@ pub struct HierStats {
     /// the item budget set for the frame
     pub rep_items: u64,
     pub rep_level: u32,
+    /// dots emitted for representative cut placements (kept members
+    /// in view, before the layer fan-out)
+    pub rep_dots: u64,
     /// pages selected whose every record is thin (max_min < hairline
     /// x cut): what the page hairline rule would have dropped
     pub thin_pages_kept: u64,
@@ -844,8 +849,6 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, level: u32, page_leve
         explain_on: opts.explain,
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         reps: req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0,
-        rep_edges: HashMap::new(),
-        rep_full: HashSet::new(),
         rep_page_level: page_level,
         rep_level: level,
         rep_counting: counting,
@@ -1154,12 +1157,6 @@ struct Hier<'a> {
     wash_walk_budget: u64,
     /// ViewReq::page_reps in force (cut on, sub-cut wash off)
     reps: bool,
-    /// representative placements expanded this walk: pli -> the
-    /// member levels their repetition is thinned by in place_edge
-    rep_edges: HashMap<u64, u32>,
-    /// cells reached through a representative placement: drawn whole
-    /// (their cut content was thinned at the placement)
-    rep_full: HashSet<u32>,
     /// the page level of this pass (one representative page in 2^Lp)
     rep_page_level: u32,
     /// the frame's level (one cut item in 2^L) and whether this pass
@@ -1279,7 +1276,6 @@ impl<'a> Hier<'a> {
                             self.st.cull_page_size += 1;
                             continue;
                         }
-                        let full = self.rep_full.contains(&ci);
                         let rep = in_view
                             && self.reps
                             && rep_keeps((pi - pr.page_lo) as u64, self.rep_page_level);
@@ -1291,11 +1287,7 @@ impl<'a> Hier<'a> {
                                 // the page; its members render as
                                 // hairline pixels, as Calibre shows them
                                 if rep {
-                                    let level = if full {
-                                        0
-                                    } else {
-                                        self.rep_level.saturating_sub(self.rep_page_level)
-                                    };
+                                    let level = self.rep_level.saturating_sub(self.rep_page_level);
                                     self.page_levels.insert(pi, level.min(255) as u8);
                                     self.st.rep_decode_bytes += p.usize_ as u64;
                                     self.st.rep_pages_kept += 1;
@@ -1468,7 +1460,6 @@ impl<'a> Hier<'a> {
             self.thin_bins.clear();
             self.wash_nodes.clear();
             self.sparse_edges.clear();
-            self.rep_edges.clear();
             // the page frontier's run for this cell's placements (the
             // child-BVH root's box) and the per-node heaviest-member
             // table it prunes with
@@ -1517,7 +1508,7 @@ impl<'a> Hier<'a> {
                             && self.reps
                             && r != 0
                             && node.bbox.intersects(b)
-                            && (self.rep_full.contains(&ci) || {
+                            && {
                                 // a lower bound on every placement's index
                                 // modulus below: the frame's level less
                                 // the member levels the heaviest
@@ -1529,7 +1520,7 @@ impl<'a> Hier<'a> {
                                     .unwrap_or(REP_LEVELS_MAX as u8) as u32;
                                 let (lo, hi) = self.cbvh_places(ni);
                                 rep_in_run(lo, hi, cell.place_start, self.rep_level.saturating_sub(heaviest))
-                            });
+                            };
                         if !rep_descend {
                         if !self.sub_cut_wash || !node.bbox.intersects(b) {
                             if self.reps && r != 0 && node.bbox.intersects(b) {
@@ -1646,14 +1637,12 @@ impl<'a> Hier<'a> {
                                         self.st.cull_size += 1;
                                         continue;
                                     }
-                                    let full = self.rep_full.contains(&ci);
-                                    let lm = if full { Some(0) } else { self.place_rep(pli, &h, cell.place_start) };
-                                    if let Some(lm) = lm {
+                                    if let Some(lm) = self.place_rep(pli, &h, cell.place_start) {
                                         self.st.rep_children += 1;
-                                        self.note_child("rep_expand", pli, &h, &rb, &boxes);
-                                        self.rep_edges.insert(pli, lm);
-                                        self.rep_full.insert(h.child);
-                                        edges.insert(pli);
+                                        self.note_child("rep_dots", pli, &h, &rb, &boxes);
+                                        self.rep_dots(&mut wc, pli, &h, &rb, &boxes, lm);
+                                        self.st.cull_size += 1;
+                                        framed.insert(pli);
                                         continue;
                                     }
                                 }
@@ -1731,14 +1720,11 @@ impl<'a> Hier<'a> {
                                     self.st.cull_size += 1;
                                     continue;
                                 }
-                                let full = self.rep_full.contains(&ci);
-                                let lm = if full { Some(0) } else { self.place_rep(pli, &h, cell.place_start) };
-                                if let Some(lm) = lm {
+                                if let Some(lm) = self.place_rep(pli, &h, cell.place_start) {
                                     self.st.rep_children += 1;
-                                    self.note_child("rep_expand", pli, &h, &rb, &boxes);
-                                    self.rep_edges.insert(pli, lm);
-                                    self.rep_full.insert(h.child);
-                                    edges.insert(pli);
+                                    self.note_child("rep_dots", pli, &h, &rb, &boxes);
+                                    self.rep_dots(&mut wc, pli, &h, &rb, &boxes, lm);
+                                    self.st.cull_size += 1;
                                     continue;
                                 }
                             }
@@ -1971,9 +1957,9 @@ impl<'a> Hier<'a> {
     /// every 2^lm-th point - and the placement's index within its cell
     /// the remaining L - lm; a plain placement (one member) takes them
     /// all by index. Both factors are powers of two growing with L, so
-    /// the survivors stay nested; and never a footprint wash: the
-    /// survivors are drawn whole (field 2026-09-17: the washed array
-    /// footprint was the one box left at the fit view).
+    /// the survivors stay nested; and never the array's footprint as one
+    /// wash (field 2026-09-17: that was the one box left at the fit
+    /// view) - each survivor is a dot of its own box (rep_dots).
     fn place_rep(&self, pli: u64, h: &floe_ovm::PlaceHead, place_start: u32) -> Option<u32> {
         let l = self.rep_level;
         let members = self.place_members(pli, h);
@@ -2012,11 +1998,80 @@ impl<'a> Hier<'a> {
         }
     }
 
-    /// the counting pass: a cut placement in view adds its members
-    /// times the child's recursive record members to the frame's items
+    /// the counting pass: a cut placement in view adds its members to
+    /// the frame's items - a cut instance is one dot on screen
     fn count_place(&mut self, pli: u64, h: &floe_ovm::PlaceHead) {
-        let per = self.v.cell(h.child).rec_members.max(1);
-        self.st.rep_items = self.st.rep_items.saturating_add(self.place_members(pli, h).saturating_mul(per));
+        self.st.rep_items = self.st.rep_items.saturating_add(self.place_members(pli, h));
+    }
+
+    /// A representative cut placement drawn as DOTS: one rect of the
+    /// child's box per kept member (member 0 and every 2^lm-th, the
+    /// grid by thin_grid's balanced strides) on every visible layer
+    /// of the child's recursive mask - the box is at most the cut on
+    /// screen (or a hairline strip), so it is the instance's picture
+    /// at this zoom, costs no page decode and no walk into the child
+    /// (field 2026-09-17: drawing the child whole decoded every page
+    /// of every kept instance for one pixel each, and filled blocks
+    /// into boxes). Nothing off the view is emitted.
+    fn rep_dots(&mut self, wc: &mut WsCell, pli: u64, h: &floe_ovm::PlaceHead, rb: &BBox, boxes: &[BBox], lm: u32) -> u64 {
+        let v = self.v;
+        let bits = v.bitset(v.cell_lmask_rec(h.child));
+        let mut layers: Vec<u32> = Vec::new();
+        for (byte_index, (&m, &vis)) in bits.iter().zip(self.wash_vis.iter()).enumerate() {
+            let both = m & vis;
+            for bit in 0..8 {
+                if both & (1 << bit) != 0 {
+                    layers.push((byte_index * 8 + bit) as u32);
+                }
+            }
+        }
+        if layers.is_empty() {
+            return 0;
+        }
+        let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
+        let b0 = xf_bbox(&t0, rb);
+        let mut dots = 0u64;
+        let mut emit = |wc: &mut WsCell, dx: i64, dy: i64| {
+            let mb = BBox {
+                x0: b0.x0.saturating_add(dx),
+                y0: b0.y0.saturating_add(dy),
+                x1: b0.x1.saturating_add(dx),
+                y1: b0.y1.saturating_add(dy),
+            };
+            if boxes.iter().any(|b| mb.intersects(b)) {
+                for &l in &layers {
+                    wc.washes.push((l, mb));
+                }
+                dots += 1;
+            }
+        };
+        match h.kind {
+            0 => emit(wc, 0, 0),
+            1 => {
+                let (na, nb, va, vb) = thin_grid(h.na as u64, h.nb as u64, h.va, h.vb, lm);
+                for j in 0..nb as i64 {
+                    for i in 0..na as i64 {
+                        emit(wc, i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                    }
+                }
+            }
+            _ => {
+                if let Some(pr) = v.pts_ref(pli) {
+                    let step = 1u32 << lm.min(31);
+                    let mut s = 0u32;
+                    while s < pr.count {
+                        let (dx, dy) = pr.pt(s);
+                        emit(wc, dx, dy);
+                        s = s.saturating_add(step);
+                        if step == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        self.st.rep_dots = self.st.rep_dots.saturating_add(dots);
+        dots
     }
 
     /// Whether a culled item is a hairline cut under the cull policy
@@ -2264,7 +2319,6 @@ impl<'a> Hier<'a> {
                             self.st.cull_page_size += 1;
                             continue;
                         }
-                        let full = self.rep_full.contains(&cell);
                         let rep = in_view
                             && self.reps
                             && rep_keeps((pi - page_lo) as u64, self.rep_page_level);
@@ -2272,11 +2326,7 @@ impl<'a> Hier<'a> {
                         match self.sub_cut_verdict(&p, std::slice::from_ref(b), size_cut, washable, rep) {
                             SubCut::Keep => {
                                 if rep {
-                                    let level = if full {
-                                        0
-                                    } else {
-                                        self.rep_level.saturating_sub(self.rep_page_level)
-                                    };
+                                    let level = self.rep_level.saturating_sub(self.rep_page_level);
                                     self.page_levels.insert(pi, level.min(255) as u8);
                                     self.st.rep_decode_bytes += p.usize_ as u64;
                                     self.st.rep_pages_kept += 1;
@@ -2621,7 +2671,6 @@ impl<'a> Hier<'a> {
         // washing (expand_sparse) passes the cut here on purpose
         if !structural
             && !self.sparse_edges.contains(&pli)
-            && !self.rep_edges.contains_key(&pli)
             && ((cw < self.cut && ch < self.cut)
                 || cw.min(ch) < self.hair)
         {
@@ -2697,19 +2746,19 @@ impl<'a> Hier<'a> {
                 if vis {
                     // ONE CellInstArray, full na x nb: off-view
                     // members are klayout's clip problem; nesting
-                    // stays nested (zero expansion). A representative
-                    // array ships one member in 4^j (page frontier)
-                    let (na, nb, va, vb) = match self.rep_edges.get(&pli) {
-                        Some(&lm) if lm > 0 => thin_grid(h.na as u64, h.nb as u64, h.va, h.vb, lm),
-                        _ => (h.na as u64, h.nb as u64, h.va, h.vb),
-                    };
+                    // stays nested (zero expansion)
                     wc.insts.push(WsInst {
                         child: ckey,
                         x: h.x,
                         y: h.y,
                         rot: h.rot,
                         flip: h.flip,
-                        rep: Rep::Grid { na, nb, va, vb },
+                        rep: Rep::Grid {
+                            na: h.na as u64,
+                            nb: h.nb as u64,
+                            va: h.va,
+                            vb: h.vb,
+                        },
                     });
                     self.st.inst_edges += 1;
                 }
@@ -2805,15 +2854,6 @@ impl<'a> Hier<'a> {
                     (0..count).collect()
                 } else {
                     sel.into_iter().collect()
-                };
-                // a representative point set ships every 2^lm-th slot
-                // (page frontier; slot 0 stays, nested in lm)
-                let emit: Vec<u32> = match self.rep_edges.get(&pli) {
-                    Some(&lm) if lm > 0 => {
-                        let m = 1u32 << lm.min(31);
-                        emit.into_iter().filter(|s| s % m == 0).collect()
-                    }
-                    _ => emit,
                 };
                 if emit.is_empty() {
                     return;

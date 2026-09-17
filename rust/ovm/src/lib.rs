@@ -1537,11 +1537,13 @@ impl<'a> PtsRef<'a> {
 }
 
 pub struct Ovm {
-    /// per cell, per child-BVH node (index - cell.bvh_start): floor(log2)
-    /// of the largest repetition member count of any placement below -
-    /// the page frontier's run pruning needs it (a placement's index
-    /// modulus shrinks by its member count); built lazily per cell on
-    /// first use, once per open index
+    /// per cell, per child-BVH node (index - cell.bvh_start), two
+    /// tables the page frontier reads: floor(log2) of the largest
+    /// repetition member count of any placement below (its run pruning:
+    /// a placement's index modulus shrinks by its member count), and
+    /// floor(log2) of the placement members below (the frame's item
+    /// count, a cut instance being one dot on screen); built lazily
+    /// per cell on first use, once per open index
     pub bvh_member_log2: std::sync::Mutex<std::collections::HashMap<u32, (std::sync::Arc<[u8]>, std::sync::Arc<[u8]>)>>,
     pub data: Backing,
     pub unit: f64,
@@ -1612,9 +1614,9 @@ pub fn map_file(path: &str) -> Result<Backing, String> {
 
 impl Ovm {
     /// per child-BVH node of `cell`: (floor(log2 members) of its
-    /// heaviest placement, floor(log2) of the items below it - members
-    /// times the child's recursive record members, at least one); empty
-    /// slices when the cell has no BVH
+    /// heaviest placement, floor(log2) of the placement members below
+    /// it - the page frontier's items, a cut instance being one dot on
+    /// screen, at least one); empty slices when the cell has no BVH
     pub fn cbvh_member_log2(&self, cell: u32) -> (std::sync::Arc<[u8]>, std::sync::Arc<[u8]>) {
         if let Some(t) = self.bvh_member_log2.lock().unwrap().get(&cell) {
             return t.clone();
@@ -1643,8 +1645,9 @@ impl Ovm {
                             _ => self.pts_ref(pli).map(|p| p.count as u64).unwrap_or(1),
                         };
                         best = best.max(members.max(1).ilog2().min(63) as u8);
-                        let per = self.cell(h.child).rec_members.max(1);
-                        sum = sum.saturating_add(members.saturating_mul(per));
+                        // a cut instance is one item on screen (a dot
+                        // of its box), whatever it holds
+                        sum = sum.saturating_add(members);
                     }
                     heaviest[slot] = best;
                     items[slot] = sum;

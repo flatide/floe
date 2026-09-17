@@ -1861,6 +1861,13 @@ class SubCutTests(unittest.TestCase):
             self.assertGreaterEqual(len(lit), len(lit_on) * 9 // 10, layer)
             self.assertEqual(res["plan_culls"]["rep_level"], 0, (layer, res["plan_culls"]))
             if layer == (7, 0):
+                # the placed array: a dot per kept member (level 0: all
+                # 40,000) on the child's layer, no page of the child
+                # decoded, nothing walked below the placement
+                self.assertGreaterEqual(res["plan_culls"]["rep_children"], 1, res["plan_culls"])
+                self.assertEqual(res["tiles"], 0, res)  # plan_pages on the wire
+                self.assertEqual(res["plan_culls"]["rep_kept"], 0, res["plan_culls"])
+            if layer == (7, 0):
                 self.assertTrue(lit <= placed, sorted(lit - placed)[:10])
             culls = res["plan_culls"]
             self.assertGreaterEqual(culls["rep_kept"] + culls["rep_washed"]

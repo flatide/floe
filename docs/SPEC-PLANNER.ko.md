@@ -77,14 +77,18 @@
   단계가 나눠 맡는다.
   - 배치 단계(플래너): 컷 배치의 반복 멤버가 lm = min(L, ⌊log2 멤버 수⌋)를 맡아
     2^lm개 중 하나(Grid는 축 균형 stride `thin_grid`, Pts는 2^lm번째 slot; 멤버 0은
-    남음)를 WsInst의 rep로 내보내고, 셀 안 배치 index가 남은 L − lm을 맡는다
-    (`place_rep`). 남긴 배치는 펼치고 그 자식 셀은 **통째로** 그린다(`rep_full`).
-    footprint wash는 쓰지 않는다(현장 2026-09-17: fit 뷰의 박스 하나).
+    남음)를 남기고, 셀 안 배치 index가 남은 L − lm을 맡는다(`place_rep`). 남긴 멤버는
+    각각 **자식 bbox 한 개**를 자식의 보이는 레이어에 그린다(`rep_dots`, explain
+    `rep_dots`): 컷 아래라 화면에서 cut px 이하의 점(hairline 셀은 가는 띠)이고, 그
+    줌에서 인스턴스의 그림 그 자체다. 자식 페이지를 디코드하지 않고 자식 아래를 걷지도
+    않는다(현장 2026-09-17: 자식을 통째로 그리면 픽셀 하나를 위해 자식의 모든 페이지를
+    디코드했고 블록이 박스로 채워졌다). 배열 footprint 하나를 wash하지도 않는다(같은 날의
+    fit 뷰 박스 하나). 세는 pass도 인스턴스 하나 = 항목 하나로 센다.
   - 페이지 단계(플래너): 페이지는 그릇이므로 뷰 안의 컷 페이지를 모두 남기되, 디코드
     예산(`HierOpts::rep_decode_bytes` 256 MiB, `rep_decode_bytes` 합)을 넘으면 플랜을
     다시 해 페이지를 run 안 index로 2^Lp개 중 하나만 남긴다(`rep_page_level`,
     `rep_replans`; 진단 `FLOE_RUST_REP_DECODE_MB`). 남긴 페이지는 L − Lp를
-    `WsCell::page_levels`로 래스터에 넘긴다(rep_full 셀은 0).
+    `WsCell::page_levels`로 래스터에 넘긴다.
   - 레코드 단계(래스터, `thin_record`): 레코드의 반복 멤버가 min(level, ⌊log2 멤버 수⌋)를
     맡고 페이지 안 index가 나머지를 맡는다(2^lr의 배수만, index로 바로 건너뜀).
   집합은 frontier 격자 대표처럼 **아래로 포함**된다(S(L+1) ⊆ S(L): 넓은 뷰에 보이는
