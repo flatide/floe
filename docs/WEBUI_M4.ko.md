@@ -7049,3 +7049,50 @@ bbox 안이지만 도형 밖인 클릭은 선택되지 않음을 확인했다. �
 수용, Python-free Linux 실행, G1 성능·G4 최종 판정, 현장 Firefox/ETX다.
 원격 SH-10/index hot reload 보류·M5 실측 조건부와 합성 다중 저장/CI 승인 대기는
 유지한다. main/jobdeck의 기존 작업이나 사용자 브라우저 세션은 변경하지 않았다.
+
+## 115. M4g-58 — native 시작 지연의 단계별 관측
+
+2026-09-18. M4g-54의 간헐적인 startup 대조 시간 초과를 별도 합성 진단으로
+재현했다. 제품 코드는 바꾸지 않았으며 아래 결과는 macOS 개발 환경의 관측이다.
+
+- Cargo 빌드는19.298초/exit0, 그 다음 `gtk_startup_oracle` 실행은 원래30초
+  제한에서30.002초/timeout이었다. 실행5초 뒤 자기 테스트 자식만1초간 sample했다.
+  CPU0%, physical footprint96KiB,804개 표본이 모두 `_dyld_start + 0`이었다.
+  이 관측 시점에는 Rust 정책/도형 연산 스택이 보이지 않았다. 샘플링한 진단 실행을
+  일반 기동 지연이나 렌더 성능 측정으로 바꾸어 주장하지 않는다.
+- 동일 대상 이름의 OS 로그에는 시작 직후 AMFI CMS/서명 검사와30초 시점의 ASP
+  정책 거부, 뒤이은 Gatekeeper 평가가 있다. 파일은 `adhoc,linker-signed`이며
+  확장 속성 이름은 없었다. ASP 로그 시각이 하네스의 kill과 겹치므로 **정책 거부가
+  timeout의 원인인지 종료에 따른 결과인지는 미확정**이다. 특정 보안 제품·네트워크·
+  영구적인 서명 손상으로 단정하지 않는다. 보안 설정/서명/확장 속성은 변경하지 않았다.
+- 초기 진단에서 생성한 두 새 inode의 동일 바이트 복사본은 첫 실행0.228/0.159초,
+  재실행0.0068/0.0072초였다. 원본과 두 복사본의 SHA-256이 모두 일치한다. 이후 원래 경로의
+  재실행은15.04초 뒤144사례를 통과했고 Rust 본문 보고는0.00초였다. 이를 경로만의
+  문제나 캐시를 비운 cold-start의 증거로 해석하지 않으며, 복사/재서명을 실행
+  우회책으로 제품에 넣지 않는다. 최초 timeout을 포함한 진단의 최종 exit는1이다.
+
+검증기에는 `oracle-build`·`gtk-startup`·`gtk-stream`의 시작/종료·wall·결과만
+출력하는 관측 래퍼를 추가했다. Cargo180초·두 oracle30초 제한, 원본 returncode와
+예외, 기존 단언은 그대로다. 자동 재시도·skip·OS 의존 동작을 추가하지 않았으며
+argv/env/출력 본문을 진단 줄에 싣지 않는다.6개 회귀 사례가 성공/실패 코드,
+timeout, launch 오류, interrupt의 동일 객체 전달·단일 호출·인자 비노출을 고정한다.
+이 Python 코드는 개발 하네스이며 Rust 제품의 실행 의존성이 아니다.
+
+검증 결과:
+
+- `--only validation_selector,web_startup`: exit0.6개 관측 계약,144 GTK startup/
+  380 stream 대조와 실제 서버22기동·21첫 세대·6사전 거부가 통과했다.
+- 이어 `sh tools/validate_rust.sh` **정규 전체 실행이 exit0/ALL OK**다. 목록은91개지만
+  기본 실행은 workspace `unit`을 실행하고 선택용 `unit_vfs`·`unit_render` 두 분기를
+  별도 실행하지 않는 기존 구조라89개 실행 항목이다. 이 두 release 전용 단위 분기를
+  따로 실행했다고 기록하지 않는다. 전체 실행의 oracle-build/startup/stream wall은
+  0.064/0.010/0.005초다. Mac 격리 runtime, CLI/DRC/공유/UI/jobdeck/점유와
+  KLayout의13 PX·2 phase-exact·14 style(j1/j8)를 포함한다. 기존 Rust/Pillow/GTK
+  경고와 `CVDisplayLink` 경고는 남아 있다. 반복 PASS로 최초 지연을 해결 처리하지 않는다.
+
+기존 인증 Chrome 탭의 연결 화면을 읽었으나 이후 `Debugger unattached`와 native
+`cgWindowNotFound`로 실제 조작 검증을 진행하지 못했다. 인증 파일/새 경로로 우회하지
+않았고 기존 서버·리뷰 파일은 보존했다. 실제 브라우저 저장/복원·설정·입력 수용,
+Python-free Linux 실행, G1 성능·G4 최종 판정, 현장 Firefox/ETX가 여전히 남는다.
+원격 SH-10/index hot reload는 보류, M5는 실측 조건부이며 합성 다중 저장/CI 승인은
+대기 상태다. main/jobdeck 작업을 보존하고 이번 단계의 로컬 회귀 근거만 갱신한다.

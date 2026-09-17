@@ -269,6 +269,7 @@ if gate web_browse; then RAN="$RAN web_browse"
 if gate web_file_display; then RAN="$RAN web_file_display"
     .venv/bin/python -B tools/validate_web_file_display.py; fi
 if gate web_startup; then RAN="$RAN web_startup"
+    .venv/bin/python -B tools/validate_web_startup_timing.py
     .venv/bin/python -B tools/validate_web_startup.py "$FLOE2_SMOKE_SRC"; fi
 if gate instance_key; then RAN="$RAN instance_key"
     .venv/bin/python -B tools/validate_instance_key.py; fi

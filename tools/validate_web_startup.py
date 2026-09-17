@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
@@ -19,6 +20,28 @@ from validate_web_cli import APP, INDEX, RENDERD, Client, read_json, wait
 from validate_web_cli_inventory import legacy_parsers
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def measured_run(stage, *args, **kwargs):
+    """Separate compilation/launch latency; preserve every original deadline."""
+    started = time.monotonic()
+    outcome = "interrupted"
+    print(f"WEB STARTUP STAGE: {stage} begin", flush=True)
+    try:
+        result = subprocess.run(*args, **kwargs)
+        outcome = f"exit={result.returncode}"
+        return result
+    except subprocess.TimeoutExpired:
+        outcome = "timeout"
+        raise
+    except OSError:
+        outcome = "launch-error"
+        raise
+    finally:
+        # Do not print argv/environment: future stages may contain private
+        # session paths. This is wall time, not Rust test-body or render time.
+        elapsed = time.monotonic() - started
+        print(f"WEB STARTUP STAGE: {stage} {outcome} wall={elapsed:.3f}s", flush=True)
 
 
 def refinement_oracle():
@@ -120,14 +143,14 @@ def oracle(work):
             frames=shown.frames_on, labels=shown.labels_on and not deck, bbox=obj.view_bbox())))
     path = work / "startup.json"
     path.write_text(json.dumps(cases))
-    build = subprocess.run([shutil.which("cargo"), "test", "--offline", "--locked", "-p", "floe-app",
+    build = measured_run("oracle-build", [shutil.which("cargo"), "test", "--offline", "--locked", "-p", "floe-app",
         "--bin", "floe2-web", "--no-run", "--message-format=json"], cwd=ROOT / "rust",
         capture_output=True, text=True, timeout=180)
     assert build.returncode == 0, (build.stdout, build.stderr)
     bins = [r["executable"] for line in build.stdout.splitlines()
             if (r := json.loads(line)).get("reason") == "compiler-artifact" and r.get("executable")]
     assert len(bins) == 1
-    run = subprocess.run([bins[0], "gtk_startup_oracle", "--ignored", "--nocapture"],
+    run = measured_run("gtk-startup", [bins[0], "gtk_startup_oracle", "--ignored", "--nocapture"],
         env=dict(os.environ, PATH="", FLOE_STARTUP_ORACLE=str(path)), capture_output=True, text=True, timeout=30)
     assert run.returncode == 0, (run.stdout, run.stderr)
     assert f"GTK STARTUP: ALL OK ({len(cases)} " in run.stdout
@@ -155,7 +178,7 @@ def oracle(work):
         policies.append(dict(argv=["view", *argv], want=want))
     path = work / "stream-policy.json"
     path.write_text(json.dumps(policies))
-    run = subprocess.run([bins[0], "gtk_stream_policy_oracle", "--ignored", "--nocapture"],
+    run = measured_run("gtk-stream", [bins[0], "gtk_stream_policy_oracle", "--ignored", "--nocapture"],
         env=dict(os.environ, PATH="", FLOE_STREAM_ORACLE=str(path)), capture_output=True, text=True, timeout=30)
     assert run.returncode == 0, (run.stdout, run.stderr)
     assert f"GTK STREAM POLICY: ALL OK ({len(policies)} " in run.stdout
