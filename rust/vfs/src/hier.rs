@@ -59,12 +59,13 @@ pub const WASH_MIN_COVERAGE_HAIR: f64 = 1.0 / 8.0;
 /// The thinning is applied ONCE along the path: a page's level is
 /// handed (less the decode budget's page level) to the raster, where a
 /// record's members absorb min(., log2 members) and its index the
-/// rest; a cut child-BVH node's level (its members below, from the
-/// index's lazy per-node table, against the node's box) is inherited
-/// by every placement below it - members absorb min(L, log2 members),
-/// the placement's index the rest - and a kept member is a dot of the
-/// child's box (rep_dots); a cut placement outside such a node takes
-/// its own footprint's level. Levels are capped so 2^L fits a u64.
+/// rest; a cut child-BVH subtree within the density's dot pitch
+/// (1 / sqrt(density) px) is one dot at its centre and is not walked
+/// (rep_node_dot), a wider one is walked to its leaves, where a cut
+/// placement takes its footprint's level - members absorb min(L,
+/// log2 members), the placement's index the rest - and a kept member
+/// is a dot of the child's box (rep_dots). Levels are capped so 2^L
+/// fits a u64.
 pub const REP_LEVELS_MAX: u32 = 40;
 
 /// levels below the cut: floor(log2((threshold / measure)^2)), 0 at or
@@ -496,8 +497,10 @@ pub struct HierStats {
     pub rep_level: u32,
     pub page_bytes: u64,
     /// dots emitted for representative cut placements (kept members
-    /// in view, before the layer fan-out)
+    /// in view, before the layer fan-out) and for cut child-BVH
+    /// subtrees within the dot pitch (one each)
     pub rep_dots: u64,
+    pub rep_node_dots: u64,
     /// pages selected whose every record is thin (max_min < hairline
     /// x cut): what the page hairline rule would have dropped
     pub thin_pages_kept: u64,
@@ -851,6 +854,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32) -> H
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         reps: req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0,
         rep_page_level: page_level,
+        dot_lattice: HashSet::new(),
         page_levels: HashMap::new(),
         wash_walk_budget: opts.sub_cut_walk_budget,
         sparse_px_left: opts.sub_cut_sparse_px,
@@ -1157,6 +1161,9 @@ struct Hier<'a> {
     reps: bool,
     /// the page level of this pass (one representative page in 2^Lp)
     rep_page_level: u32,
+    /// the dot-pitch lattice cells (cell frame) that already hold a
+    /// node dot in the cell being walked
+    dot_lattice: HashSet<(i64, i64)>,
     /// the levels a kept representative page hands to the raster
     page_levels: HashMap<u32, u8>,
     /// remaining per-plan sub-cut budgets (HierOpts::sub_cut_sparse_px
@@ -1347,7 +1354,10 @@ impl<'a> Hier<'a> {
             // relatively-large members verbatim and cannot thin
             // them; strokes bypass the speckle, so exact geometry
             // saturates into a solid wall)
-            if self.wash_px > 0.0 && self.px_per_dbu > 0.0 {
+            // (never a representative page: the page frontier draws it
+            // thinned to the density - a bbox rect here was the solid
+            // 2 x 2 px square the field saw as boxes at the fit view)
+            if self.wash_px > 0.0 && self.px_per_dbu > 0.0 && !self.page_levels.contains_key(&pi) {
                 let pw = (p.bbox.x1 - p.bbox.x0).max(0) as f64
                     * self.px_per_dbu;
                 let ph = (p.bbox.y1 - p.bbox.y0).max(0) as f64
@@ -1453,21 +1463,15 @@ impl<'a> Hier<'a> {
             self.thin_bins.clear();
             self.wash_nodes.clear();
             self.sparse_edges.clear();
+            self.dot_lattice.clear();
             // the page frontier's run for this cell's placements (the
             // child-BVH root's box) and the per-node heaviest-member
             // table it prunes with
-            let (member_table, items_table): (std::sync::Arc<[u8]>, std::sync::Arc<[u8]>) = if self.reps {
-                self.v.cbvh_member_log2(ci)
-            } else {
-                (std::sync::Arc::from(Vec::new()), std::sync::Arc::from(Vec::new()))
-            };
             let mut edges: BTreeSet<u64> = BTreeSet::new();
             let mut framed: HashSet<u64> = HashSet::new();
             for b in &boxes {
-                // (node, the page frontier's level inherited from the
-                // first cut node above, if any)
-                let mut stack: Vec<(u32, Option<u32>)> = vec![(cell.bvh_start, None)];
-                while let Some((ni, inherited)) = stack.pop() {
+                let mut stack = vec![cell.bvh_start];
+                while let Some(ni) = stack.pop() {
                     let node = self.v.bvh(ni);
                     self.st.visited_bvh += 1;
                     // rev 43: v7 size annotations - a subtree whose
@@ -1476,8 +1480,6 @@ impl<'a> Hier<'a> {
                     // walk stops paying O(boundary placements) for
                     // boxes the cut was always going to drop (150M
                     // field case: 4.5s plan for 1023 boxes)
-                    #[allow(unused_assignments)]
-                    let mut node_level = inherited;
                     if (node.max_dim as u64) < cut
                         || (node.max_min as u64) < hair_prune
                     {
@@ -1487,46 +1489,31 @@ impl<'a> Hier<'a> {
                             let (md, mm) = (node.max_dim as u64, node.max_min as u64);
                             self.note("cbvh", "prune_size", ci, None, ni as u64, nb, md, md, mm, node.count as u64);
                         }
-                        // the page frontier: a representative placement
-                        // may live below (index a multiple of 4^k within
-                        // the cell's placements, k from the node's largest
-                        // child): descend; a subtree without one is pruned
-                        // the page frontier: the first cut node on the
-                        // way down sets the level for everything below
-                        // it - its members below (the index's lazy
-                        // per-node table) against its box on screen -
-                        // and a subtree whose placement-index run holds
-                        // no representative (the level less the member
-                        // levels the heaviest repetition below could
-                        // absorb) is pruned
+                        // the page frontier: a cut subtree no wider on
+                        // screen than the density's dot pitch is ONE
+                        // dot - a pixel at its centre on this cell's
+                        // visible layers (rep_node_dot); nothing below
+                        // it is visited. A wider one is walked to its
+                        // children; its leaves' placements take their
+                        // own footprint's level (place_rep). The walk
+                        // costs the nodes wider than the pitch in view -
+                        // bounded by the screen, never by the placements
+                        // below (field 2026-09-17: descending every cut
+                        // subtree took over 80 s at full depth).
                         let rep_descend = !self.sub_cut_wash
                             && self.reps
                             && r != 0
                             && node.bbox.intersects(b)
                             && {
-                                let slot = (ni - cell.bvh_start) as usize;
-                                if node_level.is_none() {
-                                    let items = items_table.get(slot).map(|&l| 1u64 << l.min(63)).unwrap_or(1);
-                                    let level = self.density_level(
-                                        items,
-                                        node.max_min as u64,
-                                        node.max_dim as u64,
-                                        &node.bbox,
-                                    );
-                                    node_level = Some(level);
+                                if self.within_dot_pitch(&node.bbox) {
+                                    self.rep_node_dot(&mut wc, ni, &node.bbox);
+                                    false
+                                } else {
+                                    true
                                 }
-                                let heaviest = member_table
-                                    .get(slot)
-                                    .copied()
-                                    .unwrap_or(REP_LEVELS_MAX as u8) as u32;
-                                let (lo, hi) = self.cbvh_places(ni);
-                                rep_in_run(lo, hi, cell.place_start, node_level.unwrap_or(0).saturating_sub(heaviest))
                             };
                         if !rep_descend {
                         if !self.sub_cut_wash || !node.bbox.intersects(b) {
-                            if self.reps && r != 0 && node.bbox.intersects(b) {
-                                self.st.rep_pruned += 1;
-                            }
                             continue;
                         }
                         // sub-cut wash (jobdeck wide view): walk the
@@ -1559,7 +1546,7 @@ impl<'a> Hier<'a> {
                     }
                     if !node.leaf {
                         for k in 0..node.count as u32 {
-                            stack.push((node.first + k, node_level));
+                            stack.push(node.first + k);
                         }
                         continue;
                     }
@@ -1630,7 +1617,7 @@ impl<'a> Hier<'a> {
                                 // placement index, place_rep), never
                                 // washed as its footprint
                                 if !self.sub_cut_wash && self.reps {
-                                    if let Some(lm) = self.place_rep(pli, &h, &rb, cell.place_start, node_level) {
+                                    if let Some(lm) = self.place_rep(pli, &h, &rb, cell.place_start) {
                                         self.st.rep_children += 1;
                                         self.note_child("rep_dots", pli, &h, &rb, &boxes);
                                         self.rep_dots(&mut wc, pli, &h, &rb, &boxes, lm);
@@ -1705,7 +1692,7 @@ impl<'a> Hier<'a> {
                         let size_cut = cw < cut && chh < cut;
                         if size_cut || cw.min(chh) < self.hair {
                             if !self.sub_cut_wash && self.reps {
-                                if let Some(lm) = self.place_rep(pli, &h, &rb, cell.place_start, node_level) {
+                                if let Some(lm) = self.place_rep(pli, &h, &rb, cell.place_start) {
                                     self.st.rep_children += 1;
                                     self.note_child("rep_dots", pli, &h, &rb, &boxes);
                                     self.rep_dots(&mut wc, pli, &h, &rb, &boxes, lm);
@@ -1945,16 +1932,11 @@ impl<'a> Hier<'a> {
     /// the survivors stay nested; and never the array's footprint as one
     /// wash (field 2026-09-17: that was the one box left at the fit
     /// view) - each survivor is a dot of its own box (rep_dots).
-    fn place_rep(&mut self, pli: u64, h: &floe_ovm::PlaceHead, rb: &BBox, place_start: u32, inherited: Option<u32>) -> Option<u32> {
+    fn place_rep(&mut self, pli: u64, h: &floe_ovm::PlaceHead, rb: &BBox, place_start: u32) -> Option<u32> {
         let members = self.place_members(pli, h);
-        let l = match inherited {
-            Some(l) => l,
-            None => {
-                let (cw, chh) = ((rb.x1 - rb.x0).max(0) as u64, (rb.y1 - rb.y0).max(0) as u64);
-                let fp = self.place_footprint(pli, h, rb);
-                self.density_level(members, cw.min(chh), cw.max(chh), &fp)
-            }
-        };
+        let (cw, chh) = ((rb.x1 - rb.x0).max(0) as u64, (rb.y1 - rb.y0).max(0) as u64);
+        let fp = self.place_footprint(pli, h, rb);
+        let l = self.density_level(members, cw.min(chh), cw.max(chh), &fp);
         let lm = member_levels(members, l);
         if rep_keeps(pli.saturating_sub(place_start as u64), l - lm) {
             self.st.rep_items = self.st.rep_items.saturating_add(members);
@@ -1963,6 +1945,66 @@ impl<'a> Hier<'a> {
         } else {
             None
         }
+    }
+
+    /// the density's dot pitch in screen px (1 / sqrt(density)), and
+    /// whether a box on screen is within it on both axes
+    fn within_dot_pitch(&self, bx: &BBox) -> bool {
+        let ppd = self.px_per_dbu;
+        let d = self.opts.rep_density;
+        if !(ppd > 0.0) || !(d > 0.0) {
+            return false;
+        }
+        let pitch = (1.0 / d.sqrt()).max(1.0);
+        let w = (bx.x1 - bx.x0).max(0) as f64 * ppd;
+        let h = (bx.y1 - bx.y0).max(0) as f64 * ppd;
+        w <= pitch && h <= pitch
+    }
+
+    /// one dot for a cut child-BVH subtree: a pixel at the node's
+    /// centre on the visible recursive layers of its first placement's
+    /// child (the node holds no layer mask of its own; the first child
+    /// is its representative), at most one dot per cell of the dot
+    /// pitch's lattice in the cell's frame (sibling nodes within the
+    /// pitch would otherwise pile up: the field's block came out
+    /// three-quarters lit)
+    fn rep_node_dot(&mut self, wc: &mut WsCell, ni: u32, bx: &BBox) {
+        let ppd = self.px_per_dbu;
+        let side = if ppd > 0.0 { (1.0 / ppd).ceil().max(1.0) as i64 } else { 1 };
+        let pitch = (1.0 / self.opts.rep_density.max(1e-9).sqrt()).max(1.0);
+        let pitch_dbu = if ppd > 0.0 { (pitch / ppd).ceil().max(1.0) as i64 } else { 1 };
+        let cx = bx.x0 / 2 + bx.x1 / 2;
+        let cy = bx.y0 / 2 + bx.y1 / 2;
+        if !self.dot_lattice.insert((cx.div_euclid(pitch_dbu), cy.div_euclid(pitch_dbu))) {
+            return;
+        }
+        let dot = BBox {
+            x0: cx - side / 2,
+            y0: cy - side / 2,
+            x1: cx - side / 2 + side,
+            y1: cy - side / 2 + side,
+        };
+        let v = self.v;
+        let mut a = ni;
+        let first = loop {
+            let n = v.bvh(a);
+            if n.leaf || n.count == 0 {
+                break n.first as u64;
+            }
+            a = n.first;
+        };
+        let child = v.place_head(first).child;
+        let bits = v.bitset(v.cell_lmask_rec(child));
+        for (byte_index, (&m, &vis)) in bits.iter().zip(self.wash_vis.iter()).enumerate() {
+            let both = m & vis;
+            for bit in 0..8 {
+                if both & (1 << bit) != 0 {
+                    wc.washes.push(((byte_index * 8 + bit) as u32, dot));
+                }
+            }
+        }
+        self.st.rep_node_dots += 1;
+        self.st.rep_children += 1;
     }
 
     /// the page frontier's level of a cut item: the smallest L with
@@ -2041,6 +2083,16 @@ impl<'a> Hier<'a> {
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, rb);
         let mut dots = 0u64;
+        // at most one dot per cell of the dot pitch's lattice (cell
+        // frame), whatever emits it: sparse repetitions scattered over
+        // the same area - an OASIS writer folds scattered instances of
+        // one cell into point sets - are each sparse by their own
+        // footprint yet pile up together (the field's block came out
+        // three-quarters lit)
+        let ppd = self.px_per_dbu;
+        let pitch = (1.0 / self.opts.rep_density.max(1e-9).sqrt()).max(1.0);
+        let pitch_dbu = if ppd > 0.0 { (pitch / ppd).ceil().max(1.0) as i64 } else { 1 };
+        let lattice = &mut self.dot_lattice;
         let mut emit = |wc: &mut WsCell, dx: i64, dy: i64| {
             let mb = BBox {
                 x0: b0.x0.saturating_add(dx),
@@ -2048,12 +2100,17 @@ impl<'a> Hier<'a> {
                 x1: b0.x1.saturating_add(dx),
                 y1: b0.y1.saturating_add(dy),
             };
-            if boxes.iter().any(|b| mb.intersects(b)) {
-                for &l in &layers {
-                    wc.washes.push((l, mb));
-                }
-                dots += 1;
+            if !boxes.iter().any(|b| mb.intersects(b)) {
+                return;
             }
+            let (cx, cy) = (mb.x0 / 2 + mb.x1 / 2, mb.y0 / 2 + mb.y1 / 2);
+            if !lattice.insert((cx.div_euclid(pitch_dbu), cy.div_euclid(pitch_dbu))) {
+                return;
+            }
+            for &l in &layers {
+                wc.washes.push((l, mb));
+            }
+            dots += 1;
         };
         match h.kind {
             0 => emit(wc, 0, 0),

@@ -6726,6 +6726,7 @@ pub fn plan_cmd(args: &[String]) {
              \"rep_items\": {},\n  \
              \"rep_level\": {},\n  \
              \"rep_dots\": {},\n  \
+             \"rep_node_dots\": {},\n  \
              \"pts_enumerated\": {},\n  \"pts_fallback\": {},\n  \
              \"pts_offsets_scanned\": {},\n  \
              \"pts_selected\": {},\n  \
@@ -6765,6 +6766,7 @@ pub fn plan_cmd(args: &[String]) {
             st.rep_items,
             st.rep_level,
             st.rep_dots,
+            st.rep_node_dots,
             st.pts_enumerated,
             st.pts_fallback,
             st.pts_offsets_scanned,

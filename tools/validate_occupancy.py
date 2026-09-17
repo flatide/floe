@@ -1466,7 +1466,10 @@ def write_subcut(path):
     8/0: 200 hairlines 0.1 x 190 um on a 1 um pitch over 200..400 um
     (a dense hairline page: washed under cull); 9/0: three such lines
     400 um apart (3.75 % of their footprint, under the 1/8 hairline
-    rule: kept and drawn as lines); 6/0: a frame so the top spans
+    rule: kept and drawn as lines); 10/0: 40,000 plain placements of
+    a 0.2 um DOT2 cell at jittered positions over 1000..1200 um (no
+    array the writer could fold: a child BVH of thousands of leaves,
+    for the page frontier's node dots); 6/0: a frame so the top spans
     0..2000 um"""
     ly = db.Layout()
     ly.dbu = 0.001
@@ -1491,6 +1494,15 @@ def write_subcut(path):
     for k in range(3):
         x = 1000 * UM + k * 400 * UM
         top.shapes(l9).insert(db.Box(x, 1500 * UM, x + 100, 1690 * UM))
+    l10 = ly.layer(10, 0)
+    dot2 = ly.create_cell("DOT2")
+    dot2.shapes(l10).insert(db.Box(0, 0, 200, 200))
+    for j in range(200):
+        for i in range(200):
+            x = 1000 * UM + i * UM + (i * 7 + j * 3) % 5 * 100
+            y = 1000 * UM + j * UM + (i * 3 + j * 11) % 7 * 100
+            top.insert(db.CellInstArray(dot2.cell_index(),
+                                        db.Trans(db.Vector(x, y))))
     top.shapes(l6).insert(db.Box(0, 0, 2000 * UM, 2000 * UM))
     opt = db.SaveLayoutOptions()
     opt.format = "OASIS"
@@ -1880,6 +1892,50 @@ class SubCutTests(unittest.TestCase):
                              (0, 0, 0, 0, 0), (layer, culls))
         for layer in ((4, 0), (5, 0), (7, 0)):
             self.assertEqual(self._lit(self.worker_noreps, layer, "keep"), set(), layer)
+
+    def test_a_field_of_plain_cut_placements_is_node_dots_and_a_tiny_page_is_not_a_square(self):
+        # 10/0: 40,000 plain placements of a 0.2 um cell over a 200 um
+        # square (20 x 20 px at 10 um/px): cut subtrees within the
+        # density's 2 px pitch become one pixel each at their centre,
+        # at most one per 2 x 2 px lattice cell - up to a quarter of the
+        # block, never solid, no placement below them visited, nothing
+        # decoded, and only on the layer the dotted child holds (the
+        # 4/0 and 9/0 frames above saw no dot from this field); the
+        # kill switch culls
+        block = {(x, y) for x in range(98, 122) for y in range(78, 102)}
+        lit, res = self._frame(self.worker, (10, 0))
+        self.assertTrue(lit <= block, sorted(lit - block)[:10])
+        self.assertTrue(40 <= len(lit) <= 150, len(lit))
+        self.assertEqual(res["tiles"], 0, res)
+        self.assertGreaterEqual(res["plan_culls"]["rep_children"], 40, res["plan_culls"])
+        res = floe_index("plan", self.cache, "--view", "0,0,2000,2000",
+                         "--px-per-um", "0.1", "--cut-px", "1",
+                         "--page-hairline", "1", "--page-reps", "1",
+                         "--layers", "10/0")
+        stats = {k: int(v) for k, v in re.findall(r'"(\w+)": (\d+)', res.stdout)}
+        # (the OASIS writer folded the scattered instances into point
+        # sets whose boxes exceed the pitch, so here the lattice caps
+        # the member dots; a compact subtree ends in one node dot)
+        self.assertGreaterEqual(stats["rep_dots"] + stats["rep_node_dots"], 40, stats)
+        self.assertLessEqual(stats["rep_dots"] + stats["rep_node_dots"], 150, stats)
+        self.assertLess(stats["visited_bvh"], 40_000, stats)
+        self.assertEqual(self._lit(self.worker_noreps, (10, 0)), set())
+        # a representative page that is one or two pixels on screen is
+        # drawn thinned (one dot), never as the M7-C bbox square:
+        # 4/0's 200 um array page at 100 um/px
+        SubCutTests.gen += 1
+        box = (0.0, 0.0, 2000.0 * UM, 2000.0 * UM)
+        lit, res = render_settled(self.worker, SubCutTests.gen, box, 20,
+                                  cut_px=1.0, thin="cull", visible=[(4, 0)])
+        # (its two kept members straddle pixel edges: up to the page's
+        # 2 x 2 px, but as geometry - no M7-C wash, one representative)
+        self.assertTrue(1 <= len(lit) <= 4, sorted(lit))
+        self.assertEqual(res["plan_culls"]["washed"], 0, res["plan_culls"])
+        self.assertEqual(res["plan_culls"]["rep_kept"], 1, res["plan_culls"])
+        SubCutTests.gen += 1
+        gone, _ = render_settled(self.worker_noreps, SubCutTests.gen, box, 20,
+                                 cut_px=1.0, thin="cull", visible=[(4, 0)])
+        self.assertEqual(gone, set())
 
     def test_dense_sub_cut_pages_are_washed_and_sparse_ones_drawn(self):
         # with the rules on: 10 um/px, cut 1 px = 10 um, every 0.2 um
