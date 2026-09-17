@@ -18,7 +18,7 @@
 - macOS arm64, 실제 Chrome extension 연결. About의 앱 revision은 `1a16379`,
   web bundle은 `9ff0b84011c8978ed46fa1106c4814189736e8b8`다.
   About의 index/renderd0.12.101은 **기대 호환 버전**이며 실행 도구의 source hash
-  증거로 사용하지 않는다. `127a485`까지 후속 커밋은 문서만 바꿨다.
+  증거로 사용하지 않는다. `21a0c22`까지 후속 커밋은 문서만 바꿨다.
 - private 시작 파일·session JSON·cookie/storage credential은 읽지 않았다.
   기존 `file://` 접근 차단을 우회하지 않았고, 원격 서버·실제 설계·기존 기본값은
   사용하지 않았다. 공유 flag가 켜졌다는 것만으로 초대를 발급하지 않는다.
@@ -67,14 +67,48 @@ layer였다. margin과 합성은 **독립 캡처**이며 같은 순간의 exact-
 PNG·시작 파일·source/cache는 커밋하지 않는다. 이 검사로 서버 측 자동 PNG 쓰기나
 설계 기본값 게시 권한이 생기지 않는다.
 
-## 4. 잔여
+## 4. 실제 Follow·Explore — 합성 layout-only
+
+2026-09-17 사용자가 **현재 가시 레이어의 Follow·Explore 초대 발급, 같은 Chrome의
+테스트 탭 사용, 검사 후 폐기**를 승인했다. 위 owner 세션의 9개 레이어만 공유했고
+DRC는 포함하지 않았다. 초대는 각각 UI에서 동의 후 한 번 발급하고 `Open guest tab`으로
+열었다. 외부로 링크를 보내지 않았으며 초대 credential·cookie/storage 값은 읽거나
+문서에 저장하지 않았다. URL의 초대 fragment는 guest 부팅 후 제거된 것을 확인했다.
+
+| 검사 | 실제 관측 |
+|---|---|
+| Follow 표시·제어 | geometry·라벨과 raw/margin 프레임 표시. 승인 레이어 9개는 읽기 전용, 독립 이동 컨트롤 없음 |
+| owner 추적 | owner view500 → 400µm 변경에 Follow 화면도 확대. Follow canvas의 Right 입력 뒤 owner는 X200/Y220/view400 유지 |
+| Follow 새로고침 | 새 초대 발급 없이 `Following owner`와 프레임 복원 |
+| Explore 이동 분리 | X1000/Y1000/view200µm 요청에 도형 밖 검은 화면, X200/Y220/view400 요청에 도형 복원. owner는 X200/Y220/view400 유지 |
+| Explore 레이어 분리 | Hide all: 9개 체크 off·geometry/라벨 없는 검은 화면. 동시에 Follow의 9개 체크와 도형 유지. Show all approved로 복원 |
+| Explore 새로고침 | 독립 view200µm로 확대한 화면이 reload 뒤에도 유지. owner는 view400µm 유지. 화면 대조이며 exact-pixel diff 검사는 아님 |
+| 두 세션 폐기 | owner의 각 Revoke 후 해당 guest가 종료 안내·`No displayed frame`으로 전환. screenshot에서 이전 geometry가 지워지고 Explore 조작 비활성화 |
+| 폐기 후 reload | 두 탭 모두 새 초대를 요구하고 프레임을 복원하지 않음. owner 목록의 활성 초대/게스트 0개 확인 |
+
+Explore의 Goto 입력은 현재 카메라 readback이 아니라 초안이다. reload 뒤 입력이
+0/0/빈 폭으로 초기화돼도 독립 화면은 복원된다. 입력값만으로 복원 판정을 하지 않았다.
+이 UX 차이는 기록하되 이번 검사를 위해 카메라/입력 동작을 바꾸지 않았다.
+
+보안 관측의 범위도 구분한다. 실제 초대 링크의 `rel="noopener noreferrer"`와
+`target="_blank"`는 확인했다. 그러나 브라우저 도구의 제한된 읽기 평가에는
+`window.opener`가 노출되지 않아 **실제 opener 단절을 판정할 수 없었다**.
+`document.referrer`는 빈 문자열로 관측했지만 네트워크 Referrer 헤더 검사는 아니다.
+credential 저장소·교차 인증 경계의 native 게이트를 이 관측으로 대체하지 않는다.
+Back/BFCache, 자연 만료, owner 종료·공개 범위 변경에 따른 폐기, 느린 수신자,
+게스트 DRC·pick/snap/룰러는 이번 실제 브라우저 검사 범위 밖이다.
+
+검사 후 두 테스트 탭을 닫고 사용자 owner 탭은 X200/Y220/view500µm·9개 레이어 on으로
+남겼다. source와 `design.ovm/ovp/ovt` 네 파일의 SHA-256·크기·mtime가 검사 전후
+모두 일치했다. 초대 폐기는 이후 접근을 막으며 이미 수신·복사한 픽셀을 회수하는
+기능은 아니다. 제품 코드 수정이나 전체 배터리 재실행은 없었다.
+
+## 5. 잔여
 
 이 단계에서 확인한 것은 owner의 합성 layout 표시·일부 조작·dump 다운로드다.
 레이어 다중 선택/스타일·ruler/snap·파일/DRC 열기·저장/충돌/복구·슬롯 편집·clipboard,
-auth/BFCache/종료·owner/guest SH-08은 아직 전부 수용한 것이 아니다. 초대 검사는
-합성 layout scope와 테스트 후 폐기를 사용자에게 확인한 뒤 별도 기록으로 진행한다.
-공유 창 미리보기에서는 loopback/layout-only 범위, 동의 기본off·Create 비활성화,
-활성 초대/게스트0개를 확인하고 닫았다. 초대는 발급하지 않았으며 guest 수용 근거가 아니다.
+auth/BFCache/종료·owner/guest SH-08은 아직 전부 수용한 것이 아니다. §4는 사용자
+승인 후 추가한 실제 layout-only 공유 근거이며 SH-08의 전체 수용 판정은 아니다.
 
 Python-free Linux 실행, G1/G4 전체, 현장 Firefox/ETX G2는 남는다. 원격 SH-10은
 사용자 보류이며 world-tile M5는 실측 조건부다. 로컬 Chrome 성공으로 닫지 않는다.

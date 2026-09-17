@@ -134,6 +134,10 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    후속 [실제 owner 브라우저 기록](WEBUI_BROWSER_ACCEPTANCE.ko.md)은 합성 valmini의
    표시·goto·정렬 pan·줌·pick·레이어 전체 숨김/복원과 두 dump PNG의 실제 저장을
    확인한다. input→photon/순간 깜빡임, clipboard·저장/복구·공유 전체 수용은 별도다.
+   같은 기록 §4에는 별도 승인한 실제 Follow·Explore의 추적/독립 이동·레이어,
+   reload와 revoke 후 화면 지움·reload 차단을 추가했다. 두 초대는 폐기했고
+   source/cache는 불변이다. SH-08의 일부 근거이며 DRC 공유·Back/BFCache·실제
+   opener/Referrer 헤더 등을 포함한 전체 수용은 남는다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격

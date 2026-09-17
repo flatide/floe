@@ -73,7 +73,7 @@ native gate는 `tools/validate_view_stream.py`, `validate_owner_service.py`,
 | SH-05 Follow 독립성 | `local_follow_reuses_pixels_has_private_credit_and_rejects_owner_commands`, 대형 미수신 socket 폐기·private credit·owner 진행, margin crop/reconnect native 검사 | 실제 느린 원격망의 화면 지연/처리량은 SH-10/G3 |
 | SH-06 Explore 독립성 | owner+두 Explore의 별도 state/worker/DRC, query/룰러, admission 거부·재접속 재사용·연속 단절 후 reap/회계 | 서버 전체 다중 gateway 부하·실칩 latency는 별도 |
 | SH-07 종료/late 완료 | guest별 logout/revoke, owner/scope 종료 cascade unit/native, 취소된 copy/body·lease/permit 수명 검사 | 실제 브라우저 복구 시나리오는 SH-08 |
-| SH-08 실제 브라우저 | client/DOM 모형의 storage·revocation·stale 응답 gate는 보조 근거 | **미수용**: 동시 owner/guest·refresh/back/URL/opener/Referrer·실제 화면. 접근 차단을 우회하지 않음 |
+| SH-08 실제 브라우저 | [Chrome 합성 검사 §4](WEBUI_BROWSER_ACCEPTANCE.ko.md): owner+Follow+Explore 화면, 독립 이동/레이어, reload, 초대 fragment 제거, revoke 후 화면 지움·reload 차단. client/DOM gate는 보조 근거 | **부분 확인, 전체 미수용**: Back/BFCache·opener 실동작/Referrer 헤더·자연 만료/범위 변경·DRC 등. 시작 파일 접근 차단을 우회하지 않음 |
 | SH-09 읽기 결과 | native 합성 DRC/waive 표시·독립 선택/CD·fractional ASCII, 덱 child 범위·summary 조회 제한; CLI source/cache/review bytes·mtime | 실제 guest UI 시각/입력 및 실칩 수용 별도 |
 | SH-10 배포 C | loopback Host/Origin 위조 거부는 로컬 경계 근거 | **미구현/미수용**: 승인된 TLS/auth/proxy·원격 공개·G3. 로컬 PASS로 대체 불가 |
 
@@ -113,12 +113,26 @@ all-target strict clippy(`--no-deps -- -D warnings`)도 통과했다.
 동일했다(`floe-permissions-input.sha256`). 임시 `.venv` 링크는 종료 후 제거했다.
 실제 브라우저·Linux 실행·실칩 성능·원격 서비스 수용을 검사한 것은 아니다.
 
-## 4. 전체 goal에서 남은 것
+## 4. 후속 실제 Chrome 근거
+
+2026-09-17 사용자가 연 합성 valmini owner 세션에서 별도 동의를 받아 layout-only
+Follow·Explore를 하나씩 발급했다. [실제 브라우저 기록 §4](WEBUI_BROWSER_ACCEPTANCE.ko.md)에
+동시 표시·Follow 추적·Explore 독립 이동/레이어·reload·폐기 검사를 남겼다.
+두 초대는 모두 폐기했고 활성 목록0개, 폐기 후 reload로 프레임 복원이 불가함을
+확인했다. 테스트 탭만 닫고 owner는 유지했다. source/OVM/OVP/OVT의 bytes·mtime는
+불변이다. 링크 외부 전송·원격 공개·DRC 공유·제품 코드 변경은 없었다.
+
+이 후속 검사는 위 §3의 전체 배터리를 새로 실행한 것이 아니다. 실제 opener 객체는
+도구에서 관측할 수 없어 링크 속성만 확인했으며 Referrer 헤더도 미검사다.
+SH-08 전체나 SH-10 수용으로 확대하지 않는다.
+
+## 5. 전체 goal에서 남은 것
 
 로컬 Rust/web 기능과 공유 UI는 연결됐고 이번 단계는 권한 목록 공백을 막는다.
 남은 큰 범위는 실제 브라우저 SH-08·G1/GTK 대비 표시/입력/성능과 G4 최종 수용,
 Python-free Linux **실행** 수용, 현장 TeeBox Firefox/ETX G2, 원격 배포 C의 운영
-정책/승인·구현·G3다. TeeBox 불가와 브라우저 접근 차단을 로컬 모형으로 대신하지 않는다.
+정책/승인·구현·G3다. Chrome 합성 검사는 SH-08의 일부 진전이며, TeeBox 불가와
+남은 브라우저 수용을 로컬 모형으로 대신하지 않는다. 원격 단계는 사용자 보류다.
 world-tile M5는 선행 성능 조건/실측에 따른 조건부 작업이며 완료로 세지 않는다.
 인덱스 교체를 열린 GUI가 자동 감지하는 문제는 사용자 요청대로 후속 서버/캐시 수명
 설계로 보류한다. 커밋 수나 로컬 green을 전체 완료 백분율로 환산하지 않는다.
