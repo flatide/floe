@@ -149,6 +149,11 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    복원을 확인했고 마지막 Native import로 초기 상태를 되돌렸다. 카메라와
    소스/캐시 파일은 불변이다. flat9레이어 기본 패턴의 수용이며 그룹 상속·custom
    bitmap/v2·슬롯 편집의 실제 브라우저 수용으로 확대하지 않는다.
+   §7은 승인된 합성 폴더에서8규칙/23오류 ASCII DRC 최초 등록, SVRF8/8 연결,
+   두 edge-pair의 좌표/CD, metadata 기반4레이어 격리·9레이어 복원, 잘못된 SVRF
+   교체 거부 후 기존 상태 보존을 실제 Chrome에서 확인했다. 기존 DRC의 교체·
+   pack 생성·reviewer 재등록·메모/waive 저장·자동 저장 수용은 아직 아니다.
+   합성 DRC는 읽기 전용 연결을 유지하고 패널/markers만 닫았으며 입력과 캐시는 불변이다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격

@@ -239,12 +239,71 @@ Frames/Labels on·선택/룰러0 상태로 탭과 서버를 열어 두었다.
 custom bitmap/v2·슬롯 편집은 집중 HTTP 게이트와 구별하며 실제 브라우저 수용으로
 확대하지 않는다.
 
-## 7. 잔여
+## 7. 실제 읽기 전용 DRC 열기·SVRF 교체·CD/레이어 복원
+
+2026-09-17, §6.1과 같은 Chrome/57643 세션에서 후속 검사했다. 제품 코드는
+`cb4a698`이며 열린 바이너리는 §6.1의 수정 빌드다(커밋 뒤 서버 재시작은 없음).
+파일 선택기가 허용한 기존 합성 폴더 안에 새 `drc-ui.Z8ykGA` 하위 폴더를 만들고
+아래 작은 fixture를 생성했다. 실제 설계·기존 reviewer 파일은 사용하지 않았다.
+
+```sh
+python tools/gen_drcdb.py TEST_DIR/synthetic.db \
+  --checks 8 --max-errors 7 --zeros 1 --precision 40000 \
+  --die 120,160,280,280 --seed 42 \
+  --svrf TEST_DIR/synthetic.svrf --pathname synthetic.svrf \
+  --layers M1,M2,M3,M4,V1,V2,CT,GT \
+  --svrf-gds M1=1/0,M2=2/0,M3=3/0,M4=4/0,V1=5/0,V2=6/0,CT=7/0,GT=8/0,FILLA=63/63,FILLB=8/0
+rust/target/release/floe2-web svrf TEST_DIR/synthetic.svrf \
+  --no-env-switches --out TEST_DIR/synthetic.rules.json
+```
+
+`TEST_DIR`는 새 합성 디렉터리로 치환한다. generator는 검증 도구이고, 제품의
+DRC 읽기·SVRF 변환·브라우저 서비스는 Rust다. ASCII는3,616bytes,8규칙·23오류·
+4 admin section이다. 첫 규칙과 마지막 규칙은0오류이며 admin section은 규칙 목록에
+나오지 않았다. DRC source hash는
+`3e9c9015089d8647fb1031640385314884857a87cd9b0459b423f884da829988`이다.
+
+| 검사 | 실제 Chrome 관측 |
+| --- | --- |
+| 최초 DRC 등록 | Open DRC results → 승인 폴더 → synthetic.db → Open selected DRC (read-only). `8 rules · 23 errors · ASCII`, `NO REVIEW WRITES`, no ICE cache 표시 |
+| 열 때 레이아웃 | 9레이어·depth99·High 유지. 중심 X200/Y220 유지. 오른쪽 패널 때문에 화면 폭2312→1672device px, view500→361.5916955µm: 같은 배율의 crop이며 동일 view 폭 유지라는 뜻은 아님 |
+| 빈 규칙·목록 | M1.SPACE.1은 No matching errors. M2.OVERLAP.2는 global1/2 두 오류. 단일 클릭은 `Global 1 · 4/4 vertices`를 표시하고 카메라는 유지 |
+| Frame error·Next | global1 중심254.1032875/183.4981µm, global2 중심141.5042375/178.294575µm. 원본 edge 좌표의 bbox 중심과 일치하며 CD 각각0.0116/0.0189µm 표시 |
+| SVRF 연결 | Load SVRF metadata → synthetic.rules.json. `SVRF 8/8 matched`,5분류 표시. 카메라·레이어는 유지하고 기존 focus/CD 초기화 |
+| 규칙 비교·격리 | M2 첫 오류로 이동: `measured 0.011575 vs < 0.025µm`, Δ≈−0.013425µm. source_gds인2/0·3/0·8/0·63/63만 on, 나머지5레이어 off |
+| 잘못된 교체 | JSON 대신 생성한 원본 synthetic.svrf를 선택하면 명시 거부. 모달을 닫은 뒤8/8 metadata, global1 focus/CD, 동일 카메라·4레이어 격리가 유지됨 |
+| Restore layers | 최초9레이어 on으로 복원, 오류 focus와 CD 해제. 이 작업은 카메라를 원위치로 되돌리는 명령은 아님 |
+
+CD 비교는 source의 정수 좌표 차이 `463/40000=0.011575µm`,
+`757/40000=0.018925µm`와 직접 대조했다. 부동소수점 상세 표시에는 미세한 잔차가
+있고 화면의 짧은 라벨은 반올림된다. 이 두 edge-pair의 일치를 모든 CD 종류·스냅·
+sign-off 정확도의 수용으로 확대하지 않는다. 분류 목록은 확인했지만 모든 필터
+조합·대형 페이지 순회·키보드/box 그룹 선택은 이번 검사 범위가 아니다.
+
+오류 메시지는 범용 파일 선택 안내여서 SVRF JSON 설명은 아래 고정 도움말을 함께
+읽어야 했다. 파일 선택기의 AX checkbox는 Playwright role 조회와 맞지 않아 한 번
+`no_matches`였고, 실제 AX 행을 다시 읽어 선택했다. 이를 앱의 파일 읽기 실패로
+집계하지 않는다. 자동화 왕복 시간으로 제품 지연을 측정하지 않았다.
+
+마지막에 DRC markers off·focus/CD 정리·패널 접기 후 X200/Y220/view500µm,
+9레이어 on·0 rulers·Local connected/final frame으로 복원했다. **합성 DRC와
+SVRF는 읽기 전용으로 연결된 채 남아 있다.** 이전에 없던 DRC 등록까지 없앴다고
+표현하지 않는다. `Build pack`·reviewer 재등록·메모/waive·자동 저장은 실행하지
+않았다. `Saving review state`는 세션의 패널 상태 동기화이며 review sidecar 게시가
+아니다.
+
+검사 전후 source·OVM/OVP/OVT의 SHA-256·크기·mtime, 합성 DRC의 SHA-256·크기·
+mtime, metadata JSON의 SHA-256이 같다. 새 테스트 폴더는 generator/변환기가 만든
+DB·SVRF·INCLUDE·JSON4파일뿐이며 ICE/리뷰/lock 파일이 생성되지 않았다. 제품 수정이
+없는 실제 UI 수용 기록이므로 §6.1의 배터리를 다시 실행한 것으로 기록하지 않는다.
+
+## 8. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
 공유, §5의 일부 레이어/스타일·스냅 없는 수동 측정, §6의 두 설정 다운로드와
-§6.1의 flat9레이어 Native/Calibre 불러오기·복원이다. 각 절의 미검사 범위 및
-파일/DRC 열기·저장/충돌/복구·슬롯 편집·clipboard·auth/BFCache/종료는 남는다.
+§6.1의 flat9레이어 Native/Calibre 불러오기·복원, §7의 작은 ASCII DRC 최초 등록·
+SVRF 교체·두 CD·레이어 격리/복원이다. 각 절의 미검사 범위 및 기존 DRC 교체/실패,
+pack 생성·메모/waive 저장/충돌/복구·슬롯 편집·clipboard·auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
 
 Python-free Linux 실행, G1/G4 전체, 현장 Firefox/ETX G2는 남는다. 원격 SH-10은
