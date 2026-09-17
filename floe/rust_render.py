@@ -1103,6 +1103,9 @@ class RustRenderWorker:
                 "rep_kept": _wire_int(fields, "rep_kept"),
                 "rep_washed": _wire_int(fields, "rep_washed"),
                 "rep_children": _wire_int(fields, "rep_children"),
+                # the page level the decode budget forced (0 = all cut
+                # pages in view kept, their records thinned instead)
+                "rep_page_level": _wire_int(fields, "rep_page_level"),
             },
             # occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): layers
             # drawn from design.ovo instead of their pages, the cells

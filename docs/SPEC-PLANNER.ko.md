@@ -62,57 +62,51 @@
   `FLOE_RUST_SUB_CUT_WASH=on`(단일 레이아웃), `FLOE_RUST_DECK_WIDE=on`(덱; 둘 다
   진단 전용, 기본 off); gate `validate_occupancy` `SubCutTests`(on 워커가 규칙을
   검증), `validate_jobdeck` `WideViewTests`·`ThinPageTests`.
-  **대표(page frontier)**(`ViewReq::page_reps`, 사용자 설계 2026-09-17; 단일
-  레이아웃 요청에 켬, 덱 pass·exact·probe는 off): 컷이 버리던 것을 없애지 않고
-  **대표만 남긴다**. 컷에 걸린 페이지/배치가 자기 컷 문턱의 1/2^k 이하이면(k =
-  `rep_octaves`; hairline 컷은 `max_min/page_hair`, 크기 컷은 `max_dim/cut`, 둘 다면
-  먼저 잘린 쪽 = 큰 k) 소속 run(페이지: (cell, layer)의 페이지 열, 배치: 셀의 배치
-  열) 안의 index가 4^k의 배수인 것만 남기고(`rep_keeps`), 남긴 것은 **항상
-  지오메트리로 그린다** — 페이지는 디코드해 그리고(`rep_keep`), 배치는 펼치되
-  (`rep_expand`) 배열의 멤버를 솎는다: 멤버가 j = min(k, ⌊log4 멤버 수⌋) 옥타브를
-  맡아 4^j개 중 하나(Grid는 축당 stride 2^ja × 2^jb, ja + jb = 2j, `thin_grid`;
-  Pts는 4^j번째 점)를 WsInst의 rep로 내보내고, 남은 k − j 옥타브는 셀 안 배치
-  index(4^(k−j)의 배수)가 맡는다(`place_rep`). 대표에는 wash를 쓰지 않는다(현장
-  2026-09-17 2차: 밀집 페이지의 bbox wash와 배열 footprint wash가 fit 뷰의 박스
-  하나·중간 줌의 박스들이었다). 한 옥타브 축소하면 뷰의 컷 항목이 4배, 남기는 비율이
-  1/4이라 **뷰당 수는 컷 시점의 수 근처로 유지**된다 — 항목이 고르게 분포하고 비용이
-  비슷할 때의 기대치이고, 페이지 하나의 거대 반복이나 index 0이 늘 남는 짧은 run이
-  많으면 수와 비용이 어긋난다(리뷰 2026-09-17). 집합은 frontier 격자 대표처럼 **아래로
-  포함**된다: 4^(k+1)의 배수는 4^k의 배수이므로 S(k+1) ⊆ S(k), 즉 넓은 뷰에 보이는
-  것은 더 가까운 모든 뷰에도 있었고 축소 중에 새로 나타나는 것은 없다(index 4는 k=1
-  에 남고 k=2에 사라진다). run의 첫 항목(index 0)은 어느 줌에서든 대표 **후보**이고
-  실제 표시는 뷰 안·상위 배치의 판정을 거친다(대표는 sub-cut 예산을 타지 않는다;
-  옥타브 솎기가 곧 상한이다). 진단용 sub-cut 규칙의 wash 판정에 쓰는 ink 추정은
-  멤버 수 × 최소변 × 긴변(px; `max_min`·`max(max_w, max_h)`) — 리뷰가 짚은 대로
-  예전의 멤버 수 × max_w × max_h는 1000×1 선과 1×1000 선의 L을 200 % 밀집으로 보아
-  정사각형을 통째로 wash했다. BVH는 서브트리의 index 구간
-  ([lo, hi), 페이지는 leaf-order permute로 연속)에 4^k의 배수가 없으면 통째로
-  프루닝한다(`rep_pruned`): 크기 컷 노드와, `min(max_w, max_h) < page_hair`인 노드
-  (모든 페이지의 max_min이 그 이하라 hairline 컷 — 한 방향 배선 run은 잡히고 양방향이
-  섞인 노드는 리프까지 내려간다; 노드별 max_min은 인덱스에 없다). 예산
-  (`sub_cut_sparse_px`/`sub_cut_wash_px`)이 안전망. 대표는 부분만 보이는 무늬이지
-  요약처럼 채워진 면이 아니다. 킬 스위치
-  `FLOE_RUST_PAGE_REPS=off`(뷰어), `floe-index plan --page-reps 1`. gate
-  `PageFrontierTests`(121만 hairline이 N≈19 페이지: 800/400/200 px에서 대표 집합이
-  정확히 run 전체 → {0,4,8,…} → {0,16,…}, page_candidates·visited_page_bvh가
-  옥타브와 함께 감소, 절반 뷰·2배 배율의 대표 수가 같은 자릿수, L 두 선은 wash 없이
-  선 두 개, 킬 스위치는 0 px), `SubCutTests`(단일 페이지 레이어 = index 0 = 대표),
-  `ThinPageTests`·`test_render_detail…`.
-  **플랜당 예산**(2026-09-16 현장: 150 MB 실칩 thin:cull detail medium의 중간
-  줌에서 draw가 6 s를 넘었고 킬 스위치로 이전 속도가 돌아옴): sub-cut 규칙이
-  한 프레임에 보태는 양을 두 예산이 막는다. ① `sub_cut_sparse_px` — 남긴 희소
-  페이지·펼친 희소 배치의 ink 추정(멤버 수 × 멤버 화면 px, 멤버당 최소 1 px;
-  `wash_worth`와 같은 척도)의 합. 소진 뒤의 희소 항목은 wash가 아니라 **버린다**
-  (옛 cull; 희소 footprint의 wash는 2026-09-15의 거짓 블록이므로). ② `sub_cut_wash_px`
-  — wash의 뷰 안 면적(레이어당 한 장)의 합. 소진 뒤의 항목은 버린다. 걷는 순서대로
-  쓰므로 같은 요청은 같은 플랜이다. stats `sub_cut_sparse_over` / `sub_cut_wash_over`
-  (perf 줄·상태줄 `sub-cut over A/B`)가 버린 수. 기본 16 Mpx / 64 Mpx(4 Mpx 뷰의
-  hairline ink 4장·블록 채움 16장, 각각 raster 수십 ms; 현장 perf 줄로 확정 전의
-  잠정값). 진단 `FLOE_RUST_SUB_CUT_SPARSE_MPX` / `FLOE_RUST_SUB_CUT_WASH_MPX`(Mpx,
-  0 = 희소 전부 / wash 전부 버림 — 어느 쪽이 느린지 가르는 A/B). gate
-  `SubCutTests.test_the_per_plan_budgets…`(10 px / 100 px 예산: 4 px짜리 희소
-  페이지는 남고 63 px짜리 선 페이지와 400 px wash는 버려져 카운터에 잡힘; 기본
-  예산은 아무것도 버리지 않음).
+  **대표(page frontier)**(`ViewReq::page_reps`, 사용자 설계 2026-09-17, 같은 날
+  리뷰 조건으로 단계화; 단일 레이아웃 요청에 켬, 덱 pass·exact·probe는 off): 컷이
+  버리던 것을 없애지 않고 **2^L개 중 하나**를 남긴다. L = ⌊log2 (문턱/측정값)²⌋
+  (`rep_level`, 옥타브당 2레벨; hairline 컷은 `max_min/page_hair`, 크기 컷은
+  `max_dim/cut`, 둘 다면 먼저 잘린 쪽 = 큰 L). 솎기 비율은 경로 전체에서 **한 번만**
+  적용하고 단계가 나눠 맡는다.
+  - 배치 단계(플래너): 컷 배치의 반복 멤버가 lm = min(L, ⌊log2 멤버 수⌋)를 맡아
+    2^lm개 중 하나(Grid는 축 균형 stride `thin_grid`, Pts는 2^lm번째 slot; 멤버 0은
+    남음)를 WsInst의 rep로 내보내고, 셀 안 배치 index가 남은 L − lm을 맡는다
+    (`place_rep`). 남긴 배치는 펼치고, 그 자식 셀은 **통째로** 그린다(`rep_full`:
+    자식의 컷 페이지·배치는 더 솎지 않는다 — 두 번 솎지 않기). footprint wash는 쓰지
+    않는다(현장 2026-09-17: fit 뷰의 박스 하나).
+  - 페이지 단계(플래너): 페이지는 항목이 아니라 그릇이므로 뷰 안의 컷 페이지를 모두
+    남기되, 디코드 예산(`HierOpts::rep_decode_bytes` 256 MiB, `rep_decode_bytes`
+    합)을 넘으면 플랜을 다시 해 페이지를 run 안 index로 2^Lp개 중 하나만 남긴다(Lp는
+    맞는 최소, `rep_page_level`, `rep_replans`; 진단 `FLOE_RUST_REP_DECODE_MB`). 남긴
+    페이지는 L − Lp를 `WsCell::page_levels`로 래스터에 넘긴다.
+  - 레코드 단계(래스터, `thin_record`): 페이지의 레코드는 반복 멤버가
+    min(level, ⌊log2 멤버 수⌋)를 맡고(위와 같은 stride/slot), 페이지 안 index가 나머지를
+    맡는다(2^lr의 배수만 그림, 선택된 index로 바로 건너뜀).
+  한 옥타브 축소하면 뷰의 컷 항목이 4배, 남기는 비율이 1/4이라 **뷰당 수는 컷 시점
+  근처로 유지**된다 — run이 아직 뷰보다 클 때의 이야기이고, run이 뷰에 다 들어온
+  뒤에는 항목이 더 늘지 않으므로 레벨을 **run이 처음 뷰에 맞은 줌의 값으로 고정**한다
+  (`level_capped`: run bbox(pbvh 루트·cbvh 루트·선형 run의 합집합)와 뷰의 px 크기만의
+  함수라 화면 이동에 안정; 면적이 아니라 두 축의 포함으로 판정). 집합은 frontier
+  격자 대표처럼 **아래로 포함**된다(S(L+1) ⊆ S(L): 넓은 뷰에 보이는 것은 가까운 모든
+  뷰에도 있었고 축소 중 새로 나타나는 것은 없다; 생존자는 사라질 수 있다). run의 첫
+  항목(index 0)은 어느 줌에서든 후보이고 실제 표시는 뷰 안·상위 배치 판정을 거친다.
+  비용 일정은 항목이 고르게 분포하고 비용이 비슷할 때의 기대치다. BVH 프루닝: 페이지
+  BVH는 run 구간에 2^Lp의 배수가 없으면 통째로 건너뛰고(크기 컷 노드와
+  `min(max_w, max_h) < page_hair`인 hairline 노드; Lp = 0이면 모두 내려간다), 자식
+  BVH는 노드 아래 배치들의 index 모듈러스 하한(노드의 가장 큰 자식으로 구한 L에서
+  노드 아래 가장 무거운 반복의 ⌊log2 멤버⌋를 뺀 값; 인덱스 리더가 셀별로 한 번 게으르게
+  만드는 `Ovm::cbvh_member_log2` 표)로 구간을 건너뛴다(`rep_pruned`). 대표는 sub-cut
+  예산을 타지 않는다. 진단용 sub-cut 규칙의 wash 판정에 쓰는 ink 추정은 멤버 수 ×
+  최소변 × 긴변(px) — 예전의 멤버 수 × max_w × max_h는 1000×1 선과 1×1000 선의 L을
+  200 % 밀집으로 보아 정사각형을 통째로 wash했다. 대표는 부분만 보이는 무늬이지
+  요약처럼 채워진 면이 아니다. 킬 스위치 `FLOE_RUST_PAGE_REPS=off`(뷰어),
+  `floe-index plan --page-reps 1`; 상태줄·perf 줄 `reps K pages/C children [L n]`.
+  gate `PageFrontierTests`(121만 hairline이 N≈19 페이지: 800/400/200 px 모두 N 페이지를
+  남기고 page level 0; 희소 레이어의 픽셀 밀도가 800 → 400 → 200 px로 감소하며 네
+  사분면 모두 켜짐; `FLOE_RUST_REP_DECODE_MB=4`면 re-plan해 2^Lp번째 페이지만 남고
+  구간 프루닝이 발생; L 두 선은 wash 없이 선 하나; 킬 스위치는 0 px), `SubCutTests`
+  (단일 페이지 레이어 = index 0 = 대표, 레벨 11의 점 무늬), `ThinPageTests`·
+  `test_render_detail…`.
   **점유 요약 레이어**(`ViewReq::page_skip`, OCCUPANCY_PLAN M2): 비트셋에 든
   레이어는 페이지 범위(prange)에서 통째로 건너뛰어 선택·디코드가 없고
   `summary_pages`로 센다. 순회(자식·프레임·다른 레이어)는 `vis` 그대로이되,

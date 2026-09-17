@@ -6718,6 +6718,9 @@ pub fn plan_cmd(args: &[String]) {
              \"rep_pages_washed\": {},\n  \
              \"rep_children\": {},\n  \
              \"rep_pruned\": {},\n  \
+             \"rep_decode_bytes\": {},\n  \
+             \"rep_page_level\": {},\n  \
+             \"rep_replans\": {},\n  \
              \"pts_enumerated\": {},\n  \"pts_fallback\": {},\n  \
              \"pts_offsets_scanned\": {},\n  \
              \"pts_selected\": {},\n  \
@@ -6751,6 +6754,9 @@ pub fn plan_cmd(args: &[String]) {
             st.rep_pages_washed,
             st.rep_children,
             st.rep_pruned,
+            st.rep_decode_bytes,
+            st.rep_page_level,
+            st.rep_replans,
             st.pts_enumerated,
             st.pts_fallback,
             st.pts_offsets_scanned,

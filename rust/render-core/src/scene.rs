@@ -588,6 +588,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![2, 4],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
@@ -654,6 +655,7 @@ mod tests {
                 WsCell {
                     key: top,
                     pages: Vec::new(),
+                    page_levels: Vec::new(),
                     insts: vec![WsInst {
                         child,
                         x: 0,
@@ -670,6 +672,7 @@ mod tests {
                     // page 2 decodes on layer 3; page 4 stays deferred, so
                     // its layer never reaches the mask table
                     pages: vec![2, 4],
+                    page_levels: Vec::new(),
                     insts: Vec::new(),
                     frames: vec![(bbox, Rep::One, 2)],
                     washes: Vec::new(),

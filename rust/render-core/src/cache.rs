@@ -81,6 +81,9 @@ pub struct PlanCullCounts {
     pub rep_kept: u64,
     pub rep_washed: u64,
     pub rep_children: u64,
+    /// the page level the decode budget forced (one representative
+    /// page in 2^Lp), 0 when every cut page in view was kept
+    pub rep_page_level: u64,
 }
 
 impl PlanCullCounts {
@@ -103,6 +106,7 @@ impl PlanCullCounts {
             rep_kept: st.rep_pages_kept,
             rep_washed: st.rep_pages_washed,
             rep_children: st.rep_children,
+            rep_page_level: st.rep_page_level as u64,
         }
     }
 
@@ -124,6 +128,7 @@ impl PlanCullCounts {
         self.rep_kept = self.rep_kept.saturating_add(other.rep_kept);
         self.rep_washed = self.rep_washed.saturating_add(other.rep_washed);
         self.rep_children = self.rep_children.saturating_add(other.rep_children);
+        self.rep_page_level = self.rep_page_level.max(other.rep_page_level);
     }
 }
 
@@ -649,6 +654,7 @@ impl Cache {
             plan.wcells.push(floe_vfs::hier::WsCell {
                 key: plan.top,
                 pages: Vec::new(),
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
@@ -706,6 +712,7 @@ impl Cache {
                 wcells: vec![floe_vfs::hier::WsCell {
                     key: top,
                     pages: Vec::new(),
+                    page_levels: Vec::new(),
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),

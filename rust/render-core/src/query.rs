@@ -861,6 +861,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![page_id],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
@@ -882,6 +883,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![0, 1],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
@@ -1140,6 +1142,7 @@ mod tests {
             wcells: vec![WsCell {
                 key: top,
                 pages: vec![0, 1],
+                page_levels: Vec::new(),
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),

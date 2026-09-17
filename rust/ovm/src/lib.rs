@@ -1537,6 +1537,12 @@ impl<'a> PtsRef<'a> {
 }
 
 pub struct Ovm {
+    /// per cell, per child-BVH node (index - cell.bvh_start): floor(log2)
+    /// of the largest repetition member count of any placement below -
+    /// the page frontier's run pruning needs it (a placement's index
+    /// modulus shrinks by its member count); built lazily per cell on
+    /// first use, once per open index
+    pub bvh_member_log2: std::sync::Mutex<std::collections::HashMap<u32, std::sync::Arc<[u8]>>>,
     pub data: Backing,
     pub unit: f64,
     pub src_size: u64,
@@ -1605,6 +1611,60 @@ pub fn map_file(path: &str) -> Result<Backing, String> {
 }
 
 impl Ovm {
+    /// floor(log2 members) of the heaviest placement under each
+    /// child-BVH node of `cell` (see the field); an empty slice when
+    /// the cell has no BVH
+    pub fn cbvh_member_log2(&self, cell: u32) -> std::sync::Arc<[u8]> {
+        if let Some(t) = self.bvh_member_log2.lock().unwrap().get(&cell) {
+            return t.clone();
+        }
+        let c = self.cell(cell);
+        let (start, count) = (c.bvh_start, c.bvh_count as usize);
+        let mut out = vec![0u8; count];
+        if count > 0 {
+            // post-order over the cell's nodes: children before parents
+            let mut stack: Vec<(u32, bool)> = vec![(start, false)];
+            while let Some((ni, done)) = stack.pop() {
+                let n = self.bvh(ni);
+                let slot = (ni - start) as usize;
+                if n.leaf {
+                    let mut best = 0u8;
+                    for k in 0..n.count as u64 {
+                        let pli = n.first as u64 + k;
+                        let h = self.place_head(pli);
+                        let members: u64 = match h.kind {
+                            0 => 1,
+                            1 => (h.na as u64).saturating_mul(h.nb as u64),
+                            _ => self.pts_ref(pli).map(|p| p.count as u64).unwrap_or(1),
+                        };
+                        best = best.max(members.max(1).ilog2().min(63) as u8);
+                    }
+                    if slot < count {
+                        out[slot] = best;
+                    }
+                } else if done {
+                    let mut best = 0u8;
+                    for k in 0..n.count as u32 {
+                        let ci = n.first + k;
+                        if ci >= start && ((ci - start) as usize) < count {
+                            best = best.max(out[(ci - start) as usize]);
+                        }
+                    }
+                    if slot < count {
+                        out[slot] = best;
+                    }
+                } else {
+                    stack.push((ni, true));
+                    for k in 0..n.count as u32 {
+                        stack.push((n.first + k, false));
+                    }
+                }
+            }
+        }
+        let t: std::sync::Arc<[u8]> = out.into();
+        self.bvh_member_log2.lock().unwrap().insert(cell, t.clone());
+        t
+    }
     /// full-strength open from an owned buffer: DEEP validation
     /// (per-record places / pts pool / instance-BVH bounds). Unit
     /// tests and gate fixtures come through here.
@@ -2366,6 +2426,7 @@ impl Ovm {
         }
 
         Ok(Ovm {
+            bvh_member_log2: std::sync::Mutex::new(std::collections::HashMap::new()),
             unit: f64::from_le_bytes(data[16..24].try_into().unwrap()),
             src_size: g64(&data, 24),
             src_mtime: g64(&data, 32),
