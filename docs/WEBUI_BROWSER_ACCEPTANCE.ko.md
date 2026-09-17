@@ -409,13 +409,52 @@ screenshot에서도 A/B의 검은 바탕 위 빨강·초록·파랑·노랑 막�
 원격 화면·Firefox/ETX·색 관리·input→photon/pacing이나 native renderer/WS 정확도의
 검증으로 확대하지 않는다. 파일 다운로드·서버 게시·설계 변경은 없고 About을 닫았다.
 
-## 9. 잔여
+## 9. 실제 키 입력·초안 보호 — 일부 완료
+
+§7.3의 기존 합성 탭에서 source·카메라·레이어 설정을 유지하며 실제 키 입력을
+전달했다. source 최대 depth는2다. 다음은 DOM/AX의 적용 값으로 확인한 결과이며,
+단순 요청 직후의 이전 값/Rendering 상태를 완료로 집계하지 않았다.
+
+| 검사 | 관측 |
+|---|---|
+| 숫자 depth | canvas `1` → depth1·Baked depth1·최종3pages |
+| 상대 depth | `>`로1→2; 다시 `>`는2 유지; `<`는2→1 |
+| 하한 | `0` 적용 뒤 `<`도0 유지·Baked depth0 |
+| full 입력 | 개별 실제 `9` 두 번 후 depth가 `full`로 변경 |
+| 좌표 편집 보호 | X 초안에 `987654`, Left, `fb1` 입력 → `98765fb14`; 카메라 이동·frames/mono 토글·depth 변경 없음(gen29 유지) |
+| 초안 취소 | X 입력의 Escape → 현재 중심200µm로 복원; Y220/view500 유지 |
+| Tab 순환 | canvas에서 Tab 세 번 → Hide other errors → Hide all → All |
+| 포커스 이탈 | canvas Shift+Tab → Go 버튼(`goto`)으로 이동 |
+| 종료 확인 진입 | canvas `q` → 확인 dialog, Cancel에 초기 포커스. 즉시 종료하지 않음 |
+
+캔버스의 generic role 조회와 비입력 요소의 `pressSequentially`는 도구가 거부했다.
+화면의 실제 `viewport` 요소를 재확인한 뒤 개별 key press로 검사했으며, 도구 실패를
+앱 키 입력 실패로 계산하지 않는다. `99`의 정확한 이벤트 간격·경계1초를 측정한
+검사가 아니라 그 단축키의 실제 full 적용을 확인한 것이다. Tab 검사는 모드 선택
+값의 순환이며 이때 룰러/선택이0개여서 모든 overlay 종류의 픽셀 숨김을 증명하지 않는다.
+오른쪽 버튼 drag는 제공된 자동화 API로 전달할 수 없어 박스 줌의 실제 수용은
+계속 미검증이다. DOM에서 이벤트를 합성해 물리 조작 수용을 대신하지 않았다.
+
+X200/Y220/view500·depth99·Frames/Labels on·Mono off·Overlays All로 복원했다.
+이후 종료 확인의 Cancel에 Enter를 보냈고 dialog는 닫혔지만 화면에 `Local service
+is unavailable`가 나왔다. 이때 기존57643과 새 테스트56087 모두 LISTEN 소켓이
+없었다. **Cancel이 서버를 종료시켰다고도, 취소 후 정상 연결이 유지됐다고도
+판정하지 않는다.** 종료 원인/시점의 인과는 미확정이고 취소 경로의 실제 재검증을
+남긴다. 서버 재시작이나 다른 프로세스 종료는 이 검사에서 수행하지 않았다.
+
+사용자가 새 저장 세션의56087 포트를 인계했으나 해당 탭에는 `Launch with
+floe2-web view and use its private session link`가 표시돼 아직 인증되지 않았다.
+비공개 JSON의 전체 URL을 사용자가 직접 열도록 요청했으며 인증값은 읽지 않았다.
+이후 그 탭도 사라져 §7.2 저장 roundtrip은 시작하지 못했다. 새 세션 입력7파일의
+기준 SHA-256을 수집했으며 예정된 두 reviewer sidecar는 없는 상태였다.
+
+## 10. 잔여
 
 현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
 공유, §5의 일부 레이어/스타일·스냅 없는 수동 측정, §6의 두 설정 다운로드와
 §6.1의 flat9레이어 Native/Calibre 불러오기·복원, §7의 작은 ASCII DRC 최초 등록·
 SVRF 교체·두 CD·레이어 격리/복원, §7.3의 작은 DRC 필터/순환/선택 복원과 §8의
-Chrome 표시 진단이다. 각 절의 미검사 범위 및 기존 DRC 교체/실패,
+Chrome 표시 진단, §9의 일부 키 입력·초안 보호다. 각 절의 미검사 범위 및 기존 DRC 교체/실패,
 pack 생성·메모/waive 저장/충돌/복구·슬롯 편집·clipboard·auth/BFCache/종료는 남는다.
 이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
 

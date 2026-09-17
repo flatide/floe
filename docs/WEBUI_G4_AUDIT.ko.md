@@ -164,6 +164,10 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    박스 선택·reload 복원을 확인했다. 첫 worker 실패 원인은 미확정이며 새 교체 수정
    바이너리/저장 수용은 아니다. §8은 실제 Chrome의 PNG/raw/crop 픽셀 차이0과
    screenshot 색 막대/흰 십자 관측이다. 원격 화면·G1/G2 수용으로 확대하지 않는다.
+   §9는 depth 숫자/상대/하한/full, 좌표 초안의 단축키 보호·Escape, Tab 모드 순환과
+   Shift+Tab 포커스 이탈을 확인한다. q의 Cancel 초기 포커스는 확인했으나 취소 뒤
+   서버 리스너 부재로 연결 유지 여부·종료 원인은 미확정이다. 오른쪽 drag와 실제
+   저장 세션 인증은 아직 남고, 입력 전체 수용이나 종료/복구 PASS로 집계하지 않는다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격
