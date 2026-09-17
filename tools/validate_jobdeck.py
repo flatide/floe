@@ -2872,18 +2872,16 @@ class ThinPageTests(unittest.TestCase):
         # blanket sub-cut rules (the same picture here)
         noreps = {"FLOE_RUST_PAGE_REPS": "off"}
         wash = {"FLOE_RUST_SUB_CUT_WASH": "on"}
-        # the representative page's records thin by level (the 0.1 um
-        # lines are 11 levels under a 10 um cut: one line in 2048 - the
-        # first): a few pixels, never nothing, never everything
-        thinned = self._lit(self._rgb("thin.oas", "high"))
-        self.assertTrue(0 < thinned < self._lit(exact), thinned)
+        # the representative page's 400 lines are within the item
+        # budget (level 0): drawn exactly
+        self.assertEqual(self._rgb("thin.oas", "high"), exact)
         self.assertEqual(self._lit(self._rgb("thin.oas", "high", noreps)), 0)
         self.assertEqual(self._rgb("thin.oas", "high", wash), exact)
         # the mask policy on the same file: identical to exact
         self.assertEqual(self._rgb("thin.oas", "high", thin="keep"), exact)
         # explicit cull is the default; the diagnostic override wins
         # over the request either way
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high", thin="cull")), thinned)
+        self.assertEqual(self._rgb("thin.oas", "high", thin="cull"), exact)
         self.assertEqual(self._lit(self._rgb("thin.oas", "high", dict(noreps), thin="cull")), 0)
         self.assertEqual(self._rgb("thin.oas", "high",
                                    {"FLOE_RUST_PAGE_HAIRLINE": "keep"}), exact)
@@ -2910,7 +2908,7 @@ class ThinPageTests(unittest.TestCase):
         noreps = {"FLOE_RUST_PAGE_REPS": "off"}
         self.assertEqual(self._lit(self._rgb("thin.oas", "high", noreps)), 0)
         self.assertGreater(self._lit(self._rgb("thinmix.oas", "high", noreps)), 100)
-        self.assertGreater(self._lit(self._rgb("thin.oas", "high")), 0)
+        self.assertGreater(self._lit(self._rgb("thin.oas", "high")), 100)
 
     def test_deck_keeps_thin_pages_by_default(self):
         exact = self._rgb("thin.jb", "exact")

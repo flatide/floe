@@ -40,31 +40,31 @@ pub const WASH_MIN_COVERAGE: f64 = 1.0 / 256.0;
 pub const WASH_MIN_COVERAGE_HAIR: f64 = 1.0 / 8.0;
 
 /// Representatives (the page frontier, user design 2026-09-17,
-/// staged after the review of the same day): a cut item whose measure
-/// is m against the threshold t that cut it sits L = floor(log2
-/// (t/m)^2) LEVELS below the cut (two levels per octave), and one item
-/// in 2^L of its kind survives - by index within the owning run, the
-/// thinning applied ONCE along the path and shared between the stages:
-/// a placement's repetition members absorb min(L, log2 members)
-/// levels (balanced strides, thin_grid) and its index within the
-/// cell's placements the rest; a page is a container, kept subject to
-/// the decode budget (rep_page_level, one page in 2^Lp by index) with
-/// its remaining L - Lp handed to the raster, where a record's members
-/// absorb min(., log2 members) and its index the rest. Zooming out one
-/// octave quadruples the cut items in view and keeps a quarter, so the
-/// count in view stays about what it was at the cut - while the run
-/// still exceeds the view; once a run fits the view its level is
-/// capped at the level it had at the zoom where it first fit
-/// (level_capped: a function of the run's box and the view's pixel
-/// size, so a pan changes nothing), and the survivors are nested the
-/// way the frontier's lattice representatives are (rev 45): S(L+1) is
-/// a subset of S(L), a multiple of 2^(L+1) being a multiple of 2^L -
-/// what a wider view shows was shown at every closer view, nothing
-/// pops in as you zoom out. A run's item 0 is a candidate at any zoom
-/// (shown when in view and under an expanded parent). A cell reached
-/// through a representative placement is drawn WHOLE (rep_full): its
-/// cut content was thinned at the placement, never twice. Levels are
-/// capped so 2^L fits a u64.
+/// staged after the review of the same day, the level set by an item
+/// budget after the field of the same day): what the cut drops is
+/// thinned to one item in 2^L instead of vanishing, L the frame's
+/// LEVEL - the smallest with (cut items in view) / 2^L within
+/// HierOpts::rep_items (a counting pass first; 0 while the view holds
+/// fewer). Zooming out one octave quadruples the cut items in view,
+/// so L grows by two and a quarter survive - the user's "one in four"
+/// - and once the whole layout is in view the count stops growing and
+/// so does L: the fit view shows the budget's worth of items spread
+/// over the whole chip (a per-run cap tried before froze every small
+/// run at level 0 and drew whole blocks). The thinning is applied ONCE
+/// along the path and shared between the stages: a placement's
+/// repetition members absorb min(L, log2 members) levels (balanced
+/// strides, thin_grid) and its index within the cell's placements the
+/// rest, its child then drawn whole (rep_full); a page is a container,
+/// kept subject to the decode budget (rep_page_level, one page in 2^Lp
+/// by index) with L - Lp handed to the raster, where a record's
+/// members absorb min(., log2 members) and its index the rest. The
+/// survivors are nested the way the frontier's lattice representatives
+/// are (rev 45): S(L+1) is a subset of S(L), a multiple of 2^(L+1)
+/// being a multiple of 2^L - what a wider view shows was shown at
+/// every closer view, nothing pops in as you zoom out; a pan that
+/// crosses a power of two of the count moves L by one (no hysteresis
+/// yet). A run's item 0 is a candidate at any zoom. Levels are capped
+/// so 2^L fits a u64.
 pub const REP_LEVELS_MAX: u32 = 40;
 
 /// levels below the cut: floor(log2((threshold / measure)^2)), 0 at or
@@ -186,6 +186,31 @@ fn sub_cut_wash_px() -> f64 {
 
 /// HierOpts::rep_decode_bytes default: 256 MiB
 pub const REP_DECODE_BYTES: u64 = 256 << 20;
+
+/// HierOpts::rep_items default: a million items a frame - a dense
+/// dot field on a 2 Mpx view, a few hundred ms of raster
+pub const REP_ITEMS: u64 = 1 << 20;
+
+fn rep_items() -> u64 {
+    static B: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *B.get_or_init(|| {
+        std::env::var("FLOE_RUST_REP_ITEMS_M")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .map(|v| (v * 1048576.0) as u64)
+            .unwrap_or(REP_ITEMS)
+    })
+}
+
+/// the smallest level with `items / 2^L <= budget` (0 when within)
+pub fn level_for(items: u64, budget: u64) -> u32 {
+    if budget == 0 || items <= budget {
+        return 0;
+    }
+    let over = items.div_ceil(budget);
+    (u64::BITS - (over - 1).leading_zeros()).min(REP_LEVELS_MAX)
+}
 
 fn rep_decode_bytes() -> u64 {
     static B: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -329,6 +354,12 @@ pub struct HierOpts {
     /// their level. 0 = no budget. FLOE_RUST_REP_DECODE_MB overrides
     /// (diagnostic).
     pub rep_decode_bytes: u64,
+    /// The page frontier's item budget per plan: the cut items in view
+    /// (page members, placement members times the child's recursive
+    /// record members) are thinned to at most about this many; sets
+    /// the frame's level. 0 = no thinning. FLOE_RUST_REP_ITEMS_M
+    /// overrides (millions, diagnostic).
+    pub rep_items: u64,
     /// Field diagnosis (2026-09-10): record one ExplainRow per page,
     /// page-BVH node, child placement / child-BVH node and frame the
     /// walk judged INSIDE the view - kept, culled by size, hairline,
@@ -374,6 +405,7 @@ impl Default for HierOpts {
             sub_cut_sparse_px: sub_cut_sparse_px(),
             sub_cut_wash_px: sub_cut_wash_px(),
             rep_decode_bytes: rep_decode_bytes(),
+            rep_items: rep_items(),
             explain: false,
         }
     }
@@ -457,6 +489,10 @@ pub struct HierStats {
     pub rep_decode_bytes: u64,
     pub rep_page_level: u32,
     pub rep_replans: u32,
+    /// the cut items the counting pass found in view and the level
+    /// the item budget set for the frame
+    pub rep_items: u64,
+    pub rep_level: u32,
     /// pages selected whose every record is thin (max_min < hairline
     /// x cut): what the page hairline rule would have dropped
     pub thin_pages_kept: u64,
@@ -762,22 +798,32 @@ pub fn walk_vis(req: &ViewReq) -> Vec<u8> {
 }
 
 pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
-    let mut plan = plan_hier_pass(v, req, opts, 0);
-    if req.page_reps && opts.rep_decode_bytes > 0 && plan.stats.rep_decode_bytes > opts.rep_decode_bytes {
+    let reps = req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0;
+    if !reps {
+        return plan_hier_pass(v, req, opts, 0, 0, false);
+    }
+    // pass 1 counts the cut items in view; the item budget sets the
+    // frame's level (one item in 2^L); pass 2 selects
+    let counted = plan_hier_pass(v, req, opts, 0, 0, true);
+    let items = counted.stats.rep_items;
+    let level = level_for(items, opts.rep_items);
+    let mut plan = plan_hier_pass(v, req, opts, level, 0, false);
+    plan.stats.rep_items = items;
+    if opts.rep_decode_bytes > 0 && plan.stats.rep_decode_bytes > opts.rep_decode_bytes {
         // the representative pages would decode more than the budget:
         // redo the plan with the pages thinned one in 2^Lp by index,
         // Lp the smallest level that fits (their records take the rest
-        // of their level in the raster). Deterministic in the view.
-        let over = plan.stats.rep_decode_bytes.div_ceil(opts.rep_decode_bytes);
-        let level = (u64::BITS - (over - 1).leading_zeros()).min(REP_LEVELS_MAX);
-        let mut again = plan_hier_pass(v, req, opts, level);
+        // of the level in the raster). Deterministic in the view.
+        let page_level = level_for(plan.stats.rep_decode_bytes, opts.rep_decode_bytes);
+        let mut again = plan_hier_pass(v, req, opts, level, page_level, false);
         again.stats.rep_replans = 1;
+        again.stats.rep_items = items;
         plan = again;
     }
     plan
 }
 
-fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32) -> HierPlan {
+fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, level: u32, page_level: u32, counting: bool) -> HierPlan {
     let structural_frontier = opts.frame_cap != 0;
     let mut h = Hier {
         v,
@@ -801,6 +847,8 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32) -> H
         rep_edges: HashMap::new(),
         rep_full: HashSet::new(),
         rep_page_level: page_level,
+        rep_level: level,
+        rep_counting: counting,
         page_levels: HashMap::new(),
         wash_walk_budget: opts.sub_cut_walk_budget,
         sparse_px_left: opts.sub_cut_sparse_px,
@@ -857,6 +905,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32) -> H
     }
     let mut st = h.st;
     st.rep_page_level = page_level;
+    st.rep_level = level;
     st.wc_cells = h.out.len() as u64;
     st.wc_variants =
         h.out.keys().filter(|&&(_, r)| r != REM_FULL).count() as u64;
@@ -1113,6 +1162,10 @@ struct Hier<'a> {
     rep_full: HashSet<u32>,
     /// the page level of this pass (one representative page in 2^Lp)
     rep_page_level: u32,
+    /// the frame's level (one cut item in 2^L) and whether this pass
+    /// only counts the cut items in view (no selection)
+    rep_level: u32,
+    rep_counting: bool,
     /// the levels a kept representative page hands to the raster
     page_levels: HashMap<u32, u8>,
     /// remaining per-plan sub-cut budgets (HierOpts::sub_cut_sparse_px
@@ -1204,7 +1257,6 @@ impl<'a> Hier<'a> {
                 continue;
             }
             if pr.pbvh_root == PBVH_NONE {
-                let run = if self.reps { self.linear_run(&pr) } else { BBox::EMPTY };
                 for pi in pr.page_lo..pr.page_lo + pr.page_count {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
@@ -1220,10 +1272,17 @@ impl<'a> Hier<'a> {
                         // rest of its level in the raster; a cell
                         // reached through a representative placement
                         // draws every page whole)
+                        if self.rep_counting && in_view {
+                            // the counting pass: the page's members are
+                            // the frame's cut items
+                            self.st.rep_items = self.st.rep_items.saturating_add(p.members);
+                            self.st.cull_page_size += 1;
+                            continue;
+                        }
                         let full = self.rep_full.contains(&ci);
                         let rep = in_view
                             && self.reps
-                            && (full || rep_keeps((pi - pr.page_lo) as u64, self.rep_page_level));
+                            && rep_keeps((pi - pr.page_lo) as u64, self.rep_page_level);
                         let washable = in_view && (self.sub_cut_wash || rep);
                         match self.sub_cut_verdict(&p, &boxes[..], size_cut, washable, rep) {
                             SubCut::Keep => {
@@ -1235,7 +1294,7 @@ impl<'a> Hier<'a> {
                                     let level = if full {
                                         0
                                     } else {
-                                        self.page_level(&p, size_cut, &run).saturating_sub(self.rep_page_level)
+                                        self.rep_level.saturating_sub(self.rep_page_level)
                                     };
                                     self.page_levels.insert(pi, level.min(255) as u8);
                                     self.st.rep_decode_bytes += p.usize_ as u64;
@@ -1413,9 +1472,11 @@ impl<'a> Hier<'a> {
             // the page frontier's run for this cell's placements (the
             // child-BVH root's box) and the per-node heaviest-member
             // table it prunes with
-            let place_run = if self.reps { self.v.bvh(cell.bvh_start).bbox } else { BBox::EMPTY };
-            let member_table: std::sync::Arc<[u8]> =
-                if self.reps { self.v.cbvh_member_log2(ci) } else { std::sync::Arc::from(Vec::new()) };
+            let (member_table, items_table): (std::sync::Arc<[u8]>, std::sync::Arc<[u8]>) = if self.reps {
+                self.v.cbvh_member_log2(ci)
+            } else {
+                (std::sync::Arc::from(Vec::new()), std::sync::Arc::from(Vec::new()))
+            };
             let mut edges: BTreeSet<u64> = BTreeSet::new();
             let mut framed: HashSet<u64> = HashSet::new();
             for b in &boxes {
@@ -1442,30 +1503,32 @@ impl<'a> Hier<'a> {
                         // may live below (index a multiple of 4^k within
                         // the cell's placements, k from the node's largest
                         // child): descend; a subtree without one is pruned
+                        if self.rep_counting && r != 0 && node.bbox.intersects(b) && !self.sub_cut_wash {
+                            // the counting pass: the items below a cut
+                            // node, from the index's lazy per-node table
+                            let items = items_table
+                                .get((ni - cell.bvh_start) as usize)
+                                .map(|&l| 1u64 << l.min(63))
+                                .unwrap_or(0);
+                            self.st.rep_items = self.st.rep_items.saturating_add(items);
+                            continue;
+                        }
                         let rep_descend = !self.sub_cut_wash
                             && self.reps
                             && r != 0
                             && node.bbox.intersects(b)
                             && (self.rep_full.contains(&ci) || {
                                 // a lower bound on every placement's index
-                                // modulus below: its level from the node's
-                                // largest child (at least every child's),
-                                // less the member levels the heaviest
+                                // modulus below: the frame's level less
+                                // the member levels the heaviest
                                 // repetition below could absorb (the
                                 // index's lazy per-node table)
-                                let mut l = 0;
-                                if (node.max_dim as u64) < cut {
-                                    l = self.level_capped(node.max_dim as u64, cut, &place_run);
-                                }
-                                if (node.max_min as u64) < hair_prune {
-                                    l = l.max(self.level_capped(node.max_min as u64, hair_prune, &place_run));
-                                }
                                 let heaviest = member_table
                                     .get((ni - cell.bvh_start) as usize)
                                     .copied()
                                     .unwrap_or(REP_LEVELS_MAX as u8) as u32;
                                 let (lo, hi) = self.cbvh_places(ni);
-                                rep_in_run(lo, hi, cell.place_start, l.saturating_sub(heaviest))
+                                rep_in_run(lo, hi, cell.place_start, self.rep_level.saturating_sub(heaviest))
                             });
                         if !rep_descend {
                         if !self.sub_cut_wash || !node.bbox.intersects(b) {
@@ -1575,8 +1638,16 @@ impl<'a> Hier<'a> {
                                 // placement index, place_rep), never
                                 // washed as its footprint
                                 if !self.sub_cut_wash && self.reps {
+                                    if self.rep_counting {
+                                        let fp = self.place_footprint(pli, &h, &rb);
+                                        if boxes.iter().any(|b| fp.intersects(b)) {
+                                            self.count_place(pli, &h);
+                                        }
+                                        self.st.cull_size += 1;
+                                        continue;
+                                    }
                                     let full = self.rep_full.contains(&ci);
-                                    let lm = if full { Some(0) } else { self.place_rep(pli, &h, cw, chh, &place_run, cell.place_start) };
+                                    let lm = if full { Some(0) } else { self.place_rep(pli, &h, cell.place_start) };
                                     if let Some(lm) = lm {
                                         self.st.rep_children += 1;
                                         self.note_child("rep_expand", pli, &h, &rb, &boxes);
@@ -1652,8 +1723,16 @@ impl<'a> Hier<'a> {
                         let size_cut = cw < cut && chh < cut;
                         if size_cut || cw.min(chh) < self.hair {
                             if !self.sub_cut_wash && self.reps {
+                                if self.rep_counting {
+                                    let fp = self.place_footprint(pli, &h, &rb);
+                                    if boxes.iter().any(|b| fp.intersects(b)) {
+                                        self.count_place(pli, &h);
+                                    }
+                                    self.st.cull_size += 1;
+                                    continue;
+                                }
                                 let full = self.rep_full.contains(&ci);
-                                let lm = if full { Some(0) } else { self.place_rep(pli, &h, cw, chh, &place_run, cell.place_start) };
+                                let lm = if full { Some(0) } else { self.place_rep(pli, &h, cell.place_start) };
                                 if let Some(lm) = lm {
                                     self.st.rep_children += 1;
                                     self.note_child("rep_expand", pli, &h, &rb, &boxes);
@@ -1841,56 +1920,6 @@ impl<'a> Hier<'a> {
         }
     }
 
-    /// rep_level with the run cap: the level a cut item would have at
-    /// the zoom where its run's box first fits the view (both axes) -
-    /// beyond that zoom the items in view no longer multiply, so the
-    /// level stops growing; a function of the run's box and the view's
-    /// size only, so a pan changes nothing
-    fn level_capped(&self, measure: u64, threshold: u64, run: &BBox) -> u32 {
-        let vw = (self.req.view.x1 - self.req.view.x0).max(1) as f64;
-        let vh = (self.req.view.y1 - self.req.view.y0).max(1) as f64;
-        let rw = (run.x1 - run.x0).max(1) as f64;
-        let rh = (run.y1 - run.y0).max(1) as f64;
-        let s = (rw / vw).max(rh / vh);
-        let t = if s < 1.0 { (threshold as f64 * s).floor() as u64 } else { threshold };
-        rep_level(measure, t)
-    }
-
-    /// the levels a cut page sits below its cut: the hairline cut
-    /// under cull and the size cut, whichever cut it first (the deeper
-    /// one - it vanished at that zoom), capped by its run
-    fn page_level(&self, p: &floe_ovm::PageV, size_cut: bool, run: &BBox) -> u32 {
-        let mut l = 0;
-        if size_cut {
-            l = self.level_capped(p.max_w.max(p.max_h), self.cut, run);
-        }
-        if self.page_hair > 0 && p.max_min < self.page_hair {
-            l = l.max(self.level_capped(p.max_min, self.page_hair, run));
-        }
-        l
-    }
-
-    /// the levels a cut placement (child box cw x chh) sits below its cut
-    fn place_level(&self, cw: u64, chh: u64, run: &BBox) -> u32 {
-        let mut l = 0;
-        if cw < self.cut && chh < self.cut {
-            l = self.level_capped(cw.max(chh), self.cut, run);
-        }
-        if cw.min(chh) < self.hair {
-            l = l.max(self.level_capped(cw.min(chh), self.hair, run));
-        }
-        l
-    }
-
-    /// the union box of a linear page run (at most PBVH_LEAF pages)
-    fn linear_run(&self, pr: &floe_ovm::PrangeV) -> BBox {
-        let mut b = BBox::EMPTY;
-        for pi in pr.page_lo..pr.page_lo + pr.page_count {
-            b.grow(&self.v.page(pi).bbox);
-        }
-        b
-    }
-
     /// the pages of a page-BVH subtree, [lo, hi): pages are laid out in
     /// tree order (finish_layer's leaf-order permute), so the first
     /// leaf's first page and the last leaf's end bound the subtree
@@ -1945,19 +1974,49 @@ impl<'a> Hier<'a> {
     /// the survivors stay nested; and never a footprint wash: the
     /// survivors are drawn whole (field 2026-09-17: the washed array
     /// footprint was the one box left at the fit view).
-    fn place_rep(&self, pli: u64, h: &floe_ovm::PlaceHead, cw: u64, chh: u64, run: &BBox, place_start: u32) -> Option<u32> {
-        let l = self.place_level(cw, chh, run);
-        let members: u64 = match h.kind {
-            0 => 1,
-            1 => (h.na as u64).saturating_mul(h.nb as u64),
-            _ => self.v.pts_ref(pli).map(|p| p.count as u64).unwrap_or(1),
-        };
+    fn place_rep(&self, pli: u64, h: &floe_ovm::PlaceHead, place_start: u32) -> Option<u32> {
+        let l = self.rep_level;
+        let members = self.place_members(pli, h);
         let lm = member_levels(members, l);
         if rep_keeps(pli.saturating_sub(place_start as u64), l - lm) {
             Some(lm)
         } else {
             None
         }
+    }
+
+    /// a placement's whole footprint (the repetition extent of the
+    /// child's box) in the parent's frame
+    fn place_footprint(&self, pli: u64, h: &floe_ovm::PlaceHead, rb: &BBox) -> BBox {
+        let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
+        let b0 = xf_bbox(&t0, rb);
+        match h.kind {
+            0 => b0,
+            1 => grow_by_offsets(
+                &b0,
+                &grid_ovis(0, h.na as i64 - 1, 0, h.nb as i64 - 1, h.va, h.vb),
+            ),
+            _ => match self.v.pts_ref(pli) {
+                Some(pr) => grow_by_offsets(&b0, &pr.extent()),
+                None => b0,
+            },
+        }
+    }
+
+    /// a placement's repetition member count
+    fn place_members(&self, pli: u64, h: &floe_ovm::PlaceHead) -> u64 {
+        match h.kind {
+            0 => 1,
+            1 => (h.na as u64).saturating_mul(h.nb as u64),
+            _ => self.v.pts_ref(pli).map(|p| p.count as u64).unwrap_or(1),
+        }
+    }
+
+    /// the counting pass: a cut placement in view adds its members
+    /// times the child's recursive record members to the frame's items
+    fn count_place(&mut self, pli: u64, h: &floe_ovm::PlaceHead) {
+        let per = self.v.cell(h.child).rec_members.max(1);
+        self.st.rep_items = self.st.rep_items.saturating_add(self.place_members(pli, h).saturating_mul(per));
     }
 
     /// Whether a culled item is a hairline cut under the cull policy
@@ -2117,7 +2176,6 @@ impl<'a> Hier<'a> {
         page_lo: u32,
         washes: &mut Vec<(u32, BBox)>,
     ) {
-        let run = self.v.pbvh(root).bbox;
         let mut stack = vec![root];
         while let Some(ni) = stack.pop() {
             let n = self.v.pbvh(ni);
@@ -2159,7 +2217,7 @@ impl<'a> Hier<'a> {
                     // the run, Lp the pass' page level): descend; a
                     // subtree without one is pruned
                     let (lo, hi) = self.pbvh_pages(ni);
-                    self.rep_full.contains(&cell) || rep_in_run(lo, hi, page_lo, self.rep_page_level)
+                    self.rep_counting || rep_in_run(lo, hi, page_lo, self.rep_page_level)
                 } {
                     // descend
                 } else {
@@ -2169,11 +2227,11 @@ impl<'a> Hier<'a> {
                     continue;
                 }
             } else if self.reps
+                && !self.rep_counting
                 && self.rep_page_level > 0
                 && self.page_hair > 0
                 && n.max_w.min(n.max_h) < self.page_hair
                 && n.bbox.intersects(b)
-                && !self.rep_full.contains(&cell)
             {
                 // every page below is hairline-cut (a page's max_min is
                 // at most the smaller of the node's max_w / max_h, so
@@ -2199,10 +2257,17 @@ impl<'a> Hier<'a> {
                     if size_cut || p.max_min < self.page_hair {
                         let in_view = p.bbox.intersects(b);
                         // see the linear page loop
+                        if self.rep_counting && in_view {
+                            // the counting pass: the page's members are
+                            // the frame's cut items
+                            self.st.rep_items = self.st.rep_items.saturating_add(p.members);
+                            self.st.cull_page_size += 1;
+                            continue;
+                        }
                         let full = self.rep_full.contains(&cell);
                         let rep = in_view
                             && self.reps
-                            && (full || rep_keeps((pi - page_lo) as u64, self.rep_page_level));
+                            && rep_keeps((pi - page_lo) as u64, self.rep_page_level);
                         let washable = in_view && (self.sub_cut_wash || rep);
                         match self.sub_cut_verdict(&p, std::slice::from_ref(b), size_cut, washable, rep) {
                             SubCut::Keep => {
@@ -2210,7 +2275,7 @@ impl<'a> Hier<'a> {
                                     let level = if full {
                                         0
                                     } else {
-                                        self.page_level(&p, size_cut, &run).saturating_sub(self.rep_page_level)
+                                        self.rep_level.saturating_sub(self.rep_page_level)
                                     };
                                     self.page_levels.insert(pi, level.min(255) as u8);
                                     self.st.rep_decode_bytes += p.usize_ as u64;

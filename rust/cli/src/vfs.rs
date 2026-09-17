@@ -6721,6 +6721,8 @@ pub fn plan_cmd(args: &[String]) {
              \"rep_decode_bytes\": {},\n  \
              \"rep_page_level\": {},\n  \
              \"rep_replans\": {},\n  \
+             \"rep_items\": {},\n  \
+             \"rep_level\": {},\n  \
              \"pts_enumerated\": {},\n  \"pts_fallback\": {},\n  \
              \"pts_offsets_scanned\": {},\n  \
              \"pts_selected\": {},\n  \
@@ -6757,6 +6759,8 @@ pub fn plan_cmd(args: &[String]) {
             st.rep_decode_bytes,
             st.rep_page_level,
             st.rep_replans,
+            st.rep_items,
+            st.rep_level,
             st.pts_enumerated,
             st.pts_fallback,
             st.pts_offsets_scanned,

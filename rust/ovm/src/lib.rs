@@ -1542,7 +1542,7 @@ pub struct Ovm {
     /// the page frontier's run pruning needs it (a placement's index
     /// modulus shrinks by its member count); built lazily per cell on
     /// first use, once per open index
-    pub bvh_member_log2: std::sync::Mutex<std::collections::HashMap<u32, std::sync::Arc<[u8]>>>,
+    pub bvh_member_log2: std::sync::Mutex<std::collections::HashMap<u32, (std::sync::Arc<[u8]>, std::sync::Arc<[u8]>)>>,
     pub data: Backing,
     pub unit: f64,
     pub src_size: u64,
@@ -1611,24 +1611,29 @@ pub fn map_file(path: &str) -> Result<Backing, String> {
 }
 
 impl Ovm {
-    /// floor(log2 members) of the heaviest placement under each
-    /// child-BVH node of `cell` (see the field); an empty slice when
-    /// the cell has no BVH
-    pub fn cbvh_member_log2(&self, cell: u32) -> std::sync::Arc<[u8]> {
+    /// per child-BVH node of `cell`: (floor(log2 members) of its
+    /// heaviest placement, floor(log2) of the items below it - members
+    /// times the child's recursive record members, at least one); empty
+    /// slices when the cell has no BVH
+    pub fn cbvh_member_log2(&self, cell: u32) -> (std::sync::Arc<[u8]>, std::sync::Arc<[u8]>) {
         if let Some(t) = self.bvh_member_log2.lock().unwrap().get(&cell) {
             return t.clone();
         }
         let c = self.cell(cell);
         let (start, count) = (c.bvh_start, c.bvh_count as usize);
-        let mut out = vec![0u8; count];
+        let mut heaviest = vec![0u8; count];
+        let mut items: Vec<u64> = vec![0; count];
         if count > 0 {
             // post-order over the cell's nodes: children before parents
             let mut stack: Vec<(u32, bool)> = vec![(start, false)];
             while let Some((ni, done)) = stack.pop() {
                 let n = self.bvh(ni);
                 let slot = (ni - start) as usize;
+                if slot >= count {
+                    continue;
+                }
                 if n.leaf {
-                    let mut best = 0u8;
+                    let (mut best, mut sum) = (0u8, 0u64);
                     for k in 0..n.count as u64 {
                         let pli = n.first as u64 + k;
                         let h = self.place_head(pli);
@@ -1638,21 +1643,22 @@ impl Ovm {
                             _ => self.pts_ref(pli).map(|p| p.count as u64).unwrap_or(1),
                         };
                         best = best.max(members.max(1).ilog2().min(63) as u8);
+                        let per = self.cell(h.child).rec_members.max(1);
+                        sum = sum.saturating_add(members.saturating_mul(per));
                     }
-                    if slot < count {
-                        out[slot] = best;
-                    }
+                    heaviest[slot] = best;
+                    items[slot] = sum;
                 } else if done {
-                    let mut best = 0u8;
+                    let (mut best, mut sum) = (0u8, 0u64);
                     for k in 0..n.count as u32 {
                         let ci = n.first + k;
                         if ci >= start && ((ci - start) as usize) < count {
-                            best = best.max(out[(ci - start) as usize]);
+                            best = best.max(heaviest[(ci - start) as usize]);
+                            sum = sum.saturating_add(items[(ci - start) as usize]);
                         }
                     }
-                    if slot < count {
-                        out[slot] = best;
-                    }
+                    heaviest[slot] = best;
+                    items[slot] = sum;
                 } else {
                     stack.push((ni, true));
                     for k in 0..n.count as u32 {
@@ -1661,7 +1667,8 @@ impl Ovm {
                 }
             }
         }
-        let t: std::sync::Arc<[u8]> = out.into();
+        let items_log2: Vec<u8> = items.into_iter().map(|v| v.max(1).ilog2().min(63) as u8).collect();
+        let t: (std::sync::Arc<[u8]>, std::sync::Arc<[u8]>) = (heaviest.into(), items_log2.into());
         self.bvh_member_log2.lock().unwrap().insert(cell, t.clone());
         t
     }

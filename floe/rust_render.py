@@ -1106,6 +1106,8 @@ class RustRenderWorker:
                 # the page level the decode budget forced (0 = all cut
                 # pages in view kept, their records thinned instead)
                 "rep_page_level": _wire_int(fields, "rep_page_level"),
+                # the frame's level: one cut item in 2^L (the item budget)
+                "rep_level": _wire_int(fields, "rep_level"),
             },
             # occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): layers
             # drawn from design.ovo instead of their pages, the cells

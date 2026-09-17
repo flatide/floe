@@ -3647,10 +3647,14 @@ class Viewer:
                             text += ", reps %s pages/%s children" % (
                                 fmt_count(culls.get("rep_kept", 0)),
                                 fmt_count(culls.get("rep_children", 0)))
+                            if culls.get("rep_level"):
+                                # the item budget's level: one cut item
+                                # in 2^L
+                                text += " L%d" % culls["rep_level"]
                             if culls.get("rep_page_level"):
                                 # the decode budget thinned the pages
-                                # themselves (one in 2^L by index)
-                                text += " L%d" % culls["rep_page_level"]
+                                # themselves (one in 2^P by index)
+                                text += " P%d" % culls["rep_page_level"]
                     summ = res.get("summary") or {}
                     if summ.get("layers"):
                         # occupancy summary (M2): these layers were

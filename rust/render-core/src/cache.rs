@@ -84,6 +84,8 @@ pub struct PlanCullCounts {
     /// the page level the decode budget forced (one representative
     /// page in 2^Lp), 0 when every cut page in view was kept
     pub rep_page_level: u64,
+    /// the frame's level (one cut item in 2^L, set by the item budget)
+    pub rep_level: u64,
 }
 
 impl PlanCullCounts {
@@ -107,6 +109,7 @@ impl PlanCullCounts {
             rep_washed: st.rep_pages_washed,
             rep_children: st.rep_children,
             rep_page_level: st.rep_page_level as u64,
+            rep_level: st.rep_level as u64,
         }
     }
 
@@ -129,6 +132,7 @@ impl PlanCullCounts {
         self.rep_washed = self.rep_washed.saturating_add(other.rep_washed);
         self.rep_children = self.rep_children.saturating_add(other.rep_children);
         self.rep_page_level = self.rep_page_level.max(other.rep_page_level);
+        self.rep_level = self.rep_level.max(other.rep_level);
     }
 }
 

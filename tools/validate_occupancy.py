@@ -1627,13 +1627,14 @@ class PageFrontierTests(unittest.TestCase):
                  re.findall(r'"(\w+)": (\d+)', res.stdout)}
         return reps, stats
 
-    def test_every_cut_page_in_view_is_kept_and_its_records_thin_by_level(self):
+    def test_every_cut_page_in_view_is_kept_and_the_item_budget_sets_the_level(self):
         # the 1 um lines are hairline-cut once 1 um < 0.5 px. Every cut
-        # page in view is a representative (the 19 MiB of this run are
+        # page in view is a representative (the run's ~8.5 MB decoded is
         # within the 256 MiB decode budget, page level 0) at every
-        # zoom; what thins with the zoom is the records inside, in the
-        # raster: 2.5 um/px (800 px) is level 0 (every line), 5 um/px
-        # level 2 (one in 4), 10 um/px level 4 (one in 16)
+        # zoom; the frame's level comes from the item budget: the run's
+        # 1,210,000 lines against a million is level 1 (one line in
+        # two) whatever the zoom, since the whole run is in view - the
+        # count no longer grows with the zoom, so neither does the level
         s200, st200 = self._plan(0.1)
         s400, st400 = self._plan(0.2)
         s800, st800 = self._plan(0.4)
@@ -1647,17 +1648,24 @@ class PageFrontierTests(unittest.TestCase):
             self.assertEqual(st["rep_page_level"], 0, st)
             self.assertEqual(st["rep_replans"], 0, st)
             self.assertEqual(st["rep_pages_kept"], n, st)
+            self.assertEqual(st["rep_items"], 1_210_000, st)
+            self.assertEqual(st["rep_level"], 1, st)
             self.assertGreater(st["rep_decode_bytes"], n * 100_000, st)
-        # the frames: representatives light pixels at every zoom, in
-        # every quadrant of the view (the records thin by index within
-        # the page, spread over its area), the density falling as the
-        # view widens; the kill switch shows the old cull
+        # half the view holds fewer lines (the count is per page: every
+        # page meeting the view counts whole): within the budget, level 0
+        _, half = self._plan(0.2, view="0,0,1000,1000")
+        self.assertLess(half["rep_items"], 1_210_000, half)
+        self.assertEqual(half["rep_level"], 0, half)
+        # the frames: the sparse layer (12,100 lines, within the budget:
+        # level 0, every line) lights every quadrant at every zoom, the
+        # pixel density rising as the view widens (the same lines on
+        # fewer pixels); the kill switch shows the old cull
         dens = {}
         for px in (200, 400, 800):
             lit, res = self._frame(self.worker, px, (3, 0))
             culls = res["plan_culls"]
             self.assertEqual(culls["rep_kept"], 1, (px, culls))
-            self.assertEqual(culls["rep_page_level"], 0, (px, culls))
+            self.assertEqual((culls["rep_level"], culls["rep_page_level"]), (0, 0), (px, culls))
             half = px // 2
             for qx, qy in ((0, 0), (1, 0), (0, 1), (1, 1)):
                 quad = sum(1 for x, y in lit
@@ -1667,8 +1675,39 @@ class PageFrontierTests(unittest.TestCase):
             gone, res = self._frame(self.worker_off, px, (3, 0))
             self.assertEqual(gone, set(), px)
             self.assertEqual(res["plan_culls"]["rep_kept"], 0)
-        self.assertLess(dens[200], dens[400], dens)
-        self.assertLess(dens[400], dens[800], dens)
+        self.assertGreater(dens[200], dens[800], dens)
+        # the dense layer over budget: level 1 at every zoom, and its
+        # records thin by index inside the kept pages - at 800 px half
+        # the lines are drawn, fewer pixels than the whole layer lights
+        lit_thin, res = self._frame(self.worker, 800, (1, 0))
+        self.assertEqual(res["plan_culls"]["rep_level"], 1, res["plan_culls"])
+        self.assertEqual(res["plan_culls"]["rep_kept"], n, res["plan_culls"])
+        self.assertGreater(len(lit_thin), 100_000, len(lit_thin))
+
+    def test_a_smaller_item_budget_raises_the_level_and_thins_the_records(self):
+        # FLOE_RUST_REP_ITEMS_M=0.001 (1,049 items) against the sparse
+        # layer's 12,100 lines: level 4 (one line in 16); the frame
+        # lights about a sixteenth of the pixels the whole layer does
+        _, st = self._plan(0.4, layer="3/0", env=dict(os.environ, FLOE_RUST_REP_ITEMS_M="0.001"))
+        self.assertEqual(st["rep_items"], 12_100, st)
+        self.assertEqual(st["rep_level"], 4, st)
+        os.environ["FLOE_RUST_REP_ITEMS_M"] = "0.001"
+        try:
+            tight = SubCutTests._worker.__func__(self)
+        finally:
+            del os.environ["FLOE_RUST_REP_ITEMS_M"]
+        try:
+            lit_tight, res = self._frame(tight, 800, (3, 0))
+        finally:
+            tight.stop()
+        self.assertEqual(res["plan_culls"]["rep_level"], 4, res["plan_culls"])
+        lit_all, _ = self._frame(self.worker, 800, (3, 0))
+        # one line in 16 (neighbouring lines overlap on the pixel grid,
+        # so the pixel ratio is looser than the line ratio)
+        self.assertTrue(len(lit_all) / 32 <= len(lit_tight) <= len(lit_all) / 4,
+                        (len(lit_tight), len(lit_all)))
+        # nested: what the tight budget draws, the full one drew
+        self.assertTrue(lit_tight <= lit_all, len(lit_tight - lit_all))
 
     def test_the_decode_budget_thins_the_pages_by_index_and_replans(self):
         # FLOE_RUST_REP_DECODE_MB=1 against the run's ~8.5 MB decoded
@@ -1690,15 +1729,16 @@ class PageFrontierTests(unittest.TestCase):
 
     def test_an_l_of_two_hairlines_is_drawn_as_lines_not_as_its_square(self):
         # review 2026-09-17: a representative is drawn, never washed -
-        # the L page (2 records, level 4: one record in 16 - the first)
-        # shows one 100 px line, never the 100 x 100 px square
+        # the L page (2 records, within the budget: level 0) shows its
+        # two 100 px lines, never the 100 x 100 px square
         lit, res = self._frame(self.worker, 200, (2, 0))
         culls = res["plan_culls"]
         self.assertEqual((culls["rep_kept"], culls["rep_washed"]), (1, 0), culls)
-        self.assertTrue(80 <= len(lit) <= 150, len(lit))
+        self.assertTrue(150 <= len(lit) <= 450, len(lit))
         xs = sorted({x for x, _ in lit})
         ys = sorted({y for _, y in lit})
-        self.assertTrue(len(xs) <= 3 or len(ys) <= 3, (len(xs), len(ys)))
+        self.assertGreaterEqual(max(sum(1 for x, _ in lit if x == c) for c in xs), 80)
+        self.assertGreaterEqual(max(sum(1 for _, y in lit if y == r) for r in ys), 80)
         reps, _ = self._plan(0.1, layer="2/0")
         self.assertEqual(len(reps), 1)
 
@@ -1812,15 +1852,14 @@ class SubCutTests(unittest.TestCase):
             lit, res = self._frame(self.worker, layer)
             lit_on, _ = self._frame(self.worker_on, layer)
             self.assertTrue(lit, layer)
-            # a representative is geometry thinned by its level (11 here:
-            # 0.2 um against a 10 um cut): the array page and the placed
-            # array show a stipple of their members inside the block the
-            # diagnostic rules wash, the line pages one line, the sparse
-            # page one dot - never more than the rules draw, never a wash
+            # a representative is geometry: these layers hold fewer items
+            # than the budget, so the level is 0 and every shape draws -
+            # the same pixels the diagnostic rules light (a dense block
+            # by its own members, the sparse page by its dots), never a
+            # wash
             self.assertTrue(lit <= lit_on, (layer, sorted(lit - lit_on)[:10]))
-            self.assertLessEqual(len(lit), len(lit_on), layer)
-            if layer in ((4, 0), (7, 0)):
-                self.assertGreaterEqual(len(lit), 8, (layer, sorted(lit)))
+            self.assertGreaterEqual(len(lit), len(lit_on) * 9 // 10, layer)
+            self.assertEqual(res["plan_culls"]["rep_level"], 0, (layer, res["plan_culls"]))
             if layer == (7, 0):
                 self.assertTrue(lit <= placed, sorted(lit - placed)[:10])
             culls = res["plan_culls"]
