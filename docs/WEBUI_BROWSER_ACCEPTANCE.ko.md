@@ -103,12 +103,50 @@ Back/BFCache, 자연 만료, owner 종료·공개 범위 변경에 따른 폐기
 모두 일치했다. 초대 폐기는 이후 접근을 막으며 이미 수신·복사한 픽셀을 회수하는
 기능은 아니다. 제품 코드 수정이나 전체 배터리 재실행은 없었다.
 
-## 5. 잔여
+## 5. owner 레이어·스타일·수동 측정
 
-이 단계에서 확인한 것은 owner의 합성 layout 표시·일부 조작·dump 다운로드다.
-레이어 다중 선택/스타일·ruler/snap·파일/DRC 열기·저장/충돌/복구·슬롯 편집·clipboard,
-auth/BFCache/종료·owner/guest SH-08은 아직 전부 수용한 것이 아니다. §4는 사용자
-승인 후 추가한 실제 layout-only 공유 근거이며 SH-08의 전체 수용 판정은 아니다.
+2026-09-17 사용자가 새로 연 동일 합성 valmini 세션에서 검사했다. 이전 프로세스는
+사용자가 종료했다고 확인했으며, 별도 재시작 시도는 인증 교환 없이120초가 지나
+exit0으로 종료됐다. 이 종료들을 제품의 자발적 크래시 증거로 집계하지 않는다.
+새 세션의 About은 §1과 같은 앱 revision `1a16379`·web bundle을 표시한다.
+`cb82bb4`까지 후속 변경은 문서뿐이다. 비공개 시작 파일이나 credential은 읽지 않았다.
+
+| 검사 | 실제 관측 |
+|---|---|
+| 범위 선택 | 1/0 클릭 → Shift+3/0 클릭으로 1/0·2/0·3/0, `3 selected` |
+| 개별 선택 해제 | Cmd+2/0 클릭으로 1/0·3/0만 남고 `2 selected` |
+| 선택 가시성 | Hide selected는 1/0·3/0만 off, 나머지7행은 on. Show selected로9행 모두 복원 |
+| 다중 색상 | Style selected에서 Color만 체크해 cyan 적용. 1/0·3/0만 `#00ffff`, 나머지7행 색상 불변. 화면에서 청록 도형 표시 |
+| 단일 스타일 취소 | 7/0의 Speckle/1px를 Outline/3px 초안으로 바꾼 뒤 Cancel. 다시 열면 Speckle/1px 유지 |
+| 단일 스타일 적용 | 7/0에 Outline/3px 적용 후 final frame screenshot에서 파란 채움 사각형이 윤곽선으로 변경 |
+| 새로고침 | 1/0·3/0의 cyan과 7/0의 Outline/3px 유지. 레이어 행 선택은0개로 초기화. 선폭의 픽셀 수를 별도 계수한 검사는 아님 |
+| 뷰 닫기·재열기 | 같은 등록 소스를 Open layout으로 다시 열면 기본 색상과7/0 Speckle/1px 복원. depth99·High 유지. fit 이후 X200/Y220/view500으로 다시 맞춤 |
+| 키보드 편집 진입 | 7/0 스타일 버튼의 Enter로 편집기가 열리며 복원된 Speckle/1px 확인; Cancel로 닫음 |
+
+수동 ruler는 스냅을 **끈 상태**에서 actual pointer 두 번으로 측정했다. viewport는
+1156×735.5 CSS px, canvas2312×1471 device px이고 view 폭은500µm다.
+
+| 클릭 좌표(CSS px) | 계산한 거리 | 실제 UI |
+|---|---:|---|
+| (500,450) → (900,450) | 400×500/1156 = 173.0103806µm | Length/Δx173.0104, Δy0.0000µm; 수평 치수선 screenshot |
+| (650,250) → (650,600) | 350×500/1156 = 151.3840830µm | Length151.3841, Δx0.0000, Δy−151.3841µm; `2 rulers` |
+
+canvas에 포커스가 있는 상태의 `k`는 마지막 수직 ruler만 삭제하고 수평 ruler와
+173.0104µm 결과를 남겼다. `Shift+K`는0 rulers, `Escape`는 측정 모드 off로 전환했다.
+스냅은 원래 on으로 복원했고, 선택0개·ruler0개·9레이어 on·기본 색상·X200/Y220/view500
+상태로 사용자 탭을 유지했다. source/OVM/OVP/OVT의 SHA-256·크기·mtime도 전후 일치한다.
+저장/다운로드/공유 기본값 게시, 새 초대 발급, 제품 코드 변경은 없었다.
+
+이는 평면9레이어의 일부 UI-03/04 수용 근거다. 그룹/잡덱의 접힘·상속, 페이지 간 선택,
+bitmap 슬롯, 스냅 정확도·Shift 자유각·선택 bbox gap, DRC CD, clipboard와 지연/부하
+수용은 별도다. 모형 게이트나 이 두 거리 일치만으로 전체 측정 기능을 완료 처리하지 않는다.
+
+## 6. 잔여
+
+현재 근거는 owner의 합성 layout 표시·일부 조작·dump 다운로드, §4의 layout-only
+공유, §5의 일부 레이어/스타일·스냅 없는 수동 측정이다. 각 절의 미검사 범위와
+파일/DRC 열기·저장/충돌/복구·슬롯 편집·clipboard·auth/BFCache/종료는 남는다.
+이를 UI-03/04나 owner/guest SH-08 전체 수용으로 확대하지 않는다.
 
 Python-free Linux 실행, G1/G4 전체, 현장 Firefox/ETX G2는 남는다. 원격 SH-10은
 사용자 보류이며 world-tile M5는 실측 조건부다. 로컬 Chrome 성공으로 닫지 않는다.

@@ -138,6 +138,9 @@ open에서도 원본 일치를 재검사한다. hot reload/내용 해시 기반 
    reload와 revoke 후 화면 지움·reload 차단을 추가했다. 두 초대는 폐기했고
    source/cache는 불변이다. SH-08의 일부 근거이며 DRC 공유·Back/BFCache·실제
    opener/Referrer 헤더 등을 포함한 전체 수용은 남는다.
+   §5는 새 합성 owner 세션의 Shift/Cmd 레이어 선택·선택 가시성/색상, 단일 스타일
+   취소/적용·reload 유지·재열기 기본값 복원과 두 수동 거리/Undo/Clear를 확인한다.
+   그룹 상속·bitmap 슬롯·스냅/자유각·DRC CD·저장/복구는 이 검사에 포함되지 않는다.
 3. M2 공유는 `shares=false`, loopback-only다. M2b-1의
    [초대·인증 코어](WEBUI_SHARING_GRANTS.ko.md)와 M2b-2의
    [follow 프레임 전송](WEBUI_SHARING_FOLLOW.ko.md)을 기본 off로 연결한다. 허가 없는 원격
