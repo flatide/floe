@@ -810,6 +810,7 @@ impl Cache {
             },
             sub_cut_wash: request.sub_cut_wash && !request.exact,
             page_reps: request.page_reps && !request.exact,
+            decode_budget: request.decode_budget,
             page_hairline: request.page_hairline,
             prune_skipped: request.prune_summary,
             page_skip: if request.summary_layers.is_empty() {

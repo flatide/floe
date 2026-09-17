@@ -55,6 +55,9 @@ pub struct PlanRequest {
     /// The page frontier (floe_vfs::ViewReq::page_reps): what the cut
     /// drops is thinned to representatives instead of vanishing.
     pub page_reps: bool,
+    /// The decoded-generation budget the page frontier's page decode
+    /// must fit under (floe_vfs::ViewReq::decode_budget; 0 = unknown).
+    pub decode_budget: u64,
     /// The page hairline policy (floe_vfs::ViewReq::page_hairline):
     /// true culls all-thin pages (plain layout performance policy),
     /// false keeps them (mask / jobdeck policy).
@@ -101,6 +104,7 @@ mod tests {
             exact: true,
             sub_cut_wash: false,
             page_reps: false,
+            decode_budget: 0,
             page_hairline: true,
             summary_layers: Vec::new(),
             prune_summary: false,

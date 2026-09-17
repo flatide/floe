@@ -58,6 +58,10 @@ pub struct ViewReq {
     /// nothing pops in as you zoom out). Ignored when sub_cut_wash is
     /// on (that diagnostic keeps everything). Plain layouts only.
     pub page_reps: bool,
+    /// The renderer's decoded-generation budget (bytes; 0 = unknown):
+    /// the page frontier keeps its representative pages within half
+    /// of what that budget still holds after the plan's other pages.
+    pub decode_budget: u64,
     /// Whether the rev 41 hairline rule culls PAGES (a page whose every
     /// record has min side < hairline x cut is dropped whole). true is
     /// the plain layout's performance policy (thin shapes may be

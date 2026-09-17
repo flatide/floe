@@ -990,6 +990,7 @@ fn run_clip(
         exact: true,
         sub_cut_wash: false,
         page_reps: false,
+        decode_budget: 0,
         page_hairline: true,
         summary_layers: Vec::new(),
         prune_summary: false,
@@ -1789,7 +1790,7 @@ fn run_render(
     // request before any reuse, since the retained-frame and published-
     // scene keys carry it; FLOE_RUST_OCCUPANCY=off is the kill switch
     let summary = cache.summary_selection(
-        &make_plan_request(cache, &command)?,
+        &make_plan_request(cache, &command, state.page_cache.budget_bytes())?,
         command.thin_keep,
         std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off"),
     )?;
@@ -1797,7 +1798,7 @@ fn run_render(
     let pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key);
     let command = &command;
     check_generation(cancellation, command.generation)?;
-    let request = make_plan_request(cache, command)?;
+    let request = make_plan_request(cache, command, state.page_cache.budget_bytes())?;
     // the summarized layers leave the page plan (§6 step 3): no page
     // selection, page BVH or child walk for them
     let page_request = cache.page_plan_request(&request, &summary, !command.frames)?;
@@ -2485,7 +2486,7 @@ fn prepare_pan_reuse(
     })
 }
 
-fn make_plan_request(cache: &Cache, command: &RenderCommand) -> Result<PlanRequest, String> {
+fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64) -> Result<PlanRequest, String> {
     let [x0, y0, x1, y1] = command.view;
     let planner_x0 = checked_bound(x0.floor(), "view x0")?;
     let planner_y0 = checked_bound(y0.floor(), "view y0")?;
@@ -2519,6 +2520,7 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand) -> Result<PlanReque
         // across zooms - instead of vanishing. FLOE_RUST_PAGE_REPS=off
         // is the kill switch.
         page_reps: !command.exact && page_reps_enabled(),
+        decode_budget,
         page_hairline: !command.thin_keep,
         summary_layers: Vec::new(),
         prune_summary: false,
