@@ -2,7 +2,8 @@
 
 2026-09-16, M4g-30. [M0 §2.8~2.9](WEBUI_M0.ko.md)의 `gtktest`/`--dump`
 미이관을 실제 코드로 분리한 계약과 현재 구현이다. **합성·정적 입력 PNG 진단은
-연결하고 승인된 브라우저 dump도 추가했지만 실제 브라우저 수용·GTK 진단 폐기는 아니다.**
+연결하고 승인된 브라우저 dump도 추가했지만 전체 브라우저 수용·GTK 진단 폐기는 아니다.**
+2026-09-17 로컬 Chrome의 인증된 합성 진단 확인 범위는 §6에 따로 기록한다.
 
 ## 1. GTK의 실제 동작
 
@@ -214,3 +215,33 @@ loopback 공개 shell만 실제 Chrome으로 열었다. 소스·입력 PNG·rend
 PNG/raw/crop 픽셀, 정상 인증·refresh 복구, dump 다운로드, owner/guest SH-08,
 Firefox/ETX·G1/G4는 여전히 미수용이다. 이전 `file://` 접근 차단을 우회하지 않았으며,
 다음 인증 검사는 사용자가 정상 제품 시작 절차로 연 합성 세션에서 이어가야 한다.
+
+## 6. 2026-09-17 실제 Chrome의 인증된 합성 진단
+
+사용자가 정상 시작 절차로 연 `displaytest --no-open` 탭을 넘겨받아 검사했다.
+private 시작 파일·session JSON·cookie/storage credential은 읽지 않았다.
+화면 보고서의 bundle `9ff0b84011c8978ed46fa1106c4814189736e8b8`는 로컬 release의
+`--version` 출력과 일치한다(revision `1a16379`, aarch64-apple-darwin).
+현재 `7169e77`까지의 후속 변경은 검증 문서뿐이며 제품 코드는 동일하다.
+
+| 합성 검사 | 검사한 픽셀 | 다른 픽셀 |
+|---|---:|---:|
+| PNG | 57,600 | 0 |
+| raw RGBA | 57,600 | 0 |
+| crop + 별도 overlay | 40,960 | 0 |
+
+- DPR 2. screenshot에서 A/B의 검은 배경·빨강/초록/파랑/노랑 막대와 C의 crop·흰 십자를
+  확인했다. 사용자의 물리 화면 관찰을 대신 입력하지 않아 `screen_observation`과
+  `desktop_acceptance`는 `unverified`로 남겼다.
+- reload 후 같은 탭은 credential 재입력 없이 Ready로 복구됐고 보고서/검사 결과는
+  사라졌다. 자동 검사는 없었으며 Run display test를 눌러 위0차이를 다시 확인했다.
+- Quit session 확인창에서 Keep session을 선택하면 Ready와 기존 보고서가 유지됐다.
+  실제 종료·서버 수거는 이 사용자 소유 세션에서 시험하지 않았다.
+- about:blank로 이동 후 Back으로 돌아오면 Ready 및 미실행 상태였다. 명시 Run 뒤
+  위0차이를 다시 확인하고 결과 화면을 남겼다. `pageshow.persisted` 정지 안내가
+  관측된 것은 아니므로 **BFCache 복원 분기 검증으로 계산하지 않는다**.
+
+이로써 로컬 Chrome의 인증된 합성 PNG/raw/crop 표시, 같은 탭 reload·history 복귀,
+명시 실행과 종료 취소의 근거를 추가했다. layout/renderer/WS 프레임·pan/input 지연,
+선택 PNG/APNG, dump 다운로드, owner/guest SH-08, Firefox/ETX·Linux·G1/G4 전체는
+여전히 별도다. 다음 단계는 사용자가 정상 절차로 연 **합성 valmini view**의 검사다.
