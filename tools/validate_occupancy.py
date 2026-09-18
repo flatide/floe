@@ -1124,11 +1124,16 @@ class RenderTests(unittest.TestCase):
         os.environ["FLOE_RUST_OCCUPANCY_DEPTH"] = "off"
         cls.worker_nodepth = cls._start_worker()
         del os.environ["FLOE_RUST_OCCUPANCY_DEPTH"]
+        # the keep-only rule of 2026-09-11..17 (kill switch of the
+        # 2026-09-18 change that lets cull draw the summary too)
+        os.environ["FLOE_RUST_OCCUPANCY_CULL"] = "off"
+        cls.worker_keeponly = cls._start_worker()
+        del os.environ["FLOE_RUST_OCCUPANCY_CULL"]
         cls.gen = 100
 
     @classmethod
     def tearDownClass(cls):
-        for w in (cls.worker, cls.worker_off, cls.worker_nodepth):
+        for w in (cls.worker, cls.worker_off, cls.worker_nodepth, cls.worker_keeponly):
             try:
                 w.stop()
             except Exception:
@@ -1222,13 +1227,33 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(corner & lit2, set())
         self.assertTrue((21, 78) in lit2 and (28, 79) in lit2, "the L's arms")
 
-    def test_cull_exact_and_limited_depth_requests_are_untouched(self):
-        for kw, vis, reason in (({"thin": "cull"}, [(1, 0)], "policy"),
-                                ({"cut_px": 0.0}, [(1, 0)], "exact")):
-            lit, summ, _ = self._render(self.worker, visible=vis, **kw)
-            off, s_off, _ = self._render(self.worker_off, visible=vis, **kw)
-            self.assertEqual((summ["layers"], summ["none"]), (0, reason), kw)
-            self.assertEqual(lit, off, kw)
+    def test_cull_draws_the_summary_like_keep_while_exact_and_limited_depth_stay_consistent(self):
+        # 2026-09-18 (user: cull + occupancy): the wide-view summary no
+        # longer needs the mask policy. Under cull the same planes are
+        # drawn and those layers leave the page plan; the near view
+        # (cells > 1 px) returns to cull's page path, which drops the
+        # sub-cut pages. FLOE_RUST_OCCUPANCY_CULL=off is the keep-only
+        # rule of before (reason `policy`).
+        keep, s_keep, _ = self._render(self.worker, visible=[(1, 0)])
+        cull, s_cull, _ = self._render(self.worker, visible=[(1, 0)], thin="cull")
+        self.assertEqual((s_cull["layers"], s_cull["none"]), (1, "-"), s_cull)
+        self.assertEqual(cull, keep, "cull draws the same summary as keep")
+        only, s_only, _ = self._render(self.worker_keeponly, visible=[(1, 0)], thin="cull")
+        off, s_off, _ = self._render(self.worker_off, visible=[(1, 0)], thin="cull")
+        self.assertEqual((s_only["layers"], s_only["none"]), (0, "policy"), s_only)
+        self.assertEqual(only, off, "the kill switch is the old cull page path")
+        self.assertNotEqual(cull, off, "the wide view differs between summary and cull")
+        # near view: 4 um cells at 0.5 um/px (100 um over 200 px) are 8 px
+        near_lit, s_near, _ = self._render(self.worker, bbox_um=(0, 0, 100, 100),
+                                           visible=[(1, 0)], thin="cull")
+        near_off, _, _ = self._render(self.worker_off, bbox_um=(0, 0, 100, 100),
+                                      visible=[(1, 0)], thin="cull")
+        self.assertEqual((s_near["layers"], s_near["none"]), (0, "near"), s_near)
+        self.assertEqual(near_lit, near_off, "near view: cull's page path as before")
+        exact, s_exact, _ = self._render(self.worker, visible=[(1, 0)], cut_px=0.0)
+        exact_off, _, _ = self._render(self.worker_off, visible=[(1, 0)], cut_px=0.0)
+        self.assertEqual((s_exact["layers"], s_exact["none"]), (0, "exact"), s_exact)
+        self.assertEqual(exact, exact_off)
         # a limited depth draws the planes at or above it (per-depth
         # planes, 2026-09-16; user: keep at any depth): 2/0's FAR child
         # box (depth 1, at 600..650 x 1600..1650 um = pixels 60..64 x

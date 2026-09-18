@@ -51,5 +51,5 @@ pub use raster::{
 };
 pub use request::{PlanRequest, ViewBox, FULL_DEPTH};
 pub use scene::FrameScene;
-pub use summary::{level_for as summary_level_for, SummaryPlane, SummarySelection};
+pub use summary::{cull_allowed as summary_cull_allowed, level_for as summary_level_for, SummaryPlane, SummarySelection};
 pub use stats::RenderStats;

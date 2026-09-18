@@ -445,7 +445,11 @@ class RustRenderWorker:
             shutil.rmtree(self._work_dir, ignore_errors=True)
 
     def _wait_for(self, predicate, phase):
-        timeout = self._open_timeout_s if phase == "open" else 10.0
+        # the ready handshake is a process launch: macOS scans a freshly
+        # written executable on its first launch (the About-probe root
+        # cause, 2026-09-17: seconds, and a launch killed mid-scan does
+        # not warm it), so the ready phase waits 30 s like the probe
+        timeout = self._open_timeout_s if phase == "open" else 30.0
         deadline = time.monotonic() + timeout
         with self._condition:
             while not predicate():

@@ -1793,9 +1793,12 @@ fn run_render(
     // occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): decided per
     // request before any reuse, since the retained-frame and published-
     // scene keys carry it; FLOE_RUST_OCCUPANCY=off is the kill switch
+    // the policy condition: keep, or cull (2026-09-18) unless
+    // FLOE_RUST_OCCUPANCY_CULL=off (the kill switch back to keep-only)
+    let policy_allows = command.thin_keep || floe_render_core::summary_cull_allowed();
     let summary = cache.summary_selection(
         &make_plan_request(cache, &command, state.page_cache.budget_bytes())?,
-        command.thin_keep,
+        policy_allows,
         std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off"),
     )?;
     let summary_key = SummaryKey::of(&summary);

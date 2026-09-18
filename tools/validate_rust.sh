@@ -166,6 +166,13 @@ fi
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" \
     cargo build --release 2>/dev/null >/dev/null)
 INDEX_BIN=rust/target/release/floe-index
+# warm the freshly built renderer once: macOS scans a new executable on
+# its first launch (seconds; a launch killed mid-scan stays cold), which
+# made the first gate to start a worker time out (occupancy's deck
+# worker, 2026-09-18)
+if [ -x rust/target/release/floe-renderd ]; then
+    echo "" | rust/target/release/floe-renderd >/dev/null 2>&1 || true
+fi
 echo "== floe2 product + accuracy gates (KLayout = oracle/generator only)"
 if gate unit; then
     RAN="$RAN unit"

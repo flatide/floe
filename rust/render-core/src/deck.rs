@@ -771,7 +771,7 @@ impl Deck {
             // plans no pages and paints its planes in the pass raster
             let summary = self.sources[source_index].cache.summary_selection(
                 &plan_request,
-                request.thin_keep,
+                request.thin_keep || crate::summary::cull_allowed(),
                 occupancy_off,
             )?;
             let plan_request = self.sources[source_index].cache.page_plan_request(

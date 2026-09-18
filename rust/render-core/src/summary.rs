@@ -1,12 +1,14 @@
 //! Occupancy summary planes (docs/OCCUPANCY_PLAN.ko.md M2).
 //!
-//! At a wide view under the mask policy (`thin=keep`) a layer is not
-//! decoded and rastered from its pages: its cells of the design.ovo
-//! pyramid level whose cell is at most one screen pixel are projected
-//! to a screen mask and styled (raster.rs `paint_summary_plane`). The
-//! selection is per request and per layer: every one of the five
-//! conditions must hold (keep policy, not exact, a valid design.ovo
-//! matching the cache, level-0 cell <= 1 px, and the depth: with a
+//! At a wide view a layer is not decoded and rastered from its pages:
+//! its cells of the design.ovo pyramid level whose cell is at most one
+//! screen pixel are projected to a screen mask and styled (raster.rs
+//! `paint_summary_plane`). The selection is per request and per layer:
+//! every one of the five conditions must hold (the policy: keep, or
+//! cull since 2026-09-18 unless FLOE_RUST_OCCUPANCY_CULL=off - under
+//! cull the near view then returns to the cull page path, which drops
+//! the sub-cut pages; not exact; a valid design.ovo
+//! matching the cache; level-0 cell <= 1 px; and the depth: with a
 //! version-2 file - one bit plane per placement depth, 2026-09-16 -
 //! any depth qualifies and the planes at or above the request depth
 //! are drawn, exactly the shapes the page path draws there; with a
@@ -209,6 +211,13 @@ pub const DEFAULT_MAX_CELL_PX: f64 = 1.0;
 /// cell-centre projection lights one pixel per cell, so a wider cell
 /// would leave a lattice of false holes inside filled shapes (review
 /// 2026-09-11 (2nd, follow-up) P2: 2 px filled 1,600 of 4,096 pixels).
+/// The 2026-09-18 rule: cull requests take the summary too, unless the
+/// kill switch FLOE_RUST_OCCUPANCY_CULL=off restores the keep-only rule.
+/// Callers pass `thin_keep || cull_allowed()` as the policy condition.
+pub fn cull_allowed() -> bool {
+    std::env::var("FLOE_RUST_OCCUPANCY_CULL").as_deref() != Ok("off")
+}
+
 pub fn max_cell_px() -> f64 {
     parse_max_cell_px(std::env::var("FLOE_RUST_OCCUPANCY_PX").ok().as_deref())
 }

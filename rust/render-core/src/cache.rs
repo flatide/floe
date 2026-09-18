@@ -468,14 +468,20 @@ impl Cache {
     /// planes are the file's planes at or above the request depth
     /// (a version-2 file; 2026-09-16), so a limited depth has its own
     /// summary.
+    /// `policy_allows`: the request's thin policy admits the summary -
+    /// keep always, cull since 2026-09-18 (user: cull + occupancy; the
+    /// summary is what a wide view of a layout needs, and keep's near
+    /// view that draws every hairline page is not) unless the kill
+    /// switch FLOE_RUST_OCCUPANCY_CULL=off restores the keep-only rule
+    /// (renderd decides and passes the flag).
     pub fn summary_selection(
         &self,
         request: &PlanRequest,
-        thin_keep: bool,
+        policy_allows: bool,
         disabled: bool,
     ) -> Result<crate::summary::SummarySelection, String> {
         use crate::summary::{self, SummarySelection};
-        if !thin_keep {
+        if !policy_allows {
             return Ok(SummarySelection::none(summary::NONE_POLICY));
         }
         // a cut of 0 is the archival "exact" of `floe2 render

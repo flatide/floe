@@ -418,9 +418,10 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   디코드 없이 그린다. `FLOE_RUST_REPRESENTATIVES=off`로 끈다.
   유한 샘플이므로 확대 시 밀도 및 긴 선의 길이는 근사이며, 상세 조건과 상한은
   [대표 점 파일](docs/REPRESENTATIVES.ko.md)을 참고한다.
-- **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):
-  캐시에 `design.ovo`(`floe2 index --occupancy-only`)가 있고 요청이 keep·
-  exact 아님이며 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지
+- **점유 요약**(광역뷰, 2026-09-11; keep 전용이었다가 2026-09-18부터 cull도,
+  docs/OCCUPANCY_PLAN.ko.md): 캐시에 `design.ovo`(`floe2 index --occupancy`)가
+  있고 요청이 exact 아님이며(킬 스위치 `FLOE_RUST_OCCUPANCY_CULL=off`는 keep
+  전용으로 복귀) 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지
   대신 셀 ≤ 1 px인 피라미드 레벨의 점유 마스크로 그려진다(셀 중심이 놓인
   픽셀; 경계 solid, 내부 채움). depth는 무엇이든 된다(2026-09-16 M6: 요약은
   배치 깊이별 비트 평면이라 요청 depth 이하의 평면만 그린다; 2026-09-16 이전
@@ -432,8 +433,9 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   `FLOE_RUST_OCCUPANCY_PX=0.5`로 더 가는 레벨). 실칩 없이 재 보려면
   `tools/gen_maskchip.py OUT.oas --jb`(실측 수치를 재현한 35.8 × 34.6 mm 합성
   마스크, docs/OCCUPANCY_PLAN.ko.md §12 "M5 준비"). 상태줄 `summary N layers C cells (level k, x um; not pickable)` —
-  이 뷰에서 pick/snap은 그 레이어를 보지 못한다. keep인데 요약이 없으면
-  `summary: none (nofile|invalid|near|off|depth|layers)`. 덱은 pass마다
+  이 뷰에서 pick/snap은 그 레이어를 보지 못한다. 요약이 없으면
+  `summary: none (nofile|invalid|near|off|depth|layers)`; cull의 near(셀 > 1 px)는
+  종전대로 컷 아래 페이지를 버린다. 덱은 pass마다
   소스 뷰에서 같은 판정을 하며 상태줄 `summary P passes C cells (not
   pickable)`·`N passes without summary`. 킬 스위치 `FLOE_RUST_OCCUPANCY=off`.
   일반 레이아웃(`thin:cull`)은 변화 없음.

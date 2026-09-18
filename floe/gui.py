@@ -3672,9 +3672,10 @@ class Viewer:
                                  " %g um; not pickable)" % (
                                      summ["layers"], fmt_count(summ["cells"]),
                                      summ["level"], summ["cell_um"]))
-                    elif (summ.get("none") not in (None, "-", "policy",
-                                                   "exact")
-                          and self._effective_thin() == "keep"):
+                    elif summ.get("none") not in (None, "-", "policy",
+                                                  "exact"):
+                        # since 2026-09-18 the summary serves cull too,
+                        # so its absence is worth a word under either
                         text += ", summary: none (%s)" % summ["none"]
                     if res.get("labels_truncated"):
                         text += ", labels partial"
