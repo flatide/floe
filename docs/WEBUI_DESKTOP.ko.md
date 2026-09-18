@@ -12,9 +12,10 @@
 macOS에서 창이 뜨는 것, SSH XQuartz 실험, Firefox에서 성공한 검사는 이 현장
 수용을 대신하지 않는다. 외부 브라우저 실행 경로도 별도로 유지한다.
 
-현재는 **D0 공통 실행 경계와 환경 진단 단계**다. 실행 가능한 `floe2-desktop`,
-`.app`, Linux desktop portable은 아직 제공하지 않는다. `floe2-web`은 계속 외부
-브라우저용 CLI다. “standalone Rust backend”와 “브라우저 없는 독립 앱”을 구분한다.
+현재는 **D1-mac 개발용 호스트**까지 구현했다. macOS 12+에서 `floe2-desktop`과
+로컬 개발용 `.app`을 빌드할 수 있다. 시스템 AppKit/WKWebView를 Rust 바인딩으로
+호출하며 외부 브라우저나 Python 런타임을 사용하지 않는다. **RHEL 호스트와
+배포용 패키지는 아직 미제공**이다. `floe2-web` 외부 브라우저 경로도 유지한다.
 
 ## 2. 공통 구조
 
@@ -34,8 +35,9 @@ service thread:  floe_app::embedded::Session
 - 임베디드 시작은 URL을 callback으로 전달한다. 인증 파일/argv/로그에 URL을
   남기지 않는다. 현재 세션이 소유하는 임시 디렉터리만 0700으로 만들며 기존
   scope 보호 목록에 넣는다. URL 구조 검증 및 동일 root 문서 탐색 판정은 공통
-  순수 함수로 둔다. 이 함수가 존재한다고 **미구현 WebView의 탐색 차단까지
-  완료된 것은 아니다**.
+  순수 함수로 둔다. macOS 호스트는 실제 WKNavigationDelegate에서 이 정책을
+  적용하고 main-frame 이외 탐색, 새 창, 다운로드, 미디어 권한을 거부한다.
+  JS→네이티브 파일/명령 IPC는 추가하지 않는다.
 - 세션 종료·worker 정리는 기존 서비스가 맡는다. 호스트는 메인 스레드에서 창을
   운영하고 서비스 스레드 종료를 기다려야 한다. 창 닫기는 기존 End session의
   취소 기본값 확인을 열고, 승인되지 않은 저장이나 종료를 대신 실행하지 않는다.
@@ -67,7 +69,9 @@ service thread:  floe_app::embedded::Session
 부적합을 확인해 제거했다. 후보 빌드/다운로드는 제품 검증으로 세지 않으며 기존
 `rust/Cargo.lock`과 `rust/vendor/`를 바꾸지 않았다.
 
-다음 후보를 비교한다. 아직 어느 것도 채택·완료되지 않았다.
+Linux는 다음 후보를 비교한다. 아직 어느 것도 채택·완료되지 않았다.
+macOS는 시스템 WKWebView 직접 바인딩을 선택했으며 이 선택으로 Linux ABI를
+고정하지 않는다. Wry/Tao 의존성은 추가하지 않았다.
 
 | 후보 | 확인할 핵심 |
 |---|---|
@@ -94,7 +98,7 @@ RPM 설치 버전과 pkg-config ABI는 서로 구분한다. 라이브러리 존�
 | 단계 | 범위 | 상태 |
 |---|---|---|
 | D0 | 확정 요구, RHEL ABI 조사, 공유 Rust 실행 경계, 읽기 전용 환경 감사 | 공통 기반·선택 검증 완료; 현장 inventory와 전체 회귀 잔여 |
-| D1 | 플랫폼 호스트 선택, lock/vendor/고지, 독립 창·인증·표시·종료/실패 정리 | 미완료 |
+| D1 | 플랫폼 호스트 선택, lock/vendor/고지, 독립 창·인증·표시·종료/실패 정리 | macOS 개발 호스트·인증/확인 종료 검사 구현; Linux·실패 복구 수용 잔여 |
 | D2 | 메뉴·단축키·IME·DPR/resize/pan, 파일 선택·다운로드·클립보드, 저장·복구·창 닫기 | 미완료 |
 | D3 | macOS 패키지, RHEL 8.6/8.10 ELF/런타임, 실제 ETX 입력·픽셀·지연·사용량 비교 | 미완료 |
 
@@ -133,3 +137,87 @@ Python-free Linux 실행·G2 ETX)는 계속 남는다. D0를 이 목표 완료�
   전체 배터리 성공과 macOS 시작 지연 원인 규명은 남겨 둔다.
 - 기존 `rust/Cargo.toml`, `rust/Cargo.lock`, `rust/vendor/`는 불변.
   새 GUI 의존성·다운로드 후보는 제품에 편입하지 않았다.
+
+## 6. D1-mac 개발 호스트 (2026-09-18)
+
+구현 경계:
+
+- `desktop/`은 별도 Cargo workspace. 기존 `rust/Cargo.toml`, `Cargo.lock`,
+  `vendor/`는 불변이며 headless/musl 기본 빌드에 GUI를 넣지 않는다.
+  별도 lock의 registry 92개 중 기존 83개는 같은 version/checksum의 상대
+  symlink로 재사용, 새 바인딩 9개는 Cargo vendor 원본(약 14 MiB)이다.
+  `tools/validate_desktop_vendor.py`는 identity/checksum과 새 crate 모든 파일을
+  검증한다. 원본 고지·upstream 보충 문서는 `desktop/NOTICES.md`에 연결했다.
+- AppKit 메인 스레드가 WKWebView와 weak delegate의 수명을 소유한다.
+  원래 Rust 서비스는 별도 스레드이며, 창 종료/실패/시그널 때 취소 후 join한다.
+  SIGINT/SIGTERM은 명시적인 강제 종료 경로이고 저장 확정을 대신하지 않는다.
+- 매 창은 비영속 WKWebsiteDataStore와 새 일회용 인증을 사용한다. 인증 URL은
+  메모리로만 전달하며 로그에는 기존 비인증 loopback origin만 나온다.
+- 닫기 버튼·메뉴/Dock Quit은 기존 웹 End session 확인창을 연다. Cancel이
+  기본 포커스다. 확인 DELETE 이후 서비스 종료를 기다려 창을 닫는다.
+  네이티브 창 닫기가 기존 파일 선택 모달의 포커스와 경쟁하는 결함을 실측해,
+  종료 확인의 키/포커스 처리를 window capture로 올렸다. 기존 모달의 작업·
+  초안은 폐기하지 않으며 종료 취소 시 그대로 돌아간다.
+- 정책 밖 탐색·popup·download를 허용하거나 OS 외부 브라우저로 전달하지
+  않는다. 파일 upload, 다운로드 save dialog, clipboard, 메뉴 편집/IME는 D2
+  잔여다. 서버 내부의 Browse server files는 기존 scope와 읽기 계약을 유지한다.
+- WebKit 실패에서 인증/저장 요청을 자동 재전송하지 않는다. 현재 JS가 동작하지
+  않는 실패 화면은 제목으로 알리며 Ctrl+C로 정리한다. 재접속/장애 종료 UX는
+  D2 수용 잔여다. macOS 결과는 RHEL/ETX 결과가 아니다.
+
+개발 실행(리포 루트 기준):
+
+```sh
+(cd rust && cargo build --release --offline --locked -p floe-index -p floe-renderd)
+(cd desktop && cargo build --offline --locked)
+FLOE_INDEX_BIN="$PWD/rust/target/release/floe-index" \
+FLOE_RENDERD_BIN="$PWD/rust/target/release/floe-renderd" \
+  desktop/target/debug/floe2-desktop view /path/to/design.oas --depth full --detail high
+```
+
+`view`는 생략 가능하다. 캐시가 없거나 오래됐으면 화면에 안내하며 자동 색인하지
+않는다. 색인은 기존 CLI 또는 웹의 명시적인 Index 승인 경로로 수행한다.
+`--firefox`, `--no-open`, `--session-file`은 내장 호스트에서 거부한다.
+
+```sh
+sh tools/build_desktop_macos_dev.sh
+sh tools/validate_desktop.sh
+```
+
+첫 명령은 `desktop/target/macos-dev.XXXXXX/Floe2.app`을 매번 새로 만들고 경로를
+출력한다. 기존 묶음을 덮어쓰지 않는다. 인접 index/renderd를 포함하지만 **debug
+개발용이며 서명·공증·배포 고지 조립·release 성능 검증을 마친 패키지가 아니다**.
+두 번째는 실제 창을 띄우는 명시적 macOS 게이트다. 일반 headless 배터리에서는
+GUI를 자동 실행하지 않고 source/vendor 감사와 공통 embedded lifecycle만 한다.
+
+검증:
+
+- 오프라인 build, host clippy `-D warnings`, 수명 unit 2개 통과.
+- 실제 WKWebView `--smoke-test`: 빈 워크스페이스 인증 → 네이티브 닫기 → Cancel
+  → application Quit → 확인 → 서버 join 통과. 초기 3회 대기는 성공으로 세지
+  않는다. 계측 후 발견한 중첩 모달 포커스 충돌을 수정해 통과했다.
+  테스트는 설계·reviewer·쓰기 scope 인자를 받지 않고 고정된 marker/boolean만
+  출력한다. 120초 UI 전체 deadline은 기존 30초 native oracle과 별개다.
+- 기존 `node tools/validate_web_ui.cjs`: ES2017 및 전체 결정적 UI 회귀 통과.
+- 전체 `sh tools/validate_rust.sh`는 unit/CLI/runtime/embedded/layerprops 이후
+  기존 `layer_defaults` native oracle의 30초 timeout으로 exit 1. 전체 green
+  아님. 로그: `/private/tmp/floe-desktop-gates.6CjZyt/full.log`.
+  `embedded_host,layer_defaults,web_ui,web_cli,web_startup` 선택 재검증에서는
+  embedded/vendor·layer_defaults·web_cli는 통과했지만 GTK startup oracle이
+  다시 30초 timeout이었다(`focused.log`). 이후 소스/기한 변경 없이
+  `--only web_startup,web_ui`를 실행해 **exit 0 / ALL OK**를 확인했다
+  (`startup-rerun.log`). 전체 통과로 합산하지 않는다.
+- 최종 `sh tools/validate_desktop.sh`: **exit 0**, unit 2개 및 실제 WKWebView
+  인증/닫기 취소/application Quit 확인/server join 통과(`native.log`).
+- 실제 개발 `.app`에서 새 임시 합성 valmini를 full depth/high로 열어 화면의
+  도형·색·라벨과 9개 레이어, 연결/final frame 표시를 확인했다. 오른쪽/왼쪽
+  커서 pan으로 중심 이동·복원 및 margin crop generation 3/4도 확인했다.
+  테스트 후 실제 닫기 버튼과 End session으로 종료, 프로세스 exit 0 확인.
+  화면 캡처로 직접 확인했으나 정량 픽셀 oracle·input-to-photon 측정은 아니다.
+  `data/m1` 및 공통 검증의 별도 이름 캐시는 뷰어 기본 경로와 달라 거부됐으며
+  기존 캐시를 개명/덮어쓰지 않았다. 새 `/private/tmp/floe-desktop-layout.p9Mjp2`
+  복사본에서만 2-worker 색인했다. 원본/고객 설계/DRC sidecar는 건드리지 않았다.
+
+전체 목표 잔여: Linux 호스트/런타임 선택·RHEL 8.6/8.10 ETX 실측, D2 입출력·
+복구 수용, D3 배포, 웹 잔여 브라우저 수용과 G1/G4 및 Python-free Linux 검증.
+원격 공유/CI 실행 보류는 바꾸지 않았다.

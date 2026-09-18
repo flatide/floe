@@ -7,9 +7,10 @@
 2026-09-18 요구 추가: **외부 브라우저 없이 독립 창 + 내장 WebView**도 필수다.
 HTML/Canvas UI·Rust 서비스를 공유하며 별도 Rust 위젯 UI를 만들지 않는다.
 필수 현장은 **RHEL 8.6/8.10 + ETX/X11**. [데스크톱 계획](WEBUI_DESKTOP.ko.md)의
-D0~D3를 추가 추적한다. 공통 실행 경계·선택 회귀는 준비됐지만 데스크톱 앱은
-미제공이다. 전체 배터리는 기존 오라클의 macOS 실행 timeout으로 미통과이며,
-후속 선택 재검증 통과와 구분한다([검증 기록](WEBUI_DESKTOP.ko.md#5-d0-검증-기록-2026-09-18)).
+D0~D3를 추가 추적한다. D1-mac의 시스템 WKWebView 독립 호스트·개발용 `.app`과
+실제 인증/확인 종료 검사를 구현했다. **RHEL 호스트·D2 입출력·D3 배포는 잔여**다.
+전체 배터리는 기존 오라클의 macOS 실행 timeout으로 미통과이며, 선택 재검증과
+구분한다([검증 기록](WEBUI_DESKTOP.ko.md#6-d1-mac-개발-호스트-2026-09-18)).
 
 현재 상태: **M0 로컬 조사/API 초안 + M1a worker client·공유 서비스 + 일반/잡덱 index·info/render/probe·분석/spec CLI**.
 M1b-1에서 의존성 선정과 인증된 loopback HTTP/WS transport 기반을 추가했다.

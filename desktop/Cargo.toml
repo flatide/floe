@@ -1,0 +1,31 @@
+[package]
+name = "floe-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "LicenseRef-Flatide-Proprietary"
+description = "Embedded WebView host for the existing floe2 Rust service"
+
+# GUI bindings never enter the headless/musl workspace.
+[workspace]
+resolver = "2"
+
+[[bin]]
+name = "floe2-desktop"
+path = "src/main.rs"
+
+[dependencies]
+floe-app = { path = "../rust/app" }
+floe-app-core = { path = "../rust/app-core" }
+signal-hook = { version = "=0.4.4", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.4"
+block2 = "=0.6.2"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSObject", "NSString", "NSGeometry", "NSNotification", "NSURL", "NSURLRequest", "NSTimer", "NSDate", "NSError"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSRunningApplication", "NSWindow", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSEvent", "NSGraphics", "NSGraphicsContext"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKPreferences", "WKNavigation", "WKNavigationAction", "WKNavigationDelegate", "WKNavigationResponse", "WKUIDelegate", "WKFrameInfo", "WKSecurityOrigin"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,3 @@
+# Cargo registry sources are byte-preserved; validate_desktop_vendor.py checks
+# their published checksums. Do not reformat upstream whitespace.
+vendor/** -whitespace

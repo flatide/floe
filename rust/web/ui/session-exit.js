@@ -3,6 +3,10 @@
     'use strict';
     function bind(o) {
         const el=o.el,doc=o.document,panel=el('session-exit-dialog'),button=el('logout');
+        // Native window/Dock Quit can arrive while another modal owns focus.
+        // Window capture precedes the document-level traps without cancelling
+        // their drafts, pending operations or modal state.
+        const capture=doc.defaultView||doc;
         let enabled=false,opened=false,committed=false,prior=null,hidden=[];
         function close(restore) {
             if(!opened){return;}opened=false;panel.hidden=true;button.setAttribute('aria-expanded','false');
@@ -21,7 +25,7 @@
             if(!opened||!enabled||committed){return;}committed=true;stop();return o.confirm();
         };
         panel.addEventListener('click',function(e){if(e.target===panel){close(true);}});
-        doc.addEventListener('keydown',function(e){
+        capture.addEventListener('keydown',function(e){
             if(!opened){return;}e.stopPropagation();if(e.isComposing){return;}
             if(e.key==='Escape'){e.preventDefault();close(true);return;}
             if(e.key==='Tab'){
@@ -31,7 +35,7 @@
                 }
             }
         },true);
-        doc.addEventListener('focusin',function(e){if(opened&&!panel.contains(e.target)){el('session-exit-cancel').focus();}},true);
+        capture.addEventListener('focusin',function(e){if(opened){e.stopPropagation();if(!panel.contains(e.target)){el('session-exit-cancel').focus();}}},true);
         return {open:open,stop:stop,init:function(){if(!committed){enabled=true;button.disabled=false;}}};
     }
     const api={bind:bind};

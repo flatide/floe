@@ -5,7 +5,9 @@ const ids=new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]));
 assert.match(html,/id="session-exit-dialog"[^>]*role="dialog"[^>]*aria-modal="true"/);
 assert.match(html,/Earlier approved file writes are not undone/);
 const nodes=new Map(),listeners={};
-const doc={activeElement:null,contains:n=>[...nodes.values()].includes(n),addEventListener(k,f,capture){assert(capture);listeners[k]=f;}};
+const doc={activeElement:null,contains:n=>[...nodes.values()].includes(n),
+    defaultView:{addEventListener(k,f,capture){assert(capture);listeners[k]=f;}},
+    addEventListener(){throw Error('exit must precede document modal traps');}};
 class Node {
     constructor(id){this.id=id;this.attrs={};this.hidden=false;this.disabled=false;this.events={};}
     focus(){if(!this.disabled){doc.activeElement=this;}}
@@ -26,7 +28,8 @@ async function run(){
     assert.equal(el('app-header').getAttribute('aria-hidden'),'true');assert(key('ArrowRight').stopped);
     assert(key('Tab',{shiftKey:true}).used);assert.equal(doc.activeElement,el('session-exit-confirm'));
     assert(key('Tab').used);assert.equal(doc.activeElement,el('session-exit-cancel'));
-    listeners.focusin({target:el('viewport')});assert.equal(doc.activeElement,el('session-exit-cancel'));
+    let trapped=false;listeners.focusin({target:el('viewport'),stopPropagation(){trapped=true;}});assert(trapped);assert.equal(doc.activeElement,el('session-exit-cancel'));
+    trapped=false;listeners.focusin({target:el('session-exit-confirm'),stopPropagation(){trapped=true;}});assert(trapped,'other modal must not steal focus from exit buttons');
     key('Escape',{isComposing:true});assert(!el('session-exit-dialog').hidden);
     const enter=key('Enter');assert(!enter.used);assert.equal(doc.activeElement,el('session-exit-cancel'));assert.equal(calls,0);
     el('session-exit-cancel').onclick();assert(el('session-exit-dialog').hidden);assert.equal(doc.activeElement,el('viewport'));
