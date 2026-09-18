@@ -38,7 +38,7 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck representatives fit_budget write_once rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget write_once rust_renderer klayout"
 alias_gates() {
     case "$1" in
         quick)    echo "unit_vfs unit_render occupancy rust_renderer" ;;
@@ -46,7 +46,7 @@ alias_gates() {
         occ)      echo "unit_vfs occupancy" ;;
         render)   echo "unit_render rust_renderer representatives fit_budget write_once render_goldens render_speckle render_frames klayout" ;;
         indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives" ;;
-        python)   echo "index_cli vfs_profile floe2 drc_ice svrf" ;;
+        python)   echo "index_cli vfs_profile floe2 drc_ice svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
     esac
@@ -291,6 +291,10 @@ if gate jobdeck; then RAN="$RAN jobdeck"
 # combined index run leaves a complete base cache behind
 if gate representatives; then RAN="$RAN representatives"
     .venv/bin/python tools/validate_representatives.py; fi
+# the synthetic MAIN01 generator: legacy geometry byte-identical, chip
+# geometry deterministic, KLayout-readable, indexable and chip-shaped
+if gate gen_main01; then RAN="$RAN gen_main01"
+    .venv/bin/python tools/validate_gen_main01.py; fi
 # budget-fitted cut: a keep view over the generation budget is drawn at a
 # lowered density instead of failing; frames that fit are untouched
 if gate fit_budget; then RAN="$RAN fit_budget"
