@@ -130,4 +130,20 @@ cargo test --manifest-path rust/Cargo.toml -p floe-vfs representatives::tests --
 파일 손상/불일치 거절, cycle/overflow, 결정성을 다룬다. 통합 검증은 기존 인덱스
 파일 보존, 정상/추가 생성 일치, 원본 페이지 디코드 없이 full/depth0 표시,
 점 묶음/기존 래스터 픽셀 일치, 킬 스위치와 손상 파일 폴백을 확인한다.
-긴 배터리 및 실칩 성능 측정은 이번 커밋 전에는 실행하지 않는다.
+긴 배터리 및 실칩 성능 측정은 3c4bed6 전에는 실행하지 않았다. 실칩 기록은 아래에 둔다.
+
+## 실칩 기록
+
+- 2026-09-18, MAIN01(9.8 GB, 배치 6.4억 + 배열 1.6억 레코드), 0.12.155
+  `--representatives-only`: `representatives: member directory exceeds 2 GiB limit`
+  (배치당 누적 구간 엔트리 상한 134,217,728개를 count 단계에서 초과). 추가 생성이라
+  기본 캐시는 보존됐다. 이 실패가 884f3c4(배치당 엔트리 없는 count + 스트리밍
+  resolve)의 계기다.
+- 2026-09-18, MAIN09(142 MB, 337 레이어, 깊이 11), 884f3c4 `floe2 index --representatives`:
+  인덱싱 시간이 평소보다 약 10초 늘어난 채로 완료했고, 사용자 확인으로 실제 시간이
+  줄어드는 효과가 있었다(첫 실칩 성공). 아직 기록되지 않은 값: 로그의 `count
+  directory=`, `resolve … peak requests=`, groups/points/파일 크기, 그리고 fit view
+  perf 라인의 `stored_rep_points/tested/limited`와 plan_ms(depth 0·full depth).
+- MAIN01은 884f3c4로 재시도 예정. 확인할 것은 위 두 로그 줄과 총 경과시간이며,
+  `--representatives-only`에서는 원본 재파싱이 지배적이다(합성 1/10 규모에서 22초 중
+  OVR 자체는 8초).
