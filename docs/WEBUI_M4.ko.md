@@ -1297,7 +1297,10 @@ usage와 목록은 reaper와 별도 잠금으로 읽으므로 순간 entries 수
 
 Download는 같은 출처의 일회성 native form POST다. CSRF는 body에만 있고 URL에는
 없다. JS Blob으로 파일 전체를 복제하지 않는다. 오류 페이지가 layout을 대체하지
-않도록 별도 다운로드 context(`noopener noreferrer`)를 사용한다. 서버/클라이언트는
+않도록 별도 다운로드 context(`noopener`)를 사용한다. 2026-09-18 D2 검사에서
+`noreferrer`/`no-referrer`가 POST Origin을 null로 만드는 충돌을 확인해,
+외부 referrer는 차단하는 `same-origin` 정책으로 수정했다. 네이티브 호스트의
+POST 응답 단계 전환은 [데스크톱 §7](WEBUI_DESKTOP.ko.md#7-d2-mac-파일클립보드복구-2026-09-18) 참조. 서버/클라이언트는
 클릭을 다운로드 완료로 표시하지 않는다. 실제 완료는 브라우저 다운로드 UI에서 확인한다.
 Release는 서버 파일 접근만 폐기하며 이미 받은 사용자의 복사본은 지우지 않는다.
 TTL 조회는 버튼 DOM을 교체하지 않아 키보드 focus를 보존한다.

@@ -12,7 +12,7 @@
 macOS에서 창이 뜨는 것, SSH XQuartz 실험, Firefox에서 성공한 검사는 이 현장
 수용을 대신하지 않는다. 외부 브라우저 실행 경로도 별도로 유지한다.
 
-현재는 **D1-mac 개발용 호스트**까지 구현했다. macOS 12+에서 `floe2-desktop`과
+현재는 **D2-mac 입출력·명시적 복구의 첫 구현**까지 진행했다. macOS 12+에서 `floe2-desktop`과
 로컬 개발용 `.app`을 빌드할 수 있다. 시스템 AppKit/WKWebView를 Rust 바인딩으로
 호출하며 외부 브라우저나 Python 런타임을 사용하지 않는다. **RHEL 호스트와
 배포용 패키지는 아직 미제공**이다. `floe2-web` 외부 브라우저 경로도 유지한다.
@@ -36,7 +36,8 @@ service thread:  floe_app::embedded::Session
   남기지 않는다. 현재 세션이 소유하는 임시 디렉터리만 0700으로 만들며 기존
   scope 보호 목록에 넣는다. URL 구조 검증 및 동일 root 문서 탐색 판정은 공통
   순수 함수로 둔다. macOS 호스트는 실제 WKNavigationDelegate에서 이 정책을
-  적용하고 main-frame 이외 탐색, 새 창, 다운로드, 미디어 권한을 거부한다.
+  적용하고 main-frame 이외 탐색, 새 창, 미디어 권한을 거부한다. D2 다운로드는
+  소유 origin의 blob 및 기존 clip/review POST 다운로드 경로만 별도로 허용한다.
   JS→네이티브 파일/명령 IPC는 추가하지 않는다.
 - 세션 종료·worker 정리는 기존 서비스가 맡는다. 호스트는 메인 스레드에서 창을
   운영하고 서비스 스레드 종료를 기다려야 한다. 창 닫기는 기존 End session의
@@ -99,7 +100,7 @@ RPM 설치 버전과 pkg-config ABI는 서로 구분한다. 라이브러리 존�
 |---|---|---|
 | D0 | 확정 요구, RHEL ABI 조사, 공유 Rust 실행 경계, 읽기 전용 환경 감사 | 공통 기반·선택 검증 완료; 현장 inventory와 전체 회귀 잔여 |
 | D1 | 플랫폼 호스트 선택, lock/vendor/고지, 독립 창·인증·표시·종료/실패 정리 | macOS 개발 호스트·인증/확인 종료 검사 구현; Linux·실패 복구 수용 잔여 |
-| D2 | 메뉴·단축키·IME·DPR/resize/pan, 파일 선택·다운로드·클립보드, 저장·복구·창 닫기 | 미완료 |
+| D2 | 메뉴·단축키·IME·DPR/resize/pan, 파일 선택·다운로드·클립보드, 저장·복구·창 닫기 | macOS 파일/편집 메뉴·PNG/텍스트 복사·명시적 복구 구현; 아래 잔여 수용 별도 |
 | D3 | macOS 패키지, RHEL 8.6/8.10 ELF/런타임, 실제 ETX 입력·픽셀·지연·사용량 비교 | 미완료 |
 
 웹에서 이미 검증한 경로도 WebView 엔진 차이는 다시 검사한다. 특히 blob
@@ -221,3 +222,103 @@ GUI를 자동 실행하지 않고 source/vendor 감사와 공통 embedded lifecy
 전체 목표 잔여: Linux 호스트/런타임 선택·RHEL 8.6/8.10 ETX 실측, D2 입출력·
 복구 수용, D3 배포, 웹 잔여 브라우저 수용과 G1/G4 및 Python-free Linux 검증.
 원격 공유/CI 실행 보류는 바꾸지 않았다.
+
+## 7. D2-mac 파일·클립보드·복구 (2026-09-18)
+
+§6은 당시 D1 기록이다. 이후 추가한 현재 동작:
+
+- 웹의 `input[type=file]`은 NSOpenPanel로 **선택한 단일 파일**만 넘긴다.
+  폴더 선택/일괄 재귀 업로드는 거부한다. 파일 크기·형식·reviewer scope·저장 승인
+  검사는 기존 JS/서버에서 그대로 수행한다. 이것은 settings/review import용이며,
+  로컬 OASIS를 임의로 서버 scope에 등록하는 새 기능은 아니다.
+- WKDownloadDelegate와 NSSavePanel로 PNG·설정 blob, clip/review artifact의
+  기존 POST 다운로드를 연결했다. URL은 소유 loopback origin의 정확한 경로만
+  허용하고, 외부 URL/file URL/임의 popup은 거부한다. POST만 다운로드 전용
+  비표시 WebView 1개에 원래 요청을 맡기고, 정확한 URL·HTTP 200·binary MIME의
+  **응답 단계**에서 다운로드로 전환한다. HTML 응답은 표시하지 않는다. 최초
+  응답 대기는 30초, 후속 탐색과 다운로드 redirect는 거부한다. POST body와
+  cookie/CSRF를 호스트가 읽거나 요청을 복제하지 않는다. 실패/완료 시 전용 뷰를 정리한다.
+  action 단계에서 바로 Download로 전환하면 실제 WebKit에서 POST body가 0바이트가
+  되는 문제를 합성 clip으로 확인해 이 구조로 바꿨다.
+- 웹 공통 다운로드 폼은 `noopener`를 유지하되 `noreferrer`를 제거하고 응답의
+  Referrer-Policy를 `same-origin`으로 바꿨다. `no-referrer`가 non-CORS POST의
+  Origin까지 `null`로 만드는 표준 동작과 서버의 exact Origin 검사가 충돌하기
+  때문이다. 외부 referrer는 계속 차단되고, 인증값은 URL query에 두지 않으며
+  bootstrap fragment는 HTTP referrer에 실리지 않는다. 서버의 Origin/CSRF/cookie
+  검사는 완화하지 않았다. [Fetch Origin 규칙](https://fetch.spec.whatwg.org/#append-a-request-origin-header).
+- 동시 다운로드 1개, 게시 파일 최대 512 MiB. 알려진 길이는 대화상자 전에,
+  길이 미상은 전송 중 및 게시 전에 검사한다. 폴링 상한은 순간 디스크 사용량의
+  엄밀한 상한이 아니다. 실패/취소는 자동 재시작하거나 resume data를 사용하지 않는다.
+- 선택한 목적지와 같은 파일시스템의 무작위 0700 임시 폴더에 내려받고,
+  완료 후 0600·sync 및 **no-clobber hard link**로 게시한다. 기존 파일과 dangling
+  symlink, 선택 이후 생긴 동명 파일 모두 보존한다. **덮어쓰기는 아직 지원하지
+  않으므로 새 이름을 선택**해야 한다. hard link를 지원하지 않는 파일시스템에서는
+  명시적으로 실패하며 copy/overwrite로 조용히 대체하지 않는다. sync 결과 불명은
+  목적지를 확인하라고 알리고 재시도하지 않는다. 정상 실패/종료는 소유 임시 파일만
+  정리한다. 호스트 kill/OS crash 후 잔존 임시 폴더의 자동 청소는 미구현이다.
+- Edit 메뉴의 Undo/Cut/Copy/Paste/Select All은 표준 responder chain을 사용한다.
+  PNG는 기존 ClipboardItem promise + 사용자 클릭/키 입력 경로를 그대로 사용한다.
+  클립보드를 읽는 네이티브 IPC나 주기적 읽기는 없다.
+  [WebKit의 사용자 동작 기반 clipboard 계약](https://webkit.org/blog/10855/async-clipboard-api/).
+- 앱 메뉴 `Recover View…`는 Cancel/Return 기본의 네이티브 확인 후 **같은 WebView**의
+  credential-free root에 GET한다. 일회용 bootstrap, 저장 POST, 색인/clip 승인을
+  다시 보내지 않는다. cookie/sessionStorage가 남으면 기존 웹의 receipt 조회와
+  view 복원을 사용한다. 새 문서 로드 후 고정 marker만 제한적으로 확인하며,
+  인증 페이지 재연결과 렌더/저장 결과 확인을 구분한다. 미저장 편집 초안·캡처는
+  사라질 수 있고, sessionStorage까지 소실된 경우에는 새 앱 세션이 필요하다.
+- `Force End Session…`은 JS가 응답하지 않아도 사용할 수 있는 별도 네이티브
+  확인이다. 기본은 취소이며 승인 시 다운로드 취소·서비스 취소·worker join을
+  한다. 기존 SIGTERM 취소 경로를 써 exit 143을 반환한다. 이미 승인된 서버 파일
+  쓰기가 완료됐을 가능성을 안내하고, 저장을 대신 승인하거나 롤백하지 않는다.
+
+검증 기록:
+
+- host unit 5개: 서비스 수명, URL/method allowlist, 이름 정규화, 미완료 정리,
+  게시 경쟁/no-clobber/0600/초과 크기/dangling symlink 검증. 오프라인 build·fmt·
+  host clippy `-D warnings` 통과. registry crate 추가 없음(기존 getrandom 직접 사용과
+  AppKit block2 feature만 lock에 추가), 기존 Rust workspace/vendor 불변.
+- `sh tools/validate_desktop.sh`: 실제 빈 WKWebView 인증, 창 닫기→취소,
+  application Quit→확인, 서버 join 통과. 최종 다운로드 방어 추가 후 재실행도
+  exit 0(`/private/tmp/floe-d2-native-final.log`). 실제 valmini 앱도 다운로드·
+  취소·복구 이후 End session으로 exit 0 확인했다.
+- 실제 개발 `.app` + 임시 합성 valmini에서 1840×1382 PNG 및 native settings JSON
+  저장, 파일 헤더/0600 확인, NSOpenPanel로 동일 JSON 재입력→9 rows 적용 통과.
+  산출물 `/private/tmp/floe-desktop-io.tReHXO/`. 설계 기본값/실제 리뷰는 쓰지 않았다.
+- 실제 clip POST→저장창→새 OASIS 게시 통과: `floe-clip-5.oas` 71,197 bytes,
+  0600, OASIS 헤더 및 `floe-index scan`으로 단일 셀·3,585,415 도형 확인.
+  이어 같은 다운로드의 Save 취소와 Recover View 후 프레임/조작 복원도 확인했다.
+  DRC artifact는 같은 정책/스트림을 쓰지만 네이티브에서의 실제 검사는 아직 별도 잔여다.
+- 웹 transport 15검사와 전체 ES2017/UI 회귀 통과. 공통 referrer 헤더와 두 다운로드
+  폼의 `noopener`를 테스트로 고정했다(`/private/tmp/floe-d2-transport.log`,
+  `/private/tmp/floe-d2-ui-final.log`). 임시 진단은 형식 boolean/길이만 사용했고 제거했다.
+- 실제 Copy view 버튼 및 canvas Cmd+C는 PNG 복사 성공 상태 확인. 좌표 입력에서
+  Cmd+C/Cmd+V로 **방금 복사한 합성 값** 복원 확인. 기존 클립보드 내용은 읽지 않았다.
+- Recover View 확인창 Return은 미적용 `901.234` 초안을 유지했다. 명시적 Reload만
+  실제 서버 좌표 `201.712…`로 복원, 같은 세션·레이어·프레임·조작 재활성화 확인.
+  한 검사에서 표시 프레임 대기가 남았으나 후속 새 세션·재연결에서는 활성화됐다.
+  이를 강제 WebContent crash/occlusion 전 조합 통과로 세지 않는다. 강제 종료 확인과
+  서비스 exit 143도 확인했다. 실제 DRC 결과 불명 저장·WebContent process kill·
+  cookie/storage 소실·IME/다중 화면 DPI 수용은 잔여다.
+- 전체 `sh tools/validate_rust.sh`는 workspace unit, CLI/runtime, embedded,
+  layerprops/layer_defaults 이후 **기존 GTK palette oracle의 30초 timeout**으로
+  exit 1. 전체 green 아님(`/private/tmp/floe-d2-battery.log`). 같은 제한으로
+  `--only embedded_host,layer_palette,web_ui,web_cli`는 **ALL OK**
+  (`/private/tmp/floe-d2-focused.log`). 제한 완화·OS 보안 변경은 하지 않았다.
+- POST 수정 후 전체 재실행은 앞서 실패한 palette 및 clip/capture/질의/stream,
+  owner service 21검사, HTTP 권한 462 probes, 파일 선택/표시까지 통과한 뒤
+  기존 **gtk_startup_oracle의 30초 timeout**으로 exit 1이었다
+  (`/private/tmp/floe-d2-battery-final.log`). 전체 green으로 합산하지 않는다.
+  같은 제한의 `--only web_startup,web_ui` 재확인도 startup에서 timeout/exit 1
+  (`/private/tmp/floe-d2-startup-final.log`)이므로 그 실행의 web_ui는 미실행이다.
+  위 별도 Node UI 회귀 통과와 구분한다. OS 앱 검사라는 원인은 확정하지 않았다.
+
+실측 중 발견한 기존 자원 예약 이슈: 기본 뷰 1024 MiB + Browse 192 MiB +
+clip 1024 MiB가 managed decoded 2048 MiB를 초과해 clip은 jobs 1이어도 `busy`다.
+기본 decode 8 + raster 4 + Browse 1 + clip 4도 CPU 16을 넘는다. 이 단계에서는
+공유 서비스의 자원 정책을 완화하지 않았다. 작은 합성 다운로드 검사는 기존 옵션
+`--budget-mb 512 --jobs 2 --raster-jobs 1`로 별도 수행해 통과했다. 기본값에서의 clip
+admission/실제 가용량 안내 개선은 별도 추적한다.
+
+전체 목표 잔여: D2 장애·DRC/IME/DPI 확대 수용, Linux 호스트 및 RHEL 8.6/8.10
+ETX, D3 배포/서명/고지, G1 성능·G4 대조·Python-free Linux 실행. 원격 공유·CI·
+열린 색인 hot-reload 보류는 그대로이며 이 커밋을 전체 목표 완료로 세지 않는다.

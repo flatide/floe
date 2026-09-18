@@ -54,7 +54,8 @@
         if(last!==a.last_seq||(a.active!==null&&(a.active!==last||terminal(a.history[a.history.length-1])))){fail();}return v;
     }
     function download(doc,csrf,k,n,P){id(csrf);kind(k);P.counter(n);const form=doc.createElement('form'),input=doc.createElement('input');
-        form.method='POST';form.action=BASE+k+'/artifacts/'+n+'/download';form.enctype='application/x-www-form-urlencoded';form.target='_blank';form.rel='noopener noreferrer';form.hidden=true;
+        // Preserve POST Origin; gateway same-origin policy prevents external referrers.
+        form.method='POST';form.action=BASE+k+'/artifacts/'+n+'/download';form.enctype='application/x-www-form-urlencoded';form.target='_blank';form.rel='noopener';form.hidden=true;
         input.type='hidden';input.name='csrf';input.value=csrf;form.appendChild(input);doc.body.appendChild(form);try{form.submit();}finally{input.value='';doc.body.removeChild(form);}}
     function bind(o){
         const P=o.protocol,el=o.el;

@@ -3,6 +3,7 @@
 #[cfg(target_os = "macos")]
 mod macos;
 mod service;
+mod transfers;
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -13,7 +14,7 @@ fn main() {
             View options: floe2-web view --help (except browser/session-file options).\n\
             Current host: macOS only; RHEL 8/ETX host is pending.\n\
             --smoke-test: empty-workspace native authentication/close test only.\n\
-            D1 preview: local file upload/download and clipboard acceptance pending."
+            macOS preview: native file dialogs, Edit menu and explicit Recover View."
         );
         return;
     }

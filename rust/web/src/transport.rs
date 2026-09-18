@@ -666,7 +666,10 @@ async fn guard(State(gate): State<Gate>, request: Request, next: Next) -> Respon
     let headers = response.headers_mut();
     for (key, value) in [
         ("cache-control", "no-store"),
-        ("referrer-policy", "no-referrer"),
+        // no-referrer also nulls Origin for non-CORS POST form downloads.
+        // Keep exact Origin checks; disclose no referrer outside this gateway.
+        // The UI URL has no credential query (bootstrap is a fragment).
+        ("referrer-policy", "same-origin"),
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
     ] {

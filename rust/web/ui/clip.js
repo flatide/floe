@@ -79,7 +79,9 @@
         form.method='POST';form.action='/api/v1/artifacts/'+id+'/download';form.enctype='application/x-www-form-urlencoded';
         // An expired-file error must not navigate away from the layout. The
         // new download context gets no opener and no secret in its URL.
-        form.target='_blank';form.rel='noopener noreferrer';form.hidden=true;
+        // Do not use noreferrer: it nulls the POST Origin required by the
+        // gateway. Its same-origin referrer policy still protects external URLs.
+        form.target='_blank';form.rel='noopener';form.hidden=true;
         input.type='hidden';input.name='csrf';input.value=csrf;form.appendChild(input);document.body.appendChild(form);
         try {form.submit();}finally{input.value='';document.body.removeChild(form);}
     }

@@ -94,7 +94,7 @@ async function tests(){
     for(const change of [v=>v.limits.file_bytes='1',v=>v.usage.pending=3,v=>v.operations.last_seq='01',v=>v.artifacts=[{path:'/etc/passwd'}]]){const v=catalog();change(v);assert.throws(()=>T.catalog(v,'notes',P));}
     let submitted;const body={children:[],appendChild(v){this.children.push(v);},removeChild(v){this.children.splice(this.children.indexOf(v),1);}};
     const doc={body,createElement(){return {children:[],appendChild(v){this.children.push(v);},submit(){submitted={action:this.action,csrf:this.children[0].value,target:this.target,rel:this.rel};}};}};
-    T.download(doc,'f'.repeat(64),'notes','9007199254740993',P);assert.equal(submitted.action,'/api/v1/drc/review/notes/artifacts/9007199254740993/download');assert.equal(submitted.csrf,'f'.repeat(64));assert.equal(submitted.target,'_blank');assert.equal(submitted.rel,'noopener noreferrer');assert.equal(body.children.length,0);
+    T.download(doc,'f'.repeat(64),'notes','9007199254740993',P);assert.equal(submitted.action,'/api/v1/drc/review/notes/artifacts/9007199254740993/download');assert.equal(submitted.csrf,'f'.repeat(64));assert.equal(submitted.target,'_blank');assert.equal(submitted.rel,'noopener');assert.equal(body.children.length,0);
     console.log('WEB DRC TRANSFER UI: ALL OK (chunk/replay, whole replacement consent, editor preservation, limits, stale/expiry, downloads, teardown)');
 }
 module.exports={catalog,preview};

@@ -386,6 +386,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
         .contains(&format!("/assets/{BUNDLE}/fill-editor.js")));
     assert!(!page.body.contains("@@BUNDLE@@"));
     assert!(page.headers["content-security-policy"].contains("script-src 'self'"));
+    assert_eq!(page.headers["referrer-policy"], "same-origin");
     assert!(page.headers["content-security-policy"].contains(&format!("ws://{}", server.addr)));
     assert!(!page.headers["content-security-policy"].contains("unsafe-inline"));
     for (name, mime) in [

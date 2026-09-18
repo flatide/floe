@@ -165,7 +165,7 @@ function posts(h){return h.requests.filter(r=>r.method==='POST'&&r.path==='/api/
     }
     {
         const h=harness(),csrf='c'.repeat(64);C.download(h.document,csrf,id,P);
-        assert.deepEqual(h.submissions,[{method:'POST',action:'/api/v1/artifacts/'+id+'/download',target:'_blank',rel:'noopener noreferrer',
+        assert.deepEqual(h.submissions,[{method:'POST',action:'/api/v1/artifacts/'+id+'/download',target:'_blank',rel:'noopener',
             enctype:'application/x-www-form-urlencoded',inputs:[{type:'hidden',name:'csrf',value:csrf}]}]);
         assert.equal(h.document.body.children.length,0);assert(!h.submissions[0].action.includes(csrf));
         for(const bad of ['../file','01','18446744073709551616'])assert.throws(()=>C.download(h.document,csrf,bad,P));
