@@ -2356,6 +2356,10 @@ adapter/bench/GUI perf 라인 전파. ④ renderd 현재 RSS(`rss_bytes`,
 depth 0에서도 예산 초과). decode 뒤 검사는 안전망으로 남아 있다. 남은 것: 추정치/실측치
 비율의 frame line 기록.
 
+실칩 확인(사용자, 2026-09-18, a05da06 / 0.12.162): 예산 초과가 더 이상 발생하지 않는다.
+아직 기록되지 않은 값: 뷰별 `detail /N`(fit_shift), 낮춘 밀도의 그림 품질, full depth의
+추가 패스 plan 시간.
+
 문제: 뷰당 decoded 상한 판정이 라운드 decode **뒤**에 이루어져
 (제품 기본은 단일 라운드라 뷰 전체 decode 뒤) 낭비와 순간 메모리
 증가를 막지 못한다.
