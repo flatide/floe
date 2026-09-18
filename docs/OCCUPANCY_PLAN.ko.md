@@ -8,7 +8,9 @@
 
 광역뷰(keep, 그리고 2026-09-18부터 cull도)에서는 페이지 디코드·raster 대신 **소스·레이어별
 점유 비트맵 피라미드**(셀 ≤ 화면 1 px인 레벨)를 화면 마스크로 투영해 그린다.
-점유는 색인 시 **도형 교차**로 만든다(bbox 대체 없음). 근접뷰·exact는 지금처럼
+점유는 색인 시 **도형 교차**로 만든다. bbox 대체는 없되, 2026-09-18부터 기본 생성은
+격자 셀 하나에 들어가는 배치 서브트리만 그 bbox로 마킹한다(`--occupancy-prune`, §12;
+정확 경로는 `--occupancy-prune 0`). 근접뷰·exact는 지금처럼
 exact keep. 제한 depth는 2026-09-16(M6)부터 배치 깊이별 비트 평면으로 요약한다.
 cull의 근접뷰(셀 > 1 px)는 종전대로 컷 아래 페이지를 버린다(§12 2026-09-18).
 
@@ -911,6 +913,31 @@ jobs 1/4/`--occupancy-balance 0` 파일 동일, `floe2 index --occupancy-balance
 - 게이트 `validate_occupancy RenderTests`: cull 광역뷰 = keep 요약 픽셀, 킬 스위치 =
   종전 cull 페이지 경로, near = cull 페이지 경로, exact 불변.
 - 안 바뀐 것: 덱의 keep 기본, 근접뷰·exact, 생성(`--occupancy`는 레이아웃 opt-in).
+
+### 2026-09-18 — 셀 크기에서 멈추는 생성 (`--occupancy-prune`, 0.12.159)
+
+MAIN01(배치 6.4억 + 배열 1.6억 레코드, 깊이 15)은 요약 생성이 시간 단위였다. 정확
+경로는 계층을 top 공간으로 펼쳐 **인스턴스마다 자식 도형을 전부 charge**하므로 비용이
+평탄화 멤버 수에 비례한다. 사용자 결정: 뷰어 비교에 .ovo가 필요하므로 생성을 가속한다.
+
+- 규칙(기본 on): 배치된 셀의 재귀 bbox가 격자 셀 하나에 들어가면(두 변 ≤ 셀) 그 셀에서
+  내려가지 않고 bbox(최대 2 × 2 셀)를 마킹한다. 평면은 그 레이어가 서브트리 안에서
+  도형을 갖는 상대 깊이마다 정확히 고른다(레이어별 셀당 상대 깊이 비트마스크). 그런 셀의
+  축 정렬 Grid 배치가 pitch ≤ 셀이면 첫·마지막 멤버 bbox의 합집합(풋프린트)을 한 번에
+  채운다(모든 격자 셀이 멤버 bbox와 만나므로 멤버별 마킹과 같은 결과). pitch가 더 크거나
+  Pts면 멤버마다 bbox 하나다.
+- 계약: 레이어·깊이 평면마다 `exact ⊆ pruned ⊆ dilate(exact, 1셀)`, 평면 집합 동일,
+  `--jobs`·`--occupancy-balance`와 무관하게 바이트 동일. 요약 화면의 오차 계약은 셀 ≤
+  1 px에서 1 px가 더해진다(요약 픽셀이 exact에서 최대 2 px).
+- 비용: 셀보다 작은 인스턴스는 도형 수와 무관하게 마크 1–4개 × 깊이 평면 수, 조밀
+  배열은 채움 1회. unit 가중치도 같은 가정으로 계산해 분할이 어긋나지 않는다. work
+  예산(`none:work`)은 실제 마크 수로 줄어든다.
+- 정확 경로는 `--occupancy-prune 0`(floe-index, floe2 index 공통)로 남고 오라클 게이트가
+  쓴다. 게이트 `validate_occupancy PruneContractTests`(회전·반사 단일 배치, 조밀/성긴
+  Grid, 큰 셀 안의 작은 셀, 깊이 평면, work 감소, jobs·split 무관 바이트 동일).
+- 진행 로그 `grouped records …; prune on (N of M cells fit a C dbu cell)`.
+- 실칩 계측 대기: MAIN09(기준 231.9 s @1 µm, ae8e311 이전)와 MAIN01의 생성 시간·파일
+  크기, 그리고 exact 대비 초과 셀 비율.
 
 실측 MAIN09 thin:cull, 337 레이어 전부 표시 (사용자, 2026-09-18, eb7268a):
 

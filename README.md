@@ -163,7 +163,10 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   --occupancy`. 확인은 `floe-index occupancy .<src>.ice`. 마킹은 `--jobs`
   스레드가 작업량 기준 unit으로 나눠 맡는다(레코드의 거대 반복도 멤버 범위로,
   2026-09-16); `--occupancy-balance 0`은 옛 개수 기준 분할로 되돌리는 킬
-  스위치이고 파일은 어느 쪽이든 바이트 동일하다. 형식·규칙은
+  스위치이고 파일은 어느 쪽이든 바이트 동일하다. 2026-09-18부터 기본 생성은 격자
+  셀 하나에 들어가는 배치 서브트리를 그 bbox로 마킹하고(조밀 Grid는 풋프린트 한 번)
+  그 아래로 내려가지 않는다 — 정확 마킹의 1셀 이내 상위집합이며 인스턴스 수에 묶이지
+  않는다. `--occupancy-prune 0`이 정확 경로다. 형식·규칙은
   docs/OCCUPANCY_PLAN.ko.md, 뷰어 적용은 M2~M5(완료).
 
 ### Jobdeck (Calibre MDPView `.jb`)

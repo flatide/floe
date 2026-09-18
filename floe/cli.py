@@ -332,6 +332,9 @@ def _occupancy_args(args):
     balance = getattr(args, "occupancy_balance", None)
     if balance is not None:
         out += ["--occupancy-balance", str(int(balance))]
+    prune = getattr(args, "occupancy_prune", None)
+    if prune is not None:
+        out += ["--occupancy-prune", str(int(prune))]
     return out
 
 
@@ -1846,6 +1849,14 @@ def main(argv=None, *, prog=None, rust_only=None):
              "in member ranges, a heavy placement member by member; 0 the "
              "count-based split (kill switch; the file is byte-identical "
              "either way)")
+    rust.add_argument(
+        "--occupancy-prune", type=int, choices=(0, 1), default=None,
+        metavar="0|1",
+        help="1 (default, 2026-09-18): the occupancy walk stops at a placed "
+             "cell whose recursive bbox fits one grid cell and marks that "
+             "bbox (a dense grid of one: its footprint) - a superset of the "
+             "exact marking within one cell, and the cost no longer grows "
+             "with the instances below the cell size; 0 the exact walk")
     p.set_defaults(occupancy=None, occupancy_only=False)
     rust.add_argument("--no-lod", action="store_true",
                       help="do not generate merged LOD page variants "

@@ -357,6 +357,41 @@ def write_deep(path):
     ly._destroy()
 
 
+def write_prune(path):
+    """the prune contract (2026-09-18) at 1 um cells: LEAF (0.4 x 0.6 um,
+    1/0 of its own, SUB inside it holding 2/0) fits one grid cell; the top
+    places it singly under every rotation/mirror, as a dense grid (pitch
+    0.5 x 0.7 um <= the cell: one footprint fill), as a sparse grid (3 um:
+    member bboxes), and inside BIG (12 um, not small; placed twice, once
+    rotated). 3/0 is the top's own box (exact path)."""
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("PRUNE")
+    leaf = ly.create_cell("LEAF")
+    sub = ly.create_cell("SUB")
+    big = ly.create_cell("BIG")
+    l1, l2, l3 = ly.layer(1, 0), ly.layer(2, 0), ly.layer(3, 0)
+    leaf.shapes(l1).insert(db.Box(0, 0, 400, 600))
+    sub.shapes(l2).insert(db.Box(0, 0, 150, 150))
+    leaf.insert(db.CellInstArray(sub.cell_index(), db.Trans(db.Vector(200, 300))))
+    top.shapes(l3).insert(db.Box(0, 0, 5 * UM, 2 * UM))
+    spots = [(1300, 1700), (7250, 900), (12600, 3400), (2900, 8800),
+             (15500, 15500), (9100, 12250), (4400, 4450), (18750, 6100)]
+    for k, (x, y) in enumerate(spots):
+        top.insert(db.CellInstArray(leaf.cell_index(), db.Trans(k % 4, k >= 4, x, y)))
+    top.insert(db.CellInstArray(leaf.cell_index(), db.Trans(db.Vector(20 * UM, 2 * UM)),
+                                db.Vector(500, 0), db.Vector(0, 700), 40, 30))
+    top.insert(db.CellInstArray(leaf.cell_index(), db.Trans(db.Vector(2 * UM, 30 * UM)),
+                                db.Vector(3 * UM, 0), db.Vector(0, 3 * UM), 12, 6))
+    big.shapes(l1).insert(db.Box(0, 0, 12 * UM, 1 * UM))
+    big.insert(db.CellInstArray(leaf.cell_index(), db.Trans(db.Vector(1 * UM, 3 * UM)),
+                                db.Vector(900, 0), db.Vector(0, 900), 10, 8))
+    top.insert(db.CellInstArray(big.cell_index(), db.Trans(db.Vector(45 * UM, 5 * UM))))
+    top.insert(db.CellInstArray(big.cell_index(), db.Trans(1, False, 70 * UM, 30 * UM)))
+    ly.write(str(path))
+    ly._destroy()
+
+
 def write_uturn(path):
     """1/0 holds a U-turn path the hull refuses (the raster refuses it
     too) beside a box; 2/0 a plain box."""
@@ -411,10 +446,13 @@ def write_chip(path, cellname, w_um, h_um):
     ly._destroy()
 
 
-def index_with_occupancy(src, um):
+def index_with_occupancy(src, um, prune=0):
+    # prune=0: the exact walk - the oracle gates compare bit for bit with
+    # KLayout; the default build prunes (PruneContractTests pin its contract)
     out = vfs_cache_dir(src)
     shutil.rmtree(out, ignore_errors=True)
     floe_index("vfs", src, out, "--occupancy", "--occupancy-um", um,
+               "--occupancy-prune", prune,
                "--no-lod", "--slow-cell-s", "999", "--jobs", "2")
     return Path(out)
 
@@ -543,6 +581,70 @@ class GenerationOracleTests(unittest.TestCase):
         lit = sum(bin(b).count("1") for b in diag[2])
         self.assertGreater(lit, 20)
         self.assertLess(lit, 120)
+
+
+class PruneContractTests(unittest.TestCase):
+    """2026-09-18: the default build (`--occupancy-prune 1`) stops the
+    walk at a placed cell whose recursive bbox fits one grid cell and
+    marks that bbox (an axis-aligned grid of one with a pitch <= the
+    cell: its footprint, in one fill). Contract against the exact walk
+    (`--occupancy-prune 0`), per layer and per depth plane: exact <=
+    pruned <= dilate(exact, one cell); the same planes; less work; the
+    file is the same whatever --jobs and the unit split."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.exact_src = TMP / "prune_exact.oas"
+        cls.pruned_src = TMP / "prune_on.oas"
+        write_prune(cls.exact_src)
+        shutil.copy2(cls.exact_src, cls.pruned_src)
+        cls.exact = read_ovo(index_with_occupancy(cls.exact_src, 1, prune=0) / "design.ovo")
+        cls.pruned_cache = index_with_occupancy(cls.pruned_src, 1, prune=1)
+        cls.pruned = read_ovo(cls.pruned_cache / "design.ovo")
+
+    @staticmethod
+    def planes(ovo):
+        return {(l["key"], p["depth"]): p["levels"][0]
+                for l in ovo["layers"] for p in l["planes"]}
+
+    @staticmethod
+    def lit(level):
+        w, h, _ = level
+        return {(i, j) for j in range(h) for i in range(w) if bit(level, i, j)}
+
+    def test_pruned_is_a_superset_within_one_cell_on_the_same_planes(self):
+        exact, pruned = self.planes(self.exact), self.planes(self.pruned)
+        self.assertEqual(sorted(exact), sorted(pruned), "same layers and depth planes")
+        extra = 0
+        for key in sorted(exact):
+            e, p = self.lit(exact[key]), self.lit(pruned[key])
+            self.assertEqual(sorted(e - p)[:5], [], "%s: exact cells missing" % (key,))
+            far = [c for c in p if not any((c[0] + dx, c[1] + dy) in e
+                                           for dx in (-1, 0, 1) for dy in (-1, 0, 1))]
+            self.assertEqual(far[:5], [], "%s: pruned cells beyond one cell of exact" % (key,))
+            extra += len(p - e)
+        self.assertGreater(extra, 0, "the fixture must exercise the prune")
+
+    def test_the_depth_planes_are_those_of_the_shapes(self):
+        depths = {}
+        for (key, depth) in self.planes(self.pruned):
+            depths.setdefault(key, set()).add(depth)
+        # 3/0: the top's own box; 1/0: BIG's box and LEAF under the top (1),
+        # LEAF under BIG (2); 2/0: SUB under LEAF under the top (2), under BIG (3)
+        self.assertEqual(depths, {(3, 0): {0}, (1, 0): {1, 2}, (2, 0): {2, 3}})
+
+    def test_the_work_drops_and_the_file_does_not_depend_on_jobs_or_the_split(self):
+        work = {l["key"]: l["work"] for l in self.exact["layers"]}
+        pruned = {l["key"]: l["work"] for l in self.pruned["layers"]}
+        self.assertLess(pruned[(1, 0)], work[(1, 0)])
+        self.assertLess(pruned[(2, 0)], work[(2, 0)])
+        shas = {sha(self.pruned_cache / "design.ovo")}
+        for extra in (("--jobs", "1"), ("--jobs", "4", "--occupancy-balance", "0")):
+            out = TMP / ("prune_alt_%s" % "_".join(a.strip("-") for a in extra))
+            floe_index("vfs", self.pruned_src, out, "--occupancy", "--occupancy-um", 1,
+                       "--no-lod", "--slow-cell-s", "999", *extra)
+            shas.add(sha(out / "design.ovo"))
+        self.assertEqual(len(shas), 1, "prune on by default, byte-identical files")
 
 
 class GenerationContractTests(unittest.TestCase):

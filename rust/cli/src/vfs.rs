@@ -195,6 +195,12 @@ pub fn vfs_cmd(args: &[String]) {
                 occ_opts.balanced_units = args[i + 1].as_str() != "0";
                 i += 2;
             }
+            "--occupancy-prune" => {
+                // 0 = the exact walk (every instance's shapes); 1 (default,
+                // 2026-09-18) stops at cells that fit one grid cell
+                occ_opts.prune = args[i + 1].as_str() != "0";
+                i += 2;
+            }
             "--occupancy-max-bytes" => {
                 occ_opts.max_bytes = args[i + 1].parse().expect("occupancy max bytes");
                 i += 2;
