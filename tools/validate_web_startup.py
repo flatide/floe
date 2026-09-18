@@ -144,7 +144,7 @@ def oracle(work):
     path = work / "startup.json"
     path.write_text(json.dumps(cases))
     build = measured_run("oracle-build", [shutil.which("cargo"), "test", "--offline", "--locked", "-p", "floe-app",
-        "--bin", "floe2-web", "--no-run", "--message-format=json"], cwd=ROOT / "rust",
+        "--lib", "--no-run", "--message-format=json"], cwd=ROOT / "rust",
         capture_output=True, text=True, timeout=180)
     assert build.returncode == 0, (build.stdout, build.stderr)
     bins = [r["executable"] for line in build.stdout.splitlines()

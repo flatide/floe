@@ -545,7 +545,7 @@ pub(crate) struct SessionFile {
     identity: Option<(u64, u64)>,
 }
 impl SessionFile {
-    pub(crate) fn create(explicit: Option<PathBuf>, value: &Value) -> Result<Self> {
+    fn private_directory() -> Result<Self> {
         let root = fs::canonicalize(std::env::temp_dir())?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -553,11 +553,14 @@ impl SessionFile {
             .as_nanos();
         let directory = root.join(format!("floe-web-{}-{stamp}", std::process::id()));
         DirBuilder::new().mode(0o700).create(&directory)?;
-        let mut owned = Self {
+        Ok(Self {
             path: directory.join("session.json"),
             directory,
             identity: None,
-        };
+        })
+    }
+    pub(crate) fn create(explicit: Option<PathBuf>, value: &Value) -> Result<Self> {
+        let mut owned = Self::private_directory()?;
         if let Some(p) = explicit {
             owned.path = cache::absolute(&p)?;
         }
@@ -603,6 +606,31 @@ fn readonly_selection(
     floe_app_core::drc::select_review(&path, reviewer, stop)
 }
 pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
+    run_hosted(c, cancelled, None)
+}
+type EmbeddedHost = Box<dyn FnOnce(crate::embedded::Ready) -> Result<()> + Send>;
+
+pub(crate) fn parse_embedded(args: &[String]) -> Result<Command> {
+    let mut c = parse(args)?;
+    if c.help || c.no_open || c.firefox.is_some() || c.session_file.is_some() {
+        return Err(Error::input(
+            "embedded host accepts view options only; browser/session-file options and CLI help are unsupported",
+        ));
+    }
+    // Do not forward into a separately running browser workspace. Desktop
+    // single-instance ownership is a distinct, later acceptance item.
+    c.independent = true;
+    c.no_open = true;
+    Ok(c)
+}
+pub(crate) fn run_embedded(
+    c: Command,
+    cancelled: &Arc<AtomicUsize>,
+    ready: EmbeddedHost,
+) -> Result<i32> {
+    run_hosted(c, cancelled, Some(ready))
+}
+fn run_hosted(c: Command, cancelled: &Arc<AtomicUsize>, host: Option<EmbeddedHost>) -> Result<i32> {
     if c.help {
         println!("{HELP}");
         return Ok(0);
@@ -848,10 +876,15 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         Gateway::attach_drc_registry(&mut gate, registry).map_err(Error::input)?;
     }
     let url = format!("{}/#bootstrap={}", gate.origin(), secret.expose());
-    let session = SessionFile::create(
-        c.session_file,
-        &json!({"url":url,"origin":gate.origin(),"bundle":BUNDLE,"pid":std::process::id()}),
-    )?;
+    let session = if host.is_some() {
+        // Native host gets the one-use URL in memory, not a launch file.
+        SessionFile::private_directory()?
+    } else {
+        SessionFile::create(
+            c.session_file,
+            &json!({"url":url,"origin":gate.origin(),"bundle":BUNDLE,"pid":std::process::id()}),
+        )?
+    };
     if let Some(tag) = &c.drc_reviewer {
         Gateway::enable_drc_review(
             &mut gate,
@@ -894,10 +927,17 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         .map(|path| floe_app_core::browser::Browser::start(&path, &session.directory, &url))
         .transpose()?;
     eprintln!("[floe2-web] local workspace: {}", gate.origin());
-    eprintln!(
-        "[floe2-web] private session link: {} (one use, expires in 120s)",
-        session.path.display()
-    );
+    if let Some(host) = host {
+        host(crate::embedded::Ready {
+            origin: gate.origin().into(),
+            url,
+        })?;
+    } else {
+        eprintln!(
+            "[floe2-web] private session link: {} (one use, expires in 120s)",
+            session.path.display()
+        );
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -941,6 +981,20 @@ pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn embedded_private_directory_does_not_write_a_credential() {
+        use std::os::unix::fs::PermissionsExt;
+        let session = SessionFile::private_directory().unwrap();
+        let dir = session.directory.clone();
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(!session.path.exists());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        drop(session);
+        assert!(!dir.exists());
+    }
     #[test]
     fn bare_source_dispatch_is_the_same_parser_without_filesystem_guessing() {
         use std::ffi::OsString;

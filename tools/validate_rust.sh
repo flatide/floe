@@ -39,7 +39,7 @@ rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
 jobdeck representatives rust_renderer klayout"
-WEB_APP_GATES="app_cli cache_migration web_cli_inventory native_revision web_selfcheck web_portable runtime_smoke app_render \
+WEB_APP_GATES="app_cli cache_migration web_cli_inventory native_revision web_selfcheck web_portable runtime_smoke embedded_host app_render \
 layerprops layer_defaults layer_palette palette_styles display_test app_clip managed_clip app_captures \
 fe_embed drc_captures view_controller zoom_band minimap depth_keys web_wheel worker_queries \
 view_stream managed_index owner_service web_cli web_local_sharing display_cli display_input web_handoff \
@@ -214,6 +214,11 @@ if gate web_portable; then RAN="$RAN web_portable"
     .venv/bin/python -B tools/validate_web_portable.py; fi
 if gate runtime_smoke; then RAN="$RAN runtime_smoke"
     .venv/bin/python -B tools/validate_runtime_smoke.py; fi
+if gate embedded_host; then RAN="$RAN embedded_host"
+    .venv/bin/python -B tools/validate_desktop_env.py
+    (cd rust && FLOE_INDEX_BIN="$PWD/target/release/floe-index" \
+        FLOE_RENDERD_BIN="$PWD/target/release/floe-renderd" \
+        cargo test --release --offline --locked -p floe-app --test embedded_lifecycle -- --ignored); fi
 if gate app_render; then RAN="$RAN app_render"
     .venv/bin/python tools/validate_app_render.py "$FLOE2_SMOKE_SRC"; fi
 if gate layerprops; then RAN="$RAN layerprops"

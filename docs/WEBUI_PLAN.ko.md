@@ -4,6 +4,13 @@
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
+2026-09-18 요구 추가: **외부 브라우저 없이 독립 창 + 내장 WebView**도 필수다.
+HTML/Canvas UI·Rust 서비스를 공유하며 별도 Rust 위젯 UI를 만들지 않는다.
+필수 현장은 **RHEL 8.6/8.10 + ETX/X11**. [데스크톱 계획](WEBUI_DESKTOP.ko.md)의
+D0~D3를 추가 추적한다. 공통 실행 경계·선택 회귀는 준비됐지만 데스크톱 앱은
+미제공이다. 전체 배터리는 기존 오라클의 macOS 실행 timeout으로 미통과이며,
+후속 선택 재검증 통과와 구분한다([검증 기록](WEBUI_DESKTOP.ko.md#5-d0-검증-기록-2026-09-18)).
+
 현재 상태: **M0 로컬 조사/API 초안 + M1a worker client·공유 서비스 + 일반/잡덱 index·info/render/probe·분석/spec CLI**.
 M1b-1에서 의존성 선정과 인증된 loopback HTTP/WS transport 기반을 추가했다.
 M1b-2a에서 managed lease/admission과 native view controller를 추가했다.
@@ -520,21 +527,21 @@ M4g-15a는 명시 ICE와 인접 reviewer 파일의 읽기 선택을 저장 권�
                  ▼
              HTML UI (canvas 2D; Python 런타임 없음)
 
-배포 A  데스크톱 패키징: launcher가 gatewayd+renderd를 함께 기동,
-        UI는 로컬 브라우저(firefox --kiosk)로 loopback 접속.
-배포 B  주 작업자(ETX): TeeBox 계정이 A와 동일 구성을 기동하되
-        firefox의 DISPLAY를 ETX로 지정. portal→TeeBox 실행 흐름이
-        한 글자도 안 바뀐다(§0). B는 A의 특수형이다.
+배포 A  데스크톱 패키징: 독립 native 창 + 내장 WebView에서 같은 UI를
+        loopback으로 표시. 외부 브라우저용 floe2-web도 별도 유지.
+배포 B  주 작업자(ETX): RHEL 8.6/8.10 TeeBox에서 A를 실행하고 X11로 표시.
+        내장 WebView ABI·ETX 입력/화질/성능을 별도로 검증한다.
+        기존 Firefox 경로는 비교/병존용이며 내장 앱 완료로 세지 않는다.
 배포 C  동료/원격 뷰어: gatewayd만 TeeBox에서 서빙, 사용자 자신의
         브라우저가 네트워크로 접속. 픽셀은 로컬에서 그려진다.
 ```
 
-- B는 A의 실행 구성을 재사용하되 Firefox 프로필 격리·ETX 성능은 별도
+- B는 A의 UI/서비스를 재사용하되 RHEL의 WebKit ABI 및 ETX 성능은 별도
   검증한다. DISPLAY 상속만으로 G2 통과를 보장하지 않는다.
 - C는 같은 서비스 계약을 쓰되 TLS·게스트 권한·전송 상한·다중 사용자
   자원 정책이 추가된다. 단순한 바인딩 주소 변경만으로 배포 완료가 아니다.
-- 향후 로컬 Electron 셸은 "C에 붙는 선택적 데스크톱 래퍼"로 분리
-  판단한다(§8) — TeeBox 실행 모델과 무관한 사용자측 배포 정책 문제.
+- 독립 창 자체는 이제 필수이며 특정 엔진(Electron/Wry 등)의 채택과는
+  구분한다. RHEL 8 ABI·ETX 수용 및 오프라인 배포 비용으로 선택한다.
 
 ## 3. 컴포넌트
 
@@ -613,6 +620,11 @@ M4g-15a는 명시 ICE와 인접 reviewer 파일의 읽기 선택을 저장 권�
   lint를 CI 게이트로.
 
 ### 3.3 launcher 통합
+
+**2026-09-18 추가:** 아래는 구현되어 있는 **외부 브라우저 경로**의 계약이다.
+새 필수 독립 창은 `floe_app::embedded::Session`을 공통 진입점으로 사용한다.
+구체적 WebView 호스트/배포와 D0~D3는 [데스크톱 계획](WEBUI_DESKTOP.ko.md)을 따른다.
+Firefox kiosk를 그 요구의 대체로 간주하지 않는다.
 
 - Rust `floe2 view <src> --web`(명령 이름 가칭): gatewayd+renderd 기동 → 토큰 URL
   생성 → Firefox 실행(배포 A/B 공용). DISPLAY는 호출측 환경을 그대로
@@ -748,8 +760,9 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   WebGL2. 최적화를 넣더라도 현장 하한에서 동작하는 기본 경로를 유지한다.
 - 접속 첫 페이지에서 필요 API를 feature-detect — 미달이면 필요 버전
   안내를 명시 표출(조용한 오동작 금지).
-- 주 작업자 경로(B)는 TeeBox의 Firefox 하나만 문제되므로 하한 협상이
-  쉽다.
+- 기존 외부 브라우저 비교 경로는 TeeBox Firefox를 감사한다. 새 내장 앱
+  경로(B)는 별도의 WebView 엔진/ABI·기능 하한을 검증해야 한다. Firefox
+  감사 통과를 WebKit 또는 Chromium 내장 앱의 수용으로 대신하지 않는다.
 
 ## 8. 배포·라이선스
 
@@ -757,6 +770,10 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   웹 제품은 Rust CLI/gateway/renderd/indexer + 정적 UI 자산으로 구성한다.
   Python/venv/PyGObject를 웹 제품 실행에 포함하지 않는다. 이관 중 GTK
   검증용 패키지는 구분한다. 브라우저 제공 방식은 M0 환경 감사에서 확정한다.
+- 내장 앱은 [D0~D3](WEBUI_DESKTOP.ko.md)에서 별도 패키지로 검증한다.
+  GTK/WebKit 같은 시스템 GUI 의존성이 기존 musl CLI/worker 번들에 섞이지
+  않도록 한다. Python/PyGObject 없이 WebKitGTK를 쓰는 것은 별도 Rust 위젯
+  UI 재작성과 다르지만, 그 런타임·라이선스·보안 업데이트 책임은 남는다.
 - Electron(선택, 후순위): 사용자 로컬 셸로만 검토, **현장 검증 전
   제외**(§1). 라이선스는 파일 동봉으로 단정하지 않고 **배포 조건
   체크리스트**로 확인한다: 실제 번들의 Chromium/FFmpeg 빌드 구성,
