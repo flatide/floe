@@ -239,6 +239,36 @@ pub fn level_for(items: u64, budget: u64) -> u32 {
 /// are point lists (polygon vertices, Pts offsets) and cost about six times
 /// their stored size in memory. About a tenth above the rect measurement;
 /// the post-decode check stays as the safety net for anything it misses.
+///
+/// Budget-fitted DENSITY (2026-09-19, field on the synthetic MAIN01: thin
+/// keep showed nothing for five zoom steps from the fit view). Raising the
+/// cut sheds whole size classes: where a view's shapes are one class, the
+/// finest cut that fits selects NOTHING - the screen went empty, after
+/// seconds of abandoned passes. A plan over its budget now keeps the
+/// requested cut and lowers the DENSITY instead:
+///   * the pass runs to the end unless it passes FIT_OVERSHOOT budgets
+///     (then the cut doubles - detail goes only when the density would
+///     have to fall under about one page in FIT_OVERSHOOT); a doubling
+///     that lands under HALF a budget stepped over a size class, so the
+///     finer cut is planned completely after all and thinned harder;
+///   * of the pages it selected, those not in the complete tier are kept
+///     one in 2^k by their sequence number within their (cell, layer) run,
+///     the runs out of phase by cell and layer (so single-page runs thin
+///     too) - k the smallest level the budget allows, the sets nested as k
+///     grows - and the rest of the
+///     budget keeps the LARGEST pages complete (by the largest cut that
+///     still selects them), so big structures never get holes while a
+///     sample of every finer class stays on screen;
+///   * if even one page in 2^FIT_THIN_MAX is too much, the largest pages
+///     alone are kept - the old behaviour at an exact boundary.
+/// One pass where the ladder took up to seven. FLOE_RUST_FIT_THIN=off
+/// restores the ladder above.
+pub const FIT_OVERSHOOT: u64 = 8;
+pub const FIT_THIN_MAX: u32 = 12;
+/// the cut may double this many times (x64, the ladder's reach)
+pub const FIT_OCTAVES_MAX: u32 = 6;
+/// HierStats::fit_thin when only the largest pages were kept
+pub const FIT_THIN_DROPPED: u32 = 255;
 pub const FIT_PAGE_FIXED: u64 = 4096;
 pub const FIT_RECORD_BYTES: u64 = 192;
 pub const FIT_RECORD_STORED: u64 = 12;
@@ -265,6 +295,11 @@ pub fn fit_rungs(cut_dbu: i64, px_per_dbu: f64) -> Vec<i64> {
     rungs.sort_unstable();
     rungs.dedup();
     rungs
+}
+
+fn fit_thin_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_FIT_THIN").as_deref() != Ok("off"))
 }
 
 fn fit_budget_enabled() -> bool {
@@ -423,6 +458,9 @@ pub struct HierOpts {
     /// fit the plan to ViewReq::decode_budget by raising the cut (see
     /// FIT_SHIFTS_MAX); false = plan as asked (FLOE_RUST_FIT_BUDGET=off)
     pub fit_budget: bool,
+    /// a plan over its budget lowers the density before the detail
+    /// (FLOE_RUST_FIT_THIN=off: the cut ladder)
+    pub fit_thin: bool,
     /// Field diagnosis (2026-09-10): record one ExplainRow per page,
     /// page-BVH node, child placement / child-BVH node and frame the
     /// walk judged INSIDE the view - kept, culled by size, hairline,
@@ -470,6 +508,7 @@ impl Default for HierOpts {
             rep_decode_bytes: rep_decode_bytes(),
             rep_density: rep_density(),
             fit_budget: fit_budget_enabled(),
+            fit_thin: fit_thin_enabled(),
             explain: false,
         }
     }
@@ -573,6 +612,12 @@ pub struct HierStats {
     pub fit_cull: u32,
     pub fit_passes: u32,
     pub fit_over: bool,
+    /// budget-fitted density: pages outside the complete tier are kept one
+    /// in 2^fit_thin (0 = none thinned, FIT_THIN_DROPPED = only the largest
+    /// pages kept), and the complete tier starts at this percentage of the
+    /// requested cut (0 = no tier)
+    pub fit_thin: u32,
+    pub fit_full_pct: u32,
     /// dots emitted for representative cut placements (kept members
     /// in view, before the layer fan-out) and for cut child-BVH
     /// subtrees within the dot pitch (one each)
@@ -886,6 +931,9 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
     if !opts.fit_budget || req.decode_budget == 0 || req.cut_dbu <= 0 {
         return plan_hier_as_asked(v, req, opts, 0);
     }
+    if opts.fit_thin {
+        return plan_hier_thinned(v, req, opts);
+    }
     let mut passes = 1u32;
     let asked = plan_hier_as_asked(v, req, opts, req.decode_budget);
     if !asked.stats.fit_over {
@@ -939,6 +987,188 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
     plan.stats.fit_cull = (!req.page_hairline) as u32;
     plan.stats.fit_passes = passes + 1;
     plan
+}
+
+/// Budget-fitted density (see FIT_OVERSHOOT).
+fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
+    let limit = req.decode_budget.saturating_mul(FIT_OVERSHOOT);
+    let mut attempt = req.clone();
+    let mut passes = 0u32;
+    for octave in 0..=FIT_OCTAVES_MAX {
+        attempt.cut_dbu = req.cut_dbu.saturating_mul(1i64 << octave);
+        passes += 1;
+        let mut plan = plan_hier_as_asked(v, &attempt, opts, limit);
+        if plan.stats.fit_over {
+            continue;
+        }
+        if octave == 0 && plan.stats.fit_bytes <= req.decode_budget {
+            plan.stats.fit_passes = passes;
+            return plan;
+        }
+        let hairline = if attempt.page_hairline { opts.hairline } else { 0.0 };
+        let mut at = octave;
+        if octave > 0 && unique_page_memory(v, &plan) < req.decode_budget / 2 {
+            // the finer pass was over FIT_OVERSHOOT budgets and this one is
+            // under half of one: the doubling stepped over a size class (the
+            // empty screen). Plan the finer cut to the end and thin it.
+            let mut finer = attempt.clone();
+            finer.cut_dbu = req.cut_dbu.saturating_mul(1i64 << (octave - 1));
+            passes += 1;
+            let mut whole = plan_hier_as_asked(v, &finer, opts, 0);
+            if thin_to_budget(v, &mut whole, hairline, req.cut_dbu, req.decode_budget) {
+                (plan, at) = (whole, octave - 1);
+            } else if !thin_to_budget(v, &mut plan, hairline, req.cut_dbu, req.decode_budget) {
+                break;
+            }
+        } else if !thin_to_budget(v, &mut plan, hairline, req.cut_dbu, req.decode_budget) {
+            break;
+        }
+        if at > 0 || plan.stats.fit_thin != 0 {
+            plan.stats.fit_pct = 100u32 << at;
+        }
+        plan.stats.fit_passes = passes;
+        return plan;
+    }
+    // not even the largest page fits: the complete plan of the last cut,
+    // flagged, so the render reports the budget exactly as it used to
+    let mut plan = plan_hier_as_asked(v, &attempt, opts, 0);
+    plan.stats.fit_over = true;
+    plan.stats.fit_pct = ((attempt.cut_dbu as f64 / req.cut_dbu as f64) * 100.0).round().max(100.0) as u32;
+    plan.stats.fit_passes = passes + 1;
+    plan
+}
+
+/// The estimated decoded memory of a plan's pages, each counted once.
+fn unique_page_memory(v: &Ovm, plan: &HierPlan) -> u64 {
+    plan.pages.iter().map(|&pi| { let p = v.page(pi); page_memory(p.records, p.usize_) }).sum()
+}
+
+/// Keeps of a complete plan what `budget` holds (see FIT_OVERSHOOT): one
+/// page in 2^k of every (cell, layer) run by sequence number, then the
+/// largest pages complete while they fit. False when not even one page
+/// can stay. `hairline` is the page hairline factor in force (0 = keep).
+fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, hairline: f64, asked_cut: i64, budget: u64) -> bool {
+    let metas: Vec<floe_ovm::PageV> = plan.pages.iter().map(|&pi| v.page(pi)).collect();
+    let mem: Vec<u64> = metas.iter().map(|p| page_memory(p.records, p.usize_)).collect();
+    let total: u64 = mem.iter().sum();
+    // the pass summed per working cell; the generation holds a page once
+    plan.stats.fit_bytes = total;
+    if total <= budget {
+        return true;
+    }
+    // the largest cut that still selects the page: the size cut looks at
+    // the longer side, the hairline cull at the shorter one
+    let key: Vec<u64> = metas
+        .iter()
+        .map(|p| {
+            let long = p.max_w.max(p.max_h);
+            if hairline > 0.0 {
+                long.min((p.max_min as f64 / hairline) as u64)
+            } else {
+                long
+            }
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..metas.len()).collect();
+    order.sort_by(|&a, &b| key[b].cmp(&key[a]).then(plan.pages[a].cmp(&plan.pages[b])));
+    let mut level = 1u32;
+    while level < FIT_THIN_MAX && (total >> level) > budget {
+        level += 1;
+    }
+    let mut kept: Option<(Vec<bool>, u64, u32, Option<u64>)> = None;
+    while level <= FIT_THIN_MAX {
+        let step = 1u32 << level;
+        // one page in 2^level of every run, the runs out of phase by cell
+        // and layer: single-page runs (a small cell, a layer with little on
+        // it) stay one in 2^level too, where "sequence 0 of every run"
+        // kept every one of them at any level (the synthetic chip's top
+        // cell: 41 layers of one page, 74 MB that no level could shed);
+        // nested as the level grows
+        let mut keep: Vec<bool> = metas
+            .iter()
+            .map(|p| p.seq.wrapping_add(p.cell).wrapping_add(p.layer_idx) % step == 0)
+            .collect();
+        let mut bytes: u64 = keep.iter().zip(&mem).filter(|(k, _)| **k).map(|(_, m)| *m).sum();
+        if bytes <= budget {
+            let mut stop = order.len();
+            for (at, &i) in order.iter().enumerate() {
+                if !keep[i] {
+                    if bytes + mem[i] > budget {
+                        stop = at;
+                        break;
+                    }
+                    bytes += mem[i];
+                    keep[i] = true;
+                }
+            }
+            kept = Some((keep, bytes, level, full_tier(&order, &key, stop)));
+            break;
+        }
+        level += 1;
+    }
+    let (keep, bytes, level, full) = match kept {
+        Some(found) => found,
+        None => {
+            let mut keep = vec![false; metas.len()];
+            let (mut bytes, mut stop) = (0u64, order.len());
+            for (at, &i) in order.iter().enumerate() {
+                if bytes + mem[i] > budget {
+                    stop = at;
+                    break;
+                }
+                bytes += mem[i];
+                keep[i] = true;
+            }
+            if stop == 0 {
+                return false;
+            }
+            (keep, bytes, FIT_THIN_DROPPED, full_tier(&order, &key, stop))
+        }
+    };
+    let dropped: HashSet<u32> = plan.pages.iter().zip(&keep).filter(|(_, k)| !**k).map(|(&pi, _)| pi).collect();
+    let mut page_bytes = 0u64;
+    for cell in &mut plan.wcells {
+        if !cell.page_levels.is_empty() {
+            let mut levels = std::mem::take(&mut cell.page_levels).into_iter();
+            let pages = &cell.pages;
+            cell.page_levels = pages
+                .iter()
+                .filter_map(|pi| {
+                    let level = levels.next().unwrap_or(0);
+                    (!dropped.contains(pi)).then_some(level)
+                })
+                .collect();
+        }
+        cell.pages.retain(|pi| !dropped.contains(pi));
+        page_bytes += cell.pages.iter().map(|&pi| v.page(pi).usize_ as u64).sum::<u64>();
+    }
+    let mut at = 0usize;
+    plan.page_prio.retain(|_| {
+        at += 1;
+        keep[at - 1]
+    });
+    let mut at = 0usize;
+    plan.pages.retain(|_| {
+        at += 1;
+        keep[at - 1]
+    });
+    plan.stats.page_bytes = page_bytes;
+    plan.stats.fit_bytes = bytes;
+    plan.stats.fit_thin = level;
+    plan.stats.fit_full_pct = full
+        .map(|cut| ((cut as f64 / asked_cut.max(1) as f64) * 100.0).round().clamp(100.0, u32::MAX as f64) as u32)
+        .unwrap_or(0);
+    true
+}
+
+/// The complete tier's boundary when the pages `order[..stop]` (largest
+/// key first) are all kept: the smallest key every page at or above which
+/// is kept - the page at `stop` was left out, so its key is not complete.
+fn full_tier(order: &[usize], key: &[u64], stop: usize) -> Option<u64> {
+    match order.get(stop) {
+        None => order.last().map(|&i| key[i]),
+        Some(&out) => order[..stop].iter().map(|&i| key[i]).filter(|&k| k > key[out]).min(),
+    }
 }
 
 fn plan_hier_as_asked(v: &Ovm, req: &ViewReq, opts: &HierOpts, fit_limit: u64) -> HierPlan {
@@ -3782,7 +4012,8 @@ mod tests {
             r.page_hairline = hairline;
             r
         };
-        let fitted = |v: &Ovm, r: &ViewReq| plan_hier(v, r, &HierOpts::default());
+        // the cut ladder (FLOE_RUST_FIT_THIN=off); the density fit has its own test
+        let fitted = |v: &Ovm, r: &ViewReq| plan_hier(v, r, &HierOpts { fit_thin: false, ..HierOpts::default() });
         let as_asked = |v: &Ovm, r: &ViewReq| plan_hier(v, r, &HierOpts { fit_budget: false, ..HierOpts::default() });
         // the oracle: the first rung (ascending) whose plain plan fits
         let oracle = |v: &Ovm, r: &ViewReq| -> Option<(i64, usize)> {
@@ -3832,6 +4063,103 @@ mod tests {
         let giant = fixture(&[FCell { name: "TOP", pages, places: vec![] }], 0);
         let over = fitted(&giant, &ask(50, 1, false));
         assert_eq!((over.pages.len(), over.stats.fit_cull, over.stats.fit_over, over.stats.fit_pct), (1, 1, true, 6400));
+    }
+
+    #[test]
+    fn a_plan_over_its_decode_budget_keeps_its_cut_and_lowers_the_density() {
+        // field 2026-09-19 (synthetic MAIN01, thin keep): five zoom steps of
+        // empty screen - the view's shapes are ONE size class, so the finest
+        // cut that fitted selected nothing. Sixteen 200-squares (4 px: above
+        // the 2 px page wash) and two of 1600 in one (cell, layer) run; cut 50.
+        let mut pages = Vec::new();
+        for i in 0..16 {
+            pages.push((bx(i * 400, 0, i * 400 + 200, 200), 200, 200));
+        }
+        for i in 0..2 {
+            pages.push((bx(i * 3200, 3000, i * 3200 + 1600, 4600), 1600, 1600));
+        }
+        let chip = fixture(&[FCell { name: "TOP", pages: pages.clone(), places: vec![] }], 0);
+        let view = bx(-10, -10, 20_000_000, 20_000_000);
+        let per = page_memory(1, 0);
+        let ask = |budget: u64| {
+            let mut r = rq(view, 50, u32::MAX);
+            r.px_per_dbu = 0.02;
+            r.decode_budget = budget;
+            r
+        };
+        let fitted = |v: &Ovm, r: &ViewReq| plan_hier(v, r, &HierOpts::default());
+        let ladder = |v: &Ovm, r: &ViewReq| plan_hier(v, r, &HierOpts { fit_thin: false, ..HierOpts::default() });
+        // a plan that fits is the plan as asked, in one pass
+        let roomy = fitted(&chip, &ask(18 * per));
+        assert_eq!((roomy.pages.len(), roomy.stats.fit_pct, roomy.stats.fit_thin, roomy.stats.fit_passes), (18, 0, 0, 1));
+        // six pages: the ladder sheds the whole class of 200s ...
+        let six = ask(6 * per);
+        assert_eq!(ladder(&chip, &six).pages, vec![16, 17]);
+        // ... the density fit keeps one 200 in four, both 1600s complete, in one pass
+        let plan = fitted(&chip, &six);
+        assert_eq!(plan.pages, vec![0, 4, 8, 12, 16, 17]);
+        assert_eq!(
+            (plan.stats.fit_pct, plan.stats.fit_thin, plan.stats.fit_full_pct, plan.stats.fit_passes, plan.stats.fit_over),
+            (100, 2, 3200, 1, false)
+        );
+        assert_eq!(plan.stats.fit_bytes, 6 * per);
+        assert_eq!(plan.wcells[0].pages, plan.pages, "the working cell is thinned with the plan");
+        assert_eq!(plan.page_prio.len(), plan.pages.len());
+        // seven: the spare page completes nothing (the 200s are not all kept),
+        // so the tier still starts at the 1600s
+        let seven = fitted(&chip, &ask(7 * per));
+        assert_eq!((seven.pages.clone(), seven.stats.fit_full_pct), (vec![0, 1, 4, 8, 12, 16, 17], 3200));
+        // three: a level deeper, a subset of the six (the sets are nested), no
+        // complete tier (one of the 1600s had to go)
+        let three = fitted(&chip, &ask(3 * per));
+        assert_eq!((three.pages.clone(), three.stats.fit_thin, three.stats.fit_full_pct), (vec![0, 8, 16], 3, 0));
+        assert!(three.pages.iter().all(|p| plan.pages.contains(p)));
+        // two: eighteen pages are more than FIT_OVERSHOOT budgets, so the pass
+        // is abandoned and the cut doubles until a pass completes (x8: a 200 still
+        // passes a cut of 200, so x4 is over as well)
+        let two = fitted(&chip, &ask(2 * per));
+        assert_eq!((two.pages.clone(), two.stats.fit_pct, two.stats.fit_thin, two.stats.fit_passes), (vec![16, 17], 800, 0, 4));
+        // a page and a half: x8 leaves the two 1600s, one too many - one goes
+        let one = fitted(&chip, &ask(per + per / 2));
+        assert_eq!((one.pages.clone(), one.stats.fit_pct, one.stats.fit_thin, one.stats.fit_over), (vec![16], 800, 1, false));
+        // the cliff: forty 200s and one 1600 against four pages. The passes at
+        // x1..x4 are over FIT_OVERSHOOT budgets, the pass at x8 holds one page -
+        // under half a budget, so the doubling stepped over the 200s. The x4
+        // cut is planned to the end and thinned as deep as it takes: three
+        // 200s stay with the 1600, where the ladder shows the 1600 alone
+        let mut cliff = Vec::new();
+        for i in 0..40 {
+            cliff.push((bx(i * 400, 0, i * 400 + 200, 200), 200, 200));
+        }
+        cliff.push((bx(0, 3000, 1600, 4600), 1600, 1600));
+        let cliff = fixture(&[FCell { name: "TOP", pages: cliff, places: vec![] }], 0);
+        let four = fitted(&cliff, &ask(4 * per));
+        assert_eq!(
+            (four.pages.clone(), four.stats.fit_pct, four.stats.fit_thin, four.stats.fit_full_pct, four.stats.fit_passes),
+            (vec![0, 16, 32, 40], 400, 4, 3200, 5)
+        );
+        assert_eq!(ladder(&cliff, &ask(4 * per)).pages, vec![40]);
+        // the same request, the same plan
+        assert_eq!(fitted(&chip, &six).pages, plan.pages);
+        // single-page runs (small cells): one CELL in 2^k stays, by cell index
+        let cells: Vec<FCell> = (0..8)
+            .map(|_| FCell { name: "LEAF", pages: vec![(bx(0, 0, 200, 200), 200, 200)], places: vec![] })
+            .chain(std::iter::once(FCell {
+                name: "TOP",
+                pages: vec![],
+                places: (0..8).map(|i| (i, i as i64 * 1000, 0, 0, false, Rep::One)).collect(),
+            }))
+            .collect();
+        let leaves = fixture(&cells, 8);
+        let half = fitted(&leaves, &ask(4 * per));
+        assert_eq!((half.pages.len(), half.stats.fit_thin), (4, 1));
+        assert!(half.pages.iter().all(|&p| leaves.page(p).cell % 2 == 0));
+        assert!(half.wcells.iter().all(|w| w.pages.iter().all(|p| half.pages.contains(p))));
+        // not even the largest page fits: the complete plan, flagged, as before
+        pages.push((bx(0, 0, 10_000_000, 10_000_000), 10_000_000, 10_000_000));
+        let giant = fixture(&[FCell { name: "TOP", pages, places: vec![] }], 0);
+        let over = fitted(&giant, &ask(1));
+        assert_eq!((over.pages.len(), over.stats.fit_over, over.stats.fit_pct), (1, true, 6400));
     }
 
     #[test]

@@ -32,9 +32,10 @@ sh tools/validate_rust.sh --only quick path/to.oas
 - `write_once`(tools/validate_write_once.py, 약 20초; `render` 별칭에 포함): write-once 타일
   (F2R-28)의 프레임 18개가 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`와 바이트 동일한지, 밀집 뷰에서
   타일이 차고 paint가 줄어드는지, 킬 스위치가 write-once 작업을 전혀 하지 않는지.
-- `fit_budget`(tools/validate_fit_budget.py, 약 20초; `planner`·`render` 별칭에 포함): 합성
-  MAIN01 칩의 keep + cut 1 px 광역뷰가 48 MB 예산에서 오류 대신 낮춘 밀도로 그려지는지
-  (킬 스위치는 종전 오류), 예산 안의 프레임은 픽셀이 바뀌지 않는지.
+- `fit_budget`(tools/validate_fit_budget.py, 약 25초; `planner`·`render` 별칭에 포함): 합성
+  MAIN01 칩의 keep + cut 1 px 광역뷰가 48 MB 예산에서 오류 대신 낮춘 밀도(`fit_thin` > 0)로
+  그려지고 **빈 프레임이 아닌지**, `FLOE_RUST_FIT_THIN=off`는 컷을 올리고(`fit_pct` > 100)
+  `FLOE_RUST_FIT_BUDGET=off`는 종전 오류인지, 예산 안의 프레임은 픽셀이 바뀌지 않는지.
 - `representatives`(tools/validate_representatives.py, 약 10초; `render`·`indexer`
   별칭에 포함): design.ovr 추가 생성이 캐시를 보존하는지, depth 0 제외·kill switch·
   손상 파일 폴백, 그리고 결합 인덱스 실행에서 OVR 생성이 실패해도(`--kill-at

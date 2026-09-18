@@ -1122,6 +1122,11 @@ class RustRenderWorker:
                 "fit_pct": _wire_int(fields, "fit_pct"),
                 "fit_cull": _wire_int(fields, "fit_cull"),
                 "fit_over": _wire_int(fields, "fit_over"),
+                # budget-fitted density: pages below the complete tier kept one
+                # in 2^fit_thin (255 = only the largest pages kept); the tier
+                # starts at fit_full_pct percent of the requested cut
+                "fit_thin": _wire_int(fields, "fit_thin"),
+                "fit_full_pct": _wire_int(fields, "fit_full_pct"),
                 "stored_rep_points": _wire_int(fields, "stored_rep_points"),
                 "stored_rep_tested": _wire_int(fields, "stored_rep_tested"),
                 "stored_rep_limited": _wire_int(fields, "stored_rep_limited"),

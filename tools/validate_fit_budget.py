@@ -3,12 +3,17 @@
 
 Field: `thin keep` + detail high is the picture closest to Calibre, but a
 wide view, many layers or a deep depth ended in "decoded generation budget
-exceeded". The planner now raises the cut by half octaves until the pages it
-selects fit the generation budget. This gate renders a synthetic MAIN01-class
+exceeded". The planner fits such a plan to the generation budget: since
+0.12.166 by lowering the DENSITY at the requested cut (one page in 2^k below a
+complete tier of the largest pages; field 2026-09-19: raising the cut emptied
+the screen where a view's shapes are one size class), before that by raising
+the cut (FLOE_RUST_FIT_THIN=off). This gate renders a synthetic MAIN01-class
 chip (tools/gen_main01_like.py) under a small budget:
 
-  * keep + cut 1 px over the whole chip, every layer: a frame, fit_pct > 100,
-    where the kill switch FLOE_RUST_FIT_BUDGET=off gives the old error;
+  * keep + cut 1 px over the whole chip, every layer: a frame with something
+    on it, fit_thin > 0, where FLOE_RUST_FIT_THIN=off raises the cut
+    (fit_pct > 100, fit_thin 0) and FLOE_RUST_FIT_BUDGET=off gives the old
+    error;
   * a frame that fits is untouched: fit_pct 0 and pixel-identical to the
     kill switch's frame, at the wide view under a large budget and at a near
     view under the small one.
@@ -30,18 +35,23 @@ from floe.rust_render import RustRenderWorker
 PX = 1920       # at this size keep + cut 1 px of the whole chip decodes ~110 MB
 
 
-def worker(src, budget_mb, fit=True):
+def worker(src, budget_mb, fit=True, thin=True):
     os.environ['FLOE_RUST_BUDGET_MB'] = str(budget_mb)
     if fit:
         os.environ.pop('FLOE_RUST_FIT_BUDGET', None)
     else:
         os.environ['FLOE_RUST_FIT_BUDGET'] = 'off'
+    if thin:
+        os.environ.pop('FLOE_RUST_FIT_THIN', None)
+    else:
+        os.environ['FLOE_RUST_FIT_THIN'] = 'off'
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
     w.start()
     os.environ.pop('FLOE_RUST_BUDGET_MB', None)
     os.environ.pop('FLOE_RUST_FIT_BUDGET', None)
+    os.environ.pop('FLOE_RUST_FIT_THIN', None)
     return w
 
 
@@ -74,6 +84,7 @@ def main():
             done = subprocess.run(argv, cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
             assert done.returncode == 0, done.stdout + done.stderr
         tight, tight_off = worker(src, 48), worker(src, 48, fit=False)
+        ladder = worker(src, 48, thin=False)
         roomy, roomy_off = worker(src, 1024), worker(src, 1024, fit=False)
         try:
             x0, y0, x1, y1 = map(float, tight.cache.meta['bbox'])
@@ -84,17 +95,25 @@ def main():
                 'the kill switch no longer reproduces the field error', err.get('tiles'), err.get('resident_mb'))
             fitted, res = frame(tight, 2, wide)
             culls = res['plan_culls']
-            assert fitted is not None and culls['fit_pct'] > 100 and culls['fit_over'] == 0, culls
+            assert fitted is not None and culls['fit_thin'] > 0 and culls['fit_over'] == 0, culls
+            background = bytes(fitted[:4])
+            lit = sum(1 for i in range(0, len(fitted), 4) if bytes(fitted[i:i + 4]) != background)
+            assert lit > 0, 'the fitted frame is empty'
+            raised, rres = frame(ladder, 7, wide)
+            rculls = rres['plan_culls']
+            assert raised is not None and rculls['fit_pct'] > 100 and rculls['fit_thin'] == 0, rculls
             a, ra = frame(roomy, 3, wide)
             b, _ = frame(roomy_off, 4, wide)
             assert ra['plan_culls']['fit_pct'] == 0 and a == b, 'a frame that fits must not change'
             c, rc = frame(tight, 5, near)
             d, _ = frame(tight_off, 6, near)
             assert rc['plan_culls']['fit_pct'] == 0 and c == d and any(c), 'near view under the small budget'
-            print('fit budget: wide keep view fits 48 MB at cut x%.3g (old: error), '
-                  'fitting frames unchanged' % (culls['fit_pct'] / 100.0))
+            print('fit budget: wide keep view fits 48 MB at 1/%d below x%.3g, %d px lit '
+                  '(ladder: cut x%.3g; old: error), fitting frames unchanged'
+                  % (1 << culls['fit_thin'] if culls['fit_thin'] < 255 else 0, culls['fit_full_pct'] / 100.0,
+                     lit, rculls['fit_pct'] / 100.0))
         finally:
-            for w in (tight, tight_off, roomy, roomy_off):
+            for w in (tight, tight_off, ladder, roomy, roomy_off):
                 w.stop()
     print('FIT BUDGET: ALL OK')
 

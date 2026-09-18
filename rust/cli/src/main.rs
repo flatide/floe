@@ -126,7 +126,7 @@ fn main() {
              [--profile-snapshot PATH] [--profile-snapshot-refresh]\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
-             [--depth N] [--explain 1] [--page-hairline 0|1] [--sub-cut-wash 0|1] [--page-reps 0|1] \
+             [--depth N] [--explain 1] [--page-hairline 0|1] [--sub-cut-wash 0|1] [--page-reps 0|1] [--decode-budget-mb N] \
              [--summary-layers a/b,..] [--prune-summary 0|1]\n       \
              floe-index occupancy <outdir> [--layer L/D] [--level N] \
              [--dump]\n       \

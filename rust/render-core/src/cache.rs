@@ -99,6 +99,11 @@ pub struct PlanCullCounts {
     pub fit_pct: u64,
     pub fit_cull: u64,
     pub fit_over: u64,
+    /// budget-fitted density: pages outside the complete tier kept one in
+    /// 2^fit_thin (255 = only the largest pages), the tier's start in
+    /// percent of the requested cut (0 = no tier)
+    pub fit_thin: u64,
+    pub fit_full_pct: u64,
 }
 
 impl PlanCullCounts {
@@ -126,6 +131,8 @@ impl PlanCullCounts {
             fit_pct: st.fit_pct as u64,
             fit_cull: st.fit_cull as u64,
             fit_over: st.fit_over as u64,
+            fit_thin: st.fit_thin as u64,
+            fit_full_pct: st.fit_full_pct as u64,
         }
     }
 
@@ -152,6 +159,8 @@ impl PlanCullCounts {
         self.fit_pct = self.fit_pct.max(other.fit_pct);
         self.fit_cull = self.fit_cull.max(other.fit_cull);
         self.fit_over = self.fit_over.max(other.fit_over);
+        self.fit_thin = self.fit_thin.max(other.fit_thin);
+        self.fit_full_pct = self.fit_full_pct.max(other.fit_full_pct);
     }
 }
 

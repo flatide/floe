@@ -3510,15 +3510,26 @@ class Viewer:
                     if res.get("cut_um"):
                         cut = ", cut<%.3gum" % res["cut_um"]
                     fit = (res.get("plan_culls") or {})
-                    if fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over"):
+                    if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
+                            or fit.get("fit_thin")):
                         # budget-fitted cut (0.12.162): the planner raised
                         # the cut so the frame fits the decoded budget.
                         # Shown HERE, next to the cut, because the bar is
                         # ellipsized at its end and the long diagnostics
                         # tail hid it (field 2026-09-18)
                         factor = max(100, int(fit.get("fit_pct", 0) or 100)) / 100.0
-                        cut += " x%.3g to fit budget%s%s" % (
-                            factor,
+                        thin = int(fit.get("fit_thin", 0) or 0)
+                        if thin:
+                            # budget-fitted density (0.12.166): the cut stays,
+                            # pages below the complete tier are kept 1 in 2^k
+                            full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
+                            cut += "%s 1/%s%s to fit budget" % (
+                                " x%.3g" % factor if factor > 1 else "",
+                                "%d" % (1 << thin) if thin < 255 else "0",
+                                " below x%.3g" % full if full else "")
+                        else:
+                            cut += " x%.3g to fit budget" % factor
+                        cut += "%s%s" % (
                             ", hairlines culled" if fit.get("fit_cull") else "",
                             ", STILL OVER" if fit.get("fit_over") else "")
                     drawn = ""

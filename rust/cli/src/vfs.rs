@@ -6785,6 +6785,11 @@ pub fn plan_cmd(args: &[String]) {
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--page-hairline") {
             req.page_hairline = val != "0";
         }
+        // --decode-budget-mb N: the renderer's generation budget, so the
+        // budget fit (density, or the cut ladder) can be read off a plan
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--decode-budget-mb") {
+            req.decode_budget = val.parse::<u64>().expect("decode-budget-mb") << 20;
+        }
         // --sub-cut-wash 0|1: the jobdeck wide-view policy (JOBDECK
         // step 4) on a single source, so `--explain` shows its
         // verdicts (wash, keep_sparse, expand_sparse) off the deck
@@ -6859,6 +6864,7 @@ pub fn plan_cmd(args: &[String]) {
              \"washed_pages\": {},\n  \
              \"culled_bvh_size\": {},\n  \
              \"thin_frames\": {},\n  \
+             \"fit_pct\": {},\n  \"fit_thin\": {},\n  \"fit_full_pct\": {},\n  \"fit_passes\": {},\n  \"fit_bytes\": {},\n  \
              \"plan_ms\": {:.2}\n}}",
             plan.pages.len(),
             cbytes,
@@ -6901,6 +6907,11 @@ pub fn plan_cmd(args: &[String]) {
             st.washed_pages,
             st.culled_bvh_size,
             st.thin_frames,
+            st.fit_pct,
+            st.fit_thin,
+            st.fit_full_pct,
+            st.fit_passes,
+            st.fit_bytes,
             ms
         );
         if rest.iter().any(|(k, _)| k == "--inspect") {

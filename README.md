@@ -429,7 +429,12 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   그리며 픽셀을 한 번만 쓰고, 이미 다 쓰인 타일·영역에 닿을 뿐인 작업은 건너뛴다. 그림은 바이트
   동일. 레이어가 많이 겹치는 광역뷰의 덧칠(합성 MAIN01에서 픽셀당 300회)을 없앤다. 상태줄
   `once T tiles/P passes/I items`, 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`.
-- **예산에 맞춘 컷**(0.12.162): 선택한 페이지가 디코드 예산(기본 1024 MB)을 넘을 뷰는
+- **예산에 맞춘 밀도**(0.12.166, docs/SPEC-PLANNER.ko.md §3): 디코드 예산을 넘는 뷰는 컷을 올리는
+  대신 요청 컷에서 밀도를 낮춘다 — 큰 페이지부터 완전하게 채우고 그 아래는 2^k개 중 하나만
+  남긴다. 컷을 올리면 한 크기대가 통째로 빠져 합성 MAIN01의 광역뷰가 빈 화면이 되던 문제의
+  수정. 상태줄 `cut<…um 1/M below xF to fit budget`, 킬 스위치 `FLOE_RUST_FIT_THIN=off`(아래의
+  컷 사다리로 복귀).
+- **예산에 맞춘 컷**(0.12.162; 0.12.166부터 `FLOE_RUST_FIT_THIN=off`일 때만): 선택한 페이지가 디코드 예산(기본 1024 MB)을 넘을 뷰는
   오류("decoded generation budget exceeded") 대신 예산에 맞는 가장 세밀한 컷(요청 컷 ×
   2^(k/4)와 표준 detail 컷 1·3·5 px 중)으로 밀도를 낮춰 그린다. detail high가 medium보다
   거칠게 끝나는 일은 없다. keep 요청이 그래도 안 맞으면 hairline을 버린다. 상태줄의 컷 옆에 `cut<…um xN to fit

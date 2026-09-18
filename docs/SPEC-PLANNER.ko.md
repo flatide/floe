@@ -169,10 +169,39 @@
 - stats `fit_bytes/fit_pct/fit_cull/fit_passes/fit_over`(fit_pct = 맞춘 컷 ÷ 요청 컷 × 100, 0 = 그대로), frame line `fit_pct= fit_cull=
   fit_over=`, 상태줄의 컷 옆 `cut<…um xN to fit budget, hairlines culled`(말줄임되는 뒤쪽 진단 문자열이 아니라 앞쪽). 킬 스위치
   `FLOE_RUST_FIT_BUDGET=off`(종전 오류로 복귀).
-- 한계: 줄이는 단위는 크기 등급이다. 한 등급의 페이지만으로 예산을 넘는 뷰는 그 등급이
-  통째로 빠진다(합성 칩의 fit view는 551페이지 → 0). 추정이 실측보다 작으면 decode 뒤의
-  검사가 여전히 오류를 낸다(안전망). 게이트 `tools/validate_fit_budget.py`, 단위
-  `a_plan_over_its_decode_budget_raises_the_cut_until_it_fits`.
+- 위 사다리의 한계: 줄이는 단위가 크기 등급이라, 한 등급의 페이지만으로 예산을 넘는 뷰는 그
+  등급이 통째로 빠진다. 합성 MAIN01에서 thin keep의 fit 다음 다섯 줌 단계가 **빈 화면**이었다
+  (사용자 2026-09-19; 1/10 크기 재현: 전 레이어 ×2·×4·×8이 컷 ×4·×8·×16에서 0페이지, plan 5 s).
+
+#### 예산에 맞춘 밀도 (0.12.166, 2026-09-19 — 기본; 위 사다리는 `FLOE_RUST_FIT_THIN=off`)
+
+컷을 올리지 않고 **요청 컷에서 밀도를 낮춘다**(`plan_hier_thinned`, `thin_to_budget`).
+- 패스는 끝까지 돈다. 단 추정 메모리가 예산의 `FIT_OVERSHOOT`(8)배를 넘으면 버리고 컷을 두
+  배로 올려 다시 돈다(× 64까지) — 세밀함은 밀도를 약 1/8 아래로 내려야 할 때만 포기한다.
+  두 배로 올린 패스가 예산의 **절반 미만**이면 크기 등급 하나를 건너뛴 것이므로(빈 화면의
+  원인) 한 단 아래 컷을 상한 없이 끝까지 계획해 더 깊이 솎는다.
+- 끝난 플랜의 페이지(한 번씩 센 `page_memory` 합)가 예산을 넘으면: 페이지를 (seq + 셀 +
+  레이어) mod 2^k = 0인 것만 남긴다. seq는 (셀, 레이어) run 안의 순번이고, 위상을 셀과
+  레이어로 어긋나게 해 페이지가 하나뿐인 run(작은 셀, 내용이 적은 레이어)도 2^k개 중 하나만
+  남는다(seq만 쓰면 모든 run의 0번이 어느 k에서도 남는다 — 합성 칩 top 셀의 41개 레이어
+  74 MB). k는 total ≤ 예산 × 2^k인 최소값부터 실제로 맞을 때까지. k가 커질수록 집합이 포함된다.
+- 남은 예산으로 **큰 페이지부터 완전하게** 채운다(완전 계층). 크기 키 = 그 페이지가 아직
+  선택되는 가장 큰 컷: keep은 긴 변의 최대, cull은 min(긴 변, 짧은 변 ÷ hairline). 큰 구조에는
+  구멍이 나지 않고, 그 아래 등급은 모두 표본이 남는다.
+- 2^12개 중 하나로도 안 맞으면 큰 페이지만 남긴다(`fit_thin` 255; 정확한 경계에서의 종전
+  동작). 한 페이지도 못 남기면 마지막 컷의 완전한 플랜을 `fit_over`로 돌려준다(종전 오류).
+- 사다리의 최대 7패스가 1패스(8배 초과 시 컷당 1패스 추가)로 준다. keep → cull 폴백은 없다.
+- stats/frame line `fit_pct`(쓴 컷 ÷ 요청 컷 × 100; 맞췄으면 100 이상, 그대로면 0),
+  `fit_thin`(k; 255 = 큰 페이지만), `fit_full_pct`(완전 계층이 시작하는 컷 ÷ 요청 컷 × 100,
+  0 = 계층 없음). 상태줄 `cut<…um [xN] 1/M below xF to fit budget`.
+- 합성 MAIN01 1/10, 전 레이어, keep, detail high: ×2·×4·×8이 빈 화면 → 예산 16 GB로 그린
+  프레임과 129 / 37,206 / 26,782 px(화면의 0.006 / 1.8 / 1.3 %)만 다른 그림, 모두 1/2 밀도.
+- 한계: 솎는 단위가 페이지라 밀집 영역이 페이지 크기의 조각으로 빈다. 인스턴스가 공유하는
+  페이지는 모든 인스턴스에서 같이 빠진다. 컷 미만이라 선택되지 않는 도형(1 레이어 fit의 빈
+  화면)은 이 변경과 무관하다. 추정이 실측보다 작으면 decode 뒤의 검사가 여전히 오류를 낸다
+  (안전망). 게이트 `tools/validate_fit_budget.py`, 단위
+  `a_plan_over_its_decode_budget_keeps_its_cut_and_lowers_the_density`(밀도),
+  `a_plan_over_its_decode_budget_is_planned_at_the_finest_cut_that_fits`(사다리).
 
 ## 4. 프레임 (cell reference outline)
 
