@@ -144,6 +144,15 @@ cargo test --manifest-path rust/Cargo.toml -p floe-vfs representatives::tests --
   줄어드는 효과가 있었다(첫 실칩 성공). 아직 기록되지 않은 값: 로그의 `count
   directory=`, `resolve … peak requests=`, groups/points/파일 크기, 그리고 fit view
   perf 라인의 `stored_rep_points/tested/limited`와 plan_ms(depth 0·full depth).
-- MAIN01은 884f3c4로 재시도 예정. 확인할 것은 위 두 로그 줄과 총 경과시간이며,
-  `--representatives-only`에서는 원본 재파싱이 지배적이다(합성 1/10 규모에서 22초 중
-  OVR 자체는 8초).
+- 2026-09-18, MAIN01, 884f3c4 `--representatives-only`: 595.3초에 완료.
+  `groups=2146 directory=1191003 peak_requests=4194304 points=4194304 161M (147.8s)`.
+  디렉터리 119만 그룹은 상한 67,108,864의 1.8 %, OVR 생성 148초, 나머지 447초는
+  원본 재파싱. 뷰어: fit view 밀도가 너무 낮고, 확대해도 점은 점으로 남다가 어느
+  줌에서 갑자기 도형이 되며 그 차이가 크다(사용자). 원인은 구조적이다: 전 파일 상한
+  4,194,304점을 top 그룹 2,146개가 나누어 그룹당 평균 약 1,950점이 칩 전체를 대표하고,
+  프레임 상한 262,144점은 2000² px에서 15 px당 1점이며, 저장 표본은 줌에 따라 늘지
+  않아 한 옥타브 확대마다 화면 안의 점이 1/4로 줄다가 `min_dim ≥ cut/2`가 되는 줌에서
+  실제 도형으로 바뀐다. 표본 점은 인계 줌 근처의 실제 밀도(픽셀당 선 하나 수준)에
+  도달할 수 없다(필요 공급량이 프레임 상한 × 4^옥타브). 상한을 올리면 fit view
+  밀도는 오르지만 절벽은 남는다. 절벽을 없애는 것은 래스터 커버리지 피라미드
+  (design.ovo)나 도형 인계를 앞당기는 컷 정책뿐이다(2026-09-18 판단, 결정 대기).
