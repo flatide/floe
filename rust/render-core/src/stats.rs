@@ -36,6 +36,8 @@ pub struct RenderStats {
     pub png_us: u64,
     pub tiles: u32,
     pub workers_used: u16,
+    pub representative_spans: u64,
+    pub representative_pixels: u64,
     pub primitives_tested: u64,
     pub primitives_drawn: u64,
     pub rep_members_tested: u64,

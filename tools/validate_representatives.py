@@ -33,12 +33,18 @@ def index(src, *args, ok=True):
     return result
 
 
-def worker(src, off=False, unbinned=False):
+def worker(src, off=False, unbinned=False, direct=False, batch=None):
     os.environ['FLOE_RUST_REPRESENTATIVES'] = 'off' if off else 'on'
     # Leave unrelated diagnostic paths off, regardless of the caller's shell.
     for key in ('FLOE_RUST_PAGE_REPS', 'FLOE_RUST_SUB_CUT_WASH'):
         os.environ.pop(key, None)
     os.environ['FLOE_RUST_WORK_BIN'] = 'off' if unbinned else 'on'
+    os.environ['FLOE_RUST_REPRESENTATIVES_DIRECT'] = 'on' if direct else 'off'
+    os.environ.pop('FLOE_RUST_REPRESENTATIVES_MERGE', None)
+    if batch is None:
+        os.environ.pop('FLOE_RUST_REPRESENTATIVES_BATCH', None)
+    else:
+        os.environ['FLOE_RUST_REPRESENTATIVES_BATCH'] = str(batch)
     cache = Cache(str(src))
     cache.load()
     result = RustRenderWorker(cache)
@@ -140,6 +146,54 @@ def ovr2_section(temp):
         len(dots), len(lines), [n for _, _, n in lengths]))
 
 
+def ovr2_tree_section(temp):
+    """Stored proxies, zoom refinement, resumable budgets, and no box across gaps."""
+    src = Path(temp) / 'merged-lines.oas'
+    ly = db.Layout()
+    ly.dbu = .001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(1, 0)
+    for cluster in (1000, 400000):
+        for i in range(2048):
+            x = cluster + i * 4
+            top.shapes(layer).insert(db.Box(x, 1000, x + 1, 401000))
+    ly.write(str(src))
+    index(src, '--representatives', '--representatives-format', '2',
+          '--representatives-points', '8192')
+    data = (Path(vfs_cache_dir(src)) / 'design.ovr').read_bytes()
+    assert data[:8] == b'FLOEOVR2' and int.from_bytes(data[8:12], 'little') == 3
+    merged, direct, resumed, unbinned = (worker(src), worker(src, direct=True),
+                                        worker(src, batch=3), worker(src, unbinned=True))
+    try:
+        fast, report = frame(merged, 100, px=512, span=512000.)
+        reference, direct_report = frame(direct, 101, px=512, span=512000.)
+        c = report['plan_culls']
+        assert c['stored_rep_points'] <= 16 and c['stored_rep_proxies'] > 0, c
+        assert c['stored_rep_tested'] < 64 and report['cache_miss'] == 0, report
+        assert direct_report['plan_culls']['stored_rep_points'] == 4096, direct_report['plan_culls']
+        for a, b in ((fast, reference), (reference, fast)):
+            stray = [p for p in a if not any((p[0]+dx,p[1]+dy) in b
+                                            for dx in (-1,0,1) for dy in (-1,0,1))]
+            assert not stray, 'merged raster differs by >1 px: %s' % stray[:5]
+        assert not any(20 < x < 390 for x, y in fast), 'cluster gap was filled'
+        divided, divided_report = frame(resumed, 102, px=512, span=512000.)
+        assert divided == fast, 'query budget changed the final image'
+        assert divided_report['rounds'] == 2 and divided_report['plan_culls']['stored_rep_limited'], divided_report
+        walked, _ = frame(unbinned, 103, px=512, span=512000.)
+        assert walked == fast, 'binned/walk proxy rasters differ'
+        # Zoom crosses the merge-error threshold and supplies more leaves.
+        zoom, zoom_report = frame(merged, 104, px=512, span=2048.)
+        zoom_direct, _ = frame(direct, 105, px=512, span=2048.)
+        assert zoom and zoom == zoom_direct, 'near query did not refine to the original samples'
+        assert zoom_report['plan_culls']['stored_rep_points'] > c['stored_rep_points']
+        print('representatives tree: 4096 shapes -> %d proxies; nodes=%d bytes=%d raster=%.1f ms; zoom=%d shapes; %d refinement rounds' % (
+            c['stored_rep_points'], c['stored_rep_nodes'], c['stored_rep_bytes'], report['draw_ms'],
+            zoom_report['plan_culls']['stored_rep_points'], divided_report['rounds']))
+    finally:
+        for w in (merged, direct, resumed, unbinned):
+            w.stop()
+
+
 def main():
     os.environ['FLOE_INDEX_BIN'] = str(ROOT / 'rust/target/release/floe-index')
     os.environ['FLOE_RENDERD_BIN'] = str(ROOT / 'rust/target/release/floe-renderd')
@@ -237,6 +291,7 @@ def main():
         print('representatives: additive preservation, normal build, depth, pixel replay, kill switch, invalid fallback, '
               'combined-run failure keeps the cache OK')
         ovr2_section(temp)
+        ovr2_tree_section(temp)
         print('representatives: OVR2 shapes (length, rotation, on-geometry, additive, format switch) OK')
 
 

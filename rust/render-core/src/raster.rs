@@ -885,6 +885,8 @@ fn render_geometry_impl(
     })
 }
 
+type RepSpan = (u32, u32, u32); // row, first column, exclusive end
+
 #[derive(Clone)]
 struct RasterBand {
     width: u32,
@@ -894,6 +896,7 @@ struct RasterBand {
     row0: u32,
     row1: u32,
     pixels: Vec<u8>,
+    rep_spans: Vec<RepSpan>,
 }
 
 impl RasterBand {
@@ -928,6 +931,7 @@ impl RasterBand {
             row0,
             row1,
             pixels,
+            rep_spans: Vec::new(),
         })
     }
 
@@ -1721,6 +1725,7 @@ fn replay_plane_items(
     items: &[PlaneItem],
     minis: Option<&[Option<WorkBin>]>,
 ) -> Result<(), String> {
+    let mut rep_spans = std::mem::take(&mut band.rep_spans);
     for item in items {
         match item {
             PlaneItem::Cell {
@@ -1784,7 +1789,7 @@ fn replay_plane_items(
                     counters.rect_records = counters.rect_records.saturating_add(1);
                     stats.primitives_tested = stats.primitives_tested.saturating_add(1);
                     stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-                    if paint_representative(band, request, prim, paint)? {
+                    if queue_representative(band, request, prim, paint, &mut rep_spans, stats)? {
                         counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
                         stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
                         stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
@@ -1881,6 +1886,8 @@ fn replay_plane_items(
             }
         }
     }
+    flush_representative_spans(band, request, paint, &mut rep_spans, stats);
+    band.rep_spans = rep_spans;
     Ok(())
 }
 
@@ -2346,6 +2353,7 @@ fn apply_label_passes(
         row0: 0,
         row1: frame.height,
         pixels: frame.pixels,
+        rep_spans: Vec::new(),
     };
     if styled.hierarchy_frames {
         render_prepared_labels(
@@ -2639,6 +2647,8 @@ fn monochrome(color: [u8; 4]) -> [u8; 4] {
 }
 
 fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
+    total.representative_spans = total.representative_spans.saturating_add(worker.representative_spans);
+    total.representative_pixels = total.representative_pixels.saturating_add(worker.representative_pixels);
     total.primitives_tested = total
         .primitives_tested
         .saturating_add(worker.primitives_tested);
@@ -2984,6 +2994,7 @@ fn render_cell(
         }
     }
     if path.len() == 1 {
+        let mut rep_spans = std::mem::take(&mut band.rep_spans);
         for (layer_idx, prim) in &cell.reps {
             check_cancelled(guard)?;
             if !selection.includes(*layer_idx) {
@@ -2992,12 +3003,14 @@ fn render_cell(
             counters.rect_records = counters.rect_records.saturating_add(1);
             stats.primitives_tested = stats.primitives_tested.saturating_add(1);
             stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-            if paint_representative(band, request, prim, paint)? {
+            if queue_representative(band, request, prim, paint, &mut rep_spans, stats)? {
                 counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
                 stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
                 stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
             }
         }
+        flush_representative_spans(band, request, paint, &mut rep_spans, stats);
+        band.rep_spans = rep_spans;
     }
     if matches!(selection, GeometrySelection::All) {
         counters.deferred_frame_records = counters
@@ -3659,6 +3672,77 @@ fn paint_world_rect(
     Ok(filled || stroked)
 }
 
+/// Batch the already-selected hairlines, not the source records. The scratch
+/// buffer is reused per tile, capped at 64K row spans, and never scans empty
+/// layer pixels. All paints in this layer are opaque writes of the same colour.
+fn queue_representative(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    prim: &floe_vfs::representatives::Prim,
+    paint: PaintStyle,
+    spans: &mut Vec<RepSpan>,
+    stats: &mut RenderStats,
+) -> Result<bool, String> {
+    if prim.kind != floe_vfs::representatives::PRIM_SEGMENT {
+        if let Some((x0, y0, x1, y1)) = hairline_world_bbox(request, prim.bbox(), paint)? {
+            let c0 = x0.max(band.col0 as i128);
+            let c1 = x1.min(band.col1 as i128);
+            let r0 = y0.max(band.row0 as i128);
+            let r1 = y1.min(band.row1 as i128);
+            if c0 >= c1 || r0 >= r1 {
+                return Ok(false);
+            }
+            if spans.len() + (r1 - r0) as usize > 65536 {
+                flush_representative_spans(band, request, paint, spans, stats);
+            }
+            for r in r0..r1 {
+                spans.push((r as u32, c0 as u32, c1 as u32));
+            }
+            return Ok(true);
+        }
+    }
+    paint_representative(band, request, prim, paint)
+}
+fn flush_representative_spans(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    paint: PaintStyle,
+    spans: &mut Vec<RepSpan>,
+    stats: &mut RenderStats,
+) {
+    if spans.is_empty() {
+        return;
+    }
+    spans.sort_unstable();
+    let solid = PaintStyle {
+        fill: LayerFill::Solid,
+        ..paint
+    };
+    let mut run = spans[0];
+    let mut paint_run = |run: RepSpan| {
+        fill_span(
+            band,
+            solid,
+            request.height,
+            run.0 as usize,
+            run.1 as usize,
+            run.2 as usize,
+        );
+        stats.representative_spans += 1;
+        stats.representative_pixels += (run.2 - run.1) as u64;
+    };
+    for &next in &spans[1..] {
+        if next.0 == run.0 && next.1 <= run.2 {
+            run.2 = run.2.max(next.2);
+        } else {
+            paint_run(run);
+            run = next;
+        }
+    }
+    paint_run(run);
+    spans.clear();
+}
+
 /// One OVR2 representative: a rect takes the real rect's path (so a
 /// sub-pixel width is the one-pixel hairline and the long axis keeps its
 /// projected length - 4, 3, 2, 1 px as the view widens), a segment is
@@ -3673,6 +3757,9 @@ fn paint_representative(
     if prim.kind == PRIM_SEGMENT {
         return stroke_world_polyline(band, request, &[(prim.x0, prim.y0), (prim.x1, prim.y1)], paint);
     }
+    let paint = if prim.flags & floe_vfs::representatives::PRIM_MERGED_SOLID != 0 {
+        PaintStyle { fill: LayerFill::Solid, ..paint }
+    } else { paint };
     paint_world_rect(band, request, prim.bbox(), paint)
 }
 
@@ -4505,6 +4592,121 @@ mod tests {
     use floe_vfs::hier::{HierPlan, HierStats, WsCell, WsInst, REM_FULL};
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
+
+
+    #[test]
+    fn representative_spans_match_direct_pixels_with_overlap_styles_and_tiles() {
+        use floe_vfs::representatives::{Prim, PRIM_RECT, PRIM_SEGMENT};
+        let req = GeometryRasterRequest {
+            view: RasterViewBox::new(-15., -25., 985., 975.).unwrap(),
+            width: 100,
+            height: 100,
+            ..request()
+        };
+        let base = Prim {
+            x0: 15,
+            y0: 10,
+            x1: 17,
+            y1: 900,
+            gate_dim: 4,
+            thickness: 0,
+            kind: PRIM_RECT,
+            flags: 0,
+            rank: 0,
+        };
+        let mut prims = vec![base; 1000];
+        prims.extend([
+            Prim {
+                x0: 5,
+                y0: 25,
+                x1: 900,
+                y1: 27,
+                ..base
+            },
+            Prim {
+                x0: 300,
+                y0: 300,
+                x1: 310,
+                y1: 310,
+                ..base
+            },
+            Prim {
+                x0: 0,
+                y0: 900,
+                x1: 900,
+                y1: 0,
+                kind: PRIM_SEGMENT,
+                ..base
+            },
+        ]);
+        for fill in [
+            LayerFill::Solid,
+            LayerFill::Clear,
+            LayerFill::Speckle,
+            LayerFill::Pattern([0x5555; 16]),
+        ] {
+            for width in [1, 4] {
+                let paint = PaintStyle {
+                    fill,
+                    stroke_width: width,
+                    ..paint(&req)
+                };
+                let mut reference = full_band(&req);
+                for p in &prims {
+                    paint_representative(&mut reference, &req, p, paint).unwrap();
+                }
+                for tile in [10, 100] {
+                    let mut assembled = vec![0u8; reference.pixels.len()];
+                    let mut stats = RenderStats::default();
+                    let mut scratch = Vec::new();
+                    for y in (0..100).step_by(tile) {
+                        for x in (0..100).step_by(tile) {
+                            let mut band = RasterBand::new_tile(
+                                &req,
+                                x as u32,
+                                (x + tile) as u32,
+                                y as u32,
+                                (y + tile) as u32,
+                            )
+                            .unwrap();
+                            for p in &prims {
+                                queue_representative(
+                                    &mut band,
+                                    &req,
+                                    p,
+                                    paint,
+                                    &mut scratch,
+                                    &mut stats,
+                                )
+                                .unwrap();
+                            }
+                            flush_representative_spans(
+                                &mut band,
+                                &req,
+                                paint,
+                                &mut scratch,
+                                &mut stats,
+                            );
+                            for r in 0..tile {
+                                assembled[((y + r) * 100 + x) * 4..((y + r) * 100 + x + tile) * 4]
+                                    .copy_from_slice(&band.pixels[r * tile * 4..(r + 1) * tile * 4]);
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        assembled, reference.pixels,
+                        "fill={fill:?} width={width} tile={tile}"
+                    );
+                    if width == 1 {
+                        assert!(
+                            stats.representative_pixels < 10000,
+                            "overlapping pixels are unioned"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn request() -> GeometryRasterRequest {
         GeometryRasterRequest {

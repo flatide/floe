@@ -76,7 +76,7 @@ pub fn vfs_cmd(args: &[String]) {
     let mut representatives = false;
     let mut representatives_only = false;
     let mut representative_points = floe_vfs::representatives::DEFAULT_POINTS;
-    // 1 = OVR1 points (default), 2 = OVR2 step 1: the same samples as shapes
+    // 1 = OVR1 points (default), 2 = OVR2 shapes with a premerged spatial tree
     let mut representative_format = 1u32;
     let mut occ_opts = floe_vfs::occupancy::Opts::default();
     // the base cell follows the chip size unless --occupancy-um says
@@ -1912,22 +1912,23 @@ fn write_representatives(
         }
         let mut built = reps::build_with(doc, points, Some(|s| eprintln!("[vfs] representatives {}", s)), format == 2)?;
         let count: usize = built.groups.iter().map(|g| g.points.len()).sum();
-        let bytes = if format == 2 {
-            let kinds = |k: u8| built.groups.iter().flat_map(|g| &g.prims).filter(|p| p.kind == k).count();
-            eprintln!("[vfs] representatives format=2 rects={} segments={} points={} (no usable edge: {})",
-                      kinds(reps::PRIM_RECT), kinds(reps::PRIM_SEGMENT), kinds(reps::PRIM_POINT), built.point_fallbacks);
-            reps::encode_v2(&mut built, ovm)?
-        } else {
-            reps::encode(&mut built, ovm)
-        };
         let tmp = format!("{}/design.ovr.tmp", outdir);
         let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        file.write_all(&bytes).map_err(|e| e.to_string())?;
+        let size = if format == 2 {
+            let kinds = |k: u8| built.groups.iter().flat_map(|g| &g.prims).filter(|p| p.kind == k).count();
+            eprintln!("[vfs] representatives format=2 revision=3 rects={} segments={} points={} (no usable edge: {})",
+                      kinds(reps::PRIM_RECT), kinds(reps::PRIM_SEGMENT), kinds(reps::PRIM_POINT), built.point_fallbacks);
+            reps::write_tree(&mut file, &mut built, ovm)?
+        } else {
+            let bytes = reps::encode(&mut built, ovm);
+            file.write_all(&bytes).map_err(|e| e.to_string())?;
+            bytes.len() as u64
+        };
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
         std::fs::rename(&tmp, format!("{}/design.ovr", outdir)).map_err(|e| e.to_string())?;
         eprintln!("[vfs] representatives format={} groups={} directory={} peak_requests={} points={} {} ({:.1}s)",
-                  format, built.groups.len(), built.directory, built.peak_requests, count, fmt_size(bytes.len() as u64),
+                  format, built.groups.len(), built.directory, built.peak_requests, count, fmt_size(size),
                   started.elapsed().as_secs_f64());
         Ok(())
     })();

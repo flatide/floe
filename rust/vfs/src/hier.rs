@@ -533,7 +533,7 @@ pub struct HierStats {
     pub thin_frames: u64,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HierPlan {
     pub top: WsKey,
     /// sorted by key

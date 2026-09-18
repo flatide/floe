@@ -1,5 +1,10 @@
 # 인덱싱 시 생성하는 대표 점 — OVR1 (0.12.154)
 
+실칩 테스트 자산: [MAIN09.oas / MAIN01.oas 통계](REALCHIP_TEST_NOTES.ko.md).
+
+후속 설계안: [OVR2 — 형상 대표와 오차에 따른 사전 병합](OVR2_DESIGN.ko.md).
+2026-09-18 사용자 요청에 따른 구현 전 설계이며, 아래 OVR1의 현재 동작과 구분한다.
+
 일반 레이아웃의 `thin:cull`에서 컷 아래의 존재를 보여 주는 선택 기능이다.
 페이지 frontier와 sub-cut wash를 켜지 않는다. 원본 플랜은 종전 cull 그대로이며,
 `design.ovr`의 실제 도형 위 점을 레이어 색으로 보충한다. 박스 영역을 채우지 않는다.
@@ -134,7 +139,7 @@ cargo test --manifest-path rust/Cargo.toml -p floe-vfs representatives::tests --
 
 ## OVR2 1단계 — 같은 샘플을 형상으로 (0.12.160, opt-in)
 
-설계는 [OVR2 설계안](OVR2_DESIGN.ko.md). 1단계는 §11의 첫 항목만 구현한다: **샘플의
+설계는 [OVR2 설계안](OVR2_DESIGN.ko.md). 1단계는 최초 설계의 형상 복원만 구현했다: **샘플의
 선정·순번·솎기는 OVR1과 같고, 샘플 하나가 점이 아니라 형상이다.** 마스크 피라미드,
 전역 프레임 솎기 해제, 공급량 증가는 포함하지 않는다(2단계 이후).
 
@@ -164,8 +169,58 @@ floe2 index source.oas --representatives-only --representatives-format 2 --jobs 
   점 42개 → 선 5,627 px, 단일 선의 그림이 exact와 동일하며 길이 4·3·2·1 px, 회전 배치,
   모든 픽셀이 실제 도형 1 px 이내, 추가 생성이 색인 보존, OVR1 옆에서 format 2 요청 시
   교체).
-- 남은 것(설계안 §11 2–4단계): 공간 타일 마스크와 선택적 I/O, 컷 경계 대역, 공급량.
-  1단계만으로는 fit 밀도(그룹당 표본 수)와 인계 지점의 밀도 절벽이 그대로다.
+- 1단계만으로는 fit 밀도(그룹당 표본 수)와 인계 지점의 밀도 절벽이 그대로였다.
+  후속은 마스크 피라미드 대신 아래의 사전 병합 트리로 변경했다.
+
+## OVR2 2단계 — 사전 병합 공간 트리 (0.12.161, opt-in)
+
+생성 명령은 동일하다. 1단계 OVR2가 있어도 이 명령으로 다시 만들어야 트리가 추가된다.
+
+```sh
+floe2 index source.oas --representatives-only --representatives-format 2 --jobs 12
+```
+
+- 형식: `FLOEOVR2`, 내부 revision 3. reader는 OVR1·OVR2 revision 2·3을 읽는다.
+  기본 생성은 계속 format 1이며, 형상 실험에 format 2를 명시한다.
+- 생성: 기존 count/resolve 뒤 대표 형상만 공간 정렬해 128개 잎, 최대 8분기 트리를
+  만든다. 노드마다 최대 8개의 Rect 프록시와 누적 기하 오차를 저장한다. 반복 멤버
+  전수 전개나 세계좌표 비트맵 생성은 하지 않는다. 형상·프록시는 파일로 스트리밍하며
+  완성 파일 크기의 추가 Vec을 만들지 않는다. 파일 상한은 512 MiB다.
+- 병합: 일치/연속 구간부터 병합하며, 같은 축 범위의 평행 구간은 빈 간격 절반을
+  국소 오차로 쓴다. 나머지 Rect는 보수적인 거리 상한을 쓴다. 부모에는 자식 오차도
+  누적한다. Segment/Point는 1단계 형상을 유지하며 트리로 공간 검색한다.
+- 조회: 전역 sample count에 따른 솎기를 쓰지 않는다. bbox로 공간을 제외하고,
+  오차 ≤ 0.5 px이며 노드 전체가 컷 아래일 때 프록시를 쓴다. 컷 경계는 자식으로
+  내려간다. 모든 가시 레이어를 occupancy가 대체하면 OVR 열기/검증도 미룬다.
+- 스타일: 1 px outline의 solid 채움, 또는 자손 모두 서브픽셀인 hairline에만 Rect
+  병합을 사용한다. 후자는 병합 후에도 solid로 칠한다. 다른 스타일은 잎으로 내려가
+  개별 경계를 보존한다. 같은 타일/레이어의 hairline 행 구간은 합쳐 한 번 칠한다.
+- IO: 헤더/노드 디렉터리 checksum은 열 때, 형상/프록시 블록 checksum은 처음 읽을 때
+  검증한다. 형상 전체를 열 때 파싱하지 않는다. OVM identity checksum은 여전히 첫
+  열기의 비용이며 cold 성능 측정에 포함한다. payload는 mmap이고 별도의 전체 decoded
+  캐시는 만들지 않는다. 워커 타일의 행 구간 scratch는 64K 구간을 넘기기 전에 비운다.
+- 정제: 노드·후보·읽기 바이트·출력 수·예상 페인트 픽셀 작업량 및 경과 시간으로 조회를 나눈다.
+  저장한 커서부터 이어가며 앞쪽 N개만 표시하고 완료하지 않는다. 중간 프레임은
+  partial/final=0이고, 끝까지 조회한 결과만 final=1이다. 원본 전수 디코드로 폴백하지
+  않는다. 대표 조회 때문에 추가하는 중간 래스터는 한 번으로 제한하고 남은 조회
+  묶음을 모아 최종 화면을 그린다(원본 페이지 정제는 기존 정책). 이 예산은 **작업
+  묶음 기준**이며, 전체 프레임 시간 상한을 보장하지 않는다. 시간 검사는 128번의
+  조회 작업마다 하며 mmap page fault 등의 단일 지연을 중단시키는 hard timeout은 아니다.
+- 진단: `FLOE_RUST_REPRESENTATIVES_DIRECT=on` 또는
+  `FLOE_RUST_REPRESENTATIVES_MERGE=off`는 같은 저장 형상을 병합 없이 조회한다.
+  `FLOE_RUST_REPRESENTATIVES_BATCH=N`은 정제 실험용 출력 묶음 크기(1–262144)다.
+  모두 워커 시작 전에 설정하며 revision 3 경로에 적용된다.
+- perf/어댑터: 기존 stored_rep_points/tested/limited 외에 stored_rep_nodes/proxies/bytes,
+  stored_rep_pixels(조회 시 페인트 추정), stored_rep_spans/painted_pixels(실제 hairline
+  행 구간 병합 뒤 페인트; 일반 Rect/Segment의 전체 픽셀 수는 아님)를 기록한다.
+- 게이트: 떨어진 두 군집의 4,096개 평행선 → 8개 프록시, 1개 노드·512 B payload
+  조회. 확대 시 265개 형상으로 정제하고 direct 픽셀과 일치한다. 원래 빈 군집 사이를
+  채우지 않으며, 출력 묶음을 3개로 제한해도 최종 그림은 같고 중간+최종 2회만 그린다.
+  별도 단위 검증으로 작은 ROI 프루닝·depth·비등방 배율·넓은 outline halo·오차 상한·
+  손상 파일·취소·스타일별 행 구간 병합의 픽셀 일치를 확인한다.
+
+샘플 공급량은 그대로다. 전역 솎기와 점 표현의 손실은 제거하지만, 원래 뽑지 않은
+도형까지 생기지는 않는다. MAIN01의 실제 밀도·속도는 새 파일로 별도 측정해야 한다.
 
 ## 실칩 기록
 

@@ -1092,6 +1092,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "rep_page_level": "2", "rep_level": "7",
                 "stored_rep_points": "16384", "stored_rep_tested": "65536",
                 "stored_rep_limited": "1",
+                "stored_rep_nodes": "128", "stored_rep_proxies": "64",
+                "stored_rep_bytes": "8192", "stored_rep_pixels": "64000",
+                "stored_rep_spans": "100", "stored_rep_painted_pixels": "8000",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
@@ -1104,7 +1107,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "rep_kept": 34, "rep_washed": 35, "rep_children": 36,
                 "rep_page_level": 2, "rep_level": 7,
                 "stored_rep_points": 16384, "stored_rep_tested": 65536,
-                "stored_rep_limited": 1})
+                "stored_rep_limited": 1,
+                "stored_rep_nodes": 128, "stored_rep_proxies": 64,
+                "stored_rep_bytes": 8192, "stored_rep_pixels": 64000,
+                "stored_rep_spans": 100, "stored_rep_painted_pixels": 8000})
             self.assertEqual(result["frame_format"], "raw")
             self.assertEqual(result["rgba"], raw_pixels)
             self.assertNotIn("png", result)
@@ -1166,7 +1172,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             partial = worker.res.get_nowait()
             # Old/deck replies omit OVR diagnostics; keep their stable zero
             # defaults instead of carrying counters from another generation.
-            for key in ("stored_rep_points", "stored_rep_tested", "stored_rep_limited"):
+            for key in ("stored_rep_points", "stored_rep_tested", "stored_rep_limited",
+                        "stored_rep_nodes", "stored_rep_proxies", "stored_rep_bytes",
+                        "stored_rep_pixels", "stored_rep_spans", "stored_rep_painted_pixels"):
                 self.assertEqual(partial["plan_culls"][key], 0)
             self.assertEqual(partial["refining"], 1)
             self.assertIn(9, worker._jobs)

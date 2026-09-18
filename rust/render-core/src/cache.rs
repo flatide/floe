@@ -44,6 +44,10 @@ pub struct PlanSummary {
     pub representative_points: u64,
     pub representative_tested: u64,
     pub representative_limited: bool,
+    pub representative_nodes: u64,
+    pub representative_proxies: u64,
+    pub representative_bytes: u64,
+    pub representative_pixels: u64,
     pub wc_cells: u64,
     pub wc_variants: u64,
     pub inst_edges: u64,
@@ -140,11 +144,55 @@ impl PlanCullCounts {
 }
 
 pub struct PlannedView {
+    pub representative_stream: Option<floe_vfs::representatives::TreeStream>,
     pub plan: HierPlan,
     pub summary: PlanSummary,
     pub stats: RenderStats,
 }
 
+
+impl PlannedView {
+    /// One bounded representative query round. The renderer publishes a partial
+    /// frame while a cursor remains, then resumes it without rescanning leaves.
+    pub fn advance_representatives(&mut self, cancelled: impl Fn() -> bool) -> Result<(), String> {
+        let Some(stream) = &mut self.representative_stream else {
+            return Ok(());
+        };
+        let started = Instant::now();
+        let prims = stream.next(cancelled)?;
+        let stats = &stream.stats;
+        self.summary.representative_points = stats.points;
+        self.summary.representative_tested = stats.tested;
+        self.summary.representative_limited = stats.limited;
+        self.summary.representative_nodes = stats.nodes;
+        self.summary.representative_proxies = stats.proxy_nodes;
+        self.summary.representative_bytes = stats.bytes;
+        self.summary.representative_pixels = stats.pixels;
+        if !prims.is_empty() {
+            let top = self.plan.top;
+            if let Some(cell) = self.plan.wcells.iter_mut().find(|c| c.key == top) {
+                cell.reps.extend(prims);
+            } else {
+                self.plan.wcells.push(floe_vfs::hier::WsCell {
+                    key: top,
+                    pages: Vec::new(),
+                    page_levels: Vec::new(),
+                    insts: Vec::new(),
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                    reps: prims,
+                });
+                self.summary.wc_cells += 1;
+                self.plan.stats.wc_cells += 1;
+            }
+        }
+        if stream.is_done() {
+            self.representative_stream = None;
+        }
+        self.stats.plan_us = self.stats.plan_us.saturating_add(elapsed_us(started));
+        Ok(())
+    }
+}
 
 /// Display label selected by the parent VFS planner and resolved to the
 /// renderer's stable OVM layer index. Block labels have no design layer.
@@ -284,7 +332,7 @@ pub struct Cache {
     /// render there (user 2026-09-15: the depth is a free control)
     layer_depth: Vec<u32>,
     // Immutable for this open cache; reopen after publishing design.ovr.
-    representatives: std::sync::OnceLock<Option<floe_vfs::representatives::File>>,
+    representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
 }
 
 /// The longest top-to-cell path of every cell (None = unreachable
@@ -708,6 +756,7 @@ impl Cache {
         }
 
         Ok(PlannedView {
+            representative_stream: None,
             plan,
             summary,
             stats: RenderStats {
@@ -717,23 +766,43 @@ impl Cache {
         })
     }
 
-    /// Plain viewer only: native point representatives supplement the normal
-    /// cull plan. Exact/probe/deck callers continue to use `plan` unchanged.
+    /// Plain viewer only: representatives supplement the normal cull plan.
+    /// Resume `representative_stream` with `advance_representatives` until it is
+    /// None before treating the scene as complete. Exact/probe/deck use `plan`.
     pub fn plan_with_representatives(&self, request: &PlanRequest) -> Result<PlannedView, String> {
+        self.plan_with_representatives_options(request, Default::default(), || false)
+    }
+
+    pub fn plan_with_representatives_options(
+        &self, request: &PlanRequest,
+        options: floe_vfs::representatives::TreeOptions,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<PlannedView, String> {
         let mut planned = self.plan(request)?;
         let req = self.view_request(request)?;
         if request.exact || req.cut_dbu <= 0 || !req.page_hairline || req.page_reps || req.sub_cut_wash {
             return Ok(planned);
         }
+        // Defer the lazy file open (including its OVM checksum) if occupancy
+        // already supplies every visible layer. Keep the OnceLock uninitialised
+        // so a later near view can still open the representatives.
+        if req.vis.iter().enumerate().all(|(i, bits)| bits & !req.page_skip.get(i).copied().unwrap_or(0) == 0) {
+            return Ok(planned);
+        }
+        let plan_us_before_reps = planned.stats.plan_us;
         let started = Instant::now();
         let file = self.representatives.get_or_init(|| {
             if !Path::new(&self.dir).join("design.ovr").exists() { return None; }
             match floe_vfs::representatives::File::open(&self.dir, &self.vfs.ovm) {
-                Ok(file) => Some(file),
+                Ok(file) => Some(std::sync::Arc::new(file)),
                 Err(error) => { eprintln!("[render] ignoring design.ovr: {}", error); None }
             }
         });
-        if let Some(file) = file.as_ref().filter(|f| f.version() == 2) {
+        if let Some(file) = file.as_ref().filter(|f| f.version() == 3) {
+            planned.representative_stream = Some(floe_vfs::representatives::TreeStream::new(
+                std::sync::Arc::clone(file), &req, options));
+            planned.advance_representatives(cancelled)?;
+        } else if let Some(file) = file.as_ref().filter(|f| f.version() == 2) {
             // OVR2: the samples as shapes, carried apart from the washes
             let (prims, stats) = file.query_prims(&req);
             planned.summary.representative_points = stats.points;
@@ -771,7 +840,7 @@ impl Cache {
                 }
             }
         }
-        planned.stats.plan_us = planned.stats.plan_us.saturating_add(elapsed_us(started));
+        planned.stats.plan_us = plan_us_before_reps.saturating_add(elapsed_us(started));
         Ok(planned)
     }
 
@@ -782,6 +851,7 @@ impl Cache {
     pub fn empty_plan(&self) -> PlannedView {
         let top = (self.vfs.ovm.top, floe_vfs::hier::REM_FULL);
         PlannedView {
+            representative_stream: None,
             plan: HierPlan {
                 top,
                 wcells: vec![floe_vfs::hier::WsCell {

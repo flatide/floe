@@ -881,6 +881,8 @@ struct FramePixels {
     label_pixel_paints: u64,
     rep_members_tested: u64,
     rep_members_drawn: u64,
+    representative_spans: u64,
+    representative_pixels: u64,
     hier_cells_visited: u64,
     subtrees_pruned: u64,
     summary_cells: u64,
@@ -1826,13 +1828,33 @@ fn run_render(
         .as_ref()
         .is_some_and(|reuse| reuse.valid == [0, 0, command.width, command.height])
         && published_scene_serves(published_scene, command, state.style_epoch, &summary_key)?;
-    let planned = if label_only {
+    let mut representative_options = floe_render_core::RepresentativeOptions::default();
+    representative_options.max_px_per_dbu = Some(
+        (command.width as f64 / (command.view[2] - command.view[0]))
+            .max(command.height as f64 / (command.view[3] - command.view[1])));
+    representative_options.halo_px = state.styles.iter().map(|s| s.outline_width)
+        .max().unwrap_or(1) as f64 + 1.;
+    representative_options.direct = std::env::var("FLOE_RUST_REPRESENTATIVES_MERGE").as_deref() == Ok("off")
+        || std::env::var("FLOE_RUST_REPRESENTATIVES_DIRECT").as_deref() == Ok("on");
+    if !state.styles.is_empty() {
+        representative_options.solid_layers = Some(state.styles.iter().filter(|s| s.outline_width == 1
+            && (matches!(s.fill, LayerFill::Solid) || matches!(s.fill, LayerFill::Pattern(rows) if rows.iter().all(|&r| r == u16::MAX))))
+            .map(|s| s.layer_idx).collect());
+        representative_options.hairline_layers = Some(state.styles.iter().filter(|s| s.outline_width == 1)
+            .map(|s| s.layer_idx).collect());
+    }
+    // Diagnostic for the resumable query gate (also useful for IO/paint tuning).
+    if let Ok(n) = std::env::var("FLOE_RUST_REPRESENTATIVES_BATCH").unwrap_or_default().parse::<usize>() {
+        representative_options.output_per_batch = n.clamp(1, 262144);
+    }
+    let mut planned = if label_only {
         cache.empty_plan()
     } else {
         if std::env::var("FLOE_RUST_REPRESENTATIVES").as_deref() == Ok("off") || command.thin_keep {
             cache.plan(&page_request)?
         } else {
-            cache.plan_with_representatives(&page_request)?
+            cache.plan_with_representatives_options(&page_request, representative_options,
+                || cancellation.is_cancelled(command.generation))?
         }
     };
     check_generation(cancellation, command.generation)?;
@@ -1894,7 +1916,7 @@ fn run_render(
     } else {
         state.styles.clone()
     };
-    let plan = Arc::new(planned.plan);
+    let mut plan = Arc::new(std::mem::replace(&mut planned.plan, cache.empty_plan().plan));
     let query_layers: Arc<[CacheLayer]> = Arc::from(cache.layers());
     let mut query_cell_names = BTreeMap::new();
     for cell in &plan.wcells {
@@ -1915,7 +1937,21 @@ fn run_render(
     let mut decoded_pages = Vec::with_capacity(selected.len());
     let mut generation_bytes = 0u64;
     let mut round_index = 0usize;
+    let mut drain_representatives = false;
     while round_index < rounds.len() {
+        if round_index > 0 && planned.representative_stream.is_some() {
+            // COW preserves the previously published query scene. Resume the
+            // saved spatial cursor; a budget never silently drops the tail.
+            std::mem::swap(&mut planned.plan, Arc::make_mut(&mut plan));
+            loop {
+                planned.advance_representatives(|| cancellation.is_cancelled(command.generation))?;
+                if !drain_representatives || planned.representative_stream.is_none() { break; }
+            }
+            std::mem::swap(&mut planned.plan, Arc::make_mut(&mut plan));
+        }
+        if round_index + 1 == rounds.len() && planned.representative_stream.is_some() {
+            rounds.push(Vec::new());
+        }
         let round_page_ids = std::mem::take(&mut rounds[round_index]);
         check_generation(cancellation, command.generation)?;
         let (mut round_pages, decode_stats) = state.page_cache.load_cancellable(
@@ -2040,6 +2076,8 @@ fn run_render(
                 label_pixel_paints: report.label_pixel_paints,
                 rep_members_tested: report.stats.rep_members_tested,
                 rep_members_drawn: report.stats.rep_members_drawn,
+                representative_spans: report.stats.representative_spans,
+                representative_pixels: report.stats.representative_pixels,
                 hier_cells_visited: report.stats.hier_cells_visited,
                 subtrees_pruned: report.stats.subtrees_pruned,
                 summary_cells: report.summary_cell_paints,
@@ -2122,13 +2160,13 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
                 published_output,
                 if command.raw_frame { "raw" } else { "png" },
-                pixels.partial as u8,
+                (pixels.partial || planned.representative_stream.is_some()) as u8,
                 scene.deferred_pages().len(),
                 pixels.frame_cache_hit as u8,
                 state
@@ -2217,8 +2255,21 @@ fn run_render(
                 planned.summary.representative_points,
                 planned.summary.representative_tested,
                 planned.summary.representative_limited as u8,
+                planned.summary.representative_nodes,
+                planned.summary.representative_proxies,
+                planned.summary.representative_bytes,
+                planned.summary.representative_pixels,
+                pixels.representative_spans,
+                pixels.representative_pixels,
             ),
         );
+        // Representative batches bound query work, not the number of full
+        // scene rasters: publish one preview, then drain the resumable cursor
+        // for the next scene. Otherwise tiny/IO-limited batches would paint an
+        // ever-growing prefix repeatedly (quadratic refinement cost).
+        if planned.representative_stream.is_some() {
+            drain_representatives = true;
+        }
         // Cost-aware refinement (F2R-09 REOPEN, §3.15): every round
         // re-rasterizes the whole accumulated scene, so on a large
         // cold view the intermediate frames themselves became the
@@ -2230,6 +2281,9 @@ fn run_render(
         // that sub-500ms jobs get no refinement at all.
         if round_index + 1 < rounds.len() && pixels.raster_us > refinement_raster_budget_us() {
             collapse_refinement_tail(&mut rounds, round_index);
+            // As for page refinement, pay at most one further expensive
+            // raster. Queries still check cancellation at every node/batch.
+            drain_representatives = true;
         }
         round_index += 1;
     }

@@ -1115,6 +1115,12 @@ class RustRenderWorker:
                 "stored_rep_points": _wire_int(fields, "stored_rep_points"),
                 "stored_rep_tested": _wire_int(fields, "stored_rep_tested"),
                 "stored_rep_limited": _wire_int(fields, "stored_rep_limited"),
+                "stored_rep_nodes": _wire_int(fields, "stored_rep_nodes"),
+                "stored_rep_proxies": _wire_int(fields, "stored_rep_proxies"),
+                "stored_rep_bytes": _wire_int(fields, "stored_rep_bytes"),
+                "stored_rep_pixels": _wire_int(fields, "stored_rep_pixels"),
+                "stored_rep_spans": _wire_int(fields, "stored_rep_spans"),
+                "stored_rep_painted_pixels": _wire_int(fields, "stored_rep_painted_pixels"),
             },
             # occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): layers
             # drawn from design.ovo instead of their pages, the cells

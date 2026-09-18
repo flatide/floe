@@ -11,6 +11,9 @@ use floe_oasis::doc::{Doc, PlaceRec, Rep};
 use floe_ovm::{BBox, Backing, Ovm};
 use std::collections::{BTreeMap, HashMap};
 
+mod tree;
+pub use tree::{Options as TreeOptions, Stream as TreeStream, write as write_tree};
+
 pub const DEFAULT_POINTS: usize = 262_144;
 pub const MAX_POINTS: usize = 4_194_304;
 pub const FRAME_POINTS: usize = 262_144;
@@ -66,6 +69,9 @@ pub const PRIM_RECT: u8 = 0;
 pub const PRIM_SEGMENT: u8 = 1;
 pub const PRIM_POINT: u8 = 2;
 pub const PRIM_PARTIAL: u8 = 1;
+/// Runtime-only proxy flag: a union of subpixel hairlines stays solid even
+/// when the union is wide enough to enter the ordinary rectangle fill path.
+pub const PRIM_MERGED_SOLID: u8 = 2;
 impl Prim {
     pub fn bbox(&self) -> BBox {
         BBox {
@@ -941,15 +947,20 @@ struct GroupRef {
 pub struct File {
     data: Backing,
     groups: Vec<GroupRef>,
-    /// 1 = points (OVR1), 2 = shapes (OVR2 step 1)
+    /// 1 = points, 2 = flat shapes, 3 = shapes with a premerged spatial tree.
     version: u32,
+    tree: Option<tree::Tree>,
 }
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct QueryStats {
     pub points: u64,
     pub tested: u64,
     pub chunks: u64,
     pub limited: bool,
+    pub nodes: u64,
+    pub proxy_nodes: u64,
+    pub bytes: u64,
+    pub pixels: u64,
 }
 struct Cursor<'a> {
     data: &'a [u8],
@@ -1017,6 +1028,11 @@ impl File {
         Self::from_backing(floe_ovm::map_file(&format!("{dir}/design.ovr"))?, ovm)
     }
     pub fn from_backing(data: Backing, ovm: &Ovm) -> Result<Self, String> {
+        if data.len() >= 12 && &data[..8] == MAGIC2
+            && u32::from_le_bytes(data[8..12].try_into().unwrap()) == 3 {
+            let tree = tree::Tree::parse(&data, ovm)?;
+            return Ok(Self { data, groups: Vec::new(), version: 3, tree: Some(tree) });
+        }
         // OVR1: 40-byte points (192 MiB); OVR2: 64-byte shapes (384 MiB)
         let version = if data.len() >= 8 && &data[..8] == MAGIC2 { 2u32 } else { 1 };
         let cap = if version == 2 { 384 } else { 192 } * 1024 * 1024;
@@ -1144,7 +1160,7 @@ impl File {
         if c.pos != end {
             return Err("representatives: trailing data".into());
         }
-        Ok(Self { data, groups, version })
+        Ok(Self { data, groups, version, tree: None })
     }
 
     /// No source page reads, hierarchy expansion, or repetition enumeration.

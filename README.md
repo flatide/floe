@@ -421,8 +421,10 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   디코드 없이 그린다. `FLOE_RUST_REPRESENTATIVES=off`로 끈다.
   유한 샘플이므로 확대 시 밀도 및 긴 선의 길이는 근사이며, 상세 조건과 상한은
   [대표 점 파일](docs/REPRESENTATIVES.ko.md)을 참고한다. `--representatives-format 2`
-  (OVR2 1단계, 0.12.160)는 같은 샘플을 점이 아니라 형상(실제 사각형, 다각형·경로의
-  실제 경계 선분)으로 저장해 가는 선이 화면에서 길이를 유지한다.
+  (OVR2, 0.12.161)는 같은 샘플을 실제 사각형·경계 선분으로 저장하고 사전 병합
+  공간 트리를 만든다. 화면 오차 0.5 px 이내인 병합 표현을 쓰며 확대하면 자식
+  형상으로 내려간다. 전역 개수에 따른 추가 솎기를 제거하고 겹친 hairline 행 구간을
+  합쳐 그린다. 1단계 파일은 같은 명령으로 재생성해야 하며, 실칩 성능은 측정 전이다.
 - **점유 요약**(광역뷰, 2026-09-11; keep 전용이었다가 2026-09-18부터 cull도,
   docs/OCCUPANCY_PLAN.ko.md): 캐시에 `design.ovo`(`floe2 index --occupancy`)가
   있고 요청이 exact 아님이며(킬 스위치 `FLOE_RUST_OCCUPANCY_CULL=off`는 keep

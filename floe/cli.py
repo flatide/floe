@@ -323,7 +323,7 @@ def _discard_occupancy_tmp(outdir):
 
 
 def _representatives_format_args(args):
-    """`--representatives-format 2` (OVR2 step 1: the samples as shapes);
+    """`--representatives-format 2` (OVR2 shapes and premerged spatial tree);
     nothing for the default OVR1 points."""
     fmt = getattr(args, "representatives_format", None)
     return ["--representatives-format", str(int(fmt))] if fmt is not None else []
@@ -1836,9 +1836,9 @@ def main(argv=None, *, prog=None, rust_only=None):
              "implies --representatives")
     rust.add_argument(
         "--representatives-format", type=int, choices=(1, 2), default=None, metavar="1|2",
-        help="design.ovr format: 1 (default) one point per sample; 2 (OVR2 step 1) the "
-             "same samples as shapes - the rect itself, or a real boundary edge of a "
-             "polygon/path - so a sub-cut hairline keeps its length on screen. Giving "
+        help="design.ovr format: 1 (default) one point per sample; 2 (OVR2) shapes "
+             "with a premerged spatial tree - zoom refines the stored shapes within "
+             "a 0.5 px merge error. Giving "
              "the option rebuilds the file on a current cache; implies --representatives")
     occ = rust.add_mutually_exclusive_group()
     occ.add_argument(
