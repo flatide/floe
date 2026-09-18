@@ -39,7 +39,7 @@ assert.deepEqual(pans[0],{kind:'pan',x:-0.25,y:1/6,snap:false});assert.equal(g.a
 for(const kind of ['blur','resize','pagehide','stale','buttons','hidden']){
     viewport.emit('mousedown',event(100,100));win.emit('mousemove',event(150,140));
     if(kind==='stale'){stamp='2';win.emit('mousemove',event(170,180));}
-    else if(kind==='buttons'){win.emit('mousemove',event(170,180,0,0));}
+    else if(kind==='buttons'){win.emit('mousemove',event(170,180,0,2));}
     else if(kind==='hidden'){doc.hidden=true;doc.emit('visibilitychange');doc.hidden=false;}
     else {win.emit(kind);}
     assert.equal(g.active(),false,kind);assert.equal(frames.size,0,kind);
@@ -110,7 +110,7 @@ console.log('WEB OBJECT GESTURES: ALL OK (opt-in modifiers, unchanged plain clic
         if(kind==='hidden'){d.hidden=true;d.emit('visibilitychange');d.hidden=false;}
         else if(kind==='stale'){stamp++;move(170,160);}
         else if(kind==='not-displayed'){ready=false;move(170,160);ready=true;}
-        else if(kind==='buttons'){w.emit('mousemove',event(170,160,2,0));}
+        else if(kind==='buttons'){w.emit('mousemove',event(170,160,2,1));}
         else if(kind==='chord'){v.emit('mousedown',event(170,160,0,3));}
         else{w.emit(kind);}
         assert(!g.active(),kind);assert.equal(frames.size,0,kind);assert.equal(boxes.at(-1),null,kind);
@@ -119,3 +119,73 @@ console.log('WEB OBJECT GESTURES: ALL OK (opt-in modifiers, unchanged plain clic
     let blocked=false;v.emit('contextmenu',{preventDefault(){blocked=true;}});assert(blocked);
 }
 console.log('WEB BAND GESTURES: ALL OK (release-only, dominant direction/tie/wobble, 5px axes, DPI, no pick/pan, stale/cancel/hidden/chords)');
+
+// Release races use a deterministic clock, not sleeps or a permissive ready
+// mock that changes the existing cancellation/navigation contract.
+function releaseHarness(button) {
+    const v=target(),w=target(),d=target(),timers=new Map(),frames=new Map(),sent=[],clicks=[];
+    let clock=0,id=0,stamp=1,ready=true,bandReady=true;
+    const mask=button===0?1:button===1?4:2;
+    w.setTimeout=(fn,ms)=>{const n=++id;timers.set(n,{fn,at:clock+ms});return n;};
+    w.clearTimeout=n=>timers.delete(n);
+    v.getBoundingClientRect=()=>({left:0,top:0});
+    const g=gestures.bind({viewport:v,window:w,document:d,ready:()=>ready,bandReady:()=>bandReady,stamp:()=>stamp,
+        dimensions:()=>({pixels:[800,600],dpr:2}),cursor(){},preview(){},bandPreview(){},
+        pan:n=>sent.push(n),band:n=>sent.push(n),click:(...a)=>clicks.push(a),
+        requestAnimationFrame:fn=>{const n=++id;frames.set(n,fn);return n;},cancelAnimationFrame:n=>frames.delete(n)});
+    const mouse=(type,x,y,buttons=type==='mouseup'?0:mask,b=button)=>{
+        (type==='mousedown'?v:w).emit(type,event(x,y,b,buttons));
+    };
+    const advance=ms=>{clock+=ms;for(const [n,t] of [...timers])if(t.at<=clock){timers.delete(n);t.fn();}};
+    const raf=()=>{for(const [n,f] of [...frames]){frames.delete(n);f();}};
+    return {w,d,g,timers,frames,sent,clicks,mouse,advance,raf,
+        stale(){stamp++;},notReady(){ready=false;},notDisplayed(){bandReady=false;}};
+}
+let releaseCases=0;
+for(const button of [0,1,2]) {
+    for(const paintFirst of [false,true]) for(const zeroMove of [false,true]) {
+        const h=releaseHarness(button);
+        h.mouse('mousedown',100,100);h.mouse('mousemove',150,130);
+        if(paintFirst)h.raf();
+        if(zeroMove){h.mouse('mousemove',900,900,0);h.advance(99);}
+        assert(h.g.active());assert.equal(h.sent.length,0,'no submission before release');
+        h.mouse('mouseup',160,140);
+        assert.equal(h.sent.length,1,'moving release must submit exactly once');
+        if(button===2){assert.deepEqual(h.sent[0],{kind:'band',start:[.25,1/3],end:[.4,1/3+80/600],axes:[true,true],outward:false});}
+        else{assert.deepEqual(h.sent[0],{kind:'pan',x:-.15,y:80/600,snap:false});}
+        assert(!h.g.active());assert.equal(h.timers.size,0);assert.equal(h.frames.size,0);
+        h.mouse('mouseup',160,140);h.mouse('mousemove',170,150,0);h.advance(200);h.raf();
+        assert.equal(h.sent.length,1);assert.equal(h.clicks.length,0);releaseCases++;
+    }
+    for(const reason of ['timeout','blur','resize','pagehide','hidden','escape','stale','not-ready',...(button===2?['not-displayed']:[])]) {
+        const h=releaseHarness(button);
+        h.mouse('mousedown',100,100);h.mouse('mousemove',150,130);h.mouse('mousemove',151,131,0);
+        if(reason==='timeout'){
+            h.advance(99);h.mouse('mousemove',500,500,0);h.advance(1);
+            assert(!h.g.active(),'zero-button moves must not extend the deadline');
+        }else if(reason==='hidden'){h.d.hidden=true;h.d.emit('visibilitychange');}
+        else if(reason==='escape'){h.g.cancel();} // Owner and guest Escape call this API.
+        else if(reason==='stale'){h.stale();}
+        else if(reason==='not-ready'){h.notReady();}
+        else if(reason==='not-displayed'){h.notDisplayed();}
+        else{h.w.emit(reason);}
+        h.mouse('mouseup',160,140);h.advance(200);h.raf();
+        assert.equal(h.sent.length,0,reason);assert.equal(h.clicks.length,0,reason);
+        assert(!h.g.active());assert.equal(h.timers.size,0);assert.equal(h.frames.size,0);releaseCases++;
+    }
+    const resume=releaseHarness(button);
+    resume.mouse('mousedown',100,100);resume.mouse('mousemove',150,130);resume.mouse('mousemove',151,131,0);
+    resume.mouse('mousemove',160,140);resume.advance(200);assert(resume.g.active());
+    resume.mouse('mouseup',170,150);assert.equal(resume.sent.length,1);releaseCases++;
+    const restart=releaseHarness(button);
+    restart.mouse('mousedown',100,100);restart.mouse('mousemove',150,130);restart.mouse('mousemove',151,131,0);
+    restart.mouse('mousedown',300,300);restart.advance(200);assert(restart.g.active());
+    restart.mouse('mouseup',320,310);assert.equal(restart.sent.length,1);
+    if(button!==2)assert.deepEqual(restart.sent[0],{kind:'pan',x:-.05,y:20/600,snap:false});
+    releaseCases++;
+    const wrong=releaseHarness(button);
+    wrong.mouse('mousedown',100,100);wrong.mouse('mousemove',150,130);wrong.mouse('mousemove',151,131,0);
+    wrong.mouse('mouseup',160,140,0,(button+1)%3);assert(wrong.g.active());
+    wrong.advance(100);wrong.mouse('mouseup',160,140);assert.equal(wrong.sent.length,0);releaseCases++;
+}
+console.log('WEB RELEASE ORDER: ALL OK ('+releaseCases+' cases; left/middle pan + right band, immediate/painted, lost input/cancel, no delayed navigation)');

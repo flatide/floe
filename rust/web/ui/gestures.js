@@ -17,7 +17,21 @@
         return {kind: 'zoom', factor: factor, anchor: anchor.map(v => Math.max(0, Math.min(1, v)))};
     }
     function bind(port) {
-        let drag = null, paint = null;
+        let drag = null, paint = null, releaseWait = null;
+        function clearReleaseWait() {
+            if (releaseWait !== null) { port.window.clearTimeout(releaseWait); releaseWait = null; }
+        }
+        function awaitRelease() {
+            // A zero-button move can precede mouseup. It is not proof of a
+            // cancelled gesture and must never commit navigation by itself.
+            // Keep the last held-button preview until the matching release;
+            // bound genuine lost-input recovery without delaying normal ups.
+            if (releaseWait !== null) { return; }
+            const pending = drag;
+            releaseWait = port.window.setTimeout(function () {
+                if (drag === pending) { releaseWait = null; cancel(); }
+            }, 100);
+        }
         function draw() {
             paint = null;
             if (drag && drag.band) { port.bandPreview(bandPreview(drag)); }
@@ -27,6 +41,7 @@
             return {start:d.start,end:d.end,outward:d.x-d.minX>d.maxX-d.x,dimensions:d.dimensions};
         }
         function cancel() {
+            clearReleaseWait();
             if (paint !== null) { port.cancelAnimationFrame(paint); paint = null; }
             const had = drag; drag = null;
             if (had) { if(had.band){port.bandPreview(null);}else{port.preview(null, true);} port.cursor(false); }
@@ -53,6 +68,9 @@
             drag.dy = Math.max(-drag.height, Math.min(drag.height, Math.round(y * drag.dpr)));
         }
         port.viewport.addEventListener('mousedown', function (event) {
+            // A new press after an unconfirmed release starts a new gesture,
+            // not a chord with the orphaned one.
+            if (releaseWait !== null) { cancel(); }
             if (drag) { if(drag.band){cancel();}else{drag.plain = drag.unchorded = false;} return; }
             const box = !!(port.selectionMode && port.selectionMode());
             const band=event.button===2&&!!port.band;
@@ -77,7 +95,13 @@
         port.window.addEventListener('mousemove', function (event) {
             if (!drag) { return; }
             const mask = drag.button === 0 ? 1 : drag.button===2 ? 2 : 4;
-            if (typeof event.buttons === 'number' && (event.buttons & mask) === 0) { cancel(); return; }
+            if (typeof event.buttons === 'number' && (event.buttons & mask) === 0) {
+                if (event.buttons === 0 && drag.stamp === port.stamp() && port.ready() &&
+                    (!drag.band || !port.bandReady || port.bandReady())) { awaitRelease(); }
+                else { cancel(); }
+                return;
+            }
+            clearReleaseWait();
             if(drag.band && typeof event.buttons==='number' && event.buttons!==mask){cancel();return;}
             if (typeof event.buttons === 'number' && event.buttons !== mask) { drag.plain = drag.unchorded = false; }
             update(event);
@@ -85,6 +109,7 @@
         });
         port.window.addEventListener('mouseup', function (event) {
             if (!drag || event.button !== drag.button) { return; }
+            clearReleaseWait();
             update(event);
             if (!drag) { return; }
             if (paint !== null) { port.cancelAnimationFrame(paint); paint = null; }

@@ -322,3 +322,32 @@ admission/실제 가용량 안내 개선은 별도 추적한다.
 전체 목표 잔여: D2 장애·DRC/IME/DPI 확대 수용, Linux 호스트 및 RHEL 8.6/8.10
 ETX, D3 배포/서명/고지, G1 성능·G4 대조·Python-free Linux 실행. 원격 공유·CI·
 열린 색인 hot-reload 보류는 그대로이며 이 커밋을 전체 목표 완료로 세지 않는다.
+
+## 2026-09-19 — 움직이는 중 버튼 놓기
+
+macOS 독립 창에서 왼쪽 pan·오른쪽 박스 줌을 움직이는 중 놓으면 취소되고,
+멈춘 뒤 놓으면 성공한다는 현장 보고가 있었다. 공통 `gestures.js`는
+`mousemove(buttons=0)`을 즉시 취소로 처리하므로 뒤의 정상 `mouseup`도 버렸다.
+그 순서는 합성 이벤트로 재현했다. 실제 보고된 WebView의 이벤트 순서를 수집해
+확정한 것은 아니므로 현장 원인 확정과 회귀 테스트를 구분한다.
+
+버튼 상태 0인 이동에서는 마지막으로 눌림이 확인된 미리보기를 유지하고,
+최대 100ms 동안 원래 버튼의 `mouseup`을 기다린다. 정상 놓기는 유예가 끝날
+때까지 기다리지 않고 즉시 적용한다. 버튼 상태 0만으로 이동·선택을 확정하지
+않으며 반복된 이동은 기한을 연장하지 않는다. 놓기가 유실되면 타이머가 취소하고,
+늦은 놓기는 무시한다. Escape·blur·숨김·resize·뷰 변경 취소는 유지한다.
+기다리는 중 새 press는 이전 드래그를 취소하고 새 동작을 시작한다.
+
+검증 범위: 왼쪽/중간 pan·오른쪽 band, 첫 rAF 전/후 놓기, 종료 좌표 반영,
+누락·다른 버튼·늦은 놓기, 취소/재시작을 가짜 시계로 고정하며 owner와 guest의
+실제 UI 핸들러에서도 0-button move → release 및 Escape를 검사한다.
+UI는 실행 파일에 내장되므로 기존 `.app`을 재실행하는 것만으로는 갱신되지 않는다.
+`sh tools/build_desktop_macos_dev.sh`로 새 앱을 만들고 출력된 경로를 실행한다.
+실제 마우스의 빠른 드래그 재확인은 별도다.
+
+검증 결과: release-order 46건과 owner/guest UI 통과,
+`node tools/validate_web_ui.cjs` 전체 ES2017/결정적 UI gate 통과.
+동일한 새 테스트를 수정 전 HEAD의 `gestures.js`에 적용하면 zero-button move
+직후의 active 단언이 실패하는 것도 확인했다. 새 개발 `.app` 빌드와 실제
+`--smoke-test`의 WebKit 인증 → 닫기 취소 → 종료 확인 → service join도 통과했다.
+이 네이티브 smoke는 마우스 이벤트 순서 실측이나 pan/박스 줌 수용을 대신하지 않는다.

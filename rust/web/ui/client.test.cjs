@@ -240,7 +240,7 @@ const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require
     panel.contextChanged=()=>{contextChanges++;changed();};panel.paint=(p,s)=>{drcDisplays.push({p,s});paint(p,s);};
     const click=panel.click;panel.click=(...v)=>{drcClicks.push(v);return consumeDRC || click(...v);};return tracedResume(panel,'drc');
 }},FloePanelState:require('./panel-state.js'),FloeDRCBuild:require('./drc-build.js'),ResizeObserver:class {constructor(fn){this.fn=fn;observers.push(this);}observe(e){this.target=e;}disconnect(){this.target=null;}},devicePixelRatio:1,
-    addEventListener:(k,f)=>listen(listeners,k,f),setTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout};
+    addEventListener:(k,f)=>listen(listeners,k,f),setTimeout,clearTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout};
 const storage=new Map();
 window.isSecureContext=true;window.ClipboardItem=class {constructor(data){this.data=data;}};
 window.FloeSettings=require('./settings.js');
@@ -1313,6 +1313,8 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     await wait(()=>node('canvas').style.left==='13px');
     assert.deepEqual(DRC.point(drcDisplays.at(-1).p,0,0),[-24.0625,91]);
     assert.equal(dragEdits(),beforeDrag);assert.equal(draws.length,beforeDragDraws);
+    listeners.mousemove({...mouse(34,32),buttons:0});
+    assert.equal(dragEdits(),beforeDrag,'zero-button move committed a pan');
     listeners.mouseup(mouse(33,31));
     assert.equal(dragEdits(),beforeDrag+1);
     assert.deepEqual(second.sent.at(-1).body.navigation,{kind:'pan',x:-0.13,y:0.1375,snap:false});
@@ -1333,11 +1335,14 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     await wait(()=>!node('zoom-band').hidden);
     assert.equal(node('zoom-band').style.left,'20px');assert.equal(node('zoom-band').style.width,'40px');
     assert.match(node('zoom-band-hint').textContent,/Zoom in/);assert.equal(dragEdits(),beforeDrag+1);
+    listeners.mousemove(right(61,51,0));
     node('viewport').keydown({key:'Escape',preventDefault(){}});assert(node('zoom-band').hidden);
     listeners.mouseup(right(60,50,0));assert.equal(dragEdits(),beforeDrag+1);
     node('overlays').value='none';node('overlays').onchange();
     node('viewport').mousedown(right(20,20));listeners.mousemove(right(60,50));
-    await wait(()=>!node('zoom-band').hidden);listeners.mouseup(right(60,50,0));
+    await wait(()=>!node('zoom-band').hidden);listeners.mousemove(right(61,51,0));
+    assert.equal(dragEdits(),beforeDrag+1,'zero-button move committed a band');
+    listeners.mouseup(right(60,50,0));
     const bandWire=second.sent.at(-1).body.navigation;
     assert.deepEqual({...bandWire,end:null},{kind:'band',start:[.2,.25],end:null,axes:[true,true],outward:false});
     assert(Math.abs(bandWire.end[0]-.6)<1e-15);assert.equal(bandWire.end[1],.625);

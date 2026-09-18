@@ -163,7 +163,9 @@ if(require.main===module)(async()=>{
     inspect.raf();assert(!inspect.el('query-canvas').hidden);
     let count=iw.sent.length;inspect.mouse('mousedown',16,8);inspect.mouse('mousemove',30,8);inspect.raf();inspect.mouse('mousemove',16,8);inspect.mouse('mouseup',16,8);
     assert.equal(iw.sent.length,count,'a returned pan is not an object click or a navigation');
-    inspect.mouse('mousedown',16,8);inspect.mouse('mousemove',32,8);inspect.raf();inspect.mouse('mouseup',32,8);request=iw.sent.at(-1);
+    inspect.mouse('mousedown',16,8);inspect.mouse('mousemove',32,8);inspect.raf();
+    inspect.mouse('mousemove',33,9,0,{buttons:0});assert.equal(iw.sent.length,count);
+    inspect.mouse('mouseup',32,8);request=iw.sent.at(-1);
     assert.equal(request.type,'explore.set');assert.deepEqual(request.body.navigation,{kind:'pan',x:-.25,y:0,snap:false});
     count=iw.sent.length;click(inspect,20,8);assert.equal(iw.sent.length,count,'no query behind an unacknowledged display edit');
     iw.text({type:'accepted',seq:request.seq,view_id:view,connection_epoch:epoch,state_rev:'2',render_rev:'2'});
@@ -210,6 +212,7 @@ if(require.main===module)(async()=>{
     band.el('guest-viewport').listeners.keydown({key:'Escape',preventDefault(){}});assert(band.el('zoom-band').hidden);
     band.mouse('mouseup',40,24,2);assert.equal(bw.sent.length,1,'Escape cancels without a pick/navigation');
     band.mouse('mousedown',12,8,2);band.mouse('mousemove',40,24,2);band.raf();
+    band.mouse('mousemove',41,25,2,{buttons:0});assert.equal(bw.sent.length,1);
     band.mouse('mouseup',40,24,2);assert.equal(bw.sent.at(-1).body.navigation.kind,'band');assert(band.el('zoom-band').hidden);bw.onclose();
     const limits=environment();await limits.c.start();const lw=limits.sockets[0];limits.hello();lw.text(limits.state());lw.binary(packet(exactScene));limits.raf();
     lw.text(limits.state({rendering:true}));limits.el('guest-viewport').listeners.wheel(wheel);assert.equal(lw.sent.length,1,'wheel waits for final display');
