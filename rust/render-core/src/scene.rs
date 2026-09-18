@@ -80,6 +80,7 @@ impl SceneMasks {
         let mut layers: Vec<u32> = pages.values().map(|page| page.layer_idx).collect();
         for cell in cells {
             layers.extend(cell.washes.iter().map(|&(layer_idx, _)| layer_idx));
+            layers.extend(cell.reps.iter().map(|&(layer_idx, _)| layer_idx));
         }
         layers.sort_unstable();
         layers.dedup();
@@ -107,6 +108,11 @@ impl SceneMasks {
                 }
             }
             for &(layer_idx, _) in &cell.washes {
+                if let Ok(bit) = layers.binary_search(&layer_idx) {
+                    bits[row + bit / 64] |= 1u64 << (bit % 64);
+                }
+            }
+            for &(layer_idx, _) in &cell.reps {
                 if let Ok(bit) = layers.binary_search(&layer_idx) {
                     bits[row + bit / 64] |= 1u64 << (bit % 64);
                 }
@@ -171,7 +177,7 @@ impl SceneMasks {
         for &index in &post_order {
             let cell = &cells[index];
             let own = u64::from(
-                !cell.pages.is_empty() || !cell.washes.is_empty() || !cell.frames.is_empty(),
+                !cell.pages.is_empty() || !cell.washes.is_empty() || !cell.reps.is_empty() || !cell.frames.is_empty(),
             );
             let mut weight = own;
             for instance in &cell.insts {
@@ -592,6 +598,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                reps: Vec::new(),
             }],
             pages: vec![2, 4],
             page_prio: vec![0, 1],
@@ -666,6 +673,7 @@ mod tests {
                     }],
                     frames: Vec::new(),
                     washes: vec![(5, bbox)],
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child,
@@ -676,6 +684,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: vec![(bbox, Rep::One, 2)],
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
             ],
             pages: vec![2, 4],

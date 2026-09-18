@@ -445,6 +445,9 @@ pub struct WsCell {
     /// page's members paints the same pixel blob, and shipping
     /// geometry only builds a hairline wall no dither can thin
     pub washes: Vec<(u32, BBox)>,
+    /// representative shapes of design.ovr (OVR2) in this cell's frame -
+    /// the top cell only; drawn as the shapes they are, never as washes
+    pub reps: Vec<(u32, crate::representatives::Prim)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1225,6 +1228,7 @@ impl<'a> Hier<'a> {
             insts: Vec::new(),
             frames: Vec::new(),
             washes: Vec::new(),
+            reps: Vec::new(),
         };
         // ---- own pages: (cell,layer) runs, layer roots skip whole,
         // per-box queries dedup into one sorted set

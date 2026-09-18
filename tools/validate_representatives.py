@@ -46,14 +46,15 @@ def worker(src, off=False, unbinned=False):
     return result
 
 
-def frame(w, gen, depth=None, cut=3, px=500):
-    w.submit({'kind': 'repattern', 'fills': [((1, 0), '\n'.join(['*' * 16] * 16))],
-              'widths': [((1, 0), 1)]})
+def frame(w, gen, depth=None, cut=3, px=500, span=1_500_000., visible=((1, 0),)):
+    visible = list(visible)
+    w.submit({'kind': 'repattern', 'fills': [(k, '\n'.join(['*' * 16] * 16)) for k in visible],
+              'widths': [(k, 1) for k in visible]})
     w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless',
-              'bbox': (0., 0., 1_500_000., 1_500_000.), 'view': None,
+              'bbox': (0., 0., float(span), float(span)), 'view': None,
               'w': px, 'h': px, 'depth': depth, 'cut_px': cut,
               'lod': False, 'frames': False, 'labels': False, 'abstract': False,
-              'visible': [(1, 0)], 'frame_format': 'raw', 'thin': 'cull'})
+              'visible': visible, 'frame_format': 'raw', 'thin': 'cull'})
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
@@ -64,6 +65,79 @@ def frame(w, gen, depth=None, cut=3, px=500):
                    if any(data[i * 4:i * 4 + 3])}
             return lit, res
     raise AssertionError('representative frame timeout')
+
+
+def ovr2_section(temp):
+    """OVR2 step 1 (docs/OVR2_DESIGN.ko.md): the same samples stored as
+    shapes. A sub-cut hairline keeps its projected length (4, 3, 2, 1 px as
+    the view widens) under a rotation too, every lit pixel lies on real
+    geometry, the additive build leaves the cache alone, an OVR1 next to a
+    current cache does not hide a requested OVR2, and OVR1 still reads."""
+    src = Path(temp) / 'lines.oas'
+    ly = db.Layout()
+    ly.dbu = .001
+    top = ly.create_cell('TOP')
+    vl = ly.create_cell('VL')
+    l2, l3, l4 = ly.layer(2, 0), ly.layer(3, 0), ly.layer(4, 0)
+    for i in range(40):     # 0.05 x 400 um hairlines, 30 um apart
+        top.shapes(l2).insert(db.Box(i * 30000 + 1000, 1000, i * 30000 + 1050, 401000))
+    top.shapes(l3).insert(db.Box(100000, 800000, 500000, 800050))      # one horizontal line
+    vl.shapes(l4).insert(db.Box(0, 0, 400000, 50))                     # horizontal in VL ...
+    top.insert(db.CellInstArray(vl.cell_index(), db.Trans(1, False, 900000, 600000)))  # ... vertical in TOP
+    ly.write(str(src))
+    index(src)
+    cache = Path(vfs_cache_dir(src))
+    before = {p.name: digest(p) for p in cache.iterdir() if p.is_file()}
+    index(src, '--representatives-only', '--representatives-points', '4096')
+    sidecar = cache / 'design.ovr'
+    assert sidecar.read_bytes()[:8] == b'FLOEOVR1'
+    layers = ((2, 0), (3, 0), (4, 0))
+    points = worker(src)
+    try:
+        dots, _ = frame(points, 20, visible=layers)
+        dot_line, _ = frame(points, 21, px=200, span=20_000_000., visible=[(3, 0)])
+    finally:
+        points.stop()
+    # a current cache with an OVR1: the format option alone rebuilds it as OVR2
+    result = index(src, '--representatives', '--representatives-format', '2',
+                   '--representatives-points', '4096')
+    assert sidecar.read_bytes()[:8] == b'FLOEOVR2', result.stdout + result.stderr
+    assert 'format=2' in result.stderr and 'rects=42' in result.stderr, result.stderr
+    assert before == {name: digest(cache / name) for name in before}, 'additive OVR2 build changed the index'
+    shapes = worker(src)
+    exact = worker(src)
+    try:
+        lines, report = frame(shapes, 22, visible=layers)
+        real, _ = frame(exact, 23, cut=0, visible=layers)
+        assert report['plan_culls']['stored_rep_points'] == 42, report['plan_culls']
+        assert report['cache_miss'] == 0, 'shapes need no page decode'
+        # 40 hairlines of 133 px + two 133 px lines against 42 dots
+        assert len(dots) <= 42 and len(lines) > 100 * len(dots) // 2, (len(dots), len(lines))
+        stray = [p for p in lines if not any((p[0] + dx, p[1] + dy) in real
+                                             for dx in (-1, 0, 1) for dy in (-1, 0, 1))]
+        assert not stray, 'shape pixels off the real geometry: %s' % stray[:5]
+        # the projected length of ONE 400 um line at 100, 133, 200, 400 um per
+        # pixel, horizontal (3/0) and rotated to vertical (4/0): a group of one
+        # member is always sampled, and the shape takes the real rect's paint
+        # path, so the picture IS the exact one - whatever the raster's
+        # hairline rule gives across the line - and the long axis shrinks
+        # 4, 3, 2, 1 px with the view instead of being a dot from the start
+        lengths = []
+        for k, span in enumerate((20_000_000., 26_666_667., 40_000_000., 80_000_000.)):
+            for layer, axis in (((3, 0), 0), ((4, 0), 1)):
+                lit, _ = frame(shapes, 30 + 4 * k + 2 * axis, px=200, span=span, visible=[layer])
+                ref, _ = frame(exact, 31 + 4 * k + 2 * axis, px=200, span=span, cut=0, visible=[layer])
+                assert lit == ref and lit, (layer, span, sorted(lit), sorted(ref))
+                lengths.append((layer, span, len({p[axis] for p in lit})))
+        for layer in ((3, 0), (4, 0)):
+            got = [n for l, _, n in lengths if l == layer]
+            assert got == sorted(got, reverse=True) and got[0] >= 4 and got[-1] <= 2, lengths
+        assert len(dot_line) == 1, 'OVR1 shows the same line as one dot: %d' % len(dot_line)
+    finally:
+        for w in (shapes, exact):
+            w.stop()
+    print('representatives OVR2: %d dots -> %d shape px, projected lengths %s' % (
+        len(dots), len(lines), [n for _, _, n in lengths]))
 
 
 def main():
@@ -162,6 +236,8 @@ def main():
         assert sidecar.read_bytes()[:8] == b'FLOEOVR1'
         print('representatives: additive preservation, normal build, depth, pixel replay, kill switch, invalid fallback, '
               'combined-run failure keeps the cache OK')
+        ovr2_section(temp)
+        print('representatives: OVR2 shapes (length, rotation, on-geometry, additive, format switch) OK')
 
 
 if __name__ == '__main__':

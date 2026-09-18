@@ -18,6 +18,8 @@ const CHUNK: usize = 128;
 const MAX_GROUPS: usize = 65_536;
 const MAX_DIRECTORY_GROUPS: usize = 67_108_864; // 24-byte (key, count) each: 1.5 GiB, excluding the Doc
 const MAGIC: &[u8; 8] = b"FLOEOVR1";
+/// OVR2 step 1 (docs/OVR2_DESIGN.ko.md): the same samples as 64-byte shapes
+const MAGIC2: &[u8; 8] = b"FLOEOVR2";
 type Key = (u32, u32, u32); // layer, datatype, relative depth
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,11 +40,60 @@ impl Point {
         }
     }
 }
+/// OVR2 (docs/OVR2_DESIGN.ko.md section 4): the sampled shape itself in
+/// top coordinates, so a sub-cut hairline keeps its long axis on screen
+/// (4, 3, 2, 1 px as the view widens) instead of collapsing to a dot.
+/// Rect: the transformed corners (x0 <= x1, y0 <= y1). Segment: one real
+/// boundary edge of a polygon or of a path's outline (the longest
+/// non-degenerate one, the first on a tie; PRIM_PARTIAL says the shape has
+/// more). Point: a shape with no usable edge (counted as a fallback).
+/// `gate_dim` is the cut test of the ORIGINAL shape - min(max_dim, 2 *
+/// min_dim) of its bbox, the plain thin:cull rule - never of the picked
+/// edge. `rank` is the draw order, as in Point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prim {
+    pub x0: i64,
+    pub y0: i64,
+    pub x1: i64,
+    pub y1: i64,
+    pub gate_dim: u64,
+    pub thickness: u64,
+    pub kind: u8,
+    pub flags: u8,
+    pub rank: u32,
+}
+pub const PRIM_RECT: u8 = 0;
+pub const PRIM_SEGMENT: u8 = 1;
+pub const PRIM_POINT: u8 = 2;
+pub const PRIM_PARTIAL: u8 = 1;
+impl Prim {
+    pub fn bbox(&self) -> BBox {
+        BBox {
+            x0: self.x0.min(self.x1),
+            y0: self.y0.min(self.y1),
+            x1: self.x0.max(self.x1),
+            y1: self.y0.max(self.y1),
+        }
+    }
+}
+/// a record's primitive in cell coordinates, before the repetition offset
+#[derive(Clone, Copy)]
+struct Local {
+    x0: i64,
+    y0: i64,
+    x1: i64,
+    y1: i64,
+    kind: u8,
+    flags: u8,
+}
 #[derive(Debug)]
 pub struct Group {
     pub key: Key,
     pub members: u64,
     pub points: Vec<Point>,
+    /// the same samples as shapes, in the same order (empty unless built
+    /// with `build_with(.., true)`)
+    pub prims: Vec<Prim>,
 }
 pub struct Built {
     pub groups: Vec<Group>,
@@ -53,6 +104,15 @@ pub struct Built {
     /// peak number of sample requests in flight during the resolve pass
     /// (64 bytes each; bounded by the sample count, not by the layout)
     pub peak_requests: usize,
+    /// shapes that had no usable edge and were stored as a point (OVR2)
+    pub point_fallbacks: u64,
+}
+/// what the resolve pass fills
+struct Out {
+    points: Vec<Vec<Option<Point>>>,
+    prims: Option<Vec<Vec<Option<Prim>>>>,
+    locals: HashMap<(usize, u8, u32), Local>,
+    point_fallbacks: u64,
 }
 /// per cell: (layer, datatype, relative depth) -> logical members, sorted by key
 type Counts = Vec<(Key, u64)>;
@@ -246,6 +306,12 @@ fn quotas(counts: &[u64], cap: usize, total_cap: usize) -> Result<Vec<usize>, St
 /// children x child groups + samples x depth + sorting). Memory: directory +
 /// samples in flight (64 bytes each, peak logged) + points + the Doc.
 pub fn build(doc: &Doc, per_group: usize, progress: Option<fn(&str)>) -> Result<Built, String> {
+    build_with(doc, per_group, progress, false)
+}
+
+/// `shapes`: also resolve every sample to its Prim (OVR2). The samples,
+/// their order and the points are the same either way.
+pub fn build_with(doc: &Doc, per_group: usize, progress: Option<fn(&str)>, shapes: bool) -> Result<Built, String> {
     if per_group == 0 || per_group > MAX_POINTS {
         return Err(format!(
             "representatives: points must be in 1..={MAX_POINTS}"
@@ -321,7 +387,12 @@ pub fn build(doc: &Doc, per_group: usize, progress: Option<fn(&str)>) -> Result<
     // the sample ranks of every top group, drawn as before (permutation,
     // rejection); each becomes a request that starts at top
     let mut pending: Vec<Vec<Req>> = (0..doc.cells.len()).map(|_| Vec::new()).collect();
-    let mut points: Vec<Vec<Option<Point>>> = Vec::with_capacity(root.len());
+    let mut out = Out {
+        points: Vec::with_capacity(root.len()),
+        prims: if shapes { Some(Vec::with_capacity(root.len())) } else { None },
+        locals: HashMap::new(),
+        point_fallbacks: 0,
+    };
     for (gi, (&(key, members), count)) in root.iter().zip(budgets).enumerate() {
         let mask = members
             .checked_next_power_of_two()
@@ -349,7 +420,10 @@ pub fn build(doc: &Doc, per_group: usize, progress: Option<fn(&str)>) -> Result<
             });
             drawn += 1;
         }
-        points.push(vec![None; count]);
+        out.points.push(vec![None; count]);
+        if let Some(prims) = out.prims.as_mut() {
+            prims.push(vec![None; count]);
+        }
     }
     let started = std::time::Instant::now();
     let mut in_flight = pending[doc.top].len();
@@ -363,7 +437,7 @@ pub fn build(doc: &Doc, per_group: usize, progress: Option<fn(&str)>) -> Result<
             continue;
         }
         in_flight -= reqs.len();
-        in_flight += resolve_cell(doc, &counts, ci, reqs, &mut pending, &mut points, &mut anchors)?;
+        in_flight += resolve_cell(doc, &counts, ci, reqs, &mut pending, &mut out, &mut anchors)?;
         peak = peak.max(in_flight);
         scanned += 1;
         if heartbeat.elapsed().as_secs() >= 10 {
@@ -379,11 +453,19 @@ pub fn build(doc: &Doc, per_group: usize, progress: Option<fn(&str)>) -> Result<
         peak as f64 * 64.0 / 1_048_576.0,
         started.elapsed().as_secs_f64()
     ));
+    let Out { points, prims, point_fallbacks, .. } = out;
+    let mut prims = prims.map(|p| p.into_iter());
     let mut result = Vec::with_capacity(root.len());
     for (&(key, members), pts) in root.iter().zip(points) {
         let mut done = Vec::with_capacity(pts.len());
         for p in pts {
             done.push(p.ok_or("representatives: sample not resolved (internal)")?);
+        }
+        let mut shaped = Vec::new();
+        if let Some(it) = prims.as_mut() {
+            for p in it.next().ok_or("representatives: shape group missing (internal)")? {
+                shaped.push(p.ok_or("representatives: sample shape not resolved (internal)")?);
+            }
         }
         log(&format!(
             "{}/{} depth={} members={} points={}",
@@ -397,12 +479,14 @@ pub fn build(doc: &Doc, per_group: usize, progress: Option<fn(&str)>) -> Result<
             key,
             members,
             points: done,
+            prims: shaped,
         });
     }
     Ok(Built {
         groups: result,
         directory,
         peak_requests: peak,
+        point_fallbacks,
     })
 }
 
@@ -422,7 +506,7 @@ fn resolve_cell(
     ci: usize,
     mut reqs: Vec<Req>,
     pending: &mut [Vec<Req>],
-    points: &mut [Vec<Option<Point>>],
+    out: &mut Out,
     anchors: &mut HashMap<(usize, u8, u32), Point>,
 ) -> Result<usize, String> {
     reqs.sort_unstable_by_key(|r| (r.key, r.rank, r.sample));
@@ -443,17 +527,17 @@ fn resolve_cell(
     // own shapes, in the count order
     for (ri, r) in cell.rects.iter().enumerate() {
         if let Some(&c) = key_of.get(&(r.layer, r.dt, 0)) {
-            hit_shape(doc, ci, 0, ri, &r.rep, &mut cursors[c], &reqs, points, anchors)?;
+            hit_shape(doc, ci, 0, ri, &r.rep, &mut cursors[c], &reqs, out, anchors)?;
         }
     }
     for (ri, p) in cell.polys.iter().enumerate().filter(|(_, p)| !p.pts.is_empty()) {
         if let Some(&c) = key_of.get(&(p.layer, p.dt, 0)) {
-            hit_shape(doc, ci, 1, ri, &p.rep, &mut cursors[c], &reqs, points, anchors)?;
+            hit_shape(doc, ci, 1, ri, &p.rep, &mut cursors[c], &reqs, out, anchors)?;
         }
     }
     for (ri, p) in cell.paths.iter().enumerate().filter(|(_, p)| !p.pts.is_empty()) {
         if let Some(&c) = key_of.get(&(p.layer, p.dt, 0)) {
-            hit_shape(doc, ci, 2, ri, &p.rep, &mut cursors[c], &reqs, points, anchors)?;
+            hit_shape(doc, ci, 2, ri, &p.rep, &mut cursors[c], &reqs, out, anchors)?;
         }
     }
     // placements in record order; per distinct child, the child groups that
@@ -518,7 +602,7 @@ fn hit_shape(
     rep: &Rep,
     cur: &mut GroupCursor,
     reqs: &[Req],
-    points: &mut [Vec<Option<Point>>],
+    out: &mut Out,
     anchors: &mut HashMap<(usize, u8, u32), Point>,
 ) -> Result<(), String> {
     let n = members(rep)?;
@@ -531,7 +615,7 @@ fn hit_shape(
         let base = anchor(doc, ci, kind, ri, anchors)?;
         let off = offset(rep, req.rank - cur.pos);
         let (x, y) = apply_xf(req.m, req.tx, req.ty, base.x as i128 + off.0, base.y as i128 + off.1);
-        points[req.group as usize][req.sample as usize] = Some(Point {
+        out.points[req.group as usize][req.sample as usize] = Some(Point {
             x: x
                 .try_into()
                 .map_err(|_| "representatives: x coordinate overflow")?,
@@ -542,10 +626,95 @@ fn hit_shape(
             min_dim: base.min_dim,
             rank: req.sample,
         });
+        if out.prims.is_some() {
+            let local = local_prim(doc, ci, kind, ri, out)?;
+            let a = apply_xf(req.m, req.tx, req.ty, local.x0 as i128 + off.0, local.y0 as i128 + off.1);
+            let z = apply_xf(req.m, req.tx, req.ty, local.x1 as i128 + off.0, local.y1 as i128 + off.1);
+            let coord = |v: i128| -> Result<i64, String> {
+                v.try_into().map_err(|_| "representatives: shape coordinate overflow".to_string())
+            };
+            let (ax, ay, zx, zy) = (coord(a.0)?, coord(a.1)?, coord(z.0)?, coord(z.1)?);
+            // a rect keeps x0 <= x1, y0 <= y1 under any rotation or mirror
+            let (x0, y0, x1, y1) = if local.kind == PRIM_RECT {
+                (ax.min(zx), ay.min(zy), ax.max(zx), ay.max(zy))
+            } else {
+                (ax, ay, zx, zy)
+            };
+            let prims = out.prims.as_mut().expect("shapes requested");
+            prims[req.group as usize][req.sample as usize] = Some(Prim {
+                x0,
+                y0,
+                x1,
+                y1,
+                gate_dim: base.max_dim.min(base.min_dim.saturating_mul(2)),
+                thickness: 0,
+                kind: local.kind,
+                flags: local.flags,
+                rank: req.sample,
+            });
+        }
         cur.next += 1;
     }
     cur.pos = limit;
     Ok(())
+}
+
+/// The record's primitive in cell coordinates, cached per record: a rect
+/// as itself; a polygon as its longest non-degenerate boundary edge; a path
+/// as the longest edge of the outline the raster paints (path_outline_any).
+/// A shape without such an edge degrades to a point on it and is counted.
+fn local_prim(doc: &Doc, ci: usize, kind: u8, ri: usize, out: &mut Out) -> Result<Local, String> {
+    let record: u32 = ri
+        .try_into()
+        .map_err(|_| "representatives: record index exceeds u32")?;
+    if let Some(cached) = out.locals.get(&(ci, kind, record)) {
+        return Ok(*cached);
+    }
+    fn longest_edge(pts: &[(i64, i64)]) -> Option<((i64, i64), (i64, i64))> {
+        let mut best: Option<(u128, (i64, i64), (i64, i64))> = None;
+        for i in 0..pts.len() {
+            let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+            let (dx, dy) = ((b.0 as i128 - a.0 as i128), (b.1 as i128 - a.1 as i128));
+            let len = (dx * dx + dy * dy) as u128;
+            if len > 0 && best.is_none_or(|(l, _, _)| len > l) {
+                best = Some((len, a, b));
+            }
+        }
+        best.map(|(_, a, b)| (a, b))
+    }
+    let cell = &doc.cells[ci];
+    let mut fallback = false;
+    let local = match kind {
+        0 => {
+            let r = &cell.rects[ri];
+            let x1 = r.x.checked_add(r.w).ok_or("representatives: rect x overflow")?;
+            let y1 = r.y.checked_add(r.h).ok_or("representatives: rect y overflow")?;
+            Local { x0: r.x.min(x1), y0: r.y.min(y1), x1: r.x.max(x1), y1: r.y.max(y1), kind: PRIM_RECT, flags: 0 }
+        }
+        _ => {
+            let outline;
+            let pts: &[(i64, i64)] = if kind == 1 {
+                &cell.polys[ri].pts
+            } else {
+                let p = &cell.paths[ri];
+                outline = floe_tiler::path_outline_any(&p.pts, p.hw, p.es, p.ee).unwrap_or_default();
+                &outline
+            };
+            match longest_edge(pts) {
+                Some((a, b)) => Local { x0: a.0, y0: a.1, x1: b.0, y1: b.1, kind: PRIM_SEGMENT, flags: PRIM_PARTIAL },
+                None => {
+                    fallback = true;
+                    let first = if kind == 1 { cell.polys[ri].pts[0] } else { cell.paths[ri].pts[0] };
+                    Local { x0: first.0, y0: first.1, x1: first.0, y1: first.1, kind: PRIM_POINT, flags: PRIM_PARTIAL }
+                }
+            }
+        }
+    };
+    if fallback {
+        out.point_fallbacks += 1;
+    }
+    out.locals.insert((ci, kind, record), local);
+    Ok(local)
 }
 
 /// The record's anchor (rect centre, polygon first vertex, path first spine
@@ -688,6 +857,74 @@ pub fn encode(built: &mut Built, ovm: &Ovm) -> Vec<u8> {
     out
 }
 
+fn morton_xy(x: i64, y: i64, b: BBox) -> u64 {
+    morton(&Point { x, y, max_dim: 0, min_dim: 0, rank: 0 }, b)
+}
+
+/// OVR2 step 1: the header and group table of OVR1 (version 2), chunks of
+/// up to 128 shapes in Morton order of their centres, each chunk's bbox the
+/// union of its shapes' EXTENTS (a long hairline whose centre is off screen
+/// is still found), 64-byte records: uid (group << 32 | rank) u64, x0 y0 x1
+/// y1 i64, gate_dim u64, thickness u64, kind u8, flags u8, 6 zero bytes.
+/// Requires a `build_with(.., true)` result.
+pub fn encode_v2(built: &mut Built, ovm: &Ovm) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    out.extend(MAGIC2);
+    put32(&mut out, 2);
+    put32(&mut out, crc32fast::hash(&ovm.data));
+    put64(&mut out, ovm.src_size);
+    put64(&mut out, ovm.src_mtime);
+    put64(&mut out, ovm.unit.to_bits());
+    put32(&mut out, ovm.top);
+    put32(&mut out, built.groups.len() as u32);
+    for (gi, group) in built.groups.iter_mut().enumerate() {
+        if group.prims.len() != group.points.len() {
+            return Err("representatives: OVR2 needs the shapes of every sample (build_with)".into());
+        }
+        let centre = |p: &Prim| {
+            (
+                ((p.x0 as i128 + p.x1 as i128) / 2) as i64,
+                ((p.y0 as i128 + p.y1 as i128) / 2) as i64,
+            )
+        };
+        let mut bounds = BBox::EMPTY;
+        for p in &group.prims {
+            let (x, y) = centre(p);
+            bounds.grow(&BBox { x0: x, y0: y, x1: x, y1: y });
+        }
+        group.prims.sort_unstable_by_key(|p| {
+            let (x, y) = centre(p);
+            (morton_xy(x, y, bounds), p.rank)
+        });
+        for n in [group.key.0, group.key.1, group.key.2, group.prims.len() as u32] {
+            put32(&mut out, n);
+        }
+        put64(&mut out, group.members);
+        put32(&mut out, group.prims.len().div_ceil(CHUNK) as u32);
+        for chunk in group.prims.chunks(CHUNK) {
+            let mut b = BBox::EMPTY;
+            for p in chunk {
+                b.grow(&p.bbox());
+            }
+            put_bbox(&mut out, b);
+            put32(&mut out, chunk.len() as u32);
+            put32(&mut out, chunk.iter().map(|p| p.rank).min().unwrap());
+            for p in chunk {
+                put64(&mut out, ((gi as u64) << 32) | p.rank as u64);
+                for v in [p.x0, p.y0, p.x1, p.y1] {
+                    put64(&mut out, v as u64);
+                }
+                put64(&mut out, p.gate_dim);
+                put64(&mut out, p.thickness);
+                out.extend([p.kind, p.flags, 0, 0, 0, 0, 0, 0]);
+            }
+        }
+    }
+    let crc = crc32fast::hash(&out);
+    put32(&mut out, crc);
+    Ok(out)
+}
+
 struct ChunkRef {
     bbox: BBox,
     offset: usize,
@@ -704,6 +941,8 @@ struct GroupRef {
 pub struct File {
     data: Backing,
     groups: Vec<GroupRef>,
+    /// 1 = points (OVR1), 2 = shapes (OVR2 step 1)
+    version: u32,
 }
 #[derive(Default, Debug)]
 pub struct QueryStats {
@@ -752,13 +991,36 @@ impl Cursor<'_> {
         }
         Ok(p)
     }
+    /// an OVR2 record and the group index of its uid
+    fn prim(&mut self) -> Result<(Prim, u32), String> {
+        let uid = self.u64()?;
+        let p = Prim {
+            x0: self.u64()? as i64,
+            y0: self.u64()? as i64,
+            x1: self.u64()? as i64,
+            y1: self.u64()? as i64,
+            gate_dim: self.u64()?,
+            thickness: self.u64()?,
+            kind: 0,
+            flags: 0,
+            rank: uid as u32,
+        };
+        let tail: [u8; 8] = self.take()?;
+        if tail[0] > PRIM_POINT || tail[1] & !PRIM_PARTIAL != 0 || tail[2..] != [0; 6] {
+            return Err("representatives: unknown shape kind or flags".into());
+        }
+        Ok((Prim { kind: tail[0], flags: tail[1], ..p }, (uid >> 32) as u32))
+    }
 }
 impl File {
     pub fn open(dir: &str, ovm: &Ovm) -> Result<Self, String> {
         Self::from_backing(floe_ovm::map_file(&format!("{dir}/design.ovr"))?, ovm)
     }
     pub fn from_backing(data: Backing, ovm: &Ovm) -> Result<Self, String> {
-        if data.len() < 52 || data.len() > 192 * 1024 * 1024 {
+        // OVR1: 40-byte points (192 MiB); OVR2: 64-byte shapes (384 MiB)
+        let version = if data.len() >= 8 && &data[..8] == MAGIC2 { 2u32 } else { 1 };
+        let cap = if version == 2 { 384 } else { 192 } * 1024 * 1024;
+        if data.len() < 52 || data.len() > cap {
             return Err("representatives: invalid file size".into());
         }
         let end = data.len() - 4;
@@ -769,7 +1031,7 @@ impl File {
             data: &data[..end],
             pos: 0,
         };
-        if &c.take::<8>()? != MAGIC || c.u32()? != 1 {
+        if &c.take::<8>()? != if version == 2 { MAGIC2 } else { MAGIC } || c.u32()? != version {
             return Err("representatives: unsupported format".into());
         }
         if c.u32()? != crc32fast::hash(&ovm.data)
@@ -827,16 +1089,31 @@ impl File {
                 let offset = c.pos;
                 let mut actual_min = u32::MAX;
                 for _ in 0..len {
-                    let p = c.point()?;
-                    if p.rank as usize >= count
-                        || seen[p.rank as usize]
-                        || p.min_dim > p.max_dim
-                        || !bbox.intersects(&p.bbox())
-                    {
+                    let rank = if version == 2 {
+                        let (p, group) = c.prim()?;
+                        let b = p.bbox();
+                        if group as usize != groups.len()
+                            || (p.kind == PRIM_RECT && (p.x0 > p.x1 || p.y0 > p.y1))
+                            || b.x0 < bbox.x0
+                            || b.y0 < bbox.y0
+                            || b.x1 > bbox.x1
+                            || b.y1 > bbox.y1
+                        {
+                            return Err("representatives: invalid shape".into());
+                        }
+                        p.rank
+                    } else {
+                        let p = c.point()?;
+                        if p.min_dim > p.max_dim || !bbox.intersects(&p.bbox()) {
+                            return Err("representatives: invalid point".into());
+                        }
+                        p.rank
+                    };
+                    if rank as usize >= count || seen[rank as usize] {
                         return Err("representatives: invalid point".into());
                     }
-                    seen[p.rank as usize] = true;
-                    actual_min = actual_min.min(p.rank);
+                    seen[rank as usize] = true;
+                    actual_min = actual_min.min(rank);
                 }
                 if actual_min != min_rank {
                     return Err("representatives: invalid rank directory".into());
@@ -867,17 +1144,18 @@ impl File {
         if c.pos != end {
             return Err("representatives: trailing data".into());
         }
-        Ok(Self { data, groups })
+        Ok(Self { data, groups, version })
     }
 
     /// No source page reads, hierarchy expansion, or repetition enumeration.
     /// The rank mask is global (not viewport-relative), so panning/margin
     /// reuse selects the same world points. Zoom thinning uses nested masks.
-    pub fn query(&self, req: &crate::ViewReq) -> (Vec<(u32, BBox)>, QueryStats) {
-        let mut stats = QueryStats::default();
-        if req.cut_dbu <= 0 || req.px_per_dbu <= 0.0 {
-            return (Vec::new(), stats);
-        }
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// The visible groups of a request and each one's nested rank shift.
+    fn selection(&self, req: &crate::ViewReq, stats: &mut QueryStats) -> Vec<(&GroupRef, u32)> {
         let bit = |bits: &[u8], li: u32| {
             bits.get(li as usize / 8)
                 .is_some_and(|b| b & (1 << (li % 8)) != 0)
@@ -919,8 +1197,50 @@ impl File {
                 density_shift.max(base_shift)
             })
             .collect();
+        groups.into_iter().zip(shifts).collect()
+    }
+
+    /// OVR2: the shapes of a request. The same nested rank thinning and
+    /// frame cap as the points (step 1 changes what a sample looks like,
+    /// not how many are drawn); a shape is taken by its EXTENT meeting the
+    /// view and by the original shape's gate_dim being under the cut.
+    pub fn query_prims(&self, req: &crate::ViewReq) -> (Vec<(u32, Prim)>, QueryStats) {
+        let mut stats = QueryStats::default();
+        if self.version != 2 || req.cut_dbu <= 0 || req.px_per_dbu <= 0.0 {
+            return (Vec::new(), stats);
+        }
         let mut out = Vec::new();
-        for (g, shift) in groups.into_iter().zip(shifts) {
+        for (g, shift) in self.selection(req, &mut stats) {
+            for chunk in &g.chunks {
+                stats.chunks += 1;
+                if !chunk.bbox.intersects(&req.view) || (shift >= 32 && chunk.min_rank != 0) {
+                    continue;
+                }
+                let mut c = Cursor { data: &self.data, pos: chunk.offset };
+                for _ in 0..chunk.len {
+                    let (p, _) = c.prim().expect("validated OVR shape");
+                    stats.tested += 1;
+                    if (p.rank as u64) & ((1u64 << shift) - 1) != 0
+                        || p.gate_dim >= req.cut_dbu as u64
+                        || !req.view.intersects(&p.bbox())
+                    {
+                        continue;
+                    }
+                    out.push((g.layer, p));
+                }
+            }
+        }
+        stats.points = out.len() as u64;
+        (out, stats)
+    }
+
+    pub fn query(&self, req: &crate::ViewReq) -> (Vec<(u32, BBox)>, QueryStats) {
+        let mut stats = QueryStats::default();
+        if self.version != 1 || req.cut_dbu <= 0 || req.px_per_dbu <= 0.0 {
+            return (Vec::new(), stats);
+        }
+        let mut out = Vec::new();
+        for (g, shift) in self.selection(req, &mut stats) {
             for chunk in &g.chunks {
                 stats.chunks += 1;
                 if !chunk.bbox.intersects(&req.view) || (shift >= 32 && chunk.min_rank != 0) {
@@ -1211,6 +1531,7 @@ mod tests {
         let mut built = Built {
             directory: 0,
             peak_requests: 0,
+            point_fallbacks: 0,
             groups: (0..2)
                 .map(|depth| {
                     let scale = if depth == 0 { 1 } else { 100 };
@@ -1226,6 +1547,7 @@ mod tests {
                                 rank: rank as u32,
                             })
                             .collect(),
+                        prims: Vec::new(),
                     }
                 })
                 .collect(),
@@ -1476,6 +1798,7 @@ mod tests {
                     key,
                     members: run.members,
                     points,
+                    prims: Vec::new(),
                 });
             }
             let _ = entries;
@@ -1653,9 +1976,123 @@ mod tests {
                 assert_eq!(a.points, b.points, "group {:?} at {} per group", a.key, per_group);
             }
             let ovm = ovm();
-            let mut legacy_built = Built { groups: std::mem::take(&mut theirs), directory: 0, peak_requests: 0 };
+            let mut legacy_built = Built { groups: std::mem::take(&mut theirs), directory: 0, peak_requests: 0, point_fallbacks: 0 };
             assert_eq!(encode(&mut ours, &ovm), encode(&mut legacy_built, &ovm));
             assert!(ours.directory >= 3 && ours.peak_requests > 0);
+        }
+    }
+
+    fn load_v2(built: &mut Built) -> File {
+        let ovm = ovm();
+        File::from_backing(Backing::Vec(encode_v2(built, &ovm).unwrap()), &ovm).unwrap()
+    }
+
+    #[test]
+    fn ovr2_shapes_keep_their_extent_under_every_transform() {
+        // a 2 x 40 hairline rect, a polygon whose longest edge is its 30-long
+        // base, a path whose outline's longest edge runs along its 50-long
+        // spine, and a degenerate polygon that can only be a point
+        let leaf = Cell {
+            rects: vec![RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 2, h: 40, rep: Rep::One }],
+            polys: vec![
+                PolyRec { layer: 2, dt: 0, pts: vec![(0, 0), (30, 0), (30, 10), (0, 10)], rep: Rep::One },
+                PolyRec { layer: 4, dt: 0, pts: vec![(7, 7), (7, 7), (7, 7)], rep: Rep::One },
+            ],
+            paths: vec![PathRec { layer: 3, dt: 0, pts: vec![(0, 0), (50, 0)], hw: 1, es: 0, ee: 0, rep: Rep::One }],
+            ..Cell::default()
+        };
+        let top = Cell {
+            places: vec![
+                PlaceRec { cell: 0, x: 1000, y: 2000, rot: 1, flip: false, rep: Rep::One },
+                PlaceRec { cell: 0, x: -500, y: 300, rot: 0, flip: true, rep: Rep::One },
+            ],
+            ..Cell::default()
+        };
+        let mut source = doc(vec![leaf, top], 1);
+        source.layer_order = vec![(1, 0), (2, 0), (3, 0), (4, 0)];
+        let built = build_with(&source, 100, None, true).unwrap();
+        assert_eq!(built.point_fallbacks, 1);
+        let shapes = |layer: u32| -> Vec<Prim> {
+            let g = built.groups.iter().find(|g| g.key.0 == layer).unwrap();
+            assert_eq!(g.prims.len(), g.points.len());
+            let mut v = g.prims.clone();
+            v.sort_by_key(|p| p.bbox().x0);
+            v
+        };
+        // the rect under flip (y -> -y) then translate, and under rot 90:
+        // its long axis turns from vertical to horizontal
+        let rects = shapes(1);
+        assert_eq!((rects[0].kind, rects[0].bbox()), (PRIM_RECT, BBox { x0: -500, y0: 260, x1: -498, y1: 300 }));
+        assert_eq!(rects[1].bbox(), BBox { x0: 960, y0: 2000, x1: 1000, y1: 2002 });
+        assert!(rects.iter().all(|p| p.gate_dim == 4 && p.x0 <= p.x1 && p.y0 <= p.y1));
+        // the polygon's base edge, 30 long, marked partial; gate from its bbox
+        let polys = shapes(2);
+        assert!(polys.iter().all(|p| p.kind == PRIM_SEGMENT && p.flags == PRIM_PARTIAL && p.gate_dim == 20));
+        let len = |p: &Prim| (p.x1 - p.x0).abs().max((p.y1 - p.y0).abs());
+        assert!(polys.iter().all(|p| len(p) == 30));
+        // the path: an outline edge as long as the spine; gate = 2 * its width
+        let paths = shapes(3);
+        assert!(paths.iter().all(|p| p.kind == PRIM_SEGMENT && len(p) == 50 && p.gate_dim == 4));
+        assert!(shapes(4).iter().all(|p| p.kind == PRIM_POINT && p.x0 == p.x1 && p.y0 == p.y1));
+    }
+
+    #[test]
+    fn ovr2_files_round_trip_and_a_long_shape_is_found_by_its_extent() {
+        let long = Cell {
+            rects: vec![RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 100_000, h: 2, rep: Rep::One }, rect(Rep::One)],
+            ..Cell::default()
+        };
+        let source = doc(vec![long], 0);
+        let mut built = build_with(&source, 10, None, true).unwrap();
+        let v1 = load(&mut built);
+        let file = load_v2(&mut built);
+        assert_eq!((v1.version(), file.version()), (1, 2));
+        // a view far from the long rect's centre (50_000, 1) still meets its extent
+        let mut req = request(1000, 0);
+        req.view = BBox { x0: 90_000, y0: -10, x1: 90_100, y1: 10 };
+        let (shapes, stats) = file.query_prims(&req);
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].1.bbox(), BBox { x0: 0, y0: 0, x1: 100_000, y1: 2 });
+        assert_eq!(stats.points, 1);
+        // the point file has nothing there, and each file answers only its own query
+        assert!(v1.query(&req).0.is_empty());
+        assert!(file.query(&req).0.is_empty() && v1.query_prims(&req).0.is_empty());
+        // the cut gates by the ORIGINAL shape: 2 * min_dim = 4 for the long rect
+        req.cut_dbu = 4;
+        assert!(file.query_prims(&req).0.is_empty());
+        // a shapes file needs the shapes; corruption and a foreign cache are refused
+        let ovm = ovm();
+        assert!(encode_v2(&mut build(&source, 10, None).unwrap(), &ovm).is_err());
+        let bytes = encode_v2(&mut built, &ovm).unwrap();
+        let mut bad = bytes.clone();
+        let at = bad.len() - 12; // inside the last record's kind/flags/pad bytes
+        bad[at] ^= 0x40;
+        assert!(File::from_backing(Backing::Vec(bad), &ovm).is_err());
+        assert!(File::from_backing(Backing::Vec(bytes[..bytes.len() - 1].to_vec()), &ovm).is_err());
+    }
+
+    #[test]
+    fn ovr2_thins_by_the_same_nested_ranks_as_the_points() {
+        let source = doc(
+            vec![Cell {
+                rects: vec![rect(Rep::Grid { na: 64, nb: 64, va: (10, 0), vb: (0, 10) })],
+                ..Cell::default()
+            }],
+            0,
+        );
+        let mut built = build_with(&source, 4096, None, true).unwrap();
+        let (v1, v2) = (load(&mut built), load_v2(&mut built));
+        for cut in [3i64, 6, 12] {
+            let mut req = request(cut, 0);
+            req.px_per_dbu = 0.75 / cut as f64;
+            let points: BTreeSet<_> = v1.query(&req).0.into_iter().map(|(_, b)| (b.x0, b.y0)).collect();
+            let shapes: BTreeSet<_> = v2
+                .query_prims(&req)
+                .0
+                .into_iter()
+                .map(|(_, p)| ((p.x0 + p.x1) / 2, (p.y0 + p.y1) / 2))
+                .collect();
+            assert_eq!(points, shapes, "cut {cut}: the same samples, as shapes");
         }
     }
 }

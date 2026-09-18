@@ -76,6 +76,8 @@ pub fn vfs_cmd(args: &[String]) {
     let mut representatives = false;
     let mut representatives_only = false;
     let mut representative_points = floe_vfs::representatives::DEFAULT_POINTS;
+    // 1 = OVR1 points (default), 2 = OVR2 step 1: the same samples as shapes
+    let mut representative_format = 1u32;
     let mut occ_opts = floe_vfs::occupancy::Opts::default();
     // the base cell follows the chip size unless --occupancy-um says
     // otherwise (2026-09-16; occupancy::auto_base_um_for_span)
@@ -155,6 +157,17 @@ pub fn vfs_cmd(args: &[String]) {
             "--representatives-points" => {
                 representative_points = args.get(i + 1).expect("representatives points").parse().expect("representatives points");
                 representatives = true;
+                i += 2;
+            }
+            "--representatives-format" => {
+                representative_format = match args.get(i + 1).map(|s| s.as_str()) {
+                    Some("1") => 1,
+                    Some("2") => 2,
+                    _ => {
+                        eprintln!("--representatives-format must be 1 (points) or 2 (shapes)");
+                        std::process::exit(2);
+                    }
+                };
                 i += 2;
             }
             "--coverage" => {
@@ -596,7 +609,7 @@ pub fn vfs_cmd(args: &[String]) {
             eprintln!("--representatives-only: cache/source identity differs; re-index first");
             std::process::exit(1);
         }
-        if let Err(e) = write_representatives(&doc, &outdir, &ovm, representative_points, kill_at.as_deref()) {
+        if let Err(e) = write_representatives(&doc, &outdir, &ovm, representative_points, representative_format, kill_at.as_deref()) {
             eprintln!("[vfs] representatives: {}", e);
             std::process::exit(1);
         }
@@ -705,7 +718,7 @@ pub fn vfs_cmd(args: &[String]) {
             if representatives {
                 // an optional file never costs the cache: warn, finish
                 // design.ovm + marker, and say how to add it later
-                if let Err(e) = write_representatives(&doc, &outdir, &ovm, representative_points, kill_at.as_deref()) {
+                if let Err(e) = write_representatives(&doc, &outdir, &ovm, representative_points, representative_format, kill_at.as_deref()) {
                     eprintln!(
                         "[vfs] representatives: {} - the cache is completed without design.ovr; add it later with --representatives-only",
                         e
@@ -1887,6 +1900,7 @@ fn write_representatives(
     outdir: &str,
     ovm: &floe_ovm::Ovm,
     points: usize,
+    format: u32,
     kill_at: Option<&str>,
 ) -> Result<(), String> {
     use floe_vfs::representatives as reps;
@@ -1896,17 +1910,24 @@ fn write_representatives(
         if kill_at == Some("representatives-fail") {
             return Err("--kill-at representatives-fail (gate-only simulated build failure)".into());
         }
-        let mut built = reps::build(doc, points, Some(|s| eprintln!("[vfs] representatives {}", s)))?;
+        let mut built = reps::build_with(doc, points, Some(|s| eprintln!("[vfs] representatives {}", s)), format == 2)?;
         let count: usize = built.groups.iter().map(|g| g.points.len()).sum();
-        let bytes = reps::encode(&mut built, ovm);
+        let bytes = if format == 2 {
+            let kinds = |k: u8| built.groups.iter().flat_map(|g| &g.prims).filter(|p| p.kind == k).count();
+            eprintln!("[vfs] representatives format=2 rects={} segments={} points={} (no usable edge: {})",
+                      kinds(reps::PRIM_RECT), kinds(reps::PRIM_SEGMENT), kinds(reps::PRIM_POINT), built.point_fallbacks);
+            reps::encode_v2(&mut built, ovm)?
+        } else {
+            reps::encode(&mut built, ovm)
+        };
         let tmp = format!("{}/design.ovr.tmp", outdir);
         let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
         file.write_all(&bytes).map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
         std::fs::rename(&tmp, format!("{}/design.ovr", outdir)).map_err(|e| e.to_string())?;
-        eprintln!("[vfs] representatives groups={} directory={} peak_requests={} points={} {} ({:.1}s)",
-                  built.groups.len(), built.directory, built.peak_requests, count, fmt_size(bytes.len() as u64),
+        eprintln!("[vfs] representatives format={} groups={} directory={} peak_requests={} points={} {} ({:.1}s)",
+                  format, built.groups.len(), built.directory, built.peak_requests, count, fmt_size(bytes.len() as u64),
                   started.elapsed().as_secs_f64());
         Ok(())
     })();

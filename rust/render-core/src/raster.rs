@@ -1022,6 +1022,10 @@ enum PlaneItem {
     // Native display points, spatially ordered in design.ovr. A tile rejects
     // a whole chunk instead of checking every point of the frame.
     Points { world_bbox: BBox, points: Vec<BBox> },
+    /// Representative SHAPES of design.ovr (OVR2): rects, boundary segments
+    /// and fallback points in top coordinates, chunked like Points. They are
+    /// painted as the shapes they are (paint_representative), never as a wash.
+    Reps { world_bbox: BBox, prims: Vec<floe_vfs::representatives::Prim> },
     /// An instance left unexpanded (its measured expansion overran the
     /// item budget, §3.15/§3.17). The tile resolves it through the
     /// combined mini walk for its `edge`, falling back to the walk's
@@ -1386,6 +1390,28 @@ fn collect_cell(
             bin.planes[plane].push(PlaneItem::Wash { world_bbox });
         }
     }
+    // OVR2 shapes ride on the top cell only (identity transform)
+    if path.len() == 1 {
+        for &(layer_idx, prim) in &cell.reps {
+            let Some(&plane) = plane_of.get(&layer_idx) else {
+                continue;
+            };
+            let world_bbox = prim.bbox();
+            if !world_bbox.intersects(&cull_view) {
+                continue;
+            }
+            if let Some(PlaneItem::Reps { world_bbox: bounds, prims }) = bin.planes[plane].last_mut() {
+                if prims.len() < 128 {
+                    bounds.grow(&world_bbox);
+                    prims.push(prim);
+                    continue;
+                }
+            }
+            check_cancelled(guard)?;
+            bin.charge()?;
+            bin.planes[plane].push(PlaneItem::Reps { world_bbox, prims: vec![prim] });
+        }
+    }
     if want_frames && !cell.frames.is_empty() {
         // The walk reaches a non-top cell only when its bbox meets the
         // view, so the item filter mirrors that; the top cell is
@@ -1744,6 +1770,21 @@ fn replay_plane_items(
                     stats.primitives_tested = stats.primitives_tested.saturating_add(1);
                     stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
                     if paint_world_rect(band, request, point, paint)? {
+                        counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
+                        stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
+                        stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
+                    }
+                }
+            }
+            PlaneItem::Reps { world_bbox, prims } => {
+                if !world_bbox.intersects(&cull_view) { continue; }
+                check_cancelled(guard)?;
+                for prim in prims {
+                    if !prim.bbox().intersects(&cull_view) { continue; }
+                    counters.rect_records = counters.rect_records.saturating_add(1);
+                    stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+                    stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
+                    if paint_representative(band, request, prim, paint)? {
                         counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
                         stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
                         stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
@@ -2942,6 +2983,22 @@ fn render_cell(
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
         }
     }
+    if path.len() == 1 {
+        for (layer_idx, prim) in &cell.reps {
+            check_cancelled(guard)?;
+            if !selection.includes(*layer_idx) {
+                continue;
+            }
+            counters.rect_records = counters.rect_records.saturating_add(1);
+            stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+            stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
+            if paint_representative(band, request, prim, paint)? {
+                counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
+                stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
+                stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
+            }
+        }
+    }
     if matches!(selection, GeometrySelection::All) {
         counters.deferred_frame_records = counters
             .deferred_frame_records
@@ -3600,6 +3657,23 @@ fn paint_world_rect(
         paint,
     )?;
     Ok(filled || stroked)
+}
+
+/// One OVR2 representative: a rect takes the real rect's path (so a
+/// sub-pixel width is the one-pixel hairline and the long axis keeps its
+/// projected length - 4, 3, 2, 1 px as the view widens), a segment is
+/// stroked as the boundary edge it is, a fallback point is a one-pixel rect.
+fn paint_representative(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    prim: &floe_vfs::representatives::Prim,
+    paint: PaintStyle,
+) -> Result<bool, String> {
+    use floe_vfs::representatives::PRIM_SEGMENT;
+    if prim.kind == PRIM_SEGMENT {
+        return stroke_world_polyline(band, request, &[(prim.x0, prim.y0), (prim.x1, prim.y1)], paint);
+    }
+    paint_world_rect(band, request, prim.bbox(), paint)
 }
 
 fn paint_world_polygon(
@@ -5116,6 +5190,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                reps: Vec::new(),
             }],
             pages: vec![0, 1],
             page_prio: vec![0, 1],
@@ -5196,6 +5271,7 @@ mod tests {
                 insts: Vec::new(),
                 frames,
                 washes: Vec::new(),
+                reps: Vec::new(),
             }],
             pages: vec![0, 1],
             page_prio: vec![0, 1],
@@ -5262,6 +5338,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                reps: Vec::new(),
             }],
             pages: vec![page_id],
             page_prio: vec![0],
@@ -5446,6 +5523,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 }],
                 pages: vec![0],
                 page_prio: vec![0],
@@ -5529,6 +5607,7 @@ mod tests {
                     insts: vec![inst(child_a, 2, 2), inst(child_b, 4, 2), inst(child_c, 2, 4)],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child_a,
@@ -5537,6 +5616,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child_b,
@@ -5545,6 +5625,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child_c,
@@ -5553,6 +5634,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
             ],
             pages: vec![0, 1, 2, 3],
@@ -5694,6 +5776,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                reps: Vec::new(),
             }],
             pages: vec![0],
             page_prio: vec![0],
@@ -6059,6 +6142,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: child,
@@ -6067,6 +6151,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                 ],
                 pages: vec![0],
@@ -6166,6 +6251,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: mid,
@@ -6174,6 +6260,7 @@ mod tests {
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: leaf,
@@ -6182,6 +6269,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                 ],
                 pages: vec![0],
@@ -6282,6 +6370,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: mid,
@@ -6290,6 +6379,7 @@ mod tests {
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: leaf,
@@ -6298,6 +6388,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                 ],
                 pages: vec![0, 1],
@@ -6400,6 +6491,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: mid,
@@ -6408,6 +6500,7 @@ mod tests {
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: leaf,
@@ -6416,6 +6509,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                 ],
                 pages: vec![0],
@@ -6505,6 +6599,7 @@ mod tests {
                         1,
                     )],
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 }],
                 pages: vec![0, 1],
                 page_prio: vec![0, 0],
@@ -6706,6 +6801,7 @@ mod tests {
                         insts: vec![inst(child_a, 2), inst(child_b, 4)],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: child_a,
@@ -6714,6 +6810,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: child_b,
@@ -6722,6 +6819,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                 ],
                 pages: vec![0],
@@ -6796,6 +6894,7 @@ mod tests {
                     insts: vec![inst(child)],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child,
@@ -6804,6 +6903,7 @@ mod tests {
                     insts: vec![inst(top)],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
             ],
             pages: vec![0],
@@ -7212,6 +7312,7 @@ mod tests {
                     }],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child,
@@ -7220,6 +7321,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
             ],
             pages: vec![0],

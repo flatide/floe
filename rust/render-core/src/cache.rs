@@ -674,6 +674,7 @@ impl Cache {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                reps: Vec::new(),
             });
         }
 
@@ -732,7 +733,26 @@ impl Cache {
                 Err(error) => { eprintln!("[render] ignoring design.ovr: {}", error); None }
             }
         });
-        if let Some(file) = file {
+        if let Some(file) = file.as_ref().filter(|f| f.version() == 2) {
+            // OVR2: the samples as shapes, carried apart from the washes
+            let (prims, stats) = file.query_prims(&req);
+            planned.summary.representative_points = stats.points;
+            planned.summary.representative_tested = stats.tested;
+            planned.summary.representative_limited = stats.limited;
+            if !prims.is_empty() {
+                let top = planned.plan.top;
+                if let Some(cell) = planned.plan.wcells.iter_mut().find(|c| c.key == top) {
+                    cell.reps.extend(prims);
+                } else {
+                    planned.plan.wcells.push(floe_vfs::hier::WsCell {
+                        key: top, pages: Vec::new(), page_levels: Vec::new(), insts: Vec::new(),
+                        frames: Vec::new(), washes: Vec::new(), reps: prims,
+                    });
+                    planned.plan.stats.wc_cells += 1;
+                    planned.summary.wc_cells += 1;
+                }
+            }
+        } else if let Some(file) = file {
             let (points, stats) = file.query(&req);
             planned.summary.representative_points = stats.points;
             planned.summary.representative_tested = stats.tested;
@@ -744,7 +764,7 @@ impl Cache {
                 } else {
                     planned.plan.wcells.push(floe_vfs::hier::WsCell {
                         key: top, pages: Vec::new(), page_levels: Vec::new(), insts: Vec::new(),
-                        frames: Vec::new(), washes: points,
+                        frames: Vec::new(), washes: points, reps: Vec::new(),
                     });
                     planned.plan.stats.wc_cells += 1;
                     planned.summary.wc_cells += 1;
@@ -771,6 +791,7 @@ impl Cache {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 }],
                 pages: Vec::new(),
                 page_prio: Vec::new(),

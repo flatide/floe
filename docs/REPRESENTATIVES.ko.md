@@ -132,6 +132,41 @@ cargo test --manifest-path rust/Cargo.toml -p floe-vfs representatives::tests --
 점 묶음/기존 래스터 픽셀 일치, 킬 스위치와 손상 파일 폴백을 확인한다.
 긴 배터리 및 실칩 성능 측정은 3c4bed6 전에는 실행하지 않았다. 실칩 기록은 아래에 둔다.
 
+## OVR2 1단계 — 같은 샘플을 형상으로 (0.12.160, opt-in)
+
+설계는 [OVR2 설계안](OVR2_DESIGN.ko.md). 1단계는 §11의 첫 항목만 구현한다: **샘플의
+선정·순번·솎기는 OVR1과 같고, 샘플 하나가 점이 아니라 형상이다.** 마스크 피라미드,
+전역 프레임 솎기 해제, 공급량 증가는 포함하지 않는다(2단계 이후).
+
+```sh
+floe2 index source.oas --representatives-only --representatives-format 2 --jobs 12
+```
+
+- `--representatives-format 1|2`(기본 1 = OVR1 점). 2를 주면 현재 캐시에 OVR1이 있어도
+  추가 생성으로 다시 만든다(파일 존재만으로 생략하지 않음). reader는 두 형식을 읽고,
+  킬 스위치 `FLOE_RUST_REPRESENTATIVES=off`와 적용 범위(thin:cull, exact/probe/keep/덱
+  제외)는 공통이다.
+- 형상: Rectangle은 변환된 실제 모서리(회전 시 가로·세로가 바뀜), Polygon은 가장 긴
+  비퇴화 경계 선분(동률은 원본 순서), Path는 래스터가 칠하는 외곽선
+  (`path_outline_any`)의 가장 긴 선분이며 둘 다 partial 플래그를 단다. 쓸 선분이 없으면
+  도형 위 점으로 퇴화하고 로그에 센다. `gate_dim`은 원본 도형 bbox의
+  `min(max_dim, 2 × min_dim)`이고 `gate_dim < cut`인 샘플만 보충한다.
+- 파일: magic `FLOEOVR2`, 헤더·그룹표는 OVR1과 같고 레코드는 64 B(uid = group << 32 |
+  순번, x0 y0 x1 y1, gate_dim, thickness, kind, flags). 청크(128개)는 형상 중심의 Morton
+  순서이고 청크 bbox는 **형상 범위의 합**이라 중심이 화면 밖인 긴 선도 조회된다. 최대
+  4,194,304개 = 256 MiB, reader 상한 384 MiB.
+- 표시: 형상은 `WsCell.reps`로 top 셀에 실려 wash와 분리되고, 래스터는 Rect를 실제
+  사각형의 경로(`paint_world_rect`: 서브픽셀 폭은 기존 hairline 규칙)로, 선분을 경계선
+  stroke로 그린다. 따라서 가는 선은 투영 길이가 4 → 3 → 2 → 1 px로 줄어든다. 비닝/
+  비비닝 래스터 모두 같은 픽셀이다.
+- 검증: 단위(형상의 회전·반사·경로 외곽선·점 퇴화, v2 왕복·손상 거절, 범위로 조회,
+  OVR1과 같은 중첩 솎기), 게이트 `validate_representatives.py`의 OVR2 절(40개 헤어라인이
+  점 42개 → 선 5,627 px, 단일 선의 그림이 exact와 동일하며 길이 4·3·2·1 px, 회전 배치,
+  모든 픽셀이 실제 도형 1 px 이내, 추가 생성이 색인 보존, OVR1 옆에서 format 2 요청 시
+  교체).
+- 남은 것(설계안 §11 2–4단계): 공간 타일 마스크와 선택적 I/O, 컷 경계 대역, 공급량.
+  1단계만으로는 fit 밀도(그룹당 표본 수)와 인계 지점의 밀도 절벽이 그대로다.
+
 ## 실칩 기록
 
 - 2026-09-18, MAIN01(9.8 GB, 배치 6.4억 + 배열 1.6억 레코드), 0.12.155

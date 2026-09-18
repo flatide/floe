@@ -420,7 +420,9 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   새 색인은 `--representatives`. 페이지 frontier를 켜지 않고 원본 페이지 추가
   디코드 없이 그린다. `FLOE_RUST_REPRESENTATIVES=off`로 끈다.
   유한 샘플이므로 확대 시 밀도 및 긴 선의 길이는 근사이며, 상세 조건과 상한은
-  [대표 점 파일](docs/REPRESENTATIVES.ko.md)을 참고한다.
+  [대표 점 파일](docs/REPRESENTATIVES.ko.md)을 참고한다. `--representatives-format 2`
+  (OVR2 1단계, 0.12.160)는 같은 샘플을 점이 아니라 형상(실제 사각형, 다각형·경로의
+  실제 경계 선분)으로 저장해 가는 선이 화면에서 길이를 유지한다.
 - **점유 요약**(광역뷰, 2026-09-11; keep 전용이었다가 2026-09-18부터 cull도,
   docs/OCCUPANCY_PLAN.ko.md): 캐시에 `design.ovo`(`floe2 index --occupancy`)가
   있고 요청이 exact 아님이며(킬 스위치 `FLOE_RUST_OCCUPANCY_CULL=off`는 keep

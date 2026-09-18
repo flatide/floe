@@ -322,6 +322,13 @@ def _discard_occupancy_tmp(outdir):
             print(f"[floe] cannot remove {tmp}: {exc}", file=sys.stderr)
 
 
+def _representatives_format_args(args):
+    """`--representatives-format 2` (OVR2 step 1: the samples as shapes);
+    nothing for the default OVR1 points."""
+    fmt = getattr(args, "representatives_format", None)
+    return ["--representatives-format", str(int(fmt))] if fmt is not None else []
+
+
 def _occupancy_args(args):
     """`--occupancy-um` (the base cell in microns) and
     `--occupancy-balance` (the marking unit split) for floe-index."""
@@ -354,6 +361,7 @@ def _run_rust_index(args, binary, coverage_only=False,
     if representatives_only:
         command += ["--representatives-only", "--representatives-points",
                     str(getattr(args, "representatives_points", None) or 262144)]
+        command += _representatives_format_args(args)
     elif coverage_only:
         command.append("--coverage-only")
     elif occupancy_only:
@@ -363,6 +371,7 @@ def _run_rust_index(args, binary, coverage_only=False,
         if getattr(args, "representatives", False) and not profiling:
             command += ["--representatives", "--representatives-points",
                         str(getattr(args, "representatives_points", None) or 262144)]
+            command += _representatives_format_args(args)
         if args.page_target_mb is not None:
             command += ["--page-target-mb", str(args.page_target_mb)]
         if args.coverage:
@@ -414,7 +423,8 @@ def _run_rust_index(args, binary, coverage_only=False,
 
 def cmd_index(args):
     representatives = (getattr(args, "representatives", False) or
-                       getattr(args, "representatives_points", None) is not None)
+                       getattr(args, "representatives_points", None) is not None or
+                       getattr(args, "representatives_format", None) is not None)
     representatives_only = getattr(args, "representatives_only", False)
     args.representatives = representatives
     if getattr(args, "representatives_points", None) is not None and args.representatives_points > 4194304:
@@ -570,7 +580,10 @@ def cmd_index(args):
         if args.coverage and not os.path.isfile(
                 os.path.join(outdir, "design.ovc")):
             _run_rust_index(args, binary, coverage_only=True)
+        # an explicit sample cap or FORMAT rebuilds the file even when one
+        # exists: an OVR1 next to the cache must not hide a requested OVR2
         if representatives and (getattr(args, "representatives_points", None) is not None or
+                                getattr(args, "representatives_format", None) is not None or
                                 not os.path.isfile(os.path.join(outdir, "design.ovr"))):
             _run_rust_index(args, binary, representatives_only=True)
         if args.occupancy:
@@ -1821,6 +1834,12 @@ def main(argv=None, *, prog=None, rust_only=None):
         "--representatives-points", type=_positive_int, default=None, metavar="N",
         help="sample cap per layer/depth group (default 262144, global cap 4194304); "
              "implies --representatives")
+    rust.add_argument(
+        "--representatives-format", type=int, choices=(1, 2), default=None, metavar="1|2",
+        help="design.ovr format: 1 (default) one point per sample; 2 (OVR2 step 1) the "
+             "same samples as shapes - the rect itself, or a real boundary edge of a "
+             "polygon/path - so a sub-cut hairline keeps its length on screen. Giving "
+             "the option rebuilds the file on a current cache; implies --representatives")
     occ = rust.add_mutually_exclusive_group()
     occ.add_argument(
         "--occupancy", action="store_true",
