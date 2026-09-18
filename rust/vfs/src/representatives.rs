@@ -1,11 +1,13 @@
 //! OVR1: bounded, display-only native point samples, independent of OVP pages.
 //!
-//! Count logical members bottom-up, then resolve only sampled member ranks.
-//! A trillion-member Grid therefore costs one count and at most the sample
-//! budget, never a trillion-member walk. Groups preserve (layer, relative
-//! depth), so a depth-zero view cannot accidentally display descendants.
-//! These are approximate existence samples, NOT occupancy or query geometry.
-use floe_oasis::doc::{Doc, Rep};
+//! Count logical members bottom-up, then resolve only sampled member ranks
+//! by streaming them down the hierarchy (see `build`). A trillion-member Grid
+//! costs one count and at most the sample budget, never a trillion-member
+//! walk, and a billion placement records cost a scan, never a directory
+//! entry each. Groups preserve (layer, relative depth), so a depth-zero view
+//! cannot accidentally display descendants. These are approximate existence
+//! samples, NOT occupancy or query geometry.
+use floe_oasis::doc::{Doc, PlaceRec, Rep};
 use floe_ovm::{BBox, Backing, Ovm};
 use std::collections::{BTreeMap, HashMap};
 
@@ -14,7 +16,7 @@ pub const MAX_POINTS: usize = 4_194_304;
 pub const FRAME_POINTS: usize = 262_144;
 const CHUNK: usize = 128;
 const MAX_GROUPS: usize = 65_536;
-const MAX_INDEX_ENTRIES: usize = 134_217_728; // 2 GiB, excluding the source Doc
+const MAX_DIRECTORY_GROUPS: usize = 67_108_864; // 24-byte (key, count) each: 1.5 GiB, excluding the Doc
 const MAGIC: &[u8; 8] = b"FLOEOVR1";
 type Key = (u32, u32, u32); // layer, datatype, relative depth
 
@@ -44,20 +46,76 @@ pub struct Group {
 }
 pub struct Built {
     pub groups: Vec<Group>,
-    pub entries: usize,
+    /// (layer, datatype, depth) groups over all reachable cells - the size of
+    /// the count directory, the only structure proportional to the hierarchy
+    /// (24 bytes each, MAX_DIRECTORY_GROUPS). Nothing is kept per placement.
+    pub directory: usize,
+    /// peak number of sample requests in flight during the resolve pass
+    /// (64 bytes each; bounded by the sample count, not by the layout)
+    pub peak_requests: usize,
 }
+/// per cell: (layer, datatype, relative depth) -> logical members, sorted by key
+type Counts = Vec<(Key, u64)>;
+
+/// A sample on its way down the hierarchy. `group` (final top group) and
+/// `sample` (draw order = the file's Point.rank) never change; `key` and
+/// `rank` are relative to the cell holding the request; (m, tx, ty) is the
+/// accumulated cell-to-top map p_top = m * p + t.
 #[derive(Clone, Copy)]
-struct Entry {
-    end: u64,
-    record: u32,
-    kind: u8, // rect, polygon, path, placement
+struct Req {
+    rank: u64,
+    tx: i128,
+    ty: i128,
+    key: Key,
+    group: u32,
+    sample: u32,
+    m: [i8; 4],
 }
-#[derive(Default)]
-struct Run {
-    entries: Vec<Entry>,
-    members: u64,
+const IDENTITY: [i8; 4] = [1, 0, 0, 1];
+
+// p_parent = R_rot(F_flip(p)) + (pl.x + off.x, pl.y + off.y), composed on the
+// right of the accumulated map (M . T): the same flip, rotate, translate order
+// and i128 arithmetic as applying the placement chain bottom-up.
+fn place_xf(m: [i8; 4], tx: i128, ty: i128, pl: &PlaceRec, off: (i128, i128)) -> ([i8; 4], i128, i128) {
+    let f: i8 = if pl.flip { -1 } else { 1 };
+    let (c, s): (i8, i8) = match pl.rot & 3 {
+        0 => (1, 0),
+        1 => (0, 1),
+        2 => (-1, 0),
+        _ => (0, -1),
+    };
+    let t = [c, -s * f, s, c * f];
+    let nm = [
+        m[0] * t[0] + m[1] * t[2],
+        m[0] * t[1] + m[1] * t[3],
+        m[2] * t[0] + m[3] * t[2],
+        m[2] * t[1] + m[3] * t[3],
+    ];
+    let (px, py) = (pl.x as i128 + off.0, pl.y as i128 + off.1);
+    (
+        nm,
+        m[0] as i128 * px + m[1] as i128 * py + tx,
+        m[2] as i128 * px + m[3] as i128 * py + ty,
+    )
 }
-type CellIndex = BTreeMap<Key, Run>;
+fn apply_xf(m: [i8; 4], tx: i128, ty: i128, x: i128, y: i128) -> (i128, i128) {
+    (
+        m[0] as i128 * x + m[1] as i128 * y + tx,
+        m[2] as i128 * x + m[3] as i128 * y + ty,
+    )
+}
+
+fn add_count(own: &mut BTreeMap<Key, u64>, key: Key, n: u64) -> Result<(), String> {
+    if n == 0 {
+        return Ok(());
+    }
+    let e = own.entry(key).or_insert(0);
+    *e = e
+        .checked_add(n)
+        .ok_or("representatives: recursive member count exceeds u64")?;
+    Ok(())
+}
+
 
 fn members(rep: &Rep) -> Result<u64, String> {
     match rep {
@@ -84,36 +142,6 @@ fn offset(rep: &Rep, rank: u64) -> (i128, i128) {
         }
     }
 }
-fn add(
-    index: &mut CellIndex,
-    key: Key,
-    n: u64,
-    record: usize,
-    kind: u8,
-    entries: &mut usize,
-) -> Result<(), String> {
-    if n == 0 {
-        return Ok(());
-    }
-    *entries += 1;
-    if *entries > MAX_INDEX_ENTRIES {
-        return Err("representatives: member directory exceeds 2 GiB limit".into());
-    }
-    let run = index.entry(key).or_default();
-    run.members = run
-        .members
-        .checked_add(n)
-        .ok_or("representatives: recursive member count exceeds u64")?;
-    run.entries.push(Entry {
-        end: run.members,
-        record: record
-            .try_into()
-            .map_err(|_| "representatives: record index exceeds u32")?,
-        kind,
-    });
-    Ok(())
-}
-
 // Iterative postorder: no call-stack dependence on source hierarchy depth.
 fn postorder(doc: &Doc) -> Result<Vec<usize>, String> {
     if doc.top >= doc.cells.len() {
@@ -196,259 +224,397 @@ fn quotas(counts: &[u64], cap: usize, total_cap: usize) -> Result<Vec<usize>, St
     Ok(out)
 }
 
+/// Two passes over the parsed Doc, neither of which stores anything per
+/// placement record (the 0.12.154 member directory did, and MAIN01's
+/// placements alone exceeded its 2 GiB).
+///
+/// 1. count (bottom-up): logical members per (layer, datatype, depth) group
+///    per cell. Placements are aggregated per distinct child first - counts
+///    commute - so the cost is records + sum(distinct children x child
+///    groups), and the memory is the directory (cells x groups).
+/// 2. resolve (top-down, reverse postorder): the sample ranks drawn at top
+///    become requests that move down the hierarchy. A cell is scanned once
+///    for all requests it received from all its parents; one traversal of
+///    its records in the count order (rects, polygons, paths, placements)
+///    advances a cursor per requested group, forwards the ranks that fall
+///    into a placement to the child (rank / n = instance, rank % n = inner
+///    rank, transform composed), and resolves the ones that fall on a shape.
+///    Requests are moved, and a scanned cell's buffer is dropped.
+///
+/// Cost: count = O(records + sum distinct children x child groups); resolve
+/// = O(records of the scanned cells + sum over scanned cells of distinct
+/// children x child groups + samples x depth + sorting). Memory: directory +
+/// samples in flight (64 bytes each, peak logged) + points + the Doc.
 pub fn build(doc: &Doc, per_group: usize, progress: Option<fn(&str)>) -> Result<Built, String> {
     if per_group == 0 || per_group > MAX_POINTS {
         return Err(format!(
             "representatives: points must be in 1..={MAX_POINTS}"
         ));
     }
+    let log = |s: &str| {
+        if let Some(f) = progress {
+            f(s)
+        }
+    };
     let order = postorder(doc)?;
-    let mut index: Vec<CellIndex> = (0..doc.cells.len()).map(|_| BTreeMap::new()).collect();
-    let mut entries = 0;
-    let mut groups = 0usize;
+    let started = std::time::Instant::now();
+    let mut counts: Vec<Counts> = vec![Vec::new(); doc.cells.len()];
+    let mut directory = 0usize;
     let mut heartbeat = std::time::Instant::now();
     for &ci in &order {
         let cell = &doc.cells[ci];
-        let mut own = CellIndex::new();
-        for (i, r) in cell.rects.iter().enumerate() {
-            add(
-                &mut own,
-                (r.layer, r.dt, 0),
-                members(&r.rep)?,
-                i,
-                0,
-                &mut entries,
-            )?;
+        let mut own = BTreeMap::new();
+        for r in &cell.rects {
+            add_count(&mut own, (r.layer, r.dt, 0), members(&r.rep)?)?;
         }
-        for (i, p) in cell
-            .polys
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.pts.is_empty())
-        {
-            add(
-                &mut own,
-                (p.layer, p.dt, 0),
-                members(&p.rep)?,
-                i,
-                1,
-                &mut entries,
-            )?;
+        for p in cell.polys.iter().filter(|p| !p.pts.is_empty()) {
+            add_count(&mut own, (p.layer, p.dt, 0), members(&p.rep)?)?;
         }
-        for (i, p) in cell
-            .paths
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.pts.is_empty())
-        {
-            add(
-                &mut own,
-                (p.layer, p.dt, 0),
-                members(&p.rep)?,
-                i,
-                2,
-                &mut entries,
-            )?;
+        for p in cell.paths.iter().filter(|p| !p.pts.is_empty()) {
+            add_count(&mut own, (p.layer, p.dt, 0), members(&p.rep)?)?;
         }
-        for (i, pl) in cell.places.iter().enumerate() {
+        let mut per_child: HashMap<usize, u64> = HashMap::new();
+        for pl in &cell.places {
             let n = members(&pl.rep)?;
-            for (&(l, d, depth), run) in &index[pl.cell] {
+            let e = per_child.entry(pl.cell).or_insert(0);
+            *e = e
+                .checked_add(n)
+                .ok_or("representatives: recursive member count exceeds u64")?;
+        }
+        for (&child, &n) in &per_child {
+            for &((l, d, depth), m) in &counts[child] {
                 let depth = depth
                     .checked_add(1)
                     .filter(|&d| d <= 4096)
                     .ok_or("representatives: hierarchy depth exceeds 4096")?;
-                add(
+                add_count(
                     &mut own,
                     (l, d, depth),
-                    n.checked_mul(run.members)
+                    n.checked_mul(m)
                         .ok_or("representatives: recursive member count exceeds u64")?,
-                    i,
-                    3,
-                    &mut entries,
                 )?;
             }
         }
-        groups += own.len();
-        if groups > 4_194_304 {
-            return Err("representatives: cell/group directory limit exceeded".into());
+        directory += own.len();
+        if directory > MAX_DIRECTORY_GROUPS {
+            return Err(format!(
+                "representatives: group directory exceeds {MAX_DIRECTORY_GROUPS} groups"
+            ));
         }
-        index[ci] = own;
+        counts[ci] = own.into_iter().collect();
         if heartbeat.elapsed().as_secs() >= 10 {
-            if let Some(log) = progress {
-                log(&format!("count entries={entries} cell={ci}"));
-            }
+            log(&format!("count cell={ci} directory={directory}"));
             heartbeat = std::time::Instant::now();
         }
     }
-    let root = &index[doc.top];
+    log(&format!(
+        "count directory={directory} groups ({:.0} MiB) in {:.1}s",
+        directory as f64 * 24.0 / 1_048_576.0,
+        started.elapsed().as_secs_f64()
+    ));
+    let root = &counts[doc.top];
     if root.len() > MAX_GROUPS {
         return Err("representatives: top group limit exceeded".into());
     }
-    let counts: Vec<_> = root.values().map(|r| r.members).collect();
-    let budgets = quotas(&counts, per_group, MAX_POINTS)?;
-    let mut result = Vec::with_capacity(root.len());
-    let mut anchors = HashMap::new();
-    for ((&key, run), count) in root.iter().zip(budgets) {
-        let mut points = Vec::with_capacity(count);
-        let mask = run
-            .members
+    let totals: Vec<u64> = root.iter().map(|&(_, m)| m).collect();
+    let budgets = quotas(&totals, per_group, MAX_POINTS)?;
+    // the sample ranks of every top group, drawn as before (permutation,
+    // rejection); each becomes a request that starts at top
+    let mut pending: Vec<Vec<Req>> = (0..doc.cells.len()).map(|_| Vec::new()).collect();
+    let mut points: Vec<Vec<Option<Point>>> = Vec::with_capacity(root.len());
+    for (gi, (&(key, members), count)) in root.iter().zip(budgets).enumerate() {
+        let mask = members
             .checked_next_power_of_two()
             .unwrap_or(0)
             .wrapping_sub(1);
         let mut candidate = 0u64;
-        while points.len() < count {
+        let mut drawn = 0usize;
+        while drawn < count {
             let rank = permute(candidate, mask);
             candidate += 1;
             if candidate > (count as u64).saturating_mul(64).saturating_add(128) {
                 return Err("representatives: sampling work limit exceeded".into());
             }
-            if rank >= run.members {
+            if rank >= members {
                 continue;
             }
-            let mut p = resolve(doc, &index, key, rank, &mut anchors)?;
-            p.rank = points.len() as u32;
-            points.push(p);
+            pending[doc.top].push(Req {
+                rank,
+                tx: 0,
+                ty: 0,
+                key,
+                group: gi as u32,
+                sample: drawn as u32,
+                m: IDENTITY,
+            });
+            drawn += 1;
         }
-        if let Some(log) = progress {
-            log(&format!(
-                "{}/{} depth={} members={} points={}",
-                key.0,
-                key.1,
-                key.2,
-                run.members,
-                points.len()
-            ));
+        points.push(vec![None; count]);
+    }
+    let started = std::time::Instant::now();
+    let mut in_flight = pending[doc.top].len();
+    let mut peak = in_flight;
+    let mut anchors = HashMap::new();
+    let mut scanned = 0usize;
+    let mut heartbeat = std::time::Instant::now();
+    for &ci in order.iter().rev() {
+        let reqs = std::mem::take(&mut pending[ci]);
+        if reqs.is_empty() {
+            continue;
         }
+        in_flight -= reqs.len();
+        in_flight += resolve_cell(doc, &counts, ci, reqs, &mut pending, &mut points, &mut anchors)?;
+        peak = peak.max(in_flight);
+        scanned += 1;
+        if heartbeat.elapsed().as_secs() >= 10 {
+            log(&format!("resolve cells={scanned} in flight={in_flight}"));
+            heartbeat = std::time::Instant::now();
+        }
+    }
+    if in_flight != 0 {
+        return Err("representatives: samples left unresolved (internal)".into());
+    }
+    log(&format!(
+        "resolve cells={scanned} peak requests={peak} ({:.0} MiB) in {:.1}s",
+        peak as f64 * 64.0 / 1_048_576.0,
+        started.elapsed().as_secs_f64()
+    ));
+    let mut result = Vec::with_capacity(root.len());
+    for (&(key, members), pts) in root.iter().zip(points) {
+        let mut done = Vec::with_capacity(pts.len());
+        for p in pts {
+            done.push(p.ok_or("representatives: sample not resolved (internal)")?);
+        }
+        log(&format!(
+            "{}/{} depth={} members={} points={}",
+            key.0,
+            key.1,
+            key.2,
+            members,
+            done.len()
+        ));
         result.push(Group {
             key,
-            members: run.members,
-            points,
+            members,
+            points: done,
         });
     }
     Ok(Built {
         groups: result,
-        entries,
+        directory,
+        peak_requests: peak,
     })
 }
 
-fn resolve(
+/// requests of one group inside one cell: reqs[next..end] in rank order,
+/// `pos` = members of the group counted so far in the scan
+struct GroupCursor {
+    next: usize,
+    end: usize,
+    pos: u64,
+}
+
+/// One scan of cell `ci` for all its requests. Returns the number forwarded
+/// to children (pushed onto `pending`).
+fn resolve_cell(
     doc: &Doc,
-    index: &[CellIndex],
-    mut key: Key,
-    mut rank: u64,
+    counts: &[Counts],
+    ci: usize,
+    mut reqs: Vec<Req>,
+    pending: &mut [Vec<Req>],
+    points: &mut [Vec<Option<Point>>],
+    anchors: &mut HashMap<(usize, u8, u32), Point>,
+) -> Result<usize, String> {
+    reqs.sort_unstable_by_key(|r| (r.key, r.rank, r.sample));
+    let mut cursors: Vec<GroupCursor> = Vec::new();
+    let mut key_of: HashMap<Key, usize> = HashMap::new();
+    let mut i = 0;
+    while i < reqs.len() {
+        let key = reqs[i].key;
+        let mut j = i;
+        while j < reqs.len() && reqs[j].key == key {
+            j += 1;
+        }
+        key_of.insert(key, cursors.len());
+        cursors.push(GroupCursor { next: i, end: j, pos: 0 });
+        i = j;
+    }
+    let cell = &doc.cells[ci];
+    // own shapes, in the count order
+    for (ri, r) in cell.rects.iter().enumerate() {
+        if let Some(&c) = key_of.get(&(r.layer, r.dt, 0)) {
+            hit_shape(doc, ci, 0, ri, &r.rep, &mut cursors[c], &reqs, points, anchors)?;
+        }
+    }
+    for (ri, p) in cell.polys.iter().enumerate().filter(|(_, p)| !p.pts.is_empty()) {
+        if let Some(&c) = key_of.get(&(p.layer, p.dt, 0)) {
+            hit_shape(doc, ci, 1, ri, &p.rep, &mut cursors[c], &reqs, points, anchors)?;
+        }
+    }
+    for (ri, p) in cell.paths.iter().enumerate().filter(|(_, p)| !p.pts.is_empty()) {
+        if let Some(&c) = key_of.get(&(p.layer, p.dt, 0)) {
+            hit_shape(doc, ci, 2, ri, &p.rep, &mut cursors[c], &reqs, points, anchors)?;
+        }
+    }
+    // placements in record order; per distinct child, the child groups that
+    // have requests in this cell (child members, cursor, child key) - so a
+    // placement whose child has none costs one lookup
+    let mut forwarded = 0usize;
+    let mut child_active: HashMap<usize, Vec<(u64, usize, Key)>> = HashMap::new();
+    for pl in &cell.places {
+        let acts = child_active.entry(pl.cell).or_insert_with(|| {
+            counts[pl.cell]
+                .iter()
+                .filter_map(|&((l, d, dep), m)| {
+                    key_of.get(&(l, d, dep + 1)).map(|&c| (m, c, (l, d, dep)))
+                })
+                .collect()
+        });
+        if acts.is_empty() {
+            continue;
+        }
+        let n_pl = members(&pl.rep)?;
+        for &(n_child, c, child_key) in acts.iter() {
+            let span = n_pl
+                .checked_mul(n_child)
+                .ok_or("representatives: recursive member count exceeds u64")?;
+            let cur = &mut cursors[c];
+            let limit = cur
+                .pos
+                .checked_add(span)
+                .ok_or("representatives: recursive member count exceeds u64")?;
+            while cur.next < cur.end && reqs[cur.next].rank < limit {
+                let req = reqs[cur.next];
+                let r = req.rank - cur.pos;
+                let (m, tx, ty) = place_xf(req.m, req.tx, req.ty, pl, offset(&pl.rep, r / n_child));
+                pending[pl.cell].push(Req {
+                    rank: r % n_child,
+                    tx,
+                    ty,
+                    key: child_key,
+                    m,
+                    ..req
+                });
+                forwarded += 1;
+                cur.next += 1;
+            }
+            cur.pos = limit;
+        }
+    }
+    if cursors.iter().any(|c| c.next != c.end) {
+        return Err("representatives: sample rank beyond the counted members (internal)".into());
+    }
+    Ok(forwarded)
+}
+
+/// A shape record of `n` members in the scan: the requests whose rank falls
+/// into it become points (anchor + repetition offset, then the cell-to-top map).
+#[allow(clippy::too_many_arguments)]
+fn hit_shape(
+    doc: &Doc,
+    ci: usize,
+    kind: u8,
+    ri: usize,
+    rep: &Rep,
+    cur: &mut GroupCursor,
+    reqs: &[Req],
+    points: &mut [Vec<Option<Point>>],
+    anchors: &mut HashMap<(usize, u8, u32), Point>,
+) -> Result<(), String> {
+    let n = members(rep)?;
+    let limit = cur
+        .pos
+        .checked_add(n)
+        .ok_or("representatives: recursive member count exceeds u64")?;
+    while cur.next < cur.end && reqs[cur.next].rank < limit {
+        let req = reqs[cur.next];
+        let base = anchor(doc, ci, kind, ri, anchors)?;
+        let off = offset(rep, req.rank - cur.pos);
+        let (x, y) = apply_xf(req.m, req.tx, req.ty, base.x as i128 + off.0, base.y as i128 + off.1);
+        points[req.group as usize][req.sample as usize] = Some(Point {
+            x: x
+                .try_into()
+                .map_err(|_| "representatives: x coordinate overflow")?,
+            y: y
+                .try_into()
+                .map_err(|_| "representatives: y coordinate overflow")?,
+            max_dim: base.max_dim,
+            min_dim: base.min_dim,
+            rank: req.sample,
+        });
+        cur.next += 1;
+    }
+    cur.pos = limit;
+    Ok(())
+}
+
+/// The record's anchor (rect centre, polygon first vertex, path first spine
+/// point) and dimensions in cell coordinates, cached per record.
+fn anchor(
+    doc: &Doc,
+    ci: usize,
+    kind: u8,
+    ri: usize,
     anchors: &mut HashMap<(usize, u8, u32), Point>,
 ) -> Result<Point, String> {
-    let mut ci = doc.top;
-    let mut transforms = Vec::new();
-    let mut point;
-    let rep_offset;
-    loop {
-        let run = &index[ci][&key];
-        let ei = run.entries.partition_point(|e| e.end <= rank);
-        let entry = run.entries[ei];
-        rank -= if ei == 0 { 0 } else { run.entries[ei - 1].end };
-        let cell = &doc.cells[ci];
-        let ri = entry.record as usize;
-        if entry.kind == 3 {
-            let pl = &cell.places[ri];
-            key.2 -= 1;
-            let n = index[pl.cell][&key].members;
-            let off = offset(&pl.rep, rank / n);
-            transforms.push((pl, off));
-            rank %= n;
-            ci = pl.cell;
-        } else {
-            let rep = match entry.kind {
-                0 => &cell.rects[ri].rep,
-                1 => &cell.polys[ri].rep,
-                _ => &cell.paths[ri].rep,
-            };
-            rep_offset = offset(rep, rank);
-            let anchor_key = (ci, entry.kind, entry.record);
-            point = if let Some(cached) = anchors.get(&anchor_key) {
-                *cached
+    let record: u32 = ri
+        .try_into()
+        .map_err(|_| "representatives: record index exceeds u32")?;
+    if let Some(cached) = anchors.get(&(ci, kind, record)) {
+        return Ok(*cached);
+    }
+    let cell = &doc.cells[ci];
+    let (x, y, w, h) = match kind {
+        0 => {
+            let r = &cell.rects[ri];
+            (
+                r.x.checked_add(r.w / 2)
+                    .ok_or("representatives: rect x overflow")?,
+                r.y.checked_add(r.h / 2)
+                    .ok_or("representatives: rect y overflow")?,
+                r.w.unsigned_abs(),
+                r.h.unsigned_abs(),
+            )
+        }
+        _ => {
+            let pts = if kind == 1 {
+                &cell.polys[ri].pts
             } else {
-                let calculated = (|| -> Result<Point, String> {
-                    let (x, y, w, h) = match entry.kind {
-                        0 => {
-                            let r = &cell.rects[ri];
-                            (
-                                r.x.checked_add(r.w / 2)
-                                    .ok_or("representatives: rect x overflow")?,
-                                r.y.checked_add(r.h / 2)
-                                    .ok_or("representatives: rect y overflow")?,
-                                r.w.unsigned_abs(),
-                                r.h.unsigned_abs(),
-                            )
-                        }
-                        _ => {
-                            let pts = if entry.kind == 1 {
-                                &cell.polys[ri].pts
-                            } else {
-                                &cell.paths[ri].pts
-                            };
-                            let mut b = BBox::EMPTY;
-                            for &(x, y) in pts {
-                                b.grow(&BBox {
-                                    x0: x,
-                                    y0: y,
-                                    x1: x,
-                                    y1: y,
-                                });
-                            }
-                            let extra = if entry.kind == 2 {
-                                cell.paths[ri].hw.unsigned_abs().saturating_mul(2)
-                            } else {
-                                0
-                            };
-                            // A polygon vertex or path spine point lies on actual geometry;
-                            // a concave polygon's bbox centre need not lie inside it.
-                            (
-                                pts[0].0,
-                                pts[0].1,
-                                b.x1.abs_diff(b.x0).saturating_add(extra),
-                                b.y1.abs_diff(b.y0).saturating_add(extra),
-                            )
-                        }
-                    };
-                    Ok(Point {
-                        x,
-                        y,
-                        max_dim: w.max(h),
-                        min_dim: w.min(h),
-                        rank: 0,
-                    })
-                })()?;
-                anchors.insert(anchor_key, calculated);
-                calculated
+                &cell.paths[ri].pts
             };
-            break;
+            let mut b = BBox::EMPTY;
+            for &(x, y) in pts {
+                b.grow(&BBox {
+                    x0: x,
+                    y0: y,
+                    x1: x,
+                    y1: y,
+                });
+            }
+            let extra = if kind == 2 {
+                cell.paths[ri].hw.unsigned_abs().saturating_mul(2)
+            } else {
+                0
+            };
+            // A polygon vertex or path spine point lies on actual geometry;
+            // a concave polygon's bbox centre need not lie inside it.
+            (
+                pts[0].0,
+                pts[0].1,
+                b.x1.abs_diff(b.x0).saturating_add(extra),
+                b.y1.abs_diff(b.y0).saturating_add(extra),
+            )
         }
-    }
-    let (mut x, mut y) = (
-        point.x as i128 + rep_offset.0,
-        point.y as i128 + rep_offset.1,
-    );
-    for (pl, off) in transforms.into_iter().rev() {
-        if pl.flip {
-            y = -y;
-        }
-        (x, y) = match pl.rot & 3 {
-            0 => (x, y),
-            1 => (-y, x),
-            2 => (-x, -y),
-            _ => (y, -x),
-        };
-        x += pl.x as i128 + off.0;
-        y += pl.y as i128 + off.1;
-    }
-    point.x = x
-        .try_into()
-        .map_err(|_| "representatives: x coordinate overflow")?;
-    point.y = y
-        .try_into()
-        .map_err(|_| "representatives: y coordinate overflow")?;
-    Ok(point)
+    };
+    let p = Point {
+        x,
+        y,
+        max_dim: w.max(h),
+        min_dim: w.min(h),
+        rank: 0,
+    };
+    anchors.insert((ci, kind, record), p);
+    Ok(p)
 }
 
 fn put32(out: &mut Vec<u8>, n: u32) {
@@ -792,7 +958,7 @@ impl File {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use floe_oasis::doc::{Cell, PlaceRec, RectRec};
+    use floe_oasis::doc::{Cell, PathRec, PolyRec, RectRec};
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
@@ -883,7 +1049,7 @@ mod tests {
         };
         let source = doc(vec![cell], 0);
         let built = build(&source, 4096, None).unwrap();
-        assert_eq!(built.entries, 1);
+        assert_eq!(built.directory, 1);
         let g = &built.groups[0];
         assert_eq!(g.members, 1_000_000_000_000);
         assert_eq!(g.points.len(), 4096);
@@ -1043,7 +1209,8 @@ mod tests {
     fn frame_cap_cannot_resurrect_points_when_zooming_out() {
         let n = FRAME_POINTS / 2 + 1;
         let mut built = Built {
-            entries: 0,
+            directory: 0,
+            peak_requests: 0,
             groups: (0..2)
                 .map(|depth| {
                     let scale = if depth == 0 { 1 } else { 100 };
@@ -1131,5 +1298,364 @@ mod tests {
         let first = encode(&mut a, &ovm);
         assert_eq!(first, encode(&mut a, &ovm));
         assert!(File::from_backing(Backing::Vec(encode(&mut b, &ovm)), &ovm).is_ok());
+    }
+
+    /// The 0.12.154 builder (materialized member directory, one entry per
+    /// placement record x child group): the reference the streaming
+    /// resolve must match byte for byte.
+    mod legacy {
+        use super::super::*;
+        const MAX_INDEX_ENTRIES: usize = 134_217_728;
+        #[derive(Clone, Copy)]
+        struct Entry {
+            end: u64,
+            record: u32,
+            kind: u8, // rect, polygon, path, placement
+        }
+        #[derive(Default)]
+        struct Run {
+            entries: Vec<Entry>,
+            members: u64,
+        }
+        type CellIndex = BTreeMap<Key, Run>;
+
+        fn add(
+            index: &mut CellIndex,
+            key: Key,
+            n: u64,
+            record: usize,
+            kind: u8,
+            entries: &mut usize,
+        ) -> Result<(), String> {
+            if n == 0 {
+                return Ok(());
+            }
+            *entries += 1;
+            if *entries > MAX_INDEX_ENTRIES {
+                return Err("representatives: member directory exceeds 2 GiB limit".into());
+            }
+            let run = index.entry(key).or_default();
+            run.members = run
+                .members
+                .checked_add(n)
+                .ok_or("representatives: recursive member count exceeds u64")?;
+            run.entries.push(Entry {
+                end: run.members,
+                record: record
+                    .try_into()
+                    .map_err(|_| "representatives: record index exceeds u32")?,
+                kind,
+            });
+            Ok(())
+        }
+
+        pub fn build(doc: &Doc, per_group: usize, progress: Option<fn(&str)>) -> Result<Vec<Group>, String> {
+            if per_group == 0 || per_group > MAX_POINTS {
+                return Err(format!(
+                    "representatives: points must be in 1..={MAX_POINTS}"
+                ));
+            }
+            let order = postorder(doc)?;
+            let mut index: Vec<CellIndex> = (0..doc.cells.len()).map(|_| BTreeMap::new()).collect();
+            let mut entries = 0;
+            let mut groups = 0usize;
+            let mut heartbeat = std::time::Instant::now();
+            for &ci in &order {
+                let cell = &doc.cells[ci];
+                let mut own = CellIndex::new();
+                for (i, r) in cell.rects.iter().enumerate() {
+                    add(
+                        &mut own,
+                        (r.layer, r.dt, 0),
+                        members(&r.rep)?,
+                        i,
+                        0,
+                        &mut entries,
+                    )?;
+                }
+                for (i, p) in cell
+                    .polys
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| !p.pts.is_empty())
+                {
+                    add(
+                        &mut own,
+                        (p.layer, p.dt, 0),
+                        members(&p.rep)?,
+                        i,
+                        1,
+                        &mut entries,
+                    )?;
+                }
+                for (i, p) in cell
+                    .paths
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| !p.pts.is_empty())
+                {
+                    add(
+                        &mut own,
+                        (p.layer, p.dt, 0),
+                        members(&p.rep)?,
+                        i,
+                        2,
+                        &mut entries,
+                    )?;
+                }
+                for (i, pl) in cell.places.iter().enumerate() {
+                    let n = members(&pl.rep)?;
+                    for (&(l, d, depth), run) in &index[pl.cell] {
+                        let depth = depth
+                            .checked_add(1)
+                            .filter(|&d| d <= 4096)
+                            .ok_or("representatives: hierarchy depth exceeds 4096")?;
+                        add(
+                            &mut own,
+                            (l, d, depth),
+                            n.checked_mul(run.members)
+                                .ok_or("representatives: recursive member count exceeds u64")?,
+                            i,
+                            3,
+                            &mut entries,
+                        )?;
+                    }
+                }
+                groups += own.len();
+                if groups > 4_194_304 {
+                    return Err("representatives: cell/group directory limit exceeded".into());
+                }
+                index[ci] = own;
+                if heartbeat.elapsed().as_secs() >= 10 {
+                    if let Some(log) = progress {
+                        log(&format!("count entries={entries} cell={ci}"));
+                    }
+                    heartbeat = std::time::Instant::now();
+                }
+            }
+            let root = &index[doc.top];
+            if root.len() > MAX_GROUPS {
+                return Err("representatives: top group limit exceeded".into());
+            }
+            let counts: Vec<_> = root.values().map(|r| r.members).collect();
+            let budgets = quotas(&counts, per_group, MAX_POINTS)?;
+            let mut result = Vec::with_capacity(root.len());
+            let mut anchors = HashMap::new();
+            for ((&key, run), count) in root.iter().zip(budgets) {
+                let mut points = Vec::with_capacity(count);
+                let mask = run
+                    .members
+                    .checked_next_power_of_two()
+                    .unwrap_or(0)
+                    .wrapping_sub(1);
+                let mut candidate = 0u64;
+                while points.len() < count {
+                    let rank = permute(candidate, mask);
+                    candidate += 1;
+                    if candidate > (count as u64).saturating_mul(64).saturating_add(128) {
+                        return Err("representatives: sampling work limit exceeded".into());
+                    }
+                    if rank >= run.members {
+                        continue;
+                    }
+                    let mut p = resolve(doc, &index, key, rank, &mut anchors)?;
+                    p.rank = points.len() as u32;
+                    points.push(p);
+                }
+                if let Some(log) = progress {
+                    log(&format!(
+                        "{}/{} depth={} members={} points={}",
+                        key.0,
+                        key.1,
+                        key.2,
+                        run.members,
+                        points.len()
+                    ));
+                }
+                result.push(Group {
+                    key,
+                    members: run.members,
+                    points,
+                });
+            }
+            let _ = entries;
+            Ok(result)
+        }
+
+        fn resolve(
+            doc: &Doc,
+            index: &[CellIndex],
+            mut key: Key,
+            mut rank: u64,
+            anchors: &mut HashMap<(usize, u8, u32), Point>,
+        ) -> Result<Point, String> {
+            let mut ci = doc.top;
+            let mut transforms = Vec::new();
+            let mut point;
+            let rep_offset;
+            loop {
+                let run = &index[ci][&key];
+                let ei = run.entries.partition_point(|e| e.end <= rank);
+                let entry = run.entries[ei];
+                rank -= if ei == 0 { 0 } else { run.entries[ei - 1].end };
+                let cell = &doc.cells[ci];
+                let ri = entry.record as usize;
+                if entry.kind == 3 {
+                    let pl = &cell.places[ri];
+                    key.2 -= 1;
+                    let n = index[pl.cell][&key].members;
+                    let off = offset(&pl.rep, rank / n);
+                    transforms.push((pl, off));
+                    rank %= n;
+                    ci = pl.cell;
+                } else {
+                    let rep = match entry.kind {
+                        0 => &cell.rects[ri].rep,
+                        1 => &cell.polys[ri].rep,
+                        _ => &cell.paths[ri].rep,
+                    };
+                    rep_offset = offset(rep, rank);
+                    let anchor_key = (ci, entry.kind, entry.record);
+                    point = if let Some(cached) = anchors.get(&anchor_key) {
+                        *cached
+                    } else {
+                        let calculated = (|| -> Result<Point, String> {
+                            let (x, y, w, h) = match entry.kind {
+                                0 => {
+                                    let r = &cell.rects[ri];
+                                    (
+                                        r.x.checked_add(r.w / 2)
+                                            .ok_or("representatives: rect x overflow")?,
+                                        r.y.checked_add(r.h / 2)
+                                            .ok_or("representatives: rect y overflow")?,
+                                        r.w.unsigned_abs(),
+                                        r.h.unsigned_abs(),
+                                    )
+                                }
+                                _ => {
+                                    let pts = if entry.kind == 1 {
+                                        &cell.polys[ri].pts
+                                    } else {
+                                        &cell.paths[ri].pts
+                                    };
+                                    let mut b = BBox::EMPTY;
+                                    for &(x, y) in pts {
+                                        b.grow(&BBox {
+                                            x0: x,
+                                            y0: y,
+                                            x1: x,
+                                            y1: y,
+                                        });
+                                    }
+                                    let extra = if entry.kind == 2 {
+                                        cell.paths[ri].hw.unsigned_abs().saturating_mul(2)
+                                    } else {
+                                        0
+                                    };
+                                    // A polygon vertex or path spine point lies on actual geometry;
+                                    // a concave polygon's bbox centre need not lie inside it.
+                                    (
+                                        pts[0].0,
+                                        pts[0].1,
+                                        b.x1.abs_diff(b.x0).saturating_add(extra),
+                                        b.y1.abs_diff(b.y0).saturating_add(extra),
+                                    )
+                                }
+                            };
+                            Ok(Point {
+                                x,
+                                y,
+                                max_dim: w.max(h),
+                                min_dim: w.min(h),
+                                rank: 0,
+                            })
+                        })()?;
+                        anchors.insert(anchor_key, calculated);
+                        calculated
+                    };
+                    break;
+                }
+            }
+            let (mut x, mut y) = (
+                point.x as i128 + rep_offset.0,
+                point.y as i128 + rep_offset.1,
+            );
+            for (pl, off) in transforms.into_iter().rev() {
+                if pl.flip {
+                    y = -y;
+                }
+                (x, y) = match pl.rot & 3 {
+                    0 => (x, y),
+                    1 => (-y, x),
+                    2 => (-x, -y),
+                    _ => (y, -x),
+                };
+                x += pl.x as i128 + off.0;
+                y += pl.y as i128 + off.1;
+            }
+            point.x = x
+                .try_into()
+                .map_err(|_| "representatives: x coordinate overflow")?;
+            point.y = y
+                .try_into()
+                .map_err(|_| "representatives: y coordinate overflow")?;
+            Ok(point)
+        }
+
+    }
+
+    #[test]
+    fn streaming_resolve_matches_the_materialized_directory_byte_for_byte() {
+        // shared leaves under several parents with every transform, Grid and
+        // Pts repetitions on shapes and placements, polygons and paths, and
+        // groups both fully and partially sampled
+        let leaf = Cell {
+            rects: vec![
+                rect(Rep::Pts(Arc::from([(0, 0), (10, 20), (30, 5)]))),
+                RectRec { layer: 2, dt: 0, x: 5, y: 5, w: 4, h: 6,
+                          rep: Rep::Grid { na: 3, nb: 2, va: (10, 0), vb: (0, 12) } },
+            ],
+            polys: vec![PolyRec { layer: 1, dt: 0, pts: vec![(1, 1), (9, 1), (9, 5), (1, 5)], rep: Rep::One },
+                        PolyRec { layer: 3, dt: 1, pts: vec![(0, 0), (4, 0), (4, 4)],
+                                  rep: Rep::Grid { na: 2, nb: 2, va: (20, 0), vb: (0, 20) } }],
+            paths: vec![PathRec { layer: 1, dt: 0, pts: vec![(0, 0), (50, 0), (50, 30)], hw: 3, es: 0, ee: 0,
+                                  rep: Rep::Pts(Arc::from([(0, 0), (0, 100)])) }],
+            ..Cell::default()
+        };
+        let mid = Cell {
+            rects: vec![rect(Rep::Grid { na: 40, nb: 40, va: (8, 0), vb: (0, 8) })],
+            places: vec![
+                PlaceRec { cell: 0, x: 100, y: 200, rot: 1, flip: true,
+                           rep: Rep::Grid { na: 2, nb: 1, va: (40, 0), vb: (0, 0) } },
+                PlaceRec { cell: 0, x: -7, y: 3, rot: 3, flip: false,
+                           rep: Rep::Pts(Arc::from([(0, 0), (500, 0), (0, 500)])) },
+            ],
+            ..Cell::default()
+        };
+        let top = Cell {
+            rects: vec![rect(Rep::One), RectRec { layer: 2, dt: 0, x: -3, y: -3, w: 6, h: 6, rep: Rep::One }],
+            places: vec![
+                PlaceRec { cell: 1, x: -10, y: 30, rot: 2, flip: true, rep: Rep::One },
+                PlaceRec { cell: 1, x: 1000, y: 0, rot: 0, flip: false,
+                           rep: Rep::Grid { na: 2, nb: 2, va: (2000, 0), vb: (0, 2000) } },
+                PlaceRec { cell: 0, x: 7, y: 7, rot: 1, flip: false, rep: Rep::One },
+                PlaceRec { cell: 1, x: 5, y: -5, rot: 3, flip: true, rep: Rep::One },
+            ],
+            ..Cell::default()
+        };
+        let source = doc(vec![leaf, mid, top], 2);
+        for per_group in [3usize, 100, 5000] {
+            let mut ours = build(&source, per_group, None).unwrap();
+            let mut theirs = legacy::build(&source, per_group, None).unwrap();
+            assert_eq!(ours.groups.len(), theirs.len());
+            for (a, b) in ours.groups.iter().zip(&theirs) {
+                assert_eq!((a.key, a.members), (b.key, b.members));
+                assert_eq!(a.points, b.points, "group {:?} at {} per group", a.key, per_group);
+            }
+            let ovm = ovm();
+            let mut legacy_built = Built { groups: std::mem::take(&mut theirs), directory: 0, peak_requests: 0 };
+            assert_eq!(encode(&mut ours, &ovm), encode(&mut legacy_built, &ovm));
+            assert!(ours.directory >= 3 && ours.peak_requests > 0);
+        }
     }
 }

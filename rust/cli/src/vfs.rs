@@ -1899,8 +1899,9 @@ fn write_representatives(
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
         std::fs::rename(&tmp, format!("{}/design.ovr", outdir)).map_err(|e| e.to_string())?;
-        eprintln!("[vfs] representatives groups={} entries={} points={} {} ({:.1}s)",
-                  built.groups.len(), built.entries, count, fmt_size(bytes.len() as u64), started.elapsed().as_secs_f64());
+        eprintln!("[vfs] representatives groups={} directory={} peak_requests={} points={} {} ({:.1}s)",
+                  built.groups.len(), built.directory, built.peak_requests, count, fmt_size(bytes.len() as u64),
+                  started.elapsed().as_secs_f64());
         Ok(())
     })();
     if result.is_err() {
