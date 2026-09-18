@@ -52,6 +52,7 @@ PHASE_FIELDS = (
     "work_bin_overflow_items", "rep_members_tested",
     "rep_members_drawn",
     "hier_cells_visited", "subtrees_pruned",
+    "once_full_tiles", "once_passes_skipped", "once_items_skipped",
     # stable floe/KLayout service phases (absent from Rust results)
     "load_ms", "phase_plan", "phase_delta", "phase_apply", "draw_ms",
     "wait_ms", "new",

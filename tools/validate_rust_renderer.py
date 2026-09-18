@@ -1096,6 +1096,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "stored_rep_nodes": "128", "stored_rep_proxies": "64",
                 "stored_rep_bytes": "8192", "stored_rep_pixels": "64000",
                 "stored_rep_spans": "100", "stored_rep_painted_pixels": "8000",
+                "once_tiles": "5", "once_passes": "400", "once_items": "77",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
@@ -1152,6 +1153,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["work_bin_defer_wmax"], 5000)
             # rect 6 + polygon 7 + path 8 + frame 9
             self.assertEqual(result["member_paints"], 30)
+            self.assertEqual((result["once_full_tiles"], result["once_passes_skipped"],
+                              result["once_items_skipped"]), (5, 400, 77))
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)

@@ -45,6 +45,14 @@ pub struct RenderStats {
     /// Hierarchy walk entries across all tiles and paint planes
     /// (geometry and frame-band walks; F2R-03b 2b gate metric).
     pub hier_cells_visited: u64,
+    /// F2R-28 write-once tiles: tiles whose pass sequence ended early
+    /// because every pixel was written, the passes (planes and frame
+    /// bands) they skipped, and the items (cell visits, pages, instance
+    /// members, washes, point chunks) skipped because their device box
+    /// held no open pixel.
+    pub once_full_tiles: u32,
+    pub once_passes_skipped: u64,
+    pub once_items_skipped: u64,
     /// Instance edges skipped by the subtree content masks.
     pub subtrees_pruned: u64,
     pub decoded_cache_hit: u32,

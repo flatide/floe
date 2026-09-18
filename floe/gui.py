@@ -3620,6 +3620,13 @@ class Viewer:
                         text += ", hier %s/%s pruned" % (
                             fmt_count(res["hier_cells_visited"]),
                             fmt_count(res.get("subtrees_pruned", 0)))
+                    if res.get("once_full_tiles") or res.get("once_items_skipped"):
+                        # F2R-28 write-once tiles: tiles that filled up (and the
+                        # passes they skipped), items skipped as fully covered
+                        text += ", once %s tiles/%s passes/%s items" % (
+                            fmt_count(res.get("once_full_tiles", 0)),
+                            fmt_count(res.get("once_passes_skipped", 0)),
+                            fmt_count(res.get("once_items_skipped", 0)))
                     culls = res.get("plan_culls") or {}
                     if any(culls.values()):
                         # planner verdicts (field 2026-09-10): pages

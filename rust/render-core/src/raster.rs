@@ -603,6 +603,59 @@ fn check_member_cancelled(guard: Option<RenderGuard<'_>>, member: &mut u16) -> R
     Ok(())
 }
 
+thread_local! {
+    /// Test override of `write_once_enabled` for the calling thread.
+    static WRITE_ONCE_OVERRIDE: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
+}
+
+/// F2R-28 write-once tiles (see `WriteOnce`); kill switch
+/// FLOE_RUST_WRITE_ONCE=off restores the ordered overwrite.
+fn write_once_enabled() -> bool {
+    if let Some(forced) = WRITE_ONCE_OVERRIDE.with(|value| value.get()) {
+        return forced;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FLOE_RUST_WRITE_ONCE").as_deref() != Ok("off"))
+}
+
+/// Internal marker: a member enumeration stopped because its tile has no
+/// open pixel left. Raised and caught around one enumeration, never
+/// across a function boundary.
+const WRITE_ONCE_FULL: &str = "write-once tile full";
+
+fn until_full<T>(result: Result<T, String>) -> Result<Option<T>, String> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error == WRITE_ONCE_FULL => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// One paint pass of a styled tile: a hierarchy-frame band or a plane.
+#[derive(Clone, Copy)]
+enum TilePass {
+    Frames(u8),
+    Plane(usize),
+}
+
+/// The passes in overwrite order (frame bands 2, 3, 1, the planes, frame
+/// band 0) - reversed for a write-once tile, where the first writer of a
+/// pixel is its last overwriter.
+fn tile_passes(planes: usize, walk_frames: bool, write_once: bool) -> Vec<TilePass> {
+    let mut passes = Vec::with_capacity(planes + 4);
+    if walk_frames {
+        passes.extend([2u8, 3, 1].map(TilePass::Frames));
+    }
+    passes.extend((0..planes).map(TilePass::Plane));
+    if walk_frames {
+        passes.push(TilePass::Frames(0));
+    }
+    if write_once {
+        passes.reverse();
+    }
+    passes
+}
+
 fn render_geometry(
     scene: &FrameScene,
     request: &GeometryRasterRequest,
@@ -722,6 +775,7 @@ fn render_geometry_impl(
     stats.workers_used = worker_count.try_into().unwrap_or(u16::MAX);
     stats.tiles = tile_count.try_into().unwrap_or(u32::MAX);
     let bin = bin.as_ref();
+    let write_once = matches!(mode, RenderMode::Styled(_)) && write_once_enabled();
     let next_tile = AtomicUsize::new(0);
     let tiles = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(worker_count);
@@ -766,6 +820,7 @@ fn render_geometry_impl(
                             mode,
                             bin,
                             guard,
+                            write_once,
                             col0,
                             col1,
                             row0,
@@ -887,6 +942,59 @@ fn render_geometry_impl(
 
 type RepSpan = (u32, u32, u32); // row, first column, exclusive end
 
+/// Write-once state of one tile (F2R-28). Every geometry paint is an
+/// opaque overwrite in its plane's single colour, so the frame is a pure
+/// function of "the last plane that writes a pixel wins". Painting the
+/// planes in REVERSE order and writing each pixel at most once gives the
+/// same bytes - and lets everything that can only touch written pixels
+/// be skipped: a tile whose pixels are all written ends its plane
+/// sequence, an item whose device box is written is never enumerated.
+/// Field 2026-09-18 (synthetic MAIN01, 449 layers): 332 member paints per
+/// lit pixel, the layers covering one another.
+/// Bit i of word w of a row is local column w * 64 + i; 1 = written.
+#[derive(Clone)]
+struct WriteOnce {
+    words: usize,
+    bits: Vec<u64>,
+    open: u32,
+    /// the open pixels' box found by the last scan, and `open` then
+    open_box: Option<(u32, [usize; 4])>,
+}
+
+/// Which pixels of a span a fill lights (the interior rule of
+/// `fill_span`, as a column mask).
+#[derive(Clone, Copy)]
+enum SpanRule {
+    All,
+    /// lit where (row + column) is even
+    Speckle { row: usize },
+    /// one 16-column stipple row, bit 15 = column 0 (mod 16)
+    Pattern { word: u16 },
+}
+
+impl SpanRule {
+    /// Lit columns of the 64 local columns starting at absolute column `col`.
+    #[inline]
+    fn mask(self, col: usize) -> u64 {
+        match self {
+            SpanRule::All => !0,
+            SpanRule::Speckle { row } => {
+                if (row + col) & 1 == 0 {
+                    0x5555_5555_5555_5555
+                } else {
+                    0xAAAA_AAAA_AAAA_AAAA
+                }
+            }
+            SpanRule::Pattern { word } => {
+                // bit k of `lit` = column k (mod 16)
+                let lit = u64::from(word.reverse_bits());
+                let tiled = lit | lit << 16 | lit << 32 | lit << 48;
+                tiled.rotate_right((col & 15) as u32)
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct RasterBand {
     width: u32,
@@ -897,6 +1005,8 @@ struct RasterBand {
     row1: u32,
     pixels: Vec<u8>,
     rep_spans: Vec<RepSpan>,
+    /// None: planes paint in order and overwrite (the reference path).
+    once: Option<WriteOnce>,
 }
 
 impl RasterBand {
@@ -932,11 +1042,269 @@ impl RasterBand {
             row1,
             pixels,
             rep_spans: Vec::new(),
+            once: None,
         })
     }
 
     fn tile_width(&self) -> u32 {
         self.col1 - self.col0
+    }
+
+    fn enable_write_once(&mut self) {
+        let width = self.tile_width() as usize;
+        let rows = (self.row1 - self.row0) as usize;
+        let words = width.div_ceil(64);
+        let mut bits = vec![0u64; words * rows];
+        if width % 64 != 0 {
+            // columns past the tile are never open
+            let padding = !0u64 << (width % 64);
+            for row in 0..rows {
+                bits[row * words + words - 1] = padding;
+            }
+        }
+        self.once = Some(WriteOnce {
+            words,
+            bits,
+            open: (width * rows) as u32,
+            open_box: None,
+        });
+    }
+
+    /// The cull view of the next pass of a write-once tile: the world view
+    /// of the bounding box of the pixels still open (one pixel wider than
+    /// the tile's own stroke margin), never more than `cull_view`. What
+    /// lies outside it can only touch written pixels. None: no open pixel.
+    fn open_view(&mut self, request: &GeometryRasterRequest, cull_view: BBox, stroke_pixels: u8) -> Result<Option<BBox>, String> {
+        let (tile_width, tile_rows) = (self.tile_width(), self.row1 - self.row0);
+        let (col0, row0) = (self.col0, self.row0);
+        let Some(once) = self.once.as_mut() else {
+            return Ok(Some(cull_view));
+        };
+        if once.open == 0 {
+            return Ok(None);
+        }
+        if once.open == tile_width * tile_rows {
+            return Ok(Some(cull_view));
+        }
+        let rows = tile_rows as usize;
+        let (mut r0, mut r1, mut c0, mut c1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+        if let Some((open, found)) = once.open_box {
+            if open == once.open {
+                [r0, r1, c0, c1] = found;
+            }
+        }
+        for row in 0..if r0 == usize::MAX { rows } else { 0 } {
+            for word in 0..once.words {
+                let open = !once.bits[row * once.words + word];
+                if open == 0 {
+                    continue;
+                }
+                r0 = r0.min(row);
+                r1 = row + 1;
+                c0 = c0.min(word * 64 + open.trailing_zeros() as usize);
+                c1 = c1.max(word * 64 + 64 - open.leading_zeros() as usize);
+            }
+        }
+        if r0 == usize::MAX {
+            return Ok(None);
+        }
+        once.open_box = Some((once.open, [r0, r1, c0, c1]));
+        let view = tile_world_view(
+            request,
+            col0 + c0 as u32,
+            col0 + c1 as u32,
+            row0 + r0 as u32,
+            row0 + r1 as u32,
+            stroke_pixels.saturating_add(1),
+        )?;
+        Ok(Some(BBox {
+            x0: view.x0.max(cull_view.x0),
+            y0: view.y0.max(cull_view.y0),
+            x1: view.x1.min(cull_view.x1),
+            y1: view.y1.min(cull_view.y1),
+        }))
+    }
+
+    /// Every pixel of the tile is written: nothing painted from here on
+    /// can change it.
+    #[inline]
+    fn is_full(&self) -> bool {
+        matches!(&self.once, Some(once) if once.open == 0)
+    }
+
+    /// Some pixel is written, so a region test can succeed.
+    #[inline]
+    fn any_written(&self) -> bool {
+        matches!(&self.once, Some(once) if once.open < self.tile_width() * (self.row1 - self.row0))
+    }
+
+    /// Write-once span: the lit, still open pixels of absolute columns
+    /// [first_col, end_col) of absolute row `row` take `color`. Returns
+    /// whether the rule lights any pixel of the span - what the
+    /// overwriting path reports, written or not.
+    #[inline]
+    fn write_once_span(&mut self, row: usize, first_col: usize, end_col: usize, color: [u8; 4], rule: SpanRule) -> bool {
+        self.write_once_rows(row, row + 1, first_col, end_col, color, |_| rule)
+    }
+
+    /// One solid pixel (a stepped stroke, a summary cell).
+    #[inline]
+    fn write_once_pixel(&mut self, row: usize, col: usize, color: [u8; 4]) {
+        let width = self.tile_width() as usize;
+        let (local_row, local_col) = (row - self.row0 as usize, col - self.col0 as usize);
+        let Some(once) = self.once.as_mut() else {
+            return;
+        };
+        let slot = &mut once.bits[local_row * once.words + (local_col >> 6)];
+        let bit = 1u64 << (local_col & 63);
+        if *slot & bit == 0 {
+            *slot |= bit;
+            once.open -= 1;
+            let from = (local_row * width + local_col) * 4;
+            self.pixels[from..from + 4].copy_from_slice(&color);
+        }
+    }
+
+    /// `write_once_span` over absolute rows [row0, row1) of one column
+    /// range (a rect fill, a hairline, an axis-aligned stroke): the word
+    /// range and the span masks are found once, a row costs its rule and
+    /// one mask word per 64 columns.
+    #[inline]
+    fn write_once_rows(
+        &mut self,
+        row0: usize,
+        row1: usize,
+        first_col: usize,
+        end_col: usize,
+        color: [u8; 4],
+        rule_of: impl Fn(usize) -> SpanRule,
+    ) -> bool {
+        let width = self.tile_width() as usize;
+        let col_base = self.col0 as usize;
+        let band_row0 = self.row0 as usize;
+        let (c0, c1) = (first_col - col_base, end_col - col_base);
+        let Some(once) = self.once.as_mut() else {
+            return false;
+        };
+        let words = once.words;
+        let (w0, w1) = (c0 >> 6, (c1 - 1) >> 6);
+        let edge = |word: usize| {
+            let origin = word << 6;
+            let lo = c0.max(origin) - origin;
+            let hi = c1.min(origin + 64) - origin;
+            (lo, hi, if hi - lo == 64 { !0u64 } else { ((1u64 << (hi - lo)) - 1) << lo })
+        };
+        let mut lit_any = false;
+        let mut newly = 0u32;
+        for row in row0..row1 {
+            let rule = rule_of(row);
+            let speckle = matches!(rule, SpanRule::Speckle { .. });
+            let local_row = row - band_row0;
+            let bits = &mut once.bits[local_row * words..(local_row + 1) * words];
+            let pixels = &mut self.pixels[local_row * width * 4..(local_row + 1) * width * 4];
+            for word in w0..w1 + 1 {
+                let origin = word << 6;
+                let (lo, hi, span) = edge(word);
+                let lit = span & rule.mask(col_base + origin);
+                if lit == 0 {
+                    continue;
+                }
+                lit_any = true;
+                let todo = lit & !bits[word];
+                if todo == 0 {
+                    continue;
+                }
+                bits[word] |= todo;
+                newly += todo.count_ones();
+                if todo == span {
+                    // an open solid stretch: the overwriting path's loop
+                    for pixel in pixels[(origin + lo) * 4..(origin + hi) * 4].chunks_exact_mut(4) {
+                        pixel.copy_from_slice(&color);
+                    }
+                    continue;
+                }
+                let first = todo.trailing_zeros() as usize;
+                let last = 64 - todo.leading_zeros() as usize;
+                if speckle && todo == lit {
+                    // an open checkerboard stretch: every other pixel from
+                    // the first lit one, the overwriting path's stride
+                    for pair in pixels[(origin + first) * 4..(origin + last) * 4].chunks_mut(8) {
+                        pair[..4].copy_from_slice(&color);
+                    }
+                } else if todo.count_ones() as usize * 4 >= last - first {
+                    // dense (a stipple, a partly written stretch): one pass
+                    for (bit, pixel) in (first..last).zip(pixels[(origin + first) * 4..(origin + last) * 4].chunks_exact_mut(4)) {
+                        if todo >> bit & 1 != 0 {
+                            pixel.copy_from_slice(&color);
+                        }
+                    }
+                } else {
+                    let mut left = todo;
+                    while left != 0 {
+                        let from = (origin + left.trailing_zeros() as usize) * 4;
+                        pixels[from..from + 4].copy_from_slice(&color);
+                        left &= left - 1;
+                    }
+                }
+            }
+        }
+        once.open -= newly;
+        lit_any
+    }
+
+    /// True when no pixel of absolute device rows [r0, r1) x columns
+    /// [c0, c1) inside this tile is open: an item confined to the box
+    /// cannot change the tile. An empty intersection is true.
+    fn device_box_written(&self, r0: i128, r1: i128, c0: i128, c1: i128) -> bool {
+        let Some(once) = &self.once else {
+            return false;
+        };
+        let r0 = r0.max(self.row0 as i128);
+        let r1 = r1.min(self.row1 as i128);
+        let c0 = c0.max(self.col0 as i128);
+        let c1 = c1.min(self.col1 as i128);
+        if r0 >= r1 || c0 >= c1 {
+            return true;
+        }
+        if once.open == 0 {
+            return true;
+        }
+        let (c0, c1) = ((c0 - self.col0 as i128) as usize, (c1 - self.col0 as i128) as usize);
+        for row in (r0 - self.row0 as i128) as usize..(r1 - self.row0 as i128) as usize {
+            for word in c0 / 64..=(c1 - 1) / 64 {
+                let lo = c0.max(word * 64) - word * 64;
+                let hi = c1.min(word * 64 + 64) - word * 64;
+                let span = if hi - lo == 64 { !0u64 } else { ((1u64 << (hi - lo)) - 1) << lo };
+                if once.bits[row * once.words + word] & span != span {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// `device_box_written` for a world box and everything painted from
+    /// it: fills, the outline of `stroke_width`, the hairline collapse
+    /// and its one-pixel row bias all stay within `stroke_width + 2`
+    /// pixels of the box's device corners. A box the device mapping
+    /// rejects is never skipped, so its error stays reachable.
+    fn world_box_written(&self, request: &GeometryRasterRequest, world: BBox, stroke_width: u8) -> bool {
+        if !self.any_written() {
+            return false;
+        }
+        let (Ok((x0, y1)), Ok((x1, y0))) = (
+            world_to_device(request, world.x0, world.y0),
+            world_to_device(request, world.x1, world.y1),
+        ) else {
+            return false;
+        };
+        let margin = i128::from(stroke_width) + 2;
+        self.device_box_written(
+            floor_div(y0.min(y1), DEVICE_ONE) - margin,
+            floor_div(y0.max(y1), DEVICE_ONE) + 1 + margin,
+            floor_div(x0.min(x1), DEVICE_ONE) - margin,
+            floor_div(x0.max(x1), DEVICE_ONE) + 1 + margin,
+        )
     }
 }
 
@@ -1630,76 +1998,73 @@ fn raster_tile_from_bin(
         )?
     };
     let walk_frames = styled.hierarchy_frames && !bin.frames.is_empty();
-    if styled.hierarchy_frames {
-        if walk_frames {
-            for frame_band in [2, 3, 1] {
-                check_cancelled(guard)?;
-                replay_frame_items(
-                    scene,
-                    request,
-                    band,
-                    cull_view,
-                    frame_band,
-                    frame_paint(frame_band),
-                    stats,
-                    counters,
-                    guard,
-                    &bin.frames,
-                    Some(&minis),
-                )?;
-            }
-        }
-    }
-    for (plane, layer) in styled.layers.iter().enumerate() {
+    let passes = tile_passes(styled.layers.len(), walk_frames, band.once.is_some());
+    let stroke_pixels = styled
+        .layers
+        .iter()
+        .map(|layer| layer.outline_width)
+        .max()
+        .unwrap_or(1);
+    let tile_view = cull_view;
+    for (done, pass) in passes.iter().enumerate() {
         check_cancelled(guard)?;
-        let color = if styled.mono {
-            monochrome(layer.color)
-        } else {
-            layer.color
+        // write-once: the pass sees only what can reach an open pixel
+        let Some(cull_view) = band.open_view(request, tile_view, stroke_pixels)? else {
+            stats.once_full_tiles = stats.once_full_tiles.saturating_add(1);
+            stats.once_passes_skipped = stats.once_passes_skipped.saturating_add((passes.len() - done) as u64);
+            break;
         };
-        let paint = PaintStyle {
-            color,
-            fill: layer.fill,
-            stroke: StrokeStyle::Solid,
-            stroke_width: layer.outline_width,
-        };
-        // an occupancy summary paints in the layer's own slot (M2):
-        // the plane's page items are empty for a summarized layer
-        if let Some(summary) = scene.summary_for(layer.layer_idx) {
-            paint_summary_plane(band, request, summary, paint, counters)?;
+        if cull_view.x0 >= cull_view.x1 || cull_view.y0 >= cull_view.y1 {
+            continue;
         }
-        replay_plane_items(
-            scene,
-            request,
-            band,
-            cull_view,
-            stats,
-            counters,
-            guard,
-            record_scratch,
-            layer,
-            plane,
-            paint,
-            &bin.planes[plane],
-            Some(&minis),
-        )?;
-    }
-    if styled.hierarchy_frames {
-        check_cancelled(guard)?;
-        if walk_frames {
-            replay_frame_items(
+        match *pass {
+            TilePass::Frames(frame_band) => replay_frame_items(
                 scene,
                 request,
                 band,
                 cull_view,
-                0,
-                frame_paint(0),
+                frame_band,
+                frame_paint(frame_band),
                 stats,
                 counters,
                 guard,
                 &bin.frames,
                 Some(&minis),
-            )?;
+            )?,
+            TilePass::Plane(plane) => {
+                let layer = &styled.layers[plane];
+                let color = if styled.mono {
+                    monochrome(layer.color)
+                } else {
+                    layer.color
+                };
+                let paint = PaintStyle {
+                    color,
+                    fill: layer.fill,
+                    stroke: StrokeStyle::Solid,
+                    stroke_width: layer.outline_width,
+                };
+                // an occupancy summary paints in the layer's own slot (M2):
+                // the plane's page items are empty for a summarized layer
+                if let Some(summary) = scene.summary_for(layer.layer_idx) {
+                    paint_summary_plane(band, request, summary, paint, counters)?;
+                }
+                replay_plane_items(
+                    scene,
+                    request,
+                    band,
+                    cull_view,
+                    stats,
+                    counters,
+                    guard,
+                    record_scratch,
+                    layer,
+                    plane,
+                    paint,
+                    &bin.planes[plane],
+                    Some(&minis),
+                )?;
+            }
         }
     }
     Ok(())
@@ -1727,6 +2092,9 @@ fn replay_plane_items(
 ) -> Result<(), String> {
     let mut rep_spans = std::mem::take(&mut band.rep_spans);
     for item in items {
+        if band.is_full() {
+            break;
+        }
         match item {
             PlaneItem::Cell {
                 world_bbox,
@@ -1735,6 +2103,10 @@ fn replay_plane_items(
                 cell,
             } => {
                 if !world_bbox.intersects(&cull_view) {
+                    continue;
+                }
+                if band.world_box_written(request, *world_bbox, paint.stroke_width) {
+                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
                     continue;
                 }
                 let visited = scene.cell(*cell).ok_or_else(|| {
@@ -1748,6 +2120,17 @@ fn replay_plane_items(
                     if page.layer_idx != layer.layer_idx || !page.bbox.intersects(&local_view)
                     {
                         continue;
+                    }
+                    if band.any_written() {
+                        if band.is_full() {
+                            break;
+                        }
+                        if let Ok(world) = transform.apply_bbox(page.bbox) {
+                            if band.world_box_written(request, world, paint.stroke_width) {
+                                stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                                continue;
+                            }
+                        }
                     }
                     let level = visited.page_levels.get(slot).copied().unwrap_or(0);
                     raster_page_records(
@@ -1768,6 +2151,10 @@ fn replay_plane_items(
             }
             PlaneItem::Points { world_bbox, points } => {
                 if !world_bbox.intersects(&cull_view) { continue; }
+                if band.world_box_written(request, *world_bbox, paint.stroke_width) {
+                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                    continue;
+                }
                 check_cancelled(guard)?;
                 for &point in points {
                     if !point.intersects(&cull_view) { continue; }
@@ -1783,6 +2170,10 @@ fn replay_plane_items(
             }
             PlaneItem::Reps { world_bbox, prims } => {
                 if !world_bbox.intersects(&cull_view) { continue; }
+                if band.world_box_written(request, *world_bbox, paint.stroke_width) {
+                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                    continue;
+                }
                 check_cancelled(guard)?;
                 for prim in prims {
                     if !prim.bbox().intersects(&cull_view) { continue; }
@@ -1798,6 +2189,10 @@ fn replay_plane_items(
             }
             PlaneItem::Wash { world_bbox } => {
                 if !world_bbox.intersects(&cull_view) {
+                    continue;
+                }
+                if band.world_box_written(request, *world_bbox, paint.stroke_width) {
+                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
                     continue;
                 }
                 counters.rect_records = counters.rect_records.saturating_add(1);
@@ -1853,12 +2248,22 @@ fn replay_plane_items(
                 let local_view = inverse.apply_bbox(cull_view)?;
                 let mut deferred_path = Vec::new();
                 let mut cancel_member = 0u16;
-                let visit = for_each_visible_offset(
+                let visit = until_full(for_each_visible_offset(
                     &instance.rep,
                     base_bbox,
                     local_view,
                     |offset_x, offset_y| {
                         check_member_cancelled(guard, &mut cancel_member)?;
+                        if band.any_written() {
+                            if band.is_full() {
+                                return Err(WRITE_ONCE_FULL.to_string());
+                            }
+                            let member = translate_bbox(base_bbox, offset_x, offset_y)?;
+                            if band.world_box_written(request, transform.apply_bbox(member)?, paint.stroke_width) {
+                                stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                                return Ok(());
+                            }
+                        }
                         let x = checked_add(instance.x, offset_x, "instance x")?;
                         let y = checked_add(instance.y, offset_y, "instance y")?;
                         let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
@@ -1880,9 +2285,10 @@ fn replay_plane_items(
                             record_scratch,
                         )
                     },
-                )?;
-                stats.rep_members_tested =
-                    stats.rep_members_tested.saturating_add(visit.tested);
+                ))?;
+                stats.rep_members_tested = stats
+                    .rep_members_tested
+                    .saturating_add(visit.map_or(0, |visit| visit.tested));
             }
         }
     }
@@ -2032,76 +2438,72 @@ fn raster_tile_walk_styled(
     // The masks are subtree-cumulative, so a frame-free plan
     // skips all four band walks in one test (labels still run).
     let walk_frames = styled.hierarchy_frames && scene.subtree_has_frames(scene.top());
-    if styled.hierarchy_frames {
-        if walk_frames {
-            for frame_band in [2, 3, 1] {
-                check_cancelled(guard)?;
-                render_frame_band(
-                    scene,
-                    request,
-                    band,
-                    cull_view,
-                    stats,
-                    counters,
-                    frame_band,
-                    frame_paint(frame_band),
-                    guard,
-                    scene.top(),
-                    OrthoTransform::identity(),
-                    path,
-                )?;
-            }
-        }
-    }
-    for layer in &styled.layers {
+    let passes = tile_passes(styled.layers.len(), walk_frames, band.once.is_some());
+    let stroke_pixels = styled
+        .layers
+        .iter()
+        .map(|layer| layer.outline_width)
+        .max()
+        .unwrap_or(1);
+    let tile_view = cull_view;
+    for (done, pass) in passes.iter().enumerate() {
         check_cancelled(guard)?;
-        let paint = PaintStyle {
-            color: if styled.mono {
-                monochrome(layer.color)
-            } else {
-                layer.color
-            },
-            fill: layer.fill,
-            stroke: StrokeStyle::Solid,
-            stroke_width: layer.outline_width,
+        // write-once: the pass sees only what can reach an open pixel
+        let Some(cull_view) = band.open_view(request, tile_view, stroke_pixels)? else {
+            stats.once_full_tiles = stats.once_full_tiles.saturating_add(1);
+            stats.once_passes_skipped = stats.once_passes_skipped.saturating_add((passes.len() - done) as u64);
+            break;
         };
-        if let Some(summary) = scene.summary_for(layer.layer_idx) {
-            paint_summary_plane(band, request, summary, paint, counters)?;
+        if cull_view.x0 >= cull_view.x1 || cull_view.y0 >= cull_view.y1 {
+            continue;
         }
-        render_cell(
-            scene,
-            request,
-            band,
-            cull_view,
-            stats,
-            counters,
-            GeometrySelection::Layer(layer.layer_idx),
-            SubtreePrune::Layer(scene.layer_mask_bit(layer.layer_idx)),
-            paint,
-            guard,
-            scene.top(),
-            OrthoTransform::identity(),
-            path,
-            record_scratch,
-        )?;
-    }
-    if styled.hierarchy_frames {
-        check_cancelled(guard)?;
-        if walk_frames {
-            render_frame_band(
+        match *pass {
+            TilePass::Frames(frame_band) => render_frame_band(
                 scene,
                 request,
                 band,
                 cull_view,
                 stats,
                 counters,
-                0,
-                frame_paint(0),
+                frame_band,
+                frame_paint(frame_band),
                 guard,
                 scene.top(),
                 OrthoTransform::identity(),
                 path,
-            )?;
+            )?,
+            TilePass::Plane(plane) => {
+                let layer = &styled.layers[plane];
+                let paint = PaintStyle {
+                    color: if styled.mono {
+                        monochrome(layer.color)
+                    } else {
+                        layer.color
+                    },
+                    fill: layer.fill,
+                    stroke: StrokeStyle::Solid,
+                    stroke_width: layer.outline_width,
+                };
+                if let Some(summary) = scene.summary_for(layer.layer_idx) {
+                    paint_summary_plane(band, request, summary, paint, counters)?;
+                }
+                render_cell(
+                    scene,
+                    request,
+                    band,
+                    cull_view,
+                    stats,
+                    counters,
+                    GeometrySelection::Layer(layer.layer_idx),
+                    SubtreePrune::Layer(scene.layer_mask_bit(layer.layer_idx)),
+                    paint,
+                    guard,
+                    scene.top(),
+                    OrthoTransform::identity(),
+                    path,
+                    record_scratch,
+                )?;
+            }
         }
     }
     Ok(())
@@ -2114,6 +2516,7 @@ fn raster_tile(
     mode: RenderMode<'_>,
     bin: Option<&WorkBin>,
     guard: Option<RenderGuard<'_>>,
+    write_once: bool,
     col0: u32,
     col1: u32,
     row0: u32,
@@ -2121,6 +2524,9 @@ fn raster_tile(
 ) -> Result<RasterTileOutput, String> {
     check_cancelled(guard)?;
     let mut band = RasterBand::new_tile(request, col0, col1, row0, row1)?;
+    if write_once {
+        band.enable_write_once();
+    }
     let stroke_pixels = match mode {
         RenderMode::Occupancy => 1,
         RenderMode::Styled(styled) => styled
@@ -2354,6 +2760,7 @@ fn apply_label_passes(
         row1: frame.height,
         pixels: frame.pixels,
         rep_spans: Vec::new(),
+        once: None,
     };
     if styled.hierarchy_frames {
         render_prepared_labels(
@@ -2665,6 +3072,9 @@ fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
         .hier_cells_visited
         .saturating_add(worker.hier_cells_visited);
     total.subtrees_pruned = total.subtrees_pruned.saturating_add(worker.subtrees_pruned);
+    total.once_full_tiles = total.once_full_tiles.saturating_add(worker.once_full_tiles);
+    total.once_passes_skipped = total.once_passes_skipped.saturating_add(worker.once_passes_skipped);
+    total.once_items_skipped = total.once_items_skipped.saturating_add(worker.once_items_skipped);
     total.raster_tile_max_us = total.raster_tile_max_us.max(worker.raster_tile_max_us);
     total.tiles_reused = total.tiles_reused.saturating_add(worker.tiles_reused);
 }
@@ -2735,6 +3145,9 @@ fn raster_page_records(
     page.index
         .rects()
         .for_each_intersecting(local_view, record_scratch, |record| {
+            if band.is_full() {
+                return Ok(());
+            }
             let rect = geometry
                 .rects
                 .get(record as usize)
@@ -2774,13 +3187,16 @@ fn raster_page_records(
             };
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
-            let visit = for_each_visible_offset_chunked(
+            let visit = until_full(for_each_visible_offset_chunked(
                 &rep,
                 chunks,
                 base,
                 local_view,
                 |offset_x, offset_y| {
                     check_member_cancelled(guard, &mut cancel_member)?;
+                    if band.is_full() {
+                        return Err(WRITE_ONCE_FULL.to_string());
+                    }
                     let local = translate_bbox(base, offset_x, offset_y)?;
                     let world = world_transform.apply_bbox(local)?;
                     if paint_world_rect(band, request, world, paint)? {
@@ -2788,8 +3204,10 @@ fn raster_page_records(
                     }
                     Ok(())
                 },
-            )?;
-            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+            ))?;
+            stats.rep_members_tested = stats
+                .rep_members_tested
+                .saturating_add(visit.map_or(0, |visit| visit.tested));
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
             counters.rectangle_members_drawn =
@@ -2800,6 +3218,9 @@ fn raster_page_records(
     page.index
         .polys()
         .for_each_intersecting(local_view, record_scratch, |record| {
+            if band.is_full() {
+                return Ok(());
+            }
             let polygon = geometry
                 .polys
                 .get(record as usize)
@@ -2824,13 +3245,16 @@ fn raster_page_records(
             } else {
                 None
             };
-            let visit = for_each_visible_offset_chunked(
+            let visit = until_full(for_each_visible_offset_chunked(
                 &rep,
                 chunks,
                 base,
                 local_view,
                 |offset_x, offset_y| {
                     check_member_cancelled(guard, &mut cancel_member)?;
+                    if band.is_full() {
+                        return Err(WRITE_ONCE_FULL.to_string());
+                    }
                     world_points.clear();
                     for &(x, y) in &polygon.pts {
                         let x = checked_add(x, offset_x, "polygon x")?;
@@ -2842,8 +3266,10 @@ fn raster_page_records(
                     }
                     Ok(())
                 },
-            )?;
-            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+            ))?;
+            stats.rep_members_tested = stats
+                .rep_members_tested
+                .saturating_add(visit.map_or(0, |visit| visit.tested));
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
             counters.polygon_members_drawn =
@@ -2854,6 +3280,9 @@ fn raster_page_records(
     page.index
         .paths()
         .for_each_intersecting(local_view, record_scratch, |record| {
+            if band.is_full() {
+                return Ok(());
+            }
             let path_record = geometry
                 .paths
                 .get(record as usize)
@@ -2886,13 +3315,16 @@ fn raster_page_records(
             } else {
                 None
             };
-            let visit = for_each_visible_offset_chunked(
+            let visit = until_full(for_each_visible_offset_chunked(
                 &rep,
                 chunks,
                 base,
                 local_view,
                 |offset_x, offset_y| {
                     check_member_cancelled(guard, &mut cancel_member)?;
+                    if band.is_full() {
+                        return Err(WRITE_ONCE_FULL.to_string());
+                    }
                     world_points.clear();
                     for &(x, y) in &outline {
                         let x = checked_add(x, offset_x, "path x")?;
@@ -2911,8 +3343,10 @@ fn raster_page_records(
                     }
                     Ok(())
                 },
-            )?;
-            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+            ))?;
+            stats.rep_members_tested = stats
+                .rep_members_tested
+                .saturating_add(visit.map_or(0, |visit| visit.tested));
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
             counters.path_members_drawn = counters.path_members_drawn.saturating_add(drawn);
@@ -2945,6 +3379,9 @@ fn render_cell(
     let cell = scene
         .cell(key)
         .ok_or_else(|| format!("invalid plan: missing working cell {:?}", key))?;
+    if band.is_full() {
+        return Ok(());
+    }
     stats.hier_cells_visited = stats.hier_cells_visited.saturating_add(1);
     path.push(key);
     let local_view = world_transform.invert()?.apply_bbox(cull_view)?;
@@ -2962,6 +3399,17 @@ fn render_cell(
         // 858x789 frame repeated the same record walks 49 times at 128px.
         if !selection.includes(page.layer_idx) || !page.bbox.intersects(&local_view) {
             continue;
+        }
+        if band.any_written() {
+            if band.is_full() {
+                break;
+            }
+            if let Ok(world) = world_transform.apply_bbox(page.bbox) {
+                if band.world_box_written(request, world, paint.stroke_width) {
+                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                    continue;
+                }
+            }
         }
         raster_page_records(
             band,
@@ -3039,12 +3487,22 @@ fn render_cell(
             OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
         let base_bbox = base_place.apply_bbox(child_bbox)?;
         let mut cancel_member = 0u16;
-        let visit = for_each_visible_offset(
+        let visit = until_full(for_each_visible_offset(
             &instance.rep,
             base_bbox,
             local_view,
             |offset_x, offset_y| {
                 check_member_cancelled(guard, &mut cancel_member)?;
+                if band.any_written() {
+                    if band.is_full() {
+                        return Err(WRITE_ONCE_FULL.to_string());
+                    }
+                    let member = translate_bbox(base_bbox, offset_x, offset_y)?;
+                    if band.world_box_written(request, world_transform.apply_bbox(member)?, paint.stroke_width) {
+                        stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                        return Ok(());
+                    }
+                }
                 let x = checked_add(instance.x, offset_x, "instance x")?;
                 let y = checked_add(instance.y, offset_y, "instance y")?;
                 let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
@@ -3066,8 +3524,10 @@ fn render_cell(
                     record_scratch,
                 )
             },
-        )?;
-        stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+        ))?;
+        stats.rep_members_tested = stats
+            .rep_members_tested
+            .saturating_add(visit.map_or(0, |visit| visit.tested));
     }
     path.pop();
     Ok(())
@@ -3635,6 +4095,9 @@ fn paint_hairline_device_rect(
     let end_row = checked_usize(end_row, "hairline end row")?;
     let first_col = checked_usize(first_col, "hairline first column")?;
     let end_col = checked_usize(end_col, "hairline end column")?;
+    if band.once.is_some() {
+        return Ok(band.write_once_rows(first_row, end_row, first_col, end_col, paint.color, |_| SpanRule::All));
+    }
     let solid = PaintStyle {
         fill: LayerFill::Solid,
         ..paint
@@ -3982,9 +4445,13 @@ fn paint_summary_plane(
                 || !mask[(mr - 1) * hw + mc]
                 || !mask[(mr + 1) * hw + mc];
             if boundary || fill_pixel_on(paint.fill, r, c, request.height) {
+                painted += 1;
+                if band.once.is_some() {
+                    band.write_once_pixel(r as usize, c as usize, paint.color);
+                    continue;
+                }
                 let offset = ((r - band.row0) as usize * tile_width + (c - band.col0) as usize) * 4;
                 band.pixels[offset..offset + 4].copy_from_slice(&paint.color);
-                painted += 1;
             }
         }
     }
@@ -4016,6 +4483,17 @@ fn fill_device_rect_with_phase(
     let first_col = checked_usize(first_col, "rectangle first column")?;
     let end_col = checked_usize(end_col, "rectangle end column")?;
     let mut drew = false;
+    if band.once.is_some() {
+        let frame_height = request.height;
+        return Ok(match paint.fill {
+            LayerFill::Clear => false,
+            LayerFill::Solid => band.write_once_rows(first_row, end_row, first_col, end_col, paint.color, |_| SpanRule::All),
+            LayerFill::Speckle => band.write_once_rows(first_row, end_row, first_col, end_col, paint.color, |row| SpanRule::Speckle { row }),
+            LayerFill::Pattern(rows) => band.write_once_rows(first_row, end_row, first_col, end_col, paint.color, |row| SpanRule::Pattern {
+                word: rows[((row as u32).wrapping_add(frame_height - 1) & 15) as usize],
+            }),
+        });
+    }
     for row in first_row..end_row {
         if fill_span(band, paint, request.height, row, first_col, end_col) {
             drew = true;
@@ -4038,6 +4516,17 @@ fn fill_span(
 ) -> bool {
     if first_col >= end_col {
         return false;
+    }
+    if band.once.is_some() {
+        let rule = match paint.fill {
+            LayerFill::Clear => return false,
+            LayerFill::Solid => SpanRule::All,
+            LayerFill::Speckle => SpanRule::Speckle { row },
+            LayerFill::Pattern(rows) => SpanRule::Pattern {
+                word: rows[((row as u32).wrapping_add(frame_height - 1) & 15) as usize],
+            },
+        };
+        return band.write_once_span(row, first_col, end_col, paint.color, rule);
     }
     let row_offset = (row - band.row0 as usize) * band.tile_width() as usize;
     let col_base = band.col0 as usize;
@@ -4199,6 +4688,10 @@ fn stroke_device_segment(
         if row_lo > row_hi || col_lo > col_hi {
             return Ok(false);
         }
+        if band.once.is_some() {
+            band.write_once_rows(row_lo as usize, row_hi as usize + 1, col_lo as usize, col_hi as usize + 1, paint.color, |_| SpanRule::All);
+            return Ok(true);
+        }
         let width = band.tile_width() as usize;
         for row in row_lo..=row_hi {
             let local_row = row as usize - band.row0 as usize;
@@ -4225,6 +4718,11 @@ fn stroke_device_segment(
                 }
                 for stroke_x in x0 + stroke_low..=x0 + stroke_high {
                     if stroke_x < band.col0 as i64 || stroke_x >= band.col1 as i64 {
+                        continue;
+                    }
+                    if band.once.is_some() {
+                        band.write_once_pixel(stroke_y as usize, stroke_x as usize, paint.color);
+                        drew = true;
                         continue;
                     }
                     let local_row = stroke_y as usize - band.row0 as usize;
@@ -4755,6 +5253,225 @@ mod tests {
         };
         let error = world_to_device(&request, i64::MAX, 0).unwrap_err();
         assert!(error.contains("coordinate overflow: polygon device x"));
+    }
+
+    fn with_write_once<T>(on: bool, run: impl FnOnce() -> T) -> T {
+        WRITE_ONCE_OVERRIDE.with(|value| value.set(Some(on)));
+        let out = run();
+        WRITE_ONCE_OVERRIDE.with(|value| value.set(None));
+        out
+    }
+
+    /// Deterministic pseudo-random stream for the write-once scenes.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: i64) -> i64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 33) % bound as u64) as i64
+        }
+    }
+
+    fn once_page(page_id: u32, layer_idx: u32, span: i64, rng: &mut Lcg, dense: bool) -> Arc<DecodedPage> {
+        let mut rects = Vec::new();
+        let mut polys = Vec::new();
+        let mut paths = Vec::new();
+        for _ in 0..if dense { 40 } else { 8 } {
+            let (w, h) = (1 + rng.next(if dense { 60 } else { 25 }), 1 + rng.next(if dense { 60 } else { 25 }));
+            let rep = match rng.next(3) {
+                0 => Rep::One,
+                1 => Rep::Grid { na: 1 + rng.next(6) as u64, nb: 1 + rng.next(6) as u64, va: (3 + rng.next(30), 0), vb: (0, 3 + rng.next(30)) },
+                _ => Rep::Pts(Arc::from(vec![(0, 0), (rng.next(40), rng.next(40)), (rng.next(40), 5 + rng.next(40))])),
+            };
+            rects.push(RectRec { layer: layer_idx, dt: 0, x: rng.next(span), y: rng.next(span), w, h, rep });
+        }
+        for _ in 0..4 {
+            let (x, y, a) = (rng.next(span), rng.next(span), 4 + rng.next(40));
+            polys.push(PolyRec {
+                layer: layer_idx,
+                dt: 0,
+                pts: vec![(x, y), (x + a, y), (x + a, y + a / 2), (x + a / 2, y + a / 2), (x + a / 2, y + a), (x, y + a)],
+                rep: Rep::One,
+            });
+            let (px, py, len) = (rng.next(span), rng.next(span), 10 + rng.next(80));
+            paths.push(PathRec {
+                layer: layer_idx,
+                dt: 0,
+                pts: vec![(px, py), (px + len, py), (px + len, py + len / 2)],
+                hw: 1 + rng.next(4),
+                es: 0,
+                ee: 0,
+                rep: Rep::One,
+            });
+        }
+        let doc = Doc {
+            unit: 1.0,
+            cells: vec![Cell { name: format!("ONCE{page_id}"), rects, polys, paths, ..Cell::default() }],
+            top: 0,
+            layer_order: vec![(layer_idx, 0)],
+            norm_s: 0.0,
+            layer_names: HashMap::new(),
+            layer_aliases: HashMap::new(),
+        };
+        // generous: every member, outline and path join lies inside
+        let bbox = BBox { x0: -64, y0: -64, x1: span + 256, y1: span + 256 };
+        Arc::new(DecodedPage {
+            page_id,
+            layer_idx,
+            bbox,
+            encoded_bytes: 1,
+            records: 1,
+            members: 1,
+            index: crate::PageIndex::build(&doc),
+            doc,
+        })
+    }
+
+    /// Four layers over a top cell and an arrayed child, washes and every
+    /// hierarchy-frame band; `dense` covers the view so tiles fill up.
+    fn once_scene(seed: u64, dense: bool) -> FrameScene {
+        let mut rng = Lcg(seed);
+        let top = (0, REM_FULL);
+        let child = (1, REM_FULL);
+        let span = 320;
+        let mut pages = Vec::new();
+        for layer in 0..4u32 {
+            pages.push(once_page(layer, layer, span, &mut rng, dense));
+        }
+        for layer in 0..4u32 {
+            pages.push(once_page(4 + layer, layer, 40, &mut rng, false));
+        }
+        let child_box = BBox { x0: -64, y0: -64, x1: 40 + 256, y1: 40 + 256 };
+        let top_box = BBox { x0: -400, y0: -400, x1: span + 700, y1: span + 700 };
+        let frame = |rng: &mut Lcg, band: u8| {
+            let (x, y) = (rng.next(span), rng.next(span));
+            (BBox { x0: x, y0: y, x1: x + 2 + rng.next(90), y1: y + 2 + rng.next(90) }, Rep::One, band)
+        };
+        let plan = HierPlan {
+            top,
+            wcells: vec![
+                WsCell {
+                    key: top,
+                    pages: vec![0, 1, 2, 3],
+                    page_levels: Vec::new(),
+                    insts: vec![
+                        WsInst { child, x: 10, y: 20, rot: 0, flip: false, rep: Rep::Grid { na: 5, nb: 4, va: (61, 0), vb: (0, 67) } },
+                        WsInst { child, x: 300, y: 40, rot: 1, flip: true, rep: Rep::One },
+                    ],
+                    frames: (0..8).map(|index| frame(&mut rng, index % 4)).collect(),
+                    washes: (0..6)
+                        .map(|index| {
+                            let (x, y) = (rng.next(span), rng.next(span));
+                            (index % 4, BBox { x0: x, y0: y, x1: x + 1 + rng.next(50), y1: y + 1 + rng.next(50) })
+                        })
+                        .collect(),
+                    reps: Vec::new(),
+                },
+                WsCell {
+                    key: child,
+                    pages: vec![4, 5, 6, 7],
+                    page_levels: Vec::new(),
+                    insts: Vec::new(),
+                    frames: vec![(BBox { x0: 0, y0: 0, x1: 40, y1: 40 }, Rep::One, 1)],
+                    washes: vec![(2, BBox { x0: 5, y0: 5, x1: 9, y1: 30 })],
+                    reps: Vec::new(),
+                },
+            ],
+            pages: (0..8).collect(),
+            page_prio: vec![0; 8],
+            stats: HierStats::default(),
+            explain: Vec::new(),
+        };
+        FrameScene::from_test_parts(plan, pages, BTreeMap::from([(top, top_box), (child, child_box)])).unwrap()
+    }
+
+    #[test]
+    fn write_once_frames_match_the_ordered_overwrite_byte_for_byte() {
+        let mut stipple = [0u16; 16];
+        for (row, word) in stipple.iter_mut().enumerate() {
+            *word = 0x8421u16.rotate_left(row as u32);
+        }
+        let fills = [LayerFill::Solid, LayerFill::Speckle, LayerFill::Pattern(stipple), LayerFill::Clear];
+        let colors = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255]];
+        let mut full_tiles = 0u32;
+        for (seed, dense) in [(1u64, false), (2, true), (3, true)] {
+            for shift in 0..4usize {
+                for (width, height, tile_size, view) in [
+                    (96u32, 80u32, 16u16, (0.0, 0.0, 330.0, 275.0)),
+                    (67, 53, 64, (-20.0, 10.0, 181.0, 169.0)),
+                    (48, 48, 8, (100.0, 100.0, 148.0, 148.0)),
+                ] {
+                    let request = StyledGeometryRasterRequest {
+                        raster: GeometryRasterRequest {
+                            view: RasterViewBox::new(view.0, view.1, view.2, view.3).unwrap(),
+                            width,
+                            height,
+                            workers: 3,
+                            tile_size,
+                            ..request()
+                        },
+                        layers: (0..4usize)
+                            .map(|layer| LayerStyle {
+                                layer_idx: layer as u32,
+                                color: colors[layer],
+                                fill: fills[(layer + shift) % 4],
+                                outline_width: 1 + ((layer + shift) % 3) as u8,
+                            })
+                            .collect(),
+                        hierarchy_frames: shift % 2 == 0,
+                        mono: false,
+                    };
+                    let scene = once_scene(seed, dense);
+                    let ordered = with_write_once(false, || render_geometry_styled(&scene, &request).unwrap());
+                    let ordered_walk = with_write_once(false, || render_geometry_styled_unbinned(&scene, &request).unwrap());
+                    let once = with_write_once(true, || render_geometry_styled(&scene, &request).unwrap());
+                    let once_walk = with_write_once(true, || render_geometry_styled_unbinned(&scene, &request).unwrap());
+                    assert_eq!(ordered.frame.pixels(), ordered_walk.frame.pixels());
+                    assert_eq!(ordered.stats.once_full_tiles, 0);
+                    let case = format!("seed {seed} shift {shift} {width}x{height} tile {tile_size}");
+                    assert!(once.frame.pixels() == ordered.frame.pixels(), "binned write-once differs: {case}");
+                    assert!(once_walk.frame.pixels() == ordered.frame.pixels(), "walked write-once differs: {case}");
+                    assert!(once.frame.pixels().chunks_exact(4).any(|pixel| pixel != request.raster.background));
+                    full_tiles += once.stats.once_full_tiles + once_walk.stats.once_full_tiles;
+                }
+            }
+        }
+        assert!(full_tiles > 0, "the dense scenes must fill tiles, or the early exits are untested");
+    }
+
+    #[test]
+    fn write_once_spans_light_the_pixels_of_the_fill_rule_once() {
+        let request = GeometryRasterRequest { width: 150, height: 9, ..request() };
+        let mut stipple = [0u16; 16];
+        for (row, word) in stipple.iter_mut().enumerate() {
+            *word = 0xA531u16.rotate_right(row as u32);
+        }
+        for fill in [LayerFill::Solid, LayerFill::Speckle, LayerFill::Pattern(stipple), LayerFill::Clear] {
+            // a tile that starts off a 64- and a 16-column boundary
+            let mut ordered = RasterBand::new_tile(&request, 7, 143, 2, 9).unwrap();
+            let mut once = ordered.clone();
+            once.enable_write_once();
+            let first = PaintStyle { fill, ..PaintStyle::solid([1, 2, 3, 255]) };
+            let second = PaintStyle { fill, ..PaintStyle::solid([9, 8, 7, 255]) };
+            let spans = [(2usize, 7usize, 143usize), (3, 60, 70), (3, 8, 9), (5, 63, 66), (8, 100, 143), (4, 7, 72)];
+            for &(row, c0, c1) in &spans {
+                // ordered: `first` then `second` overwrites; once: `second` wins by coming first
+                fill_span(&mut ordered, first, request.height, row, c0, c1);
+            }
+            for &(row, c0, c1) in &spans[..3] {
+                fill_span(&mut ordered, second, request.height, row, c0, c1);
+                let lit = fill_span(&mut once, second, request.height, row, c0, c1);
+                let mut probe = RasterBand::new_tile(&request, 7, 143, 2, 9).unwrap();
+                assert_eq!(lit, fill_span(&mut probe, second, request.height, row, c0, c1), "{fill:?} row {row}");
+            }
+            for &(row, c0, c1) in &spans {
+                fill_span(&mut once, first, request.height, row, c0, c1);
+            }
+            assert!(once.pixels == ordered.pixels, "{fill:?}");
+            let lit = ordered.pixels.chunks_exact(4).filter(|pixel| **pixel != request.background).count() as u32;
+            let width = once.tile_width() * (once.row1 - once.row0);
+            assert_eq!(once.once.as_ref().unwrap().open, width - lit, "{fill:?}: open counts the unwritten pixels");
+        }
     }
 
     fn full_band(request: &GeometryRasterRequest) -> RasterBand {
@@ -6733,8 +7450,15 @@ mod tests {
         // Many small tiles: a deferred block would multiply its walk by
         // the tile count, an expanded one is collected exactly once.
         request.raster.tile_size = 8;
-        let walk = render_geometry_styled_unbinned(&make_scene(), &request).unwrap();
-        let bin = render_geometry_styled(&make_scene(), &request).unwrap();
+        // the walk's visit count is the ordered overwrite's: a write-once
+        // tile that fills up stops its walk early, which is not what this
+        // test measures
+        let (walk, bin) = with_write_once(false, || {
+            (
+                render_geometry_styled_unbinned(&make_scene(), &request).unwrap(),
+                render_geometry_styled(&make_scene(), &request).unwrap(),
+            )
+        });
         assert!(
             bin.stats.work_bin_items > 4096,
             "single placement must expand into the bin: {} items",

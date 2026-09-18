@@ -535,6 +535,8 @@ class RustRenderWorker:
             "member_paints": 0,
             "rep_tested": 0, "rep_drawn": 0,
             "hier_cells": 0, "subtree_prunes": 0,
+            # F2R-28 write-once tiles (sum over rounds)
+            "once_tiles": 0, "once_passes": 0, "once_items": 0,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -1009,6 +1011,8 @@ class RustRenderWorker:
         state["rep_drawn"] += _wire_int(fields, "rep_drawn")
         state["hier_cells"] += _wire_int(fields, "hier_cells")
         state["subtree_prunes"] += _wire_int(fields, "subtree_prunes")
+        for key in ("once_tiles", "once_passes", "once_items"):
+            state[key] += _wire_int(fields, key)
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1177,6 +1181,9 @@ class RustRenderWorker:
             "rep_members_drawn": state["rep_drawn"],
             "hier_cells_visited": state["hier_cells"],
             "subtrees_pruned": state["subtree_prunes"],
+            "once_full_tiles": state["once_tiles"],
+            "once_passes_skipped": state["once_passes"],
+            "once_items_skipped": state["once_items"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on

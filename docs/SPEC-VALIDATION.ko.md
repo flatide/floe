@@ -29,6 +29,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
   배터리는 캐시를 매번 다시 만들어 형식 변경이 묵은 캐시 뒤에 숨지 못하게 한다.
 - 유닛 게이트: `unit`(워크스페이스 debug `cargo test`), `unit_vfs`·`unit_render`
   (release `--lib`; release 프로필의 doctest는 LTO와 어긋나 제외).
+- `write_once`(tools/validate_write_once.py, 약 20초; `render` 별칭에 포함): write-once 타일
+  (F2R-28)의 프레임 18개가 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`와 바이트 동일한지, 밀집 뷰에서
+  타일이 차고 paint가 줄어드는지, 킬 스위치가 write-once 작업을 전혀 하지 않는지.
 - `fit_budget`(tools/validate_fit_budget.py, 약 20초; `planner`·`render` 별칭에 포함): 합성
   MAIN01 칩의 keep + cut 1 px 광역뷰가 48 MB 예산에서 오류 대신 낮춘 밀도로 그려지는지
   (킬 스위치는 종전 오류), 예산 안의 프레임은 픽셀이 바뀌지 않는지.

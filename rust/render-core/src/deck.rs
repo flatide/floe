@@ -1505,6 +1505,9 @@ fn accumulate_raster(stats: &mut RenderStats, raster: &RenderStats) {
     stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(raster.rep_members_drawn);
     stats.hier_cells_visited = stats.hier_cells_visited.saturating_add(raster.hier_cells_visited);
     stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(raster.subtrees_pruned);
+    stats.once_full_tiles = stats.once_full_tiles.saturating_add(raster.once_full_tiles);
+    stats.once_passes_skipped = stats.once_passes_skipped.saturating_add(raster.once_passes_skipped);
+    stats.once_items_skipped = stats.once_items_skipped.saturating_add(raster.once_items_skipped);
 }
 
 /// A frames-only pass paints nothing but the raster's structural

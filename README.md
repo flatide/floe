@@ -425,6 +425,10 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   공간 트리를 만든다. 화면 오차 0.5 px 이내인 병합 표현을 쓰며 확대하면 자식
   형상으로 내려간다. 전역 개수에 따른 추가 솎기를 제거하고 겹친 hairline 행 구간을
   합쳐 그린다. 1단계 파일은 같은 명령으로 재생성해야 하며, 실칩 성능은 측정 전이다.
+- **write-once 타일**(0.12.165, docs/FLOE2_OPTIMIZATION.ko.md F2R-28): 래스터가 plane을 역순으로
+  그리며 픽셀을 한 번만 쓰고, 이미 다 쓰인 타일·영역에 닿을 뿐인 작업은 건너뛴다. 그림은 바이트
+  동일. 레이어가 많이 겹치는 광역뷰의 덧칠(합성 MAIN01에서 픽셀당 300회)을 없앤다. 상태줄
+  `once T tiles/P passes/I items`, 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`.
 - **예산에 맞춘 컷**(0.12.162): 선택한 페이지가 디코드 예산(기본 1024 MB)을 넘을 뷰는
   오류("decoded generation budget exceeded") 대신 예산에 맞는 가장 세밀한 컷(요청 컷 ×
   2^(k/4)와 표준 detail 컷 1·3·5 px 중)으로 밀도를 낮춰 그린다. detail high가 medium보다
