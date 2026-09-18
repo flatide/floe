@@ -911,3 +911,22 @@ jobs 1/4/`--occupancy-balance 0` 파일 동일, `floe2 index --occupancy-balance
 - 게이트 `validate_occupancy RenderTests`: cull 광역뷰 = keep 요약 픽셀, 킬 스위치 =
   종전 cull 페이지 경로, near = cull 페이지 경로, exact 불변.
 - 안 바뀐 것: 덱의 keep 기본, 근접뷰·exact, 생성(`--occupancy`는 레이아웃 opt-in).
+
+실측 MAIN09 thin:cull, 337 레이어 전부 표시 (사용자, 2026-09-18, eb7268a):
+
+| 뷰 | 프레임 | load + draw | 요약 |
+|---|---:|---:|---|
+| fit | 70 ms | 0 + 2 ms | 337 layers, 0 cells |
+| 200 % | 950 ms | 0 + 804 ms | 337 layers, 183.5 M cells |
+| 400 % | 173 ms | 13 + 132 ms | none (near) → cull 페이지 경로 |
+
+- 400 %부터 셀 > 1 px라 예상대로 페이지 경로로 돌아가고, 헤어라인 레이어는 컷 아래라
+  비어 있다(빈 대역, 위 선택지).
+- 200 %의 804 ms는 `paint_summary_plane`의 구조 비용이었다: 레이어마다 타일 전체
+  마스크를 할당·0 초기화하고 모든 픽셀을 훑었다(2048² px × 337 레이어 ≈ 1.4 G 픽셀
+  방문 + 타일 × 레이어 수만큼의 할당). 0.12.158: 타일에 켜진 셀이 없는 레이어는 셀
+  스캔만 하고 끝내며, 마스크는 켜진 픽셀이 있을 때만 만들고 켜진 픽셀이 있는 행만
+  칠한다(픽셀 동일). 밀집 레이어의 비용은 그대로이므로 실측으로 다시 잰다.
+- fit의 "0 cells"는 미해결이다. 337 레이어가 선택됐는데 셀이 하나도 투영되지 않았다는
+  뜻이라, 재사용 프레임(`frame_cache_hit`)이거나 depth 제한 요청일 수 있다. perf 라인의
+  `frame_cache_hit`, `summary_level`, `summary_cell_um`, depth로 확인한다.

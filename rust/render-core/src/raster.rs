@@ -3742,7 +3742,12 @@ fn paint_summary_plane(
     let hr1 = band.row1 as i64 + 1;
     let hw = (hc1 - hc0) as usize;
     let hh = (hr1 - hr0) as usize;
-    let mut mask = vec![false; hw * hh];
+    // the lit pixels of the halo window are collected first: a layer
+    // with none in this tile costs the cell scan only, never the mask
+    // allocation and the pixel loop (field 2026-09-18: MAIN09 at 200 %
+    // with 337 visible layers spent 804 ms drawing, most of it in
+    // full-tile mask zeroing and scanning for layers with nothing here)
+    let mut lit: Vec<(u32, u32)> = Vec::new();
     // world bounds of the halo window
     let wx0 = view.x0 + hc0 as f64 * span_x / width;
     let wx1 = view.x0 + hc1 as f64 * span_x / width;
@@ -3781,17 +3786,31 @@ fn paint_summary_plane(
                 let pc = ((mx - view.x0) * width / span_x).floor() as i64;
                 let pr = ((view.y1 - my) * height / span_y).floor() as i64;
                 if pc >= hc0 && pc < hc1 && pr >= hr0 && pr < hr1 {
-                    mask[(pr - hr0) as usize * hw + (pc - hc0) as usize] = true;
+                    lit.push(((pr - hr0) as u32, (pc - hc0) as u32));
                 }
             }
             i += 1;
         }
     }
     counters.summary_cells_drawn = counters.summary_cells_drawn.saturating_add(cells);
+    if lit.is_empty() {
+        return Ok(());
+    }
+    let mut mask = vec![false; hw * hh];
+    let mut row_lit = vec![false; hh];
+    for &(mr, mc) in &lit {
+        mask[mr as usize * hw + mc as usize] = true;
+        row_lit[mr as usize] = true;
+    }
     let tile_width = band.tile_width() as usize;
     let mut painted = 0u64;
     for r in band.row0..band.row1 {
         let mr = (r as i64 - hr0) as usize;
+        // only lit pixels are painted, so a row without one is skipped
+        // (its neighbours are read from the full mask when they matter)
+        if !row_lit[mr] {
+            continue;
+        }
         for c in band.col0..band.col1 {
             let mc = (c as i64 - hc0) as usize;
             if !mask[mr * hw + mc] {
