@@ -38,13 +38,13 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck representatives gen_main01 fit_budget write_once rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget sub_cut_box write_once rust_renderer klayout"
 alias_gates() {
     case "$1" in
         quick)    echo "unit_vfs unit_render occupancy rust_renderer" ;;
-        planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget" ;;
+        planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box" ;;
         occ)      echo "unit_vfs occupancy" ;;
-        render)   echo "unit_render rust_renderer representatives fit_budget write_once render_goldens render_speckle render_frames klayout" ;;
+        render)   echo "unit_render rust_renderer representatives fit_budget sub_cut_box write_once render_goldens render_speckle render_frames klayout" ;;
         indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives" ;;
         python)   echo "index_cli vfs_profile floe2 drc_ice svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
@@ -299,6 +299,10 @@ if gate gen_main01; then RAN="$RAN gen_main01"
 # lowered density instead of failing; frames that fit are untouched
 if gate fit_budget; then RAN="$RAN fit_budget"
     .venv/bin/python tools/validate_fit_budget.py; fi
+# sub-cut boxes: under thin keep with few layers visible, what the size cut
+# drops stays as a box from index metadata; everything else unchanged
+if gate sub_cut_box; then RAN="$RAN sub_cut_box"
+    .venv/bin/python tools/validate_sub_cut_box.py; fi
 # write-once tiles: planes painted in reverse, each pixel written once,
 # covered work skipped - frames byte-identical to the ordered overwrite
 if gate write_once; then RAN="$RAN write_once"

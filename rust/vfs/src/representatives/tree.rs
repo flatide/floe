@@ -847,6 +847,7 @@ mod tests {
             page_hairline: true,
             page_skip: vec![],
             prune_skipped: false,
+            sub_cut_box: false,
         }
     }
     fn stream(prims: Vec<Prim>, req: &crate::ViewReq, options: Options) -> Stream {

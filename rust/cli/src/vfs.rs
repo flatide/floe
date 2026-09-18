@@ -2215,6 +2215,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
                     page_hairline: true,
                     page_skip: Vec::new(),
                     prune_skipped: false,
+                    sub_cut_box: false,
         };
         let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
         let (boxes, truncated) = floe_vfs::hier::frontier_boxes(
@@ -6502,6 +6503,7 @@ fn make_req(
             page_hairline: true,
             page_skip: Vec::new(),
             prune_skipped: false,
+            sub_cut_box: false,
     }
 }
 
@@ -6802,6 +6804,15 @@ pub fn plan_cmd(args: &[String]) {
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--page-reps") {
             req.page_reps = val != "0";
         }
+        // --sub-cut-box 0|1: what the size cut drops stays as a box
+        // (ViewReq::sub_cut_box; the viewer sets it for thin keep);
+        // --sub-cut-box-px N: the largest box (HierOpts::sub_cut_box_px)
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-box") {
+            req.sub_cut_box = val != "0";
+        }
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-box-px") {
+            popts.sub_cut_box_px = val.parse().expect("sub-cut-box-px");
+        }
         // --summary-layers a/b,..: layers an occupancy summary draws
         // (OCCUPANCY_PLAN M3): their pages are skipped (verdict
         // `summary` under --explain); --prune-summary 1 also prunes
@@ -6865,6 +6876,11 @@ pub fn plan_cmd(args: &[String]) {
              \"culled_bvh_size\": {},\n  \
              \"thin_frames\": {},\n  \
              \"fit_pct\": {},\n  \"fit_thin\": {},\n  \"fit_full_pct\": {},\n  \"fit_passes\": {},\n  \"fit_bytes\": {},\n  \
+             \"sub_cut_boxes\": {},\n  \
+             \"sub_cut_box_nodes\": {},\n  \
+             \"sub_cut_box_over\": {},\n  \
+             \"sub_cut_box_sampled\": {},\n  \
+             \"washes\": {},\n  \
              \"plan_ms\": {:.2}\n}}",
             plan.pages.len(),
             cbytes,
@@ -6912,6 +6928,11 @@ pub fn plan_cmd(args: &[String]) {
             st.fit_full_pct,
             st.fit_passes,
             st.fit_bytes,
+            st.sub_cut_boxes,
+            st.sub_cut_box_nodes,
+            st.sub_cut_box_over,
+            st.sub_cut_box_sampled,
+            plan.wcells.iter().map(|c| c.washes.len() as u64).sum::<u64>(),
             ms
         );
         if rest.iter().any(|(k, _)| k == "--inspect") {

@@ -83,6 +83,10 @@ pub struct ViewReq {
     /// when no hierarchy frames are wanted; with frames the walk keeps
     /// `vis` so a summarized layer's cells still frame.
     pub prune_skipped: bool,
+    /// What the size cut drops stays as a box drawn from index metadata
+    /// (hier.rs SUB_CUT_BOX_PX): renderd sets it for a `thin keep` request
+    /// of a plain layout; deck passes, probes and the CLI's plans do not.
+    pub sub_cut_box: bool,
 }
 
 /// one placement of a page cell in the working-set top. na/nb/va/vb

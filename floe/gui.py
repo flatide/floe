@@ -3663,6 +3663,13 @@ class Viewer:
                             text += ", sub-cut washes %s/sparse %s" % (
                                 fmt_count(culls.get("sub_cut_washes", 0)),
                                 fmt_count(culls.get("sub_cut_sparse", 0)))
+                        if culls.get("sub_cut_boxes") or culls.get("sub_cut_box_over"):
+                            # sub-cut boxes (0.12.168): what the size cut
+                            # drops, kept as boxes under thin keep
+                            text += ", boxes %s%s" % (
+                                fmt_count(culls.get("sub_cut_boxes", 0)),
+                                " (+%s over)" % fmt_count(culls["sub_cut_box_over"])
+                                if culls.get("sub_cut_box_over") else "")
                         if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
                             # dropped by the per-plan sub-cut budgets
                             # (sparse ink / wash area): the frame is

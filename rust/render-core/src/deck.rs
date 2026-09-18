@@ -1619,6 +1619,7 @@ fn source_plan_request(
         page_hairline: !request.thin_keep,
         summary_layers: Vec::new(),
         prune_summary: false,
+        sub_cut_box: false,
     };
     plan.validate()?;
     Ok(Some(plan))

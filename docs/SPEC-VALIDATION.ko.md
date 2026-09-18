@@ -33,6 +33,10 @@ sh tools/validate_rust.sh --only quick path/to.oas
   `--geometry legacy`가 2026-09-17의 파일과 바이트 동일(sha256 고정)한지, `--geometry chip`이
   `--jobs`와 무관하게 결정적이고 KLayout·floe-index가 읽으며 칩의 모양(가늘고 긴 배선, 여러
   크기대, 다이에 비해 작은 라이브러리 셀)인지.
+- `sub_cut_box`(tools/validate_sub_cut_box.py, 약 15초; `planner`·`render` 별칭에 포함): 칩 형태
+  합성 MAIN01의 via 레이어 하나, keep, 칩 전체 — 킬 스위치는 빈 프레임, 기본은 박스가 찍힌
+  프레임이고 디코드 페이지 수는 같다. cull 요청, 전 레이어 keep(레이어 상한 초과), 컷 아래가
+  없는 근접 keep 뷰는 킬 스위치와 바이트 동일.
 - `write_once`(tools/validate_write_once.py, 약 20초; `render` 별칭에 포함): write-once 타일
   (F2R-28)의 프레임 18개가 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`와 바이트 동일한지, 밀집 뷰에서
   타일이 차고 paint가 줄어드는지, 킬 스위치가 write-once 작업을 전혀 하지 않는지.

@@ -1939,8 +1939,14 @@ class SubCutTests(unittest.TestCase):
         os.environ.pop("FLOE_RUST_PAGE_REPS", None)
         # the default worker: the plain cull (both the sub-cut rules
         # and the page frontier are off); worker_reps switches the
-        # frontier on, worker_on the sub-cut rules
+        # frontier on, worker_on the sub-cut rules. The sub-cut boxes of
+        # 0.12.168 (thin keep, few layers: what the cut drops stays as a
+        # box) have a gate of their own, tools/validate_sub_cut_box.py;
+        # here the baseline is the cut that drops, so they are switched off
+        # (the frontier and the sub-cut rules exclude them anyway)
+        os.environ["FLOE_RUST_SUB_CUT_BOX"] = "off"
         cls.worker = cls._worker()
+        del os.environ["FLOE_RUST_SUB_CUT_BOX"]
         os.environ["FLOE_RUST_PAGE_REPS"] = "on"
         cls.worker_reps = cls._worker()
         del os.environ["FLOE_RUST_PAGE_REPS"]

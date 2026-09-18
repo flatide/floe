@@ -203,6 +203,33 @@
   `a_plan_over_its_decode_budget_keeps_its_cut_and_lowers_the_density`(밀도),
   `a_plan_over_its_decode_budget_is_planned_at_the_finest_cut_that_fits`(사다리).
 
+### sub-cut 박스 (0.12.168, 2026-09-19)
+
+실칩·합성 관찰: `thin keep` 그림은 Calibre와 비슷하지만 크기 컷이 버린 것은 **사라진다**
+(합성 MAIN01의 via 레이어 하나는 fit부터 ×4까지 빈 화면; Calibre는 모든 도형을 최소 크기로
+남긴다). `ViewReq::sub_cut_box`(renderd가 일반 레이아웃의 `thin keep` 요청에 켠다; 덱 pass·
+probe·exact·CLI 플랜은 아님)이면 크기 컷이 버리는 것을 **인덱스 메타만으로 그린 박스**로 남긴다.
+페이지는 하나도 더 디코드하지 않는다.
+- 크기 컷에 걸린 페이지·페이지 BVH 노드·배치 BVH 노드·배치 footprint가 화면에서 양축
+  `sub_cut_box_px`(4 px) 이하이면 자기 레이어의 박스 하나이고 그 아래는 방문하지 않는다. 더
+  넓은 노드는 내려간다(컷은 통째로 건너뛰던 곳) — 걷기와 박스 수가 화면 크기에 묶인다.
+- 단일 배치는 자기 bbox(컷 미만). 축정렬 grid 배치는 간격이 박스보다 좁은 축은 한 줄로 잇고
+  넓은 축은 멤버마다 박스: 작은 셀의 밀집 배열은 rect 하나, 성긴 배열은 박스 격자. 기울어진
+  grid와 박스보다 넓은 점 목록은 종전대로 버린다.
+- 레이어: 페이지는 정확, 배치는 자식의 재귀 레이어 마스크, 배치 BVH 노드는 아래 배치를 최대
+  8개 고르게 뽑아 마스크를 합친다(뽑히지 않은 배치에만 있는 레이어는 그 박스에서 빠진다).
+- **보이는 레이어가 `sub_cut_box_layers`(4)개 이하일 때만**: 박스는 그러지 않으면 빈 화면일
+  뷰(작은 도형의 레이어 몇 개)를 위한 것이고, 레이어가 많은 뷰는 배선과 블록으로 이미 차 있으며
+  박스는 레이어마다 걷기와 paint가 든다. 플랜당 rect 200만 개 상한(`sub_cut_box_over`).
+- 박스는 자기 크기만큼 정직하다(실제 도형에서 4 px 이내). 2 px 이하 페이지 wash(M7-C)와 같은
+  표현이라, 페이지가 박스였다가 컷 아래로 내려가도 계속 박스다.
+- stats/frame line `sub_cut_boxes`·`sub_cut_box_over`, 상태줄 `boxes N`. 킬 스위치
+  `FLOE_RUST_SUB_CUT_BOX=off`, 진단 `FLOE_RUST_SUB_CUT_BOX_PX`, `floe-index plan --sub-cut-box 1
+  [--sub-cut-box-px N]`. 래스터는 wash를 128개씩 묶은 chunk 항목으로 받는다(항목 하나씩이면
+  bin 상한을 넘겨 타일·plane별 walk로 떨어졌다).
+- 게이트 `sub_cut_box`(tools/validate_sub_cut_box.py), 단위
+  `what_the_size_cut_drops_stays_as_a_box_under_the_sub_cut_boxes`.
+
 ## 4. 프레임 (cell reference outline)
 
 r==0 경계에서 `frame_depth_boundary`:

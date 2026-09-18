@@ -68,6 +68,8 @@ pub struct PlanRequest {
     /// Prune subtrees that hold only summarized layers (no frames
     /// wanted): floe_vfs::ViewReq::prune_skipped.
     pub prune_summary: bool,
+    /// Sub-cut boxes (floe_vfs::ViewReq::sub_cut_box).
+    pub sub_cut_box: bool,
 }
 
 impl PlanRequest {
@@ -108,6 +110,7 @@ mod tests {
             page_hairline: true,
             summary_layers: Vec::new(),
             prune_summary: false,
+            sub_cut_box: false,
         };
         assert!(req.validate().is_err());
     }

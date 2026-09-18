@@ -999,6 +999,7 @@ fn run_clip(
         page_hairline: true,
         summary_layers: Vec::new(),
         prune_summary: false,
+        sub_cut_box: false,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1782,6 +1783,13 @@ fn sub_cut_wash_enabled() -> bool {
 /// answer moves to representative data built at index time into a
 /// file of its own); FLOE_RUST_PAGE_REPS=on turns the planner-side
 /// representatives on for a diagnosis.
+/// Sub-cut boxes on a plain layout's `thin keep` frames
+/// (floe_vfs::ViewReq::sub_cut_box); FLOE_RUST_SUB_CUT_BOX=off is the kill
+/// switch.
+fn sub_cut_box_enabled() -> bool {
+    std::env::var("FLOE_RUST_SUB_CUT_BOX").as_deref() != Ok("off")
+}
+
 fn page_reps_enabled() -> bool {
     std::env::var("FLOE_RUST_PAGE_REPS").as_deref() == Ok("on")
 }
@@ -2169,7 +2177,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} sub_cut_boxes={} sub_cut_box_over={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -2259,6 +2267,8 @@ fn run_render(
                 planned.summary.culls.fit_over,
                 planned.summary.culls.fit_thin,
                 planned.summary.culls.fit_full_pct,
+                planned.summary.culls.sub_cut_boxes,
+                planned.summary.culls.sub_cut_box_over,
                 summary.planes.len(),
                 pixels.summary_cells,
                 pixels.summary_pixels,
@@ -2609,6 +2619,10 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64)
         page_hairline: !command.thin_keep,
         summary_layers: Vec::new(),
         prune_summary: false,
+        // sub-cut boxes: `thin keep` means nothing vanishes - what the size
+        // cut drops stays as a box (hier.rs SUB_CUT_BOX_PX).
+        // FLOE_RUST_SUB_CUT_BOX=off is the kill switch.
+        sub_cut_box: !command.exact && command.thin_keep && sub_cut_box_enabled(),
     };
     request.validate()?;
     if cache.unit() <= 0.0 {

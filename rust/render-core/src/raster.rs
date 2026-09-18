@@ -1388,11 +1388,9 @@ enum PlaneItem {
         inverse: OrthoTransform,
         cell: WsKey,
     },
-    Wash {
-        world_bbox: BBox,
-    },
-    // Native display points, spatially ordered in design.ovr. A tile rejects
-    // a whole chunk instead of checking every point of the frame.
+    // Rects of the plane in walk order, up to 128 to a chunk: the planner's
+    // washes (page washes, sub-cut boxes) and the native display points of
+    // design.ovr. A tile rejects a whole chunk instead of checking every rect.
     Points { world_bbox: BBox, points: Vec<BBox> },
     /// Representative SHAPES of design.ovr (OVR2): rects, boundary segments
     /// and fallback points in top coordinates, chunked like Points. They are
@@ -1746,21 +1744,22 @@ fn collect_cell(
         if !world_bbox.intersects(&cull_view) {
             continue;
         }
-        if wash.x0 == wash.x1 && wash.y0 == wash.y1 {
-            if let Some(PlaneItem::Points { world_bbox: bounds, points }) = bin.planes[plane].last_mut() {
-                if points.len() < 128 {
-                    bounds.grow(&world_bbox);
-                    points.push(world_bbox);
-                    continue;
-                }
+        // Washes share chunk items of up to 128 rects (as the zero-size
+        // display points always did): the sub-cut boxes (floe_vfs hier.rs
+        // SUB_CUT_BOX_PX) are washes of a few pixels, a million of them in a
+        // wide view of a few layers, and one bin item each overran the item
+        // cap and sent the frame down the per-tile, per-plane walk. The order
+        // within the plane is the walk's, as before.
+        if let Some(PlaneItem::Points { world_bbox: bounds, points }) = bin.planes[plane].last_mut() {
+            if points.len() < 128 {
+                bounds.grow(&world_bbox);
+                points.push(world_bbox);
+                continue;
             }
-            check_cancelled(guard)?;
-            bin.charge()?;
-            bin.planes[plane].push(PlaneItem::Points { world_bbox, points: vec![world_bbox] });
-        } else {
-            bin.charge()?;
-            bin.planes[plane].push(PlaneItem::Wash { world_bbox });
         }
+        check_cancelled(guard)?;
+        bin.charge()?;
+        bin.planes[plane].push(PlaneItem::Points { world_bbox, points: vec![world_bbox] });
     }
     // OVR2 shapes ride on the top cell only (identity transform)
     if path.len() == 1 {
@@ -2185,24 +2184,6 @@ fn replay_plane_items(
                         stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
                         stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
                     }
-                }
-            }
-            PlaneItem::Wash { world_bbox } => {
-                if !world_bbox.intersects(&cull_view) {
-                    continue;
-                }
-                if band.world_box_written(request, *world_bbox, paint.stroke_width) {
-                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
-                    continue;
-                }
-                counters.rect_records = counters.rect_records.saturating_add(1);
-                stats.primitives_tested = stats.primitives_tested.saturating_add(1);
-                stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-                if paint_world_rect(band, request, *world_bbox, paint)? {
-                    counters.rectangle_members_drawn =
-                        counters.rectangle_members_drawn.saturating_add(1);
-                    stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
-                    stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
                 }
             }
             PlaneItem::Deferred {

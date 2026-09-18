@@ -185,6 +185,51 @@ fn sub_cut_wash_px() -> f64 {
     *PX.get_or_init(|| env_mpx("FLOE_RUST_SUB_CUT_WASH_MPX", SUB_CUT_WASH_PX))
 }
 
+/// Sub-cut boxes (ViewReq::sub_cut_box; field 2026-09-18/19: the keep
+/// picture is Calibre-like except that what the size cut drops VANISHES -
+/// on the synthetic MAIN01 one via layer is an empty screen from the fit
+/// view to x4, where Calibre keeps every shape at a minimum size). What
+/// the size cut drops stays as a BOX drawn from index metadata alone - no
+/// page is decoded:
+///   * a size-cut page, page-BVH node, child-BVH node or child placement
+///     footprint at most `sub_cut_box_px` on screen in both axes is one
+///     box on its layers, and nothing below it is visited;
+///   * a wider size-cut node is walked (the cut used to prune it whole),
+///     so the walk - and the box count - is bound by the screen, about one
+///     box per sub_cut_box_px^2 pixels of covered area per hierarchy level;
+///   * a page's layer is exact; a child's layers are its recursive layer
+///     mask; a child-BVH node takes the union of the masks of up to
+///     SUB_CUT_BOX_MASK_SAMPLES evenly spaced placements below it (a layer
+///     only the unsampled ones hold is missed in that box);
+///   * only with at most `sub_cut_box_layers` layers visible: the boxes are
+///     for the view that would otherwise be EMPTY (one or a few layers of
+///     small shapes). A view of many layers is full of wires and blocks
+///     anyway, and boxes cost a walk and a paint per layer - on the chip-
+///     geometry synthetic MAIN01 eight layers at x8 went from 0.1 s to 1.1 s
+///     for a frame that was fully lit without them. Beyond
+///     `sub_cut_box_max` box rects the rest are dropped as the cut always
+///     did (sub_cut_box_over).
+/// A box is as honest as its size: within sub_cut_box_px of something
+/// real. Exact requests, probes, deck passes and the diagnostic sub-cut
+/// wash / page representatives never take boxes.
+pub const SUB_CUT_BOX_PX: f64 = 4.0;
+
+/// HierOpts::sub_cut_box_px default; FLOE_RUST_SUB_CUT_BOX_PX overrides (diagnostic).
+fn sub_cut_box_px() -> f64 {
+    static PX: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *PX.get_or_init(|| {
+        std::env::var("FLOE_RUST_SUB_CUT_BOX_PX")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(SUB_CUT_BOX_PX)
+    })
+}
+pub const SUB_CUT_BOX_MAX: u64 = 2_000_000;
+pub const SUB_CUT_BOX_LAYERS: u32 = 4;
+/// placements sampled for the layer mask of a child-BVH node box
+pub const SUB_CUT_BOX_MASK_SAMPLES: u32 = 8;
+
 /// HierOpts::rep_decode_bytes default: 256 MiB
 pub const REP_DECODE_BYTES: u64 = 256 << 20;
 
@@ -441,6 +486,11 @@ pub struct HierOpts {
     /// / FLOE_RUST_SUB_CUT_WASH_MPX override in Mpx (diagnostic).
     pub sub_cut_sparse_px: f64,
     pub sub_cut_wash_px: f64,
+    /// sub-cut boxes (see SUB_CUT_BOX_PX): the largest box in screen px,
+    /// the box rects a plan may emit, the visible layers it still boxes for
+    pub sub_cut_box_px: f64,
+    pub sub_cut_box_max: u64,
+    pub sub_cut_box_layers: u32,
     /// The page frontier's decode budget per plan, decoded bytes of
     /// the cut pages kept as representatives (a page is about 1 MiB
     /// decoded; the render cache holds 1 GiB): beyond it the plan is
@@ -505,6 +555,9 @@ impl Default for HierOpts {
             sub_cut_walk_budget: 200_000,
             sub_cut_sparse_px: sub_cut_sparse_px(),
             sub_cut_wash_px: sub_cut_wash_px(),
+            sub_cut_box_px: sub_cut_box_px(),
+            sub_cut_box_max: SUB_CUT_BOX_MAX,
+            sub_cut_box_layers: SUB_CUT_BOX_LAYERS,
             rep_decode_bytes: rep_decode_bytes(),
             rep_density: rep_density(),
             fit_budget: fit_budget_enabled(),
@@ -581,6 +634,14 @@ pub struct HierStats {
     /// HierOpts::sub_cut_sparse_px, washes beyond sub_cut_wash_px
     pub sub_cut_sparse_over: u64,
     pub sub_cut_wash_over: u64,
+    /// sub-cut boxes (ViewReq::sub_cut_box): box rects emitted, the BVH
+    /// nodes among their sources, boxes dropped beyond sub_cut_box_max,
+    /// node boxes whose layer mask was sampled (more placements below
+    /// than SUB_CUT_BOX_MASK_SAMPLES)
+    pub sub_cut_boxes: u64,
+    pub sub_cut_box_nodes: u64,
+    pub sub_cut_box_over: u64,
+    pub sub_cut_box_sampled: u64,
     /// representatives (the page frontier, ViewReq::page_reps): cut
     /// pages kept (sparse, drawn as pixels) / washed (dense), cut
     /// placements washed or expanded, BVH subtrees pruned because no
@@ -1218,6 +1279,11 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         explain: Vec::new(),
         explain_on: opts.explain,
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
+        boxm: false,
+        box_px: opts.sub_cut_box_px,
+        vis_layers: Vec::new(),
+        box_bits: Vec::new(),
+        boxes_left: opts.sub_cut_box_max,
         reps: req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0,
         rep_page_level: page_level,
         dot_lattice: HashSet::new(),
@@ -1247,6 +1313,25 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         thin_bins: HashSet::new(),
         frames_total: 0,
     };
+    if req.sub_cut_box
+        && req.cut_dbu > 0
+        && req.px_per_dbu > 0.0
+        && !req.sub_cut_wash
+        && !req.page_reps
+        && opts.sub_cut_box_px > 0.0
+    {
+        // the layers a box may take: visible and not drawn by a summary
+        let layers: Vec<u32> = h
+            .wash_vis
+            .iter()
+            .enumerate()
+            .flat_map(|(at, &byte)| (0..8u32).filter(move |bit| byte & (1 << bit) != 0).map(move |bit| at as u32 * 8 + bit))
+            .collect();
+        if !layers.is_empty() && layers.len() <= opts.sub_cut_box_layers as usize {
+            h.boxm = true;
+            h.vis_layers = layers;
+        }
+    }
     let top_ci = v.top;
     let r0 = h.norm_r(
         top_ci,
@@ -1530,6 +1615,14 @@ struct Hier<'a> {
     /// ViewReq::sub_cut_wash and its remaining walk budget
     sub_cut_wash: bool,
     wash_walk_budget: u64,
+    /// ViewReq::sub_cut_box in force (see plan_hier_pass), the largest box
+    /// in screen px, the visible layers a box may take and the box rects left
+    boxm: bool,
+    box_px: f64,
+    vis_layers: Vec<u32>,
+    /// scratch of box_node
+    box_bits: Vec<u8>,
+    boxes_left: u64,
     /// ViewReq::page_reps in force (cut on, sub-cut wash off)
     reps: bool,
     /// the page level of this pass (one representative page in 2^Lp)
@@ -1650,6 +1743,10 @@ impl<'a> Hier<'a> {
                             && self.reps
                             && rep_keeps((pi - pr.page_lo) as u64, self.rep_page_level);
                         let washable = in_view && (self.sub_cut_wash || rep);
+                        if size_cut && in_view && self.box_page(&p, pi, &mut wc.washes, ci) {
+                            self.st.cull_page_size += 1;
+                            continue;
+                        }
                         match self.sub_cut_verdict(&p, &boxes[..], size_cut, washable, rep) {
                             SubCut::Keep => {
                                 // sparse: too few members for a wash to
@@ -1878,7 +1975,22 @@ impl<'a> Hier<'a> {
                         // bounded by the screen, never by the placements
                         // below (field 2026-09-17: descending every cut
                         // subtree took over 80 s at full depth).
-                        let rep_descend = !self.sub_cut_wash
+                        // sub-cut boxes: a size-cut node no wider than
+                        // a box is one box; a wider one is walked so
+                        // its placements decide by their footprints
+                        let box_descend = self.boxm
+                            && r != 0
+                            && (node.max_dim as u64) < cut
+                            && node.bbox.intersects(b)
+                            && {
+                                if self.box_small(&node.bbox) {
+                                    self.box_node(&mut wc, ni, &node.bbox);
+                                    false
+                                } else {
+                                    true
+                                }
+                            };
+                        let rep_descend = box_descend || !self.sub_cut_wash
                             && self.reps
                             && r != 0
                             && node.bbox.intersects(b)
@@ -2018,6 +2130,9 @@ impl<'a> Hier<'a> {
                                     edges.insert(pli);
                                     continue;
                                 }
+                                if self.boxm && size_cut {
+                                    self.box_child(&mut wc, pli, &h, &rb, &boxes);
+                                }
                                 self.st.cull_size += 1;
                                 framed.insert(pli);
                                 self.note_child("fold_size", pli, &h, &rb, &boxes);
@@ -2092,6 +2207,9 @@ impl<'a> Hier<'a> {
                                 edges.insert(pli);
                                 continue;
                             }
+                            if self.boxm && size_cut {
+                                self.box_child(&mut wc, pli, &h, &rb, &boxes);
+                            }
                             self.st.cull_size += 1;
                             self.note_child(
                                 if cw < cut && chh < cut { "omit_size" } else { "omit_hair" },
@@ -2115,6 +2233,146 @@ impl<'a> Hier<'a> {
     /// whole footprint (the repetition extent, one rect) on every
     /// visible layer of the child's recursive layer mask, when the
     /// footprint meets a view box.
+    /// At most box_px on screen in both axes: one box.
+    fn box_small(&self, fp: &BBox) -> bool {
+        let ppd = self.px_per_dbu;
+        let fw = (fp.x1 - fp.x0).max(0) as f64 * ppd;
+        let fh = (fp.y1 - fp.y0).max(0) as f64 * ppd;
+        fw <= self.box_px && fh <= self.box_px
+    }
+
+    fn take_box(&mut self, n: u64) -> bool {
+        if n <= self.boxes_left {
+            self.boxes_left -= n;
+            self.st.sub_cut_boxes += n;
+            true
+        } else {
+            self.st.sub_cut_box_over += 1;
+            false
+        }
+    }
+
+    /// A size-cut page in view under the sub-cut boxes: true when it stays
+    /// as its bbox on its own layer (never decoded).
+    fn box_page(&mut self, p: &floe_ovm::PageV, pi: u32, washes: &mut Vec<(u32, BBox)>, ci: u32) -> bool {
+        if !self.boxm || !self.box_small(&p.bbox) || !self.take_box(1) {
+            return false;
+        }
+        washes.push((p.layer_idx, p.bbox));
+        self.note_page("box", ci, p, pi);
+        true
+    }
+
+    /// `fp` on every visible layer of bitset bytes `bits`, within the box
+    /// count budget.
+    fn box_layers(&mut self, wc: &mut WsCell, bits: &[u8], fp: BBox) -> bool {
+        let lit = |layer: u32| bits.get((layer / 8) as usize).is_some_and(|byte| byte & (1 << (layer % 8)) != 0);
+        let count = self.vis_layers.iter().filter(|&&layer| lit(layer)).count() as u64;
+        if count == 0 || !self.take_box(count) {
+            return false;
+        }
+        wc.washes.extend(self.vis_layers.iter().filter(|&&layer| lit(layer)).map(|&layer| (layer, fp)));
+        true
+    }
+
+    /// A size-cut child-BVH node no wider than a box: one box on the
+    /// layers of the placements below (all of them up to
+    /// SUB_CUT_BOX_MASK_SAMPLES, else that many evenly spaced ones);
+    /// nothing below is visited.
+    fn box_node(&mut self, wc: &mut WsCell, ni: u32, fp: &BBox) {
+        let (lo, hi) = self.cbvh_places(ni);
+        let n = hi.saturating_sub(lo);
+        if n == 0 {
+            return;
+        }
+        let v = self.v;
+        let take = n.min(SUB_CUT_BOX_MASK_SAMPLES);
+        let mut bits = std::mem::take(&mut self.box_bits);
+        bits.clear();
+        for k in 0..take {
+            let pli = lo as u64 + (k as u64 * n as u64) / take as u64;
+            let mask = v.bitset(v.cell_lmask_rec(v.place_head(pli).child));
+            if bits.len() < mask.len() {
+                bits.resize(mask.len(), 0);
+            }
+            for (out, &byte) in bits.iter_mut().zip(mask.iter()) {
+                *out |= byte;
+            }
+        }
+        if n > take {
+            self.st.sub_cut_box_sampled += 1;
+        }
+        if self.box_layers(wc, &bits, *fp) {
+            self.st.sub_cut_box_nodes += 1;
+        }
+        self.box_bits = bits;
+    }
+
+    /// A size-cut child placement under the sub-cut boxes. A single child is
+    /// its bbox (under the cut, so a few px). An array whose footprint is no
+    /// wider than a box is one box; a wider axis-aligned grid is drawn member
+    /// by member where its pitch is wider than a box and as one run where the
+    /// members are closer than that - a dense array of tiny cells is one rect,
+    /// a sparse one a lattice of boxes, either way bound by the screen. Skewed
+    /// grids and point lists wider than a box are dropped as before.
+    fn box_child(&mut self, wc: &mut WsCell, pli: u64, h: &floe_ovm::PlaceHead, rb: &BBox, boxes: &[BBox]) {
+        let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
+        let b0 = xf_bbox(&t0, rb);
+        let fp = match h.kind {
+            0 => b0,
+            1 => grow_by_offsets(&b0, &grid_ovis(0, h.na as i64 - 1, 0, h.nb as i64 - 1, h.va, h.vb)),
+            _ => match self.v.pts_ref(pli) {
+                Some(pr) => grow_by_offsets(&b0, &pr.extent()),
+                None => b0,
+            },
+        };
+        if fp.is_empty() || !boxes.iter().any(|b| fp.intersects(b)) {
+            return;
+        }
+        let v = self.v;
+        let bits = v.bitset(v.cell_lmask_rec(h.child));
+        if h.kind == 0 || self.box_small(&fp) {
+            self.box_layers(wc, bits, fp);
+            return;
+        }
+        let (na, nb, va, vb) = (h.na as i64, h.nb as i64, h.va, h.vb);
+        // axis-aligned grids only: a along x and b along y, or the other way round
+        let aligned = (va.1 == 0 && vb.0 == 0) || (va.0 == 0 && vb.1 == 0);
+        if h.kind != 1 || !aligned {
+            return;
+        }
+        let mut view = BBox::EMPTY;
+        for b in boxes {
+            view.grow(b);
+        }
+        let GridVis::Range { i0, i1, j0, j1 } = grid_ranges(na, nb, va, vb, &minkowski_neg(&view, &b0)) else {
+            return;
+        };
+        let step_px = |vec: (i64, i64)| vec.0.unsigned_abs().max(vec.1.unsigned_abs()) as f64 * self.px_per_dbu;
+        // members closer than a box run together: one group for the axis
+        let groups = |lo: i64, hi: i64, dense: bool| -> Vec<(i64, i64)> {
+            if dense {
+                vec![(lo, hi)]
+            } else {
+                (lo..=hi).map(|at| (at, at)).collect()
+            }
+        };
+        let (dense_a, dense_b) = (na == 1 || step_px(va) <= self.box_px, nb == 1 || step_px(vb) <= self.box_px);
+        let count = (if dense_a { 1 } else { (i1 - i0 + 1) as u64 }).saturating_mul(if dense_b { 1 } else { (j1 - j0 + 1) as u64 });
+        if count > self.boxes_left {
+            self.st.sub_cut_box_over += 1;
+            return;
+        }
+        for &(ia, ib) in &groups(i0, i1, dense_a) {
+            for &(ja, jb) in &groups(j0, j1, dense_b) {
+                let run = grow_by_offsets(&b0, &grid_ovis(ia, ib, ja, jb, va, vb));
+                if !self.box_layers(wc, bits, run) {
+                    return;
+                }
+            }
+        }
+    }
+
     /// The footprint is wider than WASH_WIDE_NODE_PX on a side.
     fn wash_wide(&self, fp: &BBox) -> bool {
         let ppd = self.px_per_dbu;
@@ -2694,7 +2952,18 @@ impl<'a> Hier<'a> {
                 // budget lasts so its pages decide by their own
                 // member coverage (wash_worth / keep_sparse), and
                 // beyond the budget washes its extent coarsely
-                if self.sub_cut_wash && n.bbox.intersects(b) {
+                if self.boxm && n.bbox.intersects(b) {
+                    // sub-cut boxes: a node no wider than a box is one
+                    // (a page BVH is per (cell, layer): the layer is
+                    // exact); a wider one walks on to its pages
+                    if self.box_small(&n.bbox) {
+                        if self.take_box(1) {
+                            washes.push((layer_idx, n.bbox));
+                            self.st.sub_cut_box_nodes += 1;
+                        }
+                        continue;
+                    }
+                } else if self.sub_cut_wash && n.bbox.intersects(b) {
                     if self.wash_blob(&n.bbox) || !self.wash_wide(&n.bbox) {
                         if self.take_wash(&n.bbox, std::slice::from_ref(b), 1) {
                             washes.push((layer_idx, n.bbox));
@@ -2760,6 +3029,10 @@ impl<'a> Hier<'a> {
                             && self.reps
                             && rep_keeps((pi - page_lo) as u64, self.rep_page_level);
                         let washable = in_view && (self.sub_cut_wash || rep);
+                        if size_cut && in_view && self.box_page(&p, pi, washes, cell) {
+                            self.st.cull_page_size += 1;
+                            continue;
+                        }
                         match self.sub_cut_verdict(&p, std::slice::from_ref(b), size_cut, washable, rep) {
                             SubCut::Keep => {
                                 if rep {
@@ -3555,6 +3828,7 @@ mod tests {
                     page_hairline: false,
                     page_skip: Vec::new(),
                     prune_skipped: false,
+                    sub_cut_box: false,
         }
     }
 
@@ -3800,6 +4074,7 @@ mod tests {
                     page_hairline: false,
                     page_skip: Vec::new(),
                     prune_skipped: false,
+                    sub_cut_box: false,
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
@@ -4160,6 +4435,94 @@ mod tests {
         let giant = fixture(&[FCell { name: "TOP", pages, places: vec![] }], 0);
         let over = fitted(&giant, &ask(1));
         assert_eq!((over.pages.len(), over.stats.fit_over, over.stats.fit_pct), (1, true, 6400));
+    }
+
+    #[test]
+    fn what_the_size_cut_drops_stays_as_a_box_under_the_sub_cut_boxes() {
+        // field 2026-09-18/19: the keep picture is Calibre-like except that
+        // what the size cut drops vanishes (one via layer of the synthetic
+        // MAIN01: an empty screen from the fit view to x4). 0.02 px/dbu: the
+        // cut of 100 dbu is 2 px, a box is at most 4 px = 200 dbu.
+        let leaf = FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] };
+        let top = FCell {
+            name: "TOP",
+            pages: vec![
+                (bx(0, 0, 5000, 5000), 5000, 5000),   // drawn as ever
+                (bx(6000, 0, 6100, 100), 60, 60),     // size-cut, 2 px: a box
+                (bx(8000, 0, 9000, 1000), 60, 60),    // size-cut, 20 px: vanishes as before
+            ],
+            places: vec![
+                (0, 0, 7000, 0, false, Rep::One),
+                // 50 members 1.6 px apart: one run
+                (0, 0, 8000, 0, false, Rep::Grid { na: 50, nb: 1, va: (80, 0), vb: (0, 0) }),
+                // 5 x 2 members 20 px apart: ten boxes
+                (0, 0, 9000, 0, false, Rep::Grid { na: 5, nb: 2, va: (1000, 0), vb: (0, 1000) }),
+            ],
+        };
+        let chip = fixture(&[leaf, top], 1);
+        let view = bx(-10, -10, 20_000, 20_000);
+        let ask = |boxes: bool, depth: u32| {
+            let mut r = rq(view, 100, depth);
+            r.px_per_dbu = 0.02;
+            r.sub_cut_box = boxes;
+            r.vis = vec![1];        // the fixture's one layer (the cap counts visible layers)
+            r
+        };
+        let plain = plan_hier(&chip, &ask(false, u32::MAX), &HierOpts::default());
+        assert!(plain.wcells.iter().all(|w| w.washes.is_empty()) && plain.stats.sub_cut_boxes == 0);
+        let plan = plan_hier(&chip, &ask(true, u32::MAX), &HierOpts::default());
+        // nothing more is decoded, nothing more is expanded
+        assert_eq!((plan.pages.clone(), plan.wcells.len()), (plain.pages.clone(), plain.wcells.len()));
+        let washes = &plan.wcells.iter().find(|w| w.key.0 == 1).unwrap().washes;
+        let has = |b: BBox| washes.iter().filter(|(layer, wash)| *layer == 0 && *wash == b).count();
+        assert_eq!(has(bx(6000, 0, 6100, 100)), 1, "the small size-cut page: {washes:?}");
+        assert_eq!(has(bx(8000, 0, 9000, 1000)), 0, "a wide size-cut page is no box");
+        assert_eq!(has(bx(0, 7000, 60, 7060)), 1, "the single child");
+        assert_eq!(has(bx(0, 8000, 49 * 80 + 60, 8060)), 1, "the dense array is one run");
+        for (i, j) in [(0, 0), (4, 0), (0, 1), (4, 1)] {
+            assert_eq!(has(bx(i * 1000, 9000 + j * 1000, i * 1000 + 60, 9060 + j * 1000)), 1, "sparse member {i},{j}");
+        }
+        assert_eq!((washes.len(), plan.stats.sub_cut_boxes, plan.stats.sub_cut_box_over), (13, 13, 0));
+        // the same request, the same boxes; a narrow view boxes only what it sees
+        assert_eq!(&plan_hier(&chip, &ask(true, u32::MAX), &HierOpts::default()).wcells, &plan.wcells);
+        let mut narrow = ask(true, u32::MAX);
+        narrow.view = bx(3900, 8900, 4200, 9200);
+        let seen = plan_hier(&chip, &narrow, &HierOpts::default());
+        let seen = &seen.wcells.iter().find(|w| w.key.0 == 1).unwrap().washes;
+        // (the planner's local view is wider than the request by its margin, so a
+        // neighbour or two come along; the far members do not)
+        assert!(seen.iter().any(|(_, b)| *b == bx(4000, 9000, 4060, 9060)), "{seen:?}");
+        assert!(seen.len() < 10 && seen.iter().all(|(_, b)| b.x0 >= 3000 && b.y0 >= 8000), "{seen:?}");
+        // depth 0: children are outlines only, the page box stays
+        let flat = plan_hier(&chip, &ask(true, 0), &HierOpts::default());
+        assert_eq!(flat.stats.sub_cut_boxes, 1);
+        // more layers visible than the cap, a hidden layer, an exact request, the cap: none / fewer
+        let none = plan_hier(&chip, &ask(true, u32::MAX), &HierOpts { sub_cut_box_layers: 0, ..HierOpts::default() });
+        assert_eq!(none.stats.sub_cut_boxes, 0);
+        let mut hidden = ask(true, u32::MAX);
+        hidden.vis = vec![0];
+        assert_eq!(plan_hier(&chip, &hidden, &HierOpts::default()).stats.sub_cut_boxes, 0);
+        let mut exact = ask(true, u32::MAX);
+        exact.cut_dbu = 0;
+        assert_eq!(plan_hier(&chip, &exact, &HierOpts::default()).stats.sub_cut_boxes, 0);
+        let capped = plan_hier(&chip, &ask(true, u32::MAX), &HierOpts { sub_cut_box_max: 5, ..HierOpts::default() });
+        assert!(capped.stats.sub_cut_boxes <= 5 && capped.stats.sub_cut_box_over > 0);
+        // a cluster of children no wider than a box is ONE box, and nothing below it is visited
+        let cluster = fixture(
+            &[
+                FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] },
+                FCell {
+                    name: "TOP",
+                    pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)],
+                    places: vec![(0, 9000, 9000, 0, false, Rep::One), (0, 9070, 9000, 0, false, Rep::One), (0, 9000, 9070, 0, false, Rep::One)],
+                },
+            ],
+            1,
+        );
+        let one = plan_hier(&cluster, &ask(true, u32::MAX), &HierOpts::default());
+        assert_eq!((one.stats.sub_cut_boxes, one.stats.sub_cut_box_nodes), (1, 1));
+        let washes = &one.wcells.iter().find(|w| w.key.0 == 1).unwrap().washes;
+        assert_eq!(washes.as_slice(), &[(0, bx(9000, 9000, 9130, 9130))]);
     }
 
     #[test]
@@ -4828,6 +5191,7 @@ mod tests {
                     page_hairline: false,
                     page_skip: Vec::new(),
                     prune_skipped: false,
+                    sub_cut_box: false,
         }
     }
 
@@ -5370,6 +5734,7 @@ mod tests {
                     page_hairline: false,
                     page_skip: Vec::new(),
                     prune_skipped: false,
+                    sub_cut_box: false,
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks
