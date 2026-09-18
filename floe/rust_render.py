@@ -1112,6 +1112,12 @@ class RustRenderWorker:
                 "rep_page_level": _wire_int(fields, "rep_page_level"),
                 # the frame's level: one cut item in 2^L (the item budget)
                 "rep_level": _wire_int(fields, "rep_level"),
+                # budget-fitted cut: the planner raised the cut this many
+                # half octaves (and culled a keep request's hairlines, fit_cull)
+                # so the frame fits the decoded generation budget
+                "fit_shift": _wire_int(fields, "fit_shift"),
+                "fit_cull": _wire_int(fields, "fit_cull"),
+                "fit_over": _wire_int(fields, "fit_over"),
                 "stored_rep_points": _wire_int(fields, "stored_rep_points"),
                 "stored_rep_tested": _wire_int(fields, "stored_rep_tested"),
                 "stored_rep_limited": _wire_int(fields, "stored_rep_limited"),

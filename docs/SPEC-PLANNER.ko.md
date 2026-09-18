@@ -146,6 +146,30 @@
   화면px² → lod_page로 교체. 프로브는 px=0이라 구조적으로 exact.
 - 워시: 페이지 화면상 양축 ≤ wash_px → (layer, bbox) 렉트로 붕괴.
 
+### 예산에 맞춘 컷 (budget-fitted cut, 0.12.162, 2026-09-18)
+
+실칩: `thin keep` + detail high가 Calibre와 가장 가까운 그림이고 밀도는 오히려 높다. 그런데
+광역뷰·많은 레이어·깊은 depth에서 "decoded generation budget exceeded"로 프레임이 실패했다
+(depth 0에서도). 페이지를 무작위로 버리는 대신 **밀도를 낮춰서 맞춘다.**
+
+- `plan_hier`는 `ViewReq::decode_budget`(renderd가 주는 세대 예산, 기본 1024 MB)이 있고
+  `cut_dbu > 0`이면, 선택한 페이지의 디코드 메모리 추정(`page_memory` = 4096 + 레코드당
+  192 B + 저장 바이트 × 2; 합성 MAIN01 실측 레코드당 173 B보다 1/4 보수적)을 합산한다.
+  예산을 넘는 패스는 그 자리에서 버리고 컷을 반 옥타브(× √2) 올려 다시 계획한다. 최대
+  `FIT_SHIFTS_MAX` = 12단(× 64). keep 요청이 그래도 안 맞으면(긴 헤어라인은 size 컷으로
+  빠지지 않는다) hairline 컷을 켜고(cull) 같은 사다리를 다시 오른다. 끝까지 안 맞으면
+  마지막 단의 완전한 플랜을 `fit_over`로 표시해 돌려주고 렌더는 종전대로 예산을 보고한다.
+- 요청만으로 결정적이고, 예산 안에 드는 프레임은 한 패스로 끝나며 픽셀이 바뀌지 않는다.
+  exact(cut 0), 덱 pass, probe(`decode_budget` 0)는 건드리지 않는다. 반 옥타브로 양자화해
+  팬 중에 컷이 자주 바뀌지 않게 했다.
+- stats `fit_bytes/fit_shift/fit_cull/fit_passes/fit_over`, frame line `fit_shift= fit_cull=
+  fit_over=`, 상태줄 `detail /N to fit budget (hairlines culled)`. 킬 스위치
+  `FLOE_RUST_FIT_BUDGET=off`(종전 오류로 복귀).
+- 한계: 줄이는 단위는 크기 등급이다. 한 등급의 페이지만으로 예산을 넘는 뷰는 그 등급이
+  통째로 빠진다(합성 칩의 fit view는 551페이지 → 0). 추정이 실측보다 작으면 decode 뒤의
+  검사가 여전히 오류를 낸다(안전망). 게이트 `tools/validate_fit_budget.py`, 단위
+  `a_plan_over_its_decode_budget_raises_the_cut_until_it_fits`.
+
 ## 4. 프레임 (cell reference outline)
 
 r==0 경계에서 `frame_depth_boundary`:

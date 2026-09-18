@@ -212,6 +212,37 @@ pub fn level_for(items: u64, budget: u64) -> u32 {
     (u64::BITS - (over - 1).leading_zeros()).min(REP_LEVELS_MAX)
 }
 
+/// Budget-fitted cut (field 2026-09-18: `thin keep` + detail high is the
+/// picture closest to Calibre - denser, even - but a wide view, many layers
+/// or a deep depth ended in "decoded generation budget exceeded"). The
+/// planner estimates the decoded memory of the pages it selects and, when a
+/// request would not fit its generation budget, plans again with the cut
+/// raised by half an octave (x sqrt 2) - the density is lowered, never a page
+/// dropped at random - up to FIT_SHIFTS_MAX times (x 64); a keep request
+/// that still does not fit then culls its hairline pages (the cull policy)
+/// and climbs the same ladder. A pass that goes over is abandoned at once,
+/// so the rungs cost little beside the one that fits.
+/// Deterministic in the request; exact requests (cut 0) are never touched;
+/// FLOE_RUST_FIT_BUDGET=off is the kill switch.
+///
+/// The estimate: a decoded page is its records as structs plus the page
+/// index (measured 2026-09-18 on the synthetic MAIN01: 551 pages of 625 K
+/// records, 6.3 MB stored, were 108 MB resident = 173 B per record), so
+/// 4096 + 192 per record + twice the stored bytes (point lists) - on the
+/// safe side of the measurement by a quarter.
+pub const FIT_PAGE_FIXED: u64 = 4096;
+pub const FIT_RECORD_BYTES: u64 = 192;
+pub const FIT_SHIFTS_MAX: u32 = 12;
+
+pub fn page_memory(records: u32, stored: u32) -> u64 {
+    FIT_PAGE_FIXED + records as u64 * FIT_RECORD_BYTES + stored as u64 * 2
+}
+
+fn fit_budget_enabled() -> bool {
+    static B: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *B.get_or_init(|| std::env::var("FLOE_RUST_FIT_BUDGET").as_deref() != Ok("off"))
+}
+
 fn rep_decode_bytes() -> u64 {
     static B: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *B.get_or_init(|| {
@@ -360,6 +391,9 @@ pub struct HierOpts {
     /// every item's level (density_level). 0 = no thinning.
     /// FLOE_RUST_REP_DENSITY overrides (diagnostic).
     pub rep_density: f64,
+    /// fit the plan to ViewReq::decode_budget by raising the cut (see
+    /// FIT_SHIFTS_MAX); false = plan as asked (FLOE_RUST_FIT_BUDGET=off)
+    pub fit_budget: bool,
     /// Field diagnosis (2026-09-10): record one ExplainRow per page,
     /// page-BVH node, child placement / child-BVH node and frame the
     /// walk judged INSIDE the view - kept, culled by size, hairline,
@@ -406,6 +440,7 @@ impl Default for HierOpts {
             sub_cut_wash_px: sub_cut_wash_px(),
             rep_decode_bytes: rep_decode_bytes(),
             rep_density: rep_density(),
+            fit_budget: fit_budget_enabled(),
             explain: false,
         }
     }
@@ -499,6 +534,16 @@ pub struct HierStats {
     pub rep_items: u64,
     pub rep_level: u32,
     pub page_bytes: u64,
+    /// budget-fitted cut: the estimated decoded memory of the selected
+    /// pages (page_memory), how many half octaves the cut was raised to fit
+    /// ViewReq::decode_budget, whether a keep request fell back to the
+    /// hairline cull, the passes planned, and whether even the last
+    /// rung was over (the render then reports the budget as before)
+    pub fit_bytes: u64,
+    pub fit_shift: u32,
+    pub fit_cull: u32,
+    pub fit_passes: u32,
+    pub fit_over: bool,
     /// dots emitted for representative cut placements (kept members
     /// in view, before the layer fan-out) and for cut child-BVH
     /// subtrees within the dot pitch (one each)
@@ -809,8 +854,44 @@ pub fn walk_vis(req: &ViewReq) -> Vec<u8> {
 }
 
 pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
+    if !opts.fit_budget || req.decode_budget == 0 || req.cut_dbu <= 0 {
+        return plan_hier_as_asked(v, req, opts, 0);
+    }
+    // the ladder: the cut as asked, doubled up to FIT_SHIFTS_MAX times;
+    // a keep request then culls its hairlines and climbs again
+    let mut attempt = req.clone();
+    let (mut shift, mut culled, mut passes) = (0u32, false, 0u32);
+    loop {
+        passes += 1;
+        let mut plan = plan_hier_as_asked(v, &attempt, opts, req.decode_budget);
+        let last = shift == FIT_SHIFTS_MAX && (culled || req.page_hairline);
+        if !plan.stats.fit_over || last {
+            if plan.stats.fit_over {
+                // nothing fits: the complete plan of the last rung, so
+                // the render reports the budget exactly as it used to
+                plan = plan_hier_as_asked(v, &attempt, opts, 0);
+                plan.stats.fit_over = true;
+                passes += 1;
+            }
+            plan.stats.fit_shift = shift;
+            plan.stats.fit_cull = culled as u32;
+            plan.stats.fit_passes = passes;
+            return plan;
+        }
+        if shift < FIT_SHIFTS_MAX {
+            shift += 1;
+        } else {
+            (shift, culled) = (0, true);
+            attempt.page_hairline = true;
+        }
+        // half-octave rungs: cut x 2^(shift / 2)
+        attempt.cut_dbu = ((req.cut_dbu as f64) * 2f64.powf(shift as f64 / 2.0)).round().min(i64::MAX as f64) as i64;
+    }
+}
+
+fn plan_hier_as_asked(v: &Ovm, req: &ViewReq, opts: &HierOpts, fit_limit: u64) -> HierPlan {
     let reps = req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0;
-    let mut plan = plan_hier_pass(v, req, opts, 0);
+    let mut plan = plan_hier_pass(v, req, opts, 0, fit_limit);
     if !reps || opts.rep_decode_bytes == 0 {
         return plan;
     }
@@ -828,14 +909,14 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         // Lp the smallest level that fits (their records take the rest
         // of their level in the raster). Deterministic in the view.
         let page_level = level_for(plan.stats.rep_decode_bytes, budget);
-        let mut again = plan_hier_pass(v, req, opts, page_level);
+        let mut again = plan_hier_pass(v, req, opts, page_level, fit_limit);
         again.stats.rep_replans = 1;
         plan = again;
     }
     plan
 }
 
-fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32) -> HierPlan {
+fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_limit: u64) -> HierPlan {
     let structural_frontier = opts.frame_cap != 0;
     let mut h = Hier {
         v,
@@ -858,6 +939,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32) -> H
         reps: req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0,
         rep_page_level: page_level,
         dot_lattice: HashSet::new(),
+        fit_limit,
         page_levels: HashMap::new(),
         wash_walk_budget: opts.sub_cut_walk_budget,
         sparse_px_left: opts.sub_cut_sparse_px,
@@ -911,6 +993,12 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32) -> H
     }
     while let Some(Reverse((_, ci, r))) = h.heap.pop() {
         h.expand(ci, r);
+        if h.fit_limit > 0 && h.st.fit_bytes > h.fit_limit {
+            // over the generation budget: this pass is abandoned and
+            // plan_hier plans again with a coarser cut
+            h.st.fit_over = true;
+            break;
+        }
     }
     let mut st = h.st;
     st.rep_page_level = page_level;
@@ -1167,6 +1255,8 @@ struct Hier<'a> {
     /// the dot-pitch lattice cells (cell frame) that already hold a
     /// node dot in the cell being walked
     dot_lattice: HashSet<(i64, i64)>,
+    /// stop the pass once the selected pages' estimated memory passes this (0 = never)
+    fit_limit: u64,
     /// the levels a kept representative page hands to the raster
     page_levels: HashMap<u32, u8>,
     /// remaining per-plan sub-cut budgets (HierOpts::sub_cut_sparse_px
@@ -1440,7 +1530,9 @@ impl<'a> Hier<'a> {
         wc.pages = sel.into_iter().collect();
         wc.page_levels = wc.pages.iter().map(|p| self.page_levels.get(p).copied().unwrap_or(0)).collect();
         for &p in &wc.pages {
-            self.st.page_bytes = self.st.page_bytes.saturating_add(self.v.page(p).usize_ as u64);
+            let page = self.v.page(p);
+            self.st.page_bytes = self.st.page_bytes.saturating_add(page.usize_ as u64);
+            self.st.fit_bytes = self.st.fit_bytes.saturating_add(page_memory(page.records, page.usize_));
         }
         // ---- children (r = 0: depth exhausted - children render
         // as outline frames; own pages above carry the geometry)
@@ -3607,6 +3699,57 @@ mod tests {
     /// the v6 max_min field, folds and frames via the box min side.
     /// A sub-hair wire is a 1px stroke however long it is; at wide
     /// views it only builds walls the speckle cannot thin.
+    #[test]
+    fn a_plan_over_its_decode_budget_raises_the_cut_until_it_fits() {
+        // field 2026-09-18: keep + detail high is the closest picture to
+        // Calibre, but wide views ended in "decoded generation budget
+        // exceeded". Four size classes in one cell: 8 squares of 100, 4 of
+        // 400, 2 of 1600, a 6400 x 10 hairline and a 10^7 giant.
+        let mut pages = Vec::new();
+        for i in 0..8 {
+            pages.push((bx(i * 200, 0, i * 200 + 100, 100), 100, 100));
+        }
+        for i in 0..4 {
+            pages.push((bx(i * 800, 1000, i * 800 + 400, 1400), 400, 400));
+        }
+        for i in 0..2 {
+            pages.push((bx(i * 3200, 3000, i * 3200 + 1600, 4600), 1600, 1600));
+        }
+        pages.push((bx(0, 6000, 6400, 6010), 6400, 10));
+        let small = fixture(&[FCell { name: "TOP", pages: pages.clone(), places: vec![] }], 0);
+        let view = bx(-10, -10, 20_000_000, 20_000_000);
+        let per = page_memory(1, 0);
+        let plan = |v: &Ovm, cut: i64, budget: u64, hairline: bool, fit: bool| {
+            let mut r = rq(view, cut, u32::MAX);
+            r.decode_budget = budget;
+            r.page_hairline = hairline;
+            let o = HierOpts { fit_budget: fit, ..HierOpts::default() };
+            plan_hier(v, &r, &o)
+        };
+        let got = |p: &HierPlan| (p.pages.len(), p.stats.fit_shift, p.stats.fit_cull, p.stats.fit_over);
+        // no budget, a roomy one, the kill switch, an exact request: as asked
+        assert_eq!(got(&plan(&small, 50, 0, false, true)), (15, 0, 0, false));
+        let roomy = plan(&small, 50, 15 * per, false, true);
+        assert_eq!((got(&roomy), roomy.stats.fit_bytes, roomy.stats.fit_passes), ((15, 0, 0, false), 15 * per, 1));
+        assert_eq!(got(&plan(&small, 50, 7 * per, false, false)), (15, 0, 0, false));
+        assert_eq!(got(&plan(&small, 0, per, false, true)).1, 0);
+        // seven pages: the 100s go once the cut passes 100 (50 x 2^(3/2) = 141)
+        assert_eq!(got(&plan(&small, 50, 7 * per, false, true)), (7, 3, 0, false));
+        // three: the 400s too (50 x 2^(7/2) = 566); two: the 1600s (x 2^(11/2))
+        assert_eq!(got(&plan(&small, 50, 3 * per, false, true)), (3, 7, 0, false));
+        assert_eq!(got(&plan(&small, 50, 2 * per, false, true)), (1, 11, 0, false));
+        // less than a page: keep cannot shed the long hairline by size, so
+        // the ladder ends, the hairlines are culled and it climbs again
+        assert_eq!(got(&plan(&small, 50, 1, false, true)), (0, 11, 1, false));
+        // a cull request has only the one ladder
+        assert_eq!(got(&plan(&small, 50, 1, true, true)), (0, 11, 0, false));
+        // nothing fits a giant: the complete plan of the last rung, flagged,
+        // so the render reports the budget as it always did
+        pages.push((bx(0, 0, 10_000_000, 10_000_000), 10_000_000, 10_000_000));
+        let giant = fixture(&[FCell { name: "TOP", pages, places: vec![] }], 0);
+        assert_eq!(got(&plan(&giant, 50, 1, false, true)), (1, 12, 1, true));
+    }
+
     #[test]
     fn explain_rows_name_the_rule_that_dropped_a_region() {
         // field diagnosis 2026-09-10: which rule dropped what, in

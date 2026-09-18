@@ -3658,6 +3658,12 @@ class Viewer:
                                 # the decode budget thinned the pages
                                 # themselves (one in 2^P by index)
                                 text += " P%d" % culls["rep_page_level"]
+                    if culls.get("fit_shift") or culls.get("fit_cull"):
+                        # the planner lowered the density so the frame
+                        # fits the decoded budget (never a random drop)
+                        text += ", detail /%.3g to fit budget%s" % (
+                            2.0 ** (int(culls.get("fit_shift", 0)) / 2.0),
+                            " (hairlines culled)" if culls.get("fit_cull") else "")
                     if culls.get("stored_rep_points") or culls.get("stored_rep_limited"):
                         text += ", stored reps %s/tested %s%s" % (
                             fmt_count(culls.get("stored_rep_points", 0)),

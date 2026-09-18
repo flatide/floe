@@ -2348,7 +2348,13 @@ adapter/bench/GUI perf 라인 전파. ④ renderd 현재 RSS(`rss_bytes`,
 플래그가 1회 이상 발화하는 단위 테스트, 실칩 perf 라인에서 필드 확인.
 픽셀 경로 무변경(oracle 배터리).
 
-### F2R-24 — decode 전 byte admission (`TODO`)
+### F2R-24 — decode 전 byte admission (`PARTIAL` 0.12.162)
+
+2026-09-18: 플래너가 페이지 메타(레코드 수·저장 바이트)로 디코드 메모리를 추정해 decode
+**전에** 판정한다. 다만 오류로 끝내지 않고 컷을 반 옥타브씩 올려 예산에 맞춘다
+(SPEC-PLANNER §3 "예산에 맞춘 컷"; 실칩: keep + detail high가 Calibre에 가장 가깝지만
+depth 0에서도 예산 초과). decode 뒤 검사는 안전망으로 남아 있다. 남은 것: 추정치/실측치
+비율의 frame line 기록.
 
 문제: 뷰당 decoded 상한 판정이 라운드 decode **뒤**에 이루어져
 (제품 기본은 단일 라운드라 뷰 전체 decode 뒤) 낭비와 순간 메모리
