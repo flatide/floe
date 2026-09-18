@@ -3509,6 +3509,18 @@ class Viewer:
                     cut = ""
                     if res.get("cut_um"):
                         cut = ", cut<%.3gum" % res["cut_um"]
+                    fit = (res.get("plan_culls") or {})
+                    if fit.get("fit_shift") or fit.get("fit_cull") or fit.get("fit_over"):
+                        # budget-fitted cut (0.12.162): the planner raised
+                        # the cut so the frame fits the decoded budget.
+                        # Shown HERE, next to the cut, because the bar is
+                        # ellipsized at its end and the long diagnostics
+                        # tail hid it (field 2026-09-18)
+                        factor = 2.0 ** (int(fit.get("fit_shift", 0)) / 2.0)
+                        cut += " x%.3g to fit budget%s%s" % (
+                            factor,
+                            ", hairlines culled" if fit.get("fit_cull") else "",
+                            ", STILL OVER" if fit.get("fit_over") else "")
                     drawn = ""
                     if res.get("drawn") is not None:
                         drawn = ", ~%s drawn" % fmt_count(res["drawn"])
@@ -3658,12 +3670,6 @@ class Viewer:
                                 # the decode budget thinned the pages
                                 # themselves (one in 2^P by index)
                                 text += " P%d" % culls["rep_page_level"]
-                    if culls.get("fit_shift") or culls.get("fit_cull"):
-                        # the planner lowered the density so the frame
-                        # fits the decoded budget (never a random drop)
-                        text += ", detail /%.3g to fit budget%s" % (
-                            2.0 ** (int(culls.get("fit_shift", 0)) / 2.0),
-                            " (hairlines culled)" if culls.get("fit_cull") else "")
                     if culls.get("stored_rep_points") or culls.get("stored_rep_limited"):
                         text += ", stored reps %s/tested %s%s" % (
                             fmt_count(culls.get("stored_rep_points", 0)),

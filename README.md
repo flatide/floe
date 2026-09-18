@@ -427,7 +427,7 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   합쳐 그린다. 1단계 파일은 같은 명령으로 재생성해야 하며, 실칩 성능은 측정 전이다.
 - **예산에 맞춘 컷**(0.12.162): 선택한 페이지가 디코드 예산(기본 1024 MB)을 넘을 뷰는
   오류("decoded generation budget exceeded") 대신 컷을 반 옥타브씩 올려 밀도를 낮춰
-  그린다. keep 요청이 그래도 안 맞으면 hairline을 버린다. 상태줄 `detail /N to fit
+  그린다. keep 요청이 그래도 안 맞으면 hairline을 버린다. 상태줄의 컷 옆에 `cut<…um xN to fit
   budget`, 킬 스위치 `FLOE_RUST_FIT_BUDGET=off`. `thin keep` + detail high가 Calibre에 가장
   가까운 조합이다(docs/SPEC-PLANNER.ko.md §3).
 - **점유 요약**(광역뷰, 2026-09-11; keep 전용이었다가 2026-09-18부터 cull도,

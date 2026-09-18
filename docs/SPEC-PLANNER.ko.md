@@ -163,7 +163,7 @@
   exact(cut 0), 덱 pass, probe(`decode_budget` 0)는 건드리지 않는다. 반 옥타브로 양자화해
   팬 중에 컷이 자주 바뀌지 않게 했다.
 - stats `fit_bytes/fit_shift/fit_cull/fit_passes/fit_over`, frame line `fit_shift= fit_cull=
-  fit_over=`, 상태줄 `detail /N to fit budget (hairlines culled)`. 킬 스위치
+  fit_over=`, 상태줄의 컷 옆 `cut<…um xN to fit budget, hairlines culled`(말줄임되는 뒤쪽 진단 문자열이 아니라 앞쪽). 킬 스위치
   `FLOE_RUST_FIT_BUDGET=off`(종전 오류로 복귀).
 - 한계: 줄이는 단위는 크기 등급이다. 한 등급의 페이지만으로 예산을 넘는 뷰는 그 등급이
   통째로 빠진다(합성 칩의 fit view는 551페이지 → 0). 추정이 실측보다 작으면 decode 뒤의
