@@ -8,6 +8,14 @@ Python/GTK/KLayout/Node/브라우저는 패키지에 넣지 않는다. 개발용
 
 ## 만들기
 
+vendor는 Git으로 전달된 원본 파일 전체가 필요하다. `data/`·`AGENTS.md`를
+모든 하위 폴더에서 무시하던 규칙 때문에 `sha1` 테스트 벡터 등 5개 원본이
+누락된 문제를 수정했다. `failed to open .../tests/data/sha1.blb` 오류가 나면
+수정 커밋을 pull한 뒤 같은 빌드를 다시 실행한다. 체크섬 삭제나 빈 파일 생성으로
+우회하지 않는다. 개발 gate `tools/validate_vendor.py`는 Rust/desktop vendor의
+체크섬과 Git 포함 여부를 함께 검사하며, Git 없는 소스 archive에서는 체크섬을
+검사한다. `sh tools/validate_rust.sh --only vendor`로도 실행할 수 있다.
+
 Rust 1.89 이상 툴체인과 대상 std를 **사전에 설치/반입**해야 한다. 이 스크립트는
 rustup target add·다운로드·pip/npm을 실행하지 않는다. rustup 사용 시 `rustup which`로
 이미 설치된 cargo/rustc를 선택하며 `RUSTUP_TOOLCHAIN=1.89.0`처럼 선택할 수 있다.

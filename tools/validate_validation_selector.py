@@ -11,7 +11,7 @@ SCRIPT = ROOT / "tools/validate_rust.sh"
 
 def main():
     source = SCRIPT.read_text()
-    prelude, boundary, _ = source.partition("\nFLOE2_SMOKE_SRC=")
+    prelude, boundary, _ = source.partition("\nRAN=\n")
     assert boundary, "selector/setup boundary changed; audit before executing"
     # Execute only the actual parser and gate predicate. Never execute fixture
     # setup, Cargo or a gate body, including when testing malformed selections.

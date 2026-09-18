@@ -34,7 +34,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 # ---- gate names and aliases ----------------------------------------
-GATES="validation_selector unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
+GATES="validation_selector vendor unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
@@ -116,6 +116,11 @@ gate() {
     return 1
 }
 RAN=
+
+# Check checkout completeness before Cargo can hide a missing file behind a
+# warm build cache, or fail with a less actionable dependency checksum error.
+if gate vendor; then RAN="$RAN vendor"
+    .venv/bin/python -B tools/validate_vendor.py; fi
 
 FLOE2_SMOKE_SRC=${TMPDIR:-/tmp}/floe-valmini/valmini.oas
 mkdir -p "$(dirname "$FLOE2_SMOKE_SRC")"

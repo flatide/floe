@@ -1,5 +1,5 @@
 .venv/
-data/
+/data/
 __pycache__/
 *.pyc
 .DS_Store
@@ -10,7 +10,7 @@ __pycache__/
 .*.tray
 .*.ice.index.lock
 floe-portable-*.tar.gz
-AGENTS.md
+/AGENTS.md
 floe_research/
 
 # local jobdeck (Calibre MDPView) analysis tooling - not part of the product
