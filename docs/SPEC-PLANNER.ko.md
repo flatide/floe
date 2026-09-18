@@ -154,15 +154,19 @@
 
 - `plan_hier`는 `ViewReq::decode_budget`(renderd가 주는 세대 예산, 기본 1024 MB)이 있고
   `cut_dbu > 0`이면, 선택한 페이지의 디코드 메모리 추정(`page_memory` = 4096 + 레코드당
-  192 B + 저장 바이트 × 2; 합성 MAIN01 실측 레코드당 173 B보다 1/4 보수적)을 합산한다.
-  예산을 넘는 패스는 그 자리에서 버리고 컷을 반 옥타브(× √2) 올려 다시 계획한다. 최대
-  `FIT_SHIFTS_MAX` = 12단(× 64). keep 요청이 그래도 안 맞으면(긴 헤어라인은 size 컷으로
-  빠지지 않는다) hairline 컷을 켜고(cull) 같은 사다리를 다시 오른다. 끝까지 안 맞으면
-  마지막 단의 완전한 플랜을 `fit_over`로 표시해 돌려주고 렌더는 종전대로 예산을 보고한다.
+  192 B + 레코드당 12 B를 넘는 저장 바이트 × 6(꼭짓점·Pts 오프셋); 합성 MAIN01 실측 사각형
+  레코드당 173 B의 약 1.1배)을 합산한다. 예산을 넘는 패스는 그 자리에서 버린다.
+- 후보 컷(`fit_rungs`)은 요청 컷 × 2^(k/4), k = 1..24(× 64)와 그보다 큰 표준 detail 컷
+  (1·3·5 px)이다. **맞는 컷 중 가장 세밀한 것**을 이분 탐색으로 고른다(넘는 패스는 중단,
+  맞는 패스는 완전한 플랜; 약 log2(26)회). detail 컷이 후보에 있으므로 high 요청이
+  medium이 그대로 계획하는 컷보다 거칠게 끝나는 일이 없다(실칩 2차 보고: 반 옥타브
+  사다리에서 high가 2.83 px → 4 px로 건너뛰어 3 px가 맞는 medium보다 거칠고 빨랐다).
+- keep 요청이 어떤 단에서도 안 맞으면(긴 헤어라인은 size 컷으로 빠지지 않는다) hairline
+  컷을 켜고(cull) 요청 컷부터 같은 후보를 다시 탐색한다. 끝까지 안 맞으면 마지막 단의
+  완전한 플랜을 `fit_over`로 표시해 돌려주고 렌더는 종전대로 예산을 보고한다.
 - 요청만으로 결정적이고, 예산 안에 드는 프레임은 한 패스로 끝나며 픽셀이 바뀌지 않는다.
-  exact(cut 0), 덱 pass, probe(`decode_budget` 0)는 건드리지 않는다. 반 옥타브로 양자화해
-  팬 중에 컷이 자주 바뀌지 않게 했다.
-- stats `fit_bytes/fit_shift/fit_cull/fit_passes/fit_over`, frame line `fit_shift= fit_cull=
+  exact(cut 0), 덱 pass, probe(`decode_budget` 0)는 건드리지 않는다.
+- stats `fit_bytes/fit_pct/fit_cull/fit_passes/fit_over`(fit_pct = 맞춘 컷 ÷ 요청 컷 × 100, 0 = 그대로), frame line `fit_pct= fit_cull=
   fit_over=`, 상태줄의 컷 옆 `cut<…um xN to fit budget, hairlines culled`(말줄임되는 뒤쪽 진단 문자열이 아니라 앞쪽). 킬 스위치
   `FLOE_RUST_FIT_BUDGET=off`(종전 오류로 복귀).
 - 한계: 줄이는 단위는 크기 등급이다. 한 등급의 페이지만으로 예산을 넘는 뷰는 그 등급이

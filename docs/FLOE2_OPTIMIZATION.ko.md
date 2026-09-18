@@ -2351,14 +2351,30 @@ adapter/bench/GUI perf 라인 전파. ④ renderd 현재 RSS(`rss_bytes`,
 ### F2R-24 — decode 전 byte admission (`PARTIAL` 0.12.162)
 
 2026-09-18: 플래너가 페이지 메타(레코드 수·저장 바이트)로 디코드 메모리를 추정해 decode
-**전에** 판정한다. 다만 오류로 끝내지 않고 컷을 반 옥타브씩 올려 예산에 맞춘다
+**전에** 판정한다. 다만 오류로 끝내지 않고 컷을 올려 예산에 맞춘다(0.12.162는 반 옥타브
+사다리, 0.12.164부터는 아래 2차 보고에 따라 맞는 후보 중 가장 세밀한 컷)
 (SPEC-PLANNER §3 "예산에 맞춘 컷"; 실칩: keep + detail high가 Calibre에 가장 가깝지만
 depth 0에서도 예산 초과). decode 뒤 검사는 안전망으로 남아 있다. 남은 것: 추정치/실측치
 비율의 frame line 기록.
 
 실칩 확인(사용자, 2026-09-18, a05da06 / 0.12.162): 예산 초과가 더 이상 발생하지 않는다.
-아직 기록되지 않은 값: 뷰별 `detail /N`(fit_shift), 낮춘 밀도의 그림 품질, full depth의
+아직 기록되지 않은 값: 뷰별 컷 배수(`fit_pct`), 낮춘 밀도의 그림 품질, full depth의
 추가 패스 plan 시간.
+
+실칩 2차 보고(사용자, 2026-09-18, 1f6900c / 0.12.163): 그림은 Calibre와 유사하고 어느 정도
+확대하면 Calibre보다 밀도가 높다. 그런데 detail medium의 fit view는 1초 이상, detail high의
+fit view는 300 ms 정도이며 이 역전이 일정 줌 구간 동안 이어진다. 원인(코드 확인, 실칩
+status 값은 미기록): 반 옥타브 사다리는 요청 컷에서만 올라가므로 high(1 px)는 1.41 → 2 →
+2.83 → 4 px로 medium의 3 px를 건너뛴다. 가장 유력한 설명: medium은 3 px가 예산에 그대로
+맞아 예산 가까이 decode하고(느림), high는 2.83 px가 넘쳐 4 px로 내려앉아 medium보다 거칠고
+빨랐다(high가 더 빠르려면 high의 최종 컷이 medium보다 거칠어야 한다). "thin
+keep 탐색이 medium에서 더 느리다"는 가설은 합성 입력에서 재현되지 않았다(맞춤이 없을 때
+plan 시간은 medium이 더 짧다). 수정(0.12.164): 후보를 요청 컷 × 2^(k/4)(k=1..24)와 표준
+detail 컷(1·3·5 px)으로 두고 이분 탐색으로 예산에 맞는 **가장 세밀한** 후보를 고른다.
+high가 medium보다 거칠게 끝나지 않으므로 high는 medium 이상으로 느려진다(의도된 결과:
+예산을 다 쓰는 뷰의 비용이 약 1초라는 뜻이며, 이 비용 자체를 줄이는 것은 별도 과제).
+아직 기록되지 않은 값: medium/high 각각의 `cut<…um xN to fit budget`과 plan/decode/raster
+시간 분해.
 
 문제: 뷰당 decoded 상한 판정이 라운드 decode **뒤**에 이루어져
 (제품 기본은 단일 라운드라 뷰 전체 decode 뒤) 낭비와 순간 메모리

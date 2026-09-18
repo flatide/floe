@@ -7,9 +7,9 @@ exceeded". The planner now raises the cut by half octaves until the pages it
 selects fit the generation budget. This gate renders a synthetic MAIN01-class
 chip (tools/gen_main01_like.py) under a small budget:
 
-  * keep + cut 1 px over the whole chip, every layer: a frame, fit_shift > 0,
+  * keep + cut 1 px over the whole chip, every layer: a frame, fit_pct > 100,
     where the kill switch FLOE_RUST_FIT_BUDGET=off gives the old error;
-  * a frame that fits is untouched: fit_shift 0 and pixel-identical to the
+  * a frame that fits is untouched: fit_pct 0 and pixel-identical to the
     kill switch's frame, at the wide view under a large budget and at a near
     view under the small one.
 
@@ -84,15 +84,15 @@ def main():
                 'the kill switch no longer reproduces the field error', err.get('tiles'), err.get('resident_mb'))
             fitted, res = frame(tight, 2, wide)
             culls = res['plan_culls']
-            assert fitted is not None and culls['fit_shift'] > 0 and culls['fit_over'] == 0, culls
+            assert fitted is not None and culls['fit_pct'] > 100 and culls['fit_over'] == 0, culls
             a, ra = frame(roomy, 3, wide)
             b, _ = frame(roomy_off, 4, wide)
-            assert ra['plan_culls']['fit_shift'] == 0 and a == b, 'a frame that fits must not change'
+            assert ra['plan_culls']['fit_pct'] == 0 and a == b, 'a frame that fits must not change'
             c, rc = frame(tight, 5, near)
             d, _ = frame(tight_off, 6, near)
-            assert rc['plan_culls']['fit_shift'] == 0 and c == d and any(c), 'near view under the small budget'
-            print('fit budget: wide keep view fits 48 MB at detail /%.3g (old: error), '
-                  'fitting frames unchanged' % (2.0 ** (culls['fit_shift'] / 2.0)))
+            assert rc['plan_culls']['fit_pct'] == 0 and c == d and any(c), 'near view under the small budget'
+            print('fit budget: wide keep view fits 48 MB at cut x%.3g (old: error), '
+                  'fitting frames unchanged' % (culls['fit_pct'] / 100.0))
         finally:
             for w in (tight, tight_off, roomy, roomy_off):
                 w.stop()

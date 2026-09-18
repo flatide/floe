@@ -93,10 +93,10 @@ pub struct PlanCullCounts {
     pub rep_page_level: u64,
     /// the frame's level (one cut item in 2^L, set by the item budget)
     pub rep_level: u64,
-    /// budget-fitted cut (hier.rs plan_hier): the cut was raised this
-    /// many half octaves to fit the decoded generation budget, a keep request
+    /// budget-fitted cut (hier.rs plan_hier): the cut the plan was fitted
+    /// to as a percentage of the requested one (0 = as asked), a keep request
     /// fell back to the hairline cull (1), and nothing fitted (1)
-    pub fit_shift: u64,
+    pub fit_pct: u64,
     pub fit_cull: u64,
     pub fit_over: u64,
 }
@@ -123,7 +123,7 @@ impl PlanCullCounts {
             rep_children: st.rep_children,
             rep_page_level: st.rep_page_level as u64,
             rep_level: st.rep_level as u64,
-            fit_shift: st.fit_shift as u64,
+            fit_pct: st.fit_pct as u64,
             fit_cull: st.fit_cull as u64,
             fit_over: st.fit_over as u64,
         }
@@ -149,7 +149,7 @@ impl PlanCullCounts {
         self.rep_children = self.rep_children.saturating_add(other.rep_children);
         self.rep_page_level = self.rep_page_level.max(other.rep_page_level);
         self.rep_level = self.rep_level.max(other.rep_level);
-        self.fit_shift = self.fit_shift.max(other.fit_shift);
+        self.fit_pct = self.fit_pct.max(other.fit_pct);
         self.fit_cull = self.fit_cull.max(other.fit_cull);
         self.fit_over = self.fit_over.max(other.fit_over);
     }
