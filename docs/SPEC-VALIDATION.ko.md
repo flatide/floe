@@ -39,6 +39,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
   없는 근접 keep 뷰는 킬 스위치와 바이트 동일. 리뷰 재현 레이아웃 4개(klayout.db로 생성):
   depth 제한 아래 도형에는 박스가 없고, 0.5 px·3 px 간격 배열과 점 목록의 드문 레이어는 멤버를
   직접 그린 프레임과 켜진 픽셀 수가 같으며, 64배치 중 하나의 레이어는 클러스터마다 노드 박스 하나.
+  0.12.172: 두 레이어의 150 px 박스에서 위 레이어 채움을 없애도 아래 레이어가 그대로 켜지는지,
+  같은 워커에서 frames 끔/켬/끔으로 계획된 경계 프레임이 0/64/0인지.
 - `write_once`(tools/validate_write_once.py, 약 20초; `render` 별칭에 포함): write-once 타일
   (F2R-28)의 프레임 18개가 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`와 바이트 동일한지, 밀집 뷰에서
   타일이 차고 paint가 줄어드는지, 킬 스위치가 write-once 작업을 전혀 하지 않는지.

@@ -14,13 +14,18 @@ the chip-geometry synthetic MAIN01 (tools/gen_main01_like.py):
   * what is NOT the feature's business is byte-identical to the kill switch:
     the same view under `thin cull`, the all-layer keep view (more layers than
     the cap), and a near keep view where nothing is under the cut;
-  * sixteen layers at once: every box is ONE rect on the topmost layer it
-    stands for, so there are no more boxes than with the layers one by one;
+  * sixteen layers at once: a box is a rect on every layer it stands for, so
+    there are as many rects as with the layers planned one by one (fewer
+    when the plan went a level coarser);
   * a box never claims what is not there, and never loses what is (review
     2026-09-19, four small layouts written with klayout.db): shapes below the
     depth limit get no box; 0.5 px members at a 3 px pitch light the pixels
     of the members, not the array's footprint; a layer held by one placement
-    in 64 under a node box, or by one member of a point list, keeps its box.
+    in 64 under a node box, or by one member of a point list, keeps its box;
+  * a box never hides a layer the styles would show (review 2026-09-20: a
+    150 px box of two layers, the top one with a CLEAR fill, lights what the
+    lower layer lights alone), and the viewer's frames switch reaches the
+    planner (frames off at depth 0: no depth-boundary outline is planned).
 
     .venv/bin/python tools/validate_sub_cut_box.py
 """
@@ -53,10 +58,10 @@ def worker(src, on):
     return w
 
 
-def frame(w, gen, bbox, keys, thin, depth=None, size=None, cut_px=1):
+def frame(w, gen, bbox, keys, thin, depth=None, size=None, cut_px=1, frames=False):
     width, height = size or (W, H)
     w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': bbox, 'view': None,
-              'w': width, 'h': height, 'depth': depth, 'cut_px': cut_px, 'lod': False, 'frames': False,
+              'w': width, 'h': height, 'depth': depth, 'cut_px': cut_px, 'lod': False, 'frames': frames,
               'labels': False, 'abstract': False, 'visible': keys, 'frame_format': 'raw',
               'thin': thin, 'frame_cache': False})
     deadline = time.monotonic() + 300
@@ -123,18 +128,51 @@ def review_layouts(out):
             cell.shapes(l3 if k == 37 else l1).insert(db.Box(0, 0, 300, 300))
             top.insert(db.CellInstArray(cell.cell_index(), db.Trans(cx * um + (k % 8) * 400, cy * um + (k // 8) * 400)))
     layout.write(str(out / 'nodes.oas'))
+    # an abutting 300 x 300 array of a 0.5 um cell that holds 1/0 AND 3/0: one
+    # 150 px box for both layers
+    layout, top, l1, l3 = new()
+    leaf = layout.create_cell('LEAF')
+    leaf.shapes(l1).insert(db.Box(0, 0, 500, 500))
+    leaf.shapes(l3).insert(db.Box(0, 0, 500, 500))
+    top.insert(db.CellInstArray(leaf.cell_index(), db.Trans(400 * um, 400 * um), db.Vector(500, 0), db.Vector(0, 500), 300, 300))
+    layout.write(str(out / 'styles.oas'))
+    # 64 children that hold only 1/0, under a top with 2/0
+    layout, top, l1, _ = new()
+    for k in range(64):
+        cell = layout.create_cell('C%02d' % k)
+        cell.shapes(l1).insert(db.Box(0, 0, 50 * um, 50 * um))
+        top.insert(db.CellInstArray(cell.cell_index(), db.Trans(((k % 8) * 100 + 20) * um, ((k // 8) * 100 + 20) * um)))
+    layout.write(str(out / 'frames.oas'))
 
 
 def review_cases(temp):
     review_layouts(temp)
     view, size = (0.0, 0.0, 1_000_000.0, 1_000_000.0), (1000, 1000)
     seen = {}
-    for name in ('depth', 'array', 'points', 'nodes'):
+    for name in ('depth', 'array', 'points', 'nodes', 'styles', 'frames'):
         done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(temp / (name + '.oas'))],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
         off, on = worker(temp / (name + '.oas'), False), worker(temp / (name + '.oas'), True)
         try:
+            if name == 'styles':
+                clear = '\n'.join(['.' * 16] * 16)
+                alone, _ = frame(on, 1, view, [(1, 0)], 'keep', size=size)
+                on.submit({'kind': 'repattern', 'fills': [((3, 0), clear)], 'widths': []})
+                under, res = frame(on, 2, view, [(1, 0), (3, 0)], 'keep', size=size)
+                assert lit(alone) > 10_000 and lit(under) >= lit(alone), (
+                    'a clear layer on top erased the one under it: %d px alone, %d px under it'
+                    % (lit(alone), lit(under)))
+                assert res['plan_culls']['sub_cut_boxes'] == 2, res['plan_culls']
+                seen[name] = '%d px alone, %d px under a clear layer' % (lit(alone), lit(under))
+                continue
+            if name == 'frames':
+                # the same worker, the frames switch toggled: off, on, off
+                planned = [frame(on, gen, view, [(2, 0)], 'keep', depth=0, size=size, frames=want)[1]['frame_rects']
+                           for gen, want in ((1, False), (2, True), (3, False))]
+                assert planned == [0, 64, 0], 'frame rects planned with frames off/on/off: %s' % planned
+                seen[name] = 'frames off plans none, on plans 64'
+                continue
             if name == 'depth':
                 for depth, want in ((1, False), (2, True), (None, True)):
                     pixels, res = frame(on, depth or 9, view, [(1, 0)], 'keep', depth=depth, size=size)

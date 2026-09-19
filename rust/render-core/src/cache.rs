@@ -998,6 +998,7 @@ impl Cache {
             page_hairline: request.page_hairline,
             prune_skipped: request.prune_summary,
             sub_cut_box: request.sub_cut_box && !request.exact,
+            frames: request.frames,
             page_skip: if request.summary_layers.is_empty() {
                 Vec::new()
             } else {

@@ -215,8 +215,8 @@ fn sub_cut_wash_px() -> f64 {
 ///     takes the union over ALL placements below it, stopping early once
 ///     every visible layer the cell can hold is found (`sub_cut_box_reads`
 ///     counts the placements read);
-///   * a box is ONE rect, on the topmost (in paint order) of the layers it
-///     stands for - see box_layers;
+///   * a box is one rect per layer it stands for (see box_layers: which
+///     layer hides which is the raster's business, it knows the styles);
 ///   * only with at most `sub_cut_box_layers` (16) layers visible: the boxes
 ///     are for the view that would otherwise be sparse. Measured on the
 ///     chip-geometry synthetic MAIN01 1/10 (2026-09-19, keep, detail high,
@@ -267,12 +267,6 @@ impl LayerSet {
         for (word, more) in self.0[..n].iter_mut().zip(other.0[..n].iter()) {
             *word |= *more;
         }
-    }
-
-    /// the topmost layer of the set
-    #[inline]
-    fn top(&self, n: usize) -> Option<usize> {
-        self.0[..n].iter().enumerate().rev().find(|(_, word)| **word != 0).map(|(at, word)| at * 64 + 63 - word.leading_zeros() as usize)
     }
 }
 
@@ -1335,7 +1329,9 @@ fn plan_hier_as_asked(v: &Ovm, req: &ViewReq, opts: &HierOpts, fit_limit: u64) -
 }
 
 fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_limit: u64) -> HierPlan {
-    let structural_frontier = opts.frame_cap != 0;
+    // a request that draws no hierarchy frames plans none (ViewReq::frames)
+    let frame_cap = if req.frames { opts.frame_cap } else { 0 };
+    let structural_frontier = frame_cap != 0;
     let mut h = Hier {
         v,
         req,
@@ -1354,6 +1350,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         explain: Vec::new(),
         explain_on: opts.explain,
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
+        frame_cap,
         boxm: false,
         box_px: opts.sub_cut_box_px * (1u32 << opts.sub_cut_box_level.min(8)) as f64,
         box_stride: 1i64 << opts.sub_cut_box_level.min(8),
@@ -1706,6 +1703,8 @@ struct Hier<'a> {
     wash_walk_budget: u64,
     /// ViewReq::sub_cut_box in force (see plan_hier_pass), the largest box
     /// in screen px, the visible layers a box may take and the box rects left
+    /// HierOpts::frame_cap, or 0 for a request without hierarchy frames
+    frame_cap: usize,
     boxm: bool,
     box_px: f64,
     /// arrays keep every box_stride-th member (the pass level)
@@ -2057,7 +2056,7 @@ impl<'a> Hier<'a> {
                     // are drawn whatever the layers, so only where none
                     // can come (full depth, or frames off).
                     if node.lmask_rec != floe_ovm::LMASK_UNKNOWN
-                        && (r == REM_FULL || self.opts.frame_cap == 0)
+                        && (r == REM_FULL || self.frame_cap == 0)
                         && !masks_intersect(self.v.bitset(node.lmask_rec), &self.walk_vis)
                     {
                         self.st.culled_bvh_layer += 1;
@@ -2182,7 +2181,7 @@ impl<'a> Hier<'a> {
                         // frame_depth_boundary.
                         if r == 0 {
                             if self.frames_total
-                                < self.opts.frame_cap
+                                < self.frame_cap
                             {
                                 framed.insert(pli);
                                 self.frame_depth_boundary(
@@ -2252,7 +2251,7 @@ impl<'a> Hier<'a> {
                                 self.note_child("fold_size", pli, &h, &rb, &boxes);
                                 continue;
                             }
-                            if self.opts.frame_cap != 0
+                            if self.frame_cap != 0
                                 || masks_intersect(
                                     self.v.bitset(
                                         self.v.cell_lmask_rec(h.child),
@@ -2463,22 +2462,27 @@ impl<'a> Hier<'a> {
         found
     }
 
-    /// `fp` as ONE box on the topmost of the visible layers in `found`. The
-    /// boxes of the layers under it would cover the same pixels and be
-    /// overwritten: every paint is opaque, and the default fill (the
-    /// speckle) has one phase for all layers. (With per-layer stipples the
-    /// lower layers would show through the top one's dark pixels - inside a
-    /// box of at most a few pixels, behind its solid outline.) One rect per
-    /// box instead of one per layer is what lets the boxes work with any
-    /// number of layers visible: 32 layers took 1.9 M rects, the plan cap.
+    /// `fp` as a box on EVERY visible layer in `found`, within the box count
+    /// budget. 0.12.171 kept the topmost layer's rect alone, reasoning that
+    /// it covers the ones below - true only for fills that light the same
+    /// pixels. Review 2026-09-20: with the top layer's fill CLEAR a 150 px
+    /// box of two layers showed its 600 px outline where the lower layer
+    /// alone lit 11,700 px. What a layer hides depends on the styles, which
+    /// the planner does not know and which change without a new plan; the
+    /// write-once raster already drops a rect whose pixels are all written.
     fn box_layers(&mut self, wc: &mut WsCell, found: LayerSet, fp: BBox) -> bool {
-        let Some(top) = found.top(self.set_words) else {
-            return false;
-        };
-        if !self.take_box(1) {
+        let n = self.set_words;
+        let count: u64 = found.0[..n].iter().map(|word| word.count_ones() as u64).sum();
+        if count == 0 || !self.take_box(count) {
             return false;
         }
-        wc.washes.push((self.vis_layers[top], fp));
+        for (at, &word) in found.0[..n].iter().enumerate() {
+            let mut left = word;
+            while left != 0 {
+                wc.washes.push((self.vis_layers[at * 64 + left.trailing_zeros() as usize], fp));
+                left &= left - 1;
+            }
+        }
         true
     }
 
@@ -2645,7 +2649,8 @@ impl<'a> Hier<'a> {
             }
         };
         let (group_a, group_b) = (groups(i0, i1, run_a), groups(j0, j1, run_b));
-        let rects = (group_a.len() * group_b.len()) as u64;
+        let layers: u64 = found.0[..self.set_words].iter().map(|word| word.count_ones() as u64).sum();
+        let rects = (group_a.len() * group_b.len()) as u64 * layers;
         if rects > self.boxes_left {
             self.st.sub_cut_box_over += 1;
             return;
@@ -4116,6 +4121,7 @@ mod tests {
                     page_skip: Vec::new(),
                     prune_skipped: false,
                     sub_cut_box: false,
+                    frames: true,
         }
     }
 
@@ -4362,6 +4368,7 @@ mod tests {
                     page_skip: Vec::new(),
                     prune_skipped: false,
                     sub_cut_box: false,
+                    frames: true,
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
@@ -4920,10 +4927,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_cut_box_is_one_rect_on_the_topmost_layer_it_stands_for() {
-        // 0.12.171: one rect per box, not one per layer - the boxes of the
-        // layers underneath cover the same pixels and are overwritten. A
-        // cluster of a LEAF on L1/0 and a LEAF on L2/0 within 4 px.
+    fn a_sub_cut_box_keeps_every_layer_it_stands_for() {
+        // review 2026-09-20: 0.12.171 kept the topmost layer's rect alone, and
+        // a top layer with a CLEAR fill erased the layer under it. Which layer
+        // hides which is the raster's business. A cluster of a LEAF on L1/0
+        // and a LEAF on L2/0 within 4 px.
         let cells = [
             FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] },
             FCell { name: "LEAF@2", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] },
@@ -4944,10 +4952,10 @@ mod tests {
         };
         let node = bx(9000, 9000, 9130, 9130);
         for masks in [true, false] {
-            // both visible: one rect, on L2/0 (painted over L1/0)
-            assert_eq!(boxes(0b11, masks), (vec![(1, node)], 1), "masks {masks}");
+            // both visible: a rect on each, in paint order
+            assert_eq!(boxes(0b11, masks), (vec![(0, node), (1, node)], 2), "masks {masks}");
             // "everything visible" sets the padding bits of the byte too
-            assert_eq!(boxes(0xff, masks), (vec![(1, node)], 1));
+            assert_eq!(boxes(0xff, masks), (vec![(0, node), (1, node)], 2));
             // one visible: that layer
             assert_eq!(boxes(0b01, masks), (vec![(0, node)], 1));
             assert_eq!(boxes(0b10, masks), (vec![(1, node)], 1));
@@ -4966,13 +4974,17 @@ mod tests {
                 places: (0..6).map(|i| (0, i as i64 * 1000, 0, 0, false, Rep::One)).collect(),
             },
         ];
+        // review 2026-09-20: frames off must come through the REQUEST - the
+        // viewer plans with the default options (frame_cap 200,000), and this
+        // test used to set frame_cap 0 itself, so it never saw that the
+        // viewer's switch did not reach the planner
         let plan_of = |masks: bool, vis: u8, depth: u32, frames: bool| {
             let chip = fixture_with(&cells, 1, masks);
             let mut r = rq(bx(-10, -10, 20_000, 20_000), 100, depth);
             r.px_per_dbu = 0.02;
             r.vis = vec![vis];
-            let opts = HierOpts { frame_cap: if frames { 200_000 } else { 0 }, ..HierOpts::default() };
-            plan_hier(&chip, &r, &opts)
+            r.frames = frames;
+            plan_hier(&chip, &r, &HierOpts::default())
         };
         // the LEAFs' layer hidden: one node test instead of six placements
         let (with, without) = (plan_of(true, 0b10, u32::MAX, true), plan_of(false, 0b10, u32::MAX, true));
@@ -4988,7 +5000,14 @@ mod tests {
         let (with, without) = (plan_of(true, 0b10, 0, true), plan_of(false, 0b10, 0, true));
         assert_eq!(with.stats.culled_bvh_layer, 0);
         assert!(with.stats.frame_rects > 0 && with.wcells == without.wcells);
-        assert_eq!(plan_of(true, 0b10, 0, false).stats.culled_bvh_layer, 1);
+        // frames off: none planned, and the subtree is not walked for them
+        let off = plan_of(true, 0b10, 0, false);
+        assert_eq!((off.stats.culled_bvh_layer, off.stats.frame_rects), (1, 0));
+        assert!(off.wcells.iter().all(|w| w.frames.is_empty()));
+        // ... with or without node masks, and the pages are the same either way
+        let plain = plan_of(false, 0b10, 0, false);
+        assert_eq!((plain.stats.frame_rects, &plain.pages), (0, &with.pages));
+        assert_eq!(off.pages, with.pages);
     }
 
     #[test]
@@ -5658,6 +5677,7 @@ mod tests {
                     page_skip: Vec::new(),
                     prune_skipped: false,
                     sub_cut_box: false,
+                    frames: true,
         }
     }
 
@@ -6223,6 +6243,7 @@ mod tests {
                     page_skip: Vec::new(),
                     prune_skipped: false,
                     sub_cut_box: false,
+                    frames: true,
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks

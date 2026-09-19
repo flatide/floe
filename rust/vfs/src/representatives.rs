@@ -1366,6 +1366,7 @@ mod tests {
             page_skip: vec![],
             prune_skipped: false,
             sub_cut_box: false,
+            frames: true,
         }
     }
     fn load(built: &mut Built) -> File {

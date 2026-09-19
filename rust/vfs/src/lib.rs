@@ -87,6 +87,12 @@ pub struct ViewReq {
     /// (hier.rs SUB_CUT_BOX_PX): renderd sets it for a `thin keep` request
     /// of a plain layout; deck passes, probes and the CLI's plans do not.
     pub sub_cut_box: bool,
+    /// The frame draws hierarchy frames (cell outlines at the depth
+    /// boundary). False: none are planned, and a child subtree that holds
+    /// no visible layer is not walked to reach them - the planner's
+    /// HierOpts::frame_cap only says how many, not whether. renderd passes
+    /// the viewer's frames switch; everything else plans with frames.
+    pub frames: bool,
 }
 
 /// one placement of a page cell in the working-set top. na/nb/va/vb

@@ -1000,6 +1000,7 @@ fn run_clip(
         summary_layers: Vec::new(),
         prune_summary: false,
         sub_cut_box: false,
+        frames: true,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -2626,6 +2627,10 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64)
         // cut drops stays as a box (hier.rs SUB_CUT_BOX_PX).
         // FLOE_RUST_SUB_CUT_BOX=off is the kill switch.
         sub_cut_box: !command.exact && command.thin_keep && sub_cut_box_enabled(),
+        // the viewer's frames switch reaches the planner (review 2026-09-20: it
+        // only reached the raster, so a frames-off view still planned - and
+        // walked for - every depth-boundary outline)
+        frames: command.frames,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
