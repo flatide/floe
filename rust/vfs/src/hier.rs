@@ -215,18 +215,74 @@ fn sub_cut_wash_px() -> f64 {
 ///     takes the union over ALL placements below it, stopping early once
 ///     every visible layer the cell can hold is found (`sub_cut_box_reads`
 ///     counts the placements read);
-///   * only with at most `sub_cut_box_layers` layers visible: the boxes are
-///     for the view that would otherwise be EMPTY (one or a few layers of
-///     small shapes). A view of many layers is full of wires and blocks
-///     anyway, and boxes cost a walk and a paint per layer - on the chip-
-///     geometry synthetic MAIN01 eight layers at x8 went from 0.1 s to 1.1 s
-///     for a frame that was fully lit without them. Beyond
-///     `sub_cut_box_max` box rects the rest are dropped as the cut always
-///     did (sub_cut_box_over).
+///   * a box is ONE rect, on the topmost (in paint order) of the layers it
+///     stands for - see box_layers;
+///   * only with at most `sub_cut_box_layers` (16) layers visible: the boxes
+///     are for the view that would otherwise be sparse. Measured on the
+///     chip-geometry synthetic MAIN01 1/10 (2026-09-19, keep, detail high,
+///     boxes off -> on): 16 layers light 183 K -> 896 K px at the fit view
+///     for 0.04 -> 0.36 s; with 32 layers the screen is already 90 % lit
+///     from x2 on, and with 128 or all 449 every pixel is lit from x4 on
+///     while the frame goes 0.8 -> 4.1 s and 2.5 -> 5.9 s - the boxes of a
+///     top layer are painted first and buy nothing. Beyond
+///     `sub_cut_box_max` box rects the pass is planned a level coarser.
+///     FLOE_RUST_SUB_CUT_BOX_LAYERS overrides (diagnostic; up to
+///     LAYER_SET_MAX).
 /// A box is as honest as its size: within sub_cut_box_px of something
 /// real. Exact requests, probes, deck passes and the diagnostic sub-cut
 /// wash / page representatives never take boxes.
 pub const SUB_CUT_BOX_PX: f64 = 4.0;
+
+/// A set of visible layers by PAINT RANK (bit k = the k-th visible layer in
+/// ascending (layer, datatype) order - the order the viewer paints them,
+/// bottom to top), up to LAYER_SET_MAX of them.
+pub const LAYER_SET_MAX: usize = 512;
+
+/// Every operation takes `n`, the words in use (the visible layers / 64,
+/// rounded up): with a handful of layers visible - the common case - a set
+/// is one word, and these run once per placement read.
+#[derive(Clone, Copy)]
+struct LayerSet([u64; LAYER_SET_MAX / 64]);
+
+impl LayerSet {
+    const EMPTY: LayerSet = LayerSet([0; LAYER_SET_MAX / 64]);
+
+    #[inline]
+    fn is_empty(&self, n: usize) -> bool {
+        self.0[..n].iter().all(|word| *word == 0)
+    }
+
+    #[inline]
+    fn same(&self, other: &LayerSet, n: usize) -> bool {
+        self.0[..n] == other.0[..n]
+    }
+
+    #[inline]
+    fn insert(&mut self, rank: usize) {
+        self.0[rank / 64] |= 1 << (rank % 64);
+    }
+
+    #[inline]
+    fn union(&mut self, other: &LayerSet, n: usize) {
+        for (word, more) in self.0[..n].iter_mut().zip(other.0[..n].iter()) {
+            *word |= *more;
+        }
+    }
+
+    /// the topmost layer of the set
+    #[inline]
+    fn top(&self, n: usize) -> Option<usize> {
+        self.0[..n].iter().enumerate().rev().find(|(_, word)| **word != 0).map(|(at, word)| at * 64 + 63 - word.leading_zeros() as usize)
+    }
+}
+
+/// HierOpts::sub_cut_box_layers default; FLOE_RUST_SUB_CUT_BOX_LAYERS overrides (diagnostic).
+fn sub_cut_box_layers() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("FLOE_RUST_SUB_CUT_BOX_LAYERS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(SUB_CUT_BOX_LAYERS)
+    })
+}
 
 /// HierOpts::sub_cut_box_px default; FLOE_RUST_SUB_CUT_BOX_PX overrides (diagnostic).
 fn sub_cut_box_px() -> f64 {
@@ -249,7 +305,7 @@ pub const SUB_CUT_BOX_LEVELS: u32 = 3;
 /// 7 ns each); past it a node keeps what it found so far - true positives -
 /// and the rest of its layers are unknown (sub_cut_box_unsure)
 pub const SUB_CUT_BOX_READS: u64 = 64_000_000;
-pub const SUB_CUT_BOX_LAYERS: u32 = 4;
+pub const SUB_CUT_BOX_LAYERS: u32 = 16;
 /// member boxes one array placement may emit per layer before it is strided
 pub const SUB_CUT_BOX_ARRAY_MAX: u64 = 1 << 18;
 
@@ -587,7 +643,7 @@ impl Default for HierOpts {
             sub_cut_wash_px: sub_cut_wash_px(),
             sub_cut_box_px: sub_cut_box_px(),
             sub_cut_box_max: SUB_CUT_BOX_MAX,
-            sub_cut_box_layers: SUB_CUT_BOX_LAYERS,
+            sub_cut_box_layers: sub_cut_box_layers(),
             sub_cut_box_reads: SUB_CUT_BOX_READS,
             sub_cut_box_level: 0,
             rep_decode_bytes: rep_decode_bytes(),
@@ -1305,6 +1361,9 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         vis_layers: Vec::new(),
         cell_bits_memo: HashMap::new(),
         node_bits_memo: HashMap::new(),
+        mask_bits_memo: HashMap::new(),
+        vis_rank: HashMap::new(),
+        set_words: 1,
         boxes_left: opts.sub_cut_box_max,
         reps: req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0,
         rep_page_level: page_level,
@@ -1348,10 +1407,18 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
             .iter()
             .enumerate()
             .flat_map(|(at, &byte)| (0..8u32).filter(move |bit| byte & (1 << bit) != 0).map(move |bit| at as u32 * 8 + bit))
+            // a request may set the padding bits of its last byte ("everything")
+            .filter(|&idx| idx < v.n_layers)
             .collect();
-        if !layers.is_empty() && layers.len() <= (opts.sub_cut_box_layers as usize).min(32) {
+        if !layers.is_empty() && layers.len() <= (opts.sub_cut_box_layers as usize).min(LAYER_SET_MAX) {
+            // paint order: the viewer paints ascending (layer, datatype), the
+            // index numbers layers by first appearance in the file
+            let mut layers: Vec<(u32, u32, u32)> = layers.iter().map(|&idx| { let l = v.layer(idx); (l.layer, l.dt, idx) }).collect();
+            layers.sort();
             h.boxm = true;
-            h.vis_layers = layers;
+            h.vis_layers = layers.iter().map(|&(_, _, idx)| idx).collect();
+            h.vis_rank = h.vis_layers.iter().enumerate().map(|(rank, &idx)| (idx, rank)).collect();
+            h.set_words = h.vis_layers.len().div_ceil(64).max(1);
         }
     }
     let top_ci = v.top;
@@ -1647,8 +1714,13 @@ struct Hier<'a> {
     vis_layers: Vec<u32>,
     /// cell_bits / node_bits of this pass: (cell | node, remaining depth) ->
     /// which of `vis_layers` (bit k = vis_layers[k]) are really there
-    cell_bits_memo: HashMap<(u32, u32), u32>,
-    node_bits_memo: HashMap<(u32, u32), u32>,
+    cell_bits_memo: HashMap<(u32, u32), LayerSet>,
+    node_bits_memo: HashMap<(u32, u32), LayerSet>,
+    /// layer bitset index -> its visible layers, and layer index -> paint rank
+    mask_bits_memo: HashMap<u32, LayerSet>,
+    vis_rank: HashMap<u32, usize>,
+    /// LayerSet words in use
+    set_words: usize,
     boxes_left: u64,
     /// ViewReq::page_reps in force (cut on, sub-cut wash off)
     reps: bool,
@@ -1954,7 +2026,7 @@ impl<'a> Hier<'a> {
             let cut = self.cut;
             // the visible layers this cell can hold at all: a node scan for
             // the sub-cut boxes stops once it has found them
-            let box_upper = if self.boxm { self.vis_bits(self.v.cell_lmask_rec(ci)) } else { 0 };
+            let box_upper = if self.boxm { self.vis_bits(self.v.cell_lmask_rec(ci)) } else { LayerSet::EMPTY };
             // rev 45: at the r==0 boundary with the thin lattice on,
             // hairline-thin subtrees must still be WALKED - their
             // boxes are no longer culled but sampled. The both-dims
@@ -2305,15 +2377,36 @@ impl<'a> Hier<'a> {
         true
     }
 
-    /// which of `vis_layers` a layer bitset holds (bit k = vis_layers[k])
-    fn vis_bits(&self, mask: u32) -> u32 {
-        let bits = self.v.bitset(mask);
-        let mut out = 0u32;
-        for (k, &layer) in self.vis_layers.iter().enumerate() {
-            if bits.get((layer / 8) as usize).is_some_and(|byte| byte & (1 << (layer % 8)) != 0) {
-                out |= 1 << k;
+    /// which of `vis_layers` a layer bitset holds (bit k = vis_layers[k]),
+    /// memoized by bitset index
+    fn vis_bits(&mut self, mask: u32) -> LayerSet {
+        if self.vis_layers.len() <= 16 {
+            // a few layers: testing their bits beats a memo lookup (this runs
+            // once per placement read)
+            let bits = self.v.bitset(mask);
+            let mut out = LayerSet::EMPTY;
+            for (rank, &layer) in self.vis_layers.iter().enumerate() {
+                if bits.get((layer / 8) as usize).is_some_and(|byte| byte & (1 << (layer % 8)) != 0) {
+                    out.0[0] |= 1 << rank;
+                }
+            }
+            return out;
+        }
+        if let Some(known) = self.mask_bits_memo.get(&mask) {
+            return *known;
+        }
+        let mut out = LayerSet::EMPTY;
+        for (at, (&byte, &vis)) in self.v.bitset(mask).iter().zip(self.wash_vis.iter()).enumerate() {
+            let mut both = byte & vis;
+            while both != 0 {
+                let layer = at as u32 * 8 + both.trailing_zeros();
+                if let Some(&rank) = self.vis_rank.get(&layer) {
+                    out.insert(rank);
+                }
+                both &= both - 1;
             }
         }
+        self.mask_bits_memo.insert(mask, out);
         out
     }
 
@@ -2334,14 +2427,15 @@ impl<'a> Hier<'a> {
     /// depth boundary, else its own shapes and what its children draw one
     /// level down (a walk of its placements, memoized per pass, stopped
     /// once everything the recursive mask allows is found).
-    fn cell_bits(&mut self, ci: u32, rem: u32) -> u32 {
+    fn cell_bits(&mut self, ci: u32, rem: u32) -> LayerSet {
         let v = self.v;
         let all = self.vis_bits(v.cell_lmask_rec(ci));
-        if rem == REM_FULL || all == 0 || rem >= v.cell_height(ci) {
+        let n = self.set_words;
+        if rem == REM_FULL || all.is_empty(n) || rem >= v.cell_height(ci) {
             return all;
         }
         let own = self.vis_bits(v.cell_lmask_direct(ci));
-        if rem == 0 || own == all {
+        if rem == 0 || own.same(&all, n) {
             return own;
         }
         if let Some(&known) = self.cell_bits_memo.get(&(ci, rem)) {
@@ -2359,8 +2453,9 @@ impl<'a> Hier<'a> {
             self.reads_left -= 1;
             self.st.sub_cut_box_reads += 1;
             let child = v.place_child(pli);
-            found |= self.cell_bits(child, self.child_rem(child, rem));
-            if found == all {
+            let below = self.cell_bits(child, self.child_rem(child, rem));
+            found.union(&below, n);
+            if found.same(&all, n) {
                 break;
             }
         }
@@ -2368,17 +2463,22 @@ impl<'a> Hier<'a> {
         found
     }
 
-    /// `fp` on the visible layers in `found` (bit k = vis_layers[k]), within
-    /// the box count budget.
-    fn box_layers(&mut self, wc: &mut WsCell, found: u32, fp: BBox) -> bool {
-        if found == 0 || !self.take_box(found.count_ones() as u64) {
+    /// `fp` as ONE box on the topmost of the visible layers in `found`. The
+    /// boxes of the layers under it would cover the same pixels and be
+    /// overwritten: every paint is opaque, and the default fill (the
+    /// speckle) has one phase for all layers. (With per-layer stipples the
+    /// lower layers would show through the top one's dark pixels - inside a
+    /// box of at most a few pixels, behind its solid outline.) One rect per
+    /// box instead of one per layer is what lets the boxes work with any
+    /// number of layers visible: 32 layers took 1.9 M rects, the plan cap.
+    fn box_layers(&mut self, wc: &mut WsCell, found: LayerSet, fp: BBox) -> bool {
+        let Some(top) = found.top(self.set_words) else {
+            return false;
+        };
+        if !self.take_box(1) {
             return false;
         }
-        for (k, &layer) in self.vis_layers.iter().enumerate() {
-            if found & (1 << k) != 0 {
-                wc.washes.push((layer, fp));
-            }
-        }
+        wc.washes.push((self.vis_layers[top], fp));
         true
     }
 
@@ -2391,12 +2491,12 @@ impl<'a> Hier<'a> {
     /// the two they bound the answer, and only when the bounds differ - or
     /// the index carries no masks - are the placements asked, ALL of them,
     /// up to the moment every layer in `upper` is found.
-    fn box_node(&mut self, wc: &mut WsCell, ni: u32, fp: &BBox, r: u32, upper: u32, masks: (u32, u32)) {
+    fn box_node(&mut self, wc: &mut WsCell, ni: u32, fp: &BBox, r: u32, upper: LayerSet, masks: (u32, u32)) {
         let known = if masks.0 == floe_ovm::LMASK_UNKNOWN || masks.1 == floe_ovm::LMASK_UNKNOWN {
             None
         } else {
             let (most, least) = (self.vis_bits(masks.0), self.vis_bits(masks.1));
-            if r == REM_FULL || most == least {
+            if r == REM_FULL || most.same(&least, self.set_words) {
                 Some((most, most))
             } else if r == 1 {
                 Some((least, least))
@@ -2405,14 +2505,14 @@ impl<'a> Hier<'a> {
             }
         };
         let (least, upper) = match known {
-            Some((least, most)) if least == most => {
+            Some((least, most)) if least.same(&most, self.set_words) => {
                 if self.box_layers(wc, most, *fp) {
                     self.st.sub_cut_box_nodes += 1;
                 }
                 return;
             }
             Some((least, most)) => (least, most),
-            None => (0, upper),
+            None => (LayerSet::EMPTY, upper),
         };
         let found = match self.node_bits_memo.get(&(ni, r)) {
             Some(&known) => known,
@@ -2428,8 +2528,9 @@ impl<'a> Hier<'a> {
                     self.reads_left -= 1;
                     self.st.sub_cut_box_reads += 1;
                     let child = v.place_child(pli);
-                    found |= self.cell_bits(child, self.child_rem(child, r));
-                    if found == upper {
+                    let below = self.cell_bits(child, self.child_rem(child, r));
+                    found.union(&below, self.set_words);
+                    if found.same(&upper, self.set_words) {
                         break;
                     }
                 }
@@ -2464,7 +2565,7 @@ impl<'a> Hier<'a> {
             return;
         }
         let found = self.cell_bits(h.child, self.child_rem(h.child, r));
-        if found == 0 {
+        if found.is_empty(self.set_words) {
             return;
         }
         if h.kind == 0 || self.box_small(&fp) {
@@ -2544,7 +2645,7 @@ impl<'a> Hier<'a> {
             }
         };
         let (group_a, group_b) = (groups(i0, i1, run_a), groups(j0, j1, run_b));
-        let rects = (group_a.len() * group_b.len()) as u64 * found.count_ones() as u64;
+        let rects = (group_a.len() * group_b.len()) as u64;
         if rects > self.boxes_left {
             self.st.sub_cut_box_over += 1;
             return;
@@ -4816,6 +4917,41 @@ mod tests {
         // without reading a placement; in between they only bound the answer
         assert_eq!((boxes_of(4, u32::MAX, true).2, boxes_of(4, 1, true).2), (0, 0));
         assert!(boxes_of(4, 2, true).2 > 0 && boxes_of(4, u32::MAX, false).2 > 0);
+    }
+
+    #[test]
+    fn a_sub_cut_box_is_one_rect_on_the_topmost_layer_it_stands_for() {
+        // 0.12.171: one rect per box, not one per layer - the boxes of the
+        // layers underneath cover the same pixels and are overwritten. A
+        // cluster of a LEAF on L1/0 and a LEAF on L2/0 within 4 px.
+        let cells = [
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] },
+            FCell { name: "LEAF@2", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] },
+            FCell {
+                name: "TOP",
+                pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)],
+                places: vec![(0, 9000, 9000, 0, false, Rep::One), (1, 9070, 9000, 0, false, Rep::One), (0, 9000, 9070, 0, false, Rep::One)],
+            },
+        ];
+        let boxes = |vis: u8, masks: bool| {
+            let chip = fixture_with(&cells, 2, masks);
+            let mut r = rq(bx(-10, -10, 20_000, 20_000), 100, u32::MAX);
+            r.px_per_dbu = 0.02;
+            r.sub_cut_box = true;
+            r.vis = vec![vis];
+            let plan = plan_hier(&chip, &r, &HierOpts::default());
+            (plan.wcells.iter().flat_map(|w| w.washes.clone()).collect::<Vec<_>>(), plan.stats.sub_cut_boxes)
+        };
+        let node = bx(9000, 9000, 9130, 9130);
+        for masks in [true, false] {
+            // both visible: one rect, on L2/0 (painted over L1/0)
+            assert_eq!(boxes(0b11, masks), (vec![(1, node)], 1), "masks {masks}");
+            // "everything visible" sets the padding bits of the byte too
+            assert_eq!(boxes(0xff, masks), (vec![(1, node)], 1));
+            // one visible: that layer
+            assert_eq!(boxes(0b01, masks), (vec![(0, node)], 1));
+            assert_eq!(boxes(0b10, masks), (vec![(1, node)], 1));
+        }
     }
 
     #[test]

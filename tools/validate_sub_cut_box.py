@@ -4,7 +4,7 @@
 Field: the `thin keep` picture is Calibre-like except that what the size cut
 drops VANISHES - one via layer of the synthetic MAIN01 is an empty screen from
 the fit view to x4, where Calibre keeps every shape at a minimum size. Under
-`thin keep` with at most four layers visible, what the size cut drops now
+`thin keep` with at most sixteen layers visible, what the size cut drops now
 stays as a box drawn from index metadata (no page decoded). This gate renders
 the chip-geometry synthetic MAIN01 (tools/gen_main01_like.py):
 
@@ -14,6 +14,8 @@ the chip-geometry synthetic MAIN01 (tools/gen_main01_like.py):
   * what is NOT the feature's business is byte-identical to the kill switch:
     the same view under `thin cull`, the all-layer keep view (more layers than
     the cap), and a near keep view where nothing is under the cut;
+  * sixteen layers at once: every box is ONE rect on the topmost layer it
+    stands for, so there are no more boxes than with the layers one by one;
   * a box never claims what is not there, and never loses what is (review
     2026-09-19, four small layouts written with klayout.db): shapes below the
     depth limit get no box; 0.5 px members at a 3 px pitch light the pixels
@@ -192,8 +194,18 @@ def main():
                 assert a == b and rb['plan_culls']['sub_cut_boxes'] == 0, (
                     'frame %d changed: %s' % (gen, rb['plan_culls']))
                 same += 1
+            # sixteen layers: more lit than the kill switch, and one rect per box -
+            # never more rects than the sixteen layers planned one at a time
+            sixteen = every[::max(1, len(every) // 16)][:16]
+            sparse, _ = frame(off, 7, wide, sixteen, 'keep')
+            many, res16 = frame(on, 7, wide, sixteen, 'keep')
+            boxes16 = res16['plan_culls']['sub_cut_boxes']
+            singles = sum(frame(on, 10 + k, wide, [key], 'keep')[1]['plan_culls']['sub_cut_boxes']
+                          for k, key in enumerate(sixteen))
+            assert lit(many) > lit(sparse) and 0 < boxes16 <= singles, (lit(many), lit(sparse), boxes16, singles)
             print('sub-cut box: one via layer of the chip, keep: %d px lit by %d boxes (kill switch: empty), '
-                  '%d other frames unchanged' % (lit(boxed), culls['sub_cut_boxes'], same))
+                  '%d other frames unchanged; sixteen layers: %d -> %d px lit, %d boxes (one by one: %d)'
+                  % (lit(boxed), culls['sub_cut_boxes'], same, lit(sparse), lit(many), boxes16, singles))
         finally:
             off.stop()
             on.stop()
