@@ -139,7 +139,9 @@ floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
    커미터** 파이프라인 처리.
    - 워커: 입장 제어(`ci >= commit_base + window` 시 1ms 슬립) 후
      `build_cell_plan` — phase 타이머 6칸 [bvh/asm/split/lod/pts/sink]:
-     - 인스턴스 BVH(리프 순서=방출 순서, v7 max_dim/max_min 주석),
+     - 인스턴스 BVH(리프 순서=방출 순서, v7 max_dim/max_min 주석; v8 레이어 마스크는
+       모든 셀을 커밋한 뒤 `Builder::annotate_bvh_masks(jobs)`가 셀 단위 병렬로 채운다 —
+       로그 `[vfs] bvh layer masks: N nodes, M new bitsets`),
      - (cell,layer) 런 조립 + **rep-split**(목표 페이지 크기 초과 시
        Grid 인덱스 분할/Pts rebase 분할, oversize 격리, v6 max_min 계산).
        **셀별 분할 모드**(#60): 지배 레이어(최대 레이어 ≥60% AND

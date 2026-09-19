@@ -6332,6 +6332,16 @@ fn build(
     // the caller writes design.ovm LAST (commit marker, after the
     // viewer-side files); ovp_len/ovt_len ride in the header so
     // open can verify both cache pairs
+    // v8: subtree layer masks on every instance-BVH node
+    let tmask = std::time::Instant::now();
+    let (mask_nodes, mask_sets) = b.annotate_bvh_masks(jobs);
+    eprintln!(
+        "[vfs] bvh layer masks: {} nodes, {} new bitsets ({:.1}s, rss {})",
+        mask_nodes,
+        mask_sets,
+        tmask.elapsed().as_secs_f64(),
+        rss()
+    );
     let ovm_bytes = b.finish(ovp_off, ovt_off);
     eprintln!(
         "[vfs] {} pages ({}) + ovm {} in {:.1}s",
@@ -6873,7 +6883,7 @@ pub fn plan_cmd(args: &[String]) {
              \"grid_fallback_full\": {},\n  \
              \"kbox_merges\": {},\n  \"lod_pages\": {},\n  \
              \"washed_pages\": {},\n  \
-             \"culled_bvh_size\": {},\n  \
+             \"culled_bvh_size\": {},\n  \"culled_bvh_layer\": {},\n  \
              \"thin_frames\": {},\n  \
              \"fit_pct\": {},\n  \"fit_thin\": {},\n  \"fit_full_pct\": {},\n  \"fit_none_pct\": {},\n  \"fit_passes\": {},\n  \"fit_bytes\": {},\n  \
              \"sub_cut_boxes\": {},\n  \
@@ -6922,6 +6932,7 @@ pub fn plan_cmd(args: &[String]) {
             st.lod_swapped,
             st.washed_pages,
             st.culled_bvh_size,
+            st.culled_bvh_layer,
             st.thin_frames,
             st.fit_pct,
             st.fit_thin,

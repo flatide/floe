@@ -36,7 +36,7 @@ def read_ovm(path):
     d = open(path, "rb").read()
     assert d[:8] == b"FLOEOVM1", "magic"
     ver = struct.unpack_from("<I", d, 8)[0]
-    assert ver == 7, ver  # v7: bvh size annotations
+    assert ver == 8, ver  # v8: bvh subtree layer masks
     top, n_layers, n_cells, n_pages = struct.unpack_from(
         "<IIII", d, 40)
     ovp_len = struct.unpack_from("<Q", d, 72)[0]
@@ -70,6 +70,60 @@ def read_ovm(path):
         pages.append((cell, li, seq, off, csz, recs, mems, lod))
     return {"top": top, "layers": layers, "cells": cells,
             "pages": pages, "ovp_len": ovp_len}
+
+
+BVH_LEN = 56       # v8: +lmask_rec@48, +lmask_direct@52
+PLACE_LEN = 64
+LMASK_UNKNOWN = 0xFFFFFFFF
+
+
+def check_bvh_masks(path):
+    """v8: every annotated instance-BVH node holds exactly the union of the
+    layer masks of the cells placed below it (recursive @48, own shapes @52).
+    Returns (nodes, annotated, problems)."""
+    d = open(path, "rb").read()
+    n_layers, n_cells = struct.unpack_from("<II", d, 44)
+    secs = [struct.unpack_from("<QQ", d, 88 + 16 * i) for i in range(14)]
+    width = max(1, (n_layers + 7) // 8)
+    bits_off, bits_len = secs[4]
+    n_sets = bits_len // width
+
+    def mask(idx):
+        return int.from_bytes(d[bits_off + idx * width:bits_off + (idx + 1) * width], "little")
+
+    cells = []
+    for i in range(n_cells):
+        o = secs[2][0] + CELL_LEN * i
+        cells.append(struct.unpack_from("<II", d, o + 104))      # (direct, recursive)
+    places_off = secs[3][0]
+    bvh_off, bvh_len = secs[5]
+    n_nodes = bvh_len // BVH_LEN
+    assert bvh_len % BVH_LEN == 0, "bvh stride"
+    truth = [None] * n_nodes            # (recursive, direct) unions, children follow parents
+    problems, annotated = [], 0
+    for i in range(n_nodes - 1, -1, -1):
+        o = bvh_off + BVH_LEN * i
+        first, count, leaf = struct.unpack_from("<IHH", d, o + 32)
+        rec = own = 0
+        for k in range(first, first + count):
+            if leaf:
+                child = struct.unpack_from("<I", d, places_off + PLACE_LEN * k)[0]
+                rec |= mask(cells[child][1])
+                own |= mask(cells[child][0])
+            else:
+                rec |= truth[k][0]
+                own |= truth[k][1]
+        truth[i] = (rec, own)
+        m_rec, m_own = struct.unpack_from("<II", d, o + 48)
+        if m_rec == LMASK_UNKNOWN and m_own == LMASK_UNKNOWN:
+            continue
+        annotated += 1
+        if m_rec >= n_sets or m_own >= n_sets:
+            problems.append("bvh node %d mask index out of the pool" % i)
+        elif (mask(m_rec), mask(m_own)) != (rec, own):
+            problems.append("bvh node %d masks %x/%x, the placements below hold %x/%x"
+                            % (i, mask(m_rec), mask(m_own), rec, own))
+    return n_nodes, annotated, problems
 
 
 def main():
@@ -246,6 +300,33 @@ def main():
           "members indexed, top rbbox, failures: %d"
           % (checked, n_lod, len(lmap), tm.get("members", 0),
              len(bad)))
+    # v8 node layer masks: the battery cache (nodes under 64 placements stay
+    # unknown) and a rebuild that annotates EVERY node, both checked against
+    # the placements; the same bytes at 1 and 4 jobs
+    nodes, annotated, problems = check_bvh_masks(outdir + "/design.ovm")
+    for msg in problems:
+        fail(msg)
+    with tempfile.TemporaryDirectory(prefix="floe-ovm8-") as temp:
+        built = []
+        for jobs in ("1", "4"):
+            out = os.path.join(temp, "j" + jobs)
+            env = dict(os.environ, FLOE_INDEX_BVH_MASK_MIN="1")
+            run = subprocess.run([fi, "vfs", src, out, "--jobs", jobs], env=env,
+                                 capture_output=True, text=True)
+            if run.returncode != 0:
+                fail("v8 rebuild failed: " + run.stderr[-300:])
+                break
+            built.append(open(out + "/design.ovm", "rb").read())
+        if len(built) == 2:
+            if built[0] != built[1]:
+                fail("design.ovm differs between --jobs 1 and 4 with every node annotated")
+            all_nodes, all_annotated, problems = check_bvh_masks(os.path.join(temp, "j1", "design.ovm"))
+            for msg in problems:
+                fail(msg)
+            if all_nodes and all_annotated != all_nodes:
+                fail("FLOE_INDEX_BVH_MASK_MIN=1 annotated %d of %d nodes" % (all_annotated, all_nodes))
+            print("bvh layer masks: %d nodes (%d annotated at the default threshold, %d of %d with "
+                  "threshold 1), all equal to the placements below" % (nodes, annotated, all_annotated, all_nodes))
     sys.exit(1 if bad else 0)
 
 

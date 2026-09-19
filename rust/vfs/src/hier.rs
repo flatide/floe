@@ -747,6 +747,9 @@ pub struct HierStats {
     /// (every placement under them would have been size/hairline
     /// culled - rev 43)
     pub culled_bvh_size: u64,
+    /// instance-BVH subtrees pruned because no cell placed below them
+    /// holds a visible layer (the v8 node layer masks)
+    pub culled_bvh_layer: u64,
     /// boundary records that entered the rev 45 thin-frame lattice
     /// path (min side under the cut, lattice representatives kept)
     pub thin_frames: u64,
@@ -1976,6 +1979,18 @@ impl<'a> Hier<'a> {
                 while let Some(ni) = stack.pop() {
                     let node = self.v.bvh(ni);
                     self.st.visited_bvh += 1;
+                    // v8 layer masks: no cell placed below holds a visible
+                    // layer - what the per-placement cull_layer test would
+                    // find out one placement at a time. Hierarchy frames
+                    // are drawn whatever the layers, so only where none
+                    // can come (full depth, or frames off).
+                    if node.lmask_rec != floe_ovm::LMASK_UNKNOWN
+                        && (r == REM_FULL || self.opts.frame_cap == 0)
+                        && !masks_intersect(self.v.bitset(node.lmask_rec), &self.walk_vis)
+                    {
+                        self.st.culled_bvh_layer += 1;
+                        continue;
+                    }
                     // rev 43: v7 size annotations - a subtree whose
                     // every child cell is under the cut (or
                     // hairline-thin) prunes wholesale; the fit-view
@@ -2011,7 +2026,7 @@ impl<'a> Hier<'a> {
                             && node.bbox.intersects(b)
                             && {
                                 if self.box_small(&node.bbox) {
-                                    self.box_node(&mut wc, ni, &node.bbox, r, box_upper);
+                                    self.box_node(&mut wc, ni, &node.bbox, r, box_upper, (node.lmask_rec, node.lmask_direct));
                                     false
                                 } else {
                                     true
@@ -2369,16 +2384,42 @@ impl<'a> Hier<'a> {
 
     /// A size-cut child-BVH node no wider than a box, in a cell shown with
     /// `r` levels left: one box on the layers the placements below it
-    /// really draw (ALL of them are asked, up to the first moment every
-    /// layer in `upper` - what the cell can hold at all - is found);
-    /// nothing below is visited for geometry.
-    fn box_node(&mut self, wc: &mut WsCell, ni: u32, fp: &BBox, r: u32, upper: u32) {
+    /// really draw; nothing below is visited for geometry. The node's v8
+    /// layer masks answer without a read at full depth (the recursive
+    /// union) and one level above the depth boundary (the own-shapes
+    /// union: a child with nothing below it is its own shapes); between
+    /// the two they bound the answer, and only when the bounds differ - or
+    /// the index carries no masks - are the placements asked, ALL of them,
+    /// up to the moment every layer in `upper` is found.
+    fn box_node(&mut self, wc: &mut WsCell, ni: u32, fp: &BBox, r: u32, upper: u32, masks: (u32, u32)) {
+        let known = if masks.0 == floe_ovm::LMASK_UNKNOWN || masks.1 == floe_ovm::LMASK_UNKNOWN {
+            None
+        } else {
+            let (most, least) = (self.vis_bits(masks.0), self.vis_bits(masks.1));
+            if r == REM_FULL || most == least {
+                Some((most, most))
+            } else if r == 1 {
+                Some((least, least))
+            } else {
+                Some((least, most))
+            }
+        };
+        let (least, upper) = match known {
+            Some((least, most)) if least == most => {
+                if self.box_layers(wc, most, *fp) {
+                    self.st.sub_cut_box_nodes += 1;
+                }
+                return;
+            }
+            Some((least, most)) => (least, most),
+            None => (0, upper),
+        };
         let found = match self.node_bits_memo.get(&(ni, r)) {
             Some(&known) => known,
             None => {
                 let (lo, hi) = self.cbvh_places(ni);
                 let v = self.v;
-                let mut found = 0u32;
+                let mut found = least;
                 for pli in lo as u64..hi as u64 {
                     if self.reads_left == 0 {
                         self.st.sub_cut_box_unsure += 1;
@@ -4743,8 +4784,8 @@ mod tests {
                 places: vec![(1, 12_000, 0, 0, false, Rep::One), (2, 12_080, 0, 0, false, Rep::One), (2, 12_000, 80, 0, false, Rep::One)],
             },
         ];
-        let boxes_at = |top: usize, depth: u32| {
-            let chip = fixture(&cells[..=top], top);
+        let boxes_of = |top: usize, depth: u32, masks: bool| {
+            let chip = fixture_with(&cells[..=top], top, masks);
             let mut r = rq(bx(-10, -10, 20_000, 20_000), 100, depth);
             r.px_per_dbu = 0.02;
             r.sub_cut_box = true;
@@ -4752,7 +4793,13 @@ mod tests {
             let plan = plan_hier(&chip, &r, &HierOpts::default());
             let mut out: Vec<i64> = plan.wcells.iter().flat_map(|w| w.washes.iter().map(|(_, b)| b.x0)).collect();
             out.sort();
-            (out, plan.stats.sub_cut_box_nodes)
+            (out, plan.stats.sub_cut_box_nodes, plan.stats.sub_cut_box_reads)
+        };
+        // the v8 node masks and the placement reads give the same answer
+        let boxes_at = |top: usize, depth: u32| {
+            let (with, without) = (boxes_of(top, depth, true), boxes_of(top, depth, false));
+            assert_eq!((&with.0, with.1), (&without.0, without.1), "top {top} depth {depth}");
+            (with.0, with.1)
         };
         // depth 1 draws TOP and its children's OWN shapes: the LEAF alone
         assert_eq!(boxes_at(3, 1).0, vec![10_000]);
@@ -4765,6 +4812,47 @@ mod tests {
         assert_eq!(boxes_at(4, 1), (vec![], 0));
         assert_eq!(boxes_at(4, 2), (vec![12_000], 1));
         assert_eq!(boxes_at(4, u32::MAX), (vec![12_000], 1));
+        // at full depth and one level above the depth boundary the masks answer
+        // without reading a placement; in between they only bound the answer
+        assert_eq!((boxes_of(4, u32::MAX, true).2, boxes_of(4, 1, true).2), (0, 0));
+        assert!(boxes_of(4, 2, true).2 > 0 && boxes_of(4, u32::MAX, false).2 > 0);
+    }
+
+    #[test]
+    fn a_subtree_without_a_visible_layer_is_pruned_by_its_node_mask() {
+        // v8: the per-placement cull_layer test, asked of the node
+        let cells = [
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 500, 500), 500, 500)], places: vec![] },
+            // TOP's own page is on the second layer, the LEAFs' on the first
+            FCell {
+                name: "TOP@2",
+                pages: vec![(bx(0, 2000, 5000, 7000), 5000, 5000)],
+                places: (0..6).map(|i| (0, i as i64 * 1000, 0, 0, false, Rep::One)).collect(),
+            },
+        ];
+        let plan_of = |masks: bool, vis: u8, depth: u32, frames: bool| {
+            let chip = fixture_with(&cells, 1, masks);
+            let mut r = rq(bx(-10, -10, 20_000, 20_000), 100, depth);
+            r.px_per_dbu = 0.02;
+            r.vis = vec![vis];
+            let opts = HierOpts { frame_cap: if frames { 200_000 } else { 0 }, ..HierOpts::default() };
+            plan_hier(&chip, &r, &opts)
+        };
+        // the LEAFs' layer hidden: one node test instead of six placements
+        let (with, without) = (plan_of(true, 0b10, u32::MAX, true), plan_of(false, 0b10, u32::MAX, true));
+        assert_eq!((with.stats.culled_bvh_layer, with.stats.cull_layer), (1, 0));
+        assert_eq!((without.stats.culled_bvh_layer, without.stats.cull_layer), (0, 6));
+        assert_eq!((&with.pages, &with.wcells), (&without.pages, &without.wcells));
+        assert_eq!(with.pages.len(), 1, "TOP's own page");
+        // visible: nothing is pruned, the same plan
+        let (with, without) = (plan_of(true, 0b11, u32::MAX, true), plan_of(false, 0b11, u32::MAX, true));
+        assert_eq!((with.stats.culled_bvh_layer, &with.pages, &with.wcells), (0, &without.pages, &without.wcells));
+        // a depth boundary draws hierarchy frames whatever the layers: no prune
+        // while frames may come, the same frames either way
+        let (with, without) = (plan_of(true, 0b10, 0, true), plan_of(false, 0b10, 0, true));
+        assert_eq!(with.stats.culled_bvh_layer, 0);
+        assert!(with.stats.frame_rects > 0 && with.wcells == without.wcells);
+        assert_eq!(plan_of(true, 0b10, 0, false).stats.culled_bvh_layer, 1);
     }
 
     #[test]
@@ -5467,13 +5555,22 @@ mod tests {
     }
 
     fn fixture(cells: &[FCell], top: usize) -> Ovm {
+        fixture_with(cells, top, true)
+    }
+
+    /// `masks` false: an index without the v8 node layer masks (the planner
+    /// reads placements instead)
+    fn fixture_with(cells: &[FCell], top: usize, masks: bool) -> Ovm {
         let n = cells.len();
         let mut height = vec![0u32; n];
         let mut rbb = vec![BBox::EMPTY; n];
-        // whether the cell's subtree holds any shape (the recursive layer mask)
-        let mut shapes = vec![false; n];
+        // the layer of a cell's pages: L1/0 (index 0), or L2/0 (index 1) for a
+        // cell whose name ends in "@2"; the recursive layer mask of its subtree
+        let layer_of = |ci: usize| u32::from(cells[ci].name.ends_with("@2"));
+        let mut shapes = vec![0u8; n];
         for ci in 0..n {
-            shapes[ci] = !cells[ci].pages.is_empty() || cells[ci].places.iter().any(|(c, ..)| shapes[*c]);
+            let own = if cells[ci].pages.is_empty() { 0 } else { 1u8 << layer_of(ci) };
+            shapes[ci] = cells[ci].places.iter().fold(own, |mask, (c, ..)| mask | shapes[*c]);
             let mut b = BBox::EMPTY;
             for (pb, _, _) in &cells[ci].pages {
                 b.grow(pb);
@@ -5489,7 +5586,9 @@ mod tests {
         b.top = top as u32;
         b.layer(1, 0, "L1", 0, 0);
         let m1 = b.bitset(&[1]);
-        let m0 = b.bitset(&[0]);
+        if (0..n).any(|ci| layer_of(ci) == 1) {
+            b.layer(2, 0, "L2", 0, 0);
+        }
         for ci in 0..n {
             assert!(cells[ci].places.len() <= 8, "one-leaf bvh cap");
             let place_base = b.n_places() as u32;
@@ -5535,7 +5634,7 @@ mod tests {
                 cells[ci].pages.iter().enumerate()
             {
                 b.page(
-                    ci as u32, 0, k as u32, pb, 0, 0, 0, 1, 1, *mw,
+                    ci as u32, layer_of(ci), k as u32, pb, 0, 0, 0, 1, 1, *mw,
                     *mh, floe_ovm::LOD_EXACT,
                     floe_ovm::LOD_PAGE_NONE,
                 );
@@ -5543,12 +5642,14 @@ mod tests {
             let page_count = b.n_pages() - page_start;
             let (pr_start, pr_count) = if page_count > 0 {
                 (
-                    b.prange(0, page_start, page_count, PBVH_NONE),
+                    b.prange(layer_of(ci), page_start, page_count, PBVH_NONE),
                     1u32,
                 )
             } else {
                 (b.n_pranges(), 0)
             };
+            let mask_own = b.bitset(&[if cells[ci].pages.is_empty() { 0 } else { 1u8 << layer_of(ci) }]);
+            let mask_rec = b.bitset(&[shapes[ci]]);
             b.cell(
                 cells[ci].name,
                 height[ci],
@@ -5563,13 +5664,18 @@ mod tests {
                 bvh_count,
                 pr_start,
                 pr_count,
-                if cells[ci].pages.is_empty() { m0 } else { m1 },
-                if shapes[ci] { m1 } else { m0 },
+                mask_own,
+                mask_rec,
                 1,
                 0,
                 0,
                 m1,
             );
+        }
+        // like the indexer: v8 subtree layer masks on the BVH nodes (every
+        // node: the fixture's cells hold at most eight placements)
+        if masks {
+            b.annotate_bvh_masks_min(2, 1);
         }
         Ovm::from_bytes(b.finish(0, 0)).unwrap()
     }

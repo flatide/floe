@@ -35,7 +35,28 @@ pub const MAGIC: &[u8; 8] = b"FLOEOVM1";
 /// header spare at 80 becomes ovt_len (design.ovt byte length:
 /// string bytes + Morton-ordered text pts pools live THERE, the
 /// ovm keeps only fixed records).
-pub const VERSION: u32 = 7;
+/// v8: instance-BVH nodes carry the LAYERS below them (BVH_LEN 56): the
+/// union of the recursive layer masks of the placed cells, and the union
+/// of their own-shapes masks (bitset indexes at 48 / 52, LMASK_UNKNOWN
+/// when a builder did not annotate). The planner prunes a subtree that
+/// holds no visible layer without visiting a placement, and the sub-cut
+/// boxes read a node's layers instead of every placement below it
+/// (2026-09-19: 20-58 M placement reads per plan on the synthetic MAIN01).
+pub const VERSION: u32 = 8;
+/// A node is annotated when at least this many placement records lie below
+/// it. Small nodes stay LMASK_UNKNOWN (the planner reads their few
+/// placements): their unions are nearly all distinct, and every distinct
+/// union is a bitset in the pool - annotating every node of the synthetic
+/// MAIN01 1/10 added 18 M bitsets, 1.2 GB. FLOE_INDEX_BVH_MASK_MIN
+/// overrides (diagnostic).
+pub const BVH_MASK_MIN_PLACES: u64 = 64;
+
+fn bvh_mask_min_places() -> u64 {
+    std::env::var("FLOE_INDEX_BVH_MASK_MIN").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(BVH_MASK_MIN_PLACES)
+}
+
+/// "no layer mask recorded" for a BVH node
+pub const LMASK_UNKNOWN: u32 = u32::MAX;
 
 pub const HEADER_LEN: usize = 312;
 pub const LAYER_LEN: usize = 32;
@@ -49,7 +70,9 @@ pub const PLACE_LEN: usize = 64;
 /// the instance BVH lacked it, so a fit view walked every boundary
 /// placement just to cull it - 150M field case: 4.5s plan for 1023
 /// boxes).
-pub const BVH_LEN: usize = 48;
+/// v8: +8 bytes - subtree layer masks at 48 (recursive) and 52 (own
+/// shapes of the placed cells), bitset indexes or LMASK_UNKNOWN
+pub const BVH_LEN: usize = 56;
 /// v6: +8 bytes - max_min at offset 96 (max over records
 /// of min(w,h): the whole page is hairline-thin iff this
 /// is small; planner cuts sub-hairline pages wholesale)
@@ -267,6 +290,9 @@ fn enc_bvh(
     p16(out, leaf as u16);
     p32(out, max_dim);
     p32(out, max_min);
+    // subtree layer masks: Builder::annotate_bvh_masks fills them in
+    p32(out, LMASK_UNKNOWN);
+    p32(out, LMASK_UNKNOWN);
     assert_eq!(out.len() % BVH_LEN, 0, "bvh stride");
 }
 
@@ -1233,6 +1259,145 @@ impl Builder {
     /// ovp_len / ovt_len: byte lengths of the design.ovp/design.ovt
     /// this ovm commits - the reader (and the viewer's Vfs::open)
     /// verifies both pairs.
+    /// v8: fills in every instance-BVH node's subtree layer masks from the
+    /// cells and placements already appended (call once, after the last
+    /// cell, before `finish`). Cells are independent, so `jobs` threads
+    /// work through them in batches; bitsets are interned in cell and node
+    /// order afterwards, so the bytes do not depend on `jobs`.
+    pub fn annotate_bvh_masks(&mut self, jobs: usize) -> (u64, u64) {
+        self.annotate_bvh_masks_min(jobs, bvh_mask_min_places())
+    }
+
+    /// `annotate_bvh_masks` with an explicit placement threshold (tests
+    /// annotate every node with 1). Returns (nodes annotated, bitsets added).
+    pub fn annotate_bvh_masks_min(&mut self, jobs: usize, min_places: u64) -> (u64, u64) {
+        let before = self.bitsets.len() / self.bs_width.max(1);
+        let width = self.bs_width;
+        let words = width.div_ceil(8).max(1);
+        let n_cells = self.n_cells as usize;
+        if self.n_bvh == 0 || n_cells == 0 {
+            return (0, 0);
+        }
+        let to_words = |bitsets: &[u8], idx: u32| -> Vec<u64> {
+            let bytes = &bitsets[idx as usize * width..(idx as usize + 1) * width];
+            let mut out = vec![0u64; words];
+            for (at, &byte) in bytes.iter().enumerate() {
+                out[at / 8] |= (byte as u64) << (8 * (at % 8));
+            }
+            out
+        };
+        // per cell: (recursive, own-shapes) layer words and the BVH range
+        let mut cell_masks: Vec<(Vec<u64>, Vec<u64>)> = Vec::with_capacity(n_cells);
+        let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(n_cells);
+        for ci in 0..n_cells {
+            let rec = &self.cells[ci * CELL_LEN..];
+            cell_masks.push((to_words(&self.bitsets, g32(rec, 108)), to_words(&self.bitsets, g32(rec, 104))));
+            ranges.push((g32(rec, 96), g32(rec, 100)));
+        }
+        struct CellOut {
+            table: Vec<Vec<u64>>,
+            // per node of the cell: (recursive, own-shapes) index into `table`,
+            // LMASK_UNKNOWN for a node under the placement threshold
+            ids: Vec<(u32, u32)>,
+        }
+        let annotate = |places: &[u8], bvh: &[u8], (start, count): (u32, u32)| -> CellOut {
+            let mut table: Vec<Vec<u64>> = Vec::new();
+            let mut index: std::collections::HashMap<Vec<u64>, u32> = std::collections::HashMap::new();
+            let mut ids = vec![(LMASK_UNKNOWN, LMASK_UNKNOWN); count as usize];
+            // masks and placement counts of the nodes not consumed by their parent yet
+            let mut open: std::collections::HashMap<usize, (Vec<u64>, Vec<u64>, u64)> = std::collections::HashMap::new();
+            let mut intern = |mask: Vec<u64>, table: &mut Vec<Vec<u64>>| -> u32 {
+                if let Some(&id) = index.get(&mask) {
+                    return id;
+                }
+                let id = table.len() as u32;
+                index.insert(mask.clone(), id);
+                table.push(mask);
+                id
+            };
+            // children are appended after their parent: walk backwards
+            for local in (0..count as usize).rev() {
+                let node = &bvh[(start as usize + local) * BVH_LEN..];
+                let (first, n, leaf) = (g32(node, 32) as usize, g16(node, 36) as usize, g16(node, 38) != 0);
+                let (mut rec, mut own, mut below) = (vec![0u64; words], vec![0u64; words], 0u64);
+                for k in first..first + n {
+                    if leaf {
+                        let child = g32(&places[k * PLACE_LEN..], 0) as usize;
+                        for w in 0..words {
+                            rec[w] |= cell_masks[child].0[w];
+                            own[w] |= cell_masks[child].1[w];
+                        }
+                        below += 1;
+                    } else {
+                        let (r, d, count) = open.remove(&(k - start as usize)).expect("child node before its parent");
+                        for w in 0..words {
+                            rec[w] |= r[w];
+                            own[w] |= d[w];
+                        }
+                        below += count;
+                    }
+                }
+                if below >= min_places {
+                    ids[local] = (intern(rec.clone(), &mut table), intern(own.clone(), &mut table));
+                }
+                open.insert(local, (rec, own, below));
+            }
+            CellOut { table, ids }
+        };
+        const BATCH_NODES: u64 = 4 << 20;
+        let mut annotated = 0u64;
+        let jobs = jobs.max(1);
+        let mut at = 0usize;
+        while at < n_cells {
+            let mut end = at;
+            let mut nodes = 0u64;
+            while end < n_cells && (end == at || nodes + ranges[end].1 as u64 <= BATCH_NODES) {
+                nodes += ranges[end].1 as u64;
+                end += 1;
+            }
+            let outs: Vec<CellOut> = {
+                let (places, bvh) = (&self.places[..], &self.bvh[..]);
+                let next = std::sync::atomic::AtomicUsize::new(at);
+                let slots: Vec<std::sync::Mutex<Option<CellOut>>> = (at..end).map(|_| std::sync::Mutex::new(None)).collect();
+                std::thread::scope(|scope| {
+                    for _ in 0..jobs.min(end - at) {
+                        scope.spawn(|| loop {
+                            let ci = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if ci >= end {
+                                break;
+                            }
+                            let out = annotate(places, bvh, ranges[ci]);
+                            *slots[ci - at].lock().unwrap() = Some(out);
+                        });
+                    }
+                });
+                slots.into_iter().map(|slot| slot.into_inner().unwrap().expect("annotated cell")).collect()
+            };
+            for (ci, out) in (at..end).zip(outs) {
+                let global: Vec<u32> = out
+                    .table
+                    .iter()
+                    .map(|mask| {
+                        let bytes: Vec<u8> = mask.iter().flat_map(|word| word.to_le_bytes()).take(width).collect();
+                        self.bitset(&bytes)
+                    })
+                    .collect();
+                let start = ranges[ci].0 as usize;
+                for (local, &(rec, own)) in out.ids.iter().enumerate() {
+                    if rec == LMASK_UNKNOWN {
+                        continue;
+                    }
+                    annotated += 1;
+                    let node = &mut self.bvh[(start + local) * BVH_LEN..];
+                    node[48..52].copy_from_slice(&global[rec as usize].to_le_bytes());
+                    node[52..56].copy_from_slice(&global[own as usize].to_le_bytes());
+                }
+            }
+            at = end;
+        }
+        (annotated, (self.bitsets.len() / width.max(1) - before) as u64)
+    }
+
     pub fn finish(mut self, ovp_len: u64, ovt_len: u64) -> Vec<u8> {
         // The pts pool is logically the tail of the places section. Append
         // both source buffers directly to the final output instead of first
@@ -1413,6 +1578,11 @@ pub struct NodeV {
     /// v7 subtree size annotations (see Builder::bvh_node)
     pub max_dim: u32,
     pub max_min: u32,
+    /// v8 subtree layer masks (bitset indexes, LMASK_UNKNOWN = not
+    /// recorded): the recursive layers of every cell placed below the
+    /// node, and those cells' own-shapes layers
+    pub lmask_rec: u32,
+    pub lmask_direct: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1900,6 +2070,12 @@ impl Ovm {
                 let lim = if leaf { n_places } else { n_bvh as u64 };
                 if first + count > lim {
                     return Err(corrupt(format!("bvh node {} range", i)));
+                }
+                for at in [48, 52] {
+                    let mask = g32(b, at);
+                    if mask != LMASK_UNKNOWN && mask as u64 >= n_bitsets {
+                        return Err(corrupt(format!("bvh node {} layer mask", i)));
+                    }
                 }
             }
         }
@@ -2640,6 +2816,8 @@ impl Ovm {
             leaf: g16(b, 38) != 0,
             max_dim: g32(b, 40),
             max_min: g32(b, 44),
+            lmask_rec: g32(b, 48),
+            lmask_direct: g32(b, 52),
         }
     }
 
@@ -2734,6 +2912,8 @@ impl Ovm {
             // points); MAX = the "never prune" neutral value
             max_dim: u32::MAX,
             max_min: u32::MAX,
+            lmask_rec: LMASK_UNKNOWN,
+            lmask_direct: LMASK_UNKNOWN,
         }
     }
 
@@ -2959,6 +3139,61 @@ mod tests {
             m0,
         );
         b.finish(150, 0)
+    }
+
+    /// v8: subtree layer masks. TOP places A (layers 0, 1 below it, 0 its
+    /// own), B (layer 2) and C (layer 9, second byte) in a two-level BVH.
+    #[test]
+    fn bvh_nodes_carry_the_layers_placed_below_them() {
+        let build = |jobs: usize, min_places: u64| {
+            let mut b = Builder::new(1000.0, 0, 0, 10);
+            b.top = 3;
+            for k in 0..10 {
+                b.layer(k, 0, "L", 0, 0);
+            }
+            let bb = BBox { x0: 0, y0: 0, x1: 10, y1: 10 };
+            let (a_own, a_rec) = (b.bitset(&[0b001, 0]), b.bitset(&[0b011, 0]));
+            let b_mask = b.bitset(&[0b100, 0]);
+            let c_mask = b.bitset(&[0, 0b10]);
+            let none = b.bitset(&[0, 0]);
+            for (name, own, rec) in [("A", a_own, a_rec), ("B", b_mask, b_mask), ("C", c_mask, c_mask)] {
+                b.cell(name, 0, 1, &bb, &bb, 0, 0, 0, 0, 0, 0, 0, 0, own, rec, 0, 0, 0, none);
+            }
+            // places 0..3: A A B C; leaves [A A] and [B C] under one root
+            let p0 = b.place(0, 0, 0, 0, false, &Rep::One) as u32;
+            b.place(0, 20, 0, 0, false, &Rep::One);
+            b.place(1, 40, 0, 0, false, &Rep::One);
+            b.place(2, 60, 0, 0, false, &Rep::One);
+            let root = b.bvh_node(&bb, 1, 2, false, 10, 10);
+            b.bvh_node(&bb, p0, 2, true, 10, 10);
+            b.bvh_node(&bb, p0 + 2, 2, true, 10, 10);
+            let all = b.bitset(&[0b111, 0b10]);
+            b.cell("TOP", 1, 0, &bb, &bb, p0, 4, 0, 0, root, 3, 0, 0, none, all, 0, 0, 0, none);
+            // inner `first` is a global node index here (no sink rebase)
+            let stats = b.annotate_bvh_masks_min(jobs, min_places);
+            (b.finish(0, 0), stats)
+        };
+        let (bytes, stats) = build(1, 1);
+        assert_eq!(stats.0, 3, "every node annotated");
+        let v = Ovm::from_bytes(bytes.clone()).unwrap();
+        let masks = |ni: u32| {
+            let node = v.bvh(ni);
+            (v.bitset(node.lmask_rec).to_vec(), v.bitset(node.lmask_direct).to_vec())
+        };
+        assert_eq!(masks(1), (vec![0b011, 0], vec![0b001, 0]), "two placements of A");
+        assert_eq!(masks(2), (vec![0b100, 0b10], vec![0b100, 0b10]), "B and C");
+        assert_eq!(masks(0), (vec![0b111, 0b10], vec![0b101, 0b10]), "the root is the union of its children");
+        // the same bytes whatever the thread count
+        assert_eq!(build(4, 1).0, bytes);
+        // under the threshold a node stays unknown: only the root holds 4 placements
+        let (bytes, stats) = build(2, 4);
+        let v = Ovm::from_bytes(bytes).unwrap();
+        assert_eq!(stats.0, 1);
+        assert_eq!((v.bvh(1).lmask_rec, v.bvh(2).lmask_direct), (LMASK_UNKNOWN, LMASK_UNKNOWN));
+        assert_eq!(v.bitset(v.bvh(0).lmask_rec), &[0b111, 0b10]);
+        // a builder that never annotates reads back as unknown, and opens
+        let plain = Ovm::from_bytes(build_sample()).unwrap();
+        assert_eq!((plain.bvh(0).lmask_rec, plain.bvh(0).lmask_direct), (LMASK_UNKNOWN, LMASK_UNKNOWN));
     }
 
     #[test]

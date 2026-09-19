@@ -19,7 +19,7 @@
 | cells | 셀 디렉토리 | name, height(트리 높이), topo_rank(부모<자식 보장), rbbox(재귀 bbox), bbox, place_start/count, page_start/count, bvh_start/count, prange_start/count, lmask_rec(재귀 레이어 마스크 비트셋), 텍스트 필드(v5) |
 | places | 배치 | child ci, x, y, rot(0..3), flip, rep kind(0=One/1=Grid/2=Pts), Grid: na/nb/va/vb, Pts: pool 참조(오프셋+count) |
 | pts pool | Pts 오프셋 풀 | Morton 정렬, 배치가 (오프셋,개수)로 참조. **1M 멤버 = 레코드 1개**(비전개) |
-| bvh | 인스턴스 BVH | **BVH_LEN=48**: bbox, first/count/leaf + v7 크기 주석 `max_dim`@40, `max_min`@44 (u32 포화; 서브트리 내 자식 rbbox 최대 변/최소 변) |
+| bvh | 인스턴스 BVH | **BVH_LEN=56**(v8): bbox, first/count/leaf + v7 크기 주석 `max_dim`@40, `max_min`@44 (u32 포화; 서브트리 내 자식 rbbox 최대 변/최소 변) + **v8 레이어 마스크** `lmask_rec`@48(아래에 놓인 모든 셀의 재귀 레이어 마스크 합집합), `lmask_direct`@52(그 셀들 자신의 도형 마스크 합집합) — 비트셋 인덱스, `LMASK_UNKNOWN`(u32::MAX) = 기록 없음. 아래 배치가 64개(`BVH_MASK_MIN_PLACES`) 미만인 노드는 기록하지 않는다(작은 노드의 합집합은 거의 다 달라 비트셋 풀이 커진다: 전 노드 기록 시 합성 MAIN01 1/10에서 비트셋 1,800만 개·1.2 GB, 임계 64에서 84만 개·48 MB). `Builder::annotate_bvh_masks(jobs)`가 마지막 셀 뒤·finish 전에 채우며 결과 바이트는 jobs와 무관하다. v7 캐시는 열 때 "ovm version 7 (this build reads v8)" 오류 — `floe2 index <src> --force`로 다시 만든다. |
 | pages | 페이지 디렉토리 | **PAGE_LEN=104**: cell, layer_idx, seq, bbox, ovp 오프셋/csize/usize, records, members, max_w, max_h, lod_kind(LOD_EXACT/…), lod_page(u32, LOD_PAGE_NONE=없음), v6 `max_min`@96 (레코드별 min변의 최대 — 헤어라인 페이지 판정) |
 | pranges | (cell,layer) 런 | layer_idx, page_lo, page_count, pbvh_root(PBVH_NONE=선형) |
 | pbvh | 페이지 BVH | max_w/max_h 주석 (컷 프루닝) |

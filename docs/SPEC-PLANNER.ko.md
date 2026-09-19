@@ -250,11 +250,19 @@ probe·exact·CLI 플랜은 아님)이면 크기 컷이 버리는 것을 **인�
   래스터는 wash를 128개씩 묶은 chunk 항목으로 받는다.
 - 비용(칩 형태 합성 1/10, keep high, 프레임 s, 0.12.168 → 0.12.169): via 1 레이어 ×2 0.32 →
   0.57, 4 레이어 fit 0.52 → 1.18, ×4 1.07 → 1.62. 늘어난 것은 정확한 레이어 확인(plan +0.1~
-  0.5 s, 읽기 2,000만~5,800만)과 이어 붙이지 않은 배열 멤버다. 인덱스에 배치 BVH 노드별 레이어
-  마스크가 있으면 읽기가 없어진다(형식 변경·재인덱싱이라 미룸).
+  0.5 s, 읽기 2,000만~5,800만)과 이어 붙이지 않은 배열 멤버다.
+- **v8 노드 레이어 마스크**(0.12.170, SPEC-FORMATS bvh): 노드 박스는 full depth면 `lmask_rec`
+  합집합, depth 경계 한 단 위(r = 1)면 `lmask_direct` 합집합을 **읽기 없이** 그대로 쓴다. 그
+  사이 depth에서는 두 마스크가 답의 하한·상한이고, 둘이 다를 때만(또는 마스크가 없는 작은
+  노드·v8 이전 방식의 픽스처) 배치를 읽는다. 같은 마스크로 **보이는 레이어가 하나도 없는 배치
+  서브트리를 노드째 건너뛴다**(`culled_bvh_layer`; 배치마다 하던 `cull_layer` 판정을 노드에서.
+  계층 프레임은 레이어와 무관하게 그리므로 full depth이거나 프레임이 꺼진 요청에서만). 같은
+  측정: via ×2 0.57 → 0.22 s, 4 레이어 fit 1.18 → 0.41 s, ×4 1.62 → 1.12 s; via fit의 plan
+  545 → 170 ms, 읽기 2,900만 → 290만. 박스 수와 켜진 픽셀은 그대로다.
 - 게이트 `sub_cut_box`(tools/validate_sub_cut_box.py: 합성 칩 + 리뷰 재현 레이아웃 4개), 단위
   `what_the_size_cut_drops_stays_as_a_box_under_the_sub_cut_boxes`,
-  `a_sub_cut_box_shows_only_what_the_requested_depth_holds`.
+  `a_sub_cut_box_shows_only_what_the_requested_depth_holds`(마스크 있는 인덱스와 없는 인덱스가
+  같은 박스), `a_subtree_without_a_visible_layer_is_pruned_by_its_node_mask`.
 
 ## 4. 프레임 (cell reference outline)
 
