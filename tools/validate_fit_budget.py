@@ -5,7 +5,7 @@ Field: `thin keep` + detail high is the picture closest to Calibre, but a
 wide view, many layers or a deep depth ended in "decoded generation budget
 exceeded". The planner fits such a plan to the generation budget: since
 0.12.166 by lowering the DENSITY at the requested cut (one page in 2^k below a
-complete tier of the largest pages; field 2026-09-19: raising the cut emptied
+complete tier of the largest size classes; field 2026-09-19: raising the cut emptied
 the screen where a view's shapes are one size class), before that by raising
 the cut (FLOE_RUST_FIT_THIN=off). This gate renders a synthetic MAIN01-class
 chip (tools/gen_main01_like.py) under a small budget:
@@ -108,9 +108,10 @@ def main():
             c, rc = frame(tight, 5, near)
             d, _ = frame(tight_off, 6, near)
             assert rc['plan_culls']['fit_pct'] == 0 and c == d and any(c), 'near view under the small budget'
-            print('fit budget: wide keep view fits 48 MB at 1/%d below x%.3g, %d px lit '
-                  '(ladder: cut x%.3g; old: error), fitting frames unchanged'
-                  % (1 << culls['fit_thin'] if culls['fit_thin'] < 255 else 0, culls['fit_full_pct'] / 100.0,
+            print('fit budget: wide keep view fits 48 MB with 1/%d of the class it ends in (complete from x%.3g, '
+                  'none below x%.3g; 0 = no such class), %d px lit (ladder: cut x%.3g; old: error), '
+                  'fitting frames unchanged'
+                  % (1 << culls['fit_thin'], culls['fit_full_pct'] / 100.0, culls['fit_none_pct'] / 100.0,
                      lit, rculls['fit_pct'] / 100.0))
         finally:
             for w in (tight, tight_off, ladder, roomy, roomy_off):

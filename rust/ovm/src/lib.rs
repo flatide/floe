@@ -2518,6 +2518,30 @@ impl Ovm {
         gbox(&self.sec(SEC_CELLS)[i as usize * CELL_LEN..], 48)
     }
 
+    /// own-shapes layer bitset index, height and placement range of a cell
+    /// without materializing the name (the planner's sub-cut boxes)
+    pub fn cell_lmask_direct(&self, i: u32) -> u32 {
+        assert!(i < self.n_cells, "cell index");
+        g32(&self.sec(SEC_CELLS)[i as usize * CELL_LEN..], 104)
+    }
+
+    pub fn cell_height(&self, i: u32) -> u32 {
+        assert!(i < self.n_cells, "cell index");
+        g32(&self.sec(SEC_CELLS)[i as usize * CELL_LEN..], 8)
+    }
+
+    pub fn cell_places(&self, i: u32) -> (u32, u32) {
+        assert!(i < self.n_cells, "cell index");
+        let b = &self.sec(SEC_CELLS)[i as usize * CELL_LEN..];
+        (g32(b, 80), g32(b, 84))
+    }
+
+    /// the child cell of a placement, nothing else decoded
+    pub fn place_child(&self, i: u64) -> u32 {
+        assert!(i < self.n_places, "place index");
+        g32(&self.sec(SEC_PLACES)[i as usize * PLACE_LEN..], 0)
+    }
+
     pub fn cell_lmask_rec(&self, i: u32) -> u32 {
         assert!(i < self.n_cells, "cell index");
         g32(&self.sec(SEC_CELLS)[i as usize * CELL_LEN..], 108)

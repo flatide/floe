@@ -13,7 +13,12 @@ the chip-geometry synthetic MAIN01 (tools/gen_main01_like.py):
     boxes on it (sub_cut_boxes > 0) and no page decoded for them;
   * what is NOT the feature's business is byte-identical to the kill switch:
     the same view under `thin cull`, the all-layer keep view (more layers than
-    the cap), and a near keep view where nothing is under the cut.
+    the cap), and a near keep view where nothing is under the cut;
+  * a box never claims what is not there, and never loses what is (review
+    2026-09-19, four small layouts written with klayout.db): shapes below the
+    depth limit get no box; 0.5 px members at a 3 px pitch light the pixels
+    of the members, not the array's footprint; a layer held by one placement
+    in 64 under a node box, or by one member of a point list, keeps its box.
 
     .venv/bin/python tools/validate_sub_cut_box.py
 """
@@ -46,9 +51,10 @@ def worker(src, on):
     return w
 
 
-def frame(w, gen, bbox, keys, thin):
+def frame(w, gen, bbox, keys, thin, depth=None, size=None, cut_px=1):
+    width, height = size or (W, H)
     w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': bbox, 'view': None,
-              'w': W, 'h': H, 'depth': None, 'cut_px': 1, 'lod': False, 'frames': False,
+              'w': width, 'h': height, 'depth': depth, 'cut_px': cut_px, 'lod': False, 'frames': False,
               'labels': False, 'abstract': False, 'visible': keys, 'frame_format': 'raw',
               'thin': thin, 'frame_cache': False})
     deadline = time.monotonic() + 300
@@ -63,6 +69,94 @@ def frame(w, gen, bbox, keys, thin):
 def lit(pixels):
     background = pixels[:4]
     return sum(1 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != background)
+
+
+def review_layouts(out):
+    """1000 x 1000 um layouts viewed at 1 um per pixel (dbu 0.001): a frame on
+    2/0 fixes the extent, the small shapes are on 1/0 and 3/0."""
+    import klayout.db as db
+    um = 1000
+
+    def new():
+        layout = db.Layout()
+        layout.dbu = 0.001
+        top = layout.create_cell('TOP')
+        top.shapes(layout.layer(2, 0)).insert(db.Box(0, 0, 1000 * um, 1000 * um))
+        return layout, top, layout.layer(1, 0), layout.layer(3, 0)
+
+    # shapes only at depth 2: TOP -> MID (0.9 um, nothing of its own) -> LEAF
+    layout, top, l1, _ = new()
+    mid, leaf = layout.create_cell('MID'), layout.create_cell('LEAF')
+    leaf.shapes(l1).insert(db.Box(0, 0, 200, 200))
+    for i in range(4):
+        mid.insert(db.CellInstArray(leaf.cell_index(), db.Trans(i * 230, 0)))
+    for i in range(10):
+        for j in range(10):
+            top.insert(db.CellInstArray(mid.cell_index(), db.Trans((50 + i * 90) * um, (50 + j * 90) * um)))
+    layout.write(str(out / 'depth.oas'))
+    # 30 x 30 members of 0.5 px at a 3 px pitch
+    layout, top, l1, _ = new()
+    leaf = layout.create_cell('LEAF')
+    leaf.shapes(l1).insert(db.Box(0, 0, 500, 500))
+    top.insert(db.CellInstArray(leaf.cell_index(), db.Trans(400 * um, 400 * um), db.Vector(3 * um, 0), db.Vector(0, 3 * um), 30, 30))
+    layout.write(str(out / 'array.oas'))
+    # 3/0 in one placement of 32, three clusters (the indexer merges the repeats
+    # of a cell into point lists three members wide apart)
+    layout, top, l1, l3 = new()
+    common, rare = layout.create_cell('LEAF_A'), layout.create_cell('LEAF_B')
+    common.shapes(l1).insert(db.Box(0, 0, 300, 300))
+    rare.shapes(l3).insert(db.Box(0, 0, 300, 300))
+    for cx, cy, which in ((300, 300, 17), (600, 700, 31), (200, 800, 5)):
+        for k in range(32):
+            cell = rare if k == which else common
+            top.insert(db.CellInstArray(cell.cell_index(), db.Trans(cx * um + (k % 6) * 500, cy * um + (k // 6) * 500)))
+    layout.write(str(out / 'points.oas'))
+    # eight 3 um clusters of 64 cells found nowhere else, one of each on 3/0: a
+    # cluster is one child-BVH node box
+    layout, top, l1, l3 = new()
+    for n in range(8):
+        cx, cy = 100 + 110 * n, 100 + 97 * ((n * 5) % 8)
+        for k in range(64):
+            cell = layout.create_cell('LEAF_%d_%02d' % (n, k))
+            cell.shapes(l3 if k == 37 else l1).insert(db.Box(0, 0, 300, 300))
+            top.insert(db.CellInstArray(cell.cell_index(), db.Trans(cx * um + (k % 8) * 400, cy * um + (k // 8) * 400)))
+    layout.write(str(out / 'nodes.oas'))
+
+
+def review_cases(temp):
+    review_layouts(temp)
+    view, size = (0.0, 0.0, 1_000_000.0, 1_000_000.0), (1000, 1000)
+    seen = {}
+    for name in ('depth', 'array', 'points', 'nodes'):
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(temp / (name + '.oas'))],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+        off, on = worker(temp / (name + '.oas'), False), worker(temp / (name + '.oas'), True)
+        try:
+            if name == 'depth':
+                for depth, want in ((1, False), (2, True), (None, True)):
+                    pixels, res = frame(on, depth or 9, view, [(1, 0)], 'keep', depth=depth, size=size)
+                    assert (lit(pixels) > 0) == want and (res['plan_culls']['sub_cut_boxes'] > 0) == want, (
+                        'depth %s: %d px lit, %s' % (depth, lit(pixels), res['plan_culls']))
+                seen[name] = 'no box under the depth limit'
+                continue
+            layer = (1, 0) if name == 'array' else (3, 0)
+            # the truth: the members themselves, drawn with a cut under their size
+            truth, _ = frame(off, 1, view, [layer], 'keep', size=size, cut_px=0.25)
+            gone, _ = frame(off, 2, view, [layer], 'keep', size=size)
+            boxed, res = frame(on, 1, view, [layer], 'keep', size=size)
+            culls = res['plan_culls']
+            assert lit(gone) == 0 and lit(truth) > 0, (name, lit(gone), lit(truth))
+            if name == 'nodes':
+                # one box of at most 4 x 4 px per cluster, where the rare cell really is
+                assert culls['sub_cut_boxes'] == 8 and 8 <= lit(boxed) <= 8 * 16, (lit(boxed), culls)
+            else:
+                assert lit(boxed) == lit(truth), '%s: %d px lit, the members light %d' % (name, lit(boxed), lit(truth))
+            seen[name] = '%d px (members: %d)' % (lit(boxed), lit(truth))
+        finally:
+            off.stop()
+            on.stop()
+    return seen
 
 
 def main():
@@ -103,6 +197,7 @@ def main():
         finally:
             off.stop()
             on.stop()
+        print('sub-cut box review cases: %s' % review_cases(Path(temp)))
     print('SUB-CUT BOX: ALL OK')
 
 

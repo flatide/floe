@@ -3519,14 +3519,21 @@ class Viewer:
                         # tail hid it (field 2026-09-18)
                         factor = max(100, int(fit.get("fit_pct", 0) or 100)) / 100.0
                         thin = int(fit.get("fit_thin", 0) or 0)
-                        if thin:
-                            # budget-fitted density (0.12.166): the cut stays,
-                            # pages below the complete tier are kept 1 in 2^k
-                            full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
-                            cut += "%s 1/%s%s to fit budget" % (
-                                " x%.3g" % factor if factor > 1 else "",
-                                "%d" % (1 << thin) if thin < 255 else "0",
-                                " below x%.3g" % full if full else "")
+                        full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
+                        none = int(fit.get("fit_none_pct", 0) or 0) / 100.0
+                        if thin or none:
+                            # budget-fitted density (0.12.169): size classes
+                            # largest first - complete from xF up, the class
+                            # the budget ends in about 1 in 2^k, nothing
+                            # under xG
+                            parts = []
+                            if factor > 1:
+                                parts.append("x%.3g" % factor)
+                            if thin:
+                                parts.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
+                            if none:
+                                parts.append("none below x%.3g" % none)
+                            cut += " %s to fit budget" % ", ".join(parts)
                         else:
                             cut += " x%.3g to fit budget" % factor
                         cut += "%s%s" % (
@@ -3666,10 +3673,14 @@ class Viewer:
                         if culls.get("sub_cut_boxes") or culls.get("sub_cut_box_over"):
                             # sub-cut boxes (0.12.168): what the size cut
                             # drops, kept as boxes under thin keep
-                            text += ", boxes %s%s" % (
+                            text += ", boxes %s%s%s%s" % (
                                 fmt_count(culls.get("sub_cut_boxes", 0)),
+                                " x%d coarser" % (1 << culls["sub_cut_box_level"])
+                                if culls.get("sub_cut_box_level") else "",
                                 " (+%s over)" % fmt_count(culls["sub_cut_box_over"])
-                                if culls.get("sub_cut_box_over") else "")
+                                if culls.get("sub_cut_box_over") else "",
+                                " (%s unsure)" % fmt_count(culls["sub_cut_box_unsure"])
+                                if culls.get("sub_cut_box_unsure") else "")
                         if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
                             # dropped by the per-plan sub-cut budgets
                             # (sparse ink / wash area): the frame is

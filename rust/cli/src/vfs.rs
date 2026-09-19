@@ -6875,11 +6875,11 @@ pub fn plan_cmd(args: &[String]) {
              \"washed_pages\": {},\n  \
              \"culled_bvh_size\": {},\n  \
              \"thin_frames\": {},\n  \
-             \"fit_pct\": {},\n  \"fit_thin\": {},\n  \"fit_full_pct\": {},\n  \"fit_passes\": {},\n  \"fit_bytes\": {},\n  \
+             \"fit_pct\": {},\n  \"fit_thin\": {},\n  \"fit_full_pct\": {},\n  \"fit_none_pct\": {},\n  \"fit_passes\": {},\n  \"fit_bytes\": {},\n  \
              \"sub_cut_boxes\": {},\n  \
              \"sub_cut_box_nodes\": {},\n  \
              \"sub_cut_box_over\": {},\n  \
-             \"sub_cut_box_sampled\": {},\n  \
+             \"sub_cut_box_reads\": {},\n  \"sub_cut_box_strided\": {},\n  \"sub_cut_box_unsure\": {},\n  \"sub_cut_box_level\": {},\n  \
              \"washes\": {},\n  \
              \"plan_ms\": {:.2}\n}}",
             plan.pages.len(),
@@ -6926,12 +6926,16 @@ pub fn plan_cmd(args: &[String]) {
             st.fit_pct,
             st.fit_thin,
             st.fit_full_pct,
+            st.fit_none_pct,
             st.fit_passes,
             st.fit_bytes,
             st.sub_cut_boxes,
             st.sub_cut_box_nodes,
             st.sub_cut_box_over,
-            st.sub_cut_box_sampled,
+            st.sub_cut_box_reads,
+            st.sub_cut_box_strided,
+            st.sub_cut_box_unsure,
+            st.sub_cut_box_level,
             plan.wcells.iter().map(|c| c.washes.len() as u64).sum::<u64>(),
             ms
         );

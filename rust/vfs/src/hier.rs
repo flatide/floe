@@ -194,13 +194,27 @@ fn sub_cut_wash_px() -> f64 {
 ///   * a size-cut page, page-BVH node, child-BVH node or child placement
 ///     footprint at most `sub_cut_box_px` on screen in both axes is one
 ///     box on its layers, and nothing below it is visited;
+///   * an array of sub-cut cells wider than a box is drawn member by
+///     member, each as its own bbox; members run together along an axis only
+///     where they really touch on screen (pitch <= member size, or under a
+///     pixel). Review 2026-09-19: running together everything closer than a
+///     box turned 0.5 px members at a 3 px pitch into one 89 x 89 px fill.
+///     More than SUB_CUT_BOX_ARRAY_MAX members in view are strided from
+///     index 0 (real positions, lower density; sub_cut_box_strided);
 ///   * a wider size-cut node is walked (the cut used to prune it whole),
 ///     so the walk - and the box count - is bound by the screen, about one
 ///     box per sub_cut_box_px^2 pixels of covered area per hierarchy level;
-///   * a page's layer is exact; a child's layers are its recursive layer
-///     mask; a child-BVH node takes the union of the masks of up to
-///     SUB_CUT_BOX_MASK_SAMPLES evenly spaced placements below it (a layer
-///     only the unsampled ones hold is missed in that box);
+///   * a box is drawn on a layer only when something of that layer is
+///     REALLY there within the requested depth (review 2026-09-19: a box
+///     from the recursive layer mask showed shapes below a depth limit, and
+///     a node mask sampled from 8 placements lost a layer held by one
+///     placement in 32). A page's layer is exact. A child's layers are the
+///     layers of the cells within the depth it is shown at (`cell_bits`:
+///     the recursive mask at full depth, the own-shapes mask at the depth
+///     boundary, else a memoized walk of its placements). A child-BVH node
+///     takes the union over ALL placements below it, stopping early once
+///     every visible layer the cell can hold is found (`sub_cut_box_reads`
+///     counts the placements read);
 ///   * only with at most `sub_cut_box_layers` layers visible: the boxes are
 ///     for the view that would otherwise be EMPTY (one or a few layers of
 ///     small shapes). A view of many layers is full of wires and blocks
@@ -226,9 +240,18 @@ fn sub_cut_box_px() -> f64 {
     })
 }
 pub const SUB_CUT_BOX_MAX: u64 = 2_000_000;
+/// A plan that would pass sub_cut_box_max is planned again one LEVEL
+/// coarser - boxes twice as large, arrays every second member - up to this
+/// level: the whole view gets coarser evenly, where dropping the boxes past
+/// the cap left the cells walked last with nothing (sub_cut_box_level).
+pub const SUB_CUT_BOX_LEVELS: u32 = 3;
+/// placements one pass may read to find the layers really present (about
+/// 7 ns each); past it a node keeps what it found so far - true positives -
+/// and the rest of its layers are unknown (sub_cut_box_unsure)
+pub const SUB_CUT_BOX_READS: u64 = 64_000_000;
 pub const SUB_CUT_BOX_LAYERS: u32 = 4;
-/// placements sampled for the layer mask of a child-BVH node box
-pub const SUB_CUT_BOX_MASK_SAMPLES: u32 = 8;
+/// member boxes one array placement may emit per layer before it is strided
+pub const SUB_CUT_BOX_ARRAY_MAX: u64 = 1 << 18;
 
 /// HierOpts::rep_decode_bytes default: 256 MiB
 pub const REP_DECODE_BYTES: u64 = 256 << 20;
@@ -288,32 +311,36 @@ pub fn level_for(items: u64, budget: u64) -> u32 {
 /// Budget-fitted DENSITY (2026-09-19, field on the synthetic MAIN01: thin
 /// keep showed nothing for five zoom steps from the fit view). Raising the
 /// cut sheds whole size classes: where a view's shapes are one class, the
-/// finest cut that fits selects NOTHING - the screen went empty, after
-/// seconds of abandoned passes. A plan over its budget now keeps the
-/// requested cut and lowers the DENSITY instead:
-///   * the pass runs to the end unless it passes FIT_OVERSHOOT budgets
-///     (then the cut doubles - detail goes only when the density would
-///     have to fall under about one page in FIT_OVERSHOOT); a doubling
-///     that lands under HALF a budget stepped over a size class, so the
-///     finer cut is planned completely after all and thinned harder;
-///   * of the pages it selected, those not in the complete tier are kept
-///     one in 2^k by their sequence number within their (cell, layer) run,
-///     the runs out of phase by cell and layer (so single-page runs thin
-///     too) - k the smallest level the budget allows, the sets nested as k
-///     grows - and the rest of the
-///     budget keeps the LARGEST pages complete (by the largest cut that
-///     still selects them), so big structures never get holes while a
-///     sample of every finer class stays on screen;
-///   * if even one page in 2^FIT_THIN_MAX is too much, the largest pages
-///     alone are kept - the old behaviour at an exact boundary.
-/// One pass where the ladder took up to seven. FLOE_RUST_FIT_THIN=off
-/// restores the ladder above.
+/// finest cut that fits selects NOTHING. A plan over its budget is now the
+/// longest PREFIX that fits of its pages in one fixed priority order:
+///   * size class first, largest first - the class of a page is the octave
+///     of the largest cut that still selects it (absolute dbu, so a page's
+///     class never moves with the view);
+///   * within a class the van der Corput order of (sequence number in the
+///     (cell, layer) run + cell + layer): the bit-reversed value ascending,
+///     so any prefix of a class is an even sample of it, a longer prefix a
+///     superset, and single-page runs of different cells and layers thin
+///     like long runs do;
+///   * the page index last.
+/// The classes above the one the prefix ends in are complete, that class
+/// is sampled, the classes below it are gone - the detail goes from the
+/// finest class up, and the class that does not fit is thinned instead of
+/// dropped (the empty screen). The order does not depend on the view or
+/// the budget and the prefix is strict (it ends at the first page that
+/// does not fit), so at a given cut NARROWING THE VIEW OR RAISING THE
+/// BUDGET NEVER REMOVES A PAGE THAT STAYS IN VIEW. (Review 2026-09-19 of
+/// 0.12.166: a 2^k sample topped up with the largest pages broke that -
+/// a wide view kept pages {0, 1, 8}, the narrower one {0, 4, 8}.) Zooming
+/// in lowers the cut and brings finer classes in, which all rank after
+/// the pages already shown.
+/// The passes only find the pages to rank: the requested cut first, then
+/// the powers of two above it (whole classes); a pass is abandoned past
+/// FIT_OVERSHOOT budgets, and when a completed pass leaves room the class
+/// below it is planned to the end, because the prefix ends there.
+/// FLOE_RUST_FIT_THIN=off restores the ladder above.
 pub const FIT_OVERSHOOT: u64 = 8;
-pub const FIT_THIN_MAX: u32 = 12;
 /// the cut may double this many times (x64, the ladder's reach)
 pub const FIT_OCTAVES_MAX: u32 = 6;
-/// HierStats::fit_thin when only the largest pages were kept
-pub const FIT_THIN_DROPPED: u32 = 255;
 pub const FIT_PAGE_FIXED: u64 = 4096;
 pub const FIT_RECORD_BYTES: u64 = 192;
 pub const FIT_RECORD_STORED: u64 = 12;
@@ -491,6 +518,9 @@ pub struct HierOpts {
     pub sub_cut_box_px: f64,
     pub sub_cut_box_max: u64,
     pub sub_cut_box_layers: u32,
+    pub sub_cut_box_reads: u64,
+    /// the level of this pass (plan_hier_as_asked raises it, see SUB_CUT_BOX_LEVELS)
+    pub sub_cut_box_level: u32,
     /// The page frontier's decode budget per plan, decoded bytes of
     /// the cut pages kept as representatives (a page is about 1 MiB
     /// decoded; the render cache holds 1 GiB): beyond it the plan is
@@ -558,6 +588,8 @@ impl Default for HierOpts {
             sub_cut_box_px: sub_cut_box_px(),
             sub_cut_box_max: SUB_CUT_BOX_MAX,
             sub_cut_box_layers: SUB_CUT_BOX_LAYERS,
+            sub_cut_box_reads: SUB_CUT_BOX_READS,
+            sub_cut_box_level: 0,
             rep_decode_bytes: rep_decode_bytes(),
             rep_density: rep_density(),
             fit_budget: fit_budget_enabled(),
@@ -636,12 +668,17 @@ pub struct HierStats {
     pub sub_cut_wash_over: u64,
     /// sub-cut boxes (ViewReq::sub_cut_box): box rects emitted, the BVH
     /// nodes among their sources, boxes dropped beyond sub_cut_box_max,
-    /// node boxes whose layer mask was sampled (more placements below
-    /// than SUB_CUT_BOX_MASK_SAMPLES)
+    /// placements read to find the layers really present under a node or
+    /// within a depth limit, arrays strided past SUB_CUT_BOX_ARRAY_MAX
     pub sub_cut_boxes: u64,
     pub sub_cut_box_nodes: u64,
     pub sub_cut_box_over: u64,
-    pub sub_cut_box_sampled: u64,
+    pub sub_cut_box_reads: u64,
+    pub sub_cut_box_strided: u64,
+    /// node boxes whose scan ran out of sub_cut_box_reads (layers beyond the
+    /// ones found are unknown), and the level the boxes were planned at
+    pub sub_cut_box_unsure: u64,
+    pub sub_cut_box_level: u32,
     /// representatives (the page frontier, ViewReq::page_reps): cut
     /// pages kept (sparse, drawn as pixels) / washed (dense), cut
     /// placements washed or expanded, BVH subtrees pruned because no
@@ -673,12 +710,14 @@ pub struct HierStats {
     pub fit_cull: u32,
     pub fit_passes: u32,
     pub fit_over: bool,
-    /// budget-fitted density: pages outside the complete tier are kept one
-    /// in 2^fit_thin (0 = none thinned, FIT_THIN_DROPPED = only the largest
-    /// pages kept), and the complete tier starts at this percentage of the
-    /// requested cut (0 = no tier)
+    /// budget-fitted density: the class the prefix ends in keeps about one
+    /// page in 2^fit_thin (0 = no class is sampled); the complete classes
+    /// start at fit_full_pct percent of the requested cut (0 = none is
+    /// complete); everything under fit_none_pct percent of it is gone (0 =
+    /// no class was dropped whole)
     pub fit_thin: u32,
     pub fit_full_pct: u32,
+    pub fit_none_pct: u32,
     /// dots emitted for representative cut placements (kept members
     /// in view, before the layer fan-out) and for cut child-BVH
     /// subtrees within the dot pitch (one each)
@@ -1053,44 +1092,47 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
 /// Budget-fitted density (see FIT_OVERSHOOT).
 fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
     let limit = req.decode_budget.saturating_mul(FIT_OVERSHOOT);
+    // the requested cut, then the powers of two above it: whole classes
+    let mut cuts = vec![req.cut_dbu];
+    let first = 1i64 << (64 - (req.cut_dbu as u64).leading_zeros()).min(62);
+    cuts.extend((0..FIT_OCTAVES_MAX).map(|k| first.saturating_mul(1i64 << k)));
     let mut attempt = req.clone();
     let mut passes = 0u32;
-    for octave in 0..=FIT_OCTAVES_MAX {
-        attempt.cut_dbu = req.cut_dbu.saturating_mul(1i64 << octave);
+    for at in 0..cuts.len() {
+        attempt.cut_dbu = cuts[at];
         passes += 1;
         let mut plan = plan_hier_as_asked(v, &attempt, opts, limit);
         if plan.stats.fit_over {
             continue;
         }
-        if octave == 0 && plan.stats.fit_bytes <= req.decode_budget {
+        let bytes = unique_page_memory(v, &plan);
+        if at == 0 && bytes <= req.decode_budget {
             plan.stats.fit_passes = passes;
             return plan;
         }
-        let hairline = if attempt.page_hairline { opts.hairline } else { 0.0 };
-        let mut at = octave;
-        if octave > 0 && unique_page_memory(v, &plan) < req.decode_budget / 2 {
-            // the finer pass was over FIT_OVERSHOOT budgets and this one is
-            // under half of one: the doubling stepped over a size class (the
-            // empty screen). Plan the finer cut to the end and thin it.
-            let mut finer = attempt.clone();
-            finer.cut_dbu = req.cut_dbu.saturating_mul(1i64 << (octave - 1));
+        let mut used = at;
+        if at > 0 && bytes < req.decode_budget {
+            // the classes of this cut fit with room to spare: the prefix ends
+            // in the class below, which the pass before abandoned - plan it
+            // to the end
+            used = at - 1;
+            attempt.cut_dbu = cuts[used];
             passes += 1;
-            let mut whole = plan_hier_as_asked(v, &finer, opts, 0);
-            if thin_to_budget(v, &mut whole, hairline, req.cut_dbu, req.decode_budget) {
-                (plan, at) = (whole, octave - 1);
-            } else if !thin_to_budget(v, &mut plan, hairline, req.cut_dbu, req.decode_budget) {
-                break;
-            }
-        } else if !thin_to_budget(v, &mut plan, hairline, req.cut_dbu, req.decode_budget) {
+            plan = plan_hier_as_asked(v, &attempt, opts, 0);
+        }
+        let hairline = if attempt.page_hairline { opts.hairline } else { 0.0 };
+        if !thin_to_budget(v, &mut plan, hairline, req.cut_dbu, req.decode_budget) {
             break;
         }
-        if at > 0 || plan.stats.fit_thin != 0 {
-            plan.stats.fit_pct = 100u32 << at;
+        plan.stats.fit_pct = ((cuts[used] as f64 / req.cut_dbu as f64) * 100.0).round().max(100.0) as u32;
+        if used > 0 {
+            // the raised cut dropped what is under it
+            plan.stats.fit_none_pct = plan.stats.fit_none_pct.max(plan.stats.fit_pct);
         }
         plan.stats.fit_passes = passes;
         return plan;
     }
-    // not even the largest page fits: the complete plan of the last cut,
+    // not even the first page fits: the complete plan of the last cut,
     // flagged, so the render reports the budget exactly as it used to
     let mut plan = plan_hier_as_asked(v, &attempt, opts, 0);
     plan.stats.fit_over = true;
@@ -1104,10 +1146,27 @@ fn unique_page_memory(v: &Ovm, plan: &HierPlan) -> u64 {
     plan.pages.iter().map(|&pi| { let p = v.page(pi); page_memory(p.records, p.usize_) }).sum()
 }
 
-/// Keeps of a complete plan what `budget` holds (see FIT_OVERSHOOT): one
-/// page in 2^k of every (cell, layer) run by sequence number, then the
-/// largest pages complete while they fit. False when not even one page
-/// can stay. `hairline` is the page hairline factor in force (0 = keep).
+/// The largest cut that still selects the page: the size cut looks at the
+/// longer side, the hairline cull (factor `hairline`, 0 = keep) at the
+/// shorter one. Its octave is the page's size class.
+pub fn fit_key(p: &floe_ovm::PageV, hairline: f64) -> u64 {
+    let long = p.max_w.max(p.max_h);
+    if hairline > 0.0 {
+        long.min((p.max_min as f64 / hairline) as u64)
+    } else {
+        long
+    }
+}
+
+/// The fixed priority of a page (see FIT_OVERSHOOT): ascending = first.
+pub fn fit_priority(p: &floe_ovm::PageV, hairline: f64, page: u32) -> (std::cmp::Reverse<u32>, u32, u32) {
+    let class = 63 - fit_key(p, hairline).max(1).leading_zeros();
+    let phase = p.seq.wrapping_add(p.cell).wrapping_add(p.layer_idx);
+    (std::cmp::Reverse(class), phase.reverse_bits(), page)
+}
+
+/// Keeps of a complete plan the longest prefix in `fit_priority` order that
+/// `budget` holds. False when not even the first page fits.
 fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, hairline: f64, asked_cut: i64, budget: u64) -> bool {
     let metas: Vec<floe_ovm::PageV> = plan.pages.iter().map(|&pi| v.page(pi)).collect();
     let mem: Vec<u64> = metas.iter().map(|p| page_memory(p.records, p.usize_)).collect();
@@ -1117,74 +1176,38 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, hairline: f64, asked_cut: i64, b
     if total <= budget {
         return true;
     }
-    // the largest cut that still selects the page: the size cut looks at
-    // the longer side, the hairline cull at the shorter one
-    let key: Vec<u64> = metas
-        .iter()
-        .map(|p| {
-            let long = p.max_w.max(p.max_h);
-            if hairline > 0.0 {
-                long.min((p.max_min as f64 / hairline) as u64)
-            } else {
-                long
-            }
-        })
-        .collect();
+    let prio: Vec<_> = metas.iter().zip(&plan.pages).map(|(p, &pi)| fit_priority(p, hairline, pi)).collect();
     let mut order: Vec<usize> = (0..metas.len()).collect();
-    order.sort_by(|&a, &b| key[b].cmp(&key[a]).then(plan.pages[a].cmp(&plan.pages[b])));
-    let mut level = 1u32;
-    while level < FIT_THIN_MAX && (total >> level) > budget {
-        level += 1;
-    }
-    let mut kept: Option<(Vec<bool>, u64, u32, Option<u64>)> = None;
-    while level <= FIT_THIN_MAX {
-        let step = 1u32 << level;
-        // one page in 2^level of every run, the runs out of phase by cell
-        // and layer: single-page runs (a small cell, a layer with little on
-        // it) stay one in 2^level too, where "sequence 0 of every run"
-        // kept every one of them at any level (the synthetic chip's top
-        // cell: 41 layers of one page, 74 MB that no level could shed);
-        // nested as the level grows
-        let mut keep: Vec<bool> = metas
-            .iter()
-            .map(|p| p.seq.wrapping_add(p.cell).wrapping_add(p.layer_idx) % step == 0)
-            .collect();
-        let mut bytes: u64 = keep.iter().zip(&mem).filter(|(k, _)| **k).map(|(_, m)| *m).sum();
-        if bytes <= budget {
-            let mut stop = order.len();
-            for (at, &i) in order.iter().enumerate() {
-                if !keep[i] {
-                    if bytes + mem[i] > budget {
-                        stop = at;
-                        break;
-                    }
-                    bytes += mem[i];
-                    keep[i] = true;
-                }
-            }
-            kept = Some((keep, bytes, level, full_tier(&order, &key, stop)));
+    order.sort_by_key(|&i| prio[i]);
+    let mut keep = vec![false; metas.len()];
+    let (mut bytes, mut kept) = (0u64, 0usize);
+    for &i in &order {
+        if bytes + mem[i] > budget {
             break;
         }
-        level += 1;
+        bytes += mem[i];
+        keep[i] = true;
+        kept += 1;
     }
-    let (keep, bytes, level, full) = match kept {
-        Some(found) => found,
-        None => {
-            let mut keep = vec![false; metas.len()];
-            let (mut bytes, mut stop) = (0u64, order.len());
-            for (at, &i) in order.iter().enumerate() {
-                if bytes + mem[i] > budget {
-                    stop = at;
-                    break;
-                }
-                bytes += mem[i];
-                keep[i] = true;
-            }
-            if stop == 0 {
-                return false;
-            }
-            (keep, bytes, FIT_THIN_DROPPED, full_tier(&order, &key, stop))
-        }
+    if kept == 0 {
+        return false;
+    }
+    // the class the prefix ends in, what it keeps of it, and whether
+    // anything lies below it
+    let class_of = |i: usize| prio[i].0 .0;
+    let edge = class_of(order[kept]);
+    let in_edge = order.iter().filter(|&&i| class_of(i) == edge).count() as u64;
+    let kept_edge = order[..kept].iter().filter(|&&i| class_of(i) == edge).count() as u64;
+    let below = order.iter().any(|&i| class_of(i) < edge);
+    let pct = |class: u32| (((1u64 << class.min(62)) as f64 / asked_cut.max(1) as f64) * 100.0).round().clamp(100.0, u32::MAX as f64) as u32;
+    plan.stats.fit_thin = if kept_edge == 0 { 0 } else { (in_edge.div_ceil(kept_edge) as f64).log2().ceil().max(1.0) as u32 };
+    plan.stats.fit_full_pct = order[..kept].iter().map(|&i| class_of(i)).filter(|&class| class > edge).min().map(pct).unwrap_or(0);
+    plan.stats.fit_none_pct = if kept_edge == 0 {
+        pct(edge + 1)
+    } else if below {
+        pct(edge)
+    } else {
+        0
     };
     let dropped: HashSet<u32> = plan.pages.iter().zip(&keep).filter(|(_, k)| !**k).map(|(&pi, _)| pi).collect();
     let mut page_bytes = 0u64;
@@ -1215,26 +1238,19 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, hairline: f64, asked_cut: i64, b
     });
     plan.stats.page_bytes = page_bytes;
     plan.stats.fit_bytes = bytes;
-    plan.stats.fit_thin = level;
-    plan.stats.fit_full_pct = full
-        .map(|cut| ((cut as f64 / asked_cut.max(1) as f64) * 100.0).round().clamp(100.0, u32::MAX as f64) as u32)
-        .unwrap_or(0);
     true
-}
-
-/// The complete tier's boundary when the pages `order[..stop]` (largest
-/// key first) are all kept: the smallest key every page at or above which
-/// is kept - the page at `stop` was left out, so its key is not complete.
-fn full_tier(order: &[usize], key: &[u64], stop: usize) -> Option<u64> {
-    match order.get(stop) {
-        None => order.last().map(|&i| key[i]),
-        Some(&out) => order[..stop].iter().map(|&i| key[i]).filter(|&k| k > key[out]).min(),
-    }
 }
 
 fn plan_hier_as_asked(v: &Ovm, req: &ViewReq, opts: &HierOpts, fit_limit: u64) -> HierPlan {
     let reps = req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0;
     let mut plan = plan_hier_pass(v, req, opts, 0, fit_limit);
+    // sub-cut boxes past their cap: the same pass one level coarser
+    let mut level = opts.sub_cut_box_level;
+    while plan.stats.sub_cut_box_over > 0 && !plan.stats.fit_over && level < SUB_CUT_BOX_LEVELS {
+        level += 1;
+        plan = plan_hier_pass(v, req, &HierOpts { sub_cut_box_level: level, ..opts.clone() }, 0, fit_limit);
+    }
+    plan.stats.sub_cut_box_level = level;
     if !reps || opts.rep_decode_bytes == 0 {
         return plan;
     }
@@ -1280,9 +1296,12 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         explain_on: opts.explain,
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         boxm: false,
-        box_px: opts.sub_cut_box_px,
+        box_px: opts.sub_cut_box_px * (1u32 << opts.sub_cut_box_level.min(8)) as f64,
+        box_stride: 1i64 << opts.sub_cut_box_level.min(8),
+        reads_left: opts.sub_cut_box_reads,
         vis_layers: Vec::new(),
-        box_bits: Vec::new(),
+        cell_bits_memo: HashMap::new(),
+        node_bits_memo: HashMap::new(),
         boxes_left: opts.sub_cut_box_max,
         reps: req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0,
         rep_page_level: page_level,
@@ -1327,7 +1346,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
             .enumerate()
             .flat_map(|(at, &byte)| (0..8u32).filter(move |bit| byte & (1 << bit) != 0).map(move |bit| at as u32 * 8 + bit))
             .collect();
-        if !layers.is_empty() && layers.len() <= opts.sub_cut_box_layers as usize {
+        if !layers.is_empty() && layers.len() <= (opts.sub_cut_box_layers as usize).min(32) {
             h.boxm = true;
             h.vis_layers = layers;
         }
@@ -1619,9 +1638,14 @@ struct Hier<'a> {
     /// in screen px, the visible layers a box may take and the box rects left
     boxm: bool,
     box_px: f64,
+    /// arrays keep every box_stride-th member (the pass level)
+    box_stride: i64,
+    reads_left: u64,
     vis_layers: Vec<u32>,
-    /// scratch of box_node
-    box_bits: Vec<u8>,
+    /// cell_bits / node_bits of this pass: (cell | node, remaining depth) ->
+    /// which of `vis_layers` (bit k = vis_layers[k]) are really there
+    cell_bits_memo: HashMap<(u32, u32), u32>,
+    node_bits_memo: HashMap<(u32, u32), u32>,
     boxes_left: u64,
     /// ViewReq::page_reps in force (cut on, sub-cut wash off)
     reps: bool,
@@ -1925,6 +1949,9 @@ impl<'a> Hier<'a> {
             // only ABOVE-cut edges (few, bounded by real content)
             // are gathered for the multi-box contribution pass.
             let cut = self.cut;
+            // the visible layers this cell can hold at all: a node scan for
+            // the sub-cut boxes stops once it has found them
+            let box_upper = if self.boxm { self.vis_bits(self.v.cell_lmask_rec(ci)) } else { 0 };
             // rev 45: at the r==0 boundary with the thin lattice on,
             // hairline-thin subtrees must still be WALKED - their
             // boxes are no longer culled but sampled. The both-dims
@@ -1984,7 +2011,7 @@ impl<'a> Hier<'a> {
                             && node.bbox.intersects(b)
                             && {
                                 if self.box_small(&node.bbox) {
-                                    self.box_node(&mut wc, ni, &node.bbox);
+                                    self.box_node(&mut wc, ni, &node.bbox, r, box_upper);
                                     false
                                 } else {
                                     true
@@ -2131,7 +2158,7 @@ impl<'a> Hier<'a> {
                                     continue;
                                 }
                                 if self.boxm && size_cut {
-                                    self.box_child(&mut wc, pli, &h, &rb, &boxes);
+                                    self.box_child(&mut wc, pli, &h, &rb, &boxes, r);
                                 }
                                 self.st.cull_size += 1;
                                 framed.insert(pli);
@@ -2208,7 +2235,7 @@ impl<'a> Hier<'a> {
                                 continue;
                             }
                             if self.boxm && size_cut {
-                                self.box_child(&mut wc, pli, &h, &rb, &boxes);
+                                self.box_child(&mut wc, pli, &h, &rb, &boxes, r);
                             }
                             self.st.cull_size += 1;
                             self.note_child(
@@ -2263,59 +2290,125 @@ impl<'a> Hier<'a> {
         true
     }
 
-    /// `fp` on every visible layer of bitset bytes `bits`, within the box
-    /// count budget.
-    fn box_layers(&mut self, wc: &mut WsCell, bits: &[u8], fp: BBox) -> bool {
-        let lit = |layer: u32| bits.get((layer / 8) as usize).is_some_and(|byte| byte & (1 << (layer % 8)) != 0);
-        let count = self.vis_layers.iter().filter(|&&layer| lit(layer)).count() as u64;
-        if count == 0 || !self.take_box(count) {
+    /// which of `vis_layers` a layer bitset holds (bit k = vis_layers[k])
+    fn vis_bits(&self, mask: u32) -> u32 {
+        let bits = self.v.bitset(mask);
+        let mut out = 0u32;
+        for (k, &layer) in self.vis_layers.iter().enumerate() {
+            if bits.get((layer / 8) as usize).is_some_and(|byte| byte & (1 << (layer % 8)) != 0) {
+                out |= 1 << k;
+            }
+        }
+        out
+    }
+
+    /// the remaining depth a child of a cell at `r` is shown with
+    fn child_rem(&self, child: u32, r: u32) -> u32 {
+        if r == REM_FULL || r == 0 {
+            return r;
+        }
+        if r - 1 >= self.v.cell_height(child) {
+            REM_FULL
+        } else {
+            r - 1
+        }
+    }
+
+    /// The visible layers cell `ci` really draws with `rem` levels left
+    /// below it: the recursive mask at full depth, its own shapes at the
+    /// depth boundary, else its own shapes and what its children draw one
+    /// level down (a walk of its placements, memoized per pass, stopped
+    /// once everything the recursive mask allows is found).
+    fn cell_bits(&mut self, ci: u32, rem: u32) -> u32 {
+        let v = self.v;
+        let all = self.vis_bits(v.cell_lmask_rec(ci));
+        if rem == REM_FULL || all == 0 || rem >= v.cell_height(ci) {
+            return all;
+        }
+        let own = self.vis_bits(v.cell_lmask_direct(ci));
+        if rem == 0 || own == all {
+            return own;
+        }
+        if let Some(&known) = self.cell_bits_memo.get(&(ci, rem)) {
+            return known;
+        }
+        let (start, count) = v.cell_places(ci);
+        let mut found = own;
+        for pli in start as u64..start as u64 + count as u64 {
+            if self.reads_left == 0 {
+                // unknown beyond here: what was found is there, the rest is
+                // not claimed (and not memoized as complete)
+                self.st.sub_cut_box_unsure += 1;
+                return found;
+            }
+            self.reads_left -= 1;
+            self.st.sub_cut_box_reads += 1;
+            let child = v.place_child(pli);
+            found |= self.cell_bits(child, self.child_rem(child, rem));
+            if found == all {
+                break;
+            }
+        }
+        self.cell_bits_memo.insert((ci, rem), found);
+        found
+    }
+
+    /// `fp` on the visible layers in `found` (bit k = vis_layers[k]), within
+    /// the box count budget.
+    fn box_layers(&mut self, wc: &mut WsCell, found: u32, fp: BBox) -> bool {
+        if found == 0 || !self.take_box(found.count_ones() as u64) {
             return false;
         }
-        wc.washes.extend(self.vis_layers.iter().filter(|&&layer| lit(layer)).map(|&layer| (layer, fp)));
+        for (k, &layer) in self.vis_layers.iter().enumerate() {
+            if found & (1 << k) != 0 {
+                wc.washes.push((layer, fp));
+            }
+        }
         true
     }
 
-    /// A size-cut child-BVH node no wider than a box: one box on the
-    /// layers of the placements below (all of them up to
-    /// SUB_CUT_BOX_MASK_SAMPLES, else that many evenly spaced ones);
-    /// nothing below is visited.
-    fn box_node(&mut self, wc: &mut WsCell, ni: u32, fp: &BBox) {
-        let (lo, hi) = self.cbvh_places(ni);
-        let n = hi.saturating_sub(lo);
-        if n == 0 {
-            return;
-        }
-        let v = self.v;
-        let take = n.min(SUB_CUT_BOX_MASK_SAMPLES);
-        let mut bits = std::mem::take(&mut self.box_bits);
-        bits.clear();
-        for k in 0..take {
-            let pli = lo as u64 + (k as u64 * n as u64) / take as u64;
-            let mask = v.bitset(v.cell_lmask_rec(v.place_head(pli).child));
-            if bits.len() < mask.len() {
-                bits.resize(mask.len(), 0);
+    /// A size-cut child-BVH node no wider than a box, in a cell shown with
+    /// `r` levels left: one box on the layers the placements below it
+    /// really draw (ALL of them are asked, up to the first moment every
+    /// layer in `upper` - what the cell can hold at all - is found);
+    /// nothing below is visited for geometry.
+    fn box_node(&mut self, wc: &mut WsCell, ni: u32, fp: &BBox, r: u32, upper: u32) {
+        let found = match self.node_bits_memo.get(&(ni, r)) {
+            Some(&known) => known,
+            None => {
+                let (lo, hi) = self.cbvh_places(ni);
+                let v = self.v;
+                let mut found = 0u32;
+                for pli in lo as u64..hi as u64 {
+                    if self.reads_left == 0 {
+                        self.st.sub_cut_box_unsure += 1;
+                        break;
+                    }
+                    self.reads_left -= 1;
+                    self.st.sub_cut_box_reads += 1;
+                    let child = v.place_child(pli);
+                    found |= self.cell_bits(child, self.child_rem(child, r));
+                    if found == upper {
+                        break;
+                    }
+                }
+                self.node_bits_memo.insert((ni, r), found);
+                found
             }
-            for (out, &byte) in bits.iter_mut().zip(mask.iter()) {
-                *out |= byte;
-            }
-        }
-        if n > take {
-            self.st.sub_cut_box_sampled += 1;
-        }
-        if self.box_layers(wc, &bits, *fp) {
+        };
+        if self.box_layers(wc, found, *fp) {
             self.st.sub_cut_box_nodes += 1;
         }
-        self.box_bits = bits;
     }
 
-    /// A size-cut child placement under the sub-cut boxes. A single child is
-    /// its bbox (under the cut, so a few px). An array whose footprint is no
-    /// wider than a box is one box; a wider axis-aligned grid is drawn member
-    /// by member where its pitch is wider than a box and as one run where the
-    /// members are closer than that - a dense array of tiny cells is one rect,
-    /// a sparse one a lattice of boxes, either way bound by the screen. Skewed
-    /// grids and point lists wider than a box are dropped as before.
-    fn box_child(&mut self, wc: &mut WsCell, pli: u64, h: &floe_ovm::PlaceHead, rb: &BBox, boxes: &[BBox]) {
+    /// A size-cut child placement under the sub-cut boxes, in a cell shown
+    /// with `r` levels left. A single child is its bbox (under the cut). An
+    /// array no wider than a box is one box. A wider axis-aligned grid is
+    /// drawn member by member, each member its own bbox; along an axis where
+    /// the members really touch on screen (pitch <= member size, or under a
+    /// pixel) they run together; a point list is drawn point by point. A
+    /// skewed grid wider than a box is dropped as before.
+    fn box_child(&mut self, wc: &mut WsCell, pli: u64, h: &floe_ovm::PlaceHead, rb: &BBox, boxes: &[BBox], r: u32) {
         let t0 = Xf::place(h.x, h.y, h.rot, h.flip);
         let b0 = xf_bbox(&t0, rb);
         let fp = match h.kind {
@@ -2329,44 +2422,96 @@ impl<'a> Hier<'a> {
         if fp.is_empty() || !boxes.iter().any(|b| fp.intersects(b)) {
             return;
         }
-        let v = self.v;
-        let bits = v.bitset(v.cell_lmask_rec(h.child));
-        if h.kind == 0 || self.box_small(&fp) {
-            self.box_layers(wc, bits, fp);
+        let found = self.cell_bits(h.child, self.child_rem(h.child, r));
+        if found == 0 {
             return;
         }
-        let (na, nb, va, vb) = (h.na as i64, h.nb as i64, h.va, h.vb);
-        // axis-aligned grids only: a along x and b along y, or the other way round
-        let aligned = (va.1 == 0 && vb.0 == 0) || (va.0 == 0 && vb.1 == 0);
-        if h.kind != 1 || !aligned {
+        if h.kind == 0 || self.box_small(&fp) {
+            self.box_layers(wc, found, fp);
             return;
         }
         let mut view = BBox::EMPTY;
         for b in boxes {
             view.grow(b);
         }
+        if h.kind == 2 {
+            // a point list: the members in view, chunk by chunk
+            let Some(pr) = self.v.pts_ref(pli) else {
+                return;
+            };
+            let region = minkowski_neg(&view, &b0);
+            let stride = self.box_stride;
+            let mut members = 0u64;
+            for k in 0..pr.n_chunks {
+                if !pr.chunk_bbox(k).intersects(&region) {
+                    continue;
+                }
+                let (lo, hi) = pr.chunk_range(k);
+                for slot in (lo..hi).filter(|slot| *slot as i64 % stride == 0) {
+                    let (ox, oy) = pr.pt(slot);
+                    let at = pt_box(ox, oy);
+                    if !at.intersects(&region) {
+                        continue;
+                    }
+                    members += 1;
+                    if members > SUB_CUT_BOX_ARRAY_MAX {
+                        self.st.sub_cut_box_over += 1;
+                        return;
+                    }
+                    if !self.box_layers(wc, found, grow_by_offsets(&b0, &at)) {
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+        let (na, nb, va, vb) = (h.na as i64, h.nb as i64, h.va, h.vb);
+        // axis-aligned grids only: a along x and b along y, or the other way round
+        // (a skewed grid wider than a box is dropped as before)
+        let aligned = (va.1 == 0 && vb.0 == 0) || (va.0 == 0 && vb.1 == 0);
+        if h.kind != 1 || !aligned {
+            return;
+        }
         let GridVis::Range { i0, i1, j0, j1 } = grid_ranges(na, nb, va, vb, &minkowski_neg(&view, &b0)) else {
             return;
         };
-        let step_px = |vec: (i64, i64)| vec.0.unsigned_abs().max(vec.1.unsigned_abs()) as f64 * self.px_per_dbu;
-        // members closer than a box run together: one group for the axis
-        let groups = |lo: i64, hi: i64, dense: bool| -> Vec<(i64, i64)> {
-            if dense {
+        let ppd = self.px_per_dbu;
+        let (mw, mh) = ((b0.x1 - b0.x0).max(0) as f64 * ppd, (b0.y1 - b0.y0).max(0) as f64 * ppd);
+        // members touch on screen along an axis: the pitch is no more than
+        // the member's size there, or than the pixel a smaller member lights
+        let touch = |count: i64, step: (i64, i64)| {
+            let (pitch, size) = if step.1 == 0 { (step.0.unsigned_abs() as f64 * ppd, mw) } else { (step.1.unsigned_abs() as f64 * ppd, mh) };
+            count == 1 || pitch <= size.max(1.0)
+        };
+        let (run_a, run_b) = (touch(na, va), touch(nb, vb));
+        let (count_a, count_b) = (if run_a { 1 } else { (i1 - i0 + 1) as u64 }, if run_b { 1 } else { (j1 - j0 + 1) as u64 });
+        // too many members in view: every s-th of index 0, s, 2s, ... (real
+        // positions at a lower density, stable under a pan)
+        let mut stride = self.box_stride;
+        while (count_a.div_ceil(if run_a { 1 } else { stride as u64 })) * (count_b.div_ceil(if run_b { 1 } else { stride as u64 })) > SUB_CUT_BOX_ARRAY_MAX {
+            stride += 1;
+        }
+        if stride > self.box_stride {
+            self.st.sub_cut_box_strided += 1;
+        }
+        let groups = |lo: i64, hi: i64, run: bool| -> Vec<(i64, i64)> {
+            if run {
                 vec![(lo, hi)]
             } else {
-                (lo..=hi).map(|at| (at, at)).collect()
+                let first = (lo + stride - 1) / stride * stride;
+                (first..=hi).step_by(stride as usize).map(|at| (at, at)).collect()
             }
         };
-        let (dense_a, dense_b) = (na == 1 || step_px(va) <= self.box_px, nb == 1 || step_px(vb) <= self.box_px);
-        let count = (if dense_a { 1 } else { (i1 - i0 + 1) as u64 }).saturating_mul(if dense_b { 1 } else { (j1 - j0 + 1) as u64 });
-        if count > self.boxes_left {
+        let (group_a, group_b) = (groups(i0, i1, run_a), groups(j0, j1, run_b));
+        let rects = (group_a.len() * group_b.len()) as u64 * found.count_ones() as u64;
+        if rects > self.boxes_left {
             self.st.sub_cut_box_over += 1;
             return;
         }
-        for &(ia, ib) in &groups(i0, i1, dense_a) {
-            for &(ja, jb) in &groups(j0, j1, dense_b) {
-                let run = grow_by_offsets(&b0, &grid_ovis(ia, ib, ja, jb, va, vb));
-                if !self.box_layers(wc, bits, run) {
+        for &(ia, ib) in &group_a {
+            for &(ja, jb) in &group_b {
+                let member = grow_by_offsets(&b0, &grid_ovis(ia, ib, ja, jb, va, vb));
+                if !self.box_layers(wc, found, member) {
                     return;
                 }
             }
@@ -4345,7 +4490,8 @@ mod tests {
         // field 2026-09-19 (synthetic MAIN01, thin keep): five zoom steps of
         // empty screen - the view's shapes are ONE size class, so the finest
         // cut that fitted selected nothing. Sixteen 200-squares (4 px: above
-        // the 2 px page wash) and two of 1600 in one (cell, layer) run; cut 50.
+        // the 2 px page wash; class 7 = 128..255 dbu) and two of 1600 (class
+        // 10) in one (cell, layer) run; cut 50.
         let mut pages = Vec::new();
         for i in 0..16 {
             pages.push((bx(i * 400, 0, i * 400 + 200, 200), 200, 200));
@@ -4364,44 +4510,44 @@ mod tests {
         };
         let fitted = |v: &Ovm, r: &ViewReq| plan_hier(v, r, &HierOpts::default());
         let ladder = |v: &Ovm, r: &ViewReq| plan_hier(v, r, &HierOpts { fit_thin: false, ..HierOpts::default() });
+        let fit = |p: &HierPlan| (p.stats.fit_pct, p.stats.fit_thin, p.stats.fit_full_pct, p.stats.fit_none_pct, p.stats.fit_passes);
         // a plan that fits is the plan as asked, in one pass
         let roomy = fitted(&chip, &ask(18 * per));
-        assert_eq!((roomy.pages.len(), roomy.stats.fit_pct, roomy.stats.fit_thin, roomy.stats.fit_passes), (18, 0, 0, 1));
+        assert_eq!((roomy.pages.len(), fit(&roomy)), (18, (0, 0, 0, 0, 1)));
         // six pages: the ladder sheds the whole class of 200s ...
         let six = ask(6 * per);
         assert_eq!(ladder(&chip, &six).pages, vec![16, 17]);
-        // ... the density fit keeps one 200 in four, both 1600s complete, in one pass
+        // ... the density fit keeps the 1600s and an even quarter of the 200s
+        // (van der Corput: 0, 8, 4, 12, 2, ...), in one pass
         let plan = fitted(&chip, &six);
         assert_eq!(plan.pages, vec![0, 4, 8, 12, 16, 17]);
-        assert_eq!(
-            (plan.stats.fit_pct, plan.stats.fit_thin, plan.stats.fit_full_pct, plan.stats.fit_passes, plan.stats.fit_over),
-            (100, 2, 3200, 1, false)
-        );
-        assert_eq!(plan.stats.fit_bytes, 6 * per);
+        assert_eq!((fit(&plan), plan.stats.fit_over, plan.stats.fit_bytes), ((100, 2, 2048, 0, 1), false, 6 * per));
         assert_eq!(plan.wcells[0].pages, plan.pages, "the working cell is thinned with the plan");
         assert_eq!(plan.page_prio.len(), plan.pages.len());
-        // seven: the spare page completes nothing (the 200s are not all kept),
-        // so the tier still starts at the 1600s
-        let seven = fitted(&chip, &ask(7 * per));
-        assert_eq!((seven.pages.clone(), seven.stats.fit_full_pct), (vec![0, 1, 4, 8, 12, 16, 17], 3200));
-        // three: a level deeper, a subset of the six (the sets are nested), no
-        // complete tier (one of the 1600s had to go)
-        let three = fitted(&chip, &ask(3 * per));
-        assert_eq!((three.pages.clone(), three.stats.fit_thin, three.stats.fit_full_pct), (vec![0, 8, 16], 3, 0));
-        assert!(three.pages.iter().all(|p| plan.pages.contains(p)));
-        // two: eighteen pages are more than FIT_OVERSHOOT budgets, so the pass
-        // is abandoned and the cut doubles until a pass completes (x8: a 200 still
-        // passes a cut of 200, so x4 is over as well)
+        // every smaller budget keeps a subset, every larger one a superset
+        let mut last: Option<Vec<u32>> = None;
+        for budget in 1..=18u64 {
+            let now = fitted(&chip, &ask(budget * per + per / 2)).pages;
+            assert_eq!(now.len() as u64, budget);
+            if let Some(before) = &last {
+                assert!(before.iter().all(|p| now.contains(p)), "budget {budget}: {before:?} -> {now:?}");
+            }
+            last = Some(now);
+        }
+        assert_eq!(fitted(&chip, &ask(3 * per)).pages, vec![0, 16, 17]);
+        // two pages: eighteen are more than FIT_OVERSHOOT budgets, so the passes
+        // at 50, 64 and 128 are abandoned and the one at 256 - the class of the
+        // 1600s - fits exactly
         let two = fitted(&chip, &ask(2 * per));
-        assert_eq!((two.pages.clone(), two.stats.fit_pct, two.stats.fit_thin, two.stats.fit_passes), (vec![16, 17], 800, 0, 4));
-        // a page and a half: x8 leaves the two 1600s, one too many - one goes
+        assert_eq!((two.pages.clone(), fit(&two)), (vec![16, 17], (512, 0, 0, 512, 4)));
+        // a page and a half: one of the two
         let one = fitted(&chip, &ask(per + per / 2));
-        assert_eq!((one.pages.clone(), one.stats.fit_pct, one.stats.fit_thin, one.stats.fit_over), (vec![16], 800, 1, false));
-        // the cliff: forty 200s and one 1600 against four pages. The passes at
-        // x1..x4 are over FIT_OVERSHOOT budgets, the pass at x8 holds one page -
-        // under half a budget, so the doubling stepped over the 200s. The x4
-        // cut is planned to the end and thinned as deep as it takes: three
-        // 200s stay with the 1600, where the ladder shows the 1600 alone
+        assert_eq!((one.pages.clone(), fit(&one), one.stats.fit_over), (vec![16], (512, 1, 0, 512, 4), false));
+        // the class below: forty 200s and one 1600 against four pages. The
+        // passes up to 128 are over FIT_OVERSHOOT budgets, the one at 256 holds
+        // one page and leaves room - the prefix ends in the class below, so the
+        // cut of 128 is planned to the end: three 200s stay with the 1600,
+        // where the ladder shows the 1600 alone
         let mut cliff = Vec::new();
         for i in 0..40 {
             cliff.push((bx(i * 400, 0, i * 400 + 200, 200), 200, 200));
@@ -4409,14 +4555,9 @@ mod tests {
         cliff.push((bx(0, 3000, 1600, 4600), 1600, 1600));
         let cliff = fixture(&[FCell { name: "TOP", pages: cliff, places: vec![] }], 0);
         let four = fitted(&cliff, &ask(4 * per));
-        assert_eq!(
-            (four.pages.clone(), four.stats.fit_pct, four.stats.fit_thin, four.stats.fit_full_pct, four.stats.fit_passes),
-            (vec![0, 16, 32, 40], 400, 4, 3200, 5)
-        );
+        assert_eq!((four.pages.clone(), fit(&four)), (vec![0, 16, 32, 40], (256, 4, 2048, 256, 5)));
         assert_eq!(ladder(&cliff, &ask(4 * per)).pages, vec![40]);
-        // the same request, the same plan
-        assert_eq!(fitted(&chip, &six).pages, plan.pages);
-        // single-page runs (small cells): one CELL in 2^k stays, by cell index
+        // single-page runs (small cells): every other CELL stays, by cell index
         let cells: Vec<FCell> = (0..8)
             .map(|_| FCell { name: "LEAF", pages: vec![(bx(0, 0, 200, 200), 200, 200)], places: vec![] })
             .chain(std::iter::once(FCell {
@@ -4430,11 +4571,50 @@ mod tests {
         assert_eq!((half.pages.len(), half.stats.fit_thin), (4, 1));
         assert!(half.pages.iter().all(|&p| leaves.page(p).cell % 2 == 0));
         assert!(half.wcells.iter().all(|w| w.pages.iter().all(|p| half.pages.contains(p))));
-        // not even the largest page fits: the complete plan, flagged, as before
+        // not even the first page fits: the complete plan, flagged, as before
         pages.push((bx(0, 0, 10_000_000, 10_000_000), 10_000_000, 10_000_000));
         let giant = fixture(&[FCell { name: "TOP", pages, places: vec![] }], 0);
         let over = fitted(&giant, &ask(1));
-        assert_eq!((over.pages.len(), over.stats.fit_over, over.stats.fit_pct), (1, true, 6400));
+        assert_eq!((over.pages.len(), over.stats.fit_over), (1, true));
+    }
+
+    #[test]
+    fn narrowing_the_view_never_removes_a_budget_fitted_page_that_stays_in_view() {
+        // review 2026-09-19 of 0.12.166: the 2^k sample topped up with the
+        // largest pages kept {0, 1, 8} in a wide view and {0, 4, 8} in a
+        // narrower one - page 1 vanished on the way in, still in view. Three
+        // size classes in a row along x; the views are prefixes of the row.
+        let mut pages = Vec::new();
+        for i in 0..48i64 {
+            let side = [200, 200, 200, 450, 200, 1600][(i % 6) as usize];
+            pages.push((bx(i * 2000, 0, i * 2000 + side, side), side as u64, side as u64));
+        }
+        let chip = fixture(&[FCell { name: "TOP", pages, places: vec![] }], 0);
+        let per = page_memory(1, 0);
+        let ask = |x1: i64, budget: u64| {
+            let mut r = rq(bx(-10, -10, x1, 5000), 50, u32::MAX);
+            r.px_per_dbu = 0.02;
+            r.decode_budget = budget;
+            r
+        };
+        let in_view = |x1: i64| plan_hier(&chip, &ask(x1, 0), &HierOpts::default()).pages;
+        let widths = [96_000i64, 61_000, 40_000, 23_000, 9_000];
+        for budget in [2u64, 3, 5, 8, 13, 21] {
+            let mut wide: Option<Vec<u32>> = None;
+            for &x1 in &widths {
+                let plan = plan_hier(&chip, &ask(x1, budget * per), &HierOpts::default());
+                assert!(!plan.stats.fit_over && plan.stats.fit_bytes <= budget * per);
+                let visible = in_view(x1);
+                if let Some(before) = &wide {
+                    let lost: Vec<u32> = before.iter().copied().filter(|p| visible.contains(p) && !plan.pages.contains(p)).collect();
+                    assert!(lost.is_empty(), "budget {budget}, view to {x1}: {lost:?} left the plan but not the view");
+                }
+                wide = Some(plan.pages);
+            }
+        }
+        // and the largest class is never the one to go
+        let plan = plan_hier(&chip, &ask(96_000, 10 * per), &HierOpts::default());
+        assert!((0..48u32).filter(|p| p % 6 == 5).all(|p| plan.pages.contains(&p)), "{:?}", plan.pages);
     }
 
     #[test]
@@ -4442,7 +4622,8 @@ mod tests {
         // field 2026-09-18/19: the keep picture is Calibre-like except that
         // what the size cut drops vanishes (one via layer of the synthetic
         // MAIN01: an empty screen from the fit view to x4). 0.02 px/dbu: the
-        // cut of 100 dbu is 2 px, a box is at most 4 px = 200 dbu.
+        // cut of 100 dbu is 2 px, a box is at most 4 px = 200 dbu, a LEAF is
+        // 60 dbu = 1.2 px.
         let leaf = FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] };
         let top = FCell {
             name: "TOP",
@@ -4453,10 +4634,13 @@ mod tests {
             ],
             places: vec![
                 (0, 0, 7000, 0, false, Rep::One),
-                // 50 members 1.6 px apart: one run
-                (0, 0, 8000, 0, false, Rep::Grid { na: 50, nb: 1, va: (80, 0), vb: (0, 0) }),
+                // 50 members that abut (pitch = size): one run
+                (0, 0, 8000, 0, false, Rep::Grid { na: 50, nb: 1, va: (60, 0), vb: (0, 0) }),
                 // 5 x 2 members 20 px apart: ten boxes
                 (0, 0, 9000, 0, false, Rep::Grid { na: 5, nb: 2, va: (1000, 0), vb: (0, 1000) }),
+                // review 2026-09-19: 1.2 px members at a 3 px pitch, 30 x 30. Closer
+                // than a box, but they do not touch: 900 member boxes, not one 89 px fill
+                (0, 0, 12_000, 0, false, Rep::Grid { na: 30, nb: 30, va: (150, 0), vb: (0, 150) }),
             ],
         };
         let chip = fixture(&[leaf, top], 1);
@@ -4478,11 +4662,15 @@ mod tests {
         assert_eq!(has(bx(6000, 0, 6100, 100)), 1, "the small size-cut page: {washes:?}");
         assert_eq!(has(bx(8000, 0, 9000, 1000)), 0, "a wide size-cut page is no box");
         assert_eq!(has(bx(0, 7000, 60, 7060)), 1, "the single child");
-        assert_eq!(has(bx(0, 8000, 49 * 80 + 60, 8060)), 1, "the dense array is one run");
+        assert_eq!(has(bx(0, 8000, 49 * 60 + 60, 8060)), 1, "members that abut are one run");
         for (i, j) in [(0, 0), (4, 0), (0, 1), (4, 1)] {
             assert_eq!(has(bx(i * 1000, 9000 + j * 1000, i * 1000 + 60, 9060 + j * 1000)), 1, "sparse member {i},{j}");
         }
-        assert_eq!((washes.len(), plan.stats.sub_cut_boxes, plan.stats.sub_cut_box_over), (13, 13, 0));
+        for (i, j) in [(0, 0), (29, 0), (13, 7), (29, 29)] {
+            assert_eq!(has(bx(i * 150, 12_000 + j * 150, i * 150 + 60, 12_060 + j * 150)), 1, "member {i},{j} of the 3 px array");
+        }
+        assert!(washes.iter().all(|(_, b)| b.x1 - b.x0 <= 3000 && b.y1 - b.y0 <= 200), "no box beyond the run and the 4 px: {washes:?}");
+        assert_eq!((washes.len(), plan.stats.sub_cut_boxes, plan.stats.sub_cut_box_over, plan.stats.sub_cut_box_level), (913, 913, 0, 0));
         // the same request, the same boxes; a narrow view boxes only what it sees
         assert_eq!(&plan_hier(&chip, &ask(true, u32::MAX), &HierOpts::default()).wcells, &plan.wcells);
         let mut narrow = ask(true, u32::MAX);
@@ -4496,7 +4684,7 @@ mod tests {
         // depth 0: children are outlines only, the page box stays
         let flat = plan_hier(&chip, &ask(true, 0), &HierOpts::default());
         assert_eq!(flat.stats.sub_cut_boxes, 1);
-        // more layers visible than the cap, a hidden layer, an exact request, the cap: none / fewer
+        // more layers visible than the cap, a hidden layer, an exact request: none
         let none = plan_hier(&chip, &ask(true, u32::MAX), &HierOpts { sub_cut_box_layers: 0, ..HierOpts::default() });
         assert_eq!(none.stats.sub_cut_boxes, 0);
         let mut hidden = ask(true, u32::MAX);
@@ -4505,8 +4693,12 @@ mod tests {
         let mut exact = ask(true, u32::MAX);
         exact.cut_dbu = 0;
         assert_eq!(plan_hier(&chip, &exact, &HierOpts::default()).stats.sub_cut_boxes, 0);
-        let capped = plan_hier(&chip, &ask(true, u32::MAX), &HierOpts { sub_cut_box_max: 5, ..HierOpts::default() });
-        assert!(capped.stats.sub_cut_boxes <= 5 && capped.stats.sub_cut_box_over > 0);
+        // past the cap the whole plan goes one level coarser - boxes of 8 px,
+        // every second member - instead of leaving the cells walked last empty
+        let coarser = plan_hier(&chip, &ask(true, u32::MAX), &HierOpts { sub_cut_box_max: 400, ..HierOpts::default() });
+        assert_eq!((coarser.stats.sub_cut_box_level, coarser.stats.sub_cut_box_over), (1, 0));
+        let washes = &coarser.wcells.iter().find(|w| w.key.0 == 1).unwrap().washes;
+        assert_eq!(washes.iter().filter(|(_, b)| b.y0 >= 12_000).count(), 15 * 15, "every second member of the 30 x 30");
         // a cluster of children no wider than a box is ONE box, and nothing below it is visited
         let cluster = fixture(
             &[
@@ -4523,6 +4715,56 @@ mod tests {
         assert_eq!((one.stats.sub_cut_boxes, one.stats.sub_cut_box_nodes), (1, 1));
         let washes = &one.wcells.iter().find(|w| w.key.0 == 1).unwrap().washes;
         assert_eq!(washes.as_slice(), &[(0, bx(9000, 9000, 9130, 9130))]);
+    }
+
+    #[test]
+    fn a_sub_cut_box_shows_only_what_the_requested_depth_holds() {
+        // review 2026-09-19: the box took the child's RECURSIVE layer mask, so a
+        // depth-1 view showed boxes for shapes that live at depth 2. MID holds
+        // no shape of its own, only LEAFs; DEEP only a MID.
+        let cells = [
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 30, 30), 30, 30)], places: vec![] },
+            FCell { name: "MID", pages: vec![], places: vec![(0, 0, 0, 0, false, Rep::One), (0, 40, 0, 0, false, Rep::One)] },
+            FCell { name: "DEEP", pages: vec![], places: vec![(1, 0, 0, 0, false, Rep::One)] },
+            FCell {
+                name: "TOP",
+                pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)],
+                places: vec![
+                    (1, 6000, 0, 0, false, Rep::One),       // MID: shapes one level below it
+                    (2, 8000, 0, 0, false, Rep::One),       // DEEP: shapes two levels below it
+                    (0, 10_000, 0, 0, false, Rep::One),     // LEAF: its own shapes
+                ],
+            },
+            // the same three kinds within one 4 px node (the fixture's BVH is one
+            // leaf per cell, so the cluster gets a cell of its own)
+            FCell {
+                name: "CLUSTER",
+                pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)],
+                places: vec![(1, 12_000, 0, 0, false, Rep::One), (2, 12_080, 0, 0, false, Rep::One), (2, 12_000, 80, 0, false, Rep::One)],
+            },
+        ];
+        let boxes_at = |top: usize, depth: u32| {
+            let chip = fixture(&cells[..=top], top);
+            let mut r = rq(bx(-10, -10, 20_000, 20_000), 100, depth);
+            r.px_per_dbu = 0.02;
+            r.sub_cut_box = true;
+            r.vis = vec![1];
+            let plan = plan_hier(&chip, &r, &HierOpts::default());
+            let mut out: Vec<i64> = plan.wcells.iter().flat_map(|w| w.washes.iter().map(|(_, b)| b.x0)).collect();
+            out.sort();
+            (out, plan.stats.sub_cut_box_nodes)
+        };
+        // depth 1 draws TOP and its children's OWN shapes: the LEAF alone
+        assert_eq!(boxes_at(3, 1).0, vec![10_000]);
+        // depth 2 reaches the LEAFs inside MID, not DEEP's
+        assert_eq!(boxes_at(3, 2).0, vec![6000, 10_000]);
+        // depth 3 and full depth: all of them
+        assert_eq!(boxes_at(3, 3).0, vec![6000, 8000, 10_000]);
+        assert_eq!(boxes_at(3, u32::MAX), boxes_at(3, 3));
+        // the node box asks the same question of every placement below it
+        assert_eq!(boxes_at(4, 1), (vec![], 0));
+        assert_eq!(boxes_at(4, 2), (vec![12_000], 1));
+        assert_eq!(boxes_at(4, u32::MAX), (vec![12_000], 1));
     }
 
     #[test]
@@ -5228,7 +5470,10 @@ mod tests {
         let n = cells.len();
         let mut height = vec![0u32; n];
         let mut rbb = vec![BBox::EMPTY; n];
+        // whether the cell's subtree holds any shape (the recursive layer mask)
+        let mut shapes = vec![false; n];
         for ci in 0..n {
+            shapes[ci] = !cells[ci].pages.is_empty() || cells[ci].places.iter().any(|(c, ..)| shapes[*c]);
             let mut b = BBox::EMPTY;
             for (pb, _, _) in &cells[ci].pages {
                 b.grow(pb);
@@ -5244,6 +5489,7 @@ mod tests {
         b.top = top as u32;
         b.layer(1, 0, "L1", 0, 0);
         let m1 = b.bitset(&[1]);
+        let m0 = b.bitset(&[0]);
         for ci in 0..n {
             assert!(cells[ci].places.len() <= 8, "one-leaf bvh cap");
             let place_base = b.n_places() as u32;
@@ -5317,8 +5563,8 @@ mod tests {
                 bvh_count,
                 pr_start,
                 pr_count,
-                m1,
-                m1,
+                if cells[ci].pages.is_empty() { m0 } else { m1 },
+                if shapes[ci] { m1 } else { m0 },
                 1,
                 0,
                 0,

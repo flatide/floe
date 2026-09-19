@@ -434,9 +434,9 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   작은 도형의 레이어 하나만 켠 광역뷰가 빈 화면이던 문제의 수정. 상태줄 `boxes N`, 킬 스위치
   `FLOE_RUST_SUB_CUT_BOX=off`.
 - **예산에 맞춘 밀도**(0.12.166, docs/SPEC-PLANNER.ko.md §3): 디코드 예산을 넘는 뷰는 컷을 올리는
-  대신 요청 컷에서 밀도를 낮춘다 — 큰 페이지부터 완전하게 채우고 그 아래는 2^k개 중 하나만
-  남긴다. 컷을 올리면 한 크기대가 통째로 빠져 합성 MAIN01의 광역뷰가 빈 화면이 되던 문제의
-  수정. 상태줄 `cut<…um 1/M below xF to fit budget`, 킬 스위치 `FLOE_RUST_FIT_THIN=off`(아래의
+  대신 밀도를 낮춘다 — 크기 등급이 큰 것부터 완전하게 남기고, 예산이 끝나는 등급은 고르게
+  솎는다. 뷰를 좁히거나 예산을 늘려도 화면 안의 페이지는 빠지지 않는다(0.12.169). 컷을 올리면 한 크기대가 통째로 빠져 합성 MAIN01의 광역뷰가 빈 화면이 되던 문제의
+  수정. 상태줄 `cut<…um 1/M below xF, none below xG to fit budget`, 킬 스위치 `FLOE_RUST_FIT_THIN=off`(아래의
   컷 사다리로 복귀).
 - **예산에 맞춘 컷**(0.12.162; 0.12.166부터 `FLOE_RUST_FIT_THIN=off`일 때만): 선택한 페이지가 디코드 예산(기본 1024 MB)을 넘을 뷰는
   오류("decoded generation budget exceeded") 대신 예산에 맞는 가장 세밀한 컷(요청 컷 ×

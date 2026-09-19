@@ -104,10 +104,17 @@ pub struct PlanCullCounts {
     /// percent of the requested cut (0 = no tier)
     pub fit_thin: u64,
     pub fit_full_pct: u64,
+    /// everything under this percentage of the requested cut is gone (0 = no
+    /// class dropped whole)
+    pub fit_none_pct: u64,
     /// sub-cut boxes (floe_vfs::ViewReq::sub_cut_box): box rects the plan
     /// emitted, boxes dropped beyond the per-plan cap
     pub sub_cut_boxes: u64,
     pub sub_cut_box_over: u64,
+    /// the level the boxes were planned at (2^level coarser to stay under the
+    /// cap), node boxes whose layer scan ran out of its read budget
+    pub sub_cut_box_level: u64,
+    pub sub_cut_box_unsure: u64,
 }
 
 impl PlanCullCounts {
@@ -137,8 +144,11 @@ impl PlanCullCounts {
             fit_over: st.fit_over as u64,
             fit_thin: st.fit_thin as u64,
             fit_full_pct: st.fit_full_pct as u64,
+            fit_none_pct: st.fit_none_pct as u64,
             sub_cut_boxes: st.sub_cut_boxes,
             sub_cut_box_over: st.sub_cut_box_over,
+            sub_cut_box_level: st.sub_cut_box_level as u64,
+            sub_cut_box_unsure: st.sub_cut_box_unsure,
         }
     }
 
@@ -167,8 +177,11 @@ impl PlanCullCounts {
         self.fit_over = self.fit_over.max(other.fit_over);
         self.fit_thin = self.fit_thin.max(other.fit_thin);
         self.fit_full_pct = self.fit_full_pct.max(other.fit_full_pct);
+        self.fit_none_pct = self.fit_none_pct.max(other.fit_none_pct);
         self.sub_cut_boxes = self.sub_cut_boxes.saturating_add(other.sub_cut_boxes);
         self.sub_cut_box_over = self.sub_cut_box_over.saturating_add(other.sub_cut_box_over);
+        self.sub_cut_box_level = self.sub_cut_box_level.max(other.sub_cut_box_level);
+        self.sub_cut_box_unsure = self.sub_cut_box_unsure.saturating_add(other.sub_cut_box_unsure);
     }
 }
 
