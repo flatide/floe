@@ -1,5 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod actions;
 #[cfg(target_os = "macos")]
 mod macos;
 mod service;
@@ -14,7 +15,8 @@ fn main() {
             View options: floe2-web view --help (except browser/session-file options).\n\
             Current host: macOS only; RHEL 8/ETX host is pending.\n\
             --smoke-test: empty-workspace native authentication/close test only.\n\
-            macOS preview: native file dialogs, Edit menu and explicit Recover View."
+            With no SOURCE or --root, choose an approved working folder before startup.\n\
+            macOS preview: native file dialogs, File/Edit menus and explicit Recover View."
         );
         return;
     }
@@ -41,7 +43,12 @@ fn main() {
     match result {
         Ok(code) => std::process::exit(code),
         Err(e) => {
-            eprintln!("floe2-desktop: {e}");
+            let message = actions::error_text(&e.to_string());
+            eprintln!("floe2-desktop: {message}");
+            #[cfg(target_os = "macos")]
+            if !smoke {
+                macos::show_error(&message);
+            }
             std::process::exit(1);
         }
     }

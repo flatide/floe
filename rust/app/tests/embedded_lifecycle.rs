@@ -2,15 +2,25 @@
 //! Run with matching native binaries; this is NOT WebView/ETX acceptance.
 use floe_app::embedded::{validate_ready, Ready, Session};
 use std::{
+    fs,
     io::{Read, Write},
     net::TcpStream,
+    path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc, Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+struct EmptyRoot(PathBuf);
+impl Drop for EmptyRoot {
+    fn drop(&mut self) {
+        // Never recursively remove anything an unexpected writer produced.
+        let _ = fs::remove_dir(&self.0);
+    }
+}
 
 struct Running {
     stop: Arc<AtomicUsize>,
@@ -54,7 +64,14 @@ fn request(
 #[test]
 #[ignore = "requires matching floe-index/renderd; tools/validate_rust.sh --only embedded_host"]
 fn in_process_bootstrap_authentication_and_confirmed_shutdown() {
-    let session = Session::parse(&[]).unwrap();
+    let root = EmptyRoot(std::env::temp_dir().join(format!(
+        "floe-embedded-root-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    )));
+    fs::create_dir(&root.0).unwrap();
+    let mut session = Session::parse(&[]).unwrap();
+    session.set_initial_directory(&root.0).unwrap();
     let stop = Arc::new(AtomicUsize::new(0));
     let flag = Arc::clone(&stop);
     let (send, receive) = mpsc::sync_channel(1);
@@ -90,6 +107,10 @@ fn in_process_bootstrap_authentication_and_confirmed_shutdown() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("exchange JSON");
     let csrf = json["csrf"].as_str().expect("CSRF token");
     let extra = format!("Cookie: {cookie}\r\nX-Floe-CSRF: {csrf}\r\n");
+    let (status, _, browse) = request(&ready, "GET", "/api/v1/browse", &extra, "");
+    assert_eq!(status, 200);
+    assert!(browse.contains(root.0.file_name().unwrap().to_str().unwrap()));
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
     let (status, _, _) = request(&ready, "DELETE", "/api/v1/session", &extra, "");
     assert_eq!(status, 204);
     let result = running

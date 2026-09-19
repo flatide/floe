@@ -12,7 +12,7 @@
 macOS에서 창이 뜨는 것, SSH XQuartz 실험, Firefox에서 성공한 검사는 이 현장
 수용을 대신하지 않는다. 외부 브라우저 실행 경로도 별도로 유지한다.
 
-현재는 **D2-mac 입출력·명시적 복구의 첫 구현**까지 진행했다. macOS 12+에서 `floe2-desktop`과
+현재는 **D2-mac 입출력·명시적 복구 및 시작/메뉴 사용성 보완**까지 진행했다. macOS 12+에서 `floe2-desktop`과
 로컬 개발용 `.app`을 빌드할 수 있다. 시스템 AppKit/WKWebView를 Rust 바인딩으로
 호출하며 외부 브라우저나 Python 런타임을 사용하지 않는다. **RHEL 호스트와
 배포용 패키지는 아직 미제공**이다. `floe2-web` 외부 브라우저 경로도 유지한다.
@@ -351,3 +351,86 @@ UI는 실행 파일에 내장되므로 기존 `.app`을 재실행하는 것만�
 직후의 active 단언이 실패하는 것도 확인했다. 새 개발 `.app` 빌드와 실제
 `--smoke-test`의 WebKit 인증 → 닫기 취소 → 종료 확인 → service join도 통과했다.
 이 네이티브 smoke는 마우스 이벤트 순서 실측이나 pan/박스 줌 수용을 대신하지 않는다.
+
+## 2026-09-19 — 시작·열기·메뉴 보완
+
+- LaunchServices의 작업 디렉터리는 터미널과 다르다. `open -n … --args view
+  quick.oas`에서 앱이 닫히던 것은 같은 상대경로를 찾지 못했기 때문이다.
+  `open --args`에는 **소스 및 다른 경로 옵션을 절대경로로** 넘긴다. 원래 터미널
+  디렉터리를 앱에서 추측하거나 홈 폴더로 바꾸지 않는다.
+- 인자 파싱/서비스 시작·종료 오류는 stderr와 네이티브 오류창에 표시한다.
+  bootstrap 링크는 오류 문구에서도 생략하며, 글자 수/제어 문자를 제한한다.
+  오류 확인은 실패 작업을 다시 실행하지 않는다. `--help`는 GUI를 열지 않고,
+  자동 `--smoke-test` 실패도 오류창에서 멈추지 않는다.
+- SOURCE/`--root` 없이 시작하면 **작업 폴더를 먼저 명시적으로 선택**한다.
+  Finder의 기본 cwd `/`를 권한 범위로 삼지 않는다. 취소는 서비스·worker를
+  만들지 않고 exit 0. 선택한 기존 로컬 디렉터리만 `--root`와 같은 검사를 거쳐
+  이번 세션의 초기 browse 범위가 되며 `/` 자체는 거부한다. 선택 자체는
+  색인·설계/리뷰 저장을 실행하지 않는다. 기존 SOURCE/`--root` 지정은 유지되고,
+  시작 후 범위를 추가하는 IPC나 Finder 문서 열기 이벤트는 추가하지 않았다.
+- File → Open Layout… (`Cmd+O`), Open DRC Results…는 기존 승인 범위의 웹
+  파일 선택기를 연다. DRC는 먼저 열린 레이아웃이 필요하다. 다른 모달/승인창을
+  덮지 않고, 색인/저장 확인을 자동 승인하지 않는다. About은 기존 읽기 전용
+  정보 화면, Close Window (`Cmd+W`)는 기존 End session 확인을 사용한다.
+  Window → Minimize (`Cmd+M`) 및 Dock 재활성화는 **같은 세션** 창만 복원한다.
+  데스크톱 프로세스 사이 단일 인스턴스 전달은 여전히 미구현이다.
+
+상대경로를 쓰는 터미널 실행(호출자의 cwd 유지, 명시 worker 환경변수도 보존):
+
+```sh
+# 저장소에서 최초/변경 후 빌드
+sh tools/build_desktop_macos_dev.sh
+# 같은 저장소 디렉터리 안에 quick.oas가 있을 때
+sh tools/run_desktop_macos_dev.sh view quick.oas
+# 다른 디렉터리에서도 실행기 경로를 지정하면 그 디렉터리 기준으로 해석
+sh /path/to/floe2_webui/tools/run_desktop_macos_dev.sh view quick.oas
+```
+
+최적화된 호스트 미리보기도 만들 수 있다. 기존 기본은 debug이며, worker는
+두 경우 모두 release다. 매 빌드는 **새 `.app` 경로**를 출력하여 이전 앱을
+덮어쓰지 않는다. `--release`도 unsigned/unnotarized 개발판이지 D3 배포 완료가 아니다.
+
+```sh
+floe_app=$(sh tools/build_desktop_macos_dev.sh --release)
+open -n "$floe_app"                          # 초기 작업 폴더 선택
+open -n "$floe_app" --args view /absolute/path/quick.oas
+# 또는 최적화 바이너리를 호출자의 cwd에서 직접 실행
+sh tools/run_desktop_macos_dev.sh --release view quick.oas
+```
+
+회귀 검사: `validate_desktop_launcher.py`는 격리된 합성 경로/가짜 실행 파일로
+cwd·공백/한글 인자·명시 override·종료 코드·미빌드 안내·debug/release 패키징 및
+새 출력 경로를 검사한다. `desktop/ui/menu-action.test.cjs`는 허용 버튼 외 실행,
+비활성/숨김/로딩 및 모달 중 열기를 차단한다. 둘은 `embedded_host` gate에 배선했다.
+시작 폴더 API는 유효성/최초 1회/기존 SOURCE·root 보존을 Rust unit으로 고정한다.
+실제 Finder/오류창/메뉴 검사는 아래 실행 기록과 구분한다.
+
+실행 기록:
+
+- `floe-app --lib`: 32 통과, 기존 GTK oracle 2개는 이 명령에서 ignored.
+  호스트 unit 6개, 실행기/패키징 합성 7개, 고정 메뉴 스크립트 검사 및
+  호스트 `cargo clippy --all-targets --no-deps -- -D warnings` 통과.
+  의존 프로젝트의 기존 경고와 호스트 검사 결과를 구분한다.
+- `sh tools/validate_rust.sh --only embedded_host,web_ui`: ALL OK.
+  새 초기 폴더가 실제 browse 범위로 연결되고 그 안에 파일을 만들지 않는
+  lifecycle 단언 추가 후 `--only embedded_host`도 ALL OK. 전체 배터리
+  재실행을 의미하지 않는다.
+- 실제 debug/release WebView: 인증 → 초기 파일 선택기 닫기 → 네이티브
+  About → 다른 메뉴의 모달 덮어쓰기 차단 → 닫기 취소 → 종료 확인/join 통과.
+  처음 확장한 smoke는 초기 파일 목록 요청 중 Close를 눌러 timeout이 났다.
+  목록 읽기 완료와 모달 닫힘을 각각 확인하도록 테스트를 수정했으며, 제한
+  시간이나 모달 보호를 완화하지 않았다.
+- 시작 모달을 `run()`보다 먼저 띄우므로 AppKit 시작 완료를 명시적으로
+  알린 뒤 모달 루프에 들어간다. 통상 `run()`이 `finishLaunching()`을
+  호출한다는 [Apple 계약](https://developer.apple.com/documentation/appkit/nsapplication/finishlaunching%28%29)에 따른다.
+  이 보완 전 화면 제어 연결은 timeout, 보완 후 동일한 Finder 시작창을
+  읽고 조작할 수 있었다.
+- 실제 `.app`에서 새 빈 합성 폴더 선택 → 그 폴더 하나의 파일 선택기,
+  Cmd+O 재열기, Cmd+W 종료 확인/종료를 확인했다. 합성 잘못된 옵션의
+  오류창 및 Close 뒤 exit 1, 초기 폴더 선택 Cancel 뒤 앱 종료도 확인했다.
+  실제 설계/리뷰 파일은 수정하지 않았다. Dock 복원·다중 화면/IME·실제 DRC
+  저장 장애 수용까지 확대한 검사는 아니다.
+
+남은 큰 작업은 RHEL 8.6/8.10 호스트·ETX 검증, 배포 서명/완전한 고지,
+DRC 저장 결과 불명·WebContent crash/저장소 소실 및 IME/DPI 수용이다.
+원격 공유·CI·열린 색인 hot-reload 보류는 변경하지 않는다.

@@ -23,7 +23,7 @@ use std::{
     io::{Read, Write},
     net::{Ipv4Addr, TcpListener},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -143,6 +143,25 @@ pub struct Command {
     drc_reviewer: Option<String>,
     read_reviewer: Option<String>,
     drc_edit_waives: bool,
+}
+impl Command {
+    pub(crate) fn needs_initial_directory(&self) -> bool {
+        self.sources.is_empty() && self.roots.is_empty()
+    }
+
+    pub(crate) fn set_initial_directory(&mut self, directory: &Path) -> Result<()> {
+        if !self.needs_initial_directory() {
+            return Err(Error::input(
+                "initial source/root scope is already specified",
+            ));
+        }
+        let directory = fs::canonicalize(directory)?;
+        // The trusted native launcher's explicit folder choice is equivalent
+        // to --root, never permission to extend an already running session.
+        AccessScope::new(std::slice::from_ref(&directory))?;
+        self.roots.push(directory);
+        Ok(())
+    }
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command {

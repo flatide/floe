@@ -11,6 +11,7 @@ repo=$PWD
 (cd rust && cargo build --release --offline --locked -p floe-index -p floe-renderd)
 (cd desktop && cargo fmt -- --check && cargo test --offline --locked && cargo build --offline --locked)
 node rust/web/ui/session-exit.test.cjs
+node desktop/ui/menu-action.test.cjs
 FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
 FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
     desktop/target/debug/floe2-desktop --smoke-test

@@ -222,6 +222,8 @@ if gate runtime_smoke; then RAN="$RAN runtime_smoke"
 if gate embedded_host; then RAN="$RAN embedded_host"
     .venv/bin/python -B tools/validate_desktop_env.py
     .venv/bin/python -B tools/validate_desktop_vendor.py
+    .venv/bin/python -B tools/validate_desktop_launcher.py
+    node desktop/ui/menu-action.test.cjs
     (cd rust && FLOE_INDEX_BIN="$PWD/target/release/floe-index" \
         FLOE_RENDERD_BIN="$PWD/target/release/floe-renderd" \
         cargo test --release --offline --locked -p floe-app --test embedded_lifecycle -- --ignored); fi

@@ -1,5 +1,6 @@
 //! The only native FFI boundary. All AppKit/WebKit objects stay on the main
 //! thread; delegates and completion blocks are retained through their use.
+use crate::actions::Action;
 use crate::service::Service;
 use crate::transfers::{self, PendingFile};
 use block2::{DynBlock, RcBlock};
@@ -62,12 +63,27 @@ define_class!(
 
     unsafe impl NSObjectProtocol for Host {}
     impl Host {
+        #[unsafe(method(openLayout:))]
+        fn open_layout(&self, _sender: Option<&AnyObject>) { self.menu_action(Action::OpenLayout); }
+        #[unsafe(method(openDrc:))]
+        fn open_drc(&self, _sender: Option<&AnyObject>) { self.menu_action(Action::OpenDrc); }
+        #[unsafe(method(showAbout:))]
+        fn show_about(&self, _sender: Option<&AnyObject>) { self.menu_action(Action::About); }
         #[unsafe(method(recoverView:))]
         fn recover_view(&self, _sender: Option<&AnyObject>) { self.recover(); }
         #[unsafe(method(forceEndSession:))]
         fn force_end_session(&self, _sender: Option<&AnyObject>) { self.force_close(); }
     }
     unsafe impl NSApplicationDelegate for Host {
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
+            // Dock reactivation reveals this session, never replays open/save.
+            if let Some(window) = self.ivars().window.get() {
+                window.deminiaturize(None);
+                window.makeKeyAndOrderFront(None);
+            }
+            false
+        }
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
             self.request_close();
@@ -424,6 +440,49 @@ impl Host {
     fn status(&self, message: &str) {
         if let Some(window) = self.ivars().window.get() {
             window.setTitle(&NSString::from_str(message));
+        }
+    }
+    fn menu_action(&self, action: Action) {
+        if self.ivars().panel_open.get() || self.ivars().recovering.get() {
+            return;
+        }
+        let Some(web) = self.ivars().web.get() else {
+            return;
+        };
+        let host = self.retain();
+        let callback = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            // Never expose arbitrary JS values or NSError (may contain URLs).
+            let marker = if error.is_null() {
+                unsafe { value.as_ref() }
+                    .and_then(|v| v.downcast_ref::<NSString>())
+                    .map(|v| v.to_string())
+            } else {
+                None
+            };
+            if host.ivars().smoke {
+                let status = match marker.as_deref() {
+                    Some("opened") => "opened",
+                    Some("busy") => "busy",
+                    Some("unavailable") => "unavailable",
+                    _ => "evaluation-failed",
+                };
+                eprintln!("[desktop-smoke] menu={status}");
+            }
+            match marker.as_deref() {
+                Some("opened") => host.status("floe2 — embedded preview"),
+                Some("busy") => host.status("Finish or cancel the current dialog first"),
+                _ => {
+                    host.status("Menu action unavailable — wait for the view, or use Recover View")
+                }
+            }
+        });
+        // The action enum supplies only fixed button IDs. Existing web controls
+        // retain all registered-root, indexing and review approval checks.
+        unsafe {
+            web.evaluateJavaScript_completionHandler(
+                &NSString::from_str(&action.script()),
+                Some(&callback),
+            );
         }
     }
     fn owned_frame(&self, frame: &WKFrameInfo) -> bool {
@@ -786,9 +845,12 @@ impl Host {
         let step = self.ivars().smoke_step.get();
         // Empty-workspace QA only, never accepts a source/reviewer/write scope.
         let js = match step {
-            0 => "(()=>{const b=document.getElementById('logout');return b&&!b.disabled?'ready':JSON.stringify([!!b,typeof FloeProtocol==='object',typeof FloeSessionExit==='object',document.readyState==='complete',!!location.hash]);})()",
-            1 | 3 => "(()=>{const p=document.getElementById('session-exit-dialog');return p&&!p.hidden&&document.activeElement.id==='session-exit-cancel'?'confirm':JSON.stringify([!!p,!!p&&p.hidden,document.activeElement.id==='session-exit-cancel',document.hasFocus()]);})()",
-            2 => "document.getElementById('session-exit-dialog').hidden?'cancelled':'wait'",
+            0 => "(()=>{const b=document.getElementById('logout'),p=document.getElementById('browse-dialog'),c=document.getElementById('browse-close'),r=document.getElementById('browse-refresh');return b&&!b.disabled&&p&&!p.hidden&&c&&!c.disabled&&r&&!r.disabled?'ready':JSON.stringify([!!b,typeof FloeProtocol==='object',typeof FloeSessionExit==='object',document.readyState==='complete',!!location.hash]);})()",
+            1 => "document.getElementById('browse-dialog').hidden?'dismissed':'wait'",
+            2 | 3 => "(()=>{const a=document.getElementById('about-dialog'),b=document.getElementById('browse-dialog');return a&&!a.hidden&&b&&b.hidden?'about':'wait';})()",
+            4 => "document.getElementById('about-dialog').hidden?'dismissed':'wait'",
+            5 | 7 => "(()=>{const p=document.getElementById('session-exit-dialog');return p&&!p.hidden&&document.activeElement.id==='session-exit-cancel'?'confirm':JSON.stringify([!!p,!!p&&p.hidden,document.activeElement.id==='session-exit-cancel',document.hasFocus()]);})()",
+            6 => "document.getElementById('session-exit-dialog').hidden?'cancelled':'wait'",
             _ => { self.ivars().evaluating.set(false); return; },
         };
         let host = self.retain();
@@ -811,7 +873,15 @@ impl Host {
             };
             if *host.ivars().smoke_probe.borrow() != text {
                 // Only fixed markers / five booleans can leave this QA probe.
-                if ["ready", "confirm", "cancelled", "wait"].contains(&text.as_str())
+                if [
+                    "ready",
+                    "about",
+                    "dismissed",
+                    "confirm",
+                    "cancelled",
+                    "wait",
+                ]
+                .contains(&text.as_str())
                     || text.bytes().all(|b| b"[]truefals, ".contains(&b))
                 {
                     eprintln!("[desktop-smoke] step={step} probe={text}");
@@ -820,21 +890,41 @@ impl Host {
             }
             let next = match (step, text.as_str()) {
                 (0, "ready") => {
-                    host.ivars().window.get().unwrap().performClose(None);
+                    // Empty workspaces open the file picker during startup.
+                    // Wait for its initial catalogue request to finish before
+                    // closing; a queued read temporarily disables Close.
+                    host.eval("document.getElementById('browse-close').click()");
                     1
                 }
-                (1, "confirm") => {
-                    host.eval("document.getElementById('session-exit-cancel').click()");
+                (1, "dismissed") => {
+                    host.menu_action(Action::About);
                     2
                 }
-                (2, "cancelled") => {
-                    // Exercise the actual application delegate (Dock/menu Quit).
-                    NSApplication::sharedApplication(host.mtm()).terminate(None);
+                (2, "about") => {
+                    // A native menu action must not replace an existing modal.
+                    host.menu_action(Action::OpenLayout);
                     3
                 }
-                (3, "confirm") => {
-                    host.eval("document.getElementById('session-exit-confirm').click()");
+                (3, "about") => {
+                    host.eval("document.getElementById('about-close').click()");
                     4
+                }
+                (4, "dismissed") => {
+                    host.ivars().window.get().unwrap().performClose(None);
+                    5
+                }
+                (5, "confirm") => {
+                    host.eval("document.getElementById('session-exit-cancel').click()");
+                    6
+                }
+                (6, "cancelled") => {
+                    // Exercise the actual application delegate (Dock/menu Quit).
+                    NSApplication::sharedApplication(host.mtm()).terminate(None);
+                    7
+                }
+                (7, "confirm") => {
+                    host.eval("document.getElementById('session-exit-confirm').click()");
+                    8
                 }
                 _ => step,
             };
@@ -854,13 +944,67 @@ impl Host {
     }
 }
 
-pub fn run(session: Session, smoke: bool) -> Result<i32> {
+/// LaunchServices discards terminal stderr. Report startup/service failures
+/// visibly, without writing an error file or replaying a failed operation.
+pub fn show_error(message: &str) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    finish_before_startup_modal(&app);
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(ns_string!("floe2 Desktop — session error"));
+    alert.setInformativeText(&NSString::from_str(&format!(
+        "{message}\n\nWhen launching with open --args, use absolute file paths. For relative paths use tools/run_desktop_macos_dev.sh."
+    )));
+    alert.addButtonWithTitle(ns_string!("Close"));
+    alert.runModal();
+}
+
+fn finish_before_startup_modal(app: &NSApplication) {
+    // run() normally completes AppKit launch, but these modal loops precede
+    // it. Do not leave LaunchServices waiting for startup throughout a dialog.
+    if !NSRunningApplication::currentApplication().isFinishedLaunching() {
+        app.finishLaunching();
+    }
+}
+
+pub fn run(mut session: Session, smoke: bool) -> Result<i32> {
     if !objc2::available!(macos = 12.0) {
         return Err(Error::input("embedded preview requires macOS 12 or later"));
     }
     let mtm =
         MainThreadMarker::new().ok_or_else(|| Error::input("desktop requires the main thread"))?;
     let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    if !smoke && session.needs_initial_directory() {
+        // Finder has no meaningful working directory. The user chooses the
+        // initial scope; never silently grant / or the entire home directory.
+        finish_before_startup_modal(&app);
+        let panel = NSOpenPanel::openPanel(mtm);
+        panel.setTitle(Some(ns_string!("Choose floe2 working folder")));
+        panel.setMessage(Some(ns_string!("Allow this session to browse layouts and DRC files inside this folder. Selecting a folder does not index or save files.")));
+        panel.setPrompt(Some(ns_string!("Use Folder")));
+        panel.setCanChooseFiles(false);
+        panel.setCanChooseDirectories(true);
+        panel.setAllowsMultipleSelection(false);
+        panel.setCanCreateDirectories(false);
+        panel.setCanDownloadUbiquitousContents(false);
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+        if panel.runModal() != NSModalResponseOK {
+            return Ok(0);
+        }
+        let folder = panel
+            .URL()
+            .filter(|u| u.isFileURL())
+            .and_then(|u| u.path())
+            .ok_or_else(|| Error::input("no local working folder selected"))?;
+        session.set_initial_directory(Path::new(&folder.to_string()))?;
+    }
     let host = Host::new(mtm, Service::start(session)?, smoke);
     // SAFETY: Owned window never auto-releases on close. The main-thread host
     // remains retained until after timer invalidation and delegate detachment.
@@ -891,6 +1035,13 @@ pub fn run(session: Session, smoke: bool) -> Result<i32> {
     // SAFETY: terminate: is NSApplication's standard action; target is resolved
     // by AppKit. Our applicationShouldTerminate: always guards it.
     unsafe {
+        let about = submenu.addItemWithTitle_action_keyEquivalent(
+            ns_string!("About floe2…"),
+            Some(sel!(showAbout:)),
+            ns_string!(""),
+        );
+        about.setTarget(Some(&host));
+        submenu.addItem(&NSMenuItem::separatorItem(mtm));
         let recover = submenu.addItemWithTitle_action_keyEquivalent(
             ns_string!("Recover View…"),
             Some(sel!(recoverView:)),
@@ -912,6 +1063,30 @@ pub fn run(session: Session, smoke: bool) -> Result<i32> {
     }
     item.setSubmenu(Some(&submenu));
     menu.addItem(&item);
+    let file_item = NSMenuItem::new(mtm);
+    let file = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("File"));
+    unsafe {
+        let open = file.addItemWithTitle_action_keyEquivalent(
+            ns_string!("Open Layout…"),
+            Some(sel!(openLayout:)),
+            ns_string!("o"),
+        );
+        open.setTarget(Some(&host));
+        let drc = file.addItemWithTitle_action_keyEquivalent(
+            ns_string!("Open DRC Results…"),
+            Some(sel!(openDrc:)),
+            ns_string!(""),
+        );
+        drc.setTarget(Some(&host));
+        file.addItem(&NSMenuItem::separatorItem(mtm));
+        file.addItemWithTitle_action_keyEquivalent(
+            ns_string!("Close Window…"),
+            Some(sel!(performClose:)),
+            ns_string!("w"),
+        );
+    }
+    file_item.setSubmenu(Some(&file));
+    menu.addItem(&file_item);
     let edit_item = NSMenuItem::new(mtm);
     let edit = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("Edit"));
     // AppKit responder-chain actions preserve text selection/IME and WebKit's
@@ -933,6 +1108,23 @@ pub fn run(session: Session, smoke: bool) -> Result<i32> {
     }
     edit_item.setSubmenu(Some(&edit));
     menu.addItem(&edit_item);
+    let window_item = NSMenuItem::new(mtm);
+    let window_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("Window"));
+    unsafe {
+        window_menu.addItemWithTitle_action_keyEquivalent(
+            ns_string!("Minimize"),
+            Some(sel!(performMiniaturize:)),
+            ns_string!("m"),
+        );
+        window_menu.addItemWithTitle_action_keyEquivalent(
+            ns_string!("Bring All to Front"),
+            Some(sel!(arrangeInFront:)),
+            ns_string!(""),
+        );
+    }
+    window_item.setSubmenu(Some(&window_menu));
+    menu.addItem(&window_item);
+    app.setWindowsMenu(Some(&window_menu));
     app.setMainMenu(Some(&menu));
     let timer_host = host.clone();
     let block = RcBlock::new(move |_: NonNull<NSTimer>| timer_host.poll());
@@ -958,12 +1150,12 @@ pub fn run(session: Session, smoke: bool) -> Result<i32> {
         return Err(Error::input(message));
     }
     if smoke {
-        if result != 0 || host.ivars().smoke_step.get() != 4 {
+        if result != 0 || host.ivars().smoke_step.get() != 8 {
             return Err(Error::input(
                 "native smoke did not complete confirmed shutdown",
             ));
         }
-        println!("DESKTOP SMOKE: OK (WebKit auth; native close→cancel; application quit→confirm; service joined)");
+        println!("DESKTOP SMOKE: OK (WebKit auth; native menu About + modal guard; native close→cancel; application quit→confirm; service joined)");
     }
     Ok(result)
 }

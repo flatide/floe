@@ -1,6 +1,7 @@
 //! In-process desktop host boundary. No WebView dependency enters this crate.
 use crate::web_view;
 use floe_app_core::{Error, Result};
+use std::path::Path;
 use std::sync::{atomic::AtomicUsize, Arc};
 
 /// A one-use credential transferred directly to the owning UI thread.
@@ -21,6 +22,16 @@ impl Session {
         Ok(Self {
             command: web_view::parse_embedded(&words)?,
         })
+    }
+
+    /// A native launcher may ask for a folder before starting an empty session.
+    /// Explicit source/root arguments always win; there is no live scope change.
+    pub fn needs_initial_directory(&self) -> bool {
+        self.command.needs_initial_directory()
+    }
+
+    pub fn set_initial_directory(&mut self, directory: &Path) -> Result<()> {
+        self.command.set_initial_directory(directory)
     }
 
     /// Run on a worker thread. The host owns cancellation and must wait for
@@ -117,6 +128,37 @@ mod tests {
             "https://example.com",
             "https://example.com/"
         ));
+    }
+
+    #[test]
+    fn native_folder_choice_is_explicit_validated_and_one_use() {
+        let mut session = Session::parse(&[]).unwrap();
+        assert!(session.needs_initial_directory());
+        assert!(session.set_initial_directory(Path::new("/")).is_err());
+        assert!(session
+            .set_initial_directory(Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/Cargo.toml"
+            )))
+            .is_err());
+        assert!(session
+            .set_initial_directory(Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/Cargo.toml/missing"
+            )))
+            .is_err());
+        assert!(session.needs_initial_directory());
+        session
+            .set_initial_directory(Path::new(env!("CARGO_MANIFEST_DIR")))
+            .unwrap();
+        assert!(!session.needs_initial_directory());
+        assert!(session.set_initial_directory(Path::new("/tmp")).is_err());
+        for args in [vec!["design.oas"], vec!["--root", "/tmp"]] {
+            let mut explicit =
+                Session::parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).unwrap();
+            assert!(!explicit.needs_initial_directory());
+            assert!(explicit.set_initial_directory(Path::new("/tmp")).is_err());
+        }
     }
 
     #[test]
