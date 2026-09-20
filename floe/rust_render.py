@@ -382,7 +382,9 @@ class RustRenderWorker:
             return
         kind = job.get("kind")
         try:
-            if kind == "render":
+            if kind == "render_probe":
+                self._submit_probe(job)
+            elif kind == "render":
                 self._submit_render(job)
             elif kind == "recolor":
                 self._submit_recolor(job)
@@ -473,7 +475,19 @@ class RustRenderWorker:
         if self.debug:
             print("[rust-render] > " + command, file=sys.stderr, flush=True)
 
-    def _submit_render(self, job):
+    def _submit_probe(self, job):
+        """docs/LAYER_DECODE_PROBE_PLAN.ko.md: the diagnostic
+        `render_probe` command. Same request as a render, painted the
+        way `mode` asks; the answer is a `probe_frame`, never a frame,
+        and no published scene or retained frame comes of it. Only
+        tools/bench_layer_decode.py and the gate send it."""
+        mode = str(job.get("mode") or "baseline")
+        if mode not in ("baseline", "ordered", "occlusion"):
+            raise ValueError("probe mode must be baseline, ordered or "
+                             "occlusion: %s" % mode)
+        self._submit_render(job, probe=mode)
+
+    def _submit_render(self, job, probe=None):
         if job.get("abstract"):
             raise RuntimeError(
                 "abstract mode is intentionally unsupported by the Rust "
@@ -541,12 +555,13 @@ class RustRenderWorker:
         with self._jobs_lock:
             self._jobs[generation] = state
         command = (
-            "render gen=%d view=%s w=%d h=%d depth=%s cut=%s exact=0 "
+            "%s gen=%d view=%s w=%d h=%d depth=%s cut=%s exact=0 "
             "layers=%s frames=%s labels=%s font_px=%d mono=%s "
             "frame_cache=%s "
             "jobs=%d decode_jobs=%d tile_px=%d "
             "round_pages=%d round_paths=1 frame_format=%s "
             "thin=%s style_epoch=%d out=%s" % (
+                "render" if probe is None else "render_probe",
                 generation, ",".join(repr(value) for value in bbox),
                 int(job["w"]), int(job["h"]), depth,
                 repr(max(0.0, float(job.get("cut_px") or 0.0))), layers,
@@ -559,6 +574,8 @@ class RustRenderWorker:
                 self._round_pages,
                 "raw" if raw else "png",
                 thin, self._style_epoch, output))
+        if probe is not None:
+            command += " probe=" + probe
         self._send(command)
 
     def _submit_recolor(self, job):
@@ -780,6 +797,8 @@ class RustRenderWorker:
                     pass
         elif kind == "frame":
             self._emit_frame(fields)
+        elif kind == "probe_frame":
+            self._emit_frame(fields, probe=True)
         elif kind == "snap":
             self._emit_snap(fields)
         elif kind == "pick":
@@ -912,13 +931,13 @@ class RustRenderWorker:
             except OSError:
                 pass
 
-    def _emit_frame(self, fields):
+    def _emit_frame(self, fields, probe=False):
         generation = _wire_int(fields, "gen", -1)
         with self._jobs_lock:
             state = self._jobs.get(generation)
         if state is None:
             return
-        path = fields.get("png")
+        path = fields.get("out") if probe else fields.get("png")
         frame_format = fields.get("format", "png")
         read_started = time.monotonic()
         try:
@@ -963,7 +982,8 @@ class RustRenderWorker:
                     pass
         adapter_read_us = round((time.monotonic() - read_started) * 1e6)
 
-        final = _wire_int(fields, "final") != 0
+        # a probe answers once, with the finished frame
+        final = probe or _wire_int(fields, "final") != 0
         if not final:
             # `partial=1 deferred=0` is still a progressive round. The wire's
             # final bit, not deferred's truthiness, decides settled state.
@@ -1029,7 +1049,8 @@ class RustRenderWorker:
         job = state["job"]
         deferred = _wire_int(fields, "deferred")
         output = {
-            "kind": "frame", "frame_format": frame_format,
+            "kind": "probe_frame" if probe else "frame",
+            "frame_format": frame_format,
             "bbox": job["bbox"],
             "gen": generation, "tiles": _wire_int(
                 fields, "plan_pages",
@@ -1263,6 +1284,31 @@ class RustRenderWorker:
             px_per_um = float(job["w"]) / max(
                 1e-12, span_dbu * float(self.cache.meta["dbu"]))
             output["cut_um"] = round(cut_px / px_per_um, 3)
+        if probe:
+            # docs/LAYER_DECODE_PROBE_PLAN.ko.md §8: what the probe did
+            # beside the pixels, in the probe's own words
+            output["probe"] = {
+                "mode": fields.get("mode", ""),
+                "planned_pages": _wire_int(fields, "planned_pages"),
+                "selected_pages": _wire_int(fields, "selected_pages"),
+                "requested_pages": _wire_int(fields, "requested_pages"),
+                "decoded_pages": _wire_int(fields, "decoded_pages"),
+                "cache_hits": _wire_int(fields, "cache_hits"),
+                "skipped_pages": _wire_int(fields, "skipped_pages"),
+                "passes": _wire_int(fields, "passes"),
+                "layer_passes": _wire_int(fields, "layer_passes"),
+                "decode_ms": _wire_int(fields, "decode_us") / 1000.0,
+                "scene_ms": _wire_int(fields, "scene_us") / 1000.0,
+                "prepare_ms": _wire_int(fields, "prepare_us") / 1000.0,
+                "paint_ms": _wire_int(fields, "paint_us") / 1000.0,
+                "finish_ms": _wire_int(fields, "finish_us") / 1000.0,
+                "total_ms": _wire_int(fields, "total_us") / 1000.0,
+                "raster_ms": _wire_int(fields, "raster_us") / 1000.0,
+                "once_tiles": _wire_int(fields, "once_tiles"),
+                "once_passes": _wire_int(fields, "once_passes"),
+                "once_items": _wire_int(fields, "once_items"),
+                "bin_items": _wire_int(fields, "bin_items"),
+            }
         self.res.put(output)
         if final:
             with self._jobs_lock:

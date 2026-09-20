@@ -14,6 +14,7 @@ mod page_cache;
 mod page_index;
 mod png;
 mod query;
+mod layer_decode;
 mod raster;
 mod repetition;
 mod request;
@@ -45,13 +46,15 @@ pub use raster::{
     render_geometry_styled_cancellable_windowed,
     render_geometry_styled_unbinned,
     render_geometry_styled_unbinned_cancellable, FrameReuse, GeometryRasterReport,
-    GeometryRasterRequest, LayerFill,
+    GeometryRasterRequest, LayerFill, LayerRasterSession,
     LayerStyle, RasterViewBox, RgbaFrame, StyledGeometryRasterRequest, DEFAULT_TILE_SIZE,
     MAX_TILE_SIZE,
 };
+pub use layer_decode::{LayerProbeReport, ProbeMode};
 pub use request::{PlanRequest, ViewBox, FULL_DEPTH};
 pub use scene::FrameScene;
 pub use summary::{cull_allowed as summary_cull_allowed, level_for as summary_level_for, SummaryPlane, SummarySelection};
 pub use stats::RenderStats;
 
+pub use floe_vfs::hier::HierPlan;
 pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;

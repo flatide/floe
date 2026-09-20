@@ -896,6 +896,42 @@ fn render_geometry_impl(
             summary_pixel_paints: counters.summary_pixels_drawn,
         });
     }
+    finish_geometry_frame(
+        request,
+        mode,
+        scene,
+        tiles,
+        tile_columns,
+        tile_rows,
+        stats,
+        counters,
+        prepared_labels.as_ref(),
+        labels_truncated,
+        keep_geometry,
+        started,
+        guard,
+    )
+}
+
+/// Assembles the rastered tiles into the frame, paints the label passes over
+/// it and fills in the report - the tail every full-frame raster shares
+/// (`render_geometry_impl` and `LayerRasterSession::finish`).
+#[allow(clippy::too_many_arguments)]
+fn finish_geometry_frame(
+    request: &GeometryRasterRequest,
+    mode: RenderMode<'_>,
+    scene: &FrameScene,
+    tiles: Vec<RasterBand>,
+    tile_columns: u32,
+    tile_rows: u32,
+    mut stats: RenderStats,
+    mut counters: RasterCounters,
+    prepared_labels: Option<&PreparedLabels>,
+    labels_truncated: bool,
+    keep_geometry: bool,
+    started: Instant,
+    guard: Option<RenderGuard<'_>>,
+) -> Result<GeometryRasterReport, String> {
     let mut frame = assemble_tiles(request, tiles, tile_columns, tile_rows)?;
     check_cancelled(guard)?;
     // §F2R-20: the retained copy exists only because labels paint over
@@ -903,7 +939,7 @@ fn render_geometry_impl(
     // the geometry frame and the caller retains it without a copy
     // (a 4K margin frame is ~130 MiB - one copy fewer per settle).
     let label_pass = matches!(
-        (prepared_labels.as_ref(), mode),
+        (prepared_labels, mode),
         (Some(labels), RenderMode::Styled(_)) if !labels.rows.is_empty()
     );
     let geometry_frame = (keep_geometry && label_pass).then(|| frame.clone());
@@ -912,7 +948,7 @@ fn render_geometry_impl(
     // geometry plane, in one full-frame pass - a deliberate deviation
     // from the KLayout between-plane order so a pan-reused geometry
     // frame can take fresh viewport-planned labels on top.
-    if let (Some(labels), RenderMode::Styled(styled)) = (prepared_labels.as_ref(), mode) {
+    if let (Some(labels), RenderMode::Styled(styled)) = (prepared_labels, mode) {
         frame = apply_label_passes(request, styled, labels, frame, &mut counters, guard)?;
     }
     check_cancelled(guard)?;
@@ -1967,108 +2003,6 @@ fn collect_cell(
     Ok(())
 }
 
-/// Serves one tile from the bin: same plane order, same per-plane DFS
-/// item order, same record queries as the walk.
-#[allow(clippy::too_many_arguments)]
-fn raster_tile_from_bin(
-    scene: &FrameScene,
-    request: &GeometryRasterRequest,
-    styled: &StyledGeometryRasterRequest,
-    bin: &WorkBin,
-    band: &mut RasterBand,
-    cull_view: BBox,
-    stats: &mut RenderStats,
-    counters: &mut RasterCounters,
-    guard: Option<RenderGuard<'_>>,
-    record_scratch: &mut RecordSet,
-) -> Result<(), String> {
-    // §3.17: resolve every deferred edge once for this tile before the
-    // band/plane sequence consumes it from all sides.
-    let minis = if bin.deferred_edges.is_empty() {
-        Vec::new()
-    } else {
-        build_deferred_minis(
-            scene,
-            bin,
-            styled.hierarchy_frames,
-            cull_view,
-            guard,
-            stats,
-        )?
-    };
-    let walk_frames = styled.hierarchy_frames && !bin.frames.is_empty();
-    let passes = tile_passes(styled.layers.len(), walk_frames, band.once.is_some());
-    let stroke_pixels = styled
-        .layers
-        .iter()
-        .map(|layer| layer.outline_width)
-        .max()
-        .unwrap_or(1);
-    let tile_view = cull_view;
-    for (done, pass) in passes.iter().enumerate() {
-        check_cancelled(guard)?;
-        // write-once: the pass sees only what can reach an open pixel
-        let Some(cull_view) = band.open_view(request, tile_view, stroke_pixels)? else {
-            stats.once_full_tiles = stats.once_full_tiles.saturating_add(1);
-            stats.once_passes_skipped = stats.once_passes_skipped.saturating_add((passes.len() - done) as u64);
-            break;
-        };
-        if cull_view.x0 >= cull_view.x1 || cull_view.y0 >= cull_view.y1 {
-            continue;
-        }
-        match *pass {
-            TilePass::Frames(frame_band) => replay_frame_items(
-                scene,
-                request,
-                band,
-                cull_view,
-                frame_band,
-                frame_paint(frame_band),
-                stats,
-                counters,
-                guard,
-                &bin.frames,
-                Some(&minis),
-            )?,
-            TilePass::Plane(plane) => {
-                let layer = &styled.layers[plane];
-                let color = if styled.mono {
-                    monochrome(layer.color)
-                } else {
-                    layer.color
-                };
-                let paint = PaintStyle {
-                    color,
-                    fill: layer.fill,
-                    stroke: StrokeStyle::Solid,
-                    stroke_width: layer.outline_width,
-                };
-                // an occupancy summary paints in the layer's own slot (M2):
-                // the plane's page items are empty for a summarized layer
-                if let Some(summary) = scene.summary_for(layer.layer_idx) {
-                    paint_summary_plane(band, request, summary, paint, counters)?;
-                }
-                replay_plane_items(
-                    scene,
-                    request,
-                    band,
-                    cull_view,
-                    stats,
-                    counters,
-                    guard,
-                    record_scratch,
-                    layer,
-                    plane,
-                    paint,
-                    &bin.planes[plane],
-                    Some(&minis),
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Consumes one plane-item sequence: the bin's own list, or a mini
 /// bin's list replayed at a deferred edge's slot (minis = None there,
 /// so a mini's own deferrals take the legacy per-plane walk). Order is
@@ -2402,45 +2336,156 @@ fn replay_frame_items(
 }
 
 
-/// The pre-2c styled tile path: per-plane hierarchy walks. Kept
-/// verbatim as the work-bin fallback and byte-equality reference.
+/// One tile's state across the pass sequence (docs/LAYER_DECODE_PROBE_PLAN.ko.md
+/// §5). `raster_tile` runs every pass of a tile in one call; the layer-decode
+/// probe runs one pass over every tile and decodes what the next layer needs
+/// before the next, so the write-once mask, the pixels and the resolved
+/// deferred edges have to outlive a single pass.
+struct TileWork {
+    band: RasterBand,
+    /// the tile's own cull view; a write-once pass narrows it to the open
+    /// pixels (`open_view`) without losing this one
+    tile_view: BBox,
+    /// §3.17 deferred edges resolved for this tile (bin path only)
+    minis: Vec<Option<WorkBin>>,
+    path: Vec<WsKey>,
+    record_scratch: RecordSet,
+    stats: RenderStats,
+    counters: RasterCounters,
+    /// no open pixel is left: the tile takes no further pass
+    full: bool,
+}
+
+impl TileWork {
+    fn new(
+        request: &GeometryRasterRequest,
+        stroke_pixels: u8,
+        write_once: bool,
+        col0: u32,
+        col1: u32,
+        row0: u32,
+        row1: u32,
+    ) -> Result<Self, String> {
+        let mut band = RasterBand::new_tile(request, col0, col1, row0, row1)?;
+        if write_once {
+            band.enable_write_once();
+        }
+        Ok(TileWork {
+            band,
+            tile_view: tile_world_view(request, col0, col1, row0, row1, stroke_pixels)?,
+            minis: Vec::new(),
+            path: Vec::new(),
+            record_scratch: RecordSet::default(),
+            stats: RenderStats::default(),
+            counters: RasterCounters::default(),
+            full: false,
+        })
+    }
+
+    /// §3.17: resolve every deferred edge once for this tile before the
+    /// band/plane sequence consumes it from all sides.
+    fn prepare_minis(
+        &mut self,
+        scene: &FrameScene,
+        bin: Option<&WorkBin>,
+        hierarchy_frames: bool,
+        guard: Option<RenderGuard<'_>>,
+    ) -> Result<(), String> {
+        if let Some(bin) = bin.filter(|bin| !bin.deferred_edges.is_empty()) {
+            self.minis = build_deferred_minis(
+                scene,
+                bin,
+                hierarchy_frames,
+                self.tile_view,
+                guard,
+                &mut self.stats,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn output(self) -> RasterTileOutput {
+        RasterTileOutput {
+            tile: self.band,
+            stats: self.stats,
+            counters: self.counters,
+        }
+    }
+}
+
+/// The pass sequence of a styled frame. It is a property of the frame, not of
+/// a tile, so every tile takes the same passes in the same order and a pass
+/// index means the same paint step in all of them.
+fn styled_passes(
+    scene: &FrameScene,
+    styled: &StyledGeometryRasterRequest,
+    bin: Option<&WorkBin>,
+    write_once: bool,
+) -> Vec<TilePass> {
+    let walk_frames = styled.hierarchy_frames
+        && match bin {
+            // the masks are subtree-cumulative, so a frame-free plan
+            // skips all four band walks in one test (labels still run)
+            None => scene.subtree_has_frames(scene.top()),
+            Some(bin) => !bin.frames.is_empty(),
+        };
+    tile_passes(styled.layers.len(), walk_frames, write_once)
+}
+
+/// One pass of one tile: the bin's item lists when the collection holds them,
+/// the per-plane hierarchy walk otherwise. `remaining` counts this pass and
+/// every pass after it - what a tile that fills here never runs.
 #[allow(clippy::too_many_arguments)]
-fn raster_tile_walk_styled(
+fn raster_tile_pass(
     scene: &FrameScene,
     request: &GeometryRasterRequest,
     styled: &StyledGeometryRasterRequest,
-    band: &mut RasterBand,
-    cull_view: BBox,
-    stats: &mut RenderStats,
-    counters: &mut RasterCounters,
+    bin: Option<&WorkBin>,
+    work: &mut TileWork,
+    pass: TilePass,
+    remaining: usize,
+    stroke_pixels: u8,
     guard: Option<RenderGuard<'_>>,
-    path: &mut Vec<WsKey>,
-    record_scratch: &mut RecordSet,
 ) -> Result<(), String> {
-    // The masks are subtree-cumulative, so a frame-free plan
-    // skips all four band walks in one test (labels still run).
-    let walk_frames = styled.hierarchy_frames && scene.subtree_has_frames(scene.top());
-    let passes = tile_passes(styled.layers.len(), walk_frames, band.once.is_some());
-    let stroke_pixels = styled
-        .layers
-        .iter()
-        .map(|layer| layer.outline_width)
-        .max()
-        .unwrap_or(1);
-    let tile_view = cull_view;
-    for (done, pass) in passes.iter().enumerate() {
-        check_cancelled(guard)?;
-        // write-once: the pass sees only what can reach an open pixel
-        let Some(cull_view) = band.open_view(request, tile_view, stroke_pixels)? else {
-            stats.once_full_tiles = stats.once_full_tiles.saturating_add(1);
-            stats.once_passes_skipped = stats.once_passes_skipped.saturating_add((passes.len() - done) as u64);
-            break;
-        };
-        if cull_view.x0 >= cull_view.x1 || cull_view.y0 >= cull_view.y1 {
-            continue;
-        }
-        match *pass {
-            TilePass::Frames(frame_band) => render_frame_band(
+    check_cancelled(guard)?;
+    // write-once: the pass sees only what can reach an open pixel
+    let Some(cull_view) = work.band.open_view(request, work.tile_view, stroke_pixels)? else {
+        work.stats.once_full_tiles = work.stats.once_full_tiles.saturating_add(1);
+        work.stats.once_passes_skipped = work
+            .stats
+            .once_passes_skipped
+            .saturating_add(remaining as u64);
+        work.full = true;
+        return Ok(());
+    };
+    if cull_view.x0 >= cull_view.x1 || cull_view.y0 >= cull_view.y1 {
+        return Ok(());
+    }
+    let TileWork {
+        band,
+        minis,
+        path,
+        record_scratch,
+        stats,
+        counters,
+        ..
+    } = work;
+    match pass {
+        TilePass::Frames(frame_band) => match bin {
+            Some(bin) => replay_frame_items(
+                scene,
+                request,
+                band,
+                cull_view,
+                frame_band,
+                frame_paint(frame_band),
+                stats,
+                counters,
+                guard,
+                &bin.frames,
+                Some(minis),
+            )?,
+            None => render_frame_band(
                 scene,
                 request,
                 band,
@@ -2454,22 +2499,41 @@ fn raster_tile_walk_styled(
                 OrthoTransform::identity(),
                 path,
             )?,
-            TilePass::Plane(plane) => {
-                let layer = &styled.layers[plane];
-                let paint = PaintStyle {
-                    color: if styled.mono {
-                        monochrome(layer.color)
-                    } else {
-                        layer.color
-                    },
-                    fill: layer.fill,
-                    stroke: StrokeStyle::Solid,
-                    stroke_width: layer.outline_width,
-                };
-                if let Some(summary) = scene.summary_for(layer.layer_idx) {
-                    paint_summary_plane(band, request, summary, paint, counters)?;
-                }
-                render_cell(
+        },
+        TilePass::Plane(plane) => {
+            let layer = &styled.layers[plane];
+            let paint = PaintStyle {
+                color: if styled.mono {
+                    monochrome(layer.color)
+                } else {
+                    layer.color
+                },
+                fill: layer.fill,
+                stroke: StrokeStyle::Solid,
+                stroke_width: layer.outline_width,
+            };
+            // an occupancy summary paints in the layer's own slot (M2):
+            // the plane's page items are empty for a summarized layer
+            if let Some(summary) = scene.summary_for(layer.layer_idx) {
+                paint_summary_plane(band, request, summary, paint, counters)?;
+            }
+            match bin {
+                Some(bin) => replay_plane_items(
+                    scene,
+                    request,
+                    band,
+                    cull_view,
+                    stats,
+                    counters,
+                    guard,
+                    record_scratch,
+                    layer,
+                    plane,
+                    paint,
+                    &bin.planes[plane],
+                    Some(minis),
+                )?,
+                None => render_cell(
                     scene,
                     request,
                     band,
@@ -2484,7 +2548,7 @@ fn raster_tile_walk_styled(
                     OrthoTransform::identity(),
                     path,
                     record_scratch,
-                )?;
+                )?,
             }
         }
     }
@@ -2505,10 +2569,6 @@ fn raster_tile(
     row1: u32,
 ) -> Result<RasterTileOutput, String> {
     check_cancelled(guard)?;
-    let mut band = RasterBand::new_tile(request, col0, col1, row0, row1)?;
-    if write_once {
-        band.enable_write_once();
-    }
     let stroke_pixels = match mode {
         RenderMode::Occupancy => 1,
         RenderMode::Styled(styled) => styled
@@ -2518,66 +2578,418 @@ fn raster_tile(
             .max()
             .unwrap_or(1),
     };
-    let cull_view = tile_world_view(request, col0, col1, row0, row1, stroke_pixels)?;
-    let mut stats = RenderStats::default();
-    let mut counters = RasterCounters::default();
-    let mut path = Vec::new();
-    let mut record_scratch = RecordSet::default();
+    let mut work = TileWork::new(request, stroke_pixels, write_once, col0, col1, row0, row1)?;
     match mode {
         RenderMode::Occupancy => {
+            let cull_view = work.tile_view;
             render_cell(
                 scene,
                 request,
-                &mut band,
+                &mut work.band,
                 cull_view,
-                &mut stats,
-                &mut counters,
+                &mut work.stats,
+                &mut work.counters,
                 GeometrySelection::All,
                 SubtreePrune::Off,
                 PaintStyle::solid(request.foreground),
                 guard,
                 scene.top(),
                 OrthoTransform::identity(),
-                &mut path,
-                &mut record_scratch,
+                &mut work.path,
+                &mut work.record_scratch,
             )?;
         }
         RenderMode::Styled(styled) => {
-            if let Some(bin) = bin {
-                raster_tile_from_bin(
+            work.prepare_minis(scene, bin, styled.hierarchy_frames, guard)?;
+            let passes = styled_passes(scene, styled, bin, work.band.once.is_some());
+            for (done, &pass) in passes.iter().enumerate() {
+                if work.full {
+                    break;
+                }
+                raster_tile_pass(
                     scene,
                     request,
                     styled,
                     bin,
-                    &mut band,
-                    cull_view,
-                    &mut stats,
-                    &mut counters,
+                    &mut work,
+                    pass,
+                    passes.len() - done,
+                    stroke_pixels,
                     guard,
-                    &mut record_scratch,
-                )?;
-            } else {
-                raster_tile_walk_styled(
-                    scene,
-                    request,
-                    styled,
-                    &mut band,
-                    cull_view,
-                    &mut stats,
-                    &mut counters,
-                    guard,
-                    &mut path,
-                    &mut record_scratch,
                 )?;
             }
         }
     }
     check_cancelled(guard)?;
-    Ok(RasterTileOutput {
-        tile: band,
-        stats,
-        counters,
+    Ok(work.output())
+}
+
+
+/// Runs `f` on every tile, over `workers` threads that take the next tile as
+/// they free up (the tile scheduling of `render_geometry_impl`, one pass at a
+/// time instead of one whole tile).
+fn for_each_tile<F>(tiles: &mut [TileWork], workers: usize, f: F) -> Result<(), String>
+where
+    F: Fn(&mut TileWork) -> Result<(), String> + Sync,
+{
+    if workers <= 1 || tiles.len() <= 1 {
+        for tile in tiles.iter_mut() {
+            f(tile)?;
+        }
+        return Ok(());
+    }
+    let queue = std::sync::Mutex::new(tiles.iter_mut().collect::<Vec<_>>());
+    let (queue, f) = (&queue, &f);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            handles.push(scope.spawn(move || {
+                loop {
+                    let next = queue
+                        .lock()
+                        .map_err(|_| "raster tile queue poisoned".to_string())?
+                        .pop();
+                    let Some(tile) = next else {
+                        return Ok(());
+                    };
+                    f(tile)?;
+                }
+            }));
+        }
+        let mut error: Option<String> = None;
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(failed)) => {
+                    error.get_or_insert(failed);
+                }
+                Err(_) => {
+                    error.get_or_insert_with(|| "raster worker panicked".to_string());
+                }
+            }
+        }
+        match error {
+            Some(failed) => Err(failed),
+            None => Ok(()),
+        }
     })
+}
+
+/// The tiles of one styled frame kept alive across its pass sequence
+/// (docs/LAYER_DECODE_PROBE_PLAN.ko.md §5). `render_geometry_impl` runs every
+/// pass of a tile in one call and returns a finished frame; a session runs ONE
+/// pass over every tile and hands control back, so the caller can decode what
+/// the next layer needs in between. The tile grid, the pass order, the
+/// write-once rule and every coordinate are the normal path's, so the frame a
+/// session finishes is byte-identical to `render_geometry_styled`'s.
+///
+/// Diagnostic only: no device window, no pan reuse, no retained geometry
+/// frame, and the passes of one frame run to the end before `finish`.
+pub struct LayerRasterSession {
+    /// the effective request (the deferred-edge tile shrink applied)
+    request: GeometryRasterRequest,
+    bin: Option<WorkBin>,
+    passes: Vec<TilePass>,
+    stroke_pixels: u8,
+    workers: usize,
+    tiles: Vec<TileWork>,
+    tile_columns: u32,
+    tile_rows: u32,
+    stats: RenderStats,
+    labels: Option<PreparedLabels>,
+    labels_truncated: bool,
+    started: Instant,
+}
+
+impl LayerRasterSession {
+    /// Plans the frame's tiles and passes. `scene` must already carry every
+    /// page the work-bin collection needs to see (the collection reads page
+    /// metadata through `FrameScene::page`).
+    pub fn begin(
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        work_bin: bool,
+        guard: Option<RenderGuard<'_>>,
+    ) -> Result<Self, String> {
+        styled.validate()?;
+        let started = Instant::now();
+        let mut stats = RenderStats::default();
+        let (labels, labels_truncated) = PreparedLabels::build(scene, &styled.raster)?;
+        let stroke_pixels = styled
+            .layers
+            .iter()
+            .map(|layer| layer.outline_width)
+            .max()
+            .unwrap_or(1);
+        let bin = if work_bin {
+            collect_work_bin(
+                scene,
+                &styled.raster,
+                styled,
+                stroke_pixels,
+                guard,
+                &mut stats,
+                None,
+            )?
+        } else {
+            None
+        };
+        stats.work_bin_items = bin.as_ref().map(|bin| bin.items).unwrap_or(0);
+        // §3.21: the deferred-edge tile shrink, as in `render_geometry_impl`
+        let request = if styled.raster.tile_size > 128
+            && bin
+                .as_ref()
+                .is_some_and(|bin| !bin.deferred_edges.is_empty())
+        {
+            GeometryRasterRequest {
+                tile_size: 128,
+                ..styled.raster
+            }
+        } else {
+            styled.raster
+        };
+        let tile_size = u32::from(request.tile_size);
+        let tile_columns = request.width.div_ceil(tile_size);
+        let tile_rows = request.height.div_ceil(tile_size);
+        let tile_count_u64 = u64::from(tile_columns) * u64::from(tile_rows);
+        let tile_count: usize = tile_count_u64
+            .try_into()
+            .map_err(|_| format!("raster tile count limit exceeded: {tile_count_u64}"))?;
+        let workers = usize::from(request.workers).min(tile_count).max(1);
+        stats.workers_used = workers.try_into().unwrap_or(u16::MAX);
+        stats.tiles = tile_count.try_into().unwrap_or(u32::MAX);
+        let write_once = write_once_enabled();
+        let mut tiles = Vec::with_capacity(tile_count);
+        for tile_index in 0..tile_count {
+            let tile_x = tile_index % tile_columns as usize;
+            let tile_y = tile_index / tile_columns as usize;
+            tiles.push(TileWork::new(
+                &request,
+                stroke_pixels,
+                write_once,
+                tile_boundary(request.width, tile_x, tile_size),
+                tile_boundary(request.width, tile_x + 1, tile_size),
+                tile_boundary(request.height, tile_y, tile_size),
+                tile_boundary(request.height, tile_y + 1, tile_size),
+            )?);
+        }
+        let passes = styled_passes(scene, styled, bin.as_ref(), write_once);
+        let hierarchy_frames = styled.hierarchy_frames;
+        let bin_ref = bin.as_ref();
+        for_each_tile(&mut tiles, workers, |tile| {
+            tile.prepare_minis(scene, bin_ref, hierarchy_frames, guard)
+        })?;
+        Ok(LayerRasterSession {
+            request,
+            bin,
+            passes,
+            stroke_pixels,
+            workers,
+            tiles,
+            tile_columns,
+            tile_rows,
+            stats,
+            labels,
+            labels_truncated,
+            started,
+        })
+    }
+
+    pub fn begin_cancellable(
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        work_bin: bool,
+        generation: u64,
+        cancellation: &RenderCancellation,
+    ) -> Result<Self, String> {
+        Self::begin(
+            scene,
+            styled,
+            work_bin,
+            Some(RenderGuard {
+                generation,
+                cancellation,
+            }),
+        )
+    }
+
+    /// The styled plane a pass paints, if it paints one (a hierarchy frame
+    /// band paints no layer).
+    fn plane_of(pass: TilePass) -> Option<usize> {
+        match pass {
+            TilePass::Plane(plane) => Some(plane),
+            TilePass::Frames(_) => None,
+        }
+    }
+
+    pub fn passes(&self) -> usize {
+        self.passes.len()
+    }
+
+    /// Runs the frame pass by pass, calling `before_pass` on this thread
+    /// before each one with the plane it is about to paint. The raster
+    /// workers live for the whole frame and wait at a barrier while
+    /// `before_pass` runs, so stopping between layers costs a barrier, not a
+    /// thread (measured 2026-09-20: spawning four workers per pass cost
+    /// 105-135 ms of a 449-layer frame, all of the order's apparent price).
+    ///
+    /// Tiles are independent, so a tile painted through every pass at once
+    /// and a tile painted one pass at a time reach the same pixels; the
+    /// barrier exists for the caller, not for the raster.
+    pub fn render_layered<F>(
+        self,
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        guard: Option<RenderGuard<'_>>,
+        mut before_pass: F,
+    ) -> Result<GeometryRasterReport, String>
+    where
+        F: FnMut(Option<usize>) -> Result<(), String>,
+    {
+        let LayerRasterSession {
+            request,
+            bin,
+            passes,
+            stroke_pixels,
+            workers,
+            tiles,
+            tile_columns,
+            tile_rows,
+            stats,
+            labels,
+            labels_truncated,
+            started,
+        } = self;
+        let tiles: Vec<std::sync::Mutex<TileWork>> =
+            tiles.into_iter().map(std::sync::Mutex::new).collect();
+        let (bin, passes) = (bin.as_ref(), passes.as_slice());
+        let barrier = std::sync::Barrier::new(workers + 1);
+        let pass_index = AtomicUsize::new(0);
+        let cursor = AtomicUsize::new(0);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let failure = std::sync::Mutex::new(None::<String>);
+        let (tiles_ref, barrier, pass_index, cursor, stop, failure) = (
+            &tiles, &barrier, &pass_index, &cursor, &stop, &failure,
+        );
+        std::thread::scope(|scope| -> Result<(), String> {
+            for _ in 0..workers {
+                scope.spawn(move || loop {
+                    barrier.wait();
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let at = pass_index.load(Ordering::Relaxed);
+                    let (pass, remaining) = (passes[at], passes.len() - at);
+                    loop {
+                        let tile_index = cursor.fetch_add(1, Ordering::Relaxed);
+                        let Some(slot) = tiles_ref.get(tile_index) else {
+                            break;
+                        };
+                        let Ok(mut tile) = slot.lock() else {
+                            break;
+                        };
+                        if tile.full {
+                            continue;
+                        }
+                        let tile_started = Instant::now();
+                        let result = raster_tile_pass(
+                            scene,
+                            &request,
+                            styled,
+                            bin,
+                            &mut tile,
+                            pass,
+                            remaining,
+                            stroke_pixels,
+                            guard,
+                        );
+                        tile.stats.raster_tile_max_us =
+                            tile.stats.raster_tile_max_us.saturating_add(
+                                tile_started
+                                    .elapsed()
+                                    .as_micros()
+                                    .try_into()
+                                    .unwrap_or(u64::MAX),
+                            );
+                        if let Err(error) = result {
+                            if let Ok(mut failure) = failure.lock() {
+                                failure.get_or_insert(error);
+                            }
+                        }
+                    }
+                    barrier.wait();
+                });
+            }
+            let mut result = Ok(());
+            for at in 0..passes.len() {
+                if let Err(error) = before_pass(Self::plane_of(passes[at])) {
+                    result = Err(error);
+                    break;
+                }
+                pass_index.store(at, Ordering::Relaxed);
+                cursor.store(0, Ordering::Relaxed);
+                barrier.wait();
+                barrier.wait();
+                let failed = failure.lock().map_err(|_| "raster failure lock poisoned".to_string())?.clone();
+                if let Some(error) = failed {
+                    result = Err(error);
+                    break;
+                }
+            }
+            stop.store(true, Ordering::Release);
+            barrier.wait();
+            result
+        })?;
+        let mut stats = stats;
+        let mut counters = RasterCounters::default();
+        let mut bands = Vec::with_capacity(tiles.len());
+        for slot in tiles {
+            let output = slot
+                .into_inner()
+                .map_err(|_| "raster tile lock poisoned".to_string())?
+                .output();
+            add_stats(&mut stats, &output.stats);
+            counters.add(&output.counters);
+            bands.push(output.tile);
+        }
+        finish_geometry_frame(
+            &request,
+            RenderMode::Styled(styled),
+            scene,
+            bands,
+            tile_columns,
+            tile_rows,
+            stats,
+            counters,
+            labels.as_ref(),
+            labels_truncated,
+            false,
+            started,
+            guard,
+        )
+    }
+
+    pub fn render_layered_cancellable<F>(
+        self,
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        generation: u64,
+        cancellation: &RenderCancellation,
+        before_pass: F,
+    ) -> Result<GeometryRasterReport, String>
+    where
+        F: FnMut(Option<usize>) -> Result<(), String>,
+    {
+        self.render_layered(
+            scene,
+            styled,
+            Some(RenderGuard {
+                generation,
+                cancellation,
+            }),
+            before_pass,
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -5377,6 +5789,27 @@ mod tests {
         FrameScene::from_test_parts(plan, pages, BTreeMap::from([(top, top_box), (child, child_box)])).unwrap()
     }
 
+    /// The same frame through `LayerRasterSession`: one pass at a time over
+    /// tiles that stay alive, as the layer-decode probe paints it.
+    fn session_frame(
+        scene: &FrameScene,
+        request: &StyledGeometryRasterRequest,
+        work_bin: bool,
+    ) -> GeometryRasterReport {
+        let session = LayerRasterSession::begin(scene, request, work_bin, None).unwrap();
+        let expected = session.passes();
+        assert!(expected > 0, "a styled frame has at least one pass");
+        let mut seen = 0;
+        let report = session
+            .render_layered(scene, request, None, |_| {
+                seen += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(seen, expected, "every pass is announced once");
+        report
+    }
+
     #[test]
     fn write_once_frames_match_the_ordered_overwrite_byte_for_byte() {
         let mut stipple = [0u16; 16];
@@ -5415,6 +5848,17 @@ mod tests {
                     };
                     let scene = once_scene(seed, dense);
                     let ordered = with_write_once(false, || render_geometry_styled(&scene, &request).unwrap());
+                    // the layer-decode probe's retained tiles paint the same
+                    // passes one at a time (LAYER_DECODE_PROBE_PLAN §5)
+                    for work_bin in [true, false] {
+                        for once in [true, false] {
+                            let session = with_write_once(once, || session_frame(&scene, &request, work_bin));
+                            assert!(
+                                session.frame.pixels() == ordered.frame.pixels(),
+                                "session (work_bin {work_bin}, write-once {once}) differs: seed {seed} shift {shift} {width}x{height} tile {tile_size}"
+                            );
+                        }
+                    }
                     let ordered_walk = with_write_once(false, || render_geometry_styled_unbinned(&scene, &request).unwrap());
                     let once = with_write_once(true, || render_geometry_styled(&scene, &request).unwrap());
                     let once_walk = with_write_once(true, || render_geometry_styled_unbinned(&scene, &request).unwrap());
@@ -5423,6 +5867,12 @@ mod tests {
                     let case = format!("seed {seed} shift {shift} {width}x{height} tile {tile_size}");
                     assert!(once.frame.pixels() == ordered.frame.pixels(), "binned write-once differs: {case}");
                     assert!(once_walk.frame.pixels() == ordered.frame.pixels(), "walked write-once differs: {case}");
+                    let session = with_write_once(true, || session_frame(&scene, &request, true));
+                    assert_eq!(
+                        (session.stats.once_full_tiles, session.stats.once_passes_skipped, session.stats.once_items_skipped),
+                        (once.stats.once_full_tiles, once.stats.once_passes_skipped, once.stats.once_items_skipped),
+                        "the session skips what the normal path skips: {case}"
+                    );
                     assert!(once.frame.pixels().chunks_exact(4).any(|pixel| pixel != request.raster.background));
                     full_tiles += once.stats.once_full_tiles + once_walk.stats.once_full_tiles;
                 }

@@ -3064,6 +3064,31 @@ max(max_w, max_h)로 크기 등급을 매겼다. 재현(단위 테스트로 고�
 큰 컷"이고 도형 단위 컷에서는 그것이 `max_min`이다. 이제 컷 3과 5 모두 정사각형 페이지를 고르고
 상태는 `complete from x21.33, none below x2.67`(작은 변 기준)이다. 킬 스위치·cull의 등급은 그대로.
 
+#### F2R-28 다음 단계 1 — 레이어 순서로 그리는 진단 경로 (`render_probe`, 0.12.175, 2026-09-20)
+
+위 계측("전 레이어를 켠 뷰에서 디코드의 92~99 %가 한 픽셀도 못 쓰는 페이지")에 대해 사용자가
+docs/LAYER_DECODE_PROBE_PLAN.ko.md에 구현 계획을 쓰고 진행을 지시했다. 1단계는 **아무것도 생략하지
+않고** 같은 플랜·같은 selected를 레이어 순서로(위에서 아래로) 그릴 수 있게 만들고, 그림이 같은지와
+순서 자체의 값이 얼마인지만 본다. 디코드 생략(3단계)은 페이지 메타데이터 장면(2단계)이 있어야 한다.
+
+- `render_probe mode=baseline|ordered` (renderd 전용, `render`와 같은 필드 + `probe=`; 응답은
+  `probe_frame`이고 published scene·retained 프레임·점진 라운드를 건드리지 않는다). `occlusion`은
+  아직 오류로 거절한다 — 다른 모드로 조용히 대체하지 않는다.
+- `LayerRasterSession`: 타일과 write-once 마스크가 프레임 내내 살아 있고 pass를 하나씩 그린다.
+  래스터 워커는 프레임 동안 유지되며 pass 사이에는 장벽에서 기다린다. 타일이 서로 독립이므로
+  "타일 하나를 끝까지"와 "pass 하나를 모든 타일에"는 같은 픽셀이다.
+- 기존 `raster_tile_from_bin`/`raster_tile_walk_styled`는 pass 하나를 그리는 `raster_tile_pass`
+  하나로 합쳤다(일반 경로도 이것을 돈다 — 두 경로가 갈라질 수 없다).
+- 검증: write-once 오라클 테스트에 세션 프레임을 더해 36개 장면 × bin/walk × write-once on/off가
+  바이트 동일(건너뛴 타일·pass·항목 수까지), 게이트 `layer_decode`(5레이어 레이아웃, 줌 4단계,
+  keep/cull, depth 0/full, frames·labels, 타일 64/128/384, 워커 1/4/12).
+
+순서만 바꾼 값(합성 칩 1/10, keep medium, paint ms, `baseline → ordered`): 1·16 레이어는 **빨라지고**
+(16 레이어 fit 176 → 61 ms — 모든 타일이 같은 plane을 연달아 그려 캐시에 남는 것으로 보인다),
+64·449 레이어는 느려진다(449 fit 190 → 292, ×4 302 → 406). 느려지는 값은 pass 장벽이 타일 간 부하
+분산을 없애는 데서 온다(워커 1개면 두 모드가 같다). 449 레이어에서 +100 ms 안팎이고 3단계가 아낄
+디코드가 106~260 ms이므로, 3단계 전에 **레이어를 묶어 판정하는 방법**을 정해야 한다.
+
 ### F2R-25 — 라벨 bin 기반 선택의 제한적 검증 (`TODO`)
 
 문제: 라벨 budget 소진 시 걷기 순서의 prefix만 표시돼 dense 뷰에서

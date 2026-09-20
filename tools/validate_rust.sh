@@ -38,13 +38,13 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode rust_renderer klayout"
 alias_gates() {
     case "$1" in
         quick)    echo "unit_vfs unit_render occupancy rust_renderer" ;;
         planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box shape_cut" ;;
         occ)      echo "unit_vfs occupancy" ;;
-        render)   echo "unit_render rust_renderer representatives fit_budget sub_cut_box shape_cut write_once render_goldens render_speckle render_frames klayout" ;;
+        render)   echo "unit_render rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode render_goldens render_speckle render_frames klayout" ;;
         indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives" ;;
         python)   echo "index_cli vfs_profile floe2 drc_ice svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
@@ -311,6 +311,10 @@ if gate shape_cut; then RAN="$RAN shape_cut"
 # covered work skipped - frames byte-identical to the ordered overwrite
 if gate write_once; then RAN="$RAN write_once"
     .venv/bin/python tools/validate_write_once.py; fi
+# layer-decode probe: the same plan painted layer by layer over tiles that
+# stay alive is byte-identical to the normal render (render_probe)
+if gate layer_decode; then RAN="$RAN layer_decode"
+    .venv/bin/python tools/validate_layer_decode.py; fi
 # in-tree CPU renderer: Python queue contract plus independent
 # KLayout pixel oracle at deterministic serial/parallel settings
 if gate rust_renderer; then RAN="$RAN rust_renderer"

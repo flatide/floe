@@ -1,5 +1,7 @@
 use floe_render_core::{
     pick_scene, pick_scene_cancellable, render_geometry_occupancy_cancellable,
+    render_geometry_styled_cancellable, HierPlan, LayerProbeReport, LayerRasterSession, ProbeMode,
+    RenderLabel, SummarySelection,
     render_geometry_styled_cancellable_reuse,
     render_geometry_styled_unbinned_cancellable, FrameReuse,
     snap_scene, snap_scene_cancellable, validate_font_px, Cache, CacheLayer, ClipGeometry, Deck,
@@ -349,6 +351,11 @@ struct RenderCommand {
     raw_frame: bool,
     style_epoch: Option<u64>,
     out: String,
+    /// `render_probe` only (docs/LAYER_DECODE_PROBE_PLAN.ko.md): paint this
+    /// frame the probe's way instead of the normal one and answer with a
+    /// `probe_frame`. The published scene, the retained frame and the
+    /// refinement rounds are not touched.
+    probe: Option<ProbeMode>,
     /// `thin=keep|cull`: the page hairline policy of this frame's
     /// plans - keep (mask / jobdeck: all-thin pages stay and raster
     /// as 1 px hairlines) or cull (plain layout: dropped whole, the
@@ -432,35 +439,42 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 },
             ))))
         }
-        "render" => {
-            reject_unknown(
-                &fields,
-                &[
-                    "gen",
-                    "view",
-                    "w",
-                    "h",
-                    "depth",
-                    "cut",
-                    "exact",
-                    "layers",
-                    "frames",
-                    "labels",
-                    "font_px",
-                    "mono",
-                    "frame_cache",
-                    "jobs",
-                    "decode_jobs",
-                    "tile_px",
-                    "decode_pages",
-                    "round_pages",
-                    "round_paths",
-                    "frame_format",
-                    "style_epoch",
-                    "out",
-                    "thin",
-                ],
-            )?;
+        "render" | "render_probe" => {
+            let probe = if command == "render_probe" {
+                Some(ProbeMode::parse(required(&fields, "probe")?)?)
+            } else {
+                None
+            };
+            let mut allowed: Vec<&str> = Vec::new();
+            if probe.is_some() {
+                allowed.push("probe");
+            }
+            allowed.extend([
+                "gen",
+                "view",
+                "w",
+                "h",
+                "depth",
+                "cut",
+                "exact",
+                "layers",
+                "frames",
+                "labels",
+                "font_px",
+                "mono",
+                "frame_cache",
+                "jobs",
+                "decode_jobs",
+                "tile_px",
+                "decode_pages",
+                "round_pages",
+                "round_paths",
+                "frame_format",
+                "style_epoch",
+                "out",
+                "thin",
+            ]);
+            reject_unknown(&fields, &allowed)?;
             let thin_keep = match fields.get("thin").map(|s| s.as_str()) {
                 None | Some("cull") => false,
                 Some("keep") => true,
@@ -539,6 +553,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     raw_frame,
                     style_epoch: optional_parse(&fields, "style_epoch")?,
                     out: required(&fields, "out")?.to_string(),
+                    probe,
                     thin_keep,
                 },
             ))))
@@ -1804,6 +1819,171 @@ fn page_reps_enabled() -> bool {
     std::env::var("FLOE_RUST_PAGE_REPS").as_deref() == Ok("on")
 }
 
+/// docs/LAYER_DECODE_PROBE_PLAN.ko.md: the `render_probe` command. One plan,
+/// painted the way `mode` asks, published as a `probe_frame` so a normal
+/// render's answer can never be confused with a diagnostic one.
+///
+/// Step 1 (plan §10) decodes the whole selection in both modes: `ordered`
+/// changes only who paints - `LayerRasterSession`, one pass at a time over
+/// tiles that stay alive - which is what the frame has to stay byte-identical
+/// through. Deciding the decode per layer needs the page metadata scene of
+/// step 2, so `occlusion` is refused rather than quietly served by `ordered`.
+#[allow(clippy::too_many_arguments)]
+fn run_layer_probe(
+    page_cache: &mut DecodedPageCache,
+    cache: &Cache,
+    command: &RenderCommand,
+    responses: &Sender<String>,
+    cancellation: &RenderCancellation,
+    mode: ProbeMode,
+    plan: Arc<HierPlan>,
+    selected: &[u32],
+    styles: &[LayerStyle],
+    raster_request: GeometryRasterRequest,
+    labels: Arc<[RenderLabel]>,
+    summary: &SummarySelection,
+    decode_workers: u16,
+) -> Result<(), String> {
+    let started = Instant::now();
+    if styles.is_empty() {
+        return Err("a layer-decode probe needs styled layers".to_string());
+    }
+    if mode == ProbeMode::Occlusion {
+        return Err(
+            "probe mode occlusion is not implemented yet (LAYER_DECODE_PROBE_PLAN §10 step 3)"
+                .to_string(),
+        );
+    }
+    let mut probe = LayerProbeReport::new(mode);
+    probe.planned_pages = plan.pages.len() as u64;
+    probe.selected_pages = selected.len() as u64;
+    let styled = StyledGeometryRasterRequest {
+        raster: raster_request,
+        layers: styles.to_vec(),
+        hierarchy_frames: command.frames,
+        mono: command.mono,
+    };
+    let decode_started = Instant::now();
+    let (pages, decode_stats) = page_cache.load_cancellable(
+        cache,
+        selected,
+        decode_workers,
+        command.generation,
+        cancellation,
+    )?;
+    probe.decode_us = elapsed_us(decode_started);
+    probe.requested_pages = selected.len() as u64;
+    probe.decoded_pages = pages.len() as u64;
+    probe.cache_hits = u64::from(decode_stats.decoded_cache_hit);
+    check_generation(cancellation, command.generation)?;
+    let scene_started = Instant::now();
+    let mut scene = FrameScene::new_shared_with_labels(
+        cache,
+        Arc::clone(&plan),
+        pages,
+        Arc::clone(&labels),
+        command.label_font_px,
+    )?;
+    if summary.is_active() {
+        scene.set_summaries(summary.planes.clone());
+    }
+    probe.scene_us = elapsed_us(scene_started);
+    let report = match mode {
+        ProbeMode::Baseline => {
+            let paint_started = Instant::now();
+            let report = render_geometry_styled_cancellable(
+                &scene,
+                &styled,
+                command.generation,
+                cancellation,
+            )?;
+            probe.paint_us = elapsed_us(paint_started);
+            report
+        }
+        // FLOE_RUST_WORK_BIN=off keeps its meaning here: the per-tile walk
+        ProbeMode::Ordered | ProbeMode::Occlusion => {
+            let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
+            let prepare_started = Instant::now();
+            let session = LayerRasterSession::begin_cancellable(
+                &scene,
+                &styled,
+                work_bin,
+                command.generation,
+                cancellation,
+            )?;
+            probe.prepare_us = elapsed_us(prepare_started);
+            let paint_started = Instant::now();
+            let report = session.render_layered_cancellable(
+                &scene,
+                &styled,
+                command.generation,
+                cancellation,
+                |plane| {
+                    probe.passes += 1;
+                    probe.layer_passes += u64::from(plane.is_some());
+                    Ok(())
+                },
+            )?;
+            probe.paint_us = elapsed_us(paint_started);
+            report
+        }
+    };
+    check_generation(cancellation, command.generation)?;
+    let frame = report.frame;
+    let png = if command.raw_frame {
+        None
+    } else {
+        Some(frame.png_bytes()?)
+    };
+    let raw_header = command
+        .raw_frame
+        .then(|| raw_frame_header(frame.width(), frame.height()));
+    let parts: Vec<&[u8]> = match (&raw_header, &png) {
+        (Some(header), _) => vec![header.as_slice(), frame.pixels()],
+        (None, Some(png)) => vec![png.as_slice()],
+        _ => return Err("probe frame has neither raw pixels nor PNG bytes".to_string()),
+    };
+    let publish = publish_frame(&command.out, command.generation, &parts, cancellation)?;
+    probe.total_us = elapsed_us(started);
+    respond(
+        responses,
+        format!(
+            "probe_frame gen={} mode={} format={} out={} partial={} planned_pages={} selected_pages={} requested_pages={} decoded_pages={} cache_hits={} skipped_pages={} passes={} layer_passes={} decode_us={} scene_us={} prepare_us={} paint_us={} finish_us={} total_us={} raster_us={} raster_tile_max_us={} tiles={} workers={} bin_items={} once_tiles={} once_passes={} once_items={} publish_write_us={} publish_sync_us={} publish_rename_us={}",
+            command.generation,
+            probe.mode,
+            if command.raw_frame { "raw" } else { "png" },
+            command.out,
+            report.partial as u8,
+            probe.planned_pages,
+            probe.selected_pages,
+            probe.requested_pages,
+            probe.decoded_pages,
+            probe.cache_hits,
+            probe.skipped_pages,
+            probe.passes,
+            probe.layer_passes,
+            probe.decode_us,
+            probe.scene_us,
+            probe.prepare_us,
+            probe.paint_us,
+            probe.finish_us,
+            probe.total_us,
+            report.stats.raster_us,
+            report.stats.raster_tile_max_us,
+            report.stats.tiles,
+            report.stats.workers_used,
+            report.stats.work_bin_items,
+            report.stats.once_full_tiles,
+            report.stats.once_passes_skipped,
+            report.stats.once_items_skipped,
+            publish.write_us,
+            publish.sync_us,
+            publish.rename_us,
+        ),
+    );
+    Ok(())
+}
+
 fn run_render(
     state: &mut WorkerState,
     command: &RenderCommand,
@@ -1955,6 +2135,27 @@ fn run_render(
         .as_ref()
         .map(|planned| Arc::from(planned.rows.clone()))
         .unwrap_or_else(|| Arc::from([]));
+    if let Some(mode) = command.probe {
+        // docs/LAYER_DECODE_PROBE_PLAN.ko.md: the same plan and selection, a
+        // different way of painting them. Everything a normal render does
+        // around the frame - refinement rounds, published scene, retained
+        // frame, pan reuse - is deliberately skipped.
+        return run_layer_probe(
+            &mut state.page_cache,
+            cache,
+            &command,
+            responses,
+            cancellation,
+            mode,
+            Arc::clone(&plan),
+            &selected,
+            &styles,
+            raster_request,
+            Arc::clone(&labels),
+            &summary,
+            decode_workers,
+        );
+    }
     let mut rounds = refinement_batches(&selected, command.round_pages, |page_id| {
         state.page_cache.contains(page_id)
     })?;
