@@ -11,8 +11,12 @@
 //! * `ordered` - the same selection, painted by `LayerRasterSession` one pass
 //!   at a time, top layer first. It measures what the order itself costs.
 //! * `occlusion` - `ordered` without the pages that can no longer reach an
-//!   open pixel. Not built yet (plan §10 step 3); asking for it is an error
-//!   rather than a silent fall back to another mode.
+//!   open pixel, decided at each block's start from the masks that block
+//!   starts with.
+//!
+//! `ordered` and `occlusion` of the SAME block size are the pair to compare:
+//! only that pair separates the decode the coverage saves from what stopping
+//! between blocks costs.
 
 /// Which of the three ways of painting one plan the probe runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,19 +60,38 @@ pub struct LayerProbeReport {
     pub requested_pages: u64,
     pub decoded_pages: u64,
     pub cache_hits: u64,
-    /// pages left out because they can no longer reach an open pixel
+    /// pages of the selection never asked for, and their STORED bytes
+    /// (what the read would have cost; a page's decoded size is not known
+    /// without decoding it)
     pub skipped_pages: u64,
+    pub skipped_bytes: u64,
+    /// the decoded memory the pages that were read charge to the budget
+    pub decoded_bytes: u64,
+    pub cache_misses: u64,
+    /// (page, instance) pairs the demand looked at, and why they were left
+    /// out: outside the frame, written to the last pixel, or a deferred edge
+    /// the probe does not walk (its layer is then asked for whole)
+    pub demand_candidates: u64,
+    pub demand_out_of_view: u64,
+    pub demand_occluded: u64,
+    pub demand_unsure: u64,
     /// passes the session ran, the blocks they were painted in (one stop of
     /// every worker each) and the layers among the passes
     pub passes: u64,
     pub blocks: u64,
     pub layer_passes: u64,
-    /// the frame's phases
+    /// the frame's phases. `prepare_us + paint_us` is the raster in every
+    /// mode - the normal path prepares inside its one render call, so it
+    /// reports that as paint and leaves prepare at 0 - and `decode_us` and
+    /// `demand_us` are taken out of a layered run's paint, where they happen
+    /// between blocks, on the driver's thread.
     pub decode_us: u64,
+    pub read_us: u64,
+    pub decode_sum_us: u64,
+    pub demand_us: u64,
     pub scene_us: u64,
     pub prepare_us: u64,
     pub paint_us: u64,
-    pub finish_us: u64,
     pub total_us: u64,
 }
 

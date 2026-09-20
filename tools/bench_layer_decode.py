@@ -8,9 +8,13 @@ a mode whose pixels differ is a failure, not a faster number.
 
 Two rules the numbers depend on (review 2026-09-20):
 
-  * cold means a worker that has rendered nothing. Every (view, mode) gets a
-    worker of its own, so a view never inherits the page cache of the view
-    before it; the repeats on that same worker are the warm numbers.
+  * cold means a worker that has rendered nothing. Every cold measurement
+    gets a worker of its own, so a view never inherits the page cache of the
+    view before it, and `--repeat` repeats the COLD measurement (a fresh
+    worker each time) while `--warm` adds re-runs on the last of them. The
+    order of the modes is rotated between repeats, so a mode is not always
+    the one that finds the OS file cache warm. Reported: the median and the
+    range - differences of a few ms are not readable from one run.
   * the raster is `prepare_ms + paint_ms` in every mode. The normal path
     collects the work bin and builds the tiles inside its one render call, so
     it reports that as paint with prepare 0; a session splits them. Comparing
@@ -19,7 +23,7 @@ Two rules the numbers depend on (review 2026-09-20):
     .venv/bin/python tools/bench_layer_decode.py <cache-or-oas> [options]
       --modes baseline,ordered:1,ordered:4   --layers 1,16,64,449
       --zooms 1,4,8                 --depth full|0|N
-      --repeat 2                    --thin keep|cull
+      --repeat 3   --warm 1        --thin keep|cull
       --cut-px 3.0                  --size 1920x1080
       --json <path>
 
@@ -55,7 +59,8 @@ def parse_args(argv):
     ap.add_argument('--thin', default='keep', choices=('keep', 'cull'))
     ap.add_argument('--cut-px', type=float, default=3.0)
     ap.add_argument('--size', default='1920x1080')
-    ap.add_argument('--repeat', type=int, default=2)
+    ap.add_argument('--repeat', type=int, default=3)
+    ap.add_argument('--warm', type=int, default=1)
     ap.add_argument('--json')
     args = ap.parse_args(argv)
     specs, args.modes = args.modes.split(','), []
@@ -132,51 +137,68 @@ def main(argv=None):
     rows = []
     gen = 0
     for case in cases:
-        digests, runs = {}, {}
-        for spec, mode, block in args.modes:
-            # a worker of its own: cold is a worker that has rendered nothing,
-            # and the repeats after it are this worker warm
-            worker = make_worker(args.source)
-            try:
-                for repeat in range(args.repeat):
+        digests, cold_runs, warm_runs = {}, {}, {}
+        for repeat in range(args.repeat):
+            # rotate the modes so one of them is not always first
+            order = args.modes[repeat % len(args.modes):] + args.modes[:repeat % len(args.modes)]
+            for spec, mode, block in order:
+                # a worker of its own: cold is a worker that has rendered nothing
+                worker = make_worker(args.source)
+                try:
                     gen += 1
                     digest, probe = run(worker, gen, args, case['bbox'], case['keys'], mode, block)
                     digests.setdefault(spec, set()).add(digest)
-                    runs.setdefault(spec, []).append(dict(probe, repeat=repeat))
-            finally:
-                worker.stop()
+                    cold_runs.setdefault(spec, []).append(dict(probe, repeat=repeat))
+                    if repeat + 1 == args.repeat:
+                        for warm in range(args.warm):
+                            gen += 1
+                            digest, probe = run(worker, gen, args, case['bbox'],
+                                                case['keys'], mode, block)
+                            digests[spec].add(digest)
+                            warm_runs.setdefault(spec, []).append(dict(probe, warm=warm))
+                finally:
+                    worker.stop()
         shapes = {digest for values in digests.values() for digest in values}
         if len(shapes) != 1:
             raise SystemExit('modes disagree on the pixels: layers %d zoom x%g: %s'
                              % (case['layers'], case['zoom'], digests))
         row = {'layers': case['layers'], 'zoom': case['zoom'], 'digest': shapes.pop(),
                'modes': {}}
-        for spec, values in runs.items():
-            cold, warm = values[0], values[1:]
-            pick = lambda key: statistics.median(item[key] for item in warm)
+        for spec, cold in cold_runs.items():
+            warm = warm_runs.get(spec, [])
+            mid = lambda items, key: statistics.median(item[key] for item in items)
+            span = lambda items, key: [min(item[key] for item in items),
+                                       max(item[key] for item in items)]
             row['modes'][spec] = {
-                'cold': cold,
-                'warm_ms': pick('wall_ms') if warm else None,
-                'warm_range_ms': [min(item['wall_ms'] for item in warm),
-                                  max(item['wall_ms'] for item in warm)] if warm else None,
-                'warm_decode_ms': pick('decode_ms') if warm else None,
-                'warm_raster_ms': pick('raster_ms') if warm else None,
+                # the median cold run, and the spread of the repeats
+                'cold': min(cold, key=lambda item: abs(item['wall_ms'] - mid(cold, 'wall_ms'))),
+                'cold_ms': mid(cold, 'wall_ms'),
+                'cold_range_ms': span(cold, 'wall_ms'),
+                'cold_decode_ms': mid(cold, 'decode_ms'),
+                'cold_raster_ms': mid(cold, 'raster_ms'),
+                'cold_demand_ms': mid(cold, 'demand_ms'),
+                'repeats': len(cold),
+                'warm_ms': mid(warm, 'wall_ms') if warm else None,
+                'warm_range_ms': span(warm, 'wall_ms') if warm else None,
+                'warm_decode_ms': mid(warm, 'decode_ms') if warm else None,
+                'warm_raster_ms': mid(warm, 'raster_ms') if warm else None,
             }
         rows.append(row)
-        print('layers %-4d zoom x%-4g | %s' % (
-            case['layers'], case['zoom'],
-            '  '.join('%s cold %.0f ms (decode %.0f, raster %.0f, %d/%d pages, %d blocks) warm %s'
-                      % (spec, values['cold']['wall_ms'], values['cold']['decode_ms'],
-                         values['cold']['raster_ms'], values['cold']['decoded_pages'],
-                         values['cold']['selected_pages'], values['cold']['blocks'],
-                         '-' if values['warm_ms'] is None else '%.0f ms' % values['warm_ms'])
-                      for spec, values in row['modes'].items())), flush=True)
+        for spec, values in row['modes'].items():
+            cold = values['cold']
+            print('layers %-4d zoom x%-5g %-12s | cold %5.0f ms [%.0f-%.0f] decode %5.0f '
+                  'raster %5.0f demand %4.1f | pages %5d/%-5d mem %5.1f MB skipped %5.1f MB src'
+                  % (case['layers'], case['zoom'], spec, values['cold_ms'],
+                     values['cold_range_ms'][0], values['cold_range_ms'][1],
+                     values['cold_decode_ms'], values['cold_raster_ms'], values['cold_demand_ms'],
+                     cold['decoded_pages'], cold['selected_pages'],
+                     cold['decoded_bytes'] / 1e6, cold['skipped_bytes'] / 1e6), flush=True)
     report = {
         'source': str(Path(args.source).resolve()),
         'renderd': RENDERD_VERSION,
         'request': {'width': args.width, 'height': args.height, 'cut_px': args.cut_px,
                     'thin': args.thin, 'depth': args.depth, 'repeat': args.repeat,
-                    'frames': False, 'labels': False},
+                    'warm': args.warm, 'frames': False, 'labels': False},
         'env': {name: value for name, value in sorted(os.environ.items())
                 if name.startswith('FLOE_')},
         'rows': rows,

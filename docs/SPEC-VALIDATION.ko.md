@@ -55,7 +55,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
   write-once로 건너뛴 타일·pass·항목 수가 일치한다. 프레임 응답은 `probe_frame`이고 published
   scene을 갱신하지 않는다(probe 뒤의 snap이 그 전 렌더의 답을 그대로 준다). 블록 크기(`block=`,
   작업자가 한 타일에 연달아 그리는 pass 수) 2·4·1000도 같은 프레임이다. `mode=occlusion`은
-  오류이고 그 뒤에도 워커가 정상 동작한다.
+  `mode=occlusion`(위 레이어가 덮은 페이지를 읽지 않는다)도 같은 프레임이고, 불투명한 위 레이어
+  아래의 페이지를 실제로 읽지 않는다. write-once 마스크를 끄면 occlusion은 오류이고(가림을 증명할
+  수 없다) 그 뒤에도 워커가 정상 동작한다.
 - `write_once`(tools/validate_write_once.py, 약 20초; `render` 별칭에 포함): write-once 타일
   (F2R-28)의 프레임 18개가 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`와 바이트 동일한지, 밀집 뷰에서
   타일이 차고 paint가 줄어드는지, 킬 스위치가 write-once 작업을 전혀 하지 않는지.

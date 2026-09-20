@@ -5,9 +5,9 @@ F2R-28 measured that with every layer visible 92-99 % of the pages a frame
 decodes never light a pixel. Before anything is skipped, the painting has to
 be able to run LAYER BY LAYER over tiles that stay alive, and produce the very
 same frame. `render_probe mode=baseline` is the normal path; `mode=ordered`
-paints the same plan and the same selection through `LayerRasterSession`, one
-pass at a time, top layer first. `mode=occlusion` (skipping the decode) is not
-built yet and must be refused, never served by another mode.
+paints the same plan and the same selection through `LayerRasterSession`, top
+layer first, in blocks; `mode=occlusion` leaves out the pages a pass could no
+longer paint into an open pixel. All three must reach the same frame.
 
 This gate renders one small layout written with klayout.db - overlapping
 shapes on five layers (solid over solid, solid over a sparse array, speckle
@@ -19,10 +19,15 @@ and clear fills with shapes under their holes, a hairline grid) - and checks:
     block size (how many layers a worker paints into a tile before the
     workers meet), and the two modes agree on what the write-once mask let
     them skip;
+  * occlusion reaches the same frame at every block size, and under an opaque
+    upper layer it really leaves pages unread (and reads what shows through a
+    speckle fill: the layers below the holes are never skipped, which the
+    identical frame proves);
   * the probe answers `probe_frame`, never `frame`, and publishes no scene:
     a snap right after a probe of an empty far view still answers from the
     render before it;
-  * `mode=occlusion` is an error, and the worker takes renders after it.
+  * occlusion without the write-once masks is an error - it cannot show that
+    anything is covered - and the worker takes renders after the refusal.
 
     .venv/bin/python tools/validate_layer_decode.py
 """
@@ -43,15 +48,18 @@ W, H = 640, 360
 SOLID = '\n'.join(['*' * 16] * 16)
 CLEAR = '\n'.join(['.' * 16] * 16)
 SPECKLE = '\n'.join([('*.' * 8) if row % 2 == 0 else ('.*' * 8) for row in range(16)])
-FILLS = (SOLID, SPECKLE, CLEAR, SOLID, SPECKLE)
+# the top layer is solid so something really is covered; the speckle and
+# clear fills below it are what must NOT count as cover
+FILLS = (SOLID, SPECKLE, CLEAR, SOLID, SOLID)
 LAYERS = [(10 + i, 0) for i in range(5)]
 
 
 def layout(path):
     """Five layers that cover each other in every way the write-once mask
     cares about: an opaque block, a sparse array under it, hairlines that
-    cross both, and a cell placed twice so one instance is covered and the
-    other is not."""
+    cross both, a cell placed twice so one instance is covered and the other
+    is not, and a cell whose own pages sit entirely under a solid rectangle of
+    the top layer - the one thing occlusion may leave unread."""
     import klayout.db as kdb
     ly = kdb.Layout()
     ly.dbu = 0.001
@@ -67,15 +75,26 @@ def layout(path):
     top.insert(kdb.DCellInstArray(leaf.cell_index(), kdb.DTrans(kdb.DVector(80, 0))))
     top.shapes(lay[0]).insert(kdb.DBox(5, 5, 45, 40))
     top.shapes(lay[2]).insert(kdb.DBox(20, 10, 130, 35))
+    # a cell of its own (so its pages are its own) under a solid cover
+    hidden = ly.create_cell('HIDDEN')
+    for k in range(8):
+        hidden.shapes(lay[0]).insert(kdb.DBox(k * 2.0, 0, k * 2.0 + 1.0, 10))
+        hidden.shapes(lay[1]).insert(kdb.DBox(k * 2.0, 1, k * 2.0 + 1.5, 9))
+    top.insert(kdb.DCellInstArray(hidden.cell_index(), kdb.DTrans(kdb.DVector(100, 42))))
+    top.shapes(lay[4]).insert(kdb.DBox(95, 38, 125, 58))
     top.shapes(lay[4]).insert(kdb.DBox(0, 44, 140, 44.3))
     for k in range(12):
         top.shapes(lay[4]).insert(kdb.DBox(k * 12.0, 0, k * 12.0 + 0.1, 50))
     ly.write(str(path))
 
 
-def worker(src, tile_px, jobs):
+def worker(src, tile_px, jobs, write_once=True):
     os.environ['FLOE_RUST_TILE_PX'] = str(tile_px)
     os.environ['FLOE_RUST_RASTER_JOBS'] = str(jobs)
+    if write_once:
+        os.environ.pop('FLOE_RUST_WRITE_ONCE', None)
+    else:
+        os.environ['FLOE_RUST_WRITE_ONCE'] = 'off'
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
@@ -86,6 +105,7 @@ def worker(src, tile_px, jobs):
     time.sleep(0.4)
     os.environ.pop('FLOE_RUST_TILE_PX', None)
     os.environ.pop('FLOE_RUST_RASTER_JOBS', None)
+    os.environ.pop('FLOE_RUST_WRITE_ONCE', None)
     return w
 
 
@@ -133,7 +153,7 @@ def main():
         assert done.returncode == 0, done.stdout + done.stderr
         w = worker(src, 128, 4)
         gen = 0
-        checked = lit = 0
+        checked = lit = skipped = 0
         try:
             for zoom, bbox in views(w.cache):
                 for thin, depth, frames, labels in (('keep', None, False, False),
@@ -161,15 +181,23 @@ def main():
                         'the two modes skip different work: %s %s %s' % (case, pb, po))
                     checked += 1
                     lit += sum(1 for i in range(0, len(base), 4) if max(base[i:i + 3]) > 8)
-            # the block size is scheduling only: a worker painting four or
-            # every layer into a tile before the workers meet paints the same
-            for block in (2, 4, 1000):
-                gen += 1
-                blocked, rb = frame(w, gen, bbox, 'ordered', block=block)
-                assert blocked == ordered, 'block %d differs' % block
-                assert rb['probe']['blocks'] == -(-rb['probe']['passes'] // block), rb['probe']
-                checked += 1
+                    # the block size is scheduling only - a worker painting
+                    # four or every layer into a tile before the workers meet
+                    # paints the same - and leaving the pages an upper layer
+                    # covers unread changes nothing either
+                    for mode in ('ordered', 'occlusion'):
+                        for block in (2, 4, 1000):
+                            gen += 1
+                            blocked, rp = frame(w, gen, bbox, mode, thin, depth, frames,
+                                                labels, block=block)
+                            assert blocked == base, '%s block %d differs: %s' % (mode, block, case)
+                            assert rp['probe']['blocks'] == -(-rp['probe']['passes'] // block), rp['probe']
+                            if mode == 'ordered':
+                                assert rp['probe']['skipped_pages'] == 0, rp['probe']
+                            skipped += rp['probe']['skipped_pages']
+                            checked += 1
             assert lit > 0, 'every frame of the gate was empty'
+            assert skipped > 0, 'occlusion never left a page unread'
         finally:
             w.stop()
         # tile size and worker count do not change the pixels either
@@ -210,8 +238,8 @@ def main():
             assert (after['x'], after['y']) == (before['x'], before['y']), (before, after)
         finally:
             w.stop()
-        # occlusion is refused and the worker keeps working
-        w = worker(src, 128, 4)
+        # occlusion cannot show coverage without the write-once masks
+        w = worker(src, 128, 4, write_once=False)
         try:
             gen += 1
             _, bbox = next(iter(views(w.cache)))
@@ -220,16 +248,17 @@ def main():
                       'lod': False, 'frames': False, 'labels': False, 'abstract': False,
                       'visible': LAYERS, 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
             res = w.res.get(timeout=120)
-            assert res.get('kind') == 'error' and 'occlusion' in res.get('msg', ''), res
+            assert res.get('kind') == 'error' and 'write-once' in res.get('msg', ''), res
             # a render after the refusal still works: the worker is not wedged
             gen += 1
             after, _ = frame(w, gen, bbox, None)
             assert after
         finally:
             w.stop()
-        print('layer decode: %d view/mode pairs byte-identical (%d lit px over them), '
-              '3 tile/worker settings identical, published scene untouched, '
-              'occlusion refused' % (checked, lit))
+        print('layer decode: %d view/mode pairs byte-identical (%d lit px over them, '
+              '%d page reads left out by occlusion), 3 tile/worker settings identical, '
+              'published scene untouched, occlusion without write-once refused'
+              % (checked, lit, skipped))
     print('validate_layer_decode: OK')
 
 

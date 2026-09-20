@@ -1838,11 +1838,12 @@ fn page_reps_enabled() -> bool {
 /// painted the way `mode` asks, published as a `probe_frame` so a normal
 /// render's answer can never be confused with a diagnostic one.
 ///
-/// Step 1 (plan §10) decodes the whole selection in both modes: `ordered`
-/// changes only who paints - `LayerRasterSession`, one pass at a time over
-/// tiles that stay alive - which is what the frame has to stay byte-identical
-/// through. Deciding the decode per layer needs the page metadata scene of
-/// step 2, so `occlusion` is refused rather than quietly served by `ordered`.
+/// `baseline` decodes the whole selection and renders it in one call.
+/// `ordered` and `occlusion` build a metadata scene - it knows every page of
+/// the plan before one is read - and decode block by block: `ordered` asks for
+/// every page of the block's layers, `occlusion` only for those a pass could
+/// still paint into an open pixel. The two of the same block size are the
+/// pair to compare, and all three must reach the same pixels.
 #[allow(clippy::too_many_arguments)]
 fn run_layer_probe(
     page_cache: &mut DecodedPageCache,
@@ -1863,12 +1864,6 @@ fn run_layer_probe(
     if styles.is_empty() {
         return Err("a layer-decode probe needs styled layers".to_string());
     }
-    if mode == ProbeMode::Occlusion {
-        return Err(
-            "probe mode occlusion is not implemented yet (LAYER_DECODE_PROBE_PLAN §10 step 3)"
-                .to_string(),
-        );
-    }
     let mut probe = LayerProbeReport::new(mode);
     probe.planned_pages = plan.pages.len() as u64;
     probe.selected_pages = selected.len() as u64;
@@ -1878,77 +1873,157 @@ fn run_layer_probe(
         hierarchy_frames: command.frames,
         mono: command.mono,
     };
-    let decode_started = Instant::now();
-    let (pages, decode_stats) = page_cache.load_cancellable(
-        cache,
-        selected,
-        decode_workers,
-        command.generation,
-        cancellation,
-    )?;
-    probe.decode_us = elapsed_us(decode_started);
-    probe.requested_pages = selected.len() as u64;
-    probe.decoded_pages = pages.len() as u64;
-    probe.cache_hits = u64::from(decode_stats.decoded_cache_hit);
-    check_generation(cancellation, command.generation)?;
-    let scene_started = Instant::now();
-    let mut scene = FrameScene::new_shared_with_labels(
-        cache,
-        Arc::clone(&plan),
-        pages,
-        Arc::clone(&labels),
-        command.label_font_px,
-    )?;
-    if summary.is_active() {
-        scene.set_summaries(summary.planes.clone());
-    }
-    probe.scene_us = elapsed_us(scene_started);
-    let report = match mode {
-        // `prepare_us` + `paint_us` is the whole raster in both modes: the
-        // normal path prepares the bin and the tiles inside its one render
-        // call, so its preparation is counted in `paint_us` and `prepare_us`
-        // stays 0 (review 2026-09-20: the two were compared as if they were
-        // the same phase).
-        ProbeMode::Baseline => {
-            let paint_started = Instant::now();
-            let report = render_geometry_styled_cancellable(
-                &scene,
-                &styled,
-                command.generation,
-                cancellation,
-            )?;
-            probe.paint_us = elapsed_us(paint_started);
-            report
+    let report = if mode == ProbeMode::Baseline {
+        let decode_started = Instant::now();
+        let (pages, decode_stats) = page_cache.load_cancellable(
+            cache,
+            selected,
+            decode_workers,
+            command.generation,
+            cancellation,
+        )?;
+        probe.decode_us = elapsed_us(decode_started);
+        probe.requested_pages = selected.len() as u64;
+        probe.decoded_pages = pages.len() as u64;
+        probe.decoded_bytes = pages.iter().map(|page| page.estimated_bytes()).sum();
+        probe.cache_hits = u64::from(decode_stats.decoded_cache_hit);
+        probe.cache_misses = u64::from(decode_stats.decoded_cache_miss);
+        probe.read_us = decode_stats.page_read_us;
+        probe.decode_sum_us = decode_stats.page_decode_sum_us;
+        check_generation(cancellation, command.generation)?;
+        let scene_started = Instant::now();
+        let mut scene = FrameScene::new_shared_with_labels(
+            cache,
+            Arc::clone(&plan),
+            pages,
+            Arc::clone(&labels),
+            command.label_font_px,
+        )?;
+        if summary.is_active() {
+            scene.set_summaries(summary.planes.clone());
         }
-        // FLOE_RUST_WORK_BIN=off keeps its meaning here: the per-tile walk
-        ProbeMode::Ordered | ProbeMode::Occlusion => {
-            let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
-            let prepare_started = Instant::now();
-            let session = LayerRasterSession::begin_cancellable(
-                &scene,
-                &styled,
-                work_bin,
-                command.generation,
-                cancellation,
-            )?;
-            probe.passes = session.passes() as u64;
-            probe.prepare_us = elapsed_us(prepare_started);
-            let paint_started = Instant::now();
-            let report = session.render_layered_cancellable(
-                &scene,
-                &styled,
-                command.generation,
-                cancellation,
-                command.probe_block,
-                |planes| {
-                    probe.blocks += 1;
-                    probe.layer_passes += planes.len() as u64;
-                    Ok(())
-                },
-            )?;
-            probe.paint_us = elapsed_us(paint_started);
-            report
+        probe.scene_us = elapsed_us(scene_started);
+        let paint_started = Instant::now();
+        let report =
+            render_geometry_styled_cancellable(&scene, &styled, command.generation, cancellation)?;
+        probe.paint_us = elapsed_us(paint_started);
+        report
+    } else {
+        // FLOE_RUST_WORK_BIN=off keeps its meaning here: the per-tile walk.
+        // The demand reads the collection, so occlusion needs it, and it can
+        // only show coverage with the write-once masks.
+        let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
+        let occlusion = mode == ProbeMode::Occlusion;
+        if occlusion && !work_bin {
+            return Err("probe mode occlusion needs the work bin".to_string());
         }
+        if occlusion && std::env::var("FLOE_RUST_WRITE_ONCE").as_deref() == Ok("off") {
+            return Err("probe mode occlusion needs the write-once masks".to_string());
+        }
+        // the pages arrive block by block, so the collection and the masks
+        // come from the plan's page metadata (LAYER_DECODE_PROBE_PLAN §4)
+        let scene_started = Instant::now();
+        let mut scene = FrameScene::new_metadata(
+            cache,
+            Arc::clone(&plan),
+            Arc::clone(&labels),
+            command.label_font_px,
+        )?;
+        if summary.is_active() {
+            scene.set_summaries(summary.planes.clone());
+        }
+        let scene = scene;
+        probe.scene_us = elapsed_us(scene_started);
+        let prepare_started = Instant::now();
+        let session = LayerRasterSession::begin_cancellable(
+            &scene,
+            &styled,
+            work_bin,
+            command.generation,
+            cancellation,
+        )?;
+        probe.passes = session.passes() as u64;
+        probe.prepare_us = elapsed_us(prepare_started);
+        let paint_started = Instant::now();
+        let mut loaded: BTreeSet<u32> = BTreeSet::new();
+        let mut generation_bytes = 0u64;
+        let mut wanted: Vec<u32> = Vec::new();
+        let mut failed: Option<String> = None;
+        let report = session.render_layered_cancellable(
+            &scene,
+            &styled,
+            command.generation,
+            cancellation,
+            command.probe_block,
+            |planes, demand| {
+                probe.blocks += 1;
+                probe.layer_passes += planes.len() as u64;
+                let demand_started = Instant::now();
+                wanted.clear();
+                for &plane in planes {
+                    let stats = demand.pages_for_plane(plane, occlusion, &mut wanted);
+                    probe.demand_candidates += stats.candidates;
+                    probe.demand_out_of_view += stats.out_of_view;
+                    probe.demand_occluded += stats.occluded;
+                    probe.demand_unsure += stats.unsure;
+                }
+                wanted.sort_unstable();
+                wanted.dedup();
+                wanted.retain(|page_id| !loaded.contains(page_id));
+                probe.demand_us += elapsed_us(demand_started);
+                if wanted.is_empty() {
+                    return Ok(());
+                }
+                let decode_started = Instant::now();
+                let (pages, decode_stats) = page_cache.load_cancellable(
+                    cache,
+                    &wanted,
+                    decode_workers,
+                    command.generation,
+                    cancellation,
+                )?;
+                probe.decode_us += elapsed_us(decode_started);
+                probe.requested_pages += wanted.len() as u64;
+                probe.cache_hits += u64::from(decode_stats.decoded_cache_hit);
+                probe.cache_misses += u64::from(decode_stats.decoded_cache_miss);
+                probe.read_us += decode_stats.page_read_us;
+                probe.decode_sum_us += decode_stats.page_decode_sum_us;
+                let block_bytes = pages.iter().try_fold(0u64, |total, page| {
+                    total
+                        .checked_add(page.estimated_bytes())
+                        .ok_or_else(|| "decoded generation byte charge overflow".to_string())
+                })?;
+                probe.decoded_bytes += block_bytes;
+                generation_bytes = checked_generation_bytes(
+                    generation_bytes,
+                    block_bytes,
+                    page_cache.budget_bytes(),
+                )?;
+                probe.decoded_pages += pages.len() as u64;
+                for page in pages {
+                    loaded.insert(page.page_id);
+                    if let Err(error) = scene.set_decoded_page(page) {
+                        failed.get_or_insert(error);
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        // the raster alone: reading and asking happen on this thread between
+        // blocks and must not be counted as painting
+        probe.paint_us = elapsed_us(paint_started)
+            .saturating_sub(probe.decode_us)
+            .saturating_sub(probe.demand_us);
+        probe.skipped_pages = probe.selected_pages.saturating_sub(loaded.len() as u64);
+        probe.skipped_bytes = selected
+            .iter()
+            .filter(|page_id| !loaded.contains(page_id))
+            .map(|&page_id| cache.page_encoded_bytes(page_id))
+            .sum();
+        report
     };
     check_generation(cancellation, command.generation)?;
     let frame = report.frame;
@@ -1970,7 +2045,7 @@ fn run_layer_probe(
     respond(
         responses,
         format!(
-            "probe_frame gen={} mode={} block={} format={} out={} partial={} planned_pages={} selected_pages={} requested_pages={} decoded_pages={} cache_hits={} skipped_pages={} passes={} blocks={} layer_passes={} decode_us={} scene_us={} prepare_us={} paint_us={} finish_us={} total_us={} raster_us={} raster_tile_max_us={} tiles={} workers={} bin_items={} once_tiles={} once_passes={} once_items={} publish_write_us={} publish_sync_us={} publish_rename_us={}",
+            "probe_frame gen={} mode={} block={} format={} out={} partial={} planned_pages={} selected_pages={} requested_pages={} decoded_pages={} cache_hits={} cache_misses={} skipped_pages={} skipped_bytes={} decoded_bytes={} demand_candidates={} demand_out_of_view={} demand_occluded={} demand_unsure={} passes={} blocks={} layer_passes={} decode_us={} read_us={} decode_sum_us={} demand_us={} scene_us={} prepare_us={} paint_us={} total_us={} raster_us={} raster_tile_max_us={} tiles={} workers={} bin_items={} once_tiles={} once_passes={} once_items={} publish_write_us={} publish_sync_us={} publish_rename_us={}",
             command.generation,
             probe.mode,
             command.probe_block,
@@ -1982,15 +2057,24 @@ fn run_layer_probe(
             probe.requested_pages,
             probe.decoded_pages,
             probe.cache_hits,
+            probe.cache_misses,
             probe.skipped_pages,
+            probe.skipped_bytes,
+            probe.decoded_bytes,
+            probe.demand_candidates,
+            probe.demand_out_of_view,
+            probe.demand_occluded,
+            probe.demand_unsure,
             probe.passes,
             probe.blocks,
             probe.layer_passes,
             probe.decode_us,
+            probe.read_us,
+            probe.decode_sum_us,
+            probe.demand_us,
             probe.scene_us,
             probe.prepare_us,
             probe.paint_us,
-            probe.finish_us,
             probe.total_us,
             report.stats.raster_us,
             report.stats.raster_tile_max_us,

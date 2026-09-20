@@ -1,19 +1,22 @@
 # 전체 플랜 유지 + 레이어 순서 디코드 검증 계획
 
-상태: **1단계 구현·검증 완료(0.12.175), 2·3단계 미구현**. 2026-09-20.
+상태: **1~3단계 구현·검증 완료(0.12.177), 실칩 측정 전**. 2026-09-20.
 - 있는 것: `render_probe` 명령(`mode=baseline|ordered`), `LayerRasterSession`(프레임 내내 살아 있는
   타일과 pass 단위 그리기, 워커 풀 유지), 게이트 `tools/validate_layer_decode.py`, 벤치
   `tools/bench_layer_decode.py`. 이름은 계획의 제안과 다르다: 드라이버는 renderd의 `run_layer_probe`
   (플랜·selected·스타일을 만드는 `run_render`의 앞부분을 그대로 쓰기 위해서다), `render-core/src/
   layer_decode.rs`에는 모드와 보고 타입만 있다. `finish`는 `render_layered` 하나로 합쳤다(호출자가
   pass마다 콜백을 받는다). `render_probe`는 별도 명령이지만 `render`와 같은 필드 파서를 쓴다.
-- 없는 것: 메타데이터 장면(§4), `demand_pages`(§6), `mode=occlusion`(요청하면 **오류**이며 다른
-  모드로 조용히 대체되지 않는다), 레이어별 디코드. 1단계는 계획대로 selected 전부를 먼저 디코드하고
-  **그리는 순서만** 바꾼다.
-- 아래 §4·§6·§7의 타입·필드는 아직 구현할 인터페이스의 제안이다.
-- 1단계에서 확인한 계획의 빈 곳: `build_deferred_minis`(§3.17 deferred edge의 타일별 미니 bin)도
-  decoded 페이지로 걷는다. §3·§4의 "메타 조회 어댑터"가 `collect_cell`뿐 아니라 이쪽도 덮어야
-  2·3단계의 그림이 같다. 1단계에서는 전부 디코드한 뒤 한 번 만들어 문제가 없다.
+- 2단계(0.12.177): `Cache::page_geometry`(payload 없이 레이어·cell-local bbox)와
+  `FrameScene::new_metadata` — 플랜의 **모든** 페이지를 아는 장면. 메인 bin·미니 bin·하위 레이어
+  마스크가 전부 이 메타로 만들어지고(미니 bin은 같은 `collect_cell`을 타므로 함께 해결된다),
+  디코드된 페이지는 `set_decoded_page(&self)`로 슬롯에 들어간다 — 장면도 마스크도 다시 만들지 않는다.
+- 3단계(0.12.177): `BlockDemand::pages_for_plane` — 블록 시작 마스크로 그 블록의 필요 페이지를
+  정한다. 공유 페이지는 **어느 인스턴스라도** 열릴 가능성이 있으면 읽고, 화면 밖은 따로 센다.
+  deferred edge는 걷지 않고 그 레이어를 통째로 읽는다(`unsure`). `mode=occlusion`은 work bin과
+  write-once 마스크가 있어야 하며 없으면 오류다(가림을 증명할 수 없다).
+- 없는 것: 적응형 블록 크기, 예상 디코드량 기반 블록 제한, 실칩 측정.
+- 아래 §7의 상태 구분(`explicitly_deferred`)과 §8의 일부 항목은 아직 제안이다.
 
 ## 1. 목적과 비교 계약
 

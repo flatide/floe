@@ -19,6 +19,20 @@ pub struct FrameScene {
     /// occupancy summary planes painted in place of the layers'
     /// pages (docs/OCCUPANCY_PLAN.ko.md M2); empty = none
     summaries: Vec<crate::summary::SummaryPlane>,
+    /// The layer and bbox of EVERY page of the plan, decoded or not, and one
+    /// slot per page for the pages a caller decodes later
+    /// (docs/LAYER_DECODE_PROBE_PLAN.ko.md §4). `None` on the normal path,
+    /// where a round paints only what it has already decoded and the work bin
+    /// and the masks are right to be built from that.
+    meta: Option<PageMeta>,
+}
+
+/// Per-page metadata of a plan, aligned with `HierPlan::pages`, and the slots
+/// the pages themselves arrive in.
+struct PageMeta {
+    layer: Vec<u32>,
+    bbox: Vec<floe_ovm::BBox>,
+    late: Vec<std::sync::OnceLock<Arc<DecodedPage>>>,
 }
 
 /// Bottom-up subtree content masks over the plan hierarchy (F2R-03b
@@ -56,8 +70,12 @@ struct SceneMasks {
 const MASK_BUDGET_BYTES: usize = 16 << 20;
 
 impl SceneMasks {
-    fn build(plan: &HierPlan, pages: &BTreeMap<u32, Arc<DecodedPage>>) -> Self {
-        Self::build_bounded(plan, pages, MASK_BUDGET_BYTES)
+    fn build(
+        plan: &HierPlan,
+        pages: &BTreeMap<u32, Arc<DecodedPage>>,
+        meta: Option<&PageMeta>,
+    ) -> Self {
+        Self::build_bounded(plan, pages, meta, MASK_BUDGET_BYTES)
     }
 
     fn full_masks() -> Self {
@@ -74,10 +92,24 @@ impl SceneMasks {
     fn build_bounded(
         plan: &HierPlan,
         pages: &BTreeMap<u32, Arc<DecodedPage>>,
+        meta: Option<&PageMeta>,
         cap_bytes: usize,
     ) -> Self {
+        // a metadata scene masks by what the PLAN holds: the pages arrive
+        // later, and a layer pruned out of the walk never gets them
+        let page_layer = |page_id: u32| match meta {
+            Some(meta) => plan
+                .pages
+                .binary_search(&page_id)
+                .ok()
+                .map(|at| meta.layer[at]),
+            None => pages.get(&page_id).map(|page| page.layer_idx),
+        };
         let cells = &plan.wcells;
-        let mut layers: Vec<u32> = pages.values().map(|page| page.layer_idx).collect();
+        let mut layers: Vec<u32> = match meta {
+            Some(meta) => meta.layer.clone(),
+            None => pages.values().map(|page| page.layer_idx).collect(),
+        };
         for cell in cells {
             layers.extend(cell.washes.iter().map(|&(layer_idx, _)| layer_idx));
             layers.extend(cell.reps.iter().map(|&(layer_idx, _)| layer_idx));
@@ -101,8 +133,8 @@ impl SceneMasks {
             frames[index] = !cell.frames.is_empty();
             let row = index * words;
             for &page_id in &cell.pages {
-                if let Some(page) = pages.get(&page_id) {
-                    if let Ok(bit) = layers.binary_search(&page.layer_idx) {
+                if let Some(layer_idx) = page_layer(page_id) {
+                    if let Ok(bit) = layers.binary_search(&layer_idx) {
                         bits[row + bit / 64] |= 1u64 << (bit % 64);
                     }
                 }
@@ -330,7 +362,7 @@ impl FrameScene {
                 ));
             }
         }
-        let masks = SceneMasks::build(&plan, &pages);
+        let masks = SceneMasks::build(&plan, &pages, None);
         Ok(Self {
             plan,
             pages,
@@ -340,7 +372,77 @@ impl FrameScene {
             label_font_px,
             masks,
             summaries: Vec::new(),
+            meta: None,
         })
+    }
+
+    /// A scene that knows every page of the plan but has decoded none of them
+    /// (docs/LAYER_DECODE_PROBE_PLAN.ko.md §4). The work bin and the subtree
+    /// masks come out the same as a fully decoded scene's; the pages arrive
+    /// later through `set_decoded_page`, and only what has arrived is painted.
+    pub fn new_metadata(
+        source: &Cache,
+        plan: Arc<HierPlan>,
+        labels: Arc<[RenderLabel]>,
+        label_font_px: f32,
+    ) -> Result<Self, String> {
+        let mut scene = Self::new_shared_with_labels(source, plan, Vec::new(), labels, label_font_px)?;
+        let mut meta = PageMeta {
+            layer: Vec::with_capacity(scene.plan.pages.len()),
+            bbox: Vec::with_capacity(scene.plan.pages.len()),
+            late: Vec::new(),
+        };
+        for &page_id in &scene.plan.pages {
+            let (layer, bbox) = source.page_geometry(page_id)?;
+            meta.layer.push(layer);
+            meta.bbox.push(bbox);
+        }
+        meta.late.resize_with(scene.plan.pages.len(), Default::default);
+        scene.masks = SceneMasks::build(&scene.plan, &scene.pages, Some(&meta));
+        scene.deferred_pages = Vec::new();
+        scene.meta = Some(meta);
+        Ok(scene)
+    }
+
+    /// Hands a decoded page to a metadata scene. Takes `&self` so the frame
+    /// being painted from it needs no rebuild; a page may be set once.
+    pub fn set_decoded_page(&self, page: Arc<DecodedPage>) -> Result<(), String> {
+        let Some(meta) = self.meta.as_ref() else {
+            return Err("this scene takes no pages after it was built".to_string());
+        };
+        let at = self
+            .plan
+            .pages
+            .binary_search(&page.page_id)
+            .map_err(|_| format!("decoded page {} is outside the plan", page.page_id))?;
+        meta.late[at]
+            .set(page)
+            .map_err(|page| format!("decoded page {} is already in the scene", page.page_id))
+    }
+
+    /// The layer and the cell-local bbox of a page the plan holds, decoded or
+    /// not: what the work-bin collection and the subtree masks need.
+    pub fn page_geometry(&self, page_id: u32) -> Option<(u32, floe_ovm::BBox)> {
+        match &self.meta {
+            Some(meta) => self
+                .plan
+                .pages
+                .binary_search(&page_id)
+                .ok()
+                .map(|at| (meta.layer[at], meta.bbox[at])),
+            None => self
+                .pages
+                .get(&page_id)
+                .map(|page| (page.layer_idx, page.bbox)),
+        }
+    }
+
+    /// Pages of the plan that have neither been decoded nor handed over.
+    pub fn undecoded_pages(&self) -> usize {
+        match &self.meta {
+            Some(meta) => meta.late.iter().filter(|slot| slot.get().is_none()).count(),
+            None => self.deferred_pages.len(),
+        }
     }
 
     /// Attach the request's summary planes (renderd, after the page
@@ -374,7 +476,11 @@ impl FrameScene {
     }
 
     pub fn page(&self, page_id: u32) -> Option<&Arc<DecodedPage>> {
-        self.pages.get(&page_id)
+        let Some(meta) = self.meta.as_ref() else {
+            return self.pages.get(&page_id);
+        };
+        let at = self.plan.pages.binary_search(&page_id).ok()?;
+        meta.late[at].get()
     }
 
     pub fn cell_bbox(&self, key: WsKey) -> Option<floe_ovm::BBox> {
@@ -398,7 +504,10 @@ impl FrameScene {
     }
 
     pub fn is_partial(&self) -> bool {
-        !self.deferred_pages.is_empty()
+        match &self.meta {
+            Some(_) => self.undecoded_pages() != 0,
+            None => !self.deferred_pages.is_empty(),
+        }
     }
 
     /// Dense mask bit for a styled layer, or None when no decoded page
@@ -721,7 +830,7 @@ mod tests {
         // nothing prunes, nothing allocates, pixels are unchanged.
         let mut scene = scene;
         let plan = Arc::clone(&scene.plan);
-        let capped = SceneMasks::build_bounded(&plan, &scene.pages, 1);
+        let capped = SceneMasks::build_bounded(&plan, &scene.pages, None, 1);
         assert!(capped.full);
         assert!(capped.bits.is_empty());
         scene.masks = capped;

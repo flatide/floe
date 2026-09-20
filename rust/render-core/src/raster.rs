@@ -1743,20 +1743,23 @@ fn collect_cell(
     *visit_seq += 1;
     let stamp = *visit_seq;
     for &page_id in &cell.pages {
-        let Some(page) = scene.page(page_id) else {
+        // the page's METADATA: a layer-ordered frame collects before it has
+        // decoded anything (LAYER_DECODE_PROBE_PLAN §4), and the same walk
+        // then serves the mini bins of the deferred edges
+        let Some((layer_idx, bbox)) = scene.page_geometry(page_id) else {
             continue;
         };
-        let Some(&plane) = plane_of.get(&page.layer_idx) else {
+        let Some(&plane) = plane_of.get(&layer_idx) else {
             continue;
         };
-        if !page.bbox.intersects(&local_view) {
+        if !bbox.intersects(&local_view) {
             continue;
         }
         let entry = &mut plane_scratch[plane];
         if entry.0 == stamp {
-            entry.1.grow(&page.bbox);
+            entry.1.grow(&bbox);
         } else {
-            *entry = (stamp, page.bbox);
+            *entry = (stamp, bbox);
         }
     }
     for (plane, entry) in plane_scratch.iter().enumerate() {
@@ -2699,6 +2702,171 @@ pub struct LayerRasterSession {
     labels: Option<PreparedLabels>,
     labels_truncated: bool,
     started: Instant,
+    /// the plan's pages per styled plane, sorted unique: what a layer needs
+    /// when nothing about coverage is known (LAYER_DECODE_PROBE_PLAN §6)
+    pages_by_plane: Vec<Vec<u32>>,
+}
+
+/// What a block of layers still needs read, asked at the block's start with
+/// every worker stopped (docs/LAYER_DECODE_PROBE_PLAN.ko.md §6). The masks it
+/// reads are the ones the block starts from, so the answer does not depend on
+/// which worker got which tile.
+pub struct BlockDemand<'a> {
+    request: &'a GeometryRasterRequest,
+    styled: &'a StyledGeometryRasterRequest,
+    scene: &'a FrameScene,
+    bin: Option<&'a WorkBin>,
+    tiles: &'a [std::sync::MutexGuard<'a, TileWork>],
+    pages_by_plane: &'a [Vec<u32>],
+}
+
+/// Why the pages of one plane were asked for or left out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DemandStats {
+    /// (page, instance) pairs looked at
+    pub candidates: u64,
+    /// pages asked for
+    pub needed: u64,
+    /// instances whose box is outside the frame
+    pub out_of_view: u64,
+    /// instances whose box is written to the last pixel already
+    pub occluded: u64,
+    /// items the walk could not decide (a deferred edge): their layer is
+    /// asked for whole
+    pub unsure: u64,
+}
+
+impl BlockDemand<'_> {
+    /// Every device pixel `world` could paint is written already. False when
+    /// that cannot be shown - the answer is never "skip it" on a doubt.
+    fn written(&self, world: BBox, stroke_width: u8) -> bool {
+        let Some((c0, c1, r0, r1)) = self.device_box(world, stroke_width) else {
+            return false;
+        };
+        // outside the frame there is nothing to paint
+        if c1 <= 0 || r1 <= 0 || c0 >= i128::from(self.request.width) || r0 >= i128::from(self.request.height) {
+            return true;
+        }
+        self.tiles
+            .iter()
+            .all(|tile| tile.band.device_box_written(r0, r1, c0, c1))
+    }
+
+    /// The box can reach a pixel of the frame at all.
+    fn in_frame(&self, world: BBox, stroke_width: u8) -> bool {
+        let Some((c0, c1, r0, r1)) = self.device_box(world, stroke_width) else {
+            return true;
+        };
+        c1 > 0
+            && r1 > 0
+            && c0 < i128::from(self.request.width)
+            && r0 < i128::from(self.request.height)
+    }
+
+    /// `RasterBand::world_box_written`'s device box, shared so a page the
+    /// probe leaves out is one the raster would have skipped anyway.
+    fn device_box(&self, world: BBox, stroke_width: u8) -> Option<(i128, i128, i128, i128)> {
+        let (Ok((x0, y1)), Ok((x1, y0))) = (
+            world_to_device(self.request, world.x0, world.y0),
+            world_to_device(self.request, world.x1, world.y1),
+        ) else {
+            return None;
+        };
+        let margin = i128::from(stroke_width) + 2;
+        Some((
+            floor_div(x0.min(x1), DEVICE_ONE) - margin,
+            floor_div(x0.max(x1), DEVICE_ONE) + 1 + margin,
+            floor_div(y0.min(y1), DEVICE_ONE) - margin,
+            floor_div(y0.max(y1), DEVICE_ONE) + 1 + margin,
+        ))
+    }
+
+    /// The plan's pages for this plane (`occlusion` false), or only those a
+    /// pass could still paint into an open pixel (`occlusion` true). Pages are
+    /// appended to `out`; a page any instance may still show is asked for.
+    pub fn pages_for_plane(
+        &self,
+        plane: usize,
+        occlusion: bool,
+        out: &mut Vec<u32>,
+    ) -> DemandStats {
+        let mut stats = DemandStats::default();
+        let all = self.pages_by_plane.get(plane).map(Vec::as_slice).unwrap_or(&[]);
+        let Some(bin) = self.bin.filter(|_| occlusion) else {
+            stats.candidates = all.len() as u64;
+            stats.needed = all.len() as u64;
+            out.extend_from_slice(all);
+            return stats;
+        };
+        let Some(layer) = self.styled.layers.get(plane) else {
+            return stats;
+        };
+        let first = out.len();
+        for item in &bin.planes[plane] {
+            let PlaneItem::Cell {
+                world_bbox,
+                transform,
+                cell,
+                ..
+            } = item
+            else {
+                // a deferred edge is resolved per tile, during the paint: the
+                // probe does not walk it again, it asks for the layer whole
+                if matches!(item, PlaneItem::Deferred { .. }) {
+                    stats.unsure += 1;
+                    out.extend_from_slice(all);
+                }
+                continue;
+            };
+            if self.written(*world_bbox, layer.outline_width) {
+                stats.occluded += 1;
+                continue;
+            }
+            let Some(visited) = self.scene.cell(*cell) else {
+                continue;
+            };
+            for &page_id in &visited.pages {
+                let Some((page_layer, bbox)) = self.scene.page_geometry(page_id) else {
+                    continue;
+                };
+                if page_layer != layer.layer_idx {
+                    continue;
+                }
+                stats.candidates += 1;
+                let Ok(world) = transform.apply_bbox(bbox) else {
+                    out.push(page_id);
+                    continue;
+                };
+                if !self.in_frame(world, layer.outline_width) {
+                    stats.out_of_view += 1;
+                    continue;
+                }
+                if self.written(world, layer.outline_width) {
+                    stats.occluded += 1;
+                    continue;
+                }
+                out.push(page_id);
+            }
+        }
+        out[first..].sort_unstable();
+        let end = first + partition_dedup(&mut out[first..]);
+        out.truncate(end);
+        stats.needed = (out.len() - first) as u64;
+        stats
+    }
+}
+
+/// `slice::partition_dedup` on a sorted slice (not stable in this toolchain):
+/// the unique prefix's length.
+fn partition_dedup(values: &mut [u32]) -> usize {
+    let mut kept = 0usize;
+    for at in 0..values.len() {
+        if kept == 0 || values[kept - 1] != values[at] {
+            values[kept] = values[at];
+            kept += 1;
+        }
+    }
+    kept
 }
 
 impl LayerRasterSession {
@@ -2774,6 +2942,24 @@ impl LayerRasterSession {
             )?);
         }
         let passes = styled_passes(scene, styled, bin.as_ref(), write_once);
+        // the plan's pages per plane: what a layer needs when coverage says
+        // nothing, and the conservative answer for a deferred edge
+        let mut planes_of_layer: Vec<(u32, usize)> = styled
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(plane, layer)| (layer.layer_idx, plane))
+            .collect();
+        planes_of_layer.sort_unstable();
+        let mut pages_by_plane: Vec<Vec<u32>> = vec![Vec::new(); styled.layers.len()];
+        for &page_id in &scene.plan().pages {
+            let Some((layer_idx, _)) = scene.page_geometry(page_id) else {
+                continue;
+            };
+            if let Ok(at) = planes_of_layer.binary_search_by_key(&layer_idx, |entry| entry.0) {
+                pages_by_plane[planes_of_layer[at].1].push(page_id);
+            }
+        }
         let hierarchy_frames = styled.hierarchy_frames;
         let bin_ref = bin.as_ref();
         for_each_tile(&mut tiles, workers, |tile| {
@@ -2792,6 +2978,7 @@ impl LayerRasterSession {
             labels,
             labels_truncated,
             started,
+            pages_by_plane,
         })
     }
 
@@ -2849,7 +3036,7 @@ impl LayerRasterSession {
         mut before_block: F,
     ) -> Result<GeometryRasterReport, String>
     where
-        F: FnMut(&[usize]) -> Result<(), String>,
+        F: FnMut(&[usize], &BlockDemand<'_>) -> Result<(), String>,
     {
         let block = block.max(1);
         let LayerRasterSession {
@@ -2865,6 +3052,7 @@ impl LayerRasterSession {
             labels,
             labels_truncated,
             started,
+            pages_by_plane,
         } = self;
         let tiles: Vec<std::sync::Mutex<TileWork>> =
             tiles.into_iter().map(std::sync::Mutex::new).collect();
@@ -2937,7 +3125,22 @@ impl LayerRasterSession {
                         .iter()
                         .filter_map(|&pass| Self::plane_of(pass)),
                 );
-                if let Err(error) = before_block(&planes) {
+                let guards = tiles
+                    .iter()
+                    .map(|tile| tile.lock().map_err(|_| "raster tile lock poisoned".to_string()))
+                    .collect::<Result<Vec<_>, String>>()?;
+                let demand = BlockDemand {
+                    request: &request,
+                    styled,
+                    scene,
+                    bin,
+                    tiles: &guards,
+                    pages_by_plane: &pages_by_plane,
+                };
+                let asked = before_block(&planes, &demand);
+                drop(demand);
+                drop(guards);
+                if let Err(error) = asked {
                     result = Err(error);
                     break;
                 }
@@ -2994,7 +3197,7 @@ impl LayerRasterSession {
         before_block: F,
     ) -> Result<GeometryRasterReport, String>
     where
-        F: FnMut(&[usize]) -> Result<(), String>,
+        F: FnMut(&[usize], &BlockDemand<'_>) -> Result<(), String>,
     {
         self.render_layered(
             scene,
@@ -5819,7 +6022,7 @@ mod tests {
         assert!(expected > 0, "a styled frame has at least one pass");
         let (mut blocks, mut planes) = (0, 0);
         let report = session
-            .render_layered(scene, request, None, block, |block| {
+            .render_layered(scene, request, None, block, |block, _| {
                 blocks += 1;
                 planes += block.len();
                 Ok(())

@@ -731,6 +731,19 @@ impl Cache {
         self.vfs.ovm.page(page_id).usize_ as u64
     }
 
+    /// The layer and the cell-local bbox of one page, without reading its
+    /// payload (docs/LAYER_DECODE_PROBE_PLAN.ko.md §4): a layer-ordered frame
+    /// collects its work bin and its subtree masks before it has decoded
+    /// anything, and a page missing from that collection could never be
+    /// painted later.
+    pub fn page_geometry(&self, page_id: u32) -> Result<(u32, floe_ovm::BBox), String> {
+        if page_id >= self.vfs.ovm.n_pages {
+            return Err(format!("page {} is outside the index", page_id));
+        }
+        let page = self.vfs.ovm.page(page_id);
+        Ok((page.layer_idx, page.bbox))
+    }
+
     /// Original design-cell name for query/pick provenance.
     pub fn cell_name(&self, cell_id: u32) -> Result<String, String> {
         if cell_id >= self.vfs.ovm.n_cells {
