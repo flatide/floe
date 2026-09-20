@@ -1177,8 +1177,12 @@ fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
             passes += 1;
             plan = plan_hier_as_asked(v, &attempt, opts, 0);
         }
-        let hairline = if attempt.page_hairline { opts.hairline } else { 0.0 };
-        if !thin_to_budget(v, &mut plan, hairline, req.cut_dbu, req.decode_budget) {
+        let key = if attempt.shape_cut {
+            FitKey::SmallerSide
+        } else {
+            FitKey::LongerSide { hairline: if attempt.page_hairline { opts.hairline } else { 0.0 } }
+        };
+        if !thin_to_budget(v, &mut plan, key, req.cut_dbu, req.decode_budget) {
             break;
         }
         plan.stats.fit_pct = ((cuts[used] as f64 / req.cut_dbu as f64) * 100.0).round().max(100.0) as u32;
@@ -1203,28 +1207,40 @@ fn unique_page_memory(v: &Ovm, plan: &HierPlan) -> u64 {
     plan.pages.iter().map(|&pi| { let p = v.page(pi); page_memory(p.records, p.usize_) }).sum()
 }
 
-/// The largest cut that still selects the page: the size cut looks at the
-/// longer side, the hairline cull (factor `hairline`, 0 = keep) at the
-/// shorter one. Its octave is the page's size class.
-pub fn fit_key(p: &floe_ovm::PageV, hairline: f64) -> u64 {
+/// Which cut rule the budget ranks pages by - the one the pass selected them
+/// with, so that a size class is "what one more octave of cut would drop".
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FitKey {
+    /// the size cut looks at the longer side, the hairline cull (factor
+    /// `hairline`, 0 = keep) at the shorter one
+    LongerSide { hairline: f64 },
+    /// the shape cut (ViewReq::shape_cut): a page stays while one of its
+    /// shapes reaches the cut on both sides - max_min (review 2026-09-20: the
+    /// longer side kept a page of 10000 x 4 wires over a page of 64-squares)
+    SmallerSide,
+}
+
+/// The largest cut that still selects the page. Its octave is the page's
+/// size class.
+pub fn fit_key(p: &floe_ovm::PageV, key: FitKey) -> u64 {
     let long = p.max_w.max(p.max_h);
-    if hairline > 0.0 {
-        long.min((p.max_min as f64 / hairline) as u64)
-    } else {
-        long
+    match key {
+        FitKey::SmallerSide => p.max_min,
+        FitKey::LongerSide { hairline } if hairline > 0.0 => long.min((p.max_min as f64 / hairline) as u64),
+        FitKey::LongerSide { .. } => long,
     }
 }
 
 /// The fixed priority of a page (see FIT_OVERSHOOT): ascending = first.
-pub fn fit_priority(p: &floe_ovm::PageV, hairline: f64, page: u32) -> (std::cmp::Reverse<u32>, u32, u32) {
-    let class = 63 - fit_key(p, hairline).max(1).leading_zeros();
+pub fn fit_priority(p: &floe_ovm::PageV, key: FitKey, page: u32) -> (std::cmp::Reverse<u32>, u32, u32) {
+    let class = 63 - fit_key(p, key).max(1).leading_zeros();
     let phase = p.seq.wrapping_add(p.cell).wrapping_add(p.layer_idx);
     (std::cmp::Reverse(class), phase.reverse_bits(), page)
 }
 
 /// Keeps of a complete plan the longest prefix in `fit_priority` order that
 /// `budget` holds. False when not even the first page fits.
-fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, hairline: f64, asked_cut: i64, budget: u64) -> bool {
+fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, budget: u64) -> bool {
     let metas: Vec<floe_ovm::PageV> = plan.pages.iter().map(|&pi| v.page(pi)).collect();
     let mem: Vec<u64> = metas.iter().map(|p| page_memory(p.records, p.usize_)).collect();
     let total: u64 = mem.iter().sum();
@@ -1233,7 +1249,7 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, hairline: f64, asked_cut: i64, b
     if total <= budget {
         return true;
     }
-    let prio: Vec<_> = metas.iter().zip(&plan.pages).map(|(p, &pi)| fit_priority(p, hairline, pi)).collect();
+    let prio: Vec<_> = metas.iter().zip(&plan.pages).map(|(p, &pi)| fit_priority(p, key, pi)).collect();
     let mut order: Vec<usize> = (0..metas.len()).collect();
     order.sort_by_key(|&i| prio[i]);
     let mut keep = vec![false; metas.len()];
@@ -4645,6 +4661,34 @@ mod tests {
         let giant = fixture(&[FCell { name: "TOP", pages, places: vec![] }], 0);
         let over = fitted(&giant, &ask(50, 1, false));
         assert_eq!((over.pages.len(), over.stats.fit_cull, over.stats.fit_over, over.stats.fit_pct), (1, 1, true, 6400));
+    }
+
+    #[test]
+    fn under_the_shape_cut_the_budget_ranks_pages_by_their_smaller_side() {
+        // review 2026-09-20: the shape cut selects by the smaller side, the
+        // budget still ranked by the longer one - of a page of 10000 x 4 wires
+        // and a page of 64-squares (same cost, cut 3, room for one) the wires
+        // stayed and the squares went, and came back at a cut of 5.
+        let pages = vec![(bx(0, 0, 10_000, 4), 10_000, 4), (bx(0, 100, 64, 164), 64, 64)];
+        let chip = fixture(&[FCell { name: "TOP", pages, places: vec![] }], 0);
+        let per = page_memory(1, 0);
+        let ask = |cut: i64, shape_cut: bool| {
+            let mut r = rq(bx(-10, -10, 20_000, 20_000), cut, u32::MAX);
+            r.decode_budget = per + per / 2;
+            r.shape_cut = shape_cut;
+            r
+        };
+        let plan = |cut: i64, shape_cut: bool| plan_hier(&chip, &ask(cut, shape_cut), &HierOpts::default());
+        // the cut by the page's largest shape ranks by the longer side, as before
+        assert_eq!(plan(3, false).pages, vec![0]);
+        // the shape cut: the squares are the larger class (64 against 4), and
+        // the status says so in terms of the same side - complete from 64 dbu
+        // (x21.33 the cut), nothing under 8 dbu (x2.67)
+        let fitted = plan(3, true);
+        assert_eq!(fitted.pages, vec![1]);
+        assert_eq!((fitted.stats.fit_thin, fitted.stats.fit_full_pct, fitted.stats.fit_none_pct), (0, 2133, 267));
+        // and a larger cut never brings a page back
+        assert_eq!(plan(5, true).pages, vec![1]);
     }
 
     #[test]
