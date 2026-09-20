@@ -38,17 +38,15 @@ BLOCK past the layer count is one block: the tiles then run in the normal
 render's order, which is the floor of what the stops can cost (the metadata
 scene and the session are still there, so it is not the normal render).
 
-On a real chip (MAIN01, MAIN09) the run to report is, per representative view:
+On a real chip the run is, per representative view:
 
     .venv/bin/python tools/bench_layer_decode.py <cache> \
-        --modes baseline,ordered:8,occlusion:8,occlusion:1000 \
-        --layers <all> --zooms 1,4,8 --depth full --repeat 3 --warm 2 \
-        --center <x,y in um> --json main01-full.json
+        --modes baseline,ordered:8,occlusion:8 --layers all \
+        --zooms 1,4,8 --depth full --repeat 3 --warm 2 --center <x,y um>
 
-and the same with `--depth 0`. What matters is whether the pages the coverage
-leaves out survive the real shared instances and deferred arrays: the JSON's
-`demand_unsure` (deferred edges, whose layer is read whole) and
-`demand_occluded` against `selected_pages` say that directly.
+and the same with `--depth 0`. It ends with a short block of numbers under
+`== type this ==`; where the results have to be carried off a closed machine
+by hand, those rows are the only thing anyone types.
 """
 import argparse
 import hashlib
@@ -233,7 +231,52 @@ def main(argv=None):
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=1))
         print('wrote', args.json)
+    print_digest(args, rows)
     return report
+
+
+def print_digest(args, rows):
+    """The smallest set of numbers the decision needs, in the fewest
+    characters: where a result has to be carried off a closed machine by
+    hand, this block is the only thing anyone types. Columns that say
+    nothing are dropped into the header, so a clean run is shorter.
+
+    z    zoom                       sel  pages the plan selected
+    bas  baseline ms                ord  ordered ms (same block, reads all)
+    occ  occlusion ms               pg   pages occlusion read
+    uns  its deferred fall-backs    basW/occW  the same two, warm
+    """
+    kind = lambda name: next((spec for spec, mode, _ in args.modes if mode == name), None)
+    bas, ordered, occ = kind('baseline'), kind('ordered'), kind('occlusion')
+    if not (bas and ordered and occ):
+        return
+    block = next(block for spec, _, block in args.modes if spec == occ)
+    table = []
+    for row in rows:
+        m = row['modes']
+        table.append({
+            'z': '%g' % row['zoom'],
+            'sel': m[bas]['cold']['selected_pages'],
+            'bas': round(m[bas]['cold_ms']),
+            'ord': round(m[ordered]['cold_ms']),
+            'occ': round(m[occ]['cold_ms']),
+            'pg': m[occ]['cold']['decoded_pages'],
+            'uns': m[occ]['cold']['demand_unsure'],
+            'basW': round(m[bas]['warm_ms'] or 0),
+            'occW': round(m[occ]['warm_ms'] or 0),
+        })
+    columns = ['z', 'sel', 'bas', 'ord', 'occ', 'pg', 'uns', 'basW', 'occW']
+    header = ['d=%s' % ('f' if args.depth is None else args.depth), 'n=%d' % block]
+    if all(line['uns'] == 0 for line in table):
+        columns.remove('uns')
+        header.append('uns=0')
+    if not args.warm:
+        columns = [name for name in columns if not name.endswith('W')]
+    print('\n== type this ==')
+    print('# ' + ' '.join(header))
+    print(' '.join(columns))
+    for line in table:
+        print(' '.join(str(line[name]) for name in columns))
 
 
 if __name__ == '__main__':
