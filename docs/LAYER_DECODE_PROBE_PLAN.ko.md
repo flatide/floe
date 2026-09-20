@@ -15,7 +15,13 @@
   정한다. 공유 페이지는 **어느 인스턴스라도** 열릴 가능성이 있으면 읽고, 화면 밖은 따로 센다.
   deferred edge는 걷지 않고 그 레이어를 통째로 읽는다(`unsure`). `mode=occlusion`은 work bin과
   write-once 마스크가 있어야 하며 없으면 오류다(가림을 증명할 수 없다).
-- 없는 것: 적응형 블록 크기, 예상 디코드량 기반 블록 제한, 실칩 측정.
+- 없는 것: 적응형 블록 크기, 예상 디코드량 기반 블록 제한, **실칩 측정**.
+- 실칩에서 돌릴 것(대표 뷰마다, depth full과 0 둘 다):
+  `tools/bench_layer_decode.py <cache> --modes baseline,ordered:8,occlusion:8,occlusion:1000
+  --layers all --zooms 1,4,8 --repeat 3 --warm 2 --center <x,y um> --json <out>.json`.
+  회수할 값은 `demand_occluded`/`demand_unsure`(deferred edge라 레이어를 통째로 읽은 수) 대
+  `selected_pages`다 — 실제 공유 인스턴스와 deferred 배열에서 생략이 얼마나 남는지가 거기 드러난다.
+  `occlusion:1000`은 가림을 쓰지 못하는 대조군이다(블록 하나는 아무것도 그려지기 전에 판정한다).
 - 아래 §7의 상태 구분(`explicitly_deferred`)과 §8의 일부 항목은 아직 제안이다.
 
 ## 1. 목적과 비교 계약

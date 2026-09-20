@@ -1951,7 +1951,7 @@ fn run_layer_probe(
         let mut failed: Option<String> = None;
         // the decode workers stay up for the frame: one worker set per block
         // was most of a layer-ordered frame's decode (0.12.178)
-        let report = cache.with_decode_pool(
+        let (report, pool_us) = cache.with_decode_pool(
             decode_workers,
             Some((command.generation, cancellation)),
             |pool| session.render_layered_cancellable(
@@ -2008,15 +2008,20 @@ fn run_layer_probe(
                 Ok(())
             },
         ),
-        )??;
+        )?;
+        let report = report?;
+        probe.pool_us = pool_us;
         if let Some(error) = failed {
             return Err(error);
         }
         // the raster alone: reading and asking happen on this thread between
         // blocks and must not be counted as painting
+        // the raster alone: reading, asking and the decode pool itself happen
+        // on this thread, between blocks
         probe.paint_us = elapsed_us(paint_started)
             .saturating_sub(probe.decode_us)
-            .saturating_sub(probe.demand_us);
+            .saturating_sub(probe.demand_us)
+            .saturating_sub(probe.pool_us);
         probe.skipped_pages = probe.selected_pages.saturating_sub(loaded.len() as u64);
         probe.skipped_bytes = selected
             .iter()
@@ -2045,7 +2050,7 @@ fn run_layer_probe(
     respond(
         responses,
         format!(
-            "probe_frame gen={} mode={} block={} format={} out={} partial={} planned_pages={} selected_pages={} requested_pages={} decoded_pages={} cache_hits={} cache_misses={} skipped_pages={} skipped_bytes={} decoded_bytes={} demand_candidates={} demand_out_of_view={} demand_occluded={} demand_unsure={} passes={} blocks={} layer_passes={} decode_us={} read_us={} decode_sum_us={} demand_us={} scene_us={} prepare_us={} paint_us={} total_us={} raster_us={} raster_tile_max_us={} tiles={} workers={} bin_items={} once_tiles={} once_passes={} once_items={} publish_write_us={} publish_sync_us={} publish_rename_us={}",
+            "probe_frame gen={} mode={} block={} format={} out={} partial={} planned_pages={} selected_pages={} requested_pages={} decoded_pages={} cache_hits={} cache_misses={} skipped_pages={} skipped_bytes={} decoded_bytes={} demand_candidates={} demand_out_of_view={} demand_occluded={} demand_unsure={} passes={} blocks={} layer_passes={} decode_us={} read_us={} decode_sum_us={} demand_us={} pool_us={} scene_us={} prepare_us={} paint_us={} total_us={} raster_us={} raster_tile_max_us={} tiles={} workers={} bin_items={} once_tiles={} once_passes={} once_items={} publish_write_us={} publish_sync_us={} publish_rename_us={}",
             command.generation,
             probe.mode,
             command.probe_block,
@@ -2072,6 +2077,7 @@ fn run_layer_probe(
             probe.read_us,
             probe.decode_sum_us,
             probe.demand_us,
+            probe.pool_us,
             probe.scene_us,
             probe.prepare_us,
             probe.paint_us,

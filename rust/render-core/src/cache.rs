@@ -1095,12 +1095,15 @@ impl Cache {
     /// reads one block of layers at a time, and building a worker set per
     /// block was most of its decode: the work per page is the same either way
     /// (`page_decode_sum_us` barely moves), the wall time is not.
+    /// Answers `(body's value, the microseconds the pool itself cost)` -
+    /// raising the workers and letting them go, which belongs to neither the
+    /// decode nor the raster (review 2026-09-21: it was counted as paint).
     pub fn with_decode_pool<T>(
         &self,
         workers: u16,
         guard: Option<(u64, &RenderCancellation)>,
         body: impl FnOnce(&DecodePool<'_>) -> T,
-    ) -> Result<T, String> {
+    ) -> Result<(T, u64), String> {
         if workers == 0 || workers > MAX_DECODE_WORKERS {
             return Err(format!(
                 "decode workers must be in 1..={MAX_DECODE_WORKERS}: {workers}"
@@ -1127,14 +1130,20 @@ impl Cache {
                 self.0.start.wait();
             }
         }
-        let out = std::thread::scope(|scope| {
+        let started = Instant::now();
+        let body_ended = std::cell::Cell::new(None);
+        let (out, spawn_us) = std::thread::scope(|scope| {
             for _ in 0..pool.workers {
                 scope.spawn(move || pool.serve());
             }
+            let spawn_us = elapsed_us(started);
             let _release = Release(pool);
-            body(pool)
+            let out = body(pool);
+            body_ended.set(Some(Instant::now()));
+            (out, spawn_us)
         });
-        Ok(out)
+        let teardown_us = body_ended.get().map(elapsed_us).unwrap_or(0);
+        Ok((out, spawn_us.saturating_add(teardown_us)))
     }
 
     fn decode_pages_impl(
@@ -1316,6 +1325,11 @@ impl DecodePool<'_> {
         page_ids: &[u32],
     ) -> Result<(Vec<DecodedPage>, RenderStats), String> {
         check_decode_cancelled(self.guard)?;
+        // nothing to read: waking the workers for an empty batch is the whole
+        // cost of a block whose pages the cache already holds
+        if page_ids.is_empty() {
+            return Ok((Vec::new(), RenderStats::default()));
+        }
         let read_started = Instant::now();
         let payloads = self.source.read_pages(page_ids)?;
         let page_read_us = elapsed_us(read_started);

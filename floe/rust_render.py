@@ -1313,6 +1313,7 @@ class RustRenderWorker:
                 "read_ms": _wire_int(fields, "read_us") / 1000.0,
                 "decode_sum_ms": _wire_int(fields, "decode_sum_us") / 1000.0,
                 "demand_ms": _wire_int(fields, "demand_us") / 1000.0,
+                "pool_ms": _wire_int(fields, "pool_us") / 1000.0,
                 "scene_ms": _wire_int(fields, "scene_us") / 1000.0,
                 "prepare_ms": _wire_int(fields, "prepare_us") / 1000.0,
                 "paint_ms": _wire_int(fields, "paint_us") / 1000.0,

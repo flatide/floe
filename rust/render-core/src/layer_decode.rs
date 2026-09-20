@@ -89,6 +89,9 @@ pub struct LayerProbeReport {
     pub read_us: u64,
     pub decode_sum_us: u64,
     pub demand_us: u64,
+    /// raising the decode workers and letting them go: neither decode nor
+    /// raster, and only a layered run has it
+    pub pool_us: u64,
     pub scene_us: u64,
     pub prepare_us: u64,
     pub paint_us: u64,

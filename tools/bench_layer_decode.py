@@ -18,10 +18,12 @@ Two rules the numbers depend on (review 2026-09-20):
   * the raster is `prepare_ms + paint_ms` in every mode. The normal path
     collects the work bin and builds the tiles inside its one render call, so
     it reports that as paint with prepare 0; a session splits them. Comparing
-    the paint columns alone compares different things.
+    the paint columns alone compares different things. What a layered run
+    spends on reading (`decode_ms`), on asking what to read (`demand_ms`) and
+    on the decode pool itself (`pool_ms`) is taken out of its paint.
 
     .venv/bin/python tools/bench_layer_decode.py <cache-or-oas> [options]
-      --modes baseline,ordered:1,ordered:4   --layers 1,16,64,449
+      --modes baseline,ordered:1,ordered:4   --layers 16,449 or all
       --zooms 1,4,8                 --depth full|0|N
       --repeat 3   --warm 1        --thin keep|cull
       --cut-px 3.0                  --size 1920x1080
@@ -31,7 +33,22 @@ A mode is `baseline` or `ordered[:BLOCK]` / `occlusion[:BLOCK]`, where BLOCK
 is how many consecutive layers a raster worker paints into a tile before the
 workers meet and the driver looks at the masks again (1 = stop at every
 layer). Pair an `occlusion:N` with the `ordered:N` of the same block size:
-only that pair separates the decode it skips from what the stops cost.
+only that pair separates the decode it skips from what the stops cost. A
+BLOCK past the layer count is one block: the tiles then run in the normal
+render's order, which is the floor of what the stops can cost (the metadata
+scene and the session are still there, so it is not the normal render).
+
+On a real chip (MAIN01, MAIN09) the run to report is, per representative view:
+
+    .venv/bin/python tools/bench_layer_decode.py <cache> \
+        --modes baseline,ordered:8,occlusion:8,occlusion:1000 \
+        --layers <all> --zooms 1,4,8 --depth full --repeat 3 --warm 2 \
+        --center <x,y in um> --json main01-full.json
+
+and the same with `--depth 0`. What matters is whether the pages the coverage
+leaves out survive the real shared instances and deferred arrays: the JSON's
+`demand_unsure` (deferred edges, whose layer is read whole) and
+`demand_occluded` against `selected_pages` say that directly.
 """
 import argparse
 import hashlib
@@ -61,6 +78,7 @@ def parse_args(argv):
     ap.add_argument('--size', default='1920x1080')
     ap.add_argument('--repeat', type=int, default=3)
     ap.add_argument('--warm', type=int, default=1)
+    ap.add_argument('--center', help='view centre "x,y" in um (default: the layout centre)')
     ap.add_argument('--json')
     args = ap.parse_args(argv)
     specs, args.modes = args.modes.split(','), []
@@ -69,7 +87,8 @@ def parse_args(argv):
         if mode not in ('baseline', 'ordered', 'occlusion'):
             ap.error('unknown probe mode: %s' % spec)
         args.modes.append((spec, mode, int(block) if block else 1))
-    args.layers = [int(v) for v in args.layers.split(',')]
+    # 'all' = every layer of the source, resolved once the cache is open
+    args.layers = [v if v == 'all' else int(v) for v in args.layers.split(',')]
     args.zooms = [float(v) for v in args.zooms.split(',')]
     args.width, args.height = (int(v) for v in args.size.split('x'))
     args.depth = None if args.depth == 'full' else int(args.depth)
@@ -104,6 +123,7 @@ def run(worker, gen, args, bbox, keys, mode, block):
     probe['wall_ms'] = wall * 1000.0
     # the whole raster, comparable across modes (see the module docstring)
     probe['raster_ms'] = probe['prepare_ms'] + probe['paint_ms']
+    probe['other_ms'] = probe['scene_ms'] + probe['pool_ms']
     return hashlib.sha256(pixels).hexdigest(), probe
 
 
@@ -117,10 +137,15 @@ def main(argv=None):
     dbu = float(meta['dbu'])
     x0, y0, x1, y1 = (value * dbu for value in meta['bbox'])
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    if args.center:
+        cx, cy = (float(value) for value in args.center.split(','))
     every = [(int(layer['layer']), int(layer['datatype'])) for layer in meta['layers']]
     cases = []
     for count in args.layers:
-        keys = every[:: max(1, len(every) // count)][:count]
+        if count == 'all':
+            count, keys = len(every), list(every)
+        else:
+            keys = every[:: max(1, len(every) // count)][:count]
         for zoom in args.zooms:
             scale = max((x1 - x0) / args.width, (y1 - y0) / args.height) / zoom
             box = (cx - scale * args.width / 2, cy - scale * args.height / 2,
@@ -177,6 +202,7 @@ def main(argv=None):
                 'cold_decode_ms': mid(cold, 'decode_ms'),
                 'cold_raster_ms': mid(cold, 'raster_ms'),
                 'cold_demand_ms': mid(cold, 'demand_ms'),
+            'cold_other_ms': mid(cold, 'other_ms'),
                 'repeats': len(cold),
                 'warm_ms': mid(warm, 'wall_ms') if warm else None,
                 'warm_range_ms': span(warm, 'wall_ms') if warm else None,
@@ -187,10 +213,11 @@ def main(argv=None):
         for spec, values in row['modes'].items():
             cold = values['cold']
             print('layers %-4d zoom x%-5g %-12s | cold %5.0f ms [%.0f-%.0f] decode %5.0f '
-                  'raster %5.0f demand %4.1f | pages %5d/%-5d mem %5.1f MB skipped %5.1f MB src'
+                  'raster %5.0f demand %4.1f other %4.1f | pages %5d/%-5d mem %5.1f MB skipped %5.1f MB src'
                   % (case['layers'], case['zoom'], spec, values['cold_ms'],
                      values['cold_range_ms'][0], values['cold_range_ms'][1],
                      values['cold_decode_ms'], values['cold_raster_ms'], values['cold_demand_ms'],
+                     values['cold_other_ms'],
                      cold['decoded_pages'], cold['selected_pages'],
                      cold['decoded_bytes'] / 1e6, cold['skipped_bytes'] / 1e6), flush=True)
     report = {
