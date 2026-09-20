@@ -1949,7 +1949,12 @@ fn run_layer_probe(
         let mut generation_bytes = 0u64;
         let mut wanted: Vec<u32> = Vec::new();
         let mut failed: Option<String> = None;
-        let report = session.render_layered_cancellable(
+        // the decode workers stay up for the frame: one worker set per block
+        // was most of a layer-ordered frame's decode (0.12.178)
+        let report = cache.with_decode_pool(
+            decode_workers,
+            Some((command.generation, cancellation)),
+            |pool| session.render_layered_cancellable(
             &scene,
             &styled,
             command.generation,
@@ -1975,13 +1980,7 @@ fn run_layer_probe(
                     return Ok(());
                 }
                 let decode_started = Instant::now();
-                let (pages, decode_stats) = page_cache.load_cancellable(
-                    cache,
-                    &wanted,
-                    decode_workers,
-                    command.generation,
-                    cancellation,
-                )?;
+                let (pages, decode_stats) = page_cache.load_pooled(pool, &wanted)?;
                 probe.decode_us += elapsed_us(decode_started);
                 probe.requested_pages += wanted.len() as u64;
                 probe.cache_hits += u64::from(decode_stats.decoded_cache_hit);
@@ -2008,7 +2007,8 @@ fn run_layer_probe(
                 }
                 Ok(())
             },
-        )?;
+        ),
+        )??;
         if let Some(error) = failed {
             return Err(error);
         }

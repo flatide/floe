@@ -6,6 +6,7 @@ use floe_vfs::{Vfs, ViewReq};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::font::label_planner_metrics;
@@ -1089,6 +1090,53 @@ impl Cache {
         self.decode_pages_impl(page_ids, workers, Some((generation, cancellation)))
     }
 
+    /// Runs `body` with a decode pool whose workers stay up for the whole
+    /// call (docs/LAYER_DECODE_PROBE_PLAN.ko.md §5). A layer-ordered frame
+    /// reads one block of layers at a time, and building a worker set per
+    /// block was most of its decode: the work per page is the same either way
+    /// (`page_decode_sum_us` barely moves), the wall time is not.
+    pub fn with_decode_pool<T>(
+        &self,
+        workers: u16,
+        guard: Option<(u64, &RenderCancellation)>,
+        body: impl FnOnce(&DecodePool<'_>) -> T,
+    ) -> Result<T, String> {
+        if workers == 0 || workers > MAX_DECODE_WORKERS {
+            return Err(format!(
+                "decode workers must be in 1..={MAX_DECODE_WORKERS}: {workers}"
+            ));
+        }
+        let pool = DecodePool {
+            source: self,
+            guard,
+            workers: usize::from(workers),
+            slots: Mutex::new(Vec::new()),
+            outputs: Mutex::new(Vec::new()),
+            next: AtomicUsize::new(0),
+            start: std::sync::Barrier::new(usize::from(workers) + 1),
+            done: std::sync::Barrier::new(usize::from(workers) + 1),
+            stop: std::sync::atomic::AtomicBool::new(false),
+        };
+        let pool = &pool;
+        // the workers wait at `start`, so they must be released however the
+        // body ends - a panic that skipped it would hang the join below
+        struct Release<'p, 'a>(&'p DecodePool<'a>);
+        impl Drop for Release<'_, '_> {
+            fn drop(&mut self) {
+                self.0.stop.store(true, Ordering::Release);
+                self.0.start.wait();
+            }
+        }
+        let out = std::thread::scope(|scope| {
+            for _ in 0..pool.workers {
+                scope.spawn(move || pool.serve());
+            }
+            let _release = Release(pool);
+            body(pool)
+        });
+        Ok(out)
+    }
+
     fn decode_pages_impl(
         &self,
         page_ids: &[u32],
@@ -1203,6 +1251,136 @@ impl Cache {
                 page_decode_max_us,
                 page_index_us,
                 decode_workers_used: worker_count.try_into().unwrap_or(u16::MAX),
+                decoded_cache_miss: page_ids.len().try_into().unwrap_or(u32::MAX),
+                decoded_cache_bytes: decoded_bytes,
+                ..RenderStats::default()
+            },
+        ))
+    }
+}
+
+/// Decode workers that outlive one batch (`Cache::with_decode_pool`). Pages
+/// are handed over as owned payloads, so a worker holds no lock while it
+/// parses; the caller waits at a barrier for the batch it asked for.
+pub struct DecodePool<'a> {
+    source: &'a Cache,
+    guard: Option<(u64, &'a RenderCancellation)>,
+    workers: usize,
+    slots: Mutex<Vec<Option<PagePayload>>>,
+    #[allow(clippy::type_complexity)]
+    outputs: Mutex<Vec<(usize, Result<(DecodedPage, u64), String>, u64)>>,
+    next: AtomicUsize,
+    start: std::sync::Barrier,
+    done: std::sync::Barrier,
+    stop: std::sync::atomic::AtomicBool,
+}
+
+impl DecodePool<'_> {
+    fn serve(&self) {
+        loop {
+            self.start.wait();
+            if self.stop.load(Ordering::Acquire) {
+                return;
+            }
+            loop {
+                let index = self.next.fetch_add(1, Ordering::Relaxed);
+                let payload = match self.slots.lock() {
+                    Ok(mut slots) => match slots.get_mut(index) {
+                        Some(slot) => slot.take(),
+                        None => None,
+                    },
+                    Err(_) => None,
+                };
+                let Some(payload) = payload else {
+                    break;
+                };
+                let page_started = Instant::now();
+                // a panicking worker would leave the batch barrier one short
+                // for good; the batch fails instead
+                let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    decode_payload(&payload, self.guard)
+                }))
+                .unwrap_or_else(|_| Err(format!("page decode worker panicked on page {}", payload.page_id)));
+                let page_us = elapsed_us(page_started);
+                if let Ok(mut outputs) = self.outputs.lock() {
+                    outputs.push((index, decoded, page_us));
+                }
+            }
+            self.done.wait();
+        }
+    }
+
+    /// `Cache::decode_pages_parallel` for one batch, on the pool's workers.
+    pub fn decode_pages(
+        &self,
+        page_ids: &[u32],
+    ) -> Result<(Vec<DecodedPage>, RenderStats), String> {
+        check_decode_cancelled(self.guard)?;
+        let read_started = Instant::now();
+        let payloads = self.source.read_pages(page_ids)?;
+        let page_read_us = elapsed_us(read_started);
+        check_decode_cancelled(self.guard)?;
+        let decode_started = Instant::now();
+        let count = payloads.len();
+        {
+            let mut slots = self
+                .slots
+                .lock()
+                .map_err(|_| "decode pool payload lock poisoned".to_string())?;
+            slots.clear();
+            slots.extend(payloads.into_iter().map(Some));
+        }
+        self.outputs
+            .lock()
+            .map_err(|_| "decode pool output lock poisoned".to_string())?
+            .clear();
+        self.next.store(0, Ordering::Relaxed);
+        self.start.wait();
+        self.done.wait();
+        let mut indexed = std::mem::take(
+            &mut *self
+                .outputs
+                .lock()
+                .map_err(|_| "decode pool output lock poisoned".to_string())?,
+        );
+        check_decode_cancelled(self.guard)?;
+        indexed.sort_unstable_by_key(|(index, _, _)| *index);
+        if indexed.len() != count {
+            return Err(format!(
+                "internal error: decoded {} of {} page payloads",
+                indexed.len(),
+                count
+            ));
+        }
+        let mut decoded = Vec::with_capacity(count);
+        let mut decoded_bytes = 0u64;
+        let mut page_decode_sum_us = 0u64;
+        let mut page_decode_max_us = 0u64;
+        let mut page_index_us = 0u64;
+        for (expected_index, (index, page, page_us)) in indexed.into_iter().enumerate() {
+            if index != expected_index {
+                return Err(format!(
+                    "internal error: decoded page index {index}, expected {expected_index}"
+                ));
+            }
+            let (page, index_us) = page?;
+            page_decode_sum_us = page_decode_sum_us.saturating_add(page_us);
+            page_decode_max_us = page_decode_max_us.max(page_us);
+            page_index_us = page_index_us.saturating_add(index_us);
+            decoded_bytes = decoded_bytes
+                .checked_add(page.encoded_bytes as u64)
+                .ok_or_else(|| "limit exceeded: decoded page bytes".to_string())?;
+            decoded.push(page);
+        }
+        Ok((
+            decoded,
+            RenderStats {
+                page_read_us,
+                page_decode_us: elapsed_us(decode_started),
+                page_decode_sum_us,
+                page_decode_max_us,
+                page_index_us,
+                decode_workers_used: self.workers.min(count).try_into().unwrap_or(u16::MAX),
                 decoded_cache_miss: page_ids.len().try_into().unwrap_or(u32::MAX),
                 decoded_cache_bytes: decoded_bytes,
                 ..RenderStats::default()
