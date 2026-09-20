@@ -485,9 +485,12 @@ class RustRenderWorker:
         if mode not in ("baseline", "ordered", "occlusion"):
             raise ValueError("probe mode must be baseline, ordered or "
                              "occlusion: %s" % mode)
-        self._submit_render(job, probe=mode)
+        block = int(job.get("block") or 1)
+        if block < 1:
+            raise ValueError("probe block must be positive: %d" % block)
+        self._submit_render(job, probe=mode, block=block)
 
-    def _submit_render(self, job, probe=None):
+    def _submit_render(self, job, probe=None, block=1):
         if job.get("abstract"):
             raise RuntimeError(
                 "abstract mode is intentionally unsupported by the Rust "
@@ -575,7 +578,7 @@ class RustRenderWorker:
                 "raw" if raw else "png",
                 thin, self._style_epoch, output))
         if probe is not None:
-            command += " probe=" + probe
+            command += " probe=%s block=%d" % (probe, block)
         self._send(command)
 
     def _submit_recolor(self, job):
@@ -1289,6 +1292,7 @@ class RustRenderWorker:
             # beside the pixels, in the probe's own words
             output["probe"] = {
                 "mode": fields.get("mode", ""),
+                "block": _wire_int(fields, "block"),
                 "planned_pages": _wire_int(fields, "planned_pages"),
                 "selected_pages": _wire_int(fields, "selected_pages"),
                 "requested_pages": _wire_int(fields, "requested_pages"),
@@ -1296,6 +1300,7 @@ class RustRenderWorker:
                 "cache_hits": _wire_int(fields, "cache_hits"),
                 "skipped_pages": _wire_int(fields, "skipped_pages"),
                 "passes": _wire_int(fields, "passes"),
+                "blocks": _wire_int(fields, "blocks"),
                 "layer_passes": _wire_int(fields, "layer_passes"),
                 "decode_ms": _wire_int(fields, "decode_us") / 1000.0,
                 "scene_ms": _wire_int(fields, "scene_us") / 1000.0,

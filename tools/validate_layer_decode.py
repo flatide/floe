@@ -15,8 +15,10 @@ and clear fills with shapes under their holes, a hairline grid) - and checks:
 
   * baseline and ordered frames are byte-identical, over fills, zooms, thin
     keep/cull, depth 0/full, hierarchy frames on/off and labels on/off;
-  * the same holds at tile sizes 64/128/384 and 1/4 raster workers, and the
-    two modes agree on what the write-once mask let them skip;
+  * the same holds at tile sizes 64/128/384 and 1/4 raster workers, at every
+    block size (how many layers a worker paints into a tile before the
+    workers meet), and the two modes agree on what the write-once mask let
+    them skip;
   * the probe answers `probe_frame`, never `frame`, and publishes no scene:
     a snap right after a probe of an empty far view still answers from the
     render before it;
@@ -87,7 +89,8 @@ def worker(src, tile_px, jobs):
     return w
 
 
-def frame(w, gen, bbox, mode=None, thin='keep', depth=None, frames=False, labels=False, keys=None):
+def frame(w, gen, bbox, mode=None, thin='keep', depth=None, frames=False, labels=False,
+          keys=None, block=1):
     job = {'kind': 'render' if mode is None else 'render_probe', 'gen': gen, 'scope': 'headless',
            'bbox': bbox, 'view': None, 'w': W, 'h': H, 'depth': depth, 'cut_px': 3.0, 'lod': False,
            'frames': frames, 'labels': labels, 'abstract': False,
@@ -95,6 +98,7 @@ def frame(w, gen, bbox, mode=None, thin='keep', depth=None, frames=False, labels
            'frame_format': 'raw', 'thin': thin, 'frame_cache': False}
     if mode is not None:
         job['mode'] = mode
+        job['block'] = block
     w.submit(job)
     want = 'probe_frame' if mode is not None else 'frame'
     deadline = time.monotonic() + 300
@@ -157,6 +161,14 @@ def main():
                         'the two modes skip different work: %s %s %s' % (case, pb, po))
                     checked += 1
                     lit += sum(1 for i in range(0, len(base), 4) if max(base[i:i + 3]) > 8)
+            # the block size is scheduling only: a worker painting four or
+            # every layer into a tile before the workers meet paints the same
+            for block in (2, 4, 1000):
+                gen += 1
+                blocked, rb = frame(w, gen, bbox, 'ordered', block=block)
+                assert blocked == ordered, 'block %d differs' % block
+                assert rb['probe']['blocks'] == -(-rb['probe']['passes'] // block), rb['probe']
+                checked += 1
             assert lit > 0, 'every frame of the gate was empty'
         finally:
             w.stop()

@@ -356,6 +356,11 @@ struct RenderCommand {
     /// `probe_frame`. The published scene, the retained frame and the
     /// refinement rounds are not touched.
     probe: Option<ProbeMode>,
+    /// `render_probe` only: how many consecutive passes a raster worker paints
+    /// into a tile before the workers meet and the driver looks at the masks
+    /// again. 1 stops at every layer; a block is conservative (it decides with
+    /// the mask of the block's first layer) but meets N times less often.
+    probe_block: usize,
     /// `thin=keep|cull`: the page hairline policy of this frame's
     /// plans - keep (mask / jobdeck: all-thin pages stay and raster
     /// as 1 px hairlines) or cull (plain layout: dropped whole, the
@@ -445,9 +450,18 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             } else {
                 None
             };
+            let probe_block: usize = if probe.is_some() {
+                let block = optional_parse(&fields, "block")?.unwrap_or(1usize);
+                if block == 0 {
+                    return Err("probe block must be positive".to_string());
+                }
+                block
+            } else {
+                1
+            };
             let mut allowed: Vec<&str> = Vec::new();
             if probe.is_some() {
-                allowed.push("probe");
+                allowed.extend(["probe", "block"]);
             }
             allowed.extend([
                 "gen",
@@ -554,6 +568,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     style_epoch: optional_parse(&fields, "style_epoch")?,
                     out: required(&fields, "out")?.to_string(),
                     probe,
+                    probe_block,
                     thin_keep,
                 },
             ))))
@@ -1889,6 +1904,11 @@ fn run_layer_probe(
     }
     probe.scene_us = elapsed_us(scene_started);
     let report = match mode {
+        // `prepare_us` + `paint_us` is the whole raster in both modes: the
+        // normal path prepares the bin and the tiles inside its one render
+        // call, so its preparation is counted in `paint_us` and `prepare_us`
+        // stays 0 (review 2026-09-20: the two were compared as if they were
+        // the same phase).
         ProbeMode::Baseline => {
             let paint_started = Instant::now();
             let report = render_geometry_styled_cancellable(
@@ -1911,6 +1931,7 @@ fn run_layer_probe(
                 command.generation,
                 cancellation,
             )?;
+            probe.passes = session.passes() as u64;
             probe.prepare_us = elapsed_us(prepare_started);
             let paint_started = Instant::now();
             let report = session.render_layered_cancellable(
@@ -1918,9 +1939,10 @@ fn run_layer_probe(
                 &styled,
                 command.generation,
                 cancellation,
-                |plane| {
-                    probe.passes += 1;
-                    probe.layer_passes += u64::from(plane.is_some());
+                command.probe_block,
+                |planes| {
+                    probe.blocks += 1;
+                    probe.layer_passes += planes.len() as u64;
                     Ok(())
                 },
             )?;
@@ -1948,9 +1970,10 @@ fn run_layer_probe(
     respond(
         responses,
         format!(
-            "probe_frame gen={} mode={} format={} out={} partial={} planned_pages={} selected_pages={} requested_pages={} decoded_pages={} cache_hits={} skipped_pages={} passes={} layer_passes={} decode_us={} scene_us={} prepare_us={} paint_us={} finish_us={} total_us={} raster_us={} raster_tile_max_us={} tiles={} workers={} bin_items={} once_tiles={} once_passes={} once_items={} publish_write_us={} publish_sync_us={} publish_rename_us={}",
+            "probe_frame gen={} mode={} block={} format={} out={} partial={} planned_pages={} selected_pages={} requested_pages={} decoded_pages={} cache_hits={} skipped_pages={} passes={} blocks={} layer_passes={} decode_us={} scene_us={} prepare_us={} paint_us={} finish_us={} total_us={} raster_us={} raster_tile_max_us={} tiles={} workers={} bin_items={} once_tiles={} once_passes={} once_items={} publish_write_us={} publish_sync_us={} publish_rename_us={}",
             command.generation,
             probe.mode,
+            command.probe_block,
             if command.raw_frame { "raw" } else { "png" },
             command.out,
             report.partial as u8,
@@ -1961,6 +1984,7 @@ fn run_layer_probe(
             probe.cache_hits,
             probe.skipped_pages,
             probe.passes,
+            probe.blocks,
             probe.layer_passes,
             probe.decode_us,
             probe.scene_us,

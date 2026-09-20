@@ -2826,26 +2826,32 @@ impl LayerRasterSession {
         self.passes.len()
     }
 
-    /// Runs the frame pass by pass, calling `before_pass` on this thread
-    /// before each one with the plane it is about to paint. The raster
-    /// workers live for the whole frame and wait at a barrier while
-    /// `before_pass` runs, so stopping between layers costs a barrier, not a
-    /// thread (measured 2026-09-20: spawning four workers per pass cost
-    /// 105-135 ms of a 449-layer frame, all of the order's apparent price).
+    /// Runs the frame in blocks of `block` consecutive passes, calling
+    /// `before_block` on this thread before each block with the styled planes
+    /// it is about to paint. A worker takes a tile and paints the whole block
+    /// into it, top layer first; the workers meet at a barrier only at the
+    /// block's end, which is where the caller decides what the next block
+    /// needs.
     ///
-    /// Tiles are independent, so a tile painted through every pass at once
-    /// and a tile painted one pass at a time reach the same pixels; the
-    /// barrier exists for the caller, not for the raster.
+    /// Tiles are independent and a tile's own pass order never changes, so
+    /// every block size paints the same pixels - `block >= passes()` is the
+    /// normal render's schedule, `block == 1` stops at every layer. The
+    /// barrier is what the caller pays for looking: it also takes the tile
+    /// load balancing away, because the frame's time goes from the longest
+    /// tile to the sum of the longest tile of each block (measured
+    /// 2026-09-20: about +100 ms on a 449-layer frame at block 1).
     pub fn render_layered<F>(
         self,
         scene: &FrameScene,
         styled: &StyledGeometryRasterRequest,
         guard: Option<RenderGuard<'_>>,
-        mut before_pass: F,
+        block: usize,
+        mut before_block: F,
     ) -> Result<GeometryRasterReport, String>
     where
-        F: FnMut(Option<usize>) -> Result<(), String>,
+        F: FnMut(&[usize]) -> Result<(), String>,
     {
+        let block = block.max(1);
         let LayerRasterSession {
             request,
             bin,
@@ -2878,8 +2884,8 @@ impl LayerRasterSession {
                     if stop.load(Ordering::Acquire) {
                         return;
                     }
-                    let at = pass_index.load(Ordering::Relaxed);
-                    let (pass, remaining) = (passes[at], passes.len() - at);
+                    let first = pass_index.load(Ordering::Relaxed);
+                    let last = (first + block).min(passes.len());
                     loop {
                         let tile_index = cursor.fetch_add(1, Ordering::Relaxed);
                         let Some(slot) = tiles_ref.get(tile_index) else {
@@ -2888,21 +2894,28 @@ impl LayerRasterSession {
                         let Ok(mut tile) = slot.lock() else {
                             break;
                         };
-                        if tile.full {
-                            continue;
-                        }
                         let tile_started = Instant::now();
-                        let result = raster_tile_pass(
-                            scene,
-                            &request,
-                            styled,
-                            bin,
-                            &mut tile,
-                            pass,
-                            remaining,
-                            stroke_pixels,
-                            guard,
-                        );
+                        for at in first..last {
+                            if tile.full {
+                                break;
+                            }
+                            if let Err(error) = raster_tile_pass(
+                                scene,
+                                &request,
+                                styled,
+                                bin,
+                                &mut tile,
+                                passes[at],
+                                passes.len() - at,
+                                stroke_pixels,
+                                guard,
+                            ) {
+                                if let Ok(mut failure) = failure.lock() {
+                                    failure.get_or_insert(error);
+                                }
+                                break;
+                            }
+                        }
                         tile.stats.raster_tile_max_us =
                             tile.stats.raster_tile_max_us.saturating_add(
                                 tile_started
@@ -2911,18 +2924,20 @@ impl LayerRasterSession {
                                     .try_into()
                                     .unwrap_or(u64::MAX),
                             );
-                        if let Err(error) = result {
-                            if let Ok(mut failure) = failure.lock() {
-                                failure.get_or_insert(error);
-                            }
-                        }
                     }
                     barrier.wait();
                 });
             }
             let mut result = Ok(());
-            for at in 0..passes.len() {
-                if let Err(error) = before_pass(Self::plane_of(passes[at])) {
+            let mut planes: Vec<usize> = Vec::with_capacity(block);
+            for at in (0..passes.len()).step_by(block) {
+                planes.clear();
+                planes.extend(
+                    passes[at..(at + block).min(passes.len())]
+                        .iter()
+                        .filter_map(|&pass| Self::plane_of(pass)),
+                );
+                if let Err(error) = before_block(&planes) {
                     result = Err(error);
                     break;
                 }
@@ -2975,10 +2990,11 @@ impl LayerRasterSession {
         styled: &StyledGeometryRasterRequest,
         generation: u64,
         cancellation: &RenderCancellation,
-        before_pass: F,
+        block: usize,
+        before_block: F,
     ) -> Result<GeometryRasterReport, String>
     where
-        F: FnMut(Option<usize>) -> Result<(), String>,
+        F: FnMut(&[usize]) -> Result<(), String>,
     {
         self.render_layered(
             scene,
@@ -2987,7 +3003,8 @@ impl LayerRasterSession {
                 generation,
                 cancellation,
             }),
-            before_pass,
+            block,
+            before_block,
         )
     }
 }
@@ -5795,18 +5812,21 @@ mod tests {
         scene: &FrameScene,
         request: &StyledGeometryRasterRequest,
         work_bin: bool,
+        block: usize,
     ) -> GeometryRasterReport {
         let session = LayerRasterSession::begin(scene, request, work_bin, None).unwrap();
         let expected = session.passes();
         assert!(expected > 0, "a styled frame has at least one pass");
-        let mut seen = 0;
+        let (mut blocks, mut planes) = (0, 0);
         let report = session
-            .render_layered(scene, request, None, |_| {
-                seen += 1;
+            .render_layered(scene, request, None, block, |block| {
+                blocks += 1;
+                planes += block.len();
                 Ok(())
             })
             .unwrap();
-        assert_eq!(seen, expected, "every pass is announced once");
+        assert_eq!(blocks, expected.div_ceil(block.max(1)), "one call per block");
+        assert_eq!(planes, request.layers.len(), "every plane is announced once");
         report
     }
 
@@ -5852,11 +5872,15 @@ mod tests {
                     // passes one at a time (LAYER_DECODE_PROBE_PLAN §5)
                     for work_bin in [true, false] {
                         for once in [true, false] {
-                            let session = with_write_once(once, || session_frame(&scene, &request, work_bin));
-                            assert!(
-                                session.frame.pixels() == ordered.frame.pixels(),
-                                "session (work_bin {work_bin}, write-once {once}) differs: seed {seed} shift {shift} {width}x{height} tile {tile_size}"
-                            );
+                            // every block size paints the same frame: 1 = a stop
+                            // at every layer, 3 = a block, 99 = the whole frame
+                            for block in [1usize, 3, 99] {
+                                let session = with_write_once(once, || session_frame(&scene, &request, work_bin, block));
+                                assert!(
+                                    session.frame.pixels() == ordered.frame.pixels(),
+                                    "session (work_bin {work_bin}, write-once {once}, block {block}) differs: seed {seed} shift {shift} {width}x{height} tile {tile_size}"
+                                );
+                            }
                         }
                     }
                     let ordered_walk = with_write_once(false, || render_geometry_styled_unbinned(&scene, &request).unwrap());
@@ -5867,7 +5891,7 @@ mod tests {
                     let case = format!("seed {seed} shift {shift} {width}x{height} tile {tile_size}");
                     assert!(once.frame.pixels() == ordered.frame.pixels(), "binned write-once differs: {case}");
                     assert!(once_walk.frame.pixels() == ordered.frame.pixels(), "walked write-once differs: {case}");
-                    let session = with_write_once(true, || session_frame(&scene, &request, true));
+                    let session = with_write_once(true, || session_frame(&scene, &request, true, 1));
                     assert_eq!(
                         (session.stats.once_full_tiles, session.stats.once_passes_skipped, session.stats.once_items_skipped),
                         (once.stats.once_full_tiles, once.stats.once_passes_skipped, once.stats.once_items_skipped),

@@ -58,8 +58,10 @@ pub struct LayerProbeReport {
     pub cache_hits: u64,
     /// pages left out because they can no longer reach an open pixel
     pub skipped_pages: u64,
-    /// passes the session ran, and the layers among them
+    /// passes the session ran, the blocks they were painted in (one stop of
+    /// every worker each) and the layers among the passes
     pub passes: u64,
+    pub blocks: u64,
     pub layer_passes: u64,
     /// the frame's phases
     pub decode_us: u64,
