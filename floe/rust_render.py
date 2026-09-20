@@ -1134,6 +1134,9 @@ class RustRenderWorker:
                 "sub_cut_box_over": _wire_int(fields, "sub_cut_box_over"),
                 "sub_cut_box_level": _wire_int(fields, "sub_cut_box_level"),
                 "sub_cut_box_unsure": _wire_int(fields, "sub_cut_box_unsure"),
+                # the per-shape cut (thin keep): every shape is judged by its
+                # smaller side, dbu; 0 = the cut judges pages by their largest shape
+                "shape_cut": _wire_int(fields, "shape_cut"),
                 "stored_rep_points": _wire_int(fields, "stored_rep_points"),
                 "stored_rep_tested": _wire_int(fields, "stored_rep_tested"),
                 "stored_rep_limited": _wire_int(fields, "stored_rep_limited"),

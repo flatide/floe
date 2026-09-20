@@ -2138,6 +2138,7 @@ fn replay_plane_items(
                         page,
                         page_id,
                         level,
+                        scene.plan().stats.shape_cut.min(i64::MAX as u64) as i64,
                         local_view,
                         *transform,
                         stats,
@@ -3099,6 +3100,7 @@ fn raster_page_records(
     page: &crate::DecodedPage,
     page_id: u32,
     level: u8,
+    shape_cut: i64,
     local_view: BBox,
     world_transform: OrthoTransform,
     stats: &mut RenderStats,
@@ -3141,7 +3143,9 @@ fn raster_page_records(
                     page_id, rect.w, rect.h
                 ));
             }
-            if rect.w == 0 || rect.h == 0 {
+            if rect.w == 0 || rect.h == 0 || rect.w.min(rect.h) < shape_cut {
+                // the per-shape cut (HierStats::shape_cut): the whole record,
+                // its members share the size
                 return Ok(());
             }
             let x1 = rect
@@ -3214,6 +3218,9 @@ fn raster_page_records(
                     page_id
                 )
             })?;
+            if (base.x1 - base.x0).min(base.y1 - base.y0) < shape_cut {
+                return Ok(());
+            }
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
             // One scratch per record, reused by every repetition member.
@@ -3282,6 +3289,9 @@ fn raster_page_records(
             let base = polygon_bbox(&outline).ok_or_else(|| {
                 format!("corrupt page {}: path outline is degenerate", page_id)
             })?;
+            if (base.x1 - base.x0).min(base.y1 - base.y0) < shape_cut {
+                return Ok(());
+            }
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
             // One outline/centerline scratch pair per record, reused by
@@ -3398,6 +3408,7 @@ fn render_cell(
             page,
             page_id,
             level,
+            scene.plan().stats.shape_cut.min(i64::MAX as u64) as i64,
             local_view,
             world_transform,
             stats,
@@ -6635,6 +6646,11 @@ mod tests {
     /// (10 units/px), so sub-pixel features are expressible in i64
     /// world coordinates.
     fn hairline_scene(rects: Vec<RectRec>, polys: Vec<PolyRec>, paths: Vec<PathRec>) -> FrameScene {
+        shape_cut_scene(rects, polys, paths, 0)
+    }
+
+    /// `hairline_scene` planned with a per-shape cut (HierStats::shape_cut)
+    fn shape_cut_scene(rects: Vec<RectRec>, polys: Vec<PolyRec>, paths: Vec<PathRec>, shape_cut: u64) -> FrameScene {
         let doc = Doc {
             unit: 1.0,
             cells: vec![Cell {
@@ -6680,7 +6696,7 @@ mod tests {
             }],
             pages: vec![0],
             page_prio: vec![0],
-            stats: HierStats::default(),
+            stats: HierStats { shape_cut, ..HierStats::default() },
                     explain: Vec::new(),
         };
         FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)])).unwrap()
@@ -6717,6 +6733,34 @@ mod tests {
             }
         }
         lit
+    }
+
+    #[test]
+    fn the_shape_cut_drops_the_shapes_whose_smaller_side_is_under_it() {
+        // 10 units a pixel. Large: a 100 x 100 rect and a 60 x 60 polygon.
+        // Small on one side or both: an array of 20 x 20 rects, a 200 x 20
+        // wire, a 20 x 20 polygon and a path 10 wide and 200 long.
+        let rect = |x, y, w, h, rep| RectRec { layer: 1, dt: 0, x, y, w, h, rep };
+        let large_rects = vec![rect(10, 10, 100, 100, Rep::One)];
+        let large_polys = vec![PolyRec { layer: 1, dt: 0, pts: vec![(200, 20), (260, 20), (260, 80), (200, 80)], rep: Rep::One }];
+        let mut rects = large_rects.clone();
+        rects.push(rect(150, 150, 20, 20, Rep::Grid { na: 3, nb: 3, va: (40, 0), vb: (0, 40) }));
+        rects.push(rect(10, 280, 200, 20, Rep::One));
+        let mut polys = large_polys.clone();
+        polys.push(PolyRec { layer: 1, dt: 0, pts: vec![(280, 280), (300, 280), (290, 300)], rep: Rep::One });
+        let paths = vec![PathRec { layer: 1, dt: 0, pts: vec![(20, 240), (220, 240)], hw: 5, es: 0, ee: 0, rep: Rep::One }];
+        let request = hairline_request();
+        let frame = |scene: &FrameScene| render_geometry_styled(scene, &request).unwrap().frame;
+        let everything = frame(&shape_cut_scene(rects.clone(), polys.clone(), paths.clone(), 0));
+        let large_only = frame(&shape_cut_scene(large_rects, large_polys, Vec::new(), 0));
+        assert_ne!(everything, large_only, "the small shapes are drawn without the cut");
+        // a cut of 30: what is 20 or 10 on its smaller side goes, however long
+        assert_eq!(frame(&shape_cut_scene(rects.clone(), polys.clone(), paths.clone(), 30)), large_only);
+        // a smaller side equal to the cut is not under it
+        assert_eq!(frame(&shape_cut_scene(rects.clone(), polys.clone(), paths.clone(), 10)), everything);
+        // the cut is per shape: above the large shapes too, nothing is left
+        let blank = frame(&shape_cut_scene(Vec::new(), Vec::new(), Vec::new(), 0));
+        assert_eq!(frame(&shape_cut_scene(rects, polys, paths, 101)), blank);
     }
 
     #[test]

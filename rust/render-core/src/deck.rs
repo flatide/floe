@@ -1620,6 +1620,7 @@ fn source_plan_request(
         summary_layers: Vec::new(),
         prune_summary: false,
         sub_cut_box: false,
+        shape_cut: false,
         frames: true,
     };
     plan.validate()?;

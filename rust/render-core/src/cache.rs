@@ -115,6 +115,8 @@ pub struct PlanCullCounts {
     /// cap), node boxes whose layer scan ran out of its read budget
     pub sub_cut_box_level: u64,
     pub sub_cut_box_unsure: u64,
+    /// the per-shape cut the frame was planned with, dbu (0 = none)
+    pub shape_cut: u64,
 }
 
 impl PlanCullCounts {
@@ -149,6 +151,7 @@ impl PlanCullCounts {
             sub_cut_box_over: st.sub_cut_box_over,
             sub_cut_box_level: st.sub_cut_box_level as u64,
             sub_cut_box_unsure: st.sub_cut_box_unsure,
+            shape_cut: st.shape_cut,
         }
     }
 
@@ -182,6 +185,7 @@ impl PlanCullCounts {
         self.sub_cut_box_over = self.sub_cut_box_over.saturating_add(other.sub_cut_box_over);
         self.sub_cut_box_level = self.sub_cut_box_level.max(other.sub_cut_box_level);
         self.sub_cut_box_unsure = self.sub_cut_box_unsure.saturating_add(other.sub_cut_box_unsure);
+        self.shape_cut = self.shape_cut.max(other.shape_cut);
     }
 }
 
@@ -998,6 +1002,7 @@ impl Cache {
             page_hairline: request.page_hairline,
             prune_skipped: request.prune_summary,
             sub_cut_box: request.sub_cut_box && !request.exact,
+            shape_cut: request.shape_cut && !request.exact,
             frames: request.frames,
             page_skip: if request.summary_layers.is_empty() {
                 Vec::new()

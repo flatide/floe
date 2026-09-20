@@ -1047,6 +1047,7 @@ mod tests {
                     page_skip: Vec::new(),
                     prune_skipped: false,
                     sub_cut_box: false,
+                    shape_cut: false,
                     frames: true,
         }
     }

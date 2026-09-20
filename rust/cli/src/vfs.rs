@@ -2216,6 +2216,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
                     page_skip: Vec::new(),
                     prune_skipped: false,
                     sub_cut_box: false,
+                    shape_cut: false,
                     frames: true,
         };
         let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
@@ -6515,6 +6516,7 @@ fn make_req(
             page_skip: Vec::new(),
             prune_skipped: false,
             sub_cut_box: false,
+            shape_cut: false,
             frames: true,
     }
 }
@@ -6824,6 +6826,11 @@ pub fn plan_cmd(args: &[String]) {
         }
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-box-px") {
             popts.sub_cut_box_px = val.parse().expect("sub-cut-box-px");
+        }
+        // --shape-cut 1: the cut judges every shape by its smaller side
+        // (ViewReq::shape_cut; the viewer sets it for thin keep)
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--shape-cut") {
+            req.shape_cut = val != "0";
         }
         // --summary-layers a/b,..: layers an occupancy summary draws
         // (OCCUPANCY_PLAN M3): their pages are skipped (verdict

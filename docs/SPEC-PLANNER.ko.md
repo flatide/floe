@@ -212,6 +212,29 @@
   `narrowing_the_view_never_removes_a_budget_fitted_page_that_stays_in_view`(밀도),
   `a_plan_over_its_decode_budget_is_planned_at_the_finest_cut_that_fits`(사다리).
 
+### 도형 단위 컷 (shape cut, 0.12.173, 2026-09-20) — `thin keep`
+
+사용자 결정: 페이지의 큰 도형 때문에 작은 도형이 살아남지 않게 하고, 컷 조건을 "두 변 중 하나라도
+컷보다 작으면"으로 바꾼다(대상은 thin keep — 최종적으로 keep 하나로 합친다). 종전 keep: 페이지는
+`max_w < cut && max_h < cut`일 때만 잘렸고(페이지의 **가장 큰** 도형 기준), hairline cut
+(`max_min < cut × 0.5`)은 꺼져 있어 한 변이 컷보다 긴 가는 도형은 전부 남았으며, 래스터에는 도형별
+검사가 없었다. 합성 MAIN01의 TOP 109/2 페이지(멤버 144만 개, 가장 큰 도형 12.2 × 14.0 µm)는
+0.4 µm 배열을 9,000 µm 뷰까지 그리기 대상으로 남겼다(F2R-30).
+- `ViewReq::shape_cut`(renderd: `!exact && thin_keep`, 킬 스위치 `FLOE_RUST_SHAPE_CUT=off`; 덱 패스·
+  probe·CLI plan은 끔, `floe-index plan --shape-cut 1`로 진단). 컷이 0이면 없다.
+- 플래너: 페이지는 **`max_min < cut`**이면 잘린다(`max_min` = 레코드별 min(w, h)의 최대, v6 —
+  크기 컷과 hairline 컷을 하나로, 계수 1.0). 페이지 BVH 노드는 `min(max_w, max_h) < cut`이면
+  통째로(아래 모든 페이지의 max_min이 그 이하). 잘린 페이지는 종전 size cut과 같은 길을 간다:
+  footprint가 박스(4 px) 이하이면 sub-cut 박스, 아니면 사라진다(밀도 표현은 F2R-30의 다음 단계).
+- 래스터: 계획이 컷을 실어 보낸다(`HierStats::shape_cut`, dbu; 예산 맞춤으로 컷이 올라간 패스면 그
+  컷). `raster_page_records`가 **min(w, h) < 컷인 레코드를 건너뛴다**(사각형은 w·h, 폴리곤·path는
+  한 멤버의 bbox; repetition은 멤버 크기가 같으므로 레코드째 — 멤버 열거도 없다). 변환에 배율이
+  없어(`OrthoTransform`) dbu로 바로 비교한다.
+- 바뀌지 않는 것: thin cull, exact·컷 0, 덱 합성, 셀·배치의 컷(셀 bbox 기준; 가는 셀은 종전대로
+  `max_min < cut × 0.5`에서 서브트리째 빠진다 — 그 안의 도형은 새 규칙으로도 전부 컷이라 그림은 같다),
+  점 query(그리지 않은 도형도 잡힌다).
+- 상태줄 `cut<…um (min side)`, 프레임 줄 `shape_cut=<dbu>`.
+
 ### sub-cut 박스 (0.12.168, 정확성 수정 0.12.169)
 
 실칩·합성 관찰: `thin keep` 그림은 Calibre와 비슷하지만 크기 컷이 버린 것은 **사라진다**

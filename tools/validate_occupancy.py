@@ -947,7 +947,12 @@ class GenerationContractTests(unittest.TestCase):
             return sum(1 for p in im.getdata() if p != (0, 0, 0))
         exact = lit("exact", "keep")
         cull = lit("high", "cull")
-        keep = lit("high", "keep")
+        # the mask policy this symptom is about: keep draws every thin
+        # shape. The per-shape cut of 0.12.173 (a plain layout's keep: a
+        # shape under the cut on either side goes; gate of its own,
+        # tools/validate_shape_cut.py) is switched off for it
+        mask_policy = dict(run_env(), FLOE_RUST_SHAPE_CUT="off")
+        keep = lit("high", "keep", env=mask_policy)
         self.assertGreater(exact, 10000)
         self.assertEqual(keep, exact)
         # under cull the dense hairline neighbours' pages are cut and
@@ -1944,6 +1949,10 @@ class SubCutTests(unittest.TestCase):
         # box) have a gate of their own, tools/validate_sub_cut_box.py;
         # here the baseline is the cut that drops, so they are switched off
         # (the frontier and the sub-cut rules exclude them anyway)
+        # the per-shape cut of 0.12.173 (tools/validate_shape_cut.py) would
+        # take the thin pages these rules are about before they are reached:
+        # every worker here keeps the cut by the page's largest shape
+        os.environ["FLOE_RUST_SHAPE_CUT"] = "off"
         os.environ["FLOE_RUST_SUB_CUT_BOX"] = "off"
         cls.worker = cls._worker()
         del os.environ["FLOE_RUST_SUB_CUT_BOX"]
@@ -1959,6 +1968,7 @@ class SubCutTests(unittest.TestCase):
         del os.environ["FLOE_RUST_SUB_CUT_SPARSE_MPX"]
         del os.environ["FLOE_RUST_SUB_CUT_WASH_MPX"]
         del os.environ["FLOE_RUST_SUB_CUT_WASH"]
+        del os.environ["FLOE_RUST_SHAPE_CUT"]
 
     @classmethod
     def tearDownClass(cls):
@@ -2193,8 +2203,12 @@ class DeckRenderTests(unittest.TestCase):
         deck.start()
         c = Cache(str(cls.dir / "thinwide.oas"))
         c.load()
+        # the single-source reference of the deck's page path: deck passes
+        # plan without the per-shape cut of 0.12.173, so the reference does too
+        os.environ["FLOE_RUST_SHAPE_CUT"] = "off"
         single = RustRenderWorker(c)
         single.start()
+        del os.environ["FLOE_RUST_SHAPE_CUT"]
         return deck, single
 
     @classmethod

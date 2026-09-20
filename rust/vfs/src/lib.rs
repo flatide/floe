@@ -87,6 +87,15 @@ pub struct ViewReq {
     /// (hier.rs SUB_CUT_BOX_PX): renderd sets it for a `thin keep` request
     /// of a plain layout; deck passes, probes and the CLI's plans do not.
     pub sub_cut_box: bool,
+    /// The cut judges every shape by its SMALLER side (user decision
+    /// 2026-09-20, `thin keep`): a page is cut when none of its shapes
+    /// reaches the cut on both sides (max_min < cut - the size cut and the
+    /// hairline cut in one), and in the pages that stay the raster drops the
+    /// shapes under it (HierStats::shape_cut), so a large shape no longer
+    /// keeps the small ones of its page alive. renderd sets it for a `thin
+    /// keep` request of a plain layout; deck passes, probes and the CLI's
+    /// plans do not.
+    pub shape_cut: bool,
     /// The frame draws hierarchy frames (cell outlines at the depth
     /// boundary). False: none are planned, and a child subtree that holds
     /// no visible layer is not walked to reach them - the planner's

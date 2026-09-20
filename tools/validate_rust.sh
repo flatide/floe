@@ -38,13 +38,13 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck representatives gen_main01 fit_budget sub_cut_box write_once rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once rust_renderer klayout"
 alias_gates() {
     case "$1" in
         quick)    echo "unit_vfs unit_render occupancy rust_renderer" ;;
-        planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box" ;;
+        planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box shape_cut" ;;
         occ)      echo "unit_vfs occupancy" ;;
-        render)   echo "unit_render rust_renderer representatives fit_budget sub_cut_box write_once render_goldens render_speckle render_frames klayout" ;;
+        render)   echo "unit_render rust_renderer representatives fit_budget sub_cut_box shape_cut write_once render_goldens render_speckle render_frames klayout" ;;
         indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives" ;;
         python)   echo "index_cli vfs_profile floe2 drc_ice svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
@@ -303,6 +303,10 @@ if gate fit_budget; then RAN="$RAN fit_budget"
 # drops stays as a box from index metadata; everything else unchanged
 if gate sub_cut_box; then RAN="$RAN sub_cut_box"
     .venv/bin/python tools/validate_sub_cut_box.py; fi
+# per-shape cut: under thin keep the cut judges every shape by its smaller
+# side - pages by max_min, shapes inside the pages that stay by the raster
+if gate shape_cut; then RAN="$RAN shape_cut"
+    .venv/bin/python tools/validate_shape_cut.py; fi
 # write-once tiles: planes painted in reverse, each pixel written once,
 # covered work skipped - frames byte-identical to the ordered overwrite
 if gate write_once; then RAN="$RAN write_once"

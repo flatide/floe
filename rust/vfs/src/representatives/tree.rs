@@ -848,6 +848,7 @@ mod tests {
             page_skip: vec![],
             prune_skipped: false,
             sub_cut_box: false,
+            shape_cut: false,
             frames: true,
         }
     }

@@ -729,6 +729,10 @@ pub struct HierStats {
     /// ones found are unknown), and the level the boxes were planned at
     pub sub_cut_box_unsure: u64,
     pub sub_cut_box_level: u32,
+    /// the per-shape cut the plan was made with (ViewReq::shape_cut), in
+    /// dbu; 0 = none. The raster drops the shapes whose smaller side is
+    /// under it from the pages it draws.
+    pub shape_cut: u64,
     /// representatives (the page frontier, ViewReq::page_reps): cut
     /// pages kept (sparse, drawn as pixels) / washed (dense), cut
     /// placements washed or expanded, BVH subtrees pruned because no
@@ -1352,6 +1356,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         frame_cap,
         boxm: false,
+        shape_cut: req.shape_cut && req.cut_dbu > 0,
         box_px: opts.sub_cut_box_px * (1u32 << opts.sub_cut_box_level.min(8)) as f64,
         box_stride: 1i64 << opts.sub_cut_box_level.min(8),
         reads_left: opts.sub_cut_box_reads,
@@ -1455,6 +1460,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
     }
     let mut st = h.st;
     st.rep_page_level = page_level;
+    st.shape_cut = if h.shape_cut { h.cut } else { 0 };
     st.wc_cells = h.out.len() as u64;
     st.wc_variants =
         h.out.keys().filter(|&&(_, r)| r != REM_FULL).count() as u64;
@@ -1706,6 +1712,8 @@ struct Hier<'a> {
     /// HierOpts::frame_cap, or 0 for a request without hierarchy frames
     frame_cap: usize,
     boxm: bool,
+    /// ViewReq::shape_cut: pages are cut by max_min < cut
+    shape_cut: bool,
     box_px: f64,
     /// arrays keep every box_stride-th member (the pass level)
     box_stride: i64,
@@ -1826,7 +1834,8 @@ impl<'a> Hier<'a> {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
                     let size_cut = p.max_w < self.cut && p.max_h < self.cut;
-                    if size_cut || p.max_min < self.page_hair {
+                    // shape cut: no shape of the page reaches the cut on both sides
+                    if size_cut || p.max_min < self.page_hair || (self.shape_cut && p.max_min < self.cut) {
                         let in_view = boxes.iter().any(|b| p.bbox.intersects(b));
                         // washable under the sub-cut rules (a size cut
                         // always, a hairline cut under cull with the
@@ -1841,7 +1850,7 @@ impl<'a> Hier<'a> {
                             && self.reps
                             && rep_keeps((pi - pr.page_lo) as u64, self.rep_page_level);
                         let washable = in_view && (self.sub_cut_wash || rep);
-                        if size_cut && in_view && self.box_page(&p, pi, &mut wc.washes, ci) {
+                        if (size_cut || self.shape_cut) && in_view && self.box_page(&p, pi, &mut wc.washes, ci) {
                             self.st.cull_page_size += 1;
                             continue;
                         }
@@ -3230,7 +3239,8 @@ impl<'a> Hier<'a> {
         while let Some(ni) = stack.pop() {
             let n = self.v.pbvh(ni);
             self.st.visited_page_bvh += 1;
-            if n.max_w < self.cut && n.max_h < self.cut {
+            // shape cut: every page below has max_min <= min(max_w, max_h)
+            if (n.max_w < self.cut && n.max_h < self.cut) || (self.shape_cut && n.max_w.min(n.max_h) < self.cut) {
                 self.st.culled_page_bvh_cut += 1;
                 if self.explain_on && n.bbox.intersects(b) {
                     let nb = n.bbox;
@@ -3314,14 +3324,15 @@ impl<'a> Hier<'a> {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
                     let size_cut = p.max_w < self.cut && p.max_h < self.cut;
-                    if size_cut || p.max_min < self.page_hair {
+                    // shape cut: no shape of the page reaches the cut on both sides
+                    if size_cut || p.max_min < self.page_hair || (self.shape_cut && p.max_min < self.cut) {
                         let in_view = p.bbox.intersects(b);
                         // see the linear page loop
                         let rep = in_view
                             && self.reps
                             && rep_keeps((pi - page_lo) as u64, self.rep_page_level);
                         let washable = in_view && (self.sub_cut_wash || rep);
-                        if size_cut && in_view && self.box_page(&p, pi, washes, cell) {
+                        if (size_cut || self.shape_cut) && in_view && self.box_page(&p, pi, washes, cell) {
                             self.st.cull_page_size += 1;
                             continue;
                         }
@@ -4121,6 +4132,7 @@ mod tests {
                     page_skip: Vec::new(),
                     prune_skipped: false,
                     sub_cut_box: false,
+                    shape_cut: false,
                     frames: true,
         }
     }
@@ -4368,6 +4380,7 @@ mod tests {
                     page_skip: Vec::new(),
                     prune_skipped: false,
                     sub_cut_box: false,
+                    shape_cut: false,
                     frames: true,
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
@@ -5077,6 +5090,64 @@ mod tests {
     }
 
     #[test]
+    fn the_shape_cut_judges_a_page_by_the_smaller_sides_of_its_shapes() {
+        let v = fixture(
+            &[
+                FCell {
+                    name: "FAT",
+                    pages: vec![(bx(0, 0, 500, 500), 500, 500)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "MIX", // a page of wires (4000 x 100) and a fat page
+                    pages: vec![
+                        (bx(0, 0, 4000, 100), 4000, 100),
+                        (bx(0, 300, 500, 800), 500, 500),
+                    ],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        (1, 6000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            2,
+        );
+        let view = bx(-10, -10, 11_000, 1000);
+        // thin keep as it was: the wire page stays whatever its smaller side
+        let keep = plan_hier(&v, &rq(view, 300, u32::MAX), &HierOpts::default());
+        assert_eq!((keep.pages.len(), keep.stats.shape_cut), (3, 0));
+        // the shape cut: a smaller side of 100 is under the cut of 300,
+        // however long the wires are; the plan carries the cut for the raster
+        let mut req = rq(view, 300, u32::MAX);
+        req.shape_cut = true;
+        let cut = plan_hier(&v, &req, &HierOpts::default());
+        assert_eq!((cut.pages.len(), cut.stats.shape_cut), (2, 300));
+        assert!(cut.pages.iter().all(|&pi| v.page(pi).max_min >= 300));
+        assert!(cut.stats.cull_page_size >= 1);
+        // the cut itself, not the hairline half of it: at 150 the page
+        // hairline rule (75) keeps the wire page, the shape cut takes it
+        let mut hair = rq(view, 150, u32::MAX);
+        hair.page_hairline = true;
+        assert_eq!(plan_hier(&v, &hair, &HierOpts::default()).pages.len(), 3);
+        hair.shape_cut = true;
+        assert_eq!(plan_hier(&v, &hair, &HierOpts::default()).pages.len(), 2);
+        // a smaller side equal to the cut is not under it
+        let mut edge = rq(view, 100, u32::MAX);
+        edge.shape_cut = true;
+        assert_eq!(plan_hier(&v, &edge, &HierOpts::default()).pages.len(), 3);
+        // no cut, no shape cut
+        let mut exact = rq(view, 0, u32::MAX);
+        exact.shape_cut = true;
+        let all = plan_hier(&v, &exact, &HierOpts::default());
+        assert_eq!((all.pages.len(), all.stats.shape_cut), (3, 0));
+    }
+
+    #[test]
     fn hairline_min_side_cut() {
         let v = fixture(
             &[
@@ -5677,6 +5748,7 @@ mod tests {
                     page_skip: Vec::new(),
                     prune_skipped: false,
                     sub_cut_box: false,
+                    shape_cut: false,
                     frames: true,
         }
     }
@@ -6243,6 +6315,7 @@ mod tests {
                     page_skip: Vec::new(),
                     prune_skipped: false,
                     sub_cut_box: false,
+                    shape_cut: false,
                     frames: true,
         };
         // brute equality needs the corner windows, not the whole
@@ -6983,6 +7056,17 @@ mod tests {
         let c = plan_hier(&tree, &req, &HierOpts::default());
         assert!(c.stats.culled_page_bvh_cut > 0);
         assert!(c.pages.is_empty());
+        // the shape cut prunes by the smaller of the node's two maxima: the
+        // pages are 90 x 50, so a cut of 70 leaves them to the size cut and
+        // takes them all under the shape cut, tree and linear run alike
+        let mut req = rq(bx(0, 0, 1990, 50), 70, u32::MAX);
+        let kept = plan_hier(&tree, &req, &HierOpts::default());
+        assert_eq!((kept.pages.len(), kept.stats.culled_page_bvh_cut), (20, 0));
+        req.shape_cut = true;
+        let c = plan_hier(&tree, &req, &HierOpts::default());
+        assert!(c.stats.culled_page_bvh_cut > 0);
+        assert!(c.pages.is_empty());
+        assert!(plan_hier(&lin, &req, &HierOpts::default()).pages.is_empty());
     }
 
     // ---------------------------------------------- delta (par.3.2)

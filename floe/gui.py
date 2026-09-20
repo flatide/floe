@@ -3509,6 +3509,9 @@ class Viewer:
                     cut = ""
                     if res.get("cut_um"):
                         cut = ", cut<%.3gum" % res["cut_um"]
+                        # thin keep since 0.12.173: each shape by its smaller side
+                        if (res.get("plan_culls") or {}).get("shape_cut"):
+                            cut += " (min side)"
                     fit = (res.get("plan_culls") or {})
                     if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
                             or fit.get("fit_thin")):
