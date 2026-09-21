@@ -1809,12 +1809,6 @@ fn sub_cut_wash_enabled() -> bool {
     std::env::var("FLOE_RUST_SUB_CUT_WASH").as_deref() == Ok("on")
 }
 
-/// The page frontier (floe_vfs::ViewReq::page_reps) on a plain
-/// layout's frames. DEACTIVATED (user decision 2026-09-17: the field
-/// still saw boxes and a 60 s full-depth plan on 0.12.152, and the
-/// answer moves to representative data built at index time into a
-/// file of its own); FLOE_RUST_PAGE_REPS=on turns the planner-side
-/// representatives on for a diagnosis.
 /// Sub-cut boxes on a plain layout's `thin keep` frames
 /// (floe_vfs::ViewReq::sub_cut_box). OFF by default since 0.12.182 (user
 /// decision 2026-09-21): with few layers visible the box plan walks every
@@ -1834,6 +1828,12 @@ fn shape_cut_enabled() -> bool {
     std::env::var("FLOE_RUST_SHAPE_CUT").as_deref() != Ok("off")
 }
 
+/// The page frontier (floe_vfs::ViewReq::page_reps) on a plain
+/// layout's frames. DEACTIVATED (user decision 2026-09-17: the field
+/// still saw boxes and a 60 s full-depth plan on 0.12.152, and the
+/// answer moves to representative data built at index time into a
+/// file of its own); FLOE_RUST_PAGE_REPS=on turns the planner-side
+/// representatives on for a diagnosis.
 fn page_reps_enabled() -> bool {
     std::env::var("FLOE_RUST_PAGE_REPS").as_deref() == Ok("on")
 }
