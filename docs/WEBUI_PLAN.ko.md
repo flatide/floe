@@ -17,6 +17,9 @@ D3 배포는 잔여**다. 상세 수용 범위는 데스크톱 계획 §7 참조
 기본 clip 예약 충돌은 전용 캐시·가용량 안내로 보완했다(§10, 전체 자원 상한은 유지).
 native 복구는 navigation/JS 응답 전체 deadline과 세대 검사로 보완하고, 빈
 WKWebView의 명시적 GET 재로딩을 별도 QA로 추적한다(§11; DRC/crash 실측과 구분).
+실제 macOS 합성 DRC에서 메모·waive 수동 저장 후 복구, opt-in 초기화,
+저장 내용 read-back 및 Notes 네이티브 다운로드까지 확인했다(§12).
+이는 저장 중 crash/결과 불명·storage 소실·OS IME/접근성 수용을 대신하지 않는다.
 전체 배터리는 기존 오라클의 macOS 실행 timeout으로 미통과이며, 선택 재검증과
 구분한다([검증 기록](WEBUI_DESKTOP.ko.md#7-d2-mac-파일클립보드복구-2026-09-18)).
 

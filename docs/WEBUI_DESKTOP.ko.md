@@ -677,3 +677,56 @@ G1/G4 및 Python-free Linux 검증은 남는다. 원격 공유·CI·열린 색�
 이는 실제 WebContent process kill, cookie/storage 강제 소실, DRC 저장 중 결과
 불명 복구의 대체 검사가 아니다. 그 확대 수용과 OS IME/DPI/물리 입력, RHEL 호스트,
 서명·공증, G1/G4 및 Python-free Linux 검증은 여전히 남는다.
+
+## 12. D2-mac 실제 DRC 저장·복구·다운로드 수용 (2026-09-21)
+
+`209ff78`의 release 개발 `.app`을 새 합성 valmini + DRC pack으로 실행했다.
+DRC는 `SYNTHETIC.SPACE` 규칙의 사각형 2개와 edge-pair 1개, 총 3오류다.
+reviewer는 `native-d2` 하나만 등록하고 waive 편집을 명시적으로 허용했다.
+실제 설계·기존 리뷰·다른 세션·공유 기본값은 사용하지 않았다.
+
+이번 검사는 실제 AppKit/WKWebView UI를 조작했다. 전용 GUI 연결은 환경 오류로
+사용할 수 없어, 이미 허용된 macOS 접근성과 **소유한 합성 앱 PID/창만** 대상으로
+검사했다. 인증 URL/cookie/sessionStorage를 읽어내거나 HTTP API로 UI를 대신하지
+않았다. 최종 종료 확인은 화면에서 버튼 위치를 확인해 클릭을 요청했지만 그
+자동화 호출은 접근성 권한 오류로 끝났다. 접근성 API에서 그 웹 모달의 자식이
+조회되지 않은 관측과 함께 별도 잔여이며, 최종 버튼 조작/VoiceOver 수용을
+통과했다고 주장하지 않는다. 시스템 설정·권한 변경도 하지 않았다.
+
+| 실제 검사 | 결과 |
+|---|---|
+| 오류 1 선택 → 메모 읽기 → 한글 포함 입력 → 미리보기 → 명시 승인 | `Saved · #1`, 새 note sidecar 생성 |
+| 같은 오류의 Waive 선택 → 미리보기 → 명시 승인 | waive sidecar 생성, 복구 후 `Save completed · #1` 및 reader revision 일치 |
+| 메모·waive 자동 저장 opt-in을 각각 켠 뒤 Recover View → Reload View | 인증된 같은 세션으로 복귀, 두 opt-in 모두 off로 초기화 |
+| 복구 후 오류 1을 다시 읽기 | 입력한 한글 메모 완전 일치, `1 already waived · 0 reserved statuses` |
+| Notes Prepare export → Download → 실제 NSSavePanel에서 새 경로 승인 | 228바이트 `.fe`, note sidecar와 `cmp` 일치, 파일 권한 0600 |
+| 복구·export·종료 전후 보호 검사 | note/waive SHA-256 불변, 소스 OASIS·ASCII DRC·pack·VFS 파일의 크기/해시 불변 |
+| 세션 수명 정리 | native 실행 exit 0, 소유 앱·renderd PID 모두 종료; 최종 확인 버튼 자동화 성공으로는 합산하지 않음 |
+
+첫 메모 미리보기는 접근성 화면 조회 중 30초가 지나 만료됐고 저장되지 않았다.
+새 스냅샷/미리보기에서만 승인해 저장했으며, 유효기간을 늘리거나 실패한 승인을
+자동 재전송하지 않았다. 자동화 도중 waive 선택 스냅샷도 만료/무효화되어
+폐기·재읽기했다. 이 과정을 정상 저장 성공으로 세지 않는다.
+다운로드도 Save 버튼 직후 파일이 아직 없었으므로, 이후 호스트의
+`Download saved (new file; existing files unchanged)`와 실제 파일을 모두 확인한
+시점만 성공으로 기록한다.
+
+합성 메모는 `Synthetic native save — 한글 복구 확인 2026-09-21`이다.
+접근성 텍스트 입력이므로 OS 한글 IME의 조합/후보창 수용과는 다르다.
+정상 저장 **후** 복구 검사이며, 저장 중 프로세스 종료·결과 불명·cookie/storage
+소실·충돌 복구 검사를 대체하지 않는다. opt-in 이후 새 자동 저장 요청을 보내지
+않았으므로 이번 기록의 자동 저장 수용 범위는 **복구 시 동의 초기화**까지다.
+다운로드는 Notes만 확인했으며 Waives 다운로드/재import는 별도다.
+
+실행 자료는 `/private/tmp/floe-desktop-drc.6Umo3s/`에 남겼다. 입력 fingerprint,
+저장/복구 접근성 상태, 앱 창 캡처, 다운로드 및 테스트 sidecar를 포함한다.
+별도 회귀도 host unit 13개 및 `node tools/validate_web_ui.cjs` 전체 검사를
+통과했다(`host-tests.log`, `web-ui-tests.log`). 문서만 갱신했으며 전체 Rust/GTK
+배터리 재통과로 확대하지 않는다.
+소스/캐시/리뷰 산출물은 저장소에 커밋하지 않는다. 임시 자료는 OS 정리로
+사라질 수 있으며 제품의 영구 테스트 입력으로 의존하지 않는다.
+
+이번 단계는 제품 코드 변경이 아닌 실제 native 수용 범위 확대다. 남은 macOS
+항목은 저장 중 장애/결과 불명·storage 소실, OS IME·DPI·물리 입력/접근성,
+서명·공증·배포 수용이다. RHEL 호스트·ETX/Python-free Linux 및 G1/G4는 그대로
+남고, 원격 공유·CI·열린 색인 hot-reload 보류도 유지한다.
