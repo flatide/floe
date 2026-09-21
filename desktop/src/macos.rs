@@ -48,6 +48,7 @@ struct State {
     smoke: bool,
     smoke_notices: bool,
     smoke_recovery: bool,
+    smoke_review: bool,
     smoke_step: Cell<u8>,
     evaluating: Cell<bool>,
     smoke_probe: RefCell<String>,
@@ -402,6 +403,11 @@ impl Host {
         // performs the ORIGINAL POST. No window is shown; no response is
         // ever committed as HTML, and this view has no UI delegate/IPC.
         let child = unsafe {
+            if self.ivars().smoke_review {
+                // The supplied configuration inherits the main content controller.
+                // Do not copy QA observers into the separate transfer WebView.
+                config.setUserContentController(&WKUserContentController::new(self.mtm()));
+            }
             WKWebView::initWithFrame_configuration(
                 WKWebView::alloc(self.mtm()),
                 NSRect::ZERO,
@@ -462,6 +468,7 @@ impl Host {
         smoke: bool,
         smoke_notices: bool,
         smoke_recovery: bool,
+        smoke_review: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(State {
             service: RefCell::new(service),
@@ -477,7 +484,8 @@ impl Host {
             smoke,
             smoke_notices,
             smoke_recovery,
-            smoke_step: Cell::new(0),
+            smoke_review,
+            smoke_step: Cell::new(if smoke_review { 20 } else { 0 }),
             evaluating: Cell::new(false),
             smoke_probe: RefCell::new(String::new()),
             start: Instant::now(),
@@ -787,6 +795,18 @@ impl Host {
         let web = unsafe {
             let config = WKWebViewConfiguration::new(mtm);
             config.setWebsiteDataStore(&WKWebsiteDataStore::nonPersistentDataStore(mtm));
+            if self.ivars().smoke_review {
+                // Only the no-argument QA mode creates this host, after generating
+                // new synthetic inputs. Observe saves from document start so a
+                // replay during startup cannot escape the counter. Main frame only.
+                let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                    WKUserScript::alloc(mtm),
+                    &NSString::from_str(include_str!("../ui/review-transport.js")),
+                    WKUserScriptInjectionTime::AtDocumentStart,
+                    true,
+                );
+                config.userContentController().addUserScript(&script);
+            }
             config
                 .preferences()
                 .setJavaScriptCanOpenWindowsAutomatically(false);
@@ -937,7 +957,8 @@ impl Host {
             return;
         }
         let step = self.ivars().smoke_step.get();
-        // Empty-workspace QA only, never accepts a source/reviewer/write scope.
+        // Ordinary smoke is empty-workspace only. Review smoke creates its own
+        // fresh fixture; no QA invocation accepts caller paths/reviewer scopes.
         let js = match step {
             0 => "(()=>{const b=document.getElementById('logout'),p=document.getElementById('browse-dialog'),c=document.getElementById('browse-close'),r=document.getElementById('browse-refresh');return b&&!b.disabled&&p&&!p.hidden&&c&&!c.disabled&&r&&!r.disabled?'ready':JSON.stringify([!!b,typeof FloeProtocol==='object',typeof FloeSessionExit==='object',document.readyState==='complete',!!location.hash]);})()",
             1 => "document.getElementById('browse-dialog').hidden?'dismissed':'wait'",
@@ -952,6 +973,11 @@ impl Host {
             12 => concat!("(", include_str!("../ui/recovery-probe.js"), ")('arm')"),
             13 => concat!("(", include_str!("../ui/recovery-probe.js"), ")('check')"),
             14 => "document.getElementById('browse-dialog').hidden?'dismissed':'wait'",
+            20 => concat!("(", include_str!("../ui/review-probe.js"), ")('note-start')"),
+            21 => concat!("(", include_str!("../ui/review-probe.js"), ")('note-check')"),
+            22 => concat!("(", include_str!("../ui/review-probe.js"), ")('waive-start')"),
+            23 => concat!("(", include_str!("../ui/review-probe.js"), ")('waive-check')"),
+            24 => concat!("(", include_str!("../ui/review-probe.js"), ")('read-back')"),
             _ => { self.ivars().evaluating.set(false); return; },
         };
         let host = self.retain();
@@ -987,6 +1013,15 @@ impl Host {
                     "armed",
                     "recovered",
                     "recovery-failed",
+                    "review-failed",
+                    "note-lost",
+                    "note-resolved",
+                    "waive-lost",
+                    "waive-resolved",
+                    "review-ok",
+                    "review-wait-list",
+                    "review-wait-read",
+                    "review-wait-snapshot",
                     "wait",
                 ]
                 .contains(&text.as_str())
@@ -997,6 +1032,19 @@ impl Host {
                 *host.ivars().smoke_probe.borrow_mut() = text.clone();
             }
             let next = match (step, text.as_str()) {
+                (20..=24, "review-failed") => {
+                    host.fail("synthetic native review recovery QA failed");
+                    step
+                }
+                (20, "note-lost") | (22, "waive-lost") => {
+                    host.start_recovery();
+                    step + 1
+                }
+                (21, "note-resolved") | (23, "waive-resolved") => step + 1,
+                (24, "review-ok") => {
+                    host.ivars().window.get().unwrap().performClose(None);
+                    5
+                }
                 (0, "ready") => 11,
                 (11, "ime-failed") => {
                     host.fail("native synthetic composition-key guard failed");
@@ -1125,6 +1173,7 @@ pub fn run(
     smoke: bool,
     smoke_notices: bool,
     smoke_recovery: bool,
+    smoke_review: bool,
 ) -> Result<i32> {
     if !objc2::available!(macos = 12.0) {
         return Err(Error::input("embedded preview requires macOS 12 or later"));
@@ -1164,6 +1213,7 @@ pub fn run(
         smoke,
         smoke_notices,
         smoke_recovery,
+        smoke_review,
     );
     // SAFETY: Owned window never auto-releases on close. The main-thread host
     // remains retained until after timer invalidation and delegate detachment.
@@ -1184,7 +1234,13 @@ pub fn run(
     window.setTitle(ns_string!("floe2 — starting local service…"));
     window.setDelegate(Some(ProtocolObject::from_ref(&*host)));
     window.center();
-    window.makeKeyAndOrderFront(None);
+    if smoke_review {
+        // Programmatic synthetic QA must not steal the user's typing focus.
+        // The window/WebView remains real and visible, behind existing windows.
+        window.orderBack(None);
+    } else {
+        window.makeKeyAndOrderFront(None);
+    }
     host.ivars().window.set(window).unwrap();
     app.setDelegate(Some(ProtocolObject::from_ref(&*host)));
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -1291,8 +1347,10 @@ pub fn run(
     // block retains host; it never transfers UI objects to the service thread.
     let timer =
         unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, true, &block) };
-    #[allow(deprecated)]
-    app.activateIgnoringOtherApps(true);
+    if !smoke_review {
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
     app.run();
     timer.invalidate();
     app.setDelegate(None);
@@ -1314,7 +1372,11 @@ pub fn run(
                 "native smoke did not complete confirmed shutdown",
             ));
         }
-        println!("DESKTOP SMOKE: OK (WebKit auth; synthetic composition-key guard; native menu About + modal guard; native close→cancel; application quit→confirm; service joined)");
+        if smoke_review {
+            println!("DESKTOP REVIEW RECOVERY: OK (synthetic-only; dropped save ACKs; authenticated reloads; no automatic POST replay; explicit identical receipt resolution; UI read-back; native close/cancel/quit; service joined)");
+        } else {
+            println!("DESKTOP SMOKE: OK (WebKit auth; synthetic composition-key guard; native menu About + modal guard; native close→cancel; application quit→confirm; service joined)");
+        }
         if smoke_notices {
             println!(
                 "DESKTOP NOTICE UI: OK (packaged list; verified text read; next catalogue page)"

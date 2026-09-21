@@ -730,3 +730,79 @@ reviewer는 `native-d2` 하나만 등록하고 waive 편집을 명시적으로 �
 항목은 저장 중 장애/결과 불명·storage 소실, OS IME·DPI·물리 입력/접근성,
 서명·공증·배포 수용이다. RHEL 호스트·ETX/Python-free Linux 및 G1/G4는 그대로
 남고, 원격 공유·CI·열린 색인 hot-reload 보류도 유지한다.
+
+## 13. D2-mac 합성 저장 응답 유실·재로딩 자동 검사 (2026-09-21)
+
+§12의 수동 정상 저장 후 복구와 별도로, 실제 WKWebView + Rust 저장 경로의
+반복 가능한 응답 유실 게이트를 추가했다. 명령은 **단독 옵션만** 받는다.
+
+```sh
+FLOE_INDEX_BIN="$PWD/rust/target/release/floe-index" \
+FLOE_RENDERD_BIN="$PWD/rust/target/release/floe-renderd" \
+  desktop/target/debug/floe2-desktop --smoke-test-review-recovery
+```
+
+`view`, SOURCE, `--root`, DRC/reviewer 등 다른 인자를 함께 주면 이 QA 모드로
+진입하지 않는다. 기존 세션·인증 파일도 받지 않는다. Rust OASIS writer로 작은
+사각형을 만들고, 고정 합성 ASCII DRC 2오류를 새 0700 임시 폴더에 쓴다.
+기존 Rust 인덱서/DRC builder를 각각 2 jobs로 실행하며 Python은 사용하지 않는다.
+준비 단계도 SIGINT/SIGTERM과 작업별 120초 deadline에 취소·join한다.
+reviewer는 새 합성 자료의 `native-recovery-test`로 고정한다. 같은 이름의 다른
+폴더 리뷰에 접근하지 않는다. 실행 폴더를 출력하고 작은 합성 산출물을 보존한다.
+
+검사 순서:
+
+1. 실제 UI에서 첫 오류 선택, 메모 입력/미리보기/명시 승인을 실행한다.
+   QA 전용 document-start 스크립트가 그 요청을 **정상 전송**한 뒤 성공 HTTP
+   응답 한 번만 UI의 network-error 경로로 바꾼다. 서버/디스크 장애 주입은 아니다.
+2. 결과 불명 UI와 서버의 저장 receipt가 확인된 뒤 같은 WebView를 제품의
+   credential-free GET 복구 함수로 재로딩한다. 시작 시점부터 요청 수를 세어
+   자동 재전송이 없었는지 확인한다. QA의 Reload는 테스트 명령의 고정 동작이며,
+   정상 Recover 메뉴의 확인창은 바꾸지 않는다.
+3. 제품 UI의 **Resolve approved request**로만 원래 승인을 재확인한다.
+   요청 수는 1→2지만 receipt는 계속 `#1`이어야 한다. 새 편집 승인/seq를 만들지
+   않고, 재로딩 후 자동 저장 opt-in도 off여야 한다.
+4. Waive에도 같은 유실·재로딩·명시 재확인을 적용한다. 디스크 저장뿐 아니라
+   reader metadata가 receipt와 일치하고 read barrier가 풀렸는지 확인한다.
+5. UI에서 메모·waive를 각각 다시 읽고, snapshot을 순서대로 해제한다.
+   마지막에는 native 닫기→Cancel, application Quit→확인을 거쳐 service를 join한다.
+   별도 Rust 검증이 원본 OASIS/ASCII/pack/색인 바이트 불변, note 내용·waived count,
+   두 sidecar 권한 0600을 확인한다.
+
+주입 스크립트는 이 합성 QA 호스트의 **주 문서에만** 설치한다. 일반 실행과
+다운로드 WebView에는 설치하지 않는다. 정확한 두 API 경로의 POST 수/상태 코드만
+보며 request body, 승인 token, 인증 header/cookie, response body를 읽지 않는다.
+호스트로 나오는 값도 고정된 단계 marker뿐이다. document-start 설치 덕분에
+페이지 초기화 중 자동 POST가 생겨도 검사에서 빠지지 않는다. 4xx/5xx를 성공한
+응답 유실처럼 취급하지 않고 검사 실패로 처리한다. 새 registry 의존성은 없으며
+기존 Rust OASIS writer와 이미 vendored된 WebKit 바인딩 feature만 사용한다.
+
+개발 중 첫 실행은 `about:blank` 시점에 아직 없는 QA 스크립트를 실패로 판단했다.
+인증된 페이지 준비 이후에 검사하도록 고쳤다. 다음 실행은 read-back에서 두
+snapshot을 동시에 요청해 하나가 429로 거절되어 timeout이었다. 자원 제한은
+바꾸지 않고 첫 snapshot을 해제한 뒤 다음 것을 읽도록 검사 절차를 수정했다.
+자동 검사 창은 다른 창 뒤에 두어 사용자 키 입력 포커스를 가져오지 않는다.
+이 결과를 실제 물리 키/IME 수용으로 확대하지 않는다.
+
+검증 범위의 한계: **성공 응답 유실**과 실제 엔진 재로딩 수용이다. 실제
+WebContent process kill, 저장 중 worker kill/디스크 장애, cookie/storage 강제
+소실 또는 crash 뒤 OS 복구를 통과했다는 뜻이 아니다. 이 확대 장애 수용과
+OS IME/DPI/접근성, 서명/공증, RHEL/ETX·G1/G4는 여전히 별도다.
+
+실행 결과:
+
+- host unit **15 passed**, fmt 및 clippy `--all-targets --no-deps -- -D warnings`
+  통과. QA 단독 인자, 신규 파일 비덮어쓰기, 전송 경로/오류 구분, 문서 초기화 전
+  대기 및 snapshot 순차 해제 회귀를 포함한다.
+- `sh tools/validate_desktop.sh`: **exit 0**. 기존 빈 창·GET 복구 smoke와 새
+  note/waive 응답 유실→재로딩→명시 재확인→UI/file read-back 검사 모두 통과했다.
+- `sh tools/validate_rust.sh --only embedded_host,web_ui,validation_selector`:
+  **exit 0 / ALL OK**. 전체 Rust/GTK 배터리 통과로 합산하지 않는다.
+- release 개발 `.app`을 새로 빌드하고 고지 279파일을 검증했다. index/renderd
+  환경 override를 제외한 **동봉 실행 파일만으로도** 새 native QA가 exit 0이며
+  두 UI receipt `#1`, 파일 read-back/0600/입력 불변과 확인 종료를 통과했다.
+- 로그: `/private/tmp/floe-native-review-ui.log`(초기 문서 준비 실패),
+  `floe-native-review-ui-retry.log`(동시 snapshot read-back timeout),
+  `floe-native-review-ui-final.log`, `floe-native-review-native-gate.log`,
+  `floe-native-review-battery.log`, `floe-native-review-{unit,clippy,release}.log`,
+  `floe-native-review-release-ui.log`.

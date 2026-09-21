@@ -218,6 +218,7 @@ dependencies = [
  "block2",
  "floe-app",
  "floe-app-core",
+ "floe-oasis",
  "getrandom",
  "objc2",
  "objc2-app-kit",

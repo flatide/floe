@@ -4,6 +4,7 @@ mod actions;
 #[cfg(target_os = "macos")]
 mod macos;
 mod recovery;
+mod review_qa;
 mod service;
 mod transfers;
 
@@ -18,6 +19,7 @@ fn main() {
             --smoke-test: empty-workspace native authentication/close test only.\n\
             --smoke-test-notices: same test plus packaged About notice reads.\n\
             --smoke-test-recovery: same test plus explicit credential-free reload.\n\
+            --smoke-test-review-recovery: NEW synthetic files only; save ACK loss/reload.\n\
             --check-notices: verify every packaged notice chunk; no GUI or workers.\n\
             With no SOURCE or --root, choose an approved working folder before startup.\n\
             macOS preview: native file dialogs, File/Edit menus and explicit Recover View."
@@ -36,26 +38,46 @@ fn main() {
     }
     let smoke_notices = args == ["--smoke-test-notices"];
     let smoke_recovery = args == ["--smoke-test-recovery"];
-    let smoke = smoke_notices || smoke_recovery || args == ["--smoke-test"];
+    let smoke_review = review_qa::requested(&args);
+    let smoke = smoke_notices || smoke_recovery || smoke_review || args == ["--smoke-test"];
     if smoke {
         args.clear();
     }
     if args.first().is_some_and(|a| a == "view") {
         args.remove(0);
     }
-    let result = floe_app::embedded::Session::parse(&args).and_then(|session| {
+    let result = (|| {
+        if smoke_review && !cfg!(target_os = "macos") {
+            return Err(floe_app_core::Error::input(
+                "review WebView QA requires macOS",
+            ));
+        }
+        let fixture = if smoke_review {
+            Some(review_qa::Fixture::create()?)
+        } else {
+            None
+        };
+        if let Some(fixture) = &fixture {
+            args = fixture.arguments()?;
+        }
+        let session = floe_app::embedded::Session::parse(&args)?;
         #[cfg(target_os = "macos")]
         {
-            macos::run(session, smoke, smoke_notices, smoke_recovery)
+            let code = macos::run(session, smoke, smoke_notices, smoke_recovery, smoke_review)?;
+            if let Some(fixture) = &fixture {
+                fixture.verify()?;
+                println!("DESKTOP REVIEW FILES: OK (exact note/waive read-back; 0600; original inputs unchanged)");
+            }
+            Ok(code)
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (session, smoke, smoke_notices, smoke_recovery);
+            let _ = (session, smoke, smoke_notices, smoke_recovery, fixture);
             Err(floe_app_core::Error::input(
                 "native host not implemented for this platform; use floe2-web",
             ))
         }
-    });
+    })();
     match result {
         Ok(code) => std::process::exit(code),
         Err(e) => {

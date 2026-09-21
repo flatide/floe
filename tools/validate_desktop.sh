@@ -14,9 +14,13 @@ node rust/web/ui/session-exit.test.cjs
 node desktop/ui/menu-action.test.cjs
 node desktop/ui/ime-probe.test.cjs
 node desktop/ui/recovery-probe.test.cjs
+node desktop/ui/review-transport.test.cjs
 FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
 FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
     desktop/target/debug/floe2-desktop --smoke-test
 FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
 FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
     desktop/target/debug/floe2-desktop --smoke-test-recovery
+FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
+FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
+    desktop/target/debug/floe2-desktop --smoke-test-review-recovery
