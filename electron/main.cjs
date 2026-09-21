@@ -10,6 +10,7 @@ const { RecoveryController } = require('./recovery-controller.cjs');
 const { ClipboardController, activationProbe } = require('./clipboard-controller.cjs');
 const { Notices, runtimeRoot } = require('./notices.cjs');
 const { terminationSignals } = require('./termination-signals.cjs');
+const { TerminalExit } = require('./terminal-exit.cjs');
 const { Downloads, blobAllowed, postAllowed, mimeAllowed, outsideProfile } = require('./downloads.cjs');
 const P = require('./policy.cjs');
 const runtime = require('./runtime.json');
@@ -41,6 +42,7 @@ const qaClipboard = { requests: 0, grants: 0, denials: 0, probes: 0, active: fal
 let downloads, downloadQaRoot, downloadQaChoice = 0, cleanupConfirmed = false;
 const downloadWindows = new Map();
 let ended = false, failure = false, shuttingDown = false, qaCompleted = false;
+const terminalExit = new TerminalExit(code => app.exit(code));
 let statusURL = null, deniedNavigations = 0, deniedWindows = 0;
 let qaStep = 'startup';
 let qaReadiness = null;
@@ -82,14 +84,20 @@ function evalOwned(script) {
   return window.webContents.executeJavaScript(script, false);
 }
 function requestClose() {
+  if (ended) { acknowledgeTerminal(); return; }
   reveal();
   if (panel || stopping || !close) return;
   clipboardAccess?.invalidate();
   if (recovery) recovery.invalidate();
   return close.request().catch(() => fail());
 }
+function acknowledgeTerminal() {
+  terminalExit.request();
+  if (window && !window.isDestroyed()) window.destroy();
+}
 function cancelService() {
   stopping = true;
+  if (ended) { messageAbort?.abort(); acknowledgeTerminal(); return; }
   notices?.close();
   messageAbort?.abort();
   clipboardAccess?.end();
@@ -123,17 +131,25 @@ async function finish(code) {
   if (recovery) recovery.end();
   if (code !== 0 && !(stopping && code === 143)) failure = true;
   if (smoke && !qaCompleted) failure = true;
+  const keepError = failure && !smoke && !stopping && window && !window.isDestroyed();
+  terminalExit.begin(!!keepError);
   const downloadCleanup = downloads ? downloads.shutdown() : Promise.resolve(true);
   if (window && !window.isDestroyed()) {
-    if (failure && !smoke && !stopping) await message('The Rust session ended with an error. No save or index request was retried.');
-    window.destroy();
+    if (keepError) {
+      // A modal already being open must not hide the failure or leave Live
+      // geometry behind it. No auth/recovery/save is possible on this local page.
+      messageAbort?.abort();
+      window.setTitle('floe2 · Rust session ended');
+      status('The Rust session ended with an error. Unsaved drafts are no longer available. Earlier approved writes may already have completed; check saved results after explicitly starting a new session. No save, index request, or session was replayed. Close this window to exit.');
+      reveal();
+    } else window.destroy();
   }
   for (const entry of downloadWindows.values()) { if (!entry.window.isDestroyed()) entry.window.destroy(); }
   cleanupConfirmed = await downloadCleanup;
   if (!cleanupConfirmed) { failure = true; console.error('floe2 Electron: private download cleanup not confirmed; profile retained; no replay.'); }
   if (root) { try { fs.rmdirSync(root); } catch (_) { failure = true; } }
   if (smoke) console.log(failure ? 'ELECTRON SMOKE: FAIL' : 'ELECTRON SMOKE: OK (sandboxed Chromium; Rust auth; navigation/window denial; close/cancel/quit; service joined)');
-  app.exit(failure ? 1 : 0);
+  terminalExit.complete(failure ? 1 : 0);
 }
 async function recover() {
   clipboardAccess?.invalidate();
@@ -157,9 +173,10 @@ async function showNotices() {
 
 app.on('before-quit', event => {
   if (signalSmoke) console.log('ELECTRON SIGNAL: before-quit');
+  if (ended) { event.preventDefault(); acknowledgeTerminal(); return; }
   if (!ended) { event.preventDefault(); if (close) requestClose(); else cancelService(); }
 });
-app.on('window-all-closed', () => { if (!ended) cancelService(); });
+app.on('window-all-closed', () => { if (!ended) cancelService(); else terminalExit.request(); });
 app.on('activate', reveal);
 const rearmTermination = terminationSignals(process, signal => {
   if (signalSmoke) console.log('ELECTRON SIGNAL: handled ' + signal);
@@ -206,7 +223,7 @@ app.whenReady().then(async () => {
       else if (details.method === 'POST' && /^\/api\/v1\/views\/[^/]+\/palette$/.test(details.url.slice(origin.length))) qaRecoveryRequests.paletteReads++;
       else if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(details.method)) qaRecoveryRequests.mutations++;
     }
-    callback({ cancel: !P.requestAllowed(origin, details.url) && !blobAllowed(origin, details.url) && details.url !== statusURL });
+    callback({ cancel: details.url !== statusURL && (ended || (!P.requestAllowed(origin, details.url) && !blobAllowed(origin, details.url))) });
   });
   ses.webRequest.onHeadersReceived((details, callback) => {
     const entry = downloadWindows.get(details.webContentsId);
@@ -267,7 +284,7 @@ app.whenReady().then(async () => {
   web.on('will-attach-webview', event => event.preventDefault());
   for (const name of ['will-navigate', 'will-frame-navigate', 'will-redirect']) {
     web.on(name, event => {
-      if (!P.navigationAllowed(origin, event.url, event.isMainFrame)) { deniedNavigations++; event.preventDefault(); }
+      if (ended || !P.navigationAllowed(origin, event.url, event.isMainFrame)) { deniedNavigations++; event.preventDefault(); }
     });
   }
   web.on('did-start-navigation', event => {

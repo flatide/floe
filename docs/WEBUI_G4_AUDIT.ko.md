@@ -1,5 +1,14 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-22 후속: [Rust 서비스 종료 UI](WEBUI_ELECTRON_REVIEW.ko.md#rust-서비스-종료-ui--2026-09-22)는
+서비스 종료 시 기존 문서가 유지되거나 열린 확인창 때문에 오류 안내가 생략되는
+경로를 바꿨다. 실제 합성 SIGKILL에서 안내 유지·Reload 취소·worker 종료·명시
+닫기/exit1을 확인했으며, 아래 앞선 서비스-only 검사의 UI 공백 일부를 닫는다.
+저장소 장애·물리 입력·현장 및 전체 G4는 별도다. 이번 전체 Rust/web 실행은
+layerprops/기본값을 지나 `web_startup`의 oracle-build180초 timeout으로 exit1,
+Electron 통합 실행도 Rust helper3건 timeout으로 exit1이다. 별도 직접 UI 검사의
+성공으로 전체 실패를 대체하지 않는다.
+
 2026-09-22 후속: [실제 Rust 서비스 종료·재시작](WEBUI_REVIEW_SERVICE_CRASH.ko.md)에서
 note/waive의 승인 전·게시 후4조합, worker 종료, 새 인증/reader의 재조회, 이전
 receipt·승인 거부와 새 승인 저장을 확인했다. 서비스 오류 UI·저장소 장애·DRC-PUB-01

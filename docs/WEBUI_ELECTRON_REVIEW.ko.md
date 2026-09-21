@@ -102,3 +102,87 @@ callback의 거부/redirect 판단을 보존한다. 요청 횟수는 죽는 페�
 전체 목표에는 Rust 저장 worker/디스크 장애, 실제 물리 입력·OS 파일창·IME/DPI,
 G1 동일 조건 성능/G4 확대 수용, RHEL8.6/8.10+ETX 및 Python-free Linux 실행,
 정식 호스트 채택·서명/배포가 남는다. 원격 공유·유료 CI 보류는 그대로다.
+
+## Rust 서비스 종료 UI — 2026-09-22
+
+표시 프로세스 복구와 달리 Rust 서비스가 죽으면 같은 세션의 Recover는 불가능하다.
+기존 `finish()`는 서비스 exit를 알리는 동안 기존 레이아웃 문서를 종료 안내로 바꾸지 않았고,
+`panel`이 이미 열려 있으면 알림 자체를 생략하고 창을 파괴했다. 새로운 합성
+미승인 note preview에서 실제 소유 서비스에 SIGKILL을 보내, 종료 화면으로
+전환되지 않는 것을 재현했다(`floe-service-exit-ui-baseline.log`, exit1). 기존 문서
+자체의 WebSocket 단절 표시와는 구별하며, 죽은 서비스가 Live 문구를 얼마나 오래
+남겼는지까지 이 실패 로그만으로 측정했다고 주장하지 않는다.
+
+Electron 비교 shell **0.1.2**에서 다음과 같이 바꾼다. Rust 서비스/renderer 버전과
+저장 API/권한은 바꾸지 않는다.
+
+- 오류가 난 세션은 서버 없는 고정 로컬 상태 페이지로 교체한다. 도형·Live·편집기는
+  남기지 않으며 미저장 초안 소실과 **승인된 쓰기는 이미 완료됐을 가능성**을 안내한다.
+  새 세션을 명시적으로 시작해 결과를 확인하도록 하며 자동 시작/저장/색인은 없다.
+- 열린 native message box는 AbortSignal로 취소하고 확인창 유무에 기대지 않는다.
+  실제 Reload 확인창도 Cancel 응답으로 닫히며 늦은 Reload가 실행되지 않는다.
+  OS Save/Open chooser 전체의 자동 닫힘을 이 결과로 보장하지는 않는다.
+- 종료 후 기존 origin/WS/blob 요청과 navigation, native Recover/파일 메뉴/프로그램식 clipboard
+  권한은 더 이상 사용할 수 없다. 고정 로컬 안내 페이지만 허용한다.
+- 다운로드 producer 취소·helper 정리는 안내창과 독립적으로 진행한다. 창 닫기·Quit·
+  신호가 정리 중 들어와도 `TerminalExit`는 정리 결과가 나온 뒤에만 exit한다.
+  오류 창은 닫기 전까지 유지하고 exit1을 보존한다. 정상 종료와 일반 smoke는
+  추가 확인을 요구하지 않는다. Electron의 [Quit/exit 수명주기](https://www.electronjs.org/docs/latest/api/app)와
+  [dialog의 취소 신호](https://www.electronjs.org/docs/latest/api/dialog)를 사용하며 런타임/OS 보안을 바꾸지 않는다.
+
+검사는 새 TOP 사각형·2오류/1규칙 DRC만 생성한다. UI에서 note를 준비하되
+동의 체크/Approve는 **실행하지 않는다**. source/cache/pack의 바이트·모드·mtime와
+파일 목록 전체가 불변이어야 하며, 실제 설계/기존 메모/클립보드는 접근하지 않는다.
+인증은 새 pipe→페이지 메모리 안에만 있고 로그/파일에 기록하지 않는다.
+
+```sh
+# 같은 pinned runtime/일치하는 Rust worker·helper를 사용. 자동 설치 없음.
+"$FLOE_ELECTRON_BIN" tools/validate_electron_service_exit.cjs
+"$FLOE_ELECTRON_BIN" tools/validate_electron_service_exit.cjs --pending-prompt
+"$FLOE_ELECTRON_BIN" tools/validate_electron_service_exit.cjs --signal
+node --test electron/terminal-exit.test.cjs
+```
+
+macOS arm64/44.4.3에서 일반 창 닫기, 실제 Reload 확인창 대기→취소→Quit,
+종료 안내 상태의 실제 SIGTERM 세 경로는 각각 exit0(검사 성공)이다. 제품의 예상 종료 코드는 **1**이며 QA가 이를
+확인하고 성공으로 변환한다. 서비스는 실제 SIGKILL/code=null이고, 사전에 관찰한
+직계 Rust worker도 사라져야 한다. 메뉴의 Recover 호출은 새 서비스/페이지를
+만들지 않고, terminal PNG의 도형/Live 제거와 안내 문구를 직접 확인했다.
+`floe-service-exit-ui-final.log`, `floe-service-exit-ui-prompt.log`,
+`floe-service-exit-ui-signal.log`에 기록했다. 마지막 신호는 QA가 자기 소유 호스트
+PID에 보낸 실제 OS 신호이며 JS `emit`이나 제품 취소 함수 직접 호출이 아니다.
+실제 native 창/API 경로이며 물리 키 입력·현장 ETX/다른 OS 수용은 아니다.
+
+초기 QA의 미승인 상태에서 Approve 활성화를 기다린 오류와 MenuItem click의
+반환값을 검사한 오류는 실제 UI 계약에 맞췄다. consent 기본값/저장 권한/시간
+제한을 완화하지 않았다. 해당 중간 실패 로그도 유지한다. 순수 수명주기/호스트/
+복구/신호 **17개**와 portable JS 파일 포함 검사2개는 통과했다. 실제 SIGKILL
+검사는 opt-in 명령이며 일반 게이트에는 순수 TerminalExit 검사만 넣는다.
+
+`floe-terminal-exit-electron.log`의 전체 Electron gate는 Rust helper unit19개/
+clippy 이후 Node 통합 검사에서 **38 pass/3 timeout**으로 exit1이었다. download
+slot 두 검사와 pipelined init/cancel 서비스 검사이며 timeout의 원인을 이 UI 수정이나
+macOS loader로 확정하지 않는다. timeout 확대·실패 검사 재실행으로 성공 처리하지 않았다.
+그 뒤 실행되지 못한 별도 GUI 검사(`floe-terminal-exit-gui-regression.log`)는 새 빈 창의
+인증/메뉴/종료, Chromium blob의 취소/게시/경합/정리와 기존 외부 SIGINT/SIGTERM
+네 경로까지 exit0이다. 이를 앞선 전체 gate 실패를 대체하는 것으로 합산하지 않는다.
+packager fmt/clippy도 통과했다.
+
+같이 시작한 전체 Rust/web 검사 로그는 `floe-terminal-exit-full.log`다. 진행 중
+`query_stream` 테스트 실행 파일을 읽기 전용으로 1초 sample한 결과, 시작 후
+27.6초 시점의 783개 샘플이 모두 `_dyld_start+0`이고 footprint는112KiB였다
+(`floe-terminal-query-start.sample`). 이후 테스트 본문은5개 ignored로0.00초에
+끝났다. **해당 프로세스의 본문 이전 지연** 근거이며, 앞의 helper timeout3건까지
+같은 원인이라고 단정하거나 macOS 보안 설정을 바꾸지는 않는다.
+
+전체 Rust/web 실행은 **exit1**이었다. workspace 단위, index/app CLI, portable,
+자급식 runtime, embedded lifecycle, layerprops/layer defaults, palette/bitmap,
+display/clip/capture, 조회/공유/owner lifecycle, handoff/file picker까지 통과했으나
+`web_startup`의 `oracle-build`에서180.009초 timeout으로 멈췄다. 실패 명령은
+`cargo test --offline --locked -p floe-app --lib --no-run --message-format=json`이다.
+앞선 layerprops/기본값 통과로 과거 기동 실패를 지우거나 이번 build timeout을
+같은 원인으로 확정하지 않는다. 이후 gate는 실행되지 않았고 **전체 green 아님**이다.
+전체 실행을 재시작하지 않았으며 임시 `.venv` 링크는 종료 trap에서 제거됐다.
+
+이 수정은 서비스 종료의 표시 누락을 닫는 것이며 저장소 write/fsync 장애,
+DRC-PUB-01, NFS 호환성 또는 전체 G4 완료를 뜻하지 않는다.

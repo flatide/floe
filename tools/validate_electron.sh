@@ -23,6 +23,7 @@ node --test ../../desktop/ui/layout-parity-probe.test.cjs ../../desktop/ui/frame
 node --test ../clipboard-controller.test.cjs
 node --test ../notices.test.cjs
 node --test ../termination-signals.test.cjs
+node --test ../terminal-exit.test.cjs
 node --test ../readiness-qa.test.cjs
 node --test ../../tools/validate_electron_review.test.cjs
 node --test ../../tools/electron-review-fixture.test.cjs

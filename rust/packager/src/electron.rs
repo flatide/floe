@@ -26,6 +26,7 @@ const APP_FILES: &[&str] = &[
     "electron/recovery-controller.cjs",
     "electron/clipboard-controller.cjs",
     "electron/termination-signals.cjs",
+    "electron/terminal-exit.cjs",
     "electron/downloads.cjs",
     "electron/download-slot.cjs",
     "electron/readiness-qa.cjs",
