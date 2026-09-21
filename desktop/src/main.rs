@@ -2,6 +2,7 @@
 
 mod actions;
 mod close_request;
+mod download_fs;
 mod download_qa;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -25,6 +26,7 @@ fn main() {
             --smoke-test-review-recovery: NEW synthetic files only; save ACK loss/reload.\n\
             --smoke-test-storage-loss / --smoke-test-cookie-loss: NEW empty WebView only.\n\
             --smoke-test-download-cancel: NEW synthetic blob/staging files only.\n\
+            --smoke-test-download-publish: NEW synthetic blob, real WebKit file write only.\n\
             --smoke-test-download-cleanup-failure: same isolated QA with a cleanup obstacle.\n\
             --check-notices: verify every packaged notice chunk; no GUI or workers.\n\
             With no SOURCE or --root, choose an approved working folder before startup.\n\

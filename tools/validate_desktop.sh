@@ -35,6 +35,9 @@ FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
 FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
 FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
     desktop/target/debug/floe2-desktop --smoke-test-download-cancel
+FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
+FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
+    desktop/target/debug/floe2-desktop --smoke-test-download-publish
 # A cleanup failure must reach the ordinary error exit, even after a successful
 # session shutdown. Require both the real native QA verdict and the exact error
 # route; an unrelated crash/nonzero status cannot pass this gate.

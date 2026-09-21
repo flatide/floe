@@ -1062,3 +1062,84 @@ null 목적지로 해제한다. 원래 WebView를 교체하거나 인증을 재�
 
 이 단계의 정리 실패 보고는 완료했다. 전체 목표에는 확대 장애 복구·실제 IME/DPI/
 접근성, 서명/공증, RHEL 8.6/8.10 ETX 호스트와 현장 G1/G4 검증이 남는다.
+
+## 18. D2-mac 다운로드 경로 교체 보호와 실제 게시 (2026-09-21)
+
+§17의 path 기반 정리에 두 재현을 추가했다. private staging을 이동하고 옛 이름을
+다른 합성 폴더의 symlink로 바꾸면 취소가 다른 폴더의 payload를 지웠다. 선택한
+저장 폴더를 이동·교체하면 publication이 다른 폴더의 payload를 새 목적지로
+게시했다. 기존 코드에서 두 검사 모두 실패했고, 고객 자료 없이 새 합성 경로만
+사용했다. 단순한 저장 실패 문구가 아니라 파일 작업의 기준을 수정해야 하는 문제다.
+
+`PendingFile`은 선택 시 canonical parent와 private staging 디렉터리의 핸들을
+보관한다. payload 검사·진행 크기·게시·정리는 `openat/fstatat/linkat/unlinkat`의
+핸들 상대 단일 이름으로 실행한다. symlink를 따라 payload를 열지 않고, regular
+file·512MiB·단일 hardlink를 검사한 뒤 같은 열린 파일에 0600과 sync를 적용한다.
+다른 파일의 hardlink를 0600으로 바꾸는 것도 거부한다. 목적지의 기존 파일을
+덮어쓰지 않는 link publication과 게시/정리 결과 분리는 유지한다.
+디렉터리를 열고 보관하므로 선택 폴더에는 읽기·쓰기·탐색 권한이 필요하다.
+권한/핸들 확보 실패 때 안전하지 않은 path 방식으로 우회하지 않는다.
+
+WebKit에 staging URL을 넘기기 전과 게시 전후에 parent/staging의 device·inode를
+검사한다. 수신 중 경로 변경 또는 크기 조회 오류도 명시적으로 중단하고 별도
+transfer WebView를 정리한다. 정리는 원래 열린 staging의 payload만 unlink하고,
+parent에 남은 임시 이름의 identity가 같을 때만 빈 디렉터리를 제거한다. 이동된
+폴더를 찾아 재귀 삭제하거나 새 위치에 저장을 재시도하지 않는다. 변경/불명확한
+정리는 §17의 경고로 남으며, 성공한 게시를 cleanup 실패 때문에 재생하지 않는다.
+
+macOS/APFS 합성 검사에서는 `rmdir` 뒤에도 열린 디렉터리의 link count가 2로
+남았다. 링크 수만으로 정리 완료를 판단하지 않는다. 기존 임시 이름이 없을 때에는
+공개 `F_GETPATH`로 핸들의 위치를 읽고 그 위치가 없는지 확인한다. 위치가 살아
+있거나 조회가 불명확하면 정리 오류이며, 반환 경로는 삭제에 사용하지 않는다.
+API와 버퍼 크기는 [Apple fcntl 문서](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html),
+디렉터리 이동 추적 용도는 [Apple WatchRoot 문서](https://developer.apple.com/documentation/coreservices/kfseventstreamcreateflagwatchroot)를 참고했다.
+
+보호 범위에는 한계가 있다. WebKit 공개 destination API는 fd가 아닌 **파일 URL**을
+받으므로 마지막 확인과 WebKit 파일 열기 사이를 원자화하지 못한다. POSIX의
+mkdir→open 또는 identity 검사→link/unlink 역시 비협조적인 same-UID/root의
+이름 변경에 대한 filesystem CAS가 아니다. 이 단계는 확인된 경로 교체·symlink/
+hardlink 사례를 막는 보완이며, 적대적으로 계속 바뀌는 파일시스템의 완전한 격리나
+NFS/디스크 장애 수용을 주장하지 않는다. 실제 서버 저장 정책은 별도 검증 대상이다.
+
+직접 의존성으로 선언한 `libc = 0.2.189`는 이미 desktop lock/vendor에 있던 동일
+패키지다. lock에는 host의 의존 연결 한 줄만 추가했고 새 registry 패키지·버전·
+checksum 또는 vendor source는 변경하지 않았다. Linux native host 구현을 뜻하지 않는다.
+
+새 `--smoke-test-download-publish`는 caller 파일/출력 경로를 받지 않는 단독 QA
+모드다. 기존 취소 QA와 달리 합성 blob의 실제 WKDownload에 새 private staging
+URL을 넘긴다. 테스트가 payload를 대신 쓰지 않으며 WebKit 완료 callback에서
+정상 publication을 실행한 뒤 원본 blob bytes·0600·임시 파일 제거·완료 sentinel
+보존을 확인한다. 이후 일반 메뉴/닫기/service join과 알려진 합성 파일만의 명시적
+teardown을 요구한다. 사용자 SavePanel 클릭·대용량 전송·실물 디스크 고장은 별도다.
+
+검증 결과:
+
+- host unit **35 passed**, fmt·host clippy `--all-targets --no-deps -- -D warnings`
+  통과. 경로 교체 두 건, 교체 없이 이동된 staging의 경고, 삭제된 staging의 정상
+  처리, symlink/hardlink 대상의 내용·권한 보존을 포함한다.
+- `sh tools/validate_desktop.sh` **exit 0**. 실제 WebKit blob의 새 파일 저장뿐 아니라
+  기존 일반 메뉴/닫기·복구·합성 DRC·인증 소실·다운로드 취소·정리 실패도 통과했다.
+- release 개발 앱 `desktop/target/macos-dev.8XmH5K/Floe2.app` 조립과 고지 검사를
+  통과했다. 번들 worker만으로 실제 게시·취소 exit 0과 정리 실패의 정확한
+  QA 표식/오류 exit 1을 검증했다. 전체 wrapper는 exit 0이다.
+- vendor 검사 **92개 잠금 패키지, 기존 공통 source 불변**. 고지 279파일은 별도
+  합성 복사본에서 이동·변조·누락·symlink 거부까지 통과했다. 서명/공증은 아니다.
+- `sh tools/validate_rust.sh --only embedded_host,validation_selector` **exit 0 / ALL OK**.
+  환경 점검 2개, 런처 9개, JS·vendor 및 실제 내장 서비스 수명 검사까지 완료했다.
+  이 선택 결과를 전체 배터리 통과로 대체하지 않는다. 로그는
+  `/private/tmp/floe-download-directory-battery-selected.log`다. 두 검사 종료 후
+  검사 전용 `.venv` 링크만 제거했으며 정본 interpreter는 변경하지 않았다.
+- 로그: `/private/tmp/floe-download-directory-{tests-final,clippy-final,native,release}.log`.
+  이전 구현의 두 실패는 `floe-download-directory-before.log`, release 실제 실행의
+  표식·종료 상태와 고지 변조 검사는 실행 도구 결과에 남겼다.
+
+- `sh tools/validate_rust.sh` 전체 재시도는 약 14분 실행 후 **명시 중단(exit 143)**했다.
+  새 test executable 실행마다 긴 대기가 반복됐고, 이 시점까지 실패한 assertion은
+  없었지만 전체 완료도 아니다. 실행 중단을 통과나 코드 오류로 바꾸어 기록하지
+  않는다. 중단 직전 notices 5개까지 통과하고 oasis 검사 시작 단계였다. 로그는
+  `/private/tmp/floe-download-directory-battery-full.log`다. 전역 배터리 완료는 후속에
+  남긴다. OS 보안 설정을 바꾸거나 검사 skip을 늘려 우회하지 않았다.
+
+이번 macOS 다운로드 경로 보호·실제 게시 단계는 완료했다. 전체 목표에는 실제
+process/worker·디스크 장애 복구, 물리 IME/DPI/접근성, 서명/공증, RHEL/ETX 및
+현장 G1/G4와 전역 배터리 완료가 계속 남는다.

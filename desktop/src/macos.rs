@@ -272,10 +272,22 @@ define_class!(
             let Some(slot) = slot else { return; };
             if let Some(file) = slot.file {
                 let outcome = file.publish();
+                let saved = outcome.publication.is_ok() && outcome.cleanup.is_ok();
                 self.record_cleanup(outcome.cleanup);
                 match outcome.publication {
                     Ok(()) => self.status("Download saved (new file; existing files unchanged)"),
                     Err(_) => self.status("Download publication not confirmed — check destination; no automatic retry"),
+                }
+                if let Some(qa) = &self.ivars().download_qa {
+                    if qa.mode == download_qa::Mode::Publish {
+                        if !saved || !qa.intact(true) {
+                            self.fail("native blob publication or read-back failed");
+                        } else {
+                            self.ivars().download_qa_done.set(true);
+                            self.ivars().smoke_step.set(0);
+                            eprintln!("[desktop-smoke] real WebKit blob published; bytes and 0600 verified; staging removed");
+                        }
+                    }
                 }
             }
             self.clear_transfer_view();
@@ -688,22 +700,44 @@ impl Host {
                 || self.ivars().download_qa_completion.borrow().is_some()
             {
                 completion.call((std::ptr::null_mut(),));
-                self.fail("download cancellation QA received an unexpected destination");
+                self.fail("download QA received an unexpected destination");
                 return;
             }
-            // A REAL WKDownload has reached its destination callback. Hold that
-            // callback for cancellation, never approve a caller path. Partial
-            // bytes here are synthetic fixture bytes, not WebKit transfer bytes.
+            // A REAL WKDownload has reached its destination callback. Cancel
+            // modes hold it with synthetic partial bytes. Publish alone grants
+            // a fresh QA staging URL and waits for actual WebKit-written bytes.
             match qa.pending() {
                 Ok(file) => {
+                    let url = if qa.mode == download_qa::Mode::Publish {
+                        match file.staging_for_download() {
+                            Ok(path) => Some(NSURL::fileURLWithPath(&NSString::from_str(
+                                &path.to_string_lossy(),
+                            ))),
+                            Err(_) => {
+                                self.discard_pending(Some(file));
+                                completion.call((std::ptr::null_mut(),));
+                                self.fail("isolated publication QA destination changed");
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     self.ivars()
                         .downloads
                         .borrow_mut()
                         .get_mut(&key)
                         .unwrap()
                         .file = Some(file);
-                    *self.ivars().download_qa_completion.borrow_mut() = Some(completion.copy());
-                    self.ivars().smoke_step.set(43);
+                    if let Some(url) = url {
+                        // Only this exact QA mode grants a fresh private URL,
+                        // never a caller-selected or existing destination.
+                        self.ivars().smoke_step.set(47);
+                        completion.call((Retained::as_ptr(&url).cast_mut(),));
+                    } else {
+                        *self.ivars().download_qa_completion.borrow_mut() = Some(completion.copy());
+                        self.ivars().smoke_step.set(43);
+                    }
                 }
                 Err(_) => {
                     completion.call((std::ptr::null_mut(),));
@@ -730,22 +764,23 @@ impl Host {
                     .and_then(|u| u.path())
                     .and_then(|p| PendingFile::new(Path::new(&p.to_string())).ok());
                 if let Some(file) = file {
-                    let url = NSURL::fileURLWithPath(&NSString::from_str(
-                        &file.staging().to_string_lossy(),
-                    ));
-                    let mut slots = host.ivars().downloads.borrow_mut();
-                    if let Some(slot) = slots.get_mut(&key) {
-                        slot.file = Some(file);
+                    if let Ok(path) = file.staging_for_download() {
+                        let url =
+                            NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+                        let mut slots = host.ivars().downloads.borrow_mut();
+                        if let Some(slot) = slots.get_mut(&key) {
+                            slot.file = Some(file);
+                            drop(slots);
+                            host.status("Downloading to private staging file…");
+                            done.call((Retained::as_ptr(&url).cast_mut(),));
+                            return;
+                        }
                         drop(slots);
-                        host.status("Downloading to private staging file…");
-                        done.call((Retained::as_ptr(&url).cast_mut(),));
-                        return;
                     }
-                    drop(slots);
                     host.discard_pending(Some(file));
                 }
                 host.status(
-                    "Download not saved — select a new writable filename; existing file preserved",
+                    "Download not saved — select a new writable filename in an unchanged folder; existing file preserved",
                 );
             } else {
                 host.status("Download cancelled — no destination file written");
@@ -1138,27 +1173,29 @@ impl Host {
         } else {
             // Unknown content length is checked while transferring as well as
             // before publication. No failed download is ever resumed implicitly.
-            let oversized: Vec<_> = self
+            let invalid: Vec<_> = self
                 .ivars()
                 .downloads
                 .borrow()
                 .iter()
                 .filter_map(|(key, slot)| {
-                    slot.file
-                        .as_ref()
-                        .and_then(|f| std::fs::metadata(f.staging()).ok())
-                        .filter(|m| m.len() > transfers::MAX_BYTES)
-                        .map(|_| *key)
+                    slot.file.as_ref().and_then(|file| match file.received_size() {
+                        Ok(Some(bytes)) if bytes > transfers::MAX_BYTES => Some((*key, "Download exceeded 512 MiB — cancelled, destination unchanged")),
+                        Err(_) => Some((*key, "Download staging changed or became unavailable — cancelled; explicit retry only")),
+                        _ => None,
+                    })
                 })
                 .collect();
-            for key in oversized {
-                if let Some(slot) = self.ivars().downloads.borrow_mut().remove(&key) {
+            for (key, reason) in invalid {
+                let slot = self.ivars().downloads.borrow_mut().remove(&key);
+                if let Some(slot) = slot {
                     unsafe {
                         slot.object.setDelegate(None);
                         slot.object.cancel(None);
                     }
                     self.discard_pending(slot.file);
-                    self.status("Download exceeded 512 MiB — cancelled, destination unchanged");
+                    self.clear_transfer_view();
+                    self.status(reason);
                 }
             }
             if self.ivars().smoke && !self.ivars().recovery.borrow().busy() {
@@ -1814,9 +1851,7 @@ pub fn run(
                 .contains(CLEANUP_WARNING)
                 != (mode == download_qa::Mode::CleanupFailure)
         {
-            return Err(Error::input(
-                "native download cancellation QA did not complete",
-            ));
+            return Err(Error::input("native download QA did not complete"));
         }
         host.ivars()
             .download_qa
@@ -1825,6 +1860,7 @@ pub fn run(
             .teardown()
             .map_err(|_| Error::input("native download QA teardown was not confirmed"))?;
         match mode {
+            download_qa::Mode::Publish => println!("DESKTOP DOWNLOAD PUBLISH: OK (real WebKit blob bytes; 0600 read-back; publication and staging cleanup; menu/close/service join; explicit QA teardown)"),
             download_qa::Mode::Cancel => println!("DESKTOP DOWNLOAD CANCEL: OK (real blob WKDownload at destination boundary; synthetic partial file; Return cancels stop; explicit stop removes staging; completed file/session preserved; normal close and service join)"),
             download_qa::Mode::CleanupFailure => println!("DESKTOP DOWNLOAD CLEANUP FAILURE: OK (real WKDownload; nonempty private directory; payload removed; unknown contents preserved; sticky warning; session preserved; confirmed shutdown joined)"),
         }
