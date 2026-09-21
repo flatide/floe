@@ -4,6 +4,10 @@
 후속이다. 이번 변경은 Rust test-only 모듈이며 제품 게시/보안/복구 정책은 그대로다.
 **DRC-PUB-01이 열려 있으므로 저장 프로세스 장애 전체를 완료로 판정하지 않는다.**
 
+후속 [전체 Rust 서비스 종료·재시작](WEBUI_REVIEW_SERVICE_CRASH.ko.md)은 승인 전과
+완전한 게시 후의4조합에서 새 reader·인증/receipt 분리와 후속 저장을 확인한다.
+아래 내부 link gap이나 NFS/전원 손실 수용을 대신하지 않는다.
+
 ## 실제 SIGKILL 12조합
 
 `app-core/src/drc/review/store/process_crash_tests.rs`가 실제 `Draft::publish_using`의

@@ -1,5 +1,9 @@
 # Electron DRC 승인 응답 대기 중 표시 프로세스 장애
 
+후속 [실제 Rust 서비스 종료·재시작 검사](WEBUI_REVIEW_SERVICE_CRASH.ko.md)는
+서비스도 사라진 뒤 새 인증/reader에서 게시 값과 이전 승인 만료를 확인한다.
+아래와 달리 GUI 없이 HTTP/pipe 경로를 검사하며 실제 오류창 수용은 남는다.
+
 후속 [Rust 저장 프로세스 종료 검사](WEBUI_REVIEW_PROCESS_CRASH.ko.md)는12개
 게시 전후 조합을 확인했고, 그 내부 신규 link/unlink 창은 DRC-PUB-01로 열어 두었다.
 아래 Chromium 복구 성공은 해당 파일시스템 경계의 해결 근거가 아니다.

@@ -1,5 +1,10 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-22 후속: [실제 Rust 서비스 종료·재시작](WEBUI_REVIEW_SERVICE_CRASH.ko.md)에서
+note/waive의 승인 전·게시 후4조합, worker 종료, 새 인증/reader의 재조회, 이전
+receipt·승인 거부와 새 승인 저장을 확인했다. 서비스 오류 UI·저장소 장애·DRC-PUB-01
+및 전체 G4 완료로 확대하지 않는다.
+
 2026-09-22 후속: [저장 프로세스 SIGKILL 경계](WEBUI_REVIEW_PROCESS_CRASH.ko.md)는
 12조합을 확인했지만 신규 게시의 link/unlink 사이 double-link 재열기 거부를
 **DRC-PUB-01 미해결**로 재현했다. NFS/로컬 저장 호환성 결정을 기다리며,

@@ -14,14 +14,7 @@ app.enableSandbox();
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-review-'));
 fs.chmodSync(root, 0o700);
 console.log('ELECTRON REVIEW: synthetic artifacts ' + root);
-function write(name, bytes) { fs.writeFileSync(path.join(root, name), bytes, { flag: 'wx', mode: 0o600 }); }
-// Same fixed TOP rectangle as desktop/src/review_qa.rs, encoded using
-// rust/oasis/src/write.rs START/CELL/RECT/END layout (not a general OASIS writer).
-const header = Buffer.from('%SEMI-OASIS\r\n', 'ascii');
-const start = Buffer.from([1, 3, 49, 46, 48, 7, 0, 0, 0, 0, 0, 64, 143, 64]);
-const rect = Buffer.from([14, 3, 84, 79, 80, 20, 0x7b, 1, 0, 0xc0, 0xb8, 2, 0xb0, 0xea, 1, 0, 0]);
-write('synthetic.oas', Buffer.concat([header, start, Buffer.alloc(13), rect, Buffer.from([2, 252, 1]), Buffer.alloc(253)]));
-write('synthetic.db', 'TOP 1000\nSYNTHETIC.SPACE\n2 2 1 Sep 21 00:00:00 2026\nSynthetic native recovery only.\np 1 4\n10000 10000\n11000 10000\n11000 11000\n10000 11000\np 2 4\n20000 10000\n21000 10000\n21000 11000\n20000 11000\n');
+require('./electron-review-fixture.cjs').writeInputs(root);
 for (const [key, name] of [['FLOE_INDEX_BIN', 'floe-index'], ['FLOE_RENDERD_BIN', 'floe-renderd']]) {
   if (!Object.hasOwn(process.env, key)) process.env[key] = path.join(repo, 'rust/target/release', name);
 }

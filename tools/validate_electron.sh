@@ -25,6 +25,7 @@ node --test ../notices.test.cjs
 node --test ../termination-signals.test.cjs
 node --test ../readiness-qa.test.cjs
 node --test ../../tools/validate_electron_review.test.cjs
+node --test ../../tools/electron-review-fixture.test.cjs
 cd "$repo"
 "$FLOE_ELECTRON_BIN" tools/validate_electron_notices.cjs
 sh tools/run_electron_dev.sh --smoke-test
