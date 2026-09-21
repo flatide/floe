@@ -11,7 +11,7 @@
 |---|---|---|
 | E0 | 기존 Rust Session의 전용 파이프 sidecar, JS 클라이언트, 수명/인증 회귀 | 구현·실제 Node↔Rust 합성 검사; 아래 계약 |
 | E1 | sandboxed Electron 독립 창, 같은 웹 번들, 시작/종료/실패 처리, 런타임 고정/검증 | macOS arm64 실제 Chromium 합성 창 검사 통과. 기능·성능 수용은 E2/E3 |
-| E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | E2a pan·메모리, E2b 내보내기, E2c 표시 프로세스 충돌/인증 상실 합성 검사 통과. WK/현장 대조·물리 입력·실제 Save 창·DRC 저장 중 복구는 남음 |
+| E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | E2a pan·메모리, E2b 내보내기, E2c 복구, E2d 클립보드, E2e 외부 종료 신호 합성 검사 통과. WK/현장 대조·물리 입력·실제 Save 창·DRC 저장 중 복구는 남음 |
 | E3 | RHEL 전체 ELF/라이브러리 의존성, sandbox·ETX/다중 사용자 실측, 라이선스/업데이트/오프라인 배포 | 현장 대기, OS 패키지/보안 설정 변경 없음 |
 
 Rust geometry·렌더러·색인·DRC·파일 권한/저장 API를 JS로 옮기지 않는다. Electron은
@@ -70,7 +70,8 @@ GET용 CSRF 헤더를 빠뜨려401이었고 하네스만 수정했다. 제품 �
 `electron/main.cjs`는 같은 Rust 웹 번들을 sandboxed Chromium 창에 연다. Python과
 외부 Chrome/Firefox는 실행에 필요 없다. 서비스·색인·raster는 기존 Rust 그대로다.
 Node integration/preload/native IPC 없음, context isolation/sandbox on, 비영속 partition,
-권한 요청/일반 새 창/webview 거부, 소유 origin 밖 HTTP/WS·탐색 거부. E2b의 정확한
+권한 요청/일반 새 창/webview 거부가 기본이며 E2d의 활성 clipboard 쓰기만 허용한다.
+소유 origin 밖 HTTP/WS·탐색은 거부한다. E2b의 정확한
 POST 내보내기만 숨김 임시 창을 허용한다(아래 계약). 시작/실패 페이지의
 고정 data URL만 별도 허용하며 임의 data URL 접두사를 허용하지 않는다. spellcheck는
 끄고 기존 웹 CSP를 유지한다. 임시 profile은 새0700폴더이며 종료 정리는 best-effort다.
@@ -131,9 +132,9 @@ E2b부터 같은 Cargo build가 `floe-electron-download`도 만든다. 기본은
   캡처한다. 캡처를 숨은 창의 가시성 통과 수단으로 쓰지 않는다. layout 픽셀·물리
   키 입력·input→photon 검증은 아니다.
 - 반복 명령: `FLOE_ELECTRON_BIN="..." sh tools/validate_electron.sh`.
-  이 gate는 Electron E0/E1/E2b(blob) 전용이다. POST clip은 layout driver에서 검사한다.
+  이 gate는 Electron E0/E1/E2b(blob)와 E2e 종료 신호 전용이다. POST clip은 layout driver에서 검사한다.
   전체 `validate_rust.sh` 통과를 뜻하지 않는다.
-  최근 전체 Rust/web gate는 기존 GTK startup oracle30초 timeout으로 실패했고,
+  0.12.185 전체 Rust/web gate는 native layerprops oracle30초 timeout으로 실패했고,
   selected gates/native host 통과와 분리해 기록한다.
 
 현장 RHEL에서 실행하지 않았다. Linux sidecar `cargo check`와 아래 공식 런타임의
@@ -339,6 +340,10 @@ E2d 클립보드의 별도 승인·경계·검증은
 [WEBUI_ELECTRON_CLIPBOARD.ko.md](WEBUI_ELECTRON_CLIPBOARD.ko.md)에 기록한다.
 일반 회귀 명령은 OS 클립보드를 변경하지 않으며 `--clipboard` QA 옵션만 명시적으로
 테스트 문자열·PNG를 쓴다. 기존 클립보드는 읽거나 백업/복원하지 않는다.
+
+E2e의 [외부 종료 신호 수용](WEBUI_ELECTRON_SIGNALS.ko.md)은 runtime 초기화 뒤
+SIGINT/SIGTERM 재등록, native message box의 Cancel 종료, 기존 오류 보존을 다룬다.
+메뉴/Dock Quit의 기본취소 확인은 유지하며 실제 RHEL/ETX·busy I/O 수용은 별도다.
 
 - `electron/runtime.json`은 공식 릴리스 **44.4.3 (2026-09-18)** 및 공식 SHA-256을
   기록한다. macOS arm64는 검증·실행했고, Linux x64는 archive/GLIBC 정적 점검만

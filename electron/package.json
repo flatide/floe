@@ -4,5 +4,5 @@
   "private": true,
   "main": "main.cjs",
   "description": "Experimental Electron shell; Rust retains service and file authority",
-  "scripts": { "test": "node --test service-client.test.cjs host.test.cjs layout-qa.test.cjs downloads.test.cjs recovery-controller.test.cjs clipboard-controller.test.cjs" }
+  "scripts": { "test": "node --test service-client.test.cjs host.test.cjs layout-qa.test.cjs downloads.test.cjs recovery-controller.test.cjs clipboard-controller.test.cjs termination-signals.test.cjs" }
 }

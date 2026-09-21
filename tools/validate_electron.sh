@@ -20,7 +20,9 @@ node --test ../service-client.test.cjs ../service-lifecycle.test.cjs ../host.tes
 node ../../desktop/ui/recovery-probe.test.cjs
 node --test ../../desktop/ui/frame-parity-probe.test.cjs
 node --test ../clipboard-controller.test.cjs
+node --test ../termination-signals.test.cjs
 cd "$repo"
 sh tools/run_electron_dev.sh --smoke-test
 sh tools/run_electron_dev.sh --smoke-download-test
-echo 'ELECTRON E0/E1/E2b GATE: OK (blob exports; not POST/layout-performance or RHEL/ETX acceptance)'
+node tools/validate_electron_signals.cjs
+echo 'ELECTRON HOST GATE: OK (E0/E1, blob exports, signal shutdown; not POST/layout-performance or RHEL/ETX acceptance)'

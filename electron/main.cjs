@@ -8,6 +8,7 @@ const { ServiceClient } = require('./service-client.cjs');
 const { CloseController } = require('./close-controller.cjs');
 const { RecoveryController } = require('./recovery-controller.cjs');
 const { ClipboardController, activationProbe } = require('./clipboard-controller.cjs');
+const { terminationSignals } = require('./termination-signals.cjs');
 const { Downloads, blobAllowed, postAllowed, mimeAllowed, outsideProfile } = require('./downloads.cjs');
 const P = require('./policy.cjs');
 const runtime = require('./runtime.json');
@@ -16,6 +17,9 @@ app.setName('floe2 Electron comparison');
 app.enableSandbox();
 const args = process.argv.slice(app.isPackaged ? 1 : 2);
 const emptySmoke = args.length === 1 && args[0] === '--smoke-test';
+const signalModes = { '--smoke-signal-test': 'idle', '--smoke-signal-dialog-test': 'dialog', '--smoke-signal-error-test': 'error' };
+const signalMode = args.length === 1 && Object.hasOwn(signalModes, args[0]) ? signalModes[args[0]] : null;
+const signalSmoke = signalMode !== null;
 const downloadSmoke = args.length === 1 && args[0] === '--smoke-download-test';
 // Explicit read-only QA of a pre-indexed synthetic source. No DRC/default writes,
 // indexing or caller-chosen output path. The validation driver creates the source.
@@ -26,10 +30,11 @@ const clipSmoke = args.length === 2 && args[0] === '--smoke-clip-download-test' 
 const recoveryModes = { '--smoke-recovery-test': 'normal', '--smoke-recovery-storage-test': 'storage', '--smoke-recovery-cookie-test': 'cookie' };
 const recoveryMode = args.length === 2 && Object.hasOwn(recoveryModes, args[0]) && path.isAbsolute(args[1]) ? recoveryModes[args[0]] : null;
 const recoverySmoke = recoveryMode !== null;
-const smoke = emptySmoke || layoutSmoke || paritySmoke || clipboardSmoke || downloadSmoke || clipSmoke || recoverySmoke;
+const smoke = emptySmoke || signalSmoke || layoutSmoke || paritySmoke || clipboardSmoke || downloadSmoke || clipSmoke || recoverySmoke;
 let profile, root, window, service, close, origin = null, panel = false, stopping = false;
 let recovery, viewFailure = false;
 let clipboardAccess;
+let messageAbort;
 const qaClipboard = { requests: 0, grants: 0, denials: 0, probes: 0, active: false };
 let downloads, downloadQaRoot, downloadQaChoice = 0, cleanupConfirmed = false;
 const downloadWindows = new Map();
@@ -58,12 +63,14 @@ function status(text) {
   window.loadURL(statusURL).catch(() => {});
 }
 async function message(text, buttons = ['OK']) {
-  if (panel || !window || window.isDestroyed()) return 0;
+  if (panel || stopping || !window || window.isDestroyed()) return 0;
   panel = true;
+  const controller = new AbortController(); messageAbort = controller;
   try {
-    return (await dialog.showMessageBox(window, { type: 'warning', message: text,
-      buttons, defaultId: 0, cancelId: 0, noLink: true })).response;
-  } finally { panel = false; }
+    const result = await dialog.showMessageBox(window, { type: 'warning', message: text,
+      buttons, defaultId: 0, cancelId: 0, noLink: true, signal: controller.signal });
+    return controller.signal.aborted ? 0 : result.response;
+  } finally { if (messageAbort === controller) messageAbort = null; panel = false; }
 }
 function evalOwned(script) {
   if (ended || !window || window.isDestroyed() || !P.navigationAllowed(origin, window.webContents.getURL())) {
@@ -80,6 +87,7 @@ function requestClose() {
 }
 function cancelService() {
   stopping = true;
+  messageAbort?.abort();
   clipboardAccess?.end();
   if (recovery) recovery.end();
   status('Stopping this session; waiting for Rust worker cleanup…');
@@ -112,7 +120,7 @@ async function finish(code) {
   if (smoke && !qaCompleted) failure = true;
   const downloadCleanup = downloads ? downloads.shutdown() : Promise.resolve(true);
   if (window && !window.isDestroyed()) {
-    if (failure && !smoke) await message('The Rust session ended with an error. No save or index request was retried.');
+    if (failure && !smoke && !stopping) await message('The Rust session ended with an error. No save or index request was retried.');
     window.destroy();
   }
   for (const entry of downloadWindows.values()) { if (!entry.window.isDestroyed()) entry.window.destroy(); }
@@ -133,10 +141,17 @@ async function menuAction(id) {
   if (result !== 'opened' && !ended) await message('This action is unavailable while the view is hidden, busy, or disconnected. No action was replayed.');
 }
 
-app.on('before-quit', event => { if (!ended) { event.preventDefault(); requestClose(); } });
+app.on('before-quit', event => {
+  if (signalSmoke) console.log('ELECTRON SIGNAL: before-quit');
+  if (!ended) { event.preventDefault(); if (close) requestClose(); else cancelService(); }
+});
 app.on('window-all-closed', () => { if (!ended) cancelService(); });
 app.on('activate', reveal);
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { failure = smoke; cancelService(); });
+const rearmTermination = terminationSignals(process, signal => {
+  if (signalSmoke) console.log('ELECTRON SIGNAL: handled ' + signal);
+  failure ||= smoke && !signalSmoke;
+  cancelService();
+});
 // Best-effort exit cleanup, not a secure-erasure/crash-cleanup guarantee.
 // Only our fresh generated profile, never a user's browser profile.
 process.on('exit', () => { if (profile && (!downloads || cleanupConfirmed)) { try { fs.rmSync(profile, { recursive: true }); } catch (_) {} } });
@@ -154,6 +169,8 @@ try {
 }
 
 app.whenReady().then(async () => {
+  if (stopping || ended) return;
+  rearmTermination();
   const partition = 'floe-' + randomUUID();
   const ses = session.fromPartition(partition, { cache: false });
   ses.setPermissionCheckHandler(() => false);
@@ -282,10 +299,10 @@ app.whenReady().then(async () => {
   ]));
   status('Starting the Rust service. Close this window to cancel. Native exports save to new files only; clipboard reads are blocked and copy requires an active view.');
   const viewArgs = layoutSmoke || paritySmoke || clipboardSmoke || clipSmoke || recoverySmoke ? [args[1], '--goto', '200,200,300', '--depth', 'full', '--detail', 'high',
-    '--jobs', '4', '--raster-jobs', '4', '--refinement', 'off'] : emptySmoke || downloadSmoke ? [] : (args[0] === 'view' ? args.slice(1) : args);
+    '--jobs', '4', '--raster-jobs', '4', '--refinement', 'off'] : emptySmoke || signalSmoke || downloadSmoke ? [] : (args[0] === 'view' ? args.slice(1) : args);
   if (clipSmoke) viewArgs.push('--budget-mb', '256'); // leave managed capacity for explicit exact export
   if (paritySmoke) viewArgs.push('--raw');
-  if (emptySmoke || downloadSmoke) {
+  if (emptySmoke || signalSmoke || downloadSmoke) {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-smoke-'));
     fs.chmodSync(root, 0o700); viewArgs.push('--root', root);
   }
@@ -358,7 +375,7 @@ async function runSmoke() {
     throw new Error('synthetic QA did not reach expected state');
   };
   await wait("(()=>{const b=document.getElementById('logout');return !document.hidden&&!location.hash&&!!b&&!b.disabled;})()");
-  if (emptySmoke || downloadSmoke) await wait("/No matching entries/.test(document.getElementById('browse-status').textContent)");
+  if (emptySmoke || signalSmoke || downloadSmoke) await wait("/No matching entries/.test(document.getElementById('browse-status').textContent)");
   const prefs = window.webContents.getLastWebPreferences();
   if (!prefs.sandbox || !prefs.contextIsolation || prefs.nodeIntegration || prefs.preload || window.webContents.session.isPersistent()) throw new Error('invalid synthetic preferences');
   if (await evalOwned("typeof require==='undefined'&&typeof process==='undefined'") !== true) throw new Error('Node exposed');
@@ -380,6 +397,24 @@ async function runSmoke() {
       throw new Error('synthetic navigation guard failed');
     }
   } finally { await new Promise(resolve => sentinel.close(resolve)); }
+  if (signalSmoke) {
+    qaCompleted = true;
+    // External driver sends a real OS signal only after authenticated readiness.
+    // No self-signal or direct cancelService call can satisfy that driver.
+    if (signalMode !== 'idle') {
+      if (signalMode === 'error') failure = true; // an earlier error must not become exit0
+      let settled = false;
+      message('Synthetic signal test: do not approve. The driver will request shutdown.', ['Cancel', 'Do not approve']).then(response => {
+        settled = true;
+        console.log(response === 0 ? 'ELECTRON SIGNAL: dialog cancelled' : 'ELECTRON SIGNAL: dialog unexpectedly approved');
+      }).catch(() => { settled = true; });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      if (settled || !panel || !messageAbort) throw Error('Synthetic native dialog not pending');
+      console.log('ELECTRON SIGNAL: dialog pending');
+    }
+    console.log('ELECTRON SIGNAL: ready');
+    return;
+  }
   if (layoutSmoke || paritySmoke) {
     qaStep = 'layout actions';
     await require('./layout-qa.cjs').run({ app, window, evalOwned, service, extraRustPids: downloads.pids(), parityOnly: paritySmoke });
