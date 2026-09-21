@@ -168,8 +168,8 @@ on/off 각각 **2,159,880픽셀 RGBA 완전 일치**가 필수다. probe 단위3
 진단만 제한하며 전체 픽셀 비교에는 상한/허용 밴드/skip이 없다.
 
 라벨 on의28픽셀은 화면 하단 두 행에 남으며, 도형 gate로 라벨 parity까지
-통과했다고 해석하지 않는다. 라벨 anchor 조회 범위/글리프 꼬리와 declutter 경계의
-추가 대조가 남는다. 예전 screenshot848,168픽셀 차이와 이번 원본 Canvas 비교는
+통과했다고 해석하지 않는다. 후속 §6에서 해당 차이를 기존 사용자 수용 규약의
+margin-only label 꼬리로 확인했다. 예전 screenshot848,168픽셀 차이와 이번 원본 Canvas 비교는
 범위·시점이 다르므로 동일 원인이라고 단정하지 않는다. WK 동일 조건 대조 및
 실제 input→photon/G1 성능 수용도 여전히 별도다.
 
@@ -187,3 +187,46 @@ green으로 간주하지 않는다. 이번 실행의 timeout을 이전 dyld samp
 확정하지 않는다. strict render-core/renderd clippy는 기존 private-interface/dead-code/
 style 경고로 **37건 실패**다(`floe-stroke-half-final-clippy.log`). 새 테스트의 불필요한
 clone 경고만 수정했고 재검사에서 사라졌으며 기존 경고를 숨기거나 일괄 수정하지 않았다.
+
+## 6. 라벨 28픽셀의 원인과 기존 수용 규약 재대조
+
+2026-09-21, 현재 제품0.12.185. **새 renderer 결함으로 분류했던 판단을 정정한다.**
+[F2R-21의 사용자 결정](FLOE2_OPTIMIZATION.ko.md#326-리뷰-medium-2건--margin-crop-라벨-정확도-게이트-질의-스레드-2026-09-05)
+(2026-09-05,0.12.53)은 빠른 라벨 포함 pan을 위해 다음 차이를 명시적으로 수용했다:
+margin 착지 때 viewport 밖·margin 안의 label anchor에서 뻗은 글리프 꼬리가 보이고
+기존 라벨을 덮을 수도 있다. `labels_truncated` margin은 여전히 crop에서 제외한다.
+도형 픽셀 차이까지 수용한 것이 아니며, §5의 stroke 수정/엄격 도형 gate는 유효하다.
+
+합성 valmini의 CLI label selection을 같은 배율에서 직접 비교했다:
+
+- foreground DBU box `[50000,79542.6829…,350000,320457.3171…]`,1640×1317px.
+- declutter bin은 `ceil(48/(1640/300000)) = 8781 DBU`다. 아래쪽 정렬 경계는
+  `9×8781 = 79029 DBU`다.
+- `M496`(layer63/63)의 anchor는 `(70088,78925)`다. foreground의 정렬 경계보다
+  104DBU 아래여서 선택되지 않고, margin 계획에는 들어간다. 글리프는 화면 하단에
+  도달한다. 실제 차이의 범위는 x93..124,y1315..1316이며 총28픽셀이다.
+- CLI 선택은 foreground260행/margin530행, 양쪽 `truncated=false`였다.
+  로그 `/private/tmp/floe-label-{foreground,margin}.tsv`의 `M496` 행으로 확인했다.
+- 엄격한 *라벨 포함* 동일성을 임시 하네스에서 요구하면 기존 바이너리는 예상대로
+  exit1이다(`floe-label-halo-before.log`). 도형-only 두 비교는 같은 실행에서0픽셀이다.
+  이는 이번에 새로 만든 결함이 아니라 기존 규약과 새로 요구한 oracle이 서로 다름을 보인다.
+
+글꼴 최대 ink 범위와 source text 길이로 조회 여백을 확대하는 실험도 만들었다.
+이는 새 형식/재인덱싱 없이 가능하지만, viewport 외곽 라벨을 더 선택해 plan/raster
+비용과 기존 cap 소진 가능성을 늘리고 직접 렌더의 label 선택 규약도 바꾼다. 따라서
+웹 이관의 필수 수정으로 편입하지 않았다. **제품 코드·버전·기존 label oracle은
+원래대로 유지**하며, 실험 패치만 `/private/tmp/floe-label-halo-trial.patch`에 보관했다.
+이 임시 파일은 배포 산출물이나 지원 옵션이 아니다. 실험의 font/VFS 단위 통과를
+현재 제품 또는 실제 픽셀/성능 수용 통과로 계산하지 않는다. 재채택에는 긴 라벨·
+다층 overlap·dense/cap·여러 font 크기의 표시/성능 비교와 정책 결정이 필요하다.
+
+복원 후 release index/renderd/render-cli와 Electron Rust helper를 다시 빌드하고,
+ready 응답의0.12.185를 확인했다. 새 valmini의 `--frame-parity`는 reuse on/off에서
+각각2,159,880 RGBA픽셀의 도형·도형+프레임 차이0, 라벨 포함 차이28로 **exit0**이다
+(`floe-label-policy-restored-parity.log`). source/cache 불변과 정상 종료도 통과했다.
+이 실행은 기존 표시 규약 재검증이며 전체 Rust/web battery 재실행은 아니다.
+
+G1의 미완료 범위는 동일 조건 GTK/WK/Electron의 실제 input→photon·pacing,
+margin 안 검은 strip/라벨 지연, 현장 수용이다. **모든 라벨 포함 foreground/margin
+픽셀 동일**을 기존 목표에 새 필수 조건으로 추가하지 않는다. 초기 프레임 대기 실패는
+이 28픽셀 현상과 별개이며 Electron 시작 대기 기록에서 계속 추적한다.

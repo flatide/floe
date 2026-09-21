@@ -230,7 +230,9 @@ E2/G1에 별도로 남긴다. 허용 오차를 키워 통과시킨 것이 아니
 0.12.185에서 두 Canvas **원본 RGBA** 대조를 추가해 별개의 native stroke
 half-phase 문제를 수정했다. `node tools/validate_electron_layout.cjs --frame-parity`는
 새 valmini의 reuse on/off·프레임 on/off 도형 픽셀이 모두 같아야 통과한다.
-라벨을 포함하면 하단 두 행의28픽셀 차이가 남아 별도로 보고한다.
+라벨을 포함하면 하단 두 행의28픽셀 차이가 남는다. 후속 G1 §6에서 `M496`의
+margin-only 꼬리로 확인했으며, 이는 F2R-21에서 사용자가 이미 수용한 표시 규약이다.
+도형-only oracle이나 G1 성능 조건을 완화한 것은 아니다.
 근거와 범위는 [G1 §5](WEBUI_G1_TIMING.ko.md#5-foregroundmargin-도형-픽셀-대조-012185).
 일반 pan QA에도 초기 Canvas 비교를 기록하므로 초기 캡처 전 진단 비용이 추가된다.
 이를 이전 계측과 무조건 동등한 성능 표본으로 취급하지 않는다.
