@@ -21,10 +21,12 @@ node ../../desktop/ui/recovery-probe.test.cjs
 node --test ../../desktop/ui/frame-parity-probe.test.cjs
 node --test ../../desktop/ui/layout-parity-probe.test.cjs ../../desktop/ui/frame-fingerprint-probe.test.cjs ../../tools/native-frame-comparison.test.cjs
 node --test ../clipboard-controller.test.cjs
+node --test ../notices.test.cjs
 node --test ../termination-signals.test.cjs
 node --test ../readiness-qa.test.cjs
 node --test ../../tools/validate_electron_review.test.cjs
 cd "$repo"
+"$FLOE_ELECTRON_BIN" tools/validate_electron_notices.cjs
 sh tools/run_electron_dev.sh --smoke-test
 sh tools/run_electron_dev.sh --smoke-download-test
 node tools/validate_electron_signals.cjs

@@ -376,6 +376,10 @@ native 파일 선택/clipboard/IME/DPI 실조작, RHEL/ETX 및 Python-free Linux
 
 ### 비교·배포 시 유지할 조건
 
+2026-09-22: Help의 [Open Source Licenses 창](WEBUI_ELECTRON_NOTICES.ko.md)을
+연결했다. 실행 runtime의 두 고지만 별도 sandbox/session에서 읽으며 외부 탐색·
+scripts·downloads를 차단한다. 로컬 native 표시/닫힘 검증은 배포 조건 판정과 별개다.
+
 E2d 클립보드의 별도 승인·경계·검증은
 [WEBUI_ELECTRON_CLIPBOARD.ko.md](WEBUI_ELECTRON_CLIPBOARD.ko.md)에 기록한다.
 일반 회귀 명령은 OS 클립보드를 변경하지 않으며 `--clipboard` QA 옵션만 명시적으로

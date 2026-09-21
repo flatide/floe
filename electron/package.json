@@ -1,8 +1,8 @@
 {
   "name": "floe2-electron-comparison",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "main": "main.cjs",
   "description": "Experimental Electron shell; Rust retains service and file authority",
-  "scripts": { "test": "node --test service-client.test.cjs host.test.cjs layout-qa.test.cjs downloads.test.cjs recovery-controller.test.cjs clipboard-controller.test.cjs termination-signals.test.cjs readiness-qa.test.cjs" }
+  "scripts": { "test": "node --test service-client.test.cjs host.test.cjs layout-qa.test.cjs downloads.test.cjs recovery-controller.test.cjs clipboard-controller.test.cjs termination-signals.test.cjs readiness-qa.test.cjs notices.test.cjs" }
 }

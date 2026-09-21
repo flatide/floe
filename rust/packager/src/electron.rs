@@ -19,6 +19,7 @@ const APP_FILES: &[&str] = &[
     "electron/package.json",
     "electron/runtime.json",
     "electron/main.cjs",
+    "electron/notices.cjs",
     "electron/service-client.cjs",
     "electron/policy.cjs",
     "electron/close-controller.cjs",

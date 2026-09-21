@@ -836,6 +836,9 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   FFmpeg(LGPL) 동적 링크 여부와 대응 소스 제공 의무, 코덱 특허
   (H.264/AAC → codec-free 빌드 선택), 고지 파일(`LICENSE`·
   `LICENSES.chromium.html`)의 Open Source Licenses 다이얼로그 편입.
+  2026-09-22 [고지 창 로컬 구현·검증](WEBUI_ELECTRON_NOTICES.ko.md)을 추가했다.
+  실제 runtime 고지 표시 항목의 근거이며, 라이선스/코덱/대응 소스와 현장 배포
+  조건을 모두 충족했다고 판정한 것은 아니다.
 - **보안 기본값**: 공유 서버 전제. A/B는 엄격한 loopback 바인딩(외부
   인터페이스 금지) + ephemeral port + 세션 토큰; **C(원격)는 HTTPS/
   WSS 기본**(폐쇄망이라는 이유로 평문을 기본으로 하지 않는다).

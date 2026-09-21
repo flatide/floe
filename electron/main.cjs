@@ -8,6 +8,7 @@ const { ServiceClient } = require('./service-client.cjs');
 const { CloseController } = require('./close-controller.cjs');
 const { RecoveryController } = require('./recovery-controller.cjs');
 const { ClipboardController, activationProbe } = require('./clipboard-controller.cjs');
+const { Notices, runtimeRoot } = require('./notices.cjs');
 const { terminationSignals } = require('./termination-signals.cjs');
 const { Downloads, blobAllowed, postAllowed, mimeAllowed, outsideProfile } = require('./downloads.cjs');
 const P = require('./policy.cjs');
@@ -34,6 +35,7 @@ const smoke = emptySmoke || signalSmoke || layoutSmoke || paritySmoke || clipboa
 let profile, root, window, service, close, origin = null, panel = false, stopping = false;
 let recovery, viewFailure = false;
 let clipboardAccess;
+let notices;
 let messageAbort;
 const qaClipboard = { requests: 0, grants: 0, denials: 0, probes: 0, active: false };
 let downloads, downloadQaRoot, downloadQaChoice = 0, cleanupConfirmed = false;
@@ -88,6 +90,7 @@ function requestClose() {
 }
 function cancelService() {
   stopping = true;
+  notices?.close();
   messageAbort?.abort();
   clipboardAccess?.end();
   if (recovery) recovery.end();
@@ -114,6 +117,7 @@ function viewGone() {
 async function finish(code) {
   if (shuttingDown) return;
   shuttingDown = true; ended = true;
+  notices?.close();
   clipboardAccess?.end();
   if (close) close.end();
   if (recovery) recovery.end();
@@ -140,6 +144,15 @@ async function menuAction(id) {
   const script = '(' + fs.readFileSync(path.join(__dirname, '../desktop/ui/menu-action.js'), 'utf8') + ')(' + JSON.stringify(id) + ')';
   const result = await evalOwned(script).catch(() => 'unavailable');
   if (result !== 'opened' && !ended) await message('This action is unavailable while the view is hidden, busy, or disconnected. No action was replayed.');
+}
+async function showNotices() {
+  if (panel || stopping || ended || recovery?.busy || downloads?.active) return;
+  panel = true;
+  clipboardAccess?.invalidate();
+  let unavailable = false;
+  try { await notices.open(window); } catch (_) { unavailable = true; }
+  finally { panel = false; }
+  if (unavailable && !ended && !stopping) await message('The local license viewer could not be opened. Check the complete verified Electron runtime.');
 }
 
 app.on('before-quit', event => {
@@ -172,6 +185,7 @@ try {
 app.whenReady().then(async () => {
   if (stopping || ended) return;
   rearmTermination();
+  notices = new Notices({ BrowserWindow, session, Menu }, runtimeRoot(fs.realpathSync(process.execPath), process.platform));
   const partition = 'floe-' + randomUUID();
   const ses = session.fromPartition(partition, { cache: false });
   ses.setPermissionCheckHandler(() => false);
@@ -296,7 +310,8 @@ app.whenReady().then(async () => {
       { label: 'Open DRC…', click: () => menuAction('drc-open') },
       { label: 'End session…', accelerator: 'CmdOrCtrl+W', click: requestClose }] },
     { label: 'Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
-    { label: 'View', submenu: [{ label: 'Recover View…', click: recover }, { label: 'About…', click: () => menuAction('about-open') }] }
+    { label: 'View', submenu: [{ label: 'Recover View…', click: recover }, { label: 'About…', click: () => menuAction('about-open') }] },
+    { label: 'Help', submenu: [{ id: 'runtime-notices', label: 'Open Source Licenses…', click: showNotices }] }
   ]));
   status('Starting the Rust service. Close this window to cancel. Native exports save to new files only; clipboard reads are blocked and copy requires an active view.');
   const viewArgs = layoutSmoke || paritySmoke || clipboardSmoke || clipSmoke || recoverySmoke ? [args[1], '--goto', '200,200,300', '--depth', 'full', '--detail', 'high',
@@ -407,6 +422,27 @@ async function runSmoke() {
       throw new Error('synthetic navigation guard failed');
     }
   } finally { await new Promise(resolve => sentinel.close(resolve)); }
+  if (emptySmoke) {
+    qaStep = 'notice menu and isolation';
+    const noticeDone = Menu.getApplicationMenu().getMenuItemById('runtime-notices').click();
+    const child = notices.window;
+    if (!panel || !child || child.webContents.session === window.webContents.session) throw new Error('Notice session not isolated');
+    qaStep = 'notice menu load';
+    let noticeTimer;
+    try {
+      await Promise.race([
+        new Promise(resolve => child.webContents.once('did-finish-load', resolve)),
+        new Promise((_, reject) => { noticeTimer = setTimeout(() => reject(new Error('Notice load timeout')), 30000); })
+      ]);
+    } finally { clearTimeout(noticeTimer); }
+    if (child.webContents.getTitle() !== 'Open Source Licenses') throw new Error('Notice contents missing');
+    child.close(); await noticeDone;
+    qaStep = 'notice menu close';
+    const noticeDeadline = Date.now() + 30000;
+    while (panel && Date.now() < noticeDeadline) await new Promise(resolve => setTimeout(resolve, 20));
+    if (panel || notices.window || ended || stopping || BrowserWindow.getAllWindows().length !== 1) throw new Error('Notice close changed owner lifetime');
+    console.log('ELECTRON NOTICES: menu open/close preserved authenticated owner');
+  }
   if (signalSmoke) {
     qaCompleted = true;
     // External driver sends a real OS signal only after authenticated readiness.
