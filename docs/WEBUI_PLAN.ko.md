@@ -227,6 +227,10 @@ CD 전용 삭제의 수동 기록 보존을 확인했다. 새 저장/제품 수�
 M4g-53은 guest의 일회용 초대 성공 결과를 숨김 후에도 보존하고 pageshow 전
 재연결·복귀 후 중복 소켓을 막는다. 로컬42조합/전체 UI/native 공유 검증이며
 실제 SH-08은 별도다([M4 §110](WEBUI_M4.ko.md#110-m4g-53--게스트-초대-교환과-복귀-경합)).
+2026-09-21 후속: Explore의 렌더 실패가 revision을 바꾸지 않아도 늦은 프레임과
+대기 입력을 차단하고 마지막 화면을 실패 상태로 표시한다. 재접속을 worker 재시작으로
+오인하지 않으며 Follow의 공유 정보 범위는 유지한다. [게스트 실패/복구 계약](WEBUI_SHARING_UI.ko.md#실패한-explore의-표시와-복구-2026-09-21)을
+따르며 실제 게스트 worker 장애·브라우저 SH-08 수용은 별도다.
 M4g-54는 Python/fixture 생성기 없이 실행되는 Rust 합성 런타임 검증기를 추가한다.
 재배치한 제품3개로 index/occupancy/layout/deck/clip/query/DRC 저장·재열기를
 검사한다. Mac 실행과 Linux musl 교차 빌드는 실제 Linux 수용과 구분한다

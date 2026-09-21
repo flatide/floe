@@ -2,6 +2,7 @@
 
 현재 query/룰러·pointer 연결은 [M2b-4b3](WEBUI_SHARING_QUERY_UI.ko.md)를 따른다.
 아래 구현/미완료 범위는 M2b-4a 시점이며 SH-08 실제 수용은 계속 남는다.
+Explore 렌더 실패의 후속 처리는 아래 **실패한 Explore의 표시와 복구** 절을 따른다.
 
 후속 [M2b-4b1 게스트 DRC UI](WEBUI_SHARING_DRC_UI.ko.md)는 별도 whole-result 승인과
 개인 목록/선택·윤곽·오류 이동을 연결한다. 아래의 layout-only 설명은 4a 단계 당시
@@ -104,6 +105,54 @@ WS 제어 응답은 owner와 같은 256KiB 상한이다. 정상 4,096개 u32 레
 64KiB를 넘을 수 있으므로 frame header의 별도 64KiB 상한과 혼동하지 않는다.
 
 ## 검증과 잔여
+
+### 실패한 Explore의 표시와 복구 (2026-09-21)
+
+렌더 실패는 `state_rev`/`render_rev`를 올리지 않을 수 있다. 따라서 revision 일치만
+확인하면 실패 직전 받은 raw/PNG가 나중에 `Complete`로 표시되고 `displayed` ACK를
+보내는 경합이 있다.
+기존 `share.state.failure`를 프레임 수신·decode 완료·RAF 게시의 추가 조건으로 쓴다.
+실패 후 이미 보관한 foreground/margin은 현재 위치에 놓을 수 있는 경우에만 참고용으로
+유지하며, **Last image / renderer failed**로 표시한다. 첫 프레임이 없거나 이전 프레임을
+현재 뷰에 놓을 수 없으면 **No displayed frame / renderer failed**다. 이후 편집 거부
+응답이 실패 안내를 덮지 않는다.
+
+- 진행 중 PNG는 즉시 취소해 blob URL/타이머를 정리하고 `discarded` ACK를 한 번 보낸다.
+  이미 decode된 프레임의 RAF도 표시하지 않고 자기 ACK만 폐기 상태로 마친다. 옛 연결의
+  callback은 새 연결에 ACK하거나 그리지 않는다.
+- navigation·표시 옵션·레이어 변경·resize 입력과 아직 제출하지 않은 대기열을 중단한다.
+  pan/box-zoom preview와 DRC 이동 receipt도 취소한다. 이미 보낸 편집의 seq는 유지하여
+  늦은 accepted/error를 정상 소비하며, 취소를 서버 작업의 rollback으로 표현하지 않는다.
+- 이미 허가된 읽기 전용 DRC 목록은 남긴다. 지연된 focus 조회가 새 이동/CD 처리를
+  시작하지 않고, 실패 전 pick의 늦은 결과도 geometry 정보를 다시 표시하지 않는다.
+- 복구는 **Leave share → owner의 새 Explore 초대**다. 단순 재접속은 서버의60초
+  grace 동안 같은 실패 controller를 돌려줄 수 있으므로 재시작이라고 안내하지 않는다.
+  자동 worker 교체·새 초대 교환·로그아웃·owner 조작·권한 확대는 추가하지 않는다.
+- Follow wire에는 현재 failure 필드가 없다. 이 변경은 이미 그 필드가 있는 Explore를
+  처리하며 Follow에 owner 진단을 새로 공개하거나 정상 Follow 표시를 바꾸지 않는다.
+
+`guest-failure.test.cjs`가 빈 화면/foreground/margin, raw RAF 대기, PNG 취소와 늦은
+onload/onerror, 편집 accepted/error 순서, cadence/resize, 드래그, DRC receipt/focus와
+pick 지연, 숨김/재접속의 이전 callback, 명시 Leave·owner storage 보존을 검사한다.
+실제 `guest.js`/공통 decoder·입력·query 코드를 쓰되 DOM/Canvas/Image 및 소켓은
+결정적 테스트 대역이다. 실제 PNG 컨테이너를 사용해도 브라우저 PNG 디코더나 실제
+게스트 worker 강제 종료 수용을 대신하지 않는다. SH-08·현장 수용은 계속 남는다.
+
+이번 변경의 검증:
+
+- `node tools/validate_web_ui.cjs`: **exit0 / WEB UI: ALL OK**. 새 실패 회귀를
+  정규 게이트에 연결했으며 ES2017과 기존 owner/guest 전체 UI 검사를 포함한다.
+  로그: `/private/tmp/floe-guest-failure-ui.log`.
+- `sh tools/validate_rust.sh --only layerprops,web_local_sharing`: **exit0 / ALL OK**.
+  재빌드한 Rust 실행 파일이 현재 guest 자산 bytes를 제공하는지, 합성 native 열기,
+  Follow/Explore·별도 DRC grant·인증 경계462조합·폐기·입력/cache 불변을 확인한다.
+  로그: `/private/tmp/floe-guest-failure-native.log`.
+- 수정 전 `d555921`의 전체 배터리는 layerprops test executable의30초 시간 초과로
+  **exit1** 종료했다(`/private/tmp/floe-desktop-global-regression.log`). 위 개별 재실행은
+  같은 제한에서72문서/980스타일/4뷰 대조를 통과했지만, 처음 시간 초과의 원인을
+  확정하거나 중단된 나머지 전체 게이트를 통과했다고 계산하지 않는다.
+
+### M2b-4a 시점의 검증 기록
 
 현재 집중 검증: web unit 113개, `--local-sharing` 기본 off/독립 실행/잘못된 값 거부,
 web/app/app-core strict clippy, ES2017 parse·기존 owner UI 전체 회귀가 통과했다.

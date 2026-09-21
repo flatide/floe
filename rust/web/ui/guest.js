@@ -18,6 +18,7 @@
         const rulerHistory=o.rulers?o.rulers.history():null;
         const now=o.now||function(){return win.performance.now();};
         const pending=new Set();let exchanging=null;
+        function live(){return !stopped&&!suspended&&!!hello&&!!state&&!state.failure;}
         // An invitation is single-use. Keep only its already submitted, bounded
         // exchange alive across hiding; never replay it or start follow-up work.
         function abortReads(){pending.forEach(function(x){if(x!==exchanging){x.abort();}});}
@@ -27,7 +28,7 @@
             canvasRect:canvas.getBoundingClientRect(),viewportRect:viewport.getBoundingClientRect(),
             connected:!stopped&&!suspended&&!!socket&&socket.readyState===1,hidden:!!doc.hidden,
             pending:inputPending(true)||!ignoreGesture&&(!!dragShift||!!gesture&&gesture.moving())}):null;}
-        function viewContext(){return !stopped&&!suspended&&hello&&state?{view_id:hello.view_id,epoch:hello.connection_epoch,
+        function viewContext(){return live()?{view_id:hello.view_id,epoch:hello.connection_epoch,
             state_rev:state.state_rev,render_key:state.render_key,mode:session.mode,pending:inputPending()}:null;}
         const focusReceipt=o.focusReceipt?o.focusReceipt.bind({protocol:P,setTimeout:win.setTimeout.bind(win),clearTimeout:win.clearTimeout.bind(win),
             context:function(){const c=viewContext();return c&&Object.assign({},c,{otherInput:queue.some(function(q){return q.notice!==focusTicket;})||!!dragShift||!!gesture&&gesture.moving()});}}):null;
@@ -69,13 +70,14 @@
                 drcContext.clearRect(0,0,w,h);drc.paint(drcContext,projection,state.pixels,drcCanvas.getBoundingClientRect());}
             else if(drc){drc.paint(null,null,null,null);}
             if(queryTools){queryTools.paint(projection,size);}}
-        function status(s){el('guest-status').textContent=s;}
+        function status(s){el('guest-status').textContent=state&&state.failure?
+            'Render failed: '+String(state.failure)+'. '+(displayed?'Last image only; this view is not live.':'No current frame.')+' Leave this share, then ask the owner for a new Explore invitation.':s;}
         function remove(){try{win.sessionStorage.removeItem(key);}catch(_){/* no persistent fallback */}}
         function valid(a){return a&&a.protocol===1&&a.bundle===bundle&&a.share_id===id&&
             ['session_id','csrf'].every(function(k){return typeof a[k]==='string'&&/^[0-9a-f]{64}$/.test(a[k]);});}
-        function controls(){const live=!stopped&&!suspended&&!!hello&&!!state;
+        function controls(){const ready=live();
             el('guest-controls').hidden=!session||session.mode!=='explore';
-            edits.forEach(function(n){el('guest-'+n).disabled=!live||session.mode!=='explore';});
+            edits.forEach(function(n){el('guest-'+n).disabled=!ready||session.mode!=='explore';});
             el('guest-leave').disabled=!auth||stopped;el('guest-reconnect').disabled=!auth||stopped||joining||!!socket;
         }
         function clear(){foreground=margin=null;ackedFrames={foreground:null,margin:null};displayed=false;canvas.width=canvas.height=1;
@@ -122,20 +124,22 @@
             const shift=dragShift||[0,0];let shown=false;[margin,foreground].forEach(function(f){const p=place(f);if(p&&p[0]+shift[0]<f.header.width&&p[1]+shift[1]<f.header.height&&p[0]+shift[0]+canvas.width>0&&p[1]+shift[1]+canvas.height>0){ctx.drawImage(f.canvas,-p[0]-shift[0],-p[1]-shift[1]);shown=true;}});
             el('guest-empty').hidden=shown;
             displayed=shown;paintOverlays(false);
+            if(state.failure){el('guest-frame-status').textContent=(shown?'Last image':'No displayed frame')+' · renderer failed';}
             return shown;
         }
         function frame(buffer,token){const packet=P.packet(buffer),h=packet.header;
             if(!hello||h.view_id!==hello.view_id||h.connection_epoch!==hello.connection_epoch){throw Error('Wrong guest frame identity');}
             if(decode||raf!==null){throw Error('Guest frame credit exceeded');}
-            if(!P.matches(h,state)){ack(h,false);return;}
+            if(!live()||!P.matches(h,state)){ack(h,false);return;}
             const image=doc.createElement('canvas');image.width=h.width;image.height=h.height;
             const job=o.decode(h,packet.data,function(draw,error){decode=null;if(token!==serial||stopped||suspended){return;}
+                if(!live()){ack(h,false);return;}
                 if(error){ack(h,false);status('Frame decode failed; reconnect to retry.');return;}
                 if(!draw||!P.matches(h,state)){ack(h,false);return;}
                 try{draw(image.getContext('2d',{alpha:false}));}catch(_){ack(h,false);status('Canvas decode failed; reconnect to retry.');return;}
                 raf=win.requestAnimationFrame(function(){raf=null;if(token!==serial||stopped||suspended){return;}
                     if(!socket||socket.readyState!==1){return;}
-                    if(!P.matches(h,state)){ack(h,false);return;}
+                    if(!live()||!P.matches(h,state)){ack(h,false);return;}
                     const f={header:h,canvas:image};if(h.purpose==='margin'){margin=f;}else{foreground=f;}
                     let shown=false;try{shown=compose();}catch(_){clear();ack(h,false);status('Canvas presentation failed; reconnect to retry.');return;}ack(h,shown);
                     el('guest-frame-status').textContent=(h.complete?'Complete':'Partial / incomplete')+(h.approximate?' · approximate':'')+' · '+h.width+' × '+h.height+' px · '+h.format+(h.purpose==='margin'?' · margin':'');
@@ -151,20 +155,30 @@
         }
         function sync(){if(session.mode!=='explore'){return;}['depth','detail','thin'].forEach(function(k){if(doc.activeElement!==el('guest-'+k)){el('guest-'+k).value=state[k];}});
             ['frames','labels','mono'].forEach(function(k){el('guest-'+k).checked=state[k];});}
-        function flush(){if(!hello||!state||flight||accepted||!queue.length||flushTimer!==null){return;}
+        function flush(){if(!live()||flight||accepted||!queue.length||flushTimer!==null){return;}
             // Same edit cadence as the owner; reserve room for frame ACKs and
             // heartbeats beneath the server's 60 control messages/sec limit.
             const remaining=65-(now()-lastSend);if(remaining>0){flushTimer=win.setTimeout(function(){flushTimer=null;flush();},remaining);return;}lastSend=now();
             const q=queue.shift();flight=send({type:'explore.set',view_id:hello.view_id,connection_epoch:hello.connection_epoch,base_state_rev:state.state_rev,body:q.body});if(q.notice){q.notice.sent(flight);}}
-        function edit(body,notice){if(stopped||suspended||!hello||!state||session.mode!=='explore'){if(notice){notice.cancel();}return;}
+        function edit(body,notice){if(!live()||session.mode!=='explore'){if(notice){notice.cancel();}return;}
             if(gesture&&gesture.active()){gesture.cancel();}
             if(queue.length>=16){if(notice){notice.cancel();}status('Input queue full; wait for this view.');return;}queue.push({body:body,notice:notice||null});if(focusReceipt){focusReceipt.changed();}flush();panelsChanged();}
         function settle(){if(accepted&&state&&P.compare(state.state_rev,accepted)>=0){accepted=null;}if(focusReceipt){focusReceipt.changed();}flush();}
-        function resized(){if(queryTools){queryTools.changed();}paintOverlays(true);if(resize!==null){win.clearTimeout(resize);}resize=win.setTimeout(function(){resize=null;if(!state||!session||session.mode!=='explore'){return;}
+        function resized(){if(queryTools){queryTools.changed();}paintOverlays(true);if(resize!==null){win.clearTimeout(resize);resize=null;}if(!live()){return;}resize=win.setTimeout(function(){resize=null;if(!live()||!session||session.mode!=='explore'){return;}
                 try{const r=viewport.getBoundingClientRect(),d=win.devicePixelRatio||1,w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));P.pixels(w,h);
                     if(w!==state.pixels[0]||h!==state.pixels[1]){edit({pixels:[w,h]});}}
                 catch(e){status(e.message);}
             },80);}
+        function failed(){
+            // Failure does not advance render/state revisions. Keep only already
+            // displayed pixels; release PNG credit and cancel unsent input. A
+            // submitted edit still owns its eventual accepted/error response.
+            queue=[];if(flushTimer!==null){win.clearTimeout(flushTimer);flushTimer=null;}
+            if(focusReceipt){focusReceipt.reset();}focusTicket=null;
+            if(gesture){gesture.cancel();}dragShift=null;
+            if(decode){const job=decode;decode=null;job.cancel();}
+            // A decoded frame's RAF retains its one discarded ACK obligation.
+        }
         function incoming(event,token){if(token!==serial||stopped||suspended){return;}
             // A valid 4096-pair layer selection can exceed 64KiB. Match the
             // owner control-reply bound; frame headers remain separately capped.
@@ -173,7 +187,7 @@
                     typeof v.query!=='boolean'||v.measure!==(v.mode==='explore')||v.mode==='follow'&&v.query||!['view_id','connection_epoch'].every(function(k){return /^[0-9a-f]{64}$/.test(v[k]);})){throw Error('Invalid guest handshake');}
                     hello=v;delay=500;status(v.mode==='follow'?'Following owner · read-only':'Independent view · read-only');controls();return;}
                 if(!hello){throw Error('Guest handshake missing');}
-                if(v.type==='share.state'){validateState(v);if(gesture&&gesture.active()&&state&&state.state_rev!==v.state_rev){gesture.cancel();}state=v;sync();compose();settle();controls();resized();panelsChanged();status((session.mode==='follow'?'Following owner':'Independent view')+' · read-only'+(v.rendering?' · rendering…':''));if(v.failure){status('Render failed: '+String(v.failure));}return;}
+                if(v.type==='share.state'){validateState(v);if(gesture&&gesture.active()&&state&&state.state_rev!==v.state_rev){gesture.cancel();}state=v;if(v.failure){failed();}sync();compose();settle();controls();resized();panelsChanged();status((session.mode==='follow'?'Following owner':'Independent view')+' · read-only'+(v.rendering?' · rendering…':''));return;}
                 if(v.type==='accepted'){if(v.seq!==flight||v.view_id!==hello.view_id||v.connection_epoch!==hello.connection_epoch){throw Error('Wrong edit acknowledgment');}P.counter(v.state_rev);flight=null;accepted=v.state_rev;if(focusReceipt){focusReceipt.accepted(v.seq,v.state_rev);}settle();panelsChanged();return;}
                 if(queryTools&&queryTools.receive(v)){return;}
                 if(v.type==='error'){if(v.seq===flight){flight=accepted=null;queue=[];if(focusReceipt){focusReceipt.rejected(v.seq);}panelsChanged();status('View change rejected. No change was replayed.');}else{throw Error('Unexpected guest error');}return;}

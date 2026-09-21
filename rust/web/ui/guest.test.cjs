@@ -65,7 +65,7 @@ function environment(mode='explore',hash='#invite='+secret,grant=false,options={
         layers:require('./guest-layers.js'),
         display:require('./guest-display.js'),tools:require('./guest-tools.js'),queryWire:require('./guest-query-wire.js'),query:require('./query.js'),
         inspect:require('./inspect.js'),measure:require('./measure.js'),rulers:require('./rulers.js'),gestures:require('./gestures.js'),
-        decode(h,data,cb){return Decode.create({ImageData:class{constructor(data){this.data=data;}},setTimeout:win.setTimeout,clearTimeout:win.clearTimeout},h,data,cb);}});
+        decode(h,data,cb){return Decode.create(Object.assign({ImageData:class{constructor(data){this.data=data;}},setTimeout:win.setTimeout,clearTimeout:win.clearTimeout},options.imageEnv),h,data,cb);}});
     function hello(ws=sockets.at(-1),connection=epoch,query=mode==='explore'){ws.onopen();ws.text({type:'share.hello',protocol:1,bundle,share_id:id,view_id:view,connection_epoch:connection,mode,read_only:true,query,measure:mode==='explore'});}
     function state(extra={}){return {type:'share.state',view_id:view,connection_epoch:epoch,dataset_revision:'1',worker_epoch:'1',state_rev:'1',render_rev:'1',render_key:'1',bbox_dbu:['0','0','64','32'],dbu_um:'1',camera_um:['32','16','64'],pixels:[64,32],depth:'full',detail:'high',thin:'keep',frames:true,labels:true,mono:false,rendering:false,failure:null,...extra};}
     function raf(){for(const [n,f] of [...rafs]){rafs.delete(n);f();}}
