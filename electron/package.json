@@ -1,0 +1,7 @@
+{
+  "name": "floe2-electron-comparison",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Experimental Electron shell; Rust retains service and file authority",
+  "scripts": { "test": "node --test service-client.test.cjs" }
+}

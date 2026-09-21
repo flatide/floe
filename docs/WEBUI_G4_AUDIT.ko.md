@@ -412,3 +412,10 @@ GTK 병존과 macOS 실제 입력/표시·G1/G4 잔여는 그대로다.
 선택6개 통과를 합쳐 전체 배터리가 통과한 것처럼 집계하지 않는다. 개발 검증의
 Python/KLayout 사용은 배포 런타임에 Python이 없다는 계약과 별개다. macOS
 AppKit/기본 WebView/복구 검증은 [Desktop §22](WEBUI_DESKTOP.ko.md#22-d2-mac-종료-요청-시-기존-창-복원-2026-09-21)에 구분한다.
+
+후속 `34a4139`의 정규 전체 재실행도 `web_startup`에서 **exit1**이었다. 이번
+oracle-build는11.352초/exit0, `gtk-startup`은30.009초 timeout이다.
+`/private/tmp/floe-webui-34a4139-full.log`. 선택 항목을 늘려 전체 성공으로 합산하거나
+시간제한·보안 정책을 완화하지 않았다. 실행 중 시작한 별도 Electron 실험은 기존
+Rust/macOS 제품 source·manifest·lock을 바꾸지 않는다. 같은 커밋의 **명시 native
+suite exit0**은 [Desktop §23](WEBUI_DESKTOP.ko.md#23-명시-native-suite-완주-및-개발-앱-2026-09-21)의 별도 근거다.

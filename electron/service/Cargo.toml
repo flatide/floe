@@ -1,0 +1,17 @@
+[package]
+name = "floe-electron-service"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "LicenseRef-Flatide-Proprietary"
+description = "Experimental owned pipe host for the existing Rust floe2 service"
+
+[workspace]
+resolver = "2"
+
+[dependencies]
+floe-app = { path = "../../rust/app" }
+floe-app-core = { path = "../../rust/app-core" }
+libc = "=0.2.189"
+serde_json = "=1.0.151"
+signal-hook = { version = "=0.4.4", default-features = false }

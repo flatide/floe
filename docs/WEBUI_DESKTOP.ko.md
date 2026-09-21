@@ -86,8 +86,9 @@ macOS는 시스템 WKWebView 직접 바인딩을 선택했으며 이 선택으�
 RHEL 8·glibc 2.28이 있지만, 임의의 최신 Electron 번들 또는 ETX를 보장하지 않는다.
 선정 버전/전체 ELF 의존성·sandbox·다중 사용자 메모리·ETX 입력/합성을 검증한다.
 기존 후순위 결정은 Chromium이 ETX에서 느리다는 실측 결론이 아니다. 최소 호스트
-비교 여부를 질의한 상태이며 **Electron/WebKitGTK 어느 쪽도 새로 채택하지 않았다**.
-macOS 호스트를 교체하거나 npm/runtime 의존성을 추가한 상태가 아니다.
+사용자는 **Electron 최소 호스트 비교 진행**을 승인했다. 비교 후보를 구현하되
+정식 채택은 RHEL/ETX 실측 뒤 결정한다. macOS 호스트는 유지한다.
+별도 경계와 단계는 [Electron 비교 계획](WEBUI_ELECTRON.ko.md)에 기록한다.
 [Electron 플랫폼 지원](https://github.com/electron/electron#platform-support),
 [VS Code 요구사항](https://code.visualstudio.com/docs/supporting/requirements),
 [동봉 엔진 보안 업데이트 책임](https://www.electronjs.org/docs/latest/tutorial/security).
@@ -1369,3 +1370,29 @@ helper에 없다. 기존 취소 기본값, 저장/복구 guard와 종료 응답 
 
 제품 바이너리/전체 게이트의 결과와 미완료 항목은 별도로 기록한다. RHEL 호스트
 선택·ETX, G1/G4, OS 입력/접근성, 장애 복구 및 서명/공증의 전체 목표는 유지한다.
+
+## 23. 명시 native suite 완주 및 개발 앱 (2026-09-21)
+
+`34a4139`의 `sh tools/validate_desktop.sh`를 생략 없이 실행해 **exit0**을 확인했다.
+`/private/tmp/floe-desktop-34a4139-full.log`. 실제 AppKit 취소/복원, 빈 WebView
+인증/메뉴/종료와 복구뿐 아니라 다음 합성 경로를 포함한다.
+
+- 메모/waive 저장 ACK 유실 뒤 인증된 reload·동일 receipt 명시 확인, 파일 내용과
+  0600 read-back. 자동 POST 재실행이 없고 원래 입력은 그대로다.
+- sessionStorage/cookie 소실 후 종료 상태와 새 시작 안내. bootstrap을 재사용하지 않는다.
+- 실제 WKDownload blob 게시/read-back, 취소 시 staging만 제거, 알 수 없는 파일을
+  둔 정리 실패의 sticky 경고와 **예상 exit1**을 외부 harness에서 성공적으로 구별했다.
+- driver가 자신이 생성한 host의 유일한 직계 renderd를 두 번 재검사한 후 한 번
+  종료했다. 이전 픽셀을 Live로 표시하지 않음, 명시 close/reopen, 새 frame,
+  이전 자식 수거·다른 PID의 새 자식, 정상 종료를 관측했다. 원본 source/pack/cache는
+  변경되지 않았다. WebKit WebContent 프로세스의 실제 crash 검사는 아니다.
+
+별도 release 개발 앱은 `desktop/target/macos-dev.5SWzV9/Floe2.app`에 만들었다.
+고지279개 검사 및 복사본에서 재배치/누락/변조/symlink 거부 검사 **exit0**.
+기존 앱 덮어쓰기·설치·서명/공증은 없고 source revision은 `34a4139` 기준이다
+(사용자 문서 변경 때문에 dirty 표시가 붙는다). 로그는
+`/private/tmp/floe-desktop-reveal-app-{build,notices}.log`에 있다.
+
+이번 명시 suite의 성공은 이전 실패 기록을 삭제하지 않는다. CUA 실제 화면·
+물리 Dock/IME/DPI/접근성, 화면/입력 성능 G1, 전체 G4와 RHEL/ETX 및 배포 수용은
+남는다. 정규 Rust/웹 전체 배터리와 이 native suite도 서로 다른 게이트다.
