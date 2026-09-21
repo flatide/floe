@@ -851,3 +851,91 @@ exit 1이었다(`floe-close-timeout-battery.log`). 제품 실패와 구분한다
 (`floe-close-timeout-battery-retry.log`)이며 검사 후 이번에 만든 링크만 제거했다.
 기존 정본 가상환경은 변경하지 않았다. 선택 배터리 통과를 전체 Rust/GTK 및 현장
 수용으로 합산하지 않는다.
+
+## 15. D2-mac 세션 정보 소실과 재시작 안내 (2026-09-21)
+
+인증을 복구할 수 없는 상태를 일반 네트워크 대기와 구분한다. 웹은 현재 문서의
+인증 정보가 없거나 sessionStorage 읽기가 실패했을 때, 또는 현재 요청이 HTTP
+401로 거절됐을 때 `restart-required` 고정 상태만 표시한다. 호스트는 비밀값이나
+페이지 오류문을 읽지 않고 이 상태를 확인해 30초 기한을 기다리지 않고 **새 앱
+세션 필요**를 알린다. 503/연결 실패를 세션 소실로 단정하지 않는다. 이전 문서의
+늦은 401/복구 응답은 현재 문서에 적용하지 않는다.
+
+기존 창은 자동 종료·재인증하지 않는다. 인증/저장 POST 및 일회용 bootstrap을
+재생하지 않으며 메모/waive 등 pending journal을 지우지 않는다. 복구 불가 창의
+종료는 기존 Cancel 기본 native Force End Session 확인을 따른다. 세션이 살아 있는
+일반 GET 복구·숨김 창 처리·30초 네트워크 deadline은 유지한다.
+
+새 **단독 인자 전용** 실제 native QA:
+
+| 명령 | 실제로 변경하는 대상 | 확인 범위 |
+|---|---|---|
+| `--smoke-test-storage-loss` | 새 빈 WebView의 `floe-session:<자기 origin>` 키 하나 삭제 | 재로딩 후 인증정보 부재 인식, 재인증/쓰기 비재생 |
+| `--smoke-test-cookie-loss` | 새 비영속 WKWebsiteDataStore의 cookie 타입만 공개 WebKit API로 제거 | sessionStorage는 유지하되 실제 HTTP 인증 실패 인식, 재인증/쓰기 비재생 |
+
+두 명령은 source/root/reviewer/세션 경로를 받지 않는다. 기존 창·브라우저 프로필을
+찾거나 재사용하지 않으며 쿠키 값·인증 header·request body를 읽지 않는다. QA 전용
+주 문서 시작 스크립트는 HTTP method/path 카운터만 기록한다. 첫 문서에서 exchange
+1회와 기존 읽기 전용 초기 목록의 browse POST 1회, 다른 쓰기 0회를 요구한다.
+새 문서에서는 exchange/browse/쓰기 모두 0회를 확인한다. 다운로드 WebView에는 주입을
+복제하지 않는다. 완료 후 **QA 소유 빈 서비스만** 취소·join하며 이것은 제품의 자동
+재시작/자동 종료 동작이 아니다. 기존 자료 파일을 새로 쓰는 검사도 아니다.
+
+이는 WebContent process kill/OS crash, 전체 sessionStorage 또는 저장 중 pending
+journal 소실, DRC 저장 중 디스크 장애를 통과했다는 뜻이 아니다. 이번 실제 소실
+범위와 별도로 남기며, OS IME/DPI/접근성·서명/공증·RHEL/ETX·G1/G4도 계속 남는다.
+
+개발 중 기존 닫기 timeout smoke가 NSAlert의 Cancel 기본 상태 검사에서 중단됐다.
+모든 버튼 추가 및 명시적 `layout()` 이후 Cancel key/initial responder를 지정하도록
+구성 순서를 보완했지만 release의 속성 단언은 다시 실패했으므로 이것만으로 해결됐다고
+보지 않는다. 이후 debug 진단 4회는 Return/initial 속성이 true여도 현재 포커스는
+Cancel이 아닌 상태였고, release 실패 시 어느 속성이 달랐는지는 확정하지 못했다.
+
+따라서 수용 판정을 실제 사용자 계약으로 바꿨다. Apple은 첫 버튼을 Return의
+기본 버튼으로 설명하며 Cancel 이름에는 Escape 키가 붙을 수 있다고 명시한다.
+`initialFirstResponder`도 현재 키 전달 결과를 뜻하지 않는다.
+[NSAlert buttons](https://developer.apple.com/documentation/appkit/nsalert/buttons?language=objc),
+[AppKit responder 설명](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/EventOverview/EventHandlingBasics/EventHandlingBasics.html).
+QA는 초기 속성을 로그로 남기되 그 조합으로 기본 동작을 추정하거나 Cancel 버튼을
+직접 클릭하지 않는다. 표시된 합성 sheet의 **자기 windowNumber로 만든 Return
+NSEvent를 그 NSWindow에만 전달**하고, completion이 Cancel일 때만 성공이다.
+다른 결과면 Force End action에 도달하기 전에 실패한다. 전역 키 이벤트, 실제 OS
+키보드/IME/접근성 수용이 아니며 기존 사용자 창에는 이벤트를 보내지 않는다.
+
+웹 UI 최초 회귀의 실패는 새 안내 문구의 단어 순서와 기존 `private session link` 기대의 차이였고,
+사용자에게 동일한 지시를 주면서 기존 문구를 유지하도록 정리했다.
+새 QA의 초기 실패는 읽기 전용 목록 조회도 POST 큐를 사용한다는 점을 카운터가
+구분하지 못했기 때문이다. 기존 목록 프로토콜을 변경하지 않고 첫 조회 1회만
+별도 집계하며, 조회가 아직 제출되기 전의 문서 준비 상태는 대기하도록 고쳤다.
+
+검증 결과: host unit **23 passed**, fmt 및 최종 host clippy
+`--all-targets --no-deps -- -D warnings` 통과. `sh tools/validate_desktop.sh` 최종
+실행은 **exit 0**으로 기존 일반/복구/닫기 timeout/합성 DRC 검사를 통과했고,
+실제 세션 키 삭제와 비영속 cookie 제거 각각에서 새 문서의 명시적 재시작 상태,
+exchange/browse/다른 쓰기 0회 및 QA 서비스 join을 확인했다. 전체 Node 웹 UI
+회귀도 문구 정리 후 **exit 0**이었다. 로그:
+`/private/tmp/floe-session-loss-{unit,clippy-complete,native-complete,web-ui-retry}.log`.
+초기 실패 로그(`native`, `native-retry`, `storage-diag`, `web-ui`)도 같은 접두사로
+보존하며 성공 실행과 섞어 계산하지 않는다.
+`sh tools/validate_rust.sh --only embedded_host,web_ui,validation_selector`도
+**exit 0 / ALL OK**였다(`floe-session-loss-battery.log`). 검사에만 사용한 정본 개발
+환경의 임시 `.venv` 링크는 제거했으며 새 Python 설치/제품 런타임 추가는 없다.
+기존 lock/vendor는 불변이고 WebKit의 이미 vendored된 data-record 바인딩 feature만
+추가했다. release 개발 `.app` 조립 및 고지 279파일 검사도 통과했다.
+첫 release 실행에서는 세션 키/쿠키 소실 두 검사는 통과했지만 앞서 설명한 닫기
+속성 단언이 실패했으므로 전체 release QA는 exit 1이었다
+(`floe-session-loss-release-ui.log`). 이를 최종 Return 전달 검사와 구분한다.
+
+최종 release 개발 `.app`에서도 **세션 키 소실 → cookie 소실 → 복구/닫기 timeout**을
+각각 새 빈 세션으로 순차 실행해 **exit 0**이었다. cookie 검사는 실제 401 경로의
+고정 UI 상태 `Session expired`, 세션 키 검사는 인증 요청 전 `Not connected` 상태를
+각각 요구해 두 소실 경로를 혼동하지 않는다. Return 검사는 표시된 sheet에 전달된
+이벤트의 실제 Cancel completion 및 세션 유지로 통과했고, 이후 정상 닫기/취소/종료도
+성공했다. 실행 파일은 `desktop/target/macos-dev.gb7oX8/Floe2.app`의 내부 바이너리이며
+환경변수 worker override 없이 번들된 worker로 실행했다. 로그:
+`/private/tmp/floe-session-loss-release-complete{.log,-ui.log}`.
+
+이 단계의 로컬 구현·검증은 완료했다. 목표 전체에서는 여전히 WebContent/worker
+강제 종료와 저장 중 디스크 장애의 복구 검증, 실제 키보드/IME·DPI·접근성 수용,
+서명·공증 및 RHEL 8.6/8.10 ETX/X11 호스트·현장 G1/G4 검증이 남는다. 개발용
+release 조립/실행 성공을 배포 승인이나 전체 목표 완료로 간주하지 않는다.

@@ -7,6 +7,7 @@ mod macos;
 mod recovery;
 mod review_qa;
 mod service;
+mod session_qa;
 mod transfers;
 
 fn main() {
@@ -21,6 +22,7 @@ fn main() {
             --smoke-test-notices: same test plus packaged About notice reads.\n\
             --smoke-test-recovery: same test plus explicit reload and close-timeout cancel.\n\
             --smoke-test-review-recovery: NEW synthetic files only; save ACK loss/reload.\n\
+            --smoke-test-storage-loss / --smoke-test-cookie-loss: NEW empty WebView only.\n\
             --check-notices: verify every packaged notice chunk; no GUI or workers.\n\
             With no SOURCE or --root, choose an approved working folder before startup.\n\
             macOS preview: native file dialogs, File/Edit menus and explicit Recover View."
@@ -40,7 +42,12 @@ fn main() {
     let smoke_notices = args == ["--smoke-test-notices"];
     let smoke_recovery = args == ["--smoke-test-recovery"];
     let smoke_review = review_qa::requested(&args);
-    let smoke = smoke_notices || smoke_recovery || smoke_review || args == ["--smoke-test"];
+    let smoke_loss = session_qa::requested(&args);
+    let smoke = smoke_notices
+        || smoke_recovery
+        || smoke_review
+        || smoke_loss.is_some()
+        || args == ["--smoke-test"];
     if smoke {
         args.clear();
     }
@@ -64,7 +71,14 @@ fn main() {
         let session = floe_app::embedded::Session::parse(&args)?;
         #[cfg(target_os = "macos")]
         {
-            let code = macos::run(session, smoke, smoke_notices, smoke_recovery, smoke_review)?;
+            let code = macos::run(
+                session,
+                smoke,
+                smoke_notices,
+                smoke_recovery,
+                smoke_review,
+                smoke_loss,
+            )?;
             if let Some(fixture) = &fixture {
                 fixture.verify()?;
                 println!("DESKTOP REVIEW FILES: OK (exact note/waive read-back; 0600; original inputs unchanged)");

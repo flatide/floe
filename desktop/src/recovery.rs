@@ -12,6 +12,7 @@ pub enum Event {
     ReadyHidden,
     Hidden,
     TimedOut,
+    RestartRequired,
 }
 struct Attempt {
     started: Instant,
@@ -90,6 +91,10 @@ impl Recovery {
         }
         self.attempt.as_mut().unwrap().in_flight = false;
         match marker {
+            Some("restart-required") => {
+                self.fail();
+                Event::RestartRequired
+            }
             Some("ready") => {
                 self.fail();
                 Event::Ready
@@ -107,6 +112,21 @@ impl Recovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lost_auth_is_terminal_without_waiting_for_network_timeout() {
+        let mut r = Recovery::default();
+        let t = Instant::now();
+        let id = r.begin(t).unwrap();
+        r.loaded(t);
+        assert_eq!(r.poll(t), Event::Probe(id));
+        assert_eq!(
+            r.reply(id, t, Some("restart-required")),
+            Event::RestartRequired
+        );
+        assert!(!r.busy());
+        assert_eq!(r.reply(id, t, Some("ready")), Event::None);
+        assert_eq!(r.poll(t + DEADLINE), Event::None);
+    }
     #[test]
     fn explicit_attempt_has_one_in_flight_probe_and_one_completion() {
         let mut r = Recovery::default();
@@ -154,6 +174,10 @@ mod tests {
         r.loaded(t);
         assert_eq!(r.poll(t), Event::Probe(new));
         assert_eq!(r.reply(old, t + DEADLINE, Some("ready")), Event::None);
+        assert_eq!(
+            r.reply(old, t + DEADLINE, Some("restart-required")),
+            Event::None
+        );
         assert!(r.busy());
         assert_eq!(r.reply(new, t, Some("ready")), Event::Ready);
     }

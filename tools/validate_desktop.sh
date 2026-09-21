@@ -15,6 +15,7 @@ node desktop/ui/menu-action.test.cjs
 node desktop/ui/ime-probe.test.cjs
 node desktop/ui/recovery-probe.test.cjs
 node desktop/ui/review-transport.test.cjs
+node desktop/ui/session-loss.test.cjs
 FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
 FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
     desktop/target/debug/floe2-desktop --smoke-test
@@ -24,3 +25,9 @@ FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
 FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
 FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
     desktop/target/debug/floe2-desktop --smoke-test-review-recovery
+FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
+FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
+    desktop/target/debug/floe2-desktop --smoke-test-storage-loss
+FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
+FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
+    desktop/target/debug/floe2-desktop --smoke-test-cookie-loss

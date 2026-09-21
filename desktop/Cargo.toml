@@ -26,7 +26,7 @@ objc2 = "=0.6.4"
 block2 = "=0.6.2"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSObject", "NSString", "NSGeometry", "NSNotification", "NSURL", "NSURLRequest", "NSURLResponse", "NSArray", "NSData", "NSTimer", "NSDate", "NSError"] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSApplication", "NSRunningApplication", "NSWindow", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSAlert", "NSButton", "NSControl"] }
-objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKPreferences", "WKNavigation", "WKNavigationAction", "WKNavigationDelegate", "WKNavigationResponse", "WKUIDelegate", "WKFrameInfo", "WKSecurityOrigin", "WKOpenPanelParameters", "WKDownload", "WKDownloadDelegate", "WKWindowFeatures", "WKUserContentController", "WKUserScript"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKPreferences", "WKNavigation", "WKNavigationAction", "WKNavigationDelegate", "WKNavigationResponse", "WKUIDelegate", "WKFrameInfo", "WKSecurityOrigin", "WKOpenPanelParameters", "WKDownload", "WKDownloadDelegate", "WKWindowFeatures", "WKUserContentController", "WKUserScript", "WKWebsiteDataRecord"] }
 
 [profile.release]
 lto = "thin"

@@ -4,6 +4,7 @@ use crate::actions::Action;
 use crate::close_request::{CloseRequest, Event as CloseEvent};
 use crate::recovery::{Event as RecoveryEvent, Recovery};
 use crate::service::Service;
+use crate::session_qa::Loss;
 use crate::transfers::{self, PendingFile};
 use block2::{DynBlock, RcBlock};
 use floe_app::embedded::{navigation_allowed, validate_ready, Ready, Session};
@@ -22,6 +23,7 @@ use std::time::{Duration, Instant};
 
 const CLOSE_SCRIPT: &str =
     "(()=>{const b=document.getElementById('logout');if(b&&!b.disabled){b.click();return 'opened';}return 'unavailable';})()";
+const SESSION_LOST: &str = "Session credentials lost or expired — start a new floe2-desktop session; no login or write replayed";
 
 struct Download {
     object: Retained<WKDownload>,
@@ -51,6 +53,8 @@ struct State {
     smoke_notices: bool,
     smoke_recovery: bool,
     smoke_review: bool,
+    smoke_loss: Option<Loss>,
+    loss_removed: Cell<bool>,
     smoke_step: Cell<u8>,
     evaluating: Cell<bool>,
     smoke_probe: RefCell<String>,
@@ -405,7 +409,7 @@ impl Host {
         // performs the ORIGINAL POST. No window is shown; no response is
         // ever committed as HTML, and this view has no UI delegate/IPC.
         let child = unsafe {
-            if self.ivars().smoke_review {
+            if self.ivars().smoke_review || self.ivars().smoke_loss.is_some() {
                 // The supplied configuration inherits the main content controller.
                 // Do not copy QA observers into the separate transfer WebView.
                 config.setUserContentController(&WKUserContentController::new(self.mtm()));
@@ -471,6 +475,7 @@ impl Host {
         smoke_notices: bool,
         smoke_recovery: bool,
         smoke_review: bool,
+        smoke_loss: Option<Loss>,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(State {
             service: RefCell::new(service),
@@ -488,7 +493,15 @@ impl Host {
             smoke_notices,
             smoke_recovery,
             smoke_review,
-            smoke_step: Cell::new(if smoke_review { 20 } else { 0 }),
+            smoke_loss,
+            loss_removed: Cell::new(false),
+            smoke_step: Cell::new(if smoke_review {
+                20
+            } else if smoke_loss.is_some() {
+                30
+            } else {
+                0
+            }),
             evaluating: Cell::new(false),
             smoke_probe: RefCell::new(String::new()),
             start: Instant::now(),
@@ -497,14 +510,17 @@ impl Host {
         unsafe { msg_send![super(this), init] }
     }
     fn fail(&self, message: &'static str) {
+        self.record_failure(message);
+        if self.ivars().smoke {
+            self.ivars().service.borrow().cancel();
+        }
+    }
+    fn record_failure(&self, message: &'static str) {
         self.ivars().close_request.borrow_mut().invalidate();
         self.ivars().recovery.borrow_mut().fail();
         self.ivars().navigation.borrow_mut().take();
         *self.ivars().failure.borrow_mut() = Some(message);
         self.status(message);
-        if self.ivars().smoke {
-            self.ivars().service.borrow().cancel();
-        }
     }
     fn status(&self, message: &str) {
         if let Some(window) = self.ivars().window.get() {
@@ -673,11 +689,13 @@ impl Host {
         alert.setMessageText(&NSString::from_str(title));
         alert.setInformativeText(&NSString::from_str(details));
         let cancel = alert.addButtonWithTitle(ns_string!("Cancel"));
+        let accept = alert.addButtonWithTitle(&NSString::from_str(accept));
+        // NSAlert lazily lays out its buttons. Establish the cancel default
+        // after the complete layout, not while adding the remaining controls.
+        alert.layout();
         cancel.setKeyEquivalent(ns_string!("\r"));
+        accept.setKeyEquivalent(ns_string!(""));
         alert.window().setInitialFirstResponder(Some(&cancel));
-        alert
-            .addButtonWithTitle(&NSString::from_str(accept))
-            .setKeyEquivalent(ns_string!(""));
         let host = self.retain();
         let close_qa = self.ivars().smoke_recovery
             && self.ivars().smoke_step.get() == 15
@@ -701,22 +719,37 @@ impl Host {
             Some(&callback),
         );
         if close_qa {
-            // Empty-workspace QA only: exercise the real NSAlert cancel action,
-            // not an OS Return/keyboard acceptance test. Never accept Force End.
-            if cancel.keyEquivalent().to_string() != "\r"
-                || !alert.window().initialFirstResponder().is_some_and(|r| {
+            // A first Cancel button can have Escape as its key equivalent while
+            // still being the Return default. Initial responder metadata is not
+            // the key-dispatch contract. Exercise Return on this exact QA sheet
+            // after presentation; no global keyboard event or forced button click.
+            let host = self.retain();
+            let dispatch = RcBlock::new(move |_: NonNull<NSTimer>| {
+                if host.ivars().smoke_step.get() != 15 || !host.ivars().panel_open.get() {
+                    return;
+                }
+                let sheet = alert.window();
+                let return_key = cancel.keyEquivalent().to_string() == "\r";
+                let initial_cancel = sheet.initialFirstResponder().is_some_and(|r| {
                     std::ptr::eq(
                         &*r as *const NSView,
                         &*cancel as *const NSButton as *const NSView,
                     )
-                })
-            {
-                self.fail("native close timeout QA has a non-cancel default");
-                return;
-            }
-            // SAFETY: Live Cancel control of this host-owned NSAlert, main thread.
+                });
+                eprintln!("[desktop-smoke] cancel metadata: return={return_key} initial={initial_cancel}; dispatching sheet-local Return");
+                if let Some(event) = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                    NSEventType::KeyDown, NSPoint::ZERO, NSEventModifierFlags::empty(), 0.0,
+                    sheet.windowNumber(), None, ns_string!("\r"), ns_string!("\r"), false, 36) {
+                    sheet.sendEvent(&event);
+                } else {
+                    host.fail("native QA Return event could not be created");
+                }
+            });
+            // SAFETY: One-shot main-thread timer retains this owned QA sheet and
+            // host until dispatch. The completion rejects any non-Cancel result
+            // BEFORE it can invoke the force-end action.
             unsafe {
-                cancel.performClick(None);
+                NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.15, false, &dispatch);
             }
         }
     }
@@ -846,13 +879,17 @@ impl Host {
         let web = unsafe {
             let config = WKWebViewConfiguration::new(mtm);
             config.setWebsiteDataStore(&WKWebsiteDataStore::nonPersistentDataStore(mtm));
-            if self.ivars().smoke_review {
+            if self.ivars().smoke_review || self.ivars().smoke_loss.is_some() {
                 // Only the no-argument QA mode creates this host, after generating
                 // new synthetic inputs. Observe saves from document start so a
                 // replay during startup cannot escape the counter. Main frame only.
                 let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
                     WKUserScript::alloc(mtm),
-                    &NSString::from_str(include_str!("../ui/review-transport.js")),
+                    &NSString::from_str(if self.ivars().smoke_review {
+                        include_str!("../ui/review-transport.js")
+                    } else {
+                        include_str!("../ui/session-loss-transport.js")
+                    }),
                     WKUserScriptInjectionTime::AtDocumentStart,
                     true,
                 );
@@ -985,6 +1022,15 @@ impl Host {
                     }
                 }
             }
+            RecoveryEvent::RestartRequired => {
+                if self.ivars().smoke_loss.is_some() && self.ivars().smoke_step.get() == 32 {
+                    // Expected only in the fresh empty loss QA. Keep the service
+                    // alive until the new document verifies zero replayed writes.
+                    self.record_failure(SESSION_LOST);
+                } else {
+                    self.fail(SESSION_LOST);
+                }
+            }
         }
     }
     fn probe_recovery(&self, epoch: u64) {
@@ -1010,7 +1056,40 @@ impl Host {
         // Fixed markers only. No auth, paths, note text or clipboard contents
         // leave the WebView. A fresh page's enabled End session follows auth.
         unsafe {
-            web.evaluateJavaScript_completionHandler(&NSString::from_str("(()=>{const b=document.getElementById('logout');if(b&&!b.disabled)return document.hidden?'ready-hidden':'ready';return document.hidden?'hidden':'waiting';})()"), Some(&callback));
+            web.evaluateJavaScript_completionHandler(
+                &NSString::from_str(concat!(
+                    "(",
+                    include_str!("../ui/recovery-status.js"),
+                    ")()"
+                )),
+                Some(&callback),
+            );
+        }
+    }
+    fn remove_qa_cookies(&self) {
+        if self.ivars().smoke_loss != Some(Loss::Cookie) {
+            self.fail("cookie loss QA invoked outside its empty session");
+            return;
+        }
+        let Some(web) = self.ivars().web.get() else {
+            return;
+        };
+        // SAFETY: This host owns a newly constructed, non-persistent store.
+        // Public WebKit removal API only; never fetch/read any cookie values.
+        unsafe {
+            let store = web.configuration().websiteDataStore();
+            if store.isPersistent() {
+                self.fail("cookie loss QA refuses a persistent data store");
+                return;
+            }
+            let types = NSSet::from_slice(&[WKWebsiteDataTypeCookies]);
+            let host = self.retain();
+            let callback = RcBlock::new(move || host.ivars().loss_removed.set(true));
+            store.removeDataOfTypes_modifiedSince_completionHandler(
+                &types,
+                &NSDate::distantPast(),
+                &callback,
+            );
         }
     }
     fn smoke_tick(&self) {
@@ -1021,6 +1100,13 @@ impl Host {
         let Some(web) = self.ivars().web.get() else {
             return;
         };
+        if self.ivars().smoke_step.get() == 31 && self.ivars().smoke_loss == Some(Loss::Cookie) {
+            if self.ivars().loss_removed.get() {
+                self.ivars().smoke_step.set(32);
+                self.start_recovery();
+            }
+            return;
+        }
         if self.ivars().evaluating.replace(true) {
             return;
         }
@@ -1048,6 +1134,10 @@ impl Host {
             22 => concat!("(", include_str!("../ui/review-probe.js"), ")('waive-start')"),
             23 => concat!("(", include_str!("../ui/review-probe.js"), ")('waive-check')"),
             24 => concat!("(", include_str!("../ui/review-probe.js"), ")('read-back')"),
+            30 => concat!("(", include_str!("../ui/session-loss-probe.js"), ")('ready')"),
+            31 => concat!("(", include_str!("../ui/session-loss-probe.js"), ")('erase-storage')"),
+            32 if self.ivars().smoke_loss == Some(Loss::Cookie) => concat!("(", include_str!("../ui/session-loss-probe.js"), ")('check-cookie')"),
+            32 => concat!("(", include_str!("../ui/session-loss-probe.js"), ")('check-storage')"),
             _ => { self.ivars().evaluating.set(false); return; },
         };
         let host = self.retain();
@@ -1093,6 +1183,15 @@ impl Host {
                     "review-wait-read",
                     "review-wait-snapshot",
                     "close-cancelled",
+                    "loss-ready",
+                    "loss-erased",
+                    "loss-confirmed",
+                    "loss-failed",
+                    "loss-failed-observer",
+                    "loss-failed-exchange",
+                    "loss-failed-write",
+                    "loss-failed-replay",
+                    "loss-failed-exception",
                     "wait",
                 ]
                 .contains(&text.as_str())
@@ -1103,6 +1202,41 @@ impl Host {
                 *host.ivars().smoke_probe.borrow_mut() = text.clone();
             }
             let next = match (step, text.as_str()) {
+                (
+                    30..=32,
+                    "loss-failed"
+                    | "loss-failed-observer"
+                    | "loss-failed-exchange"
+                    | "loss-failed-write"
+                    | "loss-failed-replay"
+                    | "loss-failed-exception",
+                ) => {
+                    host.fail("native session loss/replay QA failed");
+                    step
+                }
+                (30, "loss-ready") => {
+                    if host.ivars().smoke_loss == Some(Loss::Cookie) {
+                        host.remove_qa_cookies();
+                    }
+                    31
+                }
+                (31, "loss-erased") => {
+                    host.start_recovery();
+                    32
+                }
+                (32, "loss-confirmed") => {
+                    if *host.ivars().failure.borrow() != Some(SESSION_LOST)
+                        || host.ivars().recovery.borrow().busy()
+                    {
+                        host.fail("native host did not recognize lost session credentials");
+                        step
+                    } else {
+                        // Explicit QA cleanup of its empty service, not automatic
+                        // restart/shutdown behavior in an ordinary user session.
+                        host.ivars().service.borrow().cancel();
+                        34
+                    }
+                }
                 (20..=24, "review-failed") => {
                     host.fail("synthetic native review recovery QA failed");
                     step
@@ -1252,6 +1386,7 @@ pub fn run(
     smoke_notices: bool,
     smoke_recovery: bool,
     smoke_review: bool,
+    smoke_loss: Option<Loss>,
 ) -> Result<i32> {
     if !objc2::available!(macos = 12.0) {
         return Err(Error::input("embedded preview requires macOS 12 or later"));
@@ -1292,6 +1427,7 @@ pub fn run(
         smoke_notices,
         smoke_recovery,
         smoke_review,
+        smoke_loss,
     );
     // SAFETY: Owned window never auto-releases on close. The main-thread host
     // remains retained until after timer invalidation and delegate detachment.
@@ -1441,6 +1577,18 @@ pub fn run(
     }
     host.ivars().window.get().unwrap().setDelegate(None);
     let result = host.ivars().service.borrow_mut().join()?;
+    if let Some(loss) = smoke_loss {
+        if result == 143
+            && host.ivars().smoke_step.get() == 34
+            && *host.ivars().failure.borrow() == Some(SESSION_LOST)
+        {
+            println!("DESKTOP SESSION LOSS: OK ({loss:?}; new non-persistent empty WebView; explicit root GET; terminal restart guidance; no bootstrap/write replay; QA service cancelled and joined)");
+            return Ok(0);
+        }
+        return Err(Error::input(
+            "native session loss QA did not complete safely",
+        ));
+    }
     if let Some(message) = *host.ivars().failure.borrow() {
         return Err(Error::input(message));
     }
@@ -1462,7 +1610,7 @@ pub fn run(
         }
         if smoke_recovery {
             println!("DESKTOP RECOVERY: OK (explicit root GET; retained session storage; retired navigation ignored; new authenticated document; no bootstrap replay)");
-            println!("DESKTOP CLOSE TIMEOUT: OK (empty workspace; omitted JS close completion; real 5 s timer; duplicate requests bounded; native cancel-default sheet cancelled; session preserved; normal close still works)");
+            println!("DESKTOP CLOSE TIMEOUT: OK (empty workspace; omitted JS close completion; real 5 s timer; duplicate requests bounded; sheet-local Return cancelled; session preserved; normal close still works)");
         }
     }
     Ok(result)

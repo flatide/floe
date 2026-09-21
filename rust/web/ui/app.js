@@ -87,7 +87,7 @@
                     if (xhr.responseText) { value = JSON.parse(xhr.responseText); }
                 } catch (e) { reject(e); return; }
                 if (xhr.status < 200 || xhr.status >= 300) {
-                    if (xhr.status === 401 && currentPage(run)) { stopped = true; if (sharing) { sharing.stop(); } if (dumps) { dumps.stop(); } if (indexOpen) { indexOpen.stop(); } if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
+                    if (xhr.status === 401 && currentPage(run)) { stopped = true; el('connection').setAttribute('data-session-state', 'restart-required'); if (sharing) { sharing.stop(); } if (dumps) { dumps.stop(); } if (indexOpen) { indexOpen.stop(); } if (picker) { picker.stop(); } if (launcher) { launcher.stop(); } connection('Session expired', false); }
                     const failure = new Error(message(value && value.error || ('HTTP ' + xhr.status)));
                     failure.status = xhr.status; failure.code = value && value.error;
                     reject(failure);
@@ -715,7 +715,12 @@
             try { sessionStorage.setItem(sessionKey, JSON.stringify(auth)); } catch (_) { notice('Session storage unavailable. Reloading requires a new local session.'); }
         } else {
             try { auth = JSON.parse(sessionStorage.getItem(sessionKey)); } catch (_) { auth = null; }
-            if (!auth) { throw new Error('Launch with floe2-web view and use its private session link.'); }
+            if (!auth) {
+                // A terminal bootstrap/storage condition, not transient network
+                // delay. Native hosts read only this fixed, non-secret marker.
+                el('connection').setAttribute('data-session-state', 'restart-required');
+                throw new Error('Session credentials are unavailable. Start a new floe2-desktop session, or use a fresh private session link from floe2-web.');
+            }
         }
     }
     async function start(run) {

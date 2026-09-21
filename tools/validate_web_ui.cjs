@@ -8,6 +8,10 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
+for(const loss of ['missing','unreadable','cookie','unavailable']){
+    const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_AUTH_LOSS:loss}});
+    assert.equal(run.status,0,'session loss client '+loss+': '+run.error);
+}
 // Source guard only; actual overlay-scrollbar hit testing is a browser gate.
 const layerScroll = fs.readFileSync(path.join(ui, 'app.css'), 'utf8').match(/^\.layers\s*\{([^}]+)\}/m);
 assert(layerScroll && /padding-right:\s*16px\s*;/.test(layerScroll[1]), 'layer style buttons need an overlay-scrollbar inset');

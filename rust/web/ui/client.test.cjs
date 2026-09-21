@@ -12,6 +12,7 @@ const defaultsEnabled=process.env.FLOE_TEST_DEFAULTS==='1';let defaultOp=null;
 const minimapEnabled=process.env.FLOE_TEST_MINIMAP==='1';
 const exitEnabled=process.env.FLOE_TEST_EXIT==='1';
 const exitFailure=process.env.FLOE_TEST_EXIT_FAILURE==='1';
+const authLoss=process.env.FLOE_TEST_AUTH_LOSS||'';
 const closeBoundary=process.env.FLOE_TEST_CLOSE_BOUNDARY||'';
 const closeReply=process.env.FLOE_TEST_CLOSE_REPLY||'202';
 let closeResponse=null;
@@ -148,7 +149,7 @@ class XHR {
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
         else if((startupEnabled||dumpEnabled||closeBoundary||viewReadRace)&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=closeBoundary||viewReadRace?202:204;}
-        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,drc:!!startupSuspend,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,jobdeck_levels:modeEnabled,fill_slot_edit:fillEditorEnabled,display_dump:true,dump_on_start:dumpEnabled};}
+        else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,drc:!!startupSuspend,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,jobdeck_levels:modeEnabled,fill_slot_edit:fillEditorEnabled,display_dump:true,dump_on_start:dumpEnabled};if(authLoss){status=authLoss==='cookie'?401:503;value={error:'unavailable'};}}
         else if(startupSuspend&&this.path==='/api/v1/drc'){value={drc:null};}
         else if(launchEnabled&&this.path==='/api/v1/launch'){value=launchState;}
         else if(launchEnabled&&this.path.startsWith('/api/v1/launch/poll/')){launchPolls.push(this);return;}
@@ -281,6 +282,12 @@ const sandbox={window,document,XMLHttpRequest:XHR,WebSocket:Socket,Image,ImageDa
     setTimeout:function(fn,ms){assert(!this||!this.context,'unbound Window timer receiver');return setTimeout(fn,modeEnabled?Math.min(ms,5):ms);},
     clearTimeout:function(id){assert(!this||!this.context,'unbound Window timer receiver');return clearTimeout(id);},
     setInterval:()=>0,Date:{now:()=>freezeTime?clock:(clock+=100)},console};
+if(authLoss){
+    sandbox.location.hash='';node('logout').disabled=true;
+    storage.set('floe-note-pending','synthetic pending record');
+    if(['cookie','unavailable'].includes(authLoss)){storage.set('floe-session:'+sandbox.location.origin,JSON.stringify({csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1}));}
+    if(authLoss==='unreadable'){sandbox.sessionStorage.getItem=()=>{throw Error('storage blocked');};}
+}
 vm.runInNewContext(fs.readFileSync(__dirname+'/app.js','utf8'),sandbox,{filename:'app.js'});
 async function wait(test){for(let i=0;i<1000;i++){if(test()){return;}await new Promise(setImmediate);}throw new Error('client did not progress');}
 function hello(ws,ep=epoch){ws.receive({type:'hello',protocol:1,bundle,view_id:viewId,connection_epoch:ep});ws.receive({...snapshot,connection_epoch:ep});}
@@ -299,6 +306,14 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(authLoss){
+        await wait(()=>['Not connected','Session expired'].includes(node('connection').textContent));
+        assert.equal(node('connection').getAttribute('data-session-state'),authLoss==='unavailable'?null:'restart-required');
+        assert(node('logout').disabled);assert.equal(sockets.length,0);
+        assert(requests.every(r=>r.method==='GET'));assert(!requests.some(r=>r.path==='/api/v1/session/exchange'));
+        assert.equal(storage.get('floe-note-pending'),'synthetic pending record');
+        console.log('WEB AUTH LOSS: OK ('+authLoss+'; no bootstrap/write replay; pending journal preserved)');return;
+    }
     if(viewReadRace){
         await wait(()=>sockets.length===1);hello(sockets[0]);sockets[0].receive(packet('raw','1'));
         for(let i=0;i<12;i++){await new Promise(setImmediate);}

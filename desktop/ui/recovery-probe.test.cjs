@@ -23,3 +23,10 @@ for(const mutate of [h=>h.c.location.hash='#bootstrap=synthetic',h=>h.c.sessionS
     assert.equal(h.invoke('check'),'recovery-failed');assert.equal(h.invoke('unknown'),'recovery-failed');
 }
 console.log('desktop recovery probe: fixed markers, new document, storage retention/loss and no unrelated changes OK');
+const status='('+fs.readFileSync(__dirname+'/recovery-status.js','utf8')+')()';
+for(const hidden of [true,false])for(const disabled of [true,false])for(const phase of ['','restart-required','unrelated']){
+    const c={document:{hidden,getElementById:id=>id==='connection'?{getAttribute:key=>{assert.equal(key,'data-session-state');return phase;}}:{disabled}}};
+    assert.equal(vm.runInNewContext(status,c),phase==='restart-required'?'restart-required':disabled?(hidden?'hidden':'waiting'):(hidden?'ready-hidden':'ready'));
+}
+assert.equal(vm.runInNewContext(status,{document:{hidden:false,getElementById:()=>null}}),'waiting');
+console.log('desktop recovery status: terminal session marker wins over readiness/visibility; no sensitive reads');
