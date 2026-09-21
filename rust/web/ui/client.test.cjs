@@ -250,6 +250,12 @@ window.FloeSettings=require('./settings.js');
 window.FloeDefaults=require('./defaults.js');
 window.FloeAbout=require('./about.js');
 window.FloeDisplayDump=require('./display-dump.js');
+window.FloeDisplayTiming=require('./display-timing.js');
+window.performance={now:()=>clock};
+let timingPacketDelay=0;
+if(process.env.FLOE_TEST_TIMING==='1'){
+    window.FloeProtocol={...P,packet(buffer){const p=P.packet(buffer);clock+=timingPacketDelay;return p;}};
+}
 window.FloeSessionExit=require('./session-exit.js');
 window.FloeSharing=require('./sharing.js');
 window.FloeNotices=require('./notices.js');
@@ -307,6 +313,49 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(process.env.FLOE_TEST_TIMING==='1'){
+        await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
+        const refresh=()=>{const n=requests.length;node('timing-refresh').onclick();assert.equal(requests.length,n);return JSON.parse(node('timing-report').textContent);};
+        const enabled=()=>{const n=requests.length;node('timing-enabled').checked=true;node('timing-enabled').change();assert.equal(requests.length,n);};
+        assert.equal(node('timing-enabled').checked,false);ws.receive(packet('raw','1'));assert.equal(refresh().events.length,0);
+        freezeTime=true;enabled();
+        timingPacketDelay=3;const drawImage=ctx.drawImage;ctx.drawImage=function(...args){clock+=4;return drawImage.apply(this,args);};
+        ws.receive(packet('png','2'));clock+=12;images.at(-1).onload();ctx.drawImage=drawImage;
+        const first=refresh().events[0];assert.equal(first.kind,'frame');assert.equal(first.format,'png');assert.equal(first.decode_ms,12);
+        assert.equal(first.packet_ms,3);assert.equal(first.submit_ms,4);assert.equal(first.outcome,'submitted');assert.equal(first.receive_to_submit_ms,19);
+        ws.receive(packet('raw','3'));assert.equal(refresh().events[1].format,'raw');
+        snapshot.margin={frame_id:'4',origin_px:[48,48],crop_safe:true};snapshot.capabilities.margin=true;ws.receive(snapshot);
+        ws.receive(packet('raw','4','1',epoch,{purpose:'margin',width:196,height:176,bbox_dbu:['-58.9375','-48','137.0625','128']}));
+        assert.equal(refresh().events[2].purpose,'margin');
+        const frames=refresh().events.length;ws.receive(packet('raw','5','9'));assert.equal(refresh().events.length,frames,'unmatched packet must not count as submitted');
+        assert.equal(ws.readyState,Socket.OPEN);
+        clock+=100;node('fit').onclick();const sent=ws.sent.filter(x=>x.type==='view.set').at(-1);
+        assert(sent);clock+=11;ws.receive({type:'accepted',seq:sent.seq,state_rev:'2',render_rev:'2'});
+        assert.equal(refresh().events.filter(e=>e.kind==='edit').length,0,'ACK alone is not a committed snapshot');
+        clock+=4;snapshot.state_rev=snapshot.render_rev=snapshot.render_key='2';ws.receive(snapshot);
+        const edit=refresh().events.find(e=>e.kind==='edit');assert.equal(edit.action,'fit');assert.equal(edit.queue_ms,0);
+        assert.equal(edit.send_to_ack_ms,11);assert.equal(edit.ack_to_snapshot_ms,4);assert.equal(edit.queue_to_snapshot_ms,15);
+        const sendCount=ws.sent.filter(x=>x.type==='view.set').length;node('fit').onclick();
+        assert.equal(ws.sent.filter(x=>x.type==='view.set').length,sendCount,'65 ms input throttle was bypassed');
+        clock+=70;await new Promise(resolve=>setTimeout(resolve,80));
+        const queued=ws.sent.filter(x=>x.type==='view.set');assert.equal(queued.length,sendCount+1);
+        ws.receive({type:'accepted',seq:queued.at(-1).seq,state_rev:'3',render_rev:'3'});
+        snapshot.state_rev=snapshot.render_rev=snapshot.render_key='3';ws.receive(snapshot);
+        assert.equal(refresh().events.filter(e=>e.kind==='edit').at(-1).queue_ms,70);
+        const rect=node('viewport').getBoundingClientRect;
+        node('viewport').getBoundingClientRect=()=>{throw Error('synthetic submission failure');};
+        ws.receive(packet('raw','6','3'));node('viewport').getBoundingClientRect=rect;
+        assert.equal(refresh().events.at(-1).outcome,'discarded');assert.equal(refresh().events.at(-1).receive_to_submit_ms,null);
+        ws.receive(packet('png','7','3'));const late=images.at(-1), callback=late.onload;
+        clock+=7;document.hidden=true;docListeners.visibilitychange();
+        assert.equal(node('timing-enabled').checked,false);assert.equal(refresh().pending,0);
+        const count=refresh().events.length;if(callback){callback();}assert.equal(refresh().events.length,count,'late decode after opt-out was counted');
+        assert.equal(refresh().events.at(-1).receive_to_submit_ms,null);
+        document.hidden=false;assert.equal(node('timing-enabled').checked,false);
+        assert(!JSON.stringify(refresh()).includes(viewId));assert(!JSON.stringify(refresh()).includes(epoch));
+        listeners.pagehide({persisted:true});assert.equal(refresh().events.length,0);
+        console.log('WEB TIMING CLIENT: OK (default-off, real queue/ACK/snapshot hooks, raw/PNG/margin/stale/cancel, hidden opt-out, no network or private metadata)');return;
+    }
     if(authLoss){
         await wait(()=>['Not connected','Session expired'].includes(node('connection').textContent));
         assert.equal(node('connection').getAttribute('data-session-state'),authLoss==='unavailable'?null:'restart-required');

@@ -34,8 +34,13 @@
         }
         function draw() {
             paint = null;
-            if (drag && drag.band) { port.bandPreview(bandPreview(drag)); }
-            else if (drag && drag.moved) { port.preview([-drag.dx, -drag.dy], true); }
+            if (drag) { preview(drag, 'raf'); }
+        }
+        function preview(d, trigger) {
+            if (d.band) { port.bandPreview(bandPreview(d)); }
+            else if (d.moved) { port.preview([-d.dx, -d.dy], true); }
+            else { return; }
+            if (port.previewMeasured) { port.previewMeasured(d.inputTime, d.band ? 'band' : 'pan', trigger); }
         }
         function bandPreview(d) {
             return {start:d.start,end:d.end,outward:d.x-d.minX>d.maxX-d.x,dimensions:d.dimensions};
@@ -48,6 +53,7 @@
         }
         function update(event) {
             if (!drag) { return; }
+            drag.inputTime = port.now ? port.now() : null;
             if (drag.stamp !== port.stamp() || !port.ready()) { cancel(); return; }
             if (drag.band) {
                 if (port.bandReady && !port.bandReady()) { cancel(); return; }
@@ -123,7 +129,7 @@
                 else if(Math.max(done.maxX-done.x,done.x-done.minX)>=5 && port.notice){port.notice('Zoom band cancelled');}
                 return;
             }
-            if (done.moved) { port.preview([-done.dx, -done.dy], true); }
+            if (done.moved) { preview(done, 'release'); }
             drag = null; port.preview(null, false); port.cursor(false);
             if (done.moved && (done.dx || done.dy)) {
                 // No 16px snap for a mouse gesture: a sub-period release must

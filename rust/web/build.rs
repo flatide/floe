@@ -30,6 +30,7 @@ fn main() {
         "ui/clip.js",
         "ui/snapshot.js",
         "ui/display-dump.js",
+        "ui/display-timing.js",
         "ui/drc.js",
         "ui/drc-build.js",
         "ui/drc-notes.js",

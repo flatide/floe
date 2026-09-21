@@ -4,6 +4,10 @@
     const P = window.FloeProtocol;
     const bundle = document.querySelector('meta[name="floe-bundle"]').content;
     const el = function (id) { return document.getElementById(id); };
+    const timing = window.FloeDisplayTiming.bind({el: el, window: window});
+    const editTimings = new WeakMap();
+    document.addEventListener('visibilitychange', function () { if (document.hidden) { timing.stop(); } });
+    window.addEventListener('pagehide', function () { timing.stop(); timing.clear(); });
     const canvas = el('canvas'), viewport = el('viewport');
     const context = canvas.getContext('2d', {alpha: false});
     const marginCanvas = el('margin-canvas'), marginContext = marginCanvas.getContext('2d', {alpha: false});
@@ -202,6 +206,7 @@
         marginCanvas.hidden = true;
     }
     function clearBuffers() {
+        timing.clear();
         if (dumps) { dumps.reset(); }
         foregroundFrame = null; marginFrame = null; foregroundPerf = '';
         lastPlacement = null; dragShift = null;
@@ -288,6 +293,7 @@
     }
     function settleEdit(body, error) {
         if (!body) { return; }
+        timing.endEdit(editTimings.get(body), !error); editTimings.delete(body);
         const done = editCallbacks.get(body); editCallbacks.delete(body);
         if (done) { try { done(error || null); } catch (e) { report(e); } }
     }
@@ -311,6 +317,7 @@
                 wire.view_id=draft.context.id;wire.base_state_rev=draft.context.rev;wire.body=draft.body;
             }else if (body.prepared_token) { wire.token = body.prepared_token; } else { wire.body = body; }
             inflight = send(wire);
+            timing.sent(editTimings.get(body));
             lastSend = Date.now();
         } catch (e) { rejectEdits(e.message); report(e); }
     }
@@ -319,6 +326,8 @@
         const error = ownerBusy || submitting || indexBlocked() ? 'An owner operation or approval is pending. This input was not applied.' : !live() || !epoch ? 'Open a connected view first.' : queue.length >= 64 ? 'Input queue is full. This input was not applied.' : null;
         if (error) { notice(error); settleEdit(body, error); return null; }
         if (!body.navigation || body.navigation.kind !== 'pan' || !body.navigation.snap) { freezeMargin(); }
+        const editTiming = timing.beginEdit(body.navigation && body.navigation.kind);
+        if (editTiming) { editTimings.set(body, editTiming); }
         queue.push(body); pump(); present();
         return function () {
             const i = queue.indexOf(body);
@@ -387,6 +396,7 @@
         catch (e) { report(e); ws.close(); }
     }
     function frame(buffer, ws, serial) {
+        const receivedAt = timing.now();
         let packet;
         try { packet = P.packet(buffer); } catch (e) { report(e); ws.close(); return; }
         const h = packet.header;
@@ -394,10 +404,11 @@
             (!accepted || (h.purpose === 'foreground' && P.compare(h.render_rev, accepted.render) >= 0)) && !document.hidden; };
         if (!valid()) { acknowledge(h, 'discarded', ws, serial); return; }
         if (decode) { notice('Frame credit violation'); ws.close(); return; }
+        const frameTiming = timing.beginFrame(h, receivedAt);
         let done = false;
         function finish(draw) {
             if (done) { return; } done = true;
-            let disposition = 'discarded';
+            let disposition = 'discarded', submitted = false;
             try {
                 if (draw && valid()) {
                     const target = h.purpose === 'margin' ? marginCanvas : canvas;
@@ -433,15 +444,18 @@
                                 ' proxies/' + (perf.stored_rep_bytes || '0') + ' bytes/' + (perf.stored_rep_painted_pixels || '0') + ' painted px' : '');
                     }
                     present();
+                    submitted = true;
                 }
             } catch (e) { report(e); }
+            timing.endFrame(frameTiming, submitted);
             decode = null; acknowledge(h, disposition, ws, serial);
         }
         const task=decodeImage(h,packet.data,
-            function(draw,error){if(error){notice(error.message);}finish(draw);});
-        decode=task.cancel;task.start();
+            function(draw,error){timing.decoded(frameTiming);if(error){notice(error.message);}finish(draw);});
+        decode=function(){task.cancel();timing.endFrame(frameTiming,false);};task.start();
     }
     function disconnect() {
+        timing.interrupt();
         if (inspector) { inspector.interrupt(); }
         ackedFrames = {foreground: null, margin: null};
         if (gesture) { gesture.cancel(); }
@@ -475,6 +489,7 @@
                 else if (inspector && inspector.receive(m)) { /* latest query owns its response */ }
                 else if (m.type === 'accepted') {
                     if (m.seq !== inflight) { throw new Error('Unexpected edit acknowledgement'); }
+                    timing.ack(editTimings.get(inflightBody));
                     accepted = {rev: m.state_rev, render: m.render_rev};
                 } else if (m.type === 'error') {
                     if (m.seq === inflight) {
@@ -486,6 +501,7 @@
         };
         ws.onclose = function () {
             if (socket !== ws || serial !== socketSerial) { return; }
+            timing.interrupt();
             if (gesture) { gesture.cancel(); }
             const uncertain = !!inflight || queue.length > 0;
             freezeMargin(); epoch = ''; socket = null; finishDecode(); rejectEdits('Connection interrupted; pending input was not replayed.');
@@ -1005,6 +1021,7 @@
     });
     viewport.addEventListener('mouseleave', function () { if (drcPanel) { drcPanel.move(NaN, NaN); } if (inspector) { inspector.move(NaN, NaN); } if (measurement) { measurement.move(NaN, NaN); } });
     gesture = window.FloeGestures.bind({viewport: viewport, window: window, document: document,
+        now: timing.now, previewMeasured: timing.preview,
         dimensions: dims, ready: function () { return !indexBlocked() && live() && displayed && !!epoch && !inflight && queue.length === 0; },
         stamp: function () { return currentId + ':' + epoch + ':' + (state ? state.state_rev : ''); },
         requestAnimationFrame: function (fn) { return window.requestAnimationFrame(fn); },
@@ -1024,7 +1041,7 @@
             box.style.width=(Math.max(1,Math.round(Math.abs(ex-x)))/d.dpr)+'px';box.style.height=(Math.max(1,Math.round(Math.abs(ey-y)))/d.dpr)+'px';
             box.style.borderWidth=(1/d.dpr)+'px';hint.textContent=(b.outward?'Zoom out':'Zoom in')+' · release to apply · Esc cancels';
         },
-        cursor: reviewCursor, pan: nav, objectClicks: true, selectionMode: function () { return !!drcPanel && drcPanel.boxActive(); },
+        cursor: function(active){if(!active){timing.endGesture();}reviewCursor();}, pan: nav, objectClicks: true, selectionMode: function () { return !!drcPanel && drcPanel.boxActive(); },
         click: function (x, y, twice, modifiers) {
             if (measurement && measurement.active()) { measurement.click(x, y, modifiers); return; }
             const m = modifiers || {};

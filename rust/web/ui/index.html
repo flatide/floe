@@ -16,6 +16,7 @@
   <script defer src="/assets/@@BUNDLE@@/clip.js"></script>
   <script defer src="/assets/@@BUNDLE@@/snapshot.js"></script>
   <script defer src="/assets/@@BUNDLE@@/display-dump.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/display-timing.js"></script>
   <script defer src="/assets/@@BUNDLE@@/panel-state.js"></script>
   <script defer src="/assets/@@BUNDLE@@/rulers.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-groups.js"></script>
@@ -453,6 +454,12 @@
         <label for="display-test-observed">What do you see?</label><select id="display-test-observed"><option value="unverified">Not checked</option><option value="all_visible">All three panels look correct</option><option value="display_problem">One or more panels are wrong or blank</option></select>
         <pre id="display-test-report" tabindex="0" aria-label="Local display diagnostic report"></pre>
       </div>
+      <h2>Browser timing · local diagnostics</h2>
+      <label class="check"><input id="timing-enabled" type="checkbox"> Record browser callback timings</label>
+      <p class="note">Off by default. Last 256 numeric samples only; no coordinates, filenames, IDs, pixels, notes, network upload or persistent storage. Close About before navigating, then reopen it and refresh this report. Hidden pages stop recording. Recording adds overhead.</p>
+      <p class="note">Edit queue→send→acknowledgement→snapshot, frame callback→packet check→decode→Canvas submission, and drag event→preview submission are separate measurements. These are not actual paint, input-to-photon, FPS or a GTK comparison. OS/ETX presentation needs separate measurement.</p>
+      <div class="button-row"><button id="timing-refresh" type="button">Show / refresh measurements</button><button id="timing-clear" type="button">Clear measurements</button></div>
+      <pre id="timing-report" tabindex="0" aria-label="Local browser callback timing report"></pre>
       <h2>Distribution notices</h2>
       <p>Portable packages contain the collected original material in NOTICES/ (starting with INVENTORY.txt). Use verify.sh to check the complete package hashes. The reader below displays one bounded source chunk at a time, not executable HTML.</p>
       <p class="note">The inventory includes build dependencies and may include components not linked at runtime. It is not legal clearance or a grant of Floe distribution rights. Development executables may have no adjacent notice bundle.</p>

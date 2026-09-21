@@ -379,6 +379,9 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
     let page = server.request("GET", "/", &[], "").await;
     assert_eq!(page.status, 200);
     assert!(page.body.contains(&format!("/assets/{BUNDLE}/app.js")));
+    assert!(page
+        .body
+        .contains(&format!("/assets/{BUNDLE}/display-timing.js")));
     assert!(page.body.contains(&format!("/assets/{BUNDLE}/palette.js")));
     assert!(page.body.contains(&format!("/assets/{BUNDLE}/presets.js")));
     assert!(page
@@ -393,6 +396,7 @@ async fn embedded_assets_are_content_identified_and_never_serve_files() {
         ("app.js", "text/javascript"),
         ("image-decode.js", "text/javascript"),
         ("display-test.js", "text/javascript"),
+        ("display-timing.js", "text/javascript"),
         ("palette.js", "text/javascript"),
         ("presets.js", "text/javascript"),
         ("fill-editor.js", "text/javascript"),

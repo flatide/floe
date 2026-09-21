@@ -6,6 +6,8 @@
 47개 커밋과 새 Rust/웹 옵션·렌더 상태를 반영했다. 기본 배터리의97개 실행 대상은
 여러 실행에 걸쳐 모두 통과했다. 최초 기동 timeout·단독 재통과를 구분해 기록하며,
 한 번의 전체 배터리 성공이나 GUI/현장 수용 완료로 집계하지 않는다.
+G1 조사용 [기본 off 브라우저 구간 계측](WEBUI_G1_TIMING.ko.md)을 추가했다.
+입력 큐·이미지 준비·Canvas/CSS 반영을 분리하며, photon·GTK/ETX 수용은 별도다.
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
@@ -763,6 +765,8 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
 - **G1 (loopback, 배포 A)**: 동일 뷰·동일 renderd에서 input→photon
   지연과 drag-pan frame pacing이 GTK 셸 이하(±10%)일 것. 미통과 시
   전송 단계(T1/T2)를 앞당겨 재측정.
+  로컬 진단의 측정 경계·재현 순서는 [G1 계측](WEBUI_G1_TIMING.ko.md) 참조.
+  JS 콜백 시간만으로 이 수용 조건을 통과 처리하지 않는다.
 - **G2 (ETX, 배포 B)**: TeeBox의 실제 Firefox 버전으로 Firefox-in-ETX
   vs GTK-in-ETX를 drag pacing·settle 체감·ETX 대역폭으로 비교.
   미통과 시 주 작업자는 GTK 유지, 웹은 배포 C 전용으로 축소 — 이

@@ -30,6 +30,7 @@ input[type="color"] { padding: 1px; width: 26px; height: 25px; min-height: 25px;
 .about-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .about-heading h2 { margin: 0; }
 .about-card pre { white-space: pre-wrap; overflow-wrap: break-word; user-select: text; padding: 12px; background: #111720; line-height: 1.5; }
+#timing-report { max-height: 20rem; overflow-y: auto; }
 .about-card p { line-height: 1.6; }
 .session-exit-card { width: 440px; }
 .browse-card { width: 850px; }

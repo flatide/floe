@@ -187,6 +187,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../ui/display-dump.js"),
         ),
+        "display-timing.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/display-timing.js"),
+        ),
         "drc.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/drc.js"),

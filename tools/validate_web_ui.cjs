@@ -8,6 +8,8 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
+const timingClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_TIMING:'1'}});
+assert.equal(timingClient.status,0,'browser timing client: '+timingClient.error);
 for(const loss of ['missing','unreadable','cookie','unavailable']){
     const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_AUTH_LOSS:loss}});
     assert.equal(run.status,0,'session loss client '+loss+': '+run.error);
@@ -44,7 +46,7 @@ for(const file of ['wheel.test.cjs','client.test.cjs']){
     const run=spawnSync(process.execPath,[path.join(ui,file)],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_WHEEL:'1'}});
     assert.equal(run.status,0,'wheel '+file+': '+run.error);
 }
-for(const name of ['image-decode','display-test','display-input','display-page','display-dump']){
+for(const name of ['image-decode','display-test','display-input','display-page','display-dump','display-timing']){
     acorn.parse(fs.readFileSync(path.join(ui,name+'.js'),'utf8'),options);
     const test=spawnSync(process.execPath,[path.join(ui,name+'.test.cjs')],{stdio:'inherit',timeout:15000});
     assert.equal(test.status,0,name+': '+test.error);

@@ -189,3 +189,20 @@ for(const button of [0,1,2]) {
     wrong.advance(100);wrong.mouse('mouseup',160,140);assert.equal(wrong.sent.length,0);releaseCases++;
 }
 console.log('WEB RELEASE ORDER: ALL OK ('+releaseCases+' cases; left/middle pan + right band, immediate/painted, lost input/cancel, no delayed navigation)');
+
+// Timing sees only the latest event used by a coalesced preview, not the first
+// queued event, and never changes release-only navigation or adds a RAF loop.
+{
+    const v=target(),w=target(),d=target(),raf=new Map(),seen=[],sent=[];let tick=0,next=0;
+    const g=gestures.bind({viewport:v,window:w,document:d,ready:()=>true,stamp:()=>1,
+        dimensions:()=>({pixels:[800,600],dpr:1}),now:()=>tick,
+        preview(){},previewMeasured:(...x)=>seen.push(x),cursor(){},pan:x=>sent.push(x),
+        requestAnimationFrame:f=>{raf.set(++next,f);return next;},cancelAnimationFrame:id=>raf.delete(id)});
+    v.emit('mousedown',event(100,100));tick=3;w.emit('mousemove',event(130,120));
+    tick=6;w.emit('mousemove',event(140,120));assert.equal(raf.size,1);assert.equal(seen.length,0);
+    tick=22;const draw=raf.values().next().value;raf.clear();draw();
+    assert.deepEqual(seen,[[6,'pan','raf']]);assert.equal(sent.length,0);
+    tick=25;w.emit('mouseup',event(150,120,0,0));
+    assert.deepEqual(seen[1],[25,'pan','release']);assert.equal(sent.length,1);assert(!g.active());assert.equal(raf.size,0);
+}
+console.log('WEB PREVIEW TIMING: OK (coalesced latest-event boundary; release-only input unchanged)');
