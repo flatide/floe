@@ -22,16 +22,70 @@ from validate_web_cli_inventory import legacy_parsers
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def measured_run(stage, *args, **kwargs):
+def cargo_progress(stdout, stderr):
+    """Summarize captured Cargo output, never its paths, messages or arguments.
+
+    A bounded tail is evidence of observed events, not proof that compilation
+    never began when no event was captured. It cannot identify a loader stall.
+    """
+    limit = 1024 * 1024
+    progress = dict(fresh=0, built=0, artifacts_other=0, messages=0, scripts=0,
+                    finished=None, build_lock=0, cache_lock=0, ignored=0,
+                    truncated=False)
+
+    def tail(value):
+        if not isinstance(value, (str, bytes)):
+            return ""
+        progress["truncated"] |= len(value) > limit
+        value = value[-limit:]
+        if isinstance(value, str):
+            value = value.encode("utf-8", errors="replace")
+        progress["truncated"] |= len(value) > limit
+        return value[-limit:].decode("utf-8", errors="replace")
+
+    for line in tail(stdout).splitlines():
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            progress["ignored"] += 1
+            continue
+        if not isinstance(record, dict):
+            progress["ignored"] += 1
+            continue
+        reason = record.get("reason")
+        if reason == "compiler-artifact":
+            fresh = record.get("fresh")
+            key = "fresh" if fresh is True else "built" if fresh is False else "artifacts_other"
+            progress[key] += 1
+        elif reason == "compiler-message":
+            progress["messages"] += 1
+        elif reason == "build-script-executed":
+            progress["scripts"] += 1
+        elif reason == "build-finished" and type(record.get("success")) is bool:
+            progress["finished"] = record["success"]
+        else:
+            progress["ignored"] += 1
+    for line in tail(stderr).splitlines():
+        if line.strip() == "Blocking waiting for file lock on build directory":
+            progress["build_lock"] += 1
+        elif line.strip() == "Blocking waiting for file lock on package cache":
+            progress["cache_lock"] += 1
+    return progress
+
+
+def measured_run(stage, *args, report_cargo=False, **kwargs):
     """Separate compilation/launch latency; preserve every original deadline."""
     started = time.monotonic()
     outcome = "interrupted"
+    stdout = stderr = None
     print(f"WEB STARTUP STAGE: {stage} begin", flush=True)
     try:
         result = subprocess.run(*args, **kwargs)
+        stdout, stderr = result.stdout, result.stderr
         outcome = f"exit={result.returncode}"
         return result
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
+        stdout, stderr = error.output, error.stderr
         outcome = "timeout"
         raise
     except OSError:
@@ -42,6 +96,9 @@ def measured_run(stage, *args, **kwargs):
         # session paths. This is wall time, not Rust test-body or render time.
         elapsed = time.monotonic() - started
         print(f"WEB STARTUP STAGE: {stage} {outcome} wall={elapsed:.3f}s", flush=True)
+        if report_cargo:
+            print("WEB STARTUP CARGO: " + json.dumps(cargo_progress(stdout, stderr),
+                                                   sort_keys=True), flush=True)
 
 
 def refinement_oracle():
@@ -145,7 +202,7 @@ def oracle(work):
     path.write_text(json.dumps(cases))
     build = measured_run("oracle-build", [shutil.which("cargo"), "test", "--offline", "--locked", "-p", "floe-app",
         "--lib", "--no-run", "--message-format=json"], cwd=ROOT / "rust",
-        capture_output=True, text=True, timeout=180)
+        capture_output=True, text=True, timeout=180, report_cargo=True)
     assert build.returncode == 0, (build.stdout, build.stderr)
     bins = [r["executable"] for line in build.stdout.splitlines()
             if (r := json.loads(line)).get("reason") == "compiler-artifact" and r.get("executable")]

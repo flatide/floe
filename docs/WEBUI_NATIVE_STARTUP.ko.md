@@ -90,3 +90,71 @@ sh tools/validate_rust.sh --only layerprops
 다음 전체 실행에서 시작 대기와 본문 단계 실패를 분리해 기록한다. 모든 테스트
 실행 파일을 무조건 미리 실행하거나 보안 설정을 완화하는 해법은 채택하지 않는다.
 G1/G4 실제 UI·장애 수용, RHEL8.6/8.10+ETX, 정식 호스트 채택·서명/배포는 별도다.
+
+## Cargo 빌드 경로 분리 진단 — 2026-09-22
+
+`af40d64` 뒤의 전체 실행은 위 layerprops/기본값을 통과한 뒤 `web_startup`의
+`cargo test --offline --locked -p floe-app --lib --no-run --message-format=json`
+명령에서180.009초 timeout이었다. 당시 로그에는 Cargo의 부분 출력이 없어 빌드 락,
+컴파일/링크, 프로세스 기동 중 어느 구간인지 구분할 수 없었다. 아래 별도 실행이
+그 **과거 실패의 원인을 확정하거나 전체 gate를 성공으로 바꾸지는 않는다**.
+
+동일 명령·180초 한도로 한 번 진단 실행했다.10초 시점에 이 실행이 소유한 Cargo와
+두 rustc만 각각1초 sampling했다. Cargo는 compiler job의 출력을 기다렸으며, 두
+rustc는 이미 `main`에 진입해 `SearchPath::new → ReadDir → __getdirentries64`에
+머물렀다(543/550, 761/769표본). 이전 test executable의 `_dyld_start` 관측과는
+**다른 구간**이다. 명령은38.575초에 exit0, artifact107개 중 fresh102/built5,
+build-script19개, compiler-message3개, build-finished1개를 반환했다.
+
+읽기 전용 목록 집계:
+
+| 경로 | 항목 수 | `.o` 수 | 목록 집계 wall |
+|---|---:|---:|---:|
+| `rust/target/debug/deps` | 945,506 | 943,080 | 8.820초 |
+| `electron/service/target/debug/deps` | 11,109 | 10,603 | 0.083초 |
+
+동일한 의존성 없는 작은 Rust 입력을 stdin으로 넣고 `--crate-type=lib
+--emit=metadata`의 `-L dependency=...`만 바꿨다. 빈 폴더→기존 큰 deps→빈 폴더
+순서로 각30초 한도, 실행 시간은 **0.021 / 8.651 / 0.021초**, 세 출력2059바이트가
+완전히 같았다. 새 임시 metadata만 만들었고 기존 산출물은 변경하지 않았다.
+이 대조는 해당 큰 디렉터리의 검색 비용을 확인한다. 전체 빌드 시간 분해, 렌더
+성능, 과거180초 전부의 설명이나 Electron helper3건 timeout의 원인 증명은 아니다.
+
+Cargo의 macOS debug 기본값은 `split-debuginfo=unpacked`이고, 이 방식은 debug
+정보를 위해 object 파일을 남긴다([Cargo profiles](https://doc.rust-lang.org/cargo/reference/profiles.html#split-debuginfo),
+[Rust 1.51 설명](https://blog.rust-lang.org/2021/03/25/Rust-1.51.0/)). 따라서 `.o`라는
+이유만으로 쓰레기로 판정하거나 일괄 삭제하면 안 된다. 현재 profile/환경에서
+별도 save-temps 설정은 발견하지 않았지만,94만개의 생성 이력을 모두 추적한 것은
+아니다. 이번에는 `cargo clean`, target 개명/삭제, debug 설정 변경을 하지 않았다.
+후속 비교는 기존 debug 산출물을 보존한 별도 빌드 디렉터리에서 같은 설정으로
+수행할 수 있다. 전체 검증기의 고정 worker 경로와도 맞춰야 하며, 단순히
+`CARGO_TARGET_DIR`만 바꿔 전체 배터리 수용을 선언하지 않는다.
+
+### 실패 출력의 유실 방지
+
+`validate_web_startup.py`의 oracle-build만 `WEB STARTUP CARGO` 요약을 추가한다.
+성공/실패/timeout의 captured stdout/stderr 각각 마지막1MiB에서 고정 Cargo JSON
+이벤트 수, fresh/built 수, 마지막 build-finished boolean, 정확히 일치한 build/cache
+lock 문구의 횟수와 truncation 여부만 출력한다. 경로·인자·환경·compiler diagnostic
+본문·알 수 없는 필드는 출력하지 않는다. `finished=true`가 있어도 원래 timeout은
+다시 raise한다. 이벤트 미관찰은 미시작/락 없음의 증명이 아니다.
+
+추가 subprocess, 산출물 자동 목록 조사, 자동 sampling, 재시도·워밍업·deadline
+변경은 gate에 넣지 않았다. 순수 timing 검사는 기존6개 결과에 더해 부분 bytes/str,
+boolean 엄격 검사,1MiB/다국어/잘린 JSON/깊은 JSON, 비밀 문자열 비노출,
+원래 명령·예외 보존을 검사한다.
+
+진단 artifact(모두 합성/빌드 경로):
+
+- `/private/tmp/floe-cargo-stage-d3ldadi4/`: Cargo 출력과 소유 process3개의 sample.
+- `/private/tmp/floe-search-path-probe-7asd3cbx/`: 동일 metadata3개와 빈 검색 폴더.
+- `/private/tmp/floe-cargo-progress-selected.log`: 변경 후 선택 `web_startup` gate.
+
+순수 timing/진행 정보 검사는 통과했다. 실제 `sh tools/validate_rust.sh --only
+web_startup`는 **exit1**: oracle-build9.530초/exit0(fresh106/built1,
+build-finished=true, truncation=false) 뒤 `gtk-startup`30.005초 timeout이었다.
+그 프로세스의 이번 stack/본문 진입 표시는 수집하지 않아 원인은 미확정이다.
+새 진단이 빌드 성공과 다음 실행 실패를 구분하는 것까지 확인했으며, 뒤의 stream/
+native 검사와 전체 배터리는 성공으로 세지 않는다. 실행용 `.venv` 링크는 제거했다.
+
+이 단계는 제품/Rust 버전을 바꾸지 않으며 클립보드도 다시 읽거나 덮어쓰지 않는다.
