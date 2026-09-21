@@ -12,10 +12,15 @@ const runtime = require('./runtime.json');
 app.setName('floe2 Electron comparison');
 app.enableSandbox();
 const args = process.argv.slice(app.isPackaged ? 1 : 2);
-const smoke = args.length === 1 && args[0] === '--smoke-test';
+const emptySmoke = args.length === 1 && args[0] === '--smoke-test';
+// Explicit read-only QA of a pre-indexed synthetic source. No DRC/default writes,
+// indexing or caller-chosen output path. The validation driver creates the source.
+const layoutSmoke = args.length === 2 && args[0] === '--smoke-layout-test' && path.isAbsolute(args[1]);
+const smoke = emptySmoke || layoutSmoke;
 let profile, root, window, service, close, origin = null, panel = false, stopping = false;
 let ended = false, failure = false, shuttingDown = false, qaCompleted = false;
 let statusURL = null, deniedNavigations = 0, deniedWindows = 0;
+let qaStep = 'startup';
 const validRuntime = process.versions.electron === runtime.version && ['darwin', 'linux'].includes(process.platform) &&
   !['no-sandbox', 'disable-web-security', 'remote-debugging-port', 'remote-debugging-pipe'].some(s => app.commandLine.hasSwitch(s));
 
@@ -149,8 +154,9 @@ app.whenReady().then(async () => {
     { label: 'View', submenu: [{ label: 'Recover View…', click: recover }, { label: 'About…', click: () => menuAction('about-open') }] }
   ]));
   status('Starting the Rust service. Close this window to cancel. This is a comparison build; download and programmatic clipboard permissions are not enabled.');
-  const viewArgs = smoke ? [] : (args[0] === 'view' ? args.slice(1) : args);
-  if (smoke) {
+  const viewArgs = layoutSmoke ? [args[1], '--goto', '200,200,300', '--depth', 'full', '--detail', 'high',
+    '--jobs', '4', '--raster-jobs', '4', '--refinement', 'off'] : emptySmoke ? [] : (args[0] === 'view' ? args.slice(1) : args);
+  if (emptySmoke) {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-smoke-'));
     fs.chmodSync(root, 0o700); viewArgs.push('--root', root);
   }
@@ -174,11 +180,14 @@ app.whenReady().then(async () => {
   service.on('ready', ready => {
     if (stopping || ended) return;
     origin = ready.origin;
-    web.loadURL(ready.url).then(() => { if (smoke) runSmoke().catch(() => { failure = true; cancelService(); }); }).catch(() => fail());
+    web.loadURL(ready.url).then(() => { if (smoke) runSmoke().catch(() => {
+      console.log('ELECTRON SMOKE: failed stage ' + qaStep); failure = true; cancelService();
+    }); }).catch(() => fail());
   });
 }).catch(() => { failure = true; cancelService(); });
 
 async function runSmoke() {
+  qaStep = 'authentication';
   const wait = async (script) => {
     const end = Date.now() + 30000;
     while (Date.now() < end && !ended && !stopping) {
@@ -188,10 +197,11 @@ async function runSmoke() {
     throw new Error('synthetic QA did not reach expected state');
   };
   await wait("(()=>{const b=document.getElementById('logout');return !document.hidden&&!location.hash&&!!b&&!b.disabled;})()");
-  await wait("/No matching entries/.test(document.getElementById('browse-status').textContent)");
+  if (emptySmoke) await wait("/No matching entries/.test(document.getElementById('browse-status').textContent)");
   const prefs = window.webContents.getLastWebPreferences();
   if (!prefs.sandbox || !prefs.contextIsolation || prefs.nodeIntegration || prefs.preload || window.webContents.session.isPersistent()) throw new Error('invalid synthetic preferences');
   if (await evalOwned("typeof require==='undefined'&&typeof process==='undefined'") !== true) throw new Error('Node exposed');
+  qaStep = 'navigation guards';
   // Attempt navigation only to a fresh owned loopback sentinel, never an external
   // host. Require the actual host guard to fire, not just a coincidental CSP block.
   const sentinel = require('node:http').createServer((_req, res) => { requests++; res.end('synthetic'); });
@@ -209,6 +219,11 @@ async function runSmoke() {
       throw new Error('synthetic navigation guard failed');
     }
   } finally { await new Promise(resolve => sentinel.close(resolve)); }
+  if (layoutSmoke) {
+    qaStep = 'layout actions';
+    await require('./layout-qa.cjs').run({ app, window, evalOwned, service });
+  }
+  qaStep = 'capture';
   // Capture only the authenticated synthetic empty-root page, after checking
   // visibility. A capture must not be used to make a hidden-page test pass.
   if (await evalOwned('!document.hidden&&!location.hash') !== true) throw new Error('hidden synthetic page');
@@ -218,6 +233,7 @@ async function runSmoke() {
   fs.chmodSync(artifacts, 0o700);
   fs.writeFileSync(path.join(artifacts, 'window.png'), capture.toPNG(), { flag: 'wx', mode: 0o600 });
   console.log('ELECTRON SMOKE: synthetic screenshot ' + path.join(artifacts, 'window.png'));
+  qaStep = 'close cancel quit';
   await close.request();
   await wait("!document.getElementById('session-exit-dialog').hidden&&document.activeElement.id==='session-exit-cancel'");
   await evalOwned("document.getElementById('session-exit-cancel').click()");

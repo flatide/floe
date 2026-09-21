@@ -11,7 +11,7 @@
 |---|---|---|
 | E0 | 기존 Rust Session의 전용 파이프 sidecar, JS 클라이언트, 수명/인증 회귀 | 구현·실제 Node↔Rust 합성 검사; 아래 계약 |
 | E1 | sandboxed Electron 독립 창, 같은 웹 번들, 시작/종료/실패 처리, 런타임 고정/검증 | macOS arm64 실제 Chromium 합성 창 검사 통과. 기능·성능 수용은 E2/E3 |
-| E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | 비교·측정 필요. 단순 HTTP 시간은 input→photon이 아님 |
+| E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | E2a 합성 pan·메모리 프로브 통과. WK/현장 대조·물리 입력·입출력·복구 수용은 남음 |
 | E3 | RHEL 전체 ELF/라이브러리 의존성, sandbox·ETX/다중 사용자 실측, 라이선스/업데이트/오프라인 배포 | 현장 대기, OS 패키지/보안 설정 변경 없음 |
 
 Rust geometry·렌더러·색인·DRC·파일 권한/저장 API를 JS로 옮기지 않는다. Electron은
@@ -134,6 +134,62 @@ sh tools/run_electron_dev.sh
 통과했으며 ETX·glibc·Chromium sandbox·서버 메모리 비용을 검증한 것은 아니다.
 
 ## E2 이후 고정할 비교 조건
+
+### E2a: 합성 레이아웃·pan·계측 프로브
+
+`tools/validate_electron_layout.cjs`는 인자를 받지 않고 새 임시 폴더에 기존 valmini
+generator로 합성 OASIS를 만든 뒤 Rust index4 jobs로 인덱싱한다. 개발 fixture 생성에만
+Python/KLayout을 사용하며 실행하는 Electron·Rust 제품 경로에는 Python이 없다.
+실행 전후 합성 source/cache 파일 SHA-256 inventory가 같아야 통과한다.
+
+```sh
+export FLOE_ELECTRON_BIN="/absolute/path/Electron.app/Contents/MacOS/Electron"
+export FLOE_QA_PYTHON_BIN="/absolute/path/venv/bin/python" # KLayout 있는 개발 oracle
+# debug service 비교라면 명시; 생략은 release 경로
+export FLOE_ELECTRON_SERVICE_BIN="$PWD/electron/service/target/debug/floe-electron-service"
+node tools/validate_electron_layout.cjs
+```
+
+내부 `--smoke-layout-test ABS_SOURCE`는 기존 색인을 읽고 view 조작만 한다. 검증용
+합성 소스에만 사용한다. DRC/default 저장·index·출력 경로 인자를 허용하지 않으며
+화면 캡처/metrics는 별도 새0700폴더에0600으로 남긴다. 일반 실행에는 QA가 없다.
+공통 메뉴와 QA protocol 수학을 기존 `desktop/ui`, `rust/web/ui`에서 읽으므로 현재
+개발 비교판은 저장소 전체 레이아웃을 필요로 한다.
+
+실제 macOS arm6444.4.3에서 **exit0**: goto200,200,300µm/full/high, decode4/raster4,
+refinement off, DPR2,1640×1317 device px. 활성 Chromium 창에 Shift+Right/Left 및
+Right/Left를 주입하고, 실제 가시 margin 착지·작업 완료·두 RAF를 기다린다. 10%/50%
+각 pan에서는 캡처 픽셀이 변하고 원위치에서는 **BGRA bytes가 초기와 완전히 동일**.
+소스/cache 불변, 기존 인증/탐색 차단/종료 gate도 통과했다.
+
+2026-09-21 마지막 단일 실행의 참고값(debug Rust service + release index/renderd):
+
+| 관측 | 값 | 해석 한계 |
+|---|---:|---|
+| 10% 이동 / 복귀 | 42.7 / 34.6ms | 입력 주입→margin까지 안정된 DOM+2RAF,10ms polling 포함 |
+| 50% 이동 / 복귀 | 99.7 / 38.1ms | 최초 반응 시간·input→photon·p95가 아님 |
+| Chromium4 프로세스 working-set 합 | 약741MiB | 공유 페이지 중복 가능; 고유/피크 메모리 아님 |
+| Rust service+renderd2 프로세스 RSS 합 | 약448MiB | 같은 시점의 참고값; 위 값과 합쳐 고유 메모리라 하지 않음 |
+
+캡처/readback도 작업 사이 부하를 더한다. 메모리는 Chromium의 `getAppMetrics()`와
+숫자만 읽는 `ps`의 **소유 Rust service 자손**을 구분한다. renderer Tab의 OS sandbox는
+실측 true, Browser main의 false는 정상 호스트 권한 경계다. 모든 프로세스가 sandboxed라고
+주장하지 않는다. [Electron 프로세스 지표](https://www.electronjs.org/docs/latest/api/structures/process-metric),
+[메모리 단위](https://www.electronjs.org/docs/latest/api/structures/memory-info).
+
+초기 실패도 보존한다. 첫 하네스는16px pan 스냅을 무시한 기대 좌표로 timeout이었다.
+다음에는 foreground를 초기 캡처로 잡고 margin 복귀와 비교해848,168픽셀 차이가 났다.
+최종 gate는 **실제 Live margin crop 착지끼리** 비교한다. 제품 cut/raster/표시 규칙은
+바꾸지 않았다. 이는 foreground→margin 전환의 픽셀 불변을 증명하지 않으며 그 대조는
+E2/G1에 별도로 남긴다. 허용 오차를 키워 통과시킨 것이 아니다.
+
+최종 로그: `/private/tmp/floe-electron-layout-final.log`; 합성 캡처/metrics:
+`/var/folders/1v/1wct59qn2dbc457m8msmb5c80000gn/T/floe-electron-layout-cDb1lU/`.
+현재 Node unit12개 + 실제 pipe5개 =17개, Rust unit5·clippy·실제 빈 창 회귀는
+`sh tools/validate_electron.sh`로 재실행한다. WKWebView와 같은 조건의 대조,
+cold startup·반복 분포/peak·물리 입력·RHEL/ETX 수용은 아직 없다.
+
+### 비교·배포 시 유지할 조건
 
 - `electron/runtime.json`은 공식 릴리스 **44.4.3 (2026-09-18)** 및 공식 SHA-256을
   기록한다. macOS arm64는 검증·실행했고, macOS x64·Linux x64 검증/실행은 남았다.
