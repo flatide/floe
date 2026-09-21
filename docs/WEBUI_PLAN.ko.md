@@ -769,10 +769,13 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   전송 단계(T1/T2)를 앞당겨 재측정.
   로컬 진단의 측정 경계·재현 순서는 [G1 계측](WEBUI_G1_TIMING.ko.md) 참조.
   JS 콜백 시간만으로 이 수용 조건을 통과 처리하지 않는다.
-- **G2 (ETX, 배포 B)**: TeeBox의 실제 Firefox 버전으로 Firefox-in-ETX
-  vs GTK-in-ETX를 drag pacing·settle 체감·ETX 대역폭으로 비교.
-  미통과 시 주 작업자는 GTK 유지, 웹은 배포 C 전용으로 축소 — 이
-  경우에도 투자 손실이 없다(C는 확정 수요).
+- **G2 (ETX, 배포 B)**: 필수 대상은 RHEL 8.6/8.10 + ETX/X11의
+  **독립 창 + 내장 WebView**다. 같은 소스·캐시·뷰·표시 옵션·renderd로
+  GTK-in-ETX와 drag pacing·settle·화질·ETX 대역폭을 비교한다.
+  실제 Firefox-in-ETX 대조도 기존 브라우저 경로의 근거로 유지하지만,
+  Firefox 통과로 내장 앱의 ABI·입력·표시 수용을 대신하지 않는다.
+  미통과 시 주 작업자는 GTK를 유지하고 내장 앱의 원인을 개선·재검증한다.
+  배포 C만 제공하는 것으로 필수 독립 앱 요구를 완료 처리하지 않는다.
 - **G3 (원격, 배포 C)**: LAN 기준 goto→settle이 ETX 대비 동급 이상.
 - **일반 레이아웃의 GTK margin 계약을 M1부터 이관**한다(G1의 전제). "이전 viewport
   이미지를 이동시키고 새 프레임 요청"만 구현하면 GTK가 이미 해결한
@@ -858,9 +861,11 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
 
 2. **M2 — DRC 공유 뷰어 (배포 C)**: DRC 결과 목록/이동/waive 표시
    (읽기 전용), 게스트 토큰 URL 발급. 확정 수요 대응.
-3. **M3 — ETX 게이트 (배포 B)**: M0의 TeeBox 환경/버전을 재확인하고 G2 실측.
-   통과 시 launcher를 `--web`으로 전환할 준비, 미통과 시 원인
-   분석(전송 단계 상향) 후 재시도.
+3. **M3 — ETX 게이트 (배포 B)**: M0의 TeeBox 환경/버전과 내장 WebView의
+   RHEL ABI를 재확인하고 G2를 실측한다. Firefox 비교와 내장 앱 수용을
+   구분하며 [D0~D3](WEBUI_DESKTOP.ko.md)의 Linux 호스트·입출력·배포 검증을
+   함께 충족해야 한다. 통과 전 GTK launcher를 유지하고, 전환은 수용 후
+   별도로 판정한다. 미통과 시 원인 분석(전송 단계 상향 포함) 후 재시도한다.
 4. **M4 — 조작 parity + Python-free 제품 전환**: pick/snap/룰러/clip/
    label 토글/단축키, DRC waive·주석·설정 저장, 내보내기·보조 CLI까지
    §3.1b 전체를 검증한다. GTK 셸 은퇴 판정은 이 단계의 G4 완료 + 현장

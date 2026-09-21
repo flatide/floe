@@ -1,5 +1,8 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-21 최신 로컬 재검증은 [§7](#7-새-fixture의-legacy-오라클-준비-대기-2026-09-21)에
+기록한다. 전체 실행의 GTK 시작 timeout과 영향 범위6개 게이트의 성공은 별개다.
+
 M4g-59 후속: 새 합성 서버/Chrome 연결과 별도 복사본의 다중 저장·복구 검사가
 승인됐으며 같은 규칙의2오류 메모/waive 저장·reload 재조회 및 준비 전 note 외부
 변경의 거부/명시 재조회·재승인을 실제 Chrome에서 확인했다
@@ -347,3 +350,50 @@ Python-free Linux 실행이나 현장 Firefox/ETX를 뜻하지 않는다. 세부
 91개 목록/89개 기본 실행 항목의 구분은 [M4 §115](WEBUI_M4.ko.md#115-m4g-58--native-시작-지연의-단계별-관측)에 기록한다.
 제품 코드/시간제한/재시도 정책은 바꾸지 않았으며 전체 배터리 재실행, 최신 빌드의
 실제 브라우저 승인/복구 수용, Linux 실행이나 G1/G4 최종 판정으로 세지 않는다.
+
+## 7. 새 fixture의 legacy 오라클 준비 대기 (2026-09-21)
+
+`b4339f6` 이후 전체 배터리를 새 임시 valmini로 실행했다. 첫 실행은 Rust 검사
+전에 legacy `.tiles` 생성에서 멈췄다. 약3분30초 시점의 부모/직접 자식은 CPU0%였고,
+부모 스택은 `Buffered_read → read`, 자식은 입력 파이프 대기였다. 해당 실행의
+부모에만 SIGINT를 보낸 결과 `_avail_ram_gb → check_output(vm_stat) → stdout.read`
+대기임을 traceback으로 확인했다. **의도적으로 중단한 exit1**이며, timeout 또는
+배터리 통과로 기록하지 않는다. fork 중 파이프 상속이 정확한 근본 원인인지는
+이번 표본만으로 확정하지 않는다. 로그: `/private/tmp/floe-webui-b4339f6-full.log`.
+
+개발 배터리의 **작은 기본 valmini 오라클 생성만 `--jobs 1`**로 고정했다.
+geometry 기준·legacy 구현·제품 CLI 기본값·native 병렬 테스트·시간제한은 불변이다.
+외부에서 지정한 milestone 소스에는 이 준비 경로를 실행하지 않는다. 준비 단계를
+숨기지 않고 이름을 출력한다. 이는 기존 Python 메모리 governor 자체를 고친 것이
+아니며, Rust 제품 실행에 Python을 추가한 것도 아니다.
+
+selector gate는99개 이름/20개 parser·predicate 대조를 유지한다. 실제 준비 helper를
+가짜 인터프리터로 실행해 한글/공백 경로·jobs1·PYTHONPATH·성공/실패 종료 코드의
+전달2건을 추가했다. 실제 설계 파일·KLayout·Cargo는 이 mock 검사에서 실행하지 않는다.
+새 합성 폴더의 수정 후 준비는 약4초(소스/완료 meta의 mtime 차이)로 완료됐으며,
+이 시간은 전체 배터리 또는 native 렌더 성능 수치가 아니다.
+
+수정 후 전체 `sh tools/validate_rust.sh`는 workspace unit·CLI·캐시 이관·패키징·
+macOS Python-free 재배치·내장 서비스·레이어·clip·query·스트림·owner 서비스·
+권한·파일 표시까지 진행한 뒤 **web_startup에서 exit1**이었다. oracle-build는
+22.626초에 exit0, `gtk_startup_oracle` 실행은30.003초 timeout이었다. 앞의 준비
+대기와 다른 지점이며 후속 DRC/UI/잡덱/픽셀 게이트는 이 전체 실행에서 미실행이다.
+로그: `/private/tmp/floe-webui-serial-oracle-full.log`. 전체 통과로 합산하지 않는다.
+
+오라클 준비 변경의 직접 영향 범위는 같은 합성 결과로 별도 실행했다.
+
+```sh
+sh tools/validate_rust.sh --only validation_selector,rust_scan,rust_tiles,rust_depth,rust_meta,rust_skel
+```
+
+**exit0 / ALL OK**:7셀·9 layer-pair·520 text scan,64 band XOR/depth,
+16 density tile·16 LOD file 메타데이터,8 geometry layer·802 label tuple·
+579 sidecar entry(790 members) 대조의 실패0건이다.
+`/private/tmp/floe-webui-serial-oracle-parity.log`에 기록했다. 두 실행의 검사 전용
+`.venv` 링크는 각각 종료 시 제거했다. 기존 의존성 경고·native GUI 숨김 문제·
+macOS 첫 실행 지연은 수정하거나 성공으로 처리하지 않았다.
+
+또한 상위 계획 G2/M3에 남아 있던 Firefox 전용 문구를 확정된 RHEL 독립 WebView
+요구와 맞췄다. Firefox/Chrome 통과만으로 내장 앱·ETX 수용을 대신하거나, 실패 시
+필수 독립 앱 요구를 배포 C로 축소하지 않는다. 현장 실행 보류·원격 SH-10/G3 보류,
+GTK 병존과 macOS 실제 입력/표시·G1/G4 잔여는 그대로다.

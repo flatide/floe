@@ -115,6 +115,13 @@ gate() {
     for g in $SELECTED; do [ "$g" = "$1" ] && return 0; done
     return 1
 }
+# Only the small default fixture uses the legacy .tiles oracle. Its geometry
+# is the reference, not its parallel throughput. Avoid the legacy fork pool's
+# concurrent memory-probe pipes during preparation (Darwin read/EOF stall).
+# Native indexing/render worker counts in the actual gates are unchanged.
+build_legacy_oracle() {
+    PYTHONPATH=. .venv/bin/python -m floe index --legacy "$1" --jobs 1
+}
 RAN=
 
 # Check checkout completeness before Cargo can hide a missing file behind a
@@ -168,7 +175,8 @@ if [ "$SRC" = "$FLOE2_SMOKE_SRC" ] && [ $NEEDS_TILES = 1 ]; then
         for c in "$VFSC" "$SRC.floe"; do
             if [ -e "$c" ]; then mv "$c" "$c.aside"; fi
         done
-        PYTHONPATH=. .venv/bin/python -m floe index --legacy "$SRC" \
+        echo '== legacy .tiles oracle (valmini, sequential)'
+        build_legacy_oracle "$SRC" \
             >/dev/null || {
             for c in "$VFSC" "$SRC.floe"; do
                 if [ -e "$c.aside" ]; then mv "$c.aside" "$c"; fi
