@@ -1051,6 +1051,30 @@ class RustRenderWorker:
             state["decode_workers"], _wire_int(fields, "decode_workers"))
         job = state["job"]
         deferred = _wire_int(fields, "deferred")
+        # where the time went that no phase timer covers (2026-09-21: the
+        # field's status line showed 15.5 s of 23 s in no phase, and wait was
+        # a constant 0). renderd reports how long the command waited behind
+        # earlier ones (queue_us) and its own wall time up to this frame
+        # (wall_us); wait is what the client waited beyond that wall - the
+        # queue and the pipe - and other is the wall no phase accounts for.
+        # A renderd without the fields (or a deck frame) answers 0: unknown.
+        state["queue_us"] = _wire_int(fields, "queue_us")
+        state["wall_us"] = _wire_int(fields, "wall_us")
+        state["text_plan_us"] = _wire_int(fields, "text_plan_us")
+        elapsed_ms = (time.monotonic() - state["started"]) * 1000.0
+        wall_ms = state["wall_us"] / 1000.0
+        wait_ms = other_ms = 0
+        if wall_ms > 0:
+            wait_ms = max(0, round(elapsed_ms - wall_ms -
+                                   state["adapter_read_us"] / 1000.0))
+            if not probe:
+                phases_us = (state["plan_us"] + state["text_plan_us"] +
+                             state["read_us"] + state["decode_us"] +
+                             state["scene_us"] + state["draw_us"] +
+                             state["png_us"] + state["publish_write_us"] +
+                             state["publish_sync_us"] +
+                             state["publish_rename_us"])
+                other_ms = max(0, round(wall_ms - phases_us / 1000.0))
         output = {
             "kind": "probe_frame" if probe else "frame",
             "frame_format": frame_format,
@@ -1099,8 +1123,11 @@ class RustRenderWorker:
             "tile_px": _wire_int(fields, "tile_px"),
             "frame_width": int(job.get("w", 0)),
             "frame_height": int(job.get("h", 0)),
-            "wait_ms": 0,
-            "ms": round((time.monotonic() - state["started"]) * 1000),
+            "wait_ms": wait_ms,
+            "queue_ms": state["queue_us"] / 1000.0,
+            "wall_ms": wall_ms,
+            "other_ms": other_ms,
+            "ms": round(elapsed_ms),
             "plan_ms": state["plan_us"] / 1000.0,
             "wc_cells": _wire_int(fields, "wc_cells"),
             "inst_edges": _wire_int(fields, "inst_edges"),

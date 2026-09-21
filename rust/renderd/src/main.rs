@@ -156,8 +156,9 @@ fn serve() -> Result<(), String> {
             }
         };
         match parsed {
-            InputCommand::Worker(command) => {
-                if let WorkerCommand::Render(render) = &command {
+            InputCommand::Worker(mut command) => {
+                if let WorkerCommand::Render(render) = &mut command {
+                    render.received = Some(Instant::now());
                     if latest_generation.is_some_and(|latest| render.generation <= latest) {
                         respond(
                             &response_tx,
@@ -351,6 +352,13 @@ struct RenderCommand {
     raw_frame: bool,
     style_epoch: Option<u64>,
     out: String,
+    /// When the command line was read (set by the input loop, not the
+    /// parser): the frame's `queue_us` is how long it then waited behind the
+    /// commands before it - a plan cannot be cancelled, so a superseded one
+    /// still runs to its end (2026-09-21: the field's status line showed
+    /// 15.5 s that no phase accounted for, and the adapter's wait was a
+    /// constant 0).
+    received: Option<Instant>,
     /// `render_probe` only (docs/LAYER_DECODE_PROBE_PLAN.ko.md): paint this
     /// frame the probe's way instead of the normal one and answer with a
     /// `probe_frame`. The published scene, the retained frame and the
@@ -567,6 +575,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     raw_frame,
                     style_epoch: optional_parse(&fields, "style_epoch")?,
                     out: required(&fields, "out")?.to_string(),
+                    received: None,
                     probe,
                     probe_block,
                     thin_keep,
@@ -1849,7 +1858,23 @@ fn page_reps_enabled() -> bool {
 /// still paint into an open pixel. The two of the same block size are the
 /// pair to compare, and all three must reach the same pixels.
 #[allow(clippy::too_many_arguments)]
+/// Microseconds between reading the command and starting on it.
+fn queued_us(command: &RenderCommand, started: Instant) -> u64 {
+    command
+        .received
+        .map(|received| {
+            started
+                .saturating_duration_since(received)
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX)
+        })
+        .unwrap_or(0)
+}
+
 fn run_layer_probe(
+    run_started: Instant,
+    queue_us: u64,
     page_cache: &mut DecodedPageCache,
     cache: &Cache,
     command: &RenderCommand,
@@ -2054,7 +2079,7 @@ fn run_layer_probe(
     respond(
         responses,
         format!(
-            "probe_frame gen={} mode={} block={} format={} out={} partial={} planned_pages={} selected_pages={} requested_pages={} decoded_pages={} cache_hits={} cache_misses={} skipped_pages={} skipped_bytes={} decoded_bytes={} demand_candidates={} demand_out_of_view={} demand_occluded={} demand_unsure={} passes={} blocks={} layer_passes={} decode_us={} read_us={} decode_sum_us={} demand_us={} pool_us={} scene_us={} prepare_us={} paint_us={} total_us={} raster_us={} raster_tile_max_us={} tiles={} workers={} bin_items={} once_tiles={} once_passes={} once_items={} publish_write_us={} publish_sync_us={} publish_rename_us={}",
+            "probe_frame gen={} mode={} block={} format={} out={} partial={} planned_pages={} selected_pages={} requested_pages={} decoded_pages={} cache_hits={} cache_misses={} skipped_pages={} skipped_bytes={} decoded_bytes={} demand_candidates={} demand_out_of_view={} demand_occluded={} demand_unsure={} passes={} blocks={} layer_passes={} decode_us={} read_us={} decode_sum_us={} demand_us={} pool_us={} scene_us={} prepare_us={} paint_us={} total_us={} raster_us={} raster_tile_max_us={} tiles={} workers={} bin_items={} once_tiles={} once_passes={} once_items={} publish_write_us={} publish_sync_us={} publish_rename_us={} queue_us={} wall_us={}",
             command.generation,
             probe.mode,
             command.probe_block,
@@ -2097,6 +2122,8 @@ fn run_layer_probe(
             publish.write_us,
             publish.sync_us,
             publish.rename_us,
+            queue_us,
+            elapsed_us(run_started),
         ),
     );
     Ok(())
@@ -2109,6 +2136,9 @@ fn run_render(
     cancellation: &RenderCancellation,
     published_scene: &SharedPublishedScene,
 ) -> Result<(), String> {
+    // wall_us counts from here, queue_us up to here (see RenderCommand::received)
+    let run_started = Instant::now();
+    let queue_us = queued_us(command, run_started);
     let mut command = command.clone();
     let cache = state
         .cache
@@ -2259,6 +2289,8 @@ fn run_render(
         // around the frame - refinement rounds, published scene, retained
         // frame, pan reuse - is deliberately skipped.
         return run_layer_probe(
+            run_started,
+            queue_us,
             &mut state.page_cache,
             cache,
             &command,
@@ -2506,7 +2538,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} queue_us={} wall_us={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -2621,6 +2653,10 @@ fn run_render(
                 pixels.once_full_tiles,
                 pixels.once_passes_skipped,
                 pixels.once_items_skipped,
+                queue_us,
+                // up to this frame's response: the phases above account for
+                // part of it, the rest is time no phase timer covers
+                elapsed_us(run_started),
             ),
         );
         // Representative batches bound query work, not the number of full

@@ -3502,8 +3502,17 @@ class Viewer:
                                 res.get("phase_plan", 0),
                                 res.get("phase_delta", 0),
                                 res.get("phase_apply", 0))
-                        split = " = %d load%s + %d draw" \
-                            % (res["load_ms"], ph, res["draw_ms"])
+                        # the label plan is not part of load; shown only
+                        # when it is worth a look (2026-09-21)
+                        text = res.get("text_plan_ms", 0) or 0
+                        split = " = %d load%s%s + %d draw" % (
+                            res["load_ms"], ph,
+                            " + %d text" % text if text >= 100 else "",
+                            res["draw_ms"])
+                        # renderd time no phase covers, and time spent
+                        # waiting behind earlier commands (queue + pipe)
+                        if res.get("other_ms", 0) > 200:
+                            split += " + %d other" % res["other_ms"]
                         if res.get("wait_ms", 0) > 200:
                             split += " + %d wait" % res["wait_ms"]
                     cut = ""

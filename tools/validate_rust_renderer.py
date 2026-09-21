@@ -1060,6 +1060,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 frame.write((20).to_bytes(4, "little"))
                 frame.write((10).to_bytes(4, "little"))
                 frame.write(raw_pixels)
+            # the job was submitted a second ago: what renderd's wall does
+            # not account for is the client's wait (2026-09-21)
+            worker._jobs[7]["started"] -= 1.0
             worker._emit_frame({
                 "gen": "7", "png": raw_path, "format": "raw", "partial": "0",
                 "deferred": "0", "final": "1", "plan_pages": "2",
@@ -1101,6 +1104,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "stored_rep_bytes": "8192", "stored_rep_pixels": "64000",
                 "stored_rep_spans": "100", "stored_rep_painted_pixels": "8000",
                 "once_tiles": "5", "once_passes": "400", "once_items": "77",
+                # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
+                # its phases above add up to 45.25 ms
+                "queue_us": "1500", "wall_us": "60000",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
@@ -1140,6 +1146,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["publish_rename_ms"], 9.0)
             self.assertEqual(result["publish_ms"], 24.0)
             self.assertGreaterEqual(result["adapter_read_ms"], 0.0)
+            # the time no phase covers: renderd's own (other) and the
+            # client's beyond renderd's wall (wait = queue + pipe)
+            self.assertEqual((result["queue_ms"], result["wall_ms"]), (1.5, 60.0))
+            self.assertEqual(result["other_ms"], 15)
+            self.assertTrue(900 <= result["wait_ms"] <= 945, result["wait_ms"])
             self.assertEqual(result["cache_hit"], 14)
             self.assertEqual(result["cache_miss"], 2)
             self.assertEqual(result["frame_cache_hit"], 1)
