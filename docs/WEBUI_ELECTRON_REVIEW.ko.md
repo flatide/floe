@@ -1,5 +1,9 @@
 # Electron DRC 승인 응답 대기 중 표시 프로세스 장애
 
+후속 [Rust 저장 프로세스 종료 검사](WEBUI_REVIEW_PROCESS_CRASH.ko.md)는12개
+게시 전후 조합을 확인했고, 그 내부 신규 link/unlink 창은 DRC-PUB-01로 열어 두었다.
+아래 Chromium 복구 성공은 해당 파일시스템 경계의 해결 근거가 아니다.
+
 2026-09-22. [Electron E2](WEBUI_ELECTRON.ko.md), [G4 감사](WEBUI_G4_AUDIT.ko.md)의
 합성 저장·복구 수용 확대다. 제품 호스트/웹 UI/Rust 저장 코드는 변경하지 않았다.
 기존 WK의 성공 응답 유실 검사는 [Desktop §13](WEBUI_DESKTOP.ko.md#13-d2-mac-합성-저장-응답-유실재로딩-자동-검사-2026-09-21)에 있다.

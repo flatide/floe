@@ -7,6 +7,9 @@ use std::{
 };
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
+#[path = "process_crash_tests.rs"]
+mod process_crash;
+
 #[test]
 fn dynamic_input_protection_rechecks_old_review_drafts_without_granting_writes() {
     for review_kind in [Kind::Notes, Kind::Waives] {

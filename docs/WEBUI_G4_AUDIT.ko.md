@@ -1,5 +1,10 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-22 후속: [저장 프로세스 SIGKILL 경계](WEBUI_REVIEW_PROCESS_CRASH.ko.md)는
+12조합을 확인했지만 신규 게시의 link/unlink 사이 double-link 재열기 거부를
+**DRC-PUB-01 미해결**로 재현했다. NFS/로컬 저장 호환성 결정을 기다리며,
+테스트 통과를 이 결함의 해결이나 G4 완료로 계산하지 않는다.
+
 2026-09-22: [Electron DRC 복구 QA](WEBUI_ELECTRON_REVIEW.ko.md)는 note/waive의
 수락 응답 대기 중 실제 표시 프로세스 종료, 자동 재전송 없음, 같은 승인/receipt의
 명시 재확인과 재조회를 추가한다. Rust worker/디스크 장애 및 전체 G4 수용은 아니다.
