@@ -13,7 +13,7 @@ function run(binary, args, label, timeout) {
   const result = spawnSync(binary, args, { cwd: repo, env: process.env, encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024 });
   // Never echo raw renderer errors/URLs; only allow the fixed synthetic QA lines.
   const output = (result.stdout || '') + (result.stderr || '');
-  for (const line of output.split('\n')) if (/^ELECTRON (SMOKE|LAYOUT|DOWNLOAD):/.test(line)) console.log(line);
+  for (const line of output.split('\n')) if (/^ELECTRON (SMOKE|LAYOUT|DOWNLOAD|RECOVERY):/.test(line)) console.log(line);
   if (result.status !== 0) throw new Error(label + ' failed; no existing design/cache modified');
 }
 function snapshot(directory, prefix = '') {
@@ -35,6 +35,9 @@ const before = snapshot(root);
 try {
   run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-layout-test', source], 'Actual Electron layout', 120000);
   run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-clip-download-test', source], 'Actual Electron exact clip POST', 120000);
+  run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-recovery-test', source], 'Actual Electron recovery/crash', 120000);
+  run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-recovery-storage-test', source], 'Actual Electron session storage loss', 60000);
+  run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-recovery-cookie-test', source], 'Actual Electron session cookie loss', 60000);
 } finally {
   if (JSON.stringify(before) !== JSON.stringify(snapshot(root))) throw new Error('Synthetic source/cache changed during view QA');
 }

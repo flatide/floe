@@ -6,6 +6,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { ServiceClient } = require('./service-client.cjs');
 const { CloseController } = require('./close-controller.cjs');
+const { RecoveryController } = require('./recovery-controller.cjs');
 const { Downloads, blobAllowed, postAllowed, mimeAllowed, outsideProfile } = require('./downloads.cjs');
 const P = require('./policy.cjs');
 const runtime = require('./runtime.json');
@@ -19,8 +20,12 @@ const downloadSmoke = args.length === 1 && args[0] === '--smoke-download-test';
 // indexing or caller-chosen output path. The validation driver creates the source.
 const layoutSmoke = args.length === 2 && args[0] === '--smoke-layout-test' && path.isAbsolute(args[1]);
 const clipSmoke = args.length === 2 && args[0] === '--smoke-clip-download-test' && path.isAbsolute(args[1]);
-const smoke = emptySmoke || layoutSmoke || downloadSmoke || clipSmoke;
+const recoveryModes = { '--smoke-recovery-test': 'normal', '--smoke-recovery-storage-test': 'storage', '--smoke-recovery-cookie-test': 'cookie' };
+const recoveryMode = args.length === 2 && Object.hasOwn(recoveryModes, args[0]) && path.isAbsolute(args[1]) ? recoveryModes[args[0]] : null;
+const recoverySmoke = recoveryMode !== null;
+const smoke = emptySmoke || layoutSmoke || downloadSmoke || clipSmoke || recoverySmoke;
 let profile, root, window, service, close, origin = null, panel = false, stopping = false;
+let recovery, viewFailure = false;
 let downloads, downloadQaRoot, downloadQaChoice = 0, cleanupConfirmed = false;
 const downloadWindows = new Map();
 let ended = false, failure = false, shuttingDown = false, qaCompleted = false;
@@ -28,6 +33,8 @@ let statusURL = null, deniedNavigations = 0, deniedWindows = 0;
 let qaStep = 'startup';
 let qaPostResponses = 0, qaRejectedPostResponses = 0;
 let qaCancelReceive = false, qaCancelledActive = false, qaReceiveCleanup;
+let qaRecoverAccept = false, qaCrashes = 0, qaForceAccept = false, qaForcePrompts = 0;
+const qaRecoveryRequests = { root: 0, exchange: 0, paletteReads: 0, mutations: 0 };
 const validRuntime = process.versions.electron === runtime.version && ['darwin', 'linux'].includes(process.platform) &&
   !['no-sandbox', 'disable-web-security', 'remote-debugging-port', 'remote-debugging-pipe'].some(s => app.commandLine.hasSwitch(s));
 
@@ -62,23 +69,35 @@ function evalOwned(script) {
 function requestClose() {
   reveal();
   if (panel || stopping || !close) return;
-  close.request().catch(() => fail());
+  if (recovery) recovery.invalidate();
+  return close.request().catch(() => fail());
 }
 function cancelService() {
   stopping = true;
+  if (recovery) recovery.end();
   status('Stopping this session; waiting for Rust worker cleanup…');
   if (service) service.close(); else finish(0);
 }
 function fail() {
   if (failure || ended) return;
   failure = true;
+  if (recovery) recovery.end();
   status('The local service or view failed. No operation was replayed. Close this window to end the session. Check the matching Rust binaries and view options.');
   if (smoke) cancelService();
+}
+function viewGone() {
+  if (ended || stopping) return;
+  qaCrashes++; viewFailure = true;
+  if (recovery) recovery.invalidate();
+  if (close) close.invalidate();
+  status('The display process stopped. Rust work may already have completed. Use View → Recover View for an explicit reload, or end this session. No bootstrap or save was replayed.');
+  if (smoke && !recoverySmoke) { failure = true; cancelService(); }
 }
 async function finish(code) {
   if (shuttingDown) return;
   shuttingDown = true; ended = true;
   if (close) close.end();
+  if (recovery) recovery.end();
   if (code !== 0 && !(stopping && code === 143)) failure = true;
   if (smoke && !qaCompleted) failure = true;
   const downloadCleanup = downloads ? downloads.shutdown() : Promise.resolve(true);
@@ -94,15 +113,10 @@ async function finish(code) {
   app.exit(failure ? 1 : 0);
 }
 async function recover() {
-  if (panel || stopping || ended || !origin) return;
-  reveal();
-  const epoch = close.epoch;
-  if (await message('Reload the current view? Unsaved editor text is lost. Earlier approved saves may already have completed. No bootstrap or save is replayed.', ['Cancel', 'Reload View']) !== 1 || ended || stopping || epoch !== close.epoch) return;
-  close.invalidate();
-  window.webContents.loadURL(origin + '/').catch(() => fail());
+  return recovery ? recovery.request() : false;
 }
 async function menuAction(id) {
-  if (panel || stopping || ended) return;
+  if (panel || stopping || ended || recovery?.busy || viewFailure) return;
   const script = '(' + fs.readFileSync(path.join(__dirname, '../desktop/ui/menu-action.js'), 'utf8') + ')(' + JSON.stringify(id) + ')';
   const result = await evalOwned(script).catch(() => 'unavailable');
   if (result !== 'opened' && !ended) await message('This action is unavailable while the view is hidden, busy, or disconnected. No action was replayed.');
@@ -133,8 +147,17 @@ app.whenReady().then(async () => {
   const ses = session.fromPartition(partition, { cache: false });
   ses.setPermissionCheckHandler(() => false);
   ses.setPermissionRequestHandler((_web, _permission, callback) => callback(false));
-  ses.webRequest.onBeforeRequest((details, callback) => callback({ cancel:
-    !P.requestAllowed(origin, details.url) && !blobAllowed(origin, details.url) && details.url !== statusURL }));
+  ses.webRequest.onBeforeRequest((details, callback) => {
+    if (recoverySmoke && P.requestAllowed(origin, details.url)) {
+      if (details.url === origin + '/' && details.method === 'GET') qaRecoveryRequests.root++;
+      else if (details.url === origin + '/api/v1/session/exchange') qaRecoveryRequests.exchange++;
+      // The palette uses a POST body for bounded read-page/range queries, not
+      // a style mutation. Classify the exact read-only server endpoint, not all POSTs.
+      else if (details.method === 'POST' && /^\/api\/v1\/views\/[^/]+\/palette$/.test(details.url.slice(origin.length))) qaRecoveryRequests.paletteReads++;
+      else if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(details.method)) qaRecoveryRequests.mutations++;
+    }
+    callback({ cancel: !P.requestAllowed(origin, details.url) && !blobAllowed(origin, details.url) && details.url !== statusURL });
+  });
   ses.webRequest.onHeadersReceived((details, callback) => {
     const entry = downloadWindows.get(details.webContentsId);
     if (!entry) { callback({}); return; }
@@ -161,7 +184,7 @@ app.whenReady().then(async () => {
   window.on('close', event => { if (!ended) { event.preventDefault(); requestClose(); } });
   const web = window.webContents;
   web.setWindowOpenHandler(details => {
-    if (!stopping && !ended && !downloadWindows.size && downloads && !downloads.active &&
+    if (!stopping && !ended && !recovery?.busy && !viewFailure && !downloadWindows.size && downloads && !downloads.active &&
         downloads.slot.phase === 'ready' && postAllowed(origin, details.url) && details.postBody) {
       return { action: 'allow', overrideBrowserWindowOptions: { show: false, webPreferences: P.webPreferences(partition) } };
     }
@@ -185,11 +208,38 @@ app.whenReady().then(async () => {
       if (!P.navigationAllowed(origin, event.url, event.isMainFrame)) { deniedNavigations++; event.preventDefault(); }
     });
   }
-  web.on('did-start-navigation', event => { if (event.isMainFrame && !event.isSameDocument && close) close.invalidate(); });
-  web.on('render-process-gone', () => fail());
+  web.on('did-start-navigation', event => {
+    if (event.isMainFrame && !event.isSameDocument) {
+      if (close) close.invalidate();
+      if (recovery) recovery.navigation();
+    }
+  });
+  web.on('render-process-gone', viewGone);
   close = new CloseController({ reveal, cancelService,
     openDialog: () => evalOwned("(()=>{const b=document.getElementById('logout');if(b&&!b.disabled){b.click();return 'opened';}return 'unavailable';})()"),
-    confirmForce: async () => await message('End this session? Use when the normal confirmation is unavailable. Unsaved drafts are discarded; approved writes may already have completed. No save will be replayed.', ['Cancel', 'End Session']) === 1 });
+    confirmForce: async () => {
+      if (recoverySmoke) { qaForcePrompts++; return qaForceAccept; }
+      return await message('End this session? Use when the normal confirmation is unavailable. Unsaved drafts are discarded; approved writes may already have completed. No save will be replayed.', ['Cancel', 'End Session']) === 1;
+    } });
+  const recoveryStatus = '(' + fs.readFileSync(path.join(__dirname, '../desktop/ui/recovery-status.js'), 'utf8') + ')()';
+  recovery = new RecoveryController({
+    allowed: () => !panel && !stopping && !ended && !failure && !!origin && !downloads?.active && !downloadWindows.size && !window.isDestroyed(),
+    reveal,
+    confirm: async () => recoverySmoke ? qaRecoverAccept : await message('Reload the current view? Unsaved editor text is lost. Earlier approved saves may already have completed. No bootstrap or save is replayed.', ['Cancel', 'Reload View']) === 1,
+    load: () => { close.invalidate(); return web.loadURL(origin + '/'); },
+    probe: () => evalOwned(recoveryStatus),
+    result: async marker => {
+      if (ended || stopping) return;
+      if (marker === 'ready' || marker === 'ready-hidden') { viewFailure = false; return; }
+      if (recoverySmoke) return;
+      const text = {
+        'restart-required': 'Session authorization is missing. End this session and start a new app session. Earlier approved saves may already have completed; check their results. No bootstrap or save was replayed.',
+        timeout: 'Reload was not confirmed within 30 seconds. Use Recover View to try explicitly, or end this session. No save or bootstrap was replayed.',
+        'load-failed': 'The reload failed. Use Recover View to try explicitly, or end this session. No save or bootstrap was replayed.'
+      }[marker];
+      await message(text);
+    }
+  });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(process.platform === 'darwin' ? [{ label: 'floe2', submenu: [{ label: 'Quit floe2', accelerator: 'Command+Q', click: requestClose }] }] : []),
     { label: 'File', submenu: [
@@ -200,7 +250,7 @@ app.whenReady().then(async () => {
     { label: 'View', submenu: [{ label: 'Recover View…', click: recover }, { label: 'About…', click: () => menuAction('about-open') }] }
   ]));
   status('Starting the Rust service. Close this window to cancel. Native exports save to new files only; programmatic clipboard permissions are not enabled.');
-  const viewArgs = layoutSmoke || clipSmoke ? [args[1], '--goto', '200,200,300', '--depth', 'full', '--detail', 'high',
+  const viewArgs = layoutSmoke || clipSmoke || recoverySmoke ? [args[1], '--goto', '200,200,300', '--depth', 'full', '--detail', 'high',
     '--jobs', '4', '--raster-jobs', '4', '--refinement', 'off'] : emptySmoke || downloadSmoke ? [] : (args[0] === 'view' ? args.slice(1) : args);
   if (clipSmoke) viewArgs.push('--budget-mb', '256'); // leave managed capacity for explicit exact export
   if (emptySmoke || downloadSmoke) {
@@ -213,11 +263,11 @@ app.whenReady().then(async () => {
   if (!downloadBinary) throw new Error('Invalid download binary');
   if (downloadSmoke || clipSmoke) { downloadQaRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-export-qa-')); fs.chmodSync(downloadQaRoot, 0o700); }
   downloads = new Downloads({ binary: downloadBinary, directory: profile, origin: () => origin,
-    owns: (contents, url) => !!contents && (contents.id === web.id || downloadWindows.get(contents.id)?.url === url),
+    owns: (contents, url) => !recovery.busy && !viewFailure && !!contents && (contents.id === web.id || downloadWindows.get(contents.id)?.url === url),
     choose: async name => {
       if (downloadSmoke) return downloadQaChoice++ === 0 ? null : path.join(downloadQaRoot, 'synthetic.json');
       if (clipSmoke) return path.join(downloadQaRoot, 'synthetic.oas');
-      if (panel || stopping || ended) return null;
+      if (panel || stopping || ended || recovery.busy || viewFailure) return null;
       panel = true;
       let choice;
       try { choice = await dialog.showSaveDialog(window, { title: 'Save export to a NEW file (never replace)', defaultPath: name }); }
@@ -307,9 +357,15 @@ async function runSmoke() {
     await runDownloadSmoke();
   }
   if (clipSmoke) await runClipSmoke(wait);
+  if (recoverySmoke) await require('./recovery-qa.cjs').run({ window, evalOwned, wait, recover, recovery, mode: recoveryMode,
+    selectConfirm: value => { qaRecoverAccept = value; }, viewFailed: () => viewFailure, crashes: () => qaCrashes,
+    counts: () => qaRecoveryRequests, service, stage: value => { qaStep = value; }, requestClose,
+    forcePrompts: () => qaForcePrompts,
+    // The Rust cookie is scoped to /api/v1. A root URL does not select it.
+    eraseCookie: () => window.webContents.session.cookies.remove(origin + '/api/v1', 'floe_session_' + new URL(origin).port) });
   qaStep = 'capture';
-  // Capture only the authenticated synthetic empty-root page, after checking
-  // visibility. A capture must not be used to make a hidden-page test pass.
+  // Capture only this fresh synthetic session (including its lost-auth state),
+  // after checking visibility. A capture must not make a hidden-page test pass.
   if (await evalOwned('!document.hidden&&!location.hash') !== true) throw new Error('hidden synthetic page');
   const capture = await window.webContents.capturePage(undefined, { stayHidden: true, stayAwake: false });
   if (capture.isEmpty()) throw new Error('empty synthetic capture');
@@ -317,6 +373,12 @@ async function runSmoke() {
   fs.chmodSync(artifacts, 0o700);
   fs.writeFileSync(path.join(artifacts, 'window.png'), capture.toPNG(), { flag: 'wx', mode: 0o600 });
   console.log('ELECTRON SMOKE: synthetic screenshot ' + path.join(artifacts, 'window.png'));
+  if (recoveryMode === 'storage' || recoveryMode === 'cookie') {
+    qaStep = 'auth loss explicit native end'; qaCompleted = true; qaForceAccept = true;
+    await requestClose();
+    if (qaForcePrompts !== 2 || !stopping) throw new Error('Synthetic forced close was not confirmed');
+    return;
+  }
   qaStep = 'close cancel quit';
   await close.request();
   await wait("!document.getElementById('session-exit-dialog').hidden&&document.activeElement.id==='session-exit-cancel'");

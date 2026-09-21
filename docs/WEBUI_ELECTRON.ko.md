@@ -11,7 +11,7 @@
 |---|---|---|
 | E0 | 기존 Rust Session의 전용 파이프 sidecar, JS 클라이언트, 수명/인증 회귀 | 구현·실제 Node↔Rust 합성 검사; 아래 계약 |
 | E1 | sandboxed Electron 독립 창, 같은 웹 번들, 시작/종료/실패 처리, 런타임 고정/검증 | macOS arm64 실제 Chromium 합성 창 검사 통과. 기능·성능 수용은 E2/E3 |
-| E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | E2a pan·메모리, E2b 파일 내보내기 합성 검사 통과. WK/현장 대조·물리 입력·실제 Save 창·복구 수용은 남음 |
+| E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | E2a pan·메모리, E2b 내보내기, E2c 표시 프로세스 충돌/인증 상실 합성 검사 통과. WK/현장 대조·물리 입력·실제 Save 창·DRC 저장 중 복구는 남음 |
 | E3 | RHEL 전체 ELF/라이브러리 의존성, sandbox·ETX/다중 사용자 실측, 라이선스/업데이트/오프라인 배포 | 현장 대기, OS 패키지/보안 설정 변경 없음 |
 
 Rust geometry·렌더러·색인·DRC·파일 권한/저장 API를 JS로 옮기지 않는다. Electron은
@@ -80,8 +80,8 @@ POST 내보내기만 숨김 임시 창을 허용한다(아래 계약). 시작/�
 기본취소 End session 확인을 열고, 응답이 없을 때도 기본취소 native 확인을 거쳐야
 Rust EOF 취소를 보낸다. macOS 숨김/최소화 창은 먼저 복원한다. Rust가 정리/join한
 뒤 앱이 종료된다. Recover View는 명시 확인 후 기존 origin root GET만 수행한다.
-bootstrap·저장·index를 재전송하지 않는다. renderer 실패는 고정 오류 화면으로
-알리고 자동 복구하지 않는다. 실제 renderer crash/복구 수용은 E2에 남긴다.
+bootstrap·저장·index를 재전송하지 않는다. Chromium 표시 프로세스 실패는 고정 오류
+화면으로 알리고 자동 복구하지 않는다. E2c의 명시적 복구 범위는 아래와 같다.
 
 ### 개발 실행
 
@@ -273,6 +273,56 @@ macOS 새 바이너리 검사/동시 빌드 부하와 분리하지 못했으므�
 전체 green이라고 표기하지 않는다. 아직 남은 전체 goal은 G1/G4 폭넓은 실제 UI·동일
 조건 성능 대조, 현장 RHEL/ETX/Python-free Linux 수용, 배포 closure/고지·서명 및
 별도 승인으로 보류한 원격 단계 등이다. E2b 완료가 웹 전환 전체 완료는 아니다.
+
+### E2c: 명시적 복구와 표시 프로세스 수명
+
+Recover View는 기본취소 확인 후 기존 origin의 root GET을 **한 번** 실행한다.
+확인 시점부터 navigation·JS 상태 확인을 합해 30초이며, 늦은 결과/무응답/숨김으로
+제한을 늘리지 않는다. 시도별 상태 확인은 동시에 하나만 실행한다. timeout 뒤에는
+사용자의 새 Recover View 동작만 재시작할 수 있고, 이전 시도의 결과는 폐기한다.
+닫기·다른 navigation·Rust 종료는 해당 시도를 무효화한다. 파일 수신/Save 창과
+복구를 겹치지 않으며, 복구 도중 새로운 POST 다운로드 창도 받지 않는다.
+
+상태 확인은 기존 WK 호스트의 고정 `recovery-status.js`를 재사용한다. 인증 정보나
+저장 본문은 읽지 않고 ready/ready-hidden/restart-required만 구분한다. cookie나
+sessionStorage가 없어지면 새 세션 시작을 안내한다. bootstrap을 재전송하거나
+이전 저장·색인 요청을 새로 승인하지 않는다. **ready는 인증된 UI의 준비 상태이며
+프레임 완료나 이전 저장의 성공 판정이 아니다.** 저장 결과는 기존 웹 receipt가 맡는다.
+
+Chromium 표시 프로세스가 죽어도 Rust 서비스는 유지하고 고정 안내 화면만 띄운다.
+사용자가 복구를 승인해야 원래 앱으로 돌아간다. Rust 서비스 자체의 실패와 구별하며,
+복구가 불가능하면 기본취소 End Session 확인으로 명시적 종료/정리를 할 수 있다.
+
+2026-09-21 검증:
+
+- `sh tools/validate_electron.sh`: Node41(복구 controller7 포함), Rust helper14+service5,
+  clippy, 실제 빈 창·blob 내보내기 회귀 통과. 공유 WK 상태 probe 단위 검사도 통과.
+- `node tools/validate_electron_layout.cjs`: 새 valmini의 pan·정확 clip 회귀에 이어,
+  명시 root GET, 취소 시 draft 유지, 복구 시 sessionStorage 유지, 실제 30초 무응답
+  deadline과 명시 재시도, **실제 Chromium crash→새 PID→동일한 착지 픽셀**을 확인했다.
+- 별도 새 세션 두 개에서 각각 해당 세션의 storage 키와 `/api/v1` 범위 cookie만
+  제거했다. restart-required, bootstrap/변경 요청 재전송 없음, 종료 취소 시 Rust 유지,
+  명시적 End 후 join을 확인했다. 쿠키 값·기존 사용자 클립보드는 읽지 않았다.
+- native 확인 선택은 **QA callback 주입**이다. 실제 OS 확인창 클릭·키보드/IME 수용이나
+  DRC 저장 진행 중 crash/충돌 복구를 대신하지 않는다. source/cache SHA-256은 전후 불변.
+
+중간 QA 실패: palette의 읽기 전용 POST를 변경 요청으로 잘못 셌고, 쿠키 삭제에
+root URL을 써 `/api/v1` 쿠키가 남았다. 정확한 읽기 endpoint·cookie 경로로 검사만
+수정했다. 제품 인증은 완화하지 않았다. 최종 로그:
+`/private/tmp/floe-electron-recovery-gate.log`, `floe-electron-recovery-layout.log`.
+
+GTK 시작 오라클은 별도로 원래 30초 제한으로 재현했다. 프로세스 시작 약24초 뒤
+2초 sample은 모든 표본이 `_dyld_start`, footprint96KiB였다. **이번 실패는 Rust 테스트
+본문 진입 전 단계**이며, macOS 검사 때문인지까지는 확정하지 않는다. oracle-build는
+8.296초/exit0, 실행은 timeout이다. 로그 `floe-gtk-startup-electron-recovery.log`,
+`floe-gtk-startup-sample.txt`; 오라클 생략·제한 완화는 하지 않았다.
+같은 바이너리의 서명 검사는 valid였고, 이어 실행한 `--list`만으로도 17.072초가
+걸렸다(exit0, `floe-gtk-startup-list-only.log`). 서명을 바꾸거나 OS 검사를 끄지 않았다.
+이 관측은 cold-start 문제의 위치를 좁힐 뿐 원인 해결/전체 gate 통과를 뜻하지 않는다.
+
+전체 goal에는 G1/WK 동일 조건 성능·foreground/margin 대조, G4/DRC 확대 복구,
+native 파일 선택/clipboard/IME/DPI 실조작, RHEL/ETX 및 Python-free Linux 수용,
+오프라인 패키지·고지/서명 등이 남는다. E2c 완료는 정식 호스트 채택/전체 완료가 아니다.
 
 ### 비교·배포 시 유지할 조건
 
