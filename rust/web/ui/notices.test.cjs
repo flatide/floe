@@ -21,6 +21,8 @@ const ui=N.bind({el,document:{createElement:()=>new Element()},http(method,path,
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 async function run(){
     ui.open({status:'not_packaged',index_id:null,files:0,total_bytes:0,page_bytes:65536,list_size:64});assert.equal(requests.length,0);assert.equal(el('notice-catalog').hidden,true);
+    ui.open({status:'unavailable',index_id:null,files:0,total_bytes:0,page_bytes:65536,list_size:64});
+    assert.match(el('notice-availability').textContent,/floe2-desktop --check-notices/);assert.match(el('notice-availability').textContent,/verify.sh and selfcheck/);assert.equal(requests.length,0);
     ui.open(m);let r=requests.shift();assert.equal(r.path,'/api/v1/about/notices/0');r.resolve(list(0));await tick();
     assert.equal(el('notice-files').children.length,64);assert.match(el('notice-files').children[0].textContent,/<script>/);
     el('notice-files').children[0].onclick();r=requests.shift();assert.equal(r.path,'/api/v1/about/notices/0/0');r.resolve(chunk(0));await tick();assert.equal(el('notice-text').textContent.length,65536);

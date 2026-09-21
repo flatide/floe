@@ -47,6 +47,7 @@ struct State {
     probe_next: Cell<Instant>,
     probe_count: Cell<u8>,
     smoke: bool,
+    smoke_notices: bool,
     smoke_step: Cell<u8>,
     evaluating: Cell<bool>,
     smoke_probe: RefCell<String>,
@@ -407,7 +408,12 @@ impl Host {
             }
         }
     }
-    fn new(mtm: MainThreadMarker, service: Service, smoke: bool) -> Retained<Self> {
+    fn new(
+        mtm: MainThreadMarker,
+        service: Service,
+        smoke: bool,
+        smoke_notices: bool,
+    ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(State {
             service: RefCell::new(service),
             origin: OnceCell::new(),
@@ -422,6 +428,7 @@ impl Host {
             probe_next: Cell::new(Instant::now()),
             probe_count: Cell::new(0),
             smoke,
+            smoke_notices,
             smoke_step: Cell::new(0),
             evaluating: Cell::new(false),
             smoke_probe: RefCell::new(String::new()),
@@ -847,10 +854,13 @@ impl Host {
         let js = match step {
             0 => "(()=>{const b=document.getElementById('logout'),p=document.getElementById('browse-dialog'),c=document.getElementById('browse-close'),r=document.getElementById('browse-refresh');return b&&!b.disabled&&p&&!p.hidden&&c&&!c.disabled&&r&&!r.disabled?'ready':JSON.stringify([!!b,typeof FloeProtocol==='object',typeof FloeSessionExit==='object',document.readyState==='complete',!!location.hash]);})()",
             1 => "document.getElementById('browse-dialog').hidden?'dismissed':'wait'",
+            3 if self.ivars().smoke_notices => "(()=>{const a=document.getElementById('about-dialog'),b=document.getElementById('browse-dialog'),c=document.getElementById('notice-catalog'),n=document.getElementById('notice-list-next');return a&&!a.hidden&&b&&b.hidden&&c&&!c.hidden&&document.getElementById('notice-files').children.length===64&&n&&!n.disabled?'about':'wait';})()",
             2 | 3 => "(()=>{const a=document.getElementById('about-dialog'),b=document.getElementById('browse-dialog');return a&&!a.hidden&&b&&b.hidden?'about':'wait';})()",
             4 => "document.getElementById('about-dialog').hidden?'dismissed':'wait'",
             5 | 7 => "(()=>{const p=document.getElementById('session-exit-dialog');return p&&!p.hidden&&document.activeElement.id==='session-exit-cancel'?'confirm':JSON.stringify([!!p,!!p&&p.hidden,document.activeElement.id==='session-exit-cancel',document.hasFocus()]);})()",
             6 => "document.getElementById('session-exit-dialog').hidden?'cancelled':'wait'",
+            9 => "document.getElementById('notice-page-status').textContent.startsWith('Page 1 / ')&&document.getElementById('notice-text').textContent.length>0?'notice-read':'wait'",
+            10 => "document.getElementById('notice-list-status').textContent.startsWith('65–128 of ')&&document.getElementById('notice-text').textContent===''?'notice-page':'wait'",
             _ => { self.ivars().evaluating.set(false); return; },
         };
         let host = self.retain();
@@ -879,6 +889,8 @@ impl Host {
                     "dismissed",
                     "confirm",
                     "cancelled",
+                    "notice-read",
+                    "notice-page",
                     "wait",
                 ]
                 .contains(&text.as_str())
@@ -905,7 +917,15 @@ impl Host {
                     host.menu_action(Action::OpenLayout);
                     3
                 }
-                (3, "about") => {
+                (3, "about") if host.ivars().smoke_notices => {
+                    host.eval("document.getElementById('notice-files').children[0].click()");
+                    9
+                }
+                (9, "notice-read") => {
+                    host.eval("document.getElementById('notice-list-next').click()");
+                    10
+                }
+                (3, "about") | (10, "notice-page") => {
                     host.eval("document.getElementById('about-close').click()");
                     4
                 }
@@ -972,7 +992,7 @@ fn finish_before_startup_modal(app: &NSApplication) {
     }
 }
 
-pub fn run(mut session: Session, smoke: bool) -> Result<i32> {
+pub fn run(mut session: Session, smoke: bool, smoke_notices: bool) -> Result<i32> {
     if !objc2::available!(macos = 12.0) {
         return Err(Error::input("embedded preview requires macOS 12 or later"));
     }
@@ -1005,7 +1025,7 @@ pub fn run(mut session: Session, smoke: bool) -> Result<i32> {
             .ok_or_else(|| Error::input("no local working folder selected"))?;
         session.set_initial_directory(Path::new(&folder.to_string()))?;
     }
-    let host = Host::new(mtm, Service::start(session)?, smoke);
+    let host = Host::new(mtm, Service::start(session)?, smoke, smoke_notices);
     // SAFETY: Owned window never auto-releases on close. The main-thread host
     // remains retained until after timer invalidation and delegate detachment.
     let window = unsafe {
@@ -1156,6 +1176,11 @@ pub fn run(mut session: Session, smoke: bool) -> Result<i32> {
             ));
         }
         println!("DESKTOP SMOKE: OK (WebKit auth; native menu About + modal guard; native close→cancel; application quit→confirm; service joined)");
+        if smoke_notices {
+            println!(
+                "DESKTOP NOTICE UI: OK (packaged list; verified text read; next catalogue page)"
+            );
+        }
     }
     Ok(result)
 }

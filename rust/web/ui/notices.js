@@ -74,7 +74,7 @@
         function open(v){
             close();v=metadata(v);
             if(v.status!=='available'){
-                el('notice-availability').textContent=v.status==='not_packaged'?'This executable has no compiled portable notice index. The embedded font notice remains available.':'The compiled portable notice index could not be verified. Check the installation with verify.sh and selfcheck; restart after repair. The viewer remains usable.';return;
+                el('notice-availability').textContent=v.status==='not_packaged'?'This executable has no compiled notice index. The embedded font notice remains available.':'The compiled notice index could not be verified. Check the installation with floe2-desktop --check-notices (desktop) or verify.sh and selfcheck (portable); restart after repair. The viewer remains usable.';return;
             }
             model=v;el('notice-catalog').hidden=false;
             el('notice-availability').textContent=v.files+' original files · '+v.total_bytes+' bytes. Index pinned to this executable; each requested chunk is checked. This is not publisher authentication.';

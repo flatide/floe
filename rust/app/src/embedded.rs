@@ -4,6 +4,25 @@ use floe_app_core::{Error, Result};
 use std::path::Path;
 use std::sync::{atomic::AtomicUsize, Arc};
 
+/// Package diagnostic only: validate every original notice chunk against the
+/// identity compiled into this host. No source, worker, listener or UI starts.
+pub fn check_notices() -> Result<usize> {
+    let cancel = AtomicUsize::new(0);
+    let catalog = crate::selfcheck::notice_catalog(&cancel)?
+        .ok_or_else(|| Error::input("no notice index was packaged into this build"))?;
+    let mut start = Some(0);
+    while let Some(at) = start {
+        let listing = catalog.list(at)?;
+        for file in listing.files {
+            for page in 0..file.pages {
+                catalog.page(file.id, page, &cancel)?;
+            }
+        }
+        start = listing.next;
+    }
+    Ok(catalog.len())
+}
+
 /// A one-use credential transferred directly to the owning UI thread.
 /// Deliberately not Debug/Serialize: never put this in logs, argv or a file.
 pub struct Ready {

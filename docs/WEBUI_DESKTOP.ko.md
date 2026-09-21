@@ -12,7 +12,7 @@
 macOS에서 창이 뜨는 것, SSH XQuartz 실험, Firefox에서 성공한 검사는 이 현장
 수용을 대신하지 않는다. 외부 브라우저 실행 경로도 별도로 유지한다.
 
-현재는 **D2-mac 입출력·명시적 복구 및 시작/메뉴 사용성 보완**까지 진행했다. macOS 12+에서 `floe2-desktop`과
+현재는 **D2-mac 입출력·명시적 복구 및 시작/메뉴 사용성 보완, D3-mac 개발 패키지 고지 조립**까지 진행했다. macOS 12+에서 `floe2-desktop`과
 로컬 개발용 `.app`을 빌드할 수 있다. 시스템 AppKit/WKWebView를 Rust 바인딩으로
 호출하며 외부 브라우저나 Python 런타임을 사용하지 않는다. **RHEL 호스트와
 배포용 패키지는 아직 미제공**이다. `floe2-web` 외부 브라우저 경로도 유지한다.
@@ -101,7 +101,7 @@ RPM 설치 버전과 pkg-config ABI는 서로 구분한다. 라이브러리 존�
 | D0 | 확정 요구, RHEL ABI 조사, 공유 Rust 실행 경계, 읽기 전용 환경 감사 | 공통 기반·선택 검증 완료; 현장 inventory와 전체 회귀 잔여 |
 | D1 | 플랫폼 호스트 선택, lock/vendor/고지, 독립 창·인증·표시·종료/실패 정리 | macOS 개발 호스트·인증/확인 종료 검사 구현; Linux·실패 복구 수용 잔여 |
 | D2 | 메뉴·단축키·IME·DPR/resize/pan, 파일 선택·다운로드·클립보드, 저장·복구·창 닫기 | macOS 파일/편집 메뉴·PNG/텍스트 복사·명시적 복구 구현; 아래 잔여 수용 별도 |
-| D3 | macOS 패키지, RHEL 8.6/8.10 ELF/런타임, 실제 ETX 입력·픽셀·지연·사용량 비교 | 미완료 |
+| D3 | macOS 패키지, RHEL 8.6/8.10 ELF/런타임, 실제 ETX 입력·픽셀·지연·사용량 비교 | macOS 개발판 고지 조립/검사 구현; 서명·공증·배포/현장 수용 미완료 |
 
 웹에서 이미 검증한 경로도 WebView 엔진 차이는 다시 검사한다. 특히 blob
 다운로드/파일 덮어쓰기 확인, PNG 클립보드, DRC 결과 불명·저장 중 종료,
@@ -187,7 +187,8 @@ sh tools/validate_desktop.sh
 
 첫 명령은 `desktop/target/macos-dev.XXXXXX/Floe2.app`을 매번 새로 만들고 경로를
 출력한다. 기존 묶음을 덮어쓰지 않는다. 인접 index/renderd를 포함하지만 **debug
-개발용이며 서명·공증·배포 고지 조립·release 성능 검증을 마친 패키지가 아니다**.
+개발용이며 서명·공증·release 성능 검증을 마친 패키지가 아니다**.
+2026-09-21부터 의존 고지는 아래 §8처럼 조립하지만 배포 법적 검토 완료를 뜻하지 않는다.
 두 번째는 실제 창을 띄우는 명시적 macOS 게이트다. 일반 headless 배터리에서는
 GUI를 자동 실행하지 않고 source/vendor 감사와 공통 embedded lifecycle만 한다.
 
@@ -431,6 +432,79 @@ cwd·공백/한글 인자·명시 override·종료 코드·미빌드 안내·deb
   실제 설계/리뷰 파일은 수정하지 않았다. Dock 복원·다중 화면/IME·실제 DRC
   저장 장애 수용까지 확대한 검사는 아니다.
 
-남은 큰 작업은 RHEL 8.6/8.10 호스트·ETX 검증, 배포 서명/완전한 고지,
+남은 큰 작업은 RHEL 8.6/8.10 호스트·ETX 검증, 배포 서명/고지 수용,
 DRC 저장 결과 불명·WebContent crash/저장소 소실 및 IME/DPI 수용이다.
 원격 공유·CI·열린 색인 hot-reload 보류는 변경하지 않는다.
+
+## 8. D3-mac 개발 패키지 고지·검증된 앱 실행 (2026-09-21)
+
+`build_desktop_macos_dev.sh`는 기존 Rust portable packager의 오프라인 의존성
+조회·원문 복사·유계 notice index를 재사용한다. macOS host/index/renderd의
+native/build 의존성(빌드 전용 포함), 양쪽 Cargo lock/manifest, Rust toolchain
+저작권/라이선스, 렌더러 글꼴 OFL을 `Contents/Resources/NOTICES`에 조립한다.
+objc2 계열의 standalone license 부재는 기존 `desktop/NOTICES.md`의 출처 표시된
+upstream MIT 보충문과 원본 README로 명확히 구분한다. vendor를 바꾸지 않으며
+그 외 미정의 고지 누락은 오류다. 시스템 AppKit/WebKit/SDK는 동봉하지 않는다.
+
+호스트에 notice index 식별자·소스 revision·target을 고정한다. About의 기존
+인증된 읽기 전용 목록/본문 UI가 이를 사용한다. macOS 앱은 고정된
+`Contents/Resources`에서만 찾고 cwd나 임의 환경변수 경로로 대체하지 않는다.
+기존 portable은 실행 파일 옆 경로 그대로다. 파일 단위 크기·총량·페이징·
+심볼릭 링크 거부 및 본문 chunk 검사는 공통 코어가 담당한다.
+SHA-1은 여기서 **콘텐츠 식별**이며 발행자 인증/코드 서명이 아니다.
+
+```sh
+floe_app=$(sh tools/build_desktop_macos_dev.sh --release)
+"$floe_app/Contents/MacOS/floe2-desktop" --check-notices
+sh tools/run_desktop_macos_dev.sh --release view quick.oas
+```
+
+`--check-notices`는 모든 고지 chunk를 읽고 확인한 뒤 종료한다. GUI·listener·
+worker·소스 파일을 열지 않고, 실패는 stderr/exit 1이다. 앱을 다른 디렉터리에
+옮겨도 동작한다. 빌드는 이 검사까지 통과해야 성공 경로를 출력한다.
+
+성공 후에만 `desktop/target/macos-preview-{debug,release}.path`를 원자적으로
+교체한다. 실행기는 호출자 cwd와 명시 worker override를 유지하면서 해당 앱과
+그 안의 worker를 기본 선택한다. 잘못된/사라진 앱 경로·symlink receipt는 오류로
+알리며 조용히 다른 빌드로 넘어가지 않는다. receipt가 아예 없으면 기존 직접
+`cargo build` 바이너리 실행은 유지한다(이 빌드는 고지 패키지를 제공하지 않음).
+이전 `.app`을 지우거나 덮어쓰지 않고, 빌드 실패 때 이전 receipt도 유지한다.
+자동 다운로드·서명·공증·외부 게시·사용자 파일 권한 확대는 없다.
+
+회귀 검사는 `validate_desktop_launcher.py`의 합성 실행기/패키징과 Rust packager
+unit에 더해, 실제 `.app`을 받아 새 임시 복사본만 손상시키는 별도 게이트다:
+
+```sh
+.venv/bin/python -B tools/validate_desktop_notices.py "$floe_app"
+```
+
+새 경로/한글·공백 이동, worker/Python 없는 실행 환경, 본문 변조·누락·같은 내용의
+외부 symlink·index 변경 거부를 검사한다. 원본 앱과 설계 파일은 변경하지 않는다.
+macOS 전용 실제 앱 검사는 headless/Linux 배터리에 자동 실행시키지 않는다.
+
+실행 기록:
+
+- `floe-app --lib`: 33 통과, 기존 GTK oracle 2개 ignored. packager unit 8개,
+  host unit 6개, 합성 실행기/패키징 9개 통과. host/packager clippy
+  `--all-targets --no-deps -- -D warnings` 및 Rust fmt 통과. 의존 VFS의 기존
+  dead-code 경고 3개는 이 변경 범위에서 수정하지 않았다.
+- 실제 debug·release `.app`: 고지 279파일 전 chunk 검사 통과. release 앱의
+  별도 복사본에서 worker/Python 없이 경로 이동·누락·본문/index 변조·외부
+  symlink 거부 통과. 실행기가 검증된 release 앱을 선택하는 것도 확인했다.
+- 패키지 전용 `--smoke-test-notices`: 실제 WKWebView 인증 → About 목록
+  → 본문 읽기 → 다음 64개 목록 → 닫기 취소 → application Quit 확인 →
+  service join 통과. 고지 검사가 없는 기존 `--smoke-test`와 구분한다.
+  두 QA 명령은 source/reviewer/write scope 인자를 받지 않는다. 디자인 픽셀·
+  DRC 쓰기·물리 입력·IME/DPI 수용을 증명하는 테스트는 아니다.
+- 합성 실행기 검사의 최초 실행은 `/var`·`/private/var` 경로 별칭 비교 1건이
+  실패했다. 빌드 진입 경로를 물리 경로로 통일한 뒤 9개 모두 통과했다.
+- `sh tools/validate_rust.sh --only embedded_host,web_portable,web_selfcheck,web_ui`:
+  **exit 0 / ALL OK**. 공통 portable 실패/취소·자기 진단·embedded 수명·UI
+  회귀가 통과했다. 전체 배터리나 Linux/ETX 수용을 뜻하지 않는다.
+- 상세 로그: `/private/tmp/floe-desktop-notices-{unit,packager,host}.log`,
+  `floe-desktop-notices-release.log`, `floe-desktop-notices-native.log`,
+  `floe-desktop-notices-battery.log`.
+
+전체 목표 잔여는 D2 확대 장애·DRC·IME/DPI/물리 드래그 수용, RHEL 호스트 및
+8.6/8.10 ETX, 배포 서명/공증·고지 최종 수용, G1 성능/G4 대조와 Python-free
+Linux 실행이다. 이 단계는 D3 선행 작업일 뿐 전체 목표 완료가 아니다.

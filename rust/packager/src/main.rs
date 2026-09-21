@@ -1,5 +1,6 @@
 //! Offline development packager; existing vendored signal dependencies only.
 //! Only its own new staging directory is removed. Never replace an archive.
+mod desktop;
 mod elf;
 use std::{
     env, fs,
@@ -326,9 +327,26 @@ fn dependency_notices(
     rustc: &Path,
     target: &str,
 ) -> Result<Vec<PathBuf>> {
+    dependency_notices_for(
+        root,
+        cargo,
+        rustc,
+        target,
+        "rust",
+        &["floe-app", "floe-index", "floe-renderd"],
+    )
+}
+fn dependency_notices_for(
+    root: &Path,
+    cargo: &Path,
+    rustc: &Path,
+    target: &str,
+    workspace: &str,
+    roots: &[&str],
+) -> Result<Vec<PathBuf>> {
     let metadata: serde_json::Value = serde_json::from_str(&output(
         Command::new(cargo)
-            .current_dir(root.join("rust"))
+            .current_dir(root.join(workspace))
             .env("RUSTC", rustc)
             .args([
                 "metadata",
@@ -348,10 +366,10 @@ fn dependency_notices(
         .ok_or("missing cargo dependency graph")?;
     let mut selected = std::collections::BTreeSet::new();
     let mut todo = Vec::new();
-    for name in ["floe-app", "floe-index", "floe-renderd"] {
+    for name in roots {
         let package = packages
             .iter()
-            .find(|p| p["name"] == name && p["source"].is_null())
+            .find(|p| p["name"] == *name && p["source"].is_null())
             .ok_or("missing native root package")?;
         todo.push(
             package["id"]
@@ -383,6 +401,7 @@ fn dependency_notices(
         }
     }
     let vendor = root.join("rust/vendor").canonicalize()?;
+    let own_vendor = root.join(workspace).join("vendor").canonicalize()?;
     let mut manifests = Vec::new();
     for package in packages {
         if !selected.contains(package["id"].as_str().ok_or("missing package id")?)
@@ -396,7 +415,7 @@ fn dependency_notices(
                 .ok_or("missing manifest path")?,
         )
         .canonicalize()?;
-        if !manifest.starts_with(&vendor) {
+        if !manifest.starts_with(&vendor) && !manifest.starts_with(&own_vendor) {
             return Err("non-vendored package in offline closure".into());
         }
         manifests.push(
@@ -424,10 +443,10 @@ fn notices(
             .ok_or("notice inventory exceeds 128MiB")?;
         copy(source, target, false)
     };
-    let vendor = root.join("rust/vendor");
     let mut inventory =
         String::from("Resolved native/build dependency notices (build dependencies included; not all are runtime-linked)\n");
     for crate_dir in crates {
+        let crate_name = crate_dir.file_name().ok_or("crate without name")?;
         let mut notices = 0;
         for file in files(crate_dir)? {
             let name = file
@@ -452,15 +471,27 @@ fn notices(
                 .iter()
                 .any(|p| name.starts_with(p))
             {
-                let rel = file.strip_prefix(&vendor)?;
-                notice_copy(&file, &dest.join("crates").join(rel))?;
+                let rel = file.strip_prefix(crate_dir)?;
+                notice_copy(&file, &dest.join("crates").join(crate_name).join(rel))?;
                 if name != "CARGO.TOML" {
                     notices += 1;
                 }
             }
         }
         if notices == 0 {
-            return Err(format!("missing notice: {}", crate_dir.display()).into());
+            // Only the pinned objc2 family has an explicitly attributed
+            // upstream supplement. Other missing notices remain hard errors.
+            if !desktop::supplemented(crate_dir) {
+                return Err(format!("missing notice: {}", crate_dir.display()).into());
+            }
+            let destination = dest.join("crates").join(crate_name);
+            notice_copy(
+                &root.join("desktop/NOTICES.md"),
+                &destination.join("UPSTREAM-SUPPLEMENT.md"),
+            )?;
+            notice_copy(&crate_dir.join("README.md"), &destination.join("README.md"))?;
+            inventory.push_str(&format!("{}: upstream MIT supplement + original README (crate archive has no standalone license file)\n", crate_name.to_string_lossy()));
+            continue;
         }
         inventory.push_str(&format!(
             "{}: {notices} notice file(s)\n",
@@ -700,6 +731,18 @@ fn main() {
         if args.get(2).is_some_and(|s| s == "--help" || s == "-h") && args.len() == 3 {
             println!("{HELP}");
             return Ok(());
+        }
+        if args.get(2).is_some_and(|s| s == "--desktop-notices") {
+            if args.len() != 4 {
+                return Err("--desktop-notices requires one new resource directory".into());
+            }
+            return desktop::build(Path::new(root), Path::new(&args[3]));
+        }
+        if args.get(2).is_some_and(|s| s == "--desktop-receipt") {
+            if args.len() != 5 {
+                return Err("--desktop-receipt requires profile and checked app path".into());
+            }
+            return desktop::receipt(Path::new(root), &args[3], Path::new(&args[4]));
         }
         build(Path::new(root), parse(&args[2..])?)
     })();

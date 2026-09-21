@@ -28,8 +28,10 @@ The MIT text below is a separately attributed upstream supplement, not a
 modification to or a claim about the contents of the published crate archives.
 Upstream also documents Apple SDK-derived binding considerations. System
 AppKit/WebKit and Xcode SDK are not redistributed here; the host uses installed
-macOS frameworks. Desktop distribution/notarization and final package notice
-assembly remain D3 gates; this inventory does not declare legal review complete.
+macOS frameworks. The development `.app` builder assembles this supplement and
+the resolved dependency/toolchain/font notices into an indexed Resources bundle.
+Desktop distribution/notarization and final notice acceptance remain D3 gates;
+this inventory does not declare legal review complete.
 
 ## objc2 upstream MIT supplement
 

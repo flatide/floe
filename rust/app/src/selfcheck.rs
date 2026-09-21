@@ -7,7 +7,7 @@ use floe_app_core::{
 use floe_worker_client::{Config, WorkerClient, EXPECTED_RENDERD_VERSION};
 use serde_json::{json, Value};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicUsize, Arc},
     time::Duration,
 };
@@ -77,17 +77,32 @@ pub fn notice_catalog(cancelled: &AtomicUsize) -> Result<Option<floe_notices::Ca
         return Ok(None);
     };
     let exe = std::env::current_exe()?;
-    let root = exe
-        .parent()
-        .ok_or_else(|| Error::input("executable has no parent"))?;
+    let root = notice_root(&exe)?;
     let build = build_info();
     Ok(Some(floe_notices::Catalog::open(
-        root,
+        &root,
         id,
         build.source_revision,
         build.target,
         cancelled,
     )?))
+}
+fn notice_root(exe: &Path) -> Result<PathBuf> {
+    let parent = exe
+        .parent()
+        .ok_or_else(|| Error::input("executable has no parent"))?;
+    // A native bundle has one fixed Resources directory. No cwd/environment
+    // fallback: the pinned index still checks every selected page's identity.
+    // This is a content check, not publisher authentication.
+    if exe.file_name().is_some_and(|n| n == "floe2-desktop")
+        && parent.file_name().is_some_and(|n| n == "MacOS")
+        && parent
+            .parent()
+            .is_some_and(|p| p.file_name().is_some_and(|n| n == "Contents"))
+    {
+        return Ok(parent.parent().unwrap().join("Resources"));
+    }
+    Ok(parent.to_owned())
 }
 fn discovery(adjacent: bool, renderer: bool) -> Result<Discovery> {
     if !adjacent {
@@ -185,6 +200,24 @@ pub fn run(o: Options, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_bundle_notices_have_one_fixed_location() {
+        assert_eq!(
+            notice_root(Path::new("/tmp/Floe2.app/Contents/MacOS/floe2-desktop")).unwrap(),
+            PathBuf::from("/tmp/Floe2.app/Contents/Resources")
+        );
+        for path in [
+            "/tmp/floe2-desktop",
+            "/tmp/floe2-web",
+            "/tmp/Contents/MacOS/floe2-web",
+            "/tmp/other/MacOS/floe2-desktop",
+        ] {
+            assert_eq!(
+                notice_root(Path::new(path)).unwrap(),
+                Path::new(path).parent().unwrap()
+            );
+        }
+    }
     #[test]
     fn metadata_is_explicit_not_desktop_acceptance() {
         let m = metadata();
