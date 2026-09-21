@@ -17,8 +17,10 @@
   write-once 마스크가 있어야 하며 없으면 오류다(가림을 증명할 수 없다).
 - 없는 것: 적응형 블록 크기, 예상 디코드량 기반 블록 제한, **실칩 측정**.
 - 실칩에서 돌릴 것(대표 뷰마다, depth full과 0 둘 다):
-  `tools/bench_layer_decode.py <cache> --modes baseline,ordered:8,occlusion:8 --layers all
+  `tools/bench_layer_decode.py MAIN01.oas --modes baseline,ordered:8,occlusion:8 --layers all
   --zooms 1,4,8 --repeat 3 --warm 2 --center <x,y um>`.
+  인자는 **원본 OASIS 경로**다(옆의 `.<이름>.ice/`를 쓴다; 폴더를 줘도 된다 — 0.12.181 전에는
+  폴더를 주면 `.<이름>.ice.tiles`를 찾다 실패했다).
   결과를 손으로 옮겨야 하는 곳(폐쇄망)을 위해 마지막에 `== type this ==` 블록만 찍는다 —
   **그 블록의 줄만 옮기면 되고 나머지 출력은 옮길 필요가 없다.** 값이 없는 열은 머리글로
   접힌다(`uns=0`), `--warm 0`이면 warm 열이 빠진다. 한 depth당 4줄이다:

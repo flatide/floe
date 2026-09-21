@@ -22,7 +22,7 @@ Two rules the numbers depend on (review 2026-09-20):
     spends on reading (`decode_ms`), on asking what to read (`demand_ms`) and
     on the decode pool itself (`pool_ms`) is taken out of its paint.
 
-    .venv/bin/python tools/bench_layer_decode.py <cache-or-oas> [options]
+    .venv/bin/python tools/bench_layer_decode.py <source.oas> [options]
       --modes baseline,ordered:1,ordered:4   --layers 16,449 or all
       --zooms 1,4,8                 --depth full|0|N
       --repeat 3   --warm 1        --thin keep|cull
@@ -40,7 +40,7 @@ scene and the session are still there, so it is not the normal render).
 
 On a real chip the run is, per representative view:
 
-    .venv/bin/python tools/bench_layer_decode.py <cache> \
+    .venv/bin/python tools/bench_layer_decode.py MAIN01.oas \
         --modes baseline,ordered:8,occlusion:8 --layers all \
         --zooms 1,4,8 --depth full --repeat 3 --warm 2 --center <x,y um>
 
@@ -64,9 +64,26 @@ from floe.rust_render import RustRenderWorker
 from floe import RENDERD_VERSION
 
 
+def source_of(path):
+    """The source path a `Cache` wants. The index lives in the hidden
+    sibling `.<source>.ice/`, and the source file itself is not read, so
+    either may be given; handing `Cache` the folder made it look for
+    `..<source>.ice.ice` and fall back to the legacy `<path>.tiles`
+    (field 2026-09-21: `.MAIN01.oas.ice.tiles/meta.json` not found)."""
+    folder, name = os.path.split(os.path.abspath(path.rstrip('/')))
+    if name.startswith('.') and name.endswith('.ice') and os.path.isdir(os.path.join(folder, name)):
+        path = os.path.join(folder, name[1:-len('.ice')])
+    index = os.path.join(os.path.dirname(os.path.abspath(path)),
+                         '.' + os.path.basename(path) + '.ice', 'meta.json')
+    if not os.path.isfile(index):
+        raise SystemExit('no index for %s (looked for %s); run: floe2 index %s'
+                         % (path, index, path))
+    return path
+
+
 def parse_args(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('source')
+    ap.add_argument('source', help='the source OASIS (or its .<name>.ice folder)')
     ap.add_argument('--modes', default='baseline,ordered:1')
     ap.add_argument('--layers', default='16,449')
     ap.add_argument('--zooms', default='1,4,8')
@@ -79,6 +96,7 @@ def parse_args(argv):
     ap.add_argument('--center', help='view centre "x,y" in um (default: the layout centre)')
     ap.add_argument('--json')
     args = ap.parse_args(argv)
+    args.source = source_of(args.source)
     specs, args.modes = args.modes.split(','), []
     for spec in specs:
         mode, _, block = spec.partition(':')
