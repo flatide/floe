@@ -146,6 +146,11 @@ if(require.main===module)(async()=>{
         r.el('gd-box').onclick();r.raf();click(r,19,19);r.raf();assert.equal(r.el('gd-box').attrs['aria-pressed'],'true');
         click(r,25,25);await tick();const change=r.requests.filter(v=>v.path.endsWith('/drc/selection')&&v.method==='POST').at(-1);
         assert.deepEqual(change.body.body.bbox_um,['19','7','25','13']);assert.equal(change.body.state_rev,'1');assert.equal(w.sent.length,1);
+        const requestCount=r.requests.length;
+        for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const key of ['Tab','ArrowLeft','+','Escape']){
+            r.el('guest-viewport').listeners.keydown({key,...signal,preventDefault(){assert.fail('IME consumed');}});
+            assert.equal(r.requests.length,requestCount);assert.equal(w.sent.length,1);
+        }
         let prevented=false;r.el('guest-viewport').listeners.keydown({key:'Tab',preventDefault(){prevented=true;}});await tick();assert(prevented);
         assert(r.requests.some(v=>v.body&&v.body.body&&v.body.body.kind==='filtered_step'));assert.equal(w.sent.length,1);
         if(mode==='explore'){
@@ -209,6 +214,9 @@ if(require.main===module)(async()=>{
     count=ww.sent.length;pointer.el('guest-viewport').listeners.wheel(wheel);assert.equal(ww.sent.length,count);ww.onclose();
     const band=environment();await band.c.start();const bw=band.sockets[0];band.hello();bw.text(band.state());bw.binary(packet(exactScene));band.raf();
     band.mouse('mousedown',12,8,2);band.mouse('mousemove',40,24,2);band.raf();assert(!band.el('zoom-band').hidden);assert.equal(bw.sent.length,1);
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}]){
+        band.el('guest-viewport').listeners.keydown({key:'Escape',...signal,preventDefault(){assert.fail('IME cancelled drag');}});assert(!band.el('zoom-band').hidden);
+    }
     band.el('guest-viewport').listeners.keydown({key:'Escape',preventDefault(){}});assert(band.el('zoom-band').hidden);
     band.mouse('mouseup',40,24,2);assert.equal(bw.sent.length,1,'Escape cancels without a pick/navigation');
     band.mouse('mousedown',12,8,2);band.mouse('mousemove',40,24,2);band.raf();

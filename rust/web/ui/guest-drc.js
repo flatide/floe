@@ -258,7 +258,7 @@
             if(k==='Escape'){return popCD(true)||endJump();}
             if(k===','||k==='.'||k==='Tab'){return step(k===','||k==='Tab'&&!!shift,false);}return false;
         }
-        el('gd-errors').onkeydown=function(e){if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.isComposing&&(e.key==='ArrowUp'||e.key==='ArrowDown')){if(step(e.key==='ArrowUp',false)){e.preventDefault();}}};
+        el('gd-errors').onkeydown=function(e){if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.isComposing&&e.keyCode!==229&&(e.key==='ArrowUp'||e.key==='ArrowDown')){if(step(e.key==='ArrowUp',false)){e.preventDefault();}}};
         function paint(ctx,p,size,rect){painted=null;if(!p||!size||!context()||!data||!data.markers||!data.shown){return;}const hits=[];ctx.save();
             const markers=rows.slice();if(selected&&!markers.some(function(r){return r.check===selected.check&&r.local===selected.local;})){markers.push(selected);}
             markers.forEach(function(r){const b=bbox(r.bbox_um),xy=G.point(p,b[0]*.5+b[2]*.5,b[1]*.5+b[3]*.5);if(!xy.every(Number.isFinite)){return;}

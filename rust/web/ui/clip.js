@@ -220,7 +220,7 @@
             el('clip-layers').value='visible';el('clip-jobs').value='4';el('clip-cell-name').value='FLOE_CLIP';el('clip-form').hidden=false;el('clip-open').setAttribute('aria-expanded','true');render();el('clip-layers').focus();};
         el('clip-form').onsubmit=function(e){e.preventDefault();prepare();};
         el('clip-approve').onclick=approve;el('clip-dismiss').onclick=function(){dismiss(true);render();};
-        el('clip-form').onkeydown=function(e){if(e.key==='Escape'){e.preventDefault();e.stopPropagation();dismiss(true);render();}};
+        el('clip-form').onkeydown=function(e){if(e.isComposing||e.keyCode===229){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();dismiss(true);render();}};
         ['clip-layers','clip-jobs','clip-cell-name'].forEach(function(id){el(id).oninput=function(){cancelPreparation();note='Options changed. Review before approving.';render();};el(id).onchange=el(id).oninput;});
         el('clip-cancel').onclick=cancel;el('clip-refresh').onclick=refresh;el('clip-resolve').onclick=function(){if(uncertain&&pending&&!waiting&&!stopped){return send(pending);}};
         render();

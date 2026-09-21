@@ -8,7 +8,7 @@ class Element{
     addEventListener(k,f){this.listeners[k]=f;}focus(){doc.activeElement=this;}querySelectorAll(){return [];}
 }
 const el=k=>{if(!nodes.has(k)){nodes.set(k,new Element());}return nodes.get(k);};
-const doc={activeElement:null,contains:()=>true,addEventListener(){},createElement:()=>new Element()};
+const listeners={},doc={activeElement:null,contains:()=>true,addEventListener(k,f){listeners[k]=f;},createElement:()=>new Element()};
 async function http(method,path,body){requests.push({method,path,body});if(path==='/api/v1/drc'){return {drc:catalog};}if(method==='GET'){return {shares:entries};}if(method==='DELETE'){entries=[];return null;}
     entries=[{share_id:id,mode:body.mode,...body.drc&&{drc:body.drc}}];if(fail){throw Error('timeout');}return {share_id:id,invite,mode:body.mode,invite_seconds:120,session_seconds:1800,...body.drc&&{drc:{id:body.drc.id,revision:body.drc.revision}}};}
 const c=Sharing.bind({el,document:doc,http,origin:'http://127.0.0.1:1234',context:()=>current});
@@ -16,6 +16,10 @@ const tick=()=>new Promise(r=>setImmediate(r));
 (async()=>{
     c.init(false);el('share-open').onclick();assert.equal(requests.length,0);assert(el('share-open').hidden);
     c.init(true);el('share-open').onclick();await tick();assert.equal(requests.length,2);assert.equal(requests[0].method,'GET');assert.equal(el('share-create').disabled,true);
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const key of ['Escape','Tab']){
+        const focus=doc.activeElement;listeners.keydown({key,...signal,stopPropagation(){},preventDefault(){assert.fail('IME consumed');}});
+        assert(!el('share-dialog').hidden);assert.equal(doc.activeElement,focus);assert.equal(requests.length,2);
+    }
     await el('share-create').onclick();assert.equal(requests.length,2);el('share-consent').checked=true;el('share-consent').onchange();
     current={...current,state_rev:'2'};c.changed();await el('share-create').onclick();assert.equal(requests.length,2);assert(!el('share-consent').checked);
     el('share-cancel').onclick();el('share-open').onclick();await tick();el('share-mode').value='explore';el('share-consent').checked=true;el('share-consent').onchange();await el('share-create').onclick();await tick();

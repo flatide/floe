@@ -30,7 +30,10 @@ async function run(){
     assert(key('Tab').used);assert.equal(doc.activeElement,el('session-exit-cancel'));
     let trapped=false;listeners.focusin({target:el('viewport'),stopPropagation(){trapped=true;}});assert(trapped);assert.equal(doc.activeElement,el('session-exit-cancel'));
     trapped=false;listeners.focusin({target:el('session-exit-confirm'),stopPropagation(){trapped=true;}});assert(trapped,'other modal must not steal focus from exit buttons');
-    key('Escape',{isComposing:true});assert(!el('session-exit-dialog').hidden);
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const k of ['Escape','Tab']){
+        const focus=doc.activeElement;assert(!key(k,signal).used);assert(!el('session-exit-dialog').hidden);
+        assert.equal(doc.activeElement,focus);assert.equal(calls,0);
+    }
     const enter=key('Enter');assert(!enter.used);assert.equal(doc.activeElement,el('session-exit-cancel'));assert.equal(calls,0);
     el('session-exit-cancel').onclick();assert(el('session-exit-dialog').hidden);assert.equal(doc.activeElement,el('viewport'));
     assert.equal(el('app-header').getAttribute('aria-hidden'),null);assert.equal(el('app-workspace').getAttribute('aria-hidden'),'false');

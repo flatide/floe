@@ -508,3 +508,58 @@ macOS 전용 실제 앱 검사는 headless/Linux 배터리에 자동 실행시�
 전체 목표 잔여는 D2 확대 장애·DRC·IME/DPI/물리 드래그 수용, RHEL 호스트 및
 8.6/8.10 ETX, 배포 서명/공증·고지 최종 수용, G1 성능/G4 대조와 Python-free
 Linux 실행이다. 이 단계는 D3 선행 작업일 뿐 전체 목표 완료가 아니다.
+
+## 9. D2-mac 조합 입력과 앱 단축키 분리 (2026-09-21)
+
+코드 검사와 새 회귀로 파일 선택기의 `Enter`가 `isComposing=true`인 경우에도
+검색을 제출하고 기본 동작을 취소하는 것을 재현했다. About·clip·DRC build·
+공유 기본값 확인의 Escape에도 조합 판정이 빠져 있었다. 그 밖의 상당수
+단축키는 `isComposing`만 확인하고 기존 메모/waive 입력기가 쓰는 229 호환
+신호를 확인하지 않았다.
+
+현재 규칙은 `isComposing || keyCode === 229`이면 **앱의 keydown 명령을 실행하지
+않는 것**이다. native IME의 기본 처리에 `preventDefault`를 걸지 않는다.
+파일 검색/대화상자 닫기·포커스 순환, 뷰/미니맵 이동·복사·깊이·드래그 취소,
+레이어/채움 편집과 owner/guest DRC 순회를 같은 규칙으로 맞췄다. 기존 메모의
+composition 상태 추적 및 내장 두벌식 입력은 그대로다. 입력 확정 후 일반 키의
+동작은 유지하며, 타이머 기반 입력 지연이나 키 재실행은 추가하지 않았다.
+
+229는 새로운 단축키 규약이 아니라 기존 브라우저 경계 이벤트에 대한 호환
+처리다. [UI Events legacy keyCode 규칙](https://w3c.github.io/uievents/#determine-keydown-keyup-keyCode)과
+[MDN 조합 중 keydown 설명](https://developer.mozilla.org/en-US/docs/Web/API/Element/keydown_event#keydown_events_with_ime)을
+참고했다. 이 근거와 합성 이벤트 통과를 macOS/RHEL 입력기 전체 수용으로
+확대하지 않는다.
+
+검증 범위:
+
+- 각 UI의 실제 handler에 `isComposing=true` 및 `isComposing=false, keyCode=229`
+  이벤트를 넣고 요청 수·초안/대화상자·포커스·뷰/선택/드래그 상태 불변을 검사한다.
+  일반 Enter의 검색은 한 번 제출되고, 일반 Escape는 기존처럼 취소/닫기한다.
+- 실제 WKWebView `--smoke-test`에 빈 초기 파일 선택기의 조합 Enter/Escape/Tab
+  합성 검사를 추가했다. 성공/실패 고정 marker만 반환하며 원래 입력값을 복원한다.
+  `--smoke-test-notices`도 같은 검사 후 기존 About 고지·종료 수명을 검사한다.
+  probe 자체도 이벤트 미지원·기본 취소·포커스/텍스트/대화상자 변경 시 실패하는지
+  테스트한다. 이 JS는 명시적 네이티브 QA에서만 실행되며 제품 UI에는 추가하지 않는다.
+- 합성 DOM 이벤트는 OS 후보창, 실제 물리 키, 엔진의 기본 form submit 및
+  composition 이벤트 순서를 재현하지 않는다. macOS 한글/일본어 입력기와 현장
+  RHEL/ETX의 실제 입력 수용은 여전히 별도로 남긴다.
+
+실행 결과:
+
+- 수정 전 `browse.test.cjs`의 새 검사는 조합 Enter의 `preventDefault`에서 실패했고,
+  수정 후 확대된 전체 ES2017/UI 회귀가 통과했다. 테스트 개발 중 검색의 사전
+  GET을 포함한 총 요청 수를 제출 수로 비교한 단언과 중복 test 변수명도 고쳤다.
+- `sh tools/validate_rust.sh --only embedded_host,web_ui,web_hangul,validation_selector`:
+  **exit 0 / ALL OK**. 내장 두벌식은 기존 GTK composer와 11,172음절,
+  22,744시퀀스, 237,352전이 대조 통과. 이것은 OS IME 검사가 아니다.
+- host unit 6개, fmt 및 `clippy --all-targets --no-deps -- -D warnings` 통과.
+  release `.app`의 실제 WKWebView에서 `ime-ok` → About 고지 본문/페이징 →
+  닫기 취소 → 종료 확인 → service join 통과. 새 앱 고지 279파일 무결성 및
+  별도 복사본의 이동/누락/변조/symlink 거부 검사도 통과했다.
+- 로그: `/private/tmp/floe-desktop-ime-before.log`(의도한 수정 전 실패),
+  `floe-desktop-ime-ui.log`, `floe-desktop-ime-host.log`,
+  `floe-desktop-ime-native.log`, `floe-desktop-ime-battery.log`.
+
+이번 단계는 공통 UI 입력 결함을 없애는 D2 보완이다. DRC 저장 장애/프로세스
+crash·storage 소실 복구, DPI/물리 입력, RHEL 호스트 및 전체 배포 게이트를
+완료로 처리하지 않는다. 기존 원격 공유·CI·열린 색인 hot-reload 보류도 유지한다.

@@ -47,7 +47,12 @@ const posts=h=>h.requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/default
     assert.equal(h.requests.filter(r=>r.path.endsWith('/revoke')).length,0,'approved token was revoked');
     await h.prepare();h.c.rev=P.next(h.c.rev);h.panel.changed();await flush();assert(h.el('default-review').hidden);assert.equal(posts(h).length,1);assert(h.requests.some(r=>r.path.endsWith('/revoke')));
     await h.prepare();h.tick(30001);await flush();assert(h.el('default-review').hidden);assert.match(h.el('default-note').textContent,/expired/);
-    await h.prepare();h.el('default-review').onkeydown({key:'Escape',preventDefault(){},stopPropagation(){}});assert(h.el('default-review').hidden);assert(h.el('default-prepare').focused);
+    await h.prepare();
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}]){
+        const n=h.requests.length;h.el('default-review').onkeydown({key:'Escape',...signal,preventDefault(){assert.fail('IME default cancelled');},stopPropagation(){}});
+        assert(!h.el('default-review').hidden);assert.equal(h.requests.length,n);
+    }
+    h.el('default-review').onkeydown({key:'Escape',preventDefault(){},stopPropagation(){}});assert(h.el('default-review').hidden);assert(h.el('default-prepare').focused);
     for(const change of [()=>h.c.id='e'.repeat(64),()=>h.c.epoch='f'.repeat(64),()=>h.c.idle=false,()=>h.c.ready=false]){
         h.c.idle=h.c.ready=true;await h.prepare();change();h.panel.changed();assert(h.el('default-review').hidden);
     }

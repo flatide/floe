@@ -35,6 +35,10 @@ async function submitted(v=cat()) {
 (async()=>{
     await refresh(cat());assert.equal(postCount(),0);assert(!el('drc-build-open').disabled);
     open();assert.equal(focused,'drc-build-jobs');assert.equal(el('drc-build-jobs').value,'4');assert.equal(el('drc-build-force').checked,false);
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}]){
+        el('drc-build-form').onkeydown({key:'Escape',...signal,preventDefault(){assert.fail('IME default cancelled');},stopPropagation(){}});
+        assert(!el('drc-build-form').hidden);assert.equal(postCount(),0);assert.equal(focused,'drc-build-jobs');
+    }
     assert.equal(el('drc-build-source').textContent,'private <db>');assert(controller.escape());assert(!controller.escape());
     assert.equal(focused,'drc-build-open');assert.equal(postCount(),0);
     open();el('drc-build-force').checked=true;el('drc-build-dismiss').onclick();open();assert(!el('drc-build-force').checked,'force approval carried over');

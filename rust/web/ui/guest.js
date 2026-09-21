@@ -213,7 +213,7 @@
         ['depth','detail','thin'].forEach(function(k){el('guest-'+k).onchange=function(){const b={};b[k]=el('guest-'+k).value;edit(b);};});
         ['frames','labels','mono'].forEach(function(k){el('guest-'+k).onchange=function(){const b={};b[k]=el('guest-'+k).checked;edit(b);};});
         el('guest-go').onclick=function(){try{const n={kind:'goto',center_um:[P.decimal(el('guest-x').value.trim()),P.decimal(el('guest-y').value.trim())]},w=el('guest-width').value.trim();if(w){n.width_um=P.decimal(w);}nav(n);}catch(e){status(e.message);}};
-        viewport.addEventListener('keydown',function(e){if(e.isComposing||e.ctrlKey||e.metaKey||e.altKey||!session){return;}
+        viewport.addEventListener('keydown',function(e){if(e.isComposing||e.keyCode===229||e.ctrlKey||e.metaKey||e.altKey||!session){return;}
             if(e.key==='Escape'&&gesture&&gesture.active()){e.preventDefault();gesture.cancel();return;}
             if(drc&&(!queryTools||!queryTools.active())&&drc.key(e.key,e.shiftKey)){e.preventDefault();cursor();return;}
             if(session.mode!=='explore'){return;}

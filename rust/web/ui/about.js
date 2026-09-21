@@ -48,6 +48,7 @@
         panel.addEventListener('click',function(e){if(e.target===panel){close(true);}});
         doc.addEventListener('keydown',function(e){
             if(!opened){return;}e.stopPropagation();
+            if(e.isComposing||e.keyCode===229){return;}
             if(e.key==='Escape'){e.preventDefault();close(true);return;}
             if(e.key==='Tab'){
                 const items=Array.from(panel.querySelectorAll('button, input, [tabindex="0"]')).filter(function(n){return !n.disabled&&n.getClientRects().length>0;});

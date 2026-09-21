@@ -149,7 +149,9 @@ function rig(saved=null, options={}) {
     const keyboard=rig();await keyboard.api.init(true);await keyboard.open();
     let prevented=0;keyboard.doc.activeElement=keyboard.el('index-open-approve');
     keyboard.listeners.keydown({key:'Tab',stopPropagation(){},preventDefault(){prevented++;}});assert.equal(keyboard.doc.activeElement,keyboard.el('index-open-close'));assert(prevented);
-    keyboard.listeners.keydown({key:'Escape',isComposing:true,stopPropagation(){},preventDefault(){throw Error('IME');}});assert(keyboard.api.blocked());
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}]){
+        keyboard.listeners.keydown({key:'Escape',...signal,stopPropagation(){},preventDefault(){throw Error('IME');}});assert(keyboard.api.blocked());
+    }
     keyboard.listeners.keydown({key:'Escape',stopPropagation(){},preventDefault(){}});assert(!keyboard.api.blocked());
     assert.equal(keyboard.calls.filter(c=>c.method==='POST').length,0);keyboard.api.stop();
     console.log('WEB INDEX OPEN: ALL OK (original selection, consent/force, slots, write-ahead approval, read-only recovery, exact retry, identity, cancel, expiry, late response, partial outcome, keyboard)');

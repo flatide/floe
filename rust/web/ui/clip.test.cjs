@@ -84,6 +84,10 @@ function posts(h){return h.requests.filter(r=>r.method==='POST'&&r.path==='/api/
         await h.init();assert(!h.el('clip-open').disabled,'summary display must support exact export');
         const t=h.prepare();assert.equal(t.body.bounds.kind,'viewport');assert.equal(posts(h).length,0);h.reply(t);
         assert(!h.el('clip-approve').disabled);assert.match(h.el('clip-bounds').textContent,/-9007199254740993/);
+        for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}]){
+            const n=h.requests.length;h.el('clip-form').onkeydown({key:'Escape',...signal,preventDefault(){assert.fail('IME default cancelled');},stopPropagation(){}});
+            assert(!h.el('clip-form').hidden);assert(!h.el('clip-approve').disabled);assert.equal(h.requests.length,n);
+        }
         assert.match(h.el('clip-selection').textContent,/2 visible/);
         const approving=h.approve();await h.approve();await approving;
         assert.equal(posts(h).length,1);assert.deepEqual(posts(h)[0].body,{seq:'1',view_id:h.state.view_id,token:'d'.repeat(64),approve:true});

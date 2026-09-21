@@ -66,6 +66,11 @@ async function basic() {
     assert.equal(h.count(),3,'context click replaced the prepared selection');
     assert.equal(h.el('layer-menu').hidden,false);assert.equal(h.document.activeElement,h.el('layer-menu-show'));
     assert.equal(h.el('layer-menu').style.left,'110px');
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const key of ['Escape','End']){
+        const focus=h.document.activeElement;
+        h.el('layer-menu').onkeydown(event({key,...signal,preventDefault(){assert.fail('IME consumed');}}));
+        assert(!h.el('layer-menu').hidden);assert.equal(h.document.activeElement,focus);
+    }
     h.el('layer-menu').onkeydown(event({key:'End'}));assert.equal(h.document.activeElement,h.el('layer-menu-close'));
     h.el('layer-menu').onkeydown(event({key:'Escape'}));assert.equal(h.el('layer-menu').hidden,true);
     assert.equal(h.document.activeElement,h.row('5/1').children[3]);

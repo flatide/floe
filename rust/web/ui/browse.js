@@ -163,11 +163,14 @@
         el('browse-root').onchange=function(){load(el('browse-root').value);};
         el('browse-refresh').onclick=function(){load(current?current.directory:el('browse-root').value);};
         el('browse-filter').onchange=el('browse-refresh').onclick;
-        el('browse-query').onkeydown=function(e){if(e.key==='Enter'){e.preventDefault();el('browse-refresh').onclick();}};
+        el('browse-query').onkeydown=function(e){if(!e.isComposing&&e.keyCode!==229&&e.key==='Enter'){e.preventDefault();el('browse-refresh').onclick();}};
         el('browse-prev').onclick=function(){if(current){submit({kind:'page',snapshot:current.snapshot,start:current.start-128});}};
         el('browse-next').onclick=function(){if(current&&current.next!==null){submit({kind:'page',snapshot:current.snapshot,start:current.next});}};
         doc.addEventListener('keydown',function(e){
             if(!opened){return;}e.stopPropagation();
+            // Leave IME commit/cancel/candidate navigation to the input method.
+            // 229 also covers composition boundary keydowns with a false flag.
+            if(e.isComposing||e.keyCode===229){return;}
             if(e.key==='Enter'&&e.target===el('browse-query')){e.preventDefault();if(!pending&&!busy&&!invalid){el('browse-refresh').onclick();}return;}
             if(e.key==='Escape'){e.preventDefault();if(pending){cancel();}else if(!invalid){close(true);}return;}
             if(e.key==='Tab'){

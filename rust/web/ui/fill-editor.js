@@ -64,7 +64,7 @@
         }
         o.window.addEventListener('blur',release);
         grid.onkeydown=function(e){
-            if(e.isComposing){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();cancel();return;}
+            if(e.isComposing||e.keyCode===229){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();cancel();return;}
             if(!editable()||!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(e.key)){return;}
             e.preventDefault();e.stopPropagation();release();
             if(e.key==='Home'){focus=e.ctrlKey?0:focus-(focus%16);}

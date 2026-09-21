@@ -786,7 +786,11 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         assert.deepEqual(fields(),['123.','40','100'],'blur does not silently discard the draft');
         listeners.pagehide();listeners.pageshow({persisted:true});await wait(()=>sockets.length===2);ws=sockets[1];hello(ws);
         assert.deepEqual(fields(),['123.','40','100'],'same-view reconnect preserves edited inputs');
-        let escaped=false;node('goto-x').keydown({key:'Escape',isComposing:true,preventDefault(){escaped=true;}});assert(!escaped);
+        let escaped=false;
+        for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}]){
+            const before=fields();node('goto-x').keydown({key:'Escape',...signal,preventDefault(){escaped=true;}});
+            assert(!escaped);assert.deepEqual(fields(),before);
+        }
         const wireCount=ws.sent.length;node('goto-x').keydown({key:'Escape',preventDefault(){escaped=true;}});
         assert(escaped);assert.equal(ws.sent.length,wireCount,'Escape restores text, never navigates');
         assert.deepEqual(fields(),snapshot.camera_um);
@@ -1296,10 +1300,16 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     await applied();await wait(()=>second.sent.at(-1).seq!==firstDepthSeq);
     assert.deepEqual(second.sent.at(-1).body,{depth_step:1});await applied();
     const depthCount=second.sent.length;
-    for(const extra of [{ctrlKey:true},{metaKey:true},{altKey:true},{isComposing:true}]){
+    for(const extra of [{ctrlKey:true},{metaKey:true},{altKey:true},{isComposing:true},{keyCode:229}]){
         node('viewport').keydown({key:'<',preventDefault(){assert.fail('modified/composing depth key consumed');},...extra});
     }
     assert.equal(second.sent.length,depthCount);
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}]){
+        for(const key of ['ArrowLeft','+','-','q','r','c','f','9','Tab','Escape']){
+            node('viewport').keydown({key,target:node('viewport'),...signal,preventDefault(){assert.fail('IME shortcut consumed');}});
+        }
+    }
+    assert.equal(second.sent.length,depthCount,'IME shortcut sent a view edit');
     // Free mouse pan has no network traffic while moving and preserves the
     // translated foreground until its new (non-16px) native phase arrives.
     second.receive(packet('raw','11',snapshot.render_rev,nextEpoch));
@@ -1335,6 +1345,10 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     await wait(()=>!node('zoom-band').hidden);
     assert.equal(node('zoom-band').style.left,'20px');assert.equal(node('zoom-band').style.width,'40px');
     assert.match(node('zoom-band-hint').textContent,/Zoom in/);assert.equal(dragEdits(),beforeDrag+1);
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}]){
+        node('viewport').keydown({key:'Escape',...signal,preventDefault(){assert.fail('IME cancelled drag');}});
+        assert(!node('zoom-band').hidden);
+    }
     listeners.mousemove(right(61,51,0));
     node('viewport').keydown({key:'Escape',preventDefault(){}});assert(node('zoom-band').hidden);
     listeners.mouseup(right(60,50,0));assert.equal(dragEdits(),beforeDrag+1);
@@ -1420,7 +1434,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         await wait(()=>!node('snapshot-copy').disabled);assert.match(node('snapshot-status').textContent,/Copied 120 × 90/);
         assert(key('c',{metaKey:true}));await wait(()=>!node('snapshot-copy').disabled);assert.equal(copies.length,copyBase+2);
         textSelection={isCollapsed:false};assert(!key('c',{ctrlKey:true}));textSelection=null;
-        for(const extra of [{shiftKey:true},{altKey:true},{isComposing:true},{target:node('goto-x')},{target:node('canvas')}])assert(!key('c',{ctrlKey:true,...extra}));
+        for(const extra of [{shiftKey:true},{altKey:true},{isComposing:true},{keyCode:229},{target:node('goto-x')},{target:node('canvas')}])assert(!key('c',{ctrlKey:true,...extra}));
         assert.equal(copies.length,copyBase+2,'copy hijacked selection, an editor or browser shortcut');
         node('snapshot-save').onclick();await wait(()=>downloads.length===downloadBase+1&&!node('snapshot-save').disabled);
         assert.equal(downloads.at(-1).name,'floe-view-120x90.png');assert.equal(captureUrls.size,1);

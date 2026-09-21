@@ -26,7 +26,7 @@
         };
         panel.addEventListener('click',function(e){if(e.target===panel){close(true);}});
         capture.addEventListener('keydown',function(e){
-            if(!opened){return;}e.stopPropagation();if(e.isComposing){return;}
+            if(!opened){return;}e.stopPropagation();if(e.isComposing||e.keyCode===229){return;}
             if(e.key==='Escape'){e.preventDefault();close(true);return;}
             if(e.key==='Tab'){
                 const first=el('session-exit-cancel'),last=el('session-exit-confirm');

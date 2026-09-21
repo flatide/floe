@@ -54,6 +54,15 @@ function rig(saved=null){
     const disabled=rig();await disabled.api.init(false,true);assert.equal(disabled.calls.length,0);
     const r=rig();await r.api.init(true,true);await wait(()=>r.el('browse-entries').children.length===128);
     assert(r.api.blocked());assert.equal(r.el('app-header').getAttribute('aria-hidden'),'true');
+    const beforeIME=r.calls.length,query=r.el('browse-query');query.value='한국 조합';query.focus();
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const key of ['Enter','Escape','Tab']){
+        const event={key,target:query,...signal,preventDefault(){assert.fail('IME default was cancelled');},stopPropagation(){}};
+        r.listeners.keydown(event);query.onkeydown(event);
+        assert(!r.el('browse-dialog').hidden);assert.equal(r.doc.activeElement,query);assert.equal(r.calls.length,beforeIME);
+    }
+    const normalEnter={key:'Enter',target:query,preventDefault(){},stopPropagation(){}};
+    r.listeners.keydown(normalEnter);await wait(()=>r.calls.length>beforeIME&&!r.el('browse-refresh').disabled);
+    assert.equal(r.calls.slice(beforeIME).filter(c=>c.method==='POST').length,1,'one explicit search after composition');
     assert.match(r.el('browse-entries').children[0].children[0].textContent,/<img src=x>/,'literal filename, no HTML');
     r.el('browse-next').onclick();await wait(()=>/129–256/.test(r.el('browse-status').textContent));
     r.el('browse-prev').onclick();await wait(()=>/1–128/.test(r.el('browse-status').textContent));

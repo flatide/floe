@@ -95,6 +95,10 @@ if(require.main===module){(async()=>{
     const no=environment();no.context({...no.getContext(),drc:null});no.panelUI.changed();await tick();assert.equal(no.calls.length,0);
     for(const mode of ['follow','explore']){
         const e=environment(mode);e.panelUI.changed();await e.settle();
+        const beforeIME=e.calls.length;
+        for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const key of ['ArrowUp','ArrowDown']){
+            e.el('gd-errors').onkeydown({key,...signal,preventDefault(){assert.fail('IME changed selected error');}});assert.equal(e.calls.length,beforeIME);
+        }
         e.el('gd-step-next').onclick();await e.settle();assert.match(e.el('gd-selected').textContent,/9007199254740994/);assert.equal(e.moves.length,0);
         assert(!e.calls.some(c=>c.method==='POST'&&c.path==='/drc/selection'),'step is not a group edit');
         e.panelUI.key('Tab',false);await e.settle();assert.match(e.el('gd-selected').textContent,/9007199254740995/);

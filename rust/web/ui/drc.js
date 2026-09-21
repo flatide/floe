@@ -600,7 +600,7 @@
                 };
                 b.ondblclick = function (e) { if (e && (e.ctrlKey || e.shiftKey || e.metaKey || e.altKey)) { return; } cancelStep(); select(r, true); };
                 b.onkeydown = function (e) {
-                    if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) { return; }
+                    if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.keyCode === 229) { return; }
                     if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === '.' || e.key === ',') {
                         e.preventDefault(); step(e.key === 'ArrowUp' || e.key === ',', false, true);
                     } else if (e.key === 'n' || e.key === 'w') {

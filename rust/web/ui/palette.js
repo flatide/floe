@@ -215,7 +215,7 @@
                 let lastClick = null, lastRevision = 0;
                 name.onclick = function (e) { lastClick = select(r,e,p); lastRevision = inputRevision; };
                 name.ondblclick = function (e) { e.preventDefault(); const revision = lastRevision; Promise.resolve(lastClick).then(function (ok) { if (ok && revision === inputRevision && valid(p)) { change('toggle', new Map([[k,r.children > 0]])); } }); };
-                name.onkeydown = function (e) { if (!e.isComposing && (e.key === 'ContextMenu' || e.key === 'F10' && e.shiftKey)) { showMenu(e,name); } };
+                name.onkeydown = function (e) { if (!e.isComposing && e.keyCode !== 229 && (e.key === 'ContextMenu' || e.key === 'F10' && e.shiftKey)) { showMenu(e,name); } };
                 row.oncontextmenu = function (e) { showMenu(e,name); };
                 row.onclick = function (e) { if (e.target === row) { select(r,e,p); } };
                 row.appendChild(check); row.appendChild(extras.color); row.appendChild(expander); row.appendChild(name); row.appendChild(extras.style); list.appendChild(row);
@@ -277,7 +277,7 @@
         el('layer-menu-close').onclick = function () { hideMenu(true); };
         list.oncontextmenu = function (e) { if (e.target === list) { showMenu(e,widgets.length ? widgets[0].name : list); } };
         menu.onkeydown = function (e) {
-            if (e.isComposing) { return; }
+            if (e.isComposing || e.keyCode === 229) { return; }
             if (e.key === 'Escape') { e.preventDefault(); hideMenu(true); return; }
             if (!['ArrowDown','ArrowUp','Home','End'].includes(e.key)) { return; }
             const buttons = ['show','hide','toggle','style','all','none','close'].map(function (k) { return el('layer-menu-' + k); }).filter(function (b) { return !b.disabled; });

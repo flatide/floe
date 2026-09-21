@@ -177,7 +177,7 @@
         function dismiss(){abort(prepareTask);prepareTask=null;discard(true);note='Preparation dismissed. No new publication was approved.';render();el('default-prepare').focus();}
         el('default-prepare').onclick=prepare;el('default-dismiss').onclick=dismiss;
         el('default-consent').onchange=changed;el('default-approve').onclick=approve;
-        el('default-review').onkeydown=function(e){if(e.key==='Escape'){e.preventDefault();e.stopPropagation();dismiss();}};
+        el('default-review').onkeydown=function(e){if(e.isComposing||e.keyCode===229){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();dismiss();}};
         el('default-refresh').onclick=refresh;el('default-cancel').onclick=cancel;
         el('default-resolve').onclick=function(){if(uncertain&&pending&&!stopped&&!writeTask&&!cancelTask){return send(pending);}};
         el('default-checked').onchange=render;

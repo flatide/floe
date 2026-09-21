@@ -60,7 +60,7 @@
             finally{if(token===generation){busy=false;el('share-consent').checked=false;el('share-drc-consent').checked=false;changed();refresh();}}
         };
         panel.addEventListener('click',function(e){if(e.target===panel){close(true);}});
-        doc.addEventListener('keydown',function(e){if(!opened){return;}e.stopPropagation();if(e.isComposing){return;}if(e.key==='Escape'){e.preventDefault();close(true);return;}
+        doc.addEventListener('keydown',function(e){if(!opened){return;}e.stopPropagation();if(e.isComposing||e.keyCode===229){return;}if(e.key==='Escape'){e.preventDefault();close(true);return;}
             if(e.key==='Tab'){const items=Array.prototype.slice.call(panel.querySelectorAll('button,input,select,a')).filter(function(n){return !n.disabled&&!n.hidden&&(!n.closest||!n.closest('[hidden]'));}),i=items.indexOf(doc.activeElement);
                 if(items.length&&(i<0||e.shiftKey&&i===0||!e.shiftKey&&i===items.length-1)){e.preventDefault();items[e.shiftKey?items.length-1:0].focus();}}
         },true);

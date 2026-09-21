@@ -861,6 +861,7 @@ impl Host {
             6 => "document.getElementById('session-exit-dialog').hidden?'cancelled':'wait'",
             9 => "document.getElementById('notice-page-status').textContent.startsWith('Page 1 / ')&&document.getElementById('notice-text').textContent.length>0?'notice-read':'wait'",
             10 => "document.getElementById('notice-list-status').textContent.startsWith('65–128 of ')&&document.getElementById('notice-text').textContent===''?'notice-page':'wait'",
+            11 => include_str!("../ui/ime-probe.js"),
             _ => { self.ivars().evaluating.set(false); return; },
         };
         let host = self.retain();
@@ -891,6 +892,8 @@ impl Host {
                     "cancelled",
                     "notice-read",
                     "notice-page",
+                    "ime-ok",
+                    "ime-failed",
                     "wait",
                 ]
                 .contains(&text.as_str())
@@ -901,7 +904,12 @@ impl Host {
                 *host.ivars().smoke_probe.borrow_mut() = text.clone();
             }
             let next = match (step, text.as_str()) {
-                (0, "ready") => {
+                (0, "ready") => 11,
+                (11, "ime-failed") => {
+                    host.fail("native synthetic composition-key guard failed");
+                    step
+                }
+                (11, "ime-ok") => {
                     // Empty workspaces open the file picker during startup.
                     // Wait for its initial catalogue request to finish before
                     // closing; a queued read temporarily disables Close.
@@ -1175,7 +1183,7 @@ pub fn run(mut session: Session, smoke: bool, smoke_notices: bool) -> Result<i32
                 "native smoke did not complete confirmed shutdown",
             ));
         }
-        println!("DESKTOP SMOKE: OK (WebKit auth; native menu About + modal guard; native close→cancel; application quit→confirm; service joined)");
+        println!("DESKTOP SMOKE: OK (WebKit auth; synthetic composition-key guard; native menu About + modal guard; native close→cancel; application quit→confirm; service joined)");
         if smoke_notices {
             println!(
                 "DESKTOP NOTICE UI: OK (packaged list; verified text read; next catalogue page)"

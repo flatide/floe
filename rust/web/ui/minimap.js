@@ -54,7 +54,7 @@
             const r=canvas.getBoundingClientRect();if(!(r.width>0&&r.height>0)){return;}
             e.preventDefault();jump([(e.clientX-r.left)*SIZE/r.width,(e.clientY-r.top)*SIZE/r.height]);
         });
-        canvas.addEventListener('keydown',function(e){if(!e.isComposing&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&(e.key==='Enter'||e.key===' ')){e.preventDefault();jump([SIZE/2,SIZE/2]);}});
+        canvas.addEventListener('keydown',function(e){if(!e.isComposing&&e.keyCode!==229&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&(e.key==='Enter'||e.key===' ')){e.preventDefault();jump([SIZE/2,SIZE/2]);}});
         el('minimap-retry').onclick=function(){failed='';changed();};
         function suspend(){suspended=true;identity='';cache.clear();stamp='';el('minimap-panel').hidden=true;}
         function resume(){if(!stopped){suspended=false;changed();}}

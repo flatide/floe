@@ -30,7 +30,9 @@ const answer=(i,override={})=>requests[i].resolve({view_id:'view',dataset_revisi
     for(const extra of [{button:2},{buttons:3},{detail:2},{ctrlKey:true},{altKey:true},{metaKey:true}]){el('minimap').handlers.mousedown({...event,...extra});}
     ready=false;el('minimap').handlers.mousedown(event);assert.equal(jumps.length,1);ready=true;
     el('minimap').handlers.keydown({key:'Enter',preventDefault(){}});assert.equal(jumps.length,2);
-    el('minimap').handlers.keydown({key:' ',isComposing:true,preventDefault(){assert.fail();}});assert.equal(jumps.length,2);
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const key of [' ','Enter']){
+        el('minimap').handlers.keydown({key,...signal,preventDefault(){assert.fail();}});assert.equal(jumps.length,2);
+    }
     s={...s,minimap:{...s.minimap,marks:[[0,0,-1,1,4]]}};m.changed();assert(el('minimap').hidden);el('minimap').handlers.mousedown(event);assert.equal(jumps.length,2);
     s=snapshot(0,'new-epoch');m.changed();assert(el('minimap').hidden,'numeric base accepted');
     s=snapshot('2','new-epoch');m.changed();const suspended=requests.length-1;m.suspend();answer(suspended);await tick();m.changed();

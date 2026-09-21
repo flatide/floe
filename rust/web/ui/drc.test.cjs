@@ -79,6 +79,11 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     reply('errors',{rows:[a,b],next:'9007199254740995'});await tick();
     assert.equal(el('drc-description').textContent,'<script>not HTML</script>');
     assert(el('drc-errors').children[0].textContent.includes('#9007199254740994'));
+    const beforeIME=calls.length;
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const key of ['Tab','ArrowUp','ArrowDown','k','K']){
+        el('drc-errors').children[0].onkeydown({key,...signal,preventDefault(){assert.fail('IME selected or measured an error');}});
+        assert.equal(calls.length,beforeIME);assert.equal(nav.length,0);
+    }
     panel.paint(base,{pixels:[100,80],dpr:2,left:.5,top:0});
     assert.equal(el('drc-canvas').style.width,'50px');
     el('drc-errors').children[0].onclick();

@@ -217,6 +217,7 @@
         el('drc-build-form').onsubmit = function (e) { e.preventDefault(); return approve(); };
         el('drc-build-dismiss').onclick = function () { closeConfirmation(true); render(); };
         el('drc-build-form').onkeydown = function (e) {
+            if (e.isComposing || e.keyCode === 229) { return; }
             if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeConfirmation(true); render(); }
         };
         el('drc-build-cancel').onclick = cancel;

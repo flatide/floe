@@ -54,7 +54,13 @@ h.change({rev:'13',slotKey:'d'.repeat(40),idle:false});assert(h.ui.active(),'own
 h.change({idle:true});h.open();h.click(0);h.change({rev:'14'});assert(!h.ui.active());h.apply();assert.equal(h.writes.length,1,'stale draft submitted');
 h.open();h.apply();const pending=h.writes.at(-1);h.change({ready:false});assert(pending.cancelled);assert(!h.ui.active());pending.done(null);assert.match(h.el('fill-slot-status').textContent,/not replayed/);h.change({ready:true,epoch:'e'.repeat(64)});assert.equal(h.writes.length,2);
 h.open();h.apply();h.writes.at(-1).done('stale_state');assert(!h.ui.active());assert.equal(h.writes.length,3);h.ui.changed();assert.equal(h.writes.length,3);
-h.open();h.el('fill-slot-grid').onkeydown(ev({key:'Escape',isComposing:true}));assert(h.ui.active());h.el('fill-slot-grid').onkeydown(ev({key:'Escape'}));assert(!h.ui.active());
+h.open();
+for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const key of ['Escape','ArrowRight',' ']){
+    const before=h.bits(),focus=h.document.activeElement;
+    h.el('fill-slot-grid').onkeydown(ev({key,...signal,preventDefault(){assert.fail('IME consumed');}}));
+    assert(h.ui.active());assert.deepEqual(h.bits(),before);assert.equal(h.document.activeElement,focus);
+}
+h.el('fill-slot-grid').onkeydown(ev({key:'Escape'}));assert(!h.ui.active());
 const p=harness(true);p.open();const grid=p.el('fill-slot-grid');grid.onpointerdown(ev({pointerId:7}));grid.onpointermove(ev({pointerId:8,clientX:255,clientY:255}));assert.equal(p.bits()[15],0);
 grid.onpointermove(ev({pointerId:7,clientX:255,clientY:255}));grid.onpointercancel(ev({pointerId:7}));grid.onpointermove(ev({pointerId:7,clientX:33}));assert.equal(p.bits()[0],0x8000);assert.equal(p.bits()[15],1);
 grid.onpointerdown(ev({pointerId:9}));p.wevents.blur();grid.onpointermove(ev({pointerId:9,clientX:33}));assert.equal(p.bits()[0],0);p.cancel();assert.equal(p.writes.length,0);

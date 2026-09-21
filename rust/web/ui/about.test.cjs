@@ -27,10 +27,16 @@ const ui=A.bind({el,document:doc,bundle,displayTest:{open(){diagnosticOpen=true;
     assert.equal(method,'GET');assert.equal(path,'/api/v1/about');assert.equal(body,undefined);assert.equal(missing,false);
     return new Promise((resolve,reject)=>{token.abort=()=>{};pending.push({resolve,reject,token});});
 }});
-function key(key,shiftKey=false){const e={key,shiftKey,stopped:false,prevented:false,stopPropagation(){this.stopped=true;},preventDefault(){this.prevented=true;}};listeners.keydown(e);return e;}
+function key(key,shiftKey=false,extra={}){const e={key,shiftKey,stopped:false,prevented:false,stopPropagation(){this.stopped=true;},preventDefault(){this.prevented=true;},...extra};listeners.keydown(e);return e;}
 async function run(){
     await el('about-open').onclick();assert.equal(pending.length,0);ui.init();assert.equal(el('about-open').disabled,false);
     el('about-open').focus();el('app-workspace').setAttribute('aria-hidden','false');
+    const imeOpen=el('about-open').onclick();
+    for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const k of ['Escape','Tab']){
+        const focus=doc.activeElement;assert(!key(k,false,signal).prevented);
+        assert(!el('about-dialog').hidden);assert.equal(doc.activeElement,focus);
+    }
+    pending.shift().resolve(value);await imeOpen;key('Escape');assert(el('about-dialog').hidden);
     let p=el('about-open').onclick();assert.equal(pending.length,1);assert.equal(doc.activeElement,el('about-close'));assert(diagnosticOpen);
     assert.equal(el('app-header').getAttribute('aria-hidden'),'true');assert.equal(key('ArrowUp').stopped,true);
     let e=key('Tab',true);assert.equal(e.prevented,true);assert.equal(doc.activeElement,el('about-font'));
