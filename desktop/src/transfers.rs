@@ -59,6 +59,14 @@ pub fn suggested_name(name: &str) -> String {
 pub struct PendingFile {
     directory: PathBuf,
     destination: PathBuf,
+    finalized: bool,
+}
+#[must_use]
+pub struct Publication {
+    // Cleanup is independent: a successfully published file is still saved
+    // when removing the private staging directory fails. Never retry the save.
+    pub publication: io::Result<()>,
+    pub cleanup: io::Result<()>,
 }
 impl PendingFile {
     pub fn new(destination: &Path) -> io::Result<Self> {
@@ -84,12 +92,41 @@ impl PendingFile {
         Ok(Self {
             destination: parent.join(destination.file_name().unwrap()),
             directory,
+            finalized: false,
         })
     }
     pub fn staging(&self) -> PathBuf {
         self.directory.join("payload")
     }
-    pub fn publish(self) -> io::Result<()> {
+    pub fn publish(mut self) -> Publication {
+        let publication = self.publish_destination();
+        let cleanup = self.cleanup();
+        self.finalized = true;
+        Publication {
+            publication,
+            cleanup,
+        }
+    }
+    pub fn discard(mut self) -> io::Result<()> {
+        let cleanup = self.cleanup();
+        // A failed explicit cleanup is reported, not silently retried in Drop.
+        self.finalized = true;
+        cleanup
+    }
+    fn cleanup(&self) -> io::Result<()> {
+        fn missing_is_ok(result: io::Result<()>) -> io::Result<()> {
+            match result {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                result => result,
+            }
+        }
+        // Try only these two known targets. Unexpected directory contents or
+        // a directory where the payload should be MUST survive, never recurse.
+        let payload = missing_is_ok(fs::remove_file(self.staging()));
+        let directory = missing_is_ok(fs::remove_dir(&self.directory));
+        payload.and(directory)
+    }
+    fn publish_destination(&self) -> io::Result<()> {
         let path = self.staging();
         let meta = fs::symlink_metadata(&path)?;
         if !meta.file_type().is_file() || meta.len() > MAX_BYTES {
@@ -105,15 +142,97 @@ impl PendingFile {
 }
 impl Drop for PendingFile {
     fn drop(&mut self) {
-        // Only two known owned targets; no recursive deletion of user paths.
-        let _ = fs::remove_file(self.staging());
-        let _ = fs::remove_dir(&self.directory);
+        // Last-resort RAII for unwinding/abandoned setup. Normal host paths use
+        // discard/publish so they can preserve a visible warning until exit.
+        if !self.finalized {
+            if let Err(error) = self.cleanup() {
+                eprintln!("floe2-desktop: private download cleanup incomplete ({:?}); inspect the selected download folder; no recursive cleanup attempted", error.kind());
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn private_root() -> PathBuf {
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).unwrap();
+        let suffix: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let root = std::env::temp_dir().join(format!("floe-cleanup-test-{suffix}"));
+        DirBuilder::new().mode(0o700).create(&root).unwrap();
+        root
+    }
+    #[test]
+    fn publication_and_cleanup_are_independent_even_on_destination_conflict() {
+        for conflict in [false, true] {
+            let root = private_root();
+            let dest = root.join("result");
+            let pending = PendingFile::new(&dest).unwrap();
+            let stage = pending.staging();
+            let directory = stage.parent().unwrap().to_path_buf();
+            let obstacle = directory.join("unknown-entry");
+            fs::write(&stage, b"new download").unwrap();
+            fs::write(&obstacle, b"preserve me").unwrap();
+            if conflict {
+                fs::write(&dest, b"existing download").unwrap();
+            }
+            let outcome = pending.publish();
+            assert_eq!(outcome.publication.is_err(), conflict);
+            assert_eq!(
+                outcome.cleanup.unwrap_err().kind(),
+                io::ErrorKind::DirectoryNotEmpty
+            );
+            assert!(!stage.exists());
+            assert_eq!(fs::read(&obstacle).unwrap(), b"preserve me");
+            assert_eq!(
+                fs::read(&dest).unwrap(),
+                if conflict {
+                    b"existing download".as_slice()
+                } else {
+                    b"new download".as_slice()
+                }
+            );
+            // Test teardown knows this entry; production cleanup must not.
+            fs::remove_file(&obstacle).unwrap();
+            fs::remove_dir(&directory).unwrap();
+            fs::remove_file(&dest).unwrap();
+            fs::remove_dir(&root).unwrap();
+        }
+    }
+    #[test]
+    fn directory_payload_is_never_recursively_removed() {
+        let root = private_root();
+        let dest = root.join("result");
+        let pending = PendingFile::new(&dest).unwrap();
+        let stage = pending.staging();
+        let directory = stage.parent().unwrap().to_path_buf();
+        fs::create_dir(&stage).unwrap();
+        let child = stage.join("unknown-child");
+        fs::write(&child, b"preserve this file").unwrap();
+        assert!(pending.discard().is_err());
+        assert_eq!(fs::read(&child).unwrap(), b"preserve this file");
+        assert!(!dest.exists());
+        fs::remove_file(&child).unwrap();
+        fs::remove_dir(&stage).unwrap();
+        fs::remove_dir(&directory).unwrap();
+        fs::remove_dir(&root).unwrap();
+    }
+    #[test]
+    fn missing_staging_payload_and_directory_are_already_clean() {
+        let root = private_root();
+        for removed in [false, true] {
+            let pending = PendingFile::new(&root.join("result")).unwrap();
+            let directory = pending.staging().parent().unwrap().to_path_buf();
+            if removed {
+                fs::remove_dir(&directory).unwrap();
+            }
+            pending.discard().unwrap();
+            assert!(!directory.exists());
+            assert!(!root.join("result").exists());
+        }
+        fs::remove_dir(&root).unwrap();
+    }
     #[test]
     fn only_owned_blobs_and_exact_post_download_routes() {
         let origin = "http://127.0.0.1:12345";
@@ -176,13 +295,17 @@ mod tests {
         let pending = PendingFile::new(&dest).unwrap();
         fs::write(pending.staging(), b"new").unwrap();
         fs::write(&dest, b"existing").unwrap();
-        assert!(pending.publish().is_err());
+        let outcome = pending.publish();
+        assert!(outcome.publication.is_err());
+        outcome.cleanup.unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"existing");
         assert!(PendingFile::new(&dest).is_err());
         fs::remove_file(&dest).unwrap();
         let pending = PendingFile::new(&dest).unwrap();
         fs::write(pending.staging(), b"complete").unwrap();
-        pending.publish().unwrap();
+        let outcome = pending.publish();
+        outcome.publication.unwrap();
+        outcome.cleanup.unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"complete");
         assert_eq!(
             fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
@@ -194,7 +317,9 @@ mod tests {
             .unwrap()
             .set_len(MAX_BYTES + 1)
             .unwrap();
-        assert!(pending.publish().is_err());
+        let outcome = pending.publish();
+        assert!(outcome.publication.is_err());
+        outcome.cleanup.unwrap();
         assert!(!dest.exists(), "oversized transfer was published");
         std::os::unix::fs::symlink(root.join("absent"), &dest).unwrap();
         assert!(PendingFile::new(&dest).is_err());

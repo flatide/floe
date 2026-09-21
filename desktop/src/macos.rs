@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 const CLOSE_SCRIPT: &str =
     "(()=>{const b=document.getElementById('logout');if(b&&!b.disabled){b.click();return 'opened';}return 'unavailable';})()";
 const SESSION_LOST: &str = "Session credentials lost or expired — start a new floe2-desktop session; no login or write replayed";
+const CLEANUP_WARNING: &str = "Download cleanup warning";
+const CLEANUP_EXIT: &str = "Session ended, but private download temporary-file cleanup was not confirmed. Inspect the hidden .floe-download-* directory in the download folder you selected. Completed downloads were not removed; no save was retried.";
 type DownloadDestinationReply = RcBlock<dyn Fn(*mut NSURL)>;
 
 struct Download {
@@ -45,6 +47,7 @@ struct State {
     window: OnceCell<Retained<NSWindow>>,
     web: OnceCell<Retained<WKWebView>>,
     failure: RefCell<Option<&'static str>>,
+    cleanup_failure: Cell<Option<std::io::ErrorKind>>,
     panel_open: Cell<bool>,
     downloads: RefCell<BTreeMap<usize, Download>>,
     transfer_view: RefCell<Option<TransferView>>,
@@ -245,7 +248,7 @@ define_class!(
         fn web_crashed(&self, web: &WKWebView) {
             if self.is_transfer_view(web) {
                 self.cancel_downloads();
-                self.status("Download WebView ended — partial file discarded; explicit retry only");
+                self.status("Download WebView ended — explicit retry only");
             } else if self.is_main_view(web) {
                 self.cancel_downloads();
                 self.fail("WebView process ended — use floe2 menu: Recover View or Force End Session");
@@ -268,7 +271,9 @@ define_class!(
             let slot = self.ivars().downloads.borrow_mut().remove(&(download as *const _ as usize));
             let Some(slot) = slot else { return; };
             if let Some(file) = slot.file {
-                match file.publish() {
+                let outcome = file.publish();
+                self.record_cleanup(outcome.cleanup);
+                match outcome.publication {
                     Ok(()) => self.status("Download saved (new file; existing files unchanged)"),
                     Err(_) => self.status("Download publication not confirmed — check destination; no automatic retry"),
                 }
@@ -278,8 +283,9 @@ define_class!(
         #[unsafe(method(download:didFailWithError:resumeData:))]
         fn download_failed(&self, download: &WKDownload, _error: &NSError, _resume: Option<&NSData>) {
             let slot = self.ivars().downloads.borrow_mut().remove(&(download as *const _ as usize));
-            if slot.is_none() { return; }
-            self.status("Download failed — partial file discarded; explicit retry only");
+            let Some(slot) = slot else { return; };
+            self.discard_pending(slot.file);
+            self.status("Download failed — explicit retry only");
             self.clear_transfer_view();
         }
     }
@@ -493,6 +499,7 @@ impl Host {
             window: OnceCell::new(),
             web: OnceCell::new(),
             failure: RefCell::new(None),
+            cleanup_failure: Cell::new(None),
             panel_open: Cell::new(false),
             downloads: RefCell::new(BTreeMap::new()),
             transfer_view: RefCell::new(None),
@@ -539,7 +546,28 @@ impl Host {
     }
     fn status(&self, message: &str) {
         if let Some(window) = self.ivars().window.get() {
-            window.setTitle(&NSString::from_str(message));
+            let title = match self.ivars().cleanup_failure.get() {
+                Some(kind) => format!("floe2 — {CLEANUP_WARNING} ({kind:?}) — {message}"),
+                None => message.to_owned(),
+            };
+            window.setTitle(&NSString::from_str(&title));
+        }
+    }
+    fn record_cleanup(&self, result: std::io::Result<()>) {
+        if let Err(error) = result {
+            if self.ivars().cleanup_failure.get().is_none() {
+                self.ivars().cleanup_failure.set(Some(error.kind()));
+                // No destination, raw error, design name, or authentication data.
+                eprintln!("floe2-desktop: download cleanup incomplete ({:?}); inspect .floe-download-* in the selected download folder; completed files preserved", error.kind());
+            }
+            self.status(
+                "Temporary-file cleanup was not confirmed; inspect the selected download folder",
+            );
+        }
+    }
+    fn discard_pending(&self, file: Option<PendingFile>) {
+        if let Some(file) = file {
+            self.record_cleanup(file.discard());
         }
     }
     fn menu_action(&self, action: Action) {
@@ -647,7 +675,10 @@ impl Host {
             None
         };
         if let Some(reason) = refusal {
-            self.ivars().downloads.borrow_mut().remove(&key);
+            let slot = self.ivars().downloads.borrow_mut().remove(&key);
+            if let Some(slot) = slot {
+                self.discard_pending(slot.file);
+            }
             completion.call((std::ptr::null_mut(),));
             self.status(&reason);
             return;
@@ -710,6 +741,8 @@ impl Host {
                         done.call((Retained::as_ptr(&url).cast_mut(),));
                         return;
                     }
+                    drop(slots);
+                    host.discard_pending(Some(file));
                 }
                 host.status(
                     "Download not saved — select a new writable filename; existing file preserved",
@@ -717,7 +750,10 @@ impl Host {
             } else {
                 host.status("Download cancelled — no destination file written");
             }
-            host.ivars().downloads.borrow_mut().remove(&key);
+            let slot = host.ivars().downloads.borrow_mut().remove(&key);
+            if let Some(slot) = slot {
+                host.discard_pending(slot.file);
+            }
             done.call((std::ptr::null_mut(),));
         });
         panel.beginSheetModalForWindow_completionHandler(
@@ -781,9 +817,32 @@ impl Host {
                         host.fail("stopping an already cancelled download changed the session");
                         return;
                     }
+                    let expects_failure = host.ivars().download_qa.as_ref().unwrap().mode
+                        == download_qa::Mode::CleanupFailure;
+                    if host.ivars().cleanup_failure.get()
+                        != host
+                            .ivars()
+                            .download_qa
+                            .as_ref()
+                            .unwrap()
+                            .mode
+                            .expected_cleanup_error()
+                        || host
+                            .ivars()
+                            .window
+                            .get()
+                            .unwrap()
+                            .title()
+                            .to_string()
+                            .contains(CLEANUP_WARNING)
+                            != expects_failure
+                    {
+                        host.fail("download cleanup warning was lost or unexpected");
+                        return;
+                    }
                     host.ivars().download_qa_done.set(true);
                     host.ivars().smoke_step.set(0);
-                    eprintln!("[desktop-smoke] download stopped; private staging removed; completed file and session preserved");
+                    eprintln!("[desktop-smoke] download stopped; payload removed; cleanup_warning={expects_failure}; completed file and session preserved");
                 } else {
                     host.ivars().smoke_step.set(44);
                     eprintln!("[desktop-smoke] download stop sheet cancelled; transfer and staging preserved");
@@ -894,6 +953,7 @@ impl Host {
                 slot.object.setDelegate(None);
                 slot.object.cancel(None);
             }
+            self.discard_pending(slot.file);
         }
         // Only the isolated QA holds a destination callback. Complete it once
         // even on unexpected failure/host shutdown, with no destination grant.
@@ -1097,6 +1157,7 @@ impl Host {
                         slot.object.setDelegate(None);
                         slot.object.cancel(None);
                     }
+                    self.discard_pending(slot.file);
                     self.status("Download exceeded 512 MiB — cancelled, destination unchanged");
                 }
             }
@@ -1514,7 +1575,7 @@ pub fn run(
     smoke_recovery: bool,
     smoke_review: bool,
     smoke_loss: Option<Loss>,
-    smoke_download: bool,
+    smoke_download: Option<download_qa::Mode>,
 ) -> Result<i32> {
     if !objc2::available!(macos = 12.0) {
         return Err(Error::input("embedded preview requires macOS 12 or later"));
@@ -1556,9 +1617,9 @@ pub fn run(
         smoke_recovery,
         smoke_review,
         smoke_loss,
-        if smoke_download {
+        if let Some(mode) = smoke_download {
             Some(
-                download_qa::Fixture::create()
+                download_qa::Fixture::create(mode)
                     .map_err(|_| Error::input("cannot create download cancellation QA fixture"))?,
             )
         } else {
@@ -1732,19 +1793,48 @@ pub fn run(
         ));
     }
     if let Some(message) = *host.ivars().failure.borrow() {
+        if host.ivars().cleanup_failure.get().is_some() {
+            return Err(Error::input(format!("{message}. {CLEANUP_EXIT}")));
+        }
         return Err(Error::input(message));
     }
-    if smoke_download {
+    if let Some(mode) = smoke_download {
         if result != 0
             || host.ivars().smoke_step.get() != 8
             || !host.ivars().download_qa_done.get()
             || !host.ivars().download_qa.as_ref().unwrap().intact(true)
+            || host.ivars().cleanup_failure.get() != mode.expected_cleanup_error()
+            || host
+                .ivars()
+                .window
+                .get()
+                .unwrap()
+                .title()
+                .to_string()
+                .contains(CLEANUP_WARNING)
+                != (mode == download_qa::Mode::CleanupFailure)
         {
             return Err(Error::input(
                 "native download cancellation QA did not complete",
             ));
         }
-        println!("DESKTOP DOWNLOAD CANCEL: OK (real blob WKDownload at destination boundary; synthetic partial file; Return cancels stop; explicit stop removes staging; completed file/session preserved; normal close and service join)");
+        host.ivars()
+            .download_qa
+            .as_ref()
+            .unwrap()
+            .teardown()
+            .map_err(|_| Error::input("native download QA teardown was not confirmed"))?;
+        match mode {
+            download_qa::Mode::Cancel => println!("DESKTOP DOWNLOAD CANCEL: OK (real blob WKDownload at destination boundary; synthetic partial file; Return cancels stop; explicit stop removes staging; completed file/session preserved; normal close and service join)"),
+            download_qa::Mode::CleanupFailure => println!("DESKTOP DOWNLOAD CLEANUP FAILURE: OK (real WKDownload; nonempty private directory; payload removed; unknown contents preserved; sticky warning; session preserved; confirmed shutdown joined)"),
+        }
+    }
+    if host.ivars().cleanup_failure.get().is_some() {
+        // Do not silently close a Finder-launched app after a cleanup failure.
+        // main presents the ordinary native error dialog; never retry/delete.
+        // Synthetic QA deliberately takes this same error return (expected 1);
+        // its smoke flag suppresses only the error modal, not the failure code.
+        return Err(Error::input(CLEANUP_EXIT));
     }
     if smoke {
         if result != 0 || host.ivars().smoke_step.get() != 8 {

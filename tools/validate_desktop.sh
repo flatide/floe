@@ -35,3 +35,21 @@ FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
 FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
 FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
     desktop/target/debug/floe2-desktop --smoke-test-download-cancel
+# A cleanup failure must reach the ordinary error exit, even after a successful
+# session shutdown. Require both the real native QA verdict and the exact error
+# route; an unrelated crash/nonzero status cannot pass this gate.
+echo '== desktop cleanup-failure injection (expected error exit 1)'
+if cleanup_output=$(FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
+    FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
+    desktop/target/debug/floe2-desktop --smoke-test-download-cleanup-failure 2>&1); then
+    printf '%s\n' "$cleanup_output"
+    echo 'desktop: expected cleanup failure was silently reported as success' >&2
+    exit 1
+else
+    cleanup_status=$?
+fi
+printf '%s\n' "$cleanup_output"
+[ "$cleanup_status" -eq 1 ]
+case "$cleanup_output" in *'DESKTOP DOWNLOAD CLEANUP FAILURE: OK'*) ;; *) exit 1 ;; esac
+case "$cleanup_output" in *'floe2-desktop: Session ended, but private download temporary-file cleanup was not confirmed.'*) ;; *) exit 1 ;; esac
+echo 'DESKTOP CLEANUP ERROR EXIT: OK (expected exit 1; no modal in isolated QA)'

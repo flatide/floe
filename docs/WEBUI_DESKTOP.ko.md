@@ -997,3 +997,68 @@ null 목적지로 해제한다. 원래 WebView를 교체하거나 인증을 재�
 이 단계의 macOS 개별 다운로드 중단은 완료했다. 전체 목표에는 crash/디스크 장애와
 정리 실패의 구체적 오류 보고, 실제 IME/DPI/접근성, 서명/공증, RHEL/ETX와 G1/G4가
 계속 남는다. 기존 사용자 소개·브로셔 변경과 현장 jobdeck 작업은 포함하지 않는다.
+
+## 17. D2-mac 다운로드 임시 파일 정리 실패 보고 (2026-09-21)
+
+§16에서 남겼던 조용한 Drop 정리 오류를 명시적인 결과로 옮겼다. `PendingFile`의
+`publish()`는 **게시 결과와 cleanup 결과를 따로 반환**하고, `discard()`는 cleanup
+실패를 반환한다. 성공한 게시 뒤 정리만 실패해도 이미 저장한 파일을 되돌리거나
+저장 실패로 바꾸지 않는다. 게시가 불명확하면 기존처럼 목적지 확인을 요청하며
+재전송하지 않는다. 명시적 결과를 낸 뒤 Drop에서 몰래 재시도하지 않는다.
+예외적 unwinding/setup 이탈의 RAII fallback도 실패 시 오류 종류만 stderr에 남긴다.
+
+삭제 대상은 소유한 `payload`와 그 빈 임시 디렉터리 두 개뿐이다. payload 대신
+디렉터리가 있거나 다른 파일 때문에 디렉터리가 비지 않으면 오류로 남기며, 재귀
+삭제·목적지 삭제·알 수 없는 파일 제거를 하지 않는다. 이미 없는 경로는 정리된
+상태로 인정한다. 정상 게시, 전송 실패/취소, 크기 제한, Save 취소/경합, WebView
+장애와 종료의 native 경로는 이 결과를 받아 처리한다.
+
+처음 실패한 OS 오류 종류를 보관하고, **Download cleanup warning**을 창 제목의
+앞에 붙인다. 이후 메뉴/복구/새 상태가 이 경고를 지우지 않으며 세션은 계속 사용할
+수 있다. 실제 경로·설계명·원시 오류문을 로그에 보내지 않는다. 사용자가 종료하면
+완료된 service join 뒤 일반 오류 반환으로 알리므로 Finder 실행도 기존 native
+오류창 경로를 타며 exit 1이다. 자동 재삭제/재저장/새 인증은 없다. 사용자가 이미
+수동으로 정리했는지는 재탐색하지 않으므로 문구는 **정리가 확인되지 않았음**이다.
+
+검증 범위:
+
+- 실제 파일시스템 단위 검사: 성공한 게시 + cleanup 실패, 목적지 경합 + cleanup
+  실패의 두 결과 분리; payload가 디렉터리인 경우 내부 파일 보존; 없는 경로의
+  성공 처리. 기존 파일·symlink·크기 제한/원자 게시 검사도 유지한다.
+- 새 단독 인자 `--smoke-test-download-cleanup-failure`는 §16과 같은 새 빈
+  WebView/합성 blob/새 private 폴더만 사용한다. QA가 만든 알려지지 않은 파일을
+  임시 디렉터리에 추가해 실제 `DirectoryNotEmpty`를 발생시킨다. 첫 확인 취소는
+  모든 파일을 유지하고, 명시적 중단은 payload만 제거한다. 추가 파일·완료 sentinel
+  보존, 중복 Stop 뒤 경고, 후속 메뉴·닫기·종료 뒤에도 경고/오류 종류 유지를 확인한다.
+- native 검사는 정상 세션 종료/join까지 확인한 뒤 제품과 같은 cleanup 오류를
+  반환한다. runner는 **exit 1 + 고정 QA 성공 표식 + 정확한 cleanup 종료 안내**를
+  모두 요구한다. 관계없는 panic/비정상 종료가 통과할 수 없으며, 이 예상 실패
+  케이스만 일반 오류창을 생략한다. 따라서 실제 종료 오류창의 버튼 조작은 이
+  자동 검사가 대신하지 않는다.
+- QA teardown은 자신이 만든 추가 파일 한 개와 알려진 임시 경로만 정리한다.
+  사용자 파일이나 기존 브라우저 프로필은 사용하지 않는다. 이 결과는 ENOSPC,
+  NFS 단절, 저장 중 전원/프로세스 종료 또는 물리 디스크 고장 수용이 아니다.
+
+최종 검증 결과:
+
+- host unit **29 passed**, fmt와 host clippy `--all-targets --no-deps -- -D warnings`
+  통과. 게시·cleanup 결과 분리, 알 수 없는 파일/디렉터리 보존 검사를 포함한다.
+- `sh tools/validate_desktop.sh` **exit 0**. 기존 일반/복구/DRC/세션 소실/정상
+  다운로드 취소 및 새 정리 실패 native 검사를 모두 통과했다. 정리 실패 케이스의
+  프로그램 자체는 예상대로 exit 1이며, runner가 고정 표식·정확한 오류 문구까지
+  검사한 뒤 성공 처리한다. 첫 정리 실패부터 후속 메뉴/종료까지 경고를 유지한다.
+- `sh tools/validate_rust.sh --only embedded_host,validation_selector` **exit 0 / ALL OK**.
+  출력 없는 대기 중에도 같은 살아 있는 프로세스를 유지해 완료를 확인했으며
+  재시작하지 않았다. 검사에만 연결한 정본 개발 `.venv` 링크는 제거했다.
+- release 개발 앱 `desktop/target/macos-dev.MmC9qz/Floe2.app` 조립 및 고지 279파일
+  검사를 통과했다. worker override 없이 번들 worker로 정상 다운로드 취소 exit 0,
+  합성 정리 실패의 정확한 오류/exit 1을 확인했고 전체 검사 wrapper는 exit 0이었다.
+- native QA는 Objective-C 객체 해제 시점에 의존하지 않고 `run()` 반환 전에
+  자신이 만든 알려진 테스트 파일/디렉터리의 teardown을 명시적으로 확인한다.
+- 로그: `/private/tmp/floe-cleanup-report-{native-complete,clippy-complete,battery}.log`,
+  `floe-cleanup-report-release-complete.log`. release 실제 실행의 고정 표식과 종료
+  코드는 실행 도구 결과에도 남겼다. 전체 Rust/GTK 배터리, 실제 오류창 버튼 조작,
+  서명/공증 또는 현장 수용의 완료를 뜻하지 않는다.
+
+이 단계의 정리 실패 보고는 완료했다. 전체 목표에는 확대 장애 복구·실제 IME/DPI/
+접근성, 서명/공증, RHEL 8.6/8.10 ETX 호스트와 현장 G1/G4 검증이 남는다.

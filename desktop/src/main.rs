@@ -25,6 +25,7 @@ fn main() {
             --smoke-test-review-recovery: NEW synthetic files only; save ACK loss/reload.\n\
             --smoke-test-storage-loss / --smoke-test-cookie-loss: NEW empty WebView only.\n\
             --smoke-test-download-cancel: NEW synthetic blob/staging files only.\n\
+            --smoke-test-download-cleanup-failure: same isolated QA with a cleanup obstacle.\n\
             --check-notices: verify every packaged notice chunk; no GUI or workers.\n\
             With no SOURCE or --root, choose an approved working folder before startup.\n\
             macOS preview: native file dialogs, File/Edit menus and explicit Recover View."
@@ -50,7 +51,7 @@ fn main() {
         || smoke_recovery
         || smoke_review
         || smoke_loss.is_some()
-        || smoke_download
+        || smoke_download.is_some()
         || args == ["--smoke-test"];
     if smoke {
         args.clear();

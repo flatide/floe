@@ -29,6 +29,8 @@ WKWebView의 명시적 GET 재로딩을 별도 QA로 추적한다(§11; DRC/cras
 WebView의 세션 키·cookie 소실 QA를 분리하며 전체 storage/crash 수용과 구분한다(§15).
 네이티브 File → Stop Download로 개별 전송을 취소하고 세션을 유지한다. 합성 blob의
 실제 WKDownload와 격리된 임시 파일로 기본 취소/명시 중단을 검사한다(§16).
+다운로드 게시/임시 정리 결과를 분리하고, 정리 실패 경고를 세션 끝까지 유지한다.
+실제 비어 있지 않은 임시 폴더와 native 오류 종료를 검증한다(§17; 디스크 고장 수용과 별도).
 전체 배터리는 기존 오라클의 macOS 실행 timeout으로 미통과이며, 선택 재검증과
 구분한다([검증 기록](WEBUI_DESKTOP.ko.md#7-d2-mac-파일클립보드복구-2026-09-18)).
 
