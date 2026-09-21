@@ -397,3 +397,18 @@ macOS 첫 실행 지연은 수정하거나 성공으로 처리하지 않았다.
 요구와 맞췄다. Firefox/Chrome 통과만으로 내장 앱·ETX 수용을 대신하거나, 실패 시
 필수 독립 앱 요구를 배포 C로 축소하지 않는다. 현장 실행 보류·원격 SH-10/G3 보류,
 GTK 병존과 macOS 실제 입력/표시·G1/G4 잔여는 그대로다.
+
+## 8. 중단 지점 이후 55개 게이트의 분리 검증 (2026-09-21)
+
+`b160d37`의 같은 임시 valmini에서 `instance_key`부터 `klayout`까지55개를
+`--only`로 명시 실행했다. **exit0 / ALL OK**이며 DRC 저장/복구·웹 UI·잡덱·
+점유44개·VFS lifecycle/split/text·DRC build·jobdeck83개·renderer46개와 KLayout
+13 PX/2 phase-exact/14 style 대조를 포함한다.
+로그: `/private/tmp/floe-webui-b160d37-tail.log`. 실행 중 직접 확인한 lifecycle
+검사는 CPU를 사용하며 진행 중이었고 timeout 관측만으로 재시작하지 않았다.
+이 실행의 임시 `.venv` 링크는 정상 종료 후 제거했다.
+
+§7의 전체 실행은 여전히 `web_startup` timeout **exit1**이다. 이55개 및 앞선
+선택6개 통과를 합쳐 전체 배터리가 통과한 것처럼 집계하지 않는다. 개발 검증의
+Python/KLayout 사용은 배포 런타임에 Python이 없다는 계약과 별개다. macOS
+AppKit/기본 WebView/복구 검증은 [Desktop §22](WEBUI_DESKTOP.ko.md#22-d2-mac-종료-요청-시-기존-창-복원-2026-09-21)에 구분한다.

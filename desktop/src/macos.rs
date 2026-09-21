@@ -99,10 +99,7 @@ define_class!(
         #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
         fn reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
             // Dock reactivation reveals this session, never replays open/save.
-            if let Some(window) = self.ivars().window.get() {
-                window.deminiaturize(None);
-                window.makeKeyAndOrderFront(None);
-            }
+            self.reveal_window();
             false
         }
         #[unsafe(method(applicationShouldTerminate:))]
@@ -1048,7 +1045,16 @@ impl Host {
             }
         });
     }
+    fn reveal_window(&self) {
+        if let Some(window) = self.ivars().window.get() {
+            crate::window_visibility::reveal(window);
+        }
+    }
     fn request_close(&self) {
+        // Dock Quit can arrive while minimized/hidden. Reveal the existing
+        // window BEFORE the panel guard so an already-open sheet stays usable.
+        // This does not dismiss that sheet or approve the End session dialog.
+        self.reveal_window();
         if self.ivars().panel_open.get() {
             return;
         }

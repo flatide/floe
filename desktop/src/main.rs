@@ -13,6 +13,8 @@ mod review_qa;
 mod service;
 mod session_qa;
 mod transfers;
+#[cfg(target_os = "macos")]
+mod window_visibility;
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();

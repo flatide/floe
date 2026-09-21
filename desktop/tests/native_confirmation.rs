@@ -3,6 +3,9 @@
 #[cfg(target_os = "macos")]
 #[path = "../src/confirmation.rs"]
 mod confirmation;
+#[cfg(target_os = "macos")]
+#[path = "../src/window_visibility.rs"]
+mod window_visibility;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -13,10 +16,10 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn main() {
     use block2::RcBlock;
-    use objc2::MainThreadOnly;
+    use objc2::{MainThreadOnly, Message};
     use objc2_app_kit::*;
     use objc2_foundation::*;
-    use std::{cell::Cell, ptr::NonNull, rc::Rc};
+    use std::{cell::Cell, ptr::NonNull, rc::Rc, time::Instant};
 
     fn stop(app: &NSApplication) {
         app.stop(None);
@@ -24,6 +27,28 @@ fn main() {
             NSEventType::ApplicationDefined, NSPoint::ZERO, NSEventModifierFlags::empty(),
             0.0, 0, None, 0, 0, 0,
         ) { app.postEvent_atStart(&event, true); }
+    }
+
+    fn wait_for(app: &NSApplication, predicate: impl Fn() -> bool + 'static) -> bool {
+        let passed = Rc::new(Cell::new(false));
+        let result = passed.clone();
+        let runner = app.retain();
+        let start = Instant::now();
+        let poll = RcBlock::new(move |_: NonNull<NSTimer>| {
+            if predicate() {
+                result.set(true);
+                stop(&runner);
+            } else if start.elapsed().as_secs_f64() >= 3.0 {
+                stop(&runner);
+            }
+        });
+        // AppKit miniaturization may animate. Observe state on its run loop;
+        // timing out is failure, not an alternate path that restores the window.
+        let timer =
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, true, &poll) };
+        app.run();
+        timer.invalidate();
+        passed.get()
     }
 
     assert_eq!(
@@ -35,6 +60,80 @@ fn main() {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     app.finishLaunching();
+    // The production reveal operation must restore this owned window without
+    // approving/dismissing an existing sheet. No other application is activated.
+    let window = unsafe {
+        let w = NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::ZERO, NSSize::new(520.0, 200.0)),
+            NSWindowStyleMask::Titled | NSWindowStyleMask::Miniaturizable,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        w.setReleasedWhenClosed(false);
+        w
+    };
+    window.setTitle(ns_string!("floe synthetic confirmation visibility test"));
+    window.center();
+    assert!(
+        !window.isVisible(),
+        "negative control: new window is hidden"
+    );
+    window_visibility::reveal(&window);
+    assert!(
+        wait_for(&app, {
+            let w = window.clone();
+            move || w.isVisible() && !w.isMiniaturized()
+        }),
+        "hidden window was not revealed"
+    );
+    window.miniaturize(None);
+    assert!(
+        wait_for(&app, {
+            let w = window.clone();
+            move || w.isMiniaturized()
+        }),
+        "negative control: window must really miniaturize"
+    );
+    window_visibility::reveal(&window);
+    assert!(
+        wait_for(&app, {
+            let w = window.clone();
+            move || w.isVisible() && !w.isMiniaturized()
+        }),
+        "miniaturized window was not restored"
+    );
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(ns_string!("Synthetic pending sheet"));
+    alert.addButtonWithTitle(ns_string!("Cancel"));
+    alert.addButtonWithTitle(ns_string!("End Session"));
+    let replied = Rc::new(Cell::new(false));
+    let reply = replied.clone();
+    let callback = RcBlock::new(move |_: NSModalResponse| reply.set(true));
+    alert.beginSheetModalForWindow_completionHandler(&window, Some(&callback));
+    window.orderOut(None);
+    assert!(
+        !window.isVisible(),
+        "negative control: sheet parent is hidden"
+    );
+    window_visibility::reveal(&window);
+    assert!(
+        wait_for(&app, {
+            let w = window.clone();
+            move || w.isVisible()
+        }),
+        "pending-sheet parent was not revealed"
+    );
+    assert!(window
+        .attachedSheet()
+        .is_some_and(|s| std::ptr::eq(&*s, &*alert.window())));
+    assert!(
+        !replied.get(),
+        "revealing the parent must not resolve the sheet"
+    );
+    window.endSheet_returnCode(&alert.window(), NSAlertFirstButtonReturn);
+    window.orderOut(None);
+    println!("NATIVE VISIBILITY: OK (hidden/minimized owned window; pending sheet preserved; not Dock/physical input acceptance)");
     for (label, key) in [
         ("no key", None),
         ("Return", Some(("\r", 36))),

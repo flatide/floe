@@ -80,6 +80,18 @@ macOS는 시스템 WKWebView 직접 바인딩을 선택했으며 이 선택으�
 | 지원 가능한 API 4.1 런타임 별도 동봉 | RHEL 8.6/glibc 2.28 기준 빌드, 하위 라이브러리 closure·라이선스·업데이트 책임, 용량 |
 | 별도 Chromium 계열 내장 런타임 | RHEL 8/X11 지원 하한, 배포 크기·메모리·ETX 합성 비용 및 보안 업데이트 |
 
+2026-09-21 사용자가 Electron 대안을 문의했다. 기존 웹 UI와 Rust 서비스/렌더러를
+유지하고 작은 JS/TS 호스트에 Chromium을 동봉하는 구성이 가능하다. Python-free와
+호스트까지 Rust-only는 다른 조건이다. Electron 기반 VS Code의 요구사항에는
+RHEL 8·glibc 2.28이 있지만, 임의의 최신 Electron 번들 또는 ETX를 보장하지 않는다.
+선정 버전/전체 ELF 의존성·sandbox·다중 사용자 메모리·ETX 입력/합성을 검증한다.
+기존 후순위 결정은 Chromium이 ETX에서 느리다는 실측 결론이 아니다. 최소 호스트
+비교 여부를 질의한 상태이며 **Electron/WebKitGTK 어느 쪽도 새로 채택하지 않았다**.
+macOS 호스트를 교체하거나 npm/runtime 의존성을 추가한 상태가 아니다.
+[Electron 플랫폼 지원](https://github.com/electron/electron#platform-support),
+[VS Code 요구사항](https://code.visualstudio.com/docs/supporting/requirements),
+[동봉 엔진 보안 업데이트 책임](https://www.electronjs.org/docs/latest/tutorial/security).
+
 Firefox kiosk/app 모드를 내장 WebView 구현 완료로 대체하지 않는다. 전역 OS
 패키지 교체, sandbox 비활성화, 서버 보안 정책 변경도 자동 해결책으로 삼지 않는다.
 
@@ -1320,3 +1332,40 @@ cargo clippy --offline --locked --all-targets --features native-confirmation-qa 
 
 나머지 G1/G4·WebContent/저장 중 crash·OS IME/DPI·RHEL/ETX·서명/공증 수용은
 그대로 남는다. 위 테스트는 실제 표시·물리 키보드 수용의 대체가 아니다.
+
+## 22. D2-mac 종료 요청 시 기존 창 복원 (2026-09-21)
+
+코드 검토에서 Dock Quit의 `applicationShouldTerminate → request_close`는
+최소화 상태에서 기존 웹 종료 확인을 요청하면서 창을 복원하지 않는 것을 확인했다.
+실제 Dock 클릭으로 재현했다고 보고하지 않는다. 종료 요청 시작에서 소유 창의
+`deminiaturize → makeKeyAndOrderFront`를 호출하고, 기존 Dock reopen도 같은
+`window_visibility::reveal` helper를 사용한다. 이미 native sheet가 열렸을 때에도
+그 부모 창은 먼저 복원하되 `panel_open` guard는 그대로 반환한다.
+
+sheet 해제·확인 승인·서비스 종료·파일 저장·reload·메뉴 재실행·다른 앱 활성화는
+helper에 없다. 기존 취소 기본값, 저장/복구 guard와 종료 응답 검사는 유지한다.
+`orderOut`으로 숨긴 창/최소화한 창의 복원과 앱 전체 Hide·Spaces·다른 앱에 가려진
+화면의 실제 포커스/가시성을 구분한다. 후자는 이번 자동 검사로 증명하지 않는다.
+
+- `cargo fmt -- --check`, 일반 unit **36 passed**, native QA feature를 포함한
+  host clippy `--all-targets --no-deps -- -D warnings` 통과. 처음 QA 컴파일의
+  `Message` trait import 누락을 수정하고 다시 통과했다. 의존성 경고는 남는다.
+- 명시 `native-confirmation` AppKit 검사 **exit0**: 새 창이 숨김/최소화 상태에
+  실제 진입한 것을 먼저 단언하고 제품 helper가 이를 복원하는지 확인한다.
+  열린 sheet의 부모를 숨겼다가 복원해 같은 sheet가 부착되어 있고 completion이
+  호출되지 않았음을 단언한다. 기존 무입력/Return/Enter 취소 검사도 통과했다.
+  앱 run loop에서 최대3초 관측하며 timeout을 성공/강제 복원으로 바꾸지 않는다.
+  설계·WebView·서비스·파일을 사용하지 않고 다른 앱에 입력을 보내지 않는다.
+  로그: `/private/tmp/floe-desktop-reveal-{unit,clippy,native}.log`.
+- 화면 제어 재확인은 `CUA_REPL_ENABLED_SURFACES is required`로 실패했다.
+  실제 Dock Quit·물리 입력·전체 native UI 수용을 위 helper 검사로 대체하지 않는다.
+- 수정된 debug 제품의 새 빈 `--smoke-test`와 `--smoke-test-recovery`는 각각
+  **exit0**였다. WebKit 인증·합성 조합키 guard·About/모달 guard·native close 취소·
+  application quit 확인·서비스 join과, 명시 GET 복구/기존 sessionStorage/인증
+  재실행 없음·실제5초 종료 확인 timeout/중복 요청 제한/Return 기본 취소를 확인했다.
+  로그: `/private/tmp/floe-desktop-reveal-{smoke,recovery}.log`.
+  최소화한 **제품**에서 Dock을 누르는 물리 검사는 아니며, 이전 간헐적 hidden
+  실패 원인을 이 창 복원 수정으로 모두 해결했다고 일반화하지 않는다.
+
+제품 바이너리/전체 게이트의 결과와 미완료 항목은 별도로 기록한다. RHEL 호스트
+선택·ETX, G1/G4, OS 입력/접근성, 장애 복구 및 서명/공증의 전체 목표는 유지한다.
