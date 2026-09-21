@@ -8,9 +8,10 @@ the fit view to x4, where Calibre keeps every shape at a minimum size. Under
 stays as a box drawn from index metadata (no page decoded). This gate renders
 the chip-geometry synthetic MAIN01 (tools/gen_main01_like.py):
 
-  * one via layer, keep, the whole chip: the kill switch
-    FLOE_RUST_SUB_CUT_BOX=off gives an empty frame, the default a frame with
-    boxes on it (sub_cut_boxes > 0) and no page decoded for them;
+  * one via layer, keep, the whole chip: without the boxes the frame is
+    empty, with them (FLOE_RUST_SUB_CUT_BOX=on - off by default since
+    0.12.182, the density representation below the cut replaces them) a frame
+    with boxes on it (sub_cut_boxes > 0) and no page decoded for them;
   * what is NOT the feature's business is byte-identical to the kill switch:
     the same view under `thin cull`, the all-layer keep view (more layers than
     the cap), and a near keep view where nothing is under the cut;
@@ -47,9 +48,9 @@ VIA = (4, 2)        # layer index 14: role via (index mod 6 == 2)
 
 def worker(src, on):
     if on:
-        os.environ.pop('FLOE_RUST_SUB_CUT_BOX', None)
+        os.environ['FLOE_RUST_SUB_CUT_BOX'] = 'on'
     else:
-        os.environ['FLOE_RUST_SUB_CUT_BOX'] = 'off'
+        os.environ.pop('FLOE_RUST_SUB_CUT_BOX', None)
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)

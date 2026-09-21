@@ -1816,10 +1816,14 @@ fn sub_cut_wash_enabled() -> bool {
 /// file of its own); FLOE_RUST_PAGE_REPS=on turns the planner-side
 /// representatives on for a diagnosis.
 /// Sub-cut boxes on a plain layout's `thin keep` frames
-/// (floe_vfs::ViewReq::sub_cut_box); FLOE_RUST_SUB_CUT_BOX=off is the kill
-/// switch.
+/// (floe_vfs::ViewReq::sub_cut_box). OFF by default since 0.12.182 (user
+/// decision 2026-09-21): with few layers visible the box plan walks every
+/// size-cut subtree to its placements and replans the frame past its cap -
+/// 20 s near the fit view of a 449-layer chip with ten layers on - and what
+/// lies below the cut is to be shown by a density representation instead.
+/// FLOE_RUST_SUB_CUT_BOX=on turns them on for a diagnosis.
 fn sub_cut_box_enabled() -> bool {
-    std::env::var("FLOE_RUST_SUB_CUT_BOX").as_deref() != Ok("off")
+    std::env::var("FLOE_RUST_SUB_CUT_BOX").as_deref() == Ok("on")
 }
 
 /// The per-shape cut on a plain layout's `thin keep` frames
@@ -2948,9 +2952,9 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64)
         page_hairline: !command.thin_keep,
         summary_layers: Vec::new(),
         prune_summary: false,
-        // sub-cut boxes: `thin keep` means nothing vanishes - what the size
-        // cut drops stays as a box (hier.rs SUB_CUT_BOX_PX).
-        // FLOE_RUST_SUB_CUT_BOX=off is the kill switch.
+        // sub-cut boxes (hier.rs SUB_CUT_BOX_PX): off unless
+        // FLOE_RUST_SUB_CUT_BOX=on - the density representation below the
+        // cut replaces them (see sub_cut_box_enabled)
         sub_cut_box: !command.exact && command.thin_keep && sub_cut_box_enabled(),
         shape_cut: !command.exact && command.thin_keep && shape_cut_enabled(),
         // the viewer's frames switch reaches the planner (review 2026-09-20: it
