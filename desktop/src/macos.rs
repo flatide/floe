@@ -59,6 +59,9 @@ struct State {
     smoke_recovery: bool,
     smoke_review: bool,
     smoke_renderer: bool,
+    smoke_layout: bool,
+    layout_qa_reports: Cell<u8>,
+    layout_qa_done: Cell<bool>,
     renderer_qa_done: Cell<bool>,
     renderer_qa_reopened: Cell<Option<Instant>>,
     smoke_loss: Option<Loss>,
@@ -502,6 +505,7 @@ impl Host {
         smoke_recovery: bool,
         smoke_review: bool,
         smoke_renderer: bool,
+        smoke_layout: bool,
         smoke_loss: Option<Loss>,
         download_qa: Option<download_qa::Fixture>,
     ) -> Retained<Self> {
@@ -524,6 +528,9 @@ impl Host {
             smoke_recovery,
             smoke_review,
             smoke_renderer,
+            smoke_layout,
+            layout_qa_reports: Cell::new(0),
+            layout_qa_done: Cell::new(false),
             renderer_qa_done: Cell::new(false),
             renderer_qa_reopened: Cell::new(None),
             smoke_loss,
@@ -531,7 +538,9 @@ impl Host {
             download_qa,
             download_qa_completion: RefCell::new(None),
             download_qa_done: Cell::new(false),
-            smoke_step: Cell::new(if smoke_renderer {
+            smoke_step: Cell::new(if smoke_layout {
+                60
+            } else if smoke_renderer {
                 50
             } else if smoke_review {
                 20
@@ -1365,7 +1374,8 @@ impl Host {
         }
         let step = self.ivars().smoke_step.get();
         // Ordinary smoke is empty-workspace only. Review smoke creates its own
-        // fresh fixture; no QA invocation accepts caller paths/reviewer scopes.
+        // fresh fixture. Frame parity is a separate explicit read-only mode:
+        // its driver supplies a new valmini; no reviewer is registered.
         let js = match step {
             0 => "(()=>{const b=document.getElementById('logout'),p=document.getElementById('browse-dialog'),c=document.getElementById('browse-close'),r=document.getElementById('browse-refresh');return b&&!b.disabled&&p&&!p.hidden&&c&&!c.disabled&&r&&!r.disabled?'ready':JSON.stringify([!!b,typeof FloeProtocol==='object',typeof FloeSessionExit==='object',document.readyState==='complete',!!location.hash]);})()",
             1 => "document.getElementById('browse-dialog').hidden?'dismissed':'wait'",
@@ -1395,6 +1405,7 @@ impl Host {
             50 | 53 | 54 if self.ivars().smoke_renderer => concat!("(", include_str!("../ui/renderer-failure-probe.js"), ")('ready')"),
             51 if self.ivars().smoke_renderer => concat!("(", include_str!("../ui/renderer-failure-probe.js"), ")('failed')"),
             52 if self.ivars().smoke_renderer => concat!("(", include_str!("../ui/renderer-failure-probe.js"), ")('closed')"),
+            60 if self.ivars().smoke_layout => concat!("(", include_str!("../ui/layout-parity-probe.js"), ")(", include_str!("../ui/frame-parity-probe.js"), ")"),
             _ => { self.ivars().evaluating.set(false); return; },
         };
         let host = self.retain();
@@ -1418,6 +1429,16 @@ impl Host {
             let Some(text) = text else {
                 return;
             };
+            if step == 60 && text.starts_with("layout-metric ") {
+                let phase = host.ivars().layout_qa_reports.get();
+                if let Some(metric) = crate::layout_qa::metric(&text, phase) {
+                    println!("{metric}");
+                    host.ivars().layout_qa_reports.set(phase + 1);
+                } else {
+                    host.fail("invalid native layout parity metrics");
+                }
+                return;
+            }
             if *host.ivars().smoke_probe.borrow() != text {
                 // Only fixed markers / five booleans can leave this QA probe.
                 if [
@@ -1471,6 +1492,19 @@ impl Host {
                 *host.ivars().smoke_probe.borrow_mut() = text.clone();
             }
             let next = match (step, text.as_str()) {
+                (60, "layout-failed") => {
+                    host.fail("synthetic native layout parity QA failed");
+                    step
+                }
+                (60, "layout-ok") => {
+                    if host.ivars().layout_qa_reports.get() != 3 {
+                        host.fail("incomplete native layout parity metrics");
+                        return;
+                    }
+                    host.ivars().layout_qa_done.set(true);
+                    host.ivars().window.get().unwrap().performClose(None);
+                    5
+                }
                 (50, "renderer-ready") => {
                     // The development driver verifies this process's single
                     // direct renderd child before SIGKILL. No product PID API,
@@ -1698,6 +1732,7 @@ pub fn run(
     smoke_loss: Option<Loss>,
     smoke_download: Option<download_qa::Mode>,
     smoke_renderer: bool,
+    smoke_layout: bool,
 ) -> Result<i32> {
     if !objc2::available!(macos = 12.0) {
         return Err(Error::input("embedded preview requires macOS 12 or later"));
@@ -1739,6 +1774,7 @@ pub fn run(
         smoke_recovery,
         smoke_review,
         smoke_renderer,
+        smoke_layout,
         smoke_loss,
         if let Some(mode) = smoke_download {
             Some(
@@ -1928,6 +1964,12 @@ pub fn run(
         }
         println!("DESKTOP RENDERER FAILURE: OK (retained image not live; explicit close/reopen; new frame; close cancellation and service join)");
     }
+    if smoke_layout {
+        if result != 0 || host.ivars().smoke_step.get() != 8 || !host.ivars().layout_qa_done.get() {
+            return Err(Error::input("native layout parity QA did not complete"));
+        }
+        println!("DESKTOP LAYOUT: OK (strict Canvas geometry/frames; labels reported separately; confirmed close and service join; not input-to-photon)");
+    }
     if let Some(mode) = smoke_download {
         if result != 0
             || host.ivars().smoke_step.get() != 8
@@ -1973,7 +2015,7 @@ pub fn run(
         }
         if smoke_review {
             println!("DESKTOP REVIEW RECOVERY: OK (synthetic-only; dropped save ACKs; authenticated reloads; no automatic POST replay; explicit identical receipt resolution; UI read-back; native close/cancel/quit; service joined)");
-        } else if !smoke_renderer {
+        } else if !smoke_renderer && !smoke_layout {
             println!("DESKTOP SMOKE: OK (WebKit auth; synthetic composition-key guard; native menu About + modal guard; native close→cancel; application quit→confirm; service joined)");
         }
         if smoke_notices {

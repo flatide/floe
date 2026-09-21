@@ -230,3 +230,59 @@ G1의 미완료 범위는 동일 조건 GTK/WK/Electron의 실제 input→photon
 margin 안 검은 strip/라벨 지연, 현장 수용이다. **모든 라벨 포함 foreground/margin
 픽셀 동일**을 기존 목표에 새 필수 조건으로 추가하지 않는다. 초기 프레임 대기 실패는
 이 28픽셀 현상과 별개이며 Electron 시작 대기 기록에서 계속 추적한다.
+
+## 7. WKWebView의 실제 Canvas parity 기준선
+
+2026-09-22. 제품 렌더 정책/기본값/버전0.12.185는 그대로다. 앞선 Electron
+전용 gate에 대응하는 macOS 네이티브 QA를 추가했다. **G1 속도 비교 통과가 아니라
+각 호스트 안의 foreground/margin 정확도 검사**다.
+
+`tools/validate_native_frame_parity.cjs`는 인자를 받지 않는다. 새0700 임시 폴더에
+valmini를 생성·색인한 뒤 같은 소스·캐시·release index/renderd를 WKWebView와
+Electron에 순서대로 전달한다. decode/raster4, detail high, full depth,
+goto200,200,300µm, refinement off, raw, pan reuse on/off를 고정한다.
+각 창은 닫기 취소→명시적 종료→service join을 마쳐야 하며, 마지막에 소스·캐시
+SHA 목록이 시작 전과 같은지 확인한다. 클립보드·리뷰 저장·기존 기본값은 사용하지
+않는다. Python/KLayout은 **개발 fixture 생성에만** 쓰이고 두 앱 런타임에는 없다.
+
+네이티브 `--smoke-frame-parity-test ABS_SOURCE`는 이 드라이버용 명시적 read-only
+QA다. 기존 view/session 파서를 사용하며 새 쓰기 권한·JS→native IPC는 없다.
+일반 시작 시에는 실행되지 않는다. 새 JS wrapper는 visible/인증 완료/Live margin
+crop/같은 render revision을 기다리고 두 rAF 뒤 `frame-parity-probe.js`를 호출한다.
+labels off, frames off 전환은 **새 revision**의 margin이 도착해야 비교한다.
+geometry+frames, geometry-only는 모든 RGBA의 차이0과 nonempty를 요구한다.
+labels 포함은 §6의 수용 규약대로 차이만 기록한다. 실패/불완전/hidden은 통과할 수
+없으며, 단계30초·기존 native 전체120초 deadline을 늘리거나 재시도하지 않는다.
+호스트 밖에는 순서·크기·DPR·lit/changed의 검증된 숫자와 고정 verdict만 출력한다.
+
+실행 예(먼저 desktop 및 Electron helper를 offline build하고 검증된 runtime을 준비):
+
+```sh
+FLOE_QA_PYTHON_BIN=/absolute/dev-venv/bin/python \
+FLOE_ELECTRON_BIN=/absolute/Electron.app/Contents/MacOS/Electron \
+FLOE_ELECTRON_SERVICE_BIN="$PWD/electron/service/target/debug/floe-electron-service" \
+FLOE_ELECTRON_DOWNLOAD_BIN="$PWD/electron/service/target/debug/floe-electron-download" \
+    node tools/validate_native_frame_parity.cjs
+```
+
+실제 macOS arm64/DPR2 실행(`floe-native-parity-first.log`, exit0):
+
+| 호스트 | 실제 Canvas | labels 포함 차이 | geometry+frames / geometry 차이 |
+|---|---|---|---|
+| WKWebView | 1840×1382 | 0 | 0 / 0 |
+| Electron44.4.3 | 1640×1317 | 28 | 0 / 0 |
+
+두 pan-reuse 설정 각각 위 결과이며, 합성4세션이 정상 종료했다. WK의 도형 비교는
+각2,542,880픽셀, Electron은 각2,159,880픽셀이다. 입력 소스·캐시는 바뀌지 않았다.
+WK의 기본 window content와 Electron의 outer window 크기, UI font/layout이 달라
+viewport가 같지 않다. 따라서 lit 수나 label 차이를 **엔진 차이로 해석하지 않는다**.
+공유 픽셀 비교 코드를 사용했지만 두 호스트의 이미지끼리 비교한 것도 아니다.
+
+검증: native40단위, JS7검사, desktop strict clippy/fmt 통과. geometry mismatch,
+숨김/미준비/오래된 revision, zero-lit, 비정상·초과 숫자, 잘못된 QA 인자를 거부한다.
+이 단계에서 전체 Rust/web battery를 다시 돌린 것은 아니다. 기존 전체 실행의
+`layer_defaults`30초 timeout 기록은 남아 있다. 다음 G1 단계는 **동일 물리 viewport·
+DPR·화면 옵션을 고정한 cross-host 비교**, 실제 입력→첫 반응/완료·pacing·메모리,
+GTK 기준선과 RHEL/ETX 현장 수용이다. 화면 제어 연동의
+`CUA_REPL_ENABLED_SURFACES is required`도 해소되지 않았으므로 물리 입력 검증으로
+계산하지 않는다.

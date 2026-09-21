@@ -6,6 +6,7 @@ mod close_request;
 mod confirmation;
 mod download_fs;
 mod download_qa;
+mod layout_qa;
 #[cfg(target_os = "macos")]
 mod macos;
 mod recovery;
@@ -29,6 +30,7 @@ fn main() {
             --smoke-test-recovery: same test plus explicit reload and close-timeout cancel.\n\
             --smoke-test-review-recovery: NEW synthetic files only; save ACK loss/reload.\n\
             --smoke-test-renderer-failure: NEW synthetic layout; external test driver required.\n\
+            --smoke-frame-parity-test SOURCE: explicit synthetic read-only Canvas QA.\n\
             --smoke-test-storage-loss / --smoke-test-cookie-loss: NEW empty WebView only.\n\
             --smoke-test-download-cancel: NEW synthetic blob/staging files only.\n\
             --smoke-test-download-publish: NEW synthetic blob, real WebKit file write only.\n\
@@ -53,23 +55,35 @@ fn main() {
     let smoke_recovery = args == ["--smoke-test-recovery"];
     let smoke_review = review_qa::requested(&args);
     let smoke_renderer = review_qa::renderer_requested(&args);
+    let layout_args = match layout_qa::arguments(&args) {
+        Ok(args) => args,
+        Err(_) => {
+            eprintln!("floe2-desktop: frame parity QA requires one absolute synthetic source");
+            std::process::exit(2);
+        }
+    };
+    let smoke_layout = layout_args.is_some();
     let smoke_loss = session_qa::requested(&args);
     let smoke_download = download_qa::requested(&args);
     let smoke = smoke_notices
         || smoke_recovery
         || smoke_review
         || smoke_renderer
+        || smoke_layout
         || smoke_loss.is_some()
         || smoke_download.is_some()
         || args == ["--smoke-test"];
     if smoke {
         args.clear();
     }
+    if let Some(layout_args) = layout_args {
+        args = layout_args;
+    }
     if args.first().is_some_and(|a| a == "view") {
         args.remove(0);
     }
     let result = (|| {
-        if (smoke_review || smoke_renderer) && !cfg!(target_os = "macos") {
+        if (smoke_review || smoke_renderer || smoke_layout) && !cfg!(target_os = "macos") {
             return Err(floe_app_core::Error::input(
                 "synthetic layout WebView QA requires macOS",
             ));
@@ -98,6 +112,7 @@ fn main() {
                 smoke_loss,
                 smoke_download,
                 smoke_renderer,
+                smoke_layout,
             )?;
             if let Some(fixture) = &fixture {
                 if smoke_renderer {
