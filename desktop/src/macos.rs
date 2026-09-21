@@ -618,14 +618,24 @@ impl Host {
                 let status = match marker.as_deref() {
                     Some("opened") => "opened",
                     Some("busy") => "busy",
+                    Some("hidden") => "hidden",
                     Some("unavailable") => "unavailable",
                     _ => "evaluation-failed",
                 };
                 eprintln!("[desktop-smoke] menu={status}");
+                if marker.as_deref() == Some("hidden") {
+                    // This QA step cannot advance after a refused action. Do
+                    // not bypass visibility or count a hidden dialog as tested.
+                    host.fail("Native menu QA needs a visible WebView — activate the test window and rerun");
+                    return;
+                }
             }
             match marker.as_deref() {
                 Some("opened") => host.status("floe2 — embedded preview"),
                 Some("busy") => host.status("Finish or cancel the current dialog first"),
+                Some("hidden") => {
+                    host.status("Activate this window and retry the menu action — no reload needed")
+                }
                 _ => {
                     host.status("Menu action unavailable — wait for the view, or use Recover View")
                 }

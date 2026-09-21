@@ -25,11 +25,18 @@ for (const id of ['logout', 'index-confirm', 'save', 'review-save', "');evil('"]
 modal = true;
 assert.strictEqual(invoke('browse-open'), 'busy');
 modal = false;
-for (const target of [button, document]) {
-    target.hidden = true;
-    assert.strictEqual(invoke('browse-open'), 'unavailable');
-    target.hidden = false;
-}
+document.hidden = true;
+assert.strictEqual(invoke('browse-open'), 'hidden');
+modal = true;
+assert.strictEqual(invoke('about-open'), 'hidden');
+assert.strictEqual(invoke('save'), 'unavailable');
+assert.strictEqual(clicks, 3, 'hidden documents cannot open or replace a dialog');
+document.hidden = false;
+assert.strictEqual(invoke('about-open'), 'busy');
+modal = false;
+button.hidden = true;
+assert.strictEqual(invoke('browse-open'), 'unavailable');
+button.hidden = false;
 button.disabled = true;
 assert.strictEqual(invoke('browse-open'), 'unavailable');
 button.disabled = false;

@@ -1215,3 +1215,40 @@ python3 -B tools/validate_desktop_renderer_failure.py desktop/target/debug/floe2
 저장 도중 crash/디스크 고장, 물리 키보드·IME/DPI/접근성, 고객 대형 설계/현장
 수용을 대신하지 않는다. 이번 화면 제어 연동은 `CUA_REPL_ENABLED_SURFACES is
 required`로 사용할 수 없어 수동 화면 조작·스크린샷은 별도로 남긴다.
+
+## 20. D2-mac 숨겨진 메뉴의 진단 분리 (2026-09-21)
+
+jobdeck 정방향 통합 `2445068` 뒤 새 release 개발 앱을 조립했다. 고지279파일의
+전체 chunk 검사 및 실제 앱의 격리 복사본에 대한 경로 이동·누락·변조·symlink
+거부는 통과했다. 최초 번들은 `desktop/target/macos-dev.g02LO5/Floe2.app`이며
+로그는 `/private/tmp/floe-webui-sync4-desktop-{release,notices}.log`다.
+이는 서명/공증·GUI 수용을 대신하지 않는다.
+
+해당 번들의 `--smoke-test-notices`는 인증·합성 조합키·초기 Browse 닫기까지
+진행했으나 `menu=unavailable`에서120초 deadline으로 **exit1**이었다
+(`floe-webui-sync4-desktop-native.log`). 이 값은 숨겨진 문서와 없는/비활성
+버튼을 구별하지 않았다. 새 진단은 `document.hidden`일 때만 `hidden`을 반환한다.
+제품은 **창을 활성화한 후 메뉴를 다시 선택하라**고 안내하며 불필요한 Recover
+View/재로딩을 권하지 않는다. 버튼 부재·비활성·모달 guard와 허용된 세 메뉴만
+실행하는 정책은 유지한다. 활성화 시 메뉴를 자동 재실행하지도 않는다.
+
+수정된 debug 호스트의 실제 빈 합성 세션은 같은 지점에서 `menu=hidden`을
+보고하고 service를 취소·join하여 **exit1**로 끝났다
+(`/private/tmp/floe-desktop-visibility-native.log`). 이 실행의 실패가 WebKit의
+문서 가시성 판정 때문이라는 근거이며, 앞선 모든 실패 원인이나 OS/연동 설정의
+근본 원인을 확정하는 것은 아니다. native QA는 거부된 메뉴 뒤에 진행할 수
+없으므로 이 경우 명시적 가시성 실패로 종료한다. 숨김 guard 제거·가짜 표시·
+timeout 연장으로 게이트를 통과시키지 않는다.
+
+- Node 메뉴 회귀: 숨김/모달/비활성/허용 목록을 구별하고 숨김 중 클릭0회,
+  다시 보인 뒤에도 모달이 있으면 기존 guard가 유지됨을 확인했다.
+- host fmt·unit **36 passed**·host clippy `--all-targets --no-deps -- -D warnings`
+  통과. dependency warning이 없는 전체 workspace라는 주장은 아니다.
+  로그: `/private/tmp/floe-desktop-visibility-{unit,clippy}.log`.
+- `sh tools/validate_rust.sh --only embedded_host,web_ui,validation_selector`:
+  **exit0 / ALL OK**. 실제 내장 서비스 수명·launcher/vendor·메뉴/복구 probe와
+  전체 ES2017/UI 회귀를 포함한다. 로그: `floe-desktop-visibility-battery.log`.
+  검사 전용 `.venv` 링크는 제거했다. 이것을 native GUI 통과로 집계하지 않는다.
+- CUA 재확인도 여전히 `CUA_REPL_ENABLED_SURFACES is required`였다. 실제 표시
+  화면/물리 입력과 최종 native suite는 통과하지 않았다. 현장 RHEL/ETX,
+  WebContent/저장 중 crash, IME/DPI/접근성, G1/G4·배포 수용은 계속 남는다.
