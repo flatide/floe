@@ -60,6 +60,8 @@ struct State {
     smoke_review: bool,
     smoke_renderer: bool,
     smoke_layout: bool,
+    smoke_cross: bool,
+    layout_cross_reports: Cell<u8>,
     layout_qa_reports: Cell<u8>,
     layout_qa_done: Cell<bool>,
     renderer_qa_done: Cell<bool>,
@@ -529,6 +531,8 @@ impl Host {
             smoke_review,
             smoke_renderer,
             smoke_layout,
+            smoke_cross: smoke_layout && std::env::var("FLOE_QA_CROSS_HOST").as_deref() == Ok("1"),
+            layout_cross_reports: Cell::new(0),
             layout_qa_reports: Cell::new(0),
             layout_qa_done: Cell::new(false),
             renderer_qa_done: Cell::new(false),
@@ -1405,6 +1409,7 @@ impl Host {
             50 | 53 | 54 if self.ivars().smoke_renderer => concat!("(", include_str!("../ui/renderer-failure-probe.js"), ")('ready')"),
             51 if self.ivars().smoke_renderer => concat!("(", include_str!("../ui/renderer-failure-probe.js"), ")('failed')"),
             52 if self.ivars().smoke_renderer => concat!("(", include_str!("../ui/renderer-failure-probe.js"), ")('closed')"),
+            60 if self.ivars().smoke_cross => concat!("(", include_str!("../ui/layout-parity-probe.js"), ")(", include_str!("../ui/frame-parity-probe.js"), ",", include_str!("../ui/cross-viewport-probe.js"), ",", include_str!("../ui/frame-fingerprint-probe.js"), ")"),
             60 if self.ivars().smoke_layout => concat!("(", include_str!("../ui/layout-parity-probe.js"), ")(", include_str!("../ui/frame-parity-probe.js"), ")"),
             _ => { self.ivars().evaluating.set(false); return; },
         };
@@ -1429,6 +1434,47 @@ impl Host {
             let Some(text) = text else {
                 return;
             };
+            if step == 60 && text.starts_with("layout-state ") {
+                if let Some(state) = crate::layout_qa::failure_state(&text) {
+                    println!("{state}");
+                } else {
+                    host.fail("invalid native layout failure state");
+                }
+                return;
+            }
+            if step == 60
+                && [
+                    "initial",
+                    "configure",
+                    "resize",
+                    "goto",
+                    "ready0",
+                    "ready1",
+                    "ready2",
+                    "compare0",
+                    "compare1",
+                    "compare2",
+                    "fingerprint0",
+                    "fingerprint1",
+                    "fingerprint2",
+                ]
+                .iter()
+                .any(|stage| text == format!("layout-failed-{stage}"))
+            {
+                println!("DESKTOP LAYOUT: {text}");
+                host.fail("synthetic native layout parity QA failed");
+                return;
+            }
+            if step == 60 && host.ivars().smoke_cross && text.starts_with("layout-cross ") {
+                let phase = host.ivars().layout_cross_reports.get();
+                if let Some(metric) = crate::layout_qa::cross_metric(&text, phase) {
+                    println!("{metric}");
+                    host.ivars().layout_cross_reports.set(phase + 1);
+                } else {
+                    host.fail("invalid native cross-host frame metrics");
+                }
+                return;
+            }
             if step == 60 && text.starts_with("layout-metric ") {
                 let phase = host.ivars().layout_qa_reports.get();
                 if let Some(metric) = crate::layout_qa::metric(&text, phase) {
@@ -1497,7 +1543,10 @@ impl Host {
                     step
                 }
                 (60, "layout-ok") => {
-                    if host.ivars().layout_qa_reports.get() != 3 {
+                    if host.ivars().layout_qa_reports.get() != 3
+                        || (host.ivars().smoke_cross
+                            && host.ivars().layout_cross_reports.get() != 3)
+                    {
                         host.fail("incomplete native layout parity metrics");
                         return;
                     }

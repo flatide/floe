@@ -286,3 +286,71 @@ DPR·화면 옵션을 고정한 cross-host 비교**, 실제 입력→첫 반응/
 GTK 기준선과 RHEL/ETX 현장 수용이다. 화면 제어 연동의
 `CUA_REPL_ENABLED_SURFACES is required`도 해소되지 않았으므로 물리 입력 검증으로
 계산하지 않는다.
+
+## 8. 같은 viewport의 WKWebView/Electron RGBA 대조와 초기 가시성 실패
+
+2026-09-22. §7 드라이버를 **cross-host 원시 픽셀 대조**로 확장했다. 제품 버전,
+일반 창 크기, resize/cut/라벨 정책은 바꾸지 않았다. 명시적 parity QA와
+`FLOE_QA_CROSS_HOST=1`을 함께 사용할 때만 공유 script가 viewport를800×600 CSS px로
+고정한다. DPR은 조작하지 않고, 실제 Canvas 크기가800×DPR/600×DPR가 되어야 한다.
+`validate_native_frame_parity.cjs`는 이 모드를 설정하며 사용 명령은 §7과 같다.
+환경변수 없는 기존 Electron/WK 단독 parity QA는 기존 창 크기로 동작한다.
+
+두 호스트가 같은 `layout-parity-probe.js`와 `frame-fingerprint-probe.js`를 실행한다.
+foreground 전체와 margin의 정렬된 crop을 `getImageData`로 읽어 SHA-256을 계산한다.
+기존 per-host 도형 RGBA 차이0 조건도 유지한다. digest 중 frame ID/revision/bbox가
+바뀌거나 숨김으로 전환되면 실패다. PNG 디코딩·CSS 리샘플링·창 screenshot/도구바는
+비교에 섞지 않는다. 픽셀 배열·해시는 **명시적 합성 검사에만** 읽으며 새 API,
+JS→native IPC, 파일/클립보드/리뷰 권한은 만들지 않는다.
+
+비교기는 세 phase가 정확히 한 번씩 순서대로 있어야 한다. 물리 크기·DPR·DBU bbox와
+각 counterpart의 해시가 호스트 사이에서 같아야 한다. valmini의1nm DBU,
+goto200,200,300µm와4:3으로 유도되는 `[50000,87500,350000,312500]`도 단언한다.
+즉 두 호스트가 *같이 틀린* 카메라를 반환해도 통과하지 않는다. 라벨 포함에서
+foreground와 margin이 서로 다른 기존 수용 규약은 유지하되, **같은 foreground끼리,
+같은 margin crop끼리의 cross-host 해시**는 라벨 포함에서도 일치해야 한다.
+
+### QA 순서 수정과 실제 관측
+
+처음에는 CSS resize와 초기 goto를 동시에 진행했다. 하지만 제품
+`ViewState::resize`는 **배율을 유지**하므로 픽셀 폭 변경 후에도 월드 폭이300µm라는
+가정이 틀렸다. 최종 순서는 초기 Live margin 착지→CSS resize→실제 크기의 새 프레임
+착지→필요할 때 기존 Go 버튼으로200,200,300을 한 번 적용→세 phase 대조다.
+가시성/시간 제한을 완화하거나 제품 resize를 변경하지 않았다. 최초 렌더 비용을
+측정하는 cold-start benchmark가 아니며, 이 준비 비용을 성능 개선으로 세지 않는다.
+
+- `floe-native-cross-first.log`: 첫 WK 검사 실패. 단계 진단 전이므로 세부 원인 미확정.
+- `floe-native-cross-phase.log`: reuse on에서 양쪽 해시 일치, off에서는 Electron
+  `layout-failed-ready0`, exit1. 전체 통과로 세지 않는다.
+- `floe-native-cross-ordered.log`: 순서 수정 뒤 **4세션/두 reuse 설정 exit0**.
+  두 호스트는 각각1600×1200px/DPR2/위 고정 bbox였고, labels+frames+geometry,
+  frames+geometry, geometry 세 phase 모두 counterpart 해시가 일치했다.
+  라벨 포함 해시 접두부 `69220836d4ba298c`, 도형 두 phase `fb6b7b9bb3189208`이다.
+  foreground/margin 간에도 이 뷰에서는 차이0이었다. 소스·캐시는 불변이고 종료/join 통과.
+- 카메라·margin 검사를 추가한 **최종 코드의 실제 재검사는 아직 green이 아니다**.
+  `floe-native-cross-final.log`와 추가 진단 `floe-native-cross-state.log`는 WK의
+  `layout-failed-initial`, exit1이다. 후자의 고정 상태는
+  `mask=3118, canvas=1×1, DPR=2, goto=200,200,300`이었다. 인증은 끝났지만
+  `document.hidden=true`, frame ID가 없고 Live margin도 없었다. **CSS resize나
+  digest 실행 이전**이다. OS 창이 실제로 가려졌는지/WebKit 가시성 전달 문제인지는
+  화면 제어 연결 없이 확정하지 않는다. hidden을 강제로 false로 만들거나 재로드,
+  시간 연장, 자동 재시도를 추가하지 않았다. 모든 테스트 프로세스는 종료됐다.
+- 최종 비교기로 `ordered`의 on/off 기록을 다시 검사해 고정 카메라·해시 계약 통과를
+  확인했다. 이는 **기록 재검사**이며 마지막 실제 native 실행 실패를 대체하지 않는다.
+
+실패 진단은12bit mask와 canvas 크기/DPR/goto 숫자만 내보낸다. bit0부터 순서대로
+visible, hash 제거, logout enabled, fit enabled, empty hidden, rendering hidden,
+Live margin crop, margin visible, foreground ID, margin ID, 두 revision 같음,
+prefetch 아님이다. `revision 같음`만으로는 두 ID/유효 revision의 존재를 증명하지
+못한다. 단계명(initial/configure/resize/goto/ready/compare/fingerprint)과 함께 읽는다.
+원문 notice·경로·레이어명·인증값·리뷰 본문은 출력하지 않는다.
+
+최종 pure 검증은 desktop42단위, 선택 JS17, strict desktop clippy/fmt 통과다.
+새 단위는 양쪽이 같은 잘못된 bbox, 다른 DPR, 누락/중복 phase, 해시 변경,
+resize 후 월드 폭 변경, digest 도중 frame 교체를 거부한다. 기존 의존성 경고는
+유지했다. 전체 Rust/web battery는 이번 단계에서 재실행하지 않았으며 앞선
+native oracle30초 timeout도 해결되지 않았다.
+
+남은 G1: 초기 가시성 실패를 재현·해결한 최종 matrix 재통과, 같은 조건의 입력→첫
+반응/완료·pacing/RSS/CPU 비교, 실제 물리 입력·compositor/ETX 표시, GTK 기준선이다.
+이번 해시 일치로 성능 동등성이나 RHEL 호환성, 전체 goal 완료를 주장하지 않는다.

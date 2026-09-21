@@ -242,6 +242,9 @@ margin-only 꼬리로 확인했으며, 이는 F2R-21에서 사용자가 이미 �
 E2a 시점 Node unit12개 + 실제 pipe5개 =17개, Rust unit5·clippy·실제 빈 창 회귀는
 `sh tools/validate_electron.sh`로 재실행한다. WKWebView와 같은 조건의 대조,
 cold startup·반복 분포/peak·물리 입력·RHEL/ETX 수용은 아직 없다.
+후속 [G1 §8](WEBUI_G1_TIMING.ko.md#8-같은-viewport의-wkwebviewelectron-rgba-대조와-초기-가시성-실패)에서
+같은1600×1200px/DPR2의 cross-host Canvas 해시 일치를 관측했다. 최종 재검사의 WK
+초기 hidden/프레임 미도착 실패는 남아 있어, 안정적인 matrix나 성능 수용 통과는 아니다.
 
 ### E2b: Rust 소유 staging과 native 파일 내보내기
 

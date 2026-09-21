@@ -21,6 +21,8 @@ node desktop/ui/download-cancel-probe.test.cjs
 node desktop/ui/renderer-failure-probe.test.cjs
 node desktop/ui/frame-parity-probe.test.cjs
 node desktop/ui/layout-parity-probe.test.cjs
+node desktop/ui/frame-fingerprint-probe.test.cjs
+node --test tools/native-frame-comparison.test.cjs
 python3 -B tools/validate_desktop_renderer_failure.py --self-test
 FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
 FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \

@@ -68,6 +68,79 @@ pub fn metric(text: &str, expected_phase: u8) -> Option<String> {
     ))
 }
 
+pub fn cross_metric(text: &str, expected_phase: u8) -> Option<String> {
+    let raw = text.strip_prefix("layout-cross ")?;
+    if raw.len() > 512 {
+        return None;
+    }
+    let fields: Vec<_> = raw.split(' ').collect();
+    if fields.len() != 10
+        || fields[..8].iter().any(|s| {
+            s.is_empty()
+                || !s
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || b == b'.' || b == b'-')
+        })
+        || fields[8..].iter().any(|s| {
+            s.len() != 64
+                || !s
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    {
+        return None;
+    }
+    let n: Vec<f64> = fields[..8]
+        .iter()
+        .map(|s| s.parse().ok())
+        .collect::<Option<_>>()?;
+    if n.iter().any(|v| !v.is_finite())
+        || expected_phase > 2
+        || n[0] != f64::from(expected_phase)
+        || !(0.25..=4.).contains(&n[3])
+        || n[1] != 800. * n[3]
+        || n[2] != 600. * n[3]
+        || n[1..3].iter().any(|v| v.fract() != 0.)
+        || n[4..].iter().any(|v| v.abs() > 9_007_199_254_740_991.)
+        || n[4] >= n[6]
+        || n[5] >= n[7]
+        || (expected_phase != 0 && fields[8] != fields[9])
+    {
+        return None;
+    }
+    Some(format!("DESKTOP CROSS: {raw}"))
+}
+
+pub fn failure_state(text: &str) -> Option<String> {
+    let raw = text.strip_prefix("layout-state ")?;
+    if raw.len() > 256 {
+        return None;
+    }
+    let fields: Vec<_> = raw.split(' ').collect();
+    if fields.len() != 7
+        || fields.iter().any(|s| {
+            s.is_empty()
+                || !s
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || b == b'.' || b == b'-')
+        })
+    {
+        return None;
+    }
+    let n: Vec<f64> = fields
+        .iter()
+        .map(|s| s.parse().ok())
+        .collect::<Option<_>>()?;
+    if n.iter()
+        .any(|v| !v.is_finite() || v.abs() > 9_007_199_254_740_991.)
+        || !(0.0..=4095.0).contains(&n[0])
+        || n[0].fract() != 0.
+    {
+        return None;
+    }
+    Some(format!("DESKTOP LAYOUT: state {raw}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +184,36 @@ mod tests {
             "layout-metric 1 100 80 2 300 300 -1",
         ] {
             assert!(metric(bad, 1).is_none(), "{bad}");
+        }
+    }
+    #[test]
+    fn cross_host_metrics_are_bounded_and_geometry_hashes_must_match() {
+        let hash = "a".repeat(64);
+        let input = format!("layout-cross 1 1600 1200 2 50000 87500 350000 312500 {hash} {hash}");
+        assert!(cross_metric(&input, 1).is_some());
+        for bad in [
+            input.replace("1600", "1599"),
+            input.replace(" 2 ", " NaN "),
+            input.replace("50000 87500", "9007199254740992 87500"),
+            input.replace("350000", "1"),
+            format!("{input} extra"),
+            input.replacen(&hash, &"b".repeat(64), 1),
+            input.replace(&hash, "secret"),
+        ] {
+            assert!(cross_metric(&bad, 1).is_none());
+        }
+        assert!(cross_metric(&input, 0).is_none());
+    }
+    #[test]
+    fn failure_state_contains_only_bounded_numbers_and_a_twelve_bit_mask() {
+        assert!(failure_state("layout-state 4095 1600 1200 2 200 200 300").is_some());
+        for s in [
+            "layout-state 4096 1600 1200 2 200 200 300",
+            "layout-state 4095 1600 1200 NaN 200 200 300",
+            "layout-state secret",
+            "layout-state 4095 1600 1200 2 200 200 300 extra",
+        ] {
+            assert!(failure_state(s).is_none());
         }
     }
 }

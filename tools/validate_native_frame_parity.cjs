@@ -3,6 +3,7 @@
 // WKWebView and Electron. No caller source, clipboard or review write authority.
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {spawnSync}=require('node:child_process'),{createHash}=require('node:crypto');
+const {compare}=require('./native-frame-comparison.cjs');
 if(process.platform!=='darwin'||process.argv.length!==2)throw Error('macOS only; no arguments; NEW synthetic fixture');
 const repo=path.resolve(__dirname,'..');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'floe-native-parity-'));fs.chmodSync(root,0o700);
@@ -11,8 +12,10 @@ function selected(key,fallback) {return Object.hasOwn(process.env,key)?process.e
 function run(binary,args,label,env=process.env) {
     const r=spawnSync(binary,args,{cwd:repo,env,encoding:'utf8',timeout:120000,maxBuffer:8*1024*1024});
     const lines=((r.stdout||'')+'\n'+(r.stderr||'')).split('\n').filter(s=>
-        /^(?:DESKTOP LAYOUT:|ELECTRON (?:LAYOUT|SMOKE):)/.test(s));
+        /^(?:DESKTOP (?:LAYOUT|CROSS):|ELECTRON (?:LAYOUT|SMOKE|CROSS):)/.test(s));
     for(const line of lines)console.log(line);
+    if(r.error||r.status!==0)console.log('NATIVE PARITY: child verdict '+JSON.stringify({stage:label,exit:r.status,signal:r.signal,
+        timeout:r.error?.code==='ETIMEDOUT',spawn_error:!!r.error}));
     if(r.error||r.status!==0)throw Error(label+' failed; raw session diagnostics suppressed');
     return lines;
 }
@@ -36,7 +39,7 @@ const before=snapshot(root);
 try {
     for(const reuse of ['on','off']) {
         console.log('NATIVE PARITY: pan reuse '+reuse);
-        const env={...process.env,FLOE_INDEX_BIN:index,FLOE_RENDERD_BIN:renderd,FLOE_RUST_PAN_REUSE:reuse};
+        const env={...process.env,FLOE_INDEX_BIN:index,FLOE_RENDERD_BIN:renderd,FLOE_RUST_PAN_REUSE:reuse,FLOE_QA_CROSS_HOST:'1'};
         const wk=run(selected('FLOE_QA_DESKTOP_BIN',path.join(repo,'desktop/target/debug/floe2-desktop')),
             ['--smoke-frame-parity-test',source],'Actual WKWebView parity',env);
         if(!wk.some(s=>s.startsWith('DESKTOP LAYOUT: OK ('))||wk.filter(s=>s.startsWith('DESKTOP LAYOUT: phase=')).length!==3) {
@@ -45,8 +48,10 @@ try {
         const electron=run('sh',[path.join(repo,'tools/run_electron_dev.sh'),'--smoke-frame-parity-test',source],
             'Actual Electron parity',env);
         if(!electron.some(s=>s.startsWith('ELECTRON LAYOUT: FRAME PARITY OK (')))throw Error('Missing Electron geometry verdict');
+        const reports=compare(wk,electron);
+        console.log('NATIVE PARITY: cross-host RGBA matches '+JSON.stringify({reuse,pixels:reports[0].pixels,dpr:reports[0].dpr,phases:reports.length}));
     }
 } finally {
     if(before!==snapshot(root))throw Error('Source/cache changed during native parity QA');
 }
-console.log('NATIVE PARITY: OK (same source/cache/workers, per-host Canvas parity; NOT cross-host pixel or speed equivalence)');
+console.log('NATIVE PARITY: OK (same source/cache/workers/physical viewport/DPR/world bbox; cross-host raw RGBA hashes match; NOT speed or photon equivalence)');

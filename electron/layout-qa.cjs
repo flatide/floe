@@ -71,6 +71,29 @@ async function run({ app, window, evalOwned, service, extraRustPids = [], parity
     return { hash: createHash('sha256').update(bitmap).digest('hex'), bitmap };
   }
   window.show(); window.focus(); web.focus();
+  if(parityOnly&&process.env.FLOE_QA_CROSS_HOST==='1') {
+    const read=name=>fs.readFileSync(path.join(__dirname,'../desktop/ui/'+name+'.js'),'utf8');
+    const script='('+read('layout-parity-probe')+')('+read('frame-parity-probe')+','+
+      read('cross-viewport-probe')+','+read('frame-fingerprint-probe')+')';
+    const end=Date.now()+120000;
+    let phases=0;
+    while(Date.now()<end) {
+      const result=await evalOwned(script);
+      if(typeof result==='string'&&/^layout-state (?:-?\d+(?:\.\d+)? ){6}-?\d+(?:\.\d+)?$/.test(result)&&result.length<=269) {
+        console.log('ELECTRON LAYOUT: state '+result.slice('layout-state '.length));
+      } else if(typeof result==='string'&&/^layout-cross [0-2] [-.0-9 ]+ [a-f0-9]{64} [a-f0-9]{64}$/.test(result)) {
+        console.log('ELECTRON CROSS: '+result.slice('layout-cross '.length));phases++;
+      } else if(result==='layout-ok') {
+        if(phases!==3)throw Error('Incomplete cross-host parity');
+        console.log('ELECTRON LAYOUT: FRAME PARITY OK (shared fixed viewport probe; raw Canvas fingerprints)');
+        return;
+      } else if(/^layout-failed-(?:initial|configure|resize|goto|ready[0-2]|compare[0-2]|fingerprint[0-2])$/.test(result)) {
+        console.log('ELECTRON LAYOUT: '+result);throw Error('Cross-host Canvas QA failed');}
+      else if(result!=='wait'&&!/^layout-metric [0-2] [0-9. ]+$/.test(result)) {throw Error('Invalid cross-host verdict');}
+      await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    throw Error('Cross-host Canvas QA deadline');
+  }
   console.log('ELECTRON LAYOUT: waiting for initial frame');
   await settled(s => s.detail === 'high' && s.width === 300);
   await evalOwned("document.getElementById('viewport').focus();true");
