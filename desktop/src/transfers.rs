@@ -1,5 +1,5 @@
 //! Native downloads never interpret a web-supplied filename as a path, never
-//! overwrite a destination, and publish only after WebKit reports completion.
+//! overwrite a destination, and publish only after the browser reports completion.
 use crate::download_fs as held;
 use std::ffi::CString;
 #[cfg(test)]
@@ -167,6 +167,79 @@ impl PendingFile {
         // A failed explicit cleanup is reported, not silently retried in Drop.
         self.finalized = true;
         cleanup
+    }
+    /// A host unable to confirm that its producer stopped must retain staging,
+    /// not race that producer with RAII deletion. Report cleanup incomplete.
+    #[allow(dead_code)]
+    pub fn retain(mut self) {
+        self.finalized = true;
+    }
+    /// Electron must select its receive path synchronously, before an async
+    /// destination dialog. Copy into a NEW destination-side stage, then use the
+    /// same no-clobber publication. No path-based source/cleanup or replay.
+    #[allow(dead_code)] // The WKDownload host already receives in the chosen directory.
+    pub fn copy_publish(mut self, destination: &Path, cancelled: impl Fn() -> bool) -> Publication {
+        use std::io::{Read, Write};
+        let mut target = match Self::new(destination) {
+            Ok(target) => target,
+            Err(error) => {
+                return Publication {
+                    publication: Err(error),
+                    cleanup: self.discard(),
+                }
+            }
+        };
+        let publication = (|| {
+            self.validate_paths()?;
+            let mut source = held::open_at(&self.stage, c"payload", false)?;
+            let before = source.metadata()?;
+            if !before.is_file() || before.nlink() != 1 || before.len() > MAX_BYTES {
+                return Err(io::Error::other("invalid or oversized download"));
+            }
+            let mut out = held::create_at(&target.stage, c"payload")?;
+            let mut bytes = [0; 64 * 1024];
+            let mut copied = 0u64;
+            loop {
+                if cancelled() {
+                    return Err(io::Error::other("download publication cancelled"));
+                }
+                let n = source.read(&mut bytes)?;
+                if n == 0 {
+                    break;
+                }
+                copied = copied.checked_add(n as u64).ok_or_else(changed)?;
+                if copied > MAX_BYTES {
+                    return Err(io::Error::other("oversized download"));
+                }
+                out.write_all(&bytes[..n])?;
+            }
+            let after = source.metadata()?;
+            self.validate_paths()?;
+            if copied != before.len()
+                || before.len() != after.len()
+                || before.mtime() != after.mtime()
+                || before.mtime_nsec() != after.mtime_nsec()
+                || before.ctime() != after.ctime()
+                || before.ctime_nsec() != after.ctime_nsec()
+                || after.nlink() != 1
+                || held::stat_at(&self.stage, c"payload")?.id != identity(&before)
+            {
+                return Err(changed());
+            }
+            out.sync_all()?;
+            if cancelled() {
+                return Err(io::Error::other("download publication cancelled"));
+            }
+            target.publish_destination()
+        })();
+        let target_cleanup = target.cleanup();
+        target.finalized = true;
+        let source_cleanup = self.cleanup();
+        self.finalized = true;
+        Publication {
+            publication,
+            cleanup: target_cleanup.and(source_cleanup),
+        }
     }
     fn cleanup(&self) -> io::Result<()> {
         fn missing_is_ok(result: io::Result<()>) -> io::Result<()> {
@@ -494,6 +567,73 @@ mod tests {
     fn filename_is_not_a_path() {
         assert_eq!(suggested_name("../../secret"), "floe-export");
         assert_eq!(suggested_name("한글/파일\n.png"), "한글파일.png");
+    }
+    #[test]
+    fn copy_publication_is_private_no_clobber_and_cancellable() {
+        let root = private_root();
+        for (name, cancel, conflict) in [
+            ("ok", false, false),
+            ("cancel", true, false),
+            ("existing", false, true),
+        ] {
+            let source = PendingFile::new(&root.join("not-published")).unwrap();
+            fs::write(source.staging(), b"copied payload").unwrap();
+            let dest = root.join(name);
+            if conflict {
+                fs::write(&dest, b"original").unwrap();
+            }
+            let outcome = source.copy_publish(&dest, || cancel);
+            assert_eq!(outcome.publication.is_ok(), !cancel && !conflict);
+            outcome.cleanup.unwrap();
+            if cancel {
+                assert!(!dest.exists());
+            } else {
+                assert_eq!(
+                    fs::read(&dest).unwrap(),
+                    if conflict {
+                        b"original".as_slice()
+                    } else {
+                        b"copied payload".as_slice()
+                    }
+                );
+                if !conflict {
+                    assert_eq!(fs::metadata(&dest).unwrap().mode() & 0o777, 0o600);
+                }
+                fs::remove_file(dest).unwrap();
+            }
+        }
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir(root).unwrap();
+    }
+    #[test]
+    fn copy_cancellation_and_destination_race_after_copy_starts_leave_no_partial() {
+        use std::cell::Cell;
+        let root = private_root();
+        for conflict in [false, true] {
+            let source = PendingFile::new(&root.join("not-published")).unwrap();
+            fs::write(source.staging(), vec![7u8; 4 * 65536]).unwrap();
+            let dest = root.join("result");
+            let polls = Cell::new(0);
+            let outcome = source.copy_publish(&dest, || {
+                let n = polls.get() + 1;
+                polls.set(n);
+                if conflict && n == 2 {
+                    fs::write(&dest, b"racing original").unwrap();
+                }
+                !conflict && n == 3
+            });
+            assert!(polls.get() >= 3);
+            assert!(outcome.publication.is_err());
+            outcome.cleanup.unwrap();
+            if conflict {
+                assert_eq!(fs::read(&dest).unwrap(), b"racing original");
+                fs::remove_file(dest).unwrap();
+            } else {
+                assert!(!dest.exists());
+            }
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        }
+        fs::remove_dir(root).unwrap();
     }
     #[test]
     fn incomplete_or_racing_download_never_clobbers() {

@@ -10,20 +10,21 @@ function rustMemory(pid) {
   return ownedMemory(execFileSync('/bin/ps', ['-e', '-o', 'pid=,ppid=,rss='], { encoding: 'utf8' }), pid);
 }
 function ownedMemory(text, pid) {
+  const roots = Array.isArray(pid) ? pid : [pid];
   const rows = text.trim().split('\n').map(s => s.trim().split(/\s+/).map(Number));
-  if (!Number.isSafeInteger(pid) || pid < 1 || !rows.every(r => r.length === 3 &&
+  if (!roots.length || !roots.every(n => Number.isSafeInteger(n) && n > 0) || !rows.every(r => r.length === 3 &&
       r.every(n => Number.isSafeInteger(n) && n >= 0))) throw new Error('Invalid process metrics');
-  const selected = new Set([pid]);
+  const selected = new Set(roots);
   for (let changed = true; changed;) {
     changed = false;
     for (const [child, parent] of rows) if (selected.has(parent) && !selected.has(child)) { selected.add(child); changed = true; }
   }
   const owned = rows.filter(r => selected.has(r[0]));
-  if (!owned.some(r => r[0] === pid)) throw new Error('Rust service missing');
+  if (!roots.every(pid => owned.some(r => r[0] === pid))) throw new Error('Rust service missing');
   return { process_count: owned.length, rss_sum_kib: owned.reduce((n, r) => n + r[2], 0) };
 }
 
-async function run({ app, window, evalOwned, service }) {
+async function run({ app, window, evalOwned, service, extraRustPids = [] }) {
   const web = window.webContents;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-layout-'));
   fs.chmodSync(root, 0o700);
@@ -115,7 +116,7 @@ async function run({ app, window, evalOwned, service }) {
     viewport_css: initial.rect, viewport_pixels: initial.pixels, measurements,
     chromium: metrics.map(m => ({ type: m.type, working_set_kib: m.memory.workingSetSize,
       cpu_percent_since_prime: m.cpu.percentCPUUsage, sandboxed: m.sandboxed ?? null })),
-    rust: rustMemory(service.child.pid),
+    rust: rustMemory([service.child.pid, ...extraRustPids]),
     limitations: ['Settled landed margin plus two RAFs/polling, not input-to-photon or first response',
       'Native capture/readback adds workload between actions', 'Rust build profile depends on selected binaries', 'No WKWebView baseline yet',
       'RSS/working-set sums include shared pages; not unique memory or peak RSS', 'No RHEL/ETX or physical input acceptance'] };

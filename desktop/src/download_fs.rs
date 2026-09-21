@@ -39,6 +39,23 @@ pub fn open_at(parent: &File, name: &CStr, directory: bool) -> io::Result<File> 
     // SAFETY: openat returned a new uniquely owned descriptor.
     Ok(unsafe { File::from_raw_fd(fd) })
 }
+#[allow(dead_code)] // Used by the Electron host's cross-filesystem staging copy.
+pub fn create_at(parent: &File, name: &CStr) -> io::Result<File> {
+    // SAFETY: held directory descriptor and validated leaf; never replace/follow.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: new uniquely owned descriptor returned by openat.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
 pub fn mkdir_at(parent: &File, name: &CStr) -> io::Result<()> {
     // SAFETY: valid borrowed fd and leaf; never changes global umask.
     let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };

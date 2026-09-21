@@ -11,7 +11,7 @@
 |---|---|---|
 | E0 | 기존 Rust Session의 전용 파이프 sidecar, JS 클라이언트, 수명/인증 회귀 | 구현·실제 Node↔Rust 합성 검사; 아래 계약 |
 | E1 | sandboxed Electron 독립 창, 같은 웹 번들, 시작/종료/실패 처리, 런타임 고정/검증 | macOS arm64 실제 Chromium 합성 창 검사 통과. 기능·성능 수용은 E2/E3 |
-| E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | E2a 합성 pan·메모리 프로브 통과. WK/현장 대조·물리 입력·입출력·복구 수용은 남음 |
+| E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | E2a pan·메모리, E2b 파일 내보내기 합성 검사 통과. WK/현장 대조·물리 입력·실제 Save 창·복구 수용은 남음 |
 | E3 | RHEL 전체 ELF/라이브러리 의존성, sandbox·ETX/다중 사용자 실측, 라이선스/업데이트/오프라인 배포 | 현장 대기, OS 패키지/보안 설정 변경 없음 |
 
 Rust geometry·렌더러·색인·DRC·파일 권한/저장 API를 JS로 옮기지 않는다. Electron은
@@ -70,7 +70,8 @@ GET용 CSRF 헤더를 빠뜨려401이었고 하네스만 수정했다. 제품 �
 `electron/main.cjs`는 같은 Rust 웹 번들을 sandboxed Chromium 창에 연다. Python과
 외부 Chrome/Firefox는 실행에 필요 없다. 서비스·색인·raster는 기존 Rust 그대로다.
 Node integration/preload/native IPC 없음, context isolation/sandbox on, 비영속 partition,
-권한 요청/새 창/webview 거부, 소유 origin 밖 HTTP/WS·탐색 거부. 시작/실패 페이지의
+권한 요청/일반 새 창/webview 거부, 소유 origin 밖 HTTP/WS·탐색 거부. E2b의 정확한
+POST 내보내기만 숨김 임시 창을 허용한다(아래 계약). 시작/실패 페이지의
 고정 data URL만 별도 허용하며 임의 data URL 접두사를 허용하지 않는다. spellcheck는
 끄고 기존 웹 CSP를 유지한다. 임시 profile은 새0700폴더이며 종료 정리는 best-effort다.
 강제 crash 뒤의 안전 삭제/모든 디스크 흔적 제거를 보장하지 않는다.
@@ -107,11 +108,14 @@ sh tools/run_electron_dev.sh
 넘기며 색인은 자동 생성하지 않는다. 서비스 바이너리는 기본 release 경로 또는 명시
 `FLOE_ELECTRON_SERVICE_BIN`; 명시한 빈/잘못된 override는 fallback 없이 오류다.
 `FLOE_INDEX_BIN`/`FLOE_RENDERD_BIN`도 기존 override를 보존한다.
+E2b부터 같은 Cargo build가 `floe-electron-download`도 만든다. 기본은 선택한 service
+바이너리와 같은 폴더이며 `FLOE_ELECTRON_DOWNLOAD_BIN`으로 명시할 수 있다.
+두 바이너리를 함께 재빌드해야 한다. npm 패키지·추가 vendor는 필요 없다.
 
 ### 기능 한계와 검증
 
-- 다운로드는 차단하고 안내한다. 기존 WebView의 승인·원자 게시·저장 결과 불명
-  복구 계약을 아직 이 호스트에 이식하지 않았다.
+- E1의 다운로드 차단은 E2b에서 새 파일 내보내기로 확장했다. 기존 파일 덮어쓰기,
+  자동 재시도/재개, 임의 원격 URL 다운로드는 계속 금지다. 아래 수용 범위를 따른다.
 - 프로그램식 clipboard 권한은 차단한다. 표준 native Edit의 Copy/Paste 메뉴는
   있지만 이미지·좌표 복사, 붙여넣기/IME의 실제 수용은 별도다.
 - `node --test electron/service-client.test.cjs electron/host.test.cjs`: **10/10**.
@@ -126,7 +130,8 @@ sh tools/run_electron_dev.sh
   캡처한다. 캡처를 숨은 창의 가시성 통과 수단으로 쓰지 않는다. layout 픽셀·물리
   키 입력·input→photon 검증은 아니다.
 - 반복 명령: `FLOE_ELECTRON_BIN="..." sh tools/validate_electron.sh`.
-  이 gate는 Electron E0/E1 전용이다. 전체 `validate_rust.sh` 통과를 뜻하지 않는다.
+  이 gate는 Electron E0/E1/E2b(blob) 전용이다. POST clip은 layout driver에서 검사한다.
+  전체 `validate_rust.sh` 통과를 뜻하지 않는다.
   최근 전체 Rust/web gate는 기존 GTK startup oracle30초 timeout으로 실패했고,
   selected gates/native host 통과와 분리해 기록한다.
 
@@ -163,7 +168,7 @@ Right/Left를 주입하고, 실제 가시 margin 착지·작업 완료·두 RAF�
 각 pan에서는 캡처 픽셀이 변하고 원위치에서는 **BGRA bytes가 초기와 완전히 동일**.
 소스/cache 불변, 기존 인증/탐색 차단/종료 gate도 통과했다.
 
-2026-09-21 마지막 단일 실행의 참고값(debug Rust service + release index/renderd):
+2026-09-21 E2b 추가 전 단일 실행의 참고값(debug Rust service + release index/renderd):
 
 | 관측 | 값 | 해석 한계 |
 |---|---:|---|
@@ -173,7 +178,8 @@ Right/Left를 주입하고, 실제 가시 margin 착지·작업 완료·두 RAF�
 | Rust service+renderd2 프로세스 RSS 합 | 약448MiB | 같은 시점의 참고값; 위 값과 합쳐 고유 메모리라 하지 않음 |
 
 캡처/readback도 작업 사이 부하를 더한다. 메모리는 Chromium의 `getAppMetrics()`와
-숫자만 읽는 `ps`의 **소유 Rust service 자손**을 구분한다. renderer Tab의 OS sandbox는
+숫자만 읽는 `ps`의 **소유 Rust service 자손**을 구분한다. E2b부터 별도 download helper도
+Rust RSS 합에 포함한다(이전 2개→3개). renderer Tab의 OS sandbox는
 실측 true, Browser main의 false는 정상 호스트 권한 경계다. 모든 프로세스가 sandboxed라고
 주장하지 않는다. [Electron 프로세스 지표](https://www.electronjs.org/docs/latest/api/structures/process-metric),
 [메모리 단위](https://www.electronjs.org/docs/latest/api/structures/memory-info).
@@ -186,9 +192,87 @@ E2/G1에 별도로 남긴다. 허용 오차를 키워 통과시킨 것이 아니
 
 최종 로그: `/private/tmp/floe-electron-layout-final.log`; 합성 캡처/metrics:
 `/var/folders/1v/1wct59qn2dbc457m8msmb5c80000gn/T/floe-electron-layout-cDb1lU/`.
-현재 Node unit12개 + 실제 pipe5개 =17개, Rust unit5·clippy·실제 빈 창 회귀는
+E2a 시점 Node unit12개 + 실제 pipe5개 =17개, Rust unit5·clippy·실제 빈 창 회귀는
 `sh tools/validate_electron.sh`로 재실행한다. WKWebView와 같은 조건의 대조,
 cold startup·반복 분포/peak·물리 입력·RHEL/ETX 수용은 아직 없다.
+
+### E2b: Rust 소유 staging과 native 파일 내보내기
+
+기존 웹의 PNG/설정 blob과 정확 clip·DRC review artifact POST 경로를 받는다. 정책은
+`getInitiatorOrigin()`의 소유 origin, 소유 WebContents, 허용 URL/MIME, redirect 없음으로
+검증한다. POST는 기존 웹의 `noopener` form을 숨김·동일 partition 창에서 **그대로**
+보낸다. 원래 POST/200/허용 MIME의 첫 응답만 받으며 GET·오류 응답·redirect·추가
+탐색을 차단하고 임시 창을 닫는다. 호스트가 cookie/CSRF/body를 읽어 재전송하지 않는다.
+DRC notes/waives의 실제 Electron 내보내기 수용은 아직 별도다(경로 단위 검사만 있음).
+
+흐름: Chromium 수신 → native Save 창 → Rust 목적지 측 복사·원자 게시.
+
+- `setSavePath`가 동기 `will-download` 안에서만 가능하므로 Rust helper가 생성한
+  새0700 staging 한 개를 미리 준비한다. **수신 완료 후** native Save 창을 띄운다.
+  대화상자의 이름은 경로/제어문자를 제거한 제안일 뿐이다.
+  종료 때 정리되는 앱 profile 내부/별칭 경로는 저장 대상으로 거부한다.
+- 사용자 선택 뒤 목적지 폴더에 새 staging을 만들고64KiB씩 복사한다. 파일/디렉터리
+  핸들·inode·regular/nlink·크기/시간 정보를 확인하고 기존 WK 호스트와 같은
+  `linkat` no-clobber +0600+fsync를 쓴다. 기존 파일/링크를 덮어쓰지 않는다.
+- 활성 수신 한 개, 파일512MiB, 수신300초 제한. 크기0(미상)는 수신 중 검사하며
+  polling 전에 일시 초과할 수 있다. 복사 중 두 벌이 있어 최대 약1GiB 디스크가
+  필요할 수 있다. 복사 시간은 파일 크기·저장장치에 비례하며 메모리는 파일 크기와
+  함께 늘지 않는다. 느린 fsync/read/write syscall 자체의 종료시간은 보장하지 않는다.
+- 중단/초과는 cancel, 자동 pause/resume·재요청 없음. 창 폐쇄만으로 다운로드가
+  멈춘다고 가정하지 않는다. 실제 `DownloadItem.cancel()` 뒤 terminal `done`을
+  기다리고 Rust EOF 정리를 한다.30초 내 producer 종료를 확인하지 못하면 staging을
+  명시적으로 보존하고 cleanup 실패로 보고한다. 늦은 Save 선택은 게시하지 않는다.
+- 게시 성공/실패와 cleanup 결과는 독립적이다. 모호한 결과는 목적지 확인 안내만
+  하고 재시도하지 않는다. 알려진 payload와 빈 디렉터리만 지우며, 예상 밖 내용은
+  보존한다. cleanup 미확인은 profile 보존·오류 종료다. 강제 crash의 정리/보안 삭제,
+  모든 로컬 동일 사용자 경로 경쟁에 대한 방어를 보장한다고 주장하지 않는다.
+- helper stdin/stdout은 전용 FIFO/Unix pipe다. 원자 게시·복사는 Rust에 남고
+  renderer Node/preload/native IPC 권한은 추가하지 않는다. 파이프 read-ahead가
+  `poll`에 다음 cancel을 숨기지 않게 unbuffered fd로 읽는다. E0 조기 취소도
+  typed `Cancelled`만143으로 매핑하며 실제 시작 오류를 취소로 위장하지 않는다.
+
+API 근거: [Electron DownloadItem](https://www.electronjs.org/docs/latest/api/download-item),
+[창/POST 처리](https://www.electronjs.org/docs/latest/api/web-contents).
+
+검증:
+
+- Rust helper14+service5 단위·clippy, Node34개(가짜 controller + 실제 pipe를 구별).
+  복사 중 취소/목적지 경합, symlink·기존 파일 불변, sparse512MiB 초과, 예상 밖 staging
+  내용/producer 미확인 시 보존, 늦은 chooser 결과, bounded 진단 이력을 검사한다.
+- 실제 Chromium blob: 새 합성 JSON 취소→0600 저장→동명 거부, 활성16MiB blob 수신 중
+  종료·terminal 확인·cleanup. `--smoke-download-test`는 경로 인자를 받지 않는다.
+- layout driver는 새 valmini의 pan 검사 뒤 별도 세션에서 정확 clip을 준비·승인하고
+  원래 인증 POST 한 번의 다운로드를 확인한다. GET popup과 잘못된 CSRF POST는
+  거부되며 원래 레이아웃/인증은 유지된다. clip 검사만 view budget256MiB로 설정해
+  기존 managed clip 어드미션을 만족시킨다. source/cache SHA-256은 전후 불변이다.
+- 위 Save 선택/취소는 **QA에서 destination callback을 주입**한 것이다. 실제 OS
+  Save 창 클릭·IME·ETX 파일 선택 수용을 뜻하지 않는다. 입력 파일 chooser와
+  프로그램식 clipboard, actual renderer crash/복구는 이 단계 완료에 포함하지 않는다.
+
+로그: `/private/tmp/floe-electron-export-final.log`,
+`/private/tmp/floe-electron-download-layout.log`, `floe-electron-download-post-final.log`.
+E2b pan 재검사는 픽셀 복귀를 통과했고
+Rust3 프로세스 합 약417MiB를 관찰했다. 동시 개발 부하·단일 실행이므로 이전 표와
+성능 우열을 판정하지 않는다.
+
+중간 실패도 남긴다: 재빌드 직후 pipe3개가10/30초 startup 제한을 넘었다
+(`floe-electron-download-gate-final.log`). 같은 바이너리를 재빌드/제한 변경 없이
+재검사하면11/11이 총0.43초에 끝났다(`floe-electron-download-warm-repeat.log`).
+macOS 새 바이너리 검사/동시 빌드 부하와 분리하지 못했으므로 원인을 확정하지 않으며,
+첫 기동 지연 수용은 여전히 남는다. 최종34개와 실제 blob gate는 제한 완화 없이 통과했다.
+
+기존 WKWebView의 실제 저장/취소/cleanup 실패·DRC/인증 복구·renderd 종료/재열기
+회귀(`sh tools/validate_desktop.sh`)는 exit0이다
+(`/private/tmp/floe-desktop-electron-download-regression.log`); 최종 공유 코드의 desktop
+38개·clippy도 통과했다. 두 Electron Rust 바이너리의 Linux musl `cargo check`도
+통과했으나 Linux 링크/실행 수용은 아니다.
+
+필수 전체 `sh tools/validate_rust.sh`는 **exit1**: GTK startup oracle30초 timeout
+(oracle-build9.875초는 성공). Electron 회귀와 별개인 기존 실패이며 timeout/오라클을
+완화하지 않았다. 로그 `/private/tmp/floe-webui-electron-download-full.log`.
+전체 green이라고 표기하지 않는다. 아직 남은 전체 goal은 G1/G4 폭넓은 실제 UI·동일
+조건 성능 대조, 현장 RHEL/ETX/Python-free Linux 수용, 배포 closure/고지·서명 및
+별도 승인으로 보류한 원격 단계 등이다. E2b 완료가 웹 전환 전체 완료는 아니다.
 
 ### 비교·배포 시 유지할 조건
 

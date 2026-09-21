@@ -823,8 +823,9 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   GTK/WebKit 같은 시스템 GUI 의존성이 기존 musl CLI/worker 번들에 섞이지
   않도록 한다. Python/PyGObject 없이 WebKitGTK를 쓰는 것은 별도 Rust 위젯
   UI 재작성과 다르지만, 그 런타임·라이선스·보안 업데이트 책임은 남는다.
-- Electron(선택, 후순위): 사용자 로컬 셸로만 검토, **현장 검증 전
-  제외**(§1). 라이선스는 파일 동봉으로 단정하지 않고 **배포 조건
+- Electron: 2026-09-21 최소 호스트 비교를 승인받아 macOS 구현/합성 검사를 진행한다
+  ([E0~E3](WEBUI_ELECTRON.ko.md)). RHEL/ETX도 비교 대상이나 **현장 검증 전 정식
+  배포는 제외**(§1). 라이선스는 파일 동봉으로 단정하지 않고 **배포 조건
   체크리스트**로 확인한다: 실제 번들의 Chromium/FFmpeg 빌드 구성,
   FFmpeg(LGPL) 동적 링크 여부와 대응 소스 제공 의무, 코덱 특허
   (H.264/AAC → codec-free 빌드 선택), 고지 파일(`LICENSE`·

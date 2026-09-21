@@ -10,6 +10,9 @@ const { once } = require('node:events');
 const { ServiceClient } = require('./service-client.cjs');
 const binary = process.env.FLOE_ELECTRON_SERVICE_BIN;
 if (!binary || !path.isAbsolute(binary)) throw new Error('Set an absolute FLOE_ELECTRON_SERVICE_BIN');
+for (const key of ['FLOE_INDEX_BIN', 'FLOE_RENDERD_BIN']) {
+  if (!process.env[key] || !path.isAbsolute(process.env[key]) || !fs.existsSync(process.env[key])) throw new Error('Set an existing absolute ' + key);
+}
 
 function deadline(promise, ms = 30000) {
   let timer;
@@ -17,6 +20,19 @@ function deadline(promise, ms = 30000) {
     timer = setTimeout(() => reject(new Error('Private service test timed out')), ms);
   })]).finally(() => clearTimeout(timer));
 }
+
+test('pipelined init and cancel remain visible to the real poll loop', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-pipeline-'));
+  const child = spawn(binary, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdout.on('data', () => {}); child.stderr.on('data', () => {});
+  const closed = once(child, 'close');
+  try {
+    child.stdin.write(JSON.stringify({ v: 1, args: ['--root', root] }) + '\ncancel\n');
+    const [code] = await deadline(closed);
+    assert.equal(code, 143);
+    assert.deepEqual(fs.readdirSync(root), []);
+  } finally { child.stdin.end(); await deadline(closed); fs.rmdirSync(root); }
+});
 
 test('real private pipe: explicit folder, one-use auth, confirmed shutdown, no files', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-ipc-'));

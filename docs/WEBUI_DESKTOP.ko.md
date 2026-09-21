@@ -85,10 +85,12 @@ macOS는 시스템 WKWebView 직접 바인딩을 선택했으며 이 선택으�
 호스트까지 Rust-only는 다른 조건이다. Electron 기반 VS Code의 요구사항에는
 RHEL 8·glibc 2.28이 있지만, 임의의 최신 Electron 번들 또는 ETX를 보장하지 않는다.
 선정 버전/전체 ELF 의존성·sandbox·다중 사용자 메모리·ETX 입력/합성을 검증한다.
-기존 후순위 결정은 Chromium이 ETX에서 느리다는 실측 결론이 아니다. 최소 호스트
+기존 후순위 결정은 Chromium이 ETX에서 느리다는 실측 결론이 아니다.
 사용자는 **Electron 최소 호스트 비교 진행**을 승인했다. 비교 후보를 구현하되
 정식 채택은 RHEL/ETX 실측 뒤 결정한다. macOS 호스트는 유지한다.
 별도 경계와 단계는 [Electron 비교 계획](WEBUI_ELECTRON.ko.md)에 기록한다.
+E0/E1 독립 창과 E2a pan·E2b 새 파일 내보내기는 macOS 합성 검사까지 진행했다.
+네이티브 Save 창 실조작·WK 동일 조건 성능 대조·현장 RHEL 수용은 별도로 남긴다.
 [Electron 플랫폼 지원](https://github.com/electron/electron#platform-support),
 [VS Code 요구사항](https://code.visualstudio.com/docs/supporting/requirements),
 [동봉 엔진 보안 업데이트 책임](https://www.electronjs.org/docs/latest/tutorial/security).

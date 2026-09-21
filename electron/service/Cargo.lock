@@ -192,6 +192,7 @@ version = "0.1.0"
 dependencies = [
  "floe-app",
  "floe-app-core",
+ "getrandom",
  "libc",
  "serde_json",
  "signal-hook",

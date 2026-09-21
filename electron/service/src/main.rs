@@ -6,9 +6,10 @@
 mod service;
 
 use floe_app::embedded::{validate_ready, Session};
-use floe_app_core::{Error, Result};
+use floe_app_core::{Error, ErrorKind, Result};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
+use std::os::fd::FromRawFd;
 use std::path::Path;
 use std::time::Duration;
 
@@ -107,7 +108,14 @@ fn run() -> Result<i32> {
     if std::env::args_os().len() != 1 || !private_pipe(0) || !private_pipe(1) {
         return Err(invalid());
     }
-    let mut input = std::io::stdin().lock();
+    // StdinLock can read ahead into its own buffer, hiding pipelined cancel
+    // bytes from poll(0). Keep the control stream unbuffered end to end.
+    let fd = unsafe { libc::fcntl(0, libc::F_DUPFD_CLOEXEC, 3) };
+    if fd < 0 {
+        return Err(invalid());
+    }
+    // SAFETY: a new uniquely owned CLOEXEC duplicate of the validated stdin.
+    let mut input = unsafe { std::fs::File::from_raw_fd(fd) };
     let request = read_json(&mut input)?;
     let mut session = Session::parse(&args(&request)?)?;
     if session.needs_initial_directory() {
@@ -163,7 +171,13 @@ fn run() -> Result<i32> {
             std::thread::sleep(Duration::from_millis(25));
         }
     }
-    let code = service.join()?;
+    let code = match service.join() {
+        Ok(code) => code,
+        // Cancellation before the HTTP loop is a typed Cancelled error. Do not
+        // turn unrelated IO/startup errors into successful cancellation.
+        Err(error) if closing && !bad_control && error.kind == ErrorKind::Cancelled => 143,
+        Err(error) => return Err(error),
+    };
     if bad_control {
         Err(invalid())
     } else {
