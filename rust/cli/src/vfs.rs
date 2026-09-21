@@ -6794,7 +6794,10 @@ pub fn plan_cmd(args: &[String]) {
         // --explain 1: one line per verdict inside the view (field
         // diagnosis 2026-09-10: which rule dropped a region)
         let explain = rest.iter().any(|(k, _)| k == "--explain");
-        popts.explain = explain;
+        // --density-probe 1: what the size cut dropped, per instance in
+        // view (density_probe); it reads the explain rows
+        let probe = rest.iter().any(|(k, _)| k == "--density-probe");
+        popts.explain = explain || probe;
         // --page-hairline 0|1: the page hairline policy of the request
         // (1 = the plain layout's cull, the default here; 0 = the
         // mask / jobdeck policy that keeps thin pages)
@@ -6831,6 +6834,12 @@ pub fn plan_cmd(args: &[String]) {
         // (ViewReq::shape_cut; the viewer sets it for thin keep)
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--shape-cut") {
             req.shape_cut = val != "0";
+        }
+        // --frames 0: no hierarchy outlines, as the viewer plans with its
+        // frames switch off (the walk then skips children without a
+        // visible layer)
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--frames") {
+            req.frames = val != "0";
         }
         // --summary-layers a/b,..: layers an occupancy summary draws
         // (OCCUPANCY_PLAN M3): their pages are skipped (verdict
@@ -6965,8 +6974,414 @@ pub fn plan_cmd(args: &[String]) {
         if explain {
             print_explain(&v, &req, &plan, cut, px);
         }
+        if probe {
+            // --density-storage 1: also scan the whole index for what the
+            // summaries would weigh (every cell, page and BVH node)
+            let storage = rest.iter().any(|(k, val)| k == "--density-storage" && val != "0");
+            density_probe(&v, &req, &plan, ms, storage);
+        }
         return;
     }
+}
+
+/// What a density pass fed by small per-(cell, layer) and per-page
+/// summaries would have to look up in one view (`floe-index plan
+/// --density-probe 1`, docs/CUT_DENSITY_DESIGN.ko.md §10). Diagnostic only.
+#[derive(Clone, Copy, Default)]
+struct DensityQ {
+    /// child placements the size cut omitted (an array is one record),
+    /// their member instances, and members x the visible layers the
+    /// child holds (one lookup each in a per-(cell, layer) table)
+    child_recs: u64,
+    child_members: u64,
+    child_layers: u64,
+    /// omitted children thinner than the hairline on one side only: long
+    /// on screen, one value per (cell, layer) would not place them
+    thin_members: u64,
+    /// pages the size / shape cut dropped, those wider than 4 px on
+    /// screen (one value would not place them), and their members
+    pages: u64,
+    wide_pages: u64,
+    wide16_pages: u64,
+    wide64_pages: u64,
+    page_members: u64,
+    /// page-BVH nodes cut whole and the pages below them
+    pbvh: u64,
+    pbvh_pages: u64,
+    /// child-BVH nodes cut whole, the placement records and members below
+    cbvh: u64,
+    cbvh_recs: u64,
+    cbvh_members: u64,
+    /// of the cut child-BVH nodes, those that carry a layer mask (the
+    /// larger ones: a per-(node, layer) value could stand for them)
+    cbvh_masked: u64,
+    /// working-set cells that keep no page and place nothing (every page
+    /// of theirs on a visible layer was cut): one lookup per (cell, visible
+    /// layer it holds) would replace their pages
+    allcut_cells: u64,
+    allcut_layers: u64,
+}
+
+impl DensityQ {
+    fn add(&mut self, o: &DensityQ, k: u64) {
+        self.child_recs = self.child_recs.saturating_add(o.child_recs.saturating_mul(k));
+        self.child_members = self.child_members.saturating_add(o.child_members.saturating_mul(k));
+        self.child_layers = self.child_layers.saturating_add(o.child_layers.saturating_mul(k));
+        self.thin_members = self.thin_members.saturating_add(o.thin_members.saturating_mul(k));
+        self.pages = self.pages.saturating_add(o.pages.saturating_mul(k));
+        self.wide_pages = self.wide_pages.saturating_add(o.wide_pages.saturating_mul(k));
+        self.wide16_pages = self.wide16_pages.saturating_add(o.wide16_pages.saturating_mul(k));
+        self.wide64_pages = self.wide64_pages.saturating_add(o.wide64_pages.saturating_mul(k));
+        self.page_members = self.page_members.saturating_add(o.page_members.saturating_mul(k));
+        self.pbvh = self.pbvh.saturating_add(o.pbvh.saturating_mul(k));
+        self.pbvh_pages = self.pbvh_pages.saturating_add(o.pbvh_pages.saturating_mul(k));
+        self.cbvh = self.cbvh.saturating_add(o.cbvh.saturating_mul(k));
+        self.cbvh_recs = self.cbvh_recs.saturating_add(o.cbvh_recs.saturating_mul(k));
+        self.cbvh_members = self.cbvh_members.saturating_add(o.cbvh_members.saturating_mul(k));
+        self.cbvh_masked = self.cbvh_masked.saturating_add(o.cbvh_masked.saturating_mul(k));
+        self.allcut_cells = self.allcut_cells.saturating_add(o.allcut_cells.saturating_mul(k));
+        self.allcut_layers = self.allcut_layers.saturating_add(o.allcut_layers.saturating_mul(k));
+    }
+}
+
+fn place_members(v: &floe_vfs::Vfs, pli: u64) -> u64 {
+    let h = v.ovm.place_head(pli);
+    match h.kind {
+        0 => 1,
+        1 => h.na as u64 * h.nb as u64,
+        _ => v.ovm.pts_ref(pli).map(|pr| pr.count as u64).unwrap_or(1),
+    }
+}
+
+fn visible_layers_of(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, lmask: u32) -> u64 {
+    if lmask == floe_ovm::LMASK_UNKNOWN {
+        return 1;
+    }
+    let bits = v.ovm.bitset(lmask);
+    bits.iter()
+        .zip(req.vis.iter())
+        .map(|(a, b)| (a & b).count_ones() as u64)
+        .sum::<u64>()
+        .max(1)
+}
+
+fn probe_xf_bbox(xf: &Xf, b: &BBox) -> BBox {
+    let a = xf.apply(b.x0, b.y0);
+    let c = xf.apply(b.x1, b.y1);
+    BBox { x0: a.0.min(c.0), y0: a.1.min(c.1), x1: a.0.max(c.0), y1: a.1.max(c.1) }
+}
+
+fn probe_inside(outer: &BBox, b: &BBox) -> bool {
+    outer.x0 <= b.x0 && outer.y0 <= b.y0 && b.x1 <= outer.x1 && b.y1 <= outer.y1
+}
+
+/// The explain rows of a plan, deduplicated per (owner, kind, id) and
+/// summed per owning working-set cell, times that cell's instances whose
+/// box meets the view: fully visible instances share one memoized total,
+/// an instance on the view's edge is walked member by member (axis-aligned
+/// grids clip their index ranges, only the edge members recurse). A row is
+/// counted for every visible instance of its owner (an upper bound: the
+/// planner judged it against the union of those instances' local views).
+fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hier::HierPlan, plan_ms: f64, storage: bool) {
+    use std::collections::{HashMap, HashSet};
+    let t0 = std::time::Instant::now();
+    let px = req.px_per_dbu;
+    let index: HashMap<(u32, u32), usize> =
+        plan.wcells.iter().enumerate().map(|(i, c)| (c.key, i)).collect();
+    let mut own = vec![DensityQ::default(); plan.wcells.len()];
+    let mut seen: HashSet<((u32, u32), &'static str, u64)> = HashSet::new();
+    let (mut child_cells, mut cut_pages) = (HashSet::new(), HashSet::new());
+    for r in &plan.explain {
+        let Some(&wi) = index.get(&r.owner) else { continue };
+        if !seen.insert((r.owner, r.kind, r.id)) {
+            continue;
+        }
+        let q = &mut own[wi];
+        match (r.kind, r.verdict) {
+            ("child", "omit_size") | ("child", "fold_size") => {
+                q.child_recs += 1;
+                q.child_members += r.members;
+                q.child_layers += r.members * visible_layers_of(v, req, v.ovm.cell_lmask_rec(r.cell));
+                child_cells.insert(r.cell);
+            }
+            ("child", "omit_hair") => q.thin_members += r.members,
+            ("page", "cull_size") | ("page", "cull_hair") => {
+                q.pages += 1;
+                q.page_members += r.members;
+                let side = (r.bbox.x1 - r.bbox.x0).max(r.bbox.y1 - r.bbox.y0) as f64 * px;
+                q.wide_pages += (side > 4.0) as u64;
+                q.wide16_pages += (side > 16.0) as u64;
+                q.wide64_pages += (side > 64.0) as u64;
+                cut_pages.insert(r.id);
+            }
+            ("pbvh", "cull_size") => {
+                q.pbvh += 1;
+                let mut stack = vec![r.id as u32];
+                while let Some(ni) = stack.pop() {
+                    let n = v.ovm.pbvh(ni);
+                    if n.leaf {
+                        q.pbvh_pages += n.count as u64;
+                    } else {
+                        stack.extend(n.first..n.first + n.count as u32);
+                    }
+                }
+            }
+            ("cbvh", "prune_size") => {
+                q.cbvh += 1;
+                q.cbvh_masked += (v.ovm.bvh(r.id as u32).lmask_rec != floe_ovm::LMASK_UNKNOWN) as u64;
+                let mut stack = vec![r.id as u32];
+                while let Some(ni) = stack.pop() {
+                    let n = v.ovm.bvh(ni);
+                    if n.leaf {
+                        for k in 0..n.count as u64 {
+                            q.cbvh_recs += 1;
+                            q.cbvh_members += place_members(v, n.first as u64 + k);
+                        }
+                    } else {
+                        stack.extend(n.first..n.first + n.count as u32);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (wi, c) in plan.wcells.iter().enumerate() {
+        if own[wi].pages > 0 && c.pages.is_empty() && c.insts.is_empty() {
+            own[wi].allcut_cells = 1;
+            own[wi].allcut_layers = visible_layers_of(v, req, v.ovm.cell_lmask_direct(c.key.0));
+        }
+    }
+    let rows_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let t1 = std::time::Instant::now();
+    let view = req.view;
+    let mut full: Vec<Option<DensityQ>> = vec![None; plan.wcells.len()];
+    // one fully visible instance of working-set cell wi
+    fn full_of(plan: &floe_vfs::hier::HierPlan, index: &HashMap<(u32, u32), usize>, own: &[DensityQ],
+               full: &mut Vec<Option<DensityQ>>, wi: usize) -> DensityQ {
+        if let Some(q) = full[wi] {
+            return q;
+        }
+        let mut q = own[wi];
+        for inst in &plan.wcells[wi].insts {
+            if let Some(&ci) = index.get(&inst.child) {
+                let sub = full_of(plan, index, own, full, ci);
+                q.add(&sub, inst.rep.members());
+            }
+        }
+        full[wi] = Some(q);
+        q
+    }
+    struct Walk<'a> {
+        v: &'a floe_vfs::Vfs,
+        plan: &'a floe_vfs::hier::HierPlan,
+        index: &'a HashMap<(u32, u32), usize>,
+        own: &'a [DensityQ],
+        full: Vec<Option<DensityQ>>,
+        view: BBox,
+        visits: u64,
+    }
+    impl Walk<'_> {
+        fn member(&mut self, ci: usize, xf: &Xf, total: &mut DensityQ) {
+            self.visits += 1;
+            let rb = self.v.ovm.cell_rbbox(self.plan.wcells[ci].key.0);
+            let wb = probe_xf_bbox(xf, &rb);
+            if rb.is_empty() || !wb.intersects(&self.view) {
+                return;
+            }
+            if probe_inside(&self.view, &wb) {
+                let q = full_of(self.plan, self.index, self.own, &mut self.full, ci);
+                total.add(&q, 1);
+            } else {
+                self.partial(ci, xf, total);
+            }
+        }
+        fn partial(&mut self, wi: usize, xf: &Xf, total: &mut DensityQ) {
+            total.add(&self.own[wi], 1);
+            for inst in &self.plan.wcells[wi].insts {
+                let Some(&ci) = self.index.get(&inst.child) else { continue };
+                match &inst.rep {
+                    Rep::One => {
+                        let m = xf.compose(&Xf::place(inst.x, inst.y, inst.rot, inst.flip));
+                        self.member(ci, &m, total);
+                    }
+                    Rep::Pts(pts) => {
+                        for &(dx, dy) in pts.iter() {
+                            let m = xf.compose(&Xf::place(inst.x + dx, inst.y + dy, inst.rot, inst.flip));
+                            self.member(ci, &m, total);
+                        }
+                    }
+                    Rep::Grid { na, nb, va, vb } => {
+                        let (na, nb) = (*na as i64, *nb as i64);
+                        let a = xf.apply_vec(va.0, va.1);
+                        let b = xf.apply_vec(vb.0, vb.1);
+                        let m0 = xf.compose(&Xf::place(inst.x, inst.y, inst.rot, inst.flip));
+                        let rb = self.v.ovm.cell_rbbox(self.plan.wcells[ci].key.0);
+                        let b0 = probe_xf_bbox(&m0, &rb);
+                        // axis-aligned in the world: clip index ranges; the
+                        // members strictly inside take the memoized total
+                        let aligned = (a.1 == 0 && b.0 == 0) || (a.0 == 0 && b.1 == 0);
+                        if !aligned || rb.is_empty() {
+                            for j in 0..nb {
+                                for i in 0..na {
+                                    let m = xf.compose(&Xf::place(
+                                        inst.x + i * va.0 + j * vb.0,
+                                        inst.y + i * va.1 + j * vb.1,
+                                        inst.rot,
+                                        inst.flip,
+                                    ));
+                                    self.member(ci, &m, total);
+                                }
+                            }
+                            continue;
+                        }
+                        // (step along x, count) and (step along y, count)
+                        let ((sx, nx, ix), (sy, ny, iy)) = if a.1 == 0 {
+                            ((a.0, na, 0usize), (b.1, nb, 1usize))
+                        } else {
+                            ((b.0, nb, 1usize), (a.1, na, 0usize))
+                        };
+                        let range = |lo: i64, hi: i64, v0: i64, v1: i64, step: i64, n: i64, inside: bool| -> (i64, i64) {
+                            // indices k with [lo + k*step, hi + k*step] meeting
+                            // (or inside) [v0, v1]
+                            if step == 0 {
+                                let ok = if inside { v0 <= lo && hi <= v1 } else { hi >= v0 && lo <= v1 };
+                                return if ok { (0, n) } else { (0, 0) };
+                            }
+                            let (mut k0, mut k1) = (0i64, n);
+                            let f = |num: i64, den: i64| -> i64 { num.div_euclid(den) };
+                            let c = |num: i64, den: i64| -> i64 { -((-num).div_euclid(den)) };
+                            if step > 0 {
+                                if inside {
+                                    k0 = k0.max(c(v0 - lo, step));
+                                    k1 = k1.min(f(v1 - hi, step) + 1);
+                                } else {
+                                    k0 = k0.max(c(v0 - hi, step));
+                                    k1 = k1.min(f(v1 - lo, step) + 1);
+                                }
+                            } else {
+                                let s = -step;
+                                if inside {
+                                    k0 = k0.max(c(hi - v1, s));
+                                    k1 = k1.min(f(lo - v0, s) + 1);
+                                } else {
+                                    k0 = k0.max(c(lo - v1, s));
+                                    k1 = k1.min(f(hi - v0, s) + 1);
+                                }
+                            }
+                            (k0.max(0), k1.min(n).max(k0.max(0)))
+                        };
+                        let (mx0, mx1) = range(b0.x0, b0.x1, self.view.x0, self.view.x1, sx, nx, false);
+                        let (my0, my1) = range(b0.y0, b0.y1, self.view.y0, self.view.y1, sy, ny, false);
+                        let (fx0, fx1) = range(b0.x0, b0.x1, self.view.x0, self.view.x1, sx, nx, true);
+                        let (fy0, fy1) = range(b0.y0, b0.y1, self.view.y0, self.view.y1, sy, ny, true);
+                        let inner = ((fx1 - fx0).max(0) * (fy1 - fy0).max(0)) as u64;
+                        if inner > 0 {
+                            let q = full_of(self.plan, self.index, self.own, &mut self.full, ci);
+                            total.add(&q, inner);
+                        }
+                        for ky in my0..my1 {
+                            for kx in mx0..mx1 {
+                                if kx >= fx0 && kx < fx1 && ky >= fy0 && ky < fy1 {
+                                    continue;
+                                }
+                                let mut k = [0i64; 2];
+                                k[ix] = kx;
+                                k[iy] = ky;
+                                let (i, j) = (k[0], k[1]);
+                                let m = xf.compose(&Xf::place(
+                                    inst.x + i * va.0 + j * vb.0,
+                                    inst.y + i * va.1 + j * vb.1,
+                                    inst.rot,
+                                    inst.flip,
+                                ));
+                                self.member(ci, &m, total);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut total = DensityQ::default();
+    let visits;
+    {
+        let top = index.get(&plan.top).copied();
+        let mut w = Walk { v, plan, index: &index, own: &own, full: std::mem::take(&mut full), view, visits: 0 };
+        if let Some(ti) = top {
+            w.member(ti, &Xf::identity(), &mut total);
+        }
+        visits = w.visits;
+    }
+    let walk_ms = t1.elapsed().as_secs_f64() * 1e3;
+    // what the summaries would weigh: one value per (cell, layer) a cell's
+    // subtree holds, a 4x4 grid of one byte per page
+    let (mut pairs, mut unknown, mut droppable) = (0u64, 0u64, 0u64);
+    let cut = req.cut_dbu.max(0);
+    let n_cells = if storage { v.ovm.n_cells } else { 0 };
+    for ci in 0..n_cells {
+        let lm = v.ovm.cell_lmask_rec(ci);
+        if lm == floe_ovm::LMASK_UNKNOWN {
+            unknown += 1;
+        } else {
+            pairs += v.ovm.bitset(lm).iter().map(|b| b.count_ones() as u64).sum::<u64>();
+        }
+        let rb = v.ovm.cell_rbbox(ci);
+        if !rb.is_empty() && rb.x1 - rb.x0 < cut && rb.y1 - rb.y0 < cut {
+            droppable += 1;
+        }
+    }
+    // per child-BVH node: one value per layer below it (small nodes keep no
+    // mask - counted with their cell's layers, an upper bound)
+    let (mut bvh_nodes, mut bvh_pairs, mut bvh_unknown, mut bvh_masked_pairs) = (0u64, 0u64, 0u64, 0u64);
+    for ci in 0..n_cells {
+        let c = v.ovm.cell(ci);
+        let cell_layers = match v.ovm.cell_lmask_rec(ci) {
+            floe_ovm::LMASK_UNKNOWN => 1,
+            lm => v.ovm.bitset(lm).iter().map(|b| b.count_ones() as u64).sum::<u64>(),
+        };
+        for ni in c.bvh_start..c.bvh_start + c.bvh_count {
+            bvh_nodes += 1;
+            match v.ovm.bvh(ni).lmask_rec {
+                floe_ovm::LMASK_UNKNOWN => {
+                    bvh_unknown += 1;
+                    bvh_pairs += cell_layers;
+                }
+                lm => {
+                    let n = v.ovm.bitset(lm).iter().map(|b| b.count_ones() as u64).sum::<u64>();
+                    bvh_pairs += n;
+                    bvh_masked_pairs += n;
+                }
+            }
+        }
+    }
+    let (mut exact_pages, mut thin_pages) = (0u64, 0u64);
+    for pi in 0..if storage { v.ovm.n_pages } else { 0 } {
+        let p = v.ovm.page(pi);
+        if p.lod != 0 {
+            continue;
+        }
+        exact_pages += 1;
+        if (p.max_min as i64) < cut {
+            thin_pages += 1;
+        }
+    }
+    println!(
+        "density_probe\tplan_ms={:.1}\twalk_ms={:.1}\twalk_visits={}\tpages_selected={}\t\
+         child_recs={}\tchild_members={}\tchild_layers={}\tthin_members={}\t\
+         cut_pages={}\twide_pages={}\twide16_pages={}\twide64_pages={}\tpage_members={}\tpbvh={}\tpbvh_pages={}\t\
+         cbvh={}\tcbvh_masked={}\tcbvh_recs={}\tcbvh_members={}\tallcut_cells={}\tallcut_layers={}\t\
+         distinct_child_cells={}\tdistinct_cut_pages={}\trows_ms={:.1}\t\
+         bvh_nodes={}\tbvh_layer_pairs={}\tbvh_masked_pairs={}\tbvh_unknown={}\tpbvh_nodes={}\t\
+         storage={}\tcells={}\tcell_layer_pairs={}\tlmask_unknown={}\tcells_under_cut={}\t\
+         exact_pages={}\tpages_min_under_cut={}",
+        plan_ms, walk_ms, visits, plan.pages.len(),
+        total.child_recs, total.child_members, total.child_layers, total.thin_members,
+        total.pages, total.wide_pages, total.wide16_pages, total.wide64_pages, total.page_members, total.pbvh, total.pbvh_pages,
+        total.cbvh, total.cbvh_masked, total.cbvh_recs, total.cbvh_members, total.allcut_cells, total.allcut_layers,
+        child_cells.len(), cut_pages.len(), rows_ms,
+        bvh_nodes, bvh_pairs, bvh_masked_pairs, bvh_unknown, v.ovm.n_pbvh,
+        storage as u8, v.ovm.n_cells, pairs, unknown, droppable, exact_pages, thin_pages,
+    );
 }
 
 /// `floe-index plan --explain 1`: after the JSON, one TSV line per

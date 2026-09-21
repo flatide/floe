@@ -605,11 +605,14 @@ pub struct HierOpts {
 /// the owning cell, the layer for pages, the record id (page id, BVH
 /// node, placement index), the box in cell-local dbu, its size
 /// metrics (page max_w / max_h / max_min, a box's w / h / min side)
-/// and the member count for pages.
+/// and the member count for pages. `owner` is the working-set cell
+/// whose walk judged it (a child row's `cell` is the CHILD), so a
+/// verdict can be multiplied by that cell's instances in view.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExplainRow {
     pub kind: &'static str,
     pub verdict: &'static str,
+    pub owner: WsKey,
     pub cell: u32,
     pub layer_idx: Option<u32>,
     pub id: u64,
@@ -1369,6 +1372,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         wash_px: opts.wash_px,
         explain: Vec::new(),
         explain_on: opts.explain,
+        explain_owner: (0, 0),
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         frame_cap,
         boxm: false,
@@ -1717,9 +1721,11 @@ struct Hier<'a> {
     /// one lattice pitch is under thin_demote_px on screen: keep a
     /// single representative per bin instead of the interval bounds
     thin_demote: bool,
-    /// HierOpts::explain: the rows, and whether to record them
+    /// HierOpts::explain: the rows, whether to record them, and the
+    /// working-set cell being expanded (ExplainRow::owner)
     explain: Vec<ExplainRow>,
     explain_on: bool,
+    explain_owner: WsKey,
     /// ViewReq::sub_cut_wash and its remaining walk budget
     sub_cut_wash: bool,
     wash_walk_budget: u64,
@@ -1806,6 +1812,7 @@ impl<'a> Hier<'a> {
 
     fn expand(&mut self, ci: u32, r: u32) {
         let key = (ci, r);
+        self.explain_owner = key;
         let boxes = self.lv.get(&key).expect("lv seeded").boxes.clone();
         let cell = self.v.cell(ci);
         let mut wc = WsCell {
@@ -3194,6 +3201,7 @@ impl<'a> Hier<'a> {
             self.explain.push(ExplainRow {
                 kind,
                 verdict,
+                owner: self.explain_owner,
                 cell,
                 layer_idx,
                 id,
