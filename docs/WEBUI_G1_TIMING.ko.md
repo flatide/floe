@@ -354,3 +354,53 @@ native oracle30초 timeout도 해결되지 않았다.
 남은 G1: 초기 가시성 실패를 재현·해결한 최종 matrix 재통과, 같은 조건의 입력→첫
 반응/완료·pacing/RSS/CPU 비교, 실제 물리 입력·compositor/ETX 표시, GTK 기준선이다.
 이번 해시 일치로 성능 동등성이나 RHEL 호환성, 전체 goal 완료를 주장하지 않는다.
+
+## 9. 초기 숨김 실패의 AppKit 대조
+
+2026-09-22, 로컬 macOS26.5.2. 합성 QA에만 `window_visibility::snapshot`을 추가해
+WebView 부착 직후, 첫 유효 frame, 실패 시점의 **소유 앱/창/view** 상태를 읽는다.
+타 앱의 창 목록·제목·화면 내용·PID·경로는 조회하지 않는다. 창 활성화/전면 배치,
+hidden override, reload, timeout 연장은 추가하지 않았다. 일반 실행에는 이 출력이 없다.
+
+새 합성 실행 `/private/tmp/floe-native-window-state.log`는 초기 대기에서 **exit1**이다.
+WebView 부착 직후와30초 단계 실패 직후가 모두 다음 상태였다:
+
+| 관측 | 값 |
+|---|---|
+| AppKit app active / hidden / unoccluded | false / false / false |
+| window visible / key / main / miniaturized / unoccluded | true / false / false / false / false |
+| WebView attached to owned window / is current content view | true / true |
+| view or ancestor hidden | false |
+| view bounds / visibleRect 크기 | 1200×850 / 1200×878 |
+| WebKit document.hidden / Canvas / 실제 frame ID | true / 1×1 / 없음 |
+
+`NSWindow.isVisible`은 다른 창에 가려져도 true일 수 있다. `occlusionState`의 Visible
+bit가 없으면 AppKit은 창 전체가 가려졌다고 판정한다.
+[Apple occlusionState](https://developer.apple.com/documentation/appkit/nswindow/occlusionstate-swift.property).
+따라서 **이번 실행**은 WebKit만 잘못 hidden을 반환한 경우가 아니다. WebView의
+부착 실패·명시적 NSView 숨김·최소화도 위 값과 맞지 않는다. `visibleRect`가 비어 있지
+않다는 사실을 실제 모니터 노출 증거로 사용하지 않는다. 어떤 창/Space/환경이 가렸는지,
+모든 과거 실패가 같은 원인인지는 이 진단으로 확정하지 않았다.
+
+현재 제품은 시작 시 활성화를 요청하지만 macOS14부터 활성화는 사용자 의도에 따른
+요청이며 항상 허용되는 것은 아니다. deprecated `activateIgnoringOtherApps`를
+반복 호출하거나 보안/포커스 정책을 우회하는 수정을 하지 않았다.
+[Apple AppKit14 release notes](https://developer.apple.com/documentation/macos-release-notes/appkit-release-notes-for-macos-14).
+이 공식 정책이 **이번 비활성 상태의 구체적인 시스템 원인**이라고 단정하지도 않는다.
+
+기존 `app.js`는 hidden 문서에 온 frame을 decode/paint하지 않고 discarded ACK한다.
+다시 보이면 기존 visibilitychange 경로가 연결을 새로 수립한다. 이번 작업에서는
+그 계약을 변경하지 않았다. 다음 실제 검사는 사용자가 해당 합성 Floe2 창을 직접
+선택하고 가리지 않는 조건, 또는 화면 제어 연결 복구 후 진행한다. 무인 반복 실행으로
+우연한 성공을 모으지 않으며 기존 실패는 matrix 미통과로 남긴다.
+
+검증: desktop42단위와 `native-confirmation-qa`를 포함한 all-target strict clippy/fmt
+통과. 실제 빈 AppKit 창의 음성/양성 대조도 **exit0**였다
+(`/private/tmp/floe-native-visibility-properties.log`): 진단 읽기가 숨겨진 창을
+드러내지 않음, 제품의 명시적 reveal 이후 isVisible 변화, 부착/content 동일성,
+기존 최소화/시트 보존 및 Return/Enter 기본취소를 확인했다. 이 테스트는 WebView,
+서비스, 설계/리뷰 파일을 사용하지 않으며 실제 사용자 키 입력의 수용은 아니다.
+
+이번 화면 제어 재확인도 `CUA_REPL_ENABLED_SURFACES is required`였다. G1 픽셀
+매트릭스 최종 재통과·성능/물리 입력 수용, 전체 Rust/web gate, RHEL/ETX 및 저장
+복구/배포 검증은 여전히 남는다. 제품 버전은0.12.185, 변경은 QA/진단뿐이다.

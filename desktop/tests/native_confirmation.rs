@@ -79,6 +79,13 @@ fn main() {
         !window.isVisible(),
         "negative control: new window is hidden"
     );
+    let before = window_visibility::snapshot(&app, &window, &window.contentView().unwrap());
+    assert!(before.contains("window_visible=false"));
+    assert!(before.contains("view_attached=true content_matches=true"));
+    assert!(
+        !window.isVisible(),
+        "diagnostic read must not reveal a window"
+    );
     window_visibility::reveal(&window);
     assert!(
         wait_for(&app, {
@@ -87,6 +94,11 @@ fn main() {
         }),
         "hidden window was not revealed"
     );
+    let after = window_visibility::snapshot(&app, &window, &window.contentView().unwrap());
+    assert!(after.contains("window_visible=true"));
+    // Occlusion/key/active are intentionally not inferred from isVisible.
+    // AppKit may decline activation when this test was launched in background.
+    assert!(after.contains("window_unoccluded="));
     window.miniaturize(None);
     assert!(
         wait_for(&app, {

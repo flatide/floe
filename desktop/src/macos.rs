@@ -1177,6 +1177,16 @@ impl Host {
             .set(web)
             .map_err(|_| Error::input("duplicate desktop WebView"))?;
         window.setTitle(ns_string!("floe2 — embedded preview"));
+        if self.ivars().smoke_layout {
+            println!(
+                "DESKTOP LAYOUT: native-load {}",
+                crate::window_visibility::snapshot(
+                    &NSApplication::sharedApplication(self.mtm()),
+                    window,
+                    self.ivars().web.get().unwrap()
+                )
+            );
+        }
         Ok(())
     }
     fn poll(&self) {
@@ -1437,6 +1447,14 @@ impl Host {
             if step == 60 && text.starts_with("layout-state ") {
                 if let Some(state) = crate::layout_qa::failure_state(&text) {
                     println!("{state}");
+                    println!(
+                        "DESKTOP LAYOUT: native-failure {}",
+                        crate::window_visibility::snapshot(
+                            &NSApplication::sharedApplication(host.mtm()),
+                            host.ivars().window.get().unwrap(),
+                            host.ivars().web.get().unwrap()
+                        )
+                    );
                 } else {
                     host.fail("invalid native layout failure state");
                 }
@@ -1479,6 +1497,16 @@ impl Host {
                 let phase = host.ivars().layout_qa_reports.get();
                 if let Some(metric) = crate::layout_qa::metric(&text, phase) {
                     println!("{metric}");
+                    if phase == 0 {
+                        println!(
+                            "DESKTOP LAYOUT: native-frame {}",
+                            crate::window_visibility::snapshot(
+                                &NSApplication::sharedApplication(host.mtm()),
+                                host.ivars().window.get().unwrap(),
+                                host.ivars().web.get().unwrap()
+                            )
+                        );
+                    }
                     host.ivars().layout_qa_reports.set(phase + 1);
                 } else {
                     host.fail("invalid native layout parity metrics");
