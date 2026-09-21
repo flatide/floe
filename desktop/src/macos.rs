@@ -907,11 +907,15 @@ impl Host {
             self.ivars().window.get().unwrap(),
             Some(&callback),
         );
+        // Do not intercept keys or send a click/approval. If the public default
+        // cannot be established, leave only Cancel available in this dialog.
+        if !crate::confirmation::set_cancel_default(&alert, &cancel) {
+            accept.setEnabled(false);
+            self.status("Confirmation keyboard default unavailable — cancel this dialog");
+        }
         if close_qa || download_qa {
-            // A first Cancel button can have Escape as its key equivalent while
-            // still being the Return default. Initial responder metadata is not
-            // the key-dispatch contract. Exercise Return on this exact QA sheet
-            // after presentation; no global keyboard event or forced button click.
+            // Exercise Return on this exact QA sheet after presentation; no
+            // global keyboard event or forced Cancel click can pass the gate.
             let host = self.retain();
             let dispatch = RcBlock::new(move |_: NonNull<NSTimer>| {
                 if host.ivars().smoke_step.get() != qa_step || !host.ivars().panel_open.get() {
@@ -934,7 +938,12 @@ impl Host {
                         &*cancel as *const NSButton as *const NSView,
                     )
                 });
-                eprintln!("[desktop-smoke] cancel metadata: return={return_key} initial={initial_cancel}; dispatching sheet-local Return");
+                let default_cancel = sheet.defaultButtonCell().is_some_and(|d| {
+                    cancel.cell().is_some_and(|c| {
+                        std::ptr::eq(&*d as *const NSButtonCell as *const NSCell, &*c)
+                    })
+                });
+                eprintln!("[desktop-smoke] cancel metadata: return={return_key} initial={initial_cancel} default={default_cancel}; dispatching sheet-local Return");
                 if let Some(event) = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
                     NSEventType::KeyDown, NSPoint::ZERO, NSEventModifierFlags::empty(), 0.0,
                     sheet.windowNumber(), None, ns_string!("\r"), ns_string!("\r"), false, 36) {

@@ -10,6 +10,7 @@ esac
 repo=$PWD
 (cd rust && cargo build --release --offline --locked -p floe-index -p floe-renderd)
 (cd desktop && cargo fmt -- --check && cargo test --offline --locked && cargo build --offline --locked)
+(cd desktop && cargo test --offline --locked --features native-confirmation-qa --test native-confirmation)
 node rust/web/ui/session-exit.test.cjs
 node desktop/ui/menu-action.test.cjs
 node desktop/ui/ime-probe.test.cjs

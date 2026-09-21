@@ -1252,3 +1252,71 @@ timeout 연장으로 게이트를 통과시키지 않는다.
 - CUA 재확인도 여전히 `CUA_REPL_ENABLED_SURFACES is required`였다. 실제 표시
   화면/물리 입력과 최종 native suite는 통과하지 않았다. 현장 RHEL/ETX,
   WebContent/저장 중 crash, IME/DPI/접근성, G1/G4·배포 수용은 계속 남는다.
+
+## 21. D2-mac 확인창의 Return 기본 취소 (2026-09-21)
+
+`72e28e7` 개발 앱의 새 빈 `--smoke-test-recovery` 실행은 인증·명시 GET 복구·
+새 문서/기존 저장소 확인까지 진행했다. 이후 강제 종료 **제안** 확인창에 보낸
+sheet-local Return이 처리되지 않아120초 후 **exit1**이었다. 최종 성공으로
+집계하지 않는다(`/private/tmp/floe-desktop-recovery-current.log`).
+
+동일 NSAlert 설정의 별도 AppKit 대조에서 비활성 창은 `initial responder=Cancel`,
+`default cell=Cancel`이어도 표시 후 키 equivalent가 빈 문자열이었다. 기존의
+`layout → Cancel Return 지정 → beginSheet`만으로 이 경로를 보장하지 못했다.
+`beginSheet` **이후** `NSWindow.defaultButtonCell`을 Cancel 셀로 다시 지정한 경우
+같은 Return·Enter 이벤트가 Cancel로 처리됐다. 이는 로컬 비활성 합성 창의 근거이며
+모든 macOS/활성 창에서 기존 물리 Return이 실패했다고 일반화하지 않는다.
+
+제품은 `confirmation::set_cancel_default`를 공통 확인창에 연결한다. AppKit의
+공개 default-button API만 쓰고 전역 키 후킹·자동 클릭·확인 승인·가시성 우회는
+없다. Cancel 초기 포커스와 승인 버튼의 Return equivalent 제거는 유지한다.
+예상 button cell/default를 설정할 수 없으면 승인 버튼을 비활성화하고 취소를
+안내한다. 정상 승인 동작은 계속 명시적인 사용자 선택만으로 실행한다.
+이미 vendored된 AppKit 바인딩의 NSCell/NSActionCell/NSButtonCell feature만 켰으며
+새 패키지·lock 변경·vendor 원본 수정은 없다.
+
+Apple은 defaultButtonCell을 창이 Return/Enter를 받았을 때 동작하는 대상으로
+설명한다. `NSAlert`의 버튼 순서·Cancel 이름에 따른 초기 key equivalent와
+창의 실제 키 전달을 구별한다.
+[defaultButtonCell](https://developer.apple.com/documentation/appkit/nswindow/defaultbuttoncell),
+[NSAlert 버튼](https://developer.apple.com/documentation/appkit/nsalert/addbutton(withtitle:)).
+
+검증은 다음처럼 분리한다.
+
+- `cargo test --offline --locked`: **36 unit 통과**. 일반 실행은 새 GUI 테스트를
+  빌드·실행하지 않는다. fmt 및 feature 포함 host clippy도 통과했다.
+  커밋 직전 같은 코드의 재검증도 exit0이다. 재검증 로그는
+  `/private/tmp/floe-cancel-final-{unit,native,clippy}.log`에 둔다.
+- 새 opt-in 실제 AppKit 테스트는 제품 helper를 그대로 사용한다. 새 빈 창만
+  만들고 WebView·서비스·파일·인증을 사용하지 않는다. **키 미입력 유지, Return
+  취소, Enter 취소** 3대조를 통과했다. 시간 초과 정리로 Cancel completion이
+  발생해도 그 전에 결과를 판정하므로 키 성공으로 둔갑하지 않는다.
+  로그: `/private/tmp/floe-desktop-cancel-native.log`.
+- 수정된 전체 호스트의 복구 QA는 `recovered → Return Cancel → session preserved`
+  를 확인했다. 이후 메뉴 단계는 `document.hidden`으로 **exit1**이다.
+  `/private/tmp/floe-desktop-cancel-recovery.log`. 이 부분 관측을 전체 복구 suite
+  통과로 보고하지 않는다. 숨김 메뉴 guard와 deadline은 변경하지 않았다.
+- Escape는 이 비활성 AppKit 실험에서 기존·수정 설정 모두 직접 sheet 이벤트로
+  처리되지 않았다. Escape/물리 키·포커스/접근성 수용은 미검증으로 남긴다.
+  이를 Return 테스트의 성공에 포함하거나 실제 사용자 환경의 Escape 회귀로
+  단정하지 않는다. 실제 화면 제어 연결도 아직 사용할 수 없다.
+- `--smoke-test-download-cancel`도 같은 제품 helper에서 Return 취소 후 전송/
+  staging 보존, 명시 Stop 후 payload 제거·완료 파일/세션 보존까지 확인했다.
+  이후 숨김 메뉴 실패로 **exit1**이므로 전체 다운로드 수용 통과가 아니다.
+  로그: `/private/tmp/floe-desktop-cancel-download.log`.
+- `sh tools/validate_rust.sh --only embedded_host,web_ui,validation_selector`는
+  **exit0 / ALL OK**. 기존 vendor 92개·원본 checksum 검사도 통과하고 검사 전용
+  `.venv` 링크는 제거했다. `floe-desktop-cancel-battery.log`에 기록하며 전체
+  배터리·native GUI 통과와 구별한다. dependency 경고는 계속 남는다.
+
+명시 네이티브 게이트(`tools/validate_desktop.sh`)에만 다음 실행을 배선했다.
+headless 배터리는 GUI를 암묵적으로 실행하지 않는다.
+
+```sh
+cd desktop
+cargo test --offline --locked --features native-confirmation-qa --test native-confirmation
+cargo clippy --offline --locked --all-targets --features native-confirmation-qa --no-deps -- -D warnings
+```
+
+나머지 G1/G4·WebContent/저장 중 crash·OS IME/DPI·RHEL/ETX·서명/공증 수용은
+그대로 남는다. 위 테스트는 실제 표시·물리 키보드 수용의 대체가 아니다.

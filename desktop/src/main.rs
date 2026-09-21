@@ -2,6 +2,8 @@
 
 mod actions;
 mod close_request;
+#[cfg(target_os = "macos")]
+mod confirmation;
 mod download_fs;
 mod download_qa;
 #[cfg(target_os = "macos")]

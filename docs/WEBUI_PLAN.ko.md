@@ -45,6 +45,8 @@ WebView의 세션 키·cookie 소실 QA를 분리하며 전체 storage/crash 수
 새 프레임을 검사한다(§19). 실제 WebContent 종료·저장 중 crash·디스크 장애는 별도다.
 macOS 메뉴의 숨김 상태를 버튼 비활성과 구분해 창 활성화를 안내한다(§20).
 최신 native 검사는 WebKit의 `document.hidden` 판정으로 실패했으며 GUI 수용은 남는다.
+확인창 표시 후 Cancel 기본 버튼을 명시해 비활성 합성 창의 Return/Enter 취소를
+검증했다(§21). 전체 복구 suite의 숨김 메뉴 실패와 물리 키 수용은 별도다.
 전체 배터리는 기존 오라클의 macOS 실행 timeout으로 미통과이며, 선택 재검증과
 구분한다([검증 기록](WEBUI_DESKTOP.ko.md#7-d2-mac-파일클립보드복구-2026-09-18)).
 §18의 전체 재시도도 새 test executable 기동 대기 누적으로 중단해 전역 완료는 남아 있다.
