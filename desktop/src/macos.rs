@@ -1,6 +1,7 @@
 //! The only native FFI boundary. All AppKit/WebKit objects stay on the main
 //! thread; delegates and completion blocks are retained through their use.
 use crate::actions::Action;
+use crate::recovery::{Event as RecoveryEvent, Recovery};
 use crate::service::Service;
 use crate::transfers::{self, PendingFile};
 use block2::{DynBlock, RcBlock};
@@ -42,12 +43,11 @@ struct State {
     panel_open: Cell<bool>,
     downloads: RefCell<BTreeMap<usize, Download>>,
     transfer_view: RefCell<Option<TransferView>>,
-    recovery_probe: Cell<bool>,
-    recovering: Cell<bool>,
-    probe_next: Cell<Instant>,
-    probe_count: Cell<u8>,
+    recovery: RefCell<Recovery>,
+    navigation: RefCell<Option<Retained<WKNavigation>>>,
     smoke: bool,
     smoke_notices: bool,
+    smoke_recovery: bool,
     smoke_step: Cell<u8>,
     evaluating: Cell<bool>,
     smoke_probe: RefCell<String>,
@@ -130,7 +130,7 @@ define_class!(
                 // offscreen context keeps the original navigation until its
                 // response, never a reconstructed request or credential bridge.
                 let post = unsafe { action.request().HTTPMethod().is_some_and(|m| m.to_string() == "POST") };
-                if self.ivars().panel_open.get() || !self.ivars().downloads.borrow().is_empty()
+                if self.ivars().panel_open.get() || self.ivars().recovery.borrow().busy() || !self.ivars().downloads.borrow().is_empty()
                     || self.ivars().transfer_view.borrow().is_some()
                     || (post && unsafe { action.targetFrame().is_some() }) {
                     decision.call((WKNavigationActionPolicy::Cancel,));
@@ -201,6 +201,10 @@ define_class!(
         }
         #[unsafe(method(webView:navigationResponse:didBecomeDownload:))]
         fn response_download(&self, web: &WKWebView, response: &WKNavigationResponse, download: &WKDownload) {
+            if !self.is_transfer_view(web) {
+                unsafe { download.cancel(None); }
+                return;
+            }
             if !self.transfer_response(web, response) || self.ivars().panel_open.get() || !self.ivars().downloads.borrow().is_empty() {
                 unsafe { download.cancel(None); }
                 self.clear_transfer_view();
@@ -212,28 +216,26 @@ define_class!(
             unsafe { download.setDelegate(Some(ProtocolObject::from_ref(self))); }
         }
         #[unsafe(method(webView:didFailProvisionalNavigation:withError:))]
-        fn failed_load(&self, web: &WKWebView, _nav: Option<&WKNavigation>, _error: &NSError) {
-            if self.is_transfer_view(web) {
-                // Navigation cancellation when becoming a download is expected.
-                if !self.ivars().transfer_view.borrow().as_ref().is_some_and(|v| v.downloading) {
-                    self.clear_transfer_view();
-                    self.status("Download navigation failed — explicit retry only");
-                }
-                return;
-            }
-            // NSError can contain the bootstrap URL: never print it.
-            self.fail("WebView load failed; no request was replayed");
+        fn failed_load(&self, web: &WKWebView, nav: Option<&WKNavigation>, _error: &NSError) {
+            self.navigation_failed(web, nav);
+        }
+        #[unsafe(method(webView:didFailNavigation:withError:))]
+        fn failed_committed_load(&self, web: &WKWebView, nav: Option<&WKNavigation>, _error: &NSError) {
+            self.navigation_failed(web, nav);
         }
         #[unsafe(method(webView:didFinishNavigation:))]
-        fn loaded(&self, _web: &WKWebView, _nav: Option<&WKNavigation>) {
-            if self.ivars().recovering.replace(false) {
-                self.ivars().probe_count.set(0);
-                self.ivars().recovery_probe.set(true);
-            }
+        fn loaded(&self, web: &WKWebView, nav: Option<&WKNavigation>) {
+            self.navigation_loaded(web, nav);
         }
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
-        fn web_crashed(&self, _web: &WKWebView) {
-            self.fail("WebView process ended — use floe2 menu: Recover View or Force End Session");
+        fn web_crashed(&self, web: &WKWebView) {
+            if self.is_transfer_view(web) {
+                self.cancel_downloads();
+                self.status("Download WebView ended — partial file discarded; explicit retry only");
+            } else if self.is_main_view(web) {
+                self.cancel_downloads();
+                self.fail("WebView process ended — use floe2 menu: Recover View or Force End Session");
+            }
         }
     }
     unsafe impl WKDownloadDelegate for Host {
@@ -250,7 +252,8 @@ define_class!(
         #[unsafe(method(downloadDidFinish:))]
         fn download_finished(&self, download: &WKDownload) {
             let slot = self.ivars().downloads.borrow_mut().remove(&(download as *const _ as usize));
-            if let Some(file) = slot.and_then(|s| s.file) {
+            let Some(slot) = slot else { return; };
+            if let Some(file) = slot.file {
                 match file.publish() {
                     Ok(()) => self.status("Download saved (new file; existing files unchanged)"),
                     Err(_) => self.status("Download publication not confirmed — check destination; no automatic retry"),
@@ -261,7 +264,8 @@ define_class!(
         #[unsafe(method(download:didFailWithError:resumeData:))]
         fn download_failed(&self, download: &WKDownload, _error: &NSError, _resume: Option<&NSData>) {
             let slot = self.ivars().downloads.borrow_mut().remove(&(download as *const _ as usize));
-            if slot.is_some() { self.status("Download failed — partial file discarded; explicit retry only"); }
+            if slot.is_none() { return; }
+            self.status("Download failed — partial file discarded; explicit retry only");
             self.clear_transfer_view();
         }
     }
@@ -274,7 +278,7 @@ define_class!(
         #[unsafe(method(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:))]
         fn open_file(&self, _web: &WKWebView, parameters: &WKOpenPanelParameters,
             frame: &WKFrameInfo, completion: &DynBlock<dyn Fn(*mut NSArray<NSURL>)>) {
-            if !self.owned_frame(frame) || unsafe { parameters.allowsDirectories() }
+            if !self.owned_frame(frame) || self.ivars().recovery.borrow().busy() || unsafe { parameters.allowsDirectories() }
                 || self.ivars().panel_open.replace(true) {
                 completion.call((std::ptr::null_mut(),)); return;
             }
@@ -320,6 +324,49 @@ define_class!(
 );
 
 impl Host {
+    fn is_main_view(&self, web: &WKWebView) -> bool {
+        self.ivars()
+            .web
+            .get()
+            .is_some_and(|main| std::ptr::eq(&**main, web))
+    }
+    fn is_current_navigation(&self, web: &WKWebView, nav: Option<&WKNavigation>) -> bool {
+        self.is_main_view(web)
+            && nav.is_some_and(|nav| {
+                self.ivars()
+                    .navigation
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|current| std::ptr::eq(&**current, nav))
+            })
+    }
+    fn navigation_failed(&self, web: &WKWebView, nav: Option<&WKNavigation>) {
+        if self.is_transfer_view(web) {
+            // Becoming a download cancels its navigation normally. A retired
+            // transfer's late callback must not disturb a newer transfer/view.
+            if !self
+                .ivars()
+                .transfer_view
+                .borrow()
+                .as_ref()
+                .is_some_and(|v| v.downloading)
+            {
+                self.clear_transfer_view();
+                self.status("Download navigation failed — explicit retry only");
+            }
+        } else if self.is_current_navigation(web, nav) || (self.is_main_view(web) && nav.is_none())
+        {
+            // NSError can contain the bootstrap URL: never inspect/print it.
+            self.fail(
+                "WebView load failed — use Recover View or Force End Session; no request replayed",
+            );
+        }
+    }
+    fn navigation_loaded(&self, web: &WKWebView, nav: Option<&WKNavigation>) {
+        if self.is_current_navigation(web, nav) {
+            self.ivars().recovery.borrow_mut().loaded(Instant::now());
+        }
+    }
     fn new_transfer_view(
         &self,
         web: &WKWebView,
@@ -344,6 +391,7 @@ impl Host {
             };
         if !valid
             || self.ivars().panel_open.get()
+            || self.ivars().recovery.borrow().busy()
             || !self.ivars().downloads.borrow().is_empty()
             || self.ivars().transfer_view.borrow().is_some()
         {
@@ -413,6 +461,7 @@ impl Host {
         service: Service,
         smoke: bool,
         smoke_notices: bool,
+        smoke_recovery: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(State {
             service: RefCell::new(service),
@@ -423,12 +472,11 @@ impl Host {
             panel_open: Cell::new(false),
             downloads: RefCell::new(BTreeMap::new()),
             transfer_view: RefCell::new(None),
-            recovery_probe: Cell::new(false),
-            recovering: Cell::new(false),
-            probe_next: Cell::new(Instant::now()),
-            probe_count: Cell::new(0),
+            recovery: RefCell::new(Recovery::default()),
+            navigation: RefCell::new(None),
             smoke,
             smoke_notices,
+            smoke_recovery,
             smoke_step: Cell::new(0),
             evaluating: Cell::new(false),
             smoke_probe: RefCell::new(String::new()),
@@ -438,6 +486,8 @@ impl Host {
         unsafe { msg_send![super(this), init] }
     }
     fn fail(&self, message: &'static str) {
+        self.ivars().recovery.borrow_mut().fail();
+        self.ivars().navigation.borrow_mut().take();
         *self.ivars().failure.borrow_mut() = Some(message);
         self.status(message);
         if self.ivars().smoke {
@@ -450,14 +500,20 @@ impl Host {
         }
     }
     fn menu_action(&self, action: Action) {
-        if self.ivars().panel_open.get() || self.ivars().recovering.get() {
+        if self.ivars().panel_open.get() || self.ivars().recovery.borrow().busy() {
             return;
         }
         let Some(web) = self.ivars().web.get() else {
             return;
         };
         let host = self.retain();
+        let epoch = self.ivars().recovery.borrow().epoch();
         let callback = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            if host.ivars().recovery.borrow().epoch() != epoch
+                || host.ivars().failure.borrow().is_some()
+            {
+                return;
+            }
             // Never expose arbitrary JS values or NSError (may contain URLs).
             let marker = if error.is_null() {
                 unsafe { value.as_ref() }
@@ -623,24 +679,44 @@ impl Host {
         );
     }
     fn recover(&self) {
+        if self.ivars().recovery.borrow().busy() {
+            self.status("Recovery already in progress — wait, or use Force End Session");
+            return;
+        }
         if !self.ivars().downloads.borrow().is_empty()
             || self.ivars().transfer_view.borrow().is_some()
         {
             self.status("Finish the download before recovering the view");
             return;
         }
-        self.confirm("Recover View?", "Reload the current local session. Unsaved editor text and captured pixels will be lost. Earlier approved saves may already have completed. Existing receipt records are checked, not automatically replayed. If session storage was lost, restart the app; the one-use login is never replayed.", "Reload View", |host| {
-            if let (Some(web), Some(origin)) = (host.ivars().web.get(), host.ivars().origin.get()) {
-                // Explicit GET of a credential-free root, using the SAME WebView
-                // and data store (sessionStorage/cookies). Never reload bootstrap.
-                let url = NSURL::URLWithString(&NSString::from_str(&format!("{origin}/"))).unwrap();
-                host.ivars().recovering.set(true);
-                host.ivars().recovery_probe.set(false);
-                unsafe { web.loadRequest(&NSURLRequest::requestWithURL(&url)); }
-                *host.ivars().failure.borrow_mut() = None;
-                host.status("Recovering view — check connection and any pending save receipts");
+        self.confirm("Recover View?", "Reload the current local session. Unsaved editor text and captured pixels will be lost. Earlier approved saves may already have completed. Existing receipt records are checked, not automatically replayed. If session storage was lost, restart the app; the one-use login is never replayed.", "Reload View", |host| host.start_recovery());
+    }
+    fn start_recovery(&self) {
+        if let (Some(web), Some(origin)) = (self.ivars().web.get(), self.ivars().origin.get()) {
+            if self
+                .ivars()
+                .recovery
+                .borrow_mut()
+                .begin(Instant::now())
+                .is_none()
+            {
+                self.status(
+                    "Recovery already in progress or unavailable — use Force End Session if needed",
+                );
+                return;
             }
-        });
+            // Explicit GET of a credential-free root, using the SAME WebView
+            // and data store. Never reload bootstrap, POST, or an approval.
+            let url = NSURL::URLWithString(&NSString::from_str(&format!("{origin}/"))).unwrap();
+            let navigation = unsafe { web.loadRequest(&NSURLRequest::requestWithURL(&url)) };
+            let started = navigation.is_some();
+            *self.ivars().navigation.borrow_mut() = navigation;
+            if started {
+                self.status("Recovering view — check connection and any pending save receipts");
+            } else {
+                self.fail("Recovery could not start — use Recover View or Force End Session; no request replayed");
+            }
+        }
     }
     fn force_close(&self) {
         self.confirm("Force End Session?", "Use only when the normal End session dialog is unavailable. Unsaved drafts and in-progress downloads will be discarded. Earlier approved writes may have completed: check the files before retrying. No save will be approved or replayed.", "End Session", |host| {
@@ -662,7 +738,7 @@ impl Host {
         if self.ivars().panel_open.get() {
             return;
         }
-        if self.ivars().failure.borrow().is_some() {
+        if self.ivars().failure.borrow().is_some() || self.ivars().recovery.borrow().busy() {
             self.force_close();
             return;
         }
@@ -673,7 +749,13 @@ impl Host {
             // Only opens the existing cancel-default dialog. It cannot approve
             // a save, select a file, or authorize the DELETE by itself.
             let host = self.retain();
+            let epoch = self.ivars().recovery.borrow().epoch();
             let callback = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+                if host.ivars().recovery.borrow().epoch() != epoch
+                    || host.ivars().failure.borrow().is_some()
+                {
+                    return;
+                }
                 let opened = unsafe { value.as_ref() }
                     .and_then(|v| v.downcast_ref::<NSString>())
                     .is_some_and(|s| s.to_string() == "opened");
@@ -722,7 +804,8 @@ impl Host {
             window.setContentView(Some(&web));
             let url = NSURL::URLWithString(&NSString::from_str(&ready.url))
                 .ok_or_else(|| Error::input("invalid desktop launch URL"))?;
-            web.loadRequest(&NSURLRequest::requestWithURL(&url));
+            *self.ivars().navigation.borrow_mut() =
+                web.loadRequest(&NSURLRequest::requestWithURL(&url));
             web
         };
         self.ivars()
@@ -743,12 +826,8 @@ impl Host {
             self.clear_transfer_view();
             self.status("Download response timed out — explicit retry only");
         }
-        if self.ivars().recovery_probe.get()
-            && !self.ivars().evaluating.get()
-            && Instant::now() >= self.ivars().probe_next.get()
-        {
-            self.probe_recovery();
-        }
+        let event = self.ivars().recovery.borrow_mut().poll(Instant::now());
+        self.recovery_event(event);
         let ready = self.ivars().service.borrow().ready.try_recv();
         if let Ok(ready) = ready {
             if self.load(ready).is_err() {
@@ -790,52 +869,60 @@ impl Host {
                     self.status("Download exceeded 512 MiB — cancelled, destination unchanged");
                 }
             }
-            if self.ivars().smoke {
+            if self.ivars().smoke && !self.ivars().recovery.borrow().busy() {
                 self.smoke_tick();
             }
         }
     }
-    fn probe_recovery(&self) {
-        self.ivars()
-            .probe_next
-            .set(Instant::now() + Duration::from_millis(500));
-        let count = self.ivars().probe_count.get() + 1;
-        self.ivars().probe_count.set(count);
-        if count > 60 {
-            self.ivars().recovery_probe.set(false);
-            self.status("Recovery not confirmed — inspect connection/receipts or restart; no write replayed");
-            return;
+    fn recovery_event(&self, event: RecoveryEvent) {
+        match event {
+            RecoveryEvent::None => (),
+            RecoveryEvent::Probe(epoch) => self.probe_recovery(epoch),
+            RecoveryEvent::Ready => {
+                *self.ivars().failure.borrow_mut() = None;
+                self.status("floe2 — authenticated page reloaded; check frame and save receipts");
+            }
+            RecoveryEvent::ReadyHidden => {
+                *self.ivars().failure.borrow_mut() = None;
+                self.status("Authenticated page reloaded — activate this window; check frame and save receipts");
+            }
+            RecoveryEvent::Hidden => {
+                self.status("View reloaded but hidden — activate this window to resume frames")
+            }
+            RecoveryEvent::TimedOut => {
+                self.fail("Recovery not confirmed within 30 s — check connection/receipts or restart; no write replayed");
+                if let Some(web) = self.ivars().web.get() {
+                    unsafe {
+                        web.stopLoading();
+                    }
+                }
+            }
         }
+    }
+    fn probe_recovery(&self, epoch: u64) {
         let Some(web) = self.ivars().web.get() else {
             return;
         };
-        self.ivars().evaluating.set(true);
         let host = self.retain();
         let callback = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-            host.ivars().evaluating.set(false);
-            let marker = unsafe { value.as_ref() }
-                .and_then(|v| v.downcast_ref::<NSString>())
-                .map(|s| s.to_string());
-            if !error.is_null() {
-                return;
-            }
-            match marker.as_deref() {
-                Some("ready") => {
-                    host.ivars().recovery_probe.set(false);
-                    host.status(
-                        "floe2 — authenticated page reloaded; check frame and save receipts",
-                    );
-                }
-                Some("hidden") => {
-                    host.status("View reloaded but hidden — activate this window to resume frames")
-                }
-                _ => (),
-            }
+            let marker = if error.is_null() {
+                unsafe { value.as_ref() }
+                    .and_then(|v| v.downcast_ref::<NSString>())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            };
+            let event =
+                host.ivars()
+                    .recovery
+                    .borrow_mut()
+                    .reply(epoch, Instant::now(), marker.as_deref());
+            host.recovery_event(event);
         });
         // Fixed markers only. No auth, paths, note text or clipboard contents
         // leave the WebView. A fresh page's enabled End session follows auth.
         unsafe {
-            web.evaluateJavaScript_completionHandler(&NSString::from_str("(()=>{if(document.hidden)return 'hidden';const b=document.getElementById('logout');return b&&!b.disabled?'ready':'waiting';})()"), Some(&callback));
+            web.evaluateJavaScript_completionHandler(&NSString::from_str("(()=>{const b=document.getElementById('logout');if(b&&!b.disabled)return document.hidden?'ready-hidden':'ready';return document.hidden?'hidden':'waiting';})()"), Some(&callback));
         }
     }
     fn smoke_tick(&self) {
@@ -862,6 +949,9 @@ impl Host {
             9 => "document.getElementById('notice-page-status').textContent.startsWith('Page 1 / ')&&document.getElementById('notice-text').textContent.length>0?'notice-read':'wait'",
             10 => "document.getElementById('notice-list-status').textContent.startsWith('65–128 of ')&&document.getElementById('notice-text').textContent===''?'notice-page':'wait'",
             11 => include_str!("../ui/ime-probe.js"),
+            12 => concat!("(", include_str!("../ui/recovery-probe.js"), ")('arm')"),
+            13 => concat!("(", include_str!("../ui/recovery-probe.js"), ")('check')"),
+            14 => "document.getElementById('browse-dialog').hidden?'dismissed':'wait'",
             _ => { self.ivars().evaluating.set(false); return; },
         };
         let host = self.retain();
@@ -894,6 +984,9 @@ impl Host {
                     "notice-page",
                     "ime-ok",
                     "ime-failed",
+                    "armed",
+                    "recovered",
+                    "recovery-failed",
                     "wait",
                 ]
                 .contains(&text.as_str())
@@ -916,7 +1009,34 @@ impl Host {
                     host.eval("document.getElementById('browse-close').click()");
                     1
                 }
-                (1, "dismissed") => {
+                (1, "dismissed") if host.ivars().smoke_recovery => 12,
+                (12, "armed") => {
+                    let old = host.ivars().navigation.borrow().clone();
+                    host.start_recovery();
+                    let web = host.ivars().web.get().unwrap();
+                    // Deterministic late-callback injection, not a process kill.
+                    // Retaining old prevents pointer reuse by the new request.
+                    if let Some(old) = old {
+                        host.navigation_loaded(web, Some(&old));
+                        host.navigation_failed(web, Some(&old));
+                    } else {
+                        host.fail("native recovery QA had no initial navigation");
+                    }
+                    let event = host.ivars().recovery.borrow_mut().poll(Instant::now());
+                    if event != RecoveryEvent::None || !host.ivars().recovery.borrow().busy() {
+                        host.fail("retired navigation changed a newer recovery attempt");
+                    }
+                    13
+                }
+                (12 | 13, "recovery-failed") => {
+                    host.fail("native recovery document/storage check failed");
+                    step
+                }
+                (13, "recovered") => {
+                    host.eval("document.getElementById('browse-close').click()");
+                    14
+                }
+                (1 | 14, "dismissed") => {
                     host.menu_action(Action::About);
                     2
                 }
@@ -1000,7 +1120,12 @@ fn finish_before_startup_modal(app: &NSApplication) {
     }
 }
 
-pub fn run(mut session: Session, smoke: bool, smoke_notices: bool) -> Result<i32> {
+pub fn run(
+    mut session: Session,
+    smoke: bool,
+    smoke_notices: bool,
+    smoke_recovery: bool,
+) -> Result<i32> {
     if !objc2::available!(macos = 12.0) {
         return Err(Error::input("embedded preview requires macOS 12 or later"));
     }
@@ -1033,7 +1158,13 @@ pub fn run(mut session: Session, smoke: bool, smoke_notices: bool) -> Result<i32
             .ok_or_else(|| Error::input("no local working folder selected"))?;
         session.set_initial_directory(Path::new(&folder.to_string()))?;
     }
-    let host = Host::new(mtm, Service::start(session)?, smoke, smoke_notices);
+    let host = Host::new(
+        mtm,
+        Service::start(session)?,
+        smoke,
+        smoke_notices,
+        smoke_recovery,
+    );
     // SAFETY: Owned window never auto-releases on close. The main-thread host
     // remains retained until after timer invalidation and delegate detachment.
     let window = unsafe {
@@ -1188,6 +1319,9 @@ pub fn run(mut session: Session, smoke: bool, smoke_notices: bool) -> Result<i32
             println!(
                 "DESKTOP NOTICE UI: OK (packaged list; verified text read; next catalogue page)"
             );
+        }
+        if smoke_recovery {
+            println!("DESKTOP RECOVERY: OK (explicit root GET; retained session storage; retired navigation ignored; new authenticated document; no bootstrap replay)");
         }
     }
     Ok(result)

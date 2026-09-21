@@ -615,3 +615,65 @@ clip은 exact/full-depth 계획의 페이지를 배치로 순회하므로 작은
 입력, DRC·crash/storage 확대 장애 수용, RHEL 8.6/8.10 ETX 호스트, 서명/공증,
 G1/G4 및 Python-free Linux 검증은 남는다. 원격 공유·CI·열린 색인 hot-reload
 보류를 변경하지 않았다.
+
+## 11. D2-mac 복구 deadline·오래된 콜백 격리 (2026-09-21)
+
+§7 복구 코드에서 확인한 결함은 세 가지다. 로딩 실패는 `recovering`을 해제하지
+않았고, 60회 probe 제한은 navigation 완료 이후에만 시작했다. JS completion이
+아예 오지 않으면 다음 probe도 시작되지 않아 제한이 작동하지 않았다. 또한
+동일 delegate를 사용하는 다운로드용 WebView의 종료를 주 화면 실패로 취급했고,
+이전 navigation/전송의 늦은 callback이 새 상태를 변경할 여지가 있었다.
+
+현재는 다음 규칙을 사용한다.
+
+- 명시적 확인 후 시작한 **한 번의 복구 전체**(GET 로딩 + 인증 페이지 확인)를
+  30초로 제한한다. 동시에 하나만 실행하며 JS 응답이 없어도 timer가 종료한다.
+  OS가 앱을 정지시키면 실행 자체를 보장하지는 않지만, 재개 후 늦은 성공 응답도
+  deadline 검사로 거절한다. 실패/만료는 busy 상태를 해제해 명시적 재시도 또는
+  Force End Session을 사용할 수 있게 한다. 자동 reload/retry는 없다.
+- 주 화면 WebView와 현재 `WKNavigation`의 identity를 확인한다. navigation은
+  보관해 포인터 재사용과 혼동하지 않으며, JS completion은 별도 복구 epoch로
+  묶는다. 이전 성공/실패는 새 복구를 완료시키거나 취소시키지 않는다. 실패는
+  provisional과 committed 두 callback에서 처리한다.
+  [Apple의 navigation 오류·content process 종료 구분](https://developer.apple.com/documentation/webkit/wknavigationdelegate).
+- 인증된 페이지가 확인될 때만 이전 오류를 해제한다. 숨긴 창에서도 인증이
+  확인되면 복구 대기는 끝내되, 창 활성화 후 **프레임·저장 receipt를 별도로 확인**
+  하라고 표시한다. 페이지 인증을 렌더/DRC 저장 성공으로 확대하지 않는다.
+- 다운로드 WebView 오류는 전송에만 적용한다. 주 화면 process 종료는 소유 중인
+  전송을 취소하고 오류를 표시한다. 취소된 전송의 늦은 완료/실패는 새 전송을
+  지우지 않는다. 복구 중 새 파일 대화상자·다운로드도 시작하지 않는다.
+- 확인창 Cancel/Return 기본, 같은 WebView의 credential-free root GET,
+  cookie/sessionStorage 재사용, bootstrap/저장 승인 비재생 계약은 유지한다.
+  storage 소실을 새 인증 권한으로 대체하지 않으며 미저장 초안·캡처는 복원하지 않는다.
+
+검증 범위:
+
+- 순수 Rust 시간 주입 회귀: 로딩 미완료/JS 무응답 deadline, 실패 후 재시도,
+  이전 epoch callback, 만료 직후 성공 응답, hidden/인증 대기, 중복 probe·완료,
+  identity 소진을 검사한다. 호스트 기존 수명·전송 검사와 합쳐 13 unit 통과.
+- `--smoke-test-recovery`는 별도 **빈 작업공간**에서만 동작한다. 인증 완료 문서에
+  고정 합성 sessionStorage 값과 document marker를 넣고, 제품의 GET 복구 함수로
+  재로딩한다. 이전 navigation의 완료/실패 callback을 주입해 새 요청에 영향이
+  없는지 확인하고, 새 문서·저장소 보존·인증 및 확인 종료를 검사한다.
+  JS는 고정 결과 marker만 반환하며 인증값·경로·메모·클립보드를 읽어내지 않는다.
+- 이 검사는 사용자 확인창을 우회하는 일반 기능이 아니다. QA 옵션은 파일·DRC·
+  reviewer 인자를 받지 않으며 새 세션만 사용한다. 정상 Recover 메뉴는 확인창을
+  계속 거친다. Node 검사도 합성 값만 변경하고 타 storage 값은 보존한다.
+- `sh tools/validate_desktop.sh`에 이 검사를 추가하고 `embedded_host` 선택 게이트에
+  probe의 Node 회귀를 연결했다. 실제 native 실행 결과는 아래 기록으로 구분한다.
+
+실행 결과:
+
+- `sh tools/validate_desktop.sh`: **exit 0**. 13 unit, 기존 빈 창 smoke와 새
+  `armed → recovered` 검사, 주입한 retired navigation 무시, 새 문서 인증,
+  닫기 취소·종료 확인·service join 통과. host fmt/clippy `-D warnings`도 통과했다.
+- `sh tools/validate_rust.sh --only embedded_host,web_ui,validation_selector`:
+  **exit 0 / ALL OK**. 전체 배터리나 실제 OS crash 수용으로 합산하지 않는다.
+- release `.app` 재빌드 및 279개 고지 파일 검사 통과. 그 앱에서도
+  `--smoke-test-recovery`, `--smoke-test-notices`를 각각 실행해 **exit 0**을 확인했다.
+- 로그: `/private/tmp/floe-desktop-recovery-{unit,clippy,native,battery}.log`,
+  `floe-desktop-recovery-release.log`, `floe-desktop-recovery-release-native.log`.
+
+이는 실제 WebContent process kill, cookie/storage 강제 소실, DRC 저장 중 결과
+불명 복구의 대체 검사가 아니다. 그 확대 수용과 OS IME/DPI/물리 입력, RHEL 호스트,
+서명·공증, G1/G4 및 Python-free Linux 검증은 여전히 남는다.

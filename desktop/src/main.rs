@@ -3,6 +3,7 @@
 mod actions;
 #[cfg(target_os = "macos")]
 mod macos;
+mod recovery;
 mod service;
 mod transfers;
 
@@ -16,6 +17,7 @@ fn main() {
             Current host: macOS only; RHEL 8/ETX host is pending.\n\
             --smoke-test: empty-workspace native authentication/close test only.\n\
             --smoke-test-notices: same test plus packaged About notice reads.\n\
+            --smoke-test-recovery: same test plus explicit credential-free reload.\n\
             --check-notices: verify every packaged notice chunk; no GUI or workers.\n\
             With no SOURCE or --root, choose an approved working folder before startup.\n\
             macOS preview: native file dialogs, File/Edit menus and explicit Recover View."
@@ -33,7 +35,8 @@ fn main() {
         return;
     }
     let smoke_notices = args == ["--smoke-test-notices"];
-    let smoke = smoke_notices || args == ["--smoke-test"];
+    let smoke_recovery = args == ["--smoke-test-recovery"];
+    let smoke = smoke_notices || smoke_recovery || args == ["--smoke-test"];
     if smoke {
         args.clear();
     }
@@ -43,11 +46,11 @@ fn main() {
     let result = floe_app::embedded::Session::parse(&args).and_then(|session| {
         #[cfg(target_os = "macos")]
         {
-            macos::run(session, smoke, smoke_notices)
+            macos::run(session, smoke, smoke_notices, smoke_recovery)
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (session, smoke, smoke_notices);
+            let _ = (session, smoke, smoke_notices, smoke_recovery);
             Err(floe_app_core::Error::input(
                 "native host not implemented for this platform; use floe2-web",
             ))
