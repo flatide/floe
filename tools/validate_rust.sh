@@ -228,6 +228,7 @@ if gate embedded_host; then RAN="$RAN embedded_host"
     node desktop/ui/recovery-probe.test.cjs
     node desktop/ui/review-transport.test.cjs
     node desktop/ui/session-loss.test.cjs
+    node desktop/ui/download-cancel-probe.test.cjs
     (cd rust && FLOE_INDEX_BIN="$PWD/target/release/floe-index" \
         FLOE_RENDERD_BIN="$PWD/target/release/floe-renderd" \
         cargo test --release --offline --locked -p floe-app --test embedded_lifecycle -- --ignored); fi

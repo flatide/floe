@@ -939,3 +939,61 @@ exchange/browse/다른 쓰기 0회 및 QA 서비스 join을 확인했다. 전체
 강제 종료와 저장 중 디스크 장애의 복구 검증, 실제 키보드/IME·DPI·접근성 수용,
 서명·공증 및 RHEL 8.6/8.10 ETX/X11 호스트·현장 G1/G4 검증이 남는다. 개발용
 release 조립/실행 성공을 배포 승인이나 전체 목표 완료로 간주하지 않는다.
+
+## 16. D2-mac 개별 다운로드 중단 (2026-09-21)
+
+응답을 받은 뒤 다운로드가 멈추면 기존에는 Recover View를 막는 활성 전송을
+개별 취소할 방법이 없었다. 세션 전체를 끝내지 않고 **File → Stop Download…**로
+현재 전송만 중단할 수 있게 한다. 확인창의 기본값은 Cancel이며, Save/Open 등
+이미 열린 네이티브 모달을 덮지 않는다. Save 대화상자에서는 그 창의 Cancel을 쓴다.
+
+승인하면 현재 비표시 전송 WebView/활성 WKDownload를 중단하고 소유한 private
+staging만 기존 정리 경로로 제거 시도한다. 기존 Drop 정리는 파일시스템 오류를
+별도 보고하지 않으므로 새 완료 문구는 임시 파일 제거 성공까지 단정하지 않는다.
+열린 레이아웃·서버 artifact·완료된 다운로드는 유지한다.
+POST/내보내기를 다시 제출하거나 중단 파일을 자동 재개하지 않는다. 전송이
+확인창에서 기다리는 사이 완료됐다면 게시된 파일을 되돌리지 않고 완료됐음을
+안내한다. 전송이 없을 때 메뉴를 다시 눌러도 세션/완료 파일은 그대로다.
+Recover View의 차단 안내에도 이 메뉴를 표시한다.
+
+새 단독 인자 `--smoke-test-download-cancel`은 caller source/root/reviewer/출력
+경로를 받지 않는다. 새 빈 WebView에서 고정된 합성 텍스트 blob 하나를 만들고,
+**실제 WKDownload destination delegate**까지 도달한 뒤 목적지 응답을 보류한다.
+새 0700 합성 폴더에 만든 private staging에는 테스트가 직접 partial bytes를 쓴다.
+이것은 실제 WebKit 수신 byte 진행률/네트워크 stall/디스크 장애 실측이 아니다.
+사용자 NSSavePanel 조작·다운로드 publication과도 구분한다.
+
+이 상태에서 실제 File 메뉴 selector와 native sheet로 다음을 확인한다.
+
+1. sheet-local Return → Cancel: 전송과 partial bytes 및 완료 파일 sentinel 유지.
+2. Stop Download 버튼 → 명시 중단: delegate 해제/cancel, 임시 payload/디렉터리
+   제거, 새 목적지 파일 미생성, 완료 sentinel 동일성 및 서비스 생존.
+3. 활성 전송 없는 중복 Stop은 새 확인창/세션 종료를 만들지 않음.
+4. 이후 웹 준비·메뉴·정상 닫기/취소/종료와 service join.
+
+보류한 destination callback은 정상 취소 및 실패/호스트 종료 때에도 정확히 한 번
+null 목적지로 해제한다. 원래 WebView를 교체하거나 인증을 재발급하지 않는다.
+검사 후 소유한 합성 파일만 정리하며 기존 파일/고객 자료는 사용하지 않는다.
+단위 검사는 caller 인자 거부와 partial/완료 파일 분리를, JS 검사는 준비 이후
+합성 blob 1회 생성만을 확인한다. headless `embedded_host`에는 JS 검사만 추가하고
+실제 GUI는 명시적 `validate_desktop.sh`에서만 실행한다.
+
+검증 결과:
+
+- host unit **25 passed**, fmt 및 host clippy `--all-targets --no-deps -- -D warnings`
+  통과. 의존 vfs의 기존 경고는 이번 host 검사와 별개다.
+- `sh tools/validate_desktop.sh` **exit 0**: 기존 일반/복구/닫기 timeout/합성 DRC/
+  세션 키·cookie 소실과 새 다운로드 취소의 실제 native 검사 모두 통과했다.
+- `sh tools/validate_rust.sh --only embedded_host,validation_selector` **exit 0 / ALL OK**.
+  정본 개발 interpreter를 검사에만 연결한 임시 `.venv` 링크는 제거했다. 새 패키지
+  설치/제품 Python 의존성 또는 전체 Rust/GTK 배터리 통과를 뜻하지 않는다.
+- 최종 release 개발 앱 `desktop/target/macos-dev.9K8nEq/Floe2.app`도 조립·고지
+  279파일 검사를 통과했다. worker override 없이 번들된 worker로 다운로드 취소와
+  복구/닫기 timeout을 각각 새 빈 세션에서 실행해 **exit 0**이었다. 자동 테스트의
+  sheet-local Return/버튼 호출은 실제 물리 키보드/마우스 수용과 구분한다.
+- 로그: `/private/tmp/floe-download-cancel-{native-complete,clippy-complete,battery}.log`,
+  `floe-download-cancel-release-complete{.log,-ui.log}`.
+
+이 단계의 macOS 개별 다운로드 중단은 완료했다. 전체 목표에는 crash/디스크 장애와
+정리 실패의 구체적 오류 보고, 실제 IME/DPI/접근성, 서명/공증, RHEL/ETX와 G1/G4가
+계속 남는다. 기존 사용자 소개·브로셔 변경과 현장 jobdeck 작업은 포함하지 않는다.

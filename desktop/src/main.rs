@@ -2,6 +2,7 @@
 
 mod actions;
 mod close_request;
+mod download_qa;
 #[cfg(target_os = "macos")]
 mod macos;
 mod recovery;
@@ -23,6 +24,7 @@ fn main() {
             --smoke-test-recovery: same test plus explicit reload and close-timeout cancel.\n\
             --smoke-test-review-recovery: NEW synthetic files only; save ACK loss/reload.\n\
             --smoke-test-storage-loss / --smoke-test-cookie-loss: NEW empty WebView only.\n\
+            --smoke-test-download-cancel: NEW synthetic blob/staging files only.\n\
             --check-notices: verify every packaged notice chunk; no GUI or workers.\n\
             With no SOURCE or --root, choose an approved working folder before startup.\n\
             macOS preview: native file dialogs, File/Edit menus and explicit Recover View."
@@ -43,10 +45,12 @@ fn main() {
     let smoke_recovery = args == ["--smoke-test-recovery"];
     let smoke_review = review_qa::requested(&args);
     let smoke_loss = session_qa::requested(&args);
+    let smoke_download = download_qa::requested(&args);
     let smoke = smoke_notices
         || smoke_recovery
         || smoke_review
         || smoke_loss.is_some()
+        || smoke_download
         || args == ["--smoke-test"];
     if smoke {
         args.clear();
@@ -78,6 +82,7 @@ fn main() {
                 smoke_recovery,
                 smoke_review,
                 smoke_loss,
+                smoke_download,
             )?;
             if let Some(fixture) = &fixture {
                 fixture.verify()?;

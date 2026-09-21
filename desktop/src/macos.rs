@@ -2,6 +2,7 @@
 //! thread; delegates and completion blocks are retained through their use.
 use crate::actions::Action;
 use crate::close_request::{CloseRequest, Event as CloseEvent};
+use crate::download_qa;
 use crate::recovery::{Event as RecoveryEvent, Recovery};
 use crate::service::Service;
 use crate::session_qa::Loss;
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 const CLOSE_SCRIPT: &str =
     "(()=>{const b=document.getElementById('logout');if(b&&!b.disabled){b.click();return 'opened';}return 'unavailable';})()";
 const SESSION_LOST: &str = "Session credentials lost or expired — start a new floe2-desktop session; no login or write replayed";
+type DownloadDestinationReply = RcBlock<dyn Fn(*mut NSURL)>;
 
 struct Download {
     object: Retained<WKDownload>,
@@ -55,6 +57,9 @@ struct State {
     smoke_review: bool,
     smoke_loss: Option<Loss>,
     loss_removed: Cell<bool>,
+    download_qa: Option<download_qa::Fixture>,
+    download_qa_completion: RefCell<Option<DownloadDestinationReply>>,
+    download_qa_done: Cell<bool>,
     smoke_step: Cell<u8>,
     evaluating: Cell<bool>,
     smoke_probe: RefCell<String>,
@@ -79,6 +84,8 @@ define_class!(
         fn show_about(&self, _sender: Option<&AnyObject>) { self.menu_action(Action::About); }
         #[unsafe(method(recoverView:))]
         fn recover_view(&self, _sender: Option<&AnyObject>) { self.recover(); }
+        #[unsafe(method(stopDownload:))]
+        fn stop_download_menu(&self, _sender: Option<&AnyObject>) { self.stop_download(); }
         #[unsafe(method(forceEndSession:))]
         fn force_end_session(&self, _sender: Option<&AnyObject>) { self.force_close(); }
     }
@@ -468,6 +475,7 @@ impl Host {
             }
         }
     }
+    #[allow(clippy::too_many_arguments)]
     fn new(
         mtm: MainThreadMarker,
         service: Service,
@@ -476,7 +484,9 @@ impl Host {
         smoke_recovery: bool,
         smoke_review: bool,
         smoke_loss: Option<Loss>,
+        download_qa: Option<download_qa::Fixture>,
     ) -> Retained<Self> {
+        let smoke_download = download_qa.is_some();
         let this = Self::alloc(mtm).set_ivars(State {
             service: RefCell::new(service),
             origin: OnceCell::new(),
@@ -495,10 +505,15 @@ impl Host {
             smoke_review,
             smoke_loss,
             loss_removed: Cell::new(false),
+            download_qa,
+            download_qa_completion: RefCell::new(None),
+            download_qa_done: Cell::new(false),
             smoke_step: Cell::new(if smoke_review {
                 20
             } else if smoke_loss.is_some() {
                 30
+            } else if smoke_download {
+                40
             } else {
                 0
             }),
@@ -637,6 +652,35 @@ impl Host {
             self.status(&reason);
             return;
         }
+        if let Some(qa) = &self.ivars().download_qa {
+            if self.ivars().download_qa_done.get()
+                || self.ivars().download_qa_completion.borrow().is_some()
+            {
+                completion.call((std::ptr::null_mut(),));
+                self.fail("download cancellation QA received an unexpected destination");
+                return;
+            }
+            // A REAL WKDownload has reached its destination callback. Hold that
+            // callback for cancellation, never approve a caller path. Partial
+            // bytes here are synthetic fixture bytes, not WebKit transfer bytes.
+            match qa.pending() {
+                Ok(file) => {
+                    self.ivars()
+                        .downloads
+                        .borrow_mut()
+                        .get_mut(&key)
+                        .unwrap()
+                        .file = Some(file);
+                    *self.ivars().download_qa_completion.borrow_mut() = Some(completion.copy());
+                    self.ivars().smoke_step.set(43);
+                }
+                Err(_) => {
+                    completion.call((std::ptr::null_mut(),));
+                    self.fail("cannot prepare isolated download QA staging");
+                }
+            }
+            return;
+        }
         self.ivars().panel_open.set(true);
         let panel = NSSavePanel::savePanel(self.mtm());
         panel.setNameFieldStringValue(&NSString::from_str(&transfers::suggested_name(
@@ -700,8 +744,18 @@ impl Host {
         let close_qa = self.ivars().smoke_recovery
             && self.ivars().smoke_step.get() == 15
             && title == "Force End Session?";
+        let download_qa = self.ivars().download_qa.is_some() && title == "Stop Download?";
+        let qa_step = self.ivars().smoke_step.get();
         let callback = RcBlock::new(move |result| {
             host.ivars().panel_open.set(false);
+            if download_qa
+                && (host.ivars().service.borrow().finished()
+                    || !((qa_step == 43 && result == NSAlertFirstButtonReturn)
+                        || (qa_step == 44 && result == NSAlertSecondButtonReturn)))
+            {
+                host.fail("download cancellation QA chose an unexpected action");
+                return;
+            }
             if close_qa {
                 if result != NSAlertFirstButtonReturn || host.ivars().service.borrow().finished() {
                     host.fail("native close timeout QA did not cancel safely");
@@ -713,19 +767,50 @@ impl Host {
             if result == NSAlertSecondButtonReturn {
                 action(&host);
             }
+            if download_qa {
+                let cancelled = qa_step == 44;
+                if !host.ivars().download_qa.as_ref().unwrap().intact(cancelled)
+                    || host.has_download() == cancelled
+                {
+                    host.fail("download cancellation changed the wrong files or transfer state");
+                    return;
+                }
+                if cancelled {
+                    host.stop_download();
+                    if host.ivars().panel_open.get() || host.ivars().service.borrow().finished() {
+                        host.fail("stopping an already cancelled download changed the session");
+                        return;
+                    }
+                    host.ivars().download_qa_done.set(true);
+                    host.ivars().smoke_step.set(0);
+                    eprintln!("[desktop-smoke] download stopped; private staging removed; completed file and session preserved");
+                } else {
+                    host.ivars().smoke_step.set(44);
+                    eprintln!("[desktop-smoke] download stop sheet cancelled; transfer and staging preserved");
+                }
+            }
         });
         alert.beginSheetModalForWindow_completionHandler(
             self.ivars().window.get().unwrap(),
             Some(&callback),
         );
-        if close_qa {
+        if close_qa || download_qa {
             // A first Cancel button can have Escape as its key equivalent while
             // still being the Return default. Initial responder metadata is not
             // the key-dispatch contract. Exercise Return on this exact QA sheet
             // after presentation; no global keyboard event or forced button click.
             let host = self.retain();
             let dispatch = RcBlock::new(move |_: NonNull<NSTimer>| {
-                if host.ivars().smoke_step.get() != 15 || !host.ivars().panel_open.get() {
+                if host.ivars().smoke_step.get() != qa_step || !host.ivars().panel_open.get() {
+                    return;
+                }
+                if download_qa && qa_step == 44 {
+                    // Explicit stop of this new synthetic download, never Force End.
+                    // SAFETY: This live control belongs to the retained QA sheet
+                    // on the main thread; its only action stops that QA download.
+                    unsafe {
+                        accept.performClick(None);
+                    }
                     return;
                 }
                 let sheet = alert.window();
@@ -758,10 +843,10 @@ impl Host {
             self.status("Recovery already in progress — wait, or use Force End Session");
             return;
         }
-        if !self.ivars().downloads.borrow().is_empty()
-            || self.ivars().transfer_view.borrow().is_some()
-        {
-            self.status("Finish the download before recovering the view");
+        if self.has_download() {
+            self.status(
+                "Finish the download or use File → Stop Download before recovering the view",
+            );
             return;
         }
         self.confirm("Recover View?", "Reload the current local session. Unsaved editor text and captured pixels will be lost. Earlier approved saves may already have completed. Existing receipt records are checked, not automatically replayed. If session storage was lost, restart the app; the one-use login is never replayed.", "Reload View", |host| host.start_recovery());
@@ -810,6 +895,35 @@ impl Host {
                 slot.object.cancel(None);
             }
         }
+        // Only the isolated QA holds a destination callback. Complete it once
+        // even on unexpected failure/host shutdown, with no destination grant.
+        let done = self.ivars().download_qa_completion.borrow_mut().take();
+        if let Some(done) = done {
+            done.call((std::ptr::null_mut(),));
+        }
+    }
+    fn has_download(&self) -> bool {
+        !self.ivars().downloads.borrow().is_empty() || self.ivars().transfer_view.borrow().is_some()
+    }
+    fn stop_download(&self) {
+        if self.ivars().panel_open.get() {
+            return;
+        }
+        if !self.has_download() {
+            self.status("No active download — completed files are unchanged");
+            return;
+        }
+        self.confirm("Stop Download?", "Stop the active download and discard only its private temporary file. Completed downloads and server artifacts are kept. The layout session stays open; no export or save request is retried.", "Stop Download", |host| {
+            // Completion may have won while this sheet was open. New downloads
+            // cannot start during the native sheet, and published files are no
+            // longer in the active map. Never undo a completed publication.
+            if host.has_download() {
+                host.cancel_downloads();
+                host.status("Download stopped — completed files preserved; session kept open");
+            } else {
+                host.status("Download already finished — completed files are unchanged");
+            }
+        });
     }
     fn request_close(&self) {
         if self.ivars().panel_open.get() {
@@ -1100,6 +1214,13 @@ impl Host {
         let Some(web) = self.ivars().web.get() else {
             return;
         };
+        if matches!(self.ivars().smoke_step.get(), 43 | 44) && self.ivars().download_qa.is_some() {
+            // SAFETY: Invoke the same host-owned selector as the File menu.
+            unsafe {
+                let _: () = msg_send![self, stopDownload: std::ptr::null::<AnyObject>()];
+            }
+            return;
+        }
         if self.ivars().smoke_step.get() == 31 && self.ivars().smoke_loss == Some(Loss::Cookie) {
             if self.ivars().loss_removed.get() {
                 self.ivars().smoke_step.set(32);
@@ -1138,11 +1259,15 @@ impl Host {
             31 => concat!("(", include_str!("../ui/session-loss-probe.js"), ")('erase-storage')"),
             32 if self.ivars().smoke_loss == Some(Loss::Cookie) => concat!("(", include_str!("../ui/session-loss-probe.js"), ")('check-cookie')"),
             32 => concat!("(", include_str!("../ui/session-loss-probe.js"), ")('check-storage')"),
+            40 => include_str!("../ui/download-cancel-probe.js"),
             _ => { self.ivars().evaluating.set(false); return; },
         };
         let host = self.retain();
         let callback = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
             host.ivars().evaluating.set(false);
+            if host.ivars().smoke_step.get() != step {
+                return;
+            }
             if !error.is_null() {
                 if host.ivars().smoke_probe.borrow().as_str() != "js-error" {
                     eprintln!("[desktop-smoke] step={step} JavaScript evaluation failed");
@@ -1192,6 +1317,7 @@ impl Host {
                     "loss-failed-write",
                     "loss-failed-replay",
                     "loss-failed-exception",
+                    "download-started",
                     "wait",
                 ]
                 .contains(&text.as_str())
@@ -1202,6 +1328,7 @@ impl Host {
                 *host.ivars().smoke_probe.borrow_mut() = text.clone();
             }
             let next = match (step, text.as_str()) {
+                (40, "download-started") => 41,
                 (
                     30..=32,
                     "loss-failed"
@@ -1387,6 +1514,7 @@ pub fn run(
     smoke_recovery: bool,
     smoke_review: bool,
     smoke_loss: Option<Loss>,
+    smoke_download: bool,
 ) -> Result<i32> {
     if !objc2::available!(macos = 12.0) {
         return Err(Error::input("embedded preview requires macOS 12 or later"));
@@ -1428,6 +1556,14 @@ pub fn run(
         smoke_recovery,
         smoke_review,
         smoke_loss,
+        if smoke_download {
+            Some(
+                download_qa::Fixture::create()
+                    .map_err(|_| Error::input("cannot create download cancellation QA fixture"))?,
+            )
+        } else {
+            None
+        },
     );
     // SAFETY: Owned window never auto-releases on close. The main-thread host
     // remains retained until after timer invalidation and delegate detachment.
@@ -1507,6 +1643,12 @@ pub fn run(
             ns_string!(""),
         );
         drc.setTarget(Some(&host));
+        let stop = file.addItemWithTitle_action_keyEquivalent(
+            ns_string!("Stop Download…"),
+            Some(sel!(stopDownload:)),
+            ns_string!(""),
+        );
+        stop.setTarget(Some(&host));
         file.addItem(&NSMenuItem::separatorItem(mtm));
         file.addItemWithTitle_action_keyEquivalent(
             ns_string!("Close Window…"),
@@ -1591,6 +1733,18 @@ pub fn run(
     }
     if let Some(message) = *host.ivars().failure.borrow() {
         return Err(Error::input(message));
+    }
+    if smoke_download {
+        if result != 0
+            || host.ivars().smoke_step.get() != 8
+            || !host.ivars().download_qa_done.get()
+            || !host.ivars().download_qa.as_ref().unwrap().intact(true)
+        {
+            return Err(Error::input(
+                "native download cancellation QA did not complete",
+            ));
+        }
+        println!("DESKTOP DOWNLOAD CANCEL: OK (real blob WKDownload at destination boundary; synthetic partial file; Return cancels stop; explicit stop removes staging; completed file/session preserved; normal close and service join)");
     }
     if smoke {
         if result != 0 || host.ivars().smoke_step.get() != 8 {
