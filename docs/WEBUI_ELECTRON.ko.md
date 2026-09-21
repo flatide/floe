@@ -130,8 +130,9 @@ sh tools/run_electron_dev.sh
   최근 전체 Rust/web gate는 기존 GTK startup oracle30초 timeout으로 실패했고,
   selected gates/native host 통과와 분리해 기록한다.
 
-현장 RHEL 런타임은 아직 다운로드/실행하지 않았다. Linux sidecar `cargo check`만
-통과했으며 ETX·glibc·Chromium sandbox·서버 메모리 비용을 검증한 것은 아니다.
+현장 RHEL에서 실행하지 않았다. Linux sidecar `cargo check`와 아래 공식 런타임의
+GLIBC 정적 점검만 통과했으며 ETX·전체 시스템 라이브러리·Chromium sandbox·서버
+메모리 비용을 검증한 것은 아니다.
 
 ## E2 이후 고정할 비교 조건
 
@@ -192,7 +193,8 @@ cold startup·반복 분포/peak·물리 입력·RHEL/ETX 수용은 아직 없�
 ### 비교·배포 시 유지할 조건
 
 - `electron/runtime.json`은 공식 릴리스 **44.4.3 (2026-09-18)** 및 공식 SHA-256을
-  기록한다. macOS arm64는 검증·실행했고, macOS x64·Linux x64 검증/실행은 남았다.
+  기록한다. macOS arm64는 검증·실행했고, Linux x64는 archive/GLIBC 정적 점검만
+  했다. macOS x64 검증과 Linux 실제 실행은 남았다.
   실행 파일뿐 아니라 런타임 전체 의존성·고지/라이선스·업데이트 책임을 확인한다.
   [릴리스](https://github.com/electron/electron/releases/tag/v44.4.3),
   [공식 해시](https://github.com/electron/electron/releases/download/v44.4.3/SHASUMS256.txt).
@@ -209,3 +211,40 @@ cold startup·반복 분포/peak·물리 입력·RHEL/ETX 수용은 아직 없�
 개별 보장이 아니다. [VS Code의 RHEL8/glibc2.28 요구](https://code.visualstudio.com/docs/supporting/requirements)도
 다른 Electron 번들 전체의 호환성을 증명하지 않는다. 오래된 Electron 고정 또는
 보안 완화를 호환성 해법으로 채택하지 않는다.
+
+## E3 사전 점검: 공식 Linux archive (실행 아님)
+
+2026-09-21 공식 `electron-v44.4.3-linux-x64.zip`을 새 임시 폴더에 다운로드했다.
+SHA-256은 `fe880a7e37160cfd4e00193bc4c713ead7a778abfe74860a2d36d86fd0be48a8`로
+기록된 공식 해시와 일치한다. 압축 해제된 모든 일반 파일을 ELF magic으로 분류하고
+Apple LLVM17 `objdump --private-headers`의 **Version References**를 읽었다.
+임의 문자열 검색·ELF 실행·`ldd`를 사용하지 않았다.
+
+| 동봉 ELF64 x86-64 | 최대 GLIBC requirement |
+|---|---:|
+| electron | 2.25 |
+| chrome-sandbox | 2.4 |
+| chrome_crashpad_handler | 2.17 |
+| libffmpeg.so | 2.17 |
+| libvk_swiftshader.so | 2.17 |
+| libvulkan.so.1 | 2.16 |
+
+6개 모두2.28 ceiling 이하다. 따라서 **이 공식 archive의 직접 GLIBC 심볼 요구가
+2.28을 넘는 문제는 발견되지 않았다**. 이 결과를 RHEL 실행/전체 의존성 충족으로
+확대 해석하지 않는다. artifact: `/private/tmp/floe-electron-linux.G3vz1Z/unpacked`.
+
+주 실행 파일은 여전히 GTK3/GLib/GObject/GIO, NSS/NSPR, ATK/AT-SPI, Cairo/Pango,
+X11/XCB/Xrandr 등, GBM, xkbcommon, udev, ALSA, CUPS, DBus, expat을 동적 요구한다.
+WebKitGTK는 요구하지 않지만 **OS GUI 라이브러리가 전혀 필요 없는 앱은 아니다**.
+`$ORIGIN` RPATH도 사용하는 공식 Chromium bundle이며 기존 Rust-only portable의
+RPATH 금지 검사를 완화해 통과시킨 것이 아니다. 두 패키징 계약은 아직 별개다.
+
+현장에 남은 검증: RHEL8.6/8.10의 실제 SONAME/심볼·동적 plugin 전체,
+namespace/sandbox 설정과 일반 사용자 실행, ETX/X11 입력·DPI·합성/전송 부하,
+동시 사용자별 메모리, Rust service/index/renderd Linux 바이너리의 실행·정리.
+OS 패키지 설치/교체, setuid 권한 설정, user namespace/security 설정 변경,
+`--no-sandbox`/`--disable-web-security` 우회는 하지 않았다. Chromium의 GPU compositor
+프로세스는 UI 표시용이며 floe geometry rasterizer를 GPU로 전환한 것이 아니다.
+
+현재 판단: Electron 최소 호스트는 **비교할 수 있는 구현 후보**가 됐다. 기존 macOS
+WKWebView 앱을 대체하거나 RHEL 정식 배포로 채택할 근거는 아직 부족하다.
