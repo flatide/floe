@@ -19,11 +19,12 @@ const downloadSmoke = args.length === 1 && args[0] === '--smoke-download-test';
 // Explicit read-only QA of a pre-indexed synthetic source. No DRC/default writes,
 // indexing or caller-chosen output path. The validation driver creates the source.
 const layoutSmoke = args.length === 2 && args[0] === '--smoke-layout-test' && path.isAbsolute(args[1]);
+const paritySmoke = args.length === 2 && args[0] === '--smoke-frame-parity-test' && path.isAbsolute(args[1]);
 const clipSmoke = args.length === 2 && args[0] === '--smoke-clip-download-test' && path.isAbsolute(args[1]);
 const recoveryModes = { '--smoke-recovery-test': 'normal', '--smoke-recovery-storage-test': 'storage', '--smoke-recovery-cookie-test': 'cookie' };
 const recoveryMode = args.length === 2 && Object.hasOwn(recoveryModes, args[0]) && path.isAbsolute(args[1]) ? recoveryModes[args[0]] : null;
 const recoverySmoke = recoveryMode !== null;
-const smoke = emptySmoke || layoutSmoke || downloadSmoke || clipSmoke || recoverySmoke;
+const smoke = emptySmoke || layoutSmoke || paritySmoke || downloadSmoke || clipSmoke || recoverySmoke;
 let profile, root, window, service, close, origin = null, panel = false, stopping = false;
 let recovery, viewFailure = false;
 let downloads, downloadQaRoot, downloadQaChoice = 0, cleanupConfirmed = false;
@@ -250,9 +251,10 @@ app.whenReady().then(async () => {
     { label: 'View', submenu: [{ label: 'Recover View…', click: recover }, { label: 'About…', click: () => menuAction('about-open') }] }
   ]));
   status('Starting the Rust service. Close this window to cancel. Native exports save to new files only; programmatic clipboard permissions are not enabled.');
-  const viewArgs = layoutSmoke || clipSmoke || recoverySmoke ? [args[1], '--goto', '200,200,300', '--depth', 'full', '--detail', 'high',
+  const viewArgs = layoutSmoke || paritySmoke || clipSmoke || recoverySmoke ? [args[1], '--goto', '200,200,300', '--depth', 'full', '--detail', 'high',
     '--jobs', '4', '--raster-jobs', '4', '--refinement', 'off'] : emptySmoke || downloadSmoke ? [] : (args[0] === 'view' ? args.slice(1) : args);
   if (clipSmoke) viewArgs.push('--budget-mb', '256'); // leave managed capacity for explicit exact export
+  if (paritySmoke) viewArgs.push('--raw');
   if (emptySmoke || downloadSmoke) {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-smoke-'));
     fs.chmodSync(root, 0o700); viewArgs.push('--root', root);
@@ -348,9 +350,9 @@ async function runSmoke() {
       throw new Error('synthetic navigation guard failed');
     }
   } finally { await new Promise(resolve => sentinel.close(resolve)); }
-  if (layoutSmoke) {
+  if (layoutSmoke || paritySmoke) {
     qaStep = 'layout actions';
-    await require('./layout-qa.cjs').run({ app, window, evalOwned, service, extraRustPids: downloads.pids() });
+    await require('./layout-qa.cjs').run({ app, window, evalOwned, service, extraRustPids: downloads.pids(), parityOnly: paritySmoke });
   }
   if (downloadSmoke) {
     qaStep = 'download cancel publish conflict';

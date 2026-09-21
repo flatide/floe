@@ -125,3 +125,65 @@ raw와 PNG를 분리하고 같은 입력 trace를 여러 번 수행한다. 계�
 확인한다. JS 진단은 병목 위치를 좁히는 보조 자료로만 사용하며 input→photon과
 실제 표시 pacing ±10%, margin 안 새 strip 검정/라벨 지연 0의 화면 증거는 별도로
 필요하다. 실제 장치·ETX 측정 없이 추정 수치나 합성 지연을 성능 결과로 쓰지 않는다.
+
+## 5. foreground/margin 도형 픽셀 대조 (0.12.185)
+
+Electron 비교 중 같은 valmini 뷰의 두 Canvas 원본을 직접 대조했다. 캡처 시점·
+CSS/브라우저 chrome 차이를 배제하고, 동일 render revision·배율·16px 정수 이동·
+완전 포함을 확인한 뒤 foreground 전체 RGBA와 margin의 해당 영역을 비교한다.
+픽셀을 재샘플하지 않으며 빈 검정 화면의 일치도 성공으로 인정하지 않는다.
+
+goto200,200,300µm/full/high, raw, DPR2, 1640×1317px, decode4/raster4,
+refinement off인 새 합성 세션에서 다음을 확인했다. 프레임/라벨 토글은 이 세션에만
+적용되고 원본·캐시 SHA-256은 전후 불변이다.
+
+| 비교 | 수정 전 변경 픽셀 | 수정 후 |
+|---|---:|---:|
+| 도형만, native pan reuse on | 31 | 0 |
+| 도형만, native pan reuse off | 1,817 | 0 |
+| 도형+프레임, reuse off | 1,817 | 0 |
+| 도형+프레임+라벨, reuse on/off | 59 / 1,844 | 28 / 28 |
+
+원인: stroke 변환이 lower-origin f64에서 `height - 1 - floor(y + 0.5)`를
+계산했다. 동일한 0.3µm 상자의 y=305000 DBU 경계가 foreground에서84행,
+margin에서는656px 이동을 제외하고83행으로 반올림됐다. fill은 이미 Q32.32라
+영향받지 않았다. 재사용은 interior tile의 기존 픽셀을 복사해 차이 대부분을 숨겼다.
+대표 도형 경로를 꺼도 같은 차이가 있어 대표화/cut을 변경하지 않았다.
+
+stroke도 기존 top-origin Q32.32를 공유하고 동치 정수식을 쓰도록 수정했다.
+새 Rust 단위 테스트는 수정 전 `(13,84) != (13,83)`으로 실패했고, 수정 후
+정점과 실제 rectangle foreground/margin 전체 픽셀을 비교해 통과한다.
+render-core 단위123개도 통과했다. **공유 CPU renderer 수정**이며 Electron/CSS
+보간 설정을 바꾼 것이 아니다. renderd와 기대 버전은0.12.185로 동기화했다.
+
+재현/회귀 명령(런타임·개발 Python 설정은 Electron 문서 참조):
+
+```sh
+node tools/validate_electron_layout.cjs --frame-parity
+```
+
+항상 새 valmini를 만들어 reuse on/off 두 세션을 실행한다. 라벨 off에서 프레임
+on/off 각각 **2,159,880픽셀 RGBA 완전 일치**가 필수다. probe 단위3개는 불일치
+집계·alpha·잘못된 배율/범위/revision/숨김 및 예제8개 상한을 검사한다. 예제 개수는
+진단만 제한하며 전체 픽셀 비교에는 상한/허용 밴드/skip이 없다.
+
+라벨 on의28픽셀은 화면 하단 두 행에 남으며, 도형 gate로 라벨 parity까지
+통과했다고 해석하지 않는다. 라벨 anchor 조회 범위/글리프 꼬리와 declutter 경계의
+추가 대조가 남는다. 예전 screenshot848,168픽셀 차이와 이번 원본 Canvas 비교는
+범위·시점이 다르므로 동일 원인이라고 단정하지 않는다. WK 동일 조건 대조 및
+실제 input→photon/G1 성능 수용도 여전히 별도다.
+
+로그: `/private/tmp/floe-stroke-half-before.log`, `floe-stroke-half-after.log`,
+`floe-electron-frame-parity-final.log`. 좌표/RGBA 예제는 명시적 합성 QA 산출물에만
+남으며 제품 진단·일반 사용자 세션에는 수집 기능을 추가하지 않았다.
+
+추가 회귀: KLayout 오라클은 jobs1/8 각각 **13 PX + 2 phase-exact + 14 style**를
+통과했다(`floe-stroke-half-klayout-j1.log`, `floe-stroke-half-klayout-j8.log`). 기존
+Electron pan·clip·복구·storage/cookie 상실 검사도 `floe-electron-layout-185.log`에서
+통과했다. 필수 전체 `validate_rust.sh`는 **exit1**로 종료했다. workspace unit·CLI·
+캐시 이동·버전/portable·embedded·app read 뒤 기존 `layerprops` native oracle의
+30초 timeout이다(`floe-stroke-half-full.log`). 제한 완화/생략은 하지 않았고 전체
+green으로 간주하지 않는다. 이번 실행의 timeout을 이전 dyld sample과 동일 원인이라고
+확정하지 않는다. strict render-core/renderd clippy는 기존 private-interface/dead-code/
+style 경고로 **37건 실패**다(`floe-stroke-half-final-clippy.log`). 새 테스트의 불필요한
+clone 경고만 수정했고 재검사에서 사라졌으며 기존 경고를 숨기거나 일괄 수정하지 않았다.

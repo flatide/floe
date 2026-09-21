@@ -24,7 +24,7 @@ function ownedMemory(text, pid) {
   return { process_count: owned.length, rss_sum_kib: owned.reduce((n, r) => n + r[2], 0) };
 }
 
-async function run({ app, window, evalOwned, service, extraRustPids = [] }) {
+async function run({ app, window, evalOwned, service, extraRustPids = [], parityOnly = false }) {
   const web = window.webContents;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-layout-'));
   fs.chmodSync(root, 0o700);
@@ -37,6 +37,7 @@ async function run({ app, window, evalOwned, service, extraRustPids = [] }) {
       !/Prefetching/.test(e('margin-info').textContent),
       x:Number(e('goto-x').value),y:Number(e('goto-y').value),width:Number(e('goto-width').value),
       detail:e('detail').value,depth:e('depth').value,dpr:devicePixelRatio,
+      render_rev:c.dataset.renderRev,margin_rev:m.dataset.renderRev,
       pixels:[Math.floor(r.right*devicePixelRatio)-Math.ceil(r.left*devicePixelRatio),
         Math.floor(r.bottom*devicePixelRatio)-Math.ceil(r.top*devicePixelRatio)],
       rect:{x:Math.ceil(r.x),y:Math.ceil(r.y),width:Math.floor(r.width)-1,height:Math.floor(r.height)-1}};
@@ -74,8 +75,28 @@ async function run({ app, window, evalOwned, service, extraRustPids = [] }) {
   await settled(s => s.detail === 'high' && s.width === 300);
   await evalOwned("document.getElementById('viewport').focus();true");
   const initial = await settled();
+  const frameParity = await evalOwned('(' + fs.readFileSync(path.join(__dirname, '../desktop/ui/frame-parity-probe.js'), 'utf8') + ')()');
+  console.log('ELECTRON LAYOUT: foreground/margin pixels ' + JSON.stringify(frameParity));
   const initialHash = await capture('initial', initial);
   console.log('ELECTRON LAYOUT: initial geometry captured');
+  if (parityOnly) {
+    const reports = [{kind:'geometry-frames-labels',comparison:frameParity}];
+    let previous = initial.render_rev;
+    for (const [id, checked, kind] of [['labels',false,'geometry-frames'],['frames',false,'geometry']]) {
+      await evalOwned('(()=>{const e=document.getElementById('+JSON.stringify(id)+');e.checked='+checked+';e.dispatchEvent(new Event("change"));return true;})()');
+      const next = await settled(s => s.render_rev !== previous && s.margin_rev === s.render_rev);
+      previous = next.render_rev;
+      const comparison = await evalOwned('(' + fs.readFileSync(path.join(__dirname, '../desktop/ui/frame-parity-probe.js'), 'utf8') + ')()');
+      reports.push({kind,comparison});
+      console.log('ELECTRON LAYOUT: '+kind+' pixels '+JSON.stringify(comparison));
+    }
+    fs.writeFileSync(path.join(root, 'frame-parity.json'), JSON.stringify(reports,null,2)+'\n', {flag:'wx',mode:0o600});
+    if(reports.slice(1).some(r=>r.comparison.changed_pixels!==0||!r.comparison.foreground_lit||!r.comparison.margin_lit)) {
+      throw new Error('Foreground/margin geometry mismatch');
+    }
+    console.log('ELECTRON LAYOUT: FRAME PARITY OK (all geometry RGBA bytes, frames on/off; label comparison reported separately)');
+    return;
+  }
   // Prime CPU interval; these Chromium-only averages are not Rust CPU metrics.
   app.getAppMetrics();
   const measurements = [];
@@ -113,7 +134,7 @@ async function run({ app, window, evalOwned, service, extraRustPids = [] }) {
   const report = { schema: 1, host: 'electron', runtime: process.versions.electron, platform: process.platform,
     arch: process.arch, fixture: 'caller-selected synthetic; use the valmini driver', decode_jobs: 4, raster_jobs: 4,
     refinement: 'off', detail: initial.detail, depth: initial.depth, dpr: initial.dpr,
-    viewport_css: initial.rect, viewport_pixels: initial.pixels, measurements,
+    viewport_css: initial.rect, viewport_pixels: initial.pixels, measurements, foreground_margin_pixels: frameParity,
     chromium: metrics.map(m => ({ type: m.type, working_set_kib: m.memory.workingSetSize,
       cpu_percent_since_prime: m.cpu.percentCPUUsage, sandboxed: m.sandboxed ?? null })),
     rust: rustMemory([service.child.pid, ...extraRustPids]),

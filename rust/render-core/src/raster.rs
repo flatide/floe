@@ -5394,17 +5394,15 @@ fn world_to_stroke_vertex(
     request: &GeometryRasterRequest,
     point: (i64, i64),
 ) -> Result<(f64, f64), String> {
-    let view = request.view;
-    let span_x = view.x1 - view.x0;
-    let span_y = view.y1 - view.y0;
-    let x = (point.0 as f64 - view.x0) * request.width as f64 / span_x;
-    let lower_y = (point.1 as f64 - view.y0) * request.height as f64 / span_y;
-    let x = (x + 0.5).floor();
-    let y = request.height as f64 - 1.0 - (lower_y + 0.5).floor();
-    if !x.is_finite() || !y.is_finite() {
-        return Err("coordinate overflow: edge device vertex".to_string());
-    }
-    Ok((x, y))
+    // Share the fill path's top-origin Q32.32 conversion. Computing lower_y
+    // in f64 and then subtracting from height can cross a half-pixel tie when
+    // a margin changes height, despite an exactly integral crop translation.
+    // H - 1 - floor(H - y + 1/2) == ceil(y - 1/2) - 1.
+    let (x, y) = world_to_device(request, point.0, point.1)?;
+    Ok((
+        floor_div(x + DEVICE_HALF, DEVICE_ONE) as f64,
+        (ceil_div(y - DEVICE_HALF, DEVICE_ONE) - 1) as f64,
+    ))
 }
 
 fn stroke_device_segment(
@@ -6484,6 +6482,67 @@ mod tests {
 
     fn full_band(request: &GeometryRasterRequest) -> RasterBand {
         RasterBand::new(request, 0, request.height).unwrap()
+    }
+
+    #[test]
+    fn stroke_half_phase_is_invariant_under_margin_growth() {
+        // Actual valmini web viewport. Lower-origin f64 arithmetic makes
+        // y=305000 land in row 84 here but row 83 after a 656px margin shift.
+        let foreground = GeometryRasterRequest {
+            view: RasterViewBox::new(50000., 79542.68292682926, 350000., 320457.31707317074)
+                .unwrap(),
+            width: 1640,
+            height: 1317,
+            ..request()
+        };
+        let margin = GeometryRasterRequest {
+            view: RasterViewBox::new(
+                -99268.29268292684,
+                -40457.317073170736,
+                499268.29268292687,
+                440457.31707317074,
+            )
+            .unwrap(),
+            width: 3272,
+            height: 2629,
+            ..foreground
+        };
+        for point in [
+            (52400, 305000),
+            (52700, 305300),
+            (52400, 290000),
+            (52700, 290300),
+        ] {
+            let f = world_to_stroke_vertex(&foreground, point).unwrap();
+            let m = world_to_stroke_vertex(&margin, point).unwrap();
+            assert_eq!(f, (m.0 - 816., m.1 - 656.), "{point:?}");
+        }
+        assert_eq!(
+            world_to_stroke_vertex(&foreground, (52400, 305000))
+                .unwrap()
+                .1,
+            83.
+        );
+        let world = BBox {
+            x0: 52400,
+            y0: 305000,
+            x1: 52700,
+            y1: 305300,
+        };
+        let mut f = full_band(&foreground);
+        let mut m = full_band(&margin);
+        paint_world_rect(&mut f, &foreground, world, paint(&foreground)).unwrap();
+        paint_world_rect(&mut m, &margin, world, paint(&margin)).unwrap();
+        for row in 0..foreground.height as usize {
+            let fs = row * foreground.width as usize * 4;
+            let ms = ((row + 656) * margin.width as usize + 816) * 4;
+            let len = foreground.width as usize * 4;
+            assert_eq!(
+                &f.pixels[fs..fs + len],
+                &m.pixels[ms..ms + len],
+                "row {row}"
+            );
+        }
     }
 
     fn pixel_at_band(band: &RasterBand, x: usize, y: usize) -> [u8; 4] {

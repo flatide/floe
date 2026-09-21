@@ -21,6 +21,10 @@ no GPU path is planned.
 Rectangle, polygon, and PATH-outline interiors all use the same Q32.32
 `PixelCenter | LowerBoundary` scan-conversion policy; rectangles retain an
 allocation-free fast path driven by the same phase-bound helpers.
+Outline vertices also use that top-origin Q32.32 conversion before integer
+rounding (x: floor(x + 1/2), y: ceil(y - 1/2) - 1). This preserves the existing
+y bias without recomputing a lower-origin f64 coordinate whose half-pixel tie
+could change when a margin increases the frame height.
 
 ```sh
 cd rust
