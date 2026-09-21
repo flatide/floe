@@ -158,3 +158,54 @@ build-finished=true, truncation=false) 뒤 `gtk-startup`30.005초 timeout이었�
 native 검사와 전체 배터리는 성공으로 세지 않는다. 실행용 `.venv` 링크는 제거했다.
 
 이 단계는 제품/Rust 버전을 바꾸지 않으며 클립보드도 다시 읽거나 덮어쓰지 않는다.
+
+## 새 debug 폴더의 전체 회귀 — 2026-09-22
+
+소스 `741bcdb`를 고정하고 기존 사용자 소개/브로슈어 변경을 보존한 채 실행했다.
+기존 Cargo lock의 open holder가 없음을 확인한 뒤 `rust/target/debug`를
+`rust/target/debug.before-startup-20260922-741bcdb`로 **보존 개명**했다.
+파일을 삭제하거나 `.o`만 골라 빼지 않았다. 새 debug 디렉터리는 Cargo가 만들었다.
+release/Electron helper 디렉터리는 개명·청소하지 않았으며 필요한 재빌드는 원래
+검증 script가 수행했다. 기존 사용자 설계 캐시와 OS 보안 설정은 변경하지 않았다.
+
+새 `TMPDIR=/private/tmp/floe-clean-debug-Us9ODn/`, `CARGO_BUILD_JOBS=4`로
+**선택 옵션 없이 `sh tools/validate_rust.sh`를 한 번 실행해 exit0/ALL OK**였다.
+새 합성 valmini와 legacy oracle/VFS 캐시를 만들었고, 중간에 소스를 변경하거나
+실패 지점에서 재시작하지 않았다. script에 원래 있던 renderd 준비 실행은 유지됐다.
+따라서 이 결과는 제품의 cold first-launch 성능 측정이나 모든 프로세스의 최초
+기동 보장은 아니다. deadline/오라클/테스트 수를 완화하지 않았다.
+
+- workspace·CLI·캐시 이관·portable·내장 서비스, 속성·설정·clip·질의·스트림,
+  웹/DRC/UI·잡덱, 인덱서/VFS·occupancy·반복/계층·렌더 정확성까지 연속 통과했다.
+- `oracle-build`12.201초, `gtk-startup`0.418초(144경우), `gtk-stream`0.006초
+  (380경우). 이어 native 시작22경우/첫 세대21경우/사전 오류6경우도 통과했다.
+- KLayout 오라클은 jobs1·8 각각13 PX + 2 phase-exact + 14 style 검사를 통과했다.
+  허용된 경계 band와 phase-exact 계약을 따르며 모든 스타일의 전 픽셀 동일 주장은 아니다.
+- 종료 후 새 debug/deps는9,588항목이었다. 기존 약94.5만 항목은 backup에 남는다.
+  임시 `.venv` 링크는 제거했다. Rust 버전은0.12.185이며 제품 소스 변경은 없다.
+
+이후 같은 소스에서 별도로 `CARGO_BUILD_JOBS=4 sh tools/validate_electron.sh`도
+한 번 실행해 **exit0/ELECTRON HOST GATE OK**였다(Electron44.4.3/macOS arm64).
+Rust helper14/service5·fmt·host clippy, Node 통합41/41 및 후속 probe/권한/복구
+단위 검사, 실제 빈 Chromium 창·고지·blob 저장/취소/충돌·SIGINT/SIGTERM/자식
+정리를 통과했다. 이전 timeout3건은 이번에1.673초/0.017초/0.936초였다.
+Electron helper 폴더는 개명하지 않았으므로 그 이전 실패의 원인을 Rust debug
+폴더 하나로 확정하지 않는다. 끝의 의도적 error/SIGTERM 사례는 제품 exit1을
+요구하며 검증기 자체는 exit0이다. OS 클립보드는 다시 접근하지 않았다.
+
+로그와 SHA-256:
+
+- `/private/tmp/floe-clean-debug-full.log`:
+  `60da620846adec9e7867661446674bf38e337d7467062cb51e4cc27a03600064`
+- `/private/tmp/floe-post-clean-electron-full.log`:
+  `e25bdd12c93d5f22984555162aac52eb02d7b30243d4175251353a4aac2db5c6`
+
+실제 Electron 캡처 `floe-electron-e1-artifacts-KBpXer/window.png`를 열어 합성 빈
+Browse 화면도 확인했다. native dialog의 사용자 물리 클릭/IME, 레이아웃 성능이나
+WK 동시 대조는 이번 통합 게이트의 범위가 아니다. 화면 제어 연결 재확인은 여전히
+`CUA_REPL_ENABLED_SURFACES is required`였다.
+
+**최신 로컬 전체 회귀는 통과**로 갱신하되 과거 실패 기록을 삭제하지 않는다.
+macOS의 모든 기동 지연 원인 규명·재발 방지 완료, warning-free 전체 workspace
+clippy, G1/G4 전체, RHEL/ETX/Python-free Linux·정식 배포 수용으로 확대하지 않는다.
+DRC-PUB-01 저장소 호환성 및 native 프로세스 간 단일 인스턴스 정책 결정도 남는다.

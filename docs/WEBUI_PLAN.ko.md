@@ -1,15 +1,21 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-21(0.12.184 정방향 통합; 원격 단계 보류).
+작성 2026-08-29, 갱신 2026-09-22(로컬 전체 회귀 통과; 원격 단계 보류).
 
-최신 작업: [네 번째 jobdeck 통합](WEBUI_JOBDECK_SYNC4.ko.md)은 `9234514`까지
+최신 검증: [빌드 산출물 보존 개명 후 전체 회귀](WEBUI_NATIVE_STARTUP.ko.md#새-debug-폴더의-전체-회귀--2026-09-22)에서
+`741bcdb`의 **전체 Rust/web 배터리 한 번의 연속 실행과 별도 Electron 통합 실행이
+각각 exit0**였다. 과거 timeout을 숨기거나 여러 부분 통과로 전체 통과를 대신하지
+않았다. G1/G4 물리 입력·성능/장애 수용, RHEL/ETX 및 배포·저장소/단일 인스턴스
+결정은 여전히 남는다. 전체 목표 완료는 아니다.
+
+[네 번째 jobdeck 통합](WEBUI_JOBDECK_SYNC4.ko.md)은 `9234514`까지
 47개 커밋과 새 Rust/웹 옵션·렌더 상태를 반영했다. 기본 배터리의97개 실행 대상은
-여러 실행에 걸쳐 모두 통과했다. 최초 기동 timeout·단독 재통과를 구분해 기록하며,
-한 번의 전체 배터리 성공이나 GUI/현장 수용 완료로 집계하지 않는다.
+통합 당시 여러 실행에 걸쳐 모두 통과했다. 그때의 부분 통과와 위 후속 전체
+실행을 구분하며 어느 쪽도 GUI/현장 수용 완료로 집계하지 않는다.
 G1 조사용 [기본 off 브라우저 구간 계측](WEBUI_G1_TIMING.ko.md)을 추가했다.
 입력 큐·이미지 준비·Canvas/CSS 반영을 분리하며, photon·GTK/ETX 수용은 별도다.
 오라클의 간헐적 native 기동 지연은 [단계/loader 진단](WEBUI_NATIVE_STARTUP.ko.md)으로
-추적한다. `layerprops` 선택 게이트 통과와 이전 전체 배터리 timeout을 구분한다.
+추적한다. `layerprops` 선택 게이트, 이전 전체 timeout과 최신 전체 통과를 구분한다.
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
