@@ -6,6 +6,8 @@ mod close_request;
 mod confirmation;
 mod download_fs;
 mod download_qa;
+#[cfg(target_os = "macos")]
+mod empty_qa;
 mod layout_qa;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -103,6 +105,8 @@ fn main() {
         let session = floe_app::embedded::Session::parse(&args)?;
         #[cfg(target_os = "macos")]
         {
+            let mut session = session;
+            let empty_scope = empty_qa::Scope::prepare(&mut session, smoke)?;
             let code = macos::run(
                 session,
                 smoke,
@@ -114,6 +118,10 @@ fn main() {
                 smoke_renderer,
                 smoke_layout,
             )?;
+            if let Some(scope) = &empty_scope {
+                scope.verify()?;
+                println!("DESKTOP EMPTY SCOPE: OK (new private directory; unchanged and empty)");
+            }
             if let Some(fixture) = &fixture {
                 if smoke_renderer {
                     fixture.verify_inputs()?;

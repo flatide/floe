@@ -2,6 +2,10 @@
 
 작성: 2026-09-18. 정본 상위 계획: [WEBUI_PLAN.ko.md](WEBUI_PLAN.ko.md).
 
+2026-09-22 최신 네이티브 재검증은 [§24](#24-빈-native-qa의-cwd-범위-상속-제거-2026-09-22)에
+기록한다. 빈 QA가 cwd를 browse root로 삼는 결함을 고쳤다. 직접 실행과 `.app`
+모두 `menu=hidden` 수용 실패는 남으며, Rust/web·Electron 전체 통과와 구분한다.
+
 ## 1. 확정된 요구와 현재 상태
 
 사용자는 외부 Chrome/Firefox 없이 독립 창으로 실행하고, **현재 웹 UI를
@@ -1399,3 +1403,57 @@ helper에 없다. 기존 취소 기본값, 저장/복구 guard와 종료 응답 
 이번 명시 suite의 성공은 이전 실패 기록을 삭제하지 않는다. CUA 실제 화면·
 물리 Dock/IME/DPI/접근성, 화면/입력 성능 G1, 전체 G4와 RHEL/ETX 및 배포 수용은
 남는다. 정규 Rust/웹 전체 배터리와 이 native suite도 서로 다른 게이트다.
+
+## 24. 빈 native QA의 cwd 범위 상속 제거 (2026-09-22)
+
+`0803873` 뒤 최신 `sh tools/validate_desktop.sh`를 실행했다. 당시 Rust42개 단위
+검사와 native confirmation/JS 검사를 지나, 첫 실제 빈 WebView의
+인증·합성 조합키·Browse 닫기 뒤 **`menu=hidden`, exit1**이었다. 이후 recovery/
+review/storage/cookie/download/renderer 단계는 이 실행에서 미실행이다.
+이전 §23 통과와 최신 실패를 별도로 보존한다. 로그:
+`/private/tmp/floe-native-post-regression-full.log`.
+
+직접 실행과 일반 `.app` 진입을 분리하기 위해 새 개발 번들
+`desktop/target/macos-dev.e3M4HY/Floe2.app`을 만들어 `open -n -W --args --smoke-test`
+경로로 실행했다(실제 명령에서는 앱 경로 및 새0600 stdout/stderr 경로를 지정).
+LaunchServices의 cwd는 `/`였고, 앱은 `approved root must be a non-root directory`
+오류로 끝났다. **일반 Finder 실행의 폴더 선택 결함은 아니다.** 일반 실행은
+`needs_initial_directory()`를 보고 native 폴더 선택을 먼저 요청한다. 반면 빈 QA는
+그 선택을 생략한 채 서비스의 cwd fallback을 사용했다. 직접 QA에서는 저장소를
+조회할 수 있었고 `.app` QA에서는 `/`가 거부되는, 합성 범위/실행 경로 결함이었다.
+
+수정은 macOS의 **명시 QA 진입점만** 바꾼다.
+
+- source/root가 없는 QA이면 random 이름의 새0700 `floe-native-empty-*` 폴더를
+  만들고 기존 `Session::set_initial_directory`로 한 번만 연결한다. 일반 실행,
+  명시 source/root, 별도 layout/review fixture의 범위와 초기 폴더 UI는 그대로다.
+- 성공 종료에는 동일 directory inode/device·0700·빈 상태를 검사한다. fixture는
+  성공/실패 모두 보존하며, 알 수 없는 파일을 읽거나 재귀 삭제하지 않는다.
+- 비macOS의 미지원 실행은 이 QA 폴더를 만들지 않는다. 새로운 의존성/권한 API,
+  clipboard 읽기/쓰기, 제품 환경변수나 activation 우회는 없다.
+- 3개 회귀: 일반/명시 scope 불변, 새 폴더 한 번 연결·예상 밖 파일 보존,
+  cwd `/`의 별도 프로세스에서 안전한 scope 생성. 마지막 검사는 실제 자식을
+  30초 한도로 실행·수거하며 Rust test의 전역 cwd를 변경하지 않는다.
+
+검증:
+
+- desktop unit45 passed/child entry1 ignored(부모 검사가 실제 실행), fmt 및
+  desktop `--all-targets --no-deps -D warnings` clippy 통과.
+- `sh tools/validate_rust.sh --only embedded_host` exit0/ALL OK. 전체 Rust/web
+  배터리를 이 QA 변경 뒤 다시 돌렸다는 뜻은 아니다.
+- 새 수정 번들 `desktop/target/macos-dev.PcKc5P/Floe2.app`의 plist 및 고지279개
+  검사를 통과했다. 기존 앱은 덮어쓰지 않았으며 제품 버전0.12.185는 유지한다.
+- 동일 LaunchServices QA는 새 private root로 인증·초기 UI까지 진입해 cwd 오류가
+  사라졌으나, 첫 메뉴는 여전히 **`menu=hidden`**으로 실패했다. 새 root가0700이고
+  비어 있음도 실행 후 확인했다. `open -W`의 exit0은 앱의 성공 verdict가 아니므로
+  `DESKTOP SMOKE: OK` 부재와 오류 줄을 확인했다. 네이티브 suite 전체 통과로 세지 않는다.
+
+로그: `floe-native-empty-scope-{all-unit,clippy,bundle,embedded}.log`는
+`/private/tmp/` 아래. LaunchServices 수정 전 `/private/tmp/floe-native-ls-MOh539/`,
+수정 후 `/private/tmp/floe-native-ls-fixed-974W17/`에 분리된0600 로그를 보관했다.
+
+[AppKit activate 문서](https://developer.apple.com/documentation/appkit/nsapplication/activate%28%29)는
+요청이 실제 activation을 보장하지 않는다고 명시한다. 이 사실만으로 현재 실패의
+OS 원인을 확정하거나 `document.hidden`을 무시하지 않는다. 가시성/activation 정책,
+120초 smoke deadline 및 메뉴 판정은 바꾸지 않았다. 실제 활성 창·입력/표시 수용,
+G1/G4, RHEL/ETX·배포와 저장소/단일 인스턴스 결정은 남는다.

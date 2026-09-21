@@ -1,5 +1,11 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-22 native 후속: [빈 QA의 cwd 범위 상속](WEBUI_DESKTOP.ko.md#24-빈-native-qa의-cwd-범위-상속-제거-2026-09-22)을
+수정해 `.app`/cwd `/`에서도 새 private 빈 root로 시작한다. desktop45개 단위와
+embedded_host 선택 게이트는 통과했으나, 실제 WKWebView 메뉴는 직접/LaunchServices
+모두 `menu=hidden`으로 실패했다. 아래 Rust/web·Electron 전체 통과를 native 전체
+수용으로 확대하지 않는다. 일반 Finder의 명시 폴더 선택 정책은 변경하지 않았다.
+
 2026-09-22 최신: [새 debug 폴더의 전체 회귀](WEBUI_NATIVE_STARTUP.ko.md#새-debug-폴더의-전체-회귀--2026-09-22)는
 기존 산출물을 보존 개명한 뒤 **선택 없는 전체 Rust/web 배터리 exit0**, 이어
 **Electron 통합 게이트 exit0**를 확인했다. 앞의 여러 부분 통과를 합친 판정이
