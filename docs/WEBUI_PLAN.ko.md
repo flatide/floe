@@ -13,7 +13,11 @@ G1 조사용 [기본 off 브라우저 구간 계측](WEBUI_G1_TIMING.ko.md)을 �
 
 2026-09-18 요구 추가: **외부 브라우저 없이 독립 창 + 내장 WebView**도 필수다.
 HTML/Canvas UI·Rust 서비스를 공유하며 별도 Rust 위젯 UI를 만들지 않는다.
-필수 현장은 **RHEL 8.6/8.10 + ETX/X11**. [데스크톱 계획](WEBUI_DESKTOP.ko.md)의
+필수 현장은 **RHEL 8.6/8.10 + ETX/X11**.
+Electron 후보는 [오프라인 개발 비교 번들](WEBUI_ELECTRON_PORTABLE.ko.md)로
+저장소 밖 실행·고지/파일 무결성·macOS 합성 렌더까지 검사했다. 정식 RHEL/ETX
+채택·서명 배포 또는 G1/G4 전체 수용으로 집계하지 않는다.
+[데스크톱 계획](WEBUI_DESKTOP.ko.md)의
 D0~D3를 추가 추적한다. D1-mac의 시스템 WKWebView 독립 호스트·개발용 `.app`과
 실제 인증/확인 종료 검사를 구현했다. D2-mac 파일 선택/새 파일 저장·클립보드·
 명시적 복구도 구현하고 합성 앱에서 검사했다. macOS 시작 오류/초기 폴더/메뉴를

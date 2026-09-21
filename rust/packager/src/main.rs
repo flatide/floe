@@ -1,6 +1,7 @@
 //! Offline development packager; existing vendored signal dependencies only.
 //! Only its own new staging directory is removed. Never replace an archive.
 mod desktop;
+mod electron;
 mod elf;
 use std::{
     env, fs,
@@ -401,7 +402,11 @@ fn dependency_notices_for(
         }
     }
     let vendor = root.join("rust/vendor").canonicalize()?;
-    let own_vendor = root.join(workspace).join("vendor").canonicalize()?;
+    let own_vendor = match root.join(workspace).join("vendor").canonicalize() {
+        Ok(path) => Some(path),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
     let mut manifests = Vec::new();
     for package in packages {
         if !selected.contains(package["id"].as_str().ok_or("missing package id")?)
@@ -415,7 +420,9 @@ fn dependency_notices_for(
                 .ok_or("missing manifest path")?,
         )
         .canonicalize()?;
-        if !manifest.starts_with(&vendor) && !manifest.starts_with(&own_vendor) {
+        if !manifest.starts_with(&vendor)
+            && !own_vendor.as_ref().is_some_and(|v| manifest.starts_with(v))
+        {
             return Err("non-vendored package in offline closure".into());
         }
         manifests.push(
@@ -728,6 +735,15 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let result = (|| -> Result<()> {
         let root = args.get(1).ok_or("missing repository path")?;
+        if args.get(2).is_some_and(|s| s == "--electron") {
+            return electron::build(Path::new(root), &args[3..]);
+        }
+        if args.get(2).is_some_and(|s| s == "--electron-verify") {
+            if args.len() != 4 {
+                return Err("--electron-verify requires a bundle directory".into());
+            }
+            return electron::verify(Path::new(&args[3]));
+        }
         if args.get(2).is_some_and(|s| s == "--help" || s == "-h") && args.len() == 3 {
             println!("{HELP}");
             return Ok(());

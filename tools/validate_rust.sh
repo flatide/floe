@@ -231,7 +231,8 @@ if gate native_revision; then RAN="$RAN native_revision"
 if gate web_selfcheck; then RAN="$RAN web_selfcheck"
     .venv/bin/python -B tools/validate_web_selfcheck.py; fi
 if gate web_portable; then RAN="$RAN web_portable"
-    .venv/bin/python -B tools/validate_web_portable.py; fi
+    .venv/bin/python -B tools/validate_web_portable.py
+    .venv/bin/python -B tools/validate_electron_portable.py --self-test; fi
 if gate runtime_smoke; then RAN="$RAN runtime_smoke"
     .venv/bin/python -B tools/validate_runtime_smoke.py; fi
 if gate embedded_host; then RAN="$RAN embedded_host"

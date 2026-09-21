@@ -19,7 +19,7 @@ pub(super) fn supplemented(path: &Path) -> bool {
     )
 }
 
-fn unique_crates(crates: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+pub(super) fn unique_crates(crates: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
     let mut names = BTreeMap::new();
     for path in crates {
         let name = path.file_name().ok_or("crate without name")?.to_owned();

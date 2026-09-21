@@ -9,11 +9,17 @@ const parityOnly = process.argv.length===3 && process.argv[2]==='--frame-parity'
 const clipboardOnly = process.argv.length===3 && process.argv[2]==='--clipboard';
 if (process.argv.length !== 2 && !parityOnly && !clipboardOnly) throw new Error('Only --frame-parity or --clipboard is accepted; this test creates its own synthetic source');
 const repo = path.resolve(__dirname, '..');
+// Optional relocated development bundle: no checkout worker/runtime fallbacks.
+const bundle = Object.hasOwn(process.env, 'FLOE_QA_ELECTRON_BUNDLE') ? fs.realpathSync(process.env.FLOE_QA_ELECTRON_BUNDLE) : null;
+if (bundle && ['FLOE_ELECTRON_BIN','FLOE_ELECTRON_SERVICE_BIN','FLOE_ELECTRON_DOWNLOAD_BIN','FLOE_INDEX_BIN','FLOE_RENDERD_BIN']
+  .some(key => Object.hasOwn(process.env, key))) throw new Error('Unset runtime/worker overrides for the relocated bundle gate');
+const launcher = bundle ? path.join(bundle, 'floe2-electron') : path.join(repo, 'tools/run_electron_dev.sh');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-valmini-'));
 fs.chmodSync(root, 0o700);
 console.log('ELECTRON LAYOUT: generated fixture directory ' + root);
 function run(binary, args, label, timeout, env = process.env) {
-  const result = spawnSync(binary, args, { cwd: repo, env, encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024 });
+  const childEnv = bundle && binary === 'sh' ? { ...env, PATH: '/usr/bin:/bin' } : env;
+  const result = spawnSync(binary, args, { cwd: bundle ? root : repo, env: childEnv, encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024 });
   // Never echo raw renderer errors/URLs; only allow the fixed synthetic QA lines.
   const output = (result.stdout || '') + (result.stderr || '');
   for (const line of output.split('\n')) if (/^ELECTRON (SMOKE|LAYOUT|DOWNLOAD|RECOVERY|CLIPBOARD):/.test(line)) console.log(line);
@@ -32,25 +38,25 @@ function snapshot(directory, prefix = '') {
 const source = path.join(root, 'valmini.oas');
 run('FLOE_QA_PYTHON_BIN' in process.env ? process.env.FLOE_QA_PYTHON_BIN : path.join(repo, '.venv/bin/python'),
   ['-B', path.join(repo, 'tools/gen_valmini.py'), source], 'Synthetic generator', 120000);
-run('FLOE_INDEX_BIN' in process.env ? process.env.FLOE_INDEX_BIN : path.join(repo, 'rust/target/release/floe-index'),
+run('FLOE_INDEX_BIN' in process.env ? process.env.FLOE_INDEX_BIN : path.join(bundle || repo, 'rust/target/release/floe-index'),
   ['vfs', source, path.join(root, '.valmini.oas.ice'), '--jobs', '4'], 'Synthetic index', 120000);
 const before = snapshot(root);
 try {
   if(clipboardOnly) {
     console.log('ELECTRON CLIPBOARD: explicit synthetic overwrite; original clipboard will NOT be read/backed up/restored');
-    run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-clipboard-test', source], 'Actual synthetic clipboard', 120000);
+    run('sh', [launcher, '--smoke-clipboard-test', source], 'Actual synthetic clipboard', 120000);
   } else if(parityOnly) {
     for(const reuse of ['on','off']) {
       console.log('ELECTRON LAYOUT: native pan reuse '+reuse);
-      run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-frame-parity-test', source],
+      run('sh', [launcher, '--smoke-frame-parity-test', source],
         'Actual foreground/margin pixel parity', 120000, {...process.env,FLOE_RUST_PAN_REUSE:reuse});
     }
   } else {
-    run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-layout-test', source], 'Actual Electron layout', 120000);
-    run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-clip-download-test', source], 'Actual Electron exact clip POST', 120000);
-    run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-recovery-test', source], 'Actual Electron recovery/crash', 120000);
-    run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-recovery-storage-test', source], 'Actual Electron session storage loss', 60000);
-    run('sh', [path.join(repo, 'tools/run_electron_dev.sh'), '--smoke-recovery-cookie-test', source], 'Actual Electron session cookie loss', 60000);
+    run('sh', [launcher, '--smoke-layout-test', source], 'Actual Electron layout', 120000);
+    run('sh', [launcher, '--smoke-clip-download-test', source], 'Actual Electron exact clip POST', 120000);
+    run('sh', [launcher, '--smoke-recovery-test', source], 'Actual Electron recovery/crash', 120000);
+    run('sh', [launcher, '--smoke-recovery-storage-test', source], 'Actual Electron session storage loss', 60000);
+    run('sh', [launcher, '--smoke-recovery-cookie-test', source], 'Actual Electron session cookie loss', 60000);
   }
 } finally {
   if (JSON.stringify(before) !== JSON.stringify(snapshot(root))) throw new Error('Synthetic source/cache changed during view QA');
