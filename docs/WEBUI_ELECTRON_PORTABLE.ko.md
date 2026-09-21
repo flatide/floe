@@ -80,7 +80,7 @@ OS 패키지 설치, setuid 변경, namespace 설정 변경, `--no-sandbox` 우�
 .venv/bin/python -B tools/validate_electron_portable.py --bundle /absolute/path/floe2-electron-comparison
 ```
 
-첫 두 GUI 없는 launcher/JS 파일 목록 검사는 전체 배터리의 `web_portable`에 배선했다.
+GUI 없는 launcher/JS 파일 목록·재배치 probe 로더 검사는 전체 배터리의 `web_portable`에 배선했다.
 packager unit11개는 옵션/출력 충돌·내용/권한/링크·기존 macOS notices를 포함한다.
 실제 창 검사는 기본 배터리에 자동 추가하지 않는다. 재배치 번들로 기존 합성 valmini
 driver를 실행할 수 있다(이 개발 fixture 생성에만 Python/KLayout 사용).
@@ -174,6 +174,53 @@ revision·selfcheck·기존 portable·새 Electron launcher·macOS native runtim
 프로세스는 종료했다. PATH에서는 Docker/Podman/Colima/Lima/QEMU 실행기를 찾지
 못했다. 이 확인을 시스템 전체 미설치 증명으로 확대하지 않으며, 별도 설치나
 사용자가 보류한 외부 CI 실행은 하지 않았다.
+
+## 2026-09-22 공유 프레임 대조 파일 보완
+
+고정 viewport 대조(`FLOE_QA_CROSS_HOST=1`)가 읽는 공유 파일3개가
+`APP_FILES`에 빠져 있었다: `layout-parity-probe.js`, `cross-viewport-probe.js`,
+`frame-fingerprint-probe.js`. 저장소에서 실행하면 읽히지만 재배치 번들에는 없었다.
+일반 레이아웃 표시 실패가 아니라 **명시적 비교 QA 경로**의 패키징 결함이다.
+기존 검사도 `require()`와 과거 공유 파일3개만 확인하여 동적 `readFileSync`를 놓쳤다.
+
+목록을 고쳤으며 새 회귀는 실제 `APP_FILES`만 임시 폴더로 복사하고 패키지의
+`layout-qa.cjs` 로더를 실행한다. 첫 브라우저 평가 직전에 생성된 script를 구문
+검사하고 멈추므로 픽셀 성공을 흉내 내지 않는다. 정상 목록의 파일 읽기와 구성,
+공유 probe4개를 각각 뺀 ENOENT를 확인한다. 수정 전 실제 누락으로4조합이 실패했고
+수정 후 launcher/closure3개 검사가 통과했다. 로그 `floe-parity-bundle-closure-{before,after}.log`.
+
+새 macOS arm64 개발 archive를 만들어 공백·한글 경로로 옮긴 뒤 실제로 실행했다.
+Rust/서비스/renderd/runtime override5개를 모두 unset하고 앱 cwd는 새 합성 폴더,
+PATH는 `/usr/bin:/bin`이다. Python/KLayout은 저장소 쪽 valmini 생성에만 사용했고
+실제 앱의 worker/runtime/shared script는 모두 재배치 번들 것을 썼다.
+
+```sh
+# 앞의 runtime/worker override5개를 모두 unset한 개발 환경에서 실행
+FLOE_QA_ELECTRON_BUNDLE=/absolute/path/floe2-electron-comparison \
+FLOE_QA_CROSS_HOST=1 \
+  node tools/validate_electron_layout.cjs --frame-parity
+```
+
+- pan reuse on/off 각각 geometry+frames+labels → geometry+frames → geometry3단계, 총6단계 통과.
+  모든 단계1600×1200 device px/DPR2, world bbox `[50000,87500,350000,312500]` DBU.
+  전경/margin의 raw RGBA 해시는 이 fixture에서 모두 일치했다. driver도3개 phase,
+  픽셀 수/DPR/카메라/해시를 파싱하여 자식의 exit0 문구만으로 통과시키지 않는다.
+- source/cache SHA-256 불변, native 취소/명시 종료·서비스 join, sandbox/탐색 차단 통과.
+  실제 창 PNG도 확인했다. 패키지970항목은 실행 전 독립 inventory·자체 검사와
+  실행 후 자체 검사에서 일치했다. `floe-parity-bundle-layout.log`, `...-inventory.log`.
+- packager unit11개, fmt/clippy, 공유 probe/record 파서12개, 정규
+  `sh tools/validate_rust.sh --only web_portable` 통과. 전체 Rust/web 배터리 통과가 아니며
+  `af40d64`에 기록한 전체 oracle-build180초/helper3건 timeout은 여전히 열린 상태다.
+- archive: `/private/tmp/floe-electron-parity-0.12.185-af40d64.tar.gz`, SHA-256
+  `0cb6e096ebf8d47597a15b33a2c54ca01dfa1f04f5c919d70429e582ba40f411`.
+  source revision은 수정 작업트리 `af40d642c57f821357bab05bdbec108e8747f65d+`다.
+  검사 경로: `/private/tmp/floe-parity-relocated.lfUF8J/이동 경로/floe2-electron-comparison`.
+  Rust 제품0.12.185/Electron shell0.1.2/런타임44.4.3은 바꾸지 않았다.
+
+이는 **패키지의 공통 probe 실행**이며 WKWebView를 다시 실행한 동시 교차 호스트
+대조나 input→photon/성능/RHEL/물리 입력 수용은 아니다. 합성 검사는 클립보드·
+DRC 저장·기존 설계를 건드리지 않았다. `BUILD.txt`의 `gui_checked=false`는 조립 시점의
+자동 GUI 검사 부재를 뜻하므로 사후 개발 검사로 그 파일을 고쳐 무결성을 깨지 않았다.
 
 ## 전체 goal 잔여
 

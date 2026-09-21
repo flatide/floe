@@ -1,5 +1,10 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-22 후속: [Electron 비교 번들](WEBUI_ELECTRON_PORTABLE.ko.md)의 고정 viewport
+probe3개 누락을 재현·수정하고 재배치 번들의 실제6단계 렌더/종료·970항목 무결성을
+확인했다. 패키지 실행 경로의 근거이며 WK 동시 대조·성능/현장 수용이나 아래
+전체 gate timeout 해소로 계산하지 않는다.
+
 2026-09-22 후속: [Rust 서비스 종료 UI](WEBUI_ELECTRON_REVIEW.ko.md#rust-서비스-종료-ui--2026-09-22)는
 서비스 종료 시 기존 문서가 유지되거나 열린 확인창 때문에 오류 안내가 생략되는
 경로를 바꿨다. 실제 합성 SIGKILL에서 안내 유지·Reload 취소·worker 종료·명시

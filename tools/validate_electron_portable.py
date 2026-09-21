@@ -9,12 +9,19 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+def app_files():
+    text = (REPO / "rust/packager/src/electron.rs").read_text()
+    return set(re.findall(r'"([^"]+)"', text.split("const APP_FILES:", 1)[1]
+                          .split("];", 1)[0]))
 
 
 class LauncherTests(unittest.TestCase):
@@ -56,9 +63,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
 
     def test_explicit_javascript_closure(self):
-        text = (REPO / "rust/packager/src/electron.rs").read_text()
-        listed = set(re.findall(r'"([^"]+)"', text.split("const APP_FILES:", 1)[1]
-                                .split("];", 1)[0]))
+        listed = app_files()
         self.assertIn("electron/main.cjs", listed)
         for name in listed:
             source = REPO / name
@@ -70,6 +75,49 @@ class LauncherTests(unittest.TestCase):
                 self.assertIn(str(candidate), listed, (name, relative))
         for shared in ("menu-action.js", "recovery-status.js", "frame-parity-probe.js"):
             self.assertIn("desktop/ui/" + shared, listed)
+
+    def test_relocated_cross_host_probe_reads_and_missing_file_failures(self):
+        # Exercise the actual packaged loader, not a regex guess about dynamic
+        # readFileSync paths. Stop before browser evaluation; no pixel verdict.
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Node is required for this development-only gate")
+        script = r"""
+const path=require('node:path'),vm=require('node:vm');
+const {run}=require(process.argv[1]);
+const stop=Error('fixture read boundary');let calls=0;
+run({window:{show(){},focus(){},webContents:{focus(){}}},parityOnly:true,
+  evalOwned:async code=>{new vm.Script(code);calls++;throw stop;}}).then(()=>process.exit(1),e=>{
+  if(e===stop&&calls===1)console.log('PROBE_FILE_CLOSURE: OK');
+  else if(e.code==='ENOENT')console.log('MISSING_PROBE: '+path.basename(e.path));
+  else process.exitCode=1;
+});
+"""
+        probes = ("layout-parity-probe.js", "frame-parity-probe.js",
+                  "cross-viewport-probe.js", "frame-fingerprint-probe.js")
+        with tempfile.TemporaryDirectory(prefix="floe-probe-closure-") as td:
+            work = Path(td).resolve()
+            for missing in (None, *probes):
+                with self.subTest(missing=missing):
+                    bundle = work / (missing or "complete")
+                    for name in app_files():
+                        if name == "desktop/ui/" + str(missing):
+                            continue
+                        dest = bundle / name
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(REPO / name, dest)
+                    scratch = bundle / "scratch"
+                    scratch.mkdir()
+                    result = subprocess.run(
+                        [node, "-e", script, str(bundle / "electron/layout-qa.cjs")],
+                        cwd=bundle, env=dict(os.environ, PATH="", TMPDIR=str(scratch),
+                                             FLOE_QA_CROSS_HOST="1"),
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    expected = ("MISSING_PROBE: " + missing if missing
+                                else "PROBE_FILE_CLOSURE: OK")
+                    self.assertEqual(result.stdout.splitlines()[-1], expected)
+                    self.assertNotIn("FRAME PARITY OK", result.stdout)
 
 
 def inspect_bundle(bundle):

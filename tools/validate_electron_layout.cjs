@@ -5,6 +5,7 @@
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
+const { parse: parseFrames } = require('./native-frame-comparison.cjs');
 const parityOnly = process.argv.length===3 && process.argv[2]==='--frame-parity';
 const clipboardOnly = process.argv.length===3 && process.argv[2]==='--clipboard';
 if (process.argv.length !== 2 && !parityOnly && !clipboardOnly) throw new Error('Only --frame-parity or --clipboard is accepted; this test creates its own synthetic source');
@@ -22,8 +23,10 @@ function run(binary, args, label, timeout, env = process.env) {
   const result = spawnSync(binary, args, { cwd: bundle ? root : repo, env: childEnv, encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024 });
   // Never echo raw renderer errors/URLs; only allow the fixed synthetic QA lines.
   const output = (result.stdout || '') + (result.stderr || '');
-  for (const line of output.split('\n')) if (/^ELECTRON (SMOKE|LAYOUT|DOWNLOAD|RECOVERY|CLIPBOARD):/.test(line)) console.log(line);
+  const lines = output.split('\n').filter(line => /^ELECTRON (SMOKE|LAYOUT|DOWNLOAD|RECOVERY|CLIPBOARD|CROSS):/.test(line));
+  for (const line of lines) console.log(line);
   if (result.status !== 0) throw new Error(label + ' failed; no existing design/cache modified');
+  return lines;
 }
 function snapshot(directory, prefix = '') {
   const result = {};
@@ -48,8 +51,17 @@ try {
   } else if(parityOnly) {
     for(const reuse of ['on','off']) {
       console.log('ELECTRON LAYOUT: native pan reuse '+reuse);
-      run('sh', [launcher, '--smoke-frame-parity-test', source],
+      const lines = run('sh', [launcher, '--smoke-frame-parity-test', source],
         'Actual foreground/margin pixel parity', 120000, {...process.env,FLOE_RUST_PAN_REUSE:reuse});
+      if (process.env.FLOE_QA_CROSS_HOST === '1') {
+        const frames = parseFrames(lines, 'ELECTRON CROSS: ');
+        // This driver owns valmini (1 nm DBU) and the fixed 200,200,300 um
+        // probe. Validate camera/phase evidence, not just a child exit marker.
+        if (frames.some(f => JSON.stringify(f.bbox) !== '[50000,87500,350000,312500]' || f.dpr !== frames[0].dpr)) {
+          throw Error('Fixed synthetic camera or DPR changed');
+        }
+        console.log('ELECTRON LAYOUT: fixed viewport verified ' + JSON.stringify({reuse,pixels:frames[0].pixels,dpr:frames[0].dpr,phases:frames.length}));
+      }
     }
   } else {
     run('sh', [launcher, '--smoke-layout-test', source], 'Actual Electron layout', 120000);

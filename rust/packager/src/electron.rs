@@ -36,6 +36,9 @@ const APP_FILES: &[&str] = &[
     "desktop/ui/menu-action.js",
     "desktop/ui/recovery-status.js",
     "desktop/ui/frame-parity-probe.js",
+    "desktop/ui/layout-parity-probe.js",
+    "desktop/ui/cross-viewport-probe.js",
+    "desktop/ui/frame-fingerprint-probe.js",
     "rust/web/ui/protocol.js",
 ];
 const WORKERS: &[(&str, &str)] = &[
