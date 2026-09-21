@@ -14,7 +14,25 @@ async function run({ window, evalOwned, wait, recover, recovery, selectConfirm, 
   }
   const frame = "(()=>{const e=id=>document.getElementById(id);return !document.hidden&&!e('logout').disabled&&!e('fit').disabled&&/^Live.*margin crop/.test(e('status').textContent)&&!e('margin-canvas').hidden&&!!e('margin-canvas').dataset.frameId&&!/Prefetching/.test(e('margin-info').textContent);})()";
   async function geometry() {
-    await wait(frame);
+    try { await wait(frame); }
+    catch (error) {
+      // Fixed synthetic-state booleans only; no page text, URLs or credentials.
+      let timer;
+      const flags = await Promise.race([evalOwned(`(()=>{const e=id=>document.getElementById(id);return {
+        visible:!document.hidden,logout:!!e('logout')&&!e('logout').disabled,fit:!!e('fit')&&!e('fit').disabled,
+        live:/^Live/.test(e('status').textContent),crop:/^Live.*margin crop/.test(e('status').textContent),
+        foreground:!!e('canvas').dataset.frameId,margin:!!e('margin-canvas').dataset.frameId,
+        margin_visible:!e('margin-canvas').hidden,prefetch:/Prefetching/.test(e('margin-info').textContent),
+        rendering:!e('rendering').hidden,failed:/renderer failed/i.test(e('notice').textContent)};})()`).catch(() => null),
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), 1000); })]);
+      clearTimeout(timer);
+      const safe = {};
+      for (const key of ['visible','logout','fit','live','crop','foreground','margin','margin_visible','prefetch','rendering','failed']) {
+        safe[key] = typeof flags?.[key] === 'boolean' ? flags[key] : null;
+      }
+      console.log('ELECTRON RECOVERY: frame flags ' + JSON.stringify(safe));
+      throw error;
+    }
     await evalOwned('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))');
     const rect = await evalOwned("(()=>{const r=document.getElementById('viewport').getBoundingClientRect();return {x:Math.ceil(r.x),y:Math.ceil(r.y),width:Math.floor(r.width)-1,height:Math.floor(r.height)-1};})()");
     const image = await web.capturePage(rect, { stayHidden: true, stayAwake: false });

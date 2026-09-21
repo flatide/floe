@@ -165,6 +165,13 @@ frame** 단계가 실패해 exit1이다. cookie-loss는 실행되지 않았다. 
 않았지만 원인 해결로 세지 않는다. 초기 margin 프레임 대기 실패도 미해결로 남긴다.
 기존 source/cache SHA-256 불변 검사는 실패 정리에서도 수행했다.
 
+후속 `floe-electron-initial-frame-storage.log`의 단독 storage 검사와
+`floe-electron-initial-frame-{1..6}.log`의 storage/cookie 교대6회는 모두 exit0이다.
+각각 새 비공개 세션을 사용했고 첫 실패에서 중단하는 직렬 표본이다. 이번에는
+실패를 재현하지 못했으므로 정상화/원인 수정으로 세지 않는다. `recovery-qa.cjs`는
+프레임 대기 실패 때 가시성·Live/crop·foreground/margin 존재·prefetch·실패 표시를
+boolean으로만 수집한다. 추가 진단은1초 후 null로 끝나며 최초 실패를 그대로 반환한다.
+
 현장 RHEL에서 실행하지 않았다. Linux sidecar `cargo check`와 아래 공식 런타임의
 GLIBC 정적 점검만 통과했으며 ETX·전체 시스템 라이브러리·Chromium sandbox·서버
 메모리 비용을 검증한 것은 아니다.
