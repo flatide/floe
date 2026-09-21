@@ -22,6 +22,26 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from floe import fillpat
 
+NATIVE_TIMEOUT_SECONDS = 30
+
+
+def timeout_phase(stderr):
+    """Only fixed markers, never oracle contents, paths or assertion text."""
+    if isinstance(stderr, str):
+        stderr = stderr.encode("utf-8", errors="replace")
+    allowed = {b"entered", b"codec", b"styles", b"view0", b"view1", b"view2", b"view3", b"done"}
+    phase = "not_observed"
+    for line in (stderr or b"")[-1024 * 1024:].splitlines():
+        prefix = b"LAYERPROPS PHASE "
+        if line.startswith(prefix) and line[len(prefix):] in allowed:
+            phase = line[len(prefix):].decode("ascii")
+    return phase
+
+
+def timeout_diagnostic(stderr):
+    return "LAYERPROPS TIMEOUT: deadline=%ss last_phase=%s completion=false" % (
+        NATIVE_TIMEOUT_SECONDS, timeout_phase(stderr))
+
 
 def gtk_view(metadata, rows):
     """Run the actual GTK methods with only their checkbox boundary mocked."""
@@ -206,9 +226,15 @@ def main(fixture):
         oracle = work / "oracle.json"
         oracle.write_text(json.dumps(dict(cases=cases, styles=styles, views=views)))
         before = digest(work)
-        result = subprocess.run([binaries[0], "--ignored", "--nocapture"],
-                                env=dict(env, FLOE_LAYERPROPS_ORACLE=str(oracle)), capture_output=True, text=True, timeout=30)
+        try:
+            result = subprocess.run([binaries[0], "--ignored", "--nocapture"],
+                                    env=dict(env, FLOE_LAYERPROPS_ORACLE=str(oracle)), capture_output=True, text=True,
+                                    timeout=NATIVE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            print(timeout_diagnostic(error.stderr), file=sys.stderr)
+            raise  # No retry, fallback, extended deadline, or inferred success.
         assert result.returncode == 0, (result.stdout, result.stderr)
+        assert timeout_phase(result.stderr) == "done", "native oracle did not report its final phase"
         assert "LAYERPROPS: ALL OK (72 documents, 980 styles, 4 native view models)" in result.stdout, result.stdout
         assert digest(work) == before, "native property reading modified an input/cache or left temporary files"
         print(result.stdout.strip())

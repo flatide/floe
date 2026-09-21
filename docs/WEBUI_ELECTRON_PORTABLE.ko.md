@@ -142,7 +142,9 @@ revision·selfcheck·기존 portable·새 Electron launcher·macOS native runtim
 패키징 코드 중 어느 쪽이 근본 원인인지 확정하지 않으며, 기존 gate의 timeout/
 오라클을 완화하지 않았다. 같은 소스의 **후속 전체 배터리 안에서는 기존 portable
 검사가 통과**했지만, 이 성공으로 앞선 단독 실행 실패나 간헐적 기동 문제를 지우지
-않는다. 다음 조사는 native oracle의 loader/startup 경계이며 기능 회귀와 구분한다.
+않는다. 후속 [native oracle 단계/loader 진단](WEBUI_NATIVE_STARTUP.ko.md)에서
+테스트 본문 전 대기와 실제 속성 오라클 통과를 별도 확인했다. 기동 문제 해결이나
+전체 재통과로 판정하지 않는다.
 
 ### 2026-09-22: 패키저 밖 startup 대조
 

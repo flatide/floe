@@ -14,12 +14,16 @@ use std::{
 #[test]
 #[ignore = "run tools/validate_layerprops.py for private Python/GTK oracles"]
 fn python_codec_and_gtk_initial_visibility_match() {
+    // Fixed, non-sensitive phase markers distinguish pre-test startup from
+    // codec/model work if the unchanged external 30s deadline expires.
+    eprintln!("LAYERPROPS PHASE entered");
     let oracle: Value = serde_json::from_slice(
         &std::fs::read(std::env::var_os("FLOE_LAYERPROPS_ORACLE").unwrap()).unwrap(),
     )
     .unwrap();
     let cases = oracle["cases"].as_array().unwrap();
     assert_eq!(cases.len(), 72);
+    eprintln!("LAYERPROPS PHASE codec");
     for (i, case) in cases.iter().enumerate() {
         let doc = layerprops::parse(case["text"].as_str().unwrap()).unwrap();
         assert_eq!(json!(doc.rows), case["rows"], "parse {i}");
@@ -36,6 +40,7 @@ fn python_codec_and_gtk_initial_visibility_match() {
     }
     let styles = oracle["styles"].as_array().unwrap();
     assert_eq!(styles.len(), 980);
+    eprintln!("LAYERPROPS PHASE styles");
     for case in styles {
         let style = Style {
             layer: (7, 20),
@@ -52,7 +57,8 @@ fn python_codec_and_gtk_initial_visibility_match() {
     }
     let views = oracle["views"].as_array().unwrap();
     assert_eq!(views.len(), 4);
-    for case in views {
+    for (index, case) in views.iter().enumerate() {
+        eprintln!("LAYERPROPS PHASE view{index}");
         let resources = Resources::new(Limits::default()).unwrap();
         let data = ManagedDataset::open(
             &resources,
@@ -108,4 +114,5 @@ fn python_codec_and_gtk_initial_visibility_match() {
         );
     }
     println!("LAYERPROPS: ALL OK (72 documents, 980 styles, 4 native view models)");
+    eprintln!("LAYERPROPS PHASE done");
 }

@@ -253,6 +253,7 @@ if gate embedded_host; then RAN="$RAN embedded_host"
 if gate app_render; then RAN="$RAN app_render"
     .venv/bin/python tools/validate_app_render.py "$FLOE2_SMOKE_SRC"; fi
 if gate layerprops; then RAN="$RAN layerprops"
+    .venv/bin/python -B tools/validate_layerprops_startup.py
     .venv/bin/python -B tools/validate_layerprops.py "$FLOE2_SMOKE_SRC"; fi
 if gate layer_defaults; then RAN="$RAN layer_defaults"
     .venv/bin/python -B tools/validate_layer_defaults.py "$FLOE2_SMOKE_SRC"; fi

@@ -8,6 +8,8 @@
 한 번의 전체 배터리 성공이나 GUI/현장 수용 완료로 집계하지 않는다.
 G1 조사용 [기본 off 브라우저 구간 계측](WEBUI_G1_TIMING.ko.md)을 추가했다.
 입력 큐·이미지 준비·Canvas/CSS 반영을 분리하며, photon·GTK/ETX 수용은 별도다.
+오라클의 간헐적 native 기동 지연은 [단계/loader 진단](WEBUI_NATIVE_STARTUP.ko.md)으로
+추적한다. `layerprops` 선택 게이트 통과와 이전 전체 배터리 timeout을 구분한다.
 관련 정본: `FLOE2_OPTIMIZATION.ko.md`(F2R-10/11),
 `RUST_RENDERER_PLAN.ko.md`, `SPEC-VIEWER.ko.md`, `rust/BUILD.md`.
 
