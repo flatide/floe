@@ -22,6 +22,7 @@ node --test ../../desktop/ui/frame-parity-probe.test.cjs
 node --test ../clipboard-controller.test.cjs
 node --test ../termination-signals.test.cjs
 node --test ../readiness-qa.test.cjs
+node --test ../../tools/validate_electron_review.test.cjs
 cd "$repo"
 sh tools/run_electron_dev.sh --smoke-test
 sh tools/run_electron_dev.sh --smoke-download-test

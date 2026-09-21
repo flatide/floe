@@ -1,5 +1,10 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-22: [Electron DRC 복구 QA](WEBUI_ELECTRON_REVIEW.ko.md)는 note/waive의
+수락 응답 대기 중 실제 표시 프로세스 종료, 자동 재전송 없음, 같은 승인/receipt의
+명시 재확인과 재조회를 추가한다. Rust worker/디스크 장애 및 전체 G4 수용은 아니다.
+전체 배터리는 `layerprops`를 지나 다음 `layer_defaults`30초 timeout으로 실패했다.
+
 2026-09-21 최신 로컬 재검증은 [§7](#7-새-fixture의-legacy-오라클-준비-대기-2026-09-21)에
 기록한다. 전체 실행의 GTK 시작 timeout과 영향 범위6개 게이트의 성공은 별개다.
 

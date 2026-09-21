@@ -80,6 +80,13 @@ sh tools/validate_rust.sh --only layerprops
 
 ## 잔여
 
+2026-09-22 후속 전체 실행(`cb1f2c9`, 소스 고정)은 layerprops의 순수4개와 실제
+72문서/980스타일 오라클을 통과했으나, 다음 `layer_defaults-c910bc4e9579c5bb`의
+`--ignored --nocapture` 실행에서30초 timeout으로 종료됐다.
+로그 `/private/tmp/floe-webui-after-startup-full.log`. 해당 실행에는 본문 진입
+표시/stack 관측이 없어 구체 원인은 미확정이며 앞선 layerprops loader 관측을
+그대로 적용하지 않는다. 임시 `.venv` 링크는 종료 시 제거됐다.
+
 다음 전체 실행에서 시작 대기와 본문 단계 실패를 분리해 기록한다. 모든 테스트
 실행 파일을 무조건 미리 실행하거나 보안 설정을 완화하는 해법은 채택하지 않는다.
 G1/G4 실제 UI·장애 수용, RHEL8.6/8.10+ETX, 정식 호스트 채택·서명/배포는 별도다.
