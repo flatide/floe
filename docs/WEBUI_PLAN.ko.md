@@ -23,6 +23,8 @@ WKWebView의 명시적 GET 재로딩을 별도 QA로 추적한다(§11; DRC/cras
 추가로 합성 전용 native 자동 게이트에서 성공한 메모·waive 저장 응답을 한 번씩
 잃게 한 뒤, 재로딩 중 POST 비재생·명시적인 동일 승인 재확인·reader/read-back을
 검사한다(§13). 실제 process/worker kill·디스크/storage 소실 검사는 별도로 남는다.
+닫기 JS 콜백 유실에도 5초 뒤 기본 취소인 native 확인을 제공하며, 중복 요청과
+이전 문서의 늦은 응답을 제한한다(§14). 시간 초과 자체로 종료/저장하지 않는다.
 전체 배터리는 기존 오라클의 macOS 실행 timeout으로 미통과이며, 선택 재검증과
 구분한다([검증 기록](WEBUI_DESKTOP.ko.md#7-d2-mac-파일클립보드복구-2026-09-18)).
 

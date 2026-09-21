@@ -806,3 +806,48 @@ OS IME/DPI/접근성, 서명/공증, RHEL/ETX·G1/G4는 여전히 별도다.
   `floe-native-review-ui-final.log`, `floe-native-review-native-gate.log`,
   `floe-native-review-battery.log`, `floe-native-review-{unit,clippy,release}.log`,
   `floe-native-review-release-ui.log`.
+
+## 14. D2-mac 응답 없는 닫기 요청 (2026-09-21)
+
+네이티브 닫기/Cmd+W/Quit은 웹의 End session 확인창을 요청하지만, 기존에는
+`evaluateJavaScript`의 완료 콜백이 오지 않으면 그 요청이 무기한 대기했다.
+Force End Session 메뉴는 사용할 수 있었으나 닫기 버튼 자체에는 후속 안내가
+없었다. 정상 완료/JS 오류와 달리 **콜백 자체가 없는 경우**를 보완했다.
+
+- 닫기 확인 요청의 응답 대기는 **5초**다. 기한이 지나거나 확인창을 열지 못했다는
+  응답이면 기존 native Force End Session 확인을 제공한다. **5초 뒤 자동 종료가
+  아니다.** Cancel/Return 기본값과 명시적 End Session 승인, 저장 완료 가능성
+  경고, 취소·worker join 계약을 유지한다. 다른 native 파일/확인창은 덮지 않는다.
+- 응답을 기다리는 중 반복 닫기/Cmd+Q는 새 JS 요청을 쌓거나 기한을 연장하지
+  않는다. 정상 웹 확인창의 `opened` 응답이 오면 타이머를 해제하므로 사용자가
+  확인창을 오래 읽는 것은 제한하지 않는다.
+- 요청별 ticket과 복구 epoch로 늦은 콜백을 버린다. 시간 만료·강제 종료 확인
+  취소 이후의 새 닫기, Recover View, WebView 실패가 이전 콜백에 영향받지 않는다.
+  종료 watchdog은 저장/색인/clip 승인이나 bootstrap을 재전송하지 않는다.
+
+순수 상태 회귀는 응답 유실·중복 요청·정상/실패 응답·기한 직후 응답 경합·복구 및
+무효화·취소 뒤 재요청·ticket 고갈을 검사한다. 기존 빈 워크스페이스 명령
+`--smoke-test-recovery`도 확장했다. 복구 성공 뒤 닫기 JS 실행/콜백 하나를 의도적으로
+생략하고 중복 native 닫기를 보낸다. 실제 5초 타이머와 NSAlert를 거쳐 **Cancel
+컨트롤의 action**을 실행한 뒤 같은 세션 유지와 정상 닫기/취소/Quit을 확인한다.
+테스트에 소스/reviewer/쓰기 경로를 지정할 수 없고 강제 종료를 자동 승인하지
+않는다. 이는 실제 WebContent process hang/kill이나 물리 Return 입력의 수용을
+뜻하지 않는다. 해당 장애 및 OS 입력·접근성, 서명/공증, RHEL/ETX·G1/G4는 남는다.
+
+실행 결과: host unit **21 passed**(새 닫기 상태 6개), fmt 및 host clippy
+`--all-targets --no-deps -- -D warnings` 통과. `sh tools/validate_desktop.sh`는
+**exit 0**이며 실제 native Cancel 뒤 같은 인증 문서/메뉴/일반 종료가 동작했고
+서비스가 join됐다. 이전 note/waive 응답 유실 복구와 입력 파일 불변 검사도 그대로
+통과했다. 로그는 `/private/tmp/floe-close-timeout-{unit,clippy,native}.log`이다.
+새 release 개발 `.app`에서도 worker 환경 override 없이 같은 복구/타임아웃/
+취소/정상 종료 검사를 **exit 0**으로 통과했다(`floe-close-timeout-release-ui.log`).
+개발 고지 279파일 검사는 통과했지만 서명·공증 완료 패키지는 아니다.
+
+추가 선택 배터리의 첫 실행은 작업 트리에 `.venv`가 없어 selector 진입에서
+exit 1이었다(`floe-close-timeout-battery.log`). 제품 실패와 구분한다. 정본의 기존
+개발 interpreter와 KLayout/numpy를 읽기 확인하고 임시 `.venv` 링크로 재검증했다.
+새 패키지 설치나 제품의 Python 런타임 추가는 하지 않았다.
+같은 `--only embedded_host,web_ui,validation_selector` 재실행은 **exit 0 / ALL OK**
+(`floe-close-timeout-battery-retry.log`)이며 검사 후 이번에 만든 링크만 제거했다.
+기존 정본 가상환경은 변경하지 않았다. 선택 배터리 통과를 전체 Rust/GTK 및 현장
+수용으로 합산하지 않는다.

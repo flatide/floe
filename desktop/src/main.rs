@@ -1,6 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod actions;
+mod close_request;
 #[cfg(target_os = "macos")]
 mod macos;
 mod recovery;
@@ -18,7 +19,7 @@ fn main() {
             Current host: macOS only; RHEL 8/ETX host is pending.\n\
             --smoke-test: empty-workspace native authentication/close test only.\n\
             --smoke-test-notices: same test plus packaged About notice reads.\n\
-            --smoke-test-recovery: same test plus explicit credential-free reload.\n\
+            --smoke-test-recovery: same test plus explicit reload and close-timeout cancel.\n\
             --smoke-test-review-recovery: NEW synthetic files only; save ACK loss/reload.\n\
             --check-notices: verify every packaged notice chunk; no GUI or workers.\n\
             With no SOURCE or --root, choose an approved working folder before startup.\n\

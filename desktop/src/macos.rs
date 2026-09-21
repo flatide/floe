@@ -1,6 +1,7 @@
 //! The only native FFI boundary. All AppKit/WebKit objects stay on the main
 //! thread; delegates and completion blocks are retained through their use.
 use crate::actions::Action;
+use crate::close_request::{CloseRequest, Event as CloseEvent};
 use crate::recovery::{Event as RecoveryEvent, Recovery};
 use crate::service::Service;
 use crate::transfers::{self, PendingFile};
@@ -44,6 +45,7 @@ struct State {
     downloads: RefCell<BTreeMap<usize, Download>>,
     transfer_view: RefCell<Option<TransferView>>,
     recovery: RefCell<Recovery>,
+    close_request: RefCell<CloseRequest>,
     navigation: RefCell<Option<Retained<WKNavigation>>>,
     smoke: bool,
     smoke_notices: bool,
@@ -480,6 +482,7 @@ impl Host {
             downloads: RefCell::new(BTreeMap::new()),
             transfer_view: RefCell::new(None),
             recovery: RefCell::new(Recovery::default()),
+            close_request: RefCell::new(CloseRequest::default()),
             navigation: RefCell::new(None),
             smoke,
             smoke_notices,
@@ -494,6 +497,7 @@ impl Host {
         unsafe { msg_send![super(this), init] }
     }
     fn fail(&self, message: &'static str) {
+        self.ivars().close_request.borrow_mut().invalidate();
         self.ivars().recovery.borrow_mut().fail();
         self.ivars().navigation.borrow_mut().take();
         *self.ivars().failure.borrow_mut() = Some(message);
@@ -675,8 +679,19 @@ impl Host {
             .addButtonWithTitle(&NSString::from_str(accept))
             .setKeyEquivalent(ns_string!(""));
         let host = self.retain();
+        let close_qa = self.ivars().smoke_recovery
+            && self.ivars().smoke_step.get() == 15
+            && title == "Force End Session?";
         let callback = RcBlock::new(move |result| {
             host.ivars().panel_open.set(false);
+            if close_qa {
+                if result != NSAlertFirstButtonReturn || host.ivars().service.borrow().finished() {
+                    host.fail("native close timeout QA did not cancel safely");
+                    return;
+                }
+                eprintln!("[desktop-smoke] close timeout: native Cancel; session preserved");
+                host.ivars().smoke_step.set(16);
+            }
             if result == NSAlertSecondButtonReturn {
                 action(&host);
             }
@@ -685,6 +700,25 @@ impl Host {
             self.ivars().window.get().unwrap(),
             Some(&callback),
         );
+        if close_qa {
+            // Empty-workspace QA only: exercise the real NSAlert cancel action,
+            // not an OS Return/keyboard acceptance test. Never accept Force End.
+            if cancel.keyEquivalent().to_string() != "\r"
+                || !alert.window().initialFirstResponder().is_some_and(|r| {
+                    std::ptr::eq(
+                        &*r as *const NSView,
+                        &*cancel as *const NSButton as *const NSView,
+                    )
+                })
+            {
+                self.fail("native close timeout QA has a non-cancel default");
+                return;
+            }
+            // SAFETY: Live Cancel control of this host-owned NSAlert, main thread.
+            unsafe {
+                cancel.performClick(None);
+            }
+        }
     }
     fn recover(&self) {
         if self.ivars().recovery.borrow().busy() {
@@ -715,6 +749,7 @@ impl Host {
             }
             // Explicit GET of a credential-free root, using the SAME WebView
             // and data store. Never reload bootstrap, POST, or an approval.
+            self.ivars().close_request.borrow_mut().invalidate();
             let url = NSURL::URLWithString(&NSString::from_str(&format!("{origin}/"))).unwrap();
             let navigation = unsafe { web.loadRequest(&NSURLRequest::requestWithURL(&url)) };
             let started = navigation.is_some();
@@ -727,6 +762,7 @@ impl Host {
         }
     }
     fn force_close(&self) {
+        self.ivars().close_request.borrow_mut().invalidate();
         self.confirm("Force End Session?", "Use only when the normal End session dialog is unavailable. Unsaved drafts and in-progress downloads will be discarded. Earlier approved writes may have completed: check the files before retrying. No save will be approved or replayed.", "End Session", |host| {
             host.cancel_downloads();
             host.ivars().service.borrow().cancel();
@@ -758,18 +794,33 @@ impl Host {
             // a save, select a file, or authorize the DELETE by itself.
             let host = self.retain();
             let epoch = self.ivars().recovery.borrow().epoch();
+            let Some(ticket) = self
+                .ivars()
+                .close_request
+                .borrow_mut()
+                .begin(Instant::now(), epoch)
+            else {
+                self.status("Waiting for the close dialog — Force End Session remains available");
+                return;
+            };
+            if self.ivars().smoke_recovery && self.ivars().smoke_step.get() == 15 {
+                // Intentionally omit this one evaluation/completion in the empty
+                // QA session. The real timer/NSAlert still run; no WebKit kill.
+                return;
+            }
             let callback = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-                if host.ivars().recovery.borrow().epoch() != epoch
-                    || host.ivars().failure.borrow().is_some()
-                {
-                    return;
-                }
                 let opened = unsafe { value.as_ref() }
                     .and_then(|v| v.downcast_ref::<NSString>())
-                    .is_some_and(|s| s.to_string() == "opened");
-                if !error.is_null() || !opened {
-                    host.force_close();
-                }
+                    .is_some_and(|s| s.to_string() == "opened")
+                    && error.is_null();
+                let epoch = host.ivars().recovery.borrow().epoch();
+                let event = host.ivars().close_request.borrow_mut().reply(
+                    ticket,
+                    Instant::now(),
+                    epoch,
+                    opened,
+                );
+                host.close_event(event);
             });
             unsafe {
                 web.evaluateJavaScript_completionHandler(
@@ -836,6 +887,15 @@ impl Host {
         Ok(())
     }
     fn poll(&self) {
+        let epoch = self.ivars().recovery.borrow().epoch();
+        let close = self
+            .ivars()
+            .close_request
+            .borrow_mut()
+            .poll(Instant::now(), epoch);
+        if !self.ivars().service.borrow().finished() {
+            self.close_event(close);
+        }
         let expired = self
             .ivars()
             .transfer_view
@@ -892,6 +952,14 @@ impl Host {
             if self.ivars().smoke && !self.ivars().recovery.borrow().busy() {
                 self.smoke_tick();
             }
+        }
+    }
+    fn close_event(&self, event: CloseEvent) {
+        if event == CloseEvent::OfferForceEnd {
+            // This is an offer, not a shutdown deadline. The native sheet still
+            // defaults to Cancel, including when the JS reply never arrives.
+            self.status("Close dialog not confirmed — cancel or explicitly end the session");
+            self.force_close();
         }
     }
     fn recovery_event(&self, event: RecoveryEvent) {
@@ -973,6 +1041,8 @@ impl Host {
             12 => concat!("(", include_str!("../ui/recovery-probe.js"), ")('arm')"),
             13 => concat!("(", include_str!("../ui/recovery-probe.js"), ")('check')"),
             14 => "document.getElementById('browse-dialog').hidden?'dismissed':'wait'",
+            15 => { self.ivars().evaluating.set(false); return; },
+            16 => "(()=>{const b=document.getElementById('logout'),d=document.getElementById('session-exit-dialog');return b&&!b.disabled&&d&&d.hidden?'close-cancelled':'wait';})()",
             20 => concat!("(", include_str!("../ui/review-probe.js"), ")('note-start')"),
             21 => concat!("(", include_str!("../ui/review-probe.js"), ")('note-check')"),
             22 => concat!("(", include_str!("../ui/review-probe.js"), ")('waive-start')"),
@@ -1022,6 +1092,7 @@ impl Host {
                     "review-wait-list",
                     "review-wait-read",
                     "review-wait-snapshot",
+                    "close-cancelled",
                     "wait",
                 ]
                 .contains(&text.as_str())
@@ -1084,7 +1155,14 @@ impl Host {
                     host.eval("document.getElementById('browse-close').click()");
                     14
                 }
-                (1 | 14, "dismissed") => {
+                (14, "dismissed") => {
+                    host.ivars().smoke_step.set(15);
+                    // Duplicate native requests must keep one original deadline.
+                    host.ivars().window.get().unwrap().performClose(None);
+                    NSApplication::sharedApplication(host.mtm()).terminate(None);
+                    15
+                }
+                (1, "dismissed") | (16, "close-cancelled") => {
                     host.menu_action(Action::About);
                     2
                 }
@@ -1384,6 +1462,7 @@ pub fn run(
         }
         if smoke_recovery {
             println!("DESKTOP RECOVERY: OK (explicit root GET; retained session storage; retired navigation ignored; new authenticated document; no bootstrap replay)");
+            println!("DESKTOP CLOSE TIMEOUT: OK (empty workspace; omitted JS close completion; real 5 s timer; duplicate requests bounded; native cancel-default sheet cancelled; session preserved; normal close still works)");
         }
     }
     Ok(result)
