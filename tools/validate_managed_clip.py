@@ -109,7 +109,7 @@ for line in sys.stdin:
         assert (vfs_cache(root / "cache-change.oas") / "design.ovm").read_bytes()[:1] == b"X", (
             "cache-change fault was not injected")
         for name in ("all", "selected", "none"):
-            for jobs in (1, 8):
+            for jobs in (1, 8, 2):
                 assert (root / f"managed-{name}-j{jobs}.oas").read_bytes() == (
                     root / f"golden-{name}.oas").read_bytes()
         assert (root / "managed-stale.oas").read_bytes() == (root / "golden-all.oas").read_bytes()

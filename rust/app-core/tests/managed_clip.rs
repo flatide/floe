@@ -10,6 +10,7 @@ use floe_app_core::{
     jobdeck::color::Mode,
     managed::{self, ManagedDataset, Resources},
     registered::{AccessScope, RegisteredSource},
+    render::RenderOptions,
     ErrorKind,
 };
 use floe_worker_client::{ClipRequest, Layers};
@@ -121,7 +122,36 @@ fn native_bytes_and_resource_lifecycle() {
         ("selected", Layers::Only(vec![(7, 0)])),
         ("none", Layers::None),
     ] {
-        for jobs in [1, 8] {
+        for jobs in [1, 8, 2] {
+            // Actual native clip under the default view + browse + DRC/rules
+            // reservations. CLI golden bytes must survive the smaller LRU.
+            let foreground = if jobs == 2 {
+                vec![
+                    resources
+                        .render(&RenderOptions {
+                            binary: binary.clone(),
+                            decode_jobs: 8,
+                            raster_jobs: 4,
+                            budget_mb: 1024,
+                            tile_px: 384,
+                            round_pages: 1024,
+                            open_timeout_s: 10,
+                            label_font_px: 14,
+                            raw: true,
+                            debug: false,
+                        })
+                        .unwrap(),
+                    resources.browse().unwrap(),
+                    resources.drc_with_rules([], true).unwrap(),
+                ]
+            } else {
+                vec![]
+            };
+            let baseline = resources.usage();
+            let mut clip_options = options(&binary, jobs);
+            if jobs == 2 {
+                clip_options.budget_mb = 256;
+            }
             let store = Store::new(artifacts::Limits::default()).unwrap();
             let (source, data) = open(&resources, &source_path);
             let revision = data.revision;
@@ -131,7 +161,7 @@ fn native_bytes_and_resource_lifecycle() {
                 source,
                 data,
                 request(jobs, layers.clone()),
-                options(&binary, jobs),
+                clip_options,
             )
             .unwrap();
             let s = wait(&mut job);
@@ -143,7 +173,7 @@ fn native_bytes_and_resource_lifecycle() {
             assert_eq!(result.bbox_dbu, [250, 1100, 14000, 4700]);
             assert!(!result.source_stale);
             assert_eq!(result.records == 0, tag == "none");
-            assert_eq!(resources.usage(), managed::Usage::default());
+            assert_eq!(resources.usage(), baseline);
             compare(
                 &store,
                 s.id,
@@ -154,6 +184,7 @@ fn native_bytes_and_resource_lifecycle() {
             drop(job); // A completed Job does not own/erase its published result.
             assert!(store.open(s.id).is_ok());
             assert!(store.release(s.id));
+            drop(foreground);
             released(&resources, &store, &source_path);
         }
     }

@@ -7,6 +7,7 @@ const artifact=(id='1')=>({id,bytes:'64',expires_in_ms:'600000',name:'floe-clip-
 function status(history=[],files=[]) {
     const last=history.at(-1),active=last&&!['failed','cancelled','ready'].includes(last.phase)?last.seq:null;
     return {operations:{last_seq:last?last.seq:'0',active,history},available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
+        capacity:{cpu_slots:16,workers:2,decoded_mb:'2048',cache_mb:'256'},
         limits:{artifacts:4,artifact_bytes:'536870912',total_bytes:'2147483648',readers:2,ttl_seconds:600},
         usage:{entries:files.length,pending:0,bytes:String(files.length*64),readers:0},artifacts:files};
 }
@@ -72,13 +73,39 @@ function posts(h){return h.requests.filter(r=>r.method==='POST'&&r.path==='/api/
     const unavailable=ready();unavailable.artifact.available=false;unavailable.artifact.expires_in_ms=null;C.operation(unavailable,P,Q);
     for(const mutate of [v=>v.artifacts.push(v.artifacts[0]),v=>v.artifacts[0].name='../source.oas',v=>v.artifacts[0].bytes='536870913',
         v=>v.artifacts[0].id=1,v=>v.operations.active=id,v=>v.operations.last_seq='0',v=>v.usage.readers=3,v=>v.path='/private/source',
-        v=>v.artifacts[0].expires_in_ms='600001']) {
+        v=>v.artifacts[0].expires_in_ms='600001',v=>delete v.capacity,v=>v.capacity.cpu_slots=257,
+        v=>v.capacity.workers=-1,v=>v.capacity.cache_mb='0',v=>v.capacity.cache_mb='257',v=>v.capacity.decoded_mb='01',
+        v=>v.capacity.decoded_mb='1048577',v=>v.jobs_default=0,v=>v.jobs_default=17]) {
         const bad=clone(s);mutate(bad);assert.throws(()=>C.catalog(bad,P,Q));
     }
     for(const box of [['-9223372036854775809','0','1','1'],['1','0','1','1'],['2','0','1','1'],['0','0','9223372036854775808','1']]) {
         const op=ready();op.artifact.bbox_dbu=box;assert.throws(()=>C.operation(op,P,Q));
     }
     const edge=ready();edge.artifact.bbox_dbu=['-9223372036854775808','-1','9223372036854775807','1'];C.operation(edge,P,Q);
+    {
+        const h=harness();h.model.jobs_default=2;h.model.capacity={cpu_slots:2,workers:1,decoded_mb:'320',cache_mb:'256'};
+        await h.init();const t=h.prepare();assert.equal(t.body.jobs,2);h.reply(t);
+        assert.match(h.el('clip-options').textContent,/2 jobs · 256 MiB cache/);
+        assert.match(h.el('clip-resources').textContent,/2 CPU slots, 1 worker slots, 320 MiB/);
+        // A newer pre-approval snapshot blocks submission, not the reviewed
+        // options. No silently smaller job count or automatic retry.
+        h.model.capacity.cpu_slots=1;await h.approve();assert.equal(posts(h).length,0);
+        assert(h.el('clip-approve').disabled);assert.equal(h.el('clip-jobs').value,'2');
+        assert.match(h.el('clip-resources').textContent,/Insufficient capacity/);
+        h.model.capacity.cpu_slots=2;await h.c.refresh();assert.equal(posts(h).length,0);
+        assert(!h.el('clip-approve').disabled);await h.approve();assert.equal(posts(h).length,1);h.c.stop();
+    }
+    for(const capacity of [{cpu_slots:0},{workers:0},{decoded_mb:'255'}]) {
+        const h=harness();h.model.artifacts=[artifact()];Object.assign(h.model.capacity,capacity);
+        await h.init();h.prepare();assert.equal(h.sent.length,0);assert(h.el('clip-prepare').disabled);
+        assert(!h.el('clip-open').disabled);assert.match(h.el('clip-resources').textContent,/Insufficient capacity/);
+        const buttons=h.el('clip-files').children[0].children[1].children;
+        assert(!buttons[0].disabled);assert(!buttons[1].disabled);buttons[0].onclick();assert.deepEqual(h.downloads,['1']);h.c.stop();
+    }
+    {
+        const h=harness();h.model.jobs_default=1;h.model.capacity.cpu_slots=1;await h.init();
+        assert.equal(h.prepare().body.jobs,1);h.reply();assert(!h.el('clip-approve').disabled);h.c.stop();
+    }
     {
         const h=harness();await h.c.init(false);assert(h.el('clip-panel').hidden);assert.equal(h.requests.length,0);
         await h.init();assert(!h.el('clip-open').disabled,'summary display must support exact export');
@@ -127,6 +154,7 @@ function posts(h){return h.requests.filter(r=>r.method==='POST'&&r.path==='/api/
             h.override=null;h.model=status([entry(r.body.seq)]);return Promise.reject(new Error('lost receipt'));}};
         await h.approve();assert(!h.el('clip-resolve').hidden);const request=posts(h)[0].body;
         assert.equal(request.seq,'9007199254740994');h.c.stop();await h.c.resume();assert.equal(posts(h).length,1);
+        h.model.capacity.cpu_slots=0;h.model.capacity.workers=0;h.model.capacity.decoded_mb='0';await h.c.refresh();
         h.context.connected=false;await h.el('clip-resolve').onclick();assert.equal(posts(h).length,2);assert.equal(posts(h)[1].body,request);
         assert(h.el('clip-resolve').hidden);h.c.stop();
     }

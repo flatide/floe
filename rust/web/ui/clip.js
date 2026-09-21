@@ -49,8 +49,11 @@
         return op;
     }
     function catalog(v,P,Q) {
-        keys(v,['operations','available','kind','jobs_default','jobs_min','jobs_max','limits','usage','artifacts']);
-        if (typeof v.available!=='boolean' || v.kind!=='exact_clip' || v.jobs_default!==4 || v.jobs_min!==1 || v.jobs_max!==16) { fail(); }
+        keys(v,['operations','available','kind','jobs_default','jobs_min','jobs_max','limits','usage','artifacts','capacity']);
+        if (typeof v.available!=='boolean' || v.kind!=='exact_clip' || !Number.isInteger(v.jobs_default) || v.jobs_default<1 || v.jobs_default>16 || v.jobs_min!==1 || v.jobs_max!==16) { fail(); }
+        keys(v.capacity,['cpu_slots','workers','decoded_mb','cache_mb']);
+        ['cpu_slots','workers'].forEach(function(k){if(!Number.isInteger(v.capacity[k])||v.capacity[k]<0||v.capacity[k]>(k==='cpu_slots'?256:32)){fail();}});
+        bounded(v.capacity.decoded_mb,1048576,P);bounded(v.capacity.cache_mb,256,P);P.counter(v.capacity.cache_mb);
         keys(v.limits,['artifacts','artifact_bytes','total_bytes','readers','ttl_seconds']);
         if(v.limits.artifacts!==4 || v.limits.artifact_bytes!=='536870912' || v.limits.total_bytes!=='2147483648' || v.limits.readers!==2 || v.limits.ttl_seconds!==600) { fail(); }
         keys(v.usage,['entries','pending','bytes','readers']);bounded(v.usage.bytes,2147483648,P);
@@ -102,6 +105,10 @@
         function last() {const a=model&&model.operations.history;return a&&a[a.length-1];}
         function permitted() {return enabled&&!stopped&&!stale&&model&&model.available;}
         function busy() {return waiting||uncertain||!!pending||!!active();}
+        function resourcesFit(jobs) {
+            const c=model&&model.capacity;
+            return !!c&&Number.isInteger(jobs)&&jobs>=1&&jobs<=16&&jobs<=c.cpu_slots&&c.workers>0&&P.compare(c.decoded_mb,c.cache_mb)>=0;
+        }
         function cancelPreparation() {if(preparing) {o.clearTimeout(preparing.timeout);preparing=null;}o.clearTimeout(expiryTimer);expiryTimer=null;draft=null;}
         function dismiss(focus) {
             if(!editor) {return false;}editor='';cancelPreparation();el('clip-form').hidden=true;el('clip-open').setAttribute('aria-expanded','false');
@@ -137,15 +144,18 @@
             if(draft&&o.now()>=draft.until) {cancelPreparation();note='Preparation expired. Review the clip again.';}
             el('clip-panel').hidden=!enabled;
             el('clip-open').disabled=!permitted()||!s||busy();
-            el('clip-prepare').disabled=!permitted()||!editor||!!preparing||busy();
+            el('clip-prepare').disabled=!permitted()||!editor||!!preparing||busy()||!resourcesFit(Number(el('clip-jobs').value));
             ['clip-layers','clip-jobs','clip-cell-name'].forEach(function(id){el(id).disabled=waiting||!!preparing;});
-            el('clip-review').hidden=!draft;el('clip-approve').disabled=!permitted()||!draft||busy();
+            el('clip-review').hidden=!draft;el('clip-approve').disabled=!permitted()||!draft||busy()||!resourcesFit(draft.value.jobs);
             el('clip-cancel').hidden=!active();el('clip-cancel').disabled=!permitted()||!!cancelTask||last()&&last().phase==='cancelling';
             el('clip-resolve').hidden=!uncertain;el('clip-resolve').disabled=stopped||waiting;
             el('clip-refresh').disabled=stopped||!enabled||!!getTask;
             el('clip-status').textContent=label(last());
             el('clip-note').textContent=pollError||note||(!s?'Open a connected layout and wait for a displayed frame. Jobdeck clip is unsupported.':'');
             el('clip-usage').textContent=model?model.usage.entries+'/4 artifact slots · '+(Number(model.usage.bytes)/1048576).toFixed(1)+' MiB reserved/retained · '+model.usage.readers+'/2 downloads':'';
+            const capacity=model&&model.capacity;
+            el('clip-resources').textContent=capacity?'Clip cache: '+capacity.cache_mb+' MiB (not total RAM). Unreserved: '+capacity.cpu_slots+' CPU slots, '+capacity.workers+' worker slots, '+capacity.decoded_mb+' MiB. Snapshot only; start rechecks admission.'+
+                (editor&&!resourcesFit(Number(el('clip-jobs').value))?' Insufficient capacity for these jobs. Reduce jobs or finish other work, then Refresh.':''):'';
             renderFiles();
         }
         function schedule() {o.clearTimeout(timer);timer=null;if(enabled&&!stopped) {timer=o.setTimeout(refresh,active()||waiting?500:2500);}}
@@ -164,6 +174,7 @@
             render();const s=scope(),c=o.context();if(!permitted()||!editor||!s||busy()||preparing) {return;}
             const jobs=el('clip-jobs').value,name=el('clip-cell-name').value,layers=el('clip-layers').value;
             if(!/^(?:[1-9]|1[0-6])$/.test(jobs)||!['visible','all','none'].includes(layers)||!name||new TextEncoder().encode(name).length>4096||/[\u0000-\u001f\u007f-\u009f]/.test(name)) {note='Choose 1–16 jobs and a nonempty cell name without control characters (4096 UTF-8 bytes maximum).';render();return;}
+            if(!resourcesFit(Number(jobs))) {render();return;}
             cancelPreparation();note='Preparing the current viewport; no export has been approved.';
             const t={view:c.id,epoch:c.state.connection_epoch,stamp:s.key,anchor:s.anchor,source_stale:c.state.source_stale,
                 jobs:Number(jobs),cell_name:name,layers:layers==='visible'?selection(c.state.layers):{mode:layers},sent:o.now(),seq:null,timeout:null};
@@ -179,7 +190,7 @@
                 const d=prepared(m,t,P,Q);draft={value:d,until:Math.min(t.sent+30000,o.now()+Number(d.expires_in_ms)),stamp:t.stamp,view:t.view};
                 el('clip-bounds').textContent=d.bbox_dbu.join(', ')+' DBU\n1 DBU = '+o.context().state.dbu_um+' µm';
                 el('clip-selection').textContent=d.layers.mode==='only'?d.layers.count+' visible layer pairs':d.layers.mode==='none'?'No layers — the OASIS will be empty.':'All layers';
-                el('clip-options').textContent=d.jobs+' jobs · cell '+d.cell_name;
+                el('clip-options').textContent=d.jobs+' jobs · '+model.capacity.cache_mb+' MiB cache · cell '+d.cell_name;
                 el('clip-stale').hidden=!m.source_stale;note='Review these frozen options, then approve. Preparation expires after 30 seconds.';
                 expiryTimer=o.setTimeout(render,Math.max(0,draft.until-o.now()));
             }catch(e){cancelPreparation();note=e.message;}render();return true;
@@ -197,9 +208,9 @@
             }finally{if(writeTask===t){writeTask=null;waiting=false;if(!stopped){await refresh();}else{render();}}}
         }
         async function approve() {
-            render();const d=draft;if(!permitted()||!d||busy()) {return;}const t={};approvalTask=t;waiting=true;render();
+            render();const d=draft;if(!permitted()||!d||busy()||!resourcesFit(d.value.jobs)) {return;}const t={};approvalTask=t;waiting=true;render();
             await refresh();if(approvalTask!==t) {return;}approvalTask=null;waiting=false;render();const s=scope();
-            if(!permitted()||draft!==d||!s||s.key!==d.stamp||o.now()>=d.until||active()) {render();return;}
+            if(!permitted()||draft!==d||!s||s.key!==d.stamp||o.now()>=d.until||active()||!resourcesFit(d.value.jobs)) {render();return;}
             try {await send(Object.freeze({seq:P.next(model.operations.last_seq),view_id:d.view,token:d.value.token,approve:true}));}
             catch(e){note=e.message;render();}
         }
@@ -217,7 +228,7 @@
             finally {releasing.delete(id);if(!stopped){await refresh();}}
         }
         el('clip-open').onclick=function(){render();const s=scope();if(!permitted()||!s||busy()){return;}editor=s.key;cancelPreparation();note='';
-            el('clip-layers').value='visible';el('clip-jobs').value='4';el('clip-cell-name').value='FLOE_CLIP';el('clip-form').hidden=false;el('clip-open').setAttribute('aria-expanded','true');render();el('clip-layers').focus();};
+            el('clip-layers').value='visible';el('clip-jobs').value=String(model.jobs_default);el('clip-cell-name').value='FLOE_CLIP';el('clip-form').hidden=false;el('clip-open').setAttribute('aria-expanded','true');render();el('clip-layers').focus();};
         el('clip-form').onsubmit=function(e){e.preventDefault();prepare();};
         el('clip-approve').onclick=approve;el('clip-dismiss').onclick=function(){dismiss(true);render();};
         el('clip-form').onkeydown=function(e){if(e.isComposing||e.keyCode===229){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();dismiss(true);render();}};

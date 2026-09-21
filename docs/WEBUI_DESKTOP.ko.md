@@ -318,7 +318,7 @@ clip 1024 MiB가 managed decoded 2048 MiB를 초과해 clip은 jobs 1이어도 `
 기본 decode 8 + raster 4 + Browse 1 + clip 4도 CPU 16을 넘는다. 이 단계에서는
 공유 서비스의 자원 정책을 완화하지 않았다. 작은 합성 다운로드 검사는 기존 옵션
 `--budget-mb 512 --jobs 2 --raster-jobs 1`로 별도 수행해 통과했다. 기본값에서의 clip
-admission/실제 가용량 안내 개선은 별도 추적한다.
+admission/실제 가용량 안내 개선은 이후 §10에서 처리했다. 위 결과는 수정 전 실측이다.
 
 전체 목표 잔여: D2 장애·DRC/IME/DPI 확대 수용, Linux 호스트 및 RHEL 8.6/8.10
 ETX, D3 배포/서명/고지, G1 성능·G4 대조·Python-free Linux 실행. 원격 공유·CI·
@@ -563,3 +563,55 @@ composition 상태 추적 및 내장 두벌식 입력은 그대로다. 입력 �
 이번 단계는 공통 UI 입력 결함을 없애는 D2 보완이다. DRC 저장 장애/프로세스
 crash·storage 소실 복구, DPI/물리 입력, RHEL 호스트 및 전체 배포 게이트를
 완료로 처리하지 않는다. 기존 원격 공유·CI·열린 색인 hot-reload 보류도 유지한다.
+
+## 10. D2 기본 clip 예약 충돌 보완 (2026-09-21)
+
+§7의 실패는 clip이 뷰의 1,024 MiB decoded LRU를 그대로 예약하고 기본 4 jobs를
+요청한 데서 나왔다. 기본 뷰 decode 8 + raster 4, Browse 1을 유지하면 CPU가
+17/16, decoded 예약은 2,240/2,048 MiB가 된다. jobs만 줄여도 메모리는 넘는다.
+
+관리형 exact clip의 전용 LRU를 **min(뷰 cache, 256 MiB)**로 분리했다.
+clip은 exact/full-depth 계획의 페이지를 배치로 순회하므로 작은 LRU는 이미
+처리한 페이지의 보관량을 줄일 뿐 도형·레이어·반복을 생략하지 않는다. CLI의
+`floe2 clip` 옵션이나 raster/cut은 바꾸지 않았다. 이 캐시는 active batch,
+누적 clip geometry, 출력 OASIS 버퍼를 합친 RSS 상한이 **아니다**.
+
+- 기본 jobs는 현재 미예약 CPU 슬롯에 맞춰 1~2를 제안한다. 사용자가 선택한
+  1~16 jobs는 승인 후 바꾸지 않는다. CPU가 0이면 필드에는 1을 제안하되
+  준비/승인은 비활성이다. 실행 중인 뷰/DRC/색인을 대신 중지하지 않는다.
+- 기본 뷰 + Browse + DRC/rules + clip(2 jobs/256 MiB)의 총 예약은 CPU 16,
+  worker 2, decoded 1,984 MiB다. 기존 상한 16/2/2,048을 늘리지 않았다.
+- 인증된 export catalog에 미예약 CPU/worker/decoded 및 clip cache를 표시한다.
+  OS의 실제 여유 메모리가 아닌 **단일 시점의 관리형 예약 가용량**이다.
+  UI는 준비와 승인 전 확인하고, 실제 worker 시작은 같은 원자적 admission으로
+  다시 검사한다. 경합 시 `busy`가 날 수 있으며 자동 재시도/축소는 없다.
+- 자원이 없더라도 기존 artifact 다운로드/해제 및 결과 불명 요청의 동일 receipt
+  재확인은 유지한다. 가용량 안내가 추가 파일 접근·저장 권한을 주지는 않는다.
+
+검증:
+
+- core 292개·web 122개 unit 통과(각각 ignored 7/3은 합산하지 않음).
+  변경 crate fmt와 `clippy --all-targets --no-deps -- -D warnings` 통과.
+- 실제 native clip gate에 기본 뷰/Browse/DRC-rules **예약을 보유한** j2/256 MiB
+  실행을 추가했다. all/selected/none 출력이 기존 CLI golden과 바이트 일치하며
+  기존 Python/j1/j8·KLayout XOR, 취소/reap·source/cache 보호·오류 주입도 통과했다.
+  실제 네이티브 뷰·DRC 창을 동시에 조작한 부하 실측이라는 뜻은 아니다.
+- owner HTTP/WS 21검사 통과. catalog 가용량과 작은 뷰 cache 유지(64 MiB)를
+  검사한다. 전체 ES2017/UI 회귀에서 준비 차단·승인 전 가용량 감소·복구 후
+  자동 제출 없음·사용자 jobs 보존·동일 요청 재확인·다운로드 유지도 통과했다.
+- release 개발 `.app` 재빌드, 279개 고지 파일 검사, 실제 WKWebView의 인증·
+  합성 조합 키·About·닫기 취소·종료 확인 및 service join 통과. 이 빈 작업공간
+  smoke는 새 기본값의 native 저장창 수동 검사를 대신하지 않는다.
+- 첫 선택 배터리는 기존 CLI 오류 주입 기대 문구 단언에서 실패했고, 진단을
+  보강한 재실행은 `clip --help` 시작 자체가 50초 timeout이었다. 같은 바이너리의
+  help가 정상 시작된 뒤 제한을 바꾸지 않고 재실행해 위 clip/owner/UI 검사를
+  통과했다. 최초 실패의 원인을 macOS 보안 검사라고 확정하지 않는다.
+- 로그: `/private/tmp/floe-desktop-clip-{unit,clippy,fmt,ui}.log`,
+  `floe-desktop-clip-battery.log`(첫 실패), `floe-desktop-clip-battery-retry.log`
+  (help timeout), `floe-desktop-clip-battery-final.log`,
+  `floe-desktop-clip-{release,native}.log`. 첫 실행의 `embedded_host`는 별도로 통과했다.
+
+이번 단계가 전체 D2 또는 현장 수용 완료를 뜻하지 않는다. 실제 OS IME/DPI/물리
+입력, DRC·crash/storage 확대 장애 수용, RHEL 8.6/8.10 ETX 호스트, 서명/공증,
+G1/G4 및 Python-free Linux 검증은 남는다. 원격 공유·CI·열린 색인 hot-reload
+보류를 변경하지 않았다.

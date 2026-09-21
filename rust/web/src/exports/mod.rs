@@ -72,8 +72,11 @@ impl Service {
             resources,
             options: ClipOptions {
                 binary: render.binary.clone(),
-                jobs: 4,
-                budget_mb: render.budget_mb,
+                jobs: 2,
+                // Clip visits every exact page in batches. Retaining a full
+                // view-sized LRU only competes with the still-open view; this
+                // limit changes retention, never the exported geometry.
+                budget_mb: render.budget_mb.min(256),
                 open_timeout_s: render.open_timeout_s,
                 clip_timeout_s: 300,
             },
@@ -105,10 +108,13 @@ impl Service {
             self.decorate(row);
         }
         let usage = self.inner.store.usage();
+        let capacity = self.inner.resources.export_capacity();
         let artifacts=self.inner.store.inventory().into_iter().map(|(id,i)|json!({
             "id":id.to_string(),"bytes":i.size_bytes.to_string(),"expires_in_ms":i.expires_in_ms.to_string(),"name":format!("floe-clip-{id}.oas")
         })).collect::<Vec<_>>();
-        json!({"operations":ledger,"available":!s.closed,"kind":"exact_clip","jobs_default":4,"jobs_min":1,"jobs_max":16,
+        json!({"operations":ledger,"available":!s.closed,"kind":"exact_clip","jobs_default":capacity.cpu_slots.clamp(1,2),"jobs_min":1,"jobs_max":16,
+            "capacity":{"cpu_slots":capacity.cpu_slots,"workers":capacity.workers,
+                "decoded_mb":capacity.decoded_mb.to_string(),"cache_mb":self.inner.options.budget_mb.to_string()},
             "artifacts":artifacts,
             "limits":{"artifacts":4,"artifact_bytes":"536870912","total_bytes":"2147483648","readers":2,"ttl_seconds":600},
             "usage":{"entries":usage.entries,"pending":usage.pending,"bytes":usage.bytes.to_string(),"readers":usage.readers}})
@@ -296,4 +302,55 @@ fn dto(seq: u64, view_id: &str, s: &Snapshot) -> Value {
     };
     json!({"seq":seq.to_string(),"kind":"exact_clip","view_id":view_id,"dataset_revision":s.dataset_revision.to_string(),"phase":phase,"elapsed_ms":s.elapsed_ms.to_string(),"error":s.failure.map(view::safe_error),
         "artifact":s.outcome.as_ref().map(|o|json!({"id":o.artifact_id.to_string(),"bytes":o.bytes.to_string(),"records":o.records.to_string(),"bbox_dbu":o.bbox_dbu.map(|n|n.to_string()),"source_stale":o.source_stale,"name":format!("floe-clip-{}.oas",o.artifact_id)}))})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floe_app_core::managed::{Limits, Usage};
+    #[test]
+    fn clip_catalog_reports_capacity_and_separate_cache_without_reserving() {
+        let resources = Resources::new(Limits::default()).unwrap();
+        let mut render = RenderOptions {
+            binary: "unused-clip-catalog-test".into(),
+            decode_jobs: 8,
+            raster_jobs: 4,
+            budget_mb: 1024,
+            tile_px: 384,
+            round_pages: 1024,
+            open_timeout_s: 10,
+            label_font_px: 14,
+            raw: true,
+            debug: false,
+        };
+        let view = resources.render(&render).unwrap();
+        let browse = resources.browse().unwrap();
+        let drc = resources.drc_with_rules([], true).unwrap();
+        let service = Service::start(Arc::clone(&resources), &render).unwrap();
+        let baseline = resources.usage();
+        let status = service.status();
+        assert_eq!(status["jobs_default"], 2);
+        assert_eq!(
+            status["capacity"],
+            json!({"cpu_slots":2,"workers":1,"decoded_mb":"320","cache_mb":"256"})
+        );
+        assert_eq!(resources.usage(), baseline);
+        let cpu = resources.index([], 1).unwrap();
+        assert_eq!(service.status()["jobs_default"], 1);
+        drop(cpu);
+        let clip = resources
+            .export(2, service.inner.options.budget_mb)
+            .unwrap();
+        let status = service.status();
+        assert_eq!(status["capacity"]["workers"], 0);
+        assert_eq!(status["capacity"]["cpu_slots"], 0);
+        assert_eq!(status["jobs_default"], 1);
+        // Existing downloads/releases remain available under exhaustion.
+        assert_eq!(status["available"], true);
+        drop((clip, service, drc, browse, view));
+        assert_eq!(resources.usage(), Usage::default());
+        render.budget_mb = 64;
+        let small = Service::start(resources, &render).unwrap();
+        assert_eq!(small.status()["capacity"]["cache_mb"], "64");
+    }
 }

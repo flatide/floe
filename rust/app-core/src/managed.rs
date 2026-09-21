@@ -42,6 +42,13 @@ pub struct Usage {
     pub decoded_mb: u64,
     pub index_jobs: u32,
 }
+/// Unreserved managed capacity, not free physical memory or a reservation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExportCapacity {
+    pub cpu_slots: u32,
+    pub workers: u32,
+    pub decoded_mb: u64,
+}
 #[derive(Default)]
 struct Hold {
     readers: usize,
@@ -79,6 +86,16 @@ impl Resources {
     }
     pub fn usage(&self) -> Usage {
         self.state.lock().unwrap().usage
+    }
+    /// UI advice from one snapshot. Export admission still rechecks atomically
+    /// after approval; another operation can reserve this capacity meanwhile.
+    pub fn export_capacity(&self) -> ExportCapacity {
+        let usage = self.usage();
+        ExportCapacity {
+            cpu_slots: self.limits.cpu_slots.saturating_sub(usage.cpu_slots),
+            workers: self.limits.workers.saturating_sub(usage.workers),
+            decoded_mb: self.limits.decoded_mb.saturating_sub(usage.decoded_mb),
+        }
     }
     /// Read-only UI advice, not a reservation or cache-writer preflight. Index
     /// admission rechecks the same limits after the user chooses their jobs.
@@ -446,6 +463,65 @@ impl ManagedDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clip_advice_is_read_only_and_default_foreground_can_export() {
+        let r = Resources::new(Limits::default()).unwrap();
+        let render = r
+            .render(&RenderOptions {
+                binary: PathBuf::from("unused-clip-capacity-test"),
+                decode_jobs: 8,
+                raster_jobs: 4,
+                budget_mb: 1024,
+                tile_px: 384,
+                round_pages: 1024,
+                open_timeout_s: 30,
+                label_font_px: 14,
+                raw: true,
+                debug: false,
+            })
+            .unwrap();
+        let browse = r.browse().unwrap();
+        let drc = r.drc_with_rules([], true).unwrap();
+        let baseline = r.usage();
+        assert_eq!(
+            r.export_capacity(),
+            ExportCapacity {
+                cpu_slots: 2,
+                workers: 1,
+                decoded_mb: 320
+            }
+        );
+        assert_eq!(r.usage(), baseline);
+        // The old inherited view cache could not fit even with just one job.
+        assert!(matches!(r.export(4, 1024), Err(e) if e.kind == ErrorKind::Busy));
+        assert!(matches!(r.export(1, 1024), Err(e) if e.kind == ErrorKind::Busy));
+        let clip = r.export(2, 256).unwrap();
+        assert_eq!(
+            r.usage(),
+            Usage {
+                cpu_slots: 16,
+                workers: 2,
+                decoded_mb: 1984,
+                index_jobs: 0
+            }
+        );
+        assert_eq!(
+            r.export_capacity(),
+            ExportCapacity {
+                cpu_slots: 0,
+                workers: 0,
+                decoded_mb: 64
+            }
+        );
+        assert!(matches!(r.export(1, 1), Err(e) if e.kind == ErrorKind::Busy));
+        drop(clip);
+        assert_eq!(r.usage(), baseline);
+        // Advice is not a reservation: a later contender must recheck.
+        let competing = r.export(1, 128).unwrap();
+        assert!(matches!(r.export(2, 256), Err(e) if e.kind == ErrorKind::Busy));
+        drop((competing, drc, browse, render));
+        assert_eq!(r.usage(), Usage::default());
+    }
     #[test]
     fn index_planning_keeps_reads_and_promotes_writes_atomically() {
         let r = Resources::new(Limits::default()).unwrap();

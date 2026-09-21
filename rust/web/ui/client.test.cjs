@@ -72,6 +72,7 @@ let modeOperation=null,serverMode='chip',serverLevels=['1'],modeReadFailure=fals
 let textSelection=null;
 let clipController,clipOp=null,clipFile=null;
 function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
+    capacity:{cpu_slots:16,workers:2,decoded_mb:'2048',cache_mb:'256'},
     operations:{last_seq:clipOp?'1':'0',active:null,history:clipOp?[clipOp]:[]},artifacts:clipFile?[clipFile]:[],
     limits:{artifacts:4,artifact_bytes:'536870912',total_bytes:'2147483648',readers:2,ttl_seconds:600},
     usage:{entries:clipFile?1:0,pending:0,bytes:clipFile?'64':'0',readers:0}};}

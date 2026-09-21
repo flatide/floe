@@ -132,6 +132,13 @@ async fn exact_export_receipts_replays_and_authenticated_binary_downloads() {
     assert_eq!(caps.0, 200);
     assert_eq!(caps.1["snapshot_png"], true);
     let (mut ws, hello, f) = opened(&h, &l, true).await;
+    let advice = h.call(&l, "GET", "/api/v1/exports", Value::Null).await;
+    assert_eq!(advice.0, 200);
+    assert_eq!(advice.1["jobs_default"], 2);
+    assert_eq!(
+        advice.1["capacity"],
+        json!({"cpu_slots":14,"workers":1,"decoded_mb":"1984","cache_mb":"64"})
+    );
     let mut forged = f.clone();
     forged["dataset_revision"] = json!("999999");
     assert_eq!(

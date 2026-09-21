@@ -127,7 +127,8 @@ for line in sys.stdin:
     for mode, message in (("failure", "ENOSPC"), ("corrupt", "header mismatch")):
         target.write_bytes(old)
         result = run(args, dict(fake_env, FAKE_MODE=mode), code=1)
-        assert message in result.stderr and "clip saved" not in result.stdout
+        assert message in result.stderr and "clip saved" not in result.stdout, (
+            mode, result.stdout, result.stderr)
         assert target.read_bytes() == old
     target.write_bytes(old)
     result = run(args, dict(fake_env, FAKE_MODE="clip", FLOE_RUST_CLIP_TIMEOUT_S="1"), code=1)
