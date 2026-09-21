@@ -137,6 +137,34 @@ E2b부터 같은 Cargo build가 `floe-electron-download`도 만든다. 기본은
   0.12.185 전체 Rust/web gate는 native layerprops oracle30초 timeout으로 실패했고,
   selected gates/native host 통과와 분리해 기록한다.
 
+### 합성 시작 대기 진단
+
+E2e 뒤 layout 회귀 한 번이 exact clip 창의 `authentication` 단계에서 실패했다
+(`floe-electron-signals-layout.log`). 당시 조건은 문서 가시성·fragment 제거·logout
+버튼 존재/활성의 AND라 어느 조건이 실패했는지 구분할 수 없다. 인증 오류나 macOS
+창 가림으로 확정하지 않는다. 제품 인증이나 창 focus 정책은 변경하지 않았다.
+
+`electron/readiness-qa.cjs`는 동일한 네 조건을 각각 1/2/4/8 bit로만 기록한다.
+15일 때만 통과하며 예를 들어 14는 인증 관련 UI 조건은 충족했지만 문서가 숨겨진
+상태다. URL/fragment 내용·cookie/storage·페이지 문구·raw 예외는 출력하지 않는다.
+실패 시 마지막 bit와 native 창 visible/minimized/focused boolean만 보고한다.
+비정상 renderer 응답은 null로 제한한다. 기존 30초 대기는 monotonic deadline으로
+고정하고 renderer JS 자체가 응답하지 않아도 끝나며, 늦은 응답은 통과로 바뀌지 않는다.
+empty browse와 sandbox 검사 실패도 별도 단계로 구분한다. 일반 제품 실행에는 이
+probe를 호출하지 않으며 자동 재인증·timeout 연장·숨은 창 성공 처리는 추가하지 않는다.
+
+`node --test electron/readiness-qa.test.cjs` 5개가 가시성/교환 조건 분리, 비정상 값의
+내용 비노출, JS 무응답/늦은 응답·event-loop 지연, 세션 종료/실패 시 무재시도를 고정한다.
+관련 Node host/controller 합계41개도 통과했다(`floe-electron-readiness-unit.log`).
+전체 Electron host gate 역시 Rust unit/clippy·파이프·blob·외부 신호까지 exit0이다
+(`floe-electron-readiness-host.log`). 진단 추가 후 새 합성 source의
+layout 회귀(`floe-electron-readiness-layout.log`)에서는 pan·exact clip POST·실제
+Chromium crash/reload까지 통과했으나, 다음 storage-loss 창의 **recovery initial
+frame** 단계가 실패해 exit1이다. cookie-loss는 실행되지 않았다. 이때 authentication
+단계는 통과했으며 storage 삭제도 아직 실행 전이다. 처음 인증 실패는 이번에 재현되지
+않았지만 원인 해결로 세지 않는다. 초기 margin 프레임 대기 실패도 미해결로 남긴다.
+기존 source/cache SHA-256 불변 검사는 실패 정리에서도 수행했다.
+
 현장 RHEL에서 실행하지 않았다. Linux sidecar `cargo check`와 아래 공식 런타임의
 GLIBC 정적 점검만 통과했으며 ETX·전체 시스템 라이브러리·Chromium sandbox·서버
 메모리 비용을 검증한 것은 아니다.

@@ -82,4 +82,5 @@ Live/버튼 enabled를 기다리는 조건을 보강한 다음 통과했지만, 
 화면 제어 재확인은 `CUA_REPL_ENABLED_SURFACES is required`로 실패했다. 별도 합성
 일반 창을 정리하면서 SIGTERM/SIGINT 뒤 호스트가 남는 현상도 관측했다. Rust 서비스에
 SIGTERM을 보내 worker/helper 정리를 확인한 뒤 소유 호스트만 강제 종료했다. 해당
-종료 경로는 이번 clipboard 통과에 포함하지 않으며 별도 회귀로 원인을 확인한다.
+종료 경로는 이번 clipboard 통과에 포함하지 않는다. 후속 E2e에서 별도 재현·수정과
+실제 외부 신호 검사를 완료했으며 [종료 신호 수용 기록](WEBUI_ELECTRON_SIGNALS.ko.md)을 따른다.

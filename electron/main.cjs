@@ -41,6 +41,7 @@ const downloadWindows = new Map();
 let ended = false, failure = false, shuttingDown = false, qaCompleted = false;
 let statusURL = null, deniedNavigations = 0, deniedWindows = 0;
 let qaStep = 'startup';
+let qaReadiness = null;
 let qaPostResponses = 0, qaRejectedPostResponses = 0;
 let qaCancelReceive = false, qaCancelledActive = false, qaReceiveCleanup;
 let qaRecoverAccept = false, qaCrashes = 0, qaForceAccept = false, qaForcePrompts = 0;
@@ -359,6 +360,10 @@ app.whenReady().then(async () => {
     try { await downloads.ready; } catch (_) { fail(); return; }
     if (stopping || ended) return;
     web.loadURL(ready.url).then(() => { if (smoke) runSmoke().catch(() => {
+      if (qaStep === 'authentication') console.log('ELECTRON SMOKE: readiness ' + JSON.stringify({
+        bits: qaReadiness, visible: !window.isDestroyed() && window.isVisible(),
+        minimized: !window.isDestroyed() && window.isMinimized(),
+        focused: !window.isDestroyed() && window.isFocused(), stopping, ended }));
       console.log('ELECTRON SMOKE: failed stage ' + qaStep); failure = true; cancelService();
     }); }).catch(() => fail());
   });
@@ -374,8 +379,13 @@ async function runSmoke() {
     }
     throw new Error('synthetic QA did not reach expected state');
   };
-  await wait("(()=>{const b=document.getElementById('logout');return !document.hidden&&!location.hash&&!!b&&!b.disabled;})()");
-  if (emptySmoke || signalSmoke || downloadSmoke) await wait("/No matching entries/.test(document.getElementById('browse-status').textContent)");
+  await require('./readiness-qa.cjs').waitReady({ evaluate: evalOwned, alive: () => !ended && !stopping,
+    observe: bits => { qaReadiness = bits; } });
+  if (emptySmoke || signalSmoke || downloadSmoke) {
+    qaStep = 'empty browse';
+    await wait("/No matching entries/.test(document.getElementById('browse-status').textContent)");
+  }
+  qaStep = 'sandbox preferences';
   const prefs = window.webContents.getLastWebPreferences();
   if (!prefs.sandbox || !prefs.contextIsolation || prefs.nodeIntegration || prefs.preload || window.webContents.session.isPersistent()) throw new Error('invalid synthetic preferences');
   if (await evalOwned("typeof require==='undefined'&&typeof process==='undefined'") !== true) throw new Error('Node exposed');
