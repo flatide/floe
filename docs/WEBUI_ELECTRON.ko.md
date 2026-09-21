@@ -10,7 +10,7 @@
 | 단계 | 산출물 | 완료 근거/잔여 |
 |---|---|---|
 | E0 | 기존 Rust Session의 전용 파이프 sidecar, JS 클라이언트, 수명/인증 회귀 | 구현·실제 Node↔Rust 합성 검사; 아래 계약 |
-| E1 | sandboxed Electron 독립 창, 같은 웹 번들, 시작/종료/실패 처리, 런타임 고정/검증 | 다음 구현. E0만으로 독립 앱 사용 가능이라고 하지 않음 |
+| E1 | sandboxed Electron 독립 창, 같은 웹 번들, 시작/종료/실패 처리, 런타임 고정/검증 | macOS arm64 실제 Chromium 합성 창 검사 통과. 기능·성능 수용은 E2/E3 |
 | E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | 비교·측정 필요. 단순 HTTP 시간은 input→photon이 아님 |
 | E3 | RHEL 전체 ELF/라이브러리 의존성, sandbox·ETX/다중 사용자 실측, 라이선스/업데이트/오프라인 배포 | 현장 대기, OS 패키지/보안 설정 변경 없음 |
 
@@ -40,7 +40,7 @@ Rust/macOS manifest·lock/vendor 원본은 바꾸지 않는다. `desktop/src/ser
    잘못된 control도 세션을 닫고 오류다. 정상 웹 End session은 기존 인증·CSRF·DELETE를
    거쳐 exit0이다. 파일 승인/저장/인덱싱 권한은 파이프에 추가하지 않는다.
 
-검증 명령(개발용 Node만 필요, Electron 런타임은 아직 실행하지 않음):
+E0 검증 명령(개발용 Node만 필요, 이 명령에는 Electron 창 검사가 없음):
 
 ```sh
 cd electron/service
@@ -65,10 +65,78 @@ GET용 CSRF 헤더를 빠뜨려401이었고 하네스만 수정했다. 제품 �
 **exit0**이다(`floe-electron-service-linux-check.log`). 이는 sidecar의 Linux 타입/
 컴파일 검사이며, 링크된 실행 파일·RHEL 런타임·Chromium/glibc 호환성 검증은 아니다.
 
-## E1 이후 고정할 비교 조건
+## E1: 실제 독립 창
+
+`electron/main.cjs`는 같은 Rust 웹 번들을 sandboxed Chromium 창에 연다. Python과
+외부 Chrome/Firefox는 실행에 필요 없다. 서비스·색인·raster는 기존 Rust 그대로다.
+Node integration/preload/native IPC 없음, context isolation/sandbox on, 비영속 partition,
+권한 요청/새 창/webview 거부, 소유 origin 밖 HTTP/WS·탐색 거부. 시작/실패 페이지의
+고정 data URL만 별도 허용하며 임의 data URL 접두사를 허용하지 않는다. spellcheck는
+끄고 기존 웹 CSP를 유지한다. 임시 profile은 새0700폴더이며 종료 정리는 best-effort다.
+강제 crash 뒤의 안전 삭제/모든 디스크 흔적 제거를 보장하지 않는다.
+
+메뉴의 Open layout/DRC/About는 기존 웹 동작을 호출한다. 창 닫기/Cmd-Q는 기존
+기본취소 End session 확인을 열고, 응답이 없을 때도 기본취소 native 확인을 거쳐야
+Rust EOF 취소를 보낸다. macOS 숨김/최소화 창은 먼저 복원한다. Rust가 정리/join한
+뒤 앱이 종료된다. Recover View는 명시 확인 후 기존 origin root GET만 수행한다.
+bootstrap·저장·index를 재전송하지 않는다. renderer 실패는 고정 오류 화면으로
+알리고 자동 복구하지 않는다. 실제 renderer crash/복구 수용은 E2에 남긴다.
+
+### 개발 실행
+
+현재는 저장소 기반 비교판이며 `.app`/RPM/portable 완성 패키지가 아니다. 메뉴 코드도
+`desktop/ui/menu-action.js`를 재사용하므로 `electron` 디렉터리만 떼어 배포하지 않는다.
+공식 런타임 archive를 `runtime.json`의 SHA-256으로 검증하고 전체 내용(Helper,
+resources, LICENSE/고지 포함)을 유지한다. 개발 스크립트는 다운로드/설치하지 않으며
+실행 시 Electron 버전44.4.3과 sandbox 설정을 재검사한다(버전 검사는 해시 검증 대체 아님).
+
+```sh
+# feature/webui 작업 트리 루트에서
+(cd rust && cargo build --release --offline --locked -p floe-index -p floe-renderd)
+(cd electron/service && cargo build --release --offline --locked)
+
+# macOS: 검증·압축해제한 공식 런타임
+export FLOE_ELECTRON_BIN="/absolute/path/Electron.app/Contents/MacOS/Electron"
+# Linux 후보: 같은 변수에 검증·압축해제한 런타임의 /absolute/path/electron 지정
+sh tools/run_electron_dev.sh view "/absolute/path/design.oas"
+# 소스 생략 시 native 폴더 선택; 임의 cwd/home 자동 허용 없음
+sh tools/run_electron_dev.sh
+```
+
+개발 런처는 호출한 cwd와 공백/한글 인자를 유지한다. Rust CLI의 view 옵션을 그대로
+넘기며 색인은 자동 생성하지 않는다. 서비스 바이너리는 기본 release 경로 또는 명시
+`FLOE_ELECTRON_SERVICE_BIN`; 명시한 빈/잘못된 override는 fallback 없이 오류다.
+`FLOE_INDEX_BIN`/`FLOE_RENDERD_BIN`도 기존 override를 보존한다.
+
+### 기능 한계와 검증
+
+- 다운로드는 차단하고 안내한다. 기존 WebView의 승인·원자 게시·저장 결과 불명
+  복구 계약을 아직 이 호스트에 이식하지 않았다.
+- 프로그램식 clipboard 권한은 차단한다. 표준 native Edit의 Copy/Paste 메뉴는
+  있지만 이미지·좌표 복사, 붙여넣기/IME의 실제 수용은 별도다.
+- `node --test electron/service-client.test.cjs electron/host.test.cjs`: **10/10**.
+  실제 파이프5개까지 포함하면15개. 종료 timeout·중복 요청·stale 확인 취소,
+  런처의 cwd·공백/한글 인자·명시 executable 오류를 포함한다.
+- 공식44.4.3 darwin-arm64 archive SHA-256 검증 후 실제 Electron 실행 **exit0**.
+  새 빈 root로 Rust 일회용 인증·목록 읽기, 보이는 문서·hash 제거·renderer Node 부재,
+  실제 다른 loopback sentinel 탐색 차단(요청0)과 새 창 차단, 기본취소 focus→취소→
+  정상 Quit 확인→서비스 종료를 검사했다. 인증값은 출력하지 않는다.
+- `--smoke-test`는 추가 인자를 받지 않고 새 빈 root만 만든다. 합성 캡처는 새 임시
+  폴더의0600 `window.png`이며, 문서 가시성을 먼저 검사하고 `stayHidden:true`로
+  캡처한다. 캡처를 숨은 창의 가시성 통과 수단으로 쓰지 않는다. layout 픽셀·물리
+  키 입력·input→photon 검증은 아니다.
+- 반복 명령: `FLOE_ELECTRON_BIN="..." sh tools/validate_electron.sh`.
+  이 gate는 Electron E0/E1 전용이다. 전체 `validate_rust.sh` 통과를 뜻하지 않는다.
+  최근 전체 Rust/web gate는 기존 GTK startup oracle30초 timeout으로 실패했고,
+  selected gates/native host 통과와 분리해 기록한다.
+
+현장 RHEL 런타임은 아직 다운로드/실행하지 않았다. Linux sidecar `cargo check`만
+통과했으며 ETX·glibc·Chromium sandbox·서버 메모리 비용을 검증한 것은 아니다.
+
+## E2 이후 고정할 비교 조건
 
 - `electron/runtime.json`은 공식 릴리스 **44.4.3 (2026-09-18)** 및 공식 SHA-256을
-  기록한다. macOS arm64/x64·Linux x64 아카이브의 다운로드/검증/실행은 별도 단계다.
+  기록한다. macOS arm64는 검증·실행했고, macOS x64·Linux x64 검증/실행은 남았다.
   실행 파일뿐 아니라 런타임 전체 의존성·고지/라이선스·업데이트 책임을 확인한다.
   [릴리스](https://github.com/electron/electron/releases/tag/v44.4.3),
   [공식 해시](https://github.com/electron/electron/releases/download/v44.4.3/SHASUMS256.txt).
