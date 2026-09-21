@@ -1,6 +1,9 @@
 # 전체 플랜 유지 + 레이어 순서 디코드 검증 계획
 
-상태: **1~3단계 구현·검증 완료(0.12.177), 실칩 측정 전**. 2026-09-20.
+상태: **1~3단계 구현·검증 완료(0.12.177), 실칩 측정 완료(2026-09-21) — 기본 경로 적용 안 함**.
+- 실칩 결과(FLOE2_OPTIMIZATION F2R-28 "실칩 결과"): depth full의 세 뷰에서 occlusion이 생략한 페이지가
+  0~0.4 %(`uns=0`), occlusion은 baseline 대비 +28~55 %(cold). 합성 칩의 가림(1/4~1/77)은 생성기의
+  block 레이어가 만든 과장이었다. `render_probe`는 진단 경로로 남긴다.
 - 있는 것: `render_probe` 명령(`mode=baseline|ordered`), `LayerRasterSession`(프레임 내내 살아 있는
   타일과 pass 단위 그리기, 워커 풀 유지), 게이트 `tools/validate_layer_decode.py`, 벤치
   `tools/bench_layer_decode.py`. 이름은 계획의 제안과 다르다: 드라이버는 renderd의 `run_layer_probe`
