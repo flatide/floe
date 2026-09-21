@@ -4,6 +4,11 @@
 관련 정본: [웹 전환 계획 §6](WEBUI_PLAN.ko.md#6-성능-요구와-게이트),
 [데스크톱 계획](WEBUI_DESKTOP.ko.md).
 
+2026-09-22 후속: [실제 활성 창의 WK/Electron 대조](WEBUI_DESKTOP.ko.md#25-활성-창에서의-전체-native-검사와-호스트-대조-2026-09-22)에서
+같은1600×1200/DPR2/world bbox·workers·새 합성 소스/캐시로 pan reuse on/off ×
+세 단계 RGBA가 모두 일치했다. 이는 §8~9의 숨김 실패 뒤 얻은 픽셀 동등성 근거다.
+input→photon/pacing 측정은 하지 않았으므로 **G1 성능 게이트는 계속 미완료**다.
+
 ## 1. 목적과 수용 경계
 
 기존 상태줄의 `plan/decode/draw/native wall/queue`는 Rust 서비스·렌더러의

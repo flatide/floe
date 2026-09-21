@@ -1,5 +1,12 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-22 최신: 사용자의 창 활성화 협조 승인 뒤 [native 전체 suite와 WK/Electron
+고정 화면 대조](WEBUI_DESKTOP.ko.md#25-활성-창에서의-전체-native-검사와-호스트-대조-2026-09-22)가
+각각 exit0이었다. 아래 `menu=hidden`은 앞선 실패 기록이다. 실제 저장 경로는 NFS
+등 공유 FS로 확인됐고, [호스트별 창 재사용](WEBUI_NATIVE_INSTANCE.ko.md)도 승인됐다.
+정책 확인 대기는 해소됐지만 NFS 게시 복구/창 재사용 구현, 물리 입력·G1 성능,
+RHEL/ETX·배포 및 G4 전체 수용은 남는다.
+
 2026-09-22 native 후속: [빈 QA의 cwd 범위 상속](WEBUI_DESKTOP.ko.md#24-빈-native-qa의-cwd-범위-상속-제거-2026-09-22)을
 수정해 `.app`/cwd `/`에서도 새 private 빈 root로 시작한다. desktop45개 단위와
 embedded_host 선택 게이트는 통과했으나, 실제 WKWebView 메뉴는 직접/LaunchServices

@@ -4,6 +4,12 @@
 후속이다. 이번 변경은 Rust test-only 모듈이며 제품 게시/보안/복구 정책은 그대로다.
 **DRC-PUB-01이 열려 있으므로 저장 프로세스 장애 전체를 완료로 판정하지 않는다.**
 
+2026-09-22 사용자 확인: 실제 저장 경로는 **NFS 등 공유 파일시스템**이다.
+아래의 파일시스템 종류 확인 대기는 해소됐다. no-replace rename을 유일한 저장
+경로로 바꾸지 않으며, 명시적 게시 복구 프로토콜을 후속 설계·구현 대상으로 둔다.
+실제 NFS 버전/마운트 옵션·locking/ACL/xattr/durability 수용은 아직 미검증이다.
+이 확인 자체가 DRC-PUB-01 수정 완료나 임시 파일 자동 삭제 승인은 아니다.
+
 후속 [전체 Rust 서비스 종료·재시작](WEBUI_REVIEW_SERVICE_CRASH.ko.md)은 승인 전과
 완전한 게시 후의4조합에서 새 reader·인증/receipt 분리와 후속 저장을 확인한다.
 아래 내부 link gap이나 NFS/전원 손실 수용을 대신하지 않는다.
@@ -66,11 +72,28 @@ syscall 사이에 직접 breakpoint를 넣은 실험은 아니며, 12개의 제�
    정확한 sibling inode를 검증하는 별도 복구 승인·프로토콜이 필요하다. 읽기만으로
    디렉터리를 스캔·개명·삭제하거나 nlink 보안 제한을 없애는 방식은 채택하지 않는다.
 
-실제 RHEL 저장 경로가 NFS인지 로컬 XFS/ext4인지 미확인이다. 예를 들어
+당시에는 실제 RHEL 저장 경로가 NFS인지 로컬 XFS/ext4인지 미확인이었다. 예를 들어
 [upstream Linux4.18 NFS `nfs_rename`](https://github.com/torvalds/linux/blob/v4.18/fs/nfs/dir.c#L1873-L1883)은
 nonzero rename flags를 거부한다. 이것을 현장 Red Hat 패치 커널의 실행 결과로
 간주하지는 않지만, 로컬 APFS 통과만으로 무조건 치환할 수 없다는 구체적 근거다.
-파일시스템 확인/정책 선택 전에는 제품 기본 동작이나 실패 호환성을 변경하지 않는다.
+현재 NFS 사용은 확인됐으므로 로컬 파일시스템 전용 치환 대신 다음 경계를 지킨다.
+
+- `RENAME_NOREPLACE` 지원 여부를 추측해 필수화하거나, 미지원 시 이미 알려진
+  link gap으로 조용히 fallback한 뒤 해결됐다고 표시하지 않는다.
+- [rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html)와
+  [link(2)](https://man7.org/linux/man-pages/man2/link.2.html)의 NFS 주의사항처럼,
+  syscall 오류만으로 게시가 일어나지 않았다고 단정할 수 없다. 정확한 대상/단계
+  identity를 다시 확인할 수 없으면 결과 불명을 유지하고 새 저장을 자동 재시도하지 않는다.
+- 복구는 등록된 pack/reviewer/kind와 정확한 게시 stage를 결합한 별도 미리보기/
+  명시 실행으로 설계한다. 일반 읽기의 디렉터리 스캔·임시 이름 채택/삭제 및
+  single-link 보안 검사 완화는 하지 않는다. 복구 자체의 중단/중복/대상 변경도
+  다시 확인할 수 있어야 하며, 예전 버전의 stage를 이름만 보고 정리하지 않는다.
+- stable lock의 inode 유지·기존 ACL/소유권/pack binding·source 보호를 보존한다.
+  [flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html)의 NFS locking은
+  마운트/프로토콜 영향도 받으므로, 로컬 프로세스 검사를 다중 NFS client 검증으로
+  대체하지 않는다. 보안 설정·마운트 옵션을 자동 변경하지 않는다.
+
+구체적인 journal/복구 wire·권한 연결·실제 NFS fault 검사는 아직 구현/수용 전이다.
 
 ## 실행과 증거
 

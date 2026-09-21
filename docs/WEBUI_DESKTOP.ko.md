@@ -2,9 +2,11 @@
 
 작성: 2026-09-18. 정본 상위 계획: [WEBUI_PLAN.ko.md](WEBUI_PLAN.ko.md).
 
-2026-09-22 최신 네이티브 재검증은 [§24](#24-빈-native-qa의-cwd-범위-상속-제거-2026-09-22)에
-기록한다. 빈 QA가 cwd를 browse root로 삼는 결함을 고쳤다. 직접 실행과 `.app`
-모두 `menu=hidden` 수용 실패는 남으며, Rust/web·Electron 전체 통과와 구분한다.
+2026-09-22 최신 네이티브 재검증은 [§25](#25-활성-창에서의-전체-native-검사와-호스트-대조-2026-09-22)에
+기록한다. 사용자의 창 활성화 협조 승인 뒤 전체 native suite와 WK/Electron 고정
+viewport 대조가 각각 exit0이었다. §24의 과거 숨김 실패는 보존한다. 물리 입력·
+성능/RHEL 수용은 별도이며, [호스트별 창 재사용](WEBUI_NATIVE_INSTANCE.ko.md)은
+사용자 정책 확정 후 구현 대상으로 전환했다.
 
 ## 1. 확정된 요구와 현재 상태
 
@@ -1457,3 +1459,61 @@ LaunchServices의 cwd는 `/`였고, 앱은 `approved root must be a non-root dir
 OS 원인을 확정하거나 `document.hidden`을 무시하지 않는다. 가시성/activation 정책,
 120초 smoke deadline 및 메뉴 판정은 바꾸지 않았다. 실제 활성 창·입력/표시 수용,
 G1/G4, RHEL/ETX·배포와 저장소/단일 인스턴스 결정은 남는다.
+
+## 25. 활성 창에서의 전체 native 검사와 호스트 대조 (2026-09-22)
+
+사용자가 새 합성 Floe2 창을 직접 선택하고 가리지 않도록 유지하는 검사를
+승인했다. 기존 visibility 거부·120초 host/driver deadline·단계별30초 frame
+deadline·RGBA 비교 기준은 변경하지 않았다. 별도 activation 우회도 없다.
+
+`tools/validate_native_frame_parity.cjs`의 연속 실행이 exit0이다. 새 valmini 하나와
+동일 캐시·index/renderd를 두 호스트에 사용하고 전후 입력 SHA-256 불변을 검사했다.
+pan reuse on/off 각각 labels+frames, frames-only, geometry-only 세 단계에서
+**WKWebView와 Electron의 foreground 및 해당 margin crop RGBA 해시가 모두 일치**했다.
+고정 조건은1600×1200 physical px, DPR2, DBU bbox `(50000,87500,350000,312500)`이다.
+각 단계 foreground/margin 내부 차이도0이었다. labels 포함642,545 lit px,
+나머지610,669 lit px로 빈 화면 일치를 통과로 인정한 것이 아니다.
+AppKit은 실제 app active/unoccluded, window key/main/unoccluded를 모두 true로 보고했다.
+
+재현 명령(리포 루트, 검증한 런타임·helper 경로를 명시):
+
+```sh
+FLOE_QA_PYTHON_BIN=/Users/journey/Flatide/floe/.venv/bin/python \
+FLOE_QA_DESKTOP_BIN="$PWD/desktop/target/macos-dev.PcKc5P/Floe2.app/Contents/MacOS/floe2-desktop" \
+FLOE_ELECTRON_BIN=/private/tmp/floe-electron-runtime.kj3s2u/unpacked/Electron.app/Contents/MacOS/Electron \
+FLOE_ELECTRON_SERVICE_BIN="$PWD/electron/service/target/debug/floe-electron-service" \
+FLOE_ELECTRON_DOWNLOAD_BIN="$PWD/electron/service/target/debug/floe-electron-download" \
+node tools/validate_native_frame_parity.cjs
+CARGO_BUILD_JOBS=4 sh tools/validate_desktop.sh
+```
+
+첫 대조는 WK3단계를 통과한 뒤 Electron에서 실패했다. 실행자가 debug helper
+override를 빠뜨렸고 기본 `electron/service/target/release/` 바이너리 둘이 없었다.
+같은 fixture의 별도 실행도 즉시 실패했다. 이 원인을 확인한 뒤 위 경로를 명시해
+**새 fixture로 전체 on/off 대조를 한 번 연속 실행**했다. 첫 실패를 숨기거나
+여러 부분 성공을 조립한 판정이 아니다. `.app`은 §24의 코드가 담긴 기존 PcKc5P
+번들로, 내장 source stamp는 `0803873+`(f13dc4f 커밋 전 빌드)다.
+
+이어 `f13dc4f` 작업 트리의 **전체 `validate_desktop.sh`가 exit0**이었다.
+45 unit(자식 진입1개는 부모가 별도 실행), native confirmation·JS 검사,
+실제 빈 창 인증/메뉴/종료, reload·close callback timeout 기본취소,
+합성 note/waive ACK 유실·동일 승인 확인·파일 read-back, storage/cookie 소실,
+WKDownload 취소/게시/정리 실패 경고, 실제 소유 renderd SIGKILL·새 worker/프레임
+재열기까지 실행했다. 주입된 cleanup 실패는 예상 exit1을 요구하는 하위 검사이며,
+전체 스크립트의 exit0과 구분한다. 기존 설계·리뷰·클립보드는 사용하지 않았다.
+
+증거(`/private/tmp/`):
+
+- `floe-native-approved-activation-parity-complete.log`, SHA-256
+  `82f8a5ad7eddb4109fa53dd304298ca5f24cf3883b12c689535fd269010fd087`.
+- `floe-native-approved-activation-full.log`, SHA-256
+  `3f2a189a26a1adaf2b1a5d23a6f5c921a12f4642d06dc6e4214725d4e0c6f793`.
+- 최초 실패: `floe-native-approved-activation-parity.log`,
+  `floe-electron-approved-activation-diagnostic.log`.
+- 마지막 Electron 합성 screenshot은 temp의
+  `floe-electron-e1-artifacts-bgmHvJ/window.png`로 실제 확인했다.
+
+이로써 **이 실행의 숨김 차단과 정해진 native 합성 suite**는 통과했다.
+자동 activation이 모든 환경에서 보장된다는 뜻은 아니며, CUA 연결 복구·물리
+mouse/IME/DPI/접근성·input→photon/pacing·저장소 장애·NFS 복구·RHEL/ETX·배포
+수용은 남는다. 창 재사용은 승인만 됐고 아직 제품에 연결하지 않았다.

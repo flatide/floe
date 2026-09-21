@@ -2,6 +2,12 @@
 
 작성 2026-08-29, 갱신 2026-09-22(로컬 전체 회귀 통과; 원격 단계 보류).
 
+후속 [활성 창 native 검증](WEBUI_DESKTOP.ko.md#25-활성-창에서의-전체-native-검사와-호스트-대조-2026-09-22):
+전체 native suite와 WK/Electron 동일 viewport RGBA 대조가 각각 exit0이다.
+사용자는 NFS 등 공유 저장소와 [호스트별 기본 창 재사용](WEBUI_NATIVE_INSTANCE.ko.md)을
+확정했다. 이 두 항목은 정책 확인 대기에서 **후속 구현/현장 수용**으로 전환한다.
+실제 입력·성능/RHEL/배포 검증이나 전체 목표 완료를 뜻하지 않는다.
+
 최신 검증: [빌드 산출물 보존 개명 후 전체 회귀](WEBUI_NATIVE_STARTUP.ko.md#새-debug-폴더의-전체-회귀--2026-09-22)에서
 `741bcdb`의 **전체 Rust/web 배터리 한 번의 연속 실행과 별도 Electron 통합 실행이
 각각 exit0**였다. 과거 timeout을 숨기거나 여러 부분 통과로 전체 통과를 대신하지
