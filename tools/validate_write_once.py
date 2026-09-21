@@ -11,9 +11,12 @@ and the battery's valmini with the kill switch FLOE_RUST_WRITE_ONCE=off and
 without it:
 
   * every frame is byte-identical - wide and near views, keep and cull, with
-    hierarchy frames and labels on, at depth 1 and full depth;
-  * the dense view fills tiles (once_full_tiles > 0) and paints fewer members;
-    the kill switch reports no write-once work at all.
+    hierarchy frames and labels on, at depth 1 and full depth - under the
+    viewer's area-true drawing and under the KLayout rule (FLOE_RUST_AREA_TRUE
+    =off);
+  * under the KLayout rule the dense view fills tiles (once_full_tiles > 0) and
+    paints fewer members (area-true lights sub-pixel shapes by their area, so
+    this chip fills no tile there); the kill switch reports no write-once work.
 
     .venv/bin/python tools/validate_write_once.py
 """
@@ -25,11 +28,6 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-# The dense chip must fill tiles for write-once to save paints; under
-# area-true drawing (FLOE_RUST_AREA_TRUE, gate tools/validate_area_true.py) its
-# sub-pixel shapes light only their area and no tile fills, so the mechanism is
-# checked under the KLayout rule.
-os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 sys.path.insert(0, str(ROOT))
 from floe.cache import Cache
 from floe.rust_render import RustRenderWorker
@@ -37,8 +35,10 @@ from floe.rust_render import RustRenderWorker
 W, H = 1280, 720
 
 
-def worker(src, on, tile_px):
+def worker(src, on, tile_px, klayout):
     os.environ['FLOE_RUST_TILE_PX'] = str(tile_px)
+    if klayout:
+        os.environ['FLOE_RUST_AREA_TRUE'] = 'off'
     if on:
         os.environ.pop('FLOE_RUST_WRITE_ONCE', None)
     else:
@@ -49,6 +49,7 @@ def worker(src, on, tile_px):
     w.start()
     os.environ.pop('FLOE_RUST_WRITE_ONCE', None)
     os.environ.pop('FLOE_RUST_TILE_PX', None)
+    os.environ.pop('FLOE_RUST_AREA_TRUE', None)
     return w
 
 
@@ -75,8 +76,9 @@ def views(cache):
         yield zoom, (cx - s * W / 2, cy - s * H / 2, cx + s * W / 2, cy + s * H / 2)
 
 
-def compare(src, name, tile_px):
-    off, on = worker(src, False, tile_px), worker(src, True, tile_px)
+def compare(src, name, tile_px, klayout):
+    off, on = worker(src, False, tile_px, klayout), worker(src, True, tile_px, klayout)
+    name += ' (KLayout rule)' if klayout else ' (area-true)'
     gen, full, fewer = 0, 0, False
     try:
         for zoom, bbox in views(on.cache):
@@ -112,11 +114,15 @@ def main():
             done = subprocess.run(argv, cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
             assert done.returncode == 0, done.stdout + done.stderr
         # small tiles: the 0.003-scale chip covers no 384 px tile completely
-        frames, full, fewer = compare(chip, 'chip', 48)
+        frames, full, fewer = compare(chip, 'chip', 48, True)
         assert full > 0 and fewer, 'the dense chip must fill tiles and save paints (full tiles %d)' % full
-        more, _, _ = compare(mini, 'valmini', 384)
-        print('write once: %d frames byte-identical to the ordered overwrite, %d full tiles on the chip'
-              % (frames + more, full))
+        more, _, _ = compare(mini, 'valmini', 384, True)
+        # the viewer's drawing: the same identity, whatever it saves
+        area, area_full, _ = compare(chip, 'chip', 48, False)
+        area_more, _, _ = compare(mini, 'valmini', 384, False)
+        print('write once: %d frames byte-identical to the ordered overwrite (%d KLayout rule, %d area-true), '
+              '%d full tiles on the chip (area-true %d)'
+              % (frames + more + area + area_more, frames + more, area + area_more, full, area_full))
     print('WRITE ONCE: ALL OK')
 
 

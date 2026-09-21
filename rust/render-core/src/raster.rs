@@ -4661,6 +4661,19 @@ fn hairline_world_bbox(
     world: BBox,
     paint: PaintStyle,
 ) -> Result<Option<(i128, i128, i128, i128)>, String> {
+    hairline_world_bbox_of(request, world, paint, None)
+}
+
+/// `hairline_world_bbox` for a shape whose area is not its box's (a polygon or
+/// a path outline, in world units squared): the area-true draw keeps it with
+/// the chance its OWN area fills the pixels it would light (review 2026-09-22:
+/// a triangle half its box was kept as often as the box).
+fn hairline_world_bbox_of(
+    request: &GeometryRasterRequest,
+    world: BBox,
+    paint: PaintStyle,
+    area: Option<f64>,
+) -> Result<Option<(i128, i128, i128, i128)>, String> {
     // 1px solid strokes only. A wider outline paints far more than
     // the collapsed cells (KLayout w4 A/B: 84,303 vs 24,158 px — an
     // interior-diff regression, not band noise), so thick-stroked
@@ -4678,7 +4691,11 @@ fn hairline_world_bbox(
         return Ok(None);
     }
     if request.area_true {
-        return area_true_hairline(world, (x0, y0, x1, y1), sub_x, sub_y).map(Some);
+        let view = request.view;
+        let px_area = area.map(|a| {
+            a * (request.width as f64 / (view.x1 - view.x0)) * (request.height as f64 / (view.y1 - view.y0))
+        });
+        return area_true_hairline(world, (x0, y0, x1, y1), sub_x, sub_y, px_area).map(Some);
     }
     let point = sub_x && sub_y;
     let (cx0, cx1) = hairline_axis_span(x0, x1, sub_x, point, 0);
@@ -4690,7 +4707,8 @@ fn hairline_world_bbox(
 /// area_true): it lights one pixel across each such side - the one holding its
 /// centre - and the pixel-centre span along a longer side, and it is KEPT with
 /// the chance its area fills those pixels (a w px wide wire: w, a w x h px
-/// point: w h). The draw is decided by the shape's world rank, so a zoom-out
+/// point: w h; a polygon: its own area in px over max(w,1) max(h,1) - `area`,
+/// None for a rectangle). The draw is decided by the shape's world rank, so a zoom-out
 /// keeps a subset of what the zoom-in kept, a pan changes nothing, and the
 /// kept shapes light, on average, as many pixels as the shapes cover: 0.1 px
 /// wires 1 px apart light one column in ten instead of every column.
@@ -4700,10 +4718,15 @@ fn area_true_hairline(
     device: (i128, i128, i128, i128),
     sub_x: bool,
     sub_y: bool,
+    area: Option<f64>,
 ) -> Result<(i128, i128, i128, i128), String> {
     let (x0, y0, x1, y1) = device;
-    let fill = |d: i128| (d.max(0) as f64 / DEVICE_ONE as f64).min(1.0);
-    if area_rank(world) >= fill(x1 - x0) * fill(y1 - y0) {
+    let side = |d: i128| d.max(0) as f64 / DEVICE_ONE as f64;
+    let keep = match area {
+        None => side(x1 - x0).min(1.0) * side(y1 - y0).min(1.0),
+        Some(area) => (area / (side(x1 - x0).max(1.0) * side(y1 - y0).max(1.0))).clamp(0.0, 1.0),
+    };
+    if area_rank(world) >= keep {
         return Ok((0, 0, 0, 0));
     }
     let across = |v0: i128, v1: i128| {
@@ -4713,6 +4736,17 @@ fn area_true_hairline(
     let (cx0, cx1) = if sub_x { across(x0, x1) } else { fill_phase_columns(x0, x1, FillPhase::PixelCenter)? };
     let (cy0, cy1) = if sub_y { across(y0, y1) } else { fill_phase_rows(y0, y1, FillPhase::PixelCenter)? };
     Ok((cx0, cy0, cx1, cy1))
+}
+
+/// A polygon's area in world units squared (shoelace, even-odd net).
+fn polygon_area(points: &[(i64, i64)]) -> f64 {
+    let mut twice: i128 = 0;
+    for k in 0..points.len() {
+        let (x0, y0) = points[k];
+        let (x1, y1) = points[(k + 1) % points.len()];
+        twice += x0 as i128 * y1 as i128 - x1 as i128 * y0 as i128;
+    }
+    twice.unsigned_abs() as f64 / 2.0
 }
 
 /// A shape box's rank in [0, 1) for the area-true sub-pixel draw: a function
@@ -5036,7 +5070,8 @@ fn paint_world_polygon(
     paint: PaintStyle,
 ) -> Result<bool, String> {
     if let Some(world) = polygon_bbox(points) {
-        if let Some(rect) = hairline_world_bbox(request, world, paint)? {
+        let area = if request.area_true { Some(polygon_area(points)) } else { None };
+        if let Some(rect) = hairline_world_bbox_of(request, world, paint, area)? {
             return paint_hairline_device_rect(band, request, rect, paint);
         }
     }
@@ -5067,7 +5102,8 @@ fn paint_world_path(
     paint: PaintStyle,
 ) -> Result<bool, String> {
     if let Some(world) = polygon_bbox(outline) {
-        if let Some(rect) = hairline_world_bbox(request, world, paint)? {
+        let area = if request.area_true { Some(polygon_area(outline)) } else { None };
+        if let Some(rect) = hairline_world_bbox_of(request, world, paint, area)? {
             // The centerline lies inside the collapsed outline bbox, so
             // its stroke pass is covered by the collapsed spans.
             return paint_hairline_device_rect(band, request, rect, paint);
@@ -5724,8 +5760,9 @@ fn fill_device_polygon_with_phase(
 }
 
 /// The scanline of `fill_device_polygon_with_phase`: every row in
-/// [row_lo, row_hi) (and not above the image) gets its spans, unclamped, in
-/// column order.
+/// [row_lo, row_hi) gets its spans, unclamped, in column order - rows above
+/// or below the image too (the area-true rim reads the row over the image's
+/// top edge: an interior row there is not a border; review 2026-09-22).
 fn scan_device_polygon(
     device: &[(i128, i128)],
     phase: FillPhase,
@@ -5769,8 +5806,7 @@ fn scan_device_polygon(
         .iter()
         .map(|edge| edge.first_row)
         .min()
-        .unwrap_or(0)
-        .max(0);
+        .unwrap_or(0);
     let end_row = edges
         .iter()
         .map(|edge| edge.end_row)
@@ -7707,9 +7743,9 @@ mod tests {
             for (b, count, kept) in [(&wire, &mut wires, &mut kept_wires), (&point, &mut points, &mut kept_points)] {
                 *count += 1;
                 let (x0, y0, x1, y1) = device(b, 1);
-                let near = area_true_hairline(*b, (x0, y0, x1, y1), x1 - x0 < one, y1 - y0 < one).unwrap();
+                let near = area_true_hairline(*b, (x0, y0, x1, y1), x1 - x0 < one, y1 - y0 < one, None).unwrap();
                 let (a0, b0, a1, b1) = device(b, 2);
-                let far = area_true_hairline(*b, (a0, b0, a1, b1), a1 - a0 < one, b1 - b0 < one).unwrap();
+                let far = area_true_hairline(*b, (a0, b0, a1, b1), a1 - a0 < one, b1 - b0 < one, None).unwrap();
                 let drawn = |r: (i128, i128, i128, i128)| r.0 < r.2 && r.1 < r.3;
                 if drawn(near) {
                     *kept += 1;
@@ -7718,12 +7754,60 @@ mod tests {
                 } else {
                     assert!(!drawn(far), "a shape dropped when near came back when zoomed out");
                 }
-                assert_eq!(near, area_true_hairline(*b, (x0, y0, x1, y1), x1 - x0 < one, y1 - y0 < one).unwrap());
+                assert_eq!(near, area_true_hairline(*b, (x0, y0, x1, y1), x1 - x0 < one, y1 - y0 < one, None).unwrap());
             }
         }
         let share = |k: usize, n: usize| k as f64 / n as f64;
         assert!((share(kept_wires, wires) - 0.3).abs() < 0.015, "wires kept {}", share(kept_wires, wires));
         assert!((share(kept_points, points) - 0.2).abs() < 0.015, "points kept {}", share(kept_points, points));
+    }
+
+    #[test]
+    fn area_true_draws_no_rim_where_a_shape_runs_off_the_view() {
+        // review 2026-09-22: a polygon around the whole view lit its top row -
+        // the scan stopped at row 0, so the row above looked empty. With the
+        // fill cleared only a rim can light a pixel, and there is none inside
+        let big_poly = vec![(-200, -150), (600, -170), (650, 520), (-230, 480)];
+        let request = |fill: LayerFill, dx: f64, dy: f64| {
+            let mut request = area_true_request(32, 7, 3);
+            request.raster.view = RasterViewBox::new(dx, dy, 320.0 + dx, 320.0 + dy).unwrap();
+            request.layers[0].fill = fill;
+            request
+        };
+        let polys = vec![PolyRec { layer: 1, dt: 0, pts: big_poly, rep: Rep::One }];
+        let rects = vec![RectRec { layer: 1, dt: 0, x: -170, y: -190, w: 700, h: 690, rep: Rep::One }];
+        for (rects, polys) in [(rects.clone(), Vec::new()), (Vec::new(), polys.clone())] {
+            let scene = hairline_scene(rects, polys, Vec::new());
+            for (dx, dy) in [(0.0, 0.0), (10.0, 0.0), (0.0, -10.0), (-10.0, 10.0)] {
+                let frame = render_geometry_styled(&scene, &request(LayerFill::Clear, dx, dy)).unwrap().frame;
+                assert!(lit_set(&frame, 32).is_empty(), "a rim inside the shape at pan ({}, {})", dx, dy);
+                let solid = render_geometry_styled(&scene, &request(LayerFill::Solid, dx, dy)).unwrap().frame;
+                assert_eq!(lit_set(&solid, 32).len(), 32 * 32);
+            }
+        }
+    }
+
+    #[test]
+    fn area_true_keeps_a_sub_pixel_polygon_by_its_own_area() {
+        // review 2026-09-22: 0.8 x 0.8 px triangles lit as many pixels as the
+        // squares of the same box. 900 of each, 3 px apart (no two share a pixel)
+        let (mut squares, mut triangles) = (Vec::new(), Vec::new());
+        for j in 0..30i64 {
+            for i in 0..30i64 {
+                let (x, y) = (10 + i * 30 + (j * 7) % 11, 10 + j * 30 + (i * 5) % 13);
+                squares.push(PolyRec { layer: 1, dt: 0, pts: vec![(x, y), (x + 8, y), (x + 8, y + 8), (x, y + 8)], rep: Rep::One });
+                triangles.push(PolyRec { layer: 1, dt: 0, pts: vec![(x, y), (x + 8, y), (x, y + 8)], rep: Rep::One });
+            }
+        }
+        let mut request = area_true_request(96, DEFAULT_TILE_SIZE, 1);
+        request.raster.view = RasterViewBox::new(0.0, 0.0, 960.0, 960.0).unwrap();
+        let lit = |polys: Vec<PolyRec>| {
+            lit_set(&render_geometry_styled(&hairline_scene(Vec::new(), polys, Vec::new()), &request).unwrap().frame, 96).len()
+        };
+        let (square, triangle) = (lit(squares), lit(triangles));
+        // expected 900 x 0.64 = 576 and 288
+        assert!((square as f64 - 576.0).abs() < 60.0, "squares lit {}", square);
+        assert!((triangle as f64 - 288.0).abs() < 45.0, "triangles lit {}", triangle);
     }
 
     #[test]

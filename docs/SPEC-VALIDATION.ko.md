@@ -52,8 +52,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
   2/2)은 그려진 평균 폭이 실제의 ±0.6 px이고 1px 이상 간격이 막대마다 열려 있다(킬 스위치
   `FLOE_RUST_AREA_TRUE=off`는 1.2·1.5 px 간격을 닫는다). 1px 미만(0.1/0.9, 0.25/0.75, 0.5/1.5,
   0.5/0.5)은 켜진 비율이 덮임의 0.5~1.6배(킬 스위치는 전부 켠다). 같은 뷰 두 번과 37×23 px 정수
-  pan의 겹친 영역이 픽셀까지 같다. occupancy·jobdeck 게이트는 KLayout 규칙에 대한 비교라 이 킬
-  스위치를 모든 워커에 고정한다.
+  pan의 겹친 영역이 픽셀까지 같다. 0/0.25/0.5/0.75 px pan에서 1px 이상 격자의 간격이 모두 열려 있고
+  켜진 열 비율의 네 위상 평균이 덮임의 ±0.08(한 위상은 아니다 — 1.5/1.5 px는 0.667/0.333).
+  채움을 끈 다각형·사각형이 뷰의 사방 밖으로 걸칠 때 뷰 안에 켜진 픽셀이 0(정수·소수 pan 4가지).
+  0.8×0.8 px 삼각형 900개가 같은 bbox 사각형 900개의 0.35~0.65배만 켠다. occupancy·jobdeck·
+  representatives 게이트는 KLayout 규칙에 대한 비교라 이 킬 스위치를 모든 워커에 고정한다.
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과
@@ -69,8 +72,10 @@ sh tools/validate_rust.sh --only quick path/to.oas
   폐쇄망에서 손으로 옮겨 적는 경우를 위해 마지막에 `== type this ==` 블록(한 depth당 4줄)만 찍고,
   값이 없는 열은 머리글로 접는다.
 - `write_once`(tools/validate_write_once.py, 약 20초; `render` 별칭에 포함): write-once 타일
-  (F2R-28)의 프레임 18개가 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`와 바이트 동일한지, 밀집 뷰에서
-  타일이 차고 paint가 줄어드는지, 킬 스위치가 write-once 작업을 전혀 하지 않는지.
+  (F2R-28)의 프레임 18개가 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`와 바이트 동일한지(area-true와
+  KLayout 규칙 각각, 합 36개), KLayout 규칙의 밀집 뷰에서 타일이 차고 paint가 줄어드는지(area-true는
+  1px 미만 도형을 면적만큼 켜서 이 칩의 타일이 차지 않는다), 킬 스위치가 write-once 작업을 전혀
+  하지 않는지.
 - `fit_budget`(tools/validate_fit_budget.py, 약 25초; `planner`·`render` 별칭에 포함): 합성
   MAIN01 칩의 keep + cut 1 px 광역뷰가 48 MB 예산에서 오류 대신 낮춘 밀도(`fit_thin` > 0)로
   그려지고 **빈 프레임이 아닌지**, `FLOE_RUST_FIT_THIN=off`는 컷을 올리고(`fit_pct` > 100)

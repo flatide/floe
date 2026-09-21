@@ -21,7 +21,19 @@ in pixels at the 0.1 um/px view (the field's lines keep one phase).
   * bars under a pixel: the lit share is within 0.5..1.6 of the covered share
     (the kill switch lights 1.0 of every field);
   * the same view twice gives the same pixels, and a view moved by a whole
-    number of pixels gives the same pixels where the two overlap.
+    number of pixels gives the same pixels where the two overlap;
+  * a view moved by a quarter, a half and three quarters of a pixel: each bar
+    grating keeps its gaps, and its lit column share averaged over the four
+    phases is within 0.08 of the covered share - one phase alone is NOT (1.5 px
+    bars 1.5 px apart light 2 of 3 columns at one phase, 1 of 3 at another:
+    the pixel-centre rule rounds each edge, so widths and gaps are kept on
+    average over positions, not at every one);
+  * with the fill cleared, a polygon and a rectangle that run off every side
+    of the view light no pixel in it (review 2026-09-22: the rim took the row
+    over the top edge for a border), at whole and fractional pans;
+  * 900 triangles and 900 squares of the same 0.8 x 0.8 px box, 3 px apart:
+    the triangles light about half as many pixels (review 2026-09-22: a
+    sub-pixel polygon was kept by its box's area).
 
     .venv/bin/python tools/validate_area_true.py
 """
@@ -41,6 +53,11 @@ W, H = 1000, 400
 PX_UM = 0.1                                   # the view: 0.1 um a pixel
 FIELD_W, FIELD_H, PAD = 16.0, 6.0, 4.0        # um
 LAYER = (1, 0)
+POLY, RECT, TRI, SQUARE = (2, 0), (3, 0), (4, 0), (5, 0)
+BIG = (60.0, 40.0)            # um: the shapes that run off the edges, around this point
+SMALL = (120.0, 5.0)          # um: the triangle and square fields' corner
+CLEAR = '\n'.join(['.' * 16] * 16)
+BLACK = bytes((0, 0, 0, 255))              # the frame background
 # (bar width px, gap px); the first six are at least a pixel wide
 WIDE = [(3.8, 3.8), (3.8, 1.2), (5.2, 2.8), (7.6, 2.4), (1.5, 1.5), (2.0, 2.0)]
 THIN = [(0.1, 0.9), (0.25, 0.75), (0.5, 1.5), (0.5, 0.5)]
@@ -64,6 +81,18 @@ def layout(path):
         while x + w * PX_UM <= fx + FIELD_W + 1e-9:
             top.shapes(li).insert(kdb.DBox(x, fy, x + w * PX_UM, fy + FIELD_H))
             x += (w + g) * PX_UM
+    cx, cy = BIG
+    octagon = [(-30, -12), (-12, -31), (13, -29), (31, -11), (29, 12), (11, 30), (-12, 31), (-31, 13)]
+    top.shapes(ly.layer(*POLY)).insert(kdb.DPolygon([kdb.DPoint(cx + x, cy + y) for x, y in octagon]))
+    top.shapes(ly.layer(*RECT)).insert(kdb.DBox(cx - 27.3, cy - 26.1, cx + 28.7, cy + 25.9))
+    tri, sq = ly.layer(*TRI), ly.layer(*SQUARE)
+    side = 0.8 * PX_UM
+    for j in range(30):
+        for i in range(30):
+            x = SMALL[0] + i * 3 * PX_UM + ((j * 7) % 11) * 0.01 * PX_UM
+            y = SMALL[1] + j * 3 * PX_UM + ((i * 5) % 13) * 0.01 * PX_UM
+            top.shapes(tri).insert(kdb.DPolygon([kdb.DPoint(x, y), kdb.DPoint(x + side, y), kdb.DPoint(x, y + side)]))
+            top.shapes(sq).insert(kdb.DBox(x, y, x + side, y + side))
     ly.write(str(path))
 
 
@@ -80,11 +109,11 @@ def worker(src, on):
     return w
 
 
-def frame(w, gen, view_um, cut_px=0.0):
+def frame(w, gen, view_um, cut_px=0.0, visible=(LAYER,), size=(None, None)):
     dbu = float(w.cache.meta['dbu'])
     w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in view_um), 'view': None,
-              'w': W, 'h': H, 'depth': None, 'cut_px': cut_px, 'lod': False, 'frames': False,
-              'labels': False, 'abstract': False, 'visible': [LAYER], 'frame_format': 'raw',
+              'w': size[0] or W, 'h': size[1] or H, 'depth': None, 'cut_px': cut_px, 'lod': False, 'frames': False,
+              'labels': False, 'abstract': False, 'visible': list(visible), 'frame_format': 'raw',
               'thin': 'keep', 'frame_cache': False})
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
@@ -174,6 +203,49 @@ def main():
                     differ += a != b
             assert differ == 0, 'a whole-pixel pan changed %d pixels' % differ
             print('area-true: reproducible, a 37 x 23 px pan changes no pixel')
+            # fractional pans: the lit column share of each bar grating
+            gen = 10
+            for n, (w, g) in enumerate(WIDE):
+                shares = []
+                for phase in (0.0, 0.25, 0.5, 0.75):
+                    gen += 1
+                    moved = (view[0] + phase * PX_UM, view[1], view[2] + phase * PX_UM, view[3])
+                    pixels = frame(on, gen, moved)
+                    flags, _ = columns(pixels, moved, n)
+                    bars, gaps = runs(flags)
+                    assert gaps and min(gaps) >= 1 and len(gaps) >= len(bars), \
+                        'bars %g/%g px at a %g px pan: a gap closed' % (w, g, phase)
+                    shares.append(sum(flags) / len(flags))
+                cover = w / (w + g)
+                mean = sum(shares) / len(shares)
+                assert abs(mean - cover) <= 0.08, 'bars %g/%g px: column share %.3f over four phases for %.3f covered (%s)' \
+                    % (w, g, mean, cover, ['%.3f' % v for v in shares])
+                print('area-true bars %4g / %4g px: column share per phase %s, mean %.3f for %.3f covered'
+                      % (w, g, ' '.join('%.3f' % v for v in shares), mean, cover))
+            # with the fill cleared, shapes around the whole view draw no rim in it
+            on.submit({'kind': 'repattern', 'fills': [(POLY, CLEAR), (RECT, CLEAR)], 'widths': []})
+            size = (200, 150)
+            for dx, dy in ((0.0, 0.0), (0.37, 0.0), (0.0, 0.61), (1.0, -1.0)):
+                bx, by = BIG[0] - 7.0 + dx * PX_UM, BIG[1] - 5.0 + dy * PX_UM
+                inside = (bx, by, bx + size[0] * PX_UM, by + size[1] * PX_UM)
+                for layer in (POLY, RECT):
+                    gen += 1
+                    pixels = frame(on, gen, inside, visible=(layer,), size=size)
+                    lit = sum(pixels[i:i + 4] != BLACK for i in range(0, len(pixels), 4))
+                    assert lit == 0, 'layer %s: %d rim pixels inside the shape at a (%g, %g) px pan' % (layer, lit, dx, dy)
+            on.submit({'kind': 'repattern', 'fills': [], 'widths': []})
+            print('area-true: shapes running off the view draw no rim in it (4 pans, polygon and rectangle)')
+            # sub-pixel polygons keep by their own area
+            span = (SMALL[0] - 1.0, SMALL[1] - 1.0, SMALL[0] - 1.0 + 100 * PX_UM, SMALL[1] - 1.0 + 100 * PX_UM)
+            counts = {}
+            for layer in (TRI, SQUARE):
+                gen += 1
+                pixels = frame(on, gen, span, visible=(layer,), size=(100, 100))
+                counts[layer] = sum(pixels[i:i + 4] != BLACK for i in range(0, len(pixels), 4))
+            ratio = counts[TRI] / counts[SQUARE]
+            assert 0.35 <= ratio <= 0.65, 'triangles lit %d, squares %d (%.2f)' % (counts[TRI], counts[SQUARE], ratio)
+            print('area-true: 900 triangles light %d px, 900 squares %d px (%.2f; areas 0.32 / 0.64 px each)'
+                  % (counts[TRI], counts[SQUARE], ratio))
         finally:
             on.stop()
             off.stop()
