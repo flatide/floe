@@ -7,6 +7,7 @@ const { randomUUID } = require('node:crypto');
 const { ServiceClient } = require('./service-client.cjs');
 const { CloseController } = require('./close-controller.cjs');
 const { RecoveryController } = require('./recovery-controller.cjs');
+const { ClipboardController, activationProbe } = require('./clipboard-controller.cjs');
 const { Downloads, blobAllowed, postAllowed, mimeAllowed, outsideProfile } = require('./downloads.cjs');
 const P = require('./policy.cjs');
 const runtime = require('./runtime.json');
@@ -20,13 +21,16 @@ const downloadSmoke = args.length === 1 && args[0] === '--smoke-download-test';
 // indexing or caller-chosen output path. The validation driver creates the source.
 const layoutSmoke = args.length === 2 && args[0] === '--smoke-layout-test' && path.isAbsolute(args[1]);
 const paritySmoke = args.length === 2 && args[0] === '--smoke-frame-parity-test' && path.isAbsolute(args[1]);
+const clipboardSmoke = args.length === 2 && args[0] === '--smoke-clipboard-test' && path.isAbsolute(args[1]);
 const clipSmoke = args.length === 2 && args[0] === '--smoke-clip-download-test' && path.isAbsolute(args[1]);
 const recoveryModes = { '--smoke-recovery-test': 'normal', '--smoke-recovery-storage-test': 'storage', '--smoke-recovery-cookie-test': 'cookie' };
 const recoveryMode = args.length === 2 && Object.hasOwn(recoveryModes, args[0]) && path.isAbsolute(args[1]) ? recoveryModes[args[0]] : null;
 const recoverySmoke = recoveryMode !== null;
-const smoke = emptySmoke || layoutSmoke || paritySmoke || downloadSmoke || clipSmoke || recoverySmoke;
+const smoke = emptySmoke || layoutSmoke || paritySmoke || clipboardSmoke || downloadSmoke || clipSmoke || recoverySmoke;
 let profile, root, window, service, close, origin = null, panel = false, stopping = false;
 let recovery, viewFailure = false;
+let clipboardAccess;
+const qaClipboard = { requests: 0, grants: 0, denials: 0, probes: 0, active: false };
 let downloads, downloadQaRoot, downloadQaChoice = 0, cleanupConfirmed = false;
 const downloadWindows = new Map();
 let ended = false, failure = false, shuttingDown = false, qaCompleted = false;
@@ -70,11 +74,13 @@ function evalOwned(script) {
 function requestClose() {
   reveal();
   if (panel || stopping || !close) return;
+  clipboardAccess?.invalidate();
   if (recovery) recovery.invalidate();
   return close.request().catch(() => fail());
 }
 function cancelService() {
   stopping = true;
+  clipboardAccess?.end();
   if (recovery) recovery.end();
   status('Stopping this session; waiting for Rust worker cleanup…');
   if (service) service.close(); else finish(0);
@@ -82,6 +88,7 @@ function cancelService() {
 function fail() {
   if (failure || ended) return;
   failure = true;
+  clipboardAccess?.end();
   if (recovery) recovery.end();
   status('The local service or view failed. No operation was replayed. Close this window to end the session. Check the matching Rust binaries and view options.');
   if (smoke) cancelService();
@@ -89,6 +96,7 @@ function fail() {
 function viewGone() {
   if (ended || stopping) return;
   qaCrashes++; viewFailure = true;
+  clipboardAccess?.invalidate();
   if (recovery) recovery.invalidate();
   if (close) close.invalidate();
   status('The display process stopped. Rust work may already have completed. Use View → Recover View for an explicit reload, or end this session. No bootstrap or save was replayed.');
@@ -97,6 +105,7 @@ function viewGone() {
 async function finish(code) {
   if (shuttingDown) return;
   shuttingDown = true; ended = true;
+  clipboardAccess?.end();
   if (close) close.end();
   if (recovery) recovery.end();
   if (code !== 0 && !(stopping && code === 143)) failure = true;
@@ -114,6 +123,7 @@ async function finish(code) {
   app.exit(failure ? 1 : 0);
 }
 async function recover() {
+  clipboardAccess?.invalidate();
   return recovery ? recovery.request() : false;
 }
 async function menuAction(id) {
@@ -147,7 +157,14 @@ app.whenReady().then(async () => {
   const partition = 'floe-' + randomUUID();
   const ses = session.fromPartition(partition, { cache: false });
   ses.setPermissionCheckHandler(() => false);
-  ses.setPermissionRequestHandler((_web, _permission, callback) => callback(false));
+  ses.setPermissionRequestHandler((web, permission, callback, details) => {
+    const result = value => {
+      if (clipboardSmoke) { qaClipboard.requests++; if (value) qaClipboard.grants++; else qaClipboard.denials++; }
+      callback(value);
+    };
+    if (clipboardAccess) clipboardAccess.request(web, permission, result, details);
+    else result(false);
+  });
   ses.webRequest.onBeforeRequest((details, callback) => {
     if (recoverySmoke && P.requestAllowed(origin, details.url)) {
       if (details.url === origin + '/' && details.method === 'GET') qaRecoveryRequests.root++;
@@ -184,6 +201,18 @@ app.whenReady().then(async () => {
     title: 'floe2 · Electron comparison', backgroundColor: '#171b23', webPreferences: P.webPreferences(partition) });
   window.on('close', event => { if (!ended) { event.preventDefault(); requestClose(); } });
   const web = window.webContents;
+  clipboardAccess = new ClipboardController({ origin: () => origin,
+    owns: contents => contents === web && !web.isDestroyed() && web.getURL() === origin + '/',
+    allowed: () => !panel && !stopping && !ended && !failure && !viewFailure && !recovery?.busy &&
+      !window.isDestroyed() && window.isVisible() && window.isFocused() && !window.isMinimized(),
+    // World 1001 is isolated from page JS; false never manufactures user input.
+    probe: async contents => {
+      const active = await contents.executeJavaScriptInIsolatedWorld(1001, [{ code: activationProbe }], false);
+      if (clipboardSmoke) { qaClipboard.probes++; qaClipboard.active = active === true; }
+      return active;
+    }
+  });
+  window.on('blur', () => clipboardAccess.invalidate());
   web.setWindowOpenHandler(details => {
     if (!stopping && !ended && !recovery?.busy && !viewFailure && !downloadWindows.size && downloads && !downloads.active &&
         downloads.slot.phase === 'ready' && postAllowed(origin, details.url) && details.postBody) {
@@ -211,6 +240,7 @@ app.whenReady().then(async () => {
   }
   web.on('did-start-navigation', event => {
     if (event.isMainFrame && !event.isSameDocument) {
+      clipboardAccess.invalidate();
       if (close) close.invalidate();
       if (recovery) recovery.navigation();
     }
@@ -250,8 +280,8 @@ app.whenReady().then(async () => {
     { label: 'Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
     { label: 'View', submenu: [{ label: 'Recover View…', click: recover }, { label: 'About…', click: () => menuAction('about-open') }] }
   ]));
-  status('Starting the Rust service. Close this window to cancel. Native exports save to new files only; programmatic clipboard permissions are not enabled.');
-  const viewArgs = layoutSmoke || paritySmoke || clipSmoke || recoverySmoke ? [args[1], '--goto', '200,200,300', '--depth', 'full', '--detail', 'high',
+  status('Starting the Rust service. Close this window to cancel. Native exports save to new files only; clipboard reads are blocked and copy requires an active view.');
+  const viewArgs = layoutSmoke || paritySmoke || clipboardSmoke || clipSmoke || recoverySmoke ? [args[1], '--goto', '200,200,300', '--depth', 'full', '--detail', 'high',
     '--jobs', '4', '--raster-jobs', '4', '--refinement', 'off'] : emptySmoke || downloadSmoke ? [] : (args[0] === 'view' ? args.slice(1) : args);
   if (clipSmoke) viewArgs.push('--budget-mb', '256'); // leave managed capacity for explicit exact export
   if (paritySmoke) viewArgs.push('--raw');
@@ -353,6 +383,15 @@ async function runSmoke() {
   if (layoutSmoke || paritySmoke) {
     qaStep = 'layout actions';
     await require('./layout-qa.cjs').run({ app, window, evalOwned, service, extraRustPids: downloads.pids(), parityOnly: paritySmoke });
+  }
+  if (clipboardSmoke) {
+    qaStep = 'synthetic clipboard';
+    try {
+      await require('./clipboard-qa.cjs').run({ window, evalOwned, wait, stage: value => { qaStep = value; } });
+    } finally {
+      console.log('ELECTRON CLIPBOARD: permission counts ' + JSON.stringify(qaClipboard));
+      console.log('ELECTRON CLIPBOARD: PNG status flags ' + JSON.stringify(await evalOwned("(()=>{const s=document.getElementById('snapshot-status').textContent;return {copied:/^Copied /.test(s),refused:/refused/.test(s),capturing:/Capturing/.test(s),busy:/still encoding/.test(s),hidden:document.hidden,ready:!document.getElementById('snapshot-copy').disabled};})()")));
+    }
   }
   if (downloadSmoke) {
     qaStep = 'download cancel publish conflict';

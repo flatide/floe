@@ -19,6 +19,7 @@ export FLOE_INDEX_BIN FLOE_RENDERD_BIN
 node --test ../service-client.test.cjs ../service-lifecycle.test.cjs ../host.test.cjs ../layout-qa.test.cjs ../downloads.test.cjs ../download-slot.test.cjs ../recovery-controller.test.cjs
 node ../../desktop/ui/recovery-probe.test.cjs
 node --test ../../desktop/ui/frame-parity-probe.test.cjs
+node --test ../clipboard-controller.test.cjs
 cd "$repo"
 sh tools/run_electron_dev.sh --smoke-test
 sh tools/run_electron_dev.sh --smoke-download-test

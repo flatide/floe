@@ -116,8 +116,9 @@ E2b부터 같은 Cargo build가 `floe-electron-download`도 만든다. 기본은
 
 - E1의 다운로드 차단은 E2b에서 새 파일 내보내기로 확장했다. 기존 파일 덮어쓰기,
   자동 재시도/재개, 임의 원격 URL 다운로드는 계속 금지다. 아래 수용 범위를 따른다.
-- 프로그램식 clipboard 권한은 차단한다. 표준 native Edit의 Copy/Paste 메뉴는
-  있지만 이미지·좌표 복사, 붙여넣기/IME의 실제 수용은 별도다.
+- E2d부터 활성 소유 창의 transient user activation이 확인된 프로그램식 쓰기만
+  허용한다. 읽기 권한은 계속 차단한다. 실제 합성 문자열·PNG 검사와 물리 입력/IME의
+  남은 범위는 [클립보드 수용 기록](WEBUI_ELECTRON_CLIPBOARD.ko.md)을 따른다.
 - `node --test electron/service-client.test.cjs electron/host.test.cjs`: **10/10**.
   실제 파이프5개까지 포함하면15개. 종료 timeout·중복 요청·stale 확인 취소,
   런처의 cwd·공백/한글 인자·명시 executable 오류를 포함한다.
@@ -333,6 +334,11 @@ native 파일 선택/clipboard/IME/DPI 실조작, RHEL/ETX 및 Python-free Linux
 오프라인 패키지·고지/서명 등이 남는다. E2c 완료는 정식 호스트 채택/전체 완료가 아니다.
 
 ### 비교·배포 시 유지할 조건
+
+E2d 클립보드의 별도 승인·경계·검증은
+[WEBUI_ELECTRON_CLIPBOARD.ko.md](WEBUI_ELECTRON_CLIPBOARD.ko.md)에 기록한다.
+일반 회귀 명령은 OS 클립보드를 변경하지 않으며 `--clipboard` QA 옵션만 명시적으로
+테스트 문자열·PNG를 쓴다. 기존 클립보드는 읽거나 백업/복원하지 않는다.
 
 - `electron/runtime.json`은 공식 릴리스 **44.4.3 (2026-09-18)** 및 공식 SHA-256을
   기록한다. macOS arm64는 검증·실행했고, Linux x64는 archive/GLIBC 정적 점검만
