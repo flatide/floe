@@ -229,6 +229,8 @@ if gate embedded_host; then RAN="$RAN embedded_host"
     node desktop/ui/review-transport.test.cjs
     node desktop/ui/session-loss.test.cjs
     node desktop/ui/download-cancel-probe.test.cjs
+    node desktop/ui/renderer-failure-probe.test.cjs
+    .venv/bin/python -B tools/validate_desktop_renderer_failure.py --self-test
     (cd rust && FLOE_INDEX_BIN="$PWD/target/release/floe-index" \
         FLOE_RENDERD_BIN="$PWD/target/release/floe-renderd" \
         cargo test --release --offline --locked -p floe-app --test embedded_lifecycle -- --ignored); fi

@@ -34,6 +34,10 @@ const guestLifecycle=spawnSync(process.execPath,[path.join(ui,'guest-lifecycle.t
 assert.equal(guestLifecycle.status,0,'guest lifecycle: '+guestLifecycle.error);
 const frameStatus=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_FRAME_STATUS:'1'}});
 assert.equal(frameStatus.status,0,'frame status client: '+frameStatus.error);
+for(const mode of ['empty','foreground','margin']){
+    const run=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_WORKER_FAILURE:mode}});
+    assert.equal(run.status,0,'worker failure client '+mode+': '+run.error);
+}
 for(const file of ['wheel.test.cjs','client.test.cjs']){
     const run=spawnSync(process.execPath,[path.join(ui,file)],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_WHEEL:'1'}});
     assert.equal(run.status,0,'wheel '+file+': '+run.error);

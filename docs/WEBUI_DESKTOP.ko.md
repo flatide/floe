@@ -1143,3 +1143,75 @@ teardown을 요구한다. 사용자 SavePanel 클릭·대용량 전송·실물 �
 이번 macOS 다운로드 경로 보호·실제 게시 단계는 완료했다. 전체 목표에는 실제
 process/worker·디스크 장애 복구, 물리 IME/DPI/접근성, 서명/공증, RHEL/ETX 및
 현장 G1/G4와 전역 배터리 완료가 계속 남는다.
+
+## 19. D2-mac 실제 렌더러 종료와 마지막 화면 표시 (2026-09-21)
+
+장애 수용 중 공통 UI에서 두 재현을 고정했다. worker failure snapshot 뒤에도
+retained margin crop이 상태줄을 `Live`로 덮었고, 같은 revision의 늦은 PNG decode/
+raw packet이 실패 뒤 다시 착지할 수 있었다. 수정 전 Node 검사에서 각각 실패했다.
+픽셀 계산/렌더러를 바꾸는 문제가 아니라 **마지막 화면과 살아 있는 결과의 구분**이다.
+
+실패한 view의 마지막 화면은 참조용으로 유지하되 `failed · last displayed image
+(not live)`로 표시한다. 첫 프레임 전 실패라면 화면이 없음을 표시한다. 남은 perf도
+previous frame으로 표시하고 margin 준비 안내는 지운다. 진행 중 PNG decode를
+취소·해제하고, terminal view의 늦은 raw/PNG는 revision이 같아도 discarded ACK로
+거부한다. 실패 상태에서 탐색은 차단하고, 사용자가 **Close layout → Open layout**으로
+다시 열 수 있다고 안내한다. 자동 재시작·이전 입력/저장 재생·새 인증 발급은 없다.
+
+검증은 세 층으로 나눈다.
+
+- 공통 UI Node: 빈 화면/foreground/margin 세 상태 각각에서 실패 표시·남은 픽셀·
+  decode 취소·늦은 PNG/raw 거부·URL 해제·조작 차단·명시적 닫기/재열기를 단언한다.
+- native QA DOM probe: 실제 착지한 margin과 실패/닫기 상태를 고정 표식으로 읽는다.
+  인증/저장소/요청 본문을 읽지 않는다. probe 자체의 상태 판정도 별도로 검사한다.
+- **실제 macOS WKWebView + renderd SIGKILL**: 개발 driver가 새 앱을 실행하고
+  `ps`의 pid/ppid/comm만 읽어 그 앱의 유일한 직접 자식과 정확한 renderd 실행 경로를
+  두 번 확인한다. 확인된 PID만 한 번 종료한다. 실패 표시, 닫기로 두 buffer 제거,
+  명시적 다시 열기, 이전 자식 회수와 다른 PID, 새 margin 프레임, 닫기 취소와 정상
+  service join/exit 0을 모두 요구한다. 기존 사용자 앱을 이름으로 찾아 종료하지 않는다.
+
+새 단독 인자 `--smoke-test-renderer-failure`는 외부 driver용이며 source/reviewer/
+추가 인자를 받지 않는다. 기존 합성 fixture 생성기를 재사용하되 새 layout만 열고
+DRC·reviewer는 등록하지 않는다. source/pack/cache read-back 동일성을 확인한다.
+Python과 `ps`는 **개발 검사에만** 쓰며 설치 제품의 의존성/자동 재시작 기능이 아니다.
+private WebKit PID API는 추가하지 않았다. headless `embedded_host`에는 probe와
+PID 선택 순수 단위 검사만 들어가며, 실제 앱 실행은 `validate_desktop.sh`에 있다.
+
+직접 실행 예시(합성 파일만 새로 생성):
+
+```sh
+FLOE_INDEX_BIN="$PWD/rust/target/release/floe-index" \
+FLOE_RENDERD_BIN="$PWD/rust/target/release/floe-renderd" \
+python3 -B tools/validate_desktop_renderer_failure.py desktop/target/debug/floe2-desktop
+```
+
+검증 결과:
+
+- host unit **36 passed**, fmt와 host clippy `--all-targets --no-deps -- -D warnings`
+  통과. 최종 진단 probe 보완 후에도 재검사했다.
+- 최초 debug host의 실제 SIGKILL/명시적 재열기 검사는 **exit 0**이었다. 이전
+  자식 회수·다른 PID·새 margin·정상 종료와 합성 입력 동일성까지 확인했다.
+  로그: `/private/tmp/floe-renderer-failure-native.log`.
+- `sh tools/validate_rust.sh --only embedded_host,web_ui,validation_selector` 최종
+  **exit 0 / ALL OK**. 빈/foreground/margin 세 실패 회귀, ES2017 및 전체 결정적
+  UI 검사, probe·PID 선택 검사, 실제 내장 서비스 수명을 포함한다. 로그는
+  `/private/tmp/floe-renderer-failure-battery-final.log`; 검사 전용 `.venv` 링크는
+  제거했다. 수정 전 두 실패는 `floe-worker-failure-before-{margin,foreground}.log`다.
+- 최종 release 개발 앱 `desktop/target/macos-dev.3YRqNP/Floe2.app` 조립과 고지
+  279파일 검사는 **exit 0**. 로그는 `floe-renderer-failure-release-final.log`다.
+  이 번들의 실제 GUI 장애 검사는 아직 완료하지 않았다.
+- **전체 native 재검증은 미통과**다. 첫 suite의 새 케이스가 exit 1이었고, 후속
+  진단 실행은 `renderer-document-hidden`으로 첫 margin을 기다리다 exit 1이었다.
+  고정 표식이 없던 첫 실패의 원인까지 동일하다고 단정하지 않는다. 최종 suite는
+  기존 일반 메뉴 검사에서 `menu=unavailable`, step 2 대기 후 120초 deadline으로
+  exit 1이었다. 로그는 `floe-renderer-failure-{native-suite,diagnostic,native-final}.log`.
+  따라서 최초 단독 성공을 반복 실행·최종 번들·전체 native 회귀 성공으로 합산하지 않는다.
+
+이 native gate는 실제 창이 보이는 상태에서 실행해야 한다. 숨겨지거나 완전히
+가려진 WebView가 프레임 수신/메뉴 작업을 중지하는 정책을 우회하거나, Node 결과로
+실제 프레임 조건을 대체하지 않았다. 최종 창 가시성 환경의 반복 검증은 잔여다.
+
+이 검사는 빈 합성 작업의 렌더러 프로세스 장애다. 실제 WebContent process 종료,
+저장 도중 crash/디스크 고장, 물리 키보드·IME/DPI/접근성, 고객 대형 설계/현장
+수용을 대신하지 않는다. 이번 화면 제어 연동은 `CUA_REPL_ENABLED_SURFACES is
+required`로 사용할 수 없어 수동 화면 조작·스크린샷은 별도로 남긴다.

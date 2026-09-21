@@ -58,6 +58,9 @@ struct State {
     smoke_notices: bool,
     smoke_recovery: bool,
     smoke_review: bool,
+    smoke_renderer: bool,
+    renderer_qa_done: Cell<bool>,
+    renderer_qa_reopened: Cell<Option<Instant>>,
     smoke_loss: Option<Loss>,
     loss_removed: Cell<bool>,
     download_qa: Option<download_qa::Fixture>,
@@ -501,6 +504,7 @@ impl Host {
         smoke_notices: bool,
         smoke_recovery: bool,
         smoke_review: bool,
+        smoke_renderer: bool,
         smoke_loss: Option<Loss>,
         download_qa: Option<download_qa::Fixture>,
     ) -> Retained<Self> {
@@ -522,12 +526,17 @@ impl Host {
             smoke_notices,
             smoke_recovery,
             smoke_review,
+            smoke_renderer,
+            renderer_qa_done: Cell::new(false),
+            renderer_qa_reopened: Cell::new(None),
             smoke_loss,
             loss_removed: Cell::new(false),
             download_qa,
             download_qa_completion: RefCell::new(None),
             download_qa_done: Cell::new(false),
-            smoke_step: Cell::new(if smoke_review {
+            smoke_step: Cell::new(if smoke_renderer {
+                50
+            } else if smoke_review {
                 20
             } else if smoke_loss.is_some() {
                 30
@@ -1358,6 +1367,9 @@ impl Host {
             32 if self.ivars().smoke_loss == Some(Loss::Cookie) => concat!("(", include_str!("../ui/session-loss-probe.js"), ")('check-cookie')"),
             32 => concat!("(", include_str!("../ui/session-loss-probe.js"), ")('check-storage')"),
             40 => include_str!("../ui/download-cancel-probe.js"),
+            50 | 53 | 54 if self.ivars().smoke_renderer => concat!("(", include_str!("../ui/renderer-failure-probe.js"), ")('ready')"),
+            51 if self.ivars().smoke_renderer => concat!("(", include_str!("../ui/renderer-failure-probe.js"), ")('failed')"),
+            52 if self.ivars().smoke_renderer => concat!("(", include_str!("../ui/renderer-failure-probe.js"), ")('closed')"),
             _ => { self.ivars().evaluating.set(false); return; },
         };
         let host = self.retain();
@@ -1416,6 +1428,14 @@ impl Host {
                     "loss-failed-replay",
                     "loss-failed-exception",
                     "download-started",
+                    "renderer-ready",
+                    "renderer-document-hidden",
+                    "renderer-await-margin",
+                    "renderer-margin-hidden",
+                    "renderer-await-live-crop",
+                    "renderer-failed",
+                    "renderer-status-invalid",
+                    "renderer-closed",
                     "wait",
                 ]
                 .contains(&text.as_str())
@@ -1426,6 +1446,44 @@ impl Host {
                 *host.ivars().smoke_probe.borrow_mut() = text.clone();
             }
             let next = match (step, text.as_str()) {
+                (50, "renderer-ready") => {
+                    // The development driver verifies this process's single
+                    // direct renderd child before SIGKILL. No product PID API,
+                    // signal injection or automatic respawn is added here.
+                    eprintln!("DESKTOP RENDERER KILL READY");
+                    51
+                }
+                (51, "renderer-status-invalid") => {
+                    host.fail("renderer failure was presented as live or actionable");
+                    step
+                }
+                (51, "renderer-failed") => {
+                    eprintln!("DESKTOP RENDERER FAILURE OBSERVED");
+                    host.eval("document.getElementById('close').click()");
+                    52
+                }
+                (52, "renderer-closed") => {
+                    host.eval("document.getElementById('open').click()");
+                    53
+                }
+                (53, "renderer-ready") => {
+                    host.ivars().renderer_qa_done.set(true);
+                    host.ivars().renderer_qa_reopened.set(Some(Instant::now()));
+                    eprintln!("DESKTOP RENDERER REOPENED");
+                    54
+                }
+                (54, "renderer-ready")
+                    if host
+                        .ivars()
+                        .renderer_qa_reopened
+                        .get()
+                        .is_some_and(|t| t.elapsed() >= Duration::from_secs(1)) =>
+                {
+                    // Give the external driver a bounded opportunity to observe
+                    // the replacement child, without blocking the main thread.
+                    host.ivars().window.get().unwrap().performClose(None);
+                    5
+                }
                 (40, "download-started") => 41,
                 (
                     30..=32,
@@ -1605,6 +1663,7 @@ fn finish_before_startup_modal(app: &NSApplication) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     mut session: Session,
     smoke: bool,
@@ -1613,6 +1672,7 @@ pub fn run(
     smoke_review: bool,
     smoke_loss: Option<Loss>,
     smoke_download: Option<download_qa::Mode>,
+    smoke_renderer: bool,
 ) -> Result<i32> {
     if !objc2::available!(macos = 12.0) {
         return Err(Error::input("embedded preview requires macOS 12 or later"));
@@ -1653,6 +1713,7 @@ pub fn run(
         smoke_notices,
         smoke_recovery,
         smoke_review,
+        smoke_renderer,
         smoke_loss,
         if let Some(mode) = smoke_download {
             Some(
@@ -1835,6 +1896,13 @@ pub fn run(
         }
         return Err(Error::input(message));
     }
+    if smoke_renderer {
+        if result != 0 || host.ivars().smoke_step.get() != 8 || !host.ivars().renderer_qa_done.get()
+        {
+            return Err(Error::input("native renderer failure QA did not complete"));
+        }
+        println!("DESKTOP RENDERER FAILURE: OK (retained image not live; explicit close/reopen; new frame; close cancellation and service join)");
+    }
     if let Some(mode) = smoke_download {
         if result != 0
             || host.ivars().smoke_step.get() != 8
@@ -1880,7 +1948,7 @@ pub fn run(
         }
         if smoke_review {
             println!("DESKTOP REVIEW RECOVERY: OK (synthetic-only; dropped save ACKs; authenticated reloads; no automatic POST replay; explicit identical receipt resolution; UI read-back; native close/cancel/quit; service joined)");
-        } else {
+        } else if !smoke_renderer {
             println!("DESKTOP SMOKE: OK (WebKit auth; synthetic composition-key guard; native menu About + modal guard; native close→cancel; application quit→confirm; service joined)");
         }
         if smoke_notices {

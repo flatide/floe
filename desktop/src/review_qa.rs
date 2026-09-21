@@ -28,6 +28,9 @@ const DB: &str = "TOP 1000\nSYNTHETIC.SPACE\n2 2 1 Sep 21 00:00:00 2026\nSynthet
 pub fn requested(args: &[String]) -> bool {
     args == ["--smoke-test-review-recovery"]
 }
+pub fn renderer_requested(args: &[String]) -> bool {
+    args == ["--smoke-test-renderer-failure"]
+}
 
 struct PreparationStop {
     flag: Arc<AtomicUsize>,
@@ -185,12 +188,36 @@ impl Fixture {
             "256".into(),
         ])
     }
-    pub fn verify(&self) -> Result<()> {
+    pub fn layout_arguments(&self) -> Result<Vec<String>> {
+        // Reuse the same new synthetic inputs/fingerprint without registering
+        // the DRC or granting review edits to renderer-failure QA.
+        Ok(vec![
+            self.source
+                .to_str()
+                .ok_or_else(|| Error::input("QA path must be UTF-8"))?
+                .to_owned(),
+            "--depth".into(),
+            "full".into(),
+            "--detail".into(),
+            "high".into(),
+            "--jobs".into(),
+            "2".into(),
+            "--raster-jobs".into(),
+            "1".into(),
+            "--budget-mb".into(),
+            "256".into(),
+        ])
+    }
+    pub fn verify_inputs(&self) -> Result<()> {
         for (path, bytes) in &self.before {
             if fs::read(path)? != *bytes {
                 return Err(Error::input("native QA changed a source/pack/cache input"));
             }
         }
+        Ok(())
+    }
+    pub fn verify(&self) -> Result<()> {
+        self.verify_inputs()?;
         let notes = self.root.join(format!(".synthetic.db.notes.{REVIEWER}.fe"));
         let waives = self.root.join(format!(".synthetic.db.waive.{REVIEWER}"));
         let text = fs::read_to_string(&notes)?;
@@ -257,6 +284,31 @@ mod tests {
             vec!["--smoke-test-review-recovery", "--drc-reviewer", "existing"],
         ] {
             assert!(!requested(
+                &words.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            ));
+        }
+    }
+
+    #[test]
+    fn renderer_qa_never_accepts_user_inputs() {
+        assert!(renderer_requested(
+            &["--smoke-test-renderer-failure".into()]
+        ));
+        for words in [
+            vec![],
+            vec!["view", "--smoke-test-renderer-failure"],
+            vec!["--smoke-test-renderer-failure", "user.oas"],
+            vec![
+                "--smoke-test-renderer-failure",
+                "--drc-reviewer",
+                "existing",
+            ],
+            vec![
+                "--smoke-test-renderer-failure",
+                "--smoke-test-review-recovery",
+            ],
+        ] {
+            assert!(!renderer_requested(
                 &words.into_iter().map(str::to_owned).collect::<Vec<_>>()
             ));
         }

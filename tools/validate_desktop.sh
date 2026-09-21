@@ -17,6 +17,8 @@ node desktop/ui/recovery-probe.test.cjs
 node desktop/ui/review-transport.test.cjs
 node desktop/ui/session-loss.test.cjs
 node desktop/ui/download-cancel-probe.test.cjs
+node desktop/ui/renderer-failure-probe.test.cjs
+python3 -B tools/validate_desktop_renderer_failure.py --self-test
 FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
 FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
     desktop/target/debug/floe2-desktop --smoke-test
@@ -56,3 +58,8 @@ printf '%s\n' "$cleanup_output"
 case "$cleanup_output" in *'DESKTOP DOWNLOAD CLEANUP FAILURE: OK'*) ;; *) exit 1 ;; esac
 case "$cleanup_output" in *'floe2-desktop: Session ended, but private download temporary-file cleanup was not confirmed.'*) ;; *) exit 1 ;; esac
 echo 'DESKTOP CLEANUP ERROR EXIT: OK (expected exit 1; no modal in isolated QA)'
+# Requires a genuinely visible landed frame. Keep this synthetic window visible;
+# a hidden/occluded WebView correctly suspends frame delivery and cannot pass.
+FLOE_INDEX_BIN="$repo/rust/target/release/floe-index" \
+FLOE_RENDERD_BIN="$repo/rust/target/release/floe-renderd" \
+    python3 -B tools/validate_desktop_renderer_failure.py desktop/target/debug/floe2-desktop

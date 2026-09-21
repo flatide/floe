@@ -39,7 +39,7 @@
         index_unavailable: 'A current index is required. Review “Index and open…” or use “Index this source”; opening never indexes automatically.',
         busy: 'Resources or cache are busy. Wait, choose fewer index jobs, or explicitly close a reader before rebuilding its cache.',
         worker_version: 'The native renderer version does not match. Rebuild the matched binaries.',
-        worker_failed: 'The renderer failed. Check the local service diagnostics; close and reopen to retry.',
+        worker_failed: 'The renderer failed. Any remaining image is the last displayed frame, not a live result. Close this layout, then use Open layout to retry. Check the local service diagnostics.',
         stale_state: 'The view changed in another connection. That edit was not replayed.',
         prepared_edit_expired: 'This prepared move is no longer current. Select the error again; it was not replayed.',
         prepared_edit_unavailable: 'The move could not be prepared. Try again.',
@@ -155,12 +155,17 @@
         if (snapshots) { snapshots.changed(); }
         dumpChanged();
         if (minimap) { minimap.changed(); }
-        if (full) {
+        const failed = state && state.status === 'failed';
+        if (failed) {
+            // Retained pixels remain useful for reference, but cannot turn a
+            // terminal worker failure back into a "Live" margin crop.
+            el('status').textContent = 'failed · ' + (displayed ? 'last displayed image (not live)' : 'no frame displayed');
+        } else if (full) {
             const pending = !!inflightBody || queue.length > 0 || !!dragShift;
             el('status').textContent = (pending ? 'Pan preview' : 'Live') + ' · margin crop · gen ' + marginFrame.generation;
         }
-        el('perf').textContent = foregroundPerf + (full ? ' · crop (no foreground render)' : '');
-        el('margin-info').textContent = state && state.capabilities.margin ?
+        el('perf').textContent = foregroundPerf + (failed ? (foregroundPerf ? ' · previous frame' : '') : full ? ' · crop (no foreground render)' : '');
+        el('margin-info').textContent = failed ? '' : state && state.capabilities.margin ?
             (state.margin_working ? 'Prefetching' : (mp ? 'Margin ready' : 'Margin pending')) +
             (marginFrame ? ' · ' + (Number((marginFrame.perf || {}).raster_us || 0) / 1000).toFixed(1) + ' ms bg' : '') +
             (marginFrame && marginFrame.labels_truncated ? ' · labels partial' : '') + (state.margin_failure ? ' · prefetch failed' : '') : '';
@@ -340,6 +345,7 @@
             freezeMargin(); marginFrame = null; marginCanvas.width = 1; marginCanvas.height = 1;
         }
         state = s;
+        if (s.status === 'failed') { finishDecode(); }
         if (accepted && P.compare(s.state_rev, accepted.rev) >= 0) {
             const body = inflightBody, error = accepted.error || (s.state_rev !== accepted.rev ?
                 'The view changed again after that edit; dependent review effects were not applied. The current view is authoritative.' : null);
@@ -384,7 +390,7 @@
         let packet;
         try { packet = P.packet(buffer); } catch (e) { report(e); ws.close(); return; }
         const h = packet.header;
-        const valid = function () { return ws === socket && serial === socketSerial && P.matches(h, state) &&
+        const valid = function () { return live() && ws === socket && serial === socketSerial && P.matches(h, state) &&
             (!accepted || (h.purpose === 'foreground' && P.compare(h.render_rev, accepted.render) >= 0)) && !document.hidden; };
         if (!valid()) { acknowledge(h, 'discarded', ws, serial); return; }
         if (decode) { notice('Frame credit violation'); ws.close(); return; }

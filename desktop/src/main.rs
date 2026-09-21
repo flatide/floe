@@ -24,6 +24,7 @@ fn main() {
             --smoke-test-notices: same test plus packaged About notice reads.\n\
             --smoke-test-recovery: same test plus explicit reload and close-timeout cancel.\n\
             --smoke-test-review-recovery: NEW synthetic files only; save ACK loss/reload.\n\
+            --smoke-test-renderer-failure: NEW synthetic layout; external test driver required.\n\
             --smoke-test-storage-loss / --smoke-test-cookie-loss: NEW empty WebView only.\n\
             --smoke-test-download-cancel: NEW synthetic blob/staging files only.\n\
             --smoke-test-download-publish: NEW synthetic blob, real WebKit file write only.\n\
@@ -47,11 +48,13 @@ fn main() {
     let smoke_notices = args == ["--smoke-test-notices"];
     let smoke_recovery = args == ["--smoke-test-recovery"];
     let smoke_review = review_qa::requested(&args);
+    let smoke_renderer = review_qa::renderer_requested(&args);
     let smoke_loss = session_qa::requested(&args);
     let smoke_download = download_qa::requested(&args);
     let smoke = smoke_notices
         || smoke_recovery
         || smoke_review
+        || smoke_renderer
         || smoke_loss.is_some()
         || smoke_download.is_some()
         || args == ["--smoke-test"];
@@ -62,18 +65,22 @@ fn main() {
         args.remove(0);
     }
     let result = (|| {
-        if smoke_review && !cfg!(target_os = "macos") {
+        if (smoke_review || smoke_renderer) && !cfg!(target_os = "macos") {
             return Err(floe_app_core::Error::input(
-                "review WebView QA requires macOS",
+                "synthetic layout WebView QA requires macOS",
             ));
         }
-        let fixture = if smoke_review {
+        let fixture = if smoke_review || smoke_renderer {
             Some(review_qa::Fixture::create()?)
         } else {
             None
         };
         if let Some(fixture) = &fixture {
-            args = fixture.arguments()?;
+            args = if smoke_renderer {
+                fixture.layout_arguments()?
+            } else {
+                fixture.arguments()?
+            };
         }
         let session = floe_app::embedded::Session::parse(&args)?;
         #[cfg(target_os = "macos")]
@@ -86,10 +93,16 @@ fn main() {
                 smoke_review,
                 smoke_loss,
                 smoke_download,
+                smoke_renderer,
             )?;
             if let Some(fixture) = &fixture {
-                fixture.verify()?;
-                println!("DESKTOP REVIEW FILES: OK (exact note/waive read-back; 0600; original inputs unchanged)");
+                if smoke_renderer {
+                    fixture.verify_inputs()?;
+                    println!("DESKTOP RENDERER INPUTS: OK (new synthetic source/pack/cache unchanged; no reviewer registered)");
+                } else {
+                    fixture.verify()?;
+                    println!("DESKTOP REVIEW FILES: OK (exact note/waive read-back; 0600; original inputs unchanged)");
+                }
             }
             Ok(code)
         }

@@ -59,6 +59,7 @@ const displayTestEnabled=process.env.FLOE_TEST_DISPLAY==='1',displayReads=[];
 const wheelEnabled=process.env.FLOE_TEST_WHEEL==='1';
 const dumpEnabled=process.env.FLOE_TEST_DUMP==='1';
 const frameStatusEnabled=process.env.FLOE_TEST_FRAME_STATUS==='1';
+const workerFailure=process.env.FLOE_TEST_WORKER_FAILURE||'';
 const indexDefaultsEnabled=process.env.FLOE_TEST_INDEX_DEFAULTS==='1';
 function presetFixture(){
     const lines=name=>fs.readFileSync(__dirname+'/../../../floe/'+name,'utf8').split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#')).map(l=>l.split(/\s+/));
@@ -148,7 +149,7 @@ class XHR {
         else if(raw){value={kind:'drc_review_transfer',phase:'queued',seq:this.headers['X-Floe-Transfer-Seq']};status=202;}
         else if (this.path==='/api/v1/session/exchange') {value={csrf:'c'.repeat(64),session_id:'c'.repeat(64),bundle,protocol:1};}
         else if (this.path==='/api/v1/session'&&this.method==='DELETE') {value=exitFailure?{error:'unavailable'}:null;status=exitFailure?503:204;}
-        else if((startupEnabled||dumpEnabled||closeBoundary||viewReadRace)&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=closeBoundary||viewReadRace?202:204;}
+        else if((startupEnabled||dumpEnabled||workerFailure||closeBoundary||viewReadRace)&&this.path==='/api/v1/views/'+viewId&&this.method==='DELETE'){open=false;value=null;status=closeBoundary||viewReadRace?202:204;}
         else if(this.path==='/api/v1/capabilities') {value={protocol:1,bundle,drc:!!startupSuspend,index_open:indexOpenEnabled,launcher:launchEnabled,exports:clipEnabled,snapshot_png:snapshotEnabled,layer_settings:settingsEnabled,design_defaults:defaultsEnabled,jobdeck_modes:modeEnabled,jobdeck_levels:modeEnabled,fill_slot_edit:fillEditorEnabled,display_dump:true,dump_on_start:dumpEnabled};if(authLoss){status=authLoss==='cookie'?401:503;value={error:'unavailable'};}}
         else if(startupSuspend&&this.path==='/api/v1/drc'){value={drc:null};}
         else if(launchEnabled&&this.path==='/api/v1/launch'){value=launchState;}
@@ -553,6 +554,48 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         assert.equal(node('index-representatives').disabled,false);
         assert.equal(count(),before,'choosing index defaults never submits a write');
         listeners.pagehide();console.log('WEB INDEX DEFAULTS: ALL OK (source-aware defaults, explicit choices, no implicit write)');return;
+    }
+    if(workerFailure){
+        assert(['empty','foreground','margin'].includes(workerFailure));
+        await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
+        if(workerFailure!=='empty'){ws.receive(packet('raw','1'));}
+        if(workerFailure==='margin'){
+            snapshot.margin={frame_id:'2',origin_px:[48,48],crop_safe:true};snapshot.capabilities.margin=true;ws.receive(snapshot);
+            ws.receive(packet('raw','2','1',epoch,{purpose:'margin',width:196,height:176,bbox_dbu:['-58.9375','-48','137.0625','128']}));
+            assert.match(node('status').textContent,/Live.*margin crop/);
+            assert.equal(node('canvas').hidden,true);
+        }
+        // A foreground image can still be decoding when a terminal worker
+        // failure snapshot arrives; its matching revision does not make it live.
+        const lateRaw=packet('raw','4');
+        ws.receive(packet('png','3'));const late=images.at(-1).onload;
+        snapshot.status='failed';snapshot.failure='worker_failed';snapshot.margin=null;snapshot.margin_working=false;
+        ws.receive(snapshot);
+        assert.match(node('status').textContent,/^failed/);
+        assert.match(node('notice').textContent,/renderer failed/i);
+        assert.equal(node('rendering').hidden,true);
+        assert(node('fit').disabled&&node('zoom-in').disabled&&!node('close').disabled);
+        assert.equal(node('empty').hidden,workerFailure!=='empty');
+        const before=draws.length,commands=ws.sent.filter(m=>m.type!=='frame.ack').length;
+        late();ws.receive(lateRaw);
+        assert.equal(draws.length,before,'late pixels landed after renderer failure');
+        assert.equal(ws.sent.at(-1).disposition,'discarded');
+        assert.equal(urls.size,0);
+        assert.match(node('status').textContent,/^failed/);
+        if(workerFailure!=='empty'){assert.match(node('status').textContent,/last displayed image/i);}
+        else{assert(!node('status').textContent.includes('last displayed'));}
+        assert.equal(ws.sent.filter(m=>m.type!=='frame.ack').length,commands,'failure replayed input');
+        // Explicit close still works and removes both retained buffers.
+        await node('close').onclick();assert.equal(node('status').textContent,'View closed');
+        for(const id of ['canvas','margin-canvas']){assert.equal(node(id).width,1);assert.equal(node(id).dataset.frameId,undefined);}
+        // The old failure must not poison an explicitly opened replacement.
+        const opens=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations').length;
+        const beforeOpen=opens();assert(!node('open').disabled);
+        snapshot.status='idle';snapshot.failure=null;snapshot.worker_epoch='3';viewId='e'.repeat(64);snapshot.view_id=viewId;
+        node('open').onclick();await wait(()=>sockets.length===2);assert.equal(opens(),beforeOpen+1);
+        const next=sockets[1];hello(next,'f'.repeat(64));next.receive(packet('raw','5','1','f'.repeat(64)));
+        assert.match(node('status').textContent,/^Live/);assert(!node('fit').disabled);assert(!node('status').textContent.includes('last displayed'));
+        listeners.pagehide();console.log('WEB WORKER FAILURE: ALL OK ('+workerFailure+'; retained pixels labelled; terminal late-frame rejection; explicit close/reopen)');return;
     }
     if(frameStatusEnabled){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);

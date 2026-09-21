@@ -33,6 +33,9 @@ WebView의 세션 키·cookie 소실 QA를 분리하며 전체 storage/crash 수
 실제 비어 있지 않은 임시 폴더와 native 오류 종료를 검증한다(§17; 디스크 고장 수용과 별도).
 다운로드 게시·정리를 열린 디렉터리 핸들에 고정해 경로 교체에 의한 다른 파일
 접근을 제한하고, 실제 WebKit blob 저장·권한·read-back을 별도로 검사한다(§18).
+렌더러 실패 뒤 retained margin/늦은 프레임이 Live 표시를 복원하지 않게 보완했다.
+새 합성 앱의 직접 자식 renderd만 SIGKILL해 실패 표시·명시적 닫기/재열기·새 worker와
+새 프레임을 검사한다(§19). 실제 WebContent 종료·저장 중 crash·디스크 장애는 별도다.
 전체 배터리는 기존 오라클의 macOS 실행 timeout으로 미통과이며, 선택 재검증과
 구분한다([검증 기록](WEBUI_DESKTOP.ko.md#7-d2-mac-파일클립보드복구-2026-09-18)).
 §18의 전체 재시도도 새 test executable 기동 대기 누적으로 중단해 전역 완료는 남아 있다.
