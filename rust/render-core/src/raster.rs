@@ -615,6 +615,59 @@ fn check_member_cancelled(guard: Option<RenderGuard<'_>>, member: &mut u16) -> R
     Ok(())
 }
 
+thread_local! {
+    /// Test override of `write_once_enabled` for the calling thread.
+    static WRITE_ONCE_OVERRIDE: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
+}
+
+/// F2R-28 write-once tiles (see `WriteOnce`); kill switch
+/// FLOE_RUST_WRITE_ONCE=off restores the ordered overwrite.
+fn write_once_enabled() -> bool {
+    if let Some(forced) = WRITE_ONCE_OVERRIDE.with(|value| value.get()) {
+        return forced;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FLOE_RUST_WRITE_ONCE").as_deref() != Ok("off"))
+}
+
+/// Internal marker: a member enumeration stopped because its tile has no
+/// open pixel left. Raised and caught around one enumeration, never
+/// across a function boundary.
+const WRITE_ONCE_FULL: &str = "write-once tile full";
+
+fn until_full<T>(result: Result<T, String>) -> Result<Option<T>, String> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error == WRITE_ONCE_FULL => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// One paint pass of a styled tile: a hierarchy-frame band or a plane.
+#[derive(Clone, Copy)]
+enum TilePass {
+    Frames(u8),
+    Plane(usize),
+}
+
+/// The passes in overwrite order (frame bands 2, 3, 1, the planes, frame
+/// band 0) - reversed for a write-once tile, where the first writer of a
+/// pixel is its last overwriter.
+fn tile_passes(planes: usize, walk_frames: bool, write_once: bool) -> Vec<TilePass> {
+    let mut passes = Vec::with_capacity(planes + 4);
+    if walk_frames {
+        passes.extend([2u8, 3, 1].map(TilePass::Frames));
+    }
+    passes.extend((0..planes).map(TilePass::Plane));
+    if walk_frames {
+        passes.push(TilePass::Frames(0));
+    }
+    if write_once {
+        passes.reverse();
+    }
+    passes
+}
+
 fn render_geometry(
     scene: &FrameScene,
     request: &GeometryRasterRequest,
@@ -742,6 +795,7 @@ fn render_geometry_impl(
     stats.workers_used = worker_count.try_into().unwrap_or(u16::MAX);
     stats.tiles = tile_count.try_into().unwrap_or(u32::MAX);
     let bin = bin.as_ref();
+    let write_once = matches!(mode, RenderMode::Styled(_)) && write_once_enabled();
     let next_tile = AtomicUsize::new(0);
     let tiles = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(worker_count);
@@ -780,9 +834,9 @@ fn render_geometry_impl(
                     });
                     let mut output = match reused {
                         Some(output) => output?,
-                        None => {
-                            raster_tile(scene, request, mode, bin, guard, col0, col1, row0, row1)?
-                        }
+                        None => raster_tile(
+                            scene, request, mode, bin, guard, write_once, col0, col1, row0, row1,
+                        )?,
                     };
                     output.stats.raster_tile_max_us = tile_started
                         .elapsed()
@@ -853,6 +907,42 @@ fn render_geometry_impl(
             summary_pixel_paints: counters.summary_pixels_drawn,
         });
     }
+    finish_geometry_frame(
+        request,
+        mode,
+        scene,
+        tiles,
+        tile_columns,
+        tile_rows,
+        stats,
+        counters,
+        prepared_labels.as_ref(),
+        labels_truncated,
+        keep_geometry,
+        started,
+        guard,
+    )
+}
+
+/// Assembles the rastered tiles into the frame, paints the label passes over
+/// it and fills in the report - the tail every full-frame raster shares
+/// (`render_geometry_impl` and `LayerRasterSession::finish`).
+#[allow(clippy::too_many_arguments)]
+fn finish_geometry_frame(
+    request: &GeometryRasterRequest,
+    mode: RenderMode<'_>,
+    scene: &FrameScene,
+    tiles: Vec<RasterBand>,
+    tile_columns: u32,
+    tile_rows: u32,
+    mut stats: RenderStats,
+    mut counters: RasterCounters,
+    prepared_labels: Option<&PreparedLabels>,
+    labels_truncated: bool,
+    keep_geometry: bool,
+    started: Instant,
+    guard: Option<RenderGuard<'_>>,
+) -> Result<GeometryRasterReport, String> {
     let mut frame = assemble_tiles(request, tiles, tile_columns, tile_rows)?;
     check_cancelled(guard)?;
     // §F2R-20: the retained copy exists only because labels paint over
@@ -860,7 +950,7 @@ fn render_geometry_impl(
     // the geometry frame and the caller retains it without a copy
     // (a 4K margin frame is ~130 MiB - one copy fewer per settle).
     let label_pass = matches!(
-        (prepared_labels.as_ref(), mode),
+        (prepared_labels, mode),
         (Some(labels), RenderMode::Styled(_)) if !labels.rows.is_empty()
     );
     let geometry_frame = (keep_geometry && label_pass).then(|| frame.clone());
@@ -869,7 +959,7 @@ fn render_geometry_impl(
     // geometry plane, in one full-frame pass - a deliberate deviation
     // from the KLayout between-plane order so a pan-reused geometry
     // frame can take fresh viewport-planned labels on top.
-    if let (Some(labels), RenderMode::Styled(styled)) = (prepared_labels.as_ref(), mode) {
+    if let (Some(labels), RenderMode::Styled(styled)) = (prepared_labels, mode) {
         frame = apply_label_passes(request, styled, labels, frame, &mut counters, guard)?;
     }
     check_cancelled(guard)?;
@@ -897,6 +987,65 @@ fn render_geometry_impl(
     })
 }
 
+type RepSpan = (u32, u32, u32); // row, first column, exclusive end
+
+/// Write-once state of one tile (F2R-28). Every geometry paint is an
+/// opaque overwrite in its plane's single colour, so the frame is a pure
+/// function of "the last plane that writes a pixel wins". Painting the
+/// planes in REVERSE order and writing each pixel at most once gives the
+/// same bytes - and lets everything that can only touch written pixels
+/// be skipped: a tile whose pixels are all written ends its plane
+/// sequence, an item whose device box is written is never enumerated.
+/// Field 2026-09-18 (synthetic MAIN01, 449 layers): 332 member paints per
+/// lit pixel, the layers covering one another.
+/// Bit i of word w of a row is local column w * 64 + i; 1 = written.
+#[derive(Clone)]
+struct WriteOnce {
+    words: usize,
+    bits: Vec<u64>,
+    open: u32,
+    /// the open pixels' box found by the last scan, and `open` then
+    open_box: Option<(u32, [usize; 4])>,
+}
+
+/// Which pixels of a span a fill lights (the interior rule of
+/// `fill_span`, as a column mask).
+#[derive(Clone, Copy)]
+enum SpanRule {
+    All,
+    /// lit where (row + column) is even
+    Speckle {
+        row: usize,
+    },
+    /// one 16-column stipple row, bit 15 = column 0 (mod 16)
+    Pattern {
+        word: u16,
+    },
+}
+
+impl SpanRule {
+    /// Lit columns of the 64 local columns starting at absolute column `col`.
+    #[inline]
+    fn mask(self, col: usize) -> u64 {
+        match self {
+            SpanRule::All => !0,
+            SpanRule::Speckle { row } => {
+                if (row + col) & 1 == 0 {
+                    0x5555_5555_5555_5555
+                } else {
+                    0xAAAA_AAAA_AAAA_AAAA
+                }
+            }
+            SpanRule::Pattern { word } => {
+                // bit k of `lit` = column k (mod 16)
+                let lit = u64::from(word.reverse_bits());
+                let tiled = lit | lit << 16 | lit << 32 | lit << 48;
+                tiled.rotate_right((col & 15) as u32)
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct RasterBand {
     width: u32,
@@ -906,6 +1055,9 @@ struct RasterBand {
     row0: u32,
     row1: u32,
     pixels: Vec<u8>,
+    rep_spans: Vec<RepSpan>,
+    /// None: planes paint in order and overwrite (the reference path).
+    once: Option<WriteOnce>,
 }
 
 impl RasterBand {
@@ -940,11 +1092,304 @@ impl RasterBand {
             row0,
             row1,
             pixels,
+            rep_spans: Vec::new(),
+            once: None,
         })
     }
 
     fn tile_width(&self) -> u32 {
         self.col1 - self.col0
+    }
+
+    fn enable_write_once(&mut self) {
+        let width = self.tile_width() as usize;
+        let rows = (self.row1 - self.row0) as usize;
+        let words = width.div_ceil(64);
+        let mut bits = vec![0u64; words * rows];
+        if width % 64 != 0 {
+            // columns past the tile are never open
+            let padding = !0u64 << (width % 64);
+            for row in 0..rows {
+                bits[row * words + words - 1] = padding;
+            }
+        }
+        self.once = Some(WriteOnce {
+            words,
+            bits,
+            open: (width * rows) as u32,
+            open_box: None,
+        });
+    }
+
+    /// The cull view of the next pass of a write-once tile: the world view
+    /// of the bounding box of the pixels still open (one pixel wider than
+    /// the tile's own stroke margin), never more than `cull_view`. What
+    /// lies outside it can only touch written pixels. None: no open pixel.
+    fn open_view(
+        &mut self,
+        request: &GeometryRasterRequest,
+        cull_view: BBox,
+        stroke_pixels: u8,
+    ) -> Result<Option<BBox>, String> {
+        let (tile_width, tile_rows) = (self.tile_width(), self.row1 - self.row0);
+        let (col0, row0) = (self.col0, self.row0);
+        let Some(once) = self.once.as_mut() else {
+            return Ok(Some(cull_view));
+        };
+        if once.open == 0 {
+            return Ok(None);
+        }
+        if once.open == tile_width * tile_rows {
+            return Ok(Some(cull_view));
+        }
+        let rows = tile_rows as usize;
+        let (mut r0, mut r1, mut c0, mut c1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+        if let Some((open, found)) = once.open_box {
+            if open == once.open {
+                [r0, r1, c0, c1] = found;
+            }
+        }
+        for row in 0..if r0 == usize::MAX { rows } else { 0 } {
+            for word in 0..once.words {
+                let open = !once.bits[row * once.words + word];
+                if open == 0 {
+                    continue;
+                }
+                r0 = r0.min(row);
+                r1 = row + 1;
+                c0 = c0.min(word * 64 + open.trailing_zeros() as usize);
+                c1 = c1.max(word * 64 + 64 - open.leading_zeros() as usize);
+            }
+        }
+        if r0 == usize::MAX {
+            return Ok(None);
+        }
+        once.open_box = Some((once.open, [r0, r1, c0, c1]));
+        let view = tile_world_view(
+            request,
+            col0 + c0 as u32,
+            col0 + c1 as u32,
+            row0 + r0 as u32,
+            row0 + r1 as u32,
+            stroke_pixels.saturating_add(1),
+        )?;
+        Ok(Some(BBox {
+            x0: view.x0.max(cull_view.x0),
+            y0: view.y0.max(cull_view.y0),
+            x1: view.x1.min(cull_view.x1),
+            y1: view.y1.min(cull_view.y1),
+        }))
+    }
+
+    /// Every pixel of the tile is written: nothing painted from here on
+    /// can change it.
+    #[inline]
+    fn is_full(&self) -> bool {
+        matches!(&self.once, Some(once) if once.open == 0)
+    }
+
+    /// Some pixel is written, so a region test can succeed.
+    #[inline]
+    fn any_written(&self) -> bool {
+        matches!(&self.once, Some(once) if once.open < self.tile_width() * (self.row1 - self.row0))
+    }
+
+    /// Write-once span: the lit, still open pixels of absolute columns
+    /// [first_col, end_col) of absolute row `row` take `color`. Returns
+    /// whether the rule lights any pixel of the span - what the
+    /// overwriting path reports, written or not.
+    #[inline]
+    fn write_once_span(
+        &mut self,
+        row: usize,
+        first_col: usize,
+        end_col: usize,
+        color: [u8; 4],
+        rule: SpanRule,
+    ) -> bool {
+        self.write_once_rows(row, row + 1, first_col, end_col, color, |_| rule)
+    }
+
+    /// One solid pixel (a stepped stroke, a summary cell).
+    #[inline]
+    fn write_once_pixel(&mut self, row: usize, col: usize, color: [u8; 4]) {
+        let width = self.tile_width() as usize;
+        let (local_row, local_col) = (row - self.row0 as usize, col - self.col0 as usize);
+        let Some(once) = self.once.as_mut() else {
+            return;
+        };
+        let slot = &mut once.bits[local_row * once.words + (local_col >> 6)];
+        let bit = 1u64 << (local_col & 63);
+        if *slot & bit == 0 {
+            *slot |= bit;
+            once.open -= 1;
+            let from = (local_row * width + local_col) * 4;
+            self.pixels[from..from + 4].copy_from_slice(&color);
+        }
+    }
+
+    /// `write_once_span` over absolute rows [row0, row1) of one column
+    /// range (a rect fill, a hairline, an axis-aligned stroke): the word
+    /// range and the span masks are found once, a row costs its rule and
+    /// one mask word per 64 columns.
+    #[inline]
+    fn write_once_rows(
+        &mut self,
+        row0: usize,
+        row1: usize,
+        first_col: usize,
+        end_col: usize,
+        color: [u8; 4],
+        rule_of: impl Fn(usize) -> SpanRule,
+    ) -> bool {
+        let width = self.tile_width() as usize;
+        let col_base = self.col0 as usize;
+        let band_row0 = self.row0 as usize;
+        let (c0, c1) = (first_col - col_base, end_col - col_base);
+        let Some(once) = self.once.as_mut() else {
+            return false;
+        };
+        let words = once.words;
+        let (w0, w1) = (c0 >> 6, (c1 - 1) >> 6);
+        let edge = |word: usize| {
+            let origin = word << 6;
+            let lo = c0.max(origin) - origin;
+            let hi = c1.min(origin + 64) - origin;
+            (
+                lo,
+                hi,
+                if hi - lo == 64 {
+                    !0u64
+                } else {
+                    ((1u64 << (hi - lo)) - 1) << lo
+                },
+            )
+        };
+        let mut lit_any = false;
+        let mut newly = 0u32;
+        for row in row0..row1 {
+            let rule = rule_of(row);
+            let speckle = matches!(rule, SpanRule::Speckle { .. });
+            let local_row = row - band_row0;
+            let bits = &mut once.bits[local_row * words..(local_row + 1) * words];
+            let pixels = &mut self.pixels[local_row * width * 4..(local_row + 1) * width * 4];
+            for word in w0..w1 + 1 {
+                let origin = word << 6;
+                let (lo, hi, span) = edge(word);
+                let lit = span & rule.mask(col_base + origin);
+                if lit == 0 {
+                    continue;
+                }
+                lit_any = true;
+                let todo = lit & !bits[word];
+                if todo == 0 {
+                    continue;
+                }
+                bits[word] |= todo;
+                newly += todo.count_ones();
+                if todo == span {
+                    // an open solid stretch: the overwriting path's loop
+                    for pixel in pixels[(origin + lo) * 4..(origin + hi) * 4].chunks_exact_mut(4) {
+                        pixel.copy_from_slice(&color);
+                    }
+                    continue;
+                }
+                let first = todo.trailing_zeros() as usize;
+                let last = 64 - todo.leading_zeros() as usize;
+                if speckle && todo == lit {
+                    // an open checkerboard stretch: every other pixel from
+                    // the first lit one, the overwriting path's stride
+                    for pair in pixels[(origin + first) * 4..(origin + last) * 4].chunks_mut(8) {
+                        pair[..4].copy_from_slice(&color);
+                    }
+                } else if todo.count_ones() as usize * 4 >= last - first {
+                    // dense (a stipple, a partly written stretch): one pass
+                    for (bit, pixel) in (first..last)
+                        .zip(pixels[(origin + first) * 4..(origin + last) * 4].chunks_exact_mut(4))
+                    {
+                        if todo >> bit & 1 != 0 {
+                            pixel.copy_from_slice(&color);
+                        }
+                    }
+                } else {
+                    let mut left = todo;
+                    while left != 0 {
+                        let from = (origin + left.trailing_zeros() as usize) * 4;
+                        pixels[from..from + 4].copy_from_slice(&color);
+                        left &= left - 1;
+                    }
+                }
+            }
+        }
+        once.open -= newly;
+        lit_any
+    }
+
+    /// True when no pixel of absolute device rows [r0, r1) x columns
+    /// [c0, c1) inside this tile is open: an item confined to the box
+    /// cannot change the tile. An empty intersection is true.
+    fn device_box_written(&self, r0: i128, r1: i128, c0: i128, c1: i128) -> bool {
+        let Some(once) = &self.once else {
+            return false;
+        };
+        let r0 = r0.max(self.row0 as i128);
+        let r1 = r1.min(self.row1 as i128);
+        let c0 = c0.max(self.col0 as i128);
+        let c1 = c1.min(self.col1 as i128);
+        if r0 >= r1 || c0 >= c1 {
+            return true;
+        }
+        if once.open == 0 {
+            return true;
+        }
+        let (c0, c1) = (
+            (c0 - self.col0 as i128) as usize,
+            (c1 - self.col0 as i128) as usize,
+        );
+        for row in (r0 - self.row0 as i128) as usize..(r1 - self.row0 as i128) as usize {
+            for word in c0 / 64..=(c1 - 1) / 64 {
+                let lo = c0.max(word * 64) - word * 64;
+                let hi = c1.min(word * 64 + 64) - word * 64;
+                let span = if hi - lo == 64 {
+                    !0u64
+                } else {
+                    ((1u64 << (hi - lo)) - 1) << lo
+                };
+                if once.bits[row * once.words + word] & span != span {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// `device_box_written` for a world box and everything painted from
+    /// it: fills, the outline of `stroke_width`, the hairline collapse
+    /// and its one-pixel row bias all stay within `stroke_width + 2`
+    /// pixels of the box's device corners. A box the device mapping
+    /// rejects is never skipped, so its error stays reachable.
+    fn world_box_written(
+        &self,
+        request: &GeometryRasterRequest,
+        world: BBox,
+        stroke_width: u8,
+    ) -> bool {
+        if !self.any_written() {
+            return false;
+        }
+        let (Ok((x0, y1)), Ok((x1, y0))) = (
+            world_to_device(request, world.x0, world.y0),
+            world_to_device(request, world.x1, world.y1),
+        ) else {
+            return false;
+        };
+        let margin = i128::from(stroke_width) + 2;
+        self.device_box_written(
+            floor_div(y0.min(y1), DEVICE_ONE) - margin,
+            floor_div(y0.max(y1), DEVICE_ONE) + 1 + margin,
+            floor_div(x0.min(x1), DEVICE_ONE) - margin,
+            floor_div(x0.max(x1), DEVICE_ONE) + 1 + margin,
+        )
     }
 }
 
@@ -1028,14 +1473,19 @@ enum PlaneItem {
         inverse: OrthoTransform,
         cell: WsKey,
     },
-    Wash {
-        world_bbox: BBox,
-    },
-    // Native display points, spatially ordered in design.ovr. A tile rejects
-    // a whole chunk instead of checking every point of the frame.
+    // Rects of the plane in walk order, up to 128 to a chunk: the planner's
+    // washes (page washes, sub-cut boxes) and the native display points of
+    // design.ovr. A tile rejects a whole chunk instead of checking every rect.
     Points {
         world_bbox: BBox,
         points: Vec<BBox>,
+    },
+    /// Representative SHAPES of design.ovr (OVR2): rects, boundary segments
+    /// and fallback points in top coordinates, chunked like Points. They are
+    /// painted as the shapes they are (paint_representative), never as a wash.
+    Reps {
+        world_bbox: BBox,
+        prims: Vec<floe_vfs::representatives::Prim>,
     },
     /// An instance left unexpanded (its measured expansion overran the
     /// item budget, §3.15/§3.17). The tile resolves it through the
@@ -1351,20 +1801,23 @@ fn collect_cell(
     *visit_seq += 1;
     let stamp = *visit_seq;
     for &page_id in &cell.pages {
-        let Some(page) = scene.page(page_id) else {
+        // the page's METADATA: a layer-ordered frame collects before it has
+        // decoded anything (LAYER_DECODE_PROBE_PLAN §4), and the same walk
+        // then serves the mini bins of the deferred edges
+        let Some((layer_idx, bbox)) = scene.page_geometry(page_id) else {
             continue;
         };
-        let Some(&plane) = plane_of.get(&page.layer_idx) else {
+        let Some(&plane) = plane_of.get(&layer_idx) else {
             continue;
         };
-        if !page.bbox.intersects(&local_view) {
+        if !bbox.intersects(&local_view) {
             continue;
         }
         let entry = &mut plane_scratch[plane];
         if entry.0 == stamp {
-            entry.1.grow(&page.bbox);
+            entry.1.grow(&bbox);
         } else {
-            *entry = (stamp, page.bbox);
+            *entry = (stamp, bbox);
         }
     }
     for (plane, entry) in plane_scratch.iter().enumerate() {
@@ -1388,27 +1841,57 @@ fn collect_cell(
         if !world_bbox.intersects(&cull_view) {
             continue;
         }
-        if wash.x0 == wash.x1 && wash.y0 == wash.y1 {
-            if let Some(PlaneItem::Points {
+        // Washes share chunk items of up to 128 rects (as the zero-size
+        // display points always did): the sub-cut boxes (floe_vfs hier.rs
+        // SUB_CUT_BOX_PX) are washes of a few pixels, a million of them in a
+        // wide view of a few layers, and one bin item each overran the item
+        // cap and sent the frame down the per-tile, per-plane walk. The order
+        // within the plane is the walk's, as before.
+        if let Some(PlaneItem::Points {
+            world_bbox: bounds,
+            points,
+        }) = bin.planes[plane].last_mut()
+        {
+            if points.len() < 128 {
+                bounds.grow(&world_bbox);
+                points.push(world_bbox);
+                continue;
+            }
+        }
+        check_cancelled(guard)?;
+        bin.charge()?;
+        bin.planes[plane].push(PlaneItem::Points {
+            world_bbox,
+            points: vec![world_bbox],
+        });
+    }
+    // OVR2 shapes ride on the top cell only (identity transform)
+    if path.len() == 1 {
+        for &(layer_idx, prim) in &cell.reps {
+            let Some(&plane) = plane_of.get(&layer_idx) else {
+                continue;
+            };
+            let world_bbox = prim.bbox();
+            if !world_bbox.intersects(&cull_view) {
+                continue;
+            }
+            if let Some(PlaneItem::Reps {
                 world_bbox: bounds,
-                points,
+                prims,
             }) = bin.planes[plane].last_mut()
             {
-                if points.len() < 128 {
+                if prims.len() < 128 {
                     bounds.grow(&world_bbox);
-                    points.push(world_bbox);
+                    prims.push(prim);
                     continue;
                 }
             }
             check_cancelled(guard)?;
             bin.charge()?;
-            bin.planes[plane].push(PlaneItem::Points {
+            bin.planes[plane].push(PlaneItem::Reps {
                 world_bbox,
-                points: vec![world_bbox],
+                prims: vec![prim],
             });
-        } else {
-            bin.charge()?;
-            bin.planes[plane].push(PlaneItem::Wash { world_bbox });
         }
     }
     if want_frames && !cell.frames.is_empty() {
@@ -1593,104 +2076,6 @@ fn collect_cell(
     Ok(())
 }
 
-/// Serves one tile from the bin: same plane order, same per-plane DFS
-/// item order, same record queries as the walk.
-#[allow(clippy::too_many_arguments)]
-fn raster_tile_from_bin(
-    scene: &FrameScene,
-    request: &GeometryRasterRequest,
-    styled: &StyledGeometryRasterRequest,
-    bin: &WorkBin,
-    band: &mut RasterBand,
-    cull_view: BBox,
-    stats: &mut RenderStats,
-    counters: &mut RasterCounters,
-    guard: Option<RenderGuard<'_>>,
-    record_scratch: &mut RecordSet,
-) -> Result<(), String> {
-    // §3.17: resolve every deferred edge once for this tile before the
-    // band/plane sequence consumes it from all sides.
-    let minis = if bin.deferred_edges.is_empty() {
-        Vec::new()
-    } else {
-        build_deferred_minis(scene, bin, styled.hierarchy_frames, cull_view, guard, stats)?
-    };
-    let walk_frames = styled.hierarchy_frames && !bin.frames.is_empty();
-    if styled.hierarchy_frames {
-        if walk_frames {
-            for frame_band in [2, 3, 1] {
-                check_cancelled(guard)?;
-                replay_frame_items(
-                    scene,
-                    request,
-                    band,
-                    cull_view,
-                    frame_band,
-                    frame_paint(frame_band),
-                    stats,
-                    counters,
-                    guard,
-                    &bin.frames,
-                    Some(&minis),
-                )?;
-            }
-        }
-    }
-    for (plane, layer) in styled.layers.iter().enumerate() {
-        check_cancelled(guard)?;
-        let color = if styled.mono {
-            monochrome(layer.color)
-        } else {
-            layer.color
-        };
-        let paint = PaintStyle {
-            color,
-            fill: layer.fill,
-            stroke: StrokeStyle::Solid,
-            stroke_width: layer.outline_width,
-        };
-        // an occupancy summary paints in the layer's own slot (M2):
-        // the plane's page items are empty for a summarized layer
-        if let Some(summary) = scene.summary_for(layer.layer_idx) {
-            paint_summary_plane(band, request, summary, paint, counters)?;
-        }
-        replay_plane_items(
-            scene,
-            request,
-            band,
-            cull_view,
-            stats,
-            counters,
-            guard,
-            record_scratch,
-            layer,
-            plane,
-            paint,
-            &bin.planes[plane],
-            Some(&minis),
-        )?;
-    }
-    if styled.hierarchy_frames {
-        check_cancelled(guard)?;
-        if walk_frames {
-            replay_frame_items(
-                scene,
-                request,
-                band,
-                cull_view,
-                0,
-                frame_paint(0),
-                stats,
-                counters,
-                guard,
-                &bin.frames,
-                Some(&minis),
-            )?;
-        }
-    }
-    Ok(())
-}
-
 /// Consumes one plane-item sequence: the bin's own list, or a mini
 /// bin's list replayed at a deferred edge's slot (minis = None there,
 /// so a mini's own deferrals take the legacy per-plane walk). Order is
@@ -1711,7 +2096,11 @@ fn replay_plane_items(
     items: &[PlaneItem],
     minis: Option<&[Option<WorkBin>]>,
 ) -> Result<(), String> {
+    let mut rep_spans = std::mem::take(&mut band.rep_spans);
     for item in items {
+        if band.is_full() {
+            break;
+        }
         match item {
             PlaneItem::Cell {
                 world_bbox,
@@ -1720,6 +2109,10 @@ fn replay_plane_items(
                 cell,
             } => {
                 if !world_bbox.intersects(&cull_view) {
+                    continue;
+                }
+                if band.world_box_written(request, *world_bbox, paint.stroke_width) {
+                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
                     continue;
                 }
                 let visited = scene.cell(*cell).ok_or_else(|| {
@@ -1733,6 +2126,18 @@ fn replay_plane_items(
                     if page.layer_idx != layer.layer_idx || !page.bbox.intersects(&local_view) {
                         continue;
                     }
+                    if band.any_written() {
+                        if band.is_full() {
+                            break;
+                        }
+                        if let Ok(world) = transform.apply_bbox(page.bbox) {
+                            if band.world_box_written(request, world, paint.stroke_width) {
+                                stats.once_items_skipped =
+                                    stats.once_items_skipped.saturating_add(1);
+                                continue;
+                            }
+                        }
+                    }
                     let level = visited.page_levels.get(slot).copied().unwrap_or(0);
                     raster_page_records(
                         band,
@@ -1740,6 +2145,7 @@ fn replay_plane_items(
                         page,
                         page_id,
                         level,
+                        scene.plan().stats.shape_cut.min(i64::MAX as u64) as i64,
                         local_view,
                         *transform,
                         stats,
@@ -1752,6 +2158,10 @@ fn replay_plane_items(
             }
             PlaneItem::Points { world_bbox, points } => {
                 if !world_bbox.intersects(&cull_view) {
+                    continue;
+                }
+                if band.world_box_written(request, *world_bbox, paint.stroke_width) {
+                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
                     continue;
                 }
                 check_cancelled(guard)?;
@@ -1770,18 +2180,28 @@ fn replay_plane_items(
                     }
                 }
             }
-            PlaneItem::Wash { world_bbox } => {
+            PlaneItem::Reps { world_bbox, prims } => {
                 if !world_bbox.intersects(&cull_view) {
                     continue;
                 }
-                counters.rect_records = counters.rect_records.saturating_add(1);
-                stats.primitives_tested = stats.primitives_tested.saturating_add(1);
-                stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-                if paint_world_rect(band, request, *world_bbox, paint)? {
-                    counters.rectangle_members_drawn =
-                        counters.rectangle_members_drawn.saturating_add(1);
-                    stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
-                    stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
+                if band.world_box_written(request, *world_bbox, paint.stroke_width) {
+                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                    continue;
+                }
+                check_cancelled(guard)?;
+                for prim in prims {
+                    if !prim.bbox().intersects(&cull_view) {
+                        continue;
+                    }
+                    counters.rect_records = counters.rect_records.saturating_add(1);
+                    stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+                    stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
+                    if queue_representative(band, request, prim, paint, &mut rep_spans, stats)? {
+                        counters.rectangle_members_drawn =
+                            counters.rectangle_members_drawn.saturating_add(1);
+                        stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
+                        stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
+                    }
                 }
             }
             PlaneItem::Deferred {
@@ -1827,12 +2247,27 @@ fn replay_plane_items(
                 let local_view = inverse.apply_bbox(cull_view)?;
                 let mut deferred_path = Vec::new();
                 let mut cancel_member = 0u16;
-                let visit = for_each_visible_offset(
+                let visit = until_full(for_each_visible_offset(
                     &instance.rep,
                     base_bbox,
                     local_view,
                     |offset_x, offset_y| {
                         check_member_cancelled(guard, &mut cancel_member)?;
+                        if band.any_written() {
+                            if band.is_full() {
+                                return Err(WRITE_ONCE_FULL.to_string());
+                            }
+                            let member = translate_bbox(base_bbox, offset_x, offset_y)?;
+                            if band.world_box_written(
+                                request,
+                                transform.apply_bbox(member)?,
+                                paint.stroke_width,
+                            ) {
+                                stats.once_items_skipped =
+                                    stats.once_items_skipped.saturating_add(1);
+                                return Ok(());
+                            }
+                        }
                         let x = checked_add(instance.x, offset_x, "instance x")?;
                         let y = checked_add(instance.y, offset_y, "instance y")?;
                         let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
@@ -1854,11 +2289,15 @@ fn replay_plane_items(
                             record_scratch,
                         )
                     },
-                )?;
-                stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+                ))?;
+                stats.rep_members_tested = stats
+                    .rep_members_tested
+                    .saturating_add(visit.map_or(0, |visit| visit.tested));
             }
         }
     }
+    flush_representative_spans(band, request, paint, &mut rep_spans, stats);
+    band.rep_spans = rep_spans;
     Ok(())
 }
 
@@ -1980,94 +2419,223 @@ fn replay_frame_items(
     Ok(())
 }
 
-/// The pre-2c styled tile path: per-plane hierarchy walks. Kept
-/// verbatim as the work-bin fallback and byte-equality reference.
+/// One tile's state across the pass sequence (docs/LAYER_DECODE_PROBE_PLAN.ko.md
+/// §5). `raster_tile` runs every pass of a tile in one call; the layer-decode
+/// probe runs one pass over every tile and decodes what the next layer needs
+/// before the next, so the write-once mask, the pixels and the resolved
+/// deferred edges have to outlive a single pass.
+struct TileWork {
+    band: RasterBand,
+    /// the tile's own cull view; a write-once pass narrows it to the open
+    /// pixels (`open_view`) without losing this one
+    tile_view: BBox,
+    /// §3.17 deferred edges resolved for this tile (bin path only)
+    minis: Vec<Option<WorkBin>>,
+    path: Vec<WsKey>,
+    record_scratch: RecordSet,
+    stats: RenderStats,
+    counters: RasterCounters,
+    /// no open pixel is left: the tile takes no further pass
+    full: bool,
+}
+
+impl TileWork {
+    fn new(
+        request: &GeometryRasterRequest,
+        stroke_pixels: u8,
+        write_once: bool,
+        col0: u32,
+        col1: u32,
+        row0: u32,
+        row1: u32,
+    ) -> Result<Self, String> {
+        let mut band = RasterBand::new_tile(request, col0, col1, row0, row1)?;
+        if write_once {
+            band.enable_write_once();
+        }
+        Ok(TileWork {
+            band,
+            tile_view: tile_world_view(request, col0, col1, row0, row1, stroke_pixels)?,
+            minis: Vec::new(),
+            path: Vec::new(),
+            record_scratch: RecordSet::default(),
+            stats: RenderStats::default(),
+            counters: RasterCounters::default(),
+            full: false,
+        })
+    }
+
+    /// §3.17: resolve every deferred edge once for this tile before the
+    /// band/plane sequence consumes it from all sides.
+    fn prepare_minis(
+        &mut self,
+        scene: &FrameScene,
+        bin: Option<&WorkBin>,
+        hierarchy_frames: bool,
+        guard: Option<RenderGuard<'_>>,
+    ) -> Result<(), String> {
+        if let Some(bin) = bin.filter(|bin| !bin.deferred_edges.is_empty()) {
+            self.minis = build_deferred_minis(
+                scene,
+                bin,
+                hierarchy_frames,
+                self.tile_view,
+                guard,
+                &mut self.stats,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn output(self) -> RasterTileOutput {
+        RasterTileOutput {
+            tile: self.band,
+            stats: self.stats,
+            counters: self.counters,
+        }
+    }
+}
+
+/// The pass sequence of a styled frame. It is a property of the frame, not of
+/// a tile, so every tile takes the same passes in the same order and a pass
+/// index means the same paint step in all of them.
+fn styled_passes(
+    scene: &FrameScene,
+    styled: &StyledGeometryRasterRequest,
+    bin: Option<&WorkBin>,
+    write_once: bool,
+) -> Vec<TilePass> {
+    let walk_frames = styled.hierarchy_frames
+        && match bin {
+            // the masks are subtree-cumulative, so a frame-free plan
+            // skips all four band walks in one test (labels still run)
+            None => scene.subtree_has_frames(scene.top()),
+            Some(bin) => !bin.frames.is_empty(),
+        };
+    tile_passes(styled.layers.len(), walk_frames, write_once)
+}
+
+/// One pass of one tile: the bin's item lists when the collection holds them,
+/// the per-plane hierarchy walk otherwise. `remaining` counts this pass and
+/// every pass after it - what a tile that fills here never runs.
 #[allow(clippy::too_many_arguments)]
-fn raster_tile_walk_styled(
+fn raster_tile_pass(
     scene: &FrameScene,
     request: &GeometryRasterRequest,
     styled: &StyledGeometryRasterRequest,
-    band: &mut RasterBand,
-    cull_view: BBox,
-    stats: &mut RenderStats,
-    counters: &mut RasterCounters,
+    bin: Option<&WorkBin>,
+    work: &mut TileWork,
+    pass: TilePass,
+    remaining: usize,
+    stroke_pixels: u8,
     guard: Option<RenderGuard<'_>>,
-    path: &mut Vec<WsKey>,
-    record_scratch: &mut RecordSet,
 ) -> Result<(), String> {
-    // The masks are subtree-cumulative, so a frame-free plan
-    // skips all four band walks in one test (labels still run).
-    let walk_frames = styled.hierarchy_frames && scene.subtree_has_frames(scene.top());
-    if styled.hierarchy_frames {
-        if walk_frames {
-            for frame_band in [2, 3, 1] {
-                check_cancelled(guard)?;
-                render_frame_band(
-                    scene,
-                    request,
-                    band,
-                    cull_view,
-                    stats,
-                    counters,
-                    frame_band,
-                    frame_paint(frame_band),
-                    guard,
-                    scene.top(),
-                    OrthoTransform::identity(),
-                    path,
-                )?;
-            }
-        }
+    check_cancelled(guard)?;
+    // write-once: the pass sees only what can reach an open pixel
+    let Some(cull_view) = work
+        .band
+        .open_view(request, work.tile_view, stroke_pixels)?
+    else {
+        work.stats.once_full_tiles = work.stats.once_full_tiles.saturating_add(1);
+        work.stats.once_passes_skipped = work
+            .stats
+            .once_passes_skipped
+            .saturating_add(remaining as u64);
+        work.full = true;
+        return Ok(());
+    };
+    if cull_view.x0 >= cull_view.x1 || cull_view.y0 >= cull_view.y1 {
+        return Ok(());
     }
-    for layer in &styled.layers {
-        check_cancelled(guard)?;
-        let paint = PaintStyle {
-            color: if styled.mono {
-                monochrome(layer.color)
-            } else {
-                layer.color
-            },
-            fill: layer.fill,
-            stroke: StrokeStyle::Solid,
-            stroke_width: layer.outline_width,
-        };
-        if let Some(summary) = scene.summary_for(layer.layer_idx) {
-            paint_summary_plane(band, request, summary, paint, counters)?;
-        }
-        render_cell(
-            scene,
-            request,
-            band,
-            cull_view,
-            stats,
-            counters,
-            GeometrySelection::Layer(layer.layer_idx),
-            SubtreePrune::Layer(scene.layer_mask_bit(layer.layer_idx)),
-            paint,
-            guard,
-            scene.top(),
-            OrthoTransform::identity(),
-            path,
-            record_scratch,
-        )?;
-    }
-    if styled.hierarchy_frames {
-        check_cancelled(guard)?;
-        if walk_frames {
-            render_frame_band(
+    let TileWork {
+        band,
+        minis,
+        path,
+        record_scratch,
+        stats,
+        counters,
+        ..
+    } = work;
+    match pass {
+        TilePass::Frames(frame_band) => match bin {
+            Some(bin) => replay_frame_items(
+                scene,
+                request,
+                band,
+                cull_view,
+                frame_band,
+                frame_paint(frame_band),
+                stats,
+                counters,
+                guard,
+                &bin.frames,
+                Some(minis),
+            )?,
+            None => render_frame_band(
                 scene,
                 request,
                 band,
                 cull_view,
                 stats,
                 counters,
-                0,
-                frame_paint(0),
+                frame_band,
+                frame_paint(frame_band),
                 guard,
                 scene.top(),
                 OrthoTransform::identity(),
                 path,
-            )?;
+            )?,
+        },
+        TilePass::Plane(plane) => {
+            let layer = &styled.layers[plane];
+            let paint = PaintStyle {
+                color: if styled.mono {
+                    monochrome(layer.color)
+                } else {
+                    layer.color
+                },
+                fill: layer.fill,
+                stroke: StrokeStyle::Solid,
+                stroke_width: layer.outline_width,
+            };
+            // an occupancy summary paints in the layer's own slot (M2):
+            // the plane's page items are empty for a summarized layer
+            if let Some(summary) = scene.summary_for(layer.layer_idx) {
+                paint_summary_plane(band, request, summary, paint, counters)?;
+            }
+            match bin {
+                Some(bin) => replay_plane_items(
+                    scene,
+                    request,
+                    band,
+                    cull_view,
+                    stats,
+                    counters,
+                    guard,
+                    record_scratch,
+                    layer,
+                    plane,
+                    paint,
+                    &bin.planes[plane],
+                    Some(minis),
+                )?,
+                None => render_cell(
+                    scene,
+                    request,
+                    band,
+                    cull_view,
+                    stats,
+                    counters,
+                    GeometrySelection::Layer(layer.layer_idx),
+                    SubtreePrune::Layer(scene.layer_mask_bit(layer.layer_idx)),
+                    paint,
+                    guard,
+                    scene.top(),
+                    OrthoTransform::identity(),
+                    path,
+                    record_scratch,
+                )?,
+            }
         }
     }
     Ok(())
@@ -2080,13 +2648,13 @@ fn raster_tile(
     mode: RenderMode<'_>,
     bin: Option<&WorkBin>,
     guard: Option<RenderGuard<'_>>,
+    write_once: bool,
     col0: u32,
     col1: u32,
     row0: u32,
     row1: u32,
 ) -> Result<RasterTileOutput, String> {
     check_cancelled(guard)?;
-    let mut band = RasterBand::new_tile(request, col0, col1, row0, row1)?;
     let stroke_pixels = match mode {
         RenderMode::Occupancy => 1,
         RenderMode::Styled(styled) => styled
@@ -2096,66 +2664,645 @@ fn raster_tile(
             .max()
             .unwrap_or(1),
     };
-    let cull_view = tile_world_view(request, col0, col1, row0, row1, stroke_pixels)?;
-    let mut stats = RenderStats::default();
-    let mut counters = RasterCounters::default();
-    let mut path = Vec::new();
-    let mut record_scratch = RecordSet::default();
+    let mut work = TileWork::new(request, stroke_pixels, write_once, col0, col1, row0, row1)?;
     match mode {
         RenderMode::Occupancy => {
+            let cull_view = work.tile_view;
             render_cell(
                 scene,
                 request,
-                &mut band,
+                &mut work.band,
                 cull_view,
-                &mut stats,
-                &mut counters,
+                &mut work.stats,
+                &mut work.counters,
                 GeometrySelection::All,
                 SubtreePrune::Off,
                 PaintStyle::solid(request.foreground),
                 guard,
                 scene.top(),
                 OrthoTransform::identity(),
-                &mut path,
-                &mut record_scratch,
+                &mut work.path,
+                &mut work.record_scratch,
             )?;
         }
         RenderMode::Styled(styled) => {
-            if let Some(bin) = bin {
-                raster_tile_from_bin(
+            work.prepare_minis(scene, bin, styled.hierarchy_frames, guard)?;
+            let passes = styled_passes(scene, styled, bin, work.band.once.is_some());
+            for (done, &pass) in passes.iter().enumerate() {
+                if work.full {
+                    break;
+                }
+                raster_tile_pass(
                     scene,
                     request,
                     styled,
                     bin,
-                    &mut band,
-                    cull_view,
-                    &mut stats,
-                    &mut counters,
+                    &mut work,
+                    pass,
+                    passes.len() - done,
+                    stroke_pixels,
                     guard,
-                    &mut record_scratch,
-                )?;
-            } else {
-                raster_tile_walk_styled(
-                    scene,
-                    request,
-                    styled,
-                    &mut band,
-                    cull_view,
-                    &mut stats,
-                    &mut counters,
-                    guard,
-                    &mut path,
-                    &mut record_scratch,
                 )?;
             }
         }
     }
     check_cancelled(guard)?;
-    Ok(RasterTileOutput {
-        tile: band,
-        stats,
-        counters,
+    Ok(work.output())
+}
+
+/// Runs `f` on every tile, over `workers` threads that take the next tile as
+/// they free up (the tile scheduling of `render_geometry_impl`, one pass at a
+/// time instead of one whole tile).
+fn for_each_tile<F>(tiles: &mut [TileWork], workers: usize, f: F) -> Result<(), String>
+where
+    F: Fn(&mut TileWork) -> Result<(), String> + Sync,
+{
+    if workers <= 1 || tiles.len() <= 1 {
+        for tile in tiles.iter_mut() {
+            f(tile)?;
+        }
+        return Ok(());
+    }
+    let queue = std::sync::Mutex::new(tiles.iter_mut().collect::<Vec<_>>());
+    let (queue, f) = (&queue, &f);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            handles.push(scope.spawn(move || loop {
+                let next = queue
+                    .lock()
+                    .map_err(|_| "raster tile queue poisoned".to_string())?
+                    .pop();
+                let Some(tile) = next else {
+                    return Ok(());
+                };
+                f(tile)?;
+            }));
+        }
+        let mut error: Option<String> = None;
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(failed)) => {
+                    error.get_or_insert(failed);
+                }
+                Err(_) => {
+                    error.get_or_insert_with(|| "raster worker panicked".to_string());
+                }
+            }
+        }
+        match error {
+            Some(failed) => Err(failed),
+            None => Ok(()),
+        }
     })
+}
+
+/// The tiles of one styled frame kept alive across its pass sequence
+/// (docs/LAYER_DECODE_PROBE_PLAN.ko.md §5). `render_geometry_impl` runs every
+/// pass of a tile in one call and returns a finished frame; a session runs ONE
+/// pass over every tile and hands control back, so the caller can decode what
+/// the next layer needs in between. The tile grid, the pass order, the
+/// write-once rule and every coordinate are the normal path's, so the frame a
+/// session finishes is byte-identical to `render_geometry_styled`'s.
+///
+/// Diagnostic only: no device window, no pan reuse, no retained geometry
+/// frame, and the passes of one frame run to the end before `finish`.
+pub struct LayerRasterSession {
+    /// the effective request (the deferred-edge tile shrink applied)
+    request: GeometryRasterRequest,
+    bin: Option<WorkBin>,
+    passes: Vec<TilePass>,
+    stroke_pixels: u8,
+    workers: usize,
+    tiles: Vec<TileWork>,
+    tile_columns: u32,
+    tile_rows: u32,
+    stats: RenderStats,
+    labels: Option<PreparedLabels>,
+    labels_truncated: bool,
+    started: Instant,
+    /// the plan's pages per styled plane, sorted unique: what a layer needs
+    /// when nothing about coverage is known (LAYER_DECODE_PROBE_PLAN §6)
+    pages_by_plane: Vec<Vec<u32>>,
+}
+
+/// What a block of layers still needs read, asked at the block's start with
+/// every worker stopped (docs/LAYER_DECODE_PROBE_PLAN.ko.md §6). The masks it
+/// reads are the ones the block starts from, so the answer does not depend on
+/// which worker got which tile.
+pub struct BlockDemand<'a> {
+    request: &'a GeometryRasterRequest,
+    styled: &'a StyledGeometryRasterRequest,
+    scene: &'a FrameScene,
+    bin: Option<&'a WorkBin>,
+    tiles: &'a [std::sync::MutexGuard<'a, TileWork>],
+    pages_by_plane: &'a [Vec<u32>],
+}
+
+/// Why the pages of one plane were asked for or left out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DemandStats {
+    /// (page, instance) pairs looked at
+    pub candidates: u64,
+    /// pages asked for
+    pub needed: u64,
+    /// instances whose box is outside the frame
+    pub out_of_view: u64,
+    /// instances whose box is written to the last pixel already
+    pub occluded: u64,
+    /// items the walk could not decide (a deferred edge): their layer is
+    /// asked for whole
+    pub unsure: u64,
+}
+
+impl BlockDemand<'_> {
+    /// Every device pixel `world` could paint is written already. False when
+    /// that cannot be shown - the answer is never "skip it" on a doubt.
+    fn written(&self, world: BBox, stroke_width: u8) -> bool {
+        let Some((c0, c1, r0, r1)) = self.device_box(world, stroke_width) else {
+            return false;
+        };
+        // outside the frame there is nothing to paint
+        if c1 <= 0
+            || r1 <= 0
+            || c0 >= i128::from(self.request.width)
+            || r0 >= i128::from(self.request.height)
+        {
+            return true;
+        }
+        self.tiles
+            .iter()
+            .all(|tile| tile.band.device_box_written(r0, r1, c0, c1))
+    }
+
+    /// The box can reach a pixel of the frame at all.
+    fn in_frame(&self, world: BBox, stroke_width: u8) -> bool {
+        let Some((c0, c1, r0, r1)) = self.device_box(world, stroke_width) else {
+            return true;
+        };
+        c1 > 0
+            && r1 > 0
+            && c0 < i128::from(self.request.width)
+            && r0 < i128::from(self.request.height)
+    }
+
+    /// `RasterBand::world_box_written`'s device box, shared so a page the
+    /// probe leaves out is one the raster would have skipped anyway.
+    fn device_box(&self, world: BBox, stroke_width: u8) -> Option<(i128, i128, i128, i128)> {
+        let (Ok((x0, y1)), Ok((x1, y0))) = (
+            world_to_device(self.request, world.x0, world.y0),
+            world_to_device(self.request, world.x1, world.y1),
+        ) else {
+            return None;
+        };
+        let margin = i128::from(stroke_width) + 2;
+        Some((
+            floor_div(x0.min(x1), DEVICE_ONE) - margin,
+            floor_div(x0.max(x1), DEVICE_ONE) + 1 + margin,
+            floor_div(y0.min(y1), DEVICE_ONE) - margin,
+            floor_div(y0.max(y1), DEVICE_ONE) + 1 + margin,
+        ))
+    }
+
+    /// The plan's pages for this plane (`occlusion` false), or only those a
+    /// pass could still paint into an open pixel (`occlusion` true). Pages are
+    /// appended to `out`; a page any instance may still show is asked for.
+    pub fn pages_for_plane(
+        &self,
+        plane: usize,
+        occlusion: bool,
+        out: &mut Vec<u32>,
+    ) -> DemandStats {
+        let mut stats = DemandStats::default();
+        let all = self
+            .pages_by_plane
+            .get(plane)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let Some(bin) = self.bin.filter(|_| occlusion) else {
+            stats.candidates = all.len() as u64;
+            stats.needed = all.len() as u64;
+            out.extend_from_slice(all);
+            return stats;
+        };
+        let Some(layer) = self.styled.layers.get(plane) else {
+            return stats;
+        };
+        let first = out.len();
+        for item in &bin.planes[plane] {
+            let PlaneItem::Cell {
+                world_bbox,
+                transform,
+                cell,
+                ..
+            } = item
+            else {
+                // a deferred edge is resolved per tile, during the paint: the
+                // probe does not walk it again, it asks for the layer whole
+                if matches!(item, PlaneItem::Deferred { .. }) {
+                    stats.unsure += 1;
+                    out.extend_from_slice(all);
+                }
+                continue;
+            };
+            if self.written(*world_bbox, layer.outline_width) {
+                stats.occluded += 1;
+                continue;
+            }
+            let Some(visited) = self.scene.cell(*cell) else {
+                continue;
+            };
+            for &page_id in &visited.pages {
+                let Some((page_layer, bbox)) = self.scene.page_geometry(page_id) else {
+                    continue;
+                };
+                if page_layer != layer.layer_idx {
+                    continue;
+                }
+                stats.candidates += 1;
+                let Ok(world) = transform.apply_bbox(bbox) else {
+                    out.push(page_id);
+                    continue;
+                };
+                if !self.in_frame(world, layer.outline_width) {
+                    stats.out_of_view += 1;
+                    continue;
+                }
+                if self.written(world, layer.outline_width) {
+                    stats.occluded += 1;
+                    continue;
+                }
+                out.push(page_id);
+            }
+        }
+        out[first..].sort_unstable();
+        let end = first + partition_dedup(&mut out[first..]);
+        out.truncate(end);
+        stats.needed = (out.len() - first) as u64;
+        stats
+    }
+}
+
+/// `slice::partition_dedup` on a sorted slice (not stable in this toolchain):
+/// the unique prefix's length.
+fn partition_dedup(values: &mut [u32]) -> usize {
+    let mut kept = 0usize;
+    for at in 0..values.len() {
+        if kept == 0 || values[kept - 1] != values[at] {
+            values[kept] = values[at];
+            kept += 1;
+        }
+    }
+    kept
+}
+
+impl LayerRasterSession {
+    /// Plans the frame's tiles and passes. `scene` must already carry every
+    /// page the work-bin collection needs to see (the collection reads page
+    /// metadata through `FrameScene::page`).
+    pub fn begin(
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        work_bin: bool,
+        guard: Option<RenderGuard<'_>>,
+    ) -> Result<Self, String> {
+        styled.validate()?;
+        let started = Instant::now();
+        let mut stats = RenderStats::default();
+        let (labels, labels_truncated) = PreparedLabels::build(scene, &styled.raster)?;
+        let stroke_pixels = styled
+            .layers
+            .iter()
+            .map(|layer| layer.outline_width)
+            .max()
+            .unwrap_or(1);
+        let bin = if work_bin {
+            collect_work_bin(
+                scene,
+                &styled.raster,
+                styled,
+                stroke_pixels,
+                guard,
+                &mut stats,
+                None,
+            )?
+        } else {
+            None
+        };
+        stats.work_bin_items = bin.as_ref().map(|bin| bin.items).unwrap_or(0);
+        // §3.21: the deferred-edge tile shrink, as in `render_geometry_impl`
+        let request = if styled.raster.tile_size > 128
+            && bin
+                .as_ref()
+                .is_some_and(|bin| !bin.deferred_edges.is_empty())
+        {
+            GeometryRasterRequest {
+                tile_size: 128,
+                ..styled.raster
+            }
+        } else {
+            styled.raster
+        };
+        let tile_size = u32::from(request.tile_size);
+        let tile_columns = request.width.div_ceil(tile_size);
+        let tile_rows = request.height.div_ceil(tile_size);
+        let tile_count_u64 = u64::from(tile_columns) * u64::from(tile_rows);
+        let tile_count: usize = tile_count_u64
+            .try_into()
+            .map_err(|_| format!("raster tile count limit exceeded: {tile_count_u64}"))?;
+        let workers = usize::from(request.workers).min(tile_count).max(1);
+        stats.workers_used = workers.try_into().unwrap_or(u16::MAX);
+        stats.tiles = tile_count.try_into().unwrap_or(u32::MAX);
+        let write_once = write_once_enabled();
+        let mut tiles = Vec::with_capacity(tile_count);
+        for tile_index in 0..tile_count {
+            let tile_x = tile_index % tile_columns as usize;
+            let tile_y = tile_index / tile_columns as usize;
+            tiles.push(TileWork::new(
+                &request,
+                stroke_pixels,
+                write_once,
+                tile_boundary(request.width, tile_x, tile_size),
+                tile_boundary(request.width, tile_x + 1, tile_size),
+                tile_boundary(request.height, tile_y, tile_size),
+                tile_boundary(request.height, tile_y + 1, tile_size),
+            )?);
+        }
+        let passes = styled_passes(scene, styled, bin.as_ref(), write_once);
+        // the plan's pages per plane: what a layer needs when coverage says
+        // nothing, and the conservative answer for a deferred edge
+        let mut planes_of_layer: Vec<(u32, usize)> = styled
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(plane, layer)| (layer.layer_idx, plane))
+            .collect();
+        planes_of_layer.sort_unstable();
+        let mut pages_by_plane: Vec<Vec<u32>> = vec![Vec::new(); styled.layers.len()];
+        for &page_id in &scene.plan().pages {
+            let Some((layer_idx, _)) = scene.page_geometry(page_id) else {
+                continue;
+            };
+            if let Ok(at) = planes_of_layer.binary_search_by_key(&layer_idx, |entry| entry.0) {
+                pages_by_plane[planes_of_layer[at].1].push(page_id);
+            }
+        }
+        let hierarchy_frames = styled.hierarchy_frames;
+        let bin_ref = bin.as_ref();
+        for_each_tile(&mut tiles, workers, |tile| {
+            tile.prepare_minis(scene, bin_ref, hierarchy_frames, guard)
+        })?;
+        Ok(LayerRasterSession {
+            request,
+            bin,
+            passes,
+            stroke_pixels,
+            workers,
+            tiles,
+            tile_columns,
+            tile_rows,
+            stats,
+            labels,
+            labels_truncated,
+            started,
+            pages_by_plane,
+        })
+    }
+
+    pub fn begin_cancellable(
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        work_bin: bool,
+        generation: u64,
+        cancellation: &RenderCancellation,
+    ) -> Result<Self, String> {
+        Self::begin(
+            scene,
+            styled,
+            work_bin,
+            Some(RenderGuard {
+                generation,
+                cancellation,
+            }),
+        )
+    }
+
+    /// The styled plane a pass paints, if it paints one (a hierarchy frame
+    /// band paints no layer).
+    fn plane_of(pass: TilePass) -> Option<usize> {
+        match pass {
+            TilePass::Plane(plane) => Some(plane),
+            TilePass::Frames(_) => None,
+        }
+    }
+
+    pub fn passes(&self) -> usize {
+        self.passes.len()
+    }
+
+    /// Runs the frame in blocks of `block` consecutive passes, calling
+    /// `before_block` on this thread before each block with the styled planes
+    /// it is about to paint. A worker takes a tile and paints the whole block
+    /// into it, top layer first; the workers meet at a barrier only at the
+    /// block's end, which is where the caller decides what the next block
+    /// needs.
+    ///
+    /// Tiles are independent and a tile's own pass order never changes, so
+    /// every block size paints the same pixels - `block >= passes()` is the
+    /// normal render's schedule, `block == 1` stops at every layer. The
+    /// barrier is what the caller pays for looking: it also takes the tile
+    /// load balancing away, because the frame's time goes from the longest
+    /// tile to the sum of the longest tile of each block (measured
+    /// 2026-09-20: about +100 ms on a 449-layer frame at block 1).
+    pub fn render_layered<F>(
+        self,
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        guard: Option<RenderGuard<'_>>,
+        block: usize,
+        mut before_block: F,
+    ) -> Result<GeometryRasterReport, String>
+    where
+        F: FnMut(&[usize], &BlockDemand<'_>) -> Result<(), String>,
+    {
+        let block = block.max(1);
+        let LayerRasterSession {
+            request,
+            bin,
+            passes,
+            stroke_pixels,
+            workers,
+            tiles,
+            tile_columns,
+            tile_rows,
+            stats,
+            labels,
+            labels_truncated,
+            started,
+            pages_by_plane,
+        } = self;
+        let tiles: Vec<std::sync::Mutex<TileWork>> =
+            tiles.into_iter().map(std::sync::Mutex::new).collect();
+        let (bin, passes) = (bin.as_ref(), passes.as_slice());
+        let barrier = std::sync::Barrier::new(workers + 1);
+        let pass_index = AtomicUsize::new(0);
+        let cursor = AtomicUsize::new(0);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let failure = std::sync::Mutex::new(None::<String>);
+        let (tiles_ref, barrier, pass_index, cursor, stop, failure) =
+            (&tiles, &barrier, &pass_index, &cursor, &stop, &failure);
+        std::thread::scope(|scope| -> Result<(), String> {
+            for _ in 0..workers {
+                scope.spawn(move || loop {
+                    barrier.wait();
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let first = pass_index.load(Ordering::Relaxed);
+                    let last = (first + block).min(passes.len());
+                    loop {
+                        let tile_index = cursor.fetch_add(1, Ordering::Relaxed);
+                        let Some(slot) = tiles_ref.get(tile_index) else {
+                            break;
+                        };
+                        let Ok(mut tile) = slot.lock() else {
+                            break;
+                        };
+                        let tile_started = Instant::now();
+                        for at in first..last {
+                            if tile.full {
+                                break;
+                            }
+                            if let Err(error) = raster_tile_pass(
+                                scene,
+                                &request,
+                                styled,
+                                bin,
+                                &mut tile,
+                                passes[at],
+                                passes.len() - at,
+                                stroke_pixels,
+                                guard,
+                            ) {
+                                if let Ok(mut failure) = failure.lock() {
+                                    failure.get_or_insert(error);
+                                }
+                                break;
+                            }
+                        }
+                        tile.stats.raster_tile_max_us =
+                            tile.stats.raster_tile_max_us.saturating_add(
+                                tile_started
+                                    .elapsed()
+                                    .as_micros()
+                                    .try_into()
+                                    .unwrap_or(u64::MAX),
+                            );
+                    }
+                    barrier.wait();
+                });
+            }
+            let mut result = Ok(());
+            let mut planes: Vec<usize> = Vec::with_capacity(block);
+            for at in (0..passes.len()).step_by(block) {
+                planes.clear();
+                planes.extend(
+                    passes[at..(at + block).min(passes.len())]
+                        .iter()
+                        .filter_map(|&pass| Self::plane_of(pass)),
+                );
+                let guards = tiles
+                    .iter()
+                    .map(|tile| {
+                        tile.lock()
+                            .map_err(|_| "raster tile lock poisoned".to_string())
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let demand = BlockDemand {
+                    request: &request,
+                    styled,
+                    scene,
+                    bin,
+                    tiles: &guards,
+                    pages_by_plane: &pages_by_plane,
+                };
+                let asked = before_block(&planes, &demand);
+                drop(demand);
+                drop(guards);
+                if let Err(error) = asked {
+                    result = Err(error);
+                    break;
+                }
+                pass_index.store(at, Ordering::Relaxed);
+                cursor.store(0, Ordering::Relaxed);
+                barrier.wait();
+                barrier.wait();
+                let failed = failure
+                    .lock()
+                    .map_err(|_| "raster failure lock poisoned".to_string())?
+                    .clone();
+                if let Some(error) = failed {
+                    result = Err(error);
+                    break;
+                }
+            }
+            stop.store(true, Ordering::Release);
+            barrier.wait();
+            result
+        })?;
+        let mut stats = stats;
+        let mut counters = RasterCounters::default();
+        let mut bands = Vec::with_capacity(tiles.len());
+        for slot in tiles {
+            let output = slot
+                .into_inner()
+                .map_err(|_| "raster tile lock poisoned".to_string())?
+                .output();
+            add_stats(&mut stats, &output.stats);
+            counters.add(&output.counters);
+            bands.push(output.tile);
+        }
+        finish_geometry_frame(
+            &request,
+            RenderMode::Styled(styled),
+            scene,
+            bands,
+            tile_columns,
+            tile_rows,
+            stats,
+            counters,
+            labels.as_ref(),
+            labels_truncated,
+            false,
+            started,
+            guard,
+        )
+    }
+
+    pub fn render_layered_cancellable<F>(
+        self,
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        generation: u64,
+        cancellation: &RenderCancellation,
+        block: usize,
+        before_block: F,
+    ) -> Result<GeometryRasterReport, String>
+    where
+        F: FnMut(&[usize], &BlockDemand<'_>) -> Result<(), String>,
+    {
+        self.render_layered(
+            scene,
+            styled,
+            Some(RenderGuard {
+                generation,
+                cancellation,
+            }),
+            block,
+            before_block,
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2317,6 +3464,8 @@ fn apply_label_passes(
         row0: 0,
         row1: frame.height,
         pixels: frame.pixels,
+        rep_spans: Vec::new(),
+        once: None,
     };
     if styled.hierarchy_frames {
         render_prepared_labels(
@@ -2612,6 +3761,12 @@ fn monochrome(color: [u8; 4]) -> [u8; 4] {
 }
 
 fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
+    total.representative_spans = total
+        .representative_spans
+        .saturating_add(worker.representative_spans);
+    total.representative_pixels = total
+        .representative_pixels
+        .saturating_add(worker.representative_pixels);
     total.primitives_tested = total
         .primitives_tested
         .saturating_add(worker.primitives_tested);
@@ -2628,6 +3783,13 @@ fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
         .hier_cells_visited
         .saturating_add(worker.hier_cells_visited);
     total.subtrees_pruned = total.subtrees_pruned.saturating_add(worker.subtrees_pruned);
+    total.once_full_tiles = total.once_full_tiles.saturating_add(worker.once_full_tiles);
+    total.once_passes_skipped = total
+        .once_passes_skipped
+        .saturating_add(worker.once_passes_skipped);
+    total.once_items_skipped = total
+        .once_items_skipped
+        .saturating_add(worker.once_items_skipped);
     total.raster_tile_max_us = total.raster_tile_max_us.max(worker.raster_tile_max_us);
     total.tiles_reused = total.tiles_reused.saturating_add(worker.tiles_reused);
 }
@@ -2671,6 +3833,7 @@ fn raster_page_records(
     page: &crate::DecodedPage,
     page_id: u32,
     level: u8,
+    shape_cut: i64,
     local_view: BBox,
     world_transform: OrthoTransform,
     stats: &mut RenderStats,
@@ -2698,6 +3861,9 @@ fn raster_page_records(
     page.index
         .rects()
         .for_each_intersecting(local_view, record_scratch, |record| {
+            if band.is_full() {
+                return Ok(());
+            }
             let rect = geometry
                 .rects
                 .get(record as usize)
@@ -2710,7 +3876,9 @@ fn raster_page_records(
                     page_id, rect.w, rect.h
                 ));
             }
-            if rect.w == 0 || rect.h == 0 {
+            if rect.w == 0 || rect.h == 0 || rect.w.min(rect.h) < shape_cut {
+                // the per-shape cut (HierStats::shape_cut): the whole record,
+                // its members share the size
                 return Ok(());
             }
             let x1 = rect
@@ -2737,13 +3905,16 @@ fn raster_page_records(
             };
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
-            let visit = for_each_visible_offset_chunked(
+            let visit = until_full(for_each_visible_offset_chunked(
                 &rep,
                 chunks,
                 base,
                 local_view,
                 |offset_x, offset_y| {
                     check_member_cancelled(guard, &mut cancel_member)?;
+                    if band.is_full() {
+                        return Err(WRITE_ONCE_FULL.to_string());
+                    }
                     let local = translate_bbox(base, offset_x, offset_y)?;
                     let world = world_transform.apply_bbox(local)?;
                     if paint_world_rect(band, request, world, paint)? {
@@ -2751,8 +3922,10 @@ fn raster_page_records(
                     }
                     Ok(())
                 },
-            )?;
-            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+            ))?;
+            stats.rep_members_tested = stats
+                .rep_members_tested
+                .saturating_add(visit.map_or(0, |visit| visit.tested));
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
             counters.rectangle_members_drawn =
@@ -2763,6 +3936,9 @@ fn raster_page_records(
     page.index
         .polys()
         .for_each_intersecting(local_view, record_scratch, |record| {
+            if band.is_full() {
+                return Ok(());
+            }
             let polygon = geometry
                 .polys
                 .get(record as usize)
@@ -2775,6 +3951,9 @@ fn raster_page_records(
                     page_id
                 )
             })?;
+            if (base.x1 - base.x0).min(base.y1 - base.y0) < shape_cut {
+                return Ok(());
+            }
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
             // One scratch per record, reused by every repetition member.
@@ -2787,13 +3966,16 @@ fn raster_page_records(
             } else {
                 None
             };
-            let visit = for_each_visible_offset_chunked(
+            let visit = until_full(for_each_visible_offset_chunked(
                 &rep,
                 chunks,
                 base,
                 local_view,
                 |offset_x, offset_y| {
                     check_member_cancelled(guard, &mut cancel_member)?;
+                    if band.is_full() {
+                        return Err(WRITE_ONCE_FULL.to_string());
+                    }
                     world_points.clear();
                     for &(x, y) in &polygon.pts {
                         let x = checked_add(x, offset_x, "polygon x")?;
@@ -2805,8 +3987,10 @@ fn raster_page_records(
                     }
                     Ok(())
                 },
-            )?;
-            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+            ))?;
+            stats.rep_members_tested = stats
+                .rep_members_tested
+                .saturating_add(visit.map_or(0, |visit| visit.tested));
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
             counters.polygon_members_drawn = counters.polygon_members_drawn.saturating_add(drawn);
@@ -2816,6 +4000,9 @@ fn raster_page_records(
     page.index
         .paths()
         .for_each_intersecting(local_view, record_scratch, |record| {
+            if band.is_full() {
+                return Ok(());
+            }
             let path_record = geometry
                 .paths
                 .get(record as usize)
@@ -2833,6 +4020,9 @@ fn raster_page_records(
                 .ok_or_else(|| format!("corrupt page {}: path spine is degenerate", page_id))?;
             let base = polygon_bbox(&outline)
                 .ok_or_else(|| format!("corrupt page {}: path outline is degenerate", page_id))?;
+            if (base.x1 - base.x0).min(base.y1 - base.y0) < shape_cut {
+                return Ok(());
+            }
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
             // One outline/centerline scratch pair per record, reused by
@@ -2847,13 +4037,16 @@ fn raster_page_records(
             } else {
                 None
             };
-            let visit = for_each_visible_offset_chunked(
+            let visit = until_full(for_each_visible_offset_chunked(
                 &rep,
                 chunks,
                 base,
                 local_view,
                 |offset_x, offset_y| {
                     check_member_cancelled(guard, &mut cancel_member)?;
+                    if band.is_full() {
+                        return Err(WRITE_ONCE_FULL.to_string());
+                    }
                     world_points.clear();
                     for &(x, y) in &outline {
                         let x = checked_add(x, offset_x, "path x")?;
@@ -2871,8 +4064,10 @@ fn raster_page_records(
                     }
                     Ok(())
                 },
-            )?;
-            stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+            ))?;
+            stats.rep_members_tested = stats
+                .rep_members_tested
+                .saturating_add(visit.map_or(0, |visit| visit.tested));
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(drawn);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(drawn);
             counters.path_members_drawn = counters.path_members_drawn.saturating_add(drawn);
@@ -2905,6 +4100,9 @@ fn render_cell(
     let cell = scene
         .cell(key)
         .ok_or_else(|| format!("invalid plan: missing working cell {:?}", key))?;
+    if band.is_full() {
+        return Ok(());
+    }
     stats.hier_cells_visited = stats.hier_cells_visited.saturating_add(1);
     path.push(key);
     let local_view = world_transform.invert()?.apply_bbox(cull_view)?;
@@ -2923,12 +4121,24 @@ fn render_cell(
         if !selection.includes(page.layer_idx) || !page.bbox.intersects(&local_view) {
             continue;
         }
+        if band.any_written() {
+            if band.is_full() {
+                break;
+            }
+            if let Ok(world) = world_transform.apply_bbox(page.bbox) {
+                if band.world_box_written(request, world, paint.stroke_width) {
+                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                    continue;
+                }
+            }
+        }
         raster_page_records(
             band,
             request,
             page,
             page_id,
             level,
+            scene.plan().stats.shape_cut.min(i64::MAX as u64) as i64,
             local_view,
             world_transform,
             stats,
@@ -2952,6 +4162,26 @@ fn render_cell(
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
         }
+    }
+    if path.len() == 1 {
+        let mut rep_spans = std::mem::take(&mut band.rep_spans);
+        for (layer_idx, prim) in &cell.reps {
+            check_cancelled(guard)?;
+            if !selection.includes(*layer_idx) {
+                continue;
+            }
+            counters.rect_records = counters.rect_records.saturating_add(1);
+            stats.primitives_tested = stats.primitives_tested.saturating_add(1);
+            stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
+            if queue_representative(band, request, prim, paint, &mut rep_spans, stats)? {
+                counters.rectangle_members_drawn =
+                    counters.rectangle_members_drawn.saturating_add(1);
+                stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
+                stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
+            }
+        }
+        flush_representative_spans(band, request, paint, &mut rep_spans, stats);
+        band.rep_spans = rep_spans;
     }
     if matches!(selection, GeometrySelection::All) {
         counters.deferred_frame_records = counters
@@ -2980,12 +4210,26 @@ fn render_cell(
             OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
         let base_bbox = base_place.apply_bbox(child_bbox)?;
         let mut cancel_member = 0u16;
-        let visit = for_each_visible_offset(
+        let visit = until_full(for_each_visible_offset(
             &instance.rep,
             base_bbox,
             local_view,
             |offset_x, offset_y| {
                 check_member_cancelled(guard, &mut cancel_member)?;
+                if band.any_written() {
+                    if band.is_full() {
+                        return Err(WRITE_ONCE_FULL.to_string());
+                    }
+                    let member = translate_bbox(base_bbox, offset_x, offset_y)?;
+                    if band.world_box_written(
+                        request,
+                        world_transform.apply_bbox(member)?,
+                        paint.stroke_width,
+                    ) {
+                        stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                        return Ok(());
+                    }
+                }
                 let x = checked_add(instance.x, offset_x, "instance x")?;
                 let y = checked_add(instance.y, offset_y, "instance y")?;
                 let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
@@ -3007,8 +4251,10 @@ fn render_cell(
                     record_scratch,
                 )
             },
-        )?;
-        stats.rep_members_tested = stats.rep_members_tested.saturating_add(visit.tested);
+        ))?;
+        stats.rep_members_tested = stats
+            .rep_members_tested
+            .saturating_add(visit.map_or(0, |visit| visit.tested));
     }
     path.pop();
     Ok(())
@@ -3576,6 +4822,16 @@ fn paint_hairline_device_rect(
     let end_row = checked_usize(end_row, "hairline end row")?;
     let first_col = checked_usize(first_col, "hairline first column")?;
     let end_col = checked_usize(end_col, "hairline end column")?;
+    if band.once.is_some() {
+        return Ok(band.write_once_rows(
+            first_row,
+            end_row,
+            first_col,
+            end_col,
+            paint.color,
+            |_| SpanRule::All,
+        ));
+    }
     let solid = PaintStyle {
         fill: LayerFill::Solid,
         ..paint
@@ -3611,6 +4867,107 @@ fn paint_world_rect(
         paint,
     )?;
     Ok(filled || stroked)
+}
+
+/// Batch the already-selected hairlines, not the source records. The scratch
+/// buffer is reused per tile, capped at 64K row spans, and never scans empty
+/// layer pixels. All paints in this layer are opaque writes of the same colour.
+fn queue_representative(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    prim: &floe_vfs::representatives::Prim,
+    paint: PaintStyle,
+    spans: &mut Vec<RepSpan>,
+    stats: &mut RenderStats,
+) -> Result<bool, String> {
+    if prim.kind != floe_vfs::representatives::PRIM_SEGMENT {
+        if let Some((x0, y0, x1, y1)) = hairline_world_bbox(request, prim.bbox(), paint)? {
+            let c0 = x0.max(band.col0 as i128);
+            let c1 = x1.min(band.col1 as i128);
+            let r0 = y0.max(band.row0 as i128);
+            let r1 = y1.min(band.row1 as i128);
+            if c0 >= c1 || r0 >= r1 {
+                return Ok(false);
+            }
+            if spans.len() + (r1 - r0) as usize > 65536 {
+                flush_representative_spans(band, request, paint, spans, stats);
+            }
+            for r in r0..r1 {
+                spans.push((r as u32, c0 as u32, c1 as u32));
+            }
+            return Ok(true);
+        }
+    }
+    paint_representative(band, request, prim, paint)
+}
+fn flush_representative_spans(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    paint: PaintStyle,
+    spans: &mut Vec<RepSpan>,
+    stats: &mut RenderStats,
+) {
+    if spans.is_empty() {
+        return;
+    }
+    spans.sort_unstable();
+    let solid = PaintStyle {
+        fill: LayerFill::Solid,
+        ..paint
+    };
+    let mut run = spans[0];
+    let mut paint_run = |run: RepSpan| {
+        fill_span(
+            band,
+            solid,
+            request.height,
+            run.0 as usize,
+            run.1 as usize,
+            run.2 as usize,
+        );
+        stats.representative_spans += 1;
+        stats.representative_pixels += (run.2 - run.1) as u64;
+    };
+    for &next in &spans[1..] {
+        if next.0 == run.0 && next.1 <= run.2 {
+            run.2 = run.2.max(next.2);
+        } else {
+            paint_run(run);
+            run = next;
+        }
+    }
+    paint_run(run);
+    spans.clear();
+}
+
+/// One OVR2 representative: a rect takes the real rect's path (so a
+/// sub-pixel width is the one-pixel hairline and the long axis keeps its
+/// projected length - 4, 3, 2, 1 px as the view widens), a segment is
+/// stroked as the boundary edge it is, a fallback point is a one-pixel rect.
+fn paint_representative(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    prim: &floe_vfs::representatives::Prim,
+    paint: PaintStyle,
+) -> Result<bool, String> {
+    use floe_vfs::representatives::PRIM_SEGMENT;
+    if prim.kind == PRIM_SEGMENT {
+        return stroke_world_polyline(
+            band,
+            request,
+            &[(prim.x0, prim.y0), (prim.x1, prim.y1)],
+            paint,
+        );
+    }
+    let paint = if prim.flags & floe_vfs::representatives::PRIM_MERGED_SOLID != 0 {
+        PaintStyle {
+            fill: LayerFill::Solid,
+            ..paint
+        }
+    } else {
+        paint
+    };
+    paint_world_rect(band, request, prim.bbox(), paint)
 }
 
 fn paint_world_polygon(
@@ -3753,7 +5110,12 @@ fn paint_summary_plane(
     let hr1 = band.row1 as i64 + 1;
     let hw = (hc1 - hc0) as usize;
     let hh = (hr1 - hr0) as usize;
-    let mut mask = vec![false; hw * hh];
+    // the lit pixels of the halo window are collected first: a layer
+    // with none in this tile costs the cell scan only, never the mask
+    // allocation and the pixel loop (field 2026-09-18: MAIN09 at 200 %
+    // with 337 visible layers spent 804 ms drawing, most of it in
+    // full-tile mask zeroing and scanning for layers with nothing here)
+    let mut lit: Vec<(u32, u32)> = Vec::new();
     // world bounds of the halo window
     let wx0 = view.x0 + hc0 as f64 * span_x / width;
     let wx1 = view.x0 + hc1 as f64 * span_x / width;
@@ -3792,17 +5154,31 @@ fn paint_summary_plane(
                 let pc = ((mx - view.x0) * width / span_x).floor() as i64;
                 let pr = ((view.y1 - my) * height / span_y).floor() as i64;
                 if pc >= hc0 && pc < hc1 && pr >= hr0 && pr < hr1 {
-                    mask[(pr - hr0) as usize * hw + (pc - hc0) as usize] = true;
+                    lit.push(((pr - hr0) as u32, (pc - hc0) as u32));
                 }
             }
             i += 1;
         }
     }
     counters.summary_cells_drawn = counters.summary_cells_drawn.saturating_add(cells);
+    if lit.is_empty() {
+        return Ok(());
+    }
+    let mut mask = vec![false; hw * hh];
+    let mut row_lit = vec![false; hh];
+    for &(mr, mc) in &lit {
+        mask[mr as usize * hw + mc as usize] = true;
+        row_lit[mr as usize] = true;
+    }
     let tile_width = band.tile_width() as usize;
     let mut painted = 0u64;
     for r in band.row0..band.row1 {
         let mr = (r as i64 - hr0) as usize;
+        // only lit pixels are painted, so a row without one is skipped
+        // (its neighbours are read from the full mask when they matter)
+        if !row_lit[mr] {
+            continue;
+        }
         for c in band.col0..band.col1 {
             let mc = (c as i64 - hc0) as usize;
             if !mask[mr * hw + mc] {
@@ -3813,9 +5189,13 @@ fn paint_summary_plane(
                 || !mask[(mr - 1) * hw + mc]
                 || !mask[(mr + 1) * hw + mc];
             if boundary || fill_pixel_on(paint.fill, r, c, request.height) {
+                painted += 1;
+                if band.once.is_some() {
+                    band.write_once_pixel(r as usize, c as usize, paint.color);
+                    continue;
+                }
                 let offset = ((r - band.row0) as usize * tile_width + (c - band.col0) as usize) * 4;
                 band.pixels[offset..offset + 4].copy_from_slice(&paint.color);
-                painted += 1;
             }
         }
     }
@@ -3847,6 +5227,29 @@ fn fill_device_rect_with_phase(
     let first_col = checked_usize(first_col, "rectangle first column")?;
     let end_col = checked_usize(end_col, "rectangle end column")?;
     let mut drew = false;
+    if band.once.is_some() {
+        let frame_height = request.height;
+        return Ok(match paint.fill {
+            LayerFill::Clear => false,
+            LayerFill::Solid => {
+                band.write_once_rows(first_row, end_row, first_col, end_col, paint.color, |_| {
+                    SpanRule::All
+                })
+            }
+            LayerFill::Speckle => {
+                band.write_once_rows(first_row, end_row, first_col, end_col, paint.color, |row| {
+                    SpanRule::Speckle { row }
+                })
+            }
+            LayerFill::Pattern(rows) => {
+                band.write_once_rows(first_row, end_row, first_col, end_col, paint.color, |row| {
+                    SpanRule::Pattern {
+                        word: rows[((row as u32).wrapping_add(frame_height - 1) & 15) as usize],
+                    }
+                })
+            }
+        });
+    }
     for row in first_row..end_row {
         if fill_span(band, paint, request.height, row, first_col, end_col) {
             drew = true;
@@ -3869,6 +5272,17 @@ fn fill_span(
 ) -> bool {
     if first_col >= end_col {
         return false;
+    }
+    if band.once.is_some() {
+        let rule = match paint.fill {
+            LayerFill::Clear => return false,
+            LayerFill::Solid => SpanRule::All,
+            LayerFill::Speckle => SpanRule::Speckle { row },
+            LayerFill::Pattern(rows) => SpanRule::Pattern {
+                word: rows[((row as u32).wrapping_add(frame_height - 1) & 15) as usize],
+            },
+        };
+        return band.write_once_span(row, first_col, end_col, paint.color, rule);
     }
     let row_offset = (row - band.row0 as usize) * band.tile_width() as usize;
     let col_base = band.col0 as usize;
@@ -4030,6 +5444,17 @@ fn stroke_device_segment(
         if row_lo > row_hi || col_lo > col_hi {
             return Ok(false);
         }
+        if band.once.is_some() {
+            band.write_once_rows(
+                row_lo as usize,
+                row_hi as usize + 1,
+                col_lo as usize,
+                col_hi as usize + 1,
+                paint.color,
+                |_| SpanRule::All,
+            );
+            return Ok(true);
+        }
         let width = band.tile_width() as usize;
         for row in row_lo..=row_hi {
             let local_row = row as usize - band.row0 as usize;
@@ -4056,6 +5481,11 @@ fn stroke_device_segment(
                 }
                 for stroke_x in x0 + stroke_low..=x0 + stroke_high {
                     if stroke_x < band.col0 as i64 || stroke_x >= band.col1 as i64 {
+                        continue;
+                    }
+                    if band.once.is_some() {
+                        band.write_once_pixel(stroke_y as usize, stroke_x as usize, paint.color);
+                        drew = true;
                         continue;
                     }
                     let local_row = stroke_y as usize - band.row0 as usize;
@@ -4424,6 +5854,122 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
+    #[test]
+    fn representative_spans_match_direct_pixels_with_overlap_styles_and_tiles() {
+        use floe_vfs::representatives::{Prim, PRIM_RECT, PRIM_SEGMENT};
+        let req = GeometryRasterRequest {
+            view: RasterViewBox::new(-15., -25., 985., 975.).unwrap(),
+            width: 100,
+            height: 100,
+            ..request()
+        };
+        let base = Prim {
+            x0: 15,
+            y0: 10,
+            x1: 17,
+            y1: 900,
+            gate_dim: 4,
+            thickness: 0,
+            kind: PRIM_RECT,
+            flags: 0,
+            rank: 0,
+        };
+        let mut prims = vec![base; 1000];
+        prims.extend([
+            Prim {
+                x0: 5,
+                y0: 25,
+                x1: 900,
+                y1: 27,
+                ..base
+            },
+            Prim {
+                x0: 300,
+                y0: 300,
+                x1: 310,
+                y1: 310,
+                ..base
+            },
+            Prim {
+                x0: 0,
+                y0: 900,
+                x1: 900,
+                y1: 0,
+                kind: PRIM_SEGMENT,
+                ..base
+            },
+        ]);
+        for fill in [
+            LayerFill::Solid,
+            LayerFill::Clear,
+            LayerFill::Speckle,
+            LayerFill::Pattern([0x5555; 16]),
+        ] {
+            for width in [1, 4] {
+                let paint = PaintStyle {
+                    fill,
+                    stroke_width: width,
+                    ..paint(&req)
+                };
+                let mut reference = full_band(&req);
+                for p in &prims {
+                    paint_representative(&mut reference, &req, p, paint).unwrap();
+                }
+                for tile in [10, 100] {
+                    let mut assembled = vec![0u8; reference.pixels.len()];
+                    let mut stats = RenderStats::default();
+                    let mut scratch = Vec::new();
+                    for y in (0..100).step_by(tile) {
+                        for x in (0..100).step_by(tile) {
+                            let mut band = RasterBand::new_tile(
+                                &req,
+                                x as u32,
+                                (x + tile) as u32,
+                                y as u32,
+                                (y + tile) as u32,
+                            )
+                            .unwrap();
+                            for p in &prims {
+                                queue_representative(
+                                    &mut band,
+                                    &req,
+                                    p,
+                                    paint,
+                                    &mut scratch,
+                                    &mut stats,
+                                )
+                                .unwrap();
+                            }
+                            flush_representative_spans(
+                                &mut band,
+                                &req,
+                                paint,
+                                &mut scratch,
+                                &mut stats,
+                            );
+                            for r in 0..tile {
+                                assembled[((y + r) * 100 + x) * 4..((y + r) * 100 + x + tile) * 4]
+                                    .copy_from_slice(
+                                        &band.pixels[r * tile * 4..(r + 1) * tile * 4],
+                                    );
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        assembled, reference.pixels,
+                        "fill={fill:?} width={width} tile={tile}"
+                    );
+                    if width == 1 {
+                        assert!(
+                            stats.representative_pixels < 10000,
+                            "overlapping pixels are unioned"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn request() -> GeometryRasterRequest {
         GeometryRasterRequest {
             view: RasterViewBox::new(0.0, 0.0, 10.0, 10.0).unwrap(),
@@ -4471,6 +6017,469 @@ mod tests {
         };
         let error = world_to_device(&request, i64::MAX, 0).unwrap_err();
         assert!(error.contains("coordinate overflow: polygon device x"));
+    }
+
+    fn with_write_once<T>(on: bool, run: impl FnOnce() -> T) -> T {
+        WRITE_ONCE_OVERRIDE.with(|value| value.set(Some(on)));
+        let out = run();
+        WRITE_ONCE_OVERRIDE.with(|value| value.set(None));
+        out
+    }
+
+    /// Deterministic pseudo-random stream for the write-once scenes.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: i64) -> i64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) % bound as u64) as i64
+        }
+    }
+
+    fn once_page(
+        page_id: u32,
+        layer_idx: u32,
+        span: i64,
+        rng: &mut Lcg,
+        dense: bool,
+    ) -> Arc<DecodedPage> {
+        let mut rects = Vec::new();
+        let mut polys = Vec::new();
+        let mut paths = Vec::new();
+        for _ in 0..if dense { 40 } else { 8 } {
+            let (w, h) = (
+                1 + rng.next(if dense { 60 } else { 25 }),
+                1 + rng.next(if dense { 60 } else { 25 }),
+            );
+            let rep = match rng.next(3) {
+                0 => Rep::One,
+                1 => Rep::Grid {
+                    na: 1 + rng.next(6) as u64,
+                    nb: 1 + rng.next(6) as u64,
+                    va: (3 + rng.next(30), 0),
+                    vb: (0, 3 + rng.next(30)),
+                },
+                _ => Rep::Pts(Arc::from(vec![
+                    (0, 0),
+                    (rng.next(40), rng.next(40)),
+                    (rng.next(40), 5 + rng.next(40)),
+                ])),
+            };
+            rects.push(RectRec {
+                layer: layer_idx,
+                dt: 0,
+                x: rng.next(span),
+                y: rng.next(span),
+                w,
+                h,
+                rep,
+            });
+        }
+        for _ in 0..4 {
+            let (x, y, a) = (rng.next(span), rng.next(span), 4 + rng.next(40));
+            polys.push(PolyRec {
+                layer: layer_idx,
+                dt: 0,
+                pts: vec![
+                    (x, y),
+                    (x + a, y),
+                    (x + a, y + a / 2),
+                    (x + a / 2, y + a / 2),
+                    (x + a / 2, y + a),
+                    (x, y + a),
+                ],
+                rep: Rep::One,
+            });
+            let (px, py, len) = (rng.next(span), rng.next(span), 10 + rng.next(80));
+            paths.push(PathRec {
+                layer: layer_idx,
+                dt: 0,
+                pts: vec![(px, py), (px + len, py), (px + len, py + len / 2)],
+                hw: 1 + rng.next(4),
+                es: 0,
+                ee: 0,
+                rep: Rep::One,
+            });
+        }
+        let doc = Doc {
+            unit: 1.0,
+            cells: vec![Cell {
+                name: format!("ONCE{page_id}"),
+                rects,
+                polys,
+                paths,
+                ..Cell::default()
+            }],
+            top: 0,
+            layer_order: vec![(layer_idx, 0)],
+            norm_s: 0.0,
+            layer_names: HashMap::new(),
+            layer_aliases: HashMap::new(),
+        };
+        // generous: every member, outline and path join lies inside
+        let bbox = BBox {
+            x0: -64,
+            y0: -64,
+            x1: span + 256,
+            y1: span + 256,
+        };
+        Arc::new(DecodedPage {
+            page_id,
+            layer_idx,
+            bbox,
+            encoded_bytes: 1,
+            records: 1,
+            members: 1,
+            index: crate::PageIndex::build(&doc),
+            doc,
+        })
+    }
+
+    /// Four layers over a top cell and an arrayed child, washes and every
+    /// hierarchy-frame band; `dense` covers the view so tiles fill up.
+    fn once_scene(seed: u64, dense: bool) -> FrameScene {
+        let mut rng = Lcg(seed);
+        let top = (0, REM_FULL);
+        let child = (1, REM_FULL);
+        let span = 320;
+        let mut pages = Vec::new();
+        for layer in 0..4u32 {
+            pages.push(once_page(layer, layer, span, &mut rng, dense));
+        }
+        for layer in 0..4u32 {
+            pages.push(once_page(4 + layer, layer, 40, &mut rng, false));
+        }
+        let child_box = BBox {
+            x0: -64,
+            y0: -64,
+            x1: 40 + 256,
+            y1: 40 + 256,
+        };
+        let top_box = BBox {
+            x0: -400,
+            y0: -400,
+            x1: span + 700,
+            y1: span + 700,
+        };
+        let frame = |rng: &mut Lcg, band: u8| {
+            let (x, y) = (rng.next(span), rng.next(span));
+            (
+                BBox {
+                    x0: x,
+                    y0: y,
+                    x1: x + 2 + rng.next(90),
+                    y1: y + 2 + rng.next(90),
+                },
+                Rep::One,
+                band,
+            )
+        };
+        let plan = HierPlan {
+            top,
+            wcells: vec![
+                WsCell {
+                    key: top,
+                    pages: vec![0, 1, 2, 3],
+                    page_levels: Vec::new(),
+                    insts: vec![
+                        WsInst {
+                            child,
+                            x: 10,
+                            y: 20,
+                            rot: 0,
+                            flip: false,
+                            rep: Rep::Grid {
+                                na: 5,
+                                nb: 4,
+                                va: (61, 0),
+                                vb: (0, 67),
+                            },
+                        },
+                        WsInst {
+                            child,
+                            x: 300,
+                            y: 40,
+                            rot: 1,
+                            flip: true,
+                            rep: Rep::One,
+                        },
+                    ],
+                    frames: (0..8).map(|index| frame(&mut rng, index % 4)).collect(),
+                    washes: (0..6)
+                        .map(|index| {
+                            let (x, y) = (rng.next(span), rng.next(span));
+                            (
+                                index % 4,
+                                BBox {
+                                    x0: x,
+                                    y0: y,
+                                    x1: x + 1 + rng.next(50),
+                                    y1: y + 1 + rng.next(50),
+                                },
+                            )
+                        })
+                        .collect(),
+                    reps: Vec::new(),
+                },
+                WsCell {
+                    key: child,
+                    pages: vec![4, 5, 6, 7],
+                    page_levels: Vec::new(),
+                    insts: Vec::new(),
+                    frames: vec![(
+                        BBox {
+                            x0: 0,
+                            y0: 0,
+                            x1: 40,
+                            y1: 40,
+                        },
+                        Rep::One,
+                        1,
+                    )],
+                    washes: vec![(
+                        2,
+                        BBox {
+                            x0: 5,
+                            y0: 5,
+                            x1: 9,
+                            y1: 30,
+                        },
+                    )],
+                    reps: Vec::new(),
+                },
+            ],
+            pages: (0..8).collect(),
+            page_prio: vec![0; 8],
+            stats: HierStats::default(),
+            explain: Vec::new(),
+        };
+        FrameScene::from_test_parts(
+            plan,
+            pages,
+            BTreeMap::from([(top, top_box), (child, child_box)]),
+        )
+        .unwrap()
+    }
+
+    /// The same frame through `LayerRasterSession`: one pass at a time over
+    /// tiles that stay alive, as the layer-decode probe paints it.
+    fn session_frame(
+        scene: &FrameScene,
+        request: &StyledGeometryRasterRequest,
+        work_bin: bool,
+        block: usize,
+    ) -> GeometryRasterReport {
+        let session = LayerRasterSession::begin(scene, request, work_bin, None).unwrap();
+        let expected = session.passes();
+        assert!(expected > 0, "a styled frame has at least one pass");
+        let (mut blocks, mut planes) = (0, 0);
+        let report = session
+            .render_layered(scene, request, None, block, |block, _| {
+                blocks += 1;
+                planes += block.len();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            blocks,
+            expected.div_ceil(block.max(1)),
+            "one call per block"
+        );
+        assert_eq!(
+            planes,
+            request.layers.len(),
+            "every plane is announced once"
+        );
+        report
+    }
+
+    #[test]
+    fn write_once_frames_match_the_ordered_overwrite_byte_for_byte() {
+        let mut stipple = [0u16; 16];
+        for (row, word) in stipple.iter_mut().enumerate() {
+            *word = 0x8421u16.rotate_left(row as u32);
+        }
+        let fills = [
+            LayerFill::Solid,
+            LayerFill::Speckle,
+            LayerFill::Pattern(stipple),
+            LayerFill::Clear,
+        ];
+        let colors = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+        ];
+        let mut full_tiles = 0u32;
+        for (seed, dense) in [(1u64, false), (2, true), (3, true)] {
+            for shift in 0..4usize {
+                for (width, height, tile_size, view) in [
+                    (96u32, 80u32, 16u16, (0.0, 0.0, 330.0, 275.0)),
+                    (67, 53, 64, (-20.0, 10.0, 181.0, 169.0)),
+                    (48, 48, 8, (100.0, 100.0, 148.0, 148.0)),
+                ] {
+                    let request = StyledGeometryRasterRequest {
+                        raster: GeometryRasterRequest {
+                            view: RasterViewBox::new(view.0, view.1, view.2, view.3).unwrap(),
+                            width,
+                            height,
+                            workers: 3,
+                            tile_size,
+                            ..request()
+                        },
+                        layers: (0..4usize)
+                            .map(|layer| LayerStyle {
+                                layer_idx: layer as u32,
+                                color: colors[layer],
+                                fill: fills[(layer + shift) % 4],
+                                outline_width: 1 + ((layer + shift) % 3) as u8,
+                            })
+                            .collect(),
+                        hierarchy_frames: shift % 2 == 0,
+                        mono: false,
+                    };
+                    let scene = once_scene(seed, dense);
+                    let ordered = with_write_once(false, || {
+                        render_geometry_styled(&scene, &request).unwrap()
+                    });
+                    // the layer-decode probe's retained tiles paint the same
+                    // passes one at a time (LAYER_DECODE_PROBE_PLAN §5)
+                    for work_bin in [true, false] {
+                        for once in [true, false] {
+                            // every block size paints the same frame: 1 = a stop
+                            // at every layer, 3 = a block, 99 = the whole frame
+                            for block in [1usize, 3, 99] {
+                                let session = with_write_once(once, || {
+                                    session_frame(&scene, &request, work_bin, block)
+                                });
+                                assert!(
+                                    session.frame.pixels() == ordered.frame.pixels(),
+                                    "session (work_bin {work_bin}, write-once {once}, block {block}) differs: seed {seed} shift {shift} {width}x{height} tile {tile_size}"
+                                );
+                            }
+                        }
+                    }
+                    let ordered_walk = with_write_once(false, || {
+                        render_geometry_styled_unbinned(&scene, &request).unwrap()
+                    });
+                    let once =
+                        with_write_once(true, || render_geometry_styled(&scene, &request).unwrap());
+                    let once_walk = with_write_once(true, || {
+                        render_geometry_styled_unbinned(&scene, &request).unwrap()
+                    });
+                    assert_eq!(ordered.frame.pixels(), ordered_walk.frame.pixels());
+                    assert_eq!(ordered.stats.once_full_tiles, 0);
+                    let case =
+                        format!("seed {seed} shift {shift} {width}x{height} tile {tile_size}");
+                    assert!(
+                        once.frame.pixels() == ordered.frame.pixels(),
+                        "binned write-once differs: {case}"
+                    );
+                    assert!(
+                        once_walk.frame.pixels() == ordered.frame.pixels(),
+                        "walked write-once differs: {case}"
+                    );
+                    let session =
+                        with_write_once(true, || session_frame(&scene, &request, true, 1));
+                    assert_eq!(
+                        (
+                            session.stats.once_full_tiles,
+                            session.stats.once_passes_skipped,
+                            session.stats.once_items_skipped
+                        ),
+                        (
+                            once.stats.once_full_tiles,
+                            once.stats.once_passes_skipped,
+                            once.stats.once_items_skipped
+                        ),
+                        "the session skips what the normal path skips: {case}"
+                    );
+                    assert!(once
+                        .frame
+                        .pixels()
+                        .chunks_exact(4)
+                        .any(|pixel| pixel != request.raster.background));
+                    full_tiles += once.stats.once_full_tiles + once_walk.stats.once_full_tiles;
+                }
+            }
+        }
+        assert!(
+            full_tiles > 0,
+            "the dense scenes must fill tiles, or the early exits are untested"
+        );
+    }
+
+    #[test]
+    fn write_once_spans_light_the_pixels_of_the_fill_rule_once() {
+        let request = GeometryRasterRequest {
+            width: 150,
+            height: 9,
+            ..request()
+        };
+        let mut stipple = [0u16; 16];
+        for (row, word) in stipple.iter_mut().enumerate() {
+            *word = 0xA531u16.rotate_right(row as u32);
+        }
+        for fill in [
+            LayerFill::Solid,
+            LayerFill::Speckle,
+            LayerFill::Pattern(stipple),
+            LayerFill::Clear,
+        ] {
+            // a tile that starts off a 64- and a 16-column boundary
+            let mut ordered = RasterBand::new_tile(&request, 7, 143, 2, 9).unwrap();
+            let mut once = ordered.clone();
+            once.enable_write_once();
+            let first = PaintStyle {
+                fill,
+                ..PaintStyle::solid([1, 2, 3, 255])
+            };
+            let second = PaintStyle {
+                fill,
+                ..PaintStyle::solid([9, 8, 7, 255])
+            };
+            let spans = [
+                (2usize, 7usize, 143usize),
+                (3, 60, 70),
+                (3, 8, 9),
+                (5, 63, 66),
+                (8, 100, 143),
+                (4, 7, 72),
+            ];
+            for &(row, c0, c1) in &spans {
+                // ordered: `first` then `second` overwrites; once: `second` wins by coming first
+                fill_span(&mut ordered, first, request.height, row, c0, c1);
+            }
+            for &(row, c0, c1) in &spans[..3] {
+                fill_span(&mut ordered, second, request.height, row, c0, c1);
+                let lit = fill_span(&mut once, second, request.height, row, c0, c1);
+                let mut probe = RasterBand::new_tile(&request, 7, 143, 2, 9).unwrap();
+                assert_eq!(
+                    lit,
+                    fill_span(&mut probe, second, request.height, row, c0, c1),
+                    "{fill:?} row {row}"
+                );
+            }
+            for &(row, c0, c1) in &spans {
+                fill_span(&mut once, first, request.height, row, c0, c1);
+            }
+            assert!(once.pixels == ordered.pixels, "{fill:?}");
+            let lit = ordered
+                .pixels
+                .chunks_exact(4)
+                .filter(|pixel| **pixel != request.background)
+                .count() as u32;
+            let width = once.tile_width() * (once.row1 - once.row0);
+            assert_eq!(
+                once.once.as_ref().unwrap().open,
+                width - lit,
+                "{fill:?}: open counts the unwritten pixels"
+            );
+        }
     }
 
     fn full_band(request: &GeometryRasterRequest) -> RasterBand {
@@ -5108,6 +7117,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                reps: Vec::new(),
             }],
             pages: vec![0, 1],
             page_prio: vec![0, 1],
@@ -5188,6 +7198,7 @@ mod tests {
                 insts: Vec::new(),
                 frames,
                 washes: Vec::new(),
+                reps: Vec::new(),
             }],
             pages: vec![0, 1],
             page_prio: vec![0, 1],
@@ -5254,6 +7265,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                reps: Vec::new(),
             }],
             pages: vec![page_id],
             page_prio: vec![0],
@@ -5438,6 +7450,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 }],
                 pages: vec![0],
                 page_prio: vec![0],
@@ -5525,6 +7538,7 @@ mod tests {
                     ],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child_a,
@@ -5533,6 +7547,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child_b,
@@ -5541,6 +7556,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child_c,
@@ -5549,6 +7565,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
             ],
             pages: vec![0, 1, 2, 3],
@@ -5649,6 +7666,16 @@ mod tests {
     /// (10 units/px), so sub-pixel features are expressible in i64
     /// world coordinates.
     fn hairline_scene(rects: Vec<RectRec>, polys: Vec<PolyRec>, paths: Vec<PathRec>) -> FrameScene {
+        shape_cut_scene(rects, polys, paths, 0)
+    }
+
+    /// `hairline_scene` planned with a per-shape cut (HierStats::shape_cut)
+    fn shape_cut_scene(
+        rects: Vec<RectRec>,
+        polys: Vec<PolyRec>,
+        paths: Vec<PathRec>,
+        shape_cut: u64,
+    ) -> FrameScene {
         let doc = Doc {
             unit: 1.0,
             cells: vec![Cell {
@@ -5690,10 +7717,14 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                reps: Vec::new(),
             }],
             pages: vec![0],
             page_prio: vec![0],
-            stats: HierStats::default(),
+            stats: HierStats {
+                shape_cut,
+                ..HierStats::default()
+            },
             explain: Vec::new(),
         };
         FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)])).unwrap()
@@ -5730,6 +7761,95 @@ mod tests {
             }
         }
         lit
+    }
+
+    #[test]
+    fn the_shape_cut_drops_the_shapes_whose_smaller_side_is_under_it() {
+        // 10 units a pixel. Large: a 100 x 100 rect and a 60 x 60 polygon.
+        // Small on one side or both: an array of 20 x 20 rects, a 200 x 20
+        // wire, a 20 x 20 polygon and a path 10 wide and 200 long.
+        let rect = |x, y, w, h, rep| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep,
+        };
+        let large_rects = vec![rect(10, 10, 100, 100, Rep::One)];
+        let large_polys = vec![PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(200, 20), (260, 20), (260, 80), (200, 80)],
+            rep: Rep::One,
+        }];
+        let mut rects = large_rects.clone();
+        rects.push(rect(
+            150,
+            150,
+            20,
+            20,
+            Rep::Grid {
+                na: 3,
+                nb: 3,
+                va: (40, 0),
+                vb: (0, 40),
+            },
+        ));
+        rects.push(rect(10, 280, 200, 20, Rep::One));
+        let mut polys = large_polys.clone();
+        polys.push(PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(280, 280), (300, 280), (290, 300)],
+            rep: Rep::One,
+        });
+        let paths = vec![PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(20, 240), (220, 240)],
+            hw: 5,
+            es: 0,
+            ee: 0,
+            rep: Rep::One,
+        }];
+        let request = hairline_request();
+        let frame = |scene: &FrameScene| render_geometry_styled(scene, &request).unwrap().frame;
+        let everything = frame(&shape_cut_scene(
+            rects.clone(),
+            polys.clone(),
+            paths.clone(),
+            0,
+        ));
+        let large_only = frame(&shape_cut_scene(large_rects, large_polys, Vec::new(), 0));
+        assert_ne!(
+            everything, large_only,
+            "the small shapes are drawn without the cut"
+        );
+        // a cut of 30: what is 20 or 10 on its smaller side goes, however long
+        assert_eq!(
+            frame(&shape_cut_scene(
+                rects.clone(),
+                polys.clone(),
+                paths.clone(),
+                30
+            )),
+            large_only
+        );
+        // a smaller side equal to the cut is not under it
+        assert_eq!(
+            frame(&shape_cut_scene(
+                rects.clone(),
+                polys.clone(),
+                paths.clone(),
+                10
+            )),
+            everything
+        );
+        // the cut is per shape: above the large shapes too, nothing is left
+        let blank = frame(&shape_cut_scene(Vec::new(), Vec::new(), Vec::new(), 0));
+        assert_eq!(frame(&shape_cut_scene(rects, polys, paths, 101)), blank);
     }
 
     #[test]
@@ -6052,6 +8172,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: child,
@@ -6060,6 +8181,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                 ],
                 pages: vec![0],
@@ -6152,6 +8274,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: mid,
@@ -6160,6 +8283,7 @@ mod tests {
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: leaf,
@@ -6168,6 +8292,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                 ],
                 pages: vec![0],
@@ -6261,6 +8386,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: mid,
@@ -6269,6 +8395,7 @@ mod tests {
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: leaf,
@@ -6277,6 +8404,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                 ],
                 pages: vec![0, 1],
@@ -6376,6 +8504,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: mid,
@@ -6384,6 +8513,7 @@ mod tests {
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: leaf,
@@ -6392,6 +8522,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                 ],
                 pages: vec![0],
@@ -6409,8 +8540,15 @@ mod tests {
         // Many small tiles: a deferred block would multiply its walk by
         // the tile count, an expanded one is collected exactly once.
         request.raster.tile_size = 8;
-        let walk = render_geometry_styled_unbinned(&make_scene(), &request).unwrap();
-        let bin = render_geometry_styled(&make_scene(), &request).unwrap();
+        // the walk's visit count is the ordered overwrite's: a write-once
+        // tile that fills up stops its walk early, which is not what this
+        // test measures
+        let (walk, bin) = with_write_once(false, || {
+            (
+                render_geometry_styled_unbinned(&make_scene(), &request).unwrap(),
+                render_geometry_styled(&make_scene(), &request).unwrap(),
+            )
+        });
         assert!(
             bin.stats.work_bin_items > 4096,
             "single placement must expand into the bin: {} items",
@@ -6474,6 +8612,7 @@ mod tests {
                         1,
                     )],
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 }],
                 pages: vec![0, 1],
                 page_prio: vec![0, 0],
@@ -6671,6 +8810,7 @@ mod tests {
                         insts: vec![inst(child_a, 2), inst(child_b, 4)],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: child_a,
@@ -6679,6 +8819,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                     WsCell {
                         key: child_b,
@@ -6687,6 +8828,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        reps: Vec::new(),
                     },
                 ],
                 pages: vec![0],
@@ -6760,6 +8902,7 @@ mod tests {
                     insts: vec![inst(child)],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child,
@@ -6768,6 +8911,7 @@ mod tests {
                     insts: vec![inst(top)],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
             ],
             pages: vec![0],
@@ -7203,6 +9347,7 @@ mod tests {
                     }],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
                 WsCell {
                     key: child,
@@ -7211,6 +9356,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 },
             ],
             pages: vec![0],

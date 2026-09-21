@@ -6,6 +6,7 @@ use floe_vfs::{Vfs, ViewReq};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::font::label_planner_metrics;
@@ -44,6 +45,10 @@ pub struct PlanSummary {
     pub representative_points: u64,
     pub representative_tested: u64,
     pub representative_limited: bool,
+    pub representative_nodes: u64,
+    pub representative_proxies: u64,
+    pub representative_bytes: u64,
+    pub representative_pixels: u64,
     pub wc_cells: u64,
     pub wc_variants: u64,
     pub inst_edges: u64,
@@ -89,6 +94,30 @@ pub struct PlanCullCounts {
     pub rep_page_level: u64,
     /// the frame's level (one cut item in 2^L, set by the item budget)
     pub rep_level: u64,
+    /// budget-fitted cut (hier.rs plan_hier): the cut the plan was fitted
+    /// to as a percentage of the requested one (0 = as asked), a keep request
+    /// fell back to the hairline cull (1), and nothing fitted (1)
+    pub fit_pct: u64,
+    pub fit_cull: u64,
+    pub fit_over: u64,
+    /// budget-fitted density: pages outside the complete tier kept one in
+    /// 2^fit_thin (255 = only the largest pages), the tier's start in
+    /// percent of the requested cut (0 = no tier)
+    pub fit_thin: u64,
+    pub fit_full_pct: u64,
+    /// everything under this percentage of the requested cut is gone (0 = no
+    /// class dropped whole)
+    pub fit_none_pct: u64,
+    /// sub-cut boxes (floe_vfs::ViewReq::sub_cut_box): box rects the plan
+    /// emitted, boxes dropped beyond the per-plan cap
+    pub sub_cut_boxes: u64,
+    pub sub_cut_box_over: u64,
+    /// the level the boxes were planned at (2^level coarser to stay under the
+    /// cap), node boxes whose layer scan ran out of its read budget
+    pub sub_cut_box_level: u64,
+    pub sub_cut_box_unsure: u64,
+    /// the per-shape cut the frame was planned with, dbu (0 = none)
+    pub shape_cut: u64,
 }
 
 impl PlanCullCounts {
@@ -113,6 +142,17 @@ impl PlanCullCounts {
             rep_children: st.rep_children,
             rep_page_level: st.rep_page_level as u64,
             rep_level: st.rep_level as u64,
+            fit_pct: st.fit_pct as u64,
+            fit_cull: st.fit_cull as u64,
+            fit_over: st.fit_over as u64,
+            fit_thin: st.fit_thin as u64,
+            fit_full_pct: st.fit_full_pct as u64,
+            fit_none_pct: st.fit_none_pct as u64,
+            sub_cut_boxes: st.sub_cut_boxes,
+            sub_cut_box_over: st.sub_cut_box_over,
+            sub_cut_box_level: st.sub_cut_box_level as u64,
+            sub_cut_box_unsure: st.sub_cut_box_unsure,
+            shape_cut: st.shape_cut,
         }
     }
 
@@ -140,15 +180,71 @@ impl PlanCullCounts {
         self.rep_children = self.rep_children.saturating_add(other.rep_children);
         self.rep_page_level = self.rep_page_level.max(other.rep_page_level);
         self.rep_level = self.rep_level.max(other.rep_level);
+        self.fit_pct = self.fit_pct.max(other.fit_pct);
+        self.fit_cull = self.fit_cull.max(other.fit_cull);
+        self.fit_over = self.fit_over.max(other.fit_over);
+        self.fit_thin = self.fit_thin.max(other.fit_thin);
+        self.fit_full_pct = self.fit_full_pct.max(other.fit_full_pct);
+        self.fit_none_pct = self.fit_none_pct.max(other.fit_none_pct);
+        self.sub_cut_boxes = self.sub_cut_boxes.saturating_add(other.sub_cut_boxes);
+        self.sub_cut_box_over = self.sub_cut_box_over.saturating_add(other.sub_cut_box_over);
+        self.sub_cut_box_level = self.sub_cut_box_level.max(other.sub_cut_box_level);
+        self.sub_cut_box_unsure = self
+            .sub_cut_box_unsure
+            .saturating_add(other.sub_cut_box_unsure);
+        self.shape_cut = self.shape_cut.max(other.shape_cut);
     }
 }
 
 pub struct PlannedView {
+    pub representative_stream: Option<floe_vfs::representatives::TreeStream>,
     pub plan: HierPlan,
     pub summary: PlanSummary,
     pub stats: RenderStats,
 }
 
+impl PlannedView {
+    /// One bounded representative query round. The renderer publishes a partial
+    /// frame while a cursor remains, then resumes it without rescanning leaves.
+    pub fn advance_representatives(&mut self, cancelled: impl Fn() -> bool) -> Result<(), String> {
+        let Some(stream) = &mut self.representative_stream else {
+            return Ok(());
+        };
+        let started = Instant::now();
+        let prims = stream.next(cancelled)?;
+        let stats = &stream.stats;
+        self.summary.representative_points = stats.points;
+        self.summary.representative_tested = stats.tested;
+        self.summary.representative_limited = stats.limited;
+        self.summary.representative_nodes = stats.nodes;
+        self.summary.representative_proxies = stats.proxy_nodes;
+        self.summary.representative_bytes = stats.bytes;
+        self.summary.representative_pixels = stats.pixels;
+        if !prims.is_empty() {
+            let top = self.plan.top;
+            if let Some(cell) = self.plan.wcells.iter_mut().find(|c| c.key == top) {
+                cell.reps.extend(prims);
+            } else {
+                self.plan.wcells.push(floe_vfs::hier::WsCell {
+                    key: top,
+                    pages: Vec::new(),
+                    page_levels: Vec::new(),
+                    insts: Vec::new(),
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                    reps: prims,
+                });
+                self.summary.wc_cells += 1;
+                self.plan.stats.wc_cells += 1;
+            }
+        }
+        if stream.is_done() {
+            self.representative_stream = None;
+        }
+        self.stats.plan_us = self.stats.plan_us.saturating_add(elapsed_us(started));
+        Ok(())
+    }
+}
 /// Display label selected by the parent VFS planner and resolved to the
 /// renderer's stable OVM layer index. Block labels have no design layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -287,7 +383,7 @@ pub struct Cache {
     /// render there (user 2026-09-15: the depth is a free control)
     layer_depth: Vec<u32>,
     // Immutable for this open cache; reopen after publishing design.ovr.
-    representatives: std::sync::OnceLock<Option<floe_vfs::representatives::File>>,
+    representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
 }
 
 /// The longest top-to-cell path of every cell (None = unreachable
@@ -476,14 +572,20 @@ impl Cache {
     /// planes are the file's planes at or above the request depth
     /// (a version-2 file; 2026-09-16), so a limited depth has its own
     /// summary.
+    /// `policy_allows`: the request's thin policy admits the summary -
+    /// keep always, cull since 2026-09-18 (user: cull + occupancy; the
+    /// summary is what a wide view of a layout needs, and keep's near
+    /// view that draws every hairline page is not) unless the kill
+    /// switch FLOE_RUST_OCCUPANCY_CULL=off restores the keep-only rule
+    /// (renderd decides and passes the flag).
     pub fn summary_selection(
         &self,
         request: &PlanRequest,
-        thin_keep: bool,
+        policy_allows: bool,
         disabled: bool,
     ) -> Result<crate::summary::SummarySelection, String> {
         use crate::summary::{self, SummarySelection};
-        if !thin_keep {
+        if !policy_allows {
             return Ok(SummarySelection::none(summary::NONE_POLICY));
         }
         // a cut of 0 is the archival "exact" of `floe2 render
@@ -658,6 +760,19 @@ impl Cache {
         self.vfs.ovm.page(page_id).usize_ as u64
     }
 
+    /// The layer and the cell-local bbox of one page, without reading its
+    /// payload (docs/LAYER_DECODE_PROBE_PLAN.ko.md §4): a layer-ordered frame
+    /// collects its work bin and its subtree masks before it has decoded
+    /// anything, and a page missing from that collection could never be
+    /// painted later.
+    pub fn page_geometry(&self, page_id: u32) -> Result<(u32, floe_ovm::BBox), String> {
+        if page_id >= self.vfs.ovm.n_pages {
+            return Err(format!("page {} is outside the index", page_id));
+        }
+        let page = self.vfs.ovm.page(page_id);
+        Ok((page.layer_idx, page.bbox))
+    }
+
     /// Original design-cell name for query/pick provenance.
     pub fn cell_name(&self, cell_id: u32) -> Result<String, String> {
         if cell_id >= self.vfs.ovm.n_cells {
@@ -696,6 +811,7 @@ impl Cache {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                reps: Vec::new(),
             });
         }
 
@@ -729,6 +845,7 @@ impl Cache {
         }
 
         Ok(PlannedView {
+            representative_stream: None,
             plan,
             summary,
             stats: RenderStats {
@@ -738,9 +855,19 @@ impl Cache {
         })
     }
 
-    /// Plain viewer only: native point representatives supplement the normal
-    /// cull plan. Exact/probe/deck callers continue to use `plan` unchanged.
+    /// Plain viewer only: representatives supplement the normal cull plan.
+    /// Resume `representative_stream` with `advance_representatives` until it is
+    /// None before treating the scene as complete. Exact/probe/deck use `plan`.
     pub fn plan_with_representatives(&self, request: &PlanRequest) -> Result<PlannedView, String> {
+        self.plan_with_representatives_options(request, Default::default(), || false)
+    }
+
+    pub fn plan_with_representatives_options(
+        &self,
+        request: &PlanRequest,
+        options: floe_vfs::representatives::TreeOptions,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<PlannedView, String> {
         let mut planned = self.plan(request)?;
         let req = self.view_request(request)?;
         if request.exact
@@ -751,20 +878,63 @@ impl Cache {
         {
             return Ok(planned);
         }
+        // Defer the lazy file open (including its OVM checksum) if occupancy
+        // already supplies every visible layer. Keep the OnceLock uninitialised
+        // so a later near view can still open the representatives.
+        if req
+            .vis
+            .iter()
+            .enumerate()
+            .all(|(i, bits)| bits & !req.page_skip.get(i).copied().unwrap_or(0) == 0)
+        {
+            return Ok(planned);
+        }
+        let plan_us_before_reps = planned.stats.plan_us;
         let started = Instant::now();
         let file = self.representatives.get_or_init(|| {
             if !Path::new(&self.dir).join("design.ovr").exists() {
                 return None;
             }
             match floe_vfs::representatives::File::open(&self.dir, &self.vfs.ovm) {
-                Ok(file) => Some(file),
+                Ok(file) => Some(std::sync::Arc::new(file)),
                 Err(error) => {
                     eprintln!("[render] ignoring design.ovr: {}", error);
                     None
                 }
             }
         });
-        if let Some(file) = file {
+        if let Some(file) = file.as_ref().filter(|f| f.version() == 3) {
+            planned.representative_stream = Some(floe_vfs::representatives::TreeStream::new(
+                std::sync::Arc::clone(file),
+                &req,
+                options,
+            ));
+            planned.advance_representatives(cancelled)?;
+        } else if let Some(file) = file.as_ref().filter(|f| f.version() == 2) {
+            // OVR2: the samples as shapes, carried apart from the washes
+            let (prims, stats) = file.query_prims(&req);
+            planned.summary.representative_points = stats.points;
+            planned.summary.representative_tested = stats.tested;
+            planned.summary.representative_limited = stats.limited;
+            if !prims.is_empty() {
+                let top = planned.plan.top;
+                if let Some(cell) = planned.plan.wcells.iter_mut().find(|c| c.key == top) {
+                    cell.reps.extend(prims);
+                } else {
+                    planned.plan.wcells.push(floe_vfs::hier::WsCell {
+                        key: top,
+                        pages: Vec::new(),
+                        page_levels: Vec::new(),
+                        insts: Vec::new(),
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                        reps: prims,
+                    });
+                    planned.plan.stats.wc_cells += 1;
+                    planned.summary.wc_cells += 1;
+                }
+            }
+        } else if let Some(file) = file {
             let (points, stats) = file.query(&req);
             planned.summary.representative_points = stats.points;
             planned.summary.representative_tested = stats.tested;
@@ -781,13 +951,14 @@ impl Cache {
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: points,
+                        reps: Vec::new(),
                     });
                     planned.plan.stats.wc_cells += 1;
                     planned.summary.wc_cells += 1;
                 }
             }
         }
-        planned.stats.plan_us = planned.stats.plan_us.saturating_add(elapsed_us(started));
+        planned.stats.plan_us = plan_us_before_reps.saturating_add(elapsed_us(started));
         Ok(planned)
     }
 
@@ -798,6 +969,7 @@ impl Cache {
     pub fn empty_plan(&self) -> PlannedView {
         let top = (self.vfs.ovm.top, floe_vfs::hier::REM_FULL);
         PlannedView {
+            representative_stream: None,
             plan: HierPlan {
                 top,
                 wcells: vec![floe_vfs::hier::WsCell {
@@ -807,6 +979,7 @@ impl Cache {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    reps: Vec::new(),
                 }],
                 pages: Vec::new(),
                 page_prio: Vec::new(),
@@ -900,6 +1073,9 @@ impl Cache {
             decode_budget: request.decode_budget,
             page_hairline: request.page_hairline,
             prune_skipped: request.prune_summary,
+            sub_cut_box: request.sub_cut_box && !request.exact,
+            shape_cut: request.shape_cut && !request.exact,
+            frames: request.frames,
             page_skip: if request.summary_layers.is_empty() {
                 Vec::new()
             } else {
@@ -970,6 +1146,62 @@ impl Cache {
         cancellation: &RenderCancellation,
     ) -> Result<(Vec<DecodedPage>, RenderStats), String> {
         self.decode_pages_impl(page_ids, workers, Some((generation, cancellation)))
+    }
+
+    /// Runs `body` with a decode pool whose workers stay up for the whole
+    /// call (docs/LAYER_DECODE_PROBE_PLAN.ko.md §5). A layer-ordered frame
+    /// reads one block of layers at a time, and building a worker set per
+    /// block was most of its decode: the work per page is the same either way
+    /// (`page_decode_sum_us` barely moves), the wall time is not.
+    /// Answers `(body's value, the microseconds the pool itself cost)` -
+    /// raising the workers and letting them go, which belongs to neither the
+    /// decode nor the raster (review 2026-09-21: it was counted as paint).
+    pub fn with_decode_pool<T>(
+        &self,
+        workers: u16,
+        guard: Option<(u64, &RenderCancellation)>,
+        body: impl FnOnce(&DecodePool<'_>) -> T,
+    ) -> Result<(T, u64), String> {
+        if workers == 0 || workers > MAX_DECODE_WORKERS {
+            return Err(format!(
+                "decode workers must be in 1..={MAX_DECODE_WORKERS}: {workers}"
+            ));
+        }
+        let pool = DecodePool {
+            source: self,
+            guard,
+            workers: usize::from(workers),
+            slots: Mutex::new(Vec::new()),
+            outputs: Mutex::new(Vec::new()),
+            next: AtomicUsize::new(0),
+            start: std::sync::Barrier::new(usize::from(workers) + 1),
+            done: std::sync::Barrier::new(usize::from(workers) + 1),
+            stop: std::sync::atomic::AtomicBool::new(false),
+        };
+        let pool = &pool;
+        // the workers wait at `start`, so they must be released however the
+        // body ends - a panic that skipped it would hang the join below
+        struct Release<'p, 'a>(&'p DecodePool<'a>);
+        impl Drop for Release<'_, '_> {
+            fn drop(&mut self) {
+                self.0.stop.store(true, Ordering::Release);
+                self.0.start.wait();
+            }
+        }
+        let started = Instant::now();
+        let body_ended = std::cell::Cell::new(None);
+        let (out, spawn_us) = std::thread::scope(|scope| {
+            for _ in 0..pool.workers {
+                scope.spawn(move || pool.serve());
+            }
+            let spawn_us = elapsed_us(started);
+            let _release = Release(pool);
+            let out = body(pool);
+            body_ended.set(Some(Instant::now()));
+            (out, spawn_us)
+        });
+        let teardown_us = body_ended.get().map(elapsed_us).unwrap_or(0);
+        Ok((out, spawn_us.saturating_add(teardown_us)))
     }
 
     fn decode_pages_impl(
@@ -1086,6 +1318,146 @@ impl Cache {
                 page_decode_max_us,
                 page_index_us,
                 decode_workers_used: worker_count.try_into().unwrap_or(u16::MAX),
+                decoded_cache_miss: page_ids.len().try_into().unwrap_or(u32::MAX),
+                decoded_cache_bytes: decoded_bytes,
+                ..RenderStats::default()
+            },
+        ))
+    }
+}
+
+/// Decode workers that outlive one batch (`Cache::with_decode_pool`). Pages
+/// are handed over as owned payloads, so a worker holds no lock while it
+/// parses; the caller waits at a barrier for the batch it asked for.
+pub struct DecodePool<'a> {
+    source: &'a Cache,
+    guard: Option<(u64, &'a RenderCancellation)>,
+    workers: usize,
+    slots: Mutex<Vec<Option<PagePayload>>>,
+    #[allow(clippy::type_complexity)]
+    outputs: Mutex<Vec<(usize, Result<(DecodedPage, u64), String>, u64)>>,
+    next: AtomicUsize,
+    start: std::sync::Barrier,
+    done: std::sync::Barrier,
+    stop: std::sync::atomic::AtomicBool,
+}
+
+impl DecodePool<'_> {
+    fn serve(&self) {
+        loop {
+            self.start.wait();
+            if self.stop.load(Ordering::Acquire) {
+                return;
+            }
+            loop {
+                let index = self.next.fetch_add(1, Ordering::Relaxed);
+                let payload = match self.slots.lock() {
+                    Ok(mut slots) => match slots.get_mut(index) {
+                        Some(slot) => slot.take(),
+                        None => None,
+                    },
+                    Err(_) => None,
+                };
+                let Some(payload) = payload else {
+                    break;
+                };
+                let page_started = Instant::now();
+                // a panicking worker would leave the batch barrier one short
+                // for good; the batch fails instead
+                let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    decode_payload(&payload, self.guard)
+                }))
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "page decode worker panicked on page {}",
+                        payload.page_id
+                    ))
+                });
+                let page_us = elapsed_us(page_started);
+                if let Ok(mut outputs) = self.outputs.lock() {
+                    outputs.push((index, decoded, page_us));
+                }
+            }
+            self.done.wait();
+        }
+    }
+
+    /// `Cache::decode_pages_parallel` for one batch, on the pool's workers.
+    pub fn decode_pages(
+        &self,
+        page_ids: &[u32],
+    ) -> Result<(Vec<DecodedPage>, RenderStats), String> {
+        check_decode_cancelled(self.guard)?;
+        // nothing to read: waking the workers for an empty batch is the whole
+        // cost of a block whose pages the cache already holds
+        if page_ids.is_empty() {
+            return Ok((Vec::new(), RenderStats::default()));
+        }
+        let read_started = Instant::now();
+        let payloads = self.source.read_pages(page_ids)?;
+        let page_read_us = elapsed_us(read_started);
+        check_decode_cancelled(self.guard)?;
+        let decode_started = Instant::now();
+        let count = payloads.len();
+        {
+            let mut slots = self
+                .slots
+                .lock()
+                .map_err(|_| "decode pool payload lock poisoned".to_string())?;
+            slots.clear();
+            slots.extend(payloads.into_iter().map(Some));
+        }
+        self.outputs
+            .lock()
+            .map_err(|_| "decode pool output lock poisoned".to_string())?
+            .clear();
+        self.next.store(0, Ordering::Relaxed);
+        self.start.wait();
+        self.done.wait();
+        let mut indexed = std::mem::take(
+            &mut *self
+                .outputs
+                .lock()
+                .map_err(|_| "decode pool output lock poisoned".to_string())?,
+        );
+        check_decode_cancelled(self.guard)?;
+        indexed.sort_unstable_by_key(|(index, _, _)| *index);
+        if indexed.len() != count {
+            return Err(format!(
+                "internal error: decoded {} of {} page payloads",
+                indexed.len(),
+                count
+            ));
+        }
+        let mut decoded = Vec::with_capacity(count);
+        let mut decoded_bytes = 0u64;
+        let mut page_decode_sum_us = 0u64;
+        let mut page_decode_max_us = 0u64;
+        let mut page_index_us = 0u64;
+        for (expected_index, (index, page, page_us)) in indexed.into_iter().enumerate() {
+            if index != expected_index {
+                return Err(format!(
+                    "internal error: decoded page index {index}, expected {expected_index}"
+                ));
+            }
+            let (page, index_us) = page?;
+            page_decode_sum_us = page_decode_sum_us.saturating_add(page_us);
+            page_decode_max_us = page_decode_max_us.max(page_us);
+            page_index_us = page_index_us.saturating_add(index_us);
+            decoded_bytes = decoded_bytes
+                .checked_add(page.encoded_bytes as u64)
+                .ok_or_else(|| "limit exceeded: decoded page bytes".to_string())?;
+            decoded.push(page);
+        }
+        Ok((
+            decoded,
+            RenderStats {
+                page_read_us,
+                page_decode_us: elapsed_us(decode_started),
+                page_decode_sum_us,
+                page_decode_max_us,
+                page_index_us,
+                decode_workers_used: self.workers.min(count).try_into().unwrap_or(u16::MAX),
                 decoded_cache_miss: page_ids.len().try_into().unwrap_or(u32::MAX),
                 decoded_cache_bytes: decoded_bytes,
                 ..RenderStats::default()

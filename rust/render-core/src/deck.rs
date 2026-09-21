@@ -809,7 +809,7 @@ impl Deck {
             // plans no pages and paints its planes in the pass raster
             let summary = self.sources[source_index].cache.summary_selection(
                 &plan_request,
-                request.thin_keep,
+                request.thin_keep || crate::summary::cull_allowed(),
                 occupancy_off,
             )?;
             let plan_request = self.sources[source_index].cache.page_plan_request(
@@ -1632,6 +1632,13 @@ fn accumulate_raster(stats: &mut RenderStats, raster: &RenderStats) {
         .hier_cells_visited
         .saturating_add(raster.hier_cells_visited);
     stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(raster.subtrees_pruned);
+    stats.once_full_tiles = stats.once_full_tiles.saturating_add(raster.once_full_tiles);
+    stats.once_passes_skipped = stats
+        .once_passes_skipped
+        .saturating_add(raster.once_passes_skipped);
+    stats.once_items_skipped = stats
+        .once_items_skipped
+        .saturating_add(raster.once_items_skipped);
 }
 
 /// A frames-only pass paints nothing but the raster's structural
@@ -1749,6 +1756,9 @@ fn source_plan_request(
         page_hairline: !request.thin_keep,
         summary_layers: Vec::new(),
         prune_summary: false,
+        sub_cut_box: false,
+        shape_cut: false,
+        frames: true,
     };
     plan.validate()?;
     Ok(Some(plan))

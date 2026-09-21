@@ -222,8 +222,12 @@
         <div class="form-row"><label for="index-jobs">Index jobs</label><input id="index-jobs" class="short" type="number" min="1" max="16" value="12"></div>
         <label class="check"><input id="index-lod" type="checkbox"> Include LOD</label>
         <label class="check"><input id="index-occupancy" type="checkbox"> Include occupancy summary (default: jobdeck only)</label>
-        <label class="check"><input id="index-representatives" type="checkbox"> Include representative points (plain layout only)</label>
-        <p class="note">Representative points are approximate display samples, not pickable geometry. Reopen after generation. Adding both summaries to a current cache uses two passes; a completed first pass remains if the second fails.</p>
+        <label for="index-occupancy-prune">Occupancy walk</label>
+        <select id="index-occupancy-prune" disabled><option value="">Native default (prune on)</option><option value="1">Prune sub-cell bboxes</option><option value="0">Exact walk (diagnostic)</option></select>
+        <label class="check"><input id="index-representatives" type="checkbox"> Include representative samples (plain layout only)</label>
+        <label for="index-representatives-format">Representative format</label>
+        <select id="index-representatives-format" disabled><option value="">Reuse existing / native default (points)</option><option value="1">Rebuild as points (1)</option><option value="2">Rebuild as shape/tree samples (2)</option></select>
+        <p class="note">Samples are approximate display data, not pickable geometry. An explicit format rebuilds OVR even on a current cache. Occupancy pruning may enlarge sub-cell footprints within one grid cell. Reopen after generation. Adding both summaries to a current cache uses two passes; a completed first pass remains if the second fails.</p>
         <label class="check"><input id="index-force" type="checkbox"> Force replacement of existing cache</label>
         <div class="button-row"><button id="index">Run index</button><button id="cancel-job" disabled>Cancel</button></div>
         <p id="operation" class="note" role="status">No active operation.</p>

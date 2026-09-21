@@ -322,6 +322,13 @@ def _discard_occupancy_tmp(outdir):
             print(f"[floe] cannot remove {tmp}: {exc}", file=sys.stderr)
 
 
+def _representatives_format_args(args):
+    """`--representatives-format 2` (OVR2 shapes and premerged spatial tree);
+    nothing for the default OVR1 points."""
+    fmt = getattr(args, "representatives_format", None)
+    return ["--representatives-format", str(int(fmt))] if fmt is not None else []
+
+
 def _occupancy_args(args):
     """`--occupancy-um` (the base cell in microns) and
     `--occupancy-balance` (the marking unit split) for floe-index."""
@@ -332,6 +339,9 @@ def _occupancy_args(args):
     balance = getattr(args, "occupancy_balance", None)
     if balance is not None:
         out += ["--occupancy-balance", str(int(balance))]
+    prune = getattr(args, "occupancy_prune", None)
+    if prune is not None:
+        out += ["--occupancy-prune", str(int(prune))]
     return out
 
 
@@ -351,6 +361,7 @@ def _run_rust_index(args, binary, coverage_only=False,
     if representatives_only:
         command += ["--representatives-only", "--representatives-points",
                     str(getattr(args, "representatives_points", None) or 262144)]
+        command += _representatives_format_args(args)
     elif coverage_only:
         command.append("--coverage-only")
     elif occupancy_only:
@@ -360,6 +371,7 @@ def _run_rust_index(args, binary, coverage_only=False,
         if getattr(args, "representatives", False) and not profiling:
             command += ["--representatives", "--representatives-points",
                         str(getattr(args, "representatives_points", None) or 262144)]
+            command += _representatives_format_args(args)
         if args.page_target_mb is not None:
             command += ["--page-target-mb", str(args.page_target_mb)]
         if args.coverage:
@@ -411,7 +423,8 @@ def _run_rust_index(args, binary, coverage_only=False,
 
 def cmd_index(args):
     representatives = (getattr(args, "representatives", False) or
-                       getattr(args, "representatives_points", None) is not None)
+                       getattr(args, "representatives_points", None) is not None or
+                       getattr(args, "representatives_format", None) is not None)
     representatives_only = getattr(args, "representatives_only", False)
     args.representatives = representatives
     if getattr(args, "representatives_points", None) is not None and args.representatives_points > 4194304:
@@ -567,7 +580,10 @@ def cmd_index(args):
         if args.coverage and not os.path.isfile(
                 os.path.join(outdir, "design.ovc")):
             _run_rust_index(args, binary, coverage_only=True)
+        # an explicit sample cap or FORMAT rebuilds the file even when one
+        # exists: an OVR1 next to the cache must not hide a requested OVR2
         if representatives and (getattr(args, "representatives_points", None) is not None or
+                                getattr(args, "representatives_format", None) is not None or
                                 not os.path.isfile(os.path.join(outdir, "design.ovr"))):
             _run_rust_index(args, binary, representatives_only=True)
         if args.occupancy:
@@ -1822,6 +1838,12 @@ def main(argv=None, *, prog=None, rust_only=None):
         "--representatives-points", type=_positive_int, default=None, metavar="N",
         help="sample cap per layer/depth group (default 262144, global cap 4194304); "
              "implies --representatives")
+    rust.add_argument(
+        "--representatives-format", type=int, choices=(1, 2), default=None, metavar="1|2",
+        help="design.ovr format: 1 (default) one point per sample; 2 (OVR2) shapes "
+             "with a premerged spatial tree - zoom refines the stored shapes within "
+             "a 0.5 px merge error. Giving "
+             "the option rebuilds the file on a current cache; implies --representatives")
     occ = rust.add_mutually_exclusive_group()
     occ.add_argument(
         "--occupancy", action="store_true",
@@ -1850,6 +1872,14 @@ def main(argv=None, *, prog=None, rust_only=None):
              "in member ranges, a heavy placement member by member; 0 the "
              "count-based split (kill switch; the file is byte-identical "
              "either way)")
+    rust.add_argument(
+        "--occupancy-prune", type=int, choices=(0, 1), default=None,
+        metavar="0|1",
+        help="1 (default, 2026-09-18): the occupancy walk stops at a placed "
+             "cell whose recursive bbox fits one grid cell and marks that "
+             "bbox (a dense grid of one: its footprint) - a superset of the "
+             "exact marking within one cell, and the cost no longer grows "
+             "with the instances below the cell size; 0 the exact walk")
     # Resolve the source-aware default only after the backend is known.
     p.set_defaults(occupancy=None, occupancy_only=False)
     rust.add_argument("--no-lod", action="store_true",

@@ -23,8 +23,8 @@ APP = ROOT / "rust/target/release/floe2-web"
 # This is deliberately explicit: new/removed flags must trigger another audit.
 SURFACE = {
     "index": """--level=1 --force --jobs=2 --page-target-mb=1
-        --occupancy --no-occupancy --occupancy-only --occupancy-um=4 --occupancy-balance=1 --no-lod --lod
-        --representatives --representatives-only --representatives-points=262144
+        --occupancy --no-occupancy --occupancy-only --occupancy-um=4 --occupancy-balance=1 --occupancy-prune=1 --no-lod --lod
+        --representatives --representatives-only --representatives-points=262144 --representatives-format=1
         --slow-cell-s=0 --p2-shard-limit-mb=0 --profile-cell=TOP --profile-cell-ci=0
         --profile-jobs=1,2 --profile-repeat=2 --profile-snapshot=snapshot
         --profile-snapshot-refresh""",
@@ -75,6 +75,8 @@ DEFAULTS = {
 }
 CHOICES = {
     ("index", "--occupancy-balance"): (0, 1),
+    ("index", "--occupancy-prune"): (0, 1),
+    ("index", "--representatives-format"): (1, 2),
     ("render", "--anchor"): ("center", "lb"),
     ("render", "--thin"): ("auto", "keep", "cull"),
     ("render", "--detail"): ("exact", "low", "medium", "high"),

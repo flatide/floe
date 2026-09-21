@@ -3502,13 +3502,55 @@ class Viewer:
                                 res.get("phase_plan", 0),
                                 res.get("phase_delta", 0),
                                 res.get("phase_apply", 0))
-                        split = " = %d load%s + %d draw" \
-                            % (res["load_ms"], ph, res["draw_ms"])
+                        # the label plan is not part of load; shown only
+                        # when it is worth a look (2026-09-21)
+                        text = res.get("text_plan_ms", 0) or 0
+                        split = " = %d load%s%s + %d draw" % (
+                            res["load_ms"], ph,
+                            " + %d text" % text if text >= 100 else "",
+                            res["draw_ms"])
+                        # renderd time no phase covers, and time spent
+                        # waiting behind earlier commands (queue + pipe)
+                        if res.get("other_ms", 0) > 200:
+                            split += " + %d other" % res["other_ms"]
                         if res.get("wait_ms", 0) > 200:
                             split += " + %d wait" % res["wait_ms"]
                     cut = ""
                     if res.get("cut_um"):
                         cut = ", cut<%.3gum" % res["cut_um"]
+                        # thin keep since 0.12.173: each shape by its smaller side
+                        if (res.get("plan_culls") or {}).get("shape_cut"):
+                            cut += " (min side)"
+                    fit = (res.get("plan_culls") or {})
+                    if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
+                            or fit.get("fit_thin")):
+                        # budget-fitted cut (0.12.162): the planner raised
+                        # the cut so the frame fits the decoded budget.
+                        # Shown HERE, next to the cut, because the bar is
+                        # ellipsized at its end and the long diagnostics
+                        # tail hid it (field 2026-09-18)
+                        factor = max(100, int(fit.get("fit_pct", 0) or 100)) / 100.0
+                        thin = int(fit.get("fit_thin", 0) or 0)
+                        full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
+                        none = int(fit.get("fit_none_pct", 0) or 0) / 100.0
+                        if thin or none:
+                            # budget-fitted density (0.12.169): size classes
+                            # largest first - complete from xF up, the class
+                            # the budget ends in about 1 in 2^k, nothing
+                            # under xG
+                            parts = []
+                            if factor > 1:
+                                parts.append("x%.3g" % factor)
+                            if thin:
+                                parts.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
+                            if none:
+                                parts.append("none below x%.3g" % none)
+                            cut += " %s to fit budget" % ", ".join(parts)
+                        else:
+                            cut += " x%.3g to fit budget" % factor
+                        cut += "%s%s" % (
+                            ", hairlines culled" if fit.get("fit_cull") else "",
+                            ", STILL OVER" if fit.get("fit_over") else "")
                     drawn = ""
                     if res.get("drawn") is not None:
                         drawn = ", ~%s drawn" % fmt_count(res["drawn"])
@@ -3608,6 +3650,13 @@ class Viewer:
                         text += ", hier %s/%s pruned" % (
                             fmt_count(res["hier_cells_visited"]),
                             fmt_count(res.get("subtrees_pruned", 0)))
+                    if res.get("once_full_tiles") or res.get("once_items_skipped"):
+                        # F2R-28 write-once tiles: tiles that filled up (and the
+                        # passes they skipped), items skipped as fully covered
+                        text += ", once %s tiles/%s passes/%s items" % (
+                            fmt_count(res.get("once_full_tiles", 0)),
+                            fmt_count(res.get("once_passes_skipped", 0)),
+                            fmt_count(res.get("once_items_skipped", 0)))
                     culls = res.get("plan_culls") or {}
                     if any(culls.values()):
                         # planner verdicts (field 2026-09-10): pages
@@ -3633,6 +3682,17 @@ class Viewer:
                             text += ", sub-cut washes %s/sparse %s" % (
                                 fmt_count(culls.get("sub_cut_washes", 0)),
                                 fmt_count(culls.get("sub_cut_sparse", 0)))
+                        if culls.get("sub_cut_boxes") or culls.get("sub_cut_box_over"):
+                            # sub-cut boxes (0.12.168): what the size cut
+                            # drops, kept as boxes under thin keep
+                            text += ", boxes %s%s%s%s" % (
+                                fmt_count(culls.get("sub_cut_boxes", 0)),
+                                " x%d coarser" % (1 << culls["sub_cut_box_level"])
+                                if culls.get("sub_cut_box_level") else "",
+                                " (+%s over)" % fmt_count(culls["sub_cut_box_over"])
+                                if culls.get("sub_cut_box_over") else "",
+                                " (%s unsure)" % fmt_count(culls["sub_cut_box_unsure"])
+                                if culls.get("sub_cut_box_unsure") else "")
                         if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
                             # dropped by the per-plan sub-cut budgets
                             # (sparse ink / wash area): the frame is
@@ -3672,9 +3732,10 @@ class Viewer:
                                  " %g um; not pickable)" % (
                                      summ["layers"], fmt_count(summ["cells"]),
                                      summ["level"], summ["cell_um"]))
-                    elif (summ.get("none") not in (None, "-", "policy",
-                                                   "exact")
-                          and self._effective_thin() == "keep"):
+                    elif summ.get("none") not in (None, "-", "policy",
+                                                  "exact"):
+                        # since 2026-09-18 the summary serves cull too,
+                        # so its absence is worth a word under either
                         text += ", summary: none (%s)" % summ["none"]
                     if res.get("labels_truncated"):
                         text += ", labels partial"

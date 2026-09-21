@@ -112,6 +112,7 @@ def main(fixture):
             run("index", source, "--occupancy-um", value, env=env, code=2)
         for value in ("2", "-1", "x"):
             run("index", source, "--occupancy-balance", value, env=env, code=2)
+            run("index", source, "--occupancy-prune", value, env=env, code=2)
         assert not cache.exists()
 
         run("index", source, "--jobs", "2", env=env)
@@ -223,7 +224,26 @@ def main(fixture):
         unchanged = set(reps_before) - {"design.ovr"}
         assert digest(reps_cache, unchanged) == {k: reps_before[k] for k in unchanged}
         assert (reps_cache / "design.ovr").read_bytes() != (additive_cache / "design.ovr").read_bytes()
+        for fmt, magic in ((2, b"FLOEOVR2"), (1, b"FLOEOVR1")):
+            # Explicit format implies samples and regenerates a present OVR;
+            # both runtime implementations invoke the same native contract.
+            keep = digest(reps_cache, (*PARTS, "meta.json", "design.ovo"))
+            flags = ("--representatives-format", str(fmt), "--jobs", "2")
+            run("index", reps, *flags, env=env)
+            run("index", reps_add, *flags, env=env, python=True)
+            assert digest(reps_cache, keep) == keep
+            data = (reps_cache / "design.ovr").read_bytes()
+            assert data.startswith(magic)
+            assert data == (additive_cache / "design.ovr").read_bytes()
+        for prune in (0, 1):
+            keep = digest(reps_cache, (*PARTS, "meta.json", "design.ovr"))
+            flags = ("--occupancy-only", "--occupancy-um", "2", "--occupancy-prune", str(prune), "--jobs", "2")
+            run("index", reps, *flags, env=env)
+            run("index", reps_add, *flags, env=env, python=True)
+            assert digest(reps_cache, keep) == keep
+            assert (reps_cache / "design.ovo").read_bytes() == (additive_cache / "design.ovo").read_bytes()
         for flags in [("--representatives-points", "0"), ("--representatives-points", "4194305"),
+                      ("--representatives-format", "0"), ("--representatives-format", "3"),
                       ("--representatives-only", "--occupancy"), ("--representatives", "--occupancy-only"),
                       ("--representatives", "--profile-cell-ci", "0")]:
             before_bad = digest(reps_cache)

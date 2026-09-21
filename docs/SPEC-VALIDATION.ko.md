@@ -29,11 +29,54 @@ sh tools/validate_rust.sh --only quick path/to.oas
   배터리는 캐시를 매번 다시 만들어 형식 변경이 묵은 캐시 뒤에 숨지 못하게 한다.
 - 유닛 게이트: `unit`(워크스페이스 debug `cargo test`), `unit_vfs`·`unit_render`
   (release `--lib`; release 프로필의 doctest는 LTO와 어긋나 제외).
+- `gen_main01`(tools/validate_gen_main01.py, 약 10초; `python` 별칭에 포함): 합성 MAIN01 생성기.
+  `--geometry legacy`가 2026-09-17의 파일과 바이트 동일(sha256 고정)한지, `--geometry chip`이
+  `--jobs`와 무관하게 결정적이고 KLayout·floe-index가 읽으며 칩의 모양(가늘고 긴 배선, 여러
+  크기대, 다이에 비해 작은 라이브러리 셀)인지.
+- `sub_cut_box`(tools/validate_sub_cut_box.py, 약 15초; `planner`·`render` 별칭에 포함): 칩 형태
+  합성 MAIN01의 via 레이어 하나, keep, 칩 전체 — 박스 없이는 빈 프레임, `FLOE_RUST_SUB_CUT_BOX=on`
+  (0.12.182부터 기본 꺼짐)이면 박스가 찍힌 프레임이고 디코드 페이지 수는 같다. cull 요청, 전 레이어 keep(레이어 상한 초과), 컷 아래가
+  없는 근접 keep 뷰는 킬 스위치와 바이트 동일. 리뷰 재현 레이아웃 4개(klayout.db로 생성):
+  depth 제한 아래 도형에는 박스가 없고, 0.5 px·3 px 간격 배열과 점 목록의 드문 레이어는 멤버를
+  직접 그린 프레임과 켜진 픽셀 수가 같으며, 64배치 중 하나의 레이어는 클러스터마다 노드 박스 하나.
+  0.12.172: 두 레이어의 150 px 박스에서 위 레이어 채움을 없애도 아래 레이어가 그대로 켜지는지,
+  같은 워커에서 frames 끔/켬/끔으로 계획된 경계 프레임이 0/64/0인지.
+- `shape_cut`(tools/validate_shape_cut.py, 약 5초; `planner`·`render` 별칭에 포함): klayout.db로 만든
+  작은 레이아웃(20 µm 사각형 + 0.4 µm 배열 + 0.2 µm 배선이 한 페이지, 배선만 있는 레이어 하나).
+  전부 컷 이상인 근접 keep 뷰는 킬 스위치 `FLOE_RUST_SHAPE_CUT=off`와 바이트 동일하고 프레임이 컷을
+  보고한다. 넓은 keep 뷰(배열 2.6 px, 배선 1.3 px, 컷 3 px)는 켜진 픽셀이 전부 큰 사각형 안이고
+  (킬 스위치는 배열·배선을 그대로 켠다) 큰 사각형 자체는 같다. 배선만 있는 레이어는 빈 프레임이고
+  플래너가 페이지를 자른다. cull과 컷 0 프레임은 킬 스위치와 바이트 동일.
+- `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
+  검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
+  레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과
+  `mode=ordered`의 프레임이 컷·줌 4단계·keep/cull·depth 0/full·frames·labels에서 바이트 동일하고,
+  일반 `render`와도 같다. 타일 64/128/384 px와 래스터 워커 1/4/12에서도 같은 프레임이며, 두 모드가
+  write-once로 건너뛴 타일·pass·항목 수가 일치한다. 프레임 응답은 `probe_frame`이고 published
+  scene을 갱신하지 않는다(probe 뒤의 snap이 그 전 렌더의 답을 그대로 준다). 블록 크기(`block=`,
+  작업자가 한 타일에 연달아 그리는 pass 수) 2·4·1000도 같은 프레임이다. `mode=occlusion`은
+  `mode=occlusion`(위 레이어가 덮은 페이지를 읽지 않는다)도 같은 프레임이고, 불투명한 위 레이어
+  아래의 페이지를 실제로 읽지 않는다. write-once 마스크를 끄면 occlusion은 오류이고(가림을 증명할
+  수 없다) 그 뒤에도 워커가 정상 동작한다.
+- `bench_layer_decode.py`는 게이트가 아니라 측정 도구다(docs/LAYER_DECODE_PROBE_PLAN.ko.md §9).
+  폐쇄망에서 손으로 옮겨 적는 경우를 위해 마지막에 `== type this ==` 블록(한 depth당 4줄)만 찍고,
+  값이 없는 열은 머리글로 접는다.
+- `write_once`(tools/validate_write_once.py, 약 20초; `render` 별칭에 포함): write-once 타일
+  (F2R-28)의 프레임 18개가 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`와 바이트 동일한지, 밀집 뷰에서
+  타일이 차고 paint가 줄어드는지, 킬 스위치가 write-once 작업을 전혀 하지 않는지.
+- `fit_budget`(tools/validate_fit_budget.py, 약 25초; `planner`·`render` 별칭에 포함): 합성
+  MAIN01 칩의 keep + cut 1 px 광역뷰가 48 MB 예산에서 오류 대신 낮춘 밀도(`fit_thin` > 0)로
+  그려지고 **빈 프레임이 아닌지**, `FLOE_RUST_FIT_THIN=off`는 컷을 올리고(`fit_pct` > 100)
+  `FLOE_RUST_FIT_BUDGET=off`는 종전 오류인지, 예산 안의 프레임은 픽셀이 바뀌지 않는지.
 - `representatives`(tools/validate_representatives.py, 약 10초; `render`·`indexer`
   별칭에 포함): design.ovr 추가 생성이 캐시를 보존하는지, depth 0 제외·kill switch·
   손상 파일 폴백, 그리고 결합 인덱스 실행에서 OVR 생성이 실패해도(`--kill-at
   representatives-fail`, 게이트 전용 모의 실패) design.ovm·마커가 완성되고 캐시가
   열리는지, `--representatives-only`의 같은 실패는 exit 1이며 캐시를 건드리지 않는지.
+  OVR2의 형상 길이·회전·실제 경계와 revision 3의 두 군집 병합/빈 공간 보존,
+  direct 대비 픽셀 오차·확대 정제·조회 묶음 제한 시 최종 픽셀 및 2회 래스터,
+  비닝/비비닝 일치도 검사한다. 기하 오차 상한·공간/depth 프루닝·블록 checksum·
+  취소는 `unit_vfs`, 스타일별 hairline 행 구간 병합은 `unit_render`가 담당한다.
 - 마지막 줄은 같은 `RUST VALIDATION: ALL OK`이고 `--only`면 돌린 게이트 목록이
   붙는다. 커밋 규칙: 반복 커밋은 바꾼 영역의 별칭 통과, 실칩용 푸시는 전체 배터리.
 

@@ -143,12 +143,37 @@ impl DecodedPageCache {
         self.load_impl(source, page_ids, workers, Some((generation, cancellation)))
     }
 
+    /// `load_cancellable` on a pool whose workers outlive the batch
+    /// (`Cache::with_decode_pool`): the same pages, without building a worker
+    /// set for every block a layer-ordered frame reads.
+    pub fn load_pooled(
+        &mut self,
+        pool: &crate::cache::DecodePool<'_>,
+        page_ids: &[u32],
+    ) -> Result<(Vec<Arc<DecodedPage>>, RenderStats), String> {
+        self.load_from(page_ids, None, |missing| pool.decode_pages(missing))
+    }
+
     fn load_impl(
         &mut self,
         source: &Cache,
         page_ids: &[u32],
         workers: u16,
         guard: Option<(u64, &crate::RenderCancellation)>,
+    ) -> Result<(Vec<Arc<DecodedPage>>, RenderStats), String> {
+        self.load_from(page_ids, guard, |missing| match guard {
+            Some((generation, cancellation)) => {
+                source.decode_pages_cancellable(missing, workers, generation, cancellation)
+            }
+            None => source.decode_pages_parallel(missing, workers),
+        })
+    }
+
+    fn load_from(
+        &mut self,
+        page_ids: &[u32],
+        guard: Option<(u64, &crate::RenderCancellation)>,
+        decode: impl FnOnce(&[u32]) -> Result<(Vec<DecodedPage>, RenderStats), String>,
     ) -> Result<(Vec<Arc<DecodedPage>>, RenderStats), String> {
         let mut resolved: HashMap<u32, Arc<DecodedPage>> = HashMap::new();
         let mut missing = Vec::new();
@@ -165,12 +190,7 @@ impl DecodedPageCache {
         }
 
         let evictions_before = self.evictions;
-        let (decoded, mut stats) = match guard {
-            Some((generation, cancellation)) => {
-                source.decode_pages_cancellable(&missing, workers, generation, cancellation)?
-            }
-            None => source.decode_pages_parallel(&missing, workers)?,
-        };
+        let (decoded, mut stats) = decode(&missing)?;
         for page in decoded {
             check_load_cancelled(guard)?;
             let page = Arc::new(page);

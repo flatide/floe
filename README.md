@@ -163,7 +163,10 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   --occupancy`. 확인은 `floe-index occupancy .<src>.ice`. 마킹은 `--jobs`
   스레드가 작업량 기준 unit으로 나눠 맡는다(레코드의 거대 반복도 멤버 범위로,
   2026-09-16); `--occupancy-balance 0`은 옛 개수 기준 분할로 되돌리는 킬
-  스위치이고 파일은 어느 쪽이든 바이트 동일하다. 형식·규칙은
+  스위치이고 파일은 어느 쪽이든 바이트 동일하다. 2026-09-18부터 기본 생성은 격자
+  셀 하나에 들어가는 배치 서브트리를 그 bbox로 마킹하고(조밀 Grid는 풋프린트 한 번)
+  그 아래로 내려가지 않는다 — 정확 마킹의 1셀 이내 상위집합이며 인스턴스 수에 묶이지
+  않는다. `--occupancy-prune 0`이 정확 경로다. 형식·규칙은
   docs/OCCUPANCY_PLAN.ko.md, 뷰어 적용은 M2~M5(완료).
 
 ### Jobdeck (Calibre MDPView `.jb`)
@@ -417,10 +420,42 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   새 색인은 `--representatives`. 페이지 frontier를 켜지 않고 원본 페이지 추가
   디코드 없이 그린다. `FLOE_RUST_REPRESENTATIVES=off`로 끈다.
   유한 샘플이므로 확대 시 밀도 및 긴 선의 길이는 근사이며, 상세 조건과 상한은
-  [대표 점 파일](docs/REPRESENTATIVES.ko.md)을 참고한다.
-- **점유 요약**(`thin:keep`의 광역뷰, 2026-09-11, docs/OCCUPANCY_PLAN.ko.md):
-  캐시에 `design.ovo`(`floe2 index --occupancy-only`)가 있고 요청이 keep·
-  exact 아님이며 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지
+  [대표 점 파일](docs/REPRESENTATIVES.ko.md)을 참고한다. `--representatives-format 2`
+  (OVR2, 0.12.161)는 같은 샘플을 실제 사각형·경계 선분으로 저장하고 사전 병합
+  공간 트리를 만든다. 화면 오차 0.5 px 이내인 병합 표현을 쓰며 확대하면 자식
+  형상으로 내려간다. 전역 개수에 따른 추가 솎기를 제거하고 겹친 hairline 행 구간을
+  합쳐 그린다. 1단계 파일은 같은 명령으로 재생성해야 하며, 실칩 성능은 측정 전이다.
+- **write-once 타일**(0.12.165, docs/FLOE2_OPTIMIZATION.ko.md F2R-28): 래스터가 plane을 역순으로
+  그리며 픽셀을 한 번만 쓰고, 이미 다 쓰인 타일·영역에 닿을 뿐인 작업은 건너뛴다. 그림은 바이트
+  동일. 레이어가 많이 겹치는 광역뷰의 덧칠(합성 MAIN01에서 픽셀당 300회)을 없앤다. 상태줄
+  `once T tiles/P passes/I items`, 킬 스위치 `FLOE_RUST_WRITE_ONCE=off`.
+- **인덱스 v8**(0.12.170): 배치 BVH 노드에 레이어 마스크가 들어갔다. 이전 캐시는 열리지 않으므로
+  `floe2 index <src> --force`로 다시 만든다. 레이어 몇 개만 켠 뷰에서 보이는 레이어가 없는
+  서브트리를 노드째 건너뛰고, sub-cut 박스가 배치를 읽지 않고 레이어를 안다.
+- **도형 단위 컷**(0.12.173, docs/SPEC-PLANNER.ko.md §3): `thin keep`에서 컷이 도형마다 **작은 변**을
+  본다 — 페이지의 큰 도형 때문에 작은 도형이 남지 않고, 한 변만 긴 가는 도형도 컷 아래면 빠진다.
+  빠진 것의 밀도 표현은 다음 단계(F2R-30). 상태줄 `cut<…um (min side)`, 킬 스위치
+  `FLOE_RUST_SHAPE_CUT=off`.
+- **sub-cut 박스**(0.12.168, docs/SPEC-PLANNER.ko.md §3): `thin keep`이고 보이는 레이어가 16개
+  (0.12.171; 그 전에는 4개) 이하이면, 크기 컷이 버리던 것을 인덱스 메타만으로 그린 4 px 이하 박스로 남긴다(디코드 없음).
+  작은 도형의 레이어 하나만 켠 광역뷰가 빈 화면이던 문제의 수정. 상태줄 `boxes N`.
+  **0.12.182부터 기본 꺼짐**(`FLOE_RUST_SUB_CUT_BOX=on`으로 켬): 보이는 레이어가 적은 넓은 뷰에서
+  박스 계획이 수십 초 걸렸고, 컷 아래는 밀도 표현으로 대체한다.
+- **예산에 맞춘 밀도**(0.12.166, docs/SPEC-PLANNER.ko.md §3): 디코드 예산을 넘는 뷰는 컷을 올리는
+  대신 밀도를 낮춘다 — 크기 등급이 큰 것부터 완전하게 남기고, 예산이 끝나는 등급은 고르게
+  솎는다. 뷰를 좁히거나 예산을 늘려도 화면 안의 페이지는 빠지지 않는다(0.12.169). 컷을 올리면 한 크기대가 통째로 빠져 합성 MAIN01의 광역뷰가 빈 화면이 되던 문제의
+  수정. 상태줄 `cut<…um 1/M below xF, none below xG to fit budget`, 킬 스위치 `FLOE_RUST_FIT_THIN=off`(아래의
+  컷 사다리로 복귀).
+- **예산에 맞춘 컷**(0.12.162; 0.12.166부터 `FLOE_RUST_FIT_THIN=off`일 때만): 선택한 페이지가 디코드 예산(기본 1024 MB)을 넘을 뷰는
+  오류("decoded generation budget exceeded") 대신 예산에 맞는 가장 세밀한 컷(요청 컷 ×
+  2^(k/4)와 표준 detail 컷 1·3·5 px 중)으로 밀도를 낮춰 그린다. detail high가 medium보다
+  거칠게 끝나는 일은 없다. keep 요청이 그래도 안 맞으면 hairline을 버린다. 상태줄의 컷 옆에 `cut<…um xN to fit
+  budget`, 킬 스위치 `FLOE_RUST_FIT_BUDGET=off`. `thin keep` + detail high가 Calibre에 가장
+  가까운 조합이다(docs/SPEC-PLANNER.ko.md §3).
+- **점유 요약**(광역뷰, 2026-09-11; keep 전용이었다가 2026-09-18부터 cull도,
+  docs/OCCUPANCY_PLAN.ko.md): 캐시에 `design.ovo`(`floe2 index --occupancy`)가
+  있고 요청이 exact 아님이며(킬 스위치 `FLOE_RUST_OCCUPANCY_CULL=off`는 keep
+  전용으로 복귀) 기준 셀이 화면 1 px 이하이면, 그 레이어는 페이지
   대신 셀 ≤ 1 px인 피라미드 레벨의 점유 마스크로 그려진다(셀 중심이 놓인
   픽셀; 경계 solid, 내부 채움). depth는 무엇이든 된다(2026-09-16 M6: 요약은
   배치 깊이별 비트 평면이라 요청 depth 이하의 평면만 그린다; 2026-09-16 이전
@@ -432,8 +467,9 @@ floe는 이미지 뷰어 flateyes의 OASIS 버전으로, 인스턴스 모델을 
   `FLOE_RUST_OCCUPANCY_PX=0.5`로 더 가는 레벨). 실칩 없이 재 보려면
   `tools/gen_maskchip.py OUT.oas --jb`(실측 수치를 재현한 35.8 × 34.6 mm 합성
   마스크, docs/OCCUPANCY_PLAN.ko.md §12 "M5 준비"). 상태줄 `summary N layers C cells (level k, x um; not pickable)` —
-  이 뷰에서 pick/snap은 그 레이어를 보지 못한다. keep인데 요약이 없으면
-  `summary: none (nofile|invalid|near|off|depth|layers)`. 덱은 pass마다
+  이 뷰에서 pick/snap은 그 레이어를 보지 못한다. 요약이 없으면
+  `summary: none (nofile|invalid|near|off|depth|layers)`; cull의 near(셀 > 1 px)는
+  종전대로 컷 아래 페이지를 버린다. 덱은 pass마다
   소스 뷰에서 같은 판정을 하며 상태줄 `summary P passes C cells (not
   pickable)`·`N passes without summary`. 킬 스위치 `FLOE_RUST_OCCUPANCY=off`.
   일반 레이아웃(`thin:cull`)은 변화 없음.

@@ -2834,12 +2834,20 @@ class ThinPageTests(unittest.TestCase):
         # occupancy summary (the index default since 2026-09-15) would
         # draw the wide views instead, so it is switched off here
         os.environ["FLOE_RUST_OCCUPANCY"] = "off"
+        # the mask policy these checks pin is "keep draws every thin
+        # shape". Since 0.12.173 a PLAIN layout's keep cuts every shape
+        # by its smaller side (tools/validate_shape_cut.py); the deck
+        # path does not, and FLOE_RUST_SHAPE_CUT=off is the mask policy
+        # for a source opened on its own - what this class renders with
+        cls.env["FLOE_RUST_SHAPE_CUT"] = "off"
+        os.environ["FLOE_RUST_SHAPE_CUT"] = "off"
         for name in ("thin.oas", "thinmix.oas", "thin.jb"):
             run_floe2("index", CLI / name, "--jobs", "2", env=cls.env, ok=0)
 
     @classmethod
     def tearDownClass(cls):
         os.environ.pop("FLOE_RUST_OCCUPANCY", None)
+        os.environ.pop("FLOE_RUST_SHAPE_CUT", None)
 
     def _rgb(self, src, detail, env=None, thin=None):
         from PIL import Image

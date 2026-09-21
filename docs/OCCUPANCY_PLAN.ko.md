@@ -6,11 +6,13 @@
 
 ## 0. 한 줄 요약
 
-마스크 정책(`thin=keep`)의 광역뷰에서는 페이지 디코드·raster 대신 **소스·레이어별
+광역뷰(keep, 그리고 2026-09-18부터 cull도)에서는 페이지 디코드·raster 대신 **소스·레이어별
 점유 비트맵 피라미드**(셀 ≤ 화면 1 px인 레벨)를 화면 마스크로 투영해 그린다.
-점유는 색인 시 **도형 교차**로 만든다(bbox 대체 없음). 근접뷰·exact는 지금처럼
+점유는 색인 시 **도형 교차**로 만든다. bbox 대체는 없되, 2026-09-18부터 기본 생성은
+격자 셀 하나에 들어가는 배치 서브트리만 그 bbox로 마킹한다(`--occupancy-prune`, §12;
+정확 경로는 `--occupancy-prune 0`). 근접뷰·exact는 지금처럼
 exact keep. 제한 depth는 2026-09-16(M6)부터 배치 깊이별 비트 평면으로 요약한다.
-일반 레이아웃 정책(`thin=cull`)은 바꾸지 않는다.
+cull의 근접뷰(셀 > 1 px)는 종전대로 컷 아래 페이지를 버린다(§12 2026-09-18).
 
 ## 1. 왜 (실측)
 
@@ -891,3 +893,83 @@ jobs 1/4/`--occupancy-balance 0` 파일 동일, `floe2 index --occupancy-balance
 생성한다. occupancy 마킹과 별개이며, 일반 cull 플랜의 페이지 선택을 늘리지 않는다.
 정확한 점유 요약의 대체물이 아니고 덱/keep 정책도 바꾸지 않는다.
 생성 비용, 확대 시 밀도 한계와 사용법은 [REPRESENTATIVES](REPRESENTATIVES.ko.md) 참조.
+
+### 2026-09-18 — cull에서도 요약 (0.12.157, 사용자 결정 "thin cull + occupancy")
+
+실칩 MAIN01: OVR1 점 표본은 fit 밀도가 너무 낮고(전 파일 4,194,304점을 top 그룹
+2,146개가 나눔), keep은 셀 > 1 px가 되는 순간 헤어라인 페이지를 전부 그려 인스턴스
+수에 묶여 느리다(summary.rs의 다섯 조건 중 "keep 정책"과 "레벨 0 셀 ≤ 1 px"). 헤어라인
+전수 그리기는 일반 레이아웃에 불필요하므로 요약을 cull에서도 쓴다.
+
+- render-core `Cache::summary_selection`의 정책 조건이 `policy_allows`가 된다: keep,
+  또는 cull(킬 스위치 `FLOE_RUST_OCCUPANCY_CULL=off`면 종전 keep 전용, 사유 `policy`).
+  나머지 네 조건(exact 아님, 유효한 design.ovo, 셀 ≤ 1 px, depth 평면)은 그대로.
+- cull에서 요약이 켜진 레이어는 keep과 같은 평면을 그리고 페이지 플랜에서 빠진다.
+  셀 > 1 px(near)부터는 cull의 페이지 경로로 돌아가 컷 아래 페이지를 버린다. 즉
+  헤어라인 레이어는 "조밀한 요약 → 빈 화면 → cut/2 이상에서 도형"이 되며, 그 빈
+  대역(MAIN01 4 µm 셀·cut 3 px이면 약 6옥타브)은 별도 결정이다: 셀 상한을 2–4 px로
+  푸는 진단(`FLOE_RUST_OCCUPANCY_PX`의 ≤ 1.0 제한 완화), OVR2 Primitive, 인계 앞당김.
+- GUI 상태줄의 `summary: none (<사유>)`는 cull에서도 표시한다.
+- 게이트 `validate_occupancy RenderTests`: cull 광역뷰 = keep 요약 픽셀, 킬 스위치 =
+  종전 cull 페이지 경로, near = cull 페이지 경로, exact 불변.
+- 안 바뀐 것: 덱의 keep 기본, 근접뷰·exact, 생성(`--occupancy`는 레이아웃 opt-in).
+
+### 2026-09-18 — 셀 크기에서 멈추는 생성 (`--occupancy-prune`, 0.12.159)
+
+MAIN01(배치 6.4억 + 배열 1.6억 레코드, 깊이 15)은 요약 생성이 시간 단위였다. 정확
+경로는 계층을 top 공간으로 펼쳐 **인스턴스마다 자식 도형을 전부 charge**하므로 비용이
+평탄화 멤버 수에 비례한다. 사용자 결정: 뷰어 비교에 .ovo가 필요하므로 생성을 가속한다.
+
+- 규칙(기본 on): 배치된 셀의 재귀 bbox가 격자 셀 하나에 들어가면(두 변 ≤ 셀) 그 셀에서
+  내려가지 않고 bbox(최대 2 × 2 셀)를 마킹한다. 평면은 그 레이어가 서브트리 안에서
+  도형을 갖는 상대 깊이마다 정확히 고른다(레이어별 셀당 상대 깊이 비트마스크). 그런 셀의
+  축 정렬 Grid 배치가 pitch ≤ 셀이면 첫·마지막 멤버 bbox의 합집합(풋프린트)을 한 번에
+  채운다(모든 격자 셀이 멤버 bbox와 만나므로 멤버별 마킹과 같은 결과). pitch가 더 크거나
+  Pts면 멤버마다 bbox 하나다.
+- 계약: 레이어·깊이 평면마다 `exact ⊆ pruned ⊆ dilate(exact, 1셀)`, 평면 집합 동일,
+  `--jobs`·`--occupancy-balance`와 무관하게 바이트 동일. 요약 화면의 오차 계약은 셀 ≤
+  1 px에서 1 px가 더해진다(요약 픽셀이 exact에서 최대 2 px).
+- 비용: 셀보다 작은 인스턴스는 도형 수와 무관하게 마크 1–4개 × 깊이 평면 수, 조밀
+  배열은 채움 1회. unit 가중치도 같은 가정으로 계산해 분할이 어긋나지 않는다. work
+  예산(`none:work`)은 실제 마크 수로 줄어든다.
+- 정확 경로는 `--occupancy-prune 0`(floe-index, floe2 index 공통)로 남고 오라클 게이트가
+  쓴다. 게이트 `validate_occupancy PruneContractTests`(회전·반사 단일 배치, 조밀/성긴
+  Grid, 큰 셀 안의 작은 셀, 깊이 평면, work 감소, jobs·split 무관 바이트 동일).
+- 진행 로그 `grouped records …; prune on (N of M cells fit a C dbu cell)`.
+- 실칩 계측 대기: MAIN09(기준 231.9 s @1 µm, ae8e311 이전)와 MAIN01의 생성 시간·파일
+  크기, 그리고 exact 대비 초과 셀 비율.
+
+### 2026-09-18 — 일반 레이아웃의 요약은 보류 (사용자 결정)
+
+occupancy는 정밀할수록 용량이 커진다: 셀을 절반으로 줄이면 파일과 마킹량이 약 4배이고
+(MAIN09 1 µm에서 698 MB), MAIN01급 칩에서 400 % 이상까지 덮으려면 수 GB가 된다. 그래도
+셀 > 1 px부터 cut/2 인계까지의 빈 대역은 남는다. 그래서 레이아웃의 광역뷰를 요약으로
+해결하는 방향은 보류한다.
+
+- 코드는 그대로 둔다. 레이아웃은 `--occupancy`를 줄 때만 design.ovo를 만들고(기본 off),
+  파일이 없으면 cull 요약 경로는 `summary: none (nofile)`로 꺼져 종전 cull과 같다. prune
+  생성(0.12.159), cull에서의 요약(0.12.157), 빈 타일 건너뛰기(0.12.158)는 덱과 요약을
+  직접 만든 레이아웃에 계속 적용된다. 킬 스위치는 `FLOE_RUST_OCCUPANCY=off`,
+  `FLOE_RUST_OCCUPANCY_CULL=off`, `--occupancy-prune 0`.
+- MAIN01의 prune 생성 실측은 하지 않았다(미계측으로 남김).
+- 레이아웃 광역·중간 줌의 다음 방향은 크기 있는 대표 형상이다
+  ([OVR2 설계안](OVR2_DESIGN.ko.md), 구현 전).
+
+실측 MAIN09 thin:cull, 337 레이어 전부 표시 (사용자, 2026-09-18, eb7268a):
+
+| 뷰 | 프레임 | load + draw | 요약 |
+|---|---:|---:|---|
+| fit | 70 ms | 0 + 2 ms | 337 layers, 0 cells |
+| 200 % | 950 ms | 0 + 804 ms | 337 layers, 183.5 M cells |
+| 400 % | 173 ms | 13 + 132 ms | none (near) → cull 페이지 경로 |
+
+- 400 %부터 셀 > 1 px라 예상대로 페이지 경로로 돌아가고, 헤어라인 레이어는 컷 아래라
+  비어 있다(빈 대역, 위 선택지).
+- 200 %의 804 ms는 `paint_summary_plane`의 구조 비용이었다: 레이어마다 타일 전체
+  마스크를 할당·0 초기화하고 모든 픽셀을 훑었다(2048² px × 337 레이어 ≈ 1.4 G 픽셀
+  방문 + 타일 × 레이어 수만큼의 할당). 0.12.158: 타일에 켜진 셀이 없는 레이어는 셀
+  스캔만 하고 끝내며, 마스크는 켜진 픽셀이 있을 때만 만들고 켜진 픽셀이 있는 행만
+  칠한다(픽셀 동일). 밀집 레이어의 비용은 그대로이므로 실측으로 다시 잰다.
+- fit의 "0 cells"는 미해결이다. 337 레이어가 선택됐는데 셀이 하나도 투영되지 않았다는
+  뜻이라, 재사용 프레임(`frame_cache_hit`)이거나 depth 제한 요청일 수 있다. perf 라인의
+  `frame_cache_hit`, `summary_level`, `summary_cell_um`, depth로 확인한다.

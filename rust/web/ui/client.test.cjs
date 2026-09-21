@@ -538,21 +538,38 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         assert.equal(node('index-occupancy').checked,false,'layout default is off');
         assert.equal(node('index-representatives').checked,false,'representatives are opt-in');
         assert.equal(node('index-representatives').disabled,false);
-        node('index-representatives').checked=true;
+        assert.equal(node('index-representatives-format').disabled,true);
+        assert.equal(node('index-occupancy-prune').disabled,true);
+        node('index-representatives').checked=true;node('index-representatives').onchange();
+        assert.equal(node('index-representatives-format').disabled,false);
+        node('index-representatives-format').value='2';
+        node('index-occupancy-prune').value='0';
         const count=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations').length,before=count();
         node('index-occupancy').checked=true;node('source').onchange();
         assert.equal(node('index-occupancy').checked,true,'same source preserves explicit choice');
         assert.equal(node('index-representatives').checked,true);
+        assert.equal(node('index-representatives-format').value,'2');
+        assert.equal(node('index-occupancy-prune').value,'0');
+        assert.equal(node('index-occupancy-prune').disabled,false);
         node('source').value='deck';node('source').onchange();
         assert.equal(node('index-occupancy').checked,true,'new deck default is on');
         assert.equal(node('index-representatives').checked,false);
         assert.equal(node('index-representatives').disabled,true);
+        assert.equal(node('index-representatives-format').disabled,true);
+        assert.equal(node('index-representatives-format').value,'');
+        assert.equal(node('index-occupancy-prune').value,'');
         node('index-occupancy').checked=false;node('source').onchange();
         assert.equal(node('index-occupancy').checked,false,'same deck preserves explicit opt-out');
         node('source').value='src';node('source').onchange();
         assert.equal(node('index-occupancy').checked,false,'new layout selection resets the default');
         assert.equal(node('index-representatives').disabled,false);
         assert.equal(count(),before,'choosing index defaults never submits a write');
+        node('index-representatives').checked=true;node('index-representatives').onchange();node('index-representatives-format').value='2';
+        node('index-occupancy').checked=true;node('index-occupancy').onchange();node('index-occupancy-prune').value='0';
+        node('index').onclick();await wait(()=>count()===before+1);
+        const options=requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations').at(-1).body.options;
+        assert.equal(options.representatives_format,2);assert.equal(options.occupancy_prune,0);
+        assert.equal(options.representatives,true);assert.equal(options.occupancy,true);
         listeners.pagehide();console.log('WEB INDEX DEFAULTS: ALL OK (source-aware defaults, explicit choices, no implicit write)');return;
     }
     if(workerFailure){
@@ -619,6 +636,13 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         ws.receive(packet('raw','7','1',epoch,{approximate:true,perf:{stored_rep_points:'21',stored_rep_tested:'100',stored_rep_limited:'1'}}));
         assert.match(node('status').textContent,/Live · approximate/);
         assert.match(node('perf').textContent,/stored reps 21\/tested 100 \(capped\)/);
+        ws.receive(packet('raw','8','1',epoch,{approximate:true,perf:{fit_pct:'100',fit_thin:'2',fit_full_pct:'400',fit_none_pct:'100',shape_cut:'10',
+            wall_us:'300000',queue_us:'20000',text_plan_us:'1200',once_tiles:'2',once_items:'7',stored_rep_nodes:'15',stored_rep_proxies:'3',stored_rep_bytes:'400'}}));
+        assert.match(node('status').textContent,/Live · approximate · budget fit · short-side cut/);
+        assert.match(node('perf').textContent,/native wall 300.0 ms\/queue 20.0 ms\/text 1.2 ms/);
+        assert.match(node('perf').textContent,/boundary class 1\/2\^2, full ≥×4.00, omitted <×1.00/);
+        assert.match(node('perf').textContent,/write-once 2 tiles\/0 passes\/7 items skipped/);
+        assert.match(node('perf').textContent,/OVR tree 15 nodes\/3 proxies\/400 bytes/);
         listeners.pagehide();
         console.log('WEB FRAME STATUS: ALL OK (intermediate/final/incomplete, u64 round, stale discard, margin timing isolation)');return;
     }

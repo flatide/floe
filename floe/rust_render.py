@@ -382,7 +382,9 @@ class RustRenderWorker:
             return
         kind = job.get("kind")
         try:
-            if kind == "render":
+            if kind == "render_probe":
+                self._submit_probe(job)
+            elif kind == "render":
                 self._submit_render(job)
             elif kind == "recolor":
                 self._submit_recolor(job)
@@ -445,7 +447,11 @@ class RustRenderWorker:
             shutil.rmtree(self._work_dir, ignore_errors=True)
 
     def _wait_for(self, predicate, phase):
-        timeout = self._open_timeout_s if phase == "open" else 10.0
+        # the ready handshake is a process launch: macOS scans a freshly
+        # written executable on its first launch (the About-probe root
+        # cause, 2026-09-17: seconds, and a launch killed mid-scan does
+        # not warm it), so the ready phase waits 30 s like the probe
+        timeout = self._open_timeout_s if phase == "open" else 30.0
         deadline = time.monotonic() + timeout
         with self._condition:
             while not predicate():
@@ -469,7 +475,22 @@ class RustRenderWorker:
         if self.debug:
             print("[rust-render] > " + command, file=sys.stderr, flush=True)
 
-    def _submit_render(self, job):
+    def _submit_probe(self, job):
+        """docs/LAYER_DECODE_PROBE_PLAN.ko.md: the diagnostic
+        `render_probe` command. Same request as a render, painted the
+        way `mode` asks; the answer is a `probe_frame`, never a frame,
+        and no published scene or retained frame comes of it. Only
+        tools/bench_layer_decode.py and the gate send it."""
+        mode = str(job.get("mode") or "baseline")
+        if mode not in ("baseline", "ordered", "occlusion"):
+            raise ValueError("probe mode must be baseline, ordered or "
+                             "occlusion: %s" % mode)
+        block = int(job.get("block") or 1)
+        if block < 1:
+            raise ValueError("probe block must be positive: %d" % block)
+        self._submit_render(job, probe=mode, block=block)
+
+    def _submit_render(self, job, probe=None, block=1):
         if job.get("abstract"):
             raise RuntimeError(
                 "abstract mode is intentionally unsupported by the Rust "
@@ -531,16 +552,19 @@ class RustRenderWorker:
             "member_paints": 0,
             "rep_tested": 0, "rep_drawn": 0,
             "hier_cells": 0, "subtree_prunes": 0,
+            # F2R-28 write-once tiles (sum over rounds)
+            "once_tiles": 0, "once_passes": 0, "once_items": 0,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
         command = (
-            "render gen=%d view=%s w=%d h=%d depth=%s cut=%s exact=0 "
+            "%s gen=%d view=%s w=%d h=%d depth=%s cut=%s exact=0 "
             "layers=%s frames=%s labels=%s font_px=%d mono=%s "
             "frame_cache=%s "
             "jobs=%d decode_jobs=%d tile_px=%d "
             "round_pages=%d round_paths=1 frame_format=%s "
             "thin=%s style_epoch=%d out=%s" % (
+                "render" if probe is None else "render_probe",
                 generation, ",".join(repr(value) for value in bbox),
                 int(job["w"]), int(job["h"]), depth,
                 repr(max(0.0, float(job.get("cut_px") or 0.0))), layers,
@@ -553,6 +577,8 @@ class RustRenderWorker:
                 self._round_pages,
                 "raw" if raw else "png",
                 thin, self._style_epoch, output))
+        if probe is not None:
+            command += " probe=%s block=%d" % (probe, block)
         self._send(command)
 
     def _submit_recolor(self, job):
@@ -774,6 +800,8 @@ class RustRenderWorker:
                     pass
         elif kind == "frame":
             self._emit_frame(fields)
+        elif kind == "probe_frame":
+            self._emit_frame(fields, probe=True)
         elif kind == "snap":
             self._emit_snap(fields)
         elif kind == "pick":
@@ -906,13 +934,13 @@ class RustRenderWorker:
             except OSError:
                 pass
 
-    def _emit_frame(self, fields):
+    def _emit_frame(self, fields, probe=False):
         generation = _wire_int(fields, "gen", -1)
         with self._jobs_lock:
             state = self._jobs.get(generation)
         if state is None:
             return
-        path = fields.get("png")
+        path = fields.get("out") if probe else fields.get("png")
         frame_format = fields.get("format", "png")
         read_started = time.monotonic()
         try:
@@ -957,7 +985,8 @@ class RustRenderWorker:
                     pass
         adapter_read_us = round((time.monotonic() - read_started) * 1e6)
 
-        final = _wire_int(fields, "final") != 0
+        # a probe answers once, with the finished frame
+        final = probe or _wire_int(fields, "final") != 0
         if not final:
             # `partial=1 deferred=0` is still a progressive round. The wire's
             # final bit, not deferred's truthiness, decides settled state.
@@ -1005,6 +1034,8 @@ class RustRenderWorker:
         state["rep_drawn"] += _wire_int(fields, "rep_drawn")
         state["hier_cells"] += _wire_int(fields, "hier_cells")
         state["subtree_prunes"] += _wire_int(fields, "subtree_prunes")
+        for key in ("once_tiles", "once_passes", "once_items"):
+            state[key] += _wire_int(fields, key)
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1020,8 +1051,33 @@ class RustRenderWorker:
             state["decode_workers"], _wire_int(fields, "decode_workers"))
         job = state["job"]
         deferred = _wire_int(fields, "deferred")
+        # where the time went that no phase timer covers (2026-09-21: the
+        # field's status line showed 15.5 s of 23 s in no phase, and wait was
+        # a constant 0). renderd reports how long the command waited behind
+        # earlier ones (queue_us) and its own wall time up to this frame
+        # (wall_us); wait is what the client waited beyond that wall - the
+        # queue and the pipe - and other is the wall no phase accounts for.
+        # A renderd without the fields (or a deck frame) answers 0: unknown.
+        state["queue_us"] = _wire_int(fields, "queue_us")
+        state["wall_us"] = _wire_int(fields, "wall_us")
+        state["text_plan_us"] = _wire_int(fields, "text_plan_us")
+        elapsed_ms = (time.monotonic() - state["started"]) * 1000.0
+        wall_ms = state["wall_us"] / 1000.0
+        wait_ms = other_ms = 0
+        if wall_ms > 0:
+            wait_ms = max(0, round(elapsed_ms - wall_ms -
+                                   state["adapter_read_us"] / 1000.0))
+            if not probe:
+                phases_us = (state["plan_us"] + state["text_plan_us"] +
+                             state["read_us"] + state["decode_us"] +
+                             state["scene_us"] + state["draw_us"] +
+                             state["png_us"] + state["publish_write_us"] +
+                             state["publish_sync_us"] +
+                             state["publish_rename_us"])
+                other_ms = max(0, round(wall_ms - phases_us / 1000.0))
         output = {
-            "kind": "frame", "frame_format": frame_format,
+            "kind": "probe_frame" if probe else "frame",
+            "frame_format": frame_format,
             "bbox": job["bbox"],
             "gen": generation, "tiles": _wire_int(
                 fields, "plan_pages",
@@ -1067,8 +1123,11 @@ class RustRenderWorker:
             "tile_px": _wire_int(fields, "tile_px"),
             "frame_width": int(job.get("w", 0)),
             "frame_height": int(job.get("h", 0)),
-            "wait_ms": 0,
-            "ms": round((time.monotonic() - state["started"]) * 1000),
+            "wait_ms": wait_ms,
+            "queue_ms": state["queue_us"] / 1000.0,
+            "wall_ms": wall_ms,
+            "other_ms": other_ms,
+            "ms": round(elapsed_ms),
             "plan_ms": state["plan_us"] / 1000.0,
             "wc_cells": _wire_int(fields, "wc_cells"),
             "inst_edges": _wire_int(fields, "inst_edges"),
@@ -1108,9 +1167,36 @@ class RustRenderWorker:
                 "rep_page_level": _wire_int(fields, "rep_page_level"),
                 # the frame's level: one cut item in 2^L (the item budget)
                 "rep_level": _wire_int(fields, "rep_level"),
+                # budget-fitted cut: the cut the planner fitted the frame to,
+                # in percent of the requested one (0 = as asked), and whether
+                # it culled a keep request's hairlines to fit (fit_cull)
+                "fit_pct": _wire_int(fields, "fit_pct"),
+                "fit_cull": _wire_int(fields, "fit_cull"),
+                "fit_over": _wire_int(fields, "fit_over"),
+                # budget-fitted density: pages below the complete tier kept one
+                # in 2^fit_thin (255 = only the largest pages kept); the tier
+                # starts at fit_full_pct percent of the requested cut
+                "fit_thin": _wire_int(fields, "fit_thin"),
+                "fit_full_pct": _wire_int(fields, "fit_full_pct"),
+                "fit_none_pct": _wire_int(fields, "fit_none_pct"),
+                # sub-cut boxes (thin keep, few layers): what the size cut drops
+                # drawn as boxes from index metadata; boxes beyond the plan cap
+                "sub_cut_boxes": _wire_int(fields, "sub_cut_boxes"),
+                "sub_cut_box_over": _wire_int(fields, "sub_cut_box_over"),
+                "sub_cut_box_level": _wire_int(fields, "sub_cut_box_level"),
+                "sub_cut_box_unsure": _wire_int(fields, "sub_cut_box_unsure"),
+                # the per-shape cut (thin keep): every shape is judged by its
+                # smaller side, dbu; 0 = the cut judges pages by their largest shape
+                "shape_cut": _wire_int(fields, "shape_cut"),
                 "stored_rep_points": _wire_int(fields, "stored_rep_points"),
                 "stored_rep_tested": _wire_int(fields, "stored_rep_tested"),
                 "stored_rep_limited": _wire_int(fields, "stored_rep_limited"),
+                "stored_rep_nodes": _wire_int(fields, "stored_rep_nodes"),
+                "stored_rep_proxies": _wire_int(fields, "stored_rep_proxies"),
+                "stored_rep_bytes": _wire_int(fields, "stored_rep_bytes"),
+                "stored_rep_pixels": _wire_int(fields, "stored_rep_pixels"),
+                "stored_rep_spans": _wire_int(fields, "stored_rep_spans"),
+                "stored_rep_painted_pixels": _wire_int(fields, "stored_rep_painted_pixels"),
             },
             # occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): layers
             # drawn from design.ovo instead of their pages, the cells
@@ -1161,6 +1247,9 @@ class RustRenderWorker:
             "rep_members_drawn": state["rep_drawn"],
             "hier_cells_visited": state["hier_cells"],
             "subtrees_pruned": state["subtree_prunes"],
+            "once_full_tiles": state["once_tiles"],
+            "once_passes_skipped": state["once_passes"],
+            "once_items_skipped": state["once_items"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on
@@ -1225,6 +1314,43 @@ class RustRenderWorker:
             px_per_um = float(job["w"]) / max(
                 1e-12, span_dbu * float(self.cache.meta["dbu"]))
             output["cut_um"] = round(cut_px / px_per_um, 3)
+        if probe:
+            # docs/LAYER_DECODE_PROBE_PLAN.ko.md §8: what the probe did
+            # beside the pixels, in the probe's own words
+            output["probe"] = {
+                "mode": fields.get("mode", ""),
+                "block": _wire_int(fields, "block"),
+                "planned_pages": _wire_int(fields, "planned_pages"),
+                "selected_pages": _wire_int(fields, "selected_pages"),
+                "requested_pages": _wire_int(fields, "requested_pages"),
+                "decoded_pages": _wire_int(fields, "decoded_pages"),
+                "cache_hits": _wire_int(fields, "cache_hits"),
+                "cache_misses": _wire_int(fields, "cache_misses"),
+                "skipped_pages": _wire_int(fields, "skipped_pages"),
+                "skipped_bytes": _wire_int(fields, "skipped_bytes"),
+                "decoded_bytes": _wire_int(fields, "decoded_bytes"),
+                "demand_candidates": _wire_int(fields, "demand_candidates"),
+                "demand_out_of_view": _wire_int(fields, "demand_out_of_view"),
+                "demand_occluded": _wire_int(fields, "demand_occluded"),
+                "demand_unsure": _wire_int(fields, "demand_unsure"),
+                "passes": _wire_int(fields, "passes"),
+                "blocks": _wire_int(fields, "blocks"),
+                "layer_passes": _wire_int(fields, "layer_passes"),
+                "decode_ms": _wire_int(fields, "decode_us") / 1000.0,
+                "read_ms": _wire_int(fields, "read_us") / 1000.0,
+                "decode_sum_ms": _wire_int(fields, "decode_sum_us") / 1000.0,
+                "demand_ms": _wire_int(fields, "demand_us") / 1000.0,
+                "pool_ms": _wire_int(fields, "pool_us") / 1000.0,
+                "scene_ms": _wire_int(fields, "scene_us") / 1000.0,
+                "prepare_ms": _wire_int(fields, "prepare_us") / 1000.0,
+                "paint_ms": _wire_int(fields, "paint_us") / 1000.0,
+                "total_ms": _wire_int(fields, "total_us") / 1000.0,
+                "raster_ms": _wire_int(fields, "raster_us") / 1000.0,
+                "once_tiles": _wire_int(fields, "once_tiles"),
+                "once_passes": _wire_int(fields, "once_passes"),
+                "once_items": _wire_int(fields, "once_items"),
+                "bin_items": _wire_int(fields, "bin_items"),
+            }
         self.res.put(output)
         if final:
             with self._jobs_lock:

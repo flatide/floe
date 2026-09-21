@@ -10,6 +10,7 @@ mod cancel;
 mod clip;
 mod deck;
 mod font;
+mod layer_decode;
 mod page_cache;
 mod page_index;
 mod png;
@@ -23,7 +24,7 @@ mod summary;
 mod transform;
 
 pub use cache::{
-    Cache, CacheInfo, CacheLayer, DecodedPage, PagePayload, PlanSummary, PlannedLabels,
+    Cache, CacheInfo, CacheLayer, DecodePool, DecodedPage, PagePayload, PlanSummary, PlannedLabels,
     PlannedView, RenderLabel,
 };
 pub use cancel::RenderCancellation;
@@ -33,6 +34,7 @@ pub use deck::{
     DeckRenderReport, DeckRenderRequest, DeckSpec,
 };
 pub use font::{validate_font_px, DEFAULT_LABEL_FONT_PX, MAX_LABEL_FONT_PX, MIN_LABEL_FONT_PX};
+pub use layer_decode::{LayerProbeReport, ProbeMode};
 pub use page_cache::DecodedPageCache;
 pub use page_index::PageIndex;
 pub use query::{
@@ -44,10 +46,16 @@ pub use raster::{
     render_geometry_styled_cancellable, render_geometry_styled_cancellable_reuse,
     render_geometry_styled_cancellable_windowed, render_geometry_styled_unbinned,
     render_geometry_styled_unbinned_cancellable, FrameReuse, GeometryRasterReport,
-    GeometryRasterRequest, LayerFill, LayerStyle, RasterViewBox, RgbaFrame,
+    GeometryRasterRequest, LayerFill, LayerRasterSession, LayerStyle, RasterViewBox, RgbaFrame,
     StyledGeometryRasterRequest, DEFAULT_TILE_SIZE, MAX_TILE_SIZE,
 };
 pub use request::{PlanRequest, ViewBox, FULL_DEPTH};
 pub use scene::FrameScene;
 pub use stats::RenderStats;
-pub use summary::{level_for as summary_level_for, SummaryPlane, SummarySelection};
+pub use summary::{
+    cull_allowed as summary_cull_allowed, level_for as summary_level_for, SummaryPlane,
+    SummarySelection,
+};
+
+pub use floe_vfs::hier::HierPlan;
+pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;

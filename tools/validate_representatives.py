@@ -5,9 +5,11 @@ Run after building floe-index and floe-renderd:
     .venv/bin/python tools/validate_representatives.py
 """
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import time
@@ -33,12 +35,18 @@ def index(src, *args, ok=True):
     return result
 
 
-def worker(src, off=False, unbinned=False):
+def worker(src, off=False, unbinned=False, direct=False, batch=None):
     os.environ['FLOE_RUST_REPRESENTATIVES'] = 'off' if off else 'on'
     # Leave unrelated diagnostic paths off, regardless of the caller's shell.
     for key in ('FLOE_RUST_PAGE_REPS', 'FLOE_RUST_SUB_CUT_WASH'):
         os.environ.pop(key, None)
     os.environ['FLOE_RUST_WORK_BIN'] = 'off' if unbinned else 'on'
+    os.environ['FLOE_RUST_REPRESENTATIVES_DIRECT'] = 'on' if direct else 'off'
+    os.environ.pop('FLOE_RUST_REPRESENTATIVES_MERGE', None)
+    if batch is None:
+        os.environ.pop('FLOE_RUST_REPRESENTATIVES_BATCH', None)
+    else:
+        os.environ['FLOE_RUST_REPRESENTATIVES_BATCH'] = str(batch)
     cache = Cache(str(src))
     cache.load()
     result = RustRenderWorker(cache)
@@ -46,14 +54,15 @@ def worker(src, off=False, unbinned=False):
     return result
 
 
-def frame(w, gen, depth=None, cut=3, px=500):
-    w.submit({'kind': 'repattern', 'fills': [((1, 0), '\n'.join(['*' * 16] * 16))],
-              'widths': [((1, 0), 1)]})
+def frame(w, gen, depth=None, cut=3, px=500, span=1_500_000., visible=((1, 0),)):
+    visible = list(visible)
+    w.submit({'kind': 'repattern', 'fills': [(k, '\n'.join(['*' * 16] * 16)) for k in visible],
+              'widths': [(k, 1) for k in visible]})
     w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless',
-              'bbox': (0., 0., 1_500_000., 1_500_000.), 'view': None,
+              'bbox': (0., 0., float(span), float(span)), 'view': None,
               'w': px, 'h': px, 'depth': depth, 'cut_px': cut,
               'lod': False, 'frames': False, 'labels': False, 'abstract': False,
-              'visible': [(1, 0)], 'frame_format': 'raw', 'thin': 'cull'})
+              'visible': visible, 'frame_format': 'raw', 'thin': 'cull'})
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
@@ -64,6 +73,146 @@ def frame(w, gen, depth=None, cut=3, px=500):
                    if any(data[i * 4:i * 4 + 3])}
             return lit, res
     raise AssertionError('representative frame timeout')
+
+
+def ovr2_section(temp):
+    """OVR2 step 1 (docs/OVR2_DESIGN.ko.md): the same samples stored as
+    shapes. A sub-cut hairline keeps its projected length (4, 3, 2, 1 px as
+    the view widens) under a rotation too, every lit pixel lies on real
+    geometry, the additive build leaves the cache alone, an OVR1 next to a
+    current cache does not hide a requested OVR2, and OVR1 still reads."""
+    src = Path(temp) / 'lines.oas'
+    ly = db.Layout()
+    ly.dbu = .001
+    top = ly.create_cell('TOP')
+    vl = ly.create_cell('VL')
+    l2, l3, l4 = ly.layer(2, 0), ly.layer(3, 0), ly.layer(4, 0)
+    for i in range(40):     # 0.05 x 400 um hairlines, 30 um apart
+        top.shapes(l2).insert(db.Box(i * 30000 + 1000, 1000, i * 30000 + 1050, 401000))
+    top.shapes(l3).insert(db.Box(100000, 800000, 500000, 800050))      # one horizontal line
+    vl.shapes(l4).insert(db.Box(0, 0, 400000, 50))                     # horizontal in VL ...
+    top.insert(db.CellInstArray(vl.cell_index(), db.Trans(1, False, 900000, 600000)))  # ... vertical in TOP
+    ly.write(str(src))
+    index(src)
+    cache = Path(vfs_cache_dir(src))
+    before = {p.name: digest(p) for p in cache.iterdir() if p.is_file()}
+    index(src, '--representatives-only', '--representatives-points', '4096')
+    sidecar = cache / 'design.ovr'
+    assert sidecar.read_bytes()[:8] == b'FLOEOVR1'
+    layers = ((2, 0), (3, 0), (4, 0))
+    points = worker(src)
+    try:
+        dots, _ = frame(points, 20, visible=layers)
+        dot_line, _ = frame(points, 21, px=200, span=20_000_000., visible=[(3, 0)])
+    finally:
+        points.stop()
+    # a current cache with an OVR1: the format option alone rebuilds it as OVR2
+    result = index(src, '--representatives', '--representatives-format', '2',
+                   '--representatives-points', '4096')
+    assert sidecar.read_bytes()[:8] == b'FLOEOVR2', result.stdout + result.stderr
+    assert 'format=2' in result.stderr and 'rects=42' in result.stderr, result.stderr
+    assert before == {name: digest(cache / name) for name in before}, 'additive OVR2 build changed the index'
+    shapes = worker(src)
+    exact = worker(src)
+    try:
+        lines, report = frame(shapes, 22, visible=layers)
+        real, _ = frame(exact, 23, cut=0, visible=layers)
+        assert report['plan_culls']['stored_rep_points'] == 42, report['plan_culls']
+        assert report['cache_miss'] == 0, 'shapes need no page decode'
+        # 40 hairlines of 133 px + two 133 px lines against 42 dots
+        assert len(dots) <= 42 and len(lines) > 100 * len(dots) // 2, (len(dots), len(lines))
+        stray = [p for p in lines if not any((p[0] + dx, p[1] + dy) in real
+                                             for dx in (-1, 0, 1) for dy in (-1, 0, 1))]
+        assert not stray, 'shape pixels off the real geometry: %s' % stray[:5]
+        # the projected length of ONE 400 um line at 100, 133, 200, 400 um per
+        # pixel, horizontal (3/0) and rotated to vertical (4/0): a group of one
+        # member is always sampled, and the shape takes the real rect's paint
+        # path, so the picture IS the exact one - whatever the raster's
+        # hairline rule gives across the line - and the long axis shrinks
+        # 4, 3, 2, 1 px with the view instead of being a dot from the start
+        lengths = []
+        for k, span in enumerate((20_000_000., 26_666_667., 40_000_000., 80_000_000.)):
+            for layer, axis in (((3, 0), 0), ((4, 0), 1)):
+                lit, _ = frame(shapes, 30 + 4 * k + 2 * axis, px=200, span=span, visible=[layer])
+                ref, _ = frame(exact, 31 + 4 * k + 2 * axis, px=200, span=span, cut=0, visible=[layer])
+                assert lit == ref and lit, (layer, span, sorted(lit), sorted(ref))
+                lengths.append((layer, span, len({p[axis] for p in lit})))
+        for layer in ((3, 0), (4, 0)):
+            got = [n for l, _, n in lengths if l == layer]
+            assert got == sorted(got, reverse=True) and got[0] >= 4 and got[-1] <= 2, lengths
+        assert len(dot_line) == 1, 'OVR1 shows the same line as one dot: %d' % len(dot_line)
+    finally:
+        for w in (shapes, exact):
+            w.stop()
+    print('representatives OVR2: %d dots -> %d shape px, projected lengths %s' % (
+        len(dots), len(lines), [n for _, _, n in lengths]))
+
+
+def ovr2_tree_section(temp):
+    """Stored proxies, zoom refinement, resumable budgets, and no box across gaps."""
+    src = Path(temp) / 'merged-lines.oas'
+    ly = db.Layout()
+    ly.dbu = .001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(1, 0)
+    for cluster in (1000, 400000):
+        for i in range(2048):
+            x = cluster + i * 4
+            top.shapes(layer).insert(db.Box(x, 1000, x + 1, 401000))
+    ly.write(str(src))
+    index(src, '--representatives', '--representatives-format', '2',
+          '--representatives-points', '8192')
+    data = (Path(vfs_cache_dir(src)) / 'design.ovr').read_bytes()
+    assert data[:8] == b'FLOEOVR2' and int.from_bytes(data[8:12], 'little') == 3
+    merged, direct, resumed, unbinned = (worker(src), worker(src, direct=True),
+                                        worker(src, batch=3), worker(src, unbinned=True))
+    try:
+        fast, report = frame(merged, 100, px=512, span=512000.)
+        reference, direct_report = frame(direct, 101, px=512, span=512000.)
+        c = report['plan_culls']
+        assert c['stored_rep_points'] <= 16 and c['stored_rep_proxies'] > 0, c
+        assert c['stored_rep_tested'] < 64 and report['cache_miss'] == 0, report
+        assert direct_report['plan_culls']['stored_rep_points'] == 4096, direct_report['plan_culls']
+        for a, b in ((fast, reference), (reference, fast)):
+            stray = [p for p in a if not any((p[0]+dx,p[1]+dy) in b
+                                            for dx in (-1,0,1) for dy in (-1,0,1))]
+            assert not stray, 'merged raster differs by >1 px: %s' % stray[:5]
+        assert not any(20 < x < 390 for x, y in fast), 'cluster gap was filled'
+        divided, divided_report = frame(resumed, 102, px=512, span=512000.)
+        assert divided == fast, 'query budget changed the final image'
+        assert divided_report['rounds'] == 2 and divided_report['plan_culls']['stored_rep_limited'], divided_report
+        walked, _ = frame(unbinned, 103, px=512, span=512000.)
+        assert walked == fast, 'binned/walk proxy rasters differ'
+        # Zoom crosses the merge-error threshold and supplies more leaves.
+        zoom, zoom_report = frame(merged, 104, px=512, span=2048.)
+        zoom_direct, _ = frame(direct, 105, px=512, span=2048.)
+        assert zoom and zoom == zoom_direct, 'near query did not refine to the original samples'
+        assert zoom_report['plan_culls']['stored_rep_points'] > c['stored_rep_points']
+        print('representatives tree: 4096 shapes -> %d proxies; nodes=%d bytes=%d raster=%.1f ms; zoom=%d shapes; %d refinement rounds' % (
+            c['stored_rep_points'], c['stored_rep_nodes'], c['stored_rep_bytes'], report['draw_ms'],
+            zoom_report['plan_culls']['stored_rep_points'], divided_report['rounds']))
+    finally:
+        for w in (merged, direct, resumed, unbinned):
+            w.stop()
+    # The Rust-only client sees the same two frames. In particular, an OVR
+    # cursor with zero geometry pages is not a complete query scene yet.
+    cargo = shutil.which('cargo') or str(Path.home() / '.cargo/bin/cargo')
+    build = subprocess.run([cargo, 'test', '--offline', '--locked', '-p', 'floe-worker-client',
+                            '--test', 'representative_frames', '--no-run', '--message-format=json'],
+                           cwd=ROOT / 'rust', capture_output=True, text=True, timeout=180)
+    assert build.returncode == 0, build.stderr
+    binaries = [r['executable'] for line in build.stdout.splitlines()
+                if (r := json.loads(line)).get('reason') == 'compiler-artifact'
+                and r['target']['name'] == 'representative_frames' and r.get('executable')]
+    assert len(binaries) == 1
+    before = {p.name: (digest(p), p.stat().st_mtime_ns) for p in Path(vfs_cache_dir(src)).iterdir() if p.is_file()}
+    result = subprocess.run([binaries[0], '--ignored', '--nocapture'], capture_output=True, text=True,
+                            env=dict(os.environ, PATH='', FLOE_REP_QUERY_CACHE=vfs_cache_dir(src),
+                                     FLOE_REP_QUERY_RENDERD=str(ROOT / 'rust/target/release/floe-renderd')), timeout=60)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'RUST OVR QUERY COMPLETION: ALL OK' in result.stdout
+    assert {p.name: (digest(p), p.stat().st_mtime_ns) for p in Path(vfs_cache_dir(src)).iterdir() if p.is_file()} == before
+    print(result.stdout.strip())
 
 
 def main():
@@ -162,6 +311,9 @@ def main():
         assert sidecar.read_bytes()[:8] == b'FLOEOVR1'
         print('representatives: additive preservation, normal build, depth, pixel replay, kill switch, invalid fallback, '
               'combined-run failure keeps the cache OK')
+        ovr2_section(temp)
+        ovr2_tree_section(temp)
+        print('representatives: OVR2 shapes (length, rotation, on-geometry, additive, format switch) OK')
 
 
 if __name__ == '__main__':

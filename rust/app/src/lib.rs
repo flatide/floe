@@ -73,9 +73,11 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --occupancy-only           Rebuild only summary on a current cache
   --occupancy-um UM          Positive base cell; default chip-size adaptive
   --occupancy-balance 0|1    Marking work split; default 1, byte-neutral diagnostic
+  --occupancy-prune 0|1      Sub-cell bbox marking; default 1, 0 walks exact geometry
   --representatives          Add bounded representative points (plain layout only)
   --representatives-only     Rebuild only points on a current cache
   --representatives-points N Group sample cap, 1..4194304; implies representatives
+  --representatives-format 1|2 Points or shape/tree samples; implies rebuild of OVR
   --slow-cell-s S            Nonnegative slow-cell threshold
   --p2-shard-limit-mb N       Nonnegative shard-copy ceiling
   --profile-cell NAME        Profile one cell without writing a normal cache
@@ -239,6 +241,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             "--representatives-points" => {
                 options.representatives_points = Some(number(value()?, flag)?)
             }
+            "--representatives-format" => {
+                options.representatives_format = Some(number(value()?, flag)?)
+            }
             "--jobs" => options.jobs = number(value()?, flag)?,
             "--page-target-mb" => options.page_target_mb = Some(number(value()?, flag)?),
             "--occupancy-um" => options.occupancy_um = Some(number(value()?, flag)?),
@@ -247,6 +252,13 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
                     0 => false,
                     1 => true,
                     _ => return Err(Error::input("occupancy-balance must be 0 or 1")),
+                });
+            }
+            "--occupancy-prune" => {
+                options.occupancy_prune = Some(match number::<u8>(value()?, flag)? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(Error::input("occupancy-prune must be 0 or 1")),
                 });
             }
             "--slow-cell-s" => options.slow_cell_s = Some(number(value()?, flag)?),
@@ -481,6 +493,28 @@ mod tests {
     }
     #[test]
     fn invalid_or_unported_requests_never_launch_native() {
+        for format in ["1", "2"] {
+            let Cli::Index(_, o, _) = parsed(&[
+                "index",
+                "x",
+                "--representatives-format",
+                format,
+                "--occupancy-prune",
+                "0",
+            ])
+            .unwrap() else {
+                panic!("index")
+            };
+            assert!(o.wants_representatives());
+            assert_eq!(o.occupancy_prune, Some(false));
+        }
+        for args in [
+            ["index", "x", "--representatives-format", "0"],
+            ["index", "x", "--representatives-format", "3"],
+            ["index", "x", "--occupancy-prune", "2"],
+        ] {
+            assert!(parsed(&args).is_err());
+        }
         for args in [
             &["index"][..],
             &["index", "x", "--jobs"],

@@ -610,6 +610,15 @@ dropped gen=40 reason=stale
 error gen=42 code=limit message=...
 ```
 
+`frame`(과 `probe_frame`) 줄의 `queue_us`는 명령을 읽은 뒤 작업을 시작하기까지 앞선 명령 뒤에서
+기다린 시간, `wall_us`는 작업 시작부터 이 frame 응답까지의 renderd 시간이다(2026-09-21, 0.12.184).
+계획(`plan_hier`)은 도중에 취소되지 않으므로 대체된 요청의 계획이 끝까지 돌며 다음 요청을 늦출 수
+있다 — 그 대기가 `queue_us`다. Python adapter는 이것으로 `wait_ms` = 클라이언트 경과 − `wall_us`
+− adapter 읽기(대기와 pipe; 전에는 상수 0), `other_ms` = `wall_us` − 알려진 단계(plan·text plan·
+read·decode·scene·raster·png·publish)의 합(어떤 단계 타이머도 덮지 않는 renderd 시간)을 만든다.
+GUI 상태줄은 `= L load [...] [+ T text] + D draw [+ O other] [+ W wait]`로, text는 100 ms 이상,
+other·wait는 200 ms를 넘을 때만 보인다. 필드가 없는 renderd나 deck frame에서는 둘 다 0(모름)이다.
+
 daemon protocol `round_pages` fallback은 128, floe2 adapter 제품 기본은 1024이며
 한 round에서 새로 읽을 최대 cache-miss page 수다.
 cache hit는 개수와 무관하게 첫 scene에 모두 포함하며 마지막 miss tail이 budget의

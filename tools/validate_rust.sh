@@ -38,7 +38,7 @@ GATES="validation_selector vendor unit unit_vfs unit_render index_cli vfs_profil
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck representatives rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode rust_renderer klayout"
 WEB_APP_GATES="app_cli cache_migration web_cli_inventory native_revision web_selfcheck web_portable runtime_smoke embedded_host app_render \
 layerprops layer_defaults layer_palette palette_styles display_test app_clip managed_clip app_captures \
 fe_embed drc_captures view_controller zoom_band minimap depth_keys web_wheel worker_queries \
@@ -52,11 +52,11 @@ alias_gates() {
     case "$1" in
         web)      echo "$WEB_APP_GATES" ;;
         quick)    echo "unit_vfs unit_render occupancy rust_renderer" ;;
-        planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle" ;;
+        planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box shape_cut" ;;
         occ)      echo "unit_vfs occupancy" ;;
-        render)   echo "unit_render rust_renderer representatives render_goldens render_speckle render_frames klayout" ;;
+        render)   echo "unit_render rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode render_goldens render_speckle render_frames klayout" ;;
         indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives" ;;
-        python)   echo "index_cli vfs_profile floe2 drc_ice svrf" ;;
+        python)   echo "index_cli vfs_profile floe2 drc_ice svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
     esac
@@ -184,6 +184,13 @@ fi
 (cd rust && PATH="$HOME/.cargo/bin:$PATH" \
     cargo build --release 2>/dev/null >/dev/null)
 INDEX_BIN=rust/target/release/floe-index
+# warm the freshly built renderer once: macOS scans a new executable on
+# its first launch (seconds; a launch killed mid-scan stays cold), which
+# made the first gate to start a worker time out (occupancy's deck
+# worker, 2026-09-18)
+if [ -x rust/target/release/floe-renderd ]; then
+    echo "" | rust/target/release/floe-renderd >/dev/null 2>&1 || true
+fi
 echo "== floe2 product + accuracy gates (KLayout = oracle/generator only)"
 if gate validation_selector; then RAN="$RAN validation_selector"
     .venv/bin/python -B tools/validate_validation_selector.py; fi
@@ -456,6 +463,30 @@ if gate jobdeck; then RAN="$RAN jobdeck"
 # combined index run leaves a complete base cache behind
 if gate representatives; then RAN="$RAN representatives"
     .venv/bin/python tools/validate_representatives.py; fi
+# the synthetic MAIN01 generator: legacy geometry byte-identical, chip
+# geometry deterministic, KLayout-readable, indexable and chip-shaped
+if gate gen_main01; then RAN="$RAN gen_main01"
+    .venv/bin/python tools/validate_gen_main01.py; fi
+# budget-fitted cut: a keep view over the generation budget is drawn at a
+# lowered density instead of failing; frames that fit are untouched
+if gate fit_budget; then RAN="$RAN fit_budget"
+    .venv/bin/python tools/validate_fit_budget.py; fi
+# sub-cut boxes: under thin keep with few layers visible, what the size cut
+# drops stays as a box from index metadata; everything else unchanged
+if gate sub_cut_box; then RAN="$RAN sub_cut_box"
+    .venv/bin/python tools/validate_sub_cut_box.py; fi
+# per-shape cut: under thin keep the cut judges every shape by its smaller
+# side - pages by max_min, shapes inside the pages that stay by the raster
+if gate shape_cut; then RAN="$RAN shape_cut"
+    .venv/bin/python tools/validate_shape_cut.py; fi
+# write-once tiles: planes painted in reverse, each pixel written once,
+# covered work skipped - frames byte-identical to the ordered overwrite
+if gate write_once; then RAN="$RAN write_once"
+    .venv/bin/python tools/validate_write_once.py; fi
+# layer-decode probe: the same plan painted layer by layer over tiles that
+# stay alive is byte-identical to the normal render (render_probe)
+if gate layer_decode; then RAN="$RAN layer_decode"
+    .venv/bin/python tools/validate_layer_decode.py; fi
 # in-tree CPU renderer: Python queue contract plus independent
 # KLayout pixel oracle at deterministic serial/parallel settings
 if gate rust_renderer; then RAN="$RAN rust_renderer"

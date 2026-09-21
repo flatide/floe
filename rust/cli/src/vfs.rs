@@ -75,6 +75,8 @@ pub fn vfs_cmd(args: &[String]) {
     let mut representatives = false;
     let mut representatives_only = false;
     let mut representative_points = floe_vfs::representatives::DEFAULT_POINTS;
+    // 1 = OVR1 points (default), 2 = OVR2 shapes with a premerged spatial tree
+    let mut representative_format = 1u32;
     let mut occ_opts = floe_vfs::occupancy::Opts::default();
     // the base cell follows the chip size unless --occupancy-um says
     // otherwise (2026-09-16; occupancy::auto_base_um_for_span)
@@ -148,6 +150,17 @@ pub fn vfs_cmd(args: &[String]) {
                 representatives = true;
                 i += 2;
             }
+            "--representatives-format" => {
+                representative_format = match args.get(i + 1).map(|s| s.as_str()) {
+                    Some("1") => 1,
+                    Some("2") => 2,
+                    _ => {
+                        eprintln!("--representatives-format must be 1 (points) or 2 (shapes)");
+                        std::process::exit(2);
+                    }
+                };
+                i += 2;
+            }
             "--coverage" => {
                 coverage = true;
                 i += 1;
@@ -184,6 +197,12 @@ pub fn vfs_cmd(args: &[String]) {
             "--occupancy-balance" => {
                 // 0 = the count-based unit split (kill switch, 2026-09-16)
                 occ_opts.balanced_units = args[i + 1].as_str() != "0";
+                i += 2;
+            }
+            "--occupancy-prune" => {
+                // 0 = the exact walk (every instance's shapes); 1 (default,
+                // 2026-09-18) stops at cells that fit one grid cell
+                occ_opts.prune = args[i + 1].as_str() != "0";
                 i += 2;
             }
             "--occupancy-max-bytes" => {
@@ -566,6 +585,7 @@ pub fn vfs_cmd(args: &[String]) {
             &outdir,
             &ovm,
             representative_points,
+            representative_format,
             kill_at.as_deref(),
         ) {
             eprintln!("[vfs] representatives: {}", e);
@@ -677,6 +697,7 @@ pub fn vfs_cmd(args: &[String]) {
                     &outdir,
                     &ovm,
                     representative_points,
+                    representative_format,
                     kill_at.as_deref(),
                 ) {
                     eprintln!(
@@ -1837,6 +1858,7 @@ fn write_representatives(
     outdir: &str,
     ovm: &floe_ovm::Ovm,
     points: usize,
+    format: u32,
     kill_at: Option<&str>,
 ) -> Result<(), String> {
     use floe_vfs::representatives as reps;
@@ -1848,27 +1870,38 @@ fn write_representatives(
                 "--kill-at representatives-fail (gate-only simulated build failure)".into(),
             );
         }
-        let mut built = reps::build(
+        let mut built = reps::build_with(
             doc,
             points,
             Some(|s| eprintln!("[vfs] representatives {}", s)),
+            format == 2,
         )?;
         let count: usize = built.groups.iter().map(|g| g.points.len()).sum();
-        let bytes = reps::encode(&mut built, ovm);
         let tmp = format!("{}/design.ovr.tmp", outdir);
         let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        file.write_all(&bytes).map_err(|e| e.to_string())?;
+        let size = if format == 2 {
+            let kinds = |k: u8| {
+                built
+                    .groups
+                    .iter()
+                    .flat_map(|g| &g.prims)
+                    .filter(|p| p.kind == k)
+                    .count()
+            };
+            eprintln!("[vfs] representatives format=2 revision=3 rects={} segments={} points={} (no usable edge: {})",
+                      kinds(reps::PRIM_RECT), kinds(reps::PRIM_SEGMENT), kinds(reps::PRIM_POINT), built.point_fallbacks);
+            reps::write_tree(&mut file, &mut built, ovm)?
+        } else {
+            let bytes = reps::encode(&mut built, ovm);
+            file.write_all(&bytes).map_err(|e| e.to_string())?;
+            bytes.len() as u64
+        };
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
         std::fs::rename(&tmp, format!("{}/design.ovr", outdir)).map_err(|e| e.to_string())?;
-        eprintln!(
-            "[vfs] representatives groups={} entries={} points={} {} ({:.1}s)",
-            built.groups.len(),
-            built.entries,
-            count,
-            fmt_size(bytes.len() as u64),
-            started.elapsed().as_secs_f64()
-        );
+        eprintln!("[vfs] representatives format={} groups={} directory={} peak_requests={} points={} {} ({:.1}s)",
+                  format, built.groups.len(), built.directory, built.peak_requests, count, fmt_size(size),
+                  started.elapsed().as_secs_f64());
         Ok(())
     })();
     if result.is_err() {
@@ -2183,6 +2216,9 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
             page_hairline: true,
             page_skip: Vec::new(),
             prune_skipped: false,
+            sub_cut_box: false,
+            shape_cut: false,
+            frames: true,
         };
         let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
         let (boxes, truncated) = floe_vfs::hier::frontier_boxes(v, &plan, FRONTIER_KEEP);
@@ -5958,6 +5994,16 @@ fn build(
     // the caller writes design.ovm LAST (commit marker, after the
     // viewer-side files); ovp_len/ovt_len ride in the header so
     // open can verify both cache pairs
+    // v8: subtree layer masks on every instance-BVH node
+    let tmask = std::time::Instant::now();
+    let (mask_nodes, mask_sets) = b.annotate_bvh_masks(jobs);
+    eprintln!(
+        "[vfs] bvh layer masks: {} nodes, {} new bitsets ({:.1}s, rss {})",
+        mask_nodes,
+        mask_sets,
+        tmask.elapsed().as_secs_f64(),
+        rss()
+    );
     let ovm_bytes = b.finish(ovp_off, ovt_off);
     eprintln!(
         "[vfs] {} pages ({}) + ovm {} in {:.1}s",
@@ -6135,6 +6181,9 @@ fn make_req(
         page_hairline: true,
         page_skip: Vec::new(),
         prune_skipped: false,
+        sub_cut_box: false,
+        shape_cut: false,
+        frames: true,
     }
 }
 
@@ -6404,6 +6453,11 @@ pub fn plan_cmd(args: &[String]) {
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--page-hairline") {
             req.page_hairline = val != "0";
         }
+        // --decode-budget-mb N: the renderer's generation budget, so the
+        // budget fit (density, or the cut ladder) can be read off a plan
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--decode-budget-mb") {
+            req.decode_budget = val.parse::<u64>().expect("decode-budget-mb") << 20;
+        }
         // --sub-cut-wash 0|1: the jobdeck wide-view policy (JOBDECK
         // step 4) on a single source, so `--explain` shows its
         // verdicts (wash, keep_sparse, expand_sparse) off the deck
@@ -6415,6 +6469,20 @@ pub fn plan_cmd(args: &[String]) {
         // rep_expand; off by default here (the viewer turns it on)
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--page-reps") {
             req.page_reps = val != "0";
+        }
+        // --sub-cut-box 0|1: what the size cut drops stays as a box
+        // (ViewReq::sub_cut_box; the viewer sets it for thin keep);
+        // --sub-cut-box-px N: the largest box (HierOpts::sub_cut_box_px)
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-box") {
+            req.sub_cut_box = val != "0";
+        }
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-box-px") {
+            popts.sub_cut_box_px = val.parse().expect("sub-cut-box-px");
+        }
+        // --shape-cut 1: the cut judges every shape by its smaller side
+        // (ViewReq::shape_cut; the viewer sets it for thin keep)
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--shape-cut") {
+            req.shape_cut = val != "0";
         }
         // --summary-layers a/b,..: layers an occupancy summary draws
         // (OCCUPANCY_PLAN M3): their pages are skipped (verdict
@@ -6476,8 +6544,14 @@ pub fn plan_cmd(args: &[String]) {
              \"grid_fallback_full\": {},\n  \
              \"kbox_merges\": {},\n  \"lod_pages\": {},\n  \
              \"washed_pages\": {},\n  \
-             \"culled_bvh_size\": {},\n  \
+             \"culled_bvh_size\": {},\n  \"culled_bvh_layer\": {},\n  \
              \"thin_frames\": {},\n  \
+             \"fit_pct\": {},\n  \"fit_thin\": {},\n  \"fit_full_pct\": {},\n  \"fit_none_pct\": {},\n  \"fit_passes\": {},\n  \"fit_bytes\": {},\n  \
+             \"sub_cut_boxes\": {},\n  \
+             \"sub_cut_box_nodes\": {},\n  \
+             \"sub_cut_box_over\": {},\n  \
+             \"sub_cut_box_reads\": {},\n  \"sub_cut_box_strided\": {},\n  \"sub_cut_box_unsure\": {},\n  \"sub_cut_box_level\": {},\n  \
+             \"washes\": {},\n  \
              \"plan_ms\": {:.2}\n}}",
             plan.pages.len(),
             cbytes,
@@ -6519,7 +6593,22 @@ pub fn plan_cmd(args: &[String]) {
             st.lod_swapped,
             st.washed_pages,
             st.culled_bvh_size,
+            st.culled_bvh_layer,
             st.thin_frames,
+            st.fit_pct,
+            st.fit_thin,
+            st.fit_full_pct,
+            st.fit_none_pct,
+            st.fit_passes,
+            st.fit_bytes,
+            st.sub_cut_boxes,
+            st.sub_cut_box_nodes,
+            st.sub_cut_box_over,
+            st.sub_cut_box_reads,
+            st.sub_cut_box_strided,
+            st.sub_cut_box_unsure,
+            st.sub_cut_box_level,
+            plan.wcells.iter().map(|c| c.washes.len() as u64).sum::<u64>(),
             ms
         );
         if rest.iter().any(|(k, _)| k == "--inspect") {

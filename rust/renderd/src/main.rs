@@ -1,10 +1,12 @@
 use floe_render_core::{
     pick_scene, pick_scene_cancellable, render_geometry_occupancy_cancellable,
-    render_geometry_styled_cancellable_reuse, render_geometry_styled_unbinned_cancellable,
-    snap_scene, snap_scene_cancellable, validate_font_px, Cache, CacheLayer, ClipGeometry, Deck,
-    DeckRenderRequest, DeckSpec, DecodedPageCache, FrameReuse, FrameScene, GeometryRasterRequest,
-    LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation, SceneQueryLayer,
-    SceneQueryRequest, SceneSnapKind, StyledGeometryRasterRequest, ViewBox, DEFAULT_LABEL_FONT_PX,
+    render_geometry_styled_cancellable, render_geometry_styled_cancellable_reuse,
+    render_geometry_styled_unbinned_cancellable, snap_scene, snap_scene_cancellable,
+    validate_font_px, Cache, CacheLayer, ClipGeometry, Deck, DeckRenderRequest, DeckSpec,
+    DecodedPageCache, FrameReuse, FrameScene, GeometryRasterRequest, HierPlan, LayerFill,
+    LayerProbeReport, LayerRasterSession, LayerStyle, PlanRequest, ProbeMode, RasterViewBox,
+    RenderCancellation, RenderLabel, SceneQueryLayer, SceneQueryRequest, SceneSnapKind,
+    StyledGeometryRasterRequest, SummarySelection, ViewBox, DEFAULT_LABEL_FONT_PX,
     DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -159,8 +161,9 @@ fn serve() -> Result<(), String> {
             }
         };
         match parsed {
-            InputCommand::Worker(command) => {
-                if let WorkerCommand::Render(render) = &command {
+            InputCommand::Worker(mut command) => {
+                if let WorkerCommand::Render(render) = &mut command {
+                    render.received = Some(Instant::now());
                     if latest_generation.is_some_and(|latest| render.generation <= latest) {
                         respond(
                             &response_tx,
@@ -368,6 +371,23 @@ struct RenderCommand {
     raw_frame: bool,
     style_epoch: Option<u64>,
     out: String,
+    /// When the command line was read (set by the input loop, not the
+    /// parser): the frame's `queue_us` is how long it then waited behind the
+    /// commands before it - a plan cannot be cancelled, so a superseded one
+    /// still runs to its end (2026-09-21: the field's status line showed
+    /// 15.5 s that no phase accounted for, and the adapter's wait was a
+    /// constant 0).
+    received: Option<Instant>,
+    /// `render_probe` only (docs/LAYER_DECODE_PROBE_PLAN.ko.md): paint this
+    /// frame the probe's way instead of the normal one and answer with a
+    /// `probe_frame`. The published scene, the retained frame and the
+    /// refinement rounds are not touched.
+    probe: Option<ProbeMode>,
+    /// `render_probe` only: how many consecutive passes a raster worker paints
+    /// into a tile before the workers meet and the driver looks at the masks
+    /// again. 1 stops at every layer; a block is conservative (it decides with
+    /// the mask of the block's first layer) but meets N times less often.
+    probe_block: usize,
     /// `thin=keep|cull`: the page hairline policy of this frame's
     /// plans - keep (mask / jobdeck: all-thin pages stay and raster
     /// as 1 px hairlines) or cull (plain layout: dropped whole, the
@@ -453,35 +473,51 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 },
             ))))
         }
-        "render" => {
-            reject_unknown(
-                &fields,
-                &[
-                    "gen",
-                    "view",
-                    "w",
-                    "h",
-                    "depth",
-                    "cut",
-                    "exact",
-                    "layers",
-                    "frames",
-                    "labels",
-                    "font_px",
-                    "mono",
-                    "frame_cache",
-                    "jobs",
-                    "decode_jobs",
-                    "tile_px",
-                    "decode_pages",
-                    "round_pages",
-                    "round_paths",
-                    "frame_format",
-                    "style_epoch",
-                    "out",
-                    "thin",
-                ],
-            )?;
+        "render" | "render_probe" => {
+            let probe = if command == "render_probe" {
+                Some(ProbeMode::parse(required(&fields, "probe")?)?)
+            } else {
+                None
+            };
+            let probe_block: usize = if probe.is_some() {
+                let block = optional_parse(&fields, "block")?.unwrap_or(1usize);
+                if block == 0 {
+                    return Err("probe block must be positive".to_string());
+                }
+                block
+            } else {
+                1
+            };
+            let mut allowed: Vec<&str> = Vec::new();
+            if probe.is_some() {
+                allowed.extend(["probe", "block"]);
+            }
+            allowed.extend([
+                "gen",
+                "view",
+                "w",
+                "h",
+                "depth",
+                "cut",
+                "exact",
+                "layers",
+                "frames",
+                "labels",
+                "font_px",
+                "mono",
+                "frame_cache",
+                "jobs",
+                "decode_jobs",
+                "tile_px",
+                "decode_pages",
+                "round_pages",
+                "round_paths",
+                "frame_format",
+                "style_epoch",
+                "out",
+                "thin",
+            ]);
+            reject_unknown(&fields, &allowed)?;
             let thin_keep = match fields.get("thin").map(|s| s.as_str()) {
                 None | Some("cull") => false,
                 Some("keep") => true,
@@ -560,6 +596,9 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     raw_frame,
                     style_epoch: optional_parse(&fields, "style_epoch")?,
                     out: required(&fields, "out")?.to_string(),
+                    received: None,
+                    probe,
+                    probe_block,
                     thin_keep,
                 },
             ))))
@@ -929,8 +968,13 @@ struct FramePixels {
     label_pixel_paints: u64,
     rep_members_tested: u64,
     rep_members_drawn: u64,
+    representative_spans: u64,
+    representative_pixels: u64,
     hier_cells_visited: u64,
     subtrees_pruned: u64,
+    once_full_tiles: u32,
+    once_passes_skipped: u64,
+    once_items_skipped: u64,
     summary_cells: u64,
     summary_pixels: u64,
 }
@@ -1042,6 +1086,9 @@ fn run_clip(
         page_hairline: true,
         summary_layers: Vec::new(),
         prune_summary: false,
+        sub_cut_box: false,
+        shape_cut: false,
+        frames: true,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1784,7 +1831,7 @@ fn run_deck_render(
     let publish_stats = publish_frame(&command.out, command.generation, &parts, cancellation)?;
     let stats = &report.stats;
     let response = format!(
-            "frame gen={} round=1 final=1 png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} summary_passes={} summary_none_passes={} summary_cells={}",
+            "frame gen={} round=1 final=1 png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} summary_passes={} summary_none_passes={} summary_cells={} once_tiles={} once_passes={} once_items={}",
             command.generation,
             command.out,
             if command.raw_frame { "raw" } else { "png" },
@@ -1865,6 +1912,9 @@ fn run_deck_render(
             report.summary_passes,
             report.summary_none_passes,
             report.summary_cells,
+            stats.once_full_tiles,
+            stats.once_passes_skipped,
+            stats.once_items_skipped,
         );
     respond(
         responses,
@@ -1883,6 +1933,25 @@ fn sub_cut_wash_enabled() -> bool {
     std::env::var("FLOE_RUST_SUB_CUT_WASH").as_deref() == Ok("on")
 }
 
+/// Sub-cut boxes on a plain layout's `thin keep` frames
+/// (floe_vfs::ViewReq::sub_cut_box). OFF by default since 0.12.182 (user
+/// decision 2026-09-21): with few layers visible the box plan walks every
+/// size-cut subtree to its placements and replans the frame past its cap -
+/// 20 s near the fit view of a 449-layer chip with ten layers on - and what
+/// lies below the cut is to be shown by a density representation instead.
+/// FLOE_RUST_SUB_CUT_BOX=on turns them on for a diagnosis.
+fn sub_cut_box_enabled() -> bool {
+    std::env::var("FLOE_RUST_SUB_CUT_BOX").as_deref() == Ok("on")
+}
+
+/// The per-shape cut on a plain layout's `thin keep` frames
+/// (floe_vfs::ViewReq::shape_cut); FLOE_RUST_SHAPE_CUT=off is the kill
+/// switch (pages are then cut by their largest shape, and thin shapes
+/// longer than the cut all stay, as before 0.12.173).
+fn shape_cut_enabled() -> bool {
+    std::env::var("FLOE_RUST_SHAPE_CUT").as_deref() != Ok("off")
+}
+
 /// The page frontier (floe_vfs::ViewReq::page_reps) on a plain
 /// layout's frames. DEACTIVATED (user decision 2026-09-17: the field
 /// still saw boxes and a 60 s full-depth plan on 0.12.152, and the
@@ -1893,6 +1962,290 @@ fn page_reps_enabled() -> bool {
     std::env::var("FLOE_RUST_PAGE_REPS").as_deref() == Ok("on")
 }
 
+/// docs/LAYER_DECODE_PROBE_PLAN.ko.md: the `render_probe` command. One plan,
+/// painted the way `mode` asks, published as a `probe_frame` so a normal
+/// render's answer can never be confused with a diagnostic one.
+///
+/// `baseline` decodes the whole selection and renders it in one call.
+/// `ordered` and `occlusion` build a metadata scene - it knows every page of
+/// the plan before one is read - and decode block by block: `ordered` asks for
+/// every page of the block's layers, `occlusion` only for those a pass could
+/// still paint into an open pixel. The two of the same block size are the
+/// pair to compare, and all three must reach the same pixels.
+#[allow(clippy::too_many_arguments)]
+/// Microseconds between reading the command and starting on it.
+fn queued_us(command: &RenderCommand, started: Instant) -> u64 {
+    command
+        .received
+        .map(|received| {
+            started
+                .saturating_duration_since(received)
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX)
+        })
+        .unwrap_or(0)
+}
+
+fn run_layer_probe(
+    run_started: Instant,
+    queue_us: u64,
+    page_cache: &mut DecodedPageCache,
+    cache: &Cache,
+    command: &RenderCommand,
+    responses: &Sender<String>,
+    cancellation: &RenderCancellation,
+    mode: ProbeMode,
+    plan: Arc<HierPlan>,
+    selected: &[u32],
+    styles: &[LayerStyle],
+    raster_request: GeometryRasterRequest,
+    labels: Arc<[RenderLabel]>,
+    summary: &SummarySelection,
+    decode_workers: u16,
+) -> Result<(), String> {
+    let started = Instant::now();
+    if styles.is_empty() {
+        return Err("a layer-decode probe needs styled layers".to_string());
+    }
+    let mut probe = LayerProbeReport::new(mode);
+    probe.planned_pages = plan.pages.len() as u64;
+    probe.selected_pages = selected.len() as u64;
+    let styled = StyledGeometryRasterRequest {
+        raster: raster_request,
+        layers: styles.to_vec(),
+        hierarchy_frames: command.frames,
+        mono: command.mono,
+    };
+    let report = if mode == ProbeMode::Baseline {
+        let decode_started = Instant::now();
+        let (pages, decode_stats) = page_cache.load_cancellable(
+            cache,
+            selected,
+            decode_workers,
+            command.generation,
+            cancellation,
+        )?;
+        probe.decode_us = elapsed_us(decode_started);
+        probe.requested_pages = selected.len() as u64;
+        probe.decoded_pages = pages.len() as u64;
+        probe.decoded_bytes = pages.iter().map(|page| page.estimated_bytes()).sum();
+        probe.cache_hits = u64::from(decode_stats.decoded_cache_hit);
+        probe.cache_misses = u64::from(decode_stats.decoded_cache_miss);
+        probe.read_us = decode_stats.page_read_us;
+        probe.decode_sum_us = decode_stats.page_decode_sum_us;
+        check_generation(cancellation, command.generation)?;
+        let scene_started = Instant::now();
+        let mut scene = FrameScene::new_shared_with_labels(
+            cache,
+            Arc::clone(&plan),
+            pages,
+            Arc::clone(&labels),
+            command.label_font_px,
+        )?;
+        if summary.is_active() {
+            scene.set_summaries(summary.planes.clone());
+        }
+        probe.scene_us = elapsed_us(scene_started);
+        let paint_started = Instant::now();
+        let report =
+            render_geometry_styled_cancellable(&scene, &styled, command.generation, cancellation)?;
+        probe.paint_us = elapsed_us(paint_started);
+        report
+    } else {
+        // FLOE_RUST_WORK_BIN=off keeps its meaning here: the per-tile walk.
+        // The demand reads the collection, so occlusion needs it, and it can
+        // only show coverage with the write-once masks.
+        let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
+        let occlusion = mode == ProbeMode::Occlusion;
+        if occlusion && !work_bin {
+            return Err("probe mode occlusion needs the work bin".to_string());
+        }
+        if occlusion && std::env::var("FLOE_RUST_WRITE_ONCE").as_deref() == Ok("off") {
+            return Err("probe mode occlusion needs the write-once masks".to_string());
+        }
+        // the pages arrive block by block, so the collection and the masks
+        // come from the plan's page metadata (LAYER_DECODE_PROBE_PLAN §4)
+        let scene_started = Instant::now();
+        let mut scene = FrameScene::new_metadata(
+            cache,
+            Arc::clone(&plan),
+            Arc::clone(&labels),
+            command.label_font_px,
+        )?;
+        if summary.is_active() {
+            scene.set_summaries(summary.planes.clone());
+        }
+        let scene = scene;
+        probe.scene_us = elapsed_us(scene_started);
+        let prepare_started = Instant::now();
+        let session = LayerRasterSession::begin_cancellable(
+            &scene,
+            &styled,
+            work_bin,
+            command.generation,
+            cancellation,
+        )?;
+        probe.passes = session.passes() as u64;
+        probe.prepare_us = elapsed_us(prepare_started);
+        let paint_started = Instant::now();
+        let mut loaded: BTreeSet<u32> = BTreeSet::new();
+        let mut generation_bytes = 0u64;
+        let mut wanted: Vec<u32> = Vec::new();
+        let mut failed: Option<String> = None;
+        // the decode workers stay up for the frame: one worker set per block
+        // was most of a layer-ordered frame's decode (0.12.178)
+        let (report, pool_us) = cache.with_decode_pool(
+            decode_workers,
+            Some((command.generation, cancellation)),
+            |pool| {
+                session.render_layered_cancellable(
+                    &scene,
+                    &styled,
+                    command.generation,
+                    cancellation,
+                    command.probe_block,
+                    |planes, demand| {
+                        probe.blocks += 1;
+                        probe.layer_passes += planes.len() as u64;
+                        let demand_started = Instant::now();
+                        wanted.clear();
+                        for &plane in planes {
+                            let stats = demand.pages_for_plane(plane, occlusion, &mut wanted);
+                            probe.demand_candidates += stats.candidates;
+                            probe.demand_out_of_view += stats.out_of_view;
+                            probe.demand_occluded += stats.occluded;
+                            probe.demand_unsure += stats.unsure;
+                        }
+                        wanted.sort_unstable();
+                        wanted.dedup();
+                        wanted.retain(|page_id| !loaded.contains(page_id));
+                        probe.demand_us += elapsed_us(demand_started);
+                        if wanted.is_empty() {
+                            return Ok(());
+                        }
+                        let decode_started = Instant::now();
+                        let (pages, decode_stats) = page_cache.load_pooled(pool, &wanted)?;
+                        probe.decode_us += elapsed_us(decode_started);
+                        probe.requested_pages += wanted.len() as u64;
+                        probe.cache_hits += u64::from(decode_stats.decoded_cache_hit);
+                        probe.cache_misses += u64::from(decode_stats.decoded_cache_miss);
+                        probe.read_us += decode_stats.page_read_us;
+                        probe.decode_sum_us += decode_stats.page_decode_sum_us;
+                        let block_bytes = pages.iter().try_fold(0u64, |total, page| {
+                            total.checked_add(page.estimated_bytes()).ok_or_else(|| {
+                                "decoded generation byte charge overflow".to_string()
+                            })
+                        })?;
+                        probe.decoded_bytes += block_bytes;
+                        generation_bytes = checked_generation_bytes(
+                            generation_bytes,
+                            block_bytes,
+                            page_cache.budget_bytes(),
+                        )?;
+                        probe.decoded_pages += pages.len() as u64;
+                        for page in pages {
+                            loaded.insert(page.page_id);
+                            if let Err(error) = scene.set_decoded_page(page) {
+                                failed.get_or_insert(error);
+                            }
+                        }
+                        Ok(())
+                    },
+                )
+            },
+        )?;
+        let report = report?;
+        probe.pool_us = pool_us;
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        // the raster alone: reading and asking happen on this thread between
+        // blocks and must not be counted as painting
+        // the raster alone: reading, asking and the decode pool itself happen
+        // on this thread, between blocks
+        probe.paint_us = elapsed_us(paint_started)
+            .saturating_sub(probe.decode_us)
+            .saturating_sub(probe.demand_us)
+            .saturating_sub(probe.pool_us);
+        probe.skipped_pages = probe.selected_pages.saturating_sub(loaded.len() as u64);
+        probe.skipped_bytes = selected
+            .iter()
+            .filter(|page_id| !loaded.contains(page_id))
+            .map(|&page_id| cache.page_encoded_bytes(page_id))
+            .sum();
+        report
+    };
+    check_generation(cancellation, command.generation)?;
+    let frame = report.frame;
+    let png = if command.raw_frame {
+        None
+    } else {
+        Some(frame.png_bytes()?)
+    };
+    let raw_header = command
+        .raw_frame
+        .then(|| raw_frame_header(frame.width(), frame.height()));
+    let parts: Vec<&[u8]> = match (&raw_header, &png) {
+        (Some(header), _) => vec![header.as_slice(), frame.pixels()],
+        (None, Some(png)) => vec![png.as_slice()],
+        _ => return Err("probe frame has neither raw pixels nor PNG bytes".to_string()),
+    };
+    let publish = publish_frame(&command.out, command.generation, &parts, cancellation)?;
+    probe.total_us = elapsed_us(started);
+    respond(
+        responses,
+        format!(
+            "probe_frame gen={} mode={} block={} format={} out={} partial={} planned_pages={} selected_pages={} requested_pages={} decoded_pages={} cache_hits={} cache_misses={} skipped_pages={} skipped_bytes={} decoded_bytes={} demand_candidates={} demand_out_of_view={} demand_occluded={} demand_unsure={} passes={} blocks={} layer_passes={} decode_us={} read_us={} decode_sum_us={} demand_us={} pool_us={} scene_us={} prepare_us={} paint_us={} total_us={} raster_us={} raster_tile_max_us={} tiles={} workers={} bin_items={} once_tiles={} once_passes={} once_items={} publish_write_us={} publish_sync_us={} publish_rename_us={} queue_us={} wall_us={}",
+            command.generation,
+            probe.mode,
+            command.probe_block,
+            if command.raw_frame { "raw" } else { "png" },
+            command.out,
+            report.partial as u8,
+            probe.planned_pages,
+            probe.selected_pages,
+            probe.requested_pages,
+            probe.decoded_pages,
+            probe.cache_hits,
+            probe.cache_misses,
+            probe.skipped_pages,
+            probe.skipped_bytes,
+            probe.decoded_bytes,
+            probe.demand_candidates,
+            probe.demand_out_of_view,
+            probe.demand_occluded,
+            probe.demand_unsure,
+            probe.passes,
+            probe.blocks,
+            probe.layer_passes,
+            probe.decode_us,
+            probe.read_us,
+            probe.decode_sum_us,
+            probe.demand_us,
+            probe.pool_us,
+            probe.scene_us,
+            probe.prepare_us,
+            probe.paint_us,
+            probe.total_us,
+            report.stats.raster_us,
+            report.stats.raster_tile_max_us,
+            report.stats.tiles,
+            report.stats.workers_used,
+            report.stats.work_bin_items,
+            report.stats.once_full_tiles,
+            report.stats.once_passes_skipped,
+            report.stats.once_items_skipped,
+            publish.write_us,
+            publish.sync_us,
+            publish.rename_us,
+            queue_us,
+            elapsed_us(run_started),
+        ),
+    );
+    Ok(())
+}
+
 fn run_render(
     state: &mut WorkerState,
     command: &RenderCommand,
@@ -1900,6 +2253,9 @@ fn run_render(
     cancellation: &RenderCancellation,
     published_scene: &SharedPublishedScene,
 ) -> Result<(), String> {
+    // wall_us counts from here, queue_us up to here (see RenderCommand::received)
+    let run_started = Instant::now();
+    let queue_us = queued_us(command, run_started);
     let mut command = command.clone();
     let cache = state
         .cache
@@ -1908,9 +2264,12 @@ fn run_render(
     // occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): decided per
     // request before any reuse, since the retained-frame and published-
     // scene keys carry it; FLOE_RUST_OCCUPANCY=off is the kill switch
+    // the policy condition: keep, or cull (2026-09-18) unless
+    // FLOE_RUST_OCCUPANCY_CULL=off (the kill switch back to keep-only)
+    let policy_allows = command.thin_keep || floe_render_core::summary_cull_allowed();
     let summary = cache.summary_selection(
         &make_plan_request(cache, &command, state.page_cache.budget_bytes())?,
-        command.thin_keep,
+        policy_allows,
         std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off"),
     )?;
     let summary_key = SummaryKey::of(&summary);
@@ -1945,13 +2304,52 @@ fn run_render(
         .as_ref()
         .is_some_and(|reuse| reuse.valid == [0, 0, command.width, command.height])
         && published_scene_serves(published_scene, command, state.style_epoch, &summary_key)?;
-    let planned = if label_only {
+    let mut representative_options = floe_render_core::RepresentativeOptions::default();
+    representative_options.max_px_per_dbu = Some(
+        (command.width as f64 / (command.view[2] - command.view[0]))
+            .max(command.height as f64 / (command.view[3] - command.view[1])),
+    );
+    representative_options.halo_px = state
+        .styles
+        .iter()
+        .map(|s| s.outline_width)
+        .max()
+        .unwrap_or(1) as f64
+        + 1.;
+    representative_options.direct = std::env::var("FLOE_RUST_REPRESENTATIVES_MERGE").as_deref()
+        == Ok("off")
+        || std::env::var("FLOE_RUST_REPRESENTATIVES_DIRECT").as_deref() == Ok("on");
+    if !state.styles.is_empty() {
+        representative_options.solid_layers = Some(state.styles.iter().filter(|s| s.outline_width == 1
+            && (matches!(s.fill, LayerFill::Solid) || matches!(s.fill, LayerFill::Pattern(rows) if rows.iter().all(|&r| r == u16::MAX))))
+            .map(|s| s.layer_idx).collect());
+        representative_options.hairline_layers = Some(
+            state
+                .styles
+                .iter()
+                .filter(|s| s.outline_width == 1)
+                .map(|s| s.layer_idx)
+                .collect(),
+        );
+    }
+    // Diagnostic for the resumable query gate (also useful for IO/paint tuning).
+    if let Ok(n) = std::env::var("FLOE_RUST_REPRESENTATIVES_BATCH")
+        .unwrap_or_default()
+        .parse::<usize>()
+    {
+        representative_options.output_per_batch = n.clamp(1, 262144);
+    }
+    let mut planned = if label_only {
         cache.empty_plan()
     } else {
         if std::env::var("FLOE_RUST_REPRESENTATIVES").as_deref() == Ok("off") || command.thin_keep {
             cache.plan(&page_request)?
         } else {
-            cache.plan_with_representatives(&page_request)?
+            cache.plan_with_representatives_options(
+                &page_request,
+                representative_options,
+                || cancellation.is_cancelled(command.generation),
+            )?
         }
     };
     check_generation(cancellation, command.generation)?;
@@ -2013,7 +2411,10 @@ fn run_render(
     } else {
         state.styles.clone()
     };
-    let plan = Arc::new(planned.plan);
+    let mut plan = Arc::new(std::mem::replace(
+        &mut planned.plan,
+        cache.empty_plan().plan,
+    ));
     let query_layers: Arc<[CacheLayer]> = Arc::from(cache.layers());
     let mut query_cell_names = BTreeMap::new();
     for cell in &plan.wcells {
@@ -2028,13 +2429,53 @@ fn run_render(
         .as_ref()
         .map(|planned| Arc::from(planned.rows.clone()))
         .unwrap_or_else(|| Arc::from([]));
+    if let Some(mode) = command.probe {
+        // docs/LAYER_DECODE_PROBE_PLAN.ko.md: the same plan and selection, a
+        // different way of painting them. Everything a normal render does
+        // around the frame - refinement rounds, published scene, retained
+        // frame, pan reuse - is deliberately skipped.
+        return run_layer_probe(
+            run_started,
+            queue_us,
+            &mut state.page_cache,
+            cache,
+            &command,
+            responses,
+            cancellation,
+            mode,
+            Arc::clone(&plan),
+            &selected,
+            &styles,
+            raster_request,
+            Arc::clone(&labels),
+            &summary,
+            decode_workers,
+        );
+    }
     let mut rounds = refinement_batches(&selected, command.round_pages, |page_id| {
         state.page_cache.contains(page_id)
     })?;
     let mut decoded_pages = Vec::with_capacity(selected.len());
     let mut generation_bytes = 0u64;
     let mut round_index = 0usize;
+    let mut drain_representatives = false;
     while round_index < rounds.len() {
+        if round_index > 0 && planned.representative_stream.is_some() {
+            // COW preserves the previously published query scene. Resume the
+            // saved spatial cursor; a budget never silently drops the tail.
+            std::mem::swap(&mut planned.plan, Arc::make_mut(&mut plan));
+            loop {
+                planned
+                    .advance_representatives(|| cancellation.is_cancelled(command.generation))?;
+                if !drain_representatives || planned.representative_stream.is_none() {
+                    break;
+                }
+            }
+            std::mem::swap(&mut planned.plan, Arc::make_mut(&mut plan));
+        }
+        if round_index + 1 == rounds.len() && planned.representative_stream.is_some() {
+            rounds.push(Vec::new());
+        }
         let round_page_ids = std::mem::take(&mut rounds[round_index]);
         check_generation(cancellation, command.generation)?;
         let (mut round_pages, decode_stats) = state.page_cache.load_cancellable(
@@ -2157,8 +2598,13 @@ fn run_render(
                 label_pixel_paints: report.label_pixel_paints,
                 rep_members_tested: report.stats.rep_members_tested,
                 rep_members_drawn: report.stats.rep_members_drawn,
+                representative_spans: report.stats.representative_spans,
+                representative_pixels: report.stats.representative_pixels,
                 hier_cells_visited: report.stats.hier_cells_visited,
                 subtrees_pruned: report.stats.subtrees_pruned,
+                once_full_tiles: report.stats.once_full_tiles,
+                once_passes_skipped: report.stats.once_passes_skipped,
+                once_items_skipped: report.stats.once_items_skipped,
                 summary_cells: report.summary_cell_paints,
                 summary_pixels: report.summary_pixel_paints,
             }
@@ -2204,7 +2650,9 @@ fn run_render(
                         generation: command.generation,
                         round: (round_index + 1) as u64,
                     }),
-                    complete: !pixels.partial && scene.deferred_pages().is_empty(),
+                    complete: !pixels.partial
+                        && planned.representative_stream.is_none()
+                        && scene.deferred_pages().is_empty(),
                     summary_layers: summary.planes.len(),
                 },
                 scene: Arc::clone(&scene),
@@ -2251,13 +2699,13 @@ fn run_render(
             .map_or(QueryContext::default(), |p| p.context)
             .wire();
         let response = format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} queue_us={} wall_us={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
                 published_output,
                 if command.raw_frame { "raw" } else { "png" },
-                pixels.partial as u8,
+                (pixels.partial || planned.representative_stream.is_some()) as u8,
                 scene.deferred_pages().len(),
                 pixels.frame_cache_hit as u8,
                 state
@@ -2336,6 +2784,17 @@ fn run_render(
                 planned.summary.culls.rep_children,
                 planned.summary.culls.rep_page_level,
                 planned.summary.culls.rep_level,
+                planned.summary.culls.fit_pct,
+                planned.summary.culls.fit_cull,
+                planned.summary.culls.fit_over,
+                planned.summary.culls.fit_thin,
+                planned.summary.culls.fit_full_pct,
+                planned.summary.culls.fit_none_pct,
+                planned.summary.culls.sub_cut_boxes,
+                planned.summary.culls.sub_cut_box_over,
+                planned.summary.culls.sub_cut_box_level,
+                planned.summary.culls.sub_cut_box_unsure,
+                planned.summary.culls.shape_cut,
                 summary.planes.len(),
                 pixels.summary_cells,
                 pixels.summary_pixels,
@@ -2346,8 +2805,28 @@ fn run_render(
                 planned.summary.representative_points,
                 planned.summary.representative_tested,
                 planned.summary.representative_limited as u8,
+                planned.summary.representative_nodes,
+                planned.summary.representative_proxies,
+                planned.summary.representative_bytes,
+                planned.summary.representative_pixels,
+                pixels.representative_spans,
+                pixels.representative_pixels,
+                pixels.once_full_tiles,
+                pixels.once_passes_skipped,
+                pixels.once_items_skipped,
+                queue_us,
+                // up to this frame's response: the phases above account for
+                // part of it, the rest is time no phase timer covers
+                elapsed_us(run_started),
             );
         respond(responses, format!("{response} {query_context}"));
+        // Representative batches bound query work, not the number of full
+        // scene rasters: publish one preview, then drain the resumable cursor
+        // for the next scene. Otherwise tiny/IO-limited batches would paint an
+        // ever-growing prefix repeatedly (quadratic refinement cost).
+        if planned.representative_stream.is_some() {
+            drain_representatives = true;
+        }
         // Cost-aware refinement (F2R-09 REOPEN, §3.15): every round
         // re-rasterizes the whole accumulated scene, so on a large
         // cold view the intermediate frames themselves became the
@@ -2359,6 +2838,9 @@ fn run_render(
         // that sub-500ms jobs get no refinement at all.
         if round_index + 1 < rounds.len() && pixels.raster_us > refinement_raster_budget_us() {
             collapse_refinement_tail(&mut rounds, round_index);
+            // As for page refinement, pay at most one further expensive
+            // raster. Queries still check cancellation at every node/batch.
+            drain_representatives = true;
         }
         round_index += 1;
     }
@@ -2671,6 +3153,15 @@ fn make_plan_request(
         page_hairline: !command.thin_keep,
         summary_layers: Vec::new(),
         prune_summary: false,
+        // sub-cut boxes (hier.rs SUB_CUT_BOX_PX): off unless
+        // FLOE_RUST_SUB_CUT_BOX=on - the density representation below the
+        // cut replaces them (see sub_cut_box_enabled)
+        sub_cut_box: !command.exact && command.thin_keep && sub_cut_box_enabled(),
+        shape_cut: !command.exact && command.thin_keep && shape_cut_enabled(),
+        // the viewer's frames switch reaches the planner (review 2026-09-20: it
+        // only reached the raster, so a frames-off view still planned - and
+        // walked for - every depth-boundary outline)
+        frames: command.frames,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {

@@ -119,14 +119,14 @@ fn main() {
              [--plan-batch N] [--encode-batch N] \
              [--page-target-mb N] \
              [--coverage | --coverage-only] [--no-lod] [--frontier-only] \
-             [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1] \
+             [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1] [--occupancy-prune 0|1] \
              [--slow-cell-s S] [--p2-shard-limit-mb N] \
              [--profile-cell NAME | --profile-cell-ci N] \
              [--profile-jobs N,N,...] [--profile-repeat N] \
              [--profile-snapshot PATH] [--profile-snapshot-refresh]\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
-             [--depth N] [--explain 1] [--page-hairline 0|1] [--sub-cut-wash 0|1] [--page-reps 0|1] \
+             [--depth N] [--explain 1] [--page-hairline 0|1] [--sub-cut-wash 0|1] [--page-reps 0|1] [--sub-cut-box 0|1] [--sub-cut-box-px N] [--decode-budget-mb N] \
              [--summary-layers a/b,..] [--prune-summary 0|1]\n       \
              floe-index occupancy <outdir> [--layer L/D] [--level N] \
              [--dump]\n       \

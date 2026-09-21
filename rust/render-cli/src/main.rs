@@ -226,6 +226,9 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         page_hairline: true,
         summary_layers: Vec::new(),
         prune_summary: false,
+        sub_cut_box: false,
+        shape_cut: false,
+        frames: true,
     })
 }
 

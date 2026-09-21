@@ -42,7 +42,7 @@
 //!   match the cache's design.ovm; a file that fails any check reads
 //!   as "no summary".
 
-use floe_oasis::doc::{Doc, PathRec, PolyRec, RectRec, Rep};
+use floe_oasis::doc::{Doc, PathRec, PlaceRec, PolyRec, RectRec, Rep};
 use floe_ovm::Ovm;
 use floe_tiler::hier::cell_bboxes;
 use floe_tiler::{is_axis, path_outline_any, Xf};
@@ -141,6 +141,18 @@ pub struct Opts {
     /// the work, and 12 threads ran at one thread's speed); false =
     /// the count-based split (`--occupancy-balance 0`, the kill switch)
     pub balanced_units: bool,
+    /// stop the hierarchy walk at a placed cell whose recursive bbox
+    /// fits in one grid cell (both extents <= the cell): its bbox is
+    /// marked - at most a 2 x 2 block - into the planes of the depths
+    /// where this layer has shapes under it, and an axis-aligned Grid
+    /// of such a cell with a pitch <= the cell marks its footprint in
+    /// one go. The result is a superset of the exact marking within
+    /// one cell (exact <= pruned <= dilate(exact, 1 cell)); the cost
+    /// stops growing with the number of instances below the cell size
+    /// (field 2026-09-18: MAIN01's 800 M placements made the exact
+    /// walk take hours). false = the exact walk
+    /// (`--occupancy-prune 0`; the oracle gates use it)
+    pub prune: bool,
 }
 
 impl Default for Opts {
@@ -153,8 +165,90 @@ impl Default for Opts {
             max_bytes: DEFAULT_MAX_BYTES,
             progress: None,
             balanced_units: true,
+            prune: true,
         }
     }
+}
+
+/// recursive bbox of a cell (floe_tiler::hier::cell_bboxes)
+type Win = (i64, i64, i64, i64);
+
+/// The prune context of one layer build (Opts::prune): per cell the
+/// recursive bbox, whether it fits one grid cell, and the bit mask of
+/// the relative placement depths at which this layer has shapes under
+/// the cell (bit 0 = the cell's own records; bit 31 saturates).
+#[derive(Clone, Copy)]
+struct Prune<'a> {
+    bboxes: &'a [Option<Win>],
+    small: &'a [bool],
+    depth_mask: &'a [u32],
+}
+
+/// relative-depth masks of one layer, bottom-up over the cells that
+/// hold it (`has`)
+fn layer_depth_masks(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> Vec<u32> {
+    fn go(
+        doc: &Doc,
+        ci: usize,
+        shapes: &[CellShapes<'_>],
+        has: &[bool],
+        memo: &mut Vec<Option<u32>>,
+        open: &mut Vec<bool>,
+    ) -> u32 {
+        if let Some(m) = memo[ci] {
+            return m;
+        }
+        if open[ci] {
+            return 0;
+        }
+        open[ci] = true;
+        let mut m: u32 = if shapes[ci].is_empty() { 0 } else { 1 };
+        for pl in &doc.cells[ci].places {
+            if !has[pl.cell] {
+                continue;
+            }
+            let cm = go(doc, pl.cell, shapes, has, memo, open);
+            m |= (cm << 1) | (cm & (1 << 31));
+        }
+        open[ci] = false;
+        memo[ci] = Some(m);
+        m
+    }
+    let mut memo = vec![None; doc.cells.len()];
+    let mut open = vec![false; doc.cells.len()];
+    for ci in 0..doc.cells.len() {
+        if has[ci] {
+            go(doc, ci, shapes, has, &mut memo, &mut open);
+        }
+    }
+    memo.into_iter().map(|m| m.unwrap_or(0)).collect()
+}
+
+/// An axis-aligned Grid placement whose pitch is at most the cell on
+/// both axes: every grid cell of its footprint meets a member's bbox,
+/// so the footprint (the union of the first and the last member's
+/// world bbox) marks what the members would, in one fill.
+fn grid_prunable(rep: &Rep, c: i64) -> bool {
+    match rep {
+        Rep::Grid { na, nb, va, vb } => {
+            let axis = |v: &(i64, i64)| (v.0 == 0 || v.1 == 0) && v.0.abs() <= c && v.1.abs() <= c;
+            *na >= 1 && *nb >= 1 && axis(va) && axis(vb)
+        }
+        _ => false,
+    }
+}
+
+/// world bbox of a placed cell's recursive bbox
+fn placed_bbox(b: Win, xf: &Xf, pl: &PlaceRec, dx: i64, dy: i64) -> (i128, i128, i128, i128) {
+    let t = xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
+    let a = t.apply(b.0, b.1);
+    let z = t.apply(b.2, b.3);
+    (
+        a.0.min(z.0) as i128,
+        a.1.min(z.1) as i128,
+        a.0.max(z.0) as i128,
+        a.1.max(z.1) as i128,
+    )
 }
 
 /// how many plain placements deep the balanced split descends looking
@@ -619,9 +713,78 @@ struct Marker<'a> {
     /// single thread: the local count is exact)
     shared: Option<&'a std::sync::atomic::AtomicU64>,
     unflushed: u64,
+    prune: Option<Prune<'a>>,
 }
 
 impl<'a> Marker<'a> {
+    /// Opts::prune: the subtree of `ci` (placed by `xf`, at placement
+    /// depth `depth`) as its bbox, into the plane of every relative
+    /// depth at which this layer has shapes under it.
+    fn mark_subtree(&mut self, ci: usize, xf: &Xf, depth: u32) -> bool {
+        let Some(p) = self.prune else { return true };
+        let Some(b) = p.bboxes[ci] else { return true };
+        let a = xf.apply(b.0, b.1);
+        let z = xf.apply(b.2, b.3);
+        self.mark_world_rect_at_depths(
+            (
+                a.0.min(z.0) as i128,
+                a.1.min(z.1) as i128,
+                a.0.max(z.0) as i128,
+                a.1.max(z.1) as i128,
+            ),
+            p.depth_mask[ci],
+            depth,
+        )
+    }
+
+    fn mark_world_rect_at_depths(
+        &mut self,
+        r: (i128, i128, i128, i128),
+        mask: u32,
+        depth: u32,
+    ) -> bool {
+        let saved = self.depth;
+        let mut bit = 0u32;
+        let mut ok = true;
+        while ok && bit < 32 && (mask >> bit) != 0 {
+            if mask & (1 << bit) != 0 {
+                self.depth = depth.saturating_add(bit);
+                ok = self.mark_world_rect(r.0, r.1, r.2, r.3);
+            }
+            bit += 1;
+        }
+        self.depth = saved;
+        ok
+    }
+
+    /// Opts::prune for a Grid placement of a small cell with a pitch
+    /// at most the cell: the footprint in one fill (see grid_prunable)
+    fn mark_grid_footprint(&mut self, pl: &PlaceRec, xf: &Xf, depth: u32) -> bool {
+        let Some(p) = self.prune else { return true };
+        let Some(b) = p.bboxes[pl.cell] else {
+            return true;
+        };
+        let Rep::Grid { na, nb, va, vb } = &pl.rep else {
+            return true;
+        };
+        let (la, lb) = (*na as i64 - 1, *nb as i64 - 1);
+        let first = placed_bbox(b, xf, pl, 0, 0);
+        let last = placed_bbox(b, xf, pl, la * va.0 + lb * vb.0, la * va.1 + lb * vb.1);
+        if !self.charge(1) {
+            return false;
+        }
+        self.mark_world_rect_at_depths(
+            (
+                first.0.min(last.0),
+                first.1.min(last.1),
+                first.2.max(last.2),
+                first.3.max(last.3),
+            ),
+            p.depth_mask[pl.cell],
+            depth.saturating_add(1),
+        )
+    }
+
     fn charge(&mut self, n: u64) -> bool {
         self.work = self.work.saturating_add(n);
         if self.work > self.max_work {
@@ -706,6 +869,15 @@ impl<'a> Marker<'a> {
                 let pl = &self.doc.cells[u.ci].places[*pi];
                 // Grid/Pts members are charged one each, exactly as the
                 // walk charges them; a plain placement is not charged
+                if let Some(p) = self.prune {
+                    if p.small[pl.cell]
+                        && grid_prunable(&pl.rep, self.c)
+                        && *m0 == 0
+                        && *m1 == rep_members(&pl.rep)
+                    {
+                        return self.mark_grid_footprint(pl, &u.xf, u.depth);
+                    }
+                }
                 let charged = !matches!(pl.rep, Rep::One);
                 for k in *m0..*m1 {
                     if charged && !self.charge(1) {
@@ -1071,6 +1243,11 @@ impl<'a> Marker<'a> {
         if self.over || !self.has[ci] {
             return !self.over;
         }
+        if let Some(p) = self.prune {
+            if p.small[ci] {
+                return self.mark_subtree(ci, xf, depth);
+            }
+        }
         // the cell's own records are at `depth`, its placements' one deeper
         self.depth = depth;
         let cell = &self.doc.cells[ci];
@@ -1101,6 +1278,14 @@ impl<'a> Marker<'a> {
                     }
                 }
                 Rep::Grid { na, nb, va, vb } => {
+                    if let Some(p) = self.prune {
+                        if p.small[pl.cell] && grid_prunable(&pl.rep, self.c) {
+                            if !self.mark_grid_footprint(pl, xf, depth) {
+                                return false;
+                            }
+                            continue;
+                        }
+                    }
                     // member offsets live in the parent frame: place
                     // the child at (x + dx, y + dy) under the parent's
                     // xf. Members are walked as they are enumerated and
@@ -1287,6 +1472,7 @@ fn rep_member(rep: &Rep, k: u64) -> (i64, i64) {
 /// placements' members in `pieces` ranges; plain placements are
 /// descended into while `depth < expand`
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn collect_units(
     doc: &Doc,
     has: &[bool],
@@ -1296,6 +1482,8 @@ fn collect_units(
     depth: usize,
     expand: usize,
     pieces: usize,
+    small: Option<&[bool]>,
+    c: i64,
     out: &mut Vec<Unit>,
 ) {
     let cell = &doc.cells[ci];
@@ -1330,7 +1518,7 @@ fn collect_units(
         if !has[pl.cell] {
             continue;
         }
-        if matches!(pl.rep, Rep::One) && depth < expand {
+        if matches!(pl.rep, Rep::One) && depth < expand && !small.is_some_and(|s| s[pl.cell]) {
             let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
             collect_units(
                 doc,
@@ -1341,12 +1529,29 @@ fn collect_units(
                 depth + 1,
                 expand,
                 pieces,
+                small,
+                c,
                 out,
             );
             continue;
         }
         let members = rep_members(&pl.rep);
         if members == 0 {
+            continue;
+        }
+        if small.is_some_and(|s| s[pl.cell]) && grid_prunable(&pl.rep, c) {
+            // one fill (Marker::mark_grid_footprint): never split
+            out.push(Unit {
+                ci,
+                xf,
+                depth: depth as u32,
+                extra: 0,
+                kind: UnitKind::Place {
+                    pi,
+                    m0: 0,
+                    m1: members,
+                },
+            });
             continue;
         }
         let chunk = ((members + pieces as u64 - 1) / pieces as u64).max(1);
@@ -1368,17 +1573,31 @@ fn collect_units(
 /// per cell, the estimated marking work of the layer under it: its own
 /// records on the layer (repetition members counted) plus every
 /// placement's members times the child's weight; a cycle adds nothing
-fn layer_weights(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> Vec<u64> {
+/// with the prune a small cell is one bbox mark and a prunable grid of one is one fill
+fn layer_weights(
+    doc: &Doc,
+    shapes: &[CellShapes<'_>],
+    has: &[bool],
+    small: Option<&[bool]>,
+    c: i64,
+) -> Vec<u64> {
+    #[allow(clippy::too_many_arguments)]
     fn weight(
         doc: &Doc,
         ci: usize,
         shapes: &[CellShapes<'_>],
         has: &[bool],
+        small: Option<&[bool]>,
+        c: i64,
         memo: &mut Vec<Option<u64>>,
         open: &mut Vec<bool>,
     ) -> u64 {
         if let Some(w) = memo[ci] {
             return w;
+        }
+        if small.is_some_and(|s| s[ci]) {
+            memo[ci] = Some(1);
+            return 1;
         }
         if open[ci] {
             return 0;
@@ -1399,8 +1618,12 @@ fn layer_weights(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> Vec<u64>
             if !has[pl.cell] {
                 continue;
             }
-            let child = weight(doc, pl.cell, shapes, has, memo, open);
-            w = w.saturating_add(rep_members(&pl.rep).saturating_mul(child.max(1)));
+            let child = weight(doc, pl.cell, shapes, has, small, c, memo, open);
+            if small.is_some_and(|s| s[pl.cell]) && grid_prunable(&pl.rep, c) {
+                w = w.saturating_add(1);
+            } else {
+                w = w.saturating_add(rep_members(&pl.rep).saturating_mul(child.max(1)));
+            }
         }
         open[ci] = false;
         memo[ci] = Some(w);
@@ -1409,7 +1632,7 @@ fn layer_weights(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> Vec<u64>
     let mut memo = vec![None; doc.cells.len()];
     let mut open = vec![false; doc.cells.len()];
     for ci in 0..doc.cells.len() {
-        weight(doc, ci, shapes, has, &mut memo, &mut open);
+        weight(doc, ci, shapes, has, small, c, &mut memo, &mut open);
     }
     memo.into_iter().map(|w| w.unwrap_or(0)).collect()
 }
@@ -1434,6 +1657,7 @@ fn collect_units_weighted(
     budget: u64,
     weights: &[u64],
     c: i64,
+    small: Option<&[bool]>,
     out: &mut Vec<Unit>,
 ) {
     let cell = &doc.cells[ci];
@@ -1516,8 +1740,24 @@ fn collect_units_weighted(
             continue;
         }
         let child = weights[pl.cell].max(1);
+        let small_child = small.is_some_and(|s| s[pl.cell]);
+        if small_child && grid_prunable(&pl.rep, c) {
+            // one fill (Marker::mark_grid_footprint): never split
+            out.push(Unit {
+                ci,
+                xf,
+                depth: d,
+                extra: 0,
+                kind: UnitKind::Place {
+                    pi,
+                    m0: 0,
+                    m1: members,
+                },
+            });
+            continue;
+        }
         if matches!(pl.rep, Rep::One) {
-            if child > budget && depth < MAX_EXPAND_DEPTH {
+            if child > budget && depth < MAX_EXPAND_DEPTH && !small_child {
                 let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
                 collect_units_weighted(
                     doc,
@@ -1529,6 +1769,7 @@ fn collect_units_weighted(
                     budget,
                     weights,
                     c,
+                    small,
                     out,
                 );
                 continue;
@@ -1542,7 +1783,11 @@ fn collect_units_weighted(
             });
             continue;
         }
-        if child > budget && members <= EXPAND_MEMBERS_MAX && depth < MAX_EXPAND_DEPTH {
+        if child > budget
+            && members <= EXPAND_MEMBERS_MAX
+            && depth < MAX_EXPAND_DEPTH
+            && !small_child
+        {
             // a few members of a heavy child: each member's units of
             // its own, so a giant record inside reaches its Members
             // units; the member's charge (the walk charges each Grid/
@@ -1561,6 +1806,7 @@ fn collect_units_weighted(
                     budget,
                     weights,
                     c,
+                    small,
                     out,
                 );
                 if out.len() > start {
@@ -1613,11 +1859,12 @@ fn units_for(
     jobs: usize,
     balanced: bool,
     c: i64,
+    small: Option<&[bool]>,
 ) -> Vec<Unit> {
     let target = jobs.max(1) * 4;
     let mut units = Vec::new();
     if balanced {
-        let weights = layer_weights(doc, shapes, has);
+        let weights = layer_weights(doc, shapes, has, small, c);
         let budget = (weights[doc.top] / target as u64).max(1);
         collect_units_weighted(
             doc,
@@ -1629,6 +1876,7 @@ fn units_for(
             budget,
             &weights,
             c,
+            small,
             &mut units,
         );
         if !units.is_empty() {
@@ -1646,6 +1894,8 @@ fn units_for(
             0,
             expand,
             target,
+            small,
+            c,
             &mut units,
         );
         if units.len() >= target {
@@ -1673,6 +1923,7 @@ fn build_layer(
     jobs: usize,
     progress: Option<fn(&str)>,
     balanced: bool,
+    prune: Option<(&[Option<Win>], &[bool])>,
 ) -> (Layer, u64) {
     let layer_with = |status: u8, work: u64, planes: Vec<Plane>| Layer {
         layer: key.0,
@@ -1685,7 +1936,21 @@ fn build_layer(
         return (layer_with(STATUS_EMPTY, 0, Vec::new()), 0);
     }
     let prepared = std::time::Instant::now();
-    let units = units_for(doc, has, shapes, jobs, balanced, cell_dbu);
+    let depth_mask = prune.map(|_| layer_depth_masks(doc, shapes, has));
+    let prune = prune.map(|(bboxes, small)| Prune {
+        bboxes,
+        small,
+        depth_mask: depth_mask.as_deref().unwrap_or(&[]),
+    });
+    let units = units_for(
+        doc,
+        has,
+        shapes,
+        jobs,
+        balanced,
+        cell_dbu,
+        prune.map(|p| p.small),
+    );
     let planes = Planes::new(w, h, layer_max_depth(doc, shapes, has));
     let threads = jobs.max(1).min(units.len()).max(1);
     let shared = std::sync::atomic::AtomicU64::new(0);
@@ -1761,6 +2026,7 @@ fn build_layer(
                             paths_skipped: 0,
                             shared: if threads > 1 { Some(shared) } else { None },
                             unflushed: 0,
+                            prune,
                         };
                         loop {
                             let k = next.fetch_add(1, Relaxed);
@@ -1902,10 +2168,19 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
         log("grouping records by layer");
     }
     let mut index = index_shapes(doc);
+    // Opts::prune: the cells whose whole subtree fits one grid cell
+    let small: Vec<bool> = bboxes
+        .iter()
+        .map(|b| opts.prune && b.is_some_and(|b| b.2 - b.0 <= cell_dbu && b.3 - b.1 <= cell_dbu))
+        .collect();
     if let Some(log) = opts.progress {
         log(&format!(
-            "grouped records in {:.3}s",
-            indexing.elapsed().as_secs_f64()
+            "grouped records in {:.3}s; prune {} ({} of {} cells fit a {} dbu cell)",
+            indexing.elapsed().as_secs_f64(),
+            if opts.prune { "on" } else { "off" },
+            small.iter().filter(|&&s| s).count(),
+            small.len(),
+            cell_dbu
         ));
     }
     for &key in &doc.layer_order {
@@ -1945,6 +2220,11 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
             opts.jobs,
             opts.progress,
             opts.balanced_units,
+            if opts.prune {
+                Some((bboxes.as_slice(), small.as_slice()))
+            } else {
+                None
+            },
         );
         skipped += sk;
         if layer.status == STATUS_OK {
@@ -2656,6 +2936,7 @@ mod tests {
             paths_skipped: 0,
             shared: None,
             unflushed: 0,
+            prune: None,
         };
         let world: Vec<(i128, i128)> = pts.iter().map(|&(x, y)| (x as i128, y as i128)).collect();
         assert!(m.mark_world_poly(&world));
@@ -3005,6 +3286,7 @@ mod tests {
             &Opts {
                 base_um: 0.01,
                 max_work: budget,
+                prune: false,
                 ..Opts::default()
             },
         )
@@ -3036,6 +3318,7 @@ mod tests {
             &Opts {
                 base_um: 0.01,
                 max_work: budget,
+                prune: false,
                 ..Opts::default()
             },
         )
@@ -3127,8 +3410,8 @@ mod tests {
         assert_eq!(write_ovo(&one), write_ovo(&many));
         let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
         let has = layer_presence(&d, &shapes);
-        assert!(units_for(&d, &has, &shapes, 3, false, 10).len() >= 12);
-        assert!(units_for(&d, &has, &shapes, 3, true, 10).len() >= 12);
+        assert!(units_for(&d, &has, &shapes, 3, false, 10, None).len() >= 12);
+        assert!(units_for(&d, &has, &shapes, 3, true, 10, None).len() >= 12);
         // a top holding one die placement: the units come from below
         let mut leaf = cell("B");
         leaf.rects.push(rect(1, 0, 0, 7, 3, Rep::One));
@@ -3168,7 +3451,7 @@ mod tests {
         let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
         let has = layer_presence(&d, &shapes);
         for balanced in [false, true] {
-            let units = units_for(&d, &has, &shapes, 3, balanced, 10);
+            let units = units_for(&d, &has, &shapes, 3, balanced, 10, None);
             assert!(
                 units.iter().all(|u| u.ci == 2),
                 "units should sit in the leaf"
@@ -3392,7 +3675,7 @@ mod tests {
         let d = doc_with(vec![top, leaf, heavy], 0, vec![(1, 0)]);
         let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
         let has = layer_presence(&d, &shapes);
-        let units = units_for(&d, &has, &shapes, 12, true, c);
+        let units = units_for(&d, &has, &shapes, 12, true, c, None);
         let members = |shape: u8| {
             units
                 .iter()
@@ -3481,6 +3764,48 @@ mod tests {
     }
 
     #[test]
+    fn the_prune_marks_a_dense_grid_of_a_small_cell_in_one_fill() {
+        // 2026-09-18: the same 100k x 100k grid that the exact walk
+        // stops on (none:work above) is, with the prune (the default),
+        // one footprint fill - a 5 dbu child at pitch 1 in 10 dbu cells
+        let mut child = cell("C");
+        child.rects.push(rect(1, 0, 0, 5, 5, Rep::One));
+        let mut top = cell("T");
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 0,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::Grid {
+                na: 100_000,
+                nb: 100_000,
+                va: (1, 0),
+                vb: (0, 0),
+            },
+        });
+        let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
+        let occ = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                max_work: 50_000,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(occ.layers[0].status, STATUS_OK);
+        assert!(occ.layers[0].work < 50_000, "work {}", occ.layers[0].work);
+        // the fill is the members' footprint: x 0..100_004, y 0..5 in 10 dbu cells
+        let plane = &occ.layers[0].planes[0];
+        assert_eq!(plane.depth, 1);
+        let l0 = &plane.levels[0];
+        assert_eq!(l0.count(), (occ.w as u64) * (occ.h as u64));
+    }
+
+    #[test]
     fn the_work_budget_is_shared_across_threads() {
         // the review's huge grid on four threads: every thread flushes
         // its charges into the layer's total, so the over-budget stop
@@ -3511,6 +3836,7 @@ mod tests {
                 base_um: 0.01,
                 max_work: budget,
                 jobs: 4,
+                prune: false,
                 ..Opts::default()
             },
         )
@@ -3757,16 +4083,16 @@ mod tests {
         let d = doc_with(vec![top, light, heavy], 0, vec![(1, 0)]);
         let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
         let has = layer_presence(&d, &shapes);
-        let weights = layer_weights(&d, &shapes, &has);
+        let weights = layer_weights(&d, &shapes, &has, None, 10);
         assert_eq!((weights[1], weights[2]), (1, 90_000 + 64));
         assert_eq!(weights[0], 60 + 90_064);
-        let by_count = units_for(&d, &has, &shapes, 4, false, 10);
+        let by_count = units_for(&d, &has, &shapes, 4, false, 10, None);
         assert_eq!(
             by_count.iter().filter(|u| u.ci == 2).count(),
             0,
             "count split leaves the block one unit"
         );
-        let balanced = units_for(&d, &has, &shapes, 4, true, 10);
+        let balanced = units_for(&d, &has, &shapes, 4, true, 10, None);
         let in_block = balanced.iter().filter(|u| u.ci == 2).count();
         assert!(
             in_block >= 8,

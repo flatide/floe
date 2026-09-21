@@ -502,6 +502,8 @@ pub fn safe_error(kind: floe_app_core::ErrorKind) -> &'static str {
 const PERF: &[&str] = &[
     "plan_us",
     "text_plan_us",
+    "queue_us",
+    "wall_us",
     "read_us",
     "decode_us",
     "decode_sum_us",
@@ -542,6 +544,26 @@ const PERF: &[&str] = &[
     "stored_rep_points",
     "stored_rep_tested",
     "stored_rep_limited",
+    "stored_rep_nodes",
+    "stored_rep_proxies",
+    "stored_rep_bytes",
+    "stored_rep_pixels",
+    "stored_rep_spans",
+    "stored_rep_painted_pixels",
+    "fit_pct",
+    "fit_cull",
+    "fit_over",
+    "fit_thin",
+    "fit_full_pct",
+    "fit_none_pct",
+    "sub_cut_boxes",
+    "sub_cut_box_over",
+    "sub_cut_box_level",
+    "sub_cut_box_unsure",
+    "shape_cut",
+    "once_tiles",
+    "once_passes",
+    "once_items",
     "rect_paints",
     "polygon_paints",
     "path_paints",
@@ -611,6 +633,12 @@ pub fn frame_header(
         .collect();
     let approximate = [
         "stored_rep_points",
+        "stored_rep_proxies",
+        "fit_pct",
+        "fit_cull",
+        "fit_over",
+        "fit_thin",
+        "sub_cut_boxes",
         "rep_kept",
         "rep_children",
         "summary_passes",
@@ -1011,6 +1039,51 @@ mod tests {
         assert!(h["query_scene"]["generation"].is_null());
         f.frame.fields.0.remove("scene_gen");
         assert!(frame_header(&f, "v", "c").is_err());
+    }
+    #[test]
+    fn upstream_fit_and_tree_diagnostics_are_numeric_and_mark_approximation() {
+        for key in [
+            "stored_rep_proxies",
+            "fit_pct",
+            "fit_cull",
+            "fit_over",
+            "fit_thin",
+            "sub_cut_boxes",
+        ] {
+            let mut f = frame();
+            f.frame.fields.0.remove("summary_cells");
+            f.frame.fields.0.insert(key.into(), "2".into());
+            f.frame.fields.0.insert("scene_complete".into(), "0".into());
+            let h: Value = serde_json::from_slice(&frame_header(&f, "v", "c").unwrap()).unwrap();
+            assert_eq!(h["approximate"], true, "{key}");
+            assert_eq!(h["perf"][key], "2");
+            assert_eq!(
+                h["query"], false,
+                "pending representative scene cannot be queried"
+            );
+            f.frame
+                .fields
+                .0
+                .insert(key.into(), "/private/secret".into());
+            let h: Value = serde_json::from_slice(&frame_header(&f, "v", "c").unwrap()).unwrap();
+            assert_eq!(h["approximate"], false, "{key}");
+            assert!(h["perf"].get(key).is_none());
+        }
+        let mut f = frame();
+        for key in [
+            "wall_us",
+            "queue_us",
+            "once_tiles",
+            "once_passes",
+            "once_items",
+            "stored_rep_bytes",
+            "stored_rep_painted_pixels",
+            "shape_cut",
+        ] {
+            f.frame.fields.0.insert(key.into(), u64::MAX.to_string());
+            let h: Value = serde_json::from_slice(&frame_header(&f, "v", "c").unwrap()).unwrap();
+            assert_eq!(h["perf"][key], u64::MAX.to_string());
+        }
     }
     #[test]
     fn malformed_frame_dimensions_payload_and_header_size_fail_before_encoding() {

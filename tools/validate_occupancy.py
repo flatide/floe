@@ -357,6 +357,41 @@ def write_deep(path):
     ly._destroy()
 
 
+def write_prune(path):
+    """the prune contract (2026-09-18) at 1 um cells: LEAF (0.4 x 0.6 um,
+    1/0 of its own, SUB inside it holding 2/0) fits one grid cell; the top
+    places it singly under every rotation/mirror, as a dense grid (pitch
+    0.5 x 0.7 um <= the cell: one footprint fill), as a sparse grid (3 um:
+    member bboxes), and inside BIG (12 um, not small; placed twice, once
+    rotated). 3/0 is the top's own box (exact path)."""
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("PRUNE")
+    leaf = ly.create_cell("LEAF")
+    sub = ly.create_cell("SUB")
+    big = ly.create_cell("BIG")
+    l1, l2, l3 = ly.layer(1, 0), ly.layer(2, 0), ly.layer(3, 0)
+    leaf.shapes(l1).insert(db.Box(0, 0, 400, 600))
+    sub.shapes(l2).insert(db.Box(0, 0, 150, 150))
+    leaf.insert(db.CellInstArray(sub.cell_index(), db.Trans(db.Vector(200, 300))))
+    top.shapes(l3).insert(db.Box(0, 0, 5 * UM, 2 * UM))
+    spots = [(1300, 1700), (7250, 900), (12600, 3400), (2900, 8800),
+             (15500, 15500), (9100, 12250), (4400, 4450), (18750, 6100)]
+    for k, (x, y) in enumerate(spots):
+        top.insert(db.CellInstArray(leaf.cell_index(), db.Trans(k % 4, k >= 4, x, y)))
+    top.insert(db.CellInstArray(leaf.cell_index(), db.Trans(db.Vector(20 * UM, 2 * UM)),
+                                db.Vector(500, 0), db.Vector(0, 700), 40, 30))
+    top.insert(db.CellInstArray(leaf.cell_index(), db.Trans(db.Vector(2 * UM, 30 * UM)),
+                                db.Vector(3 * UM, 0), db.Vector(0, 3 * UM), 12, 6))
+    big.shapes(l1).insert(db.Box(0, 0, 12 * UM, 1 * UM))
+    big.insert(db.CellInstArray(leaf.cell_index(), db.Trans(db.Vector(1 * UM, 3 * UM)),
+                                db.Vector(900, 0), db.Vector(0, 900), 10, 8))
+    top.insert(db.CellInstArray(big.cell_index(), db.Trans(db.Vector(45 * UM, 5 * UM))))
+    top.insert(db.CellInstArray(big.cell_index(), db.Trans(1, False, 70 * UM, 30 * UM)))
+    ly.write(str(path))
+    ly._destroy()
+
+
 def write_uturn(path):
     """1/0 holds a U-turn path the hull refuses (the raster refuses it
     too) beside a box; 2/0 a plain box."""
@@ -411,10 +446,13 @@ def write_chip(path, cellname, w_um, h_um):
     ly._destroy()
 
 
-def index_with_occupancy(src, um):
+def index_with_occupancy(src, um, prune=0):
+    # prune=0: the exact walk - the oracle gates compare bit for bit with
+    # KLayout; the default build prunes (PruneContractTests pin its contract)
     out = vfs_cache_dir(src)
     shutil.rmtree(out, ignore_errors=True)
     floe_index("vfs", src, out, "--occupancy", "--occupancy-um", um,
+               "--occupancy-prune", prune,
                "--no-lod", "--slow-cell-s", "999", "--jobs", "2")
     return Path(out)
 
@@ -543,6 +581,70 @@ class GenerationOracleTests(unittest.TestCase):
         lit = sum(bin(b).count("1") for b in diag[2])
         self.assertGreater(lit, 20)
         self.assertLess(lit, 120)
+
+
+class PruneContractTests(unittest.TestCase):
+    """2026-09-18: the default build (`--occupancy-prune 1`) stops the
+    walk at a placed cell whose recursive bbox fits one grid cell and
+    marks that bbox (an axis-aligned grid of one with a pitch <= the
+    cell: its footprint, in one fill). Contract against the exact walk
+    (`--occupancy-prune 0`), per layer and per depth plane: exact <=
+    pruned <= dilate(exact, one cell); the same planes; less work; the
+    file is the same whatever --jobs and the unit split."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.exact_src = TMP / "prune_exact.oas"
+        cls.pruned_src = TMP / "prune_on.oas"
+        write_prune(cls.exact_src)
+        shutil.copy2(cls.exact_src, cls.pruned_src)
+        cls.exact = read_ovo(index_with_occupancy(cls.exact_src, 1, prune=0) / "design.ovo")
+        cls.pruned_cache = index_with_occupancy(cls.pruned_src, 1, prune=1)
+        cls.pruned = read_ovo(cls.pruned_cache / "design.ovo")
+
+    @staticmethod
+    def planes(ovo):
+        return {(l["key"], p["depth"]): p["levels"][0]
+                for l in ovo["layers"] for p in l["planes"]}
+
+    @staticmethod
+    def lit(level):
+        w, h, _ = level
+        return {(i, j) for j in range(h) for i in range(w) if bit(level, i, j)}
+
+    def test_pruned_is_a_superset_within_one_cell_on_the_same_planes(self):
+        exact, pruned = self.planes(self.exact), self.planes(self.pruned)
+        self.assertEqual(sorted(exact), sorted(pruned), "same layers and depth planes")
+        extra = 0
+        for key in sorted(exact):
+            e, p = self.lit(exact[key]), self.lit(pruned[key])
+            self.assertEqual(sorted(e - p)[:5], [], "%s: exact cells missing" % (key,))
+            far = [c for c in p if not any((c[0] + dx, c[1] + dy) in e
+                                           for dx in (-1, 0, 1) for dy in (-1, 0, 1))]
+            self.assertEqual(far[:5], [], "%s: pruned cells beyond one cell of exact" % (key,))
+            extra += len(p - e)
+        self.assertGreater(extra, 0, "the fixture must exercise the prune")
+
+    def test_the_depth_planes_are_those_of_the_shapes(self):
+        depths = {}
+        for (key, depth) in self.planes(self.pruned):
+            depths.setdefault(key, set()).add(depth)
+        # 3/0: the top's own box; 1/0: BIG's box and LEAF under the top (1),
+        # LEAF under BIG (2); 2/0: SUB under LEAF under the top (2), under BIG (3)
+        self.assertEqual(depths, {(3, 0): {0}, (1, 0): {1, 2}, (2, 0): {2, 3}})
+
+    def test_the_work_drops_and_the_file_does_not_depend_on_jobs_or_the_split(self):
+        work = {l["key"]: l["work"] for l in self.exact["layers"]}
+        pruned = {l["key"]: l["work"] for l in self.pruned["layers"]}
+        self.assertLess(pruned[(1, 0)], work[(1, 0)])
+        self.assertLess(pruned[(2, 0)], work[(2, 0)])
+        shas = {sha(self.pruned_cache / "design.ovo")}
+        for extra in (("--jobs", "1"), ("--jobs", "4", "--occupancy-balance", "0")):
+            out = TMP / ("prune_alt_%s" % "_".join(a.strip("-") for a in extra))
+            floe_index("vfs", self.pruned_src, out, "--occupancy", "--occupancy-um", 1,
+                       "--no-lod", "--slow-cell-s", "999", *extra)
+            shas.add(sha(out / "design.ovo"))
+        self.assertEqual(len(shas), 1, "prune on by default, byte-identical files")
 
 
 class GenerationContractTests(unittest.TestCase):
@@ -845,7 +947,12 @@ class GenerationContractTests(unittest.TestCase):
             return sum(1 for p in im.getdata() if p != (0, 0, 0))
         exact = lit("exact", "keep")
         cull = lit("high", "cull")
-        keep = lit("high", "keep")
+        # the mask policy this symptom is about: keep draws every thin
+        # shape. The per-shape cut of 0.12.173 (a plain layout's keep: a
+        # shape under the cut on either side goes; gate of its own,
+        # tools/validate_shape_cut.py) is switched off for it
+        mask_policy = dict(run_env(), FLOE_RUST_SHAPE_CUT="off")
+        keep = lit("high", "keep", env=mask_policy)
         self.assertGreater(exact, 10000)
         self.assertEqual(keep, exact)
         # under cull the dense hairline neighbours' pages are cut and
@@ -1124,11 +1231,16 @@ class RenderTests(unittest.TestCase):
         os.environ["FLOE_RUST_OCCUPANCY_DEPTH"] = "off"
         cls.worker_nodepth = cls._start_worker()
         del os.environ["FLOE_RUST_OCCUPANCY_DEPTH"]
+        # the keep-only rule of 2026-09-11..17 (kill switch of the
+        # 2026-09-18 change that lets cull draw the summary too)
+        os.environ["FLOE_RUST_OCCUPANCY_CULL"] = "off"
+        cls.worker_keeponly = cls._start_worker()
+        del os.environ["FLOE_RUST_OCCUPANCY_CULL"]
         cls.gen = 100
 
     @classmethod
     def tearDownClass(cls):
-        for w in (cls.worker, cls.worker_off, cls.worker_nodepth):
+        for w in (cls.worker, cls.worker_off, cls.worker_nodepth, cls.worker_keeponly):
             try:
                 w.stop()
             except Exception:
@@ -1222,13 +1334,33 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(corner & lit2, set())
         self.assertTrue((21, 78) in lit2 and (28, 79) in lit2, "the L's arms")
 
-    def test_cull_exact_and_limited_depth_requests_are_untouched(self):
-        for kw, vis, reason in (({"thin": "cull"}, [(1, 0)], "policy"),
-                                ({"cut_px": 0.0}, [(1, 0)], "exact")):
-            lit, summ, _ = self._render(self.worker, visible=vis, **kw)
-            off, s_off, _ = self._render(self.worker_off, visible=vis, **kw)
-            self.assertEqual((summ["layers"], summ["none"]), (0, reason), kw)
-            self.assertEqual(lit, off, kw)
+    def test_cull_draws_the_summary_like_keep_while_exact_and_limited_depth_stay_consistent(self):
+        # 2026-09-18 (user: cull + occupancy): the wide-view summary no
+        # longer needs the mask policy. Under cull the same planes are
+        # drawn and those layers leave the page plan; the near view
+        # (cells > 1 px) returns to cull's page path, which drops the
+        # sub-cut pages. FLOE_RUST_OCCUPANCY_CULL=off is the keep-only
+        # rule of before (reason `policy`).
+        keep, s_keep, _ = self._render(self.worker, visible=[(1, 0)])
+        cull, s_cull, _ = self._render(self.worker, visible=[(1, 0)], thin="cull")
+        self.assertEqual((s_cull["layers"], s_cull["none"]), (1, "-"), s_cull)
+        self.assertEqual(cull, keep, "cull draws the same summary as keep")
+        only, s_only, _ = self._render(self.worker_keeponly, visible=[(1, 0)], thin="cull")
+        off, s_off, _ = self._render(self.worker_off, visible=[(1, 0)], thin="cull")
+        self.assertEqual((s_only["layers"], s_only["none"]), (0, "policy"), s_only)
+        self.assertEqual(only, off, "the kill switch is the old cull page path")
+        self.assertNotEqual(cull, off, "the wide view differs between summary and cull")
+        # near view: 4 um cells at 0.5 um/px (100 um over 200 px) are 8 px
+        near_lit, s_near, _ = self._render(self.worker, bbox_um=(0, 0, 100, 100),
+                                           visible=[(1, 0)], thin="cull")
+        near_off, _, _ = self._render(self.worker_off, bbox_um=(0, 0, 100, 100),
+                                      visible=[(1, 0)], thin="cull")
+        self.assertEqual((s_near["layers"], s_near["none"]), (0, "near"), s_near)
+        self.assertEqual(near_lit, near_off, "near view: cull's page path as before")
+        exact, s_exact, _ = self._render(self.worker, visible=[(1, 0)], cut_px=0.0)
+        exact_off, _, _ = self._render(self.worker_off, visible=[(1, 0)], cut_px=0.0)
+        self.assertEqual((s_exact["layers"], s_exact["none"]), (0, "exact"), s_exact)
+        self.assertEqual(exact, exact_off)
         # a limited depth draws the planes at or above it (per-depth
         # planes, 2026-09-16; user: keep at any depth): 2/0's FAR child
         # box (depth 1, at 600..650 x 1600..1650 um = pixels 60..64 x
@@ -1812,8 +1944,18 @@ class SubCutTests(unittest.TestCase):
         os.environ.pop("FLOE_RUST_PAGE_REPS", None)
         # the default worker: the plain cull (both the sub-cut rules
         # and the page frontier are off); worker_reps switches the
-        # frontier on, worker_on the sub-cut rules
+        # frontier on, worker_on the sub-cut rules. The sub-cut boxes of
+        # 0.12.168 (thin keep, few layers: what the cut drops stays as a
+        # box) have a gate of their own, tools/validate_sub_cut_box.py;
+        # here the baseline is the cut that drops, so they are switched off
+        # (the frontier and the sub-cut rules exclude them anyway)
+        # the per-shape cut of 0.12.173 (tools/validate_shape_cut.py) would
+        # take the thin pages these rules are about before they are reached:
+        # every worker here keeps the cut by the page's largest shape
+        os.environ["FLOE_RUST_SHAPE_CUT"] = "off"
+        os.environ["FLOE_RUST_SUB_CUT_BOX"] = "off"
         cls.worker = cls._worker()
+        del os.environ["FLOE_RUST_SUB_CUT_BOX"]
         os.environ["FLOE_RUST_PAGE_REPS"] = "on"
         cls.worker_reps = cls._worker()
         del os.environ["FLOE_RUST_PAGE_REPS"]
@@ -1826,6 +1968,7 @@ class SubCutTests(unittest.TestCase):
         del os.environ["FLOE_RUST_SUB_CUT_SPARSE_MPX"]
         del os.environ["FLOE_RUST_SUB_CUT_WASH_MPX"]
         del os.environ["FLOE_RUST_SUB_CUT_WASH"]
+        del os.environ["FLOE_RUST_SHAPE_CUT"]
 
     @classmethod
     def tearDownClass(cls):
@@ -2060,8 +2203,12 @@ class DeckRenderTests(unittest.TestCase):
         deck.start()
         c = Cache(str(cls.dir / "thinwide.oas"))
         c.load()
+        # the single-source reference of the deck's page path: deck passes
+        # plan without the per-shape cut of 0.12.173, so the reference does too
+        os.environ["FLOE_RUST_SHAPE_CUT"] = "off"
         single = RustRenderWorker(c)
         single.start()
+        del os.environ["FLOE_RUST_SHAPE_CUT"]
         return deck, single
 
     @classmethod

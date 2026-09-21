@@ -30,9 +30,11 @@ pub struct IndexOptions {
     pub occupancy_only: bool,
     pub occupancy_um: Option<f64>,
     pub occupancy_balance: Option<bool>,
+    pub occupancy_prune: Option<bool>,
     pub representatives: bool,
     pub representatives_only: bool,
     pub representatives_points: Option<u64>,
+    pub representatives_format: Option<u8>,
     pub slow_cell_s: Option<f64>,
     pub p2_shard_limit_mb: Option<u64>,
     pub profile_cell: Option<ProfileCell>,
@@ -52,9 +54,11 @@ impl Default for IndexOptions {
             occupancy_only: false,
             occupancy_um: None,
             occupancy_balance: None,
+            occupancy_prune: None,
             representatives: false,
             representatives_only: false,
             representatives_points: None,
+            representatives_format: None,
             slow_cell_s: None,
             p2_shard_limit_mb: None,
             profile_cell: None,
@@ -67,6 +71,12 @@ impl Default for IndexOptions {
 }
 impl IndexOptions {
     pub fn validate(&self) -> Result<()> {
+        if self
+            .representatives_format
+            .is_some_and(|n| n != 1 && n != 2)
+        {
+            return Err(Error::input("representatives-format must be 1 or 2"));
+        }
         if self
             .representatives_points
             .is_some_and(|n| n == 0 || n > 4_194_304)
@@ -145,7 +155,10 @@ impl IndexOptions {
         self.occupancy.unwrap_or(false) || self.occupancy_um.is_some()
     }
     pub fn wants_representatives(&self) -> bool {
-        self.representatives || self.representatives_only || self.representatives_points.is_some()
+        self.representatives
+            || self.representatives_only
+            || self.representatives_points.is_some()
+            || self.representatives_format.is_some()
     }
 }
 
@@ -191,7 +204,9 @@ pub fn decide(
     }
     if *state == CacheState::Current && !options.force {
         if options.wants_representatives()
-            && (!has_representatives || options.representatives_points.is_some())
+            && (!has_representatives
+                || options.representatives_points.is_some()
+                || options.representatives_format.is_some())
         {
             return Ok(if options.wants_occupancy() && !has_occupancy {
                 Action::SummariesOnly
@@ -237,12 +252,18 @@ fn arguments(
         if let Some(n) = o.representatives_points {
             add(&mut a, "--representatives-points", n);
         }
+        if let Some(n) = o.representatives_format {
+            add(&mut a, "--representatives-format", n);
+        }
         return Ok(a);
     }
     if *action == Action::OccupancyOnly {
         a.push("--occupancy-only".into());
         if let Some(v) = o.occupancy_balance {
             add(&mut a, "--occupancy-balance", u8::from(v));
+        }
+        if let Some(v) = o.occupancy_prune {
+            add(&mut a, "--occupancy-prune", u8::from(v));
         }
         if let Some(v) = o.occupancy_um {
             add(&mut a, "--occupancy-um", v);
@@ -254,12 +275,18 @@ fn arguments(
     }
     if *action == Action::Build && o.wants_representatives() {
         a.push("--representatives".into());
+        if let Some(n) = o.representatives_format {
+            add(&mut a, "--representatives-format", n);
+        }
         if let Some(n) = o.representatives_points {
             add(&mut a, "--representatives-points", n);
         }
     }
     if *action != Action::Profile && o.wants_occupancy() {
         a.push("--occupancy".into());
+        if let Some(v) = o.occupancy_prune {
+            add(&mut a, "--occupancy-prune", u8::from(v));
+        }
         if let Some(v) = o.occupancy_balance {
             add(&mut a, "--occupancy-balance", u8::from(v));
         }
@@ -834,6 +861,60 @@ mod tests {
         o.representatives_points = None;
         o.profile_cell = Some(ProfileCell::Index(0));
         assert!(o.validate().is_err());
+    }
+    #[test]
+    fn upstream_summary_controls_preserve_defaults_and_forward_each_pass() {
+        let mut o = IndexOptions::default();
+        for format in [1, 2] {
+            o.representatives_format = Some(format);
+            assert!(o.wants_representatives());
+            assert_eq!(
+                decide(&o, &CacheState::Current, true, true).unwrap(),
+                Action::RepresentativesOnly
+            );
+            for action in [
+                Action::Build,
+                Action::RepresentativesOnly,
+                Action::SummariesOnly,
+            ] {
+                let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action).unwrap();
+                assert!(a.windows(2).any(|w| w
+                    == [
+                        OsString::from("--representatives-format"),
+                        format.to_string().into()
+                    ]));
+            }
+        }
+        for format in [0, 3, 255] {
+            o.representatives_format = Some(format);
+            assert!(o.validate().is_err());
+        }
+        o.representatives_format = None;
+        o.occupancy = Some(true);
+        for prune in [false, true] {
+            o.occupancy_prune = Some(prune);
+            for action in [Action::Build, Action::OccupancyOnly] {
+                let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action).unwrap();
+                assert!(a.windows(2).any(|w| w
+                    == [
+                        OsString::from("--occupancy-prune"),
+                        u8::from(prune).to_string().into()
+                    ]));
+            }
+            assert_eq!(
+                decide(&o, &CacheState::Current, true, true).unwrap(),
+                Action::OccupancyPresent
+            );
+        }
+        let a = arguments(
+            Path::new("/s"),
+            Path::new("/c"),
+            &IndexOptions::default(),
+            &Action::Build,
+        )
+        .unwrap();
+        assert!(!a.contains(&OsString::from("--representatives-format")));
+        assert!(!a.contains(&OsString::from("--occupancy-prune")));
     }
     #[test]
     fn reuse_force_and_additive_policy() {

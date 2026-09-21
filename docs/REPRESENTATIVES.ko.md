@@ -1,5 +1,10 @@
 # 인덱싱 시 생성하는 대표 점 — OVR1 (0.12.154)
 
+실칩 테스트 자산: [MAIN09.oas / MAIN01.oas 통계](REALCHIP_TEST_NOTES.ko.md).
+
+후속 설계안: [OVR2 — 형상 대표와 오차에 따른 사전 병합](OVR2_DESIGN.ko.md).
+2026-09-18 사용자 요청에 따른 구현 전 설계이며, 아래 OVR1의 현재 동작과 구분한다.
+
 일반 레이아웃의 `thin:cull`에서 컷 아래의 존재를 보여 주는 선택 기능이다.
 페이지 frontier와 sub-cut wash를 켜지 않는다. 원본 플랜은 종전 cull 그대로이며,
 `design.ovr`의 실제 도형 위 점을 레이어 색으로 보충한다. 박스 영역을 채우지 않는다.
@@ -41,20 +46,34 @@ floe2 index source.oas --representatives-only --representatives-points 524288 --
 
 ## 생성 비용
 
-1. 명시 레코드·배치를 읽고 `(cell, layer, datatype, 상대 depth)`별 논리 멤버 수와
-   누적 구간을 아래에서 위로 계산한다. Grid는 `na × nb`, Pts는 배열 길이만 센다.
-2. top의 `(layer, datatype, depth)`별로 멤버 번호를 결정적으로 샘플링한다.
-   누적 구간 이진 검색으로 선택한 도형/배치를 찾고, 반복 오프셋을 산술적으로 구한다.
-   Grid/Pts 전체 멤버를 순회하거나 occupancy 셀을 마킹하지 않는다.
+1. count(아래에서 위로): 명시 레코드·배치를 읽고 `(cell, layer, datatype, 상대
+   depth)`별 논리 멤버 수를 계산한다. Grid는 `na × nb`, Pts는 배열 길이만 센다.
+   배치는 자식 셀별로 먼저 합산하므로(합은 순서와 무관) 비용은 레코드 수 + Σ(서로
+   다른 자식 × 자식 그룹 수)이고, 메모리는 셀 × 그룹의 디렉터리뿐이다. 배치 레코드마다
+   저장하는 것은 없다(0.12.156; 0.12.154의 배치당 누적 구간 엔트리는 MAIN01의 배치
+   수만으로 2 GiB 상한을 넘어 실패했다).
+2. resolve(위에서 아래로, postorder 역순): top의 `(layer, datatype, depth)`별로 멤버
+   순위를 결정적으로 샘플링하고, 각 샘플을 (최종 top 그룹, 원래 샘플 순번, 현재 셀의
+   논리 순위, 누적 변환) 요청으로 만들어 계층을 따라 내려보낸다. 셀은 모든 부모의
+   요청을 모은 뒤 한 번만 훑는다. count와 같은 순서(사각형, 다각형, 경로, 배치)로
+   레코드를 한 번 순회하며 그룹별 커서를 전진시키고, 배치에 떨어진 순위는 `r / n`
+   (반복 멤버)·`r % n`(자식 내부 순위)으로 자식에 넘기며, 도형에 떨어진 순위는 반복
+   오프셋을 산술적으로 구해 점으로 확정한다. 요청은 이동하고 처리한 셀의 버퍼는
+   해제된다. Grid/Pts 전체 멤버를 순회하거나 occupancy 셀을 마킹하지 않는다.
+   비용은 O(레코드)가 아니라 훑는 셀의 레코드 + Σ(서로 다른 자식 × 자식 그룹) +
+   샘플 × 깊이 + 정렬이며, 총 시간은 실측 대상이다.
 3. 직사각형 중심, 다각형 꼭짓점, 경로 중심선 위 점을 계층 변환한다. 다각형 bbox
    중심처럼 도형 밖일 수 있는 위치는 사용하지 않는다. 형상 크기 정보도 저장한다.
 4. 점들을 Morton 순서로 정렬하고 128점씩 공간 디렉터리를 만든다.
 
 전 파일 최대 4,194,304점(보통 최대 약 162 MiB; reader 상한 192 MiB), 그룹별 기본
 262,144점이다. 전역 예산을 나눌 때 작은 그룹의 몫을 먼저 확보하고 큰 그룹에
-논리 멤버 수 비례로 배분한다. 인덱싱 중 누적 구간 엔트리는 최대 134,217,728개
-(16-byte 엔트리 약 2 GiB, Vec 여유 용량·맵·파싱 Doc·좌표 캐시는 별도), cell/group
-수는 최대 4,194,304개, top 그룹 수는 최대 65,536개다. 한계·좌표/멤버 수 overflow·
+논리 멤버 수 비례로 배분한다. 인덱싱 중 메모리는 그룹 디렉터리(셀 × 그룹, 24 B씩
+최대 67,108,864개 ≈ 1.5 GiB)와 이동 중인 샘플 요청(64 B씩, 최대치는 샘플 수 4,194,304
+≈ 256 MiB; 로그의 `peak_requests`)이며 파싱 Doc·좌표 캐시·결과 점·직렬화 버퍼는
+별도다. "샘플 수로 제한된다"이지 "작다"는 뜻이 아니다. top 그룹 수는 최대 65,536개다
+(449 쌍 × 깊이 16 = 7,184). MAIN01의 실제 디렉터리 크기는 로그 `count directory=`로
+계측해야 한다. 한계·좌표/멤버 수 overflow·
 계층 cycle은 오류로 종료하며, 불완전한 대표 파일을 정상 파일로 게시하지 않는다.
 기존 파일은 tmp 작성·sync·rename이 완료될 때 교체된다.
 
@@ -99,7 +118,9 @@ chunk 수를 가진다. chunk는 bbox, 점 수, 최소 rank, 점 배열이다. �
 파일 없음/손상/불일치는 stderr에 사유를 남기고 정상 cull로 폴백한다.
 OVM/OVP 형식과 버전은 바꾸지 않는다. 정상 재색인은 낡은 OVR/tmp도 제거한다.
 
-생성 로그는 그룹별 members/points와 전체 entries/points/bytes/총 경과시간을 찍는다.
+생성 로그는 `count directory=<그룹 수> (<MiB>)`, `resolve cells=<훑은 셀> peak
+requests=<최대 요청 수> (<MiB>)`, 그룹별 members/points, 전체 groups/directory/
+peak_requests/points/bytes/총 경과시간을 찍는다(10초마다 진행 heartbeat).
 프레임 wire/perf: `stored_rep_points`, `stored_rep_tested`, `stored_rep_limited`.
 뷰어 상세 상태에는 `stored reps .../tested ... (capped)`가 표시된다.
 
@@ -114,4 +135,114 @@ cargo test --manifest-path rust/Cargo.toml -p floe-vfs representatives::tests --
 파일 손상/불일치 거절, cycle/overflow, 결정성을 다룬다. 통합 검증은 기존 인덱스
 파일 보존, 정상/추가 생성 일치, 원본 페이지 디코드 없이 full/depth0 표시,
 점 묶음/기존 래스터 픽셀 일치, 킬 스위치와 손상 파일 폴백을 확인한다.
-긴 배터리 및 실칩 성능 측정은 이번 커밋 전에는 실행하지 않는다.
+긴 배터리 및 실칩 성능 측정은 3c4bed6 전에는 실행하지 않았다. 실칩 기록은 아래에 둔다.
+
+## OVR2 1단계 — 같은 샘플을 형상으로 (0.12.160, opt-in)
+
+설계는 [OVR2 설계안](OVR2_DESIGN.ko.md). 1단계는 최초 설계의 형상 복원만 구현했다: **샘플의
+선정·순번·솎기는 OVR1과 같고, 샘플 하나가 점이 아니라 형상이다.** 마스크 피라미드,
+전역 프레임 솎기 해제, 공급량 증가는 포함하지 않는다(2단계 이후).
+
+```sh
+floe2 index source.oas --representatives-only --representatives-format 2 --jobs 12
+```
+
+- `--representatives-format 1|2`(기본 1 = OVR1 점). 2를 주면 현재 캐시에 OVR1이 있어도
+  추가 생성으로 다시 만든다(파일 존재만으로 생략하지 않음). reader는 두 형식을 읽고,
+  킬 스위치 `FLOE_RUST_REPRESENTATIVES=off`와 적용 범위(thin:cull, exact/probe/keep/덱
+  제외)는 공통이다.
+- 형상: Rectangle은 변환된 실제 모서리(회전 시 가로·세로가 바뀜), Polygon은 가장 긴
+  비퇴화 경계 선분(동률은 원본 순서), Path는 래스터가 칠하는 외곽선
+  (`path_outline_any`)의 가장 긴 선분이며 둘 다 partial 플래그를 단다. 쓸 선분이 없으면
+  도형 위 점으로 퇴화하고 로그에 센다. `gate_dim`은 원본 도형 bbox의
+  `min(max_dim, 2 × min_dim)`이고 `gate_dim < cut`인 샘플만 보충한다.
+- 파일: magic `FLOEOVR2`, 헤더·그룹표는 OVR1과 같고 레코드는 64 B(uid = group << 32 |
+  순번, x0 y0 x1 y1, gate_dim, thickness, kind, flags). 청크(128개)는 형상 중심의 Morton
+  순서이고 청크 bbox는 **형상 범위의 합**이라 중심이 화면 밖인 긴 선도 조회된다. 최대
+  4,194,304개 = 256 MiB, reader 상한 384 MiB.
+- 표시: 형상은 `WsCell.reps`로 top 셀에 실려 wash와 분리되고, 래스터는 Rect를 실제
+  사각형의 경로(`paint_world_rect`: 서브픽셀 폭은 기존 hairline 규칙)로, 선분을 경계선
+  stroke로 그린다. 따라서 가는 선은 투영 길이가 4 → 3 → 2 → 1 px로 줄어든다. 비닝/
+  비비닝 래스터 모두 같은 픽셀이다.
+- 검증: 단위(형상의 회전·반사·경로 외곽선·점 퇴화, v2 왕복·손상 거절, 범위로 조회,
+  OVR1과 같은 중첩 솎기), 게이트 `validate_representatives.py`의 OVR2 절(40개 헤어라인이
+  점 42개 → 선 5,627 px, 단일 선의 그림이 exact와 동일하며 길이 4·3·2·1 px, 회전 배치,
+  모든 픽셀이 실제 도형 1 px 이내, 추가 생성이 색인 보존, OVR1 옆에서 format 2 요청 시
+  교체).
+- 1단계만으로는 fit 밀도(그룹당 표본 수)와 인계 지점의 밀도 절벽이 그대로였다.
+  후속은 마스크 피라미드 대신 아래의 사전 병합 트리로 변경했다.
+
+## OVR2 2단계 — 사전 병합 공간 트리 (0.12.161, opt-in)
+
+생성 명령은 동일하다. 1단계 OVR2가 있어도 이 명령으로 다시 만들어야 트리가 추가된다.
+
+```sh
+floe2 index source.oas --representatives-only --representatives-format 2 --jobs 12
+```
+
+- 형식: `FLOEOVR2`, 내부 revision 3. reader는 OVR1·OVR2 revision 2·3을 읽는다.
+  기본 생성은 계속 format 1이며, 형상 실험에 format 2를 명시한다.
+- 생성: 기존 count/resolve 뒤 대표 형상만 공간 정렬해 128개 잎, 최대 8분기 트리를
+  만든다. 노드마다 최대 8개의 Rect 프록시와 누적 기하 오차를 저장한다. 반복 멤버
+  전수 전개나 세계좌표 비트맵 생성은 하지 않는다. 형상·프록시는 파일로 스트리밍하며
+  완성 파일 크기의 추가 Vec을 만들지 않는다. 파일 상한은 512 MiB다.
+- 병합: 일치/연속 구간부터 병합하며, 같은 축 범위의 평행 구간은 빈 간격 절반을
+  국소 오차로 쓴다. 나머지 Rect는 보수적인 거리 상한을 쓴다. 부모에는 자식 오차도
+  누적한다. Segment/Point는 1단계 형상을 유지하며 트리로 공간 검색한다.
+- 조회: 전역 sample count에 따른 솎기를 쓰지 않는다. bbox로 공간을 제외하고,
+  오차 ≤ 0.5 px이며 노드 전체가 컷 아래일 때 프록시를 쓴다. 컷 경계는 자식으로
+  내려간다. 모든 가시 레이어를 occupancy가 대체하면 OVR 열기/검증도 미룬다.
+- 스타일: 1 px outline의 solid 채움, 또는 자손 모두 서브픽셀인 hairline에만 Rect
+  병합을 사용한다. 후자는 병합 후에도 solid로 칠한다. 다른 스타일은 잎으로 내려가
+  개별 경계를 보존한다. 같은 타일/레이어의 hairline 행 구간은 합쳐 한 번 칠한다.
+- IO: 헤더/노드 디렉터리 checksum은 열 때, 형상/프록시 블록 checksum은 처음 읽을 때
+  검증한다. 형상 전체를 열 때 파싱하지 않는다. OVM identity checksum은 여전히 첫
+  열기의 비용이며 cold 성능 측정에 포함한다. payload는 mmap이고 별도의 전체 decoded
+  캐시는 만들지 않는다. 워커 타일의 행 구간 scratch는 64K 구간을 넘기기 전에 비운다.
+- 정제: 노드·후보·읽기 바이트·출력 수·예상 페인트 픽셀 작업량 및 경과 시간으로 조회를 나눈다.
+  저장한 커서부터 이어가며 앞쪽 N개만 표시하고 완료하지 않는다. 중간 프레임은
+  partial/final=0이고, 끝까지 조회한 결과만 final=1이다. 원본 전수 디코드로 폴백하지
+  않는다. 대표 조회 때문에 추가하는 중간 래스터는 한 번으로 제한하고 남은 조회
+  묶음을 모아 최종 화면을 그린다(원본 페이지 정제는 기존 정책). 이 예산은 **작업
+  묶음 기준**이며, 전체 프레임 시간 상한을 보장하지 않는다. 시간 검사는 128번의
+  조회 작업마다 하며 mmap page fault 등의 단일 지연을 중단시키는 hard timeout은 아니다.
+- 진단: `FLOE_RUST_REPRESENTATIVES_DIRECT=on` 또는
+  `FLOE_RUST_REPRESENTATIVES_MERGE=off`는 같은 저장 형상을 병합 없이 조회한다.
+  `FLOE_RUST_REPRESENTATIVES_BATCH=N`은 정제 실험용 출력 묶음 크기(1–262144)다.
+  모두 워커 시작 전에 설정하며 revision 3 경로에 적용된다.
+- perf/어댑터: 기존 stored_rep_points/tested/limited 외에 stored_rep_nodes/proxies/bytes,
+  stored_rep_pixels(조회 시 페인트 추정), stored_rep_spans/painted_pixels(실제 hairline
+  행 구간 병합 뒤 페인트; 일반 Rect/Segment의 전체 픽셀 수는 아님)를 기록한다.
+- 게이트: 떨어진 두 군집의 4,096개 평행선 → 8개 프록시, 1개 노드·512 B payload
+  조회. 확대 시 265개 형상으로 정제하고 direct 픽셀과 일치한다. 원래 빈 군집 사이를
+  채우지 않으며, 출력 묶음을 3개로 제한해도 최종 그림은 같고 중간+최종 2회만 그린다.
+  별도 단위 검증으로 작은 ROI 프루닝·depth·비등방 배율·넓은 outline halo·오차 상한·
+  손상 파일·취소·스타일별 행 구간 병합의 픽셀 일치를 확인한다.
+
+샘플 공급량은 그대로다. 전역 솎기와 점 표현의 손실은 제거하지만, 원래 뽑지 않은
+도형까지 생기지는 않는다. MAIN01의 실제 밀도·속도는 새 파일로 별도 측정해야 한다.
+
+## 실칩 기록
+
+- 2026-09-18, MAIN01(9.8 GB, 배치 6.4억 + 배열 1.6억 레코드), 0.12.155
+  `--representatives-only`: `representatives: member directory exceeds 2 GiB limit`
+  (배치당 누적 구간 엔트리 상한 134,217,728개를 count 단계에서 초과). 추가 생성이라
+  기본 캐시는 보존됐다. 이 실패가 884f3c4(배치당 엔트리 없는 count + 스트리밍
+  resolve)의 계기다.
+- 2026-09-18, MAIN09(142 MB, 337 레이어, 깊이 11), 884f3c4 `floe2 index --representatives`:
+  인덱싱 시간이 평소보다 약 10초 늘어난 채로 완료했고, 사용자 확인으로 실제 시간이
+  줄어드는 효과가 있었다(첫 실칩 성공). 아직 기록되지 않은 값: 로그의 `count
+  directory=`, `resolve … peak requests=`, groups/points/파일 크기, 그리고 fit view
+  perf 라인의 `stored_rep_points/tested/limited`와 plan_ms(depth 0·full depth).
+- 2026-09-18, MAIN01, 884f3c4 `--representatives-only`: 595.3초에 완료.
+  `groups=2146 directory=1191003 peak_requests=4194304 points=4194304 161M (147.8s)`.
+  디렉터리 119만 그룹은 상한 67,108,864의 1.8 %, OVR 생성 148초, 나머지 447초는
+  원본 재파싱. 뷰어: fit view 밀도가 너무 낮고, 확대해도 점은 점으로 남다가 어느
+  줌에서 갑자기 도형이 되며 그 차이가 크다(사용자). 원인은 구조적이다: 전 파일 상한
+  4,194,304점을 top 그룹 2,146개가 나누어 그룹당 평균 약 1,950점이 칩 전체를 대표하고,
+  프레임 상한 262,144점은 2000² px에서 15 px당 1점이며, 저장 표본은 줌에 따라 늘지
+  않아 한 옥타브 확대마다 화면 안의 점이 1/4로 줄다가 `min_dim ≥ cut/2`가 되는 줌에서
+  실제 도형으로 바뀐다. 표본 점은 인계 줌 근처의 실제 밀도(픽셀당 선 하나 수준)에
+  도달할 수 없다(필요 공급량이 프레임 상한 × 4^옥타브). 상한을 올리면 fit view
+  밀도는 오르지만 절벽은 남는다. 절벽을 없애는 것은 래스터 커버리지 피라미드
+  (design.ovo)나 도형 인계를 앞당기는 컷 정책뿐이다(2026-09-18 판단, 결정 대기).

@@ -410,15 +410,27 @@
                     displayed = true; el('empty').hidden = true; disposition = 'displayed';
                     target.dataset.frameId = h.frame_id; target.dataset.renderRev = h.render_rev;
                     target.dataset.bboxDbu = JSON.stringify(h.bbox_dbu);
-                    el('status').textContent = (!h.final ? 'Refining' : h.complete ? 'Live' : 'INCOMPLETE') + (h.approximate ? ' · approximate' : '') +
-                        (h.labels_truncated ? ' · labels partial' : '') + (h.deck_skipped !== '0' ? ' · skipped ' + h.deck_skipped : '') + ' · gen ' + h.generation;
                     const perf = h.perf || {}, ms = function (name) { return perf[name] ? (Number(perf[name]) / 1000).toFixed(1) : '0'; };
+                    const fitted = ['fit_pct','fit_cull','fit_over','fit_thin'].some(function (k) { return Number(perf[k] || 0) > 0; });
+                    el('status').textContent = (!h.final ? 'Refining' : h.complete ? 'Live' : 'INCOMPLETE') + (h.approximate ? ' · approximate' : '') +
+                        (fitted ? ' · budget fit' : '') + (Number(perf.shape_cut || 0) > 0 ? ' · short-side cut' : '') +
+                        (h.labels_truncated ? ' · labels partial' : '') + (h.deck_skipped !== '0' ? ' · skipped ' + h.deck_skipped : '') + ' · gen ' + h.generation;
                     if (h.purpose === 'foreground') {
                         foregroundPerf = 'Rust foreground · plan ' + ms('plan_us') + ' ms · decode ' + ms('decode_us') + ' ms · draw ' + ms('raster_us') +
                             ' ms · ' + (perf.pages || '0') + ' pages · ' + h.width + ' × ' + h.height + ' px · ' + h.format +
+                            (perf.wall_us !== undefined ? ' · native wall ' + ms('wall_us') + ' ms/queue ' + ms('queue_us') + ' ms/text ' + ms('text_plan_us') + ' ms' : '') +
+                            (fitted ? ' · budget fit: cut ×' + (Number(perf.fit_pct || '100') / 100).toFixed(2) +
+                                (Number(perf.fit_thin || 0) > 0 ? ', boundary class 1/2^' + perf.fit_thin : '') +
+                                (Number(perf.fit_full_pct || 0) > 0 ? ', full ≥×' + (Number(perf.fit_full_pct) / 100).toFixed(2) : ', no full class') +
+                                (Number(perf.fit_none_pct || 0) > 0 ? ', omitted <×' + (Number(perf.fit_none_pct) / 100).toFixed(2) : ', no wholly omitted class') +
+                                (Number(perf.fit_cull || 0) > 0 ? ', hairline cull' : '') + (Number(perf.fit_over || 0) > 0 ? ', over limit' : '') : '') +
+                            (Number(perf.once_tiles || 0) + Number(perf.once_passes || 0) + Number(perf.once_items || 0) > 0 ?
+                                ' · write-once ' + (perf.once_tiles || '0') + ' tiles/' + (perf.once_passes || '0') + ' passes/' + (perf.once_items || '0') + ' items skipped' : '') +
                             ' · round ' + h.round + (h.final ? ' · final frame' : ' · refining') +
                             (Number(perf.stored_rep_points || 0) > 0 ? ' · stored reps ' + perf.stored_rep_points + '/tested ' + (perf.stored_rep_tested || '0') +
-                                (Number(perf.stored_rep_limited || 0) > 0 ? ' (capped)' : '') : '');
+                                (Number(perf.stored_rep_limited || 0) > 0 ? ' (capped)' : '') : '') +
+                            (Number(perf.stored_rep_nodes || 0) > 0 ? ' · OVR tree ' + perf.stored_rep_nodes + ' nodes/' + (perf.stored_rep_proxies || '0') +
+                                ' proxies/' + (perf.stored_rep_bytes || '0') + ' bytes/' + (perf.stored_rep_painted_pixels || '0') + ' painted px' : '');
                     }
                     present();
                 }
@@ -568,6 +580,10 @@
         });
         levelNext = page.next; el('level-more').hidden = levelNext === null;
     }
+    function indexSummaryControls() {
+        el('index-occupancy-prune').disabled = !el('index-occupancy').checked;
+        el('index-representatives-format').disabled = el('index-representatives').disabled || !el('index-representatives').checked;
+    }
     function sourceSelection() {
         const source = catalog.find(function (r) { return r.source_id === el('source').value; });
         if (!source) { el('source-note').textContent = 'No source registered in this workspace.'; el('level-options').hidden = true; controls(); return; }
@@ -578,11 +594,14 @@
         if (levelSource !== source.source_id) {
             el('index-occupancy').checked = source.deck;
             el('index-representatives').checked = false;
+            el('index-occupancy-prune').value = '';
+            el('index-representatives-format').value = '';
             ++levelLoad; levelBusy = false;
             levelSource = source.source_id; levelNext = null; levelIds = new Set(); el('level-list').textContent = ''; el('levels-all').checked = true;
             if (source.deck) { moreLevels().catch(report); }
         }
         el('source-note').textContent = source.deck ? 'Jobdeck · select levels before opening.' : 'OASIS layout · current index required.';
+        indexSummaryControls();
         controls();
     }
     async function refreshCatalog() {
@@ -1014,8 +1033,16 @@
             }
             if (inspector) { inspector.click(x, y, modifiers); }
         }});
+    el('index-occupancy').onchange = indexSummaryControls;
+    el('index-representatives').onchange = indexSummaryControls;
     el('index').onclick = function () {
-        try { submitOperation({kind: 'index', source_id: el('source').value, levels: levels(), options: {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked, occupancy: el('index-occupancy').checked, representatives: !el('index-representatives').disabled && el('index-representatives').checked}}).catch(report); }
+        try {
+            const options = {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked,
+                occupancy: el('index-occupancy').checked, representatives: !el('index-representatives').disabled && el('index-representatives').checked};
+            if (options.occupancy && el('index-occupancy-prune').value !== '') { options.occupancy_prune = Number(el('index-occupancy-prune').value); }
+            if (options.representatives && el('index-representatives-format').value !== '') { options.representatives_format = Number(el('index-representatives-format').value); }
+            submitOperation({kind: 'index', source_id: el('source').value, levels: levels(), options: options}).catch(report);
+        }
         catch (e) { report(e); }
     };
     el('cancel-job').onclick = function () { const id = el('cancel-job').dataset.seq; if (id && !indexBlocked()) { http('POST', '/api/v1/operations/' + id + '/cancel', {}).then(operationState).catch(report); } };

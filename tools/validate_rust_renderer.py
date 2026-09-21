@@ -1060,6 +1060,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 frame.write((20).to_bytes(4, "little"))
                 frame.write((10).to_bytes(4, "little"))
                 frame.write(raw_pixels)
+            # the job was submitted a second ago: what renderd's wall does
+            # not account for is the client's wait (2026-09-21)
+            worker._jobs[7]["started"] -= 1.0
             worker._emit_frame({
                 "gen": "7", "png": raw_path, "format": "raw", "partial": "0",
                 "deferred": "0", "final": "1", "plan_pages": "2",
@@ -1090,8 +1093,20 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "sub_cut_sparse_over": "32", "sub_cut_wash_over": "33",
                 "rep_kept": "34", "rep_washed": "35", "rep_children": "36",
                 "rep_page_level": "2", "rep_level": "7",
+                "fit_pct": "283", "fit_cull": "1", "fit_over": "0",
+                "fit_thin": "3", "fit_full_pct": "850", "fit_none_pct": "400",
+                "sub_cut_boxes": "1234", "sub_cut_box_over": "5",
+                "sub_cut_box_level": "1", "sub_cut_box_unsure": "2",
+                "shape_cut": "4392",
                 "stored_rep_points": "16384", "stored_rep_tested": "65536",
                 "stored_rep_limited": "1",
+                "stored_rep_nodes": "128", "stored_rep_proxies": "64",
+                "stored_rep_bytes": "8192", "stored_rep_pixels": "64000",
+                "stored_rep_spans": "100", "stored_rep_painted_pixels": "8000",
+                "once_tiles": "5", "once_passes": "400", "once_items": "77",
+                # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
+                # its phases above add up to 45.25 ms
+                "queue_us": "1500", "wall_us": "60000",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
@@ -1103,8 +1118,16 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "sub_cut_sparse_over": 32, "sub_cut_wash_over": 33,
                 "rep_kept": 34, "rep_washed": 35, "rep_children": 36,
                 "rep_page_level": 2, "rep_level": 7,
+                "fit_pct": 283, "fit_cull": 1, "fit_over": 0,
+                "fit_thin": 3, "fit_full_pct": 850, "fit_none_pct": 400,
+                "sub_cut_boxes": 1234, "sub_cut_box_over": 5,
+                "sub_cut_box_level": 1, "sub_cut_box_unsure": 2,
+                "shape_cut": 4392,
                 "stored_rep_points": 16384, "stored_rep_tested": 65536,
-                "stored_rep_limited": 1})
+                "stored_rep_limited": 1,
+                "stored_rep_nodes": 128, "stored_rep_proxies": 64,
+                "stored_rep_bytes": 8192, "stored_rep_pixels": 64000,
+                "stored_rep_spans": 100, "stored_rep_painted_pixels": 8000})
             self.assertEqual(result["frame_format"], "raw")
             self.assertEqual(result["rgba"], raw_pixels)
             self.assertNotIn("png", result)
@@ -1123,6 +1146,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["publish_rename_ms"], 9.0)
             self.assertEqual(result["publish_ms"], 24.0)
             self.assertGreaterEqual(result["adapter_read_ms"], 0.0)
+            # the time no phase covers: renderd's own (other) and the
+            # client's beyond renderd's wall (wait = queue + pipe)
+            self.assertEqual((result["queue_ms"], result["wall_ms"]), (1.5, 60.0))
+            self.assertEqual(result["other_ms"], 15)
+            self.assertTrue(900 <= result["wait_ms"] <= 945, result["wait_ms"])
             self.assertEqual(result["cache_hit"], 14)
             self.assertEqual(result["cache_miss"], 2)
             self.assertEqual(result["frame_cache_hit"], 1)
@@ -1144,6 +1172,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["work_bin_defer_wmax"], 5000)
             # rect 6 + polygon 7 + path 8 + frame 9
             self.assertEqual(result["member_paints"], 30)
+            self.assertEqual((result["once_full_tiles"], result["once_passes_skipped"],
+                              result["once_items_skipped"]), (5, 400, 77))
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
@@ -1166,7 +1196,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             partial = worker.res.get_nowait()
             # Old/deck replies omit OVR diagnostics; keep their stable zero
             # defaults instead of carrying counters from another generation.
-            for key in ("stored_rep_points", "stored_rep_tested", "stored_rep_limited"):
+            for key in ("stored_rep_points", "stored_rep_tested", "stored_rep_limited",
+                        "stored_rep_nodes", "stored_rep_proxies", "stored_rep_bytes",
+                        "stored_rep_pixels", "stored_rep_spans", "stored_rep_painted_pixels"):
                 self.assertEqual(partial["plan_culls"][key], 0)
             self.assertEqual(partial["refining"], 1)
             self.assertIn(9, worker._jobs)

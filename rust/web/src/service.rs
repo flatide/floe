@@ -83,9 +83,11 @@ pub struct IndexArgs {
     pub occupancy_only: bool,
     pub occupancy_um: Field<String>,
     pub occupancy_balance: Field<u8>,
+    pub occupancy_prune: Field<u8>,
     pub representatives: bool,
     pub representatives_only: bool,
     pub representatives_points: Field<u64>,
+    pub representatives_format: Field<u8>,
 }
 impl Default for IndexArgs {
     fn default() -> Self {
@@ -97,9 +99,11 @@ impl Default for IndexArgs {
             occupancy_only: false,
             occupancy_um: Field::Absent,
             occupancy_balance: Field::Absent,
+            occupancy_prune: Field::Absent,
             representatives: false,
             representatives_only: false,
             representatives_points: Field::Absent,
+            representatives_format: Field::Absent,
         }
     }
 }
@@ -130,12 +134,22 @@ impl IndexArgs {
                 Field::Absent => None,
                 Field::Value(n) => Some(n),
             },
+            representatives_format: match self.representatives_format {
+                Field::Absent => None,
+                Field::Value(n) => Some(n),
+            },
             occupancy_um,
             occupancy_balance: match self.occupancy_balance {
                 Field::Absent => None,
                 Field::Value(0) => Some(false),
                 Field::Value(1) => Some(true),
                 Field::Value(_) => return Err(Error::input("occupancy-balance must be 0 or 1")),
+            },
+            occupancy_prune: match self.occupancy_prune {
+                Field::Absent => None,
+                Field::Value(0) => Some(false),
+                Field::Value(1) => Some(true),
+                Field::Value(_) => return Err(Error::input("occupancy-prune must be 0 or 1")),
             },
             ..Default::default()
         };
@@ -1058,6 +1072,31 @@ mod index_args_tests {
                 .and_then(|v| v.core().map_err(|_| ()))
         };
         assert!(!core(json!({})).unwrap().wants_representatives());
+        for format in [1, 2] {
+            let o = core(json!({"representatives_format":format})).unwrap();
+            assert!(o.wants_representatives());
+            assert_eq!(o.representatives_format, Some(format));
+        }
+        assert_eq!(
+            core(json!({"occupancy_prune":0})).unwrap().occupancy_prune,
+            Some(false)
+        );
+        assert_eq!(
+            core(json!({"occupancy_prune":1})).unwrap().occupancy_prune,
+            Some(true)
+        );
+        for v in [
+            json!({"occupancy_prune":2}),
+            json!({"occupancy_prune":null}),
+            json!({"occupancy_prune":"0"}),
+            json!({"representatives_format":0}),
+            json!({"representatives_format":3}),
+            json!({"representatives_format":null}),
+            json!({"representatives_format":"2"}),
+            json!({"representatives_format":2,"occupancy_only":true}),
+        ] {
+            assert!(core(v.clone()).is_err(), "{v}");
+        }
         assert!(core(json!({"representatives":true}))
             .unwrap()
             .wants_representatives());
