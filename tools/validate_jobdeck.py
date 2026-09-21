@@ -30,6 +30,11 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# The deck composites are compared with layout renders, and the thin-page
+# policies with lit-pixel floors, all drawn by the KLayout rule: area-true
+# drawing (FLOE_RUST_AREA_TRUE, its own gate tools/validate_area_true.py) is
+# pinned off for every worker of this gate.
+os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 sys.path.insert(0, str(ROOT))
 
 from floe import jobdeck as jd                       # noqa: E402

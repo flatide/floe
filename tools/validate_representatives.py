@@ -15,6 +15,10 @@ import time
 import klayout.db as db
 
 ROOT = Path(__file__).resolve().parents[1]
+# Representatives are compared with the exact (cut 0) picture of the real
+# geometry drawn by the KLayout rule: area-true drawing (FLOE_RUST_AREA_TRUE,
+# its own gate tools/validate_area_true.py) is pinned off for every worker.
+os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 sys.path.insert(0, str(ROOT))
 from floe.cachepath import vfs_cache_dir
 from floe.cache import Cache

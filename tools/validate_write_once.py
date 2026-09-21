@@ -25,6 +25,11 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# The dense chip must fill tiles for write-once to save paints; under
+# area-true drawing (FLOE_RUST_AREA_TRUE, gate tools/validate_area_true.py) its
+# sub-pixel shapes light only their area and no tile fills, so the mechanism is
+# checked under the KLayout rule.
+os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 sys.path.insert(0, str(ROOT))
 from floe.cache import Cache
 from floe.rust_render import RustRenderWorker

@@ -47,6 +47,13 @@ sh tools/validate_rust.sh --only quick path/to.oas
   보고한다. 넓은 keep 뷰(배열 2.6 px, 배선 1.3 px, 컷 3 px)는 켜진 픽셀이 전부 큰 사각형 안이고
   (킬 스위치는 배열·배선을 그대로 켠다) 큰 사각형 자체는 같다. 배선만 있는 레이어는 빈 프레임이고
   플래너가 페이지를 자른다. cull과 컷 0 프레임은 킬 스위치와 바이트 동일.
+- `area_true`(tools/validate_area_true.py, 약 10초; `render` 별칭에 포함): klayout.db로 만든 세로
+  막대 격자(0.1 µm/px 뷰에서 폭/간격 px). 1px 이상(3.8/3.8, 3.8/1.2, 5.2/2.8, 7.6/2.4, 1.5/1.5,
+  2/2)은 그려진 평균 폭이 실제의 ±0.6 px이고 1px 이상 간격이 막대마다 열려 있다(킬 스위치
+  `FLOE_RUST_AREA_TRUE=off`는 1.2·1.5 px 간격을 닫는다). 1px 미만(0.1/0.9, 0.25/0.75, 0.5/1.5,
+  0.5/0.5)은 켜진 비율이 덮임의 0.5~1.6배(킬 스위치는 전부 켠다). 같은 뷰 두 번과 37×23 px 정수
+  pan의 겹친 영역이 픽셀까지 같다. occupancy·jobdeck 게이트는 KLayout 규칙에 대한 비교라 이 킬
+  스위치를 모든 워커에 고정한다.
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과

@@ -1837,6 +1837,17 @@ fn shape_cut_enabled() -> bool {
     std::env::var("FLOE_RUST_SHAPE_CUT").as_deref() != Ok("off")
 }
 
+/// Area-true drawing (floe_render_core::GeometryRasterRequest::area_true,
+/// user decision 2026-09-22): a drawn shape lights the pixels whose centres it
+/// covers with its outline on their rim, and a shape under a pixel on a side is
+/// kept with the chance its area fills its pixels - the KLayout rule grew every
+/// shape by about a pixel per axis, closed the gaps up to ~1.5 px and lit 0.1 px
+/// wires 1 px apart as a solid block. Exact frames keep the KLayout rule;
+/// FLOE_RUST_AREA_TRUE=off is the kill switch.
+fn area_true_enabled() -> bool {
+    std::env::var("FLOE_RUST_AREA_TRUE").as_deref() != Ok("off")
+}
+
 /// The page frontier (floe_vfs::ViewReq::page_reps) on a plain
 /// layout's frames. DEACTIVATED (user decision 2026-09-17: the field
 /// still saw boxes and a 60 s full-depth plan on 0.12.152, and the
@@ -2253,6 +2264,9 @@ fn run_render(
         } else {
             command.tile_size
         },
+        // area-true drawing (GeometryRasterRequest::area_true): every frame
+        // but an exact one, which keeps the KLayout rule
+        area_true: !command.exact && area_true_enabled(),
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache

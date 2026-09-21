@@ -77,6 +77,14 @@ pub struct GeometryRasterRequest {
     pub workers: u16,
     /// Width and height of independently owned square image tiles.
     pub tile_size: u16,
+    /// Area-true drawing (2026-09-22): a shape lights the pixels whose centres
+    /// it covers and its outline is the rim of those pixels, so a w px shape
+    /// lights w px on average and a g px gap stays g px (the KLayout rule
+    /// grows every shape by about a pixel per axis and closes gaps up to
+    /// ~1.5 px); a shape under a pixel on a side is kept with the chance its
+    /// area fills the pixels it would light, ranked by its world box.
+    /// false = the KLayout-measured rule (exact renders, the oracle gates).
+    pub area_true: bool,
 }
 
 impl GeometryRasterRequest {
@@ -2093,12 +2101,13 @@ fn replay_plane_items(
                     continue;
                 }
                 check_cancelled(guard)?;
+                let marker = marker_request(request);
                 for &point in points {
                     if !point.intersects(&cull_view) { continue; }
                     counters.rect_records = counters.rect_records.saturating_add(1);
                     stats.primitives_tested = stats.primitives_tested.saturating_add(1);
                     stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-                    if paint_world_rect(band, request, point, paint)? {
+                    if paint_world_rect(band, &marker, point, paint)? {
                         counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
                         stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
                         stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
@@ -2112,12 +2121,13 @@ fn replay_plane_items(
                     continue;
                 }
                 check_cancelled(guard)?;
+                let marker = marker_request(request);
                 for prim in prims {
                     if !prim.bbox().intersects(&cull_view) { continue; }
                     counters.rect_records = counters.rect_records.saturating_add(1);
                     stats.primitives_tested = stats.primitives_tested.saturating_add(1);
                     stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-                    if queue_representative(band, request, prim, paint, &mut rep_spans, stats)? {
+                    if queue_representative(band, &marker, prim, paint, &mut rep_spans, stats)? {
                         counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
                         stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
                         stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
@@ -4059,7 +4069,7 @@ fn render_cell(
         stats.primitives_tested = stats.primitives_tested.saturating_add(1);
         stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
         let world = world_transform.apply_bbox(wash)?;
-        if paint_world_rect(band, request, world, paint)? {
+        if paint_world_rect(band, &marker_request(request), world, paint)? {
             counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
@@ -4075,7 +4085,7 @@ fn render_cell(
             counters.rect_records = counters.rect_records.saturating_add(1);
             stats.primitives_tested = stats.primitives_tested.saturating_add(1);
             stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-            if queue_representative(band, request, prim, paint, &mut rep_spans, stats)? {
+            if queue_representative(band, &marker_request(request), prim, paint, &mut rep_spans, stats)? {
                 counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
                 stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
                 stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
@@ -4667,10 +4677,56 @@ fn hairline_world_bbox(
     if !sub_x && !sub_y {
         return Ok(None);
     }
+    if request.area_true {
+        return area_true_hairline(world, (x0, y0, x1, y1), sub_x, sub_y).map(Some);
+    }
     let point = sub_x && sub_y;
     let (cx0, cx1) = hairline_axis_span(x0, x1, sub_x, point, 0);
     let (cy0, cy1) = hairline_axis_span(y0, y1, sub_y, point, -1);
     Ok(Some((cx0, cy0, cx1, cy1)))
+}
+
+/// Area-true form of a shape under a pixel on a side (GeometryRasterRequest::
+/// area_true): it lights one pixel across each such side - the one holding its
+/// centre - and the pixel-centre span along a longer side, and it is KEPT with
+/// the chance its area fills those pixels (a w px wide wire: w, a w x h px
+/// point: w h). The draw is decided by the shape's world rank, so a zoom-out
+/// keeps a subset of what the zoom-in kept, a pan changes nothing, and the
+/// kept shapes light, on average, as many pixels as the shapes cover: 0.1 px
+/// wires 1 px apart light one column in ten instead of every column.
+/// A dropped shape answers an empty box.
+fn area_true_hairline(
+    world: BBox,
+    device: (i128, i128, i128, i128),
+    sub_x: bool,
+    sub_y: bool,
+) -> Result<(i128, i128, i128, i128), String> {
+    let (x0, y0, x1, y1) = device;
+    let fill = |d: i128| (d.max(0) as f64 / DEVICE_ONE as f64).min(1.0);
+    if area_rank(world) >= fill(x1 - x0) * fill(y1 - y0) {
+        return Ok((0, 0, 0, 0));
+    }
+    let across = |v0: i128, v1: i128| {
+        let cell = floor_div(v0 + v1, 2 * DEVICE_ONE);
+        (cell, cell + 1)
+    };
+    let (cx0, cx1) = if sub_x { across(x0, x1) } else { fill_phase_columns(x0, x1, FillPhase::PixelCenter)? };
+    let (cy0, cy1) = if sub_y { across(y0, y1) } else { fill_phase_rows(y0, y1, FillPhase::PixelCenter)? };
+    Ok((cx0, cy0, cx1, cy1))
+}
+
+/// A shape box's rank in [0, 1) for the area-true sub-pixel draw: a function
+/// of its WORLD box only, so it is the same at every zoom, pan, tile and
+/// worker, and exact duplicates share it (they light the same pixel anyway).
+fn area_rank(world: BBox) -> f64 {
+    let mut h: u64 = 0x243F_6A88_85A3_08D3;
+    for v in [world.x0, world.y0, world.x1, world.y1] {
+        h = (h ^ v as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        h ^= h >> 31;
+    }
+    (h >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// Measured KLayout hairline placement (32px-aligned and 858px
@@ -4744,6 +4800,9 @@ fn paint_world_rect(
     if let Some(rect) = hairline_world_bbox(request, world, paint)? {
         return paint_hairline_device_rect(band, request, rect, paint);
     }
+    if area_true_rim(request, paint) {
+        return paint_area_true_rect(band, request, world, paint);
+    }
     let filled = fill_world_rect(band, request, world, paint)?;
     let stroked = stroke_world_polygon(
         band,
@@ -4757,6 +4816,126 @@ fn paint_world_rect(
         paint,
     )?;
     Ok(filled || stroked)
+}
+
+/// The request a MARKER is painted with: washes, wash points and stored
+/// representatives stand for what the cut dropped - a sub-pixel one is a dot
+/// that must show, not a shape to keep by its area - so they keep the KLayout
+/// rule whatever GeometryRasterRequest::area_true says.
+fn marker_request(request: &GeometryRasterRequest) -> GeometryRasterRequest {
+    GeometryRasterRequest { area_true: false, ..*request }
+}
+
+/// Whether a shape at least a pixel on both sides takes the area-true form
+/// (GeometryRasterRequest::area_true): a 1 px solid outline, the style every
+/// hairline collapse assumes too. A thicker or dotted outline keeps the
+/// KLayout fill and edge stroke - a deliberate heavy style.
+fn area_true_rim(request: &GeometryRasterRequest, paint: PaintStyle) -> bool {
+    request.area_true && matches!(paint.stroke, StrokeStyle::Solid) && paint.stroke_width == 1
+}
+
+/// Area-true rectangle, at least a pixel on both sides: the pixels whose
+/// centres it covers take the layer's fill, and the rim of those pixels is the
+/// outline - nothing outside them, so a w px wide shape lights w px on average
+/// and the gap to its neighbour keeps its width.
+fn paint_area_true_rect(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    world: BBox,
+    paint: PaintStyle,
+) -> Result<bool, String> {
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    let (c0, c1) = fill_phase_columns(x0, x1, FillPhase::PixelCenter)?;
+    let (r0, r1) = fill_phase_rows(y0, y1, FillPhase::PixelCenter)?;
+    if c0 >= c1 || r0 >= r1 {
+        return Ok(false);
+    }
+    let filled = fill_device_rect_with_phase(band, request, x0, y0, x1, y1, FillPhase::PixelCenter, paint)?;
+    let mut rim = false;
+    for piece in [(c0, r0, c1, r0 + 1), (c0, r1 - 1, c1, r1), (c0, r0, c0 + 1, r1), (c1 - 1, r0, c1, r1)] {
+        rim |= paint_hairline_device_rect(band, request, piece, paint)?;
+    }
+    Ok(filled || rim)
+}
+
+/// Area-true polygon (and path outline), at least a pixel on both sides: the
+/// pixels whose centres it covers take the layer's fill, and the pixels of
+/// that set with a side on its border - the span ends, and what the row above
+/// or below does not cover - are the outline. The rows next to the band are
+/// scanned too, so the rim is the same whatever the tiling.
+fn paint_area_true_polygon(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    points: &[(i64, i64)],
+    paint: PaintStyle,
+) -> Result<bool, String> {
+    if points.len() < 3 {
+        return Err("polygon has fewer than 3 vertices".to_string());
+    }
+    let mut device = Vec::with_capacity(points.len());
+    for &(x, y) in points {
+        device.push(world_to_device(request, x, y)?);
+    }
+    // only the polygon's own rows (one more on each side) inside the band
+    // and its two neighbour rows: a small polygon must not pay for the tile
+    let (low, high) = device.iter().fold((i128::MAX, i128::MIN), |(a, b), &(_, y)| (a.min(y), b.max(y)));
+    let lo = (band.row0 as i64 - 1).max(checked_i64(floor_div(low, DEVICE_ONE), "polygon low row")? - 1);
+    let hi = (band.row1 as i64 + 1).min(checked_i64(floor_div(high, DEVICE_ONE), "polygon high row")? + 2);
+    if lo >= hi {
+        return Ok(false);
+    }
+    let mut rows: Vec<Vec<(i128, i128)>> = vec![Vec::new(); (hi - lo) as usize];
+    scan_device_polygon(&device, FillPhase::PixelCenter, lo, hi, |row, first, end| {
+        if first < end {
+            rows[(row - lo) as usize].push((first, end));
+        }
+        Ok(())
+    })?;
+    let empty: Vec<(i128, i128)> = Vec::new();
+    let at = |row: i64| -> &Vec<(i128, i128)> {
+        if row < lo || row >= hi { &empty } else { &rows[(row - lo) as usize] }
+    };
+    let (row0, row1) = ((band.row0 as i64).max(lo), (band.row1 as i64).min(hi));
+    let mut drew = false;
+    for row in row0..row1 {
+        for &(first, end) in at(row) {
+            let first = first.max(band.col0 as i128);
+            let end = end.min(band.col1 as i128);
+            if first < end {
+                let first = checked_usize(first, "polygon first column")?;
+                let end = checked_usize(end, "polygon end column")?;
+                drew |= fill_span(band, paint, request.height, row as usize, first, end);
+            }
+        }
+    }
+    let mut rim = Vec::new();
+    for row in row0..row1 {
+        rim.clear();
+        for &(first, end) in at(row) {
+            rim.push((first, first + 1));
+            rim.push((end - 1, end));
+            for neighbour in [at(row - 1), at(row + 1)] {
+                let mut from = first;
+                for &(a, b) in neighbour.iter() {
+                    if b <= from || a >= end {
+                        continue;
+                    }
+                    if a > from {
+                        rim.push((from, a));
+                    }
+                    from = from.max(b);
+                }
+                if from < end {
+                    rim.push((from, end));
+                }
+            }
+        }
+        for &(first, end) in &rim {
+            drew |= paint_hairline_device_rect(band, request, (first, row as i128, end, row as i128 + 1), paint)?;
+        }
+    }
+    Ok(drew)
 }
 
 /// Batch the already-selected hairlines, not the source records. The scratch
@@ -4861,6 +5040,9 @@ fn paint_world_polygon(
             return paint_hairline_device_rect(band, request, rect, paint);
         }
     }
+    if area_true_rim(request, paint) {
+        return paint_area_true_polygon(band, request, points, paint);
+    }
     let filled = fill_world_polygon(band, request, points, paint)?;
     let stroked = stroke_world_polygon(band, request, points, paint)?;
     Ok(filled || stroked)
@@ -4890,6 +5072,11 @@ fn paint_world_path(
             // its stroke pass is covered by the collapsed spans.
             return paint_hairline_device_rect(band, request, rect, paint);
         }
+    }
+    // area-true: the outline's covered pixels and their rim; the spine
+    // stroke would reach a pixel past a flush end
+    if area_true_rim(request, paint) {
+        return paint_area_true_polygon(band, request, outline, paint);
     }
     let outlined = paint_world_path_outline(band, request, outline, paint)?;
     let centered = stroke_world_polyline(band, request, centerline, paint)?;
@@ -5517,6 +5704,35 @@ fn fill_device_polygon_with_phase(
     phase: FillPhase,
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    let (row0, row1) = (band.row0 as i64, band.row1 as i64);
+    let (col0, col1) = (band.col0 as i128, band.col1 as i128);
+    let mut drew = false;
+    scan_device_polygon(device, phase, row0, row1, |row, first_col, end_col| {
+        let first_col = first_col.max(col0);
+        let end_col = end_col.min(col1);
+        if first_col >= end_col {
+            return Ok(());
+        }
+        let first_col = checked_usize(first_col, "polygon first column")?;
+        let end_col = checked_usize(end_col, "polygon end column")?;
+        if fill_span(band, paint, request.height, row as usize, first_col, end_col) {
+            drew = true;
+        }
+        Ok(())
+    })?;
+    Ok(drew)
+}
+
+/// The scanline of `fill_device_polygon_with_phase`: every row in
+/// [row_lo, row_hi) (and not above the image) gets its spans, unclamped, in
+/// column order.
+fn scan_device_polygon(
+    device: &[(i128, i128)],
+    phase: FillPhase,
+    row_lo: i64,
+    row_hi: i64,
+    mut emit: impl FnMut(i64, i128, i128) -> Result<(), String>,
+) -> Result<(), String> {
     let mut edges = Vec::with_capacity(device.len());
     for index in 0..device.len() {
         let (mut x0, mut y0) = device[index];
@@ -5546,7 +5762,7 @@ fn fill_device_polygon_with_phase(
         });
     }
     if edges.is_empty() {
-        return Ok(false);
+        return Ok(());
     }
     edges.sort_unstable_by_key(|edge| (edge.first_row, edge.end_row, edge.x0));
     let first_row = edges
@@ -5560,10 +5776,10 @@ fn fill_device_polygon_with_phase(
         .map(|edge| edge.end_row)
         .max()
         .unwrap_or(0)
-        .min(band.row1 as i64);
-    let first_row = first_row.max(band.row0 as i64);
+        .min(row_hi);
+    let first_row = first_row.max(row_lo);
     if first_row >= end_row {
-        return Ok(false);
+        return Ok(());
     }
 
     let mut next_edge = 0usize;
@@ -5575,7 +5791,6 @@ fn fill_device_polygon_with_phase(
         .copied()
         .filter(|edge| edge.first_row < first_row && edge.end_row > first_row)
         .collect();
-    let mut drew = false;
     let mut intersections = Vec::with_capacity(active.len());
     for row in first_row..end_row {
         while next_edge < edges.len() && edges[next_edge].first_row == row {
@@ -5612,26 +5827,10 @@ fn fill_device_polygon_with_phase(
         }
         for pair in intersections.chunks_exact(2) {
             let (first_col, end_col) = fill_phase_columns(pair[0], pair[1], phase)?;
-            let first_col = first_col.max(band.col0 as i128);
-            let end_col = end_col.min(band.col1 as i128);
-            if first_col >= end_col {
-                continue;
-            }
-            let first_col = checked_usize(first_col, "polygon first column")?;
-            let end_col = checked_usize(end_col, "polygon end column")?;
-            if fill_span(
-                band,
-                paint,
-                request.height,
-                row as usize,
-                first_col,
-                end_col,
-            ) {
-                drew = true;
-            }
+            emit(row, first_col, end_col)?;
         }
     }
-    Ok(drew)
+    Ok(())
 }
 
 fn world_to_device(
@@ -5839,6 +6038,7 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
         }
     }
 
@@ -6262,6 +6462,7 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
         };
         let mut pattern = [0u16; 16];
         for (row, word) in pattern.iter_mut().enumerate() {
@@ -6382,6 +6583,7 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
         };
         let segments = [
             ((4.0, 9.0), (21.0, 9.0)),   // horizontal inside the tile
@@ -6456,6 +6658,7 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
         };
         let mut band = full_band(&request);
         paint_world_rect(
@@ -6610,6 +6813,7 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
         };
         let mut frame = full_band(&request);
         fill_world_polygon_with_phase(
@@ -7128,6 +7332,7 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 2,
             tile_size: 16,
+            area_true: false,
         };
         let pruned =
             render_geometry_occupancy(&scene_with(crate::PageIndex::build), &request).unwrap();
@@ -7410,6 +7615,137 @@ mod tests {
             }
         }
         lit
+    }
+
+    /// `hairline_request` under the area-true rule, `size` px square over the
+    /// same 320-unit world, with the given tiling
+    fn area_true_request(size: u32, tile_size: u16, workers: u16) -> StyledGeometryRasterRequest {
+        let mut request = hairline_request();
+        request.raster.area_true = true;
+        request.raster.width = size;
+        request.raster.height = size;
+        request.raster.tile_size = tile_size;
+        request.raster.workers = workers;
+        request
+    }
+
+    fn lit_set(frame: &RgbaFrame, size: usize) -> BTreeSet<(usize, usize)> {
+        let mut lit = BTreeSet::new();
+        for row in 0..size {
+            for col in 0..size {
+                if pixel(frame, col, row) != [0, 0, 0, 255] {
+                    lit.insert((col, row));
+                }
+            }
+        }
+        lit
+    }
+
+    /// even-odd inside test of a pixel centre (world units)
+    fn centre_inside(pts: &[(i64, i64)], x: f64, y: f64) -> bool {
+        let mut inside = false;
+        for k in 0..pts.len() {
+            let (x0, y0) = (pts[k].0 as f64, pts[k].1 as f64);
+            let (x1, y1) = (pts[(k + 1) % pts.len()].0 as f64, pts[(k + 1) % pts.len()].1 as f64);
+            if (y0 > y) != (y1 > y) && x < x0 + (y - y0) * (x1 - x0) / (y1 - y0) {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    #[test]
+    fn area_true_shapes_light_exactly_the_pixels_whose_centres_they_cover() {
+        // 10 units a pixel, solid fill: the lit set is the centre set - no
+        // pixel of growth past a shape, so the 1.2 px gap between the two
+        // 3.8 px bars keeps its column (the KLayout rule lights it)
+        let rect = |x, y, w, h| RectRec { layer: 1, dt: 0, x, y, w, h, rep: Rep::One };
+        let bars = vec![rect(13, 13, 38, 294), rect(63, 13, 38, 294)];
+        let lshape = vec![(153, 23), (297, 23), (297, 91), (211, 91), (211, 293), (153, 293)];
+        let polys = vec![PolyRec { layer: 1, dt: 0, pts: lshape.clone(), rep: Rep::One }];
+        let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
+        let frame = render_geometry_styled(&hairline_scene(bars.clone(), polys, Vec::new()), &request).unwrap().frame;
+        let lit = lit_set(&frame, 32);
+        let mut want = BTreeSet::new();
+        for row in 0..32usize {
+            for col in 0..32usize {
+                let (x, y) = ((col as f64 + 0.5) * 10.0, 320.0 - (row as f64 + 0.5) * 10.0);
+                let in_bar = bars.iter().any(|b| x > b.x as f64 && x <= (b.x + b.w) as f64 && y >= b.y as f64 && y < (b.y + b.h) as f64);
+                if in_bar || centre_inside(&lshape, x, y) {
+                    want.insert((col, row));
+                }
+            }
+        }
+        assert_eq!(lit, want, "area-true lit set differs from the pixel-centre set");
+        assert!(lit.iter().all(|&(col, _)| col != 5), "the 1.2 px gap between the bars was closed");
+        // the KLayout rule grows the first bar into that column
+        let mut klayout = request.clone();
+        klayout.raster.area_true = false;
+        let grown = lit_set(&render_geometry_styled(&hairline_scene(bars, Vec::new(), Vec::new()), &klayout).unwrap().frame, 32);
+        assert!(grown.iter().any(|&(col, _)| col == 5));
+    }
+
+    #[test]
+    fn area_true_keeps_a_sub_pixel_shape_with_the_chance_it_fills_its_pixels() {
+        // many 0.3 px wide wires and 0.4 x 0.5 px points at scattered world
+        // boxes: the kept share is the covered share, the decision is the
+        // world box's, and zooming out keeps a subset
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as i64
+        };
+        let one = DEVICE_ONE;
+        let (mut wires, mut points) = (0usize, 0usize);
+        let (mut kept_wires, mut kept_points) = (0usize, 0usize);
+        for _ in 0..40_000 {
+            let (x, y) = (next() % 1_000_000, next() % 1_000_000);
+            // 1 unit = one device unit at this scale: DEVICE_ONE units a pixel
+            let wire = BBox { x0: x, y0: y, x1: x + (0.3 * one as f64) as i64, y1: y + 5 * one as i64 };
+            let point = BBox { x0: x, y0: y, x1: x + (0.4 * one as f64) as i64, y1: y + (0.5 * one as f64) as i64 };
+            let device = |b: &BBox, k: i128| (b.x0 as i128 / k, b.y0 as i128 / k, b.x1 as i128 / k, b.y1 as i128 / k);
+            for (b, count, kept) in [(&wire, &mut wires, &mut kept_wires), (&point, &mut points, &mut kept_points)] {
+                *count += 1;
+                let (x0, y0, x1, y1) = device(b, 1);
+                let near = area_true_hairline(*b, (x0, y0, x1, y1), x1 - x0 < one, y1 - y0 < one).unwrap();
+                let (a0, b0, a1, b1) = device(b, 2);
+                let far = area_true_hairline(*b, (a0, b0, a1, b1), a1 - a0 < one, b1 - b0 < one).unwrap();
+                let drawn = |r: (i128, i128, i128, i128)| r.0 < r.2 && r.1 < r.3;
+                if drawn(near) {
+                    *kept += 1;
+                    // one pixel across the thin side
+                    assert!(near.2 - near.0 == 1);
+                } else {
+                    assert!(!drawn(far), "a shape dropped when near came back when zoomed out");
+                }
+                assert_eq!(near, area_true_hairline(*b, (x0, y0, x1, y1), x1 - x0 < one, y1 - y0 < one).unwrap());
+            }
+        }
+        let share = |k: usize, n: usize| k as f64 / n as f64;
+        assert!((share(kept_wires, wires) - 0.3).abs() < 0.015, "wires kept {}", share(kept_wires, wires));
+        assert!((share(kept_points, points) - 0.2).abs() < 0.015, "points kept {}", share(kept_points, points));
+    }
+
+    #[test]
+    fn area_true_pixels_do_not_depend_on_the_tiling() {
+        // the rim reads the rows next to a band, so no tile or worker split
+        // may change a pixel; sub-pixel ranks are world-anchored
+        let rect = |x, y, w, h, rep| RectRec { layer: 1, dt: 0, x, y, w, h, rep };
+        let rects = vec![
+            rect(7, 9, 131, 47, Rep::One),
+            rect(150, 150, 3, 90, Rep::Grid { na: 40, nb: 1, va: (4, 0), vb: (0, 0) }),
+            rect(20, 200, 2, 2, Rep::Grid { na: 30, nb: 30, va: (3, 0), vb: (0, 3) }),
+            rect(233, 17, 61, 29, Rep::Grid { na: 2, nb: 5, va: (33, 0), vb: (0, 41) }),
+        ];
+        let polys = vec![PolyRec { layer: 1, dt: 0, pts: vec![(141, 61), (311, 97), (253, 303), (171, 211)], rep: Rep::One }];
+        let paths = vec![PathRec { layer: 1, dt: 0, pts: vec![(15, 120), (120, 120), (120, 190)], hw: 6, es: 3, ee: 0, rep: Rep::One }];
+        let scene = hairline_scene(rects, polys, paths);
+        let reference = render_geometry_styled(&scene, &area_true_request(96, DEFAULT_TILE_SIZE, 1)).unwrap().frame;
+        assert!(!lit_set(&reference, 96).is_empty());
+        for (tile, workers) in [(7u16, 1u16), (16, 3), (5, 4)] {
+            let frame = render_geometry_styled(&scene, &area_true_request(96, tile, workers)).unwrap().frame;
+            assert_eq!(frame, reference, "tile {} workers {}", tile, workers);
+        }
     }
 
     #[test]
@@ -9039,6 +9375,7 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 3,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
         };
         let report = render_geometry_occupancy(&scene, &raster_request).unwrap();
         raster_request.workers = 1;
@@ -9115,6 +9452,7 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers,
             tile_size,
+            area_true: false,
         }
     }
 

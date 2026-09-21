@@ -42,6 +42,10 @@ from pathlib import Path
 import klayout.db as db
 
 ROOT = Path(__file__).resolve().parents[1]
+# The summaries, washes and frontier dots here are judged against page renders
+# drawn by the KLayout rule: area-true drawing (FLOE_RUST_AREA_TRUE, its own
+# gate tools/validate_area_true.py) is pinned off for every worker of this gate.
+os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 sys.path.insert(0, str(ROOT))
 from floe.cachepath import vfs_cache_dir  # noqa: E402
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
