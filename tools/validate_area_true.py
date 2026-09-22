@@ -48,13 +48,20 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
     ADAPTIVE_CUT_DENSITY_PLAN §4.2): one row of 64 bars 1.5 px wide stored
     as one array, as two placements of a 32-bar cell, and as a column cell
     placed rotated onto the row lights the same pixels at whole and
-    fractional pans.
+    fractional pans;
+  * the indexer's own page split (review 2026-09-23): a 64 x 6 lattice of
+    1.5 x 4.5 px bars among 70,000 single rectangles on its layer, indexed
+    with a 16 MiB and a 1 MiB page target - one page, and two pages that cut
+    the lattice's Grid record in two (frag_split / frag_rep) - lights the
+    same pixels at five pans, whole and fractional on both axes, and about
+    its covered area (the per-record ranks differed in 258 px).
 
     .venv/bin/python tools/validate_area_true.py
 """
 import math
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -73,6 +80,9 @@ POLY, RECT, TRI, SQUARE, DOTS = (2, 0), (3, 0), (4, 0), (5, 0), (6, 0)
 TINY = (300.0, 0.0)           # um: the 10 x 10 placements of a 2 um cell, 40 um apart
 ROW = (500.0, 3.0)            # um: one lattice row stored three ways, layers 8, 9, 10
 ROW_LAYERS = ((8, 0), (9, 0), (10, 0))
+SPLIT_LAYER = (11, 0)         # the page split layout: a lattice among single rectangles
+SPLIT_AT = (490.4, 3.0)       # um: the lattice's first bar
+SPLIT_PANS = ((0.0, 0.0), (0.2, 0.0), (0.37, 0.0), (0.5, 0.29), (0.81, 0.63))
 BIG = (60.0, 40.0)            # um: the shapes that run off the edges, around this point
 SMALL = (120.0, 5.0)          # um: the triangle and square fields' corner
 CLEAR = '\n'.join(['.' * 16] * 16)
@@ -188,6 +198,32 @@ def layout(path):
         wx = x0 + i * pitch
         column.shapes(col).insert(kdb.DBox(y0, -(wx + bw), y0 + bh, -wx))
     top.insert(kdb.CellInstArray(column.cell_index(), kdb.Trans(1, False, 0, 0)))
+    ly.write(str(path))
+
+
+def split_layout(path):
+    """A 64 x 6 lattice of 0.15 x 0.45 um bars (pitch 0.3 x 0.8 um: 1.5 x 4.5 px
+    at 3 x 8 px) in the middle of 70,000 rectangles of distinct sizes (no
+    repetition) 17 um and more above it on the same layer: 1.1 MB of records,
+    over a 1 MiB page target, so the indexer splits the layer across x through
+    the lattice."""
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    li = ly.layer(*SPLIT_LAYER)
+    x0, y0 = SPLIT_AT
+    for j in range(6):
+        for i in range(64):
+            top.shapes(li).insert(kdb.DBox(x0 + i * 0.3, y0 + j * 0.8, x0 + i * 0.3 + 0.15, y0 + j * 0.8 + 0.45))
+    state = 12345
+    for k in range(70000):
+        state = (state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+        x = (state >> 33) % 1000000 / 1000.0
+        state = (state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+        y = 20.0 + (state >> 33) % 20000 / 1000.0
+        w, h = 0.02 + (k % 500) * 0.001, 0.02 + (k // 500) * 0.001
+        top.shapes(li).insert(kdb.DBox(x, y, x + w, y + h))
     ly.write(str(path))
 
 
@@ -416,6 +452,36 @@ def main():
                         pan, len(lit[0]), len(lit[1]), len(lit[2]), len(lit[0] ^ lit[1]), len(lit[0] ^ lit[2]))
             print('lattice ranks: one array, two cell placements and a rotated column light the same %d px'
                   % len(lit[0]))
+            # the indexer's own page split: one layout, a 16 MiB and a 1 MiB page target
+            whole_src, split_src = Path(temp) / 'split16.oas', Path(temp) / 'split1.oas'
+            split_layout(whole_src)
+            shutil.copy(whole_src, split_src)
+            for src, mb in ((whole_src, 16), (split_src, 1)):
+                done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--page-target-mb', str(mb)],
+                                      cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+                assert done.returncode == 0, done.stdout + done.stderr
+            pair = [worker(whole_src, True), worker(split_src, True)]
+            try:
+                size, covered_px = (240, 80), 64 * 6 * 1.5 * 4.5
+                for px, py in SPLIT_PANS:
+                    bx, by = SPLIT_AT[0] - 2.4 + px * PX_UM, SPLIT_AT[1] - 1.0 + py * PX_UM
+                    box = (bx, by, bx + size[0] * PX_UM, by + size[1] * PX_UM)
+                    lit, pages = [], []
+                    for w in pair:
+                        gen += 1
+                        pixels, report = frame(w, gen, box, visible=(SPLIT_LAYER,), size=size, report=True)
+                        lit.append({i // 4 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK})
+                        pages.append(report['tiles'])
+                    assert pages == [1, 2], 'page split at a (%g, %g) px pan: %s pages, expected 1 and 2' % (px, py, pages)
+                    assert lit[0] == lit[1], 'page split at a (%g, %g) px pan: %d / %d px, %d differ' % (
+                        px, py, len(lit[0]), len(lit[1]), len(lit[0] ^ lit[1]))
+                    assert abs(len(lit[0]) / covered_px - 1.0) <= 0.02, \
+                        'page split lattice: %d px lit for %.0f covered' % (len(lit[0]), covered_px)
+            finally:
+                for w in pair:
+                    w.stop()
+            print('page split: the lattice in 1 page (16 MiB) and cut into 2 (1 MiB) lights the same %d px '
+                  '(%.0f covered) at %d pans' % (len(lit[0]), covered_px, len(SPLIT_PANS)))
         finally:
             on.stop()
             off.stop()

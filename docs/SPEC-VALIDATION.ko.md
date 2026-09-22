@@ -61,7 +61,10 @@ sh tools/validate_rust.sh --only quick path/to.oas
   M7 LOD 교체가 기본 꺼짐인지: `floe2 index --lod`로 만든 조밀한 레이아웃의 넓은 뷰에서 교체 0,
   `FLOE_RUST_LOD=on`이면 교체가 생긴다. 같은 세계 격자 행(1.5 px 막대 64개)을 한 배열·32개
   셀 두 번 배치·90° 회전 열 셀로 저장한 세 레이어가 정수·소수 pan에서 같은 픽셀을 켠다(세계 격자
-  번호).
+  번호). 인덱서의 실제 페이지 분할(2026-09-23 검토): 64×6 격자(1.5×4.5 px 막대)와 같은 레이어의
+  단일 사각형 70,000개를 페이지 목표 16 MiB(1페이지)·1 MiB(격자 Grid가 둘로 잘린 2페이지)로
+  인덱싱해 두 축의 정수·소수 pan 5곳에서 같은 픽셀, 켜진 픽셀이 덮인 면적의 ±2 %(레코드별 번호일 때
+  258 px 차이).
   occupancy·jobdeck·representatives·sub_cut_box 게이트는 KLayout 규칙에 대한 비교라 이 킬 스위치를
   모든 워커에 고정한다(sub_cut_box: 상자는 표시용 점, 그 기준인 멤버 직접 그리기도 KLayout 규칙).
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드

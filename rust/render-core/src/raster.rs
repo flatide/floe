@@ -4955,11 +4955,16 @@ fn paint_width_first_rect(
 /// draws the same members whether it is stored as one Grid, as the index's
 /// fragments (frag_rep re-bases and renumbers them), with its axes swapped or
 /// a pitch negated, or placed rotated or mirrored. What it cannot see: a
-/// one-member fragment is a Rep::One (world-box hash), and a fragment that
-/// lost an axis (a one-row piece of a 2-D grid) has no pitch on that axis, so
-/// it keys differently. A skewed grid keeps the per-record index (the record's
-/// own (i, j), u its first member's world-box ranks); a collinear 2-D grid has
-/// no clean index and keeps the member's own world-box ranks.
+/// one-member fragment is a Rep::One, and a 1 x 1 grid ranks like one - the
+/// single shape's world-box hash. A one-row piece of a 2-D grid is written as
+/// a one-dimensional repetition (the page file drops the other vector), so
+/// nothing tells it from an array stored as that row from the start: it ranks
+/// as that row's own lattice - its pitch, the fixed coordinate across, the
+/// same under further splits of the row - and apart from the 2-D lattice it
+/// was cut from (review 2026-09-23). A skewed grid keeps the per-record index
+/// (the record's own (i, j), u its first member's world-box ranks); a
+/// collinear 2-D grid has no clean index and keeps the member's own world-box
+/// ranks.
 struct GridRanks {
     mode: GridMode,
     u: (f64, f64),
@@ -4994,6 +4999,10 @@ impl GridRanks {
         };
         let repeating: Vec<(i64, i64)> =
             [(*na > 1, wa), (*nb > 1, wb)].iter().filter(|(many, _)| *many).map(|&(_, v)| v).collect();
+        // no repeating vector: one member, ranked as the same shape stored alone
+        if repeating.is_empty() {
+            return Ok(None);
+        }
         let lattice = repeating.iter().map(|&v| along(v)).collect::<Option<Vec<(i64, i64)>>>().and_then(|steps| {
             let px = steps.iter().map(|s| s.0).max().unwrap_or(0);
             let py = steps.iter().map(|s| s.1).max().unwrap_or(0);
@@ -8108,6 +8117,65 @@ mod tests {
         // a different phase or size is a different lattice
         let shifted = member_ranks(&[(at(7, 0), Rep::Grid { na: 64, nb: 1, va: (30, 0), vb: (0, 0) }, id)]);
         assert_ne!(shifted.values().collect::<Vec<_>>(), whole.values().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_fragment_that_lost_an_axis_ranks_as_its_own_row() {
+        // review 2026-09-23: a one-row piece of a 2-D lattice is written as a
+        // one-dimensional repetition - the page file drops the other vector
+        // (oasis write.rs, the nb == 1 arms; doc.rs reads vb (0, 0) back) - so
+        // it cannot be told from an array stored as that row from the start.
+        // It ranks as that row's own lattice: with or without the dropped
+        // vector, as a plain one-row array, under further splits of the row,
+        // and it still spreads its extra pixels; it keys apart from the 2-D
+        // lattice it was cut from (out of the identity guarantee). A one-member
+        // piece (Rep::One) and a 1 x 1 grid take the single shape's hash.
+        let id = OrthoTransform::identity();
+        let bar = BBox { x0: -1003, y0: 2000, x1: -988, y1: 2300 };
+        let at = |dx: i64, dy: i64| BBox { x0: bar.x0 + dx, y0: bar.y0 + dy, x1: bar.x1 + dx, y1: bar.y1 + dy };
+        let row = |na: u64, vb: (i64, i64)| Rep::Grid { na, nb: 1, va: (30, 0), vb };
+        let lattice = member_ranks(&[(bar, Rep::Grid { na: 64, nb: 8, va: (30, 0), vb: (0, 400) }, id)]);
+        let of_lattice = |keep: &dyn Fn(&(i64, i64, i64, i64)) -> bool| {
+            lattice.iter().filter(|(k, _)| keep(k)).map(|(k, v)| (*k, *v)).collect::<BTreeMap<_, _>>()
+        };
+        // the fourth row: frag_rep keeps vb with count 1 in memory (nj == 1)
+        let dy = 3 * 400;
+        let kept = member_ranks(&[(at(0, dy), row(64, (0, 400)), id)]);
+        let written = member_ranks(&[(at(0, dy), row(64, (0, 0)), id)]);
+        assert_eq!(kept.len(), 64);
+        assert_eq!(kept, written, "the dropped vector changed the row's ranks");
+        let split = member_ranks(&[(at(0, dy), row(20, (0, 0)), id), (at(20 * 30, dy), row(44, (0, 0)), id)]);
+        assert_eq!(split, written, "a split of the row ranks differently");
+        assert_ne!(written, of_lattice(&|k| k.1 == bar.y0 + dy), "the row piece ranks as the 2-D lattice");
+        // it still spreads: of 64 bars 1.5 px wide half draw 2 px, never three alike in a row
+        let wide: Vec<bool> = written.values().map(|ranks| 1.5 - ranks.0 > 1.0).collect();
+        let count = wide.iter().filter(|w| **w).count();
+        assert!((31..=33).contains(&count), "{} of 64 wide", count);
+        assert!(wide.windows(3).all(|w| !(w[0] == w[1] && w[1] == w[2])), "three alike in a row");
+        // the sixth column: frag_rep swaps the vectors (ni == 1)
+        let dx = 5 * 30;
+        let column = member_ranks(&[(at(dx, 0), Rep::Grid { na: 8, nb: 1, va: (0, 400), vb: (30, 0) }, id)]);
+        let plain = member_ranks(&[(at(dx, 0), Rep::Grid { na: 1, nb: 8, va: (0, 0), vb: (0, 400) }, id)]);
+        assert_eq!(column.len(), 8);
+        assert_eq!(column, plain, "the swapped column piece ranks apart from a plain column");
+        assert_ne!(column, of_lattice(&|k| k.0 == bar.x0 + dx), "the column piece ranks as the 2-D lattice");
+        // one member: no grid ranks, and a frame draws a 1 x 1 grid as the shape alone
+        assert!(GridRanks::new(&Rep::One, &id, bar).unwrap().is_none());
+        assert!(GridRanks::new(&Rep::Grid { na: 1, nb: 1, va: (30, 0), vb: (0, 400) }, &id, bar).unwrap().is_none());
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |span: i64| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as i64 % span
+        };
+        let dots: Vec<(i64, i64)> = (0..300).map(|_| (next(310), next(310))).collect();
+        let draw = |rep: &Rep| {
+            let rects = dots.iter().map(|&(x, y)| RectRec { layer: 1, dt: 0, x, y, w: 5, h: 5, rep: rep.clone() }).collect();
+            let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
+            lit_set(&render_geometry_styled(&hairline_scene(rects, Vec::new(), Vec::new()), &request).unwrap().frame, 32)
+        };
+        let alone = draw(&Rep::One);
+        assert!(!alone.is_empty() && alone.len() < 300, "{} of 300 half-pixel dots lit", alone.len());
+        assert_eq!(draw(&Rep::Grid { na: 1, nb: 1, va: (30, 0), vb: (0, 400) }), alone, "a 1 x 1 grid drew apart from the shape");
     }
 
     #[test]
