@@ -25,7 +25,7 @@
 | pts_enum_budget | 200_000 | 요청당 오프셋 가시성 테스트 상한(소진=통째 포함) |
 | frame_cap | 200_000 | 플랜 전체 프레임 엔트리 상한 (0=프레임 off) |
 | lod_k | 4.0 | LOD 밀도 게이트 계수 (0=off) |
-| wash_px | 2.0 | 워시 문턱 px (0=off) |
+| wash_px | 2.0 | 워시 문턱 px (0=off); 요청의 `page_wash`가 꺼져 있으면 쓰지 않음(§3) |
 | hairline | 0.5 | rev 41 min변 컷 계수 (0=off) |
 | thin_lattice_um | 7.0 | rev 45 프레임 격자 피치 µm (0=rev 41 프레임 컬 복원) |
 | thin_demote_px | 14.0 | 격자 1피치 화면 px가 이 미만이면 빈당 2→1 강등 |
@@ -144,7 +144,11 @@
   금지).
 - LOD 스왑: 충실도(실방출 셀 ≤1px 양축) AND members > lod_k×페이지
   화면px² → lod_page로 교체. 프로브는 px=0이라 구조적으로 exact.
-- 워시: 페이지 화면상 양축 ≤ wash_px → (layer, bbox) 렉트로 붕괴.
+- 워시: 페이지 화면상 양축 ≤ wash_px → (layer, bbox) 렉트로 붕괴. 요청 필드 `ViewReq::page_wash`가
+  켜져 있을 때만 — **renderd의 일반 레이아웃 프레임은 기본 끔**(2026-09-22 사용자 결정: 2×2 px 덩어리는
+  KLayout 규칙으로 그리는 표시용 점이라 작은 페이지의 area-true 그리기를 가렸다; 이제 그 페이지를
+  디코드해 그린다), `FLOE_RUST_PAGE_WASH=on`으로 되돌린다. exact 프레임, jobdeck, CLI(`floe-index plan`)와
+  테스트 요청은 종전대로 켠다.
 
 ### 예산에 맞춘 컷 (budget-fitted cut, 0.12.162, 2026-09-18)
 

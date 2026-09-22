@@ -2218,6 +2218,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
                     sub_cut_box: false,
                     shape_cut: false,
                     frames: true,
+                    page_wash: true,
         };
         let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
         let (boxes, truncated) = floe_vfs::hier::frontier_boxes(
@@ -6518,6 +6519,7 @@ fn make_req(
             sub_cut_box: false,
             shape_cut: false,
             frames: true,
+            page_wash: true,
     }
 }
 

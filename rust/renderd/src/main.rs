@@ -1041,6 +1041,8 @@ fn run_clip(
         sub_cut_box: false,
         shape_cut: false,
         frames: true,
+        // px_per_dbu 0 above: no wash could fire either way
+        page_wash: true,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1846,6 +1848,16 @@ fn shape_cut_enabled() -> bool {
 /// FLOE_RUST_AREA_TRUE=off is the kill switch.
 fn area_true_enabled() -> bool {
     std::env::var("FLOE_RUST_AREA_TRUE").as_deref() != Ok("off")
+}
+
+/// The M7-C page wash (floe_vfs::ViewReq::page_wash) on a plain layout's
+/// frames. OFF by default (user decision 2026-09-22): a page whose whole image
+/// fits 2 x 2 px was shipped as one bbox rect - a marker drawn by the KLayout
+/// rule - so the small pages of a wide view never showed the area-true
+/// drawing that is being checked; they are now decoded and drawn.
+/// FLOE_RUST_PAGE_WASH=on turns the wash back on.
+fn page_wash_enabled() -> bool {
+    std::env::var("FLOE_RUST_PAGE_WASH").as_deref() == Ok("on")
 }
 
 /// The page frontier (floe_vfs::ViewReq::page_reps) on a plain
@@ -3011,6 +3023,10 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64)
         // only reached the raster, so a frames-off view still planned - and
         // walked for - every depth-boundary outline)
         frames: command.frames,
+        // the M7-C page wash (floe_vfs::ViewReq::page_wash): off unless
+        // FLOE_RUST_PAGE_WASH=on (see page_wash_enabled); an exact frame
+        // keeps what it had
+        page_wash: command.exact || page_wash_enabled(),
     };
     request.validate()?;
     if cache.unit() <= 0.0 {

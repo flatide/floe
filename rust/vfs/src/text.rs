@@ -1049,6 +1049,7 @@ mod tests {
                     sub_cut_box: false,
                     shape_cut: false,
                     frames: true,
+                    page_wash: true,
         }
     }
 

@@ -1960,7 +1960,7 @@ impl<'a> Hier<'a> {
             // (never a representative page: the page frontier draws it
             // thinned to the density - a bbox rect here was the solid
             // 2 x 2 px square the field saw as boxes at the fit view)
-            if self.wash_px > 0.0 && self.px_per_dbu > 0.0 && !self.page_levels.contains_key(&pi) {
+            if self.req.page_wash && self.wash_px > 0.0 && self.px_per_dbu > 0.0 && !self.page_levels.contains_key(&pi) {
                 let pw = (p.bbox.x1 - p.bbox.x0).max(0) as f64
                     * self.px_per_dbu;
                 let ph = (p.bbox.y1 - p.bbox.y0).max(0) as f64
@@ -4158,6 +4158,7 @@ mod tests {
                     sub_cut_box: false,
                     shape_cut: false,
                     frames: true,
+                    page_wash: true,
         }
     }
 
@@ -4406,6 +4407,7 @@ mod tests {
                     sub_cut_box: false,
                     shape_cut: false,
                     frames: true,
+                    page_wash: true,
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
@@ -5802,6 +5804,7 @@ mod tests {
                     sub_cut_box: false,
                     shape_cut: false,
                     frames: true,
+                    page_wash: true,
         }
     }
 
@@ -6369,6 +6372,7 @@ mod tests {
                     sub_cut_box: false,
                     shape_cut: false,
                     frames: true,
+                    page_wash: true,
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks

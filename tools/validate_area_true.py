@@ -37,7 +37,10 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
     over the top edge for a border), at whole and fractional pans;
   * 900 triangles and 900 squares of the same 0.8 x 0.8 px box, 3 px apart:
     the triangles light about half as many pixels (review 2026-09-22: a
-    sub-pixel polygon was kept by its box's area).
+    sub-pixel polygon was kept by its box's area);
+  * the M7-C page wash is off by default (user decision 2026-09-22): a wide
+    view of a small cell placed 10 x 10 times, each page under a pixel, washes
+    no page and draws the geometry; FLOE_RUST_PAGE_WASH=on washes them.
 
     .venv/bin/python tools/validate_area_true.py
 """
@@ -58,7 +61,8 @@ W, H = 1000, 400
 PX_UM = 0.1                                   # the view: 0.1 um a pixel
 FIELD_W, FIELD_H, PAD = 16.0, 6.0, 4.0        # um
 LAYER = (1, 0)
-POLY, RECT, TRI, SQUARE = (2, 0), (3, 0), (4, 0), (5, 0)
+POLY, RECT, TRI, SQUARE, DOTS = (2, 0), (3, 0), (4, 0), (5, 0), (6, 0)
+TINY = (300.0, 0.0)           # um: the 10 x 10 placements of a 2 um cell, 40 um apart
 BIG = (60.0, 40.0)            # um: the shapes that run off the edges, around this point
 SMALL = (120.0, 5.0)          # um: the triangle and square fields' corner
 CLEAR = '\n'.join(['.' * 16] * 16)
@@ -150,23 +154,32 @@ def layout(path):
             y = SMALL[1] + j * 3 * PX_UM + ((i * 5) % 13) * 0.01 * PX_UM
             top.shapes(tri).insert(kdb.DPolygon([kdb.DPoint(x, y), kdb.DPoint(x + side, y), kdb.DPoint(x, y + side)]))
             top.shapes(sq).insert(kdb.DBox(x, y, x + side, y + side))
+    dot = ly.create_cell('DOT')
+    for x0, y0, x1, y1 in ((0.0, 0.0, 0.6, 2.0), (1.0, 0.0, 2.0, 0.5), (1.2, 1.1, 1.9, 1.8)):
+        dot.shapes(ly.layer(*DOTS)).insert(kdb.DBox(x0, y0, x1, y1))
+    step = int(40.0 / ly.dbu)
+    top.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(int(TINY[0] / ly.dbu), int(TINY[1] / ly.dbu)),
+                                 kdb.Vector(step, 0), kdb.Vector(0, step), 10, 10))
     ly.write(str(path))
 
 
-def worker(src, on):
+def worker(src, on, wash=False):
     if on:
         os.environ.pop('FLOE_RUST_AREA_TRUE', None)
     else:
         os.environ['FLOE_RUST_AREA_TRUE'] = 'off'
+    if wash:
+        os.environ['FLOE_RUST_PAGE_WASH'] = 'on'
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
     w.start()
     os.environ.pop('FLOE_RUST_AREA_TRUE', None)
+    os.environ.pop('FLOE_RUST_PAGE_WASH', None)
     return w
 
 
-def frame(w, gen, view_um, cut_px=0.0, visible=(LAYER,), size=(None, None)):
+def frame(w, gen, view_um, cut_px=0.0, visible=(LAYER,), size=(None, None), report=False):
     dbu = float(w.cache.meta['dbu'])
     w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in view_um), 'view': None,
               'w': size[0] or W, 'h': size[1] or H, 'depth': None, 'cut_px': cut_px, 'lod': False, 'frames': False,
@@ -177,7 +190,8 @@ def frame(w, gen, view_um, cut_px=0.0, visible=(LAYER,), size=(None, None)):
         res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
         assert res.get('kind') != 'error', res
         if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
-            return bytes(res.pop('rgba'))
+            pixels = bytes(res.pop('rgba'))
+            return (pixels, res) if report else pixels
     raise AssertionError('area-true frame timeout')
 
 
@@ -318,6 +332,21 @@ def main():
             assert 0.35 <= ratio <= 0.65, 'triangles lit %d, squares %d (%.2f)' % (counts[TRI], counts[SQUARE], ratio)
             print('area-true: 900 triangles light %d px, 900 squares %d px (%.2f; areas 0.32 / 0.64 px each)'
                   % (counts[TRI], counts[SQUARE], ratio))
+            # the page wash: off by default, FLOE_RUST_PAGE_WASH=on turns it back on
+            washer = worker(src, True, wash=True)
+            try:
+                wide = (TINY[0] - 100.0, TINY[1] - 100.0, TINY[0] - 100.0 + 200 * 4.0, TINY[1] - 100.0 + 150 * 4.0)
+                gen += 1
+                plain, report = frame(on, gen, wide, visible=(DOTS,), size=(200, 150), report=True)
+                washed, wreport = frame(washer, 1, wide, visible=(DOTS,), size=(200, 150), report=True)
+                lit = sum(plain[i:i + 4] != BLACK for i in range(0, len(plain), 4))
+                assert report['plan_culls']['washed'] == 0 and lit > 0, \
+                    'default frame: %d pages washed, %d px lit' % (report['plan_culls']['washed'], lit)
+                assert wreport['plan_culls']['washed'] > 0, 'FLOE_RUST_PAGE_WASH=on washed no page'
+                print('page wash: default washes 0 pages and draws %d px of geometry; on, %d pages washed'
+                      % (lit, wreport['plan_culls']['washed']))
+            finally:
+                washer.stop()
         finally:
             on.stop()
             off.stop()

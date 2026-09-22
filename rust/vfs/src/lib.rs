@@ -96,6 +96,13 @@ pub struct ViewReq {
     /// keep` request of a plain layout; deck passes, probes and the CLI's
     /// plans do not.
     pub shape_cut: bool,
+    /// The M7-C page wash (HierOpts::wash_px): a page whose whole image is at
+    /// most wash_px in both axes ships as one bbox rect on its own layer
+    /// instead of its geometry. renderd turns it OFF for a plain layout's
+    /// frames by default (user decision 2026-09-22: the blob hid the
+    /// area-true drawing of small pages; FLOE_RUST_PAGE_WASH=on restores it);
+    /// every other caller keeps it.
+    pub page_wash: bool,
     /// The frame draws hierarchy frames (cell outlines at the depth
     /// boundary). False: none are planned, and a child subtree that holds
     /// no visible layer is not walked to reach them - the planner's

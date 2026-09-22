@@ -56,8 +56,10 @@ sh tools/validate_rust.sh --only quick path/to.oas
   0.85~1.15배. 킬 스위치 `FLOE_RUST_AREA_TRUE=off`는 1.2·1.5 px 간격을 닫고 1px 미만 격자를 전부 켠다.
   같은 뷰 두 번과 37×23 px 정수 pan의 겹친 영역이 픽셀까지 같다. 채움을 끈 다각형·사각형이 뷰의
   사방 밖으로 걸칠 때 뷰 안에 켜진 픽셀이 0(정수·소수 pan 4가지). 0.8×0.8 px 삼각형 900개가 같은
-  bbox 사각형 900개의 0.35~0.65배만 켠다. occupancy·jobdeck·representatives 게이트는 KLayout 규칙에
-  대한 비교라 이 킬 스위치를 모든 워커에 고정한다.
+  bbox 사각형 900개의 0.35~0.65배만 켠다. M7-C 페이지 워시가 기본 꺼짐인지: 2 µm 셀 10×10 배치의
+  넓은 뷰(페이지가 1 px 미만)에서 워시 0·도형이 그려지고, `FLOE_RUST_PAGE_WASH=on`이면 워시가 생긴다.
+  occupancy·jobdeck·representatives·sub_cut_box 게이트는 KLayout 규칙에 대한 비교라 이 킬 스위치를
+  모든 워커에 고정한다(sub_cut_box: 상자는 표시용 점, 그 기준인 멤버 직접 그리기도 KLayout 규칙).
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과

@@ -38,6 +38,11 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# Boxes are markers drawn by the KLayout rule and are compared with the
+# members drawn directly: area-true drawing (FLOE_RUST_AREA_TRUE, gate
+# tools/validate_area_true.py) keeps a sub-pixel member by its area, so the
+# members are drawn by the KLayout rule here too.
+os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 sys.path.insert(0, str(ROOT))
 from floe.cache import Cache
 from floe.rust_render import RustRenderWorker

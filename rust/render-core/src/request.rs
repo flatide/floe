@@ -72,6 +72,8 @@ pub struct PlanRequest {
     pub sub_cut_box: bool,
     /// The per-shape cut (floe_vfs::ViewReq::shape_cut).
     pub shape_cut: bool,
+    /// The M7-C page wash (floe_vfs::ViewReq::page_wash).
+    pub page_wash: bool,
     /// The frame draws hierarchy frames (floe_vfs::ViewReq::frames).
     pub frames: bool,
 }
@@ -117,6 +119,7 @@ mod tests {
             sub_cut_box: false,
             shape_cut: false,
             frames: true,
+            page_wash: true,
         };
         assert!(req.validate().is_err());
     }

@@ -850,6 +850,7 @@ mod tests {
             sub_cut_box: false,
             shape_cut: false,
             frames: true,
+            page_wash: true,
         }
     }
     fn stream(prims: Vec<Prim>, req: &crate::ViewReq, options: Options) -> Stream {
