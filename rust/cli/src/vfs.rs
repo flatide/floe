@@ -4162,8 +4162,13 @@ fn plan_layer_frontier(
             depth,
             &mut oversize,
         );
+        // the prefix emits pages of its own (oversize groups and
+        // leaves above the cutoff): count their Grid pieces here
+        // as split_pages does for the tasks' (review 2026-09-23:
+        // the P2 build logged 0 pieces for the serial build's 2)
         let mut emitted: Vec<PageJob> = Vec::new();
         for grp in oversize {
+            count_grid_pieces(cell, &grp, &mut stats);
             emit_page(ci, li, grp, &mut seq0, &mut emitted);
         }
         match step {
@@ -4175,6 +4180,7 @@ fn plan_layer_frontier(
                 stack.push((lv, depth + 1));
             }
             NodeStep::Leaf(r) => {
+                count_grid_pieces(cell, &r, &mut stats);
                 emit_page(ci, li, r, &mut seq0, &mut emitted);
                 segs.push(Seg::Pages(emitted));
             }
@@ -8432,6 +8438,9 @@ mod split_tests {
     /// differ - the encode goes through each plan's own shards)
     fn layer_bytes_equal(doc: &Doc, a: &LayerPlan, b: &LayerPlan) {
         assert_eq!(a.stats.fragments, b.stats.fragments);
+        assert_eq!(a.stats.grid_pieces, b.stats.grid_pieces);
+        assert_eq!(a.stats.grid_rows, b.stats.grid_rows);
+        assert_eq!(a.stats.grid_ones, b.stats.grid_ones);
         assert_eq!(a.stats.oversize_pages, b.stats.oversize_pages);
         assert_eq!(a.stats.depth_capped, b.stats.depth_capped);
         assert_eq!(a.pbvh, b.pbvh);
@@ -8445,6 +8454,72 @@ mod split_tests {
             assert_eq!(ra, rb);
             assert_eq!(pa, pb, "payload differs at seq {}", x.seq);
         }
+    }
+
+    /// review 2026-09-23: the P2 prefix emits pages of its own
+    /// (oversize groups and leaves above the cutoff) and counted
+    /// none of their Grid pieces - the P2 build logged (0, 0, 0)
+    /// for the serial build's (2, 2, 0) on byte-identical pages
+    #[test]
+    fn p2_prefix_counts_the_grid_pieces_it_emits() {
+        // two bands of 50 wide rectangles and a 64 x 2 grid between
+        // them: the first plane runs across y through the grid
+        let mut recs = Vec::new();
+        for y in [0, 8500] {
+            for _ in 0..50 {
+                recs.push(RectRec {
+                    layer: 1,
+                    dt: 0,
+                    x: 0,
+                    y,
+                    w: 1905,
+                    h: 500,
+                    rep: Rep::One,
+                });
+            }
+        }
+        recs.push(RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 15,
+            h: 5000,
+            rep: Rep::Grid { na: 64, nb: 2, va: (30, 0), vb: (0, 4000) },
+        });
+        let doc = mini_doc(recs);
+        let cell = &doc.cells[0];
+        let a = plan_layer(cell, 0, 0, assemble_rects(cell), 64);
+        let b = plan_layer_frontier(
+            cell,
+            0,
+            0,
+            assemble_rects(cell),
+            64,
+            &P2Opts {
+                threads: 4,
+                target_tasks: 8,
+                task_min: 1,
+                shard_limit: Some(u64::MAX),
+                budget: None,
+                lease: 0,
+                late_waiters: None,
+                helpers_used: None,
+                join_barrier: None,
+            },
+        );
+        let counts = |st: &SplitStats| {
+            (st.grid_pieces, st.grid_rows, st.grid_ones)
+        };
+        assert_eq!(counts(&a.stats), (2, 2, 0), "serial");
+        // pages, payloads and the three counters agree
+        layer_bytes_equal(&doc, &a, &b);
+        // and the counters are what the emitted pages hold
+        let mut recount = SplitStats::default();
+        for page in &b.pages {
+            count_grid_pieces(cell, &page.recs, &mut recount);
+        }
+        assert_eq!(counts(&b.stats), counts(&recount), "P2 vs its pages");
     }
 
     /// #60 P2 mode selection: a dominant single layer past
