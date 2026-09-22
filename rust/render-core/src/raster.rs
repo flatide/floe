@@ -4753,7 +4753,14 @@ fn polygon_area(points: &[(i64, i64)]) -> f64 {
 /// of its WORLD box only, so it is the same at every zoom, pan, tile and
 /// worker, and exact duplicates share it (they light the same pixel anyway).
 fn area_rank(world: BBox) -> f64 {
-    let mut h: u64 = 0x243F_6A88_85A3_08D3;
+    salted_rank(world, 0)
+}
+
+/// `area_rank` under a salt: salts 1 and 2 are the x and y ranks of a
+/// width-first rectangle - independent, so a 0.5 x 0.5 px box shows 1 time
+/// in 4, not 1 in 2 (review 2026-09-22).
+fn salted_rank(world: BBox, salt: u64) -> f64 {
+    let mut h: u64 = 0x243F_6A88_85A3_08D3 ^ salt.wrapping_mul(0xD6E8_FEB8_6659_FD93);
     for v in [world.x0, world.y0, world.x1, world.y1] {
         h = (h ^ v as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
         h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -4831,11 +4838,11 @@ fn paint_world_rect(
     world: BBox,
     paint: PaintStyle,
 ) -> Result<bool, String> {
-    if let Some(rect) = hairline_world_bbox(request, world, paint)? {
-        return paint_hairline_device_rect(band, request, rect, paint);
-    }
     if area_true_rim(request, paint) {
         return paint_area_true_rect(band, request, world, paint);
+    }
+    if let Some(rect) = hairline_world_bbox(request, world, paint)? {
+        return paint_hairline_device_rect(band, request, rect, paint);
     }
     let filled = fill_world_rect(band, request, world, paint)?;
     let stroked = stroke_world_polygon(
@@ -4868,10 +4875,17 @@ fn area_true_rim(request: &GeometryRasterRequest, paint: PaintStyle) -> bool {
     request.area_true && matches!(paint.stroke, StrokeStyle::Solid) && paint.stroke_width == 1
 }
 
-/// Area-true rectangle, at least a pixel on both sides: the pixels whose
-/// centres it covers take the layer's fill, and the rim of those pixels is the
-/// outline - nothing outside them, so a w px wide shape lights w px on average
-/// and the gap to its neighbour keeps its width.
+/// Area-true rectangle, WIDTH FIRST (user decision 2026-09-22), at any size:
+/// each axis draws m = ceil(w - t) pixels - the whole pixels of its w px
+/// always, one more when its fraction beats t - centred on the rectangle, t
+/// the rectangle's world rank for that axis (`width_first_span`). The pixels
+/// take the layer's fill and their rim is the outline. What it keeps: each
+/// rectangle's whole pixels and, over rectangles, its mean width (a width
+/// never changes under a pan, and shrinks monotonically when zooming out -
+/// a sub-pixel side shows when w > t, the same shape at every scale below).
+/// What it does not: a gap under 2 px may close and neighbours may land on
+/// the same pixels (quantization error, accepted - the picture as a whole
+/// comes first). The box never leaves the pixels the rectangle touches.
 fn paint_area_true_rect(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,
@@ -4880,17 +4894,35 @@ fn paint_area_true_rect(
 ) -> Result<bool, String> {
     let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
     let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
-    let (c0, c1) = fill_phase_columns(x0, x1, FillPhase::PixelCenter)?;
-    let (r0, r1) = fill_phase_rows(y0, y1, FillPhase::PixelCenter)?;
-    if c0 >= c1 || r0 >= r1 {
+    let Some((c0, c1)) = width_first_span(x0, x1, salted_rank(world, 1)) else {
         return Ok(false);
-    }
-    let filled = fill_device_rect_with_phase(band, request, x0, y0, x1, y1, FillPhase::PixelCenter, paint)?;
+    };
+    let Some((r0, r1)) = width_first_span(y0, y1, salted_rank(world, 2)) else {
+        return Ok(false);
+    };
+    let (d0, d1) = (c0 * DEVICE_ONE, c1 * DEVICE_ONE);
+    let (e0, e1) = (r0 * DEVICE_ONE, r1 * DEVICE_ONE);
+    let filled = fill_device_rect_with_phase(band, request, d0, e0, d1, e1, FillPhase::PixelCenter, paint)?;
     let mut rim = false;
     for piece in [(c0, r0, c1, r0 + 1), (c0, r1 - 1, c1, r1), (c0, r0, c0 + 1, r1), (c1 - 1, r0, c1, r1)] {
         rim |= paint_hairline_device_rect(band, request, piece, paint)?;
     }
     Ok(filled || rim)
+}
+
+/// One axis of a width-first rectangle: the side [v0, v1) (device units) is
+/// w px; it draws m = ceil(w - t) pixels, none when m < 1, starting at
+/// floor(centre - m/2 + 1/2). m is floor(w) or floor(w) + 1 (floor(w) + 1
+/// exactly when the fraction exceeds t), non-decreasing in w.
+fn width_first_span(v0: i128, v1: i128, t: f64) -> Option<(i128, i128)> {
+    let w = (v1 - v0).max(0) as f64 / DEVICE_ONE as f64;
+    let m = (w - t).ceil();
+    if !(m >= 1.0) {
+        return None;
+    }
+    let m = m as i128;
+    let start = floor_div(v0 + v1 - m * DEVICE_ONE + DEVICE_ONE, 2 * DEVICE_ONE);
+    Some((start, start + m))
 }
 
 /// Area-true polygon (and path outline), at least a pixel on both sides: the
@@ -7691,75 +7723,124 @@ mod tests {
     }
 
     #[test]
-    fn area_true_shapes_light_exactly_the_pixels_whose_centres_they_cover() {
-        // 10 units a pixel, solid fill: the lit set is the centre set - no
-        // pixel of growth past a shape, so the 1.2 px gap between the two
-        // 3.8 px bars keeps its column (the KLayout rule lights it)
-        let rect = |x, y, w, h| RectRec { layer: 1, dt: 0, x, y, w, h, rep: Rep::One };
-        let bars = vec![rect(13, 13, 38, 294), rect(63, 13, 38, 294)];
+    fn area_true_polygons_light_exactly_the_pixels_whose_centres_they_cover() {
+        // 10 units a pixel, solid fill: a polygon's lit set is its centre set -
+        // no pixel of growth past it
         let lshape = vec![(153, 23), (297, 23), (297, 91), (211, 91), (211, 293), (153, 293)];
         let polys = vec![PolyRec { layer: 1, dt: 0, pts: lshape.clone(), rep: Rep::One }];
         let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
-        let frame = render_geometry_styled(&hairline_scene(bars.clone(), polys, Vec::new()), &request).unwrap().frame;
-        let lit = lit_set(&frame, 32);
+        let frame = render_geometry_styled(&hairline_scene(Vec::new(), polys, Vec::new()), &request).unwrap().frame;
         let mut want = BTreeSet::new();
         for row in 0..32usize {
             for col in 0..32usize {
                 let (x, y) = ((col as f64 + 0.5) * 10.0, 320.0 - (row as f64 + 0.5) * 10.0);
-                let in_bar = bars.iter().any(|b| x > b.x as f64 && x <= (b.x + b.w) as f64 && y >= b.y as f64 && y < (b.y + b.h) as f64);
-                if in_bar || centre_inside(&lshape, x, y) {
+                if centre_inside(&lshape, x, y) {
                     want.insert((col, row));
                 }
             }
         }
-        assert_eq!(lit, want, "area-true lit set differs from the pixel-centre set");
-        assert!(lit.iter().all(|&(col, _)| col != 5), "the 1.2 px gap between the bars was closed");
-        // the KLayout rule grows the first bar into that column
-        let mut klayout = request.clone();
-        klayout.raster.area_true = false;
-        let grown = lit_set(&render_geometry_styled(&hairline_scene(bars, Vec::new(), Vec::new()), &klayout).unwrap().frame, 32);
-        assert!(grown.iter().any(|&(col, _)| col == 5));
+        assert_eq!(lit_set(&frame, 32), want, "area-true polygon differs from its pixel-centre set");
     }
 
     #[test]
-    fn area_true_keeps_a_sub_pixel_shape_with_the_chance_it_fills_its_pixels() {
-        // many 0.3 px wide wires and 0.4 x 0.5 px points at scattered world
-        // boxes: the kept share is the covered share, the decision is the
-        // world box's, and zooming out keeps a subset
+    fn width_first_rectangles_keep_their_whole_pixels_and_their_mean_width() {
+        // one axis: m = ceil(w - t) is floor(w) or floor(w) + 1, the box stays
+        // inside the pixels the side touches, m never grows when w shrinks,
+        // and over ranks the mean m is w
+        let one = DEVICE_ONE;
+        let mut state = 0x0bad_5eed_1234_5678u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..20_000 {
+            let v0 = ((next() * 1000.0) * one as f64) as i128;
+            let w = next() * 7.0;
+            let v1 = v0 + (w * one as f64) as i128;
+            let t = next();
+            let wide = (v1 - v0) as f64 / one as f64;
+            match width_first_span(v0, v1, t) {
+                None => assert!(wide - t <= 0.0, "w {} t {}: dropped", wide, t),
+                Some((a, b)) => {
+                    let m = b - a;
+                    assert!(m == wide.floor() as i128 || m == wide.floor() as i128 + 1, "w {}: {} px", wide, m);
+                    assert_eq!(m > wide.floor() as i128, wide - wide.floor() > t, "w {} t {}", wide, t);
+                    assert!(a >= floor_div(v0, one) && b <= ceil_div(v1, one), "w {}: box left its pixels", wide);
+                    // half the side: never more pixels
+                    let half = width_first_span(v0, v0 + (v1 - v0) / 2, t).map_or(0, |(a, b)| b - a);
+                    assert!(half <= m);
+                }
+            }
+        }
+        // mean width over ranks, and independent axes: a 0.5 x 0.5 px box shows 1 in 4
+        let (w, trials) = (2.35, 40_000usize);
+        let mut total = 0i128;
+        let (mut shown, mut quarter) = (0usize, 0usize);
+        for k in 0..trials {
+            let world = BBox { x0: k as i64 * 97, y0: 11, x1: k as i64 * 97 + 5, y1: 16 };
+            total += width_first_span(0, (w * one as f64) as i128, salted_rank(world, 1)).map_or(0, |(a, b)| b - a);
+            let half = (0.5 * one as f64) as i128;
+            let x = width_first_span(0, half, salted_rank(world, 1)).is_some();
+            let y = width_first_span(0, half, salted_rank(world, 2)).is_some();
+            shown += x as usize;
+            quarter += (x && y) as usize;
+        }
+        let mean = total as f64 / trials as f64;
+        assert!((mean - w).abs() < 0.01, "mean width {}", mean);
+        assert!((shown as f64 / trials as f64 - 0.5).abs() < 0.01);
+        assert!((quarter as f64 / trials as f64 - 0.25).abs() < 0.01, "0.5 x 0.5 px shown {}", quarter as f64 / trials as f64);
+        // in a frame: the 1.2 px gap between two 3.8 px bars stays open (the
+        // boxes never leave the pixels the bars touch), each bar 3 or 4 px
+        let rect = |x, y, w, h| RectRec { layer: 1, dt: 0, x, y, w, h, rep: Rep::One };
+        let bars = vec![rect(13, 13, 38, 294), rect(63, 13, 38, 294)];
+        let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
+        let lit = lit_set(&render_geometry_styled(&hairline_scene(bars.clone(), Vec::new(), Vec::new()), &request).unwrap().frame, 32);
+        assert!(lit.iter().all(|&(col, _)| col != 5), "the 1.2 px gap between the bars was closed");
+        for range in [1..6usize, 6..11] {
+            let cols: BTreeSet<usize> = lit.iter().map(|&(c, _)| c).filter(|c| range.contains(c)).collect();
+            assert!(cols.len() == 3 || cols.len() == 4, "a 3.8 px bar drew {} columns", cols.len());
+        }
+        let mut klayout = request.clone();
+        klayout.raster.area_true = false;
+        let grown = lit_set(&render_geometry_styled(&hairline_scene(bars, Vec::new(), Vec::new()), &klayout).unwrap().frame, 32);
+        assert!(grown.iter().any(|&(col, _)| col == 5), "the KLayout rule grows the first bar into the gap");
+    }
+
+    #[test]
+    fn width_first_keeps_a_sub_pixel_rectangle_with_the_chance_it_fills_its_pixel() {
+        // many 0.3 px wires and 0.4 x 0.5 px points at scattered world boxes:
+        // the kept share is the covered share (independent axes), the decision
+        // is the world box's, and zooming out keeps a subset
         let mut state = 0x1234_5678_9abc_def0u64;
         let mut next = || {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (state >> 33) as i64
         };
-        let one = DEVICE_ONE;
-        let (mut wires, mut points) = (0usize, 0usize);
-        let (mut kept_wires, mut kept_points) = (0usize, 0usize);
-        for _ in 0..40_000 {
+        let one = DEVICE_ONE as i64;
+        let (mut kept_wires, mut kept_points, n) = (0usize, 0usize, 40_000usize);
+        for _ in 0..n {
             let (x, y) = (next() % 1_000_000, next() % 1_000_000);
-            // 1 unit = one device unit at this scale: DEVICE_ONE units a pixel
-            let wire = BBox { x0: x, y0: y, x1: x + (0.3 * one as f64) as i64, y1: y + 5 * one as i64 };
+            let wire = BBox { x0: x, y0: y, x1: x + (0.3 * one as f64) as i64, y1: y + 5 * one };
             let point = BBox { x0: x, y0: y, x1: x + (0.4 * one as f64) as i64, y1: y + (0.5 * one as f64) as i64 };
-            let device = |b: &BBox, k: i128| (b.x0 as i128 / k, b.y0 as i128 / k, b.x1 as i128 / k, b.y1 as i128 / k);
-            for (b, count, kept) in [(&wire, &mut wires, &mut kept_wires), (&point, &mut points, &mut kept_points)] {
-                *count += 1;
-                let (x0, y0, x1, y1) = device(b, 1);
-                let near = area_true_hairline(*b, (x0, y0, x1, y1), x1 - x0 < one, y1 - y0 < one, None).unwrap();
-                let (a0, b0, a1, b1) = device(b, 2);
-                let far = area_true_hairline(*b, (a0, b0, a1, b1), a1 - a0 < one, b1 - b0 < one, None).unwrap();
-                let drawn = |r: (i128, i128, i128, i128)| r.0 < r.2 && r.1 < r.3;
-                if drawn(near) {
-                    *kept += 1;
-                    // one pixel across the thin side
-                    assert!(near.2 - near.0 == 1);
-                } else {
-                    assert!(!drawn(far), "a shape dropped when near came back when zoomed out");
+            for (b, kept) in [(&wire, &mut kept_wires), (&point, &mut kept_points)] {
+                // one world unit = one device unit here, and half of it zoomed out
+                let draw = |k: i128| {
+                    let sx = width_first_span(b.x0 as i128 / k, b.x1 as i128 / k, salted_rank(*b, 1));
+                    let sy = width_first_span(b.y0 as i128 / k, b.y1 as i128 / k, salted_rank(*b, 2));
+                    sx.zip(sy)
+                };
+                match draw(1) {
+                    Some(((a0, a1), _)) => {
+                        *kept += 1;
+                        assert_eq!(a1 - a0, 1, "one pixel across the thin side");
+                    }
+                    None => assert!(draw(2).is_none(), "a shape dropped when near came back when zoomed out"),
                 }
-                assert_eq!(near, area_true_hairline(*b, (x0, y0, x1, y1), x1 - x0 < one, y1 - y0 < one, None).unwrap());
             }
         }
-        let share = |k: usize, n: usize| k as f64 / n as f64;
-        assert!((share(kept_wires, wires) - 0.3).abs() < 0.015, "wires kept {}", share(kept_wires, wires));
-        assert!((share(kept_points, points) - 0.2).abs() < 0.015, "points kept {}", share(kept_points, points));
+        let share = |k: usize| k as f64 / n as f64;
+        assert!((share(kept_wires) - 0.3).abs() < 0.015, "wires kept {}", share(kept_wires));
+        assert!((share(kept_points) - 0.2).abs() < 0.015, "points kept {}", share(kept_points));
     }
 
     #[test]

@@ -6,28 +6,29 @@ The KLayout rule grew every drawn shape by about a pixel per axis - fill by
 two sampling phases plus an edge stroke on the pixel holding each edge - so
 gaps up to ~1.5 px closed (3.8 px bars 1.2 px apart drew as one block) and a
 shape under a pixel lit a whole one (0.1 px wires 1 px apart lit every
-column, 10x their area). Under area-true a shape lights the pixels whose
-centres it covers, its outline is the rim of those pixels, and a shape under a
-pixel on a side is kept with the chance its area fills its pixels, ranked by
-its world box.
+column, 10x their area). Under area-true a RECTANGLE is drawn width first -
+each axis ceil(w - t) px (its whole pixels always, one more when the fraction
+beats t, t its world rank for that axis), centred - and any other shape
+lights the pixels whose centres it covers with its outline on their rim, a
+sub-pixel one kept with the chance its own area fills its pixels. Contract:
+a rectangle keeps its whole pixels and, over rectangles, its mean width; a
+gap under 2 px may close and neighbours may share pixels (quantization).
 
-One layout written with klayout.db: fields of vertical bars, width / gap given
-in pixels at the 0.1 um/px view (the field's lines keep one phase).
+One layout written with klayout.db: fields of vertical bars (widths / gaps in
+pixels at the 0.1 um/px view, cycling through a list per field), at pans of
+0, 1/4, 1/2 and 3/4 px:
 
-  * bars at least a pixel wide: the mean drawn width is within 0.6 px of the
-    true one and every gap of a pixel or more stays open between each pair of
-    bars; under the kill switch FLOE_RUST_AREA_TRUE=off the 1.2 and 1.5 px
-    gaps close, as they did;
-  * bars under a pixel: the lit share is within 0.5..1.6 of the covered share
-    (the kill switch lights 1.0 of every field);
+  * no lit column lies outside the columns the bars touch;
+  * in fields whose gaps are all 2 px or more, every bar draws floor(w) or
+    floor(w) + 1 px, the same width at every pan, and no gap closes;
+  * every field of bars a pixel or wider - integer and non-integer pitches,
+    neighbours of different widths - lights, averaged over the four pans, a
+    column share within 0.08 of its covered share;
+  * bars under a pixel: the lit share is within 0.5..1.6 of the covered share;
+  * under the kill switch FLOE_RUST_AREA_TRUE=off the 1.2 and 1.5 px gaps
+    close and every sub-pixel field lights every pixel, as before;
   * the same view twice gives the same pixels, and a view moved by a whole
     number of pixels gives the same pixels where the two overlap;
-  * a view moved by a quarter, a half and three quarters of a pixel: each bar
-    grating keeps its gaps, and its lit column share averaged over the four
-    phases is within 0.08 of the covered share - one phase alone is NOT (1.5 px
-    bars 1.5 px apart light 2 of 3 columns at one phase, 1 of 3 at another:
-    the pixel-centre rule rounds each edge, so widths and gaps are kept on
-    average over positions, not at every one);
   * with the fill cleared, a polygon and a rectangle that run off every side
     of the view light no pixel in it (review 2026-09-22: the rim took the row
     over the top edge for a border), at whole and fractional pans;
@@ -37,6 +38,7 @@ in pixels at the 0.1 um/px view (the field's lines keep one phase).
 
     .venv/bin/python tools/validate_area_true.py
 """
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -59,8 +61,11 @@ SMALL = (120.0, 5.0)          # um: the triangle and square fields' corner
 CLEAR = '\n'.join(['.' * 16] * 16)
 BLACK = bytes((0, 0, 0, 255))              # the frame background
 # (bar width px, gap px); the first six are at least a pixel wide
-WIDE = [(3.8, 3.8), (3.8, 1.2), (5.2, 2.8), (7.6, 2.4), (1.5, 1.5), (2.0, 2.0)]
-THIN = [(0.1, 0.9), (0.25, 0.75), (0.5, 1.5), (0.5, 0.5)]
+# fields of bars: (width px, gap px) cycled across the field
+WIDE = [[(3.8, 3.8)], [(3.8, 1.2)], [(5.2, 2.8)], [(7.6, 2.4)], [(1.5, 1.5)], [(2.0, 2.0)],
+        [(1.5, 1.0)], [(3.3, 1.4)], [(2.7, 2.1)],                       # pitch 2.5, 4.7, 4.8 px
+        [(1.7, 2.3), (3.2, 1.1), (2.45, 2.6), (1.15, 1.9)]]            # neighbours of different widths
+THIN = [[(0.1, 0.9)], [(0.25, 0.75)], [(0.5, 1.5)], [(0.5, 0.5)]]
 FIELDS = WIDE + THIN
 PER_ROW = 5
 
@@ -69,18 +74,67 @@ def origin(n):
     return (PAD + (n % PER_ROW) * (FIELD_W + PAD), PAD + (n // PER_ROW) * (FIELD_H + PAD))
 
 
+def bars_of(n):
+    """Field n's bars: (x0 um, x1 um, width px), the (width, gap) list cycled."""
+    fx, _ = origin(n)
+    out, x, k = [], fx, 0
+    while True:
+        w, g = FIELDS[n][k % len(FIELDS[n])]
+        x0, x1 = round(x, 4), round(x + w * PX_UM, 4)
+        if x1 > fx + FIELD_W + 1e-9:
+            return out
+        out.append((x0, x1, w))
+        x += (w + g) * PX_UM
+        k += 1
+
+
+def name(n):
+    return ' '.join('%g/%g' % pair for pair in FIELDS[n]) + ' px'
+
+
+def touched(view, n):
+    """The columns field n's bars touch in this view."""
+    cols = set()
+    for x0, x1, _ in bars_of(n):
+        a, b = round((x0 - view[0]) / PX_UM, 6), round((x1 - view[0]) / PX_UM, 6)
+        cols.update(range(math.floor(a), math.ceil(b)))
+    return cols
+
+
+def bar_widths(pixels, view, n):
+    """Per bar of field n: (true width px, lengths of the lit runs within the
+    columns it touches)."""
+    runs_ = []
+    for c in sorted(lit_columns(pixels, view, n)):
+        if runs_ and runs_[-1][1] == c:
+            runs_[-1][1] = c + 1
+        else:
+            runs_.append([c, c + 1])
+    out = {}
+    for k, (x0, x1, w) in enumerate(bars_of(n)):
+        lo = math.floor(round((x0 - view[0]) / PX_UM, 6))
+        hi = math.ceil(round((x1 - view[0]) / PX_UM, 6))
+        out[k] = (w, [b - a for a, b in runs_ if a < hi and b > lo])
+    return out
+
+
+def covered(n):
+    lo, hi = origin(n)[0], origin(n)[0] + FIELD_W
+    inner = (lo + 2 * PX_UM, hi - 2 * PX_UM)
+    area = sum(max(0.0, min(x1, inner[1]) - max(x0, inner[0])) for x0, x1, _ in bars_of(n))
+    return area / (inner[1] - inner[0])
+
+
 def layout(path):
     import klayout.db as kdb
     ly = kdb.Layout()
     ly.dbu = 0.001
     top = ly.create_cell('TOP')
     li = ly.layer(*LAYER)
-    for n, (w, g) in enumerate(FIELDS):
+    for n in range(len(FIELDS)):
         fx, fy = origin(n)
-        x = fx
-        while x + w * PX_UM <= fx + FIELD_W + 1e-9:
-            top.shapes(li).insert(kdb.DBox(x, fy, x + w * PX_UM, fy + FIELD_H))
-            x += (w + g) * PX_UM
+        for x0, x1, _ in bars_of(n):
+            top.shapes(li).insert(kdb.DBox(x0, fy, x1, fy + FIELD_H))
     cx, cy = BIG
     octagon = [(-30, -12), (-12, -31), (13, -29), (31, -11), (29, 12), (11, 30), (-12, 31), (-31, 13)]
     top.shapes(ly.layer(*POLY)).insert(kdb.DPolygon([kdb.DPoint(cx + x, cy + y) for x, y in octagon]))
@@ -132,13 +186,23 @@ def columns(pixels, view, n):
     c1 = int(round((fx + FIELD_W - view[0]) / PX_UM)) - 2
     r0 = int(round((view[3] - (fy + FIELD_H)) / PX_UM)) + 2
     r1 = int(round((view[3] - fy) / PX_UM)) - 2
-    background = pixels[:4]
     flags, lit = [], 0
     for c in range(c0, c1):
-        k = sum(pixels[(r * W + c) * 4:(r * W + c) * 4 + 4] != background for r in range(r0, r1))
+        k = sum(pixels[(r * W + c) * 4:(r * W + c) * 4 + 4] != BLACK for r in range(r0, r1))
         flags.append(k > 0)
         lit += k
     return flags, lit / ((c1 - c0) * (r1 - r0))
+
+
+def lit_columns(pixels, view, n):
+    """The absolute columns of field n's rows with any lit pixel."""
+    fx, fy = origin(n)
+    r0 = int(round((view[3] - (fy + FIELD_H)) / PX_UM)) + 2
+    r1 = int(round((view[3] - fy) / PX_UM)) - 2
+    c0 = max(0, int(math.floor((fx - view[0]) / PX_UM)) - 3)
+    c1 = min(W, int(math.ceil((fx + FIELD_W - view[0]) / PX_UM)) + 3)
+    return {c for c in range(c0, c1)
+            if any(pixels[(r * W + c) * 4:(r * W + c) * 4 + 4] != BLACK for r in range(r0, r1))}
 
 
 def runs(flags):
@@ -168,32 +232,54 @@ def main():
         try:
             view = (0.0, 0.0, W * PX_UM, H * PX_UM)
             now, was = frame(on, 1, view), frame(off, 1, view)
-            for n, (w, g) in enumerate(WIDE):
-                flags, _ = columns(now, view, n)
-                bars, gaps = runs(flags)
-                mean = sum(bars) / len(bars)
-                assert abs(mean - w) <= 0.6, 'bars %g/%g px: drawn %.2f px wide' % (w, g, mean)
-                assert len(gaps) >= len(bars) and min(gaps) >= 1, \
-                    'bars %g/%g px: a gap closed (%d bars, gaps %s)' % (w, g, len(bars), gaps[:8])
-                print('area-true bars %4g / %4g px: drawn %.2f px, gaps %.2f px'
-                      % (w, g, mean, sum(gaps) / len(gaps)))
-            for n in (WIDE.index((3.8, 1.2)), WIDE.index((1.5, 1.5))):
+            gen = 10
+            for n in range(len(WIDE)):
+                gaps_wide = all(g >= 2 for _, g in FIELDS[n])
+                shares, widths_seen = [], None
+                for phase in (0.0, 0.25, 0.5, 0.75):
+                    gen += 1
+                    moved = (view[0] + phase * PX_UM, view[1], view[2] + phase * PX_UM, view[3])
+                    pixels = now if phase == 0.0 else frame(on, gen, moved)
+                    stray = lit_columns(pixels, moved, n) - touched(moved, n)
+                    assert not stray, '%s at a %g px pan: columns %s lit outside the bars' % (name(n), phase, sorted(stray)[:6])
+                    flags, _ = columns(pixels, moved, n)
+                    shares.append(sum(flags) / len(flags))
+                    if gaps_wide:
+                        # each bar by position: its one run, floor(w) or floor(w) + 1 wide
+                        widths = bar_widths(pixels, moved, n)
+                        for k, (w, hit) in widths.items():
+                            assert len(hit) == 1, '%s at a %g px pan: bar %d drew runs %s (a gap closed?)' % (name(n), phase, k, hit)
+                            assert math.floor(w) <= hit[0] <= math.floor(w) + 1, \
+                                '%s at a %g px pan: a %g px bar drew %d px' % (name(n), phase, w, hit[0])
+                        assert widths_seen in (None, widths), '%s: a pan changed a width' % name(n)
+                        widths_seen = widths
+                cover = covered(n)
+                mean = sum(shares) / len(shares)
+                assert abs(mean - cover) <= 0.08, '%s: column share %.3f over four pans for %.3f covered (%s)' \
+                    % (name(n), mean, cover, ['%.3f' % v for v in shares])
+                print('area-true bars %-28s column share per pan %s, mean %.3f for %.3f covered%s'
+                      % (name(n), ' '.join('%.3f' % v for v in shares), mean, cover,
+                         ', widths kept at every pan' if gaps_wide else ''))
+            for n in (WIDE.index([(3.8, 1.2)]), WIDE.index([(1.5, 1.5)])):
                 flags, _ = columns(was, view, n)
-                assert all(flags), 'kill switch: the %g/%g px gaps should close as before' % WIDE[n]
-            for k, (w, g) in enumerate(THIN):
+                assert all(flags), 'kill switch: the %s gaps should close as before' % name(n)
+            for k in range(len(THIN)):
                 n = len(WIDE) + k
-                cover = w / (w + g)
+                cover = covered(n)
                 _, lit = columns(now, view, n)
                 _, before = columns(was, view, n)
-                assert 0.5 <= lit / cover <= 1.6, 'bars %g/%g px: lit %.3f of covered %.3f' % (w, g, lit, cover)
-                assert before > 0.99, 'kill switch: bars %g/%g px lit %.3f, expected every pixel' % (w, g, before)
-                print('area-true bars %4g / %4g px: lit %.3f for %.3f covered (kill switch %.3f)'
-                      % (w, g, lit, cover, before))
+                assert 0.5 <= lit / cover <= 1.6, '%s: lit %.3f of covered %.3f' % (name(n), lit, cover)
+                assert before > 0.99, 'kill switch: %s lit %.3f, expected every pixel' % (name(n), before)
+                stray = lit_columns(now, view, n) - touched(view, n)
+                assert not stray, '%s: columns lit outside the bars' % name(n)
+                print('area-true bars %-28s lit %.3f for %.3f covered (kill switch %.3f)' % (name(n), lit, cover, before))
             # the same view again, and moved by 37 x 23 whole pixels
-            assert frame(on, 2, view) == now, 'area-true frame is not reproducible'
+            gen += 1
+            assert frame(on, gen, view) == now, 'area-true frame is not reproducible'
             dx, dy = 37, 23
             moved = (view[0] + dx * PX_UM, view[1] + dy * PX_UM, view[2] + dx * PX_UM, view[3] + dy * PX_UM)
-            shifted = frame(on, 3, moved)
+            gen += 1
+            shifted = frame(on, gen, moved)
             # world y grows upward: the moved view shows old pixel (c, r) at (c - dx, r + dy)
             differ = 0
             for r in range(0, H - dy):
@@ -203,25 +289,6 @@ def main():
                     differ += a != b
             assert differ == 0, 'a whole-pixel pan changed %d pixels' % differ
             print('area-true: reproducible, a 37 x 23 px pan changes no pixel')
-            # fractional pans: the lit column share of each bar grating
-            gen = 10
-            for n, (w, g) in enumerate(WIDE):
-                shares = []
-                for phase in (0.0, 0.25, 0.5, 0.75):
-                    gen += 1
-                    moved = (view[0] + phase * PX_UM, view[1], view[2] + phase * PX_UM, view[3])
-                    pixels = frame(on, gen, moved)
-                    flags, _ = columns(pixels, moved, n)
-                    bars, gaps = runs(flags)
-                    assert gaps and min(gaps) >= 1 and len(gaps) >= len(bars), \
-                        'bars %g/%g px at a %g px pan: a gap closed' % (w, g, phase)
-                    shares.append(sum(flags) / len(flags))
-                cover = w / (w + g)
-                mean = sum(shares) / len(shares)
-                assert abs(mean - cover) <= 0.08, 'bars %g/%g px: column share %.3f over four phases for %.3f covered (%s)' \
-                    % (w, g, mean, cover, ['%.3f' % v for v in shares])
-                print('area-true bars %4g / %4g px: column share per phase %s, mean %.3f for %.3f covered'
-                      % (w, g, ' '.join('%.3f' % v for v in shares), mean, cover))
             # with the fill cleared, shapes around the whole view draw no rim in it
             on.submit({'kind': 'repattern', 'fills': [(POLY, CLEAR), (RECT, CLEAR)], 'widths': []})
             size = (200, 150)
