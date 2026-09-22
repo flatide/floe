@@ -59,7 +59,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
   bbox 사각형 900개의 0.35~0.65배만 켠다. M7-C 페이지 워시가 기본 꺼짐인지: 2 µm 셀 10×10 배치의
   넓은 뷰(페이지가 1 px 미만)에서 워시 0·도형이 그려지고, `FLOE_RUST_PAGE_WASH=on`이면 워시가 생긴다.
   M7 LOD 교체가 기본 꺼짐인지: `floe2 index --lod`로 만든 조밀한 레이아웃의 넓은 뷰에서 교체 0,
-  `FLOE_RUST_LOD=on`이면 교체가 생긴다.
+  `FLOE_RUST_LOD=on`이면 교체가 생긴다. 같은 세계 격자 행(1.5 px 막대 64개)을 한 배열·32개
+  셀 두 번 배치·90° 회전 열 셀로 저장한 세 레이어가 정수·소수 pan에서 같은 픽셀을 켠다(세계 격자
+  번호).
   occupancy·jobdeck·representatives·sub_cut_box 게이트는 KLayout 규칙에 대한 비교라 이 킬 스위치를
   모든 워커에 고정한다(sub_cut_box: 상자는 표시용 점, 그 기준인 멤버 직접 그리기도 KLayout 규칙).
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
