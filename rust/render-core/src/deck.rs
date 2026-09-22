@@ -1625,6 +1625,7 @@ fn source_plan_request(
         shape_cut: false,
         frames: true,
         page_wash: true,
+        lod_swap: true,
     };
     plan.validate()?;
     Ok(Some(plan))

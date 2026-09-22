@@ -40,7 +40,10 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
     sub-pixel polygon was kept by its box's area);
   * the M7-C page wash is off by default (user decision 2026-09-22): a wide
     view of a small cell placed 10 x 10 times, each page under a pixel, washes
-    no page and draws the geometry; FLOE_RUST_PAGE_WASH=on washes them.
+    no page and draws the geometry; FLOE_RUST_PAGE_WASH=on washes them;
+  * the M7 LOD swap is off by default (user decision 2026-09-22): a dense
+    layout indexed with `floe2 index --lod` swaps no page for its merged
+    variant at a wide view; FLOE_RUST_LOD=on swaps it.
 
     .venv/bin/python tools/validate_area_true.py
 """
@@ -163,19 +166,21 @@ def layout(path):
     ly.write(str(path))
 
 
-def worker(src, on, wash=False):
+def worker(src, on, wash=False, lod=False):
     if on:
         os.environ.pop('FLOE_RUST_AREA_TRUE', None)
     else:
         os.environ['FLOE_RUST_AREA_TRUE'] = 'off'
     if wash:
         os.environ['FLOE_RUST_PAGE_WASH'] = 'on'
+    if lod:
+        os.environ['FLOE_RUST_LOD'] = 'on'
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
     w.start()
-    os.environ.pop('FLOE_RUST_AREA_TRUE', None)
-    os.environ.pop('FLOE_RUST_PAGE_WASH', None)
+    for name in ('FLOE_RUST_AREA_TRUE', 'FLOE_RUST_PAGE_WASH', 'FLOE_RUST_LOD'):
+        os.environ.pop(name, None)
     return w
 
 
@@ -347,6 +352,30 @@ def main():
                       % (lit, wreport['plan_culls']['washed']))
             finally:
                 washer.stop()
+            # the LOD swap: off by default, FLOE_RUST_LOD=on swaps a merged variant in
+            dense = Path(temp) / 'dense.oas'
+            import klayout.db as kdb
+            ly = kdb.Layout()
+            ly.dbu = 0.001
+            top = ly.create_cell('TOP')
+            li = ly.layer(7, 0)
+            for j in range(120):
+                for i in range(120):
+                    top.shapes(li).insert(kdb.DBox(i * 0.1, j * 0.1, i * 0.1 + 0.05, j * 0.1 + 0.05))
+            ly.write(str(dense))
+            done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(dense), '--lod'],
+                                  cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+            assert done.returncode == 0, done.stdout + done.stderr
+            swaps = {}
+            for lod in (False, True):
+                w = worker(dense, True, lod=lod)
+                try:
+                    _, rep = frame(w, 1, (-50.0, -50.0, 60.0, 60.0), visible=((7, 0),), size=(200, 200), report=True)
+                    swaps[lod] = rep['plan_culls']['lod_swapped']
+                finally:
+                    w.stop()
+            assert swaps[False] == 0 and swaps[True] > 0, 'LOD swaps: default %d, FLOE_RUST_LOD=on %d' % (swaps[False], swaps[True])
+            print('lod swap: default swaps 0 pages; on, %d' % swaps[True])
         finally:
             on.stop()
             off.stop()

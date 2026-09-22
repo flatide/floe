@@ -103,6 +103,14 @@ pub struct ViewReq {
     /// area-true drawing of small pages; FLOE_RUST_PAGE_WASH=on restores it);
     /// every other caller keeps it.
     pub page_wash: bool,
+    /// The M7 LOD swap (HierOpts::lod_k): a page with a merged variant is
+    /// drawn from that variant when a grid cell is under a pixel and the
+    /// page is dense enough. renderd turns it OFF for a plain layout's
+    /// frames by default (user decision 2026-09-22: LOD is not in use - the
+    /// index builds no variants unless `floe2 index --lod`; FLOE_RUST_LOD=on
+    /// restores the swap for a cache that has them); every other caller
+    /// keeps it.
+    pub lod_swap: bool,
     /// The frame draws hierarchy frames (cell outlines at the depth
     /// boundary). False: none are planned, and a child subtree that holds
     /// no visible layer is not walked to reach them - the planner's

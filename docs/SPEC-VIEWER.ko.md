@@ -150,9 +150,12 @@
   n/p·waive·박스선택 체크). 항목은 키와 **같은 핸들러**를 호출하고
   라벨에 키를 병기(AccelGroup 미등록 — 키는 `_on_key` 단일 경로,
   이중 발화 방지). CheckMenuItem은 메뉴 `show` 시 `_menu_sync`가
-  실상태(frames_on/abstract/coverage_on/lod_on/_mono/snap_on/mode)를
+  실상태(frames_on/abstract/coverage_on/_mono/snap_on/mode)를
   반영하며 `_menu_guard`로 set_active의 핸들러 역발화를 차단.
   단, floe2는 density coverage 상태와 메뉴/키 입력 자체를 노출하지 않는다.
+  LOD 토글(메뉴 항목·`l` 키·깊이 라벨의 `lod:on/off`·`floe2 view --lod`)은 제거됐다(2026-09-22
+  사용자 결정: LOD는 쓰지 않는다 — 토글은 Rust 경로의 renderd에 닿지도 않았다). 실행 중인 창으로
+  넘어오는 `lod=` 필드는 받아서 무시하고, renderd의 LOD 교체는 기본 끔이다(SPEC-PLANNER §3).
 
 ## 8. 색/패턴 적용 경로
 

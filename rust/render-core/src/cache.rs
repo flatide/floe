@@ -1039,6 +1039,7 @@ impl Cache {
             sub_cut_box: request.sub_cut_box && !request.exact,
             shape_cut: request.shape_cut && !request.exact,
             page_wash: request.page_wash,
+            lod_swap: request.lod_swap,
             frames: request.frames,
             page_skip: if request.summary_layers.is_empty() {
                 Vec::new()

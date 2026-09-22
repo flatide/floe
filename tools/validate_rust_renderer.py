@@ -179,7 +179,8 @@ class WorkerContractTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(viewer.detail, 2)
         self.assertEqual(viewer.depth_value, 999)
-        self.assertFalse(viewer.lod_on)
+        # lod= is retired from the viewer (2026-09-22): accepted, ignored
+        self.assertTrue(viewer.lod_on)
         self.assertFalse(viewer.frames_on)
         self.assertFalse(viewer.labels_on)
         self.assertEqual(viewer.label_font_px, 18)
@@ -246,7 +247,8 @@ class WorkerContractTests(unittest.TestCase):
         with mock.patch("floe.gui.run_viewer") as run_viewer:
             cli.cmd_view(args)
         options = run_viewer.call_args.kwargs
-        self.assertFalse(options["lod"])
+        # the viewer has no LOD toggle any more (2026-09-22)
+        self.assertNotIn("lod", options)
         self.assertFalse(options["frames"])
         self.assertFalse(options["labels"])
         self.assertFalse(options["frame_cache"])

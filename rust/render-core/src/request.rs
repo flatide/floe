@@ -74,6 +74,8 @@ pub struct PlanRequest {
     pub shape_cut: bool,
     /// The M7-C page wash (floe_vfs::ViewReq::page_wash).
     pub page_wash: bool,
+    /// The M7 LOD swap (floe_vfs::ViewReq::lod_swap).
+    pub lod_swap: bool,
     /// The frame draws hierarchy frames (floe_vfs::ViewReq::frames).
     pub frames: bool,
 }
@@ -120,6 +122,7 @@ mod tests {
             shape_cut: false,
             frames: true,
             page_wash: true,
+            lod_swap: true,
         };
         assert!(req.validate().is_err());
     }

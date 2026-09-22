@@ -44,7 +44,8 @@ DEBOUNCE_MS = 120
 # view is a live working set - merged variants must engage there
 # without a keypress. The planner's fidelity/worth gates and the
 # probe exactness rule keep it self-limiting; 'l' still toggles.
-DEFAULT_LOD = True
+# LOD is retired from the viewer (user decision 2026-09-22): no toggle, off
+DEFAULT_LOD = False
 DEFAULT_FRAMES = True
 DEFAULT_LABELS = True
 DEFAULT_LABEL_FONT_PX = 14
@@ -1184,7 +1185,8 @@ class Viewer:
         if HAS_DENSITY_COVERAGE:
             self.coverage_on = False
         # Explicit request controls; no shell environment is consulted.
-        self.lod_on = bool(lod)
+        # retired (2026-09-22): the `lod` argument is accepted and ignored
+        self.lod_on = False
         # the page hairline policy (review 2026-09-11): "auto" = keep
         # for a jobdeck, cull for a layout; "keep" / "cull" explicit
         # (View > keep thin shapes, --thin, a forwarded thin=)
@@ -1647,7 +1649,7 @@ class Viewer:
         main.pack_start(self.overlay, True, True, 0)
 
         # Two-tier status area. Upper: cursor/interaction plus persistent
-        # view/depth/cut/cov/lod state. Lower: retained render/performance
+        # view/depth/cut/cov state. Lower: retained render/performance
         # plus live rendering/refinement progress. Mouse motion only
         # replaces the upper-left text, never the lower render details.
         sbars = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -2389,8 +2391,6 @@ class Viewer:
                 self._set_depth(int(depth), redraw=False)
             except ValueError:
                 pass
-        if opts.get("lod") in ("on", "off"):
-            self._set_lod(opts["lod"] == "on", redraw=False)
         if opts.get("thin") in ("auto", "keep", "cull"):
             self._set_thin(opts["thin"], redraw=False)
         frames = opts.get("frames")
@@ -3570,9 +3570,6 @@ class Viewer:
                     refin = ""
                     if res.get("refining"):
                         refin = ", refining %d" % res["refining"]
-                    lod = ""
-                    if res.get("lod"):
-                        lod = ", lod %d" % res["lod"]
                     text = ""
                     if res.get("plan_ms") is not None:
                         # "frontier", not "frames": the planner's
@@ -3675,13 +3672,13 @@ class Viewer:
                         # planner verdicts (field 2026-09-10): pages
                         # culled by size/hairline, page-BVH nodes,
                         # child-BVH nodes pruned, child cells omitted,
-                        # layer skips, washes, LOD swaps, thin frames
+                        # layer skips, washes, thin frames
                         text += (", cut pages %s/pbvh %s/cbvh %s/cells %s"
-                                 ", layer %s, washed %s, lod %s, thin %s"
+                                 ", layer %s, washed %s, thin %s"
                                  % tuple(fmt_count(culls.get(k, 0)) for k in (
                                      "pages_size", "page_bvh", "child_bvh",
                                      "children_size", "layer", "washed",
-                                     "lod_swapped", "thin_frames")))
+                                     "thin_frames")))
                         if culls.get("thin_pages"):
                             # all-thin pages the page hairline rule
                             # would have dropped (2026-09-10): their
@@ -3802,11 +3799,11 @@ class Viewer:
                     # +new = pages actually shipped for this view
                     # (cache misses, summed over its stream rounds)
                     mode = "live (%d tiles, +%d new, %d ms" \
-                           "%s%s%s%s%s%s%s)" \
+                           "%s%s%s%s%s%s)" \
                         % (res["tiles"], res.get("new", 0) or 0,
                            res["ms"], split,
                            self._depth_note(used), cut, drawn,
-                           refin, lod, text)
+                           refin, text)
                     # the first frame after a load also says how long the
                     # load took (the frame's own ms is only its render)
                     mode = self._load_note(res) + mode
@@ -4460,8 +4457,6 @@ class Viewer:
             self._toggle_abstract()
         elif name == "v" and HAS_DENSITY_COVERAGE:
             self._toggle_coverage()
-        elif name == "l":
-            self._set_lod(not self.lod_on)
         elif name == "b":
             self._set_mono(not self._mono)
         elif name == "e":
@@ -4525,7 +4520,6 @@ class Viewer:
             if HAS_DENSITY_COVERAGE:
                 lbl += " · cov:%s" % (
                     "on" if self.coverage_on else "off")
-            lbl += " · lod:%s" % ("on" if self.lod_on else "off")
             # the page hairline policy in force: cull = thin shapes
             # may be omitted at wide views (plain layout default)
             lbl += " · thin:%s" % self._effective_thin()
@@ -4582,13 +4576,6 @@ class Viewer:
             return
         self.coverage_on = not self.coverage_on
         self._on_depth()
-
-    def _set_lod(self, enabled, redraw=True):
-        enabled = bool(enabled)
-        changed = enabled != self.lod_on
-        self.lod_on = enabled
-        if changed and redraw:
-            self._on_depth()
 
     def _effective_thin(self):
         """The page hairline policy in force: the explicit mode, or
@@ -4840,17 +4827,11 @@ class Viewer:
             btns.append(b)
             row.pack_start(b, False, False, 0)
         note = Gtk.Label()
-        merged_hint = (
-            "merged LOD is generated by floe2 index unless --no-lod"
-            if APP == "floe2" else
-            "when the cache carries them - floe index --merge-only "
-            "upgrades old caches")
         note.set_markup(
             "<small>lower detail hides finer features from live "
-            "renders;\nareas below the cut draw as merged outlines "
-            "instead\n(%s). snap/pick/clip stay "
-            "exact.\nthe status line shows the physical cut "
-            "(cut&lt;0.35um).\nkeys: d = this dialog</small>" % merged_hint)
+            "renders;\nshapes below the cut are not drawn. snap/pick/clip "
+            "stay exact.\nthe status line shows the physical cut "
+            "(cut&lt;0.35um).\nkeys: d = this dialog</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
         ok = Gtk.Button(label="ok")
@@ -5191,8 +5172,6 @@ class Viewer:
         if HAS_DENSITY_COVERAGE:
             check(m, "density coverage\tv", self._toggle_coverage,
                   lambda: self.coverage_on)
-        check(m, "LOD\tl", lambda: self._set_lod(not self.lod_on),
-              lambda: self.lod_on)
         # the page hairline policy (review 2026-09-11): a plain layout
         # may omit thin shapes at wide views for speed; the mask
         # policy keeps them (a jobdeck's default)

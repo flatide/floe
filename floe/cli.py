@@ -1448,7 +1448,6 @@ def cmd_view(args):
     # stay enabled: cold vs warm cache behavior is itself part of the product.
     stream_kb = args.stream_kb
     if args.perf_baseline:
-        args.lod = "off"
         args.frames = "off"
         args.labels = "off"
         args.refinement = "off"
@@ -1503,9 +1502,9 @@ def cmd_view(args):
         if goto is not None:
             # repr() round-trips floats exactly, unlike %g
             request += "\tgoto=" + ",".join(repr(v) for v in goto)
-        request += ("\tdetail=%s\tdepth=%d\tlod=%s\tframes=%s"
+        request += ("\tdetail=%s\tdepth=%d\tframes=%s"
                     "\tlabels=%s\tlabelpx=%d" % (
-                        detail_name, depth, args.lod, args.frames,
+                        detail_name, depth, args.frames,
                         args.labels, args.label_font_px))
         levels = getattr(args, "level", None)
         if levels:
@@ -1546,7 +1545,7 @@ def cmd_view(args):
         pending_fields = tuple(
             (["goto=" + ",".join(repr(v) for v in goto)] if goto else [])
             + ["detail=%s" % detail_name, "depth=%d" % depth,
-               "lod=%s" % args.lod, "frames=%s" % args.frames,
+               "frames=%s" % args.frames,
                "labels=%s" % args.labels,
                "labelpx=%d" % args.label_font_px]
             + (["levels=" + ",".join(str(i) for i in levels)]
@@ -1560,7 +1559,7 @@ def cmd_view(args):
     from .gui import run_viewer
     run_viewer(c, server, goto=goto, drc=args.drc,
                detail=detail, dump=args.dump, depth=depth,
-               lod=args.lod == "on", frames=args.frames == "on",
+               frames=args.frames == "on",
                labels=args.labels == "on",
                label_font_px=args.label_font_px,
                frame_cache=args.frame_cache == "on",
@@ -2234,12 +2233,6 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "Digits / the `d` dialog change it at runtime. "
                         "Forwarded to a running instance")
     _add_thin_option(p)
-    p.add_argument("--lod", choices=("on", "off"), default="on",
-                   help="starting merged geometry LOD state (default on - "
-                        "the live first view needs merged variants without "
-                        "a keypress; the planner reverts to exact on zoom "
-                        "and probes are always exact. The viewer "
-                        "button/`l` changes it live)")
     p.add_argument("--refinement", choices=("on", "off"), default="on",
                    help="publish progressive intermediate frames (default "
                         "on); off waits for one settled frame in both floe "

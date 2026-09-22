@@ -230,6 +230,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         shape_cut: false,
         frames: true,
         page_wash: true,
+        lod_swap: true,
     })
 }
 

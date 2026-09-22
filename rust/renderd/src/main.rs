@@ -1043,6 +1043,7 @@ fn run_clip(
         frames: true,
         // px_per_dbu 0 above: no wash could fire either way
         page_wash: true,
+        lod_swap: true,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1863,6 +1864,15 @@ fn area_true_enabled() -> bool {
 /// FLOE_RUST_PAGE_WASH=on turns the wash back on.
 fn page_wash_enabled() -> bool {
     std::env::var("FLOE_RUST_PAGE_WASH").as_deref() == Ok("on")
+}
+
+/// The M7 LOD swap (floe_vfs::ViewReq::lod_swap) on a plain layout's frames.
+/// OFF by default (user decision 2026-09-22: LOD is not in use; the viewer's
+/// toggle is gone, and it never reached renderd anyway). The index builds no
+/// merged variants unless `floe2 index --lod`; FLOE_RUST_LOD=on swaps them in
+/// again for a cache that has them.
+fn lod_enabled() -> bool {
+    std::env::var("FLOE_RUST_LOD").as_deref() == Ok("on")
 }
 
 /// The page frontier (floe_vfs::ViewReq::page_reps) on a plain
@@ -3032,6 +3042,9 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64)
         // FLOE_RUST_PAGE_WASH=on (see page_wash_enabled); an exact frame
         // keeps what it had
         page_wash: command.exact || page_wash_enabled(),
+        // the M7 LOD swap (floe_vfs::ViewReq::lod_swap): off unless
+        // FLOE_RUST_LOD=on (see lod_enabled)
+        lod_swap: lod_enabled(),
     };
     request.validate()?;
     if cache.unit() <= 0.0 {

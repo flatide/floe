@@ -143,7 +143,11 @@
 - REM_FULL 자식: 동일 술어로 생략(레이어별 프록시 없음 — 가짜 지오메트리
   금지).
 - LOD 스왑: 충실도(실방출 셀 ≤1px 양축) AND members > lod_k×페이지
-  화면px² → lod_page로 교체. 프로브는 px=0이라 구조적으로 exact.
+  화면px² → lod_page로 교체. 프로브는 px=0이라 구조적으로 exact. 요청 필드 `ViewReq::lod_swap`이
+  켜져 있을 때만 — **renderd의 일반 레이아웃 프레임은 기본 끔**(2026-09-22 사용자 결정: LOD는 쓰지
+  않는다; 인덱스도 `floe2 index --lod` 없이는 변종을 만들지 않고, 뷰어의 LOD 토글은 제거됐다),
+  `FLOE_RUST_LOD=on`으로 변종이 있는 캐시에서 되돌린다. CLI(`floe-index plan`, `--lod 0`이 끔)·jobdeck·
+  테스트 요청은 종전대로 켠다.
 - 워시: 페이지 화면상 양축 ≤ wash_px → (layer, bbox) 렉트로 붕괴. 요청 필드 `ViewReq::page_wash`가
   켜져 있을 때만 — **renderd의 일반 레이아웃 프레임은 기본 끔**(2026-09-22 사용자 결정: 2×2 px 덩어리는
   KLayout 규칙으로 그리는 표시용 점이라 작은 페이지의 area-true 그리기를 가렸다; 이제 그 페이지를

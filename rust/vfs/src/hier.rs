@@ -1973,7 +1973,8 @@ impl<'a> Hier<'a> {
                 }
             }
             let mut eff = pi;
-            if self.lod_k > 0.0
+            if self.req.lod_swap
+                && self.lod_k > 0.0
                 && self.px_per_dbu > 0.0
                 && p.lod_page != floe_ovm::LOD_PAGE_NONE
             {
@@ -4159,6 +4160,7 @@ mod tests {
                     shape_cut: false,
                     frames: true,
                     page_wash: true,
+                    lod_swap: true,
         }
     }
 
@@ -4408,6 +4410,7 @@ mod tests {
                     shape_cut: false,
                     frames: true,
                     page_wash: true,
+                    lod_swap: true,
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
@@ -5805,6 +5808,7 @@ mod tests {
                     shape_cut: false,
                     frames: true,
                     page_wash: true,
+                    lod_swap: true,
         }
     }
 
@@ -6373,6 +6377,7 @@ mod tests {
                     shape_cut: false,
                     frames: true,
                     page_wash: true,
+                    lod_swap: true,
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks

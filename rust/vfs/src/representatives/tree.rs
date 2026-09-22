@@ -851,6 +851,7 @@ mod tests {
             shape_cut: false,
             frames: true,
             page_wash: true,
+            lod_swap: true,
         }
     }
     fn stream(prims: Vec<Prim>, req: &crate::ViewReq, options: Options) -> Stream {
