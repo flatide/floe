@@ -8179,6 +8179,54 @@ mod tests {
     }
 
     #[test]
+    fn duplicates_of_a_shape_draw_as_one() {
+        // ADAPTIVE_CUT_DENSITY_PLAN §4.2 (review 2026-09-23): the same world
+        // box stored twice on the same path - two single rectangles, a Grid
+        // twice, a Grid and a fragment of it - lights exactly the pixels one
+        // copy lights: the decision is the world box's (or the lattice's),
+        // never the record's or the paint order's. A single rectangle over
+        // a Grid member is another path (its own world-box hash), so the
+        // pair lights the union of the two decisions - the wider one, since
+        // both are centred on the same box - and nothing outside it.
+        let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
+        let draw = |rects: Vec<RectRec>| {
+            lit_set(&render_geometry_styled(&hairline_scene(rects, Vec::new(), Vec::new()), &request).unwrap().frame, 32)
+        };
+        let rect = |x, y, w, h, rep: Rep| RectRec { layer: 1, dt: 0, x, y, w, h, rep };
+        // 40 single 1.5 x 1.5 px boxes at scattered places (10 units a pixel)
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |span: i64| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as i64 % span
+        };
+        let singles: Vec<RectRec> = (0..40).map(|_| rect(next(300), next(300), 15, 15, Rep::One)).collect();
+        let once = draw(singles.clone());
+        assert!(once.len() > 40, "{} px for 40 boxes", once.len());
+        let mut twice = singles.clone();
+        twice.extend(singles.iter().cloned());
+        assert_eq!(draw(twice), once, "a duplicate single rectangle changed the pixels");
+        let mut reversed = singles.clone();
+        reversed.reverse();
+        assert_eq!(draw(reversed), once, "the record order changed the pixels");
+        // a row of 8 bars 1.5 px wide at 3 px: itself twice, and with a
+        // fragment of itself (members 3..6, re-based as the index would)
+        let row = rect(13, 50, 15, 200, Rep::Grid { na: 8, nb: 1, va: (30, 0), vb: (0, 0) });
+        let lattice = draw(vec![row.clone()]);
+        assert_eq!(draw(vec![row.clone(), row.clone()]), lattice, "a duplicate Grid changed the pixels");
+        let piece = rect(13 + 3 * 30, 50, 15, 200, Rep::Grid { na: 3, nb: 1, va: (30, 0), vb: (0, 0) });
+        assert_eq!(draw(vec![row.clone(), piece]), lattice, "a fragment over its Grid changed the pixels");
+        // a single rectangle over member 5: another path - the pair lights
+        // the union of the two decisions, at most 2 px wide, nothing else
+        let member = rect(13 + 5 * 30, 50, 15, 200, Rep::One);
+        let alone = draw(vec![member.clone()]);
+        let pair = draw(vec![row.clone(), member]);
+        assert_eq!(pair, lattice.union(&alone).cloned().collect(), "the pair drew outside its two decisions");
+        let cols = |set: &BTreeSet<(usize, usize)>| set.iter().map(|&(col, _)| col).filter(|&c| (15..=18).contains(&c)).collect::<BTreeSet<_>>();
+        assert!(cols(&pair).len() <= 2, "member 5 wider than 2 px: {:?}", cols(&pair));
+        assert!(cols(&pair).is_superset(&cols(&lattice)));
+    }
+
+    #[test]
     fn width_first_keeps_a_sub_pixel_rectangle_with_the_chance_it_fills_its_pixel() {
         // many 0.3 px wires and 0.4 x 0.5 px points at scattered world boxes:
         // the kept share is the covered share (independent axes), the decision

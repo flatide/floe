@@ -223,7 +223,15 @@ floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
 
 로그 라인: `[vfs] build: streaming pipeline N cells (J workers, plan
 window W, encode batch E, page target M MiB[, lod off])...` →
-`pipeline complete (wall/commit/encode)`.
+`pipeline complete (wall/commit/encode)` → (분할이 있을 때만)
+`rep-split F fragments (G grid pieces: R one-row of a 2-D grid, O
+one-member), … oversize pages, … depth-capped, … lod variants`.
+G·R·O(2026-09-23)는 페이지 방출 시점에 세는 정확한 수: G = 페이지에
+남은 Grid 조각 레코드, R = 그중 2차원 Grid에서 잘려 나온 한 줄·한 열
+조각(페이지 파일에 1차원 반복으로 기록되며 렌더러는 그 줄 자체의
+격자로 순위를 매겨 원래 격자와 넓어지는 멤버가 달라진다 —
+RENDERER-TESTS §3), O = 1멤버 조각(`Rep::One`). 실칩에서 격자 조각이
+얼마나 생기는지 이 줄로 읽는다.
 
 ## 3. 결정성 (하드 게이트)
 

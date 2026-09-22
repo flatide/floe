@@ -2497,6 +2497,16 @@ fn arena_at(arenas: &[Arena], slot: u32) -> &Arena {
 #[derive(Default, Clone, Copy)]
 struct SplitStats {
     fragments: u64,
+    /// the Grid pieces the split emits (Frag::Grid records), of
+    /// which: `grid_rows` are one-row / one-column pieces of a
+    /// 2-D grid - written as a one-dimensional repetition, so the
+    /// renderer ranks them as that row's own lattice, apart from
+    /// the grid they were cut from - and `grid_ones` one-member
+    /// pieces (Rep::One). Read in the build's rep-split line to see
+    /// how often a real layout meets either (review 2026-09-23)
+    grid_pieces: u64,
+    grid_rows: u64,
+    grid_ones: u64,
     oversize_pages: u64,
     depth_capped: u64,
     lod_pages: u64,
@@ -3059,6 +3069,30 @@ fn split_node(
     NodeStep::Split { lv, rv }
 }
 
+/// count the Grid pieces a page emits (see SplitStats)
+fn count_grid_pieces(
+    cell: &floe_oasis::doc::Cell,
+    recs: &[PRec],
+    st: &mut SplitStats,
+) {
+    for r in recs {
+        let Frag::Grid { i0, i1, j0, j1 } = r.frag else {
+            continue;
+        };
+        let (ni, nj) = (i1 - i0, j1 - j0);
+        let two_d = matches!(
+            rec_rep(cell, r),
+            Rep::Grid { na, nb, .. } if *na > 1 && *nb > 1
+        );
+        st.grid_pieces += 1;
+        if ni == 1 && nj == 1 {
+            st.grid_ones += 1;
+        } else if (ni == 1 || nj == 1) && two_d {
+            st.grid_rows += 1;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn split_pages(
     cell: &floe_oasis::doc::Cell,
@@ -3083,10 +3117,12 @@ fn split_pages(
         &mut oversize,
     );
     for grp in oversize {
+        count_grid_pieces(cell, &grp, st);
         emit_page(ci, li, grp, seq, out);
     }
     let (lv, rv) = match step {
         NodeStep::Leaf(r) => {
+            count_grid_pieces(cell, &r, st);
             emit_page(ci, li, r, seq, out);
             return;
         }
@@ -4483,6 +4519,9 @@ fn plan_layer_frontier(
             r.as_mut().expect("p2 task result");
         timing.p2_tasks_sum_s += *task_s;
         stats.fragments += st.fragments;
+        stats.grid_pieces += st.grid_pieces;
+        stats.grid_rows += st.grid_rows;
+        stats.grid_ones += st.grid_ones;
         stats.oversize_pages += st.oversize_pages;
         stats.depth_capped += st.depth_capped;
         stats.lod_pages += st.lod_pages;
@@ -4918,6 +4957,9 @@ fn build_cell_plan(
         pranges.push((lp.li, run_lo, run_count, root));
         pages.append(&mut lp.pages);
         split_stats.fragments += lp.stats.fragments;
+        split_stats.grid_pieces += lp.stats.grid_pieces;
+        split_stats.grid_rows += lp.stats.grid_rows;
+        split_stats.grid_ones += lp.stats.grid_ones;
         split_stats.oversize_pages += lp.stats.oversize_pages;
         split_stats.depth_capped += lp.stats.depth_capped;
         split_stats.lod_pages += lp.stats.lod_pages;
@@ -5089,6 +5131,9 @@ fn build_cell_plan(
                 slots[i].lock().unwrap().take()
             {
                 split_stats.fragments += lst.fragments;
+                split_stats.grid_pieces += lst.grid_pieces;
+                split_stats.grid_rows += lst.grid_rows;
+                split_stats.grid_ones += lst.grid_ones;
                 split_stats.oversize_pages += lst.oversize_pages;
                 split_stats.depth_capped += lst.depth_capped;
                 split_stats.lod_pages += lst.lod_pages;
@@ -6125,6 +6170,18 @@ fn build(
                 .fragments
                 .checked_add(split_stats.fragments)
                 .expect("limit exceeded: fragment count");
+            split_total.grid_pieces = split_total
+                .grid_pieces
+                .checked_add(split_stats.grid_pieces)
+                .expect("limit exceeded: grid piece count");
+            split_total.grid_rows = split_total
+                .grid_rows
+                .checked_add(split_stats.grid_rows)
+                .expect("limit exceeded: grid row piece count");
+            split_total.grid_ones = split_total
+                .grid_ones
+                .checked_add(split_stats.grid_ones)
+                .expect("limit exceeded: grid one-member count");
             split_total.oversize_pages = split_total
                 .oversize_pages
                 .checked_add(split_stats.oversize_pages)
@@ -6307,10 +6364,14 @@ fn build(
         || split_total.lod_pages > 0
     {
         eprintln!(
-            "[vfs] build: rep-split {} fragments, {} oversize \
+            "[vfs] build: rep-split {} fragments ({} grid pieces: \
+             {} one-row of a 2-D grid, {} one-member), {} oversize \
              pages, {} depth-capped, {} lod variants \
              ({} skew grids verbatim)",
             split_total.fragments,
+            split_total.grid_pieces,
+            split_total.grid_rows,
+            split_total.grid_ones,
             split_total.oversize_pages,
             split_total.depth_capped,
             split_total.lod_pages,
@@ -8787,6 +8848,77 @@ mod split_tests {
             "wide pairs poisoned pages: {}x die",
             area / ((DIE as i128) * (DIE as i128))
         );
+    }
+
+    /// the rep-split line's grid piece classes (review 2026-09-23):
+    /// a 2-row grid cut across y leaves two one-row pieces, a row
+    /// cut along x two plain pieces, a two-member row two Rep::One
+    #[test]
+    fn grid_pieces_are_classified() {
+        const DIE: i64 = 1_000_000;
+        // 70,000 single rectangles (1.1 MB, over the MIB target),
+        // half below 499,000 and half above 521,000 along the long
+        // axis, so the median record - the split plane - is the grid
+        let scatter = |tall: bool| -> Vec<RectRec> {
+            let mut g = Lcg(77);
+            (0..70_000usize)
+                .map(|k| {
+                    let near = g.next(DIE / 4);
+                    let far = if k % 2 == 0 {
+                        g.next(479_000)
+                    } else {
+                        521_000 + g.next(459_000)
+                    };
+                    let (x, y) = if tall { (near, far) } else { (far, near) };
+                    RectRec {
+                        layer: 1,
+                        dt: 0,
+                        x,
+                        y,
+                        w: 20 + (k % 500) as i64,
+                        h: 20 + (k / 500) as i64,
+                        rep: Rep::One,
+                    }
+                })
+                .collect()
+        };
+        let grid = |x, y, na, nb, vb| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w: 150,
+            h: 450,
+            rep: Rep::Grid { na, nb, va: (300, 0), vb },
+        };
+        for (name, tall, rec, want) in [
+            ("2 x 64 across y", true, grid(100_000, 499_600, 64, 2, (0, 800)), (2, 2, 0)),
+            ("64 x 1 along x", false, grid(490_400, 100_000, 64, 1, (0, 0)), (2, 0, 0)),
+            ("2 x 1 along x", false, grid(499_700, 100_000, 2, 1, (0, 0)), (2, 0, 2)),
+        ] {
+            let mut recs = scatter(tall);
+            recs.push(rec);
+            let plan = assert_conserved(&mini_doc(recs));
+            let st = &plan.split_stats;
+            assert_eq!(st.fragments, 1, "{}: fragments", name);
+            assert_eq!(
+                (st.grid_pieces, st.grid_rows, st.grid_ones),
+                want,
+                "{}: (pieces, one-row, one-member)",
+                name
+            );
+            let pieces: Vec<(u64, u64)> = plan
+                .pages
+                .iter()
+                .filter(|j| j.lod == floe_ovm::LOD_EXACT)
+                .flat_map(|j| j.recs.iter())
+                .filter_map(|r| match r.frag {
+                    Frag::Grid { i0, i1, j0, j1 } => Some((i1 - i0, j1 - j0)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(pieces.len(), 2, "{}: pieces {:?}", name, pieces);
+        }
     }
 
     /// duplicate offsets (counted!), negative coordinates

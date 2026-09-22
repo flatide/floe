@@ -54,7 +54,14 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
     with a 16 MiB and a 1 MiB page target - one page, and two pages that cut
     the lattice's Grid record in two (frag_split / frag_rep) - lights the
     same pixels at five pans, whole and fractional on both axes, and about
-    its covered area (the per-record ranks differed in 258 px).
+    its covered area (the per-record ranks differed in 258 px); the build's
+    rep-split line counts its 2 grid pieces, none one-row or one-member;
+  * a 2 x 64 lattice cut ACROSS its rows (a tall layout, the split plane
+    between the rows): the build counts 2 one-row pieces of a 2-D grid,
+    each written as a one-dimensional repetition, and they light the same
+    pixels as the two rows stored alone on their own layers - a row piece
+    ranks as that row's own lattice - while the uncut lattice (16 MiB) picks
+    differently (documented: outside the identity guarantee).
 
     .venv/bin/python tools/validate_area_true.py
 """
@@ -82,6 +89,8 @@ ROW = (500.0, 3.0)            # um: one lattice row stored three ways, layers 8,
 ROW_LAYERS = ((8, 0), (9, 0), (10, 0))
 SPLIT_LAYER = (11, 0)         # the page split layout: a lattice among single rectangles
 SPLIT_AT = (490.4, 3.0)       # um: the lattice's first bar
+ROWS_AT = (100.0, 499.6)      # um: the 2 x 64 lattice the tall layout's split cuts into rows
+ROW_A, ROW_B = (12, 0), (13, 0)   # its two rows stored alone
 SPLIT_PANS = ((0.0, 0.0), (0.2, 0.0), (0.37, 0.0), (0.5, 0.29), (0.81, 0.63))
 BIG = (60.0, 40.0)            # um: the shapes that run off the edges, around this point
 SMALL = (120.0, 5.0)          # um: the triangle and square fields' corner
@@ -201,30 +210,46 @@ def layout(path):
     ly.write(str(path))
 
 
-def split_layout(path):
+def split_layout(path, rows=False):
     """A 64 x 6 lattice of 0.15 x 0.45 um bars (pitch 0.3 x 0.8 um: 1.5 x 4.5 px
     at 3 x 8 px) in the middle of 70,000 rectangles of distinct sizes (no
     repetition) 17 um and more above it on the same layer: 1.1 MB of records,
     over a 1 MiB page target, so the indexer splits the layer across x through
-    the lattice."""
+    the lattice. With `rows`, a tall layout instead: a 2 x 64 lattice with
+    half the rectangles below it and half above (the median record, where the
+    indexer puts its plane, is the lattice itself), so the split runs between
+    the rows; the same two rows stored alone on ROW_A and ROW_B."""
     import klayout.db as kdb
     ly = kdb.Layout()
     ly.dbu = 0.001
     top = ly.create_cell('TOP')
     li = ly.layer(*SPLIT_LAYER)
-    x0, y0 = SPLIT_AT
-    for j in range(6):
+    (x0, y0), nrows = (ROWS_AT, 2) if rows else (SPLIT_AT, 6)
+    for j in range(nrows):
         for i in range(64):
             top.shapes(li).insert(kdb.DBox(x0 + i * 0.3, y0 + j * 0.8, x0 + i * 0.3 + 0.15, y0 + j * 0.8 + 0.45))
+            if rows:
+                top.shapes(ly.layer(*(ROW_A, ROW_B)[j])).insert(
+                    kdb.DBox(x0 + i * 0.3, y0 + j * 0.8, x0 + i * 0.3 + 0.15, y0 + j * 0.8 + 0.45))
     state = 12345
     for k in range(70000):
         state = (state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
-        x = (state >> 33) % 1000000 / 1000.0
+        a = (state >> 33)
         state = (state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
-        y = 20.0 + (state >> 33) % 20000 / 1000.0
+        b = (state >> 33)
+        if rows:
+            x = a % 200000 / 1000.0
+            # the low half ends 2 um under the lattice: the view around it sees no scatter
+            y = 20.0 + b % 477000 / 1000.0 if k % 2 == 0 else 521.0 + b % 459000 / 1000.0
+        else:
+            x, y = a % 1000000 / 1000.0, 20.0 + b % 20000 / 1000.0
         w, h = 0.02 + (k % 500) * 0.001, 0.02 + (k // 500) * 0.001
         top.shapes(li).insert(kdb.DBox(x, y, x + w, y + h))
     ly.write(str(path))
+
+
+def lit_pixels(pixels):
+    return {i // 4 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK}
 
 
 def worker(src, on, wash=False, lod=False):
@@ -460,6 +485,8 @@ def main():
                 done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--page-target-mb', str(mb)],
                                       cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
                 assert done.returncode == 0, done.stdout + done.stderr
+                pieces = 'rep-split 1 fragments (2 grid pieces: 0 one-row of a 2-D grid, 0 one-member)'
+                assert (pieces in done.stderr) == (mb == 1), '%d MiB build log:\n%s' % (mb, done.stderr)
             pair = [worker(whole_src, True), worker(split_src, True)]
             try:
                 size, covered_px = (240, 80), 64 * 6 * 1.5 * 4.5
@@ -482,6 +509,40 @@ def main():
                     w.stop()
             print('page split: the lattice in 1 page (16 MiB) and cut into 2 (1 MiB) lights the same %d px '
                   '(%.0f covered) at %d pans' % (len(lit[0]), covered_px, len(SPLIT_PANS)))
+            # a 2-row lattice cut across its rows: the one-row pieces rank as
+            # the rows stored alone, apart from the uncut lattice
+            rows_src, uncut_src = Path(temp) / 'rows1.oas', Path(temp) / 'rows16.oas'
+            split_layout(rows_src, rows=True)
+            shutil.copy(rows_src, uncut_src)
+            for src, mb in ((rows_src, 1), (uncut_src, 16)):
+                done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--page-target-mb', str(mb)],
+                                      cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+                assert done.returncode == 0, done.stdout + done.stderr
+                pieces = 'rep-split 1 fragments (2 grid pieces: 2 one-row of a 2-D grid, 0 one-member)'
+                assert (pieces in done.stderr) == (mb == 1), '%d MiB build log:\n%s' % (mb, done.stderr)
+            pair = [worker(rows_src, True), worker(uncut_src, True)]
+            try:
+                size, covered_px, apart = (240, 80), 2 * 64 * 1.5 * 4.5, []
+                for px, py in SPLIT_PANS:
+                    bx, by = ROWS_AT[0] - 2.4 + px * PX_UM, ROWS_AT[1] - 1.0 + py * PX_UM
+                    box = (bx, by, bx + size[0] * PX_UM, by + size[1] * PX_UM)
+                    gen += 1
+                    cut, report = frame(pair[0], gen, box, visible=(SPLIT_LAYER,), size=size, report=True)
+                    assert report['tiles'] == 2, 'row split at a (%g, %g) px pan: %d pages' % (px, py, report['tiles'])
+                    gen += 1
+                    alone = frame(pair[0], gen, box, visible=(ROW_A, ROW_B), size=size)
+                    gen += 1
+                    uncut = frame(pair[1], gen, box, visible=(SPLIT_LAYER,), size=size)
+                    cut, alone, uncut = lit_pixels(cut), lit_pixels(alone), lit_pixels(uncut)
+                    assert cut and cut == alone, 'row pieces at a (%g, %g) px pan: %d / %d px, %d differ from the rows stored alone' % (
+                        px, py, len(cut), len(alone), len(cut ^ alone))
+                    assert abs(len(cut) / covered_px - 1.0) <= 0.03, 'row pieces: %d px lit for %.0f covered' % (len(cut), covered_px)
+                    apart.append(len(cut ^ uncut))
+            finally:
+                for w in pair:
+                    w.stop()
+            print('row pieces: a 2 x 64 lattice cut into one-row pieces lights the same %d px (%.0f covered) as the rows '
+                  'stored alone at %d pans; the uncut lattice differs in %s px' % (len(cut), covered_px, len(SPLIT_PANS), apart))
         finally:
             on.stop()
             off.stop()
