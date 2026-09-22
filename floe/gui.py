@@ -1708,6 +1708,8 @@ class Viewer:
                               self._on_incoming)
         GLib.timeout_add(POLL_MS, self._poll)
 
+        # the load clock (see _load_note): from here to the first frame
+        self._load_marks = {"t0": time.monotonic()} if cache is not None else None
         self._apply_cache(cache)
         if show:
             self.window.show_all()
@@ -1878,6 +1880,10 @@ class Viewer:
         self._sync_label_font_capability()
         self._sync_abstract_capability()
         if cache is not None:
+            marks = getattr(self, "_load_marks", None)
+            if marks is not None and "cache" not in marks:
+                # the cache, the layer panel: done; the service opens next
+                marks["cache"] = time.monotonic()
             self.worker = make_render_worker(
                 cache, stream_kb=self.stream_kb,
                 stream_target_ms=self.stream_target_ms,
@@ -1904,8 +1910,13 @@ class Viewer:
         if hide is not None:
             hide()
         if error is not None:
+            self._load_marks = None
             self._set_live_status("render service open failed: %s" % error)
             return False
+        marks = getattr(self, "_load_marks", None)
+        if marks is not None and "cache" in marks and "service" not in marks:
+            marks["service"] = time.monotonic()
+            marks["open"] = getattr(worker, "open_report", None) or {}
         self._sync_label_font_capability()
         self._sync_abstract_capability()
         if self._fit_after_worker_start:
@@ -2043,6 +2054,8 @@ class Viewer:
                 and not self.cache.is_stale() \
                 and getattr(self.cache, "ids", None) == ids:
             return None
+        # the load clock (see _load_note): from the file's selection
+        self._load_marks = {"t0": time.monotonic()}
         # the loading banner from the first blocking step until the
         # render service has opened (_worker_start_finished); a
         # refusal or an exception before that takes it down here
@@ -3794,6 +3807,9 @@ class Viewer:
                            res["ms"], split,
                            self._depth_note(used), cut, drawn,
                            refin, lod, text)
+                    # the first frame after a load also says how long the
+                    # load took (the frame's own ms is only its render)
+                    mode = self._load_note(res) + mode
                 # Also keep a terminal performance log (only the settled
                 # frame prints; refining rounds would spam every ~0.4s).
                 # The same line now remains in the persistent lower bar.
@@ -3819,6 +3835,25 @@ class Viewer:
         elif kind == "error":
             self._clear_pending()
             self._set_live_status("error: %s" % res.get("msg"))
+
+    def _load_note(self, res):
+        """The first settled frame after a load: the time from the file's
+        selection to this frame, split into the cache and layer panel, the
+        render service's open (renderd's own cache open in brackets) and the
+        first frame (field 2026-09-22: a 10 s service open showed as the
+        frame's 52 ms). Empty for every other frame."""
+        marks = getattr(self, "_load_marks", None)
+        if not marks or "service" not in marks or res.get("refining"):
+            return ""
+        self._load_marks = None
+        now = time.monotonic()
+        service = "service %.1f s" % (marks["service"] - marks["cache"])
+        opened = (marks.get("open") or {}).get("renderd_open_ms")
+        if opened is not None:
+            service += " [renderd open %.1f s]" % (opened / 1000.0)
+        return "loaded in %.1f s (cache %.1f s + %s + first frame %.2f s) · " % (
+            now - marks["t0"], marks["cache"] - marks["t0"], service,
+            now - marks["service"])
 
     def _set_status(self, bbox, mode):
         w_um = (bbox[2] - bbox[0]) * self.dbu

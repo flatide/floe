@@ -376,8 +376,12 @@ pub struct Cache {
     /// levels) of any cell holding the layer's own pages - a request
     /// depth at or above it draws every shape of the layer, so the
     /// layer's summary (a full-depth flattening) equals the exact
-    /// render there (user 2026-09-15: the depth is a free control)
-    layer_depth: Vec<u32>,
+    /// render there (user 2026-09-15: the depth is a free control).
+    /// Computed on first use: only a limited-depth occupancy request on a
+    /// file without depth planes asks, and the sweep reads every placement
+    /// record (field 2026-09-22: ~10 s of every layout's open, a plain
+    /// layout with no design.ovo included)
+    layer_depth: std::sync::OnceLock<Vec<u32>>,
     // Immutable for this open cache; reopen after publishing design.ovr.
     representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
 }
@@ -392,13 +396,21 @@ fn layer_max_depths(ovm: &floe_ovm::Ovm) -> Vec<u32> {
     if n == 0 || ovm.top as usize >= n {
         return vec![0; n_layers];
     }
-    let children = |ci: usize| -> Vec<usize> {
-        let c = ovm.cell(ci as u32);
-        (c.place_start as u64..c.place_start as u64 + c.place_count as u64)
-            .map(|pli| ovm.place_head(pli).child as usize)
-            .filter(|&k| k < n)
-            .collect()
-    };
+    // each cell's DISTINCT children, read once (a cell places the same
+    // child in many records; the sweeps below visit every edge twice)
+    let distinct: Vec<Vec<usize>> = (0..n)
+        .map(|ci| {
+            let c = ovm.cell(ci as u32);
+            let mut kids: Vec<usize> = (c.place_start as u64..c.place_start as u64 + c.place_count as u64)
+                .map(|pli| ovm.place_child(pli) as usize)
+                .filter(|&k| k < n)
+                .collect();
+            kids.sort_unstable();
+            kids.dedup();
+            kids
+        })
+        .collect();
+    let children = |ci: usize| -> Vec<usize> { distinct[ci].clone() };
     // post-order DFS from the top -> reversed, a topological order of
     // the reachable cells (edges back into the stack are cycles)
     let mut state = vec![0u8; n]; // 0 new, 1 on the stack, 2 done
@@ -466,19 +478,28 @@ impl Cache {
             .to_str()
             .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
         let vfs = Vfs::open(dir)?;
-        let layer_depth = layer_max_depths(&vfs.ovm);
         Ok(Self {
             vfs,
             dir: dir.to_string(),
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
-            layer_depth,
+            layer_depth: std::sync::OnceLock::new(),
             representatives: std::sync::OnceLock::new(),
         })
     }
 
     /// The deepest placement level holding pages of layer `idx`.
     pub fn layer_depth(&self, idx: u32) -> u32 {
-        self.layer_depth.get(idx as usize).copied().unwrap_or(0)
+        self.layer_depth
+            .get_or_init(|| layer_max_depths(&self.vfs.ovm))
+            .get(idx as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether the per-layer depths have been computed (a plain open must
+    /// not pay for them; tests read this).
+    pub fn layer_depths_computed(&self) -> bool {
+        self.layer_depth.get().is_some()
     }
 
     /// The cache's design.ovo if present and valid for THIS cache

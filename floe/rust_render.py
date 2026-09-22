@@ -222,6 +222,12 @@ class RustRenderWorker:
         self._renderd_build = None
         self._max_depth = None
         self._opened = False
+        # how long start() took, by step (field 2026-09-22: a 10 s service
+        # open showed as a 52 ms frame): process up to `ready`, the cache
+        # open (`open_ms`: waited for `opened`; `renderd_open_ms`: renderd's
+        # own open_us), the first style; None until start() returns
+        self.open_report = None
+        self._renderd_open_us = None
         self._styled_epoch = None
         self._style_paths = {}
         self._startup_error = None
@@ -329,10 +335,22 @@ class RustRenderWorker:
                     daemon=True)
                 self._reader.start()
                 self._stderr_reader.start()
+            started = time.monotonic()
             self._wait_for(lambda: self._ready, "ready")
+            ready = time.monotonic()
             self._send(self._open_command())
             self._wait_for(lambda: self._opened, "open")
+            opened = time.monotonic()
             self._publish_style(wait=True)
+            styled = time.monotonic()
+            self.open_report = {
+                "spawn_ms": (ready - started) * 1000.0,
+                "open_ms": (opened - ready) * 1000.0,
+                "renderd_open_ms": (self._renderd_open_us / 1000.0
+                                    if self._renderd_open_us is not None else None),
+                "style_ms": (styled - opened) * 1000.0,
+                "total_ms": (styled - started) * 1000.0,
+            }
         except Exception:
             self.stop()
             raise
@@ -786,6 +804,9 @@ class RustRenderWorker:
                 # pre-0.12.16 renderd, so keep None rather than 0
                 max_depth = _wire_int(fields, "max_depth", -1)
                 self._max_depth = max_depth if max_depth >= 0 else None
+                # the open's own time (renderd 0.12.191+; absent before)
+                open_us = _wire_int(fields, "open_us", -1)
+                self._renderd_open_us = open_us if open_us >= 0 else None
                 self._condition.notify_all()
         elif kind == "styled":
             with self._condition:

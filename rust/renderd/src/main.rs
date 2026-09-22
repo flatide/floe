@@ -1151,6 +1151,9 @@ fn handle_open(
             return;
         }
     };
+    // the open's own time, reported on `opened` (open_us) so a client can
+    // tell the cache open from the process start and the first frame
+    let open_started = Instant::now();
     if let Some(spec_path) = command.deck.as_deref() {
         let opened = std::fs::read_to_string(spec_path)
             .map_err(|error| format!("read deck spec {spec_path}: {error}"))
@@ -1176,7 +1179,7 @@ fn handle_open(
                 respond(
                     responses,
                     format!(
-                        "opened unit={} top=0 layers={} cells={} pages={} ovp_bytes=0 max_depth={} budget_bytes={} jobs={} deck=1 sources={} placements={} bbox={}",
+                        "opened unit={} top=0 layers={} cells={} pages={} ovp_bytes=0 max_depth={} budget_bytes={} jobs={} deck=1 sources={} placements={} bbox={} open_us={}",
                         info.unit,
                         info.layers,
                         info.sources,
@@ -1186,7 +1189,8 @@ fn handle_open(
                         command.jobs,
                         info.sources,
                         info.placements,
-                        bbox
+                        bbox,
+                        elapsed_us(open_started)
                     ),
                 );
             }
@@ -1213,7 +1217,7 @@ fn handle_open(
             respond(
                 responses,
                 format!(
-                    "opened unit={} top={} layers={} cells={} pages={} ovp_bytes={} max_depth={} budget_bytes={} jobs={}",
+                    "opened unit={} top={} layers={} cells={} pages={} ovp_bytes={} max_depth={} budget_bytes={} jobs={} open_us={}",
                     info.unit,
                     info.top_cell,
                     info.layers,
@@ -1222,7 +1226,8 @@ fn handle_open(
                     info.ovp_bytes,
                     info.max_depth,
                     budget_bytes,
-                    command.jobs
+                    command.jobs,
+                    elapsed_us(open_started)
                 ),
             );
         }
