@@ -43,7 +43,12 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
     no page and draws the geometry; FLOE_RUST_PAGE_WASH=on washes them;
   * the M7 LOD swap is off by default (user decision 2026-09-22): a dense
     layout indexed with `floe2 index --lod` swaps no page for its merged
-    variant at a wide view; FLOE_RUST_LOD=on swaps it.
+    variant at a wide view; FLOE_RUST_LOD=on swaps it;
+  * an axis-aligned array ranks on the world lattice (candidate 2 of
+    ADAPTIVE_CUT_DENSITY_PLAN §4.2): one row of 64 bars 1.5 px wide stored
+    as one array, as two placements of a 32-bar cell, and as a column cell
+    placed rotated onto the row lights the same pixels at whole and
+    fractional pans.
 
     .venv/bin/python tools/validate_area_true.py
 """
@@ -66,6 +71,8 @@ FIELD_W, FIELD_H, PAD = 16.0, 6.0, 4.0        # um
 LAYER = (1, 0)
 POLY, RECT, TRI, SQUARE, DOTS = (2, 0), (3, 0), (4, 0), (5, 0), (6, 0)
 TINY = (300.0, 0.0)           # um: the 10 x 10 placements of a 2 um cell, 40 um apart
+ROW = (500.0, 3.0)            # um: one lattice row stored three ways, layers 8, 9, 10
+ROW_LAYERS = ((8, 0), (9, 0), (10, 0))
 BIG = (60.0, 40.0)            # um: the shapes that run off the edges, around this point
 SMALL = (120.0, 5.0)          # um: the triangle and square fields' corner
 CLEAR = '\n'.join(['.' * 16] * 16)
@@ -163,6 +170,24 @@ def layout(path):
     step = int(40.0 / ly.dbu)
     top.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(int(TINY[0] / ly.dbu), int(TINY[1] / ly.dbu)),
                                  kdb.Vector(step, 0), kdb.Vector(0, step), 10, 10))
+    # one row of 64 bars (0.15 x 6 um, pitch 0.3 um) stored three ways
+    bw, bh, pitch = 0.15, 6.0, 0.3
+    x0, y0 = ROW
+    whole, half, col = ly.layer(*ROW_LAYERS[0]), ly.layer(*ROW_LAYERS[1]), ly.layer(*ROW_LAYERS[2])
+    for i in range(64):
+        top.shapes(whole).insert(kdb.DBox(x0 + i * pitch, y0, x0 + i * pitch + bw, y0 + bh))
+    cell = ly.create_cell('HALF')
+    for i in range(32):
+        cell.shapes(half).insert(kdb.DBox(i * pitch, 0.0, i * pitch + bw, bh))
+    for k in range(2):
+        top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(int(round((x0 + 32 * k * pitch) / ly.dbu)),
+                                                                   int(round(y0 / ly.dbu)))))
+    # a column cell rotated by 90 degrees onto the row: (x, y) -> (-y, x)
+    column = ly.create_cell('COL')
+    for i in range(64):
+        wx = x0 + i * pitch
+        column.shapes(col).insert(kdb.DBox(y0, -(wx + bw), y0 + bh, -wx))
+    top.insert(kdb.CellInstArray(column.cell_index(), kdb.Trans(1, False, 0, 0)))
     ly.write(str(path))
 
 
@@ -376,6 +401,21 @@ def main():
                     w.stop()
             assert swaps[False] == 0 and swaps[True] > 0, 'LOD swaps: default %d, FLOE_RUST_LOD=on %d' % (swaps[False], swaps[True])
             print('lod swap: default swaps 0 pages; on, %d' % swaps[True])
+            # the same lattice row stored three ways lights the same pixels
+            size = (240, 80)
+            for pan in (0.0, 0.37):
+                box = (ROW[0] - 2.0 + pan * PX_UM, ROW[1] - 1.0, ROW[0] - 2.0 + pan * PX_UM + size[0] * PX_UM,
+                       ROW[1] - 1.0 + size[1] * PX_UM)
+                lit = []
+                for layer in ROW_LAYERS:
+                    gen += 1
+                    pixels = frame(on, gen, box, visible=(layer,), size=size)
+                    lit.append({i // 4 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK})
+                assert lit[0] and lit[0] == lit[1] == lit[2], \
+                    'the lattice row at a %g px pan: %d / %d / %d px, %d and %d differ from the array' % (
+                        pan, len(lit[0]), len(lit[1]), len(lit[2]), len(lit[0] ^ lit[1]), len(lit[0] ^ lit[2]))
+            print('lattice ranks: one array, two cell placements and a rotated column light the same %d px'
+                  % len(lit[0]))
         finally:
             on.stop()
             off.stop()

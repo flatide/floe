@@ -3833,7 +3833,7 @@ fn raster_page_records(
                     }
                     let local = translate_bbox(base, offset_x, offset_y)?;
                     let world = world_transform.apply_bbox(local)?;
-                    let painted = match grid.as_ref().and_then(|g| g.ranks(offset_x, offset_y)) {
+                    let painted = match grid.as_ref().and_then(|g| g.ranks(offset_x, offset_y, &world)) {
                         Some(ranks) => paint_width_first_rect(band, request, world, paint, ranks)?,
                         None => paint_world_rect(band, request, world, paint)?,
                     };
@@ -4936,30 +4936,43 @@ fn paint_width_first_rect(
 /// Width-first ranks of the members of one rectangle ARRAY (a Grid repetition;
 /// user decision 2026-09-22): a world-box hash spreads the extra pixels of an
 /// array at random - runs of wide and narrow members - so an array member's
-/// rank comes from its index instead. For the world x axis, p is the index
-/// that moves members in world x and s the other one; the x rank is
-/// frac(u_x + vdc(p) + phi s): vdc (the bit-reversed index, van der Corput) lets
-/// any run of neighbours take its share of extra pixels - a half makes it one
-/// in two - and phi s (the golden ratio) shifts each row so the rows do not
-/// repeat each other. The y rank swaps p and s, so in a one-row array it is
-/// frac(u_y + phi i) and the two axes stay independent (a 0.5 x 0.5 px member
-/// shows 1 time in 4). u_x, u_y are the array's world-box ranks at this
-/// placement. The ranks depend on the world and the index only - the same at
-/// every zoom, pan, tile and worker. A collinear two-dimensional grid has no
-/// clean index and keeps the member's own world-box ranks.
+/// rank comes from an index instead. For the world x axis, with ix the index
+/// along x and iy the one along y, the x rank is frac(u_x + vdc(ix) + phi iy):
+/// vdc (the bit-reversed index, van der Corput) lets any run of neighbours
+/// take its share of extra pixels - a half makes it one in two - and phi iy
+/// (the golden ratio, as a 64-bit Weyl step) shifts each row so the rows do
+/// not repeat each other. The y rank swaps ix and iy, so in a one-row array
+/// it is frac(u_y + phi ix) and the two axes stay independent (a 0.5 x 0.5 px
+/// member shows 1 time in 4).
+///
+/// An array whose world repetition vectors run along x and y (the common,
+/// axis-aligned case) counts on the WORLD LATTICE (user decision 2026-09-22,
+/// ADAPTIVE_CUT_DENSITY_PLAN §4.2 candidate 2): along an axis of pitch P the
+/// index is the member's world bbox corner div_euclid P, and u is a hash of
+/// the pitches, the phases (corner rem_euclid P; the fixed coordinate on an
+/// axis without repetition) and the member's world size - never of the
+/// record's first member, count or numbering. So the same world lattice
+/// draws the same members whether it is stored as one Grid, as the index's
+/// fragments (frag_rep re-bases and renumbers them), with its axes swapped or
+/// a pitch negated, or placed rotated or mirrored. What it cannot see: a
+/// one-member fragment is a Rep::One (world-box hash), and a fragment that
+/// lost an axis (a one-row piece of a 2-D grid) has no pitch on that axis, so
+/// it keys differently. A skewed grid keeps the per-record index (the record's
+/// own (i, j), u its first member's world-box ranks); a collinear 2-D grid has
+/// no clean index and keeps the member's own world-box ranks.
 struct GridRanks {
-    va: (i64, i64),
-    vb: (i64, i64),
-    na: u64,
-    nb: u64,
-    det: i128,
-    x_along_a: bool,
+    mode: GridMode,
     u: (f64, f64),
 }
 
-impl GridRanks {
-    const PHI: f64 = 0.618_033_988_749_894_9;
+enum GridMode {
+    /// world pitches along x and y (0 = no repetition along that axis)
+    Lattice { px: i64, py: i64 },
+    /// the record's own index (skewed grids)
+    Index { va: (i64, i64), vb: (i64, i64), na: u64, nb: u64, det: i128, x_along_a: bool },
+}
 
+impl GridRanks {
     fn new(rep: &Rep, world_transform: &OrthoTransform, base_world: BBox) -> Result<Option<GridRanks>, String> {
         let Rep::Grid { na, nb, va, vb } = rep else {
             return Ok(None);
@@ -4967,56 +4980,105 @@ impl GridRanks {
         let origin = world_transform.apply(0, 0)?;
         let a = world_transform.apply(va.0, va.1)?;
         let b = world_transform.apply(vb.0, vb.1)?;
-        let wa = ((a.0 - origin.0).unsigned_abs(), (a.1 - origin.1).unsigned_abs());
-        let wb = ((b.0 - origin.0).unsigned_abs(), (b.1 - origin.1).unsigned_abs());
+        let wa = (a.0 - origin.0, a.1 - origin.1);
+        let wb = (b.0 - origin.0, b.1 - origin.1);
+        // the world lattice: every repeating vector along x or y, two of them
+        // along different axes
+        let along = |v: (i64, i64)| -> Option<(i64, i64)> {
+            match v {
+                (0, 0) => None,
+                (x, 0) => Some((x.abs(), 0)),
+                (0, y) => Some((0, y.abs())),
+                _ => None,
+            }
+        };
+        let repeating: Vec<(i64, i64)> =
+            [(*na > 1, wa), (*nb > 1, wb)].iter().filter(|(many, _)| *many).map(|&(_, v)| v).collect();
+        let lattice = repeating.iter().map(|&v| along(v)).collect::<Option<Vec<(i64, i64)>>>().and_then(|steps| {
+            let px = steps.iter().map(|s| s.0).max().unwrap_or(0);
+            let py = steps.iter().map(|s| s.1).max().unwrap_or(0);
+            // two repeating vectors must not share an axis
+            let distinct = steps.len() < 2 || (steps[0].0 == 0) != (steps[1].0 == 0);
+            distinct.then_some((px, py))
+        });
+        if let Some((px, py)) = lattice {
+            let key = BBox {
+                x0: if px > 0 { base_world.x0.rem_euclid(px) } else { base_world.x0 },
+                y0: if py > 0 { base_world.y0.rem_euclid(py) } else { base_world.y0 },
+                x1: base_world.x1 - base_world.x0,
+                y1: base_world.y1 - base_world.y0,
+            };
+            let salt = (px as u64).rotate_left(21) ^ (py as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            return Ok(Some(GridRanks {
+                mode: GridMode::Lattice { px, py },
+                u: (salted_rank(key, 3 ^ salt), salted_rank(key, 4 ^ salt)),
+            }));
+        }
+        let (ua, ub) = ((wa.0.unsigned_abs(), wa.1.unsigned_abs()), (wb.0.unsigned_abs(), wb.1.unsigned_abs()));
         // which index is x's primary: a one-row array's own index goes to the
         // axis it runs along (a column of bars spreads its y decisions by vdc)
         let x_along_a = if *nb <= 1 {
-            wa.0 >= wa.1
+            ua.0 >= ua.1
         } else if *na <= 1 {
-            wb.0 < wb.1
+            ub.0 < ub.1
         } else {
-            wa.0 >= wb.0
+            ua.0 >= ub.0
         };
         Ok(Some(GridRanks {
-            va: *va,
-            vb: *vb,
-            na: *na,
-            nb: *nb,
-            det: va.0 as i128 * vb.1 as i128 - va.1 as i128 * vb.0 as i128,
-            x_along_a,
+            mode: GridMode::Index {
+                va: *va,
+                vb: *vb,
+                na: *na,
+                nb: *nb,
+                det: va.0 as i128 * vb.1 as i128 - va.1 as i128 * vb.0 as i128,
+                x_along_a,
+            },
             u: (salted_rank(base_world, 1), salted_rank(base_world, 2)),
         }))
     }
 
-    /// The member at this offset from the array's first: its (i, j) index.
+    /// A skewed grid's member at this offset from the record's first: (i, j).
     fn index(&self, ox: i64, oy: i64) -> Option<(u64, u64)> {
+        let GridMode::Index { va, vb, na, nb, det, .. } = self.mode else {
+            return None;
+        };
         let (ox, oy) = (ox as i128, oy as i128);
-        let (va, vb) = ((self.va.0 as i128, self.va.1 as i128), (self.vb.0 as i128, self.vb.1 as i128));
+        let (va, vb) = ((va.0 as i128, va.1 as i128), (vb.0 as i128, vb.1 as i128));
         let along = |v: (i128, i128)| -> Option<u64> {
             let k = if v.0 != 0 { ox / v.0 } else if v.1 != 0 { oy / v.1 } else { 0 };
             u64::try_from(k).ok()
         };
-        if self.det != 0 {
-            let i = (ox * vb.1 - oy * vb.0) / self.det;
-            let j = (va.0 * oy - va.1 * ox) / self.det;
+        if det != 0 {
+            let i = (ox * vb.1 - oy * vb.0) / det;
+            let j = (va.0 * oy - va.1 * ox) / det;
             return Some((u64::try_from(i).ok()?, u64::try_from(j).ok()?));
         }
-        if self.nb <= 1 {
+        if nb <= 1 {
             return Some((along(va)?, 0));
         }
-        if self.na <= 1 {
+        if na <= 1 {
             return Some((0, along(vb)?));
         }
         None
     }
 
-    fn ranks(&self, ox: i64, oy: i64) -> Option<(f64, f64)> {
-        let (i, j) = self.index(ox, oy)?;
-        let (p, s) = if self.x_along_a { (i, j) } else { (j, i) };
+    /// The member's (x, y) ranks: `world` is its world bbox, (ox, oy) its
+    /// offset from the record's first member.
+    fn ranks(&self, ox: i64, oy: i64, world: &BBox) -> Option<(f64, f64)> {
+        let (ix, iy) = match self.mode {
+            GridMode::Lattice { px, py } => (
+                if px > 0 { world.x0.div_euclid(px) as u64 } else { 0 },
+                if py > 0 { world.y0.div_euclid(py) as u64 } else { 0 },
+            ),
+            GridMode::Index { x_along_a, .. } => {
+                let (i, j) = self.index(ox, oy)?;
+                if x_along_a { (i, j) } else { (j, i) }
+            }
+        };
         let vdc = |k: u64| (k.reverse_bits() >> 11) as f64 / (1u64 << 53) as f64;
-        let spread = |u: f64, p: u64, s: u64| (u + vdc(p) + Self::PHI * s as f64).rem_euclid(1.0);
-        Some((spread(self.u.0, p, s), spread(self.u.1, s, p)))
+        let weyl = |k: u64| (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << 53) as f64;
+        let spread = |u: f64, p: u64, s: u64| (u + vdc(p) + weyl(s)).rem_euclid(1.0);
+        Some((spread(self.u.0, ix, iy), spread(self.u.1, iy, ix)))
     }
 }
 
@@ -7916,12 +7978,38 @@ mod tests {
         assert!(grown.iter().any(|&(col, _)| col == 5), "the KLayout rule grows the first bar into the gap");
     }
 
+    /// Every member of a Grid record placed by `transform`: (offset, world box).
+    fn grid_members(local: BBox, rep: &Rep, transform: &OrthoTransform) -> Vec<((i64, i64), BBox)> {
+        let Rep::Grid { na, nb, va, vb } = rep else { unreachable!() };
+        let mut out = Vec::new();
+        for j in 0..*nb as i64 {
+            for i in 0..*na as i64 {
+                let (ox, oy) = (i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                let member = BBox { x0: local.x0 + ox, y0: local.y0 + oy, x1: local.x1 + ox, y1: local.y1 + oy };
+                out.push(((ox, oy), transform.apply_bbox(member).unwrap()));
+            }
+        }
+        out
+    }
+
+    /// (world box -> ranks) of every member of these records.
+    fn member_ranks(records: &[(BBox, Rep, OrthoTransform)]) -> BTreeMap<(i64, i64, i64, i64), (f64, f64)> {
+        let mut out = BTreeMap::new();
+        for (local, rep, transform) in records {
+            let grid = GridRanks::new(rep, transform, transform.apply_bbox(*local).unwrap()).unwrap().unwrap();
+            for ((ox, oy), world) in grid_members(*local, rep, transform) {
+                let ranks = grid.ranks(ox, oy, &world).expect("ranks");
+                assert!(out.insert((world.x0, world.y0, world.x1, world.y1), ranks).is_none(), "a member twice");
+            }
+        }
+        out
+    }
+
     #[test]
     fn array_members_spread_their_extra_pixels_by_index() {
         // a row of 64 bars 1.5 px wide: exactly half draw 2 px, and never
         // more than two neighbours in a row decide alike ("one in two"); the
         // same along a column, and for a row placed rotated to vertical
-        let world = BBox { x0: 1000, y0: 2000, x1: 1015, y1: 2300 };
         let runs = |wide: &[bool]| {
             let (mut best, mut run) = (1, 1);
             for k in 1..wide.len() {
@@ -7932,45 +8020,94 @@ mod tests {
         };
         let identity = OrthoTransform::identity();
         let rotated = OrthoTransform::place(0, 0, 1, false).unwrap();
+        let bar = BBox { x0: 1000, y0: 2000, x1: 1015, y1: 2300 };
         for (rep, transform, axis) in [
             (Rep::Grid { na: 64, nb: 1, va: (30, 0), vb: (0, 0) }, &identity, 0),
             (Rep::Grid { na: 1, nb: 64, va: (0, 0), vb: (0, 30) }, &identity, 1),
             (Rep::Grid { na: 64, nb: 1, va: (0, 30), vb: (0, 0) }, &identity, 1),
             (Rep::Grid { na: 64, nb: 1, va: (30, 0), vb: (0, 0) }, &rotated, 1),
+            // a skewed grid keeps the record's own index
+            (Rep::Grid { na: 64, nb: 1, va: (30, 7), vb: (0, 0) }, &identity, 0),
         ] {
-            let grid = GridRanks::new(&rep, transform, world).unwrap().unwrap();
-            let Rep::Grid { na, nb, va, vb } = rep else { unreachable!() };
-            let mut wide = Vec::new();
-            for j in 0..nb as i64 {
-                for i in 0..na as i64 {
-                    let (ox, oy) = (i * va.0 + j * vb.0, i * va.1 + j * vb.1);
-                    let ranks = grid.ranks(ox, oy).expect("an index");
-                    let t = if axis == 0 { ranks.0 } else { ranks.1 };
-                    wide.push(1.5 - t > 1.0);
-                }
-            }
+            let grid = GridRanks::new(&rep, transform, transform.apply_bbox(bar).unwrap()).unwrap().unwrap();
+            let wide: Vec<bool> = grid_members(bar, &rep, transform)
+                .iter()
+                .map(|((ox, oy), world)| {
+                    let ranks = grid.ranks(*ox, *oy, world).expect("an index");
+                    1.5 - if axis == 0 { ranks.0 } else { ranks.1 } > 1.0
+                })
+                .collect();
             let count = wide.iter().filter(|w| **w).count();
             assert!((31..=33).contains(&count), "{:?}: {} of 64 wide", rep, count);
             assert!(runs(&wide) <= 2, "{:?}: a run of {} alike", rep, runs(&wide));
         }
         // a 32 x 32 array of sub-pixel points keeps the covered share
-        let grid = GridRanks::new(&Rep::Grid { na: 32, nb: 32, va: (20, 0), vb: (0, 20) }, &identity, world).unwrap().unwrap();
+        let rep = Rep::Grid { na: 32, nb: 32, va: (20, 0), vb: (0, 20) };
+        let grid = GridRanks::new(&rep, &identity, bar).unwrap().unwrap();
         for (w, h) in [(0.5, 0.5), (0.3, 0.7), (0.9, 0.2)] {
-            let mut kept = 0;
-            for j in 0..32 {
-                for i in 0..32 {
-                    let (tx, ty) = grid.ranks(i * 20, j * 20).unwrap();
-                    kept += (w > tx && h > ty) as usize;
-                }
-            }
+            let kept = grid_members(bar, &rep, &identity)
+                .iter()
+                .filter(|((ox, oy), world)| {
+                    let (tx, ty) = grid.ranks(*ox, *oy, world).unwrap();
+                    w > tx && h > ty
+                })
+                .count();
             let share = kept as f64 / 1024.0;
             assert!((share - w * h).abs() < 0.03, "{} x {} px points kept {}", w, h, share);
         }
-        // a skewed grid still finds its indices; a collinear 2-D one keeps the hash
-        let skew = GridRanks::new(&Rep::Grid { na: 5, nb: 7, va: (30, 10), vb: (-7, 40) }, &identity, world).unwrap().unwrap();
+        // a skewed grid finds its record indices; a collinear 2-D one keeps the hash
+        let skew = GridRanks::new(&Rep::Grid { na: 5, nb: 7, va: (30, 10), vb: (-7, 40) }, &identity, bar).unwrap().unwrap();
         assert_eq!(skew.index(3 * 30 + 4 * -7, 3 * 10 + 4 * 40), Some((3, 4)));
-        let collinear = GridRanks::new(&Rep::Grid { na: 5, nb: 7, va: (30, 0), vb: (60, 0) }, &identity, world).unwrap().unwrap();
-        assert_eq!(collinear.ranks(90, 0), None);
+        let collinear = GridRanks::new(&Rep::Grid { na: 5, nb: 7, va: (30, 0), vb: (60, 0) }, &identity, bar).unwrap().unwrap();
+        assert_eq!(collinear.ranks(90, 0, &bar), None);
+    }
+
+    #[test]
+    fn an_axis_aligned_array_ranks_the_same_however_it_is_stored() {
+        // ADAPTIVE_CUT_DENSITY_PLAN §4.2 candidate 2: the same world lattice as
+        // one Grid, as the index's re-based fragments, with its axes swapped,
+        // a pitch negated, or placed rotated / mirrored - every member keeps
+        // its ranks (the per-record index gave 10 of 64 different picks)
+        let id = OrthoTransform::identity();
+        let bar = BBox { x0: -1003, y0: 2000, x1: -988, y1: 2300 };
+        let at = |dx: i64, dy: i64| BBox { x0: bar.x0 + dx, y0: bar.y0 + dy, x1: bar.x1 + dx, y1: bar.y1 + dy };
+        let whole = member_ranks(&[(bar, Rep::Grid { na: 64, nb: 1, va: (30, 0), vb: (0, 0) }, id)]);
+        assert_eq!(whole.len(), 64);
+        let fragments = member_ranks(&[
+            (bar, Rep::Grid { na: 32, nb: 1, va: (30, 0), vb: (0, 0) }, id),
+            (at(32 * 30, 0), Rep::Grid { na: 20, nb: 1, va: (30, 0), vb: (0, 0) }, id),
+            (at(52 * 30, 0), Rep::Grid { na: 12, nb: 1, va: (30, 0), vb: (0, 0) }, id),
+        ]);
+        assert_eq!(fragments, whole, "fragments of the lattice rank differently");
+        let swapped = member_ranks(&[(bar, Rep::Grid { na: 1, nb: 64, va: (0, 0), vb: (30, 0) }, id)]);
+        assert_eq!(swapped, whole, "the axis-swapped record ranks differently");
+        let negated = member_ranks(&[(at(63 * 30, 0), Rep::Grid { na: 64, nb: 1, va: (-30, 0), vb: (0, 0) }, id)]);
+        assert_eq!(negated, whole, "the negated pitch ranks differently");
+        // a column of bars in a cell placed rotated (and mirrored) onto the row
+        for (rot, flip) in [(1u8, false), (3, false), (1, true), (3, true)] {
+            let place = OrthoTransform::place(0, 0, rot, flip).unwrap();
+            let inverse = place.invert().unwrap();
+            // the local member 0 that lands on the row's first bar, the local step
+            // that lands on (+30, 0)
+            let local = inverse.apply_bbox(bar).unwrap();
+            let (sx, sy) = inverse.apply(30, 0).unwrap();
+            let (ox, oy) = inverse.apply(0, 0).unwrap();
+            let step = (sx - ox, sy - oy);
+            let placed = member_ranks(&[(local, Rep::Grid { na: 64, nb: 1, va: step, vb: (0, 0) }, place)]);
+            assert_eq!(placed, whole, "the rotated placement (rot {} flip {}) ranks differently", rot, flip);
+        }
+        // a 2-D lattice and its four 4 x 4 fragments
+        let two = member_ranks(&[(bar, Rep::Grid { na: 8, nb: 8, va: (30, 0), vb: (0, 400) }, id)]);
+        let quarters = member_ranks(&[
+            (bar, Rep::Grid { na: 4, nb: 4, va: (30, 0), vb: (0, 400) }, id),
+            (at(120, 0), Rep::Grid { na: 4, nb: 4, va: (30, 0), vb: (0, 400) }, id),
+            (at(0, 1600), Rep::Grid { na: 4, nb: 4, va: (30, 0), vb: (0, 400) }, id),
+            (at(120, 1600), Rep::Grid { na: 4, nb: 4, va: (0, 400), vb: (30, 0) }, id),
+        ]);
+        assert_eq!(quarters, two, "fragments of the 2-D lattice rank differently");
+        // a different phase or size is a different lattice
+        let shifted = member_ranks(&[(at(7, 0), Rep::Grid { na: 64, nb: 1, va: (30, 0), vb: (0, 0) }, id)]);
+        assert_ne!(shifted.values().collect::<Vec<_>>(), whole.values().collect::<Vec<_>>());
     }
 
     #[test]
