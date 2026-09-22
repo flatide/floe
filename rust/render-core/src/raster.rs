@@ -3812,6 +3812,13 @@ fn raster_page_records(
             } else {
                 None
             };
+            // area-true members of a whole array spread their width decisions
+            // by their index (GridRanks); a thinned repetition keeps the hash
+            let grid = if area_true_rim(request, paint) && matches!(rep, std::borrow::Cow::Borrowed(_)) {
+                GridRanks::new(&rect.rep, &world_transform, world_transform.apply_bbox(base)?)?
+            } else {
+                None
+            };
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
             let visit = until_full(for_each_visible_offset_chunked(
@@ -3826,7 +3833,11 @@ fn raster_page_records(
                     }
                     let local = translate_bbox(base, offset_x, offset_y)?;
                     let world = world_transform.apply_bbox(local)?;
-                    if paint_world_rect(band, request, world, paint)? {
+                    let painted = match grid.as_ref().and_then(|g| g.ranks(offset_x, offset_y)) {
+                        Some(ranks) => paint_width_first_rect(band, request, world, paint, ranks)?,
+                        None => paint_world_rect(band, request, world, paint)?,
+                    };
+                    if painted {
                         drawn = drawn.saturating_add(1);
                     }
                     Ok(())
@@ -4892,12 +4903,24 @@ fn paint_area_true_rect(
     world: BBox,
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    paint_width_first_rect(band, request, world, paint, (salted_rank(world, 1), salted_rank(world, 2)))
+}
+
+/// `paint_area_true_rect` under given x and y ranks: an array member's come
+/// from its index (GridRanks), any other rectangle's from its world box.
+fn paint_width_first_rect(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    world: BBox,
+    paint: PaintStyle,
+    ranks: (f64, f64),
+) -> Result<bool, String> {
     let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
     let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
-    let Some((c0, c1)) = width_first_span(x0, x1, salted_rank(world, 1)) else {
+    let Some((c0, c1)) = width_first_span(x0, x1, ranks.0) else {
         return Ok(false);
     };
-    let Some((r0, r1)) = width_first_span(y0, y1, salted_rank(world, 2)) else {
+    let Some((r0, r1)) = width_first_span(y0, y1, ranks.1) else {
         return Ok(false);
     };
     let (d0, d1) = (c0 * DEVICE_ONE, c1 * DEVICE_ONE);
@@ -4908,6 +4931,93 @@ fn paint_area_true_rect(
         rim |= paint_hairline_device_rect(band, request, piece, paint)?;
     }
     Ok(filled || rim)
+}
+
+/// Width-first ranks of the members of one rectangle ARRAY (a Grid repetition;
+/// user decision 2026-09-22): a world-box hash spreads the extra pixels of an
+/// array at random - runs of wide and narrow members - so an array member's
+/// rank comes from its index instead. For the world x axis, p is the index
+/// that moves members in world x and s the other one; the x rank is
+/// frac(u_x + vdc(p) + phi s): vdc (the bit-reversed index, van der Corput) lets
+/// any run of neighbours take its share of extra pixels - a half makes it one
+/// in two - and phi s (the golden ratio) shifts each row so the rows do not
+/// repeat each other. The y rank swaps p and s, so in a one-row array it is
+/// frac(u_y + phi i) and the two axes stay independent (a 0.5 x 0.5 px member
+/// shows 1 time in 4). u_x, u_y are the array's world-box ranks at this
+/// placement. The ranks depend on the world and the index only - the same at
+/// every zoom, pan, tile and worker. A collinear two-dimensional grid has no
+/// clean index and keeps the member's own world-box ranks.
+struct GridRanks {
+    va: (i64, i64),
+    vb: (i64, i64),
+    na: u64,
+    nb: u64,
+    det: i128,
+    x_along_a: bool,
+    u: (f64, f64),
+}
+
+impl GridRanks {
+    const PHI: f64 = 0.618_033_988_749_894_9;
+
+    fn new(rep: &Rep, world_transform: &OrthoTransform, base_world: BBox) -> Result<Option<GridRanks>, String> {
+        let Rep::Grid { na, nb, va, vb } = rep else {
+            return Ok(None);
+        };
+        let origin = world_transform.apply(0, 0)?;
+        let a = world_transform.apply(va.0, va.1)?;
+        let b = world_transform.apply(vb.0, vb.1)?;
+        let wa = ((a.0 - origin.0).unsigned_abs(), (a.1 - origin.1).unsigned_abs());
+        let wb = ((b.0 - origin.0).unsigned_abs(), (b.1 - origin.1).unsigned_abs());
+        // which index is x's primary: a one-row array's own index goes to the
+        // axis it runs along (a column of bars spreads its y decisions by vdc)
+        let x_along_a = if *nb <= 1 {
+            wa.0 >= wa.1
+        } else if *na <= 1 {
+            wb.0 < wb.1
+        } else {
+            wa.0 >= wb.0
+        };
+        Ok(Some(GridRanks {
+            va: *va,
+            vb: *vb,
+            na: *na,
+            nb: *nb,
+            det: va.0 as i128 * vb.1 as i128 - va.1 as i128 * vb.0 as i128,
+            x_along_a,
+            u: (salted_rank(base_world, 1), salted_rank(base_world, 2)),
+        }))
+    }
+
+    /// The member at this offset from the array's first: its (i, j) index.
+    fn index(&self, ox: i64, oy: i64) -> Option<(u64, u64)> {
+        let (ox, oy) = (ox as i128, oy as i128);
+        let (va, vb) = ((self.va.0 as i128, self.va.1 as i128), (self.vb.0 as i128, self.vb.1 as i128));
+        let along = |v: (i128, i128)| -> Option<u64> {
+            let k = if v.0 != 0 { ox / v.0 } else if v.1 != 0 { oy / v.1 } else { 0 };
+            u64::try_from(k).ok()
+        };
+        if self.det != 0 {
+            let i = (ox * vb.1 - oy * vb.0) / self.det;
+            let j = (va.0 * oy - va.1 * ox) / self.det;
+            return Some((u64::try_from(i).ok()?, u64::try_from(j).ok()?));
+        }
+        if self.nb <= 1 {
+            return Some((along(va)?, 0));
+        }
+        if self.na <= 1 {
+            return Some((0, along(vb)?));
+        }
+        None
+    }
+
+    fn ranks(&self, ox: i64, oy: i64) -> Option<(f64, f64)> {
+        let (i, j) = self.index(ox, oy)?;
+        let (p, s) = if self.x_along_a { (i, j) } else { (j, i) };
+        let vdc = |k: u64| (k.reverse_bits() >> 11) as f64 / (1u64 << 53) as f64;
+        let spread = |u: f64, p: u64, s: u64| (u + vdc(p) + Self::PHI * s as f64).rem_euclid(1.0);
+        Some((spread(self.u.0, p, s), spread(self.u.1, s, p)))
+    }
 }
 
 /// One axis of a width-first rectangle: the side [v0, v1) (device units) is
@@ -7804,6 +7914,63 @@ mod tests {
         klayout.raster.area_true = false;
         let grown = lit_set(&render_geometry_styled(&hairline_scene(bars, Vec::new(), Vec::new()), &klayout).unwrap().frame, 32);
         assert!(grown.iter().any(|&(col, _)| col == 5), "the KLayout rule grows the first bar into the gap");
+    }
+
+    #[test]
+    fn array_members_spread_their_extra_pixels_by_index() {
+        // a row of 64 bars 1.5 px wide: exactly half draw 2 px, and never
+        // more than two neighbours in a row decide alike ("one in two"); the
+        // same along a column, and for a row placed rotated to vertical
+        let world = BBox { x0: 1000, y0: 2000, x1: 1015, y1: 2300 };
+        let runs = |wide: &[bool]| {
+            let (mut best, mut run) = (1, 1);
+            for k in 1..wide.len() {
+                run = if wide[k] == wide[k - 1] { run + 1 } else { 1 };
+                best = best.max(run);
+            }
+            best
+        };
+        let identity = OrthoTransform::identity();
+        let rotated = OrthoTransform::place(0, 0, 1, false).unwrap();
+        for (rep, transform, axis) in [
+            (Rep::Grid { na: 64, nb: 1, va: (30, 0), vb: (0, 0) }, &identity, 0),
+            (Rep::Grid { na: 1, nb: 64, va: (0, 0), vb: (0, 30) }, &identity, 1),
+            (Rep::Grid { na: 64, nb: 1, va: (0, 30), vb: (0, 0) }, &identity, 1),
+            (Rep::Grid { na: 64, nb: 1, va: (30, 0), vb: (0, 0) }, &rotated, 1),
+        ] {
+            let grid = GridRanks::new(&rep, transform, world).unwrap().unwrap();
+            let Rep::Grid { na, nb, va, vb } = rep else { unreachable!() };
+            let mut wide = Vec::new();
+            for j in 0..nb as i64 {
+                for i in 0..na as i64 {
+                    let (ox, oy) = (i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                    let ranks = grid.ranks(ox, oy).expect("an index");
+                    let t = if axis == 0 { ranks.0 } else { ranks.1 };
+                    wide.push(1.5 - t > 1.0);
+                }
+            }
+            let count = wide.iter().filter(|w| **w).count();
+            assert!((31..=33).contains(&count), "{:?}: {} of 64 wide", rep, count);
+            assert!(runs(&wide) <= 2, "{:?}: a run of {} alike", rep, runs(&wide));
+        }
+        // a 32 x 32 array of sub-pixel points keeps the covered share
+        let grid = GridRanks::new(&Rep::Grid { na: 32, nb: 32, va: (20, 0), vb: (0, 20) }, &identity, world).unwrap().unwrap();
+        for (w, h) in [(0.5, 0.5), (0.3, 0.7), (0.9, 0.2)] {
+            let mut kept = 0;
+            for j in 0..32 {
+                for i in 0..32 {
+                    let (tx, ty) = grid.ranks(i * 20, j * 20).unwrap();
+                    kept += (w > tx && h > ty) as usize;
+                }
+            }
+            let share = kept as f64 / 1024.0;
+            assert!((share - w * h).abs() < 0.03, "{} x {} px points kept {}", w, h, share);
+        }
+        // a skewed grid still finds its indices; a collinear 2-D one keeps the hash
+        let skew = GridRanks::new(&Rep::Grid { na: 5, nb: 7, va: (30, 10), vb: (-7, 40) }, &identity, world).unwrap().unwrap();
+        assert_eq!(skew.index(3 * 30 + 4 * -7, 3 * 10 + 4 * 40), Some((3, 4)));
+        let collinear = GridRanks::new(&Rep::Grid { na: 5, nb: 7, va: (30, 0), vb: (60, 0) }, &identity, world).unwrap().unwrap();
+        assert_eq!(collinear.ranks(90, 0), None);
     }
 
     #[test]

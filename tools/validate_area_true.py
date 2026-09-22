@@ -23,8 +23,11 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
     floor(w) + 1 px, the same width at every pan, and no gap closes;
   * every field of bars a pixel or wider - integer and non-integer pitches,
     neighbours of different widths - lights, averaged over the four pans, a
-    column share within 0.08 of its covered share;
-  * bars under a pixel: the lit share is within 0.5..1.6 of the covered share;
+    column share within 0.08 of its covered share; a field of one width and
+    gap is written as an ARRAY (an OASIS repetition), whose members spread
+    their extra pixels by index (GridRanks), and stays within 0.025;
+  * bars under a pixel (arrays too): the lit share is within 0.85..1.15 of the
+    covered share;
   * under the kill switch FLOE_RUST_AREA_TRUE=off the 1.2 and 1.5 px gaps
     close and every sub-pixel field lights every pixel, as before;
   * the same view twice gives the same pixels, and a view moved by a whole
@@ -255,7 +258,9 @@ def main():
                         widths_seen = widths
                 cover = covered(n)
                 mean = sum(shares) / len(shares)
-                assert abs(mean - cover) <= 0.08, '%s: column share %.3f over four pans for %.3f covered (%s)' \
+                # one (width, gap): an array, spread by index; else world-box hashes
+                tolerance = 0.025 if len(FIELDS[n]) == 1 else 0.08
+                assert abs(mean - cover) <= tolerance, '%s: column share %.3f over four pans for %.3f covered (%s)' \
                     % (name(n), mean, cover, ['%.3f' % v for v in shares])
                 print('area-true bars %-28s column share per pan %s, mean %.3f for %.3f covered%s'
                       % (name(n), ' '.join('%.3f' % v for v in shares), mean, cover,
@@ -268,7 +273,7 @@ def main():
                 cover = covered(n)
                 _, lit = columns(now, view, n)
                 _, before = columns(was, view, n)
-                assert 0.5 <= lit / cover <= 1.6, '%s: lit %.3f of covered %.3f' % (name(n), lit, cover)
+                assert 0.85 <= lit / cover <= 1.15, '%s: lit %.3f of covered %.3f' % (name(n), lit, cover)
                 assert before > 0.99, 'kill switch: %s lit %.3f, expected every pixel' % (name(n), before)
                 stray = lit_columns(now, view, n) - touched(view, n)
                 assert not stray, '%s: columns lit outside the bars' % name(n)
