@@ -2012,6 +2012,116 @@ fn write_occupancy(
 /// `floe-index occupancy <cache> [--layer L/D --level N --dump]`:
 /// header, identity against design.ovm, per-layer statuses and set
 /// counts; --dump prints one level as rows of 0/1 (gates)
+/// `floe-index bvh <outdir> --cell NAME`: a cell's child BVH as TSV -
+/// one `node` line per node (id, parent, depth, leaf, count, bbox um,
+/// max_dim um, max_min um, mask recorded) and one `place` line per leaf
+/// placement (node, placement index, child cell, x y um, rot, flip, kind,
+/// na, nb, va, vb um); a Pts placement adds one `chunk` line per 64-member
+/// chunk (offset box um, members) and one `pt` line per member (offset um).
+/// Diagnostic (CUT_DENSITY_DESIGN §10.2: what a per-node summary can and
+/// cannot represent).
+pub fn bvh_cmd(args: &[String]) {
+    let mut dir: Option<String> = None;
+    let mut cell_name: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--cell" => {
+                cell_name = args.get(i + 1).cloned();
+                i += 2;
+            }
+            a => {
+                if dir.is_none() {
+                    dir = Some(a.to_string());
+                }
+                i += 1;
+            }
+        }
+    }
+    let (Some(dir), Some(cell_name)) = (dir, cell_name) else {
+        eprintln!("usage: floe-index bvh <outdir> --cell NAME");
+        std::process::exit(2);
+    };
+    let v = floe_vfs::Vfs::open(&dir).unwrap_or_else(|e| {
+        eprintln!("open {}: {}", dir, e);
+        std::process::exit(1);
+    });
+    let Some(ci) = (0..v.ovm.n_cells).find(|&ci| v.ovm.cell(ci).name == cell_name) else {
+        eprintln!("no cell named {}", cell_name);
+        std::process::exit(1);
+    };
+    let unit = v.ovm.unit;
+    let um = |d: i64| d as f64 / unit;
+    let c = v.ovm.cell(ci);
+    println!("bvh\theader\tcell={}\tci={}\tnodes={}\tplacements={}\tunit={}", cell_name, ci, c.bvh_count, c.place_count, unit);
+    if c.bvh_count == 0 {
+        return;
+    }
+    let mut stack: Vec<(u32, u32, u32)> = vec![(c.bvh_start, u32::MAX, 0)];
+    while let Some((ni, parent, depth)) = stack.pop() {
+        let n = v.ovm.bvh(ni);
+        println!(
+            "node\t{}\t{}\t{}\t{}\t{}\t{:.4},{:.4},{:.4},{:.4}\t{:.4}\t{:.4}\t{}",
+            ni,
+            if parent == u32::MAX { -1 } else { parent as i64 },
+            depth,
+            n.leaf as u8,
+            n.count,
+            um(n.bbox.x0),
+            um(n.bbox.y0),
+            um(n.bbox.x1),
+            um(n.bbox.y1),
+            n.max_dim as f64 / unit,
+            n.max_min as f64 / unit,
+            (n.lmask_rec != floe_ovm::LMASK_UNKNOWN) as u8
+        );
+        if n.leaf {
+            for pli in n.first as u64..(n.first + n.count as u32) as u64 {
+                let h = v.ovm.place_head(pli);
+                println!(
+                    "place\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{:.4},{:.4}\t{:.4},{:.4}",
+                    ni,
+                    pli,
+                    crate::tsv_esc(&v.ovm.cell(h.child).name),
+                    um(h.x),
+                    um(h.y),
+                    h.rot,
+                    h.flip as u8,
+                    h.kind,
+                    h.na,
+                    h.nb,
+                    um(h.va.0),
+                    um(h.va.1),
+                    um(h.vb.0),
+                    um(h.vb.1)
+                );
+                // a Pts placement: its decode-time chunks (64 members
+                // each, offset boxes relative to x y) and every member's
+                // offset - the finest spatial subdivision the index
+                // already stores for a scattered placement
+                if let Some(pr) = v.ovm.pts_ref(pli) {
+                    for k in 0..pr.n_chunks {
+                        let cb = pr.chunk_bbox(k);
+                        let (lo, hi) = pr.chunk_range(k);
+                        println!(
+                            "chunk\t{}\t{}\t{:.4},{:.4},{:.4},{:.4}\t{}",
+                            pli, k, um(cb.x0), um(cb.y0), um(cb.x1), um(cb.y1), hi - lo
+                        );
+                    }
+                    for slot in 0..pr.count {
+                        let (dx, dy) = pr.pt(slot);
+                        println!("pt\t{}\t{}\t{:.4}\t{:.4}", pli, slot, um(dx), um(dy));
+                    }
+                }
+            }
+        } else {
+            for k in (n.first..n.first + n.count as u32).rev() {
+                stack.push((k, ni, depth + 1));
+            }
+        }
+    }
+}
+
 pub fn occupancy_cmd(args: &[String]) {
     use floe_vfs::occupancy as occ;
     let mut dir: Option<String> = None;
@@ -7490,6 +7600,77 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
             _ => {}
         }
     }
+    // CUT_DENSITY_DESIGN §10.2 check 2: a cut child-BVH node without a
+    // layer mask would take its parent's summary value. Proxy for the
+    // value: the subtree's placed cell boxes' area over the node's box
+    // (boxes, not shapes; overlap ignored; all layers) - compared node vs
+    // parent, weighted by the node's screen area, over the cut nodes
+    // without a mask, distinct per (cell, node)
+    let mut fallback_seen: HashSet<(u32, u64)> = HashSet::new();
+    let mut fallback: (u64, f64, f64, f64, f64, f64) = (0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut area_memo: HashMap<u32, f64> = HashMap::new();
+    let mut parents: HashMap<u32, HashMap<u32, u32>> = HashMap::new();
+    fn subtree_box_area(v: &floe_vfs::Vfs, ni: u32, memo: &mut HashMap<u32, f64>) -> f64 {
+        if let Some(&a) = memo.get(&ni) {
+            return a;
+        }
+        let n = v.ovm.bvh(ni);
+        let mut a = 0.0;
+        if n.leaf {
+            for pli in n.first as u64..(n.first + n.count as u32) as u64 {
+                let h = v.ovm.place_head(pli);
+                let rb = v.ovm.cell_rbbox(h.child);
+                let m = place_members(v, pli) as f64;
+                a += (rb.x1 - rb.x0).max(0) as f64 * (rb.y1 - rb.y0).max(0) as f64 * m;
+            }
+        } else {
+            for k in n.first..n.first + n.count as u32 {
+                a += subtree_box_area(v, k, memo);
+            }
+        }
+        memo.insert(ni, a);
+        a
+    }
+    let box_value = |v: &floe_vfs::Vfs, ni: u32, memo: &mut HashMap<u32, f64>| -> f64 {
+        let n = v.ovm.bvh(ni);
+        let area = (n.bbox.x1 - n.bbox.x0).max(0) as f64 * (n.bbox.y1 - n.bbox.y0).max(0) as f64;
+        if area <= 0.0 { 0.0 } else { (subtree_box_area(v, ni, memo) / area).min(1.0) }
+    };
+    for r in &plan.explain {
+        if r.kind != "cbvh" || r.verdict != "prune_size" || !fallback_seen.insert((r.cell, r.id)) {
+            continue;
+        }
+        let ni = r.id as u32;
+        if v.ovm.bvh(ni).lmask_rec != floe_ovm::LMASK_UNKNOWN {
+            continue;
+        }
+        let cell = v.ovm.cell(r.cell);
+        let map = parents.entry(r.cell).or_insert_with(|| {
+            let mut m = HashMap::new();
+            let mut stack = vec![cell.bvh_start];
+            while let Some(k) = stack.pop() {
+                let n = v.ovm.bvh(k);
+                if !n.leaf {
+                    for child in n.first..n.first + n.count as u32 {
+                        m.insert(child, k);
+                        stack.push(child);
+                    }
+                }
+            }
+            m
+        });
+        let Some(&parent) = map.get(&ni) else { continue };
+        let vn = box_value(v, ni, &mut area_memo);
+        let vp = box_value(v, parent, &mut area_memo);
+        let w = ((r.bbox.x1 - r.bbox.x0) as f64 * px).max(0.0) * ((r.bbox.y1 - r.bbox.y0) as f64 * px).max(0.0);
+        let d = (vn - vp).abs();
+        fallback.0 += 1;
+        fallback.1 += w;
+        fallback.2 += w * d;
+        fallback.3 += if d > 0.1 { w } else { 0.0 };
+        fallback.4 += if d > 0.25 { w } else { 0.0 };
+        fallback.5 += w * vn;
+    }
     for (wi, c) in plan.wcells.iter().enumerate() {
         if own[wi].pages + own[wi].pbvh_pages > 0 && c.pages.is_empty() && c.insts.is_empty() {
             own[wi].allcut_cells = 1;
@@ -7733,6 +7914,7 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
          distinct_cut_page_bytes={}\tdistinct_cut_page_records={}\t\
          cbvh_pages={}\tcbvh_page_bytes={}\tcbvh_page_usize={}\tcbvh_page_records={}\t\
          kept_pages={}\tkept_sub_cut_records={}\t\
+         fallback_nodes={}\tfallback_px={:.0}\tfallback_mean_abs={:.4}\tfallback_over_10={:.4}\tfallback_over_25={:.4}\tfallback_mean_value={:.4}\t\
          exact_csize={}\texact_usize={}\texact_records={}\t\
          meta={}\tmeta_pages={}\tmeta_s={:.1}\tmeta_peak_rss={}\tmeta_rect_one={}\tmeta_rect_grid={}\t\
          meta_rect_pts={}\tmeta_rect_pts_points={}\tmeta_poly={}\tmeta_path={}\tmeta_vertices={}\t\
@@ -7748,6 +7930,11 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
         distinct_cut_bytes, distinct_cut_records,
         total.cbvh_pages, total.cbvh_page_bytes, total.cbvh_page_usize, total.cbvh_page_records,
         total.kept_pages, total.kept_sub_cut_records,
+        fallback.0, fallback.1,
+        if fallback.1 > 0.0 { fallback.2 / fallback.1 } else { 0.0 },
+        if fallback.1 > 0.0 { fallback.3 / fallback.1 } else { 0.0 },
+        if fallback.1 > 0.0 { fallback.4 / fallback.1 } else { 0.0 },
+        if fallback.1 > 0.0 { fallback.5 / fallback.1 } else { 0.0 },
         exact_csize, exact_usize, exact_records,
         meta as u8, census.pages, census_s, proc_status_bytes("VmHWM:").unwrap_or(0),
         census.rect_one, census.rect_grid, census.rect_pts, census.rect_pts_points, census.poly, census.path,

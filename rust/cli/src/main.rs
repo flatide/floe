@@ -102,6 +102,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "occupancy" {
         return vfs::occupancy_cmd(&args[2..]);
     }
+    if args.len() >= 3 && args[1] == "bvh" {
+        return vfs::bvh_cmd(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "vfsd" {
         return vfs::vfsd_cmd(&args[2..]);
     }
@@ -131,6 +134,7 @@ fn main() {
              [--density-probe 1] [--density-storage 1] [--selection-meta 1]\n       \
              floe-index occupancy <outdir> [--layer L/D] [--level N] \
              [--dump]\n       \
+             floe-index bvh <outdir> --cell NAME  (TSV dump of a cell's child BVH: nodes and leaf placements)\n       \
              floe-index drc <results.db> [out.tray] \
              [--pack] [--jobs N]"
         );

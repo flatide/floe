@@ -74,6 +74,7 @@ def main(argv=None):
             'cut_page_bytes', 'cut_page_usize', 'cut_page_records',
             'distinct_cut_page_bytes', 'distinct_cut_page_records',
             'kept_pages', 'kept_sub_cut_records',
+            'fallback_nodes', 'fallback_px', 'fallback_mean_abs', 'fallback_over_10', 'fallback_over_25', 'fallback_mean_value',
             'cbvh_pages', 'cbvh_page_bytes', 'cbvh_page_usize', 'cbvh_page_records']
     once = None
     rows = []
@@ -142,6 +143,14 @@ def main(argv=None):
                  k(once, 'meta_path'), k(once, 'meta_vertices'), k(once, 'meta_other_rep_points'), mb(once, 'meta_bytes'),
                  100 * int(once['meta_bytes']) / max(1, int(once['exact_csize'])), mb(once, 'exact_csize'),
                  100 * int(once['meta_bytes']) / max(1, int(once['exact_usize'])), mb(once, 'exact_usize')))
+    # CUT_DENSITY_DESIGN §10.2 check 2: cut child-BVH nodes without a layer
+    # mask, and what taking the parent's value would cost (box-area proxy)
+    print('\nunmasked cut nodes (parent-value fallback, box-area proxy, weighted by screen px): '
+          'nodes, px, mean |node - parent|, share of px with |d| > 0.1, > 0.25, mean node value')
+    for spec, z, row in rows:
+        print('%-6s x%-6g %s nodes, %s px, mean abs %s, over 0.1: %s, over 0.25: %s, mean value %s'
+              % (spec, z, k(row, 'fallback_nodes'), k(row, 'fallback_px'), row['fallback_mean_abs'],
+                 row['fallback_over_10'], row['fallback_over_25'], row['fallback_mean_value']))
     print('== type this 2 == (zoom: cut page MB stored, records, once-each MB, records; below-cut-node pages, '
           'MB stored, records; kept pages, their records under the cut; m: meta pages, s, MB, rect one/grid/pts, poly+path)')
     for spec, z, row in rows:
@@ -149,6 +158,10 @@ def main(argv=None):
                                                     mb(row, 'distinct_cut_page_bytes'), k(row, 'distinct_cut_page_records'),
                                                     k(row, 'cbvh_pages'), mb(row, 'cbvh_page_bytes'), k(row, 'cbvh_page_records'),
                                                     k(row, 'kept_pages'), k(row, 'kept_sub_cut_records')))
+    print('== type this 3 == (zoom: unmasked cut nodes, px, mean abs, over 0.1, over 0.25)')
+    for spec, z, row in rows:
+        print('%s %g %s %s %s %s %s' % (spec[0], z, k(row, 'fallback_nodes'), k(row, 'fallback_px'), row['fallback_mean_abs'],
+                                        row['fallback_over_10'], row['fallback_over_25']))
     if int(once.get('meta', '0')):
         print('m %s %s %s %s/%s/%s %s' % (k(once, 'meta_pages'), once['meta_s'], mb(once, 'meta_bytes'),
                                           k(once, 'meta_rect_one'), k(once, 'meta_rect_grid'), k(once, 'meta_rect_pts'),
