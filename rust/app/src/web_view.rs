@@ -25,7 +25,7 @@ use std::{
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -625,41 +625,70 @@ fn readonly_selection(
     floe_app_core::drc::select_review(&path, reviewer, stop)
 }
 pub fn run(c: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
-    run_hosted(c, cancelled, None)
+    run_hosted(c, cancelled, None, None)
 }
 type EmbeddedHost = Box<dyn FnOnce(crate::embedded::Ready) -> Result<()> + Send>;
 
-pub(crate) fn parse_embedded(args: &[String]) -> Result<Command> {
+pub(crate) fn parse_embedded(args: &[String], independent: bool) -> Result<Command> {
     let mut c = parse(args)?;
     if c.help || c.no_open || c.firefox.is_some() || c.session_file.is_some() {
         return Err(Error::input(
             "embedded host accepts view options only; browser/session-file options and CLI help are unsupported",
         ));
     }
-    // Do not forward into a separately running browser workspace. Desktop
-    // single-instance ownership is a distinct, later acceptance item.
-    c.independent = true;
+    c.independent |= independent;
     c.no_open = true;
     Ok(c)
+}
+pub(crate) struct EmbeddedLaunch {
+    owner: Option<floe_app_core::instance::Owner>,
+    present: Arc<AtomicBool>,
+}
+pub(crate) fn claim_electron(
+    c: &Command,
+    stop: &AtomicUsize,
+    present: Arc<AtomicBool>,
+) -> Result<Option<EmbeddedLaunch>> {
+    let owner = if c.independent {
+        None
+    } else {
+        match handoff::claim("floe2-electron", "FLOE_ELECTRON_INSTANCE_DIR")? {
+            floe_app_core::instance::Claim::Owner(owner) => Some(owner),
+            floe_app_core::instance::Claim::Running(endpoint) => {
+                handoff::forward_quiet(&endpoint, c, stop)?;
+                return Ok(None);
+            }
+        }
+    };
+    Ok(Some(EmbeddedLaunch { owner, present }))
 }
 pub(crate) fn run_embedded(
     c: Command,
     cancelled: &Arc<AtomicUsize>,
     ready: EmbeddedHost,
+    launch: Option<EmbeddedLaunch>,
 ) -> Result<i32> {
-    run_hosted(c, cancelled, Some(ready))
+    run_hosted(c, cancelled, Some(ready), launch)
 }
-fn run_hosted(c: Command, cancelled: &Arc<AtomicUsize>, host: Option<EmbeddedHost>) -> Result<i32> {
+fn run_hosted(
+    c: Command,
+    cancelled: &Arc<AtomicUsize>,
+    host: Option<EmbeddedHost>,
+    launch: Option<EmbeddedLaunch>,
+) -> Result<i32> {
     if c.help {
         println!("{HELP}");
         return Ok(0);
     }
     // Claim/forward before Firefox or native discovery. A stale/busy owner is
     // an explicit error, never permission to create a second default instance.
-    let owner = if c.independent {
+    let present = launch.as_ref().map(|l| Arc::clone(&l.present));
+    let owner = if let Some(launch) = launch {
+        launch.owner
+    } else if c.independent {
         None
     } else {
-        match handoff::claim()? {
+        match handoff::claim("floe2-web", "FLOE_WEB_INSTANCE_DIR")? {
             floe_app_core::instance::Claim::Owner(owner) => Some(owner),
             floe_app_core::instance::Claim::Running(endpoint) => {
                 return handoff::forward(&endpoint, &c, cancelled)
@@ -940,7 +969,7 @@ fn run_hosted(c: Command, cancelled: &Arc<AtomicUsize>, host: Option<EmbeddedHos
     // Verify the combined reservation before advertising a usable workspace.
     drop(resources.render(&options)?);
     let mut instance = owner
-        .map(|owner| handoff::Runtime::start(owner, Arc::clone(&service), launches))
+        .map(|owner| handoff::Runtime::start(owner, Arc::clone(&service), launches, present))
         .transpose()?;
     let mut browser = firefox
         .map(|path| floe_app_core::browser::Browser::start(&path, &session.directory, &url))
@@ -1000,6 +1029,23 @@ fn run_hosted(c: Command, cancelled: &Arc<AtomicUsize>, host: Option<EmbeddedHos
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn electron_uses_parser_instance_policy_while_legacy_host_stays_independent() {
+        for (args, independent) in [
+            (vec!["view"], false),
+            (vec!["view", "--root", "/tmp"], false),
+            (vec!["view", "--multi"], true),
+            (vec!["view", "--jobs", "1"], true),
+            (vec!["view", "--refinement", "off"], true),
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            let native = parse_embedded(&args, false).unwrap();
+            assert_eq!(native.independent, independent);
+            assert!(native.no_open);
+            assert!(parse_embedded(&args, true).unwrap().independent);
+        }
+    }
     #[test]
     fn embedded_private_directory_does_not_write_a_credential() {
         use std::os::unix::fs::PermissionsExt;

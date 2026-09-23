@@ -35,6 +35,7 @@ const recoverySmoke = recoveryMode !== null;
 const smoke = emptySmoke || signalSmoke || layoutSmoke || paritySmoke || clipboardSmoke || downloadSmoke || clipSmoke || recoverySmoke;
 let profile, root, window, service, close, origin = null, panel = false, stopping = false;
 let recovery, viewFailure = false;
+let ownerStarted = false;
 let clipboardAccess;
 let notices;
 let messageAbort;
@@ -54,6 +55,7 @@ const validRuntime = process.versions.electron === runtime.version && ['darwin',
   !['no-sandbox', 'disable-web-security', 'remote-debugging-port', 'remote-debugging-pipe'].some(s => app.commandLine.hasSwitch(s));
 
 function reveal() {
+  if (!ownerStarted && !failure) return;
   if (!window || window.isDestroyed()) return;
   if (window.isMinimized()) window.restore();
   window.show(); window.focus();
@@ -111,6 +113,7 @@ function fail() {
   clipboardAccess?.end();
   if (recovery) recovery.end();
   status('The local service or view failed. No operation was replayed. Close this window to end the session. Check the matching Rust binaries and view options.');
+  reveal();
   if (smoke) cancelService();
 }
 function viewGone() {
@@ -246,7 +249,9 @@ app.whenReady().then(async () => {
     const entry = contents && downloadWindows.get(contents.id);
     if (entry) setImmediate(() => { if (!entry.window.isDestroyed()) entry.window.destroy(); });
   });
-  window = new BrowserWindow({ width: 1100, height: 850, show: true,
+  // Remain invisible until Rust has claimed ownership. A forwarded invocation
+  // never flashes a second window or creates a download/auth service.
+  window = new BrowserWindow({ width: 1100, height: 850, show: false,
     title: 'floe2 · Electron comparison', backgroundColor: '#171b23', webPreferences: P.webPreferences(partition) });
   window.on('close', event => { if (!ended) { event.preventDefault(); requestClose(); } });
   const web = window.webContents;
@@ -335,6 +340,7 @@ app.whenReady().then(async () => {
     '--jobs', '4', '--raster-jobs', '4', '--refinement', 'off'] : emptySmoke || signalSmoke || downloadSmoke ? [] : (args[0] === 'view' ? args.slice(1) : args);
   if (clipSmoke) viewArgs.push('--budget-mb', '256'); // leave managed capacity for explicit exact export
   if (paritySmoke) viewArgs.push('--raw');
+  if (smoke) viewArgs.push('--multi'); // never attach synthetic QA to a user's owner
   if (emptySmoke || signalSmoke || downloadSmoke) {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-smoke-'));
     fs.chmodSync(root, 0o700); viewArgs.push('--root', root);
@@ -344,7 +350,7 @@ app.whenReady().then(async () => {
   const downloadBinary = Object.hasOwn(process.env, 'FLOE_ELECTRON_DOWNLOAD_BIN') ? process.env.FLOE_ELECTRON_DOWNLOAD_BIN : path.join(path.dirname(binary), 'floe-electron-download');
   if (!downloadBinary) throw new Error('Invalid download binary');
   if (downloadSmoke || clipSmoke) { downloadQaRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-export-qa-')); fs.chmodSync(downloadQaRoot, 0o700); }
-  downloads = new Downloads({ binary: downloadBinary, directory: profile, origin: () => origin,
+  const startDownloads = () => new Downloads({ binary: downloadBinary, directory: profile, origin: () => origin,
     owns: (contents, url) => !recovery.busy && !viewFailure && !!contents && (contents.id === web.id || downloadWindows.get(contents.id)?.url === url),
     choose: async name => {
       if (downloadSmoke) return downloadQaChoice++ === 0 ? null : path.join(downloadQaRoot, 'synthetic.json');
@@ -378,6 +384,15 @@ app.whenReady().then(async () => {
   service = new ServiceClient(binary, viewArgs, env);
   service.on('failure', fail);
   service.on('ended', result => finish(result.code));
+  service.on('starting', () => {
+    if (stopping || ended) return;
+    ownerStarted = true;
+    try { downloads = startDownloads(); reveal(); }
+    catch (_) { fail(); cancelService(); }
+  });
+  // No view mutation or confirmation here: the ordinary launch proposal
+  // consumer waits for pending dialogs/drafts before opening a new source.
+  service.on('present', () => { if (!stopping && !ended) reveal(); });
   service.on('directory', async () => {
     panel = true;
     try {

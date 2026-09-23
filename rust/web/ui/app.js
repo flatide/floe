@@ -1169,7 +1169,13 @@
         ready:function(){return !!epoch&&live()&&!inflight&&!accepted&&queue.length===0&&!(gesture&&gesture.active())&&!document.hidden;},
         navigate:nav,focus:function(){viewport.focus();}});
     function launchReady() {
-        return !indexBlocked() && !stopped && !document.hidden && (!picker || !picker.blocked()) && !startupWaiting && !submitting && !ownerBusy && !inflight && !accepted && !queue.length &&
+        // A trusted CLI adds a proposal, not consent to discard current edits.
+        // Keep review/approval panels intact even after their editor lost focus.
+        const editing = gotoDirty || ['browse-dialog','index-open-dialog','about-dialog','session-exit-dialog','share-dialog',
+            'notes-editor','notes-review','notes-uncertain','notes-cancel',
+            'waives-editor','waives-review','waives-uncertain','waives-cancel',
+            'default-review','default-uncertain','default-cancel'].some(function(id){return !el(id).hidden;});
+        return !editing && !indexBlocked() && !stopped && !document.hidden && (!picker || !picker.blocked()) && !startupWaiting && !submitting && !ownerBusy && !inflight && !accepted && !queue.length &&
             !(gesture && gesture.active()) && (!live() || ['idle','rendering'].includes(state.status));
     }
     launcher=window.FloeLauncher.bind({el:el,http:http,protocol:P,ready:launchReady,changed:controls,

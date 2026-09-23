@@ -7,9 +7,13 @@ const origin = 'http://127.0.0.1:32123';
 const token = 'a'.repeat(64); // synthetic, never a live credential
 const ready = { v: 1, event: 'ready', origin, url: origin + '/#bootstrap=' + token };
 
-test('strict private ready/directory messages', () => {
+test('strict private owner/forward/ready/present messages', () => {
   assert.deepEqual(decodeFrame(encodeFrame(ready)), ready);
   assert.deepEqual(decodeFrame(encodeFrame({ v: 1, event: 'directory' })), { v: 1, event: 'directory' });
+  for (const event of ['starting', 'forwarded', 'present']) {
+    assert.deepEqual(decodeFrame(encodeFrame({ v: 1, event })), { v: 1, event });
+    assert.throws(() => decodeFrame(encodeFrame({ v: 1, event, url: ready.url })), /Invalid service frame/);
+  }
   for (const value of [null, [], {}, { ...ready, v: 2 }, { ...ready, extra: true },
     { v: 1, event: 'directory', extra: true }, { ...ready, url: 'file:///tmp/x' },
     { ...ready, origin: 'http://127.0.0.1:65536' },
@@ -31,14 +35,14 @@ function client() {
   const value = Object.create(ServiceClient.prototype);
   EventEmitter.call(value);
   Object.assign(value, { phase: 'starting', buffer: Buffer.alloc(0), closing: false, failed: false });
-  const seen = { ready: 0, directory: 0, failure: 0, closed: 0, writes: [] };
+  const seen = { starting: 0, forwarded: 0, present: 0, ready: 0, directory: 0, failure: 0, closed: 0, writes: [] };
   value.child = { stdin: { end() { seen.closed++; }, write(bytes) { seen.writes.push(bytes); } } };
-  for (const name of ['ready', 'directory', 'failure']) value.on(name, () => seen[name]++);
+  for (const name of ['starting', 'forwarded', 'present', 'ready', 'directory', 'failure']) value.on(name, () => seen[name]++);
   return { value, seen };
 }
 
 test('every ready split boundary, duplicate rejection and late-frame discard', () => {
-  const wire = encodeFrame(ready);
+  const wire = Buffer.concat([encodeFrame({ v: 1, event: 'starting' }), encodeFrame(ready)]);
   for (let at = 0; at <= wire.length; at++) {
     const { value, seen } = client();
     value.receive(wire.subarray(0, at));
@@ -55,6 +59,7 @@ test('every ready split boundary, duplicate rejection and late-frame discard', (
 
 test('folder choice is explicit and one-use; malformed/oversized streams close', () => {
   const { value, seen } = client();
+  value.receive(encodeFrame({ v: 1, event: 'starting' }));
   value.receive(encodeFrame({ v: 1, event: 'directory' }));
   assert.equal(seen.directory, 1);
   assert.throws(() => value.chooseDirectory('relative'), /Invalid folder/);
@@ -69,5 +74,28 @@ test('folder choice is explicit and one-use; malformed/oversized streams close',
     assert.equal(result.failure, 1);
     assert.equal(result.closed, 1);
     assert.equal(result.ready, 0);
+  }
+});
+
+test('forwarded is terminal without credentials; present requires a ready owner', () => {
+  for (const events of [
+    ['forwarded'], ['starting', 'ready', 'present', 'present'],
+  ]) {
+    const { value, seen } = client();
+    for (const event of events) value.receive(encodeFrame(event === 'ready' ? ready : { v: 1, event }));
+    assert.equal(seen.failure, 0);
+    assert.equal(seen.forwarded, events[0] === 'forwarded' ? 1 : 0);
+    assert.equal(seen.present, events[0] === 'forwarded' ? 0 : 2);
+  }
+  for (const events of [
+    ['ready'], ['directory'], ['present'], ['starting', 'starting'],
+    ['starting', 'forwarded'], ['forwarded', 'starting'], ['forwarded', 'ready'],
+    ['forwarded', 'directory'], ['forwarded', 'forwarded'], ['forwarded', 'present'],
+    ['starting', 'present'], ['starting', 'directory', 'present'],
+  ]) {
+    const { value, seen } = client();
+    for (const event of events) value.receive(encodeFrame(event === 'ready' ? ready : { v: 1, event }));
+    assert.equal(seen.failure, 1, events.join(','));
+    assert.equal(seen.closed, 1);
   }
 });

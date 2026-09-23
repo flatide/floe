@@ -12,11 +12,10 @@ use std::thread::{self, JoinHandle};
 fn build() -> String {
     format!("{}-{BUNDLE}", env!("CARGO_PKG_VERSION"))
 }
-pub(super) fn claim() -> Result<Claim> {
+pub(super) fn claim(product: &str, env: &str) -> Result<Claim> {
     let display = std::env::var("DISPLAY").ok();
-    let key = Key::new("floe2-web", display.as_deref())?;
-    let base = std::env::var_os("FLOE_WEB_INSTANCE_DIR")
-        .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    let key = Key::new(product, display.as_deref())?;
+    let base = std::env::var_os(env).map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
     Endpoint::in_directory(&base, &key)?.claim(&build())
 }
 fn absolute(path: &std::path::Path) -> Result<PathBuf> {
@@ -114,6 +113,12 @@ fn decode(value: &Value) -> Result<(Command, Option<String>)> {
     Ok((c, policy))
 }
 pub(super) fn forward(endpoint: &Endpoint, c: &Command, stop: &AtomicUsize) -> Result<i32> {
+    forward_quiet(endpoint, c, stop)?;
+    println!("Request queued in the existing floe2-web workspace; check that window for opening/level selection.");
+    Ok(0)
+}
+// The Electron private stdout pipe must contain framed events only.
+pub(super) fn forward_quiet(endpoint: &Endpoint, c: &Command, stop: &AtomicUsize) -> Result<()> {
     let connection = endpoint.connect(&build(), stop)?;
     let intent = connection.intent(message(c)?)?;
     let outcome = match connection.submit(&intent, stop) {
@@ -126,10 +131,7 @@ pub(super) fn forward(endpoint: &Endpoint, c: &Command, stop: &AtomicUsize) -> R
         Err(e) => return Err(e),
     };
     match outcome {
-        Outcome::Handled { reply } if reply["phase"] == "queued" => {
-            println!("Request queued in the existing floe2-web workspace; check that window for opening/level selection.");
-            Ok(0)
-        }
+        Outcome::Handled { reply } if reply["phase"] == "queued" => Ok(()),
         Outcome::Failed { code } => Err(Error::new(
             ErrorKind::Busy,
             format!("existing workspace refused launch: {code:?}"),
@@ -213,6 +215,7 @@ impl Runtime {
         owner: Owner,
         service: Arc<Service>,
         launches: Arc<Launches>,
+        present: Option<Arc<AtomicBool>>,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicUsize::new(0));
         let (tx, rx): (SyncSender<Pending>, _) = mpsc::sync_channel(1);
@@ -255,6 +258,8 @@ impl Runtime {
                             .is_err()
                         {
                             launches.failed(&id, ErrorKind::Busy);
+                        } else if let Some(present) = &present {
+                            present.store(true, Ordering::Release);
                         }
                         Ok(json!({"phase":"queued","id":id}))
                     })

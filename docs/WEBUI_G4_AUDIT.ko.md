@@ -1,5 +1,10 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-23 후속: [Electron 창 재사용](WEBUI_NATIVE_INSTANCE.ko.md) 구현과 실제
+macOS 합성 두 프로세스 검사를 통과했다. 창 복원·새 파일 등록·동일 worker 유지,
+pending 모달 보존·secondary의 표시/auth 없음이 범위다. NFS 게시 복구·물리
+입력/G1·RHEL/ETX·배포 수용은 남고 G4 전체 완료로 세지 않는다.
+
 2026-09-23 범위 변경: 사용자 결정으로 네이티브 제품 호스트는 Electron 하나다.
 WKWebView는 [동결](../desktop/README.md)했고 아래 WK 구현/검사는 과거 근거로
 보존한다. 이후 WK 전용 장애/입력/배포·양 호스트 동시 검증을 요구하지 않는다.

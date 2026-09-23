@@ -11,6 +11,10 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 const MAX_LINE: usize = 65_536;
@@ -117,7 +121,14 @@ fn run() -> Result<i32> {
     // SAFETY: a new uniquely owned CLOEXEC duplicate of the validated stdin.
     let mut input = unsafe { std::fs::File::from_raw_fd(fd) };
     let request = read_json(&mut input)?;
-    let mut session = Session::parse(&args(&request)?)?;
+    let present = Arc::new(AtomicBool::new(false));
+    let Some(mut session) =
+        Session::electron(&args(&request)?, &AtomicUsize::new(0), Arc::clone(&present))?
+    else {
+        send(json!({"v":1,"event":"forwarded"}))?;
+        return Ok(0);
+    };
+    send(json!({"v":1,"event":"starting"}))?;
     if session.needs_initial_directory() {
         send(json!({"v":1,"event":"directory"}))?;
         let choice = read_json(&mut input)?;
@@ -127,6 +138,7 @@ fn run() -> Result<i32> {
     let mut closing = false;
     let mut bad_control = false;
     let mut command = Vec::new();
+    let mut ready_sent = false;
     while !service.finished() {
         if !closing {
             if let Ok(ready) = service.ready.try_recv() {
@@ -134,6 +146,10 @@ fn run() -> Result<i32> {
                 // Deliberately serialize here only: private pipe, never argv,
                 // diagnostic stderr, a credential file, or a public listener.
                 send(json!({"v":1,"event":"ready","origin":ready.origin,"url":ready.url}))?;
+                ready_sent = true;
+            }
+            if ready_sent && present.swap(false, Ordering::AcqRel) {
+                send(json!({"v":1,"event":"present"}))?;
             }
             let mut poll = libc::pollfd {
                 fd: 0,

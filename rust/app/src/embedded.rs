@@ -2,7 +2,10 @@
 use crate::web_view;
 use floe_app_core::{Error, Result};
 use std::path::Path;
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize},
+    Arc,
+};
 
 /// Package diagnostic only: validate every original notice chunk against the
 /// identity compiled into this host. No source, worker, listener or UI starts.
@@ -32,15 +35,36 @@ pub struct Ready {
 
 pub struct Session {
     command: web_view::Command,
+    launch: Option<web_view::EmbeddedLaunch>,
 }
 impl Session {
-    /// View arguments only; every desktop invocation owns a separate session.
+    /// Legacy independent host boundary (including the frozen WK host).
     pub fn parse(args: &[String]) -> Result<Self> {
         let mut words = vec!["view".to_owned()];
         words.extend_from_slice(args);
         Ok(Self {
-            command: web_view::parse_embedded(&words)?,
+            command: web_view::parse_embedded(&words, true)?,
+            launch: None,
         })
+    }
+
+    /// Claim the Electron namespace before folder choice or service startup.
+    /// None means an existing owner accepted the request, not that it rendered.
+    /// The only owner notification is a coalesced present bit, never a URL.
+    pub fn electron(
+        args: &[String],
+        cancelled: &AtomicUsize,
+        present: Arc<AtomicBool>,
+    ) -> Result<Option<Self>> {
+        let mut words = vec!["view".to_owned()];
+        words.extend_from_slice(args);
+        let command = web_view::parse_embedded(&words, false)?;
+        Ok(
+            web_view::claim_electron(&command, cancelled, present)?.map(|launch| Self {
+                command,
+                launch: Some(launch),
+            }),
+        )
     }
 
     /// A native launcher may ask for a folder before starting an empty session.
@@ -62,7 +86,7 @@ impl Session {
         cancelled: &Arc<AtomicUsize>,
         ready: impl FnOnce(Ready) -> Result<()> + Send + 'static,
     ) -> Result<i32> {
-        web_view::run_embedded(self.command, cancelled, Box::new(ready))
+        web_view::run_embedded(self.command, cancelled, Box::new(ready), self.launch)
     }
 }
 

@@ -7,6 +7,12 @@ WKWebView는 `617909e` 기준으로 [동결](../desktop/README.md)하며 코드�
 유지한다. 아래 비교판 구현 이력과 현재 바이너리의 comparison 표기는 보존하며,
 호스트 선택을 RHEL 8.6/8.10 + ETX/X11·메모리/입력 지연·정식 배포 수용으로 세지 않는다.
 
+2026-09-23: shell0.1.3에서 [기본 창 재사용](WEBUI_NATIVE_INSTANCE.ko.md)을 구현했다.
+같은 사용자·DISPLAY의 기본 Electron 창에 CLI 파일/goto를 전달하고 숨김/최소화를
+복원한다. `--multi`와 명시 process/DRC 옵션은 독립 실행이다. 실제 두 Electron
+프로세스·합성 레이아웃 검사와 private pipe8개를 통과했으며 기존 승인/편집은
+자동 확정하지 않는다. WK 호스트는 변경하지 않았다.
+
 ## 범위와 단계
 
 | 단계 | 산출물 | 완료 근거/잔여 |
@@ -32,9 +38,11 @@ Rust/macOS manifest·lock/vendor 원본은 바꾸지 않는다. `desktop/src/ser
 1. sidecar의 stdin/stdout은 상속한 FIFO 또는 Unix socket이어야 한다. 터미널,
    일반 파일, TCP socket을 거부한다. 이는 직접 리다이렉션 방어이며 신뢰된 부모가
    받은 값을 고의로 저장하는 것까지 막는 보안 경계라고 주장하지 않는다.
-2. 부모는 `{"v":1,"args":[...]}` 한 줄을 보낸다. 인자는 Rust `Session::parse`가
+2. 부모는 `{"v":1,"args":[...]}` 한 줄을 보낸다. 인자는 Rust `Session::electron`이
    해석한다. 프레임64KiB, 인자256개/각8KiB 상한; UTF-8/공백/개행은 JSON으로 보존한다.
-3. 소스/root가 없으면 `directory` 이벤트 뒤 명시 폴더 선택만 받는다. 기존 Rust
+3. owner는 `starting` 이벤트 뒤 시작한다. 기존 owner로 전달됐으면 `forwarded` 후
+   종료하고 새 인증/폴더 선택/download helper를 만들지 않는다. 새 owner에
+   소스/root가 없으면 `directory` 이벤트 뒤 명시 폴더 선택만 받는다. 기존 Rust
    initial-directory 정책을 사용하며 임의 cwd/home를 자동 browse root로 추가하지 않는다.
 4. ready의 origin/일회용 URL은 원래 Rust 검증을 거쳐 전용 stdout으로만 전달한다.
    인증 파일·argv·stderr 로그에는 쓰지 않는다. Node도 malformed 프레임/자식 stderr를
@@ -104,6 +112,10 @@ resources, LICENSE/고지 포함)을 유지한다. 개발 스크립트는 다운
 export FLOE_ELECTRON_BIN="/absolute/path/Electron.app/Contents/MacOS/Electron"
 # Linux 후보: 같은 변수에 검증·압축해제한 런타임의 /absolute/path/electron 지정
 sh tools/run_electron_dev.sh view "/absolute/path/design.oas"
+# 같은 창에서 새 위치. jobs 등 process 옵션을 추가하면 독립 실행이다.
+sh tools/run_electron_dev.sh view "/absolute/path/design.oas" --goto 200,200,300
+# 기존 기본 창을 건드리지 않는 독립 실행
+sh tools/run_electron_dev.sh view "/absolute/path/design.oas" --multi
 # 소스 생략 시 native 폴더 선택; 임의 cwd/home 자동 허용 없음
 sh tools/run_electron_dev.sh
 ```

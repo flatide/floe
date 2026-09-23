@@ -1,6 +1,6 @@
 {
   "name": "floe2-electron-comparison",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "main": "main.cjs",
   "description": "Experimental Electron shell; Rust retains service and file authority",

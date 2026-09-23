@@ -113,6 +113,10 @@ for (const id of [...fs.readFileSync(__dirname+'/index.html','utf8').matchAll(/\
 }
 nodes.get('levels-all').checked=true;
 nodes.get('index-open').hidden=true;
+// These authoring/approval panels are hidden in the real initial HTML.
+for(const id of ['browse-dialog','index-open-dialog','about-dialog','session-exit-dialog','share-dialog',
+    'notes-editor','notes-review','notes-uncertain','notes-cancel','waives-editor','waives-review','waives-uncertain','waives-cancel',
+    'default-review','default-uncertain','default-cancel']) nodes.get(id).hidden=true;
 const node = id=>nodes.get(id);
 const bundle='d'.repeat(40), epoch='b'.repeat(64);let viewId='a'.repeat(64);
 const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_revision:'1',state_rev:'1',
@@ -990,6 +994,16 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         }
         await wait(()=>launchPolls.length);
         assert(node('open').disabled&&node('index').disabled);assert.equal(sockets.length,0);
+        assert.equal(launcherOptions.ready(),true);
+        for(const id of ['about-dialog','session-exit-dialog','share-dialog','notes-editor','notes-review','notes-uncertain','notes-cancel',
+            'waives-editor','waives-review','waives-uncertain','waives-cancel','default-review','default-uncertain','default-cancel']){
+            node(id).hidden=false;assert.equal(launcherOptions.ready(),false,id+' must postpone CLI open');node(id).hidden=true;
+        }
+        assert.equal(launcherOptions.ready(),true);
+        node('goto-x').input();
+        assert.equal(launcherOptions.ready(),false,'unsubmitted goto draft must survive CLI open');
+        node('goto-x').keydown({key:'Escape',preventDefault(){}});
+        assert.equal(launcherOptions.ready(),true);
         node('notice').textContent='previous source error';node('notice').hidden=false;
         await push('a');await wait(()=>sockets.length===1);hello(sockets[0]);
         assert.deepEqual(posts()[0].body,{action:'open',seq:'1',pixels:[100,80],levels:{mode:'all'}});

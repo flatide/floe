@@ -9,6 +9,13 @@ WK/Electron 교차 검사는 후속 필수 완료 조건에서 제외하되 공�
 검증은 유지한다. 외부 브라우저용 `floe2-web`과 GTK 비교 경로는 유지하며,
 Electron 선택 자체로 RHEL/ETX·성능·배포 수용을 통과 처리하지 않는다.
 
+2026-09-23 진행: [Electron 창 재사용](WEBUI_NATIVE_INSTANCE.ko.md)을 구현하고
+실제 macOS 두 프로세스에서 전달·숨김/최소화 복원·기존 worker 유지·모달 대기를
+확인했다(shell0.1.3). NFS 게시 복구, GTK 대비 G1/물리 입력, RHEL/ETX와 정식
+배포는 남는다. 아래 2026-09-22의 창 재사용 "구현 대기"는 과거 기록이다.
+이 변경의 최종 전체 Rust/web 배터리와 별도 Electron 통합 게이트는 각각 exit0이다.
+실패 후 재검사와 로그 identity는 [창 재사용 검증 기록](WEBUI_NATIVE_INSTANCE.ko.md)에 남긴다.
+
 후속 [활성 창 native 검증](WEBUI_DESKTOP.ko.md#25-활성-창에서의-전체-native-검사와-호스트-대조-2026-09-22):
 전체 native suite와 WK/Electron 동일 viewport RGBA 대조가 각각 exit0이다.
 사용자는 NFS 등 공유 저장소와 [호스트별 기본 창 재사용](WEBUI_NATIVE_INSTANCE.ko.md)을

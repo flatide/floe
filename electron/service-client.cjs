@@ -11,7 +11,7 @@ function decodeFrame(bytes) {
   catch (_) { throw new Error('Invalid service frame'); }
   if (!value || Array.isArray(value) || value.v !== 1) throw new Error('Invalid service frame');
   const keys = Object.keys(value).sort().join(',');
-  if (value.event === 'directory' && keys === 'event,v') return value;
+  if (['starting', 'forwarded', 'directory', 'present'].includes(value.event) && keys === 'event,v') return value;
   if (value.event !== 'ready' || keys !== 'event,origin,url,v' ||
       typeof value.origin !== 'string' || typeof value.url !== 'string') {
     throw new Error('Invalid service frame');
@@ -74,10 +74,18 @@ class ServiceClient extends EventEmitter {
       let frame;
       try { frame = decodeFrame(line); }
       catch (_) { return this.fail(); }
-      if (frame.event === 'directory' && this.phase === 'starting') {
+      if (frame.event === 'starting' && this.phase === 'starting') {
+        this.phase = 'owner';
+        this.emit('starting');
+      } else if (frame.event === 'forwarded' && this.phase === 'starting') {
+        this.phase = 'forwarded';
+        this.emit('forwarded');
+      } else if (frame.event === 'present' && this.phase === 'ready') {
+        this.emit('present');
+      } else if (frame.event === 'directory' && this.phase === 'owner') {
         this.phase = 'directory';
         this.emit('directory');
-      } else if (frame.event === 'ready' && ['starting', 'waiting-ready'].includes(this.phase)) {
+      } else if (frame.event === 'ready' && ['owner', 'waiting-ready'].includes(this.phase)) {
         this.phase = 'ready';
         this.emit('ready', frame);
       } else {
