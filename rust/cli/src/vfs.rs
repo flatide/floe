@@ -6554,8 +6554,22 @@ fn parse_common(
             }
         }
     }
-    (dir.expect("ovm dir"), view, px_per_um, cut_px, depth,
-     layers, rest)
+    // field 2026-09-23: `floe-index plan --density-probe MAIN09.oas` gave
+    // "panicked ... ovm dir" - every --option takes one value, so the
+    // source name was swallowed as the option's value and no index
+    // directory was left. Say what the command takes instead.
+    let Some(dir) = dir else {
+        eprintln!(
+            "floe-index plan: no index directory given (every --option takes one value, \
+             e.g. --density-probe 1).\n\
+             usage: floe-index plan <layout.ice dir> --view x0,y0,x1,y1 --px-per-um N [--cut-px N] \
+             [--layers a/b,..] [--depth N] [--density-probe 1] [--density-storage 1] [--selection-meta 1]\n\
+             for the density probe over a whole layout use \
+             tools/probe_density_queries.py <layout.oas> [--meta] (it forms these commands)"
+        );
+        std::process::exit(2);
+    };
+    (dir, view, px_per_um, cut_px, depth, layers, rest)
 }
 
 fn make_req(
