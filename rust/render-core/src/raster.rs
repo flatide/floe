@@ -8255,6 +8255,120 @@ mod tests {
         }
     }
 
+    /// ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1 (2026-09-23): can a lattice's
+    /// sub-pixel survivors be listed without visiting every member? Under
+    /// GridRanks' lattice rule a member (ix, iy) survives a w_x x w_y px
+    /// draw when frac(u_x + vdc(ix) + weyl(iy)) < w_x and the swapped test
+    /// for y. For a fixed row the x condition puts vdc(ix) in one interval
+    /// (mod 1), and vdc maps a dyadic interval [m 2^-b, (m + 1) 2^-b) onto
+    /// the arithmetic progression ix = rev_b(m) (mod 2^b) - so the row's
+    /// candidates are the union of at most ~2 x 53 progressions, walked
+    /// survivor by survivor; the y condition (it couples to ix through
+    /// weyl(ix)) is then tested on those candidates only. The interval is
+    /// widened by 2^-40 and every candidate re-tested with the exact f64
+    /// rule, so the set is the full scan's by construction.
+    fn lattice_survivors_by_enumeration(
+        u: (f64, f64),
+        cols: std::ops::Range<u64>,
+        rows: std::ops::Range<u64>,
+        w: (f64, f64),
+    ) -> (Vec<(u64, u64)>, u64) {
+        const BITS: u32 = 53;
+        let vdc = |k: u64| (k.reverse_bits() >> 11) as f64 / (1u64 << BITS) as f64;
+        let weyl = |k: u64| (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << BITS) as f64;
+        let rank = |u: f64, p: u64, s: u64| (u + vdc(p) + weyl(s)).rem_euclid(1.0);
+        let scale = (1u64 << BITS) as f64;
+        let pad = 2f64.powi(-40);
+        let mut out = Vec::new();
+        let mut tested = 0u64;
+        for iy in rows {
+            // vdc(ix) must lie in [lo, lo + w_x) mod 1, lo = -(u_x + weyl(iy))
+            let lo = (-(u.0 + weyl(iy))).rem_euclid(1.0);
+            let mut pieces: Vec<(u64, u64)> = Vec::new();
+            let a = ((lo - pad).max(0.0) * scale) as u64;
+            let b = ((lo + w.0 + pad).min(1.0) * scale).ceil() as u64;
+            pieces.push((a, b.min(1 << BITS)));
+            if lo + w.0 + pad > 1.0 {
+                pieces.push((0, (((lo + w.0 + pad - 1.0) * scale).ceil() as u64).min(1 << BITS)));
+            }
+            if lo - pad < 0.0 {
+                pieces.push((((lo - pad + 1.0) * scale) as u64, 1 << BITS));
+            }
+            for (mut lo_r, hi_r) in pieces {
+                // dyadic decomposition of [lo_r, hi_r) in the 53-bit reversed space
+                while lo_r < hi_r {
+                    let mut s = lo_r.trailing_zeros().min(BITS);
+                    while s > 0 && lo_r + (1u64 << s) > hi_r {
+                        s -= 1;
+                    }
+                    let b = BITS - s;
+                    let m = lo_r >> s;
+                    // the top b bits of the reversed value m are the low b bits of ix, reversed
+                    let residue = if b == 0 { 0 } else { m.reverse_bits() >> (64 - b) };
+                    let stride = 1u64 << b;
+                    let first = cols.start + (residue.wrapping_sub(cols.start) & (stride - 1));
+                    let mut ix = first;
+                    while ix < cols.end {
+                        tested += 1;
+                        if rank(u.0, ix, iy) < w.0 && rank(u.1, iy, ix) < w.1 {
+                            out.push((ix, iy));
+                        }
+                        ix += stride;
+                    }
+                    lo_r += 1u64 << s;
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        (out, tested)
+    }
+
+    #[test]
+    fn sub_pixel_survivors_can_be_enumerated_without_visiting_every_member() {
+        // ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1: the enumeration's set is
+        // the full scan's, and it visits about the survivors plus ~100
+        // candidates a row instead of every member
+        let vdc = |k: u64| (k.reverse_bits() >> 11) as f64 / (1u64 << 53) as f64;
+        let weyl = |k: u64| (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << 53) as f64;
+        let rank = |u: f64, p: u64, s: u64| (u + vdc(p) + weyl(s)).rem_euclid(1.0);
+        let u = (0.3719, 0.8231);
+        for (cols, rows, w) in [
+            (0..1_000_000u64, 0..1u64, (0.05, 1.0)),
+            (0..2048u64, 0..2048u64, (0.05, 0.05)),
+            (0..2048u64, 0..2048u64, (0.5, 0.5)),
+            (1000..3000u64, 500..700u64, (0.02, 0.9)),
+        ] {
+            let members = (cols.end - cols.start) * (rows.end - rows.start);
+            let t = std::time::Instant::now();
+            let mut scan = Vec::new();
+            for iy in rows.clone() {
+                for ix in cols.clone() {
+                    if rank(u.0, ix, iy) < w.0 && rank(u.1, iy, ix) < w.1 {
+                        scan.push((ix, iy));
+                    }
+                }
+            }
+            scan.sort_unstable();
+            let scan_us = t.elapsed().as_micros();
+            let t = std::time::Instant::now();
+            let (listed, tested) = lattice_survivors_by_enumeration(u, cols.clone(), rows.clone(), w);
+            let list_us = t.elapsed().as_micros();
+            assert_eq!(listed, scan, "{}x{} at {:?}: the enumeration differs from the scan", cols.end - cols.start, rows.end - rows.start, w);
+            let share = scan.len() as f64 / members as f64;
+            assert!((share - w.0 * w.1).abs() < 0.01 + 0.5 * w.0 * w.1 / (members as f64).sqrt(), "share {} for {:?}", share, w);
+            assert!(tested < members, "tested {} of {} members", tested, members);
+            // the candidates are the x survivors (w_x of the members, the y
+            // test prunes them) plus the progression ends, ~110 a row
+            let x_share = (w.0 * members as f64) as u64;
+            assert!(tested <= x_share + x_share / 50 + 120 * (rows.end - rows.start), "tested {} for {} x candidates in {} rows", tested, x_share, rows.end - rows.start);
+            eprintln!(
+                "§4.3 step 1: {} members ({}x{}) at {:?} px: {} survivors; full scan {} us, enumeration tested {} ({:.1}x fewer) in {} us",
+                members, cols.end - cols.start, rows.end - rows.start, w, scan.len(), scan_us, tested, members as f64 / tested as f64, list_us
+            );
+        }
+    }
+
     #[test]
     fn duplicates_of_a_shape_draw_as_one() {
         // ADAPTIVE_CUT_DENSITY_PLAN §4.2 (review 2026-09-23): the same world
