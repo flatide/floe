@@ -108,6 +108,15 @@ floe 뷰어의 klayout 경로를 대체하려면 무엇을 소비하고, 무엇�
   표시용 점(wash, wash 점, 저장 대표점)은 컷 아래를 대신 보이는 점이라 KLayout 규칙 그대로다.
   exact 프레임과 `floe-render-cli`는 KLayout 규칙이고,
   renderd의 `FLOE_RUST_AREA_TRUE=off`가 킬 스위치다. 게이트 `validate_area_true`.
+  **추가 성김 보정(진단, 2026-09-23; ADAPTIVE_CUT_DENSITY_PLAN §4.2 후보 1)**: renderd의
+  `FLOE_RUST_WIDTH_C=c`(c ≥ 1, 기본 1 = 위 규칙 그대로; 범위 밖 값은 1)는 사각형의 추가 픽셀을
+  t < P_c(f) = f / (c − (c − 1) f)일 때만 준다(`GeometryRasterRequest::width_c`). c = 2면 0.05 px 변은
+  20개 중 하나가 아니라 39개 중 하나, 1.99 px 변은 평균 1.98 px(f / c였다면 1.495 px로 2 px에서
+  뛴다) — 정수 폭에서 연속이고 w에 단조이며 상자는 c = 1의 상자 안에 있다(floor(w) 아래로는
+  내려가지 않는다). 의도적으로 어둡게 하는 근사라 기본은 1이고, 실칩 효과는 아직 보지 않았다. 단위
+  테스트 `extra_sparsening_thins_the_extra_pixels_continuously`; 게이트: c = 2에서 1.5 px 배열의 네
+  pan 열 비율이 덮임의 (1 + 1/3)/1.5, 0.5 px 배열은 덮임의 2/3, 새로 켜지는 열 없음(스티플 안쪽 열이
+  테두리가 되면서 픽셀은 달라진다), 0.5는 c = 1과 픽셀까지 같다.
   측정(합성 1/10 칩, 1920×1080, thin keep, warm 래스터, 끔 → 켬): 3 px 컷은 잡음 범위(전 레이어 fit
   314 → 379 ms, ×4 372 → 324 ms), 1 px 컷은 전 레이어 fit 1113 → 783 ms, 마지막 10레이어 53 → 36 ms,
   ×16 313 → 313 ms. 다각형 테두리는 그 다각형의 행만 훑는다(타일 높이만큼 훑으면 ×16이 2배였다).

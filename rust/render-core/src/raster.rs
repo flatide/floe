@@ -85,6 +85,16 @@ pub struct GeometryRasterRequest {
     /// area fills the pixels it would light, ranked by its world box.
     /// false = the KLayout-measured rule (exact renders, the oracle gates).
     pub area_true: bool,
+    /// The extra-sparsening strength of the width-first rule
+    /// (ADAPTIVE_CUT_DENSITY_PLAN §4.2 candidate 1, diagnostic only): a
+    /// rectangle's side of w px draws floor(w) + 1 px when its rank t is
+    /// under P_c(frac(w)) = f / (c - (c - 1) f). c = 1 is the rule itself
+    /// (the extra pixel with chance f, the mean width w); c > 1 darkens
+    /// on purpose - c = 2 keeps a 0.05 px side 1 time in 39 instead of 1 in
+    /// 20 - and stays monotone in w and continuous at whole widths, so the
+    /// picture only thins, never jumps. renderd sets it from
+    /// FLOE_RUST_WIDTH_C (default 1); every other request uses 1.
+    pub width_c: f64,
 }
 
 impl GeometryRasterRequest {
@@ -4917,10 +4927,10 @@ fn paint_width_first_rect(
 ) -> Result<bool, String> {
     let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
     let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
-    let Some((c0, c1)) = width_first_span(x0, x1, ranks.0) else {
+    let Some((c0, c1)) = width_first_span_c(x0, x1, ranks.0, request.width_c) else {
         return Ok(false);
     };
-    let Some((r0, r1)) = width_first_span(y0, y1, ranks.1) else {
+    let Some((r0, r1)) = width_first_span_c(y0, y1, ranks.1, request.width_c) else {
         return Ok(false);
     };
     let (d0, d1) = (c0 * DEVICE_ONE, c1 * DEVICE_ONE);
@@ -5096,12 +5106,24 @@ impl GridRanks {
 /// floor(centre - m/2 + 1/2). m is floor(w) or floor(w) + 1 (floor(w) + 1
 /// exactly when the fraction exceeds t), non-decreasing in w.
 fn width_first_span(v0: i128, v1: i128, t: f64) -> Option<(i128, i128)> {
+    width_first_span_c(v0, v1, t, 1.0)
+}
+
+/// `width_first_span` with the extra pixel taken when t < P_c(frac(w)),
+/// P_c(f) = f / (c - (c - 1) f) (GeometryRasterRequest::width_c): c = 1 is
+/// the plain rule (P = f, so m = ceil(w - t)); a larger c thins the extra
+/// pixels towards the whole width, never past floor(w), and P_c runs from
+/// 0 to 1 over a whole pixel's fraction, so the mean width stays continuous
+/// at whole widths (f / c alone would drop from 1.99 to 1.495 px at c = 2).
+fn width_first_span_c(v0: i128, v1: i128, t: f64, c: f64) -> Option<(i128, i128)> {
     let w = (v1 - v0).max(0) as f64 / DEVICE_ONE as f64;
-    let m = (w - t).ceil();
-    if !(m >= 1.0) {
+    let whole = w.floor();
+    let f = w - whole;
+    let p = if c > 1.0 { f / (c - (c - 1.0) * f) } else { f };
+    let m = whole as i128 + i128::from(t < p);
+    if m < 1 {
         return None;
     }
-    let m = m as i128;
     let start = floor_div(v0 + v1 - m * DEVICE_ONE + DEVICE_ONE, 2 * DEVICE_ONE);
     Some((start, start + m))
 }
@@ -6288,6 +6310,7 @@ mod tests {
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
+            width_c: 1.0,
         }
     }
 
@@ -6712,6 +6735,7 @@ mod tests {
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
+            width_c: 1.0,
         };
         let mut pattern = [0u16; 16];
         for (row, word) in pattern.iter_mut().enumerate() {
@@ -6833,6 +6857,7 @@ mod tests {
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
+            width_c: 1.0,
         };
         let segments = [
             ((4.0, 9.0), (21.0, 9.0)),   // horizontal inside the tile
@@ -6908,6 +6933,7 @@ mod tests {
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
+            width_c: 1.0,
         };
         let mut band = full_band(&request);
         paint_world_rect(
@@ -7063,6 +7089,7 @@ mod tests {
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
+            width_c: 1.0,
         };
         let mut frame = full_band(&request);
         fill_world_polygon_with_phase(
@@ -7582,6 +7609,7 @@ mod tests {
             workers: 2,
             tile_size: 16,
             area_true: false,
+            width_c: 1.0,
         };
         let pruned =
             render_geometry_occupancy(&scene_with(crate::PageIndex::build), &request).unwrap();
@@ -8176,6 +8204,55 @@ mod tests {
         let alone = draw(&Rep::One);
         assert!(!alone.is_empty() && alone.len() < 300, "{} of 300 half-pixel dots lit", alone.len());
         assert_eq!(draw(&Rep::Grid { na: 1, nb: 1, va: (30, 0), vb: (0, 400) }), alone, "a 1 x 1 grid drew apart from the shape");
+    }
+
+    #[test]
+    fn extra_sparsening_thins_the_extra_pixels_continuously() {
+        // ADAPTIVE_CUT_DENSITY_PLAN §4.2 candidate 1 (diagnostic
+        // FLOE_RUST_WIDTH_C): under c the extra pixel comes when t < P_c(f),
+        // P_c(f) = f / (c - (c - 1) f). c = 1 is the plain rule; c = 2 keeps
+        // a 0.05 px side about 1 time in 39 and a 1.99 px side 1.98 px on
+        // average (f / c would give 1.495 - a jump at 2 px); the span under
+        // c is within the plain rule's span, never under floor(w), and is
+        // monotone in w at a fixed rank.
+        let one = DEVICE_ONE as i128;
+        let side = |w: f64| (w * one as f64).round() as i128;
+        let mean = |w: f64, c: f64| {
+            let n = 20_000;
+            (0..n).map(|k| width_first_span_c(0, side(w), (k as f64 + 0.5) / n as f64, c).map_or(0, |(a, b)| b - a)).sum::<i128>() as f64 / n as f64
+        };
+        for w in [0.05, 0.5, 1.05, 1.5, 1.99, 2.0, 3.8] {
+            assert!((mean(w, 1.0) - w).abs() < 0.001, "c = 1 keeps the mean width {} ({})", w, mean(w, 1.0));
+            let f = w - w.floor();
+            let p2 = f / (2.0 - f);
+            assert!((mean(w, 2.0) - (w.floor() + p2)).abs() < 0.001, "c = 2 at {}: {} for {}", w, mean(w, 2.0), w.floor() + p2);
+        }
+        assert!((mean(0.05, 2.0) - 1.0 / 39.0).abs() < 0.001);
+        assert!((mean(1.99, 2.0) - 1.980).abs() < 0.002);
+        assert!(mean(1.99, 2.0) < mean(2.0, 2.0) && mean(2.0, 2.0) == 2.0, "continuous at a whole width");
+        // containment and monotony at fixed ranks
+        let mut state = 0x1234_5678u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..5000 {
+            let (t, w, v0) = (next(), next() * 6.0, (next() * 40.0 * one as f64) as i128);
+            let plain = width_first_span_c(v0, v0 + side(w), t, 1.0);
+            for c in [1.5, 2.0, 4.0] {
+                let sparse = width_first_span_c(v0, v0 + side(w), t, c);
+                match (plain, sparse) {
+                    (None, Some(_)) => panic!("c = {} drew what c = 1 dropped (w {} t {})", c, w, t),
+                    (Some((a, b)), Some((x, y))) => {
+                        assert!(x >= a && y <= b, "c = {}: [{}, {}) left [{}, {}) (w {} t {})", c, x, y, a, b, w, t);
+                        assert!(y - x >= w.floor() as i128, "c = {} under floor(w)", c);
+                    }
+                    _ => {}
+                }
+                let wider = width_first_span_c(v0, v0 + side(w + 0.37), t, c).map_or(0, |(a, b)| b - a);
+                assert!(wider >= sparse.map_or(0, |(a, b)| b - a), "c = {}: not monotone in w", c);
+            }
+        }
     }
 
     #[test]
@@ -9961,6 +10038,7 @@ mod tests {
             workers: 3,
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
+            width_c: 1.0,
         };
         let report = render_geometry_occupancy(&scene, &raster_request).unwrap();
         raster_request.workers = 1;
@@ -10038,6 +10116,7 @@ mod tests {
             workers,
             tile_size,
             area_true: false,
+            width_c: 1.0,
         }
     }
 

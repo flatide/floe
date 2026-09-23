@@ -61,7 +61,14 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
     each written as a one-dimensional repetition, and they light the same
     pixels as the two rows stored alone on their own layers - a row piece
     ranks as that row's own lattice - while the uncut lattice (16 MiB) picks
-    differently (documented: outside the identity guarantee).
+    differently (documented: outside the identity guarantee);
+  * the extra-sparsening diagnostic FLOE_RUST_WIDTH_C=2 (ADAPTIVE_CUT_DENSITY_PLAN
+    §4.2 candidate 1): a 1.5 px array's four-pan column share is (1 + 1/3) / 1.5
+    of its covered share (P_2(0.5) = 1/3) within 0.025, the 0.5 px array
+    keeps 2/3 of its covered share (0.55..0.8), every column it lights is lit
+    under the plain rule too (a narrower box lies within the plain one; the
+    pixels differ where a stippled interior column becomes the rim), and an
+    out-of-range value (0.5) is the plain rule pixel for pixel.
 
     .venv/bin/python tools/validate_area_true.py
 """
@@ -252,7 +259,7 @@ def lit_pixels(pixels):
     return {i // 4 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK}
 
 
-def worker(src, on, wash=False, lod=False):
+def worker(src, on, wash=False, lod=False, width_c=None):
     if on:
         os.environ.pop('FLOE_RUST_AREA_TRUE', None)
     else:
@@ -261,11 +268,13 @@ def worker(src, on, wash=False, lod=False):
         os.environ['FLOE_RUST_PAGE_WASH'] = 'on'
     if lod:
         os.environ['FLOE_RUST_LOD'] = 'on'
+    if width_c is not None:
+        os.environ['FLOE_RUST_WIDTH_C'] = str(width_c)
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
     w.start()
-    for name in ('FLOE_RUST_AREA_TRUE', 'FLOE_RUST_PAGE_WASH', 'FLOE_RUST_LOD'):
+    for name in ('FLOE_RUST_AREA_TRUE', 'FLOE_RUST_PAGE_WASH', 'FLOE_RUST_LOD', 'FLOE_RUST_WIDTH_C'):
         os.environ.pop(name, None)
     return w
 
@@ -423,6 +432,37 @@ def main():
             assert 0.35 <= ratio <= 0.65, 'triangles lit %d, squares %d (%.2f)' % (counts[TRI], counts[SQUARE], ratio)
             print('area-true: 900 triangles light %d px, 900 squares %d px (%.2f; areas 0.32 / 0.64 px each)'
                   % (counts[TRI], counts[SQUARE], ratio))
+            # the extra-sparsening diagnostic: c = 2 thins the extra pixels by
+            # P_2(f) = f / (2 - f), within the plain rule's pixels; a value
+            # under 1 is the plain rule
+            sparse, plain = worker(src, True, width_c=2), worker(src, True, width_c=0.5)
+            try:
+                gen += 1
+                assert frame(plain, gen, view) == now, 'FLOE_RUST_WIDTH_C=0.5 changed the plain rule'
+                n = WIDE.index([(1.5, 1.5)])
+                shares = []
+                for phase in (0.0, 0.25, 0.5, 0.75):
+                    gen += 1
+                    moved = (view[0] + phase * PX_UM, view[1], view[2] + phase * PX_UM, view[3])
+                    flags, _ = columns(frame(sparse, gen, moved), moved, n)
+                    shares.append(sum(flags) / len(flags))
+                mean, want = sum(shares) / len(shares), covered(n) * (1 + 0.5 / 1.5) / 1.5
+                assert abs(mean - want) <= 0.025, 'c = 2: %s column share %.3f over four pans for %.3f expected' % (name(n), mean, want)
+                gen += 1
+                thinned = frame(sparse, gen, view)
+                k = len(WIDE) + THIN.index([(0.5, 0.5)])
+                _, lit = columns(thinned, view, k)
+                ratio = lit / covered(k)
+                assert 0.55 <= ratio <= 0.8, 'c = 2: %s lit %.3f of covered %.3f' % (name(k), lit, covered(k))
+                # the narrower box lies within the plain one: no new column
+                # (pixels differ where a stippled interior column turns rim)
+                extra = {px % W for px in lit_pixels(thinned)} - {px % W for px in lit_pixels(now)}
+                assert not extra, 'c = 2 lit %d columns the plain rule does not' % len(extra)
+                print('width c = 2: %s column share %.3f for %.3f expected, %s keeps %.2f of its cover, %d px lit for %d (no new column)'
+                      % (name(n), mean, want, name(k), ratio, len(lit_pixels(thinned)), len(lit_pixels(now))))
+            finally:
+                sparse.stop()
+                plain.stop()
             # the page wash: off by default, FLOE_RUST_PAGE_WASH=on turns it back on
             washer = worker(src, True, wash=True)
             try:

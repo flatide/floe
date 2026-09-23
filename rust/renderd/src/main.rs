@@ -1862,6 +1862,18 @@ fn area_true_enabled() -> bool {
 /// rule - so the small pages of a wide view never showed the area-true
 /// drawing that is being checked; they are now decoded and drawn.
 /// FLOE_RUST_PAGE_WASH=on turns the wash back on.
+/// The width-first rule's extra-sparsening strength
+/// (floe_render_core::GeometryRasterRequest::width_c, ADAPTIVE_CUT_DENSITY_PLAN
+/// §4.2 candidate 1): FLOE_RUST_WIDTH_C=c with c >= 1, diagnostic only -
+/// unset, empty or out of range means 1 (the plain rule).
+fn width_c() -> f64 {
+    std::env::var("FLOE_RUST_WIDTH_C")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|c| c.is_finite() && *c >= 1.0)
+        .unwrap_or(1.0)
+}
+
 fn page_wash_enabled() -> bool {
     std::env::var("FLOE_RUST_PAGE_WASH").as_deref() == Ok("on")
 }
@@ -2294,6 +2306,7 @@ fn run_render(
         // area-true drawing (GeometryRasterRequest::area_true): every frame
         // but an exact one, which keeps the KLayout rule
         area_true: !command.exact && area_true_enabled(),
+        width_c: width_c(),
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache

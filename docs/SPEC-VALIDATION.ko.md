@@ -68,7 +68,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
   격자를 행 사이로 자르는 세로 긴 레이아웃(사각형 절반이 격자 아래, 절반이 위 — 중앙값 레코드인
   격자에 분할면이 놓인다): 1 MiB 빌드 로그가 2차원 Grid의 한 줄 조각 2개를 세고, 그 조각들이 같은
   레이아웃에 따로 저장한 두 행(레이어 12·13)과 pan 5곳에서 같은 픽셀을 켠다(863 px, 덮임 864의
-  ±3 %); 자르지 않은 격자(16 MiB)와의 차이(300 px, 보장 범위 밖)는 출력만 한다.
+  ±3 %); 자르지 않은 격자(16 MiB)와의 차이(300 px, 보장 범위 밖)는 출력만 한다. 추가 성김 진단
+  `FLOE_RUST_WIDTH_C=2`: 1.5 px 배열의 네 pan 열 비율이 덮임 × (1 + 1/3)/1.5의 ±0.025, 0.5 px 배열의
+  켜진 비율이 덮임의 0.55~0.8, c = 1이 켜지 않은 열은 켜지 않으며, 범위 밖 값 0.5는 c = 1과 픽셀까지 같다.
   occupancy·jobdeck·representatives·sub_cut_box 게이트는 KLayout 규칙에 대한 비교라 이 킬 스위치를
   모든 워커에 고정한다(sub_cut_box: 상자는 표시용 점, 그 기준인 멤버 직접 그리기도 KLayout 규칙).
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드

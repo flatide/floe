@@ -1176,6 +1176,7 @@ fn stream_pass(
         workers: request.workers.max(1),
         tile_size: request.tile_size,
         area_true: false,
+        width_c: 1.0,
     };
     let mut report = StreamReport {
         pass_bytes_max: first_bytes,
@@ -1346,6 +1347,7 @@ fn raster_pass(
         workers,
         tile_size: request.tile_size,
         area_true: false,
+        width_c: 1.0,
     };
     // a frames-only pass only when this placement's plan holds a
     // hierarchy frame at all (analysis 2026-09-09: the pass ran, and

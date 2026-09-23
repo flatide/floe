@@ -131,6 +131,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             workers: args.jobs,
             tile_size: args.tile_size,
             area_true: false,
+            width_c: 1.0,
         };
         let (mode, raster) = if args.styles.is_empty() {
             (
