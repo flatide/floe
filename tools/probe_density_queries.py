@@ -75,6 +75,7 @@ def main(argv=None):
             'distinct_cut_page_bytes', 'distinct_cut_page_records',
             'kept_pages', 'kept_sub_cut_records',
             'fallback_nodes', 'fallback_px', 'fallback_mean_abs', 'fallback_over_10', 'fallback_over_25', 'fallback_mean_value',
+            'census_layers_sub_cut', 'census_records_sub_cut',
             'cbvh_pages', 'cbvh_page_bytes', 'cbvh_page_usize', 'cbvh_page_records']
     once = None
     rows = []
@@ -162,6 +163,19 @@ def main(argv=None):
     for spec, z, row in rows:
         print('%s %g %s %s %s %s %s' % (spec[0], z, k(row, 'fallback_nodes'), k(row, 'fallback_px'), row['fallback_mean_abs'],
                                         row['fallback_over_10'], row['fallback_over_25']))
+    if args.meta:
+        # CUT_DENSITY_DESIGN §10.3: the layers a coarse plane at each band
+        # would have to exist for (any record under that view's cut), and
+        # the records under the cut over the whole index
+        print('\nlayers with records under the cut (a coarse plane per band exists only for them; whole index, of %s layers):'
+              % once.get('layers', '?'))
+        for spec, z, row in rows:
+            if spec == 'all':
+                print('   x%-6g %s layers, %s records under the cut' % (z, row['census_layers_sub_cut'], k(row, 'census_records_sub_cut')))
+        print('== type this 4 == (zoom: layers with sub-cut records, records)')
+        for spec, z, row in rows:
+            if spec == 'all':
+                print('%g %s %s' % (z, row['census_layers_sub_cut'], k(row, 'census_records_sub_cut')))
     if int(once.get('meta', '0')):
         print('m %s %s %s %s/%s/%s %s' % (k(once, 'meta_pages'), once['meta_s'], mb(once, 'meta_bytes'),
                                           k(once, 'meta_rect_one'), k(once, 'meta_rect_grid'), k(once, 'meta_rect_pts'),

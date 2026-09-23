@@ -7351,14 +7351,17 @@ impl MetaCensus {
     }
 }
 
-fn meta_census(v: &floe_vfs::Vfs, jobs: usize, cut_dbu: i64) -> Result<(MetaCensus, f64, Vec<u32>), String> {
+fn meta_census(v: &floe_vfs::Vfs, jobs: usize, cut_dbu: i64) -> Result<(MetaCensus, f64, Vec<u32>, Vec<u64>), String> {
     let t = std::time::Instant::now();
     let exact: Vec<u32> = (0..v.ovm.n_pages).filter(|&pi| v.ovm.page(pi).lod == 0).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let total = std::sync::Mutex::new(MetaCensus::default());
     // per page: records whose min side is under the cut (the per-shape
-    // cut's work inside a kept page)
+    // cut's work inside a kept page); per layer: the same summed over the
+    // layer's pages (CUT_DENSITY_DESIGN §10.3: the layers a coarse plane
+    // at this band would have to exist for at all)
     let under_cut = std::sync::Mutex::new(vec![0u32; v.ovm.n_pages as usize]);
+    let layer_under = std::sync::Mutex::new(vec![0u64; v.ovm.n_layers as usize]);
     let failed = std::sync::Mutex::new(None::<String>);
     std::thread::scope(|scope| {
         for _ in 0..jobs.max(1) {
@@ -7446,8 +7449,10 @@ fn meta_census(v: &floe_vfs::Vfs, jobs: usize, cut_dbu: i64) -> Result<(MetaCens
                         mine_under.push((pi, under));
                     }
                     let mut table = under_cut.lock().unwrap();
+                    let mut layers = layer_under.lock().unwrap();
                     for (pi, under) in mine_under {
                         table[pi as usize] = under;
+                        layers[v.ovm.page(pi).layer_idx as usize] += under as u64;
                     }
                 }
                 total.lock().unwrap().add(&mine);
@@ -7457,7 +7462,7 @@ fn meta_census(v: &floe_vfs::Vfs, jobs: usize, cut_dbu: i64) -> Result<(MetaCens
     if let Some(e) = failed.into_inner().unwrap() {
         return Err(e);
     }
-    Ok((total.into_inner().unwrap(), t.elapsed().as_secs_f64(), under_cut.into_inner().unwrap()))
+    Ok((total.into_inner().unwrap(), t.elapsed().as_secs_f64(), under_cut.into_inner().unwrap(), layer_under.into_inner().unwrap()))
 }
 
 fn place_members(v: &floe_vfs::Vfs, pli: u64) -> u64 {
@@ -7504,18 +7509,22 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
     let px = req.px_per_dbu;
     let index: HashMap<(u32, u32), usize> =
         plan.wcells.iter().enumerate().map(|(i, c)| (c.key, i)).collect();
-    let (census, census_s, under_cut) = if meta {
+    let (census, census_s, under_cut, layer_under) = if meta {
         let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
         match meta_census(v, jobs, req.cut_dbu.max(0)) {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("selection meta census failed: {}", e);
-                (MetaCensus::default(), 0.0, Vec::new())
+                (MetaCensus::default(), 0.0, Vec::new(), Vec::new())
             }
         }
     } else {
-        (MetaCensus::default(), 0.0, Vec::new())
+        (MetaCensus::default(), 0.0, Vec::new(), Vec::new())
     };
+    // layers with any record under this view's cut (a plane per band exists
+    // only for them), and the records under the cut over the whole index
+    let census_layers_sub_cut = layer_under.iter().filter(|&&n| n > 0).count() as u64;
+    let census_records_sub_cut: u64 = layer_under.iter().sum();
     let mut own = vec![DensityQ::default(); plan.wcells.len()];
     for (wi, c) in plan.wcells.iter().enumerate() {
         own[wi].kept_pages = c.pages.len() as u64;
@@ -7918,7 +7927,7 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
          exact_csize={}\texact_usize={}\texact_records={}\t\
          meta={}\tmeta_pages={}\tmeta_s={:.1}\tmeta_peak_rss={}\tmeta_rect_one={}\tmeta_rect_grid={}\t\
          meta_rect_pts={}\tmeta_rect_pts_points={}\tmeta_poly={}\tmeta_path={}\tmeta_vertices={}\t\
-         meta_other_rep_points={}\tmeta_bytes={}",
+         meta_other_rep_points={}\tmeta_bytes={}\tcensus_layers_sub_cut={}\tcensus_records_sub_cut={}\tlayers={}",
         plan_ms, walk_ms, visits, plan.pages.len(),
         total.child_recs, total.child_members, total.child_layers, total.thin_members,
         total.pages, total.wide_pages, total.wide16_pages, total.wide64_pages, total.page_members, total.pbvh, total.pbvh_pages,
@@ -7939,6 +7948,7 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
         meta as u8, census.pages, census_s, proc_status_bytes("VmHWM:").unwrap_or(0),
         census.rect_one, census.rect_grid, census.rect_pts, census.rect_pts_points, census.poly, census.path,
         census.vertices, census.other_rep_points, census.meta_bytes,
+        census_layers_sub_cut, census_records_sub_cut, v.ovm.n_layers,
     );
 }
 
