@@ -1571,16 +1571,16 @@ def cmd_view(args):
 
 
 def _add_thin_option(p):
-    """The page hairline policy (review 2026-09-11): a plain layout
-    culls all-thin pages at wide views for speed, a jobdeck keeps them
-    (mask data is hairlines); a mask source opened on its own can ask
-    for the mask policy with --thin keep."""
+    """The page hairline policy (review 2026-09-11): every source keeps
+    all-thin pages as 1 px hairlines by default (a plain layout too
+    since 2026-09-23, user decision; it used to cull them at wide views
+    for speed) - --thin cull asks for the former layout policy."""
     p.add_argument("--thin", choices=("auto", "keep", "cull"),
                    default=None,
-                   help="thin shapes at wide views: auto = keep for a "
-                        "jobdeck, cull for a layout (the performance "
-                        "policy); keep = mask policy (all-thin pages stay "
-                        "as 1 px hairlines); cull = drop them")
+                   help="thin shapes at wide views: auto = keep (every "
+                        "source since 0.12.199; a layout used to cull); "
+                        "keep = all-thin pages stay as 1 px hairlines; "
+                        "cull = drop them (faster at wide views)")
 
 
 def _add_level_option(p):

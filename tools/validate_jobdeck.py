@@ -1580,10 +1580,12 @@ class JobdeckShortcutTests(unittest.TestCase):
             inspect.getsource(gui)
         self.assertIn("toggle level view / chip view\\tCtrl+,", src)
         # View > thin shapes at wide views (user call 2026-09-15): the
-        # three policies as menu commands
-        for label in ("thin shapes at wide views", "keep (mask policy)",
-                      "cull (layout policy, faster)",
-                      "auto (jobdeck keep, layout cull)"):
+        # three policies as menu commands (auto = keep for every
+        # source since 2026-09-23)
+        for label in ("thin shapes at wide views",
+                      "keep (thin shapes as hairlines)",
+                      "cull (drop all-thin pages, faster)",
+                      "auto (keep)"):
             self.assertIn(label, src)
 
 
@@ -2871,30 +2873,30 @@ class ThinPageTests(unittest.TestCase):
     def _lit(rgb):
         return sum(1 for p in rgb if p != (0, 0, 0))
 
-    def test_layout_culls_by_default_and_keeps_under_the_mask_policy(self):
+    def test_layout_keeps_by_default_and_culls_when_asked(self):
         # 200 px over 2000 um: 1 px = 10 um, hair = 5 um; the 0.1 um
         # lines (40 um long) are all-thin
         exact = self._rgb("thin.oas", "exact")
         self.assertGreater(self._lit(exact), 100)
-        # the plain layout's default: the performance policy culls the
-        # all-thin page - nothing. The page frontier (FLOE_RUST_PAGE_REPS
+        # the plain layout's default since 2026-09-23 (user decision):
+        # keep, identical to exact
+        self.assertEqual(self._rgb("thin.oas", "high"), exact)
+        # the former layout policy, now asked for with --thin cull,
+        # culls the all-thin page - nothing. The page frontier (FLOE_RUST_PAGE_REPS
         # =on, deactivated by default since 2026-09-17) keeps a
         # representative of what the cut drops - this single sparse
         # page, drawn exactly - and the blanket sub-cut rules
         # (FLOE_RUST_SUB_CUT_WASH=on) give the same picture here
         reps = {"FLOE_RUST_PAGE_REPS": "on"}
         wash = {"FLOE_RUST_SUB_CUT_WASH": "on"}
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
-        self.assertEqual(self._rgb("thin.oas", "high", reps), exact)
-        self.assertEqual(self._rgb("thin.oas", "high", wash), exact)
-        # the mask policy on the same file: identical to exact
-        self.assertEqual(self._rgb("thin.oas", "high", thin="keep"), exact)
-        # explicit cull is the default; the diagnostic override wins
-        # over the request either way
         self.assertEqual(self._lit(self._rgb("thin.oas", "high", thin="cull")), 0)
-        self.assertEqual(self._rgb("thin.oas", "high", dict(reps), thin="cull"), exact)
+        self.assertEqual(self._rgb("thin.oas", "high", reps, thin="cull"), exact)
+        self.assertEqual(self._rgb("thin.oas", "high", wash, thin="cull"), exact)
+        # explicit keep is the default; the diagnostic override wins
+        # over the request either way
+        self.assertEqual(self._rgb("thin.oas", "high", thin="keep"), exact)
         self.assertEqual(self._rgb("thin.oas", "high",
-                                   {"FLOE_RUST_PAGE_HAIRLINE": "keep"}), exact)
+                                   {"FLOE_RUST_PAGE_HAIRLINE": "keep"}, thin="cull"), exact)
         self.assertEqual(self._lit(self._rgb(
             "thin.oas", "high", {"FLOE_RUST_PAGE_HAIRLINE": "cull"},
             thin="keep")), 0)
@@ -2910,14 +2912,15 @@ class ThinPageTests(unittest.TestCase):
         outside = [(x, y) for x, y in diff if not (x >= 194 and y <= 5)]
         self.assertEqual(outside, [], "lines identical away from the box")
         self.assertTrue(diff, "the box itself is drawn")
-        # under the plain policy the thicker record decides the fate
-        # of every line in its page - the documented omission; with the
-        # page frontier switched on (FLOE_RUST_PAGE_REPS=on) the sparse
-        # all-thin page is a representative and drawn either way
+        # under cull (the former layout policy) the thicker record
+        # decides the fate of every line in its page - the documented
+        # omission; with the page frontier switched on
+        # (FLOE_RUST_PAGE_REPS=on) the sparse all-thin page is a
+        # representative and drawn either way
         reps = {"FLOE_RUST_PAGE_REPS": "on"}
-        self.assertEqual(self._lit(self._rgb("thin.oas", "high")), 0)
-        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high")), 100)
-        self.assertGreater(self._lit(self._rgb("thin.oas", "high", reps)), 100)
+        self.assertEqual(self._lit(self._rgb("thin.oas", "high", thin="cull")), 0)
+        self.assertGreater(self._lit(self._rgb("thinmix.oas", "high", thin="cull")), 100)
+        self.assertGreater(self._lit(self._rgb("thin.oas", "high", reps, thin="cull")), 100)
 
     def test_deck_keeps_thin_pages_by_default(self):
         exact = self._rgb("thin.jb", "exact")
@@ -2978,7 +2981,8 @@ class ThinPageTests(unittest.TestCase):
         # cull only with the page frontier off (FLOE_RUST_PAGE_REPS=off);
         # by default it is a representative (the first of its run,
         # sparse) kept as a thin page, as the sub-cut rules
-        # (FLOE_RUST_SUB_CUT_WASH=on) keep it too
+        # (FLOE_RUST_SUB_CUT_WASH=on) keep it too. No thin (the
+        # adapter's default) is keep since 2026-09-23
         for thin, wash, reps, thin_pages, culled in (
                 ("keep", True, True, 1, 0),
                 ("keep", False, True, 1, 0),
@@ -2988,7 +2992,7 @@ class ThinPageTests(unittest.TestCase):
                 (None, True, True, 1, 0),
                 (None, False, True, 1, 0),
                 ("cull", False, False, 0, 1),
-                (None, False, False, 0, 1)):
+                (None, False, False, 1, 0)):
             c = Cache(str(CLI / "thin.oas"))
             c.load()
             if wash:

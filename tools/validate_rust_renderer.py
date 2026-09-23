@@ -131,12 +131,12 @@ class WorkerContractTests(unittest.TestCase):
         v.cache = SimpleNamespace(is_jobdeck=False)
         v.thin_mode = "auto"
         auto = gui.Viewer._render_key(v, "live")
-        v.thin_mode = "cull"
-        self.assertEqual(gui.Viewer._render_key(v, "live"), auto,
-                         "auto on a layout is cull")
         v.thin_mode = "keep"
         keep = gui.Viewer._render_key(v, "live")
-        self.assertNotEqual(keep, auto)
+        self.assertEqual(keep, auto,
+                         "auto on a layout is keep (2026-09-23)")
+        v.thin_mode = "cull"
+        self.assertNotEqual(gui.Viewer._render_key(v, "live"), auto)
         v.thin_mode = "auto"
         v.cache = SimpleNamespace(is_jobdeck=True)
         self.assertEqual(gui.Viewer._render_key(v, "live"), keep,
@@ -1038,8 +1038,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
             # the page hairline policy rides with every frame; a plain
-            # worker's default is the performance policy
-            self.assertIn("thin=cull", commands[0])
+            # worker's default is keep since 2026-09-23 (it was cull)
+            self.assertIn("thin=keep", commands[0])
             self.assertIn("font_px=22", commands[0])
             # the interactive default skips the PNG codec on both sides
             self.assertIn("frame_format=raw", commands[0])

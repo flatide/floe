@@ -239,11 +239,12 @@ class RustRenderWorker:
         self._clip_jobs = {}
         self._mono = False
         # the page hairline policy sent with every frame (`thin=`):
-        # "cull" is the plain layout's performance policy (all-thin
-        # pages dropped at wide views), "keep" the mask / jobdeck
-        # policy (long thin shapes stay as 1 px hairlines). A job's
-        # "thin" overrides; the deck worker defaults to keep
-        self._thin_default = "cull"
+        # "keep" (long thin shapes stay as 1 px hairlines) is the
+        # default for every source since 2026-09-23 (user decision:
+        # a plain layout too); "cull" (all-thin pages dropped at wide
+        # views, the former layout policy) stays as a job's explicit
+        # choice - View > thin shapes > cull, --thin cull
+        self._thin_default = "keep"
         self._style_epoch = 0
         self._colors = {}
         self._fills = {}

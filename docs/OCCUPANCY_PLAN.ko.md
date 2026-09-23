@@ -552,7 +552,9 @@ layer 3/300 status=ok work=729081740 set=4342426,1220836,338091,94074,27163,8105
   요약(존재만 표시)은 별도 결정으로 남긴다.
 - **뷰어 메뉴**: View > thin shapes at wide views > auto / keep (mask policy) /
   cull (layout policy, faster). 예전 "keep thin shapes (mask detail)" 체크 항목을
-  대체하며, 상태줄 `thin:keep|cull`은 그대로.
+  대체하며, 상태줄 `thin:keep|cull`은 그대로. 2026-09-23부터 auto는 모든 소스에서
+  keep이고(사용자 결정: 일반 레이아웃도 keep), 항목 이름은 auto (keep) / keep (thin
+  shapes as hairlines) / cull (drop all-thin pages, faster).
 - 남은 후속: 8-b 품질 샷(5 mm 뷰 요약 vs exact), `floe-index scan`으로 charge당
   비용(생성 시간의 다음 단계), cull에서의 요약.
 

@@ -685,7 +685,11 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   (2026-09-11)**: 마스크는 hairline이 많으므로 덱은 keep이 기본, 일반 레이아웃은
   기존 성능 정책(cull)을 유지하고, 단독 마스크 OASIS는 `--thin keep`/View > thin
   shapes at wide views > keep으로 선택한다(2026-09-15: auto/keep/cull 서브메뉴). 요청별 `thin=keep|cull`로 전달되며 공유 기본값이 아니다.
-  gate `ThinPageTests`(덱 기본 keep, 레이아웃 기본 cull, `--thin`, 진단 override).
+  gate `ThinPageTests`(덱 기본 keep, 레이아웃 기본 keep, `--thin`, 진단 override).
+  **기본 변경(2026-09-23, 사용자 결정)**: 일반 레이아웃도 keep이 기본이다(auto = 모든 소스 keep).
+  cull은 View > thin shapes at wide views > cull 또는 `--thin cull`로 명시할 때만 쓴다(킬 스위치).
+  keep은 광역 뷰에서 all-thin 페이지를 디코드하므로 넓은 뷰의 비용이 늘 수 있다(위 실측 6의 덱
+  fit 뷰 참고) — 실칩 레이아웃의 광역 뷰 시간은 아직 측정하지 않았다.
   **실측 6(2026-09-11, 덱 fit 뷰 165 × 160 mm, 1 px = 202 µm)**: keep 정책으로
   25,138페이지(그중 thin 25k)를 전부 디코드(합 30.9 s)하고 4,170만 hairline을
   칠해(draw 22.2 s) 프레임 32 s → 광역 뷰에서는 쓸 수 없음. 이 줌에서 선

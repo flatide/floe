@@ -441,9 +441,8 @@ class ShotRunner:
         # because captures are exact, which pinned the cause to the
         # plan-stage cut
         self.cut_px = max(0.0, float(cut_px or 0.0))
-        # the page hairline policy: None = the source's default (a
-        # jobdeck keeps thin pages, a layout culls them), or an
-        # explicit "keep" / "cull"
+        # the page hairline policy: None = the default (keep, for a
+        # layout too since 2026-09-23), or an explicit "keep" / "cull"
         self.thin = thin
         self.worker = make_render_worker(cache)
         self._gen = 0

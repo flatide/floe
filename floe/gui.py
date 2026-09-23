@@ -1188,7 +1188,8 @@ class Viewer:
         # retired (2026-09-22): the `lod` argument is accepted and ignored
         self.lod_on = False
         # the page hairline policy (review 2026-09-11): "auto" = keep
-        # for a jobdeck, cull for a layout; "keep" / "cull" explicit
+        # for every source (2026-09-23 user decision: a plain layout
+        # too; it was cull); "keep" / "cull" explicit
         # (View > keep thin shapes, --thin, a forwarded thin=)
         self.thin_mode = thin if thin in ("auto", "keep", "cull") else "auto"
         self.frames_on = bool(frames)
@@ -4579,14 +4580,14 @@ class Viewer:
 
     def _effective_thin(self):
         """The page hairline policy in force: the explicit mode, or
-        for auto the source's default - a jobdeck keeps its all-thin
-        pages (mask data is hairlines), a layout culls them at wide
-        views (the performance policy)."""
+        for auto keep - a jobdeck's all-thin pages (mask data is
+        hairlines) and, since 2026-09-23 (user decision), a plain
+        layout's too; cull (all-thin pages dropped at wide views, the
+        former layout policy) only when asked for."""
         mode = getattr(self, "thin_mode", "auto")
         if mode in ("keep", "cull"):
             return mode
-        cache = getattr(self, "cache", None)
-        return "keep" if getattr(cache, "is_jobdeck", False) else "cull"
+        return "keep"
 
     def _set_thin(self, mode, redraw=True):
         """View > keep thin shapes / --thin / a forwarded thin=: switch
@@ -5186,9 +5187,9 @@ class Viewer:
         thin_menu.connect("show", lambda *_: self._menu_sync())
         thin_menu.connect("deactivate", lambda *_: self._restore_keys())
         m.append(thin_root)
-        for mode, label in (("auto", "auto (jobdeck keep, layout cull)"),
-                            ("keep", "keep (mask policy)"),
-                            ("cull", "cull (layout policy, faster)")):
+        for mode, label in (("auto", "auto (keep)"),
+                            ("keep", "keep (thin shapes as hairlines)"),
+                            ("cull", "cull (drop all-thin pages, faster)")):
             check(thin_menu, label,
                   (lambda mode=mode: self._set_thin(mode)),
                   (lambda mode=mode:
