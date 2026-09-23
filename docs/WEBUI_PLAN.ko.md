@@ -1,6 +1,13 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-22(로컬 전체 회귀 통과; 원격 단계 보류).
+작성 2026-08-29, 갱신 2026-09-23(Electron 단일 호스트; WK 동결; 원격 단계 보류).
+
+**현재 호스트 결정:** macOS/Linux 네이티브 앱은 [Electron](WEBUI_ELECTRON.ko.md)만
+개발한다. WKWebView는 `617909e` 기준으로 [동결](../desktop/README.md)하고 기존
+코드·검증 기록을 보존한다. 창 재사용도 Electron만 구현한다. WK 전용 GUI 및
+WK/Electron 교차 검사는 후속 필수 완료 조건에서 제외하되 공통 Rust/웹/Electron
+검증은 유지한다. 외부 브라우저용 `floe2-web`과 GTK 비교 경로는 유지하며,
+Electron 선택 자체로 RHEL/ETX·성능·배포 수용을 통과 처리하지 않는다.
 
 후속 [활성 창 native 검증](WEBUI_DESKTOP.ko.md#25-활성-창에서의-전체-native-검사와-호스트-대조-2026-09-22):
 전체 native suite와 WK/Electron 동일 viewport RGBA 대조가 각각 exit0이다.
@@ -28,9 +35,9 @@ G1 조사용 [기본 off 브라우저 구간 계측](WEBUI_G1_TIMING.ko.md)을 �
 2026-09-18 요구 추가: **외부 브라우저 없이 독립 창 + 내장 WebView**도 필수다.
 HTML/Canvas UI·Rust 서비스를 공유하며 별도 Rust 위젯 UI를 만들지 않는다.
 필수 현장은 **RHEL 8.6/8.10 + ETX/X11**.
-Electron 후보는 [오프라인 개발 비교 번들](WEBUI_ELECTRON_PORTABLE.ko.md)로
+선택한 Electron 호스트는 [오프라인 개발 비교 번들](WEBUI_ELECTRON_PORTABLE.ko.md)로
 저장소 밖 실행·고지/파일 무결성·macOS 합성 렌더까지 검사했다. 정식 RHEL/ETX
-채택·서명 배포 또는 G1/G4 전체 수용으로 집계하지 않는다.
+실행 수용·서명 배포 또는 G1/G4 전체 수용으로 집계하지 않는다.
 [데스크톱 계획](WEBUI_DESKTOP.ko.md)의
 D0~D3를 추가 추적한다. D1-mac의 시스템 WKWebView 독립 호스트·개발용 `.app`과
 실제 인증/확인 종료 검사를 구현했다. D2-mac 파일 선택/새 파일 저장·클립보드·
@@ -567,10 +574,9 @@ M4g-15a는 명시 ICE와 인접 reviewer 파일의 읽기 선택을 저장 권�
 
 - GTK 셸의 즉시 대체. GTK는 parity + ETX 게이트(§6) 통과 전까지 주
   작업자용으로 병존한다(worker job/result 계약이 GUI 중립이라 가능).
-- Electron을 TeeBox에서 실행해 X/ETX로 쏘는 형태는 **현장 검증 전
-  제외**. 원격 디스플레이에서 Chromium 합성 비용이 크다는 우려는
-  해당 ETX 구성에서 실측되지 않았고, Firefox도 배포 B에서는 결국
-  ETX 화면 전송을 거치므로 기술적 단정이 아니라 우선순위 결정이다.
+- 현장 검증 전 Electron을 GTK 대신 실사용에 강제 배포하는 것. Electron의
+  RHEL/ETX 구현·검증 자체는 현재 필수 범위다. 실측 전 속도를 단정하지 않는다.
+- WKWebView/Linux WebKit 호스트의 추가 개발·배포. WK는 참조용으로 동결한다.
 - 초기 단계의 편집·계측 고급 기능 parity. M1~M2는 읽기 중심이다.
 - 동결된 floe/KLayout·legacy indexer·폐기된 coverage 코드의 Rust 복제.
   현재 floe2가 제공하는 기능 계약을 기준으로 이관한다.
@@ -589,21 +595,21 @@ M4g-15a는 명시 ICE와 인접 reviewer 파일의 읽기 선택을 저장 권�
                  ▼
              HTML UI (canvas 2D; Python 런타임 없음)
 
-배포 A  데스크톱 패키징: 독립 native 창 + 내장 WebView에서 같은 UI를
+배포 A  데스크톱 패키징: Electron 독립 창 + 내장 Chromium에서 같은 UI를
         loopback으로 표시. 외부 브라우저용 floe2-web도 별도 유지.
 배포 B  주 작업자(ETX): RHEL 8.6/8.10 TeeBox에서 A를 실행하고 X11로 표시.
-        내장 WebView ABI·ETX 입력/화질/성능을 별도로 검증한다.
+        Electron ABI·ETX 입력/화질/성능을 별도로 검증한다.
         기존 Firefox 경로는 비교/병존용이며 내장 앱 완료로 세지 않는다.
 배포 C  동료/원격 뷰어: gatewayd만 TeeBox에서 서빙, 사용자 자신의
         브라우저가 네트워크로 접속. 픽셀은 로컬에서 그려진다.
 ```
 
-- B는 A의 UI/서비스를 재사용하되 RHEL의 WebKit ABI 및 ETX 성능은 별도
+- B는 A의 UI/서비스를 재사용하되 RHEL의 Electron 의존성 및 ETX 성능은 별도
   검증한다. DISPLAY 상속만으로 G2 통과를 보장하지 않는다.
 - C는 같은 서비스 계약을 쓰되 TLS·게스트 권한·전송 상한·다중 사용자
   자원 정책이 추가된다. 단순한 바인딩 주소 변경만으로 배포 완료가 아니다.
-- 독립 창 자체는 이제 필수이며 특정 엔진(Electron/Wry 등)의 채택과는
-  구분한다. RHEL 8 ABI·ETX 수용 및 오프라인 배포 비용으로 선택한다.
+- 독립 창의 엔진은 Electron으로 확정했다. RHEL 8 ABI·ETX 수용 및
+  오프라인 배포 비용 검증은 선택과 별개로 남는다.
 
 ## 3. 컴포넌트
 
@@ -788,7 +794,7 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
   로컬 진단의 측정 경계·재현 순서는 [G1 계측](WEBUI_G1_TIMING.ko.md) 참조.
   JS 콜백 시간만으로 이 수용 조건을 통과 처리하지 않는다.
 - **G2 (ETX, 배포 B)**: 필수 대상은 RHEL 8.6/8.10 + ETX/X11의
-  **독립 창 + 내장 WebView**다. 같은 소스·캐시·뷰·표시 옵션·renderd로
+  **Electron 독립 창 + 내장 Chromium**이다. 같은 소스·캐시·뷰·표시 옵션·renderd로
   GTK-in-ETX와 drag pacing·settle·화질·ETX 대역폭을 비교한다.
   실제 Firefox-in-ETX 대조도 기존 브라우저 경로의 근거로 유지하지만,
   Firefox 통과로 내장 앱의 ABI·입력·표시 수용을 대신하지 않는다.
@@ -883,9 +889,9 @@ jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 �
 
 2. **M2 — DRC 공유 뷰어 (배포 C)**: DRC 결과 목록/이동/waive 표시
    (읽기 전용), 게스트 토큰 URL 발급. 확정 수요 대응.
-3. **M3 — ETX 게이트 (배포 B)**: M0의 TeeBox 환경/버전과 내장 WebView의
+3. **M3 — ETX 게이트 (배포 B)**: M0의 TeeBox 환경/버전과 Electron의
    RHEL ABI를 재확인하고 G2를 실측한다. Firefox 비교와 내장 앱 수용을
-   구분하며 [D0~D3](WEBUI_DESKTOP.ko.md)의 Linux 호스트·입출력·배포 검증을
+   구분하며 [Electron E2/E3](WEBUI_ELECTRON.ko.md)의 Linux 호스트·입출력·배포 검증을
    함께 충족해야 한다. 통과 전 GTK launcher를 유지하고, 전환은 수용 후
    별도로 판정한다. 미통과 시 원인 분석(전송 단계 상향 포함) 후 재시도한다.
 4. **M4 — 조작 parity + Python-free 제품 전환**: pick/snap/룰러/clip/

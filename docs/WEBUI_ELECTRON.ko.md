@@ -1,9 +1,11 @@
-# Electron 독립 앱 비교
+# Electron 독립 앱 — 단일 네이티브 호스트
 
 2026-09-21. 상위 [웹 전환](WEBUI_PLAN.ko.md), [데스크톱](WEBUI_DESKTOP.ko.md).
-사용자 승인: **Electron 최소 호스트 비교 진행**. 기존 macOS WKWebView 앱 유지.
-정식 호스트 채택·배포는 RHEL 8.6/8.10 + ETX/X11의 호환성/메모리/입력 지연을
-확인한 뒤 결정한다. Chromium이 느리거나 빠르다고 미리 단정하지 않는다.
+2026-09-23 사용자 결정: **Electron을 macOS/Linux의 단일 네이티브 호스트로 선택**했다.
+WKWebView는 `617909e` 기준으로 [동결](../desktop/README.md)하며 코드·기록만 보존한다.
+이후 기능·창 재사용·성능·배포 준비는 Electron에 집중한다. 외부 브라우저 경로는
+유지한다. 아래 비교판 구현 이력과 현재 바이너리의 comparison 표기는 보존하며,
+호스트 선택을 RHEL 8.6/8.10 + ETX/X11·메모리/입력 지연·정식 배포 수용으로 세지 않는다.
 
 ## 범위와 단계
 
@@ -11,13 +13,14 @@
 |---|---|---|
 | E0 | 기존 Rust Session의 전용 파이프 sidecar, JS 클라이언트, 수명/인증 회귀 | 구현·실제 Node↔Rust 합성 검사; 아래 계약 |
 | E1 | sandboxed Electron 독립 창, 같은 웹 번들, 시작/종료/실패 처리, 런타임 고정/검증 | macOS arm64 실제 Chromium 합성 창 검사 통과. 기능·성능 수용은 E2/E3 |
-| E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | E2a~e 합성 근거 및 [Chromium 종료/DRC 복구·Rust 서비스 종료 안내](WEBUI_ELECTRON_REVIEW.ko.md). [2026-09-22 후속 통합 검사](WEBUI_NATIVE_STARTUP.ko.md#새-debug-폴더의-전체-회귀--2026-09-22)는 helper3건 포함 exit0. WK/현장 대조·물리 입력·실제 Save 창·저장소 장애는 남음 |
+| E2 | 합성 레이아웃 입력/표시, 시작/RSS/CPU/input→표시 비교 도구, native 메뉴/입출력/복구 수용 | E2a~e 합성 근거 및 [Chromium 종료/DRC 복구·Rust 서비스 종료 안내](WEBUI_ELECTRON_REVIEW.ko.md). [2026-09-22 후속 통합 검사](WEBUI_NATIVE_STARTUP.ko.md#새-debug-폴더의-전체-회귀--2026-09-22)는 helper3건 포함 exit0. GTK/현장 대조·물리 입력·실제 Save 창·저장소 장애는 남음. WK 교차 검사는 과거 기준선이며 후속 필수 게이트가 아님 |
 | E3 | RHEL 전체 ELF/라이브러리 의존성, sandbox·ETX/다중 사용자 실측, 라이선스/업데이트/오프라인 배포 | [이동 가능한 개발 비교 번들](WEBUI_ELECTRON_PORTABLE.ko.md) macOS 로컬 검사. 현장/정식 배포 대기, OS 패키지/보안 설정 변경 없음 |
 
 Rust geometry·렌더러·색인·DRC·파일 권한/저장 API를 JS로 옮기지 않는다. Electron은
 기존 정적 웹 UI와 작은 JS 호스트를 사용하므로 Python-free지만 호스트까지 Rust-only는
-아니다. 웹/기존 macOS 호스트의 대체·삭제, Node를 Rust CLI 필수 의존성으로 추가,
-원격 공유 공개, implicit indexing, `--no-sandbox` 우회는 포함하지 않는다.
+아니다. WK 제품 개발은 중단하되 기존 코드/바이너리의 삭제는 하지 않는다.
+Node를 Rust CLI 필수 의존성으로 추가, 원격 공유 공개, implicit indexing,
+`--no-sandbox` 우회는 포함하지 않는다.
 
 ## E0: 전용 파이프와 수명
 

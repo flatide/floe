@@ -1,8 +1,12 @@
 # G1 — 브라우저 구간 계측
 
-작성: 2026-09-21. 범위: owner 웹 뷰어와 같은 UI를 쓰는 WKWebView.
+작성: 2026-09-21. 현재 범위: owner 웹 뷰어와 같은 UI를 쓰는 Electron.
 관련 정본: [웹 전환 계획 §6](WEBUI_PLAN.ko.md#6-성능-요구와-게이트),
 [데스크톱 계획](WEBUI_DESKTOP.ko.md).
+
+2026-09-23: WKWebView 동결에 따라 아래 WK 비교 이력은 기준선으로만 보존한다.
+이후 성능 수용은 GTK 대비 Electron/웹을 대상으로 하며 WK 성능 개선이나 교차
+대조 완료를 기다리지 않는다. G1 input→photon/pacing 기준은 완화하지 않는다.
 
 2026-09-22 후속: [실제 활성 창의 WK/Electron 대조](WEBUI_DESKTOP.ko.md#25-활성-창에서의-전체-native-검사와-호스트-대조-2026-09-22)에서
 같은1600×1200/DPR2/world bbox·workers·새 합성 소스/캐시로 pan reuse on/off ×

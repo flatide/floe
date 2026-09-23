@@ -1,5 +1,11 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-23 범위 변경: 사용자 결정으로 네이티브 제품 호스트는 Electron 하나다.
+WKWebView는 [동결](../desktop/README.md)했고 아래 WK 구현/검사는 과거 근거로
+보존한다. 이후 WK 전용 장애/입력/배포·양 호스트 동시 검증을 요구하지 않는다.
+공통 서비스/웹·Electron 수용, Electron 창 재사용·NFS 게시 복구·GTK 대비 G1·
+RHEL/ETX·배포는 계속 남는다. 동결을 미완료 기능의 검증 통과로 집계하지 않는다.
+
 2026-09-22 최신: 사용자의 창 활성화 협조 승인 뒤 [native 전체 suite와 WK/Electron
 고정 화면 대조](WEBUI_DESKTOP.ko.md#25-활성-창에서의-전체-native-검사와-호스트-대조-2026-09-22)가
 각각 exit0이었다. 아래 `menu=hidden`은 앞선 실패 기록이다. 실제 저장 경로는 NFS
