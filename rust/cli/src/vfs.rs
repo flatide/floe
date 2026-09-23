@@ -7049,7 +7049,11 @@ pub fn plan_cmd(args: &[String]) {
             // --density-storage 1: also scan the whole index for what the
             // summaries would weigh (every cell, page and BVH node)
             let storage = rest.iter().any(|(k, val)| k == "--density-storage" && val != "0");
-            density_probe(&v, &req, &plan, ms, storage);
+            // --selection-meta 1: also decode every exact page for the
+            // record census a per-record selection meta would cost
+            // (ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 2)
+            let meta = rest.iter().any(|(k, val)| k == "--selection-meta" && val != "0");
+            density_probe(&v, &req, &plan, ms, storage, meta);
         }
         return;
     }
@@ -7091,6 +7095,19 @@ struct DensityQ {
     /// layer it holds) would replace their pages
     allcut_cells: u64,
     allcut_layers: u64,
+    /// ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 2: what reaching the cut
+    /// candidates would read - the cut pages (page and page-BVH culls)
+    /// and the exact pages of the subtrees below cut child-BVH nodes on
+    /// the visible layers: stored bytes (decode input), encoded bytes
+    /// (decode output) and records (the per-record selection meta's
+    /// rows, and the enumeration's candidates)
+    cut_page_bytes: u64,
+    cut_page_usize: u64,
+    cut_page_records: u64,
+    cbvh_page_bytes: u64,
+    cbvh_page_usize: u64,
+    cbvh_page_records: u64,
+    cbvh_pages: u64,
 }
 
 impl DensityQ {
@@ -7112,7 +7129,178 @@ impl DensityQ {
         self.cbvh_masked = self.cbvh_masked.saturating_add(o.cbvh_masked.saturating_mul(k));
         self.allcut_cells = self.allcut_cells.saturating_add(o.allcut_cells.saturating_mul(k));
         self.allcut_layers = self.allcut_layers.saturating_add(o.allcut_layers.saturating_mul(k));
+        self.cut_page_bytes = self.cut_page_bytes.saturating_add(o.cut_page_bytes.saturating_mul(k));
+        self.cut_page_usize = self.cut_page_usize.saturating_add(o.cut_page_usize.saturating_mul(k));
+        self.cut_page_records = self.cut_page_records.saturating_add(o.cut_page_records.saturating_mul(k));
+        self.cbvh_page_bytes = self.cbvh_page_bytes.saturating_add(o.cbvh_page_bytes.saturating_mul(k));
+        self.cbvh_page_usize = self.cbvh_page_usize.saturating_add(o.cbvh_page_usize.saturating_mul(k));
+        self.cbvh_page_records = self.cbvh_page_records.saturating_add(o.cbvh_page_records.saturating_mul(k));
+        self.cbvh_pages = self.cbvh_pages.saturating_add(o.cbvh_pages.saturating_mul(k));
     }
+}
+
+/// The exact pages of a cell's whole subtree on the view's visible
+/// layers, placements multiplied: (pages, stored bytes, encoded bytes,
+/// records) - what a density pass would read below a child-BVH node the
+/// size cut pruned (§4.3 step 2), memoized per cell.
+fn subtree_pages(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, ci: u32, memo: &mut std::collections::HashMap<u32, (u64, u64, u64, u64)>) -> (u64, u64, u64, u64) {
+    if let Some(&q) = memo.get(&ci) {
+        return q;
+    }
+    let c = v.ovm.cell(ci);
+    let mut q = (0u64, 0u64, 0u64, 0u64);
+    for k in c.prange_start..c.prange_start + c.prange_count {
+        let pr = v.ovm.prange(k);
+        let li = pr.layer_idx as usize;
+        if req.vis.get(li / 8).map_or(false, |b| b >> (li % 8) & 1 == 1) {
+            for pi in pr.page_lo..pr.page_lo + pr.page_count {
+                let p = v.ovm.page(pi);
+                if p.lod == 0 {
+                    q.0 += 1;
+                    q.1 += p.csize as u64;
+                    q.2 += p.usize_ as u64;
+                    q.3 += p.records as u64;
+                }
+            }
+        }
+    }
+    for pli in c.place_start as u64..(c.place_start + c.place_count) as u64 {
+        let child = v.ovm.place_head(pli).child;
+        let m = place_members(v, pli);
+        let sub = subtree_pages(v, req, child, memo);
+        q.0 = q.0.saturating_add(sub.0.saturating_mul(m));
+        q.1 = q.1.saturating_add(sub.1.saturating_mul(m));
+        q.2 = q.2.saturating_add(sub.2.saturating_mul(m));
+        q.3 = q.3.saturating_add(sub.3.saturating_mul(m));
+    }
+    memo.insert(ci, q);
+    q
+}
+
+/// What a per-record selection meta would hold, decoded from every exact
+/// page (§4.3 step 2 item 1): the record census by kind and the bytes of a
+/// flat table that lets the lattice enumeration find a record's sub-cut
+/// candidates without opening its page - rectangle One 20 B (layer, box),
+/// Grid 44 B (+ counts, two vectors), Pts 20 B + 8 B a point; a polygon or
+/// path 20 B + 8 B a vertex, its repetition the same. Decoding every page
+/// is also the meta's generation cost (wall time, peak RSS on Linux).
+#[derive(Default, Clone, Copy)]
+struct MetaCensus {
+    pages: u64,
+    csize: u64,
+    usize_: u64,
+    rect_one: u64,
+    rect_grid: u64,
+    rect_pts: u64,
+    rect_pts_points: u64,
+    poly: u64,
+    path: u64,
+    vertices: u64,
+    other_rep_points: u64,
+    meta_bytes: u64,
+}
+
+impl MetaCensus {
+    fn add(&mut self, o: &MetaCensus) {
+        self.pages += o.pages;
+        self.csize += o.csize;
+        self.usize_ += o.usize_;
+        self.rect_one += o.rect_one;
+        self.rect_grid += o.rect_grid;
+        self.rect_pts += o.rect_pts;
+        self.rect_pts_points += o.rect_pts_points;
+        self.poly += o.poly;
+        self.path += o.path;
+        self.vertices += o.vertices;
+        self.other_rep_points += o.other_rep_points;
+        self.meta_bytes += o.meta_bytes;
+    }
+}
+
+fn meta_census(v: &floe_vfs::Vfs, jobs: usize) -> Result<(MetaCensus, f64), String> {
+    let t = std::time::Instant::now();
+    let exact: Vec<u32> = (0..v.ovm.n_pages).filter(|&pi| v.ovm.page(pi).lod == 0).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let total = std::sync::Mutex::new(MetaCensus::default());
+    let failed = std::sync::Mutex::new(None::<String>);
+    std::thread::scope(|scope| {
+        for _ in 0..jobs.max(1) {
+            scope.spawn(|| {
+                let mut mine = MetaCensus::default();
+                loop {
+                    let k = next.fetch_add(256, std::sync::atomic::Ordering::Relaxed);
+                    if k >= exact.len() {
+                        break;
+                    }
+                    let batch = &exact[k..(k + 256).min(exact.len())];
+                    let payloads = match v.read_page_batch(batch) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            *failed.lock().unwrap() = Some(e);
+                            return;
+                        }
+                    };
+                    for (pi, bytes) in payloads {
+                        let p = v.ovm.page(pi);
+                        mine.pages += 1;
+                        mine.csize += p.csize as u64;
+                        mine.usize_ += p.usize_ as u64;
+                        let doc = match floe_oasis::doc::parse_doc(&bytes) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                *failed.lock().unwrap() = Some(format!("page {}: {}", pi, e));
+                                return;
+                            }
+                        };
+                        for cell in &doc.cells {
+                            for r in &cell.rects {
+                                match &r.rep {
+                                    Rep::One => {
+                                        mine.rect_one += 1;
+                                        mine.meta_bytes += 20;
+                                    }
+                                    Rep::Grid { .. } => {
+                                        mine.rect_grid += 1;
+                                        mine.meta_bytes += 44;
+                                    }
+                                    Rep::Pts(pts) => {
+                                        mine.rect_pts += 1;
+                                        mine.rect_pts_points += pts.len() as u64;
+                                        mine.meta_bytes += 20 + 8 * pts.len() as u64;
+                                    }
+                                }
+                            }
+                            let mut shape = |n_vertices: u64, rep: &Rep| {
+                                mine.vertices += n_vertices;
+                                mine.meta_bytes += 20 + 8 * n_vertices;
+                                match rep {
+                                    Rep::One => {}
+                                    Rep::Grid { .. } => mine.meta_bytes += 24,
+                                    Rep::Pts(pts) => {
+                                        mine.other_rep_points += pts.len() as u64;
+                                        mine.meta_bytes += 8 * pts.len() as u64;
+                                    }
+                                }
+                            };
+                            for pg in &cell.polys {
+                                mine.poly += 1;
+                                shape(pg.pts.len() as u64, &pg.rep);
+                            }
+                            for pa in &cell.paths {
+                                mine.path += 1;
+                                shape(pa.pts.len() as u64, &pa.rep);
+                            }
+                        }
+                    }
+                }
+                total.lock().unwrap().add(&mine);
+            });
+        }
+    });
+    if let Some(e) = failed.into_inner().unwrap() {
+        return Err(e);
+    }
+    Ok((total.into_inner().unwrap(), t.elapsed().as_secs_f64()))
 }
 
 fn place_members(v: &floe_vfs::Vfs, pli: u64) -> u64 {
@@ -7153,7 +7341,7 @@ fn probe_inside(outer: &BBox, b: &BBox) -> bool {
 /// grids clip their index ranges, only the edge members recurse). A row is
 /// counted for every visible instance of its owner (an upper bound: the
 /// planner judged it against the union of those instances' local views).
-fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hier::HierPlan, plan_ms: f64, storage: bool) {
+fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hier::HierPlan, plan_ms: f64, storage: bool, meta: bool) {
     use std::collections::{HashMap, HashSet};
     let t0 = std::time::Instant::now();
     let px = req.px_per_dbu;
@@ -7161,6 +7349,13 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
         plan.wcells.iter().enumerate().map(|(i, c)| (c.key, i)).collect();
     let mut own = vec![DensityQ::default(); plan.wcells.len()];
     let mut seen: HashSet<((u32, u32), &'static str, u64)> = HashSet::new();
+    let mut subtree_memo: HashMap<u32, (u64, u64, u64, u64)> = HashMap::new();
+    let page_volume = |q: &mut DensityQ, pi: u32| {
+        let p = v.ovm.page(pi);
+        q.cut_page_bytes += p.csize as u64;
+        q.cut_page_usize += p.usize_ as u64;
+        q.cut_page_records += p.records as u64;
+    };
     let (mut child_cells, mut cut_pages) = (HashSet::new(), HashSet::new());
     for r in &plan.explain {
         let Some(&wi) = index.get(&r.owner) else { continue };
@@ -7184,6 +7379,7 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
                 q.wide16_pages += (side > 16.0) as u64;
                 q.wide64_pages += (side > 64.0) as u64;
                 cut_pages.insert(r.id);
+                page_volume(q, r.id as u32);
             }
             ("pbvh", "cull_size") => {
                 q.pbvh += 1;
@@ -7192,6 +7388,9 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
                     let n = v.ovm.pbvh(ni);
                     if n.leaf {
                         q.pbvh_pages += n.count as u64;
+                        for pi in n.first..n.first + n.count as u32 {
+                            page_volume(q, pi);
+                        }
                     } else {
                         stack.extend(n.first..n.first + n.count as u32);
                     }
@@ -7206,7 +7405,14 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
                     if n.leaf {
                         for k in 0..n.count as u64 {
                             q.cbvh_recs += 1;
-                            q.cbvh_members += place_members(v, n.first as u64 + k);
+                            let m = place_members(v, n.first as u64 + k);
+                            q.cbvh_members += m;
+                            let child = v.ovm.place_head(n.first as u64 + k).child;
+                            let sub = subtree_pages(v, req, child, &mut subtree_memo);
+                            q.cbvh_pages = q.cbvh_pages.saturating_add(sub.0.saturating_mul(m));
+                            q.cbvh_page_bytes = q.cbvh_page_bytes.saturating_add(sub.1.saturating_mul(m));
+                            q.cbvh_page_usize = q.cbvh_page_usize.saturating_add(sub.2.saturating_mul(m));
+                            q.cbvh_page_records = q.cbvh_page_records.saturating_add(sub.3.saturating_mul(m));
                         }
                     } else {
                         stack.extend(n.first..n.first + n.count as u32);
@@ -7222,6 +7428,12 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
             own[wi].allcut_layers = visible_layers_of(v, req, v.ovm.cell_lmask_direct(c.key.0));
         }
     }
+    // the cut pages once each: what a frame would actually read (a decoded
+    // page serves all its instances); the per-instance sums above are the work
+    let (distinct_cut_bytes, distinct_cut_records) = cut_pages.iter().fold((0u64, 0u64), |a, &pi| {
+        let p = v.ovm.page(pi as u32);
+        (a.0 + p.csize as u64, a.1 + p.records as u64)
+    });
     let rows_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t1 = std::time::Instant::now();
     let view = req.view;
@@ -7436,6 +7648,22 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
             thin_pages += 1;
         }
     }
+    let (census, census_s) = if meta {
+        let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
+        match meta_census(v, jobs) {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("selection meta census failed: {}", e);
+                (MetaCensus::default(), 0.0)
+            }
+        }
+    } else {
+        (MetaCensus::default(), 0.0)
+    };
+    let (exact_csize, exact_usize, exact_records) = (0..if storage { v.ovm.n_pages } else { 0 })
+        .map(|pi| v.ovm.page(pi))
+        .filter(|p| p.lod == 0)
+        .fold((0u64, 0u64, 0u64), |a, p| (a.0 + p.csize as u64, a.1 + p.usize_ as u64, a.2 + p.records as u64));
     println!(
         "density_probe\tplan_ms={:.1}\twalk_ms={:.1}\twalk_visits={}\tpages_selected={}\t\
          child_recs={}\tchild_members={}\tchild_layers={}\tthin_members={}\t\
@@ -7444,7 +7672,14 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
          distinct_child_cells={}\tdistinct_cut_pages={}\trows_ms={:.1}\t\
          bvh_nodes={}\tbvh_layer_pairs={}\tbvh_masked_pairs={}\tbvh_unknown={}\tpbvh_nodes={}\t\
          storage={}\tcells={}\tcell_layer_pairs={}\tlmask_unknown={}\tcells_under_cut={}\t\
-         exact_pages={}\tpages_min_under_cut={}",
+         exact_pages={}\tpages_min_under_cut={}\t\
+         cut_page_bytes={}\tcut_page_usize={}\tcut_page_records={}\t\
+         distinct_cut_page_bytes={}\tdistinct_cut_page_records={}\t\
+         cbvh_pages={}\tcbvh_page_bytes={}\tcbvh_page_usize={}\tcbvh_page_records={}\t\
+         exact_csize={}\texact_usize={}\texact_records={}\t\
+         meta={}\tmeta_pages={}\tmeta_s={:.1}\tmeta_peak_rss={}\tmeta_rect_one={}\tmeta_rect_grid={}\t\
+         meta_rect_pts={}\tmeta_rect_pts_points={}\tmeta_poly={}\tmeta_path={}\tmeta_vertices={}\t\
+         meta_other_rep_points={}\tmeta_bytes={}",
         plan_ms, walk_ms, visits, plan.pages.len(),
         total.child_recs, total.child_members, total.child_layers, total.thin_members,
         total.pages, total.wide_pages, total.wide16_pages, total.wide64_pages, total.page_members, total.pbvh, total.pbvh_pages,
@@ -7452,6 +7687,13 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
         child_cells.len(), cut_pages.len(), rows_ms,
         bvh_nodes, bvh_pairs, bvh_masked_pairs, bvh_unknown, v.ovm.n_pbvh,
         storage as u8, v.ovm.n_cells, pairs, unknown, droppable, exact_pages, thin_pages,
+        total.cut_page_bytes, total.cut_page_usize, total.cut_page_records,
+        distinct_cut_bytes, distinct_cut_records,
+        total.cbvh_pages, total.cbvh_page_bytes, total.cbvh_page_usize, total.cbvh_page_records,
+        exact_csize, exact_usize, exact_records,
+        meta as u8, census.pages, census_s, proc_status_bytes("VmHWM:").unwrap_or(0),
+        census.rect_one, census.rect_grid, census.rect_pts, census.rect_pts_points, census.poly, census.path,
+        census.vertices, census.other_rep_points, census.meta_bytes,
     );
 }
 

@@ -14,8 +14,19 @@ the plan's instances - the part a density pass cannot avoid without a
 flattened summary. Also printed once: the (cell, layer) pairs and pages the
 summaries would hold.
 
+ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 2 (2026-09-23): per view it also sums what
+reaching the cut candidates would READ - the cut pages' stored bytes (decode
+input), encoded bytes and records, and the same for the exact pages of the
+subtrees below child-BVH nodes the size cut pruned, placements multiplied
+(records = the rows a per-record selection meta would hold, and the lattice
+enumeration's candidates). With --meta it decodes every exact page once for
+the record census by kind and the bytes of a flat per-record selection meta
+(rectangle One 20 B, Grid 44 B, Pts 20 B + 8 B a point; polygon / path 20 B +
+8 B a vertex), and reports that decode's wall time and peak RSS (Linux) - the
+meta's generation cost.
+
     .venv/bin/python tools/probe_density_queries.py data/synthetic/main01_chip_p10.oas \\
-        [--layers last10,all] [--zooms 1,2,4,8,16,64] [--depth full] [--size 1920x1080]
+        [--layers last10,all] [--zooms 1,2,4,8,16,64] [--depth full] [--size 1920x1080] [--meta]
 """
 import argparse
 import json
@@ -44,6 +55,7 @@ def main(argv=None):
     ap.add_argument('--cut-px', type=float, default=3.0)
     ap.add_argument('--center', help='view centre "x,y" in um (default: the layout centre)')
     ap.add_argument('--bin', default=str(ROOT / 'rust/target/release/floe-index'))
+    ap.add_argument('--meta', action='store_true', help='decode every exact page once for the selection meta census')
     args = ap.parse_args(argv)
     ice = cache_dir(args.source)
     meta = json.loads((ice / 'meta.json').read_text())
@@ -58,7 +70,10 @@ def main(argv=None):
     cols = ['plan_ms', 'walk_ms', 'walk_visits', 'pages_selected', 'child_recs', 'child_members',
             'child_layers', 'thin_members', 'cut_pages', 'wide_pages', 'wide16_pages', 'wide64_pages',
             'pbvh', 'pbvh_pages',
-            'cbvh', 'cbvh_masked', 'cbvh_recs', 'cbvh_members', 'allcut_cells', 'allcut_layers']
+            'cbvh', 'cbvh_masked', 'cbvh_recs', 'cbvh_members', 'allcut_cells', 'allcut_layers',
+            'cut_page_bytes', 'cut_page_usize', 'cut_page_records',
+            'distinct_cut_page_bytes', 'distinct_cut_page_records',
+            'cbvh_pages', 'cbvh_page_bytes', 'cbvh_page_usize', 'cbvh_page_records']
     once = None
     rows = []
     print('view          ' + ' '.join('%13s' % c for c in cols))
@@ -70,7 +85,8 @@ def main(argv=None):
             cmd = [args.bin, 'plan', str(ice), '--view', '%f,%f,%f,%f' % (cx - hw, cy - hh, cx + hw, cy + hh),
                    '--px-per-um', repr(px), '--cut-px', repr(args.cut_px), '--depth', args.depth,
                    '--shape-cut', '1', '--page-hairline', '0', '--frames', '0', '--density-probe', '1',
-                   '--density-storage', '0' if once else '1']
+                   '--density-storage', '0' if once else '1',
+                   '--selection-meta', '1' if args.meta and not once else '0']
             if spec != 'all':
                 cmd += ['--layers', ','.join('%d/%d' % k for k in chosen)]
             out = subprocess.run(cmd, capture_output=True, text=True)
@@ -103,6 +119,36 @@ def main(argv=None):
         print('%s %g %s' % (spec[0], z, ' '.join(k(row, c) for c in (
             'child_recs', 'child_members', 'cut_pages', 'cbvh', 'cbvh_masked', 'cbvh_recs', 'allcut_cells'))))
     print('s %s %s %s' % (k(once, 'cell_layer_pairs'), k(once, 'exact_pages'), k(once, 'bvh_masked_pairs')))
+    # §4.3 step 2: what the cut candidates would read, per view, against the
+    # whole index; the selection meta's size and generation cost with --meta
+    mb = lambda row, c: '%.1f' % (int(row[c]) / 1e6)
+    print('\nread volume (MB stored / MB encoded / records): cut pages, then the subtrees below cut BVH nodes; '
+          'whole index %s / %s MB, %s records in %s exact pages'
+          % (mb(once, 'exact_csize'), mb(once, 'exact_usize'), k(once, 'exact_records'), k(once, 'exact_pages')))
+    for spec, z, row in rows:
+        print('%-6s x%-6g cut pages %s / %s / %s (once each %s MB / %s)   below cut nodes %s pages %s / %s / %s'
+              % (spec, z, mb(row, 'cut_page_bytes'), mb(row, 'cut_page_usize'), k(row, 'cut_page_records'),
+                 mb(row, 'distinct_cut_page_bytes'), k(row, 'distinct_cut_page_records'),
+                 k(row, 'cbvh_pages'), mb(row, 'cbvh_page_bytes'), mb(row, 'cbvh_page_usize'), k(row, 'cbvh_page_records')))
+    if int(once.get('meta', '0')):
+        print('selection meta: %s pages decoded in %s s (peak rss %.1f GB); rectangles One %s, Grid %s, Pts %s (%s points); '
+              'polygons %s, paths %s (%s vertices, %s repetition points); flat meta %s MB = %.0f%% of the stored pages '
+              '(%s MB), %.0f%% of the encoded (%s MB)'
+              % (k(once, 'meta_pages'), once['meta_s'], int(once['meta_peak_rss']) / 1e9, k(once, 'meta_rect_one'),
+                 k(once, 'meta_rect_grid'), k(once, 'meta_rect_pts'), k(once, 'meta_rect_pts_points'), k(once, 'meta_poly'),
+                 k(once, 'meta_path'), k(once, 'meta_vertices'), k(once, 'meta_other_rep_points'), mb(once, 'meta_bytes'),
+                 100 * int(once['meta_bytes']) / max(1, int(once['exact_csize'])), mb(once, 'exact_csize'),
+                 100 * int(once['meta_bytes']) / max(1, int(once['exact_usize'])), mb(once, 'exact_usize')))
+    print('== type this 2 == (zoom: cut page MB stored, records, once-each MB, records; below-cut-node pages, '
+          'MB stored, records; m: meta pages, s, MB, rect one/grid/pts, poly+path)')
+    for spec, z, row in rows:
+        print('%s %g %s %s %s %s %s %s %s' % (spec[0], z, mb(row, 'cut_page_bytes'), k(row, 'cut_page_records'),
+                                              mb(row, 'distinct_cut_page_bytes'), k(row, 'distinct_cut_page_records'),
+                                              k(row, 'cbvh_pages'), mb(row, 'cbvh_page_bytes'), k(row, 'cbvh_page_records')))
+    if int(once.get('meta', '0')):
+        print('m %s %s %s %s/%s/%s %s' % (k(once, 'meta_pages'), once['meta_s'], mb(once, 'meta_bytes'),
+                                          k(once, 'meta_rect_one'), k(once, 'meta_rect_grid'), k(once, 'meta_rect_pts'),
+                                          k(once, 'meta_poly') if once['meta_path'] == '0' else '%s+%s' % (k(once, 'meta_poly'), k(once, 'meta_path'))))
 
 
 if __name__ == '__main__':
