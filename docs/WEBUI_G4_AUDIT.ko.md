@@ -1,5 +1,10 @@
 # 웹 전환 G4 잔여 감사
 
+2026-09-23 후속: [DRC 명시적 게시 복구 코어](WEBUI_REVIEW_RECOVERY.ko.md)는
+inode 표식·별도 승인 capability·동일 작업 재확인을 구현하고 로컬 중단/변경 거부를
+검사했다. actor/HTTP/UI, shared defaults의 같은 문제, 실제 NFS 수용은 남는다.
+선택 없는 전체 Rust/web 배터리는 exit0이다. DRC-PUB-01 및 G4 전체 완료로 세지 않는다.
+
 2026-09-23 후속: [Electron 창 재사용](WEBUI_NATIVE_INSTANCE.ko.md) 구현과 실제
 macOS 합성 두 프로세스 검사를 통과했다. 창 복원·새 파일 등록·동일 worker 유지,
 pending 모달 보존·secondary의 표시/auth 없음이 범위다. NFS 게시 복구·물리

@@ -52,18 +52,46 @@ fn publication_crash_child() {
     if existing {
         draft(&f, &s, false).publish(&f.stop).unwrap();
     }
+    if point.starts_with("recovery_") {
+        assert!(!existing);
+        draft(&f, &s, true).publish(&f.stop).unwrap();
+        let security = Security::read(&File::open(s.target()).unwrap()).unwrap();
+        let marker: serde_json::Value =
+            serde_json::from_slice(security.attribute(super::super::recovery::MARKER).unwrap())
+                .unwrap();
+        let stage = f.dir.join(marker["stage"].as_str().unwrap());
+        fs::hard_link(s.target(), &stage).unwrap(); // marked gap fixture
+        s.prepare_recovery(&f.stop)
+            .unwrap()
+            .recover_using(
+                &f.stop,
+                || {
+                    if point == "recovery_before" {
+                        ready_then_wait_for_death();
+                    }
+                    fs::remove_file(stage)?;
+                    ready_then_wait_for_death(); // repair committed, receipt not returned
+                },
+                File::sync_all,
+            )
+            .unwrap();
+        panic!("recovery unexpectedly returned");
+    }
     draft(&f, &s, true)
-        .publish_using(
+        .publish_with_link_hook(
             &f.stop,
             || {
                 if point == "link_gap" {
                     assert!(!existing);
-                    // Reconstruct the existing Stage::commit first-publication
-                    // gap: linkat succeeded, unlinkat has not run. This is a
-                    // deterministic filesystem-state model, NOT a hook inside
-                    // Stage::commit or a claim that this path was fixed.
+                    // Old-version gap without provenance is still NOT adopted.
                     let stages = temporary_stages(&f);
                     assert_eq!(stages.len(), 1);
+                    let file = File::open(&stages[0]).unwrap();
+                    Security::read(&file)
+                        .unwrap()
+                        .without_attribute(super::super::recovery::MARKER)
+                        .apply(&file)
+                        .unwrap();
                     fs::hard_link(&stages[0], s.target()).unwrap();
                     ready_then_wait_for_death();
                 }
@@ -78,6 +106,11 @@ fn publication_crash_child() {
                 }
                 directory.sync_all()?;
                 ready_then_wait_for_death(); // synced, before returning a receipt
+            },
+            || {
+                if point == "real_link_gap" {
+                    ready_then_wait_for_death();
+                }
             },
         )
         .unwrap();
@@ -97,7 +130,16 @@ fn parse_case(case: &str) -> (Kind, bool, &str) {
         "missing" => false,
         _ => panic!("invalid synthetic target"),
     };
-    assert!(["before", "committed", "synced", "link_gap"].contains(&parts[2]));
+    assert!([
+        "before",
+        "committed",
+        "synced",
+        "link_gap",
+        "real_link_gap",
+        "recovery_before",
+        "recovery_after"
+    ]
+    .contains(&parts[2]));
     (kind, existing, parts[2])
 }
 
@@ -194,9 +236,18 @@ fn subprocess_death_preserves_publication_boundary() {
 }
 
 #[test]
-fn interrupted_first_link_model_exposes_the_unresolved_double_link_gap() {
+fn legacy_unmarked_link_gap_is_not_adopted() {
     for kind_name in ["notes", "waives"] {
         run_case(&format!("{kind_name}:missing:link_gap"));
+    }
+}
+
+#[test]
+fn actual_link_gap_and_repair_death_allow_only_explicit_bound_recovery() {
+    for kind_name in ["notes", "waives"] {
+        for point in ["real_link_gap", "recovery_before", "recovery_after"] {
+            run_case(&format!("{kind_name}:missing:{point}"));
+        }
     }
 }
 
@@ -243,7 +294,7 @@ fn run_case(case: &str) {
         stop: AtomicUsize::new(0),
     };
     let s = f.store(kind); // fresh reader; no state survives from writer
-    if point == "link_gap" {
+    if ["link_gap", "real_link_gap", "recovery_before"].contains(&point) {
         let stages = temporary_stages(&f);
         assert_eq!(stages.len(), 1);
         let target = fs::metadata(s.target()).unwrap();
@@ -257,8 +308,24 @@ fn run_case(case: &str) {
             .expect("double-link target must remain rejected");
         assert_eq!(error.kind, ErrorKind::InvalidInput);
         assert_eq!(fs::read(&f.pack).unwrap(), f.bytes);
-        println!("REVIEW CRASH GAP: {case}: new target has two links; reopening is rejected (unresolved)");
-        return;
+        if point == "link_gap" {
+            assert!(s.prepare_recovery(&f.stop).is_err());
+            println!("REVIEW CRASH GAP: {case}: unmarked legacy pair refused without deletion");
+            return;
+        }
+        let before = fs::read(s.target()).unwrap();
+        let recovery = s.prepare_recovery(&f.stop).unwrap();
+        assert_eq!(fs::metadata(s.target()).unwrap().nlink(), 2);
+        assert_eq!(
+            recovery.recover(&f.stop).unwrap(),
+            RecoveryResult::Recovered {
+                already_completed: false,
+                directory_synced: true,
+            }
+        );
+        assert_eq!(fs::read(s.target()).unwrap(), before);
+        assert!(temporary_stages(&f).is_empty());
+        println!("REVIEW CRASH RECOVERY: {case}: exact explicit unlink restored single-link read");
     }
     let published = point != "before";
     assert_eq!(s.target().exists(), existing || published, "{case}");

@@ -956,8 +956,22 @@ fn permissions_and_extended_attributes_survive_replacement() {
     let attr = c"user.floe-review-test";
     crate::layer_defaults::security::set(&file, attr, b"keep").unwrap();
     let security = Security::read(&file).unwrap();
+    let marker = security
+        .attribute(super::recovery::MARKER)
+        .unwrap()
+        .to_vec();
     f.note(&s, "new").publish(&f.stop).unwrap();
-    assert!(Security::read(&File::open(s.target()).unwrap()).unwrap() == security);
+    let current = Security::read(&File::open(s.target()).unwrap()).unwrap();
+    // The owned publication marker must follow the new inode. All other
+    // attributes, mode, owners and ACL remain exactly as before.
+    assert_ne!(
+        current.attribute(super::recovery::MARKER),
+        Some(marker.as_slice())
+    );
+    assert!(
+        current.without_attribute(super::recovery::MARKER)
+            == security.without_attribute(super::recovery::MARKER)
+    );
     let old = fs::read(s.target()).unwrap();
     let d = f.note(&s, "stale attributes");
     crate::layer_defaults::security::set(&File::open(s.target()).unwrap(), attr, b"changed")

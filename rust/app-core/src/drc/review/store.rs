@@ -27,6 +27,8 @@ use std::{
 const TTL: Duration = Duration::from_secs(120);
 mod transfer;
 pub use transfer::{ExportContents, ExportInfo};
+mod recovery;
+pub use recovery::{Recovery, RecoveryResult, RecoveryState};
 #[cfg(target_os = "macos")]
 const BINDING: &std::ffi::CStr = c"com.floe.review-pack-v1";
 #[cfg(not(target_os = "macos"))]
@@ -432,6 +434,16 @@ struct Capture {
 }
 impl Capture {
     fn read(store: &Store, writable: bool, stop: &AtomicUsize) -> Result<Option<Self>> {
+        Self::read_links(store, writable, 1, stop)
+    }
+    // Only the explicit, bound recovery path may ask for two links. Normal
+    // snapshots/imports/readers keep the single-link contract above.
+    fn read_links(
+        store: &Store,
+        writable: bool,
+        links: u64,
+        stop: &AtomicUsize,
+    ) -> Result<Option<Self>> {
         check_cancelled(stop)?;
         let mut file = match store.directory.open_leaf(
             &store.name,
@@ -448,7 +460,7 @@ impl Capture {
         };
         let meta = file.metadata()?;
         if !meta.is_file()
-            || meta.nlink() != 1
+            || meta.nlink() != links
             || meta.len() > store.max_bytes()
             || store.kind == Kind::Waives && meta.len() != store.max_bytes()
         {
@@ -848,6 +860,15 @@ impl Draft {
         before_commit: impl FnOnce() -> Result<()>,
         sync: impl FnOnce(&File) -> std::io::Result<()>,
     ) -> Result<Published> {
+        self.publish_with_link_hook(stop, before_commit, sync, || {})
+    }
+    fn publish_with_link_hook(
+        self,
+        stop: &AtomicUsize,
+        before_commit: impl FnOnce() -> Result<()>,
+        sync: impl FnOnce(&File) -> std::io::Result<()>,
+        after_link: impl FnOnce(),
+    ) -> Result<Published> {
         self.snapshot.store.require_editor()?;
         let _registration = self.snapshot.store.sources.publication(stop)?;
         if Instant::now() >= self.expires {
@@ -936,6 +957,7 @@ impl Draft {
                 "cannot preserve review pack binding",
             ));
         }
+        recovery::mark(s, &staged, identity(&lm))?;
         staged
             .file
             .set_times(fs::FileTimes::new().set_modified(SystemTime::now()))?;
@@ -985,7 +1007,7 @@ impl Draft {
         // This is not a filesystem CAS against noncooperating writers (incl. GTK).
         context(
             "commit",
-            staged.commit(&s.name, self.snapshot.before.is_some()),
+            staged.commit_with(&s.name, self.snapshot.before.is_some(), after_link),
         )?;
         // The commit wins over any later cancellation or directory-sync error.
         Ok(Published {

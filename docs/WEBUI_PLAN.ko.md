@@ -2,6 +2,11 @@
 
 작성 2026-08-29, 갱신 2026-09-23(Electron 단일 호스트; WK 동결; 원격 단계 보류).
 
+2026-09-23 후속: [DRC 게시 복구 코어](WEBUI_REVIEW_RECOVERY.ko.md)를 추가했다.
+mark/preview/recover/reconcile과 로컬 SIGKILL 검증 단계이며, 앱에서의 승인 UI·wire는
+아직 없다. shared defaults·실제 NFS까지 포함한 DRC-PUB-01 완료와 구분한다.
+이 단계의 선택 없는 전체 Rust/web 배터리는 exit0이다.
+
 **현재 호스트 결정:** macOS/Linux 네이티브 앱은 [Electron](WEBUI_ELECTRON.ko.md)만
 개발한다. WKWebView는 `617909e` 기준으로 [동결](../desktop/README.md)하고 기존
 코드·검증 기록을 보존한다. 창 재사용도 Electron만 구현한다. WK 전용 GUI 및

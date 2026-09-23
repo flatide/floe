@@ -465,6 +465,9 @@ pub(crate) struct Stage {
     id: (u64, u64),
 }
 impl Stage {
+    pub(crate) fn name(&self) -> &CStr {
+        &self.name
+    }
     fn create(directory: Arc<Directory>, publisher: &Publisher) -> Result<Self> {
         Self::create_for(directory, "layerprops", |path| publisher.protect(path))
     }
@@ -536,6 +539,15 @@ impl Stage {
     /// Caller holds the stable advisory lock and has revalidated input/target.
     /// A missing target uses linkat, never a clobbering rename.
     pub(crate) fn commit(&mut self, name: &CStr, replace: bool) -> Result<()> {
+        self.commit_with(name, replace, || {})
+    }
+    /// Private hook also lets subprocess tests stop in the actual link gap.
+    pub(crate) fn commit_with(
+        &mut self,
+        name: &CStr,
+        replace: bool,
+        after_link: impl FnOnce(),
+    ) -> Result<()> {
         // SAFETY: live directory fd and validated single-component CStrings.
         let rc = unsafe {
             if replace {
@@ -561,6 +573,7 @@ impl Stage {
         if replace {
             self.linked = false;
         } else {
+            after_link();
             self.unlink();
         }
         Ok(())

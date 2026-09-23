@@ -25,6 +25,11 @@ pub(crate) struct Security {
     acl: Vec<u8>,
 }
 impl Security {
+    #[cfg(test)]
+    pub(crate) fn without_attribute(mut self, name: &CStr) -> Self {
+        self.attrs.remove(name);
+        self
+    }
     pub(crate) fn attribute(&self, name: &CStr) -> Option<&[u8]> {
         self.attrs.get(name).map(Vec::as_slice)
     }
