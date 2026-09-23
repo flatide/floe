@@ -73,6 +73,7 @@ def main(argv=None):
             'cbvh', 'cbvh_masked', 'cbvh_recs', 'cbvh_members', 'allcut_cells', 'allcut_layers',
             'cut_page_bytes', 'cut_page_usize', 'cut_page_records',
             'distinct_cut_page_bytes', 'distinct_cut_page_records',
+            'kept_pages', 'kept_sub_cut_records',
             'cbvh_pages', 'cbvh_page_bytes', 'cbvh_page_usize', 'cbvh_page_records']
     once = None
     rows = []
@@ -86,7 +87,7 @@ def main(argv=None):
                    '--px-per-um', repr(px), '--cut-px', repr(args.cut_px), '--depth', args.depth,
                    '--shape-cut', '1', '--page-hairline', '0', '--frames', '0', '--density-probe', '1',
                    '--density-storage', '0' if once else '1',
-                   '--selection-meta', '1' if args.meta and not once else '0']
+                   '--selection-meta', '1' if args.meta else '0']
             if spec != 'all':
                 cmd += ['--layers', ','.join('%d/%d' % k for k in chosen)]
             out = subprocess.run(cmd, capture_output=True, text=True)
@@ -127,9 +128,11 @@ def main(argv=None):
           % (mb(once, 'exact_csize'), mb(once, 'exact_usize'), k(once, 'exact_records'), k(once, 'exact_pages')))
     for spec, z, row in rows:
         print('%-6s x%-6g cut pages %s / %s / %s (once each %s MB / %s)   below cut nodes %s pages %s / %s / %s'
+              '   kept pages %s with %s records under the cut%s'
               % (spec, z, mb(row, 'cut_page_bytes'), mb(row, 'cut_page_usize'), k(row, 'cut_page_records'),
                  mb(row, 'distinct_cut_page_bytes'), k(row, 'distinct_cut_page_records'),
-                 k(row, 'cbvh_pages'), mb(row, 'cbvh_page_bytes'), mb(row, 'cbvh_page_usize'), k(row, 'cbvh_page_records')))
+                 k(row, 'cbvh_pages'), mb(row, 'cbvh_page_bytes'), mb(row, 'cbvh_page_usize'), k(row, 'cbvh_page_records'),
+                 k(row, 'kept_pages'), k(row, 'kept_sub_cut_records'), '' if args.meta else ' (needs --meta)'))
     if int(once.get('meta', '0')):
         print('selection meta: %s pages decoded in %s s (peak rss %.1f GB); rectangles One %s, Grid %s, Pts %s (%s points); '
               'polygons %s, paths %s (%s vertices, %s repetition points); flat meta %s MB = %.0f%% of the stored pages '
@@ -140,11 +143,12 @@ def main(argv=None):
                  100 * int(once['meta_bytes']) / max(1, int(once['exact_csize'])), mb(once, 'exact_csize'),
                  100 * int(once['meta_bytes']) / max(1, int(once['exact_usize'])), mb(once, 'exact_usize')))
     print('== type this 2 == (zoom: cut page MB stored, records, once-each MB, records; below-cut-node pages, '
-          'MB stored, records; m: meta pages, s, MB, rect one/grid/pts, poly+path)')
+          'MB stored, records; kept pages, their records under the cut; m: meta pages, s, MB, rect one/grid/pts, poly+path)')
     for spec, z, row in rows:
-        print('%s %g %s %s %s %s %s %s %s' % (spec[0], z, mb(row, 'cut_page_bytes'), k(row, 'cut_page_records'),
-                                              mb(row, 'distinct_cut_page_bytes'), k(row, 'distinct_cut_page_records'),
-                                              k(row, 'cbvh_pages'), mb(row, 'cbvh_page_bytes'), k(row, 'cbvh_page_records')))
+        print('%s %g %s %s %s %s %s %s %s %s %s' % (spec[0], z, mb(row, 'cut_page_bytes'), k(row, 'cut_page_records'),
+                                                    mb(row, 'distinct_cut_page_bytes'), k(row, 'distinct_cut_page_records'),
+                                                    k(row, 'cbvh_pages'), mb(row, 'cbvh_page_bytes'), k(row, 'cbvh_page_records'),
+                                                    k(row, 'kept_pages'), k(row, 'kept_sub_cut_records')))
     if int(once.get('meta', '0')):
         print('m %s %s %s %s/%s/%s %s' % (k(once, 'meta_pages'), once['meta_s'], mb(once, 'meta_bytes'),
                                           k(once, 'meta_rect_one'), k(once, 'meta_rect_grid'), k(once, 'meta_rect_pts'),

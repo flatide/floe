@@ -7122,6 +7122,14 @@ struct DensityQ {
     cbvh_page_usize: u64,
     cbvh_page_records: u64,
     cbvh_pages: u64,
+    /// review 2026-09-23: the pages the plan KEEPS still lose records to
+    /// the per-shape cut at raster time (a big shape and 1,000 small ones
+    /// in one page: the small ones are density work the page culls never
+    /// see). With --selection-meta the census counts each page's records
+    /// under the cut (rectangle min side, polygon / path bbox min side)
+    /// and the walk sums them over the kept pages' instances
+    kept_pages: u64,
+    kept_sub_cut_records: u64,
 }
 
 impl DensityQ {
@@ -7150,6 +7158,8 @@ impl DensityQ {
         self.cbvh_page_usize = self.cbvh_page_usize.saturating_add(o.cbvh_page_usize.saturating_mul(k));
         self.cbvh_page_records = self.cbvh_page_records.saturating_add(o.cbvh_page_records.saturating_mul(k));
         self.cbvh_pages = self.cbvh_pages.saturating_add(o.cbvh_pages.saturating_mul(k));
+        self.kept_pages = self.kept_pages.saturating_add(o.kept_pages.saturating_mul(k));
+        self.kept_sub_cut_records = self.kept_sub_cut_records.saturating_add(o.kept_sub_cut_records.saturating_mul(k));
     }
 }
 
@@ -7231,11 +7241,14 @@ impl MetaCensus {
     }
 }
 
-fn meta_census(v: &floe_vfs::Vfs, jobs: usize) -> Result<(MetaCensus, f64), String> {
+fn meta_census(v: &floe_vfs::Vfs, jobs: usize, cut_dbu: i64) -> Result<(MetaCensus, f64, Vec<u32>), String> {
     let t = std::time::Instant::now();
     let exact: Vec<u32> = (0..v.ovm.n_pages).filter(|&pi| v.ovm.page(pi).lod == 0).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let total = std::sync::Mutex::new(MetaCensus::default());
+    // per page: records whose min side is under the cut (the per-shape
+    // cut's work inside a kept page)
+    let under_cut = std::sync::Mutex::new(vec![0u32; v.ovm.n_pages as usize]);
     let failed = std::sync::Mutex::new(None::<String>);
     std::thread::scope(|scope| {
         for _ in 0..jobs.max(1) {
@@ -7254,8 +7267,10 @@ fn meta_census(v: &floe_vfs::Vfs, jobs: usize) -> Result<(MetaCensus, f64), Stri
                             return;
                         }
                     };
+                    let mut mine_under: Vec<(u32, u32)> = Vec::new();
                     for (pi, bytes) in payloads {
                         let p = v.ovm.page(pi);
+                        let mut under = 0u32;
                         mine.pages += 1;
                         mine.csize += p.csize as u64;
                         mine.usize_ += p.usize_ as u64;
@@ -7268,6 +7283,7 @@ fn meta_census(v: &floe_vfs::Vfs, jobs: usize) -> Result<(MetaCensus, f64), Stri
                         };
                         for cell in &doc.cells {
                             for r in &cell.rects {
+                                under += (r.w.min(r.h) < cut_dbu) as u32;
                                 match &r.rep {
                                     Rep::One => {
                                         mine.rect_one += 1;
@@ -7296,15 +7312,32 @@ fn meta_census(v: &floe_vfs::Vfs, jobs: usize) -> Result<(MetaCensus, f64), Stri
                                     }
                                 }
                             };
+                            let bbox_min = |pts: &[(i64, i64)]| -> i64 {
+                                let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+                                for &(x, y) in pts {
+                                    x0 = x0.min(x);
+                                    y0 = y0.min(y);
+                                    x1 = x1.max(x);
+                                    y1 = y1.max(y);
+                                }
+                                (x1 - x0).min(y1 - y0)
+                            };
                             for pg in &cell.polys {
                                 mine.poly += 1;
+                                under += (bbox_min(&pg.pts) < cut_dbu) as u32;
                                 shape(pg.pts.len() as u64, &pg.rep);
                             }
                             for pa in &cell.paths {
                                 mine.path += 1;
+                                under += (bbox_min(&pa.pts) < cut_dbu) as u32;
                                 shape(pa.pts.len() as u64, &pa.rep);
                             }
                         }
+                        mine_under.push((pi, under));
+                    }
+                    let mut table = under_cut.lock().unwrap();
+                    for (pi, under) in mine_under {
+                        table[pi as usize] = under;
                     }
                 }
                 total.lock().unwrap().add(&mine);
@@ -7314,7 +7347,7 @@ fn meta_census(v: &floe_vfs::Vfs, jobs: usize) -> Result<(MetaCensus, f64), Stri
     if let Some(e) = failed.into_inner().unwrap() {
         return Err(e);
     }
-    Ok((total.into_inner().unwrap(), t.elapsed().as_secs_f64()))
+    Ok((total.into_inner().unwrap(), t.elapsed().as_secs_f64(), under_cut.into_inner().unwrap()))
 }
 
 fn place_members(v: &floe_vfs::Vfs, pli: u64) -> u64 {
@@ -7361,7 +7394,24 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
     let px = req.px_per_dbu;
     let index: HashMap<(u32, u32), usize> =
         plan.wcells.iter().enumerate().map(|(i, c)| (c.key, i)).collect();
+    let (census, census_s, under_cut) = if meta {
+        let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
+        match meta_census(v, jobs, req.cut_dbu.max(0)) {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("selection meta census failed: {}", e);
+                (MetaCensus::default(), 0.0, Vec::new())
+            }
+        }
+    } else {
+        (MetaCensus::default(), 0.0, Vec::new())
+    };
     let mut own = vec![DensityQ::default(); plan.wcells.len()];
+    for (wi, c) in plan.wcells.iter().enumerate() {
+        own[wi].kept_pages = c.pages.len() as u64;
+        own[wi].kept_sub_cut_records =
+            c.pages.iter().map(|&pi| under_cut.get(pi as usize).copied().unwrap_or(0) as u64).sum();
+    }
     let mut seen: HashSet<((u32, u32), &'static str, u64)> = HashSet::new();
     let mut subtree_memo: HashMap<u32, (u64, u64, u64, u64)> = HashMap::new();
     let page_volume = |q: &mut DensityQ, pi: u32| {
@@ -7404,6 +7454,10 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
                         q.pbvh_pages += n.count as u64;
                         for pi in n.first..n.first + n.count as u32 {
                             page_volume(q, pi);
+                            // review 2026-09-23: these are cut pages too -
+                            // the once-each volume missed them (16 pages,
+                            // 4.35 MB cut, 0 read once each)
+                            cut_pages.insert(pi as u64);
                         }
                     } else {
                         stack.extend(n.first..n.first + n.count as u32);
@@ -7437,7 +7491,7 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
         }
     }
     for (wi, c) in plan.wcells.iter().enumerate() {
-        if own[wi].pages > 0 && c.pages.is_empty() && c.insts.is_empty() {
+        if own[wi].pages + own[wi].pbvh_pages > 0 && c.pages.is_empty() && c.insts.is_empty() {
             own[wi].allcut_cells = 1;
             own[wi].allcut_layers = visible_layers_of(v, req, v.ovm.cell_lmask_direct(c.key.0));
         }
@@ -7662,18 +7716,6 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
             thin_pages += 1;
         }
     }
-    let (census, census_s) = if meta {
-        let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
-        match meta_census(v, jobs) {
-            Ok(x) => x,
-            Err(e) => {
-                eprintln!("selection meta census failed: {}", e);
-                (MetaCensus::default(), 0.0)
-            }
-        }
-    } else {
-        (MetaCensus::default(), 0.0)
-    };
     let (exact_csize, exact_usize, exact_records) = (0..if storage { v.ovm.n_pages } else { 0 })
         .map(|pi| v.ovm.page(pi))
         .filter(|p| p.lod == 0)
@@ -7690,6 +7732,7 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
          cut_page_bytes={}\tcut_page_usize={}\tcut_page_records={}\t\
          distinct_cut_page_bytes={}\tdistinct_cut_page_records={}\t\
          cbvh_pages={}\tcbvh_page_bytes={}\tcbvh_page_usize={}\tcbvh_page_records={}\t\
+         kept_pages={}\tkept_sub_cut_records={}\t\
          exact_csize={}\texact_usize={}\texact_records={}\t\
          meta={}\tmeta_pages={}\tmeta_s={:.1}\tmeta_peak_rss={}\tmeta_rect_one={}\tmeta_rect_grid={}\t\
          meta_rect_pts={}\tmeta_rect_pts_points={}\tmeta_poly={}\tmeta_path={}\tmeta_vertices={}\t\
@@ -7704,6 +7747,7 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
         total.cut_page_bytes, total.cut_page_usize, total.cut_page_records,
         distinct_cut_bytes, distinct_cut_records,
         total.cbvh_pages, total.cbvh_page_bytes, total.cbvh_page_usize, total.cbvh_page_records,
+        total.kept_pages, total.kept_sub_cut_records,
         exact_csize, exact_usize, exact_records,
         meta as u8, census.pages, census_s, proc_status_bytes("VmHWM:").unwrap_or(0),
         census.rect_one, census.rect_grid, census.rect_pts, census.rect_pts_points, census.poly, census.path,
