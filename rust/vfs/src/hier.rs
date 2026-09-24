@@ -2073,7 +2073,7 @@ impl<'a> Hier<'a> {
             let hair_prune = if r == 0 && self.thin_dbu > 0 {
                 0
             } else {
-                self.hair
+                self.child_hair()
             };
             self.thin_bins.clear();
             self.wash_nodes.clear();
@@ -2240,7 +2240,7 @@ impl<'a> Hier<'a> {
                         // outline now (frames on) or nothing.
                         if r != REM_FULL {
                             let size_cut = cw < cut && chh < cut;
-                            if size_cut || cw.min(chh) < self.hair {
+                            if size_cut || cw.min(chh) < self.child_hair() {
                                 // rev 33: the fold is SILENT. A
                                 // fold box tracked the cut - it
                                 // appeared and vanished with zoom
@@ -2335,7 +2335,7 @@ impl<'a> Hier<'a> {
                         // available, omit the below-cut child instead
                         // of displaying false geometry.
                         let size_cut = cw < cut && chh < cut;
-                        if size_cut || cw.min(chh) < self.hair {
+                        if size_cut || cw.min(chh) < self.child_hair() {
                             if !self.sub_cut_wash && self.reps {
                                 if let Some(lm) = self.place_rep(pli, &h, &rb, cell.place_start) {
                                     self.st.rep_children += 1;
@@ -3115,6 +3115,20 @@ impl<'a> Hier<'a> {
         !size_cut && self.page_hair > 0
     }
 
+    /// The hairline threshold a CHILD CELL or a child-BVH subtree is cut by
+    /// (its smaller side under it): `hair`, or 0 under shape_cut_max - the
+    /// hairline-keeping cut judges children by their larger side (the size
+    /// cut, both sides under the cut), as the raster judges the records
+    /// (review of 5800b57, 2026-09-25: the wires of a thin child cell
+    /// vanished while the same wires in the parent's own page were drawn).
+    fn child_hair(&self) -> u64 {
+        if self.shape_cut_max {
+            0
+        } else {
+            self.hair
+        }
+    }
+
     /// Returns false when the placement is sparse (no wash could
     /// stand for it): the caller expands it instead of dropping it.
     fn wash_sub_cut_child(
@@ -3719,7 +3733,7 @@ impl<'a> Hier<'a> {
         if !structural
             && !self.sparse_edges.contains(&pli)
             && ((cw < self.cut && ch < self.cut)
-                || cw.min(ch) < self.hair)
+                || cw.min(ch) < self.child_hair())
         {
             self.st.cull_size += 1;
             return;
@@ -5314,6 +5328,74 @@ mod tests {
             &HierOpts::default(),
         );
         assert_eq!(p3.stats.frame_rects, 0);
+    }
+
+    /// The hairline-keeping cut (shape_cut_max) judges a CHILD CELL and a
+    /// child-BVH subtree by its larger side too (review of 5800b57,
+    /// 2026-09-25): a thin child cell - min side under the hairline half of
+    /// the cut, long side above the cut - is walked and its page drawn, at
+    /// full depth and at a finite one, whether the thin placement shares its
+    /// BVH node with a fat one (the per-placement tests) or is alone under it
+    /// (the node's max_min prune); a child under the cut on both sides is
+    /// still cut.
+    #[test]
+    fn shape_cut_max_judges_child_cells_by_their_larger_side() {
+        let thin_page = (bx(0, 0, 4000, 100), 4000, 100);
+        let mixed = fixture(
+            &[
+                FCell { name: "THIN", pages: vec![thin_page], places: vec![] },
+                FCell { name: "FAT", pages: vec![(bx(0, 0, 500, 500), 500, 500)], places: vec![] },
+                FCell { name: "SPECK", pages: vec![(bx(0, 0, 200, 200), 200, 200)], places: vec![] },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        (1, 6000, 0, 0, false, Rep::One),
+                        (2, 8000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            3,
+        );
+        let alone = fixture(
+            &[
+                FCell { name: "THIN", pages: vec![thin_page], places: vec![] },
+                FCell { name: "MID", pages: vec![], places: vec![(0, 0, 0, 0, false, Rep::One)] },
+                FCell { name: "TOP", pages: vec![], places: vec![(1, 0, 0, 0, false, Rep::One)] },
+            ],
+            2,
+        );
+        let view = bx(-10, -10, 11_000, 1000);
+        let thin_of = |v: &Ovm| (0..v.n_pages).find(|&pi| v.page(pi).max_min == 100).unwrap();
+        for depth in [REM_FULL, 2] {
+            // cut 300 -> hair 150: the thin child (min side 100) is cut
+            // unless the cut keeps the hairlines
+            let keep = plan_hier(&mixed, &rq(view, 300, depth), &HierOpts::default());
+            assert!(!keep.pages.contains(&thin_of(&mixed)), "depth {depth}");
+            let mut req = rq(view, 300, depth);
+            req.shape_cut_max = true;
+            let max = plan_hier(&mixed, &req, &HierOpts::default());
+            assert!(max.pages.contains(&thin_of(&mixed)), "depth {depth}");
+            // FAT stays, SPECK (both sides under the cut) goes
+            assert_eq!(max.pages.len(), 2, "depth {depth}");
+            assert!(max.pages.iter().all(|&pi| mixed.page(pi).max_w.max(mixed.page(pi).max_h) >= 300));
+            assert_eq!((max.stats.shape_cut, max.stats.shape_cut_max), (300, true));
+            // alone under its node: the node's max_min prune
+            let keep = plan_hier(&alone, &rq(view, 300, depth), &HierOpts::default());
+            assert!(keep.pages.is_empty() && keep.stats.culled_bvh_size >= 1, "depth {depth}");
+            let mut req = rq(view, 300, depth);
+            req.shape_cut_max = true;
+            let max = plan_hier(&alone, &req, &HierOpts::default());
+            assert_eq!(max.pages, vec![thin_of(&alone)], "depth {depth}");
+            // under the cut on both sides: cut under max as well
+            let small = plan_hier(&alone, &{
+                let mut r = rq(view, 5000, depth);
+                r.shape_cut_max = true;
+                r
+            }, &HierOpts::default());
+            assert!(small.pages.is_empty(), "depth {depth}");
+        }
     }
 
     /// Rev 45 (Calibre alignment): a boundary box whose MIN side is

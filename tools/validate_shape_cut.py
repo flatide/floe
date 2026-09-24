@@ -22,7 +22,15 @@ squares and a 0.2 um wire on one layer (one page), wires alone on another.
     §10.6, 2026-09-24): at the wider view the large square is drawn exactly as
     under the shape cut, the array of 0.4 um squares (both sides under the
     cut) is not drawn, the 0.2 um wire (longer than the cut) is, and the
-    layer of wires alone keeps its page.
+    layer of wires alone keeps its page;
+  * the same wires placed as a child cell (one wire a cell, 12 placements -
+    review of 5800b57, 2026-09-25): max judges the child cells and the child
+    BVH by their larger side too, so the wires frame is byte-identical to the
+    flat layout's under max as with no cut at all (the smaller-side hairline
+    prune had dropped the thin child cell: 0 px against the flat layout's), and
+    under the shape cut both are empty. (The kill switch keeps the previous
+    thin keep's rule, which prunes the thin child cell while it keeps the
+    thin page of TOP.)
 
     .venv/bin/python tools/validate_shape_cut.py
 """
@@ -43,7 +51,9 @@ MIXED, WIRES = (7, 0), (8, 0)
 SQUARE = (0.0, 0.0, 20.0, 20.0)    # um
 
 
-def layout(path):
+def layout(path, wire_cell=False):
+    """`wire_cell`: the wires of WIRES are one child cell (a single wire)
+    placed 12 times instead of shapes of TOP - the same geometry"""
     import klayout.db as kdb
     ly = kdb.Layout()
     ly.dbu = 0.001
@@ -55,9 +65,21 @@ def layout(path):
             x, y = 40 + 1.2 * i, 1.2 * j
             top.shapes(mixed).insert(kdb.DBox(x, y, x + 0.4, y + 0.4))
     top.shapes(mixed).insert(kdb.DBox(0, 40, 60, 40.2))
-    for k in range(12):
-        top.shapes(wires).insert(kdb.DBox(0, 2.0 * k, 70, 2.0 * k + 0.2))
+    if wire_cell:
+        wire = ly.create_cell('WIRE')
+        wire.shapes(wires).insert(kdb.DBox(0, 0, 70, 0.2))
+        for k in range(12):
+            top.insert(kdb.DCellInstArray(wire.cell_index(), kdb.DTrans(0, 2.0 * k)))
+    else:
+        for k in range(12):
+            top.shapes(wires).insert(kdb.DBox(0, 2.0 * k, 70, 2.0 * k + 0.2))
     ly.write(str(path))
+
+
+def index(src):
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
 
 
 def worker(src, on):
@@ -105,9 +127,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='floe-shape-cut-') as temp:
         src = Path(temp) / 'shapes.oas'
         layout(src)
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
-                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
-        assert done.returncode == 0, done.stdout + done.stderr
+        index(src)
         off, on = worker(src, False), worker(src, True)
         try:
             near, wide = view(35, 21, 80), view(35, 21, 200)   # 0.0625 and 0.15625 um a pixel
@@ -168,6 +188,33 @@ def main():
                 wires_kept, rw = frame(hair, gen, wide, [WIRES], 'keep')
                 assert len(lit_pixels(wires_kept)) > 500 and rw['plan_culls']['pages_size'] == 0, (len(lit_pixels(wires_kept)), rw['plan_culls'])
                 print('shape cut max: square identical, array 0 px, wire %d px, wires alone %d px (page kept)' % (wire_px, len(lit_pixels(wires_kept))))
+                # the same wires as a child cell: max walks the thin child by
+                # its larger side, like the records - the frame is the flat one
+                cell_src = Path(temp) / 'wire_cell.oas'
+                layout(cell_src, wire_cell=True)
+                index(cell_src)
+                cell_off, cell_on, cell_hair = worker(cell_src, False), worker(cell_src, True), worker(cell_src, 'max')
+                try:
+                    # 0.2 um a pixel: the wires are exactly 1 x 350 px on whole
+                    # pixels, so the width-first draw lights the same pixels
+                    # whatever ranks the members (the flat array's lattice
+                    # ranks, the placements' world-box hash); cut 3 px, hair
+                    # 1.5 px - the thin child cell was pruned
+                    exact = view(35, 21, 256)
+                    lit = {}
+                    for name, flat_w, cell_w, cut_px in (('no cut', off, cell_off, 0.0), ('max', hair, cell_hair, 3.0), ('shape cut', on, cell_on, 3.0)):
+                        gen += 1
+                        a = frame(flat_w, gen, exact, [WIRES], 'keep', cut_px)[0]
+                        b, rb = frame(cell_w, gen, exact, [WIRES], 'keep', cut_px)
+                        assert a == b, 'wires as a child cell differ from the flat layout under %s: %d vs %d px (%s)' % (
+                            name, len(lit_pixels(b)), len(lit_pixels(a)), rb['plan_culls'])
+                        lit[name] = len(lit_pixels(b))
+                    assert lit['max'] == lit['no cut'] == 12 * 350 and lit['shape cut'] == 0, lit
+                    print('shape cut max: wires as a child cell identical to the flat layout (%d px; no cut and shape cut identical too)' % lit['max'])
+                finally:
+                    cell_off.stop()
+                    cell_on.stop()
+                    cell_hair.stop()
             finally:
                 hair.stop()
         finally:
