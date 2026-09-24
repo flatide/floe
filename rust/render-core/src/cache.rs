@@ -116,8 +116,10 @@ pub struct PlanCullCounts {
     /// cap), node boxes whose layer scan ran out of its read budget
     pub sub_cut_box_level: u64,
     pub sub_cut_box_unsure: u64,
-    /// the per-shape cut the frame was planned with, dbu (0 = none)
+    /// the per-shape cut the frame was planned with, dbu (0 = none), and
+    /// whether it judges records by their larger side (hairlines kept)
     pub shape_cut: u64,
+    pub shape_cut_max: bool,
 }
 
 impl PlanCullCounts {
@@ -153,6 +155,7 @@ impl PlanCullCounts {
             sub_cut_box_level: st.sub_cut_box_level as u64,
             sub_cut_box_unsure: st.sub_cut_box_unsure,
             shape_cut: st.shape_cut,
+            shape_cut_max: st.shape_cut_max,
         }
     }
 
@@ -187,6 +190,7 @@ impl PlanCullCounts {
         self.sub_cut_box_level = self.sub_cut_box_level.max(other.sub_cut_box_level);
         self.sub_cut_box_unsure = self.sub_cut_box_unsure.saturating_add(other.sub_cut_box_unsure);
         self.shape_cut = self.shape_cut.max(other.shape_cut);
+        self.shape_cut_max |= other.shape_cut_max;
     }
 }
 
@@ -1038,6 +1042,7 @@ impl Cache {
             prune_skipped: request.prune_summary,
             sub_cut_box: request.sub_cut_box && !request.exact,
             shape_cut: request.shape_cut && !request.exact,
+            shape_cut_max: request.shape_cut_max && !request.exact && !request.shape_cut,
             page_wash: request.page_wash,
             lod_swap: request.lod_swap,
             frames: request.frames,

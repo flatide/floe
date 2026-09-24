@@ -245,6 +245,11 @@
 - 예산에 맞춘 밀도의 크기 등급도 같은 변을 본다(`FitKey::SmallerSide`, 0.12.174): 상태줄의
   `1/M below xF, none below xG`는 keep에서 **작은 변** 기준이다.
 - 상태줄 `cut<…um (min side)`, 프레임 줄 `shape_cut=<dbu>`.
+- **진단 `FLOE_RUST_SHAPE_CUT=max`(2026-09-24, CUT_DENSITY_DESIGN §10.6):** `ViewReq::shape_cut_max` —
+  페이지는 0.12.173 이전 규칙(`max_w < cut && max_h < cut`)으로만 잘리고, 래스터는 **긴 변**이 컷 미만인
+  레코드만 건너뛴다(`HierStats::shape_cut_max`). 한 변이 컷보다 긴 가는 도형(헤어라인)은 남아 폭 우선
+  그리기(RENDERER-TESTS §3)가 폭만큼의 확률로 솎는다. 기본은 아니며 `thin keep` 요청에서 헤어라인을 남길 때의
+  속도·화면 채움을 재는 스위치다. `off`는 종전대로 도형별 컷 없음.
 
 ### sub-cut 박스 (0.12.168, 정확성 수정 0.12.169, **0.12.182부터 기본 꺼짐**)
 

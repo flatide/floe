@@ -849,6 +849,7 @@ mod tests {
             prune_skipped: false,
             sub_cut_box: false,
             shape_cut: false,
+            shape_cut_max: false,
             frames: true,
             page_wash: true,
             lod_swap: true,

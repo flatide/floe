@@ -96,6 +96,13 @@ pub struct ViewReq {
     /// keep` request of a plain layout; deck passes, probes and the CLI's
     /// plans do not.
     pub shape_cut: bool,
+    /// The hairline-keeping cut (CUT_DENSITY_DESIGN §10.6, diagnostic,
+    /// renderd FLOE_RUST_SHAPE_CUT=max): pages are cut by their largest
+    /// shape (both max sides under the cut, the pre-0.12.173 rule) and
+    /// the raster drops only the records whose LARGER side is under it -
+    /// a long thin shape stays and the width-first drawing thins it by its
+    /// width. Exclusive with `shape_cut`.
+    pub shape_cut_max: bool,
     /// The M7-C page wash (HierOpts::wash_px): a page whose whole image is at
     /// most wash_px in both axes ships as one bbox rect on its own layer
     /// instead of its geometry. renderd turns it OFF for a plain layout's

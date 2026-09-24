@@ -47,6 +47,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
   보고한다. 넓은 keep 뷰(배열 2.6 px, 배선 1.3 px, 컷 3 px)는 켜진 픽셀이 전부 큰 사각형 안이고
   (킬 스위치는 배열·배선을 그대로 켠다) 큰 사각형 자체는 같다. 배선만 있는 레이어는 빈 프레임이고
   플래너가 페이지를 자른다. cull과 컷 0 프레임은 킬 스위치와 바이트 동일.
+  `FLOE_RUST_SHAPE_CUT=max`(2026-09-24, CUT_DENSITY_DESIGN §10.6): 넓은 뷰에서 큰 사각형은 도형 컷과 같고 0.4 µm 배열은 0 px,
+  0.2 µm 선은 그려지며 선만 있는 페이지는 남는다.
 - `area_true`(tools/validate_area_true.py, 약 15초; `render` 별칭에 포함): klayout.db로 만든 세로
   막대 격자(0.1 µm/px 뷰, 격자마다 폭/간격 px 목록을 순환 — 정수·비정수 pitch, 폭이 섞인 이웃, 1px
   미만)를 0/¼/½/¾ px pan에서: 켜진 열이 막대가 건드리는 열 밖에 없다. 간격이 모두 2 px 이상인

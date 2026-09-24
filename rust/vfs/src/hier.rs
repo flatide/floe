@@ -734,8 +734,10 @@ pub struct HierStats {
     pub sub_cut_box_level: u32,
     /// the per-shape cut the plan was made with (ViewReq::shape_cut), in
     /// dbu; 0 = none. The raster drops the shapes whose smaller side is
-    /// under it from the pages it draws.
+    /// under it from the pages it draws - or, with `shape_cut_max`
+    /// (ViewReq::shape_cut_max), whose larger side is.
     pub shape_cut: u64,
+    pub shape_cut_max: bool,
     /// representatives (the page frontier, ViewReq::page_reps): cut
     /// pages kept (sparse, drawn as pixels) / washed (dense), cut
     /// placements washed or expanded, BVH subtrees pruned because no
@@ -1377,6 +1379,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         frame_cap,
         boxm: false,
         shape_cut: req.shape_cut && req.cut_dbu > 0,
+        shape_cut_max: req.shape_cut_max && req.cut_dbu > 0,
         box_px: opts.sub_cut_box_px * (1u32 << opts.sub_cut_box_level.min(8)) as f64,
         box_stride: 1i64 << opts.sub_cut_box_level.min(8),
         reads_left: opts.sub_cut_box_reads,
@@ -1480,7 +1483,8 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
     }
     let mut st = h.st;
     st.rep_page_level = page_level;
-    st.shape_cut = if h.shape_cut { h.cut } else { 0 };
+    st.shape_cut = if h.shape_cut || h.shape_cut_max { h.cut } else { 0 };
+    st.shape_cut_max = h.shape_cut_max;
     st.wc_cells = h.out.len() as u64;
     st.wc_variants =
         h.out.keys().filter(|&&(_, r)| r != REM_FULL).count() as u64;
@@ -1736,6 +1740,8 @@ struct Hier<'a> {
     boxm: bool,
     /// ViewReq::shape_cut: pages are cut by max_min < cut
     shape_cut: bool,
+    /// ViewReq::shape_cut_max: the raster cuts records by their larger side
+    shape_cut_max: bool,
     box_px: f64,
     /// arrays keep every box_stride-th member (the pass level)
     box_stride: i64,
@@ -4158,6 +4164,7 @@ mod tests {
                     prune_skipped: false,
                     sub_cut_box: false,
                     shape_cut: false,
+                    shape_cut_max: false,
                     frames: true,
                     page_wash: true,
                     lod_swap: true,
@@ -4408,6 +4415,7 @@ mod tests {
                     prune_skipped: false,
                     sub_cut_box: false,
                     shape_cut: false,
+                    shape_cut_max: false,
                     frames: true,
                     page_wash: true,
                     lod_swap: true,
@@ -5806,6 +5814,7 @@ mod tests {
                     prune_skipped: false,
                     sub_cut_box: false,
                     shape_cut: false,
+                    shape_cut_max: false,
                     frames: true,
                     page_wash: true,
                     lod_swap: true,
@@ -6375,6 +6384,7 @@ mod tests {
                     prune_skipped: false,
                     sub_cut_box: false,
                     shape_cut: false,
+                    shape_cut_max: false,
                     frames: true,
                     page_wash: true,
                     lod_swap: true,

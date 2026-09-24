@@ -1040,6 +1040,7 @@ fn run_clip(
         prune_summary: false,
         sub_cut_box: false,
         shape_cut: false,
+        shape_cut_max: false,
         frames: true,
         // px_per_dbu 0 above: no wash could fire either way
         page_wash: true,
@@ -1842,7 +1843,15 @@ fn sub_cut_box_enabled() -> bool {
 /// switch (pages are then cut by their largest shape, and thin shapes
 /// longer than the cut all stay, as before 0.12.173).
 fn shape_cut_enabled() -> bool {
-    std::env::var("FLOE_RUST_SHAPE_CUT").as_deref() != Ok("off")
+    !matches!(std::env::var("FLOE_RUST_SHAPE_CUT").as_deref(), Ok("off") | Ok("max"))
+}
+
+/// FLOE_RUST_SHAPE_CUT=max (CUT_DENSITY_DESIGN §10.6, diagnostic): pages
+/// are cut by their largest shape and records only when their larger side
+/// is under the cut, so the hairlines stay and the width-first drawing
+/// thins them by their width.
+fn shape_cut_max_enabled() -> bool {
+    std::env::var("FLOE_RUST_SHAPE_CUT").as_deref() == Ok("max")
 }
 
 /// Area-true drawing (floe_render_core::GeometryRasterRequest::area_true,
@@ -3046,7 +3055,8 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64)
         // FLOE_RUST_SUB_CUT_BOX=on - the density representation below the
         // cut replaces them (see sub_cut_box_enabled)
         sub_cut_box: !command.exact && command.thin_keep && sub_cut_box_enabled(),
-        shape_cut: !command.exact && command.thin_keep && shape_cut_enabled(),
+        shape_cut: !command.exact && command.thin_keep && shape_cut_enabled() && !shape_cut_max_enabled(),
+        shape_cut_max: !command.exact && command.thin_keep && shape_cut_max_enabled(),
         // the viewer's frames switch reaches the planner (review 2026-09-20: it
         // only reached the raster, so a frames-off view still planned - and
         // walked for - every depth-boundary outline)

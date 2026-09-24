@@ -17,7 +17,12 @@ squares and a 0.2 um wire on one layer (one page), wires alone on another.
     still lights the array and the wire; the layer of wires alone is an empty
     frame and its page is cut by the planner;
   * not the feature's business, byte-identical to the kill switch: the same
-    views under `thin cull`, and with no cut at all (detail off).
+    views under `thin cull`, and with no cut at all (detail off);
+  * the hairline-keeping diagnostic FLOE_RUST_SHAPE_CUT=max (CUT_DENSITY_DESIGN
+    §10.6, 2026-09-24): at the wider view the large square is drawn exactly as
+    under the shape cut, the array of 0.4 um squares (both sides under the
+    cut) is not drawn, the 0.2 um wire (longer than the cut) is, and the
+    layer of wires alone keeps its page.
 
     .venv/bin/python tools/validate_shape_cut.py
 """
@@ -56,10 +61,10 @@ def layout(path):
 
 
 def worker(src, on):
-    if on:
+    if on is True:
         os.environ.pop('FLOE_RUST_SHAPE_CUT', None)
     else:
-        os.environ['FLOE_RUST_SHAPE_CUT'] = 'off'
+        os.environ['FLOE_RUST_SHAPE_CUT'] = 'off' if on is False else on
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
@@ -144,6 +149,27 @@ def main():
                 same += 1
             print('shape cut: near views identical (3), wide keep view %d -> %d px (all in the large square), wires alone %d -> 0 px, %d unrelated frames identical'
                   % (len(was), len(kept), len(lit_pixels(lines)), same))
+            # the hairline-keeping mode: the square as under the shape cut, the
+            # array gone, the wire and the wires-alone page kept
+            hair = worker(src, 'max')
+            try:
+                gen += 1
+                mixed, rm = frame(hair, gen, wide, [MIXED], 'keep')
+                got = lit_pixels(mixed)
+                in_array = lambda p: (40 - wide[0]) / spp - 2 <= p[0] <= (72 - wide[0]) / spp + 2 and (wide[3] - 24.5) / spp - 2 <= p[1] <= (wide[3] - 0) / spp + 2
+                in_wire = lambda p: (wide[3] - 40.4) / spp - 2 <= p[1] <= (wide[3] - 39.8) / spp + 2 and p[0] <= (60 - wide[0]) / spp + 2
+                assert [p for p in got if inside(p)] == kept, 'max: the large square differs from the shape cut'
+                assert not any(in_array(p) for p in got if not inside(p)), 'max: the array of small squares was drawn'
+                wire_px = sum(in_wire(p) for p in got if not inside(p))
+                assert wire_px > 100, 'max: the wire was not drawn (%d px)' % wire_px
+                assert all(inside(p) or in_wire(p) for p in got), 'max: pixels outside the square and the wire'
+                assert rm['plan_culls']['shape_cut'] > 0, rm['plan_culls']
+                gen += 1
+                wires_kept, rw = frame(hair, gen, wide, [WIRES], 'keep')
+                assert len(lit_pixels(wires_kept)) > 500 and rw['plan_culls']['pages_size'] == 0, (len(lit_pixels(wires_kept)), rw['plan_culls'])
+                print('shape cut max: square identical, array 0 px, wire %d px, wires alone %d px (page kept)' % (wire_px, len(lit_pixels(wires_kept))))
+            finally:
+                hair.stop()
         finally:
             off.stop()
             on.stop()

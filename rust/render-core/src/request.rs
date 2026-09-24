@@ -72,6 +72,8 @@ pub struct PlanRequest {
     pub sub_cut_box: bool,
     /// The per-shape cut (floe_vfs::ViewReq::shape_cut).
     pub shape_cut: bool,
+    /// The hairline-keeping cut (floe_vfs::ViewReq::shape_cut_max).
+    pub shape_cut_max: bool,
     /// The M7-C page wash (floe_vfs::ViewReq::page_wash).
     pub page_wash: bool,
     /// The M7 LOD swap (floe_vfs::ViewReq::lod_swap).
@@ -120,6 +122,7 @@ mod tests {
             prune_summary: false,
             sub_cut_box: false,
             shape_cut: false,
+            shape_cut_max: false,
             frames: true,
             page_wash: true,
             lod_swap: true,

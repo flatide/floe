@@ -2094,6 +2094,7 @@ fn replay_plane_items(
                         page_id,
                         level,
                         scene.plan().stats.shape_cut.min(i64::MAX as u64) as i64,
+                        scene.plan().stats.shape_cut_max,
                         local_view,
                         *transform,
                         stats,
@@ -3746,6 +3747,12 @@ fn thin_record<'a>(rep: &'a Rep, level: u8, record: usize) -> Option<std::borrow
     }))
 }
 
+/// the side the per-shape cut judges a shape's bbox by
+fn cut_side_of(base: BBox, larger: bool) -> i64 {
+    let (w, h) = (base.x1 - base.x0, base.y1 - base.y0);
+    if larger { w.max(h) } else { w.min(h) }
+}
+
 fn raster_page_records(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,
@@ -3753,6 +3760,7 @@ fn raster_page_records(
     page_id: u32,
     level: u8,
     shape_cut: i64,
+    shape_cut_max: bool,
     local_view: BBox,
     world_transform: OrthoTransform,
     stats: &mut RenderStats,
@@ -3795,9 +3803,12 @@ fn raster_page_records(
                     page_id, rect.w, rect.h
                 ));
             }
-            if rect.w == 0 || rect.h == 0 || rect.w.min(rect.h) < shape_cut {
-                // the per-shape cut (HierStats::shape_cut): the whole record,
-                // its members share the size
+            // the per-shape cut (HierStats::shape_cut): the whole record,
+            // its members share the size; by the smaller side, or by the
+            // larger one when the hairlines are to stay (shape_cut_max:
+            // the width-first drawing thins them by their width)
+            let cut_side = if shape_cut_max { rect.w.max(rect.h) } else { rect.w.min(rect.h) };
+            if rect.w == 0 || rect.h == 0 || cut_side < shape_cut {
                 return Ok(());
             }
             let x1 = rect
@@ -3881,7 +3892,7 @@ fn raster_page_records(
                     page_id
                 )
             })?;
-            if (base.x1 - base.x0).min(base.y1 - base.y0) < shape_cut {
+            if cut_side_of(base, shape_cut_max) < shape_cut {
                 return Ok(());
             }
             let mut drawn = 0u64;
@@ -3952,7 +3963,7 @@ fn raster_page_records(
             let base = polygon_bbox(&outline).ok_or_else(|| {
                 format!("corrupt page {}: path outline is degenerate", page_id)
             })?;
-            if (base.x1 - base.x0).min(base.y1 - base.y0) < shape_cut {
+            if cut_side_of(base, shape_cut_max) < shape_cut {
                 return Ok(());
             }
             let mut drawn = 0u64;
@@ -4072,6 +4083,7 @@ fn render_cell(
             page_id,
             level,
             scene.plan().stats.shape_cut.min(i64::MAX as u64) as i64,
+            scene.plan().stats.shape_cut_max,
             local_view,
             world_transform,
             stats,
