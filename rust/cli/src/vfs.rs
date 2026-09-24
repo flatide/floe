@@ -1962,12 +1962,26 @@ fn write_occupancy(
         eprintln!("[vfs] occupancy: {}", e);
         std::process::exit(1);
     });
+    let built_s = t.elapsed().as_secs_f64();
+    let phases = occ::phases_take();
+    let writing = std::time::Instant::now();
     let bytes = occ::write_ovo(&built);
     {
         let mut f = std::fs::File::create(&tmp).expect("create ovo tmp");
         f.write_all(&bytes).expect("write ovo tmp");
         f.sync_all().expect("sync ovo tmp");
     }
+    // CUT_DENSITY_DESIGN §10.5: where the build's time went
+    eprintln!(
+        "[vfs] occupancy phases: build {:.1}s = group {:.1}s + prepare {:.1}s + mark {:.1}s + pyramid {:.1}s + other {:.1}s; write {:.1}s",
+        built_s,
+        phases[0],
+        phases[1],
+        phases[2],
+        phases[3],
+        (built_s - phases.iter().sum::<f64>()).max(0.0),
+        writing.elapsed().as_secs_f64()
+    );
     if kill_at == Some("occupancy-tmp") {
         eprintln!("[vfs] --kill-at occupancy-tmp");
         std::process::exit(9);
@@ -2202,6 +2216,33 @@ pub fn occupancy_cmd(args: &[String]) {
         // planes= lists the placement depths that hold a shape (a
         // version-1 file: `all`) with each plane's level-0 count
         let sets: Vec<String> = (0..f.n_levels as usize).map(|lv| f.count(k, lv).to_string()).collect();
+        // non-empty 16 x 16-cell tiles per level (review 2026-09-24: what a
+        // tiled sparse plane would store, against the set-cell share)
+        let tiles: Vec<String> = (0..f.n_levels as usize)
+            .map(|lv| match f.level(k, lv) {
+                Some((w, h, bits)) => {
+                    let rb = occ::Level::row_bytes(w);
+                    let (tw, th) = ((w + 15) / 16, (h + 15) / 16);
+                    let mut n = 0u64;
+                    for tj in 0..th {
+                        for ti in 0..tw {
+                            let mut any = false;
+                            'rows: for j in tj * 16..((tj + 1) * 16).min(h) {
+                                for i in ti * 16..((ti + 1) * 16).min(w) {
+                                    if (bits[j as usize * rb + (i / 8) as usize] >> (i % 8)) & 1 == 1 {
+                                        any = true;
+                                        break 'rows;
+                                    }
+                                }
+                            }
+                            n += any as u64;
+                        }
+                    }
+                    format!("{}/{}", n, tw as u64 * th as u64)
+                }
+                None => "0/0".to_string(),
+            })
+            .collect();
         let (w0, h0) = l.planes.first().and_then(|p| p.levels.first()).map(|e| (e.w, e.h)).unwrap_or((0, 0));
         let planes: Vec<String> = l
             .planes
@@ -2213,7 +2254,7 @@ pub fn occupancy_cmd(args: &[String]) {
             })
             .collect();
         println!(
-            "layer idx={} ld={}/{} status={} work={} level0={}x{} set={} planes={}",
+            "layer idx={} ld={}/{} status={} work={} level0={}x{} set={} tiles16={} planes={}",
             k,
             l.layer,
             l.dt,
@@ -2222,6 +2263,7 @@ pub fn occupancy_cmd(args: &[String]) {
             w0,
             h0,
             sets.join(","),
+            tiles.join(","),
             if planes.is_empty() { "-".to_string() } else { planes.join(",") }
         );
     }

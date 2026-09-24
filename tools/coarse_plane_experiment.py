@@ -77,6 +77,41 @@ def band_params(b):
     return s_min, zone, cut
 
 
+def integral(mask):
+    """the integral image of a per-DBU field: I[y, x] = sum over [0, x) x [0, y)"""
+    a = np.zeros((mask.shape[0] + 1, mask.shape[1] + 1), dtype=np.float64)
+    a[1:, 1:] = np.asarray(mask, dtype=np.float64).cumsum(0).cumsum(1)
+    return a
+
+
+def sample_integral(ii, xs, ys):
+    """I at fractional coordinates: a per-DBU field is constant on unit cells,
+    so the integral over [0, x) x [0, y) is bilinear in the fractions - the
+    interpolation is exact (review 2026-09-24: round(1 / s) put the truth on
+    the wrong columns for every non-integer scale)"""
+    xs = np.clip(xs, 0, ii.shape[1] - 1)
+    ys = np.clip(ys, 0, ii.shape[0] - 1)
+    x0 = np.floor(xs).astype(int).clip(0, ii.shape[1] - 2)
+    y0 = np.floor(ys).astype(int).clip(0, ii.shape[0] - 2)
+    fx, fy = xs - x0, ys - y0
+    a = ii[np.ix_(y0, x0)]
+    b = ii[np.ix_(y0, x0 + 1)]
+    c = ii[np.ix_(y0 + 1, x0)]
+    d = ii[np.ix_(y0 + 1, x0 + 1)]
+    fx, fy = fx[None, :], fy[:, None]
+    return a * (1 - fx) * (1 - fy) + b * fx * (1 - fy) + c * (1 - fx) * fy + d * fx * fy
+
+
+def resample(field, unit_dbu, s, side):
+    """mean of a field (constant on unit_dbu cells) over each screen pixel of a
+    side x side view at s px/DBU - exact, any s"""
+    ii = integral(field)
+    edges = np.arange(side + 1) / s / unit_dbu          # pixel edges in field cells
+    full = sample_integral(ii, edges, edges)
+    box = full[1:, 1:] - full[:-1, 1:] - full[1:, :-1] + full[:-1, :-1]
+    return box / ((1.0 / s / unit_dbu) ** 2)
+
+
 def quantize8(cov):
     v = np.rint(cov * 255).astype(np.uint8)
     v[(cov > 0) & (v == 0)] = 1             # not empty -> at least 1
@@ -90,26 +125,31 @@ def quantize16(cov):
 
 
 def store(planes):
-    """tiled sparse bytes: header, then per band per non-empty tile:
-    (tile index u32, presence bits 32 B, values 256 x 1 or 2 B)"""
+    """tiled sparse bytes: header, then per band a header (band, n, tiles a
+    side, bits, NON-EMPTY TILE COUNT) and that many tiles: (tile index u32,
+    presence bits 32 B, values 256 x 1 or 2 B). The count is explicit
+    (review 2026-09-24: guessing the band's end from the next bytes could not
+    restore an empty band)"""
     out = io.BytesIO()
-    out.write(struct.pack('<4sII', b'CPLN', 1, len(planes)))
+    out.write(struct.pack('<4sII', b'CPLN', 2, len(planes)))
     per_band = {}
     for b, (values, bits) in sorted(planes.items()):
         n = values.shape[0]
         nt = -(-n // TILE)
         start = out.tell()
-        out.write(struct.pack('<IIII', b, n, nt, bits))
+        tiles = []
         for tj in range(nt):
             for ti in range(nt):
                 tile = values[tj * TILE:(tj + 1) * TILE, ti * TILE:(ti + 1) * TILE]
-                if not tile.any():
-                    continue
-                full = np.zeros((TILE, TILE), dtype=values.dtype)
-                full[:tile.shape[0], :tile.shape[1]] = tile
-                out.write(struct.pack('<I', tj * nt + ti))
-                out.write(np.packbits(full > 0).tobytes())
-                out.write(full.astype('<u1' if bits == 8 else '<u2').tobytes())
+                if tile.any():
+                    tiles.append((tj * nt + ti, tile))
+        out.write(struct.pack('<IIIII', b, n, nt, bits, len(tiles)))
+        for k, tile in tiles:
+            full = np.zeros((TILE, TILE), dtype=values.dtype)
+            full[:tile.shape[0], :tile.shape[1]] = tile
+            out.write(struct.pack('<I', k))
+            out.write(np.packbits(full > 0).tobytes())
+            out.write(full.astype('<u1' if bits == 8 else '<u2').tobytes())
         per_band[b] = out.tell() - start
     return out.getvalue(), per_band
 
@@ -117,35 +157,36 @@ def store(planes):
 def restore(blob):
     f = io.BytesIO(blob)
     magic, version, nb = struct.unpack('<4sII', f.read(12))
-    assert magic == b'CPLN' and version == 1
+    assert magic == b'CPLN' and version == 2
     planes = {}
     for _ in range(nb):
-        b, n, nt, bits = struct.unpack('<IIII', f.read(16))
+        b, n, nt, bits, count = struct.unpack('<IIIII', f.read(20))
         dtype = np.uint8 if bits == 8 else np.uint16
         values = np.zeros((nt * TILE, nt * TILE), dtype=dtype)
-        while True:
-            head = f.read(4)
-            if len(head) < 4:
-                break
-            (k,) = struct.unpack('<I', head)
-            if k >= nt * nt or (planes and k < 0):
-                f.seek(-4, 1)
-                break
+        for _ in range(count):
+            (k,) = struct.unpack('<I', f.read(4))
             presence = np.unpackbits(np.frombuffer(f.read(32), dtype=np.uint8)).reshape(TILE, TILE)
             tile = np.frombuffer(f.read(TILE * TILE * (bits // 8)), dtype=dtype).reshape(TILE, TILE)
             assert ((tile > 0) == (presence > 0)).all()
-            tj, ti = divmod(k, nt)
+            tj, ti = divmod(int(k), nt)
             values[tj * TILE:(tj + 1) * TILE, ti * TILE:(ti + 1) * TILE] = tile
-            # the next record may be the next band's header: peek
-            pos = f.tell()
-            nxt = f.read(16)
-            f.seek(pos)
-            if len(nxt) == 16:
-                b2, n2, nt2, bits2 = struct.unpack('<IIII', nxt)
-                if b2 == b + 1 and bits2 == bits and n2 <= n:
-                    break
         planes[b] = (values[:n, :n], bits)
+    assert f.read(1) == b'', 'bytes left after the last band'
     return planes
+
+
+def restore_self_test():
+    """review 2026-09-24: an empty plane before a non-empty one, and two
+    empty planes, come back as stored"""
+    empty = (np.zeros((32, 32), dtype=np.uint8), 8)
+    some = np.zeros((32, 32), dtype=np.uint8)
+    some[3, 5] = 7
+    for planes in ({0: empty, 1: (some, 8)}, {0: empty, 1: empty}, {0: (some, 8), 1: empty, 2: (some, 8)}):
+        blob, _ = store(planes)
+        back = restore(blob)
+        assert back.keys() == planes.keys()
+        for b in planes:
+            assert (back[b][0] == planes[b][0]).all() and back[b][1] == planes[b][1]
 
 
 def main(argv=None):
@@ -179,6 +220,8 @@ def main(argv=None):
               % (b, s_min, s_min * 2 ** (1 / PER_OCTAVE), zone, level, zone * s_min, cut, n, n, nonempty, 100 * nonempty / (n * n), tiles, (-(-n // TILE)) ** 2))
     # ---- 1. store / restore
     print('\n== 1. store / restore')
+    restore_self_test()
+    print('empty planes (before a non-empty one, and two in a row) restore as stored: OK')
     for name, planes in (('8 bit', planes8), ('16 bit', planes16)):
         blob, per_band = store(planes)
         back = restore(blob)
@@ -213,32 +256,24 @@ def main(argv=None):
         # the band's rule
         orig = dpe.paint(rects[minside >= cut], scale=s, side=side)
         n_orig = int((minside >= cut).sum())
-        # density from the plane, projected to screen pixels (zone value spread over its pixels)
+        # density from the plane: the zone field (constant per zone) averaged
+        # over each screen pixel, exact at any s
         v = planes8[b][0].astype(np.float64) / 255.0
-        zpx = zone * s                                  # zone side in screen px (4..8)
-        ys = (np.arange(side) / zpx).astype(int).clip(0, v.shape[0] - 1)
-        xs = (np.arange(side) / zpx).astype(int).clip(0, v.shape[1] - 1)
-        dens = v[np.ix_(ys, xs)]
+        dens = resample(v, zone, s, side)
         lit = orig.sum() + dens[~orig].sum()
         bright = lit / (true_area * s * s)
-        # the density part's truth: the exact coverage of the shapes under the band's cut at screen pixels
-        fine_under = dpe.paint(rects[minside < cut])
-        px = int(round(1 / s))
-        truth = fine_under[:side * px, :side * px].reshape(side, px, side, px).mean(axis=(1, 3)) if px * side <= W else None
-        mae = float(np.abs(dens - truth)[~orig].mean()) if truth is not None else float('nan')
+        # the density part's truth: the exact coverage of the shapes under the band's cut per screen pixel
+        truth = resample(dpe.paint(rects[minside < cut]), 1, s, side)
+        mae = float(np.abs(dens - truth)[~orig].mean())
         # continuous baseline: originals >= c_req, exact zone density at this view's level (8-16 px zones)
         orig_c = dpe.paint(rects[minside >= c_req], scale=s, side=side)
         n_cont = int((minside >= c_req).sum())
         zc = 1 << level
         cov_c = dpe.zone_sum(dpe.paint(rects[minside < c_req]), level).astype(np.float64) / (zc * zc)
-        zpx_c = zc * s
-        ys_c = (np.arange(side) / zpx_c).astype(int).clip(0, cov_c.shape[0] - 1)
-        xs_c = (np.arange(side) / zpx_c).astype(int).clip(0, cov_c.shape[1] - 1)
-        dens_c = cov_c[np.ix_(ys_c, xs_c)]
+        dens_c = resample(cov_c, zc, s, side)
         bright_c = (orig_c.sum() + dens_c[~orig_c].sum()) / (true_area * s * s)
-        fine_c = dpe.paint(rects[minside < c_req])
-        truth_c = fine_c[:side * px, :side * px].reshape(side, px, side, px).mean(axis=(1, 3)) if px * side <= W else None
-        mae_c = float(np.abs(dens_c - truth_c)[~orig_c].mean()) if truth_c is not None else float('nan')
+        truth_c = resample(dpe.paint(rects[minside < c_req]), 1, s, side)
+        mae_c = float(np.abs(dens_c - truth_c)[~orig_c].mean())
         rows.append((s, b, c_req, cut, bright, bright_c, mae, mae_c, n_orig, n_cont, int(orig.sum()), int(orig_c.sum()), v.shape[0] ** 2))
         if b != prev_b or True:
             print('%-9.5f %-5d %-6d %-6d %8.3f %8.3f %8.4f %8.4f %8d %8d' % (s, b, c_req, cut, bright, bright_c, mae, mae_c, n_orig, n_cont))
@@ -249,10 +284,14 @@ def main(argv=None):
     step_c = max(abs(a - b) for a, b in zip(brights_c, brights_c[1:]))
     print('band planes: brightness %.3f..%.3f, largest step %.3f; continuous: %.3f..%.3f, step %.3f'
           % (min(brights), max(brights), step, min(brights_c), max(brights_c), step_c))
-    maes = [r[6] for r in rows if not math.isnan(r[6])]
-    maes_c = [r[7] for r in rows if not math.isnan(r[7])]
-    print('density MAE per screen px: band planes mean %.4f max %.4f; continuous mean %.4f max %.4f'
-          % (sum(maes) / len(maes), max(maes), sum(maes_c) / len(maes_c), max(maes_c)))
+    maes = [r[6] for r in rows]
+    maes_c = [r[7] for r in rows]
+    print('density MAE per screen px (all %d views, exact resampling): band planes mean %.4f max %.4f; continuous mean %.4f max %.4f'
+          % (len(rows), sum(maes) / len(maes), max(maes), sum(maes_c) / len(maes_c), max(maes_c)))
+    near = [r[6] for r in rows if r[2] * 2 <= r[3]]     # c_req <= c_b / 2: the near half of a band
+    near_c = [r[7] for r in rows if r[2] * 2 <= r[3]]
+    print('near halves of the bands (c_req <= c_b / 2, %d views): band planes %.4f, continuous %.4f'
+          % (len(near), sum(near) / max(1, len(near)), sum(near_c) / max(1, len(near_c))))
     # ---- 4. originals cost
     print('\n== 4. originals: shapes and painted pixels, band cut vs continuous (mean over the sweep)')
     print('shapes %.2fx, painted px %.2fx (band planes / continuous)'
@@ -269,7 +308,7 @@ def main(argv=None):
         v = planes8[b][0]
         n = v.shape[0]
         bl = [r[4] for r in rows if r[1] == b]
-        ml = [r[6] for r in rows if r[1] == b and not math.isnan(r[6])]
+        ml = [r[6] for r in rows if r[1] == b]
         print('%d %d %d %.1f %d | %.3f-%.3f %.4f' % (b, zone, cut, 100 * (v > 0).mean(), sum(1 for tj in range(-(-n // TILE)) for ti in range(-(-n // TILE)) if v[tj * TILE:(tj + 1) * TILE, ti * TILE:(ti + 1) * TILE].any()),
                                               min(bl), max(bl), sum(ml) / max(1, len(ml))))
 
