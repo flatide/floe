@@ -46,6 +46,11 @@ ROOT = Path(__file__).resolve().parents[1]
 # drawn by the KLayout rule: area-true drawing (FLOE_RUST_AREA_TRUE, its own
 # gate tools/validate_area_true.py) is pinned off for every worker of this gate.
 os.environ["FLOE_RUST_AREA_TRUE"] = "off"
+# A plain layout's frames draw no occupancy summary by default (user decision
+# 2026-09-24; jobdeck passes keep it): the layout workers of this gate judge
+# the summary itself, so they opt in with FLOE_RUST_OCCUPANCY=on; the kill
+# switch workers still set =off, and RenderTests checks the default.
+os.environ["FLOE_RUST_OCCUPANCY"] = "on"
 sys.path.insert(0, str(ROOT))
 from floe.cachepath import vfs_cache_dir  # noqa: E402
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
@@ -1225,11 +1230,14 @@ class RenderTests(unittest.TestCase):
         assert sum("status=ok" in r for r in rows) == 2, rows
         os.environ["FLOE_RENDERD_BIN"] = str(
             ROOT / "rust" / "target" / "release" / "floe-renderd")
-        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
+        os.environ["FLOE_RUST_OCCUPANCY"] = "on"
         cls.worker = cls._start_worker()
         os.environ["FLOE_RUST_OCCUPANCY"] = "off"
         cls.worker_off = cls._start_worker()
-        del os.environ["FLOE_RUST_OCCUPANCY"]
+        # the default: a plain layout draws no summary (reason "layout")
+        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
+        cls.worker_default = cls._start_worker()
+        os.environ["FLOE_RUST_OCCUPANCY"] = "on"
         # the per-depth planes' kill switch: a version-2 file used like
         # a version-1 one (only at a depth that draws the layer whole)
         os.environ["FLOE_RUST_OCCUPANCY_DEPTH"] = "off"
@@ -1244,7 +1252,7 @@ class RenderTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        for w in (cls.worker, cls.worker_off, cls.worker_nodepth, cls.worker_keeponly):
+        for w in (cls.worker, cls.worker_off, cls.worker_default, cls.worker_nodepth, cls.worker_keeponly):
             try:
                 w.stop()
             except Exception:
@@ -1291,6 +1299,18 @@ class RenderTests(unittest.TestCase):
             if res.get("refining"):
                 continue
             return lit_pixels(res["rgba"], px, px), res["summary"], bbox
+
+    def test_a_plain_layout_draws_no_summary_by_default(self):
+        """User decision 2026-09-24: without FLOE_RUST_OCCUPANCY=on a plain
+        layout's frames take no summary even with a design.ovo - the wide
+        keep view plans pages and is pixel-identical to the kill switch;
+        the opt-in draws the summary."""
+        default, s_default, _ = self._render(self.worker_default, thin="keep")
+        off, s_off, _ = self._render(self.worker_off, thin="keep")
+        _, s_on, _ = self._render(self.worker, thin="keep")
+        self.assertEqual((s_default["layers"], s_default["none"]), (0, "layout"), s_default)
+        self.assertEqual(default, off, "the default frame differs from the kill switch's")
+        self.assertGreater(s_on["layers"], 0, s_on)
 
     def test_the_wide_view_mask_equals_the_projected_level_at_every_pan_phase(self):
         ovo = read_ovo(self.cache / "design.ovo")
@@ -1469,7 +1489,7 @@ class RenderTests(unittest.TestCase):
         src = TMP / "gaps.oas"
         write_gaps(src)
         cache = index_with_occupancy(src, 4)
-        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
+        os.environ["FLOE_RUST_OCCUPANCY"] = "on"
         sys.path.insert(0, str(ROOT))
         from floe.cache import Cache
         from floe.rust_render import RustRenderWorker
@@ -2187,11 +2207,11 @@ class DeckRenderTests(unittest.TestCase):
         os.environ["FLOE_RENDERD_BIN"] = str(
             ROOT / "rust" / "target" / "release" / "floe-renderd")
         sys.path.insert(0, str(ROOT))
-        os.environ.pop("FLOE_RUST_OCCUPANCY", None)
+        os.environ["FLOE_RUST_OCCUPANCY"] = "on"
         cls.deck, cls.single = cls._workers()
         os.environ["FLOE_RUST_OCCUPANCY"] = "off"
         cls.deck_off, cls.single_off = cls._workers()
-        del os.environ["FLOE_RUST_OCCUPANCY"]
+        os.environ["FLOE_RUST_OCCUPANCY"] = "on"
         cls.bbox = tuple(cls.deck.cache.meta["bbox"])
         cls.dbu = float(cls.deck.cache.meta["dbu"])
 

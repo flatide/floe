@@ -773,6 +773,7 @@ impl Deck {
                 &plan_request,
                 request.thin_keep || crate::summary::cull_allowed(),
                 occupancy_off,
+                false,
             )?;
             let plan_request = self.sources[source_index].cache.page_plan_request(
                 &plan_request,

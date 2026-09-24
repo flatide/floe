@@ -22,8 +22,10 @@ Per view (all layers, fit / x4 / x16, thin keep, cut 3 px, 1920 x 1080,
 centred): the second (warm) frame's wall and draw time, pages read, rectangle
 members drawn, the share of lit pixels, and the plan's cut counters (shape
 cut, pages cut by size, thin pages kept, the fit budget's percentage / over /
-thin level). An occupancy summary in the index (design.ovo) replaces the
-pages at wide keep views - move it aside for a page-path measurement.
+thin level). A plain layout's frames draw no occupancy summary by default
+since 2026-09-24 (FLOE_RUST_OCCUPANCY=on would bring it back and let it
+replace the pages at wide keep views), so a design.ovo in the index does
+not disturb the measurement.
 
     .venv/bin/python tools/bench_hairline_cut.py <layout.oas> [--zooms 1,4,16] [--size 1920x1080]
 """

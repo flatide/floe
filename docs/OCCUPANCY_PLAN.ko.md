@@ -215,6 +215,14 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
    keep 광역뷰면 `summary: none (<이유>)`(파일 없음·무효·레이어 status·킬 스위치).
 8. 킬 스위치 `FLOE_RUST_OCCUPANCY=off`(요약 무시 → 현행), `floe-index plan
    --explain`에 verdict `summary`(레이어 단위).
+9. **일반 레이아웃은 기본으로 요약을 쓰지 않는다(2026-09-24 사용자 결정).** renderd의 레이아웃 프레임
+   (잡덱 패스가 아닌 것)은 `design.ovo`가 있어도 요약을 고르지 않고(`summary: none (layout)`) 페이지
+   경로로 그린다. 잡덱 패스(`deck.rs`)는 그대로 요약을 쓴다. 레이아웃에서 다시 쓰려면 진단
+   `FLOE_RUST_OCCUPANCY=on`; `=off`는 종전대로 덱까지 끈다. 이유: 레이아웃을 `--occupancy`로 색인하면
+   요약이 넓은 keep 뷰를 대신 그려, 폭 우선 그리기·헤어라인 측정(CUT_DENSITY_DESIGN §10.6)에서 페이지
+   경로가 가려졌다. `floe2 index`의 레이아웃 기본(요약 안 만듦)은 그대로이고, 만든 파일은 남아 있어도
+   쓰이지 않는다. gate `RenderTests.test_a_plain_layout_draws_no_summary_by_default`(기본 프레임 =
+   킬 스위치 프레임, 이유 `layout`, opt-in은 요약); 이 게이트의 레이아웃 워커는 `=on`으로 요약을 판정한다.
 
 ## 7. 덱 통합
 

@@ -2213,6 +2213,9 @@ fn run_render(
         &make_plan_request(cache, &command, state.page_cache.budget_bytes())?,
         policy_allows,
         std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off"),
+        // a plain layout draws no summary unless FLOE_RUST_OCCUPANCY=on
+        // (user decision 2026-09-24; jobdeck passes keep it)
+        !floe_render_core::summary_layout_allowed(),
     )?;
     let summary_key = SummaryKey::of(&summary);
     let pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key);

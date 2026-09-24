@@ -67,6 +67,9 @@ pub const NONE_NOFILE: &str = "nofile";
 pub const NONE_INVALID: &str = "invalid";
 pub const NONE_NEAR: &str = "near";
 pub const NONE_LAYERS: &str = "layers";
+/// a plain layout's frame (not a jobdeck pass): the summary is off by
+/// default there (user decision 2026-09-24), FLOE_RUST_OCCUPANCY=on uses it
+pub const NONE_LAYOUT: &str = "layout";
 
 /// The summary decision of one request.
 #[derive(Clone)]
@@ -216,6 +219,17 @@ pub const DEFAULT_MAX_CELL_PX: f64 = 1.0;
 /// Callers pass `thin_keep || cull_allowed()` as the policy condition.
 pub fn cull_allowed() -> bool {
     std::env::var("FLOE_RUST_OCCUPANCY_CULL").as_deref() != Ok("off")
+}
+
+/// A plain layout's frames draw no occupancy summary by default (user
+/// decision 2026-09-24): the summary stands in for pages at wide views,
+/// which a jobdeck's mask sources need and a layout's own view does not
+/// (a layout indexed with --occupancy kept replacing its wide keep views,
+/// and hid the page path from measurements). FLOE_RUST_OCCUPANCY=on uses
+/// it for layouts again (diagnostic); =off turns it off for decks too.
+/// Jobdeck passes (deck.rs) are not affected.
+pub fn layout_allowed() -> bool {
+    std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("on")
 }
 
 pub fn max_cell_px() -> f64 {

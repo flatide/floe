@@ -594,11 +594,15 @@ impl Cache {
     /// view that draws every hairline page is not) unless the kill
     /// switch FLOE_RUST_OCCUPANCY_CULL=off restores the keep-only rule
     /// (renderd decides and passes the flag).
+    /// `layout_off`: a plain layout's frame without the opt-in
+    /// (summary::layout_allowed) - no summary, reason "layout"; jobdeck
+    /// passes pass false.
     pub fn summary_selection(
         &self,
         request: &PlanRequest,
         policy_allows: bool,
         disabled: bool,
+        layout_off: bool,
     ) -> Result<crate::summary::SummarySelection, String> {
         use crate::summary::{self, SummarySelection};
         if !policy_allows {
@@ -611,6 +615,9 @@ impl Cache {
         }
         if disabled {
             return Ok(SummarySelection::none(summary::NONE_OFF));
+        }
+        if layout_off {
+            return Ok(SummarySelection::none(summary::NONE_LAYOUT));
         }
         let (file, error, stamp) = self.occupancy_file();
         let Some(file) = file else {

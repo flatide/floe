@@ -1845,7 +1845,9 @@ def main(argv=None, *, prog=None, rust_only=None):
         help="build the design.ovo occupancy pyramid (the mask-policy "
              "wide view summary): the default for a jobdeck's sources, "
              "opt-in for a layout (2026-09-16); when a current cache "
-             "lacks it, add it without replacing the cache")
+             "lacks it, add it without replacing the cache. A plain "
+             "layout's frames do not draw it unless FLOE_RUST_OCCUPANCY=on "
+             "(2026-09-24); jobdeck views do")
     occ.add_argument(
         "--no-occupancy", dest="occupancy", action="store_false",
         help="index without the occupancy summary (the layout default; "
