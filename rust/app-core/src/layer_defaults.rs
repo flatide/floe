@@ -28,6 +28,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+pub(crate) mod evidence;
 mod recovery;
 pub(crate) mod security;
 pub use recovery::{Recovery, RecoveryResult, RecoveryState};
@@ -304,11 +305,12 @@ impl Draft {
                 "cannot preserve design-default permissions/attributes",
             ));
         }
-        recovery::mark(&self, &staged, identity(&lm))?;
+        recovery::mark(&self, &mut staged, identity(&lm))?;
         staged
             .file
             .set_times(fs::FileTimes::new().set_modified(SystemTime::now()))?;
         staged.file.sync_all()?;
+        staged.seal_evidence(&self.name, |p| self.publisher.protect(p), stop)?;
         before_commit()?;
         self.current(true, stop)?;
         if self.directory.leaf_identity(&self.lock_name)? != identity(&lm) {
@@ -323,6 +325,13 @@ impl Draft {
         staged.commit(&self.name, self.before.is_some())?;
         // Never turn an already committed result into a cancellation/error.
         let directory_synced = sync_directory(&self.directory.file).is_ok();
+        // A durable replacement must precede retiring the old inode's record.
+        // On a sync warning retain both; old target may return after a crash.
+        if directory_synced {
+            if let Some(before) = &self.before {
+                before.evidence.retire(|p| self.publisher.protect(p));
+            }
+        }
         Ok(Published { directory_synced })
     }
 }
@@ -434,10 +443,11 @@ struct Capture {
     stamp: Stamp,
     bytes: Vec<u8>,
     security: Security,
+    evidence: evidence::Evidence,
 }
 impl Capture {
     fn read(
-        dir: &Directory,
+        dir: &Arc<Directory>,
         name: &CStr,
         writable: bool,
         stop: &AtomicUsize,
@@ -445,7 +455,7 @@ impl Capture {
         Self::read_links(dir, name, writable, 1, stop)
     }
     fn read_links(
-        dir: &Directory,
+        dir: &Arc<Directory>,
         name: &CStr,
         writable: bool,
         links: u64,
@@ -480,14 +490,35 @@ impl Capture {
         if bytes.len() > layerprops::MAX_BYTES || Stamp::of(&file.metadata()?) != stamp {
             return Err(conflict());
         }
+        use sha1::{Digest, Sha1};
+        let evidence = evidence::Evidence::read(
+            Arc::clone(dir),
+            name,
+            &file,
+            Sha1::digest(&bytes).into(),
+            &security,
+            evidence::Kind::Default,
+        )?;
+        if Stamp::of(&file.metadata()?) != stamp || dir.leaf_identity(name)? != stamp.id {
+            return Err(conflict());
+        }
         Ok(Some(Self {
             stamp,
             bytes,
             security,
+            evidence,
         }))
     }
+    fn attribute(&self, name: &CStr) -> Option<&[u8]> {
+        self.security
+            .attribute(name)
+            .or_else(|| self.evidence.attribute(name))
+    }
     fn same(&self, other: &Self) -> bool {
-        self.stamp == other.stamp && self.bytes == other.bytes && self.security == other.security
+        self.stamp == other.stamp
+            && self.bytes == other.bytes
+            && self.security == other.security
+            && self.evidence.same(&other.evidence)
     }
 }
 pub(crate) struct Stage {
@@ -497,6 +528,10 @@ pub(crate) struct Stage {
     pub(crate) creation_security: Security,
     linked: bool,
     id: (u64, u64),
+    owned: std::collections::BTreeMap<String, Vec<u8>>,
+    needs_evidence: bool,
+    evidence: Option<evidence::Evidence>,
+    sealed_stamp: Option<Stamp>,
 }
 impl Stage {
     pub(crate) fn name(&self) -> &CStr {
@@ -545,6 +580,10 @@ impl Stage {
                 creation_security: Security::empty(),
                 linked: true,
                 id,
+                owned: Default::default(),
+                needs_evidence: false,
+                evidence: None,
+                sealed_stamp: None,
             };
             stage.creation_security = Security::read(&stage.file)?;
             Security::private(&stage.file)?;
@@ -556,6 +595,12 @@ impl Stage {
         let m = self.file.metadata()?;
         if !m.is_file() || m.nlink() != 1 || self.directory.leaf_identity(&self.name)? != self.id {
             return Err(conflict());
+        }
+        if let Some(e) = &self.evidence {
+            if self.sealed_stamp != Some(Stamp::of(&m)) {
+                return Err(conflict());
+            }
+            e.unchanged()?;
         }
         Ok(())
     }
@@ -665,6 +710,13 @@ impl Stage {
 }
 impl Drop for Stage {
     fn drop(&mut self) {
+        if self.linked {
+            // Before a publication syscall only. A commit attempt clears
+            // `linked` first, keeping both kinds of evidence on uncertainty.
+            if let Some(e) = &self.evidence {
+                e.retire(|_| Ok(()));
+            }
+        }
         self.unlink();
     }
 }

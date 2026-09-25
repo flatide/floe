@@ -6,10 +6,10 @@
 단위 검사로 대체 통과시키지 않으며, 명시적으로 보류된 기능을 임의로 재개하지 않는다.
 이번 기능·자동 검증 커밋은 `374452b`이며, 후속 문서 커밋은 잔여 범위 분리만 한다.
 
-**후속 사용자 결정: NFS 지원 보류.** NFS 전용 구현·보완·현장 수용은 현재 필수
-완료 조건에서 제외한다. 저장·복구의 개발/수용 기준은 우선 로컬 파일시스템이다.
-기존 안전 장치를 제거하거나 NFS 경로 접근을 새로 차단하는 결정은 아니며,
-현재 동작을 NFS 지원 보장으로 해석하지 않는다. RHEL/ETX 수용은 별도로 남는다.
+**최신 사용자 결정: xattr 없는 NFS의 기본 읽기·저장 호환성은 구현한다.**
+[불변 보조 record 방식](WEBUI_NO_XATTR.ko.md)으로 note/waive/shared-default의
+xattr 필수 조건을 제거했다. NFS 서버 장애·다중 client·재마운트 수용과 실제
+현장 검증은 별도로 남고, RHEL/ETX 수용도 완료 처리하지 않는다.
 
 ## 1. 승인된 비실측 구현
 
@@ -21,6 +21,7 @@
 | DRC note/waive 별도 저장 승인, opt-in 자동 저장, 응답 유실·파일 중단 복구 | 구현됨. 기존 Electron 수용과 새 일반 게시 불명 처리를 구분: [DRC 복구](WEBUI_REVIEW_RECOVERY.ko.md) |
 | 공유 layer default 중단 복구 | 이번에 source-bound 표식·별도 승인·읽기 전용 확인·회귀 추가: [상세](WEBUI_DEFAULT_RECOVERY.ko.md) |
 | 일반 게시 syscall 결과 불명 | 이번에 사후 확인·증거 보존·불명 receipt·새 게시 차단 추가. 일반 게시 불명은 파일 확인/새 서버 세션이 필요한 보수적 운영 계약 |
+| xattr 없는 NFS의 기본 저장 호환성 | ENOTSUP만 inode별 보조 record로 전환. 식별·별도 복구·파일 형식 유지. [계약·제한](WEBUI_NO_XATTR.ko.md) |
 | 로컬 Follow/Explore 공유 | 기존 opt-in/loopback 구현 유지. 원격 공개로 확장하지 않음 |
 | 오프라인 개발 번들·고지·무결성/의존성 검사 도구 | 구현됨: [portable](WEBUI_ELECTRON_PORTABLE.ko.md), [고지](WEBUI_ELECTRON_NOTICES.ko.md). 정식 배포 승인이 아님 |
 
@@ -46,8 +47,8 @@
 
 ## 3. 정책·권한·설계상 보류 — 테스트만 남은 것으로 오해하지 않음
 
-- **NFS 지원**: 사용자 보류. NFS lock/xattr/ACL, RPC 결과 불명, 다중 client·재마운트,
-  서버 장애/durability 대응과 현장 수용은 재개 요청 전까지 진행하지 않는다.
+- **NFS 확장 수용**: xattr 미지원 기본 저장은 재개·구현했다. NFS ACL/lock의
+  현장 수용, 다중 client·재마운트 및 서버 장애/durability 보장은 여전히 별도다.
 - **원격 공유 SH-10**: 사용자가 보류. HTTPS proxy/public exposure·사내 인증·인증서/
   방화벽 변경을 이번 “나머지”에 포함하지 않는다.
 - **유료/외부 CI 실행**: GitHub Actions 실행 보류 유지.

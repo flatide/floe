@@ -21,7 +21,7 @@ struct Marker {
     file: (u64, u64),
     lock: (u64, u64),
 }
-pub(super) fn mark(d: &Draft, stage: &Stage, lock: (u64, u64)) -> Result<()> {
+pub(super) fn mark(d: &Draft, stage: &mut Stage, lock: (u64, u64)) -> Result<()> {
     let bytes = serde_json::to_vec(&Marker {
         v: 1,
         target: d.name.as_bytes().to_vec(),
@@ -37,11 +37,7 @@ pub(super) fn mark(d: &Draft, stage: &Stage, lock: (u64, u64)) -> Result<()> {
     if bytes.len() > 16384 {
         return Err(Error::input("default recovery marker exceeds limit"));
     }
-    security::set(&stage.file, MARKER, &bytes)?;
-    if Security::read(&stage.file)?.attribute(MARKER) != Some(bytes.as_slice()) {
-        return Err(unsupported("cannot preserve default recovery marker"));
-    }
-    Ok(())
+    stage.set_owned(MARKER, &bytes)
 }
 fn source_stamp(d: &Draft) -> Result<(u64, i64, i64)> {
     let m = fs::metadata(d.source.path())?;
@@ -102,7 +98,6 @@ impl Lock {
 }
 fn marker(d: &Draft, c: &Capture) -> Result<CString> {
     let bytes = c
-        .security
         .attribute(MARKER)
         .filter(|b| b.len() <= 16384)
         .ok_or_else(|| Error::input("default has no supported recovery marker"))?;
@@ -189,6 +184,7 @@ impl Recovery {
             || c.stamp.id != before.stamp.id
             || c.bytes != before.bytes
             || c.security != before.security
+            || !c.evidence.same(&before.evidence)
             || c.stamp.modified != before.stamp.modified
             || links == 2 && !c.same(before)
             || d.directory.leaf_identity(&d.name)? != c.stamp.id

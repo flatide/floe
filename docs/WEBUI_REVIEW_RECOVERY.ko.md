@@ -5,7 +5,9 @@
 연결했다. Electron도 같은 UI를 사용한다. 후속으로 [shared defaults와 일반 게시
 결과 불명](WEBUI_DEFAULT_RECOVERY.ko.md)의 구현·자동 검증을 추가했다. 실제
 GUI/서비스 종료 수용은 별도이므로 DRC-PUB-01 전체 완료로 세지 않는다.
-NFS 지원은 후속 사용자 결정으로 보류하며 현재 필수 잔여에서 제외한다.
+최신 요청으로 [xattr 없는 NFS의 기본 저장](WEBUI_NO_XATTR.ko.md)은 재개했다.
+아래 xattr-only 설명은 이전 구현 기록이며 현재는 불변 보조 record로도 복구한다.
+실제 NFS 장애/다중 client 수용은 별도다.
 기존 로컬 저장·복구 안전 장치는 유지한다. WKWebView는 동결한다.
 
 ## 1. 복구 대상과 저장 변경

@@ -3,12 +3,29 @@ use crate::layer_defaults::tests::Fixture;
 
 fn gap(f: &Fixture) -> PathBuf {
     f.draft().publish(&f.stop).unwrap();
-    let file = File::open(f.target()).unwrap();
-    let security = Security::read(&file).unwrap();
-    let m: Marker = serde_json::from_slice(security.attribute(MARKER).unwrap()).unwrap();
+    let draft = f.draft();
+    let capture = draft.before.as_ref().unwrap();
+    let m: Marker = serde_json::from_slice(capture.attribute(MARKER).unwrap()).unwrap();
     let stage = f.dir.join(m.stage);
     fs::hard_link(f.target(), &stage).unwrap();
     stage
+}
+#[test]
+fn no_xattr_default_recovery_uses_companion_and_preserves_normal_read_guards() {
+    let _guard = security::fault::inject(libc::ENOTSUP, libc::EOPNOTSUPP);
+    let f = Fixture::new();
+    let stage = gap(&f);
+    let payload = fs::read(f.target()).unwrap();
+    let proof = prepare(&f);
+    assert_eq!(proof.reconcile(&f.stop).unwrap(), RecoveryState::Pending);
+    assert!(matches!(
+        proof.recover(&f.stop).unwrap(),
+        RecoveryResult::Recovered { .. }
+    ));
+    assert!(!stage.exists());
+    assert_eq!(fs::read(f.target()).unwrap(), payload);
+    assert_eq!(proof.reconcile(&f.stop).unwrap(), RecoveryState::Completed);
+    f.draft().publish(&f.stop).unwrap();
 }
 fn prepare(f: &Fixture) -> Recovery {
     f.publisher

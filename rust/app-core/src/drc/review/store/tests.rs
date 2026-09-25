@@ -11,6 +11,117 @@ static SERIAL: AtomicU64 = AtomicU64::new(0);
 mod process_crash;
 
 #[test]
+fn no_xattr_reviews_remain_bound_across_reopen_replacement_and_waive_install() {
+    for k in [Kind::Notes, Kind::Waives] {
+        for list in [0, libc::ENOTSUP] {
+            let _guard = crate::layer_defaults::security::fault::inject(list, libc::EOPNOTSUPP);
+            let f = Fixture::new();
+            let store = f.store(k);
+            let save = |store: &Arc<Store>, text: &str| {
+                if k == Kind::Notes {
+                    f.note(store, text).publish(&f.stop).unwrap()
+                } else {
+                    store
+                        .snapshot(&f.stop)
+                        .unwrap()
+                        .prepare_waives(&[(0, 1)], &f.stop)
+                        .unwrap()
+                        .publish(&f.stop)
+                        .unwrap()
+                }
+            };
+            let receipt = save(&store, "first");
+            let reopened = f.store(k);
+            let snap = reopened.snapshot(&f.stop).unwrap();
+            assert!(!snap.legacy_unverified());
+            if k == Kind::Notes {
+                assert_eq!(snap.notes().unwrap().get(0), Some("first"));
+                snap.check_note_display(&f.stop).unwrap();
+            } else {
+                snap.verify_published(&receipt).unwrap();
+                let mut reader =
+                    crate::drc::Database::open_explicit(&f.pack, None, &f.stop).unwrap();
+                let applied = snap.apply_waives(&mut reader, &f.stop).unwrap();
+                assert!(!applied.legacy_unverified);
+                assert_eq!(applied.waived, 1);
+            }
+            save(&reopened, "second");
+            assert!(!reopened.snapshot(&f.stop).unwrap().legacy_unverified());
+            let records: Vec<_> = fs::read_dir(&f.dir)
+                .unwrap()
+                .map(|v| v.unwrap().path())
+                .filter(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".floe-meta-")
+                })
+                .collect();
+            assert_eq!(records.len(), 1);
+            f.clean();
+            // Equal legacy pack headers are insufficient, as on xattr hosts.
+            let replacement = f.dir.join("replacement.ice");
+            fs::write(&replacement, &f.bytes).unwrap();
+            fs::rename(replacement, &f.pack).unwrap();
+            let other = f.store(k);
+            assert_eq!(kind(other.snapshot(&f.stop)), ErrorKind::Cache);
+        }
+    }
+}
+
+#[test]
+fn no_xattr_review_evidence_change_rejects_old_snapshot_and_corruption_is_not_legacy() {
+    let _guard = crate::layer_defaults::security::fault::inject(libc::ENOTSUP, libc::ENOTSUP);
+    let f = Fixture::new();
+    let store = f.store(Kind::Notes);
+    f.note(&store, "saved").publish(&f.stop).unwrap();
+    let snap = store.snapshot(&f.stop).unwrap();
+    let evidence = snap.before.as_ref().unwrap().evidence.path();
+    fs::write(evidence, b"{invalid}").unwrap();
+    assert!(snap.check_note_display(&f.stop).is_err());
+    assert!(store.snapshot(&f.stop).is_err());
+    f.clean();
+}
+
+#[test]
+fn no_xattr_interrupted_review_commit_keeps_recoverable_companion_and_payload() {
+    for k in [Kind::Notes, Kind::Waives] {
+        let _guard = crate::layer_defaults::security::fault::inject(libc::ENOTSUP, libc::ENOTSUP);
+        let f = Fixture::new();
+        let store = f.store(k);
+        let snap = store.snapshot(&f.stop).unwrap();
+        let draft = if k == Kind::Notes {
+            snap.prepare_note(&[0], "interrupted", &f.stop).unwrap()
+        } else {
+            snap.prepare_waives(&[(0, 1)], &f.stop).unwrap()
+        };
+        // Unwind at the real Stage link/unlink boundary, not a process kill.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            draft.publish_with_link_hook(
+                &f.stop,
+                || Ok(()),
+                File::sync_all,
+                || panic!("injected post-link interruption"),
+            )
+        }));
+        assert!(result.is_err());
+        assert_eq!(fs::metadata(store.target()).unwrap().nlink(), 2);
+        let before = fs::read(store.target()).unwrap();
+        let reopened = f.store(k);
+        assert!(reopened.snapshot(&f.stop).is_err());
+        let repair = reopened.prepare_recovery(&f.stop).unwrap();
+        assert!(matches!(
+            repair.recover(&f.stop).unwrap(),
+            RecoveryResult::Recovered { .. }
+        ));
+        assert_eq!(repair.reconcile(&f.stop).unwrap(), RecoveryState::Completed);
+        assert_eq!(fs::read(store.target()).unwrap(), before);
+        assert!(!reopened.snapshot(&f.stop).unwrap().legacy_unverified());
+        f.clean();
+    }
+}
+
+#[test]
 fn dynamic_input_protection_rechecks_old_review_drafts_without_granting_writes() {
     for review_kind in [Kind::Notes, Kind::Waives] {
         for lock_target in [false, true] {

@@ -111,14 +111,16 @@ fn checked(rc: i32) -> std::io::Result<()> {
         Ok(())
     }
 }
-fn list(file: &File, out: &mut [u8]) -> isize {
+fn list(file: &File, out: &mut [u8]) -> std::io::Result<usize> {
+    #[cfg(test)]
+    fault::check(false)?;
     let p = if out.is_empty() {
         std::ptr::null_mut()
     } else {
         out.as_mut_ptr().cast()
     };
     // SAFETY: live fd and writable buffer (or null size query).
-    unsafe {
+    let rc = unsafe {
         #[cfg(target_os = "macos")]
         {
             libc::flistxattr(file.as_raw_fd(), p, out.len(), 0)
@@ -127,6 +129,11 @@ fn list(file: &File, out: &mut [u8]) -> isize {
         {
             libc::flistxattr(file.as_raw_fd(), p, out.len())
         }
+    };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(rc as usize)
     }
 }
 fn get(file: &File, name: &CStr, out: &mut [u8]) -> isize {
@@ -159,9 +166,14 @@ fn length(n: isize, max: usize) -> Result<usize> {
     Ok(n as usize)
 }
 fn attributes(file: &File) -> Result<BTreeMap<CString, Vec<u8>>> {
-    let n = length(list(file, &mut []), MAX_NAMES)?;
+    // An unsupported namespace is not an unreadable attribute. Only the
+    // initial list may mean "none"; losing enumerated metadata is an error.
+    let n = match list(file, &mut []) {
+        Err(e) if unavailable(&e) => return Ok(BTreeMap::new()),
+        value => length(value? as isize, MAX_NAMES)?,
+    };
     let mut names = vec![0; n];
-    if length(list(file, &mut names), MAX_NAMES)? != n {
+    if length(list(file, &mut names)? as isize, MAX_NAMES)? != n {
         return Err(super::conflict());
     }
     if n != 0 && names.last() != Some(&0) {
@@ -184,6 +196,25 @@ fn attributes(file: &File) -> Result<BTreeMap<CString, Vec<u8>>> {
     Ok(result)
 }
 pub(crate) fn set(file: &File, name: &CStr, value: &[u8]) -> Result<()> {
+    set_raw(file, name, value)?;
+    Ok(())
+}
+fn unavailable(e: &std::io::Error) -> bool {
+    e.raw_os_error()
+        .is_some_and(|v| v == libc::ENOTSUP || v == libc::EOPNOTSUPP)
+}
+/// Only Floe-owned publication metadata may use a companion on ENOTSUP.
+/// Preserving existing OS metadata still calls strict `set` above.
+pub(crate) fn set_owned(file: &File, name: &CStr, value: &[u8]) -> Result<bool> {
+    match set_raw(file, name, value) {
+        Ok(()) => Ok(true),
+        Err(e) if unavailable(&e) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+fn set_raw(file: &File, name: &CStr, value: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    fault::check(true)?;
     // SAFETY: valid fd/CString and readable value buffer, flags 0 (set/replace).
     let rc = unsafe {
         #[cfg(target_os = "macos")]
@@ -208,8 +239,30 @@ pub(crate) fn set(file: &File, name: &CStr, value: &[u8]) -> Result<()> {
             )
         }
     };
-    checked(rc)?;
-    Ok(())
+    checked(rc)
+}
+
+/// Per-test-thread syscall model, never an environment switch or product flag.
+#[cfg(test)]
+pub(crate) mod fault {
+    use std::cell::Cell;
+    thread_local! { static ERRORS: Cell<(i32, i32)> = const { Cell::new((0, 0)) }; }
+    pub(crate) struct Guard((i32, i32));
+    pub(crate) fn inject(list: i32, set: i32) -> Guard {
+        Guard(ERRORS.with(|v| v.replace((list, set))))
+    }
+    pub(super) fn check(set: bool) -> std::io::Result<()> {
+        let (l, s) = ERRORS.with(Cell::get);
+        match if set { s } else { l } {
+            0 => Ok(()),
+            n => Err(std::io::Error::from_raw_os_error(n)),
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ERRORS.with(|v| v.set(self.0));
+        }
+    }
 }
 fn remove(file: &File, name: &CStr) -> Result<()> {
     // SAFETY: live fd and valid NUL-terminated attribute name.

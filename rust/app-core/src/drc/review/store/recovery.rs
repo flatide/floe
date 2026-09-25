@@ -22,7 +22,7 @@ struct Marker {
     file: (u64, u64),
     lock: (u64, u64),
 }
-pub(super) fn mark(store: &Store, stage: &Stage, lock: (u64, u64)) -> Result<()> {
+pub(super) fn mark(store: &Store, stage: &mut Stage, lock: (u64, u64)) -> Result<()> {
     let marker = Marker {
         v: 1,
         target: store.name.as_bytes().to_vec(),
@@ -35,14 +35,7 @@ pub(super) fn mark(store: &Store, stage: &Stage, lock: (u64, u64)) -> Result<()>
     if bytes.len() > MARKER_BYTES {
         return Err(Error::input("review recovery marker exceeds limit"));
     }
-    crate::layer_defaults::security::set(&stage.file, MARKER, &bytes)?;
-    if Security::read(&stage.file)?.attribute(MARKER) != Some(bytes.as_slice()) {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            "cannot preserve review recovery marker",
-        ));
-    }
-    Ok(())
+    stage.set_owned(MARKER, &bytes)
 }
 
 /// Opaque, expiring approval preview tied to one registered writer and inode.
@@ -111,13 +104,12 @@ impl Lock {
 }
 
 fn marker(s: &Store, capture: &Capture) -> Result<CString> {
-    if capture.security.attribute(BINDING) != Some(s.binding.as_slice()) {
+    if capture.attribute(BINDING) != Some(s.binding.as_slice()) {
         return Err(Error::input(
             "review recovery requires the exact pack binding",
         ));
     }
     let bytes = capture
-        .security
         .attribute(MARKER)
         .filter(|v| v.len() <= MARKER_BYTES)
         .ok_or_else(|| Error::input("review has no supported recovery marker"))?;
@@ -238,6 +230,7 @@ impl Recovery {
             || identity(&current.file.metadata()?) != identity(&self.before.file.metadata()?)
             || current.digest != self.before.digest
             || current.security != self.before.security
+            || !current.evidence.same(&self.before.evidence)
             || links == 2 && !current.same(&self.before)
         {
             return Err(conflict());

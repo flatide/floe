@@ -6,7 +6,10 @@ use super::{rewrite_waives, ImportReport, Layout, Notes, WaiveStats, EDIT_ITEMS,
 use crate::{
     artifact, check_cancelled,
     drc::{waive_paths, Pack},
-    layer_defaults::{identity, leaf, reject_aliases, security::Security, Directory, Stage, Stamp},
+    layer_defaults::{
+        evidence::Evidence, identity, leaf, reject_aliases, security::Security, Directory, Stage,
+        Stamp,
+    },
     registered::{AccessScope, RegisteredSource},
     Error, ErrorKind, Result,
 };
@@ -429,6 +432,7 @@ struct Capture {
     file: File,
     stamp: Stamp,
     security: Security,
+    evidence: Evidence,
     // Bounded-memory change detection, not a signature or authorization token.
     digest: [u8; 20],
 }
@@ -470,15 +474,6 @@ impl Capture {
         }
         let stamp = Stamp::of(&meta);
         let security = Security::read(&file)?;
-        if security
-            .attribute(BINDING)
-            .is_some_and(|v| v != store.binding)
-        {
-            return Err(Error::new(
-                ErrorKind::Cache,
-                "review belongs to another pack identity; explicit import is required",
-            ));
-        }
         let mut hash = Sha1::new();
         let mut bytes = [0; 64 * 1024];
         let mut len = 0u64;
@@ -501,12 +496,41 @@ impl Capture {
             return Err(conflict());
         }
         check_cancelled(stop)?;
-        Ok(Some(Self {
+        let digest = hash.finalize().into();
+        let evidence = Evidence::read(
+            Arc::clone(&store.directory),
+            &store.name,
+            &file,
+            digest,
+            &security,
+            crate::layer_defaults::evidence::Kind::Review,
+        )?;
+        let captured = Self {
             file,
             stamp,
             security,
-            digest: hash.finalize().into(),
-        }))
+            evidence,
+            digest,
+        };
+        if captured
+            .attribute(BINDING)
+            .is_some_and(|v| v != store.binding)
+        {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "review belongs to another pack identity; explicit import is required",
+            ));
+        }
+        captured.unchanged()?;
+        if store.directory.leaf_identity(&store.name)? != identity(&captured.file.metadata()?) {
+            return Err(conflict());
+        }
+        Ok(Some(captured))
+    }
+    fn attribute(&self, name: &std::ffi::CStr) -> Option<&[u8]> {
+        self.security
+            .attribute(name)
+            .or_else(|| self.evidence.attribute(name))
     }
     fn unchanged(&self) -> Result<()> {
         if Stamp::of(&self.file.metadata()?) != self.stamp
@@ -514,10 +538,14 @@ impl Capture {
         {
             return Err(conflict());
         }
+        self.evidence.unchanged()?;
         Ok(())
     }
     fn same(&self, other: &Self) -> bool {
-        self.stamp == other.stamp && self.security == other.security && self.digest == other.digest
+        self.stamp == other.stamp
+            && self.security == other.security
+            && self.digest == other.digest
+            && self.evidence.same(&other.evidence)
     }
 }
 /// Non-serializable expected revision, owned by one registered Store. Do not
@@ -552,7 +580,7 @@ impl Snapshot {
             || identity(&before.file.metadata()?) != proof.identity
             || before.digest != proof.digest
             || Sha1::digest(&self.store.binding).as_slice() != proof.binding
-            || before.security.attribute(BINDING) != Some(self.store.binding.as_slice())
+            || before.attribute(BINDING) != Some(self.store.binding.as_slice())
         {
             return Err(conflict());
         }
@@ -652,7 +680,7 @@ impl Snapshot {
     pub fn legacy_unverified(&self) -> bool {
         self.before
             .as_ref()
-            .is_some_and(|c| c.security.attribute(BINDING).is_none())
+            .is_some_and(|c| c.attribute(BINDING).is_none())
     }
     pub fn notes(&self) -> Option<&Notes> {
         self.notes.as_ref()
@@ -945,40 +973,38 @@ impl Draft {
         } else {
             Security::private(&staged.file)?;
         }
-        // Bytes remain interoperable with GTK. The owned xattr atomically
-        // travels with the replacement inode, unlike a second manifest file.
-        context(
-            "write binding",
-            crate::layer_defaults::security::set(&staged.file, BINDING, &s.binding),
-        )?;
-        if Security::read(&staged.file)?.attribute(BINDING) != Some(s.binding.as_slice()) {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "cannot preserve review pack binding",
-            ));
-        }
-        recovery::mark(s, &staged, identity(&lm))?;
+        // Bytes remain interoperable with GTK. ENOTSUP uses durable immutable
+        // inode-qualified evidence, not an unbound/legacy save.
+        context("write binding", staged.set_owned(BINDING, &s.binding))?;
+        recovery::mark(s, &mut staged, identity(&lm))?;
         staged
             .file
             .set_times(fs::FileTimes::new().set_modified(SystemTime::now()))?;
         staged.file.sync_all()?;
+        let sealed_digest = staged.seal_evidence(&s.name, |p| s.protect(p), stop)?;
         // Fixed-memory extra read pass, before commit. SHA-1 is used here as
         // the existing revision change detector, not as a signature.
         let proof = if s.kind == Kind::Waives {
-            staged.file.rewind()?;
-            let mut hash = Sha1::new();
-            let mut bytes = [0; 64 * 1024];
-            loop {
-                check_cancelled(stop)?;
-                let n = staged.file.read(&mut bytes)?;
-                if n == 0 {
-                    break;
+            // The fallback has already hashed these exact sealed bytes.
+            let digest = if let Some(digest) = sealed_digest {
+                digest
+            } else {
+                staged.file.rewind()?;
+                let mut hash = Sha1::new();
+                let mut bytes = [0; 64 * 1024];
+                loop {
+                    check_cancelled(stop)?;
+                    let n = staged.file.read(&mut bytes)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hash.update(&bytes[..n]);
                 }
-                hash.update(&bytes[..n]);
-            }
+                hash.finalize().into()
+            };
             Some(PublishedFile {
                 identity: identity(&staged.file.metadata()?),
-                digest: hash.finalize().into(),
+                digest,
                 binding: Sha1::digest(&s.binding).into(),
             })
         } else {
@@ -1010,8 +1036,14 @@ impl Draft {
             staged.commit_with(&s.name, self.snapshot.before.is_some(), after_link),
         )?;
         // The commit wins over any later cancellation or directory-sync error.
+        let directory_synced = sync(&s.directory.file).is_ok();
+        if directory_synced {
+            if let Some(before) = &self.snapshot.before {
+                before.evidence.retire(|p| s.protect(p));
+            }
+        }
         Ok(Published {
-            directory_synced: sync(&s.directory.file).is_ok(),
+            directory_synced,
             file: proof,
         })
     }
