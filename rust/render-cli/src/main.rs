@@ -134,7 +134,6 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             width_c: 1.0,
             survivor_list: true,
             place_lattice: false,
-            sub_cut_arrays: false,
         };
         let (mode, raster) = if args.styles.is_empty() {
             (

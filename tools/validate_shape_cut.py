@@ -23,10 +23,6 @@ squares and a 0.2 um wire on one layer (one page), wires alone on another.
     under the shape cut, the array of 0.4 um squares (both sides under the
     cut) is not drawn, the 0.2 um wire (longer than the cut) is, and the
     layer of wires alone keeps its page;
-  * the sub-cut arrays diagnostic FLOE_RUST_SHAPE_CUT=arrays (§10.9, max plus
-    the arrays under the cut): the array of 0.4 um squares is drawn as the
-    kill switch draws it, a lone 0.3 um square stays cut, and every pixel
-    outside the array is max's;
   * the same wires placed as a child cell (one wire a cell, 12 placements -
     review of 5800b57, 2026-09-25): max judges the child cells and the child
     BVH by their larger side too, so the wires frame is byte-identical to the
@@ -53,7 +49,6 @@ from floe.rust_render import RustRenderWorker
 W, H = 1280, 720
 MIXED, WIRES = (7, 0), (8, 0)
 SQUARE = (0.0, 0.0, 20.0, 20.0)    # um
-LONE = (65.0, 30.0, 65.3, 30.3)     # um
 
 
 def layout(path, wire_cell=False):
@@ -70,8 +65,6 @@ def layout(path, wire_cell=False):
             x, y = 40 + 1.2 * i, 1.2 * j
             top.shapes(mixed).insert(kdb.DBox(x, y, x + 0.4, y + 0.4))
     top.shapes(mixed).insert(kdb.DBox(0, 40, 60, 40.2))
-    # a lone 0.3 um square (a size of its own: no repetition takes it in)
-    top.shapes(mixed).insert(kdb.DBox(*LONE))
     if wire_cell:
         wire = ly.create_cell('WIRE')
         wire.shapes(wires).insert(kdb.DBox(0, 0, 70, 0.2))
@@ -195,24 +188,6 @@ def main():
                 wires_kept, rw = frame(hair, gen, wide, [WIRES], 'keep')
                 assert len(lit_pixels(wires_kept)) > 500 and rw['plan_culls']['pages_size'] == 0, (len(lit_pixels(wires_kept)), rw['plan_culls'])
                 print('shape cut max: square identical, array 0 px, wire %d px, wires alone %d px (page kept)' % (wire_px, len(lit_pixels(wires_kept))))
-                # the sub-cut arrays diagnostic (CUT_DENSITY_DESIGN §10.9): max
-                # plus the arrays under the cut - the 0.4 um squares (2.6 px,
-                # an OASIS repetition) are drawn as without any per-shape cut,
-                # the lone 0.3 um square (1.9 px) stays cut, the rest is max's
-                arrays = worker(src, 'arrays')
-                try:
-                    gen += 1
-                    lit_a = lit_pixels(frame(arrays, gen, wide, [MIXED], 'keep')[0])
-                    in_lone = lambda p: (LONE[0] - wide[0]) / spp - 2 <= p[0] <= (LONE[2] - wide[0]) / spp + 2 and \
-                        (wide[3] - LONE[3]) / spp - 2 <= p[1] <= (wide[3] - LONE[1]) / spp + 2
-                    squares = [p for p in lit_a if in_array(p) and not inside(p)]
-                    assert squares and squares == [p for p in was if in_array(p) and not inside(p)], \
-                        'arrays: the 0.4 um squares light %d px, the kill switch %d' % (len(squares), sum(in_array(p) and not inside(p) for p in was))
-                    assert [p for p in lit_a if not in_array(p)] == [p for p in got if not in_array(p)], 'arrays: pixels outside the array differ from max'
-                    assert not any(in_lone(p) for p in lit_a) and any(in_lone(p) for p in was), 'arrays: the lone square under the cut'
-                    print('shape cut arrays: the array of 0.4 um squares %d px as without the cut, the lone 0.3 um square cut, the rest as max' % len(squares))
-                finally:
-                    arrays.stop()
                 # the same wires as a child cell: max walks the thin child by
                 # its larger side, like the records - the frame is the flat one
                 cell_src = Path(temp) / 'wire_cell.oas'

@@ -122,11 +122,7 @@ floe 뷰어의 klayout 경로를 대체하려면 무엇을 소비하고, 무엇�
   대상 포함)와 다각형 정점 합 1,024 초과 가운데 하나라도 해당하면 바로 전수 방문으로 물러난다
   (`the_placement_walk_preparation_is_bounded`). 걷기의 결과(걸음, 또는 전수 방문의 사유 15가지)는
   1·2차원 배열별로 `RenderStats::place_walks`에 세어 renderd `place_walks=`와 워커 결과로 내보낸다
-  (0.12.211, `placement_walk_outcomes_are_counted`).
-  **컷 아래 격자 배열(진단, 0.12.212, CUT_DENSITY_DESIGN §10.9):** `FLOE_RUST_SHAPE_CUT=arrays`는 max에 더해
-  도형 컷 아래라도 세계 격자로 순위를 받는 온전한 배열 레코드를 남긴다(`keeps_sub_cut_array`). 그 멤버는
-  폭 우선 / area-true 규칙으로 솎고 생존 걷기로 걷는다. 다각형·path 배열은 격자 순위로 유지를 판정하고, 그 밖의
-  컷 아래 레코드는 종전대로 버린다. 단위 테스트는 `sub_cut_arrays_draw_their_members_by_their_size`다. 생존 걷기의 비용 모형은
+  (0.12.211, `placement_walk_outcomes_are_counted`). 생존 걷기의 비용 모형은
   블록 수를 항의 확률로 추정하고 멤버 방문을 레코드 배열 4, 배치 배열 16블록으로 센다(0.12.209).
   **같은 세계 박스의 중복**(단일 사각형 둘, 같은 Grid 둘, Grid와 그 조각)은 한 벌과 같은 픽셀을
   켜고 레코드 순서도 무관하다(단위 테스트 `duplicates_of_a_shape_draw_as_one`); Grid 멤버 위의 단일

@@ -1845,16 +1845,15 @@ fn sub_cut_box_enabled() -> bool {
 /// switch (pages are then cut by their largest shape, and thin shapes
 /// longer than the cut all stay, as before 0.12.173).
 fn shape_cut_enabled() -> bool {
-    !matches!(std::env::var("FLOE_RUST_SHAPE_CUT").as_deref(), Ok("off") | Ok("max") | Ok("arrays"))
+    !matches!(std::env::var("FLOE_RUST_SHAPE_CUT").as_deref(), Ok("off") | Ok("max"))
 }
 
 /// FLOE_RUST_SHAPE_CUT=max (CUT_DENSITY_DESIGN §10.6, diagnostic): pages
 /// are cut by their largest shape and records only when their larger side
 /// is under the cut, so the hairlines stay and the width-first drawing
-/// thins them by their width. `arrays` (§10.9) is max plus the sub-cut
-/// arrays (GeometryRasterRequest::sub_cut_arrays).
+/// thins them by their width.
 fn shape_cut_max_enabled() -> bool {
-    matches!(std::env::var("FLOE_RUST_SHAPE_CUT").as_deref(), Ok("max") | Ok("arrays"))
+    std::env::var("FLOE_RUST_SHAPE_CUT").as_deref() == Ok("max")
 }
 
 /// Area-true drawing (floe_render_core::GeometryRasterRequest::area_true,
@@ -2324,9 +2323,6 @@ fn run_render(
         width_c: width_c(),
         survivor_list: std::env::var("FLOE_RUST_SURVIVOR_LIST").as_deref() != Ok("off"),
         place_lattice: std::env::var("FLOE_RUST_PLACE_LATTICE").as_deref() == Ok("on"),
-        // the sub-cut arrays diagnostic rides on the hairline-keeping cut of
-        // a plain layout's thin keep frame (CUT_DENSITY_DESIGN §10.9)
-        sub_cut_arrays: !command.exact && command.thin_keep && std::env::var("FLOE_RUST_SHAPE_CUT").as_deref() == Ok("arrays"),
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache
