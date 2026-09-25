@@ -108,6 +108,13 @@ pub struct GeometryRasterRequest {
     /// on its own lattice; with `survivor_list` a placement array of a small
     /// cell then visits only the members whose shapes can survive.
     pub place_lattice: bool,
+    /// Sub-cut arrays (CUT_DENSITY_DESIGN §10.9, diagnostic, default off;
+    /// renderd FLOE_RUST_SHAPE_CUT=arrays, with shape_cut_max): a record under
+    /// the per-shape cut stays when it is a whole array ranked on its world
+    /// lattice - its members are drawn by the area-true rule, thinned by their
+    /// size and walked by survivors - while any other record under the cut
+    /// goes as before; polygon and path arrays keep by their lattice rank.
+    pub sub_cut_arrays: bool,
 }
 
 impl GeometryRasterRequest {
@@ -3920,7 +3927,10 @@ fn raster_page_records(
             // larger one when the hairlines are to stay (shape_cut_max:
             // the width-first drawing thins them by their width)
             let cut_side = if shape_cut_max { rect.w.max(rect.h) } else { rect.w.min(rect.h) };
-            if rect.w == 0 || rect.h == 0 || cut_side < shape_cut {
+            if rect.w == 0 || rect.h == 0 {
+                return Ok(());
+            }
+            if cut_side < shape_cut && !keeps_sub_cut_array(request, paint, &rect.rep, level, &world_transform)? {
                 return Ok(());
             }
             let x1 = rect
@@ -4010,7 +4020,7 @@ fn raster_page_records(
                     page_id
                 )
             })?;
-            if cut_side_of(base, shape_cut_max) < shape_cut {
+            if cut_side_of(base, shape_cut_max) < shape_cut && !keeps_sub_cut_array(request, paint, &polygon.rep, level, &world_transform)? {
                 return Ok(());
             }
             let mut drawn = 0u64;
@@ -4088,7 +4098,7 @@ fn raster_page_records(
             let base = polygon_bbox(&outline).ok_or_else(|| {
                 format!("corrupt page {}: path outline is degenerate", page_id)
             })?;
-            if cut_side_of(base, shape_cut_max) < shape_cut {
+            if cut_side_of(base, shape_cut_max) < shape_cut && !keeps_sub_cut_array(request, paint, &path_record.rep, level, &world_transform)? {
                 return Ok(());
             }
             let mut drawn = 0u64;
@@ -5938,8 +5948,24 @@ fn survivor_walk(
     .ok())
 }
 
+/// Under the sub-cut arrays diagnostic (GeometryRasterRequest::sub_cut_arrays):
+/// whether a record under the per-shape cut stays - a whole array (page level
+/// 0, not thinned) ranked on its world lattice and drawn by the area-true rule,
+/// whose members the width-first / area-true draw thins by their size and the
+/// survivor walk lists; any other record under the cut goes.
+fn keeps_sub_cut_array(
+    request: &GeometryRasterRequest,
+    paint: PaintStyle,
+    rep: &Rep,
+    level: u8,
+    world_transform: &OrthoTransform,
+) -> Result<bool, String> {
+    Ok(request.sub_cut_arrays && level == 0 && area_true_rim(request, paint) && placement_lattice(rep, world_transform)?.is_some())
+}
+
 /// The world lattice a sub-pixel polygon or path keeps by under the placement
-/// lattice (GeometryRasterRequest::place_lattice): its own array's for a
+/// lattice (GeometryRasterRequest::place_lattice) - or the sub-cut arrays
+/// diagnostic, for arrays: its own array's for a
 /// whole lattice array (`whole`: not thinned by the page frontier), the
 /// placement array's for a single shape, None otherwise (its world box's
 /// rank) - and None when its paint is not the area-true rim.
@@ -5951,7 +5977,7 @@ fn area_keep_lattice(
     world_transform: &OrthoTransform,
     placed: Option<(i64, i64)>,
 ) -> Result<Option<(i64, i64)>, String> {
-    if !request.place_lattice || !area_true_rim(request, paint) || !whole {
+    if !(request.place_lattice || request.sub_cut_arrays) || !area_true_rim(request, paint) || !whole {
         return Ok(None);
     }
     match rep {
@@ -7258,6 +7284,7 @@ mod tests {
             width_c: 1.0,
             survivor_list: true,
             place_lattice: false,
+            sub_cut_arrays: false,
         }
     }
 
@@ -7685,6 +7712,7 @@ mod tests {
             width_c: 1.0,
             survivor_list: true,
             place_lattice: false,
+            sub_cut_arrays: false,
         };
         let mut pattern = [0u16; 16];
         for (row, word) in pattern.iter_mut().enumerate() {
@@ -7809,6 +7837,7 @@ mod tests {
             width_c: 1.0,
             survivor_list: true,
             place_lattice: false,
+            sub_cut_arrays: false,
         };
         let segments = [
             ((4.0, 9.0), (21.0, 9.0)),   // horizontal inside the tile
@@ -7887,6 +7916,7 @@ mod tests {
             width_c: 1.0,
             survivor_list: true,
             place_lattice: false,
+            sub_cut_arrays: false,
         };
         let mut band = full_band(&request);
         paint_world_rect(
@@ -8045,6 +8075,7 @@ mod tests {
             width_c: 1.0,
             survivor_list: true,
             place_lattice: false,
+            sub_cut_arrays: false,
         };
         let mut frame = full_band(&request);
         fill_world_polygon_with_phase(
@@ -8567,6 +8598,7 @@ mod tests {
             width_c: 1.0,
             survivor_list: true,
             place_lattice: false,
+            sub_cut_arrays: false,
         };
         let pruned =
             render_geometry_occupancy(&scene_with(crate::PageIndex::build), &request).unwrap();
@@ -8765,8 +8797,18 @@ mod tests {
         shape_cut_scene(rects, polys, paths, 0)
     }
 
+    /// `hairline_scene` planned with the hairline-keeping cut (HierStats::
+    /// shape_cut with shape_cut_max)
+    fn shape_cut_max_scene(rects: Vec<RectRec>, polys: Vec<PolyRec>, paths: Vec<PathRec>, shape_cut: u64) -> FrameScene {
+        shape_cut_scene_with(rects, polys, paths, HierStats { shape_cut, shape_cut_max: true, ..HierStats::default() })
+    }
+
     /// `hairline_scene` planned with a per-shape cut (HierStats::shape_cut)
     fn shape_cut_scene(rects: Vec<RectRec>, polys: Vec<PolyRec>, paths: Vec<PathRec>, shape_cut: u64) -> FrameScene {
+        shape_cut_scene_with(rects, polys, paths, HierStats { shape_cut, ..HierStats::default() })
+    }
+
+    fn shape_cut_scene_with(rects: Vec<RectRec>, polys: Vec<PolyRec>, paths: Vec<PathRec>, stats: HierStats) -> FrameScene {
         let doc = Doc {
             unit: 1.0,
             cells: vec![Cell {
@@ -8812,7 +8854,7 @@ mod tests {
             }],
             pages: vec![0],
             page_prio: vec![0],
-            stats: HierStats { shape_cut, ..HierStats::default() },
+            stats,
                     explain: Vec::new(),
         };
         FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)])).unwrap()
@@ -9807,6 +9849,53 @@ mod tests {
             assert!(bin.stats.work_bin_defer_rep >= 1, "the array was not deferred");
             assert_eq!(bin.frame, reference.frame, "list {}", list);
         }
+    }
+
+    /// The sub-cut arrays diagnostic (CUT_DENSITY_DESIGN §10.9): under the
+    /// hairline-keeping cut of 3 px, an array of 0.2 px dots and an array of
+    /// sub-pixel triangles - both sides under the cut - are drawn as the same
+    /// frame with no cut draws them (the area-true rule thins them by their
+    /// size; polygon arrays keep by their lattice rank in this mode),
+    /// byte-identical with the survivor list off; a single 1 px box under the
+    /// cut stays cut and the box above it is the same.
+    #[test]
+    fn sub_cut_arrays_draw_their_members_by_their_size() {
+        let rect = |x, y, w, h, rep: Rep| RectRec { layer: 1, dt: 0, x, y, w, h, rep };
+        // 5 world units a pixel at 64 px: the cut is 15 units
+        let dots = rect(0, 0, 1, 1, Rep::Grid { na: 50, nb: 50, va: (3, 0), vb: (0, 3) });
+        let lone = rect(250, 250, 5, 5, Rep::One);
+        let big = rect(200, 20, 60, 60, Rep::One);
+        let tri = PolyRec { layer: 1, dt: 0, pts: vec![(0, 170), (2, 170), (0, 172)], rep: Rep::Grid { na: 50, nb: 20, va: (3, 0), vb: (0, 3) } };
+        let records = || (vec![dots.clone(), lone.clone(), big.clone()], vec![tri.clone()]);
+        let (rects, polys) = records();
+        let cut = shape_cut_max_scene(rects, polys, Vec::new(), 15);
+        let (rects, polys) = records();
+        let uncut = shape_cut_max_scene(rects, polys, Vec::new(), 0);
+        let request = |arrays: bool, list: bool| {
+            let mut r = area_true_request(64, DEFAULT_TILE_SIZE, 1);
+            r.raster.sub_cut_arrays = arrays;
+            r.raster.survivor_list = list;
+            r
+        };
+        let lit = |frame: &RgbaFrame, x0: usize, y0: usize, x1: usize, y1: usize| {
+            lit_set(frame, 64).into_iter().filter(|&(c, r)| c >= x0 && c < x1 && r >= y0 && r < y1).collect::<BTreeSet<_>>()
+        };
+        // regions in device px (y down): the dots x 0..30, y 34..64; the
+        // triangles x 0..30, y 17..30; the lone box x 50..51, y 13..14
+        let max = render_geometry_styled(&cut, &request(false, true)).unwrap().frame;
+        let arrays = render_geometry_styled(&cut, &request(true, true)).unwrap().frame;
+        let every = render_geometry_styled(&cut, &request(true, false)).unwrap().frame;
+        // the uncut frame under the same rule (polygon arrays keep by their
+        // lattice rank in this mode): nothing is under its cut
+        let none = render_geometry_styled(&uncut, &request(true, true)).unwrap().frame;
+        assert_eq!(arrays, every, "the survivor list changed the sub-cut arrays");
+        assert!(lit(&max, 0, 17, 31, 64).is_empty(), "max drew a sub-cut array");
+        let dots_lit = lit(&arrays, 0, 34, 31, 64);
+        assert!(!dots_lit.is_empty() && dots_lit == lit(&none, 0, 34, 31, 64), "the dots differ from the uncut frame");
+        let tri_lit = lit(&arrays, 0, 17, 31, 31);
+        assert!(!tri_lit.is_empty() && tri_lit == lit(&none, 0, 17, 31, 31), "the triangles differ from the uncut frame");
+        assert!(lit(&arrays, 49, 12, 53, 16).is_empty() && !lit(&none, 49, 12, 53, 16).is_empty(), "the lone sub-cut box");
+        assert_eq!(lit(&arrays, 39, 47, 53, 61), lit(&max, 39, 47, 53, 61), "the box above the cut");
     }
 
     #[test]
@@ -11595,6 +11684,7 @@ mod tests {
             width_c: 1.0,
             survivor_list: true,
             place_lattice: false,
+            sub_cut_arrays: false,
         };
         let report = render_geometry_occupancy(&scene, &raster_request).unwrap();
         raster_request.workers = 1;
@@ -11675,6 +11765,7 @@ mod tests {
             width_c: 1.0,
             survivor_list: true,
             place_lattice: false,
+            sub_cut_arrays: false,
         }
     }
 
