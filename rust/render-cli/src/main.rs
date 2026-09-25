@@ -133,6 +133,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             area_true: false,
             width_c: 1.0,
             survivor_list: true,
+            place_lattice: false,
         };
         let (mode, raster) = if args.styles.is_empty() {
             (

@@ -72,7 +72,13 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
   * the survivor list (§4.3 step 1 in the renderer, 2026-09-25): the whole
     view with its sub-pixel arrays is byte-identical under the kill switch
     FLOE_RUST_SURVIVOR_LIST=off, which walks more members (the 0.1 and 0.25 px
-    arrays are listed; the 0.5 px ones cost as much either way and are walked).
+    arrays are listed; the 0.5 px ones cost as much either way and are walked);
+  * the placement lattice (CUT_DENSITY_DESIGN §10.8, diagnostic
+    FLOE_RUST_PLACE_LATTICE=on): 0.2 px bars and 0.3 px triangles, 120 x 3,
+    stored as shapes of TOP (OASIS repetitions) and as one cell placed by an
+    array, light the same pixels at a whole and a fractional pan; with both
+    visible the frame is byte-identical with the survivor list off, which
+    visits more cells.
 
     .venv/bin/python tools/validate_area_true.py
 """
@@ -102,6 +108,8 @@ SPLIT_LAYER = (11, 0)         # the page split layout: a lattice among single re
 SPLIT_AT = (490.4, 3.0)       # um: the lattice's first bar
 ROWS_AT = (100.0, 499.6)      # um: the 2 x 64 lattice the tall layout's split cuts into rows
 ROW_A, ROW_B = (12, 0), (13, 0)   # its two rows stored alone
+PLACE_AT = (700.0, 3.0)       # um: a lattice of sub-pixel bars and triangles, flat and as a placement array
+PLACE_FLAT, PLACE_ARRAY = (14, 0), (15, 0)
 SPLIT_PANS = ((0.0, 0.0), (0.2, 0.0), (0.37, 0.0), (0.5, 0.29), (0.81, 0.63))
 BIG = (60.0, 40.0)            # um: the shapes that run off the edges, around this point
 SMALL = (120.0, 5.0)          # um: the triangle and square fields' corner
@@ -218,6 +226,22 @@ def layout(path):
         wx = x0 + i * pitch
         column.shapes(col).insert(kdb.DBox(y0, -(wx + bw), y0 + bh, -wx))
     top.insert(kdb.CellInstArray(column.cell_index(), kdb.Trans(1, False, 0, 0)))
+    # the placement lattice: a 0.02 um bar and a 0.03 um triangle (0.2 and 0.3 px
+    # wide) repeated 120 x 3 times at 0.07 x 3 um, as shapes of TOP (written as
+    # OASIS repetitions) and as one cell placed by an array
+    px, py = PLACE_AT
+    flat, placed = ly.layer(*PLACE_FLAT), ly.layer(*PLACE_ARRAY)
+    bar = lambda x, y: kdb.DBox(x, y, x + 0.02, y + 2.0)
+    tri = lambda x, y: kdb.DPolygon([kdb.DPoint(x + 0.03, y), kdb.DPoint(x + 0.06, y), kdb.DPoint(x + 0.03, y + 2.0)])
+    for j in range(3):
+        for i in range(120):
+            top.shapes(flat).insert(bar(px + i * 0.07, py + j * 3.0))
+            top.shapes(flat).insert(tri(px + i * 0.07, py + j * 3.0))
+    unit = ly.create_cell('LATTICE_UNIT')
+    unit.shapes(placed).insert(bar(0.0, 0.0))
+    unit.shapes(placed).insert(tri(0.0, 0.0))
+    top.insert(kdb.CellInstArray(unit.cell_index(), kdb.Trans(int(round(px / ly.dbu)), int(round(py / ly.dbu))),
+                                 kdb.Vector(70, 0), kdb.Vector(0, 3000), 120, 3))
     ly.write(str(path))
 
 
@@ -263,7 +287,7 @@ def lit_pixels(pixels):
     return {i // 4 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK}
 
 
-def worker(src, on, wash=False, lod=False, width_c=None, survivor_list=None):
+def worker(src, on, wash=False, lod=False, width_c=None, survivor_list=None, place_lattice=False):
     if on:
         os.environ.pop('FLOE_RUST_AREA_TRUE', None)
     else:
@@ -276,11 +300,14 @@ def worker(src, on, wash=False, lod=False, width_c=None, survivor_list=None):
         os.environ['FLOE_RUST_WIDTH_C'] = str(width_c)
     if survivor_list is not None:
         os.environ['FLOE_RUST_SURVIVOR_LIST'] = survivor_list
+    if place_lattice:
+        os.environ['FLOE_RUST_PLACE_LATTICE'] = 'on'
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
     w.start()
-    for name in ('FLOE_RUST_AREA_TRUE', 'FLOE_RUST_PAGE_WASH', 'FLOE_RUST_LOD', 'FLOE_RUST_WIDTH_C', 'FLOE_RUST_SURVIVOR_LIST'):
+    for name in ('FLOE_RUST_AREA_TRUE', 'FLOE_RUST_PAGE_WASH', 'FLOE_RUST_LOD', 'FLOE_RUST_WIDTH_C', 'FLOE_RUST_SURVIVOR_LIST',
+                 'FLOE_RUST_PLACE_LATTICE'):
         os.environ.pop(name, None)
     return w
 
@@ -540,6 +567,35 @@ def main():
                         pan, len(lit[0]), len(lit[1]), len(lit[2]), len(lit[0] ^ lit[1]), len(lit[0] ^ lit[2]))
             print('lattice ranks: one array, two cell placements and a rotated column light the same %d px'
                   % len(lit[0]))
+            # the placement lattice (CUT_DENSITY_DESIGN §10.8, diagnostic): the
+            # sub-pixel bars and triangles placed by an array rank as their flat
+            # arrays - the same pixels at whole and fractional pans - and the
+            # survivor walk of the placement array draws what visiting every
+            # member draws (the kill switch of the list), visiting fewer cells
+            lattice_on = worker(src, True, place_lattice=True)
+            lattice_all = worker(src, True, place_lattice=True, survivor_list='off')
+            try:
+                size = (240, 100)
+                for pan in (0.0, 0.37):
+                    box = (PLACE_AT[0] - 1.0 + pan * PX_UM, PLACE_AT[1] - 1.0, PLACE_AT[0] - 1.0 + pan * PX_UM + size[0] * PX_UM,
+                           PLACE_AT[1] - 1.0 + size[1] * PX_UM)
+                    lit = {}
+                    for kind, w, layer in (('flat', lattice_on, PLACE_FLAT), ('placed', lattice_on, PLACE_ARRAY), ('off', on, PLACE_FLAT)):
+                        gen += 1
+                        lit[kind] = lit_pixels(frame(w, gen, box, visible=(layer,), size=size))
+                    assert lit['flat'] and lit['flat'] == lit['placed'], 'placement lattice at a %g px pan: flat %d px, placed %d px, %d differ' % (
+                        pan, len(lit['flat']), len(lit['placed']), len(lit['flat'] ^ lit['placed']))
+                    gen += 1
+                    listed, lreport = frame(lattice_on, gen, box, visible=(PLACE_FLAT, PLACE_ARRAY), size=size, report=True)
+                    every, ereport = frame(lattice_all, gen, box, visible=(PLACE_FLAT, PLACE_ARRAY), size=size, report=True)
+                    assert listed == every, 'the placement survivor walk changed %d px' % len(lit_pixels(listed) ^ lit_pixels(every))
+                    assert lreport['hier_cells_visited'] < ereport['hier_cells_visited'], (lreport['hier_cells_visited'], ereport['hier_cells_visited'])
+                print('placement lattice: the placed bars and triangles light the flat arrays\' %d px at 2 pans (the rule off: %d px); '
+                      'the survivor walk draws the same, visiting %d cells instead of %d'
+                      % (len(lit['flat']), len(lit['off']), lreport['hier_cells_visited'], ereport['hier_cells_visited']))
+            finally:
+                lattice_on.stop()
+                lattice_all.stop()
             # the indexer's own page split: one layout, a 16 MiB and a 1 MiB page target
             whole_src, split_src = Path(temp) / 'split16.oas', Path(temp) / 'split1.oas'
             split_layout(whole_src)

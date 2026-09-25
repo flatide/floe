@@ -1179,6 +1179,7 @@ fn stream_pass(
         area_true: false,
         width_c: 1.0,
         survivor_list: true,
+        place_lattice: false,
     };
     let mut report = StreamReport {
         pass_bytes_max: first_bytes,
@@ -1351,6 +1352,7 @@ fn raster_pass(
         area_true: false,
         width_c: 1.0,
         survivor_list: true,
+        place_lattice: false,
     };
     // a frames-only pass only when this placement's plan holds a
     // hierarchy frame at all (analysis 2026-09-09: the pass ran, and

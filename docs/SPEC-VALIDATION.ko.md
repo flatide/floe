@@ -79,6 +79,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
   켜진 비율이 덮임의 0.55~0.8, c = 1이 켜지 않은 열은 켜지 않으며, 범위 밖 값 0.5는 c = 1과 픽셀까지 같다.
   생존 멤버 목록(0.12.207, CUT_DENSITY_DESIGN §10.7): 기본 뷰가 킬 스위치 `FLOE_RUST_SURVIVOR_LIST=off`와
   바이트 동일하고 검사 멤버가 더 적다(59,043 px, 924 → 671 — 0.1·0.25 px 배열이 목록으로 걸린다).
+  배치 격자 진단(0.12.209, `FLOE_RUST_PLACE_LATTICE=on`, CUT_DENSITY_DESIGN §10.8): 0.2 px 막대와 0.3 px
+  삼각형 120×3을 TOP의 도형(OASIS 반복)과 셀 배치 배열로 저장한 두 레이어가 정수·소수 pan에서 같은
+  픽셀(2,380 px)을 켜고, 둘을 함께 켠 프레임이 목록 끔과 바이트 동일하며 방문 셀이 더 적다(132 대 361).
   occupancy·jobdeck·representatives·sub_cut_box 게이트는 KLayout 규칙에 대한 비교라 이 킬 스위치를
   모든 워커에 고정한다(sub_cut_box: 상자는 표시용 점, 그 기준인 멤버 직접 그리기도 KLayout 규칙).
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드

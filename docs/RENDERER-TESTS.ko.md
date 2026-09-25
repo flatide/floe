@@ -109,6 +109,16 @@ floe 뷰어의 klayout 경로를 대체하려면 무엇을 소비하고, 무엇�
   바이트 동일하고 검사 멤버는 1/3 미만이다. 손으로 돌리는 `survivor_walk_in_a_nearly_full_tile_timing`
   (--ignored): 열린 픽셀 하나만 남은 타일 뒤의 200만 멤버 배열에서 래스터가 목록 켬 75 µs, 끔 102 µs
   (미리 목록을 만들던 0.12.207은 15.5 ms).
+  **배치 격자(진단, 기본 꺼짐, 0.12.209, CUT_DENSITY_DESIGN §10.8):** `FLOE_RUST_PLACE_LATTICE=on`이면
+  축 정렬 배치 배열 아래의 단일 도형(사각형, 다각형, path)이 그 배열의 세계 격자로 순위를 받는다. 같은 도형을
+  평면 Grid로 저장했을 때와 같은 순위이며, 기준은 경로 위의 가장 안쪽 격자 배열이다. 다각형과 path는 평면
+  격자 배열에서도 1 px 미만 유지 판정을 격자 순위로 한다(`lattice_area_rank`: 생존 확률은 면적 기반 그대로).
+  작은 잎 셀(단일 사각형·다각형 8개 이하, 모두 1 px 미만)의 배치 배열은 생존 목록으로 살 수 있는 멤버만
+  방문한다. 순위는 이 빠른 열거와 무관하게 bin·타일 walk·미룬 간선에서 같다. 단위 테스트는
+  `a_placed_shape_ranks_as_its_flat_array_under_the_placement_lattice`,
+  `the_placement_survivor_walk_draws_what_every_member_draws`,
+  `a_deferred_placement_array_draws_as_the_walk_under_the_placement_lattice`다. 생존 걷기의 비용 모형은
+  블록 수를 항의 확률로 추정하고 멤버 방문을 레코드 배열 4, 배치 배열 16블록으로 센다(0.12.209).
   **같은 세계 박스의 중복**(단일 사각형 둘, 같은 Grid 둘, Grid와 그 조각)은 한 벌과 같은 픽셀을
   켜고 레코드 순서도 무관하다(단위 테스트 `duplicates_of_a_shape_draw_as_one`); Grid 멤버 위의 단일
   사각형은 다른 경로(자기 세계 박스 해시)라 두 결정의 합집합 — 같은 박스 중심에 놓이므로 더 넓은
