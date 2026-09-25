@@ -1031,6 +1031,22 @@ prune 켬)의 시간·메모리가 그 하한이다. 합성 1/10 칩(449 레이�
 
 ### 10.6 헤어라인을 남기면 무엇이 드는가: `FLOE_RUST_SHAPE_CUT=max` (2026-09-24, 리뷰 보완 2026-09-25)
 
+**기본 변경(0.12.214, 사용자 결정 2026-09-25):** 이 절의 긴 변 기준(max)이 thin keep의 기본이 됐다. 작은 변
+기준(0.12.173~0.12.213의 기본)은 킬 스위치 `FLOE_RUST_SHAPE_CUT=min`, 도형별 컷 없음은 `off`다. 판단 당시 합성
+칩 값은 이 절의 표 그대로다(전 레이어 fit warm 240 → 607 ms, 생존 걷기 뒤 약 500 ms; ×4는 오히려 빠르고, ×16은
+배치 격자 순위를 켜면 58 ms). 실칩 확인은 아직 없다. 상태줄은 `cut<…um (larger side)`로, 프레임 줄은
+`shape_cut_max=1`로 이를 보인다.
+
+**thin cull과의 관계(사용자 관찰 2026-09-25).** 작은 변 기준이 기본이던 때, thin keep에서는 안 보이는 헤어라인이
+thin cull에서는 보였다. 도형별 컷이 thin keep에만 적용되고, cull은 0.12.173 이전 규칙을 쓰기 때문이다. cull은
+모든 도형이 가는 페이지(`max_min < cut × 0.5`)와 두 변 모두 컷 미만인 페이지만 자르고, 남은 페이지의 레코드는
+전부 그린다. 가는 자식 셀(작은 변 < cut × 0.5)은 자른다. 긴 변 기준 기본에서도 두 모드는 포함 관계가 아니다.
+
+- keep만 그리는 것: 헤어라인만 있는 페이지와 가는 자식 셀 안의 헤어라인.
+- cull만 그리는 것: 굵은 도형과 같은 페이지에 든 작은 박스(두 변 모두 컷 미만).
+
+cull을 맞출지는 미정이다.
+
 사용자 관찰(2026-09-24): detail medium·thin keep에서는 두 변 중 하나라도 3 px 미만이면 잘리므로, 헤어라인(한 변만
 컷보다 긴 가는 도형)을 폭 우선 그리기(RENDERER-TESTS §3)의 성김에 맡기면 그리는 양과 화면 채움이 줄 것 같지만,
 컷 미만 도형을 상당수 조회해야 하므로 속도 영향을 확인해야 한다.
@@ -1100,7 +1116,7 @@ OS가 인덱스를 읽는 시간을 포함한다(앞선 실행에서 첫 뷰의 
 
 실칩 측정은 다음 줄의 `== type this ==`로 받는다(공유 서버에서는 `--budget-mb` 없이 기본 1024 MB로 돌린다. 이
 경우 fit 예산이 페이지를 솎으면 마지막 열 fit%에 나타난다):
-`.venv/bin/python tools/bench_hairline_cut.py <oas> --modes current,max --layers last10,all --zooms 1,4,16 --repeat 3`.
+`.venv/bin/python tools/bench_hairline_cut.py <oas> --modes min,max --layers last10,all --zooms 1,4,16 --repeat 3`.
 첫 측정(5800b57: 자식 셀 컷이 남은 상태, 모드별 warm 한 번, 전 레이어)의 fit 236 → 602 ms, ×4 261 → 104 ms,
 ×16 19 → 147 ms, off fit 2,600 ms는 위 표로 대체한다.
 
@@ -1277,7 +1293,7 @@ k_B를 고정하면 생존 조건은 vdc(k_A)가 한 구간에 드는 것이다.
 2. fit의 검사 멤버는 비용 모형 보정으로 6.36 M → 5.82 M이 됐다. 이것은 모드와 무관한 레코드 배열 쪽이다.
 3. 남은 일은 네 가지다.
    - 실칩에서 모드 켬의 그림과 속도를 비교한다: `setenv FLOE_RUST_PLACE_LATTICE on`에서
-     `bench_hairline_cut.py <oas> --modes current,max --layers last10,all --zooms 1,4,16 --repeat 3`.
+     `bench_hairline_cut.py <oas> --modes min,max --layers last10,all --zooms 1,4,16 --repeat 3`.
    - 거절된 2차원 배열의 조건(도형 축 불일치·커서 상한)을 조사한다.
    - 도형 수 상한 8을 조정할지 본다.
    - 기본값을 정한다.

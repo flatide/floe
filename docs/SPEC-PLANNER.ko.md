@@ -229,8 +229,12 @@
 (`max_min < cut × 0.5`)은 꺼져 있어 한 변이 컷보다 긴 가는 도형은 전부 남았으며, 래스터에는 도형별
 검사가 없었다. 합성 MAIN01의 TOP 109/2 페이지(멤버 144만 개, 가장 큰 도형 12.2 × 14.0 µm)는
 0.4 µm 배열을 9,000 µm 뷰까지 그리기 대상으로 남겼다(F2R-30).
-- `ViewReq::shape_cut`(renderd: `!exact && thin_keep`, 킬 스위치 `FLOE_RUST_SHAPE_CUT=off`; 덱 패스·
-  probe·CLI plan은 끔, `floe-index plan --shape-cut 1`로 진단). 컷이 0이면 없다.
+- **기본 변경(0.12.214, 사용자 결정 2026-09-25):** thin keep의 기본은 아래 **긴 변 기준**(`ViewReq::shape_cut_max`,
+  CUT_DENSITY_DESIGN §10.6)이다. 이 절의 작은 변 기준(`ViewReq::shape_cut`)은 `FLOE_RUST_SHAPE_CUT=min`일 때만
+  쓰고, `off`는 도형별 컷을 하지 않는다. 상태줄은 `cut<…um (larger side)` / `(min side)`로 구분하고, 프레임 줄은
+  `shape_cut_max=1|0`을 보낸다.
+- `ViewReq::shape_cut`(renderd: `!exact && thin_keep`이고 `FLOE_RUST_SHAPE_CUT=min`일 때; 0.12.173~0.12.213의
+  기본; 덱 패스·probe·CLI plan은 끔, `floe-index plan --shape-cut 1`로 진단). 컷이 0이면 없다.
 - 플래너: 페이지는 **`max_min < cut`**이면 잘린다(`max_min` = 레코드별 min(w, h)의 최대, v6 —
   크기 컷과 hairline 컷을 하나로, 계수 1.0). 페이지 BVH 노드는 `min(max_w, max_h) < cut`이면
   통째로(아래 모든 페이지의 max_min이 그 이하). 잘린 페이지는 종전 size cut과 같은 길을 간다:
@@ -243,17 +247,18 @@
   `max_min < cut × 0.5`에서 서브트리째 빠진다 — 그 안의 도형은 새 규칙으로도 전부 컷이라 그림은 같다),
   점 query(그리지 않은 도형도 잡힌다).
 - 예산에 맞춘 밀도의 크기 등급도 같은 변을 본다(`FitKey::SmallerSide`, 0.12.174): 상태줄의
-  `1/M below xF, none below xG`는 keep에서 **작은 변** 기준이다.
-- 상태줄 `cut<…um (min side)`, 프레임 줄 `shape_cut=<dbu>`.
-- **진단 `FLOE_RUST_SHAPE_CUT=max`(2026-09-24, CUT_DENSITY_DESIGN §10.6):** `ViewReq::shape_cut_max` —
+  `1/M below xF, none below xG`는 이 컷에서 **작은 변** 기준이다(긴 변 기준에서는 `FitKey::LongerSide`).
+- 상태줄 `cut<…um (min side)`, 프레임 줄 `shape_cut=<dbu> shape_cut_max=0`.
+- **긴 변 기준 — 기본(0.12.214; 2026-09-24의 진단 `FLOE_RUST_SHAPE_CUT=max`, CUT_DENSITY_DESIGN §10.6):** `ViewReq::shape_cut_max` —
   페이지는 0.12.173 이전 규칙(`max_w < cut && max_h < cut`)으로만 잘리고, 래스터는 **긴 변**이 컷 미만인
   레코드만 건너뛴다(`HierStats::shape_cut_max`). 한 변이 컷보다 긴 가는 도형(헤어라인)은 남아 폭 우선
   그리기(RENDERER-TESTS §3)가 폭만큼의 확률로 솎는다. 자식 셀과 자식 BVH도 같은 긴 변 기준이다(0.12.206,
   리뷰 2026-09-25): 작은 변이 `cut × 0.5` 미만인 가는 자식 셀·서브트리를 자르던 헤어라인 규칙(`max_min < hair`,
   `min(w, h) < hair` — 전체 깊이, 유한 깊이의 fold, 배치 확장 네 곳)을 max에서는 끄고(`Hier::child_hair` = 0)
   두 변 모두 컷 미만인 크기 컷만 남긴다. 같은 선을 부모 셀에 직접 두든 자식 셀로 배치하든 그림이 같다
-  (종전에는 자식 셀 쪽이 0 px). 기본은 아니며 `thin keep` 요청에서 헤어라인을 남길 때의 속도·화면 채움을
-  재는 스위치다. `off`는 종전대로 도형별 컷 없음(가는 자식 셀의 헤어라인 컷은 종전 그대로 남는다).
+  (종전에는 자식 셀 쪽이 0 px). 0.12.214부터 thin keep의 기본이다(변수 없음 또는 `max`). 상태줄
+  `cut<…um (larger side)`, 프레임 줄 `shape_cut_max=1`. `off`는 종전대로 도형별 컷 없음(가는 자식 셀의 헤어라인
+  컷은 종전 그대로 남는다).
 
 ### sub-cut 박스 (0.12.168, 정확성 수정 0.12.169, **0.12.182부터 기본 꺼짐**)
 

@@ -3532,9 +3532,12 @@ class Viewer:
                     cut = ""
                     if res.get("cut_um"):
                         cut = ", cut<%.3gum" % res["cut_um"]
-                        # thin keep since 0.12.173: each shape by its smaller side
-                        if (res.get("plan_culls") or {}).get("shape_cut"):
-                            cut += " (min side)"
+                        # thin keep: each shape by its larger side (0.12.214,
+                        # the hairlines stay) or, under FLOE_RUST_SHAPE_CUT=min,
+                        # by its smaller side (0.12.173..0.12.213)
+                        culls = res.get("plan_culls") or {}
+                        if culls.get("shape_cut"):
+                            cut += " (larger side)" if culls.get("shape_cut_max") else " (min side)"
                     fit = (res.get("plan_culls") or {})
                     if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
                             or fit.get("fit_thin")):

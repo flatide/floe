@@ -10,8 +10,11 @@ pixel, so hairlines could stay in the plan and thin themselves out. What
 that costs is the question: the pages holding them are read and decoded and
 their records walked, and the screen may fill with 1 px lines.
 
-Three modes of renderd's FLOE_RUST_SHAPE_CUT:
-  * (unset)  today: pages cut by max_min < cut, records by min side < cut;
+Modes of renderd's FLOE_RUST_SHAPE_CUT (`current` = the variable unset):
+  * (unset)  the default: since 0.12.214 (user decision 2026-09-25) the same
+             as max; before it the same as min;
+  * min      pages cut by max_min < cut, records by min side < cut (the
+             default 0.12.173..0.12.213);
   * max      pages, child cells and child-BVH subtrees cut only when both
              sides are under the cut (the pre-0.12.173 page rule; since the
              review of 2026-09-25 also for a thin child cell), records only
@@ -41,7 +44,7 @@ The occupancy summary is kept out with FLOE_RUST_OCCUPANCY=off (a plain
 layout draws none by default anyway) and every frame is checked for
 summary.layers == 0.
 
-    .venv/bin/python tools/bench_hairline_cut.py <layout.oas> [--modes current,max] [--layers last10,all]
+    .venv/bin/python tools/bench_hairline_cut.py <layout.oas> [--modes min,max] [--layers last10,all]
         [--zooms 1,4,16] [--repeat 3] [--center X,Y (um)] [--budget-mb MB]
 """
 import argparse
@@ -59,6 +62,8 @@ from floe.cachepath import vfs_cache_dir  # noqa: E402
 from floe.rust_render import RustRenderWorker  # noqa: E402
 
 BLACK = bytes((0, 0, 0, 255))
+# one letter a mode on the `type this` lines (min and max share an initial)
+MODE_CODE = {'current': 'd', 'min': 'n', 'max': 'x', 'off': 'o'}
 
 
 def frame(w, gen, bbox_dbu, size, cut_px, visible):
@@ -101,7 +106,7 @@ def main(argv=None):
     ap.add_argument('--layers', default='last10,all')
     ap.add_argument('--size', default='1920x1080')
     ap.add_argument('--cut-px', type=float, default=3.0)
-    ap.add_argument('--modes', default='current,max')
+    ap.add_argument('--modes', default='min,max')
     ap.add_argument('--repeat', type=int, default=3, help='warm frames after the cold one (default 3)')
     ap.add_argument('--center', help='view centre in um (default: the layout centre)')
     ap.add_argument('--budget-mb', type=int, help='FLOE_RUST_BUDGET_MB for the workers (raise it to keep the fit budget out of the comparison)')
@@ -179,10 +184,10 @@ def main(argv=None):
 
     def k(v):
         return '-' if v is None else '%.0fk' % (v / 1000) if v >= 10000 else '%d' % v
-    print('== type this == (mode layers zoom | cold wall decode raster | warm wall raster lo-hi | pages bin tested drawn lit fit%)')
+    print('== type this == (mode d/n/x/o = default/min/max/off, layers zoom | cold wall decode raster | warm wall raster lo-hi | pages bin tested drawn lit fit%)')
     for r in rows:
         print('%s %s %g | %.0f %.0f %.0f | %s %s %s | %s %s %s %s %.3f %s' % (
-            r['mode'][0], r['layers'], r['zoom'], r['cold_wall'], r['cold']['decode_ms'] + r['cold']['read_ms'], r['cold']['raster_ms'],
+            MODE_CODE.get(r['mode'], r['mode'][:1]), r['layers'], r['zoom'], r['cold_wall'], r['cold']['decode_ms'] + r['cold']['read_ms'], r['cold']['raster_ms'],
             '%.0f' % r['warm_wall'] if r['warm_wall'] is not None else '-',
             '%.0f' % r['warm_raster'] if r['warm_raster'] is not None else '-',
             '%.0f-%.0f' % r['warm_raster_range'] if r['warm_raster_range'] else '-',
@@ -192,7 +197,7 @@ def main(argv=None):
         print('== type this 2 == (placement walks, the 3 outcomes with the most members: outcome walks/members)')
         for r in walked:
             top = sorted(r['walks'].items(), key=lambda kv: -kv[1][1])[:3]
-            print('%s %s %g | %s' % (r['mode'][0], r['layers'], r['zoom'], ' '.join('%s %s/%s' % (n, k(v[0]), k(v[1])) for n, v in top)))
+            print('%s %s %g | %s' % (MODE_CODE.get(r['mode'], r['mode'][:1]), r['layers'], r['zoom'], ' '.join('%s %s/%s' % (n, k(v[0]), k(v[1])) for n, v in top)))
 
 
 if __name__ == '__main__':

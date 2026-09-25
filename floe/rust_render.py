@@ -1227,9 +1227,12 @@ class RustRenderWorker:
                 "sub_cut_box_over": _wire_int(fields, "sub_cut_box_over"),
                 "sub_cut_box_level": _wire_int(fields, "sub_cut_box_level"),
                 "sub_cut_box_unsure": _wire_int(fields, "sub_cut_box_unsure"),
-                # the per-shape cut (thin keep): every shape is judged by its
-                # smaller side, dbu; 0 = the cut judges pages by their largest shape
+                # the per-shape cut (thin keep), dbu; 0 = the cut judges pages
+                # by their largest shape. shape_cut_max: shapes are judged by
+                # their LARGER side (the default since 0.12.214, the hairlines
+                # stay), else by their smaller one (FLOE_RUST_SHAPE_CUT=min)
                 "shape_cut": _wire_int(fields, "shape_cut"),
+                "shape_cut_max": _wire_int(fields, "shape_cut_max"),
                 "stored_rep_points": _wire_int(fields, "stored_rep_points"),
                 "stored_rep_tested": _wire_int(fields, "stored_rep_tested"),
                 "stored_rep_limited": _wire_int(fields, "stored_rep_limited"),

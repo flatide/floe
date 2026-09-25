@@ -1840,20 +1840,30 @@ fn sub_cut_box_enabled() -> bool {
     std::env::var("FLOE_RUST_SUB_CUT_BOX").as_deref() == Ok("on")
 }
 
-/// The per-shape cut on a plain layout's `thin keep` frames
-/// (floe_vfs::ViewReq::shape_cut); FLOE_RUST_SHAPE_CUT=off is the kill
-/// switch (pages are then cut by their largest shape, and thin shapes
-/// longer than the cut all stay, as before 0.12.173).
-fn shape_cut_enabled() -> bool {
-    !matches!(std::env::var("FLOE_RUST_SHAPE_CUT").as_deref(), Ok("off") | Ok("max"))
+/// The per-shape cut on a plain layout's `thin keep` frames, by
+/// FLOE_RUST_SHAPE_CUT (CUT_DENSITY_DESIGN §10.6).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShapeCut {
+    /// The default since 0.12.214 (user decision 2026-09-25), also `max`: the
+    /// hairline-keeping cut (floe_vfs::ViewReq::shape_cut_max) - pages,
+    /// child cells and records are cut only when their LARGER side is under
+    /// the cut, so a thin shape longer than the cut stays and the width-first
+    /// drawing thins it by its width.
+    Larger,
+    /// `min`, the kill switch - the default of 0.12.173..0.12.213
+    /// (floe_vfs::ViewReq::shape_cut): every shape judged by its smaller side.
+    Smaller,
+    /// `off`: no per-shape cut - pages are cut by their largest shape and
+    /// every record of a kept page is drawn, as before 0.12.173.
+    Off,
 }
 
-/// FLOE_RUST_SHAPE_CUT=max (CUT_DENSITY_DESIGN §10.6, diagnostic): pages
-/// are cut by their largest shape and records only when their larger side
-/// is under the cut, so the hairlines stay and the width-first drawing
-/// thins them by their width.
-fn shape_cut_max_enabled() -> bool {
-    std::env::var("FLOE_RUST_SHAPE_CUT").as_deref() == Ok("max")
+fn shape_cut_mode() -> ShapeCut {
+    match std::env::var("FLOE_RUST_SHAPE_CUT").as_deref() {
+        Ok("min") => ShapeCut::Smaller,
+        Ok("off") => ShapeCut::Off,
+        _ => ShapeCut::Larger,
+    }
 }
 
 /// Area-true drawing (floe_render_core::GeometryRasterRequest::area_true,
@@ -2609,7 +2619,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} queue_us={} wall_us={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} queue_us={} wall_us={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -2705,6 +2715,7 @@ fn run_render(
                 planned.summary.culls.sub_cut_box_level,
                 planned.summary.culls.sub_cut_box_unsure,
                 planned.summary.culls.shape_cut,
+                planned.summary.culls.shape_cut_max as u8,
                 summary.planes.len(),
                 pixels.summary_cells,
                 pixels.summary_pixels,
@@ -3064,8 +3075,8 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64)
         // FLOE_RUST_SUB_CUT_BOX=on - the density representation below the
         // cut replaces them (see sub_cut_box_enabled)
         sub_cut_box: !command.exact && command.thin_keep && sub_cut_box_enabled(),
-        shape_cut: !command.exact && command.thin_keep && shape_cut_enabled() && !shape_cut_max_enabled(),
-        shape_cut_max: !command.exact && command.thin_keep && shape_cut_max_enabled(),
+        shape_cut: !command.exact && command.thin_keep && shape_cut_mode() == ShapeCut::Smaller,
+        shape_cut_max: !command.exact && command.thin_keep && shape_cut_mode() == ShapeCut::Larger,
         // the viewer's frames switch reaches the planner (review 2026-09-20: it
         // only reached the raster, so a frames-off view still planned - and
         // walked for - every depth-boundary outline)

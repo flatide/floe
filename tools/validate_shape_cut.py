@@ -7,8 +7,14 @@ the page's largest shape (12 x 14 um), and thin shapes longer than the cut were
 never cut at all. User decision: under `thin keep` the cut judges every shape
 by its SMALLER side - a page is cut when none of its shapes reaches the cut on
 both sides, and in the pages that stay the raster drops the shapes under it.
-One small layout written with klayout.db: a 20 um square, an array of 0.4 um
-squares and a 0.2 um wire on one layer (one page), wires alone on another.
+Since 0.12.214 (user decision 2026-09-25) the DEFAULT judges every shape by
+its LARGER side instead (the hairline-keeping cut, CUT_DENSITY_DESIGN §10.6,
+formerly the diagnostic FLOE_RUST_SHAPE_CUT=max); the smaller-side cut is
+FLOE_RUST_SHAPE_CUT=min, and `off` has no per-shape cut. One small layout
+written with klayout.db: a 20 um square, an array of 0.4 um squares and a
+0.2 um wire on one layer (one page), wires alone on another.
+
+The smaller-side cut (FLOE_RUST_SHAPE_CUT=min):
 
   * a view where everything is at or above the cut: byte-identical to the
     kill switch FLOE_RUST_SHAPE_CUT=off, and the frame reports the cut;
@@ -18,19 +24,20 @@ squares and a 0.2 um wire on one layer (one page), wires alone on another.
     frame and its page is cut by the planner;
   * not the feature's business, byte-identical to the kill switch: the same
     views under `thin cull`, and with no cut at all (detail off);
-  * the hairline-keeping diagnostic FLOE_RUST_SHAPE_CUT=max (CUT_DENSITY_DESIGN
-    §10.6, 2026-09-24): at the wider view the large square is drawn exactly as
-    under the shape cut, the array of 0.4 um squares (both sides under the
-    cut) is not drawn, the 0.2 um wire (longer than the cut) is, and the
-    layer of wires alone keeps its page;
+The larger-side cut (the default, and FLOE_RUST_SHAPE_CUT=max):
+  * at the wider view the large square is drawn exactly as under the
+    smaller-side cut, the array of 0.4 um squares (both sides under the cut)
+    is not drawn, the 0.2 um wire (longer than the cut) is, and the layer of
+    wires alone keeps its page; a worker without the variable draws these
+    frames byte for byte as `max`;
   * the same wires placed as a child cell (one wire a cell, 12 placements -
     review of 5800b57, 2026-09-25): max judges the child cells and the child
     BVH by their larger side too, so the wires frame is byte-identical to the
     flat layout's under max as with no cut at all (the smaller-side hairline
     prune had dropped the thin child cell: 0 px against the flat layout's), and
-    under the shape cut both are empty. (The kill switch keeps the previous
-    thin keep's rule, which prunes the thin child cell while it keeps the
-    thin page of TOP.)
+    under the smaller-side cut both are empty. (`off` keeps the previous thin
+    keep's rule, which prunes the thin child cell while it keeps the thin page
+    of TOP.)
 
     .venv/bin/python tools/validate_shape_cut.py
 """
@@ -128,7 +135,7 @@ def main():
         src = Path(temp) / 'shapes.oas'
         layout(src)
         index(src)
-        off, on = worker(src, False), worker(src, True)
+        off, on = worker(src, False), worker(src, 'min')
         try:
             near, wide = view(35, 21, 80), view(35, 21, 200)   # 0.0625 and 0.15625 um a pixel
             gen = 0
@@ -188,12 +195,30 @@ def main():
                 wires_kept, rw = frame(hair, gen, wide, [WIRES], 'keep')
                 assert len(lit_pixels(wires_kept)) > 500 and rw['plan_culls']['pages_size'] == 0, (len(lit_pixels(wires_kept)), rw['plan_culls'])
                 print('shape cut max: square identical, array 0 px, wire %d px, wires alone %d px (page kept)' % (wire_px, len(lit_pixels(wires_kept))))
+                # the default is the larger-side cut: without the variable the
+                # frames are max's, and they say so (shape_cut_max)
+                default = worker(src, True)
+                try:
+                    same = 0
+                    for bbox, keys in ((wide, [MIXED]), (wide, [WIRES]), (near, [MIXED, WIRES])):
+                        gen += 1
+                        a, ra = frame(default, gen, bbox, keys, 'keep')
+                        b, rb = frame(hair, gen, bbox, keys, 'keep')
+                        assert a == b, 'the default differs from max at %s %s' % (bbox, keys)
+                        assert ra['plan_culls']['shape_cut'] > 0 and ra['plan_culls']['shape_cut_max'] == 1, ra['plan_culls']
+                        same += 1
+                    gen += 1
+                    _, rm = frame(on, gen, wide, [MIXED], 'keep')
+                    assert rm['plan_culls']['shape_cut'] > 0 and rm['plan_culls']['shape_cut_max'] == 0, rm['plan_culls']
+                    print('shape cut default: %d frames byte-identical to max (shape_cut_max=1; min reports 0)' % same)
+                finally:
+                    default.stop()
                 # the same wires as a child cell: max walks the thin child by
                 # its larger side, like the records - the frame is the flat one
                 cell_src = Path(temp) / 'wire_cell.oas'
                 layout(cell_src, wire_cell=True)
                 index(cell_src)
-                cell_off, cell_on, cell_hair = worker(cell_src, False), worker(cell_src, True), worker(cell_src, 'max')
+                cell_off, cell_on, cell_hair = worker(cell_src, False), worker(cell_src, 'min'), worker(cell_src, 'max')
                 try:
                     # 0.2 um a pixel: the wires are exactly 1 x 350 px on whole
                     # pixels, so the width-first draw lights the same pixels
