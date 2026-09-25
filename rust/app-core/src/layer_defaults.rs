@@ -28,7 +28,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+mod recovery;
 pub(crate) mod security;
+pub use recovery::{Recovery, RecoveryResult, RecoveryState};
 use security::Security;
 const DRAFT_TTL: Duration = Duration::from_secs(120);
 static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -117,6 +119,28 @@ impl Publisher {
             ));
         }
         let text = layerprops::format(&document.rows)?.into_bytes();
+        self.prepare_bytes(source, mode, text, 1, stop)
+    }
+    fn prepare_bytes(
+        self: &Arc<Self>,
+        source: Arc<RegisteredSource>,
+        mode: Mode,
+        text: Vec<u8>,
+        links: u64,
+        stop: &AtomicUsize,
+    ) -> Result<Draft> {
+        check_cancelled(stop)?;
+        if !self
+            .sources
+            .snapshot()
+            .iter()
+            .any(|s| Arc::ptr_eq(s, &source))
+            || (!source.deck && mode != Mode::Level)
+        {
+            return Err(Error::input(
+                "source/mode is outside this default publisher",
+            ));
+        }
         source.validate(stop)?;
         let props = if source.deck {
             props_source(source.path(), mode)?
@@ -146,7 +170,7 @@ impl Publisher {
                 .path
                 .join(std::ffi::OsStr::from_bytes(lock_name.as_bytes())),
         )?;
-        let before = Capture::read(&directory, &name, false, stop)?;
+        let before = Capture::read_links(&directory, &name, false, links, stop)?;
         directory.validate()?;
         source.validate(stop)?;
         Ok(Draft {
@@ -280,6 +304,7 @@ impl Draft {
                 "cannot preserve design-default permissions/attributes",
             ));
         }
+        recovery::mark(&self, &staged, identity(&lm))?;
         staged
             .file
             .set_times(fs::FileTimes::new().set_modified(SystemTime::now()))?;
@@ -417,6 +442,15 @@ impl Capture {
         writable: bool,
         stop: &AtomicUsize,
     ) -> Result<Option<Self>> {
+        Self::read_links(dir, name, writable, 1, stop)
+    }
+    fn read_links(
+        dir: &Directory,
+        name: &CStr,
+        writable: bool,
+        links: u64,
+        stop: &AtomicUsize,
+    ) -> Result<Option<Self>> {
         let file = match dir.open_leaf(
             name,
             if writable {
@@ -431,7 +465,7 @@ impl Capture {
             Err(e) => return Err(e.into()),
         };
         let m = file.metadata()?;
-        if !m.is_file() || m.nlink() != 1 || m.len() > layerprops::MAX_BYTES as u64 {
+        if !m.is_file() || m.nlink() != links || m.len() > layerprops::MAX_BYTES as u64 {
             return Err(Error::input(
                 "default must be a single-link regular file of at most 4 MiB",
             ));
@@ -548,35 +582,72 @@ impl Stage {
         replace: bool,
         after_link: impl FnOnce(),
     ) -> Result<()> {
-        // SAFETY: live directory fd and validated single-component CStrings.
-        let rc = unsafe {
-            if replace {
-                libc::renameat(
-                    self.directory.file.as_raw_fd(),
-                    self.name.as_ptr(),
-                    self.directory.file.as_raw_fd(),
-                    name.as_ptr(),
-                )
+        self.commit_using(name, replace, after_link, |stage| {
+            // SAFETY: live directory fd and validated single-component CStrings.
+            let rc = unsafe {
+                if replace {
+                    libc::renameat(
+                        stage.directory.file.as_raw_fd(),
+                        stage.name.as_ptr(),
+                        stage.directory.file.as_raw_fd(),
+                        name.as_ptr(),
+                    )
+                } else {
+                    libc::linkat(
+                        stage.directory.file.as_raw_fd(),
+                        stage.name.as_ptr(),
+                        stage.directory.file.as_raw_fd(),
+                        name.as_ptr(),
+                        0,
+                    )
+                }
+            };
+            if rc == 0 {
+                Ok(())
             } else {
-                libc::linkat(
-                    self.directory.file.as_raw_fd(),
-                    self.name.as_ptr(),
-                    self.directory.file.as_raw_fd(),
-                    name.as_ptr(),
-                    0,
-                )
+                Err(std::io::Error::last_os_error())
             }
-        };
-        if rc != 0 {
-            return Err(std::io::Error::last_os_error().into());
+        })
+    }
+    fn commit_using(
+        &mut self,
+        name: &CStr,
+        replace: bool,
+        after_link: impl FnOnce(),
+        syscall: impl FnOnce(&Self) -> std::io::Result<()>,
+    ) -> Result<()> {
+        // Disable Drop cleanup BEFORE the syscall: even an error/panic can
+        // follow a committed NFS request. Preserve the exact marked evidence.
+        self.linked = false;
+        let result = syscall(self);
+        let target_is_ours = self.directory.leaf_identity(name).ok() == Some(self.id);
+        let stage_absent = matches!(self.directory.leaf_identity(&self.name), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+        if target_is_ours
+            && replace
+            && stage_absent
+            && self.file.metadata().is_ok_and(|m| m.nlink() == 1)
+        {
+            return Ok(());
         }
-        if replace {
-            self.linked = false;
-        } else {
+        if target_is_ours && !replace {
             after_link();
-            self.unlink();
+            // Only a successful link ACK authorizes immediate cleanup. An
+            // error may be a committed link: leave its second name for the
+            // separately approved recovery path, never retry the syscall.
+            if result.is_ok() && self.directory.leaf_identity(&self.name).ok() == Some(self.id) {
+                self.linked = true;
+                self.unlink();
+                self.linked = false;
+                if self.directory.leaf_identity(name).ok() == Some(self.id)
+                    && self.file.metadata().is_ok_and(|m| m.nlink() == 1)
+                    && matches!(self.directory.leaf_identity(&self.name), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+                {
+                    return Ok(());
+                }
+            }
         }
-        Ok(())
+        Err(Error::new(ErrorKind::PublicationUnknown,
+            "publication result is unknown; do not retry; inspect or explicitly recover the marked file in a new session"))
     }
     fn unlink(&mut self) {
         if self.linked {

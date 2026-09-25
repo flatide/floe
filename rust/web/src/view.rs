@@ -489,6 +489,7 @@ pub fn safe_error(kind: floe_app_core::ErrorKind) -> &'static str {
         K::InvalidInput => "invalid_request",
         K::Unsupported => "unsupported",
         K::Io => "io_error",
+        K::PublicationUnknown => "publication_unknown",
         K::Cache => "index_unavailable",
         K::Busy | K::Admission => "busy",
         K::Version => "worker_version",

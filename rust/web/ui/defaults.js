@@ -3,7 +3,7 @@
  * original request; only an explicit Resolve click can replay that request. */
 (function(root) {
     'use strict';
-    const phases={queued:'Queued',publishing:'Publishing',succeeded:'Published',failed:'Not published',cancelled:'Cancelled before publication'};
+    const phases={queued:'Queued',publishing:'Working',uncertain:'Outcome UNKNOWN',succeeded:'Published',failed:'Not published',cancelled:'Cancelled before publication'};
     const errors={default_changed:'The file or its attributes changed, or another publisher holds its lock. Review again.',
         stale_state:'The view changed. Review the current settings again.',view_unavailable:'The prepared view closed or changed.',
         default_draft_expired:'The preparation expired or was replaced. Review again.',
@@ -11,6 +11,7 @@
         invalid_request:'The settings or derived default file cannot be used. Registered inputs and private files are protected.',
         busy:'Another publication or preparation is active. Nothing is retried automatically.',
         io_error:'The default file or directory could not be accessed. Check local permissions and service diagnostics.',
+        publication_unknown:'The filesystem operation may have completed. Do not publish again. Repair receipts can be checked read-only; for an unknown publication, inspect the shared file and start a new server session before any separately approved repair.',
         operation_conflict:'This sequence belongs to a different approved request. This request was not accepted.',
         operation_sequence:'Another publication used the sequence. Review again; no new request was submitted.',
         operation_expired:'The receipt left server history. Verify the shared file before clearing this local record.',
@@ -24,16 +25,19 @@
     function text(v,n){if(typeof v!=='string'||!v.length||v.length>n){fail();}return v;}
     function terminal(v){return !!v&&['succeeded','failed','cancelled'].includes(v.phase);}
     function operation(v,P){
-        keys(v,['seq','kind','phase'],['view_id','state_rev','name','published','directory_synced','error']);P.counter(v.seq);
+        keys(v,['seq','kind','phase'],['view_id','state_rev','name','published','directory_synced','error','recover','recovered']);P.counter(v.seq);
+        if(v.recover!==undefined&&v.recover!==true){fail();}
         if(v.kind!=='design_default'||!Object.prototype.hasOwnProperty.call(phases,v.phase)){fail();}
         if(v.view_id!==undefined){id(v.view_id);}if(v.state_rev!==undefined){P.counter(v.state_rev);}if(v.name!==undefined){text(v.name,4096);}
         if(v.phase!=='queued'){id(v.view_id);P.counter(v.state_rev);text(v.name,4096);}
-        if(terminal(v)){
-            if(v.published!==(v.phase==='succeeded')){fail();}
-            if(v.published){if(typeof v.directory_synced!=='boolean'||v.error!==undefined){fail();}}
+        if(v.phase==='uncertain'){
+            if(v.published!==null||v.error!=='publication_unknown'||v.directory_synced!==undefined||v.recovered!==undefined){fail();}
+        }else if(terminal(v)){
+            if(v.published!==(v.phase==='succeeded'&&!v.recover)){fail();}
+            if(v.phase==='succeeded'){if(typeof v.directory_synced!=='boolean'||v.error!==undefined||(v.recover&&v.recovered!==true)){fail();}}
             else{text(v.error,128);if(v.directory_synced!==undefined){fail();}}
         }else if(v.published!==undefined||v.error!==undefined||v.directory_synced!==undefined){fail();}
-        return v;
+        if(v.recovered!==undefined&&(!v.recover||v.phase!=='succeeded')){fail();}return v;
     }
     function catalog(v,P){
         keys(v,['available','operations','kind','scope','max_bytes','jobs']);
@@ -44,21 +48,23 @@
         if(prev!==a.last_seq||(a.active!==null&&(a.active!==prev||terminal(a.history[a.history.length-1])))){fail();}return v;
     }
     function prepared(v,c,P,Q){
-        keys(v,['token','view_id','state_rev','name','bytes','replaces_existing','expires_in_ms','scope','affects','mode','levels','title','rows']);
+        keys(v,['token','view_id','state_rev','name','bytes','replaces_existing','expires_in_ms','scope','affects','mode','levels','title','rows'],['recover']);
+        if(v.recover!==undefined&&v.recover!==true){fail();}
         id(v.token);id(v.view_id);P.counter(v.state_rev);P.counter(v.bytes);P.counter(v.expires_in_ms);
         if(v.view_id!==c.id||v.state_rev!==c.rev||P.compare(v.bytes,'4194304')>0||P.compare(v.expires_in_ms,'30000')>0||
             typeof v.replaces_existing!=='boolean'||v.scope!=='shared_design_default'||v.affects!=='future_opens'||
-            !['level','chip','layer'].includes(v.mode)||!Number.isInteger(v.rows)||v.rows<1||v.rows>65536){fail();}
+            !['level','chip','layer'].includes(v.mode)||!Number.isInteger(v.rows)||v.rows<(v.recover?0:1)||v.rows>65536){fail();}
         text(v.name,4096);text(v.title,4096);
         if(v.levels!==null){if(!Array.isArray(v.levels)||!v.levels.length||v.levels.length>4096){fail();}
             const unique=new Set();v.levels.forEach(function(n){Q.i64(n,P);if(unique.has(n)){fail();}unique.add(n);});}
         return v;
     }
-    function approval(v,P){keys(v,['seq','view_id','state_rev','token','approve']);P.counter(v.seq);P.counter(v.state_rev);id(v.view_id);id(v.token);if(v.approve!==true){fail();}return v;}
+    function approval(v,P){keys(v,['seq','view_id','state_rev','token'],['approve','approve_recovery']);P.counter(v.seq);P.counter(v.state_rev);id(v.view_id);id(v.token);if(!((v.approve===true&&v.approve_recovery===undefined)||(v.approve_recovery===true&&v.approve===undefined))){fail();}return v;}
     function label(v){
         if(!v){return 'No design default published in this server session.';}
-        let s=phases[v.phase]+' · #'+v.seq+(v.name?' · '+v.name:'');
-        if(v.phase==='succeeded'){s+='\nShared default updated for future opens. Existing windows are unchanged.';
+        let phase=v.recover&&v.phase==='succeeded'?'Repaired':v.recover&&v.phase==='failed'?'Repair not completed':phases[v.phase];
+        let s=(v.recover?'File repair · ':'')+phase+' · #'+v.seq+(v.name?' · '+v.name:'');
+        if(v.phase==='succeeded'){s+=v.recover?'\nExtra staging link removed. Contents and permissions were preserved. Existing windows are unchanged.':'\nShared default updated for future opens. Existing windows are unchanged.';
             if(!v.directory_synced){s+='\nPublished, but directory sync failed. Durability is unconfirmed; do not publish again just to retry sync.';}}
         if(v.error){s+='\n'+(errors[v.error]||'The server rejected this publication. Check local diagnostics.');}return s;
     }
@@ -74,8 +80,8 @@
         function last(){const a=model&&model.operations.history;return a&&a[a.length-1];}
         function permitted(){return enabled&&!stopped&&!stale&&model&&model.available;}
         function busy(){return !!pending||uncertain||!!active()||!!writeTask||!!approving;}
-        function store(request){try{o.savePending(request?JSON.stringify({session_id:id(o.session()),request:request}):null);storageWarning='';}
-            catch(_){storageWarning='Browser session storage is unavailable. Keep this page open until the outcome is confirmed; a reload cannot recover an uncertain approval.';}}
+        function store(request){try{o.savePending(request?JSON.stringify({session_id:id(o.session()),request:request}):null);storageWarning='';return true;}
+            catch(_){storageWarning='Browser session storage is unavailable. No new approval can be sent; keep this page open for any already submitted operation.';return false;}}
         function recover(){el('default-checked').checked=false;try{const raw=o.loadPending();if(raw===null){return;}if(typeof raw!=='string'||raw.length>2048){fail();}
                 const saved=JSON.parse(raw);keys(saved,['session_id','request']);id(saved.session_id);
                 if(saved.session_id!==o.session()){throw new Error('Previous server session');}
@@ -97,6 +103,9 @@
         function render(){
             el('default-panel').hidden=!enabled;
             el('default-prepare').disabled=!permitted()||!context()||busy()||!!prepareTask;
+            el('default-recover').disabled=el('default-prepare').disabled;
+            const receipt=last();el('default-check-repair').hidden=!(receipt&&receipt.recover&&receipt.phase==='uncertain');
+            el('default-check-repair').disabled=!permitted()||!!cancelTask||!!writeTask;
             el('default-review').hidden=!draft;
             el('default-consent').disabled=!draft||busy()||!permitted();
             el('default-approve').disabled=!draft||!el('default-consent').checked||busy()||!permitted();
@@ -113,7 +122,7 @@
         function install(v){
             const old=last(),next=v.operations.history[v.operations.history.length-1];
             if(model&&(P.compare(v.operations.last_seq,model.operations.last_seq)<0||old&&next&&old.seq===next.seq&&terminal(old)&&
-                ['phase','view_id','state_rev','name','published','directory_synced','error'].some(function(k){return old[k]!==next[k];}))){throw new Error('Older publication state was ignored.');}
+                ['phase','view_id','state_rev','name','published','directory_synced','error','recover','recovered'].some(function(k){return old[k]!==next[k];}))){throw new Error('Older publication state was ignored.');}
             if(draft&&(v.operations.active||model&&v.operations.last_seq!==model.operations.last_seq)){discard(true);note='Another publication changed the session. Review again.';}
             model=v;stale=false;pollError='';
         }
@@ -132,23 +141,30 @@
             }catch(e){if(!t.cancelled&&readTask===t){stale=true;pollError='Publication state could not be checked. '+e.message;if(e.status===401){stopped=true;}}}
             finally{if(readTask===t){readTask=null;changed();schedule();}}
         }
-        async function prepare(){
+        async function prepare(repair){
+            repair=repair===true;
             changed();const c=context();if(!permitted()||!c||busy()||prepareTask){return;}
             discard(true);const t={context:c,sent:o.now(),cancelled:false,abort:null};prepareTask=t;
             note='Reading current settings and checking the target. No file has been approved.';render();
-            try{const d=prepared(await o.http('POST','/api/v1/defaults/prepare',{view_id:c.id,state_rev:c.rev},false,t),c,P,Q);
+            try{const request={view_id:c.id,state_rev:c.rev};if(repair){request.recover=true;}
+                const d=prepared(await o.http('POST','/api/v1/defaults/prepare',request,false,t),c,P,Q);
+                if((d.recover===true)!==repair){fail();}
                 if(t.cancelled||prepareTask!==t||!same(c)){return;}
                 draft={value:d,context:c,until:Math.min(t.sent+30000,o.now()+Number(d.expires_in_ms))};
-                el('default-target').textContent=d.title+' · '+d.mode+' mode\n'+d.name+' · '+d.rows+' rows · '+d.bytes+' bytes\n'+(d.replaces_existing?'REPLACE existing shared file':'Create shared file');
-                el('default-levels').textContent=d.levels===null?'All opened levels / layout layers.':('Selected deck levels only: '+d.levels.join(', ')+'. Other rows are NOT merged or preserved.');
+                el('default-target').textContent=d.title+' · '+d.mode+' mode\n'+d.name+' · '+d.bytes+' bytes\n'+(repair?'Repair exact marked staging link':(d.replaces_existing?'REPLACE existing shared file':'Create shared file'));
+                el('default-levels').textContent=repair?'The completed file is kept as-is. Current layer selections and styles will NOT be written.':d.levels===null?'All opened levels / layout layers.':('Selected deck levels only: '+d.levels.join(', ')+'. Other rows are NOT merged or preserved.');
+                el('default-impact').textContent=repair?'Remove only the proven extra staging link of this completed default. No directory scanning, legacy cleanup or payload rewrite.':'This writes the shared Calibre layerprops file for future opens, including other users. It replaces the whole file, not a merge. Existing windows are unchanged.';
+                el('default-consent-label').textContent=repair?'I approve removing this default’s proven extra staging link.':'I approve writing this shared default.';
+                el('default-approve').textContent=repair?'Repair interrupted default':'Publish shared default';
                 note='Review the shared impact and explicitly approve. This preparation expires after 30 seconds.';
                 expiry=o.setTimeout(changed,Math.max(0,draft.until-o.now()));
             }catch(e){if(!t.cancelled&&prepareTask===t){note=errors[e.code]||e.message;}}
             finally{if(prepareTask===t){prepareTask=null;changed();if(draft){el('default-consent').focus();}}}
         }
         async function send(request){
-            pending=request;uncertain=false;el('default-checked').checked=false;store(request);abort(readTask);readTask=null;
-            const t={cancelled:false,abort:null};writeTask=t;note='Submitting the approved settings. Closing the view does not undo publication.';render();
+            if(!store(request)){note='Approval was not sent because its recovery record could not be stored.';render();return;}
+            pending=request;uncertain=false;el('default-checked').checked=false;abort(readTask);readTask=null;
+            const t={cancelled:false,abort:null};writeTask=t;note=request.approve_recovery?'Submitting the explicitly approved file repair. No settings are being published.':'Submitting the approved settings. Closing the view does not undo publication.';render();
             try{const op=operation(await o.http('POST','/api/v1/defaults',request,false,t),P);
                 if(op.seq!==request.seq||op.view_id!==undefined&&(op.view_id!==request.view_id||op.state_rev!==request.state_rev)){fail();}
                 if(t.cancelled||stopped||writeTask!==t){return;}receipt(op);pending=null;uncertain=false;store(null);note='Approval acknowledged. The receipt below is authoritative.';
@@ -163,7 +179,8 @@
             changed();const d=draft;if(!permitted()||!d||busy()||!el('default-consent').checked){return;}
             const t={};approving=t;render();await refresh();if(approving!==t){return;}approving=null;changed();
             if(!permitted()||draft!==d||!same(d.context)||busy()||!el('default-consent').checked){render();return;}
-            try{const request=Object.freeze({seq:P.next(model.operations.last_seq),view_id:d.value.view_id,state_rev:d.value.state_rev,token:d.value.token,approve:true});
+            try{const request={seq:P.next(model.operations.last_seq),view_id:d.value.view_id,state_rev:d.value.state_rev,token:d.value.token};
+                if(d.value.recover){request.approve_recovery=true;}else{request.approve=true;}Object.freeze(request);
                 discard(false);await send(request);
             }catch(e){note=e.message;render();}
         }
@@ -175,7 +192,15 @@
             finally{if(cancelTask===t){cancelTask=null;if(!stopped){await refresh();}}}
         }
         function dismiss(){abort(prepareTask);prepareTask=null;discard(true);note='Preparation dismissed. No new publication was approved.';render();el('default-prepare').focus();}
-        el('default-prepare').onclick=prepare;el('default-dismiss').onclick=dismiss;
+        el('default-prepare').onclick=function(){return prepare(false);};el('default-recover').onclick=function(){return prepare(true);};el('default-dismiss').onclick=dismiss;
+        el('default-check-repair').onclick=async function(){
+            const op=last();if(!op||!op.recover||op.phase!=='uncertain'||!permitted()||cancelTask||writeTask){return;}
+            const t={cancelled:false,abort:null};cancelTask=t;render();
+            try{const checked=operation(await o.http('POST','/api/v1/defaults/'+op.seq+'/reconcile',{},false,t),P);
+                if(checked.seq!==op.seq){fail();}if(!t.cancelled){receipt(checked);note='Read-only check requested. No unlink or publication was retried.';}}
+            catch(e){if(!t.cancelled){note=e.message;}}
+            finally{if(cancelTask===t){cancelTask=null;if(!stopped){await refresh();}}}
+        };
         el('default-consent').onchange=changed;el('default-approve').onclick=approve;
         el('default-review').onkeydown=function(e){if(e.isComposing||e.keyCode===229){return;}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();dismiss();}};
         el('default-refresh').onclick=refresh;el('default-cancel').onclick=cancel;

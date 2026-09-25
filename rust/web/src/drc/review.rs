@@ -146,6 +146,7 @@ struct Work {
 }
 struct State {
     binding: Binding,
+    publication_unknown: bool,
     closed: bool,
     detached: bool,
     serial: u64,
@@ -216,6 +217,7 @@ impl Service {
         let inner = Arc::new(Inner {
             state: Mutex::new(State {
                 binding: Binding::new(config.read_target.clone(), config.reader_id.clone())?,
+                publication_unknown: false,
                 closed: false,
                 detached: false,
                 serial: 0,
@@ -473,6 +475,9 @@ impl Service {
         value
     }
     fn require_editor(&self) -> std::result::Result<(), Failure> {
+        if self.inner.state.lock().unwrap().publication_unknown {
+            return Err("publication_unknown");
+        }
         if self.inner.config.editable {
             Ok(())
         } else {
@@ -711,6 +716,7 @@ fn safe(kind: ErrorKind) -> Failure {
         ErrorKind::Cancelled => "drc_cancelled",
         ErrorKind::Incomplete => "drc_read_limit",
         ErrorKind::Io => "review_io_error",
+        ErrorKind::PublicationUnknown => "publication_unknown",
         _ => "review_unavailable",
     }
 }
@@ -888,6 +894,7 @@ fn run(inner: Arc<Inner>) {
             s.transfer.artifacts.clear();
         }
         value["review_rev"] = json!(s.review_rev.to_string());
+        s.publication_unknown |= value["outcome_unknown"] == true;
         s.ledger.update(seq, value, true);
         s.stop = None;
     }

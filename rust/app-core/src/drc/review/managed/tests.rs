@@ -584,6 +584,27 @@ fn late_cancel_durability_warning_and_worker_panic_do_not_claim_rollback() {
     );
     f.preserved();
 }
+#[test]
+fn syscall_uncertainty_is_not_failed_publication_or_cancellation() {
+    let f = Fixture::new();
+    let m = f.open(store::Kind::Notes);
+    let mut job = f
+        .note(&m, "unknown syscall")
+        .start_using(false, |_d, stop| {
+            stop.store(1, Ordering::Relaxed);
+            Err(Error::new(
+                ErrorKind::PublicationUnknown,
+                "synthetic ambiguous commit",
+            ))
+        })
+        .unwrap();
+    let status = finish(&mut job);
+    assert_eq!(status.phase, Phase::Failed);
+    assert!(status.outcome_unknown);
+    assert!(status.outcome.is_none());
+    assert_eq!(status.failure, Some(ErrorKind::PublicationUnknown));
+    f.preserved();
+}
 
 #[test]
 fn dropping_job_requests_cancel_and_joins_instead_of_detaching() {

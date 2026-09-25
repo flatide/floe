@@ -7,7 +7,7 @@ use crate::{
     view,
 };
 use floe_app_core::{
-    layer_defaults::{Draft, Publisher},
+    layer_defaults::{Draft, Publisher, Recovery, RecoveryResult, RecoveryState},
     ErrorKind, Result,
 };
 pub(crate) use http::routes;
@@ -28,6 +28,8 @@ use tokio::sync::Semaphore;
 pub(super) struct Prepare {
     view_id: String,
     state_rev: String,
+    #[serde(default)]
+    recover: bool,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,14 +38,43 @@ pub(super) struct Submit {
     view_id: String,
     state_rev: String,
     token: String,
+    #[serde(default)]
     approve: bool,
+    #[serde(default)]
+    approve_recovery: bool,
+}
+enum Prepared {
+    Publish(Box<Draft>),
+    Recover(Arc<Recovery>),
+}
+impl From<Draft> for Prepared {
+    fn from(d: Draft) -> Self {
+        Self::Publish(Box::new(d))
+    }
+}
+impl Prepared {
+    fn target(&self) -> &std::path::Path {
+        match self {
+            Self::Publish(d) => d.target(),
+            Self::Recover(d) => d.target(),
+        }
+    }
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Publish(d) => d.bytes(),
+            Self::Recover(d) => d.bytes(),
+        }
+    }
+    fn recovery(&self) -> bool {
+        matches!(self, Self::Recover(_))
+    }
 }
 struct Ready {
     token: String,
     owner: SessionId,
     view_id: String,
     rev: u64,
-    draft: Draft,
+    draft: Prepared,
     expires: Instant,
     name: String,
 }
@@ -52,7 +83,8 @@ struct Work {
     view_id: String,
     rev: u64,
     name: String,
-    draft: Draft,
+    draft: Prepared,
+    check: bool,
     stop: Arc<AtomicUsize>,
 }
 struct State {
@@ -62,6 +94,7 @@ struct State {
     ledger: Ledger,
     pending: Option<Work>,
     stop: Option<Arc<AtomicUsize>>,
+    held: Option<(u64, Arc<Recovery>)>,
 }
 struct Inner {
     state: Mutex<State>,
@@ -83,6 +116,7 @@ impl Service {
                 ledger: Ledger::default(),
                 pending: None,
                 stop: None,
+                held: None,
             }),
             wake: Condvar::new(),
         });
@@ -114,8 +148,9 @@ impl Service {
         serial: u64,
         owner: SessionId,
         request: Prepare,
-        draft: Draft,
+        draft: impl Into<Prepared>,
     ) -> std::result::Result<Value, &'static str> {
+        let draft = draft.into();
         let mut s = self.inner.state.lock().unwrap();
         if s.closed || serial != s.serial {
             return Err("default_draft_expired");
@@ -128,7 +163,13 @@ impl Service {
             .ok_or("default_unavailable")?
             .to_owned();
         let rev = view::counter(&request.state_rev)?;
-        let result = json!({"token":token,"view_id":request.view_id,"state_rev":request.state_rev,"name":name,"bytes":draft.bytes().to_string(),"replaces_existing":draft.replaces_existing(),"expires_in_ms":"30000","scope":"shared_design_default","affects":"future_opens"});
+        if request.recover != draft.recovery() {
+            return Err("default_approval_required");
+        }
+        let mut result = json!({"token":token,"view_id":request.view_id,"state_rev":request.state_rev,"name":name,"bytes":draft.bytes().to_string(),"replaces_existing":matches!(&draft,Prepared::Publish(d) if d.replaces_existing()),"expires_in_ms":"30000","scope":"shared_design_default","affects":"future_opens"});
+        if draft.recovery() {
+            result["recover"] = json!(true);
+        }
         s.ready = Some(Ready {
             token,
             owner,
@@ -148,10 +189,10 @@ impl Service {
     ) -> std::result::Result<Value, &'static str> {
         let seq = view::counter(&req.seq)?;
         let rev = view::counter(&req.state_rev)?;
-        if !req.approve || req.token.len() != 64 || req.view_id.len() != 64 {
+        if req.approve == req.approve_recovery || req.token.len() != 64 || req.view_id.len() != 64 {
             return Err("default_approval_required");
         }
-        let signature = format!("{req:?}");
+        let signature = format!("{} {req:?}", owner.as_str());
         let mut s = self.inner.state.lock().unwrap();
         if s.closed {
             return Err("closed");
@@ -164,6 +205,9 @@ impl Service {
             .as_ref()
             .filter(|r| r.token == req.token && r.owner == *owner)
             .ok_or("default_draft_expired")?;
+        if r.draft.recovery() != req.approve_recovery {
+            return Err("default_approval_required");
+        }
         if Instant::now() >= r.expires {
             s.ready = None;
             return Err("default_draft_expired");
@@ -200,6 +244,7 @@ impl Service {
             rev,
             name: r.name,
             draft: r.draft,
+            check: false,
             stop,
         });
         self.inner.wake.notify_one();
@@ -246,6 +291,44 @@ impl Service {
         }
         Ok(v)
     }
+    fn reconcile(&self, seq: u64) -> std::result::Result<Value, &'static str> {
+        let mut s = self.inner.state.lock().unwrap();
+        if s.closed {
+            return Err("closed");
+        }
+        let receipt = s.ledger.get(seq).ok_or("operation_expired")?;
+        if receipt["phase"] != "uncertain" {
+            return Ok(receipt);
+        }
+        let proof = s
+            .held
+            .as_ref()
+            .filter(|(n, _)| *n == seq)
+            .map(|(_, p)| Arc::clone(p))
+            .ok_or("publication_unknown")?;
+        if s.pending.is_some() {
+            return Err("busy");
+        }
+        let stop = Arc::new(AtomicUsize::new(0));
+        s.stop = Some(Arc::clone(&stop));
+        s.pending = Some(Work {
+            seq,
+            view_id: receipt["view_id"].as_str().unwrap().into(),
+            rev: view::counter(receipt["state_rev"].as_str().unwrap())?,
+            name: receipt["name"].as_str().unwrap().into(),
+            draft: Prepared::Recover(proof),
+            check: true,
+            stop,
+        });
+        let mut checking = receipt;
+        checking["phase"] = json!("publishing");
+        checking.as_object_mut().unwrap().remove("error");
+        checking.as_object_mut().unwrap().remove("published");
+        checking.as_object_mut().unwrap().remove("recovered");
+        s.ledger.update(seq, checking.clone(), false);
+        self.inner.wake.notify_one();
+        Ok(checking)
+    }
     pub fn request_stop(&self) {
         let mut s = self.inner.state.lock().unwrap();
         s.closed = true;
@@ -282,7 +365,11 @@ fn run(inner: Arc<Inner>) {
             let Some(w) = s.pending.take() else {
                 break;
             };
-            s.ledger.update(w.seq,json!({"seq":w.seq.to_string(),"kind":"design_default","phase":"publishing","view_id":w.view_id,"state_rev":w.rev.to_string(),"name":w.name}),false);
+            let mut progress = json!({"seq":w.seq.to_string(),"kind":"design_default","phase":"publishing","view_id":w.view_id,"state_rev":w.rev.to_string(),"name":w.name});
+            if w.draft.recovery() {
+                progress["recover"] = json!(true);
+            }
+            s.ledger.update(w.seq, progress, false);
             w
         };
         let Work {
@@ -291,19 +378,73 @@ fn run(inner: Arc<Inner>) {
             rev,
             name,
             draft,
+            check,
             stop,
         } = work;
-        let result = draft.publish(&stop);
-        let value = match result {
-            Ok(p) => {
-                json!({"seq":seq.to_string(),"kind":"design_default","phase":"succeeded","view_id":view_id,"state_rev":rev.to_string(),"name":name,"published":true,"directory_synced":p.directory_synced})
-            }
-            Err(e) => {
-                json!({"seq":seq.to_string(),"kind":"design_default","phase":if e.kind==ErrorKind::Cancelled {"cancelled"} else {"failed"},"view_id":view_id,"state_rev":rev.to_string(),"name":name,"published":false,"error":safe(e.kind)})
-            }
+        let proof = match &draft {
+            Prepared::Recover(p) => Some(Arc::clone(p)),
+            _ => None,
         };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match draft {
+            Prepared::Publish(d) => d.publish(&stop).map(|p| Some(p.directory_synced)),
+            Prepared::Recover(p) if check => match p.reconcile(&stop) {
+                Ok(RecoveryState::Completed) => Ok(Some(false)), // inspection is not a durability claim
+                Ok(RecoveryState::Pending) => Err(floe_app_core::Error::new(
+                    ErrorKind::Busy,
+                    "repair not completed; prepare again",
+                )),
+                Err(_) => Ok(None),
+            },
+            Prepared::Recover(p) => p.recover(&stop).map(|r| match r {
+                RecoveryResult::Recovered { directory_synced } => Some(directory_synced),
+                RecoveryResult::Uncertain => None,
+            }),
+        }))
+        .unwrap_or_else(|_| {
+            Err(floe_app_core::Error::new(
+                ErrorKind::PublicationUnknown,
+                "publication worker ended unexpectedly",
+            ))
+        });
+        let unknown = matches!(&result, Ok(None))
+            || matches!(&result, Err(e) if e.kind == ErrorKind::PublicationUnknown);
+        let mut value = json!({"seq":seq.to_string(),"kind":"design_default","view_id":view_id,"state_rev":rev.to_string(),"name":name});
+        if proof.is_some() {
+            value["recover"] = json!(true);
+        }
+        if unknown {
+            value["phase"] = json!("uncertain");
+            value["published"] = Value::Null;
+            value["error"] = json!("publication_unknown");
+        } else {
+            match result {
+                Ok(Some(synced)) => {
+                    value["phase"] = json!("succeeded");
+                    value["published"] = json!(proof.is_none());
+                    value["directory_synced"] = json!(synced);
+                    if proof.is_some() {
+                        value["recovered"] = json!(true);
+                    }
+                }
+                Err(e) => {
+                    value["phase"] = json!(if e.kind == ErrorKind::Cancelled {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    });
+                    value["published"] = json!(false);
+                    value["error"] = json!(safe(e.kind));
+                }
+                Ok(None) => unreachable!(),
+            }
+        }
         let mut s = inner.state.lock().unwrap();
-        s.ledger.update(seq, value, true);
+        s.held = if unknown {
+            proof.map(|p| (seq, p))
+        } else {
+            None
+        };
+        s.ledger.update(seq, value, !unknown);
         s.stop = None;
     }
 }

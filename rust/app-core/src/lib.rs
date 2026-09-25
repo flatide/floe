@@ -60,6 +60,8 @@ pub enum ErrorKind {
     InvalidInput,
     Unsupported,
     Io,
+    /// A publication syscall was attempted; failure is not proof of rollback.
+    PublicationUnknown,
     Cache,
     Busy,
     /// Resource/lease admission failed before opening a review model. This is

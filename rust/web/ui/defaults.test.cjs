@@ -18,13 +18,13 @@ function harness(shared={raw:null,model:catalog(),writes:0,records:new Map()}){
     function execute(r){
         const {method,path,body}=r;
         if(method==='GET')return clone(shared.model);
-        if(path.endsWith('/prepare'))return draft(c);
+        if(path.endsWith('/prepare'))return draft(c,body.recover?{recover:true,replaces_existing:false}:{});
         if(path.endsWith('/revoke'))return null;
         if(path.endsWith('/cancel')){const v=shared.model.operations.history.at(-1);return clone(v);}
         assert.equal(path,'/api/v1/defaults');
         const prior=shared.records.get(body.seq);
         if(prior){assert.deepEqual(body,prior.request,'replay changed the approved body');return clone(prior.result);}
-        shared.writes++;const result=op(body.seq,'succeeded',{view_id:body.view_id,state_rev:body.state_rev});
+        shared.writes++;const result=op(body.seq,'succeeded',{view_id:body.view_id,state_rev:body.state_rev,...(body.approve_recovery?{recover:true,recovered:true,published:false}:{})});
         shared.records.set(body.seq,{request:clone(body),result});shared.model=catalog(shared.model.operations.history.concat(result).slice(-32));return clone(result);
     }
     const panel=D.bind({el,protocol:P,query:Q,context:()=>c,session:()=>session,now:()=>now,
@@ -112,5 +112,29 @@ const posts=h=>h.requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/default
     assert.throws(()=>D.operation(op('1','queued',{state_rev:1}),P));
     for(const change of [v=>v.rows=65537,v=>v.bytes='4194305',v=>v.levels=['1','1'],v=>v.levels=['9223372036854775808'],v=>v.state_rev='1',v=>v.path='/x']){const v=draft(h.c);change(v);assert.throws(()=>D.prepared(v,h.c,P,Q));}
     const duplicate=catalog([op(),op()]);assert.throws(()=>D.catalog(duplicate,P));
+    // Distinct consent and persisted SAME request; neither GET nor panel
+    // reopening approves a repair. No actual browser/filesystem is involved.
+    const repair=harness();await repair.init();await repair.el('default-recover').onclick();
+    assert.equal(posts(repair).length,0);assert.match(repair.el('default-impact').textContent,/No directory scanning/);
+    assert.match(repair.el('default-levels').textContent,/NOT be written/);
+    assert.match(repair.el('default-consent-label').textContent,/extra staging link/);
+    await repair.el('default-approve').onclick();assert.equal(posts(repair).length,0);
+    let repairDrop=true;repair.override=r=>{if(r.method==='POST'&&r.path==='/api/v1/defaults'&&repairDrop){repairDrop=false;repair.execute(r);return Promise.reject(error(0));}};
+    await repair.approve();const repairBody=clone(posts(repair)[0].body);
+    assert.equal(repairBody.approve_recovery,true);assert.equal(repairBody.approve,undefined);
+    assert.deepEqual(JSON.parse(repair.shared.raw).request,repairBody);repair.panel.stop();
+    const repairReload=harness(repair.shared);await repairReload.init();assert.equal(posts(repairReload).length,0);
+    await repairReload.el('default-resolve').onclick();assert.deepEqual(posts(repairReload)[0].body,repairBody);
+    assert.equal(repairReload.shared.writes,1);assert.match(repairReload.el('default-status').textContent,/Contents and permissions were preserved/);repairReload.panel.stop();
+    assert.throws(()=>D.approval({...repairBody,approve:true},P));
+    const noJournal=harness();await noJournal.init();await noJournal.el('default-recover').onclick();noJournal.storageError=true;
+    await noJournal.approve();assert.equal(posts(noJournal).length,0);assert.match(noJournal.el('default-note').textContent,/not sent/);noJournal.panel.stop();
+    assert.throws(()=>D.operation(op('1','succeeded',{recover:true,published:true,recovered:true}),P));
+    const ambiguous=harness();ambiguous.shared.model=catalog([op('1','uncertain',{published:null,error:'publication_unknown',recover:true})]);
+    await ambiguous.init();assert(ambiguous.el('default-prepare').disabled);assert(!ambiguous.el('default-check-repair').hidden);
+    assert.equal(ambiguous.requests.filter(r=>r.path.endsWith('/reconcile')).length,0);
+    ambiguous.override=r=>{if(r.path.endsWith('/reconcile')){const done=op('1','succeeded',{published:false,recover:true,recovered:true,directory_synced:false});ambiguous.shared.model=catalog([done]);return done;}};
+    await ambiguous.el('default-check-repair').onclick();assert.equal(posts(ambiguous).length,0);
+    assert.match(ambiguous.el('default-note').textContent,/No unlink or publication was retried/);ambiguous.panel.stop();
     console.log('WEB DEFAULTS: ALL OK (read-only preview, checked consent, expiry/context, revoke, same-request reload recovery, no automatic replay, cancel/commit, durability, storage/schema/u64)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

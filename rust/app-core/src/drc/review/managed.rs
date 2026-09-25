@@ -441,6 +441,7 @@ impl Prepared {
                     }
                     Ok(Err(e)) => {
                         s.failure = Some(e.kind);
+                        s.outcome_unknown = e.kind == ErrorKind::PublicationUnknown;
                         s.phase = if e.kind == ErrorKind::Cancelled {
                             Phase::Cancelled
                         } else {

@@ -44,6 +44,7 @@ impl Fixture {
             Prepare {
                 view_id: "a".repeat(64),
                 state_rev: "1".into(),
+                recover: false,
             },
             self.draft(),
         )
@@ -129,7 +130,8 @@ fn cancelled_admitted_work_is_drained_without_publication_or_stuck_ledger() {
             view_id: "a".repeat(64),
             rev: 1,
             name: "mask.jb.layerprops".into(),
-            draft,
+            draft: draft.into(),
+            check: false,
             stop,
         });
     }
@@ -165,4 +167,101 @@ fn wire_rejects_unapproved_paths_and_unknown_fields() {
     assert!(serde_json::from_value::<Submit>(good.clone()).is_ok());
     good["text"] = json!("arbitrary replacement");
     assert!(serde_json::from_value::<Submit>(good).is_err());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn recovery_preview_is_separate_and_actor_never_rewrites_settings() {
+    let f = Fixture::new();
+    f.draft().publish(&AtomicUsize::new(0)).unwrap();
+    let target = f.dir.join("mask.jb.layerprops");
+    let payload = fs::read(&target).unwrap();
+    // Tests can model a hard-link gap with the actual emitted marker, without
+    // starting an app or terminating a process.
+    // Read ONLY our just-created fixture's known xattr. Keep the transport
+    // crate unsafe-free; OS-independent fault checks live in app-core.
+    let output = std::process::Command::new("/usr/bin/xattr")
+        .args(["-p", "com.floe.default-stage-v1"])
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let marker: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stage = f.dir.join(marker["stage"].as_str().unwrap());
+    fs::hard_link(&target, &stage).unwrap();
+    let proof = f
+        .service
+        .publisher
+        .prepare_recovery(
+            Arc::clone(&f.source),
+            floe_app_core::jobdeck::color::Mode::Level,
+            &AtomicUsize::new(0),
+        )
+        .unwrap();
+    let serial = f.service.begin().unwrap();
+    let preview = f
+        .service
+        .finish(
+            serial,
+            owner(),
+            Prepare {
+                view_id: "a".repeat(64),
+                state_rev: "1".into(),
+                recover: true,
+            },
+            Prepared::Recover(Arc::new(proof)),
+        )
+        .unwrap();
+    assert_eq!(preview["recover"], true);
+    assert!(stage.exists());
+    {
+        let mut s = f.service.inner.state.lock().unwrap();
+        let ready = s.ready.take().unwrap();
+        s.ledger
+            .admit(1, "explicit repair".into(), "design_default")
+            .unwrap();
+        let stop = Arc::new(AtomicUsize::new(0));
+        s.stop = Some(Arc::clone(&stop));
+        s.pending = Some(Work {
+            seq: 1,
+            view_id: ready.view_id,
+            rev: ready.rev,
+            name: ready.name,
+            draft: ready.draft,
+            check: false,
+            stop,
+        });
+    }
+    f.service.inner.wake.notify_one();
+    let end = Instant::now() + Duration::from_secs(3);
+    while f.service.operation(1).unwrap()["phase"] != "succeeded" {
+        assert!(Instant::now() < end);
+        thread::sleep(Duration::from_millis(2));
+    }
+    let done = f.service.operation(1).unwrap();
+    assert_eq!(done["recover"], true);
+    assert_eq!(done["recovered"], true);
+    assert_eq!(done["published"], false);
+    assert_eq!(fs::read(target).unwrap(), payload);
+    assert!(!stage.exists());
+}
+
+#[test]
+fn uncertain_publication_cannot_be_cleared_by_cancel_or_new_draft() {
+    let f = Fixture::new();
+    {
+        let mut s = f.service.inner.state.lock().unwrap();
+        s.ledger
+            .admit(1, "ambiguous syscall".into(), "design_default")
+            .unwrap();
+        s.ledger.update(
+            1,
+            json!({"seq":"1","phase":"uncertain","published":null,"error":"publication_unknown"}),
+            false,
+        );
+    }
+    assert_eq!(f.service.begin().unwrap_err(), "busy");
+    assert_eq!(f.service.cancel(1).unwrap()["phase"], "uncertain");
+    assert_eq!(f.service.reconcile(1).unwrap_err(), "publication_unknown");
+    assert_eq!(f.service.status()["operations"]["active"], "1");
 }

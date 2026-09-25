@@ -128,6 +128,7 @@
     "POST /api/v1/defaults/prepare": ["defaults/http.rs","prepare","owner"],
     "POST /api/v1/defaults/revoke": ["defaults/http.rs","revoke","owner"],
     "POST /api/v1/defaults/{seq}/cancel": ["defaults/http.rs","cancel","owner"],
+    "POST /api/v1/defaults/{seq}/reconcile": ["defaults/http.rs","reconcile","owner"],
     "POST /api/v1/drc/builds": ["drc/registry.rs","submit","owner"],
     "POST /api/v1/drc/builds/{seq}/cancel": ["drc/registry.rs","cancel","owner"],
     "POST /api/v1/drc/review/notes": ["drc/review/http.rs","submit","owner"],

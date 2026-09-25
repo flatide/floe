@@ -151,14 +151,15 @@
         </div>
         <div id="default-panel" hidden>
           <h2>Shared design default</h2>
-          <div class="button-row"><button id="default-prepare" type="button" disabled>Review publication…</button><button id="default-dismiss" type="button" disabled>Dismiss</button></div>
+          <div class="button-row"><button id="default-prepare" type="button" disabled>Review publication…</button><button id="default-recover" type="button" disabled>Review interrupted-file repair…</button><button id="default-dismiss" type="button" disabled>Dismiss</button></div>
           <div id="default-review" hidden>
             <p id="default-target"></p><p id="default-levels" class="note"></p>
-            <p class="note">This writes the shared Calibre layerprops file for future opens, including other users. It replaces the whole file, not a merge. Existing windows are unchanged.</p>
-            <label class="check"><input id="default-consent" type="checkbox">I approve writing this shared default.</label>
+            <p id="default-impact" class="note">This writes the shared Calibre layerprops file for future opens, including other users. It replaces the whole file, not a merge. Existing windows are unchanged.</p>
+            <label class="check"><input id="default-consent" type="checkbox"><span id="default-consent-label">I approve writing this shared default.</span></label>
             <button id="default-approve" type="button" class="primary" disabled>Publish shared default</button>
           </div>
           <p id="default-status" role="status" class="note"></p>
+          <button id="default-check-repair" type="button" hidden>Check repair result (read only)</button>
           <div class="button-row"><button id="default-cancel" type="button" hidden>Request cancel</button><button id="default-refresh" type="button">Refresh receipt</button></div>
           <div id="default-uncertain" hidden>
             <p class="note">Outcome unknown. Resolve sends only the original approved request. Do not start a new publication to retry it.</p>

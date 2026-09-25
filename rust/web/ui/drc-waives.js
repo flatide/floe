@@ -14,6 +14,7 @@
         drc_busy:'Another DRC operation is active. No write is retried automatically.',
         review_busy:'Review resources are busy or at capacity. Close another review editor or retry after the active read finishes. No save was attempted.',
         review_io_error:'The waive file could not be accessed. Check permissions and local diagnostics.',
+        publication_unknown:'The filesystem may have completed this write. Further edits are blocked in this server session. Inspect the file, then use a new session for any separately approved recovery; do not retry the save.',
         review_unavailable:'Check the save receipt before deciding whether to try again.',
         drc_apply_unknown:'Reader acknowledgement was lost or timed out. Reopen the review to verify the saved file.',
         invalid_drc_request:'Invalid waive selection or action. Registered inputs and private files are protected.',

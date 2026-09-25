@@ -25,6 +25,7 @@ pub(crate) fn routes() -> Router<Gate> {
         .route("/api/v1/defaults/revoke", post(revoke))
         .route("/api/v1/defaults/{seq}", get(operation))
         .route("/api/v1/defaults/{seq}/cancel", post(cancel))
+        .route("/api/v1/defaults/{seq}/reconcile", post(reconcile))
 }
 fn fail(code: &str) -> Response {
     let status = match code {
@@ -95,7 +96,15 @@ async fn prepare(
     };
     let output = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        publisher.prepare(source, mode, &state.layerprops(&model)?, &stop)
+        if req.recover {
+            publisher
+                .prepare_recovery(source, mode, &stop)
+                .map(|p| super::Prepared::Recover(Arc::new(p)))
+        } else {
+            publisher
+                .prepare(source, mode, &state.layerprops(&model)?, &stop)
+                .map(super::Prepared::from)
+        }
     })
     .await;
     if !g.alive(&owner) || *g.stopping.borrow() {
@@ -183,6 +192,22 @@ async fn cancel(State(g): State<Gate>, headers: HeaderMap, Path(seq): Path<Strin
         Err(e) => return fail(e),
     };
     match s.cancel(seq) {
+        Ok(v) => (StatusCode::ACCEPTED, Json(v)).into_response(),
+        Err(e) => fail(e),
+    }
+}
+async fn reconcile(State(g): State<Gate>, headers: HeaderMap, Path(seq): Path<String>) -> Response {
+    if let Err(e) = transport::http_session(&g, &headers) {
+        return transport::error(e);
+    }
+    let Some(s) = &g.defaults else {
+        return transport::error(StatusCode::FORBIDDEN);
+    };
+    let seq = match view::counter(&seq) {
+        Ok(n) => n,
+        Err(e) => return fail(e),
+    };
+    match s.reconcile(seq) {
         Ok(v) => (StatusCode::ACCEPTED, Json(v)).into_response(),
         Err(e) => fail(e),
     }

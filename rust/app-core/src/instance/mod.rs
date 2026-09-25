@@ -523,7 +523,7 @@ impl Ledger {
                     code: match e.kind {
                         ErrorKind::InvalidInput => Failure::InvalidInput,
                         ErrorKind::Unsupported => Failure::Unsupported,
-                        ErrorKind::Io => Failure::Io,
+                        ErrorKind::Io | ErrorKind::PublicationUnknown => Failure::Io,
                         ErrorKind::Cache => Failure::Cache,
                         ErrorKind::Busy | ErrorKind::Admission => Failure::Busy,
                         ErrorKind::Version => Failure::Version,

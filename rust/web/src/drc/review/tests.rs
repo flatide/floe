@@ -18,6 +18,30 @@ fn configured_service(editable: bool) -> Arc<Service> {
     .unwrap()
 }
 #[test]
+fn unknown_publication_blocks_new_writes_without_losing_receipts() {
+    let s = service();
+    let actor = owner();
+    let req = request();
+    let receipt = json!({"seq":"1","phase":"failed","published":null,"outcome_unknown":true});
+    {
+        let mut state = s.inner.state.lock().unwrap();
+        state
+            .ledger
+            .admit(1, Service::signature(&actor, &req), "drc_note")
+            .unwrap();
+        state.ledger.update(1, receipt.clone(), true);
+        state.publication_unknown = true;
+    }
+    assert_eq!(s.require_editor().unwrap_err(), "publication_unknown");
+    assert_eq!(s.replay(&actor, &req).unwrap(), Some(receipt));
+    assert_eq!(s.submit(&actor, req).unwrap_err(), "publication_unknown");
+    s.admit_detach(|| Ok(())).unwrap();
+    s.admit_reconnect(Binding::new(None, None).unwrap(), || Ok(()))
+        .unwrap();
+    assert_eq!(s.require_editor().unwrap_err(), "publication_unknown");
+    stop(&s);
+}
+#[test]
 fn reconnect_is_atomic_and_keeps_both_ledgers_without_regranting_authority() {
     for editable in [false, true] {
         let s = configured_service(editable);

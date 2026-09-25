@@ -2,7 +2,8 @@
 
 2026-09-25 갱신. [프로세스 종료 분석](WEBUI_REVIEW_PROCESS_CRASH.ko.md)의 후속이다.
 `075a1b3`의 **Rust DRC note/waive 표식·복구 코어**에 owner actor/HTTP/공통 웹 UI를
-연결했다. Electron도 같은 UI를 사용한다. shared defaults·일반 게시의 결과 불명·실제
+연결했다. Electron도 같은 UI를 사용한다. 후속으로 [shared defaults와 일반 게시
+결과 불명](WEBUI_DEFAULT_RECOVERY.ko.md)의 구현·자동 검증을 추가했다. 실제
 NFS 수용은 별도이므로 DRC-PUB-01 전체 완료로 세지 않는다. WKWebView는 동결한다.
 
 ## 1. 복구 대상과 저장 변경
@@ -293,10 +294,11 @@ unit:   58c69c1c4137ccfc7e5b2400df42cee78455761bad968c293600afa27c8edcf9
    UI 명시 복구/Chromium 종료/재열기는 §5에서 통과했으며, 자동 재열기는 하지 않는다.
 2. NFS 결과 불명과 승인 proof의 장기 유지/서비스 재시작을 함께 검증한다. reader
    startup의 explicit-waive/guarded 경로 차이는 별도 감사 대상으로 유지한다.
-3. shared layer defaults에도 같은 link gap이 있다. 이번 DRC 표식은 **적용되지 않으며**
-   해결됐다고 주장하지 않는다. 별도 source-bound 표식/권한 정책과 회귀가 필요하다.
-4. 기존 일반 게시의 NFS link/rename 오류 및 결과 불명 receipt 경로 전체는 별도다.
-   이번 `Uncertain` 처리의 범위는 명시적 복구 unlink다.
+3. shared layer defaults의 별도 source-bound 표식·복구 승인·읽기 전용 확인은
+   [후속 구현](WEBUI_DEFAULT_RECOVERY.ko.md)을 완료했다. 실제 GUI/서비스 종료 수용은 남는다.
+4. 일반 게시 link/rename 오류의 사후 확인·증거 보존·결과 불명 receipt/새 쓰기
+   차단도 후속 구현했다. 불명 일반 게시 후 같은 세션에서 임의로 latch를 해제하지
+   않으며, 파일 확인/새 세션/필요시 별도 복구 절차다. 실제 NFS 장애 수용은 남는다.
 5. 실제 RHEL8.6/8.10·NFS lock/xattr/ACL·다중 client·장애/durability를 검증한다.
    로컬 SIGKILL은 원격 서버 장애나 전원 손실 수용을 대신하지 않는다.
 

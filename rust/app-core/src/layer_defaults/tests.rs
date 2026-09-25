@@ -5,6 +5,53 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 const TEXT: &str = "3.0 red solid Mask 1 3\n";
 
 #[test]
+fn ambiguous_commit_keeps_evidence_and_never_reports_rollback() {
+    for replace in [false, true] {
+        for committed in [false, true] {
+            let f = Fixture::new();
+            if replace {
+                fs::write(f.target(), b"old file").unwrap();
+            }
+            let directory = Directory::open(&f.dir).unwrap();
+            let mut stage = Stage::create(Arc::clone(&directory), &f.publisher).unwrap();
+            stage.file.write_all(b"new file").unwrap();
+            let path = directory
+                .path
+                .join(std::ffi::OsStr::from_bytes(stage.name.as_bytes()));
+            let result = stage.commit_using(
+                c"design.jb.layerprops",
+                replace,
+                || {},
+                |_| {
+                    if committed {
+                        if replace {
+                            fs::rename(&path, f.target()).unwrap();
+                        } else {
+                            fs::hard_link(&path, f.target()).unwrap();
+                        }
+                    }
+                    Err(std::io::Error::from_raw_os_error(libc::EIO))
+                },
+            );
+            if replace && committed {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(kind(result), ErrorKind::PublicationUnknown);
+            }
+            drop(stage);
+            assert_eq!(path.exists(), !(replace && committed));
+            if committed {
+                assert_eq!(fs::read(f.target()).unwrap(), b"new file");
+            } else if replace {
+                assert_eq!(fs::read(f.target()).unwrap(), b"old file");
+            } else {
+                assert!(!f.target().exists());
+            }
+        }
+    }
+}
+
+#[test]
 fn dynamic_drc_inputs_and_review_targets_recheck_already_prepared_defaults() {
     for review_target in [false, true] {
         for lock_target in [false, true] {
@@ -73,14 +120,14 @@ fn dynamic_sources_protect_old_drafts_and_publication_excludes_registration() {
     drop(f.publisher.sources.begin(&f.stop).unwrap());
     f.no_stage();
 }
-struct Fixture {
-    dir: PathBuf,
-    source: Arc<RegisteredSource>,
-    publisher: Arc<Publisher>,
-    stop: AtomicUsize,
+pub(super) struct Fixture {
+    pub(super) dir: PathBuf,
+    pub(super) source: Arc<RegisteredSource>,
+    pub(super) publisher: Arc<Publisher>,
+    pub(super) stop: AtomicUsize,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::named("design.jb")
     }
     fn named(name: &str) -> Self {
@@ -100,12 +147,12 @@ impl Fixture {
             stop,
         }
     }
-    fn draft(&self) -> Draft {
+    pub(super) fn draft(&self) -> Draft {
         self.publisher
             .prepare(Arc::clone(&self.source), Mode::Level, TEXT, &self.stop)
             .unwrap()
     }
-    fn target(&self) -> PathBuf {
+    pub(super) fn target(&self) -> PathBuf {
         let mut p = self.source.path().as_os_str().to_owned();
         p.push(".layerprops");
         p.into()
@@ -208,7 +255,12 @@ fn create_and_replace_preserve_old_open_inode_and_shared_permissions() {
     assert!(d.replaces_existing());
     d.publish(&f.stop).unwrap();
     let new = File::open(f.target()).unwrap();
-    assert!(Security::read(&new).unwrap() == before);
+    assert!(
+        Security::read(&new)
+            .unwrap()
+            .without_attribute(recovery::MARKER)
+            == before.without_attribute(recovery::MARKER)
+    );
     assert_ne!(
         identity(&old.metadata().unwrap()),
         identity(&new.metadata().unwrap())
@@ -243,7 +295,12 @@ fn preserve_extended_attributes_and_detect_attribute_changes() {
     let before = Security::read(&file).unwrap();
     f.draft().publish(&f.stop).unwrap();
     let current = File::open(f.target()).unwrap();
-    assert!(Security::read(&current).unwrap() == before);
+    assert!(
+        Security::read(&current)
+            .unwrap()
+            .without_attribute(recovery::MARKER)
+            == before.without_attribute(recovery::MARKER)
+    );
     let draft = f.draft();
     security::set(&current, name, b"changed").unwrap();
     assert_eq!(kind(draft.publish(&f.stop)), ErrorKind::Busy);
@@ -493,7 +550,12 @@ fn replacement_preserves_named_acl_and_new_file_inherits_directory_policy() {
     }
     let before = Security::read(&File::open(f.target()).unwrap()).unwrap();
     f.draft().publish(&f.stop).unwrap();
-    assert!(Security::read(&File::open(f.target()).unwrap()).unwrap() == before);
+    assert!(
+        Security::read(&File::open(f.target()).unwrap())
+            .unwrap()
+            .without_attribute(recovery::MARKER)
+            == before.without_attribute(recovery::MARKER)
+    );
     fs::remove_file(f.target()).unwrap();
     #[cfg(target_os = "macos")]
     assert!(std::process::Command::new("/bin/chmod")
@@ -508,7 +570,12 @@ fn replacement_preserves_named_acl_and_new_file_inherits_directory_policy() {
     let control = File::create(f.dir.join("normal-create")).unwrap();
     let expected = Security::read(&control).unwrap();
     f.draft().publish(&f.stop).unwrap();
-    assert!(Security::read(&File::open(f.target()).unwrap()).unwrap() == expected);
+    assert!(
+        Security::read(&File::open(f.target()).unwrap())
+            .unwrap()
+            .without_attribute(recovery::MARKER)
+            == expected.without_attribute(recovery::MARKER)
+    );
     f.no_stage();
 }
 

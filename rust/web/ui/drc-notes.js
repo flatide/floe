@@ -15,6 +15,7 @@
         drc_busy:'Another DRC operation is active. Nothing is retried automatically.',
         review_busy:'Review resources are busy or at capacity. Close another review editor or retry after the active read finishes. No save was attempted.',
         review_io_error:'The note file could not be accessed. Check permissions and local diagnostics.',
+        publication_unknown:'The filesystem may have completed this write. Further edits are blocked in this server session. Inspect the file, then use a new session for any separately approved recovery; do not retry the save.',
         review_unavailable:'The note operation failed. Check its receipt before trying again.',
         invalid_drc_request:'Invalid note text or target. Registered inputs and private files are protected.',
         drc_read_limit:'The selection or note exceeds the supported limit.',
