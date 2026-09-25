@@ -28,7 +28,11 @@ layer/datatype - the probe's `last10`) and view (fit x zoom, thin keep, cut
 wall (submit to result) and renderd's own split - plan, page read, decode,
 scene, raster - and pages read, work-bin items, hierarchy cells visited,
 repetition members tested / drawn, member paints, items the write-once mask
-skipped, the lit share and the plan's cut counters. The raster time is the
+skipped, the lit share and the plan's cut counters - and, under the
+diagnostic placement lattice (FLOE_RUST_PLACE_LATTICE=on, CUT_DENSITY_DESIGN
+§10.8), the placement arrays' survivor walks by outcome (`place walks`:
+walks / visible members per outcome, 1 / 2 = 1-D / 2-D arrays; `== type this
+2 ==` keeps the three with the most members). The raster time is the
 whole raster stage: the work bin, the record and member walk, the transforms,
 the survival test and the pixel writes together, so a raster difference says
 the stage costs more, not which of them does.
@@ -153,7 +157,7 @@ def main(argv=None):
                            bin_items=res.get('work_bin_items'), tested=res.get('rep_members_tested'),
                            drawn=res.get('rep_members_drawn'), paints=res.get('member_paints'),
                            skipped=res.get('once_items_skipped'), cells=res.get('hier_cells_visited'),
-                           lit=lit, culls=res.get('plan_culls', {}))
+                           walks=res.get('place_walks') or {}, lit=lit, culls=res.get('plan_culls', {}))
                 rows.append(row)
                 c, cs = row['culls'], row['cold']
                 print('%-7s %-7s x%-4g cold %8.0f ms (plan %6.0f read %6.0f decode %6.0f scene %5.0f raster %7.0f; miss %s) | '
@@ -166,6 +170,11 @@ def main(argv=None):
                          c.get('shape_cut'), c.get('pages_size'), c.get('child_bvh'), c.get('children_size'), c.get('fit_pct')), flush=True)
                 if args.culls:
                     print('   culls: ' + ' '.join('%s=%s' % kv for kv in sorted(c.items()) if kv[1]), flush=True)
+                if row['walks']:
+                    # FLOE_RUST_PLACE_LATTICE=on: the placement arrays' survivor
+                    # walks by outcome (walks / visible members; 1 / 2 = 1-D / 2-D)
+                    print('   place walks: ' + ' '.join('%s %d/%d' % (k, v[0], v[1]) for k, v in
+                                                        sorted(row['walks'].items(), key=lambda kv: -kv[1][1])), flush=True)
     os.environ.pop('FLOE_RUST_SHAPE_CUT', None)
 
     def k(v):
@@ -178,6 +187,12 @@ def main(argv=None):
             '%.0f' % r['warm_raster'] if r['warm_raster'] is not None else '-',
             '%.0f-%.0f' % r['warm_raster_range'] if r['warm_raster_range'] else '-',
             r['pages'], k(r['bin_items']), k(r['tested']), k(r['drawn']), r['lit'], r['culls'].get('fit_pct')))
+    walked = [r for r in rows if r['walks']]
+    if walked:
+        print('== type this 2 == (placement walks, the 3 outcomes with the most members: outcome walks/members)')
+        for r in walked:
+            top = sorted(r['walks'].items(), key=lambda kv: -kv[1][1])[:3]
+            print('%s %s %g | %s' % (r['mode'][0], r['layers'], r['zoom'], ' '.join('%s %s/%s' % (n, k(v[0]), k(v[1])) for n, v in top)))
 
 
 if __name__ == '__main__':

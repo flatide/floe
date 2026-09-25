@@ -1281,3 +1281,47 @@ k_B를 고정하면 생존 조건은 vdc(k_A)가 한 구간에 드는 것이다.
    - 거절된 2차원 배열의 조건(도형 축 불일치·커서 상한)을 조사한다.
    - 도형 수 상한 8을 조정할지 본다.
    - 기본값을 정한다.
+
+**거절 사유별 계측(0.12.211, 검토 2026-09-25의 다음 순서).** 프레임이 배치 배열의 생존 걷기를 결과별로 센다
+(`RenderStats::place_walks`, renderd `place_walks=` 필드, 워커 결과 `place_walks`).
+
+- 결과는 walked, not_leaf, no_range, page_level, undecoded, non_rim, array_record, path, shapes,
+  prep_work, not_subpixel, no_shapes, no_axis, axis_mismatch, cost, cursor_cap이다. 1차원 배열은 이름 뒤에
+  `1`, 2차원은 `2`를 붙이고 `걷기 수/보이는 멤버`로 적는다.
+- 작업 bin의 수집은 프레임당 한 번, 타일 walk와 mini walk는 타일마다 센다.
+- `bench_hairline_cut.py`가 프레임마다 `place walks:` 줄과 `== type this 2 ==`(멤버가 가장 많은 결과 셋)를
+  찍는다.
+- 단위 테스트: `the_placement_walk_preparation_is_bounded`가 walked·prep_work·shapes를,
+  `placement_walk_outcomes_are_counted`가 cost·walked·axis_mismatch·not_subpixel과 1·2차원 구분을 확인한다.
+- 게이트는 `place_walks`가 renderd와 워커를 지나 `walked2`로 오는지 확인한다.
+
+합성 칩(max, 모드 켬, 전 레이어 ×16; 계층 방문 127,433):
+
+| 결과 | 걷기 수 / 보이는 멤버 |
+|---|---:|
+| walked2 | 829 / 475,067 |
+| **axis_mismatch2** | **206 / 69,283** |
+| axis_mismatch1 | 414 / 3,754 |
+| walked1 | 244 / 2,093 |
+| cost2 | 57 / 927 |
+| cost1 | 14 / 36 |
+
+처음 10레이어 ×16은 walked2 97 / 31,778, axis_mismatch1 27 / 247, walked1 26 / 210이다. fit·×4와 마지막 10레이어에는
+배치 걷기가 없다(배치 배열 아래의 셀이 1 px 이상이거나 계획에 없음).
+
+읽은 것:
+
+1. 거절된 2차원 배열은 거의 모두 **axis_mismatch**다. 한 격자 축에서 셀의 모든 도형이 1 px 미만이어야 하는데,
+   그런 축이 없다. 도형 수·준비 작업량·커서 상한으로 거절된 것은 없다. 멤버가 적어 목록이 이득이 아닌 cost는
+   927 멤버뿐이다.
+2. 구성은 임시 계측으로 봤다(커밋 안 함). 합성 칩의 이 셀들은 모두 사각형이고, 원인은 두 가지다.
+   - **(a) 한 셀에 방향이 섞였다.** 세로 선(x로 1 px 미만)과 가로 선(y로 1 px 미만)이 함께 있다. 예를 들어
+     2차원 배열 180회는 x 1개 + y 2개다.
+   - **(b) 1차원 배열의 반복 방향이 선의 가는 방향과 다르다.** x로 반복되는 가로 선 등이다(115 + 59 + 30회).
+
+   두 경우 모두 걷는 번호 방향의 순위 항이 vdc가 아니라 황금비 Weyl 항(weyl(k) = frac(k·φ))이어서, 지금의
+   등차수열 열거로는 나열되지 않는다.
+3. **다음 제안(결정 필요, 미구현): Weyl 항 열거.** frac(c + k·α) ∈ [0, p)인 k는 세 가지 간격(three-gap 정리 —
+   α의 연분수 분모로 정해진다)으로만 이어진다. 그래서 첫 적중 뒤로는 적중마다 O(1)로 다음 적중을 구할 수
+   있다. α는 64비트 정수 곱이라 유리수이고, 간격은 정수 연산으로 정확히 구해진다. 이 커서를 지금의 vdc
+   커서와 같은 heap에 넣으면 (a)·(b)가 모두 걸린다. 순위 규칙은 바뀌지 않는다(열거만 늘어난다).

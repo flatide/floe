@@ -97,6 +97,23 @@ def _parse_wire_line(line):
     return tokens[0], fields
 
 
+def _add_place_walks(total, value):
+    """Adds a `place_walks=` wire value (`<outcome><1|2>:<walks>/<members>`,
+    comma-separated, `-` for none; CUT_DENSITY_DESIGN §10.8) to `total`,
+    {outcome1d: [walks, members]}."""
+    if not value or value == "-":
+        return
+    for part in value.split(","):
+        try:
+            name, counts = part.split(":", 1)
+            walks, members = (int(v) for v in counts.split("/", 1))
+        except ValueError:
+            continue
+        entry = total.setdefault(name, [0, 0])
+        entry[0] += walks
+        entry[1] += members
+
+
 def _wire_int(fields, name, default=0):
     try:
         return int(fields.get(name, default))
@@ -573,6 +590,8 @@ class RustRenderWorker:
             "hier_cells": 0, "subtree_prunes": 0,
             # F2R-28 write-once tiles (sum over rounds)
             "once_tiles": 0, "once_passes": 0, "once_items": 0,
+            # placement survivor walks by outcome (sum over rounds)
+            "place_walks": {},
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -1058,6 +1077,7 @@ class RustRenderWorker:
         state["subtree_prunes"] += _wire_int(fields, "subtree_prunes")
         for key in ("once_tiles", "once_passes", "once_items"):
             state[key] += _wire_int(fields, key)
+        _add_place_walks(state["place_walks"], fields.get("place_walks", "-"))
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1272,6 +1292,7 @@ class RustRenderWorker:
             "once_full_tiles": state["once_tiles"],
             "once_passes_skipped": state["once_passes"],
             "once_items_skipped": state["once_items"],
+            "place_walks": dict(state["place_walks"]),
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on

@@ -10,7 +10,7 @@ use crate::page_index::RecordSet;
 use crate::repetition::{for_each_visible_offset, for_each_visible_offset_chunked, visible_grid_range, RepVisit};
 use floe_oasis::doc::Rep;
 use crate::transform::OrthoTransform;
-use crate::{FrameScene, RenderCancellation, RenderStats, ViewBox};
+use crate::{FrameScene, RenderCancellation, RenderStats, ViewBox, PLACE_WALK_OUTCOMES};
 
 const MAX_IMAGE_PIXELS: u64 = 268_435_456;
 const MAX_WORKERS: u16 = 256;
@@ -1677,6 +1677,7 @@ fn build_deferred_minis(
                 local_view,
                 &|layer| bin.plane_of.get(&layer).map(|&plane| ranking.rim[plane]),
                 guard,
+            stats,
             )?,
             None => None,
         };
@@ -2011,6 +2012,7 @@ fn collect_cell(
                     local_view,
                     &|layer| plane_of.get(&layer).map(|&plane| ranking.rim[plane]),
                     guard,
+                stats,
                 )?,
                 None => None,
             };
@@ -2287,6 +2289,7 @@ fn replay_plane_items(
                         local_view,
                         &|index| (index == layer.layer_idx).then(|| area_true_rim(request, paint)),
                         guard,
+                    stats,
                     )?,
                     None => None,
                 };
@@ -3816,6 +3819,10 @@ fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
     total.once_items_skipped = total.once_items_skipped.saturating_add(worker.once_items_skipped);
     total.raster_tile_max_us = total.raster_tile_max_us.max(worker.raster_tile_max_us);
     total.tiles_reused = total.tiles_reused.saturating_add(worker.tiles_reused);
+    for (sum, walks) in total.place_walks.iter_mut().zip(worker.place_walks.iter()) {
+        sum.0 = sum.0.saturating_add(walks.0);
+        sum.1 = sum.1.saturating_add(walks.1);
+    }
 }
 
 /// Queries one decoded page's record index against a tile-local view
@@ -4290,6 +4297,7 @@ fn render_cell(
                 local_view,
                 &|layer| selection.includes(layer).then(|| area_true_rim(request, paint)),
                 guard,
+            stats,
             )?,
             None => None,
         };
@@ -5256,22 +5264,50 @@ fn placement_survivor_walk(
     local_view: BBox,
     layer_rim: &dyn Fn(u32) -> Option<bool>,
     guard: Option<RenderGuard<'_>>,
+    stats: &mut RenderStats,
 ) -> Result<Option<SurvivorWalk>, String> {
-    let (px, py) = pitches;
     if !request.survivor_list {
         return Ok(None);
     }
+    let range = visible_grid_range(&instance.rep, base_bbox, local_view);
+    let planned = plan_placement_walk(scene, request, instance, parent_world, pitches, range, layer_rim, guard)?;
+    let members = range.map_or(0, |(i0, i1, j0, j1)| ((i1 - i0 + 1) as u64).saturating_mul((j1 - j0 + 1) as u64));
+    let two = matches!(instance.rep, Rep::Grid { na, nb, .. } if na > 1 && nb > 1);
+    let (outcome, walk) = match planned {
+        Ok(walk) => (PlaceWalkOutcome::Walked, Some(walk)),
+        Err(outcome) => (outcome, None),
+    };
+    let slot = &mut stats.place_walks[outcome as usize + if two { PLACE_WALK_OUTCOMES.len() } else { 0 }];
+    slot.0 = slot.0.saturating_add(1);
+    slot.1 = slot.1.saturating_add(members);
+    Ok(walk)
+}
+
+/// The plan of `placement_survivor_walk`, or why every member is visited.
+#[allow(clippy::too_many_arguments)]
+fn plan_placement_walk(
+    scene: &FrameScene,
+    request: &GeometryRasterRequest,
+    instance: &floe_vfs::hier::WsInst,
+    parent_world: &OrthoTransform,
+    pitches: (i64, i64),
+    range: Option<(i64, i64, i64, i64)>,
+    layer_rim: &dyn Fn(u32) -> Option<bool>,
+    guard: Option<RenderGuard<'_>>,
+) -> Result<Result<SurvivorWalk, PlaceWalkOutcome>, String> {
+    use PlaceWalkOutcome as Why;
+    let (px, py) = pitches;
     let Rep::Grid { va, vb, .. } = &instance.rep else {
-        return Ok(None);
+        return Ok(Err(Why::NoAxis));
     };
     let Some(child) = scene.cell(instance.child) else {
-        return Ok(None);
+        return Ok(Err(Why::NotLeaf));
     };
     if !child.insts.is_empty() || !child.frames.is_empty() || !child.washes.is_empty() || !child.reps.is_empty() {
-        return Ok(None);
+        return Ok(Err(Why::NotLeaf));
     }
-    let Some(range) = visible_grid_range(&instance.rep, base_bbox, local_view) else {
-        return Ok(None);
+    let Some(range) = range else {
+        return Ok(Err(Why::NoRange));
     };
     let shape_cut = scene.plan().stats.shape_cut.min(i64::MAX as u64) as i64;
     let shape_cut_max = scene.plan().stats.shape_cut_max;
@@ -5287,32 +5323,38 @@ fn placement_survivor_walk(
     for (slot, &page_id) in child.pages.iter().enumerate() {
         check_cancelled(guard)?;
         if child.page_levels.get(slot).copied().unwrap_or(0) != 0 {
-            return Ok(None);
+            return Ok(Err(Why::PageLevel));
         }
         let Some(page) = scene.page(page_id) else {
-            return Ok(None);
+            return Ok(Err(Why::Undecoded));
         };
         let Some(rim) = layer_rim(page.layer_idx) else {
             continue;
         };
         let Some(geometry) = page.doc.cells.get(page.doc.top) else {
-            return Ok(None);
+            return Ok(Err(Why::Undecoded));
         };
         if !geometry.paths.is_empty() {
-            return Ok(None);
+            return Ok(Err(Why::Path));
         }
         for rect in &geometry.rects {
             check_member_cancelled(guard, &mut heartbeat)?;
             work += 1;
             if work > PLACEMENT_PREP_WORK {
-                return Ok(None);
+                return Ok(Err(Why::PrepWork));
             }
             let base = BBox { x0: rect.x, y0: rect.y, x1: rect.x.saturating_add(rect.w), y1: rect.y.saturating_add(rect.h) };
             if rect.w <= 0 || rect.h <= 0 || cut_side_of(base, shape_cut_max) < shape_cut {
                 continue;
             }
-            if !rim || !matches!(rect.rep, Rep::One) || rects.len() + areas.len() == SMALL_CELL_SHAPES {
-                return Ok(None);
+            if !rim {
+                return Ok(Err(Why::NonRim));
+            }
+            if !matches!(rect.rep, Rep::One) {
+                return Ok(Err(Why::ArrayRecord));
+            }
+            if rects.len() + areas.len() == SMALL_CELL_SHAPES {
+                return Ok(Err(Why::Shapes));
             }
             let world = member0.apply_bbox(base)?;
             let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
@@ -5330,25 +5372,31 @@ fn placement_survivor_walk(
             check_member_cancelled(guard, &mut heartbeat)?;
             work += 1 + polygon.pts.len() as u64;
             if work > PLACEMENT_PREP_WORK {
-                return Ok(None);
+                return Ok(Err(Why::PrepWork));
             }
             let Some(base) = polygon_bbox(&polygon.pts) else {
-                return Ok(None);
+                return Ok(Err(Why::NotSubPixel));
             };
             if cut_side_of(base, shape_cut_max) < shape_cut {
                 continue;
             }
-            if !rim || !matches!(polygon.rep, Rep::One) || rects.len() + areas.len() == SMALL_CELL_SHAPES {
-                return Ok(None);
+            if !rim {
+                return Ok(Err(Why::NonRim));
+            }
+            if !matches!(polygon.rep, Rep::One) {
+                return Ok(Err(Why::ArrayRecord));
+            }
+            if rects.len() + areas.len() == SMALL_CELL_SHAPES {
+                return Ok(Err(Why::Shapes));
             }
             let Some(term) = area_term(request, px, py, member0.apply_bbox(base)?, polygon_area(&polygon.pts))? else {
-                return Ok(None);
+                return Ok(Err(Why::NotSubPixel));
             };
             areas.push(term);
         }
     }
     if rects.is_empty() && areas.is_empty() {
-        return Ok(None);
+        return Ok(Err(Why::NoShapes));
     }
     let (wa, wb) = world_vectors(*va, *vb, parent_world)?;
     Ok(SurvivorWalk::plan(&instance.rep, wa, wb, [px, py], range, [true, true], PLACEMENT_MEMBER_COST, |axis| {
@@ -5523,6 +5571,30 @@ const PLACEMENT_MEMBER_COST: f64 = 16.0;
 /// inner index holds one line's cursors, about 2 per bit of the resolution.
 const SURVIVOR_CURSOR_CAP: usize = 1 << 16;
 
+/// The outcome of a placement array's survivor walk (RenderStats::
+/// place_walks, PLACE_WALK_OUTCOMES in this order): walked, or why every
+/// member is visited. Of the plan's own reasons the furthest either axis got
+/// is kept: NoAxis < AxisMismatch < Cost < CursorCap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PlaceWalkOutcome {
+    Walked,
+    NotLeaf,
+    NoRange,
+    PageLevel,
+    Undecoded,
+    NonRim,
+    ArrayRecord,
+    Path,
+    Shapes,
+    PrepWork,
+    NotSubPixel,
+    NoShapes,
+    NoAxis,
+    AxisMismatch,
+    Cost,
+    CursorCap,
+}
+
 /// One shape's rank along the listed axis A of a lattice array: a member
 /// (i, j) at world indices k_A = first[A] + sign * (its index along A) and
 /// k_B across ranks frac(u + vdc(k_A) + weyl(k_B)), and may be drawn only
@@ -5597,14 +5669,16 @@ impl SurvivorWalk {
         sub: [bool; 2],
         member_cost: f64,
         terms: impl Fn(usize) -> Vec<LatticeTerm>,
-    ) -> Option<SurvivorWalk> {
+    ) -> Result<SurvivorWalk, PlaceWalkOutcome> {
         let Rep::Grid { na, nb, va, vb } = rep else {
-            return None;
+            return Err(PlaceWalkOutcome::NoAxis);
         };
         let (i0, i1, j0, j1) = range;
         if i1 < i0 || j1 < j0 {
-            return None;
+            return Err(PlaceWalkOutcome::NoRange);
         }
+        // why no axis qualified: the furthest either got
+        let mut why = PlaceWalkOutcome::NoAxis;
         // the repetition index (0 = i, 1 = j) that drives a world axis (0 = x,
         // 1 = y) and its sign: its vector runs along that axis
         let driver = |axis: usize| -> Option<(usize, i64)> {
@@ -5626,6 +5700,7 @@ impl SurvivorWalk {
             }
             let terms = terms(axis);
             if terms.is_empty() {
+                why = why.max(PlaceWalkOutcome::AxisMismatch);
                 continue;
             }
             let (along, lines) = if index == 0 { (i1 - i0 + 1, j1 - j0 + 1) } else { (j1 - j0 + 1, i1 - i0 + 1) };
@@ -5633,6 +5708,7 @@ impl SurvivorWalk {
             let most = 2 * bits as usize + 4;
             // an outer-index walk holds every line's cursors
             if index == 0 && (lines as usize).saturating_mul(most).saturating_mul(terms.len()) > SURVIVOR_CURSOR_CAP {
+                why = why.max(PlaceWalkOutcome::CursorCap);
                 continue;
             }
             // a term's interval, p 2^bits blocks of the resolution (plus the
@@ -5646,6 +5722,7 @@ impl SurvivorWalk {
             // the member walk: every member's visit, `member_cost` blocks each
             let cost = lines as f64 * blocks + chance * count * member_cost;
             if cost > SURVIVOR_LIST_SHARE * count * member_cost {
+                why = why.max(PlaceWalkOutcome::Cost);
                 continue;
             }
             // the inner index first: its walk prepares one line at a time, so
@@ -5656,11 +5733,13 @@ impl SurvivorWalk {
                 best = Some((axis, rank, terms));
             }
         }
-        let (axis, _, terms) = best?;
-        let (index, sign) = driver(axis)?;
+        let Some((axis, _, terms)) = best else {
+            return Err(why);
+        };
+        let (index, sign) = driver(axis).ok_or(PlaceWalkOutcome::NoAxis)?;
         let across = driver(1 - axis).filter(|&(other, _)| other != index && pitch[1 - axis] > 0).map(|(_, s)| s);
         let along = if index == 0 { i1 - i0 + 1 } else { j1 - j0 + 1 };
-        Some(SurvivorWalk { va: *va, vb: *vb, axis, index, sign, across, range, bits: resolution(along), terms })
+        Ok(SurvivorWalk { va: *va, vb: *vb, axis, index, sign, across, range, bits: resolution(along), terms })
     }
 
     /// The cursors (next index along A, stride) of line `o` (the index across)
@@ -5855,7 +5934,8 @@ fn survivor_walk(
                 .into_iter()
                 .collect()
         },
-    ))
+    )
+    .ok())
 }
 
 /// The world lattice a sub-pixel polygon or path keeps by under the placement
@@ -5937,7 +6017,8 @@ fn area_survivor_walk(
     let (wa, wb) = world_vectors(*va, *vb, world_transform)?;
     Ok(SurvivorWalk::plan(rep, wa, wb, [px, py], range, [axis == 0, axis == 1], RECORD_MEMBER_COST, |listed| {
         if listed == axis { vec![term] } else { Vec::new() }
-    }))
+    })
+    .ok())
 }
 
 /// One axis of a width-first rectangle: the side [v0, v1) (device units) is
@@ -9648,28 +9729,67 @@ mod tests {
         };
         let cut = HierStats { shape_cut: 75, shape_cut_max: true, ..HierStats::default() };
         let grid = Rep::Grid { na: 400, nb: 2, va: (4, 0), vb: (0, 700) };
+        // the visits with the list on and off, and the walk's outcome (the
+        // array is 2-D: RenderStats::place_walks' second half)
         let visits = |rects: Vec<RectRec>, polys: Vec<PolyRec>| {
             let scene = placed_scene_cut(vec![(1, rects, polys)], (-50, 10, 0, false, grid.clone()), world, cut.clone());
             let on = render_geometry_styled(&scene, &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, true)).unwrap();
             let off = render_geometry_styled(&scene, &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, false)).unwrap();
             assert_eq!(on.frame, off.frame);
             assert!(!lit_set(&on.frame, 64).is_empty());
-            (on.stats.hier_cells_visited, off.stats.hier_cells_visited)
+            assert_eq!(off.stats.place_walks, [(0, 0); 32], "the list off plans no walk");
+            let seen: Vec<PlaceWalkOutcome> = [
+                PlaceWalkOutcome::Walked, PlaceWalkOutcome::Shapes, PlaceWalkOutcome::PrepWork,
+            ]
+            .into_iter()
+            .filter(|&o| on.stats.place_walks[PLACE_WALK_OUTCOMES.len() + o as usize].0 > 0)
+            .collect();
+            (on.stats.hier_cells_visited, off.stats.hier_cells_visited, seen)
         };
-        let listed = |(on, off): (u64, u64)| on * 2 < off;
+        let walked = |(on, off, seen): (u64, u64, Vec<PlaceWalkOutcome>)| on * 2 < off && seen == [PlaceWalkOutcome::Walked];
+        let declined = |(on, off, seen): (u64, u64, Vec<PlaceWalkOutcome>), why: PlaceWalkOutcome| on == off && seen == [why];
         // the cut's specks are no terms but count as work: 501 records walk
-        assert!(listed(visits(std::iter::once(thin(0)).chain(specks(500)).collect(), Vec::new())));
+        assert!(walked(visits(std::iter::once(thin(0)).chain(specks(500)).collect(), Vec::new())));
         // 1,101 records are past the budget
-        let (on, off) = visits(std::iter::once(thin(0)).chain(specks(1100)).collect(), Vec::new());
-        assert_eq!(on, off, "1,101 records looked at");
+        assert!(declined(visits(std::iter::once(thin(0)).chain(specks(1100)).collect(), Vec::new()), PlaceWalkOutcome::PrepWork));
         // eight drawn shapes walk, a ninth gives up
-        assert!(listed(visits((0..8).map(|k| thin(4 * k)).collect(), Vec::new())));
-        let (on, off) = visits((0..9).map(|k| thin(4 * k)).collect(), Vec::new());
-        assert_eq!(on, off, "nine drawn shapes");
+        assert!(walked(visits((0..8).map(|k| thin(4 * k)).collect(), Vec::new())));
+        assert!(declined(visits((0..9).map(|k| thin(4 * k)).collect(), Vec::new()), PlaceWalkOutcome::Shapes));
         // a polygon's vertices count: 402 walk, 1,102 give up
-        assert!(listed(visits(Vec::new(), vec![comb(200)])));
-        let (on, off) = visits(Vec::new(), vec![comb(550)]);
-        assert_eq!(on, off, "a polygon of 1,102 vertices");
+        assert!(walked(visits(Vec::new(), vec![comb(200)])));
+        assert!(declined(visits(Vec::new(), vec![comb(550)]), PlaceWalkOutcome::PrepWork));
+    }
+
+    /// The walk's outcomes as RenderStats::place_walks counts them, one
+    /// placement array at a time: too small to pay (cost), a bar thin across
+    /// the array's only axis (axis mismatch), a triangle a pixel wide (not
+    /// sub-pixel), a path; 1-D arrays in the first half.
+    #[test]
+    fn placement_walk_outcomes_are_counted() {
+        let world = BBox { x0: -200, y0: -200, x1: 1400, y1: 1400 };
+        let outcome = |rects: Vec<RectRec>, polys: Vec<PolyRec>, rep: Rep| {
+            let scene = placed_scene(vec![(1, rects, polys)], (-50, 10, 0, false, rep), world);
+            let report = render_geometry_styled(&scene, &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, true)).unwrap();
+            report
+                .stats
+                .place_walks
+                .iter()
+                .enumerate()
+                .filter(|(_, walks)| walks.0 > 0)
+                .map(|(k, walks)| (PLACE_WALK_OUTCOMES[k % 16], 1 + k / 16, walks.1))
+                .collect::<Vec<_>>()
+        };
+        let thin = RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 1, h: 250, rep: Rep::One };
+        let lying = RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 250, h: 1, rep: Rep::One };
+        let wide = PolyRec { layer: 1, dt: 0, pts: vec![(0, 0), (100, 0), (0, 100)], rep: Rep::One };
+        // a 0.8 px bar: its chance alone passes half the members
+        let bold = RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 20, h: 250, rep: Rep::One };
+        assert_eq!(outcome(vec![bold], Vec::new(), Rep::Grid { na: 60, nb: 2, va: (30, 0), vb: (0, 700) }), vec![("cost", 2, 102)]);
+        // even six members pay for a 0.04 px bar
+        assert_eq!(outcome(vec![thin.clone()], Vec::new(), Rep::Grid { na: 3, nb: 2, va: (4, 0), vb: (0, 700) }), vec![("walked", 2, 6)]);
+        assert_eq!(outcome(vec![thin.clone()], Vec::new(), Rep::Grid { na: 400, nb: 1, va: (4, 0), vb: (0, 0) }), vec![("walked", 1, 369)]);
+        assert_eq!(outcome(vec![lying], Vec::new(), Rep::Grid { na: 400, nb: 1, va: (4, 0), vb: (0, 0) }), vec![("axis_mismatch", 1, 369)]);
+        assert_eq!(outcome(Vec::new(), vec![wide], Rep::Grid { na: 400, nb: 1, va: (4, 0), vb: (0, 0) }), vec![("not_subpixel", 1, 369)]);
     }
 
     /// A placement array too large for the work bin is deferred; its tiles'

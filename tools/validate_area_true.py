@@ -78,7 +78,7 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
     stored as shapes of TOP (OASIS repetitions) and as one cell placed by an
     array, light the same pixels at a whole and a fractional pan; with both
     visible the frame is byte-identical with the survivor list off, which
-    visits more cells.
+    visits more cells; the frame reports the walk (place_walks walked2).
 
     .venv/bin/python tools/validate_area_true.py
 """
@@ -590,9 +590,13 @@ def main():
                     every, ereport = frame(lattice_all, gen, box, visible=(PLACE_FLAT, PLACE_ARRAY), size=size, report=True)
                     assert listed == every, 'the placement survivor walk changed %d px' % len(lit_pixels(listed) ^ lit_pixels(every))
                     assert lreport['hier_cells_visited'] < ereport['hier_cells_visited'], (lreport['hier_cells_visited'], ereport['hier_cells_visited'])
+                    # the walk's outcome reaches the frame (RenderStats::place_walks):
+                    # the 120 x 3 array walked, the list off plans nothing
+                    assert lreport['place_walks'].get('walked2', [0])[0] > 0 and not ereport['place_walks'], \
+                        (lreport['place_walks'], ereport['place_walks'])
                 print('placement lattice: the placed bars and triangles light the flat arrays\' %d px at 2 pans (the rule off: %d px); '
-                      'the survivor walk draws the same, visiting %d cells instead of %d'
-                      % (len(lit['flat']), len(lit['off']), lreport['hier_cells_visited'], ereport['hier_cells_visited']))
+                      'the survivor walk draws the same, visiting %d cells instead of %d (place walks %s)'
+                      % (len(lit['flat']), len(lit['off']), lreport['hier_cells_visited'], ereport['hier_cells_visited'], lreport['place_walks']))
             finally:
                 lattice_on.stop()
                 lattice_all.stop()

@@ -63,4 +63,48 @@ pub struct RenderStats {
     pub decoded_cache_evicted: u32,
     pub decoded_cache_bytes: u64,
     pub cancelled: bool,
+    /// Placement survivor walks by outcome (CUT_DENSITY_DESIGN §10.8, the
+    /// placement lattice): (walks planned, visible members) per outcome of
+    /// PLACE_WALK_OUTCOMES, one-dimensional arrays at [k], two-dimensional at
+    /// [PLACE_WALK_OUTCOMES.len() + k]. Counted per walk: the work bin's
+    /// collection once a frame, the tile walks and mini walks once a tile.
+    pub place_walks: [(u64, u64); 32],
+}
+
+/// The outcomes of a placement array's survivor walk, in RenderStats::
+/// place_walks order: walked, or why the members were all visited.
+pub const PLACE_WALK_OUTCOMES: [&str; 16] = [
+    "walked",
+    "not_leaf",
+    "no_range",
+    "page_level",
+    "undecoded",
+    "non_rim",
+    "array_record",
+    "path",
+    "shapes",
+    "prep_work",
+    "not_subpixel",
+    "no_shapes",
+    "no_axis",
+    "axis_mismatch",
+    "cost",
+    "cursor_cap",
+];
+
+/// RenderStats::place_walks as a wire value: `<outcome><1|2>:<walks>/<members>`
+/// for every outcome seen, comma-separated; `-` for none.
+pub fn place_walks_wire(walks: &[(u64, u64); 32]) -> String {
+    let n = PLACE_WALK_OUTCOMES.len();
+    let parts: Vec<String> = walks
+        .iter()
+        .enumerate()
+        .filter(|(_, (count, _))| *count > 0)
+        .map(|(k, (count, members))| format!("{}{}:{}/{}", PLACE_WALK_OUTCOMES[k % n], 1 + k / n, count, members))
+        .collect();
+    if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join(",")
+    }
 }

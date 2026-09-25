@@ -54,7 +54,7 @@ pub use layer_decode::{LayerProbeReport, ProbeMode};
 pub use request::{PlanRequest, ViewBox, FULL_DEPTH};
 pub use scene::FrameScene;
 pub use summary::{cull_allowed as summary_cull_allowed, layout_allowed as summary_layout_allowed, level_for as summary_level_for, SummaryPlane, SummarySelection};
-pub use stats::RenderStats;
+pub use stats::{place_walks_wire, RenderStats, PLACE_WALK_OUTCOMES};
 
 pub use floe_vfs::hier::HierPlan;
 pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;
