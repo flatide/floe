@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+pub mod revision;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfileCell {

@@ -90,6 +90,14 @@ pub(crate) fn regular_file(path: &Path) -> Result<File> {
 impl Layout {
     pub fn open(source: &Path, cancelled: &AtomicUsize) -> Result<Self> {
         check_cancelled(cancelled)?;
+        Self::open_directory(source, cache::cache_path(source)?, cancelled)
+    }
+    pub(crate) fn open_directory(
+        source: &Path,
+        directory: PathBuf,
+        cancelled: &AtomicUsize,
+    ) -> Result<Self> {
+        check_cancelled(cancelled)?;
         let source = cache::absolute(source)?;
         if source
             .extension()
@@ -101,7 +109,6 @@ impl Layout {
             ));
         }
         let fingerprint = cache::fingerprint(&source)?;
-        let directory = cache::cache_path(&source)?;
         if !fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir()) {
             return Err(Error::new(
                 ErrorKind::Cache,

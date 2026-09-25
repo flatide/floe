@@ -124,7 +124,13 @@ pub fn output_path(path: &Path, layout: &Layout) -> Result<PathBuf> {
     layout_output_mode(path, layout, false)
 }
 pub(crate) fn layout_output_mode(path: &Path, layout: &Layout, planned: bool) -> Result<PathBuf> {
-    let trees = cache::cache_paths(&layout.source)?;
+    let mut trees = cache::cache_paths(&layout.source)?.to_vec();
+    trees.push(
+        cache::revision::Store::new(&layout.source)?
+            .path()
+            .to_owned(),
+    );
+    trees.push(layout.directory.clone());
     let mut files = vec![layout.source.clone()];
     for directory in &trees {
         let mut lock = directory.as_os_str().to_owned();

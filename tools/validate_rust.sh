@@ -39,7 +39,7 @@ rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
 jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode rust_renderer klayout"
-WEB_APP_GATES="app_cli cache_migration web_cli_inventory native_revision web_selfcheck web_portable runtime_smoke embedded_host app_render \
+WEB_APP_GATES="app_cli cache_migration cache_revision web_cli_inventory native_revision web_selfcheck web_portable runtime_smoke embedded_host app_render \
 layerprops layer_defaults layer_palette palette_styles display_test app_clip managed_clip app_captures \
 fe_embed drc_captures view_controller zoom_band minimap depth_keys web_wheel worker_queries \
 view_stream managed_index owner_service web_cli web_local_sharing display_cli display_input web_handoff \
@@ -224,6 +224,9 @@ if gate app_cli; then RAN="$RAN app_cli"
     .venv/bin/python tools/validate_app_cli.py "$FLOE2_SMOKE_SRC"; fi
 if gate cache_migration; then RAN="$RAN cache_migration"
     .venv/bin/python -B tools/validate_cache_migration.py "$FLOE2_SMOKE_SRC"; fi
+if gate cache_revision; then RAN="$RAN cache_revision"
+    (cd rust && FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --locked --offline -p floe-app-core --lib cache::revision &&
+        FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --locked --offline -p floe-app-core --test cache_revision -- --ignored); fi
 if gate web_cli_inventory; then RAN="$RAN web_cli_inventory"
     .venv/bin/python -B tools/validate_web_cli_inventory.py; fi
 if gate native_revision; then RAN="$RAN native_revision"

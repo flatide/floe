@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 mod migration;
 mod names;
+pub mod revision;
 pub(crate) use migration::rename_legacy;
 pub use migration::Migration;
 pub use names::{
