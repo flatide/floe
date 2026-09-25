@@ -1,6 +1,6 @@
 [package]
 name = "floe-renderd"
-version = "0.12.209"
+version = "0.12.210"
 edition.workspace = true
 license.workspace = true
 description = "Long-lived CPU rendering daemon for floe"

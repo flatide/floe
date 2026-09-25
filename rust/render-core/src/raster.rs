@@ -1676,6 +1676,7 @@ fn build_deferred_minis(
                 base_bbox,
                 local_view,
                 &|layer| bin.plane_of.get(&layer).map(|&plane| ranking.rim[plane]),
+                guard,
             )?,
             None => None,
         };
@@ -2009,6 +2010,7 @@ fn collect_cell(
                     base_bbox,
                     local_view,
                     &|layer| plane_of.get(&layer).map(|&plane| ranking.rim[plane]),
+                    guard,
                 )?,
                 None => None,
             };
@@ -2284,6 +2286,7 @@ fn replay_plane_items(
                         base_bbox,
                         local_view,
                         &|index| (index == layer.layer_idx).then(|| area_true_rim(request, paint)),
+                        guard,
                     )?,
                     None => None,
                 };
@@ -4033,10 +4036,8 @@ fn raster_page_records(
                     let y = checked_add(y, offset_y, "polygon y")?;
                     world_points.push(world_transform.apply(x, y)?);
                 }
-                let rank = match (keep_lattice, polygon_bbox(&world_points)) {
-                    (Some((px, py)), Some(world)) => Some(lattice_area_rank(px, py, &world)),
-                    _ => None,
-                };
+                let rank = keep_lattice
+                    .and_then(|(px, py)| polygon_bbox(&world_points).map(|world| lattice_area_rank(px, py, &world)));
                 if paint_world_polygon_ranked(band, request, &world_points, paint, rank)? {
                     drawn = drawn.saturating_add(1);
                 }
@@ -4120,10 +4121,8 @@ fn raster_page_records(
                         let y = checked_add(y, offset_y, "path centerline y")?;
                         world_centerline.push(world_transform.apply(x, y)?);
                     }
-                    let rank = match (keep_lattice, polygon_bbox(&world_points)) {
-                        (Some((px, py)), Some(world)) => Some(lattice_area_rank(px, py, &world)),
-                        _ => None,
-                    };
+                    let rank = keep_lattice
+                        .and_then(|(px, py)| polygon_bbox(&world_points).map(|world| lattice_area_rank(px, py, &world)));
                     if paint_world_path_ranked(band, request, &world_points, &world_centerline, paint, rank)?
                     {
                         drawn = drawn.saturating_add(1);
@@ -4290,6 +4289,7 @@ fn render_cell(
                 base_bbox,
                 local_view,
                 &|layer| selection.includes(layer).then(|| area_true_rim(request, paint)),
+                guard,
             )?,
             None => None,
         };
@@ -5221,6 +5221,13 @@ fn own_lattice(
 /// most this many shapes on the drawn layers.
 const SMALL_CELL_SHAPES: usize = 8;
 
+/// The most work the preparation of a placement array's survivor walk may do
+/// (review 2026-09-25): one unit per record of the drawn layers it looks at -
+/// those the shape cut drops included - and one per polygon vertex. A cell
+/// past it is walked member by member; the preparation runs again at every
+/// visit of the array's parent, so it must stay small whatever the cell holds.
+const PLACEMENT_PREP_WORK: u64 = 1024;
+
 /// The survivor walk of a placement array under the placement lattice
 /// (GeometryRasterRequest::place_lattice with survivor_list): `instance`, in
 /// the cell placed at `parent_world`, a lattice array of pitches `pitches`.
@@ -5248,6 +5255,7 @@ fn placement_survivor_walk(
     base_bbox: BBox,
     local_view: BBox,
     layer_rim: &dyn Fn(u32) -> Option<bool>,
+    guard: Option<RenderGuard<'_>>,
 ) -> Result<Option<SurvivorWalk>, String> {
     let (px, py) = pitches;
     if !request.survivor_list {
@@ -5270,10 +5278,14 @@ fn placement_survivor_walk(
     let member0 = parent_world.compose(&OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?)?;
     let c = request.width_c;
     // per rectangle its term along each axis it is under a pixel on; per
-    // polygon its keep axis and term
-    let mut rects: Vec<[Option<LatticeTerm>; 2]> = Vec::new();
-    let mut areas: Vec<(usize, LatticeTerm)> = Vec::new();
+    // polygon its keep axis and term - a ninth shape, a path or work past
+    // PLACEMENT_PREP_WORK gives up at once
+    let mut rects: Vec<[Option<LatticeTerm>; 2]> = Vec::with_capacity(SMALL_CELL_SHAPES);
+    let mut areas: Vec<(usize, LatticeTerm)> = Vec::with_capacity(SMALL_CELL_SHAPES);
+    let mut work = 0u64;
+    let mut heartbeat = 0u16;
     for (slot, &page_id) in child.pages.iter().enumerate() {
+        check_cancelled(guard)?;
         if child.page_levels.get(slot).copied().unwrap_or(0) != 0 {
             return Ok(None);
         }
@@ -5286,12 +5298,20 @@ fn placement_survivor_walk(
         let Some(geometry) = page.doc.cells.get(page.doc.top) else {
             return Ok(None);
         };
+        if !geometry.paths.is_empty() {
+            return Ok(None);
+        }
         for rect in &geometry.rects {
+            check_member_cancelled(guard, &mut heartbeat)?;
+            work += 1;
+            if work > PLACEMENT_PREP_WORK {
+                return Ok(None);
+            }
             let base = BBox { x0: rect.x, y0: rect.y, x1: rect.x.saturating_add(rect.w), y1: rect.y.saturating_add(rect.h) };
             if rect.w <= 0 || rect.h <= 0 || cut_side_of(base, shape_cut_max) < shape_cut {
                 continue;
             }
-            if !rim || !matches!(rect.rep, Rep::One) {
+            if !rim || !matches!(rect.rep, Rep::One) || rects.len() + areas.len() == SMALL_CELL_SHAPES {
                 return Ok(None);
             }
             let world = member0.apply_bbox(base)?;
@@ -5307,25 +5327,24 @@ fn placement_survivor_walk(
             rects.push([term(x1 - x0, ranks.u.0), term(y1 - y0, ranks.u.1)]);
         }
         for polygon in &geometry.polys {
+            check_member_cancelled(guard, &mut heartbeat)?;
+            work += 1 + polygon.pts.len() as u64;
+            if work > PLACEMENT_PREP_WORK {
+                return Ok(None);
+            }
             let Some(base) = polygon_bbox(&polygon.pts) else {
                 return Ok(None);
             };
             if cut_side_of(base, shape_cut_max) < shape_cut {
                 continue;
             }
-            if !rim || !matches!(polygon.rep, Rep::One) {
+            if !rim || !matches!(polygon.rep, Rep::One) || rects.len() + areas.len() == SMALL_CELL_SHAPES {
                 return Ok(None);
             }
             let Some(term) = area_term(request, px, py, member0.apply_bbox(base)?, polygon_area(&polygon.pts))? else {
                 return Ok(None);
             };
             areas.push(term);
-        }
-        if !geometry.paths.is_empty() {
-            return Ok(None);
-        }
-        if rects.len() + areas.len() > SMALL_CELL_SHAPES {
-            return Ok(None);
         }
     }
     if rects.is_empty() && areas.is_empty() {
@@ -9430,6 +9449,11 @@ mod tests {
     /// instance (x, y, rot, flip, rep) in an otherwise empty top cell spanning
     /// `world` - the placement lattice's test scene.
     fn placed_scene(leaf: Vec<(u32, Vec<RectRec>, Vec<PolyRec>)>, inst: (i64, i64, u8, bool, Rep), world: BBox) -> FrameScene {
+        placed_scene_cut(leaf, inst, world, HierStats::default())
+    }
+
+    /// `placed_scene` planned with the given stats (a per-shape cut)
+    fn placed_scene_cut(leaf: Vec<(u32, Vec<RectRec>, Vec<PolyRec>)>, inst: (i64, i64, u8, bool, Rep), world: BBox, stats: HierStats) -> FrameScene {
         let (top, cell) = ((0, REM_FULL), (1, REM_FULL));
         let mut pages = Vec::new();
         let mut leaf_box = BBox::EMPTY;
@@ -9488,7 +9512,7 @@ mod tests {
             ],
             pages: (0..n).collect(),
             page_prio: vec![0; n as usize],
-            stats: HierStats::default(),
+            stats,
             explain: Vec::new(),
         };
         FrameScene::from_test_parts(plan, pages, BTreeMap::from([(top, world), (cell, leaf_box)])).unwrap()
@@ -9600,6 +9624,52 @@ mod tests {
             };
             assert_eq!(white(&both.frame), white(&reference.frame), "the big shape changed the small shapes' picks at {:?}", (x, y, rot, flip));
         }
+    }
+
+    /// The preparation of a placement array's survivor walk is bounded
+    /// (review 2026-09-25): the records it looks at - those the shape cut
+    /// drops included - and the polygon vertices count against
+    /// PLACEMENT_PREP_WORK, and a ninth drawn shape gives up at once. Past a
+    /// bound the members are visited one by one, the pixels unchanged.
+    #[test]
+    fn the_placement_walk_preparation_is_bounded() {
+        let world = BBox { x0: -200, y0: -200, x1: 1400, y1: 1400 };
+        let thin = |x: i64| RectRec { layer: 1, dt: 0, x, y: 0, w: 1, h: 250, rep: Rep::One };
+        // 1 x 1 unit specks under the 75-unit (3 px) cut on both sides
+        let specks = |n: i64| (0..n).map(|k| RectRec { layer: 1, dt: 0, x: (k % 50) * 3, y: 300 + (k / 50) * 3, w: 1, h: 1, rep: Rep::One });
+        // a 1..2 unit wide comb 2 x `teeth` units tall: 2 teeth + 2 vertices
+        let comb = |teeth: i64| {
+            let mut pts = vec![(0, 0), (0, 2 * teeth)];
+            for k in (0..teeth).rev() {
+                pts.push((2, 2 * k + 2));
+                pts.push((1, 2 * k + 1));
+            }
+            PolyRec { layer: 1, dt: 0, pts, rep: Rep::One }
+        };
+        let cut = HierStats { shape_cut: 75, shape_cut_max: true, ..HierStats::default() };
+        let grid = Rep::Grid { na: 400, nb: 2, va: (4, 0), vb: (0, 700) };
+        let visits = |rects: Vec<RectRec>, polys: Vec<PolyRec>| {
+            let scene = placed_scene_cut(vec![(1, rects, polys)], (-50, 10, 0, false, grid.clone()), world, cut.clone());
+            let on = render_geometry_styled(&scene, &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, true)).unwrap();
+            let off = render_geometry_styled(&scene, &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, false)).unwrap();
+            assert_eq!(on.frame, off.frame);
+            assert!(!lit_set(&on.frame, 64).is_empty());
+            (on.stats.hier_cells_visited, off.stats.hier_cells_visited)
+        };
+        let listed = |(on, off): (u64, u64)| on * 2 < off;
+        // the cut's specks are no terms but count as work: 501 records walk
+        assert!(listed(visits(std::iter::once(thin(0)).chain(specks(500)).collect(), Vec::new())));
+        // 1,101 records are past the budget
+        let (on, off) = visits(std::iter::once(thin(0)).chain(specks(1100)).collect(), Vec::new());
+        assert_eq!(on, off, "1,101 records looked at");
+        // eight drawn shapes walk, a ninth gives up
+        assert!(listed(visits((0..8).map(|k| thin(4 * k)).collect(), Vec::new())));
+        let (on, off) = visits((0..9).map(|k| thin(4 * k)).collect(), Vec::new());
+        assert_eq!(on, off, "nine drawn shapes");
+        // a polygon's vertices count: 402 walk, 1,102 give up
+        assert!(listed(visits(Vec::new(), vec![comb(200)])));
+        let (on, off) = visits(Vec::new(), vec![comb(550)]);
+        assert_eq!(on, off, "a polygon of 1,102 vertices");
     }
 
     /// A placement array too large for the work bin is deferred; its tiles'

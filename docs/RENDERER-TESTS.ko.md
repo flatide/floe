@@ -117,7 +117,10 @@ floe 뷰어의 klayout 경로를 대체하려면 무엇을 소비하고, 무엇�
   방문한다. 순위는 이 빠른 열거와 무관하게 bin·타일 walk·미룬 간선에서 같다. 단위 테스트는
   `a_placed_shape_ranks_as_its_flat_array_under_the_placement_lattice`,
   `the_placement_survivor_walk_draws_what_every_member_draws`,
-  `a_deferred_placement_array_draws_as_the_walk_under_the_placement_lattice`다. 생존 걷기의 비용 모형은
+  `a_deferred_placement_array_draws_as_the_walk_under_the_placement_lattice`다. 걷기의 준비는
+  부모 셀 방문마다 다시 돌므로 상한이 있다(0.12.210). 그리는 레이어의 path, 아홉 번째 도형, 본 레코드(컷
+  대상 포함)와 다각형 정점 합 1,024 초과 가운데 하나라도 해당하면 바로 전수 방문으로 물러난다
+  (`the_placement_walk_preparation_is_bounded`). 생존 걷기의 비용 모형은
   블록 수를 항의 확률로 추정하고 멤버 방문을 레코드 배열 4, 배치 배열 16블록으로 센다(0.12.209).
   **같은 세계 박스의 중복**(단일 사각형 둘, 같은 Grid 둘, Grid와 그 조각)은 한 벌과 같은 픽셀을
   켜고 레코드 순서도 무관하다(단위 테스트 `duplicates_of_a_shape_draw_as_one`); Grid 멤버 위의 단일
