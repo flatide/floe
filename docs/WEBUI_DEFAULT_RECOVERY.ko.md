@@ -86,7 +86,8 @@ stable flock과 identity 확인은 협조하는 writer 사이의 방어다. 비�
 - `sh tools/validate_rust.sh --only layer_defaults,web_ui`: exit0. GTK와 동일한
  20개 target/bytes 게시 오라클 및 Node 전체 UI 회귀이며 GUI를 열지 않았다.
   전체 배터리 실행이 아니고 렌더/잡덱 정확도 전체를 재검사했다고 주장하지 않는다.
-- Electron `service`의 `cargo check --offline --locked`: exit0. 앱 실행은 별도다.
+- Electron `service`의 `cargo check --offline --locked`와 debug/release 빌드:
+  exit0. 기본 실행 경로의 release 헬퍼도 갱신했으며 앱 실행·배포 번들 재포장은 별도다.
 
 선택 배터리 로그: `/private/tmp/floe-default-final.9CwuyT/selected.log`.
 SHA-256: `dc481191572dc386d6d90a925ae5364dcfc7f925353c9b1144efbbbf7cf8ed01`.
