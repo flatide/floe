@@ -1,5 +1,10 @@
 # Electron DRC 승인 응답 대기 중 표시 프로세스 장애
 
+2026-09-25 확대: [명시적 파일 복구 native 검사](WEBUI_REVIEW_RECOVERY.ko.md)에서
+같은 실행기에 note/waive file-repair UI를 추가했다. 이제 일반 저장2건 + 명시 복구2건,
+실제 Chromium 종료4건을 검사한다. 아래2건 기록은 최초 범위이며, 복구 중 Rust
+서비스 자체 종료 또는 실제 NFS 장애 검증과 합산하지 않는다.
+
 후속 [실제 Rust 서비스 종료·재시작 검사](WEBUI_REVIEW_SERVICE_CRASH.ko.md)는
 서비스도 사라진 뒤 새 인증/reader에서 게시 값과 이전 승인 만료를 확인한다.
 아래와 달리 GUI 없이 HTTP/pipe 경로를 검사하며 실제 오류창 수용은 남는다.

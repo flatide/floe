@@ -32,6 +32,15 @@ async function prepare(h){h.attach();await tick();await h.el('recovery-prepare')
     h=harness();h.attach(true,false);await tick();assert(h.el('recovery-waives-choice').disabled);h.el('recovery-kind').value='waives';h.el('recovery-kind').onchange();assert.equal(h.el('recovery-kind').value,'notes');assert(!h.el('recovery-panel').hidden);h.api.stop();
     h=harness();await prepare(h);assert.equal(h.posts().length,0);await Promise.all([h.el('recovery-approve').onclick(),h.el('recovery-approve').onclick()]);
     assert.equal(h.posts().length,1);assert.equal(h.posts()[0].body.approve_recovery,true);assert.equal(h.stored(),null);assert.match(h.el('recovery-status').textContent,/Open DRC/);h.api.stop();assert.equal(h.timers.size,0);
+    // Only replacement of the DRC registration retires the reopen hint. A
+    // revision change alone can be the repair's own reader invalidation.
+    for(const phase of ['succeeded','failed']){
+        h=harness();h.model({...catalog(),operations:{last_seq:'1',active:null,history:[{...receipt(phase),reopen_required:true,directory_synced:null}]}});
+        h.attach();await tick();h.context({...C,revision:id('2')});h.attach();await tick();assert.match(h.el('recovery-status').textContent,/Open DRC/);
+        h.context({...C,drc_id:id('3')});h.attach();await tick();assert.match(h.el('recovery-status').textContent,/^Earlier recovery #1/);
+        assert.doesNotMatch(h.el('recovery-status').textContent,/Open DRC/);if(phase==='succeeded')assert.match(h.el('recovery-status').textContent,/Durability/);
+        assert.equal(h.posts().length,0);h.api.stop();
+    }
     // Expiry/context/permission changes and an existing edit invalidate consent.
     h=harness();await prepare(h);h.time(30101);await h.el('recovery-approve').onclick();assert.equal(h.posts().length,0);h.api.stop();
     h=harness();await prepare(h);h.context({...C,revision:id('2')});await h.el('recovery-approve').onclick();assert.equal(h.posts().length,0);assert(h.el('recovery-preview').hidden);h.api.stop();

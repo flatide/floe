@@ -72,11 +72,12 @@
             el('recovery-refresh').disabled=!!io||!editable;
             el('recovery-resolve').hidden=!pending;el('recovery-resolve').disabled=!!io||!editable;
             const row=latest();el('recovery-check').hidden=!(row&&row.phase==='uncertain');el('recovery-check').disabled=!!io||!editable||!!pending;
+            const c=current(),earlier=!!(row&&row.context&&c&&row.context.drc_id!==c.drc_id);
             el('recovery-forget').hidden=!unknown;el('recovery-checked-label').hidden=!unknown;
             el('recovery-forget').disabled=!!io||!!active()||!el('recovery-checked').checked;
-            el('recovery-status').textContent=row?'Recovery #'+row.seq+': '+row.phase+(row.recovered===true?
-                ' — payload unchanged. Reopen the DRC with Open DRC to replace the old reader.'+(row.directory_synced!==true?' Durability was not confirmed; do not repeat the repair.':''):
-                row.phase==='uncertain'?' — result unknown. Only an explicit read-only check is available.':row.phase==='failed'?' — not recovered; check the file before a new preview.'+(row.reopen_required?' Reopen with Open DRC; the old reader is retired.':''):''):'';
+            el('recovery-status').textContent=row?(earlier?'Earlier recovery #':'Recovery #')+row.seq+': '+row.phase+(row.recovered===true?
+                ' — payload unchanged.'+(earlier?' The DRC registration has changed since this receipt.':' Reopen the DRC with Open DRC to replace the old reader.')+(row.directory_synced!==true?' Durability was not confirmed; do not repeat the repair.':''):
+                row.phase==='uncertain'?' — result unknown. Only an explicit read-only check is available.':row.phase==='failed'?' — not recovered; check the file before a new preview.'+(row.reopen_required?(earlier?' The DRC registration has changed since this receipt.':' Reopen with Open DRC; the old reader is retired.'):''):''):'';
             el('recovery-message').textContent=[message,storageWarning].filter(Boolean).join(' ');
         }
         function schedule(){o.clearTimeout(timer);timer=null;const row=latest();if(!stopped&&active()&&row&&row.phase!=='uncertain'){timer=o.setTimeout(refresh,350);}}

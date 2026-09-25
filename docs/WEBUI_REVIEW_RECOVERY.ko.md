@@ -182,7 +182,8 @@ reviewer 권한을 명시적으로 재연결한다. `Reload review`/receipt GET�
 
 최종 Electron 로그: `/private/tmp/floe-recovery-accepted-electron.log`(exit0).
 합성 화면: `/private/tmp/floe-electron-review-HNEmlc/recovery-panel.png`(직접 시각 확인).
-새 **link repair 버튼의 native end-to-end**와 NFS 강제 장애는 아직 별도다. 결과 불명
+이 단계 당시 **link repair 버튼의 native end-to-end**와 NFS 강제 장애는 별도였다.
+전자는 아래 §5에서 후속 검사했고 NFS는 여전히 남는다. 결과 불명
 unlink의 native fault 모델은 §3, UI/active ledger/lease는 이번 로컬 회귀로 확인했다.
 HTTP에서 NFS syscall 결과 불명을 실제로 유발했다고 주장하지 않는다.
 
@@ -215,10 +216,81 @@ electron: 22d01fa0d67372ca92254ed9fec3c3b52a71af5eafd469b7d90825a3c2aa475d
 image:    2a4d3b98d76ce696b38663268e05c55ffc98bd1a7e219d0e6b408fafdc4d29e3
 ```
 
-## 5. 다음 단계 / 남은 범위
+## 5. 실제 Electron 파일 복구 전체 흐름 (2026-09-25 후속)
 
-1. 실제 Electron 창에서 명시 복구 UI, 복구 중 서비스 종료·새 세션의 새 승인 흐름을
-   추가 검사한다. 자동 재열기는 구현하지 않았으며 현재는 위의 명시적 picker 경로다.
+`a776a66` 다음 단계다. `tools/validate_electron_review.cjs`에 명시적 note/waive
+파일 복구를 연결했다. 기존 일반 저장 응답 유실2건도 유지하므로 한 실행에서 실제
+Chromium process crash는4번이다. Rust 서비스는 계속 살아 있으며 정상 종료 때 join한다.
+모든 입력은 새 private 합성 폴더이고 `--multi`로 기존 사용자 창을 재사용하지 않는다.
+
+1. 실제 제품 UI로 저장한 marked sidecar에서 정확한 표식·target·directory/file/lock
+   identity를 검사하고 **표식의 stage 이름으로만** hard link를 추가한다. 신규 링크
+   게시 중단의 파일 상태를 재구성한 것이며 syscall 사이의 실제 중단 주장은 아니다.
+2. Notes/Waives 선택→미리보기의 basename/bytes/reviewer 확인→미체크 승인 비활성→
+   미리보기 폐기를 검사한다. 이 과정에서는 두 링크와 payload가 모두 그대로다.
+3. 새 미리보기에서 checkbox/Approve를 누른다. 실제202 응답을 표시 프로세스에
+   전달하기 전에 host가 보류하고, 디스크가 single-link로 복구된 경계를 확인한다.
+   이 알려진 완료 경계에서 Chromium을 강제 종료한다. unlink syscall/NFS fault는 아니다.
+4. Recover View의 Cancel은 그대로 두고 명시 Reload View만 화면을 복구한다.
+   자동 승인 POST는 없고 같은 세션의 `Resolve same approval` 클릭만 동일 요청을
+   보낸다. note/waive 각각 **POST1→crash/reload 뒤1→명시 resolve 뒤2**, receipt#1이다.
+   일반 note/waive 저장 POST 수는 이 과정에서 늘어나지 않는다.
+5. 실제 `Open DRC results…` picker에서 `synthetic.db`를 다시 열고 별도 checkbox로
+   런처 reviewer를 재연결한다. 자동 저장은 off다. 새 Notes/Waives UI read-back이
+   기존 메모와 waive1개를 보여 주는지 확인한다. 숨은 HTTP 호출로 재열기를 대신하지 않는다.
+6. 원본·cache·pack bytes, sidecar bytes/mtime/dev/ino/mode/uid/gid/xattr 및 lock을
+   보존한다. 별도로 만든 이름 비슷한 decoy는 남고 표식의 stage 하나만 없어져야 한다.
+7. 마지막 screenshot의 합성 녹색 기하 픽셀을 확인한 뒤 저장한다. 화면 redraw·pan·
+   새 요청으로 빈 화면을 숨기지 않으며, 최대30초 capture-only 대기 후에도 없으면
+   실패다. 이번 두 최종 실행은 각각 첫 capture에서 통과했다. 이 존재 검사는 전체
+   geometry parity/물리 디스플레이/입력 지연 수용을 대신하지 않는다.
+
+제품 변경은 과거 복구 결과의 안내를 바로잡은 공통 UI 하나다. DRC **등록 ID**가
+바뀌면 `Earlier recovery`로 표시하고 재열기를 반복 요구하지 않는다. revision만
+바뀐 경우에는 복구 자체가 reader를 폐기한 것일 수 있으므로 기존 재열기 안내를
+유지한다. 과거 receipt도 durability 경고는 유지한다. 성공·실패 두 경우의 회귀를 추가했다.
+
+fixture helper `electron-review-gap.cjs`는 QA 전용이다. 제품 marker를 만들거나
+기존 이름을 덮어쓰거나 unlink하지 않는다. 잘못된 표식·identity·path·기존 stage·
+symlink는 새 링크 생성 없이 거부하고, 변경된 bytes/metadata/attrs는 검증 실패다.
+macOS는 시스템 `/usr/bin/xattr`, Linux QA 분기는 `getfattr`를 읽기 전용으로 쓰며
+자동 설치하지 않는다. Linux 실행은 아직 미검증이고 이는 제품 runtime 의존성 추가가 아니다.
+QA의 JSON identity는 JS safe integer 범위를 벗어나면 명시 실패한다(제품의 u64 제한 변경 없음).
+
+### 검증과 한계
+
+- 새 helper/관찰기/합성 입력 단위 검사16 passed; `validate_electron.sh`에 helper 단위
+  검사를 배선했다. native file-repair 본체는 아래 별도 명시 실행이다.
+- 기존 Electron host/복구 컨트롤러 단위 검사13 passed.
+- `node tools/validate_web_ui.cjs`: exit0, ES2017/공통 UI 전체 회귀 통과.
+- `CARGO_BUILD_JOBS=4 cargo build --offline --locked`(`electron/service`): exit0.
+- Electron44.4.3의 `tools/validate_electron_review.cjs`: 최종 두 독립 실행 모두 exit0.
+  각 실행4번의 실제 Chromium crash, payload 보존, 명시 재열기/재연결, Rust 종료 확인.
+- UI 제어와 native confirmation 응답은 QA 주입이다. OS 물리 입력/NFS/RHEL 수용이 아니다.
+  Rust 파일 복구·wire 코드는 이번에 바꾸지 않았고, 전체 Rust/web 배터리 기준선은
+  §4의 `a776a66` 실행이다. 이를 이번 변경 후 새 전체 실행이라고 부르지 않는다.
+
+초기 스크린샷의 축소 미리보기가 검게 보여 빈 canvas를 의심했으나, 원본 PNG의
+녹색 픽셀423,272개와 원본 해상도 시각 확인으로 **빈 캡처라는 판단을 정정**했다.
+제품 렌더링 장애로 기록하지 않으며, 추가한 직접 픽셀 확인은 이후 QA에 유지한다.
+
+최종 로그: `/private/tmp/floe-file-repair-electron-pixels.log`,
+`/private/tmp/floe-file-repair-electron-repeat.log`.
+반복 실행 화면: `/private/tmp/floe-electron-review-3u7WIh/recovery-panel.png`(원본 해상도 확인).
+UI/단위 로그: `/private/tmp/floe-file-repair-ui.log`, `/private/tmp/floe-file-repair-unit.log`.
+
+```text
+native: ee626db23e2ce932b492b34fd939755ceb724ec7204c8795cd4a2e52d9157cba
+repeat: a24d87104fa31191f799151292188e92ed198b0d03a7e1f2041a6a72a22bd6dc
+image:  7a627f5f1ee4ac8998ed143b0a63347354dd6c5613bb1aca758d684fb74f88a8
+ui:     ff220342a99cb8a90a5ffec4824daeb27ae17f4993a44cf13210e0ad04ae37b1
+unit:   58c69c1c4137ccfc7e5b2400df42cee78455761bad968c293600afa27c8edcf9
+```
+
+## 6. 다음 단계 / 남은 범위
+
+1. 복구 중 **Rust 서비스 자체** 종료·새 세션의 새 승인 흐름을 추가 검사한다.
+   UI 명시 복구/Chromium 종료/재열기는 §5에서 통과했으며, 자동 재열기는 하지 않는다.
 2. NFS 결과 불명과 승인 proof의 장기 유지/서비스 재시작을 함께 검증한다. reader
    startup의 explicit-waive/guarded 경로 차이는 별도 감사 대상으로 유지한다.
 3. shared layer defaults에도 같은 link gap이 있다. 이번 DRC 표식은 **적용되지 않으며**

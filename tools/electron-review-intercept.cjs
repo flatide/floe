@@ -1,7 +1,9 @@
 'use strict';
 // Synthetic QA only: observe the product guard's decision, never replace it.
 class ReviewIntercept {
-  constructor(origin, webId) {
+  constructor(origin, webId, suffix = '') {
+    if (!['', '/recovery'].includes(suffix)) throw Error('Unsupported synthetic endpoint');
+    this.suffix = suffix;
     this.origin = origin; this.webId = webId;
     this.counts = { notes: 0, waives: 0, roots: 0, exchanges: 0 };
     this.ids = new Map(); this.armed = null; this.held = null; this.failed = false;
@@ -10,7 +12,7 @@ class ReviewIntercept {
   kind(d) {
     if (!this.origin() || d.webContentsId !== this.webId() || d.method !== 'POST') return null;
     for (const kind of ['notes', 'waives']) {
-      if (d.url === this.origin() + '/api/v1/drc/review/' + kind) return kind;
+      if (d.url === this.origin() + '/api/v1/drc/review/' + kind + this.suffix) return kind;
     }
     return null;
   }

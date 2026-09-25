@@ -40,11 +40,12 @@ const before = fingerprint();
 let service, window, origin = null, stage = 'startup', complete = false, failed = false, crashes = 0;
 let accepted = false, prompts = 0;
 const wire = new ReviewIntercept(() => origin, () => window?.webContents.id);
+const repairWire = new ReviewIntercept(() => origin, () => window?.webContents.id, '/recovery');
 const actualExit = app.exit.bind(app);
 app.exit = code => {
-  wire.release();
-  const ok = code === 0 && complete && !failed && service?.phase === 'ended' && !wire.failed;
-  console.log(ok ? 'ELECTRON REVIEW: OK (two actual Chromium crashes; approved requests not replayed; explicit resolves keep receipt #1; read-back; Rust joined)' : 'ELECTRON REVIEW: FAIL stage ' + stage);
+  wire.release();repairWire.release();
+  const ok = code === 0 && complete && !failed && service?.phase === 'ended' && !wire.failed && !repairWire.failed && crashes === 4;
+  console.log(ok ? 'ELECTRON REVIEW: OK (four actual Chromium crashes; save + file-repair approvals not replayed; explicit resolves keep receipt #1; exact link cleanup; picker reopen/reconnect; read-back; Rust joined)' : 'ELECTRON REVIEW: FAIL stage ' + stage);
   actualExit(ok ? 0 : 1);
 };
 // Observe the real inherited-pipe service. No credential is saved/logged.
@@ -63,7 +64,7 @@ session.fromPartition = (...args) => {
   const ses = partition(...args);
   for (const [name, observer] of [['onBeforeRequest', 'before'], ['onHeadersReceived', 'headers']]) {
     const register = ses.webRequest[name].bind(ses.webRequest);
-    ses.webRequest[name] = listener => register((d, cb) => listener(d, response => wire[observer](d, response, cb)));
+    ses.webRequest[name] = listener => register((d, cb) => listener(d, response => wire[observer](d, response, r => repairWire[observer](d, r, cb))));
   }
   return ses;
 };
@@ -86,7 +87,7 @@ async function until(fn) {
   const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(Error('QA stage timeout')), 30000); });
   let expired = false;
   async function poll() {
-    while (!expired && !failed && !wire.failed && service?.phase !== 'ended') {
+    while (!expired && !failed && !wire.failed && !repairWire.failed && service?.phase !== 'ended') {
       if (await fn()) return;
       await new Promise(resolve => setTimeout(resolve, 30));
     }
@@ -113,6 +114,65 @@ function recoverMenu() {
   const item = Menu.getApplicationMenu().items.find(x => x.label === 'View')?.submenu.items.find(x => x.label === 'Recover View…');
   if (!item) throw Error('Recovery menu missing');
   item.click();
+}
+async function fileRecovery(kind) {
+  const gap = require('./electron-review-gap.cjs').createGap(root,kind);
+  stage = kind + ' file-repair preview';
+  await wait("!e('recovery-panel').hidden&&!e('recovery-kind').disabled&&!e('recovery-prepare').disabled");
+  await action("e('recovery-panel').open=true;e('recovery-kind').value='"+kind+"';e('recovery-kind').dispatchEvent(new Event('change',{bubbles:true}))");
+  await wait("!e('recovery-prepare').disabled");
+  await action("e('recovery-prepare').click()");
+  await wait("!e('recovery-preview').hidden&&e('recovery-approve').disabled");
+  if (await evaluate('document.getElementById("recovery-target").textContent') !== gap.leaf+' · '+gap.bytes+' bytes · reviewer native-recovery-test') throw Error('Wrong recovery target preview');
+  gap.verify(2);if(repairWire.counts[kind]!==0)throw Error('Preview approved recovery');
+  await action("e('recovery-discard').click()");
+  await wait("e('recovery-preview').hidden&&!e('recovery-prepare').disabled");gap.verify(2);
+  await action("e('recovery-prepare').click()");
+  await wait("!e('recovery-preview').hidden&&e('recovery-approve').disabled");
+  repairWire.arm(kind);
+  await action("e('recovery-consent').click();e('recovery-approve').click()");
+  stage = kind + ' file-repair accepted response held';
+  await until(()=>repairWire.held?.kind===kind);
+  // A known completed on-disk boundary, NOT an unlink syscall fault or NFS kill.
+  await until(()=>{try{gap.verify(1);return true;}catch(_){return false;}});
+  const counts=repairWire.snapshot(),pid=window.webContents.getOSProcessId(),oldCrashes=crashes;
+  stage = kind + ' file-repair Chromium crash';
+  window.webContents.forcefullyCrashRenderer();
+  await until(()=>crashes===oldCrashes+1&&window.webContents.getURL().startsWith('data:text/html;'));
+  repairWire.release();gap.verify(1);
+  const p=prompts;accepted=false;recoverMenu();await until(()=>prompts===p+1);
+  await new Promise(resolve=>setImmediate(resolve));
+  if(repairWire.counts[kind]!==1)throw Error('Cancelled reload replayed file repair');
+  accepted=true;recoverMenu();await until(()=>prompts===p+2);await ready();
+  if(window.webContents.getOSProcessId()===pid||repairWire.counts[kind]!==1||repairWire.counts.exchanges!==counts.exchanges)throw Error('Native recovery replayed file repair');
+  stage = kind + ' file-repair same approval resolve';
+  await wait("!e('recovery-resolve').hidden&&!e('recovery-resolve').disabled&&e('recovery-kind').value==='"+kind+"'&&!e('notes-autosave').checked&&!e('waives-autosave').checked");
+  gap.verify(1);
+  await action("e('recovery-resolve').click()");
+  await wait("e('recovery-resolve').hidden&&/^Recovery #1: succeeded/.test(e('recovery-status').textContent)");
+  if(repairWire.counts[kind]!==2)throw Error('Wrong file repair resolve count');gap.verify(1);
+  // The failed/retired reader must be replaced through the visible picker,
+  // not a hidden API request or an implicit permission transfer.
+  stage = kind + ' file-repair explicit DRC reopen';
+  await wait("!e('drc-open').disabled");await action("e('drc-open').click()");
+  await wait("!e('browse-dialog').hidden&&Array.from(e('browse-entries').querySelectorAll('button')).some(b=>!b.disabled&&b.textContent.startsWith('synthetic.db  ·'))");
+  await action("Array.from(e('browse-entries').querySelectorAll('button')).find(b=>b.textContent.startsWith('synthetic.db  ·')).click();e('browse-select').click()");
+  await wait("e('browse-dialog').hidden&&!e('drc-reconnect').hidden&&!e('drc-reconnect').disabled");
+  await action("e('drc-reconnect').click()");
+  await wait("!e('browse-dialog').hidden&&!e('browse-review-label').hidden&&!e('browse-review-consent').checked&&e('browse-select').disabled");
+  await action("e('browse-review-consent').click();e('browse-select').click()");
+  await wait("e('browse-dialog').hidden&&!e('notes-autosave').checked&&!e('waives-autosave').checked");
+  await ready(true);gap.verify(1);
+  await wait("/^Earlier recovery #1: succeeded/.test(e('recovery-status').textContent)&&!e('recovery-status').textContent.includes('Open DRC')");
+  stage = kind + ' file-repair fresh read-back';
+  await action("e('drc-errors').children[0].click()");
+  await wait("!e('"+kind+"-read').disabled&&/^Saved notes · native-recovery-test · revision/.test(e('drc-notes-status').textContent)");
+  await action("e('"+kind+"-read').click()");
+  await wait(kind==='notes'?"!e('notes-editor').hidden&&!e('notes-text').disabled&&e('notes-text').value==='Synthetic native recovery — 한글'":
+    "!e('waives-editor').hidden&&!e('waives-action').disabled&&e('waives-target').textContent.includes('1 already waived · 0 reserved statuses')");
+  await action("e('"+kind+"-discard').click()");await wait("e('"+kind+"-editor').hidden");gap.verify(1);
+  if(wire.counts.notes!==2||wire.counts.waives!==2)throw Error('Repair rewrote review payload');
+  console.log('ELECTRON FILE RECOVERY: '+kind+' preview/discard -> approve -> Chromium crash -> explicit resolve #1 -> picker reopen/reconnect -> read-back; POST 1 -> 1 -> 2');
 }
 async function run() {
   await until(() => { window = BrowserWindow.getAllWindows()[0]; return window && origin; });
@@ -203,16 +263,34 @@ async function run() {
       bytes.readUInt32LE(42) !== 1) throw Error('Waive disk read-back differs');
   const additions = [note, waive, note+'.lock', waive+'.lock'].map(file => path.basename(file)).sort();
   if (JSON.stringify(Object.keys(after).filter(name => !Object.hasOwn(before,name)).sort()) !== JSON.stringify(additions)) throw Error('Unexpected synthetic output');
+  stage = 'marked publication gap fixture';
+  const decoy = path.join(root,'.floe-review-000-000.tmp');fs.writeFileSync(decoy,'unrelated staging name; preserve',{flag:'wx',mode:0o600});
+  for(const kind of ['notes','waives'])await fileRecovery(kind);
+  if(fs.readFileSync(decoy,'utf8')!=='unrelated staging name; preserve')throw Error('Recovery scanned unrelated file');
+  const repaired=fingerprint();for(const [name,digest] of Object.entries(after))if(repaired[name]!==digest)throw Error('Recovery modified existing data');
+  if(JSON.stringify(Object.keys(repaired).filter(name=>!Object.hasOwn(after,name)))!==JSON.stringify([path.basename(decoy)]))throw Error('Unexpected repair output');
   stage = 'file recovery panel mounted';
   await wait("!e('recovery-panel').hidden&&!e('recovery-prepare').disabled&&e('recovery-preview').hidden&&e('recovery-check').hidden");
   await action("e('recovery-panel').open=true;e('recovery-panel').querySelector('summary').focus({preventScroll:true});e('recovery-panel').scrollIntoView({block:'start',behavior:'instant'})");
   await wait("e('recovery-panel').open&&e('recovery-panel').getBoundingClientRect().top>=0&&e('recovery-prepare').getBoundingClientRect().bottom<innerHeight");
   await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))');
-  const screenshot = await window.webContents.capturePage();
-  if (screenshot.isEmpty()) throw Error('Empty synthetic recovery panel screenshot');
+  stage = 'file recovery compositor pixels';
+  // Neither a nonempty screenshot nor a rescaled preview proves that geometry
+  // landed. This fixed synthetic view has a large green rectangle; UI icons
+  // alone cannot satisfy the threshold. Poll capture only, never force redraw
+  // or mutate the viewport to make a missing frame pass.
+  let screenshot, captures = 0;
+  await until(async () => {
+    const candidate = await window.webContents.capturePage();captures++;
+    if(candidate.isEmpty())return false;
+    const rgba = candidate.toBitmap();let green = 0;
+    for(let i=0;i<rgba.length;i+=4)if(rgba[i+1]>40&&rgba[i+1]>rgba[i]+20&&rgba[i+1]>rgba[i+2]+20)green++;
+    if(green<rgba.length/4/20)return false;
+    screenshot=candidate;return true;
+  });
+  console.log('ELECTRON REVIEW: compositor geometry confirmed in '+captures+' capture(s)');
   fs.writeFileSync(path.join(root,'recovery-panel.png'), screenshot.toPNG(), {flag:'wx',mode:0o600});
   console.log('ELECTRON REVIEW: panel screenshot ' + path.join(root,'recovery-panel.png'));
-  // Mount/read-only UI regression only; the HTTP gate exercises link repair.
   stage = 'close cancel confirm join';
   app.quit();
   await wait("!e('session-exit-dialog').hidden&&document.activeElement.id==='session-exit-cancel'");
@@ -223,9 +301,9 @@ async function run() {
   complete = true; await action("e('session-exit-confirm').click()");
 }
 app.whenReady().then(run).catch(async () => {
-  failed = true; wire.release();
+  failed = true; wire.release();repairWire.release();
   console.log('ELECTRON REVIEW: failed stage ' + stage);
-  console.log('ELECTRON REVIEW: host flags ' + JSON.stringify({counts:wire.snapshot(),readStatus:wire.readStatus,prompts,crashes,service:service?.phase,wireFailed:wire.failed}));
+  console.log('ELECTRON REVIEW: host flags ' + JSON.stringify({counts:wire.snapshot(),repairs:repairWire.snapshot(),readStatus:wire.readStatus,prompts,crashes,service:service?.phase,wireFailed:wire.failed,repairFailed:repairWire.failed}));
   let timer;
   const flags = await Promise.race([evaluate("(()=>{const e=id=>document.getElementById(id),out={visible:!document.hidden};for(const kind of ['notes','waives']){for(const suffix of ['read','text','action','prepare','approve','resolve']){const n=e(kind+'-'+suffix);out[kind+'_'+suffix]=!!n&&!n.disabled;}for(const suffix of ['editor','review','uncertain']){const n=e(kind+'-'+suffix);out[kind+'_'+suffix]=!!n&&!n.hidden;}out[kind+'_invalid']=/changed|expired/i.test(e(kind+'-message').textContent);}out.live=/^Live/.test(e('status').textContent);return out;})()").catch(()=>null),new Promise(resolve=>{timer=setTimeout(()=>resolve(null),1000);})]);
   clearTimeout(timer); console.log('ELECTRON REVIEW: UI flags ' + JSON.stringify(flags));

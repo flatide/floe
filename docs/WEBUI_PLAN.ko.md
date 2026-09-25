@@ -2,6 +2,12 @@
 
 작성 2026-08-29, 갱신 2026-09-25(Electron 단일 호스트; WK 동결; 원격 단계 보류).
 
+2026-09-25 추가 검증: [DRC 게시 복구](WEBUI_REVIEW_RECOVERY.ko.md)의 실제 Electron
+note/waive 미리보기·취소·승인·응답 유실·Chromium 종료·동일 승인 재확인·picker 재열기와
+권한 재연결을 통과했다. 재열기 뒤 과거 receipt가 재열기를 계속 요구하던 문구도
+고쳤다. 파일 복구 중 **Rust 서비스 자체** 종료·새 세션, shared defaults와 실제
+NFS/RHEL/ETX는 남으며 아래 초기 상태와 구분한다.
+
 2026-09-25 후속: [DRC 게시 복구](WEBUI_REVIEW_RECOVERY.ko.md)에 owner actor·wire·
 공통 웹/Electron 승인 UI를 연결했다. 미리보기→별도 승인→동일 receipt와 명시적
 read-only 재확인 경로이며 자동 저장/GET은 복구하지 않는다. 초기 metadata 실패

@@ -71,3 +71,13 @@ test('invalid/repeated arm is refused', () => {
   for (const kind of ['roots','__proto__','other',null]) assert.throws(() => w.arm(kind));
   w.arm('notes'); assert.throws(() => w.arm('waives'));
 });
+test('repair interceptor counts only exact recovery approvals without reading credentials', () => {
+  const w=new ReviewIntercept(()=>origin,()=>7,'/recovery');
+  for(const kind of ['notes','notes/recovery/prepare','notes/recovery/reconcile'])w.before(request(kind),{},()=>{});
+  assert.equal(w.counts.notes,0);
+  const d=request('notes/recovery',{statusCode:202});
+  for(const key of ['uploadData','requestHeaders','responseHeaders','responseBody'])Object.defineProperty(d,key,{get(){throw Error('sensitive field');}});
+  w.arm('notes');w.before(d,{},()=>{});let calls=0;w.headers(d,{},()=>calls++);
+  assert.equal(w.held.kind,'notes');w.release();assert.equal(calls,1);assert.equal(w.counts.notes,1);
+  assert.throws(()=>new ReviewIntercept(()=>origin,()=>7,'/arbitrary'));
+});
