@@ -3847,7 +3847,7 @@ fn raster_page_records(
             };
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
-            let listed = listed_survivors(request, grid.as_ref(), &rep, base, local_view, &world_transform)?;
+            let walk = survivor_walk(request, grid.as_ref(), &rep, base, local_view, &world_transform)?;
             let mut member = |offset_x: i64, offset_y: i64| -> Result<(), String> {
                 check_member_cancelled(guard, &mut cancel_member)?;
                 if band.is_full() {
@@ -3864,13 +3864,10 @@ fn raster_page_records(
                 }
                 Ok(())
             };
-            // a sub-pixel lattice array walks its listed survivors only, in the
-            // walk's order (the same pixels)
-            let visit = until_full(match listed {
-                Some(offsets) => offsets
-                    .iter()
-                    .try_for_each(|&(x, y)| member(x, y))
-                    .map(|()| RepVisit { tested: offsets.len() as u64, visible: offsets.len() as u64 }),
+            // a sub-pixel lattice array walks only the members that can
+            // survive, in the member walk's order (the same pixels)
+            let visit = until_full(match walk {
+                Some(walk) => walk.run(guard, &mut SurvivorWork::default(), &mut member),
                 None => for_each_visible_offset_chunked(&rep, chunks, base, local_view, &mut member),
             })?;
             stats.rep_members_tested = stats
@@ -5137,50 +5134,93 @@ fn weyl53(k: u64) -> f64 {
 /// this share of the members (the rest of the time the scan is as cheap).
 const SURVIVOR_LIST_SHARE: f64 = 0.5;
 
-impl GridRanks {
-    /// The members of a lattice array that CAN survive its width-first draw,
-    /// in the member walk's order (ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1,
-    /// connected to the renderer 2026-09-25): `range` is the walk's visible
-    /// index rectangle (i0, i1, j0, j1), `sub` the extra-pixel chance bound
-    /// P_c(w) of each world axis the members are under a pixel wide on
-    /// (None: a pixel or more, always drawn along it). Along such an axis A
-    /// of pitch P a member's rank is frac(u_A + vdc(k_A) + weyl(k_B)) - k_A
-    /// its world index along A, an affine function of i or j, k_B the one
-    /// across - and it is drawn only when that rank is under p: for a fixed
-    /// k_B, vdc(k_A) lies in one interval mod 1, a union of at most about
-    /// 2 x 53 dyadic intervals, and each dyadic interval is the arithmetic
-    /// progression k_A = rev_b(m) (mod 2^b), walked member by member. The
-    /// interval is padded (2^-40 against the f64 sums, the bound covers the
-    /// device rounding of each member's width), so the list holds every
-    /// member the walk would draw and the caller re-tests each by the exact
-    /// rule - the pixels are the walk's; the count is that of the listed
-    /// members. None when the array is not a lattice, no sub-pixel axis is
-    /// driven by a repetition index (a column of bars thin across the column
-    /// ranks by the Weyl step alone), or the list would not save half the
-    /// members.
-    fn survivors(
-        &self,
+/// The most progression cursors a survivor walk holds at once (review
+/// 2026-09-25: a temporary memory bound, ~1.5 MB). A walk listed along the
+/// outer repetition index merges every line's cursors in one heap; past this
+/// many it is not started and the member walk runs instead. A walk along the
+/// inner index holds one line's cursors, about 2 per bit of the resolution.
+const SURVIVOR_CURSOR_CAP: usize = 1 << 16;
+
+/// One shape's rank along the listed axis A of a lattice array: a member
+/// (i, j) at world indices k_A = first[A] + sign * (its index along A) and
+/// k_B across ranks frac(u + vdc(k_A) + weyl(k_B)), and may be drawn only
+/// when that is under `p` (an upper bound of its chance). A record's own array
+/// has one term; the shapes of a cell placed by an array have one each.
+#[derive(Clone, Copy, Debug)]
+struct LatticeTerm {
+    u: f64,
+    first: [i64; 2],
+    p: f64,
+}
+
+/// The work of one survivor walk, for tests: members handed to the draw and
+/// the most cursors held at once.
+#[derive(Clone, Copy, Debug, Default)]
+struct SurvivorWork {
+    walked: u64,
+    peak_cursors: usize,
+}
+
+/// A planned walk over the members of a lattice array that CAN survive their
+/// width-first draw (ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1 in the renderer,
+/// 2026-09-25; made lazy after the review of the same day). Along a
+/// sub-pixel world axis A of pitch P a member's rank is
+/// frac(u + vdc(k_A) + weyl(k_B)) - k_A its world index along A, a signed
+/// affine function of the repetition index i or j that runs along A, k_B the
+/// one across - so for a fixed k_B the members under p have vdc(k_A) in one
+/// interval mod 1: a union of dyadic intervals, each the arithmetic
+/// progression k_A = rev_b(m) (mod 2^b). The interval is padded (2^-40
+/// against the f64 sums) and cut at the index range's resolution (a finer
+/// block holds one member at most), so the walk is a superset of the drawn
+/// members and the caller re-tests each by the exact rule: the pixels are the
+/// member walk's. It hands members over in the member walk's order (i, then
+/// j), one line at a time, merging the line's progressions in a small heap -
+/// nothing is prepared ahead, so a draw that stops (the tile is full, the
+/// frame cancelled) stops the walk at once.
+struct SurvivorWalk {
+    va: (i64, i64),
+    vb: (i64, i64),
+    /// the listed world axis (0 = x, 1 = y), the repetition index along it
+    /// (0 = i, 1 = j) and its sign
+    axis: usize,
+    index: usize,
+    sign: i64,
+    /// the repetition index across (0 = i, 1 = j) and its sign when it runs
+    /// along the other world axis of a lattice with a pitch there
+    across: Option<i64>,
+    /// the walk's index rectangle (i0, i1, j0, j1)
+    range: (i64, i64, i64, i64),
+    /// the resolution the rank interval is cut at, in bits
+    bits: u32,
+    terms: Vec<LatticeTerm>,
+}
+
+impl SurvivorWalk {
+    /// Plans the walk over `range` of the array (`rep`'s vectors in the local
+    /// frame, `wa` / `wb` in the world) when listing pays: the listed axis is
+    /// one whose repetition index is the inner one (j) if it qualifies, else
+    /// the outer one, the cheaper when both indices do (`sub`: the world axes
+    /// the terms can be listed on - each needs a bound there). An axis does
+    /// not qualify when its list would exceed SURVIVOR_LIST_SHARE of the
+    /// members or, along the outer index, hold more than SURVIVOR_CURSOR_CAP
+    /// cursors; None when none does.
+    #[allow(clippy::too_many_arguments)]
+    fn plan(
         rep: &Rep,
-        world_transform: &OrthoTransform,
-        base_world: BBox,
+        wa: (i64, i64),
+        wb: (i64, i64),
+        pitch: [i64; 2],
         range: (i64, i64, i64, i64),
-        sub: (Option<f64>, Option<f64>),
-    ) -> Result<Option<Vec<(i64, i64)>>, String> {
-        let GridMode::Lattice { px, py } = self.mode else {
-            return Ok(None);
-        };
+        sub: [bool; 2],
+        terms: impl Fn(usize) -> Vec<LatticeTerm>,
+    ) -> Option<SurvivorWalk> {
         let Rep::Grid { na, nb, va, vb } = rep else {
-            return Ok(None);
+            return None;
         };
         let (i0, i1, j0, j1) = range;
         if i1 < i0 || j1 < j0 {
-            return Ok(None);
+            return None;
         }
-        let origin = world_transform.apply(0, 0)?;
-        let a = world_transform.apply(va.0, va.1)?;
-        let b = world_transform.apply(vb.0, vb.1)?;
-        let wa = (a.0 - origin.0, a.1 - origin.1);
-        let wb = (b.0 - origin.0, b.1 - origin.1);
         // the repetition index (0 = i, 1 = j) that drives a world axis (0 = x,
         // 1 = y) and its sign: its vector runs along that axis
         let driver = |axis: usize| -> Option<(usize, i64)> {
@@ -5189,60 +5229,65 @@ impl GridRanks {
                 (many && along != 0 && across == 0).then(|| (index, along.signum()))
             })
         };
-        let pitch = [px, py];
-        let first = [
-            if px > 0 { base_world.x0.div_euclid(px) } else { 0 },
-            if py > 0 { base_world.y0.div_euclid(py) } else { 0 },
-        ];
         let count = (i1 - i0 + 1) as f64 * (j1 - j0 + 1) as f64;
-        // the resolution the interval is cut at: 2^bits past the index range,
-        // a finer block holds one member at most (the interval is rounded
-        // outwards to it, a superset still)
+        // 2^bits past the index range: a finer block holds one member at most
         let resolution = |values: i64| (64 - (values.max(1) as u64 - 1).leading_zeros()).min(52) + 1;
-        // the axis to list along: sub-pixel and driven by an index, the
-        // cheaper of the two (a line per value of the other index, about two
-        // blocks per bit of the resolution)
-        let mut best: Option<(usize, f64, f64)> = None;
-        for (axis, p) in [(0usize, sub.0), (1, sub.1)] {
-            let (Some(p), Some((index, _))) = (p, driver(axis)) else {
+        let mut best: Option<(usize, (bool, f64), Vec<LatticeTerm>)> = None;
+        for axis in [0usize, 1] {
+            let Some((index, _)) = driver(axis) else {
                 continue;
             };
-            if pitch[axis] <= 0 {
+            if !sub[axis] || pitch[axis] <= 0 {
+                continue;
+            }
+            let terms = terms(axis);
+            if terms.is_empty() {
                 continue;
             }
             let (along, lines) = if index == 0 { (i1 - i0 + 1, j1 - j0 + 1) } else { (j1 - j0 + 1, i1 - i0 + 1) };
-            let cost = lines as f64 * (2.0 * resolution(along) as f64 + 4.0) + p * count;
-            if best.is_none_or(|(_, _, c)| cost < c) {
-                best = Some((axis, p, cost));
+            let blocks = 2 * resolution(along) as usize + 4;
+            // an outer-index walk holds every line's cursors
+            if index == 0 && (lines as usize).saturating_mul(blocks).saturating_mul(terms.len()) > SURVIVOR_CURSOR_CAP {
+                continue;
+            }
+            let chance: f64 = terms.iter().map(|t| t.p).sum::<f64>().min(1.0);
+            let cost = lines as f64 * blocks as f64 * terms.len() as f64 + chance * count;
+            if cost > SURVIVOR_LIST_SHARE * count {
+                continue;
+            }
+            // the inner index first: its walk prepares one line at a time, so
+            // a draw that stops early has paid for one line; an outer-index
+            // walk prepares every line before its first member
+            let rank = (index == 0, cost);
+            if best.as_ref().is_none_or(|(_, c, _)| rank < *c) {
+                best = Some((axis, rank, terms));
             }
         }
-        let Some((axis, p, cost)) = best else {
-            return Ok(None);
-        };
-        if cost > SURVIVOR_LIST_SHARE * count {
-            return Ok(None);
-        }
-        let (index, sign) = driver(axis).expect("the listed axis has a driver");
-        let across = driver(1 - axis);
-        let u = if axis == 0 { self.u.0 } else { self.u.1 };
-        let (d0, d1, o0, o1) = if index == 0 { (i0, i1, j0, j1) } else { (j0, j1, i0, i1) };
-        let bits_max = resolution(d1 - d0 + 1);
-        let scale = 1i64 << bits_max;
+        let (axis, _, terms) = best?;
+        let (index, sign) = driver(axis)?;
+        let across = driver(1 - axis).filter(|&(other, _)| other != index && pitch[1 - axis] > 0).map(|(_, s)| s);
+        let along = if index == 0 { i1 - i0 + 1 } else { j1 - j0 + 1 };
+        Some(SurvivorWalk { va: *va, vb: *vb, axis, index, sign, across, range, bits: resolution(along), terms })
+    }
+
+    /// The cursors (next index along A, stride) of line `o` (the index across)
+    /// for every term, appended to `out`.
+    fn line_cursors(&self, o: i64, out: &mut Vec<(i64, i64)>) {
+        let (d0, d1) = if self.index == 0 { (self.range.0, self.range.1) } else { (self.range.2, self.range.3) };
+        let scale = 1i64 << self.bits;
         let pad = 2f64.powi(-40);
-        let limit = (SURVIVOR_LIST_SHARE * count) as usize + 1;
-        let mut listed: Vec<(i64, i64)> = Vec::new();
-        for o in o0..=o1 {
-            // the world index across: from the other index when it drives the
+        for term in &self.terms {
+            // the world index across: from the index across when it drives the
             // other axis, 0 when that axis does not repeat (GridRanks::ranks)
-            let k_across = match across {
-                Some((other, s)) if other != index && pitch[1 - axis] > 0 => first[1 - axis] + s * o,
-                _ => 0,
+            let k_across = match self.across {
+                Some(s) => term.first[1 - self.axis] + s * o,
+                None => 0,
             };
-            // vdc(k_A) must lie in [lo, lo + p) mod 1: the blocks of 2^-bits_max
+            // vdc(k_A) must lie in [lo, lo + p) mod 1: the blocks of 2^-bits
             // that meet the padded interval, as one or two runs on the circle
-            let lo = (-(u + weyl53(k_across as u64))).rem_euclid(1.0);
+            let lo = (-(term.u + weyl53(k_across as u64))).rem_euclid(1.0);
             let from = ((lo - pad) * scale as f64).floor() as i64;
-            let to = ((lo + p + pad) * scale as f64).ceil() as i64;
+            let to = ((lo + term.p + pad) * scale as f64).ceil() as i64;
             let mut runs: [(i64, i64); 2] = [(0, 0); 2];
             let n = if to - from >= scale {
                 runs[0] = (0, scale);
@@ -5261,57 +5306,125 @@ impl GridRanks {
             };
             for &(lo_r, hi_r) in &runs[..n] {
                 let (mut lo_r, hi_r) = (lo_r as u64, hi_r as u64);
-                // dyadic blocks of [lo_r, hi_r) in the reversed space
                 while lo_r < hi_r {
-                    let mut shift = lo_r.trailing_zeros().min(bits_max);
+                    let mut shift = lo_r.trailing_zeros().min(self.bits);
                     while shift > 0 && lo_r + (1u64 << shift) > hi_r {
                         shift -= 1;
                     }
-                    let bits = bits_max - shift;
+                    let bits = self.bits - shift;
                     let m = lo_r >> shift;
                     // the block fixes the low `bits` bits of k_A (reversed m)
                     let residue = if bits == 0 { 0 } else { m.reverse_bits() >> (64 - bits) };
                     let stride = 1i128 << bits;
                     // k_A = first + sign * d  ==  residue (mod 2^bits)
-                    let want = (sign as i128 * (residue as i128 - first[axis] as i128)).rem_euclid(stride);
-                    let mut d = d0 as i128 + (want - d0 as i128).rem_euclid(stride);
-                    while d <= d1 as i128 {
-                        let d64 = d as i64;
-                        listed.push(if index == 0 { (d64, o) } else { (o, d64) });
-                        if listed.len() > limit {
-                            return Ok(None);
-                        }
-                        d += stride;
+                    let want = (self.sign as i128 * (residue as i128 - term.first[self.axis] as i128)).rem_euclid(stride);
+                    let d = d0 as i128 + (want - d0 as i128).rem_euclid(stride);
+                    if d <= d1 as i128 {
+                        out.push((d as i64, stride as i64));
                     }
                     lo_r += 1u64 << shift;
                 }
             }
         }
-        listed.sort_unstable();
-        listed.dedup();
-        let mut offsets = Vec::with_capacity(listed.len());
-        for (i, j) in listed {
-            let ox = i as i128 * va.0 as i128 + j as i128 * vb.0 as i128;
-            let oy = i as i128 * va.1 as i128 + j as i128 * vb.1 as i128;
-            offsets.push((checked_i64(ox, "grid offset x")?, checked_i64(oy, "grid offset y")?));
+    }
+
+    /// Walks the members in the member walk's order, handing each to
+    /// `member`; stops at the first error `member` returns (a full tile, a
+    /// cancelled frame). The count is that of the members handed over.
+    fn run(
+        &self,
+        guard: Option<RenderGuard<'_>>,
+        work: &mut SurvivorWork,
+        member: &mut dyn FnMut(i64, i64) -> Result<(), String>,
+    ) -> Result<RepVisit, String> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        let (i0, i1, j0, j1) = self.range;
+        let (d1, o0, o1) = if self.index == 0 { (i1, j0, j1) } else { (j1, i0, i1) };
+        let offset = |i: i64, j: i64| -> Result<(i64, i64), String> {
+            let ox = i as i128 * self.va.0 as i128 + j as i128 * self.vb.0 as i128;
+            let oy = i as i128 * self.va.1 as i128 + j as i128 * self.vb.1 as i128;
+            Ok((checked_i64(ox, "grid offset x")?, checked_i64(oy, "grid offset y")?))
+        };
+        let mut heartbeat = 0u16;
+        let mut cursors: Vec<(i64, i64)> = Vec::new();
+        if self.index == 1 {
+            // listed along j, the inner index: line by line (i ascending), the
+            // line's progressions merged by j
+            let mut heap: BinaryHeap<Reverse<(i64, i64)>> = BinaryHeap::new();
+            for i in o0..=o1 {
+                check_member_cancelled(guard, &mut heartbeat)?;
+                cursors.clear();
+                self.line_cursors(i, &mut cursors);
+                work.peak_cursors = work.peak_cursors.max(cursors.len());
+                heap.clear();
+                heap.extend(cursors.iter().map(|&(j, stride)| Reverse((j, stride))));
+                let mut last = i64::MIN;
+                while let Some(Reverse((j, stride))) = heap.pop() {
+                    if j + stride <= d1 {
+                        heap.push(Reverse((j + stride, stride)));
+                    }
+                    // two shapes' progressions may meet on a member
+                    if j == last {
+                        continue;
+                    }
+                    last = j;
+                    let (ox, oy) = offset(i, j)?;
+                    work.walked += 1;
+                    member(ox, oy)?;
+                }
+            }
+        } else {
+            // listed along i, the outer index: every line's progressions in one
+            // heap, merged by (i, j)
+            let mut heap: BinaryHeap<Reverse<(i64, i64, i64)>> = BinaryHeap::new();
+            for j in o0..=o1 {
+                check_member_cancelled(guard, &mut heartbeat)?;
+                cursors.clear();
+                self.line_cursors(j, &mut cursors);
+                heap.extend(cursors.iter().map(|&(i, stride)| Reverse((i, j, stride))));
+            }
+            // SurvivorWalk::plan bounds the cursors of an outer-index walk
+            debug_assert!(heap.len() <= SURVIVOR_CURSOR_CAP);
+            work.peak_cursors = work.peak_cursors.max(heap.len());
+            let mut last = (i64::MIN, i64::MIN);
+            while let Some(Reverse((i, j, stride))) = heap.pop() {
+                if i + stride <= d1 {
+                    heap.push(Reverse((i + stride, j, stride)));
+                }
+                if (i, j) == last {
+                    continue;
+                }
+                last = (i, j);
+                let (ox, oy) = offset(i, j)?;
+                work.walked += 1;
+                member(ox, oy)?;
+            }
         }
-        Ok(Some(offsets))
+        Ok(RepVisit { tested: work.walked, visible: work.walked })
     }
 }
 
-/// The members of a width-first rectangle array to walk: its listed survivors
-/// (GridRanks::survivors) when the request lists them, the array is a lattice
-/// and a member is under a pixel along an axis its repetition runs on; None
-/// for the member walk. `base` is the record's first member (local).
-fn listed_survivors(
+/// The survivor walk of a width-first rectangle array: planned when the
+/// request lists survivors, the array ranks on the world lattice
+/// (GridRanks) and its members are under a pixel along an axis its
+/// repetition runs on; None for the member walk. `base` is the record's first
+/// member (local).
+fn survivor_walk(
     request: &GeometryRasterRequest,
     grid: Option<&GridRanks>,
     rep: &Rep,
     base: BBox,
     local_view: BBox,
     world_transform: &OrthoTransform,
-) -> Result<Option<Vec<(i64, i64)>>, String> {
+) -> Result<Option<SurvivorWalk>, String> {
     let Some(grid) = grid.filter(|_| request.survivor_list) else {
+        return Ok(None);
+    };
+    let GridMode::Lattice { px, py } = grid.mode else {
+        return Ok(None);
+    };
+    let Rep::Grid { va, vb, .. } = rep else {
         return Ok(None);
     };
     let Some(range) = visible_grid_range(rep, base, local_view) else {
@@ -5327,7 +5440,28 @@ fn listed_survivors(
         let c = request.width_c;
         (w < 1.0).then(|| if c > 1.0 { w / (c - (c - 1.0) * w) } else { w })
     };
-    grid.survivors(rep, world_transform, world, range, (bound(x1 - x0), bound(y1 - y0)))
+    let chance = [bound(x1 - x0), bound(y1 - y0)];
+    let origin = world_transform.apply(0, 0)?;
+    let a = world_transform.apply(va.0, va.1)?;
+    let b = world_transform.apply(vb.0, vb.1)?;
+    let first = [
+        if px > 0 { world.x0.div_euclid(px) } else { 0 },
+        if py > 0 { world.y0.div_euclid(py) } else { 0 },
+    ];
+    Ok(SurvivorWalk::plan(
+        rep,
+        (a.0 - origin.0, a.1 - origin.1),
+        (b.0 - origin.0, b.1 - origin.1),
+        [px, py],
+        range,
+        [chance[0].is_some(), chance[1].is_some()],
+        |axis| {
+            chance[axis]
+                .map(|p| LatticeTerm { u: if axis == 0 { grid.u.0 } else { grid.u.1 }, first, p })
+                .into_iter()
+                .collect()
+        },
+    ))
 }
 
 /// One axis of a width-first rectangle: the side [v0, v1) (device units) is
@@ -8604,7 +8738,7 @@ mod tests {
         }
     }
 
-    /// GridRanks::survivors (§4.3 step 1 in the renderer, 2026-09-25): over
+    /// SurvivorWalk (§4.3 step 1 in the renderer, 2026-09-25): over
     /// random lattice arrays - 1-D and 2-D, pitches of either sign, members
     /// under a pixel on one axis or both, first members on either side of 0,
     /// placed under all eight orientations, WIDTH_C 1 and 4 - the listed
@@ -8677,9 +8811,17 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-            let Some(listed) = listed_survivors(&request, Some(&grid), &rep, base, local_view, &place).unwrap() else {
+            let Some(survivors) = survivor_walk(&request, Some(&grid), &rep, base, local_view, &place).unwrap() else {
                 continue;
             };
+            let mut listed = Vec::new();
+            let mut work = SurvivorWork::default();
+            survivors.run(None, &mut work, &mut |ox, oy| {
+                listed.push((ox, oy));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(work.walked, listed.len() as u64);
             listed_cases += 1;
             members += visit.tested;
             walked += listed.len() as u64;
@@ -8693,10 +8835,22 @@ mod tests {
                 .collect();
             assert_eq!(kept, walk, "case {}: {:?} {}x{} at ({}, {}) c {}", case, rep, w, h, x, y, request.width_c);
             assert!(listed.len() as u64 * 2 <= visit.tested + 1, "case {}: listed {} of {}", case, listed.len(), visit.tested);
-            // off: no list
+            // the walk never holds more than one line's cursors along j, or the
+            // cap along i
+            assert!(work.peak_cursors <= SURVIVOR_CURSOR_CAP);
+            // a draw that stops at once stops the walk at once
+            let mut calls = 0;
+            let mut stopped = SurvivorWork::default();
+            let result = survivors.run(None, &mut stopped, &mut |_, _| {
+                calls += 1;
+                Err(WRITE_ONCE_FULL.to_string())
+            });
+            let first = usize::from(!listed.is_empty());
+            assert!(result.is_err() == (first == 1) && calls == first && stopped.walked == first as u64, "case {}: {} calls", case, calls);
+            // off: no walk
             let mut off = request;
             off.survivor_list = false;
-            assert!(listed_survivors(&off, Some(&grid), &rep, base, local_view, &place).unwrap().is_none());
+            assert!(survivor_walk(&off, Some(&grid), &rep, base, local_view, &place).unwrap().is_none());
         }
         assert!(cases > 500 && listed_cases > 100, "{} lattice cases, {} listed", cases, listed_cases);
         eprintln!(
@@ -8741,6 +8895,47 @@ mod tests {
             );
             assert_eq!(a.stats.rep_members_drawn, b.stats.rep_members_drawn);
         }
+    }
+
+    /// Review 2026-09-25 (timing, run by hand with --ignored): a 2 M-member
+    /// sub-pixel array behind a tile that one open pixel keeps from full - the
+    /// first survivors fill it, so a walk that lists survivors must not
+    /// prepare them all first.
+    #[test]
+    #[ignore]
+    fn survivor_walk_in_a_nearly_full_tile_timing() {
+        let rect = |x, y, w, h, rep: Rep| RectRec { layer: 1, dt: 0, x, y, w, h, rep };
+        let scene = hairline_scene(
+            vec![
+                rect(100, 0, 25_500, 25_600, Rep::One),
+                rect(0, 100, 100, 25_500, Rep::One),
+                rect(0, 0, 30, 30, Rep::Grid { na: 2000, nb: 1000, va: (13, 0), vb: (0, 26) }),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut on = hairline_request();
+        on.raster.area_true = true;
+        on.raster.view = RasterViewBox::new(0.0, 0.0, 25_600.0, 25_600.0).unwrap();
+        on.raster.width = 256;
+        on.raster.height = 256;
+        on.raster.tile_size = 384;
+        let mut off = on.clone();
+        off.raster.survivor_list = false;
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for k in 0..8 {
+            for (list, times) in [(true, &mut a), (false, &mut b)] {
+                let request = if list { &on } else { &off };
+                let report = render_geometry_styled(&scene, request).unwrap();
+                if k > 0 {
+                    times.push(report.stats.raster_us);
+                }
+            }
+        }
+        a.sort_unstable();
+        b.sort_unstable();
+        let same = render_geometry_styled(&scene, &on).unwrap().frame == render_geometry_styled(&scene, &off).unwrap().frame;
+        eprintln!("nearly full tile: raster list on {} us, off {} us (medians of 7), pixels identical {}", a[3], b[3], same);
     }
 
     #[test]
