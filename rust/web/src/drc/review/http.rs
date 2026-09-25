@@ -18,6 +18,8 @@ pub(crate) fn is_large_body(method: &Method, path: &str) -> bool {
                 | "/api/v1/drc/review/notes/prepare"
                 | "/api/v1/drc/review/waives/read"
                 | "/api/v1/drc/review/waives/prepare"
+                | "/api/v1/drc/review/notes/recovery/prepare"
+                | "/api/v1/drc/review/waives/recovery/prepare"
                 | "/api/v1/drc/review/notes/transfer"
                 | "/api/v1/drc/review/waives/transfer"
                 | "/api/v1/drc/review/notes/transfer/chunk"
@@ -41,6 +43,7 @@ fn routes_for(kind: store::Kind, root: &str) -> Router<Gate> {
         .route(&format!("{root}/{{seq}}"), get(operation))
         .route(&format!("{root}/{{seq}}/cancel"), post(cancel))
         .merge(super::transfer::routes(root))
+        .merge(super::recovery::routes(root))
         .layer(Extension(kind))
         .layer(DefaultBodyLimit::max(crate::drc::RESPONSE_BYTES))
 }

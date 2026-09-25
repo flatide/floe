@@ -2,6 +2,7 @@
 //! one-use prepared tokens. Native publication outlives HTTP subscribers.
 mod display;
 mod http;
+mod recovery;
 mod transfer;
 use super::{Failure, Service as Reader};
 use crate::{
@@ -117,6 +118,7 @@ struct Submit {
     confirm_legacy: bool,
 }
 enum Model {
+    Recovery(managed::Recovery),
     Snapshot(managed::Snapshot, Vec<u64>),
     Prepared(
         managed::Prepared,
@@ -155,6 +157,7 @@ struct State {
     stop: Option<Arc<AtomicUsize>>,
     ledger: Ledger,
     transfer: transfer::State,
+    recovery: recovery::State,
     retired: Vec<Ready>,
 }
 struct Inner {
@@ -224,6 +227,7 @@ impl Service {
                 stop: None,
                 ledger: Ledger::default(),
                 transfer: transfer::State::default(),
+                recovery: recovery::State::default(),
                 retired: Vec::new(),
             }),
             config,
@@ -262,7 +266,10 @@ impl Service {
         if s.detached {
             return Err("review_disabled");
         }
-        if s.ledger.active().is_some() || s.transfer.ledger.active().is_some() {
+        if s.ledger.active().is_some()
+            || s.transfer.ledger.active().is_some()
+            || s.recovery.ledger.active().is_some()
+        {
             return Err("drc_busy");
         }
         s.serial = s.serial.checked_add(1).ok_or("review_limit")?;
@@ -299,7 +306,10 @@ impl Service {
         if s.detached {
             return Err("review_disabled");
         }
-        if s.ledger.active().is_some() || s.transfer.ledger.active().is_some() {
+        if s.ledger.active().is_some()
+            || s.transfer.ledger.active().is_some()
+            || s.recovery.ledger.active().is_some()
+        {
             return Err("drc_busy");
         }
         let ready = s
@@ -403,7 +413,7 @@ impl Service {
         if s.detached {
             return Err("review_disabled");
         }
-        if s.preparing.is_some() {
+        if s.preparing.is_some() || s.recovery.ledger.active().is_some() {
             return Err("drc_busy");
         }
         let r = s
@@ -555,6 +565,7 @@ impl Service {
             || self.preparations.available_permits() == 0
             || s.ledger.active().is_some()
             || s.transfer.ledger.active().is_some()
+            || s.recovery.ledger.active().is_some()
             || !s.retired.is_empty()
             || s.ready
                 .as_ref()
@@ -827,10 +838,23 @@ fn run(inner: Arc<Inner>) {
             let mut s = inner.state.lock().unwrap();
             while s.pending.is_none()
                 && s.transfer.pending.is_none()
+                && s.recovery.pending.is_none()
                 && s.retired.is_empty()
                 && !s.closed
             {
                 s = inner.wake.wait(s).unwrap();
+            }
+            if let Some(task) = s.recovery.pending.take() {
+                drop(s);
+                recovery::run(&inner, task);
+                continue;
+            }
+            if s.closed {
+                let held = s.recovery.held.take();
+                drop(s);
+                drop(held);
+                // Closed services can still have queued approved publications.
+                s = inner.state.lock().unwrap();
             }
             if !s.retired.is_empty() {
                 let retired = std::mem::take(&mut s.retired);

@@ -44,7 +44,7 @@ layerprops layer_defaults layer_palette palette_styles display_test app_clip man
 fe_embed drc_captures view_controller zoom_band minimap depth_keys web_wheel worker_queries \
 view_stream managed_index owner_service web_cli web_local_sharing display_cli display_input web_handoff \
 web_browse web_file_display web_startup instance_key web_drc web_drc_notes web_drc_waives web_review_budget \
-web_autosave web_read_reviewer web_drc_open web_drc_rules web_drc_transfer web_svrf web_ui web_menu_inventory \
+web_autosave web_read_reviewer web_drc_open web_drc_rules web_drc_transfer web_review_recovery web_svrf web_ui web_menu_inventory \
 web_hangul app_jobdeck app_jobdeck_sources app_jobdeck_plan app_deck_render app_drc drc_review drc_build \
 web_drc_build app_svrf svrf_native worker_client"
 GATES="$GATES $WEB_APP_GATES"
@@ -328,6 +328,8 @@ if gate web_drc_rules; then RAN="$RAN web_drc_rules"
     .venv/bin/python -B tools/validate_web_drc_rules.py "$FLOE2_SMOKE_SRC"; fi
 if gate web_drc_transfer; then RAN="$RAN web_drc_transfer"
     .venv/bin/python -B tools/validate_web_drc_transfer.py "$FLOE2_SMOKE_SRC"; fi
+if gate web_review_recovery; then RAN="$RAN web_review_recovery"
+    .venv/bin/python -B tools/validate_web_review_recovery.py "$FLOE2_SMOKE_SRC"; fi
 if gate web_svrf; then RAN="$RAN web_svrf"
     .venv/bin/python -B tools/validate_web_svrf.py "$FLOE2_SMOKE_SRC"; fi
 if gate web_ui; then RAN="$RAN web_ui"

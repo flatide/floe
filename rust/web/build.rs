@@ -36,6 +36,7 @@ fn main() {
         "ui/drc-notes.js",
         "ui/hangul.js",
         "ui/review-save-mode.js",
+        "ui/drc-recovery.js",
         "ui/drc-note-display.js",
         "ui/drc-waives.js",
         "ui/drc-transfer.js",

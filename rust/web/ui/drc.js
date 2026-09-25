@@ -60,7 +60,7 @@
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
         let restoring = false;
         let isolationNotice = '', notes = null, waives = null, transfers = null, noteDisplay = null, noteState = null, noteTarget = null;
-        let waiveDisplayBlocked = false;
+        let waiveDisplayBlocked = false, recovery = null;
         const groups = o.groups.bind({http: o.http, protocol: P, changed: groupsChanged,
             status: function (s) { el('drc-group-status').textContent = s; }});
         const persistence = o.stateStore.bind({http: o.http, protocol: P,
@@ -113,6 +113,11 @@
         if (o.transfers) {transfers=o.transfers.bind({document:doc,el:el,protocol:P,http:o.http,chunk:o.transferChunk,download:o.transferDownload,
             editors:{notes:notes,waives:waives},context:function(){const c=current();return c&&c.connected&&!restoring&&registration.metadata&&registration.metadata.format==='ice'?
                 {context:{drc_id:registration.id,revision:registration.revision,view_id:c.id},epoch:c.state.connection_epoch}:null;},
+            now:o.now||function(){return Date.now();},setTimeout:o.setTimeout||function(fn,ms){return setTimeout(fn,ms);},clearTimeout:o.clearTimeout||function(id){clearTimeout(id);}});}
+        if(o.recovery){recovery=o.recovery.bind({el:el,protocol:P,http:o.http,editors:{notes:notes,waives:waives},session:o.session,
+            loadPending:o.loadRecoveryPending,savePending:o.saveRecoveryPending,
+            context:function(){const c=o.context();return !stopped&&!(builds&&builds.suspended())&&registration&&registration.phase!=='closed'&&
+                c&&c.connected&&c.state&&c.source===registration.source_id?{drc_id:registration.id,revision:registration.revision,view_id:c.id}:null;},
             now:o.now||function(){return Date.now();},setTimeout:o.setTimeout||function(fn,ms){return setTimeout(fn,ms);},clearTimeout:o.clearTimeout||function(id){clearTimeout(id);}});}
         function noteSelection() {
             const c = current();
@@ -906,6 +911,7 @@
             groupsChanged();
             if(noteDisplay){noteDisplay.sync();}
             if(transfers){transfers.changed();}
+            if(recovery){recovery.changed();}
             if (waives && waives.suspended()) { info('Waive save or reader refresh pending. Previous DRC selection and outlines are not active.'); }
             else if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC database.'); }
             if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
@@ -919,6 +925,7 @@
             if (notes) { notes.attach(v.notes); }
             if (waives) { waives.attach(v.waives, registration); }
             if (transfers) { transfers.attach(v); }
+            if (recovery) { recovery.attach(v); }
             const activeWaives=v.waives&&v.waives.available,activeNotes=v.notes&&v.notes.available;
             el('drc-review-mode').textContent = activeWaives ? 'OWNER REVIEW' : activeNotes ? (v.notes.editable ? 'OWNER NOTES' : 'READ-ONLY REVIEWER') : 'NO REVIEW WRITES';
             if (registration) {
@@ -994,6 +1001,7 @@
         el('drc-reload').onclick = restoreState;
         return {init: refresh, refresh: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
             reviewGrant:function(){return reviewGrant;},
+            recoveryBusy:function(){return !!(recovery&&recovery.busy());},
             openContext:function(){
                 const c=o.context();if(stopped||!c||!c.connected||c.pending||!['idle','rendering'].includes(c.state.status)||registration&&['opening','updating'].includes(registration.phase)){return null;}
                 return {view_id:c.id,drc_id:registration?registration.id:null,revision:registration?registration.revision:null};
@@ -1013,8 +1021,8 @@
                 if ((key === '.' || key === ',') && rule && current()) { step(key === ',', false, false); return true; }
                 return false;
             },
-            stop: function (final) { stopped = true; if(transfers){transfers.stop(final);} if(noteDisplay){noteDisplay.stop();} if (notes) { notes.stop(final); } if (waives) { waives.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
-            resume: function () { stopped = false; if(noteDisplay){noteDisplay.resume();} if (notes) { notes.resume(); } if (waives) { waives.resume(); } if(transfers){transfers.resume();} return builds ? builds.resume() : refresh(); }};
+            stop: function (final) { stopped = true; if(recovery){recovery.stop();} if(transfers){transfers.stop(final);} if(noteDisplay){noteDisplay.stop();} if (notes) { notes.stop(final); } if (waives) { waives.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
+            resume: function () { stopped = false; if(recovery){recovery.resume();} if(noteDisplay){noteDisplay.resume();} if (notes) { notes.resume(); } if (waives) { waives.resume(); } if(transfers){transfers.resume();} return builds ? builds.resume() : refresh(); }};
     }
     const api = {bind: bind, projection: projection, point: point, shifted: shifted, vertices: vertices, metadataText: metadataText, comparisonText: comparisonText};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeDRC = api; }

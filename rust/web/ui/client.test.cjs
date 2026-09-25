@@ -116,7 +116,7 @@ nodes.get('index-open').hidden=true;
 // These authoring/approval panels are hidden in the real initial HTML.
 for(const id of ['browse-dialog','index-open-dialog','about-dialog','session-exit-dialog','share-dialog',
     'notes-editor','notes-review','notes-uncertain','notes-cancel','waives-editor','waives-review','waives-uncertain','waives-cancel',
-    'default-review','default-uncertain','default-cancel']) nodes.get(id).hidden=true;
+    'default-review','default-uncertain','default-cancel','recovery-preview','recovery-resolve','recovery-check']) nodes.get(id).hidden=true;
 const node = id=>nodes.get(id);
 const bundle='d'.repeat(40), epoch='b'.repeat(64);let viewId='a'.repeat(64);
 const snapshot={type:'snapshot',view_id:viewId,connection_epoch:epoch,dataset_revision:'1',state_rev:'1',
@@ -251,6 +251,7 @@ const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require
 const storage=new Map();
 window.isSecureContext=true;window.ClipboardItem=class {constructor(data){this.data=data;}};
 window.FloeSettings=require('./settings.js');
+window.FloeDRCRecovery=require('./drc-recovery.js');
 window.FloeDefaults=require('./defaults.js');
 window.FloeAbout=require('./about.js');
 window.FloeDisplayDump=require('./display-dump.js');
@@ -996,7 +997,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         assert(node('open').disabled&&node('index').disabled);assert.equal(sockets.length,0);
         assert.equal(launcherOptions.ready(),true);
         for(const id of ['about-dialog','session-exit-dialog','share-dialog','notes-editor','notes-review','notes-uncertain','notes-cancel',
-            'waives-editor','waives-review','waives-uncertain','waives-cancel','default-review','default-uncertain','default-cancel']){
+            'waives-editor','waives-review','waives-uncertain','waives-cancel','default-review','default-uncertain','default-cancel','recovery-preview','recovery-resolve','recovery-check']){
             node(id).hidden=false;assert.equal(launcherOptions.ready(),false,id+' must postpone CLI open');node(id).hidden=true;
         }
         assert.equal(launcherOptions.ready(),true);

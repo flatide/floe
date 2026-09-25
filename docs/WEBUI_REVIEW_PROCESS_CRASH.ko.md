@@ -2,8 +2,10 @@
 
 2026-09-23 후속: [명시적 복구 코어](WEBUI_REVIEW_RECOVERY.ko.md)에 DRC 게시 표식과
 preview/recover/reconcile을 추가하고 실제 link gap·복구 전후 프로세스 종료를 검사했다.
-일반 reader는 두 링크를 계속 거부한다. actor/HTTP/UI·shared defaults·실제 NFS는
-남으므로 DRC-PUB-01 전체는 열려 있다. 아래는 표식 추가 전의 재현/검토 기록이다.
+guarded review reader는 두 링크를 계속 거부한다. 2026-09-25에 actor/HTTP/공통 UI의
+명시 승인을 연결했으며 세부 테스트와 CLI explicit-waive/guarded reader 차이는
+위 문서 §4에 남겼다. shared defaults·일반 게시 결과 불명·실제 NFS가 남으므로
+DRC-PUB-01 전체는 열려 있다. 아래는 표식 추가 전의 재현/검토 기록이다.
 
 2026-09-22. [G4](WEBUI_G4_AUDIT.ko.md), [Electron 표시 프로세스 장애](WEBUI_ELECTRON_REVIEW.ko.md)의
 후속이다. 이번 변경은 Rust test-only 모듈이며 제품 게시/보안/복구 정책은 그대로다.

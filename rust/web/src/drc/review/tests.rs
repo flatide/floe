@@ -164,7 +164,7 @@ fn selected_read_target_cannot_be_used_as_an_editor() {
     })
     .is_err());
 }
-fn owner() -> SessionId {
+pub(super) fn owner() -> SessionId {
     let (mut auth, secret) = crate::auth::Auth::new(
         Instant::now(),
         Duration::from_secs(30),
@@ -319,6 +319,15 @@ fn wire_never_accepts_reviewer_path_kind_or_forged_global_ids() {
         &axum::http::Method::POST,
         "/api/v1/drc/review/notes/prepare/"
     ));
+    for kind in ["notes", "waives"] {
+        let path = format!("/api/v1/drc/review/{kind}/recovery/prepare");
+        assert!(http::is_large_body(&axum::http::Method::POST, &path));
+        assert!(!http::is_large_body(&axum::http::Method::GET, &path));
+        assert!(!http::is_large_body(
+            &axum::http::Method::POST,
+            &format!("{path}/")
+        ));
+    }
     let mut c = request().context;
     c.view_id = "한".repeat(64);
     assert!(c.validate().is_err());

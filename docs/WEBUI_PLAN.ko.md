@@ -1,11 +1,12 @@
 # floe2 웹 셸 / 서버-클라이언트 계획 (정본)
 
-작성 2026-08-29, 갱신 2026-09-23(Electron 단일 호스트; WK 동결; 원격 단계 보류).
+작성 2026-08-29, 갱신 2026-09-25(Electron 단일 호스트; WK 동결; 원격 단계 보류).
 
-2026-09-23 후속: [DRC 게시 복구 코어](WEBUI_REVIEW_RECOVERY.ko.md)를 추가했다.
-mark/preview/recover/reconcile과 로컬 SIGKILL 검증 단계이며, 앱에서의 승인 UI·wire는
-아직 없다. shared defaults·실제 NFS까지 포함한 DRC-PUB-01 완료와 구분한다.
-이 단계의 선택 없는 전체 Rust/web 배터리는 exit0이다.
+2026-09-25 후속: [DRC 게시 복구](WEBUI_REVIEW_RECOVERY.ko.md)에 owner actor·wire·
+공통 웹/Electron 승인 UI를 연결했다. 미리보기→별도 승인→동일 receipt와 명시적
+read-only 재확인 경로이며 자동 저장/GET은 복구하지 않는다. 초기 metadata 실패
+등록에서도 진입하고, 복구 뒤 Open DRC로 reader를 명시 재설치한다. shared defaults·
+일반 게시 결과 불명·실제 Electron/NFS 수용까지 DRC-PUB-01을 완료 처리하지 않는다.
 
 **현재 호스트 결정:** macOS/Linux 네이티브 앱은 [Electron](WEBUI_ELECTRON.ko.md)만
 개발한다. WKWebView는 `617909e` 기준으로 [동결](../desktop/README.md)하고 기존

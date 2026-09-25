@@ -23,6 +23,7 @@
   <script defer src="/assets/@@BUNDLE@@/drc-build.js"></script>
   <script defer src="/assets/@@BUNDLE@@/hangul.js"></script>
   <script defer src="/assets/@@BUNDLE@@/review-save-mode.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/drc-recovery.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-notes.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-note-display.js"></script>
   <script defer src="/assets/@@BUNDLE@@/drc-waives.js"></script>
@@ -257,6 +258,21 @@
     </main>
     <aside id="drc-panel" class="drc-panel" aria-label="DRC review" hidden>
       <div class="drc-heading"><h2>DRC review <span id="drc-review-mode">NO REVIEW WRITES</span></h2><strong id="drc-title">DRC results</strong><p id="drc-summary" class="note"></p></div>
+      <details id="recovery-panel" class="notes-panel" aria-label="Interrupted review file recovery" hidden>
+        <summary>Recover interrupted review file…</summary>
+        <p class="note">For marked note/waive files interrupted during publication. No payload rewrite, directory scan or legacy-file cleanup. Also available when DRC metadata cannot load.</p>
+        <label>File <select id="recovery-kind"><option value="notes">Notes</option><option id="recovery-waives-choice" value="waives" disabled>Waives</option></select></label>
+        <button id="recovery-prepare">Preview file recovery</button>
+        <div id="recovery-preview" hidden>
+          <p><strong id="recovery-target"></strong></p>
+          <label class="check"><input id="recovery-consent" type="checkbox"> Remove only the verified extra staging link; keep the target and its contents.</label>
+          <div class="button-row"><button id="recovery-approve" disabled>Approve file recovery</button><button id="recovery-discard">Discard preview</button></div>
+        </div>
+        <p id="recovery-status" role="status"></p><p id="recovery-message" class="note" role="status"></p>
+        <div class="button-row"><button id="recovery-refresh">Refresh receipt</button><button id="recovery-resolve" hidden>Resolve same approval</button><button id="recovery-check" hidden>Check same repair (read only)</button></div>
+        <label id="recovery-checked-label" class="check" hidden><input id="recovery-checked" type="checkbox"> I checked the file and receipt independently.</label>
+        <button id="recovery-forget" hidden disabled>Clear tab receipt only</button>
+      </details>
       <section id="drc-build" class="drc-build" aria-label="DRC pack build" hidden>
         <button id="drc-build-open" aria-expanded="false" aria-controls="drc-build-form" disabled>Build pack…</button>
         <form id="drc-build-form" aria-label="Approve pack build" hidden>

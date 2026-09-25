@@ -1085,7 +1085,9 @@
     drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http, painted:dumpChanged,
         history:rulerHistory, rulerKey:function (key) { return measurement && !drcPanel.boxActive() && measurement.key(key); },
         stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, builds: window.FloeDRCBuild, cursor: reviewCursor,
-        notes: window.FloeDRCNotes, noteDisplay: window.FloeDRCNoteDisplay, waives: window.FloeDRCWaives, transfers: window.FloeDRCTransfer, session: function () { return auth ? auth.session_id : ''; },
+        notes: window.FloeDRCNotes, noteDisplay: window.FloeDRCNoteDisplay, waives: window.FloeDRCWaives, transfers: window.FloeDRCTransfer, recovery: window.FloeDRCRecovery, session: function () { return auth ? auth.session_id : ''; },
+        loadRecoveryPending: function () { return sessionStorage.getItem('floe-review-recovery'); },
+        saveRecoveryPending: function (value) { if (value === null) { sessionStorage.removeItem('floe-review-recovery'); } else { sessionStorage.setItem('floe-review-recovery', value); } },
         transferChunk: function (kind, request, offset, blob, token) {
             if (!['notes','waives'].includes(kind)||!blob||blob.size<1||blob.size>1048576) {return Promise.reject(new Error('Invalid review chunk'));}
             return http('POST','/api/v1/drc/review/'+kind+'/transfer/chunk',undefined,false,token,{blob:blob,headers:{
@@ -1174,8 +1176,8 @@
         const editing = gotoDirty || ['browse-dialog','index-open-dialog','about-dialog','session-exit-dialog','share-dialog',
             'notes-editor','notes-review','notes-uncertain','notes-cancel',
             'waives-editor','waives-review','waives-uncertain','waives-cancel',
-            'default-review','default-uncertain','default-cancel'].some(function(id){return !el(id).hidden;});
-        return !editing && !indexBlocked() && !stopped && !document.hidden && (!picker || !picker.blocked()) && !startupWaiting && !submitting && !ownerBusy && !inflight && !accepted && !queue.length &&
+            'default-review','default-uncertain','default-cancel','recovery-preview','recovery-resolve','recovery-check'].some(function(id){return !el(id).hidden;});
+        return !editing && !(drcPanel&&drcPanel.recoveryBusy()) && !indexBlocked() && !stopped && !document.hidden && (!picker || !picker.blocked()) && !startupWaiting && !submitting && !ownerBusy && !inflight && !accepted && !queue.length &&
             !(gesture && gesture.active()) && (!live() || ['idle','rendering'].includes(state.status));
     }
     launcher=window.FloeLauncher.bind({el:el,http:http,protocol:P,ready:launchReady,changed:controls,

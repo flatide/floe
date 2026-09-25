@@ -98,6 +98,7 @@
         function permitted(){return displayReady()&&model.editable;}
         function busy(ignoreTransfer){return (!ignoreTransfer&&transferLocked)||!!pending||uncertain||!!active()||!!write||!!approving;}
         function transferReady(importing){return !!(permitted()&&!busy(true)&&!io&&!model.preparing&&!revokeTask&&(!importing||!editor));}
+        function recoveryReady(){return !!(permitted()&&!busy(false)&&!io&&!model.preparing&&!revokeTask&&!editor&&!draft);}
         async function publishTransfer(value,valid){
             if(!transferReady(true)||!valid()){return false;}const t={};approving=t;render();await refresh();
             if(approving!==t){return false;}approving=null;
@@ -274,7 +275,7 @@
         return {attach:function(value){if(!value){if(!enabled){render();}return;}try{const v=catalog(value,P);if(!enabled){enabled=true;if(v.editable||v.detached){recover();}}install(v);changed();schedule();}
                 catch(e){stale=true;notice=e.message;render();}},changed:changed,refresh:refresh,
             open:function(){if(!permitted()){return false;}changed();if(editor){el('notes-text').focus();}else{read(false);}return true;},
-            transferReady:transferReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
+            transferReady:transferReady,recoveryReady:recoveryReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
             stop:function(final){stopped=true;stale=true;saveMode.reset();approving=null;clearEditor(false);if(write){uncertain=true;}
                 [io,poll,write,cancelling,revokeTask].forEach(abort);io=poll=write=cancelling=revokeTask=null;revokeNext=null;o.clearTimeout(timer);timer=null;
                 if(final&&model&&model.editable){store(null);}render();},resume:function(){stopped=false;return enabled?refresh():Promise.resolve();}};

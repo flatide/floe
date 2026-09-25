@@ -12,6 +12,83 @@ fn flag() -> Arc<AtomicUsize> {
 }
 
 #[test]
+fn recovery_keeps_admission_and_separates_cancelled_write_from_readonly_check() {
+    use crate::layer_defaults::security::Security;
+    use std::os::unix::fs::MetadataExt;
+    #[cfg(target_os = "macos")]
+    let marker = c"com.floe.review-stage-v1";
+    #[cfg(not(target_os = "macos"))]
+    let marker = c"user.floe.review-stage-v1";
+    for k in [store::Kind::Notes, store::Kind::Waives] {
+        for cancelled in [false, true] {
+            let f = Fixture::new();
+            let m = f.open(k);
+            let draft = if k == store::Kind::Notes {
+                f.note(&m, "recovery lease")
+            } else {
+                m.snapshot(flag())
+                    .unwrap()
+                    .prepare_waives(&[(0, 1)])
+                    .unwrap()
+            };
+            assert_eq!(
+                finish(&mut draft.publish(false).unwrap()).phase,
+                Phase::Succeeded
+            );
+            let target = m.target().to_owned();
+            let bytes = fs::read(&target).unwrap();
+            let security = Security::read(&fs::File::open(&target).unwrap()).unwrap();
+            let record: serde_json::Value =
+                serde_json::from_slice(security.attribute(marker).unwrap()).unwrap();
+            let stage = f.dir.join(record["stage"].as_str().unwrap());
+            fs::hard_link(&target, &stage).unwrap();
+            let stop = flag();
+            let proof = m.prepare_recovery(Arc::clone(&stop)).unwrap();
+            assert_eq!(proof.target(), target);
+            assert_eq!(kind(m.snapshot(flag())), ErrorKind::Busy);
+            assert_eq!(kind(m.prepare_recovery(flag())), ErrorKind::Busy);
+            if cancelled {
+                stop.store(1, Ordering::Relaxed);
+                assert_eq!(kind(proof.recover()), ErrorKind::Cancelled);
+                assert_eq!(
+                    proof.reconcile(&AtomicUsize::new(0)).unwrap(),
+                    store::RecoveryState::Pending
+                );
+                assert_eq!(fs::metadata(&target).unwrap().nlink(), 2);
+            } else {
+                assert!(matches!(
+                    proof.recover().unwrap(),
+                    store::RecoveryResult::Recovered { .. }
+                ));
+                assert_eq!(
+                    proof.reconcile(&AtomicUsize::new(0)).unwrap(),
+                    store::RecoveryState::Completed
+                );
+                assert_eq!(fs::metadata(&target).unwrap().nlink(), 1);
+            }
+            m.request_stop();
+            assert_eq!(
+                kind(proof.reconcile(&AtomicUsize::new(0))),
+                ErrorKind::Cancelled
+            );
+            drop(m);
+            assert_eq!(f.resources.usage().cpu_slots, 1);
+            assert_eq!(
+                kind(f.resources.index([f.pack.clone()], 1)),
+                ErrorKind::Busy
+            );
+            drop(proof);
+            assert_eq!(f.resources.usage(), Usage::default());
+            assert_eq!(fs::read(&target).unwrap(), bytes);
+            if cancelled {
+                fs::remove_file(stage).unwrap();
+            }
+            f.preserved();
+        }
+    }
+}
+
+#[test]
 fn blocked_export_keeps_admission_until_native_unwind_after_retirement() {
     struct Block {
         entered: Option<mpsc::SyncSender<()>>,

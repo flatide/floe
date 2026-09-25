@@ -120,6 +120,9 @@
         function permitted(){return enabled&&!stopped&&!stale&&model&&model.available;}
         function busy(ignoreTransfer){return (!ignoreTransfer&&transferLocked)||!!pending||uncertain||!!active()||!!write||!!approving||suspended();}
         function transferReady(importing){return !!(permitted()&&!busy(true)&&!io&&!model.preparing&&!revokeTask&&(!importing||!editor));}
+        // A failed reader must not prevent repairing its file. Keep local
+        // edits/unknown approvals fenced without requiring reader readiness.
+        function recoveryReady(){return !!(permitted()&&!transferLocked&&!pending&&!uncertain&&!active()&&!write&&!approving&&!io&&!model.preparing&&!revokeTask&&!editor&&!draft);}
         async function publishTransfer(value,valid){
             if(!transferReady(true)||!valid()){return false;}const t={};approving=t;render();await refresh();
             if(approving!==t){return false;}approving=null;
@@ -265,7 +268,7 @@
                 try{if(!enabled){enabled=true;recover();}const v=catalog(value,P);install(v);changed();schedule();}
                 catch(e){stale=true;notice=e.message;render();}},changed:changed,refresh:refresh,suspended:suspended,
             open:function(){if(!enabled||stopped){return false;}changed();if(editor){el('waives-action').focus();}else{read(false,true,saveMode.capture());}return true;},
-            transferReady:transferReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
+            transferReady:transferReady,recoveryReady:recoveryReady,transferLock:function(value){transferLocked=value===true;render();},publishTransfer:publishTransfer,
             stop:function(final){stopped=true;stale=true;saveMode.reset();approving=null;clearEditor(false);if(write){uncertain=true;}
                 [io,poll,write,cancelling,revokeTask].forEach(abort);io=poll=write=cancelling=revokeTask=null;revokeNext=null;o.clearTimeout(timer);timer=null;
                 if(final){store(null);}notice=final?'Session ended. Earlier committed saves are not undone.':'Review disconnected. Check the receipt after reconnecting.';render();},resume:function(){stopped=false;return enabled?refresh():Promise.resolve();}};

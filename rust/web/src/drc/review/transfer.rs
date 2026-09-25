@@ -81,7 +81,10 @@ pub(super) struct Task {
 /// most the artifact entry limit can be charged here; the owner worker drains.
 pub(super) fn retire(s: &mut super::State) {
     if let Some(r) = s.ready.take() {
-        if matches!(&r.model, Model::Upload(_) | Model::Prepared(_, Some(_))) {
+        if matches!(
+            &r.model,
+            Model::Recovery(_) | Model::Upload(_) | Model::Prepared(_, Some(_))
+        ) {
             s.retired.push(r);
         }
     }
@@ -156,7 +159,10 @@ impl Service {
         if s.detached {
             return Err("review_disabled");
         }
-        if s.ledger.active().is_some() || !s.retired.is_empty() {
+        if s.ledger.active().is_some()
+            || s.recovery.ledger.active().is_some()
+            || !s.retired.is_empty()
+        {
             return Err("drc_busy");
         }
         let uses_upload = matches!(req.action, Action::Prepare | Action::Chunk);

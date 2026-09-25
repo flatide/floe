@@ -75,7 +75,7 @@ impl Inventory {
         assert!(
             matches!(
                 self.source.as_str(),
-                "drc/review/http.rs" | "drc/review/transfer.rs"
+                "drc/review/http.rs" | "drc/review/transfer.rs" | "drc/review/recovery.rs"
             ),
             "unreviewed dynamic route in {}",
             self.source

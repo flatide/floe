@@ -30,6 +30,7 @@ pub(super) fn failure(code: super::Failure) -> Response {
         "drc_changed_or_corrupt" | "drc_read_error" => StatusCode::UNPROCESSABLE_ENTITY,
         "drc_read_limit" | "drc_selection_limit" => StatusCode::PAYLOAD_TOO_LARGE,
         "drc_context_changed"
+        | "drc_reopen_required"
         | "review_changed"
         | "drc_panel_conflict"
         | "drc_selection_conflict"

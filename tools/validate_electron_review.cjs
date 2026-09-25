@@ -76,7 +76,7 @@ dialog.showMessageBox = async (_window, options) => {
   }
   failed = true; return { response: 0 };
 };
-process.argv = [process.argv[0], path.join(repo, 'electron'), 'view', path.join(root, 'synthetic.oas'),
+process.argv = [process.argv[0], path.join(repo, 'electron'), 'view', '--multi', path.join(root, 'synthetic.oas'),
   '--drc', path.join(root, '.synthetic.db.tray'), '--drc-reviewer', 'native-recovery-test', '--drc-edit-waives',
   '--jobs', '2', '--raster-jobs', '2', '--budget-mb', '256', '--refinement', 'off'];
 require(path.join(repo, 'electron/main.cjs'));
@@ -203,6 +203,16 @@ async function run() {
       bytes.readUInt32LE(42) !== 1) throw Error('Waive disk read-back differs');
   const additions = [note, waive, note+'.lock', waive+'.lock'].map(file => path.basename(file)).sort();
   if (JSON.stringify(Object.keys(after).filter(name => !Object.hasOwn(before,name)).sort()) !== JSON.stringify(additions)) throw Error('Unexpected synthetic output');
+  stage = 'file recovery panel mounted';
+  await wait("!e('recovery-panel').hidden&&!e('recovery-prepare').disabled&&e('recovery-preview').hidden&&e('recovery-check').hidden");
+  await action("e('recovery-panel').open=true;e('recovery-panel').querySelector('summary').focus({preventScroll:true});e('recovery-panel').scrollIntoView({block:'start',behavior:'instant'})");
+  await wait("e('recovery-panel').open&&e('recovery-panel').getBoundingClientRect().top>=0&&e('recovery-prepare').getBoundingClientRect().bottom<innerHeight");
+  await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))');
+  const screenshot = await window.webContents.capturePage();
+  if (screenshot.isEmpty()) throw Error('Empty synthetic recovery panel screenshot');
+  fs.writeFileSync(path.join(root,'recovery-panel.png'), screenshot.toPNG(), {flag:'wx',mode:0o600});
+  console.log('ELECTRON REVIEW: panel screenshot ' + path.join(root,'recovery-panel.png'));
+  // Mount/read-only UI regression only; the HTTP gate exercises link repair.
   stage = 'close cancel confirm join';
   app.quit();
   await wait("!e('session-exit-dialog').hidden&&document.activeElement.id==='session-exit-cancel'");
@@ -219,5 +229,8 @@ app.whenReady().then(run).catch(async () => {
   let timer;
   const flags = await Promise.race([evaluate("(()=>{const e=id=>document.getElementById(id),out={visible:!document.hidden};for(const kind of ['notes','waives']){for(const suffix of ['read','text','action','prepare','approve','resolve']){const n=e(kind+'-'+suffix);out[kind+'_'+suffix]=!!n&&!n.disabled;}for(const suffix of ['editor','review','uncertain']){const n=e(kind+'-'+suffix);out[kind+'_'+suffix]=!!n&&!n.hidden;}out[kind+'_invalid']=/changed|expired/i.test(e(kind+'-message').textContent);}out.live=/^Live/.test(e('status').textContent);return out;})()").catch(()=>null),new Promise(resolve=>{timer=setTimeout(()=>resolve(null),1000);})]);
   clearTimeout(timer); console.log('ELECTRON REVIEW: UI flags ' + JSON.stringify(flags));
-  if (service) service.close(); else app.exit(1);
+  if (service && service.phase !== 'ended') {
+    service.once('ended', () => app.exit(1));
+    service.close();
+  } else app.exit(1);
 });

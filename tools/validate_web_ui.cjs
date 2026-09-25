@@ -56,6 +56,11 @@ assert.equal(displayClient.status,0,'display client: '+displayClient.error);
 const dumpClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_DUMP:'1'}});
 assert.equal(dumpClient.status,0,'dump client: '+dumpClient.error);
 acorn.parse(fs.readFileSync(path.join(ui, 'review-save-mode.js'), 'utf8'), options);
+acorn.parse(fs.readFileSync(path.join(ui, 'drc-recovery.js'), 'utf8'), options);
+const recovery=spawnSync(process.execPath,[path.join(ui,'drc-recovery.test.cjs')],{stdio:'inherit',timeout:15000});
+assert.equal(recovery.status,0,'review recovery: '+recovery.error);
+const recoveryPanel=spawnSync(process.execPath,[path.join(ui,'drc-recovery-panel.test.cjs')],{stdio:'inherit',timeout:15000});
+assert.equal(recoveryPanel.status,0,'review recovery panel: '+recoveryPanel.error);
 for(const file of ['review-save-mode.test.cjs','review-autosave.test.cjs']){
     const run=spawnSync(process.execPath,[path.join(ui,file)],{stdio:'inherit',timeout:15000});
     assert.equal(run.status,0,file+': '+run.error);
@@ -197,7 +202,7 @@ for (const file of ['protocol.test.cjs', 'gestures.test.cjs', 'client.test.cjs',
     const run = spawnSync(process.execPath, [path.join(ui, file)], {stdio: 'inherit', timeout: 15000});
     assert.equal(run.status, 0, file + ': ' + run.error);
 }
-for (const file of ['drc-build.test.cjs', 'drc-build-panel.test.cjs', 'drc-notes.test.cjs', 'drc-notes-panel.test.cjs', 'drc-waives.test.cjs', 'drc-waives-panel.test.cjs', 'drc-detach.test.cjs', 'clip.test.cjs', 'snapshot.test.cjs', 'defaults.test.cjs']) {
+for (const file of ['drc-build.test.cjs', 'drc-build-panel.test.cjs', 'drc-notes.test.cjs', 'drc-notes-panel.test.cjs', 'drc-waives.test.cjs', 'drc-waives-panel.test.cjs', 'drc-detach.test.cjs', 'drc-recovery-editors.test.cjs', 'clip.test.cjs', 'snapshot.test.cjs', 'defaults.test.cjs']) {
     const build = spawnSync(process.execPath, [path.join(ui, file)], {stdio:'inherit',timeout:15000});
     assert.equal(build.status, 0, file + ': ' + build.error);
 }

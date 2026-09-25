@@ -162,6 +162,18 @@ impl ManagedStore {
     /// or unlimited retained models behind a one-CPU admission reservation.
     /// Caller owns the flag before this blocking call so timeout can cancel it.
     pub fn snapshot(self: &Arc<Self>, stop: Arc<AtomicUsize>) -> Result<Snapshot> {
+        let lease = self.borrow(stop)?;
+        let value = self.store.snapshot(&lease.stop)?;
+        check_cancelled(&lease.stop)?;
+        Ok(Snapshot { value, lease })
+    }
+    pub fn prepare_recovery(self: &Arc<Self>, stop: Arc<AtomicUsize>) -> Result<Recovery> {
+        let lease = self.borrow(stop)?;
+        let value = self.store.prepare_recovery(&lease.stop)?;
+        lease.check()?;
+        Ok(Recovery { value, lease })
+    }
+    fn borrow(self: &Arc<Self>, stop: Arc<AtomicUsize>) -> Result<Borrow> {
         check_cancelled(&stop)?;
         let lease = {
             let mut s = self.state.lock().unwrap();
@@ -177,9 +189,7 @@ impl ManagedStore {
                 stop,
             }
         };
-        let value = self.store.snapshot(&lease.stop)?;
-        check_cancelled(&lease.stop)?;
-        Ok(Snapshot { value, lease })
+        Ok(lease)
     }
     pub fn snapshot_published(
         self: &Arc<Self>,
@@ -202,6 +212,32 @@ impl ManagedStore {
     }
     pub fn is_idle(&self) -> bool {
         self.state.lock().unwrap().active.is_none()
+    }
+}
+/// One admitted proof survives response loss and uncertain repair. The owner
+/// worker, not an HTTP future, performs recovery and retains this lease.
+pub struct Recovery {
+    value: store::Recovery,
+    lease: Borrow,
+}
+impl Recovery {
+    pub fn target(&self) -> &Path {
+        self.lease.owner.target()
+    }
+    pub fn bytes(&self) -> u64 {
+        self.value.bytes()
+    }
+    pub fn recover(&self) -> Result<store::RecoveryResult> {
+        self.lease.check()?;
+        self.value.recover(&self.lease.stop)
+    }
+    pub fn reconcile(&self, stop: &AtomicUsize) -> Result<store::RecoveryState> {
+        // The original write may have been cancelled after its commit. A new
+        // read-only check has its own cancellation, never resets that flag.
+        if self.lease.owner.state.lock().unwrap().closed {
+            return Err(Error::new(ErrorKind::Cancelled, "review store retired"));
+        }
+        self.value.reconcile(stop)
     }
 }
 struct Borrow {

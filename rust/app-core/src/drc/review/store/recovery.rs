@@ -1,7 +1,7 @@
 //! Explicit recovery of ONE completed DRC inode with its own staging link.
 //! The marker travels with the inode, so no directory scan or second journal
 //! publication is needed. It is provenance/change detection, not authorization.
-//! This core capability is not yet exposed as an HTTP or automatic repair API.
+//! The gateway requires separate explicit approval; never use automatic repair.
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, OsStr};
