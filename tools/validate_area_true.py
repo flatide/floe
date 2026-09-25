@@ -68,7 +68,11 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
     keeps 2/3 of its covered share (0.55..0.8), every column it lights is lit
     under the plain rule too (a narrower box lies within the plain one; the
     pixels differ where a stippled interior column becomes the rim), and an
-    out-of-range value (0.5) is the plain rule pixel for pixel.
+    out-of-range value (0.5) is the plain rule pixel for pixel;
+  * the survivor list (§4.3 step 1 in the renderer, 2026-09-25): the whole
+    view with its sub-pixel arrays is byte-identical under the kill switch
+    FLOE_RUST_SURVIVOR_LIST=off, which walks more members (the 0.1 and 0.25 px
+    arrays are listed; the 0.5 px ones cost as much either way and are walked).
 
     .venv/bin/python tools/validate_area_true.py
 """
@@ -259,7 +263,7 @@ def lit_pixels(pixels):
     return {i // 4 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK}
 
 
-def worker(src, on, wash=False, lod=False, width_c=None):
+def worker(src, on, wash=False, lod=False, width_c=None, survivor_list=None):
     if on:
         os.environ.pop('FLOE_RUST_AREA_TRUE', None)
     else:
@@ -270,11 +274,13 @@ def worker(src, on, wash=False, lod=False, width_c=None):
         os.environ['FLOE_RUST_LOD'] = 'on'
     if width_c is not None:
         os.environ['FLOE_RUST_WIDTH_C'] = str(width_c)
+    if survivor_list is not None:
+        os.environ['FLOE_RUST_SURVIVOR_LIST'] = survivor_list
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
     w.start()
-    for name in ('FLOE_RUST_AREA_TRUE', 'FLOE_RUST_PAGE_WASH', 'FLOE_RUST_LOD', 'FLOE_RUST_WIDTH_C'):
+    for name in ('FLOE_RUST_AREA_TRUE', 'FLOE_RUST_PAGE_WASH', 'FLOE_RUST_LOD', 'FLOE_RUST_WIDTH_C', 'FLOE_RUST_SURVIVOR_LIST'):
         os.environ.pop(name, None)
     return w
 
@@ -463,6 +469,23 @@ def main():
             finally:
                 sparse.stop()
                 plain.stop()
+            # the survivor list (ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1 in the
+            # renderer, 2026-09-25): the sub-pixel arrays walk only the members
+            # that can survive - the member walk's pixels (the kill switch
+            # FLOE_RUST_SURVIVOR_LIST=off walks them all), fewer members
+            walker = worker(src, True, survivor_list='off')
+            try:
+                gen += 1
+                listed, lreport = frame(on, gen, view, report=True)
+                walked, wreport = frame(walker, gen, view, report=True)
+                assert listed == walked == now, 'the survivor list changed the pixels (%d vs %d px lit)' \
+                    % (len(lit_pixels(listed)), len(lit_pixels(walked)))
+                assert lreport['rep_members_tested'] < wreport['rep_members_tested'], \
+                    'the survivor list walked %d members, the member walk %d' % (lreport['rep_members_tested'], wreport['rep_members_tested'])
+                print('survivor list: the same %d px, %d members walked instead of %d'
+                      % (len(lit_pixels(listed)), lreport['rep_members_tested'], wreport['rep_members_tested']))
+            finally:
+                walker.stop()
             # the page wash: off by default, FLOE_RUST_PAGE_WASH=on turns it back on
             washer = worker(src, True, wash=True)
             try:

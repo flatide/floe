@@ -132,6 +132,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             tile_size: args.tile_size,
             area_true: false,
             width_c: 1.0,
+            survivor_list: true,
         };
         let (mode, raster) = if args.styles.is_empty() {
             (

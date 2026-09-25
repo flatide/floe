@@ -218,6 +218,27 @@ fn for_each_visible_offset_impl(
     }
 }
 
+/// The index rectangle the member walk visits for a Grid under `local_view`,
+/// inclusive (i0, i1, j0, j1) - the same `grid_ranges` call, so a subset of it
+/// in the walk's order is a subset of the walk. None for another repetition,
+/// an empty view, or a degenerate 2-D grid (the walk keeps its own guard).
+pub(crate) fn visible_grid_range(rep: &Rep, base_bbox: BBox, local_view: BBox) -> Option<(i64, i64, i64, i64)> {
+    let Rep::Grid { na, nb, va, vb } = rep else {
+        return None;
+    };
+    if base_bbox.is_empty() || local_view.is_empty() {
+        return None;
+    }
+    let (na, nb): (i64, i64) = ((*na).try_into().ok()?, (*nb).try_into().ok()?);
+    if na > 1 && nb > 1 && va.0 as i128 * vb.1 as i128 - va.1 as i128 * vb.0 as i128 == 0 {
+        return None;
+    }
+    match grid_ranges(na, nb, *va, *vb, &offset_region(local_view, base_bbox)) {
+        GridVis::Range { i0, i1, j0, j1 } => Some((i0, i1, j0, j1)),
+        GridVis::Empty => None,
+    }
+}
+
 fn charge_member(
     budget: &mut Option<(&Cell<usize>, &str)>,
     cancellation: Option<(u64, &RenderCancellation)>,

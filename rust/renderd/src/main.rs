@@ -2319,6 +2319,7 @@ fn run_render(
         // but an exact one, which keeps the KLayout rule
         area_true: !command.exact && area_true_enabled(),
         width_c: width_c(),
+        survivor_list: std::env::var("FLOE_RUST_SURVIVOR_LIST").as_deref() != Ok("off"),
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache

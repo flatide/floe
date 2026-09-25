@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crate::font::{normalized_chars, GlyphAtlas};
 use crate::page_index::RecordSet;
-use crate::repetition::{for_each_visible_offset, for_each_visible_offset_chunked};
+use crate::repetition::{for_each_visible_offset, for_each_visible_offset_chunked, visible_grid_range, RepVisit};
 use floe_oasis::doc::Rep;
 use crate::transform::OrthoTransform;
 use crate::{FrameScene, RenderCancellation, RenderStats, ViewBox};
@@ -95,6 +95,11 @@ pub struct GeometryRasterRequest {
     /// picture only thins, never jumps. renderd sets it from
     /// FLOE_RUST_WIDTH_C (default 1); every other request uses 1.
     pub width_c: f64,
+    /// List the survivors of a sub-pixel array instead of testing every
+    /// member (ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1, connected 2026-09-25;
+    /// GridRanks::survivors): the same pixels, fewer members walked. renderd
+    /// turns it off under FLOE_RUST_SURVIVOR_LIST=off (the kill switch).
+    pub survivor_list: bool,
 }
 
 impl GeometryRasterRequest {
@@ -3842,28 +3847,32 @@ fn raster_page_records(
             };
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
-            let visit = until_full(for_each_visible_offset_chunked(
-                &rep,
-                chunks,
-                base,
-                local_view,
-                |offset_x, offset_y| {
-                    check_member_cancelled(guard, &mut cancel_member)?;
-                    if band.is_full() {
-                        return Err(WRITE_ONCE_FULL.to_string());
-                    }
-                    let local = translate_bbox(base, offset_x, offset_y)?;
-                    let world = world_transform.apply_bbox(local)?;
-                    let painted = match grid.as_ref().and_then(|g| g.ranks(offset_x, offset_y, &world)) {
-                        Some(ranks) => paint_width_first_rect(band, request, world, paint, ranks)?,
-                        None => paint_world_rect(band, request, world, paint)?,
-                    };
-                    if painted {
-                        drawn = drawn.saturating_add(1);
-                    }
-                    Ok(())
-                },
-            ))?;
+            let listed = listed_survivors(request, grid.as_ref(), &rep, base, local_view, &world_transform)?;
+            let mut member = |offset_x: i64, offset_y: i64| -> Result<(), String> {
+                check_member_cancelled(guard, &mut cancel_member)?;
+                if band.is_full() {
+                    return Err(WRITE_ONCE_FULL.to_string());
+                }
+                let local = translate_bbox(base, offset_x, offset_y)?;
+                let world = world_transform.apply_bbox(local)?;
+                let painted = match grid.as_ref().and_then(|g| g.ranks(offset_x, offset_y, &world)) {
+                    Some(ranks) => paint_width_first_rect(band, request, world, paint, ranks)?,
+                    None => paint_world_rect(band, request, world, paint)?,
+                };
+                if painted {
+                    drawn = drawn.saturating_add(1);
+                }
+                Ok(())
+            };
+            // a sub-pixel lattice array walks its listed survivors only, in the
+            // walk's order (the same pixels)
+            let visit = until_full(match listed {
+                Some(offsets) => offsets
+                    .iter()
+                    .try_for_each(|&(x, y)| member(x, y))
+                    .map(|()| RepVisit { tested: offsets.len() as u64, visible: offsets.len() as u64 }),
+                None => for_each_visible_offset_chunked(&rep, chunks, base, local_view, &mut member),
+            })?;
             stats.rep_members_tested = stats
                 .rep_members_tested
                 .saturating_add(visit.map_or(0, |visit| visit.tested));
@@ -5113,6 +5122,214 @@ impl GridRanks {
     }
 }
 
+/// A lattice member's rank term along the axis it is enumerated on: the
+/// van der Corput value of its world index (GridRanks::ranks).
+fn vdc53(k: u64) -> f64 {
+    (k.reverse_bits() >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// The golden-ratio Weyl step of the index on the other axis (GridRanks::ranks).
+fn weyl53(k: u64) -> f64 {
+    (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// A lattice array's members are worth listing only when the list is at most
+/// this share of the members (the rest of the time the scan is as cheap).
+const SURVIVOR_LIST_SHARE: f64 = 0.5;
+
+impl GridRanks {
+    /// The members of a lattice array that CAN survive its width-first draw,
+    /// in the member walk's order (ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1,
+    /// connected to the renderer 2026-09-25): `range` is the walk's visible
+    /// index rectangle (i0, i1, j0, j1), `sub` the extra-pixel chance bound
+    /// P_c(w) of each world axis the members are under a pixel wide on
+    /// (None: a pixel or more, always drawn along it). Along such an axis A
+    /// of pitch P a member's rank is frac(u_A + vdc(k_A) + weyl(k_B)) - k_A
+    /// its world index along A, an affine function of i or j, k_B the one
+    /// across - and it is drawn only when that rank is under p: for a fixed
+    /// k_B, vdc(k_A) lies in one interval mod 1, a union of at most about
+    /// 2 x 53 dyadic intervals, and each dyadic interval is the arithmetic
+    /// progression k_A = rev_b(m) (mod 2^b), walked member by member. The
+    /// interval is padded (2^-40 against the f64 sums, the bound covers the
+    /// device rounding of each member's width), so the list holds every
+    /// member the walk would draw and the caller re-tests each by the exact
+    /// rule - the pixels are the walk's; the count is that of the listed
+    /// members. None when the array is not a lattice, no sub-pixel axis is
+    /// driven by a repetition index (a column of bars thin across the column
+    /// ranks by the Weyl step alone), or the list would not save half the
+    /// members.
+    fn survivors(
+        &self,
+        rep: &Rep,
+        world_transform: &OrthoTransform,
+        base_world: BBox,
+        range: (i64, i64, i64, i64),
+        sub: (Option<f64>, Option<f64>),
+    ) -> Result<Option<Vec<(i64, i64)>>, String> {
+        let GridMode::Lattice { px, py } = self.mode else {
+            return Ok(None);
+        };
+        let Rep::Grid { na, nb, va, vb } = rep else {
+            return Ok(None);
+        };
+        let (i0, i1, j0, j1) = range;
+        if i1 < i0 || j1 < j0 {
+            return Ok(None);
+        }
+        let origin = world_transform.apply(0, 0)?;
+        let a = world_transform.apply(va.0, va.1)?;
+        let b = world_transform.apply(vb.0, vb.1)?;
+        let wa = (a.0 - origin.0, a.1 - origin.1);
+        let wb = (b.0 - origin.0, b.1 - origin.1);
+        // the repetition index (0 = i, 1 = j) that drives a world axis (0 = x,
+        // 1 = y) and its sign: its vector runs along that axis
+        let driver = |axis: usize| -> Option<(usize, i64)> {
+            [(0usize, *na > 1, wa), (1, *nb > 1, wb)].into_iter().find_map(|(index, many, v)| {
+                let (along, across) = if axis == 0 { (v.0, v.1) } else { (v.1, v.0) };
+                (many && along != 0 && across == 0).then(|| (index, along.signum()))
+            })
+        };
+        let pitch = [px, py];
+        let first = [
+            if px > 0 { base_world.x0.div_euclid(px) } else { 0 },
+            if py > 0 { base_world.y0.div_euclid(py) } else { 0 },
+        ];
+        let count = (i1 - i0 + 1) as f64 * (j1 - j0 + 1) as f64;
+        // the resolution the interval is cut at: 2^bits past the index range,
+        // a finer block holds one member at most (the interval is rounded
+        // outwards to it, a superset still)
+        let resolution = |values: i64| (64 - (values.max(1) as u64 - 1).leading_zeros()).min(52) + 1;
+        // the axis to list along: sub-pixel and driven by an index, the
+        // cheaper of the two (a line per value of the other index, about two
+        // blocks per bit of the resolution)
+        let mut best: Option<(usize, f64, f64)> = None;
+        for (axis, p) in [(0usize, sub.0), (1, sub.1)] {
+            let (Some(p), Some((index, _))) = (p, driver(axis)) else {
+                continue;
+            };
+            if pitch[axis] <= 0 {
+                continue;
+            }
+            let (along, lines) = if index == 0 { (i1 - i0 + 1, j1 - j0 + 1) } else { (j1 - j0 + 1, i1 - i0 + 1) };
+            let cost = lines as f64 * (2.0 * resolution(along) as f64 + 4.0) + p * count;
+            if best.is_none_or(|(_, _, c)| cost < c) {
+                best = Some((axis, p, cost));
+            }
+        }
+        let Some((axis, p, cost)) = best else {
+            return Ok(None);
+        };
+        if cost > SURVIVOR_LIST_SHARE * count {
+            return Ok(None);
+        }
+        let (index, sign) = driver(axis).expect("the listed axis has a driver");
+        let across = driver(1 - axis);
+        let u = if axis == 0 { self.u.0 } else { self.u.1 };
+        let (d0, d1, o0, o1) = if index == 0 { (i0, i1, j0, j1) } else { (j0, j1, i0, i1) };
+        let bits_max = resolution(d1 - d0 + 1);
+        let scale = 1i64 << bits_max;
+        let pad = 2f64.powi(-40);
+        let limit = (SURVIVOR_LIST_SHARE * count) as usize + 1;
+        let mut listed: Vec<(i64, i64)> = Vec::new();
+        for o in o0..=o1 {
+            // the world index across: from the other index when it drives the
+            // other axis, 0 when that axis does not repeat (GridRanks::ranks)
+            let k_across = match across {
+                Some((other, s)) if other != index && pitch[1 - axis] > 0 => first[1 - axis] + s * o,
+                _ => 0,
+            };
+            // vdc(k_A) must lie in [lo, lo + p) mod 1: the blocks of 2^-bits_max
+            // that meet the padded interval, as one or two runs on the circle
+            let lo = (-(u + weyl53(k_across as u64))).rem_euclid(1.0);
+            let from = ((lo - pad) * scale as f64).floor() as i64;
+            let to = ((lo + p + pad) * scale as f64).ceil() as i64;
+            let mut runs: [(i64, i64); 2] = [(0, 0); 2];
+            let n = if to - from >= scale {
+                runs[0] = (0, scale);
+                1
+            } else {
+                let a = from.rem_euclid(scale);
+                let b = a + (to - from);
+                if b <= scale {
+                    runs[0] = (a, b);
+                    1
+                } else {
+                    runs[0] = (a, scale);
+                    runs[1] = (0, b - scale);
+                    2
+                }
+            };
+            for &(lo_r, hi_r) in &runs[..n] {
+                let (mut lo_r, hi_r) = (lo_r as u64, hi_r as u64);
+                // dyadic blocks of [lo_r, hi_r) in the reversed space
+                while lo_r < hi_r {
+                    let mut shift = lo_r.trailing_zeros().min(bits_max);
+                    while shift > 0 && lo_r + (1u64 << shift) > hi_r {
+                        shift -= 1;
+                    }
+                    let bits = bits_max - shift;
+                    let m = lo_r >> shift;
+                    // the block fixes the low `bits` bits of k_A (reversed m)
+                    let residue = if bits == 0 { 0 } else { m.reverse_bits() >> (64 - bits) };
+                    let stride = 1i128 << bits;
+                    // k_A = first + sign * d  ==  residue (mod 2^bits)
+                    let want = (sign as i128 * (residue as i128 - first[axis] as i128)).rem_euclid(stride);
+                    let mut d = d0 as i128 + (want - d0 as i128).rem_euclid(stride);
+                    while d <= d1 as i128 {
+                        let d64 = d as i64;
+                        listed.push(if index == 0 { (d64, o) } else { (o, d64) });
+                        if listed.len() > limit {
+                            return Ok(None);
+                        }
+                        d += stride;
+                    }
+                    lo_r += 1u64 << shift;
+                }
+            }
+        }
+        listed.sort_unstable();
+        listed.dedup();
+        let mut offsets = Vec::with_capacity(listed.len());
+        for (i, j) in listed {
+            let ox = i as i128 * va.0 as i128 + j as i128 * vb.0 as i128;
+            let oy = i as i128 * va.1 as i128 + j as i128 * vb.1 as i128;
+            offsets.push((checked_i64(ox, "grid offset x")?, checked_i64(oy, "grid offset y")?));
+        }
+        Ok(Some(offsets))
+    }
+}
+
+/// The members of a width-first rectangle array to walk: its listed survivors
+/// (GridRanks::survivors) when the request lists them, the array is a lattice
+/// and a member is under a pixel along an axis its repetition runs on; None
+/// for the member walk. `base` is the record's first member (local).
+fn listed_survivors(
+    request: &GeometryRasterRequest,
+    grid: Option<&GridRanks>,
+    rep: &Rep,
+    base: BBox,
+    local_view: BBox,
+    world_transform: &OrthoTransform,
+) -> Result<Option<Vec<(i64, i64)>>, String> {
+    let Some(grid) = grid.filter(|_| request.survivor_list) else {
+        return Ok(None);
+    };
+    let Some(range) = visible_grid_range(rep, base, local_view) else {
+        return Ok(None);
+    };
+    let world = world_transform.apply_bbox(base)?;
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    // a member's device side differs from the first's by its rounding: two
+    // units bound it; the chance of the extra pixel is P_c of that fraction
+    let bound = |d: i128| {
+        let w = (d.max(0) + 2) as f64 / DEVICE_ONE as f64;
+        let c = request.width_c;
+        (w < 1.0).then(|| if c > 1.0 { w / (c - (c - 1.0) * w) } else { w })
+    };
+    grid.survivors(rep, world_transform, world, range, (bound(x1 - x0), bound(y1 - y0)))
+}
+
 /// One axis of a width-first rectangle: the side [v0, v1) (device units) is
 /// w px; it draws m = ceil(w - t) pixels, none when m < 1, starting at
 /// floor(centre - m/2 + 1/2). m is floor(w) or floor(w) + 1 (floor(w) + 1
@@ -6323,6 +6540,7 @@ mod tests {
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
             width_c: 1.0,
+            survivor_list: true,
         }
     }
 
@@ -6748,6 +6966,7 @@ mod tests {
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
             width_c: 1.0,
+            survivor_list: true,
         };
         let mut pattern = [0u16; 16];
         for (row, word) in pattern.iter_mut().enumerate() {
@@ -6870,6 +7089,7 @@ mod tests {
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
             width_c: 1.0,
+            survivor_list: true,
         };
         let segments = [
             ((4.0, 9.0), (21.0, 9.0)),   // horizontal inside the tile
@@ -6946,6 +7166,7 @@ mod tests {
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
             width_c: 1.0,
+            survivor_list: true,
         };
         let mut band = full_band(&request);
         paint_world_rect(
@@ -7102,6 +7323,7 @@ mod tests {
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
             width_c: 1.0,
+            survivor_list: true,
         };
         let mut frame = full_band(&request);
         fill_world_polygon_with_phase(
@@ -7622,6 +7844,7 @@ mod tests {
             tile_size: 16,
             area_true: false,
             width_c: 1.0,
+            survivor_list: true,
         };
         let pruned =
             render_geometry_occupancy(&scene_with(crate::PageIndex::build), &request).unwrap();
@@ -8378,6 +8601,145 @@ mod tests {
                 "§4.3 step 1: {} members ({}x{}) at {:?} px: {} survivors; full scan {} us, enumeration tested {} ({:.1}x fewer) in {} us",
                 members, cols.end - cols.start, rows.end - rows.start, w, scan.len(), scan_us, tested, members as f64 / tested as f64, list_us
             );
+        }
+    }
+
+    /// GridRanks::survivors (§4.3 step 1 in the renderer, 2026-09-25): over
+    /// random lattice arrays - 1-D and 2-D, pitches of either sign, members
+    /// under a pixel on one axis or both, first members on either side of 0,
+    /// placed under all eight orientations, WIDTH_C 1 and 4 - the listed
+    /// members that pass the exact width-first test are exactly the walk's
+    /// drawn members, in the walk's order, and the list is a fraction of the
+    /// members.
+    #[test]
+    fn listed_survivors_are_the_walks_drawn_members() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        let span = 50_000i64;
+        let mut request = area_true_request(64, DEFAULT_TILE_SIZE, 1).raster;
+        request.view = RasterViewBox::new(-span as f64, -span as f64, span as f64, span as f64).unwrap();
+        let world_view = BBox { x0: -span, y0: -span, x1: span, y1: span };
+        let drawn = |request: &GeometryRasterRequest, world: BBox, ranks: (f64, f64)| {
+            let (x0, y1) = world_to_device(request, world.x0, world.y0).unwrap();
+            let (x1, y0) = world_to_device(request, world.x1, world.y1).unwrap();
+            width_first_span_c(x0, x1, ranks.0, request.width_c).is_some()
+                && width_first_span_c(y0, y1, ranks.1, request.width_c).is_some()
+        };
+        let (mut cases, mut listed_cases, mut members, mut walked) = (0, 0, 0u64, 0u64);
+        for case in 0..600 {
+            request.width_c = if case % 3 == 0 { 4.0 } else { 1.0 };
+            // 1562.5 world units a pixel: sides of 8..600 units are 0.005..0.4 px
+            // (one case in eight up to 1 px, where a list rarely pays)
+            let wide = case % 8 == 7;
+            let side = |thin: bool, n: &mut dyn FnMut(u64) -> u64| {
+                if thin { 8 + n(if wide { 1600 } else { 600 }) as i64 } else { 2000 + n(20_000) as i64 }
+            };
+            let (thin_x, thin_y) = match next(3) { 0 => (true, false), 1 => (false, true), _ => (true, true) };
+            let (w, h) = (side(thin_x, &mut next), side(thin_y, &mut next));
+            let pitch = |n: &mut dyn FnMut(u64) -> u64| (40 + n(3000) as i64) * if n(2) == 0 { 1 } else { -1 };
+            let place = OrthoTransform::place(next(20_000) as i64 - 10_000, next(20_000) as i64 - 10_000, next(4) as u8, next(2) == 1).unwrap();
+            let inverse = place.invert().unwrap();
+            // repetition vectors along the WORLD axes, stored in the cell's frame
+            let local = |v: (i64, i64)| {
+                let (a, o) = (inverse.apply(v.0, v.1).unwrap(), inverse.apply(0, 0).unwrap());
+                (a.0 - o.0, a.1 - o.1)
+            };
+            let (wx, wy) = (local((pitch(&mut next), 0)), local((0, pitch(&mut next))));
+            let rep = match next(4) {
+                0 => Rep::Grid { na: 1 + next(3000), nb: 1, va: wx, vb: (0, 0) },
+                1 => Rep::Grid { na: 1, nb: 1 + next(3000), va: (0, 0), vb: wy },
+                2 => Rep::Grid { na: 1 + next(200), nb: 1 + next(200), va: wx, vb: wy },
+                _ => Rep::Grid { na: 1 + next(200), nb: 1 + next(200), va: wy, vb: wx },
+            };
+            let (x, y) = (next(2 * span as u64) as i64 - span, next(2 * span as u64) as i64 - span);
+            // the local box that lands w x h in the world
+            let world_base = BBox { x0: x, y0: y, x1: x + w, y1: y + h };
+            let base = inverse.apply_bbox(world_base).unwrap();
+            let local_view = inverse.apply_bbox(world_view).unwrap();
+            let Some(grid) = GridRanks::new(&rep, &place, place.apply_bbox(base).unwrap()).unwrap() else {
+                continue;
+            };
+            if !matches!(grid.mode, GridMode::Lattice { .. }) {
+                continue;
+            }
+            cases += 1;
+            let mut walk = Vec::new();
+            let visit = for_each_visible_offset(&rep, base, local_view, |ox, oy| {
+                let world = place.apply_bbox(translate_bbox(base, ox, oy).unwrap()).unwrap();
+                if drawn(&request, world, grid.ranks(ox, oy, &world).unwrap()) {
+                    walk.push((ox, oy));
+                }
+                Ok(())
+            })
+            .unwrap();
+            let Some(listed) = listed_survivors(&request, Some(&grid), &rep, base, local_view, &place).unwrap() else {
+                continue;
+            };
+            listed_cases += 1;
+            members += visit.tested;
+            walked += listed.len() as u64;
+            let kept: Vec<(i64, i64)> = listed
+                .iter()
+                .copied()
+                .filter(|&(ox, oy)| {
+                    let world = place.apply_bbox(translate_bbox(base, ox, oy).unwrap()).unwrap();
+                    drawn(&request, world, grid.ranks(ox, oy, &world).unwrap())
+                })
+                .collect();
+            assert_eq!(kept, walk, "case {}: {:?} {}x{} at ({}, {}) c {}", case, rep, w, h, x, y, request.width_c);
+            assert!(listed.len() as u64 * 2 <= visit.tested + 1, "case {}: listed {} of {}", case, listed.len(), visit.tested);
+            // off: no list
+            let mut off = request;
+            off.survivor_list = false;
+            assert!(listed_survivors(&off, Some(&grid), &rep, base, local_view, &place).unwrap().is_none());
+        }
+        assert!(cases > 500 && listed_cases > 100, "{} lattice cases, {} listed", cases, listed_cases);
+        eprintln!(
+            "survivor lists: {} of {} lattice arrays listed, {} members walked instead of {} ({:.1}x fewer)",
+            listed_cases, cases, walked, members, members as f64 / walked.max(1) as f64
+        );
+    }
+
+    /// The listing in the frame: sub-pixel lattice arrays (dense dots both
+    /// axes, bars thin across their row, members on both sides of 0) draw
+    /// byte-identical frames with the list on and off, at two tilings, one and
+    /// three workers and WIDTH_C 1 and 4, walking a fraction of the members.
+    #[test]
+    fn a_frame_draws_the_same_with_the_survivor_list() {
+        let rect = |x, y, w, h, rep: Rep| RectRec { layer: 1, dt: 0, x, y, w, h, rep };
+        let scene = hairline_scene(
+            vec![
+                // 1 x 1 unit dots at a 1-unit pitch over the frame and beyond 0
+                rect(-40, -40, 1, 1, Rep::Grid { na: 400, nb: 400, va: (1, 0), vb: (0, 1) }),
+                // bars 1 unit wide, 200 long, a 2-unit pitch, from x = -100
+                rect(-100, 60, 1, 200, Rep::Grid { na: 300, nb: 1, va: (2, 0), vb: (0, 0) }),
+                // a column of wires 1 unit high, a 3-unit pitch downwards
+                rect(20, 310, 250, 1, Rep::Grid { na: 1, nb: 150, va: (0, 0), vb: (0, -3) }),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        for (tile, workers, c) in [(DEFAULT_TILE_SIZE, 1u16, 1.0), (16, 3, 1.0), (16, 1, 4.0)] {
+            let mut on = area_true_request(32, tile, workers);
+            on.raster.width_c = c;
+            let mut off = on.clone();
+            off.raster.survivor_list = false;
+            let a = render_geometry_styled(&scene, &on).unwrap();
+            let b = render_geometry_styled(&scene, &off).unwrap();
+            assert_eq!(a.frame, b.frame, "tile {} workers {} c {}", tile, workers, c);
+            assert!(!lit_set(&a.frame, 32).is_empty());
+            assert!(
+                a.stats.rep_members_tested * 3 < b.stats.rep_members_tested,
+                "listed {} of {} members",
+                a.stats.rep_members_tested,
+                b.stats.rep_members_tested
+            );
+            assert_eq!(a.stats.rep_members_drawn, b.stats.rep_members_drawn);
         }
     }
 
@@ -10165,6 +10527,7 @@ mod tests {
             tile_size: DEFAULT_TILE_SIZE,
             area_true: false,
             width_c: 1.0,
+            survivor_list: true,
         };
         let report = render_geometry_occupancy(&scene, &raster_request).unwrap();
         raster_request.workers = 1;
@@ -10243,6 +10606,7 @@ mod tests {
             tile_size,
             area_true: false,
             width_c: 1.0,
+            survivor_list: true,
         }
     }
 
