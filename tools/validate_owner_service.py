@@ -101,6 +101,8 @@ for line in sys.stdin:
         assert "RUST INDEX OPEN DECK: ALL OK" in checked.stdout
         assert "RUST INDEX OPEN RACES: ALL OK" in checked.stdout
         assert "RUST LIVE DECK INDEX: ALL OK" in checked.stdout
+        assert "RUST INDEX REVISION CUTOVER: ALL OK" in checked.stdout
+        assert "RUST INDEX REVISION DECK: ALL OK" in checked.stdout
         assert "RUST DECK LEVELS: ALL OK" in checked.stdout
         assert "RUST DECK LEVELS INDEX: ALL OK" in checked.stdout
         assert "RUST OWNER DECK DEFAULTS: ALL OK" in checked.stdout

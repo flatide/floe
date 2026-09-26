@@ -57,6 +57,7 @@ pub(super) fn prepare(
             viewport,
             dbu: previous.controller.model.dbu,
         }),
+        index_revision: None,
     })
 }
 

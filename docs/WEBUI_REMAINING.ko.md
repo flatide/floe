@@ -14,11 +14,11 @@ xattr 필수 조건을 제거했다. NFS 서버 장애·다중 client·재마운
 ## 1. 승인된 비실측 구현
 
 2026-09-25 후속 승인: 열린 인덱스 전환·공유 캐시 수명주기를 재개한다.
-[IR-1 저장·빌드와 IR-2 관리형 backend](WEBUI_INDEX_REVISIONS.ko.md)를 추가했다.
-IR-2는 일반/덱의 명시적 immutable API·전체 set 게시·reader pin 경로다.
-IR-3 UI 선택·명시적 전환과 IR-4 회수 정책은 남아 있다.
-기존 Index/UI는 아직 새 저장소를 사용하지 않는다. 이것을 hot-reload 완료로
-계산하지 않는다. 원격 공유·외부 CI·WK 동결 및 이번 NFS 제외 범위는 그대로다.
+[IR-1 저장·빌드, IR-2 관리형 backend, IR-3 opt-in UI/명시적 전환](WEBUI_INDEX_REVISIONS.ko.md)을
+추가했다. 별도 full-build → read-only Check → Use 순서이며 자동 hot-reload가 아니다.
+기존 Run index/Index and open/CLI 동작은 유지한다. IR-4 사용량·보존/회수 정책과
+실제 GUI/현장 수용은 남아 있다. 원격 공유·외부 CI·WK 동결 및 이번 NFS 제외
+범위는 그대로다.
 
 | 범위 | 현재 상태 / 근거 |
 |---|---|

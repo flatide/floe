@@ -419,6 +419,8 @@ mod guest_drc;
 mod index_open;
 #[path = "support/launch.rs"]
 mod launch;
+#[path = "support/revisions.rs"]
+mod revisions;
 #[path = "support/settings.rs"]
 mod settings;
 #[path = "support/window_display.rs"]

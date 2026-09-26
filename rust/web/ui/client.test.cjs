@@ -61,6 +61,8 @@ const dumpEnabled=process.env.FLOE_TEST_DUMP==='1';
 const frameStatusEnabled=process.env.FLOE_TEST_FRAME_STATUS==='1';
 const workerFailure=process.env.FLOE_TEST_WORKER_FAILURE||'';
 const indexDefaultsEnabled=process.env.FLOE_TEST_INDEX_DEFAULTS==='1';
+const revisionEnabled=process.env.FLOE_TEST_REVISIONS==='1',revisionHistory=[];
+let checkedRevision=null;
 function presetFixture(){
     const lines=name=>fs.readFileSync(__dirname+'/../../../floe/'+name,'utf8').split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#')).map(l=>l.split(/\s+/));
     return {version:1,colors:lines('colornames.def').map(([name,color])=>({name,color:'#'+color.toLowerCase()})),
@@ -216,14 +218,30 @@ class XHR {
         }
         else {throw new Error('Unexpected HTTP '+this.path);}
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
-        if(indexOpenEnabled&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
+        if((indexOpenEnabled||revisionEnabled)&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
+        if(revisionEnabled){
+            if(this.path==='/api/v1/capabilities'){value.index_revisions=true;}
+            if(this.path==='/api/v1/catalog'){value.sources[0].source_id=indexSource;}
+            if(this.path==='/api/v1/view'&&value){value.source_id=indexSource;value.index_revision=checkedRevision;}
+            if(this.path==='/api/v1/operations'){
+                if(this.method==='POST'){
+                    if(body.kind==='index_revision'){assert.equal(body.approved,true);value.index_revision='7'.repeat(32);}
+                    if(body.kind==='check_revision'){value.source_id=body.source_id;value.levels=body.levels;value.index_revision='7'.repeat(32);}
+                    if(body.kind==='use_revision'){
+                        assert.equal(body.revision,'7'.repeat(32));checkedRevision=body.revision;
+                        viewId='8'.repeat(64);snapshot.view_id=viewId;snapshot.dataset_revision='2';snapshot.worker_epoch='2';value.view_id=viewId;
+                    }
+                    revisionHistory.push(value);
+                }else{value={last_seq:lastSeq,active:null,history:revisionHistory};}
+            }
+        }
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
         if(viewReadArmed&&this.method==='GET'&&this.path==='/api/v1/view'){viewReadArmed=false;viewReadResponse=this;return;}
         if(closeBoundary&&this.method==='DELETE'&&this.path.startsWith('/api/v1/views/')){closeResponse=this;return;}
         if(this.method+' '+this.path===startupSuspend&&++startupMatches===Number(process.env.FLOE_TEST_STARTUP_MATCH||1)){startupSuspendReply=this;return;}
         if(launchExitArmed&&this.method==='GET'&&this.path===launchExit){launchExitArmed=false;launchExitReply=this;return;}
         if(body&&['mode','reselect_levels'].includes(body.kind)&&modeLosePost){modeLosePost=false;setImmediate(()=>this.ontimeout());return;}
-        if(indexOpenEnabled&&body&&body.kind==='index_open'){setImmediate(()=>this.ontimeout());return;}
+        if(indexOpenEnabled&&body&&body.kind==='index_open'||revisionEnabled&&body&&body.kind==='index_revision'){setImmediate(()=>this.ontimeout());return;}
         if(this.method==='GET'&&this.path===exitStartup&&!startupExitReply){startupExitReply=this;return;}
         if(this.method==='GET'&&resumeBarrier(this.path,()=>{
             if(resumeFailure!=='0'){this.status=resumeFailure==='401'?401:503;this.responseText=JSON.stringify({error:'late resume failure'});}
@@ -268,6 +286,7 @@ window.FloeMinimap=require('./minimap.js');
 window.FloeLauncher=require('./launcher.js');
 window.FloeBrowse=require('./browse.js');
 window.FloeIndexOpen=require('./index-open.js');
+window.FloeIndexRevisions=require('./index-revisions.js');
 for(const [api,name] of [['FloeIndexOpen','index'],['FloeBrowse','picker'],['FloeLauncher','launcher']]){
     const module=window[api];window[api]={...module,bind(options){if(name==='launcher'){launcherOptions=options;}return tracedResume(module.bind(options),name);}};
 }
@@ -586,6 +605,30 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         assert.equal(sockets.length,0);assert(node('open').disabled);assert(node('logout').disabled);
         assert.equal(requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations').length,0);
         listeners.pagehide();console.log('WEB STARTUP EXIT: ALL OK ('+exitStartup+', terminal UI, no continuation, recovery preserved)');return;
+    }
+    if(revisionEnabled){
+        await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);ws.receive(packet('raw','1'));
+        snapshot.margin={frame_id:'2',origin_px:[48,48],crop_safe:true};snapshot.capabilities.margin=true;ws.receive(snapshot);
+        ws.receive(packet('raw','2','1',epoch,{purpose:'margin',width:196,height:176,bbox_dbu:['-58.9375','-48','137.0625','128']}));
+        assert.equal(node('margin-canvas').width,196);
+        const writes=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations');
+        const before=writes().length,oldId=viewId;
+        assert.equal(node('revision-panel').hidden,false);assert(node('revision-build').disabled);assert(node('revision-use').disabled);
+        node('revision-build').onclick();assert.equal(writes().length,before);
+        node('index-force').checked=true;node('revision-approve').checked=true;node('revision-approve').onchange();
+        node('revision-build').onclick();await wait(()=>writes().length===before+1&&!node('revision-check').disabled);
+        assert.equal(writes().at(-1).body.options.force,false);assert.equal(node('revision-approve').checked,false);
+        assert.equal(viewId,oldId);assert(node('revision-use').disabled,'build receipt must not imply use');
+        assert.equal(writes().length,before+1,'uncertain response must not resubmit');
+        node('revision-check').onclick();await wait(()=>!node('revision-use').disabled);
+        assert.equal(writes().at(-1).body.kind,'check_revision');assert.equal(viewId,oldId);
+        node('revision-use').onclick();await wait(()=>sockets.length===2);
+        const use=writes().at(-1).body;assert.equal(use.kind,'use_revision');assert.equal(use.target.view_id,oldId);assert.equal(use.target.state_rev,'1');
+        assert.equal(node('canvas').width,1,'old foreground buffer survives revision cutover');
+        assert.equal(node('margin-canvas').width,1,'old margin buffer survives revision cutover');
+        assert.equal(checkedRevision,'7'.repeat(32));assert.match(node('revision-current').textContent,/7777/);
+        assert.equal(writes().length,before+3);listeners.pagehide();
+        console.log('WEB INDEX REVISION CLIENT: ALL OK (one approval, unknown build response read-only recovery, separate check/use, captured CAS, clear foreground/margin)');return;
     }
     if(indexDefaultsEnabled){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);

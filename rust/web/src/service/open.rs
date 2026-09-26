@@ -71,6 +71,7 @@ pub(super) fn execute(
         display_policy,
         label_preference,
         reselect,
+        index_revision,
     } = command;
     let mode_name = match mode {
         Mode::Level => "level",
@@ -84,6 +85,15 @@ pub(super) fn execute(
         previous,
         window_display,
     } = anchor(inner, &replace)?;
+    if index_revision.is_some()
+        && previous.as_ref().is_some_and(|(v, _)| {
+            v.source_id != source_id || v.mode != mode_name || v.levels != selected_levels
+        })
+    {
+        return Err(Error::input(
+            "close the view before changing revision source/levels/mode",
+        ));
+    }
     let window_display = window_display.label_preference(label_preference);
 
     inner.state.lock().unwrap().ledger.update(
@@ -96,7 +106,8 @@ pub(super) fn execute(
     );
     source.validate(&stop)?;
     if let Some((previous, rev)) = &previous {
-        if previous.source_id == source_id
+        if index_revision.is_none()
+            && previous.source_id == source_id
             && previous.mode == mode_name
             && previous.levels == selected_levels
         {
@@ -125,6 +136,19 @@ pub(super) fn execute(
             );
         }
     }
+    if index_revision.is_none()
+        && previous.as_ref().is_some_and(|(v, _)| {
+            v.source_id == source_id
+                && v.controller
+                    .pin_dataset()
+                    .is_ok_and(|d| d.index_revision.is_some())
+        })
+    {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            "immutable selection requires a separately checked revision set or explicit mode change",
+        ));
+    }
     if reselect.is_some() && super::index_open::needs_index(inner, &source, levels.as_ref(), &stop)?
     {
         // Ordinary open may show an incomplete deck. A requested new level
@@ -134,7 +158,18 @@ pub(super) fn execute(
             "selected levels need indexing",
         ));
     }
-    let data = ManagedDataset::open(&inner.resources, source.path(), levels, mode, &stop)?;
+    let data = if let Some(expected) = &index_revision {
+        let data = ManagedDataset::open_revisions(&inner.resources, &source, levels, mode, &stop)?;
+        if data.index_revision.as_ref() != Some(expected) {
+            return Err(Error::new(
+                ErrorKind::Busy,
+                "published index changed; check again",
+            ));
+        }
+        data
+    } else {
+        ManagedDataset::open(&inner.resources, source.path(), levels, mode, &stop)?
+    };
     let model = Model::new(&data)?;
     let (width, height) = patch.pixels.unwrap_or((1024, 768));
     let initial = ViewState::initial(&model, width, height)?;
@@ -152,6 +187,18 @@ pub(super) fn execute(
         }
         initial.viewport = camera.viewport;
         initial.validate(&model)?;
+    }
+    if index_revision.is_some() {
+        if let Some((old, _)) = &previous {
+            if old.source_id == source_id && old.mode == mode_name && old.levels == selected_levels
+            {
+                initial = old
+                    .controller
+                    .snapshot()
+                    .state
+                    .for_index_revision(&old.controller.model, &model)?;
+            }
+        }
     }
     let remembered = window_display.capture(&initial, model.deck);
     let rows = LayerCatalog::dataset(&data.dataset, &model);
@@ -206,5 +253,7 @@ pub(super) fn execute(
     let id = view.id.clone();
     s.window_display = remembered;
     s.view = Some(view);
-    Ok(json!({"seq":seq.to_string(),"kind":kind,"phase":"succeeded","view_id":id}))
+    Ok(
+        json!({"seq":seq.to_string(),"kind":kind,"phase":"succeeded","view_id":id,"index_revision":index_revision}),
+    )
 }

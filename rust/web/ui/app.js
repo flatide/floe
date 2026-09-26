@@ -31,6 +31,7 @@
     const editCallbacks = new WeakMap();
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
     let catalog = [], currentId = '', currentSource = '', currentMode = 'level', ownerBusy = false, submitting = false;
+    let revisionSupported = false, revisionCandidate = null, currentRevision = null, currentLevels = null;
     let modeReceipt = '', modeSupported = false, levelsSupported = false, fillEditSupported = false;
     let pendingStartup = null, startupWaiting = false;
     let gotoDirty = false, gotoRevision = 0, gotoView = '';
@@ -238,6 +239,12 @@
         el('mode').disabled = stopped || !source || !source.deck || launchPending || ownerBusy || submitting || indexBlocked();
         el('close').disabled = !currentId || submitting || ownerBusy || indexBlocked();
         el('index').disabled = stopped || submitting || ownerBusy || !source || indexBlocked();
+        const revisionReady = revisionSupported && !!source && !stopped && !submitting && !ownerBusy && !indexBlocked() && !launchPending && !document.hidden;
+        el('revision-build').disabled = !revisionReady || !el('revision-approve').checked;
+        el('revision-check').disabled = !revisionReady;
+        let revisionMatches = false;
+        try { revisionMatches = window.FloeIndexRevisions.matches(revisionCandidate, el('source').value, levels()); } catch (_) { /* incomplete selection */ }
+        el('revision-use').disabled = !revisionReady || !revisionMatches || !!inflight || !!accepted || !!queue.length || !!(gesture && gesture.active()) || !!(live() && !epoch) || !!(drcPanel && drcPanel.recoveryBusy());
         el('cancel-job').disabled = stopped || !ownerBusy || indexBlocked();
         el('levels-all').disabled = indexBlocked();
         el('level-more').disabled = indexBlocked() || levelBusy || levelNext === null;
@@ -547,6 +554,8 @@
         const changed = currentId !== current.view.view_id;
         if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; selectedStyle = null; el('style-editor').hidden = true; }
         currentId = current.view.view_id; currentSource = current.source_id; currentMode = current.mode; state = current.view;
+        currentRevision = current.index_revision || null; currentLevels = current.levels;
+        el('revision-current').textContent = currentRevision ? 'Open index revision: ' + currentRevision : 'Open index: legacy mutable cache';
         el('document-title').textContent = current.title; document.title = current.title + ' · floe2';
         // Reconnection restores the live view, not a different pending CLI
         // proposal's source/level form. Its explicit selection must survive.
@@ -636,6 +645,7 @@
     }
     function operationLabel(op) {
         if (op.kind === 'index_open') { return window.FloeIndexOpen.resultText(op,message); }
+        if (op.kind === 'index_revision' && op.phase === 'succeeded') { return 'New index published: ' + op.index_revision + '. Current view unchanged. Check, then Use to switch.' + (op.revision_sync_warning ? ' WARNING: published, directory sync failed.' : ''); }
         const p = op.native || {};
         return op.kind + ' · ' + op.phase + (p.phase ? ' · ' + p.phase : '') + (op.error ? ' · ' + message(op.error) : '') +
             (p.representatives_missing === true ? ' · WARNING: base cache completed without representative points; retry with --representatives-only' : '') +
@@ -662,6 +672,9 @@
         ownerBusy = all.active !== null; el('cancel-job').disabled = !ownerBusy;
         el('cancel-job').dataset.seq = all.active || ''; controls();
         const recent = all.history || [], last = recent[recent.length - 1];
+        revisionCandidate = window.FloeIndexRevisions.candidate(recent);
+        el('revision-status').textContent = revisionCandidate ? 'Checked revision: ' + revisionCandidate.index_revision + ' (selection must match)' : 'No matching published revision checked. Check the selected source/levels; no indexing or switch is automatic.';
+        controls();
         if (last) { el('operation').textContent = operationLabel(last); }
         el('live-mode-note').textContent = ownerBusy && last && last.kind === 'mode' ? 'Changing jobdeck mode…' : 'Ctrl+, toggles level/chip · same camera and loaded levels. Mode defaults reload.';
         if (!ownerBusy && last && ['failed', 'incomplete', 'cancelled'].includes(last.phase)) {
@@ -669,7 +682,7 @@
             if (!currentId) { el('empty-message').textContent = message(last.error || last.phase); connection('Local · ready', true); }
         }
         if (ownerBusy) { operationTimer = setTimeout(function () { operationState().catch(report); }, 500); }
-        else if (last && (last.kind === 'open' || last.kind === 'reselect_levels' || last.kind === 'index_open' && !indexOpen.pending()) && last.phase === 'succeeded') {
+        else if (last && (last.kind === 'open' || last.kind === 'reselect_levels' || last.kind === 'use_revision' || last.kind === 'index_open' && !indexOpen.pending()) && last.phase === 'succeeded') {
             if (last.view_id !== currentId) { await restore(); }
             else if (pendingStartup && pendingStartup.source_id === currentSource) { pendingStartup = null; }
         }
@@ -787,6 +800,7 @@
         await defaults.init(caps.design_defaults);
         if (!currentPage(run)) { return; }
         sourceSelection();
+        revisionSupported = !!caps.index_revisions; el('revision-panel').hidden = !revisionSupported;
         await indexOpen.init(caps.index_open);
         if (!currentPage(run)) { return; }
         const operations = await operationState();
@@ -835,6 +849,7 @@
     function clearClosedView() {
         ++restoreRead;
         disconnect(); state = null; currentId = ''; displayed = false; clearBuffers();
+        currentRevision = null; currentLevels = null; el('revision-current').textContent = '';
         selectedStyle = null; el('style-editor').hidden = true;
         controls(); el('empty').hidden = false; el('empty-message').textContent = 'View closed. Choose a source to reopen.';
         el('rendering').hidden = true; el('layers').textContent = ''; el('status').textContent = 'View closed';
@@ -1052,12 +1067,38 @@
         }});
     el('index-occupancy').onchange = indexSummaryControls;
     el('index-representatives').onchange = indexSummaryControls;
+    function indexOptions() {
+        const options = {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked,
+            occupancy: el('index-occupancy').checked, representatives: !el('index-representatives').disabled && el('index-representatives').checked};
+        if (options.occupancy && el('index-occupancy-prune').value !== '') { options.occupancy_prune = Number(el('index-occupancy-prune').value); }
+        if (options.representatives && el('index-representatives-format').value !== '') { options.representatives_format = Number(el('index-representatives-format').value); }
+        return options;
+    }
+    el('revision-approve').onchange = controls;
+    el('revision-build').onclick = function () {
+        if (el('revision-build').disabled || !el('revision-approve').checked) { return; }
+        try {
+            const options = indexOptions(); options.force = false;
+            const request = {kind:'index_revision', source_id:el('source').value, levels:levels(), approved:true, options:options};
+            el('revision-approve').checked = false;
+            submitOperation(request).catch(report);
+        } catch(e) { report(e); }
+    };
+    el('revision-check').onclick = function () {
+        if(el('revision-check').disabled){return;}
+        try { submitOperation({kind:'check_revision',source_id:el('source').value,levels:levels()}).catch(report); } catch(e) { report(e); }
+    };
+    el('revision-use').onclick = function () {
+        if(el('revision-use').disabled){return;}
+        try {
+            const current = live() ? {source_id:currentSource,mode:currentMode,levels:currentLevels===null?{mode:'all'}:{mode:'only',ids:currentLevels},view_id:currentId,state_rev:state.state_rev} : null;
+            const request = window.FloeIndexRevisions.useRequest(revisionCandidate,el('source').value,levels(),el('mode').value,dims().pixels,current);
+            submitOperation(request).catch(report);
+        } catch(e) { report(e); }
+    };
     el('index').onclick = function () {
         try {
-            const options = {jobs: Number(el('index-jobs').value), force: el('index-force').checked, lod: el('index-lod').checked,
-                occupancy: el('index-occupancy').checked, representatives: !el('index-representatives').disabled && el('index-representatives').checked};
-            if (options.occupancy && el('index-occupancy-prune').value !== '') { options.occupancy_prune = Number(el('index-occupancy-prune').value); }
-            if (options.representatives && el('index-representatives-format').value !== '') { options.representatives_format = Number(el('index-representatives-format').value); }
+            const options = indexOptions();
             submitOperation({kind: 'index', source_id: el('source').value, levels: levels(), options: options}).catch(report);
         }
         catch (e) { report(e); }

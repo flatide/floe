@@ -10,6 +10,8 @@ mod palette;
 mod palette_style;
 mod properties;
 mod query;
+#[cfg(test)]
+mod revision_tests;
 mod ruler;
 use crate::{
     dataset::Dataset,
@@ -527,6 +529,24 @@ impl Model {
     }
 }
 impl ViewState {
+    /// Same-source revision cutover keeps display state, never assumes that
+    /// renumbered deck planes still represent the same source/level. Schema
+    /// changes require an explicit fresh open instead of guessing visibility.
+    pub fn for_index_revision(&self, old: &Model, next: &Model) -> Result<Self> {
+        if old.dbu != next.dbu
+            || old.deck != next.deck
+            || old.pairs != next.pairs
+            || old.groups != next.groups
+            || old.folded_groups != next.folded_groups
+            || (old.deck && old.property_names != next.property_names)
+        {
+            return Err(Error::input(
+                "index coordinate/layer schema changed; close and open explicitly",
+            ));
+        }
+        self.validate(next)?;
+        Ok(self.clone())
+    }
     pub fn initial(model: &Model, width: u32, height: u32) -> Result<Self> {
         Ok(Self {
             viewport: Viewport::fit(model.bbox, width, height)?,

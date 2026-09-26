@@ -6,17 +6,17 @@ world-tile, 동결된 WKWebView는 이 작업에 포함하지 않는다.
 
 ## 현재 범위
 
-**IR-1 저장·빌드 및 IR-2 관리형 backend를 추가했다. 아직 일반 CLI/Index UI의
-기본 동작 변경이나 열린 뷰 hot-reload 구현 완료가 아니다.** 기존 `.ice`/`.floe`
-해석과 기본 관리형 Index의 읽기/쓰기 잠금은 그대로다. 새 backend는
-`ManagedIndex::start_revisions`/`ManagedDataset::open_revisions`로 명시적으로
-선택한다. UI·전환 연결은 IR-3이며, 현재 사용자 Index 버튼은 여전히 기존 경로다.
+**IR-1 저장·빌드, IR-2 관리형 backend, IR-3의 opt-in UI·명시적 전환을 추가했다.**
+기존 `.ice`/`.floe` 해석과 일반 CLI/Run index/Index and open 동작은 그대로다.
+새 backend는 웹/Electron 공통 UI의 `Index this source → Immutable index revisions`
+에서 별도로 선택한다. 빌드 완료나 브라우저 새로고침이 자동 전환을 일으키지 않는다.
+보존 파일의 사용량 조회·회수(IR-4)와 실제 GUI/현장 수용은 아직 남아 있다.
 
 | 단계 | 범위 | 상태 |
 |---|---|---|
 | IR-1 | 별도 full-build, 검증 후 게시, 불변 경로 pin, 이전 revision 보존 | 구현·로컬 자동 검증 완료 |
 | IR-2 | 관리형 Index/일반·잡덱 reader 연결, 덱 전체 revision 집합 고정 | backend 구현·로컬 자동 검증 완료 |
-| IR-3 | 명시적 갱신 확인·전환, 상태 보존, frame/margin/retained/query 무효화 | 남음 |
+| IR-3 | 명시적 갱신 확인·전환, 상태 보존, frame/margin/retained/query 무효화 | 구현·로컬 자동 검증 완료 |
 | IR-4 | 사용량·보존 상태 조회, 사용 중 보호와 명시적 회수/실패 복구 정책 | 남음 |
 
 ## 저장과 게시 계약
@@ -122,8 +122,49 @@ path와 구별해야 한다. stale 버튼/실패한 준비는 이전 뷰를 그�
   가능한 선택 수가 이보다 작을 수 있다. 이것은 전체 RSS 상한이 아니다.
 - symlink·경로 별칭을 고려한 보호 목록에 소스별 revision/set과 deck set·lock을
   추가한다. generated store는 Git ignore에 추가하며 실제/합성 캐시를 커밋하지 않는다.
-- 기존 CLI/GTK와 기본 관리형 open/index는 전환하지 않았다. `start_revisions`와
-  `open_revisions`를 사용하겠다는 명시적 선택·UI 승인·상태 CAS 연결이 IR-3의 작업이다.
+- 기존 CLI/GTK와 기본 관리형 open/index는 전환하지 않았다. 다음 IR-3 경로에서만
+  `start_revisions`/`open_revisions`의 명시적 선택·UI 승인·상태 CAS를 연결한다.
+
+## IR-3 opt-in UI·명시적 전환 — 2026-09-26
+
+1. 소스·선택 레벨과 기존 jobs/summary 옵션을 고른 뒤 `Approve one full separate
+   index build`를 체크하고 **Build new revision**을 누른다. 매번 full-build이며
+   force는 사용하지 않는다. 기존 Run index의 force/재사용 동작은 별개다.
+   승인 체크는 한 번 제출하면 해제한다. 성공 receipt에 게시 ID와 fsync 경고를
+   표시하지만 현재 뷰는 바꾸지 않는다.
+2. **Check published revision**은 파일을 쓰지 않고 선택 집합의 current/seal과
+   member pin을 검증한다. source handle·정확한 선택 레벨·32자리 revision ID만
+   반환한다. 경로 입력/캐시 파일 목록 공개나 자동 Index 권한은 추가하지 않는다.
+3. **Use checked revision**은 별도 승인 동작이다. 현재 화면 ID/state revision과
+   checked index ID를 고정한다. 전환 준비 시 current가 달라졌으면 busy이며 다시
+   Check해야 한다. 준비 중 이후 current 게시가 있어도 이미 확보한 pin만 사용한다.
+   빈 workspace에서는 이 방식으로 legacy 캐시 없이도 첫 뷰를 열 수 있다.
+
+같은 source/levels/mode에서 카메라·크기·depth/detail/thin·가시 레이어·스타일·
+fill slot·레이어 격리 복원 상태를 그대로 가져온다. DBU, 레이어 키/그룹 또는 덱
+plane 이름이 달라졌으면 임의 대응하지 않고 기존 뷰를 유지하며 전환을 거부한다.
+다른 source/levels/mode나 달라진 schema를 새로 열려면 먼저 명시적으로 Close한
+뒤 선택을 확인하고 Use한다. 일반 Open/CLI launch는 revision 자동 선택을 하지
+않는다. 불변 덱의 mode 변경은 같은 set pin을 사용하며, loaded-level 변경이
+legacy 캐시로 조용히 우회하지 않는다.
+
+전환 준비는 새 metadata·attachment·휴면 controller를 먼저 만든다. 최종 view
+CAS에 실패하거나 그 전에 취소하면 이전 controller를 유지한다. 커밋 시 기존
+예약을 공유한 채 old worker의 종료/reap을 기다린 후 새 worker를 열므로 겹쳐
+실행하지 않는다. 새 dataset revision/view ID/worker epoch는 이전 frame·margin·
+retained·query와 분리되고 브라우저의 두 이미지 버퍼도 비운다. render_key 숫자
+자체는 새 controller에서 1로 시작할 수 있으므로 단독 비교로 무효화를 주장하지
+않는다. **커밋 후 native 시작/렌더 실패는 새 뷰의 오류이며 자동 rollback은 없다.**
+
+검사 선택·자·DRC selection·미승인 preview와 mode별 임시 메모리는 새 attachment
+기준으로 초기화한다. 진행 중인 복구 UI는 Use를 막고, 전환 전 미완성 review 편집을
+저장하라는 안내를 표시한다. 저장된 note/waive와 기존 revision 파일은 수정/삭제하지
+않는다. 기존 owner-operation 직렬화는 유지하므로 빌드 중 뷰 입력은 일시 잠긴다.
+최근 operation ledger를 읽어 결과를 복구할 뿐 불명 응답/재연결에서 새 빌드나 전환
+POST를 자동 재전송하지 않는다. 현재 ID는 뷰 API와 UI에 표시한다.
+
+IR-4 전에는 이전·실패 후보가 계속 쌓인다. GC/용량 상한, 외부 캐시 수정 감지,
+NFS crash/remount·cross-host 수용, 실제 브라우저/ETX 수용은 이번 완료 범위가 아니다.
 
 ## 검증
 
@@ -178,3 +219,31 @@ current의 unlink 경합은 위의 제한적 0-link 허용으로 수정하고 �
 | `native-accepted.log` | `b96d53d875b7963fe79d03d805b94b32c03432d6a8b171eddc6256b40616725b` |
 | `clippy-accepted.log` | `255cd9aedef35846128d973e677d8d2b054dc0feadea5d27761caf8362b2343b` |
 | `battery.log` | `cfcd59085f542d770d0cfce23a4e74f3ed0e906b6ff757f771ded8a06e025170` |
+
+### IR-3 검증 결과 — 2026-09-26
+
+- app-core lib **332 passed / 8 ignored**, web lib **128 passed / 3 ignored**.
+  fmt check 및 두 패키지 Clippy(all-targets/no-deps, warnings deny) 통과.
+  기존 의존성 경고 3건은 유지했다.
+- 실제 native owner HTTP gate **23개 통과**. 새 2개는 revision이 없을 때
+  read-only Check, 승인 없는 빌드 거부, legacy 없는 첫 revision open, 빌드 중
+  기존 뷰 보존, 오래된 index ID/view CAS 거부, 이동한 camera와 non-default
+  display 보존, 새 dataset/worker identity, 예약 1개 재사용, 동일 요청 replay,
+  잡덱의 mode pin 및 loaded-level 변경의 mutable fallback 거부를 확인했다.
+- ES2017/Node gate에서 실제 app.js를 실행했다. 별도 일회 승인, 빌드 응답 불명
+  뒤 GET만으로 복구, 빌드만으로 Use 활성화/자동 전환 안 됨, 별도 Check/Use,
+  캡처된 view CAS, 이미 채워진 foreground/margin 버퍼 폐기를 검사했다.
+- 선택 배터리 `ALL OK`:
+  `sh tools/validate_rust.sh --only cache_revision,owner_service,web_ui,web_local_sharing,view_controller,view_stream,validation_selector`.
+  native 캐시 통합 2개·컨트롤러 2개·stream/sharing 20개와 기존 로컬 공유,
+  권한·브라우저 상태 회귀를 포함한다. 실제 GUI 픽셀/입력·현장 Linux/ETX/NFS
+  수용이나 새 backend의 실제 Follow/Explore UI 수용을 대신하지 않는다.
+- 최초 추가 테스트의 depth 타입 오류(코어 enum/문자열 wire)와 테스트 코드의
+  Clippy clone 경고를 수정한 뒤 재실행했다. 실패 로그도 보존했다.
+
+로그: 로컬 `/private/tmp/floe-ir3.V08CY1/`. `unit-fixed.log` SHA-256은
+`a1fa0712f966649291f193f155005c468be7e0b49db52f7e7b90bdf88cc1290b`,
+`clippy-fixed.log`는
+`6c46da6c7a3156f4f3cebff7a1ff1913756180e970450646c998e471c2ab0982`이다.
+`battery-fixed.log` SHA-256은
+`b618b02acbefacffb346da48c46ae592dc19c6e31415792b9ce09f68ac1e59eb`이다.

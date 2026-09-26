@@ -4,6 +4,7 @@
 mod index_open;
 mod levels;
 mod open;
+mod revisions;
 use index_open::IndexTarget;
 
 use crate::{
@@ -160,6 +161,28 @@ impl IndexArgs {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationDto {
+    IndexRevision {
+        seq: String,
+        source_id: String,
+        levels: LevelSelection,
+        approved: bool,
+        options: IndexArgs,
+    },
+    CheckRevision {
+        seq: String,
+        source_id: String,
+        levels: LevelSelection,
+    },
+    UseRevision {
+        seq: String,
+        source_id: String,
+        levels: LevelSelection,
+        mode: String,
+        revision: String,
+        approved: bool,
+        target: IndexTarget,
+        pixels: [u32; 2],
+    },
     ReselectLevels {
         seq: String,
         view_id: String,
@@ -202,6 +225,11 @@ pub enum OperationDto {
     },
 }
 enum Command {
+    CheckRevision {
+        source: Arc<RegisteredSource>,
+        source_id: String,
+        levels: Option<BTreeSet<i64>>,
+    },
     Mode {
         view_id: String,
         base_state_rev: u64,
@@ -218,6 +246,7 @@ enum Command {
         source: Arc<RegisteredSource>,
         levels: Option<BTreeSet<i64>>,
         options: Box<IndexOptions>,
+        immutable: bool,
     },
 }
 #[derive(Clone)]
@@ -231,10 +260,13 @@ struct OpenCommand {
     display_policy: OpenDisplay,
     label_preference: Option<bool>,
     reselect: Option<levels::Camera>,
+    index_revision: Option<String>,
 }
 impl OpenCommand {
     fn kind(&self) -> &'static str {
-        if self.reselect.is_some() {
+        if self.index_revision.is_some() {
+            "use_revision"
+        } else if self.reselect.is_some() {
             "reselect_levels"
         } else {
             "open"
@@ -567,6 +599,9 @@ impl Service {
             | OperationDto::ReselectLevels { seq, .. }
             | OperationDto::Mode { seq, .. }
             | OperationDto::Index { seq, .. }
+            | OperationDto::IndexRevision { seq, .. }
+            | OperationDto::CheckRevision { seq, .. }
+            | OperationDto::UseRevision { seq, .. }
             | OperationDto::IndexOpen { seq, .. } => view::counter(seq)?,
         };
         // A completed mode change has retired its original view ID. Replays
@@ -582,6 +617,100 @@ impl Service {
         }
         let source = |id: &str| self.source(id).ok_or("source_unavailable");
         let (kind, command) = match request {
+            OperationDto::CheckRevision {
+                source_id, levels, ..
+            } => {
+                let source = source(&source_id)?;
+                let levels = levels.core().map_err(|_| "invalid_request")?;
+                source
+                    .validate_levels(levels.as_ref())
+                    .map_err(|_| "invalid_request")?;
+                (
+                    "check_revision",
+                    Command::CheckRevision {
+                        source,
+                        source_id,
+                        levels,
+                    },
+                )
+            }
+            OperationDto::IndexRevision {
+                source_id,
+                levels,
+                options,
+                approved,
+                ..
+            } => {
+                if !approved {
+                    return Err("approval_required");
+                }
+                let source = source(&source_id)?;
+                let levels = levels.core().map_err(|_| "invalid_request")?;
+                source
+                    .validate_levels(levels.as_ref())
+                    .map_err(|_| "invalid_request")?;
+                let options = options.core().map_err(|_| "invalid_request")?;
+                if options.force
+                    || options.occupancy_only
+                    || options.representatives_only
+                    || (source.deck && options.wants_representatives())
+                {
+                    return Err("invalid_request");
+                }
+                (
+                    "index_revision",
+                    Command::Index {
+                        source,
+                        levels,
+                        options: Box::new(options),
+                        immutable: true,
+                    },
+                )
+            }
+            OperationDto::UseRevision {
+                source_id,
+                levels,
+                mode,
+                revision,
+                approved,
+                target,
+                pixels,
+                ..
+            } => {
+                if !approved {
+                    return Err("approval_required");
+                }
+                revisions::identity(&revision)?;
+                let source = source(&source_id)?;
+                let levels = levels.core().map_err(|_| "invalid_request")?;
+                source
+                    .validate_levels(levels.as_ref())
+                    .map_err(|_| "invalid_request")?;
+                let mode = Mode::parse(&mode).map_err(|_| "invalid_request")?;
+                if !source.deck && mode != Mode::Level {
+                    return Err("invalid_request");
+                }
+                floe_app_core::view::Viewport::new([0., 0., 1., 1.], pixels[0], pixels[1])
+                    .map_err(|_| "invalid_request")?;
+                (
+                    "use_revision",
+                    Command::Open(Box::new(OpenCommand {
+                        source,
+                        source_id,
+                        levels,
+                        mode,
+                        patch: Box::new(Patch {
+                            pixels: Some((pixels[0], pixels[1])),
+                            ..Default::default()
+                        }),
+                        replace: target.core()?,
+                        display_policy: OpenDisplay::Window,
+                        label_preference: None,
+                        reselect: None,
+                        index_revision: Some(revision),
+                    })),
+                )
+            }
             OperationDto::ReselectLevels {
                 view_id,
                 base_state_rev,
@@ -638,6 +767,7 @@ impl Service {
                             Field::Value(v) => Some(v),
                         },
                         reselect: None,
+                        index_revision: None,
                     })),
                 )
             }
@@ -715,6 +845,7 @@ impl Service {
                         source,
                         levels,
                         options: Box::new(options),
+                        immutable: false,
                     },
                 )
             }
@@ -838,10 +969,17 @@ fn run(inner: Arc<Inner>) {
             Command::Mode { .. } => "mode",
             Command::Open(open) => open.kind(),
             Command::IndexOpen { .. } => "index_open",
-            Command::Index { .. } => "index",
+            Command::Index { immutable, .. } => {
+                if *immutable {
+                    "index_revision"
+                } else {
+                    "index"
+                }
+            }
+            Command::CheckRevision { .. } => "check_revision",
         };
         let retry = match &work.command {
-            Command::Open(open) => Some((**open).clone()),
+            Command::Open(open) if open.index_revision.is_none() => Some((**open).clone()),
             _ => None,
         };
         let request_id = match &work.command {
@@ -955,16 +1093,7 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                 .ok_or_else(|| Error::new(ErrorKind::Busy, "source registration changed"))?;
             source.validate(&stop)?;
             let current = previous.controller.pin_dataset()?;
-            let floe_app_core::dataset::Dataset::Deck(deck) = &current.dataset else {
-                unreachable!("deck model")
-            };
-            let data = ManagedDataset::open(
-                &inner.resources,
-                source.path(),
-                deck.metadata.jobdeck.levels.clone(),
-                mode,
-                &stop,
-            )?;
+            let data = current.reopen_mode(&inner.resources, mode, &stop)?;
             let prepared = previous.mode_memory.prepare(
                 &current,
                 &previous.controller.model,
@@ -1004,6 +1133,17 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             )
         }
         Command::Open(command) => open::execute(inner, seq, *command, stop, None),
+        Command::CheckRevision {
+            source,
+            source_id,
+            levels,
+        } => {
+            let revision = ManagedDataset::published_revision(&source, &levels, &stop)?;
+            Ok(
+                json!({"seq":seq.to_string(),"kind":"check_revision","phase":"succeeded",
+                "source_id":source_id,"levels":revisions::levels(&levels),"index_revision":revision}),
+            )
+        }
         Command::IndexOpen {
             open,
             options,
@@ -1014,8 +1154,14 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             source,
             levels,
             options,
+            immutable,
         } => {
-            let mut job = ManagedIndex::start(
+            let start = if immutable {
+                ManagedIndex::start_revisions
+            } else {
+                ManagedIndex::start
+            };
+            let mut job = start(
                 &inner.resources,
                 source,
                 levels,
@@ -1026,10 +1172,17 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                 if stop.load(Ordering::Relaxed) != 0 {
                     job.cancel();
                 }
-                let state = index_state(seq, &job.snapshot());
+                let state_of = |snapshot: &IndexSnapshot| {
+                    let mut value = index_state(seq, snapshot);
+                    if immutable {
+                        value["kind"] = json!("index_revision");
+                    }
+                    value
+                };
+                let state = state_of(&job.snapshot());
                 if job.is_finished() {
                     job.close()?;
-                    return Ok(index_state(seq, &job.snapshot()));
+                    return Ok(state_of(&job.snapshot()));
                 }
                 inner.state.lock().unwrap().ledger.update(seq, state, false);
                 thread::sleep(Duration::from_millis(20));
@@ -1058,6 +1211,7 @@ fn index_state(seq: u64, s: &IndexSnapshot) -> Value {
         NativePhase::Representatives => "representatives",
     };
     json!({"seq":seq.to_string(),"kind":"index","phase":phase,"title":s.title,"current":s.current,"completed":s.completed,"total":s.total,"kept":s.kept,"renamed":s.renamed,"rename_sync_warning":s.rename_sync_warning,"skipped":s.skipped,"failed":s.failed,"elapsed_ms":s.elapsed_ms.to_string(),"error":s.failure.map(view::safe_error),
+        "index_revision":s.index_revision,"revision_sync_warning":s.revision_sync_warning,
         "native":{"phase":native,"output_bytes":s.native.output_bytes.to_string(),"dropped_lines":s.native.dropped_lines.to_string(),"representatives_missing":s.native.representatives_missing,"cells":s.native.cells.map(|n|n.to_string()),"total_cells":s.native.total_cells.map(|n|n.to_string()),"planned_pages":s.native.planned_pages.map(|n|n.to_string()),"encoded_pages":s.native.encoded_pages.map(|n|n.to_string())}})
 }
 

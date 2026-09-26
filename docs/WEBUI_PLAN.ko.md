@@ -772,9 +772,11 @@ Firefox kiosk를 그 요구의 대체로 간주하지 않는다.
 ### 4.1 인덱스 수명주기 (재개, 단계별 연결 중)
 
 2026-09-25: 사용자 승인으로 재개했다. [IR-1~4 추적](WEBUI_INDEX_REVISIONS.ko.md).
-별도 revision 저장·빌드 기반과 관리형 일반/덱의 명시적 backend API를 추가했다
-(IR-2, 2026-09-26). 기본 UI에 새 backend 선택·명시적 전환을 연결하기 전에는
-기존 열린 캐시의 busy 보호를 유지한다. 자동 hot reload는 아님.
+별도 revision 저장·빌드와 관리형 일반/덱 pin(IR-1/2), opt-in UI의 별도 full-build·
+read-only Check·명시적 Use(IR-3, 2026-09-26)를 연결했다. 같은 소스/선택/모드의
+전환은 상태를 보존하고 새 dataset/view/worker identity로 캐시를 분리한다.
+기존 Run index/일반 CLI와 열린 mutable 캐시의 busy 보호는 유지한다. 자동
+hot reload는 아니며 IR-4 보존/회수와 실제 GUI·현장 수용은 남는다.
 
 열린 GUI가 `.ovo` 교체를 즉시 감지하지 않는 기존 항목은 사용자 합의대로
 jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 별도 계약을 정한다.

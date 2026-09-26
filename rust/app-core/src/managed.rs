@@ -406,6 +406,18 @@ pub struct ManagedDataset {
     _read: Permit,
 }
 impl ManagedDataset {
+    /// Read-only discovery for an explicitly selected registered source set.
+    pub fn published_revision(
+        source: &crate::registered::RegisteredSource,
+        levels: &Option<BTreeSet<i64>>,
+        stop: &AtomicUsize,
+    ) -> Result<Option<String>> {
+        source.validate(stop)?;
+        let expected = source.selected_sources(levels.as_ref(), stop)?;
+        let pin = cache::revision::set::Store::new(source.path())?.pin(&expected, levels, stop)?;
+        source.validate(stop)?;
+        Ok(pin.map(|p| p.id().to_owned()))
+    }
     /// Explicit immutable backend. Never falls back to mutable caches on a
     /// missing, corrupt or differently selected set. Existing open stays legacy
     /// until the UI's explicit mode/cutover is connected.

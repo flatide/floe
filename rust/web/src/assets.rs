@@ -114,6 +114,10 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../ui/palette.js"),
         ),
+        "index-revisions.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/index-revisions.js"),
+        ),
         "index-open.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/index-open.js"),

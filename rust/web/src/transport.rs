@@ -51,6 +51,7 @@ pub(crate) struct Attachment {
     pub controller: Arc<ViewController>,
     pub rows: Arc<crate::layer_catalog::LayerCatalog>,
     pub source_id: String,
+    pub index_revision: Option<String>,
     pub mode: &'static str,
     pub levels: Option<Vec<String>>,
     pub mode_memory: floe_app_core::view::deck_mode::DeckModeMemory,
@@ -72,12 +73,17 @@ impl Attachment {
         title: &str,
         rows: crate::layer_catalog::LayerCatalog,
     ) -> Result<Self, crate::auth::AuthError> {
+        let index_revision = controller
+            .pin_dataset()
+            .ok()
+            .and_then(|d| d.index_revision.clone());
         Ok(Self {
             id: crate::auth::public_id()?,
             title: title.chars().take(256).collect(),
             rows: Arc::new(rows),
             controller,
             source_id: String::new(),
+            index_revision,
             mode: "level",
             levels: None,
             mode_memory: Default::default(),
@@ -751,7 +757,7 @@ async fn capabilities(State(gate): State<Gate>, headers: HeaderMap) -> Response 
     let render = gate.service.is_some() || gate.view.is_some();
     Json(json!({"protocol":1,"bundle":BUNDLE,"stage":if gate.service.is_some(){"owner-service"}else if render{"view-stream"}else{"transport"},
         "render":render,"catalog":gate.service.is_some(),"index":gate.service.is_some(),"index_open":gate.service.is_some(),"launcher":gate.cli_owner,"file_picker":gate.browse.is_some(),"jobdeck_modes":gate.service.is_some(),"jobdeck_levels":gate.service.is_some(),"drc":gate.drc.is_some(),"drc_notes":gate.drc.as_ref().is_some_and(|r|r.notes_enabled()),"drc_waives":gate.drc.as_ref().is_some_and(|r|r.waives_enabled()),"exports":gate.service.is_some(),"snapshot_png":gate.service.is_some(),"layer_settings":true,"design_defaults":gate.defaults.is_some(),"shares":false,"uploads":false,"control_bytes":CONTROL_BYTES,
-        "share_grants":gate.shares.is_some(),
+        "share_grants":gate.shares.is_some(),"index_revisions":gate.service.is_some(),
         "fill_slot_edit":gate.fill_slot_edit,"display_only":gate.display_only,
         "display_dump":gate.service.is_some(),"dump_on_start":gate.dump_on_start,
         "display_input":gate.display_input.as_ref().map(|p|json!({"width":p.width,"height":p.height,"bytes":p.bytes.len()})),
@@ -771,7 +777,7 @@ async fn current_view(State(gate): State<Gate>, headers: HeaderMap) -> Response 
         &view.id,
         "",
     );
-    Json(json!({"title":view.title,"source_id":view.source_id,"mode":view.mode,"levels":view.levels,"view":snapshot}))
+    Json(json!({"title":view.title,"source_id":view.source_id,"mode":view.mode,"levels":view.levels,"index_revision":view.index_revision,"view":snapshot}))
         .into_response()
 }
 async fn startup(State(gate): State<Gate>, headers: HeaderMap) -> Response {

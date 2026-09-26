@@ -39,6 +39,7 @@
   <script defer src="/assets/@@BUNDLE@@/launcher.js"></script>
   <script defer src="/assets/@@BUNDLE@@/browse.js"></script>
   <script defer src="/assets/@@BUNDLE@@/index-open.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/index-revisions.js"></script>
   <script defer src="/assets/@@BUNDLE@@/palette.js"></script>
   <script defer src="/assets/@@BUNDLE@@/fill-editor.js"></script>
   <script defer src="/assets/@@BUNDLE@@/presets.js"></script>
@@ -233,6 +234,17 @@
         <p class="note">Samples are approximate display data, not pickable geometry. An explicit format rebuilds OVR even on a current cache. Occupancy pruning may enlarge sub-cell footprints within one grid cell. Reopen after generation. Adding both summaries to a current cache uses two passes; a completed first pass remains if the second fails.</p>
         <label class="check"><input id="index-force" type="checkbox"> Force replacement of existing cache</label>
         <div class="button-row"><button id="index">Run index</button><button id="cancel-job" disabled>Cancel</button></div>
+        <details id="revision-panel" hidden>
+          <summary>Immutable index revisions</summary>
+          <p class="note">Build a complete separate index using the jobs/summary options above. Existing readers keep their index. Force is not used. All selected jobdeck sources must be valid OASIS; missing/GDS/gzip members fail the build. No automatic switch or cleanup; each build requires another full cache's disk space.</p>
+          <label class="check"><input id="revision-approve" type="checkbox"> Approve one full separate index build</label>
+          <button id="revision-build" type="button" disabled>Build new revision</button>
+          <button id="revision-check" type="button" disabled>Check published revision</button>
+          <p id="revision-status" class="note" role="status">No revision checked.</p>
+          <p id="revision-current" class="note"></p>
+          <p class="note">Use is a separate action. Same source/levels/mode keeps camera and display settings if the layer schema matches. Inspection, rulers, DRC selection and unapproved previews reset; save unfinished review edits first. To change source/levels/mode, close the view first. The old and failed revision files remain on disk.</p>
+          <button id="revision-use" type="button" disabled>Use checked revision</button>
+        </details>
         <p id="operation" class="note" role="status">No active operation.</p>
       </details>
     </aside>
