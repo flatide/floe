@@ -132,6 +132,23 @@ def _density_stack(value):
     return dict(zip(DENSITY_STACK_COUNTS, counts))
 
 
+DENSITY_PAGE_COUNTS = ("candidates", "taken", "decoded", "over_budget")
+
+
+def _density_pages(value):
+    """A `density_pages=` wire value (`candidates/taken/decoded/over_budget`:
+    pass 2's pages, CUT_DENSITY_DESIGN §10.10) as {count: n}; None for `-`."""
+    if not value or value == "-":
+        return None
+    try:
+        counts = [int(v) for v in value.split("/")]
+    except ValueError:
+        return None
+    if len(counts) != len(DENSITY_PAGE_COUNTS):
+        return None
+    return dict(zip(DENSITY_PAGE_COUNTS, counts))
+
+
 def _wire_int(fields, name, default=0):
     try:
         return int(fields.get(name, default))
@@ -610,8 +627,10 @@ class RustRenderWorker:
             "once_tiles": 0, "once_passes": 0, "once_items": 0,
             # placement survivor walks by outcome (sum over rounds)
             "place_walks": {},
-            # the density stack's counts of the last round (None: off)
+            # the density stack's counts of the last round (None: off), and
+            # pass 2's pages
             "density_stack": None,
+            "density_pages": None,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -1099,6 +1118,7 @@ class RustRenderWorker:
             state[key] += _wire_int(fields, key)
         _add_place_walks(state["place_walks"], fields.get("place_walks", "-"))
         state["density_stack"] = _density_stack(fields.get("density_stack", "-"))
+        state["density_pages"] = _density_pages(fields.get("density_pages", "-"))
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1318,6 +1338,7 @@ class RustRenderWorker:
             "once_items_skipped": state["once_items"],
             "place_walks": dict(state["place_walks"]),
             "density_stack": state["density_stack"],
+            "density_pages": state["density_pages"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on

@@ -934,6 +934,8 @@ struct FramePixels {
     /// the density stack's counts (RenderStats::density_stack) when the
     /// frame stacked its density
     density_stack: Option<[u64; 5]>,
+    /// pass 2's pages: candidates, left out as taken, decoded, over the budget
+    density_pages: Option<[u64; 4]>,
 }
 
 fn render_worker(
@@ -1908,6 +1910,30 @@ fn density_stack_enabled() -> bool {
     std::env::var("FLOE_RUST_DENSITY_STACK").as_deref() == Ok("top")
 }
 
+/// Pass 2's cut (px, the larger side): the shapes under pass 1's cut down to
+/// this size are density (user decision 2026-09-27: 0.5 px, so the count
+/// stays in bounds). FLOE_RUST_DENSITY_CUT_PX, diagnostic; unset, empty or
+/// out of range means 0.5.
+fn density_cut_px() -> f64 {
+    std::env::var("FLOE_RUST_DENSITY_CUT_PX")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|c| c.is_finite() && *c > 0.0)
+        .unwrap_or(0.5)
+}
+
+/// What pass 2 may decode on top of pass 1 (bytes, encoded x 2 as the
+/// estimate): FLOE_RUST_DENSITY_BUDGET_MB, diagnostic, default 256 MB - and
+/// never more than half of what the generation budget has left.
+fn density_budget_bytes() -> u64 {
+    std::env::var("FLOE_RUST_DENSITY_BUDGET_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|mb| *mb > 0)
+        .unwrap_or(256)
+        .saturating_mul(1 << 20)
+}
+
 fn page_wash_enabled() -> bool {
     std::env::var("FLOE_RUST_PAGE_WASH").as_deref() == Ok("on")
 }
@@ -2378,6 +2404,24 @@ fn run_render(
         .as_ref()
         .map(|planned| Arc::from(planned.rows.clone()))
         .unwrap_or_else(|| Arc::from([]));
+    // the density stack's pass 2 (floe_render_core DensityStack,
+    // CUT_DENSITY_DESIGN §10.10): the same view planned with the finer cut
+    // (density_cut_px); its pages are read only where pass 1 left room, in
+    // render_density_frame. A reused frame, an occupancy frame and a probe
+    // have no pass 2, nor a frame without the write-once tiles.
+    let density_plan: Option<Arc<HierPlan>> = if raster_request.density_stack
+        && !label_only
+        && !(styles.is_empty() && !command.frames)
+        && command.probe.is_none()
+        && std::env::var("FLOE_RUST_WRITE_ONCE").as_deref() != Ok("off")
+    {
+        let fine = make_plan_request_cut(cache, command, state.page_cache.budget_bytes(), density_cut_px())?;
+        let fine_pages = cache.page_plan_request(&fine, &summary, !command.frames)?;
+        Some(Arc::new(cache.plan(&fine_pages)?.plan))
+    } else {
+        None
+    };
+    check_generation(cancellation, command.generation)?;
     if let Some(mode) = command.probe {
         // docs/LAYER_DECODE_PROBE_PLAN.ko.md: the same plan and selection, a
         // different way of painting them. Everything a normal render does
@@ -2401,7 +2445,9 @@ fn run_render(
             decode_workers,
         );
     }
-    let mut rounds = refinement_batches(&selected, command.round_pages, |page_id| {
+    // pass 2 is planned once a frame: a density frame takes its pages in one round
+    let round_pages = if density_plan.is_some() { usize::MAX } else { command.round_pages };
+    let mut rounds = refinement_batches(&selected, round_pages, |page_id| {
         state.page_cache.contains(page_id)
     })?;
     let mut decoded_pages = Vec::with_capacity(selected.len());
@@ -2458,6 +2504,7 @@ fn run_render(
         let scene_us = elapsed_us(scene_started);
         check_generation(cancellation, command.generation)?;
 
+        let mut density_pages: Option<[u64; 4]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -2475,7 +2522,23 @@ fn run_render(
                 };
                 // FLOE_RUST_WORK_BIN=off: field kill switch back to the
                 // per-tile walk (identical pixels, F2R-03b 2c).
-                if std::env::var("FLOE_RUST_WORK_BIN").as_deref() == Ok("off") {
+                if let Some(density_plan) = density_plan.as_ref() {
+                    let (report, counts) = render_density_frame(
+                        cache,
+                        &mut state.page_cache,
+                        command,
+                        cancellation,
+                        &scene,
+                        &styled,
+                        &plan,
+                        density_plan,
+                        &decoded_pages,
+                        decode_workers,
+                        &mut generation_bytes,
+                    )?;
+                    density_pages = Some(counts);
+                    report
+                } else if std::env::var("FLOE_RUST_WORK_BIN").as_deref() == Ok("off") {
                     render_geometry_styled_unbinned_cancellable(
                         &scene,
                         &styled,
@@ -2557,10 +2620,8 @@ fn run_render(
                 summary_pixels: report.summary_pixel_paints,
                 place_walks: report.stats.place_walks,
                 // the stack lives in the styled write-once tiles
-                density_stack: (raster_request.density_stack
-                    && !(styles.is_empty() && !command.frames)
-                    && std::env::var("FLOE_RUST_WRITE_ONCE").as_deref() != Ok("off"))
-                .then_some(report.stats.density_stack),
+                density_stack: density_plan.is_some().then_some(report.stats.density_stack),
+                density_pages,
             }
         };
         check_generation(cancellation, command.generation)?;
@@ -2639,7 +2700,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} queue_us={} wall_us={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} queue_us={} wall_us={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -2760,6 +2821,10 @@ fn run_render(
                 // when the frame did not stack its density
                 pixels
                     .density_stack
+                    .map_or_else(|| "-".to_string(), |counts| counts.map(|count| count.to_string()).join("/")),
+                // candidates/taken/decoded/over_budget, `-` without pass 2
+                pixels
+                    .density_pages
                     .map_or_else(|| "-".to_string(), |counts| counts.map(|count| count.to_string()).join("/")),
                 queue_us,
                 // up to this frame's response: the phases above account for
@@ -3058,7 +3123,121 @@ fn prepare_pan_reuse(
     })
 }
 
+/// A frame with the density stack's pass 2 (floe_render_core DensityStack,
+/// CUT_DENSITY_DESIGN §10.10): pass 1 paints `scene` as always over tiles
+/// that stay alive (LayerRasterSession); at the block boundary the tiles say
+/// which pages of the finer plan (`density_plan`, density_cut_px) can still
+/// paint a pixel their plane's density may take - pass 1's own pages are in
+/// the density scene already - and those are decoded in the plan's order
+/// within density_budget_bytes and the generation's remaining budget; pass 2
+/// then draws the records under pass 1's cut (`plan.stats.shape_cut`) from
+/// them. No pan reuse and no retained geometry (as the layer probe).
+/// (the report, [candidate pages, left out as taken, decoded, over the budget])
+#[allow(clippy::too_many_arguments)]
+fn render_density_frame(
+    cache: &Cache,
+    page_cache: &mut DecodedPageCache,
+    command: &RenderCommand,
+    cancellation: &RenderCancellation,
+    scene: &FrameScene,
+    styled: &StyledGeometryRasterRequest,
+    plan: &HierPlan,
+    density_plan: &Arc<HierPlan>,
+    decoded_pages: &[Arc<floe_render_core::DecodedPage>],
+    decode_workers: u16,
+    generation_bytes: &mut u64,
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 4]), String> {
+    let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
+    let density_scene = FrameScene::new_metadata(cache, Arc::clone(density_plan), Arc::from([]), command.label_font_px)?;
+    for page in decoded_pages {
+        // pass 1's pages the finer plan holds too; the rest are not its
+        let _ = density_scene.set_decoded_page(Arc::clone(page));
+    }
+    let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
+    let session = LayerRasterSession::begin_with_density_cancellable(
+        scene,
+        styled,
+        work_bin,
+        Some((&density_scene, upper_cut)),
+        command.generation,
+        cancellation,
+    )?;
+    let block = session.density_block();
+    // the plan's order (its priority) for the budget
+    let mut prio: Vec<(u32, u64)> = density_plan.pages.iter().copied().zip(density_plan.page_prio.iter().copied()).collect();
+    prio.sort_unstable();
+    let budget_bytes = page_cache.budget_bytes();
+    let mut counts = [0u64; 4];
+    let mut failed: Option<String> = None;
+    let (report, _pool_us) = cache.with_decode_pool(
+        decode_workers,
+        Some((command.generation, cancellation)),
+        |pool| {
+            session.render_layered_cancellable_with(
+                scene,
+                styled,
+                Some(&density_scene),
+                command.generation,
+                cancellation,
+                block,
+                |_, demand| {
+                    if !demand.density_block() {
+                        return Ok(());
+                    }
+                    let mut wanted = Vec::new();
+                    let stats = demand.density_pages(&mut wanted);
+                    counts[0] = stats.candidates;
+                    counts[1] = stats.occluded;
+                    wanted.retain(|&page_id| density_scene.page(page_id).is_none());
+                    wanted.sort_by_key(|&page_id| prio.binary_search_by_key(&page_id, |entry| entry.0).map_or(u64::MAX, |at| prio[at].1));
+                    // the estimate: twice the encoded bytes; the cap: the density
+                    // budget, and half of what the generation has left
+                    let limit = density_budget_bytes().min(budget_bytes.saturating_sub(*generation_bytes) / 2);
+                    let mut estimate = 0u64;
+                    let mut take = Vec::with_capacity(wanted.len());
+                    for page_id in wanted {
+                        let bytes = cache.page_encoded_bytes(page_id).saturating_mul(2).max(1);
+                        if estimate.saturating_add(bytes) > limit {
+                            counts[3] += 1;
+                            continue;
+                        }
+                        estimate += bytes;
+                        take.push(page_id);
+                    }
+                    if take.is_empty() {
+                        return Ok(());
+                    }
+                    let (pages, _decode_stats) = page_cache.load_pooled(pool, &take)?;
+                    for page in pages {
+                        let bytes = page.estimated_bytes();
+                        if generation_bytes.saturating_add(bytes) > budget_bytes {
+                            counts[3] += 1;
+                            continue;
+                        }
+                        *generation_bytes += bytes;
+                        counts[2] += 1;
+                        if let Err(error) = density_scene.set_decoded_page(page) {
+                            failed.get_or_insert(error);
+                        }
+                    }
+                    Ok(())
+                },
+            )
+        },
+    )?;
+    if let Some(error) = failed {
+        return Err(error);
+    }
+    Ok((report?, counts))
+}
+
 fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64) -> Result<PlanRequest, String> {
+    make_plan_request_cut(cache, command, decode_budget, command.cut_px)
+}
+
+/// `make_plan_request` at another cut (px): the density stack's pass 2 plans
+/// the same view with the finer cut (density_cut_px).
+fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: u64, cut_px: f64) -> Result<PlanRequest, String> {
     let [x0, y0, x1, y1] = command.view;
     let planner_x0 = checked_bound(x0.floor(), "view x0")?;
     let planner_y0 = checked_bound(y0.floor(), "view y0")?;
@@ -3067,10 +3246,10 @@ fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64)
     let span_x = x1 - x0;
     let span_y = y1 - y0;
     let px_per_dbu = (command.width as f64 / span_x).min(command.height as f64 / span_y);
-    let cut_dbu = if command.exact || command.cut_px == 0.0 {
+    let cut_dbu = if command.exact || cut_px == 0.0 {
         0
     } else {
-        checked_bound((command.cut_px / px_per_dbu).ceil(), "cut dbu")?
+        checked_bound((cut_px / px_per_dbu).ceil(), "cut dbu")?
     };
     let request = PlanRequest {
         view: ViewBox::new(planner_x0, planner_y0, planner_x1, planner_y1)?,

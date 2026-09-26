@@ -174,7 +174,7 @@ def main(argv=None):
                            drawn=res.get('rep_members_drawn'), paints=res.get('member_paints'),
                            skipped=res.get('once_items_skipped'), cells=res.get('hier_cells_visited'),
                            walks=res.get('place_walks') or {}, lit=lit, culls=res.get('plan_culls', {}),
-                           counts=res.get('density_stack'))
+                           counts=res.get('density_stack'), pages2=res.get('density_pages'))
                 rows.append(row)
                 c, cs = row['culls'], row['cold']
                 print('%-7s %-3s %-7s x%-4g cold %8.0f ms (plan %6.0f read %6.0f decode %6.0f scene %5.0f raster %7.0f; miss %s) | '
@@ -188,7 +188,8 @@ def main(argv=None):
                 if args.culls:
                     print('   culls: ' + ' '.join('%s=%s' % kv for kv in sorted(c.items()) if kv[1]), flush=True)
                 if row['counts']:
-                    print('   stack: ' + ' '.join('%s %d' % kv for kv in row['counts'].items()), flush=True)
+                    print('   stack: ' + ' '.join('%s %d' % kv for kv in row['counts'].items())
+                          + ((' | pass 2 pages: ' + ' '.join('%s %d' % kv for kv in row['pages2'].items())) if row['pages2'] else ''), flush=True)
                 if row['walks']:
                     # FLOE_RUST_PLACE_LATTICE=on: the placement arrays' survivor
                     # walks by outcome (walks / visible members; 1 / 2 = 1-D / 2-D)
@@ -200,7 +201,7 @@ def main(argv=None):
     def k(v):
         return '-' if v is None else '%.0fk' % (v / 1000) if v >= 10000 else '%d' % v
     print('== type this == (mode d/n/x/o = default/min/max/off, +t = density stack top, layers zoom | cold wall decode raster '
-          '| warm wall raster lo-hi | pages bin tested drawn lit fit% [| stack lit top lower])')
+          '| warm wall raster lo-hi | pages bin tested drawn lit fit% [| stack lit top lower | pass-2 pages decoded over])')
     for r in rows:
         counts = r['counts']
         print('%s%s %s %g | %.0f %.0f %.0f | %s %s %s | %s %s %s %s %.3f %s%s' % (
@@ -209,7 +210,8 @@ def main(argv=None):
             '%.0f' % r['warm_raster'] if r['warm_raster'] is not None else '-',
             '%.0f-%.0f' % r['warm_raster_range'] if r['warm_raster_range'] else '-',
             r['pages'], k(r['bin_items']), k(r['tested']), k(r['drawn']), r['lit'], r['culls'].get('fit_pct'),
-            ' | %s %s %s' % (k(counts['lit']), k(counts['top']), k(counts['lower'])) if counts else ''))
+            (' | %s %s %s' % (k(counts['lit']), k(counts['top']), k(counts['lower']))
+             + (' | %s %s' % (k(r['pages2']['decoded']), k(r['pages2']['over_budget'])) if r['pages2'] else '')) if counts else ''))
     walked = [r for r in rows if r['walks']]
     if walked:
         print('== type this 2 == (placement walks, the 3 outcomes with the most members: outcome walks/members)')

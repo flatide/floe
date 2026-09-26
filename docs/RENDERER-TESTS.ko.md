@@ -124,14 +124,18 @@ floe 뷰어의 klayout 경로를 대체하려면 무엇을 소비하고, 무엇�
   1·2차원 배열별로 `RenderStats::place_walks`에 세어 renderd `place_walks=`와 워커 결과로 내보낸다
   (0.12.211, `placement_walk_outcomes_are_counted`). 생존 걷기의 비용 모형은
   블록 수를 항의 확률로 추정하고 멤버 방문을 레코드 배열 4, 배치 배열 16블록으로 센다(0.12.209).
-  **밀도 스택(진단, 기본 꺼짐, 0.12.224/renderd 0.12.215, CUT_DENSITY_DESIGN §10.10):**
-  `FLOE_RUST_DENSITY_STACK=top`이면 한 변이 1 px 미만인 면적 참 도형(밀도)은 최상위 평면의 것만 하위 원본 위에
-  보이고(자기 원본 내부 제외), 나머지 평면의 것은 어떤 원본도 덮지 않고(스페클·패턴 구멍, clear 내부 포함)
-  위 밀도가 차지하지 않은(떨어진 도형 포함) 픽셀에만 보인다(`DensityStack`, write-once 타일에서만).
-  격자 배열의 차지 영역은 배열 단위(`array_footprint`)라 생존 걷기 켬·끔과 같다. 단위 테스트는
-  `the_density_stack_shows_the_top_density_and_the_empty_space_only`,
+  **밀도 스택(진단, 기본 꺼짐, 0.12.226/renderd 0.12.216, CUT_DENSITY_DESIGN §10.10):**
+  `FLOE_RUST_DENSITY_STACK=top`이면 프레임을 두 번 그린다. 1패스는 계획(컷 3 px, max)을 지금처럼 칠하며 —
+  그려지는 도형은 헤어라인까지 모두 원본 — 원본이 덮은 영역(스페클·패턴 구멍, clear 내부 포함)을 기록하고,
+  2패스는 같은 뷰를 컷 0.5 px로 다시 계획한 장면에서 긴 변이 1패스 컷 미만인 레코드(밀도)를 위 평면부터
+  그린다: 최상위 평면의 밀도는 자기 원본이 쓰거나 덮은 곳 밖이면 하위 원본 위에도 덮어쓰고, 나머지 평면의
+  밀도는 어떤 원본도 쓰거나 덮지 않고 위 밀도가 차지하지 않은(떨어진 도형의 순위 0 픽셀 포함) 픽셀에만
+  쓴다(`DensityStack`, write-once 타일에서만; LayerRasterSession의 두 블록 — 2패스 페이지는 블록 경계에서
+  1패스의 마스크로 걸러 디코드한다, `BlockDemand::density_pages`). 격자 배열의 차지 영역은 배열
+  단위(`array_footprint`)라 생존 걷기 켬·끔과 같다. 단위 테스트는
+  `the_density_stack_draws_the_cut_shapes_in_the_top_plane_and_the_empty_space`,
   `a_dropped_array_member_claims_its_pixels_under_the_density_stack`,
-  `the_density_stack_draws_one_solid_plane_as_before_and_every_path_alike`다.
+  `the_density_stack_draws_one_solid_plane_as_the_finer_cut_and_every_path_alike`다.
   **같은 세계 박스의 중복**(단일 사각형 둘, 같은 Grid 둘, Grid와 그 조각)은 한 벌과 같은 픽셀을
   켜고 레코드 순서도 무관하다(단위 테스트 `duplicates_of_a_shape_draw_as_one`); Grid 멤버 위의 단일
   사각형은 다른 경로(자기 세계 박스 해시)라 두 결정의 합집합 — 같은 박스 중심에 놓이므로 더 넓은

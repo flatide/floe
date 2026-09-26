@@ -87,13 +87,15 @@ sh tools/validate_rust.sh --only quick path/to.oas
   프레임 결과의 `place_walks`에 그 배열의 걷기(`walked2`)가 오고, 목록 끔에서는 비어 있다(0.12.211).
   occupancy·jobdeck·representatives·sub_cut_box 게이트는 KLayout 규칙에 대한 비교라 이 킬 스위치를
   모든 워커에 고정한다(sub_cut_box: 상자는 표시용 점, 그 기준인 멤버 직접 그리기도 KLayout 규칙).
-- `density_stack`(tools/validate_density_stack.py, 약 5초; `render` 별칭에 포함): 밀도 스택 진단
-  (0.12.224, `FLOE_RUST_DENSITY_STACK=top`, CUT_DENSITY_DESIGN §10.10). klayout.db로 만든 0.1 µm/px
-  레이아웃(1/0: 뷰 전체의 0.2 px 선, 최상위 2/0: 왼쪽 절반의 사각형과 그 안의 0.5 px 점, 3/0: 같은 사각형만,
-  모두 기본 스페클)에서, 원본이 없는 오른쪽 절반은 켬·끔이 바이트 동일하다(하위 선 7,410 px). 끄면 사각형
-  안이 사각형만일 때보다 더 켜지고(23,286 대 19,208 px — 구멍의 선과 점), 켜면 사각형만일 때와 픽셀까지 같다.
-  켠 프레임은 `density_stack` 계측(lit·top·lower·covered·claimed)을 보고하고, 끈 프레임·`FLOE_RUST_AREA_TRUE=off`·
-  `FLOE_RUST_WRITE_ONCE=off`는 계측 없이 변수 없는 프레임과 같다.
+- `density_stack`(tools/validate_density_stack.py, 약 10초; `render` 별칭에 포함): 밀도 스택 진단
+  (0.12.226, `FLOE_RUST_DENSITY_STACK=top`, CUT_DENSITY_DESIGN §10.10 — 컷 아래 도형을 2패스로 빈 공간에).
+  klayout.db로 만든 0.1 µm/px 400×200 레이아웃(1/0: 뷰 전체의 0.15 µm(1.5 px) 사각형 격자와 오른쪽 위 사분면의
+  사각형, 최상위 4/0: 왼쪽 절반의 사각형과 그 안·1/0 사각형 위의 1.5 px 사각형들, 3/0: 왼쪽 사각형만, 모두
+  기본 스페클, 컷 3 px)에서: 끄면 1.5 px 사각형이 하나도 없고(컷), 켜면 오른쪽 아래 사분면에 1/0의 사각형이
+  1/0만 컷 없이 그린 프레임과 픽셀까지 같게 나온다. 왼쪽 사각형 안은 사각형만일 때와 같고(구멍의 하위 사각형도
+  자기 사각형도 없음), 오른쪽 위는 1/0 사각형 위에 최상위의 사각형이 최상위만 컷 없이 그린 픽셀과 같은 위치·색으로
+  올라오며 나머지는 끈 프레임 그대로다. 켠 프레임은 `density_stack`과 `density_pages`(디코드 > 0) 계측을
+  보고하고, 끈 프레임·`FLOE_RUST_AREA_TRUE=off`·`FLOE_RUST_WRITE_ONCE=off`는 계측 없이 변수 없는 프레임과 같다.
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과
