@@ -3538,10 +3538,6 @@ class Viewer:
                         culls = res.get("plan_culls") or {}
                         if culls.get("shape_cut"):
                             cut += " (larger side)" if culls.get("shape_cut_max") else " (min side)"
-                    # the density stack (diagnostic FLOE_RUST_DENSITY_STACK=top,
-                    # CUT_DENSITY_DESIGN §10.10): the frame stacked its density
-                    if res.get("density_stack") is not None:
-                        cut += ", density: top + empty"
                     fit = (res.get("plan_culls") or {})
                     if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
                             or fit.get("fit_thin")):
@@ -3806,9 +3802,15 @@ class Viewer:
                     # tiles = plan total (resident pages included);
                     # +new = pages actually shipped for this view
                     # (cache misses, summed over its stream rounds)
-                    mode = "live (%d tiles, +%d new, %d ms" \
+                    # the density stack (diagnostic FLOE_RUST_DENSITY_STACK=top,
+                    # CUT_DENSITY_DESIGN §10.10): the frame stacked its density.
+                    # First in the line - the bar is ellipsized at its end,
+                    # and next to the cut it fell off (field 2026-09-26)
+                    stack = (" [density: top + empty]"
+                             if res.get("density_stack") is not None else "")
+                    mode = "live%s (%d tiles, +%d new, %d ms" \
                            "%s%s%s%s%s%s)" \
-                        % (res["tiles"], res.get("new", 0) or 0,
+                        % (stack, res["tiles"], res.get("new", 0) or 0,
                            res["ms"], split,
                            self._depth_note(used), cut, drawn,
                            refin, text)

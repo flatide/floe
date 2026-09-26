@@ -1420,7 +1420,8 @@ k_B를 고정하면 생존 조건은 vdc(k_A)가 한 구간에 드는 것이다.
 - **계측.**
   - renderd 프레임 줄: `density_stack=lit/top/lower/covered/claimed`(꺼지면 `-`). 각각 밀도가 켠 픽셀,
     최상위가 쓴 픽셀, 나머지가 쓴 픽셀, 마지막 평면 뒤 원본이 덮은 픽셀, 밀도가 차지한 픽셀이다.
-  - 워커 결과 `density_stack`, 뷰어 상태줄 `, density: top + empty`, `tools/bench_hairline_cut.py --stacks off,top`.
+  - 워커 결과 `density_stack`, 뷰어 상태줄 맨 앞 `live [density: top + empty] (...`(0.12.225: 컷 옆에 두었더니 상태줄
+    끝의 말줄임에 가려졌다 — 현장 2026-09-26), `tools/bench_hairline_cut.py --stacks off,top`.
 - **검증.**
   - 단위 테스트 `the_density_stack_shows_the_top_density_and_the_empty_space_only`:
     4분면 장면에서 스페클·clear·패턴마다 최상위 원본 안은 원본만 보인다. 최상위 밀도는 하위 원본 위에 그대로
