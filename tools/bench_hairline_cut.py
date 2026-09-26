@@ -35,7 +35,12 @@ skipped, the lit share and the plan's cut counters - and, under the
 diagnostic placement lattice (FLOE_RUST_PLACE_LATTICE=on, CUT_DENSITY_DESIGN
 §10.8), the placement arrays' survivor walks by outcome (`place walks`:
 walks / visible members per outcome, 1 / 2 = 1-D / 2-D arrays; `== type this
-2 ==` keeps the three with the most members). The raster time is the
+2 ==` keeps the three with the most members) - and, per --stacks value, the
+density stack (FLOE_RUST_DENSITY_STACK=top, CUT_DENSITY_DESIGN §10.10: the
+top layer's density and the others' only in the empty space; `off` = the
+variable unset) with its counts (`stack`: density pixels lit, written by the
+top layer, written by the others, covered by originals, claimed by density).
+The raster time is the
 whole raster stage: the work bin, the record and member walk, the transforms,
 the survival test and the pixel writes together, so a raster difference says
 the stage costs more, not which of them does.
@@ -45,7 +50,7 @@ layout draws none by default anyway) and every frame is checked for
 summary.layers == 0.
 
     .venv/bin/python tools/bench_hairline_cut.py <layout.oas> [--modes min,max] [--layers last10,all]
-        [--zooms 1,4,16] [--repeat 3] [--center X,Y (um)] [--budget-mb MB]
+        [--zooms 1,4,16] [--repeat 3] [--center X,Y (um)] [--budget-mb MB] [--stacks off,top]
 """
 import argparse
 import json
@@ -111,6 +116,7 @@ def main(argv=None):
     ap.add_argument('--center', help='view centre in um (default: the layout centre)')
     ap.add_argument('--budget-mb', type=int, help='FLOE_RUST_BUDGET_MB for the workers (raise it to keep the fit budget out of the comparison)')
     ap.add_argument('--culls', action='store_true', help='print every non-zero plan counter per frame')
+    ap.add_argument('--stacks', default='off', help='density stack values to run: off (unset) and/or top (default off)')
     args = ap.parse_args(argv)
     os.environ.setdefault('FLOE_RUST_RETAINED_MB', '0')
     os.environ['FLOE_RUST_OCCUPANCY'] = 'off'
@@ -127,11 +133,16 @@ def main(argv=None):
     fit = min(w / (x1 - x0), h / (y1 - y0))          # px per dbu
     zooms = [float(v) for v in args.zooms.split(',')]
     rows = []
-    for mode in args.modes.split(','):
+    runs = [(mode, stack) for mode in args.modes.split(',') for stack in args.stacks.split(',')]
+    for mode, stack in runs:
         if mode == 'current':
             os.environ.pop('FLOE_RUST_SHAPE_CUT', None)
         else:
             os.environ['FLOE_RUST_SHAPE_CUT'] = mode
+        if stack == 'off':
+            os.environ.pop('FLOE_RUST_DENSITY_STACK', None)
+        else:
+            os.environ['FLOE_RUST_DENSITY_STACK'] = stack
         for lname, visible in layer_sets(args.layers, keys):
             for z in zooms:
                 px = fit * z
@@ -153,7 +164,7 @@ def main(argv=None):
                 lit = sum(1 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK) / (w * h)
                 walls = [f[2] for f in warm]
                 rasters = [f[1].get('raster_ms') or 0 for f in warm]
-                row = dict(mode=mode, layers=lname, zoom=z, cold_wall=cold_wall, cold=split(cold),
+                row = dict(mode=mode, stack=stack, layers=lname, zoom=z, cold_wall=cold_wall, cold=split(cold),
                            cold_miss=cold.get('cache_miss'),
                            warm_wall=statistics.median(walls) if walls else None, warm_range=(min(walls), max(walls)) if walls else None,
                            warm_raster=statistics.median(rasters) if rasters else None,
@@ -162,42 +173,49 @@ def main(argv=None):
                            bin_items=res.get('work_bin_items'), tested=res.get('rep_members_tested'),
                            drawn=res.get('rep_members_drawn'), paints=res.get('member_paints'),
                            skipped=res.get('once_items_skipped'), cells=res.get('hier_cells_visited'),
-                           walks=res.get('place_walks') or {}, lit=lit, culls=res.get('plan_culls', {}))
+                           walks=res.get('place_walks') or {}, lit=lit, culls=res.get('plan_culls', {}),
+                           counts=res.get('density_stack'))
                 rows.append(row)
                 c, cs = row['culls'], row['cold']
-                print('%-7s %-7s x%-4g cold %8.0f ms (plan %6.0f read %6.0f decode %6.0f scene %5.0f raster %7.0f; miss %s) | '
+                print('%-7s %-3s %-7s x%-4g cold %8.0f ms (plan %6.0f read %6.0f decode %6.0f scene %5.0f raster %7.0f; miss %s) | '
                       'warm %8s ms [%s] raster %7s [%s] | pages %6s bin %8s cells %8s members %10s / tested %10s paints %10s '
                       'once-skipped %8s lit %.3f | shape_cut %s pages_size %s child_bvh %s children_size %s fit %s%%'
-                      % (mode, lname, z, cold_wall, cs['plan_ms'], cs['read_ms'], cs['decode_ms'], cs['scene_ms'], cs['raster_ms'], row['cold_miss'],
+                      % (mode, stack, lname, z, cold_wall, cs['plan_ms'], cs['read_ms'], cs['decode_ms'], cs['scene_ms'], cs['raster_ms'], row['cold_miss'],
                          '%.0f' % row['warm_wall'] if walls else '-', '%.0f..%.0f' % row['warm_range'] if walls else '-',
                          '%.0f' % row['warm_raster'] if walls else '-', '%.0f..%.0f' % row['warm_raster_range'] if walls else '-',
                          row['pages'], row['bin_items'], row['cells'], row['drawn'], row['tested'], row['paints'], row['skipped'], lit,
                          c.get('shape_cut'), c.get('pages_size'), c.get('child_bvh'), c.get('children_size'), c.get('fit_pct')), flush=True)
                 if args.culls:
                     print('   culls: ' + ' '.join('%s=%s' % kv for kv in sorted(c.items()) if kv[1]), flush=True)
+                if row['counts']:
+                    print('   stack: ' + ' '.join('%s %d' % kv for kv in row['counts'].items()), flush=True)
                 if row['walks']:
                     # FLOE_RUST_PLACE_LATTICE=on: the placement arrays' survivor
                     # walks by outcome (walks / visible members; 1 / 2 = 1-D / 2-D)
                     print('   place walks: ' + ' '.join('%s %d/%d' % (k, v[0], v[1]) for k, v in
                                                         sorted(row['walks'].items(), key=lambda kv: -kv[1][1])), flush=True)
     os.environ.pop('FLOE_RUST_SHAPE_CUT', None)
+    os.environ.pop('FLOE_RUST_DENSITY_STACK', None)
 
     def k(v):
         return '-' if v is None else '%.0fk' % (v / 1000) if v >= 10000 else '%d' % v
-    print('== type this == (mode d/n/x/o = default/min/max/off, layers zoom | cold wall decode raster | warm wall raster lo-hi | pages bin tested drawn lit fit%)')
+    print('== type this == (mode d/n/x/o = default/min/max/off, +t = density stack top, layers zoom | cold wall decode raster '
+          '| warm wall raster lo-hi | pages bin tested drawn lit fit% [| stack lit top lower])')
     for r in rows:
-        print('%s %s %g | %.0f %.0f %.0f | %s %s %s | %s %s %s %s %.3f %s' % (
-            MODE_CODE.get(r['mode'], r['mode'][:1]), r['layers'], r['zoom'], r['cold_wall'], r['cold']['decode_ms'] + r['cold']['read_ms'], r['cold']['raster_ms'],
+        counts = r['counts']
+        print('%s%s %s %g | %.0f %.0f %.0f | %s %s %s | %s %s %s %s %.3f %s%s' % (
+            MODE_CODE.get(r['mode'], r['mode'][:1]), '' if r['stack'] == 'off' else r['stack'][:1], r['layers'], r['zoom'], r['cold_wall'], r['cold']['decode_ms'] + r['cold']['read_ms'], r['cold']['raster_ms'],
             '%.0f' % r['warm_wall'] if r['warm_wall'] is not None else '-',
             '%.0f' % r['warm_raster'] if r['warm_raster'] is not None else '-',
             '%.0f-%.0f' % r['warm_raster_range'] if r['warm_raster_range'] else '-',
-            r['pages'], k(r['bin_items']), k(r['tested']), k(r['drawn']), r['lit'], r['culls'].get('fit_pct')))
+            r['pages'], k(r['bin_items']), k(r['tested']), k(r['drawn']), r['lit'], r['culls'].get('fit_pct'),
+            ' | %s %s %s' % (k(counts['lit']), k(counts['top']), k(counts['lower'])) if counts else ''))
     walked = [r for r in rows if r['walks']]
     if walked:
         print('== type this 2 == (placement walks, the 3 outcomes with the most members: outcome walks/members)')
         for r in walked:
             top = sorted(r['walks'].items(), key=lambda kv: -kv[1][1])[:3]
-            print('%s %s %g | %s' % (MODE_CODE.get(r['mode'], r['mode'][:1]), r['layers'], r['zoom'], ' '.join('%s %s/%s' % (n, k(v[0]), k(v[1])) for n, v in top)))
+            print('%s%s %s %g | %s' % (MODE_CODE.get(r['mode'], r['mode'][:1]), '' if r['stack'] == 'off' else r['stack'][:1], r['layers'], r['zoom'], ' '.join('%s %s/%s' % (n, k(v[0]), k(v[1])) for n, v in top)))
 
 
 if __name__ == '__main__':

@@ -69,7 +69,16 @@ pub struct RenderStats {
     /// [PLACE_WALK_OUTCOMES.len() + k]. Counted per walk: the work bin's
     /// collection once a frame, the tile walks and mini walks once a tile.
     pub place_walks: [(u64, u64); 32],
+    /// The density stack (CUT_DENSITY_DESIGN §10.10), in DENSITY_STACK_COUNTS
+    /// order, summed over the tiles: density pixels the planes lit, those the
+    /// top plane's wrote, those the lower planes' wrote, and at the end of
+    /// the last plane the pixels an original covers and those a density
+    /// shape stands for.
+    pub density_stack: [u64; 5],
 }
+
+/// RenderStats::density_stack's counts, in order.
+pub const DENSITY_STACK_COUNTS: [&str; 5] = ["lit", "top", "lower", "covered", "claimed"];
 
 /// The outcomes of a placement array's survivor walk, in RenderStats::
 /// place_walks order: walked, or why the members were all visited.

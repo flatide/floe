@@ -1106,6 +1106,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "stored_rep_bytes": "8192", "stored_rep_pixels": "64000",
                 "stored_rep_spans": "100", "stored_rep_painted_pixels": "8000",
                 "once_tiles": "5", "once_passes": "400", "once_items": "77",
+                # the density stack's lit/top/lower/covered/claimed pixels
+                "density_stack": "90/40/30/1000/200",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -1176,6 +1178,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["member_paints"], 30)
             self.assertEqual((result["once_full_tiles"], result["once_passes_skipped"],
                               result["once_items_skipped"]), (5, 400, 77))
+            self.assertEqual(result["density_stack"], {
+                "lit": 90, "top": 40, "lower": 30, "covered": 1000, "claimed": 200})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
@@ -1202,6 +1206,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                         "stored_rep_nodes", "stored_rep_proxies", "stored_rep_bytes",
                         "stored_rep_pixels", "stored_rep_spans", "stored_rep_painted_pixels"):
                 self.assertEqual(partial["plan_culls"][key], 0)
+            # a frame without the field did not stack its density
+            self.assertIsNone(partial["density_stack"])
             self.assertEqual(partial["refining"], 1)
             self.assertIn(9, worker._jobs)
             self.assertFalse(os.path.exists(partial_path))

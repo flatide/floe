@@ -931,6 +931,9 @@ struct FramePixels {
     summary_pixels: u64,
     /// placement survivor walks by outcome (RenderStats::place_walks)
     place_walks: [(u64, u64); 32],
+    /// the density stack's counts (RenderStats::density_stack) when the
+    /// frame stacked its density
+    density_stack: Option<[u64; 5]>,
 }
 
 fn render_worker(
@@ -1895,6 +1898,16 @@ fn width_c() -> f64 {
         .unwrap_or(1.0)
 }
 
+/// The density stack (floe_render_core::GeometryRasterRequest::density_stack,
+/// CUT_DENSITY_DESIGN §10.10; user direction 2026-09-26: the top layer's
+/// density, and the others' only in the empty space): FLOE_RUST_DENSITY_STACK=top,
+/// diagnostic and off by default. It needs the area-true drawing (not on an
+/// exact frame or under FLOE_RUST_AREA_TRUE=off) and the write-once tiles
+/// (not under FLOE_RUST_WRITE_ONCE=off).
+fn density_stack_enabled() -> bool {
+    std::env::var("FLOE_RUST_DENSITY_STACK").as_deref() == Ok("top")
+}
+
 fn page_wash_enabled() -> bool {
     std::env::var("FLOE_RUST_PAGE_WASH").as_deref() == Ok("on")
 }
@@ -2333,6 +2346,8 @@ fn run_render(
         width_c: width_c(),
         survivor_list: std::env::var("FLOE_RUST_SURVIVOR_LIST").as_deref() != Ok("off"),
         place_lattice: std::env::var("FLOE_RUST_PLACE_LATTICE").as_deref() == Ok("on"),
+        // the density stack sorts the area-true drawing: none without it
+        density_stack: !command.exact && area_true_enabled() && density_stack_enabled(),
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache
@@ -2541,6 +2556,11 @@ fn run_render(
                 summary_cells: report.summary_cell_paints,
                 summary_pixels: report.summary_pixel_paints,
                 place_walks: report.stats.place_walks,
+                // the stack lives in the styled write-once tiles
+                density_stack: (raster_request.density_stack
+                    && !(styles.is_empty() && !command.frames)
+                    && std::env::var("FLOE_RUST_WRITE_ONCE").as_deref() != Ok("off"))
+                .then_some(report.stats.density_stack),
             }
         };
         check_generation(cancellation, command.generation)?;
@@ -2619,7 +2639,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} queue_us={} wall_us={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} queue_us={} wall_us={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -2736,6 +2756,11 @@ fn run_render(
                 pixels.once_passes_skipped,
                 pixels.once_items_skipped,
                 floe_render_core::place_walks_wire(&pixels.place_walks),
+                // lit/top/lower/covered/claimed (DENSITY_STACK_COUNTS), `-`
+                // when the frame did not stack its density
+                pixels
+                    .density_stack
+                    .map_or_else(|| "-".to_string(), |counts| counts.map(|count| count.to_string()).join("/")),
                 queue_us,
                 // up to this frame's response: the phases above account for
                 // part of it, the rest is time no phase timer covers

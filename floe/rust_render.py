@@ -114,6 +114,24 @@ def _add_place_walks(total, value):
         entry[1] += members
 
 
+DENSITY_STACK_COUNTS = ("lit", "top", "lower", "covered", "claimed")
+
+
+def _density_stack(value):
+    """A `density_stack=` wire value (`lit/top/lower/covered/claimed`,
+    CUT_DENSITY_DESIGN §10.10) as {count: n}; None for `-` (the frame did
+    not stack its density)."""
+    if not value or value == "-":
+        return None
+    try:
+        counts = [int(v) for v in value.split("/")]
+    except ValueError:
+        return None
+    if len(counts) != len(DENSITY_STACK_COUNTS):
+        return None
+    return dict(zip(DENSITY_STACK_COUNTS, counts))
+
+
 def _wire_int(fields, name, default=0):
     try:
         return int(fields.get(name, default))
@@ -592,6 +610,8 @@ class RustRenderWorker:
             "once_tiles": 0, "once_passes": 0, "once_items": 0,
             # placement survivor walks by outcome (sum over rounds)
             "place_walks": {},
+            # the density stack's counts of the last round (None: off)
+            "density_stack": None,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -1078,6 +1098,7 @@ class RustRenderWorker:
         for key in ("once_tiles", "once_passes", "once_items"):
             state[key] += _wire_int(fields, key)
         _add_place_walks(state["place_walks"], fields.get("place_walks", "-"))
+        state["density_stack"] = _density_stack(fields.get("density_stack", "-"))
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1296,6 +1317,7 @@ class RustRenderWorker:
             "once_passes_skipped": state["once_passes"],
             "once_items_skipped": state["once_items"],
             "place_walks": dict(state["place_walks"]),
+            "density_stack": state["density_stack"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on

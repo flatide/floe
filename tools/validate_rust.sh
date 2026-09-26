@@ -38,13 +38,13 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack rust_renderer klayout"
 alias_gates() {
     case "$1" in
         quick)    echo "unit_vfs unit_render occupancy rust_renderer" ;;
         planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box shape_cut" ;;
         occ)      echo "unit_vfs occupancy" ;;
-        render)   echo "unit_render rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true render_goldens render_speckle render_frames klayout" ;;
+        render)   echo "unit_render rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack render_goldens render_speckle render_frames klayout" ;;
         indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives" ;;
         python)   echo "index_cli vfs_profile floe2 drc_ice svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
@@ -320,6 +320,10 @@ if gate layer_decode; then RAN="$RAN layer_decode"
 # fills its pixels - widths and gaps kept, pan-stable, kill switch = KLayout
 if gate area_true; then RAN="$RAN area_true"
     .venv/bin/python tools/validate_area_true.py; fi
+# density stack (diagnostic FLOE_RUST_DENSITY_STACK=top): the top layer's
+# density, the others' only where no original and no density above stands
+if gate density_stack; then RAN="$RAN density_stack"
+    .venv/bin/python tools/validate_density_stack.py; fi
 # in-tree CPU renderer: Python queue contract plus independent
 # KLayout pixel oracle at deterministic serial/parallel settings
 if gate rust_renderer; then RAN="$RAN rust_renderer"
