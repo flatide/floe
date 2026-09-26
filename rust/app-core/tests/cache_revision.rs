@@ -139,4 +139,15 @@ fn actual_build_pins_old_bytes_and_publishes_only_complete_generations() {
     assert_eq!(store.pin().unwrap().unwrap().id(), second.id());
     drop(reader);
     assert_eq!(resources.usage(), Usage::default());
+    let lease_probe = fs::File::open(first.directory()).unwrap();
+    drop(first);
+    assert!(
+        matches!(
+            lease_probe.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ),
+        "Layout must retain the revision after Snapshot drops"
+    );
+    drop(layout);
+    lease_probe.try_lock().unwrap();
 }

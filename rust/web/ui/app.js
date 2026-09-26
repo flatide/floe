@@ -32,6 +32,7 @@
     let socketSerial = 0, decode = null, reconnectTimer = null, reconnectDelay = 500;
     let catalog = [], currentId = '', currentSource = '', currentMode = 'level', ownerBusy = false, submitting = false;
     let revisionSupported = false, revisionCandidate = null, currentRevision = null, currentLevels = null;
+    let revisionUsage = null;
     let modeReceipt = '', modeSupported = false, levelsSupported = false, fillEditSupported = false;
     let pendingStartup = null, startupWaiting = false;
     let gotoDirty = false, gotoRevision = 0, gotoView = '';
@@ -242,6 +243,9 @@
         const revisionReady = revisionSupported && !!source && !stopped && !submitting && !ownerBusy && !indexBlocked() && !launchPending && !document.hidden;
         el('revision-build').disabled = !revisionReady || !el('revision-approve').checked;
         el('revision-check').disabled = !revisionReady;
+        el('revision-usage').disabled = !revisionReady;
+        const usageText = revisionUsage && revisionUsage.source_id === el('source').value ? revisionUsage.text : 'Storage usage not checked for this source.';
+        if(el('revision-usage-status').textContent !== usageText){el('revision-usage-status').textContent = usageText;}
         let revisionMatches = false;
         try { revisionMatches = window.FloeIndexRevisions.matches(revisionCandidate, el('source').value, levels()); } catch (_) { /* incomplete selection */ }
         el('revision-use').disabled = !revisionReady || !revisionMatches || !!inflight || !!accepted || !!queue.length || !!(gesture && gesture.active()) || !!(live() && !epoch) || !!(drcPanel && drcPanel.recoveryBusy());
@@ -673,6 +677,7 @@
         el('cancel-job').dataset.seq = all.active || ''; controls();
         const recent = all.history || [], last = recent[recent.length - 1];
         revisionCandidate = window.FloeIndexRevisions.candidate(recent);
+        revisionUsage = window.FloeIndexRevisions.usage(recent);
         el('revision-status').textContent = revisionCandidate ? 'Checked revision: ' + revisionCandidate.index_revision + ' (selection must match)' : 'No matching published revision checked. Check the selected source/levels; no indexing or switch is automatic.';
         controls();
         if (last) { el('operation').textContent = operationLabel(last); }
@@ -1087,6 +1092,10 @@
     el('revision-check').onclick = function () {
         if(el('revision-check').disabled){return;}
         try { submitOperation({kind:'check_revision',source_id:el('source').value,levels:levels()}).catch(report); } catch(e) { report(e); }
+    };
+    el('revision-usage').onclick = function () {
+        if(el('revision-usage').disabled){return;}
+        submitOperation({kind:'revision_usage',source_id:el('source').value}).catch(report);
     };
     el('revision-use').onclick = function () {
         if(el('revision-use').disabled){return;}

@@ -1,5 +1,5 @@
-//! Explicit full-build lane for immutable generations. Not yet wired to the
-//! ordinary index command or web UI: readers/cutover must migrate together.
+//! Explicit full-build lane for immutable generations. The web UI opts in;
+//! ordinary mutable indexing remains separate.
 use super::{arguments, Action, IndexJob, IndexOptions};
 use crate::{
     cache::revision::{Candidate, Publication, Snapshot, Store},
@@ -93,9 +93,13 @@ impl Build {
     }
     /// A sealed source does not advance its individual current pointer. A set
     /// publisher makes all selected sources visible with one manifest commit.
-    pub(crate) fn seal(mut self, stop: &AtomicUsize) -> Result<Snapshot> {
+    pub(crate) fn seal(
+        mut self,
+        owner: crate::cache::revision::SetOwner,
+        stop: &AtomicUsize,
+    ) -> Result<Snapshot> {
         self.require_success(stop)?;
-        self.candidate.seal(stop)
+        self.candidate.seal_owned(Some(owner), stop)
     }
     fn require_success(&mut self, stop: &AtomicUsize) -> Result<()> {
         check_cancelled(stop)?;

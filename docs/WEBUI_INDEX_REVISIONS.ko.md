@@ -10,14 +10,16 @@ world-tile, 동결된 WKWebView는 이 작업에 포함하지 않는다.
 기존 `.ice`/`.floe` 해석과 일반 CLI/Run index/Index and open 동작은 그대로다.
 새 backend는 웹/Electron 공통 UI의 `Index this source → Immutable index revisions`
 에서 별도로 선택한다. 빌드 완료나 브라우저 새로고침이 자동 전환을 일으키지 않는다.
-보존 파일의 사용량 조회·회수(IR-4)와 실제 GUI/현장 수용은 아직 남아 있다.
+IR-4a 사용량 조회·협조적 reader 잠금 기반을 추가했다. 실제 회수·중단 복구(IR-4b)와
+실제 GUI/현장 수용은 아직 남아 있다. 삭제 API·버튼·자동 GC는 없다.
 
 | 단계 | 범위 | 상태 |
 |---|---|---|
 | IR-1 | 별도 full-build, 검증 후 게시, 불변 경로 pin, 이전 revision 보존 | 구현·로컬 자동 검증 완료 |
 | IR-2 | 관리형 Index/일반·잡덱 reader 연결, 덱 전체 revision 집합 고정 | backend 구현·로컬 자동 검증 완료 |
 | IR-3 | 명시적 갱신 확인·전환, 상태 보존, frame/margin/retained/query 무효화 | 구현·로컬 자동 검증 완료 |
-| IR-4 | 사용량·보존 상태 조회, 사용 중 보호와 명시적 회수/실패 복구 정책 | 남음 |
+| IR-4a | 사용량·보존 상태 조회, 새 리비전 소유권·협조적 reader 잠금 | 구현, 아래 자동 검증 기록 참조 |
+| IR-4b | 승인된 회수, 프로세스 장애까지의 보호, 삭제 중단·불명 결과 복구 | 남음. 조회 결과는 삭제 권한이 아님 |
 
 ## 저장과 게시 계약
 
@@ -166,6 +168,47 @@ POST를 자동 재전송하지 않는다. 현재 ID는 뷰 API와 UI에 표시�
 IR-4 전에는 이전·실패 후보가 계속 쌓인다. GC/용량 상한, 외부 캐시 수정 감지,
 NFS crash/remount·cross-host 수용, 실제 브라우저/ETX 수용은 이번 완료 범위가 아니다.
 
+## IR-4a 사용량 조회·보호 기반 — 2026-09-27
+
+- 웹/Electron 공통의 `Immutable index revisions → Refresh revision storage usage`는
+  owner 전용 `revision_usage` 작업이다. 파일 쓰기·Index·Use·삭제를 수행하지 않는다.
+  게스트 권한이나 임의 경로 API를 추가하지 않으며, 등록된 source handle만 받는다.
+- 대상은 그 dataset의 set store와 **모든 등록 의존 소스의 source store**다. 다른
+  덱의 set manifest를 찾아다니지 않는다. 공유 소스 store에는 다른 dataset이 만든
+  리비전도 있으므로 소유자를 `other_dataset`으로만 표시한다. 다른 경로는 노출하지
+  않는다. 여러 dataset의 조회 합계를 더하면 공유 store가 중복될 수 있다.
+- 합계는 실제 읽어 본 정규·단일 링크 파일의 `len` 합계다. 디스크 할당량·여유 공간·
+  **회수 가능 바이트가 아니다**. 포인터·pending 파일도 포함하고, 개별 revision 행의
+  합과 전체 합은 다를 수 있다. 등록 외 경로, symlink, hardlink, 하위 디렉터리는
+  따라가지 않는다. 알 수 없는 정규 파일은 크기만 세고 extra로 표시한다.
+- 한 요청은 최대 256개 store 후보, 256개 revision 행, 4,096개 디렉터리 entry와
+  64 MiB의 seal 읽기로 제한한다. current 읽기는 기존 개별 크기 제한을 유지한다.
+  상한/누락 발생 시 `PARTIAL`이며 숫자는 관측된 부분 합계다. geometry를 decode하거나
+  원본을 인덱싱하지 않는다. 취소를 확인하며 current가 도중 바뀌면 refresh를 요구한다.
+- 출력의 revision ID, 논리 바이트, current 여부, format, seal 상태, 사용 잠금,
+  관리형 set 소유권은 **조회 시점의 관측**이다. `idle_at_scan`은 협조적 잠금이 그때
+  없었다는 뜻이지 안전한 삭제 판정이 아니다. current/구형/미완료/손상/미확인 항목을
+  자동으로 지우거나 “회수 가능”으로 표시하지 않는다.
+- 새 source/set seal은 **version 2**다. source seal에는 관리형 빌드가 속하는
+  dataset·set ID를 기록한다. 새 set은 자신을 위해 새로 만든 v2 source만 게시하며
+  다른 set의 source pin 재사용을 거부한다. v1 set이 v2 source를 참조하는 것도
+  거부한다. v1은 읽기 호환을 유지하지만 `legacy_untracked`로 표시한다. 구 실행
+  파일은 v2를 거부하므로 새 게시본을 열려면 새 web/Electron backend가 필요하다.
+  기존 mutable `.ice`와 geometry 캐시 형식은 바꾸지 않는다.
+- `Snapshot`은 revision directory의 OS shared lock을 `Arc<File>`로 유지한다.
+  마지막 clone이 닫힐 때 해제하며 clone drop에서 명시 unlock하지 않는다. set과
+  source를 모두 pin한다. `Layout`과 `RenderSession`도 pin을 보유하며 정상 drop 시
+  native worker를 먼저 reap한다. 잠금 불가 파일시스템에서는 open이 명시 실패한다.
+  legacy mutable reader에는 이 잠금을 추가하지 않았다.
+- **회수를 열기 전 남은 조건**: host의 비정상 종료 뒤 native worker만 남는 경우의
+  직접 잠금/수명 계약, preview에 묶인 정확한 대상·소유권·current 재확인, writer 및
+  모든 reader에 대한 배타성, 부분 삭제·결과 불명 증거와 명시적 복구다. 지금의 v2
+  관측만으로 이 조건이 성립했다고 간주하지 않는다. IR-4b의 회수 가능 형식/reader
+  호환성 판정도 그 단계에서 확정한다. v1과 미게시/불명 후보는 계속 보존한다.
+
+이번 단계는 실제 사용자 캐시를 삭제하지 않았다. NFS 장애·cross-host 수용, 실제
+GUI·ETX 검사는 실행하지 않았으며, read-only inventory도 자동 주기 실행하지 않는다.
+
 ## 검증
 
 - 단위: 읽기의 무변경, current 교체 후 old pin 유지, traversal/잘못된 source/
@@ -247,3 +290,35 @@ current의 unlink 경합은 위의 제한적 0-link 허용으로 수정하고 �
 `6c46da6c7a3156f4f3cebff7a1ff1913756180e970450646c998e471c2ab0982`이다.
 `battery-fixed.log` SHA-256은
 `b618b02acbefacffb346da48c46ae592dc19c6e31415792b9ce09f68ac1e59eb`이다.
+
+### IR-4a 검증 결과 — 2026-09-27
+
+- 최종 소스의 app-core lib **339 passed / 8 ignored**, web lib **128 passed /
+  3 ignored**, 두 패키지 fmt 및 Clippy(all-targets/no-deps, warnings deny) 통과.
+  의존성의 기존 tiler 1건·VFS 2건 경고는 유지했다.
+- 새 합성 검사: 없는 store 조회의 무생성, 정확한 논리 바이트 집계, v1 미추적·
+  미봉인 상태, snapshot clone 및 별도 프로세스의 공유 잠금, 배타 잠금 시 open
+  거부, owner 경로 미추적, 타 set/v1-v2 혼용 거부, symlink·임의 entry 미순회,
+  행/메타데이터 읽기 상한, `Layout`이 원래 snapshot 이후에도 pin 유지.
+- 실제 native owner HTTP **23개 통과**. 새 사용량 요청은 열린 set/source의
+  current·in-use 상태를 보고하고, 뷰 ID 유지와 응답에 파일 경로가 없음을 검사했다.
+  ES2017 실제 app.js 게이트는 명시 버튼 1회 요청·화면 유지·큰 정수 byte 문자열·
+  빌드/전환과 분리된 조회를 확인했다. 실제 브라우저 화면 검사는 아니다.
+- 선택 배터리 `ALL OK`:
+  `sh tools/validate_rust.sh --only cache_revision,owner_service,web_ui,web_local_sharing,view_controller,view_stream,validation_selector`.
+  실제 native source/set 통합 2개, 컨트롤러 2개, stream/sharing 20개도 통과했다.
+  최종에 추가한 seal read-limit 단위 검사는 전체 lib 재실행에서 통과했다.
+- 최초 합성 fixture의 잘못된 START record와 추가 요청 이후의 기존 UI 요청 수
+  단언을 수정해 재검증했다. 코드 검토 중 발견한 seal 생성/잠금 probe 경합도
+  공유 잠금을 seal 생성 전 잡도록 순서를 고쳤다. 실제 사용자 파일 삭제는 없다.
+
+로그: 로컬 `/private/tmp/floe-ir4a.qMrby4/`. SHA-256:
+
+| 로그 | SHA-256 |
+|---|---|
+| `unit-final.log` | `6bef35a7927ef9fd04006a426a1f0353655431c208db1928ea32ea34890b3976` |
+| `clippy-final.log` | `e0c89401f187b5dc7b9b289ec1ef15a8b8d8f8547d75ab4ecedecc86d093676c` |
+| `battery.log` | `e44063432cba426818dd7f1e0e33031c9c0e3d2944945a5e046228fb3e94336d` |
+
+진행도: IR-1/2/3 완료, IR-4a 완료. 승인된 비실측 구현 중 남은 것은 IR-4b의
+명시적 회수·프로세스 장애 보호·중단 복구다. 실제 GUI/현장 및 보류 범위는 별도다.

@@ -57,7 +57,10 @@ impl RenderOptions {
     }
 }
 pub struct RenderSession {
+    // Drop/reap worker before releasing pins, even if the caller drops Dataset.
     worker: WorkerClient,
+    _layout_pin: Option<crate::cache::revision::Snapshot>,
+    _deck_pin: Option<Arc<crate::cache::revision::set::Snapshot>>,
     max_depth: u64,
     options: RenderOptions,
     cancelled: Arc<AtomicUsize>,
@@ -101,6 +104,14 @@ impl RenderSession {
         worker.set_styles(&styles)?;
         Ok(Self {
             worker,
+            _layout_pin: match dataset {
+                Dataset::Layout(layout) => layout.revision_pin.clone(),
+                _ => None,
+            },
+            _deck_pin: match dataset {
+                Dataset::Deck(deck) => deck.analysis.catalog.pinned.clone(),
+                _ => None,
+            },
             max_depth: opened.max_depth,
             options,
             cancelled,

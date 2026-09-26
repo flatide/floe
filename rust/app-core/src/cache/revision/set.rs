@@ -2,6 +2,7 @@
 //! selected source set. Source current pointers are deliberately independent.
 use super::*;
 use std::collections::BTreeSet;
+pub mod inventory;
 
 const MAX_SET_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MEMBERS: usize = 65536;
@@ -25,7 +26,7 @@ struct Manifest {
 impl Manifest {
     fn validate(&self, source: &Path) -> Result<BTreeSet<PathBuf>> {
         let members: BTreeSet<_> = self.members.iter().map(|m| m.source.clone()).collect();
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || self.source != source
             || !valid_id(&self.revision)
             || self.members.is_empty()
@@ -96,6 +97,7 @@ impl Store {
                 "revision set does not match the requested sources/levels",
             ));
         }
+        let readers = reader_lease(directory(&self.path().join(&manifest.revision))?)?;
         if Stamp::source(&self.raw.source)? != manifest.source_stamp {
             return Err(invalid("revision set source changed; rebuild required"));
         }
@@ -103,12 +105,14 @@ impl Store {
         for member in &manifest.members {
             check_cancelled(stop)?;
             let pin = super::Store::new(&member.source)?.pin_id(&member.revision)?;
+            validate_owner(&manifest, &pin.record)?;
             pin.source_unchanged()?;
             members.insert(member.source.clone(), pin);
         }
         let snapshot = Snapshot {
             root_id: id(&directory(self.path())?)?,
-            dir_id: id(&directory(&self.path().join(&manifest.revision))?)?,
+            dir_id: id(&readers)?,
+            _readers: readers,
             store: self.clone(),
             manifest,
             bytes,
@@ -145,6 +149,7 @@ pub struct Snapshot {
     members: BTreeMap<PathBuf, super::Snapshot>,
     root_id: (u64, u64),
     dir_id: (u64, u64),
+    _readers: Arc<File>,
 }
 impl Snapshot {
     pub(crate) fn validate_inputs(&self, stop: &AtomicUsize) -> Result<()> {
@@ -198,6 +203,12 @@ pub(crate) struct Publication {
     pub directory_synced: bool,
 }
 impl Builder {
+    pub(crate) fn owner(&self) -> SetOwner {
+        SetOwner {
+            source: self.candidate.store.source.clone(),
+            revision: self.candidate.revision.clone(),
+        }
+    }
     pub(crate) fn publish(
         self,
         members: BTreeMap<PathBuf, super::Snapshot>,
@@ -211,11 +222,14 @@ impl Builder {
             if pin.source() != source {
                 return Err(invalid("revision member source mismatch"));
             }
+            if pin.record.version != 2 || pin.record.owner.as_ref() != Some(&self.owner()) {
+                return Err(invalid("revision member does not belong to this new set"));
+            }
             pin.validate()?;
             pin.source_unchanged()?;
         }
         let manifest = Manifest {
-            version: 1,
+            version: 2,
             source: self.candidate.store.source.clone(),
             source_stamp: self.candidate.source_stamp.clone(),
             revision: self.candidate.revision.clone(),
@@ -244,6 +258,24 @@ impl Builder {
             directory_synced,
         })
     }
+}
+
+fn validate_owner(manifest: &Manifest, record: &Record) -> Result<()> {
+    let expected = SetOwner {
+        source: manifest.source.clone(),
+        revision: manifest.revision.clone(),
+    };
+    // Old readers reject v2. Old sets must never acquire v2 source data, which
+    // would otherwise give a lease-unaware reader a hidden reference to it.
+    let matches = match manifest.version {
+        1 => record.version == 1 && record.owner.is_none(),
+        2 => record.version == 2 && record.owner.as_ref() == Some(&expected),
+        _ => false,
+    };
+    if !matches {
+        return Err(invalid("revision set member ownership mismatch"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

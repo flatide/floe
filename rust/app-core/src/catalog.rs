@@ -67,6 +67,7 @@ pub struct Metadata {
 #[derive(Debug)]
 pub struct Layout {
     pub(crate) minimap: std::sync::OnceLock<std::sync::Arc<crate::view::minimap::Minimap>>,
+    pub(crate) revision_pin: Option<cache::revision::Snapshot>,
     pub source: PathBuf,
     pub directory: PathBuf,
     pub metadata: Metadata,
@@ -174,6 +175,7 @@ impl Layout {
         let source_stale = fingerprint != (metadata.src.size, metadata.src.mtime);
         Ok(Self {
             minimap: std::sync::OnceLock::new(),
+            revision_pin: None,
             source,
             directory,
             metadata,

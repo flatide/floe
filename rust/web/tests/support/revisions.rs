@@ -141,6 +141,28 @@ async fn explicit_revision_cutover_pins_old_view_and_rejects_stale_approvals() {
     );
     // Completed replay never allocates another controller or revision.
     assert_eq!(state(&h, &login).await["view_id"], after["view_id"]);
+    let usage = operation(
+        &h,
+        &login,
+        json!({"kind":"revision_usage","seq":"10","source_id":source}),
+    )
+    .await;
+    assert_eq!(usage["phase"], "succeeded", "{usage}");
+    assert_eq!(usage["source_id"], source);
+    let inventory = &usage["inventory"];
+    assert_eq!(inventory["partial"], false);
+    let rows = inventory["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().any(|r| r["kind"] == "set"
+        && r["revision"] == next
+        && r["current"] == true
+        && r["readers"] == "in_use"));
+    assert!(rows
+        .iter()
+        .any(|r| r["kind"] == "source" && r["set_revision"] == next && r["readers"] == "in_use"));
+    assert!(!usage.to_string().contains(dir.to_str().unwrap()));
+    assert_eq!(state(&h, &login).await["view_id"], after["view_id"]);
+    println!("RUST REVISION INVENTORY: ALL OK (read-only owner request, current and pinned protection, no filesystem paths)");
     ws.close(None).await.ok();
     next_ws.close(None).await.ok();
     h.shutdown().await;

@@ -227,6 +227,7 @@ class XHR {
                 if(this.method==='POST'){
                     if(body.kind==='index_revision'){assert.equal(body.approved,true);value.index_revision='7'.repeat(32);}
                     if(body.kind==='check_revision'){value.source_id=body.source_id;value.levels=body.levels;value.index_revision='7'.repeat(32);}
+                    if(body.kind==='revision_usage'){value.source_id=body.source_id;value.inventory={logical_bytes:'9007199254740993',stores_scanned:2,unknown_entries:0,unavailable_entries:0,partial:false,rows:[]};}
                     if(body.kind==='use_revision'){
                         assert.equal(body.revision,'7'.repeat(32));checkedRevision=body.revision;
                         viewId='8'.repeat(64);snapshot.view_id=viewId;snapshot.dataset_revision='2';snapshot.worker_epoch='2';value.view_id=viewId;
@@ -627,7 +628,14 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         assert.equal(node('canvas').width,1,'old foreground buffer survives revision cutover');
         assert.equal(node('margin-canvas').width,1,'old margin buffer survives revision cutover');
         assert.equal(checkedRevision,'7'.repeat(32));assert.match(node('revision-current').textContent,/7777/);
-        assert.equal(writes().length,before+3);listeners.pagehide();
+        await wait(()=>!node('revision-usage').disabled);
+        const priorUsage=writes().length;
+        node('revision-usage').onclick();await wait(()=>/9007199254740993/.test(node('revision-usage-status').textContent));
+        assert.equal(writes().length,priorUsage+1);
+        assert.equal(writes().at(-1).body.kind,'revision_usage');
+        assert(!writes().at(-1).body.approved&&!writes().at(-1).body.path);
+        assert.equal(viewId,'8'.repeat(64),'usage must not change the view');
+        assert.equal(writes().length,before+4);listeners.pagehide();
         console.log('WEB INDEX REVISION CLIENT: ALL OK (one approval, unknown build response read-only recovery, separate check/use, captured CAS, clear foreground/margin)');return;
     }
     if(indexDefaultsEnabled){

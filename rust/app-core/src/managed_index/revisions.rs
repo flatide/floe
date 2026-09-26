@@ -69,7 +69,7 @@ pub(super) fn run(
                     None => thread::sleep(Duration::from_millis(20)),
                 }
             }
-            build.seal(flag)
+            build.seal(builder.owner(), flag)
         })();
         let pin = match result {
             Ok(pin) => pin,

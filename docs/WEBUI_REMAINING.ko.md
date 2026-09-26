@@ -16,8 +16,10 @@ xattr 필수 조건을 제거했다. NFS 서버 장애·다중 client·재마운
 2026-09-25 후속 승인: 열린 인덱스 전환·공유 캐시 수명주기를 재개한다.
 [IR-1 저장·빌드, IR-2 관리형 backend, IR-3 opt-in UI/명시적 전환](WEBUI_INDEX_REVISIONS.ko.md)을
 추가했다. 별도 full-build → read-only Check → Use 순서이며 자동 hot-reload가 아니다.
-기존 Run index/Index and open/CLI 동작은 유지한다. IR-4 사용량·보존/회수 정책과
-실제 GUI/현장 수용은 남아 있다. 원격 공유·외부 CI·WK 동결 및 이번 NFS 제외
+기존 Run index/Index and open/CLI 동작은 유지한다. 2026-09-27 IR-4a의 owner 전용
+사용량 조회·v2 소유권·협조적 reader 잠금 기반을 추가했다. **삭제 기능은 아직 없다.**
+IR-4b의 승인 회수·프로세스 장애 보호·삭제 중단 복구와 실제 GUI/현장 수용이 남는다.
+원격 공유·외부 CI·WK 동결 및 이번 NFS 제외
 범위는 그대로다.
 
 | 범위 | 현재 상태 / 근거 |

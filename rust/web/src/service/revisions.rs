@@ -42,6 +42,13 @@ mod tests {
         let mut v = use_it;
         v["path"] = json!("/tmp/cache");
         assert!(serde_json::from_value::<OperationDto>(v).is_err());
+        let usage = json!({"kind":"revision_usage","seq":"1","source_id":"a".repeat(64)});
+        assert!(serde_json::from_value::<OperationDto>(usage.clone()).is_ok());
+        for key in ["path", "revision", "delete", "approved", "levels"] {
+            let mut bad = usage.clone();
+            bad[key] = json!(true);
+            assert!(serde_json::from_value::<OperationDto>(bad).is_err());
+        }
         let v = json!({"kind":"check_revision","seq":"1","source_id":"a".repeat(64),"levels":{"mode":"all"},"force":true});
         assert!(serde_json::from_value::<OperationDto>(v).is_err());
     }

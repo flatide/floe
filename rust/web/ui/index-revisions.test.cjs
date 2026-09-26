@@ -22,4 +22,15 @@ const use=R.useRequest(receipt,source,all,'chip',[137,103],current);
 assert.deepEqual(use.target,{kind:'replace',view_id:current.view_id,state_rev:'27'});
 assert.throws(()=>R.useRequest(receipt,source,all,'layer',[137,103],current));
 assert.throws(()=>R.useRequest(receipt,source,one,'chip',[137,103],current));
+const usage={kind:'revision_usage',phase:'succeeded',source_id:source,inventory:{logical_bytes:'9007199254740993',stores_scanned:2,unknown_entries:0,unavailable_entries:0,partial:false,rows:[
+    {kind:'source',source_number:1,revision:rev,logical_bytes:'9007199254740000',format:2,current:false,seal:'valid',readers:'in_use',owner:'this_dataset',set_revision:'c'.repeat(32)}]}};
+assert.equal(R.usage([]),null);
+assert.equal(R.usage([{...usage,phase:'failed'}]),null);
+assert.match(R.usage([usage]).text,/9007199254740993 logical file bytes/,'bytes must not be rounded by Number');
+assert.match(R.usage([usage]).text,/in_use/);
+assert.match(R.usage([usage]).text,/No deletion performed/);
+assert.match(R.usage([{...usage,inventory:{...usage.inventory,partial:true}}]).text,/PARTIAL/);
+assert.equal(R.usage([usage,{...usage,phase:'failed'}]),null,'failed refresh must not look successful');
+assert.equal(R.usage([{...usage,inventory:{...usage.inventory,logical_bytes:900}}]),null);
+assert.equal(R.candidate([usage]),null,'storage observation is not a checked cutover revision');
 console.log('WEB INDEX REVISIONS: ALL OK (explicit build/check/use, exact selection, captured view CAS, no automatic switch)');

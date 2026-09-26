@@ -5,13 +5,14 @@
 use super::{absolute, default_cache_path, utf8, validated_vfs, CacheState};
 use crate::{check_cancelled, index::WriteLease, Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
+pub use set::inventory;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    sync::atomic::AtomicUsize,
+    sync::{atomic::AtomicUsize, Arc},
 };
 pub mod set;
 
@@ -71,10 +72,25 @@ struct Record {
     revision: String,
     source_stamp: Stamp,
     files: BTreeMap<String, Stamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<SetOwner>,
+}
+/// A managed source build belongs to exactly one newly built set. This is not
+/// path authority: consumers must derive/validate member paths independently.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetOwner {
+    source: PathBuf,
+    revision: String,
 }
 impl Record {
     fn validate(&self, source: &Path) -> Result<()> {
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
+            || (self.version == 1 && self.owner.is_some())
+            || self
+                .owner
+                .as_ref()
+                .is_some_and(|o| !o.source.is_absolute() || !valid_id(&o.revision))
             || self.source != source
             || !valid_id(&self.revision)
             || self.files.keys().any(|k| !FILES.contains(&k.as_str()))
@@ -122,6 +138,7 @@ impl Store {
         record.validate(&self.source)?;
         let path = self.root.join(&record.revision);
         let dir = directory(&path)?;
+        let readers = reader_lease(dir)?;
         if read_record(&path.join("revision.json"))? != bytes {
             return Err(invalid("revision seal and current manifest disagree"));
         }
@@ -129,7 +146,8 @@ impl Store {
             store: self.clone(),
             record,
             root_id: id(&root)?,
-            dir_id: id(&dir)?,
+            dir_id: id(&readers)?,
+            _readers: readers,
         };
         snapshot.validate()?;
         Ok(Some(snapshot))
@@ -189,6 +207,7 @@ impl Store {
             return Err(invalid("invalid pinned revision id"));
         }
         let path = self.root.join(revision);
+        let readers = reader_lease(directory(&path)?)?;
         let record: Record = serde_json::from_slice(&read_record(&path.join("revision.json"))?)
             .map_err(|_| invalid("invalid pinned revision seal"))?;
         record.validate(&self.source)?;
@@ -199,7 +218,8 @@ impl Store {
             store: self.clone(),
             record,
             root_id: id(&directory(&self.root)?)?,
-            dir_id: id(&directory(&path)?)?,
+            dir_id: id(&readers)?,
+            _readers: readers,
         };
         snapshot.validate()?;
         Ok(snapshot)
@@ -215,6 +235,9 @@ pub struct Snapshot {
     record: Record,
     root_id: (u64, u64),
     dir_id: (u64, u64),
+    // Arc, not dup/try_clone + unlock: all snapshot clones share one flock.
+    // Last owner closes the descriptor. Never explicitly unlock a clone.
+    _readers: Arc<File>,
 }
 impl Snapshot {
     pub(crate) fn source_unchanged(&self) -> Result<()> {
@@ -253,6 +276,7 @@ impl Snapshot {
         let mut layout =
             crate::catalog::Layout::open_directory(self.source(), self.directory(), stop)?;
         layout.source_stale |= Stamp::source(self.source())? != self.record.source_stamp;
+        layout.revision_pin = Some(self.clone());
         self.validate()?;
         Ok(layout)
     }
@@ -288,6 +312,13 @@ impl Candidate {
         })
     }
     pub(crate) fn seal(&self, stop: &AtomicUsize) -> Result<Snapshot> {
+        self.seal_owned(None, stop)
+    }
+    pub(crate) fn seal_owned(
+        &self,
+        owner: Option<SetOwner>,
+        stop: &AtomicUsize,
+    ) -> Result<Snapshot> {
         check_cancelled(stop)?;
         let path = self.directory();
         if super::inspect(&self.store.source, &path)? != CacheState::Current {
@@ -307,14 +338,18 @@ impl Candidate {
         }
         drop(vfs);
         let record = Record {
-            version: 1,
+            version: 2,
             source: self.store.source.clone(),
             revision: self.revision.clone(),
             source_stamp: self.source_stamp.clone(),
             files: stamps,
+            owner,
         };
         record.validate(&self.store.source)?;
         let bytes = serde_json::to_vec(&record).map_err(|e| invalid(e.to_string()))?;
+        // Become a cooperating reader before the v2 seal is observable; an
+        // inventory probe must not race seal creation and abort publication.
+        let readers = reader_lease(directory(&path)?)?;
         create_record(&path.join("revision.json"), &bytes)?;
         directory(&path)?.sync_all()?;
         let snapshot = Snapshot {
@@ -322,6 +357,7 @@ impl Candidate {
             record,
             root_id: self.root_id,
             dir_id: self.dir_id,
+            _readers: readers,
         };
         snapshot.validate()?;
         snapshot.source_unchanged()?;
@@ -374,6 +410,16 @@ fn directory(path: &Path) -> Result<File> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_NONBLOCK)
         .open(path)?)
+}
+fn reader_lease(file: File) -> Result<Arc<File>> {
+    match file.try_lock_shared() {
+        Ok(()) => Ok(Arc::new(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::new(
+            ErrorKind::Busy,
+            "index revision is exclusively locked; retry explicit open",
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
 }
 fn id(file: &File) -> Result<(u64, u64)> {
     let m = file.metadata()?;

@@ -161,6 +161,10 @@ impl IndexArgs {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationDto {
+    RevisionUsage {
+        seq: String,
+        source_id: String,
+    },
     IndexRevision {
         seq: String,
         source_id: String,
@@ -225,6 +229,10 @@ pub enum OperationDto {
     },
 }
 enum Command {
+    RevisionUsage {
+        source: Arc<RegisteredSource>,
+        source_id: String,
+    },
     CheckRevision {
         source: Arc<RegisteredSource>,
         source_id: String,
@@ -601,6 +609,7 @@ impl Service {
             | OperationDto::Index { seq, .. }
             | OperationDto::IndexRevision { seq, .. }
             | OperationDto::CheckRevision { seq, .. }
+            | OperationDto::RevisionUsage { seq, .. }
             | OperationDto::UseRevision { seq, .. }
             | OperationDto::IndexOpen { seq, .. } => view::counter(seq)?,
         };
@@ -617,6 +626,13 @@ impl Service {
         }
         let source = |id: &str| self.source(id).ok_or("source_unavailable");
         let (kind, command) = match request {
+            OperationDto::RevisionUsage { source_id, .. } => (
+                "revision_usage",
+                Command::RevisionUsage {
+                    source: source(&source_id)?,
+                    source_id,
+                },
+            ),
             OperationDto::CheckRevision {
                 source_id, levels, ..
             } => {
@@ -977,6 +993,7 @@ fn run(inner: Arc<Inner>) {
                 }
             }
             Command::CheckRevision { .. } => "check_revision",
+            Command::RevisionUsage { .. } => "revision_usage",
         };
         let retry = match &work.command {
             Command::Open(open) if open.index_revision.is_none() => Some((**open).clone()),
@@ -1133,6 +1150,13 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             )
         }
         Command::Open(command) => open::execute(inner, seq, *command, stop, None),
+        Command::RevisionUsage { source, source_id } => {
+            let inventory = floe_app_core::cache::revision::inventory::inspect(&source, &stop)?;
+            Ok(
+                json!({"seq":seq.to_string(),"kind":"revision_usage","phase":"succeeded",
+                "source_id":source_id,"inventory":inventory}),
+            )
+        }
         Command::CheckRevision {
             source,
             source_id,

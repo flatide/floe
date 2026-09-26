@@ -244,6 +244,9 @@
           <p id="revision-current" class="note"></p>
           <p class="note">Use is a separate action. Same source/levels/mode keeps camera and display settings if the layer schema matches. Inspection, rulers, DRC selection and unapproved previews reset; save unfinished review edits first. To change source/levels/mode, close the view first. The old and failed revision files remain on disk.</p>
           <button id="revision-use" type="button" disabled>Use checked revision</button>
+          <button id="revision-usage" type="button" disabled>Refresh revision storage usage</button>
+          <p class="note">Reads the selected source and its registered dependencies, across all loaded-level selections. Logical file bytes, not allocated or reclaimable space. No cleanup is performed. Old-format readers cannot be tracked. Reader status is a point-in-time observation, not permission to delete.</p>
+          <pre id="revision-usage-status" class="note" aria-live="polite">Storage usage not checked.</pre>
         </details>
         <p id="operation" class="note" role="status">No active operation.</p>
       </details>

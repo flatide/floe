@@ -41,6 +41,7 @@ fn sealed(store: &Store, digit: char) -> (PathBuf, Vec<u8>) {
         revision,
         source_stamp: Stamp::source(&store.source).unwrap(),
         files: files(&path, false).unwrap(),
+        owner: None,
     };
     let bytes = serde_json::to_vec(&record).unwrap();
     create_record(&path.join("revision.json"), &bytes).unwrap();
@@ -75,7 +76,7 @@ fn malformed_pointer_never_falls_back_to_legacy_or_traverses() {
         ("revision", serde_json::json!("../external")),
         ("revision", serde_json::json!("한".repeat(32))),
         ("revision", serde_json::json!("A".repeat(32))),
-        ("version", serde_json::json!(2)),
+        ("version", serde_json::json!(3)),
         ("source", serde_json::json!(root.0.join("other.oas"))),
     ] {
         let mut value_record = base.clone();
