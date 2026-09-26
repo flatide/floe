@@ -4,7 +4,7 @@ use super::{
     geom::{Placement, Skipped},
     plan::Analysis,
 };
-use crate::{catalog::Layout, check_cancelled, Error, Result};
+use crate::{check_cancelled, Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::sync::atomic::AtomicUsize;
@@ -124,7 +124,7 @@ pub fn compose(analysis: &Analysis, cancelled: &AtomicUsize) -> Result<Composite
         }
         let info = info.expect("checked source");
         if !sources.contains_key(p.tc.as_str()) {
-            let source = Layout::open(&info.path, cancelled)?;
+            let source = analysis.catalog.open_layout(&p.tc, cancelled)?;
             if source.source_stale
                 || (source.metadata.dbu / info.dbu.expect("ok DBU") - 1.).abs() > 1e-12
             {

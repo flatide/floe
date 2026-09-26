@@ -20,6 +20,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+mod revisions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -48,6 +49,8 @@ pub struct Snapshot {
     /// Safe category only; native text/paths are not stored in the event state.
     pub failure: Option<ErrorKind>,
     pub native: Progress,
+    pub index_revision: Option<String>,
+    pub revision_sync_warning: bool,
 }
 impl Snapshot {
     pub fn terminal(&self) -> bool {
@@ -73,6 +76,36 @@ impl ManagedIndex {
         options: IndexOptions,
         indexer: Indexer,
     ) -> Result<Self> {
+        Self::start_backend(resources, source, levels, options, indexer, false)
+    }
+    /// Opt-in complete immutable set rebuild. It does not infer this write
+    /// policy from force or silently convert an additive-only request.
+    pub fn start_revisions(
+        resources: &Arc<Resources>,
+        source: Arc<RegisteredSource>,
+        levels: Option<BTreeSet<i64>>,
+        options: IndexOptions,
+        indexer: Indexer,
+    ) -> Result<Self> {
+        if options.occupancy_only
+            || options.representatives_only
+            || (source.deck && options.wants_representatives())
+        {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "immutable revision sets require full builds; deck representatives are unsupported",
+            ));
+        }
+        Self::start_backend(resources, source, levels, options, indexer, true)
+    }
+    fn start_backend(
+        resources: &Arc<Resources>,
+        source: Arc<RegisteredSource>,
+        levels: Option<BTreeSet<i64>>,
+        options: IndexOptions,
+        indexer: Indexer,
+        immutable: bool,
+    ) -> Result<Self> {
         options.validate()?;
         if options.profile_cell.is_some() {
             return Err(Error::new(
@@ -81,7 +114,9 @@ impl ManagedIndex {
             ));
         }
         source.validate_levels(levels.as_ref())?;
-        let mut permit = if source.deck {
+        let mut permit = if immutable {
+            resources.index(source.revision_paths()?, options.jobs)?
+        } else if source.deck {
             resources.index_planning(source.cache_paths()?, options.jobs)?
         } else {
             resources.index(source.cache_paths()?, options.jobs)?
@@ -104,20 +139,26 @@ impl ManagedIndex {
             elapsed_ms: 0,
             failure: None,
             native: Progress::default(),
+            index_revision: None,
+            revision_sync_warning: false,
         }));
         let (shared, flag) = (Arc::clone(&state), Arc::clone(&stop));
         let thread = thread::Builder::new()
             .name("floe-managed-index".into())
             .spawn(move || {
-                let result = run(
-                    &source,
-                    levels,
-                    &options,
-                    &indexer,
-                    &flag,
-                    &shared,
-                    &mut permit,
-                );
+                let result = if immutable {
+                    revisions::run(&source, levels, &options, &indexer, &flag, &shared)
+                } else {
+                    run(
+                        &source,
+                        levels,
+                        &options,
+                        &indexer,
+                        &flag,
+                        &shared,
+                        &mut permit,
+                    )
+                };
                 // Terminal state means all native children AND leases are released.
                 drop(permit);
                 let mut s = shared.lock().unwrap();

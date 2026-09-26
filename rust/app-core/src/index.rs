@@ -437,12 +437,15 @@ impl PreparedIndex {
                         .map(|p| p.join(name))
                 })
                 .unwrap_or_else(|_| snapshot.clone());
-            for candidate in cache::cache_paths(&source)? {
+            let mut protected = cache::cache_paths(&source)?.to_vec();
+            protected.push(cache::revision::Store::new(&source)?.path().to_owned());
+            protected.push(cache::revision::set::Store::new(&source)?.path().to_owned());
+            for candidate in protected {
                 let cache_resolved =
                     fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
                 if snapshot.starts_with(&candidate) || resolved.starts_with(&cache_resolved) {
                     return Err(Error::input(
-                        "profile snapshot must be outside both current and legacy caches",
+                        "profile snapshot must be outside current, legacy and revision caches",
                     ));
                 }
             }

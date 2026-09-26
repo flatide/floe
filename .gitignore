@@ -9,6 +9,10 @@ __pycache__/
 .*.ice/
 .*.tray
 .*.ice.index.lock
+.*.ice.revisions/
+.*.ice.revisions.index.lock
+.*.ice.revisions.sets/
+.*.ice.revisions.sets.index.lock
 floe-portable-*.tar.gz
 /AGENTS.md
 floe_research/

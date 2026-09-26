@@ -19,6 +19,36 @@ pub enum Dataset {
     Deck(Box<DeckSnapshot>),
 }
 impl Dataset {
+    pub(crate) fn open_revision_set(
+        set: std::sync::Arc<crate::cache::revision::set::Snapshot>,
+        mode: Mode,
+        stop: &AtomicUsize,
+    ) -> Result<Self> {
+        set.validate(stop)?;
+        set.validate_inputs(stop)?;
+        let result = if is_deck(set.source()) {
+            Self::Deck(Box::new(DeckSnapshot::open_pinned(
+                set.source(),
+                mode,
+                set.levels().clone(),
+                Some(std::sync::Arc::clone(&set)),
+                stop,
+            )?))
+        } else {
+            if mode != Mode::Level || set.levels().is_some() || set.members().len() != 1 {
+                return Err(Error::input("invalid layout revision selection"));
+            }
+            Self::Layout(Box::new(
+                set.members()
+                    .get(set.source())
+                    .ok_or_else(|| Error::input("missing layout revision"))?
+                    .open_layout(stop)?,
+            ))
+        };
+        set.validate(stop)?;
+        set.validate_inputs(stop)?;
+        Ok(result)
+    }
     pub fn open(
         source: &Path,
         levels: Option<BTreeSet<i64>>,

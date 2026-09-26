@@ -49,6 +49,14 @@ pub struct Analysis {
 }
 impl Analysis {
     pub fn open(path: &Path, options: &AnalysisOptions, cancelled: &AtomicUsize) -> Result<Self> {
+        Self::open_pinned(path, options, None, cancelled)
+    }
+    pub(crate) fn open_pinned(
+        path: &Path,
+        options: &AnalysisOptions,
+        pinned: Option<std::sync::Arc<cache::revision::set::Snapshot>>,
+        cancelled: &AtomicUsize,
+    ) -> Result<Self> {
         check_cancelled(cancelled)?;
         let deck = JobDeck::read(path, options.strict, cancelled)?;
         let path = cache::absolute(path)?;
@@ -58,6 +66,7 @@ impl Analysis {
                 .as_deref()
                 .unwrap_or(path.parent().expect("absolute path")),
         )?;
+        catalog.pinned = pinned;
         // Empty LOAD means all, as in the GTK load dialog. Empty ANALYSIS
         // selection means no placements and must not be silently widened.
         let load = options.load_ids.as_ref().filter(|ids| !ids.is_empty());
@@ -133,9 +142,17 @@ impl Analysis {
         let mut files = vec![PathBuf::from(&self.deck.path)];
         files.extend_from_slice(extra_inputs);
         let mut trees = Vec::new();
+        trees.push(
+            cache::revision::set::Store::new(Path::new(&self.deck.path))?
+                .path()
+                .to_owned(),
+        );
         for tc in self.deck.sources(None) {
             let source = self.catalog.resolve(tc);
-            for directory in cache::cache_paths(&source)? {
+            let mut source_trees = cache::cache_paths(&source)?.to_vec();
+            source_trees.push(cache::revision::Store::new(&source)?.path().to_owned());
+            source_trees.push(cache::revision::set::Store::new(&source)?.path().to_owned());
+            for directory in source_trees {
                 let mut lock = directory.as_os_str().to_owned();
                 lock.push(".index.lock");
                 files.push(lock.into());
@@ -143,6 +160,12 @@ impl Analysis {
             }
             files.push(source);
         }
+        let mut set_lock = cache::revision::set::Store::new(Path::new(&self.deck.path))?
+            .path()
+            .as_os_str()
+            .to_owned();
+        set_lock.push(".index.lock");
+        files.push(set_lock.into());
         artifact::protected_output_mode(path, &files, &trees, planned)
     }
     pub fn summary(&self) -> Result<Vec<String>> {

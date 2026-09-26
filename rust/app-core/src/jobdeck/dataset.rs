@@ -58,10 +58,19 @@ impl DeckSnapshot {
         levels: Option<BTreeSet<i64>>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
+        Self::open_pinned(source, mode, levels, None, cancelled)
+    }
+    pub(crate) fn open_pinned(
+        source: &Path,
+        mode: Mode,
+        levels: Option<BTreeSet<i64>>,
+        pinned: Option<std::sync::Arc<cache::revision::set::Snapshot>>,
+        cancelled: &AtomicUsize,
+    ) -> Result<Self> {
         let source = cache::absolute(source)?;
         let before = cache::fingerprint(&source)?;
         let levels = levels.filter(|s| !s.is_empty());
-        let analysis = Analysis::open(
+        let analysis = Analysis::open_pinned(
             &source,
             &AnalysisOptions {
                 mode,
@@ -69,6 +78,7 @@ impl DeckSnapshot {
                 skip_missing: true,
                 ..Default::default()
             },
+            pinned,
             cancelled,
         )?;
         let spec = spec::compose(&analysis, cancelled)?;

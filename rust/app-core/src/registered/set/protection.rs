@@ -27,7 +27,7 @@ impl Protection {
         if self.files.is_empty() && self.trees.is_empty() && self.review_targets.is_empty() {
             return Ok(());
         }
-        for cache in source.cache_paths()? {
+        for cache in source.protected_cache_paths()? {
             check_cancelled(stop)?;
             let cache = crate::artifact::resolve_prefix(&cache)?;
             for input in self

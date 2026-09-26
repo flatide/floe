@@ -6,15 +6,16 @@ world-tile, 동결된 WKWebView는 이 작업에 포함하지 않는다.
 
 ## 현재 범위
 
-**IR-1 저장·빌드 기반을 추가했다. 아직 일반 CLI/Index UI의 동작 변경이나
-열린 뷰 hot-reload 구현 완료가 아니다.** 기존 `.ice`/`.floe` 해석과
-관리형 읽기/쓰기 잠금은 그대로다. 현재 열린 캐시를 다시 색인하면 여전히
-기존 busy 보호를 받는다. 아래 API는 IR-2/3에서 함께 연결할 기반이다.
+**IR-1 저장·빌드 및 IR-2 관리형 backend를 추가했다. 아직 일반 CLI/Index UI의
+기본 동작 변경이나 열린 뷰 hot-reload 구현 완료가 아니다.** 기존 `.ice`/`.floe`
+해석과 기본 관리형 Index의 읽기/쓰기 잠금은 그대로다. 새 backend는
+`ManagedIndex::start_revisions`/`ManagedDataset::open_revisions`로 명시적으로
+선택한다. UI·전환 연결은 IR-3이며, 현재 사용자 Index 버튼은 여전히 기존 경로다.
 
 | 단계 | 범위 | 상태 |
 |---|---|---|
 | IR-1 | 별도 full-build, 검증 후 게시, 불변 경로 pin, 이전 revision 보존 | 구현·로컬 자동 검증 완료 |
-| IR-2 | 관리형 Index/일반·잡덱 reader 연결, 덱 전체 revision 집합 고정 | 남음 |
+| IR-2 | 관리형 Index/일반·잡덱 reader 연결, 덱 전체 revision 집합 고정 | backend 구현·로컬 자동 검증 완료 |
 | IR-3 | 명시적 갱신 확인·전환, 상태 보존, frame/margin/retained/query 무효화 | 남음 |
 | IR-4 | 사용량·보존 상태 조회, 사용 중 보호와 명시적 회수/실패 복구 정책 | 남음 |
 
@@ -28,8 +29,9 @@ world-tile, 동결된 WKWebView는 이 작업에 포함하지 않는다.
   foreground reserve)과 별도 store writer lock을 유지한다. drop/cancel은
   native child를 회수한 후 잠금을 놓는다. 기존 캐시 read lease와 충돌하지 않는다.
 - 기존 `IndexOptions`의 LOD/occupancy/representatives full-build 옵션을 전달한다.
-  profile/additive-only/jobdeck 직접 입력은 거부한다. 덱은 IR-2에서 각 소스
-  빌드와 revision 집합 게시를 묶어야 한다. additive summary는 기존 revision을
+  단일 소스 Build API는 profile/additive-only/jobdeck 직접 입력을 거부한다.
+  IR-2 관리형 backend가 덱의 각 소스 빌드와 revision 집합 게시를 묶는다.
+  additive summary는 기존 revision을
   수정하지 않는 별도 설계가 필요하며 이번에 자동 full rebuild로 바꾸지 않는다.
 - native exit 0만으로 게시하지 않는다. meta의 형식·소스 identity,
   VFS의 OVM/OVP/OVT pair 구조, 존재하는 OVO/OVR의 OVM binding을 검증한다.
@@ -59,8 +61,9 @@ world-tile, 동결된 WKWebView는 이 작업에 포함하지 않는다.
   원자적 교체와 경합하여 이미 연 이전 current fd의 링크 수가 0이 되는 것은
   정상 읽기로 허용한다. 이 예외는 seal/cache 파일에는 적용하지 않는다.
 - 해당 Layout의 내보내기는 legacy caches뿐 아니라 revision store·실제 pin
-  경로를 보호한다. 전체 웹의 파일 capability/protected trees 연결은 IR-2의
-  출시 전제다. 현재 일반 웹 API에서 revision store 경로를 받지 않는다.
+  경로를 보호한다. IR-2는 등록된 source의 deny-only publication protection과
+  profile snapshot·잡덱 report/export에도 revision/set/lock 보호를 연결한다.
+  현재 일반 웹 API에서 revision store 경로를 받지 않는다.
 
 “불변”은 이 writer API가 게시 파일을 다시 수정하지 않는 계약이다. readonly
 filesystem이나 악의적 동일 사용자로부터의 보호를 뜻하지 않는다. stamp는
@@ -74,15 +77,53 @@ filesystem이나 악의적 동일 사용자로부터의 보호를 뜻하지 않�
 삭제하지 않는다. 따라서 이 단계에는 디스크 사용량 상한이나 완성된 GC가 없다.
 사용자 캐시를 재귀 삭제하거나 파일 age만으로 회수하지 않는다.
 
-IR-2는 단일 레이아웃뿐 아니라 덱의 선택 소스 전체를 일관되게 고정하고,
-새 revision이 있어도 기존 뷰·Explore 게스트·진행 중 export는 원래 revision에
-남도록 연결한다. source별 current를 순차 갱신한 것만으로 덱 트랜잭션이
-완성됐다고 주장하지 않는다.
+IR-2는 아래의 set manifest로 덱의 선택 소스 전체를 고정한다. 새 revision이
+있어도 기존 ManagedDataset은 원래 pin을 보유한다. 기존 controller의
+fork/export는 해당 dataset의 Arc를 유지하는 구조이며, 새 backend로 생성한
+실제 Follow/Explore UI 수용은 IR-3 이후 별도 검사다.
 
 IR-3의 전환은 사용자가 명시적으로 요청한다. 새로운 dataset revision과 worker
 epoch를 발급하고 기존 `PreparedReplacement`의 예약 재사용·old worker reap·CAS
 cutover를 사용한다. 같은 source를 열면 단순 navigate로 재사용하는 현재 fast
 path와 구별해야 한다. stale 버튼/실패한 준비는 이전 뷰를 그대로 둔다.
+
+## IR-2 관리형 revision-set backend — 2026-09-26
+
+- 일반 레이아웃도 한 소스의 set으로 다룬다. 활성 목록은
+  `.<layout-or-deck>.ice.revisions.sets/current.json`, seal은 같은 저장소의
+  `<set-id>/revision.json`이다. 실제 geometry는 IR-1 소스별 revision 경로에 있다.
+- 관리형 `start_revisions`는 하나의 index/CPU 예약 아래 선택 소스를 순차
+  full-build한다. 각 소스는 검증·봉인만 하고 **소스별 current를 바꾸지 않는다**.
+  모든 멤버의 소스 ns identity와 파일 집합을 재검증한 뒤 set current만 한 번
+  원자적으로 바꾼다. 하나라도 실패/취소되면 이전 set을 유지한다.
+- 이 API는 **명시적 전체 재빌드**이며 기존 Index의 재사용/force/additive 의미를
+  몰래 바꾸지 않는다. profile·additive-only는 거부한다. 덱 representatives도
+  기존 정책대로 거부한다. 덱 occupancy 기본 on, 일반 기본 off를 보존한다.
+- 선택된 소스에 missing/GDS/gzip 등 지원되지 않는 멤버가 있으면 후보 생성 전
+  preflight에서 실패한다. 새 backend는 불완전한 덱을 current로 게시하지 않는다.
+  기존 legacy backend의 skip/부분 덱 정책은 그대로이며, 향후 UI는 이 차이와
+  전체 재빌드 디스크 비용을 승인 전에 설명해야 한다.
+- `open_revisions`는 등록된 deck/선택 레벨에서 expected source 집합을 다시
+  유도한다. manifest의 소스 집합·레벨이 정확히 맞아야 하며, 검증 전에는
+  manifest가 지정한 멤버 파일을 열지 않는다. 임의 디렉터리 선택 기능이 아니다.
+  current가 없거나 손상/다른 선택이면 기존 캐시로 조용히 fallback하지 않는다.
+- 현재는 set current 한 개를 사용하며 `None(all)`과 명시적 레벨 집합도 구분한다.
+  다른 레벨 선택의 새 set을 게시해도 이미 열린 이전 set은 유지된다. 여러 선택의
+  recent 목록·재사용이나 부분 선택을 기존 전체 set에서 파생하는 정책은 IR-3/4
+  후속이며, 일반 UI의 기존 레벨 선택 기능을 이 제약으로 대체하지 않았다.
+- metadata/catalog/compose가 모두 같은 pin의 실제 경로를 사용한다. source를
+  다시 해석해 current를 따라가는 경로를 쓰지 않는다. `index_revision`(persistent
+  set id)과 기존 `ManagedDataset.revision`(open별 숫자 id)은 구분한다.
+- `reopen_mode`는 같은 pin을 유지하며, `DeckModeMemory`도 index revision이
+  다르면 mode-only 전환을 거부한다. 원본 jobdeck/소스가 바뀌면 metadata를 다시
+  조합하는 작업은 실패한다. 이미 열린 dataset의 geometry 렌더는 유지된다.
+- set record는 32 MiB, 멤버는 65,536개로 제한하고 duplicate/상대 source/id
+  traversal/미정의 필드를 거부한다. 기존 관리형 lease 집합 상한도 적용되므로
+  가능한 선택 수가 이보다 작을 수 있다. 이것은 전체 RSS 상한이 아니다.
+- symlink·경로 별칭을 고려한 보호 목록에 소스별 revision/set과 deck set·lock을
+  추가한다. generated store는 Git ignore에 추가하며 실제/합성 캐시를 커밋하지 않는다.
+- 기존 CLI/GTK와 기본 관리형 open/index는 전환하지 않았다. `start_revisions`와
+  `open_revisions`를 사용하겠다는 명시적 선택·UI 승인·상태 CAS 연결이 IR-3의 작업이다.
 
 ## 검증
 
@@ -108,3 +149,32 @@ current의 unlink 경합은 위의 제한적 0-link 허용으로 수정하고 �
 `f1f56aaa0b4614b55fb9c77744ef090294dd1ec3b73e0d96a64d13aca1fcaf79`,
 `battery.log`는
 `0a30104284834813ae1801a567dc5a6be6a4bbaa23df8e31afcd19a8892cf949`이다.
+
+### IR-2 검증 결과 — 2026-09-26
+
+- 실제 native 통합 검사 2개(IR-1 및 새 `managed_revisions`) 통과. 합성 일반
+  레이아웃·두 소스 덱을 두 번 게시하고 이전 pin/new pin의 renderd PNG가 같은지
+  확인했다. mode 변경도 이전 pin을 유지한다. 덱 두 번째 소스를 의도적으로
+  실패시키거나 취소하면 set current가 유지되고 관리형 자원이 반환된다.
+- 소스별 current를 앞당기지 않음, 선택 레벨의 exact 일치, 변조된 manifest의
+  임의 member 경로 거부, revision 경로의 export 보호를 검사했다. 선택 레벨
+  set을 게시한 뒤에도 기존 전체 덱 렌더가 유지되고, 원본 덱 변경 후에는 기존
+  geometry 렌더를 유지하되 metadata 재조합(mode reopen)은 거부함을 확인했다.
+- 최종 소스 기준 app-core lib **331 passed / 8 ignored**, web lib
+  **127 passed / 3 ignored**, 두 패키지 fmt 및 Clippy
+  (all-targets/no-deps, warnings deny) 통과. 기존 의존성 경고 3건은 그대로다.
+- `sh tools/validate_rust.sh --only cache_revision,cache_migration,app_cli,managed_index,app_jobdeck,app_deck_render,layer_defaults,web_local_sharing,validation_selector`
+  선택 배터리 `ALL OK`. cache revision 단위 9개, 기존 관리형 Index, CLI,
+  캐시 개명, 레이어 기본값, 로컬 공유/HTTP 권한, 잡덱 계획·합성 렌더를 포함한다.
+  최종 member scope 검사를 소스별로 제한한 뒤 lib/native/Clippy/fmt를 재실행했다.
+- 실제 GUI·현장 Linux/ETX·NFS·Follow/Explore의 새 backend 수용은 실행하지
+  않았다. 일반 UI가 이 backend를 사용하는 단계는 여전히 IR-3이다.
+
+로그는 로컬 `/private/tmp/floe-revision-set.QbVoTM/`에 두었다. SHA-256:
+
+| 로그 | SHA-256 |
+|---|---|
+| `core-web-accepted.log` | `97707daf95f9ea6eb95815037fc249bb151fa4699fddeb8b240f86e9f8eb35d0` |
+| `native-accepted.log` | `b96d53d875b7963fe79d03d805b94b32c03432d6a8b171eddc6256b40616725b` |
+| `clippy-accepted.log` | `255cd9aedef35846128d973e677d8d2b054dc0feadea5d27761caf8362b2343b` |
+| `battery.log` | `cfcd59085f542d770d0cfce23a4e74f3ed0e906b6ff757f771ded8a06e025170` |

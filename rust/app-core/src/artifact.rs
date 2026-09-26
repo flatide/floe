@@ -131,6 +131,11 @@ pub(crate) fn layout_output_mode(path: &Path, layout: &Layout, planned: bool) ->
             .to_owned(),
     );
     trees.push(layout.directory.clone());
+    trees.push(
+        cache::revision::set::Store::new(&layout.source)?
+            .path()
+            .to_owned(),
+    );
     let mut files = vec![layout.source.clone()];
     for directory in &trees {
         let mut lock = directory.as_os_str().to_owned();

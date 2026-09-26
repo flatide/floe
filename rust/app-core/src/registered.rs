@@ -180,13 +180,61 @@ impl RegisteredSource {
             .flatten()
             .collect())
     }
+    /// Derived, deny-only paths. This does not grant publication authority.
+    pub(crate) fn protected_cache_paths(&self) -> Result<Vec<PathBuf>> {
+        let mut paths = self.cache_paths()?;
+        paths.extend(self.revision_paths()?);
+        Ok(paths)
+    }
+    pub(crate) fn revision_paths(&self) -> Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        for source in &self.dependencies {
+            paths.push(cache::revision::Store::new(source)?.path().to_owned());
+            paths.push(cache::revision::set::Store::new(source)?.path().to_owned());
+        }
+        paths.push(
+            cache::revision::set::Store::new(&self.path)?
+                .path()
+                .to_owned(),
+        );
+        for path in &paths {
+            self.scope.check(path)?;
+        }
+        Ok(paths)
+    }
+    pub(crate) fn validate_revision_member(&self, path: &Path, stop: &AtomicUsize) -> Result<()> {
+        check_cancelled(stop)?;
+        if !self.dependencies.iter().any(|p| p == path) {
+            return Err(Error::input("unregistered revision member"));
+        }
+        self.scope.check(path)?;
+        self.scope
+            .check(cache::revision::Store::new(path)?.path())?;
+        Ok(())
+    }
+    pub(crate) fn selected_sources(
+        &self,
+        levels: Option<&BTreeSet<i64>>,
+        stop: &AtomicUsize,
+    ) -> Result<BTreeSet<PathBuf>> {
+        self.validate_levels(levels)?;
+        if self.deck {
+            JobDeck::read(self.path(), true, stop)?
+                .sources(levels)
+                .into_iter()
+                .map(|tc| self.scope.check(&self.path.parent().unwrap().join(tc)))
+                .collect()
+        } else {
+            Ok([self.path.clone()].into())
+        }
+    }
     pub(crate) fn scoped_output(&self, path: &Path) -> Result<PathBuf> {
         self.scope.check(path)
     }
     /// A shared sidecar writer must protect every registered source, not only
     /// the current one: another source may have a sidecar-shaped filename.
     pub(crate) fn protect_output(&self, path: &Path) -> Result<PathBuf> {
-        let trees = self.cache_paths()?;
+        let trees = self.protected_cache_paths()?;
         let mut files = self.dependencies.clone();
         files.push(self.path.clone());
         for tree in &trees {

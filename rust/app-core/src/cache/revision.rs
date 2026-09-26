@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::AtomicUsize,
 };
+pub mod set;
 
 const FILES: &[&str] = &[
     "meta.json",
@@ -23,6 +24,12 @@ const FILES: &[&str] = &[
     "design.ovr",
 ];
 const MAX_RECORD: u64 = 16 * 1024;
+fn valid_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,11 +76,7 @@ impl Record {
     fn validate(&self, source: &Path) -> Result<()> {
         if self.version != 1
             || self.source != source
-            || self.revision.len() != 32
-            || !self
-                .revision
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !valid_id(&self.revision)
             || self.files.keys().any(|k| !FILES.contains(&k.as_str()))
             || ["meta.json", "design.ovm", "design.ovp"]
                 .iter()
@@ -132,6 +135,14 @@ impl Store {
         Ok(Some(snapshot))
     }
     pub(crate) fn begin(&self, stop: &AtomicUsize) -> Result<Candidate> {
+        self.begin_checked(stop, MAX_RECORD, || self.pin().map(|_| ()))
+    }
+    fn begin_checked(
+        &self,
+        stop: &AtomicUsize,
+        limit: u64,
+        validate: impl FnOnce() -> Result<()>,
+    ) -> Result<Candidate> {
         check_cancelled(stop)?;
         let source_stamp = Stamp::source(&self.source)?;
         // This lock is separate from mutable legacy caches, which are neither
@@ -145,10 +156,10 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
         let root = directory(&self.root)?;
-        let before = current(&self.root)?;
+        let before = current_limit(&self.root, limit)?;
         // Corrupt current is not silently overwritten, even by another build.
         if before.is_some() {
-            self.pin()?;
+            validate()?;
         }
         check_cancelled(stop)?;
         let mut random = [0; 16];
@@ -167,10 +178,31 @@ impl Store {
             revision,
             source_stamp,
             before,
+            limit,
             root_id: id(&root)?,
             dir_id: id(&dir)?,
             _lease: lease,
         })
+    }
+    fn pin_id(&self, revision: &str) -> Result<Snapshot> {
+        if !valid_id(revision) {
+            return Err(invalid("invalid pinned revision id"));
+        }
+        let path = self.root.join(revision);
+        let record: Record = serde_json::from_slice(&read_record(&path.join("revision.json"))?)
+            .map_err(|_| invalid("invalid pinned revision seal"))?;
+        record.validate(&self.source)?;
+        if record.revision != revision {
+            return Err(invalid("pinned revision id mismatch"));
+        }
+        let snapshot = Snapshot {
+            store: self.clone(),
+            record,
+            root_id: id(&directory(&self.root)?)?,
+            dir_id: id(&directory(&path)?)?,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
     }
 }
 
@@ -185,6 +217,12 @@ pub struct Snapshot {
     dir_id: (u64, u64),
 }
 impl Snapshot {
+    pub(crate) fn source_unchanged(&self) -> Result<()> {
+        if Stamp::source(self.source())? != self.record.source_stamp {
+            return Err(invalid("revision source changed"));
+        }
+        Ok(())
+    }
     pub fn id(&self) -> &str {
         &self.record.revision
     }
@@ -231,6 +269,7 @@ pub(crate) struct Candidate {
     revision: String,
     source_stamp: Stamp,
     before: Option<Vec<u8>>,
+    limit: u64,
     root_id: (u64, u64),
     dir_id: (u64, u64),
     _lease: WriteLease,
@@ -240,6 +279,15 @@ impl Candidate {
         self.store.root.join(&self.revision)
     }
     pub(crate) fn publish(self, stop: &AtomicUsize) -> Result<Publication> {
+        let snapshot = self.seal(stop)?;
+        let bytes = serde_json::to_vec(&snapshot.record).map_err(|e| invalid(e.to_string()))?;
+        let directory_synced = self.commit_current(&bytes, stop)?;
+        Ok(Publication {
+            snapshot,
+            directory_synced,
+        })
+    }
+    pub(crate) fn seal(&self, stop: &AtomicUsize) -> Result<Snapshot> {
         check_cancelled(stop)?;
         let path = self.directory();
         if super::inspect(&self.store.source, &path)? != CacheState::Current {
@@ -276,15 +324,21 @@ impl Candidate {
             dir_id: self.dir_id,
         };
         snapshot.validate()?;
+        snapshot.source_unchanged()?;
+        check_cancelled(stop)?;
+        Ok(snapshot)
+    }
+    fn commit_current(&self, bytes: &[u8], stop: &AtomicUsize) -> Result<bool> {
         let pending = self
             .store
             .root
             .join(format!(".current-{}.tmp", self.revision));
-        create_record(&pending, &bytes)?;
+        create_record_limit(&pending, bytes, self.limit)?;
         let root = directory(&self.store.root)?;
         root.sync_all()?;
         if id(&root)? != self.root_id
-            || current(&self.store.root)? != self.before
+            || id(&directory(&self.directory())?)? != self.dir_id
+            || current_limit(&self.store.root, self.limit)? != self.before
             || Stamp::source(&self.store.source)? != self.source_stamp
         {
             return Err(invalid("source or current revision changed during build"));
@@ -292,14 +346,10 @@ impl Candidate {
         check_cancelled(stop)?;
         // Once attempted, an error is not proof that the old pointer survived.
         // Preserve the complete candidate and pending manifest as evidence.
-        let directory_synced = commit_pointer(
+        commit_pointer(
             || fs::rename(&pending, self.store.root.join("current.json")),
             || root.sync_all(),
-        )?;
-        Ok(Publication {
-            snapshot,
-            directory_synced,
-        })
+        )
     }
 }
 
@@ -366,26 +416,35 @@ fn read_record(path: &Path) -> Result<Vec<u8>> {
     record_bytes(regular(path, false)?)
 }
 fn record_bytes(file: File) -> Result<Vec<u8>> {
-    if file.metadata()?.len() > MAX_RECORD {
+    record_bytes_limit(file, MAX_RECORD)
+}
+fn record_bytes_limit(file: File, limit: u64) -> Result<Vec<u8>> {
+    if file.metadata()?.len() > limit {
         return Err(invalid("revision manifest too large"));
     }
     let mut bytes = Vec::new();
-    file.take(MAX_RECORD + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_RECORD {
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
         return Err(invalid("revision manifest grew"));
     }
     Ok(bytes)
 }
 fn current(root: &Path) -> Result<Option<Vec<u8>>> {
+    current_limit(root, MAX_RECORD)
+}
+fn current_limit(root: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     let path = root.join("current.json");
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
-        Ok(_) => record_bytes(regular(&path, true)?).map(Some),
+        Ok(_) => record_bytes_limit(regular(&path, true)?, limit).map(Some),
     }
 }
 fn create_record(path: &Path, bytes: &[u8]) -> Result<()> {
-    if bytes.len() as u64 > MAX_RECORD {
+    create_record_limit(path, bytes, MAX_RECORD)
+}
+fn create_record_limit(path: &Path, bytes: &[u8], limit: u64) -> Result<()> {
+    if bytes.len() as u64 > limit {
         return Err(invalid("revision manifest too large"));
     }
     let mut file = OpenOptions::new()

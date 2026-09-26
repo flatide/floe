@@ -226,7 +226,7 @@ if gate cache_migration; then RAN="$RAN cache_migration"
     .venv/bin/python -B tools/validate_cache_migration.py "$FLOE2_SMOKE_SRC"; fi
 if gate cache_revision; then RAN="$RAN cache_revision"
     (cd rust && FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --locked --offline -p floe-app-core --lib cache::revision &&
-        FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --locked --offline -p floe-app-core --test cache_revision -- --ignored); fi
+        FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --locked --offline -p floe-app-core --test cache_revision --test managed_revisions -- --ignored); fi
 if gate web_cli_inventory; then RAN="$RAN web_cli_inventory"
     .venv/bin/python -B tools/validate_web_cli_inventory.py; fi
 if gate native_revision; then RAN="$RAN native_revision"

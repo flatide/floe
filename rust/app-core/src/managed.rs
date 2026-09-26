@@ -400,9 +400,64 @@ pub struct ManagedDataset {
     pub dataset: Dataset,
     /// Unique within Resources lifetime. Web also binds this to its server/view epoch.
     pub revision: u64,
+    /// Persistent selected index set, distinct from per-open view identity.
+    pub index_revision: Option<String>,
+    pinned: Option<Arc<cache::revision::set::Snapshot>>,
     _read: Permit,
 }
 impl ManagedDataset {
+    /// Explicit immutable backend. Never falls back to mutable caches on a
+    /// missing, corrupt or differently selected set. Existing open stays legacy
+    /// until the UI's explicit mode/cutover is connected.
+    pub fn open_revisions(
+        resources: &Arc<Resources>,
+        source: &crate::registered::RegisteredSource,
+        levels: Option<BTreeSet<i64>>,
+        mode: Mode,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
+        source.validate(stop)?;
+        let expected = source.selected_sources(levels.as_ref(), stop)?;
+        let set = cache::revision::set::Store::new(source.path())?
+            .pin(&expected, &levels, stop)?
+            .ok_or_else(|| Error::new(ErrorKind::Cache, "no published index revision set"))?;
+        let result = Self::from_revision_set(resources, Arc::new(set), mode, stop)?;
+        source.validate(stop)?;
+        Ok(result)
+    }
+    fn from_revision_set(
+        resources: &Arc<Resources>,
+        set: Arc<cache::revision::set::Snapshot>,
+        mode: Mode,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
+        let read = resources.read(set.members().values().map(|pin| pin.directory()))?;
+        let dataset = Dataset::open_revision_set(Arc::clone(&set), mode, stop)?;
+        Ok(Arc::new(Self {
+            dataset,
+            revision: resources.next_id()?,
+            index_revision: Some(set.id().into()),
+            pinned: Some(set),
+            _read: read,
+        }))
+    }
+    /// A display-mode change must not opportunistically adopt newer geometry.
+    pub fn reopen_mode(
+        &self,
+        resources: &Arc<Resources>,
+        mode: Mode,
+        stop: &AtomicUsize,
+    ) -> Result<Arc<Self>> {
+        if let Some(set) = &self.pinned {
+            Self::from_revision_set(resources, Arc::clone(set), mode, stop)
+        } else {
+            let levels = match &self.dataset {
+                Dataset::Deck(d) => d.metadata.jobdeck.levels.clone(),
+                _ => None,
+            };
+            Self::open(resources, self.dataset.source(), levels, mode, stop)
+        }
+    }
     /// Trusted local registration only. Browser input must resolve a previously
     /// authorized dataset handle, not be passed here as a filesystem path.
     pub fn open(
@@ -455,6 +510,8 @@ impl ManagedDataset {
         Ok(Arc::new(Self {
             dataset,
             revision: resources.next_id()?,
+            index_revision: None,
+            pinned: None,
             _read: read,
         }))
     }

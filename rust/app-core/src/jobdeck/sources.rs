@@ -155,12 +155,14 @@ impl SourceInfo {
 pub struct SourceCatalog {
     pub directory: PathBuf,
     pub infos: BTreeMap<String, SourceInfo>,
+    pub(crate) pinned: Option<std::sync::Arc<cache::revision::set::Snapshot>>,
 }
 impl SourceCatalog {
     pub fn new(directory: &Path) -> Result<Self> {
         Ok(Self {
             directory: cache::absolute(directory)?,
             infos: BTreeMap::new(),
+            pinned: None,
         })
     }
     pub fn resolve(&self, tc: &str) -> PathBuf {
@@ -223,7 +225,16 @@ impl SourceCatalog {
                             info.error = e.to_string();
                         }
                     }
-                    info.cache_dir = cache::cache_path(&path)?;
+                    info.cache_dir = if let Some(set) = &self.pinned {
+                        let pin = set.members().get(&cache::absolute(&path)?).ok_or_else(|| {
+                            Error::input("source is not in the pinned revision set")
+                        })?;
+                        pin.validate()?;
+                        pin.source_unchanged()?;
+                        pin.directory()
+                    } else {
+                        cache::cache_path(&path)?
+                    };
                     info.indexed = matches!(
                         cache::inspect(&path, &info.cache_dir),
                         Ok(cache::CacheState::Current)
@@ -257,6 +268,24 @@ impl SourceCatalog {
             self.probe(tc, cancelled)?;
         }
         Ok(())
+    }
+    pub(crate) fn open_layout(
+        &self,
+        tc: &str,
+        stop: &AtomicUsize,
+    ) -> Result<crate::catalog::Layout> {
+        let info = self
+            .infos
+            .get(tc)
+            .ok_or_else(|| Error::input("unprobed source"))?;
+        if let Some(set) = &self.pinned {
+            set.members()
+                .get(&cache::absolute(&info.path)?)
+                .ok_or_else(|| Error::input("unpinned source"))?
+                .open_layout(stop)
+        } else {
+            crate::catalog::Layout::open_directory(&info.path, info.cache_dir.clone(), stop)
+        }
     }
     pub fn header_dbu(&self, tc: &str, cancelled: &AtomicUsize) -> Result<Option<f64>> {
         check_cancelled(cancelled)?;

@@ -57,6 +57,7 @@ impl DeckModeMemory {
         };
         let identity = Identity::of(from);
         if identity != Identity::of(to)
+            || current.index_revision != target.index_revision
             || self
                 .identity
                 .as_deref()
