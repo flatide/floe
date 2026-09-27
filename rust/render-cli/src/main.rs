@@ -236,6 +236,8 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         frames: true,
         page_wash: true,
         lod_swap: true,
+        regions: Vec::new(),
+        visible_indices: None,
     })
 }
 

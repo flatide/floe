@@ -75,6 +75,13 @@ pub struct RenderStats {
     /// the last plane the pixels an original covers and those a density
     /// shape stands for.
     pub density_stack: [u64; 5],
+    /// The density scene's work bin (pass 2): items collected, deferred
+    /// edges, and the items reached when it hit its cap and fell back to the
+    /// per-tile walk (0 = no overflow).
+    pub density_bin: [u64; 3],
+    /// Time spent collecting the density scenes' bins and their tiles'
+    /// minis at the block boundary (us).
+    pub density_collect_us: u64,
 }
 
 /// RenderStats::density_stack's counts, in order.

@@ -170,7 +170,7 @@ def main():
                 assert px(on, c, r) == px(off, c, r), 'top right (%d, %d): the rectangle changed' % (c, r)
             stack, pages = on_res.get('density_stack'), on_res.get('density_pages')
             assert stack and stack['lit'] > 0 and stack['top'] > 0 and stack['lower'] > 0 and stack['covered'] > 0, stack
-            assert pages and pages['decoded'] > 0 and pages['over_budget'] == 0, pages
+            assert pages and pages['planned'] > 0 and pages['decoded'] > 0 and pages['over_budget'] == 0, pages
             assert off_res.get('density_stack') is None and off_res.get('density_pages') is None, off_res.get('density_stack')
             print('density stack: bottom right %d square px as cut-free, left rectangle inside = alone (%d px), top right %d top-layer px over '
                   'layer 2; counts %s; pass 2 pages %s' % (len(want), len(lit(alone, *inside)), len(squares),

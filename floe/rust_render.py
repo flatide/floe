@@ -132,11 +132,26 @@ def _density_stack(value):
     return dict(zip(DENSITY_STACK_COUNTS, counts))
 
 
-DENSITY_PAGE_COUNTS = ("candidates", "taken", "decoded", "over_budget")
+DENSITY_PAGE_COUNTS = ("planned", "in_hand", "decoded", "over_budget")
+DENSITY_TIMES = ("plan2_us", "scene2_us", "collect_us", "regions_us", "decode2_us")
+DENSITY_BIN = ("items", "deferred", "overflow")
+
+
+def _wire_counts(value, names):
+    """A `/`-separated wire value as {name: int}; None for `-` or a mismatch."""
+    if not value or value == "-":
+        return None
+    try:
+        counts = [int(v) for v in value.split("/")]
+    except ValueError:
+        return None
+    if len(counts) != len(names):
+        return None
+    return dict(zip(names, counts))
 
 
 def _density_pages(value):
-    """A `density_pages=` wire value (`candidates/taken/decoded/over_budget`:
+    """A `density_pages=` wire value (`planned/in_hand/decoded/over_budget`:
     pass 2's pages, CUT_DENSITY_DESIGN §10.10) as {count: n}; None for `-`."""
     if not value or value == "-":
         return None
@@ -631,6 +646,8 @@ class RustRenderWorker:
             # pass 2's pages
             "density_stack": None,
             "density_pages": None,
+            "density_us": None,
+            "density_bin": None,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -1119,6 +1136,8 @@ class RustRenderWorker:
         _add_place_walks(state["place_walks"], fields.get("place_walks", "-"))
         state["density_stack"] = _density_stack(fields.get("density_stack", "-"))
         state["density_pages"] = _density_pages(fields.get("density_pages", "-"))
+        state["density_us"] = _wire_counts(fields.get("density_us", "-"), DENSITY_TIMES)
+        state["density_bin"] = _wire_counts(fields.get("density_bin", "-"), DENSITY_BIN)
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1339,6 +1358,8 @@ class RustRenderWorker:
             "place_walks": dict(state["place_walks"]),
             "density_stack": state["density_stack"],
             "density_pages": state["density_pages"],
+            "density_us": state["density_us"],
+            "density_bin": state["density_bin"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on

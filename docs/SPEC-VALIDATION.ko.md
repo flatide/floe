@@ -94,7 +94,7 @@ sh tools/validate_rust.sh --only quick path/to.oas
   기본 스페클, 컷 3 px)에서: 끄면 1.5 px 사각형이 하나도 없고(컷), 켜면 오른쪽 아래 사분면에 1/0의 사각형이
   1/0만 컷 없이 그린 프레임과 픽셀까지 같게 나온다. 왼쪽 사각형 안은 사각형만일 때와 같고(구멍의 하위 사각형도
   자기 사각형도 없음), 오른쪽 위는 1/0 사각형 위에 최상위의 사각형이 최상위만 컷 없이 그린 픽셀과 같은 위치·색으로
-  올라오며 나머지는 끈 프레임 그대로다. 켠 프레임은 `density_stack`과 `density_pages`(디코드 > 0) 계측을
+  올라오며 나머지는 끈 프레임 그대로다. 켠 프레임은 `density_stack`과 `density_pages`(계획 > 0, 디코드 > 0) 계측을
   보고하고, 끈 프레임·`FLOE_RUST_AREA_TRUE=off`·`FLOE_RUST_WRITE_ONCE=off`는 계측 없이 변수 없는 프레임과 같다.
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어

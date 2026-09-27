@@ -801,7 +801,8 @@ impl Cache {
     pub fn plan(&self, request: &PlanRequest) -> Result<PlannedView, String> {
         let req = self.view_request(request)?;
         let started = Instant::now();
-        let mut plan = self.vfs.plan_hier(&req);
+        let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
+        let mut plan = self.vfs.plan_hier_in(&req, &regions);
         let plan_us = elapsed_us(started);
         // a request whose every visible layer is summarized (and
         // pruned) plans no working cell at all; the scene still needs
@@ -1035,7 +1036,18 @@ impl Cache {
         Ok(ViewReq {
             view: request.view.as_bbox(),
             cut_dbu: if request.exact { 0 } else { request.cut_dbu },
-            vis: self.vfs.layer_mask(request.visible_layers.as_deref())?,
+            vis: match &request.visible_indices {
+                Some(indices) => {
+                    let mut vis = vec![0u8; self.vfs.ovm.bs_width];
+                    for &idx in indices {
+                        if idx < self.vfs.ovm.n_layers {
+                            floe_ovm::bit_set(&mut vis, idx as usize);
+                        }
+                    }
+                    vis
+                }
+                None => self.vfs.layer_mask(request.visible_layers.as_deref())?,
+            },
             depth: request.depth,
             px_per_dbu: if request.exact {
                 0.0

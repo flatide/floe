@@ -492,6 +492,13 @@ pub type WsKey = (u32, u32);
 
 #[derive(Clone, Debug)]
 pub struct HierOpts {
+    /// The world regions the plan is for, in place of the request's one
+    /// view (empty: the view): the top cell is seeded with each of them, so
+    /// the K-box clip regions descend from the regions and what lies
+    /// between them is culled from the start (CUT_DENSITY_DESIGN §10.10: the
+    /// density stack's pass 2 plans the space the originals left). `k_boxes`
+    /// should hold them all.
+    pub regions: Vec<BBox>,
     /// localview boxes kept per WsKey before least-waste merging
     pub k_boxes: usize,
     /// pts reps at or below this emit a full (rebased) rep - above
@@ -626,6 +633,7 @@ pub struct ExplainRow {
 impl Default for HierOpts {
     fn default() -> HierOpts {
         HierOpts {
+            regions: Vec::new(),
             k_boxes: 4,
             pts_full_rep: 8192,
             pts_enum_budget: 200_000,
@@ -1468,8 +1476,16 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
             && !tc.rbbox.is_empty()
             && (r0 != REM_FULL || h.sub_cut_wash || !(w < h.cut && hh < h.cut))
         {
-            let seed = req.view.intersect(&tc.rbbox);
-            h.contribute((top_ci, r0), seed);
+            // the regions asked for, or the view (HierOpts::regions)
+            if opts.regions.is_empty() {
+                let seed = req.view.intersect(&tc.rbbox);
+                h.contribute((top_ci, r0), seed);
+            } else {
+                for region in &opts.regions {
+                    let seed = region.intersect(&req.view).intersect(&tc.rbbox);
+                    h.contribute((top_ci, r0), seed);
+                }
+            }
         }
     }
     while let Some(Reverse((_, ci, r))) = h.heap.pop() {
@@ -4013,13 +4029,24 @@ impl crate::Vfs {
     /// hairline policy is the request's (ViewReq::page_hairline);
     /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
+        self.plan_hier_in(req, &[])
+    }
+
+    /// `plan_hier` over `regions` of the view instead of the whole view
+    /// (HierOpts::regions; empty = the view): the clip regions hold them all.
+    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox]) -> HierPlan {
+        let mut opts = HierOpts::default();
+        if !regions.is_empty() {
+            opts.regions = regions.to_vec();
+            opts.k_boxes = opts.k_boxes.max(regions.len());
+        }
         match std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() {
             Ok("cull") | Ok("keep") => {
                 let mut req = req.clone();
                 req.page_hairline = std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() == Ok("cull");
-                plan_hier(&self.ovm, &req, &HierOpts::default())
+                plan_hier(&self.ovm, &req, &opts)
             }
-            _ => plan_hier(&self.ovm, req, &HierOpts::default()),
+            _ => plan_hier(&self.ovm, req, &opts),
         }
     }
 

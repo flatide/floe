@@ -45,7 +45,7 @@ pub use raster::{
     render_geometry_styled_cancellable, render_geometry_styled_cancellable_reuse,
     render_geometry_styled_cancellable_windowed,
     render_geometry_styled_unbinned,
-    render_geometry_styled_unbinned_cancellable, FrameReuse, GeometryRasterReport,
+    render_geometry_styled_unbinned_cancellable, DensityScenes, FrameReuse, GeometryRasterReport,
     GeometryRasterRequest, LayerFill, LayerRasterSession,
     LayerStyle, RasterViewBox, RgbaFrame, StyledGeometryRasterRequest, DEFAULT_TILE_SIZE,
     MAX_TILE_SIZE,

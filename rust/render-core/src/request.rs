@@ -80,11 +80,22 @@ pub struct PlanRequest {
     pub lod_swap: bool,
     /// The frame draws hierarchy frames (floe_vfs::ViewReq::frames).
     pub frames: bool,
+    /// The regions of `view` the plan is for (floe_vfs HierOpts::regions;
+    /// empty = the whole view): the density stack's pass 2 plans the space
+    /// the originals left (CUT_DENSITY_DESIGN §10.10).
+    pub regions: Vec<ViewBox>,
+    /// Visible layers by cache layer index, in place of `visible_layers`
+    /// when Some (the density stack's pass 2: the top plane's layer alone,
+    /// then the others).
+    pub visible_indices: Option<Vec<u32>>,
 }
 
 impl PlanRequest {
     pub fn validate(&self) -> Result<(), String> {
         self.view.validate()?;
+        for region in &self.regions {
+            region.validate()?;
+        }
         if self.cut_dbu < 0 {
             return Err(format!("invalid cut_dbu: {}", self.cut_dbu));
         }
@@ -126,6 +137,8 @@ mod tests {
             frames: true,
             page_wash: true,
             lod_swap: true,
+            regions: Vec::new(),
+            visible_indices: None,
         };
         assert!(req.validate().is_err());
     }

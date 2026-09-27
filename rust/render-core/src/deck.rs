@@ -1636,6 +1636,8 @@ fn source_plan_request(
         frames: true,
         page_wash: true,
         lod_swap: true,
+        regions: Vec::new(),
+        visible_indices: None,
     };
     plan.validate()?;
     Ok(Some(plan))
