@@ -31,8 +31,13 @@ with the others). Every layer takes the viewer's default speckle; the cut is
     rectangle in the top layer's colour, exactly the pixels a cut-free frame
     of the top layer alone lights there, and everything else there is
     layer 2's rectangle as without the variable;
+  * pass 2 draws the VISIBLE layers only (field 2026-09-27: with one layer
+    on, the other layers' density showed): with layer 1/0 alone on, the frame
+    is byte-identical to the cut-free frame of layer 1/0 (its squares are the
+    top plane's density, nothing above); with 1/0 and 2/0 on, the top right
+    quadrant is 2/0's rectangle alone - none of 4/0's squares;
   * the frame reports the stack's counts (density_stack: lit, top, lower,
-    covered, claimed) and pass 2's pages (density_pages: candidates, taken,
+    covered, claimed) and pass 2's pages (density_pages: planned, in_hand,
     decoded, over_budget - some decoded); none without the variable, under
     FLOE_RUST_AREA_TRUE=off or FLOE_RUST_WRITE_ONCE=off, which draw as
     without the variable.
@@ -176,6 +181,17 @@ def main():
                   'layer 2; counts %s; pass 2 pages %s' % (len(want), len(lit(alone, *inside)), len(squares),
                                                           ' '.join('%s=%d' % kv for kv in stack.items()),
                                                           ' '.join('%s=%d' % kv for kv in pages.items())))
+            # the visible layers only: layer 1/0 alone is its own top plane
+            low_on, low_res = frame(workers['on'], 6, (LOW,))
+            assert low_on == low_free, 'layer 1/0 alone with the stack differs from its cut-free frame in %d px' % sum(
+                1 for i in range(0, len(low_on), 4) if low_on[i:i + 4] != low_free[i:i + 4])
+            assert low_res['density_stack']['top'] > 0 and low_res['density_stack']['lower'] == 0, low_res['density_stack']
+            mid_on, _ = frame(workers['on'], 7, (LOW, MID))
+            mid_off, _ = frame(workers['off'], 7, (LOW, MID))
+            assert lit(mid_on, *tr) == lit(mid_off, *tr), 'with 4/0 off its squares still show in the top right (%d vs %d px)' % (
+                len(lit(mid_on, *tr)), len(lit(mid_off, *tr)))
+            assert lit(mid_on, *br) == want, 'with 4/0 off the bottom right changed'
+            print('density stack: layer 1/0 alone = its cut-free frame; 1/0 + 2/0 shows none of 4/0')
             for name, base in (('klayout', 'klayout_on'), ('ordered', 'ordered_on')):
                 a, _ = frame(workers[name], 5, both)
                 b, b_res = frame(workers[base], 5, both)

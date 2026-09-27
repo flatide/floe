@@ -2427,6 +2427,22 @@ fn run_render(
         && command.probe.is_none()
         && std::env::var("FLOE_RUST_WRITE_ONCE").as_deref() != Ok("off"))
     .then_some(());
+    // pass 2 plans by plane, so its planes are the VISIBLE layers only (the
+    // style list holds every layer; pass 1 leaves the plan to pick the pages
+    // - field 2026-09-27: with one layer on, the others' density showed and
+    // the top plane was the style list's last layer, not the visible one)
+    let density_layers: Option<BTreeSet<u32>> = match (density_plan, command.visible_layers.as_deref()) {
+        (Some(()), Some(specs)) => {
+            let cache_layers = cache.layers();
+            Some(
+                specs
+                    .iter()
+                    .filter_map(|spec| resolve_layer(spec, &cache_layers).map(|layer| layer.index))
+                    .collect(),
+            )
+        }
+        _ => None,
+    };
     if let Some(mode) = command.probe {
         // docs/LAYER_DECODE_PROBE_PLAN.ko.md: the same plan and selection, a
         // different way of painting them. Everything a normal render does
@@ -2529,6 +2545,13 @@ fn run_render(
                 // FLOE_RUST_WORK_BIN=off: field kill switch back to the
                 // per-tile walk (identical pixels, F2R-03b 2c).
                 if density_plan.is_some() {
+                    let density_styled = match &density_layers {
+                        Some(visible) => StyledGeometryRasterRequest {
+                            layers: styled.layers.iter().filter(|layer| visible.contains(&layer.layer_idx)).copied().collect(),
+                            ..styled.clone()
+                        },
+                        None => styled.clone(),
+                    };
                     let (report, counts, times) = render_density_frame(
                         cache,
                         &mut state.page_cache,
@@ -2536,7 +2559,7 @@ fn run_render(
                         cancellation,
                         &summary,
                         &scene,
-                        &styled,
+                        &density_styled,
                         &plan,
                         &decoded_pages,
                         decode_workers,
