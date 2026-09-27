@@ -173,6 +173,43 @@ fn layout_and_deck_sets_pin_geometry_and_failure_never_advances_current() {
         .unwrap()
         .is_none());
 
+    // No RenderSession wrapper: prove the separate native process, not a
+    // surviving host Snapshot/Layout, owns the last reader lease.
+    let old_id = first_layout.index_revision.clone().unwrap();
+    let old_dir = match &first_layout.dataset {
+        Dataset::Layout(l) => l.directory.clone(),
+        _ => unreachable!(),
+    };
+    let mut native = floe_worker_client::WorkerClient::spawn(floe_worker_client::Config::new(
+        binary.path().with_file_name("floe-renderd"),
+    ))
+    .unwrap();
+    native
+        .open(floe_worker_client::Source::Layout(old_dir.clone()), 32, 1)
+        .unwrap();
+    assert!(revision::reclaim::prepare(Arc::clone(&layout), &old_id, &stop).is_err());
+    drop(first_layout);
+    assert_eq!(
+        revision::reclaim::prepare(Arc::clone(&layout), &old_id, &stop)
+            .err()
+            .unwrap()
+            .kind,
+        floe_app_core::ErrorKind::Busy
+    );
+    let probe = fs::File::open(&old_dir).unwrap();
+    assert!(matches!(
+        probe.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    native.close().unwrap();
+    probe.try_lock().unwrap();
+    drop(probe);
+    let preview = revision::reclaim::prepare(Arc::clone(&layout), &old_id, &stop).unwrap();
+    assert!(!preview.summary().complete);
+    assert_eq!(preview.execute(&stop).unwrap().status, "complete");
+    assert!(!old_dir.exists());
+    assert_eq!(layout_pixels, render(&next_layout, binary.path()));
+
     let deck_path = root.0.join("synthetic.jb");
     fs::write(&deck_path, "CHIP C\n$ (1,A,TC=a.oas,AD=0.001,LY={7},DT={0},UX=100,UY=100)\n$ (2,B,TC=b.oas,AD=0.001,LY={7},DT={0},UX=100,UY=100)\nROWS 0/0\n").unwrap();
     let deck = register(&scope, &deck_path);
@@ -317,4 +354,50 @@ fn layout_and_deck_sets_pin_geometry_and_failure_never_advances_current() {
     .unwrap();
     assert!(a.reopen_mode(&resources, Mode::Chip, &stop).is_err());
     assert_eq!(old_pixels, render(&a, binary.path()));
+
+    let old_id = old_set.id().to_owned();
+    let old_dirs: Vec<_> = old_set.members().values().map(|p| p.directory()).collect();
+    let spec = root.0.join("native-deck.spec");
+    if let Dataset::Deck(d) = &a.dataset {
+        fs::write(&spec, &d.spec.text).unwrap();
+    } else {
+        unreachable!();
+    }
+    let mut native = floe_worker_client::WorkerClient::spawn(floe_worker_client::Config::new(
+        binary.path().with_file_name("floe-renderd"),
+    ))
+    .unwrap();
+    native
+        .open(floe_worker_client::Source::Deck(spec), 32, 1)
+        .unwrap();
+    drop(a);
+    drop(chip);
+    drop(old_set);
+    let fresh_deck = register(&scope, &deck_path);
+    assert_eq!(
+        revision::reclaim::prepare(Arc::clone(&fresh_deck), &old_id, &stop)
+            .err()
+            .unwrap()
+            .kind,
+        floe_app_core::ErrorKind::Busy
+    );
+    for path in &old_dirs {
+        assert!(matches!(
+            fs::File::open(path).unwrap().try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+    }
+    native.close().unwrap();
+    let preview = revision::reclaim::prepare(Arc::clone(&fresh_deck), &old_id, &stop).unwrap();
+    assert_eq!(preview.summary().sources, 2);
+    assert_eq!(preview.execute(&stop).unwrap().status, "complete");
+    assert!(old_dirs.iter().all(|p| !p.exists()));
+    assert_eq!(old_pixels, render(&b, binary.path()));
+    assert_eq!(
+        revision::reclaim::prepare(fresh_deck, &old_id, &stop)
+            .unwrap()
+            .summary()
+            .files,
+        0
+    );
 }

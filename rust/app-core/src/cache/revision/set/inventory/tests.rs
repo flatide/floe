@@ -215,6 +215,13 @@ fn set_ownership_rejects_cross_set_and_old_reader_references() {
     assert!(validate_owner(&manifest, &legacy).is_ok());
     manifest.version = 2;
     assert!(validate_owner(&manifest, &legacy).is_err());
+    let mut native_pinned = record.clone();
+    native_pinned.version = 3;
+    assert!(validate_owner(&manifest, &native_pinned).is_err());
+    manifest.version = 3;
+    assert!(validate_owner(&manifest, &record).is_err());
+    assert!(validate_owner(&manifest, &native_pinned).is_ok());
+    manifest.version = 2;
     let set = Store::new(f.source.path()).unwrap();
     fs::create_dir_all(set.path().join(&manifest.revision)).unwrap();
     let bytes = serde_json::to_vec(&manifest).unwrap();

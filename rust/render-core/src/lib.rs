@@ -18,6 +18,7 @@ mod query;
 mod raster;
 mod repetition;
 mod request;
+mod revision_lease;
 mod scene;
 mod stats;
 mod summary;

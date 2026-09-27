@@ -32,7 +32,7 @@ fn manifest_rejects_ambiguous_or_unbounded_members_and_selector() {
     for kind in 0..8 {
         let mut bad = good.clone();
         match kind {
-            0 => bad.version = 3,
+            0 => bad.version = 4,
             1 => bad.revision = "../escape".into(),
             2 => bad.members.push(bad.members[0].clone()),
             3 => bad.members[0].revision = "B".repeat(32),

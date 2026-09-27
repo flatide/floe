@@ -384,6 +384,8 @@ pub struct Cache {
     layer_depth: Vec<u32>,
     // Immutable for this open cache; reopen after publishing design.ovr.
     representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
+    // Last field: mapped/source state drops before the native reader lease.
+    _revision_lease: Option<std::fs::File>,
 }
 
 /// The longest top-to-cell path of every cell (None = unreachable
@@ -467,6 +469,7 @@ struct OccupancySlot {
 impl Cache {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
+        let revision_lease = crate::revision_lease::open(path)?;
         let dir = path
             .to_str()
             .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
@@ -478,6 +481,7 @@ impl Cache {
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
             layer_depth,
             representatives: std::sync::OnceLock::new(),
+            _revision_lease: revision_lease,
         })
     }
 

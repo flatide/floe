@@ -5,7 +5,7 @@
 use super::{absolute, default_cache_path, utf8, validated_vfs, CacheState};
 use crate::{check_cancelled, index::WriteLease, Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
-pub use set::inventory;
+pub use set::{inventory, reclaim};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -85,7 +85,7 @@ pub(crate) struct SetOwner {
 }
 impl Record {
     fn validate(&self, source: &Path) -> Result<()> {
-        if !matches!(self.version, 1 | 2)
+        if !matches!(self.version, 1..=3)
             || (self.version == 1 && self.owner.is_some())
             || self
                 .owner
@@ -284,7 +284,8 @@ impl Snapshot {
 
 pub struct Publication {
     pub snapshot: Snapshot,
-    /// false means visible commit with uncertain crash durability, not rollback.
+    /// false means visible commit with uncertain crash durability or an
+    /// incomplete retirement witness. Neither means publication rolled back.
     pub directory_synced: bool,
 }
 
@@ -338,7 +339,7 @@ impl Candidate {
         }
         drop(vfs);
         let record = Record {
-            version: 2,
+            version: 3,
             source: self.store.source.clone(),
             revision: self.revision.clone(),
             source_stamp: self.source_stamp.clone(),
@@ -347,7 +348,7 @@ impl Candidate {
         };
         record.validate(&self.store.source)?;
         let bytes = serde_json::to_vec(&record).map_err(|e| invalid(e.to_string()))?;
-        // Become a cooperating reader before the v2 seal is observable; an
+        // Become a cooperating reader before the seal is observable; an
         // inventory probe must not race seal creation and abort publication.
         let readers = reader_lease(directory(&path)?)?;
         create_record(&path.join("revision.json"), &bytes)?;
@@ -382,10 +383,18 @@ impl Candidate {
         check_cancelled(stop)?;
         // Once attempted, an error is not proof that the old pointer survived.
         // Preserve the complete candidate and pending manifest as evidence.
-        commit_pointer(
+        let synced = commit_pointer(
             || fs::rename(&pending, self.store.root.join("current.json")),
             || root.sync_all(),
-        )
+        )?;
+        // A witness is written only AFTER a successful logical publication.
+        // Missing/partial witnesses permanently protect ambiguous candidates
+        // from automatic eligibility. Failure here cannot undo publication.
+        let witnessed =
+            create_record_limit(&self.directory().join("published.json"), bytes, self.limit)
+                .and_then(|()| directory(&self.directory())?.sync_all().map_err(Into::into))
+                .is_ok();
+        Ok(synced && witnessed)
     }
 }
 

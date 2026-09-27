@@ -340,6 +340,13 @@ impl WriteLease {
         ordered.into_iter().map(|p| Self::acquire(p)).collect()
     }
     pub(crate) fn acquire(directory: &Path) -> Result<Self> {
+        Self::open(directory, true)
+    }
+    /// Read-only preparation/reclamation must not invent a missing lock inode.
+    pub(crate) fn acquire_existing(directory: &Path) -> Result<Self> {
+        Self::open(directory, false)
+    }
+    fn open(directory: &Path, create: bool) -> Result<Self> {
         let mut path = directory.as_os_str().to_owned();
         path.push(".index.lock");
         // Persistent zero-byte inode: unlink-on-unlock would allow a second
@@ -347,7 +354,7 @@ impl WriteLease {
         let f = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create(create)
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)

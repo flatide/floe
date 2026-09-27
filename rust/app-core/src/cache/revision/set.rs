@@ -3,6 +3,7 @@
 use super::*;
 use std::collections::BTreeSet;
 pub mod inventory;
+pub mod reclaim;
 
 const MAX_SET_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MEMBERS: usize = 65536;
@@ -26,7 +27,7 @@ struct Manifest {
 impl Manifest {
     fn validate(&self, source: &Path) -> Result<BTreeSet<PathBuf>> {
         let members: BTreeSet<_> = self.members.iter().map(|m| m.source.clone()).collect();
-        if !matches!(self.version, 1 | 2)
+        if !matches!(self.version, 1..=3)
             || self.source != source
             || !valid_id(&self.revision)
             || self.members.is_empty()
@@ -222,14 +223,14 @@ impl Builder {
             if pin.source() != source {
                 return Err(invalid("revision member source mismatch"));
             }
-            if pin.record.version != 2 || pin.record.owner.as_ref() != Some(&self.owner()) {
+            if pin.record.version != 3 || pin.record.owner.as_ref() != Some(&self.owner()) {
                 return Err(invalid("revision member does not belong to this new set"));
             }
             pin.validate()?;
             pin.source_unchanged()?;
         }
         let manifest = Manifest {
-            version: 2,
+            version: 3,
             source: self.candidate.store.source.clone(),
             source_stamp: self.candidate.source_stamp.clone(),
             revision: self.candidate.revision.clone(),
@@ -265,11 +266,11 @@ fn validate_owner(manifest: &Manifest, record: &Record) -> Result<()> {
         source: manifest.source.clone(),
         revision: manifest.revision.clone(),
     };
-    // Old readers reject v2. Old sets must never acquire v2 source data, which
-    // would otherwise give a lease-unaware reader a hidden reference to it.
+    // A set must never expose a newer source format to an older reader. v3
+    // specifically fences out hosts whose native worker lacks its own lease.
     let matches = match manifest.version {
         1 => record.version == 1 && record.owner.is_none(),
-        2 => record.version == 2 && record.owner.as_ref() == Some(&expected),
+        2 | 3 => record.version == manifest.version && record.owner.as_ref() == Some(&expected),
         _ => false,
     };
     if !matches {

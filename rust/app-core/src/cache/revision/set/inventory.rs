@@ -70,6 +70,7 @@ impl Scan {
         let mut extra = false;
         for name in self.names(path, stop)? {
             let known = name == "revision.json"
+                || name == "published.json"
                 || (!is_set && name.to_str().is_some_and(|n| FILES.contains(&n)));
             match fs::symlink_metadata(path.join(&name)) {
                 Ok(m) if m.is_file() && m.nlink() == 1 => {
@@ -148,6 +149,12 @@ impl Scan {
                 // Pointer/pending evidence is accounted but never interpreted as
                 // a revision path. Unknown root entries are not traversed.
                 let known = name == "current.json"
+                    || (is_set
+                        && name.to_str().is_some_and(|n| {
+                            n.strip_prefix(".reclaim-")
+                                .and_then(|s| s.strip_suffix(".json"))
+                                .is_some_and(valid_id)
+                        }))
                     || name.to_str().is_some_and(|n| {
                         n.strip_prefix(".current-")
                             .and_then(|s| s.strip_suffix(".tmp"))
@@ -245,7 +252,7 @@ impl Scan {
             }
             // Never infer absence of readers for v1: old executables did not
             // participate in leases. Unknown formats are protected as well.
-            if row.format == Some(2) {
+            if matches!(row.format, Some(2 | 3)) {
                 row.readers = match dir.try_lock() {
                     Ok(()) => "idle_at_scan",
                     Err(std::fs::TryLockError::WouldBlock) => "in_use",

@@ -76,7 +76,7 @@ fn malformed_pointer_never_falls_back_to_legacy_or_traverses() {
         ("revision", serde_json::json!("../external")),
         ("revision", serde_json::json!("한".repeat(32))),
         ("revision", serde_json::json!("A".repeat(32))),
-        ("version", serde_json::json!(3)),
+        ("version", serde_json::json!(4)),
         ("source", serde_json::json!(root.0.join("other.oas"))),
     ] {
         let mut value_record = base.clone();
@@ -152,6 +152,32 @@ fn candidate_is_exclusive_and_cancel_or_drop_never_publishes_or_deletes() {
     assert!(second.publish(&stop).is_err());
     assert!(store.pin().unwrap().is_none());
     assert!(candidate.is_dir());
+}
+
+#[test]
+fn witness_failure_after_pointer_commit_is_warning_not_rollback_or_overwrite() {
+    for conflict in [false, true] {
+        let root = Root::new();
+        let store = root.store();
+        let stop = AtomicUsize::new(0);
+        let candidate = store.begin(&stop).unwrap();
+        let witness = candidate.directory().join("published.json");
+        if conflict {
+            fs::write(&witness, b"preserve unexpected evidence").unwrap();
+        }
+        // This tests the publication primitive, not geometry validity.
+        let bytes = b"synthetic publication record";
+        assert_eq!(candidate.commit_current(bytes, &stop).unwrap(), !conflict);
+        assert_eq!(fs::read(store.path().join("current.json")).unwrap(), bytes);
+        assert_eq!(
+            fs::read(witness).unwrap(),
+            if conflict {
+                b"preserve unexpected evidence".as_slice()
+            } else {
+                bytes
+            }
+        );
+    }
 }
 
 #[test]

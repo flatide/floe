@@ -776,9 +776,10 @@ Firefox kiosk를 그 요구의 대체로 간주하지 않는다.
 read-only Check·명시적 Use(IR-3, 2026-09-26)를 연결했다. 같은 소스/선택/모드의
 전환은 상태를 보존하고 새 dataset/view/worker identity로 캐시를 분리한다.
 기존 Run index/일반 CLI와 열린 mutable 캐시의 busy 보호는 유지한다. 자동
-hot reload는 아니다. 2026-09-27 IR-4a의 읽기 전용 저장소 사용량과 v2 소유권·reader
-잠금 기반을 추가했다. 조회는 삭제 권한이 아니며 IR-4b의 명시적 회수·장애 복구와
-실제 GUI·현장 수용은 남는다.
+hot reload는 아니다. 2026-09-27 IR-4a의 읽기 전용 저장소 사용량에 이어
+IR-4b-1의 v3 native 직접 reader 잠금·로컬 inactive set 회수/중단 복구 backend를
+추가했다. 아직 HTTP 삭제 API·버튼은 없다. 조회는 삭제 권한이 아니며 IR-4b-2의
+owner 승인 UI/API·응답 유실/새 세션 복구 연결, 실제 GUI·현장 수용은 남는다.
 
 열린 GUI가 `.ovo` 교체를 즉시 감지하지 않는 기존 항목은 사용자 합의대로
 jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 별도 계약을 정한다.

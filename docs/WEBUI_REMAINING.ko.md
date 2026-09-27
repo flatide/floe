@@ -17,8 +17,10 @@ xattr 필수 조건을 제거했다. NFS 서버 장애·다중 client·재마운
 [IR-1 저장·빌드, IR-2 관리형 backend, IR-3 opt-in UI/명시적 전환](WEBUI_INDEX_REVISIONS.ko.md)을
 추가했다. 별도 full-build → read-only Check → Use 순서이며 자동 hot-reload가 아니다.
 기존 Run index/Index and open/CLI 동작은 유지한다. 2026-09-27 IR-4a의 owner 전용
-사용량 조회·v2 소유권·협조적 reader 잠금 기반을 추가했다. **삭제 기능은 아직 없다.**
-IR-4b의 승인 회수·프로세스 장애 보호·삭제 중단 복구와 실제 GUI/현장 수용이 남는다.
+사용량 조회·v2 소유권·협조적 reader 잠금 기반을 추가했다. 이어 IR-4b-1의
+**v3 native reader 직접 잠금·로컬 inactive set 회수/중단 복구 backend**를 추가했다.
+HTTP 삭제 API·버튼은 아직 없다. IR-4b-2의 owner 미리보기·1회 승인·응답 유실/새
+세션 복구 연결과 실제 GUI/현장 수용이 남는다. NFS의 캐시 회수는 차단한다.
 원격 공유·외부 CI·WK 동결 및 이번 NFS 제외
 범위는 그대로다.
 
@@ -31,6 +33,7 @@ IR-4b의 승인 회수·프로세스 장애 보호·삭제 중단 복구와 실�
 | 공유 layer default 중단 복구 | 이번에 source-bound 표식·별도 승인·읽기 전용 확인·회귀 추가: [상세](WEBUI_DEFAULT_RECOVERY.ko.md) |
 | 일반 게시 syscall 결과 불명 | 이번에 사후 확인·증거 보존·불명 receipt·새 게시 차단 추가. 일반 게시 불명은 파일 확인/새 서버 세션이 필요한 보수적 운영 계약 |
 | xattr 없는 NFS의 기본 저장 호환성 | ENOTSUP만 inode별 보조 record로 전환. 식별·별도 복구·파일 형식 유지. [계약·제한](WEBUI_NO_XATTR.ko.md) |
+| 인덱스 수명주기 | IR-1~3·IR-4a 및 IR-4b-1 backend 구현. 남은 owner 회수 UI/API는 [IR-4b-2](WEBUI_INDEX_REVISIONS.ko.md) |
 | 로컬 Follow/Explore 공유 | 기존 opt-in/loopback 구현 유지. 원격 공개로 확장하지 않음 |
 | 오프라인 개발 번들·고지·무결성/의존성 검사 도구 | 구현됨: [portable](WEBUI_ELECTRON_PORTABLE.ko.md), [고지](WEBUI_ELECTRON_NOTICES.ko.md). 정식 배포 승인이 아님 |
 
