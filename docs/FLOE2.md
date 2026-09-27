@@ -138,6 +138,7 @@ PNG publish는 유지한다. detail/depth/좌표/window는 workload이므로 명
 ```
 
 개별 제어는 `--refinement on|off`, `--frame-cache on|off`, `--margin on|off`(여백
-준비만; 팬 재사용은 유지 — 여백 도착과 프레임 자체를 구별해 볼 때), `--lod on|off`,
+준비만, **기본 off**(사용자 결정 2026-09-27: 그려진 뒤 무엇도 덧그려지지 않게); 팬 재사용은 유지;
+on은 독립 인스턴스로 뜬다), `--lod on|off`,
 `--frames on|off`, `--labels on|off`다. `--refinement off`는 floe의 VFS stream을
 0으로, floe2의 miss round를 single all-page batch로 바꾼다.

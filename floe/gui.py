@@ -1128,7 +1128,7 @@ class Viewer:
                  detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                  frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
                  label_font_px=DEFAULT_LABEL_FONT_PX,
-                 frame_cache=True, margin=True,
+                 frame_cache=True, margin=False,
                  stream_kb=None, stream_target_ms=500,
                  render_debug=False, thin="auto"):
         self.server_sock = server_sock
@@ -1203,9 +1203,9 @@ class Viewer:
         # Exact settled-frame reuse is a Rust optimization.  Stable floe
         # accepts the same control so A/B command lines remain identical.
         self.frame_cache_on = bool(frame_cache)
-        # --margin off: the background margin prefetch alone stays off
-        # (pan reuse stays) - to tell a margin's landing apart from the
-        # frame itself (user request 2026-09-27)
+        # --margin (default off, user decision 2026-09-27): the background
+        # margin prefetch alone; pan reuse stays either way. Off, every pan
+        # and zoom renders a viewport frame and nothing lands after it.
         self.margin_on = bool(margin)
         self._margin_max_px = _env_int(
             "FLOE_MARGIN_MAX_MPIX", MARGIN_MAX_MPIX, 1, 4096) << 20
@@ -9158,7 +9158,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
                label_font_px=DEFAULT_LABEL_FONT_PX,
-               frame_cache=True, margin=True,
+               frame_cache=True, margin=False,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
                thin="auto"):

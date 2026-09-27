@@ -1484,7 +1484,7 @@ def cmd_view(args):
                        or args.stream_target_ms != 500
                        or args.render_debug
                        or args.frame_cache == "off"
-                       or args.margin == "off")
+                       or args.margin == "on")
     server = None
     if not args.multi and not process_options:
         # flateyes-style single instance per (uid, DISPLAY)
@@ -2247,13 +2247,13 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "on; Rust renderer only); off is useful for "
                         "backend-neutral render timing and opens an "
                         "independent instance")
-    p.add_argument("--margin", choices=("on", "off"), default="on",
-                   help="the background margin prefetch alone (default on; "
-                        "Rust renderer only): off keeps retained-frame pan "
-                        "reuse and renders every pan and zoom as a viewport "
-                        "frame - for telling a margin's landing apart from "
-                        "the frame itself (2026-09-27); opens an "
-                        "independent instance")
+    p.add_argument("--margin", choices=("on", "off"), default="off",
+                   help="the background margin prefetch alone (default off, "
+                        "user decision 2026-09-27; Rust renderer only): every "
+                        "pan and zoom renders a viewport frame, retained-frame "
+                        "pan reuse stays; on prefetches a 2x margin behind "
+                        "each settled frame and opens an independent "
+                        "instance")
     p.add_argument("--perf-baseline", action="store_true",
                    help="backend-neutral timing preset: refinement, frame "
                         "reuse/margin prefetch, LOD, hierarchy frames and "

@@ -87,7 +87,7 @@ class WorkerContractTests(unittest.TestCase):
                 goto="1,2,700", stream_kb=None, stream_target_ms=500,
                 label_font_px=14, perf_baseline=False, lod="on",
                 frames="on", labels="on", refinement="on",
-                frame_cache="on", margin="on", render_debug=False,
+                frame_cache="on", margin="off", render_debug=False,
                 multi=False, drc=None, detail=detail, depth=depth,
                 dump=False, thin=thin,
             )
@@ -295,6 +295,16 @@ class WorkerContractTests(unittest.TestCase):
         options = run_viewer.call_args.kwargs
         self.assertFalse(options["margin"])
         self.assertTrue(options["frame_cache"])
+        # off is the default (user decision 2026-09-27): a launch without
+        # the option still forwards to the single instance; on is the
+        # process option that opens an independent one
+        args.multi = False
+        args.margin = "on"
+        with mock.patch("floe.gui.run_viewer") as run_viewer, \
+                mock.patch("floe.instance.display_key") as display_key:
+            cli.cmd_view(args)
+        self.assertTrue(run_viewer.call_args.kwargs["margin"])
+        self.assertFalse(display_key.called)
         rust = SimpleNamespace(supports_margin_prefetch=True)
         v = _stub_margin_viewer(rust, True)
         self.assertTrue(Viewer._margin_enabled(v))
