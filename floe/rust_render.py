@@ -673,6 +673,11 @@ class RustRenderWorker:
                 thin, self._style_epoch, output))
         if probe is not None:
             command += " probe=%s block=%d" % (probe, block)
+        if job.get("bg"):
+            # §F2R-17 margin: renderd drops one the scale's budget fit does
+            # not hold instead of deciding anew (it must look as the
+            # viewport already does; 2026-09-27)
+            command += " bg=on"
         self._send(command)
 
     def _submit_recolor(self, job):
@@ -909,6 +914,12 @@ class RustRenderWorker:
             generation = _wire_int(fields, "gen", -1)
             with self._jobs_lock:
                 self._jobs.pop(generation, None)
+            if kind == "dropped":
+                # a margin the budget fit does not hold (reason=fit) or a
+                # stale render: told, so the GUI can log it and a gate can
+                # wait for it; the GUI shows nothing for it
+                self.res.put({"kind": "dropped", "gen": generation,
+                              "reason": fields.get("reason", "")})
         elif kind == "error":
             message = fields.get("message", line).replace("_", " ")
             if fields.get("code") == "clip":

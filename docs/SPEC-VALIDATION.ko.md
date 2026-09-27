@@ -118,7 +118,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
   하지 않는지.
 - `fit_budget`(tools/validate_fit_budget.py; 0.12.231: 배율별 맞춤 고정 — 가운데(48 MB에서 솎임) → 같은 배율의
   전체 칩(각 축 2배, 여백) → 가운데 순서로 그려 마지막 프레임이 기억된 결정을 적용하고(`fit_fixed`) 여백의
-  가운데와 픽셀까지 같음; 여백은 결정을 적용했거나 예산을 넘겨 다시 결정(`fit_redecided`), 약 25초; `planner`·`render` 별칭에 포함): 합성
+  가운데와 픽셀까지 같음; 0.12.232: 첫 가운데가 여백 범위로 결정해 여백이 그 결정을 **적용**하고(`fit_redecided` 0)
+  첫 가운데도 여백의 가운데와 같음, 픽셀 일부만큼 옮긴 가운데가 기억을 공유, 예산 안의 근접뷰도 결정(everything)을
+  지님(`fit_fixed` 1, `fit_thin` 0); 구석 1/4에 서로 다른 셀 4개, 먼 절반에 200개인 전용 레이아웃(`layout_uneven`,
+  예산 1 MB)에서 구석이 everything으로 결정한 뒤 전체를 여백(`bg`)으로 청하면 `dropped`(reason fit)로 떨어지고 구석은
+  같은 그림, 전체를 뷰포트로 청하면 다시 결정(`fit_redecided` 1), 약 35초; `planner`·`render` 별칭에 포함): 합성
   MAIN01 칩의 keep + cut 1 px 광역뷰가 48 MB 예산에서 오류 대신 낮춘 밀도(`fit_thin` > 0)로
   그려지고 **빈 프레임이 아닌지**, `FLOE_RUST_FIT_THIN=off`는 컷을 올리고(`fit_pct` > 100)
   `FLOE_RUST_FIT_BUDGET=off`는 종전 오류인지, 예산 안의 프레임은 픽셀이 바뀌지 않는지.

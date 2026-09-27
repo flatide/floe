@@ -19,12 +19,21 @@ chip (tools/gen_main01_like.py) under a small budget:
     view under the small one;
   * the fit is remembered per scale (2026-09-27: the viewer's margin frame, a
     wider view, thinned differently and the picture changed when it replaced
-    the viewport frame): the chip's middle at the small budget, then the
-    whole chip at the same scale (twice the pixels per axis - the margin) and
-    the middle again - the last frame is planned under the margin's decision
-    (fit_fixed 1) and equals the margin's centre pixel for pixel; the margin
-    either kept the middle's decision (fit_fixed 1) or, over the budget under
-    it, decided anew (fit_redecided 1).
+    the viewport frame): the chip's middle at the small budget decides over
+    the extent of its margin (fit_fixed 1), the whole chip at the same scale
+    (twice the pixels per axis - the margin) applies that decision (fit_fixed
+    1, fit_redecided 0), the middle again too, and both middles equal the
+    margin's centre pixel for pixel; a middle shifted by a fraction of a
+    pixel's worth (its px_per_dbu differs in the last bits) shares the
+    memory; a frame within the budget carries the decision too (everything;
+    fit_fixed 1, fit_thin 0);
+  * a margin (bg) the decision does not hold is dropped, not decided anew
+    (the viewer's margin must look as the viewport already does): on a
+    layout whose corner quarter holds four distinct cells and whose far half
+    two hundred (layout_uneven), under a 1 MB budget the corner decides
+    everything, the whole layout as its margin answers `dropped` (reason
+    fit), the corner draws the same after it, and the whole layout as a
+    viewport frame refits (fit_redecided 1).
 
     .venv/bin/python tools/validate_fit_budget.py
 """
@@ -63,21 +72,53 @@ def worker(src, budget_mb, fit=True, thin=True):
     return w
 
 
-def frame(w, gen, bbox, size=PX):
+def frame(w, gen, bbox, size=PX, bg=False):
     keys = [(int(l['layer']), int(l['datatype'])) for l in w.cache.meta['layers']]
     w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': bbox, 'view': None,
               'w': size, 'h': size, 'depth': None, 'cut_px': 1, 'lod': False, 'frames': False,
               'labels': False, 'abstract': False, 'visible': keys, 'frame_format': 'raw',
-              'thin': 'keep'})
+              'thin': 'keep', 'bg': bg})
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
-        if res.get('kind') == 'error':
+        if res.get('kind') == 'error' or (res.get('kind') == 'dropped' and res.get('gen') == gen):
             return None, res
         if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
             pixels = res.pop('rgba')        # keep assertion messages readable
             return pixels, res
     raise AssertionError('fit budget frame timeout')
+
+
+def layout_uneven(path):
+    """400 x 400 um: four distinct 100-rect cells in the corner quarter, two
+    hundred more (each its own cell, so its own pages) in the far half."""
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(1, 0)
+    cells = 0
+
+    def place(x_um, y_um):
+        nonlocal cells
+        cell = ly.create_cell('C%03d' % cells)
+        for j in range(10):
+            for i in range(10):
+                # no two alike on a lattice: a regular array of one box would be
+                # written as a repetition and indexed as ONE record
+                x, y = i * 1.8 + 0.1 * ((i * 7 + j * 3) % 4), j * 1.8 + 0.1 * ((i + j * 5) % 3)
+                edge = 1.0 + 0.05 * ((i + j * 3 + cells) % 6)
+                cell.shapes(layer).insert(kdb.DBox(x, y, x + edge, y + edge))
+        top.insert(kdb.DCellInstArray(cell.cell_index(), kdb.DTrans(kdb.DVector(x_um, y_um))))
+        cells += 1
+
+    for j in range(2):
+        for i in range(2):
+            place(10.0 + i * 50.0, 10.0 + j * 50.0)
+    for j in range(20):
+        for i in range(10):
+            place(200.0 + i * 20.0, j * 20.0)
+    ly.write(str(path))
 
 
 def main():
@@ -116,6 +157,8 @@ def main():
             c, rc = frame(tight, 5, near)
             d, _ = frame(tight_off, 6, near)
             assert rc['plan_culls']['fit_pct'] == 0 and c == d and any(c), 'near view under the small budget'
+            # a frame within the budget carries its scale's decision too: everything
+            assert rc['plan_culls']['fit_thin'] == 0 and rc['plan_culls']['fit_fixed'] == 1, rc['plan_culls']
             # the fit remembered per scale: the middle, the whole chip at the
             # same scale (the margin), the middle again
             sticky = worker(src, 48)
@@ -126,19 +169,57 @@ def main():
                 again, ra2 = frame(sticky, 10, mid)
                 fits = (rf['plan_culls'], rm['plan_culls'], ra2['plan_culls'])
                 assert fits[0]['fit_thin'] > 0, 'the middle must need the fit: %s' % (fits[0],)
-                assert fits[1]['fit_fixed'] == 1 or fits[1]['fit_redecided'] == 1, 'the margin neither applied nor redecided: %s' % (fits[1],)
-                assert fits[2]['fit_fixed'] == 1, 'the middle again must apply the remembered fit: %s' % (fits[2],)
+                # the first frame decides over the margin's extent and applies it
+                assert fits[0]['fit_fixed'] == 1 and fits[0]['fit_redecided'] == 0, 'the middle must decide over its margin: %s' % (fits[0],)
+                assert fits[1]['fit_fixed'] == 1 and fits[1]['fit_redecided'] == 0, 'the margin must apply the decision: %s' % (fits[1],)
+                assert fits[2]['fit_fixed'] == 1 and fits[2]['fit_redecided'] == 0, 'the middle again must apply the remembered fit: %s' % (fits[2],)
+                assert (fits[1]['fit_thin'], fits[1]['fit_none_pct']) == (fits[0]['fit_thin'], fits[0]['fit_none_pct']), (fits[0], fits[1])
                 q = PX // 2
                 centre = b''.join(bytes(margin[((q + r) * 2 * PX + q) * 4:((q + r) * 2 * PX + q + PX) * 4]) for r in range(PX))
                 assert bytes(again) == centre, 'the middle again differs from the margin\'s centre'
-                if fits[1]['fit_redecided'] == 0:
-                    assert bytes(first) == centre, 'the margin kept the decision but drew differently'
-                print('fit budget: the fit is remembered per scale - middle 1/%d (none below x%.3g), margin %s, middle again = margin centre'
-                      % (1 << fits[0]['fit_thin'], fits[0]['fit_none_pct'] / 100.0,
-                         'redecided 1/%d (none below x%.3g)' % (1 << fits[1]['fit_thin'], fits[1]['fit_none_pct'] / 100.0)
-                         if fits[1]['fit_redecided'] else 'applied'))
+                assert bytes(first) == centre, 'the margin drew the middle differently from the first frame'
+                # a frame at the same scale whose box derives px_per_dbu with other last bits shares the memory
+                step = (x1 - x0) / 4 / PX
+                shifted = (mid[0] + step / 3, mid[1] + step / 7, mid[2] + step / 3, mid[3] + step / 7)
+                _, rs = frame(sticky, 11, shifted)
+                assert rs['plan_culls']['fit_fixed'] == 1 and rs['plan_culls']['fit_redecided'] == 0, 'a shifted middle must share the memory: %s' % (rs['plan_culls'],)
+                print('fit budget: the fit is remembered per scale - middle 1/%d (none below x%.3g) decided over its margin, margin and middle again apply it '
+                      '(= margin centre), a shifted middle shares it' % (1 << fits[0]['fit_thin'], fits[0]['fit_none_pct'] / 100.0))
             finally:
                 sticky.stop()
+            # a margin the decision does not hold is dropped, not decided anew. The
+            # synthetic chip repeats its cells, so a wider view needs few new pages;
+            # this fixture's far half holds 200 DISTINCT cells (4.6 MB of pages at
+            # 192 B a record) and its corner quarter four: under a 1 MB budget the
+            # corner decides over its own margin (nothing of the far half in it:
+            # everything), the whole layout as its margin cannot hold that
+            uneven = Path(temp) / 'uneven.oas'
+            layout_uneven(uneven)
+            done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(uneven), '--jobs', '2'],
+                                  cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+            assert done.returncode == 0, done.stdout + done.stderr
+            tiny = worker(uneven, 1)
+            try:
+                ux0, uy0, ux1, uy1 = map(float, tiny.cache.meta['bbox'])
+                side = max(ux1 - ux0, uy1 - uy0)
+                whole = (ux0, uy0, ux0 + side, uy0 + side)
+                quarter = (ux0, uy0, ux0 + side / 4, uy0 + side / 4)
+                corner, rq_ = frame(tiny, 1, quarter, size=PX // 4)
+                assert corner is not None and rq_['plan_culls']['fit_fixed'] == 1 and rq_['plan_culls']['fit_thin'] == 0, rq_.get('plan_culls')
+                assert any(corner), 'the corner quarter is empty'
+                dropped, rd = frame(tiny, 2, whole, size=PX, bg=True)
+                assert dropped is None and rd.get('kind') == 'dropped' and rd.get('reason') == 'fit', 'the margin over the decision must be dropped: %s' % (
+                    rd.get('plan_culls') if rd.get('kind') == 'frame' else rd,)
+                corner2, rq2 = frame(tiny, 3, quarter, size=PX // 4)
+                assert rq2['plan_culls']['fit_fixed'] == 1 and rq2['plan_culls']['fit_redecided'] == 0 and bytes(corner2) == bytes(corner), \
+                    'the dropped margin must leave the decision and the viewport as they were: %s' % (rq2['plan_culls'],)
+                # the same extent as a VIEWPORT frame decides anew - the legitimate refit
+                view, rv = frame(tiny, 4, whole, size=PX)
+                assert view is not None and rv['plan_culls']['fit_redecided'] == 1 and rv['plan_culls']['fit_thin'] > 0, rv.get('plan_culls')
+                print('fit budget: a margin the decision does not hold is dropped (reason fit) and the corner draws the same after it; '
+                      'the same extent as a viewport refits (1/%d)' % (1 << rv['plan_culls']['fit_thin']))
+            finally:
+                tiny.stop()
             print('fit budget: wide keep view fits 48 MB with 1/%d of the class it ends in (complete from x%.3g, '
                   'none below x%.3g; 0 = no such class), %d px lit (ladder: cut x%.3g; old: error), '
                   'fitting frames unchanged'

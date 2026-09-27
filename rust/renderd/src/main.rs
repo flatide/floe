@@ -369,6 +369,11 @@ struct RenderCommand {
     /// again. 1 stops at every layer; a block is conservative (it decides with
     /// the mask of the block's first layer) but meets N times less often.
     probe_block: usize,
+    /// `bg=on`: the viewer's margin prefetch (§F2R-17), drawn behind a
+    /// settled viewport frame and swapped in when it lands. It must look as
+    /// the viewport already does: one the scale's budget fit does not hold
+    /// is dropped instead of decided anew (2026-09-27).
+    background: bool,
     /// `thin=keep|cull`: the page hairline policy of this frame's
     /// plans - keep (mask / jobdeck: all-thin pages stay and raster
     /// as 1 px hairlines) or cull (plain layout: dropped whole, the
@@ -495,6 +500,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 "style_epoch",
                 "out",
                 "thin",
+                "bg",
             ]);
             reject_unknown(&fields, &allowed)?;
             let thin_keep = match fields.get("thin").map(|s| s.as_str()) {
@@ -578,6 +584,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     received: None,
                     probe,
                     probe_block,
+                    background: optional_bool(&fields, "bg")?.unwrap_or(false),
                     thin_keep,
                 },
             ))))
@@ -895,12 +902,21 @@ impl Default for WorkerState {
 }
 
 /// The key a budget fit is remembered under: the layers, depth, cut, thin
-/// mode and the exact scale (a pan keeps it, a zoom changes it).
+/// mode and the scale (a pan keeps it, a zoom changes it).
 fn fit_memory_key(command: &RenderCommand, request: &PlanRequest) -> String {
     format!(
-        "{:?}|{}|{}|{:x}|{}|{}|{}",
-        command.visible_layers, command.depth, request.cut_dbu, request.px_per_dbu.to_bits(), command.thin_keep, request.page_hairline, command.frames
+        "{:?}|{}|{}|{}|{}|{}|{}",
+        command.visible_layers, command.depth, request.cut_dbu, scale_token(request.px_per_dbu), command.thin_keep, request.page_hairline, command.frames
     )
+}
+
+/// The scale as the fit memory keys it: nine significant digits. The exact
+/// bits (0.12.231) split frames the viewer draws at one scale - the viewport
+/// frame, its margin, a pan's - since each derives px_per_dbu from its own
+/// box (field 2026-09-27: viewport `461/230` beside margin `3686/1843`, each
+/// under its own decision, 139,565 px of the overlap different).
+fn scale_token(px_per_dbu: f64) -> String {
+    format!("{px_per_dbu:.8e}")
 }
 
 struct FramePixels {
@@ -2331,8 +2347,13 @@ fn run_render(
         if let Some(decision) = state.fit_memory.get(&fit_key).copied() {
             page_request.fixed_fit = Some(decision);
         } else {
+            // the margin's extension per side is half the view snapped to
+            // 16 px (gui._submit_margin): up to 8 px more than half - probe
+            // 16 px beyond it, so the margin never plans what the probe
+            // did not
             let [x0, y0, x1, y1] = command.view;
-            let (dx, dy) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
+            let slack = 16.0 / page_request.px_per_dbu.max(f64::MIN_POSITIVE);
+            let (dx, dy) = ((x1 - x0) / 2.0 + slack, (y1 - y0) / 2.0 + slack);
             let probe = PlanRequest {
                 view: ViewBox::new(
                     checked_bound((x0 - dx).floor(), "probe x0")?,
@@ -2382,6 +2403,15 @@ fn run_render(
     check_generation(cancellation, command.generation)?;
     // remember the fit this plan decided (a redecision replaces the old one)
     if !label_only && !command.exact {
+        if command.background && planned.plan.stats.fit_redecided {
+            // the viewer's margin does not fit under the scale's decision
+            // (denser content than the frame that decided it): drawn under
+            // another it would change the picture when it lands (field
+            // 2026-09-27: 50% pans into the chip, 1,772 px of the viewport)
+            // - dropped; the decision and the viewport stay, pans render
+            respond(responses, format!("dropped gen={} reason=fit", command.generation));
+            return Ok(());
+        }
         if let Some(decision) = planned.plan.stats.fit_decision {
             if planned.plan.stats.fit_redecided || !state.fit_memory.contains_key(&fit_key) {
                 state.fit_memory.insert(fit_key.clone(), decision);
@@ -4036,6 +4066,31 @@ mod tests {
         let mut two = vec![vec![1], vec![2, 3]];
         collapse_refinement_tail(&mut two, 0);
         assert_eq!(two, vec![vec![1], vec![2, 3]]);
+    }
+
+    #[test]
+    fn the_fit_memory_keys_one_scale_whatever_bits_a_frame_derives() {
+        // the viewport frame and its margin compute px_per_dbu from their own
+        // boxes: the last bits differ, the scale is one
+        let scale = 1922.0 / (18_732_000.0f64 + 1922.0 * 600.0 - 18_732_000.0);
+        let margin = 3842.0 / (18_731_000.0f64 + 3842.0 * 600.0 - 18_731_000.0);
+        assert_eq!(scale_token(scale), scale_token(margin));
+        assert_eq!(scale_token(0.1), scale_token(0.1 + 4.0 * f64::EPSILON));
+        // a zoom step is another scale
+        assert_ne!(scale_token(0.1), scale_token(0.1 * 1.01));
+        assert_ne!(scale_token(1e-6), scale_token(1e-6 * 1.0001));
+    }
+
+    #[test]
+    fn a_margin_render_says_so_on_the_wire() {
+        let render = |line: &str| match parse_command(line).unwrap().unwrap() {
+            InputCommand::Worker(WorkerCommand::Render(command)) => command,
+            _ => panic!("expected a render command"),
+        };
+        let margin = render("render gen=3 view=0,0,4,4 w=4 h=4 frames=off bg=on out=/tmp/m.png");
+        assert!(margin.background);
+        let viewport = render("render gen=4 view=1,1,3,3 w=2 h=2 frames=off out=/tmp/v.png");
+        assert!(!viewport.background);
     }
 
     #[test]

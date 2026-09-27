@@ -3846,6 +3846,15 @@ class Viewer:
         elif kind == "error":
             self._clear_pending()
             self._set_live_status("error: %s" % res.get("msg"))
+        elif kind == "dropped":
+            # a margin the scale's budget fit does not hold (renderd,
+            # reason=fit): nothing lands, the viewport stays as drawn and
+            # pans here render; _margin_pending keeps the in-flight guard
+            # until the next user render, as for a superseded margin
+            pending = getattr(self, "_margin_pending", None)
+            if pending is not None and pending[0] == res.get("gen"):
+                self._margin_debug("dropped gen=%d: %s" % (
+                    res["gen"], res.get("reason") or "?"))
 
     def _load_note(self, res):
         """The first settled frame after a load: the time from the file's
