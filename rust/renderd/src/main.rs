@@ -1918,15 +1918,17 @@ fn density_stack_enabled() -> bool {
 }
 
 /// Pass 2's cut (px, the larger side): the shapes under pass 1's cut down to
-/// this size are density (user decision 2026-09-27: 0.5 px, so the count
-/// stays in bounds). FLOE_RUST_DENSITY_CUT_PX, diagnostic; unset, empty or
-/// out of range means 0.5.
+/// this size are density. 1 px (user decision 2026-09-27: 0.5 px first, so
+/// the count stays in bounds; then 1 px, which looks fine at detail medium
+/// and costs a fraction - last-10-layer fit 2.3 s -> 47 ms on the synthetic
+/// chip). FLOE_RUST_DENSITY_CUT_PX, diagnostic; unset, empty or out of range
+/// means 1.
 fn density_cut_px() -> f64 {
     std::env::var("FLOE_RUST_DENSITY_CUT_PX")
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|c| c.is_finite() && *c > 0.0)
-        .unwrap_or(0.5)
+        .unwrap_or(1.0)
 }
 
 /// What pass 2 may decode on top of pass 1 (bytes, encoded x 2 as the

@@ -7,7 +7,7 @@ pass into the space the originals left, the top layer first).
 With the diagnostic FLOE_RUST_DENSITY_STACK=top the frame is drawn twice:
 pass 1 paints the plan as always (max mode: every shape whose larger side
 reaches the cut) and records what its originals cover - speckle holes
-included; pass 2 plans the same view at a finer cut (0.5 px, the larger
+included; pass 2 plans the same view at a finer cut (1 px, the larger
 side) and reads its pages only where pass 1 left a pixel: the top layer's
 shapes under the cut draw over the lower layers' originals but not inside
 its own, every other layer's only where no original covers the pixel and no
@@ -61,7 +61,7 @@ PX_UM = 0.1
 LOW, MID, ALONE, TOP = (1, 0), (2, 0), (3, 0), (4, 0)
 BLACK = bytes((0, 0, 0, 255))
 VIEW = (0.0, 0.0, W * PX_UM, H * PX_UM)
-SQUARE = 0.15               # um: 1.5 px, under the 3 px cut, over pass 2's 0.5 px
+SQUARE = 0.15               # um: 1.5 px, under the 3 px cut, over pass 2's 1 px
 
 
 def layout(path):
