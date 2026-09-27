@@ -59,6 +59,7 @@ def _stub_margin_viewer(worker, frame_cache, viewport=(858, 802)):
     v.lod_on = v.frames_on = v.labels_on = True
     v.label_font_px = 14
     v.frame_cache_on = frame_cache
+    v.margin_on = True
     v.abstract = False
     v._layers_arg = lambda: None
     v._viewport_size = lambda: viewport
@@ -86,9 +87,9 @@ class WorkerContractTests(unittest.TestCase):
                 goto="1,2,700", stream_kb=None, stream_target_ms=500,
                 label_font_px=14, perf_baseline=False, lod="on",
                 frames="on", labels="on", refinement="on",
-                frame_cache="on", render_debug=False, multi=False,
-                drc=None, detail=detail, depth=depth, dump=False,
-                thin=thin,
+                frame_cache="on", margin="on", render_debug=False,
+                multi=False, drc=None, detail=detail, depth=depth,
+                dump=False, thin=thin,
             )
             with mock.patch.object(cli.os.path, "isfile", return_value=True), \
                     mock.patch.object(cli, "_cache_ready", return_value=True), \
@@ -241,8 +242,9 @@ class WorkerContractTests(unittest.TestCase):
             src=None, hairline=None, thin_um=None, goto=None,
             stream_kb=None, stream_target_ms=500, label_font_px=14,
             perf_baseline=True, lod="on", frames="on", labels="on",
-            refinement="on", frame_cache="on", render_debug=False,
-            multi=True, drc=None, detail="high", depth=999, dump=False,
+            refinement="on", frame_cache="on", margin="on",
+            render_debug=False, multi=True, drc=None, detail="high",
+            depth=999, dump=False,
         )
         with mock.patch("floe.gui.run_viewer") as run_viewer:
             cli.cmd_view(args)
@@ -252,6 +254,8 @@ class WorkerContractTests(unittest.TestCase):
         self.assertFalse(options["frames"])
         self.assertFalse(options["labels"])
         self.assertFalse(options["frame_cache"])
+        # frame_cache off already stops the margin; the flag itself stays
+        self.assertTrue(options["margin"])
         self.assertEqual(options["stream_kb"], 0)
         self.assertEqual(options["detail"], 2)
         self.assertEqual(options["depth"], 999)
@@ -263,11 +267,40 @@ class WorkerContractTests(unittest.TestCase):
             src=None, hairline=None, thin_um=None, goto=None,
             stream_kb=4096, stream_target_ms=500, label_font_px=14,
             perf_baseline=False, lod="off", frames="off", labels="off",
-            refinement="off", frame_cache="off", render_debug=False,
-            multi=True, drc=None, detail="high", depth=999, dump=False,
+            refinement="off", frame_cache="off", margin="on",
+            render_debug=False, multi=True, drc=None, detail="high",
+            depth=999, dump=False,
         )
         with self.assertRaisesRegex(SystemExit, "conflicts"):
             cli.cmd_view(args)
+
+    def test_margin_option_turns_the_prefetch_alone_off(self):
+        """--margin off (user request 2026-09-27): the background margin
+        prefetch alone stays off - retained-frame pan reuse (frame_cache)
+        stays on - so a margin's landing can be told apart from the frame
+        itself. It is a process option (an independent instance)."""
+        from floe import cli
+        from floe.gui import Viewer
+
+        args = SimpleNamespace(
+            src=None, hairline=None, thin_um=None, goto=None,
+            stream_kb=None, stream_target_ms=500, label_font_px=14,
+            perf_baseline=False, lod="on", frames="on", labels="on",
+            refinement="on", frame_cache="on", margin="off",
+            render_debug=False, multi=True, drc=None, detail="high",
+            depth=999, dump=False,
+        )
+        with mock.patch("floe.gui.run_viewer") as run_viewer:
+            cli.cmd_view(args)
+        options = run_viewer.call_args.kwargs
+        self.assertFalse(options["margin"])
+        self.assertTrue(options["frame_cache"])
+        rust = SimpleNamespace(supports_margin_prefetch=True)
+        v = _stub_margin_viewer(rust, True)
+        self.assertTrue(Viewer._margin_enabled(v))
+        v.margin_on = False
+        self.assertFalse(Viewer._margin_enabled(v))
+        self.assertTrue(v.frame_cache_on)
 
     def test_rust_gui_startup_does_not_import_klayout(self):
         with tempfile.TemporaryDirectory() as directory:

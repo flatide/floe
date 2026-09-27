@@ -1483,7 +1483,8 @@ def cmd_view(args):
     process_options = (stream_kb is not None
                        or args.stream_target_ms != 500
                        or args.render_debug
-                       or args.frame_cache == "off")
+                       or args.frame_cache == "off"
+                       or args.margin == "off")
     server = None
     if not args.multi and not process_options:
         # flateyes-style single instance per (uid, DISPLAY)
@@ -1563,6 +1564,7 @@ def cmd_view(args):
                labels=args.labels == "on",
                label_font_px=args.label_font_px,
                frame_cache=args.frame_cache == "on",
+               margin=args.margin == "on",
                stream_kb=stream_kb,
                stream_target_ms=args.stream_target_ms,
                render_debug=args.render_debug,
@@ -2244,6 +2246,13 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "reuse and the background margin prefetch (default "
                         "on; Rust renderer only); off is useful for "
                         "backend-neutral render timing and opens an "
+                        "independent instance")
+    p.add_argument("--margin", choices=("on", "off"), default="on",
+                   help="the background margin prefetch alone (default on; "
+                        "Rust renderer only): off keeps retained-frame pan "
+                        "reuse and renders every pan and zoom as a viewport "
+                        "frame - for telling a margin's landing apart from "
+                        "the frame itself (2026-09-27); opens an "
                         "independent instance")
     p.add_argument("--perf-baseline", action="store_true",
                    help="backend-neutral timing preset: refinement, frame "

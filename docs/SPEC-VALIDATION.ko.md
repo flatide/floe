@@ -97,6 +97,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
   올라오며 나머지는 끈 프레임 그대로다. 1/0만 켜면 1/0의 컷 없는 프레임과 바이트 동일하고(2패스는 보이는 레이어만,
   0.12.229), 1/0+2/0을 켜면 오른쪽 위에 4/0의 사각형이 없다. 켠 프레임은 `density_stack`과 `density_pages`(계획 > 0,
   디코드 > 0) 계측을 보고하고, 끈 프레임·`FLOE_RUST_AREA_TRUE=off`·`FLOE_RUST_WRITE_ONCE=off`는 계측 없이 변수 없는 프레임과 같다.
+  0.12.233: 뷰어의 여백 프레임(`bg`, 각 축 2배)이 뷰를 뷰포트 프레임과 픽셀까지 같게 그린다(2패스가 자기 예약으로
+  계획하고 그 맞춤을 배율·면마다 기억; `over_budget` 0).
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과

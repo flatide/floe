@@ -884,6 +884,10 @@ struct WorkerState {
     /// one replaces another (SPEC-PLANNER, 2026-09-27); a frame the decision
     /// does not fit decides anew and replaces it.
     fit_memory: BTreeMap<String, floe_render_core::FixedFit>,
+    /// The same for the density stack's pass 2, per side (the top plane's
+    /// plan, the other planes'): its plans are budget-fitted to a reserve of
+    /// their own and must thin alike in every frame at a scale too.
+    density_fit_memory: BTreeMap<String, floe_render_core::FixedFit>,
 }
 
 impl Default for WorkerState {
@@ -897,6 +901,7 @@ impl Default for WorkerState {
             styles: Vec::new(),
             style_epoch: None,
             fit_memory: BTreeMap::new(),
+            density_fit_memory: BTreeMap::new(),
         }
     }
 }
@@ -1216,6 +1221,7 @@ fn handle_open(
                 state.page_cache = DecodedPageCache::new(0);
                 state.retained.clear();
                 state.fit_memory.clear();
+                state.density_fit_memory.clear();
                 state.jobs = command.jobs;
                 state.styles.clear();
                 state.style_epoch = None;
@@ -1259,6 +1265,7 @@ fn handle_open(
             state.page_cache = DecodedPageCache::new(budget_bytes);
             state.retained.clear();
                 state.fit_memory.clear();
+                state.density_fit_memory.clear();
             state.jobs = command.jobs;
             state.styles.clear();
             state.style_epoch = None;
@@ -1325,6 +1332,7 @@ fn handle_style(state: &mut WorkerState, command: StyleCommand, responses: &Send
             state.style_epoch = Some(command.epoch);
             state.retained.clear();
                 state.fit_memory.clear();
+                state.density_fit_memory.clear();
             respond(
                 responses,
                 format!(
@@ -1979,6 +1987,30 @@ fn density_budget_bytes() -> u64 {
         .saturating_mul(1 << 20)
 }
 
+/// Pass 1's decode budget: the generation's, less pass 2's reserve when the
+/// density stack is on (never under half of it), so pass 2 always has the
+/// reserve whatever pass 1 decoded (2026-09-27: planned to half of what was
+/// left, the margin's pass 2 decoded 23 pages where the viewport's decoded
+/// 2,208 and the fit view changed when the margin landed).
+fn pass1_decode_budget(budget: u64, command: &RenderCommand) -> u64 {
+    if budget > 0 && density_stack_enabled() && !command.exact {
+        budget.saturating_sub(density_reserve(budget))
+    } else {
+        budget
+    }
+}
+
+/// Pass 2's reserve of the generation budget: FLOE_RUST_DENSITY_BUDGET_MB
+/// (256) but never over an eighth of the generation (128 MB of the default
+/// 1024), so pass 1 keeps most of the budget for the originals.
+fn density_reserve(budget: u64) -> u64 {
+    density_budget_bytes().min(budget / 8).max(1)
+}
+
+/// The error a margin's pass 2 raises when its budget fit does not hold the
+/// scale's decision: the frame is dropped like a pass-1 refit of a margin.
+const DROPPED_FIT: &str = "dropped:fit";
+
 fn page_wash_enabled() -> bool {
     std::env::var("FLOE_RUST_PAGE_WASH").as_deref() == Ok("on")
 }
@@ -2317,7 +2349,9 @@ fn run_render(
     let pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key);
     let command = &command;
     check_generation(cancellation, command.generation)?;
-    let request = make_plan_request(cache, command, state.page_cache.budget_bytes())?;
+    // the density stack's pass 2 decodes within a reserve of its own
+    // (density_budget_bytes): pass 1 plans to what the generation has left
+    let request = make_plan_request(cache, command, pass1_decode_budget(state.page_cache.budget_bytes(), command))?;
     // the summarized layers leave the page plan (§6 step 3): no page
     // selection, page BVH or child walk for them
     let mut page_request = cache.page_plan_request(&request, &summary, !command.frames)?;
@@ -2640,7 +2674,7 @@ fn run_render(
                         },
                         None => styled.clone(),
                     };
-                    let (report, counts, times) = render_density_frame(
+                    let (report, counts, times) = match render_density_frame(
                         cache,
                         &mut state.page_cache,
                         command,
@@ -2652,7 +2686,19 @@ fn run_render(
                         &decoded_pages,
                         decode_workers,
                         &mut generation_bytes,
-                    )?;
+                        &fit_key,
+                        &mut state.density_fit_memory,
+                        command.background,
+                    ) {
+                        Ok(rendered) => rendered,
+                        Err(error) if error == DROPPED_FIT => {
+                            // the margin's pass 2 would thin otherwise than the
+                            // viewport's: dropped, as a margin's pass-1 refit is
+                            respond(responses, format!("dropped gen={} reason=fit", command.generation));
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error),
+                    };
                     density_pages = Some(counts);
                     // both plans / the scenes / the collection / the regions / the decode
                     density_us = Some([times[0], times[1], report.stats.density_collect_us, times[2], times[3]]);
@@ -3282,6 +3328,9 @@ fn render_density_frame(
     decoded_pages: &[Arc<floe_render_core::DecodedPage>],
     decode_workers: u16,
     generation_bytes: &mut u64,
+    fit_key: &str,
+    density_memory: &mut BTreeMap<String, floe_render_core::FixedFit>,
+    background: bool,
 ) -> Result<(floe_render_core::GeometryRasterReport, [u64; 4], [u64; 4]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
@@ -3333,14 +3382,30 @@ fn render_density_frame(
                             continue;
                         }
                         let plan_started = Instant::now();
-                        let mut fine = make_plan_request_cut(cache, command, budget_bytes, density_cut_px())?;
+                        // pass 2 plans to a reserve of its own (density_budget_bytes; pass 1
+                        // plans to the rest) and its budget fit is remembered per scale and
+                        // side as pass 1's is: the same pages whatever the frame
+                        let mut fine = make_plan_request_cut(cache, command, density_reserve(budget_bytes), density_cut_px())?;
                         fine.regions = regions
                             .iter()
                             .map(|b| ViewBox::new(b.x0, b.y0, b.x1, b.y1))
                             .collect::<Result<Vec<_>, _>>()?;
                         fine.visible_indices = Some(layers);
+                        let side_key = format!("{fit_key}|density{side}");
+                        fine.fixed_fit = density_memory.get(&side_key).copied();
                         let fine_pages = cache.page_plan_request(&fine, summary, !command.frames)?;
-                        let density_plan = Arc::new(cache.plan(&fine_pages)?.plan);
+                        let planned_fine = cache.plan(&fine_pages)?.plan;
+                        if background && planned_fine.stats.fit_redecided {
+                            // the margin's pass 2 does not fit under the scale's decision:
+                            // drawn otherwise it would change the picture when it lands
+                            return Err(DROPPED_FIT.to_string());
+                        }
+                        if let Some(decision) = planned_fine.stats.fit_decision {
+                            if planned_fine.stats.fit_redecided || !density_memory.contains_key(&side_key) {
+                                density_memory.insert(side_key, decision);
+                            }
+                        }
+                        let density_plan = Arc::new(planned_fine);
                         times[0] += elapsed_us(plan_started);
                         let scene_started = Instant::now();
                         let density_scene = Arc::new(FrameScene::new_metadata(cache, Arc::clone(&density_plan), Arc::from([]), command.label_font_px)?);
@@ -3359,12 +3424,12 @@ fn render_density_frame(
                         }
                         sides[side] = Some(density_scene);
                     }
-                    // the plans' order (their priority) for the budget: twice the
-                    // encoded bytes as the estimate, the density budget and half
-                    // of what the generation has left as the cap
+                    // the plans are within the reserve by the planner's estimate; the
+                    // decode takes them in their order (the priority) under the reserve
+                    // as twice the encoded bytes, the generation check below the net
                     wanted.sort_unstable();
                     wanted.dedup_by_key(|entry| entry.1);
-                    let limit = density_budget_bytes().min(budget_bytes.saturating_sub(*generation_bytes) / 2);
+                    let limit = density_reserve(budget_bytes);
                     let mut estimate = 0u64;
                     let mut take = Vec::with_capacity(wanted.len());
                     for (_, page_id) in wanted {

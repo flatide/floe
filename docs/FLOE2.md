@@ -137,6 +137,7 @@ PNG publish는 유지한다. detail/depth/좌표/window는 workload이므로 명
   --detail high --depth 999 --perf-baseline
 ```
 
-개별 제어는 `--refinement on|off`, `--frame-cache on|off`, `--lod on|off`,
+개별 제어는 `--refinement on|off`, `--frame-cache on|off`, `--margin on|off`(여백
+준비만; 팬 재사용은 유지 — 여백 도착과 프레임 자체를 구별해 볼 때), `--lod on|off`,
 `--frames on|off`, `--labels on|off`다. `--refinement off`는 floe의 VFS stream을
 0으로, floe2의 miss round를 single all-page batch로 바꾼다.

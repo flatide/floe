@@ -36,6 +36,12 @@ with the others). Every layer takes the viewer's default speckle; the cut is
     is byte-identical to the cut-free frame of layer 1/0 (its squares are the
     top plane's density, nothing above); with 1/0 and 2/0 on, the top right
     quadrant is 2/0's rectangle alone - none of 4/0's squares;
+  * the viewer's margin frame (bg, twice the extent per axis) draws the view
+    pixel for pixel as the viewport frame did: pass 2 plans to a reserve of
+    its own and its budget fit is remembered per scale and side (2026-09-27:
+    planned to half of what the generation had left, a margin's pass 2 on
+    the synthetic chip's fit view decoded 23 pages where the viewport's
+    decoded 2,208 and 8,110 px changed when it landed);
   * the frame reports the stack's counts (density_stack: lit, top, lower,
     covered, claimed) and pass 2's pages (density_pages: planned, in_hand,
     decoded, over_budget - some decoded); none without the variable, under
@@ -112,6 +118,25 @@ def frame(w, gen, visible, cut_px=3.0):
         if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
             return bytes(res.pop('rgba')), res
     raise AssertionError('density stack frame timeout')
+
+
+def frame_bg(w, gen, visible, cut_px=3.0):
+    """The viewer's margin around VIEW: twice the extent per axis at the same
+    scale, flagged bg (gui._submit_margin)."""
+    dbu = float(w.cache.meta['dbu'])
+    vw, vh = VIEW[2] - VIEW[0], VIEW[3] - VIEW[1]
+    box = (VIEW[0] - vw / 2, VIEW[1] - vh / 2, VIEW[2] + vw / 2, VIEW[3] + vh / 2)
+    w.submit({'kind': 'render', 'gen': gen, 'scope': 'live', 'bg': True, 'bbox': tuple(v / dbu for v in box),
+              'view': tuple(v / dbu for v in VIEW), 'w': 2 * W, 'h': 2 * H, 'depth': None, 'cut_px': cut_px, 'lod': False,
+              'frames': False, 'labels': False, 'abstract': False, 'visible': list(visible), 'frame_format': 'raw',
+              'thin': 'keep', 'frame_cache': False})
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+        assert res.get('kind') not in ('error', 'dropped'), res
+        if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+            return bytes(res.pop('rgba')), res
+    raise AssertionError('density stack margin frame timeout')
 
 
 def px(pixels, c, r):
@@ -192,6 +217,17 @@ def main():
                 len(lit(mid_on, *tr)), len(lit(mid_off, *tr)))
             assert lit(mid_on, *br) == want, 'with 4/0 off the bottom right changed'
             print('density stack: layer 1/0 alone = its cut-free frame; 1/0 + 2/0 shows none of 4/0')
+            # the viewer's margin (bg, twice the extent per axis) draws the view's
+            # pixels as the viewport frame did: pass 2's fit is remembered per scale
+            # and side (2026-09-27: planned to half of what the generation had left,
+            # the margin's pass 2 decoded 23 pages where the viewport's decoded 2,208)
+            margin, mres = frame_bg(workers['on'], 8, both)
+            centre = b''.join(margin[((H // 2 + r) * 2 * W + W // 2) * 4:((H // 2 + r) * 2 * W + W // 2 + W) * 4] for r in range(H))
+            assert centre == on, 'the margin draws the view otherwise than the viewport frame in %d px' % sum(
+                1 for i in range(0, len(on), 4) if centre[i:i + 4] != on[i:i + 4])
+            assert mres.get('density_pages') and mres['density_pages']['over_budget'] == 0, mres.get('density_pages')
+            print('density stack: the margin frame draws the view as the viewport frame did (pass 2 pages %s)' % (
+                ' '.join('%s=%d' % kv for kv in mres['density_pages'].items())))
             for name, base in (('klayout', 'klayout_on'), ('ordered', 'ordered_on')):
                 a, _ = frame(workers[name], 5, both)
                 b, b_res = frame(workers[base], 5, both)

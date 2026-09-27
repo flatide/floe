@@ -1128,7 +1128,7 @@ class Viewer:
                  detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                  frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
                  label_font_px=DEFAULT_LABEL_FONT_PX,
-                 frame_cache=True,
+                 frame_cache=True, margin=True,
                  stream_kb=None, stream_target_ms=500,
                  render_debug=False, thin="auto"):
         self.server_sock = server_sock
@@ -1203,6 +1203,10 @@ class Viewer:
         # Exact settled-frame reuse is a Rust optimization.  Stable floe
         # accepts the same control so A/B command lines remain identical.
         self.frame_cache_on = bool(frame_cache)
+        # --margin off: the background margin prefetch alone stays off
+        # (pan reuse stays) - to tell a margin's landing apart from the
+        # frame itself (user request 2026-09-27)
+        self.margin_on = bool(margin)
         self._margin_max_px = _env_int(
             "FLOE_MARGIN_MAX_MPIX", MARGIN_MAX_MPIX, 1, 4096) << 20
         self.stream_kb = stream_kb
@@ -2985,8 +2989,8 @@ class Viewer:
         view and could not cancel it), and --frame-cache off /
         --perf-baseline switch every frame-reuse path off together so
         backend-neutral timings stay comparable."""
-        return bool(self.frame_cache_on) and bool(getattr(
-            self.worker, "supports_margin_prefetch", False))
+        return bool(self.frame_cache_on) and bool(self.margin_on) and bool(
+            getattr(self.worker, "supports_margin_prefetch", False))
 
     def _covered(self, bbox, scope):
         """True when the current frame still serves this view: same
@@ -9154,7 +9158,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
                label_font_px=DEFAULT_LABEL_FONT_PX,
-               frame_cache=True,
+               frame_cache=True, margin=True,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
                thin="auto"):
@@ -9166,7 +9170,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
     viewer = Viewer(cache, server_sock, goto=goto, detail=detail,
                     dump=dump, depth=depth, lod=lod, frames=frames,
                     labels=labels, label_font_px=label_font_px,
-                    frame_cache=frame_cache,
+                    frame_cache=frame_cache, margin=margin,
                     stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
                     render_debug=render_debug, thin=thin)
