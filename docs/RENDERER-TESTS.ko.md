@@ -131,7 +131,8 @@ floe 뷰어의 klayout 경로를 대체하려면 무엇을 소비하고, 무엇�
   그린다: 최상위 평면의 밀도는 자기 원본이 쓰거나 덮은 곳 밖이면 하위 원본 위에도 덮어쓰고, 나머지 평면의
   밀도는 어떤 원본도 쓰거나 덮지 않고 위 밀도가 차지하지 않은(떨어진 도형의 순위 0 픽셀 포함) 픽셀에만
   쓴다(`DensityStack`, write-once 타일에서만; LayerRasterSession의 두 블록 — 2패스는 블록 경계에서 1패스의
-  마스크로 만든 빈 공간 상자들(`BlockDemand::eligible_regions`)로 계획해 디코드한다, 0.12.227). 격자 배열의 차지 영역은 배열
+  마스크로 만든 빈 공간 상자들(`BlockDemand::eligible_regions`)로 계획해 디코드한다, 0.12.227; 나머지 평면은
+  타일마다 한 번의 걷기 `TilePass::DensityLower`로 픽셀별 최상위 평면 지도에 그린다, 0.12.228). 격자 배열의 차지 영역은 배열
   단위(`array_footprint`)라 생존 걷기 켬·끔과 같다. 단위 테스트는
   `the_density_stack_draws_the_cut_shapes_in_the_top_plane_and_the_empty_space`,
   `a_dropped_array_member_claims_its_pixels_under_the_density_stack`,
