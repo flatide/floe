@@ -469,13 +469,17 @@ fn reclaim_child() {
         return;
     };
     let root = PathBuf::from(root);
+    // Used only by private unit/HTTP fixtures, never in a product executable.
+    let name = std::env::var("FLOE_TEST_RECLAIM_SOURCE").unwrap_or_else(|_| "synthetic.oas".into());
+    assert!(matches!(name.as_str(), "synthetic.oas" | "A.oas"));
+    let revision = std::env::var("FLOE_TEST_RECLAIM_ID").unwrap_or_else(|_| "a".repeat(32));
     let source = RegisteredSource::register(
         AccessScope::new(std::slice::from_ref(&root)).unwrap(),
-        &root.join("synthetic.oas"),
+        &root.join(name),
         &AtomicUsize::new(0),
     )
     .unwrap();
-    let preview = prepare(source, &"a".repeat(32), &AtomicUsize::new(0)).unwrap();
+    let preview = prepare(source, &revision, &AtomicUsize::new(0)).unwrap();
     preview
         .execute_with(&AtomicUsize::new(0), |count, _| {
             if count == 1 {

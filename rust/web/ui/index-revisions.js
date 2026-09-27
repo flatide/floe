@@ -36,9 +36,54 @@
                 (r.current?'CURRENT; ':'')+(r.current_unknown?'CURRENT UNKNOWN; ':'')+'format '+(r.format||'?')+'; '+r.seal+'; '+r.readers+'; '+r.owner+
                 (r.set_revision?' (set '+r.set_revision+')':'')+(r.extra_entries?'; extra entries — protected':''));
         }
+        const recoveries=inv.recoveries||[],choices=new Map();
+        if(!Array.isArray(recoveries)||recoveries.length>256||!recoveries.every(id)){return null;}
+        inv.rows.filter(function(r){return r.kind==='set';}).forEach(function(r){choices.set(r.revision,{revision:r.revision,label:r.revision+(r.current?' — CURRENT, protected':' — format '+r.format),current:!!r.current});});
+        recoveries.forEach(function(r){choices.set(r,{revision:r,label:r+' — recovery evidence, unverified',current:choices.has(r)&&choices.get(r).current});});
+        if(recoveries.length){lines.push('Recovery evidence (may be incomplete, invalid or already complete):\n'+recoveries.join('\n'));}
         lines.push('Not allocated/freeable space. Idle is only a scan-time observation. Legacy, incomplete and unknown revisions remain protected. Refresh to update.');
-        return {source_id:v.source_id,text:lines.join('\n')};
+        return {source_id:v.source_id,text:lines.join('\n'),choices:Array.from(choices.values())};
     }
-    root.FloeIndexRevisions={selection:selection,candidate:candidate,matches:matches,useRequest:useRequest,usage:usage};
+    function id(v){return typeof v==='string'&&/^[0-9a-f]{32}$/.test(v);}
+    function token(v){return typeof v==='string'&&/^[0-9a-f]{64}$/.test(v);}
+    function bytes(v){return typeof v==='string'&&/^(0|[1-9][0-9]{0,19})$/.test(v)&&(v.length<20||v<='18446744073709551615');}
+    function count(v,max){return Number.isInteger(v)&&v>=0&&v<=max;}
+    function reclaimCandidate(history){
+        // The server invalidates the preview on ANY subsequently accepted
+        // operation, not merely on another reclamation. GET never approves.
+        const r=(history||[]).slice(-1)[0],p=r&&r.preview;
+        if(!r||r.kind!=='prepare_reclaim'||r.phase!=='succeeded'||!token(r.source_id)||!p||
+            !id(p.revision)||!token(p.token)||!bytes(p.logical_bytes)||!count(p.files,7170)||!count(p.sources,1024)||p.sources===0||
+            typeof p.complete!=='boolean'||typeof p.recovery!=='boolean'||!count(p.expires_in_s,300)||p.expires_in_s===0||
+            Object.keys(p).sort().join(',')!=='complete,expires_in_s,files,logical_bytes,recovery,revision,sources,token'||
+            p.complete&&(p.files!==0||p.logical_bytes!=='0'||!p.recovery)){return null;}
+        return r;
+    }
+    function reclaimRequest(r,source,revision,approved){
+        if(!approved||!r||reclaimCandidate([r])!==r||r.source_id!==source||r.preview.revision!==revision||r.preview.complete){
+            throw Error('Prepare this exact source/set again and explicitly approve the listed deletion.');
+        }
+        return {kind:'reclaim_revision',source_id:source,revision:revision,token:r.preview.token,approved:true};
+    }
+    function reclaimText(history){
+        const r=(history||[]).filter(function(v){return v.kind==='prepare_reclaim'||v.kind==='reclaim_revision';}).slice(-1)[0];
+        if(!r){return 'No reclamation preview. No automatic cleanup.';}
+        if(r.kind==='prepare_reclaim'&&reclaimCandidate([r])){
+            const p=r.preview;
+            return p.complete?'Recovery verified: already complete; no files left. No deletion is needed.':
+                (p.recovery?'Recovery preview':'Deletion preview')+' · set '+p.revision+' · '+p.files+' files / '+p.logical_bytes+' logical bytes / '+p.sources+' sources.\n'+
+                'These files and their empty revision directories will be removed irreversibly. Approval expires 5 minutes after server preparation; the server rechecks current/readers/files. Other operations invalidate this preview.';
+        }
+        const o=r.outcome;
+        if(r.kind==='reclaim_revision'&&['succeeded','incomplete'].includes(r.phase)&&o&&id(o.revision)&&
+            ['complete','interrupted','outcome_unknown'].includes(o.status)&&bytes(o.removed_logical_bytes)&&count(o.removed_files,7170)&&typeof o.sync_warning==='boolean'&&
+            Object.keys(o).sort().join(',')==='removed_files,removed_logical_bytes,revision,status,sync_warning'){
+            return 'Set '+o.revision+' · '+o.status+' · acknowledged deletion: '+o.removed_files+' files / '+o.removed_logical_bytes+' logical bytes.'+
+                (o.sync_warning?' Sync warning: crash durability unconfirmed.':'')+
+                (o.status==='complete'?' Current/new revisions preserved.':' Actual remaining files must be checked. Refresh usage, prepare the same set again, then explicitly approve recovery. No automatic retry.');
+        }
+        return 'Reclamation '+String(r.phase||'unavailable')+'. No automatic retry; refresh usage and prepare again. Busy/current, old-format, unpublished, changed or network-filesystem targets remain protected.';
+    }
+    root.FloeIndexRevisions={selection:selection,candidate:candidate,matches:matches,useRequest:useRequest,usage:usage,id:id,reclaimCandidate:reclaimCandidate,reclaimRequest:reclaimRequest,reclaimText:reclaimText};
     if(typeof module==='object'&&module.exports){module.exports=root.FloeIndexRevisions;}
 }(typeof window==='object'?window:globalThis));

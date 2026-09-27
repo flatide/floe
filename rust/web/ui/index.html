@@ -247,6 +247,19 @@
           <button id="revision-usage" type="button" disabled>Refresh revision storage usage</button>
           <p class="note">Reads the selected source and its registered dependencies, across all loaded-level selections. Logical file bytes, not allocated or reclaimable space. No cleanup is performed. Old-format readers cannot be tracked. Reader status is a point-in-time observation, not permission to delete.</p>
           <pre id="revision-usage-status" class="note" aria-live="polite">Storage usage not checked.</pre>
+          <fieldset id="reclaim-panel" hidden>
+            <legend>Reclaim an inactive revision set</legend>
+            <p class="note">Only published v3 sets on supported local filesystems. Current/open, old-format, standalone, unpublished and uncertain candidates remain protected. NFS/shared-mount reclamation is disabled. Original layouts and reviews are never targets.</p>
+            <label for="reclaim-choice">Observed sets / recovery evidence</label>
+            <select id="reclaim-choice"><option value="">Refresh storage usage to list sets</option></select>
+            <label for="reclaim-id">Exact set ID (32 lowercase hex characters; not a path)</label>
+            <input id="reclaim-id" maxlength="32" autocomplete="off" spellcheck="false">
+            <button id="reclaim-prepare" type="button" disabled>Preview deletion / check recovery</button>
+            <pre id="reclaim-status" class="note" aria-live="polite">No reclamation preview.</pre>
+            <label class="check"><input id="reclaim-approve" type="checkbox" disabled> Permanently delete exactly the previewed inactive cache files</label>
+            <button id="reclaim-run" type="button" disabled>Delete approved inactive files</button>
+            <p class="note">No automatic retry. After interruption or a new server session, refresh usage, prepare the same set ID again and approve only the newly listed remaining files. Recovery evidence can also describe completed or invalid work. Source files, current revisions and journals are kept.</p>
+          </fieldset>
         </details>
         <p id="operation" class="note" role="status">No active operation.</p>
       </details>

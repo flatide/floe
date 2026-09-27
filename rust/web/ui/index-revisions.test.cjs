@@ -33,4 +33,31 @@ assert.match(R.usage([{...usage,inventory:{...usage.inventory,partial:true}}]).t
 assert.equal(R.usage([usage,{...usage,phase:'failed'}]),null,'failed refresh must not look successful');
 assert.equal(R.usage([{...usage,inventory:{...usage.inventory,logical_bytes:900}}]),null);
 assert.equal(R.candidate([usage]),null,'storage observation is not a checked cutover revision');
-console.log('WEB INDEX REVISIONS: ALL OK (explicit build/check/use, exact selection, captured view CAS, no automatic switch)');
+const preview={kind:'prepare_reclaim',phase:'succeeded',source_id:source,preview:{token:'c'.repeat(64),revision:rev,
+    files:7,logical_bytes:'9007199254740993',sources:1,recovery:false,complete:false,expires_in_s:300}};
+assert.equal(R.reclaimCandidate([preview]),preview);
+assert.equal(R.reclaimCandidate([preview,usage]),null,'any subsequent accepted operation invalidates approval');
+assert.equal(R.reclaimCandidate([{...preview,phase:'cancelled'}]),null);
+assert.deepEqual(R.reclaimRequest(preview,source,rev,true),{kind:'reclaim_revision',source_id:source,revision:rev,token:'c'.repeat(64),approved:true});
+for(const [s,r,a] of [[source,rev,false],['e'.repeat(64),rev,true],[source,'e'.repeat(32),true]]){
+    assert.throws(()=>R.reclaimRequest(preview,s,r,a));
+}
+for(const [key,value] of [['token','../path'],['revision','a'.repeat(33)],['files',7171],['sources',0],['expires_in_s',0],
+    ['logical_bytes','18446744073709551616'],['logical_bytes',10],['complete',true],['path','/outside']]){
+    assert.equal(R.reclaimCandidate([{...preview,preview:{...preview.preview,[key]:value}}]),null,key);
+}
+const complete={...preview,preview:{...preview.preview,files:0,logical_bytes:'0',complete:true,recovery:true}};
+assert.equal(R.reclaimCandidate([complete]),complete);
+assert.throws(()=>R.reclaimRequest(complete,source,rev,true));
+assert.match(R.reclaimText([complete]),/already complete/);
+assert.match(R.reclaimText([preview]),/9007199254740993/);
+const interrupted={kind:'reclaim_revision',phase:'incomplete',outcome:{revision:rev,status:'outcome_unknown',removed_files:1,removed_logical_bytes:'5',sync_warning:false}};
+assert.equal(R.reclaimCandidate([interrupted]),null);
+assert.match(R.reclaimText([interrupted]),/No automatic retry/);
+assert.match(R.reclaimText([interrupted]),/acknowledged deletion/);
+assert.match(R.reclaimText([{...interrupted,phase:'failed'}]),/protected/);
+const observed={...usage,inventory:{...usage.inventory,recoveries:[rev]}};
+assert.deepEqual(R.usage([observed]).choices,[{revision:rev,label:rev+' — recovery evidence, unverified',current:false}]);
+assert.equal(R.reclaimCandidate([observed]),null,'journal names are observations, not approval');
+assert.equal(R.usage([{...observed,inventory:{...observed.inventory,recoveries:['../journal']}}]),null);
+console.log('WEB INDEX REVISIONS: ALL OK (build/check/use, bounded observation, narrow reclamation, invalidation, explicit recovery)');

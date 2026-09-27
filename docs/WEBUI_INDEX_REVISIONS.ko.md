@@ -11,8 +11,8 @@ world-tile, 동결된 WKWebView는 이 작업에 포함하지 않는다.
 새 backend는 웹/Electron 공통 UI의 `Index this source → Immutable index revisions`
 에서 별도로 선택한다. 빌드 완료나 브라우저 새로고침이 자동 전환을 일으키지 않는다.
 IR-4a 사용량 조회에 이어 IR-4b-1의 native reader 직접 잠금·명시적 회수/중단 복구
-backend를 추가했다. **아직 HTTP 삭제 API·버튼에 연결하지 않았다.** IR-4b-2의
-owner 승인 UI·응답 유실 복구 연결과 실제 GUI/현장 수용은 남아 있다. 자동 GC는 없다.
+backend와 IR-4b-2의 **owner 미리보기·별도 1회 승인·응답 유실/새 세션 복구 UI/API**를
+연결했다. 승인된 비실측 구현은 마쳤으며 실제 GUI/현장 수용은 남아 있다. 자동 GC는 없다.
 
 | 단계 | 범위 | 상태 |
 |---|---|---|
@@ -21,7 +21,7 @@ owner 승인 UI·응답 유실 복구 연결과 실제 GUI/현장 수용은 남�
 | IR-3 | 명시적 갱신 확인·전환, 상태 보존, frame/margin/retained/query 무효화 | 구현·로컬 자동 검증 완료 |
 | IR-4a | 사용량·보존 상태 조회, 새 리비전 소유권·협조적 reader 잠금 | 구현, 아래 자동 검증 기록 참조 |
 | IR-4b-1 | native 직접 reader 잠금, inactive v3 set 회수·부분 삭제 복구 backend | 구현. 로컬 합성 자동 검증; 아래 계약 참조 |
-| IR-4b-2 | owner 전용 미리보기·1회 승인 UI/API, 응답 유실/새 세션 복구 연결 | 남음. 조회 결과는 삭제 권한이 아님 |
+| IR-4b-2 | owner 전용 미리보기·1회 승인 UI/API, 응답 유실/새 세션 복구 연결 | 구현. 조회 결과는 삭제 권한이 아님; 실제 UI/현장 수용 별도 |
 
 ## 저장과 게시 계약
 
@@ -213,8 +213,8 @@ GUI·ETX 검사는 실행하지 않았으며, read-only inventory도 자동 주�
 
 ## IR-4b-1 회수·중단 복구 backend — 2026-09-27
 
-이번 단계는 `revision::reclaim::prepare`/`Prepared::execute`의 Rust backend다.
-아직 HTTP route/owner command·버튼은 없고, 자동 회수도 하지 않는다. 테스트에서
+IR-4b-1은 `revision::reclaim::prepare`/`Prepared::execute`의 Rust backend다.
+당시 HTTP route/owner command·버튼은 없었다(현재 IR-4b-2에서 연결). 자동 회수는 없다. 테스트에서
 새로 만든 합성 캐시만 회수했다. 사용자 캐시·원본·리뷰 파일은 삭제하지 않았다.
 
 ### 사용 중 파일과 구형 reader 보호
@@ -260,18 +260,54 @@ GUI·ETX 검사는 실행하지 않았으며, read-only inventory도 자동 주�
    journal은 0 files/complete로 조회된다. journal 손상·변경된/추가된 파일·inode
    교체는 자동 복구하지 않는다. journal은 자동 청소하지 않는다.
 
-### 파일시스템 범위·남은 연결
+### 파일시스템 범위·owner 연결
 
 회수는 명시적인 로컬 FS allowlist만 허용한다: macOS APFS/HFS + local flag,
 Linux ext 계열 magic/XFS/Btrfs/tmpfs. NFS/SMB/FUSE/overlay/미확인은 차단한다.
 이는 구현 정책이며 Linux 현장 검증 통과를 뜻하지 않는다. 기존 xattr 없는 NFS의
 note/waive/default 읽기·저장 구현이나 읽기 전용 revision inventory를 바꾸지 않는다.
 
-남은 IR-4b-2는 owner 전용 preview/approval 연결, bounded journal 목록/복구 ID
-표시, 승인 1회 소비, ledger 기반 응답 유실 확인, 새 서버 세션의 재승인이다.
+IR-4b-2에서 owner 전용 preview/approval 연결, bounded journal 목록/복구 ID
+표시, 승인 1회 소비, ledger 기반 응답 유실 확인, 새 서버 세션의 재승인을 추가했다.
 inventory의 `idle_at_scan`, Check/Build/Use receipt 또는 reconnect만으로 삭제를
-승인하지 않는다. 이 연결 전에는 UI에서 회수할 수 없다. NFS 회수·자동 GC·구형/
+승인하지 않는다. NFS 회수·자동 GC·구형/
 미게시/standalone 후보 정리는 이번 범위에 포함하지 않는다.
+
+## IR-4b-2 owner 명시 승인·응답 유실/새 세션 복구 — 2026-09-27
+
+웹/Electron 공통 `Index this source → Immutable index revisions` 패널에서:
+
+1. **Refresh revision storage usage**: 등록된 source에 속한 set 목록과 recovery
+   evidence ID를 읽는다. journal 이름은 최대 256개이며 기존 전체 scan 4,096 entries
+   예산 안에서만 찾는다. 본문/외부 경로를 따라가지 않으며, 제한 도달 시 PARTIAL이다.
+   완료/손상 journal도 이름이 보일 수 있다. 목록은 삭제 권한이 아니고 파일 경로를
+   노출하지 않는다. 기록해 둔 32자리 set ID를 직접 입력할 수도 있다.
+2. **Preview deletion / check recovery**: owner operation `prepare_reclaim`
+   (`source_id`, `revision`, `seq`)가 backend를 읽기 전용으로 검증하고 set ID,
+   파일 수/논리 bytes/source 수, recovery/complete와 5분짜리 token을 반환한다.
+   현재/열린/old-format/미게시/변경된/지원하지 않는 FS는 보호한다. 보호를
+   강제 해제하는 force/path/file-list 옵션은 없다.
+3. **Permanently delete… 체크 → Delete approved inactive files**: 별도 operation
+   `reclaim_revision`에 exact source/set/token 및 `approved=true`가 필요하다.
+   owner cookie/CSRF 계약을 그대로 적용하며 게스트에게 이 권한을 주지 않는다.
+   승인한 파일과 비게 된 해당 revision directory만 제거한다. 원본·리뷰·현재
+   revision·journal은 제거하지 않는다. 삭제는 되돌릴 수 없다.
+4. service는 preview 하나만 보관한다. **요청 접수 때** 소비하므로 worker 실행
+   전 취소도 token을 재사용하지 못한다. 다른 owner operation의 접수도 기존
+   preview를 무효화한다. 단순 GET/조회 receipt/화면 재접속은 승인하지 않는다.
+   source/set 입력 변경·숨김/종료·새 preview에서 체크가 풀리고, 만료 판단은
+   서버 monotonic clock이 최종 권한이다. UI 타이머는 보조 표시다.
+5. 같은 seq/요청의 재전송은 bounded ledger의 기존 receipt만 반환한다. UI는
+   mutation POST를 자동 재전송하지 않고 GET으로만 결과를 확인한다. POST와
+   첫 확인 응답이 모두 유실돼도 체크/실행 버튼을 복구해 재삭제하지 않는다.
+6. `interrupted`/`outcome_unknown`은 acknowledged 삭제 수만 표시한다. 실제 남은
+   파일은 다시 prepare해야 안다. 세션을 새로 열면 old token은 무효이며, usage의
+   journal ID → 새 미리보기 → **새 별도 승인**으로만 나머지를 처리한다.
+   완료 journal은 `complete`, 0 files/bytes로 표시하고 삭제 버튼은 비활성이다.
+
+preview/ledger는 세션 메모리이며 지속적 권한 저장소가 아니다. journal만 복구
+증거로 보존한다. 부분 삭제를 rollback하거나 unknown syscall을 추측하지 않는다.
+NFS 캐시 회수·journal 자동 삭제·자동 GC·원격 공유는 추가하지 않았다.
 
 ## 검증
 
@@ -384,7 +420,7 @@ current의 unlink 경합은 위의 제한적 0-link 허용으로 수정하고 �
 | `clippy-final.log` | `e0c89401f187b5dc7b9b289ec1ef15a8b8d8f8547d75ab4ecedecc86d093676c` |
 | `battery.log` | `e44063432cba426818dd7f1e0e33031c9c0e3d2944945a5e046228fb3e94336d` |
 
-진행도: IR-1/2/3 완료, IR-4a 완료. 승인된 비실측 구현 중 남은 것은 IR-4b의
+IR-4a 당시 진행도: IR-1/2/3 완료, IR-4a 완료. 승인된 비실측 구현 중 남은 것은 IR-4b의
 명시적 회수·프로세스 장애 보호·중단 복구다. 실제 GUI/현장 및 보류 범위는 별도다.
 
 ### IR-4b-1 검증 결과 — 2026-09-27
@@ -421,6 +457,43 @@ current의 unlink 경합은 위의 제한적 0-link 허용으로 수정하고 �
 | `floe-ir4b-clippy.log` | `5084233eb4b7b02bc9130d2553eff9a18ee72aed9c8f7930295132732e006560` |
 | `battery.log` | `019879fdbb1766df462cf055a18f24117564aeed44652bbb36e6b393d8723416` |
 
-진행도: **IR-1/2/3, IR-4a, IR-4b-1 완료**. 승인된 비실측 구현에서 남은 한 묶음은
+IR-4b-1 당시 진행도: **IR-1/2/3, IR-4a, IR-4b-1 완료**. 승인된 비실측 구현에서 남은 한 묶음은
 IR-4b-2의 owner 승인 UI/API·journal 복구 목록·응답 유실/새 세션 재승인 연결이다.
 외부 삭제 기능이 열렸다고 보고하지 않으며, 실제 GUI/현장·명시적 보류 항목은 별도다.
+
+### IR-4b-2 최종 검증 결과 — 2026-09-27
+
+- 제품·indexer·renderd **0.12.187** 동기화. `rust/`의 vendored 설정으로
+  app-core lib **353 passed / 8 ignored**, web lib **129 passed / 3 ignored**,
+  두 패키지 fmt 및 Clippy(all-targets/no-deps, warnings deny) 통과.
+  의존성 tiler/VFS의 기존 경고 3건은 수정하지 않았다.
+- owner HTTP **25개** 통과. 등록된 source/set/token·별도 승인, 인증/CSRF,
+  다른 operation에 의한 preview 무효화, 중복 receipt, 새 서버의 old token 거부,
+  완료 journal의 0-file 조회, current bytes/현재 native 프레임 보존을 검사했다.
+  테스트 전용 helper를 첫 unlink 후 kill/reap하고 **새 HTTP 세션에서** journal
+  조회 → 새 미리보기 → 새 명시 승인으로 남은 부분만 회수하는 검사도 통과했다.
+  실행 전 실패·보호 거부 및 조회 자체는 삭제를 시작하지 않는다.
+- 전체 웹 UI Node 게이트 통과: ES2017 파싱, 실제 app.js의 합성 DOM 경로,
+  set 변경/재조회 시 승인 해제, double-click, POST timeout + 확인 GET 503 후
+  GET-only 복구, 미완료/완료 상태, 현재 뷰 보존. actual Chrome/Electron pixel/
+  focus/물리 입력 수용을 대신하지 않는다.
+- 선택 배터리 **11 gates ALL OK**:
+  `sh tools/validate_rust.sh --only cache_revision,owner_service,web_ui,web_local_sharing,view_controller,view_stream,app_cli,native_revision,validation_selector,worker_client,unit_render`.
+  release revision 단위 30개, native revision 통합 2개, render-core 124개,
+  controller 2개·stream/sharing 20개·native worker parity를 포함한다.
+  인증 검사를 보강한 최종 소스로 owner HTTP 25개와 vendored lib/Clippy를 재실행했다.
+- 모든 쓰기/회수/프로세스 종료는 별도 임시 합성 fixture에만 적용했다. 사용자
+  원본·기존 캐시·리뷰는 변경하지 않았고 실제 GUI·RHEL/ETX·NFS 실측은 하지 않았다.
+
+로컬 로그와 SHA-256:
+
+| 로그 | SHA-256 |
+|---|---|
+| `/private/tmp/floe-ir4b2.wdZbwD/battery.log` | `c94a760c854139559963b138bba57c9fb11be1fd7a4f842c6a2f7004c17d8695` |
+| `/private/tmp/floe-ir4b2-vendored-units.log` | `758475310dced85dd2a26e6d3ffc1fc13c3b486d0196d4859a0d1278d0766902` |
+| `/private/tmp/floe-ir4b2-vendored-clippy.log` | `26ed0c717c2bd3f59fdd6923fa255ef15f522733e36028cbdf3d6705d02d7e6a` |
+| `/private/tmp/floe-ir4b2-owner-final.log` | `396150ac058930d9b4904ad3d613f0821544fa5d958ea0a26fa4574d994900d9` |
+
+최종 진행도: **IR-1/2/3, IR-4a, IR-4b-1/2 완료. 승인된 비실측 구현의 확인된
+잔여는 0**이다. 실제 GUI/현장 수용과 NFS 회수·원격 공유·외부 CI·조건부 world-tile·
+WK 동결·정식 배포 승인 등 명시적 보류는 [잔여 표](WEBUI_REMAINING.ko.md)에 구분했다.

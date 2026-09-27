@@ -91,6 +91,35 @@ fn inspection_creates_nothing_and_keeps_legacy_and_unsealed_protected() {
 }
 
 #[test]
+fn recovery_ids_are_bounded_unverified_observations_without_path_traversal() {
+    let f = Fixture::new();
+    let set = Store::new(f.source.path()).unwrap();
+    fs::create_dir(set.path()).unwrap();
+    for i in 0..=MAX_ROWS {
+        fs::write(
+            set.path().join(format!(".reclaim-{i:032x}.json")),
+            b"unverified, not a valid journal",
+        )
+        .unwrap();
+    }
+    std::os::unix::fs::symlink(
+        f.source.path(),
+        set.path().join(format!(".reclaim-{}.json", "f".repeat(32))),
+    )
+    .unwrap();
+    let result = f.inspect();
+    assert!(result.partial);
+    assert_eq!(result.recoveries.len(), MAX_ROWS);
+    assert_eq!(result.recoveries[0], "0".repeat(32));
+    assert!(!result.recoveries.contains(&"f".repeat(32)));
+    assert!(result.rows.is_empty());
+    assert!(!serde_json::to_string(&result)
+        .unwrap()
+        .contains(f.path.to_str().unwrap()));
+    assert_eq!(fs::read_dir(set.path()).unwrap().count(), MAX_ROWS + 2);
+}
+
+#[test]
 fn snapshot_clones_and_independent_processes_keep_shared_leases() {
     let f = Fixture::new();
     let bytes = f.sealed('a', 2, None);
@@ -256,6 +285,7 @@ fn seal_budget_marks_unchecked_rows_partial_without_skipping_usage_bytes() {
         result: Inventory {
             logical_bytes: "0".into(),
             rows: Vec::new(),
+            recoveries: Vec::new(),
             stores_scanned: 0,
             unknown_entries: 0,
             unavailable_entries: 0,

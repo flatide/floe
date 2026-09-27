@@ -63,7 +63,7 @@ h2 { font-size: 11px; letter-spacing: 1.25px; text-transform: uppercase; font-we
 .primary { background: #2e65aa; border-color: #5488c8; }
 .primary:hover:not(:disabled) { background: #3877c4; }
 .note { font-size: 12px; line-height: 1.5; color: #9dacc0; margin: 9px 0 0; overflow-wrap: anywhere; }
-#revision-usage-status { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow-y: auto; user-select: text; }
+#revision-usage-status, #reclaim-status { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow-y: auto; user-select: text; }
 .check { display: flex; align-items: center; gap: 7px; margin-top: 9px; font-size: 12px; }
 .check-row { display: flex; gap: 12px; margin-top: 5px; }
 details > summary { cursor: pointer; font-size: 12px; color: #b4c3d8; }

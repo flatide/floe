@@ -16,6 +16,263 @@ fn use_it(seq: u64, source: &Value, rev: &Value, target: Value, mode: &str) -> V
         "mode":mode,"revision":rev,"approved":true,"target":target,"pixels":[137,103]})
 }
 
+fn prepare_reclaim(seq: u64, source: &Value, revision: &Value) -> Value {
+    json!({"kind":"prepare_reclaim","seq":seq.to_string(),"source_id":source,"revision":revision})
+}
+fn reclaim(seq: u64, preview: &Value) -> Value {
+    json!({"kind":"reclaim_revision","seq":seq.to_string(),"source_id":preview["source_id"],
+        "revision":preview["preview"]["revision"],"token":preview["preview"]["token"],"approved":true})
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "run tools/validate_owner_service.py on private fixtures"]
+async fn explicit_reclamation_is_one_shot_and_new_session_requires_new_preview() {
+    let dir = area("revision-reclaim");
+    let path = dir.join("A.oas");
+    let h = Harness::start(std::slice::from_ref(&path), native()).await;
+    let login = h.login().await;
+    let source = h.service.catalog()["sources"][0]["source_id"].clone();
+    let first = operation(&h, &login, build(1, &source)).await;
+    let old = first["index_revision"].clone();
+    assert_eq!(first["phase"], "succeeded", "{first}");
+    let store = cache::revision::set::Store::new(&path).unwrap();
+    let pin = store
+        .pin(&[path.clone()].into(), &None, &AtomicUsize::new(0))
+        .unwrap()
+        .unwrap();
+    let second = operation(&h, &login, build(2, &source)).await;
+    let current = fs::read(store.path().join("current.json")).unwrap();
+    assert_eq!(
+        operation(&h, &login, prepare_reclaim(3, &source, &old)).await["error"],
+        "busy"
+    );
+    drop(pin);
+    let preview = operation(&h, &login, prepare_reclaim(4, &source, &old)).await;
+    assert_eq!(preview["phase"], "succeeded", "{preview}");
+    assert!(!preview.to_string().contains(dir.to_str().unwrap()));
+    assert!(!store
+        .path()
+        .join(format!(".reclaim-{}.json", old.as_str().unwrap()))
+        .exists());
+    let request = reclaim(5, &preview);
+    // Even a valid preview grants no authority to an unauthenticated or
+    // non-CSRF request. Neither denial changes the operation ledger.
+    let origin = format!("http://{}", h.addr);
+    for authenticated in [false, true] {
+        let mut headers = vec![
+            ("Origin", origin.as_str()),
+            ("Content-Type", "application/json"),
+        ];
+        if authenticated {
+            headers.push(("Cookie", login.cookie.as_str()));
+        }
+        let response = h
+            .raw("POST", "/api/v1/operations", &headers, &request.to_string())
+            .await;
+        assert!(matches!(response.0, 401 | 403));
+    }
+    for (key, value, error) in [
+        ("approved", json!(false), "approval_required"),
+        ("token", json!("e".repeat(64)), "preview_unavailable"),
+        (
+            "revision",
+            second["index_revision"].clone(),
+            "preview_unavailable",
+        ),
+    ] {
+        let mut bad = request.clone();
+        bad[key] = value;
+        assert_eq!(
+            h.call(&login, "POST", "/api/v1/operations", bad).await.1["error"],
+            error
+        );
+    }
+    assert_eq!(h.service.operations()["last_seq"], "4");
+    let usage = operation(
+        &h,
+        &login,
+        json!({"kind":"revision_usage","seq":"5","source_id":source}),
+    )
+    .await;
+    assert!(usage["inventory"]["recoveries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let mut stale = request.clone();
+    stale["seq"] = json!("6");
+    assert_eq!(
+        h.call(&login, "POST", "/api/v1/operations", stale).await.1["error"],
+        "preview_unavailable"
+    );
+    let preview = operation(&h, &login, prepare_reclaim(6, &source, &old)).await;
+    let old_request = reclaim(7, &preview);
+    // The accepted preview is not persisted as approval across a server restart.
+    h.shutdown().await;
+    let h = Harness::start(std::slice::from_ref(&path), native()).await;
+    let login = h.login().await;
+    let source = h.service.catalog()["sources"][0]["source_id"].clone();
+    let mut stale = old_request;
+    stale["seq"] = json!("1");
+    stale["source_id"] = source.clone();
+    assert_eq!(
+        h.call(&login, "POST", "/api/v1/operations", stale).await.1["error"],
+        "preview_unavailable"
+    );
+    let preview = operation(&h, &login, prepare_reclaim(1, &source, &old)).await;
+    let request = reclaim(2, &preview);
+    let done = operation(&h, &login, request.clone()).await;
+    assert_eq!(done["phase"], "succeeded", "{done}");
+    assert_eq!(done["outcome"]["status"], "complete");
+    assert!(!store.path().join(old.as_str().unwrap()).exists());
+    assert_eq!(
+        fs::read(store.path().join("current.json")).unwrap(),
+        current
+    );
+    assert_eq!(
+        h.call(&login, "POST", "/api/v1/operations", request.clone())
+            .await
+            .1,
+        done,
+        "same receipt, no replayed deletion"
+    );
+    let mut used = request;
+    used["seq"] = json!("3");
+    assert_eq!(
+        h.call(&login, "POST", "/api/v1/operations", used).await.1["error"],
+        "preview_unavailable"
+    );
+    let usage = operation(
+        &h,
+        &login,
+        json!({"kind":"revision_usage","seq":"3","source_id":source}),
+    )
+    .await;
+    assert_eq!(usage["inventory"]["recoveries"], json!([old]));
+    let checked = operation(&h, &login, prepare_reclaim(4, &source, &old)).await;
+    assert_eq!(checked["preview"]["complete"], true);
+    assert_eq!(checked["preview"]["files"], 0);
+    assert_eq!(
+        h.call(&login, "POST", "/api/v1/operations", reclaim(5, &checked))
+            .await
+            .1["error"],
+        "preview_unavailable"
+    );
+    let opened = operation(
+        &h,
+        &login,
+        use_it(
+            5,
+            &source,
+            &second["index_revision"],
+            json!({"kind":"empty"}),
+            "level",
+        ),
+    )
+    .await;
+    assert_eq!(opened["phase"], "succeeded");
+    let mut ws = h.connect(&login).await;
+    frame(&mut ws).await;
+    ws.close(None).await.ok();
+    h.shutdown().await;
+    println!("RUST REVISION RECLAIM: ALL OK (opaque preview, current/pin protection, separate consent, at-most-once deletion, restart reapproval, journal discovery, current frame)");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "run tools/validate_owner_service.py on private fixtures"]
+async fn killed_synthetic_reclaimer_is_recovered_only_after_new_http_consent() {
+    let dir = area("reclaim-recovery");
+    let path = dir.join("A.oas");
+    let h = Harness::start(std::slice::from_ref(&path), native()).await;
+    let login = h.login().await;
+    let source = h.service.catalog()["sources"][0]["source_id"].clone();
+    let old = operation(&h, &login, build(1, &source)).await["index_revision"].clone();
+    let current_revision = operation(&h, &login, build(2, &source)).await["index_revision"].clone();
+    let store = cache::revision::set::Store::new(&path).unwrap();
+    let current = fs::read(store.path().join("current.json")).unwrap();
+    h.shutdown().await;
+    // A test-only backend barrier stops after one acknowledged unlink. Kill
+    // and reap only this child; no production fault-injection switch is added.
+    let mut child = std::process::Command::new(std::env::var_os("FLOE_RECLAIM_TEST_BIN").unwrap())
+        .args([
+            "--exact",
+            "cache::revision::set::reclaim::tests::reclaim_child",
+            "--nocapture",
+        ])
+        .env("FLOE_TEST_RECLAIM_ROOT", &dir)
+        .env("FLOE_TEST_RECLAIM_SOURCE", "A.oas")
+        .env("FLOE_TEST_RECLAIM_ID", old.as_str().unwrap())
+        .spawn()
+        .unwrap();
+    let ready = dir.join("child-ready");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready.exists() && Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let reached = ready.exists();
+    let _ = child.kill();
+    let status = child.wait().unwrap();
+    assert!(reached && !status.success());
+    assert_eq!(
+        fs::read(store.path().join("current.json")).unwrap(),
+        current
+    );
+    let h = Harness::start(std::slice::from_ref(&path), native()).await;
+    let login = h.login().await;
+    let source = h.service.catalog()["sources"][0]["source_id"].clone();
+    let usage = operation(
+        &h,
+        &login,
+        json!({"kind":"revision_usage","seq":"1","source_id":source}),
+    )
+    .await;
+    assert_eq!(usage["inventory"]["recoveries"], json!([old]));
+    assert!(
+        store.path().join(old.as_str().unwrap()).exists(),
+        "listing must not resume deletion"
+    );
+    let preview = operation(&h, &login, prepare_reclaim(2, &source, &old)).await;
+    assert_eq!(preview["phase"], "succeeded", "{preview}");
+    assert_eq!(preview["preview"]["recovery"], true);
+    assert_eq!(preview["preview"]["complete"], false);
+    let mut denied = reclaim(3, &preview);
+    denied["approved"] = json!(false);
+    assert_eq!(
+        h.call(&login, "POST", "/api/v1/operations", denied).await.1["error"],
+        "approval_required"
+    );
+    assert!(store.path().join(old.as_str().unwrap()).exists());
+    let done = operation(&h, &login, reclaim(3, &preview)).await;
+    assert_eq!(done["outcome"]["status"], "complete", "{done}");
+    assert!(!store.path().join(old.as_str().unwrap()).exists());
+    assert_eq!(
+        fs::read(store.path().join("current.json")).unwrap(),
+        current
+    );
+    assert_eq!(
+        operation(
+            &h,
+            &login,
+            use_it(
+                4,
+                &source,
+                &current_revision,
+                json!({"kind":"empty"}),
+                "level"
+            )
+        )
+        .await["phase"],
+        "succeeded"
+    );
+    let mut ws = h.connect(&login).await;
+    frame(&mut ws).await;
+    ws.close(None).await.ok();
+    h.shutdown().await;
+    println!("RUST REVISION RECLAIM RECOVERY: ALL OK (private helper kill/reap, persisted journal, new owner preview/consent, current frame preserved)");
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "run tools/validate_owner_service.py on private fixtures"]
 async fn explicit_revision_cutover_pins_old_view_and_rejects_stale_approvals() {

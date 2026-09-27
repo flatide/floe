@@ -161,6 +161,18 @@ impl IndexArgs {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationDto {
+    PrepareReclaim {
+        seq: String,
+        source_id: String,
+        revision: String,
+    },
+    ReclaimRevision {
+        seq: String,
+        source_id: String,
+        revision: String,
+        token: String,
+        approved: bool,
+    },
     RevisionUsage {
         seq: String,
         source_id: String,
@@ -229,6 +241,17 @@ pub enum OperationDto {
     },
 }
 enum Command {
+    PrepareReclaim {
+        source: Arc<RegisteredSource>,
+        source_id: String,
+        revision: String,
+    },
+    ReclaimRevision {
+        source_id: String,
+        revision: String,
+        token: String,
+        prepared: Option<Box<floe_app_core::cache::revision::reclaim::Prepared>>,
+    },
     RevisionUsage {
         source: Arc<RegisteredSource>,
         source_id: String,
@@ -300,6 +323,7 @@ struct State {
     window_display: WindowDisplay,
     // Same maximum as the operation ledger. Only failed cache opens are kept.
     retry_opens: VecDeque<(u64, OpenCommand)>,
+    reclaim: Option<revisions::Preview>,
 }
 struct Inner {
     exports: Arc<crate::exports::Service>,
@@ -377,6 +401,7 @@ impl Service {
                 registering: false,
                 window_display: WindowDisplay::default(),
                 retry_opens: VecDeque::new(),
+                reclaim: None,
             }),
             wake: Condvar::new(),
         });
@@ -610,6 +635,8 @@ impl Service {
             | OperationDto::IndexRevision { seq, .. }
             | OperationDto::CheckRevision { seq, .. }
             | OperationDto::RevisionUsage { seq, .. }
+            | OperationDto::PrepareReclaim { seq, .. }
+            | OperationDto::ReclaimRevision { seq, .. }
             | OperationDto::UseRevision { seq, .. }
             | OperationDto::IndexOpen { seq, .. } => view::counter(seq)?,
         };
@@ -625,7 +652,45 @@ impl Service {
             }
         }
         let source = |id: &str| self.source(id).ok_or("source_unavailable");
-        let (kind, command) = match request {
+        let (kind, mut command) = match request {
+            OperationDto::PrepareReclaim {
+                source_id,
+                revision,
+                ..
+            } => {
+                revisions::identity(&revision)?;
+                (
+                    "prepare_reclaim",
+                    Command::PrepareReclaim {
+                        source: source(&source_id)?,
+                        source_id,
+                        revision,
+                    },
+                )
+            }
+            OperationDto::ReclaimRevision {
+                source_id,
+                revision,
+                token,
+                approved,
+                ..
+            } => {
+                if !approved {
+                    return Err("approval_required");
+                }
+                revisions::identity(&revision)?;
+                revisions::token(&token)?;
+                source(&source_id)?;
+                (
+                    "reclaim_revision",
+                    Command::ReclaimRevision {
+                        source_id,
+                        revision,
+                        token,
+                        prepared: None,
+                    },
+                )
+            }
             OperationDto::RevisionUsage { source_id, .. } => (
                 "revision_usage",
                 Command::RevisionUsage {
@@ -873,9 +938,35 @@ impl Service {
         if s.registering {
             return Err("busy");
         }
+        // Recheck replay under this same lock before consulting/consuming a
+        // one-shot preview; concurrent duplicates must return the receipt.
+        if let Some(replay) = s.ledger.replay(seq, &signature)? {
+            return Ok(replay);
+        }
+        if let Command::ReclaimRevision {
+            source_id,
+            revision,
+            token,
+            ..
+        } = &command
+        {
+            if !s
+                .reclaim
+                .as_ref()
+                .is_some_and(|p| p.matches(source_id, revision, token))
+            {
+                return Err("preview_unavailable");
+            }
+        }
         match s.ledger.admit(seq, signature, kind)? {
             Admission::Replay(state) => return Ok(state),
             Admission::New => (),
+        }
+        // Every accepted operation invalidates the previous preview. Reclaim
+        // consumes it at admission even if cancelled before its worker starts.
+        let previous = s.reclaim.take();
+        if let Command::ReclaimRevision { prepared, .. } = &mut command {
+            *prepared = Some(Box::new(previous.expect("validated preview").prepared));
         }
         let stop = Arc::new(AtomicUsize::new(0));
         if let Command::IndexOpen {
@@ -942,6 +1033,7 @@ impl Service {
         self.inner.exports.request_stop();
         let mut s = self.inner.state.lock().unwrap();
         s.closed = true;
+        s.reclaim = None;
         if let Some(flag) = &s.active_stop {
             flag.store(1, Ordering::Relaxed);
         }
@@ -994,6 +1086,8 @@ fn run(inner: Arc<Inner>) {
             }
             Command::CheckRevision { .. } => "check_revision",
             Command::RevisionUsage { .. } => "revision_usage",
+            Command::PrepareReclaim { .. } => "prepare_reclaim",
+            Command::ReclaimRevision { .. } => "reclaim_revision",
         };
         let retry = match &work.command {
             Command::Open(open) if open.index_revision.is_none() => Some((**open).clone()),
@@ -1156,6 +1250,23 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
                 json!({"seq":seq.to_string(),"kind":"revision_usage","phase":"succeeded",
                 "source_id":source_id,"inventory":inventory}),
             )
+        }
+        Command::PrepareReclaim {
+            source,
+            source_id,
+            revision,
+        } => revisions::prepare(inner, seq, source, source_id, revision, &stop),
+        Command::ReclaimRevision {
+            source_id,
+            prepared,
+            ..
+        } => {
+            let prepared = prepared
+                .ok_or_else(|| Error::new(ErrorKind::Busy, "reclamation preview unavailable"))?;
+            let outcome = prepared.execute(&stop)?;
+            Ok(json!({"seq":seq.to_string(),"kind":"reclaim_revision",
+                "phase":if outcome.status == "complete" {"succeeded"} else {"incomplete"},
+                "source_id":source_id,"outcome":outcome}))
         }
         Command::CheckRevision {
             source,

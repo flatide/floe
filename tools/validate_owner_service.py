@@ -25,6 +25,14 @@ def main(fixture):
              if (r := json.loads(line)).get("reason") == "compiler-artifact"
              and r["target"]["name"] == "owner_service" and r.get("executable")]
     assert len(tests) == 1
+    helper_build = subprocess.run([cargo, "test", "--offline", "--locked", "-p", "floe-app-core",
+                                   "--lib", "--no-run", "--message-format=json"],
+                                  cwd=ROOT / "rust", text=True, capture_output=True, timeout=180)
+    assert helper_build.returncode == 0, helper_build.stderr
+    helpers = [r["executable"] for line in helper_build.stdout.splitlines()
+               if (r := json.loads(line)).get("reason") == "compiler-artifact"
+               and r["target"]["name"] == "floe_app_core" and r.get("executable")]
+    assert len(helpers) == 1
     with tempfile.TemporaryDirectory(prefix="floe-owner-service-") as td:
         work = Path(td)
         source = work / "설계 with spaces.oas"
@@ -81,6 +89,7 @@ for line in sys.stdin:
             cache = vfs_cache(mode_source)
             mode_caches[cache] = digest(cache)
         env["FLOE_OWNER_MODE_FIXTURE"] = str(mode_dir / "A.oas")
+        env["FLOE_RECLAIM_TEST_BIN"] = helpers[0]
         checked = subprocess.run([tests[0], "--ignored", "--nocapture"], env=env,
                              text=True, capture_output=True, timeout=120)
         assert checked.returncode == 0, (checked.stdout, checked.stderr)
@@ -103,6 +112,8 @@ for line in sys.stdin:
         assert "RUST LIVE DECK INDEX: ALL OK" in checked.stdout
         assert "RUST INDEX REVISION CUTOVER: ALL OK" in checked.stdout
         assert "RUST REVISION INVENTORY: ALL OK" in checked.stdout
+        assert "RUST REVISION RECLAIM: ALL OK" in checked.stdout
+        assert "RUST REVISION RECLAIM RECOVERY: ALL OK" in checked.stdout
         assert "RUST INDEX REVISION DECK: ALL OK" in checked.stdout
         assert "RUST DECK LEVELS: ALL OK" in checked.stdout
         assert "RUST DECK LEVELS INDEX: ALL OK" in checked.stdout

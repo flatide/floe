@@ -63,6 +63,8 @@ const workerFailure=process.env.FLOE_TEST_WORKER_FAILURE||'';
 const indexDefaultsEnabled=process.env.FLOE_TEST_INDEX_DEFAULTS==='1';
 const revisionEnabled=process.env.FLOE_TEST_REVISIONS==='1',revisionHistory=[];
 let checkedRevision=null;
+let reclaimCounter=0,reclaimTimeout=false,reclaimComplete=false,reclaimReadFailure=false;
+const reclaimId='6'.repeat(32);
 function presetFixture(){
     const lines=name=>fs.readFileSync(__dirname+'/../../../floe/'+name,'utf8').split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#')).map(l=>l.split(/\s+/));
     return {version:1,colors:lines('colornames.def').map(([name,color])=>({name,color:'#'+color.toLowerCase()})),
@@ -220,23 +222,32 @@ class XHR {
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
         if((indexOpenEnabled||revisionEnabled)&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
         if(revisionEnabled){
-            if(this.path==='/api/v1/capabilities'){value.index_revisions=true;}
+            if(this.path==='/api/v1/capabilities'){value.index_revisions=true;value.index_reclamation=true;}
             if(this.path==='/api/v1/catalog'){value.sources[0].source_id=indexSource;}
             if(this.path==='/api/v1/view'&&value){value.source_id=indexSource;value.index_revision=checkedRevision;}
             if(this.path==='/api/v1/operations'){
                 if(this.method==='POST'){
                     if(body.kind==='index_revision'){assert.equal(body.approved,true);value.index_revision='7'.repeat(32);}
                     if(body.kind==='check_revision'){value.source_id=body.source_id;value.levels=body.levels;value.index_revision='7'.repeat(32);}
-                    if(body.kind==='revision_usage'){value.source_id=body.source_id;value.inventory={logical_bytes:'9007199254740993',stores_scanned:2,unknown_entries:0,unavailable_entries:0,partial:false,rows:[]};}
+                    if(body.kind==='revision_usage'){value.source_id=body.source_id;value.inventory={logical_bytes:'9007199254740993',stores_scanned:2,unknown_entries:0,unavailable_entries:0,partial:false,rows:[],recoveries:[reclaimId]};}
+                    if(body.kind==='prepare_reclaim'){
+                        value.source_id=body.source_id;value.preview={token:String(++reclaimCounter).repeat(64),revision:body.revision,
+                            files:reclaimComplete?0:7,logical_bytes:reclaimComplete?'0':'128',sources:1,recovery:true,complete:reclaimComplete,expires_in_s:300};
+                    }
+                    if(body.kind==='reclaim_revision'){
+                        assert.equal(body.approved,true);value.source_id=body.source_id;
+                        value.phase='incomplete';value.outcome={revision:body.revision,status:'outcome_unknown',removed_files:1,removed_logical_bytes:'16',sync_warning:false};
+                    }
                     if(body.kind==='use_revision'){
                         assert.equal(body.revision,'7'.repeat(32));checkedRevision=body.revision;
                         viewId='8'.repeat(64);snapshot.view_id=viewId;snapshot.dataset_revision='2';snapshot.worker_epoch='2';value.view_id=viewId;
                     }
                     revisionHistory.push(value);
-                }else{value={last_seq:lastSeq,active:null,history:revisionHistory};}
+                }else{value={last_seq:lastSeq,active:null,history:revisionHistory};if(reclaimReadFailure){reclaimReadFailure=false;status=503;value={error:'unavailable'};}}
             }
         }
         this.status=status;this.responseText=settingsPath&&this.method==='GET'?value:JSON.stringify(value);
+        if(revisionEnabled&&body&&body.kind==='reclaim_revision'&&reclaimTimeout){reclaimTimeout=false;reclaimReadFailure=true;setImmediate(()=>this.ontimeout());return;}
         if(viewReadArmed&&this.method==='GET'&&this.path==='/api/v1/view'){viewReadArmed=false;viewReadResponse=this;return;}
         if(closeBoundary&&this.method==='DELETE'&&this.path.startsWith('/api/v1/views/')){closeResponse=this;return;}
         if(this.method+' '+this.path===startupSuspend&&++startupMatches===Number(process.env.FLOE_TEST_STARTUP_MATCH||1)){startupSuspendReply=this;return;}
@@ -635,8 +646,34 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         assert.equal(writes().at(-1).body.kind,'revision_usage');
         assert(!writes().at(-1).body.approved&&!writes().at(-1).body.path);
         assert.equal(viewId,'8'.repeat(64),'usage must not change the view');
-        assert.equal(writes().length,before+4);listeners.pagehide();
-        console.log('WEB INDEX REVISION CLIENT: ALL OK (one approval, unknown build response read-only recovery, separate check/use, captured CAS, clear foreground/margin)');return;
+        assert.equal(writes().length,before+4);
+        await wait(()=>!node('reclaim-id').disabled);
+        assert.equal(node('reclaim-panel').hidden,false);assert(node('reclaim-run').disabled);
+        node('reclaim-choice').value=reclaimId;node('reclaim-choice').onchange();
+        assert.equal(node('reclaim-id').value,reclaimId);assert(!node('reclaim-prepare').disabled);
+        node('reclaim-prepare').onclick();await wait(()=>!node('reclaim-approve').disabled);
+        assert(node('reclaim-run').disabled,'preview/read-only recovery cannot approve deletion');
+        node('reclaim-approve').checked=true;node('reclaim-approve').onchange();assert(!node('reclaim-run').disabled);
+        node('reclaim-id').value='5'.repeat(32);node('reclaim-id').oninput();assert(node('reclaim-run').disabled);
+        node('reclaim-id').value=reclaimId;node('reclaim-id').oninput();assert(!node('reclaim-approve').checked);
+        node('reclaim-approve').checked=true;node('reclaim-approve').onchange();
+        node('revision-usage').onclick();await wait(()=>!node('revision-usage').disabled);
+        assert(node('reclaim-run').disabled);assert(node('reclaim-approve').disabled,'other operations consume old preview');
+        node('reclaim-prepare').onclick();await wait(()=>!node('reclaim-approve').disabled);
+        node('reclaim-approve').checked=true;node('reclaim-approve').onchange();
+        const beforeDelete=writes().length;reclaimTimeout=true;
+        node('reclaim-run').onclick();node('reclaim-run').onclick();
+        await wait(()=>writes().length===beforeDelete+1&&!reclaimReadFailure);
+        assert(node('reclaim-run').disabled,'lost POST and failed confirmation cannot unlock another deletion');
+        await new Promise(resolve=>setTimeout(resolve,1100)); // read-only reconciliation timer
+        await wait(()=>/outcome_unknown/.test(node('reclaim-status').textContent)&&!node('reclaim-prepare').disabled);
+        assert.equal(writes().length,beforeDelete+1,'double-click and lost response never repeat deletion');
+        assert.equal(writes().at(-1).body.kind,'reclaim_revision');assert(node('reclaim-run').disabled);
+        assert(!node('reclaim-approve').checked);assert.equal(viewId,'8'.repeat(64),'uncertain reclamation preserves current view');
+        reclaimComplete=true;node('reclaim-prepare').onclick();
+        await wait(()=>/already complete/.test(node('reclaim-status').textContent));
+        assert(node('reclaim-approve').disabled);assert(node('reclaim-run').disabled);listeners.pagehide();
+        console.log('WEB INDEX REVISION CLIENT: ALL OK (explicit cutover, reclaimed-set preview/consent, lost-response reconciliation, no retry, completed journal)');return;
     }
     if(indexDefaultsEnabled){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);

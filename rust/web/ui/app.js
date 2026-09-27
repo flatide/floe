@@ -33,6 +33,7 @@
     let catalog = [], currentId = '', currentSource = '', currentMode = 'level', ownerBusy = false, submitting = false;
     let revisionSupported = false, revisionCandidate = null, currentRevision = null, currentLevels = null;
     let revisionUsage = null;
+    let reclaimSupported=false,reclaimPreview=null,reclaimSeen='',reclaimSpent='',reclaimDeadline=0,reclaimTimer=null,reclaimChoices='';
     let modeReceipt = '', modeSupported = false, levelsSupported = false, fillEditSupported = false;
     let pendingStartup = null, startupWaiting = false;
     let gotoDirty = false, gotoRevision = 0, gotoView = '';
@@ -51,6 +52,8 @@
         prepared_edit_unavailable: 'The move could not be prepared. Try again.',
         prepared_edit_limit: 'This view cannot prepare another move. Close and reopen it.',
         invalid_request: 'The requested value or selection is not supported.',
+        preview_unavailable: 'This reclamation preview is no longer valid. Prepare the exact source/set again and give new approval; deletion was not replayed.',
+        approval_required: 'Separate explicit approval is required for this operation.',
         fill_edit_disabled: 'Bitmap-slot editing requires FLOE_FILL_EDIT at launch. Nothing was applied.',
         invalid_palette: 'The layer page or group is no longer valid. Reload the layer list.',
         palette_anchor_hidden: 'The range anchor is hidden by a folded group. Select its visible parent first.',
@@ -246,6 +249,15 @@
         el('revision-usage').disabled = !revisionReady;
         const usageText = revisionUsage && revisionUsage.source_id === el('source').value ? revisionUsage.text : 'Storage usage not checked for this source.';
         if(el('revision-usage-status').textContent !== usageText){el('revision-usage-status').textContent = usageText;}
+        const reclaimReady=revisionReady&&reclaimSupported;
+        el('reclaim-prepare').disabled=!reclaimReady||!window.FloeIndexRevisions.id(el('reclaim-id').value);
+        el('reclaim-id').disabled=!reclaimReady;el('reclaim-choice').disabled=!reclaimReady;
+        const rp=reclaimPreview&&reclaimPreview.preview;
+        const canReclaim=reclaimReady&&!!rp&&!rp.complete&&rp.token!==reclaimSpent&&Date.now()<reclaimDeadline&&
+            reclaimPreview.source_id===el('source').value&&rp.revision===el('reclaim-id').value;
+        if(!canReclaim){el('reclaim-approve').checked=false;}
+        el('reclaim-approve').disabled=!canReclaim;
+        el('reclaim-run').disabled=!canReclaim||!el('reclaim-approve').checked;
         let revisionMatches = false;
         try { revisionMatches = window.FloeIndexRevisions.matches(revisionCandidate, el('source').value, levels()); } catch (_) { /* incomplete selection */ }
         el('revision-use').disabled = !revisionReady || !revisionMatches || !!inflight || !!accepted || !!queue.length || !!(gesture && gesture.active()) || !!(live() && !epoch) || !!(drcPanel && drcPanel.recoveryBusy());
@@ -621,6 +633,9 @@
         el('index-representatives').disabled = source.deck;
         if (!source.deck) { el('mode').value = 'level'; }
         if (levelSource !== source.source_id) {
+            reclaimPreview=null;reclaimSeen='';reclaimDeadline=0;clearTimeout(reclaimTimer);
+            el('reclaim-approve').checked=false;el('reclaim-id').value='';
+            el('reclaim-status').textContent='No reclamation preview for this source.';
             el('index-occupancy').checked = source.deck;
             el('index-representatives').checked = false;
             el('index-occupancy-prune').value = '';
@@ -631,6 +646,7 @@
         }
         el('source-note').textContent = source.deck ? 'Jobdeck · select levels before opening.' : 'OASIS layout · current index required.';
         indexSummaryControls();
+        refreshReclaimChoices();
         controls();
     }
     async function refreshCatalog() {
@@ -678,6 +694,7 @@
         const recent = all.history || [], last = recent[recent.length - 1];
         revisionCandidate = window.FloeIndexRevisions.candidate(recent);
         revisionUsage = window.FloeIndexRevisions.usage(recent);
+        observeReclamation(recent);
         el('revision-status').textContent = revisionCandidate ? 'Checked revision: ' + revisionCandidate.index_revision + ' (selection must match)' : 'No matching published revision checked. Check the selected source/levels; no indexing or switch is automatic.';
         controls();
         if (last) { el('operation').textContent = operationLabel(last); }
@@ -806,6 +823,7 @@
         if (!currentPage(run)) { return; }
         sourceSelection();
         revisionSupported = !!caps.index_revisions; el('revision-panel').hidden = !revisionSupported;
+        reclaimSupported=!!caps.index_reclamation;el('reclaim-panel').hidden=!reclaimSupported;
         await indexOpen.init(caps.index_open);
         if (!currentPage(run)) { return; }
         const operations = await operationState();
@@ -873,6 +891,7 @@
         } catch (e) { if (currentPage(run) && currentId === id) { report(e); } }
     };
     async function endSession() {
+        clearTimeout(reclaimTimer);reclaimPreview=null;el('reclaim-approve').checked=false;
         sharing.stop();
         palette.stop();
         if (indexOpen) { indexOpen.stop(); }
@@ -1080,6 +1099,45 @@
         return options;
     }
     el('revision-approve').onchange = controls;
+    function observeReclamation(recent){
+        const next=window.FloeIndexRevisions.reclaimCandidate(recent),p=next&&next.preview;
+        if(!p||p.token!==reclaimSeen){
+            el('reclaim-approve').checked=false;reclaimSeen=p?p.token:'';
+            reclaimDeadline=p?Date.now()+p.expires_in_s*1000:0;
+        }
+        reclaimPreview=next;clearTimeout(reclaimTimer);reclaimTimer=null;
+        if(p&&reclaimDeadline>Date.now()){reclaimTimer=setTimeout(controls,reclaimDeadline-Date.now());}
+        el('reclaim-status').textContent=window.FloeIndexRevisions.reclaimText(recent);
+        refreshReclaimChoices();
+    }
+    function refreshReclaimChoices(){
+        const choices=revisionUsage&&revisionUsage.source_id===el('source').value?revisionUsage.choices:[];
+        const key=JSON.stringify([el('source').value,choices]);
+        if(key!==reclaimChoices){
+            reclaimChoices=key;el('reclaim-choice').textContent='';
+            const empty=document.createElement('option');empty.value='';empty.textContent='Select an observed set (not deletion permission)';el('reclaim-choice').appendChild(empty);
+            choices.forEach(function(c){const option=document.createElement('option');option.value=c.revision;option.textContent=c.label;option.disabled=c.current;el('reclaim-choice').appendChild(option);});
+            el('reclaim-choice').value='';
+        }
+    }
+    el('reclaim-id').oninput=function(){el('reclaim-approve').checked=false;controls();};
+    el('reclaim-choice').onchange=function(){el('reclaim-id').value=el('reclaim-choice').value;el('reclaim-approve').checked=false;controls();};
+    el('reclaim-approve').onchange=controls;
+    el('reclaim-prepare').onclick=function(){
+        if(el('reclaim-prepare').disabled){return;}
+        el('reclaim-approve').checked=false;
+        submitOperation({kind:'prepare_reclaim',source_id:el('source').value,revision:el('reclaim-id').value}).catch(report);
+    };
+    el('reclaim-run').onclick=function(){
+        if(el('reclaim-run').disabled){return;}
+        try{
+            if(Date.now()>=reclaimDeadline){throw Error('Reclamation preview expired; prepare again.');}
+            const request=window.FloeIndexRevisions.reclaimRequest(reclaimPreview,el('source').value,el('reclaim-id').value,el('reclaim-approve').checked);
+            reclaimSpent=request.token;el('reclaim-approve').checked=false;
+            submitOperation(request).catch(report);
+        }catch(e){report(e);}
+    };
+    window.addEventListener('pagehide',function(){clearTimeout(reclaimTimer);el('reclaim-approve').checked=false;reclaimPreview=null;});
     el('revision-build').onclick = function () {
         if (el('revision-build').disabled || !el('revision-approve').checked) { return; }
         try {

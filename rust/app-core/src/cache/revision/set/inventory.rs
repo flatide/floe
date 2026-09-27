@@ -14,6 +14,9 @@ pub struct Inventory {
     /// Decimal string: JSON must not round byte counts above 2^53.
     pub logical_bytes: String,
     pub rows: Vec<Entry>,
+    /// Unverified journal IDs, including completed/invalid journals. Listing
+    /// grants no authority; prepare must independently validate the contents.
+    pub recoveries: Vec<String>,
     pub stores_scanned: usize,
     pub unknown_entries: usize,
     pub unavailable_entries: usize,
@@ -161,7 +164,23 @@ impl Scan {
                             .is_some_and(valid_id)
                     });
                 match fs::symlink_metadata(&path) {
-                    Ok(m) if m.is_file() && m.nlink() == 1 => self.add_bytes(m.len())?,
+                    Ok(m) if m.is_file() && m.nlink() == 1 => {
+                        self.add_bytes(m.len())?;
+                        if is_set {
+                            if let Some(id) = name
+                                .to_str()
+                                .and_then(|n| n.strip_prefix(".reclaim-"))
+                                .and_then(|n| n.strip_suffix(".json"))
+                                .filter(|n| valid_id(n))
+                            {
+                                if self.result.recoveries.len() < MAX_ROWS {
+                                    self.result.recoveries.push(id.to_owned());
+                                } else {
+                                    self.result.partial = true;
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         self.result.unavailable_entries += 1;
                         self.result.partial = true;
@@ -291,6 +310,7 @@ pub fn inspect(source: &RegisteredSource, stop: &AtomicUsize) -> Result<Inventor
         result: Inventory {
             logical_bytes: "0".into(),
             rows: Vec::new(),
+            recoveries: Vec::new(),
             stores_scanned: 0,
             unknown_entries: 0,
             unavailable_entries: 0,
