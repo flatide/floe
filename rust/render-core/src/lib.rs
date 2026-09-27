@@ -57,4 +57,5 @@ pub use summary::{cull_allowed as summary_cull_allowed, layout_allowed as summar
 pub use stats::{place_walks_wire, RenderStats, DENSITY_STACK_COUNTS, PLACE_WALK_OUTCOMES};
 
 pub use floe_vfs::hier::HierPlan;
+pub use floe_vfs::hier::FixedFit;
 pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;

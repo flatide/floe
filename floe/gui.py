@@ -3565,9 +3565,13 @@ class Viewer:
                             cut += " %s to fit budget" % ", ".join(parts)
                         else:
                             cut += " x%.3g to fit budget" % factor
-                        cut += "%s%s" % (
+                        cut += "%s%s%s" % (
                             ", hairlines culled" if fit.get("fit_cull") else "",
-                            ", STILL OVER" if fit.get("fit_over") else "")
+                            ", STILL OVER" if fit.get("fit_over") else "",
+                            # the fit remembered for this scale did not hold
+                            # this frame: decided anew, the picture may have
+                            # changed (SPEC-PLANNER 2026-09-27)
+                            " (refit)" if fit.get("fit_redecided") else "")
                     drawn = ""
                     if res.get("drawn") is not None:
                         drawn = ", ~%s drawn" % fmt_count(res["drawn"])

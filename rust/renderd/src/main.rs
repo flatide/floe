@@ -871,6 +871,12 @@ struct WorkerState {
     jobs: u16,
     styles: Vec<LayerStyle>,
     style_epoch: Option<u64>,
+    /// The budget fit decided per render state and scale (fit_memory_key):
+    /// every later frame there - the viewport's, its margin, a pan's - is
+    /// planned under the same decision, so the picture does not change when
+    /// one replaces another (SPEC-PLANNER, 2026-09-27); a frame the decision
+    /// does not fit decides anew and replaces it.
+    fit_memory: BTreeMap<String, floe_render_core::FixedFit>,
 }
 
 impl Default for WorkerState {
@@ -883,8 +889,18 @@ impl Default for WorkerState {
             jobs: DEFAULT_JOBS,
             styles: Vec::new(),
             style_epoch: None,
+            fit_memory: BTreeMap::new(),
         }
     }
+}
+
+/// The key a budget fit is remembered under: the layers, depth, cut, thin
+/// mode and the exact scale (a pan keeps it, a zoom changes it).
+fn fit_memory_key(command: &RenderCommand, request: &PlanRequest) -> String {
+    format!(
+        "{:?}|{}|{}|{:x}|{}|{}|{}",
+        command.visible_layers, command.depth, request.cut_dbu, request.px_per_dbu.to_bits(), command.thin_keep, request.page_hairline, command.frames
+    )
 }
 
 struct FramePixels {
@@ -1059,6 +1075,7 @@ fn run_clip(
         lod_swap: true,
         regions: Vec::new(),
         visible_indices: None,
+        fixed_fit: None,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1182,6 +1199,7 @@ fn handle_open(
                 state.cache = None;
                 state.page_cache = DecodedPageCache::new(0);
                 state.retained.clear();
+                state.fit_memory.clear();
                 state.jobs = command.jobs;
                 state.styles.clear();
                 state.style_epoch = None;
@@ -1224,6 +1242,7 @@ fn handle_open(
             state.cache = Some(cache);
             state.page_cache = DecodedPageCache::new(budget_bytes);
             state.retained.clear();
+                state.fit_memory.clear();
             state.jobs = command.jobs;
             state.styles.clear();
             state.style_epoch = None;
@@ -1289,6 +1308,7 @@ fn handle_style(state: &mut WorkerState, command: StyleCommand, responses: &Send
             state.styles = styles;
             state.style_epoch = Some(command.epoch);
             state.retained.clear();
+                state.fit_memory.clear();
             respond(
                 responses,
                 format!(
@@ -2284,7 +2304,7 @@ fn run_render(
     let request = make_plan_request(cache, command, state.page_cache.budget_bytes())?;
     // the summarized layers leave the page plan (§6 step 3): no page
     // selection, page BVH or child walk for them
-    let page_request = cache.page_plan_request(&request, &summary, !command.frames)?;
+    let mut page_request = cache.page_plan_request(&request, &summary, !command.frames)?;
     // §F2R-21 label re-synthesis: when a retained frame (the margin
     // prefetch) covers the WHOLE request, its geometry is a pure
     // memcpy - skip the page plan and decode entirely, plan only the
@@ -2302,6 +2322,34 @@ fn run_render(
         .as_ref()
         .is_some_and(|reuse| reuse.valid == [0, 0, command.width, command.height])
         && published_scene_serves(published_scene, command, state.style_epoch, &summary_key)?;
+    // the budget fit decided at this scale before, if any (WorkerState::
+    // fit_memory); the first frame at a scale decides it over the extent the
+    // viewer's margin frame will have - twice the view per axis - so the
+    // margin, when it lands, thins as the viewport did (no flip after a zoom)
+    let fit_key = fit_memory_key(command, &request);
+    if !command.exact && !label_only && page_request.decode_budget > 0 {
+        if let Some(decision) = state.fit_memory.get(&fit_key).copied() {
+            page_request.fixed_fit = Some(decision);
+        } else {
+            let [x0, y0, x1, y1] = command.view;
+            let (dx, dy) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
+            let probe = PlanRequest {
+                view: ViewBox::new(
+                    checked_bound((x0 - dx).floor(), "probe x0")?,
+                    checked_bound((y0 - dy).floor(), "probe y0")?,
+                    checked_bound((x1 + dx).ceil(), "probe x1")?,
+                    checked_bound((y1 + dy).ceil(), "probe y1")?,
+                )?,
+                ..page_request.clone()
+            };
+            let decided = cache.plan(&probe)?.plan.stats.fit_decision;
+            check_generation(cancellation, command.generation)?;
+            if let Some(decision) = decided {
+                state.fit_memory.insert(fit_key.clone(), decision);
+                page_request.fixed_fit = Some(decision);
+            }
+        }
+    }
     let mut representative_options = floe_render_core::RepresentativeOptions::default();
     representative_options.max_px_per_dbu = Some(
         (command.width as f64 / (command.view[2] - command.view[0]))
@@ -2332,6 +2380,14 @@ fn run_render(
         }
     };
     check_generation(cancellation, command.generation)?;
+    // remember the fit this plan decided (a redecision replaces the old one)
+    if !label_only && !command.exact {
+        if let Some(decision) = planned.plan.stats.fit_decision {
+            if planned.plan.stats.fit_redecided || !state.fit_memory.contains_key(&fit_key) {
+                state.fit_memory.insert(fit_key.clone(), decision);
+            }
+        }
+    }
     let planned_labels = if command.labels {
         Some(cache.plan_labels(&request, command.frames, command.label_font_px)?)
     } else {
@@ -2735,7 +2791,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} queue_us={} wall_us={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} queue_us={} wall_us={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -2826,6 +2882,8 @@ fn run_render(
                 planned.summary.culls.fit_thin,
                 planned.summary.culls.fit_full_pct,
                 planned.summary.culls.fit_none_pct,
+                planned.summary.culls.fit_fixed,
+                planned.summary.culls.fit_redecided,
                 planned.summary.culls.sub_cut_boxes,
                 planned.summary.culls.sub_cut_box_over,
                 planned.summary.culls.sub_cut_box_level,
@@ -3385,6 +3443,7 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         lod_swap: lod_enabled(),
         regions: Vec::new(),
         visible_indices: None,
+        fixed_fit: None,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {

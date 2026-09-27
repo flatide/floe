@@ -1281,6 +1281,10 @@ class RustRenderWorker:
                 "fit_thin": _wire_int(fields, "fit_thin"),
                 "fit_full_pct": _wire_int(fields, "fit_full_pct"),
                 "fit_none_pct": _wire_int(fields, "fit_none_pct"),
+                # the fit remembered for this scale was applied (fit_fixed) or
+                # did not fit this frame and was decided anew (fit_redecided)
+                "fit_fixed": _wire_int(fields, "fit_fixed"),
+                "fit_redecided": _wire_int(fields, "fit_redecided"),
                 # sub-cut boxes (thin keep, few layers): what the size cut drops
                 # drawn as boxes from index metadata; boxes beyond the plan cap
                 "sub_cut_boxes": _wire_int(fields, "sub_cut_boxes"),

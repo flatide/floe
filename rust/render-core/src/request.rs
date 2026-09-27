@@ -88,6 +88,10 @@ pub struct PlanRequest {
     /// when Some (the density stack's pass 2: the top plane's layer alone,
     /// then the others).
     pub visible_indices: Option<Vec<u32>>,
+    /// A budget fit decided before, to apply as it is (floe_vfs::hier::
+    /// FixedFit; renderd keeps one per scale so the viewport frame and its
+    /// margin thin alike).
+    pub fixed_fit: Option<floe_vfs::hier::FixedFit>,
 }
 
 impl PlanRequest {
@@ -139,6 +143,7 @@ mod tests {
             lod_swap: true,
             regions: Vec::new(),
             visible_indices: None,
+            fixed_fit: None,
         };
         assert!(req.validate().is_err());
     }

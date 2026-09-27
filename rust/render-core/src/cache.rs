@@ -108,6 +108,10 @@ pub struct PlanCullCounts {
     /// everything under this percentage of the requested cut is gone (0 = no
     /// class dropped whole)
     pub fit_none_pct: u64,
+    /// a fit decided before was applied (1); one given did not fit and the
+    /// fit was decided anew (1)
+    pub fit_fixed: u64,
+    pub fit_redecided: u64,
     /// sub-cut boxes (floe_vfs::ViewReq::sub_cut_box): box rects the plan
     /// emitted, boxes dropped beyond the per-plan cap
     pub sub_cut_boxes: u64,
@@ -150,6 +154,8 @@ impl PlanCullCounts {
             fit_thin: st.fit_thin as u64,
             fit_full_pct: st.fit_full_pct as u64,
             fit_none_pct: st.fit_none_pct as u64,
+            fit_fixed: st.fit_fixed as u64,
+            fit_redecided: st.fit_redecided as u64,
             sub_cut_boxes: st.sub_cut_boxes,
             sub_cut_box_over: st.sub_cut_box_over,
             sub_cut_box_level: st.sub_cut_box_level as u64,
@@ -185,6 +191,8 @@ impl PlanCullCounts {
         self.fit_thin = self.fit_thin.max(other.fit_thin);
         self.fit_full_pct = self.fit_full_pct.max(other.fit_full_pct);
         self.fit_none_pct = self.fit_none_pct.max(other.fit_none_pct);
+        self.fit_fixed = self.fit_fixed.max(other.fit_fixed);
+        self.fit_redecided = self.fit_redecided.max(other.fit_redecided);
         self.sub_cut_boxes = self.sub_cut_boxes.saturating_add(other.sub_cut_boxes);
         self.sub_cut_box_over = self.sub_cut_box_over.saturating_add(other.sub_cut_box_over);
         self.sub_cut_box_level = self.sub_cut_box_level.max(other.sub_cut_box_level);
@@ -802,7 +810,7 @@ impl Cache {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
-        let mut plan = self.vfs.plan_hier_in(&req, &regions);
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit);
         let plan_us = elapsed_us(started);
         // a request whose every visible layer is summarized (and
         // pruned) plans no working cell at all; the scene still needs

@@ -490,8 +490,26 @@ pub fn frame_band(rect: &BBox, px_per_dbu: f64) -> u8 {
 /// variants per cell.
 pub type WsKey = (u32, u32);
 
+/// A budget fit's decision (thin_to_budget), kept per scale so every frame
+/// at that scale thins the same way (SPEC-PLANNER, 2026-09-27: the margin
+/// frame, a wider view, ended its prefix earlier and the picture changed when
+/// it replaced the viewport's): the cut the plan was made at and the
+/// `fit_priority` of the last page kept - a page is kept when its priority is
+/// at most this, whatever the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixedFit {
+    pub cut_dbu: i64,
+    pub class: u32,
+    pub phase: u32,
+    pub page: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct HierOpts {
+    /// A budget fit decided before (FixedFit): applied as it is when the
+    /// plan fits the budget under it, else the fit is decided anew and
+    /// HierStats::fit_redecided says so. None: decide.
+    pub fixed_fit: Option<FixedFit>,
     /// The world regions the plan is for, in place of the request's one
     /// view (empty: the view): the top cell is seeded with each of them, so
     /// the K-box clip regions descend from the regions and what lies
@@ -633,6 +651,7 @@ pub struct ExplainRow {
 impl Default for HierOpts {
     fn default() -> HierOpts {
         HierOpts {
+            fixed_fit: None,
             regions: Vec::new(),
             k_boxes: 4,
             pts_full_rep: 8192,
@@ -785,6 +804,12 @@ pub struct HierStats {
     pub fit_thin: u32,
     pub fit_full_pct: u32,
     pub fit_none_pct: u32,
+    /// the fit's decision (None: the plan fit whole), whether a decision
+    /// given was applied, and whether one given did not fit and the fit was
+    /// decided anew
+    pub fit_decision: Option<FixedFit>,
+    pub fit_fixed: bool,
+    pub fit_redecided: bool,
     /// dots emitted for representative cut placements (kept members
     /// in view, before the layer fan-out) and for cut child-BVH
     /// subtrees within the dot pitch (one each)
@@ -1102,7 +1127,14 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         return plan_hier_as_asked(v, req, opts, 0);
     }
     if opts.fit_thin {
-        return plan_hier_thinned(v, req, opts);
+        if let Some(fixed) = opts.fixed_fit {
+            if let Some(plan) = plan_hier_fixed(v, req, opts, fixed) {
+                return plan;
+            }
+        }
+        let mut plan = plan_hier_thinned(v, req, opts);
+        plan.stats.fit_redecided = opts.fixed_fit.is_some();
+        return plan;
     }
     let mut passes = 1u32;
     let asked = plan_hier_as_asked(v, req, opts, req.decode_budget);
@@ -1198,6 +1230,9 @@ fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         if !thin_to_budget(v, &mut plan, key, req.cut_dbu, req.decode_budget) {
             break;
         }
+        if let Some(decision) = plan.stats.fit_decision.as_mut() {
+            decision.cut_dbu = cuts[used];
+        }
         plan.stats.fit_pct = ((cuts[used] as f64 / req.cut_dbu as f64) * 100.0).round().max(100.0) as u32;
         if used > 0 {
             // the raised cut dropped what is under it
@@ -1285,9 +1320,30 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, bud
     let in_edge = order.iter().filter(|&&i| class_of(i) == edge).count() as u64;
     let kept_edge = order[..kept].iter().filter(|&&i| class_of(i) == edge).count() as u64;
     let below = order.iter().any(|&i| class_of(i) < edge);
+    // the decision: the last page kept (its cut is the caller's)
+    let last = prio[order[kept - 1]];
+    plan.stats.fit_decision = Some(FixedFit { cut_dbu: asked_cut, class: last.0 .0, phase: last.1, page: last.2 });
+    fit_class_stats(plan, &prio, &keep, edge, asked_cut);
+    debug_assert_eq!(in_edge, prio.iter().filter(|p| p.0 .0 == edge).count() as u64);
+    debug_assert_eq!(kept_edge, prio.iter().zip(&keep).filter(|(p, k)| p.0 .0 == edge && **k).count() as u64);
+    debug_assert_eq!(below, prio.iter().any(|p| p.0 .0 < edge));
+    plan.stats.page_bytes = keep_pages(v, plan, &keep);
+    plan.stats.fit_bytes = bytes;
+    true
+}
+
+/// The fit's class stats over `keep`: the class the prefix ends in (`edge`)
+/// keeps about one page in 2^fit_thin, the complete classes start at
+/// fit_full_pct percent of the requested cut, everything under fit_none_pct
+/// percent is gone.
+fn fit_class_stats(plan: &mut HierPlan, prio: &[(std::cmp::Reverse<u32>, u32, u32)], keep: &[bool], edge: u32, asked_cut: i64) {
+    let class_of = |i: usize| prio[i].0 .0;
+    let in_edge = (0..prio.len()).filter(|&i| class_of(i) == edge).count() as u64;
+    let kept_edge = (0..prio.len()).filter(|&i| class_of(i) == edge && keep[i]).count() as u64;
+    let below = (0..prio.len()).any(|i| class_of(i) < edge);
     let pct = |class: u32| (((1u64 << class.min(62)) as f64 / asked_cut.max(1) as f64) * 100.0).round().clamp(100.0, u32::MAX as f64) as u32;
     plan.stats.fit_thin = if kept_edge == 0 { 0 } else { (in_edge.div_ceil(kept_edge) as f64).log2().ceil().max(1.0) as u32 };
-    plan.stats.fit_full_pct = order[..kept].iter().map(|&i| class_of(i)).filter(|&class| class > edge).min().map(pct).unwrap_or(0);
+    plan.stats.fit_full_pct = (0..prio.len()).filter(|&i| keep[i]).map(class_of).filter(|&class| class > edge).min().map(pct).unwrap_or(0);
     plan.stats.fit_none_pct = if kept_edge == 0 {
         pct(edge + 1)
     } else if below {
@@ -1295,7 +1351,12 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, bud
     } else {
         0
     };
-    let dropped: HashSet<u32> = plan.pages.iter().zip(&keep).filter(|(_, k)| !**k).map(|(&pi, _)| pi).collect();
+}
+
+/// Drops the plan's pages not in `keep` (by position in `plan.pages`), their
+/// page levels with them; the stored bytes of the pages left, per cell.
+fn keep_pages(v: &Ovm, plan: &mut HierPlan, keep: &[bool]) -> u64 {
+    let dropped: HashSet<u32> = plan.pages.iter().zip(keep).filter(|(_, k)| !**k).map(|(&pi, _)| pi).collect();
     let mut page_bytes = 0u64;
     for cell in &mut plan.wcells {
         if !cell.page_levels.is_empty() {
@@ -1322,9 +1383,49 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, bud
         at += 1;
         keep[at - 1]
     });
-    plan.stats.page_bytes = page_bytes;
+    page_bytes
+}
+
+/// A budget fit decided before, applied as it is (HierOpts::fixed_fit): the
+/// complete plan at the decision's cut keeps the pages whose `fit_priority`
+/// is at most the decision's - the same pages, whatever the frame - so every
+/// frame at a scale thins alike. None when those pages do not fit the
+/// budget: the caller decides anew.
+fn plan_hier_fixed(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedFit) -> Option<HierPlan> {
+    let mut attempt = req.clone();
+    attempt.cut_dbu = fixed.cut_dbu.max(req.cut_dbu);
+    let mut plan = plan_hier_as_asked(v, &attempt, opts, 0);
+    if plan.stats.fit_over {
+        return None;
+    }
+    let key = if attempt.shape_cut {
+        FitKey::SmallerSide
+    } else {
+        FitKey::LongerSide { hairline: if attempt.page_hairline { opts.hairline } else { 0.0 } }
+    };
+    let threshold = (std::cmp::Reverse(fixed.class), fixed.phase, fixed.page);
+    let metas: Vec<floe_ovm::PageV> = plan.pages.iter().map(|&pi| v.page(pi)).collect();
+    let prio: Vec<_> = metas.iter().zip(&plan.pages).map(|(p, &pi)| fit_priority(p, key, pi)).collect();
+    let keep: Vec<bool> = prio.iter().map(|p| *p <= threshold).collect();
+    let bytes: u64 = metas.iter().zip(&keep).filter(|(_, k)| **k).map(|(p, _)| page_memory(p.records, p.usize_)).sum();
+    if req.decode_budget > 0 && bytes > req.decode_budget {
+        return None;
+    }
+    plan.stats.fit_decision = Some(fixed);
+    plan.stats.fit_fixed = true;
+    plan.stats.fit_passes = 1;
     plan.stats.fit_bytes = bytes;
-    true
+    if keep.iter().all(|&k| k) && attempt.cut_dbu == req.cut_dbu {
+        // the frame is lighter than the one decided on: nothing thinned
+        return Some(plan);
+    }
+    fit_class_stats(&mut plan, &prio, &keep, fixed.class, req.cut_dbu);
+    plan.stats.fit_pct = ((attempt.cut_dbu as f64 / req.cut_dbu.max(1) as f64) * 100.0).round().max(100.0) as u32;
+    if attempt.cut_dbu > req.cut_dbu {
+        plan.stats.fit_none_pct = plan.stats.fit_none_pct.max(plan.stats.fit_pct);
+    }
+    plan.stats.page_bytes = keep_pages(v, &mut plan, &keep);
+    Some(plan)
 }
 
 fn plan_hier_as_asked(v: &Ovm, req: &ViewReq, opts: &HierOpts, fit_limit: u64) -> HierPlan {
@@ -4029,13 +4130,15 @@ impl crate::Vfs {
     /// hairline policy is the request's (ViewReq::page_hairline);
     /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
-        self.plan_hier_in(req, &[])
+        self.plan_hier_in(req, &[], None)
     }
 
     /// `plan_hier` over `regions` of the view instead of the whole view
-    /// (HierOpts::regions; empty = the view): the clip regions hold them all.
-    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox]) -> HierPlan {
+    /// (HierOpts::regions; empty = the view): the clip regions hold them all;
+    /// and under a budget fit decided before (HierOpts::fixed_fit).
+    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>) -> HierPlan {
         let mut opts = HierOpts::default();
+        opts.fixed_fit = fixed_fit;
         if !regions.is_empty() {
             opts.regions = regions.to_vec();
             opts.k_boxes = opts.k_boxes.max(regions.len());

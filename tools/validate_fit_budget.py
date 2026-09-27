@@ -16,7 +16,15 @@ chip (tools/gen_main01_like.py) under a small budget:
     error;
   * a frame that fits is untouched: fit_pct 0 and pixel-identical to the
     kill switch's frame, at the wide view under a large budget and at a near
-    view under the small one.
+    view under the small one;
+  * the fit is remembered per scale (2026-09-27: the viewer's margin frame, a
+    wider view, thinned differently and the picture changed when it replaced
+    the viewport frame): the chip's middle at the small budget, then the
+    whole chip at the same scale (twice the pixels per axis - the margin) and
+    the middle again - the last frame is planned under the margin's decision
+    (fit_fixed 1) and equals the margin's centre pixel for pixel; the margin
+    either kept the middle's decision (fit_fixed 1) or, over the budget under
+    it, decided anew (fit_redecided 1).
 
     .venv/bin/python tools/validate_fit_budget.py
 """
@@ -55,10 +63,10 @@ def worker(src, budget_mb, fit=True, thin=True):
     return w
 
 
-def frame(w, gen, bbox):
+def frame(w, gen, bbox, size=PX):
     keys = [(int(l['layer']), int(l['datatype'])) for l in w.cache.meta['layers']]
     w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': bbox, 'view': None,
-              'w': PX, 'h': PX, 'depth': None, 'cut_px': 1, 'lod': False, 'frames': False,
+              'w': size, 'h': size, 'depth': None, 'cut_px': 1, 'lod': False, 'frames': False,
               'labels': False, 'abstract': False, 'visible': keys, 'frame_format': 'raw',
               'thin': 'keep'})
     deadline = time.monotonic() + 300
@@ -108,6 +116,29 @@ def main():
             c, rc = frame(tight, 5, near)
             d, _ = frame(tight_off, 6, near)
             assert rc['plan_culls']['fit_pct'] == 0 and c == d and any(c), 'near view under the small budget'
+            # the fit remembered per scale: the middle, the whole chip at the
+            # same scale (the margin), the middle again
+            sticky = worker(src, 48)
+            try:
+                mid = (x0 + (x1 - x0) / 4, y0 + (y1 - y0) / 4, x0 + 3 * (x1 - x0) / 4, y0 + 3 * (y1 - y0) / 4)
+                first, rf = frame(sticky, 8, mid)
+                margin, rm = frame(sticky, 9, wide, size=2 * PX)
+                again, ra2 = frame(sticky, 10, mid)
+                fits = (rf['plan_culls'], rm['plan_culls'], ra2['plan_culls'])
+                assert fits[0]['fit_thin'] > 0, 'the middle must need the fit: %s' % (fits[0],)
+                assert fits[1]['fit_fixed'] == 1 or fits[1]['fit_redecided'] == 1, 'the margin neither applied nor redecided: %s' % (fits[1],)
+                assert fits[2]['fit_fixed'] == 1, 'the middle again must apply the remembered fit: %s' % (fits[2],)
+                q = PX // 2
+                centre = b''.join(bytes(margin[((q + r) * 2 * PX + q) * 4:((q + r) * 2 * PX + q + PX) * 4]) for r in range(PX))
+                assert bytes(again) == centre, 'the middle again differs from the margin\'s centre'
+                if fits[1]['fit_redecided'] == 0:
+                    assert bytes(first) == centre, 'the margin kept the decision but drew differently'
+                print('fit budget: the fit is remembered per scale - middle 1/%d (none below x%.3g), margin %s, middle again = margin centre'
+                      % (1 << fits[0]['fit_thin'], fits[0]['fit_none_pct'] / 100.0,
+                         'redecided 1/%d (none below x%.3g)' % (1 << fits[1]['fit_thin'], fits[1]['fit_none_pct'] / 100.0)
+                         if fits[1]['fit_redecided'] else 'applied'))
+            finally:
+                sticky.stop()
             print('fit budget: wide keep view fits 48 MB with 1/%d of the class it ends in (complete from x%.3g, '
                   'none below x%.3g; 0 = no such class), %d px lit (ladder: cut x%.3g; old: error), '
                   'fitting frames unchanged'

@@ -116,7 +116,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
   KLayout 규칙 각각, 합 36개), KLayout 규칙의 밀집 뷰에서 타일이 차고 paint가 줄어드는지(area-true는
   1px 미만 도형을 면적만큼 켜서 이 칩의 타일이 차지 않는다), 킬 스위치가 write-once 작업을 전혀
   하지 않는지.
-- `fit_budget`(tools/validate_fit_budget.py, 약 25초; `planner`·`render` 별칭에 포함): 합성
+- `fit_budget`(tools/validate_fit_budget.py; 0.12.231: 배율별 맞춤 고정 — 가운데(48 MB에서 솎임) → 같은 배율의
+  전체 칩(각 축 2배, 여백) → 가운데 순서로 그려 마지막 프레임이 기억된 결정을 적용하고(`fit_fixed`) 여백의
+  가운데와 픽셀까지 같음; 여백은 결정을 적용했거나 예산을 넘겨 다시 결정(`fit_redecided`), 약 25초; `planner`·`render` 별칭에 포함): 합성
   MAIN01 칩의 keep + cut 1 px 광역뷰가 48 MB 예산에서 오류 대신 낮춘 밀도(`fit_thin` > 0)로
   그려지고 **빈 프레임이 아닌지**, `FLOE_RUST_FIT_THIN=off`는 컷을 올리고(`fit_pct` > 100)
   `FLOE_RUST_FIT_BUDGET=off`는 종전 오류인지, 예산 안의 프레임은 픽셀이 바뀌지 않는지.

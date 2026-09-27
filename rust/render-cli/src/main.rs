@@ -238,6 +238,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         lod_swap: true,
         regions: Vec::new(),
         visible_indices: None,
+        fixed_fit: None,
     })
 }
 
