@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
@@ -25,7 +26,7 @@ def main():
     methods = {n.name: n for n in viewer.body if isinstance(n, ast.FunctionDef)}
     method_names = ("open_file", "_open_file_load", "_set_depth")
     functions = [methods[n] for n in method_names]
-    scope = dict(os=os, APP="floe2", __name__="floe.gui", __package__="floe",
+    scope = dict(os=os, time=time, APP="floe2", __name__="floe.gui", __package__="floe",
                  _is_deck_path=lambda p: p.endswith(".jb"))
 
     class Cache:

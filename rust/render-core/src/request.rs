@@ -72,13 +72,34 @@ pub struct PlanRequest {
     pub sub_cut_box: bool,
     /// The per-shape cut (floe_vfs::ViewReq::shape_cut).
     pub shape_cut: bool,
+    /// The hairline-keeping cut (floe_vfs::ViewReq::shape_cut_max).
+    pub shape_cut_max: bool,
+    /// The M7-C page wash (floe_vfs::ViewReq::page_wash).
+    pub page_wash: bool,
+    /// The M7 LOD swap (floe_vfs::ViewReq::lod_swap).
+    pub lod_swap: bool,
     /// The frame draws hierarchy frames (floe_vfs::ViewReq::frames).
     pub frames: bool,
+    /// The regions of `view` the plan is for (floe_vfs HierOpts::regions;
+    /// empty = the whole view): the density stack's pass 2 plans the space
+    /// the originals left (CUT_DENSITY_DESIGN §10.10).
+    pub regions: Vec<ViewBox>,
+    /// Visible layers by cache layer index, in place of `visible_layers`
+    /// when Some (the density stack's pass 2: the top plane's layer alone,
+    /// then the others).
+    pub visible_indices: Option<Vec<u32>>,
+    /// A budget fit decided before, to apply as it is (floe_vfs::hier::
+    /// FixedFit; renderd keeps one per scale so the viewport frame and its
+    /// margin thin alike).
+    pub fixed_fit: Option<floe_vfs::hier::FixedFit>,
 }
 
 impl PlanRequest {
     pub fn validate(&self) -> Result<(), String> {
         self.view.validate()?;
+        for region in &self.regions {
+            region.validate()?;
+        }
         if self.cut_dbu < 0 {
             return Err(format!("invalid cut_dbu: {}", self.cut_dbu));
         }
@@ -116,7 +137,13 @@ mod tests {
             prune_summary: false,
             sub_cut_box: false,
             shape_cut: false,
+            shape_cut_max: false,
             frames: true,
+            page_wash: true,
+            lod_swap: true,
+            regions: Vec::new(),
+            visible_indices: None,
+            fixed_fit: None,
         };
         assert!(req.validate().is_err());
     }

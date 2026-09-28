@@ -3,13 +3,16 @@ use floe_vfs::hier::WsKey;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::font::{normalized_chars, GlyphAtlas};
 use crate::page_index::RecordSet;
-use crate::repetition::{for_each_visible_offset, for_each_visible_offset_chunked};
+use crate::repetition::{
+    for_each_visible_offset, for_each_visible_offset_chunked, visible_grid_range, RepVisit,
+};
 use crate::transform::OrthoTransform;
-use crate::{FrameScene, RenderCancellation, RenderStats, ViewBox};
+use crate::{FrameScene, RenderCancellation, RenderStats, ViewBox, PLACE_WALK_OUTCOMES};
 use floe_oasis::doc::Rep;
 
 const MAX_IMAGE_PIXELS: u64 = 268_435_456;
@@ -77,6 +80,44 @@ pub struct GeometryRasterRequest {
     pub workers: u16,
     /// Width and height of independently owned square image tiles.
     pub tile_size: u16,
+    /// Area-true drawing (2026-09-22): a shape lights the pixels whose centres
+    /// it covers and its outline is the rim of those pixels, so a w px shape
+    /// lights w px on average and a g px gap stays g px (the KLayout rule
+    /// grows every shape by about a pixel per axis and closes gaps up to
+    /// ~1.5 px); a shape under a pixel on a side is kept with the chance its
+    /// area fills the pixels it would light, ranked by its world box.
+    /// false = the KLayout-measured rule (exact renders, the oracle gates).
+    pub area_true: bool,
+    /// The extra-sparsening strength of the width-first rule
+    /// (ADAPTIVE_CUT_DENSITY_PLAN §4.2 candidate 1, diagnostic only): a
+    /// rectangle's side of w px draws floor(w) + 1 px when its rank t is
+    /// under P_c(frac(w)) = f / (c - (c - 1) f). c = 1 is the rule itself
+    /// (the extra pixel with chance f, the mean width w); c > 1 darkens
+    /// on purpose - c = 2 keeps a 0.05 px side 1 time in 39 instead of 1 in
+    /// 20 - and stays monotone in w and continuous at whole widths, so the
+    /// picture only thins, never jumps. renderd sets it from
+    /// FLOE_RUST_WIDTH_C (default 1); every other request uses 1.
+    pub width_c: f64,
+    /// List the survivors of a sub-pixel array instead of testing every
+    /// member (ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1, connected 2026-09-25;
+    /// GridRanks::survivors): the same pixels, fewer members walked. renderd
+    /// turns it off under FLOE_RUST_SURVIVOR_LIST=off (the kill switch).
+    pub survivor_list: bool,
+    /// The placement lattice (CUT_DENSITY_DESIGN §10.8, diagnostic, default
+    /// off; renderd FLOE_RUST_PLACE_LATTICE=on): a single shape reached
+    /// through a placement array whose vectors run along the world axes ranks
+    /// on that array's world lattice - the ranks a flat array of the shape
+    /// would take - and a flat polygon or path array ranks its sub-pixel keep
+    /// on its own lattice; with `survivor_list` a placement array of a small
+    /// cell then visits only the members whose shapes can survive.
+    pub place_lattice: bool,
+    /// The density stack (CUT_DENSITY_DESIGN §10.10, diagnostic, default
+    /// off; renderd FLOE_RUST_DENSITY_STACK=top): with `area_true`, a shape
+    /// under a pixel on a side is density and shows over the originals only
+    /// on the top plane - outside its own originals - and in the pixels no
+    /// original and no density above stands for (`DensityStack`). Needs the
+    /// write-once tiles; the placement survivor walk is not planned under it.
+    pub density_stack: bool,
 }
 
 impl GeometryRasterRequest {
@@ -643,11 +684,16 @@ fn until_full<T>(result: Result<T, String>) -> Result<Option<T>, String> {
     }
 }
 
-/// One paint pass of a styled tile: a hierarchy-frame band or a plane.
-#[derive(Clone, Copy)]
+/// One paint pass of a styled tile: a hierarchy-frame band, a plane, or -
+/// under the density stack - a plane's density (pass 2, DensityStack).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TilePass {
     Frames(u8),
     Plane(usize),
+    /// the top plane's density (pass 2)
+    Density(usize),
+    /// every other plane's density in one walk (pass 2)
+    DensityLower,
 }
 
 /// The passes in overwrite order (frame bands 2, 3, 1, the planes, frame
@@ -665,6 +711,27 @@ fn tile_passes(planes: usize, walk_frames: bool, write_once: bool) -> Vec<TilePa
     if write_once {
         passes.reverse();
     }
+    passes
+}
+
+/// `tile_passes` with the density stack's pass 2: after the last plane
+/// (write-once order: the planes top first, then plane 0) the top plane's
+/// density, then every other plane's in one walk, before the frame bands
+/// under the planes.
+fn density_passes(planes: usize, walk_frames: bool) -> Vec<TilePass> {
+    let mut passes = tile_passes(planes, walk_frames, true);
+    let at = passes
+        .iter()
+        .rposition(|pass| matches!(pass, TilePass::Plane(_)))
+        .map_or(passes.len(), |at| at + 1);
+    let mut density = Vec::with_capacity(2);
+    if planes > 0 {
+        density.push(TilePass::Density(planes - 1));
+    }
+    if planes > 1 {
+        density.push(TilePass::DensityLower);
+    }
+    passes.splice(at..at, density);
     passes
 }
 
@@ -1046,6 +1113,192 @@ impl SpanRule {
     }
 }
 
+/// The density stack of a write-once tile (CUT_DENSITY_DESIGN §10.10; user
+/// direction 2026-09-27: the density of the shapes under the cut, drawn in a
+/// second pass into the space the originals left). Pass 1 paints the frame's
+/// planes as always - top plane first, each pixel written once; every shape
+/// it draws, hairlines included, is an ORIGINAL - and records what the
+/// originals COVER: their whole interior, speckle and stipple holes and a
+/// clear fill's inside included. Pass 2 walks a second scene, planned with a
+/// finer cut (0.5 px), plane by plane from the top: its shapes under pass 1's
+/// cut are DENSITY. The top plane's density shows over every lower original
+/// but not where its own originals had painted or covered (`top_blocked`);
+/// any other plane's shows only in a pixel no original wrote or covers and no
+/// density above stands for (`claimed`: the pixels a density shape would
+/// light if kept, the dropped ones too, so a lower plane's dots never fill the
+/// gaps of an upper plane's pattern, while one sparse dot stands for its own
+/// pixel only). Masks in WriteOnce's bit layout, without its padding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StackPhase {
+    /// a frame band, or nothing: the plain write-once paint
+    Off,
+    /// a pass-1 plane: its paints also mark `covered`
+    Originals,
+    /// a pass-2 plane: its paints go to `lit` and `foot`, not to the pixels
+    Density,
+}
+
+#[derive(Clone)]
+struct DensityStack {
+    words: usize,
+    phase: StackPhase,
+    /// the running record marked its whole array's footprints
+    /// (array_footprint): its members mark only the pixels they light
+    array_foot: bool,
+    /// the rows [lo, hi) the running density plane marked in this tile
+    /// (lo >= hi: none)
+    rows: (usize, usize),
+    /// covered by an original of pass 1
+    covered: Vec<u64>,
+    /// written or covered when the top plane's originals were done: what the
+    /// top plane's density may not take
+    top_blocked: Vec<u64>,
+    /// stood for by the density painted so far
+    claimed: Vec<u64>,
+    /// the running density plane: the pixels it lights and stands for
+    lit: Vec<u64>,
+    foot: Vec<u64>,
+    /// the running density plane is the top plane
+    top: bool,
+    /// the pixels the running density plane may still take (0: none)
+    eligible: u32,
+    /// their bounding box as last found, and `eligible` then
+    eligible_box: Option<(u32, [usize; 4])>,
+    /// a record whose larger side reaches this (dbu) was pass 1's: not density
+    upper_cut: i64,
+    /// the lower planes in one walk (TilePass::DensityLower): per tile pixel
+    /// the highest plane (1-based, 0 = none) whose density lit it, and whose
+    /// density stands for it; empty until that pass
+    lit_plane: Vec<u16>,
+    foot_plane: Vec<u16>,
+    /// the plane (1-based) of the page being painted in that walk; 0 = the
+    /// per-plane masks (the top plane's pass)
+    plane: u16,
+}
+
+/// Raises the plane map entries of the set bits of one mask word to `plane`.
+fn raise_plane_bits(
+    map: &mut [u16],
+    width: usize,
+    row: usize,
+    origin: usize,
+    bits: u64,
+    plane: u16,
+) {
+    let mut left = bits;
+    while left != 0 {
+        let at = row * width + origin + left.trailing_zeros() as usize;
+        if map[at] < plane {
+            map[at] = plane;
+        }
+        left &= left - 1;
+    }
+}
+
+/// Raises the plane map entries of the absolute device rect `rect` inside
+/// the tile to `plane`; the tile rows it touched.
+#[allow(clippy::too_many_arguments)]
+fn raise_plane_rect(
+    map: &mut [u16],
+    width: usize,
+    col0: u32,
+    col1: u32,
+    row0: u32,
+    row1: u32,
+    rect: (i128, i128, i128, i128),
+    plane: u16,
+) -> Option<(usize, usize)> {
+    let (x0, y0, x1, y1) = rect;
+    let c0 = x0.max(col0 as i128);
+    let c1 = x1.min(col1 as i128);
+    let r0 = y0.max(row0 as i128);
+    let r1 = y1.min(row1 as i128);
+    if c0 >= c1 || r0 >= r1 {
+        return None;
+    }
+    let (c0, c1) = ((c0 - col0 as i128) as usize, (c1 - col0 as i128) as usize);
+    let rows = ((r0 - row0 as i128) as usize, (r1 - row0 as i128) as usize);
+    for row in rows.0..rows.1 {
+        for slot in &mut map[row * width + c0..row * width + c1] {
+            if *slot < plane {
+                *slot = plane;
+            }
+        }
+    }
+    Some(rows)
+}
+
+/// Sets the bits of the absolute device rect `rect` = (x0, y0, x1, y1)
+/// inside the tile [col0, col1) x [row0, row1) of `words` words a row; the
+/// tile rows it set, None when it was outside.
+#[allow(clippy::too_many_arguments)]
+fn mark_rect(
+    mask: &mut [u64],
+    words: usize,
+    col0: u32,
+    col1: u32,
+    row0: u32,
+    row1: u32,
+    rect: (i128, i128, i128, i128),
+) -> Option<(usize, usize)> {
+    let (x0, y0, x1, y1) = rect;
+    let c0 = x0.max(col0 as i128);
+    let c1 = x1.min(col1 as i128);
+    let r0 = y0.max(row0 as i128);
+    let r1 = y1.min(row1 as i128);
+    if c0 >= c1 || r0 >= r1 {
+        return None;
+    }
+    let (c0, c1) = ((c0 - col0 as i128) as usize, (c1 - col0 as i128) as usize);
+    let rows = ((r0 - row0 as i128) as usize, (r1 - row0 as i128) as usize);
+    for row in rows.0..rows.1 {
+        for word in c0 >> 6..=(c1 - 1) >> 6 {
+            let lo = c0.max(word << 6) - (word << 6);
+            let hi = c1.min((word << 6) + 64) - (word << 6);
+            mask[row * words + word] |= if hi - lo == 64 {
+                !0u64
+            } else {
+                ((1u64 << (hi - lo)) - 1) << lo
+            };
+        }
+    }
+    Some(rows)
+}
+
+impl DensityStack {
+    /// The running plane marked tile rows `rows`.
+    fn touch(&mut self, rows: Option<(usize, usize)>) -> bool {
+        let Some((lo, hi)) = rows else {
+            return false;
+        };
+        self.rows = if self.rows.0 >= self.rows.1 {
+            (lo, hi)
+        } else {
+            (self.rows.0.min(lo), self.rows.1.max(hi))
+        };
+        true
+    }
+}
+
+/// Writes `color` at the tile pixels of the set bits of word `index` of a
+/// tile mask (`words` words a row, the tile `width` pixels wide).
+fn paint_mask_word(
+    pixels: &mut [u8],
+    words: usize,
+    width: usize,
+    index: usize,
+    bits: u64,
+    color: [u8; 4],
+) {
+    let (row, origin) = (index / words, (index % words) << 6);
+    let mut left = bits;
+    while left != 0 {
+        let from = (row * width + origin + left.trailing_zeros() as usize) * 4;
+        pixels[from..from + 4].copy_from_slice(&color);
+        left &= left - 1;
+    }
+}
+
 #[derive(Clone)]
 struct RasterBand {
     width: u32,
@@ -1058,6 +1311,8 @@ struct RasterBand {
     rep_spans: Vec<RepSpan>,
     /// None: planes paint in order and overwrite (the reference path).
     once: Option<WriteOnce>,
+    /// the density stack (write-once tiles only)
+    stack: Option<Box<DensityStack>>,
 }
 
 impl RasterBand {
@@ -1094,6 +1349,7 @@ impl RasterBand {
             pixels,
             rep_spans: Vec::new(),
             once: None,
+            stack: None,
         })
     }
 
@@ -1121,6 +1377,504 @@ impl RasterBand {
         });
     }
 
+    /// Starts the density stack of a write-once tile (DensityStack): pass 2
+    /// draws the records under `upper_cut` (dbu, pass 1's cut).
+    fn enable_density_stack(&mut self, upper_cut: i64) {
+        let Some(once) = &self.once else {
+            return;
+        };
+        let n = once.bits.len();
+        self.stack = Some(Box::new(DensityStack {
+            words: once.words,
+            phase: StackPhase::Off,
+            array_foot: false,
+            rows: (0, 0),
+            covered: vec![0; n],
+            top_blocked: vec![0; n],
+            claimed: vec![0; n],
+            lit: vec![0; n],
+            foot: vec![0; n],
+            top: false,
+            eligible: 0,
+            eligible_box: None,
+            upper_cut,
+            lit_plane: Vec::new(),
+            foot_plane: Vec::new(),
+            plane: 0,
+        }));
+    }
+
+    /// The plane (1-based) of the page about to be painted in the lower
+    /// planes' one walk; a no-op outside it (`plane` stays 0).
+    #[inline]
+    fn set_density_plane(&mut self, plane: u16) {
+        if plane == 0 {
+            return;
+        }
+        if let Some(stack) = self
+            .stack
+            .as_mut()
+            .filter(|stack| !stack.lit_plane.is_empty())
+        {
+            stack.plane = plane;
+        }
+    }
+
+    /// Starts the lower planes' one walk (TilePass::DensityLower): the plane
+    /// maps are made, and the pixels any lower plane may take are counted.
+    fn begin_density_lower(&mut self) {
+        self.begin_density_plane(false);
+        let pixels = self.tile_width() as usize * (self.row1 - self.row0) as usize;
+        if let Some(stack) = self.stack.as_mut() {
+            stack.lit_plane = vec![0; pixels];
+            stack.foot_plane = vec![0; pixels];
+            stack.plane = 0;
+        }
+    }
+
+    /// Ends the lower planes' one walk: a pixel takes the highest plane whose
+    /// density lit it, unless a higher plane's density stands for it (its
+    /// footprint) or the pixel is taken (written, covered, claimed by the top
+    /// plane's density); what the planes stand for joins the claimed pixels.
+    /// (density pixels lit, pixels written)
+    fn end_density_lower(&mut self, colors: &[[u8; 4]]) -> (u64, u64) {
+        let width = self.tile_width() as usize;
+        let Some(stack) = self.stack.as_ref() else {
+            return (0, 0);
+        };
+        let (lo, hi) = stack.rows;
+        let words = stack.words;
+        let (mut lit_px, mut written) = (0u64, 0u64);
+        for row in lo..hi {
+            for col in 0..width {
+                let at = row * width + col;
+                let Some(stack) = self.stack.as_ref() else {
+                    break;
+                };
+                let (lit, foot) = (stack.lit_plane[at], stack.foot_plane[at]);
+                if lit == 0 && foot == 0 {
+                    continue;
+                }
+                let index = row * words + col / 64;
+                let bit = 1u64 << (col % 64);
+                let taken = self.taken_word(false, index) & bit != 0;
+                let (Some(stack), Some(once)) = (self.stack.as_mut(), self.once.as_mut()) else {
+                    break;
+                };
+                stack.claimed[index] |= bit;
+                if lit == 0 {
+                    continue;
+                }
+                lit_px += 1;
+                if foot > lit || taken {
+                    continue;
+                }
+                let Some(color) = colors.get(usize::from(lit) - 1) else {
+                    continue;
+                };
+                self.pixels[at * 4..at * 4 + 4].copy_from_slice(color);
+                if once.bits[index] & bit == 0 {
+                    once.bits[index] |= bit;
+                    once.open -= 1;
+                }
+                written += 1;
+            }
+        }
+        if let Some(stack) = self.stack.as_mut() {
+            stack.lit_plane = Vec::new();
+            stack.foot_plane = Vec::new();
+            stack.plane = 0;
+            stack.rows = (0, 0);
+            stack.phase = StackPhase::Off;
+        }
+        (lit_px, written)
+    }
+
+    /// A density plane (pass 2) is being painted: the paints are density.
+    #[inline]
+    fn stacking(&self) -> bool {
+        matches!(&self.stack, Some(stack) if stack.phase == StackPhase::Density)
+    }
+
+    /// Pass 2's cut from above (dbu): a record whose larger side reaches it
+    /// was pass 1's. None outside a density plane.
+    #[inline]
+    fn density_upper_cut(&self) -> Option<i64> {
+        match &self.stack {
+            Some(stack) if stack.phase == StackPhase::Density => Some(stack.upper_cut),
+            _ => None,
+        }
+    }
+
+    /// Sets the phase of the density stack (no-op without one).
+    fn set_phase(&mut self, phase: StackPhase) {
+        if let Some(stack) = self.stack.as_mut() {
+            stack.phase = phase;
+            stack.array_foot = false;
+        }
+    }
+
+    /// The word of the pixels that density of the top plane (`top`) or of any
+    /// other plane may not take: written before or covered by the top
+    /// plane's originals, or written or covered by any original, and what
+    /// density above stands for.
+    #[inline]
+    fn taken_word(&self, top: bool, index: usize) -> u64 {
+        let (Some(once), Some(stack)) = (&self.once, &self.stack) else {
+            return 0;
+        };
+        (if top {
+            stack.top_blocked[index]
+        } else {
+            once.bits[index] | stack.covered[index]
+        }) | stack.claimed[index]
+    }
+
+    /// Absolute rows [row0, row1) x columns [first_col, end_col) are an
+    /// interior that lights no pixel (a clear fill): covered by an original,
+    /// or stood for by density.
+    fn cover_rows(&mut self, row0: usize, row1: usize, first_col: usize, end_col: usize) {
+        let (col0, col1, band_row0, band_row1) = (self.col0, self.col1, self.row0, self.row1);
+        let Some(stack) = self.stack.as_mut() else {
+            return;
+        };
+        let rect = (
+            first_col as i128,
+            row0 as i128,
+            end_col as i128,
+            row1 as i128,
+        );
+        match stack.phase {
+            StackPhase::Off => {}
+            StackPhase::Originals => {
+                mark_rect(
+                    &mut stack.covered,
+                    stack.words,
+                    col0,
+                    col1,
+                    band_row0,
+                    band_row1,
+                    rect,
+                );
+            }
+            StackPhase::Density => {
+                if stack.array_foot {
+                    return;
+                }
+                let rows = if stack.plane != 0 {
+                    let width = (col1 - col0) as usize;
+                    raise_plane_rect(
+                        &mut stack.foot_plane,
+                        width,
+                        col0,
+                        col1,
+                        band_row0,
+                        band_row1,
+                        rect,
+                        stack.plane,
+                    )
+                } else {
+                    mark_rect(
+                        &mut stack.foot,
+                        stack.words,
+                        col0,
+                        col1,
+                        band_row0,
+                        band_row1,
+                        rect,
+                    )
+                };
+                stack.touch(rows);
+            }
+        }
+    }
+
+    /// The running record marked its whole array's footprints (on) or its
+    /// members mark their own (off).
+    fn set_array_foot(&mut self, on: bool) {
+        if let Some(stack) = self.stack.as_mut() {
+            stack.array_foot = on;
+        }
+    }
+
+    /// A density shape of the running plane: `foot` the device pixels it
+    /// stands for, `lit` those it lights (None: its rank dropped it). Whether
+    /// it lights a pixel of this tile - what its direct draw reports.
+    fn density_shape(
+        &mut self,
+        foot: Option<(i128, i128, i128, i128)>,
+        lit: Option<(i128, i128, i128, i128)>,
+    ) -> bool {
+        let (col0, col1, row0, row1) = (self.col0, self.col1, self.row0, self.row1);
+        let Some(stack) = self.stack.as_mut() else {
+            return false;
+        };
+        let width = (col1 - col0) as usize;
+        if !stack.array_foot {
+            if let Some(foot) = foot {
+                let rows = if stack.plane != 0 {
+                    raise_plane_rect(
+                        &mut stack.foot_plane,
+                        width,
+                        col0,
+                        col1,
+                        row0,
+                        row1,
+                        foot,
+                        stack.plane,
+                    )
+                } else {
+                    mark_rect(&mut stack.foot, stack.words, col0, col1, row0, row1, foot)
+                };
+                stack.touch(rows);
+            }
+        }
+        let Some(lit) = lit else {
+            return false;
+        };
+        let rows = if stack.plane != 0 {
+            raise_plane_rect(
+                &mut stack.lit_plane,
+                width,
+                col0,
+                col1,
+                row0,
+                row1,
+                lit,
+                stack.plane,
+            )
+        } else {
+            mark_rect(&mut stack.lit, stack.words, col0, col1, row0, row1, lit)
+        };
+        stack.touch(rows)
+    }
+
+    /// The top plane's originals are painted: what its density may not take
+    /// is fixed now - the pixels written so far (frame band 0 and its own
+    /// originals) and what its originals cover.
+    fn snapshot_top_blocked(&mut self) {
+        let (Some(stack), Some(once)) = (self.stack.as_mut(), self.once.as_ref()) else {
+            return;
+        };
+        for ((blocked, &bits), &covered) in stack
+            .top_blocked
+            .iter_mut()
+            .zip(&once.bits)
+            .zip(&stack.covered)
+        {
+            *blocked = bits | covered;
+        }
+    }
+
+    /// Starts a density plane (pass 2): its paints go to the masks; the
+    /// pixels it may still take are counted (`is_full`, `open_view`).
+    fn begin_density_plane(&mut self, top: bool) {
+        let tile_width = self.tile_width() as usize;
+        let Some(stack) = self.stack.as_mut() else {
+            return;
+        };
+        stack.phase = StackPhase::Density;
+        stack.array_foot = false;
+        stack.top = top;
+        stack.rows = (0, 0);
+        stack.eligible_box = None;
+        let words = stack.words;
+        let mut eligible = 0u32;
+        for index in 0..stack.claimed.len() {
+            let taken = self.taken_word_at(top, index);
+            // the padding past the tile is never eligible
+            let width = if index % words == words - 1 && tile_width % 64 != 0 {
+                tile_width % 64
+            } else {
+                64
+            };
+            let inside = if width == 64 {
+                !0u64
+            } else {
+                (1u64 << width) - 1
+            };
+            eligible += (!taken & inside).count_ones();
+        }
+        if let Some(stack) = self.stack.as_mut() {
+            stack.eligible = eligible;
+        }
+    }
+
+    /// `taken_word` for a stack borrowed mutably alongside (the same value).
+    #[inline]
+    fn taken_word_at(&self, top: bool, index: usize) -> u64 {
+        self.taken_word(top, index)
+    }
+
+    /// Ends a density plane: its lit pixels show where the plane may take
+    /// them and join the written pixels (the frame bands under the planes
+    /// paint around them); what it stands for joins the claimed pixels.
+    /// (density pixels lit, pixels written)
+    fn end_density_plane(&mut self, color: [u8; 4]) -> (u64, u64) {
+        let width = self.tile_width() as usize;
+        let Some(stack) = self.stack.as_ref() else {
+            return (0, 0);
+        };
+        let (top, words) = (stack.top, stack.words);
+        let (lo, hi) = stack.rows;
+        let (mut lit_px, mut written) = (0u64, 0u64);
+        for index in lo * words..hi * words {
+            let taken = self.taken_word(top, index);
+            let (Some(stack), Some(once)) = (self.stack.as_mut(), self.once.as_mut()) else {
+                break;
+            };
+            let (lit, foot) = (stack.lit[index], stack.foot[index]);
+            if lit | foot == 0 {
+                continue;
+            }
+            stack.lit[index] = 0;
+            stack.foot[index] = 0;
+            lit_px += u64::from(lit.count_ones());
+            let show = lit & !taken;
+            if show != 0 {
+                paint_mask_word(&mut self.pixels, words, width, index, show, color);
+                // the top plane's density overwrites lower originals: only
+                // the pixels newly written change the open count
+                let newly = show & !once.bits[index];
+                once.bits[index] |= show;
+                once.open -= newly.count_ones();
+                written += u64::from(show.count_ones());
+            }
+            stack.claimed[index] |= foot | lit;
+        }
+        if let Some(stack) = self.stack.as_mut() {
+            stack.rows = (0, 0);
+            stack.phase = StackPhase::Off;
+        }
+        (lit_px, written)
+    }
+
+    /// After the last density plane: the pixels the originals cover and the
+    /// pixels density stands for, for the counts.
+    fn density_totals(&self) -> (u64, u64) {
+        let Some(stack) = self.stack.as_ref() else {
+            return (0, 0);
+        };
+        (
+            stack
+                .covered
+                .iter()
+                .map(|word| u64::from(word.count_ones()))
+                .sum(),
+            stack
+                .claimed
+                .iter()
+                .map(|word| u64::from(word.count_ones()))
+                .sum(),
+        )
+    }
+
+    /// The bounding box [r0, r1, c0, c1] (tile rows and columns) of the
+    /// pixels the density of the top plane (`top`) or of any other plane may
+    /// still take; None: no such pixel, or no stack.
+    fn free_box(&self, top: bool) -> Option<[usize; 4]> {
+        let (tile_width, tile_rows) =
+            (self.tile_width() as usize, (self.row1 - self.row0) as usize);
+        let stack = self.stack.as_ref()?;
+        let words = stack.words;
+        let inside_last = if tile_width % 64 != 0 {
+            (1u64 << (tile_width % 64)) - 1
+        } else {
+            !0u64
+        };
+        let (mut r0, mut r1, mut c0, mut c1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+        for row in 0..tile_rows {
+            for word in 0..words {
+                let inside = if word == words - 1 {
+                    inside_last
+                } else {
+                    !0u64
+                };
+                let free = !self.taken_word(top, row * words + word) & inside;
+                if free == 0 {
+                    continue;
+                }
+                r0 = r0.min(row);
+                r1 = row + 1;
+                c0 = c0.min(word * 64 + free.trailing_zeros() as usize);
+                c1 = c1.max(word * 64 + 64 - free.leading_zeros() as usize);
+            }
+        }
+        (r0 != usize::MAX).then_some([r0, r1, c0, c1])
+    }
+
+    /// The cull view of a density plane: the world view of the bounding box
+    /// of the pixels it may still take, as `open_view` does for open pixels.
+    /// None: no such pixel.
+    fn eligible_view(
+        &mut self,
+        request: &GeometryRasterRequest,
+        cull_view: BBox,
+        stroke_pixels: u8,
+    ) -> Result<Option<BBox>, String> {
+        let (tile_width, tile_rows) = (self.tile_width(), self.row1 - self.row0);
+        let (col0, row0) = (self.col0, self.row0);
+        let Some(stack) = self.stack.as_ref() else {
+            return Ok(Some(cull_view));
+        };
+        if stack.eligible == 0 {
+            return Ok(None);
+        }
+        if stack.eligible == tile_width * tile_rows {
+            return Ok(Some(cull_view));
+        }
+        let (top, words, eligible) = (stack.top, stack.words, stack.eligible);
+        let rows = tile_rows as usize;
+        let (mut r0, mut r1, mut c0, mut c1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+        if let Some((count, found)) = stack.eligible_box {
+            if count == eligible {
+                [r0, r1, c0, c1] = found;
+            }
+        }
+        let inside_last = if tile_width % 64 != 0 {
+            (1u64 << (tile_width % 64)) - 1
+        } else {
+            !0u64
+        };
+        for row in 0..if r0 == usize::MAX { rows } else { 0 } {
+            for word in 0..words {
+                let inside = if word == words - 1 {
+                    inside_last
+                } else {
+                    !0u64
+                };
+                let free = !self.taken_word(top, row * words + word) & inside;
+                if free == 0 {
+                    continue;
+                }
+                r0 = r0.min(row);
+                r1 = row + 1;
+                c0 = c0.min(word * 64 + free.trailing_zeros() as usize);
+                c1 = c1.max(word * 64 + 64 - free.leading_zeros() as usize);
+            }
+        }
+        if r0 == usize::MAX {
+            return Ok(None);
+        }
+        if let Some(stack) = self.stack.as_mut() {
+            stack.eligible_box = Some((eligible, [r0, r1, c0, c1]));
+        }
+        let view = tile_world_view(
+            request,
+            col0 + c0 as u32,
+            col0 + c1 as u32,
+            row0 + r0 as u32,
+            row0 + r1 as u32,
+            stroke_pixels.saturating_add(1),
+        )?;
+        Ok(Some(BBox {
+            x0: view.x0.max(cull_view.x0),
+            y0: view.y0.max(cull_view.y0),
+            x1: view.x1.min(cull_view.x1),
+            y1: view.y1.min(cull_view.y1),
+        }))
+    }
+
     /// The cull view of the next pass of a write-once tile: the world view
     /// of the bounding box of the pixels still open (one pixel wider than
     /// the tile's own stroke margin), never more than `cull_view`. What
@@ -1131,6 +1885,9 @@ impl RasterBand {
         cull_view: BBox,
         stroke_pixels: u8,
     ) -> Result<Option<BBox>, String> {
+        if self.stacking() {
+            return self.eligible_view(request, cull_view, stroke_pixels);
+        }
         let (tile_width, tile_rows) = (self.tile_width(), self.row1 - self.row0);
         let (col0, row0) = (self.col0, self.row0);
         let Some(once) = self.once.as_mut() else {
@@ -1185,12 +1942,18 @@ impl RasterBand {
     /// can change it.
     #[inline]
     fn is_full(&self) -> bool {
-        matches!(&self.once, Some(once) if once.open == 0)
+        match &self.stack {
+            Some(stack) if stack.phase == StackPhase::Density => stack.eligible == 0,
+            _ => matches!(&self.once, Some(once) if once.open == 0),
+        }
     }
 
     /// Some pixel is written, so a region test can succeed.
     #[inline]
     fn any_written(&self) -> bool {
+        if self.stacking() {
+            return true;
+        }
         matches!(&self.once, Some(once) if once.open < self.tile_width() * (self.row1 - self.row0))
     }
 
@@ -1218,8 +1981,32 @@ impl RasterBand {
         let Some(once) = self.once.as_mut() else {
             return;
         };
-        let slot = &mut once.bits[local_row * once.words + (local_col >> 6)];
         let bit = 1u64 << (local_col & 63);
+        let at = local_row * once.words + (local_col >> 6);
+        if let Some(stack) = self.stack.as_mut() {
+            match stack.phase {
+                StackPhase::Off => {}
+                StackPhase::Originals => stack.covered[at] |= bit,
+                StackPhase::Density => {
+                    // density: to the masks (or the plane maps), not to the pixels
+                    if stack.plane != 0 {
+                        let pixel = local_row * width + local_col;
+                        stack.lit_plane[pixel] = stack.lit_plane[pixel].max(stack.plane);
+                        if !stack.array_foot {
+                            stack.foot_plane[pixel] = stack.foot_plane[pixel].max(stack.plane);
+                        }
+                    } else {
+                        stack.lit[at] |= bit;
+                        if !stack.array_foot {
+                            stack.foot[at] |= bit;
+                        }
+                    }
+                    stack.touch(Some((local_row, local_row + 1)));
+                    return;
+                }
+            }
+        }
+        let slot = &mut once.bits[at];
         if *slot & bit == 0 {
             *slot |= bit;
             once.open -= 1;
@@ -1251,6 +2038,65 @@ impl RasterBand {
         };
         let words = once.words;
         let (w0, w1) = (c0 >> 6, (c1 - 1) >> 6);
+        // the density stack: a density plane's spans go to its masks - what
+        // the rule lights and the whole span it stands for; an original's
+        // span is covered, holes included
+        if let Some(stack) = self
+            .stack
+            .as_mut()
+            .filter(|stack| stack.phase == StackPhase::Density)
+        {
+            let mut lit_any = false;
+            let plane = stack.plane;
+            for row in row0..row1 {
+                let rule = rule_of(row);
+                let local_row = row - band_row0;
+                for word in w0..w1 + 1 {
+                    let origin = word << 6;
+                    let lo = c0.max(origin) - origin;
+                    let hi = c1.min(origin + 64) - origin;
+                    let span = if hi - lo == 64 {
+                        !0u64
+                    } else {
+                        ((1u64 << (hi - lo)) - 1) << lo
+                    };
+                    let lit = span & rule.mask(col_base + origin);
+                    lit_any |= lit != 0;
+                    if plane != 0 {
+                        raise_plane_bits(
+                            &mut stack.lit_plane,
+                            width,
+                            local_row,
+                            origin,
+                            lit,
+                            plane,
+                        );
+                        if !stack.array_foot {
+                            raise_plane_bits(
+                                &mut stack.foot_plane,
+                                width,
+                                local_row,
+                                origin,
+                                span,
+                                plane,
+                            );
+                        }
+                    } else {
+                        stack.lit[local_row * words + word] |= lit;
+                        if !stack.array_foot {
+                            stack.foot[local_row * words + word] |= span;
+                        }
+                    }
+                }
+            }
+            stack.touch(Some((row0 - band_row0, row1 - band_row0)));
+            return lit_any;
+        }
+        let mut covered = self
+            .stack
+            .as_mut()
+            .filter(|stack| stack.phase == StackPhase::Originals)
+            .map(|stack| &mut stack.covered);
         let edge = |word: usize| {
             let origin = word << 6;
             let lo = c0.max(origin) - origin;
@@ -1276,6 +2122,9 @@ impl RasterBand {
             for word in w0..w1 + 1 {
                 let origin = word << 6;
                 let (lo, hi, span) = edge(word);
+                if let Some(covered) = covered.as_deref_mut() {
+                    covered[local_row * words + word] |= span;
+                }
                 let lit = span & rule.mask(col_base + origin);
                 if lit == 0 {
                     continue;
@@ -1329,6 +2178,13 @@ impl RasterBand {
     /// [c0, c1) inside this tile is open: an item confined to the box
     /// cannot change the tile. An empty intersection is true.
     fn device_box_written(&self, r0: i128, r1: i128, c0: i128, c1: i128) -> bool {
+        if let Some(stack) = self
+            .stack
+            .as_ref()
+            .filter(|stack| stack.phase == StackPhase::Density)
+        {
+            return self.device_box_taken(stack.top, r0, r1, c0, c1);
+        }
         let Some(once) = &self.once else {
             return false;
         };
@@ -1356,6 +2212,45 @@ impl RasterBand {
                     ((1u64 << (hi - lo)) - 1) << lo
                 };
                 if once.bits[row * once.words + word] & span != span {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Under the density stack, no pixel of absolute device rows [r0, r1) x
+    /// columns [c0, c1) inside this tile can take the density of the top
+    /// plane (`top`) or of any other plane any more (`taken_word`: sets that
+    /// only grow). An empty intersection is true.
+    fn device_box_taken(&self, top: bool, r0: i128, r1: i128, c0: i128, c1: i128) -> bool {
+        let Some(once) = &self.once else {
+            return false;
+        };
+        if self.stack.is_none() {
+            return false;
+        }
+        let r0 = r0.max(self.row0 as i128);
+        let r1 = r1.min(self.row1 as i128);
+        let c0 = c0.max(self.col0 as i128);
+        let c1 = c1.min(self.col1 as i128);
+        if r0 >= r1 || c0 >= c1 {
+            return true;
+        }
+        let (c0, c1) = (
+            (c0 - self.col0 as i128) as usize,
+            (c1 - self.col0 as i128) as usize,
+        );
+        for row in (r0 - self.row0 as i128) as usize..(r1 - self.row0 as i128) as usize {
+            for word in c0 / 64..=(c1 - 1) / 64 {
+                let lo = c0.max(word * 64) - word * 64;
+                let hi = c1.min(word * 64 + 64) - word * 64;
+                let span = if hi - lo == 64 {
+                    !0u64
+                } else {
+                    ((1u64 << (hi - lo)) - 1) << lo
+                };
+                if self.taken_word(top, row * once.words + word) & span != span {
                     return false;
                 }
             }
@@ -1460,6 +2355,17 @@ struct WorkBin {
     query: Vec<u64>,
     plane_bits: Vec<Option<usize>>,
     plane_of: std::collections::HashMap<u32, usize>,
+    /// the collection's ranking, stored for the deferred edges' mini walks
+    ranking: Option<PlaceRanking>,
+}
+
+/// What a collection walk needs to rank and walk placement arrays under the
+/// placement lattice (GeometryRasterRequest::place_lattice).
+#[derive(Clone)]
+struct PlaceRanking {
+    request: GeometryRasterRequest,
+    /// per plane: whether its paint is the area-true rim (a 1 px solid outline)
+    rim: Vec<bool>,
 }
 
 enum PlaneItem {
@@ -1472,6 +2378,8 @@ enum PlaneItem {
         transform: OrthoTransform,
         inverse: OrthoTransform,
         cell: WsKey,
+        /// the placement lattice the visit lies under (member_lattice)
+        lattice: Option<(i64, i64)>,
     },
     // Rects of the plane in walk order, up to 128 to a chunk: the planner's
     // washes (page washes, sub-cut boxes) and the native display points of
@@ -1500,6 +2408,8 @@ enum PlaneItem {
         inst: usize,
         bit: Option<usize>,
         edge: u32,
+        /// the placement lattice the parent cell lies under
+        lattice: Option<(i64, i64)>,
     },
 }
 
@@ -1529,6 +2439,8 @@ struct DeferredEdge {
     inverse: OrthoTransform,
     cell: WsKey,
     inst: usize,
+    /// the placement lattice the parent cell lies under
+    lattice: Option<(i64, i64)>,
 }
 
 /// Instances whose members x subtree item weight exceed this stay
@@ -1599,6 +2511,7 @@ impl WorkBin {
             query: Vec::new(),
             plane_bits: Vec::new(),
             plane_of: std::collections::HashMap::new(),
+            ranking: None,
         }
     }
 
@@ -1672,7 +2585,28 @@ fn build_deferred_minis(
         let local_view = edge.inverse.apply_bbox(cull_view)?;
         let mut mini = WorkBin::empty(bin.plane_bits.len(), false);
         let mut cancel_member = 0u16;
-        let walk = for_each_visible_offset(&instance.rep, base_bbox, local_view, |ox, oy| {
+        let ranking = bin
+            .ranking
+            .as_ref()
+            .ok_or_else(|| "internal error: a work bin without its ranking".to_string())?;
+        let own = own_lattice(&ranking.request, &instance.rep, &edge.transform)?;
+        let child_lattice = own.or(edge.lattice);
+        let members = match own {
+            Some(pitches) => placement_survivor_walk(
+                scene,
+                &ranking.request,
+                instance,
+                &edge.transform,
+                pitches,
+                base_bbox,
+                local_view,
+                &|layer| bin.plane_of.get(&layer).map(|&plane| ranking.rim[plane]),
+                guard,
+                stats,
+            )?,
+            None => None,
+        };
+        let mut member = |ox: i64, oy: i64| -> Result<(), String> {
             check_member_cancelled(guard, &mut cancel_member)?;
             let x = checked_add(instance.x, ox, "instance x")?;
             let y = checked_add(instance.y, oy, "instance y")?;
@@ -1684,17 +2618,23 @@ fn build_deferred_minis(
                 &bin.plane_of,
                 &bin.query,
                 &bin.plane_bits,
+                ranking,
                 want_frames,
                 cull_view,
                 guard,
                 instance.child,
                 child_world,
+                child_lattice,
                 &mut path,
                 &mut plane_scratch,
                 &mut visit_seq,
                 stats,
             )
-        });
+        };
+        let walk = match members {
+            Some(walk) => walk.run(guard, &mut SurvivorWork::default(), &mut member),
+            None => for_each_visible_offset(&instance.rep, base_bbox, local_view, &mut member),
+        };
         match walk {
             Ok(_) => minis.push(Some(mini)),
             Err(error) if error == WORK_BIN_OVERFLOW => {
@@ -1730,6 +2670,14 @@ fn collect_work_bin(
         .map(|layer| scene.layer_mask_bit(layer.layer_idx))
         .collect();
     let mut bin = WorkBin::empty(styled.layers.len(), true);
+    let ranking = PlaceRanking {
+        request: *request,
+        rim: styled
+            .layers
+            .iter()
+            .map(|layer| request.area_true && layer.outline_width == 1)
+            .collect(),
+    };
     let mut path = Vec::new();
     // Stamped per-plane scratch: one row per plane, valid only while
     // its stamp equals the current visit - avoids a per-visit alloc
@@ -1742,11 +2690,13 @@ fn collect_work_bin(
         &plane_of,
         &query,
         &plane_bits,
+        &ranking,
         styled.hierarchy_frames,
         cull_view,
         guard,
         scene.top(),
         OrthoTransform::identity(),
+        None,
         &mut path,
         &mut plane_scratch,
         &mut visit_seq,
@@ -1757,6 +2707,7 @@ fn collect_work_bin(
             bin.query = query;
             bin.plane_bits = plane_bits;
             bin.plane_of = plane_of;
+            bin.ranking = Some(ranking);
             Ok(Some(bin))
         }
         Err(error) if error == WORK_BIN_OVERFLOW => {
@@ -1774,11 +2725,13 @@ fn collect_cell(
     plane_of: &std::collections::HashMap<u32, usize>,
     query: &[u64],
     plane_bits: &[Option<usize>],
+    ranking: &PlaceRanking,
     want_frames: bool,
     cull_view: BBox,
     guard: Option<RenderGuard<'_>>,
     key: WsKey,
     world_transform: OrthoTransform,
+    lattice: Option<(i64, i64)>,
     path: &mut Vec<WsKey>,
     plane_scratch: &mut Vec<(u64, BBox)>,
     visit_seq: &mut u64,
@@ -1831,6 +2784,7 @@ fn collect_cell(
             transform: world_transform,
             inverse,
             cell: key,
+            lattice,
         });
     }
     for &(layer_idx, wash) in &cell.washes {
@@ -1987,34 +2941,52 @@ fn collect_cell(
         }
         if !deferred {
             let mut cancel_member = 0u16;
-            let attempt = for_each_visible_offset(
-                &instance.rep,
-                base_bbox,
-                local_view,
-                |offset_x, offset_y| {
-                    check_member_cancelled(guard, &mut cancel_member)?;
-                    let x = checked_add(instance.x, offset_x, "instance x")?;
-                    let y = checked_add(instance.y, offset_y, "instance y")?;
-                    let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
-                    let child_world = world_transform.compose(&local)?;
-                    collect_cell(
-                        scene,
-                        bin,
-                        plane_of,
-                        query,
-                        plane_bits,
-                        want_frames,
-                        cull_view,
-                        guard,
-                        instance.child,
-                        child_world,
-                        path,
-                        plane_scratch,
-                        visit_seq,
-                        stats,
-                    )
-                },
-            );
+            let own = own_lattice(&ranking.request, &instance.rep, &world_transform)?;
+            let child_lattice = own.or(lattice);
+            let walk = match own {
+                Some(pitches) => placement_survivor_walk(
+                    scene,
+                    &ranking.request,
+                    instance,
+                    &world_transform,
+                    pitches,
+                    base_bbox,
+                    local_view,
+                    &|layer| plane_of.get(&layer).map(|&plane| ranking.rim[plane]),
+                    guard,
+                    stats,
+                )?,
+                None => None,
+            };
+            let mut member = |offset_x: i64, offset_y: i64| -> Result<(), String> {
+                check_member_cancelled(guard, &mut cancel_member)?;
+                let x = checked_add(instance.x, offset_x, "instance x")?;
+                let y = checked_add(instance.y, offset_y, "instance y")?;
+                let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
+                let child_world = world_transform.compose(&local)?;
+                collect_cell(
+                    scene,
+                    bin,
+                    plane_of,
+                    query,
+                    plane_bits,
+                    ranking,
+                    want_frames,
+                    cull_view,
+                    guard,
+                    instance.child,
+                    child_world,
+                    child_lattice,
+                    path,
+                    plane_scratch,
+                    visit_seq,
+                    stats,
+                )
+            };
+            let attempt = match walk {
+                Some(walk) => walk.run(guard, &mut SurvivorWork::default(), &mut member),
+                None => for_each_visible_offset(&instance.rep, base_bbox, local_view, &mut member),
+            };
             if let Some((checkpoint, path_len, outer_limit)) = trial {
                 bin.trial_limit = outer_limit;
                 if matches!(&attempt, Err(error) if error.as_str() == WORK_BIN_TRIAL_STOP) {
@@ -2044,6 +3016,7 @@ fn collect_cell(
             inverse,
             cell: key,
             inst: inst_index,
+            lattice,
         });
         // One deferred item per plane the subtree can actually paint
         // (the walk's own per-plane descent gate), plus one for the
@@ -2058,6 +3031,7 @@ fn collect_cell(
                     inst: inst_index,
                     bit: *bit,
                     edge,
+                    lattice,
                 });
             }
         }
@@ -2107,6 +3081,7 @@ fn replay_plane_items(
                 transform,
                 inverse,
                 cell,
+                lattice,
             } => {
                 if !world_bbox.intersects(&cull_view) {
                     continue;
@@ -2146,8 +3121,10 @@ fn replay_plane_items(
                         page_id,
                         level,
                         scene.plan().stats.shape_cut.min(i64::MAX as u64) as i64,
+                        scene.plan().stats.shape_cut_max,
                         local_view,
                         *transform,
+                        *lattice,
                         stats,
                         counters,
                         paint,
@@ -2165,6 +3142,7 @@ fn replay_plane_items(
                     continue;
                 }
                 check_cancelled(guard)?;
+                let marker = marker_request(request);
                 for &point in points {
                     if !point.intersects(&cull_view) {
                         continue;
@@ -2172,7 +3150,7 @@ fn replay_plane_items(
                     counters.rect_records = counters.rect_records.saturating_add(1);
                     stats.primitives_tested = stats.primitives_tested.saturating_add(1);
                     stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-                    if paint_world_rect(band, request, point, paint)? {
+                    if paint_world_rect(band, &marker, point, paint)? {
                         counters.rectangle_members_drawn =
                             counters.rectangle_members_drawn.saturating_add(1);
                         stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
@@ -2189,6 +3167,7 @@ fn replay_plane_items(
                     continue;
                 }
                 check_cancelled(guard)?;
+                let marker = marker_request(request);
                 for prim in prims {
                     if !prim.bbox().intersects(&cull_view) {
                         continue;
@@ -2196,7 +3175,7 @@ fn replay_plane_items(
                     counters.rect_records = counters.rect_records.saturating_add(1);
                     stats.primitives_tested = stats.primitives_tested.saturating_add(1);
                     stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-                    if queue_representative(band, request, prim, paint, &mut rep_spans, stats)? {
+                    if queue_representative(band, &marker, prim, paint, &mut rep_spans, stats)? {
                         counters.rectangle_members_drawn =
                             counters.rectangle_members_drawn.saturating_add(1);
                         stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
@@ -2211,6 +3190,7 @@ fn replay_plane_items(
                 inst,
                 bit,
                 edge,
+                lattice,
             } => {
                 if let Some(minis) = minis {
                     if let Some(Some(mini)) = minis.get(*edge as usize) {
@@ -2247,49 +3227,67 @@ fn replay_plane_items(
                 let local_view = inverse.apply_bbox(cull_view)?;
                 let mut deferred_path = Vec::new();
                 let mut cancel_member = 0u16;
-                let visit = until_full(for_each_visible_offset(
-                    &instance.rep,
-                    base_bbox,
-                    local_view,
-                    |offset_x, offset_y| {
-                        check_member_cancelled(guard, &mut cancel_member)?;
-                        if band.any_written() {
-                            if band.is_full() {
-                                return Err(WRITE_ONCE_FULL.to_string());
-                            }
-                            let member = translate_bbox(base_bbox, offset_x, offset_y)?;
-                            if band.world_box_written(
-                                request,
-                                transform.apply_bbox(member)?,
-                                paint.stroke_width,
-                            ) {
-                                stats.once_items_skipped =
-                                    stats.once_items_skipped.saturating_add(1);
-                                return Ok(());
-                            }
+                let own = own_lattice(request, &instance.rep, transform)?;
+                let child_lattice = own.or(*lattice);
+                let walk = match own {
+                    Some(pitches) => placement_survivor_walk(
+                        scene,
+                        request,
+                        instance,
+                        transform,
+                        pitches,
+                        base_bbox,
+                        local_view,
+                        &|index| (index == layer.layer_idx).then(|| area_true_rim(request, paint)),
+                        guard,
+                        stats,
+                    )?,
+                    None => None,
+                };
+                let mut member = |offset_x: i64, offset_y: i64| -> Result<(), String> {
+                    check_member_cancelled(guard, &mut cancel_member)?;
+                    if band.any_written() {
+                        if band.is_full() {
+                            return Err(WRITE_ONCE_FULL.to_string());
                         }
-                        let x = checked_add(instance.x, offset_x, "instance x")?;
-                        let y = checked_add(instance.y, offset_y, "instance y")?;
-                        let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
-                        let child_world = transform.compose(&local)?;
-                        render_cell(
-                            scene,
+                        let member = translate_bbox(base_bbox, offset_x, offset_y)?;
+                        if band.world_box_written(
                             request,
-                            band,
-                            cull_view,
-                            stats,
-                            counters,
-                            GeometrySelection::Layer(layer.layer_idx),
-                            SubtreePrune::Layer(*bit),
-                            paint,
-                            guard,
-                            instance.child,
-                            child_world,
-                            &mut deferred_path,
-                            record_scratch,
-                        )
-                    },
-                ))?;
+                            transform.apply_bbox(member)?,
+                            paint.stroke_width,
+                        ) {
+                            stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                            return Ok(());
+                        }
+                    }
+                    let x = checked_add(instance.x, offset_x, "instance x")?;
+                    let y = checked_add(instance.y, offset_y, "instance y")?;
+                    let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
+                    let child_world = transform.compose(&local)?;
+                    render_cell(
+                        scene,
+                        request,
+                        band,
+                        cull_view,
+                        stats,
+                        counters,
+                        GeometrySelection::Layer(layer.layer_idx),
+                        SubtreePrune::Layer(*bit),
+                        paint,
+                        guard,
+                        instance.child,
+                        child_world,
+                        child_lattice,
+                        &mut deferred_path,
+                        record_scratch,
+                    )
+                };
+                let visit = until_full(match walk {
+                    Some(walk) => walk.run(guard, &mut SurvivorWork::default(), &mut member),
+                    None => {
+                        for_each_visible_offset(&instance.rep, base_bbox, local_view, &mut member)
+                    }
+                })?;
                 stats.rep_members_tested = stats
                     .rep_members_tested
                     .saturating_add(visit.map_or(0, |visit| visit.tested));
@@ -2431,6 +3429,9 @@ struct TileWork {
     tile_view: BBox,
     /// §3.17 deferred edges resolved for this tile (bin path only)
     minis: Vec<Option<WorkBin>>,
+    /// the same for the density scenes' bins (pass 2): the top plane's, the
+    /// other planes'
+    density_minis: [Vec<Option<WorkBin>>; 2],
     path: Vec<WsKey>,
     record_scratch: RecordSet,
     stats: RenderStats,
@@ -2440,10 +3441,14 @@ struct TileWork {
 }
 
 impl TileWork {
+    /// `density`: pass 2's cut from above (dbu) when the tile stacks density
+    /// (write-once only).
+    #[allow(clippy::too_many_arguments)]
     fn new(
         request: &GeometryRasterRequest,
         stroke_pixels: u8,
         write_once: bool,
+        density: Option<i64>,
         col0: u32,
         col1: u32,
         row0: u32,
@@ -2452,11 +3457,15 @@ impl TileWork {
         let mut band = RasterBand::new_tile(request, col0, col1, row0, row1)?;
         if write_once {
             band.enable_write_once();
+            if let Some(upper_cut) = density {
+                band.enable_density_stack(upper_cut);
+            }
         }
         Ok(TileWork {
             band,
             tile_view: tile_world_view(request, col0, col1, row0, row1, stroke_pixels)?,
             minis: Vec::new(),
+            density_minis: [Vec::new(), Vec::new()],
             path: Vec::new(),
             record_scratch: RecordSet::default(),
             stats: RenderStats::default(),
@@ -2487,6 +3496,22 @@ impl TileWork {
         Ok(())
     }
 
+    /// `prepare_minis` for a density scene's bin (pass 2, no frames): side
+    /// 0 is the top plane's scene, 1 the other planes'.
+    fn prepare_density_minis(
+        &mut self,
+        side: usize,
+        scene: &FrameScene,
+        bin: Option<&WorkBin>,
+        guard: Option<RenderGuard<'_>>,
+    ) -> Result<(), String> {
+        if let Some(bin) = bin.filter(|bin| !bin.deferred_edges.is_empty()) {
+            self.density_minis[side] =
+                build_deferred_minis(scene, bin, false, self.tile_view, guard, &mut self.stats)?;
+        }
+        Ok(())
+    }
+
     fn output(self) -> RasterTileOutput {
         RasterTileOutput {
             tile: self.band,
@@ -2504,6 +3529,7 @@ fn styled_passes(
     styled: &StyledGeometryRasterRequest,
     bin: Option<&WorkBin>,
     write_once: bool,
+    density: bool,
 ) -> Vec<TilePass> {
     let walk_frames = styled.hierarchy_frames
         && match bin {
@@ -2512,18 +3538,35 @@ fn styled_passes(
             None => scene.subtree_has_frames(scene.top()),
             Some(bin) => !bin.frames.is_empty(),
         };
+    if density && write_once {
+        return density_passes(styled.layers.len(), walk_frames);
+    }
     tile_passes(styled.layers.len(), walk_frames, write_once)
+}
+
+/// One side of pass 2 as a tile pass reads it (DensityStack): the scene
+/// planned with the finer cut; the top plane's side with its work bin when
+/// the collection holds it, the lower planes' side with its plane table and
+/// layer query words for the one walk (GeometrySelection::Planes).
+#[derive(Clone, Copy)]
+struct DensityScene<'a> {
+    scene: &'a FrameScene,
+    bin: Option<&'a WorkBin>,
+    table: &'a [Option<(u16, PaintStyle)>],
+    words: &'a [u64],
 }
 
 /// One pass of one tile: the bin's item lists when the collection holds them,
 /// the per-plane hierarchy walk otherwise. `remaining` counts this pass and
-/// every pass after it - what a tile that fills here never runs.
+/// every pass after it - what a tile that fills here never runs. A density
+/// pass reads `density` instead of `scene`.
 #[allow(clippy::too_many_arguments)]
 fn raster_tile_pass(
     scene: &FrameScene,
     request: &GeometryRasterRequest,
     styled: &StyledGeometryRasterRequest,
     bin: Option<&WorkBin>,
+    density: Option<DensityScene<'_>>,
     work: &mut TileWork,
     pass: TilePass,
     remaining: usize,
@@ -2531,11 +3574,28 @@ fn raster_tile_pass(
     guard: Option<RenderGuard<'_>>,
 ) -> Result<(), String> {
     check_cancelled(guard)?;
-    // write-once: the pass sees only what can reach an open pixel
+    // the density stack's phase for this pass: an original plane marks what
+    // it covers, a density plane paints into its masks (DensityStack)
+    match pass {
+        TilePass::Plane(_) => work.band.set_phase(StackPhase::Originals),
+        TilePass::Density(plane) => work
+            .band
+            .begin_density_plane(plane + 1 == styled.layers.len()),
+        TilePass::DensityLower => work.band.begin_density_lower(),
+        TilePass::Frames(_) => work.band.set_phase(StackPhase::Off),
+    }
+    // write-once: the pass sees only what can reach an open pixel (a density
+    // plane: a pixel it may take)
     let Some(cull_view) = work
         .band
         .open_view(request, work.tile_view, stroke_pixels)?
     else {
+        if matches!(pass, TilePass::Density(_) | TilePass::DensityLower) {
+            // this plane's density has nowhere to go; the planes below and
+            // the frame bands may still have
+            end_density_pass(work, styled, pass);
+            return Ok(());
+        }
         work.stats.once_full_tiles = work.stats.once_full_tiles.saturating_add(1);
         work.stats.once_passes_skipped = work
             .stats
@@ -2545,11 +3605,18 @@ fn raster_tile_pass(
         return Ok(());
     };
     if cull_view.x0 >= cull_view.x1 || cull_view.y0 >= cull_view.y1 {
+        end_density_pass(work, styled, pass);
+        return Ok(());
+    }
+    if matches!(pass, TilePass::Density(_) | TilePass::DensityLower) && density.is_none() {
+        // nothing planned for this side: nothing to draw
+        end_density_pass(work, styled, pass);
         return Ok(());
     }
     let TileWork {
         band,
         minis,
+        density_minis,
         path,
         record_scratch,
         stats,
@@ -2557,6 +3624,72 @@ fn raster_tile_pass(
         ..
     } = work;
     match pass {
+        TilePass::DensityLower => {
+            let Some(density) = density else {
+                unreachable!("checked above");
+            };
+            // one walk over the lower planes' scene: every page draws with
+            // its own plane's paint into the plane maps
+            render_cell(
+                density.scene,
+                request,
+                band,
+                cull_view,
+                stats,
+                counters,
+                GeometrySelection::Planes(density.table),
+                SubtreePrune::Layers(density.words),
+                PaintStyle::solid(request.background),
+                guard,
+                density.scene.top(),
+                OrthoTransform::identity(),
+                None,
+                path,
+                record_scratch,
+            )?;
+        }
+        TilePass::Density(plane) => {
+            let Some(density) = density else {
+                unreachable!("checked above");
+            };
+            let side = usize::from(plane + 1 != styled.layers.len());
+            let layer = &styled.layers[plane];
+            let paint = plane_paint(styled, plane);
+            match density.bin {
+                Some(bin) => replay_plane_items(
+                    density.scene,
+                    request,
+                    band,
+                    cull_view,
+                    stats,
+                    counters,
+                    guard,
+                    record_scratch,
+                    layer,
+                    plane,
+                    paint,
+                    &bin.planes[plane],
+                    Some(&density_minis[side]),
+                )?,
+                None => render_cell(
+                    density.scene,
+                    request,
+                    band,
+                    cull_view,
+                    stats,
+                    counters,
+                    GeometrySelection::Layer(layer.layer_idx),
+                    SubtreePrune::Layer(density.scene.layer_mask_bit(layer.layer_idx)),
+                    paint,
+                    guard,
+                    density.scene.top(),
+                    OrthoTransform::identity(),
+                    None,
+                    path,
+                    record_scratch,
+                )?,
+            }
+        }
         TilePass::Frames(frame_band) => match bin {
             Some(bin) => replay_frame_items(
                 scene,
@@ -2588,16 +3721,7 @@ fn raster_tile_pass(
         },
         TilePass::Plane(plane) => {
             let layer = &styled.layers[plane];
-            let paint = PaintStyle {
-                color: if styled.mono {
-                    monochrome(layer.color)
-                } else {
-                    layer.color
-                },
-                fill: layer.fill,
-                stroke: StrokeStyle::Solid,
-                stroke_width: layer.outline_width,
-            };
+            let paint = plane_paint(styled, plane);
             // an occupancy summary paints in the layer's own slot (M2):
             // the plane's page items are empty for a summarized layer
             if let Some(summary) = scene.summary_for(layer.layer_idx) {
@@ -2632,13 +3756,76 @@ fn raster_tile_pass(
                     guard,
                     scene.top(),
                     OrthoTransform::identity(),
+                    None,
                     path,
                     record_scratch,
                 )?,
             }
         }
     }
+    end_density_pass(work, styled, pass);
     Ok(())
+}
+
+/// The paint of styled plane `plane`.
+fn plane_paint(styled: &StyledGeometryRasterRequest, plane: usize) -> PaintStyle {
+    let layer = &styled.layers[plane];
+    PaintStyle {
+        color: if styled.mono {
+            monochrome(layer.color)
+        } else {
+            layer.color
+        },
+        fill: layer.fill,
+        stroke: StrokeStyle::Solid,
+        stroke_width: layer.outline_width,
+    }
+}
+
+/// The end of a pass of a density-stacked tile (DensityStack): after the top
+/// plane's originals what its density may not take is fixed; after a density
+/// plane its density shows where it may, and after the last one (plane 0)
+/// the totals are counted.
+fn end_density_pass(work: &mut TileWork, styled: &StyledGeometryRasterRequest, pass: TilePass) {
+    if work.band.stack.is_none() {
+        return;
+    }
+    match pass {
+        TilePass::Plane(plane) => {
+            if plane + 1 == styled.layers.len() {
+                work.band.snapshot_top_blocked();
+            }
+            work.band.set_phase(StackPhase::Off);
+        }
+        TilePass::Density(plane) => {
+            let top = plane + 1 == styled.layers.len();
+            let (lit, written) = work
+                .band
+                .end_density_plane(plane_paint(styled, plane).color);
+            let counts = &mut work.stats.density_stack;
+            counts[0] = counts[0].saturating_add(lit);
+            counts[if top { 1 } else { 2 }] =
+                counts[if top { 1 } else { 2 }].saturating_add(written);
+            if styled.layers.len() == 1 {
+                let (covered, claimed) = work.band.density_totals();
+                counts[3] = counts[3].saturating_add(covered);
+                counts[4] = counts[4].saturating_add(claimed);
+            }
+        }
+        TilePass::DensityLower => {
+            let colors: Vec<[u8; 4]> = (0..styled.layers.len().saturating_sub(1))
+                .map(|plane| plane_paint(styled, plane).color)
+                .collect();
+            let (lit, written) = work.band.end_density_lower(&colors);
+            let counts = &mut work.stats.density_stack;
+            counts[0] = counts[0].saturating_add(lit);
+            counts[2] = counts[2].saturating_add(written);
+            let (covered, claimed) = work.band.density_totals();
+            counts[3] = counts[3].saturating_add(covered);
+            counts[4] = counts[4].saturating_add(claimed);
+        }
+        TilePass::Frames(_) => {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2664,7 +3851,16 @@ fn raster_tile(
             .max()
             .unwrap_or(1),
     };
-    let mut work = TileWork::new(request, stroke_pixels, write_once, col0, col1, row0, row1)?;
+    let mut work = TileWork::new(
+        request,
+        stroke_pixels,
+        write_once,
+        None,
+        col0,
+        col1,
+        row0,
+        row1,
+    )?;
     match mode {
         RenderMode::Occupancy => {
             let cull_view = work.tile_view;
@@ -2681,13 +3877,14 @@ fn raster_tile(
                 guard,
                 scene.top(),
                 OrthoTransform::identity(),
+                None,
                 &mut work.path,
                 &mut work.record_scratch,
             )?;
         }
         RenderMode::Styled(styled) => {
             work.prepare_minis(scene, bin, styled.hierarchy_frames, guard)?;
-            let passes = styled_passes(scene, styled, bin, work.band.once.is_some());
+            let passes = styled_passes(scene, styled, bin, work.band.once.is_some(), false);
             for (done, &pass) in passes.iter().enumerate() {
                 if work.full {
                     break;
@@ -2697,6 +3894,7 @@ fn raster_tile(
                     request,
                     styled,
                     bin,
+                    None,
                     &mut work,
                     pass,
                     passes.len() - done,
@@ -2785,6 +3983,58 @@ pub struct LayerRasterSession {
     /// the plan's pages per styled plane, sorted unique: what a layer needs
     /// when nothing about coverage is known (LAYER_DECODE_PROBE_PLAN §6)
     pages_by_plane: Vec<Vec<u32>>,
+    /// the density stack's pass 2 (DensityStack): its scenes and bins once
+    /// the caller planned them at the block boundary, and the first density
+    /// pass
+    density: Option<DensityPlan>,
+    /// the work-bin collection is on (the density scenes' bins too)
+    work_bin: bool,
+}
+
+/// The density stack's pass-2 scenes (LayerRasterSession::render_layered_with):
+/// the finer plan of the top plane's layer over the space its density may
+/// take, and of the other layers over the space theirs may
+/// (BlockDemand::eligible_regions); None: nothing to draw on that side.
+pub struct DensityScenes {
+    pub top: Option<Arc<FrameScene>>,
+    pub others: Option<Arc<FrameScene>>,
+}
+
+/// One side of pass 2: its scene and, for the top plane's side with the
+/// collection on, its work bin; for the lower planes' side the plane table
+/// and layer query words of the one walk.
+struct DensitySide {
+    scene: Arc<FrameScene>,
+    bin: Option<WorkBin>,
+    table: Vec<Option<(u16, PaintStyle)>>,
+    words: Vec<u64>,
+}
+
+/// The density stack's pass 2 in a session (LayerRasterSession::
+/// begin_with_density): the two sides once planned, and the index of the
+/// first density pass - the block boundary the caller plans and decodes at.
+struct DensityPlan {
+    top: Option<DensitySide>,
+    others: Option<DensitySide>,
+    start: usize,
+}
+
+impl DensityPlan {
+    /// The scene and bin the density pass of `plane` reads (`top`: the top
+    /// plane).
+    fn side(&self, top: bool) -> Option<DensityScene<'_>> {
+        let side = if top {
+            self.top.as_ref()
+        } else {
+            self.others.as_ref()
+        };
+        side.map(|side| DensityScene {
+            scene: side.scene.as_ref(),
+            bin: side.bin.as_ref(),
+            table: &side.table,
+            words: &side.words,
+        })
+    }
 }
 
 /// What a block of layers still needs read, asked at the block's start with
@@ -2798,6 +4048,10 @@ pub struct BlockDemand<'a> {
     bin: Option<&'a WorkBin>,
     tiles: &'a [std::sync::MutexGuard<'a, TileWork>],
     pages_by_plane: &'a [Vec<u32>],
+    stroke_pixels: u8,
+    /// the block that starts is the density stack's pass 2: the caller plans
+    /// it over `eligible_regions` and returns its scenes
+    density_block: bool,
 }
 
 /// Why the pages of one plane were asked for or left out.
@@ -2834,6 +4088,56 @@ impl BlockDemand<'_> {
         self.tiles
             .iter()
             .all(|tile| tile.band.device_box_written(r0, r1, c0, c1))
+    }
+
+    /// No device pixel `world` could paint can take the density of the top
+    /// plane (`top`) or of any other plane (RasterBand::device_box_taken).
+    fn taken(&self, top: bool, world: BBox, stroke_width: u8) -> bool {
+        let Some((c0, c1, r0, r1)) = self.device_box(world, stroke_width) else {
+            return false;
+        };
+        if c1 <= 0
+            || r1 <= 0
+            || c0 >= i128::from(self.request.width)
+            || r0 >= i128::from(self.request.height)
+        {
+            return true;
+        }
+        self.tiles
+            .iter()
+            .all(|tile| tile.band.device_box_taken(top, r0, r1, c0, c1))
+    }
+
+    /// The block that starts is the density stack's pass 2.
+    pub fn density_block(&self) -> bool {
+        self.density_block
+    }
+
+    /// The world regions where the density of the top plane (`top`) or of
+    /// any other plane may still take a pixel (DensityStack: outside what the
+    /// top plane's originals wrote or cover; outside what any original wrote
+    /// or covers): per tile the bounding box of those pixels, one pixel and
+    /// the stroke margin wider - what pass 2 plans over (floe_vfs HierOpts::
+    /// regions). Empty: no pixel anywhere.
+    pub fn eligible_regions(&self, top: bool) -> Vec<BBox> {
+        let mut regions = Vec::new();
+        for tile in self.tiles {
+            let Some([r0, r1, c0, c1]) = tile.band.free_box(top) else {
+                continue;
+            };
+            let (col0, row0) = (tile.band.col0, tile.band.row0);
+            if let Ok(view) = tile_world_view(
+                self.request,
+                col0 + c0 as u32,
+                col0 + c1 as u32,
+                row0 + r0 as u32,
+                row0 + r1 as u32,
+                self.stroke_pixels.saturating_add(1),
+            ) {
+                regions.push(view);
+            }
+        }
+        regions
     }
 
     /// The box can reach a pixel of the frame at all.
@@ -2957,6 +4261,31 @@ fn partition_dedup(values: &mut [u32]) -> usize {
     kept
 }
 
+fn elapsed_us_of(started: Instant) -> u64 {
+    started.elapsed().as_micros().try_into().unwrap_or(u64::MAX)
+}
+
+/// The plan's pages per styled plane, sorted unique.
+fn plan_pages_by_plane(scene: &FrameScene, styled: &StyledGeometryRasterRequest) -> Vec<Vec<u32>> {
+    let mut planes_of_layer: Vec<(u32, usize)> = styled
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(plane, layer)| (layer.layer_idx, plane))
+        .collect();
+    planes_of_layer.sort_unstable();
+    let mut pages: Vec<Vec<u32>> = vec![Vec::new(); styled.layers.len()];
+    for &page_id in &scene.plan().pages {
+        let Some((layer_idx, _)) = scene.page_geometry(page_id) else {
+            continue;
+        };
+        if let Ok(at) = planes_of_layer.binary_search_by_key(&layer_idx, |entry| entry.0) {
+            pages[planes_of_layer[at].1].push(page_id);
+        }
+    }
+    pages
+}
+
 impl LayerRasterSession {
     /// Plans the frame's tiles and passes. `scene` must already carry every
     /// page the work-bin collection needs to see (the collection reads page
@@ -2965,6 +4294,20 @@ impl LayerRasterSession {
         scene: &FrameScene,
         styled: &StyledGeometryRasterRequest,
         work_bin: bool,
+        guard: Option<RenderGuard<'_>>,
+    ) -> Result<Self, String> {
+        Self::begin_with_density(scene, styled, work_bin, None, guard)
+    }
+
+    /// `begin` with the density stack's pass 2 (DensityStack): `density` is
+    /// pass 1's cut (dbu), the cut from above for pass 2, whose scenes the
+    /// caller plans at the block boundary (`render_layered_with`). Without
+    /// write-once tiles there is no pass 2.
+    pub fn begin_with_density(
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        work_bin: bool,
+        density: Option<i64>,
         guard: Option<RenderGuard<'_>>,
     ) -> Result<Self, String> {
         styled.validate()?;
@@ -2991,6 +4334,8 @@ impl LayerRasterSession {
             None
         };
         stats.work_bin_items = bin.as_ref().map(|bin| bin.items).unwrap_or(0);
+        let write_once = write_once_enabled();
+        let density = density.filter(|_| write_once);
         // §3.21: the deferred-edge tile shrink, as in `render_geometry_impl`
         let request = if styled.raster.tile_size > 128
             && bin
@@ -3014,7 +4359,6 @@ impl LayerRasterSession {
         let workers = usize::from(request.workers).min(tile_count).max(1);
         stats.workers_used = workers.try_into().unwrap_or(u16::MAX);
         stats.tiles = tile_count.try_into().unwrap_or(u32::MAX);
-        let write_once = write_once_enabled();
         let mut tiles = Vec::with_capacity(tile_count);
         for tile_index in 0..tile_count {
             let tile_x = tile_index % tile_columns as usize;
@@ -3023,36 +4367,30 @@ impl LayerRasterSession {
                 &request,
                 stroke_pixels,
                 write_once,
+                density,
                 tile_boundary(request.width, tile_x, tile_size),
                 tile_boundary(request.width, tile_x + 1, tile_size),
                 tile_boundary(request.height, tile_y, tile_size),
                 tile_boundary(request.height, tile_y + 1, tile_size),
             )?);
         }
-        let passes = styled_passes(scene, styled, bin.as_ref(), write_once);
+        let passes = styled_passes(scene, styled, bin.as_ref(), write_once, density.is_some());
         // the plan's pages per plane: what a layer needs when coverage says
         // nothing, and the conservative answer for a deferred edge
-        let mut planes_of_layer: Vec<(u32, usize)> = styled
-            .layers
-            .iter()
-            .enumerate()
-            .map(|(plane, layer)| (layer.layer_idx, plane))
-            .collect();
-        planes_of_layer.sort_unstable();
-        let mut pages_by_plane: Vec<Vec<u32>> = vec![Vec::new(); styled.layers.len()];
-        for &page_id in &scene.plan().pages {
-            let Some((layer_idx, _)) = scene.page_geometry(page_id) else {
-                continue;
-            };
-            if let Ok(at) = planes_of_layer.binary_search_by_key(&layer_idx, |entry| entry.0) {
-                pages_by_plane[planes_of_layer[at].1].push(page_id);
-            }
-        }
+        let pages_by_plane = plan_pages_by_plane(scene, styled);
         let hierarchy_frames = styled.hierarchy_frames;
         let bin_ref = bin.as_ref();
         for_each_tile(&mut tiles, workers, |tile| {
             tile.prepare_minis(scene, bin_ref, hierarchy_frames, guard)
         })?;
+        let density = density.map(|_| DensityPlan {
+            top: None,
+            others: None,
+            start: passes
+                .iter()
+                .position(|pass| matches!(pass, TilePass::Density(_)))
+                .unwrap_or(passes.len()),
+        });
         Ok(LayerRasterSession {
             request,
             bin,
@@ -3067,7 +4405,19 @@ impl LayerRasterSession {
             labels_truncated,
             started,
             pages_by_plane,
+            density,
+            work_bin,
         })
+    }
+
+    /// The passes before the density stack's pass 2 - the block size that
+    /// stops the frame once, when pass 2 asks for its pages (`render_layered`
+    /// with it runs two blocks: pass 1, then pass 2 and the frame bands under
+    /// the planes). Every pass when there is no pass 2.
+    pub fn density_block(&self) -> usize {
+        self.density
+            .as_ref()
+            .map_or(self.passes.len(), |density| density.start.max(1))
     }
 
     pub fn begin_cancellable(
@@ -3088,12 +4438,33 @@ impl LayerRasterSession {
         )
     }
 
+    /// `begin_with_density` under a cancellation guard.
+    pub fn begin_with_density_cancellable(
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        work_bin: bool,
+        density: Option<i64>,
+        generation: u64,
+        cancellation: &RenderCancellation,
+    ) -> Result<Self, String> {
+        Self::begin_with_density(
+            scene,
+            styled,
+            work_bin,
+            density,
+            Some(RenderGuard {
+                generation,
+                cancellation,
+            }),
+        )
+    }
+
     /// The styled plane a pass paints, if it paints one (a hierarchy frame
     /// band paints no layer).
     fn plane_of(pass: TilePass) -> Option<usize> {
         match pass {
             TilePass::Plane(plane) => Some(plane),
-            TilePass::Frames(_) => None,
+            TilePass::Frames(_) | TilePass::Density(_) | TilePass::DensityLower => None,
         }
     }
 
@@ -3121,10 +4492,32 @@ impl LayerRasterSession {
         styled: &StyledGeometryRasterRequest,
         guard: Option<RenderGuard<'_>>,
         block: usize,
-        mut before_block: F,
+        before_block: F,
     ) -> Result<GeometryRasterReport, String>
     where
         F: FnMut(&[usize], &BlockDemand<'_>) -> Result<(), String>,
+    {
+        let mut before_block = before_block;
+        self.render_layered_with(scene, styled, guard, block, |planes, demand| {
+            before_block(planes, demand).map(|()| None)
+        })
+    }
+
+    /// `render_layered` with the density stack's pass 2 (`begin_with_density`):
+    /// before the block the density passes start, `before_block` sees
+    /// `BlockDemand::density_block`, plans the finer scenes over
+    /// `eligible_regions` and returns them; their bins are collected here,
+    /// and the density passes read them.
+    pub fn render_layered_with<F>(
+        self,
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        guard: Option<RenderGuard<'_>>,
+        block: usize,
+        mut before_block: F,
+    ) -> Result<GeometryRasterReport, String>
+    where
+        F: FnMut(&[usize], &BlockDemand<'_>) -> Result<Option<DensityScenes>, String>,
     {
         let block = block.max(1);
         let LayerRasterSession {
@@ -3141,10 +4534,18 @@ impl LayerRasterSession {
             labels_truncated,
             started,
             pages_by_plane,
+            density,
+            work_bin,
         } = self;
+        let mut stats = stats;
         let tiles: Vec<std::sync::Mutex<TileWork>> =
             tiles.into_iter().map(std::sync::Mutex::new).collect();
         let (bin, passes) = (bin.as_ref(), passes.as_slice());
+        let density_start = density.as_ref().map(|plan| plan.start);
+        // the pass-2 scenes arrive at the block boundary; the workers read
+        // them per density pass
+        let density_slot: std::sync::RwLock<Option<DensityPlan>> = std::sync::RwLock::new(density);
+        let density_slot = &density_slot;
         let barrier = std::sync::Barrier::new(workers + 1);
         let pass_index = AtomicUsize::new(0);
         let cursor = AtomicUsize::new(0);
@@ -3171,14 +4572,31 @@ impl LayerRasterSession {
                         };
                         let tile_started = Instant::now();
                         for at in first..last {
-                            if tile.full {
-                                break;
+                            // a full tile takes no further original or frame
+                            // pass; the top plane's density may still
+                            // overwrite lower originals (DensityStack)
+                            if tile.full && !matches!(passes[at], TilePass::Density(_)) {
+                                continue;
                             }
+                            let plan = match passes[at] {
+                                TilePass::Density(_) | TilePass::DensityLower => {
+                                    density_slot.read().ok()
+                                }
+                                _ => None,
+                            };
+                            let density_pass = match (passes[at], plan.as_deref()) {
+                                (TilePass::Density(plane), Some(Some(plan))) => {
+                                    plan.side(plane + 1 == styled.layers.len())
+                                }
+                                (TilePass::DensityLower, Some(Some(plan))) => plan.side(false),
+                                _ => None,
+                            };
                             if let Err(error) = raster_tile_pass(
                                 scene,
                                 &request,
                                 styled,
                                 bin,
+                                density_pass,
                                 &mut tile,
                                 passes[at],
                                 passes.len() - at,
@@ -3212,13 +4630,14 @@ impl LayerRasterSession {
                         .iter()
                         .filter_map(|&pass| Self::plane_of(pass)),
                 );
-                let guards = tiles
+                let mut guards = tiles
                     .iter()
                     .map(|tile| {
                         tile.lock()
                             .map_err(|_| "raster tile lock poisoned".to_string())
                     })
                     .collect::<Result<Vec<_>, String>>()?;
+                let density_block = density_start == Some(at);
                 let demand = BlockDemand {
                     request: &request,
                     styled,
@@ -3226,14 +4645,107 @@ impl LayerRasterSession {
                     bin,
                     tiles: &guards,
                     pages_by_plane: &pages_by_plane,
+                    stroke_pixels,
+                    density_block,
                 };
                 let asked = before_block(&planes, &demand);
                 drop(demand);
-                drop(guards);
-                if let Err(error) = asked {
-                    result = Err(error);
-                    break;
+                let scenes = match asked {
+                    Ok(scenes) => scenes,
+                    Err(error) => {
+                        result = Err(error);
+                        break;
+                    }
+                };
+                if density_block {
+                    // the pass-2 scenes: their bins, their deferred edges'
+                    // minis per tile, then the workers may read them
+                    let collect_started = Instant::now();
+                    let mut sides: [Option<DensitySide>; 2] = [None, None];
+                    let scenes = scenes.unwrap_or(DensityScenes {
+                        top: None,
+                        others: None,
+                    });
+                    for (side, scene) in [scenes.top, scenes.others].into_iter().enumerate() {
+                        let Some(scene) = scene else {
+                            continue;
+                        };
+                        if side == 1 {
+                            // the lower planes: one walk per tile over their
+                            // scene (TilePass::DensityLower), no bin - its
+                            // items were (cell x plane) pairs, 8 M on a
+                            // 449-layer view whose plan held 108 pages
+                            let lower = styled.layers.len().saturating_sub(1);
+                            let mut table: Vec<Option<(u16, PaintStyle)>> = Vec::new();
+                            for plane in 0..lower {
+                                let layer_idx = styled.layers[plane].layer_idx as usize;
+                                if table.len() <= layer_idx {
+                                    table.resize(layer_idx + 1, None);
+                                }
+                                table[layer_idx] =
+                                    Some(((plane + 1) as u16, plane_paint(styled, plane)));
+                            }
+                            let layers: Vec<u32> = styled.layers[..lower]
+                                .iter()
+                                .map(|layer| layer.layer_idx)
+                                .collect();
+                            let words = scene.layer_query_words(&layers);
+                            sides[side] = Some(DensitySide {
+                                scene,
+                                bin: None,
+                                table,
+                                words,
+                            });
+                            continue;
+                        }
+                        let bin = if work_bin {
+                            let mut density_stats = RenderStats::default();
+                            let bin = collect_work_bin(
+                                &scene,
+                                &request,
+                                styled,
+                                stroke_pixels,
+                                guard,
+                                &mut density_stats,
+                                None,
+                            )?;
+                            stats.density_bin[0] += bin.as_ref().map_or(0, |bin| bin.items);
+                            stats.density_bin[1] += bin
+                                .as_ref()
+                                .map_or(0, |bin| bin.deferred_edges.len() as u64);
+                            stats.density_bin[2] += density_stats.work_bin_overflow_items;
+                            if bin.is_none() {
+                                // over the item cap: the per-tile, per-plane
+                                // walk would cost seconds (2026-09-27: 42 s on a
+                                // 449-layer view) - this side's density is
+                                // left out of the frame instead, and the
+                                // overflow is reported (density_bin)
+                                continue;
+                            }
+                            bin
+                        } else {
+                            None
+                        };
+                        for tile in guards.iter_mut() {
+                            tile.prepare_density_minis(side, &scene, bin.as_ref(), guard)?;
+                        }
+                        sides[side] = Some(DensitySide {
+                            scene,
+                            bin,
+                            table: Vec::new(),
+                            words: Vec::new(),
+                        });
+                    }
+                    let [top, others] = sides;
+                    if let Ok(mut slot) = density_slot.write() {
+                        if let Some(plan) = slot.as_mut() {
+                            plan.top = top;
+                            plan.others = others;
+                        }
+                    }
+                    stats.density_collect_us = elapsed_us_of(collect_started);
                 }
+                drop(guards);
                 pass_index.store(at, Ordering::Relaxed);
                 cursor.store(0, Ordering::Relaxed);
                 barrier.wait();
@@ -3251,7 +4763,6 @@ impl LayerRasterSession {
             barrier.wait();
             result
         })?;
-        let mut stats = stats;
         let mut counters = RasterCounters::default();
         let mut bands = Vec::with_capacity(tiles.len());
         for slot in tiles {
@@ -3293,6 +4804,31 @@ impl LayerRasterSession {
         F: FnMut(&[usize], &BlockDemand<'_>) -> Result<(), String>,
     {
         self.render_layered(
+            scene,
+            styled,
+            Some(RenderGuard {
+                generation,
+                cancellation,
+            }),
+            block,
+            before_block,
+        )
+    }
+
+    /// `render_layered_with` under a cancellation guard.
+    pub fn render_layered_cancellable_with<F>(
+        self,
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        generation: u64,
+        cancellation: &RenderCancellation,
+        block: usize,
+        before_block: F,
+    ) -> Result<GeometryRasterReport, String>
+    where
+        F: FnMut(&[usize], &BlockDemand<'_>) -> Result<Option<DensityScenes>, String>,
+    {
+        self.render_layered_with(
             scene,
             styled,
             Some(RenderGuard {
@@ -3466,6 +5002,7 @@ fn apply_label_passes(
         pixels: frame.pixels,
         rep_spans: Vec::new(),
         once: None,
+        stack: None,
     };
     if styled.hierarchy_frames {
         render_prepared_labels(
@@ -3654,28 +5191,47 @@ impl RasterCounters {
 }
 
 #[derive(Clone, Copy)]
-enum GeometrySelection {
+enum GeometrySelection<'a> {
     All,
     Layer(u32),
+    /// The density stack's lower planes in one walk (TilePass::DensityLower):
+    /// per cache layer index its plane (1-based) and paint, None for a layer
+    /// the walk does not draw.
+    Planes(&'a [Option<(u16, PaintStyle)>]),
 }
 
-impl GeometrySelection {
+impl GeometrySelection<'_> {
     fn includes(self, layer_idx: u32) -> bool {
         match self {
             Self::All => true,
             Self::Layer(selected) => selected == layer_idx,
+            Self::Planes(table) => table
+                .get(layer_idx as usize)
+                .is_some_and(|slot| slot.is_some()),
+        }
+    }
+
+    /// The plane (1-based; 0 for a single-plane walk) and paint layer
+    /// `layer_idx` draws with, `paint` being the walk's own; None: not drawn.
+    fn paint_of(self, layer_idx: u32, paint: PaintStyle) -> Option<(u16, PaintStyle)> {
+        match self {
+            Self::Planes(table) => table.get(layer_idx as usize).copied().flatten(),
+            _ => self.includes(layer_idx).then_some((0, paint)),
         }
     }
 }
 
 /// Subtree gate for the per-plane hierarchy walk (F2R-03b 2b).
 #[derive(Clone, Copy)]
-enum SubtreePrune {
+enum SubtreePrune<'a> {
     /// Occupancy paints every layer: no subtree can be skipped.
     Off,
     /// Styled plane: skip children whose subtree holds no decoded page
     /// or wash for this dense scene layer bit (None = nowhere at all).
     Layer(Option<usize>),
+    /// Several planes in one walk: skip children whose subtree holds none
+    /// of these dense layer bits (FrameScene::layer_query_words).
+    Layers(&'a [u64]),
 }
 
 #[derive(Clone, Copy)]
@@ -3792,6 +5348,17 @@ fn add_stats(total: &mut RenderStats, worker: &RenderStats) {
         .saturating_add(worker.once_items_skipped);
     total.raster_tile_max_us = total.raster_tile_max_us.max(worker.raster_tile_max_us);
     total.tiles_reused = total.tiles_reused.saturating_add(worker.tiles_reused);
+    for (sum, walks) in total.place_walks.iter_mut().zip(worker.place_walks.iter()) {
+        sum.0 = sum.0.saturating_add(walks.0);
+        sum.1 = sum.1.saturating_add(walks.1);
+    }
+    for (sum, count) in total
+        .density_stack
+        .iter_mut()
+        .zip(worker.density_stack.iter())
+    {
+        *sum = sum.saturating_add(*count);
+    }
 }
 
 /// Queries one decoded page's record index against a tile-local view
@@ -3827,6 +5394,16 @@ fn thin_record<'a>(rep: &'a Rep, level: u8, record: usize) -> Option<std::borrow
     }))
 }
 
+/// the side the per-shape cut judges a shape's bbox by
+fn cut_side_of(base: BBox, larger: bool) -> i64 {
+    let (w, h) = (base.x1 - base.x0, base.y1 - base.y0);
+    if larger {
+        w.max(h)
+    } else {
+        w.min(h)
+    }
+}
+
 fn raster_page_records(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,
@@ -3834,8 +5411,10 @@ fn raster_page_records(
     page_id: u32,
     level: u8,
     shape_cut: i64,
+    shape_cut_max: bool,
     local_view: BBox,
     world_transform: OrthoTransform,
+    lattice: Option<(i64, i64)>,
     stats: &mut RenderStats,
     counters: &mut RasterCounters,
     paint: PaintStyle,
@@ -3876,9 +5455,23 @@ fn raster_page_records(
                     page_id, rect.w, rect.h
                 ));
             }
-            if rect.w == 0 || rect.h == 0 || rect.w.min(rect.h) < shape_cut {
-                // the per-shape cut (HierStats::shape_cut): the whole record,
-                // its members share the size
+            // the per-shape cut (HierStats::shape_cut): the whole record,
+            // its members share the size; by the smaller side, or by the
+            // larger one when the hairlines are to stay (shape_cut_max:
+            // the width-first drawing thins them by their width)
+            let cut_side = if shape_cut_max {
+                rect.w.max(rect.h)
+            } else {
+                rect.w.min(rect.h)
+            };
+            if rect.w == 0 || rect.h == 0 || cut_side < shape_cut {
+                return Ok(());
+            }
+            // a density plane draws the records under pass 1's cut only
+            if band
+                .density_upper_cut()
+                .is_some_and(|upper| cut_side >= upper)
+            {
                 return Ok(());
             }
             let x1 = rect
@@ -3898,31 +5491,92 @@ fn raster_page_records(
             let Some(rep) = thin_record(&rect.rep, level, record as usize) else {
                 return Ok(());
             };
+            if band.stacking()
+                && area_true_rim(request, paint)
+                && density_record_blocked(band, request, &rep, base, local_view, &world_transform)?
+            {
+                stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                return Ok(());
+            }
             let chunks = if matches!(rep, std::borrow::Cow::Borrowed(_)) {
                 page.index.pts_chunks(&rect.rep)
             } else {
                 None
             };
+            // area-true members of a whole array spread their width decisions
+            // by their index (GridRanks); a thinned repetition keeps the hash
+            let grid =
+                if area_true_rim(request, paint) && matches!(rep, std::borrow::Cow::Borrowed(_)) {
+                    match (&rect.rep, lattice) {
+                        // the placement lattice: a single rectangle placed by a
+                        // lattice array ranks on it, as the array of it would
+                        (Rep::One, Some((px, py))) => Some(GridRanks::lattice(
+                            px,
+                            py,
+                            world_transform.apply_bbox(base)?,
+                        )),
+                        _ => GridRanks::new(
+                            &rect.rep,
+                            &world_transform,
+                            world_transform.apply_bbox(base)?,
+                        )?,
+                    }
+                } else {
+                    None
+                };
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
-            let visit = until_full(for_each_visible_offset_chunked(
+            let walk = survivor_walk(
+                request,
+                grid.as_ref(),
                 &rep,
-                chunks,
                 base,
                 local_view,
-                |offset_x, offset_y| {
-                    check_member_cancelled(guard, &mut cancel_member)?;
-                    if band.is_full() {
-                        return Err(WRITE_ONCE_FULL.to_string());
-                    }
-                    let local = translate_bbox(base, offset_x, offset_y)?;
-                    let world = world_transform.apply_bbox(local)?;
-                    if paint_world_rect(band, request, world, paint)? {
-                        drawn = drawn.saturating_add(1);
-                    }
-                    Ok(())
-                },
-            ))?;
+                &world_transform,
+            )?;
+            // the density stack: a lattice array's footprints at once, the
+            // same for the survivor walk and the member walk
+            let array_foot = band.stacking()
+                && area_true_rim(request, paint)
+                && matches!(rep, std::borrow::Cow::Borrowed(_))
+                && array_footprint(
+                    band,
+                    request,
+                    FootKind::Rect,
+                    &rect.rep,
+                    base,
+                    local_view,
+                    &world_transform,
+                )?;
+            band.set_array_foot(array_foot);
+            let mut member = |offset_x: i64, offset_y: i64| -> Result<(), String> {
+                check_member_cancelled(guard, &mut cancel_member)?;
+                if band.is_full() {
+                    return Err(WRITE_ONCE_FULL.to_string());
+                }
+                let local = translate_bbox(base, offset_x, offset_y)?;
+                let world = world_transform.apply_bbox(local)?;
+                let painted = match grid
+                    .as_ref()
+                    .and_then(|g| g.ranks(offset_x, offset_y, &world))
+                {
+                    Some(ranks) => paint_width_first_rect(band, request, world, paint, ranks)?,
+                    None => paint_world_rect(band, request, world, paint)?,
+                };
+                if painted {
+                    drawn = drawn.saturating_add(1);
+                }
+                Ok(())
+            };
+            // a sub-pixel lattice array walks only the members that can
+            // survive, in the member walk's order (the same pixels)
+            let visit = until_full(match walk {
+                Some(walk) => walk.run(guard, &mut SurvivorWork::default(), &mut member),
+                None => {
+                    for_each_visible_offset_chunked(&rep, chunks, base, local_view, &mut member)
+                }
+            })?;
+            band.set_array_foot(false);
             stats.rep_members_tested = stats
                 .rep_members_tested
                 .saturating_add(visit.map_or(0, |visit| visit.tested));
@@ -3951,7 +5605,13 @@ fn raster_page_records(
                     page_id
                 )
             })?;
-            if (base.x1 - base.x0).min(base.y1 - base.y0) < shape_cut {
+            if cut_side_of(base, shape_cut_max) < shape_cut {
+                return Ok(());
+            }
+            if band
+                .density_upper_cut()
+                .is_some_and(|upper| cut_side_of(base, shape_cut_max) >= upper)
+            {
                 return Ok(());
             }
             let mut drawn = 0u64;
@@ -3961,33 +5621,80 @@ fn raster_page_records(
             let Some(rep) = thin_record(&polygon.rep, level, record as usize) else {
                 return Ok(());
             };
+            if band.stacking()
+                && area_true_rim(request, paint)
+                && density_record_blocked(band, request, &rep, base, local_view, &world_transform)?
+            {
+                stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                return Ok(());
+            }
             let chunks = if matches!(rep, std::borrow::Cow::Borrowed(_)) {
                 page.index.pts_chunks(&polygon.rep)
             } else {
                 None
             };
-            let visit = until_full(for_each_visible_offset_chunked(
-                &rep,
-                chunks,
-                base,
-                local_view,
-                |offset_x, offset_y| {
-                    check_member_cancelled(guard, &mut cancel_member)?;
-                    if band.is_full() {
-                        return Err(WRITE_ONCE_FULL.to_string());
-                    }
-                    world_points.clear();
-                    for &(x, y) in &polygon.pts {
-                        let x = checked_add(x, offset_x, "polygon x")?;
-                        let y = checked_add(y, offset_y, "polygon y")?;
-                        world_points.push(world_transform.apply(x, y)?);
-                    }
-                    if paint_world_polygon(band, request, &world_points, paint)? {
-                        drawn = drawn.saturating_add(1);
-                    }
-                    Ok(())
-                },
-            ))?;
+            // the placement lattice: a sub-pixel polygon keeps by its lattice
+            // rank - its own array's, or the placement array's for a single one
+            let keep_lattice = area_keep_lattice(
+                request,
+                paint,
+                &polygon.rep,
+                matches!(rep, std::borrow::Cow::Borrowed(_)),
+                &world_transform,
+                lattice,
+            )?;
+            let walk = match keep_lattice {
+                Some((px, py)) => area_survivor_walk(
+                    request,
+                    &polygon.rep,
+                    base,
+                    polygon_area(&polygon.pts),
+                    local_view,
+                    &world_transform,
+                    px,
+                    py,
+                )?,
+                None => None,
+            };
+            let array_foot = band.stacking()
+                && area_true_rim(request, paint)
+                && matches!(rep, std::borrow::Cow::Borrowed(_))
+                && array_footprint(
+                    band,
+                    request,
+                    FootKind::Area,
+                    &polygon.rep,
+                    base,
+                    local_view,
+                    &world_transform,
+                )?;
+            band.set_array_foot(array_foot);
+            let mut member = |offset_x: i64, offset_y: i64| -> Result<(), String> {
+                check_member_cancelled(guard, &mut cancel_member)?;
+                if band.is_full() {
+                    return Err(WRITE_ONCE_FULL.to_string());
+                }
+                world_points.clear();
+                for &(x, y) in &polygon.pts {
+                    let x = checked_add(x, offset_x, "polygon x")?;
+                    let y = checked_add(y, offset_y, "polygon y")?;
+                    world_points.push(world_transform.apply(x, y)?);
+                }
+                let rank = keep_lattice.and_then(|(px, py)| {
+                    polygon_bbox(&world_points).map(|world| lattice_area_rank(px, py, &world))
+                });
+                if paint_world_polygon_ranked(band, request, &world_points, paint, rank)? {
+                    drawn = drawn.saturating_add(1);
+                }
+                Ok(())
+            };
+            let visit = until_full(match walk {
+                Some(walk) => walk.run(guard, &mut SurvivorWork::default(), &mut member),
+                None => {
+                    for_each_visible_offset_chunked(&rep, chunks, base, local_view, &mut member)
+                }
+            })?;
+            band.set_array_foot(false);
             stats.rep_members_tested = stats
                 .rep_members_tested
                 .saturating_add(visit.map_or(0, |visit| visit.tested));
@@ -4020,7 +5727,13 @@ fn raster_page_records(
                 .ok_or_else(|| format!("corrupt page {}: path spine is degenerate", page_id))?;
             let base = polygon_bbox(&outline)
                 .ok_or_else(|| format!("corrupt page {}: path outline is degenerate", page_id))?;
-            if (base.x1 - base.x0).min(base.y1 - base.y0) < shape_cut {
+            if cut_side_of(base, shape_cut_max) < shape_cut {
+                return Ok(());
+            }
+            if band
+                .density_upper_cut()
+                .is_some_and(|upper| cut_side_of(base, shape_cut_max) >= upper)
+            {
                 return Ok(());
             }
             let mut drawn = 0u64;
@@ -4032,11 +5745,39 @@ fn raster_page_records(
             let Some(rep) = thin_record(&path_record.rep, level, record as usize) else {
                 return Ok(());
             };
+            if band.stacking()
+                && area_true_rim(request, paint)
+                && density_record_blocked(band, request, &rep, base, local_view, &world_transform)?
+            {
+                stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                return Ok(());
+            }
             let chunks = if matches!(rep, std::borrow::Cow::Borrowed(_)) {
                 page.index.pts_chunks(&path_record.rep)
             } else {
                 None
             };
+            let keep_lattice = area_keep_lattice(
+                request,
+                paint,
+                &path_record.rep,
+                matches!(rep, std::borrow::Cow::Borrowed(_)),
+                &world_transform,
+                lattice,
+            )?;
+            let array_foot = band.stacking()
+                && area_true_rim(request, paint)
+                && matches!(rep, std::borrow::Cow::Borrowed(_))
+                && array_footprint(
+                    band,
+                    request,
+                    FootKind::Area,
+                    &path_record.rep,
+                    base,
+                    local_view,
+                    &world_transform,
+                )?;
+            band.set_array_foot(array_foot);
             let visit = until_full(for_each_visible_offset_chunked(
                 &rep,
                 chunks,
@@ -4059,12 +5800,23 @@ fn raster_page_records(
                         let y = checked_add(y, offset_y, "path centerline y")?;
                         world_centerline.push(world_transform.apply(x, y)?);
                     }
-                    if paint_world_path(band, request, &world_points, &world_centerline, paint)? {
+                    let rank = keep_lattice.and_then(|(px, py)| {
+                        polygon_bbox(&world_points).map(|world| lattice_area_rank(px, py, &world))
+                    });
+                    if paint_world_path_ranked(
+                        band,
+                        request,
+                        &world_points,
+                        &world_centerline,
+                        paint,
+                        rank,
+                    )? {
                         drawn = drawn.saturating_add(1);
                     }
                     Ok(())
                 },
             ))?;
+            band.set_array_foot(false);
             stats.rep_members_tested = stats
                 .rep_members_tested
                 .saturating_add(visit.map_or(0, |visit| visit.tested));
@@ -4084,12 +5836,13 @@ fn render_cell(
     cull_view: BBox,
     stats: &mut RenderStats,
     counters: &mut RasterCounters,
-    selection: GeometrySelection,
-    prune: SubtreePrune,
+    selection: GeometrySelection<'_>,
+    prune: SubtreePrune<'_>,
     paint: PaintStyle,
     guard: Option<RenderGuard<'_>>,
     key: WsKey,
     world_transform: OrthoTransform,
+    lattice: Option<(i64, i64)>,
     path: &mut Vec<WsKey>,
     record_scratch: &mut RecordSet,
 ) -> Result<(), String> {
@@ -4118,7 +5871,10 @@ fn render_cell(
         // cell-local coordinates before walking any of its records. Without
         // this gate every tile rescanned every selected page; sample9's
         // 858x789 frame repeated the same record walks 49 times at 128px.
-        if !selection.includes(page.layer_idx) || !page.bbox.intersects(&local_view) {
+        let Some((plane, paint)) = selection.paint_of(page.layer_idx, paint) else {
+            continue;
+        };
+        if !page.bbox.intersects(&local_view) {
             continue;
         }
         if band.any_written() {
@@ -4132,6 +5888,8 @@ fn render_cell(
                 }
             }
         }
+        // the lower planes' one walk: the page's plane for the density maps
+        band.set_density_plane(plane);
         raster_page_records(
             band,
             request,
@@ -4139,8 +5897,10 @@ fn render_cell(
             page_id,
             level,
             scene.plan().stats.shape_cut.min(i64::MAX as u64) as i64,
+            scene.plan().stats.shape_cut_max,
             local_view,
             world_transform,
+            lattice,
             stats,
             counters,
             paint,
@@ -4148,22 +5908,25 @@ fn render_cell(
             record_scratch,
         )?;
     }
+    // markers (washes, stored representatives) are originals: pass 2's
+    // combined walk draws none
+    let markers = !matches!(selection, GeometrySelection::Planes(_));
     for &(layer_idx, wash) in &cell.washes {
         check_cancelled(guard)?;
-        if !selection.includes(layer_idx) {
+        if !markers || !selection.includes(layer_idx) {
             continue;
         }
         counters.rect_records = counters.rect_records.saturating_add(1);
         stats.primitives_tested = stats.primitives_tested.saturating_add(1);
         stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
         let world = world_transform.apply_bbox(wash)?;
-        if paint_world_rect(band, request, world, paint)? {
+        if paint_world_rect(band, &marker_request(request), world, paint)? {
             counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
         }
     }
-    if path.len() == 1 {
+    if path.len() == 1 && markers {
         let mut rep_spans = std::mem::take(&mut band.rep_spans);
         for (layer_idx, prim) in &cell.reps {
             check_cancelled(guard)?;
@@ -4173,7 +5936,14 @@ fn render_cell(
             counters.rect_records = counters.rect_records.saturating_add(1);
             stats.primitives_tested = stats.primitives_tested.saturating_add(1);
             stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-            if queue_representative(band, request, prim, paint, &mut rep_spans, stats)? {
+            if queue_representative(
+                band,
+                &marker_request(request),
+                prim,
+                paint,
+                &mut rep_spans,
+                stats,
+            )? {
                 counters.rectangle_members_drawn =
                     counters.rectangle_members_drawn.saturating_add(1);
                 stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
@@ -4200,58 +5970,86 @@ fn render_cell(
         // decoded page or wash for this plane's layer cannot change a
         // pixel, so its repetition is never expanded. Runs after the
         // bbox lookup so the missing-child validation stays reachable.
-        if let SubtreePrune::Layer(bit) = prune {
-            if !scene.subtree_paints(instance.child, bit) {
+        match prune {
+            SubtreePrune::Layer(bit) if !scene.subtree_paints(instance.child, bit) => {
                 stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(1);
                 continue;
             }
+            SubtreePrune::Layers(words)
+                if !scene.subtree_intersects(instance.child, words, false) =>
+            {
+                stats.subtrees_pruned = stats.subtrees_pruned.saturating_add(1);
+                continue;
+            }
+            _ => {}
         }
         let base_place =
             OrthoTransform::place(instance.x, instance.y, instance.rot, instance.flip)?;
         let base_bbox = base_place.apply_bbox(child_bbox)?;
         let mut cancel_member = 0u16;
-        let visit = until_full(for_each_visible_offset(
-            &instance.rep,
-            base_bbox,
-            local_view,
-            |offset_x, offset_y| {
-                check_member_cancelled(guard, &mut cancel_member)?;
-                if band.any_written() {
-                    if band.is_full() {
-                        return Err(WRITE_ONCE_FULL.to_string());
-                    }
-                    let member = translate_bbox(base_bbox, offset_x, offset_y)?;
-                    if band.world_box_written(
-                        request,
-                        world_transform.apply_bbox(member)?,
-                        paint.stroke_width,
-                    ) {
-                        stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
-                        return Ok(());
-                    }
+        let own = own_lattice(request, &instance.rep, &world_transform)?;
+        let child_lattice = own.or(lattice);
+        let walk = match own {
+            Some(pitches) => placement_survivor_walk(
+                scene,
+                request,
+                instance,
+                &world_transform,
+                pitches,
+                base_bbox,
+                local_view,
+                &|layer| {
+                    selection
+                        .includes(layer)
+                        .then(|| area_true_rim(request, paint))
+                },
+                guard,
+                stats,
+            )?,
+            None => None,
+        };
+        let mut member = |offset_x: i64, offset_y: i64| -> Result<(), String> {
+            check_member_cancelled(guard, &mut cancel_member)?;
+            if band.any_written() {
+                if band.is_full() {
+                    return Err(WRITE_ONCE_FULL.to_string());
                 }
-                let x = checked_add(instance.x, offset_x, "instance x")?;
-                let y = checked_add(instance.y, offset_y, "instance y")?;
-                let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
-                let child_world = world_transform.compose(&local)?;
-                render_cell(
-                    scene,
+                let member = translate_bbox(base_bbox, offset_x, offset_y)?;
+                if band.world_box_written(
                     request,
-                    band,
-                    cull_view,
-                    stats,
-                    counters,
-                    selection,
-                    prune,
-                    paint,
-                    guard,
-                    instance.child,
-                    child_world,
-                    path,
-                    record_scratch,
-                )
-            },
-        ))?;
+                    world_transform.apply_bbox(member)?,
+                    paint.stroke_width,
+                ) {
+                    stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
+                    return Ok(());
+                }
+            }
+            let x = checked_add(instance.x, offset_x, "instance x")?;
+            let y = checked_add(instance.y, offset_y, "instance y")?;
+            let local = OrthoTransform::place(x, y, instance.rot, instance.flip)?;
+            let child_world = world_transform.compose(&local)?;
+            render_cell(
+                scene,
+                request,
+                band,
+                cull_view,
+                stats,
+                counters,
+                selection,
+                prune,
+                paint,
+                guard,
+                instance.child,
+                child_world,
+                child_lattice,
+                path,
+                record_scratch,
+            )
+        };
+        let visit = until_full(match walk {
+            Some(walk) => walk.run(guard, &mut SurvivorWork::default(), &mut member),
+            None => for_each_visible_offset(&instance.rep, base_bbox, local_view, &mut member),
+        })?;
         stats.rep_members_tested = stats
             .rep_members_tested
             .saturating_add(visit.map_or(0, |visit| visit.tested));
@@ -4754,6 +6552,32 @@ fn hairline_world_bbox(
     world: BBox,
     paint: PaintStyle,
 ) -> Result<Option<(i128, i128, i128, i128)>, String> {
+    hairline_world_bbox_of(request, world, paint, None)
+}
+
+/// `hairline_world_bbox` for a shape whose area is not its box's (a polygon or
+/// a path outline, in world units squared): the area-true draw keeps it with
+/// the chance its OWN area fills the pixels it would light (review 2026-09-22:
+/// a triangle half its box was kept as often as the box).
+fn hairline_world_bbox_of(
+    request: &GeometryRasterRequest,
+    world: BBox,
+    paint: PaintStyle,
+    area: Option<f64>,
+) -> Result<Option<(i128, i128, i128, i128)>, String> {
+    hairline_world_bbox_ranked(request, world, paint, area, None)
+}
+
+/// `hairline_world_bbox_of` with the area-true keep decided by `rank` when
+/// given (a lattice rank under the placement lattice, lattice_area_rank)
+/// instead of the world box's own.
+fn hairline_world_bbox_ranked(
+    request: &GeometryRasterRequest,
+    world: BBox,
+    paint: PaintStyle,
+    area: Option<f64>,
+    rank: Option<f64>,
+) -> Result<Option<(i128, i128, i128, i128)>, String> {
     // 1px solid strokes only. A wider outline paints far more than
     // the collapsed cells (KLayout w4 A/B: 84,303 vs 24,158 px — an
     // interior-diff regression, not band noise), so thick-stroked
@@ -4770,10 +6594,150 @@ fn hairline_world_bbox(
     if !sub_x && !sub_y {
         return Ok(None);
     }
+    if request.area_true {
+        let view = request.view;
+        let px_area = area.map(|a| {
+            a * (request.width as f64 / (view.x1 - view.x0))
+                * (request.height as f64 / (view.y1 - view.y0))
+        });
+        return area_true_hairline(world, (x0, y0, x1, y1), sub_x, sub_y, px_area, rank).map(Some);
+    }
     let point = sub_x && sub_y;
     let (cx0, cx1) = hairline_axis_span(x0, x1, sub_x, point, 0);
     let (cy0, cy1) = hairline_axis_span(y0, y1, sub_y, point, -1);
     Ok(Some((cx0, cy0, cx1, cy1)))
+}
+
+/// Area-true form of a shape under a pixel on a side (GeometryRasterRequest::
+/// area_true): it lights one pixel across each such side - the one holding its
+/// centre - and the pixel-centre span along a longer side, and it is KEPT with
+/// the chance its area fills those pixels (a w px wide wire: w, a w x h px
+/// point: w h; a polygon: its own area in px over max(w,1) max(h,1) - `area`,
+/// None for a rectangle). The draw is decided by the shape's world rank, so a zoom-out
+/// keeps a subset of what the zoom-in kept, a pan changes nothing, and the
+/// kept shapes light, on average, as many pixels as the shapes cover: 0.1 px
+/// wires 1 px apart light one column in ten instead of every column.
+/// A dropped shape answers an empty box. `rank`, when given, stands for the
+/// world box's rank (a lattice rank under the placement lattice).
+fn area_true_hairline(
+    world: BBox,
+    device: (i128, i128, i128, i128),
+    sub_x: bool,
+    sub_y: bool,
+    area: Option<f64>,
+    rank: Option<f64>,
+) -> Result<(i128, i128, i128, i128), String> {
+    if !area_true_kept(world, device, area, rank) {
+        return Ok((0, 0, 0, 0));
+    }
+    area_true_box(device, sub_x, sub_y)
+}
+
+/// `area_true_hairline`'s keep test.
+fn area_true_kept(
+    world: BBox,
+    device: (i128, i128, i128, i128),
+    area: Option<f64>,
+    rank: Option<f64>,
+) -> bool {
+    let (x0, y0, x1, y1) = device;
+    let side = |d: i128| d.max(0) as f64 / DEVICE_ONE as f64;
+    let keep = match area {
+        None => side(x1 - x0).min(1.0) * side(y1 - y0).min(1.0),
+        Some(area) => (area / (side(x1 - x0).max(1.0) * side(y1 - y0).max(1.0))).clamp(0.0, 1.0),
+    };
+    rank.unwrap_or_else(|| area_rank(world)) < keep
+}
+
+/// The pixels `area_true_hairline` lights when it keeps the shape: the one
+/// holding the centre across a sub-pixel side, the pixel-centre span along
+/// a longer one.
+fn area_true_box(
+    device: (i128, i128, i128, i128),
+    sub_x: bool,
+    sub_y: bool,
+) -> Result<(i128, i128, i128, i128), String> {
+    let (x0, y0, x1, y1) = device;
+    let (cx0, cx1) = if sub_x {
+        area_true_across(x0, x1)
+    } else {
+        fill_phase_columns(x0, x1, FillPhase::PixelCenter)?
+    };
+    let (cy0, cy1) = if sub_y {
+        area_true_across(y0, y1)
+    } else {
+        fill_phase_rows(y0, y1, FillPhase::PixelCenter)?
+    };
+    Ok((cx0, cy0, cx1, cy1))
+}
+
+/// The pixel holding the centre of a sub-pixel side [v0, v1).
+fn area_true_across(v0: i128, v1: i128) -> (i128, i128) {
+    let cell = floor_div(v0 + v1, 2 * DEVICE_ONE);
+    (cell, cell + 1)
+}
+
+/// A sub-pixel polygon or path under the density stack (DensityStack): the
+/// pixels it stands for and those it lights, as `hairline_world_bbox_ranked`
+/// would draw it - None when that draws it whole (an original).
+fn area_true_density(
+    request: &GeometryRasterRequest,
+    world: BBox,
+    paint: PaintStyle,
+    area: f64,
+    rank: Option<f64>,
+) -> Result<Option<((i128, i128, i128, i128), bool)>, String> {
+    if !request.area_true || !matches!(paint.stroke, StrokeStyle::Solid) || paint.stroke_width != 1
+    {
+        return Ok(None);
+    }
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    let (sub_x, sub_y) = (x1 - x0 < DEVICE_ONE, y1 - y0 < DEVICE_ONE);
+    if !sub_x && !sub_y {
+        return Ok(None);
+    }
+    let view = request.view;
+    let px_area = area
+        * (request.width as f64 / (view.x1 - view.x0))
+        * (request.height as f64 / (view.y1 - view.y0));
+    let device = (x0, y0, x1, y1);
+    Ok(Some((
+        area_true_box(device, sub_x, sub_y)?,
+        area_true_kept(world, device, Some(px_area), rank),
+    )))
+}
+
+/// A polygon's area in world units squared (shoelace, even-odd net).
+fn polygon_area(points: &[(i64, i64)]) -> f64 {
+    let mut twice: i128 = 0;
+    for k in 0..points.len() {
+        let (x0, y0) = points[k];
+        let (x1, y1) = points[(k + 1) % points.len()];
+        twice += x0 as i128 * y1 as i128 - x1 as i128 * y0 as i128;
+    }
+    twice.unsigned_abs() as f64 / 2.0
+}
+
+/// A shape box's rank in [0, 1) for the area-true sub-pixel draw: a function
+/// of its WORLD box only, so it is the same at every zoom, pan, tile and
+/// worker, and exact duplicates share it (they light the same pixel anyway).
+fn area_rank(world: BBox) -> f64 {
+    salted_rank(world, 0)
+}
+
+/// `area_rank` under a salt: salts 1 and 2 are the x and y ranks of a
+/// width-first rectangle - independent, so a 0.5 x 0.5 px box shows 1 time
+/// in 4, not 1 in 2 (review 2026-09-22).
+fn salted_rank(world: BBox, salt: u64) -> f64 {
+    let mut h: u64 = 0x243F_6A88_85A3_08D3 ^ salt.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    for v in [world.x0, world.y0, world.x1, world.y1] {
+        h = (h ^ v as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        h ^= h >> 31;
+    }
+    (h >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// Measured KLayout hairline placement (32px-aligned and 858px
@@ -4851,6 +6815,9 @@ fn paint_world_rect(
     world: BBox,
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    if area_true_rim(request, paint) {
+        return paint_area_true_rect(band, request, world, paint);
+    }
     if let Some(rect) = hairline_world_bbox(request, world, paint)? {
         return paint_hairline_device_rect(band, request, rect, paint);
     }
@@ -4867,6 +6834,1605 @@ fn paint_world_rect(
         paint,
     )?;
     Ok(filled || stroked)
+}
+
+/// The request a MARKER is painted with: washes, wash points and stored
+/// representatives stand for what the cut dropped - a sub-pixel one is a dot
+/// that must show, not a shape to keep by its area - so they keep the KLayout
+/// rule whatever GeometryRasterRequest::area_true says.
+fn marker_request(request: &GeometryRasterRequest) -> GeometryRasterRequest {
+    GeometryRasterRequest {
+        area_true: false,
+        ..*request
+    }
+}
+
+/// Whether a shape at least a pixel on both sides takes the area-true form
+/// (GeometryRasterRequest::area_true): a 1 px solid outline, the style every
+/// hairline collapse assumes too. A thicker or dotted outline keeps the
+/// KLayout fill and edge stroke - a deliberate heavy style.
+fn area_true_rim(request: &GeometryRasterRequest, paint: PaintStyle) -> bool {
+    request.area_true && matches!(paint.stroke, StrokeStyle::Solid) && paint.stroke_width == 1
+}
+
+/// Area-true rectangle, WIDTH FIRST (user decision 2026-09-22), at any size:
+/// each axis draws m = ceil(w - t) pixels - the whole pixels of its w px
+/// always, one more when its fraction beats t - centred on the rectangle, t
+/// the rectangle's world rank for that axis (`width_first_span`). The pixels
+/// take the layer's fill and their rim is the outline. What it keeps: each
+/// rectangle's whole pixels and, over rectangles, its mean width (a width
+/// never changes under a pan, and shrinks monotonically when zooming out -
+/// a sub-pixel side shows when w > t, the same shape at every scale below).
+/// What it does not: a gap under 2 px may close and neighbours may land on
+/// the same pixels (quantization error, accepted - the picture as a whole
+/// comes first). The box never leaves the pixels the rectangle touches.
+fn paint_area_true_rect(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    world: BBox,
+    paint: PaintStyle,
+) -> Result<bool, String> {
+    paint_width_first_rect(
+        band,
+        request,
+        world,
+        paint,
+        (salted_rank(world, 1), salted_rank(world, 2)),
+    )
+}
+
+/// `paint_area_true_rect` under given x and y ranks: an array member's come
+/// from its index (GridRanks), any other rectangle's from its world box.
+fn paint_width_first_rect(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    world: BBox,
+    paint: PaintStyle,
+    ranks: (f64, f64),
+) -> Result<bool, String> {
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    if band.stacking() && (x1 - x0 < DEVICE_ONE || y1 - y0 < DEVICE_ONE) {
+        // density (DensityStack): a pixel wide at most on its thin side, all
+        // rim - it stands for its widest draw (rank 0) and lights its own
+        let rect = |t: (f64, f64)| {
+            let (c, r) = (
+                width_first_span_c(x0, x1, t.0, request.width_c)?,
+                width_first_span_c(y0, y1, t.1, request.width_c)?,
+            );
+            Some((c.0, r.0, c.1, r.1))
+        };
+        return Ok(band.density_shape(rect((0.0, 0.0)), rect(ranks)));
+    }
+    let Some((c0, c1)) = width_first_span_c(x0, x1, ranks.0, request.width_c) else {
+        return Ok(false);
+    };
+    let Some((r0, r1)) = width_first_span_c(y0, y1, ranks.1, request.width_c) else {
+        return Ok(false);
+    };
+    let (d0, d1) = (c0 * DEVICE_ONE, c1 * DEVICE_ONE);
+    let (e0, e1) = (r0 * DEVICE_ONE, r1 * DEVICE_ONE);
+    let filled =
+        fill_device_rect_with_phase(band, request, d0, e0, d1, e1, FillPhase::PixelCenter, paint)?;
+    let mut rim = false;
+    for piece in [
+        (c0, r0, c1, r0 + 1),
+        (c0, r1 - 1, c1, r1),
+        (c0, r0, c0 + 1, r1),
+        (c1 - 1, r0, c1, r1),
+    ] {
+        rim |= paint_hairline_device_rect(band, request, piece, paint)?;
+    }
+    Ok(filled || rim)
+}
+
+/// Width-first ranks of the members of one rectangle ARRAY (a Grid repetition;
+/// user decision 2026-09-22): a world-box hash spreads the extra pixels of an
+/// array at random - runs of wide and narrow members - so an array member's
+/// rank comes from an index instead. For the world x axis, with ix the index
+/// along x and iy the one along y, the x rank is frac(u_x + vdc(ix) + phi iy):
+/// vdc (the bit-reversed index, van der Corput) lets any run of neighbours
+/// take its share of extra pixels - a half makes it one in two - and phi iy
+/// (the golden ratio, as a 64-bit Weyl step) shifts each row so the rows do
+/// not repeat each other. The y rank swaps ix and iy, so in a one-row array
+/// it is frac(u_y + phi ix) and the two axes stay independent (a 0.5 x 0.5 px
+/// member shows 1 time in 4).
+///
+/// An array whose world repetition vectors run along x and y (the common,
+/// axis-aligned case) counts on the WORLD LATTICE (user decision 2026-09-22,
+/// ADAPTIVE_CUT_DENSITY_PLAN §4.2 candidate 2): along an axis of pitch P the
+/// index is the member's world bbox corner div_euclid P, and u is a hash of
+/// the pitches, the phases (corner rem_euclid P; the fixed coordinate on an
+/// axis without repetition) and the member's world size - never of the
+/// record's first member, count or numbering. So the same world lattice
+/// draws the same members whether it is stored as one Grid, as the index's
+/// fragments (frag_rep re-bases and renumbers them), with its axes swapped or
+/// a pitch negated, or placed rotated or mirrored. What it cannot see: a
+/// one-member fragment is a Rep::One, and a 1 x 1 grid ranks like one - the
+/// single shape's world-box hash. A one-row piece of a 2-D grid is written as
+/// a one-dimensional repetition (the page file drops the other vector), so
+/// nothing tells it from an array stored as that row from the start: it ranks
+/// as that row's own lattice - its pitch, the fixed coordinate across, the
+/// same under further splits of the row - and apart from the 2-D lattice it
+/// was cut from (review 2026-09-23). A skewed grid keeps the per-record index
+/// (the record's own (i, j), u its first member's world-box ranks); a
+/// collinear 2-D grid has no clean index and keeps the member's own world-box
+/// ranks.
+struct GridRanks {
+    mode: GridMode,
+    u: (f64, f64),
+}
+
+enum GridMode {
+    /// world pitches along x and y (0 = no repetition along that axis)
+    Lattice { px: i64, py: i64 },
+    /// the record's own index (skewed grids)
+    Index {
+        va: (i64, i64),
+        vb: (i64, i64),
+        na: u64,
+        nb: u64,
+        det: i128,
+        x_along_a: bool,
+    },
+}
+
+/// An array's repetition vectors in the world (the linear part of the transform).
+fn world_vectors(
+    va: (i64, i64),
+    vb: (i64, i64),
+    world_transform: &OrthoTransform,
+) -> Result<((i64, i64), (i64, i64)), String> {
+    let origin = world_transform.apply(0, 0)?;
+    let a = world_transform.apply(va.0, va.1)?;
+    let b = world_transform.apply(vb.0, vb.1)?;
+    Ok((
+        (a.0 - origin.0, a.1 - origin.1),
+        (b.0 - origin.0, b.1 - origin.1),
+    ))
+}
+
+/// The world lattice of an array (GridRanks' lattice mode): every repeating
+/// vector along x or y, two of them along different axes - its pitches
+/// (px, py), 0 along an axis without repetition. None for a skewed or
+/// collinear array or one without a repeating vector.
+fn world_lattice(na: u64, nb: u64, wa: (i64, i64), wb: (i64, i64)) -> Option<(i64, i64)> {
+    let along = |v: (i64, i64)| -> Option<(i64, i64)> {
+        match v {
+            (0, 0) => None,
+            (x, 0) => Some((x.abs(), 0)),
+            (0, y) => Some((0, y.abs())),
+            _ => None,
+        }
+    };
+    let steps = [(na > 1, wa), (nb > 1, wb)]
+        .iter()
+        .filter(|(many, _)| *many)
+        .map(|&(_, v)| along(v))
+        .collect::<Option<Vec<(i64, i64)>>>()?;
+    if steps.is_empty() {
+        return None;
+    }
+    let px = steps.iter().map(|s| s.0).max().unwrap_or(0);
+    let py = steps.iter().map(|s| s.1).max().unwrap_or(0);
+    // two repeating vectors must not share an axis
+    let distinct = steps.len() < 2 || (steps[0].0 == 0) != (steps[1].0 == 0);
+    distinct.then_some((px, py))
+}
+
+/// The world lattice of a placement array (GeometryRasterRequest::
+/// place_lattice): its pitches when its vectors placed by `world_transform`
+/// (the transform of the cell holding it) run along the world axes.
+fn placement_lattice(
+    rep: &Rep,
+    world_transform: &OrthoTransform,
+) -> Result<Option<(i64, i64)>, String> {
+    let Rep::Grid { na, nb, va, vb } = rep else {
+        return Ok(None);
+    };
+    let (wa, wb) = world_vectors(*va, *vb, world_transform)?;
+    Ok(world_lattice(*na, *nb, wa, wb))
+}
+
+/// An instance's own placement lattice when the placement lattice is on and
+/// it is a lattice array (None otherwise): the members below it lie under
+/// it, and under the one above when it has none - the innermost lattice
+/// array on the path. Every member walk - the work bin's collection, its
+/// deferred edges' mini walks and their fallback, the per-tile walk - takes
+/// its members' lattice this way, whether or not it lists survivors.
+fn own_lattice(
+    request: &GeometryRasterRequest,
+    rep: &Rep,
+    world_transform: &OrthoTransform,
+) -> Result<Option<(i64, i64)>, String> {
+    if !request.place_lattice {
+        return Ok(None);
+    }
+    placement_lattice(rep, world_transform)
+}
+
+/// A placement array's cell is small enough to have its survivors listed at
+/// most this many shapes on the drawn layers.
+const SMALL_CELL_SHAPES: usize = 8;
+
+/// The most work the preparation of a placement array's survivor walk may do
+/// (review 2026-09-25): one unit per record of the drawn layers it looks at -
+/// those the shape cut drops included - and one per polygon vertex. A cell
+/// past it is walked member by member; the preparation runs again at every
+/// visit of the array's parent, so it must stay small whatever the cell holds.
+const PLACEMENT_PREP_WORK: u64 = 1024;
+
+/// The survivor walk of a placement array under the placement lattice
+/// (GeometryRasterRequest::place_lattice with survivor_list): `instance`, in
+/// the cell placed at `parent_world`, a lattice array of pitches `pitches`.
+/// Its cell must be a small leaf - no placements, frames, washes or stored
+/// representatives, page levels 0, pages decoded, at most SMALL_CELL_SHAPES
+/// single rectangles and polygons on the layers `layer_rim` says this walk
+/// draws (Some(rim): drawn, rim = the area-true 1 px outline; a drawn layer
+/// without it draws every shape whole) - and every one of those shapes under a
+/// pixel along one lattice axis A for every member: a rectangle's width-first
+/// chance there, a polygon's area-true keep chance (its rank lists on x when
+/// the lattice repeats along x). Each shape is one term of the walk, keyed by
+/// its own world box on the lattice (GridRanks::lattice, lattice_area_rank),
+/// so the walk visits every member where some shape can be drawn and the
+/// members it skips draw nothing: the pixels are those of every member's
+/// visit. Shapes the shape cut drops are no term; a path, an array record or
+/// any shape that may be a pixel or more along A leaves the members to the
+/// full walk (None) - the ranks are the same either way.
+#[allow(clippy::too_many_arguments)]
+fn placement_survivor_walk(
+    scene: &FrameScene,
+    request: &GeometryRasterRequest,
+    instance: &floe_vfs::hier::WsInst,
+    parent_world: &OrthoTransform,
+    pitches: (i64, i64),
+    base_bbox: BBox,
+    local_view: BBox,
+    layer_rim: &dyn Fn(u32) -> Option<bool>,
+    guard: Option<RenderGuard<'_>>,
+    stats: &mut RenderStats,
+) -> Result<Option<SurvivorWalk>, String> {
+    // the density stack marks what the skipped members stand for: they are
+    // all visited
+    if !request.survivor_list || request.density_stack {
+        return Ok(None);
+    }
+    let range = visible_grid_range(&instance.rep, base_bbox, local_view);
+    let planned = plan_placement_walk(
+        scene,
+        request,
+        instance,
+        parent_world,
+        pitches,
+        range,
+        layer_rim,
+        guard,
+    )?;
+    let members = range.map_or(0, |(i0, i1, j0, j1)| {
+        ((i1 - i0 + 1) as u64).saturating_mul((j1 - j0 + 1) as u64)
+    });
+    let two = matches!(instance.rep, Rep::Grid { na, nb, .. } if na > 1 && nb > 1);
+    let (outcome, walk) = match planned {
+        Ok(walk) => (PlaceWalkOutcome::Walked, Some(walk)),
+        Err(outcome) => (outcome, None),
+    };
+    let slot =
+        &mut stats.place_walks[outcome as usize + if two { PLACE_WALK_OUTCOMES.len() } else { 0 }];
+    slot.0 = slot.0.saturating_add(1);
+    slot.1 = slot.1.saturating_add(members);
+    Ok(walk)
+}
+
+/// The plan of `placement_survivor_walk`, or why every member is visited.
+#[allow(clippy::too_many_arguments)]
+fn plan_placement_walk(
+    scene: &FrameScene,
+    request: &GeometryRasterRequest,
+    instance: &floe_vfs::hier::WsInst,
+    parent_world: &OrthoTransform,
+    pitches: (i64, i64),
+    range: Option<(i64, i64, i64, i64)>,
+    layer_rim: &dyn Fn(u32) -> Option<bool>,
+    guard: Option<RenderGuard<'_>>,
+) -> Result<Result<SurvivorWalk, PlaceWalkOutcome>, String> {
+    use PlaceWalkOutcome as Why;
+    let (px, py) = pitches;
+    let Rep::Grid { va, vb, .. } = &instance.rep else {
+        return Ok(Err(Why::NoAxis));
+    };
+    let Some(child) = scene.cell(instance.child) else {
+        return Ok(Err(Why::NotLeaf));
+    };
+    if !child.insts.is_empty()
+        || !child.frames.is_empty()
+        || !child.washes.is_empty()
+        || !child.reps.is_empty()
+    {
+        return Ok(Err(Why::NotLeaf));
+    }
+    let Some(range) = range else {
+        return Ok(Err(Why::NoRange));
+    };
+    let shape_cut = scene.plan().stats.shape_cut.min(i64::MAX as u64) as i64;
+    let shape_cut_max = scene.plan().stats.shape_cut_max;
+    let member0 = parent_world.compose(&OrthoTransform::place(
+        instance.x,
+        instance.y,
+        instance.rot,
+        instance.flip,
+    )?)?;
+    let c = request.width_c;
+    // per rectangle its term along each axis it is under a pixel on; per
+    // polygon its keep axis and term - a ninth shape, a path or work past
+    // PLACEMENT_PREP_WORK gives up at once
+    let mut rects: Vec<[Option<LatticeTerm>; 2]> = Vec::with_capacity(SMALL_CELL_SHAPES);
+    let mut areas: Vec<(usize, LatticeTerm)> = Vec::with_capacity(SMALL_CELL_SHAPES);
+    let mut work = 0u64;
+    let mut heartbeat = 0u16;
+    for (slot, &page_id) in child.pages.iter().enumerate() {
+        check_cancelled(guard)?;
+        if child.page_levels.get(slot).copied().unwrap_or(0) != 0 {
+            return Ok(Err(Why::PageLevel));
+        }
+        let Some(page) = scene.page(page_id) else {
+            return Ok(Err(Why::Undecoded));
+        };
+        let Some(rim) = layer_rim(page.layer_idx) else {
+            continue;
+        };
+        let Some(geometry) = page.doc.cells.get(page.doc.top) else {
+            return Ok(Err(Why::Undecoded));
+        };
+        if !geometry.paths.is_empty() {
+            return Ok(Err(Why::Path));
+        }
+        for rect in &geometry.rects {
+            check_member_cancelled(guard, &mut heartbeat)?;
+            work += 1;
+            if work > PLACEMENT_PREP_WORK {
+                return Ok(Err(Why::PrepWork));
+            }
+            let base = BBox {
+                x0: rect.x,
+                y0: rect.y,
+                x1: rect.x.saturating_add(rect.w),
+                y1: rect.y.saturating_add(rect.h),
+            };
+            if rect.w <= 0 || rect.h <= 0 || cut_side_of(base, shape_cut_max) < shape_cut {
+                continue;
+            }
+            if !rim {
+                return Ok(Err(Why::NonRim));
+            }
+            if !matches!(rect.rep, Rep::One) {
+                return Ok(Err(Why::ArrayRecord));
+            }
+            if rects.len() + areas.len() == SMALL_CELL_SHAPES {
+                return Ok(Err(Why::Shapes));
+            }
+            let world = member0.apply_bbox(base)?;
+            let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+            let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+            let ranks = GridRanks::lattice(px, py, world);
+            let (ix, iy) = lattice_indices(px, py, &world);
+            let first = [ix as i64, iy as i64];
+            let term = |d: i128, u: f64| {
+                let w = (d.max(0) + 2) as f64 / DEVICE_ONE as f64;
+                (w < 1.0).then(|| LatticeTerm {
+                    u,
+                    first,
+                    p: if c > 1.0 { w / (c - (c - 1.0) * w) } else { w },
+                })
+            };
+            rects.push([term(x1 - x0, ranks.u.0), term(y1 - y0, ranks.u.1)]);
+        }
+        for polygon in &geometry.polys {
+            check_member_cancelled(guard, &mut heartbeat)?;
+            work += 1 + polygon.pts.len() as u64;
+            if work > PLACEMENT_PREP_WORK {
+                return Ok(Err(Why::PrepWork));
+            }
+            let Some(base) = polygon_bbox(&polygon.pts) else {
+                return Ok(Err(Why::NotSubPixel));
+            };
+            if cut_side_of(base, shape_cut_max) < shape_cut {
+                continue;
+            }
+            if !rim {
+                return Ok(Err(Why::NonRim));
+            }
+            if !matches!(polygon.rep, Rep::One) {
+                return Ok(Err(Why::ArrayRecord));
+            }
+            if rects.len() + areas.len() == SMALL_CELL_SHAPES {
+                return Ok(Err(Why::Shapes));
+            }
+            let Some(term) = area_term(
+                request,
+                px,
+                py,
+                member0.apply_bbox(base)?,
+                polygon_area(&polygon.pts),
+            )?
+            else {
+                return Ok(Err(Why::NotSubPixel));
+            };
+            areas.push(term);
+        }
+    }
+    if rects.is_empty() && areas.is_empty() {
+        return Ok(Err(Why::NoShapes));
+    }
+    let (wa, wb) = world_vectors(*va, *vb, parent_world)?;
+    Ok(SurvivorWalk::plan(
+        &instance.rep,
+        wa,
+        wb,
+        [px, py],
+        range,
+        [true, true],
+        PLACEMENT_MEMBER_COST,
+        |axis| {
+            let mut terms = Vec::with_capacity(rects.len() + areas.len());
+            for rect in &rects {
+                match rect[axis] {
+                    Some(term) => terms.push(term),
+                    None => return Vec::new(),
+                }
+            }
+            for &(along, term) in &areas {
+                if along != axis {
+                    return Vec::new();
+                }
+                terms.push(term);
+            }
+            terms
+        },
+    ))
+}
+
+/// A lattice's key for a shape whose world box is `world`: its phase along
+/// each repeating axis and its size, and a salt of the pitches - the same for
+/// every member.
+fn lattice_key(px: i64, py: i64, world: BBox) -> (BBox, u64) {
+    let key = BBox {
+        x0: if px > 0 {
+            world.x0.rem_euclid(px)
+        } else {
+            world.x0
+        },
+        y0: if py > 0 {
+            world.y0.rem_euclid(py)
+        } else {
+            world.y0
+        },
+        x1: world.x1 - world.x0,
+        y1: world.y1 - world.y0,
+    };
+    (
+        key,
+        (px as u64).rotate_left(21) ^ (py as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+    )
+}
+
+/// The world indices of a member on the lattice (GridRanks::ranks).
+fn lattice_indices(px: i64, py: i64, world: &BBox) -> (u64, u64) {
+    (
+        if px > 0 {
+            world.x0.div_euclid(px) as u64
+        } else {
+            0
+        },
+        if py > 0 {
+            world.y0.div_euclid(py) as u64
+        } else {
+            0
+        },
+    )
+}
+
+/// The area-true keep rank of a sub-pixel polygon or path on a world lattice
+/// (the placement lattice): one rank, frac(u + vdc(k) + weyl(k')), k its
+/// world index along x when the lattice repeats along x, else along y; the
+/// keep chance stays its area's (area_true_hairline).
+fn lattice_area_rank(px: i64, py: i64, world: &BBox) -> f64 {
+    let (key, salt) = lattice_key(px, py, *world);
+    let u = salted_rank(key, 5 ^ salt);
+    let (ix, iy) = lattice_indices(px, py, world);
+    let (k, across) = if px > 0 { (ix, iy) } else { (iy, ix) };
+    (u + vdc53(k) + weyl53(across)).rem_euclid(1.0)
+}
+
+impl GridRanks {
+    /// The lattice ranks of a shape whose world box is `world` (any member)
+    /// on the world lattice (px, py): keyed by its phase and size.
+    fn lattice(px: i64, py: i64, world: BBox) -> GridRanks {
+        let (key, salt) = lattice_key(px, py, world);
+        GridRanks {
+            mode: GridMode::Lattice { px, py },
+            u: (salted_rank(key, 3 ^ salt), salted_rank(key, 4 ^ salt)),
+        }
+    }
+
+    fn new(
+        rep: &Rep,
+        world_transform: &OrthoTransform,
+        base_world: BBox,
+    ) -> Result<Option<GridRanks>, String> {
+        let Rep::Grid { na, nb, va, vb } = rep else {
+            return Ok(None);
+        };
+        let (wa, wb) = world_vectors(*va, *vb, world_transform)?;
+        // no repeating vector: one member, ranked as the same shape stored alone
+        if *na <= 1 && *nb <= 1 {
+            return Ok(None);
+        }
+        if let Some((px, py)) = world_lattice(*na, *nb, wa, wb) {
+            return Ok(Some(GridRanks::lattice(px, py, base_world)));
+        }
+        let (ua, ub) = (
+            (wa.0.unsigned_abs(), wa.1.unsigned_abs()),
+            (wb.0.unsigned_abs(), wb.1.unsigned_abs()),
+        );
+        // which index is x's primary: a one-row array's own index goes to the
+        // axis it runs along (a column of bars spreads its y decisions by vdc)
+        let x_along_a = if *nb <= 1 {
+            ua.0 >= ua.1
+        } else if *na <= 1 {
+            ub.0 < ub.1
+        } else {
+            ua.0 >= ub.0
+        };
+        Ok(Some(GridRanks {
+            mode: GridMode::Index {
+                va: *va,
+                vb: *vb,
+                na: *na,
+                nb: *nb,
+                det: va.0 as i128 * vb.1 as i128 - va.1 as i128 * vb.0 as i128,
+                x_along_a,
+            },
+            u: (salted_rank(base_world, 1), salted_rank(base_world, 2)),
+        }))
+    }
+
+    /// A skewed grid's member at this offset from the record's first: (i, j).
+    fn index(&self, ox: i64, oy: i64) -> Option<(u64, u64)> {
+        let GridMode::Index {
+            va,
+            vb,
+            na,
+            nb,
+            det,
+            ..
+        } = self.mode
+        else {
+            return None;
+        };
+        let (ox, oy) = (ox as i128, oy as i128);
+        let (va, vb) = ((va.0 as i128, va.1 as i128), (vb.0 as i128, vb.1 as i128));
+        let along = |v: (i128, i128)| -> Option<u64> {
+            let k = if v.0 != 0 {
+                ox / v.0
+            } else if v.1 != 0 {
+                oy / v.1
+            } else {
+                0
+            };
+            u64::try_from(k).ok()
+        };
+        if det != 0 {
+            let i = (ox * vb.1 - oy * vb.0) / det;
+            let j = (va.0 * oy - va.1 * ox) / det;
+            return Some((u64::try_from(i).ok()?, u64::try_from(j).ok()?));
+        }
+        if nb <= 1 {
+            return Some((along(va)?, 0));
+        }
+        if na <= 1 {
+            return Some((0, along(vb)?));
+        }
+        None
+    }
+
+    /// The member's (x, y) ranks: `world` is its world bbox, (ox, oy) its
+    /// offset from the record's first member.
+    fn ranks(&self, ox: i64, oy: i64, world: &BBox) -> Option<(f64, f64)> {
+        let (ix, iy) = match self.mode {
+            GridMode::Lattice { px, py } => (
+                if px > 0 {
+                    world.x0.div_euclid(px) as u64
+                } else {
+                    0
+                },
+                if py > 0 {
+                    world.y0.div_euclid(py) as u64
+                } else {
+                    0
+                },
+            ),
+            GridMode::Index { x_along_a, .. } => {
+                let (i, j) = self.index(ox, oy)?;
+                if x_along_a {
+                    (i, j)
+                } else {
+                    (j, i)
+                }
+            }
+        };
+        let vdc = |k: u64| (k.reverse_bits() >> 11) as f64 / (1u64 << 53) as f64;
+        let weyl =
+            |k: u64| (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << 53) as f64;
+        let spread = |u: f64, p: u64, s: u64| (u + vdc(p) + weyl(s)).rem_euclid(1.0);
+        Some((spread(self.u.0, ix, iy), spread(self.u.1, iy, ix)))
+    }
+}
+
+/// A lattice member's rank term along the axis it is enumerated on: the
+/// van der Corput value of its world index (GridRanks::ranks).
+fn vdc53(k: u64) -> f64 {
+    (k.reverse_bits() >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// The golden-ratio Weyl step of the index on the other axis (GridRanks::ranks).
+fn weyl53(k: u64) -> f64 {
+    (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// A lattice array's members are worth listing only when the list is at most
+/// this share of the members (the rest of the time the scan is as cheap).
+const SURVIVOR_LIST_SHARE: f64 = 0.5;
+
+/// What a member of an array record costs the member walk (its transform,
+/// ranks and width test), in the survivor walk's blocks.
+const RECORD_MEMBER_COST: f64 = 4.0;
+
+/// What a member of a placement array costs the member walk (a cell visit:
+/// its transform, page scan and bin item), in the survivor walk's blocks.
+const PLACEMENT_MEMBER_COST: f64 = 16.0;
+
+/// The most progression cursors a survivor walk holds at once (review
+/// 2026-09-25: a temporary memory bound, ~1.5 MB). A walk listed along the
+/// outer repetition index merges every line's cursors in one heap; past this
+/// many it is not started and the member walk runs instead. A walk along the
+/// inner index holds one line's cursors, about 2 per bit of the resolution.
+const SURVIVOR_CURSOR_CAP: usize = 1 << 16;
+
+/// The outcome of a placement array's survivor walk (RenderStats::
+/// place_walks, PLACE_WALK_OUTCOMES in this order): walked, or why every
+/// member is visited. Of the plan's own reasons the furthest either axis got
+/// is kept: NoAxis < AxisMismatch < Cost < CursorCap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PlaceWalkOutcome {
+    Walked,
+    NotLeaf,
+    NoRange,
+    PageLevel,
+    Undecoded,
+    NonRim,
+    ArrayRecord,
+    Path,
+    Shapes,
+    PrepWork,
+    NotSubPixel,
+    NoShapes,
+    NoAxis,
+    AxisMismatch,
+    Cost,
+    CursorCap,
+}
+
+/// One shape's rank along the listed axis A of a lattice array: a member
+/// (i, j) at world indices k_A = first[A] + sign * (its index along A) and
+/// k_B across ranks frac(u + vdc(k_A) + weyl(k_B)), and may be drawn only
+/// when that is under `p` (an upper bound of its chance). A record's own array
+/// has one term; the shapes of a cell placed by an array have one each.
+#[derive(Clone, Copy, Debug)]
+struct LatticeTerm {
+    u: f64,
+    first: [i64; 2],
+    p: f64,
+}
+
+/// The work of one survivor walk, for tests: members handed to the draw and
+/// the most cursors held at once.
+#[derive(Clone, Copy, Debug, Default)]
+struct SurvivorWork {
+    walked: u64,
+    peak_cursors: usize,
+}
+
+/// A planned walk over the members of a lattice array that CAN survive their
+/// width-first draw (ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1 in the renderer,
+/// 2026-09-25; made lazy after the review of the same day). Along a
+/// sub-pixel world axis A of pitch P a member's rank is
+/// frac(u + vdc(k_A) + weyl(k_B)) - k_A its world index along A, a signed
+/// affine function of the repetition index i or j that runs along A, k_B the
+/// one across - so for a fixed k_B the members under p have vdc(k_A) in one
+/// interval mod 1: a union of dyadic intervals, each the arithmetic
+/// progression k_A = rev_b(m) (mod 2^b). The interval is padded (2^-40
+/// against the f64 sums) and cut at the index range's resolution (a finer
+/// block holds one member at most), so the walk is a superset of the drawn
+/// members and the caller re-tests each by the exact rule: the pixels are the
+/// member walk's. It hands members over in the member walk's order (i, then
+/// j), one line at a time, merging the line's progressions in a small heap -
+/// nothing is prepared ahead, so a draw that stops (the tile is full, the
+/// frame cancelled) stops the walk at once.
+struct SurvivorWalk {
+    va: (i64, i64),
+    vb: (i64, i64),
+    /// the listed world axis (0 = x, 1 = y), the repetition index along it
+    /// (0 = i, 1 = j) and its sign
+    axis: usize,
+    index: usize,
+    sign: i64,
+    /// the repetition index across (0 = i, 1 = j) and its sign when it runs
+    /// along the other world axis of a lattice with a pitch there
+    across: Option<i64>,
+    /// the walk's index rectangle (i0, i1, j0, j1)
+    range: (i64, i64, i64, i64),
+    /// the resolution the rank interval is cut at, in bits
+    bits: u32,
+    terms: Vec<LatticeTerm>,
+}
+
+impl SurvivorWalk {
+    /// Plans the walk over `range` of the array (`rep`'s vectors in the local
+    /// frame, `wa` / `wb` in the world) when listing pays: the listed axis is
+    /// one whose repetition index is the inner one (j) if it qualifies, else
+    /// the outer one, the cheaper when both indices do (`sub`: the world axes
+    /// the terms can be listed on - each needs a bound there). An axis does
+    /// not qualify when its list would exceed SURVIVOR_LIST_SHARE of the
+    /// members or, along the outer index, hold more than SURVIVOR_CURSOR_CAP
+    /// cursors; None when none does.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    fn plan(
+        rep: &Rep,
+        wa: (i64, i64),
+        wb: (i64, i64),
+        pitch: [i64; 2],
+        range: (i64, i64, i64, i64),
+        sub: [bool; 2],
+        member_cost: f64,
+        terms: impl Fn(usize) -> Vec<LatticeTerm>,
+    ) -> Result<SurvivorWalk, PlaceWalkOutcome> {
+        let Rep::Grid { na, nb, va, vb } = rep else {
+            return Err(PlaceWalkOutcome::NoAxis);
+        };
+        let (i0, i1, j0, j1) = range;
+        if i1 < i0 || j1 < j0 {
+            return Err(PlaceWalkOutcome::NoRange);
+        }
+        // why no axis qualified: the furthest either got
+        let mut why = PlaceWalkOutcome::NoAxis;
+        // the repetition index (0 = i, 1 = j) that drives a world axis (0 = x,
+        // 1 = y) and its sign: its vector runs along that axis
+        let driver = |axis: usize| -> Option<(usize, i64)> {
+            [(0usize, *na > 1, wa), (1, *nb > 1, wb)]
+                .into_iter()
+                .find_map(|(index, many, v)| {
+                    let (along, across) = if axis == 0 { (v.0, v.1) } else { (v.1, v.0) };
+                    (many && along != 0 && across == 0).then(|| (index, along.signum()))
+                })
+        };
+        let count = (i1 - i0 + 1) as f64 * (j1 - j0 + 1) as f64;
+        // 2^bits past the index range: a finer block holds one member at most
+        let resolution =
+            |values: i64| (64 - (values.max(1) as u64 - 1).leading_zeros()).min(52) + 1;
+        let mut best: Option<(usize, (bool, f64), Vec<LatticeTerm>)> = None;
+        for axis in [0usize, 1] {
+            let Some((index, _)) = driver(axis) else {
+                continue;
+            };
+            if !sub[axis] || pitch[axis] <= 0 {
+                continue;
+            }
+            let terms = terms(axis);
+            if terms.is_empty() {
+                why = why.max(PlaceWalkOutcome::AxisMismatch);
+                continue;
+            }
+            let (along, lines) = if index == 0 {
+                (i1 - i0 + 1, j1 - j0 + 1)
+            } else {
+                (j1 - j0 + 1, i1 - i0 + 1)
+            };
+            let bits = resolution(along);
+            let most = 2 * bits as usize + 4;
+            // an outer-index walk holds every line's cursors
+            if index == 0
+                && (lines as usize)
+                    .saturating_mul(most)
+                    .saturating_mul(terms.len())
+                    > SURVIVOR_CURSOR_CAP
+            {
+                why = why.max(PlaceWalkOutcome::CursorCap);
+                continue;
+            }
+            // a term's interval, p 2^bits blocks of the resolution (plus the
+            // padding's), splits into about 2 log2 of that dyadic blocks
+            let blocks: f64 = terms
+                .iter()
+                .map(|t| (2.0 * (t.p * (1u64 << bits) as f64 + 3.0).log2() + 2.0).min(most as f64))
+                .sum();
+            let chance: f64 = terms.iter().map(|t| t.p).sum::<f64>().min(1.0);
+            // the walk: the blocks of every line and its members' visits;
+            // the member walk: every member's visit, `member_cost` blocks each
+            let cost = lines as f64 * blocks + chance * count * member_cost;
+            if cost > SURVIVOR_LIST_SHARE * count * member_cost {
+                why = why.max(PlaceWalkOutcome::Cost);
+                continue;
+            }
+            // the inner index first: its walk prepares one line at a time, so
+            // a draw that stops early has paid for one line; an outer-index
+            // walk prepares every line before its first member
+            let rank = (index == 0, cost);
+            if best.as_ref().is_none_or(|(_, c, _)| rank < *c) {
+                best = Some((axis, rank, terms));
+            }
+        }
+        let Some((axis, _, terms)) = best else {
+            return Err(why);
+        };
+        let (index, sign) = driver(axis).ok_or(PlaceWalkOutcome::NoAxis)?;
+        let across = driver(1 - axis)
+            .filter(|&(other, _)| other != index && pitch[1 - axis] > 0)
+            .map(|(_, s)| s);
+        let along = if index == 0 { i1 - i0 + 1 } else { j1 - j0 + 1 };
+        Ok(SurvivorWalk {
+            va: *va,
+            vb: *vb,
+            axis,
+            index,
+            sign,
+            across,
+            range,
+            bits: resolution(along),
+            terms,
+        })
+    }
+
+    /// The cursors (next index along A, stride) of line `o` (the index across)
+    /// for every term, appended to `out`.
+    fn line_cursors(&self, o: i64, out: &mut Vec<(i64, i64)>) {
+        let (d0, d1) = if self.index == 0 {
+            (self.range.0, self.range.1)
+        } else {
+            (self.range.2, self.range.3)
+        };
+        let scale = 1i64 << self.bits;
+        let pad = 2f64.powi(-40);
+        for term in &self.terms {
+            // the world index across: from the index across when it drives the
+            // other axis, 0 when that axis does not repeat (GridRanks::ranks)
+            let k_across = match self.across {
+                Some(s) => term.first[1 - self.axis] + s * o,
+                None => 0,
+            };
+            // vdc(k_A) must lie in [lo, lo + p) mod 1: the blocks of 2^-bits
+            // that meet the padded interval, as one or two runs on the circle
+            let lo = (-(term.u + weyl53(k_across as u64))).rem_euclid(1.0);
+            let from = ((lo - pad) * scale as f64).floor() as i64;
+            let to = ((lo + term.p + pad) * scale as f64).ceil() as i64;
+            let mut runs: [(i64, i64); 2] = [(0, 0); 2];
+            let n = if to - from >= scale {
+                runs[0] = (0, scale);
+                1
+            } else {
+                let a = from.rem_euclid(scale);
+                let b = a + (to - from);
+                if b <= scale {
+                    runs[0] = (a, b);
+                    1
+                } else {
+                    runs[0] = (a, scale);
+                    runs[1] = (0, b - scale);
+                    2
+                }
+            };
+            for &(lo_r, hi_r) in &runs[..n] {
+                let (mut lo_r, hi_r) = (lo_r as u64, hi_r as u64);
+                while lo_r < hi_r {
+                    let mut shift = lo_r.trailing_zeros().min(self.bits);
+                    while shift > 0 && lo_r + (1u64 << shift) > hi_r {
+                        shift -= 1;
+                    }
+                    let bits = self.bits - shift;
+                    let m = lo_r >> shift;
+                    // the block fixes the low `bits` bits of k_A (reversed m)
+                    let residue = if bits == 0 {
+                        0
+                    } else {
+                        m.reverse_bits() >> (64 - bits)
+                    };
+                    let stride = 1i128 << bits;
+                    // k_A = first + sign * d  ==  residue (mod 2^bits)
+                    let want = (self.sign as i128
+                        * (residue as i128 - term.first[self.axis] as i128))
+                        .rem_euclid(stride);
+                    let d = d0 as i128 + (want - d0 as i128).rem_euclid(stride);
+                    if d <= d1 as i128 {
+                        out.push((d as i64, stride as i64));
+                    }
+                    lo_r += 1u64 << shift;
+                }
+            }
+        }
+    }
+
+    /// Walks the members in the member walk's order, handing each to
+    /// `member`; stops at the first error `member` returns (a full tile, a
+    /// cancelled frame). The count is that of the members handed over.
+    fn run(
+        &self,
+        guard: Option<RenderGuard<'_>>,
+        work: &mut SurvivorWork,
+        member: &mut dyn FnMut(i64, i64) -> Result<(), String>,
+    ) -> Result<RepVisit, String> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        let (i0, i1, j0, j1) = self.range;
+        let (d1, o0, o1) = if self.index == 0 {
+            (i1, j0, j1)
+        } else {
+            (j1, i0, i1)
+        };
+        let offset = |i: i64, j: i64| -> Result<(i64, i64), String> {
+            let ox = i as i128 * self.va.0 as i128 + j as i128 * self.vb.0 as i128;
+            let oy = i as i128 * self.va.1 as i128 + j as i128 * self.vb.1 as i128;
+            Ok((
+                checked_i64(ox, "grid offset x")?,
+                checked_i64(oy, "grid offset y")?,
+            ))
+        };
+        let mut heartbeat = 0u16;
+        let mut cursors: Vec<(i64, i64)> = Vec::new();
+        if self.index == 1 {
+            // listed along j, the inner index: line by line (i ascending), the
+            // line's progressions merged by j
+            let mut heap: BinaryHeap<Reverse<(i64, i64)>> = BinaryHeap::new();
+            for i in o0..=o1 {
+                check_member_cancelled(guard, &mut heartbeat)?;
+                cursors.clear();
+                self.line_cursors(i, &mut cursors);
+                work.peak_cursors = work.peak_cursors.max(cursors.len());
+                heap.clear();
+                heap.extend(cursors.iter().map(|&(j, stride)| Reverse((j, stride))));
+                let mut last = i64::MIN;
+                while let Some(Reverse((j, stride))) = heap.pop() {
+                    if j + stride <= d1 {
+                        heap.push(Reverse((j + stride, stride)));
+                    }
+                    // two shapes' progressions may meet on a member
+                    if j == last {
+                        continue;
+                    }
+                    last = j;
+                    let (ox, oy) = offset(i, j)?;
+                    work.walked += 1;
+                    member(ox, oy)?;
+                }
+            }
+        } else {
+            // listed along i, the outer index: every line's progressions in one
+            // heap, merged by (i, j)
+            let mut heap: BinaryHeap<Reverse<(i64, i64, i64)>> = BinaryHeap::new();
+            for j in o0..=o1 {
+                check_member_cancelled(guard, &mut heartbeat)?;
+                cursors.clear();
+                self.line_cursors(j, &mut cursors);
+                heap.extend(cursors.iter().map(|&(i, stride)| Reverse((i, j, stride))));
+            }
+            // SurvivorWalk::plan bounds the cursors of an outer-index walk
+            debug_assert!(heap.len() <= SURVIVOR_CURSOR_CAP);
+            work.peak_cursors = work.peak_cursors.max(heap.len());
+            let mut last = (i64::MIN, i64::MIN);
+            while let Some(Reverse((i, j, stride))) = heap.pop() {
+                if i + stride <= d1 {
+                    heap.push(Reverse((i + stride, j, stride)));
+                }
+                if (i, j) == last {
+                    continue;
+                }
+                last = (i, j);
+                let (ox, oy) = offset(i, j)?;
+                work.walked += 1;
+                member(ox, oy)?;
+            }
+        }
+        Ok(RepVisit {
+            tested: work.walked,
+            visible: work.walked,
+        })
+    }
+}
+
+/// The survivor walk of a width-first rectangle array: planned when the
+/// request lists survivors, the array ranks on the world lattice
+/// (GridRanks) and its members are under a pixel along an axis its
+/// repetition runs on; None for the member walk. `base` is the record's first
+/// member (local).
+fn survivor_walk(
+    request: &GeometryRasterRequest,
+    grid: Option<&GridRanks>,
+    rep: &Rep,
+    base: BBox,
+    local_view: BBox,
+    world_transform: &OrthoTransform,
+) -> Result<Option<SurvivorWalk>, String> {
+    let Some(grid) = grid.filter(|_| request.survivor_list) else {
+        return Ok(None);
+    };
+    let GridMode::Lattice { px, py } = grid.mode else {
+        return Ok(None);
+    };
+    let Rep::Grid { va, vb, .. } = rep else {
+        return Ok(None);
+    };
+    let Some(range) = visible_grid_range(rep, base, local_view) else {
+        return Ok(None);
+    };
+    let world = world_transform.apply_bbox(base)?;
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    // a member's device side differs from the first's by its rounding: two
+    // units bound it; the chance of the extra pixel is P_c of that fraction
+    let bound = |d: i128| {
+        let w = (d.max(0) + 2) as f64 / DEVICE_ONE as f64;
+        let c = request.width_c;
+        (w < 1.0).then(|| if c > 1.0 { w / (c - (c - 1.0) * w) } else { w })
+    };
+    let chance = [bound(x1 - x0), bound(y1 - y0)];
+    let origin = world_transform.apply(0, 0)?;
+    let a = world_transform.apply(va.0, va.1)?;
+    let b = world_transform.apply(vb.0, vb.1)?;
+    let first = [
+        if px > 0 { world.x0.div_euclid(px) } else { 0 },
+        if py > 0 { world.y0.div_euclid(py) } else { 0 },
+    ];
+    Ok(SurvivorWalk::plan(
+        rep,
+        (a.0 - origin.0, a.1 - origin.1),
+        (b.0 - origin.0, b.1 - origin.1),
+        [px, py],
+        range,
+        [chance[0].is_some(), chance[1].is_some()],
+        RECORD_MEMBER_COST,
+        |axis| {
+            chance[axis]
+                .map(|p| LatticeTerm {
+                    u: if axis == 0 { grid.u.0 } else { grid.u.1 },
+                    first,
+                    p,
+                })
+                .into_iter()
+                .collect()
+        },
+    )
+    .ok())
+}
+
+/// The world lattice a sub-pixel polygon or path keeps by under the placement
+/// lattice (GeometryRasterRequest::place_lattice): its own array's for a
+/// whole lattice array (`whole`: not thinned by the page frontier), the
+/// placement array's for a single shape, None otherwise (its world box's
+/// rank) - and None when its paint is not the area-true rim.
+fn area_keep_lattice(
+    request: &GeometryRasterRequest,
+    paint: PaintStyle,
+    rep: &Rep,
+    whole: bool,
+    world_transform: &OrthoTransform,
+    placed: Option<(i64, i64)>,
+) -> Result<Option<(i64, i64)>, String> {
+    if !request.place_lattice || !area_true_rim(request, paint) || !whole {
+        return Ok(None);
+    }
+    match rep {
+        Rep::One => Ok(placed),
+        rep => placement_lattice(rep, world_transform),
+    }
+}
+
+/// The survivor-walk term of a polygon or path of world box `world` and world
+/// area `area` on the lattice (px, py): the axis its keep rank lists on (x
+/// when the lattice repeats along x, lattice_area_rank) and a bound of its
+/// keep chance over the members. None unless every member is under a pixel on
+/// a side - area_true_hairline keeps only those by rank; a wider one is drawn
+/// whole. The members' device sides differ by their rounding (two units).
+fn area_term(
+    request: &GeometryRasterRequest,
+    px: i64,
+    py: i64,
+    world: BBox,
+    area: f64,
+) -> Result<Option<(usize, LatticeTerm)>, String> {
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    let hi = |d: i128| (d.max(0) + 2) as f64 / DEVICE_ONE as f64;
+    let lo = |d: i128| (d - 2).max(0) as f64 / DEVICE_ONE as f64;
+    let (dw, dh) = (x1 - x0, y1 - y0);
+    if hi(dw) >= 1.0 && hi(dh) >= 1.0 {
+        return Ok(None);
+    }
+    let view = request.view;
+    let px_area = area
+        * (request.width as f64 / (view.x1 - view.x0))
+        * (request.height as f64 / (view.y1 - view.y0));
+    let keep = (px_area / (lo(dw).max(1.0) * lo(dh).max(1.0))).clamp(0.0, 1.0);
+    let (key, salt) = lattice_key(px, py, world);
+    let (ix, iy) = lattice_indices(px, py, &world);
+    Ok(Some((
+        if px > 0 { 0 } else { 1 },
+        LatticeTerm {
+            u: salted_rank(key, 5 ^ salt),
+            first: [ix as i64, iy as i64],
+            p: keep,
+        },
+    )))
+}
+
+/// The survivor walk of a sub-pixel polygon array on its own lattice (px, py)
+/// under the placement lattice: the members whose keep rank can be under
+/// their keep chance (area_term). None when the request does not list
+/// survivors, a member may be a pixel or more on both sides, or listing does
+/// not pay.
+#[allow(clippy::too_many_arguments)]
+fn area_survivor_walk(
+    request: &GeometryRasterRequest,
+    rep: &Rep,
+    base: BBox,
+    area: f64,
+    local_view: BBox,
+    world_transform: &OrthoTransform,
+    px: i64,
+    py: i64,
+) -> Result<Option<SurvivorWalk>, String> {
+    let Rep::Grid { va, vb, .. } = rep else {
+        return Ok(None);
+    };
+    if !request.survivor_list {
+        return Ok(None);
+    }
+    let Some(range) = visible_grid_range(rep, base, local_view) else {
+        return Ok(None);
+    };
+    let Some((axis, term)) = area_term(request, px, py, world_transform.apply_bbox(base)?, area)?
+    else {
+        return Ok(None);
+    };
+    let (wa, wb) = world_vectors(*va, *vb, world_transform)?;
+    Ok(SurvivorWalk::plan(
+        rep,
+        wa,
+        wb,
+        [px, py],
+        range,
+        [axis == 0, axis == 1],
+        RECORD_MEMBER_COST,
+        |listed| {
+            if listed == axis {
+                vec![term]
+            } else {
+                Vec::new()
+            }
+        },
+    )
+    .ok())
+}
+
+/// How the density members of an array stand for their pixels under the
+/// density stack: a width-first rectangle by its widest draw (rank 0), an
+/// area-true polygon or path by the box it lights when kept.
+#[derive(Clone, Copy)]
+enum FootKind {
+    Rect,
+    Area,
+}
+
+/// The pixels one side [v0, v1) (device units) of a density member of
+/// `kind` stands for along world axis `axis` (0 = x).
+fn foot_span(
+    request: &GeometryRasterRequest,
+    kind: FootKind,
+    axis: usize,
+    v0: i128,
+    v1: i128,
+) -> Result<Option<(i128, i128)>, String> {
+    Ok(match kind {
+        FootKind::Rect => width_first_span_c(v0, v1, 0.0, request.width_c),
+        FootKind::Area if v1 - v0 < DEVICE_ONE => Some(area_true_across(v0, v1)),
+        FootKind::Area if axis == 0 => Some(fill_phase_columns(v0, v1, FillPhase::PixelCenter)?),
+        FootKind::Area => Some(fill_phase_rows(v0, v1, FillPhase::PixelCenter)?),
+    })
+}
+
+/// Past this many members along an axis whose spans can meet the tile they
+/// touch one another (`axis_footprint`): the first's and the last's hull.
+const FOOT_ENUM: i64 = 4096;
+
+/// One axis of `array_footprint`: the pixel spans that members k0..=k1 stand
+/// for along world axis `axis` - member k's side is [lo, hi] + k step, `other`
+/// a coordinate on the other axis - clipped to [clip.0, clip.1) and merged
+/// into `out`. Only the members whose span can meet the clip are looked at.
+#[allow(clippy::too_many_arguments)]
+fn axis_footprint(
+    request: &GeometryRasterRequest,
+    kind: FootKind,
+    axis: usize,
+    (lo, hi, other): (i64, i64, i64),
+    step: i64,
+    (k0, k1): (i64, i64),
+    clip: (i128, i128),
+    out: &mut Vec<(i128, i128)>,
+) -> Result<(), String> {
+    out.clear();
+    let side = |k: i64| -> Result<Option<(i128, i128)>, String> {
+        let offset = checked_i64(k as i128 * step as i128, "footprint offset")?;
+        let (a, b) = (
+            checked_add(lo, offset, "footprint side")?,
+            checked_add(hi, offset, "footprint side")?,
+        );
+        let (v0, v1) = if axis == 0 {
+            (
+                world_to_device(request, a, other)?.0,
+                world_to_device(request, b, other)?.0,
+            )
+        } else {
+            (
+                world_to_device(request, other, b)?.1,
+                world_to_device(request, other, a)?.1,
+            )
+        };
+        foot_span(request, kind, axis, v0, v1)
+    };
+    let (mut first, mut last) = (k0, k1);
+    if step != 0 && last > first {
+        // member k's span moves by `pitch` px a step from member k0's; the
+        // margin holds its length and the rounding
+        let Some(span) = side(first)? else {
+            return Ok(());
+        };
+        let view = request.view;
+        let scale = if axis == 0 {
+            request.width as f64 / (view.x1 - view.x0)
+        } else {
+            -(request.height as f64) / (view.y1 - view.y0)
+        };
+        let pitch = step as f64 * scale;
+        let centre = (span.0 + span.1) as f64 / 2.0;
+        let margin = (span.1 - span.0) as f64 + 2.0;
+        let a = (clip.0 as f64 - margin - centre) / pitch;
+        let b = (clip.1 as f64 + margin - centre) / pitch;
+        let bound = |v: f64| (k0 as f64 + v).clamp(k0 as f64, k1 as f64) as i64;
+        (first, last) = (bound(a.min(b).floor()), bound(a.max(b).ceil()));
+    }
+    let clipped = |span: (i128, i128)| (span.0.max(clip.0), span.1.min(clip.1));
+    if last as i128 - first as i128 >= FOOT_ENUM as i128 {
+        if let (Some(a), Some(b)) = (side(first)?, side(last)?) {
+            let hull = clipped((a.0.min(b.0), a.1.max(b.1)));
+            if hull.0 < hull.1 {
+                out.push(hull);
+            }
+        }
+        return Ok(());
+    }
+    for k in first..=last {
+        if let Some(span) = side(k)?.map(clipped) {
+            if span.0 < span.1 {
+                out.push(span);
+            }
+        }
+    }
+    out.sort_unstable();
+    let mut merged = 0usize;
+    for at in 0..out.len() {
+        if merged > 0 && out[at].0 <= out[merged - 1].1 {
+            out[merged - 1].1 = out[merged - 1].1.max(out[at].1);
+        } else {
+            out[merged] = out[at];
+            merged += 1;
+        }
+    }
+    out.truncate(merged);
+    Ok(())
+}
+
+/// Under the density stack, a record whose every member is density (under a
+/// pixel on a side by more than the members' rounding) and whose visible
+/// members' box (a single shape's, or a Grid's visible range) holds no pixel
+/// that can still take density (`device_box_taken`): it neither draws nor
+/// claims anything that could show, so it is skipped before its members are
+/// walked (review 2026-09-26: the rank test before the density lookup).
+fn density_record_blocked(
+    band: &RasterBand,
+    request: &GeometryRasterRequest,
+    rep: &Rep,
+    base: BBox,
+    local_view: BBox,
+    world_transform: &OrthoTransform,
+) -> Result<bool, String> {
+    let world = world_transform.apply_bbox(base)?;
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    if x1 - x0 + 4 >= DEVICE_ONE && y1 - y0 + 4 >= DEVICE_ONE {
+        return Ok(false);
+    }
+    let local = match rep {
+        Rep::One => base,
+        Rep::Grid { va, vb, .. } => {
+            let Some((i0, i1, j0, j1)) = visible_grid_range(rep, base, local_view) else {
+                return Ok(true);
+            };
+            let mut hull = BBox::EMPTY;
+            for (i, j) in [(i0, j0), (i0, j1), (i1, j0), (i1, j1)] {
+                let dx = checked_i64(
+                    i as i128 * va.0 as i128 + j as i128 * vb.0 as i128,
+                    "density hull x",
+                )?;
+                let dy = checked_i64(
+                    i as i128 * va.1 as i128 + j as i128 * vb.1 as i128,
+                    "density hull y",
+                )?;
+                hull.grow(&translate_bbox(base, dx, dy)?);
+            }
+            hull
+        }
+        _ => return Ok(false),
+    };
+    let world = world_transform.apply_bbox(local)?;
+    let (Ok((x0, y1)), Ok((x1, y0))) = (
+        world_to_device(request, world.x0, world.y0),
+        world_to_device(request, world.x1, world.y1),
+    ) else {
+        return Ok(false);
+    };
+    Ok(band.device_box_written(
+        floor_div(y0, DEVICE_ONE) - 2,
+        floor_div(y1, DEVICE_ONE) + 3,
+        floor_div(x0, DEVICE_ONE) - 2,
+        floor_div(x1, DEVICE_ONE) + 3,
+    ))
+}
+
+/// Under the density stack, what the visible members of a whole lattice
+/// array stand for, marked at once (DensityStack): member (i, j) stands for
+/// its column spans times its row spans, and on a lattice whose repeating
+/// vectors run along the world axes the columns follow one index and the rows
+/// the other, so the union is the columns' union times the rows'. It is the
+/// same whether the survivor walk or the member walk draws the array; the
+/// members then mark only what they light. False, the members marking their
+/// own, for any other array and for members that are not density. `base` is
+/// the record's first member (local).
+#[allow(clippy::too_many_arguments)]
+fn array_footprint(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    kind: FootKind,
+    rep: &Rep,
+    base: BBox,
+    local_view: BBox,
+    world_transform: &OrthoTransform,
+) -> Result<bool, String> {
+    let Rep::Grid { na, nb, va, vb } = rep else {
+        return Ok(false);
+    };
+    let (wa, wb) = world_vectors(*va, *vb, world_transform)?;
+    if world_lattice(*na, *nb, wa, wb).is_none() {
+        return Ok(false);
+    }
+    let world = world_transform.apply_bbox(base)?;
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    if x1 - x0 >= DEVICE_ONE && y1 - y0 >= DEVICE_ONE {
+        return Ok(false);
+    }
+    let Some((i0, i1, j0, j1)) = visible_grid_range(rep, base, local_view) else {
+        // no member reaches the tile: nothing to mark, none to draw
+        return Ok(true);
+    };
+    // the index and step that move each world axis (the other index, or
+    // none, leaves it)
+    let driver = |axis: usize| -> (i64, (i64, i64)) {
+        let along = |v: (i64, i64)| if axis == 0 { v.0 } else { v.1 };
+        if *na > 1 && along(wa) != 0 {
+            (along(wa), (i0, i1))
+        } else if *nb > 1 && along(wb) != 0 {
+            (along(wb), (j0, j1))
+        } else {
+            (0, (0, 0))
+        }
+    };
+    let (col0, col1, row0, row1) = (band.col0, band.col1, band.row0, band.row1);
+    let (mut columns, mut rows) = (Vec::new(), Vec::new());
+    let (step, range) = driver(0);
+    axis_footprint(
+        request,
+        kind,
+        0,
+        (world.x0, world.x1, world.y0),
+        step,
+        range,
+        (col0 as i128, col1 as i128),
+        &mut columns,
+    )?;
+    let (step, range) = driver(1);
+    axis_footprint(
+        request,
+        kind,
+        1,
+        (world.y0, world.y1, world.x0),
+        step,
+        range,
+        (row0 as i128, row1 as i128),
+        &mut rows,
+    )?;
+    let Some(stack) = band.stack.as_mut() else {
+        return Ok(false);
+    };
+    if columns.is_empty() || rows.is_empty() {
+        return Ok(true);
+    }
+    let words = stack.words;
+    let width = (col1 - col0) as usize;
+    let mut mask = vec![0u64; words];
+    for &(c0, c1) in &columns {
+        mark_rect(&mut mask, words, col0, col1, 0, 1, (c0, 0, c1, 1));
+    }
+    for &(r0, r1) in &rows {
+        let local = ((r0 - row0 as i128) as usize, (r1 - row0 as i128) as usize);
+        for row in local.0..local.1 {
+            if stack.plane != 0 {
+                for (word, &bits) in mask.iter().enumerate() {
+                    raise_plane_bits(
+                        &mut stack.foot_plane,
+                        width,
+                        row,
+                        word << 6,
+                        bits,
+                        stack.plane,
+                    );
+                }
+            } else {
+                for (slot, bits) in stack.foot[row * words..(row + 1) * words]
+                    .iter_mut()
+                    .zip(&mask)
+                {
+                    *slot |= bits;
+                }
+            }
+        }
+        stack.touch(Some(local));
+    }
+    Ok(true)
+}
+
+/// One axis of a width-first rectangle: the side [v0, v1) (device units) is
+/// w px; it draws m = ceil(w - t) pixels, none when m < 1, starting at
+/// floor(centre - m/2 + 1/2). m is floor(w) or floor(w) + 1 (floor(w) + 1
+/// exactly when the fraction exceeds t), non-decreasing in w.
+fn width_first_span(v0: i128, v1: i128, t: f64) -> Option<(i128, i128)> {
+    width_first_span_c(v0, v1, t, 1.0)
+}
+
+/// `width_first_span` with the extra pixel taken when t < P_c(frac(w)),
+/// P_c(f) = f / (c - (c - 1) f) (GeometryRasterRequest::width_c): c = 1 is
+/// the plain rule (P = f, so m = ceil(w - t)); a larger c thins the extra
+/// pixels towards the whole width, never past floor(w), and P_c runs from
+/// 0 to 1 over a whole pixel's fraction, so the mean width stays continuous
+/// at whole widths (f / c alone would drop from 1.99 to 1.495 px at c = 2).
+fn width_first_span_c(v0: i128, v1: i128, t: f64, c: f64) -> Option<(i128, i128)> {
+    let w = (v1 - v0).max(0) as f64 / DEVICE_ONE as f64;
+    let whole = w.floor();
+    let f = w - whole;
+    let p = if c > 1.0 { f / (c - (c - 1.0) * f) } else { f };
+    let m = whole as i128 + i128::from(t < p);
+    if m < 1 {
+        return None;
+    }
+    let start = floor_div(v0 + v1 - m * DEVICE_ONE + DEVICE_ONE, 2 * DEVICE_ONE);
+    Some((start, start + m))
+}
+
+/// Area-true polygon (and path outline), at least a pixel on both sides: the
+/// pixels whose centres it covers take the layer's fill, and the pixels of
+/// that set with a side on its border - the span ends, and what the row above
+/// or below does not cover - are the outline. The rows next to the band are
+/// scanned too, so the rim is the same whatever the tiling.
+fn paint_area_true_polygon(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    points: &[(i64, i64)],
+    paint: PaintStyle,
+) -> Result<bool, String> {
+    if points.len() < 3 {
+        return Err("polygon has fewer than 3 vertices".to_string());
+    }
+    let mut device = Vec::with_capacity(points.len());
+    for &(x, y) in points {
+        device.push(world_to_device(request, x, y)?);
+    }
+    // only the polygon's own rows (one more on each side) inside the band
+    // and its two neighbour rows: a small polygon must not pay for the tile
+    let (low, high) = device
+        .iter()
+        .fold((i128::MAX, i128::MIN), |(a, b), &(_, y)| {
+            (a.min(y), b.max(y))
+        });
+    let lo =
+        (band.row0 as i64 - 1).max(checked_i64(floor_div(low, DEVICE_ONE), "polygon low row")? - 1);
+    let hi = (band.row1 as i64 + 1)
+        .min(checked_i64(floor_div(high, DEVICE_ONE), "polygon high row")? + 2);
+    if lo >= hi {
+        return Ok(false);
+    }
+    let mut rows: Vec<Vec<(i128, i128)>> = vec![Vec::new(); (hi - lo) as usize];
+    scan_device_polygon(
+        &device,
+        FillPhase::PixelCenter,
+        lo,
+        hi,
+        |row, first, end| {
+            if first < end {
+                rows[(row - lo) as usize].push((first, end));
+            }
+            Ok(())
+        },
+    )?;
+    let empty: Vec<(i128, i128)> = Vec::new();
+    let at = |row: i64| -> &Vec<(i128, i128)> {
+        if row < lo || row >= hi {
+            &empty
+        } else {
+            &rows[(row - lo) as usize]
+        }
+    };
+    let (row0, row1) = ((band.row0 as i64).max(lo), (band.row1 as i64).min(hi));
+    let mut drew = false;
+    for row in row0..row1 {
+        for &(first, end) in at(row) {
+            let first = first.max(band.col0 as i128);
+            let end = end.min(band.col1 as i128);
+            if first < end {
+                let first = checked_usize(first, "polygon first column")?;
+                let end = checked_usize(end, "polygon end column")?;
+                drew |= fill_span(band, paint, request.height, row as usize, first, end);
+            }
+        }
+    }
+    let mut rim = Vec::new();
+    for row in row0..row1 {
+        rim.clear();
+        for &(first, end) in at(row) {
+            rim.push((first, first + 1));
+            rim.push((end - 1, end));
+            for neighbour in [at(row - 1), at(row + 1)] {
+                let mut from = first;
+                for &(a, b) in neighbour.iter() {
+                    if b <= from || a >= end {
+                        continue;
+                    }
+                    if a > from {
+                        rim.push((from, a));
+                    }
+                    from = from.max(b);
+                }
+                if from < end {
+                    rim.push((from, end));
+                }
+            }
+        }
+        for &(first, end) in &rim {
+            drew |= paint_hairline_device_rect(
+                band,
+                request,
+                (first, row as i128, end, row as i128 + 1),
+                paint,
+            )?;
+        }
+    }
+    Ok(drew)
 }
 
 /// Batch the already-selected hairlines, not the source records. The scratch
@@ -4976,10 +8542,37 @@ fn paint_world_polygon(
     points: &[(i64, i64)],
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    paint_world_polygon_ranked(band, request, points, paint, None)
+}
+
+/// `paint_world_polygon` with a sub-pixel polygon kept by `rank` when given
+/// (hairline_world_bbox_ranked).
+fn paint_world_polygon_ranked(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    points: &[(i64, i64)],
+    paint: PaintStyle,
+    rank: Option<f64>,
+) -> Result<bool, String> {
     if let Some(world) = polygon_bbox(points) {
-        if let Some(rect) = hairline_world_bbox(request, world, paint)? {
+        let area = if request.area_true {
+            Some(polygon_area(points))
+        } else {
+            None
+        };
+        if band.stacking() {
+            if let Some((foot, kept)) =
+                area_true_density(request, world, paint, area.unwrap_or(0.0), rank)?
+            {
+                return Ok(band.density_shape(Some(foot), kept.then_some(foot)));
+            }
+        }
+        if let Some(rect) = hairline_world_bbox_ranked(request, world, paint, area, rank)? {
             return paint_hairline_device_rect(band, request, rect, paint);
         }
+    }
+    if area_true_rim(request, paint) {
+        return paint_area_true_polygon(band, request, points, paint);
     }
     let filled = fill_world_polygon(band, request, points, paint)?;
     let stroked = stroke_world_polygon(band, request, points, paint)?;
@@ -5004,12 +8597,42 @@ fn paint_world_path(
     centerline: &[(i64, i64)],
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    paint_world_path_ranked(band, request, outline, centerline, paint, None)
+}
+
+/// `paint_world_path` with a sub-pixel path kept by `rank` when given
+/// (hairline_world_bbox_ranked).
+fn paint_world_path_ranked(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    outline: &[(i64, i64)],
+    centerline: &[(i64, i64)],
+    paint: PaintStyle,
+    rank: Option<f64>,
+) -> Result<bool, String> {
     if let Some(world) = polygon_bbox(outline) {
-        if let Some(rect) = hairline_world_bbox(request, world, paint)? {
+        let area = if request.area_true {
+            Some(polygon_area(outline))
+        } else {
+            None
+        };
+        if band.stacking() {
+            if let Some((foot, kept)) =
+                area_true_density(request, world, paint, area.unwrap_or(0.0), rank)?
+            {
+                return Ok(band.density_shape(Some(foot), kept.then_some(foot)));
+            }
+        }
+        if let Some(rect) = hairline_world_bbox_ranked(request, world, paint, area, rank)? {
             // The centerline lies inside the collapsed outline bbox, so
             // its stroke pass is covered by the collapsed spans.
             return paint_hairline_device_rect(band, request, rect, paint);
         }
+    }
+    // area-true: the outline's covered pixels and their rim; the spine
+    // stroke would reach a pixel past a flush end
+    if area_true_rim(request, paint) {
+        return paint_area_true_polygon(band, request, outline, paint);
     }
     let outlined = paint_world_path_outline(band, request, outline, paint)?;
     let centered = stroke_world_polyline(band, request, centerline, paint)?;
@@ -5230,7 +8853,10 @@ fn fill_device_rect_with_phase(
     if band.once.is_some() {
         let frame_height = request.height;
         return Ok(match paint.fill {
-            LayerFill::Clear => false,
+            LayerFill::Clear => {
+                band.cover_rows(first_row, end_row, first_col, end_col);
+                false
+            }
             LayerFill::Solid => {
                 band.write_once_rows(first_row, end_row, first_col, end_col, paint.color, |_| {
                     SpanRule::All
@@ -5275,7 +8901,10 @@ fn fill_span(
     }
     if band.once.is_some() {
         let rule = match paint.fill {
-            LayerFill::Clear => return false,
+            LayerFill::Clear => {
+                band.cover_rows(row, row + 1, first_col, end_col);
+                return false;
+            }
             LayerFill::Solid => SpanRule::All,
             LayerFill::Speckle => SpanRule::Speckle { row },
             LayerFill::Pattern(rows) => SpanRule::Pattern {
@@ -5654,6 +9283,43 @@ fn fill_device_polygon_with_phase(
     phase: FillPhase,
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    let (row0, row1) = (band.row0 as i64, band.row1 as i64);
+    let (col0, col1) = (band.col0 as i128, band.col1 as i128);
+    let mut drew = false;
+    scan_device_polygon(device, phase, row0, row1, |row, first_col, end_col| {
+        let first_col = first_col.max(col0);
+        let end_col = end_col.min(col1);
+        if first_col >= end_col {
+            return Ok(());
+        }
+        let first_col = checked_usize(first_col, "polygon first column")?;
+        let end_col = checked_usize(end_col, "polygon end column")?;
+        if fill_span(
+            band,
+            paint,
+            request.height,
+            row as usize,
+            first_col,
+            end_col,
+        ) {
+            drew = true;
+        }
+        Ok(())
+    })?;
+    Ok(drew)
+}
+
+/// The scanline of `fill_device_polygon_with_phase`: every row in
+/// [row_lo, row_hi) gets its spans, unclamped, in column order - rows above
+/// or below the image too (the area-true rim reads the row over the image's
+/// top edge: an interior row there is not a border; review 2026-09-22).
+fn scan_device_polygon(
+    device: &[(i128, i128)],
+    phase: FillPhase,
+    row_lo: i64,
+    row_hi: i64,
+    mut emit: impl FnMut(i64, i128, i128) -> Result<(), String>,
+) -> Result<(), String> {
     let mut edges = Vec::with_capacity(device.len());
     for index in 0..device.len() {
         let (mut x0, mut y0) = device[index];
@@ -5683,24 +9349,19 @@ fn fill_device_polygon_with_phase(
         });
     }
     if edges.is_empty() {
-        return Ok(false);
+        return Ok(());
     }
     edges.sort_unstable_by_key(|edge| (edge.first_row, edge.end_row, edge.x0));
-    let first_row = edges
-        .iter()
-        .map(|edge| edge.first_row)
-        .min()
-        .unwrap_or(0)
-        .max(0);
+    let first_row = edges.iter().map(|edge| edge.first_row).min().unwrap_or(0);
     let end_row = edges
         .iter()
         .map(|edge| edge.end_row)
         .max()
         .unwrap_or(0)
-        .min(band.row1 as i64);
-    let first_row = first_row.max(band.row0 as i64);
+        .min(row_hi);
+    let first_row = first_row.max(row_lo);
     if first_row >= end_row {
-        return Ok(false);
+        return Ok(());
     }
 
     let mut next_edge = 0usize;
@@ -5712,7 +9373,6 @@ fn fill_device_polygon_with_phase(
         .copied()
         .filter(|edge| edge.first_row < first_row && edge.end_row > first_row)
         .collect();
-    let mut drew = false;
     let mut intersections = Vec::with_capacity(active.len());
     for row in first_row..end_row {
         while next_edge < edges.len() && edges[next_edge].first_row == row {
@@ -5749,26 +9409,10 @@ fn fill_device_polygon_with_phase(
         }
         for pair in intersections.chunks_exact(2) {
             let (first_col, end_col) = fill_phase_columns(pair[0], pair[1], phase)?;
-            let first_col = first_col.max(band.col0 as i128);
-            let end_col = end_col.min(band.col1 as i128);
-            if first_col >= end_col {
-                continue;
-            }
-            let first_col = checked_usize(first_col, "polygon first column")?;
-            let end_col = checked_usize(end_col, "polygon end column")?;
-            if fill_span(
-                band,
-                paint,
-                request.height,
-                row as usize,
-                first_col,
-                end_col,
-            ) {
-                drew = true;
-            }
+            emit(row, first_col, end_col)?;
         }
     }
-    Ok(drew)
+    Ok(())
 }
 
 fn world_to_device(
@@ -5977,6 +9621,11 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
+            width_c: 1.0,
+            survivor_list: true,
+            place_lattice: false,
+            density_stack: false,
         }
     }
 
@@ -6139,6 +9788,11 @@ mod tests {
     /// Four layers over a top cell and an arrayed child, washes and every
     /// hierarchy-frame band; `dense` covers the view so tiles fill up.
     fn once_scene(seed: u64, dense: bool) -> FrameScene {
+        once_scene_cut(seed, dense, 0)
+    }
+
+    /// `once_scene` planned with a per-shape cut by the larger side
+    fn once_scene_cut(seed: u64, dense: bool, shape_cut: u64) -> FrameScene {
         let mut rng = Lcg(seed);
         let top = (0, REM_FULL);
         let child = (1, REM_FULL);
@@ -6251,7 +9905,11 @@ mod tests {
             ],
             pages: (0..8).collect(),
             page_prio: vec![0; 8],
-            stats: HierStats::default(),
+            stats: HierStats {
+                shape_cut,
+                shape_cut_max: true,
+                ..HierStats::default()
+            },
             explain: Vec::new(),
         };
         FrameScene::from_test_parts(
@@ -6409,6 +10067,122 @@ mod tests {
             full_tiles > 0,
             "the dense scenes must fill tiles, or the early exits are untested"
         );
+    }
+
+    /// The density stack (CUT_DENSITY_DESIGN §10.10) over the write-once
+    /// scenes, wide enough that many shapes fall under the cut: one solid
+    /// plane draws as the plain frame at pass 2's cut (its density shows
+    /// wherever its originals did not paint, and they light every pixel they
+    /// cover), and four planes of every fill draw the same frame binned,
+    /// walked per tile and through the layer-decode session at every block
+    /// size the caller may choose past the density block.
+    #[test]
+    fn the_density_stack_draws_one_solid_plane_as_the_finer_cut_and_every_path_alike() {
+        let colors = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+        ];
+        let fills = [
+            LayerFill::Solid,
+            LayerFill::Speckle,
+            LayerFill::Pattern([0x8421; 16]),
+            LayerFill::Clear,
+        ];
+        let mut changed = 0usize;
+        for (seed, dense) in [(1u64, false), (2, true)] {
+            for (width, height, tile_size, view, cut) in [
+                (96u32, 80u32, 16u16, (0.0, 0.0, 3300.0, 2750.0), 100u64),
+                (67, 53, 64, (-200.0, 100.0, 1810.0, 1690.0), 60),
+            ] {
+                let (coarse, fine) = (
+                    once_scene_cut(seed, dense, cut),
+                    Arc::new(once_scene_cut(seed, dense, cut / 6)),
+                );
+                let request = |layers: Vec<LayerStyle>| StyledGeometryRasterRequest {
+                    raster: GeometryRasterRequest {
+                        view: RasterViewBox::new(view.0, view.1, view.2, view.3).unwrap(),
+                        width,
+                        height,
+                        workers: 3,
+                        tile_size,
+                        area_true: true,
+                        density_stack: true,
+                        ..request()
+                    },
+                    layers,
+                    hierarchy_frames: false,
+                    mono: false,
+                };
+                let case = format!("seed {seed} {width}x{height}");
+                for layer in 0..4u32 {
+                    let one = vec![LayerStyle {
+                        layer_idx: layer,
+                        color: colors[layer as usize],
+                        fill: LayerFill::Solid,
+                        outline_width: 1,
+                    }];
+                    let plain = render_geometry_styled(&fine, &request(one.clone())).unwrap();
+                    let stacked = density_frame(
+                        &coarse,
+                        &fine,
+                        cut as i64,
+                        &request(one),
+                        true,
+                        &mut Vec::new(),
+                    );
+                    assert!(
+                        stacked.frame.pixels() == plain.frame.pixels(),
+                        "one solid plane {layer}: {case}"
+                    );
+                    assert!(
+                        stacked.stats.density_stack[1] > 0,
+                        "the plane's cut shapes drew: {case} layer {layer}"
+                    );
+                }
+                for shift in 0..4usize {
+                    let layers: Vec<LayerStyle> = (0..4usize)
+                        .map(|layer| LayerStyle {
+                            layer_idx: layer as u32,
+                            color: colors[layer],
+                            fill: fills[(layer + shift) % 4],
+                            outline_width: 1,
+                        })
+                        .collect();
+                    let on = density_frame(
+                        &coarse,
+                        &fine,
+                        cut as i64,
+                        &request(layers.clone()),
+                        true,
+                        &mut Vec::new(),
+                    );
+                    let walked = density_frame(
+                        &coarse,
+                        &fine,
+                        cut as i64,
+                        &request(layers.clone()),
+                        false,
+                        &mut Vec::new(),
+                    );
+                    assert!(
+                        walked.frame.pixels() == on.frame.pixels(),
+                        "walked: {case} shift {shift}"
+                    );
+                    let off = render_geometry_styled(&coarse, &request(layers)).unwrap();
+                    changed += on
+                        .frame
+                        .pixels()
+                        .chunks_exact(4)
+                        .zip(off.frame.pixels().chunks_exact(4))
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    assert!(on.stats.density_stack[0] > 0, "{case} shift {shift}");
+                }
+            }
+        }
+        assert!(changed > 0, "four planes must stack some density");
     }
 
     #[test]
@@ -6660,6 +10434,11 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
+            width_c: 1.0,
+            survivor_list: true,
+            place_lattice: false,
+            density_stack: false,
         };
         let mut pattern = [0u16; 16];
         for (row, word) in pattern.iter_mut().enumerate() {
@@ -6780,6 +10559,11 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
+            width_c: 1.0,
+            survivor_list: true,
+            place_lattice: false,
+            density_stack: false,
         };
         let segments = [
             ((4.0, 9.0), (21.0, 9.0)),   // horizontal inside the tile
@@ -6854,6 +10638,11 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
+            width_c: 1.0,
+            survivor_list: true,
+            place_lattice: false,
+            density_stack: false,
         };
         let mut band = full_band(&request);
         paint_world_rect(
@@ -7008,6 +10797,11 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 1,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
+            width_c: 1.0,
+            survivor_list: true,
+            place_lattice: false,
+            density_stack: false,
         };
         let mut frame = full_band(&request);
         fill_world_polygon_with_phase(
@@ -7526,6 +11320,11 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 2,
             tile_size: 16,
+            area_true: false,
+            width_c: 1.0,
+            survivor_list: true,
+            place_lattice: false,
+            density_stack: false,
         };
         let pruned =
             render_geometry_occupancy(&scene_with(crate::PageIndex::build), &request).unwrap();
@@ -7820,6 +11619,2945 @@ mod tests {
             }
         }
         lit
+    }
+
+    /// `hairline_request` under the area-true rule, `size` px square over the
+    /// same 320-unit world, with the given tiling
+    fn area_true_request(size: u32, tile_size: u16, workers: u16) -> StyledGeometryRasterRequest {
+        let mut request = hairline_request();
+        request.raster.area_true = true;
+        request.raster.width = size;
+        request.raster.height = size;
+        request.raster.tile_size = tile_size;
+        request.raster.workers = workers;
+        request
+    }
+
+    fn lit_set(frame: &RgbaFrame, size: usize) -> BTreeSet<(usize, usize)> {
+        let mut lit = BTreeSet::new();
+        for row in 0..size {
+            for col in 0..size {
+                if pixel(frame, col, row) != [0, 0, 0, 255] {
+                    lit.insert((col, row));
+                }
+            }
+        }
+        lit
+    }
+
+    /// even-odd inside test of a pixel centre (world units)
+    fn centre_inside(pts: &[(i64, i64)], x: f64, y: f64) -> bool {
+        let mut inside = false;
+        for k in 0..pts.len() {
+            let (x0, y0) = (pts[k].0 as f64, pts[k].1 as f64);
+            let (x1, y1) = (
+                pts[(k + 1) % pts.len()].0 as f64,
+                pts[(k + 1) % pts.len()].1 as f64,
+            );
+            if (y0 > y) != (y1 > y) && x < x0 + (y - y0) * (x1 - x0) / (y1 - y0) {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    #[test]
+    fn area_true_polygons_light_exactly_the_pixels_whose_centres_they_cover() {
+        // 10 units a pixel, solid fill: a polygon's lit set is its centre set -
+        // no pixel of growth past it
+        let lshape = vec![
+            (153, 23),
+            (297, 23),
+            (297, 91),
+            (211, 91),
+            (211, 293),
+            (153, 293),
+        ];
+        let polys = vec![PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: lshape.clone(),
+            rep: Rep::One,
+        }];
+        let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
+        let frame =
+            render_geometry_styled(&hairline_scene(Vec::new(), polys, Vec::new()), &request)
+                .unwrap()
+                .frame;
+        let mut want = BTreeSet::new();
+        for row in 0..32usize {
+            for col in 0..32usize {
+                let (x, y) = ((col as f64 + 0.5) * 10.0, 320.0 - (row as f64 + 0.5) * 10.0);
+                if centre_inside(&lshape, x, y) {
+                    want.insert((col, row));
+                }
+            }
+        }
+        assert_eq!(
+            lit_set(&frame, 32),
+            want,
+            "area-true polygon differs from its pixel-centre set"
+        );
+    }
+
+    #[test]
+    fn width_first_rectangles_keep_their_whole_pixels_and_their_mean_width() {
+        // one axis: m = ceil(w - t) is floor(w) or floor(w) + 1, the box stays
+        // inside the pixels the side touches, m never grows when w shrinks,
+        // and over ranks the mean m is w
+        let one = DEVICE_ONE;
+        let mut state = 0x0bad_5eed_1234_5678u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..20_000 {
+            let v0 = ((next() * 1000.0) * one as f64) as i128;
+            let w = next() * 7.0;
+            let v1 = v0 + (w * one as f64) as i128;
+            let t = next();
+            let wide = (v1 - v0) as f64 / one as f64;
+            match width_first_span(v0, v1, t) {
+                None => assert!(wide - t <= 0.0, "w {} t {}: dropped", wide, t),
+                Some((a, b)) => {
+                    let m = b - a;
+                    assert!(
+                        m == wide.floor() as i128 || m == wide.floor() as i128 + 1,
+                        "w {}: {} px",
+                        wide,
+                        m
+                    );
+                    assert_eq!(
+                        m > wide.floor() as i128,
+                        wide - wide.floor() > t,
+                        "w {} t {}",
+                        wide,
+                        t
+                    );
+                    assert!(
+                        a >= floor_div(v0, one) && b <= ceil_div(v1, one),
+                        "w {}: box left its pixels",
+                        wide
+                    );
+                    // half the side: never more pixels
+                    let half =
+                        width_first_span(v0, v0 + (v1 - v0) / 2, t).map_or(0, |(a, b)| b - a);
+                    assert!(half <= m);
+                }
+            }
+        }
+        // mean width over ranks, and independent axes: a 0.5 x 0.5 px box shows 1 in 4
+        let (w, trials) = (2.35, 40_000usize);
+        let mut total = 0i128;
+        let (mut shown, mut quarter) = (0usize, 0usize);
+        for k in 0..trials {
+            let world = BBox {
+                x0: k as i64 * 97,
+                y0: 11,
+                x1: k as i64 * 97 + 5,
+                y1: 16,
+            };
+            total += width_first_span(0, (w * one as f64) as i128, salted_rank(world, 1))
+                .map_or(0, |(a, b)| b - a);
+            let half = (0.5 * one as f64) as i128;
+            let x = width_first_span(0, half, salted_rank(world, 1)).is_some();
+            let y = width_first_span(0, half, salted_rank(world, 2)).is_some();
+            shown += x as usize;
+            quarter += (x && y) as usize;
+        }
+        let mean = total as f64 / trials as f64;
+        assert!((mean - w).abs() < 0.01, "mean width {}", mean);
+        assert!((shown as f64 / trials as f64 - 0.5).abs() < 0.01);
+        assert!(
+            (quarter as f64 / trials as f64 - 0.25).abs() < 0.01,
+            "0.5 x 0.5 px shown {}",
+            quarter as f64 / trials as f64
+        );
+        // in a frame: the 1.2 px gap between two 3.8 px bars stays open (the
+        // boxes never leave the pixels the bars touch), each bar 3 or 4 px
+        let rect = |x, y, w, h| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep: Rep::One,
+        };
+        let bars = vec![rect(13, 13, 38, 294), rect(63, 13, 38, 294)];
+        let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
+        let lit = lit_set(
+            &render_geometry_styled(
+                &hairline_scene(bars.clone(), Vec::new(), Vec::new()),
+                &request,
+            )
+            .unwrap()
+            .frame,
+            32,
+        );
+        assert!(
+            lit.iter().all(|&(col, _)| col != 5),
+            "the 1.2 px gap between the bars was closed"
+        );
+        for range in [1..6usize, 6..11] {
+            let cols: BTreeSet<usize> = lit
+                .iter()
+                .map(|&(c, _)| c)
+                .filter(|c| range.contains(c))
+                .collect();
+            assert!(
+                cols.len() == 3 || cols.len() == 4,
+                "a 3.8 px bar drew {} columns",
+                cols.len()
+            );
+        }
+        let mut klayout = request.clone();
+        klayout.raster.area_true = false;
+        let grown = lit_set(
+            &render_geometry_styled(&hairline_scene(bars, Vec::new(), Vec::new()), &klayout)
+                .unwrap()
+                .frame,
+            32,
+        );
+        assert!(
+            grown.iter().any(|&(col, _)| col == 5),
+            "the KLayout rule grows the first bar into the gap"
+        );
+    }
+
+    /// Every member of a Grid record placed by `transform`: (offset, world box).
+    fn grid_members(local: BBox, rep: &Rep, transform: &OrthoTransform) -> Vec<((i64, i64), BBox)> {
+        let Rep::Grid { na, nb, va, vb } = rep else {
+            unreachable!()
+        };
+        let mut out = Vec::new();
+        for j in 0..*nb as i64 {
+            for i in 0..*na as i64 {
+                let (ox, oy) = (i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                let member = BBox {
+                    x0: local.x0 + ox,
+                    y0: local.y0 + oy,
+                    x1: local.x1 + ox,
+                    y1: local.y1 + oy,
+                };
+                out.push(((ox, oy), transform.apply_bbox(member).unwrap()));
+            }
+        }
+        out
+    }
+
+    /// (world box -> ranks) of every member of these records.
+    fn member_ranks(
+        records: &[(BBox, Rep, OrthoTransform)],
+    ) -> BTreeMap<(i64, i64, i64, i64), (f64, f64)> {
+        let mut out = BTreeMap::new();
+        for (local, rep, transform) in records {
+            let grid = GridRanks::new(rep, transform, transform.apply_bbox(*local).unwrap())
+                .unwrap()
+                .unwrap();
+            for ((ox, oy), world) in grid_members(*local, rep, transform) {
+                let ranks = grid.ranks(ox, oy, &world).expect("ranks");
+                assert!(
+                    out.insert((world.x0, world.y0, world.x1, world.y1), ranks)
+                        .is_none(),
+                    "a member twice"
+                );
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn array_members_spread_their_extra_pixels_by_index() {
+        // a row of 64 bars 1.5 px wide: exactly half draw 2 px, and never
+        // more than two neighbours in a row decide alike ("one in two"); the
+        // same along a column, and for a row placed rotated to vertical
+        let runs = |wide: &[bool]| {
+            let (mut best, mut run) = (1, 1);
+            for k in 1..wide.len() {
+                run = if wide[k] == wide[k - 1] { run + 1 } else { 1 };
+                best = best.max(run);
+            }
+            best
+        };
+        let identity = OrthoTransform::identity();
+        let rotated = OrthoTransform::place(0, 0, 1, false).unwrap();
+        let bar = BBox {
+            x0: 1000,
+            y0: 2000,
+            x1: 1015,
+            y1: 2300,
+        };
+        for (rep, transform, axis) in [
+            (
+                Rep::Grid {
+                    na: 64,
+                    nb: 1,
+                    va: (30, 0),
+                    vb: (0, 0),
+                },
+                &identity,
+                0,
+            ),
+            (
+                Rep::Grid {
+                    na: 1,
+                    nb: 64,
+                    va: (0, 0),
+                    vb: (0, 30),
+                },
+                &identity,
+                1,
+            ),
+            (
+                Rep::Grid {
+                    na: 64,
+                    nb: 1,
+                    va: (0, 30),
+                    vb: (0, 0),
+                },
+                &identity,
+                1,
+            ),
+            (
+                Rep::Grid {
+                    na: 64,
+                    nb: 1,
+                    va: (30, 0),
+                    vb: (0, 0),
+                },
+                &rotated,
+                1,
+            ),
+            // a skewed grid keeps the record's own index
+            (
+                Rep::Grid {
+                    na: 64,
+                    nb: 1,
+                    va: (30, 7),
+                    vb: (0, 0),
+                },
+                &identity,
+                0,
+            ),
+        ] {
+            let grid = GridRanks::new(&rep, transform, transform.apply_bbox(bar).unwrap())
+                .unwrap()
+                .unwrap();
+            let wide: Vec<bool> = grid_members(bar, &rep, transform)
+                .iter()
+                .map(|((ox, oy), world)| {
+                    let ranks = grid.ranks(*ox, *oy, world).expect("an index");
+                    1.5 - if axis == 0 { ranks.0 } else { ranks.1 } > 1.0
+                })
+                .collect();
+            let count = wide.iter().filter(|w| **w).count();
+            assert!(
+                (31..=33).contains(&count),
+                "{:?}: {} of 64 wide",
+                rep,
+                count
+            );
+            assert!(
+                runs(&wide) <= 2,
+                "{:?}: a run of {} alike",
+                rep,
+                runs(&wide)
+            );
+        }
+        // a 32 x 32 array of sub-pixel points keeps the covered share
+        let rep = Rep::Grid {
+            na: 32,
+            nb: 32,
+            va: (20, 0),
+            vb: (0, 20),
+        };
+        let grid = GridRanks::new(&rep, &identity, bar).unwrap().unwrap();
+        for (w, h) in [(0.5, 0.5), (0.3, 0.7), (0.9, 0.2)] {
+            let kept = grid_members(bar, &rep, &identity)
+                .iter()
+                .filter(|((ox, oy), world)| {
+                    let (tx, ty) = grid.ranks(*ox, *oy, world).unwrap();
+                    w > tx && h > ty
+                })
+                .count();
+            let share = kept as f64 / 1024.0;
+            assert!(
+                (share - w * h).abs() < 0.03,
+                "{} x {} px points kept {}",
+                w,
+                h,
+                share
+            );
+        }
+        // a skewed grid finds its record indices; a collinear 2-D one keeps the hash
+        let skew = GridRanks::new(
+            &Rep::Grid {
+                na: 5,
+                nb: 7,
+                va: (30, 10),
+                vb: (-7, 40),
+            },
+            &identity,
+            bar,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(skew.index(3 * 30 + 4 * -7, 3 * 10 + 4 * 40), Some((3, 4)));
+        let collinear = GridRanks::new(
+            &Rep::Grid {
+                na: 5,
+                nb: 7,
+                va: (30, 0),
+                vb: (60, 0),
+            },
+            &identity,
+            bar,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(collinear.ranks(90, 0, &bar), None);
+    }
+
+    #[test]
+    fn an_axis_aligned_array_ranks_the_same_however_it_is_stored() {
+        // ADAPTIVE_CUT_DENSITY_PLAN §4.2 candidate 2: the same world lattice as
+        // one Grid, as the index's re-based fragments, with its axes swapped,
+        // a pitch negated, or placed rotated / mirrored - every member keeps
+        // its ranks (the per-record index gave 10 of 64 different picks)
+        let id = OrthoTransform::identity();
+        let bar = BBox {
+            x0: -1003,
+            y0: 2000,
+            x1: -988,
+            y1: 2300,
+        };
+        let at = |dx: i64, dy: i64| BBox {
+            x0: bar.x0 + dx,
+            y0: bar.y0 + dy,
+            x1: bar.x1 + dx,
+            y1: bar.y1 + dy,
+        };
+        let whole = member_ranks(&[(
+            bar,
+            Rep::Grid {
+                na: 64,
+                nb: 1,
+                va: (30, 0),
+                vb: (0, 0),
+            },
+            id,
+        )]);
+        assert_eq!(whole.len(), 64);
+        let fragments = member_ranks(&[
+            (
+                bar,
+                Rep::Grid {
+                    na: 32,
+                    nb: 1,
+                    va: (30, 0),
+                    vb: (0, 0),
+                },
+                id,
+            ),
+            (
+                at(32 * 30, 0),
+                Rep::Grid {
+                    na: 20,
+                    nb: 1,
+                    va: (30, 0),
+                    vb: (0, 0),
+                },
+                id,
+            ),
+            (
+                at(52 * 30, 0),
+                Rep::Grid {
+                    na: 12,
+                    nb: 1,
+                    va: (30, 0),
+                    vb: (0, 0),
+                },
+                id,
+            ),
+        ]);
+        assert_eq!(
+            fragments, whole,
+            "fragments of the lattice rank differently"
+        );
+        let swapped = member_ranks(&[(
+            bar,
+            Rep::Grid {
+                na: 1,
+                nb: 64,
+                va: (0, 0),
+                vb: (30, 0),
+            },
+            id,
+        )]);
+        assert_eq!(swapped, whole, "the axis-swapped record ranks differently");
+        let negated = member_ranks(&[(
+            at(63 * 30, 0),
+            Rep::Grid {
+                na: 64,
+                nb: 1,
+                va: (-30, 0),
+                vb: (0, 0),
+            },
+            id,
+        )]);
+        assert_eq!(negated, whole, "the negated pitch ranks differently");
+        // a column of bars in a cell placed rotated (and mirrored) onto the row
+        for (rot, flip) in [(1u8, false), (3, false), (1, true), (3, true)] {
+            let place = OrthoTransform::place(0, 0, rot, flip).unwrap();
+            let inverse = place.invert().unwrap();
+            // the local member 0 that lands on the row's first bar, the local step
+            // that lands on (+30, 0)
+            let local = inverse.apply_bbox(bar).unwrap();
+            let (sx, sy) = inverse.apply(30, 0).unwrap();
+            let (ox, oy) = inverse.apply(0, 0).unwrap();
+            let step = (sx - ox, sy - oy);
+            let placed = member_ranks(&[(
+                local,
+                Rep::Grid {
+                    na: 64,
+                    nb: 1,
+                    va: step,
+                    vb: (0, 0),
+                },
+                place,
+            )]);
+            assert_eq!(
+                placed, whole,
+                "the rotated placement (rot {} flip {}) ranks differently",
+                rot, flip
+            );
+        }
+        // a 2-D lattice and its four 4 x 4 fragments
+        let two = member_ranks(&[(
+            bar,
+            Rep::Grid {
+                na: 8,
+                nb: 8,
+                va: (30, 0),
+                vb: (0, 400),
+            },
+            id,
+        )]);
+        let quarters = member_ranks(&[
+            (
+                bar,
+                Rep::Grid {
+                    na: 4,
+                    nb: 4,
+                    va: (30, 0),
+                    vb: (0, 400),
+                },
+                id,
+            ),
+            (
+                at(120, 0),
+                Rep::Grid {
+                    na: 4,
+                    nb: 4,
+                    va: (30, 0),
+                    vb: (0, 400),
+                },
+                id,
+            ),
+            (
+                at(0, 1600),
+                Rep::Grid {
+                    na: 4,
+                    nb: 4,
+                    va: (30, 0),
+                    vb: (0, 400),
+                },
+                id,
+            ),
+            (
+                at(120, 1600),
+                Rep::Grid {
+                    na: 4,
+                    nb: 4,
+                    va: (0, 400),
+                    vb: (30, 0),
+                },
+                id,
+            ),
+        ]);
+        assert_eq!(
+            quarters, two,
+            "fragments of the 2-D lattice rank differently"
+        );
+        // a different phase or size is a different lattice
+        let shifted = member_ranks(&[(
+            at(7, 0),
+            Rep::Grid {
+                na: 64,
+                nb: 1,
+                va: (30, 0),
+                vb: (0, 0),
+            },
+            id,
+        )]);
+        assert_ne!(
+            shifted.values().collect::<Vec<_>>(),
+            whole.values().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_fragment_that_lost_an_axis_ranks_as_its_own_row() {
+        // review 2026-09-23: a one-row piece of a 2-D lattice is written as a
+        // one-dimensional repetition - the page file drops the other vector
+        // (oasis write.rs, the nb == 1 arms; doc.rs reads vb (0, 0) back) - so
+        // it cannot be told from an array stored as that row from the start.
+        // It ranks as that row's own lattice: with or without the dropped
+        // vector, as a plain one-row array, under further splits of the row,
+        // and it still spreads its extra pixels; it keys apart from the 2-D
+        // lattice it was cut from (out of the identity guarantee). A one-member
+        // piece (Rep::One) and a 1 x 1 grid take the single shape's hash.
+        let id = OrthoTransform::identity();
+        let bar = BBox {
+            x0: -1003,
+            y0: 2000,
+            x1: -988,
+            y1: 2300,
+        };
+        let at = |dx: i64, dy: i64| BBox {
+            x0: bar.x0 + dx,
+            y0: bar.y0 + dy,
+            x1: bar.x1 + dx,
+            y1: bar.y1 + dy,
+        };
+        let row = |na: u64, vb: (i64, i64)| Rep::Grid {
+            na,
+            nb: 1,
+            va: (30, 0),
+            vb,
+        };
+        let lattice = member_ranks(&[(
+            bar,
+            Rep::Grid {
+                na: 64,
+                nb: 8,
+                va: (30, 0),
+                vb: (0, 400),
+            },
+            id,
+        )]);
+        let of_lattice = |keep: &dyn Fn(&(i64, i64, i64, i64)) -> bool| {
+            lattice
+                .iter()
+                .filter(|(k, _)| keep(k))
+                .map(|(k, v)| (*k, *v))
+                .collect::<BTreeMap<_, _>>()
+        };
+        // the fourth row: frag_rep keeps vb with count 1 in memory (nj == 1)
+        let dy = 3 * 400;
+        let kept = member_ranks(&[(at(0, dy), row(64, (0, 400)), id)]);
+        let written = member_ranks(&[(at(0, dy), row(64, (0, 0)), id)]);
+        assert_eq!(kept.len(), 64);
+        assert_eq!(kept, written, "the dropped vector changed the row's ranks");
+        let split = member_ranks(&[
+            (at(0, dy), row(20, (0, 0)), id),
+            (at(20 * 30, dy), row(44, (0, 0)), id),
+        ]);
+        assert_eq!(split, written, "a split of the row ranks differently");
+        assert_ne!(
+            written,
+            of_lattice(&|k| k.1 == bar.y0 + dy),
+            "the row piece ranks as the 2-D lattice"
+        );
+        // it still spreads: of 64 bars 1.5 px wide half draw 2 px, never three alike in a row
+        let wide: Vec<bool> = written.values().map(|ranks| 1.5 - ranks.0 > 1.0).collect();
+        let count = wide.iter().filter(|w| **w).count();
+        assert!((31..=33).contains(&count), "{} of 64 wide", count);
+        assert!(
+            wide.windows(3).all(|w| !(w[0] == w[1] && w[1] == w[2])),
+            "three alike in a row"
+        );
+        // the sixth column: frag_rep swaps the vectors (ni == 1)
+        let dx = 5 * 30;
+        let column = member_ranks(&[(
+            at(dx, 0),
+            Rep::Grid {
+                na: 8,
+                nb: 1,
+                va: (0, 400),
+                vb: (30, 0),
+            },
+            id,
+        )]);
+        let plain = member_ranks(&[(
+            at(dx, 0),
+            Rep::Grid {
+                na: 1,
+                nb: 8,
+                va: (0, 0),
+                vb: (0, 400),
+            },
+            id,
+        )]);
+        assert_eq!(column.len(), 8);
+        assert_eq!(
+            column, plain,
+            "the swapped column piece ranks apart from a plain column"
+        );
+        assert_ne!(
+            column,
+            of_lattice(&|k| k.0 == bar.x0 + dx),
+            "the column piece ranks as the 2-D lattice"
+        );
+        // one member: no grid ranks, and a frame draws a 1 x 1 grid as the shape alone
+        assert!(GridRanks::new(&Rep::One, &id, bar).unwrap().is_none());
+        assert!(GridRanks::new(
+            &Rep::Grid {
+                na: 1,
+                nb: 1,
+                va: (30, 0),
+                vb: (0, 400)
+            },
+            &id,
+            bar
+        )
+        .unwrap()
+        .is_none());
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |span: i64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as i64 % span
+        };
+        let dots: Vec<(i64, i64)> = (0..300).map(|_| (next(310), next(310))).collect();
+        let draw = |rep: &Rep| {
+            let rects = dots
+                .iter()
+                .map(|&(x, y)| RectRec {
+                    layer: 1,
+                    dt: 0,
+                    x,
+                    y,
+                    w: 5,
+                    h: 5,
+                    rep: rep.clone(),
+                })
+                .collect();
+            let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
+            lit_set(
+                &render_geometry_styled(&hairline_scene(rects, Vec::new(), Vec::new()), &request)
+                    .unwrap()
+                    .frame,
+                32,
+            )
+        };
+        let alone = draw(&Rep::One);
+        assert!(
+            !alone.is_empty() && alone.len() < 300,
+            "{} of 300 half-pixel dots lit",
+            alone.len()
+        );
+        assert_eq!(
+            draw(&Rep::Grid {
+                na: 1,
+                nb: 1,
+                va: (30, 0),
+                vb: (0, 400)
+            }),
+            alone,
+            "a 1 x 1 grid drew apart from the shape"
+        );
+    }
+
+    #[test]
+    fn extra_sparsening_thins_the_extra_pixels_continuously() {
+        // ADAPTIVE_CUT_DENSITY_PLAN §4.2 candidate 1 (diagnostic
+        // FLOE_RUST_WIDTH_C): under c the extra pixel comes when t < P_c(f),
+        // P_c(f) = f / (c - (c - 1) f). c = 1 is the plain rule; c = 2 keeps
+        // a 0.05 px side about 1 time in 39 and a 1.99 px side 1.98 px on
+        // average (f / c would give 1.495 - a jump at 2 px); the span under
+        // c is within the plain rule's span, never under floor(w), and is
+        // monotone in w at a fixed rank.
+        let one = DEVICE_ONE as i128;
+        let side = |w: f64| (w * one as f64).round() as i128;
+        let mean = |w: f64, c: f64| {
+            let n = 20_000;
+            (0..n)
+                .map(|k| {
+                    width_first_span_c(0, side(w), (k as f64 + 0.5) / n as f64, c)
+                        .map_or(0, |(a, b)| b - a)
+                })
+                .sum::<i128>() as f64
+                / n as f64
+        };
+        for w in [0.05, 0.5, 1.05, 1.5, 1.99, 2.0, 3.8] {
+            assert!(
+                (mean(w, 1.0) - w).abs() < 0.001,
+                "c = 1 keeps the mean width {} ({})",
+                w,
+                mean(w, 1.0)
+            );
+            let f = w - w.floor();
+            let p2 = f / (2.0 - f);
+            assert!(
+                (mean(w, 2.0) - (w.floor() + p2)).abs() < 0.001,
+                "c = 2 at {}: {} for {}",
+                w,
+                mean(w, 2.0),
+                w.floor() + p2
+            );
+        }
+        assert!((mean(0.05, 2.0) - 1.0 / 39.0).abs() < 0.001);
+        assert!((mean(1.99, 2.0) - 1.980).abs() < 0.002);
+        assert!(
+            mean(1.99, 2.0) < mean(2.0, 2.0) && mean(2.0, 2.0) == 2.0,
+            "continuous at a whole width"
+        );
+        // containment and monotony at fixed ranks
+        let mut state = 0x1234_5678u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..5000 {
+            let (t, w, v0) = (next(), next() * 6.0, (next() * 40.0 * one as f64) as i128);
+            let plain = width_first_span_c(v0, v0 + side(w), t, 1.0);
+            for c in [1.5, 2.0, 4.0] {
+                let sparse = width_first_span_c(v0, v0 + side(w), t, c);
+                match (plain, sparse) {
+                    (None, Some(_)) => {
+                        panic!("c = {} drew what c = 1 dropped (w {} t {})", c, w, t)
+                    }
+                    (Some((a, b)), Some((x, y))) => {
+                        assert!(
+                            x >= a && y <= b,
+                            "c = {}: [{}, {}) left [{}, {}) (w {} t {})",
+                            c,
+                            x,
+                            y,
+                            a,
+                            b,
+                            w,
+                            t
+                        );
+                        assert!(y - x >= w.floor() as i128, "c = {} under floor(w)", c);
+                    }
+                    _ => {}
+                }
+                let wider =
+                    width_first_span_c(v0, v0 + side(w + 0.37), t, c).map_or(0, |(a, b)| b - a);
+                assert!(
+                    wider >= sparse.map_or(0, |(a, b)| b - a),
+                    "c = {}: not monotone in w",
+                    c
+                );
+            }
+        }
+    }
+
+    /// ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1 (2026-09-23): can a lattice's
+    /// sub-pixel survivors be listed without visiting every member? Under
+    /// GridRanks' lattice rule a member (ix, iy) survives a w_x x w_y px
+    /// draw when frac(u_x + vdc(ix) + weyl(iy)) < w_x and the swapped test
+    /// for y. For a fixed row the x condition puts vdc(ix) in one interval
+    /// (mod 1), and vdc maps a dyadic interval [m 2^-b, (m + 1) 2^-b) onto
+    /// the arithmetic progression ix = rev_b(m) (mod 2^b) - so the row's
+    /// candidates are the union of at most ~2 x 53 progressions, walked
+    /// survivor by survivor; the y condition (it couples to ix through
+    /// weyl(ix)) is then tested on those candidates only. The interval is
+    /// widened by 2^-40 and every candidate re-tested with the exact f64
+    /// rule, so the set is the full scan's by construction.
+    fn lattice_survivors_by_enumeration(
+        u: (f64, f64),
+        cols: std::ops::Range<u64>,
+        rows: std::ops::Range<u64>,
+        w: (f64, f64),
+    ) -> (Vec<(u64, u64)>, u64) {
+        const BITS: u32 = 53;
+        let vdc = |k: u64| (k.reverse_bits() >> 11) as f64 / (1u64 << BITS) as f64;
+        let weyl =
+            |k: u64| (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << BITS) as f64;
+        let rank = |u: f64, p: u64, s: u64| (u + vdc(p) + weyl(s)).rem_euclid(1.0);
+        let scale = (1u64 << BITS) as f64;
+        let pad = 2f64.powi(-40);
+        let mut out = Vec::new();
+        let mut tested = 0u64;
+        for iy in rows {
+            // vdc(ix) must lie in [lo, lo + w_x) mod 1, lo = -(u_x + weyl(iy))
+            let lo = (-(u.0 + weyl(iy))).rem_euclid(1.0);
+            let mut pieces: Vec<(u64, u64)> = Vec::new();
+            let a = ((lo - pad).max(0.0) * scale) as u64;
+            let b = ((lo + w.0 + pad).min(1.0) * scale).ceil() as u64;
+            pieces.push((a, b.min(1 << BITS)));
+            if lo + w.0 + pad > 1.0 {
+                pieces.push((
+                    0,
+                    (((lo + w.0 + pad - 1.0) * scale).ceil() as u64).min(1 << BITS),
+                ));
+            }
+            if lo - pad < 0.0 {
+                pieces.push((((lo - pad + 1.0) * scale) as u64, 1 << BITS));
+            }
+            for (mut lo_r, hi_r) in pieces {
+                // dyadic decomposition of [lo_r, hi_r) in the 53-bit reversed space
+                while lo_r < hi_r {
+                    let mut s = lo_r.trailing_zeros().min(BITS);
+                    while s > 0 && lo_r + (1u64 << s) > hi_r {
+                        s -= 1;
+                    }
+                    let b = BITS - s;
+                    let m = lo_r >> s;
+                    // the top b bits of the reversed value m are the low b bits of ix, reversed
+                    let residue = if b == 0 {
+                        0
+                    } else {
+                        m.reverse_bits() >> (64 - b)
+                    };
+                    let stride = 1u64 << b;
+                    let first = cols.start + (residue.wrapping_sub(cols.start) & (stride - 1));
+                    let mut ix = first;
+                    while ix < cols.end {
+                        tested += 1;
+                        if rank(u.0, ix, iy) < w.0 && rank(u.1, iy, ix) < w.1 {
+                            out.push((ix, iy));
+                        }
+                        ix += stride;
+                    }
+                    lo_r += 1u64 << s;
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        (out, tested)
+    }
+
+    #[test]
+    fn sub_pixel_survivors_can_be_enumerated_without_visiting_every_member() {
+        // ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 1: the enumeration's set is
+        // the full scan's, and it visits about the survivors plus ~100
+        // candidates a row instead of every member
+        let vdc = |k: u64| (k.reverse_bits() >> 11) as f64 / (1u64 << 53) as f64;
+        let weyl =
+            |k: u64| (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11) as f64 / (1u64 << 53) as f64;
+        let rank = |u: f64, p: u64, s: u64| (u + vdc(p) + weyl(s)).rem_euclid(1.0);
+        let u = (0.3719, 0.8231);
+        for (cols, rows, w) in [
+            (0..1_000_000u64, 0..1u64, (0.05, 1.0)),
+            (0..2048u64, 0..2048u64, (0.05, 0.05)),
+            (0..2048u64, 0..2048u64, (0.5, 0.5)),
+            (1000..3000u64, 500..700u64, (0.02, 0.9)),
+        ] {
+            let members = (cols.end - cols.start) * (rows.end - rows.start);
+            let t = std::time::Instant::now();
+            let mut scan = Vec::new();
+            for iy in rows.clone() {
+                for ix in cols.clone() {
+                    if rank(u.0, ix, iy) < w.0 && rank(u.1, iy, ix) < w.1 {
+                        scan.push((ix, iy));
+                    }
+                }
+            }
+            scan.sort_unstable();
+            let scan_us = t.elapsed().as_micros();
+            let t = std::time::Instant::now();
+            let (listed, tested) =
+                lattice_survivors_by_enumeration(u, cols.clone(), rows.clone(), w);
+            let list_us = t.elapsed().as_micros();
+            assert_eq!(
+                listed,
+                scan,
+                "{}x{} at {:?}: the enumeration differs from the scan",
+                cols.end - cols.start,
+                rows.end - rows.start,
+                w
+            );
+            let share = scan.len() as f64 / members as f64;
+            assert!(
+                (share - w.0 * w.1).abs() < 0.01 + 0.5 * w.0 * w.1 / (members as f64).sqrt(),
+                "share {} for {:?}",
+                share,
+                w
+            );
+            assert!(tested < members, "tested {} of {} members", tested, members);
+            // the candidates are the x survivors (w_x of the members, the y
+            // test prunes them) plus the progression ends, ~110 a row
+            let x_share = (w.0 * members as f64) as u64;
+            assert!(
+                tested <= x_share + x_share / 50 + 120 * (rows.end - rows.start),
+                "tested {} for {} x candidates in {} rows",
+                tested,
+                x_share,
+                rows.end - rows.start
+            );
+            eprintln!(
+                "§4.3 step 1: {} members ({}x{}) at {:?} px: {} survivors; full scan {} us, enumeration tested {} ({:.1}x fewer) in {} us",
+                members, cols.end - cols.start, rows.end - rows.start, w, scan.len(), scan_us, tested, members as f64 / tested as f64, list_us
+            );
+        }
+    }
+
+    /// SurvivorWalk (§4.3 step 1 in the renderer, 2026-09-25): over
+    /// random lattice arrays - 1-D and 2-D, pitches of either sign, members
+    /// under a pixel on one axis or both, first members on either side of 0,
+    /// placed under all eight orientations, WIDTH_C 1 and 4 - the listed
+    /// members that pass the exact width-first test are exactly the walk's
+    /// drawn members, in the walk's order, and the list is a fraction of the
+    /// members.
+    #[test]
+    fn listed_survivors_are_the_walks_drawn_members() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        let span = 50_000i64;
+        let mut request = area_true_request(64, DEFAULT_TILE_SIZE, 1).raster;
+        request.view =
+            RasterViewBox::new(-span as f64, -span as f64, span as f64, span as f64).unwrap();
+        let world_view = BBox {
+            x0: -span,
+            y0: -span,
+            x1: span,
+            y1: span,
+        };
+        let drawn = |request: &GeometryRasterRequest, world: BBox, ranks: (f64, f64)| {
+            let (x0, y1) = world_to_device(request, world.x0, world.y0).unwrap();
+            let (x1, y0) = world_to_device(request, world.x1, world.y1).unwrap();
+            width_first_span_c(x0, x1, ranks.0, request.width_c).is_some()
+                && width_first_span_c(y0, y1, ranks.1, request.width_c).is_some()
+        };
+        let (mut cases, mut listed_cases, mut members, mut walked) = (0, 0, 0u64, 0u64);
+        for case in 0..600 {
+            request.width_c = if case % 3 == 0 { 4.0 } else { 1.0 };
+            // 1562.5 world units a pixel: sides of 8..600 units are 0.005..0.4 px
+            // (one case in eight up to 1 px, where a list rarely pays)
+            let wide = case % 8 == 7;
+            let side = |thin: bool, n: &mut dyn FnMut(u64) -> u64| {
+                if thin {
+                    8 + n(if wide { 1600 } else { 600 }) as i64
+                } else {
+                    2000 + n(20_000) as i64
+                }
+            };
+            let (thin_x, thin_y) = match next(3) {
+                0 => (true, false),
+                1 => (false, true),
+                _ => (true, true),
+            };
+            let (w, h) = (side(thin_x, &mut next), side(thin_y, &mut next));
+            let pitch = |n: &mut dyn FnMut(u64) -> u64| {
+                (40 + n(3000) as i64) * if n(2) == 0 { 1 } else { -1 }
+            };
+            let place = OrthoTransform::place(
+                next(20_000) as i64 - 10_000,
+                next(20_000) as i64 - 10_000,
+                next(4) as u8,
+                next(2) == 1,
+            )
+            .unwrap();
+            let inverse = place.invert().unwrap();
+            // repetition vectors along the WORLD axes, stored in the cell's frame
+            let local = |v: (i64, i64)| {
+                let (a, o) = (
+                    inverse.apply(v.0, v.1).unwrap(),
+                    inverse.apply(0, 0).unwrap(),
+                );
+                (a.0 - o.0, a.1 - o.1)
+            };
+            let (wx, wy) = (local((pitch(&mut next), 0)), local((0, pitch(&mut next))));
+            let rep = match next(4) {
+                0 => Rep::Grid {
+                    na: 1 + next(3000),
+                    nb: 1,
+                    va: wx,
+                    vb: (0, 0),
+                },
+                1 => Rep::Grid {
+                    na: 1,
+                    nb: 1 + next(3000),
+                    va: (0, 0),
+                    vb: wy,
+                },
+                2 => Rep::Grid {
+                    na: 1 + next(200),
+                    nb: 1 + next(200),
+                    va: wx,
+                    vb: wy,
+                },
+                _ => Rep::Grid {
+                    na: 1 + next(200),
+                    nb: 1 + next(200),
+                    va: wy,
+                    vb: wx,
+                },
+            };
+            let (x, y) = (
+                next(2 * span as u64) as i64 - span,
+                next(2 * span as u64) as i64 - span,
+            );
+            // the local box that lands w x h in the world
+            let world_base = BBox {
+                x0: x,
+                y0: y,
+                x1: x + w,
+                y1: y + h,
+            };
+            let base = inverse.apply_bbox(world_base).unwrap();
+            let local_view = inverse.apply_bbox(world_view).unwrap();
+            let Some(grid) = GridRanks::new(&rep, &place, place.apply_bbox(base).unwrap()).unwrap()
+            else {
+                continue;
+            };
+            if !matches!(grid.mode, GridMode::Lattice { .. }) {
+                continue;
+            }
+            cases += 1;
+            let mut walk = Vec::new();
+            let visit = for_each_visible_offset(&rep, base, local_view, |ox, oy| {
+                let world = place
+                    .apply_bbox(translate_bbox(base, ox, oy).unwrap())
+                    .unwrap();
+                if drawn(&request, world, grid.ranks(ox, oy, &world).unwrap()) {
+                    walk.push((ox, oy));
+                }
+                Ok(())
+            })
+            .unwrap();
+            let Some(survivors) =
+                survivor_walk(&request, Some(&grid), &rep, base, local_view, &place).unwrap()
+            else {
+                continue;
+            };
+            let mut listed = Vec::new();
+            let mut work = SurvivorWork::default();
+            survivors
+                .run(None, &mut work, &mut |ox, oy| {
+                    listed.push((ox, oy));
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(work.walked, listed.len() as u64);
+            listed_cases += 1;
+            members += visit.tested;
+            walked += listed.len() as u64;
+            let kept: Vec<(i64, i64)> = listed
+                .iter()
+                .copied()
+                .filter(|&(ox, oy)| {
+                    let world = place
+                        .apply_bbox(translate_bbox(base, ox, oy).unwrap())
+                        .unwrap();
+                    drawn(&request, world, grid.ranks(ox, oy, &world).unwrap())
+                })
+                .collect();
+            assert_eq!(
+                kept, walk,
+                "case {}: {:?} {}x{} at ({}, {}) c {}",
+                case, rep, w, h, x, y, request.width_c
+            );
+            assert!(
+                listed.len() as u64 * 2 <= visit.tested + 1,
+                "case {}: listed {} of {}",
+                case,
+                listed.len(),
+                visit.tested
+            );
+            // the walk never holds more than one line's cursors along j, or the
+            // cap along i
+            assert!(work.peak_cursors <= SURVIVOR_CURSOR_CAP);
+            // a draw that stops at once stops the walk at once
+            let mut calls = 0;
+            let mut stopped = SurvivorWork::default();
+            let result = survivors.run(None, &mut stopped, &mut |_, _| {
+                calls += 1;
+                Err(WRITE_ONCE_FULL.to_string())
+            });
+            let first = usize::from(!listed.is_empty());
+            assert!(
+                result.is_err() == (first == 1) && calls == first && stopped.walked == first as u64,
+                "case {}: {} calls",
+                case,
+                calls
+            );
+            // off: no walk
+            let mut off = request;
+            off.survivor_list = false;
+            assert!(
+                survivor_walk(&off, Some(&grid), &rep, base, local_view, &place)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            cases > 500 && listed_cases > 100,
+            "{} lattice cases, {} listed",
+            cases,
+            listed_cases
+        );
+        eprintln!(
+            "survivor lists: {} of {} lattice arrays listed, {} members walked instead of {} ({:.1}x fewer)",
+            listed_cases, cases, walked, members, members as f64 / walked.max(1) as f64
+        );
+    }
+
+    /// The listing in the frame: sub-pixel lattice arrays (dense dots both
+    /// axes, bars thin across their row, members on both sides of 0) draw
+    /// byte-identical frames with the list on and off, at two tilings, one and
+    /// three workers and WIDTH_C 1 and 4, walking a fraction of the members.
+    #[test]
+    fn a_frame_draws_the_same_with_the_survivor_list() {
+        let rect = |x, y, w, h, rep: Rep| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep,
+        };
+        let scene = hairline_scene(
+            vec![
+                // 1 x 1 unit dots at a 1-unit pitch over the frame and beyond 0
+                rect(
+                    -40,
+                    -40,
+                    1,
+                    1,
+                    Rep::Grid {
+                        na: 400,
+                        nb: 400,
+                        va: (1, 0),
+                        vb: (0, 1),
+                    },
+                ),
+                // bars 1 unit wide, 200 long, a 2-unit pitch, from x = -100
+                rect(
+                    -100,
+                    60,
+                    1,
+                    200,
+                    Rep::Grid {
+                        na: 300,
+                        nb: 1,
+                        va: (2, 0),
+                        vb: (0, 0),
+                    },
+                ),
+                // a column of wires 1 unit high, a 3-unit pitch downwards
+                rect(
+                    20,
+                    310,
+                    250,
+                    1,
+                    Rep::Grid {
+                        na: 1,
+                        nb: 150,
+                        va: (0, 0),
+                        vb: (0, -3),
+                    },
+                ),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        for (tile, workers, c) in [(DEFAULT_TILE_SIZE, 1u16, 1.0), (16, 3, 1.0), (16, 1, 4.0)] {
+            let mut on = area_true_request(32, tile, workers);
+            on.raster.width_c = c;
+            let mut off = on.clone();
+            off.raster.survivor_list = false;
+            let a = render_geometry_styled(&scene, &on).unwrap();
+            let b = render_geometry_styled(&scene, &off).unwrap();
+            assert_eq!(
+                a.frame, b.frame,
+                "tile {} workers {} c {}",
+                tile, workers, c
+            );
+            assert!(!lit_set(&a.frame, 32).is_empty());
+            assert!(
+                a.stats.rep_members_tested * 3 < b.stats.rep_members_tested,
+                "listed {} of {} members",
+                a.stats.rep_members_tested,
+                b.stats.rep_members_tested
+            );
+            assert_eq!(a.stats.rep_members_drawn, b.stats.rep_members_drawn);
+        }
+    }
+
+    /// Review 2026-09-25 (timing, run by hand with --ignored): a 2 M-member
+    /// sub-pixel array behind a tile that one open pixel keeps from full - the
+    /// first survivors fill it, so a walk that lists survivors must not
+    /// prepare them all first.
+    #[test]
+    #[ignore]
+    fn survivor_walk_in_a_nearly_full_tile_timing() {
+        let rect = |x, y, w, h, rep: Rep| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep,
+        };
+        let scene = hairline_scene(
+            vec![
+                rect(100, 0, 25_500, 25_600, Rep::One),
+                rect(0, 100, 100, 25_500, Rep::One),
+                rect(
+                    0,
+                    0,
+                    30,
+                    30,
+                    Rep::Grid {
+                        na: 2000,
+                        nb: 1000,
+                        va: (13, 0),
+                        vb: (0, 26),
+                    },
+                ),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut on = hairline_request();
+        on.raster.area_true = true;
+        on.raster.view = RasterViewBox::new(0.0, 0.0, 25_600.0, 25_600.0).unwrap();
+        on.raster.width = 256;
+        on.raster.height = 256;
+        on.raster.tile_size = 384;
+        let mut off = on.clone();
+        off.raster.survivor_list = false;
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for k in 0..8 {
+            for (list, times) in [(true, &mut a), (false, &mut b)] {
+                let request = if list { &on } else { &off };
+                let report = render_geometry_styled(&scene, request).unwrap();
+                if k > 0 {
+                    times.push(report.stats.raster_us);
+                }
+            }
+        }
+        a.sort_unstable();
+        b.sort_unstable();
+        let same = render_geometry_styled(&scene, &on).unwrap().frame
+            == render_geometry_styled(&scene, &off).unwrap().frame;
+        eprintln!(
+            "nearly full tile: raster list on {} us, off {} us (medians of 7), pixels identical {}",
+            a[3], b[3], same
+        );
+    }
+
+    /// One top cell over 0..320 holding a page per (layer, rectangles,
+    /// polygons), planned with a per-shape cut by the larger side - the
+    /// density stack's test scene (pass 1 at one cut, pass 2 at a finer one).
+    fn stack_scene(pages: Vec<(u32, Vec<RectRec>, Vec<PolyRec>)>, shape_cut: u64) -> FrameScene {
+        let top = (0, REM_FULL);
+        let world = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 320,
+            y1: 320,
+        };
+        let n = pages.len() as u32;
+        let decoded = pages
+            .into_iter()
+            .enumerate()
+            .map(|(k, (layer, rects, polys))| {
+                // the page's own box (its records' extents): what the demand
+                // tests against the tiles
+                let mut bbox = BBox::EMPTY;
+                for r in &rects {
+                    let (nx, ny) = match &r.rep {
+                        Rep::Grid { na, nb, va, vb } => (
+                            (*na as i64 - 1) * va.0 + (*nb as i64 - 1) * vb.0,
+                            (*na as i64 - 1) * va.1 + (*nb as i64 - 1) * vb.1,
+                        ),
+                        _ => (0, 0),
+                    };
+                    bbox.grow(&BBox {
+                        x0: r.x.min(r.x + nx),
+                        y0: r.y.min(r.y + ny),
+                        x1: (r.x + r.w).max(r.x + r.w + nx),
+                        y1: (r.y + r.h).max(r.y + r.h + ny),
+                    });
+                }
+                for q in &polys {
+                    bbox.grow(&polygon_bbox(&q.pts).unwrap());
+                    if let Rep::Grid { na, nb, va, vb } = &q.rep {
+                        let (nx, ny) = (
+                            (*na as i64 - 1) * va.0 + (*nb as i64 - 1) * vb.0,
+                            (*na as i64 - 1) * va.1 + (*nb as i64 - 1) * vb.1,
+                        );
+                        let b = polygon_bbox(&q.pts).unwrap();
+                        bbox.grow(&BBox {
+                            x0: b.x0 + nx.min(0),
+                            y0: b.y0 + ny.min(0),
+                            x1: b.x1 + nx.max(0),
+                            y1: b.y1 + ny.max(0),
+                        });
+                    }
+                }
+                let doc = Doc {
+                    unit: 1.0,
+                    cells: vec![Cell {
+                        name: format!("S{k}"),
+                        rects,
+                        polys,
+                        ..Cell::default()
+                    }],
+                    top: 0,
+                    layer_order: vec![(layer, 0)],
+                    norm_s: 0.0,
+                    layer_names: HashMap::new(),
+                    layer_aliases: HashMap::new(),
+                };
+                Arc::new(DecodedPage {
+                    page_id: k as u32,
+                    layer_idx: layer,
+                    bbox,
+                    encoded_bytes: 1,
+                    records: 1,
+                    members: 1,
+                    index: crate::PageIndex::build(&doc),
+                    doc,
+                })
+            })
+            .collect();
+        let plan = HierPlan {
+            top,
+            wcells: vec![WsCell {
+                key: top,
+                pages: (0..n).collect(),
+                page_levels: Vec::new(),
+                insts: Vec::new(),
+                frames: Vec::new(),
+                washes: Vec::new(),
+                reps: Vec::new(),
+            }],
+            pages: (0..n).collect(),
+            page_prio: vec![0; n as usize],
+            stats: HierStats {
+                shape_cut,
+                shape_cut_max: true,
+                ..HierStats::default()
+            },
+            explain: Vec::new(),
+        };
+        FrameScene::from_test_parts(plan, decoded, BTreeMap::from([(top, world)])).unwrap()
+    }
+
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+    const BLACK: [u8; 4] = [0, 0, 0, 255];
+    /// the test scenes' cuts: pass 1 at 3 px (30 units at 10 a pixel), pass
+    /// 2 at 0.5 px
+    const CUT_1: u64 = 30;
+    const CUT_2: u64 = 5;
+
+    /// An area-true 32 px request over 0..320 painting layers 1 (white,
+    /// solid), 2 (red, solid) and 3 (green, `top`) in that order.
+    fn stack_request(top: LayerFill, tile: u16, workers: u16) -> StyledGeometryRasterRequest {
+        let mut request = area_true_request(32, tile, workers);
+        request.raster.density_stack = true;
+        request.layers = vec![
+            LayerStyle {
+                layer_idx: 1,
+                color: WHITE,
+                fill: LayerFill::Solid,
+                outline_width: 1,
+            },
+            LayerStyle {
+                layer_idx: 2,
+                color: RED,
+                fill: LayerFill::Solid,
+                outline_width: 1,
+            },
+            LayerStyle {
+                layer_idx: 3,
+                color: GREEN,
+                fill: top,
+                outline_width: 1,
+            },
+        ];
+        request
+    }
+
+    /// The density stack's frame (DensityStack): pass 1 over `scene`, pass 2
+    /// over `density` - the same pages at the finer cut, handed to both sides
+    /// - with `upper` its cut from above. The regions the block boundary
+    /// offers (top plane's, the others') go to `regions`.
+    fn density_frame(
+        scene: &FrameScene,
+        density: &Arc<FrameScene>,
+        upper: i64,
+        request: &StyledGeometryRasterRequest,
+        work_bin: bool,
+        regions: &mut Vec<(Vec<BBox>, Vec<BBox>)>,
+    ) -> GeometryRasterReport {
+        let session =
+            LayerRasterSession::begin_with_density(scene, request, work_bin, Some(upper), None)
+                .unwrap();
+        let block = session.density_block();
+        session
+            .render_layered_with(scene, request, None, block, |_, demand| {
+                if !demand.density_block() {
+                    return Ok(None);
+                }
+                regions.push((
+                    demand.eligible_regions(true),
+                    demand.eligible_regions(false),
+                ));
+                Ok(Some(DensityScenes {
+                    top: Some(Arc::clone(density)),
+                    others: Some(Arc::clone(density)),
+                }))
+            })
+            .unwrap()
+    }
+
+    fn count(
+        frame: &RgbaFrame,
+        color: [u8; 4],
+        cols: std::ops::Range<usize>,
+        rows: std::ops::Range<usize>,
+    ) -> usize {
+        rows.flat_map(|row| cols.clone().map(move |col| (col, row)))
+            .filter(|&(col, row)| pixel(frame, col, row) == color)
+            .count()
+    }
+
+    fn lit_of(
+        frame: &RgbaFrame,
+        color: [u8; 4],
+        cols: std::ops::Range<usize>,
+        rows: std::ops::Range<usize>,
+    ) -> BTreeSet<(usize, usize)> {
+        rows.flat_map(|row| cols.clone().map(move |col| (col, row)))
+            .filter(|&(col, row)| pixel(frame, col, row) == color)
+            .collect()
+    }
+
+    /// The density stack (CUT_DENSITY_DESIGN §10.10), 10 world units a pixel,
+    /// pass 1 at 3 px and pass 2 at 0.5 px, the image in quadrants: the top
+    /// plane's original (layer 3, patterned) fills the left half, layer 1's
+    /// solid original the top right. Under the cut: layer 1's 1.5 px squares
+    /// cover the frame (two pages: the left half's and the right half's; its
+    /// original is a third),
+    /// layer 3's stand in the bottom left (inside its own original) and the
+    /// top right (over layer 1's original), layer 2's in the top right too and
+    /// its 0.6 px squares at half a pixel's pitch in rows 16-23 of the bottom
+    /// right. Without the stack no square draws at all (the cut). With it: the
+    /// left half is the top original alone; in the top right the top plane's
+    /// squares draw over layer 1's original as they would alone and layer 2's
+    /// do not; rows 16-23 of the bottom right hold layer 2's dots as they
+    /// would alone and none of layer 1's (claimed, dropped members too); rows
+    /// 24-31 hold layer 1's squares as they would alone. The demand asks for
+    /// the right half's page of layer 1 and not the left half's. The survivor
+    /// list, the tiling, the workers and the bin change nothing.
+    #[test]
+    fn the_density_stack_draws_the_cut_shapes_in_the_top_plane_and_the_empty_space() {
+        let rect = |layer, x, y, w, h, rep: Rep| RectRec {
+            layer,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep,
+        };
+        let squares = |layer, x, y, n: u64, pitch: i64| {
+            rect(
+                layer,
+                x,
+                y,
+                15,
+                15,
+                Rep::Grid {
+                    na: n,
+                    nb: n,
+                    va: (pitch, 0),
+                    vb: (0, pitch),
+                },
+            )
+        };
+        let original = rect(3, 0, 0, 160, 320, Rep::One);
+        let strip = rect(
+            2,
+            162,
+            82,
+            6,
+            6,
+            Rep::Grid {
+                na: 32,
+                nb: 16,
+                va: (5, 0),
+                vb: (0, 5),
+            },
+        );
+        let pages = |top: bool| {
+            let mut layer3 = vec![squares(3, 20, 20, 5, 30), squares(3, 185, 185, 5, 30)];
+            if top {
+                layer3.push(original.clone());
+            }
+            vec![
+                (1, vec![squares(1, 5, 5, 5, 25)], Vec::new()),
+                (1, vec![squares(1, 165, 5, 7, 25)], Vec::new()),
+                (1, vec![rect(1, 160, 160, 160, 160, Rep::One)], Vec::new()),
+                (
+                    2,
+                    vec![squares(2, 170, 170, 5, 30), strip.clone()],
+                    Vec::new(),
+                ),
+                (3, layer3, Vec::new()),
+            ]
+        };
+        let coarse = stack_scene(pages(true), CUT_1);
+        let fine = Arc::new(stack_scene(pages(true), CUT_2));
+        let alone = stack_scene(vec![(3, vec![original.clone()], Vec::new())], 0);
+        // the squares as they draw alone, uncut
+        let top_alone = stack_scene(vec![(3, vec![squares(3, 185, 185, 5, 30)], Vec::new())], 0);
+        let strip_alone = stack_scene(vec![(2, vec![strip.clone()], Vec::new())], 0);
+        let low_alone = stack_scene(
+            vec![(
+                1,
+                vec![squares(1, 5, 5, 5, 25), squares(1, 165, 5, 7, 25)],
+                Vec::new(),
+            )],
+            0,
+        );
+        for fill in [
+            LayerFill::Speckle,
+            LayerFill::Clear,
+            LayerFill::Pattern([0x8888; 16]),
+        ] {
+            let request = stack_request(fill, DEFAULT_TILE_SIZE, 1);
+            let off = render_geometry_styled(&coarse, &request).unwrap();
+            let mut regions = Vec::new();
+            let on = density_frame(&coarse, &fine, CUT_1 as i64, &request, true, &mut regions);
+            let only = render_geometry_styled(&alone, &request).unwrap();
+            let plain = |scene: &FrameScene| render_geometry_styled(scene, &request).unwrap().frame;
+            let (top_ref, strip_ref, low_ref) =
+                (plain(&top_alone), plain(&strip_alone), plain(&low_alone));
+            // no square without the stack
+            assert_eq!(
+                count(&off.frame, WHITE, 16..32, 16..32)
+                    + count(&off.frame, GREEN, 16..32, 0..16)
+                    + count(&off.frame, RED, 0..32, 0..32),
+                0,
+                "{fill:?}"
+            );
+            for row in 0..32 {
+                for col in 0..16 {
+                    assert_eq!(
+                        pixel(&on.frame, col, row),
+                        pixel(&only.frame, col, row),
+                        "{fill:?} left ({col}, {row})"
+                    );
+                }
+            }
+            assert_eq!(
+                lit_of(&on.frame, GREEN, 16..32, 0..16),
+                lit_of(&top_ref, GREEN, 16..32, 0..16),
+                "{fill:?} top right, the top plane's squares"
+            );
+            assert!(!lit_of(&top_ref, GREEN, 16..32, 0..16).is_empty());
+            assert_eq!(
+                count(&on.frame, RED, 16..32, 0..16),
+                0,
+                "{fill:?} layer 2 under layer 1's original"
+            );
+            assert_eq!(
+                count(&on.frame, WHITE, 16..32, 0..16) + count(&on.frame, GREEN, 16..32, 0..16),
+                256,
+                "{fill:?} top right"
+            );
+            assert_eq!(
+                lit_of(&on.frame, RED, 16..32, 16..24),
+                lit_of(&strip_ref, RED, 16..32, 16..24),
+                "{fill:?} the strip"
+            );
+            assert!(!lit_of(&strip_ref, RED, 16..32, 16..24).is_empty());
+            assert_eq!(
+                count(&on.frame, WHITE, 16..32, 16..24),
+                0,
+                "{fill:?} layer 1 under the strip's claim"
+            );
+            assert!(
+                count(&low_ref, WHITE, 16..32, 16..24) > 0,
+                "layer 1 has squares under the strip"
+            );
+            assert_eq!(
+                lit_of(&on.frame, WHITE, 16..32, 24..32),
+                lit_of(&low_ref, WHITE, 16..32, 24..32),
+                "{fill:?} the empty space"
+            );
+            assert!(!lit_of(&low_ref, WHITE, 16..32, 24..32).is_empty());
+            // the regions pass 2 plans over (one tile): the top plane's is the
+            // right half (its own original fills the left), the others' the
+            // bottom right (layer 1's original fills the top right) - a pixel
+            // and the stroke margin wider
+            let [(top_regions, low_regions)] = regions.as_slice() else {
+                panic!("one density block: {regions:?}")
+            };
+            assert!(
+                top_regions.iter().all(|b| b.x0 >= 140 && b.y1 >= 300)
+                    && low_regions.iter().all(|b| b.x0 >= 140 && b.y1 <= 180),
+                "{fill:?} regions {top_regions:?} {low_regions:?}"
+            );
+            let stack = on.stats.density_stack;
+            assert_eq!(
+                stack[1] as usize,
+                count(&on.frame, GREEN, 16..32, 0..16),
+                "{stack:?}"
+            );
+            assert!(
+                stack[0] >= stack[1] + stack[2] && stack[2] > 0 && stack[3] > 0 && stack[4] > 0,
+                "{stack:?}"
+            );
+            assert_eq!(off.stats.density_stack, [0; 5]);
+            for (tile, workers, list, bin) in [
+                (16, 3u16, true, true),
+                (8, 2, false, true),
+                (DEFAULT_TILE_SIZE, 1, true, false),
+            ] {
+                let mut request = stack_request(fill, tile, workers);
+                request.raster.survivor_list = list;
+                let again =
+                    density_frame(&coarse, &fine, CUT_1 as i64, &request, bin, &mut Vec::new());
+                assert_eq!(
+                    again.frame, on.frame,
+                    "{fill:?} tile {tile} workers {workers} list {list} bin {bin}"
+                );
+            }
+            // write-once off: no pass 2, the plain frame
+            let ordered = with_write_once(false, || {
+                density_frame(
+                    &coarse,
+                    &fine,
+                    CUT_1 as i64,
+                    &request,
+                    true,
+                    &mut Vec::new(),
+                )
+            });
+            assert_eq!(ordered.frame, off.frame, "{fill:?}");
+        }
+    }
+
+    /// Under the density stack an array's dropped members stand for their
+    /// pixels at once (array_footprint) - the same pixels as each member's own
+    /// footprint, whether the survivor walk or the member walk draws it: a
+    /// lower plane's cut squares meet a sub-pixel array of dots (a lattice)
+    /// and a skewed one (each member its own), at pitches under and over a
+    /// pixel.
+    #[test]
+    fn a_dropped_array_member_claims_its_pixels_under_the_density_stack() {
+        let rect = |layer, x, y, w, h, rep: Rep| RectRec {
+            layer,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep,
+        };
+        let tri = |dx: i64, dy: i64| vec![(dx, dy), (dx + 2, dy), (dx, dy + 6)];
+        let poly = |pts: Vec<(i64, i64)>, rep: Rep| PolyRec {
+            layer: 2,
+            dt: 0,
+            pts,
+            rep,
+        };
+        let low = || {
+            vec![rect(
+                1,
+                2,
+                3,
+                12,
+                12,
+                Rep::Grid {
+                    na: 20,
+                    nb: 20,
+                    va: (16, 0),
+                    vb: (0, 16),
+                },
+            )]
+        };
+        for (va, vb, pitch) in [
+            ((4, 0), (0, 6), 4),
+            ((13, 0), (0, 17), 13),
+            ((13, 2), (0, 17), 13),
+        ] {
+            let arrays = || {
+                vec![
+                    rect(
+                        2,
+                        10,
+                        150,
+                        1,
+                        6,
+                        Rep::Grid {
+                            na: 30,
+                            nb: 8,
+                            va,
+                            vb,
+                        },
+                    ),
+                    rect(
+                        2,
+                        170,
+                        10,
+                        6,
+                        1,
+                        Rep::Grid {
+                            na: 11,
+                            nb: 30,
+                            va,
+                            vb,
+                        },
+                    ),
+                ]
+            };
+            let pages = vec![
+                (1, low(), Vec::new()),
+                (
+                    2,
+                    arrays(),
+                    vec![poly(
+                        tri(20, 20),
+                        Rep::Grid {
+                            na: 30,
+                            nb: 12,
+                            va,
+                            vb,
+                        },
+                    )],
+                ),
+            ];
+            // the reference: the same members stored one record each
+            let mut singles = Vec::new();
+            let mut single_polys = Vec::new();
+            for array in arrays() {
+                let Rep::Grid { na, nb, va, vb } = array.rep else {
+                    unreachable!()
+                };
+                for i in 0..na as i64 {
+                    for j in 0..nb as i64 {
+                        singles.push(rect(
+                            2,
+                            array.x + i * va.0 + j * vb.0,
+                            array.y + i * va.1 + j * vb.1,
+                            array.w,
+                            array.h,
+                            Rep::One,
+                        ));
+                    }
+                }
+            }
+            for i in 0..30i64 {
+                for j in 0..12i64 {
+                    single_polys.push(poly(
+                        tri(20 + i * va.0 + j * vb.0, 20 + i * va.1 + j * vb.1),
+                        Rep::One,
+                    ));
+                }
+            }
+            let flat = vec![(1, low(), Vec::new()), (2, singles, single_polys)];
+            let (coarse, fine) = (
+                stack_scene(pages.clone(), CUT_1),
+                Arc::new(stack_scene(pages, CUT_2)),
+            );
+            let (flat_coarse, flat_fine) = (
+                stack_scene(flat.clone(), CUT_1),
+                Arc::new(stack_scene(flat, CUT_2)),
+            );
+            let bare = Arc::new(stack_scene(vec![(1, low(), Vec::new())], CUT_2));
+            for (tile, workers, list) in [
+                (DEFAULT_TILE_SIZE, 1u16, true),
+                (DEFAULT_TILE_SIZE, 1, false),
+                (16, 3, true),
+            ] {
+                let mut request = stack_request(LayerFill::Solid, tile, workers);
+                request.raster.survivor_list = list;
+                let a = density_frame(
+                    &coarse,
+                    &fine,
+                    CUT_1 as i64,
+                    &request,
+                    true,
+                    &mut Vec::new(),
+                );
+                // a single member ranks by its world box, an array member by
+                // its index: the lit pixels differ, what they stand for not -
+                // so compare where layer 1 shows
+                let b = density_frame(
+                    &flat_coarse,
+                    &flat_fine,
+                    CUT_1 as i64,
+                    &request,
+                    true,
+                    &mut Vec::new(),
+                );
+                let white = |frame: &RgbaFrame| lit_of(frame, WHITE, 0..32, 0..32);
+                assert_eq!(
+                    white(&a.frame),
+                    white(&b.frame),
+                    "vectors {va:?} {vb:?} tile {tile} workers {workers} list {list}"
+                );
+                assert!(!white(&a.frame).is_empty());
+                let alone = density_frame(
+                    &stack_scene(vec![(1, low(), Vec::new())], CUT_1),
+                    &bare,
+                    CUT_1 as i64,
+                    &request,
+                    true,
+                    &mut Vec::new(),
+                );
+                assert!(
+                    white(&alone.frame).len() > white(&a.frame).len(),
+                    "pitch {pitch}: the arrays claim some of layer 1's pixels"
+                );
+            }
+        }
+    }
+
+    /// A leaf cell's pages (layer, rectangles, polygons) placed by one
+    /// instance (x, y, rot, flip, rep) in an otherwise empty top cell spanning
+    /// `world` - the placement lattice's test scene.
+    fn placed_scene(
+        leaf: Vec<(u32, Vec<RectRec>, Vec<PolyRec>)>,
+        inst: (i64, i64, u8, bool, Rep),
+        world: BBox,
+    ) -> FrameScene {
+        placed_scene_cut(leaf, inst, world, HierStats::default())
+    }
+
+    /// `placed_scene` planned with the given stats (a per-shape cut)
+    fn placed_scene_cut(
+        leaf: Vec<(u32, Vec<RectRec>, Vec<PolyRec>)>,
+        inst: (i64, i64, u8, bool, Rep),
+        world: BBox,
+        stats: HierStats,
+    ) -> FrameScene {
+        let (top, cell) = ((0, REM_FULL), (1, REM_FULL));
+        let mut pages = Vec::new();
+        let mut leaf_box = BBox::EMPTY;
+        for (k, (layer, rects, polys)) in leaf.into_iter().enumerate() {
+            let mut bbox = BBox::EMPTY;
+            for r in &rects {
+                bbox.grow(&BBox {
+                    x0: r.x,
+                    y0: r.y,
+                    x1: r.x + r.w,
+                    y1: r.y + r.h,
+                });
+            }
+            for q in &polys {
+                bbox.grow(&polygon_bbox(&q.pts).unwrap());
+            }
+            leaf_box.grow(&bbox);
+            let doc = Doc {
+                unit: 1.0,
+                cells: vec![Cell {
+                    name: format!("L{k}"),
+                    rects,
+                    polys,
+                    ..Cell::default()
+                }],
+                top: 0,
+                layer_order: vec![(layer, 0)],
+                norm_s: 0.0,
+                layer_names: HashMap::new(),
+                layer_aliases: HashMap::new(),
+            };
+            pages.push(Arc::new(DecodedPage {
+                page_id: k as u32,
+                layer_idx: layer,
+                bbox,
+                encoded_bytes: 1,
+                records: 1,
+                members: 1,
+                index: crate::PageIndex::build(&doc),
+                doc,
+            }));
+        }
+        let n = pages.len() as u32;
+        let (x, y, rot, flip, rep) = inst;
+        let plan = HierPlan {
+            top,
+            wcells: vec![
+                WsCell {
+                    key: top,
+                    pages: Vec::new(),
+                    page_levels: Vec::new(),
+                    insts: vec![WsInst {
+                        child: cell,
+                        x,
+                        y,
+                        rot,
+                        flip,
+                        rep,
+                    }],
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                    reps: Vec::new(),
+                },
+                WsCell {
+                    key: cell,
+                    pages: (0..n).collect(),
+                    page_levels: Vec::new(),
+                    insts: Vec::new(),
+                    frames: Vec::new(),
+                    washes: Vec::new(),
+                    reps: Vec::new(),
+                },
+            ],
+            pages: (0..n).collect(),
+            page_prio: vec![0; n as usize],
+            stats,
+            explain: Vec::new(),
+        };
+        FrameScene::from_test_parts(
+            plan,
+            pages,
+            BTreeMap::from([(top, world), (cell, leaf_box)]),
+        )
+        .unwrap()
+    }
+
+    /// An area-true request over `world` at `size` px with the placement
+    /// lattice and the survivor list as given, layers 1 (white) and 2 (red).
+    fn lattice_request(
+        world: BBox,
+        size: u32,
+        tile: u16,
+        workers: u16,
+        place: bool,
+        list: bool,
+    ) -> StyledGeometryRasterRequest {
+        let mut request = area_true_request(size, tile, workers);
+        request.raster.view = RasterViewBox::new(
+            world.x0 as f64,
+            world.y0 as f64,
+            world.x1 as f64,
+            world.y1 as f64,
+        )
+        .unwrap();
+        request.raster.place_lattice = place;
+        request.raster.survivor_list = list;
+        request.layers.push(LayerStyle {
+            layer_idx: 2,
+            color: [255, 0, 0, 255],
+            fill: LayerFill::Solid,
+            outline_width: 1,
+        });
+        request
+    }
+
+    /// The placement lattice (CUT_DENSITY_DESIGN §10.8): a single shape placed
+    /// by a lattice array ranks as the flat array of it - the same pixels for
+    /// sub-pixel rectangles (width first) and polygons (area-true keep), the
+    /// cell placed upright or rotated, with the survivor list on and off.
+    #[test]
+    fn a_placed_shape_ranks_as_its_flat_array_under_the_placement_lattice() {
+        let world = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 320,
+            y1: 320,
+        };
+        let rect = |x, y, w, h, rep: Rep| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep,
+        };
+        let poly = |pts: Vec<(i64, i64)>, rep: Rep| PolyRec {
+            layer: 1,
+            dt: 0,
+            pts,
+            rep,
+        };
+        let grid = Rep::Grid {
+            na: 40,
+            nb: 3,
+            va: (7, 0),
+            vb: (0, 90),
+        };
+        // 5 world units a pixel: a 1-unit bar is 0.2 px wide, the triangle's
+        // keep chance 0.1
+        let tri = |dx: i64, dy: i64| vec![(dx, dy), (dx + 1, dy), (dx, dy + 40)];
+        let flat_rect = hairline_scene(
+            vec![rect(3, 5, 1, 60, grid.clone())],
+            Vec::new(),
+            Vec::new(),
+        );
+        let flat_poly = hairline_scene(Vec::new(), vec![poly(tri(3, 5), grid.clone())], Vec::new());
+        // the bar stored upright, and lying down in a cell placed a quarter turn
+        let placed_rect = placed_scene(
+            vec![(1, vec![rect(0, 0, 1, 60, Rep::One)], Vec::new())],
+            (3, 5, 0, false, grid.clone()),
+            world,
+        );
+        let turned_rect = placed_scene(
+            vec![(1, vec![rect(0, -1, 60, 1, Rep::One)], Vec::new())],
+            (3, 5, 1, false, grid.clone()),
+            world,
+        );
+        let placed_poly = placed_scene(
+            vec![(1, Vec::new(), vec![poly(tri(0, 0), Rep::One)])],
+            (3, 5, 0, false, grid.clone()),
+            world,
+        );
+        for list in [false, true] {
+            let on = lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, list);
+            let flat = render_geometry_styled(&flat_rect, &on).unwrap().frame;
+            assert!(!lit_set(&flat, 64).is_empty());
+            assert_eq!(
+                render_geometry_styled(&placed_rect, &on).unwrap().frame,
+                flat,
+                "placed bar, list {}",
+                list
+            );
+            assert_eq!(
+                render_geometry_styled(&turned_rect, &on).unwrap().frame,
+                flat,
+                "turned bar, list {}",
+                list
+            );
+            let flat = render_geometry_styled(&flat_poly, &on).unwrap().frame;
+            let lit = lit_set(&flat, 64).len();
+            assert!(lit > 0, "the triangles light nothing");
+            assert_eq!(
+                render_geometry_styled(&placed_poly, &on).unwrap().frame,
+                flat,
+                "placed triangle, list {}",
+                list
+            );
+        }
+        // off: the flat array keeps its own ranks, the placed shapes their hashes
+        let off = lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, false, true);
+        assert_eq!(
+            render_geometry_styled(&flat_rect, &off).unwrap().frame,
+            render_geometry_styled(
+                &flat_rect,
+                &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, true)
+            )
+            .unwrap()
+            .frame,
+            "a flat rectangle array ranks on its lattice either way"
+        );
+    }
+
+    /// The placement array's survivor walk draws what every member's visit
+    /// draws: list on and off, the work bin and the per-tile walk, two tilings,
+    /// one and three workers - byte-identical, with fewer cells visited; a
+    /// cell whose other drawn layer holds a shape a pixel wide is walked member
+    /// by member, and its sub-pixel shapes still light the pixels they light
+    /// without that shape (the ranks do not depend on the walk).
+    #[test]
+    fn the_placement_survivor_walk_draws_what_every_member_draws() {
+        // 25 world units a pixel: the bars are 0.04 px wide, the triangle's
+        // keep chance 0.02; 400 x 2 members 0.16 px apart
+        let world = BBox {
+            x0: -200,
+            y0: -200,
+            x1: 1400,
+            y1: 1400,
+        };
+        let rect = |layer, x, y, w, h| RectRec {
+            layer,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep: Rep::One,
+        };
+        let tri = PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(2, 0), (3, 0), (2, 150)],
+            rep: Rep::One,
+        };
+        let small = (
+            1,
+            vec![rect(1, 0, 0, 1, 250), rect(1, 1, 60, 1, 150)],
+            vec![tri],
+        );
+        let big = (2, vec![rect(2, 0, 400, 200, 200)], Vec::new());
+        let grid = Rep::Grid {
+            na: 400,
+            nb: 2,
+            va: (4, 0),
+            vb: (0, 700),
+        };
+        for (x, y, rot, flip) in [(-50, 10, 0u8, false), (-40, 1100, 2, true)] {
+            let scene = placed_scene(vec![small.clone()], (x, y, rot, flip, grid.clone()), world);
+            let reference = render_geometry_styled_unbinned(
+                &scene,
+                &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, false),
+            )
+            .unwrap();
+            assert!(!lit_set(&reference.frame, 64).is_empty());
+            let mut walked = None;
+            for (tile, workers) in [(DEFAULT_TILE_SIZE, 1u16), (16, 3)] {
+                for list in [false, true] {
+                    let request = lattice_request(world, 64, tile, workers, true, list);
+                    let bin = render_geometry_styled(&scene, &request).unwrap();
+                    let walk = render_geometry_styled_unbinned(&scene, &request).unwrap();
+                    assert_eq!(
+                        bin.frame,
+                        reference.frame,
+                        "bin, tile {} workers {} list {} at {:?}",
+                        tile,
+                        workers,
+                        list,
+                        (x, y, rot, flip)
+                    );
+                    assert_eq!(
+                        walk.frame,
+                        reference.frame,
+                        "walk, tile {} workers {} list {} at {:?}",
+                        tile,
+                        workers,
+                        list,
+                        (x, y, rot, flip)
+                    );
+                    if tile == DEFAULT_TILE_SIZE {
+                        walked.get_or_insert([0u64; 2])[list as usize] =
+                            bin.stats.hier_cells_visited;
+                    }
+                }
+            }
+            let [every, listed] = walked.unwrap();
+            assert!(
+                listed * 2 < every,
+                "the walk visited {} cells of {}",
+                listed,
+                every
+            );
+            // a drawn shape a pixel wide on layer 2: member by member, the
+            // same layer-1 pixels as without it
+            let with_big = placed_scene(
+                vec![small.clone(), big.clone()],
+                (x, y, rot, flip, grid.clone()),
+                world,
+            );
+            let request = lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, true);
+            let both = render_geometry_styled(&with_big, &request).unwrap();
+            let every_member = render_geometry_styled(
+                &with_big,
+                &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, false),
+            )
+            .unwrap();
+            assert_eq!(both.frame, every_member.frame);
+            assert_eq!(
+                both.stats.hier_cells_visited, every_member.stats.hier_cells_visited,
+                "a pixel-wide shape leaves every member to the walk"
+            );
+            let white = |frame: &RgbaFrame| {
+                let mut set = BTreeSet::new();
+                for row in 0..64 {
+                    for col in 0..64 {
+                        if pixel(frame, col, row) == [255, 255, 255, 255] {
+                            set.insert((col, row));
+                        }
+                    }
+                }
+                set
+            };
+            assert_eq!(
+                white(&both.frame),
+                white(&reference.frame),
+                "the big shape changed the small shapes' picks at {:?}",
+                (x, y, rot, flip)
+            );
+        }
+    }
+
+    /// The preparation of a placement array's survivor walk is bounded
+    /// (review 2026-09-25): the records it looks at - those the shape cut
+    /// drops included - and the polygon vertices count against
+    /// PLACEMENT_PREP_WORK, and a ninth drawn shape gives up at once. Past a
+    /// bound the members are visited one by one, the pixels unchanged.
+    #[test]
+    fn the_placement_walk_preparation_is_bounded() {
+        let world = BBox {
+            x0: -200,
+            y0: -200,
+            x1: 1400,
+            y1: 1400,
+        };
+        let thin = |x: i64| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y: 0,
+            w: 1,
+            h: 250,
+            rep: Rep::One,
+        };
+        // 1 x 1 unit specks under the 75-unit (3 px) cut on both sides
+        let specks = |n: i64| {
+            (0..n).map(|k| RectRec {
+                layer: 1,
+                dt: 0,
+                x: (k % 50) * 3,
+                y: 300 + (k / 50) * 3,
+                w: 1,
+                h: 1,
+                rep: Rep::One,
+            })
+        };
+        // a 1..2 unit wide comb 2 x `teeth` units tall: 2 teeth + 2 vertices
+        let comb = |teeth: i64| {
+            let mut pts = vec![(0, 0), (0, 2 * teeth)];
+            for k in (0..teeth).rev() {
+                pts.push((2, 2 * k + 2));
+                pts.push((1, 2 * k + 1));
+            }
+            PolyRec {
+                layer: 1,
+                dt: 0,
+                pts,
+                rep: Rep::One,
+            }
+        };
+        let cut = HierStats {
+            shape_cut: 75,
+            shape_cut_max: true,
+            ..HierStats::default()
+        };
+        let grid = Rep::Grid {
+            na: 400,
+            nb: 2,
+            va: (4, 0),
+            vb: (0, 700),
+        };
+        // the visits with the list on and off, and the walk's outcome (the
+        // array is 2-D: RenderStats::place_walks' second half)
+        let visits = |rects: Vec<RectRec>, polys: Vec<PolyRec>| {
+            let scene = placed_scene_cut(
+                vec![(1, rects, polys)],
+                (-50, 10, 0, false, grid.clone()),
+                world,
+                cut.clone(),
+            );
+            let on = render_geometry_styled(
+                &scene,
+                &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, true),
+            )
+            .unwrap();
+            let off = render_geometry_styled(
+                &scene,
+                &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, false),
+            )
+            .unwrap();
+            assert_eq!(on.frame, off.frame);
+            assert!(!lit_set(&on.frame, 64).is_empty());
+            assert_eq!(
+                off.stats.place_walks,
+                [(0, 0); 32],
+                "the list off plans no walk"
+            );
+            let seen: Vec<PlaceWalkOutcome> = [
+                PlaceWalkOutcome::Walked,
+                PlaceWalkOutcome::Shapes,
+                PlaceWalkOutcome::PrepWork,
+            ]
+            .into_iter()
+            .filter(|&o| on.stats.place_walks[PLACE_WALK_OUTCOMES.len() + o as usize].0 > 0)
+            .collect();
+            (
+                on.stats.hier_cells_visited,
+                off.stats.hier_cells_visited,
+                seen,
+            )
+        };
+        let walked = |(on, off, seen): (u64, u64, Vec<PlaceWalkOutcome>)| {
+            on * 2 < off && seen == [PlaceWalkOutcome::Walked]
+        };
+        let declined = |(on, off, seen): (u64, u64, Vec<PlaceWalkOutcome>),
+                        why: PlaceWalkOutcome| on == off && seen == [why];
+        // the cut's specks are no terms but count as work: 501 records walk
+        assert!(walked(visits(
+            std::iter::once(thin(0)).chain(specks(500)).collect(),
+            Vec::new()
+        )));
+        // 1,101 records are past the budget
+        assert!(declined(
+            visits(
+                std::iter::once(thin(0)).chain(specks(1100)).collect(),
+                Vec::new()
+            ),
+            PlaceWalkOutcome::PrepWork
+        ));
+        // eight drawn shapes walk, a ninth gives up
+        assert!(walked(visits(
+            (0..8).map(|k| thin(4 * k)).collect(),
+            Vec::new()
+        )));
+        assert!(declined(
+            visits((0..9).map(|k| thin(4 * k)).collect(), Vec::new()),
+            PlaceWalkOutcome::Shapes
+        ));
+        // a polygon's vertices count: 402 walk, 1,102 give up
+        assert!(walked(visits(Vec::new(), vec![comb(200)])));
+        assert!(declined(
+            visits(Vec::new(), vec![comb(550)]),
+            PlaceWalkOutcome::PrepWork
+        ));
+    }
+
+    /// The walk's outcomes as RenderStats::place_walks counts them, one
+    /// placement array at a time: too small to pay (cost), a bar thin across
+    /// the array's only axis (axis mismatch), a triangle a pixel wide (not
+    /// sub-pixel), a path; 1-D arrays in the first half.
+    #[test]
+    fn placement_walk_outcomes_are_counted() {
+        let world = BBox {
+            x0: -200,
+            y0: -200,
+            x1: 1400,
+            y1: 1400,
+        };
+        let outcome = |rects: Vec<RectRec>, polys: Vec<PolyRec>, rep: Rep| {
+            let scene = placed_scene(vec![(1, rects, polys)], (-50, 10, 0, false, rep), world);
+            let report = render_geometry_styled(
+                &scene,
+                &lattice_request(world, 64, DEFAULT_TILE_SIZE, 1, true, true),
+            )
+            .unwrap();
+            report
+                .stats
+                .place_walks
+                .iter()
+                .enumerate()
+                .filter(|(_, walks)| walks.0 > 0)
+                .map(|(k, walks)| (PLACE_WALK_OUTCOMES[k % 16], 1 + k / 16, walks.1))
+                .collect::<Vec<_>>()
+        };
+        let thin = RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 250,
+            rep: Rep::One,
+        };
+        let lying = RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 250,
+            h: 1,
+            rep: Rep::One,
+        };
+        let wide = PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(0, 0), (100, 0), (0, 100)],
+            rep: Rep::One,
+        };
+        // a 0.8 px bar: its chance alone passes half the members
+        let bold = RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 250,
+            rep: Rep::One,
+        };
+        assert_eq!(
+            outcome(
+                vec![bold],
+                Vec::new(),
+                Rep::Grid {
+                    na: 60,
+                    nb: 2,
+                    va: (30, 0),
+                    vb: (0, 700)
+                }
+            ),
+            vec![("cost", 2, 102)]
+        );
+        // even six members pay for a 0.04 px bar
+        assert_eq!(
+            outcome(
+                vec![thin.clone()],
+                Vec::new(),
+                Rep::Grid {
+                    na: 3,
+                    nb: 2,
+                    va: (4, 0),
+                    vb: (0, 700)
+                }
+            ),
+            vec![("walked", 2, 6)]
+        );
+        assert_eq!(
+            outcome(
+                vec![thin.clone()],
+                Vec::new(),
+                Rep::Grid {
+                    na: 400,
+                    nb: 1,
+                    va: (4, 0),
+                    vb: (0, 0)
+                }
+            ),
+            vec![("walked", 1, 369)]
+        );
+        assert_eq!(
+            outcome(
+                vec![lying],
+                Vec::new(),
+                Rep::Grid {
+                    na: 400,
+                    nb: 1,
+                    va: (4, 0),
+                    vb: (0, 0)
+                }
+            ),
+            vec![("axis_mismatch", 1, 369)]
+        );
+        assert_eq!(
+            outcome(
+                Vec::new(),
+                vec![wide],
+                Rep::Grid {
+                    na: 400,
+                    nb: 1,
+                    va: (4, 0),
+                    vb: (0, 0)
+                }
+            ),
+            vec![("not_subpixel", 1, 369)]
+        );
+    }
+
+    /// A placement array too large for the work bin is deferred; its tiles'
+    /// mini walks (and their fallback) rank and list its members as the
+    /// per-tile walk does.
+    #[test]
+    fn a_deferred_placement_array_draws_as_the_walk_under_the_placement_lattice() {
+        let world = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 1600,
+            y1: 1600,
+        };
+        let leaf = (
+            1,
+            vec![RectRec {
+                layer: 1,
+                dt: 0,
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 30,
+                rep: Rep::One,
+            }],
+            Vec::new(),
+        );
+        let scene = placed_scene(
+            vec![leaf],
+            (
+                0,
+                0,
+                0,
+                false,
+                Rep::Grid {
+                    na: 800,
+                    nb: 800,
+                    va: (2, 0),
+                    vb: (0, 2),
+                },
+            ),
+            world,
+        );
+        let reference = render_geometry_styled_unbinned(
+            &scene,
+            &lattice_request(world, 32, 16, 1, true, false),
+        )
+        .unwrap();
+        assert!(!lit_set(&reference.frame, 32).is_empty());
+        for list in [false, true] {
+            let bin =
+                render_geometry_styled(&scene, &lattice_request(world, 32, 16, 2, true, list))
+                    .unwrap();
+            assert!(
+                bin.stats.work_bin_defer_rep >= 1,
+                "the array was not deferred"
+            );
+            assert_eq!(bin.frame, reference.frame, "list {}", list);
+        }
+    }
+
+    #[test]
+    fn duplicates_of_a_shape_draw_as_one() {
+        // ADAPTIVE_CUT_DENSITY_PLAN §4.2 (review 2026-09-23): the same world
+        // box stored twice on the same path - two single rectangles, a Grid
+        // twice, a Grid and a fragment of it - lights exactly the pixels one
+        // copy lights: the decision is the world box's (or the lattice's),
+        // never the record's or the paint order's. A single rectangle over
+        // a Grid member is another path (its own world-box hash), so the
+        // pair lights the union of the two decisions - the wider one, since
+        // both are centred on the same box - and nothing outside it.
+        let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
+        let draw = |rects: Vec<RectRec>| {
+            lit_set(
+                &render_geometry_styled(&hairline_scene(rects, Vec::new(), Vec::new()), &request)
+                    .unwrap()
+                    .frame,
+                32,
+            )
+        };
+        let rect = |x, y, w, h, rep: Rep| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep,
+        };
+        // 40 single 1.5 x 1.5 px boxes at scattered places (10 units a pixel)
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |span: i64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as i64 % span
+        };
+        let singles: Vec<RectRec> = (0..40)
+            .map(|_| rect(next(300), next(300), 15, 15, Rep::One))
+            .collect();
+        let once = draw(singles.clone());
+        assert!(once.len() > 40, "{} px for 40 boxes", once.len());
+        let mut twice = singles.clone();
+        twice.extend(singles.iter().cloned());
+        assert_eq!(
+            draw(twice),
+            once,
+            "a duplicate single rectangle changed the pixels"
+        );
+        let mut reversed = singles.clone();
+        reversed.reverse();
+        assert_eq!(draw(reversed), once, "the record order changed the pixels");
+        // a row of 8 bars 1.5 px wide at 3 px: itself twice, and with a
+        // fragment of itself (members 3..6, re-based as the index would)
+        let row = rect(
+            13,
+            50,
+            15,
+            200,
+            Rep::Grid {
+                na: 8,
+                nb: 1,
+                va: (30, 0),
+                vb: (0, 0),
+            },
+        );
+        let lattice = draw(vec![row.clone()]);
+        assert_eq!(
+            draw(vec![row.clone(), row.clone()]),
+            lattice,
+            "a duplicate Grid changed the pixels"
+        );
+        let piece = rect(
+            13 + 3 * 30,
+            50,
+            15,
+            200,
+            Rep::Grid {
+                na: 3,
+                nb: 1,
+                va: (30, 0),
+                vb: (0, 0),
+            },
+        );
+        assert_eq!(
+            draw(vec![row.clone(), piece]),
+            lattice,
+            "a fragment over its Grid changed the pixels"
+        );
+        // a single rectangle over member 5: another path - the pair lights
+        // the union of the two decisions, at most 2 px wide, nothing else
+        let member = rect(13 + 5 * 30, 50, 15, 200, Rep::One);
+        let alone = draw(vec![member.clone()]);
+        let pair = draw(vec![row.clone(), member]);
+        assert_eq!(
+            pair,
+            lattice.union(&alone).cloned().collect(),
+            "the pair drew outside its two decisions"
+        );
+        let cols = |set: &BTreeSet<(usize, usize)>| {
+            set.iter()
+                .map(|&(col, _)| col)
+                .filter(|&c| (15..=18).contains(&c))
+                .collect::<BTreeSet<_>>()
+        };
+        assert!(
+            cols(&pair).len() <= 2,
+            "member 5 wider than 2 px: {:?}",
+            cols(&pair)
+        );
+        assert!(cols(&pair).is_superset(&cols(&lattice)));
+    }
+
+    #[test]
+    fn width_first_keeps_a_sub_pixel_rectangle_with_the_chance_it_fills_its_pixel() {
+        // many 0.3 px wires and 0.4 x 0.5 px points at scattered world boxes:
+        // the kept share is the covered share (independent axes), the decision
+        // is the world box's, and zooming out keeps a subset
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as i64
+        };
+        let one = DEVICE_ONE as i64;
+        let (mut kept_wires, mut kept_points, n) = (0usize, 0usize, 40_000usize);
+        for _ in 0..n {
+            let (x, y) = (next() % 1_000_000, next() % 1_000_000);
+            let wire = BBox {
+                x0: x,
+                y0: y,
+                x1: x + (0.3 * one as f64) as i64,
+                y1: y + 5 * one,
+            };
+            let point = BBox {
+                x0: x,
+                y0: y,
+                x1: x + (0.4 * one as f64) as i64,
+                y1: y + (0.5 * one as f64) as i64,
+            };
+            for (b, kept) in [(&wire, &mut kept_wires), (&point, &mut kept_points)] {
+                // one world unit = one device unit here, and half of it zoomed out
+                let draw = |k: i128| {
+                    let sx =
+                        width_first_span(b.x0 as i128 / k, b.x1 as i128 / k, salted_rank(*b, 1));
+                    let sy =
+                        width_first_span(b.y0 as i128 / k, b.y1 as i128 / k, salted_rank(*b, 2));
+                    sx.zip(sy)
+                };
+                match draw(1) {
+                    Some(((a0, a1), _)) => {
+                        *kept += 1;
+                        assert_eq!(a1 - a0, 1, "one pixel across the thin side");
+                    }
+                    None => assert!(
+                        draw(2).is_none(),
+                        "a shape dropped when near came back when zoomed out"
+                    ),
+                }
+            }
+        }
+        let share = |k: usize| k as f64 / n as f64;
+        assert!(
+            (share(kept_wires) - 0.3).abs() < 0.015,
+            "wires kept {}",
+            share(kept_wires)
+        );
+        assert!(
+            (share(kept_points) - 0.2).abs() < 0.015,
+            "points kept {}",
+            share(kept_points)
+        );
+    }
+
+    #[test]
+    fn area_true_draws_no_rim_where_a_shape_runs_off_the_view() {
+        // review 2026-09-22: a polygon around the whole view lit its top row -
+        // the scan stopped at row 0, so the row above looked empty. With the
+        // fill cleared only a rim can light a pixel, and there is none inside
+        let big_poly = vec![(-200, -150), (600, -170), (650, 520), (-230, 480)];
+        let request = |fill: LayerFill, dx: f64, dy: f64| {
+            let mut request = area_true_request(32, 7, 3);
+            request.raster.view = RasterViewBox::new(dx, dy, 320.0 + dx, 320.0 + dy).unwrap();
+            request.layers[0].fill = fill;
+            request
+        };
+        let polys = vec![PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: big_poly,
+            rep: Rep::One,
+        }];
+        let rects = vec![RectRec {
+            layer: 1,
+            dt: 0,
+            x: -170,
+            y: -190,
+            w: 700,
+            h: 690,
+            rep: Rep::One,
+        }];
+        for (rects, polys) in [(rects.clone(), Vec::new()), (Vec::new(), polys.clone())] {
+            let scene = hairline_scene(rects, polys, Vec::new());
+            for (dx, dy) in [(0.0, 0.0), (10.0, 0.0), (0.0, -10.0), (-10.0, 10.0)] {
+                let frame = render_geometry_styled(&scene, &request(LayerFill::Clear, dx, dy))
+                    .unwrap()
+                    .frame;
+                assert!(
+                    lit_set(&frame, 32).is_empty(),
+                    "a rim inside the shape at pan ({}, {})",
+                    dx,
+                    dy
+                );
+                let solid = render_geometry_styled(&scene, &request(LayerFill::Solid, dx, dy))
+                    .unwrap()
+                    .frame;
+                assert_eq!(lit_set(&solid, 32).len(), 32 * 32);
+            }
+        }
+    }
+
+    #[test]
+    fn area_true_keeps_a_sub_pixel_polygon_by_its_own_area() {
+        // review 2026-09-22: 0.8 x 0.8 px triangles lit as many pixels as the
+        // squares of the same box. 900 of each, 3 px apart (no two share a pixel)
+        let (mut squares, mut triangles) = (Vec::new(), Vec::new());
+        for j in 0..30i64 {
+            for i in 0..30i64 {
+                let (x, y) = (10 + i * 30 + (j * 7) % 11, 10 + j * 30 + (i * 5) % 13);
+                squares.push(PolyRec {
+                    layer: 1,
+                    dt: 0,
+                    pts: vec![(x, y), (x + 8, y), (x + 8, y + 8), (x, y + 8)],
+                    rep: Rep::One,
+                });
+                triangles.push(PolyRec {
+                    layer: 1,
+                    dt: 0,
+                    pts: vec![(x, y), (x + 8, y), (x, y + 8)],
+                    rep: Rep::One,
+                });
+            }
+        }
+        let mut request = area_true_request(96, DEFAULT_TILE_SIZE, 1);
+        request.raster.view = RasterViewBox::new(0.0, 0.0, 960.0, 960.0).unwrap();
+        let lit = |polys: Vec<PolyRec>| {
+            lit_set(
+                &render_geometry_styled(&hairline_scene(Vec::new(), polys, Vec::new()), &request)
+                    .unwrap()
+                    .frame,
+                96,
+            )
+            .len()
+        };
+        let (square, triangle) = (lit(squares), lit(triangles));
+        // expected 900 x 0.64 = 576 and 288
+        assert!(
+            (square as f64 - 576.0).abs() < 60.0,
+            "squares lit {}",
+            square
+        );
+        assert!(
+            (triangle as f64 - 288.0).abs() < 45.0,
+            "triangles lit {}",
+            triangle
+        );
+    }
+
+    #[test]
+    fn area_true_pixels_do_not_depend_on_the_tiling() {
+        // the rim reads the rows next to a band, so no tile or worker split
+        // may change a pixel; sub-pixel ranks are world-anchored
+        let rect = |x, y, w, h, rep| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep,
+        };
+        let rects = vec![
+            rect(7, 9, 131, 47, Rep::One),
+            rect(
+                150,
+                150,
+                3,
+                90,
+                Rep::Grid {
+                    na: 40,
+                    nb: 1,
+                    va: (4, 0),
+                    vb: (0, 0),
+                },
+            ),
+            rect(
+                20,
+                200,
+                2,
+                2,
+                Rep::Grid {
+                    na: 30,
+                    nb: 30,
+                    va: (3, 0),
+                    vb: (0, 3),
+                },
+            ),
+            rect(
+                233,
+                17,
+                61,
+                29,
+                Rep::Grid {
+                    na: 2,
+                    nb: 5,
+                    va: (33, 0),
+                    vb: (0, 41),
+                },
+            ),
+        ];
+        let polys = vec![PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(141, 61), (311, 97), (253, 303), (171, 211)],
+            rep: Rep::One,
+        }];
+        let paths = vec![PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(15, 120), (120, 120), (120, 190)],
+            hw: 6,
+            es: 3,
+            ee: 0,
+            rep: Rep::One,
+        }];
+        let scene = hairline_scene(rects, polys, paths);
+        let reference =
+            render_geometry_styled(&scene, &area_true_request(96, DEFAULT_TILE_SIZE, 1))
+                .unwrap()
+                .frame;
+        assert!(!lit_set(&reference, 96).is_empty());
+        for (tile, workers) in [(7u16, 1u16), (16, 3), (5, 4)] {
+            let frame = render_geometry_styled(&scene, &area_true_request(96, tile, workers))
+                .unwrap()
+                .frame;
+            assert_eq!(frame, reference, "tile {} workers {}", tile, workers);
+        }
     }
 
     #[test]
@@ -9505,6 +16243,11 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers: 3,
             tile_size: DEFAULT_TILE_SIZE,
+            area_true: false,
+            width_c: 1.0,
+            survivor_list: true,
+            place_lattice: false,
+            density_stack: false,
         };
         let report = render_geometry_occupancy(&scene, &raster_request).unwrap();
         raster_request.workers = 1;
@@ -9581,6 +16324,11 @@ mod tests {
             foreground: [255, 255, 255, 255],
             workers,
             tile_size,
+            area_true: false,
+            width_c: 1.0,
+            survivor_list: true,
+            place_lattice: false,
+            density_stack: false,
         }
     }
 

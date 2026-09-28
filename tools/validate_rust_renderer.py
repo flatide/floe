@@ -59,6 +59,7 @@ def _stub_margin_viewer(worker, frame_cache, viewport=(858, 802)):
     v.lod_on = v.frames_on = v.labels_on = True
     v.label_font_px = 14
     v.frame_cache_on = frame_cache
+    v.margin_on = True
     v.abstract = False
     v._layers_arg = lambda: None
     v._viewport_size = lambda: viewport
@@ -86,9 +87,9 @@ class WorkerContractTests(unittest.TestCase):
                 goto="1,2,700", stream_kb=None, stream_target_ms=500,
                 label_font_px=14, perf_baseline=False, lod="on",
                 frames="on", labels="on", refinement="on",
-                frame_cache="on", render_debug=False, multi=False,
-                drc=None, detail=detail, depth=depth, dump=False,
-                thin=thin,
+                frame_cache="on", margin="off", render_debug=False,
+                multi=False, drc=None, detail=detail, depth=depth,
+                dump=False, thin=thin,
             )
             with mock.patch.object(cli.os.path, "isfile", return_value=True), \
                     mock.patch.object(cli, "_cache_ready", return_value=True), \
@@ -131,12 +132,12 @@ class WorkerContractTests(unittest.TestCase):
         v.cache = SimpleNamespace(is_jobdeck=False)
         v.thin_mode = "auto"
         auto = gui.Viewer._render_key(v, "live")
-        v.thin_mode = "cull"
-        self.assertEqual(gui.Viewer._render_key(v, "live"), auto,
-                         "auto on a layout is cull")
         v.thin_mode = "keep"
         keep = gui.Viewer._render_key(v, "live")
-        self.assertNotEqual(keep, auto)
+        self.assertEqual(keep, auto,
+                         "auto on a layout is keep (2026-09-23)")
+        v.thin_mode = "cull"
+        self.assertNotEqual(gui.Viewer._render_key(v, "live"), auto)
         v.thin_mode = "auto"
         v.cache = SimpleNamespace(is_jobdeck=True)
         self.assertEqual(gui.Viewer._render_key(v, "live"), keep,
@@ -179,7 +180,8 @@ class WorkerContractTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(viewer.detail, 2)
         self.assertEqual(viewer.depth_value, 999)
-        self.assertFalse(viewer.lod_on)
+        # lod= is retired from the viewer (2026-09-22): accepted, ignored
+        self.assertTrue(viewer.lod_on)
         self.assertFalse(viewer.frames_on)
         self.assertFalse(viewer.labels_on)
         self.assertEqual(viewer.label_font_px, 18)
@@ -240,16 +242,20 @@ class WorkerContractTests(unittest.TestCase):
             src=None, hairline=None, thin_um=None, goto=None,
             stream_kb=None, stream_target_ms=500, label_font_px=14,
             perf_baseline=True, lod="on", frames="on", labels="on",
-            refinement="on", frame_cache="on", render_debug=False,
-            multi=True, drc=None, detail="high", depth=999, dump=False,
+            refinement="on", frame_cache="on", margin="on",
+            render_debug=False, multi=True, drc=None, detail="high",
+            depth=999, dump=False,
         )
         with mock.patch("floe.gui.run_viewer") as run_viewer:
             cli.cmd_view(args)
         options = run_viewer.call_args.kwargs
-        self.assertFalse(options["lod"])
+        # the viewer has no LOD toggle any more (2026-09-22)
+        self.assertNotIn("lod", options)
         self.assertFalse(options["frames"])
         self.assertFalse(options["labels"])
         self.assertFalse(options["frame_cache"])
+        # frame_cache off already stops the margin; the flag itself stays
+        self.assertTrue(options["margin"])
         self.assertEqual(options["stream_kb"], 0)
         self.assertEqual(options["detail"], 2)
         self.assertEqual(options["depth"], 999)
@@ -261,11 +267,50 @@ class WorkerContractTests(unittest.TestCase):
             src=None, hairline=None, thin_um=None, goto=None,
             stream_kb=4096, stream_target_ms=500, label_font_px=14,
             perf_baseline=False, lod="off", frames="off", labels="off",
-            refinement="off", frame_cache="off", render_debug=False,
-            multi=True, drc=None, detail="high", depth=999, dump=False,
+            refinement="off", frame_cache="off", margin="on",
+            render_debug=False, multi=True, drc=None, detail="high",
+            depth=999, dump=False,
         )
         with self.assertRaisesRegex(SystemExit, "conflicts"):
             cli.cmd_view(args)
+
+    def test_margin_option_turns_the_prefetch_alone_off(self):
+        """--margin off (user request 2026-09-27): the background margin
+        prefetch alone stays off - retained-frame pan reuse (frame_cache)
+        stays on - so a margin's landing can be told apart from the frame
+        itself. It is a process option (an independent instance)."""
+        from floe import cli
+        from floe.gui import Viewer
+
+        args = SimpleNamespace(
+            src=None, hairline=None, thin_um=None, goto=None,
+            stream_kb=None, stream_target_ms=500, label_font_px=14,
+            perf_baseline=False, lod="on", frames="on", labels="on",
+            refinement="on", frame_cache="on", margin="off",
+            render_debug=False, multi=True, drc=None, detail="high",
+            depth=999, dump=False,
+        )
+        with mock.patch("floe.gui.run_viewer") as run_viewer:
+            cli.cmd_view(args)
+        options = run_viewer.call_args.kwargs
+        self.assertFalse(options["margin"])
+        self.assertTrue(options["frame_cache"])
+        # off is the default (user decision 2026-09-27): a launch without
+        # the option still forwards to the single instance; on is the
+        # process option that opens an independent one
+        args.multi = False
+        args.margin = "on"
+        with mock.patch("floe.gui.run_viewer") as run_viewer, \
+                mock.patch("floe.instance.display_key") as display_key:
+            cli.cmd_view(args)
+        self.assertTrue(run_viewer.call_args.kwargs["margin"])
+        self.assertFalse(display_key.called)
+        rust = SimpleNamespace(supports_margin_prefetch=True)
+        v = _stub_margin_viewer(rust, True)
+        self.assertTrue(Viewer._margin_enabled(v))
+        v.margin_on = False
+        self.assertFalse(Viewer._margin_enabled(v))
+        self.assertTrue(v.frame_cache_on)
 
     def test_rust_gui_startup_does_not_import_klayout(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1036,8 +1081,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
             # the page hairline policy rides with every frame; a plain
-            # worker's default is the performance policy
-            self.assertIn("thin=cull", commands[0])
+            # worker's default is keep since 2026-09-23 (it was cull)
+            self.assertIn("thin=keep", commands[0])
             self.assertIn("font_px=22", commands[0])
             # the interactive default skips the PNG codec on both sides
             self.assertIn("frame_format=raw", commands[0])
@@ -1095,15 +1140,20 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "rep_page_level": "2", "rep_level": "7",
                 "fit_pct": "283", "fit_cull": "1", "fit_over": "0",
                 "fit_thin": "3", "fit_full_pct": "850", "fit_none_pct": "400",
+                "fit_fixed": "1", "fit_redecided": "0",
                 "sub_cut_boxes": "1234", "sub_cut_box_over": "5",
                 "sub_cut_box_level": "1", "sub_cut_box_unsure": "2",
-                "shape_cut": "4392",
+                "shape_cut": "4392", "shape_cut_max": "1",
                 "stored_rep_points": "16384", "stored_rep_tested": "65536",
                 "stored_rep_limited": "1",
                 "stored_rep_nodes": "128", "stored_rep_proxies": "64",
                 "stored_rep_bytes": "8192", "stored_rep_pixels": "64000",
                 "stored_rep_spans": "100", "stored_rep_painted_pixels": "8000",
                 "once_tiles": "5", "once_passes": "400", "once_items": "77",
+                # the density stack's lit/top/lower/covered/claimed pixels, pass
+                # 2's pages planned/in_hand/decoded/over_budget, its times and bins
+                "density_stack": "90/40/30/1000/200", "density_pages": "12/7/4/1",
+                "density_us": "100/20/30/4/50", "density_bin": "600/1/0",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -1120,9 +1170,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "rep_page_level": 2, "rep_level": 7,
                 "fit_pct": 283, "fit_cull": 1, "fit_over": 0,
                 "fit_thin": 3, "fit_full_pct": 850, "fit_none_pct": 400,
+                "fit_fixed": 1, "fit_redecided": 0,
                 "sub_cut_boxes": 1234, "sub_cut_box_over": 5,
                 "sub_cut_box_level": 1, "sub_cut_box_unsure": 2,
-                "shape_cut": 4392,
+                "shape_cut": 4392, "shape_cut_max": 1,
                 "stored_rep_points": 16384, "stored_rep_tested": 65536,
                 "stored_rep_limited": 1,
                 "stored_rep_nodes": 128, "stored_rep_proxies": 64,
@@ -1174,6 +1225,13 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["member_paints"], 30)
             self.assertEqual((result["once_full_tiles"], result["once_passes_skipped"],
                               result["once_items_skipped"]), (5, 400, 77))
+            self.assertEqual(result["density_stack"], {
+                "lit": 90, "top": 40, "lower": 30, "covered": 1000, "claimed": 200})
+            self.assertEqual(result["density_pages"], {
+                "planned": 12, "in_hand": 7, "decoded": 4, "over_budget": 1})
+            self.assertEqual(result["density_us"], {
+                "plan2_us": 100, "scene2_us": 20, "collect_us": 30, "regions_us": 4, "decode2_us": 50})
+            self.assertEqual(result["density_bin"], {"items": 600, "deferred": 1, "overflow": 0})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
@@ -1200,6 +1258,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                         "stored_rep_nodes", "stored_rep_proxies", "stored_rep_bytes",
                         "stored_rep_pixels", "stored_rep_spans", "stored_rep_painted_pixels"):
                 self.assertEqual(partial["plan_culls"][key], 0)
+            # a frame without the fields did not stack its density
+            self.assertIsNone(partial["density_stack"])
+            self.assertIsNone(partial["density_pages"])
+            self.assertIsNone(partial["density_us"])
+            self.assertIsNone(partial["density_bin"])
             self.assertEqual(partial["refining"], 1)
             self.assertIn(9, worker._jobs)
             self.assertFalse(os.path.exists(partial_path))

@@ -121,6 +121,9 @@ cache hit page는 첫 frame에 전부 포함되어 warm 재방문에서 page 수
 daemon이 보관하는 label-free geometry frame(상태·배율당 1장, 최대 3장,
 `FLOE_RUST_RETAINED_MB` 256MiB)의 tile 재사용으로 처리한다(F2R-16/17/18/20);
 전량 재사용이면 page plan·decode를 생략하고 라벨만 다시 계획한다(F2R-21).
+예산 맞춤(SPEC-PLANNER)은 배율마다 한 번 결정되어 뷰포트·여백·팬 프레임이 같은
+페이지를 보이고, 결정을 감당하지 못하는 여백(`bg=on`)은 그리지 않고 `dropped`로
+답한다 — 여백은 뷰포트가 이미 보이는 대로여야 하기 때문이다(2026-09-27).
 
 동결된 KLayout 셸(oracle)과 floe2의 기본 end-to-end renderer를 같은 조건으로
 비교할 때는 두 명령 모두 같은 `--perf-baseline`을 사용한다. 이 preset은 refinement, exact final
@@ -134,6 +137,8 @@ PNG publish는 유지한다. detail/depth/좌표/window는 workload이므로 명
   --detail high --depth 999 --perf-baseline
 ```
 
-개별 제어는 `--refinement on|off`, `--frame-cache on|off`, `--lod on|off`,
+개별 제어는 `--refinement on|off`, `--frame-cache on|off`, `--margin on|off`(여백
+준비만, **기본 off**(사용자 결정 2026-09-27: 그려진 뒤 무엇도 덧그려지지 않게); 팬 재사용은 유지;
+on은 독립 인스턴스로 뜬다), `--lod on|off`,
 `--frames on|off`, `--labels on|off`다. `--refinement off`는 floe의 VFS stream을
 0으로, floe2의 miss round를 single all-page batch로 바꾼다.

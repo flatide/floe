@@ -102,6 +102,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "occupancy" {
         return vfs::occupancy_cmd(&args[2..]);
     }
+    if args.len() >= 3 && args[1] == "bvh" {
+        return vfs::bvh_cmd(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "vfsd" {
         return vfs::vfsd_cmd(&args[2..]);
     }
@@ -127,9 +130,11 @@ fn main() {
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
              [--depth N] [--explain 1] [--page-hairline 0|1] [--sub-cut-wash 0|1] [--page-reps 0|1] [--sub-cut-box 0|1] [--sub-cut-box-px N] [--decode-budget-mb N] \
-             [--summary-layers a/b,..] [--prune-summary 0|1]\n       \
+             [--summary-layers a/b,..] [--prune-summary 0|1] \
+             [--density-probe 1] [--density-storage 1] [--selection-meta 1]\n       \
              floe-index occupancy <outdir> [--layer L/D] [--level N] \
              [--dump]\n       \
+             floe-index bvh <outdir> --cell NAME  (TSV dump of a cell's child BVH: nodes and leaf placements)\n       \
              floe-index drc <results.db> [out.tray] \
              [--pack] [--jobs N]"
         );

@@ -44,7 +44,8 @@ DEBOUNCE_MS = 120
 # view is a live working set - merged variants must engage there
 # without a keypress. The planner's fidelity/worth gates and the
 # probe exactness rule keep it self-limiting; 'l' still toggles.
-DEFAULT_LOD = True
+# LOD is retired from the viewer (user decision 2026-09-22): no toggle, off
+DEFAULT_LOD = False
 DEFAULT_FRAMES = True
 DEFAULT_LABELS = True
 DEFAULT_LABEL_FONT_PX = 14
@@ -1127,7 +1128,7 @@ class Viewer:
                  detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                  frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
                  label_font_px=DEFAULT_LABEL_FONT_PX,
-                 frame_cache=True,
+                 frame_cache=True, margin=False,
                  stream_kb=None, stream_target_ms=500,
                  render_debug=False, thin="auto"):
         self.server_sock = server_sock
@@ -1184,9 +1185,11 @@ class Viewer:
         if HAS_DENSITY_COVERAGE:
             self.coverage_on = False
         # Explicit request controls; no shell environment is consulted.
-        self.lod_on = bool(lod)
+        # retired (2026-09-22): the `lod` argument is accepted and ignored
+        self.lod_on = False
         # the page hairline policy (review 2026-09-11): "auto" = keep
-        # for a jobdeck, cull for a layout; "keep" / "cull" explicit
+        # for every source (2026-09-23 user decision: a plain layout
+        # too; it was cull); "keep" / "cull" explicit
         # (View > keep thin shapes, --thin, a forwarded thin=)
         self.thin_mode = thin if thin in ("auto", "keep", "cull") else "auto"
         self.frames_on = bool(frames)
@@ -1200,6 +1203,10 @@ class Viewer:
         # Exact settled-frame reuse is a Rust optimization.  Stable floe
         # accepts the same control so A/B command lines remain identical.
         self.frame_cache_on = bool(frame_cache)
+        # --margin (default off, user decision 2026-09-27): the background
+        # margin prefetch alone; pan reuse stays either way. Off, every pan
+        # and zoom renders a viewport frame and nothing lands after it.
+        self.margin_on = bool(margin)
         self._margin_max_px = _env_int(
             "FLOE_MARGIN_MAX_MPIX", MARGIN_MAX_MPIX, 1, 4096) << 20
         self.stream_kb = stream_kb
@@ -1647,7 +1654,7 @@ class Viewer:
         main.pack_start(self.overlay, True, True, 0)
 
         # Two-tier status area. Upper: cursor/interaction plus persistent
-        # view/depth/cut/cov/lod state. Lower: retained render/performance
+        # view/depth/cut/cov state. Lower: retained render/performance
         # plus live rendering/refinement progress. Mouse motion only
         # replaces the upper-left text, never the lower render details.
         sbars = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -1708,6 +1715,8 @@ class Viewer:
                               self._on_incoming)
         GLib.timeout_add(POLL_MS, self._poll)
 
+        # the load clock (see _load_note): from here to the first frame
+        self._load_marks = {"t0": time.monotonic()} if cache is not None else None
         self._apply_cache(cache)
         if show:
             self.window.show_all()
@@ -1878,6 +1887,10 @@ class Viewer:
         self._sync_label_font_capability()
         self._sync_abstract_capability()
         if cache is not None:
+            marks = getattr(self, "_load_marks", None)
+            if marks is not None and "cache" not in marks:
+                # the cache, the layer panel: done; the service opens next
+                marks["cache"] = time.monotonic()
             self.worker = make_render_worker(
                 cache, stream_kb=self.stream_kb,
                 stream_target_ms=self.stream_target_ms,
@@ -1904,8 +1917,13 @@ class Viewer:
         if hide is not None:
             hide()
         if error is not None:
+            self._load_marks = None
             self._set_live_status("render service open failed: %s" % error)
             return False
+        marks = getattr(self, "_load_marks", None)
+        if marks is not None and "cache" in marks and "service" not in marks:
+            marks["service"] = time.monotonic()
+            marks["open"] = getattr(worker, "open_report", None) or {}
         self._sync_label_font_capability()
         self._sync_abstract_capability()
         if self._fit_after_worker_start:
@@ -2043,6 +2061,8 @@ class Viewer:
                 and not self.cache.is_stale() \
                 and getattr(self.cache, "ids", None) == ids:
             return None
+        # the load clock (see _load_note): from the file's selection
+        self._load_marks = {"t0": time.monotonic()}
         # the loading banner from the first blocking step until the
         # render service has opened (_worker_start_finished); a
         # refusal or an exception before that takes it down here
@@ -2376,8 +2396,6 @@ class Viewer:
                 self._set_depth(int(depth), redraw=False)
             except ValueError:
                 pass
-        if opts.get("lod") in ("on", "off"):
-            self._set_lod(opts["lod"] == "on", redraw=False)
         if opts.get("thin") in ("auto", "keep", "cull"):
             self._set_thin(opts["thin"], redraw=False)
         frames = opts.get("frames")
@@ -2971,8 +2989,8 @@ class Viewer:
         view and could not cancel it), and --frame-cache off /
         --perf-baseline switch every frame-reuse path off together so
         backend-neutral timings stay comparable."""
-        return bool(self.frame_cache_on) and bool(getattr(
-            self.worker, "supports_margin_prefetch", False))
+        return bool(self.frame_cache_on) and bool(self.margin_on) and bool(
+            getattr(self.worker, "supports_margin_prefetch", False))
 
     def _covered(self, bbox, scope):
         """True when the current frame still serves this view: same
@@ -3518,9 +3536,12 @@ class Viewer:
                     cut = ""
                     if res.get("cut_um"):
                         cut = ", cut<%.3gum" % res["cut_um"]
-                        # thin keep since 0.12.173: each shape by its smaller side
-                        if (res.get("plan_culls") or {}).get("shape_cut"):
-                            cut += " (min side)"
+                        # thin keep: each shape by its larger side (0.12.214,
+                        # the hairlines stay) or, under FLOE_RUST_SHAPE_CUT=min,
+                        # by its smaller side (0.12.173..0.12.213)
+                        culls = res.get("plan_culls") or {}
+                        if culls.get("shape_cut"):
+                            cut += " (larger side)" if culls.get("shape_cut_max") else " (min side)"
                     fit = (res.get("plan_culls") or {})
                     if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
                             or fit.get("fit_thin")):
@@ -3548,18 +3569,19 @@ class Viewer:
                             cut += " %s to fit budget" % ", ".join(parts)
                         else:
                             cut += " x%.3g to fit budget" % factor
-                        cut += "%s%s" % (
+                        cut += "%s%s%s" % (
                             ", hairlines culled" if fit.get("fit_cull") else "",
-                            ", STILL OVER" if fit.get("fit_over") else "")
+                            ", STILL OVER" if fit.get("fit_over") else "",
+                            # the fit remembered for this scale did not hold
+                            # this frame: decided anew, the picture may have
+                            # changed (SPEC-PLANNER 2026-09-27)
+                            " (refit)" if fit.get("fit_redecided") else "")
                     drawn = ""
                     if res.get("drawn") is not None:
                         drawn = ", ~%s drawn" % fmt_count(res["drawn"])
                     refin = ""
                     if res.get("refining"):
                         refin = ", refining %d" % res["refining"]
-                    lod = ""
-                    if res.get("lod"):
-                        lod = ", lod %d" % res["lod"]
                     text = ""
                     if res.get("plan_ms") is not None:
                         # "frontier", not "frames": the planner's
@@ -3662,13 +3684,13 @@ class Viewer:
                         # planner verdicts (field 2026-09-10): pages
                         # culled by size/hairline, page-BVH nodes,
                         # child-BVH nodes pruned, child cells omitted,
-                        # layer skips, washes, LOD swaps, thin frames
+                        # layer skips, washes, thin frames
                         text += (", cut pages %s/pbvh %s/cbvh %s/cells %s"
-                                 ", layer %s, washed %s, lod %s, thin %s"
+                                 ", layer %s, washed %s, thin %s"
                                  % tuple(fmt_count(culls.get(k, 0)) for k in (
                                      "pages_size", "page_bvh", "child_bvh",
                                      "children_size", "layer", "washed",
-                                     "lod_swapped", "thin_frames")))
+                                     "thin_frames")))
                         if culls.get("thin_pages"):
                             # all-thin pages the page hairline rule
                             # would have dropped (2026-09-10): their
@@ -3788,12 +3810,21 @@ class Viewer:
                     # tiles = plan total (resident pages included);
                     # +new = pages actually shipped for this view
                     # (cache misses, summed over its stream rounds)
-                    mode = "live (%d tiles, +%d new, %d ms" \
-                           "%s%s%s%s%s%s%s)" \
-                        % (res["tiles"], res.get("new", 0) or 0,
+                    # the density stack (diagnostic FLOE_RUST_DENSITY_STACK=top,
+                    # CUT_DENSITY_DESIGN §10.10): the frame stacked its density.
+                    # First in the line - the bar is ellipsized at its end,
+                    # and next to the cut it fell off (field 2026-09-26)
+                    stack = (" [density: top + empty]"
+                             if res.get("density_stack") is not None else "")
+                    mode = "live%s (%d tiles, +%d new, %d ms" \
+                           "%s%s%s%s%s%s)" \
+                        % (stack, res["tiles"], res.get("new", 0) or 0,
                            res["ms"], split,
                            self._depth_note(used), cut, drawn,
-                           refin, lod, text)
+                           refin, text)
+                    # the first frame after a load also says how long the
+                    # load took (the frame's own ms is only its render)
+                    mode = self._load_note(res) + mode
                 # Also keep a terminal performance log (only the settled
                 # frame prints; refining rounds would spam every ~0.4s).
                 # The same line now remains in the persistent lower bar.
@@ -3819,6 +3850,34 @@ class Viewer:
         elif kind == "error":
             self._clear_pending()
             self._set_live_status("error: %s" % res.get("msg"))
+        elif kind == "dropped":
+            # a margin the scale's budget fit does not hold (renderd,
+            # reason=fit): nothing lands, the viewport stays as drawn and
+            # pans here render; _margin_pending keeps the in-flight guard
+            # until the next user render, as for a superseded margin
+            pending = getattr(self, "_margin_pending", None)
+            if pending is not None and pending[0] == res.get("gen"):
+                self._margin_debug("dropped gen=%d: %s" % (
+                    res["gen"], res.get("reason") or "?"))
+
+    def _load_note(self, res):
+        """The first settled frame after a load: the time from the file's
+        selection to this frame, split into the cache and layer panel, the
+        render service's open (renderd's own cache open in brackets) and the
+        first frame (field 2026-09-22: a 10 s service open showed as the
+        frame's 52 ms). Empty for every other frame."""
+        marks = getattr(self, "_load_marks", None)
+        if not marks or "service" not in marks or res.get("refining"):
+            return ""
+        self._load_marks = None
+        now = time.monotonic()
+        service = "service %.1f s" % (marks["service"] - marks["cache"])
+        opened = (marks.get("open") or {}).get("renderd_open_ms")
+        if opened is not None:
+            service += " [renderd open %.1f s]" % (opened / 1000.0)
+        return "loaded in %.1f s (cache %.1f s + %s + first frame %.2f s) · " % (
+            now - marks["t0"], marks["cache"] - marks["t0"], service,
+            now - marks["service"])
 
     def _set_status(self, bbox, mode):
         w_um = (bbox[2] - bbox[0]) * self.dbu
@@ -4425,8 +4484,6 @@ class Viewer:
             self._toggle_abstract()
         elif name == "v" and HAS_DENSITY_COVERAGE:
             self._toggle_coverage()
-        elif name == "l":
-            self._set_lod(not self.lod_on)
         elif name == "b":
             self._set_mono(not self._mono)
         elif name == "e":
@@ -4490,7 +4547,6 @@ class Viewer:
             if HAS_DENSITY_COVERAGE:
                 lbl += " · cov:%s" % (
                     "on" if self.coverage_on else "off")
-            lbl += " · lod:%s" % ("on" if self.lod_on else "off")
             # the page hairline policy in force: cull = thin shapes
             # may be omitted at wide views (plain layout default)
             lbl += " · thin:%s" % self._effective_thin()
@@ -4548,23 +4604,16 @@ class Viewer:
         self.coverage_on = not self.coverage_on
         self._on_depth()
 
-    def _set_lod(self, enabled, redraw=True):
-        enabled = bool(enabled)
-        changed = enabled != self.lod_on
-        self.lod_on = enabled
-        if changed and redraw:
-            self._on_depth()
-
     def _effective_thin(self):
         """The page hairline policy in force: the explicit mode, or
-        for auto the source's default - a jobdeck keeps its all-thin
-        pages (mask data is hairlines), a layout culls them at wide
-        views (the performance policy)."""
+        for auto keep - a jobdeck's all-thin pages (mask data is
+        hairlines) and, since 2026-09-23 (user decision), a plain
+        layout's too; cull (all-thin pages dropped at wide views, the
+        former layout policy) only when asked for."""
         mode = getattr(self, "thin_mode", "auto")
         if mode in ("keep", "cull"):
             return mode
-        cache = getattr(self, "cache", None)
-        return "keep" if getattr(cache, "is_jobdeck", False) else "cull"
+        return "keep"
 
     def _set_thin(self, mode, redraw=True):
         """View > keep thin shapes / --thin / a forwarded thin=: switch
@@ -4805,17 +4854,11 @@ class Viewer:
             btns.append(b)
             row.pack_start(b, False, False, 0)
         note = Gtk.Label()
-        merged_hint = (
-            "merged LOD is generated by floe2 index unless --no-lod"
-            if APP == "floe2" else
-            "when the cache carries them - floe index --merge-only "
-            "upgrades old caches")
         note.set_markup(
             "<small>lower detail hides finer features from live "
-            "renders;\nareas below the cut draw as merged outlines "
-            "instead\n(%s). snap/pick/clip stay "
-            "exact.\nthe status line shows the physical cut "
-            "(cut&lt;0.35um).\nkeys: d = this dialog</small>" % merged_hint)
+            "renders;\nshapes below the cut are not drawn. snap/pick/clip "
+            "stay exact.\nthe status line shows the physical cut "
+            "(cut&lt;0.35um).\nkeys: d = this dialog</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
         ok = Gtk.Button(label="ok")
@@ -5156,8 +5199,6 @@ class Viewer:
         if HAS_DENSITY_COVERAGE:
             check(m, "density coverage\tv", self._toggle_coverage,
                   lambda: self.coverage_on)
-        check(m, "LOD\tl", lambda: self._set_lod(not self.lod_on),
-              lambda: self.lod_on)
         # the page hairline policy (review 2026-09-11): a plain layout
         # may omit thin shapes at wide views for speed; the mask
         # policy keeps them (a jobdeck's default)
@@ -5172,9 +5213,9 @@ class Viewer:
         thin_menu.connect("show", lambda *_: self._menu_sync())
         thin_menu.connect("deactivate", lambda *_: self._restore_keys())
         m.append(thin_root)
-        for mode, label in (("auto", "auto (jobdeck keep, layout cull)"),
-                            ("keep", "keep (mask policy)"),
-                            ("cull", "cull (layout policy, faster)")):
+        for mode, label in (("auto", "auto (keep)"),
+                            ("keep", "keep (thin shapes as hairlines)"),
+                            ("cull", "cull (drop all-thin pages, faster)")):
             check(thin_menu, label,
                   (lambda mode=mode: self._set_thin(mode)),
                   (lambda mode=mode:
@@ -9117,7 +9158,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
                label_font_px=DEFAULT_LABEL_FONT_PX,
-               frame_cache=True,
+               frame_cache=True, margin=False,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
                thin="auto"):
@@ -9129,7 +9170,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
     viewer = Viewer(cache, server_sock, goto=goto, detail=detail,
                     dump=dump, depth=depth, lod=lod, frames=frames,
                     labels=labels, label_font_px=label_font_px,
-                    frame_cache=frame_cache,
+                    frame_cache=frame_cache, margin=margin,
                     stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
                     render_debug=render_debug, thin=thin)

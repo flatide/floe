@@ -23,7 +23,7 @@ const RENDER_HELP: &str = "Usage: floe2-web render SOURCE [OPTIONS]
   --level N,N,...             Jobdeck: load these mask levels only
   --depth N                  0=top, 999/omit=full
   --detail exact|low|medium|high  Size cut 0/5/3/1 px (default exact)
-  --thin auto|keep|cull       Auto=layout cull, jobdeck keep
+  --thin auto|keep|cull       Auto=keep for both layouts and jobdecks
   --frames --labels          Enable these overlays (default off)
   --label-font-px N          6..96 (default 14)
   --out FILE                Default view.png; atomic PNG publication

@@ -512,8 +512,49 @@ pub fn frame_band(rect: &BBox, px_per_dbu: f64) -> u8 {
 /// variants per cell.
 pub type WsKey = (u32, u32);
 
+/// A budget fit's decision (thin_to_budget), kept per scale so every frame
+/// at that scale thins the same way (SPEC-PLANNER, 2026-09-27: the margin
+/// frame, a wider view, ended its prefix earlier and the picture changed when
+/// it replaced the viewport's): the cut the plan was made at and the
+/// `fit_priority` of the last page kept - a page is kept when its priority is
+/// at most this, whatever the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixedFit {
+    pub cut_dbu: i64,
+    pub class: u32,
+    pub phase: u32,
+    pub page: u32,
+}
+
+impl FixedFit {
+    /// The decision a plan within its budget makes: every page kept (no
+    /// priority exceeds this threshold). Recorded too (2026-09-27: a frame
+    /// that fit whole left no decision, so the wider frame after it decided
+    /// its own fit and the picture changed when it landed), so that a wider
+    /// frame under it either fits whole as well or decides anew.
+    pub fn everything(cut_dbu: i64) -> Self {
+        Self {
+            cut_dbu,
+            class: 0,
+            phase: u32::MAX,
+            page: u32::MAX,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HierOpts {
+    /// A budget fit decided before (FixedFit): applied as it is when the
+    /// plan fits the budget under it, else the fit is decided anew and
+    /// HierStats::fit_redecided says so. None: decide.
+    pub fixed_fit: Option<FixedFit>,
+    /// The world regions the plan is for, in place of the request's one
+    /// view (empty: the view): the top cell is seeded with each of them, so
+    /// the K-box clip regions descend from the regions and what lies
+    /// between them is culled from the start (CUT_DENSITY_DESIGN §10.10: the
+    /// density stack's pass 2 plans the space the originals left). `k_boxes`
+    /// should hold them all.
+    pub regions: Vec<BBox>,
     /// localview boxes kept per WsKey before least-waste merging
     pub k_boxes: usize,
     /// pts reps at or below this emit a full (rebased) rep - above
@@ -627,11 +668,14 @@ pub struct HierOpts {
 /// the owning cell, the layer for pages, the record id (page id, BVH
 /// node, placement index), the box in cell-local dbu, its size
 /// metrics (page max_w / max_h / max_min, a box's w / h / min side)
-/// and the member count for pages.
+/// and the member count for pages. `owner` is the working-set cell
+/// whose walk judged it (a child row's `cell` is the CHILD), so a
+/// verdict can be multiplied by that cell's instances in view.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExplainRow {
     pub kind: &'static str,
     pub verdict: &'static str,
+    pub owner: WsKey,
     pub cell: u32,
     pub layer_idx: Option<u32>,
     pub id: u64,
@@ -645,6 +689,8 @@ pub struct ExplainRow {
 impl Default for HierOpts {
     fn default() -> HierOpts {
         HierOpts {
+            fixed_fit: None,
+            regions: Vec::new(),
             k_boxes: 4,
             pts_full_rep: 8192,
             pts_enum_budget: 200_000,
@@ -753,8 +799,10 @@ pub struct HierStats {
     pub sub_cut_box_level: u32,
     /// the per-shape cut the plan was made with (ViewReq::shape_cut), in
     /// dbu; 0 = none. The raster drops the shapes whose smaller side is
-    /// under it from the pages it draws.
+    /// under it from the pages it draws - or, with `shape_cut_max`
+    /// (ViewReq::shape_cut_max), whose larger side is.
     pub shape_cut: u64,
+    pub shape_cut_max: bool,
     /// representatives (the page frontier, ViewReq::page_reps): cut
     /// pages kept (sparse, drawn as pixels) / washed (dense), cut
     /// placements washed or expanded, BVH subtrees pruned because no
@@ -794,6 +842,12 @@ pub struct HierStats {
     pub fit_thin: u32,
     pub fit_full_pct: u32,
     pub fit_none_pct: u32,
+    /// the fit's decision (FixedFit::everything when the plan fit whole;
+    /// None: no budget fit ran), whether a decision given was applied, and
+    /// whether one given did not fit and the fit was decided anew
+    pub fit_decision: Option<FixedFit>,
+    pub fit_fixed: bool,
+    pub fit_redecided: bool,
     /// dots emitted for representative cut placements (kept members
     /// in view, before the layer fan-out) and for cut child-BVH
     /// subtrees within the dot pitch (one each)
@@ -1097,7 +1151,14 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         return plan_hier_as_asked(v, req, opts, 0);
     }
     if opts.fit_thin {
-        return plan_hier_thinned(v, req, opts);
+        if let Some(fixed) = opts.fixed_fit {
+            if let Some(plan) = plan_hier_fixed(v, req, opts, fixed) {
+                return plan;
+            }
+        }
+        let mut plan = plan_hier_thinned(v, req, opts);
+        plan.stats.fit_redecided = opts.fixed_fit.is_some();
+        return plan;
     }
     let mut passes = 1u32;
     let asked = plan_hier_as_asked(v, req, opts, req.decode_budget);
@@ -1181,6 +1242,7 @@ fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         let bytes = unique_page_memory(v, &plan);
         if at == 0 && bytes <= req.decode_budget {
             plan.stats.fit_passes = passes;
+            plan.stats.fit_decision = Some(FixedFit::everything(req.cut_dbu));
             return plan;
         }
         let mut used = at;
@@ -1206,6 +1268,9 @@ fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         };
         if !thin_to_budget(v, &mut plan, key, req.cut_dbu, req.decode_budget) {
             break;
+        }
+        if let Some(decision) = plan.stats.fit_decision.as_mut() {
+            decision.cut_dbu = cuts[used];
         }
         plan.stats.fit_pct = ((cuts[used] as f64 / req.cut_dbu as f64) * 100.0)
             .round()
@@ -1288,6 +1353,8 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, bud
     // the pass summed per working cell; the generation holds a page once
     plan.stats.fit_bytes = total;
     if total <= budget {
+        // the decision all the same: everything at this cut
+        plan.stats.fit_decision = Some(FixedFit::everything(asked_cut));
         return true;
     }
     let prio: Vec<_> = metas
@@ -1320,6 +1387,49 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, bud
         .filter(|&&i| class_of(i) == edge)
         .count() as u64;
     let below = order.iter().any(|&i| class_of(i) < edge);
+    // the decision: the last page kept (its cut is the caller's)
+    let last = prio[order[kept - 1]];
+    plan.stats.fit_decision = Some(FixedFit {
+        cut_dbu: asked_cut,
+        class: last.0 .0,
+        phase: last.1,
+        page: last.2,
+    });
+    fit_class_stats(plan, &prio, &keep, edge, asked_cut);
+    debug_assert_eq!(
+        in_edge,
+        prio.iter().filter(|p| p.0 .0 == edge).count() as u64
+    );
+    debug_assert_eq!(
+        kept_edge,
+        prio.iter()
+            .zip(&keep)
+            .filter(|(p, k)| p.0 .0 == edge && **k)
+            .count() as u64
+    );
+    debug_assert_eq!(below, prio.iter().any(|p| p.0 .0 < edge));
+    plan.stats.page_bytes = keep_pages(v, plan, &keep);
+    plan.stats.fit_bytes = bytes;
+    true
+}
+
+/// The fit's class stats over `keep`: the class the prefix ends in (`edge`)
+/// keeps about one page in 2^fit_thin, the complete classes start at
+/// fit_full_pct percent of the requested cut, everything under fit_none_pct
+/// percent is gone.
+fn fit_class_stats(
+    plan: &mut HierPlan,
+    prio: &[(std::cmp::Reverse<u32>, u32, u32)],
+    keep: &[bool],
+    edge: u32,
+    asked_cut: i64,
+) {
+    let class_of = |i: usize| prio[i].0 .0;
+    let in_edge = (0..prio.len()).filter(|&i| class_of(i) == edge).count() as u64;
+    let kept_edge = (0..prio.len())
+        .filter(|&i| class_of(i) == edge && keep[i])
+        .count() as u64;
+    let below = (0..prio.len()).any(|i| class_of(i) < edge);
     let pct = |class: u32| {
         (((1u64 << class.min(62)) as f64 / asked_cut.max(1) as f64) * 100.0)
             .round()
@@ -1330,9 +1440,9 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, bud
     } else {
         (in_edge.div_ceil(kept_edge) as f64).log2().ceil().max(1.0) as u32
     };
-    plan.stats.fit_full_pct = order[..kept]
-        .iter()
-        .map(|&i| class_of(i))
+    plan.stats.fit_full_pct = (0..prio.len())
+        .filter(|&i| keep[i])
+        .map(class_of)
         .filter(|&class| class > edge)
         .min()
         .map(pct)
@@ -1344,10 +1454,15 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, bud
     } else {
         0
     };
+}
+
+/// Drops the plan's pages not in `keep` (by position in `plan.pages`), their
+/// page levels with them; the stored bytes of the pages left, per cell.
+fn keep_pages(v: &Ovm, plan: &mut HierPlan, keep: &[bool]) -> u64 {
     let dropped: HashSet<u32> = plan
         .pages
         .iter()
-        .zip(&keep)
+        .zip(keep)
         .filter(|(_, k)| !**k)
         .map(|(&pi, _)| pi)
         .collect();
@@ -1381,9 +1496,66 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, bud
         at += 1;
         keep[at - 1]
     });
-    plan.stats.page_bytes = page_bytes;
+    page_bytes
+}
+
+/// A budget fit decided before, applied as it is (HierOpts::fixed_fit): the
+/// complete plan at the decision's cut keeps the pages whose `fit_priority`
+/// is at most the decision's - the same pages, whatever the frame - so every
+/// frame at a scale thins alike. None when those pages do not fit the
+/// budget: the caller decides anew.
+fn plan_hier_fixed(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedFit) -> Option<HierPlan> {
+    let mut attempt = req.clone();
+    attempt.cut_dbu = fixed.cut_dbu.max(req.cut_dbu);
+    let mut plan = plan_hier_as_asked(v, &attempt, opts, 0);
+    if plan.stats.fit_over {
+        return None;
+    }
+    let key = if attempt.shape_cut {
+        FitKey::SmallerSide
+    } else {
+        FitKey::LongerSide {
+            hairline: if attempt.page_hairline {
+                opts.hairline
+            } else {
+                0.0
+            },
+        }
+    };
+    let threshold = (std::cmp::Reverse(fixed.class), fixed.phase, fixed.page);
+    let metas: Vec<floe_ovm::PageV> = plan.pages.iter().map(|&pi| v.page(pi)).collect();
+    let prio: Vec<_> = metas
+        .iter()
+        .zip(&plan.pages)
+        .map(|(p, &pi)| fit_priority(p, key, pi))
+        .collect();
+    let keep: Vec<bool> = prio.iter().map(|p| *p <= threshold).collect();
+    let bytes: u64 = metas
+        .iter()
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|(p, _)| page_memory(p.records, p.usize_))
+        .sum();
+    if req.decode_budget > 0 && bytes > req.decode_budget {
+        return None;
+    }
+    plan.stats.fit_decision = Some(fixed);
+    plan.stats.fit_fixed = true;
+    plan.stats.fit_passes = 1;
     plan.stats.fit_bytes = bytes;
-    true
+    if keep.iter().all(|&k| k) && attempt.cut_dbu == req.cut_dbu {
+        // the frame is lighter than the one decided on: nothing thinned
+        return Some(plan);
+    }
+    fit_class_stats(&mut plan, &prio, &keep, fixed.class, req.cut_dbu);
+    plan.stats.fit_pct = ((attempt.cut_dbu as f64 / req.cut_dbu.max(1) as f64) * 100.0)
+        .round()
+        .max(100.0) as u32;
+    if attempt.cut_dbu > req.cut_dbu {
+        plan.stats.fit_none_pct = plan.stats.fit_none_pct.max(plan.stats.fit_pct);
+    }
+    plan.stats.page_bytes = keep_pages(v, &mut plan, &keep);
+    Some(plan)
 }
 
 fn plan_hier_as_asked(v: &Ovm, req: &ViewReq, opts: &HierOpts, fit_limit: u64) -> HierPlan {
@@ -1461,10 +1633,12 @@ fn plan_hier_pass(
         wash_px: opts.wash_px,
         explain: Vec::new(),
         explain_on: opts.explain,
+        explain_owner: (0, 0),
         sub_cut_wash: req.sub_cut_wash && req.cut_dbu > 0,
         frame_cap,
         boxm: false,
         shape_cut: req.shape_cut && req.cut_dbu > 0,
+        shape_cut_max: req.shape_cut_max && req.cut_dbu > 0,
         box_px: opts.sub_cut_box_px * (1u32 << opts.sub_cut_box_level.min(8)) as f64,
         box_stride: 1i64 << opts.sub_cut_box_level.min(8),
         reads_left: opts.sub_cut_box_reads,
@@ -1584,8 +1758,16 @@ fn plan_hier_pass(
             && !tc.rbbox.is_empty()
             && (r0 != REM_FULL || h.sub_cut_wash || !(w < h.cut && hh < h.cut))
         {
-            let seed = req.view.intersect(&tc.rbbox);
-            h.contribute((top_ci, r0), seed);
+            // the regions asked for, or the view (HierOpts::regions)
+            if opts.regions.is_empty() {
+                let seed = req.view.intersect(&tc.rbbox);
+                h.contribute((top_ci, r0), seed);
+            } else {
+                for region in &opts.regions {
+                    let seed = region.intersect(&req.view).intersect(&tc.rbbox);
+                    h.contribute((top_ci, r0), seed);
+                }
+            }
         }
     }
     while let Some(Reverse((_, ci, r))) = h.heap.pop() {
@@ -1599,7 +1781,12 @@ fn plan_hier_pass(
     }
     let mut st = h.st;
     st.rep_page_level = page_level;
-    st.shape_cut = if h.shape_cut { h.cut } else { 0 };
+    st.shape_cut = if h.shape_cut || h.shape_cut_max {
+        h.cut
+    } else {
+        0
+    };
+    st.shape_cut_max = h.shape_cut_max;
     st.wc_cells = h.out.len() as u64;
     st.wc_variants = h.out.keys().filter(|&&(_, r)| r != REM_FULL).count() as u64;
     let pages: Vec<u32> = h.pages_all.into_iter().collect();
@@ -1818,9 +2005,11 @@ struct Hier<'a> {
     /// one lattice pitch is under thin_demote_px on screen: keep a
     /// single representative per bin instead of the interval bounds
     thin_demote: bool,
-    /// HierOpts::explain: the rows, and whether to record them
+    /// HierOpts::explain: the rows, whether to record them, and the
+    /// working-set cell being expanded (ExplainRow::owner)
     explain: Vec<ExplainRow>,
     explain_on: bool,
+    explain_owner: WsKey,
     /// ViewReq::sub_cut_wash and its remaining walk budget
     sub_cut_wash: bool,
     wash_walk_budget: u64,
@@ -1831,6 +2020,8 @@ struct Hier<'a> {
     boxm: bool,
     /// ViewReq::shape_cut: pages are cut by max_min < cut
     shape_cut: bool,
+    /// ViewReq::shape_cut_max: the raster cuts records by their larger side
+    shape_cut_max: bool,
     box_px: f64,
     /// arrays keep every box_stride-th member (the pass level)
     box_stride: i64,
@@ -1904,6 +2095,7 @@ impl<'a> Hier<'a> {
 
     fn expand(&mut self, ci: u32, r: u32) {
         let key = (ci, r);
+        self.explain_owner = key;
         let boxes = self.lv.get(&key).expect("lv seeded").boxes.clone();
         let cell = self.v.cell(ci);
         let mut wc = WsCell {
@@ -2070,7 +2262,11 @@ impl<'a> Hier<'a> {
             // (never a representative page: the page frontier draws it
             // thinned to the density - a bbox rect here was the solid
             // 2 x 2 px square the field saw as boxes at the fit view)
-            if self.wash_px > 0.0 && self.px_per_dbu > 0.0 && !self.page_levels.contains_key(&pi) {
+            if self.req.page_wash
+                && self.wash_px > 0.0
+                && self.px_per_dbu > 0.0
+                && !self.page_levels.contains_key(&pi)
+            {
                 let pw = (p.bbox.x1 - p.bbox.x0).max(0) as f64 * self.px_per_dbu;
                 let ph = (p.bbox.y1 - p.bbox.y0).max(0) as f64 * self.px_per_dbu;
                 if pw <= self.wash_px && ph <= self.wash_px {
@@ -2081,7 +2277,11 @@ impl<'a> Hier<'a> {
                 }
             }
             let mut eff = pi;
-            if self.lod_k > 0.0 && self.px_per_dbu > 0.0 && p.lod_page != floe_ovm::LOD_PAGE_NONE {
+            if self.req.lod_swap
+                && self.lod_k > 0.0
+                && self.px_per_dbu > 0.0
+                && p.lod_page != floe_ovm::LOD_PAGE_NONE
+            {
                 let (ew, eh) = (
                     (p.bbox.x1 - p.bbox.x0).max(0),
                     (p.bbox.y1 - p.bbox.y0).max(0),
@@ -2173,7 +2373,7 @@ impl<'a> Hier<'a> {
             let hair_prune = if r == 0 && self.thin_dbu > 0 {
                 0
             } else {
-                self.hair
+                self.child_hair()
             };
             self.thin_bins.clear();
             self.wash_nodes.clear();
@@ -2357,7 +2557,7 @@ impl<'a> Hier<'a> {
                         // outline now (frames on) or nothing.
                         if r != REM_FULL {
                             let size_cut = cw < cut && chh < cut;
-                            if size_cut || cw.min(chh) < self.hair {
+                            if size_cut || cw.min(chh) < self.child_hair() {
                                 // rev 33: the fold is SILENT. A
                                 // fold box tracked the cut - it
                                 // appeared and vanished with zoom
@@ -2454,7 +2654,7 @@ impl<'a> Hier<'a> {
                         // available, omit the below-cut child instead
                         // of displaying false geometry.
                         let size_cut = cw < cut && chh < cut;
-                        if size_cut || cw.min(chh) < self.hair {
+                        if size_cut || cw.min(chh) < self.child_hair() {
                             if !self.sub_cut_wash && self.reps {
                                 if let Some(lm) = self.place_rep(pli, &h, &rb, cell.place_start) {
                                     self.st.rep_children += 1;
@@ -3360,6 +3560,20 @@ impl<'a> Hier<'a> {
         !size_cut && self.page_hair > 0
     }
 
+    /// The hairline threshold a CHILD CELL or a child-BVH subtree is cut by
+    /// (its smaller side under it): `hair`, or 0 under shape_cut_max - the
+    /// hairline-keeping cut judges children by their larger side (the size
+    /// cut, both sides under the cut), as the raster judges the records
+    /// (review of 5800b57, 2026-09-25: the wires of a thin child cell
+    /// vanished while the same wires in the parent's own page were drawn).
+    fn child_hair(&self) -> u64 {
+        if self.shape_cut_max {
+            0
+        } else {
+            self.hair
+        }
+    }
+
     /// Returns false when the placement is sparse (no wash could
     /// stand for it): the caller expands it instead of dropping it.
     fn wash_sub_cut_child(
@@ -3460,6 +3674,7 @@ impl<'a> Hier<'a> {
             self.explain.push(ExplainRow {
                 kind,
                 verdict,
+                owner: self.explain_owner,
                 cell,
                 layer_idx,
                 id,
@@ -4034,7 +4249,7 @@ impl<'a> Hier<'a> {
         // washing (expand_sparse) passes the cut here on purpose
         if !structural
             && !self.sparse_edges.contains(&pli)
-            && ((cw < self.cut && ch < self.cut) || cw.min(ch) < self.hair)
+            && ((cw < self.cut && ch < self.cut) || cw.min(ch) < self.child_hair())
         {
             self.st.cull_size += 1;
             return;
@@ -4299,14 +4514,32 @@ impl crate::Vfs {
     /// hairline policy is the request's (ViewReq::page_hairline);
     /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
+        self.plan_hier_in(req, &[], None)
+    }
+
+    /// `plan_hier` over `regions` of the view instead of the whole view
+    /// (HierOpts::regions; empty = the view): the clip regions hold them all;
+    /// and under a budget fit decided before (HierOpts::fixed_fit).
+    pub fn plan_hier_in(
+        &self,
+        req: &ViewReq,
+        regions: &[BBox],
+        fixed_fit: Option<FixedFit>,
+    ) -> HierPlan {
+        let mut opts = HierOpts::default();
+        opts.fixed_fit = fixed_fit;
+        if !regions.is_empty() {
+            opts.regions = regions.to_vec();
+            opts.k_boxes = opts.k_boxes.max(regions.len());
+        }
         match std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() {
             Ok("cull") | Ok("keep") => {
                 let mut req = req.clone();
                 req.page_hairline =
                     std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() == Ok("cull");
-                plan_hier(&self.ovm, &req, &HierOpts::default())
+                plan_hier(&self.ovm, &req, &opts)
             }
-            _ => plan_hier(&self.ovm, req, &HierOpts::default()),
+            _ => plan_hier(&self.ovm, req, &opts),
         }
     }
 
@@ -4450,7 +4683,10 @@ mod tests {
             prune_skipped: false,
             sub_cut_box: false,
             shape_cut: false,
+            shape_cut_max: false,
             frames: true,
+            page_wash: true,
+            lod_swap: true,
         }
     }
 
@@ -4760,7 +4996,10 @@ mod tests {
             prune_skipped: false,
             sub_cut_box: false,
             shape_cut: false,
+            shape_cut_max: false,
             frames: true,
+            page_wash: true,
+            lod_swap: true,
         };
         let plan = plan_hier(&v, &req, &HierOpts::default());
         assert_eq!(plan.pages, vec![1]);
@@ -5147,6 +5386,77 @@ mod tests {
         );
         // and a larger cut never brings a page back
         assert_eq!(plan(5, true).pages, vec![1]);
+    }
+
+    #[test]
+    fn a_budget_fit_decided_once_is_applied_to_every_frame_at_the_scale() {
+        // 2026-09-27: the viewer's viewport frame and its margin frame must
+        // thin alike. The fixture of the test below: sixteen 200-squares and
+        // two 1600s, cut 50, one page each.
+        let mut pages = Vec::new();
+        for i in 0..16 {
+            pages.push((bx(i * 400, 0, i * 400 + 200, 200), 200, 200));
+        }
+        for i in 0..2 {
+            pages.push((bx(i * 3200, 3000, i * 3200 + 1600, 4600), 1600, 1600));
+        }
+        let chip = fixture(
+            &[FCell {
+                name: "TOP",
+                pages,
+                places: vec![],
+            }],
+            0,
+        );
+        let view = bx(-10, -10, 20_000_000, 20_000_000);
+        let per = page_memory(1, 0);
+        let ask = |budget: u64| {
+            let mut r = rq(view, 50, u32::MAX);
+            r.px_per_dbu = 0.02;
+            r.decode_budget = budget;
+            r
+        };
+        let under = |fixed: Option<FixedFit>| HierOpts {
+            fixed_fit: fixed,
+            ..HierOpts::default()
+        };
+        let state = |p: &HierPlan| (p.stats.fit_fixed, p.stats.fit_redecided, p.stats.fit_thin);
+        // a plan within its budget records the decision that keeps everything
+        let roomy = plan_hier(&chip, &ask(18 * per), &under(None));
+        assert_eq!(
+            (roomy.pages.len(), roomy.stats.fit_decision, state(&roomy)),
+            (18, Some(FixedFit::everything(50)), (false, false, 0))
+        );
+        // ... which a frame with room applies as it is
+        let again = plan_hier(&chip, &ask(18 * per), &under(roomy.stats.fit_decision));
+        assert_eq!(
+            (again.pages.len(), again.stats.fit_decision, state(&again)),
+            (18, roomy.stats.fit_decision, (true, false, 0))
+        );
+        // a frame that does not fit under it decides anew
+        let six = plan_hier(&chip, &ask(6 * per), &under(roomy.stats.fit_decision));
+        assert_eq!(
+            (six.pages.clone(), state(&six)),
+            (vec![0, 4, 8, 12, 16, 17], (false, true, 2))
+        );
+        let decision = six
+            .stats
+            .fit_decision
+            .expect("a thinned plan records its decision");
+        assert_eq!((decision.cut_dbu, decision.class), (50, 7));
+        // under the six-page decision a frame with room for everything keeps
+        // exactly those pages - the same pages whatever the frame
+        let held = plan_hier(&chip, &ask(18 * per), &under(Some(decision)));
+        assert_eq!(
+            (held.pages.clone(), held.stats.fit_decision, state(&held)),
+            (six.pages.clone(), Some(decision), (true, false, 2))
+        );
+        // a decision the budget of this frame cannot hold: decided anew
+        let three = plan_hier(&chip, &ask(3 * per), &under(Some(decision)));
+        assert_eq!(
+            (three.pages.clone(), state(&three)),
+            (vec![0, 16, 17], (false, true, 4))
+        );
     }
 
     #[test]
@@ -6072,6 +6382,112 @@ mod tests {
         assert_eq!(p3.stats.frame_rects, 0);
     }
 
+    /// The hairline-keeping cut (shape_cut_max) judges a CHILD CELL and a
+    /// child-BVH subtree by its larger side too (review of 5800b57,
+    /// 2026-09-25): a thin child cell - min side under the hairline half of
+    /// the cut, long side above the cut - is walked and its page drawn, at
+    /// full depth and at a finite one, whether the thin placement shares its
+    /// BVH node with a fat one (the per-placement tests) or is alone under it
+    /// (the node's max_min prune); a child under the cut on both sides is
+    /// still cut.
+    #[test]
+    fn shape_cut_max_judges_child_cells_by_their_larger_side() {
+        let thin_page = (bx(0, 0, 4000, 100), 4000, 100);
+        let mixed = fixture(
+            &[
+                FCell {
+                    name: "THIN",
+                    pages: vec![thin_page],
+                    places: vec![],
+                },
+                FCell {
+                    name: "FAT",
+                    pages: vec![(bx(0, 0, 500, 500), 500, 500)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "SPECK",
+                    pages: vec![(bx(0, 0, 200, 200), 200, 200)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        (1, 6000, 0, 0, false, Rep::One),
+                        (2, 8000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            3,
+        );
+        let alone = fixture(
+            &[
+                FCell {
+                    name: "THIN",
+                    pages: vec![thin_page],
+                    places: vec![],
+                },
+                FCell {
+                    name: "MID",
+                    pages: vec![],
+                    places: vec![(0, 0, 0, 0, false, Rep::One)],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![],
+                    places: vec![(1, 0, 0, 0, false, Rep::One)],
+                },
+            ],
+            2,
+        );
+        let view = bx(-10, -10, 11_000, 1000);
+        let thin_of = |v: &Ovm| {
+            (0..v.n_pages)
+                .find(|&pi| v.page(pi).max_min == 100)
+                .unwrap()
+        };
+        for depth in [REM_FULL, 2] {
+            // cut 300 -> hair 150: the thin child (min side 100) is cut
+            // unless the cut keeps the hairlines
+            let keep = plan_hier(&mixed, &rq(view, 300, depth), &HierOpts::default());
+            assert!(!keep.pages.contains(&thin_of(&mixed)), "depth {depth}");
+            let mut req = rq(view, 300, depth);
+            req.shape_cut_max = true;
+            let max = plan_hier(&mixed, &req, &HierOpts::default());
+            assert!(max.pages.contains(&thin_of(&mixed)), "depth {depth}");
+            // FAT stays, SPECK (both sides under the cut) goes
+            assert_eq!(max.pages.len(), 2, "depth {depth}");
+            assert!(max
+                .pages
+                .iter()
+                .all(|&pi| mixed.page(pi).max_w.max(mixed.page(pi).max_h) >= 300));
+            assert_eq!((max.stats.shape_cut, max.stats.shape_cut_max), (300, true));
+            // alone under its node: the node's max_min prune
+            let keep = plan_hier(&alone, &rq(view, 300, depth), &HierOpts::default());
+            assert!(
+                keep.pages.is_empty() && keep.stats.culled_bvh_size >= 1,
+                "depth {depth}"
+            );
+            let mut req = rq(view, 300, depth);
+            req.shape_cut_max = true;
+            let max = plan_hier(&alone, &req, &HierOpts::default());
+            assert_eq!(max.pages, vec![thin_of(&alone)], "depth {depth}");
+            // under the cut on both sides: cut under max as well
+            let small = plan_hier(
+                &alone,
+                &{
+                    let mut r = rq(view, 5000, depth);
+                    r.shape_cut_max = true;
+                    r
+                },
+                &HierOpts::default(),
+            );
+            assert!(small.pages.is_empty(), "depth {depth}");
+        }
+    }
+
     /// Rev 45 (Calibre alignment): a boundary box whose MIN side is
     /// under the cut no longer vanishes - deterministic
     /// representatives on a layout-fixed lattice survive (interval
@@ -6514,7 +6930,10 @@ mod tests {
             prune_skipped: false,
             sub_cut_box: false,
             shape_cut: false,
+            shape_cut_max: false,
             frames: true,
+            page_wash: true,
+            lod_swap: true,
         }
     }
 
@@ -7048,7 +7467,10 @@ mod tests {
             prune_skipped: false,
             sub_cut_box: false,
             shape_cut: false,
+            shape_cut_max: false,
             frames: true,
+            page_wash: true,
+            lod_swap: true,
         };
         // brute equality needs the corner windows, not the whole
         // spanning box - use two-box behavior via narrow checks

@@ -811,6 +811,7 @@ impl Deck {
                 &plan_request,
                 request.thin_keep || crate::summary::cull_allowed(),
                 occupancy_off,
+                false,
             )?;
             let plan_request = self.sources[source_index].cache.page_plan_request(
                 &plan_request,
@@ -1222,6 +1223,11 @@ fn stream_pass(
         foreground: [255, 255, 255, 255],
         workers: request.workers.max(1),
         tile_size: request.tile_size,
+        area_true: false,
+        width_c: 1.0,
+        survivor_list: true,
+        place_lattice: false,
+        density_stack: false,
     };
     let mut report = StreamReport {
         pass_bytes_max: first_bytes,
@@ -1415,6 +1421,11 @@ fn raster_pass(
         foreground: [255, 255, 255, 255],
         workers,
         tile_size: request.tile_size,
+        area_true: false,
+        width_c: 1.0,
+        survivor_list: true,
+        place_lattice: false,
+        density_stack: false,
     };
     // a frames-only pass only when this placement's plan holds a
     // hierarchy frame at all (analysis 2026-09-09: the pass ran, and
@@ -1758,7 +1769,13 @@ fn source_plan_request(
         prune_summary: false,
         sub_cut_box: false,
         shape_cut: false,
+        shape_cut_max: false,
         frames: true,
+        page_wash: true,
+        lod_swap: true,
+        regions: Vec::new(),
+        visible_indices: None,
+        fixed_fit: None,
     };
     plan.validate()?;
     Ok(Some(plan))

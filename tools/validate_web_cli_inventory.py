@@ -43,7 +43,7 @@ SURFACE = {
         --follow-verbatim --no-env-switches""",
     "gtktest": "",
     "view": """--level=1 --multi --goto=1,2,10 --drc=errors.db --detail=high --depth=99
-        --thin=keep --lod=on --refinement=off --frame-cache=on --perf-baseline
+        --thin=keep --refinement=off --frame-cache=on --margin=on --perf-baseline
         --frames=on --labels=on --label-font-px=14 --stream-kb=0 --stream-target-ms=500
         --render-debug --hairline=0.5 --thin-um=7 --dump --floe-reviewer=reviewer""",
     "jobdeck": """--sources=sources --level|--id=1 --mode=level --colors=colors
@@ -68,7 +68,7 @@ DEFAULTS = {
                "--drc-err": "all", "--drc-cap": 200, "--drc-frac": .3},
     "clip": {"--out": "clip.oas", "--cell-name": "FLOE_CLIP"},
     "svrf": {"--define": [], "--include-dir": []},
-    "view": {"--lod": "on", "--refinement": "on", "--frame-cache": "on", "--frames": "on",
+    "view": {"--refinement": "on", "--frame-cache": "on", "--margin": "off", "--frames": "on",
              "--labels": "on", "--label-font-px": 14, "--stream-target-ms": 500},
     "jobdeck": {"--mode": "level", "--ly-dt": "cross", "--on-missing": "skip"},
     "fe-embed": {"--" + k: [] for k in ("box", "ellipse", "line", "path", "polygon", "ruler", "text")},
@@ -83,7 +83,7 @@ CHOICES = {
     ("view", "--detail"): ("low", "medium", "high"),
     ("view", "--thin"): ("auto", "keep", "cull"),
     **{("view", flag): ("on", "off") for flag in
-       ("--lod", "--refinement", "--frame-cache", "--frames", "--labels")},
+       ("--refinement", "--frame-cache", "--margin", "--frames", "--labels")},
     ("jobdeck", "--mode"): ("level", "chip", "layer", "identifier"),
     ("jobdeck", "--ly-dt"): ("cross", "zip"),
     ("jobdeck", "--on-missing"): ("skip", "fail"),

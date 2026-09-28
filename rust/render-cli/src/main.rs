@@ -131,6 +131,11 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             foreground: [255, 255, 255, 255],
             workers: args.jobs,
             tile_size: args.tile_size,
+            area_true: false,
+            width_c: 1.0,
+            survivor_list: true,
+            place_lattice: false,
+            density_stack: false,
         };
         let (mode, raster) = if args.styles.is_empty() {
             (
@@ -228,7 +233,13 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         prune_summary: false,
         sub_cut_box: false,
         shape_cut: false,
+        shape_cut_max: false,
         frames: true,
+        page_wash: true,
+        lod_swap: true,
+        regions: Vec::new(),
+        visible_indices: None,
+        fixed_fit: None,
     })
 }
 

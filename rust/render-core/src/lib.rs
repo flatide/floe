@@ -46,17 +46,18 @@ pub use raster::{
     render_geometry_occupancy, render_geometry_occupancy_cancellable, render_geometry_styled,
     render_geometry_styled_cancellable, render_geometry_styled_cancellable_reuse,
     render_geometry_styled_cancellable_windowed, render_geometry_styled_unbinned,
-    render_geometry_styled_unbinned_cancellable, FrameReuse, GeometryRasterReport,
+    render_geometry_styled_unbinned_cancellable, DensityScenes, FrameReuse, GeometryRasterReport,
     GeometryRasterRequest, LayerFill, LayerRasterSession, LayerStyle, RasterViewBox, RgbaFrame,
     StyledGeometryRasterRequest, DEFAULT_TILE_SIZE, MAX_TILE_SIZE,
 };
 pub use request::{PlanRequest, ViewBox, FULL_DEPTH};
 pub use scene::FrameScene;
-pub use stats::RenderStats;
+pub use stats::{place_walks_wire, RenderStats, DENSITY_STACK_COUNTS, PLACE_WALK_OUTCOMES};
 pub use summary::{
-    cull_allowed as summary_cull_allowed, level_for as summary_level_for, SummaryPlane,
-    SummarySelection,
+    cull_allowed as summary_cull_allowed, layout_allowed as summary_layout_allowed,
+    level_for as summary_level_for, SummaryPlane, SummarySelection,
 };
 
+pub use floe_vfs::hier::FixedFit;
 pub use floe_vfs::hier::HierPlan;
 pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;

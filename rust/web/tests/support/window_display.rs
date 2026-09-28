@@ -109,9 +109,10 @@ async fn picker_preserves_window_state_before_first_frame_and_across_deck_and_cl
         "deck capability must not erase the preference"
     );
     assert_eq!(
-        back["view"]["effective_thin"], "cull",
-        "inherit auto, not its deck resolution"
+        back["view"]["thin"], "auto",
+        "inherit the preference, not its resolution"
     );
+    assert_eq!(back["view"]["effective_thin"], "keep");
     let mut socket = ReviewSocket::new(&h, &l).await;
     socket.set(json!({"depth":"2","detail":"low","thin":"keep","frames":false,"labels":false,"font_px":31})).await;
     let changed = current(&h, &l).await;

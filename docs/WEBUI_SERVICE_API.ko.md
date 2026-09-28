@@ -598,15 +598,15 @@ DBU와 µm를 같은 필드에 혼용하지 않고 source/deck 좌표계 ID를 �
 
 | 기능 | layout | jobdeck |
 |---|---|---|
-| thin auto | cull | keep |
+| thin auto | keep (2026-09-23 upstream 정책) | keep |
 | PNG/raw, style, depth/detail | 지원 | 지원(virtual layer 매핑) |
 | 표시 pixels PNG 복사/저장 | 브라우저 기능 검사, 실제 수용 미확인 | 동일(원본 geometry export 아님) |
-| 착지 margin/pan prefetch | 지원 | 미지원 |
+| 착지 margin/pan prefetch | `--margin on` opt-in, 기본 off | 미지원 |
 | label size / labels | 지원 | 현재 미지원 |
 | pick/snap/clip | layout 지원, scene 상태에 따른 제한 | 현재 미지원 |
 | hierarchy frames | 지원 | 지원(source별 frames-only pass 합성) |
 | abstract / 폐기된 OVC coverage | 미지원 | 미지원 |
-| OVO occupancy | 조건 충족 시 summary | source/pass 조건 충족 시 summary |
+| OVO occupancy | `FLOE_RUST_OCCUPANCY=on`일 때 조건부 summary | source/pass 조건 충족 시 summary |
 
 덱의 frames 지원은 `DeckRenderRequest.frames`와 frames-only pass 구현을
 기준으로 한다. `jobdeck/render.py`/`run_deck_render`의 오래된 소개 주석에는

@@ -922,6 +922,7 @@ fn run(
                 request.view = viewport.bbox;
                 request.width = viewport.width;
                 request.height = viewport.height;
+                request.background = purpose == Purpose::Margin;
                 let generation = engine.submit(request)?;
                 if purpose == Purpose::Foreground {
                     handled_rev = current.render_rev;
@@ -1022,6 +1023,16 @@ fn run(
                 } else {
                     return Err(Error::new(ErrorKind::Worker, format!("{code}: {message}")));
                 }
+            }
+            Some(Event::Cancelled { generation })
+                if active.as_ref().is_some_and(|t| {
+                    t.purpose == Purpose::Margin && t.generation == generation
+                }) =>
+            {
+                // renderd can drop optional bg work when it would redecide
+                // the viewport's fit. Keep the foreground and the attempt
+                // marker, so this area is not retried in a busy loop.
+                shared.lock().unwrap().snapshot.margin_working = false;
             }
             Some(Event::Cancelled { .. }) if draining.is_none() => {
                 return Err(Error::new(

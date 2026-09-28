@@ -38,13 +38,12 @@ pub enum Thin {
     Cull,
 }
 impl Thin {
-    pub fn effective(self, deck: bool) -> floe_worker_client::ThinPolicy {
+    pub fn effective(self, _deck: bool) -> floe_worker_client::ThinPolicy {
         use floe_worker_client::ThinPolicy as P;
         match self {
-            Self::Keep => P::Keep,
+            // Upstream 2026-09-23: retain thin pages for layouts as well.
+            Self::Auto | Self::Keep => P::Keep,
             Self::Cull => P::Cull,
-            Self::Auto if deck => P::Keep,
-            _ => P::Cull,
         }
     }
     pub fn name(self) -> &'static str {
@@ -225,6 +224,15 @@ impl Shot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn auto_keeps_thin_pages_for_layouts_and_decks() {
+        use floe_worker_client::ThinPolicy as P;
+        for deck in [false, true] {
+            assert_eq!(Thin::Auto.effective(deck), P::Keep);
+            assert_eq!(Thin::Keep.effective(deck), P::Keep);
+            assert_eq!(Thin::Cull.effective(deck), P::Cull);
+        }
+    }
     #[test]
     fn units_aspect_anchor_and_ties() {
         assert_eq!(

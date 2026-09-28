@@ -538,7 +538,7 @@ fn label_only_source_identity_preserves_wide_bounds_but_not_changed_metadata() {
     let mut changed = m.frame.fields.clone();
     changed.0.insert("style_epoch".into(), "99".into());
     assert!(q.observe(&make(request.clone(), changed)).is_err());
-    request.thin = floe_worker_client::ThinPolicy::Keep;
+    request.thin = floe_worker_client::ThinPolicy::Cull;
     assert_ne!(request.thin, f.frame.request.thin);
     assert!(q.observe(&make(request, m.frame.fields.clone())).is_err());
     v.close().unwrap();

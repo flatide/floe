@@ -36,7 +36,6 @@ POLICIES = {
     "_set_frames": linked("frames"),
     "_toggle_abstract": (1, "excluded", "Rust never supported abstract", None, None),
     "_toggle_coverage": (1, "excluded", "Retired density coverage; not occupancy", None, None),
-    "_set_lod": (1, "inactive", "GTK Rust wire does not carry the LOD toggle", None, None),
     "_set_thin": linked("thin"),
     "_set_mono": linked("mono"),
     "_toggle_overlays": linked("overlays"),

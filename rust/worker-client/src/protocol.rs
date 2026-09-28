@@ -211,6 +211,8 @@ pub struct RenderRequest {
     pub font_px: u32,
     pub mono: bool,
     pub frame_cache: bool,
+    /// Optional margin work must never change a foreground budget-fit decision.
+    pub background: bool,
     pub raster_jobs: u16,
     pub decode_jobs: u16,
     pub tile_px: u32,
@@ -238,6 +240,7 @@ impl Default for RenderRequest {
             font_px: 14,
             mono: false,
             frame_cache: true,
+            background: false,
             raster_jobs: jobs.min(4),
             decode_jobs: jobs,
             tile_px: 384,
@@ -290,6 +293,9 @@ impl RenderRequest {
         let depth = self.depth.map_or_else(|| "full".into(), |d| d.to_string());
         let mut command = format!("render gen={generation} view={x0},{y0},{x1},{y1} w={} h={} depth={depth} cut={} exact={} layers={} frames={} labels={} font_px={} mono={} frame_cache={} jobs={} decode_jobs={} tile_px={} round_pages={} round_paths=1 frame_format={} thin={} style_epoch={epoch} out={out}",
             self.width, self.height, self.cut_px, u8::from(self.exact), self.layers.wire()?, u8::from(self.frames), u8::from(self.labels), self.font_px, u8::from(self.mono), u8::from(self.frame_cache), self.raster_jobs, self.decode_jobs, self.tile_px, self.round_pages, self.format.wire(), self.thin.wire());
+        if self.background {
+            command.push_str(" bg=on");
+        }
         if let Some(limit) = self.decode_pages {
             write!(command, " decode_pages={limit}").unwrap();
         }
@@ -359,5 +365,19 @@ mod tests {
             .unwrap()
             .starts_with("3/300 #010203ff pat:ffff"));
         assert!(style_text(&[s.clone(), s]).is_err());
+    }
+
+    #[test]
+    fn background_is_explicit_and_foreground_is_the_default() {
+        let mut r = RenderRequest::default();
+        assert!(!r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .contains(" bg="));
+        r.background = true;
+        assert!(r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .ends_with(" bg=on"));
     }
 }

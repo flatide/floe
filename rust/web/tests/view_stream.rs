@@ -618,7 +618,7 @@ async fn native_margin_stream_keeps_foreground_credit_and_reconnect_identity() {
         assert_ne!(restored["connection_epoch"], margin["connection_epoch"]);
         ack(&mut resumed, &rhello, 1, &restored).await;
         resumed.send(Message::Text(json!({"type":"view.set","seq":"2","view_id":rhello["view_id"],
-            "connection_epoch":rhello["connection_epoch"],"base_state_rev":"2","body":{"thin":"keep"}}).to_string().into())).await.unwrap();
+            "connection_epoch":rhello["connection_epoch"],"base_state_rev":"2","body":{"thin":"cull"}}).to_string().into())).await.unwrap();
         until_reply(&mut resumed, 2, "accepted").await;
         let (changed, _) = frame(&mut resumed).await;
         assert_eq!(changed["purpose"], "foreground");

@@ -38,7 +38,7 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --goto X,Y[,WIDTH]        Initial centre; omitted width keeps fit zoom (um)
   --depth full|N            Default 0; goto/DRC/jobdeck default full (999 = full)
   --detail low|medium|high|exact  Initial detail (default medium)
-  --thin auto|keep|cull     Thin-page policy (default auto)
+  --thin auto|keep|cull     Thin-page policy (default auto=keep for every source)
   --mode level|chip|layer  Jobdeck view mode (default level)
   --level N,N,...          Initial jobdeck levels (otherwise ask before open)
   --frames [on|off]        Initial hierarchy frames (default on; bare = on)
@@ -50,7 +50,8 @@ const HELP: &str = "Usage: floe2-web view [SOURCE ...] [OPTIONS]
   --raster-jobs N          Raster workers (environment/default up to 4)
   --budget-mb N            Decoded page budget (default 1024)
   --png / --raw            Frame transfer (default raw)
-  --frame-cache on|off      Retained frame reuse + layout margin (default on)
+  --frame-cache on|off      Retained frame reuse (default on)
+  --margin on|off           Layout background prefetch (default off; needs frame cache)
   --refinement on|off      On follows round env; off forces direct-final (default effectively off)
   --stream-kb N            Legacy compatibility: 0 forces off; positive follows round env (not KB)
   --render-debug           Numeric worker-frame diagnostics to stderr; independent workspace
@@ -94,7 +95,7 @@ FLOE_RUST_ROUND_PAGES; it does not invent a progressive/byte/time policy.
 Positive --stream-kb is not a byte budget; its magnitude was unused by Rust.
 It conflicts with refinement off/perf-baseline. Repeated stream values use
 the last integer. Explicit --stream-kb always starts an independent workspace.
-Deck margin is unsupported.
+Deck margin is unsupported. --margin on starts an independent workspace.
 --stream-target-ms, --lod, --hairline and --thin-um
 are not migrated; they are rejected, never silently ignored.
 --dump starts an independent workspace. About has the capture toggle/downloads.
@@ -128,6 +129,7 @@ pub struct Command {
     budget: Option<u64>,
     raw: Option<bool>,
     frame_cache: bool,
+    margin: bool,
     direct_final: bool,
     render_debug: bool,
     dump: bool,
@@ -177,6 +179,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         budget: None,
         raw: None,
         frame_cache: true,
+        margin: false,
         direct_final: false,
         render_debug: false,
         dump: false,
@@ -363,6 +366,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     _ => return Err(Error::input("frame-cache must be on or off")),
                 };
             }
+            "--margin" => {
+                c.margin = match value()? {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(Error::input("margin must be on or off")),
+                };
+            }
             "--depth" => {
                 c.initial["depth"] = json!(startup_depth(value()?)?);
             }
@@ -456,8 +466,10 @@ pub fn parse(args: &[String]) -> Result<Command> {
     // existing owner keeps its own round environment. Only effective off
     // introduces a construction option and requires an independent owner.
     c.independent |= refinement_off;
+    c.independent |= c.margin;
     if c.perf_baseline {
         c.frame_cache = false;
+        c.margin = false;
         c.direct_final = true;
         c.initial["frames"] = json!(false);
         c.initial["labels"] = json!(false);
@@ -842,7 +854,7 @@ fn run_hosted(
         options.clone(),
         indexer.clone(),
         ControllerOptions {
-            margin_prefetch: c.frame_cache,
+            margin_prefetch: c.margin && c.frame_cache,
             frame_cache: c.frame_cache,
         },
     )?;
@@ -1116,6 +1128,20 @@ mod tests {
         assert!(c.local_sharing && c.independent);
         assert!(parse(&args("view --local-sharing=false")).is_err());
         assert!(parse(&args("view --local-sharing=on")).is_err());
+    }
+    #[test]
+    fn margin_is_opt_in_without_disabling_retained_frames() {
+        let c = parse(&args("view")).unwrap();
+        assert!(c.frame_cache && !c.margin && !c.independent);
+        let c = parse(&args("view --margin on")).unwrap();
+        assert!(c.margin && c.frame_cache && c.independent);
+        let c = parse(&args("view --margin on --perf-baseline")).unwrap();
+        assert!(!c.margin && !c.frame_cache);
+        let c = parse(&args("view --margin on --margin off")).unwrap();
+        assert!(!c.margin && !c.independent);
+        for tail in ["--margin", "--margin auto", "--margin false"] {
+            assert!(parse(&args(&format!("view {tail}"))).is_err());
+        }
     }
     #[test]
     fn direct_final_alias_and_debug_are_independent_process_options() {

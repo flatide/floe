@@ -619,6 +619,13 @@ read·decode·scene·raster·png·publish)의 합(어떤 단계 타이머도 덮
 GUI 상태줄은 `= L load [...] [+ T text] + D draw [+ O other] [+ W wait]`로, text는 100 ms 이상,
 other·wait는 200 ms를 넘을 때만 보인다. 필드가 없는 renderd나 deck frame에서는 둘 다 0(모름)이다.
 
+`opened` 줄의 `open_us`는 renderd가 캐시(또는 덱)를 연 시간이다(2026-09-22, 0.12.191). adapter는
+`start()`를 단계별로 재어 `open_report`(`spawn_ms` 프로세스가 `ready`까지, `open_ms` `opened`를 기다린
+시간, `renderd_open_ms`, `style_ms` 첫 스타일, `total_ms`)에 남기고, GUI는 로드 뒤 첫 settled 프레임의
+상태줄 맨 앞에 `loaded in T s (cache C s + service S s [renderd open R s] + first frame F s) ·`를 붙인다
+— 파일 선택(또는 시작 시 주어진 파일)부터 그 프레임까지. 프레임의 `N ms`는 그 프레임의 렌더 시간일
+뿐이다(현장 2026-09-22: 10초의 서비스 열기가 52 ms 프레임으로만 보였다).
+
 daemon protocol `round_pages` fallback은 128, floe2 adapter 제품 기본은 1024이며
 한 round에서 새로 읽을 최대 cache-miss page 수다.
 cache hit는 개수와 무관하게 첫 scene에 모두 포함하며 마지막 miss tail이 budget의

@@ -108,6 +108,10 @@ pub struct PlanCullCounts {
     /// everything under this percentage of the requested cut is gone (0 = no
     /// class dropped whole)
     pub fit_none_pct: u64,
+    /// a fit decided before was applied (1); one given did not fit and the
+    /// fit was decided anew (1)
+    pub fit_fixed: u64,
+    pub fit_redecided: u64,
     /// sub-cut boxes (floe_vfs::ViewReq::sub_cut_box): box rects the plan
     /// emitted, boxes dropped beyond the per-plan cap
     pub sub_cut_boxes: u64,
@@ -116,8 +120,10 @@ pub struct PlanCullCounts {
     /// cap), node boxes whose layer scan ran out of its read budget
     pub sub_cut_box_level: u64,
     pub sub_cut_box_unsure: u64,
-    /// the per-shape cut the frame was planned with, dbu (0 = none)
+    /// the per-shape cut the frame was planned with, dbu (0 = none), and
+    /// whether it judges records by their larger side (hairlines kept)
     pub shape_cut: u64,
+    pub shape_cut_max: bool,
 }
 
 impl PlanCullCounts {
@@ -148,11 +154,14 @@ impl PlanCullCounts {
             fit_thin: st.fit_thin as u64,
             fit_full_pct: st.fit_full_pct as u64,
             fit_none_pct: st.fit_none_pct as u64,
+            fit_fixed: st.fit_fixed as u64,
+            fit_redecided: st.fit_redecided as u64,
             sub_cut_boxes: st.sub_cut_boxes,
             sub_cut_box_over: st.sub_cut_box_over,
             sub_cut_box_level: st.sub_cut_box_level as u64,
             sub_cut_box_unsure: st.sub_cut_box_unsure,
             shape_cut: st.shape_cut,
+            shape_cut_max: st.shape_cut_max,
         }
     }
 
@@ -186,6 +195,8 @@ impl PlanCullCounts {
         self.fit_thin = self.fit_thin.max(other.fit_thin);
         self.fit_full_pct = self.fit_full_pct.max(other.fit_full_pct);
         self.fit_none_pct = self.fit_none_pct.max(other.fit_none_pct);
+        self.fit_fixed = self.fit_fixed.max(other.fit_fixed);
+        self.fit_redecided = self.fit_redecided.max(other.fit_redecided);
         self.sub_cut_boxes = self.sub_cut_boxes.saturating_add(other.sub_cut_boxes);
         self.sub_cut_box_over = self.sub_cut_box_over.saturating_add(other.sub_cut_box_over);
         self.sub_cut_box_level = self.sub_cut_box_level.max(other.sub_cut_box_level);
@@ -193,6 +204,7 @@ impl PlanCullCounts {
             .sub_cut_box_unsure
             .saturating_add(other.sub_cut_box_unsure);
         self.shape_cut = self.shape_cut.max(other.shape_cut);
+        self.shape_cut_max |= other.shape_cut_max;
     }
 }
 
@@ -380,8 +392,12 @@ pub struct Cache {
     /// levels) of any cell holding the layer's own pages - a request
     /// depth at or above it draws every shape of the layer, so the
     /// layer's summary (a full-depth flattening) equals the exact
-    /// render there (user 2026-09-15: the depth is a free control)
-    layer_depth: Vec<u32>,
+    /// render there (user 2026-09-15: the depth is a free control).
+    /// Computed on first use: only a limited-depth occupancy request on a
+    /// file without depth planes asks, and the sweep reads every placement
+    /// record (field 2026-09-22: ~10 s of every layout's open, a plain
+    /// layout with no design.ovo included)
+    layer_depth: std::sync::OnceLock<Vec<u32>>,
     // Immutable for this open cache; reopen after publishing design.ovr.
     representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
     // Last field: mapped/source state drops before the native reader lease.
@@ -398,13 +414,22 @@ fn layer_max_depths(ovm: &floe_ovm::Ovm) -> Vec<u32> {
     if n == 0 || ovm.top as usize >= n {
         return vec![0; n_layers];
     }
-    let children = |ci: usize| -> Vec<usize> {
-        let c = ovm.cell(ci as u32);
-        (c.place_start as u64..c.place_start as u64 + c.place_count as u64)
-            .map(|pli| ovm.place_head(pli).child as usize)
-            .filter(|&k| k < n)
-            .collect()
-    };
+    // each cell's DISTINCT children, read once (a cell places the same
+    // child in many records; the sweeps below visit every edge twice)
+    let distinct: Vec<Vec<usize>> = (0..n)
+        .map(|ci| {
+            let c = ovm.cell(ci as u32);
+            let mut kids: Vec<usize> = (c.place_start as u64
+                ..c.place_start as u64 + c.place_count as u64)
+                .map(|pli| ovm.place_child(pli) as usize)
+                .filter(|&k| k < n)
+                .collect();
+            kids.sort_unstable();
+            kids.dedup();
+            kids
+        })
+        .collect();
+    let children = |ci: usize| -> Vec<usize> { distinct[ci].clone() };
     // post-order DFS from the top -> reversed, a topological order of
     // the reachable cells (edges back into the stack are cycles)
     let mut state = vec![0u8; n]; // 0 new, 1 on the stack, 2 done
@@ -474,12 +499,11 @@ impl Cache {
             .to_str()
             .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
         let vfs = Vfs::open(dir)?;
-        let layer_depth = layer_max_depths(&vfs.ovm);
         Ok(Self {
             vfs,
             dir: dir.to_string(),
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
-            layer_depth,
+            layer_depth: std::sync::OnceLock::new(),
             representatives: std::sync::OnceLock::new(),
             _revision_lease: revision_lease,
         })
@@ -487,7 +511,17 @@ impl Cache {
 
     /// The deepest placement level holding pages of layer `idx`.
     pub fn layer_depth(&self, idx: u32) -> u32 {
-        self.layer_depth.get(idx as usize).copied().unwrap_or(0)
+        self.layer_depth
+            .get_or_init(|| layer_max_depths(&self.vfs.ovm))
+            .get(idx as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether the per-layer depths have been computed (a plain open must
+    /// not pay for them; tests read this).
+    pub fn layer_depths_computed(&self) -> bool {
+        self.layer_depth.get().is_some()
     }
 
     /// The cache's design.ovo if present and valid for THIS cache
@@ -582,11 +616,15 @@ impl Cache {
     /// view that draws every hairline page is not) unless the kill
     /// switch FLOE_RUST_OCCUPANCY_CULL=off restores the keep-only rule
     /// (renderd decides and passes the flag).
+    /// `layout_off`: a plain layout's frame without the opt-in
+    /// (summary::layout_allowed) - no summary, reason "layout"; jobdeck
+    /// passes pass false.
     pub fn summary_selection(
         &self,
         request: &PlanRequest,
         policy_allows: bool,
         disabled: bool,
+        layout_off: bool,
     ) -> Result<crate::summary::SummarySelection, String> {
         use crate::summary::{self, SummarySelection};
         if !policy_allows {
@@ -599,6 +637,9 @@ impl Cache {
         }
         if disabled {
             return Ok(SummarySelection::none(summary::NONE_OFF));
+        }
+        if layout_off {
+            return Ok(SummarySelection::none(summary::NONE_LAYOUT));
         }
         let (file, error, stamp) = self.occupancy_file();
         let Some(file) = file else {
@@ -801,7 +842,12 @@ impl Cache {
     pub fn plan(&self, request: &PlanRequest) -> Result<PlannedView, String> {
         let req = self.view_request(request)?;
         let started = Instant::now();
-        let mut plan = self.vfs.plan_hier(&req);
+        let regions: Vec<floe_ovm::BBox> = request
+            .regions
+            .iter()
+            .map(|region| region.as_bbox())
+            .collect();
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit);
         let plan_us = elapsed_us(started);
         // All layers off, an empty viewport, or fully summarized geometry
         // legitimately selects no working cells. The renderer still requires
@@ -1065,7 +1111,18 @@ impl Cache {
         Ok(ViewReq {
             view: request.view.as_bbox(),
             cut_dbu: if request.exact { 0 } else { request.cut_dbu },
-            vis: self.vfs.layer_mask(request.visible_layers.as_deref())?,
+            vis: match &request.visible_indices {
+                Some(indices) => {
+                    let mut vis = vec![0u8; self.vfs.ovm.bs_width];
+                    for &idx in indices {
+                        if idx < self.vfs.ovm.n_layers {
+                            floe_ovm::bit_set(&mut vis, idx as usize);
+                        }
+                    }
+                    vis
+                }
+                None => self.vfs.layer_mask(request.visible_layers.as_deref())?,
+            },
             depth: request.depth,
             px_per_dbu: if request.exact {
                 0.0
@@ -1079,6 +1136,9 @@ impl Cache {
             prune_skipped: request.prune_summary,
             sub_cut_box: request.sub_cut_box && !request.exact,
             shape_cut: request.shape_cut && !request.exact,
+            shape_cut_max: request.shape_cut_max && !request.exact && !request.shape_cut,
+            page_wash: request.page_wash,
+            lod_swap: request.lod_swap,
             frames: request.frames,
             page_skip: if request.summary_layers.is_empty() {
                 Vec::new()

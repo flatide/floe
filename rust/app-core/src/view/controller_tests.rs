@@ -23,6 +23,7 @@ struct Control {
     margin_frame: AtomicBool,
     margin_truncated: AtomicBool,
     margin_fail: AtomicBool,
+    margin_drop: AtomicBool,
     requests: Mutex<Vec<RenderRequest>>,
     styles: Mutex<Vec<Vec<Style>>>,
     cancels: AtomicUsize,
@@ -49,6 +50,7 @@ impl Default for Control {
             margin_frame: AtomicBool::new(true),
             margin_truncated: AtomicBool::new(false),
             margin_fail: AtomicBool::new(false),
+            margin_drop: AtomicBool::new(false),
             requests: Mutex::new(Vec::new()),
             styles: Mutex::new(Vec::new()),
             cancels: AtomicUsize::new(0),
@@ -168,6 +170,12 @@ impl Engine for Fake {
                 code: "io".into(),
                 message: "ENOSPC test".into(),
             }));
+        }
+        if self.control.margin_drop.load(Ordering::Relaxed)
+            && self.active.as_ref().is_some_and(|(_, r)| r.background)
+        {
+            let (generation, _) = self.active.take().unwrap();
+            return Ok(Some(Event::Cancelled { generation }));
         }
         if self.cancelled {
             if !self.ack {
@@ -915,7 +923,7 @@ fn restore_revision_policy_key_and_render_revision_are_separate() {
         .edit(
             1,
             Patch {
-                thin: Some(Thin::Cull),
+                thin: Some(Thin::Keep),
                 ..Default::default()
             },
         )
@@ -926,7 +934,7 @@ fn restore_revision_policy_key_and_render_revision_are_separate() {
         .edit(
             2,
             Patch {
-                thin: Some(Thin::Keep),
+                thin: Some(Thin::Cull),
                 ..Default::default()
             },
         )
@@ -1145,7 +1153,7 @@ fn complete_margin_crops_pan_without_another_foreground_and_invalidates_policy()
         .edit(
             2,
             Patch {
-                thin: Some(Thin::Keep),
+                thin: Some(Thin::Cull),
                 ..Default::default()
             },
         )
@@ -1279,6 +1287,35 @@ fn truncated_or_failed_margin_never_claims_complete_or_retries_in_a_loop() {
         assert_eq!(c.requests.lock().unwrap().len(), 3);
         v.close().unwrap();
     }
+}
+
+#[test]
+fn budget_fit_dropped_margin_keeps_foreground_and_does_not_retry() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    c.margin_drop.store(true, Ordering::Relaxed);
+    let mut v = start_configured(
+        &r,
+        Arc::clone(&m),
+        ViewState::initial(&m, 80, 64).unwrap(),
+        Arc::clone(&c),
+        margin_options(),
+    );
+    wait(|| {
+        let s = v.snapshot();
+        s.margin_submitted == 1 && !s.margin_working
+    });
+    assert_eq!(v.snapshot().phase, Phase::Idle);
+    assert!(v.snapshot().margin_failure.is_none());
+    assert!(v.margin().is_none());
+    assert_eq!(v.latest().unwrap().frame.generation, 1);
+    thread::sleep(Duration::from_millis(30));
+    let requests = c.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].background && requests[1].background);
+    drop(requests);
+    v.close().unwrap();
 }
 #[test]
 fn deck_or_frame_cache_off_never_prefetches() {

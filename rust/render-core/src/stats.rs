@@ -63,4 +63,72 @@ pub struct RenderStats {
     pub decoded_cache_evicted: u32,
     pub decoded_cache_bytes: u64,
     pub cancelled: bool,
+    /// Placement survivor walks by outcome (CUT_DENSITY_DESIGN §10.8, the
+    /// placement lattice): (walks planned, visible members) per outcome of
+    /// PLACE_WALK_OUTCOMES, one-dimensional arrays at [k], two-dimensional at
+    /// [PLACE_WALK_OUTCOMES.len() + k]. Counted per walk: the work bin's
+    /// collection once a frame, the tile walks and mini walks once a tile.
+    pub place_walks: [(u64, u64); 32],
+    /// The density stack (CUT_DENSITY_DESIGN §10.10), in DENSITY_STACK_COUNTS
+    /// order, summed over the tiles: density pixels the planes lit, those the
+    /// top plane's wrote, those the lower planes' wrote, and at the end of
+    /// the last plane the pixels an original covers and those a density
+    /// shape stands for.
+    pub density_stack: [u64; 5],
+    /// The density scene's work bin (pass 2): items collected, deferred
+    /// edges, and the items reached when it hit its cap and fell back to the
+    /// per-tile walk (0 = no overflow).
+    pub density_bin: [u64; 3],
+    /// Time spent collecting the density scenes' bins and their tiles'
+    /// minis at the block boundary (us).
+    pub density_collect_us: u64,
+}
+
+/// RenderStats::density_stack's counts, in order.
+pub const DENSITY_STACK_COUNTS: [&str; 5] = ["lit", "top", "lower", "covered", "claimed"];
+
+/// The outcomes of a placement array's survivor walk, in RenderStats::
+/// place_walks order: walked, or why the members were all visited.
+pub const PLACE_WALK_OUTCOMES: [&str; 16] = [
+    "walked",
+    "not_leaf",
+    "no_range",
+    "page_level",
+    "undecoded",
+    "non_rim",
+    "array_record",
+    "path",
+    "shapes",
+    "prep_work",
+    "not_subpixel",
+    "no_shapes",
+    "no_axis",
+    "axis_mismatch",
+    "cost",
+    "cursor_cap",
+];
+
+/// RenderStats::place_walks as a wire value: `<outcome><1|2>:<walks>/<members>`
+/// for every outcome seen, comma-separated; `-` for none.
+pub fn place_walks_wire(walks: &[(u64, u64); 32]) -> String {
+    let n = PLACE_WALK_OUTCOMES.len();
+    let parts: Vec<String> = walks
+        .iter()
+        .enumerate()
+        .filter(|(_, (count, _))| *count > 0)
+        .map(|(k, (count, members))| {
+            format!(
+                "{}{}:{}/{}",
+                PLACE_WALK_OUTCOMES[k % n],
+                1 + k / n,
+                count,
+                members
+            )
+        })
+        .collect();
+    if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join(",")
+    }
 }

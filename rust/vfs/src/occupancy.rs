@@ -88,6 +88,36 @@ pub const DEFAULT_MAX_CELLS: u64 = 1 << 30;
 pub const DEFAULT_MAX_WORK: u64 = 1 << 31;
 /// bitmap bytes over all layers before the rest is `none:size`
 pub const DEFAULT_MAX_BYTES: u64 = 1 << 30;
+
+/// Where a build's time goes (CUT_DENSITY_DESIGN §10.5, review
+/// 2026-09-24: the whole-run number could not say what layer
+/// parallelism would buy): nanoseconds summed over the layers of the
+/// last `build` in this process - grouping records by layer and
+/// taking each layer's shapes, a layer's preparation (presence, depth
+/// masks, units, plane allocation), the threaded marking, and the
+/// pyramid (to_level / pool). Diagnostic; read with `phases_take`.
+static PHASE_NS: [std::sync::atomic::AtomicU64; 4] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+fn phase_add(k: usize, since: std::time::Instant) {
+    PHASE_NS[k].fetch_add(
+        since.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// (group, prepare, mark, pyramid) seconds of the last build, and reset
+pub fn phases_take() -> [f64; 4] {
+    let mut out = [0.0; 4];
+    for (k, o) in out.iter_mut().enumerate() {
+        *o = PHASE_NS[k].swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e9;
+    }
+    out
+}
 /// the pyramid stops once the grid is this small on both axes
 pub const TOP_GRID: u32 = 64;
 
@@ -1952,6 +1982,7 @@ fn build_layer(
         prune.map(|p| p.small),
     );
     let planes = Planes::new(w, h, layer_max_depth(doc, shapes, has));
+    phase_add(1, prepared);
     let threads = jobs.max(1).min(units.len()).max(1);
     let shared = std::sync::atomic::AtomicU64::new(0);
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -1968,6 +1999,7 @@ fn build_layer(
             ));
         }
     }
+    let marking = std::time::Instant::now();
     let markers: Vec<Marker> = std::thread::scope(|s| {
         // Keep the sender inside the scope body: unwinding a failed
         // worker also disconnects the heartbeat before scope joins it.
@@ -2072,6 +2104,8 @@ fn build_layer(
             m.paths_skipped,
         );
     }
+    phase_add(2, marking);
+    let pyramid = std::time::Instant::now();
     let mut out = Vec::new();
     for (depth, plane) in planes.by_depth.iter().enumerate() {
         if !plane.any() {
@@ -2088,6 +2122,7 @@ fn build_layer(
             levels,
         });
     }
+    phase_add(3, pyramid);
     if out.is_empty() {
         // records without positive area (zero-width rects, degenerate
         // polygons): nothing to draw, no bitmap
@@ -2164,10 +2199,12 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
     let mut slot = 0usize;
     let mut layers = Vec::with_capacity(doc.layer_order.len());
     let indexing = std::time::Instant::now();
+    phases_take();
     if let Some(log) = opts.progress {
         log("grouping records by layer");
     }
     let mut index = index_shapes(doc);
+    phase_add(0, indexing);
     // Opts::prune: the cells whose whole subtree fits one grid cell
     let small: Vec<bool> = bboxes
         .iter()
@@ -2184,8 +2221,10 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
         ));
     }
     for &key in &doc.layer_order {
+        let grouping = std::time::Instant::now();
         let shapes = take_layer_shapes(&mut index, key, doc.cells.len());
         let has = layer_presence(doc, &shapes);
+        phase_add(0, grouping);
         if !has[doc.top] {
             layers.push(Layer {
                 layer: key.0,

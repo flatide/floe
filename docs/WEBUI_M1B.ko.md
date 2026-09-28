@@ -183,7 +183,7 @@ pending은 최신 상태 1개다. 취소는 한 번만 보내고 `pending_genera
 
 `state_rev`(복원 상태), `render_rev`(뷰포트 또는 유효 픽셀 정책), `render_key`
 (pan과 무관한 정책), `worker_epoch`와 native generation/round는 별개다.
-예를 들어 layout auto→cull은 state_rev만, pan은 render_rev만, keep/style 변경은
+예를 들어 layout auto→keep은 state_rev만, pan은 render_rev만, cull/style 변경은
 key도 바꾼다. stale base revision은 상태를 바꾸지 않고 conflict. 상대 pan 100개는
 100개 모두 적용하며 렌더만 합친다. 최신 frame Arc 하나를 보관하고 정책/뷰포트
 변경 즉시 무효화한다. 늦은 frame과 실제 IO 오류는 각각 discard/명시 오류이며
@@ -471,6 +471,11 @@ Rust 앱의 작업 화면을 우선 연결했으며 Python/GTK 제품·jobdeck �
 및 DRC/query/export/배포 전환은 다음 단계다. refinement 기본 off도 그대로다.
 
 ## 10. M1b-4a — 일반 레이아웃 margin/crop
+
+**2026-09-28 정방향 병합 갱신:** 아래는 최초 이관 기록이다. 현재 기본값은
+`--margin off`이며, `--margin on`으로 독립 세션에서만 prefetch를 활성화한다.
+retained frame 재사용은 여전히 기본 on이다. margin 요청에는 `bg=on`을 보내며
+viewport의 budget-fit 결정을 바꿔야 하는 margin은 버리고 기존 화면을 유지한다.
 
 `view`의 frame-cache는 기본 on이다. `--frame-cache off`는 native retained frame
 재사용과 margin prefetch를 함께 끈다(decoded page LRU를 끄는 옵션은 아니다).

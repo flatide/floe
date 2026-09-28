@@ -1448,7 +1448,6 @@ def cmd_view(args):
     # stay enabled: cold vs warm cache behavior is itself part of the product.
     stream_kb = args.stream_kb
     if args.perf_baseline:
-        args.lod = "off"
         args.frames = "off"
         args.labels = "off"
         args.refinement = "off"
@@ -1484,7 +1483,8 @@ def cmd_view(args):
     process_options = (stream_kb is not None
                        or args.stream_target_ms != 500
                        or args.render_debug
-                       or args.frame_cache == "off")
+                       or args.frame_cache == "off"
+                       or args.margin == "on")
     server = None
     if not args.multi and not process_options:
         # flateyes-style single instance per (uid, DISPLAY)
@@ -1503,9 +1503,9 @@ def cmd_view(args):
         if goto is not None:
             # repr() round-trips floats exactly, unlike %g
             request += "\tgoto=" + ",".join(repr(v) for v in goto)
-        request += ("\tdetail=%s\tdepth=%d\tlod=%s\tframes=%s"
+        request += ("\tdetail=%s\tdepth=%d\tframes=%s"
                     "\tlabels=%s\tlabelpx=%d" % (
-                        detail_name, depth, args.lod, args.frames,
+                        detail_name, depth, args.frames,
                         args.labels, args.label_font_px))
         levels = getattr(args, "level", None)
         if levels:
@@ -1546,7 +1546,7 @@ def cmd_view(args):
         pending_fields = tuple(
             (["goto=" + ",".join(repr(v) for v in goto)] if goto else [])
             + ["detail=%s" % detail_name, "depth=%d" % depth,
-               "lod=%s" % args.lod, "frames=%s" % args.frames,
+               "frames=%s" % args.frames,
                "labels=%s" % args.labels,
                "labelpx=%d" % args.label_font_px]
             + (["levels=" + ",".join(str(i) for i in levels)]
@@ -1560,10 +1560,11 @@ def cmd_view(args):
     from .gui import run_viewer
     run_viewer(c, server, goto=goto, drc=args.drc,
                detail=detail, dump=args.dump, depth=depth,
-               lod=args.lod == "on", frames=args.frames == "on",
+               frames=args.frames == "on",
                labels=args.labels == "on",
                label_font_px=args.label_font_px,
                frame_cache=args.frame_cache == "on",
+               margin=args.margin == "on",
                stream_kb=stream_kb,
                stream_target_ms=args.stream_target_ms,
                render_debug=args.render_debug,
@@ -1572,16 +1573,16 @@ def cmd_view(args):
 
 
 def _add_thin_option(p):
-    """The page hairline policy (review 2026-09-11): a plain layout
-    culls all-thin pages at wide views for speed, a jobdeck keeps them
-    (mask data is hairlines); a mask source opened on its own can ask
-    for the mask policy with --thin keep."""
+    """The page hairline policy (review 2026-09-11): every source keeps
+    all-thin pages as 1 px hairlines by default (a plain layout too
+    since 2026-09-23, user decision; it used to cull them at wide views
+    for speed) - --thin cull asks for the former layout policy."""
     p.add_argument("--thin", choices=("auto", "keep", "cull"),
                    default=None,
-                   help="thin shapes at wide views: auto = keep for a "
-                        "jobdeck, cull for a layout (the performance "
-                        "policy); keep = mask policy (all-thin pages stay "
-                        "as 1 px hairlines); cull = drop them")
+                   help="thin shapes at wide views: auto = keep (every "
+                        "source since 0.12.199; a layout used to cull); "
+                        "keep = all-thin pages stay as 1 px hairlines; "
+                        "cull = drop them (faster at wide views)")
 
 
 def _add_level_option(p):
@@ -1850,7 +1851,9 @@ def main(argv=None, *, prog=None, rust_only=None):
         help="build the design.ovo occupancy pyramid (the mask-policy "
              "wide view summary): the default for a jobdeck's sources, "
              "opt-in for a layout (2026-09-16); when a current cache "
-             "lacks it, add it without replacing the cache")
+             "lacks it, add it without replacing the cache. A plain "
+             "layout's frames do not draw it unless FLOE_RUST_OCCUPANCY=on "
+             "(2026-09-24); jobdeck views do")
     occ.add_argument(
         "--no-occupancy", dest="occupancy", action="store_false",
         help="index without the occupancy summary (the layout default; "
@@ -2239,12 +2242,6 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "Digits / the `d` dialog change it at runtime. "
                         "Forwarded to a running instance")
     _add_thin_option(p)
-    p.add_argument("--lod", choices=("on", "off"), default="on",
-                   help="starting merged geometry LOD state (default on - "
-                        "the live first view needs merged variants without "
-                        "a keypress; the planner reverts to exact on zoom "
-                        "and probes are always exact. The viewer "
-                        "button/`l` changes it live)")
     p.add_argument("--refinement", choices=("on", "off"), default="on",
                    help="publish progressive intermediate frames (default "
                         "on); off waits for one settled frame in both floe "
@@ -2255,6 +2252,13 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "on; Rust renderer only); off is useful for "
                         "backend-neutral render timing and opens an "
                         "independent instance")
+    p.add_argument("--margin", choices=("on", "off"), default="off",
+                   help="the background margin prefetch alone (default off, "
+                        "user decision 2026-09-27; Rust renderer only): every "
+                        "pan and zoom renders a viewport frame, retained-frame "
+                        "pan reuse stays; on prefetches a 2x margin behind "
+                        "each settled frame and opens an independent "
+                        "instance")
     p.add_argument("--perf-baseline", action="store_true",
                    help="backend-neutral timing preset: refinement, frame "
                         "reuse/margin prefetch, LOD, hierarchy frames and "

@@ -133,7 +133,7 @@ def safety(source, db, work, env, unit):
     assert [c[0] for c in commands].count("style") == 1
     renders = [c[1] for c in commands if c[0] == "render"]
     assert [c["gen"] for c in renders] == ["1", "2", "3"]
-    assert all(c["cut"] in ("0", "0.0") and c["frames"] == c["labels"] == "1" and c["thin"] == "cull" for c in renders)
+    assert all(c["cut"] in ("0", "0.0") and c["frames"] == c["labels"] == "1" and c["thin"] == "keep" for c in renders)
     reset()
     invoke([*one, "--detail", "medium", "--thin", "keep", "--label-font-px", "18"], fake_env)
     command = next(json.loads(line)[1] for line in log.read_text().splitlines() if json.loads(line)[0] == "render")

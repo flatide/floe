@@ -97,6 +97,73 @@ def _parse_wire_line(line):
     return tokens[0], fields
 
 
+def _add_place_walks(total, value):
+    """Adds a `place_walks=` wire value (`<outcome><1|2>:<walks>/<members>`,
+    comma-separated, `-` for none; CUT_DENSITY_DESIGN §10.8) to `total`,
+    {outcome1d: [walks, members]}."""
+    if not value or value == "-":
+        return
+    for part in value.split(","):
+        try:
+            name, counts = part.split(":", 1)
+            walks, members = (int(v) for v in counts.split("/", 1))
+        except ValueError:
+            continue
+        entry = total.setdefault(name, [0, 0])
+        entry[0] += walks
+        entry[1] += members
+
+
+DENSITY_STACK_COUNTS = ("lit", "top", "lower", "covered", "claimed")
+
+
+def _density_stack(value):
+    """A `density_stack=` wire value (`lit/top/lower/covered/claimed`,
+    CUT_DENSITY_DESIGN §10.10) as {count: n}; None for `-` (the frame did
+    not stack its density)."""
+    if not value or value == "-":
+        return None
+    try:
+        counts = [int(v) for v in value.split("/")]
+    except ValueError:
+        return None
+    if len(counts) != len(DENSITY_STACK_COUNTS):
+        return None
+    return dict(zip(DENSITY_STACK_COUNTS, counts))
+
+
+DENSITY_PAGE_COUNTS = ("planned", "in_hand", "decoded", "over_budget")
+DENSITY_TIMES = ("plan2_us", "scene2_us", "collect_us", "regions_us", "decode2_us")
+DENSITY_BIN = ("items", "deferred", "overflow")
+
+
+def _wire_counts(value, names):
+    """A `/`-separated wire value as {name: int}; None for `-` or a mismatch."""
+    if not value or value == "-":
+        return None
+    try:
+        counts = [int(v) for v in value.split("/")]
+    except ValueError:
+        return None
+    if len(counts) != len(names):
+        return None
+    return dict(zip(names, counts))
+
+
+def _density_pages(value):
+    """A `density_pages=` wire value (`planned/in_hand/decoded/over_budget`:
+    pass 2's pages, CUT_DENSITY_DESIGN §10.10) as {count: n}; None for `-`."""
+    if not value or value == "-":
+        return None
+    try:
+        counts = [int(v) for v in value.split("/")]
+    except ValueError:
+        return None
+    if len(counts) != len(DENSITY_PAGE_COUNTS):
+        return None
+    return dict(zip(DENSITY_PAGE_COUNTS, counts))
+
+
 def _wire_int(fields, name, default=0):
     try:
         return int(fields.get(name, default))
@@ -222,6 +289,12 @@ class RustRenderWorker:
         self._renderd_build = None
         self._max_depth = None
         self._opened = False
+        # how long start() took, by step (field 2026-09-22: a 10 s service
+        # open showed as a 52 ms frame): process up to `ready`, the cache
+        # open (`open_ms`: waited for `opened`; `renderd_open_ms`: renderd's
+        # own open_us), the first style; None until start() returns
+        self.open_report = None
+        self._renderd_open_us = None
         self._styled_epoch = None
         self._style_paths = {}
         self._startup_error = None
@@ -233,11 +306,12 @@ class RustRenderWorker:
         self._clip_jobs = {}
         self._mono = False
         # the page hairline policy sent with every frame (`thin=`):
-        # "cull" is the plain layout's performance policy (all-thin
-        # pages dropped at wide views), "keep" the mask / jobdeck
-        # policy (long thin shapes stay as 1 px hairlines). A job's
-        # "thin" overrides; the deck worker defaults to keep
-        self._thin_default = "cull"
+        # "keep" (long thin shapes stay as 1 px hairlines) is the
+        # default for every source since 2026-09-23 (user decision:
+        # a plain layout too); "cull" (all-thin pages dropped at wide
+        # views, the former layout policy) stays as a job's explicit
+        # choice - View > thin shapes > cull, --thin cull
+        self._thin_default = "keep"
         self._style_epoch = 0
         self._colors = {}
         self._fills = {}
@@ -329,10 +403,22 @@ class RustRenderWorker:
                     daemon=True)
                 self._reader.start()
                 self._stderr_reader.start()
+            started = time.monotonic()
             self._wait_for(lambda: self._ready, "ready")
+            ready = time.monotonic()
             self._send(self._open_command())
             self._wait_for(lambda: self._opened, "open")
+            opened = time.monotonic()
             self._publish_style(wait=True)
+            styled = time.monotonic()
+            self.open_report = {
+                "spawn_ms": (ready - started) * 1000.0,
+                "open_ms": (opened - ready) * 1000.0,
+                "renderd_open_ms": (self._renderd_open_us / 1000.0
+                                    if self._renderd_open_us is not None else None),
+                "style_ms": (styled - opened) * 1000.0,
+                "total_ms": (styled - started) * 1000.0,
+            }
         except Exception:
             self.stop()
             raise
@@ -554,6 +640,14 @@ class RustRenderWorker:
             "hier_cells": 0, "subtree_prunes": 0,
             # F2R-28 write-once tiles (sum over rounds)
             "once_tiles": 0, "once_passes": 0, "once_items": 0,
+            # placement survivor walks by outcome (sum over rounds)
+            "place_walks": {},
+            # the density stack's counts of the last round (None: off), and
+            # pass 2's pages
+            "density_stack": None,
+            "density_pages": None,
+            "density_us": None,
+            "density_bin": None,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -579,6 +673,11 @@ class RustRenderWorker:
                 thin, self._style_epoch, output))
         if probe is not None:
             command += " probe=%s block=%d" % (probe, block)
+        if job.get("bg"):
+            # §F2R-17 margin: renderd drops one the scale's budget fit does
+            # not hold instead of deciding anew (it must look as the
+            # viewport already does; 2026-09-27)
+            command += " bg=on"
         self._send(command)
 
     def _submit_recolor(self, job):
@@ -786,6 +885,9 @@ class RustRenderWorker:
                 # pre-0.12.16 renderd, so keep None rather than 0
                 max_depth = _wire_int(fields, "max_depth", -1)
                 self._max_depth = max_depth if max_depth >= 0 else None
+                # the open's own time (renderd 0.12.191+; absent before)
+                open_us = _wire_int(fields, "open_us", -1)
+                self._renderd_open_us = open_us if open_us >= 0 else None
                 self._condition.notify_all()
         elif kind == "styled":
             with self._condition:
@@ -812,6 +914,12 @@ class RustRenderWorker:
             generation = _wire_int(fields, "gen", -1)
             with self._jobs_lock:
                 self._jobs.pop(generation, None)
+            if kind == "dropped":
+                # a margin the budget fit does not hold (reason=fit) or a
+                # stale render: told, so the GUI can log it and a gate can
+                # wait for it; the GUI shows nothing for it
+                self.res.put({"kind": "dropped", "gen": generation,
+                              "reason": fields.get("reason", "")})
         elif kind == "error":
             message = fields.get("message", line).replace("_", " ")
             if fields.get("code") == "clip":
@@ -1036,6 +1144,11 @@ class RustRenderWorker:
         state["subtree_prunes"] += _wire_int(fields, "subtree_prunes")
         for key in ("once_tiles", "once_passes", "once_items"):
             state[key] += _wire_int(fields, key)
+        _add_place_walks(state["place_walks"], fields.get("place_walks", "-"))
+        state["density_stack"] = _density_stack(fields.get("density_stack", "-"))
+        state["density_pages"] = _density_pages(fields.get("density_pages", "-"))
+        state["density_us"] = _wire_counts(fields.get("density_us", "-"), DENSITY_TIMES)
+        state["density_bin"] = _wire_counts(fields.get("density_bin", "-"), DENSITY_BIN)
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1179,15 +1292,22 @@ class RustRenderWorker:
                 "fit_thin": _wire_int(fields, "fit_thin"),
                 "fit_full_pct": _wire_int(fields, "fit_full_pct"),
                 "fit_none_pct": _wire_int(fields, "fit_none_pct"),
+                # the fit remembered for this scale was applied (fit_fixed) or
+                # did not fit this frame and was decided anew (fit_redecided)
+                "fit_fixed": _wire_int(fields, "fit_fixed"),
+                "fit_redecided": _wire_int(fields, "fit_redecided"),
                 # sub-cut boxes (thin keep, few layers): what the size cut drops
                 # drawn as boxes from index metadata; boxes beyond the plan cap
                 "sub_cut_boxes": _wire_int(fields, "sub_cut_boxes"),
                 "sub_cut_box_over": _wire_int(fields, "sub_cut_box_over"),
                 "sub_cut_box_level": _wire_int(fields, "sub_cut_box_level"),
                 "sub_cut_box_unsure": _wire_int(fields, "sub_cut_box_unsure"),
-                # the per-shape cut (thin keep): every shape is judged by its
-                # smaller side, dbu; 0 = the cut judges pages by their largest shape
+                # the per-shape cut (thin keep), dbu; 0 = the cut judges pages
+                # by their largest shape. shape_cut_max: shapes are judged by
+                # their LARGER side (the default since 0.12.214, the hairlines
+                # stay), else by their smaller one (FLOE_RUST_SHAPE_CUT=min)
                 "shape_cut": _wire_int(fields, "shape_cut"),
+                "shape_cut_max": _wire_int(fields, "shape_cut_max"),
                 "stored_rep_points": _wire_int(fields, "stored_rep_points"),
                 "stored_rep_tested": _wire_int(fields, "stored_rep_tested"),
                 "stored_rep_limited": _wire_int(fields, "stored_rep_limited"),
@@ -1250,6 +1370,11 @@ class RustRenderWorker:
             "once_full_tiles": state["once_tiles"],
             "once_passes_skipped": state["once_passes"],
             "once_items_skipped": state["once_items"],
+            "place_walks": dict(state["place_walks"]),
+            "density_stack": state["density_stack"],
+            "density_pages": state["density_pages"],
+            "density_us": state["density_us"],
+            "density_bin": state["density_bin"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on

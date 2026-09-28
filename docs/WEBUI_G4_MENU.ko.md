@@ -38,7 +38,7 @@ python3 -B tools/validate_web_menu_inventory.py --require-complete
 | jobdeck 로드 레벨 재선택 | reselect-levels + 서버 camera/revision 고정 요청·명시 index 재시도. 첫 프레임 카메라/실패 보존 HTTP와 UI gate |
 | About / licenses | about/notices + 배포 고지 gate |
 | abstract / 옛 coverage | Rust abstract 미지원, density coverage 폐기. 새 occupancy는 제외 대상이 아님 |
-| LOD 토글 | 기존 GTK→Rust wire에 전달되지 않음. 웹은 무효로 수용하지 않고 설명과 함께 거부. index --lod와 다름 |
+| LOD 토글 | 최신 GTK에서도 제거됨(2026-09-22). 웹에도 토글 없음. 기존 view --lod는 설명과 함께 거부하며 index --lod와 다름 |
 
 ## 2. 확인된3건의 진행 상태
 

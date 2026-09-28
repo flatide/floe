@@ -215,6 +215,14 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
    keep 광역뷰면 `summary: none (<이유>)`(파일 없음·무효·레이어 status·킬 스위치).
 8. 킬 스위치 `FLOE_RUST_OCCUPANCY=off`(요약 무시 → 현행), `floe-index plan
    --explain`에 verdict `summary`(레이어 단위).
+9. **일반 레이아웃은 기본으로 요약을 쓰지 않는다(2026-09-24 사용자 결정).** renderd의 레이아웃 프레임
+   (잡덱 패스가 아닌 것)은 `design.ovo`가 있어도 요약을 고르지 않고(`summary: none (layout)`) 페이지
+   경로로 그린다. 잡덱 패스(`deck.rs`)는 그대로 요약을 쓴다. 레이아웃에서 다시 쓰려면 진단
+   `FLOE_RUST_OCCUPANCY=on`; `=off`는 종전대로 덱까지 끈다. 이유: 레이아웃을 `--occupancy`로 색인하면
+   요약이 넓은 keep 뷰를 대신 그려, 폭 우선 그리기·헤어라인 측정(CUT_DENSITY_DESIGN §10.6)에서 페이지
+   경로가 가려졌다. `floe2 index`의 레이아웃 기본(요약 안 만듦)은 그대로이고, 만든 파일은 남아 있어도
+   쓰이지 않는다. gate `RenderTests.test_a_plain_layout_draws_no_summary_by_default`(기본 프레임 =
+   킬 스위치 프레임, 이유 `layout`, opt-in은 요약); 이 게이트의 레이아웃 워커는 `=on`으로 요약을 판정한다.
 
 ## 7. 덱 통합
 
@@ -552,7 +560,9 @@ layer 3/300 status=ok work=729081740 set=4342426,1220836,338091,94074,27163,8105
   요약(존재만 표시)은 별도 결정으로 남긴다.
 - **뷰어 메뉴**: View > thin shapes at wide views > auto / keep (mask policy) /
   cull (layout policy, faster). 예전 "keep thin shapes (mask detail)" 체크 항목을
-  대체하며, 상태줄 `thin:keep|cull`은 그대로.
+  대체하며, 상태줄 `thin:keep|cull`은 그대로. 2026-09-23부터 auto는 모든 소스에서
+  keep이고(사용자 결정: 일반 레이아웃도 keep), 항목 이름은 auto (keep) / keep (thin
+  shapes as hairlines) / cull (drop all-thin pages, faster).
 - 남은 후속: 8-b 품질 샷(5 mm 뷰 요약 vs exact), `floe-index scan`으로 charge당
   비용(생성 시간의 다음 단계), cull에서의 요약.
 
@@ -566,11 +576,15 @@ medium)에서 16.7 s — `thin pages 15k kept`, `14851/14851 pages`, `dec sum 18
 FULL_DEPTH`(무제한 표식)여서 7/7이 `summary: none (depth)`로 떨어졌다. 플래너는
 높이 이상의 유한 depth를 REM_FULL로 접어 모든 도형을 그리므로 결과는 같다.
 
-조치(사용자 결정: depth는 자유롭게 바꾸는 값이므로 레이어별 조건까지): 캐시를 열
-때 셀 DAG를 한 번 훑어(top에서의 최장 경로, 배치 레코드 순회) 레이어마다 "그
+조치(사용자 결정: depth는 자유롭게 바꾸는 값이므로 레이어별 조건까지): 셀 DAG를 한 번
+훑어(top에서의 최장 경로, 배치 레코드 순회) 레이어마다 "그
 레이어의 페이지를 가진 가장 깊은 셀의 깊이"를 구하고(`Cache::layer_depth`), 요청
 depth가 무제한이거나 소스 계층 높이 이상이거나 그 레이어의 최대 깊이 이상이면 그
-레이어의 요약을 허용한다(`depth_is_full_for`). 요청 depth 안의 셀만 그리는 exact와
+레이어의 요약을 허용한다(`depth_is_full_for`). 이 훑기는 **처음 필요할 때 한 번**만 한다
+(2026-09-22 수정: 캐시를 열 때마다 모든 배치 레코드를 두 번 읽어, design.ovo가 없는 일반 레이아웃도
+MAIN01에서 서비스 열기에 약 10초를 썼다 — 합성 1/10 칩 1.3~6.2 s → 0.02~0.5 s). 이 값을 묻는 것은
+depth 평면이 없는 v1 파일(또는 `FLOE_RUST_OCCUPANCY_DEPTH=off`)의 제한 깊이 요청뿐이고, 셀마다 중복
+자식을 합쳐 배치 레코드를 한 번만 읽는다. 요청 depth 안의 셀만 그리는 exact와
 전체 깊이 평탄화인 요약이 그 조건에서 같은 도형 집합이기 때문이다. 덱은 pass마다
 그 소스에서 판정. 보이는 레이어 중 하나도 못 넘으면 `none (depth)`, 일부만 넘으면
 그 레이어만 요약(상태줄 `summary N layers`가 보이는 수보다 작다). gate: thinwide에

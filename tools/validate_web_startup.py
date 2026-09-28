@@ -172,7 +172,7 @@ def oracle(work):
         drc = "errors.db" if len(cases) % 11 == 0 else None
         args = SimpleNamespace(src=str(source), hairline=None, thin_um=None, goto=target,
             stream_kb=None, stream_target_ms=500, label_font_px=14, perf_baseline=baseline,
-            lod="on", frames=frames, labels=labels, refinement="on", frame_cache="on",
+            margin="off", frames=frames, labels=labels, refinement="on", frame_cache="on",
             render_debug=False, multi=True, drc=drc, detail="high", depth=depth, dump=False)
         policy = scope["cmd_view"](args)
         shown = SimpleNamespace()

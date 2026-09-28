@@ -114,7 +114,7 @@ def main(fixture):
                 assert p['request']['body']['thin'] == 'auto'
                 second = open_proposal(p, 2, first)
                 assert (second['view_id'], second['worker_epoch']) == (first['view_id'], first['worker_epoch'])
-                assert second['effective_thin'] == 'cull'
+                assert second['effective_thin'] == 'keep'
                 assert second['detail'] == 'medium'
                 # Effective refinement on is also omission for instance
                 # ownership. Invalid sender tools prove no replacement worker

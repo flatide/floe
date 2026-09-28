@@ -96,6 +96,28 @@ pub struct ViewReq {
     /// keep` request of a plain layout; deck passes, probes and the CLI's
     /// plans do not.
     pub shape_cut: bool,
+    /// The hairline-keeping cut (CUT_DENSITY_DESIGN §10.6, diagnostic,
+    /// renderd FLOE_RUST_SHAPE_CUT=max): pages are cut by their largest
+    /// shape (both max sides under the cut, the pre-0.12.173 rule) and
+    /// the raster drops only the records whose LARGER side is under it -
+    /// a long thin shape stays and the width-first drawing thins it by its
+    /// width. Exclusive with `shape_cut`.
+    pub shape_cut_max: bool,
+    /// The M7-C page wash (HierOpts::wash_px): a page whose whole image is at
+    /// most wash_px in both axes ships as one bbox rect on its own layer
+    /// instead of its geometry. renderd turns it OFF for a plain layout's
+    /// frames by default (user decision 2026-09-22: the blob hid the
+    /// area-true drawing of small pages; FLOE_RUST_PAGE_WASH=on restores it);
+    /// every other caller keeps it.
+    pub page_wash: bool,
+    /// The M7 LOD swap (HierOpts::lod_k): a page with a merged variant is
+    /// drawn from that variant when a grid cell is under a pixel and the
+    /// page is dense enough. renderd turns it OFF for a plain layout's
+    /// frames by default (user decision 2026-09-22: LOD is not in use - the
+    /// index builds no variants unless `floe2 index --lod`; FLOE_RUST_LOD=on
+    /// restores the swap for a cache that has them); every other caller
+    /// keeps it.
+    pub lod_swap: bool,
     /// The frame draws hierarchy frames (cell outlines at the depth
     /// boundary). False: none are planned, and a child subtree that holds
     /// no visible layer is not walked to reach them - the planner's

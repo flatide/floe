@@ -102,7 +102,8 @@ def main(fixture):
             session_path = Path(str(source) + ".layerprops.lock") if manual else work / "session.json"
             args = [str(APP), "view", str(source), "--session-file", str(session_path),
                     "--goto", "-10.9375,20,700", "--depth", "99", "--detail", "high",
-                    "--thin", "keep", "--no-labels", "--jobs", "2", "--raster-jobs", "1"]
+                    "--thin", "keep", "--no-labels", "--jobs", "2", "--raster-jobs", "1",
+                    "--margin", "on"]  # Opt in; frame-cache off below must still disable it.
             args += ["--no-open"] if manual else ["--firefox", str(fake)]
             if manual:
                 args.pop(1)  # Same real startup via bare SOURCE, not only parser tests.
