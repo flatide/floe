@@ -6312,24 +6312,27 @@ fn area_true_rim(request: &GeometryRasterRequest, paint: PaintStyle) -> bool {
     request.area_true && matches!(paint.stroke, StrokeStyle::Solid) && paint.stroke_width == 1
 }
 
-/// Area-true rectangle, WIDTH FIRST (user decision 2026-09-22), at any size:
-/// each axis draws m = ceil(w - t) pixels - the whole pixels of its w px
-/// always, one more when its fraction beats t - centred on the rectangle, t
-/// the rectangle's world rank for that axis (`width_first_span`). The pixels
-/// take the layer's fill and their rim is the outline. What it keeps: each
-/// rectangle's whole pixels and, over rectangles, its mean width (a width
-/// never changes under a pan, and shrinks monotonically when zooming out -
-/// a sub-pixel side shows when w > t, the same shape at every scale below).
-/// What it does not: a gap under 2 px may close and neighbours may land on
-/// the same pixels (quantization error, accepted - the picture as a whole
-/// comes first). The box never leaves the pixels the rectangle touches.
+/// Area-true rectangle: a side of 2 px or more is EDGE-EXACT - the pixels
+/// whose centres it covers, as a polygon's (`area_true_axis_span`; field
+/// 2026-09-28: sides at one coordinate must land on one pixel column) - and
+/// a thinner side is WIDTH FIRST (user decision 2026-09-22): it draws m =
+/// ceil(w - t) pixels - the whole pixels of its w px always, one more when its
+/// fraction beats t - centred on the rectangle, t the rank of that axis's two
+/// coordinates (`axis_rank`). The pixels take the layer's fill and their rim
+/// is the outline. What the thin side keeps: its whole pixels and, over
+/// rectangles, its mean width (a width never changes under a pan, and shrinks
+/// monotonically when zooming out - a sub-pixel side shows when w > t, the
+/// same shape at every scale below). What it does not: a gap under 2 px may
+/// close and thin neighbours may land on the same pixels (quantization error,
+/// accepted - the picture as a whole comes first). The box never leaves the
+/// pixels the rectangle touches.
 fn paint_area_true_rect(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,
     world: BBox,
     paint: PaintStyle,
 ) -> Result<bool, String> {
-    paint_width_first_rect(band, request, world, paint, (salted_rank(world, 1), salted_rank(world, 2)))
+    paint_width_first_rect(band, request, world, paint, (axis_rank(world.x0, world.x1, 1), axis_rank(world.y0, world.y1, 2)))
 }
 
 /// `paint_area_true_rect` under given x and y ranks: an array member's come
@@ -6352,10 +6355,10 @@ fn paint_width_first_rect(
         };
         return Ok(band.density_shape(rect((0.0, 0.0)), rect(ranks)));
     }
-    let Some((c0, c1)) = width_first_span_c(x0, x1, ranks.0, request.width_c) else {
+    let Some((c0, c1)) = area_true_axis_span(x0, x1, ranks.0, request.width_c) else {
         return Ok(false);
     };
-    let Some((r0, r1)) = width_first_span_c(y0, y1, ranks.1, request.width_c) else {
+    let Some((r0, r1)) = area_true_axis_span(y0, y1, ranks.1, request.width_c) else {
         return Ok(false);
     };
     let (d0, d1) = (c0 * DEVICE_ONE, c1 * DEVICE_ONE);
@@ -7506,6 +7509,43 @@ fn array_footprint(
         stack.touch(Some(local));
     }
     Ok(true)
+}
+
+/// A side this wide or wider (device units: 2 px) is drawn edge-exact - the
+/// pixels whose centres it covers, as a polygon's are (FillPhase::PixelCenter)
+/// - so the coordinates decide where an edge lands (field 2026-09-28: sides
+/// at one coordinate drew at different pixels - abutting rectangles, and a
+/// rectangle beside a polygon - since the width-first span placed a side by
+/// the rectangle's width and rank). Under it the width-first rule stays: a
+/// thin side keeps its whole pixels and its share of the extra one.
+const EDGE_EXACT_MIN: i128 = 2 * DEVICE_ONE;
+
+/// FLOE_RUST_EDGE_EXACT=off: every side width first, as 0.12.234 and before.
+fn edge_exact_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FLOE_RUST_EDGE_EXACT").as_deref() != Ok("off"))
+}
+
+/// One axis of an area-true rectangle: edge-exact from EDGE_EXACT_MIN (the
+/// pixels whose centres the side covers - never empty at 2 px or more),
+/// width first below it (`width_first_span_c`).
+fn area_true_axis_span(v0: i128, v1: i128, t: f64, c: f64) -> Option<(i128, i128)> {
+    if v1 - v0 >= EDGE_EXACT_MIN && edge_exact_enabled() {
+        let first = floor_div(v0 - DEVICE_HALF, DEVICE_ONE) + 1;
+        let end = floor_div(v1 - DEVICE_HALF, DEVICE_ONE) + 1;
+        return (end > first).then_some((first, end));
+    }
+    width_first_span_c(v0, v1, t, c)
+}
+
+/// The rank of one axis of a single rectangle: a hash of that axis's two
+/// coordinates alone (2026-09-28), so the pieces of one thin wire - the same
+/// span across, whatever their extent along - take the same pixels across,
+/// where the whole world box's hash (`salted_rank`) stepped at every joint.
+/// The two axes hash different coordinates with different salts and stay
+/// independent (a 0.5 x 0.5 px box shows 1 time in 4).
+fn axis_rank(a: i64, b: i64, salt: u64) -> f64 {
+    salted_rank(BBox { x0: a, y0: b, x1: a, y1: b }, salt)
 }
 
 /// One axis of a width-first rectangle: the side [v0, v1) (device units) is
@@ -10541,6 +10581,43 @@ mod tests {
         klayout.raster.area_true = false;
         let grown = lit_set(&render_geometry_styled(&hairline_scene(bars, Vec::new(), Vec::new()), &klayout).unwrap().frame, 32);
         assert!(grown.iter().any(|&(col, _)| col == 5), "the KLayout rule grows the first bar into the gap");
+    }
+
+    #[test]
+    fn sides_at_one_coordinate_land_on_one_pixel_column() {
+        // field 2026-09-28: abutting rectangles and a polygon beside them
+        // share the boundary column - the coordinate decides, not each
+        // rectangle's width and rank. 10 world units a pixel, 32 px frame.
+        let one = DEVICE_ONE;
+        let rect = |x, y, w, h| RectRec { layer: 1, dt: 0, x, y, w, h, rep: Rep::One };
+        // A [13, 51) and B [51, 93): 3.8 and 4.2 px, the shared side at 5.1 px
+        let bars = vec![rect(13, 13, 38, 120), rect(51, 13, 42, 120)];
+        // a polygon on another layer with its left side at 5.1 px too
+        let poly = PolyRec { layer: 2, dt: 0, pts: vec![(51, 160), (140, 160), (140, 290), (51, 290)], rep: Rep::One };
+        let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
+        let frame = render_geometry_styled(&hairline_scene(bars, vec![poly], Vec::new()), &request).unwrap().frame;
+        let lit = lit_set(&frame, 32);
+        let cols = |rows: std::ops::Range<usize>| -> BTreeSet<usize> { lit.iter().filter(|&&(_, r)| rows.contains(&r)).map(|&(c, _)| c).collect() };
+        // the bars' rows (y 13..133; row 0 is the top, y 320: rows 18.7..30.7): columns
+        // 1..=8, no gap and no overlap at the shared side
+        let bar_cols = cols(20..30);
+        assert_eq!(bar_cols, (1..=8).collect(), "the abutting bars: {bar_cols:?}");
+        // the boundary: A ends before column 5, B starts at it (5.5 px centre > 5.1)
+        let a_cols: BTreeSet<usize> = (1..=4).collect();
+        let b_cols: BTreeSet<usize> = (5..=8).collect();
+        assert_eq!(&bar_cols & &a_cols, a_cols);
+        assert_eq!(&bar_cols & &b_cols, b_cols);
+        // the polygon's rows (y 160..290: rows 3..16): its first column is B's first
+        let poly_cols = cols(4..15);
+        assert_eq!(poly_cols.iter().next(), Some(&5), "the polygon's side: {poly_cols:?}");
+        // the axis span itself: edge-exact at 2 px, width first below
+        assert_eq!(area_true_axis_span(13 * one / 10, 51 * one / 10, 0.9, 1.0), Some((1, 5)));
+        assert_eq!(area_true_axis_span(51 * one / 10, 93 * one / 10, 0.1, 1.0), Some((5, 9)));
+        let thin = area_true_axis_span(13 * one / 10, 28 * one / 10, 0.9, 1.0).unwrap();
+        assert_eq!(thin, width_first_span(13 * one / 10, 28 * one / 10, 0.9).unwrap());
+        // the pieces of one thin wire take the same rows: the rank is the axis's own
+        assert_eq!(axis_rank(13, 28, 2), axis_rank(13, 28, 2));
+        assert_ne!(salted_rank(BBox { x0: 0, y0: 13, x1: 100, y1: 28 }, 2), salted_rank(BBox { x0: 100, y0: 13, x1: 250, y1: 28 }, 2));
     }
 
     /// Every member of a Grid record placed by `transform`: (offset, world box).
