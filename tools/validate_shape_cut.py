@@ -221,10 +221,12 @@ def main():
                 cell_off, cell_on, cell_hair = worker(cell_src, False), worker(cell_src, 'min'), worker(cell_src, 'max')
                 try:
                     # 0.2 um a pixel: the wires are exactly 1 x 350 px on whole
-                    # pixels, so the width-first draw lights the same pixels
-                    # whatever ranks the members (the flat array's lattice
-                    # ranks, the placements' world-box hash); cut 3 px, hair
-                    # 1.5 px - the thin child cell was pruned
+                    # pixels, so the width-first draw of the 1 px side lights the
+                    # same pixels whatever ranks the members (the flat array's
+                    # lattice ranks, the placements' axis hash), and the 350 px
+                    # side is the block between its edge lines - 351 columns
+                    # (0.12.236, the Calibre outline); cut 3 px, hair 1.5 px -
+                    # the thin child cell was pruned
                     exact = view(35, 21, 256)
                     lit = {}
                     for name, flat_w, cell_w, cut_px in (('no cut', off, cell_off, 0.0), ('max', hair, cell_hair, 3.0), ('shape cut', on, cell_on, 3.0)):
@@ -234,7 +236,7 @@ def main():
                         assert a == b, 'wires as a child cell differ from the flat layout under %s: %d vs %d px (%s)' % (
                             name, len(lit_pixels(b)), len(lit_pixels(a)), rb['plan_culls'])
                         lit[name] = len(lit_pixels(b))
-                    assert lit['max'] == lit['no cut'] == 12 * 350 and lit['shape cut'] == 0, lit
+                    assert lit['max'] == lit['no cut'] == 12 * 351 and lit['shape cut'] == 0, lit
                     print('shape cut max: wires as a child cell identical to the flat layout (%d px; no cut and shape cut identical too)' % lit['max'])
                 finally:
                     cell_off.stop()

@@ -6855,17 +6855,20 @@ fn area_true_rim(request: &GeometryRasterRequest, paint: PaintStyle) -> bool {
     request.area_true && matches!(paint.stroke, StrokeStyle::Solid) && paint.stroke_width == 1
 }
 
-/// Area-true rectangle, WIDTH FIRST (user decision 2026-09-22), at any size:
-/// each axis draws m = ceil(w - t) pixels - the whole pixels of its w px
-/// always, one more when its fraction beats t - centred on the rectangle, t
-/// the rectangle's world rank for that axis (`width_first_span`). The pixels
-/// take the layer's fill and their rim is the outline. What it keeps: each
-/// rectangle's whole pixels and, over rectangles, its mean width (a width
-/// never changes under a pan, and shrinks monotonically when zooming out -
-/// a sub-pixel side shows when w > t, the same shape at every scale below).
-/// What it does not: a gap under 2 px may close and neighbours may land on
-/// the same pixels (quantization error, accepted - the picture as a whole
-/// comes first). The box never leaves the pixels the rectangle touches.
+/// Area-true rectangle: a side of 2 px or more is EDGE-EXACT - the pixels
+/// whose centres it covers, as a polygon's (`area_true_axis_span`; field
+/// 2026-09-28: sides at one coordinate must land on one pixel column) - and
+/// a thinner side is WIDTH FIRST (user decision 2026-09-22): it draws m =
+/// ceil(w - t) pixels - the whole pixels of its w px always, one more when its
+/// fraction beats t - centred on the rectangle, t the rank of that axis's two
+/// coordinates (`axis_rank`). The pixels take the layer's fill and their rim
+/// is the outline. What the thin side keeps: its whole pixels and, over
+/// rectangles, its mean width (a width never changes under a pan, and shrinks
+/// monotonically when zooming out - a sub-pixel side shows when w > t, the
+/// same shape at every scale below). What it does not: a gap under 2 px may
+/// close and thin neighbours may land on the same pixels (quantization error,
+/// accepted - the picture as a whole comes first). The box never leaves the
+/// pixels the rectangle touches.
 fn paint_area_true_rect(
     band: &mut RasterBand,
     request: &GeometryRasterRequest,
@@ -6877,7 +6880,10 @@ fn paint_area_true_rect(
         request,
         world,
         paint,
-        (salted_rank(world, 1), salted_rank(world, 2)),
+        (
+            axis_rank(world.x0, world.x1, 1),
+            axis_rank(world.y0, world.y1, 2),
+        ),
     )
 }
 
@@ -6904,10 +6910,10 @@ fn paint_width_first_rect(
         };
         return Ok(band.density_shape(rect((0.0, 0.0)), rect(ranks)));
     }
-    let Some((c0, c1)) = width_first_span_c(x0, x1, ranks.0, request.width_c) else {
+    let Some((c0, c1)) = area_true_axis_span(x0, x1, ranks.0, request.width_c, Axis::X) else {
         return Ok(false);
     };
-    let Some((r0, r1)) = width_first_span_c(y0, y1, ranks.1, request.width_c) else {
+    let Some((r0, r1)) = area_true_axis_span(y0, y1, ranks.1, request.width_c, Axis::Y) else {
         return Ok(false);
     };
     let (d0, d1) = (c0 * DEVICE_ONE, c1 * DEVICE_ONE);
@@ -8308,6 +8314,80 @@ fn array_footprint(
     Ok(true)
 }
 
+/// A side this wide or wider (device units: 2 px) is drawn edge-exact, the
+/// Calibre/KLayout way (field 2026-09-28: sides at one coordinate drew at
+/// different pixels - abutting rectangles, and a rectangle beside a polygon -
+/// since the width-first span placed a side by the rectangle's width and
+/// rank; then the two shapes' own rims made a shared side two pixels wide
+/// where Calibre shows one): each side is a 1 px LINE on the pixel the
+/// KLayout edge stroke picks for its coordinate (`edge_line_x`, `edge_line_y`)
+/// and the shape is the block between its lines, lines included - so two
+/// shapes sharing a coordinate share the line, and a rectangle and a polygon
+/// agree. Under it the width-first rule stays: a thin side keeps its whole
+/// pixels and its share of the extra one.
+const EDGE_EXACT_MIN: i128 = 2 * DEVICE_ONE;
+
+/// The column of the edge line at device x `v` (world_to_stroke_vertex:
+/// floor(x + 1/2) - the pixel whose left boundary is nearest, to the right of
+/// the boundary on a tie): the first fill column of the shape to its right.
+fn edge_line_x(v: i128) -> i128 {
+    floor_div(v + DEVICE_HALF, DEVICE_ONE)
+}
+
+/// The row of the edge line at device y `v` (from the top): the stroke rounds
+/// in WORLD y (floor(y_px + 1/2) from the bottom), which is ceil(v - 1/2) - 1
+/// here - the last fill row of the shape above it. The two axes round alike
+/// in world coordinates: a line belongs to the shape on its +x / +y side.
+fn edge_line_y(v: i128) -> i128 {
+    ceil_div(v - DEVICE_HALF, DEVICE_ONE) - 1
+}
+
+/// The two axes of a rectangle's device box.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    X,
+    Y,
+}
+
+/// FLOE_RUST_EDGE_EXACT=off: every side width first, as 0.12.234 and before.
+fn edge_exact_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FLOE_RUST_EDGE_EXACT").as_deref() != Ok("off"))
+}
+
+/// One axis of an area-true rectangle: edge-exact from EDGE_EXACT_MIN - the
+/// span from the line of its low side to the line of its high side, both
+/// included (2 px or more: 3 pixels at least) - width first below it
+/// (`width_first_span_c`).
+fn area_true_axis_span(v0: i128, v1: i128, t: f64, c: f64, axis: Axis) -> Option<(i128, i128)> {
+    if v1 - v0 >= EDGE_EXACT_MIN && edge_exact_enabled() {
+        let (first, last) = match axis {
+            Axis::X => (edge_line_x(v0), edge_line_x(v1)),
+            Axis::Y => (edge_line_y(v0), edge_line_y(v1)),
+        };
+        return Some((first, last + 1));
+    }
+    width_first_span_c(v0, v1, t, c)
+}
+
+/// The rank of one axis of a single rectangle: a hash of that axis's two
+/// coordinates alone (2026-09-28), so the pieces of one thin wire - the same
+/// span across, whatever their extent along - take the same pixels across,
+/// where the whole world box's hash (`salted_rank`) stepped at every joint.
+/// The two axes hash different coordinates with different salts and stay
+/// independent (a 0.5 x 0.5 px box shows 1 time in 4).
+fn axis_rank(a: i64, b: i64, salt: u64) -> f64 {
+    salted_rank(
+        BBox {
+            x0: a,
+            y0: b,
+            x1: a,
+            y1: b,
+        },
+        salt,
+    )
+}
+
 /// One axis of a width-first rectangle: the side [v0, v1) (device units) is
 /// w px; it draws m = ceil(w - t) pixels, none when m < 1, starting at
 /// floor(centre - m/2 + 1/2). m is floor(w) or floor(w) + 1 (floor(w) + 1
@@ -8367,19 +8447,30 @@ fn paint_area_true_polygon(
     if lo >= hi {
         return Ok(false);
     }
+    // a polygon 2 px or more on both sides draws its edges as the 1 px lines
+    // the KLayout stroke draws (edge_line_x / edge_line_y: the line of a
+    // coordinate is one pixel whatever the shape - a rectangle beside it, the
+    // polygon abutting it); its fill's rows include the centre on the top
+    // side (PixelCenterUpper) so the fill meets the line at every coordinate
+    let (left, right) = device
+        .iter()
+        .fold((i128::MAX, i128::MIN), |(a, b), &(x, _)| {
+            (a.min(x), b.max(x))
+        });
+    let edge_lines =
+        edge_exact_enabled() && right - left >= EDGE_EXACT_MIN && high - low >= EDGE_EXACT_MIN;
+    let phase = if edge_lines {
+        FillPhase::PixelCenterUpper
+    } else {
+        FillPhase::PixelCenter
+    };
     let mut rows: Vec<Vec<(i128, i128)>> = vec![Vec::new(); (hi - lo) as usize];
-    scan_device_polygon(
-        &device,
-        FillPhase::PixelCenter,
-        lo,
-        hi,
-        |row, first, end| {
-            if first < end {
-                rows[(row - lo) as usize].push((first, end));
-            }
-            Ok(())
-        },
-    )?;
+    scan_device_polygon(&device, phase, lo, hi, |row, first, end| {
+        if first < end {
+            rows[(row - lo) as usize].push((first, end));
+        }
+        Ok(())
+    })?;
     let empty: Vec<(i128, i128)> = Vec::new();
     let at = |row: i64| -> &Vec<(i128, i128)> {
         if row < lo || row >= hi {
@@ -8400,6 +8491,10 @@ fn paint_area_true_polygon(
                 drew |= fill_span(band, paint, request.height, row as usize, first, end);
             }
         }
+    }
+    if edge_lines {
+        drew |= stroke_world_polygon(band, request, points, paint)?;
+        return Ok(drew);
     }
     let mut rim = Vec::new();
     for row in row0..row1 {
@@ -9204,6 +9299,12 @@ struct ActiveEdge {
 #[derive(Clone, Copy)]
 enum FillPhase {
     PixelCenter,
+    /// PixelCenter with the row whose centre lies ON the top side included
+    /// and the one on the bottom side excluded (device rows [y0, y1) instead
+    /// of (y0, y1]): the rule the KLayout edge stroke's row rounding implies,
+    /// so an area-true polygon's fill meets its edge lines at every
+    /// coordinate (a half-pixel top side left a row between line and fill)
+    PixelCenterUpper,
     LowerBoundary,
 }
 
@@ -9211,6 +9312,18 @@ fn fill_phase_rows(y0: i128, y1: i128, phase: FillPhase) -> Result<(i128, i128),
     match phase {
         // Both sampling phases use a half-open y rule so shared vertices
         // always contribute exactly one incident edge.
+        FillPhase::PixelCenterUpper => Ok((
+            ceil_div(
+                y0.checked_sub(DEVICE_HALF)
+                    .ok_or_else(|| "coordinate overflow: polygon first row".to_string())?,
+                DEVICE_ONE,
+            ),
+            ceil_div(
+                y1.checked_sub(DEVICE_HALF)
+                    .ok_or_else(|| "coordinate overflow: polygon end row".to_string())?,
+                DEVICE_ONE,
+            ),
+        )),
         FillPhase::PixelCenter => Ok((
             floor_div(
                 y0.checked_sub(DEVICE_HALF)
@@ -9233,7 +9346,7 @@ fn fill_phase_rows(y0: i128, y1: i128, phase: FillPhase) -> Result<(i128, i128),
 
 fn fill_phase_columns(x0: i128, x1: i128, phase: FillPhase) -> Result<(i128, i128), String> {
     match phase {
-        FillPhase::PixelCenter => Ok((
+        FillPhase::PixelCenter | FillPhase::PixelCenterUpper => Ok((
             floor_div(
                 x0.checked_sub(DEVICE_HALF)
                     .ok_or_else(|| "coordinate overflow: polygon first column".to_string())?,
@@ -9381,7 +9494,9 @@ fn scan_device_polygon(
         }
         active.retain(|edge| edge.end_row > row);
         let scan_y = match phase {
-            FillPhase::PixelCenter => row as i128 * DEVICE_ONE + DEVICE_HALF,
+            FillPhase::PixelCenter | FillPhase::PixelCenterUpper => {
+                row as i128 * DEVICE_ONE + DEVICE_HALF
+            }
             FillPhase::LowerBoundary => (row as i128 + 1) * DEVICE_ONE,
         };
         intersections.clear();
@@ -11693,10 +11808,29 @@ mod tests {
                 }
             }
         }
+        // ... plus its edge lines (2026-09-28, the Calibre outline): the pixel of
+        // each Manhattan side's coordinate - floor(x / 10 + 1/2) columns, and rows
+        // 31 - floor(y / 10 + 1/2) - between its rounded ends
+        let col = |x: i64| ((x as f64) / 10.0 + 0.5).floor() as usize;
+        let row = |y: i64| 31 - ((y as f64) / 10.0 + 0.5).floor() as usize;
+        for k in 0..lshape.len() {
+            let ((xa, ya), (xb, yb)) = (lshape[k], lshape[(k + 1) % lshape.len()]);
+            let (c0, c1, r0, r1) = (
+                col(xa).min(col(xb)),
+                col(xa).max(col(xb)),
+                row(ya).min(row(yb)),
+                row(ya).max(row(yb)),
+            );
+            for c in c0..=c1 {
+                for r in r0..=r1 {
+                    want.insert((c, r));
+                }
+            }
+        }
         assert_eq!(
             lit_set(&frame, 32),
             want,
-            "area-true polygon differs from its pixel-centre set"
+            "area-true polygon differs from its pixel-centre set plus its edge lines"
         );
     }
 
@@ -11775,8 +11909,9 @@ mod tests {
             "0.5 x 0.5 px shown {}",
             quarter as f64 / trials as f64
         );
-        // in a frame: the 1.2 px gap between two 3.8 px bars stays open (the
-        // boxes never leave the pixels the bars touch), each bar 3 or 4 px
+        // in a frame: two 3.8 px bars 3.2 px apart - each the block between its
+        // edge lines (2026-09-28: 1.3..5.1 px is columns 1..=5, 8.3..12.1 px
+        // columns 8..=12), the gap open
         let rect = |x, y, w, h| RectRec {
             layer: 1,
             dt: 0,
@@ -11786,7 +11921,7 @@ mod tests {
             h,
             rep: Rep::One,
         };
-        let bars = vec![rect(13, 13, 38, 294), rect(63, 13, 38, 294)];
+        let bars = vec![rect(13, 13, 38, 294), rect(83, 13, 38, 294)];
         let request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
         let lit = lit_set(
             &render_geometry_styled(
@@ -11797,33 +11932,143 @@ mod tests {
             .frame,
             32,
         );
-        assert!(
-            lit.iter().all(|&(col, _)| col != 5),
-            "the 1.2 px gap between the bars was closed"
+        let cols: BTreeSet<usize> = lit.iter().map(|&(c, _)| c).collect();
+        assert_eq!(
+            cols,
+            (1..=5).chain(8..=12).collect(),
+            "the bars and the gap: {cols:?}"
         );
-        for range in [1..6usize, 6..11] {
+        // thin bars (1.5 px, 1.5 px apart) keep the width-first span: 1 or 2 px, within their pixels
+        let thin = vec![rect(13, 13, 15, 294), rect(43, 13, 15, 294)];
+        let lit = lit_set(
+            &render_geometry_styled(&hairline_scene(thin, Vec::new(), Vec::new()), &request)
+                .unwrap()
+                .frame,
+            32,
+        );
+        for range in [1..3usize, 4..6] {
             let cols: BTreeSet<usize> = lit
                 .iter()
                 .map(|&(c, _)| c)
                 .filter(|c| range.contains(c))
                 .collect();
             assert!(
-                cols.len() == 3 || cols.len() == 4,
-                "a 3.8 px bar drew {} columns",
+                cols.len() == 1 || cols.len() == 2,
+                "a 1.5 px bar drew {} columns",
                 cols.len()
             );
         }
-        let mut klayout = request.clone();
-        klayout.raster.area_true = false;
-        let grown = lit_set(
-            &render_geometry_styled(&hairline_scene(bars, Vec::new(), Vec::new()), &klayout)
-                .unwrap()
-                .frame,
-            32,
-        );
         assert!(
-            grown.iter().any(|&(col, _)| col == 5),
-            "the KLayout rule grows the first bar into the gap"
+            lit.iter().all(|&(col, _)| col != 3),
+            "the 1.5 px gap between the thin bars was closed"
+        );
+    }
+
+    #[test]
+    fn sides_at_one_coordinate_land_on_one_pixel_column() {
+        // field 2026-09-28: abutting rectangles and a polygon beside them
+        // share the boundary column - the coordinate decides, not each
+        // rectangle's width and rank - and the shared side is ONE line
+        // (Calibre), not each shape's own rim. 10 world units a pixel, 32 px
+        // frame, speckle fill: a solid column is an edge line.
+        let one = DEVICE_ONE;
+        let rect = |x, y, w, h| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep: Rep::One,
+        };
+        // A [13, 51) and B [51, 93): 3.8 and 4.2 px, the shared side at 5.1 px
+        let bars = vec![rect(13, 13, 38, 120), rect(51, 13, 42, 120)];
+        // a polygon with its left side at 5.1 px too, in other rows
+        let poly = PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(51, 160), (140, 160), (140, 290), (51, 290)],
+            rep: Rep::One,
+        };
+        let mut request = area_true_request(32, DEFAULT_TILE_SIZE, 1);
+        request.layers[0].fill = LayerFill::Speckle;
+        let frame = render_geometry_styled(&hairline_scene(bars, vec![poly], Vec::new()), &request)
+            .unwrap()
+            .frame;
+        let lit = lit_set(&frame, 32);
+        let cols = |rows: std::ops::Range<usize>| -> BTreeSet<usize> {
+            lit.iter()
+                .filter(|&&(_, r)| rows.contains(&r))
+                .map(|&(c, _)| c)
+                .collect()
+        };
+        let solid = |rows: std::ops::Range<usize>| -> BTreeSet<usize> {
+            (0..32)
+                .filter(|&c| rows.clone().all(|r| lit.contains(&(c, r))))
+                .collect()
+        };
+        // the bars' rows (y 13..133; row 0 is the top, y 320: rows 18.7..30.7): the block
+        // from A's left line (floor(1.3 + 0.5) = 1) to B's right line (floor(9.3 + 0.5) = 9)
+        let bar_cols = cols(20..30);
+        assert_eq!(
+            bar_cols,
+            (1..=9).collect(),
+            "the abutting bars: {bar_cols:?}"
+        );
+        // three lines, the shared side at 5.1 px ONE column (floor(5.6) = 5) for both
+        assert_eq!(solid(20..30), BTreeSet::from([1, 5, 9]), "the edge lines");
+        // the polygon's rows (y 160..290: rows 3..16): its left line is the bars' shared line
+        assert_eq!(
+            solid(4..15).iter().next(),
+            Some(&5),
+            "the polygon's side: {:?}",
+            solid(4..15)
+        );
+        // the axis span itself: lines included at 2 px, width first below
+        assert_eq!(
+            area_true_axis_span(13 * one / 10, 51 * one / 10, 0.9, 1.0, Axis::X),
+            Some((1, 6))
+        );
+        assert_eq!(
+            area_true_axis_span(51 * one / 10, 93 * one / 10, 0.1, 1.0, Axis::X),
+            Some((5, 10))
+        );
+        // rows round in world y: device 3.3..7.3 (world 28.7..24.7 px) is rows 2..=6
+        assert_eq!(
+            area_true_axis_span(33 * one / 10, 73 * one / 10, 0.5, 1.0, Axis::Y),
+            Some((2, 7))
+        );
+        // a half-pixel side rounds up in world y: device 3.5 is row 2, 7.5 row 6
+        assert_eq!(
+            area_true_axis_span(35 * one / 10, 75 * one / 10, 0.5, 1.0, Axis::Y),
+            Some((2, 7))
+        );
+        let thin = area_true_axis_span(13 * one / 10, 28 * one / 10, 0.9, 1.0, Axis::X).unwrap();
+        assert_eq!(
+            thin,
+            width_first_span(13 * one / 10, 28 * one / 10, 0.9).unwrap()
+        );
+        // the pieces of one thin wire take the same rows: the rank is the axis's own
+        assert_eq!(axis_rank(13, 28, 2), axis_rank(13, 28, 2));
+        assert_ne!(
+            salted_rank(
+                BBox {
+                    x0: 0,
+                    y0: 13,
+                    x1: 100,
+                    y1: 28
+                },
+                2
+            ),
+            salted_rank(
+                BBox {
+                    x0: 100,
+                    y0: 13,
+                    x1: 250,
+                    y1: 28
+                },
+                2
+            )
         );
     }
 
@@ -13190,7 +13435,10 @@ mod tests {
                 },
             )
         };
-        let original = rect(3, 0, 0, 160, 320, Rep::One);
+        // the original ends at 15.4 px: its right edge line (floor(x + 1/2),
+        // the Calibre outline of 2026-09-28) stays in column 15 - at 16.0 it
+        // would take column 16, the right half's first
+        let original = rect(3, 0, 0, 154, 320, Rep::One);
         let strip = rect(
             2,
             162,

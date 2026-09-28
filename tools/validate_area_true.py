@@ -8,24 +8,44 @@ gaps up to ~1.5 px closed (3.8 px bars 1.2 px apart drew as one block) and a
 shape under a pixel lit a whole one (0.1 px wires 1 px apart lit every
 column, 10x their area). Under area-true a RECTANGLE is drawn width first -
 each axis ceil(w - t) px (its whole pixels always, one more when the fraction
-beats t, t its world rank for that axis), centred - and any other shape
-lights the pixels whose centres it covers with its outline on their rim, a
-sub-pixel one kept with the chance its own area fills its pixels. Contract:
-a rectangle keeps its whole pixels and, over rectangles, its mean width; a
-gap under 2 px may close and neighbours may share pixels (quantization).
+beats t, t the rank of that axis's two coordinates), centred - on a side
+UNDER 2 px; a side of 2 px or more is edge-exact the Calibre way (0.12.236,
+field 2026-09-28: sides at one coordinate drew at different pixels, and a
+shared side was two pixels wide where Calibre shows one): each side is a
+1 px LINE on the pixel the KLayout edge stroke picks for its coordinate
+(floor(x + 1/2) columns; rows rounded alike in world y) and the shape is the
+block between its lines, lines included - so two shapes sharing a coordinate
+share the line. A polygon or path 2 px or more on both sides fills the
+pixels whose centres it covers (its top side's centre included) and draws
+the same edge lines; a sub-pixel one is kept with the chance its own area
+fills its pixels. Contract: a thin side keeps its whole pixels and, over
+rectangles, its mean width; a gap under 2 px may close and thin neighbours
+may share pixels (quantization); a wide side lands where its coordinate
+says, one line for every shape sharing it.
 
 One layout written with klayout.db: fields of vertical bars (widths / gaps in
 pixels at the 0.1 um/px view, cycling through a list per field), at pans of
 0, 1/4, 1/2 and 3/4 px:
 
   * no lit column lies outside the columns the bars touch;
-  * in fields whose gaps are all 2 px or more, every bar draws floor(w) or
-    floor(w) + 1 px, the same width at every pan, and no gap closes;
-  * every field of bars a pixel or wider - integer and non-integer pitches,
-    neighbours of different widths - lights, averaged over the four pans, a
-    column share within 0.08 of its covered share; a field of one width and
-    gap is written as an ARRAY (an OASIS repetition), whose members spread
-    their extra pixels by index (GridRanks), and stays within 0.025;
+  * in fields whose gaps are all 2 px or more, a bar of 2 px or more lights
+    exactly the block between its edge lines, lines included (floor(x + 1/2)
+    of each side: floor(w) + 1 or floor(w) + 2 columns by position), a
+    thinner bar floor(w) or floor(w) + 1 px with the same width at every pan,
+    and no gap closes;
+  * two rectangles abutting at a fractional coordinate and a polygon with a
+    side at that coordinate (layer 16, its own view) light one contiguous
+    block with the shared side on ONE column - floor(x + 1/2) - at the four
+    pans;
+  * a field whose bars are all 2 px or more lights, at every pan, exactly
+    the blocks between its bars' edge lines (edge-exact: the share is the
+    geometry's own - at an integer pitch every member draws the same width,
+    the quantization KLayout has too); every other field of bars a pixel or
+    wider - non-integer pitches, neighbours of different widths - lights,
+    averaged over the four pans, a column share within 0.08 of its covered
+    share; a field of one width and gap is written as an ARRAY (an OASIS
+    repetition), whose members spread their extra pixels by index
+    (GridRanks), and stays within 0.025;
   * bars under a pixel (arrays too): the lit share is within 0.85..1.15 of the
     covered share;
   * under the kill switch FLOE_RUST_AREA_TRUE=off the 1.2 and 1.5 px gaps
@@ -54,7 +74,9 @@ pixels at the 0.1 um/px view, cycling through a list per field), at pans of
     with a 16 MiB and a 1 MiB page target - one page, and two pages that cut
     the lattice's Grid record in two (frag_split / frag_rep) - lights the
     same pixels at five pans, whole and fractional on both axes, and about
-    its covered area (the per-record ranks differed in 258 px); the build's
+    1.5 px times the rows the 4.5 px side's centres give at that pan (the
+    thin side width first, the wide side edge-exact; the per-record ranks
+    differed in 258 px); the build's
     rep-split line counts its 2 grid pieces, none one-row or one-member;
   * a 2 x 64 lattice cut ACROSS its rows (a tall layout, the split plane
     between the rows): the build counts 2 one-row pieces of a 2-D grid,
@@ -110,6 +132,8 @@ ROWS_AT = (100.0, 499.6)      # um: the 2 x 64 lattice the tall layout's split c
 ROW_A, ROW_B = (12, 0), (13, 0)   # its two rows stored alone
 PLACE_AT = (700.0, 3.0)       # um: a lattice of sub-pixel bars and triangles, flat and as a placement array
 PLACE_FLAT, PLACE_ARRAY = (14, 0), (15, 0)
+ABUT, ABUT_AT = (16, 0), (900.0, 3.0)   # um: two abutting rectangles and a polygon sharing their boundary
+ABUT_A, ABUT_B = 0.383, 0.427           # um: 3.83 and 4.27 px wide
 SPLIT_PANS = ((0.0, 0.0), (0.2, 0.0), (0.37, 0.0), (0.5, 0.29), (0.81, 0.63))
 BIG = (60.0, 40.0)            # um: the shapes that run off the edges, around this point
 SMALL = (120.0, 5.0)          # um: the triangle and square fields' corner
@@ -148,11 +172,13 @@ def name(n):
 
 
 def touched(view, n):
-    """The columns field n's bars touch in this view."""
+    """The columns field n's bars may light in this view: those they touch, and
+    the column of a side's edge line (floor(x + 1/2)) when the side lies on a
+    pixel boundary or past its half."""
     cols = set()
     for x0, x1, _ in bars_of(n):
         a, b = round((x0 - view[0]) / PX_UM, 6), round((x1 - view[0]) / PX_UM, 6)
-        cols.update(range(math.floor(a), math.ceil(b)))
+        cols.update(range(math.floor(a), max(math.ceil(b), math.floor(round(b + 0.5, 6)) + 1)))
     return cols
 
 
@@ -171,6 +197,89 @@ def bar_widths(pixels, view, n):
         hi = math.ceil(round((x1 - view[0]) / PX_UM, 6))
         out[k] = (w, [b - a for a, b in runs_ if a < hi and b > lo])
     return out
+
+
+def bar_runs(pixels, view, n):
+    """Per bar of field n: (true width px, its device edges in px of this view,
+    the lit runs (first column, end column) within the columns it touches)."""
+    runs_ = []
+    for c in sorted(lit_columns(pixels, view, n)):
+        if runs_ and runs_[-1][1] == c:
+            runs_[-1][1] = c + 1
+        else:
+            runs_.append([c, c + 1])
+    out = {}
+    for k, (x0, x1, w) in enumerate(bars_of(n)):
+        a, b = round((x0 - view[0]) / PX_UM, 6), round((x1 - view[0]) / PX_UM, 6)
+        lo, hi = math.floor(a), math.ceil(b)
+        out[k] = (w, a, b, [(p, q) for p, q in runs_ if p < hi and q > lo])
+    return out
+
+
+def centre_columns(a, b):
+    """The edge-exact block of the span [a, b] px: from the edge line of its
+    left side to that of its right side, both included (floe_render_core
+    edge_line_x = floor(x + 1/2), the KLayout stroke's pixel), as (first,
+    end) with `end` exclusive. Abutting shapes share the line's column."""
+    return math.floor(round(a + 0.5, 6)), math.floor(round(b + 0.5, 6)) + 1
+
+
+def lit_run(pixels, view, rows_um, cols_um, width=W):
+    """The lit columns of the rows rows_um (y0, y1 um) within cols_um (x0, x1 um) of the view."""
+    r0 = int(round((view[3] - rows_um[1]) / PX_UM)) + 1
+    r1 = int(round((view[3] - rows_um[0]) / PX_UM)) - 1
+    c0 = max(0, int(math.floor((cols_um[0] - view[0]) / PX_UM)) - 3)
+    c1 = min(width, int(math.ceil((cols_um[1] - view[0]) / PX_UM)) + 3)
+    return sorted(c for c in range(c0, c1)
+                  if any(pixels[(r * width + c) * 4:(r * width + c) * 4 + 4] != BLACK for r in range(r0, r1)))
+
+
+def expected_share(view, n):
+    """The share of field n's interior columns whose centres a bar covers in
+    this view (the edge-exact picture of a field of bars 2 px or wider)."""
+    fx, _ = origin(n)
+    c0 = int(round((fx - view[0]) / PX_UM)) + 2
+    c1 = int(round((fx + FIELD_W - view[0]) / PX_UM)) - 2
+    bars = [centre_columns(round((x0 - view[0]) / PX_UM, 6), round((x1 - view[0]) / PX_UM, 6)) for x0, x1, _ in bars_of(n)]
+    lit = sum(1 for c in range(c0, c1) if any(first <= c < end for first, end in bars))
+    return lit / (c1 - c0)
+
+
+def lattice_rows(y0_um, view_y0_um, rows):
+    """The rows the 0.45 um (4.5 px) bars of a split lattice light per row of
+    the lattice (pitch 0.8 um = 8 px, so the same at every row): the rows
+    whose centres the bar covers in a view whose bottom is view_y0_um."""
+    counts = set()
+    for j in range(rows):
+        a = round((y0_um + j * 0.8 - view_y0_um) / PX_UM, 6)
+        # the block between the edge lines, rounded in world y as the stroke
+        # rounds (floor(y_px + 1/2) from the bottom), lines included
+        first, end = centre_columns(a, a + 4.5)
+        counts.add(end - first)
+    assert len(counts) == 1, counts
+    return counts.pop()
+
+
+def expected_mixed(view, n):
+    """The column share a field of bars should light in this view: a bar of 2 px
+    or more its whole edge-line block, a thinner bar its covered fraction of
+    each column (its width-first pixels average to that over ranks)."""
+    fx, _ = origin(n)
+    c0 = int(round((fx - view[0]) / PX_UM)) + 2
+    c1 = int(round((fx + FIELD_W - view[0]) / PX_UM)) - 2
+    total = 0.0
+    for c in range(c0, c1):
+        share = 0.0
+        for x0, x1, w in bars_of(n):
+            a, b = round((x0 - view[0]) / PX_UM, 6), round((x1 - view[0]) / PX_UM, 6)
+            if w >= 2:
+                first, end = centre_columns(a, b)
+                if first <= c < end:
+                    share = 1.0
+            else:
+                share += max(0.0, min(b, c + 1) - max(a, c))
+        total += min(1.0, share)
+    return total / (c1 - c0)
 
 
 def covered(n):
@@ -242,6 +351,15 @@ def layout(path):
     unit.shapes(placed).insert(tri(0.0, 0.0))
     top.insert(kdb.CellInstArray(unit.cell_index(), kdb.Trans(int(round(px / ly.dbu)), int(round(py / ly.dbu))),
                                  kdb.Vector(70, 0), kdb.Vector(0, 3000), 120, 3))
+    # two rectangles abutting at x = ABUT_AT[0] + ABUT_A (a fractional pixel)
+    # and, below them, a pentagon whose left side is at that coordinate
+    ax, ay = ABUT_AT
+    abut = ly.layer(*ABUT)
+    top.shapes(abut).insert(kdb.DBox(ax, ay, ax + ABUT_A, ay + 6.0))
+    top.shapes(abut).insert(kdb.DBox(ax + ABUT_A, ay, ax + ABUT_A + ABUT_B, ay + 6.0))
+    bx = ax + ABUT_A
+    top.shapes(abut).insert(kdb.DPolygon([kdb.DPoint(bx, ay + 10.0), kdb.DPoint(bx + 9.0, ay + 10.0), kdb.DPoint(bx + 12.0, ay + 13.0),
+                                          kdb.DPoint(bx + 9.0, ay + 16.0), kdb.DPoint(bx, ay + 16.0)]))
     ly.write(str(path))
 
 
@@ -385,6 +503,7 @@ def main():
             gen = 10
             for n in range(len(WIDE)):
                 gaps_wide = all(g >= 2 for _, g in FIELDS[n])
+                all_wide = all(w >= 2 for w, _ in FIELDS[n])
                 shares, widths_seen = [], None
                 for phase in (0.0, 0.25, 0.5, 0.75):
                     gen += 1
@@ -394,27 +513,70 @@ def main():
                     assert not stray, '%s at a %g px pan: columns %s lit outside the bars' % (name(n), phase, sorted(stray)[:6])
                     flags, _ = columns(pixels, moved, n)
                     shares.append(sum(flags) / len(flags))
+                    if all_wide:
+                        # edge-exact: the columns whose centres the bars cover, nothing else
+                        want = expected_share(moved, n)
+                        assert abs(shares[-1] - want) <= 1e-6, '%s at a %g px pan: column share %.4f, the centres give %.4f' % (
+                            name(n), phase, shares[-1], want)
                     if gaps_wide:
-                        # each bar by position: its one run, floor(w) or floor(w) + 1 wide
-                        widths = bar_widths(pixels, moved, n)
-                        for k, (w, hit) in widths.items():
+                        # each bar by position: from 2 px exactly the block between its
+                        # edge lines (edge-exact, 0.12.236), under 2 px floor(w) or
+                        # floor(w) + 1 wide and the same width at every pan (width first)
+                        widths = {}
+                        for k, (w, a, b, hit) in bar_runs(pixels, moved, n).items():
                             assert len(hit) == 1, '%s at a %g px pan: bar %d drew runs %s (a gap closed?)' % (name(n), phase, k, hit)
-                            assert math.floor(w) <= hit[0] <= math.floor(w) + 1, \
-                                '%s at a %g px pan: a %g px bar drew %d px' % (name(n), phase, w, hit[0])
-                        assert widths_seen in (None, widths), '%s: a pan changed a width' % name(n)
+                            if w >= 2:
+                                # the block between the edge lines, lines included
+                                assert hit[0] == centre_columns(a, b), '%s at a %g px pan: a %g px bar at [%g, %g) drew columns %s, its edge lines give %s' % (
+                                    name(n), phase, w, a, b, hit[0], centre_columns(a, b))
+                            else:
+                                assert math.floor(w) <= hit[0][1] - hit[0][0] <= math.floor(w) + 1, \
+                                    '%s at a %g px pan: a %g px bar drew %d px' % (name(n), phase, w, hit[0][1] - hit[0][0])
+                                widths[k] = hit[0][1] - hit[0][0]
+                        assert widths_seen in (None, widths), '%s: a pan changed a thin width' % name(n)
                         widths_seen = widths
                 cover = covered(n)
                 mean = sum(shares) / len(shares)
-                # one (width, gap): an array, spread by index; else world-box hashes
-                tolerance = 0.025 if len(FIELDS[n]) == 1 else 0.08
-                assert abs(mean - cover) <= tolerance, '%s: column share %.3f over four pans for %.3f covered (%s)' \
-                    % (name(n), mean, cover, ['%.3f' % v for v in shares])
+                if not all_wide:
+                    # the thin bars' pixels average to their cover over ranks (one (width,
+                    # gap): an array, spread by index; else axis hashes); a wide bar among
+                    # them is its edge-line block
+                    want = sum(expected_mixed((view[0] + phase * PX_UM, view[1], view[2] + phase * PX_UM, view[3]), n)
+                               for phase in (0.0, 0.25, 0.5, 0.75)) / 4
+                    tolerance = 0.025 if len(FIELDS[n]) == 1 else 0.08
+                    assert abs(mean - want) <= tolerance, '%s: column share %.3f over four pans for %.3f expected (%.3f covered; %s)' \
+                        % (name(n), mean, want, cover, ['%.3f' % v for v in shares])
                 print('area-true bars %-28s column share per pan %s, mean %.3f for %.3f covered%s'
                       % (name(n), ' '.join('%.3f' % v for v in shares), mean, cover,
-                         ', widths kept at every pan' if gaps_wide else ''))
+                         ' (edge-exact: the centres\' columns)' if all_wide else ', thin widths kept at every pan' if gaps_wide else ''))
             for n in (WIDE.index([(3.8, 1.2)]), WIDE.index([(1.5, 1.5)])):
                 flags, _ = columns(was, view, n)
                 assert all(flags), 'kill switch: the %s gaps should close as before' % name(n)
+            # abutting rectangles and a polygon sharing their boundary: one run, the
+            # boundary on the column whose centre the coordinate first covers
+            ax, ay = ABUT_AT
+            for phase in (0.0, 0.25, 0.5, 0.75):
+                gen += 1
+                aview = (ax - 10.0 + phase * PX_UM, 0.0, ax + 90.0 + phase * PX_UM, H * PX_UM)
+                pixels = frame(on, gen, aview, visible=(ABUT,))
+                bars = lit_run(pixels, aview, (ay, ay + 6.0), (ax, ax + ABUT_A + ABUT_B))
+                a, b = (ax - aview[0]) / PX_UM, (ax + ABUT_A + ABUT_B - aview[0]) / PX_UM
+                first, end = centre_columns(a, b)
+                assert bars == list(range(first, end)), 'abutting bars at a %g px pan: columns %s, expected %d..%d' % (phase, bars, first, end - 1)
+                boundary = centre_columns((ax + ABUT_A - aview[0]) / PX_UM, b)[0]
+                poly = lit_run(pixels, aview, (ay + 10.0, ay + 16.0), (ax + ABUT_A, ax + ABUT_A + 12.0))
+                assert poly and poly[0] == boundary, 'the polygon at a %g px pan starts at column %s, the bars\' boundary is %d' % (
+                    phase, poly[:1], boundary)
+                # the shared side is ONE line: with the fill cleared only the lines light, and
+                # the bars' rows hold exactly three columns - A's left, the shared, B's right
+                on.submit({'kind': 'repattern', 'fills': [(ABUT, CLEAR)], 'widths': []})
+                gen += 1
+                lines = frame(on, gen, aview, visible=(ABUT,))
+                on.submit({'kind': 'repattern', 'fills': [], 'widths': []})
+                bar_lines = lit_run(lines, aview, (ay + 1.0, ay + 5.0), (ax, ax + ABUT_A + ABUT_B))
+                assert bar_lines == [first, boundary, end - 1], 'abutting bars at a %g px pan: edge lines at %s, expected %s' % (
+                    phase, bar_lines, [first, boundary, end - 1])
+            print('area-true: abutting rectangles and a polygon put their shared side on one column - one line - at the four pans')
             for k in range(len(THIN)):
                 n = len(WIDE) + k
                 cover = covered(n)
@@ -612,10 +774,14 @@ def main():
                 assert (pieces in done.stderr) == (mb == 1), '%d MiB build log:\n%s' % (mb, done.stderr)
             pair = [worker(whole_src, True), worker(split_src, True)]
             try:
-                size, covered_px = (240, 80), 64 * 6 * 1.5 * 4.5
+                size = (240, 80)
                 for px, py in SPLIT_PANS:
                     bx, by = SPLIT_AT[0] - 2.4 + px * PX_UM, SPLIT_AT[1] - 1.0 + py * PX_UM
                     box = (bx, by, bx + size[0] * PX_UM, by + size[1] * PX_UM)
+                    # the 1.5 px side is width first (the lattice's ranks: half the members
+                    # a pixel wider), the 4.5 px side edge-exact - the rows whose centres
+                    # it covers at this pan, the same for every member of an 8 px pitch
+                    covered_px = 64 * 6 * 1.5 * lattice_rows(SPLIT_AT[1], by, 6)
                     lit, pages = [], []
                     for w in pair:
                         gen += 1
@@ -645,10 +811,11 @@ def main():
                 assert (pieces in done.stderr) == (mb == 1), '%d MiB build log:\n%s' % (mb, done.stderr)
             pair = [worker(rows_src, True), worker(uncut_src, True)]
             try:
-                size, covered_px, apart = (240, 80), 2 * 64 * 1.5 * 4.5, []
+                size, apart = (240, 80), []
                 for px, py in SPLIT_PANS:
                     bx, by = ROWS_AT[0] - 2.4 + px * PX_UM, ROWS_AT[1] - 1.0 + py * PX_UM
                     box = (bx, by, bx + size[0] * PX_UM, by + size[1] * PX_UM)
+                    covered_px = 2 * 64 * 1.5 * lattice_rows(ROWS_AT[1], by, 2)
                     gen += 1
                     cut, report = frame(pair[0], gen, box, visible=(SPLIT_LAYER,), size=size, report=True)
                     assert report['tiles'] == 2, 'row split at a (%g, %g) px pan: %d pages' % (px, py, report['tiles'])
