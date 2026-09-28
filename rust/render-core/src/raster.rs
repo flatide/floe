@@ -6349,8 +6349,11 @@ fn paint_width_first_rect(
     if band.stacking() && (x1 - x0 < DEVICE_ONE || y1 - y0 < DEVICE_ONE) {
         // density (DensityStack): a pixel wide at most on its thin side, all
         // rim - it stands for its widest draw (rank 0) and lights its own
+        // the same axis rule as the originals (review 2026-09-28: a 2.6 x
+        // 0.6 px array lit 232 px as originals and 153 px as density when
+        // the density kept the width-first span on the wide side too)
         let rect = |t: (f64, f64)| {
-            let (c, r) = (width_first_span_c(x0, x1, t.0, request.width_c)?, width_first_span_c(y0, y1, t.1, request.width_c)?);
+            let (c, r) = (area_true_axis_span(x0, x1, t.0, request.width_c, Axis::X)?, area_true_axis_span(y0, y1, t.1, request.width_c, Axis::Y)?);
             Some((c.0, r.0, c.1, r.1))
         };
         return Ok(band.density_shape(rect((0.0, 0.0)), rect(ranks)));

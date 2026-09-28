@@ -33,7 +33,9 @@ chip (tools/gen_main01_like.py) under a small budget:
     two hundred (layout_uneven), under a 1 MB budget the corner decides
     everything, the whole layout as its margin answers `dropped` (reason
     fit), the corner draws the same after it, and the whole layout as a
-    viewport frame refits (fit_redecided 1).
+    viewport frame refits (fit_redecided 1) - reusing no tile of the corner's
+    retained frame (drawn under the old decision) and equal to a fresh render;
+    the same view again reuses tiles under the new decision.
 
     .venv/bin/python tools/validate_fit_budget.py
 """
@@ -52,8 +54,9 @@ from floe.rust_render import RustRenderWorker
 PX = 1920       # at this size keep + cut 1 px of the whole chip decodes ~110 MB
 
 
-def worker(src, budget_mb, fit=True, thin=True):
+def worker(src, budget_mb, fit=True, thin=True, retained_mb=0):
     os.environ['FLOE_RUST_BUDGET_MB'] = str(budget_mb)
+    os.environ['FLOE_RUST_RETAINED_MB'] = str(retained_mb)
     if fit:
         os.environ.pop('FLOE_RUST_FIT_BUDGET', None)
     else:
@@ -69,6 +72,7 @@ def worker(src, budget_mb, fit=True, thin=True):
     os.environ.pop('FLOE_RUST_BUDGET_MB', None)
     os.environ.pop('FLOE_RUST_FIT_BUDGET', None)
     os.environ.pop('FLOE_RUST_FIT_THIN', None)
+    os.environ['FLOE_RUST_RETAINED_MB'] = '0'
     return w
 
 
@@ -198,7 +202,9 @@ def main():
             done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(uneven), '--jobs', '2'],
                                   cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
             assert done.returncode == 0, done.stdout + done.stderr
-            tiny = worker(uneven, 1)
+            # retention on: the corner's frame would serve the whole layout's
+            # frame at the same scale (a pan-like overlap)
+            tiny, fresh = worker(uneven, 1, retained_mb=256), worker(uneven, 1)
             try:
                 ux0, uy0, ux1, uy1 = map(float, tiny.cache.meta['bbox'])
                 side = max(ux1 - ux0, uy1 - uy0)
@@ -211,15 +217,29 @@ def main():
                 assert dropped is None and rd.get('kind') == 'dropped' and rd.get('reason') == 'fit', 'the margin over the decision must be dropped: %s' % (
                     rd.get('plan_culls') if rd.get('kind') == 'frame' else rd,)
                 corner2, rq2 = frame(tiny, 3, quarter, size=PX // 4)
-                assert rq2['plan_culls']['fit_fixed'] == 1 and rq2['plan_culls']['fit_redecided'] == 0 and bytes(corner2) == bytes(corner), \
+                # (with retention on the exact revisit is the retained frame itself - the
+                # label-only fast path plans nothing and reports no fit)
+                assert (rq2['plan_culls']['fit_fixed'] == 1 or rq2['tiles_reused'] > 0) and rq2['plan_culls']['fit_redecided'] == 0 \
+                    and bytes(corner2) == bytes(corner), \
                     'the dropped margin must leave the decision and the viewport as they were: %s' % (rq2['plan_culls'],)
-                # the same extent as a VIEWPORT frame decides anew - the legitimate refit
+                # the same extent as a VIEWPORT frame decides anew - the legitimate refit -
+                # and reuses NO tile of the corner's frame (review 2026-09-28: the reused
+                # tiles carried the old decision's pages beside the new one's): it equals
+                # a fresh worker's frame byte for byte
                 view, rv = frame(tiny, 4, whole, size=PX)
                 assert view is not None and rv['plan_culls']['fit_redecided'] == 1 and rv['plan_culls']['fit_thin'] > 0, rv.get('plan_culls')
+                assert rv['tiles_reused'] == 0, 'the refit frame reused %d tiles of the frame under the old decision' % rv['tiles_reused']
+                plain, rp = frame(fresh, 4, whole, size=PX)
+                assert bytes(view) == bytes(plain), 'the refit frame differs from a fresh render (%s vs %s)' % (rv['plan_culls'], rp['plan_culls'])
+                # under the new decision the frame is retained and serves the same view again
+                again, ra_ = frame(tiny, 5, whole, size=PX)
+                assert ra_['tiles_reused'] > 0 and bytes(again) == bytes(view), (ra_['plan_culls'], ra_['tiles_reused'])
                 print('fit budget: a margin the decision does not hold is dropped (reason fit) and the corner draws the same after it; '
-                      'the same extent as a viewport refits (1/%d)' % (1 << rv['plan_culls']['fit_thin']))
+                      'the same extent as a viewport refits (1/%d) reusing no tile and equals a fresh render; the same view again reuses %d tiles'
+                      % (1 << rv['plan_culls']['fit_thin'], ra_['tiles_reused']))
             finally:
                 tiny.stop()
+                fresh.stop()
             print('fit budget: wide keep view fits 48 MB with 1/%d of the class it ends in (complete from x%.3g, '
                   'none below x%.3g; 0 = no such class), %d px lit (ladder: cut x%.3g; old: error), '
                   'fitting frames unchanged'

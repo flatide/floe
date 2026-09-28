@@ -839,6 +839,12 @@ struct RetainedFrame {
     key: RetainedKey,
     view: [f64; 4],
     frame: floe_render_core::RgbaFrame,
+    /// The budget fit the frame was planned under (WorkerState::fit_memory;
+    /// None: no budget fit). A request under another decision must not
+    /// reuse it (review 2026-09-28: after a redecision the frame mixed the
+    /// old selection's tiles with the new one's - 240 tiles, 16,178 px off
+    /// a fresh render).
+    fit: Option<floe_render_core::FixedFit>,
 }
 
 impl RetainedFrame {
@@ -2346,7 +2352,16 @@ fn run_render(
         !floe_render_core::summary_layout_allowed(),
     )?;
     let summary_key = SummaryKey::of(&summary);
-    let pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key);
+    // the budget fit a retained frame must have been planned under to serve
+    // this request: the scale's remembered decision (the fit key does not
+    // depend on the view's position, so the request before the snap gives it)
+    let expected_fit = if command.exact {
+        None
+    } else {
+        let pre = make_plan_request(cache, &command, pass1_decode_budget(state.page_cache.budget_bytes(), &command))?;
+        if pre.decode_budget > 0 { state.fit_memory.get(&fit_memory_key(&command, &pre)).copied() } else { None }
+    };
+    let mut pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key, expected_fit);
     let command = &command;
     check_generation(cancellation, command.generation)?;
     // the density stack's pass 2 decodes within a reserve of its own
@@ -2451,7 +2466,15 @@ fn run_render(
                 state.fit_memory.insert(fit_key.clone(), decision);
             }
         }
+        if planned.plan.stats.fit_redecided && pan_reuse.is_some() {
+            // the reused tiles were drawn under the decision this frame
+            // replaced: the pages the new one drops or adds would sit beside
+            // them (review 2026-09-28) - the whole frame is drawn anew
+            pan_reuse = None;
+        }
     }
+    // the fit this frame is drawn under, for the retained frame it leaves
+    let frame_fit = if label_only { expected_fit } else { planned.plan.stats.fit_decision };
     let planned_labels = if command.labels {
         Some(cache.plan_labels(&request, command.frames, command.label_font_px)?)
     } else {
@@ -2854,6 +2877,7 @@ fn run_render(
                         key: RetainedKey::with_summary(command, state.style_epoch, summary_key.clone()),
                         view: command.view,
                         frame,
+                        fit: frame_fit,
                     },
                     retained_budget_bytes(),
                 );
@@ -3205,16 +3229,29 @@ fn prepare_pan_reuse(
     state: &WorkerState,
     command: &mut RenderCommand,
     summary: &SummaryKey,
+    fit: Option<floe_render_core::FixedFit>,
 ) -> Option<FrameReuse> {
     if !retention_enabled(command) {
         return None;
     }
     let key = RetainedKey::with_summary(command, state.style_epoch, summary.clone());
-    let retained = state
+    // newest first, every frame of this render state and budget fit: the
+    // first whose scale and grid the request meets serves (review 2026-09-28:
+    // the newest frame alone was tried, so with A -> B -> A the frame at A
+    // went unused although it was still retained)
+    let (reuse, view) = state
         .retained
         .iter()
         .rev()
-        .find(|candidate| candidate.key == key)?;
+        .filter(|candidate| candidate.key == key && candidate.fit == fit)
+        .find_map(|candidate| reuse_from(candidate, command))?;
+    command.view = view;
+    Some(reuse)
+}
+
+/// The overlap of `retained` this request can take, and the request's view
+/// snapped onto the retained grid, when the scale and the 16 px grid agree.
+fn reuse_from(retained: &RetainedFrame, command: &RenderCommand) -> Option<(FrameReuse, [f64; 4])> {
     let [ox0, oy0, ox1, oy1] = retained.view;
     let [nx0, ny0, nx1, ny1] = command.view;
     let rw = f64::from(retained.frame.width());
@@ -3276,7 +3313,7 @@ fn prepare_pan_reuse(
     // edge, y from the TOP edge).
     let vx0 = ox0 + kx as f64 * sppx;
     let vy1 = oy1 - ky as f64 * sppy;
-    command.view = [vx0, vy1 - height * sppy, vx0 + width * sppx, vy1];
+    let view = [vx0, vy1 - height * sppy, vx0 + width * sppx, vy1];
     let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
     let old = retained.frame.pixels();
     let src_row_bytes = (rw_px as usize) * 4;
@@ -3289,15 +3326,18 @@ fn prepare_pan_reuse(
     }
     let base = floe_render_core::RgbaFrame::from_pixels(command.width, command.height, pixels)
         .ok()?;
-    Some(FrameReuse {
-        base,
-        valid: [
-            valid_x0 as u32,
-            valid_y0 as u32,
-            valid_x1 as u32,
-            valid_y1 as u32,
-        ],
-    })
+    Some((
+        FrameReuse {
+            base,
+            valid: [
+                valid_x0 as u32,
+                valid_y0 as u32,
+                valid_x1 as u32,
+                valid_y1 as u32,
+            ],
+        },
+        view,
+    ))
 }
 
 /// A frame with the density stack's pass 2 (floe_render_core DensityStack,
@@ -4202,6 +4242,7 @@ mod tests {
                 vec![0u8; 32 * 32 * 4],
             )
             .unwrap(),
+            fit: None,
         };
         let roomy = usize::MAX;
         let mut retained = Vec::new();
@@ -4258,6 +4299,7 @@ mod tests {
                 vec![0u8; (px * px * 4) as usize],
             )
             .unwrap(),
+            fit: None,
         };
         let mut retained = Vec::new();
         store_retained(&mut retained, sized(64, [0.0, 0.0, 640.0, 640.0]), roomy);
@@ -4327,6 +4369,7 @@ mod tests {
             key: RetainedKey::new(&retained_cmd, None),
             view: [0.0, 0.0, 320.0, 320.0],
             frame: floe_render_core::RgbaFrame::from_pixels(32, 32, pixels.clone()).unwrap(),
+            fit: None,
         }];
         let mut margin = render(
             parse_command(
@@ -4335,7 +4378,7 @@ mod tests {
             .unwrap()
             .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut margin, &SummaryKey::default()).expect("margin maps the center");
+        let reuse = prepare_pan_reuse(&state, &mut margin, &SummaryKey::default(), None).expect("margin maps the center");
         assert_eq!(reuse.valid, [16, 16, 48, 48]);
         // margin pixel (16,16) is retained pixel (0,0)
         assert_eq!(&reuse.base.pixels()[(16 * 64 + 16) * 4..][..4], &pixels[..4]);
@@ -4346,6 +4389,7 @@ mod tests {
             key: RetainedKey::new(&retained_cmd, None),
             view: [-160.0, -160.0, 480.0, 480.0],
             frame: floe_render_core::RgbaFrame::from_pixels(64, 64, margin_pixels).unwrap(),
+            fit: None,
         }];
         let mut inside = render(
             parse_command(
@@ -4354,7 +4398,7 @@ mod tests {
             .unwrap()
             .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut inside, &SummaryKey::default()).expect("viewport maps out");
+        let reuse = prepare_pan_reuse(&state, &mut inside, &SummaryKey::default(), None).expect("viewport maps out");
         assert_eq!(reuse.valid, [0, 0, 32, 32], "fully covered by the margin");
 
         // Vertical pan: row 0 is the TOP (world y1), so a pan UP in
@@ -4368,6 +4412,7 @@ mod tests {
             key: RetainedKey::new(&retained_cmd, None),
             view: [0.0, 0.0, 320.0, 320.0],
             frame: floe_render_core::RgbaFrame::from_pixels(32, 32, row_coded).unwrap(),
+            fit: None,
         }];
         let mut panned_up = render(
             parse_command(
@@ -4376,12 +4421,35 @@ mod tests {
             .unwrap()
             .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut panned_up, &SummaryKey::default()).expect("vertical pan maps");
+        let reuse = prepare_pan_reuse(&state, &mut panned_up, &SummaryKey::default(), None).expect("vertical pan maps");
         // request y1 = 480 sits 16 rows above retained y1 = 320:
         // request rows 16..32 hold retained rows 0..16.
         assert_eq!(reuse.valid, [0, 16, 32, 32]);
         assert_eq!(reuse.base.pixels()[16 * 32 * 4], 0, "row 16 = old row 0");
         assert_eq!(reuse.base.pixels()[31 * 32 * 4], 15, "row 31 = old row 15");
+    }
+
+    #[test]
+    fn pan_reuse_finds_an_older_frame_at_the_scale_and_none_under_another_fit() {
+        // review 2026-09-28: A -> B -> A found nothing, since only the newest
+        // frame of the render state was tried; and a frame planned under
+        // another budget fit must not serve
+        let mut state = WorkerState::default();
+        let cmd = |line: &str| render(parse_command(line).unwrap().unwrap());
+        let a_cmd = cmd("render gen=0 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
+        let b_cmd = cmd("render gen=1 view=0,0,640,640 w=32 h=32 frames=off out=/tmp/b.raw");
+        let frame = |px: u32| floe_render_core::RgbaFrame::from_pixels(px, px, vec![3u8; (px * px * 4) as usize]).unwrap();
+        let fit = floe_render_core::FixedFit { cut_dbu: 5, class: 3, phase: 7, page: 9 };
+        state.retained = vec![
+            RetainedFrame { key: RetainedKey::new(&a_cmd, None), view: [0.0, 0.0, 320.0, 320.0], frame: frame(32), fit: Some(fit) },
+            RetainedFrame { key: RetainedKey::new(&b_cmd, None), view: [0.0, 0.0, 640.0, 640.0], frame: frame(32), fit: Some(fit) },
+        ];
+        let mut again = cmd("render gen=2 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/c.raw");
+        let reuse = prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), Some(fit)).expect("the older frame at this scale serves");
+        assert_eq!(reuse.valid, [0, 0, 32, 32]);
+        let other = floe_render_core::FixedFit { cut_dbu: 5, class: 4, phase: 7, page: 9 };
+        assert!(prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), Some(other)).is_none(), "another decision: nothing to reuse");
+        assert!(prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), None).is_none());
     }
 
     #[test]
