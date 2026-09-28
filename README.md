@@ -10,6 +10,14 @@
 
 하는 것을 목표로 한다. 타겟 환경은 Linux, 개발/테스트는 macOS.
 
+## Rust 웹 서버·브라우저 사용 (`feature/webui`)
+
+Linux 서버에서 `floe2-web`을 실행하고 PC의 Chrome/Firefox로 접속하는 절차는
+[Linux 서버 + 브라우저 사용 안내](docs/WEBUI_LINUX_USAGE.ko.md)에 정리했다.
+빌드·portable, 인덱싱, **SSH 터널과 일회용 인증 링크**, jobdeck/DRC, 자원 설정,
+종료·재접속과 문제 해결을 다룬다. 현재 loopback 서버이며 공개 웹 서버 배포는 아니다.
+이 경로는 Python/GTK/Electron 없이 실행하며, 아래의 기존 GTK 실행 안내와 구분한다.
+
 ## 제품 경계와 환경 설정
 
 **`floe2`가 유일한 제품 라인이다(2026-09-08 브랜치 승격).** 번들 글꼴을

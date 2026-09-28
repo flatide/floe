@@ -1,5 +1,8 @@
 # floe2-web — Rust 애플리케이션 CLI (개발 중)
 
+실행 순서 중심의 문서: [Linux 서버 + PC 브라우저 사용 안내](../../docs/WEBUI_LINUX_USAGE.ko.md).
+SSH 터널·세션 인증·서버 파일 선택·종료/재접속은 이 안내를 먼저 참고한다.
+
 현재 **일반 레이아웃/잡덱 `index/info/render/probe`, 분석 `jobdeck`, 기본 웹 `view`, ICE/ASCII `drc` 조회,
 일반 layout exact `clip`, batch/mosaic·DRC 캡처와 PNG 주석 `fe-embed`를 지원**한다.
 기존 Python `floe2`/GTK와 병행 개발하는 별도 실행 파일이며 제품 전환은 아직 완료되지 않았다.

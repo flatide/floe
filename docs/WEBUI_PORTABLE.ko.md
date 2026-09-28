@@ -84,6 +84,10 @@ packager 실행 중 SIGINT/SIGTERM은 직접 소유한 빌드 프로세스 그�
 
 ## 사용·현장 확인
 
+서버 기동부터 PC 브라우저 연결까지의 순서는
+[Linux 서버 + 브라우저 사용 안내](WEBUI_LINUX_USAGE.ko.md)를 참고한다.
+현재 listener는 loopback 전용이므로 서버 IP 직접 접속 대신 SSH 터널을 사용한다.
+
 새 디렉터리에 풀고 다음을 실행한다. `verify.sh`는 sha256sum 또는 shasum을 요구한다.
 
 ```sh
