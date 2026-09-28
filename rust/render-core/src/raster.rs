@@ -7293,7 +7293,11 @@ enum FootKind {
 /// `kind` stands for along world axis `axis` (0 = x).
 fn foot_span(request: &GeometryRasterRequest, kind: FootKind, axis: usize, v0: i128, v1: i128) -> Result<Option<(i128, i128)>, String> {
     Ok(match kind {
-        FootKind::Rect => width_first_span_c(v0, v1, 0.0, request.width_c),
+        // the originals' axis rule: a side of 2 px or more is the block between
+        // its edge lines (review 2026-09-28: the footprint kept the width-first
+        // span, so 100 members of 2.6 x 0.6 px stood for 358 px where the
+        // originals drew 400, and lower density leaked into the 42)
+        FootKind::Rect => area_true_axis_span(v0, v1, 0.0, request.width_c, if axis == 0 { Axis::X } else { Axis::Y }),
         FootKind::Area if v1 - v0 < DEVICE_ONE => Some(area_true_across(v0, v1)),
         FootKind::Area if axis == 0 => Some(fill_phase_columns(v0, v1, FillPhase::PixelCenter)?),
         FootKind::Area => Some(fill_phase_rows(v0, v1, FillPhase::PixelCenter)?),
@@ -11492,6 +11496,9 @@ mod tests {
                 vec![
                     rect(2, 10, 150, 1, 6, Rep::Grid { na: 30, nb: 8, va, vb }),
                     rect(2, 170, 10, 6, 1, Rep::Grid { na: 11, nb: 30, va, vb }),
+                    // a wide thin member (2.6 x 0.6 px): its footprint is the
+                    // edge-exact block on x (review 2026-09-28)
+                    rect(2, 10, 250, 26, 6, Rep::Grid { na: 10, nb: 4, va, vb }),
                 ]
             };
             let pages = vec![(1, low(), Vec::new()), (2, arrays(), vec![poly(tri(20, 20), Rep::Grid { na: 30, nb: 12, va, vb })])];
@@ -11526,6 +11533,12 @@ mod tests {
                 let white = |frame: &RgbaFrame| lit_of(frame, WHITE, 0..32, 0..32);
                 assert_eq!(white(&a.frame), white(&b.frame), "vectors {va:?} {vb:?} tile {tile} workers {workers} list {list}");
                 assert!(!white(&a.frame).is_empty());
+                // what the members stand for (claimed = their footprints: the lit
+                // span lies within the rank-0 span on a thin side and is the block
+                // itself on a wide one) is the same stored as an array or one by one
+                // (review 2026-09-28: the array footprint kept the width-first span
+                // on the wide side - 358 px for 400)
+                assert_eq!(a.stats.density_stack[4], b.stats.density_stack[4], "claimed: vectors {va:?} {vb:?} tile {tile} workers {workers} list {list}");
                 let alone = density_frame(&stack_scene(vec![(1, low(), Vec::new())], CUT_1), &bare, CUT_1 as i64, &request, true, &mut Vec::new());
                 assert!(white(&alone.frame).len() > white(&a.frame).len(), "pitch {pitch}: the arrays claim some of layer 1's pixels");
             }

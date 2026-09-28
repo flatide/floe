@@ -3184,9 +3184,12 @@ fn store_retained(retained: &mut Vec<RetainedFrame>, entry: RetainedFrame, budge
     // pan series' full reuse after one step while the GUI, remembering
     // the margin, did not prefetch again. Same state means identical
     // pixels over the overlap, so nothing is lost by not storing.
+    // ... and planned under the same budget fit (review 2026-09-28: a frame
+    // under another decision stayed in place, so nothing at that scale was
+    // ever reusable again and every revisit drew anew)
     if let Some(index) = retained
         .iter()
-        .position(|candidate| same_scale(candidate) && view_contains(&candidate.view, &entry.view))
+        .position(|candidate| same_scale(candidate) && candidate.fit == entry.fit && view_contains(&candidate.view, &entry.view))
     {
         // it just served this render: touch it to newest (LRU order)
         let kept = retained.remove(index);
@@ -4427,6 +4430,30 @@ mod tests {
         assert_eq!(reuse.valid, [0, 16, 32, 32]);
         assert_eq!(reuse.base.pixels()[16 * 32 * 4], 0, "row 16 = old row 0");
         assert_eq!(reuse.base.pixels()[31 * 32 * 4], 15, "row 31 = old row 15");
+    }
+
+    #[test]
+    fn a_containing_frame_under_another_fit_does_not_keep_its_place() {
+        // review 2026-09-28: the containing same-scale frame stayed whatever
+        // its fit, so after a redecision no frame at the scale could serve
+        let command = render(parse_command("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw").unwrap().unwrap());
+        let frame = |px: u32, view: [f64; 4], fit: Option<floe_render_core::FixedFit>| RetainedFrame {
+            key: RetainedKey::new(&command, Some(7)),
+            view,
+            frame: floe_render_core::RgbaFrame::from_pixels(px, px, vec![0u8; (px * px * 4) as usize]).unwrap(),
+            fit,
+        };
+        let (a, b) = (
+            Some(floe_render_core::FixedFit { cut_dbu: 5, class: 3, phase: 7, page: 9 }),
+            Some(floe_render_core::FixedFit { cut_dbu: 5, class: 4, phase: 7, page: 9 }),
+        );
+        let mut retained = vec![frame(64, [-160.0, -160.0, 480.0, 480.0], a)];
+        // the same fit: the containing margin stays
+        store_retained(&mut retained, frame(32, [0.0, 0.0, 320.0, 320.0], a), usize::MAX);
+        assert_eq!((retained.len(), retained[0].frame.width()), (1, 64));
+        // another fit: the new frame replaces it
+        store_retained(&mut retained, frame(32, [0.0, 0.0, 320.0, 320.0], b), usize::MAX);
+        assert_eq!((retained.len(), retained[0].frame.width(), retained[0].fit), (1, 32, b));
     }
 
     #[test]
