@@ -101,6 +101,10 @@ pub struct PlanRequest {
     /// under it is a dot item, never walked into or decoded - and pages and
     /// records take `cut_dbu` times this share. None: one cut for all.
     pub sub_cut_dots: Option<f64>,
+    /// > 0: a probe of whether the plan fits (floe_vfs::hier::HierOpts::
+    /// probe_limit): planned as asked, abandoned once its pages pass this
+    /// many decoded bytes (stats.fit_over). 0: a plan.
+    pub probe_limit: u64,
 }
 
 impl PlanRequest {
@@ -155,6 +159,7 @@ mod tests {
             fixed_fit: None,
             root: None,
             sub_cut_dots: None,
+            probe_limit: 0,
         };
         assert!(req.validate().is_err());
     }

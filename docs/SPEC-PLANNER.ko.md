@@ -269,6 +269,10 @@
   상자마다 만나는 노드·페이지·배치를 한 번만 센다. 블록마다 wash 하나(면적 = (개수 + ½) × 2 px²)를 내며 상한 초과는
   다시 거칠게 계획하지 않고 버린다(`sub_cut_box_over`). 레이어 수 상한(`sub_cut_box_layers`)은 적용하지 않는다.
   단위 `the_sub_cut_dots_count_what_the_cut_drops_by_block_and_never_walk_into_it`.
+  **탐침(0.12.248):** `HierOpts::probe_limit > 0`(`Vfs::plan_hier_in`의 다섯째 인자, `PlanRequest::probe_limit`)이면
+  예산 맞춤 없이 그대로 계획하되 선택한 페이지의 추정 디코드 메모리(`fit_bytes`)가 한도를 넘는 순간 그 패스를
+  버린다(`fit_over`) — renderd가 점 모드 2패스의 페이지 하한(0 px)이 예약에 드는지 볼 때 쓴다(CUT_DENSITY_DESIGN
+  §10.12 2단계; 들면 그 계획을 쓰고, 넘치면 밀도 컷 1 px와 예산 맞춤).
 - **팬 재사용도 결정을 따른다(0.12.237, renderd 0.12.226; 4883533 리뷰 2026-09-28).** (1) 보존 프레임은 자기가
   계획된 결정(`RetainedFrame::fit`)을 지니고, 요청은 그 배율의 기억된 결정과 **같은** 프레임만 재사용한다
   (`prepare_pan_reuse`의 `fit` 인자; 기억은 스냅 전 요청으로 구한다 — 키가 위치에 무관). 이 프레임의 계획이

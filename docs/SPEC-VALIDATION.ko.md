@@ -107,7 +107,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
   10×10 배열, 맞닿은 40×40 배열, 하나로 놓은 둘째 레이아웃에서 — 성긴 배열은 정확히 100픽셀(각각 멤버 중심 2 px
   안), 하나는 1픽셀, 맞닿은 배열은 4×4 블록마다 min(8, 중심이 그 안인 멤버 수)의 합(게이트가 멤버 위치로 셈)만큼,
   그 밖은 켜지지 않는다; `density_dots` 항목 = 블록 수, 초과 0; 변수 없이 스택만이면 DOT 안으로 걸어 그리고
-  `density_dots`가 없다; 여백 프레임의 가운데 = 뷰포트 프레임.
+  `density_dots`가 없다; 여백 프레임의 가운데 = 뷰포트 프레임. 0.12.248(2단계): TOP 자신의 0.05 µm(0.5 px) 사각형
+  20×10(3 px 간격)이 점 모드(페이지 하한 0)에서 컷 없는 프레임과 같은 픽셀로 그려지고, 스택만(1 px 하한)은 그리지 않는다.
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과

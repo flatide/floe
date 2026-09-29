@@ -116,6 +116,15 @@ pub struct GeometryRasterRequest {
     /// original and no density above stands for (`DensityStack`). Needs the
     /// write-once tiles; the placement survivor walk is not planned under it.
     pub density_stack: bool,
+    /// Under the density stack, a density shape claims only the pixels it
+    /// lights (CUT_DENSITY_DESIGN §10.12 step 2; renderd sets it with the
+    /// sub-cut dots): a shape under a pixel does not stand for its whole
+    /// rank-0 span, nor an array's dropped members for their footprints, so
+    /// a lower plane's density still shows where they light nothing (2026-09-30:
+    /// a 900 um root's lit share fell from 0.52 to 0.41 when the floor went to
+    /// zero - upper planes' specks claimed what they did not draw). A shape's
+    /// own interior (a clear or stippled fill) still claims its area.
+    pub density_claim_lit: bool,
 }
 
 impl GeometryRasterRequest {
@@ -1146,6 +1155,9 @@ struct DensityStack {
     eligible_box: Option<(u32, [usize; 4])>,
     /// a record whose larger side reaches this (dbu) was pass 1's: not density
     upper_cut: i64,
+    /// GeometryRasterRequest::density_claim_lit: a density shape stands for
+    /// the pixels it lights only
+    claim_lit: bool,
     /// the lower planes in one walk (TilePass::DensityLower): per tile pixel
     /// the highest plane (1-based, 0 = none) whose density lit it, and whose
     /// density stands for it; empty until that pass
@@ -1320,7 +1332,7 @@ impl RasterBand {
 
     /// Starts the density stack of a write-once tile (DensityStack): pass 2
     /// draws the records under `upper_cut` (dbu, pass 1's cut).
-    fn enable_density_stack(&mut self, upper_cut: i64) {
+    fn enable_density_stack(&mut self, upper_cut: i64, claim_lit: bool) {
         let Some(once) = &self.once else {
             return;
         };
@@ -1339,6 +1351,7 @@ impl RasterBand {
             eligible: 0,
             eligible_box: None,
             upper_cut,
+            claim_lit,
             lit_plane: Vec::new(),
             foot_plane: Vec::new(),
             plane: 0,
@@ -1509,6 +1522,8 @@ impl RasterBand {
             return false;
         };
         let width = (col1 - col0) as usize;
+        // claiming what it lights only: its footprint is its lit pixels
+        let foot = if stack.claim_lit { lit } else { foot };
         if !stack.array_foot {
             if let Some(foot) = foot {
                 let rows = if stack.plane != 0 {
@@ -3189,7 +3204,7 @@ impl TileWork {
         if write_once {
             band.enable_write_once();
             if let Some(upper_cut) = density {
-                band.enable_density_stack(upper_cut);
+                band.enable_density_stack(upper_cut, request.density_claim_lit);
             }
         }
         Ok(TileWork {
@@ -7556,6 +7571,10 @@ fn array_footprint(
     let Rep::Grid { na, nb, va, vb } = rep else {
         return Ok(false);
     };
+    // claiming what they light only, the members mark their own (none dropped)
+    if band.stack.as_ref().is_some_and(|stack| stack.claim_lit) {
+        return Ok(false);
+    }
     let (wa, wb) = world_vectors(*va, *vb, world_transform)?;
     if world_lattice(*na, *nb, wa, wb).is_none() {
         return Ok(false);
@@ -8968,6 +8987,7 @@ mod tests {
             survivor_list: true,
             place_lattice: false,
             density_stack: false,
+            density_claim_lit: false,
         }
     }
 
@@ -9269,6 +9289,7 @@ mod tests {
                         tile_size,
                         area_true: true,
                         density_stack: true,
+                        density_claim_lit: false,
                         ..request()
                     },
                     layers,
@@ -9458,6 +9479,7 @@ mod tests {
             survivor_list: true,
             place_lattice: false,
             density_stack: false,
+            density_claim_lit: false,
         };
         let mut pattern = [0u16; 16];
         for (row, word) in pattern.iter_mut().enumerate() {
@@ -9583,6 +9605,7 @@ mod tests {
             survivor_list: true,
             place_lattice: false,
             density_stack: false,
+            density_claim_lit: false,
         };
         let segments = [
             ((4.0, 9.0), (21.0, 9.0)),   // horizontal inside the tile
@@ -9662,6 +9685,7 @@ mod tests {
             survivor_list: true,
             place_lattice: false,
             density_stack: false,
+            density_claim_lit: false,
         };
         let mut band = full_band(&request);
         paint_world_rect(
@@ -9821,6 +9845,7 @@ mod tests {
             survivor_list: true,
             place_lattice: false,
             density_stack: false,
+            density_claim_lit: false,
         };
         let mut frame = full_band(&request);
         fill_world_polygon_with_phase(
@@ -10344,6 +10369,7 @@ mod tests {
             survivor_list: true,
             place_lattice: false,
             density_stack: false,
+            density_claim_lit: false,
         };
         let pruned =
             render_geometry_occupancy(&scene_with(crate::PageIndex::build), &request).unwrap();
@@ -11631,6 +11657,45 @@ mod tests {
             let request = stack_request(LayerFill::Solid, tile, workers);
             let again = density_frame(&coarse, &dots, CUT_1 as i64, &request, bin, &mut Vec::new());
             assert_eq!(again.frame, on.frame, "tile {tile} workers {workers} bin {bin}");
+        }
+    }
+
+    /// GeometryRasterRequest::density_claim_lit (the sub-cut dots'
+    /// composition, CUT_DENSITY_DESIGN §10.12 step 2): the quadrant scene's
+    /// strip (layer 2's 0.6 px squares at half a pixel's pitch, rows 16-23 of
+    /// the bottom right) lights what it lights as before but no longer stands
+    /// for the pixels it leaves dark - layer 1's squares below show there,
+    /// exactly where they draw alone; without the flag none do.
+    #[test]
+    fn claiming_what_it_lights_lets_a_lower_plane_show_between_the_specks() {
+        let rect = |layer, x, y, w, h, rep: Rep| RectRec { layer, dt: 0, x, y, w, h, rep };
+        let squares = |layer, x, y, n: u64, pitch: i64| rect(layer, x, y, 15, 15, Rep::Grid { na: n, nb: n, va: (pitch, 0), vb: (0, pitch) });
+        let strip = rect(2, 162, 82, 6, 6, Rep::Grid { na: 32, nb: 16, va: (5, 0), vb: (0, 5) });
+        let pages = || vec![(1, vec![squares(1, 165, 5, 7, 25)], Vec::new()), (2, vec![strip.clone()], Vec::new())];
+        let coarse = stack_scene(pages(), CUT_1);
+        let fine = Arc::new(stack_scene(pages(), CUT_2));
+        let strip_ref = render_geometry_styled(&stack_scene(vec![(2, vec![strip.clone()], Vec::new())], 0), &stack_request(LayerFill::Solid, DEFAULT_TILE_SIZE, 1)).unwrap().frame;
+        let low_ref = render_geometry_styled(&stack_scene(vec![(1, vec![squares(1, 165, 5, 7, 25)], Vec::new())], 0), &stack_request(LayerFill::Solid, DEFAULT_TILE_SIZE, 1)).unwrap().frame;
+        let rows = 16..24;
+        for claim_lit in [false, true] {
+            let mut request = stack_request(LayerFill::Solid, DEFAULT_TILE_SIZE, 1);
+            request.raster.density_claim_lit = claim_lit;
+            let on = density_frame(&coarse, &fine, CUT_1 as i64, &request, true, &mut Vec::new());
+            let red = lit_of(&on.frame, RED, 16..32, rows.clone());
+            assert_eq!(red, lit_of(&strip_ref, RED, 16..32, rows.clone()), "claim_lit {claim_lit}: the strip lights as alone");
+            let white = lit_of(&on.frame, WHITE, 16..32, rows.clone());
+            if claim_lit {
+                // layer 1's squares in the pixels the strip left dark, as they draw alone
+                let want: BTreeSet<_> = lit_of(&low_ref, WHITE, 16..32, rows.clone()).difference(&red).copied().collect();
+                assert!(!want.is_empty());
+                assert_eq!(white, want, "the lower plane between the specks");
+            } else {
+                assert!(white.is_empty(), "the strip stands for its footprint");
+            }
+            // tiles, workers and the bin change nothing
+            let mut again = stack_request(LayerFill::Solid, 16, 3);
+            again.raster.density_claim_lit = claim_lit;
+            assert_eq!(density_frame(&coarse, &fine, CUT_1 as i64, &again, false, &mut Vec::new()).frame, on.frame, "claim_lit {claim_lit}");
         }
     }
 
@@ -13770,6 +13835,7 @@ mod tests {
             survivor_list: true,
             place_lattice: false,
             density_stack: false,
+            density_claim_lit: false,
         };
         let report = render_geometry_occupancy(&scene, &raster_request).unwrap();
         raster_request.workers = 1;
@@ -13851,6 +13917,7 @@ mod tests {
             survivor_list: true,
             place_lattice: false,
             density_stack: false,
+            density_claim_lit: false,
         }
     }
 

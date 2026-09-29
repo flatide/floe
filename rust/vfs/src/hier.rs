@@ -638,6 +638,11 @@ pub struct HierOpts {
     /// sub_cut_box_max drops the rest (sub_cut_box_over) instead of planning
     /// again coarser. None: every cut is the request's.
     pub sub_cut_dots: Option<f64>,
+    /// A probe of whether a plan fits (renderd's page floors of the sub-cut
+    /// dots, CUT_DENSITY_DESIGN §10.12): > 0 plans as asked and abandons the
+    /// pass once its pages pass this many decoded bytes (stats.fit_over) -
+    /// no budget fit, no second pass. 0: off.
+    pub probe_limit: u64,
     /// The page frontier's decode budget per plan, decoded bytes of
     /// the cut pages kept as representatives (a page is about 1 MiB
     /// decoded; the render cache holds 1 GiB): beyond it the plan is
@@ -713,6 +718,7 @@ impl Default for HierOpts {
             sub_cut_box_reads: SUB_CUT_BOX_READS,
             sub_cut_box_level: 0,
             sub_cut_dots: None,
+            probe_limit: 0,
             rep_decode_bytes: rep_decode_bytes(),
             rep_density: rep_density(),
             fit_budget: fit_budget_enabled(),
@@ -1174,6 +1180,9 @@ pub fn walk_vis(req: &ViewReq) -> Vec<u8> {
 }
 
 pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
+    if opts.probe_limit > 0 {
+        return plan_hier_as_asked(v, req, opts, opts.probe_limit);
+    }
     if !opts.fit_budget || req.decode_budget == 0 || req.cut_dbu <= 0 {
         return plan_hier_as_asked(v, req, opts, 0);
     }
@@ -4410,18 +4419,20 @@ impl crate::Vfs {
     /// hairline policy is the request's (ViewReq::page_hairline);
     /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
-        self.plan_hier_in(req, &[], None, None)
+        self.plan_hier_in(req, &[], None, None, 0)
     }
 
     /// `plan_hier` over `regions` of the view instead of the whole view
     /// (HierOpts::regions; empty = the view): the clip regions hold them all;
     /// and under a budget fit decided before (HierOpts::fixed_fit); with the
     /// density stack's sub-cut dots (HierOpts::sub_cut_dots, the pages' share
-    /// of the cut) or without (None).
-    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>, sub_cut_dots: Option<f64>) -> HierPlan {
+    /// of the cut) or without (None); as a probe of whether it fits
+    /// (HierOpts::probe_limit, 0 = a plan).
+    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>, sub_cut_dots: Option<f64>, probe_limit: u64) -> HierPlan {
         let mut opts = HierOpts::default();
         opts.fixed_fit = fixed_fit;
         opts.sub_cut_dots = sub_cut_dots;
+        opts.probe_limit = probe_limit;
         if !regions.is_empty() {
             opts.regions = regions.to_vec();
             opts.k_boxes = opts.k_boxes.max(regions.len());

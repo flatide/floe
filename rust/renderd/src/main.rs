@@ -1052,6 +1052,10 @@ struct WorkerState {
     /// plan, the other planes'): its plans are budget-fitted to a reserve of
     /// their own and must thin alike in every frame at a scale too.
     density_fit_memory: BTreeMap<String, floe_render_core::FixedFit>,
+    /// The sub-cut dots' page floor per scale and side (the rung of
+    /// DOT_PAGE_FLOORS pass 2 planned at; its length = the density cut with
+    /// the planner's fit): every frame at a scale reads the same pages.
+    density_floor_memory: BTreeMap<String, u8>,
 }
 
 impl Default for WorkerState {
@@ -1066,6 +1070,7 @@ impl Default for WorkerState {
             style_epoch: None,
             fit_memory: BTreeMap::new(),
             density_fit_memory: BTreeMap::new(),
+            density_floor_memory: BTreeMap::new(),
         }
     }
 }
@@ -1267,6 +1272,7 @@ fn run_clip(
         fixed_fit: None,
         root: command.root,
         sub_cut_dots: None,
+        probe_limit: 0,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1406,6 +1412,7 @@ fn handle_open(
                 state.retained.clear();
                 state.fit_memory.clear();
                 state.density_fit_memory.clear();
+                state.density_floor_memory.clear();
                 state.jobs = command.jobs;
                 state.styles.clear();
                 state.style_epoch = None;
@@ -1459,6 +1466,7 @@ fn handle_open(
             state.retained.clear();
                 state.fit_memory.clear();
                 state.density_fit_memory.clear();
+                state.density_floor_memory.clear();
             state.jobs = command.jobs;
             state.styles.clear();
             state.style_epoch = None;
@@ -1758,6 +1766,7 @@ fn handle_style(state: &mut WorkerState, command: StyleCommand, responses: &Send
             state.retained.clear();
                 state.fit_memory.clear();
                 state.density_fit_memory.clear();
+                state.density_floor_memory.clear();
             respond(
                 responses,
                 format!(
@@ -2389,6 +2398,14 @@ fn density_stack_enabled() -> bool {
     std::env::var("FLOE_RUST_DENSITY_STACK").as_deref() == Ok("top")
 }
 
+/// The page floors (px, the larger side) pass 2 of the sub-cut dots tries,
+/// lowest first: the lowest whose pages fit the density reserve is taken per
+/// scale and side (render_density_frame); past them the density cut
+/// (density_cut_px) with the planner's budget fit. One rung: each that does
+/// not fit costs a probe on the first frame at a scale (about 0.4 s on the
+/// synthetic chip's all-layer fit view), and no view there was between.
+const DOT_PAGE_FLOORS: [f64; 1] = [0.0];
+
 /// The density stack's sub-cut dots (floe_vfs HierOpts::sub_cut_dots,
 /// CUT_DENSITY_DESIGN §10.12; user 2026-09-30: "a cell of 3 x 3 px or less
 /// is one dot, no descent"): pass 2 plans the cells at pass 1's cut - a cell
@@ -2960,6 +2977,8 @@ fn run_render(
         place_lattice: std::env::var("FLOE_RUST_PLACE_LATTICE").as_deref() == Ok("on"),
         // the density stack sorts the area-true drawing: none without it
         density_stack: !command.exact && area_true_enabled() && density_stack_enabled(),
+        // the sub-cut dots' composition: a density shape claims what it lights
+        density_claim_lit: density_dots_enabled(),
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache
@@ -3146,6 +3165,7 @@ fn run_render(
                         &mut generation_bytes,
                         &fit_key,
                         &mut state.density_fit_memory,
+                        &mut state.density_floor_memory,
                         command.background,
                     ) {
                         Ok(rendered) => rendered,
@@ -3814,6 +3834,7 @@ fn render_density_frame(
     generation_bytes: &mut u64,
     fit_key: &str,
     density_memory: &mut BTreeMap<String, floe_render_core::FixedFit>,
+    floor_memory: &mut BTreeMap<String, u8>,
     background: bool,
 ) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
@@ -3884,38 +3905,85 @@ fn render_density_frame(
                             continue;
                         }
                         let plan_started = Instant::now();
-                        // pass 2 plans to a reserve of its own (density_budget_bytes; pass 1
-                        // plans to the rest) and its budget fit is remembered per scale and
-                        // side as pass 1's is: the same pages whatever the frame
-                        // the sub-cut dots: the cells keep pass 1's cut - a cell under it
-                        // is a dot item, never walked into or decoded - and the pages
-                        // take the density cut as its share
-                        let mut fine = if dots {
-                            let mut fine = make_plan_request_cut(cache, command, density_reserve(budget_bytes), command.cut_px)?;
-                            fine.sub_cut_dots = Some((density_cut_px() / command.cut_px).clamp(0.0, 1.0));
-                            fine
-                        } else {
-                            make_plan_request_cut(cache, command, density_reserve(budget_bytes), density_cut_px())?
-                        };
-                        fine.regions = regions
+                        let region_boxes = regions
                             .iter()
                             .map(|b| ViewBox::new(b.x0, b.y0, b.x1, b.y1))
                             .collect::<Result<Vec<_>, _>>()?;
-                        fine.visible_indices = Some(layers);
                         let side_key = format!("{fit_key}|density{side}");
-                        fine.fixed_fit = density_memory.get(&side_key).copied();
-                        let fine_pages = cache.page_plan_request(&fine, summary, !command.frames)?;
-                        let planned_fine = cache.plan(&fine_pages)?.plan;
-                        if background && planned_fine.stats.fit_redecided {
-                            // the margin's pass 2 does not fit under the scale's decision:
-                            // drawn otherwise it would change the picture when it lands
-                            return Err(DROPPED_FIT.to_string());
-                        }
-                        if let Some(decision) = planned_fine.stats.fit_decision {
-                            if planned_fine.stats.fit_redecided || !density_memory.contains_key(&side_key) {
-                                density_memory.insert(side_key, decision);
+                        let reserve = density_reserve(budget_bytes);
+                        // one plan of this side: the sub-cut dots' (the cells at pass 1's
+                        // cut - a cell under it is a dot item, never walked into or
+                        // decoded - and the pages at `floor` px) or the plain finer cut;
+                        // with `fit` to the reserve under the scale's decision
+                        // (a floor is a probe: abandoned once its pages pass the reserve)
+                        let plan_at = |floor: Option<f64>, fit: bool| -> Result<HierPlan, String> {
+                            let budget = if fit { reserve } else { 0 };
+                            let mut fine = match floor {
+                                Some(floor) => {
+                                    let mut fine = make_plan_request_cut(cache, command, budget, command.cut_px)?;
+                                    fine.sub_cut_dots = Some((floor / command.cut_px).clamp(0.0, 1.0));
+                                    fine
+                                }
+                                None => make_plan_request_cut(cache, command, budget, density_cut_px())?,
+                            };
+                            fine.regions = region_boxes.clone();
+                            fine.visible_indices = Some(layers.clone());
+                            if fit {
+                                fine.fixed_fit = density_memory.get(&side_key).copied();
+                            } else {
+                                fine.probe_limit = reserve;
+                            }
+                            let fine_pages = cache.page_plan_request(&fine, summary, !command.frames)?;
+                            Ok(cache.plan(&fine_pages)?.plan)
+                        };
+                        // the dots' pages go as low as the reserve holds (step 2 of
+                        // CUT_DENSITY_DESIGN §10.12: a floor by the work, not a fixed
+                        // 1 px): the lowest of DOT_PAGE_FLOORS whose pages fit, from the
+                        // scale's remembered rung up - never down, so every frame at a
+                        // scale reads the same pages; a margin that would have to go up
+                        // is dropped. Past the floors, the density cut with the
+                        // planner's budget fit (as without the dots).
+                        let mut floored = None;
+                        if dots {
+                            let known = floor_memory.get(&side_key).copied();
+                            for rung in usize::from(known.unwrap_or(0))..DOT_PAGE_FLOORS.len() {
+                                let plan = plan_at(Some(DOT_PAGE_FLOORS[rung]), false)?;
+                                let fits = !plan.stats.fit_over && plan.stats.fit_bytes <= reserve;
+                                if !fits || known != Some(rung as u8) {
+                                    if background && known.is_some() {
+                                        return Err(DROPPED_FIT.to_string());
+                                    }
+                                }
+                                if fits {
+                                    floor_memory.insert(side_key.clone(), rung as u8);
+                                    floored = Some(plan);
+                                    break;
+                                }
                             }
                         }
+                        let planned_fine = match floored {
+                            Some(plan) => plan,
+                            None => {
+                                if dots {
+                                    floor_memory.insert(side_key.clone(), DOT_PAGE_FLOORS.len() as u8);
+                                }
+                                // pass 2 plans to a reserve of its own (density_budget_bytes;
+                                // pass 1 plans to the rest) and its budget fit is remembered per
+                                // scale and side as pass 1's is: the same pages whatever the frame
+                                let planned_fine = plan_at(dots.then(density_cut_px), true)?;
+                                if background && planned_fine.stats.fit_redecided {
+                                    // the margin's pass 2 does not fit under the scale's decision:
+                                    // drawn otherwise it would change the picture when it lands
+                                    return Err(DROPPED_FIT.to_string());
+                                }
+                                if let Some(decision) = planned_fine.stats.fit_decision {
+                                    if planned_fine.stats.fit_redecided || !density_memory.contains_key(&side_key) {
+                                        density_memory.insert(side_key.clone(), decision);
+                                    }
+                                }
+                                planned_fine
+                            }
+                        };
                         counts[4] += planned_fine.stats.sub_cut_boxes;
                         counts[5] += planned_fine.stats.sub_cut_box_over;
                         let density_plan = Arc::new(planned_fine);
@@ -4069,6 +4137,7 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         fixed_fit: None,
         root: command.root,
         sub_cut_dots: None,
+        probe_limit: 0,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -4716,6 +4785,7 @@ mod tests {
             fixed_fit: None,
             root: command.root,
             sub_cut_dots: None,
+            probe_limit: 0,
         };
         assert_ne!(fit_memory_key(&top, &request(&top)), fit_memory_key(&rooted, &request(&rooted)));
         // the clip and the cell queries carry it too

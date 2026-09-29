@@ -1222,6 +1222,7 @@ fn stream_pass(
         survivor_list: true,
         place_lattice: false,
         density_stack: false,
+        density_claim_lit: false,
     };
     let mut report = StreamReport {
         pass_bytes_max: first_bytes,
@@ -1396,6 +1397,7 @@ fn raster_pass(
         survivor_list: true,
         place_lattice: false,
         density_stack: false,
+        density_claim_lit: false,
     };
     // a frames-only pass only when this placement's plan holds a
     // hierarchy frame at all (analysis 2026-09-09: the pass ran, and
@@ -1682,6 +1684,7 @@ fn source_plan_request(
         fixed_fit: None,
         root: None,
         sub_cut_dots: None,
+        probe_limit: 0,
     };
     plan.validate()?;
     Ok(Some(plan))

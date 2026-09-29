@@ -135,6 +135,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             survivor_list: true,
             place_lattice: false,
             density_stack: false,
+            density_claim_lit: false,
         };
         let (mode, raster) = if args.styles.is_empty() {
             (
@@ -241,6 +242,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         fixed_fit: None,
         root: None,
         sub_cut_dots: None,
+        probe_limit: 0,
     })
 }
 

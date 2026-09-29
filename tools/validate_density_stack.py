@@ -61,7 +61,11 @@ cell under it as dots in 4 x 4 px blocks, never walking into it:
     member positions - and nothing else lights;
   * density_dots reports the items (one per block) and none over the cap;
     without the variable the stack walks into DOT and reports no dots;
-  * the margin frame draws the view as the viewport frame did.
+  * the margin frame draws the view as the viewport frame did;
+  * step 2 (a floor by the work): TOP's own 0.05 um (0.5 px) squares at a
+    3 px pitch are decoded under the dots (their pages fit the reserve at a
+    zero floor) and draw as a cut-free frame draws them there; the stack's
+    1 px floor alone leaves them out.
 
     .venv/bin/python tools/validate_density_stack.py
 """
@@ -112,6 +116,7 @@ DOT = 0.15                  # um: the DOT cell's square, 1.5 px
 SPARSE = (2030, 2030, 600, 10)      # dbu origin x, y, pitch, n: 6 px apart
 DENSE = (20000, 4000, 150, 40)      # abutting: the pitch is the square
 ALONE_DOT = (12030, 15030)
+TINY = (30.03, 12.03, 20, 10)       # um origin x, y, columns, rows: cols 300-360, rows 50-80
 
 
 def dots_layout(path):
@@ -124,6 +129,12 @@ def dots_layout(path):
     for (x, y, pitch, n) in (SPARSE, DENSE):
         top.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(kdb.Vector(x, y)), kdb.Vector(pitch, 0), kdb.Vector(0, pitch), n, n))
     top.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(kdb.Vector(*ALONE_DOT))))
+    # TOP's own specks: 0.05 um squares 0.3 um apart, under a 1 px floor
+    low = ly.layer(*LOW)
+    for j in range(TINY[3]):
+        for i in range(TINY[2]):
+            x, y = TINY[0] + i * 0.3, TINY[1] + j * 0.3
+            top.shapes(low).insert(kdb.DBox(x, y, x + 0.05, y + 0.05))
     ly.write(str(path))
 
 
@@ -162,13 +173,19 @@ def dots_checks(temp):
         want = sum(min(8, count) for count in blocks.values())
         dense = lit(on, range(195, 265), range(95, 165))
         assert len(dense) == want, 'abutting array: %d px lit, want %d over %d blocks' % (len(dense), want, len(blocks))
+        # step 2: TOP's specks draw as a cut-free frame draws them
+        free, _ = frame(workers['stack'], 3, (LOW,), cut_px=0.0)
+        specks = (range(295, 365), range(45, 85))
+        tiny = lit(on, *specks)
+        assert tiny and tiny == lit(free, *specks), "TOP's specks: %d px lit, %d cut-free" % (len(tiny), len(lit(free, *specks)))
+        assert not lit(walked, *specks), "the stack's 1 px floor draws no speck"
         everything = lit(on, range(W), range(H))
-        assert everything == sparse | alone_px | dense, '%d px lit outside the arrays' % len(everything - sparse - alone_px - dense)
+        assert everything == sparse | alone_px | dense | tiny, '%d px lit outside the arrays' % len(everything - sparse - alone_px - dense - tiny)
         dots = res.get('density_dots')
         assert dots and dots['items'] == SPARSE[3] ** 2 + 1 + len(blocks) and dots['over'] == 0, (dots, len(blocks))
         assert walked_res.get('density_dots') is None and lit(walked, range(W), range(H)), 'the stack alone draws the DOT squares, no dots'
         print('density stack dots: sparse array %d dots beside the members, lone DOT 1, abutting array %d px = sum of min(8, members) '
-              'over %d blocks; density_dots %s' % (len(sparse), len(dense), len(blocks), dots))
+              'over %d blocks; density_dots %s; TOP specks %d px as cut-free' % (len(sparse), len(dense), len(blocks), dots, len(tiny)))
         margin, _ = frame_bg(workers['dots'], 2, (LOW,))
         centre = b''.join(margin[((H // 2 + r) * 2 * W + W // 2) * 4:((H // 2 + r) * 2 * W + W // 2 + W) * 4] for r in range(H))
         assert centre == on, 'the dots margin draws the view otherwise in %d px' % sum(

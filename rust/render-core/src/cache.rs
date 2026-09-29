@@ -865,7 +865,7 @@ impl Cache {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots);
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.probe_limit);
         let plan_us = elapsed_us(started);
         // a request whose every visible layer is summarized (and
         // pruned) plans no working cell at all; the scene still needs
