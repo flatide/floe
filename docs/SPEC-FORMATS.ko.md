@@ -262,8 +262,14 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
 
 ## <deck>.rules.json — SVRF 룰 메타데이터 사이드카 (v1)
 
-정본: `floe/svrf.py`(`python -m floe svrf deck.cal [-D SW]…`), 게이트
-`tools/validate_svrf.py` R1~R4. Calibre SVRF 룰덱의 **서브셋 파스**
+정본: `rust/cli/src/svrf.rs`(`floe-index svrf deck.cal [-D SW]…`; 2026-09-29
+`floe/svrf.py`의 `floe svrf`에서 이식 — 파이썬 파서와 사이드카 바이트·scan
+출력·파스 상태가 게이트 덱 31회 + 무작위 덱 3,000개에서 동일함을 확인한 뒤
+옮겼다. `generated_by`만 `floe-index <버전>`), 읽기 쪽 `floe/svrf.py`
+(`load_rules`·`rhs_operands` — 연산자 단어 목록은 빌더와 같아야 하며
+게이트가 고정), 게이트 `tools/validate_svrf.py` R1~R5. 파일은 파이썬
+`json.dump(indent=1, sort_keys=True)`와 같은 바이트(ASCII 전용 `\uXXXX`,
+파이썬 float repr). Calibre SVRF 룰덱의 **서브셋 파스**
 결과를 JSON으로 굽고 뷰어는 이 파일만 로드한다(덱 직접 파스 없음).
 목적은 waive 판단 보조: 룰별 제약(연산자·수치)·참조 레이어·원천 GDS
 레이어를 에러 디테일에 붙인다.
@@ -289,7 +295,7 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   달라진다; --scan이 스위치별 검사된 값 후보를 `NAME(v1|v2)`로
   보고. **환경 폴백**(2026-08-18): 덱이 검사하는 스위치 이름은
   -D에 없으면 os.environ을 **지연 조회**(sourceme 워크플로 —
-  `source sourceme.* && floe svrf ...`; 전체 env 벌크 임포트
+  `source sourceme.* && floe-index svrf ...`; 전체 env 벌크 임포트
   아님, -D 우선, 히트는 defines로 승격되어 값 치환까지 동작).
   사용된 이름은 scan 리포트와 사이드카 stats.env_switches에
   provenance로 기록, `--no-env-switches`로 비활성),

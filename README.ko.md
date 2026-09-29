@@ -160,10 +160,12 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 
 `python -m floe <cmd>`: `index`(레거시 타일 캐시 .tiles), `info`,
 `render --bbox … --out view.png`, `clip --bbox …`, `probe`, `profile`,
-`drc`(요약; .ice 인덱스 자동 사용), `svrf`(SVRF 룰덱 서브셋 파스 →
-`<deck>.rules.json`), `gtktest`. `floe-index`: `scan`,
+`drc`(요약; .ice 인덱스 자동 사용), `gtktest`. `floe-index`: `scan`,
 `tile`, `index`, `vfs`, `plan`(플래너 계측 JSON), `vfsd`(데몬),
-`drc`(DRC 인덱스 사이드카 굽기).
+`drc`(DRC 인덱스 사이드카 굽기), `svrf`(SVRF 룰덱 서브셋 파스 →
+`<deck>.rules.json`; 2026-09-29 `floe svrf`에서 이동 — 입력으로 파일을
+만드는 도구는 floe-index에 둔다. `floe svrf`는 같은 옵션의 floe-index
+명령줄을 알려 주고 exit 2).
 
 ### DRC 결과 인덱스 (.ice)
 
@@ -200,8 +202,8 @@ DRC 에러의 waive 판단을 돕기 위해 SVRF 룰덱을 **서브셋 파스**�
 그래프만):
 
 ```sh
-.venv/bin/python -m floe svrf sfa14.drc.cal --scan     # 새 덱: 먼저 인벤토리
-.venv/bin/python -m floe svrf sfa14.drc.cal -D FEOL    # 실런과 같은 -D 세트!
+rust/target/release/floe-index svrf sfa14.drc.cal --scan     # 새 덱: 먼저 인벤토리
+rust/target/release/floe-index svrf sfa14.drc.cal -D FEOL    # 실런과 같은 -D 세트!
 # -> sfa14.drc.cal.rules.json (뷰어가 로드하는 사이드카)
 ```
 
@@ -231,7 +233,7 @@ VIA1=6/0,VIA2=8/0,POLY=3/0,ACTIVE=2/0,CONT=4/0,NWELL=1/0,\
 FILLA=0/0,FILLB=63/63" \
   --pathname testchip.drc.cal --svrf data/testchip.drc.cal
 rust/target/release/floe-index drc data/testchip_1g5.drc.db --pack
-.venv/bin/python -m floe svrf data/testchip.drc.cal
+rust/target/release/floe-index svrf data/testchip.drc.cal
 .venv/bin/python -m floe view data/testchip_1g5.oas \
   --drc data/testchip_1g5.drc.db
 ```

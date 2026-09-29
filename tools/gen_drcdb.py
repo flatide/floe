@@ -33,7 +33,7 @@ global numbers).
 
 --svrf DECK also writes a synthetic SVRF rule deck (plus a
 DECK.layers INCLUDE file) whose check names/constraint values
-match the db (floe/svrf.py end-to-end fixture): LAYER MAP + LAYER
+match the db (floe-index svrf end-to-end fixture): LAYER MAP + LAYER
 tables, fill_excl/*_drawn derivations, one measurement per check
 kind, a VARIABLE, and an #IFDEF SYNTH_EXTRA rule that exists only
 under -D SYNTH_EXTRA. Rule names repeat past ~2328 checks - keep

@@ -1357,7 +1357,7 @@ class Viewer:
         self._drc_wfilter = "all"   # all | notwaived | waived
         self._drc_search = ""       # rule-name substring filter
         self._drc_rmeta = None      # <deck>.rules.json dict (the
-                                    # `floe svrf` sidecar metadata)
+                                    # `floe-index svrf` sidecar metadata)
         self._drc_rmatch = (0, 0)   # sidecar-matched / db rules
         self._drc_tfilter = "all"   # rule-type filter (svrf metric)
         self._drc_rtypes = None     # rule name -> metric frozenset
@@ -6952,7 +6952,7 @@ class Viewer:
         return True
 
     def _drc_rules_auto(self, db_path):
-        """Auto-pick the `floe svrf` rule-metadata sidecar: the
+        """Auto-pick the `floe-index svrf` rule-metadata sidecar: the
         deck's Rule File Pathname is an absolute path from the
         CALIBRE RUN machine, so <deck basename>.rules.json NEXT TO
         THE DB is searched first, the recorded path second."""
@@ -8482,7 +8482,7 @@ class Viewer:
                     return
 
     def _drc_meta_lines(self, name, e):
-        """Detail-pane block from the `floe svrf` sidecar: the
+        """Detail-pane block from the `floe-index svrf` sidecar: the
         constraint as written in the deck, this violation's own
         measured dimension vs the bound (the waive-decision aid),
         the referenced layer names + source gds, and the derivation

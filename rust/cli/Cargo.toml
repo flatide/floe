@@ -1,6 +1,6 @@
 [package]
 name = "floe-index"
-version = "0.12.229"
+version = "0.12.230"
 edition.workspace = true
 license.workspace = true
 description = "floe native indexer CLI (spike: scan/inventory)"
@@ -12,3 +12,5 @@ floe-ovm = { path = "../ovm" }
 floe-vfs = { path = "../vfs" }
 memmap2 = "0.9"
 crc32fast = "1.4"
+# getpwnam for `~user` in SVRF INCLUDE paths (svrf.rs expanduser)
+libc = "0.2"

@@ -8,7 +8,7 @@
 
 ```bash
 .venv/bin/python -m floe <cmd> ...     # 소스 체크아웃
-floe <cmd> ... / floe-index drc ...    # floe-portable 번들
+floe <cmd> ... / floe-index drc|svrf ...    # floe-portable 번들
 ```
 
 **공통 규약**
@@ -123,15 +123,15 @@ floe render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
   열면 주석·범례 표시/편집, 다른 도구에선 평범한 PNG.
   스크립트에서 주석만 뽑으려면 `python fe_embed.py --dump x.png`.
 
-## 4. SVRF 사이드카 생성: `floe svrf`
+## 4. SVRF 사이드카 생성: `floe-index svrf`
 
 스냅샷 레이어 격리와 뷰어 디테일(제약/원천 레이어)을 살리려면
 룰덱에서 rules.json을 한 번 만들어 둔다:
 
 ```bash
-floe svrf deck.cal --scan                  # 새 덱 인벤토리(파스 없이 확인)
+floe-index svrf deck.cal --scan            # 새 덱 인벤토리(파스 없이 확인)
 source sourceme.sfa14_ALL && \
-floe svrf deck.cal --follow-verbatim       # 실런과 같은 환경으로 생성
+floe-index svrf deck.cal --follow-verbatim # 실런과 같은 환경으로 생성
 ```
 
 - 출력 기본 `<deck>.rules.json` (`-o`로 변경). db 옆에 두면 자동
@@ -141,6 +141,11 @@ floe svrf deck.cal --follow-verbatim       # 실런과 같은 환경으로 생�
   돌리면 -D 나열이 거의 필요 없다(`--no-env-switches`로 끔).
 - `-I DIR` = INCLUDE 탐색 경로 추가, `--follow-verbatim` =
   VERBATIM/Tcl 블록 안 INCLUDE도 추적.
+- 2026-09-29 `floe svrf`에서 **floe-index로 이동**(DRC pack `floe-index drc`,
+  레이아웃 캐시 `floe-index vfs`와 같은 자리). 옵션·출력(`.rules.json`
+  바이트까지)은 그대로이고, `floe svrf …`는 같은 옵션의 floe-index
+  명령줄을 알려 주고 exit 2로 끝난다(스크립트는 명령 이름만 바꾸면 된다).
+  `-DNAME`·`-D=NAME`·`--define=NAME`도 `-D NAME`과 같다.
 
 ## 5. 엔드-투-엔드 예시
 
@@ -150,7 +155,7 @@ DB=results.db; SRC=chip.oas; DECK=deck.cal
 mkdir -p snap
 
 floe-index drc "$DB" --jobs 8                      # 0. pack
-floe svrf "$DECK" -o "$DB.rules.json"              # 1. 사이드카(1회)
+floe-index svrf "$DECK" -o "$DB.rules.json"        # 1. 사이드카(1회)
 floe drc "$DB" --rules > rules.json                # 2. 룰 목록
 
 # 3. 에러 있는 룰마다 앞 20개 스냅샷

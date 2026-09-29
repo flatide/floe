@@ -323,6 +323,7 @@ floe-index vfs <src> [outdir] --occupancy-only [--occupancy-um F] # 기존 캐�
 # µm; occupancy::auto_base_um_for_span). 로그 `cell=…um (… dbu, auto)`.
 floe-index occupancy <outdir> [--layer L/D] [--level N] [--depth N] [--dump]  # 검사(--depth: 그 depth 이하 평면의 OR)
 floe-index hier <outdir> [--check]     # design.ovh(셀 트리 색인, SPEC-FORMATS) 추가·교체 / --check = identity 보고; `floe2 index --hier-only <src>`. 빌드는 기본으로 쓰고 `--no-hier`로 생략
+floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follow-verbatim] [--no-env-switches]   # SVRF 룰덱 서브셋 → <deck>.rules.json (2026-09-29 `floe svrf`에서 이동; SPEC-FORMATS, DRC-CLI §4)
 ```
 
 - 생성: 소스·레이어별로 top을 평탄화해 셀 비트맵을 만든다. rect는 셀 범위,
