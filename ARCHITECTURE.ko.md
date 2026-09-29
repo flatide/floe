@@ -162,5 +162,5 @@ docs/            SPEC-*.ko.md (본 문서 세트)
 | #48 | 사무실 기본값 확정 (lod_k/격자/예산) | 부분 대체됨 |
 | #55 | 라벨 Cairo GUI 오버레이 (90° 회전+폰트) | 독립, 후순위 |
 | — | 지오메트리 7µm 격자 (rev 45의 지오메트리판, ovm v8 예상) | Calibre 관찰 대기 |
-| — | 왼쪽 pane cell/object 브라우저 | 자리만 확보(`_left_stack`) |
+| — | 왼쪽 pane cell/object 브라우저 | **셀 트리 완료**(2026-09-29, SPEC-VIEWER §8c: `cells` 페이지, design.ovh + renderd hier 스레드); "선택 셀을 뷰 루트로"는 플래너 루트 변경이 필요해 후속 |
 | — | fill 비트맵 스탬핑 확정 시 fillpatterns.def 갱신 | 실물 반영 완료(2026-08-12), 오차 발견 시 수정 |

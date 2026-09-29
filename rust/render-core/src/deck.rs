@@ -381,6 +381,15 @@ pub struct Deck {
     budget_bytes: u64,
 }
 
+/// One source's hierarchy for the cell tree: its cache folder, the
+/// handle the queries read and where the deck places the source.
+#[derive(Clone)]
+pub struct DeckHierSource {
+    pub path: String,
+    pub handle: std::sync::Arc<crate::cells::HierHandle>,
+    pub placements: Vec<crate::cells::DeckXf>,
+}
+
 /// Summary of an opened deck for the daemon's `opened`/`info` lines.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeckInfo {
@@ -607,6 +616,38 @@ impl Deck {
 
     pub fn resident_bytes(&self) -> u64 {
         self.sources.iter().map(|source| source.pages.resident_bytes()).sum()
+    }
+
+    /// The sources' hierarchies for the cell tree (cells.rs), in spec
+    /// order, each with the distinct geometric placements of the source
+    /// (a placement per source x layer in the spec collapses to one
+    /// per scale/offset).
+    pub fn hier_sources(&self) -> Vec<DeckHierSource> {
+        self.sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let mut placements: Vec<crate::cells::DeckXf> = Vec::new();
+                for placed in &self.placements {
+                    if placed.spec.source != index {
+                        continue;
+                    }
+                    let xf = crate::cells::DeckXf {
+                        scale: placed.spec.scale,
+                        dx: placed.spec.dx,
+                        dy: placed.spec.dy,
+                    };
+                    if !placements.contains(&xf) {
+                        placements.push(xf);
+                    }
+                }
+                DeckHierSource {
+                    path: self.source_paths[index].clone(),
+                    handle: source.cache.hier(),
+                    placements,
+                }
+            })
+            .collect()
     }
 
     pub fn budget_bytes(&self) -> u64 {

@@ -86,10 +86,11 @@
 ## 6. 패널/오버레이
 
 - 3-pane: `lpaned[ left | paned[ canvas | side ] ]`. left:
-  `_left_stack`(DRC 브라우저 상시 내장 §8b; cell/object 브라우저
-  추후 동거) — 미니맵은 2026-08-22 우측 pane 노트북으로 이전,
-  왼쪽 pane 전체가 DRC 브라우저; 상세(TextView)는 pack2
-  shrink=False + 높이 하한 150px로 **상시 노출**.
+  `_left_stack` = **Notebook 두 페이지**(2026-09-29): `cells` = 셀 트리
+  (§8c, 기본 페이지) | `DRC` = DRC 브라우저(§8b; db 로드·`_drc_window`가
+  이 페이지를 올림) — 미니맵은 2026-08-22 우측 pane 노트북으로 이전;
+  DRC 상세(TextView)는 pack2 shrink=False + 높이 하한 150px로 **상시
+  노출**(페이지 안에서).
 - side(우측, margin_end 6): 토글 버튼행부터 시작(구 제목/소스
   줄은 2026-08-22 창 타이틀로 이전 — "floe - 파일명 · N GB ·
   grid NxN", 빈 시작은 "no layout"), 레이어 목록
@@ -146,6 +147,8 @@
 - **메뉴 바**(2026-08-22, `_build_menubar`): File(**load layout**·
   clip·copy·quit) /
   View(fit·줌·goto·detail·depth·토글 체크 5종·오버레이 순환) /
+  Cell(셀 트리·검색 `t`, 선택 셀로 줌, 인스턴스 하이라이트 체크,
+  하이라이트 해제, 셀 인덱스 빌드 — §8c) /
   Ruler(모드·스냅 체크, 삭제/전체 삭제) / DRC(open .db·SVRF rules·
   n/p·waive·박스선택 체크). 항목은 키와 **같은 핸들러**를 호출하고
   라벨에 키를 병기(AccelGroup 미등록 — 키는 `_on_key` 단일 경로,
@@ -394,6 +397,84 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   룰러 2개**도 붙인다. 축정렬 사각형=**폭·높이 2개**(둘 다 유의미,
   중앙 관통·중앙 교차). 복잡한 폴리곤/엣지셋은 룰러 생략(사용자 규정 2026-08-13).
   수동 룰러는 보존, k/Esc에는 일반 룰러처럼 반응.
+
+## 8c. 셀 트리 (Calibre cell tree, 2026-09-29)
+
+- **자리**: 왼쪽 pane Notebook의 `cells` 페이지(§6). 위에서 아래로
+  검색 박스(`find cell… (* ? wildcards)`) · 트리/결과 목록(TreeView,
+  이름 열 ellipsize END + 개수 열 우정렬, 검은 배경 `.floe-drc-list`,
+  hscroll NEVER) · 버튼 행(`highlight` 체크 = 기본 켬, `zoom`,
+  인덱스가 없을 때만 보이는 `build index…`) · 정보 줄(줄바꿈 라벨).
+  `_build_cell_panel`, 위젯 홀더 `_CellPanel`.
+- **데이터 원천 = design.ovh**(SPEC-FORMATS): 셀별 **서로 다른 자식**과
+  자식별 **배치 멤버 수**(반복 전개), 부모 목록, **탑 아래 인스턴스 수**,
+  엣지별 자식 배치의 합집합 범위. design.ovm의 배치 레코드는 부모별
+  BVH 순서라 "이 셀의 자식들"조차 그 셀의 레코드 전부를 읽어야 하고
+  (MAIN01 1/10 합성: 8,260만 레코드·5.3 GB, MAIN01은 그 10배) "이 셀의
+  부모"는 전부를 읽어야 하므로, 뷰어가 열 때 훑는 방식은 성립하지
+  않는다. 인덱서가 빌드 끝에 한 번 훑어 파일로 두고(`floe-index vfs`,
+  `--no-hier`로 생략; 1/10 합성 11.4 s → 10.6 MB), 이전 캐시에는
+  `floe2 index --hier-only <src>`(= `floe-index hier <cache>`)로
+  덧붙인다. 레코드 400만 개 이하의 작은 캐시는 파일이 없어도 데몬이
+  메모리에서 요약한다(`FLOE_RUST_HIER_INLINE_PLACES`, 진단).
+- **질의는 renderd의 hier 스레드**(RUST_RENDERER.md: `cell_sources` ·
+  `cells` · `cell_find` · `cell_bbox` · `cell_insts`, 응답은 같은
+  kind + `seq`; 실패는 `found=0 code=nohier|superseded|state|query
+  err_hex=`). 렌더·픽 스레드와 독립이라 첫 질의의 요약 열기/빌드나
+  넓은 뷰의 인스턴스 탐색이 렌더를 늦추지 않는다. GUI는 kind별
+  **최신 seq만** 받는다(`_cell_pending`, `_on_cell_result`).
+- **트리**: 레이아웃은 탑 셀이 루트이며 열자마자 펼쳐진다(자식 행 =
+  `NAME  ×members`, 멤버 1이면 개수 생략); 자식 있는 행은 `…` 자리
+  행을 달고 있다가 **처음 펼칠 때 한 번** `cells`로 채운다
+  (`test-expand-row`, `Gtk.TreeRowReference`). 한 부모의 자식이
+  20,000을 넘으면 `… N more (find by name)` 행. 정렬은 이름(대소문자
+  무시). 잡덱은 **소스(TC)마다 루트**(라벨 = 카탈로그의 TC 식별자, 배치가
+  여럿이면 `×N`), 펼치면 그 소스 탑의 자식들.
+- **검색**: 박스가 비면 트리, 채우면 결과 목록이 같은 자리에 온다
+  (모델 교체). 규칙은 대소문자 무시 **부분일치**, `*`/`?`가 있으면
+  전체 이름 **글롭**. 결과 행 = `NAME  insts`(탑 아래 인스턴스 수),
+  상한 2,000행 + 전체 개수 정보 줄. 키 입력 뒤 150 ms(SearchEntry 자체
+  지연 포함 약 300 ms) 후 질의.
+- **선택**(트리·결과 공통, 단클릭): `cell_bbox`로 정보 줄(`NAME: N
+  instances · W × H um`, 근사면 `(the blocks holding it)`), highlight가
+  켜져 있으면 `cell_insts`로 **현재 뷰 안 인스턴스 박스**를 받아 캔버스에
+  **CELL_HL(#40E0FF) 2 px 외곽**으로 그린다(화면에서 7 px보다 작은
+  인스턴스는 7 px 마커 사각). 상한 4,096박스·탐색 예산 200만 방문 —
+  넘치면 `more`, 상태줄 `(more - zoom in)`. 프레임이 착지할 때마다
+  뷰 키(src, ci, 뷰 박스 반올림)가 바뀌었으면 다시 묻는다
+  (`_cell_hl_follow`; 데몬은 대기 중인 더 새 insts 질의가 있으면 옛것을
+  `superseded`로 즉시 답한다). Tab 오버레이 숨김 상태에서는 그리지 않음.
+- **줌**(더블클릭·Enter·`zoom`·메뉴): `cell_bbox`의 범위를 DRC 점프와
+  같은 규칙으로 프레이밍(양 축 0.8, `CELL_VIEW_FRACTION`). 범위 =
+  탑이 **직접 배치한 셀은 그 인스턴스 박스들의 정확한 합집합**, 더 깊은
+  셀은 **그 셀을 품은 탑 직계 블록들의 범위**(요약이 엣지별 합집합만
+  갖고 레코드별 변환은 갖지 않으므로; `approx=1`, 상태줄
+  `(zoomed to the blocks holding it)`) — 이후 하이라이트가 정확한
+  인스턴스를 보여 준다. 탑 아래에 없는 셀(orphan)·도형 없는 셀은
+  줌하지 않고 상태줄로 이유를 말한다.
+- **키/Esc**: `t` = cells 페이지 올리고 검색 박스 포커스(pane 폭 하한
+  260 px); Esc 체인에서 선택 해제 **다음** 단계가 셀 하이라이트 해제
+  (`_cell_hl_clear`: 하이라이트와 트리 선택을 함께 지움; highlight
+  체크는 유지). 검색 박스에 포커스가 있으면 캔버스 키는 오지 않는다
+  (§7의 Entry 가드).
+- **인덱스 부재**: 어떤 소스의 답이 `code=nohier`면 정보 줄 안내 +
+  `build index…` 버튼, 그리고 **소스당 로드마다 한 번** "지금 만들까요?"
+  (FLOE_INDEX_ON_OPEN 정책, VFS 인덱스·DRC pack과 동일) → `floe-index
+  hier <cache>`를 모달 로그(`_index_modal`)로 돌린 뒤 트리를 다시 읽는다.
+  버튼·메뉴는 다시 묻는다.
+- **잡덱 좌표**: 소스 좌표의 박스는 덱 배치(`scale·p + (dx, dy)`, 소스당
+  기하 배치 중복 제거)로 덱 dbu로 바뀌어 오고, `cell_insts`의 뷰는 반대로
+  소스 좌표로 들어간다(render-core `DeckXf`). 소스가 여러 곳에 놓이면
+  박스도 그만큼.
+- **한계(후속)**: Calibre 셀 트리의 "선택한 셀을 뷰 루트로"(탑이 아닌
+  셀만 그리기, VFS_HIER rev 34 관측 정정 참조)는 플래너가 탑에서만
+  출발하므로 아직 없다 — ViewReq에 루트 셀을 두는 플래너 변경이 필요.
+  깊은 셀의 줌 범위가 블록 범위인 것도 요약에 레코드별 변환을 두면
+  정확해진다. 인스턴스 탐색은 뷰를 요약 엣지 범위로 잘라 BVH를 걷지만
+  넓은 뷰에서 큰 블록 안의 드문 셀은 예산에 걸릴 수 있다(`more`, 줌인).
+- **게이트**: `cell_tree`(tools/validate_cell_tree.py — SPEC-VALIDATION),
+  렌더 코어 유닛(cells.rs 9종), renderd 파스/워커 유닛, vfs hiersum 유닛,
+  워커 와이어 계약(validate_rust_renderer).
 
 ## 9. 픽/스냅/클립
 

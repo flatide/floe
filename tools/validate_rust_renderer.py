@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from floe import RENDERD_VERSION, __version__  # noqa: E402
 from floe.rust_render import (  # noqa: E402
+    CELL_QUERY_KINDS,
     RustRenderWorker,
     _parse_wire_line,
     _pattern_fill,
@@ -1459,6 +1460,112 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(worker.res.get_nowait(), {
                 "kind": "pick", "seq": 9, "found": False, "count": 0,
             })
+
+            # the cell tree's queries (docs/SPEC-VIEWER.ko.md §8c): one
+            # line per kind, the answer decoded per kind
+            del commands[:]
+            for job in (
+                    {"kind": "cell_sources", "seq": 10},
+                    {"kind": "cells", "seq": 11},
+                    {"kind": "cells", "seq": 12, "src": 2, "cell": 17},
+                    {"kind": "cell_find", "seq": 13, "pattern": "*inv?",
+                     "limit": 10},
+                    {"kind": "cell_find", "seq": 14, "src": 1},
+                    {"kind": "cell_bbox", "seq": 15, "cell": 9},
+                    {"kind": "cell_insts", "seq": 16, "src": 1, "cell": 9,
+                     "view": (0, -5, 10.5, 20), "cap": 7}):
+                self.assertIn(job["kind"], CELL_QUERY_KINDS)
+                worker._submit_cell_query(job)
+            self.assertEqual(commands, [
+                "cell_sources seq=10",
+                "cells seq=11 src=0",
+                "cells seq=12 src=2 cell=17",
+                "cell_find seq=13 src=-1 pat_hex=%s limit=10"
+                % "*inv?".encode().hex(),
+                "cell_find seq=14 src=1 limit=5000",
+                "cell_bbox seq=15 src=0 cell=9",
+                "cell_insts seq=16 src=1 cell=9 view=0.0,-5.0,10.5,20.0 "
+                "cap=7",
+            ])
+            path = "/caches/.a b.oas.ice"
+            kind, fields = _parse_wire_line(
+                "cell_sources seq=10 found=1 n=1 sources=0:2:%s"
+                % path.encode().hex())
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cell_sources", "seq": 10, "found": True,
+                "sources": [{"src": 0, "placements": 2, "path": path}],
+            })
+            kind, fields = _parse_wire_line(
+                "cells seq=12 src=2 found=1 cell=17 name_hex=%s insts=6 "
+                "height=3 unit=1000 bbox=0,0,10,20 n=2 total=5 "
+                "children=3:12:1:%s,4:1:0:%s" % (
+                    "MID 한".encode().hex(), "leaf".encode().hex(),
+                    "a:b".encode().hex()))
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cells", "seq": 12, "found": True, "src": 2,
+                "cell": 17, "name": "MID 한", "insts": 6, "height": 3,
+                "unit": 1000.0, "bbox": [0.0, 0.0, 10.0, 20.0],
+                "total": 5,
+                "children": [
+                    {"cell": 3, "members": 12, "leaf": True,
+                     "name": "leaf"},
+                    {"cell": 4, "members": 1, "leaf": False,
+                     "name": "a:b"}],
+            })
+            kind, fields = _parse_wire_line(
+                "cells seq=13 found=0 code=nohier err_hex=%s"
+                % "no summary".encode().hex())
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cells", "seq": 13, "found": False,
+                "code": "nohir".replace("hir", "hier"), "err": "no summary",
+            })
+            kind, fields = _parse_wire_line(
+                "cell_find seq=14 src=-1 found=1 total=1 n=1 "
+                "matches=0:5:99:%s" % "INV1".encode().hex())
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cell_find", "seq": 14, "found": True, "src": -1,
+                "total": 1,
+                "matches": [{"src": 0, "cell": 5, "insts": 99,
+                             "name": "INV1"}],
+            })
+            kind, fields = _parse_wire_line(
+                "cell_bbox seq=15 src=0 cell=9 found=1 insts=2 approx=1 "
+                "bbox=-1.5,0,3,4")
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cell_bbox", "seq": 15, "found": True, "src": 0,
+                "cell": 9, "insts": 2, "approx": True,
+                "bbox": [-1.5, 0.0, 3.0, 4.0],
+            })
+            kind, fields = _parse_wire_line(
+                "cell_bbox seq=15 src=0 cell=9 found=1 insts=0 approx=0 "
+                "bbox=-")
+            worker._handle_line(kind, fields, "")
+            self.assertIsNone(worker.res.get_nowait()["bbox"])
+            kind, fields = _parse_wire_line(
+                "cell_insts seq=16 src=1 cell=9 found=1 n=2 more=1 "
+                "visited=40 boxes=0,0,1,1;2,2,3.5,3")
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cell_insts", "seq": 16, "found": True, "src": 1,
+                "cell": 9, "more": True, "visited": 40,
+                "boxes": [[0.0, 0.0, 1.0, 1.0], [2.0, 2.0, 3.5, 3.0]],
+            })
+            kind, fields = _parse_wire_line(
+                "cell_insts seq=17 src=1 cell=9 found=1 n=0 more=0 "
+                "visited=1 boxes=-")
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait()["boxes"], [])
+            # a malformed row is an error, not a crash
+            kind, fields = _parse_wire_line(
+                "cells seq=18 src=0 found=1 cell=1 name_hex=41 insts=1 "
+                "height=0 unit=1 bbox=- n=1 total=1 children=3:12")
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait()["kind"], "error")
 
     def test_rust_worker_never_loads_or_composites_density_coverage(self):
         with tempfile.TemporaryDirectory() as directory:

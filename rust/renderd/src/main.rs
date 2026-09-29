@@ -5,7 +5,7 @@ use floe_render_core::{
     render_geometry_styled_cancellable_reuse,
     render_geometry_styled_unbinned_cancellable, FrameReuse,
     snap_scene, snap_scene_cancellable, validate_font_px, Cache, CacheLayer, ClipGeometry, Deck,
-    DeckRenderRequest, DeckSpec, DecodedPageCache, FrameScene,
+    DeckRenderRequest, DeckSpec, DeckXf, DecodedPageCache, FrameScene, HierError, HierHandle,
     GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation,
     SceneQueryLayer, SceneQueryRequest, SceneSnapKind, StyledGeometryRasterRequest, ViewBox,
     DEFAULT_LABEL_FONT_PX, DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE,
@@ -52,6 +52,35 @@ struct PublishedScene {
 }
 
 type SharedPublishedScene = Arc<RwLock<Option<Arc<PublishedScene>>>>;
+
+/// The hierarchy the cell tree's queries read (docs/SPEC-VIEWER.ko.md
+/// §8c): one source for a cache, the deck's sources in spec order for a
+/// jobdeck, each with its geometric placements (deck dbu). Published by
+/// the render worker at open, read by the hier query thread.
+struct HierSource {
+    /// the source's cache folder (a jobdeck's source identity)
+    path: String,
+    handle: Arc<HierHandle>,
+    placements: Vec<DeckXf>,
+}
+
+struct PublishedHier {
+    sources: Vec<HierSource>,
+}
+
+type SharedHier = Arc<RwLock<Option<Arc<PublishedHier>>>>;
+
+/// Children rows one `cells` answer carries at most (the count of all
+/// children travels beside them).
+const CELLS_CHILD_CAP: usize = 20_000;
+/// Name-search matches one `cell_find` answer carries at most.
+const CELL_FIND_CAP: usize = 5_000;
+/// Instance boxes one `cell_insts` answer carries at most, and the walk
+/// budget (placement records, members and BVH nodes looked at) behind
+/// them: a whole-chip view of a cell with millions of instances answers
+/// partially (more=1) instead of running for seconds.
+const CELL_INSTS_CAP: usize = 4_096;
+const CELL_INSTS_BUDGET: u64 = 2_000_000;
 
 // which target this binary was built for, mirrored from floe-index:
 // multiple builds circulate on the closed-network hosts and "which
@@ -112,6 +141,8 @@ fn serve() -> Result<(), String> {
     let worker_responses = response_tx.clone();
     let published_scene = Arc::new(RwLock::new(None));
     let worker_scene = Arc::clone(&published_scene);
+    let published_hier: SharedHier = Arc::new(RwLock::new(None));
+    let worker_hier = Arc::clone(&published_hier);
     let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
     let worker = thread::spawn(move || {
         render_worker(
@@ -119,8 +150,20 @@ fn serve() -> Result<(), String> {
             worker_responses,
             worker_cancellation,
             worker_scene,
+            worker_hier,
         )
     });
+
+    // the cell tree's queries (cells, cell_find, cell_bbox, cell_insts,
+    // cell_sources) run on their own thread: the first one may build or
+    // open the hierarchy summary, and an instance walk over a wide view
+    // runs to its budget - neither may delay a pick or a render
+    let (hier_tx, hier_rx) = mpsc::channel::<HierCommand>();
+    let hier = {
+        let responses = response_tx.clone();
+        let hier = Arc::clone(&published_hier);
+        thread::spawn(move || hier_worker(hier_rx, responses, hier))
+    };
 
     let query_inline = std::env::var("FLOE_RUST_QUERY_INLINE").as_deref() == Ok("1");
     let snap_frontier = RenderCancellation::new();
@@ -198,6 +241,12 @@ fn serve() -> Result<(), String> {
                     break;
                 }
             }
+            InputCommand::Hier(command) => {
+                if hier_tx.send(command).is_err() {
+                    main_error = Some("hier worker stopped".to_string());
+                    break;
+                }
+            }
             InputCommand::Quit => break,
         }
     }
@@ -207,6 +256,11 @@ fn serve() -> Result<(), String> {
     drop(query_tx);
     if query.join().is_err() {
         main_error.get_or_insert_with(|| "query worker panicked".to_string());
+    }
+    let _ = hier_tx.send(HierCommand::Shutdown);
+    drop(hier_tx);
+    if hier.join().is_err() {
+        main_error.get_or_insert_with(|| "hier worker panicked".to_string());
     }
 
     // EOF and stdin read failures are process shutdown requests just like
@@ -254,7 +308,49 @@ enum InputCommand {
     Cancel(u64),
     Snap(SnapCommand),
     Pick(PickCommand),
+    Hier(HierCommand),
     Quit,
+}
+
+/// The cell tree's queries (docs/SPEC-VIEWER.ko.md §8c), answered on
+/// the hier thread from the published hierarchy.
+#[derive(Debug, PartialEq)]
+enum HierCommand {
+    /// the sources of the open cache or deck
+    Sources { sequence: i64 },
+    /// a cell's children (cell None = the source's top)
+    Cells { sequence: i64, source: usize, cell: Option<u32> },
+    /// cells whose name matches (source None = every source)
+    Find { sequence: i64, source: Option<usize>, pattern: String, limit: usize },
+    /// the extent of a cell's instances (view coordinates)
+    Bbox { sequence: i64, source: usize, cell: u32 },
+    /// a cell's instances inside a view (view coordinates)
+    Insts { sequence: i64, source: usize, cell: u32, view: [f64; 4], cap: usize },
+    Shutdown,
+}
+
+impl HierCommand {
+    fn sequence(&self) -> i64 {
+        match self {
+            HierCommand::Sources { sequence }
+            | HierCommand::Cells { sequence, .. }
+            | HierCommand::Find { sequence, .. }
+            | HierCommand::Bbox { sequence, .. }
+            | HierCommand::Insts { sequence, .. } => *sequence,
+            HierCommand::Shutdown => -1,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            HierCommand::Sources { .. } => "cell_sources",
+            HierCommand::Cells { .. } => "cells",
+            HierCommand::Find { .. } => "cell_find",
+            HierCommand::Bbox { .. } => "cell_bbox",
+            HierCommand::Insts { .. } => "cell_insts",
+            HierCommand::Shutdown => "shutdown",
+        }
+    }
 }
 
 /// §F2R-20b: snap/pick run on their own thread so a worst-case dense
@@ -634,6 +730,54 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 },
             ))))
         }
+        "cell_sources" => {
+            reject_unknown(&fields, &["seq"])?;
+            Ok(Some(InputCommand::Hier(HierCommand::Sources {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+            })))
+        }
+        "cells" => {
+            reject_unknown(&fields, &["seq", "src", "cell"])?;
+            Ok(Some(InputCommand::Hier(HierCommand::Cells {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                source: optional_parse(&fields, "src")?.unwrap_or(0),
+                cell: optional_parse(&fields, "cell")?,
+            })))
+        }
+        "cell_find" => {
+            reject_unknown(&fields, &["seq", "src", "pat_hex", "limit"])?;
+            let source: i64 = optional_parse(&fields, "src")?.unwrap_or(-1);
+            let limit: usize = optional_parse(&fields, "limit")?.unwrap_or(CELL_FIND_CAP);
+            Ok(Some(InputCommand::Hier(HierCommand::Find {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                source: usize::try_from(source).ok(),
+                pattern: fields
+                    .get("pat_hex")
+                    .map(|value| wire_unhex(value, "pat_hex"))
+                    .transpose()?
+                    .unwrap_or_default(),
+                limit: limit.clamp(1, CELL_FIND_CAP),
+            })))
+        }
+        "cell_bbox" => {
+            reject_unknown(&fields, &["seq", "src", "cell"])?;
+            Ok(Some(InputCommand::Hier(HierCommand::Bbox {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                source: optional_parse(&fields, "src")?.unwrap_or(0),
+                cell: required_parse(&fields, "cell")?,
+            })))
+        }
+        "cell_insts" => {
+            reject_unknown(&fields, &["seq", "src", "cell", "view", "cap"])?;
+            let cap: usize = optional_parse(&fields, "cap")?.unwrap_or(CELL_INSTS_CAP);
+            Ok(Some(InputCommand::Hier(HierCommand::Insts {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                source: optional_parse(&fields, "src")?.unwrap_or(0),
+                cell: required_parse(&fields, "cell")?,
+                view: parse_view(required(&fields, "view")?)?,
+                cap: cap.clamp(1, CELL_INSTS_CAP),
+            })))
+        }
         "cancel" => {
             reject_unknown(&fields, &["before_gen"])?;
             Ok(Some(InputCommand::Cancel(required_parse(
@@ -991,12 +1135,13 @@ fn render_worker(
     responses: Sender<String>,
     cancellation: RenderCancellation,
     published_scene: SharedPublishedScene,
+    published_hier: SharedHier,
 ) {
     let mut state = WorkerState::default();
     for command in commands {
         match command {
             WorkerCommand::Open(command) => {
-                handle_open(&mut state, command, &responses, &published_scene)
+                handle_open(&mut state, command, &responses, &published_scene, &published_hier)
             }
             WorkerCommand::Style(command) => handle_style(&mut state, command, &responses),
             WorkerCommand::Render(command) => handle_render(
@@ -1193,6 +1338,7 @@ fn handle_open(
     command: OpenCommand,
     responses: &Sender<String>,
     published_scene: &SharedPublishedScene,
+    published_hier: &SharedHier,
 ) {
     if state.cache.is_some() || state.deck.is_some() {
         respond(
@@ -1222,6 +1368,19 @@ fn handle_open(
         match opened {
             Ok(deck) => {
                 let info = deck.info();
+                if let Ok(mut published) = published_hier.write() {
+                    *published = Some(Arc::new(PublishedHier {
+                        sources: deck
+                            .hier_sources()
+                            .into_iter()
+                            .map(|source| HierSource {
+                                path: source.path,
+                                handle: source.handle,
+                                placements: source.placements,
+                            })
+                            .collect(),
+                    }));
+                }
                 state.deck = Some(deck);
                 state.cache = None;
                 state.page_cache = DecodedPageCache::new(0);
@@ -1267,6 +1426,15 @@ fn handle_open(
     match Cache::open(cache_path) {
         Ok(cache) => {
             let info = cache.info();
+            if let Ok(mut published) = published_hier.write() {
+                *published = Some(Arc::new(PublishedHier {
+                    sources: vec![HierSource {
+                        path: cache_path.to_string(),
+                        handle: cache.hier(),
+                        placements: vec![DeckXf::IDENTITY],
+                    }],
+                }));
+            }
             state.cache = Some(cache);
             state.page_cache = DecodedPageCache::new(budget_bytes);
             state.retained.clear();
@@ -1299,6 +1467,237 @@ fn handle_open(
             responses,
             format!("error code=open message={}", wire_escape(&error)),
         ),
+    }
+}
+
+/// The hier thread: answers the cell tree's queries in order, except
+/// that an instance query with a newer one already queued behind it is
+/// answered `superseded` at once (the viewer reads its latest sequence
+/// only; a wide view's walk runs to its budget and must not queue up
+/// behind a pan).
+fn hier_worker(commands: Receiver<HierCommand>, responses: Sender<String>, hier: SharedHier) {
+    let mut queue: std::collections::VecDeque<HierCommand> = std::collections::VecDeque::new();
+    loop {
+        if queue.is_empty() {
+            match commands.recv() {
+                Ok(command) => queue.push_back(command),
+                Err(_) => break,
+            }
+        }
+        while let Ok(command) = commands.try_recv() {
+            queue.push_back(command);
+        }
+        let Some(command) = queue.pop_front() else {
+            continue;
+        };
+        if matches!(command, HierCommand::Shutdown) {
+            break;
+        }
+        if matches!(command, HierCommand::Insts { .. })
+            && queue.iter().any(|later| matches!(later, HierCommand::Insts { .. }))
+        {
+            respond(
+                &responses,
+                hier_error_line(command.kind(), command.sequence(), "superseded", QUERY_SUPERSEDED),
+            );
+            continue;
+        }
+        handle_hier(&hier, command, &responses);
+    }
+}
+
+fn hier_error_line(kind: &str, sequence: i64, code: &str, message: &str) -> String {
+    format!(
+        "{kind} seq={sequence} found=0 code={code} err_hex={}",
+        wire_hex(message)
+    )
+}
+
+fn hier_error(kind: &str, sequence: i64, error: &HierError) -> String {
+    match error {
+        HierError::NoSummary(message) => hier_error_line(kind, sequence, "nohier", message),
+        HierError::Other(message) => hier_error_line(kind, sequence, "query", message),
+    }
+}
+
+fn wire_f64_box(b: &[f64; 4]) -> String {
+    format!("{},{},{},{}", b[0], b[1], b[2], b[3])
+}
+
+fn handle_hier(hier: &SharedHier, command: HierCommand, responses: &Sender<String>) {
+    let kind = command.kind();
+    let sequence = command.sequence();
+    let published = match hier.read() {
+        Ok(guard) => guard.clone(),
+        Err(_) => None,
+    };
+    let Some(published) = published else {
+        respond(responses, hier_error_line(kind, sequence, "state", "cache not open"));
+        return;
+    };
+    let source_of = |index: usize| -> Result<&HierSource, String> {
+        published
+            .sources
+            .get(index)
+            .ok_or_else(|| format!("source {} of {}", index, published.sources.len()))
+    };
+    let line: Result<String, String> = (|| match &command {
+        HierCommand::Sources { .. } => {
+            let sources: Vec<String> = published
+                .sources
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{}:{}:{}", i, s.placements.len(), wire_hex(&s.path)))
+                .collect();
+            Ok(format!(
+                "cell_sources seq={} found=1 n={} sources={}",
+                sequence,
+                sources.len(),
+                if sources.is_empty() { "-".to_string() } else { sources.join(",") }
+            ))
+        }
+        HierCommand::Cells { source, cell, .. } => {
+            let src = source_of(*source)?;
+            let answer = floe_render_core::cell_children(&src.handle, *cell, CELLS_CHILD_CAP)
+                .map_err(|e| hier_error(kind, sequence, &e))
+                .map_err(HierWire)?;
+            let children: Vec<String> = answer
+                .rows
+                .iter()
+                .map(|r| format!("{}:{}:{}:{}", r.cell, r.members, u8::from(r.leaf), wire_hex(&r.name)))
+                .collect();
+            let bbox = if answer.rbbox.is_empty() {
+                "-".to_string()
+            } else {
+                format!("{},{},{},{}", answer.rbbox.x0, answer.rbbox.y0, answer.rbbox.x1, answer.rbbox.y1)
+            };
+            Ok(format!(
+                "cells seq={} src={} found=1 cell={} name_hex={} insts={} height={} unit={} bbox={} n={} total={} children={}",
+                sequence,
+                source,
+                answer.cell,
+                wire_hex(&answer.name),
+                answer.insts,
+                answer.height,
+                src.handle.unit(),
+                bbox,
+                children.len(),
+                answer.total,
+                if children.is_empty() { "-".to_string() } else { children.join(",") }
+            ))
+        }
+        HierCommand::Find { source, pattern, limit, .. } => {
+            let indices: Vec<usize> = match source {
+                Some(index) => {
+                    source_of(*index)?;
+                    vec![*index]
+                }
+                None => (0..published.sources.len()).collect(),
+            };
+            let mut total = 0usize;
+            let mut rows: Vec<(usize, floe_render_core::FindRow)> = Vec::new();
+            for index in indices {
+                let src = &published.sources[index];
+                let found = floe_render_core::cell_find(&src.handle, pattern, *limit)
+                    .map_err(|e| hier_error(kind, sequence, &e))
+                    .map_err(HierWire)?;
+                total += found.total;
+                rows.extend(found.rows.into_iter().map(|r| (index, r)));
+            }
+            rows.sort_by_cached_key(|(index, r)| (r.name.to_lowercase(), r.name.clone(), *index, r.cell));
+            rows.truncate(*limit);
+            let matches: Vec<String> = rows
+                .iter()
+                .map(|(index, r)| format!("{}:{}:{}:{}", index, r.cell, r.insts, wire_hex(&r.name)))
+                .collect();
+            Ok(format!(
+                "cell_find seq={} src={} found=1 total={} n={} matches={}",
+                sequence,
+                source.map(|s| s as i64).unwrap_or(-1),
+                total,
+                matches.len(),
+                if matches.is_empty() { "-".to_string() } else { matches.join(",") }
+            ))
+        }
+        HierCommand::Bbox { source, cell, .. } => {
+            let src = source_of(*source)?;
+            let extent = floe_render_core::cell_extent(&src.handle, *cell)
+                .map_err(|e| hier_error(kind, sequence, &e))
+                .map_err(HierWire)?;
+            let mut union: Option<[f64; 4]> = None;
+            if let Some(b) = extent.bbox {
+                for xf in &src.placements {
+                    let t = xf.apply(&b);
+                    union = Some(match union {
+                        None => t,
+                        Some(u) => [u[0].min(t[0]), u[1].min(t[1]), u[2].max(t[2]), u[3].max(t[3])],
+                    });
+                }
+            }
+            Ok(format!(
+                "cell_bbox seq={} src={} cell={} found=1 insts={} approx={} bbox={}",
+                sequence,
+                source,
+                cell,
+                extent.insts,
+                u8::from(extent.approx),
+                union.map(|b| wire_f64_box(&b)).unwrap_or_else(|| "-".to_string())
+            ))
+        }
+        HierCommand::Insts { source, cell, view, cap, .. } => {
+            let src = source_of(*source)?;
+            let mut boxes: Vec<String> = Vec::new();
+            let mut more = false;
+            let mut visited = 0u64;
+            for xf in &src.placements {
+                if boxes.len() >= *cap {
+                    more = true;
+                    break;
+                }
+                let Some(local) = xf.source_view(*view) else {
+                    continue;
+                };
+                let found = floe_render_core::cell_instances(
+                    &src.handle,
+                    *cell,
+                    local,
+                    *cap - boxes.len(),
+                    CELL_INSTS_BUDGET,
+                )
+                .map_err(|e| hier_error(kind, sequence, &e))
+                .map_err(HierWire)?;
+                more |= found.more;
+                visited = visited.saturating_add(found.visited);
+                boxes.extend(found.boxes.iter().map(|b| wire_f64_box(&xf.apply(b))));
+            }
+            Ok(format!(
+                "cell_insts seq={} src={} cell={} found=1 n={} more={} visited={} boxes={}",
+                sequence,
+                source,
+                cell,
+                boxes.len(),
+                u8::from(more),
+                visited,
+                if boxes.is_empty() { "-".to_string() } else { boxes.join(";") }
+            ))
+        }
+        HierCommand::Shutdown => Ok(String::new()),
+    })()
+    .map_err(|error: HierWire| error.0);
+    match line {
+        Ok(line) if line.is_empty() => {}
+        Ok(line) => respond(responses, line),
+        Err(line) if line.starts_with(kind) => respond(responses, line),
+        Err(message) => respond(responses, hier_error_line(kind, sequence, "query", &message)),
+    }
+}
+
+/// A finished error line for the wire (distinguished from a bare message).
+struct HierWire(String);
+
+impl From<String> for HierWire {
+    fn from(message: String) -> Self {
+        HierWire(message)
     }
 }
 
@@ -4152,6 +4551,65 @@ mod tests {
             "TOP 한글"
         );
         assert_eq!(wire_points(&[(0, 1), (-2, 3)]), "0,1;-2,3");
+    }
+
+    #[test]
+    fn parses_the_cell_tree_queries() {
+        let hier = |line: &str| match parse_command(line).unwrap().unwrap() {
+            InputCommand::Hier(command) => command,
+            _ => panic!("expected a hier command"),
+        };
+        assert_eq!(hier("cell_sources seq=3"), HierCommand::Sources { sequence: 3 });
+        assert_eq!(hier("cells seq=4"), HierCommand::Cells { sequence: 4, source: 0, cell: None });
+        assert_eq!(
+            hier("cells seq=5 src=2 cell=17"),
+            HierCommand::Cells { sequence: 5, source: 2, cell: Some(17) }
+        );
+        assert_eq!(
+            hier(&format!("cell_find seq=6 pat_hex={} limit=10", wire_hex("*inv?"))),
+            HierCommand::Find { sequence: 6, source: None, pattern: "*inv?".to_string(), limit: 10 }
+        );
+        // a limit over the cap is the cap; an empty pattern is allowed
+        assert_eq!(
+            hier("cell_find seq=7 src=1 limit=999999"),
+            HierCommand::Find { sequence: 7, source: Some(1), pattern: String::new(), limit: CELL_FIND_CAP }
+        );
+        assert_eq!(hier("cell_bbox seq=8 cell=9"), HierCommand::Bbox { sequence: 8, source: 0, cell: 9 });
+        assert_eq!(
+            hier("cell_insts seq=9 src=1 cell=9 view=0,-5,10.5,20 cap=7"),
+            HierCommand::Insts { sequence: 9, source: 1, cell: 9, view: [0.0, -5.0, 10.5, 20.0], cap: 7 }
+        );
+        assert!(parse_command("cell_bbox seq=8").is_err());
+        assert!(parse_command("cell_insts seq=9 cell=1 view=0,0,1,1 extra=1").is_err());
+        assert!(parse_command("cells seq=1 cell=x").is_err());
+        assert_eq!(
+            hier_error_line("cells", 4, "nohier", "no summary"),
+            format!("cells seq=4 found=0 code=nohier err_hex={}", wire_hex("no summary"))
+        );
+        assert_eq!(wire_f64_box(&[1.0, 2.5, -3.0, 4e9]), "1,2.5,-3,4000000000");
+    }
+
+    #[test]
+    fn hier_worker_answers_without_a_cache_and_supersedes_queued_instance_walks() {
+        let (tx, rx) = mpsc::channel();
+        let (responses, answers) = mpsc::channel();
+        let hier: SharedHier = Arc::new(RwLock::new(None));
+        // queue three commands before the worker runs: the older
+        // instance query is superseded by the newer one behind it, the
+        // rest answer "cache not open"
+        tx.send(HierCommand::Cells { sequence: 1, source: 0, cell: None }).unwrap();
+        tx.send(HierCommand::Insts { sequence: 2, source: 0, cell: 1, view: [0.0, 0.0, 1.0, 1.0], cap: 4 })
+            .unwrap();
+        tx.send(HierCommand::Insts { sequence: 3, source: 0, cell: 1, view: [0.0, 0.0, 2.0, 2.0], cap: 4 })
+            .unwrap();
+        tx.send(HierCommand::Shutdown).unwrap();
+        let worker = thread::spawn(move || hier_worker(rx, responses, hier));
+        worker.join().unwrap();
+        let lines: Vec<String> = answers.try_iter().collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].starts_with("cells seq=1 found=0 code=state"), "{}", lines[0]);
+        assert!(lines[1].starts_with("cell_insts seq=2 found=0 code=superseded"), "{}", lines[1]);
+        assert!(lines[2].starts_with("cell_insts seq=3 found=0 code=state"), "{}", lines[2]);
     }
 
     #[test]

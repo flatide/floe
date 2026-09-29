@@ -4,6 +4,7 @@
 
 pub mod coverage;
 pub mod hier;
+pub mod hiersum;
 pub mod occupancy;
 pub mod representatives;
 pub mod text;
@@ -167,6 +168,17 @@ impl Vfs {
             floe_ovm::map_file(&ovt_path)?
         };
         Ok(Vfs { ovm, ovp_path, ovt })
+    }
+
+    /// A session over an in-memory index without payload files (the
+    /// cell tree's tests in another crate); never a product path.
+    #[doc(hidden)]
+    pub fn from_ovm_for_tests(ovm: Ovm) -> Vfs {
+        Vfs {
+            ovm,
+            ovp_path: String::new(),
+            ovt: floe_ovm::Backing::Vec(Vec::new()),
+        }
     }
 
     /// design.ovt bytes (text strings + pts pools)

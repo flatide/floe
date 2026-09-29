@@ -188,6 +188,38 @@ def _wire_hex(fields, name):
         raise ValueError("invalid UTF-8 hex field: %s" % name) from exc
 
 
+CELL_QUERY_KINDS = ("cell_sources", "cells", "cell_find", "cell_bbox",
+                    "cell_insts")
+# the daemon's own caps (renderd CELL_FIND_CAP / CELL_INSTS_CAP); a job
+# may ask for less
+CELL_FIND_LIMIT = 5000
+CELL_INSTS_CAP = 4096
+
+
+def _wire_rows(value, width):
+    """A `,`-separated list of `:`-joined rows (`-` = none), each of
+    `width` fields; the last field may hold no `:`."""
+    if not value or value == "-":
+        return []
+    rows = []
+    for item in value.split(","):
+        parts = item.split(":", width - 1)
+        if len(parts) != width:
+            raise ValueError("invalid wire row: %r" % item)
+        rows.append(parts)
+    return rows
+
+
+def _wire_box(value):
+    """`x0,y0,x1,y1` as floats (integers stay exact); None for `-`."""
+    if not value or value == "-":
+        return None
+    parts = value.split(",")
+    if len(parts) != 4:
+        raise ValueError("invalid bbox field")
+    return [float(v) for v in parts]
+
+
 def _wire_pair_list(value, field):
     if not value:
         return []
@@ -484,6 +516,8 @@ class RustRenderWorker:
                 self._submit_pick(job)
             elif kind == "clip":
                 self._submit_clip(job)
+            elif kind in CELL_QUERY_KINDS:
+                self._submit_cell_query(job)
             else:
                 self.res.put({"kind": "error", "msg":
                               "unknown Rust worker job: %r" % kind})
@@ -720,6 +754,42 @@ class RustRenderWorker:
             max(1, int(job["r"])), int(job.get("nth", 0)),
             self._query_layers(job)))
 
+    def _submit_cell_query(self, job):
+        """The cell tree's queries (docs/SPEC-VIEWER.ko.md §8c): one line
+        each, answered by the daemon's hier thread with the same kind
+        and seq; the GUI reads the answer of its latest seq only."""
+        kind = job["kind"]
+        seq = int(job.get("seq", -1))
+        if kind == "cell_sources":
+            self._send("cell_sources seq=%d" % seq)
+        elif kind == "cells":
+            line = "cells seq=%d src=%d" % (seq, int(job.get("src", 0)))
+            if job.get("cell") is not None:
+                line += " cell=%d" % int(job["cell"])
+            self._send(line)
+        elif kind == "cell_find":
+            src = job.get("src")
+            pattern = str(job.get("pattern", ""))
+            # the wire rejects an empty value: no pat_hex = every cell
+            self._send("cell_find seq=%d src=%d%s limit=%d" % (
+                seq, -1 if src is None else int(src),
+                " pat_hex=%s" % pattern.encode("utf-8").hex() if pattern
+                else "",
+                int(job.get("limit", CELL_FIND_LIMIT))))
+        elif kind == "cell_bbox":
+            self._send("cell_bbox seq=%d src=%d cell=%d" % (
+                seq, int(job.get("src", 0)), int(job["cell"])))
+        elif kind == "cell_insts":
+            view = job["view"]
+            if len(view) != 4:
+                raise ValueError("cell_insts view must have four coordinates")
+            self._send("cell_insts seq=%d src=%d cell=%d view=%s cap=%d" % (
+                seq, int(job.get("src", 0)), int(job["cell"]),
+                ",".join("%r" % float(v) for v in view),
+                int(job.get("cap", CELL_INSTS_CAP))))
+        else:
+            raise ValueError("unknown cell query: %r" % kind)
+
     def _submit_clip(self, job):
         bbox = tuple(int(value) for value in job["bbox"])
         if len(bbox) != 4:
@@ -908,6 +978,8 @@ class RustRenderWorker:
             self._emit_snap(fields)
         elif kind == "pick":
             self._emit_pick(fields)
+        elif kind in CELL_QUERY_KINDS:
+            self._emit_cell_query(kind, fields)
         elif kind == "clip":
             self._emit_clip(fields)
         elif kind in ("cancelled", "dropped"):
@@ -991,6 +1063,78 @@ class RustRenderWorker:
         except (KeyError, TypeError, ValueError) as exc:
             self.res.put({"kind": "error", "msg":
                           "invalid Rust pick response: %s" % exc})
+            return
+        self.res.put(output)
+
+    def _emit_cell_query(self, kind, fields):
+        """A cell-tree answer as the GUI reads it: `found` False carries
+        `code` (nohier = build design.ovh; superseded; state; query) and
+        `err`; the rows of a found answer are decoded per kind."""
+        output = {
+            "kind": kind,
+            "seq": _wire_int(fields, "seq", -1),
+            "found": _wire_int(fields, "found") != 0,
+        }
+        try:
+            if not output["found"]:
+                output["code"] = fields.get("code", "query")
+                output["err"] = (_wire_hex(fields, "err_hex")
+                                 if "err_hex" in fields else "")
+                self.res.put(output)
+                return
+            if kind == "cell_sources":
+                output["sources"] = [
+                    {"src": int(a), "placements": int(b),
+                     "path": bytes.fromhex(c).decode("utf-8")}
+                    for a, b, c in _wire_rows(fields.get("sources"), 3)]
+            elif kind == "cells":
+                output.update({
+                    "src": _wire_int(fields, "src"),
+                    "cell": _wire_int(fields, "cell"),
+                    "name": _wire_hex(fields, "name_hex"),
+                    "insts": _wire_int(fields, "insts"),
+                    "height": _wire_int(fields, "height"),
+                    "unit": _wire_float(fields, "unit"),
+                    "bbox": _wire_box(fields.get("bbox")),
+                    "total": _wire_int(fields, "total"),
+                    "children": [
+                        {"cell": int(a), "members": int(b),
+                         "leaf": c == "1",
+                         "name": bytes.fromhex(d).decode("utf-8")}
+                        for a, b, c, d in _wire_rows(
+                            fields.get("children"), 4)],
+                })
+            elif kind == "cell_find":
+                output.update({
+                    "src": _wire_int(fields, "src", -1),
+                    "total": _wire_int(fields, "total"),
+                    "matches": [
+                        {"src": int(a), "cell": int(b), "insts": int(c),
+                         "name": bytes.fromhex(d).decode("utf-8")}
+                        for a, b, c, d in _wire_rows(
+                            fields.get("matches"), 4)],
+                })
+            elif kind == "cell_bbox":
+                output.update({
+                    "src": _wire_int(fields, "src"),
+                    "cell": _wire_int(fields, "cell"),
+                    "insts": _wire_int(fields, "insts"),
+                    "approx": _wire_int(fields, "approx") != 0,
+                    "bbox": _wire_box(fields.get("bbox")),
+                })
+            elif kind == "cell_insts":
+                boxes = fields.get("boxes", "-")
+                output.update({
+                    "src": _wire_int(fields, "src"),
+                    "cell": _wire_int(fields, "cell"),
+                    "more": _wire_int(fields, "more") != 0,
+                    "visited": _wire_int(fields, "visited"),
+                    "boxes": [] if boxes in ("", "-") else [
+                        _wire_box(b) for b in boxes.split(";")],
+                })
+        except (KeyError, TypeError, ValueError) as exc:
+            self.res.put({"kind": "error", "msg":
+                          "invalid Rust %s response: %s" % (kind, exc)})
             return
         self.res.put(output)
 

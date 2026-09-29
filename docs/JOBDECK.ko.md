@@ -331,6 +331,19 @@ gate: `ViewerCacheTests`(meta·세 모드의 레이어 표와 색·resolve_layer
 기동 → 워커 open → 첫 합성 프레임 표시), `test_5_ordinary_commands_take_a_deck`
 (`render/info/index/view`의 .jb 처리와 종료 코드).
 
+### 셀 트리 (2026-09-29, SPEC-VIEWER §8c)
+
+덱을 열면 왼쪽 pane `cells` 페이지의 루트는 **소스(TC)마다 하나**(라벨 =
+카탈로그의 TC 식별자, 기하 배치가 여럿이면 `×N`)이고, 펼치면 그 소스 탑
+셀의 자식들이다(renderd `cell_sources`가 스펙 순서의 소스와 캐시 폴더를,
+`cells src=S`가 자식들을 답한다; 소스별 `design.ovh` 필요 — 이 커밋
+이후의 `floe2 index deck.jb`는 소스마다 자동으로 쓰고, 이전 캐시는
+소스별 `floe2 index --hier-only <src>` 또는 뷰어의 빌드 제안). 검색은
+모든 소스를 한 번에 훑고(`src=-1`), 결과 행은 소스를 기억한다. 줌·
+하이라이트의 박스는 소스 좌표를 덱 배치(`scale·p + (dx, dy)`)로 옮긴
+덱 dbu로 오며, 한 소스가 여러 자리에 놓이면 박스도 그만큼 온다.
+pick/snap/clip이 덱에서 꺼져 있는 것과 달리 셀 질의는 덱에서도 답한다.
+
 ## 7. M4 상세 — 헤드리스 shot (`floe2 render`, 소스 종류 무관)
 
 참조 툴의 cli-spec에서 결정된 규칙을 floe2의 기존 명령에 얹었다. 덱 전용

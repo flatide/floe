@@ -345,6 +345,18 @@ def _occupancy_args(args):
     return out
 
 
+def _run_rust_hier(outdir, binary):
+    """`floe-index hier <cache>`: design.ovh, the cell tree's index
+    (docs/SPEC-FORMATS.ko.md), on a current cache."""
+    import shlex
+    import subprocess
+    command = [binary, "hier", outdir]
+    print("[floe] " + " ".join(shlex.quote(c) for c in command), flush=True)
+    rc = subprocess.call(command)
+    if rc != 0:
+        raise SystemExit(rc)
+
+
 def _run_rust_index(args, binary, coverage_only=False,
                     occupancy_only=False, representatives_only=False):
     import shlex
@@ -576,6 +588,14 @@ def cmd_index(args):
                 f"floe: --occupancy-only needs a current cache at {outdir} "
                 f"({reason})")
         return _run_rust_index(args, binary, occupancy_only=True)
+    if getattr(args, "hier_only", False):
+        # the cell tree's index, added to (or rebuilt on) a current cache
+        # by `floe-index hier`; the cache's other files are untouched
+        if not current:
+            raise SystemExit(
+                f"floe: --hier-only needs a current cache at {outdir} "
+                f"({reason})")
+        return _run_rust_hier(outdir, binary)
     if current and not args.force:
         if args.coverage and not os.path.isfile(
                 os.path.join(outdir, "design.ovc")):
@@ -1858,6 +1878,13 @@ def main(argv=None, *, prog=None, rust_only=None):
         "--occupancy-only", action="store_true",
         help="add or rebuild design.ovo on a current cache without "
              "re-indexing (the cache's other files are untouched)")
+    rust.add_argument(
+        "--hier-only", action="store_true",
+        help="add or rebuild design.ovh, the viewer's cell tree index "
+             "(children, parents, instance counts), on a current cache "
+             "without re-indexing; every new index writes it, a cache "
+             "built before 0.12.239 needs this once (one sequential pass "
+             "over the placement records: ~12 s per 80 M)")
     rust.add_argument(
         "--occupancy-um", type=_positive_float, default=None, metavar="UM",
         help="occupancy base cell in microns (default: automatic - 4 for "
