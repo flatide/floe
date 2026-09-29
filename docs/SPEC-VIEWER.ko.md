@@ -108,7 +108,13 @@
   트레이스 존치) — 두 팔레트는
   **Notebook의 palette 탭**, **minimap 탭이 기본**(180px,
   `_frontier_depths` = meta.frontier.depths, 클릭 센터링, 0.7px 미만
-  도트 생략; 2026-08-22 왼쪽 pane 하단에서 이전). fit/clip·
+  도트 생략; 2026-08-22 왼쪽 pane 하단에서 이전). 다이는 **MINIMAP_PAD
+  (6 px) 테두리 안**에 맞춘다(사용자 요청 2026-09-29, 0.12.244: 긴 축에서
+  다이 외곽선이 이미지 첫/마지막 픽셀에 놓여 위젯 가장자리에 묻히고, 다이에
+  잘라 붙이던 fit 뷰 박스가 그 위를 덮었다) — 뷰 박스는 테두리까지 나가
+  이미지 안쪽 1 px에서 잘리고, 테두리 클릭은 가장 가까운 다이 가장자리로
+  센터링(`_minimap_world_point`). 테스트
+  `test_minimap_die_outline_keeps_a_margin_from_the_edge_and_the_view_box`. fit/clip·
   open .db…·rules… 버튼은 2026-08-22 메뉴 바로 이전(패널 정보줄만 잔류).
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
@@ -524,6 +530,6 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 ## 10. 상수 모음 (gui.py 상단)
 
 MIN_SPP 0.01 · FIT_ZOOM_OUT 16 · WHEEL_ZOOM_STEP 0.96 ·
-KEY_PAN_FRACTION 0.5 / _FINE 0.1 · CAL_ZOOM_IN 0.5 · MINIMAP_PX 180 ·
+KEY_PAN_FRACTION 0.5 / _FINE 0.1 · CAL_ZOOM_IN 0.5 · MINIMAP_PX 180 · MINIMAP_PAD 6 ·
 DETAIL_PX (5,3,1)/기본 medium · COV_MAX_TEXEL_PX 160 ·
 DEBOUNCE_MS(gui.py) · 스트림 상수(_MAX_STREAM_ROUNDS 8, 예산 클램프 2048..32768KB)는 service.py.

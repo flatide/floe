@@ -265,6 +265,11 @@ PALETTE_COLORS = tuple((h, n) for n, h in fillpat.COLOR_TABLE)
 
 MINIMAP_PX = 180           # square palette area; die keeps its aspect ratio
 MINIMAP_DOT_MIN = 6        # view box smaller than this becomes a dot
+# empty border around the die inside the minimap (user call 2026-09-29:
+# the die outline sat on the image's first and last pixel on its long
+# axis - hidden at the widget edge, and covered by the fit view's box,
+# which was clipped to the die). The view box may extend into it.
+MINIMAP_PAD = 6
 MINIMAP_BG = 0x141414FF
 MINIMAP_EDGE = 0x666666FF
 MINIMAP_VIEW = 0x8ECDF5FF
@@ -2815,7 +2820,9 @@ class Viewer:
         bw, bh = bb[2] - bb[0], bb[3] - bb[1]
         if bw <= 0 or bh <= 0:
             return None
-        scale = MINIMAP_PX / max(bw, bh)
+        # the die fits inside the MINIMAP_PAD border on every side
+        inner = MINIMAP_PX - 2 * MINIMAP_PAD
+        scale = inner / max(bw, bh)
         mw, mh = max(2, round(bw * scale)), max(2, round(bh * scale))
         return (scale, (MINIMAP_PX - mw) // 2,
                 (MINIMAP_PX - mh) // 2, mw, mh)
@@ -2839,14 +2846,18 @@ class Viewer:
         return d
 
     def _minimap_world_point(self, px, py):
-        """Map a panel pixel inside the die to world coordinates."""
+        """Map a panel pixel to world coordinates: inside the die as
+        it is, in the MINIMAP_PAD border around it onto the nearest die
+        edge (the border is part of the map); farther out None."""
         geom = self._minimap_geom()
         if geom is None:
             return None
         scale, x0, y0, mw, mh = geom
-        if not (x0 <= px <= x0 + mw - 1 and
-                y0 <= py <= y0 + mh - 1):
+        if not (x0 - MINIMAP_PAD <= px <= x0 + mw - 1 + MINIMAP_PAD and
+                y0 - MINIMAP_PAD <= py <= y0 + mh - 1 + MINIMAP_PAD):
             return None
+        px = min(max(px, x0), x0 + mw - 1)
+        py = min(max(py, y0), y0 + mh - 1)
         bb = self._die_bbox()
         return (bb[0] + (px - x0) / scale,
                 bb[3] - (py - y0) / scale)
@@ -2942,12 +2953,15 @@ class Viewer:
         vw = (bbox[2] - bbox[0]) * scale
         vh = (bbox[3] - bbox[1]) * scale
         if vw >= MINIMAP_DOT_MIN and vh >= MINIMAP_DOT_MIN:
-            # the fit view overshoots the die by its margin: clip the
-            # view box to the minimap
-            rx0 = max(x0, mx(bbox[0]))
-            ry0 = max(y0, my(bbox[3]))
-            rx1 = min(x0 + mw - 1, mx(bbox[2]))
-            ry1 = min(y0 + mh - 1, my(bbox[1]))
+            # the fit view overshoots the die by its margin: the box
+            # runs into the MINIMAP_PAD border (so it no longer lies on
+            # the die outline) and is clipped one pixel inside the
+            # image, where it stays visible
+            lo, hi = 1, MINIMAP_PX - 2
+            rx0 = max(lo, mx(bbox[0]))
+            ry0 = max(lo, my(bbox[3]))
+            rx1 = min(hi, mx(bbox[2]))
+            ry1 = min(hi, my(bbox[1]))
             frame_rect(disp, rx0, ry0, max(2, round(rx1 - rx0 + 1)),
                        max(2, round(ry1 - ry0 + 1)), MINIMAP_VIEW)
         else:

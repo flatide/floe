@@ -790,6 +790,74 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertEqual(scroller.get_policy()[0],
                          gui.Gtk.PolicyType.AUTOMATIC)
 
+    def test_minimap_die_outline_keeps_a_margin_from_the_edge_and_the_view_box(self):
+        """User call 2026-09-29: the die outline sat on the minimap's
+        first and last pixel on its long axis (hidden at the widget
+        edge) and the fit view's box, clipped to the die, lay on top of
+        it. The die now fits inside a MINIMAP_PAD border, its outline
+        shows on all four sides, and the fit view's box runs outside
+        it; a click in the border centres on the nearest die edge."""
+        try:
+            from floe import gui
+            gui.import_gtk()
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        import types
+        from floe.gui import (MINIMAP_EDGE, MINIMAP_PAD, MINIMAP_PX,
+                              MINIMAP_VIEW, Viewer)
+
+        def rgb(color):
+            return ((color >> 24) & 255, (color >> 16) & 255,
+                    (color >> 8) & 255)
+
+        for die in ([0, 0, 20000, 8000], [0, 0, 6000, 18000]):
+            v = Viewer.__new__(Viewer)
+            v.meta = {"bbox": die}
+            v._view_root = None
+            v._minimap_bases = {}
+            v._frontier_depths = []
+            v.depth_value = 999
+            v._minimap_image = gui.Gtk.Image()
+            v.cx, v.cy = (die[0] + die[2]) / 2.0, (die[1] + die[3]) / 2.0
+            # the fit view: 5 % over the die on its long axis, far over
+            # it on the short one (a square-ish canvas)
+            span = max(die[2] - die[0], die[3] - die[1]) * 1.05
+            fit = (v.cx - span / 2, v.cy - span / 2,
+                   v.cx + span / 2, v.cy + span / 2)
+            v._update_minimap(fit)
+            pix = v._minimap_image.get_pixbuf()
+            data, stride, n = (pix.get_pixels(), pix.get_rowstride(),
+                               pix.get_n_channels())
+
+            def at(x, y):
+                o = int(y) * stride + int(x) * n
+                return tuple(data[o:o + 3])
+
+            _scale, x0, y0, mw, mh = v._minimap_geom()
+            x1, y1 = x0 + mw - 1, y0 + mh - 1
+            self.assertGreaterEqual(min(x0, y0), MINIMAP_PAD, die)
+            self.assertLessEqual(max(x1, y1), MINIMAP_PX - 1 - MINIMAP_PAD,
+                                 die)
+            mid_x, mid_y = (x0 + x1) // 2, (y0 + y1) // 2
+            for x, y in ((x0, mid_y), (x1, mid_y), (mid_x, y0),
+                         (mid_x, y1)):
+                self.assertEqual(at(x, y), rgb(MINIMAP_EDGE), (die, x, y))
+            # the view box runs in the border, visible and off the die,
+            # on all four sides
+            view = rgb(MINIMAP_VIEW)
+            self.assertIn(view, [at(x, mid_y) for x in range(0, x0)], die)
+            self.assertIn(view, [at(x, mid_y)
+                                 for x in range(x1 + 1, MINIMAP_PX)], die)
+            self.assertIn(view, [at(mid_x, y) for y in range(0, y0)], die)
+            self.assertIn(view, [at(mid_x, y)
+                                 for y in range(y1 + 1, MINIMAP_PX)], die)
+            # a click in the border lands on the nearest die edge; one
+            # past it is off the map
+            left = v._minimap_world_point(x0 - MINIMAP_PAD, mid_y)
+            self.assertAlmostEqual(left[0], die[0])
+            self.assertIsNone(v._minimap_world_point(x0 - MINIMAP_PAD - 1,
+                                                     mid_y))
+
     def test_view_root_moves_the_die_the_render_state_and_the_queries(self):
         """SPEC-VIEWER §8c: the selected cell as the view root - the die
         (fit, clamp, minimap) becomes its bbox, the render state and
