@@ -6901,10 +6901,13 @@ fn paint_width_first_rect(
     if band.stacking() && (x1 - x0 < DEVICE_ONE || y1 - y0 < DEVICE_ONE) {
         // density (DensityStack): a pixel wide at most on its thin side, all
         // rim - it stands for its widest draw (rank 0) and lights its own
+        // the same axis rule as the originals (review 2026-09-28: a 2.6 x
+        // 0.6 px array lit 232 px as originals and 153 px as density when
+        // the density kept the width-first span on the wide side too)
         let rect = |t: (f64, f64)| {
             let (c, r) = (
-                width_first_span_c(x0, x1, t.0, request.width_c)?,
-                width_first_span_c(y0, y1, t.1, request.width_c)?,
+                area_true_axis_span(x0, x1, t.0, request.width_c, Axis::X)?,
+                area_true_axis_span(y0, y1, t.1, request.width_c, Axis::Y)?,
             );
             Some((c.0, r.0, c.1, r.1))
         };
@@ -8047,7 +8050,17 @@ fn foot_span(
     v1: i128,
 ) -> Result<Option<(i128, i128)>, String> {
     Ok(match kind {
-        FootKind::Rect => width_first_span_c(v0, v1, 0.0, request.width_c),
+        // the originals' axis rule: a side of 2 px or more is the block between
+        // its edge lines (review 2026-09-28: the footprint kept the width-first
+        // span, so 100 members of 2.6 x 0.6 px stood for 358 px where the
+        // originals drew 400, and lower density leaked into the 42)
+        FootKind::Rect => area_true_axis_span(
+            v0,
+            v1,
+            0.0,
+            request.width_c,
+            if axis == 0 { Axis::X } else { Axis::Y },
+        ),
         FootKind::Area if v1 - v0 < DEVICE_ONE => Some(area_true_across(v0, v1)),
         FootKind::Area if axis == 0 => Some(fill_phase_columns(v0, v1, FillPhase::PixelCenter)?),
         FootKind::Area => Some(fill_phase_rows(v0, v1, FillPhase::PixelCenter)?),
@@ -13674,6 +13687,21 @@ mod tests {
                             vb,
                         },
                     ),
+                    // a wide thin member (2.6 x 0.6 px): its footprint is the
+                    // edge-exact block on x (review 2026-09-28)
+                    rect(
+                        2,
+                        10,
+                        250,
+                        26,
+                        6,
+                        Rep::Grid {
+                            na: 10,
+                            nb: 4,
+                            va,
+                            vb,
+                        },
+                    ),
                 ]
             };
             let pages = vec![
@@ -13763,6 +13791,15 @@ mod tests {
                     "vectors {va:?} {vb:?} tile {tile} workers {workers} list {list}"
                 );
                 assert!(!white(&a.frame).is_empty());
+                // what the members stand for (claimed = their footprints: the lit
+                // span lies within the rank-0 span on a thin side and is the block
+                // itself on a wide one) is the same stored as an array or one by one
+                // (review 2026-09-28: the array footprint kept the width-first span
+                // on the wide side - 358 px for 400)
+                assert_eq!(
+                    a.stats.density_stack[4], b.stats.density_stack[4],
+                    "claimed: vectors {va:?} {vb:?} tile {tile} workers {workers} list {list}"
+                );
                 let alone = density_frame(
                     &stack_scene(vec![(1, low(), Vec::new())], CUT_1),
                     &bare,

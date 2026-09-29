@@ -92,6 +92,10 @@ pub struct PlanRequest {
     /// FixedFit; renderd keeps one per scale so the viewport frame and its
     /// margin thin alike).
     pub fixed_fit: Option<floe_vfs::hier::FixedFit>,
+    /// The cell the plan starts from, in its own coordinates
+    /// (floe_vfs::ViewReq::root; the viewer's view root, SPEC-VIEWER
+    /// §8c); None = the top cell.
+    pub root: Option<u32>,
 }
 
 impl PlanRequest {
@@ -144,6 +148,7 @@ mod tests {
             regions: Vec::new(),
             visible_indices: None,
             fixed_fit: None,
+            root: None,
         };
         assert!(req.validate().is_err());
     }

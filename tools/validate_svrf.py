@@ -1,4 +1,13 @@
-"""SVRF subset-parser gate (floe/svrf.py -> .rules.json sidecar).
+"""SVRF subset-parser gate: `floe-index svrf` (rust/cli/src/svrf.rs) ->
+the <deck>.rules.json sidecar the viewer and `floe drc` read.
+
+The parser moved from floe/svrf.py to floe-index on 2026-09-29 (user call:
+the tools that build files from inputs live in floe-index); the port was
+checked against the Python parser on every deck below plus 3,000 random
+decks - sidecar bytes, scan text and parse state identical. The gate
+reaches the parse state through the gate-only `--dump-state` output
+(`BuilderView` below keeps the attribute names these checks were written
+against).
 
   R1  preprocessing: INCLUDE merge (relative to the including file,
       cycle-safe), #DEFINE/#IFDEF/#IFNDEF/#ELSE/#ENDIF branch
@@ -28,17 +37,124 @@
       VARIABLE bound/wrapped line), every check reaches a source
       gds layer; -D SYNTH_EXTRA adds exactly the EXTRA.CHECK.1
       rule.
+  R5  the command (2026-09-29): the sidecar is byte-for-byte what
+      Python's json.dump(indent=1, sort_keys=True) writes (non-ASCII,
+      quotes, 1e-05 / 1e+16 floats, null datatypes); <deck>.rules.json
+      by default; --scan prints the inventory and writes nothing;
+      -DNAME / -D=NAME / --define=NAME are -D NAME; a missing deck
+      exits 1, an unknown option 2, writing nothing; `floe2 svrf`
+      points to floe-index and exits 2; the builder's operator words
+      equal the viewer's (floe/svrf.py rhs_operands).
 
 usage: .venv/bin/python tools/validate_svrf.py
 """
 
+import collections
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from floe import drc, svrf  # noqa: E402
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+sys.path.insert(0, ROOT)
+from floe import drc  # noqa: E402
+from floe import svrf as reader  # noqa: E402
+
+BIN = os.path.join(ROOT, "rust", "target", "release", "floe-index")
+
+
+class _Check(object):
+    def __init__(self, c):
+        self.name = c["name"]
+        self.desc = c["desc"]
+        self.constraints = c["constraints"]
+        self.layers = c["layers"]
+        self.source_gds = [tuple(p) for p in c["source_gds"]]
+        self.unresolved = c["unresolved"]
+
+
+class _Deck(object):
+    """The builder's parse state, under the Python parser's names."""
+
+    def __init__(self, st, sidecar):
+        self.checks = collections.OrderedDict(
+            (c["name"], _Check(c)) for c in st["checks"])
+        self.layers = collections.OrderedDict(
+            (k, [tuple(s) if len(s) == 2 else s[0] for s in v])
+            for k, v in st["layers"])
+        self.defines = collections.OrderedDict(st["defines"])
+        self.variables = collections.OrderedDict(st["variables"])
+        self.derived = collections.OrderedDict(st["derived"])
+        self.derived_ops = collections.OrderedDict(st["derived_ops"])
+        self.layer_maps = [tuple(m) for m in st["layer_maps"]]
+        self.includes = st["includes"]
+        self.warnings = st["warnings"]
+        self.stats = collections.Counter(dict(st["stats"]))
+        self.unknown = collections.Counter(dict(st["unknown"]))
+        self.meas_hist = collections.Counter(dict(st["meas_hist"]))
+        self.switches = st["switches"]
+        self.switch_values = dict(st["switch_values"])
+        self.verbatim_includes = st["verbatim_includes"]
+        self.env_used = collections.OrderedDict(st["env_used"])
+        self.scan = st["scan"]
+        self.keywords = set(st["keywords"])
+        self.sidecar = sidecar     # (path, dict) of the written file
+
+    def to_json(self):
+        return self.sidecar[1]
+
+
+def run(args, **kw):
+    return subprocess.run([BIN, "svrf"] + list(args), capture_output=True,
+                          text=True, **kw)
+
+
+class BuilderView(object):
+    """`svrf.parse_deck(...)` etc. as the checks below call them."""
+    FORMAT = reader.FORMAT
+    load_rules = staticmethod(reader.load_rules)
+    _tmp = None
+
+    @classmethod
+    def parse_deck(cls, path, defines=None, include_dirs=(), scan_all=False,
+                   follow_verbatim=False, env_switches=True):
+        n = len(os.listdir(cls._tmp))
+        state = os.path.join(cls._tmp, "state%d.json" % n)
+        out = os.path.join(cls._tmp, "side%d.json" % n)
+        args = [path, "--dump-state", state]
+        for k, v in (defines or {}).items():
+            args += ["-D", k if v is None else "%s=%s" % (k, v)]
+        for d in include_dirs:
+            args += ["-I", d]
+        args += ["--scan"] if scan_all else ["-o", out]
+        if follow_verbatim:
+            args.append("--follow-verbatim")
+        if not env_switches:
+            args.append("--no-env-switches")
+        res = run(args)
+        if res.returncode != 0:
+            raise AssertionError("floe-index svrf %s -> rc %d\n%s"
+                                 % (args, res.returncode, res.stderr))
+        with open(state) as f:
+            st = json.load(f)
+        sidecar = None
+        if not scan_all:
+            sidecar = (out, reader.load_rules(out))
+        return _Deck(st, sidecar)
+
+    @staticmethod
+    def format_scan(d):
+        return d.scan
+
+    @staticmethod
+    def write_json(d, out):
+        shutil.copyfile(d.sidecar[0], out)
+        return d.sidecar[1]
+
+
+svrf = BuilderView
 
 FAIL = 0
 
@@ -544,13 +660,106 @@ def r4(tmp):
           gds and all(len(p) == 2 for p in gds), str(gds))
 
 
+def r5(tmp):
+    print("[R5] the command")
+    p = os.path.join(tmp, "fmt.svrf")
+    w(p,
+      "LAYER MAP 7 DATATYPE 2 100\n"
+      "LAYER M1 100\nLAYER M2 5\nLAYER M3 9.1\n"
+      "VARIABLE TINY 0.00001\nVARIABLE BIG 10000000000000000\n"
+      "VARIABLE WORD some words\n"
+      "F.1 { @ caf\u00e9 \"quoted\" back\\slash \u6e2c\u8a66\n"
+      "  INT M1 < TINY\n  EXT M1 M2 > BIG < 0.1\n  ENC M2 M3 < WORD\n}\n")
+    out = os.path.join(tmp, "fmt.json")
+    res = run([p, "-o", out])
+    check("builds (rc 0) and reports the counts",
+          res.returncode == 0 and "1 checks" in res.stdout,
+          res.stdout + res.stderr)
+    with open(out, "rb") as f:
+        raw = f.read()
+    data = json.loads(raw)
+    want = (json.dumps(data, indent=1, sort_keys=True) + "\n").encode()
+    check("sidecar bytes = Python json.dump(indent=1, sort_keys=True)",
+          raw == want, "differs")
+    check("ASCII only, floats as Python repr",
+          raw.isascii() and b"1e-05" in raw and b"1e+16" in raw
+          and b"\\u00e9" in raw, raw[:400])
+    check("generated_by names floe-index",
+          data["generated_by"].startswith("floe-index "),
+          data["generated_by"])
+    c = data["checks"]["F.1"]
+    check("null datatype and LAYER MAP pair serialized",
+          data["layers"]["M2"] == [[5, None]]
+          and data["layers"]["M1"] == [[7, 2]]
+          and data["layers"]["M3"] == [[9, 1]], str(data["layers"]))
+    check("unresolvable bound keeps its raw token",
+          any(x.get("raw") == "WORD" and x["value"] is None
+              for x in c["constraints"]), str(c["constraints"]))
+    d = os.path.join(tmp, "dflt.svrf")
+    shutil.copyfile(p, d)
+    res = run([d])
+    check("default output <deck>.rules.json",
+          res.returncode == 0 and os.path.isfile(d + ".rules.json"),
+          res.stderr)
+    s = os.path.join(tmp, "scan.svrf")
+    shutil.copyfile(p, s)
+    res = run([s, "--scan"])
+    check("--scan prints the inventory and writes nothing",
+          res.returncode == 0 and res.stdout.startswith("deck scan: ")
+          and "measurements: " in res.stdout
+          and not os.path.exists(s + ".rules.json"), res.stdout)
+    sw = os.path.join(tmp, "sw.svrf")
+    w(sw, "#IFDEF A\nLAYER HAS_A 1\n#ENDIF\n"
+          "#IFDEF B 7LM\nLAYER HAS_B 2\n#ENDIF\n")
+    forms = [["-DA", "-DB=7LM"], ["-D=A", "-D", "B=7LM"],
+             ["--define=A", "--define", "B=7LM"]]
+    seen = []
+    for k, f in enumerate(forms):
+        o = os.path.join(tmp, "sw%d.json" % k)
+        r = run([sw, "-o", o, "--no-env-switches"] + f)
+        seen.append(sorted(reader.load_rules(o)["layers"])
+                    if r.returncode == 0 else r.stderr)
+    check("-DNAME / -D=NAME / --define=NAME are -D NAME",
+          seen == [["HAS_A", "HAS_B"]] * 3, str(seen))
+    missing = os.path.join(tmp, "nosuch.svrf")
+    r = run([missing])
+    check("a missing deck exits 1 and writes nothing",
+          r.returncode == 1 and not os.path.exists(missing + ".rules.json"),
+          r.stderr)
+    r = run([p, "--frobnicate"])
+    check("an unknown option exits 2", r.returncode == 2, r.stderr)
+    r = subprocess.run([sys.executable, "-B", "-m", "floe2", "svrf", p,
+                        "-o", os.path.join(tmp, "old.json"), "-D", "X=1"],
+                       capture_output=True, text=True, cwd=ROOT)
+    check("floe2 svrf points to floe-index and exits 2",
+          r.returncode == 2
+          and "floe-index svrf %s -o %s -D X=1"
+          % (p, os.path.join(tmp, "old.json")) in r.stderr
+          and not os.path.exists(os.path.join(tmp, "old.json")),
+          r.stderr)
+    st = svrf.parse_deck(p)
+    check("builder operator words == the viewer's (rhs_operands)",
+          st.keywords == reader.KEYWORDS,
+          str(sorted(st.keywords ^ reader.KEYWORDS)))
+    check("the viewer splits a derivation as the builder did",
+          reader.rhs_operands("(a AND L3) SIZE BY 0.01 NOT x.y")
+          == ["a", "L3", "x.y"])
+
+
 def main():
+    if not os.path.isfile(BIN):
+        print("missing %s: cd rust && cargo build --release" % BIN)
+        sys.exit(2)
     with tempfile.TemporaryDirectory() as tmp:
+        work = os.path.join(tmp, "builder")
+        os.makedirs(work)
+        BuilderView._tmp = work
         r1(tmp)
         r2(tmp)
         r3(tmp)
         r3b(tmp)
         r4(tmp)
+        r5(tmp)
     print("validate_svrf:", "FAIL" if FAIL else "all green")
     sys.exit(FAIL)
 

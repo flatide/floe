@@ -14,7 +14,7 @@ waive 리뷰를 floe 뷰어 안에서 끝내는 것.
 
 ```
 results.db (Calibre ASCII, 정본)          deck.cal (SVRF 룰덱)
-      │  floe-index drc (rust, 병렬)            │  python -m floe svrf
+      │  floe-index drc (rust, 병렬)            │  floe-index svrf
       ▼                                         ▼
 .results.db.tray (자기완결 pack, 숨김)   deck.cal.rules.json (룰 메타)
       └───────────────┬─────────────────────────┘
@@ -27,8 +27,8 @@ results.db (Calibre ASCII, 정본)          deck.cal (SVRF 룰덱)
 # 1회 변환 (뷰어 open .db…가 자동으로도 수행)
 rust/target/release/floe-index drc results.db [--jobs N]
 # 룰덱 메타 (새 덱은 --scan 먼저; 실런과 동일한 -D 세트 필수)
-.venv/bin/python -m floe svrf deck.cal --scan
-.venv/bin/python -m floe svrf deck.cal -D SWITCH...
+rust/target/release/floe-index svrf deck.cal --scan
+rust/target/release/floe-index svrf deck.cal -D SWITCH...
 # 실행
 .venv/bin/python -m floe view chip.oas --drc results.db
 ```
@@ -212,7 +212,9 @@ python -m floe render chip.oas --drc results.db \
 
 ## 4. SVRF 룰 메타데이터 (.rules.json) — waive 판단 보조
 
-**서브셋 파서**(`floe/svrf.py`): 지오메트리 연산 의미는 구현하지
+**서브셋 파서**(`floe-index svrf`, `rust/cli/src/svrf.rs` — 2026-09-29
+`floe/svrf.py`에서 이식, 파이썬 쪽은 사이드카 읽기(`load_rules`·
+`rhs_operands`)만 남음): 지오메트리 연산 의미는 구현하지
 않는다 — derivation은 우변 피연산자 이름만 그래프로 넣고, 체크의
 원천 GDS 레이어는 그래프를 LAYER/LAYER MAP까지 폐쇄해서 얻는다.
 - 전처리: INCLUDE 병합, #DEFINE/#IFDEF/#ELSE, VARIABLE·값 치환 —
@@ -272,8 +274,8 @@ WIDTH=얇은 사각형, AREA=면적 미달, DENSITY=50×50 윈도)을 한계 미
 게이트(validate_rust.sh 스위트): `validate_drc_ice.py` **D1~D7**
 (pack==ASCII 적대 픽스처 · 디스패치/폐기 v1 폴백 · dedup+lazy ·
 gen 왕복 · jobs 불변 · query_rect 브루트포스 대조 · status/wcount),
-`validate_svrf.py` **R1~R4+R3b**(전처리 · 그래프 폐쇄 · 추출
-엣지케이스 · 실덱 표현식 · 엔드투엔드 매칭).
+`validate_svrf.py` **R1~R5+R3b**(전처리 · 그래프 폐쇄 · 추출
+엣지케이스 · 실덱 표현식 · 엔드투엔드 매칭 · 명령 계약 — floe-index svrf).
 
 ## 7. 미결 (사무실/실데이터 대기)
 

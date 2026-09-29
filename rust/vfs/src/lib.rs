@@ -4,6 +4,7 @@
 
 pub mod coverage;
 pub mod hier;
+pub mod hiersum;
 pub mod occupancy;
 pub mod representatives;
 pub mod text;
@@ -124,6 +125,11 @@ pub struct ViewReq {
     /// HierOpts::frame_cap only says how many, not whether. renderd passes
     /// the viewer's frames switch; everything else plans with frames.
     pub frames: bool,
+    /// The cell the plan starts from, in its own coordinates (the viewer's
+    /// "selected cell as the view root", SPEC-VIEWER §8c); None = the
+    /// file's top cell. Depth counts from it; a value outside the cell
+    /// table plans the top.
+    pub root: Option<u32>,
 }
 
 /// one placement of a page cell in the working-set top. na/nb/va/vb
@@ -165,6 +171,17 @@ impl Vfs {
             floe_ovm::map_file(&ovt_path)?
         };
         Ok(Vfs { ovm, ovp_path, ovt })
+    }
+
+    /// A session over an in-memory index without payload files (the
+    /// cell tree's tests in another crate); never a product path.
+    #[doc(hidden)]
+    pub fn from_ovm_for_tests(ovm: Ovm) -> Vfs {
+        Vfs {
+            ovm,
+            ovp_path: String::new(),
+            ovt: floe_ovm::Backing::Vec(Vec::new()),
+        }
     }
 
     /// design.ovt bytes (text strings + pts pools)

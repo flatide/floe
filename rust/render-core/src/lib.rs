@@ -7,6 +7,7 @@
 
 mod cache;
 mod cancel;
+mod cells;
 mod clip;
 mod deck;
 mod font;
@@ -29,9 +30,13 @@ pub use cache::{
     PlannedView, RenderLabel,
 };
 pub use cancel::RenderCancellation;
+pub use cells::{
+    children as cell_children, extent as cell_extent, find as cell_find, instances as cell_instances,
+    CellChildren, CellExtent, ChildRow, DeckXf, FindResult, FindRow, HierError, HierHandle, Instances,
+};
 pub use clip::ClipGeometry;
 pub use deck::{
-    overlay, source_view, transform_bbox, Deck, DeckInfo, DeckLayer, DeckPlacement,
+    overlay, source_view, transform_bbox, Deck, DeckHierSource, DeckInfo, DeckLayer, DeckPlacement,
     DeckRenderReport, DeckRenderRequest, DeckSpec,
 };
 pub use font::{validate_font_px, DEFAULT_LABEL_FONT_PX, MAX_LABEL_FONT_PX, MIN_LABEL_FONT_PX};

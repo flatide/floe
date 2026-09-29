@@ -1721,7 +1721,10 @@ fn plan_hier_pass(
             h.set_words = h.vis_layers.len().div_ceil(64).max(1);
         }
     }
-    let top_ci = v.top;
+    // the view root (ViewReq::root): the plan starts from this cell in
+    // its own coordinates, depth counted from it; the file's top when
+    // none (or one outside the table) is given
+    let top_ci = req.root.filter(|&r| r < v.n_cells).unwrap_or(v.top);
     let r0 = h.norm_r(
         top_ci,
         if req.depth == u32::MAX {
@@ -4685,6 +4688,7 @@ mod tests {
             shape_cut: false,
             shape_cut_max: false,
             frames: true,
+            root: None,
             page_wash: true,
             lod_swap: true,
         }
@@ -4998,6 +5002,7 @@ mod tests {
             shape_cut: false,
             shape_cut_max: false,
             frames: true,
+            root: None,
             page_wash: true,
             lod_swap: true,
         };
@@ -6932,6 +6937,7 @@ mod tests {
             shape_cut: false,
             shape_cut_max: false,
             frames: true,
+            root: None,
             page_wash: true,
             lod_swap: true,
         }
@@ -7106,6 +7112,75 @@ mod tests {
     // planner (review 2026-09-11: the oracle still culled thin pages
     // after the default changed, so a planner that dropped one would
     // have passed); `brute` is the default policy, `brute_with` any.
+    #[test]
+    fn a_view_root_plans_that_cell_as_the_top_in_its_own_coordinates() {
+        // LEAF (page) twice in MID (page), MID turned 90 degrees at
+        // (1000, 0) in TOP (page): a plan rooted at MID sees MID's and
+        // LEAF's pages in MID's coordinates and nothing of TOP
+        let v = fixture(
+            &[
+                FCell {
+                    name: "LEAF",
+                    pages: vec![(bx(0, 0, 40, 40), 40, 40)],
+                    places: vec![],
+                },
+                FCell {
+                    name: "MID",
+                    pages: vec![(bx(0, 0, 300, 300), 300, 300)],
+                    places: vec![
+                        (0, 10, 10, 0, false, Rep::One),
+                        (0, 200, 200, 0, false, Rep::One),
+                    ],
+                },
+                FCell {
+                    name: "TOP",
+                    pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)],
+                    places: vec![(1, 1000, 0, 1, false, Rep::One)],
+                },
+            ],
+            2,
+        );
+        let leaf_page = v.cell(0).page_start;
+        let mid_page = v.cell(1).page_start;
+        let top_page = v.cell(2).page_start;
+        let mut req = rq_px(bx(0, 0, 300, 300), 0, u32::MAX, 1.0);
+        req.root = Some(1);
+        let plan = plan_hier(&v, &req, &HierOpts::default());
+        let pages: BTreeSet<u32> = plan.pages.iter().copied().collect();
+        assert_eq!(pages, [leaf_page, mid_page].into_iter().collect());
+        assert!(!pages.contains(&top_page));
+        assert_eq!(plan.top.0, 1);
+        assert_eq!(pages, brute(&v, &req));
+        // in MID's coordinates: a view over the second LEAF only
+        let mut small = rq_px(bx(190, 190, 250, 250), 0, u32::MAX, 1.0);
+        small.root = Some(1);
+        let plan = plan_hier(&v, &small, &HierOpts::default());
+        assert_eq!(
+            plan.pages.iter().copied().collect::<BTreeSet<u32>>(),
+            brute(&v, &small)
+        );
+        assert!(plan.pages.contains(&leaf_page));
+        // depth counts from the root: depth 0 at MID keeps MID's own page
+        // and frames LEAF without its page
+        let mut d0 = rq_px(bx(0, 0, 300, 300), 0, 0, 1.0);
+        d0.root = Some(1);
+        let plan = plan_hier(&v, &d0, &HierOpts::default());
+        assert_eq!(
+            plan.pages.iter().copied().collect::<BTreeSet<u32>>(),
+            [mid_page].into_iter().collect()
+        );
+        // the top as an explicit root is the default plan; an index outside
+        // the table plans the top too
+        let plain = rq_px(bx(0, 0, 5000, 5000), 0, u32::MAX, 1.0);
+        let mut explicit = plain.clone();
+        explicit.root = Some(2);
+        let mut outside = plain.clone();
+        outside.root = Some(99);
+        let want = plan_hier(&v, &plain, &HierOpts::default()).pages;
+        assert_eq!(plan_hier(&v, &explicit, &HierOpts::default()).pages, want);
+        assert_eq!(plan_hier(&v, &outside, &HierOpts::default()).pages, want);
+    }
+
     fn brute(v: &Ovm, req: &ViewReq) -> BTreeSet<u32> {
         brute_with(v, req, &HierOpts::default())
     }
@@ -7194,7 +7269,7 @@ mod tests {
         let page_hair = if req.page_hairline { hair } else { 0 };
         walk(
             v,
-            v.top,
+            req.root.filter(|&r| r < v.n_cells).unwrap_or(v.top),
             &Xf::identity(),
             r0,
             req,
@@ -7469,6 +7544,7 @@ mod tests {
             shape_cut: false,
             shape_cut_max: false,
             frames: true,
+            root: None,
             page_wash: true,
             lod_swap: true,
         };

@@ -117,9 +117,40 @@ render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layer
 clip seq=12 box=0,0,404000,447000 layers=1/0,2/0 jobs=4 out=/tmp/clip.oas
 snap seq=20 x=1000 y=2000 r=10 layers=1/0,2/0
 pick seq=21 x=1000 y=2000 r=3 nth=0 layers=1/0,2/0
+cell_sources seq=30
+cells seq=31 src=0 cell=17
+cell_find seq=32 src=-1 pat_hex=2a696e763f limit=2000
+cell_bbox seq=33 src=0 cell=9
+cell_insts seq=34 src=0 cell=9 view=0,0,404000,447000 cap=4096
 cancel before_gen=11
 info
 quit
+```
+
+`root=<cell index>` on `render`, `clip`, `cell_bbox` and `cell_insts` is the
+view root (docs/SPEC-VIEWER.ko.md §8c): the plan starts from that cell in ITS
+coordinates (depth counted from it; the published pick/snap scene, the frame's
+retained state and the fit memory are per root); absent = the top cell. A root
+outside the cell table is an error; a jobdeck refuses a root (its sources' tops
+are its cells). Under a root the occupancy summary (a flattening of the top) is
+not used.
+
+The five `cell_*` commands are the viewer's cell tree (docs/SPEC-VIEWER.ko.md
+§8c). They run on the daemon's own hier thread over the hierarchy summary
+`design.ovh` (docs/SPEC-FORMATS.ko.md) and never touch the render or the
+pick/snap thread. Every answer repeats the kind and `seq`; a failure is
+`<kind> seq=N found=0 code=<nohier|superseded|state|query> err_hex=<utf-8 hex>`
+(`nohier`: build the summary with `floe-index hier <cache>`; `superseded`: a
+newer `cell_insts` was already queued behind this one). `src` is a source
+index of the open cache (always 0) or deck (spec order; `cell_find src=-1`
+searches every source). Answers:
+
+```text
+cell_sources seq=30 found=1 n=<sources> sources=<src>:<placements>:<path_hex>,...
+cells seq=31 src=0 found=1 cell=17 name_hex=<hex> insts=<under the top> height=<levels> unit=<source dbu> bbox=<rbbox|-> n=<rows> total=<distinct children> children=<ci>:<members>:<leaf 0|1>:<name_hex>,...   (cell omitted = the source's top; rows by name, at most 20,000)
+cell_find seq=32 src=-1 found=1 total=<matches> n=<rows> matches=<src>:<ci>:<insts>:<name_hex>,...   (substring, or a whole-name glob with * ?, case-insensitively; rows by name, at most limit <= 5,000)
+cell_bbox seq=33 src=0 cell=9 found=1 insts=<n> approx=<0|1> bbox=<x0,y0,x1,y1|->   (view coordinates: the deck's dbu for a deck; approx=1 = the extent of the top-level placements holding the cell)
+cell_insts seq=34 src=0 cell=9 found=1 n=<rows> more=<0|1> visited=<walk cost> boxes=<x0,y0,x1,y1>;...   (instance boxes meeting the view, at most cap <= 4,096 and a 2,000,000-visit walk budget; more=1 = partial)
 ```
 
 `font_px` is an integer screen-pixel size in `6..96`. The Python Rust worker

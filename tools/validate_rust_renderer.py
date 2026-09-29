@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from floe import RENDERD_VERSION, __version__  # noqa: E402
 from floe.rust_render import (  # noqa: E402
+    CELL_QUERY_KINDS,
     RustRenderWorker,
     _parse_wire_line,
     _pattern_fill,
@@ -658,6 +659,305 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         pixels, stride = disp.get_pixels(), disp.get_rowstride()
         self.assertEqual(rgb(63, 32), (0, 0, 0))
 
+    def test_cell_tree_first_expand_stays_open_and_asks_once(self):
+        """Field 2026-09-29: the first expand of a tree row closed at
+        once (later ones worked) - the placeholder child was removed
+        before the children arrived, and GTK collapses a row whose
+        last child goes. The children go in first; the row stays open,
+        the placeholder is gone, and the row asked for them once."""
+        try:
+            from floe import gui
+            gui.import_gtk()
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        import types
+        from floe.gui import Viewer
+        v = Viewer.__new__(Viewer)
+        v.cache = types.SimpleNamespace(catalog=None)
+        v.dbu = 0.001
+        v._cellwin = None
+        v._cell_seq = 0
+        v._cell_pending = {}
+        v._cell_sources = v._cell_sel = v._cell_hl = None
+        v._cell_hl_on = True
+        v._cell_hl_key = None
+        v._cell_find_seq = v._cell_insts_seq = v._cell_bbox_seq = None
+        v._cell_search_timer = None
+        v._cell_mode = "tree"
+        v._cell_nohier = set()
+        sent = []
+        v.worker = types.SimpleNamespace(alive=lambda: True,
+                                         submit=sent.append)
+        # the panel's box must stay referenced: an unparented container
+        # is destroyed with its widgets when collected, which unsets the
+        # tree view's model
+        panel = v._build_cell_panel()
+        self.addCleanup(panel.destroy)
+        w = v._cellwin
+        store = w._store
+        v._cell_tree_load_roots()
+        v._on_cell_result({
+            "kind": "cell_sources", "seq": sent[-1]["seq"], "found": True,
+            "sources": [{"src": 0, "placements": 1, "path": "/x/.a.ice"}]})
+        v._on_cell_result({
+            "kind": "cells", "seq": sent[-1]["seq"], "found": True,
+            "src": 0, "cell": 6, "name": "TOP", "insts": 1, "height": 2,
+            "unit": 1000.0, "bbox": [0, 0, 1, 1], "total": 2,
+            "children": [
+                {"cell": 4, "members": 9, "leaf": True, "name": "LEAF"},
+                {"cell": 5, "members": 2, "leaf": False, "name": "MID"}]})
+        root = store.get_iter_first()
+        self.assertTrue(w._tree.row_expanded(store.get_path(root)))
+        mid = store.iter_nth_child(root, 1)
+        self.assertEqual(store[store.iter_children(mid)][5], "placeholder")
+        asked = len(sent)
+        w._tree.expand_row(store.get_path(mid), False)
+        self.assertEqual(len(sent), asked + 1)
+        self.assertEqual((sent[-1]["kind"], sent[-1]["cell"]), ("cells", 5))
+        v._on_cell_result({
+            "kind": "cells", "seq": sent[-1]["seq"], "found": True,
+            "src": 0, "cell": 5, "name": "MID", "insts": 2, "height": 1,
+            "unit": 1000.0, "bbox": [0, 0, 1, 1], "total": 1,
+            "children": [
+                {"cell": 3, "members": 4, "leaf": True, "name": "INV"}]})
+        self.assertTrue(w._tree.row_expanded(store.get_path(mid)),
+                        "the first expand closed")
+        self.assertEqual([store[store.iter_nth_child(mid, i)][0]
+                          for i in range(store.iter_n_children(mid))],
+                         ["INV"])
+        # a second open does not ask again
+        w._tree.collapse_row(store.get_path(mid))
+        w._tree.expand_row(store.get_path(mid), False)
+        self.assertEqual(len(sent), asked + 1)
+
+    def test_cell_page_fits_the_left_pane_at_its_start_width(self):
+        """Field 2026-09-29: the left pane opened with the `cells` tab
+        off screen and the DRC tab half hidden - the page's one-row
+        button bar was 276 px against the pane's 196 px, and GtkPaned
+        shrinks a too-wide first child by clipping its LEFT side. The
+        page's minimum width must stay well under the pane's start
+        width; the buttons wrap instead."""
+        try:
+            from floe import gui
+            gui.import_gtk()
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        import types
+        from floe.gui import LEFT_PANE_PX, MINIMAP_PX, Viewer
+        v = Viewer.__new__(Viewer)
+        v.cache = None
+        v._cellwin = None
+        v._cell_seq = 0
+        v._cell_pending = {}
+        v._cell_sources = v._cell_sel = v._cell_hl = None
+        v._cell_hl_on = True
+        v._cell_hl_key = None
+        v._cell_find_seq = v._cell_insts_seq = v._cell_bbox_seq = None
+        v._cell_search_timer = None
+        v._cell_mode = "tree"
+        v._cell_nohier = set()
+        v._view_root = None
+        v.worker = types.SimpleNamespace(alive=lambda: False)
+        panel = v._build_cell_panel()
+        window = gui.Gtk.OffscreenWindow()
+        window.add(panel)
+        window.show_all()
+        self.addCleanup(window.destroy)
+        minimum, _natural = panel.get_preferred_width()
+        # the old floor (the minimap's) and the new start width alike
+        self.assertLessEqual(minimum, MINIMAP_PX + 16 - 40, minimum)
+        self.assertLess(minimum, LEFT_PANE_PX)
+        # the controls sit in a wrapping row, the build button apart
+        row = v._cellwin._zoom.get_parent().get_parent()
+        self.assertIsInstance(row, gui.Gtk.FlowBox)
+        self.assertEqual(len(row.get_children()), 4)
+        self.assertFalse(v._cellwin._build.get_visible())
+        # user call 2026-09-29: thirty nested levels expanded (570 px of
+        # indentation) must not widen the page - the tree scrolls
+        # sideways instead (hscroll AUTOMATIC), so the pane never clips
+        # the page's left side with no way back
+        store = v._cellwin._store
+        it = None
+        for depth in range(30):
+            it = store.append(it, ["CELL_%02d" % depth, "", 0, depth,
+                                   True, "cell"])
+        v._cellwin._tree.expand_all()
+        while gui.Gtk.events_pending():
+            gui.Gtk.main_iteration()
+        deep, _natural = panel.get_preferred_width()
+        self.assertLessEqual(deep, minimum + 8, (deep, minimum))
+        scroller = v._cellwin._tree.get_parent()
+        self.assertEqual(scroller.get_policy()[0],
+                         gui.Gtk.PolicyType.AUTOMATIC)
+
+    def test_minimap_die_outline_keeps_a_margin_from_the_edge_and_the_view_box(self):
+        """User call 2026-09-29: the die outline sat on the minimap's
+        first and last pixel on its long axis (hidden at the widget
+        edge) and the fit view's box, clipped to the die, lay on top of
+        it. The die now fits inside a MINIMAP_PAD border, its outline
+        shows on all four sides, and the fit view's box runs outside
+        it; a click in the border centres on the nearest die edge."""
+        try:
+            from floe import gui
+            gui.import_gtk()
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        import types
+        from floe.gui import (MINIMAP_EDGE, MINIMAP_PAD, MINIMAP_PX,
+                              MINIMAP_VIEW, Viewer)
+
+        def rgb(color):
+            return ((color >> 24) & 255, (color >> 16) & 255,
+                    (color >> 8) & 255)
+
+        for die in ([0, 0, 20000, 8000], [0, 0, 6000, 18000]):
+            v = Viewer.__new__(Viewer)
+            v.meta = {"bbox": die}
+            v._view_root = None
+            v._minimap_bases = {}
+            v._frontier_depths = []
+            v.depth_value = 999
+            v._minimap_image = gui.Gtk.Image()
+            v.cx, v.cy = (die[0] + die[2]) / 2.0, (die[1] + die[3]) / 2.0
+            # the fit view: 5 % over the die on its long axis, far over
+            # it on the short one (a square-ish canvas)
+            span = max(die[2] - die[0], die[3] - die[1]) * 1.05
+            fit = (v.cx - span / 2, v.cy - span / 2,
+                   v.cx + span / 2, v.cy + span / 2)
+            v._update_minimap(fit)
+            pix = v._minimap_image.get_pixbuf()
+            data, stride, n = (pix.get_pixels(), pix.get_rowstride(),
+                               pix.get_n_channels())
+
+            def at(x, y):
+                o = int(y) * stride + int(x) * n
+                return tuple(data[o:o + 3])
+
+            _scale, x0, y0, mw, mh = v._minimap_geom()
+            x1, y1 = x0 + mw - 1, y0 + mh - 1
+            self.assertGreaterEqual(min(x0, y0), MINIMAP_PAD, die)
+            self.assertLessEqual(max(x1, y1), MINIMAP_PX - 1 - MINIMAP_PAD,
+                                 die)
+            mid_x, mid_y = (x0 + x1) // 2, (y0 + y1) // 2
+            for x, y in ((x0, mid_y), (x1, mid_y), (mid_x, y0),
+                         (mid_x, y1)):
+                self.assertEqual(at(x, y), rgb(MINIMAP_EDGE), (die, x, y))
+            # the view box runs in the border, visible and off the die,
+            # on all four sides
+            view = rgb(MINIMAP_VIEW)
+            self.assertIn(view, [at(x, mid_y) for x in range(0, x0)], die)
+            self.assertIn(view, [at(x, mid_y)
+                                 for x in range(x1 + 1, MINIMAP_PX)], die)
+            self.assertIn(view, [at(mid_x, y) for y in range(0, y0)], die)
+            self.assertIn(view, [at(mid_x, y)
+                                 for y in range(y1 + 1, MINIMAP_PX)], die)
+            # a click in the border lands on the nearest die edge; one
+            # past it is off the map
+            left = v._minimap_world_point(x0 - MINIMAP_PAD, mid_y)
+            self.assertAlmostEqual(left[0], die[0])
+            self.assertIsNone(v._minimap_world_point(x0 - MINIMAP_PAD - 1,
+                                                     mid_y))
+
+    def test_view_root_moves_the_die_the_render_state_and_the_queries(self):
+        """SPEC-VIEWER §8c: the selected cell as the view root - the die
+        (fit, clamp, minimap) becomes its bbox, the render state and
+        every render/clip/cell query carry its index, the stale frame
+        and the margin go, and `top` returns everything."""
+        import types
+        from floe.gui import Viewer
+        v = Viewer.__new__(Viewer)
+        v.cache = types.SimpleNamespace(is_jobdeck=False)
+        v.meta = {"bbox": [0, 0, 20000, 12000], "dbu": 0.001}
+        v.dbu = 0.001
+        v.visible = {(1, 0)}
+        v._depth_key = lambda: 999
+        v._effective_cut_px = lambda: 3.0
+        v.lod_on = v.frames_on = v.labels_on = False
+        v._color_epoch = 0
+        v._effective_thin = lambda: "keep"
+        v._view_root = None
+        v._title_base = "floe - x"
+        v.window = types.SimpleNamespace(set_title=lambda t: titles.append(t))
+        titles = []
+        v._minimap_bases = {"stale": 1}
+        v.last_frame = ("frame",)
+        v._margin_frame = ("margin",)
+        v._frame_anchor = (1, 2)
+        v._job_keys = {3: "k"}
+        v._clear_pending = lambda: None
+        v._cell_hl = {"boxes": []}
+        v._cell_hl_key = "k"
+        v._cell_hl_on = True
+        # the panel: only what the root path touches
+        v._cellwin = types.SimpleNamespace(
+            _top=types.SimpleNamespace(set_sensitive=lambda on: None),
+            _info=types.SimpleNamespace(set_text=lambda t: None))
+        v._cell_sel = (0, 5, "BLK")
+        v._frontier_depths = [[[0, 0, 1, 1, 0]]]
+        v.depth_value = 0
+        fits, status, sent = [], [], []
+        v.fit = lambda: fits.append(v._die_bbox())
+        v._set_live_status = status.append
+        v.view_bbox = lambda: (0.0, 0.0, 100.0, 100.0)
+        v._cell_seq = 0
+        v._cell_pending = {}
+        v.worker = types.SimpleNamespace(alive=lambda: True,
+                                         submit=sent.append)
+        v._cell_insts_seq = None
+        plain_key = v._render_key("live")
+        self.assertIsNone(v._root_ci())
+        self.assertEqual(v._die_bbox(), [0, 0, 20000, 12000])
+        self.assertEqual(v._minimap_frontier_depth(), 0)
+        # Ctrl+T asks for the selected cell; the answer applies the root
+        v._cell_set_root()
+        self.assertEqual((sent[-1]["kind"], sent[-1]["cell"]), ("cells", 5))
+        self.assertEqual(v._cell_pending[sent[-1]["seq"]][0], "root_set")
+        v._on_cell_result({
+            "kind": "cells", "seq": sent[-1]["seq"], "found": True,
+            "src": 0, "cell": 5, "name": "BLK", "insts": 3, "height": 2,
+            "unit": 1000.0, "bbox": [0, 0, 5000, 4000], "total": 0,
+            "children": []})
+        self.assertEqual(v._root_ci(), 5)
+        self.assertEqual(v._die_bbox(), [0.0, 0.0, 5000.0, 4000.0])
+        self.assertEqual(fits, [[0.0, 0.0, 5000.0, 4000.0]])
+        self.assertIsNone(v._minimap_frontier_depth())
+        self.assertEqual(v._minimap_bases, {})
+        self.assertIsNone(v.last_frame)
+        self.assertIsNone(v._margin_frame)
+        self.assertEqual(v._job_keys, {})
+        self.assertNotEqual(v._render_key("live"), plain_key)
+        self.assertEqual(titles[-1], "floe - x · root BLK")
+        self.assertIn("view root: BLK", status[-1])
+        # the highlight was re-asked under the root
+        self.assertEqual(sent[-1]["kind"], "cell_insts")
+        self.assertEqual(sent[-1]["root"], 5)
+        # the same root again is a no-op; a shapeless cell is refused
+        n = len(sent)
+        v._cell_set_root()
+        self.assertEqual(len(sent), n)
+        v._cell_sel = (0, 7, "EMPTY")
+        v._cell_set_root()
+        v._on_cell_result({
+            "kind": "cells", "seq": sent[-1]["seq"], "found": True,
+            "src": 0, "cell": 7, "name": "EMPTY", "insts": 3, "height": 0,
+            "unit": 1000.0, "bbox": None, "total": 0, "children": []})
+        self.assertEqual(v._root_ci(), 5)
+        self.assertIn("no shapes", status[-1])
+        # back to the top
+        v._cell_root_top()
+        self.assertIsNone(v._root_ci())
+        self.assertEqual(v._die_bbox(), [0, 0, 20000, 12000])
+        self.assertEqual(v._render_key("live"), plain_key)
+        self.assertEqual(titles[-1], "floe - x")
+        self.assertEqual(len(fits), 2)
+        # a jobdeck has no view root
+        v.cache = types.SimpleNamespace(is_jobdeck=True)
+        v._cell_sel = (0, 5, "BLK")
+        n = len(sent)
+        v._cell_set_root()
+        self.assertEqual(len(sent), n)
+        self.assertIn("jobdeck", status[-1])
+
     def test_menus_and_dialogs_hand_the_keys_back_to_the_canvas(self):
         """Field 2026-09-05: after using a menu, g and the other key
         commands stayed dead until a canvas click. _focus_view puts the
@@ -1078,6 +1378,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIn("round_paths=1", commands[0])
             self.assertIn("jobs=3 decode_jobs=4 tile_px=384", commands[0])
             self.assertIn("round_pages=%d" % (1 << 30), commands[0])
+            # the view root (SPEC-VIEWER §8c) travels only when set
+            self.assertNotIn(" root=", commands[0])
+            worker._submit_render(dict(job, gen=98, root=17))
+            rooted = commands.pop()
+            self.assertTrue(rooted.endswith(" root=17"), rooted)
             self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
             # the page hairline policy rides with every frame; a plain
@@ -1459,6 +1764,118 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(worker.res.get_nowait(), {
                 "kind": "pick", "seq": 9, "found": False, "count": 0,
             })
+
+            # the cell tree's queries (docs/SPEC-VIEWER.ko.md §8c): one
+            # line per kind, the answer decoded per kind
+            del commands[:]
+            for job in (
+                    {"kind": "cell_sources", "seq": 10},
+                    {"kind": "cells", "seq": 11},
+                    {"kind": "cells", "seq": 12, "src": 2, "cell": 17},
+                    {"kind": "cell_find", "seq": 13, "pattern": "*inv?",
+                     "limit": 10},
+                    {"kind": "cell_find", "seq": 14, "src": 1},
+                    {"kind": "cell_bbox", "seq": 15, "cell": 9},
+                    {"kind": "cell_insts", "seq": 16, "src": 1, "cell": 9,
+                     "view": (0, -5, 10.5, 20), "cap": 7},
+                    {"kind": "cell_bbox", "seq": 17, "cell": 9, "root": 3},
+                    {"kind": "cell_insts", "seq": 18, "cell": 9,
+                     "view": (0, 0, 1, 1), "root": 3}):
+                self.assertIn(job["kind"], CELL_QUERY_KINDS)
+                worker._submit_cell_query(job)
+            self.assertEqual(commands, [
+                "cell_sources seq=10",
+                "cells seq=11 src=0",
+                "cells seq=12 src=2 cell=17",
+                "cell_find seq=13 src=-1 pat_hex=%s limit=10"
+                % "*inv?".encode().hex(),
+                "cell_find seq=14 src=1 limit=5000",
+                "cell_bbox seq=15 src=0 cell=9",
+                "cell_insts seq=16 src=1 cell=9 view=0.0,-5.0,10.5,20.0 "
+                "cap=7",
+                "cell_bbox seq=17 src=0 cell=9 root=3",
+                "cell_insts seq=18 src=0 cell=9 view=0.0,0.0,1.0,1.0 "
+                "cap=4096 root=3",
+            ])
+            path = "/caches/.a b.oas.ice"
+            kind, fields = _parse_wire_line(
+                "cell_sources seq=10 found=1 n=1 sources=0:2:%s"
+                % path.encode().hex())
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cell_sources", "seq": 10, "found": True,
+                "sources": [{"src": 0, "placements": 2, "path": path}],
+            })
+            kind, fields = _parse_wire_line(
+                "cells seq=12 src=2 found=1 cell=17 name_hex=%s insts=6 "
+                "height=3 unit=1000 bbox=0,0,10,20 n=2 total=5 "
+                "children=3:12:1:%s,4:1:0:%s" % (
+                    "MID 한".encode().hex(), "leaf".encode().hex(),
+                    "a:b".encode().hex()))
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cells", "seq": 12, "found": True, "src": 2,
+                "cell": 17, "name": "MID 한", "insts": 6, "height": 3,
+                "unit": 1000.0, "bbox": [0.0, 0.0, 10.0, 20.0],
+                "total": 5,
+                "children": [
+                    {"cell": 3, "members": 12, "leaf": True,
+                     "name": "leaf"},
+                    {"cell": 4, "members": 1, "leaf": False,
+                     "name": "a:b"}],
+            })
+            kind, fields = _parse_wire_line(
+                "cells seq=13 found=0 code=nohier err_hex=%s"
+                % "no summary".encode().hex())
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cells", "seq": 13, "found": False,
+                "code": "nohir".replace("hir", "hier"), "err": "no summary",
+            })
+            kind, fields = _parse_wire_line(
+                "cell_find seq=14 src=-1 found=1 total=1 n=1 "
+                "matches=0:5:99:%s" % "INV1".encode().hex())
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cell_find", "seq": 14, "found": True, "src": -1,
+                "total": 1,
+                "matches": [{"src": 0, "cell": 5, "insts": 99,
+                             "name": "INV1"}],
+            })
+            kind, fields = _parse_wire_line(
+                "cell_bbox seq=15 src=0 cell=9 found=1 insts=2 approx=1 "
+                "bbox=-1.5,0,3,4")
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cell_bbox", "seq": 15, "found": True, "src": 0,
+                "cell": 9, "insts": 2, "approx": True,
+                "bbox": [-1.5, 0.0, 3.0, 4.0],
+            })
+            kind, fields = _parse_wire_line(
+                "cell_bbox seq=15 src=0 cell=9 found=1 insts=0 approx=0 "
+                "bbox=-")
+            worker._handle_line(kind, fields, "")
+            self.assertIsNone(worker.res.get_nowait()["bbox"])
+            kind, fields = _parse_wire_line(
+                "cell_insts seq=16 src=1 cell=9 found=1 n=2 more=1 "
+                "visited=40 boxes=0,0,1,1;2,2,3.5,3")
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait(), {
+                "kind": "cell_insts", "seq": 16, "found": True, "src": 1,
+                "cell": 9, "more": True, "visited": 40,
+                "boxes": [[0.0, 0.0, 1.0, 1.0], [2.0, 2.0, 3.5, 3.0]],
+            })
+            kind, fields = _parse_wire_line(
+                "cell_insts seq=17 src=1 cell=9 found=1 n=0 more=0 "
+                "visited=1 boxes=-")
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait()["boxes"], [])
+            # a malformed row is an error, not a crash
+            kind, fields = _parse_wire_line(
+                "cells seq=18 src=0 found=1 cell=1 name_hex=41 insts=1 "
+                "height=0 unit=1 bbox=- n=1 total=1 children=3:12")
+            worker._handle_line(kind, fields, "")
+            self.assertEqual(worker.res.get_nowait()["kind"], "error")
 
     def test_rust_worker_never_loads_or_composites_density_coverage(self):
         with tempfile.TemporaryDirectory() as directory:

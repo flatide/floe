@@ -104,6 +104,33 @@ rect·path뿐인 레이어)는 `empty`(비트맵 없음, 레벨 항목은 0)로 
 다르면 파일 전체를 거부한다. `floe-index occupancy <cache>`가 헤더·identity·
 레이어 status·레벨별 set 수를 줄 단위로 출력한다(SPEC-INDEXER §6.5).
 
+## design.ovh — 계층 요약 (FLOEOVH1, 2026-09-29)
+
+정본: `rust/vfs/src/hiersum.rs`. 뷰어 셀 트리(SPEC-VIEWER §8c)의 색인.
+design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀의 서로
+다른 자식과 멤버 수"는 그 셀의 레코드 전부, "셀의 부모"는 레코드 전부를
+읽어야 하므로 한 번 훑어 요약한다. 인덱서가 빌드 끝에 쓰고(`--no-hier`로
+생략), `floe-index hier <cache> [--check]`(= `floe2 index --hier-only`)가
+이전 캐시에 덧붙이거나 identity를 보고한다. tmp + rename 공개, 마커
+프로토콜 밖(design.ovo와 같음): 재빌드 때 삭제 목록에 포함.
+
+- 헤더 64 B: magic `FLOEOVH1`, version u32(1), n_cells u32, n_places u64,
+  src_size u64, src_mtime u64, top u32, 예약 u32, n_edges u64, 예약 u64.
+- `kids_start` (n_cells+1)×u64 — 부모별 엣지 범위.
+- `edges` n_edges×48 B — child u32, 예약 u32, members u64(그 부모 안의
+  그 자식 배치 멤버 수, 반복 전개, 포화), extent 4×i64(자식 재귀 bbox를
+  모든 배치로 옮긴 합집합, 부모 좌표; 도형 없는 자식은 EMPTY). 한
+  부모의 엣지는 child 오름차순(이진 탐색 `edge_to`).
+- `parents_start` (n_cells+1)×u64, `parents` n_edges×u32 — 자식별 부모
+  오름차순.
+- `insts` n_cells×u64 — 탑 아래 인스턴스 수(탑 1, 미배치 0; topo_rank
+  순 DP, 포화).
+- identity 검사 `validate_against`: n_cells·n_places·src_size·src_mtime·
+  top이 design.ovm과 같아야 하며 아니면 "요약 없음"으로 읽힌다(뷰어가
+  빌드를 제안). 실측: MAIN01 1/10 합성(35,183셀·8,260만 레코드)
+  11.4 s → 188,065 엣지·10.6 MB. 레코드 400만 이하 캐시는 데몬이 메모리
+  요약(`HIER_INLINE_PLACES`).
+
 ## meta.json (CACHE_VERSION = 8)
 
 ```json
@@ -235,8 +262,14 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
 
 ## <deck>.rules.json — SVRF 룰 메타데이터 사이드카 (v1)
 
-정본: `floe/svrf.py`(`python -m floe svrf deck.cal [-D SW]…`), 게이트
-`tools/validate_svrf.py` R1~R4. Calibre SVRF 룰덱의 **서브셋 파스**
+정본: `rust/cli/src/svrf.rs`(`floe-index svrf deck.cal [-D SW]…`; 2026-09-29
+`floe/svrf.py`의 `floe svrf`에서 이식 — 파이썬 파서와 사이드카 바이트·scan
+출력·파스 상태가 게이트 덱 31회 + 무작위 덱 3,000개에서 동일함을 확인한 뒤
+옮겼다. `generated_by`만 `floe-index <버전>`), 읽기 쪽 `floe/svrf.py`
+(`load_rules`·`rhs_operands` — 연산자 단어 목록은 빌더와 같아야 하며
+게이트가 고정), 게이트 `tools/validate_svrf.py` R1~R5. 파일은 파이썬
+`json.dump(indent=1, sort_keys=True)`와 같은 바이트(ASCII 전용 `\uXXXX`,
+파이썬 float repr). Calibre SVRF 룰덱의 **서브셋 파스**
 결과를 JSON으로 굽고 뷰어는 이 파일만 로드한다(덱 직접 파스 없음).
 목적은 waive 판단 보조: 룰별 제약(연산자·수치)·참조 레이어·원천 GDS
 레이어를 에러 디테일에 붙인다.
@@ -262,7 +295,7 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   달라진다; --scan이 스위치별 검사된 값 후보를 `NAME(v1|v2)`로
   보고. **환경 폴백**(2026-08-18): 덱이 검사하는 스위치 이름은
   -D에 없으면 os.environ을 **지연 조회**(sourceme 워크플로 —
-  `source sourceme.* && floe svrf ...`; 전체 env 벌크 임포트
+  `source sourceme.* && floe-index svrf ...`; 전체 env 벌크 임포트
   아님, -D 우선, 히트는 defines로 승격되어 값 치환까지 동작).
   사용된 이름은 scan 리포트와 사이드카 stats.env_switches에
   provenance로 기록, `--no-env-switches`로 비활성),

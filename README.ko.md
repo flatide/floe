@@ -102,6 +102,8 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 | `r` | 룰러 모드 (크로스헤어 커서; 클릭 2점, Shift=자유각, `m`=스냅 토글) |
 | `k` / **Shift+K** | 마지막 룰러 삭제 / 전체 룰러 삭제 (룰러는 다중 누적) |
 | `g`, **Ctrl+.** | goto 다이얼로그 |
+| `t` | **셀 트리**(왼쪽 pane `cells` 페이지)로 가서 검색 박스에 포커스 — 트리 행/검색 결과 단클릭 = 정보 줄 + 뷰 안 인스턴스 하이라이트(cyan 외곽), 더블클릭·Enter·`zoom` = 그 셀로 줌; Esc = 하이라이트 해제 |
+| **Ctrl+T** / **Ctrl+Shift+T** | 선택한 셀을 **뷰 루트**로(그 셀만 그 셀의 좌표로 그림, Calibre 셀 트리와 같음; 제목에 `· root NAME`) / 탑 셀로 돌아옴. 패널의 `root`·`top` 버튼과 Cell 메뉴 동일. 잡덱에는 없음 |
 | `e` | **에러 박스 선택 모드**(룰러처럼 **Esc까지 유지** — 박스 반복 가능): 클릭 2점으로 박스 → **화면에 보이는(현재 필터·페이지) 에러** 중 박스 안의 것 선택(gold). 두 번째 클릭에 **Shift = 추가**, **Ctrl = 토글**, 무수식 = 대체. 그리드도 동일(Ctrl 토글/Shift 범위) — 모든 선택은 보이는 에러만 대상 |
 | `n` / `p` | **현재 보이는 목록**(selected/in view/waive 필터 적용분) 안에서 다음 / 이전 순환 (페이지 자동 이동) |
 | `w` | **waive 토글** — gold 선택이 있으면 **선택 전체 일괄**(전부 waived면 해제, 아니면 전부 waive), 없으면 현재 에러(단클릭/n·p 포커스, 없으면 점프 에러). v2 pack 필요 |
@@ -112,12 +114,17 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 
 ## 5. 패널 구성
 
-- **왼쪽 pane**: **DRC 브라우저 전용**(열기는 DRC 메뉴 ·
+- **왼쪽 pane**: 두 페이지 노트북 — **`cells` = 셀 트리**(기본;
+  Calibre cell tree: 검색 박스 `find cell…`(부분일치, `*`/`?` 글롭) ·
+  탑 셀부터 펼치는 트리[`NAME ×멤버수`, 펼칠 때 자식 로드] 또는 검색
+  결과[`NAME 인스턴스수`] · `highlight` 체크·`zoom`·(인덱스 없을 때)
+  `build index…` · 정보 줄. 데이터는 캐시 옆 `design.ovh`(새 인덱스는
+  자동, 이전 캐시는 `floe2 index --hier-only <src>` 또는 뷰어의 빌드
+  제안)) | **`DRC` = DRC 브라우저**(열기는 DRC 메뉴 ·
   룰 검색(목록 상단)+룰 목록[이름 · 에러수/waived]|에러 번호 그리드 ·
   하단 에러 상세 — **상세는 최소 150px 상시 확보**; db 로드 시
-  pane이 자동으로 넓어지고, 좁히면 이름은 "…" 줄임·상세는 줄바꿈·
-  필터 행은 다단 래핑으로 대응). cell/object 브라우저는 추후 같은
-  자리에 추가 예정.
+  pane이 자동으로 넓어지고 이 페이지가 올라오며, 좁히면 이름은 "…"
+  줄임·상세는 줄바꿈·필터 행은 다단 래핑으로 대응).
 - **미니맵**(depth별 구조 프런티어 — 인덱싱 때 실제 플래너로
   구워짐)은 우측 pane 하단 **탭**으로 이동(2026-08-22): minimap
   탭(기본) | palette 탭(색 7×7 + fill 5×4), 클릭 = 센터링.
@@ -153,10 +160,12 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 
 `python -m floe <cmd>`: `index`(레거시 타일 캐시 .tiles), `info`,
 `render --bbox … --out view.png`, `clip --bbox …`, `probe`, `profile`,
-`drc`(요약; .ice 인덱스 자동 사용), `svrf`(SVRF 룰덱 서브셋 파스 →
-`<deck>.rules.json`), `gtktest`. `floe-index`: `scan`,
+`drc`(요약; .ice 인덱스 자동 사용), `gtktest`. `floe-index`: `scan`,
 `tile`, `index`, `vfs`, `plan`(플래너 계측 JSON), `vfsd`(데몬),
-`drc`(DRC 인덱스 사이드카 굽기).
+`drc`(DRC 인덱스 사이드카 굽기), `svrf`(SVRF 룰덱 서브셋 파스 →
+`<deck>.rules.json`; 2026-09-29 `floe svrf`에서 이동 — 입력으로 파일을
+만드는 도구는 floe-index에 둔다. `floe svrf`는 같은 옵션의 floe-index
+명령줄을 알려 주고 exit 2).
 
 ### DRC 결과 인덱스 (.ice)
 
@@ -193,8 +202,8 @@ DRC 에러의 waive 판단을 돕기 위해 SVRF 룰덱을 **서브셋 파스**�
 그래프만):
 
 ```sh
-.venv/bin/python -m floe svrf sfa14.drc.cal --scan     # 새 덱: 먼저 인벤토리
-.venv/bin/python -m floe svrf sfa14.drc.cal -D FEOL    # 실런과 같은 -D 세트!
+rust/target/release/floe-index svrf sfa14.drc.cal --scan     # 새 덱: 먼저 인벤토리
+rust/target/release/floe-index svrf sfa14.drc.cal -D FEOL    # 실런과 같은 -D 세트!
 # -> sfa14.drc.cal.rules.json (뷰어가 로드하는 사이드카)
 ```
 
@@ -224,7 +233,7 @@ VIA1=6/0,VIA2=8/0,POLY=3/0,ACTIVE=2/0,CONT=4/0,NWELL=1/0,\
 FILLA=0/0,FILLB=63/63" \
   --pathname testchip.drc.cal --svrf data/testchip.drc.cal
 rust/target/release/floe-index drc data/testchip_1g5.drc.db --pack
-.venv/bin/python -m floe svrf data/testchip.drc.cal
+rust/target/release/floe-index svrf data/testchip.drc.cal
 .venv/bin/python -m floe view data/testchip_1g5.oas \
   --drc data/testchip_1g5.drc.db
 ```

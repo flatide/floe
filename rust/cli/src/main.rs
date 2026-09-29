@@ -12,6 +12,7 @@ use std::time::Instant;
 
 mod drcice;
 mod drcpack;
+mod svrf;
 mod vfs;
 
 #[cfg(target_env = "musl")]
@@ -105,11 +106,17 @@ fn main() {
     if args.len() >= 3 && args[1] == "bvh" {
         return vfs::bvh_cmd(&args[2..]);
     }
+    if args.len() >= 3 && args[1] == "hier" {
+        return vfs::hier_cmd(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "vfsd" {
         return vfs::vfsd_cmd(&args[2..]);
     }
     if args.len() >= 3 && args[1] == "drc" {
         return drcice::drc_cmd(&args[2..]);
+    }
+    if args.len() >= 3 && args[1] == "svrf" {
+        return svrf::svrf_cmd(&args[2..]);
     }
     if args.len() < 3 || args[1] != "scan" {
         eprintln!(
@@ -121,7 +128,7 @@ fn main() {
              floe-index vfs <file.oas> [outdir] [--jobs N] \
              [--plan-batch N] [--encode-batch N] \
              [--page-target-mb N] \
-             [--coverage | --coverage-only] [--no-lod] [--frontier-only] \
+             [--coverage | --coverage-only] [--no-lod] [--no-hier] [--frontier-only] \
              [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1] [--occupancy-prune 0|1] \
              [--slow-cell-s S] [--p2-shard-limit-mb N] \
              [--profile-cell NAME | --profile-cell-ci N] \
@@ -135,8 +142,11 @@ fn main() {
              floe-index occupancy <outdir> [--layer L/D] [--level N] \
              [--dump]\n       \
              floe-index bvh <outdir> --cell NAME  (TSV dump of a cell's child BVH: nodes and leaf placements)\n       \
+             floe-index hier <outdir> [--check]  (add design.ovh, the cell tree's index, to a cache; --check = report it)\n       \
              floe-index drc <results.db> [out.tray] \
-             [--pack] [--jobs N]"
+             [--pack] [--jobs N]\n       \
+             floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]... [-I DIR]... \
+             [--follow-verbatim] [--no-env-switches]  (SVRF rule deck subset -> <deck>.rules.json)"
         );
         std::process::exit(2);
     }

@@ -382,8 +382,11 @@ fn rep_heap_bytes(rep: &Rep) -> u64 {
 /// existing floe crates; only the currently-private OVP byte read is isolated
 /// here.
 pub struct Cache {
-    vfs: Vfs,
+    vfs: std::sync::Arc<Vfs>,
     dir: String,
+    /// the hierarchy (index + design.ovh summary) the cell tree's queries
+    /// read, shared with the daemon's query thread
+    hier: std::sync::Arc<crate::cells::HierHandle>,
     /// design.ovo, opened on first use and re-opened when its size or
     /// mtime changes (a rename publish from --occupancy-only while the
     /// viewer is up; docs/OCCUPANCY_PLAN.ko.md §4)
@@ -498,10 +501,15 @@ impl Cache {
         let dir = path
             .to_str()
             .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
-        let vfs = Vfs::open(dir)?;
+        let vfs = std::sync::Arc::new(Vfs::open(dir)?);
+        let hier = std::sync::Arc::new(crate::cells::HierHandle::new(
+            std::sync::Arc::clone(&vfs),
+            dir.to_string(),
+        ));
         Ok(Self {
             vfs,
             dir: dir.to_string(),
+            hier,
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
             layer_depth: std::sync::OnceLock::new(),
             representatives: std::sync::OnceLock::new(),
@@ -742,6 +750,11 @@ impl Cache {
         })
     }
 
+    /// The hierarchy handle the cell tree's queries read (cells.rs).
+    pub fn hier(&self) -> std::sync::Arc<crate::cells::HierHandle> {
+        std::sync::Arc::clone(&self.hier)
+    }
+
     pub fn info(&self) -> CacheInfo {
         CacheInfo {
             unit: self.vfs.ovm.unit,
@@ -851,9 +864,20 @@ impl Cache {
         let plan_us = elapsed_us(started);
         // All layers off, an empty viewport, or fully summarized geometry
         // legitimately selects no working cells. The renderer still requires
-        // a root, including for summary planes. Normalize only the empty plan;
-        // keep real structural frames and missing-root validation unchanged.
-        if plan.wcells.is_empty() && plan.pages.is_empty() {
+        // a root, including for summary planes. So does a view root that
+        // holds none of the visible layers, or lies wholly under the cut (the
+        // file's top holds every layer; a root need not - found 2026-09-30 on
+        // the synthetic chip: `invalid plan: top is missing` instead of an
+        // empty picture, and the density stack's pass 2, which plans the top
+        // plane's layer alone, ran into the same error under most roots).
+        // A jobdeck never has a root: its sub-cut source stays a skipped pass.
+        // Normalize only the empty plan; keep real structural frames and
+        // missing-root validation unchanged.
+        if plan.wcells.is_empty()
+            && (plan.pages.is_empty()
+                || !request.summary_layers.is_empty()
+                || request.root.is_some())
+        {
             plan.wcells.push(floe_vfs::hier::WsCell {
                 key: plan.top,
                 pages: Vec::new(),
@@ -1108,6 +1132,14 @@ impl Cache {
 
     fn view_request(&self, request: &PlanRequest) -> Result<ViewReq, String> {
         request.validate()?;
+        if let Some(root) = request.root {
+            if root >= self.vfs.ovm.n_cells {
+                return Err(format!(
+                    "view root {} is outside the cell table 0..{}",
+                    root, self.vfs.ovm.n_cells
+                ));
+            }
+        }
         Ok(ViewReq {
             view: request.view.as_bbox(),
             cut_dbu: if request.exact { 0 } else { request.cut_dbu },
@@ -1140,6 +1172,7 @@ impl Cache {
             page_wash: request.page_wash,
             lod_swap: request.lod_swap,
             frames: request.frames,
+            root: request.root,
             page_skip: if request.summary_layers.is_empty() {
                 Vec::new()
             } else {

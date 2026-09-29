@@ -86,10 +86,11 @@
 ## 6. 패널/오버레이
 
 - 3-pane: `lpaned[ left | paned[ canvas | side ] ]`. left:
-  `_left_stack`(DRC 브라우저 상시 내장 §8b; cell/object 브라우저
-  추후 동거) — 미니맵은 2026-08-22 우측 pane 노트북으로 이전,
-  왼쪽 pane 전체가 DRC 브라우저; 상세(TextView)는 pack2
-  shrink=False + 높이 하한 150px로 **상시 노출**.
+  `_left_stack` = **Notebook 두 페이지**(2026-09-29): `cells` = 셀 트리
+  (§8c, 기본 페이지) | `DRC` = DRC 브라우저(§8b; db 로드·`_drc_window`가
+  이 페이지를 올림) — 미니맵은 2026-08-22 우측 pane 노트북으로 이전;
+  DRC 상세(TextView)는 pack2 shrink=False + 높이 하한 150px로 **상시
+  노출**(페이지 안에서).
 - side(우측, margin_end 6): 토글 버튼행부터 시작(구 제목/소스
   줄은 2026-08-22 창 타이틀로 이전 — "floe - 파일명 · N GB ·
   grid NxN", 빈 시작은 "no layout"), 레이어 목록
@@ -107,7 +108,13 @@
   트레이스 존치) — 두 팔레트는
   **Notebook의 palette 탭**, **minimap 탭이 기본**(180px,
   `_frontier_depths` = meta.frontier.depths, 클릭 센터링, 0.7px 미만
-  도트 생략; 2026-08-22 왼쪽 pane 하단에서 이전). fit/clip·
+  도트 생략; 2026-08-22 왼쪽 pane 하단에서 이전). 다이는 **MINIMAP_PAD
+  (6 px) 테두리 안**에 맞춘다(사용자 요청 2026-09-29, 0.12.244: 긴 축에서
+  다이 외곽선이 이미지 첫/마지막 픽셀에 놓여 위젯 가장자리에 묻히고, 다이에
+  잘라 붙이던 fit 뷰 박스가 그 위를 덮었다) — 뷰 박스는 테두리까지 나가
+  이미지 안쪽 1 px에서 잘리고, 테두리 클릭은 가장 가까운 다이 가장자리로
+  센터링(`_minimap_world_point`). 테스트
+  `test_minimap_die_outline_keeps_a_margin_from_the_edge_and_the_view_box`. fit/clip·
   open .db…·rules… 버튼은 2026-08-22 메뉴 바로 이전(패널 정보줄만 잔류).
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
@@ -146,6 +153,9 @@
 - **메뉴 바**(2026-08-22, `_build_menubar`): File(**load layout**·
   clip·copy·quit) /
   View(fit·줌·goto·detail·depth·토글 체크 5종·오버레이 순환) /
+  Cell(셀 트리·검색 `t`, 선택 셀로 줌, 인스턴스 하이라이트 체크,
+  하이라이트 해제, 선택 셀을 뷰 루트로 `Ctrl+T`·탑으로 `Ctrl+Shift+T`,
+  셀 인덱스 빌드 — §8c) /
   Ruler(모드·스냅 체크, 삭제/전체 삭제) / DRC(open .db·SVRF rules·
   n/p·waive·박스선택 체크). 항목은 키와 **같은 핸들러**를 호출하고
   라벨에 키를 병기(AccelGroup 미등록 — 키는 `_on_key` 단일 경로,
@@ -395,6 +405,128 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   중앙 관통·중앙 교차). 복잡한 폴리곤/엣지셋은 룰러 생략(사용자 규정 2026-08-13).
   수동 룰러는 보존, k/Esc에는 일반 룰러처럼 반응.
 
+## 8c. 셀 트리 (Calibre cell tree, 2026-09-29)
+
+- **자리**: 왼쪽 pane Notebook의 `cells` 페이지(§6). 위에서 아래로
+  검색 박스(`find cell… (* ? wildcards)`) · 트리/결과 목록(TreeView,
+  이름 열은 **이름 전체** + 개수 열 우정렬, 검은 배경 `.floe-drc-list`,
+  **hscroll AUTOMATIC** — 사용자 요청 2026-09-29, 0.12.243: 깊이 펼치면
+  들여쓰기만으로 30단계 570 px가 되고, hscroll NEVER에서는 그 폭이
+  페이지 최소 폭이 되어 pane이 왼쪽을 잘라 내며 되돌아올 길이 없었다;
+  DRC 페이지의 "ellipsize + 가로 스크롤 금지" 규약은 그 페이지의 것으로
+  유지) · 컨트롤 행(**FlowBox** — `highlight` 체크 = 기본 켬,
+  `zoom`, `root`, `top`; 좁으면 여러 줄로 감김) · 인덱스가 없을 때만
+  보이는 `build index…` 행 · 정보 줄(줄바꿈 라벨). `_build_cell_panel`,
+  위젯 홀더 `_CellPanel`. **페이지 최소 폭 ≤ 156 px**(테스트
+  `test_cell_page_fits_the_left_pane_at_its_start_width`): 현장
+  2026-09-29 "cells 탭이 안 보이고 DRC 탭도 반쯤 가림" = 버튼 4개
+  HBox(276 px)가 pane 시작 폭(196 px)을 넘자 GtkPaned가 첫 자식의
+  **왼쪽**을 잘라 낸 것. pane 시작 폭은 `LEFT_PANE_PX` = 260(0.12.242;
+  옛 196은 미니맵의 하한이었고 미니맵은 오른쪽으로 갔다).
+- **데이터 원천 = design.ovh**(SPEC-FORMATS): 셀별 **서로 다른 자식**과
+  자식별 **배치 멤버 수**(반복 전개), 부모 목록, **탑 아래 인스턴스 수**,
+  엣지별 자식 배치의 합집합 범위. design.ovm의 배치 레코드는 부모별
+  BVH 순서라 "이 셀의 자식들"조차 그 셀의 레코드 전부를 읽어야 하고
+  (MAIN01 1/10 합성: 8,260만 레코드·5.3 GB, MAIN01은 그 10배) "이 셀의
+  부모"는 전부를 읽어야 하므로, 뷰어가 열 때 훑는 방식은 성립하지
+  않는다. 인덱서가 빌드 끝에 한 번 훑어 파일로 두고(`floe-index vfs`,
+  `--no-hier`로 생략; 1/10 합성 11.4 s → 10.6 MB), 이전 캐시에는
+  `floe2 index --hier-only <src>`(= `floe-index hier <cache>`)로
+  덧붙인다. 레코드 400만 개 이하의 작은 캐시는 파일이 없어도 데몬이
+  메모리에서 요약한다(`FLOE_RUST_HIER_INLINE_PLACES`, 진단).
+- **질의는 renderd의 hier 스레드**(RUST_RENDERER.md: `cell_sources` ·
+  `cells` · `cell_find` · `cell_bbox` · `cell_insts`, 응답은 같은
+  kind + `seq`; 실패는 `found=0 code=nohier|superseded|state|query
+  err_hex=`). 렌더·픽 스레드와 독립이라 첫 질의의 요약 열기/빌드나
+  넓은 뷰의 인스턴스 탐색이 렌더를 늦추지 않는다. GUI는 kind별
+  **최신 seq만** 받는다(`_cell_pending`, `_on_cell_result`).
+- **트리**: 레이아웃은 탑 셀이 루트이며 열자마자 펼쳐진다(자식 행 =
+  `NAME  ×members`, 멤버 1이면 개수 생략); 자식 있는 행은 `…` 자리
+  행을 달고 있다가 **처음 펼칠 때 한 번** `cells`로 채운다
+  (`test-expand-row`, `Gtk.TreeRowReference`). 채울 때는 **새 자식을
+  먼저 넣고 자리 행을 뒤에 지운다** — 마지막 자식이 사라진 행은 GTK가
+  접어 버려 첫 펼침이 곧장 닫혔다(현장 2026-09-29, 0.12.240; 펼침
+  상태를 기억해 되살림). 한 부모의 자식이
+  20,000을 넘으면 `… N more (find by name)` 행. 정렬은 이름(대소문자
+  무시). 잡덱은 **소스(TC)마다 루트**(라벨 = 카탈로그의 TC 식별자, 배치가
+  여럿이면 `×N`), 펼치면 그 소스 탑의 자식들.
+- **검색**: 박스가 비면 트리, 채우면 결과 목록이 같은 자리에 온다
+  (모델 교체). 규칙은 대소문자 무시 **부분일치**, `*`/`?`가 있으면
+  전체 이름 **글롭**. 결과 행 = `NAME  insts`(탑 아래 인스턴스 수),
+  상한 2,000행 + 전체 개수 정보 줄. 키 입력 뒤 150 ms(SearchEntry 자체
+  지연 포함 약 300 ms) 후 질의.
+- **선택**(트리·결과 공통, 단클릭): `cell_bbox`로 정보 줄(`NAME: N
+  instances · W × H um`, 근사면 `(the blocks holding it)`), highlight가
+  켜져 있으면 `cell_insts`로 **현재 뷰 안 인스턴스 박스**를 받아 캔버스에
+  **CELL_HL(#40E0FF) 2 px 외곽**으로 그린다(화면에서 7 px보다 작은
+  인스턴스는 7 px 마커 사각). 상한 4,096박스·탐색 예산 200만 방문 —
+  넘치면 `more`, 상태줄 `(more - zoom in)`. 프레임이 착지할 때마다
+  뷰 키(src, ci, 뷰 박스 반올림)가 바뀌었으면 다시 묻는다
+  (`_cell_hl_follow`; 데몬은 대기 중인 더 새 insts 질의가 있으면 옛것을
+  `superseded`로 즉시 답한다). Tab 오버레이 숨김 상태에서는 그리지 않음.
+- **줌**(더블클릭·Enter·`zoom`·메뉴): `cell_bbox`의 범위를 DRC 점프와
+  같은 규칙으로 프레이밍(양 축 0.8, `CELL_VIEW_FRACTION`). 범위 =
+  탑이 **직접 배치한 셀은 그 인스턴스 박스들의 정확한 합집합**, 더 깊은
+  셀은 **그 셀을 품은 탑 직계 블록들의 범위**(요약이 엣지별 합집합만
+  갖고 레코드별 변환은 갖지 않으므로; `approx=1`, 상태줄
+  `(zoomed to the blocks holding it)`) — 이후 하이라이트가 정확한
+  인스턴스를 보여 준다. 탑 아래에 없는 셀(orphan)·도형 없는 셀은
+  줌하지 않고 상태줄로 이유를 말한다.
+- **키/Esc**: `t` = cells 페이지 올리고 검색 박스 포커스(pane 폭 하한
+  260 px); Esc 체인에서 선택 해제 **다음** 단계가 셀 하이라이트 해제
+  (`_cell_hl_clear`: 하이라이트와 트리 선택을 함께 지움; highlight
+  체크는 유지). 검색 박스에 포커스가 있으면 캔버스 키는 오지 않는다
+  (§7의 Entry 가드).
+- **인덱스 부재**: 어떤 소스의 답이 `code=nohier`면 정보 줄 안내 +
+  `build index…` 버튼, 그리고 **소스당 로드마다 한 번** "지금 만들까요?"
+  (FLOE_INDEX_ON_OPEN 정책, VFS 인덱스·DRC pack과 동일) → `floe-index
+  hier <cache>`를 모달 로그(`_index_modal`)로 돌린 뒤 트리를 다시 읽는다.
+  버튼·메뉴는 다시 묻는다.
+- **잡덱 좌표**: 소스 좌표의 박스는 덱 배치(`scale·p + (dx, dy)`, 소스당
+  기하 배치 중복 제거)로 덱 dbu로 바뀌어 오고, `cell_insts`의 뷰는 반대로
+  소스 좌표로 들어간다(render-core `DeckXf`). 소스가 여러 곳에 놓이면
+  박스도 그만큼.
+- **뷰 루트**(2026-09-29, 0.12.241 / RENDERD 0.12.229 — Calibre 셀
+  트리의 "선택한 셀이 표시되는 탑이 된다"): `Ctrl+T` · Cell 메뉴 ·
+  패널 `root` 버튼이 **선택한 셀을 뷰 루트**로 삼고, `Ctrl+Shift+T` ·
+  메뉴 · `top` 버튼(루트일 때만 활성)이 탑 셀로 돌아온다. 뷰 루트가
+  서면 그 셀의 **자기 좌표**가 세계가 된다: 플래너(`ViewReq::root`,
+  `PlanRequest::root`, 와이어 `render … root=CI`)가 그 셀에서 출발하고
+  depth도 그 셀부터 센다; 라벨 플래너도 같은 루트에서 걷는다; 픽/스냅은
+  발행 씬을 그대로 읽으므로 루트 좌표; 클립(`clip … root=`)도 루트에서
+  잘라 낸다. GUI는 다이 bbox를 루트의 재귀 bbox로 바꾼다
+  (`_die_bbox`: fit·clamp·미니맵; 미니맵의 구운 프런티어는 탑 것이라
+  루트에서는 그리지 않음), 렌더 상태 키(`_render_key`)에 루트를 넣어
+  옛 프레임·마진이 새 좌표계에 나타나지 않게 하고(전환 때 화면과
+  in-flight 프레임 키를 비운 뒤 fit), 창 제목 뒤에 `· root NAME`을 붙인다.
+  renderd도 fit 메모리 키와 RetainedKey에 루트를 넣어 팬 재사용·결정
+  기억이 루트별로 갈린다. **루트가 서면 꺼지는 것**: 점유 요약(design.ovo는
+  탑을 평탄화한 것 — `summary: none`), 대표 파일(design.ovr, 탑 기준
+  표본)은 plan 조건상 루트에서는 쓰이지 않음(page_reps 무관). 트리는 계속
+  전체 계층을 보이며, 선택 셀의 정보·하이라이트·줌은 **루트 아래**에서
+  센다(`cell_bbox`/`cell_insts … root=CI`: 루트 직계면 정확한 범위,
+  루트 밖 셀은 "not placed under the view root"). 잡덱은 소스 탑들이
+  덱의 셀이므로 뷰 루트가 없다(renderd가 `render root=`를 거부, GUI는
+  상태줄 안내). 게이트 `cell_tree` C8: 루트=BLK 프레임 == BLK를 탑으로
+  한 별도 레이아웃(KLayout copy_tree)의 프레임, 바이트 동일.
+  **빈 루트(2026-09-30, RENDERD 0.12.231):** 파일의 탑은 모든 레이어를
+  가지지만 루트는 아닐 수 있다. 보이는 레이어를 하나도 갖지 않은 루트
+  (또는 통째로 컷 아래인 루트)는 계획에 작업 셀이 없고, 씬이 탑을 찾지
+  못해 `invalid plan: top … is missing` 오류로 프레임이 없었다(합성
+  칩에서 발견; density stack의 2패스는 최상위 평면의 레이어만 따로
+  계획하므로 대부분의 루트에서 같은 오류). 이제 루트 요청의 빈 계획은
+  빈 루트 작업 셀을 받아 **빈 그림**이 된다(`Cache::plan`, summary
+  레이어의 같은 처리를 일반화; 잡덱의 "컷 아래 소스 = 건너뛴 패스"는
+  루트가 없으므로 그대로). C8: VIA(1/0만)를 루트로 2/0만 켜면 검은
+  프레임, 1/0이면 그려짐, density stack 켬 == 끔.
+- **남은 것**: 깊은 셀의 줌 범위가 블록 범위인 것은 요약에 레코드별
+  변환을 두면 정확해진다. 인스턴스 탐색은 뷰를 요약 엣지 범위로 잘라
+  BVH를 걷지만 넓은 뷰에서 큰 블록 안의 드문 셀은 예산에 걸릴 수 있다
+  (`more`, 줌인). 루트 상태의 depth 라벨은 여전히 탑 높이(`*/N`) 기준.
+- **게이트**: `cell_tree`(tools/validate_cell_tree.py — SPEC-VALIDATION),
+  렌더 코어 유닛(cells.rs 9종), renderd 파스/워커 유닛, vfs hiersum 유닛,
+  워커 와이어 계약(validate_rust_renderer).
+
 ## 9. 픽/스냅/클립
 
 - pick: 화면 워킹셋에서 점 포함 도형 최소면적 순(_PICK_CAP 64),
@@ -408,6 +540,6 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 ## 10. 상수 모음 (gui.py 상단)
 
 MIN_SPP 0.01 · FIT_ZOOM_OUT 16 · WHEEL_ZOOM_STEP 0.96 ·
-KEY_PAN_FRACTION 0.5 / _FINE 0.1 · CAL_ZOOM_IN 0.5 · MINIMAP_PX 180 ·
+KEY_PAN_FRACTION 0.5 / _FINE 0.1 · CAL_ZOOM_IN 0.5 · MINIMAP_PX 180 · MINIMAP_PAD 6 ·
 DETAIL_PX (5,3,1)/기본 medium · COV_MAX_TEXEL_PX 160 ·
 DEBOUNCE_MS(gui.py) · 스트림 상수(_MAX_STREAM_ROUNDS 8, 예산 클램프 2048..32768KB)는 service.py.

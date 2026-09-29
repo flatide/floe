@@ -2445,6 +2445,14 @@ impl Ovm {
         (g32(b, 80), g32(b, 84))
     }
 
+    /// child-BVH node range (start, count) of a cell without
+    /// materializing the name (the cell tree's instance walk)
+    pub fn cell_bvh(&self, i: u32) -> (u32, u32) {
+        assert!(i < self.n_cells, "cell index");
+        let b = &self.sec(SEC_CELLS)[i as usize * CELL_LEN..];
+        (g32(b, 96), g32(b, 100))
+    }
+
     /// the child cell of a placement, nothing else decoded
     pub fn place_child(&self, i: u64) -> u32 {
         assert!(i < self.n_places, "place index");

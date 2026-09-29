@@ -345,6 +345,18 @@ def _occupancy_args(args):
     return out
 
 
+def _run_rust_hier(outdir, binary):
+    """`floe-index hier <cache>`: design.ovh, the cell tree's index
+    (docs/SPEC-FORMATS.ko.md), on a current cache."""
+    import shlex
+    import subprocess
+    command = [binary, "hier", outdir]
+    print("[floe] " + " ".join(shlex.quote(c) for c in command), flush=True)
+    rc = subprocess.call(command)
+    if rc != 0:
+        raise SystemExit(rc)
+
+
 def _run_rust_index(args, binary, coverage_only=False,
                     occupancy_only=False, representatives_only=False):
     import shlex
@@ -576,6 +588,14 @@ def cmd_index(args):
                 f"floe: --occupancy-only needs a current cache at {outdir} "
                 f"({reason})")
         return _run_rust_index(args, binary, occupancy_only=True)
+    if getattr(args, "hier_only", False):
+        # the cell tree's index, added to (or rebuilt on) a current cache
+        # by `floe-index hier`; the cache's other files are untouched
+        if not current:
+            raise SystemExit(
+                f"floe: --hier-only needs a current cache at {outdir} "
+                f"({reason})")
+        return _run_rust_hier(outdir, binary)
     if current and not args.force:
         if args.coverage and not os.path.isfile(
                 os.path.join(outdir, "design.ovc")):
@@ -1327,35 +1347,28 @@ def cmd_drc(args):
 
 
 def cmd_svrf(args):
-    """Parse a Calibre SVRF rule deck (subset) into rule metadata."""
-    from . import svrf
-    defines = {}
-    for d in args.define:
-        name, _, val = d.partition("=")
-        if name:
-            defines[name] = val or None
-    deck = svrf.parse_deck(args.deck, defines, args.include_dir,
-                           scan_all=args.scan,
-                           follow_verbatim=args.follow_verbatim,
-                           env_switches=not args.no_env_switches)
+    """Moved to floe-index (2026-09-29): the tools that build files from
+    inputs live there (`vfs` the layout cache, `drc` the result pack,
+    `svrf` the rule sidecar). This entry only prints the same command
+    for floe-index and exits 2, so an old script says where it went."""
+    import shlex
+    cmd = ["floe-index", "svrf", args.deck]
+    if args.out:
+        cmd += ["-o", args.out]
     if args.scan:
-        print(svrf.format_scan(deck))
-        return
-    out = args.out or (args.deck + ".rules.json")
-    data = svrf.write_json(deck, out)
-    st = data["stats"]
-    print("%s: %d checks, %d derivations, %d layers -> %s"
-          % (args.deck, st["checks"], st["derivations"],
-             len(data["layers"]), out))
-    if st["cmacro_calls"]:
-        print("[floe][warn] %d CMACRO calls NOT expanded - metadata "
-              "is incomplete for macro-generated rules"
-              % st["cmacro_calls"], file=sys.stderr)
-    if st["skipped"]:
-        print("[floe] %d unrecognized statements skipped "
-              "(--scan lists them)" % st["skipped"], file=sys.stderr)
-    for w in st["warnings"][:10]:
-        print("[floe][warn] %s" % w, file=sys.stderr)
+        cmd.append("--scan")
+    for d in args.define:
+        cmd += ["-D", d]
+    for d in args.include_dir:
+        cmd += ["-I", d]
+    if args.follow_verbatim:
+        cmd.append("--follow-verbatim")
+    if args.no_env_switches:
+        cmd.append("--no-env-switches")
+    print("svrf moved to floe-index (same options, same "
+          "<deck>.rules.json) - run:\n  %s"
+          % " ".join(shlex.quote(c) for c in cmd), file=sys.stderr)
+    sys.exit(2)
 
 
 def cmd_gtktest(args):
@@ -1863,6 +1876,13 @@ def main(argv=None, *, prog=None, rust_only=None):
         help="add or rebuild design.ovo on a current cache without "
              "re-indexing (the cache's other files are untouched)")
     rust.add_argument(
+        "--hier-only", action="store_true",
+        help="add or rebuild design.ovh, the viewer's cell tree index "
+             "(children, parents, instance counts), on a current cache "
+             "without re-indexing; every new index writes it, a cache "
+             "built before 0.12.239 needs this once (one sequential pass "
+             "over the placement records: ~12 s per 80 M)")
+    rust.add_argument(
         "--occupancy-um", type=_positive_float, default=None, metavar="UM",
         help="occupancy base cell in microns (default: automatic - 4 for "
              "a chip wider than 8 mm, 2/1/0.5/0.25 for smaller ones so the "
@@ -2160,12 +2180,9 @@ def main(argv=None, *, prog=None, rust_only=None):
     _add_reviewer_option(p)
     p.set_defaults(fn=cmd_drc)
 
-    p = sub.add_parser("svrf", help="parse a Calibre SVRF rule deck "
-                                    "(subset: layers, derivations, "
-                                    "check constraints) into "
-                                    "<deck>.rules.json - the viewer "
-                                    "loads it next to the DRC .db "
-                                    "for waive-decision aid")
+    p = sub.add_parser("svrf", help="MOVED: `floe-index svrf <deck>` "
+                                    "builds <deck>.rules.json (same "
+                                    "options); this prints that command")
     p.add_argument("deck")
     p.add_argument("-o", "--out", default=None,
                    help="output path (default <deck>.rules.json)")
@@ -2190,7 +2207,7 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "for #IFDEF switches. Default: names the "
                         "deck tests are looked up in the "
                         "environment when not -D'd (sourceme "
-                        "workflow: `source sourceme.* && floe svrf "
+                        "workflow: `source sourceme.* && floe-index svrf "
                         "...`); used ones are reported and stored "
                         "in the sidecar for provenance")
     p.set_defaults(fn=cmd_svrf)

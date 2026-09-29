@@ -686,7 +686,8 @@ pub fn plan_labels(
         st: TextStats::default(),
         done: false,
     };
-    let top = v.top;
+    // the view root (ViewReq::root), as the page planner's
+    let top = req.root.filter(|&r| r < v.n_cells).unwrap_or(v.top);
     let tc = v.cell(top);
     let r0 = w.norm_r(
         top,
@@ -946,6 +947,7 @@ mod tests {
             shape_cut: false,
             shape_cut_max: false,
             frames: true,
+            root: None,
             page_wash: true,
             lod_swap: true,
         }
@@ -1139,6 +1141,40 @@ mod tests {
     /// the viewport's own plan for texts, and every viewport block
     /// name is in the margin plan unchanged - so a GUI crop out of the
     /// margin frame shows the labels a direct render would.
+    #[test]
+    fn a_view_root_plans_the_labels_of_that_cell_in_its_own_coordinates() {
+        let (v, ovt) = fixture();
+        let opts = LabelOpts {
+            raw: true,
+            ..LabelOpts::default()
+        };
+        let wide = bx(-1_000_000, -1_000_000, 1_000_000, 1_000_000);
+        let mut top = rq(wide, 0, u32::MAX, 0.05);
+        top.root = Some(v.top);
+        let plain = plan_labels(&v, &ovt, &rq(wide, 0, u32::MAX, 0.05), &opts).unwrap();
+        let explicit = plan_labels(&v, &ovt, &top, &opts).unwrap();
+        assert_eq!(explicit.rows.len(), plain.rows.len());
+        // a cell below the top with texts of its own: rooted there, every
+        // row lies inside its recursive bbox (its coordinates), and there
+        // are no fewer rows than its own text records
+        let child = (0..v.n_cells)
+            .find(|&ci| ci != v.top && v.cell_tranges(ci).1 > 0)
+            .expect("a child with texts");
+        let mut rooted = rq(wide, 0, u32::MAX, 0.05);
+        rooted.root = Some(child);
+        let rows = plan_labels(&v, &ovt, &rooted, &opts).unwrap().rows;
+        let rb = v.cell_rbbox(child);
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter().all(|r| r.block || rb.contains_pt(r.x, r.y)),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().filter(|r| !r.block).count()
+                <= plain.rows.iter().filter(|r| !r.block).count()
+        );
+    }
+
     #[test]
     fn margin_plan_restricted_to_the_viewport_is_the_viewport_plan() {
         let (v, ovt) = fixture();

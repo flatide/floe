@@ -2,11 +2,11 @@ use floe_render_core::{
     pick_scene, pick_scene_cancellable, render_geometry_occupancy_cancellable,
     render_geometry_styled_cancellable, render_geometry_styled_cancellable_reuse,
     render_geometry_styled_unbinned_cancellable, snap_scene, snap_scene_cancellable,
-    validate_font_px, Cache, CacheLayer, ClipGeometry, Deck, DeckRenderRequest, DeckSpec,
-    DecodedPageCache, FrameReuse, FrameScene, GeometryRasterRequest, HierPlan, LayerFill,
-    LayerProbeReport, LayerRasterSession, LayerStyle, PlanRequest, ProbeMode, RasterViewBox,
-    RenderCancellation, RenderLabel, SceneQueryLayer, SceneQueryRequest, SceneSnapKind,
-    StyledGeometryRasterRequest, SummarySelection, ViewBox, DEFAULT_LABEL_FONT_PX,
+    validate_font_px, Cache, CacheLayer, ClipGeometry, Deck, DeckRenderRequest, DeckSpec, DeckXf,
+    DecodedPageCache, FrameReuse, FrameScene, GeometryRasterRequest, HierError, HierHandle,
+    HierPlan, LayerFill, LayerProbeReport, LayerRasterSession, LayerStyle, PlanRequest, ProbeMode,
+    RasterViewBox, RenderCancellation, RenderLabel, SceneQueryLayer, SceneQueryRequest,
+    SceneSnapKind, StyledGeometryRasterRequest, SummarySelection, ViewBox, DEFAULT_LABEL_FONT_PX,
     DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,6 +55,35 @@ struct PublishedScene {
 }
 
 type SharedPublishedScene = Arc<RwLock<Option<Arc<PublishedScene>>>>;
+
+/// The hierarchy the cell tree's queries read (docs/SPEC-VIEWER.ko.md
+/// §8c): one source for a cache, the deck's sources in spec order for a
+/// jobdeck, each with its geometric placements (deck dbu). Published by
+/// the render worker at open, read by the hier query thread.
+struct HierSource {
+    /// the source's cache folder (a jobdeck's source identity)
+    path: String,
+    handle: Arc<HierHandle>,
+    placements: Vec<DeckXf>,
+}
+
+struct PublishedHier {
+    sources: Vec<HierSource>,
+}
+
+type SharedHier = Arc<RwLock<Option<Arc<PublishedHier>>>>;
+
+/// Children rows one `cells` answer carries at most (the count of all
+/// children travels beside them).
+const CELLS_CHILD_CAP: usize = 20_000;
+/// Name-search matches one `cell_find` answer carries at most.
+const CELL_FIND_CAP: usize = 5_000;
+/// Instance boxes one `cell_insts` answer carries at most, and the walk
+/// budget (placement records, members and BVH nodes looked at) behind
+/// them: a whole-chip view of a cell with millions of instances answers
+/// partially (more=1) instead of running for seconds.
+const CELL_INSTS_CAP: usize = 4_096;
+const CELL_INSTS_BUDGET: u64 = 2_000_000;
 
 // which target this binary was built for, mirrored from floe-index:
 // multiple builds circulate on the closed-network hosts and "which
@@ -115,6 +144,8 @@ fn serve() -> Result<(), String> {
     let worker_responses = response_tx.clone();
     let published_scene = Arc::new(RwLock::new(None));
     let worker_scene = Arc::clone(&published_scene);
+    let published_hier: SharedHier = Arc::new(RwLock::new(None));
+    let worker_hier = Arc::clone(&published_hier);
     let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
     let worker = thread::spawn(move || {
         render_worker(
@@ -122,8 +153,20 @@ fn serve() -> Result<(), String> {
             worker_responses,
             worker_cancellation,
             worker_scene,
+            worker_hier,
         )
     });
+
+    // the cell tree's queries (cells, cell_find, cell_bbox, cell_insts,
+    // cell_sources) run on their own thread: the first one may build or
+    // open the hierarchy summary, and an instance walk over a wide view
+    // runs to its budget - neither may delay a pick or a render
+    let (hier_tx, hier_rx) = mpsc::channel::<HierCommand>();
+    let hier = {
+        let responses = response_tx.clone();
+        let hier = Arc::clone(&published_hier);
+        thread::spawn(move || hier_worker(hier_rx, responses, hier))
+    };
 
     let query_inline = std::env::var("FLOE_RUST_QUERY_INLINE").as_deref() == Ok("1");
     let snap_frontier = RenderCancellation::new();
@@ -206,6 +249,12 @@ fn serve() -> Result<(), String> {
                     break;
                 }
             }
+            InputCommand::Hier(command) => {
+                if hier_tx.send(command).is_err() {
+                    main_error = Some("hier worker stopped".to_string());
+                    break;
+                }
+            }
             InputCommand::Quit => break,
         }
     }
@@ -215,6 +264,11 @@ fn serve() -> Result<(), String> {
     drop(query_tx);
     if query.join().is_err() {
         main_error.get_or_insert_with(|| "query worker panicked".to_string());
+    }
+    let _ = hier_tx.send(HierCommand::Shutdown);
+    drop(hier_tx);
+    if hier.join().is_err() {
+        main_error.get_or_insert_with(|| "hier worker panicked".to_string());
     }
 
     // EOF and stdin read failures are process shutdown requests just like
@@ -263,7 +317,72 @@ enum InputCommand {
     CancelQuery(QueryCancel),
     Snap(SnapCommand),
     Pick(PickCommand),
+    Hier(HierCommand),
     Quit,
+}
+
+/// The cell tree's queries (docs/SPEC-VIEWER.ko.md §8c), answered on
+/// the hier thread from the published hierarchy.
+#[derive(Debug, PartialEq)]
+enum HierCommand {
+    /// the sources of the open cache or deck
+    Sources {
+        sequence: i64,
+    },
+    /// a cell's children (cell None = the source's top)
+    Cells {
+        sequence: i64,
+        source: usize,
+        cell: Option<u32>,
+    },
+    /// cells whose name matches (source None = every source)
+    Find {
+        sequence: i64,
+        source: Option<usize>,
+        pattern: String,
+        limit: usize,
+    },
+    /// the extent of a cell's instances (view coordinates)
+    Bbox {
+        sequence: i64,
+        source: usize,
+        cell: u32,
+        root: Option<u32>,
+    },
+    /// a cell's instances inside a view (view coordinates)
+    Insts {
+        sequence: i64,
+        source: usize,
+        cell: u32,
+        view: [f64; 4],
+        cap: usize,
+        root: Option<u32>,
+    },
+    Shutdown,
+}
+
+impl HierCommand {
+    fn sequence(&self) -> i64 {
+        match self {
+            HierCommand::Sources { sequence }
+            | HierCommand::Cells { sequence, .. }
+            | HierCommand::Find { sequence, .. }
+            | HierCommand::Bbox { sequence, .. }
+            | HierCommand::Insts { sequence, .. } => *sequence,
+            HierCommand::Shutdown => -1,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            HierCommand::Sources { .. } => "cell_sources",
+            HierCommand::Cells { .. } => "cells",
+            HierCommand::Find { .. } => "cell_find",
+            HierCommand::Bbox { .. } => "cell_bbox",
+            HierCommand::Insts { .. } => "cell_insts",
+            HierCommand::Shutdown => "shutdown",
+        }
+    }
 }
 
 /// §F2R-20b: snap/pick run on their own thread so a worst-case dense
@@ -398,6 +517,9 @@ struct RenderCommand {
     /// as 1 px hairlines) or cull (plain layout: dropped whole, the
     /// performance policy). Absent = cull.
     thin_keep: bool,
+    /// The view root (floe_vfs::ViewReq::root): the plan starts from this
+    /// cell in its own coordinates (SPEC-VIEWER §8c). None = the top.
+    root: Option<u32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -429,6 +551,8 @@ struct ClipCommand {
     jobs: Option<u16>,
     cell_name: String,
     out: String,
+    /// the view root the clip is cut from (as a render's); None = the top
+    root: Option<u32>,
 }
 
 struct PickWireResponse {
@@ -499,6 +623,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             }
             allowed.extend([
                 "gen",
+                "root",
                 "view",
                 "w",
                 "h",
@@ -607,6 +732,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     probe_block,
                     background: optional_bool(&fields, "bg")?.unwrap_or(false),
                     thin_keep,
+                    root: optional_parse(&fields, "root")?,
                 },
             ))))
         }
@@ -657,7 +783,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
         "clip" => {
             reject_unknown(
                 &fields,
-                &["seq", "box", "layers", "jobs", "cell_hex", "out"],
+                &["seq", "box", "layers", "jobs", "cell_hex", "out", "root"],
             )?;
             let jobs = optional_parse(&fields, "jobs")?;
             if let Some(jobs) = jobs {
@@ -675,8 +801,59 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                         .transpose()?
                         .unwrap_or_else(|| "FLOE_CLIP".to_string()),
                     out: required(&fields, "out")?.to_string(),
+                    root: optional_parse(&fields, "root")?,
                 },
             ))))
+        }
+        "cell_sources" => {
+            reject_unknown(&fields, &["seq"])?;
+            Ok(Some(InputCommand::Hier(HierCommand::Sources {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+            })))
+        }
+        "cells" => {
+            reject_unknown(&fields, &["seq", "src", "cell"])?;
+            Ok(Some(InputCommand::Hier(HierCommand::Cells {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                source: optional_parse(&fields, "src")?.unwrap_or(0),
+                cell: optional_parse(&fields, "cell")?,
+            })))
+        }
+        "cell_find" => {
+            reject_unknown(&fields, &["seq", "src", "pat_hex", "limit"])?;
+            let source: i64 = optional_parse(&fields, "src")?.unwrap_or(-1);
+            let limit: usize = optional_parse(&fields, "limit")?.unwrap_or(CELL_FIND_CAP);
+            Ok(Some(InputCommand::Hier(HierCommand::Find {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                source: usize::try_from(source).ok(),
+                pattern: fields
+                    .get("pat_hex")
+                    .map(|value| wire_unhex(value, "pat_hex"))
+                    .transpose()?
+                    .unwrap_or_default(),
+                limit: limit.clamp(1, CELL_FIND_CAP),
+            })))
+        }
+        "cell_bbox" => {
+            reject_unknown(&fields, &["seq", "src", "cell", "root"])?;
+            Ok(Some(InputCommand::Hier(HierCommand::Bbox {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                source: optional_parse(&fields, "src")?.unwrap_or(0),
+                cell: required_parse(&fields, "cell")?,
+                root: optional_parse(&fields, "root")?,
+            })))
+        }
+        "cell_insts" => {
+            reject_unknown(&fields, &["seq", "src", "cell", "view", "cap", "root"])?;
+            let cap: usize = optional_parse(&fields, "cap")?.unwrap_or(CELL_INSTS_CAP);
+            Ok(Some(InputCommand::Hier(HierCommand::Insts {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                source: optional_parse(&fields, "src")?.unwrap_or(0),
+                cell: required_parse(&fields, "cell")?,
+                view: parse_view(required(&fields, "view")?)?,
+                cap: cap.clamp(1, CELL_INSTS_CAP),
+                root: optional_parse(&fields, "root")?,
+            })))
         }
         "cancel" => {
             reject_unknown(&fields, &["before_gen"])?;
@@ -836,6 +1013,9 @@ struct RetainedKey {
     /// and vice versa - 16 tiles reused, the thin lines stayed or
     /// stayed missing; the published query scene shares this key)
     thin_keep: bool,
+    /// the view root the frame was planned from (another root is another
+    /// picture in other coordinates; SPEC-VIEWER §8c)
+    root: Option<u32>,
     /// the occupancy summary the frame was drawn with (M2): its level
     /// and the file's identity, so a frame drawn from an older
     /// design.ovo (or without one) is never reused after a rebuild
@@ -877,6 +1057,7 @@ impl RetainedKey {
             decode_pages: command.decode_pages,
             style_epoch,
             thin_keep: command.thin_keep,
+            root: command.root,
             summary,
         }
     }
@@ -887,6 +1068,12 @@ struct RetainedFrame {
     key: RetainedKey,
     view: [f64; 4],
     frame: floe_render_core::RgbaFrame,
+    /// The budget fit the frame was planned under (WorkerState::fit_memory;
+    /// None: no budget fit). A request under another decision must not
+    /// reuse it (review 2026-09-28: after a redecision the frame mixed the
+    /// old selection's tiles with the new one's - 240 tiles, 16,178 px off
+    /// a fresh render).
+    fit: Option<floe_render_core::FixedFit>,
 }
 
 impl RetainedFrame {
@@ -958,14 +1145,15 @@ impl Default for WorkerState {
 /// mode and the scale (a pan keeps it, a zoom changes it).
 fn fit_memory_key(command: &RenderCommand, request: &PlanRequest) -> String {
     format!(
-        "{:?}|{}|{}|{}|{}|{}|{}",
+        "{:?}|{}|{}|{}|{}|{}|{}|{:?}",
         command.visible_layers,
         command.depth,
         request.cut_dbu,
         scale_token(request.px_per_dbu),
         command.thin_keep,
         request.page_hairline,
-        command.frames
+        command.frames,
+        command.root
     )
 }
 
@@ -1039,13 +1227,18 @@ fn render_worker(
     responses: Sender<String>,
     cancellation: RenderCancellation,
     published_scene: SharedPublishedScene,
+    published_hier: SharedHier,
 ) {
     let mut state = WorkerState::default();
     for command in commands {
         match command {
-            WorkerCommand::Open(command) => {
-                handle_open(&mut state, command, &responses, &published_scene)
-            }
+            WorkerCommand::Open(command) => handle_open(
+                &mut state,
+                command,
+                &responses,
+                &published_scene,
+                &published_hier,
+            ),
             WorkerCommand::Style(command) => handle_style(&mut state, command, &responses),
             WorkerCommand::Render(command) => handle_render(
                 &mut state,
@@ -1151,6 +1344,7 @@ fn run_clip(
         regions: Vec::new(),
         visible_indices: None,
         fixed_fit: None,
+        root: command.root,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1241,6 +1435,7 @@ fn handle_open(
     command: OpenCommand,
     responses: &Sender<String>,
     published_scene: &SharedPublishedScene,
+    published_hier: &SharedHier,
 ) {
     if state.cache.is_some() || state.deck.is_some() {
         respond(
@@ -1270,6 +1465,19 @@ fn handle_open(
         match opened {
             Ok(deck) => {
                 let info = deck.info();
+                if let Ok(mut published) = published_hier.write() {
+                    *published = Some(Arc::new(PublishedHier {
+                        sources: deck
+                            .hier_sources()
+                            .into_iter()
+                            .map(|source| HierSource {
+                                path: source.path,
+                                handle: source.handle,
+                                placements: source.placements,
+                            })
+                            .collect(),
+                    }));
+                }
                 state.deck = Some(deck);
                 state.cache = None;
                 state.page_cache = DecodedPageCache::new(0);
@@ -1315,6 +1523,15 @@ fn handle_open(
     match Cache::open(cache_path) {
         Ok(cache) => {
             let info = cache.info();
+            if let Ok(mut published) = published_hier.write() {
+                *published = Some(Arc::new(PublishedHier {
+                    sources: vec![HierSource {
+                        path: cache_path.to_string(),
+                        handle: cache.hier(),
+                        placements: vec![DeckXf::IDENTITY],
+                    }],
+                }));
+            }
             state.cache = Some(cache);
             state.page_cache = DecodedPageCache::new(budget_bytes);
             state.retained.clear();
@@ -1347,6 +1564,251 @@ fn handle_open(
             responses,
             format!("error code=open message={}", wire_escape(&error)),
         ),
+    }
+}
+
+/// The hier thread: answers the cell tree's queries in order, except
+/// that an instance query with a newer one already queued behind it is
+/// answered `superseded` at once (the viewer reads its latest sequence
+/// only; a wide view's walk runs to its budget and must not queue up
+/// behind a pan).
+fn hier_worker(commands: Receiver<HierCommand>, responses: Sender<String>, hier: SharedHier) {
+    let mut queue: std::collections::VecDeque<HierCommand> = std::collections::VecDeque::new();
+    loop {
+        if queue.is_empty() {
+            match commands.recv() {
+                Ok(command) => queue.push_back(command),
+                Err(_) => break,
+            }
+        }
+        while let Ok(command) = commands.try_recv() {
+            queue.push_back(command);
+        }
+        let Some(command) = queue.pop_front() else {
+            continue;
+        };
+        if matches!(command, HierCommand::Shutdown) {
+            break;
+        }
+        if matches!(command, HierCommand::Insts { .. })
+            && queue
+                .iter()
+                .any(|later| matches!(later, HierCommand::Insts { .. }))
+        {
+            respond(
+                &responses,
+                hier_error_line(
+                    command.kind(),
+                    command.sequence(),
+                    "superseded",
+                    QUERY_SUPERSEDED,
+                ),
+            );
+            continue;
+        }
+        handle_hier(&hier, command, &responses);
+    }
+}
+
+fn hier_error_line(kind: &str, sequence: i64, code: &str, message: &str) -> String {
+    format!(
+        "{kind} seq={sequence} found=0 code={code} err_hex={}",
+        wire_hex(message)
+    )
+}
+
+fn hier_error(kind: &str, sequence: i64, error: &HierError) -> String {
+    match error {
+        HierError::NoSummary(message) => hier_error_line(kind, sequence, "nohier", message),
+        HierError::Other(message) => hier_error_line(kind, sequence, "query", message),
+    }
+}
+
+fn wire_f64_box(b: &[f64; 4]) -> String {
+    format!("{},{},{},{}", b[0], b[1], b[2], b[3])
+}
+
+fn handle_hier(hier: &SharedHier, command: HierCommand, responses: &Sender<String>) {
+    let kind = command.kind();
+    let sequence = command.sequence();
+    let published = match hier.read() {
+        Ok(guard) => guard.clone(),
+        Err(_) => None,
+    };
+    let Some(published) = published else {
+        respond(
+            responses,
+            hier_error_line(kind, sequence, "state", "cache not open"),
+        );
+        return;
+    };
+    let source_of = |index: usize| -> Result<&HierSource, String> {
+        published
+            .sources
+            .get(index)
+            .ok_or_else(|| format!("source {} of {}", index, published.sources.len()))
+    };
+    let line: Result<String, String> = (|| match &command {
+        HierCommand::Sources { .. } => {
+            let sources: Vec<String> = published
+                .sources
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{}:{}:{}", i, s.placements.len(), wire_hex(&s.path)))
+                .collect();
+            Ok(format!(
+                "cell_sources seq={} found=1 n={} sources={}",
+                sequence,
+                sources.len(),
+                if sources.is_empty() { "-".to_string() } else { sources.join(",") }
+            ))
+        }
+        HierCommand::Cells { source, cell, .. } => {
+            let src = source_of(*source)?;
+            let answer = floe_render_core::cell_children(&src.handle, *cell, CELLS_CHILD_CAP)
+                .map_err(|e| hier_error(kind, sequence, &e))
+                .map_err(HierWire)?;
+            let children: Vec<String> = answer
+                .rows
+                .iter()
+                .map(|r| format!("{}:{}:{}:{}", r.cell, r.members, u8::from(r.leaf), wire_hex(&r.name)))
+                .collect();
+            let bbox = if answer.rbbox.is_empty() {
+                "-".to_string()
+            } else {
+                format!("{},{},{},{}", answer.rbbox.x0, answer.rbbox.y0, answer.rbbox.x1, answer.rbbox.y1)
+            };
+            Ok(format!(
+                "cells seq={} src={} found=1 cell={} name_hex={} insts={} height={} unit={} bbox={} n={} total={} children={}",
+                sequence,
+                source,
+                answer.cell,
+                wire_hex(&answer.name),
+                answer.insts,
+                answer.height,
+                src.handle.unit(),
+                bbox,
+                children.len(),
+                answer.total,
+                if children.is_empty() { "-".to_string() } else { children.join(",") }
+            ))
+        }
+        HierCommand::Find { source, pattern, limit, .. } => {
+            let indices: Vec<usize> = match source {
+                Some(index) => {
+                    source_of(*index)?;
+                    vec![*index]
+                }
+                None => (0..published.sources.len()).collect(),
+            };
+            let mut total = 0usize;
+            let mut rows: Vec<(usize, floe_render_core::FindRow)> = Vec::new();
+            for index in indices {
+                let src = &published.sources[index];
+                let found = floe_render_core::cell_find(&src.handle, pattern, *limit)
+                    .map_err(|e| hier_error(kind, sequence, &e))
+                    .map_err(HierWire)?;
+                total += found.total;
+                rows.extend(found.rows.into_iter().map(|r| (index, r)));
+            }
+            rows.sort_by_cached_key(|(index, r)| (r.name.to_lowercase(), r.name.clone(), *index, r.cell));
+            rows.truncate(*limit);
+            let matches: Vec<String> = rows
+                .iter()
+                .map(|(index, r)| format!("{}:{}:{}:{}", index, r.cell, r.insts, wire_hex(&r.name)))
+                .collect();
+            Ok(format!(
+                "cell_find seq={} src={} found=1 total={} n={} matches={}",
+                sequence,
+                source.map(|s| s as i64).unwrap_or(-1),
+                total,
+                matches.len(),
+                if matches.is_empty() { "-".to_string() } else { matches.join(",") }
+            ))
+        }
+        HierCommand::Bbox { source, cell, root, .. } => {
+            let src = source_of(*source)?;
+            let extent = floe_render_core::cell_extent(&src.handle, *root, *cell)
+                .map_err(|e| hier_error(kind, sequence, &e))
+                .map_err(HierWire)?;
+            let mut union: Option<[f64; 4]> = None;
+            if let Some(b) = extent.bbox {
+                for xf in &src.placements {
+                    let t = xf.apply(&b);
+                    union = Some(match union {
+                        None => t,
+                        Some(u) => [u[0].min(t[0]), u[1].min(t[1]), u[2].max(t[2]), u[3].max(t[3])],
+                    });
+                }
+            }
+            Ok(format!(
+                "cell_bbox seq={} src={} cell={} found=1 insts={} approx={} bbox={}",
+                sequence,
+                source,
+                cell,
+                extent.insts,
+                u8::from(extent.approx),
+                union.map(|b| wire_f64_box(&b)).unwrap_or_else(|| "-".to_string())
+            ))
+        }
+        HierCommand::Insts { source, cell, view, cap, root, .. } => {
+            let src = source_of(*source)?;
+            let mut boxes: Vec<String> = Vec::new();
+            let mut more = false;
+            let mut visited = 0u64;
+            for xf in &src.placements {
+                if boxes.len() >= *cap {
+                    more = true;
+                    break;
+                }
+                let Some(local) = xf.source_view(*view) else {
+                    continue;
+                };
+                let found = floe_render_core::cell_instances(
+                    &src.handle,
+                    *root,
+                    *cell,
+                    local,
+                    *cap - boxes.len(),
+                    CELL_INSTS_BUDGET,
+                )
+                .map_err(|e| hier_error(kind, sequence, &e))
+                .map_err(HierWire)?;
+                more |= found.more;
+                visited = visited.saturating_add(found.visited);
+                boxes.extend(found.boxes.iter().map(|b| wire_f64_box(&xf.apply(b))));
+            }
+            Ok(format!(
+                "cell_insts seq={} src={} cell={} found=1 n={} more={} visited={} boxes={}",
+                sequence,
+                source,
+                cell,
+                boxes.len(),
+                u8::from(more),
+                visited,
+                if boxes.is_empty() { "-".to_string() } else { boxes.join(";") }
+            ))
+        }
+        HierCommand::Shutdown => Ok(String::new()),
+    })()
+    .map_err(|error: HierWire| error.0);
+    match line {
+        Ok(line) if line.is_empty() => {}
+        Ok(line) => respond(responses, line),
+        Err(line) if line.starts_with(kind) => respond(responses, line),
+        Err(message) => respond(
+            responses,
+            hier_error_line(kind, sequence, "query", &message),
+        ),
+    }
+}
+
+/// A finished error line for the wire (distinguished from a bare message).
+struct HierWire(String);
+
+impl From<String> for HierWire {
+    fn from(message: String) -> Self {
+        HierWire(message)
     }
 }
 
@@ -1834,6 +2296,12 @@ fn run_deck_render(
     cancellation: &RenderCancellation,
 ) -> Result<(), String> {
     check_generation(cancellation, command.generation)?;
+    if command.root.is_some() {
+        return Err(
+            "a jobdeck has no view root (root=): the sources' tops are the deck's cells"
+                .to_string(),
+        );
+    }
     let deck = state
         .deck
         .as_mut()
@@ -2463,12 +2931,17 @@ fn run_render(
     let summary = cache.summary_selection(
         &make_plan_request(cache, &command, state.page_cache.budget_bytes())?,
         policy_allows,
-        std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off"),
+        // design.ovo flattens the TOP cell: under another view root it is
+        // not this picture's summary
+        std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off") || command.root.is_some(),
         // a plain layout draws no summary unless FLOE_RUST_OCCUPANCY=on
         // (user decision 2026-09-24; jobdeck passes keep it)
         !floe_render_core::summary_layout_allowed(),
     )?;
     let summary_key = SummaryKey::of(&summary);
+    // the budget fit a retained frame must have been planned under to serve
+    // this request: the scale's remembered decision (the fit key does not
+    // depend on the view's position, so the request before the snap gives it)
     let query_summary_layers = Arc::new(
         summary
             .planes
@@ -2476,7 +2949,24 @@ fn run_render(
             .map(|p| p.layer_idx)
             .collect::<BTreeSet<_>>(),
     );
-    let pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key);
+    let expected_fit = if command.exact {
+        None
+    } else {
+        let pre = make_plan_request(
+            cache,
+            &command,
+            pass1_decode_budget(state.page_cache.budget_bytes(), &command),
+        )?;
+        if pre.decode_budget > 0 {
+            state
+                .fit_memory
+                .get(&fit_memory_key(&command, &pre))
+                .copied()
+        } else {
+            None
+        }
+    };
+    let mut pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key, expected_fit);
     let command = &command;
     check_generation(cancellation, command.generation)?;
     // the density stack's pass 2 decodes within a reserve of its own
@@ -2607,7 +3097,19 @@ fn run_render(
                 state.fit_memory.insert(fit_key.clone(), decision);
             }
         }
+        if planned.plan.stats.fit_redecided && pan_reuse.is_some() {
+            // the reused tiles were drawn under the decision this frame
+            // replaced: the pages the new one drops or adds would sit beside
+            // them (review 2026-09-28) - the whole frame is drawn anew
+            pan_reuse = None;
+        }
     }
+    // the fit this frame is drawn under, for the retained frame it leaves
+    let frame_fit = if label_only {
+        expected_fit
+    } else {
+        planned.plan.stats.fit_decision
+    };
     let planned_labels = if command.labels {
         Some(cache.plan_labels(&request, command.frames, command.label_font_px)?)
     } else {
@@ -3050,6 +3552,7 @@ fn run_render(
                         ),
                         view: command.view,
                         frame,
+                        fit: frame_fit,
                     },
                     retained_budget_bytes(),
                 );
@@ -3361,10 +3864,14 @@ fn store_retained(retained: &mut Vec<RetainedFrame>, entry: RetainedFrame, budge
     // pan series' full reuse after one step while the GUI, remembering
     // the margin, did not prefetch again. Same state means identical
     // pixels over the overlap, so nothing is lost by not storing.
-    if let Some(index) = retained
-        .iter()
-        .position(|candidate| same_scale(candidate) && view_contains(&candidate.view, &entry.view))
-    {
+    // ... and planned under the same budget fit (review 2026-09-28: a frame
+    // under another decision stayed in place, so nothing at that scale was
+    // ever reusable again and every revisit drew anew)
+    if let Some(index) = retained.iter().position(|candidate| {
+        same_scale(candidate)
+            && candidate.fit == entry.fit
+            && view_contains(&candidate.view, &entry.view)
+    }) {
         // it just served this render: touch it to newest (LRU order)
         let kept = retained.remove(index);
         retained.push(kept);
@@ -3406,16 +3913,29 @@ fn prepare_pan_reuse(
     state: &WorkerState,
     command: &mut RenderCommand,
     summary: &SummaryKey,
+    fit: Option<floe_render_core::FixedFit>,
 ) -> Option<FrameReuse> {
     if !retention_enabled(command) {
         return None;
     }
     let key = RetainedKey::with_summary(command, state.style_epoch, summary.clone());
-    let retained = state
+    // newest first, every frame of this render state and budget fit: the
+    // first whose scale and grid the request meets serves (review 2026-09-28:
+    // the newest frame alone was tried, so with A -> B -> A the frame at A
+    // went unused although it was still retained)
+    let (reuse, view) = state
         .retained
         .iter()
         .rev()
-        .find(|candidate| candidate.key == key)?;
+        .filter(|candidate| candidate.key == key && candidate.fit == fit)
+        .find_map(|candidate| reuse_from(candidate, command))?;
+    command.view = view;
+    Some(reuse)
+}
+
+/// The overlap of `retained` this request can take, and the request's view
+/// snapped onto the retained grid, when the scale and the 16 px grid agree.
+fn reuse_from(retained: &RetainedFrame, command: &RenderCommand) -> Option<(FrameReuse, [f64; 4])> {
     let [ox0, oy0, ox1, oy1] = retained.view;
     let [nx0, ny0, nx1, ny1] = command.view;
     let rw = f64::from(retained.frame.width());
@@ -3477,7 +3997,7 @@ fn prepare_pan_reuse(
     // edge, y from the TOP edge).
     let vx0 = ox0 + kx as f64 * sppx;
     let vy1 = oy1 - ky as f64 * sppy;
-    command.view = [vx0, vy1 - height * sppy, vx0 + width * sppx, vy1];
+    let view = [vx0, vy1 - height * sppy, vx0 + width * sppx, vy1];
     let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
     let old = retained.frame.pixels();
     let src_row_bytes = (rw_px as usize) * 4;
@@ -3490,15 +4010,18 @@ fn prepare_pan_reuse(
     }
     let base =
         floe_render_core::RgbaFrame::from_pixels(command.width, command.height, pixels).ok()?;
-    Some(FrameReuse {
-        base,
-        valid: [
-            valid_x0 as u32,
-            valid_y0 as u32,
-            valid_x1 as u32,
-            valid_y1 as u32,
-        ],
-    })
+    Some((
+        FrameReuse {
+            base,
+            valid: [
+                valid_x0 as u32,
+                valid_y0 as u32,
+                valid_x1 as u32,
+                valid_y1 as u32,
+            ],
+        },
+        view,
+    ))
 }
 
 /// A frame with the density stack's pass 2 (floe_render_core DensityStack,
@@ -3772,6 +4295,7 @@ fn make_plan_request_cut(
         regions: Vec::new(),
         visible_indices: None,
         fixed_fit: None,
+        root: command.root,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -4304,6 +4828,7 @@ mod tests {
                 jobs: Some(6),
                 cell_name: "TOP 한글".to_string(),
                 out: "/tmp/c.oas".to_string(),
+                root: None,
             }
         );
         assert!(parse_command("clip box=4,0,3,1 out=/tmp/c.oas").is_err());
@@ -4358,6 +4883,221 @@ mod tests {
             "TOP 한글"
         );
         assert_eq!(wire_points(&[(0, 1), (-2, 3)]), "0,1;-2,3");
+    }
+
+    #[test]
+    fn parses_the_cell_tree_queries() {
+        let hier = |line: &str| match parse_command(line).unwrap().unwrap() {
+            InputCommand::Hier(command) => command,
+            _ => panic!("expected a hier command"),
+        };
+        assert_eq!(
+            hier("cell_sources seq=3"),
+            HierCommand::Sources { sequence: 3 }
+        );
+        assert_eq!(
+            hier("cells seq=4"),
+            HierCommand::Cells {
+                sequence: 4,
+                source: 0,
+                cell: None
+            }
+        );
+        assert_eq!(
+            hier("cells seq=5 src=2 cell=17"),
+            HierCommand::Cells {
+                sequence: 5,
+                source: 2,
+                cell: Some(17)
+            }
+        );
+        assert_eq!(
+            hier(&format!(
+                "cell_find seq=6 pat_hex={} limit=10",
+                wire_hex("*inv?")
+            )),
+            HierCommand::Find {
+                sequence: 6,
+                source: None,
+                pattern: "*inv?".to_string(),
+                limit: 10
+            }
+        );
+        // a limit over the cap is the cap; an empty pattern is allowed
+        assert_eq!(
+            hier("cell_find seq=7 src=1 limit=999999"),
+            HierCommand::Find {
+                sequence: 7,
+                source: Some(1),
+                pattern: String::new(),
+                limit: CELL_FIND_CAP
+            }
+        );
+        assert_eq!(
+            hier("cell_bbox seq=8 cell=9"),
+            HierCommand::Bbox {
+                sequence: 8,
+                source: 0,
+                cell: 9,
+                root: None
+            }
+        );
+        assert_eq!(
+            hier("cell_insts seq=9 src=1 cell=9 view=0,-5,10.5,20 cap=7"),
+            HierCommand::Insts {
+                sequence: 9,
+                source: 1,
+                cell: 9,
+                view: [0.0, -5.0, 10.5, 20.0],
+                cap: 7,
+                root: None
+            }
+        );
+        assert!(parse_command("cell_bbox seq=8").is_err());
+        assert!(parse_command("cell_insts seq=9 cell=1 view=0,0,1,1 extra=1").is_err());
+        assert!(parse_command("cells seq=1 cell=x").is_err());
+        assert_eq!(
+            hier_error_line("cells", 4, "nohier", "no summary"),
+            format!(
+                "cells seq=4 found=0 code=nohier err_hex={}",
+                wire_hex("no summary")
+            )
+        );
+        assert_eq!(wire_f64_box(&[1.0, 2.5, -3.0, 4e9]), "1,2.5,-3,4000000000");
+    }
+
+    #[test]
+    fn a_view_root_is_part_of_the_render_state() {
+        let render = |line: &str| match parse_command(line).unwrap().unwrap() {
+            InputCommand::Worker(WorkerCommand::Render(command)) => command,
+            _ => panic!("expected a render command"),
+        };
+        let top = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
+        let rooted =
+            render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off root=17 out=/tmp/a.raw");
+        assert_eq!(top.root, None);
+        assert_eq!(rooted.root, Some(17));
+        // another root is another retained state and another fit memory
+        assert_ne!(
+            RetainedKey::new(&top, Some(1)),
+            RetainedKey::new(&rooted, Some(1))
+        );
+        assert_eq!(
+            RetainedKey::new(&rooted, Some(1)),
+            RetainedKey::new(
+                &render(
+                    "render gen=2 view=5,5,325,325 w=32 h=32 frames=off root=17 out=/tmp/b.raw"
+                ),
+                Some(1)
+            )
+        );
+        let request = |command: &RenderCommand| PlanRequest {
+            view: ViewBox::new(0, 0, 320, 320).unwrap(),
+            cut_dbu: 3,
+            visible_layers: None,
+            depth: FULL_DEPTH,
+            px_per_dbu: 0.1,
+            exact: false,
+            sub_cut_wash: false,
+            page_reps: false,
+            decode_budget: 0,
+            page_hairline: true,
+            summary_layers: Vec::new(),
+            prune_summary: false,
+            sub_cut_box: false,
+            shape_cut: false,
+            shape_cut_max: false,
+            frames: false,
+            page_wash: false,
+            lod_swap: false,
+            regions: Vec::new(),
+            visible_indices: None,
+            fixed_fit: None,
+            root: command.root,
+        };
+        assert_ne!(
+            fit_memory_key(&top, &request(&top)),
+            fit_memory_key(&rooted, &request(&rooted))
+        );
+        // the clip and the cell queries carry it too
+        match parse_command("clip seq=1 box=0,0,10,10 root=17 out=/tmp/c.oas")
+            .unwrap()
+            .unwrap()
+        {
+            InputCommand::Worker(WorkerCommand::Clip(clip)) => assert_eq!(clip.root, Some(17)),
+            _ => panic!("expected a clip command"),
+        }
+        match parse_command("cell_bbox seq=8 cell=9 root=17")
+            .unwrap()
+            .unwrap()
+        {
+            InputCommand::Hier(HierCommand::Bbox { root, .. }) => assert_eq!(root, Some(17)),
+            _ => panic!("expected a cell_bbox command"),
+        }
+        match parse_command("cell_insts seq=9 cell=9 view=0,0,1,1 root=17")
+            .unwrap()
+            .unwrap()
+        {
+            InputCommand::Hier(HierCommand::Insts { root, .. }) => assert_eq!(root, Some(17)),
+            _ => panic!("expected a cell_insts command"),
+        }
+        assert!(
+            parse_command("render gen=1 view=0,0,320,320 w=32 h=32 root=x out=/tmp/a.raw").is_err()
+        );
+    }
+
+    #[test]
+    fn hier_worker_answers_without_a_cache_and_supersedes_queued_instance_walks() {
+        let (tx, rx) = mpsc::channel();
+        let (responses, answers) = mpsc::channel();
+        let hier: SharedHier = Arc::new(RwLock::new(None));
+        // queue three commands before the worker runs: the older
+        // instance query is superseded by the newer one behind it, the
+        // rest answer "cache not open"
+        tx.send(HierCommand::Cells {
+            sequence: 1,
+            source: 0,
+            cell: None,
+        })
+        .unwrap();
+        tx.send(HierCommand::Insts {
+            sequence: 2,
+            source: 0,
+            cell: 1,
+            view: [0.0, 0.0, 1.0, 1.0],
+            cap: 4,
+            root: None,
+        })
+        .unwrap();
+        tx.send(HierCommand::Insts {
+            sequence: 3,
+            source: 0,
+            cell: 1,
+            view: [0.0, 0.0, 2.0, 2.0],
+            cap: 4,
+            root: None,
+        })
+        .unwrap();
+        tx.send(HierCommand::Shutdown).unwrap();
+        let worker = thread::spawn(move || hier_worker(rx, responses, hier));
+        worker.join().unwrap();
+        let lines: Vec<String> = answers.try_iter().collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            lines[0].starts_with("cells seq=1 found=0 code=state"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].starts_with("cell_insts seq=2 found=0 code=superseded"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].starts_with("cell_insts seq=3 found=0 code=state"),
+            "{}",
+            lines[2]
+        );
     }
 
     #[test]
@@ -4445,6 +5185,7 @@ mod tests {
             view: [0.0, 0.0, 320.0 * scale, 320.0 * scale],
             frame: floe_render_core::RgbaFrame::from_pixels(32, 32, vec![0u8; 32 * 32 * 4])
                 .unwrap(),
+            fit: None,
         };
         let roomy = usize::MAX;
         let mut retained = Vec::new();
@@ -4505,6 +5246,7 @@ mod tests {
                 vec![0u8; (px * px * 4) as usize],
             )
             .unwrap(),
+            fit: None,
         };
         let mut retained = Vec::new();
         store_retained(&mut retained, sized(64, [0.0, 0.0, 640.0, 640.0]), roomy);
@@ -4592,6 +5334,7 @@ mod tests {
             key: RetainedKey::new(&retained_cmd, None),
             view: [0.0, 0.0, 320.0, 320.0],
             frame: floe_render_core::RgbaFrame::from_pixels(32, 32, pixels.clone()).unwrap(),
+            fit: None,
         }];
         let mut margin = render(
             parse_command(
@@ -4600,7 +5343,7 @@ mod tests {
             .unwrap()
             .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut margin, &SummaryKey::default())
+        let reuse = prepare_pan_reuse(&state, &mut margin, &SummaryKey::default(), None)
             .expect("margin maps the center");
         assert_eq!(reuse.valid, [16, 16, 48, 48]);
         // margin pixel (16,16) is retained pixel (0,0)
@@ -4615,13 +5358,14 @@ mod tests {
             key: RetainedKey::new(&retained_cmd, None),
             view: [-160.0, -160.0, 480.0, 480.0],
             frame: floe_render_core::RgbaFrame::from_pixels(64, 64, margin_pixels).unwrap(),
+            fit: None,
         }];
         let mut inside = render(
             parse_command("render gen=2 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/c.raw")
                 .unwrap()
                 .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut inside, &SummaryKey::default())
+        let reuse = prepare_pan_reuse(&state, &mut inside, &SummaryKey::default(), None)
             .expect("viewport maps out");
         assert_eq!(reuse.valid, [0, 0, 32, 32], "fully covered by the margin");
 
@@ -4636,19 +5380,125 @@ mod tests {
             key: RetainedKey::new(&retained_cmd, None),
             view: [0.0, 0.0, 320.0, 320.0],
             frame: floe_render_core::RgbaFrame::from_pixels(32, 32, row_coded).unwrap(),
+            fit: None,
         }];
         let mut panned_up = render(
             parse_command("render gen=3 view=0,160,320,480 w=32 h=32 frames=off out=/tmp/d.raw")
                 .unwrap()
                 .unwrap(),
         );
-        let reuse = prepare_pan_reuse(&state, &mut panned_up, &SummaryKey::default())
+        let reuse = prepare_pan_reuse(&state, &mut panned_up, &SummaryKey::default(), None)
             .expect("vertical pan maps");
         // request y1 = 480 sits 16 rows above retained y1 = 320:
         // request rows 16..32 hold retained rows 0..16.
         assert_eq!(reuse.valid, [0, 16, 32, 32]);
         assert_eq!(reuse.base.pixels()[16 * 32 * 4], 0, "row 16 = old row 0");
         assert_eq!(reuse.base.pixels()[31 * 32 * 4], 15, "row 31 = old row 15");
+    }
+
+    #[test]
+    fn a_containing_frame_under_another_fit_does_not_keep_its_place() {
+        // review 2026-09-28: the containing same-scale frame stayed whatever
+        // its fit, so after a redecision no frame at the scale could serve
+        let command = render(
+            parse_command("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw")
+                .unwrap()
+                .unwrap(),
+        );
+        let frame =
+            |px: u32, view: [f64; 4], fit: Option<floe_render_core::FixedFit>| RetainedFrame {
+                key: RetainedKey::new(&command, Some(7)),
+                view,
+                frame: floe_render_core::RgbaFrame::from_pixels(
+                    px,
+                    px,
+                    vec![0u8; (px * px * 4) as usize],
+                )
+                .unwrap(),
+                fit,
+            };
+        let (a, b) = (
+            Some(floe_render_core::FixedFit {
+                cut_dbu: 5,
+                class: 3,
+                phase: 7,
+                page: 9,
+            }),
+            Some(floe_render_core::FixedFit {
+                cut_dbu: 5,
+                class: 4,
+                phase: 7,
+                page: 9,
+            }),
+        );
+        let mut retained = vec![frame(64, [-160.0, -160.0, 480.0, 480.0], a)];
+        // the same fit: the containing margin stays
+        store_retained(
+            &mut retained,
+            frame(32, [0.0, 0.0, 320.0, 320.0], a),
+            usize::MAX,
+        );
+        assert_eq!((retained.len(), retained[0].frame.width()), (1, 64));
+        // another fit: the new frame replaces it
+        store_retained(
+            &mut retained,
+            frame(32, [0.0, 0.0, 320.0, 320.0], b),
+            usize::MAX,
+        );
+        assert_eq!(
+            (retained.len(), retained[0].frame.width(), retained[0].fit),
+            (1, 32, b)
+        );
+    }
+
+    #[test]
+    fn pan_reuse_finds_an_older_frame_at_the_scale_and_none_under_another_fit() {
+        // review 2026-09-28: A -> B -> A found nothing, since only the newest
+        // frame of the render state was tried; and a frame planned under
+        // another budget fit must not serve
+        let mut state = WorkerState::default();
+        let cmd = |line: &str| render(parse_command(line).unwrap().unwrap());
+        let a_cmd = cmd("render gen=0 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
+        let b_cmd = cmd("render gen=1 view=0,0,640,640 w=32 h=32 frames=off out=/tmp/b.raw");
+        let frame = |px: u32| {
+            floe_render_core::RgbaFrame::from_pixels(px, px, vec![3u8; (px * px * 4) as usize])
+                .unwrap()
+        };
+        let fit = floe_render_core::FixedFit {
+            cut_dbu: 5,
+            class: 3,
+            phase: 7,
+            page: 9,
+        };
+        state.retained = vec![
+            RetainedFrame {
+                key: RetainedKey::new(&a_cmd, None),
+                view: [0.0, 0.0, 320.0, 320.0],
+                frame: frame(32),
+                fit: Some(fit),
+            },
+            RetainedFrame {
+                key: RetainedKey::new(&b_cmd, None),
+                view: [0.0, 0.0, 640.0, 640.0],
+                frame: frame(32),
+                fit: Some(fit),
+            },
+        ];
+        let mut again = cmd("render gen=2 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/c.raw");
+        let reuse = prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), Some(fit))
+            .expect("the older frame at this scale serves");
+        assert_eq!(reuse.valid, [0, 0, 32, 32]);
+        let other = floe_render_core::FixedFit {
+            cut_dbu: 5,
+            class: 4,
+            phase: 7,
+            page: 9,
+        };
+        assert!(
+            prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), Some(other)).is_none(),
+            "another decision: nothing to reuse"
+        );
+        assert!(prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), None).is_none());
     }
 
     #[test]

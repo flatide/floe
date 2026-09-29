@@ -90,6 +90,10 @@ pub fn vfs_cmd(args: &[String]) {
     // largely absorbed - and their generation dominates monster-cell
     // build time (150M field: lod was ~half of a 164s cell plan).
     let mut lod = true;
+    // the hierarchy summary design.ovh (the viewer's cell tree,
+    // floe_vfs::hiersum): written at the end of every build unless
+    // --no-hier; `floe-index hier <cache>` adds it to an older cache
+    let mut hier = true;
     // slow-cell log threshold in seconds; 0 logs every cell (the
     // S6/S7 gates use it to observe fanout uptake). CLI state, not
     // an env var - same rule as --kill-at above.
@@ -211,6 +215,10 @@ pub fn vfs_cmd(args: &[String]) {
             }
             "--no-lod" => {
                 lod = false;
+                i += 1;
+            }
+            "--no-hier" => {
+                hier = false;
                 i += 1;
             }
             "--frontier-only" => {
@@ -648,6 +656,8 @@ pub fn vfs_cmd(args: &[String]) {
             "design.ovo.tmp",
             "design.ovr",
             "design.ovr.tmp",
+            "design.ovh",
+            "design.ovh.tmp",
             "labels.tsv",
             // legacy (pre-0.10) viewer file: scrub on rebuild so a
             // re-index actually reclaims the skeleton's bytes
@@ -705,6 +715,12 @@ pub fn vfs_cmd(args: &[String]) {
                         e
                     );
                 }
+            }
+            if hier {
+                // the cell tree's index (additive, outside the marker
+                // protocol like design.ovo): a failure costs the file,
+                // never the cache
+                write_hier(&ovm, &outdir);
             }
             let fj = frontier_json_planned(&ovm);
             match ovm.data {
@@ -2129,6 +2145,98 @@ pub fn bvh_cmd(args: &[String]) {
     }
 }
 
+/// design.ovh (floe_vfs::hiersum): the cell tree's index, published by
+/// tmp + rename; logged with its size and time.
+fn write_hier(ovm: &floe_ovm::Ovm, outdir: &str) {
+    let started = std::time::Instant::now();
+    match floe_vfs::hiersum::write(ovm, outdir) {
+        Ok((stats, bytes)) => eprintln!(
+            "[vfs] hier design.ovh: cells={} edges={} records={} unplaced={} {} ({:.1}s)",
+            stats.cells,
+            stats.edges,
+            stats.records,
+            stats.unplaced,
+            fmt_size(bytes),
+            started.elapsed().as_secs_f64()
+        ),
+        Err(e) => eprintln!(
+            "[vfs] hier: {} - the cache is completed without design.ovh; add it later with `floe-index hier {}`",
+            e, outdir
+        ),
+    }
+}
+
+/// `floe-index hier <cache> [--check]`: add (or rebuild) design.ovh on an
+/// existing cache; --check reports the file's identity against the cache
+/// instead. The cache's other files are untouched.
+pub fn hier_cmd(args: &[String]) {
+    let mut dir: Option<String> = None;
+    let mut check = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--check" => {
+                check = true;
+                i += 1;
+            }
+            a if a.starts_with("--") => crate::unknown_option("hier", a),
+            a => {
+                dir = Some(a.to_string());
+                i += 1;
+            }
+        }
+    }
+    let dir = dir.unwrap_or_else(|| {
+        eprintln!("usage: floe-index hier <cache> [--check]");
+        std::process::exit(2);
+    });
+    let ovm_path = format!("{}/design.ovm", dir);
+    let ovm = floe_ovm::Ovm::open(&ovm_path).unwrap_or_else(|e| {
+        eprintln!("hier: {} (build the cache first)", e);
+        std::process::exit(1);
+    });
+    let path = format!("{}/design.ovh", dir);
+    if check {
+        let status = floe_vfs::hiersum::HierSummary::open(&path)
+            .and_then(|s| s.validate_against(&ovm).map(|()| s));
+        match status {
+            Ok(s) => println!(
+                "hier file={} version={} cells={} edges={} top={} identity=ok",
+                path,
+                floe_vfs::hiersum::VERSION,
+                s.n_cells,
+                s.n_edges,
+                s.top
+            ),
+            Err(e) => {
+                println!("hier file={} identity=none", path);
+                println!("identity_error={}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    let started = std::time::Instant::now();
+    match floe_vfs::hiersum::write(&ovm, &dir) {
+        Ok((stats, bytes)) => {
+            println!(
+                "hier file={} cells={} edges={} records={} unplaced={} bytes={} seconds={:.1}",
+                path,
+                stats.cells,
+                stats.edges,
+                stats.records,
+                stats.unplaced,
+                bytes,
+                started.elapsed().as_secs_f64()
+            );
+        }
+        Err(e) => {
+            eprintln!("hier: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn occupancy_cmd(args: &[String]) {
     use floe_vfs::occupancy as occ;
     let mut dir: Option<String> = None;
@@ -2387,6 +2495,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
             shape_cut: false,
             shape_cut_max: false,
             frames: true,
+            root: None,
             page_wash: true,
             lod_swap: true,
         };
@@ -6425,6 +6534,7 @@ fn make_req(
         shape_cut: false,
         shape_cut_max: false,
         frames: true,
+        root: None,
         page_wash: true,
         lod_swap: true,
     }
