@@ -240,6 +240,14 @@ impl Server {
 #[tokio::test]
 #[ignore = "synthetic native server_runtime gate"]
 async fn public_demo_cli_prepares_renders_enforces_caps_and_reaps_on_hup() {
+    demo_cli_transport(false).await;
+}
+#[tokio::test]
+#[ignore = "synthetic native server_runtime gate"]
+async fn http_demo_cli_prepares_renders_enforces_caps_and_reaps_on_hup() {
+    demo_cli_transport(true).await;
+}
+async fn demo_cli_transport(http_test: bool) {
     use std::{
         os::unix::fs::PermissionsExt,
         process::{Command, Stdio},
@@ -252,15 +260,30 @@ async fn public_demo_cli_prepares_renders_enforces_caps_and_reaps_on_hup() {
         }
     }
     let f = Fixture::new();
+    let origin = if http_test {
+        "http://10.0.0.10:8080"
+    } else {
+        "https://service.example.test"
+    };
+    let authority = if http_test {
+        "10.0.0.10:8080"
+    } else {
+        "service.example.test"
+    };
+    let headers = || {
+        let mut h = super::headers();
+        h.insert("host", authority.parse().unwrap());
+        h.insert("origin", origin.parse().unwrap());
+        h
+    };
     let config = f.0.join("demo.json");
     let key = f.0.join("proxy.key");
     fs::write(
         &config,
-        serde_json::to_vec(
-            &json!({"version":1,"public_origin":"https://service.example.test",
+        serde_json::to_vec(&json!({"version":1,"public_origin":origin,
         "runtime_root":f.0.join("runtime"),"max_sessions":2,"deployment":{"mode":"public_demo",
-        "data_root":f.0.join("data"),"samples":[{"id":"demo1","source":"a.oas"}]}}),
-        )
+        "allow_insecure_http":http_test,
+        "data_root":f.0.join("data"),"samples":[{"id":"demo1","source":"a.oas"}]}}))
         .unwrap(),
     )
     .unwrap();
@@ -353,6 +376,9 @@ async fn public_demo_cli_prepares_renders_enforces_caps_and_reaps_on_hup() {
     )
     .await;
     assert_eq!(code, 200);
+    let set_cookie = h["set-cookie"].to_str().unwrap();
+    assert_eq!(set_cookie.contains("; Secure;"), !http_test);
+    assert_eq!(set_cookie.starts_with("floe_http_test_"), http_test);
     let s = Session {
         id,
         cookie: h["set-cookie"]
@@ -364,13 +390,19 @@ async fn public_demo_cli_prepares_renders_enforces_caps_and_reaps_on_hup() {
             .into(),
         csrf: v["csrf"].as_str().unwrap().into(),
     };
+    let session_headers = || {
+        let mut h = headers();
+        h.insert("cookie", s.cookie.parse().unwrap());
+        h.insert("x-floe-csrf", s.csrf.parse().unwrap());
+        h
+    };
     assert_eq!(
         Server::request_at(
             addr,
             &f.0,
             "POST",
             &s.path("/view"),
-            s.headers(),
+            session_headers(),
             json!({"width":2048,"height":2048})
         )
         .await
@@ -383,7 +415,7 @@ async fn public_demo_cli_prepares_renders_enforces_caps_and_reaps_on_hup() {
             &f.0,
             "POST",
             &s.path("/view"),
-            s.headers(),
+            session_headers(),
             json!({"width":96,"height":64})
         )
         .await
@@ -393,7 +425,7 @@ async fn public_demo_cli_prepares_renders_enforces_caps_and_reaps_on_hup() {
     let mut req = format!("ws://{addr}{}", s.path("/stream"))
         .into_client_request()
         .unwrap();
-    for (k, v) in s.headers() {
+    for (k, v) in session_headers() {
         if let Some(k) = k {
             if k != "x-floe-csrf" {
                 req.headers_mut().insert(k, v);
@@ -428,6 +460,40 @@ async fn public_demo_cli_prepares_renders_enforces_caps_and_reaps_on_hup() {
         }
         assert_eq!(v["type"], "snapshot");
     }
+    // Exercise the exact read-only UI band command through the real public
+    // transport and native renderer, not just the standalone navigation DTO.
+    let span = |f: &Value| {
+        f["bbox_dbu"][2].as_str().unwrap().parse::<f64>().unwrap()
+            - f["bbox_dbu"][0].as_str().unwrap().parse::<f64>().unwrap()
+    };
+    let mut previous = f1;
+    for (i, outward) in [false, true].into_iter().enumerate() {
+        let seq = (3 + 2 * i).to_string();
+        let end_x = if outward { 0.25 } else { 0.75 };
+        send(&mut ws,json!({"type":"view.set","seq":seq,"connection_epoch":hello["connection_epoch"],"view_id":s.id,
+            "base_state_rev":previous["state_rev"],"body":{"navigation":{"kind":"band","start":[0.5,0.25],
+            "end":[end_x,0.75],"axes":[true,true],"outward":outward}}})).await;
+        loop {
+            let Message::Text(t) = next(&mut ws).await else {
+                panic!("band acceptance required")
+            };
+            let v: Value = serde_json::from_str(&t).unwrap();
+            if v["type"] == "accepted" {
+                assert_eq!(v["seq"], seq);
+                break;
+            }
+            assert_eq!(v["type"], "snapshot", "{v}");
+        }
+        let (next, png) = frame(&mut ws).await;
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(next["complete"], true);
+        assert_eq!(next["render_key"], previous["render_key"]);
+        assert_ne!(next["render_rev"], previous["render_rev"]);
+        assert_eq!(span(&next) > span(&previous), outward);
+        assert_ne!(span(&next), span(&previous));
+        ack(&mut ws, &hello, &next, (4 + 2 * i) as u32).await;
+        previous = next;
+    }
     assert_eq!(
         files(&f.0.join("data")),
         before,
@@ -449,6 +515,10 @@ async fn public_demo_cli_prepares_renders_enforces_caps_and_reaps_on_hup() {
         sleep(Duration::from_millis(20)).await;
     }
     let text = fs::read_to_string(log).unwrap();
+    assert_eq!(
+        text.contains("WARNING: HTTP demo test mode is unencrypted"),
+        http_test
+    );
     assert!(
         !text.contains(PROXY)
             && !text.contains(s.csrf.as_str())

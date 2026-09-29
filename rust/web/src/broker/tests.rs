@@ -88,7 +88,7 @@ fn session(b: &Broker, user: &str, now: Instant) -> (Launch, HeaderMap, Access) 
         "cookie",
         format!(
             "{}={}",
-            cookie_name(&launch.id).unwrap(),
+            cookie_name(&launch.id, true).unwrap(),
             credentials.cookie.expose()
         )
         .parse()
@@ -379,6 +379,7 @@ fn unredeemed_launch_expiry_revoke_and_invalid_construction_fail_closed() {
     }
     let mut c = f.config(4);
     c.deployment = Deployment::PublicDemo {
+        allow_insecure_http: false,
         data_root: f.0.join("data"),
         samples: vec![floe_app_core::server::Sample {
             id: "demo".into(),

@@ -3,14 +3,20 @@ use axum::{
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
-pub(super) fn demo() -> Response {
+fn transport(html: &str, http_test: bool) -> String {
+    html.replace("@@HTTP_TEST@@", if http_test { "true" } else { "false" })
+}
+pub(super) fn demo(http_test: bool) -> Response {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!(concat!(env!("OUT_DIR"), "/demo.html")),
+        transport(
+            include_str!(concat!(env!("OUT_DIR"), "/demo.html")),
+            http_test,
+        ),
     )
         .into_response()
 }
-pub(super) fn page(id: &str) -> Response {
+pub(super) fn page(id: &str, http_test: bool) -> Response {
     if id.len() != 64
         || !id
             .bytes()
@@ -21,7 +27,10 @@ pub(super) fn page(id: &str) -> Response {
     // Contains neither dataset metadata nor a credential; API auth is separate.
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!(concat!(env!("OUT_DIR"), "/server.html")),
+        transport(
+            include_str!(concat!(env!("OUT_DIR"), "/server.html")),
+            http_test,
+        ),
     )
         .into_response()
 }

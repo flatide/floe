@@ -3,7 +3,8 @@
 2026-09-29, `feature/webui`. **TeeBox는 Electron standalone을 유지한다.** 이 문서는
 별도 공개 샘플을 로그인 없이 탐색하는 홈페이지 데모만 다룬다. TeeBox 위임 인증·개인
 작업 파일 서비스·Electron 원격 연결은 재개하지 않는다. 실제 인터넷 공개, 인증서 설치,
-방화벽·nginx 변경은 이 구현 과정에서 하지 않았다.
+방화벽·nginx/Caddy 변경은 이 구현 과정에서 하지 않았다.
+HTTPS가 기본이며 내부망 HTTP 시험만 아래 명시적 opt-in으로 허용한다.
 
 ## 구성과 제공 범위
 
@@ -17,6 +18,14 @@
 
 지원: pan·zoom·fit·goto·depth·detail·thin·frames·labels·mono, PNG 화면 전송,
 세션 재접속과 자기 세션 종료. 로그인/브라우저 설치 확장이 필요 없다.
+캔버스에서 좌/중 버튼 드래그는 pan, 우 버튼 드래그는 zoom band다. 오른쪽 방향은 확대,
+왼쪽 방향은 축소이며 release에서 한 번 제출한다. Escape는 취소하고 canvas의 브라우저
+context menu는 막는다. 현재 프레임이 표시되기 전/이전 화면 대기 중에는 band를 받지 않는다.
+줌·자유 pan처럼 이전 프레임의 정확한 16px 위상 배치가 불가능한 경우에도, 같은 세션·연결·
+데이터 revision·worker·render policy의 **이미 표시된 화면**은 새 프레임까지 유지한다.
+상태줄은 `Previous image · waiting for current frame`으로 구별하며 이를 현재 프레임으로
+승인하거나 stale 수신 프레임을 새로 표시하지 않는다. 연결 해제·hidden·로그아웃·정책/데이터
+변경에서는 비운다. pan release의 마지막 미리보기도 유지하되 no-op/거부 시 원래 뷰로 복원한다.
 현재는 **기본 데모 UI**이며 전체 Electron UI의 레이어 패널·셀 트리·측정·pick/snap은
 이 경로에 연결하지 않았다. 큰 DPR 화면은 내부 렌더 해상도를 제한해 표시한다.
 
@@ -39,6 +48,7 @@ cargo build --offline --locked --release -j 4 -p floe-app -p floe-index -p floe-
 관리자가 [demo.example.json](../tools/web-service/demo.example.json)을 복사·편집한다.
 예제의 `data_root`, `runtime_root`는 먼저 만들어져 있어야 하며 서로 포함되면 안 된다.
 `public_origin`은 경로·끝 slash 없는 정확한 HTTPS origin, 예: `https://demo.company.com`.
+아래 HTTP 시험 opt-in에서만 `http://`를 사용한다.
 `max_sessions`는 **1~4**다. 샘플 ID는 ASCII 영문/숫자/`_`/`-` 1~64자이며 UI에 그대로
 표시한다. `source`는 data_root 아래 상대경로다. jobdeck TC 의존 파일도 root 안이어야 한다.
 TeeBox의 실칩 공용 root를 데모 root로 지정하지 않는다.
@@ -125,6 +135,62 @@ iframe은 CSP `frame-ancestors 'none'`/X-Frame-Options DENY로 차단한다. 새
 프록시 예제는 데모/세션 경로만 전달하고 나머지는 404로 닫는다. 쿠키/인증 header/응답 body를
 access/debug log에 기록하지 않는다. 실제 공개·인증서·방화벽 설정은 별도 운영 작업이다.
 
+## 내부망 HTTP 시험 (Caddy, 명시적 opt-in)
+
+공인 서브도메인·인증서 없이도 **Caddy의 내부망 HTTP 포트 → loopback Rust**로
+동일한 읽기 전용 데모를 시험할 수 있다. 일반 HTTPS와 TeeBox/standalone 인증 정책은
+바뀌지 않는다. 기존 인덱스를 재준비할 필요는 없다.
+
+**HTTP에는 암호화·전송 무결성이 없다.** 화면·샘플 이름·일회용 접속권·세션 cookie/CSRF를
+내부망의 공격자가 도청하거나 변조할 수 있다. 공개 승인 샘플만 사용하고, 관리자 승인된
+시험망으로 Caddy bind/방화벽/접속 대역을 제한한다. 설정의 hostname/IP가 실제 내부망인지
+Floe2가 DNS 조회 등으로 판정하지 않는다. `allow_insecure_http`는 인터넷 공개 허가가 아니다.
+
+1. [HTTP JSON 예제](../tools/web-service/demo-http-test.example.json)를 참고해 기존
+   `demo.json`의 `public_origin`을 `http://실제서버내부IP:8080`으로 바꾸고,
+   **`deployment` 안에** `"allow_insecure_http": true`를 추가한다. 생략/false는 HTTPS만
+   허용한다. true인데 HTTPS origin이면 설정 오류로 거부한다. TeeBox mode에는 이 필드가 없다.
+2. root/runtime/샘플 경로는 기존의 실제 경로를 유지한다. `--check-config` 결과에서
+   `insecure_http_test:true`를 확인한다. `runtime_ready:false`는 여전히 정상이다.
+3. Rust 실행은 기존 명령 그대로다. `--port 58080`을 유지하고 재시작한다.
+   `WARNING: HTTP demo test mode is unencrypted`와 `HTTP test proxy required`를 출력한다.
+4. [Caddy HTTP 예제](../tools/web-service/demo-http-test.Caddyfile)의 IP와 허용 client subnet을
+   현장에 맞춰 바꾼다. **사이트 수신 포트는 8080, `reverse_proxy` 대상만 58080**이다.
+   기존 `floe-demo.company.com:58080 { ... }` 같은 충돌 블록은 비활성화하고 다른 회사 사이트는
+   그대로 둔다. Rust 포트를 외부에 노출하지 않는다.
+5. [비공개 Caddy include 예제](../tools/web-service/demo.proxy-headers.example.caddy)는
+   `/etc/caddy/floe-demo-proxy.caddy`로 준비한다. Rust 키와 같은 값을 사용하고, 관리자/Caddy
+   실행 계정만 읽게 한다. Rust `proxy.key`는 계속 Rust 실행 UID 소유의 0600/0400이다.
+6. 아래 검사에 성공한 경우만 기존 Caddy service를 reload한다. 회사 Caddy가 container/별도
+   호스트라면 `127.0.0.1`의 의미가 달라지므로 예제를 그대로 사용하지 않는다.
+
+```sh
+/opt/floe2/bin/floe2-web server --check-config /etc/floe2-demo/demo.json
+/opt/floe2/bin/floe2-web server --demo /etc/floe2-demo/demo.json \
+  --proxy-key-file /etc/floe2-demo/proxy.key --port 58080
+# 별도 터미널: validate 성공 후에만 reload
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl reload caddy
+```
+
+브라우저에서 **`http://실제서버내부IP:8080/demo`**를 연다. 인증서 설치·SSH 터널은 필요
+없으며 지정한 origin과 주소·포트가 정확히 같아야 한다. HSTS가 걸린 회사 도메인은 브라우저가
+HTTPS로 올릴 수 있으므로 내부 IP 사용을 권한다. 원래 cookie를 Caddy에서 수정하거나 Origin을
+덮어쓰지 않는다. `X-Floe-Proxy-Key`는 외부 값을 신뢰하지 않고 private include로 덮어쓴다.
+
+HTTP 모드에서는 `floe_http_test_<id>`라는 별도 host-only cookie를 사용하고 Secure 속성만
+뺀다. HttpOnly/SameSite=Strict·세션별 경로·수명·CSRF·일회용 교환·proxy proof·정확한
+Host/Origin 검사는 그대로다. HTTPS는 기존 `__Secure-floe_server_<id>`/Secure를 유지한다.
+UI는 서버가 응답에 넣은 HTTP 시험 표식을 확인하며 경고를 표시하고 `ws://`로 연결한다.
+HTTPS 모드는 표식이 false이며 `wss://`다. 프록시 header/query로 transport를 변경할 수 없다.
+
+검증 근거: [Caddy reverse_proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy),
+[Caddy bind](https://caddyserver.com/docs/caddyfile/directives/bind),
+[Set-Cookie/Secure prefix](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie).
+내부 HTTP opt-in은 전송 보안의 예외이지 읽기/쓰기 권한 확장이 아니다. 실제 사내망·방화벽·
+현장 브라우저 수용은 별도다. HTTPS로 돌아갈 때는 flag를 제거하고 origin/Caddy를 함께 바꾼 뒤
+새 세션을 연다. 서비스 재시작 시 이전 세션은 유효하지 않다.
+
 ## 자원·세션 제한
 
 | 항목 | 기본/상한 |
@@ -159,3 +225,21 @@ HTTPS 프록시 증명은 테스트 header로 모사하므로 실제 TLS/nginx/�
 ALL OK (`server_runtime` native 11건 포함).
 관련 세 패키지 `cargo clippy --offline --locked -j 4 --all-targets --no-deps` 통과;
 의존 tiler/vfs의 기존 unused/dead-code 경고는 남고 이 변경의 새 경고는 없었다.
+
+2026-09-29 HTTP 시험 opt-in 추가 검증: server 정책/secret 14, web 단위 150,
+broker HTTP 8, HTTPS proxy 3, 권한 inventory 3, 정책 CLI 3 통과. `server_runtime`은
+HTTP/HTTPS 각각의 CLI 준비·실제 PNG WebSocket·상한 거부·SIGHUP 회수를 포함해 12건 통과.
+`sh tools/validate_rust.sh --only server_runtime,app_cli,web_cli_inventory,web_ui` ALL OK.
+관련 세 패키지 clippy 통과(기존 의존 경고만 유지). Caddy 2.11.4에서 새 HTTP 예제를
+합성 proxy key로 `caddy validate`하여 통과했다. 실제 Caddy 프록시 경유 브라우저·사내망
+접속은 아직 검증하지 않았고 운영 설정·인증서·방화벽을 변경하지 않았다.
+
+2026-09-29 데모 입력/화면 유지 회귀: `server.test.cjs`에서 우 버튼 band 확대·축소,
+Escape/blur/state 변경 취소, letterbox 좌표, 좌/중 버튼 13px pan release, no-op/거부 복원,
+버튼/키/휠 줌 대기 화면 유지와 stale 패킷 폐기, render policy/worker/dataset 변경 및
+hidden/연결 해제/로그아웃 화면 정리를 고정했다. 전체 `validate_web_ui.cjs` 통과.
+`server_runtime` 12건도 통과했고 HTTP/HTTPS 데모 CLI 두 경로에 실제 band 명령 →
+native PNG·bbox 확대/축소·render revision 변경·공용 인덱스 불변 검사를 추가했다.
+이는 합성/loopback 검증이며 수정 후 회사 브라우저에서의 실제 마우스 수용 검사는 별도다.
+UI가 실행 파일에 내장되므로 배포에는 `floe2-web` 재빌드·교체·재시작 후 `/demo`에서
+새 세션 열기가 필요하다. 이 변경에 재인덱싱이나 프록시 설정 변경은 필요 없다.

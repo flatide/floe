@@ -3,6 +3,7 @@
     'use strict';
     function bind(o){
         const doc=o.document,status=doc.getElementById('demo-status'),list=doc.getElementById('demo-samples');
+        const transport=doc.querySelector('meta[name="floe-http-test"]'),httpTest=!!transport&&transport.content==='true';
         const buttons=[];let busy=false;
         function request(method,path,body){return new Promise(function(resolve,reject){
             const x=new o.XHR();x.open(method,path,true);x.timeout=10000;
@@ -22,7 +23,8 @@
             }catch(e){status.textContent=e.message+' An interrupted launch expires after 30 seconds.';
                 busy=false;buttons.forEach(function(b){b.disabled=false;});}
         }
-        async function start(){try{if(o.location.protocol!=='https:'){throw Error('Open this demo using its HTTPS address.');}
+        async function start(){try{if(o.location.protocol!==(httpTest?'http:':'https:')){throw Error('Open this demo using its configured '+(httpTest?'HTTP test':'HTTPS')+' address.');}
+            doc.getElementById('transport-warning').hidden=!httpTest;
             const v=await request('GET','/api/v1/demo/samples');
             if(!Array.isArray(v.samples)||!v.samples.length||v.samples.length>32||new Set(v.samples).size!==v.samples.length||
                 v.samples.some(function(id){return typeof id!=='string'||!/^[A-Za-z0-9_-]{1,64}$/.test(id);})){throw Error('Invalid sample list.');}

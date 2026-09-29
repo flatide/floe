@@ -39,6 +39,19 @@ impl Origin {
     pub fn websocket_url(&self) -> String {
         self.url.replacen("http", "ws", 1)
     }
+    /// Only the explicit demo-test policy may call this. Exact Host/Origin and
+    /// loopback checks remain mandatory; only transport encryption is omitted.
+    pub(crate) fn for_http_test_proxy(
+        addr: SocketAddr,
+        public: &str,
+    ) -> Result<Self, &'static str> {
+        Self::for_listener(addr)?;
+        let canonical = floe_app_core::server::HttpTestOrigin::parse(public)?;
+        Ok(Self {
+            authority: canonical.authority().into(),
+            url: public.to_owned(),
+        })
+    }
     pub fn host_matches(&self, headers: &HeaderMap) -> bool {
         single(headers, header::HOST.as_str()) == Some(self.authority.as_str())
     }
@@ -79,6 +92,28 @@ pub fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn http_test_proxy_never_accepts_forwarding_headers_as_authority() {
+        let addr = "127.0.0.1:58080".parse().unwrap();
+        let o = Origin::for_http_test_proxy(addr, "http://10.0.0.10:8080").unwrap();
+        assert!(!o.is_https());
+        assert_eq!(o.websocket_url(), "ws://10.0.0.10:8080");
+        let mut h = HeaderMap::new();
+        h.insert("host", "10.0.0.10:8080".parse().unwrap());
+        h.insert("origin", "http://10.0.0.10:8080".parse().unwrap());
+        assert!(o.host_matches(&h) && o.origin_matches(&h, true));
+        h.insert("origin", "https://10.0.0.10:8080".parse().unwrap());
+        assert!(!o.origin_matches(&h, true));
+        h.insert("host", "evil.test".parse().unwrap());
+        h.insert("x-forwarded-host", "10.0.0.10:8080".parse().unwrap());
+        assert!(!o.host_matches(&h));
+        assert!(Origin::for_http_test_proxy(
+            "0.0.0.0:58080".parse().unwrap(),
+            "http://10.0.0.10:8080"
+        )
+        .is_err());
+        assert!(Origin::for_https_proxy(addr, "http://10.0.0.10:8080").is_err());
+    }
     #[test]
     fn proxy_origin_is_explicit_canonical_https_and_never_a_public_listener() {
         let local = "127.0.0.1:58080".parse().unwrap();

@@ -199,8 +199,12 @@ impl Broker {
         client_id: String,
         lifetimes: Lifetimes,
     ) -> Result<Self> {
-        let origin =
-            Origin::for_https_proxy(addr, policy.public_origin()).map_err(|_| Error::Invalid)?;
+        let origin = if policy.http_test() {
+            Origin::for_http_test_proxy(addr, policy.public_origin())
+        } else {
+            Origin::for_https_proxy(addr, policy.public_origin())
+        }
+        .map_err(|_| Error::Invalid)?;
         let proxy = Secret::parse(proxy_key).ok_or(Error::Invalid)?;
         if delegator.as_ref().is_some_and(|key| proxy.matches(key))
             || lifetimes.bootstrap.is_zero()
@@ -375,7 +379,8 @@ impl Broker {
     }
     pub fn authorize(&self, id: &str, headers: &HeaderMap, now: Instant) -> Result<Access> {
         self.boundary(headers, false)?;
-        let cookie = origin::cookie(headers, &cookie_name(id)?).ok_or(Error::Unauthorized)?;
+        let cookie = origin::cookie(headers, &cookie_name(id, self.origin.is_https())?)
+            .ok_or(Error::Unauthorized)?;
         let csrf = origin::single(headers, "x-floe-csrf").ok_or(Error::Unauthorized)?;
         let mut state = self.lock()?;
         sweep(&mut state, now);
@@ -581,9 +586,26 @@ fn sweep(state: &mut State, now: Instant) {
         entry.auth.is_some() || entry.worker.is_some()
     });
 }
-fn cookie_name(id: &str) -> Result<String> {
+fn cookie_name(id: &str, https: bool) -> Result<String> {
     Secret::parse(id).ok_or(Error::Unauthorized)?;
-    Ok(format!("__Secure-floe_server_{id}"))
+    // A Secure-prefixed cookie is not usable on an ordinary LAN HTTP origin.
+    // Separate namespaces also prevent accepting HTTPS credentials via HTTP.
+    let prefix = if https {
+        "__Secure-floe_server_"
+    } else {
+        "floe_http_test_"
+    };
+    Ok(format!("{prefix}{id}"))
+}
+impl Broker {
+    fn cookie_header(&self, id: &str, value: &str, max_age: u64) -> Result<String> {
+        let secure = if self.origin.is_https() {
+            "; Secure"
+        } else {
+            ""
+        };
+        Ok(format!("{}={value}; Path=/api/v1/server/sessions/{id}{secure}; HttpOnly; SameSite=Strict; Max-Age={max_age}", cookie_name(id, self.origin.is_https())?))
+    }
 }
 fn source_stamp(path: &Path) -> Result<[u64; 7]> {
     let m = fs::metadata(path).map_err(|_| Error::Invalid)?;

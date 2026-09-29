@@ -120,6 +120,7 @@ fn anonymous_demo_is_a_sample_allowlist_not_a_browser_path_or_writer() {
     let f = Fixture::new();
     let mut c = f.config();
     c.deployment = Deployment::PublicDemo {
+        allow_insecure_http: false,
         data_root: f.0.join("data"),
         samples: vec![Sample {
             id: "demo1".into(),
@@ -152,6 +153,44 @@ fn anonymous_demo_is_a_sample_allowlist_not_a_browser_path_or_writer() {
         samples.push(samples[0].clone());
     }
     assert!(c.validate().is_err());
+}
+#[test]
+fn http_demo_requires_opt_in_and_does_not_grant_teebox_or_write_authority() {
+    let f = Fixture::new();
+    let mut c = f.config();
+    c.public_origin = "http://10.0.0.10:8080".into();
+    assert!(c.clone().validate().is_err());
+    c.deployment = Deployment::PublicDemo {
+        data_root: f.0.join("data"),
+        samples: vec![Sample {
+            id: "demo1".into(),
+            source: "synthetic.oas".into(),
+        }],
+        allow_insecure_http: false,
+    };
+    assert!(c.clone().validate().is_err());
+    if let Deployment::PublicDemo {
+        allow_insecure_http,
+        ..
+    } = &mut c.deployment
+    {
+        *allow_insecure_http = true;
+    }
+    let p = c.clone().validate().unwrap();
+    assert!(p.http_test() && p.allows(Action::View));
+    assert!(!p.allows(Action::RequestIndex) && !p.allows(Action::WriteReview));
+    assert!(p.principal("teebox", "alice").is_err());
+    c.public_origin = "https://example.test".into();
+    assert!(
+        c.validate().is_err(),
+        "HTTP opt-in must not silently change HTTPS policy"
+    );
+    let mut v = serde_json::to_value(f.config()).unwrap();
+    v["deployment"]["allow_insecure_http"] = serde_json::json!(true);
+    assert!(
+        serde_json::from_value::<Config>(v).is_err(),
+        "TeeBox cannot opt into HTTP"
+    );
 }
 #[test]
 fn strict_bounded_config_reader_has_no_password_or_unknown_options() {

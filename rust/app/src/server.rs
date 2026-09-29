@@ -1,5 +1,5 @@
 //! Explicit operator commands. TeeBox serving remains deferred; public demos
-//! are separate from standalone authority and bind loopback behind HTTPS.
+//! are separate from standalone authority and bind loopback behind a proxy.
 mod demo;
 use floe_app_core::{
     server::{Action, Config, Deployment},
@@ -23,7 +23,11 @@ contains no credentials, paths or delegated user identities.
 --prepare-demo explicitly builds/publishes immutable indexes for every configured
 sample (default 4 jobs). This is an operator write, never a browser action.
 --demo requires public_demo mode, ready revision sets and max_sessions <= 4.
-It listens only on 127.0.0.1 behind the configured HTTPS proxy. The private key
+It listens only on 127.0.0.1 behind the configured proxy (HTTPS by default).
+Public demos may opt into unencrypted LAN testing with deployment.allow_insecure_http
+set to true and an explicit http:// public_origin. Restrict proxy ingress to the
+trusted test network; no network range or firewall is configured automatically.
+The private key
 file must be owned by this user, mode 0600/0400, with 64 lowercase hex digits.
 No TLS/certificates/firewall changes are made. TeeBox serving remains deferred.
 Standalone is unchanged. See docs/WEBUI_WEBSITE_DEMO.ko.md.";
@@ -129,9 +133,10 @@ fn report(config: Config) -> Result<Value> {
     };
     Ok(json!({"schema":1, "check":"server-policy", "valid":true,
         "runtime_ready":false, "mode":validated.mode(),
+        "insecure_http_test":validated.http_test(),
         "max_sessions":policy.max_sessions, "demo_samples":samples,
         "allowed_actions":actions, "index_policy":index,
-        "checks":["schema", "https_origin_spelling", "existing_disjoint_roots", "demo_source_scope"],
+        "checks":["schema", "public_origin_transport_policy", "existing_disjoint_roots", "demo_source_scope"],
         "not_checked":["authentication", "tls", "filesystem_permissions", "ready_indexes", "runtime_limits"]}))
 }
 pub fn run(command: Command, stop: &Arc<AtomicUsize>) -> Result<i32> {

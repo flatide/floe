@@ -110,18 +110,25 @@ impl Server {
         Self::start_mode(false).await
     }
     async fn start_mode(demo: bool) -> Self {
+        Self::start_transport(demo, false).await
+    }
+    async fn start_transport(demo: bool, http_test: bool) -> Self {
         let fixture = Fixture::new();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let mut config = fixture.config();
         if demo {
             config.deployment = floe_app_core::server::Deployment::PublicDemo {
+                allow_insecure_http: http_test,
                 data_root: fixture.0.join("data"),
                 samples: vec![floe_app_core::server::Sample {
                     id: "sample1".into(),
                     source: "synthetic.oas".into(),
                 }],
             };
+        }
+        if http_test {
+            config.public_origin = "http://10.0.0.10:8080".into();
         }
         let policy = config.validate().unwrap();
         let broker = Arc::new(if demo {
@@ -246,10 +253,105 @@ impl Server {
 }
 
 #[tokio::test]
+async fn http_demo_keeps_proxy_origin_csrf_and_read_only_boundaries() {
+    let s = Server::start_transport(true, true).await;
+    let h = vec![
+        ("Host", "10.0.0.10:8080"),
+        ("Origin", "http://10.0.0.10:8080"),
+        ("X-Floe-Proxy-Key", PROXY),
+        ("Content-Type", "application/json"),
+    ];
+    for route in ["/demo", &format!("/server/{}", "a".repeat(64))] {
+        let r = s.request("GET", route, &h, "").await;
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("name=\"floe-http-test\" content=\"true\""));
+        assert!(!r.body.contains("@@HTTP_TEST@@"));
+        assert!(
+            r.headers["content-security-policy"].contains("connect-src 'self' ws://10.0.0.10:8080")
+        );
+    }
+    for (name, value) in [
+        ("Host", "evil.test"),
+        ("Origin", "https://10.0.0.10:8080"),
+        ("X-Floe-Proxy-Key", "wrong"),
+    ] {
+        let mut bad = h.clone();
+        bad.iter_mut().find(|(k, _)| *k == name).unwrap().1 = value;
+        assert_eq!(
+            s.request(
+                "POST",
+                "/api/v1/demo/launches",
+                &bad,
+                r#"{"sample_id":"sample1"}"#
+            )
+            .await
+            .status,
+            403
+        );
+    }
+    let mut direct = h.clone();
+    direct.retain(|(k, _)| *k != "X-Floe-Proxy-Key");
+    assert_eq!(s.request("GET", "/demo", &direct, "").await.status, 403);
+    let r = s
+        .request(
+            "POST",
+            "/api/v1/demo/launches",
+            &h,
+            r#"{"sample_id":"sample1"}"#,
+        )
+        .await;
+    assert_eq!(r.status, 201);
+    let launch: Value = serde_json::from_str(&r.body).unwrap();
+    let id = launch["launch_id"].as_str().unwrap();
+    let exchange = format!("{}/exchange", path(id));
+    let body = json!({"bootstrap":launch["bootstrap"]}).to_string();
+    let r = s.request("POST", &exchange, &h, &body).await;
+    assert_eq!(r.status, 200);
+    let credentials: Value = serde_json::from_str(&r.body).unwrap();
+    let cookie = &r.headers["set-cookie"];
+    assert!(cookie.starts_with("floe_http_test_"));
+    assert!(!cookie.contains("Secure") && !cookie.contains("Domain="));
+    assert!(cookie.contains("HttpOnly; SameSite=Strict"));
+    assert!(cookie.contains(&format!("Path={};", path(id))));
+    assert_eq!(s.request("POST", &exchange, &h, &body).await.status, 401);
+    let mut auth = h.clone();
+    auth.push(("Cookie", cookie.split(';').next().unwrap()));
+    assert_eq!(s.request("GET", &path(id), &auth, "").await.status, 401);
+    auth.push(("X-Floe-CSRF", credentials["csrf"].as_str().unwrap()));
+    assert_eq!(s.request("GET", &path(id), &auth, "").await.status, 200);
+    let renamed =
+        cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .replacen("floe_http_test_", "__Secure-floe_server_", 1);
+    let mut wrong = auth.clone();
+    wrong.iter_mut().find(|(k, _)| *k == "Cookie").unwrap().1 = &renamed;
+    assert_eq!(s.request("GET", &path(id), &wrong, "").await.status, 401);
+    for route in [
+        "/api/v1/catalog",
+        "/api/v1/operations",
+        "/api/v1/exports",
+        "/api/v1/drc/review/notes",
+    ] {
+        assert_eq!(s.request("GET", route, &auth, "").await.status, 404);
+    }
+    assert_eq!(s.request("POST", LAUNCH, &auth, "{}").await.status, 401);
+    let logout = s.request("DELETE", &path(id), &auth, "").await;
+    assert_eq!(logout.status, 204);
+    let expired = &logout.headers["set-cookie"];
+    assert!(expired.starts_with(&format!("floe_http_test_{id}=;")));
+    assert!(expired.contains("Max-Age=0") && !expired.contains("Secure"));
+    assert_eq!(s.request("GET", &path(id), &auth, "").await.status, 401);
+    s.shutdown().await;
+}
+
+#[tokio::test]
 async fn public_demo_only_accepts_ids_and_keeps_session_authority_isolated() {
     let s = Server::start_mode(true).await;
     let r = s.request("GET", "/demo", &headers(), "").await;
     assert_eq!(r.status, 200);
+    assert!(r.body.contains("name=\"floe-http-test\" content=\"false\""));
     assert!(r.body.contains("demo.js") && !r.body.contains("@@BUNDLE@@"));
     assert!(r.headers["content-security-policy"].contains("frame-ancestors 'none'"));
     let r = s

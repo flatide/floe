@@ -6,7 +6,7 @@ mod origin;
 pub mod secret;
 use crate::{Error, Result};
 pub use config::{Config, Deployment, IndexPolicy, Sample, ValidatedConfig};
-pub use origin::HttpsOrigin;
+pub use origin::{HttpTestOrigin, HttpsOrigin};
 use serde::{Deserialize, Serialize};
 
 /// Login client and delegated subject are different identities. A trusted

@@ -5,11 +5,12 @@
         const win=o.window,doc=o.document,P=o.protocol,el=function(id){return doc.getElementById('server-'+id);};
         const match=/^\/server\/([0-9a-f]{64})$/.exec(o.location.pathname),id=match?match[1]:'';
         const bundle=doc.querySelector('meta[name="floe-bundle"]').content;
+        const transport=doc.querySelector('meta[name="floe-http-test"]'),httpTest=!!transport&&transport.content==='true';
         const base='/api/v1/server/sessions/'+id,key='floe-server-session:'+o.location.origin+':'+id;
         const canvas=el('canvas'),port=el('viewport'),ctx=canvas.getContext('2d',{alpha:false});
         const inputs=['fit','in','out','depth','detail','thin','frames','labels','mono','x','y','width','go'];
         let auth=null,socket=null,hello=null,state=null,seq='0',serial=0,started=false,stopped=false,hidden=false,joining=false;
-        let fresh=false,unopened=false,publicDemo=false,flight=null,accepted=null,queue=[],decode=null,raf=null,image=null,shift=null,gesture=null;
+        let fresh=false,unopened=false,publicDemo=false,flight=null,accepted=null,queue=[],decode=null,raf=null,image=null,shift=null,gesture=null,releasedPan=false;
         let retryTimer=null,flushTimer=null,resizeTimer=null,connectTimer=null,editTimer=null,ping=null,observer=null,delay=500,lastSend=-Infinity,received=0;
         const requests=new Set(),now=o.now||function(){return win.performance.now();};
         function status(text){el('status').textContent=text;}
@@ -19,7 +20,7 @@
         function controls(){inputs.forEach(function(n){el(n).disabled=!ready()||(n==='labels'&&state.capabilities.labels!==true);});
             el('reconnect').disabled=stopped||!auth||joining||hidden;el('leave').disabled=stopped||!auth;
             el('open').hidden=!unopened;el('open').disabled=stopped||hidden||joining||!auth;}
-        function clear(){image=null;canvas.width=canvas.height=1;el('empty').hidden=false;el('frame-status').textContent='No displayed frame';}
+        function clear(){image=null;shift=null;releasedPan=false;canvas.width=canvas.height=1;el('empty').hidden=false;el('frame-status').textContent='No displayed frame';}
         function timerClear(name){if(name!==null){win.clearTimeout(name);}return null;}
         function disconnect(){serial++;joining=false;const old=socket;socket=null;hello=state=null;flight=accepted=null;queue=[];
             requests.forEach(function(x){if(!x.exchange){x.abort();}});
@@ -52,12 +53,23 @@
             if(socket.bufferedAmount>16384||new TextEncoder().encode(text).length>8192){throw Error('Input limit');}
             seq=next;socket.send(text);return seq;}
         function ack(h){send({type:'frame.ack',connection_epoch:hello.connection_epoch,frame_id:h.frame_id});}
-        function compose(){if(!state){return;}canvas.width=state.pixels[0];canvas.height=state.pixels[1];ctx.imageSmoothingEnabled=false;
-            ctx.fillStyle='#000';ctx.fillRect(0,0,canvas.width,canvas.height);const p=image&&(P.matches(image.header,state)?[0,0]:P.placement(image.header,state));
-            el('empty').hidden=!!p;if(p){ctx.drawImage(image.canvas,-p[0]-(shift||[0,0])[0],-p[1]-(shift||[0,0])[1]);}
-            if(state.failure){el('frame-status').textContent=(p?'Last image':'No displayed frame')+' · renderer failed';}
-            else if(!p){el('frame-status').textContent='No displayed frame';}
-            else if(!P.matches(image.header,state)){el('frame-status').textContent='Previous image · waiting for current frame';}}
+        function compose(){if(!state){return;}
+            const same=image&&['view_id','connection_epoch','dataset_revision','worker_epoch','render_key'].every(function(k){return image.header[k]===state[k];});
+            if(!same||state.status==='closed'){clear();return;}
+            const exact=P.matches(image.header,state),p=exact?[0,0]:P.placement(image.header,state);
+            // placement is an exact raster-phase contract, not a condition for
+            // retaining pixels already displayed in this session. Zoom and a
+            // non-16px pan freeze the last composite until its replacement;
+            // they must never turn it into a current receipt or query target.
+            if(p&&!releasedPan){
+                canvas.width=state.pixels[0];canvas.height=state.pixels[1];ctx.imageSmoothingEnabled=false;
+                ctx.fillStyle='#000';ctx.fillRect(0,0,canvas.width,canvas.height);
+                ctx.drawImage(image.canvas,-p[0]-(shift||[0,0])[0],-p[1]-(shift||[0,0])[1]);
+            }
+            el('empty').hidden=true;
+            if(state.failure){el('frame-status').textContent='Last image · renderer failed';}
+            else if(!exact||releasedPan){el('frame-status').textContent='Previous image · waiting for current frame';}
+            else {const h=image.header;el('frame-status').textContent=(h.complete?'Complete':'Partial / incomplete')+(h.approximate?' · approximate':'')+' · '+h.width+' × '+h.height+' px';}}
         function frame(data,token){const packet=P.packet(data),h=packet.header;
             if(!hello||h.connection_epoch!==hello.connection_epoch||h.view_id!==id||h.purpose!=='foreground'||h.query){throw Error('Wrong server frame identity');}
             if(decode||raf!==null){throw Error('Frame credit exceeded');}if(!ready()||!P.matches(h,state)){ack(h);return;}
@@ -67,7 +79,7 @@
                 if(!draw||!ready()||!P.matches(h,state)){ack(h);return;}
                 try{draw(next.getContext('2d',{alpha:false}));}catch(_){lost('Canvas failed; reconnecting.');return;}
                 raf=win.requestAnimationFrame(function(){raf=null;if(token!==serial||stopped||hidden){return;}
-                    try{if(ready()&&P.matches(h,state)){image={header:h,canvas:next};compose();el('frame-status').textContent=(h.complete?'Complete':'Partial / incomplete')+(h.approximate?' · approximate':'')+' · '+h.width+' × '+h.height+' px';}ack(h);}
+                    try{if(ready()&&P.matches(h,state)){image={header:h,canvas:next};compose();}ack(h);}
                     catch(_){lost('Presentation failed; reconnecting.');}
                 });
             });decode=job;job.start();
@@ -82,7 +94,7 @@
         }
         function sync(){['depth','detail','thin'].forEach(function(k){if(doc.activeElement!==el(k)){el(k).value=state[k];}});
             ['frames','labels','mono'].forEach(function(k){el(k).checked=state[k];});}
-        function settle(){if(accepted&&state&&P.compare(state.state_rev,accepted)>=0){accepted=null;}if(!flight&&!accepted){editTimer=timerClear(editTimer);}flush();}
+        function settle(){if(accepted&&state&&P.compare(state.state_rev,accepted)>=0){accepted=null;if(releasedPan){releasedPan=false;shift=null;compose();}}if(!flight&&!accepted){editTimer=timerClear(editTimer);}flush();}
         function flush(){if(!ready()||flight||accepted||!queue.length){return;}const wait=100-(now()-lastSend);
             if(wait>0){if(flushTimer===null){flushTimer=win.setTimeout(function(){flushTimer=null;flush();},wait);}return;}
             const body=queue.shift();try{flight=send({type:'view.set',connection_epoch:hello.connection_epoch,view_id:id,base_state_rev:state.state_rev,body:body});lastSend=now();
@@ -97,10 +109,10 @@
                     hello=v;connectTimer=timerClear(connectTimer);delay=500;controls();return;}
                 if(!hello){throw Error('Missing handshake');}
                 if(v.type==='opening'){if(v.view_id!==id||v.connection_epoch!==hello.connection_epoch){throw Error('Wrong opening identity');}status('Opening assigned layout…');return;}
-                if(v.type==='snapshot'){validate(v);if(gesture&&state&&state.state_rev!==v.state_rev){gesture.cancel();}state=v;
+                if(v.type==='snapshot'){validate(v);if(state&&state.state_rev!==v.state_rev){if(gesture){gesture.cancel();}releasedPan=false;shift=null;}state=v;
                     if(v.failure){queue=[];}sync();compose();controls();settle();resized();status(v.failure?'Renderer failed; end this session and request a new launch.':'Connected · '+v.status);return;}
                 if(v.type==='accepted'){if(!flight||v.seq!==flight){throw Error('Wrong acknowledgment');}P.counter(v.state_rev);flight=null;accepted=v.state_rev;settle();return;}
-                if(v.type==='error'){if(!flight||v.seq!==flight){throw Error('Wrong error response');}flight=null;queue=[];accepted=null;editTimer=timerClear(editTimer);status('View edit rejected; check current state before trying again.');return;}
+                if(v.type==='error'){if(!flight||v.seq!==flight){throw Error('Wrong error response');}flight=null;queue=[];accepted=null;releasedPan=false;shift=null;compose();editTimer=timerClear(editTimer);status('View edit rejected; check current state before trying again.');return;}
                 if(v.type==='pong'){return;}throw Error('Unknown server message');
             }catch(_){stop('Invalid server protocol; reload with a compatible client.',false);}
         }
@@ -119,7 +131,7 @@
                     fresh=false;const p=dimensions();await request('POST','/view',{width:p[0],height:p[1]});if(token!==serial||stopped||hidden){return;}
                 }else if(!['opening','snapshot'].includes(view.type)){throw Error('Invalid view response');}
                 fresh=false;
-                const ws=new o.WebSocket(o.location.origin.replace(/^https:/,'wss:')+base+'/stream',['floe-server-v1','bundle.'+bundle,'csrf.'+auth.csrf]);
+                const ws=new o.WebSocket(o.location.origin.replace(/^http/,'ws')+base+'/stream',['floe-server-v1','bundle.'+bundle,'csrf.'+auth.csrf]);
                 socket=ws;seq='0';ws.binaryType='arraybuffer';ws.onmessage=function(e){incoming(e,token);};
                 received=now();connectTimer=win.setTimeout(function(){connectTimer=null;if(token===serial){lost('Connection handshake timed out; checking session.');}},10000);
                 ws.onerror=function(){if(token===serial){status('Server connection unavailable.');}};
@@ -132,7 +144,8 @@
         function resized(){resizeTimer=timerClear(resizeTimer);if(!ready()){return;}resizeTimer=win.setTimeout(function(){resizeTimer=null;if(!ready()){return;}
             try{const p=dimensions();if(p[0]===state.pixels[0]&&p[1]===state.pixels[1]){return;}edit({pixels:p});}catch(e){status(e.message);}},120);}
         async function start(){if(started){return;}started=true;const fragment=o.location.hash;
-            try{if(fragment){o.history.replaceState(null,'',o.location.pathname);}if(!id||o.location.protocol!=='https:'||!ctx){throw Error('Open the HTTPS server session link.');}
+            try{if(fragment){o.history.replaceState(null,'',o.location.pathname);}if(!id||o.location.protocol!==(httpTest?'http:':'https:')||!ctx){throw Error('Open the configured '+(httpTest?'HTTP test':'HTTPS')+' server session link.');}
+                doc.getElementById('transport-warning').hidden=!httpTest;
                 if(/^#bootstrap=[0-9a-f]{64}$/.test(fragment)){
                     remove();const a=await request('POST','/exchange',{bootstrap:fragment.slice(11)});if(stopped){return;}
                     if(!valid(a)||!a.viewer_ready||!a.render_transport){throw Error('Server viewer unavailable.');}auth=a;fresh=true;
@@ -152,17 +165,27 @@
         ['depth','detail','thin'].forEach(function(k){el(k).onchange=function(){const value=el(k).value;if(k==='depth'&&!/^(full|[0-9]{1,3})$/.test(value)){status('Depth must be full or an integer.');return;}const p={};p[k]=value;edit(p);};});
         ['frames','labels','mono'].forEach(function(k){el(k).onchange=function(){const p={};p[k]=el(k).checked;edit(p);};});
         el('go').onclick=function(){try{const n={kind:'goto',center_um:[P.decimal(el('x').value),P.decimal(el('y').value)]};if(el('width').value){n.width_um=P.decimal(el('width').value);if(Number(n.width_um)<=0){throw Error('Width must be positive');}}nav(n);}catch(e){status(e.message);}};
-        port.addEventListener('keydown',function(e){if(e.isComposing||e.keyCode===229||e.ctrlKey||e.metaKey||e.altKey||!ready()){return;}const step=e.shiftKey?0.1:0.5;
+        port.addEventListener('keydown',function(e){if(e.isComposing||e.keyCode===229){return;}
+            if(e.key==='Escape'&&gesture&&gesture.active()){e.preventDefault();gesture.cancel();return;}
+            if(e.ctrlKey||e.metaKey||e.altKey||!ready()){return;}const step=e.shiftKey?0.1:0.5;
             const dirs={ArrowLeft:[-step,0],ArrowRight:[step,0],ArrowUp:[0,step],ArrowDown:[0,-step]};
             if(dirs[e.key]){e.preventDefault();nav({kind:'pan',x:dirs[e.key][0],y:dirs[e.key][1],snap:true});}
             else if(['+','=','-','Home'].includes(e.key)){e.preventDefault();nav(e.key==='Home'?{kind:'fit'}:{kind:'zoom',factor:e.key==='-'?1.25:0.8});}
         });
         function screen(){const r=port.getBoundingClientRect(),scale=Math.min(r.width/state.pixels[0],r.height/state.pixels[1]);
             return {pixels:state.pixels,dpr:1/scale,left:(r.width-state.pixels[0]*scale)/2,top:(r.height-state.pixels[1]*scale)/2};}
-        if(o.gestures){gesture=o.gestures.bind({window:win,document:doc,viewport:port,ready:function(){return ready()&&!flight&&!accepted&&!queue.length;},
+        if(o.gestures){gesture=o.gestures.bind({window:win,document:doc,viewport:port,ready:function(){return ready()&&!!image&&P.matches(image.header,state)&&!flight&&!accepted&&!queue.length;},
             stamp:function(){return state&&hello.connection_epoch+':'+state.state_rev;},dimensions:screen,
             requestAnimationFrame:win.requestAnimationFrame.bind(win),cancelAnimationFrame:win.cancelAnimationFrame.bind(win),
-            preview:function(p){shift=p;compose();},cursor:function(d){port.style.cursor=d?'grabbing':'';},pan:nav});
+            preview:function(p,paint){shift=p;releasedPan=!paint;if(paint){compose();}},
+            band:nav,bandReady:function(){return !!image&&P.matches(image.header,state);},notice:status,
+            bandPreview:function(b){
+                const box=el('zoom-band'),hint=el('zoom-band-hint');box.hidden=hint.hidden=!b;if(!b){return;}
+                const d=b.dimensions,x=b.start[0]*d.pixels[0],y=b.start[1]*d.pixels[1],ex=b.end[0]*d.pixels[0],ey=b.end[1]*d.pixels[1];
+                box.style.left=((d.left||0)+Math.round(Math.min(x,ex))/d.dpr)+'px';box.style.top=((d.top||0)+Math.round(Math.min(y,ey))/d.dpr)+'px';
+                box.style.width=(Math.max(1,Math.round(Math.abs(ex-x)))/d.dpr)+'px';box.style.height=(Math.max(1,Math.round(Math.abs(ey-y)))/d.dpr)+'px';
+                box.style.borderWidth=(1/d.dpr)+'px';hint.textContent=(b.outward?'Zoom out':'Zoom in')+' · release to apply · Esc cancels';
+            },cursor:function(d){port.style.cursor=d?(gesture&&gesture.bandActive()?'crosshair':'grabbing'):'';},pan:nav});
             port.addEventListener('wheel',function(e){e.preventDefault();if(!ready()||flight||accepted||queue.length){return;}const n=o.gestures.wheelNavigation(e,screen(),port.getBoundingClientRect());if(n){nav(n);}},{passive:false});}
         function pause(){hidden=true;disconnect();status('Hidden · disconnected. Reconnecting does not replay input.');}
         function resume(){hidden=!!doc.hidden;if(!hidden&&!stopped){join();}}

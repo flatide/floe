@@ -1,0 +1,4 @@
+# PRIVATE Caddy include used inside reverse_proxy. Restrict readers to the
+# administrator and Caddy service. Keep it outside web roots and source control.
+# Use the SAME key as the Rust --proxy-key-file (not this placeholder).
+header_up X-Floe-Proxy-Key "REPLACE_WITH_PRIVATE_64_LOWERCASE_HEX"

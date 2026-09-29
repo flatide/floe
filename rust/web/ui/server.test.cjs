@@ -6,6 +6,7 @@ const auth={launch_id:id,csrf:'f'.repeat(64),bundle,protocol:'floe-server-v1',vi
 const origin='https://service.example.test',base='/api/v1/server/sessions/'+id,key='floe-server-session:'+origin+':'+id;
 const tick=()=>new Promise(r=>setImmediate(r));
 function environment(options={}) {
+    const origin=options.http?'http://10.0.0.10:8080':'https://service.example.test';
     const id=options.id||'a'.repeat(64),auth={launch_id:id,csrf:'f'.repeat(64),bundle,protocol:'floe-server-v1',viewer_ready:true,render_transport:true};
     const base='/api/v1/server/sessions/'+id,key='floe-server-session:'+origin+':'+id;
     const nodes=new Map(),events={},requests=[],sockets=[],timers=new Map(),rafs=new Map(),reads=[],deferred=[],holds=[];
@@ -14,19 +15,21 @@ function environment(options={}) {
     let number=0,clock=10000,opened=!!options.resume,code=200,confirm=true,doc;
     class Element {
         constructor(){this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.style={};this.listeners={};this.width=this.height=1;}
+        get width(){return this._width;}set width(v){this._width=v;this.resets=(this.resets||0)+1;this.pixels=new Uint8ClampedArray((this._width||1)*(this._height||1)*4);}
+        get height(){return this._height;}set height(v){this._height=v;this.resets=(this.resets||0)+1;this.pixels=new Uint8ClampedArray((this._width||1)*(this._height||1)*4);}
         getContext(){const self=this;return {fillRect(){self.pixels=new Uint8ClampedArray(self.width*self.height*4);},putImageData(i){self.pixels=i.data.slice();},
-            drawImage(i,x=0,y=0){if(x===0&&y===0){self.pixels=i.pixels.slice();}self.blits=(self.blits||0)+1;}};}
+            drawImage(i,x=0,y=0){if(x===0&&y===0){self.pixels=i.pixels.slice();}self.blits=(self.blits||0)+1;self.lastBlit=[x||0,y||0];}};}
         getBoundingClientRect(){return {width:options.width||64,height:options.height||32,left:0,top:0};}focus(){doc.activeElement=this;}
         addEventListener(k,f){this.listeners[k]=f;}
     }
     const el=k=>{if(!nodes.has(k)){nodes.set(k,new Element());}return nodes.get(k);};
     function listen(k,f){const old=events[k];events[k]=old?e=>{old(e);f(e);}:f;}
-    doc={hidden:false,activeElement:null,querySelector:()=>({content:bundle}),getElementById:el,createElement:()=>new Element(),addEventListener:listen};
+    doc={hidden:false,activeElement:null,querySelector:s=>s==='meta[name="floe-http-test"]'?(options.httpTest===undefined?null:{content:String(options.httpTest)}):{content:bundle},getElementById:el,createElement:()=>new Element(),addEventListener:listen};
     function timer(f,ms,interval=false){timers.set(++number,{f,ms,interval});return number;}
     const win={devicePixelRatio:1,performance:{now:()=>clock},sessionStorage:{getItem(k){reads.push(k);return storage.get(k)||null;},setItem(k,v){if(options.noStorage){throw Error('denied');}storage.set(k,v);},removeItem(k){storage.delete(k);}},
         setTimeout:timer,clearTimeout:n=>timers.delete(n),setInterval:(f,ms)=>timer(f,ms,true),clearInterval:n=>timers.delete(n),
         requestAnimationFrame:f=>{rafs.set(++number,f);return number;},cancelAnimationFrame:n=>rafs.delete(n),addEventListener:listen,confirm:()=>confirm};
-    const location={origin,protocol:'https:',pathname:'/server/'+id,hash:options.resume?'':options.hash===undefined?'#bootstrap='+secret:options.hash};
+    const location={origin,protocol:options.http?'http:':'https:',pathname:'/server/'+id,hash:options.resume?'':options.hash===undefined?'#bootstrap='+secret:options.hash};
     const history={replaceState(a,b,path){assert.equal(path,location.pathname);location.hash='';}};
     function state(extra={}){return {type:'snapshot',view_id:id,connection_epoch:epoch,state_rev:'1',render_rev:'1',render_key:'1',dataset_revision:'1',worker_epoch:'1',
         bbox_dbu:['0','0','64','32'],pixels:[64,32],depth:'full',detail:'high',thin:'auto',labels:true,frames:true,mono:false,status:'idle',failure:null,
@@ -47,7 +50,7 @@ function environment(options={}) {
         }
     }
     class WS {
-        constructor(url,protocols){assert.equal(url,'wss://service.example.test'+base+'/stream');assert.deepEqual(protocols,['floe-server-v1','bundle.'+bundle,'csrf.'+auth.csrf]);this.sent=[];this.readyState=1;this.bufferedAmount=0;sockets.push(this);}
+        constructor(url,protocols){assert.equal(url,(options.http?'ws://10.0.0.10:8080':'wss://service.example.test')+base+'/stream');assert.deepEqual(protocols,['floe-server-v1','bundle.'+bundle,'csrf.'+auth.csrf]);this.sent=[];this.readyState=1;this.bufferedAmount=0;sockets.push(this);}
         send(text){this.sent.push(JSON.parse(text));}close(){this.readyState=3;}text(v){this.onmessage({data:JSON.stringify(v)});}binary(extra={}){this.onmessage({data:packet({view_id:id,...extra})});}
     }
     const c=Client.bind({window:win,document:doc,location,history,protocol:P,XHR,WebSocket:WS,now:()=>clock,gestures:require('./gestures.js'),
@@ -60,6 +63,11 @@ function environment(options={}) {
 }
 module.exports={environment};
 if(require.main===module)(async()=>{
+    const http=environment({http:true,httpTest:true,demo:true});await http.c.start();assert.equal(http.sockets.length,1);
+    assert.equal(http.doc.getElementById('transport-warning').hidden,false);http.hello();http.sockets[0].binary();http.raf();
+    assert.equal(http.el('empty').hidden,true);http.el('in').onclick();assert.equal(http.sockets[0].sent.at(-1).type,'view.set');
+    http.sockets[0].onclose();http.fire(500);await tick();assert.equal(http.sockets.length,2);await http.el('leave').onclick();
+    for(const options of [{http:true},{http:true,httpTest:false},{httpTest:true}]){const bad=environment(options);await bad.c.start();assert.equal(bad.requests.length,0);assert.equal(bad.sockets.length,0);assert.equal(bad.location.hash,'');}
     const demo=environment({demo:true,width:7680,height:4320});await demo.c.start();
     const px=demo.requests.find(r=>r.method==='POST'&&r.path.endsWith('/view')).body;
     assert(px.width<=2048&&px.height<=2048&&px.width*px.height<=2097152);demo.c.stop();
@@ -98,5 +106,85 @@ if(require.main===module)(async()=>{
     const handshake=environment();await handshake.c.start();handshake.fire(10000);assert.equal(handshake.sockets[0].readyState,3);handshake.fire(500);await tick();assert.equal(handshake.sockets.length,2);handshake.c.stop();
     const noReply=environment();await noReply.c.start();noReply.hello();noReply.el('in').onclick();
     noReply.fire(10000,false);assert.equal(noReply.sockets[0].readyState,3);noReply.fire(500);await tick();noReply.hello(noReply.sockets[1],'9'.repeat(64));assert.equal(noReply.sockets[1].sent.length,0);noReply.c.stop();
+    // Navigation keeps only pixels already presented within the same render
+    // policy/session. A stale packet still cannot be newly decoded/presented.
+    async function displayed(options={}){const h=environment(options);await h.c.start();h.hello();h.sockets[0].binary();h.raf();return h;}
+    const pointer=(x,y,button=0,buttons=1)=>({clientX:x,clientY:y,button,buttons,preventDefault(){}});
+    const zoomBounds=['6.4','3.2','57.6','28.8'];
+    for(const input of ['in','out','+','-','wheel']){
+        const h=await displayed(),s=h.sockets[0],c=h.el('canvas'),pixels=c.pixels.slice(),resets=c.resets;
+        if(input==='wheel'){h.el('viewport').listeners.wheel({...pointer(32,16,0,0),deltaY:-1,deltaMode:0});}
+        else if(input==='+'||input==='-'){h.el('viewport').listeners.keydown({key:input,preventDefault(){}});}
+        else{h.el(input).onclick();}
+        const edit=s.sent.at(-1);assert.equal(edit.body.navigation.kind,'zoom');
+        s.text({type:'accepted',seq:edit.seq,state_rev:'2'});
+        s.text(h.state({state_rev:'2',render_rev:'2',bbox_dbu:zoomBounds,status:'rendering'}));
+        assert.equal(h.el('empty').hidden,true,input);assert.equal(c.resets,resets,input+' cleared the canvas');assert.deepEqual(c.pixels,pixels);
+        assert.match(h.el('frame-status').textContent,/Previous image.*waiting/);
+        s.binary();h.raf();assert.equal(c.resets,resets,'stale packet replaced retained pixels');
+        s.binary({state_rev:'2',render_rev:'2',bbox_dbu:zoomBounds});h.raf();assert(c.resets>resets);
+        assert.match(h.el('frame-status').textContent,/^Complete/);h.c.stop();assert.equal(c.width,1);
+    }
+    for(const button of [0,1]){
+        const h=await displayed(),s=h.sockets[0],c=h.el('canvas'),v=h.el('viewport'),mask=button===0?1:4;
+        v.listeners.mousedown(pointer(8,8,button,mask));h.events.mousemove(pointer(21,8,button,mask));h.raf();
+        assert.deepEqual(c.lastBlit,[13,0]);h.events.mouseup(pointer(21,8,button,0));
+        const edit=s.sent.at(-1),resets=c.resets,blits=c.blits;
+        assert.deepEqual(c.lastBlit,[13,0],'release recentered preview');
+        s.text(h.state({status:'rendering'}));assert.equal(c.resets,resets,'old snapshot erased pending pan');
+        s.text({type:'accepted',seq:edit.seq,state_rev:'2'});
+        const moved={state_rev:'2',render_rev:'2',bbox_dbu:['-13','0','51','32']};
+        s.text(h.state({...moved,status:'rendering'}));assert.equal(c.resets,resets);assert.equal(c.blits,blits);
+        assert.equal(h.el('empty').hidden,true);assert.match(h.el('frame-status').textContent,/Previous image/);
+        s.binary(moved);h.raf();assert.deepEqual(c.lastBlit,[0,0]);assert.match(h.el('frame-status').textContent,/^Complete/);h.c.stop();
+    }
+    for(const outcome of ['noop','reject']){
+        const h=await displayed(),s=h.sockets[0],c=h.el('canvas');
+        h.el('viewport').listeners.mousedown(pointer(8,8));h.events.mouseup(pointer(21,8,0,0));
+        assert.deepEqual(c.lastBlit,[13,0]);const edit=s.sent.at(-1);
+        s.text(outcome==='noop'?{type:'accepted',seq:edit.seq,state_rev:'1'}:{type:'error',seq:edit.seq});
+        assert.deepEqual(c.lastBlit,[0,0]);assert.equal(h.el('empty').hidden,true);h.c.stop();
+    }
+    const snapped=await displayed(),sn=snapped.sockets[0];
+    snapped.el('viewport').listeners.keydown({key:'ArrowLeft',preventDefault(){}});
+    const snEdit=sn.sent.at(-1);assert.equal(snEdit.body.navigation.snap,true);
+    sn.text({type:'accepted',seq:snEdit.seq,state_rev:'2'});sn.text(snapped.state({state_rev:'2',render_rev:'2',bbox_dbu:['-32','0','32','32']}));
+    assert.deepEqual(snapped.el('canvas').lastBlit,[32,0]);snapped.c.stop();
+    for(const change of [{dataset_revision:'2'},{worker_epoch:'2'},{render_key:'2'},{status:'closed'}]){
+        const h=await displayed(),s=h.sockets[0];s.text(h.state({state_rev:'2',render_rev:'2',bbox_dbu:zoomBounds}));assert.equal(h.el('empty').hidden,true);
+        s.text(h.state({state_rev:'3',...change}));assert.equal(h.el('canvas').width,1);assert.equal(h.el('empty').hidden,false);
+        s.text(h.state({state_rev:'4'}));assert.equal(h.el('empty').hidden,false,'cleared image resurfaced');h.c.stop();
+    }
+    for(const lifecycle of ['hide','disconnect','logout']){
+        const h=await displayed(),s=h.sockets[0];s.text(h.state({state_rev:'2',render_rev:'2',bbox_dbu:zoomBounds}));
+        if(lifecycle==='hide'){h.doc.hidden=true;h.events.visibilitychange();}else if(lifecycle==='disconnect'){s.onclose();}else{await h.el('leave').onclick();}
+        assert.equal(h.el('canvas').width,1);assert.equal(h.el('empty').hidden,false);h.c.stop();
+    }
+    for(const outward of [false,true]){
+        const h=await displayed(),s=h.sockets[0],v=h.el('viewport');let prevented=false;
+        v.listeners.contextmenu({preventDefault(){prevented=true;}});assert(prevented,'native image menu not suppressed');
+        v.listeners.mousedown(pointer(32,8,2,2));h.events.mousemove(pointer(outward?16:48,24,2,2));h.raf();
+        assert.equal(h.el('zoom-band').hidden,false);assert.equal(v.style.cursor,'crosshair');assert.equal(h.el('zoom-band').style.width,'16px');
+        assert.match(h.el('zoom-band-hint').textContent,outward?/Zoom out/:/Zoom in/);assert.equal(s.sent.length,1,'band edited before release');
+        h.events.mouseup(pointer(outward?16:48,24,2,0));
+        assert.deepEqual(s.sent.at(-1).body.navigation,{kind:'band',start:[0.5,0.25],end:[outward?0.25:0.75,0.75],axes:[true,true],outward});
+        assert.equal(h.el('zoom-band').hidden,true);h.c.stop();
+    }
+    for(const cancel of ['Escape','blur','snapshot']){
+        const h=await displayed(),s=h.sockets[0],v=h.el('viewport');v.listeners.mousedown(pointer(8,8,2,2));h.events.mousemove(pointer(24,24,2,2));h.raf();
+        if(cancel==='Escape'){
+            v.listeners.keydown({key:'Escape',isComposing:true,preventDefault(){assert.fail('IME Escape intercepted');}});assert.equal(h.el('zoom-band').hidden,false);
+            v.listeners.keydown({key:'Escape',preventDefault(){}});
+        }else if(cancel==='blur'){h.events.blur();}else{s.text(h.state({state_rev:'2',render_rev:'2'}));}
+        h.events.mouseup(pointer(24,24,2,0));assert.equal(s.sent.length,1,'cancelled band submitted');assert.equal(h.el('zoom-band').hidden,true);h.c.stop();
+    }
+    const letterbox=await displayed({width:128,height:96}),lb=letterbox.el('viewport');
+    lb.listeners.mousedown(pointer(32,32,2,2));letterbox.events.mousemove(pointer(96,64,2,2));letterbox.raf();
+    assert.equal(letterbox.el('zoom-band').style.top,'32px');assert.equal(letterbox.el('zoom-band').style.left,'32px');
+    letterbox.events.mouseup(pointer(96,64,2,0));assert.deepEqual(letterbox.sockets[0].sent.at(-1).body.navigation,{kind:'band',start:[0.25,0.25],end:[0.75,0.75],axes:[true,true],outward:false});letterbox.c.stop();
+    const unpainted=environment();await unpainted.c.start();unpainted.hello();unpainted.el('viewport').listeners.mousedown(pointer(8,8,2,2));unpainted.events.mouseup(pointer(24,24,2,0));assert.equal(unpainted.sockets[0].sent.length,0);unpainted.c.stop();
+    const oldView=await displayed();oldView.sockets[0].text(oldView.state({state_rev:'2',render_rev:'2',bbox_dbu:zoomBounds}));
+    oldView.el('viewport').listeners.mousedown(pointer(8,8,2,2));oldView.events.mouseup(pointer(24,24,2,0));assert.equal(oldView.sockets[0].sent.length,1,'band used stale display');oldView.c.stop();
+    console.log('WEB SERVER NAVIGATION: ALL OK (band in/out/cancel/letterbox, retained zoom/free pan, no-op/rejection, stale packet and policy/session isolation)');
     console.log('WEB SERVER SESSION: ALL OK (bootstrap, isolated storage, pixels/ACK, serialized edits, reconnect/no replay, open ambiguity, hidden exchange, revoke/logout)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

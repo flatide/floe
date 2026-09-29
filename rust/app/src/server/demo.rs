@@ -96,6 +96,10 @@ pub(super) fn prepare(path: &Path, jobs: usize, lod: bool, stop: &Arc<AtomicUsiz
 }
 pub(super) fn serve(path: &Path, key: &Path, port: u16, stop: &Arc<AtomicUsize>) -> Result<()> {
     let config = policy(path)?;
+    let http_test = config.http_test();
+    if http_test {
+        eprintln!("WARNING: HTTP demo test mode is unencrypted. Restrict the proxy to a trusted internal network; use approved samples only.");
+    }
     let key = read_proxy_key(key)?;
     let resources = resources()?;
     for id in samples(&config) {
@@ -136,7 +140,8 @@ pub(super) fn serve(path: &Path, key: &Path, port: u16, stop: &Arc<AtomicUsize>)
         );
         let runtime = Runtime::new(broker, resources, options)
             .map_err(|_| Error::input("cannot configure public demo renderer"))?;
-        eprintln!("public demo ready: {url} (loopback {addr}; HTTPS proxy required)");
+        let transport = if http_test { "HTTP test" } else { "HTTPS" };
+        eprintln!("public demo ready: {url} (loopback {addr}; {transport} proxy required)");
         broker::serve_runtime(listener, runtime, async {
             while stop.load(Ordering::Relaxed) == 0 {
                 tokio::time::sleep(Duration::from_millis(100)).await;

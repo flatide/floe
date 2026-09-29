@@ -49,7 +49,7 @@ async fn demo_page(State(host): State<Host>) -> Response {
     if !host.broker.is_public_demo() {
         return StatusCode::NOT_FOUND.into_response();
     }
-    super::assets::demo()
+    super::assets::demo(host.broker.policy.http_test())
 }
 async fn demo_samples(State(host): State<Host>) -> Response {
     match host.broker.demo_samples() {
@@ -94,8 +94,8 @@ async fn demo_launch(
         Err(_) => error(Error::Unavailable),
     }
 }
-async fn server_page(RoutePath(id): RoutePath<String>) -> Response {
-    super::assets::page(&id)
+async fn server_page(State(host): State<Host>, RoutePath(id): RoutePath<String>) -> Response {
+    super::assets::page(&id, host.broker.policy.http_test())
 }
 async fn server_asset(RoutePath((bundle, name)): RoutePath<(String, String)>) -> Response {
     super::assets::asset(&bundle, &name)
@@ -205,12 +205,13 @@ async fn exchange(
                 Json(json!({"launch_id":id,"csrf":credentials.csrf.expose(),"viewer_ready":host.runtime.is_some(),
                     "render_transport":host.runtime.is_some(),"protocol":stream::PROTOCOL,"bundle":crate::transport::BUNDLE}))
                     .into_response();
-            let cookie = format!(
-                "{}={}; Path=/api/v1/server/sessions/{id}; Secure; HttpOnly; SameSite=Strict; Max-Age={}",
-                cookie_name(&id).expect("issued ID"),
-                credentials.cookie.expose(),
-                b.lifetimes.session.as_secs()
-            );
+            let cookie = b
+                .cookie_header(
+                    &id,
+                    &credentials.cookie.expose(),
+                    b.lifetimes.session.as_secs(),
+                )
+                .expect("issued ID");
             response.headers_mut().insert(
                 "set-cookie",
                 HeaderValue::from_str(&cookie).expect("fixed hex credentials"),
@@ -243,11 +244,8 @@ async fn logout(
             let mut response = StatusCode::NO_CONTENT.into_response();
             response.headers_mut().insert(
                 "set-cookie",
-                HeaderValue::from_str(&format!(
-                    "{}=; Path=/api/v1/server/sessions/{id}; Secure; HttpOnly; SameSite=Strict; Max-Age=0",
-                    cookie_name(&id).expect("authenticated ID")
-                ))
-                .unwrap(),
+                HeaderValue::from_str(&b.cookie_header(&id, "", 0).expect("authenticated ID"))
+                    .unwrap(),
             );
             response
         }

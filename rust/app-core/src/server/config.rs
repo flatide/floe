@@ -1,4 +1,4 @@
-use super::{identifier, Action, HttpsOrigin, Principal};
+use super::{identifier, Action, HttpTestOrigin, HttpsOrigin, Principal};
 use crate::{registered::AccessScope, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -35,6 +35,9 @@ pub enum Deployment {
     PublicDemo {
         data_root: PathBuf,
         samples: Vec<Sample>,
+        /// LAN testing only; never inferred from an incoming forwarding header.
+        #[serde(default)]
+        allow_insecure_http: bool,
     },
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -101,7 +104,17 @@ impl Config {
     /// Read-only preflight: no directory creation, source parsing, index build,
     /// credential access, listener, migration or deletion.
     pub fn validate(self) -> Result<ValidatedConfig> {
-        HttpsOrigin::parse(&self.public_origin).map_err(Error::input)?;
+        if matches!(
+            self.deployment,
+            Deployment::PublicDemo {
+                allow_insecure_http: true,
+                ..
+            }
+        ) {
+            HttpTestOrigin::parse(&self.public_origin).map_err(Error::input)?;
+        } else {
+            HttpsOrigin::parse(&self.public_origin).map_err(Error::input)?;
+        }
         if self.version != 1 || self.max_sessions == 0 || self.max_sessions > 32 {
             return Err(Error::input(
                 "server config version must be 1 and max_sessions 1..32",
@@ -121,7 +134,9 @@ impl Config {
                 index.validate()?;
                 (root(shared_root)?, Some(root(work_root)?))
             }
-            Deployment::PublicDemo { data_root, samples } => {
+            Deployment::PublicDemo {
+                data_root, samples, ..
+            } => {
                 if samples.is_empty() || samples.len() > 32 {
                     return Err(Error::input("demo requires 1..32 approved samples"));
                 }
@@ -202,6 +217,15 @@ fn relative(value: &str) -> Result<&Path> {
     Ok(path)
 }
 impl ValidatedConfig {
+    pub fn http_test(&self) -> bool {
+        matches!(
+            self.config.deployment,
+            Deployment::PublicDemo {
+                allow_insecure_http: true,
+                ..
+            }
+        )
+    }
     pub fn public_origin(&self) -> &str {
         &self.config.public_origin
     }

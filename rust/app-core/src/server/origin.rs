@@ -6,9 +6,12 @@ pub struct HttpsOrigin {
 }
 impl HttpsOrigin {
     pub fn parse(value: &str) -> Result<Self, &'static str> {
+        Self::parse_scheme(value, "https", 443)
+    }
+    fn parse_scheme(value: &str, scheme: &str, default_port: u16) -> Result<Self, &'static str> {
         let authority = value
-            .strip_prefix("https://")
-            .ok_or("public origin requires https://")?;
+            .strip_prefix(&format!("{scheme}://"))
+            .ok_or("public origin scheme does not match the configured transport policy")?;
         if authority.is_empty()
             || authority.len() > 300
             || !authority.is_ascii()
@@ -17,7 +20,7 @@ impl HttpsOrigin {
                 .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
             || authority.contains(['/', '\\', '@', '?', '#', '%'])
         {
-            return Err("public origin must contain only a canonical HTTPS host and optional port");
+            return Err("public origin must contain only a canonical host and optional port");
         }
         let (host, port) = if authority.starts_with('[') {
             let end = authority.find(']').ok_or("invalid public IPv6 authority")?;
@@ -76,11 +79,13 @@ impl HttpsOrigin {
             return Err("public port must be nonzero");
         }
         let canonical = match port {
-            Some(n) if n != 443 => format!("{canonical_host}:{n}"),
+            Some(n) if n != default_port => format!("{canonical_host}:{n}"),
             _ => canonical_host,
         };
         if authority != canonical {
-            return Err("public origin must use canonical lowercase host and port (omit :443)");
+            return Err(
+                "public origin must use canonical lowercase host and port (omit the default port)",
+            );
         }
         Ok(Self {
             authority: canonical,
@@ -94,9 +99,52 @@ impl HttpsOrigin {
     }
 }
 
+/// Explicit unencrypted demo-test origin. This validates spelling, not whether
+/// a hostname/address is on a trusted LAN. The operator must restrict ingress.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpTestOrigin(HttpsOrigin);
+impl HttpTestOrigin {
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        HttpsOrigin::parse_scheme(value, "http", 80).map(Self)
+    }
+    pub fn authority(&self) -> &str {
+        self.0.authority()
+    }
+    pub fn url(&self) -> String {
+        format!("http://{}", self.authority())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn http_test_is_explicit_and_canonical_with_its_own_default_port() {
+        for value in [
+            "http://10.0.0.10:8080",
+            "http://localhost",
+            "http://[::1]:8080",
+            "http://test.example:443",
+        ] {
+            assert_eq!(HttpTestOrigin::parse(value).unwrap().url(), value);
+            assert!(HttpsOrigin::parse(value).is_err());
+        }
+        for value in [
+            "https://test.example",
+            "http://test.example:80",
+            "http://test.example:080",
+            "http://TEST",
+            "http://user@test",
+            "http://127.1",
+            "http://0.0.0.0",
+            "http://test/",
+            "http://test?x",
+            "http://test#x",
+            "http://test:0",
+        ] {
+            assert!(HttpTestOrigin::parse(value).is_err(), "{value}");
+        }
+    }
     #[test]
     fn canonical_origin_not_a_request_url() {
         for value in [

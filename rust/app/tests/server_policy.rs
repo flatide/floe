@@ -84,6 +84,7 @@ fn check_config_is_read_only_and_never_claims_a_ready_service() {
         assert_eq!(report["mode"], mode);
         assert_eq!(report["valid"], true);
         assert_eq!(report["runtime_ready"], false);
+        assert_eq!(report["insecure_http_test"], false);
         assert!(!String::from_utf8(out.stdout)
             .unwrap()
             .contains(f.0.to_str().unwrap()));
@@ -94,6 +95,22 @@ fn check_config_is_read_only_and_never_claims_a_ready_service() {
         }
         f.assert_untouched();
     }
+}
+#[test]
+fn http_demo_preflight_is_opt_in_and_read_only() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config["public_origin"] = json!("http://10.0.0.10:8080");
+    config["deployment"] = json!({"mode":"public_demo","data_root":f.0.join("data"),"samples":[{"id":"sample1","source":"synthetic.oas"}]});
+    assert!(!f.run(&config).status.success());
+    config["deployment"]["allow_insecure_http"] = json!(true);
+    let out = f.run(&config);
+    assert!(out.status.success(), "{out:?}");
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["insecure_http_test"], true);
+    assert_eq!(report["allowed_actions"], json!(["view"]));
+    assert_eq!(report["runtime_ready"], false);
+    f.assert_untouched();
 }
 #[test]
 fn invalid_config_fails_without_output_or_side_effects() {
