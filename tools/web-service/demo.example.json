@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "public_origin": "https://demo.example.test",
+  "runtime_root": "/run/floe2-demo",
+  "max_sessions": 4,
+  "deployment": {
+    "mode": "public_demo",
+    "data_root": "/srv/floe2-public-samples",
+    "samples": [ { "id": "valmini", "source": "valmini.oas" } ]
+  }
+}

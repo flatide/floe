@@ -13,7 +13,7 @@ impl Secret {
         getrandom::fill(&mut bytes).map_err(|_| AuthError::Entropy)?;
         Ok(Self(bytes))
     }
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         let bytes = value.as_bytes();
         if bytes.len() != 64 || !bytes.is_ascii() {
             return None;
@@ -29,7 +29,7 @@ impl Secret {
         }
         Some(Self(out))
     }
-    fn matches(&self, other: &Self) -> bool {
+    pub(crate) fn matches(&self, other: &Self) -> bool {
         bool::from(self.0.ct_eq(&other.0))
     }
     /// Only call for the launcher fragment, bootstrap response or Set-Cookie.

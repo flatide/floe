@@ -275,7 +275,11 @@ fn check(actual: &Value, policy: &Value) {
                     "guest",
                     "guest_drc",
                     "guest_explore",
-                    "guest_drc_conditional"
+                    "guest_drc_conditional",
+                    "server_delegate",
+                    "server_bootstrap",
+                    "server_session",
+                    "public_demo"
                 ]
                 .contains(&authority.as_str().unwrap()),
                 "unclassified authority"

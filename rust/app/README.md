@@ -1,5 +1,9 @@
 # floe2-web — Rust 애플리케이션 CLI (개발 중)
 
+회사 홈페이지용 로그인 없는 샘플 데모는 `server --help`와
+[공개 데모 구성 안내](../../docs/WEBUI_WEBSITE_DEMO.ko.md)를 참고한다.
+TeeBox는 기존 Electron standalone 경로를 유지한다.
+
 실행 순서 중심의 문서: [Linux 서버 + PC 브라우저 사용 안내](../../docs/WEBUI_LINUX_USAGE.ko.md).
 SSH 터널·세션 인증·서버 파일 선택·종료/재접속은 이 안내를 먼저 참고한다.
 

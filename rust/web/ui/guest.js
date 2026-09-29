@@ -200,7 +200,7 @@
                 session=s;el('guest-mode').textContent=s.mode==='follow'?'Follow · read-only':'Explore · read-only';
                 if(s.drc&&(!/^[0-9a-f]{64}$/.test(s.drc.id)||typeof s.drc.revision!=='string'||!s.drc.revision||s.drc.revision.length>128)){throw Error('Invalid DRC grant');}
                 el('guest-scope').textContent='Approved layout layers and loaded levels only.'+(s.drc?' The entire named DRC result was separately approved; review notes and writes are excluded.':' DRC results are not shared.');
-                const ws=new o.WebSocket(o.location.origin.replace(/^http:/,'ws:')+base+'/events',['floe.v1','bundle.'+bundle,'guest-csrf.'+auth.csrf]);
+                const ws=new o.WebSocket(o.location.origin.replace(/^http/,'ws')+base+'/events',['floe.v1','bundle.'+bundle,'guest-csrf.'+auth.csrf]);
                 socket=ws;seq='0';ws.binaryType='arraybuffer';ws.onmessage=function(e){incoming(e,token);};ws.onerror=function(){if(token===serial&&!stopped&&!suspended){status('Guest connection unavailable.');}};
                 ws.onclose=function(){if(token!==serial||stopped||suspended){return;}disconnect();status('Disconnected; checking this share before reconnecting…');retry();};
                 ws.onopen=function(){if(token!==serial){ws.close();return;}ping=win.setInterval(function(){if(hello){send({type:'ping'});}},10000);};

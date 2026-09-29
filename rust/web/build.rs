@@ -5,6 +5,12 @@ fn main() {
     let mut hash = Sha1::new();
     for path in [
         "ui/index.html",
+        "ui/server.html",
+        "ui/server.js",
+        "ui/demo.html",
+        "ui/demo.js",
+        "ui/server.css",
+        "src/broker.rs",
         "ui/guest.html",
         "ui/guest.js",
         "ui/guest-drc.js",
@@ -120,7 +126,7 @@ fn main() {
     // The local IPC build fence must also change for dirty launcher/core
     // changes, not just browser assets or the last Git commit. No runtime
     // binary hashing or filesystem traversal on a warm CLI handoff.
-    for dir in ["../app/src", "../app-core/src"] {
+    for dir in ["../app/src", "../app-core/src", "src/broker"] {
         hash_tree(Path::new(dir), &mut hash);
     }
     for path in [
@@ -134,7 +140,13 @@ fn main() {
     }
     let id = format!("{:x}", hash.finalize());
     println!("cargo:rustc-env=FLOE_WEB_BUNDLE={id}");
-    for name in ["index.html", "display.html", "guest.html"] {
+    for name in [
+        "index.html",
+        "display.html",
+        "guest.html",
+        "server.html",
+        "demo.html",
+    ] {
         let html = fs::read_to_string(format!("ui/{name}"))
             .expect("HTML source")
             .replace("@@BUNDLE@@", &id);

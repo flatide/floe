@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="floe-bundle" content="@@BUNDLE@@"><title>floe2 · Server session</title>
+  <link rel="stylesheet" href="/server-assets/@@BUNDLE@@/app.css">
+  <link rel="stylesheet" href="/server-assets/@@BUNDLE@@/server.css">
+  <script defer src="/server-assets/@@BUNDLE@@/protocol.js"></script>
+  <script defer src="/server-assets/@@BUNDLE@@/image-decode.js"></script>
+  <script defer src="/server-assets/@@BUNDLE@@/gestures.js"></script>
+  <script defer src="/server-assets/@@BUNDLE@@/server.js"></script>
+</head><body>
+  <header class="topbar"><div class="brand">floe<span>2</span></div><strong>Server session</strong>
+    <span id="server-status" class="document-title" role="status">Connecting…</span>
+    <button id="server-reconnect" disabled>Reconnect</button><button id="server-leave" disabled>End my session</button>
+    <a id="server-samples" href="/demo" hidden>Samples</a>
+  </header>
+  <div class="workspace">
+    <aside class="sidebar" aria-label="Server view controls">
+      <section><h2>Assigned layout</h2><p id="server-user" class="note"></p>
+        <p class="note">Your view is independent. Shared layout and index files are read-only here.</p>
+        <p class="note">Initial server viewer: no file browsing, indexing, review writes, query or export. These features are not granted by this page.</p>
+        <button id="server-open" hidden disabled>Open assigned layout</button>
+      </section>
+      <section><h2>View</h2>
+        <div class="button-row"><button id="server-fit" disabled>Fit</button><button id="server-in" disabled>+</button><button id="server-out" disabled>−</button></div>
+        <div class="form-row"><label for="server-depth">Depth</label><input id="server-depth" value="full" disabled></div>
+        <div class="form-row"><label for="server-detail">Detail</label><select id="server-detail" disabled><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="exact">Exact · no cut</option></select></div>
+        <div class="form-row"><label for="server-thin">Thin shapes</label><select id="server-thin" disabled><option value="auto">Auto</option><option value="keep">Keep</option><option value="cull">Cull</option></select></div>
+        <label class="check"><input id="server-frames" type="checkbox" disabled> Frames</label>
+        <label class="check"><input id="server-labels" type="checkbox" disabled> Labels</label>
+        <label class="check"><input id="server-mono" type="checkbox" disabled> Mono</label>
+        <h2>Go to (µm)</h2><label for="server-x">X</label><input id="server-x" value="0" disabled>
+        <label for="server-y">Y</label><input id="server-y" value="0" disabled>
+        <label for="server-width">View width (optional)</label><input id="server-width" disabled>
+        <button id="server-go" disabled>Go</button>
+        <p class="note">Canvas: arrow keys pan 50%, Shift + arrows 10%; + / − zoom, Home fits. Left/middle drag pans; wheel zooms about the cursor.</p>
+        <p class="note">A lost connection clears the display. Reconnect restores the server's current view without replaying navigation.</p>
+      </section>
+    </aside>
+    <main id="server-viewport" tabindex="0" aria-label="Assigned layout canvas">
+      <canvas id="server-canvas" width="1" height="1"></canvas>
+      <p id="server-empty">Waiting for an authorized frame…</p>
+    </main>
+  </div>
+  <footer id="server-frame-status" role="status">No displayed frame</footer>
+</body></html>

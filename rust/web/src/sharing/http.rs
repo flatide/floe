@@ -191,11 +191,12 @@ struct Exchange {
 pub(super) fn cookie_name(id: &str) -> String {
     format!("floe_guest_{id}")
 }
-fn set_cookie(response: &mut Response, id: &str, value: &str, seconds: u64) {
+fn set_cookie(response: &mut Response, gate: &Gateway, id: &str, value: &str, seconds: u64) {
     // id/value are validated server-generated hex; never accept a user path.
     let cookie = format!(
-        "{}={value}; Path=/api/v1/guest/{id}; HttpOnly; SameSite=Strict; Max-Age={seconds}",
-        cookie_name(id)
+        "{}={value}; Path=/api/v1/guest/{id}; HttpOnly; SameSite=Strict; Max-Age={seconds}{}",
+        cookie_name(id),
+        gate.secure_cookie_suffix()
     );
     response.headers_mut().insert(
         "set-cookie",
@@ -227,6 +228,7 @@ async fn exchange(
             .into_response();
             set_cookie(
                 &mut response,
+                &gate,
                 &id,
                 &c.cookie.expose(),
                 SESSION_TTL.as_secs(),
@@ -279,7 +281,7 @@ async fn logout(State(gate): State<Gate>, headers: HeaderMap, Path(id): Path<Str
     }) {
         Ok(()) => {
             let mut response = StatusCode::NO_CONTENT.into_response();
-            set_cookie(&mut response, &id, "", 0);
+            set_cookie(&mut response, &gate, &id, "", 0);
             response
         }
         Err(e) => transport::error(e),

@@ -196,6 +196,37 @@ pub struct ViewController {
     configuration: ControllerOptions,
 }
 
+/// Admission before potentially expensive dataset preparation. Owns no child
+/// yet; start transfers the SAME permit to the controller through child reap.
+pub struct ReservedView {
+    resources: Arc<Resources>,
+    options: RenderOptions,
+    configuration: ControllerOptions,
+    permit: Permit,
+}
+impl ReservedView {
+    pub fn start(self, dataset: Arc<ManagedDataset>, initial: ViewState) -> Result<ViewController> {
+        let model = Model::new(&dataset)?;
+        let weak = Arc::downgrade(&dataset);
+        let native_options = self.options.clone();
+        let options = self.options;
+        let mut controller = ViewController::spawn(
+            &self.resources,
+            model,
+            initial,
+            self.permit,
+            self.configuration,
+            move |stop| {
+                let engine = RenderSession::open(&dataset.dataset, options, false, stop)?;
+                Ok((Box::new(engine) as Box<dyn Engine>, Some(dataset)))
+            },
+        )?;
+        controller.dataset = weak;
+        controller.native_options = Some(native_options);
+        Ok(controller)
+    }
+}
+
 /// A dormant replacement owns the SAME reservation, not a second worker slot.
 /// Prepare can fail without stopping the original. Commit is the cutover: the
 /// new engine waits for the original's complete close/drop/reap before opening.
@@ -313,25 +344,20 @@ impl ViewController {
         initial: ViewState,
         configuration: ControllerOptions,
     ) -> Result<Self> {
-        let native_options = options.clone();
-        let model = Model::new(&dataset)?;
+        Self::reserve(resources, options, configuration)?.start(dataset, initial)
+    }
+    pub fn reserve(
+        resources: &Arc<Resources>,
+        options: RenderOptions,
+        configuration: ControllerOptions,
+    ) -> Result<ReservedView> {
         let permit = resources.render(&options)?;
-        let weak = Arc::downgrade(&dataset);
-        let mut controller = Self::spawn(
-            resources,
-            model,
-            initial,
-            permit,
+        Ok(ReservedView {
+            resources: Arc::clone(resources),
+            options,
             configuration,
-            move |stop| {
-                let engine = RenderSession::open(&dataset.dataset, options, false, stop)?;
-                // Keep the cache read lease until after engine close/drop/reap.
-                Ok((Box::new(engine) as Box<dyn Engine>, Some(dataset)))
-            },
-        )?;
-        controller.dataset = weak;
-        controller.native_options = Some(native_options);
-        Ok(controller)
+            permit,
+        })
     }
     pub fn prepare_replacement(
         self: &Arc<Self>,

@@ -20,8 +20,8 @@ use crate::{
     Error, Result,
 };
 pub use controller::{
-    ControllerOptions, DisplayFrame, MarginStatus, Phase, PreparedReplacement, Purpose, Snapshot,
-    ViewController,
+    ControllerOptions, DisplayFrame, MarginStatus, Phase, PreparedReplacement, Purpose,
+    ReservedView, Snapshot, ViewController,
 };
 pub use fill_slots::FillSlotEdit;
 use floe_worker_client::{Layers, RenderRequest, Style};

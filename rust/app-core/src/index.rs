@@ -684,8 +684,8 @@ impl IndexJob {
         Ok(None)
     }
     pub fn cancel(&mut self, signal: i32) -> Result<i32> {
-        if !matches!(signal, libc::SIGINT | libc::SIGTERM) {
-            return Err(Error::input("cancel signal must be SIGINT/SIGTERM"));
+        if !matches!(signal, libc::SIGINT | libc::SIGTERM | libc::SIGHUP) {
+            return Err(Error::input("cancel signal must be SIGINT/SIGTERM/SIGHUP"));
         }
         if let Some(code) = self.finished {
             return Ok(code);

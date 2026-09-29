@@ -26,7 +26,7 @@ function environment(mode='explore',hash='#invite='+secret,grant=false,options={
         setTimeout(f,ms){const n=++timerId;timers.set(n,{f,ms,at:clock+ms});return n;},clearTimeout(n){timers.delete(n);},setInterval(f,ms){const n=++timerId;timers.set(n,{f,ms,at:clock+ms,interval:true});return n;},clearInterval(n){timers.delete(n);},
         requestAnimationFrame(f){const n=++timerId;rafs.set(n,f);return n;},cancelAnimationFrame(n){rafs.delete(n);},addEventListener:listen,
         ResizeObserver:class{constructor(){this.active=false;observers.push(this);}observe(){this.active=true;}disconnect(){this.active=false;}}};
-    const location={origin:'http://127.0.0.1:1234',pathname:'/guest/'+id,hash};
+    const location={origin:options.origin||'http://127.0.0.1:1234',pathname:'/guest/'+id,hash};
     const history={replaceState(a,b,path){assert.equal(path,location.pathname);location.hash='';}};
     class XHR{
         open(method,path){this.method=method;this.path=path;this.headers={};}setRequestHeader(k,v){this.headers[k]=v;}
@@ -57,7 +57,7 @@ function environment(mode='explore',hash='#invite='+secret,grant=false,options={
             if(held>=0){holds.splice(held,1);delayed.push(entry);}else{entry.reply();}}
     }
     class WS{
-        constructor(url,protocols){assert.equal(url,'ws://127.0.0.1:1234/api/v1/guest/'+id+'/events');assert.deepEqual(protocols,['floe.v1','bundle.'+bundle,'guest-csrf.'+auth.csrf]);this.sent=[];this.readyState=1;sockets.push(this);}
+        constructor(url,protocols){assert.equal(url,(location.origin.startsWith('https:')?'wss:':'ws:')+location.origin.slice(location.origin.indexOf('//'))+'/api/v1/guest/'+id+'/events');assert.deepEqual(protocols,['floe.v1','bundle.'+bundle,'guest-csrf.'+auth.csrf]);this.sent=[];this.readyState=1;sockets.push(this);}
         send(text){this.sent.push(JSON.parse(text));}close(){this.readyState=3;}text(v){this.onmessage({data:JSON.stringify(v)});}binary(b){this.onmessage({data:b});}
     }
     const c=Guest.bind({window:win,document:doc,location,history,XHR,WebSocket:WS,protocol:P,now:()=>clock,
@@ -96,6 +96,11 @@ function measureReply(ws,request,point){ws.text({type:'measure.result',seq:reque
         {endpoints_dbu:[request.body.start_dbu,point],delta_um:['10','0'],distance_um:'10'}:null});}
 module.exports={environment,tick,packet,click,measureReply,exactScene,view,epoch,auth,id};
 if(require.main===module)(async()=>{
+    for(const mode of ['follow','explore']){
+        const secure=environment(mode,'#invite='+secret,false,{origin:'https://192.0.2.10:8443'});
+        await secure.c.start();assert.equal(secure.sockets.length,1);secure.hello();
+        assert(secure.storage.has('floe-guest-session:https://192.0.2.10:8443:'+id));secure.c.stop();
+    }
     const invalid=environment('follow','#bootstrap='+secret);await invalid.c.start();assert.equal(invalid.requests.length,0);assert.equal(invalid.storage.get('floe-session:http://127.0.0.1:1234'),'OWNER');
     for(const mode of ['follow','explore']){
         const e=environment(mode);await e.c.start();const ws=e.sockets[0];e.hello();ws.text(e.state());

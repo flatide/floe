@@ -1,5 +1,4 @@
-//! Strict literal loopback origin. Proxy/TLS/public binding requires a
-//! separate deployment policy, not X-Forwarded-* headers from the caller.
+//! Fixed listener/public origin. Request forwarding headers never select it.
 use axum::http::{header, HeaderMap};
 use std::net::SocketAddr;
 #[derive(Debug, Clone)]
@@ -23,6 +22,22 @@ impl Origin {
     }
     pub fn authority(&self) -> &str {
         &self.authority
+    }
+    /// An administrator-selected HTTPS origin behind a same-host proxy.
+    /// Keep the Rust socket on loopback; TLS termination is the proxy's job.
+    pub fn for_https_proxy(addr: SocketAddr, public: &str) -> Result<Self, &'static str> {
+        Self::for_listener(addr)?;
+        let canonical = floe_app_core::server::HttpsOrigin::parse(public)?;
+        Ok(Self {
+            authority: canonical.authority().into(),
+            url: public.to_owned(),
+        })
+    }
+    pub fn is_https(&self) -> bool {
+        self.url.starts_with("https://")
+    }
+    pub fn websocket_url(&self) -> String {
+        self.url.replacen("http", "ws", 1)
     }
     pub fn host_matches(&self, headers: &HeaderMap) -> bool {
         single(headers, header::HOST.as_str()) == Some(self.authority.as_str())
@@ -64,6 +79,60 @@ pub fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proxy_origin_is_explicit_canonical_https_and_never_a_public_listener() {
+        let local = "127.0.0.1:58080".parse().unwrap();
+        for value in [
+            "https://192.0.2.10",
+            "https://192.0.2.10:8443",
+            "https://floe.example",
+            "https://[2001:db8::1]:8443",
+        ] {
+            let o = Origin::for_https_proxy(local, value).unwrap();
+            assert!(o.is_https());
+            assert!(o.websocket_url().starts_with("wss://"));
+            let mut h = HeaderMap::new();
+            h.insert(header::HOST, o.authority().parse().unwrap());
+            h.insert(header::ORIGIN, value.parse().unwrap());
+            assert!(o.host_matches(&h) && o.origin_matches(&h, true));
+            h.insert(
+                header::ORIGIN,
+                value.replacen("https", "http", 1).parse().unwrap(),
+            );
+            assert!(!o.origin_matches(&h, true));
+        }
+        for value in [
+            "http://192.0.2.10",
+            "https://user:pass@host",
+            "https://host/",
+            "https://host/path",
+            "https://host?x",
+            "https://host#x",
+            "https://host:0",
+            "https://host:65536",
+            "https://host:0443",
+            "https://host:443",
+            "https://HOST",
+            "https://host.",
+            "https://127.1",
+            "https://2130706433",
+            "https://0x7f000001",
+            "https://192.000.2.1",
+            "https://0.0.0.0",
+            "https://[::]",
+            "https://host%0d",
+            "https://a_b",
+            "https://-host",
+            "https://host:",
+            "https://host\r\nx: y",
+        ] {
+            assert!(Origin::for_https_proxy(local, value).is_err(), "{value:?}");
+        }
+        assert!(
+            Origin::for_https_proxy("0.0.0.0:58080".parse().unwrap(), "https://192.0.2.10")
+                .is_err()
+        );
+    }
     #[test]
     fn literal_authority_and_origin_cannot_be_rebound_or_forwarded() {
         for value in ["0.0.0.0:9000", "192.0.2.1:9000", "127.0.0.1:0"] {

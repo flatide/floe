@@ -26,6 +26,7 @@ pub mod managed_index;
 pub mod native;
 pub mod registered;
 pub mod render;
+pub mod server;
 pub mod shots;
 pub mod styles;
 pub mod svrf;

@@ -8,6 +8,12 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
+acorn.parse(fs.readFileSync(path.join(ui,'demo.js'),'utf8'),options);
+const demoClient=spawnSync(process.execPath,[path.join(ui,'demo.test.cjs')],{stdio:'inherit',timeout:15000});
+assert.equal(demoClient.status,0,'demo.test.cjs: '+demoClient.error);
+acorn.parse(fs.readFileSync(path.join(ui,'server.js'),'utf8'),options);
+const serverClient=spawnSync(process.execPath,[path.join(ui,'server.test.cjs')],{stdio:'inherit',timeout:15000});
+assert.equal(serverClient.status,0,'server.test.cjs: '+serverClient.error);
 const timingClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_TIMING:'1'}});
 assert.equal(timingClient.status,0,'browser timing client: '+timingClient.error);
 for(const loss of ['missing','unreadable','cookie','unavailable']){

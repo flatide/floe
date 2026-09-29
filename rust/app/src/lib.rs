@@ -10,6 +10,7 @@ pub mod embedded;
 mod fe_embed;
 mod read;
 mod selfcheck;
+mod server;
 mod svrf;
 mod web_view;
 use floe_app_core::{
@@ -42,6 +43,7 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web fe-embed [OPTIONS] PNG...
        floe2-web svrf DECK [OPTIONS]
        floe2-web selfcheck [--adjacent] [--metadata-only]
+       floe2-web server --help                (policy check / public demo)
        floe2-web displaytest [PNG] [--no-open] [--port N] [--firefox PATH]
        floe2-web --version
 
@@ -111,6 +113,7 @@ enum Cli {
     FeEmbed(Box<fe_embed::Command>),
     Svrf(Box<svrf::Command>),
     SelfCheck(selfcheck::Options),
+    Server(server::Command),
     DisplayTest(display_test::Command),
 }
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
@@ -128,6 +131,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         "--help" | "-h" if args.len() == 1 => return Ok(Cli::Help(false)),
         "--version" if args.len() == 1 => return Ok(Cli::Version),
         "selfcheck" => return selfcheck::parse(&args).map(Cli::SelfCheck),
+        "server" => return server::parse(&args).map(Cli::Server),
         "displaytest" => return display_test::parse(&args).map(Cli::DisplayTest),
         "index" => (),
         "info" | "render" | "probe" => return read::parse(&args).map(|c| Cli::Read(Box::new(c))),
@@ -322,7 +326,11 @@ impl Signals {
             flag: Arc::new(AtomicUsize::new(0)),
             ids: Vec::new(),
         };
-        for n in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+        for n in [
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGTERM,
+            signal_hook::consts::SIGHUP,
+        ] {
             s.ids.push(signal_hook::flag::register_usize(
                 n,
                 Arc::clone(&s.flag),
@@ -342,6 +350,7 @@ impl Drop for Signals {
 fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     match cli {
         Cli::SelfCheck(options) => return selfcheck::run(options, cancelled),
+        Cli::Server(command) => return server::run(command, cancelled),
         Cli::DisplayTest(command) => return display_test::run(command, cancelled),
         Cli::View(command) => return web_view::run(*command, cancelled),
         Cli::Drc(command) => return drc::run(*command, cancelled),
@@ -426,7 +435,10 @@ pub fn cli_main() {
             eprintln!("floe2-web: {e}");
             match e.kind {
                 ErrorKind::InvalidInput | ErrorKind::Unsupported => 2,
-                ErrorKind::Cancelled => 128 + signals.flag.load(Ordering::Relaxed).max(2) as i32,
+                ErrorKind::Cancelled => {
+                    let signal = signals.flag.load(Ordering::Relaxed);
+                    128 + if signal == 0 { 2 } else { signal as i32 }
+                }
                 ErrorKind::Incomplete => 3,
                 _ => 1,
             }

@@ -4,6 +4,7 @@
 pub mod about;
 mod assets;
 pub mod auth;
+pub mod broker;
 pub mod browse;
 mod defaults;
 mod display_test;

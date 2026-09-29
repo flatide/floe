@@ -140,6 +140,7 @@ pub struct Gateway {
     addr: SocketAddr,
     origin: Origin,
     cookie_name: String,
+    proxy_key: Option<Secret>,
     auth: Mutex<Auth>,
     pub(crate) shares: Option<Mutex<crate::sharing::Shares>>,
     pub(crate) share_transport: Option<crate::sharing::Transport>,
@@ -180,6 +181,7 @@ impl Gateway {
                 addr,
                 origin,
                 cookie_name: format!("floe_session_{}", addr.port()),
+                proxy_key: None,
                 auth: Mutex::new(auth),
                 shares: None,
                 share_transport: None,
@@ -210,6 +212,34 @@ impl Gateway {
     }
     pub fn origin(&self) -> &str {
         self.origin.url()
+    }
+    /// Trusted launcher configuration, before this gateway is published.
+    /// Every request needs the proxy-only proof as well as normal owner/guest
+    /// authentication; X-Forwarded-* never provides either credential.
+    pub fn enable_https_proxy(gate: &mut Gate, public: &str, key: &str) -> Result<(), String> {
+        let origin = Origin::for_https_proxy(gate.addr, public)?;
+        let key = Secret::parse(key).ok_or("proxy key must be 64 lowercase hex characters")?;
+        let g = Arc::get_mut(gate).ok_or("gateway already published")?;
+        if g.proxy_key.is_some() {
+            return Err("HTTPS proxy already configured".into());
+        }
+        g.origin = origin;
+        g.proxy_key = Some(key);
+        Ok(())
+    }
+    fn proxy_matches(&self, headers: &HeaderMap) -> bool {
+        self.proxy_key.as_ref().is_none_or(|expected| {
+            origin::single(headers, "x-floe-proxy-key")
+                .and_then(Secret::parse)
+                .is_some_and(|key| expected.matches(&key))
+        })
+    }
+    pub(crate) fn secure_cookie_suffix(&self) -> &'static str {
+        if self.origin.is_https() {
+            "; Secure"
+        } else {
+            ""
+        }
     }
     /// A standalone diagnostic session has no registered sources or native workers.
     pub fn with_display_test(addr: SocketAddr) -> Result<(Gate, Secret), String> {
@@ -609,7 +639,8 @@ pub fn router(gate: Gate) -> Router {
 async fn guard(State(gate): State<Gate>, request: Request, next: Next) -> Response {
     let mut response = if *gate.stopping.borrow() {
         error(StatusCode::SERVICE_UNAVAILABLE)
-    } else if !gate.origin.host_matches(request.headers())
+    } else if !gate.proxy_matches(request.headers())
+        || !gate.origin.host_matches(request.headers())
         || !gate.origin.origin_matches(
             request.headers(),
             !matches!(*request.method(), Method::GET | Method::HEAD),
@@ -684,10 +715,10 @@ async fn guard(State(gate): State<Gate>, request: Request, next: Next) -> Respon
     // Explicit ws origin also covers Firefox versions that don't include a
     // websocket scheme in connect-src 'self'. No inline/eval/third-party code.
     let csp = format!("default-src 'none'; script-src 'self'; style-src 'self'; img-src blob:; connect-src {} {}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-        gate.origin.url(), gate.origin.url().replacen("http:", "ws:", 1));
+        gate.origin.url(), gate.origin.websocket_url());
     headers.insert(
         "content-security-policy",
-        HeaderValue::from_str(&csp).expect("literal loopback origin"),
+        HeaderValue::from_str(&csp).expect("validated fixed origin"),
     );
     response
 }
@@ -718,9 +749,10 @@ async fn exchange(
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE),
     };
     let cookie = format!(
-        "{}={}; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age=28800",
+        "{}={}; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age=28800{}",
         gate.cookie_name,
-        credentials.cookie.expose()
+        credentials.cookie.expose(),
+        gate.secure_cookie_suffix()
     );
     let mut response = Json(
         json!({"protocol":1,"bundle":BUNDLE,"session_id":credentials.id.as_str(),
@@ -801,8 +833,9 @@ async fn logout(State(gate): State<Gate>, headers: HeaderMap) -> Response {
     r.headers_mut().insert(
         "set-cookie",
         HeaderValue::from_str(&format!(
-            "{}=; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age=0",
-            gate.cookie_name
+            "{}=; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age=0{}",
+            gate.cookie_name,
+            gate.secure_cookie_suffix()
         ))
         .unwrap(),
     );
