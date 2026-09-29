@@ -60,6 +60,14 @@ pub(super) fn asset(bundle: &str, name: &str) -> Response {
             include_str!("../../ui/gestures.js"),
         ),
         "app.css" => ("text/css; charset=utf-8", include_str!("../../ui/app.css")),
+        "viewer.css" => (
+            "text/css; charset=utf-8",
+            include_str!("../../ui/viewer.css"),
+        ),
+        "viewer.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../../ui/viewer.js"),
+        ),
         "server.css" => (
             "text/css; charset=utf-8",
             include_str!("../../ui/server.css"),

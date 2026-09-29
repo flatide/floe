@@ -4,12 +4,14 @@
   <meta name="floe-http-test" content="@@HTTP_TEST@@">
   <meta name="floe-bundle" content="@@BUNDLE@@"><title>floe2 · Server session</title>
   <link rel="stylesheet" href="/server-assets/@@BUNDLE@@/app.css">
+  <link rel="stylesheet" href="/server-assets/@@BUNDLE@@/viewer.css">
   <link rel="stylesheet" href="/server-assets/@@BUNDLE@@/server.css">
   <script defer src="/server-assets/@@BUNDLE@@/protocol.js"></script>
   <script defer src="/server-assets/@@BUNDLE@@/image-decode.js"></script>
   <script defer src="/server-assets/@@BUNDLE@@/gestures.js"></script>
+  <script defer src="/server-assets/@@BUNDLE@@/viewer.js"></script>
   <script defer src="/server-assets/@@BUNDLE@@/server.js"></script>
-</head><body id="server-shell">
+</head><body id="server-shell" data-floe-viewer>
   <header class="topbar"><div class="brand">floe<span>2</span></div><strong>Server session</strong>
     <span id="server-status" class="document-title" role="status">Connecting…</span>
     <button id="server-reconnect" disabled>Reconnect</button><button id="server-leave" disabled>End my session</button>
@@ -24,27 +26,20 @@
         <button id="server-open" hidden disabled>Open assigned layout</button>
       </section>
       <section><h2>View</h2>
-        <div class="button-row"><button id="server-fit" disabled>Fit</button><button id="server-in" disabled>+</button><button id="server-out" disabled>−</button></div>
-        <div class="form-row"><label for="server-depth">Depth</label><input id="server-depth" value="full" disabled></div>
-        <div class="form-row"><label for="server-detail">Detail</label><select id="server-detail" disabled><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="exact">Exact · no cut</option></select></div>
-        <div class="form-row"><label for="server-thin">Thin shapes</label><select id="server-thin" disabled><option value="auto">Auto</option><option value="keep">Keep</option><option value="cull">Cull</option></select></div>
-        <label class="check"><input id="server-frames" type="checkbox" disabled> Frames</label>
-        <label class="check"><input id="server-labels" type="checkbox" disabled> Labels</label>
-        <label class="check"><input id="server-mono" type="checkbox" disabled> Mono</label>
-        <h2>Go to (µm)</h2><label for="server-x">X</label><input id="server-x" value="0" disabled>
-        <label for="server-y">Y</label><input id="server-y" value="0" disabled>
-        <label for="server-width">View width (optional)</label><input id="server-width" disabled>
-        <button id="server-go" disabled>Go</button>
+        @@VIEW_CONTROLS@@
         <p class="note">Canvas: arrow keys pan 50%, Shift + arrows 10%; + / − zoom, Home fits. Left/middle drag pans; wheel zooms about the cursor. Right drag draws a zoom band: rightward zooms in, leftward zooms out; Esc cancels.</p>
         <p class="note">During navigation or display-option changes the previous image stays visible until the current frame arrives. A wait cursor marks pending work; the previous image is not the completed new view.</p>
         <p class="note">A lost connection clears the display. Reconnect restores the server's current view without replaying navigation.</p>
       </section>
     </aside>
-    <main id="server-viewport" tabindex="0" aria-label="Assigned layout canvas">
-      <canvas id="server-canvas" width="1" height="1"></canvas>
-      <div id="server-zoom-band" hidden></div><div id="server-zoom-band-hint" hidden></div>
+    <main class="main">
+      @@VIEW_TOOLBAR@@
+      <div id="server-viewport" class="viewport" tabindex="0" aria-label="Assigned layout canvas">
+      <canvas id="server-canvas" class="viewer-frame" width="1" height="1"></canvas>
+      <div id="server-zoom-band" class="viewer-band" hidden></div><div id="server-zoom-band-hint" class="viewer-band-hint" hidden></div>
       <p id="server-empty">Waiting for an authorized frame…</p>
+      </div>
+      <footer id="server-frame-status" class="statusbar" role="status">No displayed frame</footer>
     </main>
   </div>
-  <footer id="server-frame-status" role="status">No displayed frame</footer>
 </body></html>

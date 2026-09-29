@@ -1,0 +1,5 @@
+/* Shared by owner/standalone and restricted server sessions. */
+[data-floe-viewer][data-busy="true"], [data-floe-viewer][data-busy="true"] * { cursor: wait !important; }
+.viewer-frame { position: absolute; top: 0; left: 0; display: block; }
+.viewer-band { position: absolute; box-sizing: border-box; border: 1px solid #fff; pointer-events: none; }
+.viewer-band-hint { position: absolute; left: 14px; top: 12px; color: #fff; background: #000b; padding: 4px 8px; pointer-events: none; }

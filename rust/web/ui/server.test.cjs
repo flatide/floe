@@ -19,8 +19,11 @@ function environment(options={}) {
         get width(){return this._width;}set width(v){this._width=v;this.resets=(this.resets||0)+1;this.pixels=new Uint8ClampedArray((this._width||1)*(this._height||1)*4);}
         get height(){return this._height;}set height(v){this._height=v;this.resets=(this.resets||0)+1;this.pixels=new Uint8ClampedArray((this._width||1)*(this._height||1)*4);}
         getContext(){const self=this;return {fillRect(){self.pixels=new Uint8ClampedArray(self.width*self.height*4);},putImageData(i){self.pixels=i.data.slice();},
-            drawImage(i,x=0,y=0){if(x===0&&y===0){self.pixels=i.pixels.slice();}self.blits=(self.blits||0)+1;self.lastBlit=[x||0,y||0];}};}
-        getBoundingClientRect(){return {width:options.width||64,height:options.height||32,left:0,top:0};}focus(){doc.activeElement=this;}
+            drawImage(i,x=0,y=0){for(let yy=0;yy<i.height;yy++){for(let xx=0;xx<i.width;xx++){
+                const dx=xx+x,dy=yy+y;if(dx<0||dy<0||dx>=self.width||dy>=self.height){continue;}
+                const src=(yy*i.width+xx)*4,dst=(dy*self.width+dx)*4;self.pixels.set(i.pixels.subarray(src,src+4),dst);
+            }}self.blits=(self.blits||0)+1;self.lastBlit=[x||0,y||0];}};}
+        getBoundingClientRect(){return {width:options.width||64,height:options.height||32,left:0,top:0,right:options.width||64,bottom:options.height||32};}focus(){doc.activeElement=this;}select(){}
         addEventListener(k,f){this.listeners[k]=f;}
     }
     const el=k=>{if(!nodes.has(k)){nodes.set(k,new Element());}return nodes.get(k);};
@@ -33,7 +36,7 @@ function environment(options={}) {
     const location={origin,protocol:options.http?'http:':'https:',pathname:'/server/'+id,hash:options.resume?'':options.hash===undefined?'#bootstrap='+secret:options.hash};
     const history={replaceState(a,b,path){assert.equal(path,location.pathname);location.hash='';}};
     function state(extra={}){return {type:'snapshot',view_id:id,connection_epoch:epoch,state_rev:'1',render_rev:'1',render_key:'1',dataset_revision:'1',worker_epoch:'1',
-        bbox_dbu:['0','0','64','32'],pixels:[64,32],depth:'full',detail:'high',thin:'auto',labels:true,frames:true,mono:false,status:'idle',failure:null,
+        bbox_dbu:['0','0','64','32'],pixels:[64,32],camera_um:['32','16','64'],font_px:14,max_depth:6,depth:'full',detail:'high',thin:'auto',labels:true,frames:true,mono:false,status:'idle',failure:null,
         capabilities:{query:false,clip:false,mode:false,labels:true},...extra};}
     class XHR {
         open(method,path){this.method=method;this.path=path;this.headers={};}setRequestHeader(k,v){this.headers[k]=v;}
@@ -54,12 +57,13 @@ function environment(options={}) {
         constructor(url,protocols){assert.equal(url,(options.http?'ws://10.0.0.10:8080':'wss://service.example.test')+base+'/stream');assert.deepEqual(protocols,['floe-server-v1','bundle.'+bundle,'csrf.'+auth.csrf]);this.sent=[];this.readyState=1;this.bufferedAmount=0;sockets.push(this);}
         send(text){this.sent.push(JSON.parse(text));}close(){this.readyState=3;}text(v){this.onmessage({data:JSON.stringify(v)});}binary(extra={}){this.onmessage({data:packet({view_id:id,...extra})});}
     }
-    const c=Client.bind({window:win,document:doc,location,history,protocol:P,XHR,WebSocket:WS,now:()=>clock,gestures:require('./gestures.js'),
+    const c=Client.bind({window:win,document:doc,location,history,protocol:P,viewer:require('./viewer.js'),XHR,WebSocket:WS,now:()=>clock,gestures:require('./gestures.js'),
         decode(h,d,done){const job=Decode.create({ImageData:class{constructor(data){this.data=data;}},setTimeout:win.setTimeout,clearTimeout:win.clearTimeout},h,d,done);
             return options.holdDecode?{start(){decoders.push({finish:()=>job.start(),fail:()=>done(null,Error('synthetic decode error'))});},cancel:()=>job.cancel()}:job;}});
     function hello(ws=sockets.at(-1),e=epoch){ws.onopen();ws.text({type:'hello',protocol:1,bundle,view_id:id,connection_epoch:e,frame_credit:1,capabilities:{view:true,index:false,review:false,export:false,query:false}});ws.text(state({connection_epoch:e}));}
     function fire(ms,interval){const item=[...timers].find(([,v])=>v.ms===ms&&(interval===undefined||v.interval===interval));assert(item,'timer '+ms);if(!item[1].interval){timers.delete(item[0]);}clock+=ms;item[1].f();}
-    return {c,el:n=>el('server-'+n),events,doc,win,location,requests,sockets,storage,reads,deferred,timers,decoders,hello,state,
+    const names={in:'zoom-in',out:'zoom-out',x:'goto-x',y:'goto-y',width:'goto-width',go:'goto'};
+    return {c,el:n=>el('server-'+(names[n]||n)),events,doc,win,location,requests,sockets,storage,reads,deferred,timers,decoders,hello,state,
         raf(){for(const [k,f] of [...rafs]){rafs.delete(k);f();}},fire,code(n){code=n;},confirm(v){confirm=v;},opened(v){opened=v;},
         defer(method,suffix){holds.push({method,suffix});}};
 }
@@ -97,7 +101,7 @@ if(require.main===module)(async()=>{
     const nostore=environment({noStorage:true});await nostore.c.start();assert.equal(nostore.sockets.length,1);nostore.c.stop();
     const stale=environment();await stale.c.start();stale.hello();const old=stale.sockets[0].onmessage;stale.sockets[0].onclose();stale.fire(500);await tick();stale.hello(stale.sockets[1],'9'.repeat(64));old({data:packet({view_id:id})});assert.equal(stale.sockets[1].sent.length,0);stale.c.stop();
     const logout=environment();await logout.c.start();logout.hello();logout.code(503);await logout.el('leave').onclick();assert(!logout.storage.has(key));assert.equal(logout.requests.filter(r=>r.method==='DELETE').length,1);assert.equal(logout.el('canvas').width,1);assert.match(logout.el('status').textContent,/unconfirmed/);
-    const nav=environment();await nav.c.start();nav.hello();nav.el('x').value='1.25';nav.el('y').value='-4';nav.el('width').value='20';nav.el('go').onclick();
+    const nav=environment();await nav.c.start();nav.hello();nav.el('x').value='1.25';nav.el('y').value='-4';nav.el('width').value='20';nav.el('goto-form').onsubmit({preventDefault(){}});
     assert.deepEqual(nav.sockets[0].sent.at(-1).body.navigation,{kind:'goto',center_um:['1.25','-4'],width_um:'20'});nav.c.stop();
     const mouse=environment();await mouse.c.start();mouse.hello();mouse.sockets[0].binary();mouse.raf();
     const down={button:0,buttons:1,clientX:8,clientY:8,preventDefault(){}};
@@ -111,6 +115,8 @@ if(require.main===module)(async()=>{
     // Only already-presented pixels can survive display-policy edits; stale
     // packets still cannot be newly decoded/presented and identity stays fixed.
     async function displayed(options={}){const h=environment(options);await h.c.start();h.hello();h.sockets[0].binary();if(options.holdDecode){h.decoders.shift().finish();}h.raf();return h;}
+    function visiblePixels(h){const c=h.el('canvas'),out=new Uint8ClampedArray(64*32*4),x=parseInt(c.style.left)||0,y=parseInt(c.style.top)||0;
+        for(let yy=0;yy<c.height;yy++){for(let xx=0;xx<c.width;xx++){const dx=xx+x,dy=yy+y;if(dx>=0&&dx<64&&dy>=0&&dy<32){out.set(c.pixels.subarray((yy*c.width+xx)*4,(yy*c.width+xx)*4+4),(dy*64+dx)*4);}}}return out;}
     const pointer=(x,y,button=0,buttons=1)=>({clientX:x,clientY:y,button,buttons,preventDefault(){}});
     const zoomBounds=['6.4','3.2','57.6','28.8'];
     for(const input of ['in','out','+','-','wheel']){
@@ -124,34 +130,34 @@ if(require.main===module)(async()=>{
         assert.equal(h.el('empty').hidden,true,input);assert.equal(c.resets,resets,input+' cleared the canvas');assert.deepEqual(c.pixels,pixels);
         assert.match(h.el('frame-status').textContent,/Previous image.*waiting/);
         s.binary();h.raf();assert.equal(c.resets,resets,'stale packet replaced retained pixels');
-        s.binary({state_rev:'2',render_rev:'2',bbox_dbu:zoomBounds});h.raf();assert(c.resets>resets);
-        assert.match(h.el('frame-status').textContent,/^Complete/);h.c.stop();assert.equal(c.width,1);
+        const blits=c.blits;s.binary({state_rev:'2',render_rev:'2',bbox_dbu:zoomBounds});h.raf();assert(c.blits>blits);
+        assert.match(h.el('frame-status').textContent,/^Live/);h.c.stop();assert.equal(c.width,1);
     }
     for(const button of [0,1]){
         const h=await displayed(),s=h.sockets[0],c=h.el('canvas'),v=h.el('viewport'),mask=button===0?1:4;
         v.listeners.mousedown(pointer(8,8,button,mask));h.events.mousemove(pointer(21,8,button,mask));h.raf();
-        assert.deepEqual(c.lastBlit,[13,0]);h.events.mouseup(pointer(21,8,button,0));
+        assert.equal(c.style.left,'13px');const preview=visiblePixels(h);h.events.mouseup(pointer(21,8,button,0));
         const edit=s.sent.at(-1),resets=c.resets,blits=c.blits;
-        assert.deepEqual(c.lastBlit,[13,0],'release recentered preview');
+        assert.deepEqual(visiblePixels(h),preview,'release recentered preview');
         s.text(h.state({status:'rendering'}));assert.equal(c.resets,resets,'old snapshot erased pending pan');
         s.text({type:'accepted',seq:edit.seq,state_rev:'2'});
         const moved={state_rev:'2',render_rev:'2',bbox_dbu:['-13','0','51','32']};
         s.text(h.state({...moved,status:'rendering'}));assert.equal(c.resets,resets);assert.equal(c.blits,blits);
         assert.equal(h.el('empty').hidden,true);assert.match(h.el('frame-status').textContent,/Previous image/);
-        s.binary(moved);h.raf();assert.deepEqual(c.lastBlit,[0,0]);assert.match(h.el('frame-status').textContent,/^Complete/);h.c.stop();
+        s.binary(moved);h.raf();assert.deepEqual(c.lastBlit,[0,0]);assert.match(h.el('frame-status').textContent,/^Live/);h.c.stop();
     }
     for(const outcome of ['noop','reject']){
-        const h=await displayed(),s=h.sockets[0],c=h.el('canvas');
+        const h=await displayed(),s=h.sockets[0],c=h.el('canvas'),original=visiblePixels(h);
         h.el('viewport').listeners.mousedown(pointer(8,8));h.events.mouseup(pointer(21,8,0,0));
-        assert.deepEqual(c.lastBlit,[13,0]);const edit=s.sent.at(-1);
+        assert.notDeepEqual(visiblePixels(h),original);const edit=s.sent.at(-1);
         s.text(outcome==='noop'?{type:'accepted',seq:edit.seq,state_rev:'1'}:{type:'error',seq:edit.seq});
-        assert.deepEqual(c.lastBlit,[0,0]);assert.equal(h.el('empty').hidden,true);h.c.stop();
+        assert.deepEqual(visiblePixels(h),original);assert.equal(h.el('empty').hidden,true);h.c.stop();
     }
     const snapped=await displayed(),sn=snapped.sockets[0];
     snapped.el('viewport').listeners.keydown({key:'ArrowLeft',preventDefault(){}});
     const snEdit=sn.sent.at(-1);assert.equal(snEdit.body.navigation.snap,true);
     sn.text({type:'accepted',seq:snEdit.seq,state_rev:'2'});sn.text(snapped.state({state_rev:'2',render_rev:'2',bbox_dbu:['-32','0','32','32']}));
-    assert.deepEqual(snapped.el('canvas').lastBlit,[32,0]);snapped.c.stop();
+    assert.equal(snapped.el('canvas').style.left,'32px');snapped.c.stop();
     for(const change of [{dataset_revision:'2'},{worker_epoch:'2'},{status:'closed'}]){
         const h=await displayed(),s=h.sockets[0];s.text(h.state({state_rev:'2',render_rev:'2',bbox_dbu:zoomBounds}));assert.equal(h.el('empty').hidden,true);
         s.text(h.state({state_rev:'3',...change}));assert.equal(h.el('canvas').width,1);assert.equal(h.el('empty').hidden,false);
@@ -204,7 +210,7 @@ if(require.main===module)(async()=>{
         assert.match(h.el('frame-status').textContent,/Previous image.*waiting/);cursor(h,true);
         s.text({type:'accepted',seq:edit.seq,state_rev:'2'});cursor(h,true);
         s.binary();h.raf();assert.equal(c.resets,resets,'stale policy frame was presented');cursor(h,true);
-        s.binary(changed);cursor(h,true);h.raf();cursor(h,false);assert.match(h.el('frame-status').textContent,/^Complete/);h.c.stop();cursor(h,false);
+        s.binary(changed);cursor(h,true);h.raf();cursor(h,false);assert.match(h.el('frame-status').textContent,/^Live/);h.c.stop();cursor(h,false);
     }
     const startup=environment();cursor(startup,false);startup.defer('POST','/exchange');const starting=startup.c.start();cursor(startup,true);
     startup.deferred[0].reply();await starting;cursor(startup,true);startup.hello();cursor(startup,true);startup.sockets[0].binary();cursor(startup,true);startup.raf();cursor(startup,false);startup.c.stop();
@@ -246,8 +252,8 @@ if(require.main===module)(async()=>{
     cs.text({type:'accepted',seq:cs.sent.at(-1).seq,state_rev:'3'});const lastState={state_rev:'3',render_rev:'3',render_key:'3',detail:'medium',thin:'keep'};
     cs.text(chain.state({...lastState,status:'rendering'}));cs.binary(lastState);chain.raf();cursor(chain,true);cs.text(chain.state(lastState));cursor(chain,false);chain.c.stop();
     const fs=require('node:fs'),path=require('node:path');
-    assert.match(fs.readFileSync(path.join(__dirname,'server.html'),'utf8'),/<body id="server-shell">/);
-    assert.match(fs.readFileSync(path.join(__dirname,'server.css'),'utf8'),/#server-shell\[data-busy="true"\][^{]*#server-shell\[data-busy="true"\] \*\s*\{\s*cursor:\s*wait\s*!important;/);
+    assert.match(fs.readFileSync(path.join(__dirname,'server.html'),'utf8'),/<body id="server-shell" data-floe-viewer>/);
+    assert.match(fs.readFileSync(path.join(__dirname,'viewer.css'),'utf8'),/\[data-floe-viewer\]\[data-busy="true"\][^{]*\[data-floe-viewer\]\[data-busy="true"\] \*\s*\{\s*cursor:\s*wait\s*!important;/);
     console.log('WEB SERVER DISPLAY POLICY: ALL OK (all controls retain pixels; waiting through queue/ACK/state/decode/presentation; failure/no-op/lifecycle resets)');
     console.log('WEB SERVER NAVIGATION: ALL OK (band in/out/cancel/letterbox, retained zoom/free pan, no-op/rejection, stale packet and policy/session isolation)');
     console.log('WEB SERVER SESSION: ALL OK (bootstrap, isolated storage, pixels/ACK, serialized edits, reconnect/no replay, open ambiguity, hidden exchange, revoke/logout)');

@@ -503,6 +503,20 @@ async fn server_shell_is_static_bounded_and_cannot_load_owner_assets() {
     assert!(csp.contains("frame-ancestors 'none'") && csp.contains("base-uri 'none'"));
     assert!(r.body.contains("server.js") && !r.body.contains("@@BUNDLE@@"));
     assert!(!r.body.contains("/app.js") && !r.body.contains("synthetic.oas"));
+    assert!(!r.body.contains("@@VIEW_") && r.body.contains("/viewer.js"));
+    let owner = include_str!("../ui/index.html");
+    for name in ["controls", "toolbar"] {
+        let fragment = owner
+            .split_once(&format!("<!-- floe-view-{name}:start -->"))
+            .unwrap()
+            .1
+            .split_once(&format!("<!-- floe-view-{name}:end -->"))
+            .unwrap()
+            .0
+            .replace("id=\"", "id=\"server-")
+            .replace("for=\"", "for=\"server-");
+        assert!(r.body.contains(&fragment), "same canonical {name}");
+    }
     assert!(!r.headers.contains_key("set-cookie"));
     assert!(s.request("HEAD", &route, &h, "").await.body.is_empty());
     let bundle = floe_web::transport::BUNDLE;
@@ -513,6 +527,8 @@ async fn server_shell_is_static_bounded_and_cannot_load_owner_assets() {
         "protocol.js",
         "image-decode.js",
         "gestures.js",
+        "viewer.js",
+        "viewer.css",
     ] {
         let r = s
             .request("GET", &format!("/server-assets/{bundle}/{name}"), &h, "")

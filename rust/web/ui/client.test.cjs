@@ -281,6 +281,7 @@ const window={FloeProtocol:P,FloeQuery:require('./query.js'),FloeInspect:require
 const storage=new Map();
 window.isSecureContext=true;window.ClipboardItem=class {constructor(data){this.data=data;}};
 window.FloeSettings=require('./settings.js');
+window.FloeViewer=require('./viewer.js');
 window.FloeDRCRecovery=require('./drc-recovery.js');
 window.FloeDefaults=require('./defaults.js');
 window.FloeAbout=require('./about.js');
@@ -349,6 +350,30 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     return out.buffer;
 }
 (async()=>{
+    if(process.env.FLOE_TEST_VIEWER==='1'){
+        await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
+        const cursor=busy=>{assert.equal(node('app-shell')['data-busy'],String(busy));assert.equal(node('viewport').style.cursor,busy?'wait':'');};
+        cursor(true);ws.receive(packet('raw','1'));cursor(false);
+        node('viewport').mousedown({clientX:10,clientY:10,button:0,buttons:1,preventDefault(){}});
+        listeners.mouseup({clientX:23,clientY:10,button:0,buttons:0,preventDefault(){}});cursor(true);
+        const noop=ws.sent.filter(m=>m.type==='view.set').at(-1);
+        ws.receive({type:'accepted',seq:noop.seq,state_rev:snapshot.state_rev,render_rev:snapshot.render_rev});ws.receive(snapshot);cursor(false);
+        ws.receive(packet('raw','2'));
+        for(const [field,value] of [['detail','medium'],['thin','cull'],['depth','4'],['frames',true],['labels',true],['mono',true]]){
+            const before=node('canvas').dataset.frameId,old=packet('raw','99',snapshot.render_rev);
+            if(typeof value==='boolean'){node(field).checked=value;}else{node(field).value=value;}node(field).onchange();cursor(true);
+            const seq=ws.sent.filter(m=>m.type==='view.set').at(-1).seq;
+            snapshot.state_rev=P.next(snapshot.state_rev);snapshot.render_rev=P.next(snapshot.render_rev);snapshot.render_key=P.next(snapshot.render_key);snapshot[field]=value;
+            ws.receive({type:'accepted',seq,state_rev:snapshot.state_rev,render_rev:snapshot.render_rev});cursor(true);ws.receive(snapshot);cursor(true);
+            assert.equal(node('canvas').dataset.frameId,before);assert.equal(node('empty').hidden,true);ws.receive(old);assert.equal(node('canvas').dataset.frameId,before);
+            ws.receive(packet('png',snapshot.render_rev,snapshot.render_rev));cursor(true);images.at(-1).onload();cursor(false);
+        }
+        ws.receive(packet('raw','100',snapshot.render_rev,epoch,{complete:false,labels_truncated:true}));cursor(false);
+        ws.receive(packet('png','101',snapshot.render_rev));cursor(true);images.at(-1).onerror();cursor(false);
+        node('zoom-in').onclick();cursor(true);snapshot.status='failed';snapshot.failure='worker_failed';ws.receive(snapshot);cursor(false);
+        listeners.pagehide();cursor(false);
+        console.log('SHARED OWNER VIEWER: ALL OK (all policy edits keep pixels; stale rejection; decode/final/failure cursor)');return;
+    }
     if(process.env.FLOE_TEST_TIMING==='1'){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);
         const refresh=()=>{const n=requests.length;node('timing-refresh').onclick();assert.equal(requests.length,n);return JSON.parse(node('timing-report').textContent);};

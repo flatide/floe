@@ -8,6 +8,11 @@ const acorn = require('./vendor/acorn-8.15.0/acorn.js');
 const root = path.resolve(__dirname, '..');
 const ui = path.join(root, 'rust/web/ui');
 const options = {ecmaVersion: 2017, sourceType: 'script'};
+acorn.parse(fs.readFileSync(path.join(ui,'viewer.js'),'utf8'),options);
+for(const file of ['viewer.test.cjs','client.test.cjs']){
+    const shared=spawnSync(process.execPath,[path.join(ui,file)],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_VIEWER:'1'}});
+    assert.equal(shared.status,0,'shared viewer '+file+': '+shared.error);
+}
 acorn.parse(fs.readFileSync(path.join(ui,'demo.js'),'utf8'),options);
 const demoClient=spawnSync(process.execPath,[path.join(ui,'demo.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(demoClient.status,0,'demo.test.cjs: '+demoClient.error);

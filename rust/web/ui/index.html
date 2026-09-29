@@ -6,9 +6,11 @@
   <meta name="floe-bundle" content="@@BUNDLE@@">
   <title>floe2 · Layout workspace</title>
   <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
+  <link rel="stylesheet" href="/assets/@@BUNDLE@@/viewer.css">
   <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
   <script defer src="/assets/@@BUNDLE@@/image-decode.js"></script>
   <script defer src="/assets/@@BUNDLE@@/gestures.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/viewer.js"></script>
   <script defer src="/assets/@@BUNDLE@@/minimap.js"></script>
   <script defer src="/assets/@@BUNDLE@@/query.js"></script>
   <script defer src="/assets/@@BUNDLE@@/inspect.js"></script>
@@ -46,7 +48,7 @@
   <script defer src="/assets/@@BUNDLE@@/sharing.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
-<body>
+<body id="app-shell" data-floe-viewer>
   <header id="app-header" class="topbar">
     <div class="brand">floe<span>2</span><small>WEB PREVIEW</small></div>
     <div id="document-title" class="document-title">Layout workspace</div>
@@ -86,11 +88,13 @@
         </details>
         <h2>Display</h2>
         <div id="live-mode-row" hidden><div class="form-row"><label for="live-mode">Jobdeck mode</label><select id="live-mode" disabled title="Keep camera and visibility; reload mode defaults"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div><p id="live-mode-note" class="note" role="status">Ctrl+, toggles level/chip · same camera and loaded levels. Mode defaults reload.</p></div>
+        <!-- floe-view-controls:start -->
         <div class="form-row"><label for="depth">Depth <span id="max-depth"></span></label><input id="depth" value="full" title="full or a nonnegative depth; canvas &lt; / &gt; steps, 9 9 selects full" class="short" disabled></div>
         <div class="form-row"><label for="detail">Detail</label><select id="detail" disabled><option value="low">Low · 5 px</option><option value="medium" selected>Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>
         <div class="form-row"><label for="thin">Thin shapes</label><select id="thin" disabled><option value="auto">Auto · keep</option><option value="keep">Keep</option><option value="cull">Cull</option></select></div>
         <div class="check-row"><label class="check"><input id="frames" type="checkbox" disabled> Frames</label><label class="check"><input id="labels" type="checkbox" disabled> Labels</label><label class="check"><input id="mono" type="checkbox" disabled> Mono</label></div>
         <div class="form-row"><label for="font-px">Label px</label><input id="font-px" class="short" type="number" min="6" max="96" value="14" disabled></div>
+        <!-- floe-view-controls:end -->
         <div class="form-row"><label for="overlays">Overlays</label><select id="overlays" disabled><option value="all">All</option><option value="focus">Hide other errors</option><option value="none">Hide all</option></select></div>
         <p class="note">Tab on canvas cycles overlays; Shift+Tab leaves the canvas. Hiding keeps selections and rulers.</p>
         <div id="snapshot-panel" hidden>
@@ -265,19 +269,21 @@
       </details>
     </aside>
     <main class="main">
+      <!-- floe-view-toolbar:start -->
       <form id="goto-form" class="toolbar" title="Goto draft is kept while editing. Escape in a coordinate restores the current view; Go applies it.">
         <button id="fit" type="button" disabled title="Fit layout (Ctrl+A)">Fit</button>
         <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
         <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
       </form>
+      <!-- floe-view-toolbar:end -->
       <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. R starts two-point rulers; Shift allows free angles; M toggles snap; K undoes; Shift+K clears rulers. Left or middle drag and arrow keys pan. Right drag rightwards zooms into a box; leftwards zooms out; Escape cancels. Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames. Less/greater steps depth; digits choose depth, 9 9 selects full. Comma/period steps DRC errors; N opens notes; W proposes a waive toggle, with separate save approval. Tab cycles overlays; Shift+Tab leaves the canvas. Ctrl or Command+C copies visible pixels.">
         <div id="notice" class="notice" role="alert" hidden></div>
-        <canvas id="margin-canvas" width="1" height="1" aria-hidden="true" hidden></canvas>
-        <canvas id="canvas" width="1" height="1" aria-label="Rendered layout"></canvas>
+        <canvas id="margin-canvas" class="viewer-frame" width="1" height="1" aria-hidden="true" hidden></canvas>
+        <canvas id="canvas" class="viewer-frame" width="1" height="1" aria-label="Rendered layout"></canvas>
         <canvas id="query-canvas" width="1" height="1" aria-label="Selected shapes and snap point" hidden></canvas>
         <canvas id="drc-canvas" width="1" height="1" aria-label="DRC markers and selected violation" hidden></canvas>
         <canvas id="ruler-canvas" width="1" height="1" aria-label="Manual, bbox gap and CD rulers with measurement preview" hidden></canvas>
-        <div id="zoom-band" aria-hidden="true" hidden></div><div id="zoom-band-hint" role="status" hidden></div>
+        <div id="zoom-band" class="viewer-band" aria-hidden="true" hidden></div><div id="zoom-band-hint" class="viewer-band-hint" role="status" hidden></div>
         <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
         <div id="rendering" class="rendering" hidden>Rendering</div>
         <div class="viewport-hint">Drag / arrows · pan <span>Right drag · box zoom</span> <span>Shift · 10%</span> <span>+ / − zoom</span> <span>Ctrl+A · fit</span></div>

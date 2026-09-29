@@ -16,7 +16,7 @@ HTTPS가 기본이며 내부망 HTTP 시험만 아래 명시적 opt-in으로 허
           HTTPS nginx → 127.0.0.1 Rust
 ```
 
-지원: pan·zoom·fit·goto·depth·detail·thin·frames·labels·mono, PNG 화면 전송,
+지원: pan·zoom·fit·goto·depth·detail·thin·frames·labels·label px·mono, PNG 화면 전송,
 세션 재접속과 자기 세션 종료. 로그인/브라우저 설치 확장이 필요 없다.
 캔버스에서 좌/중 버튼 드래그는 pan, 우 버튼 드래그는 zoom band다. 오른쪽 방향은 확대,
 왼쪽 방향은 축소이며 release에서 한 번 제출한다. Escape는 취소하고 canvas의 브라우저
@@ -32,8 +32,10 @@ render key/revision 일치 검사는 그대로 유지한다. 연결 해제·hidd
 이미지 디코드·브라우저 표시까지 포함하며, ACK나 서버 idle만으로 해제하지 않는다.
 현재 최종 프레임이 표시되면 복원하고 no-op·거부·실패·연결 종료에서도 대기가 남지 않게 한다.
 최종 프레임이 incomplete인 경우에는 그 상태를 문구로 알리고 커서를 계속 기다리게 하지 않는다.
-현재는 **기본 데모 UI**이며 전체 Electron UI의 레이어 패널·셀 트리·측정·pick/snap은
-이 경로에 연결하지 않았다. 큰 DPR 화면은 내부 렌더 해상도를 제한해 표시한다.
+표시·입력·대기 커서와 Display/Goto 조작부 정의는 일반 웹/Electron과 공통 코드다.
+인증·제한 기능만 별도 어댑터로 유지한다. [공통 뷰어 계약](WEBUI_SHARED_VIEWER.ko.md) 참고.
+전체 Electron UI의 레이어 패널·셀 트리·측정·pick/snap은 이 경로에 연결하지 않았다.
+큰 DPR 화면은 내부 렌더 해상도를 제한해 표시한다.
 
 파일 업로드·서버 탐색·인덱싱·DRC 읽기/쓰기·원본/clip 내보내기·공유 기본값·초대
 API를 마운트하지 않는다. UI 숨김만으로 제한하지 않는다. 데모 모드에서는 TeeBox

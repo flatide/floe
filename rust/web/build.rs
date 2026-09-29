@@ -10,6 +10,8 @@ fn main() {
         "ui/demo.html",
         "ui/demo.js",
         "ui/server.css",
+        "ui/viewer.js",
+        "ui/viewer.css",
         "src/broker.rs",
         "ui/guest.html",
         "ui/guest.js",
@@ -147,9 +149,30 @@ fn main() {
         "server.html",
         "demo.html",
     ] {
-        let html = fs::read_to_string(format!("ui/{name}"))
+        let mut html = fs::read_to_string(format!("ui/{name}"))
             .expect("HTML source")
             .replace("@@BUNDLE@@", &id);
+        if name == "server.html" {
+            let owner = fs::read_to_string("ui/index.html").expect("canonical viewer shell");
+            for (marker, slot) in [
+                ("controls", "@@VIEW_CONTROLS@@"),
+                ("toolbar", "@@VIEW_TOOLBAR@@"),
+            ] {
+                let start = format!("<!-- floe-view-{marker}:start -->");
+                let end = format!("<!-- floe-view-{marker}:end -->");
+                let fragment = owner
+                    .split_once(&start)
+                    .expect("viewer fragment start")
+                    .1
+                    .split_once(&end)
+                    .expect("viewer fragment end")
+                    .0
+                    .replace("id=\"", "id=\"server-")
+                    .replace("for=\"", "for=\"server-");
+                assert_eq!(html.matches(slot).count(), 1, "one viewer slot");
+                html = html.replace(slot, &fragment);
+            }
+        }
         fs::write(Path::new(&env::var_os("OUT_DIR").unwrap()).join(name), html).unwrap();
     }
 }

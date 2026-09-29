@@ -1,7 +1,7 @@
 /* Local, ES2017 CAD client. The server owns world coordinates and view state. */
 (function () {
     'use strict';
-    const P = window.FloeProtocol;
+    const P = window.FloeProtocol, V = window.FloeViewer;
     const bundle = document.querySelector('meta[name="floe-bundle"]').content;
     const el = function (id) { return document.getElementById(id); };
     const timing = window.FloeDisplayTiming.bind({el: el, window: window});
@@ -14,7 +14,8 @@
     marginCanvas.hidden = true;
     el('zoom-band').hidden = el('zoom-band-hint').hidden = true;
     let foregroundFrame = null, marginFrame = null, inflightBody = null, foregroundPerf = '';
-    let gesture = null, dragShift = null, lastPlacement = null;
+    let gesture = null, dragShift = null, lastPlacement = null, viewControls = null, decodePurpose = null;
+    let completedFrame = null, decodeFailed = false;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
     let settings = null, defaults = null, about = null, sessionExit = null, dumps = null;
@@ -36,11 +37,8 @@
     let reclaimSupported=false,reclaimPreview=null,reclaimSeen='',reclaimSpent='',reclaimDeadline=0,reclaimTimer=null,reclaimChoices='';
     let modeReceipt = '', modeSupported = false, levelsSupported = false, fillEditSupported = false;
     let pendingStartup = null, startupWaiting = false;
-    let gotoDirty = false, gotoRevision = 0, gotoView = '';
-    const gotoFields = ['goto-x','goto-y','goto-width'];
     let selectedStyle = null;
     let levelNext = null, levelSource = '', levelIds = new Set(), levelLoad = 0, levelBusy = false;
-    let lastDigit = '', lastDigitAt = 0;
     let operationTimer = null, resizeTimer = null, displayed = false;
     const errors = {
         index_unavailable: 'A current index is required. Review “Index and open…” or use “Index this source”; opening never indexes automatically.',
@@ -108,51 +106,33 @@
             xhr.send(upload ? upload.blob : body === undefined ? null : JSON.stringify(body));
         });
     }
-    function connection(text, ready) { el('connection').textContent = text; el('connection').className = 'connection' + (ready ? ' ready' : ''); }
+    function connection(text, ready) { el('connection').textContent = text; el('connection').className = 'connection' + (ready ? ' ready' : ''); updateCursor(); }
     function dims() {
-        const r = viewport.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
-        const left = Math.ceil(r.left * dpr), top = Math.ceil(r.top * dpr);
-        const w = Math.floor(r.right * dpr) - left, h = Math.floor(r.bottom * dpr) - top;
-        P.pixels(w, h);
-        return {pixels: [w, h], dpr: dpr, left: left / dpr - r.left, top: top / dpr - r.top};
-    }
-    function positionCanvas(size) {
-        canvas.style.width = (canvas.width / size.dpr) + 'px';
-        canvas.style.height = (canvas.height / size.dpr) + 'px';
-        canvas.style.left = (size.left + Math.round((size.pixels[0] - canvas.width) / 2) / size.dpr) + 'px';
-        canvas.style.top = (size.top + Math.round((size.pixels[1] - canvas.height) / 2) / size.dpr) + 'px';
-    }
-    function positionBuffer(target, size, p) {
-        target.style.width = (target.width / size.dpr) + 'px'; target.style.height = (target.height / size.dpr) + 'px';
-        target.style.left = (size.left - p[0] / size.dpr) + 'px'; target.style.top = (size.top - p[1] / size.dpr) + 'px';
+        return V.dimensions(P, viewport.getBoundingClientRect(), window.devicePixelRatio || 1);
     }
     function pendingPan() {
-        const items = (inflightBody ? [inflightBody] : []).concat(queue), delta = [0, 0];
-        for (let i = 0; i < items.length; ++i) {
-            const n = items[i].navigation;
-            if (Object.keys(items[i]).length !== 1 || !n || n.kind !== 'pan') { return null; }
-            const period = n.snap ? 16 : 1;
-            delta[0] += P.roundEven(n.x * state.pixels[0] / period) * period;
-            delta[1] -= P.roundEven(n.y * state.pixels[1] / period) * period;
-        }
-        if (dragShift) { delta[0] += dragShift[0]; delta[1] += dragShift[1]; }
-        return delta;
+        return V.panDelta(P, state, (inflightBody ? [inflightBody] : []).concat(queue), dragShift);
     }
     function dumpChanged() { if (dumps) { dumps.changed(); } }
+    function viewerContext() {
+        const h = lastPlacement && lastPlacement.full ? marginFrame : foregroundFrame;
+        return {active: !stopped && !pageSuspended && !document.hidden && !decodeFailed,
+            connected: !!socket && socket.readyState === WebSocket.OPEN && !!epoch,
+            connecting: !!socket && (!epoch || !state || state.connection_epoch !== epoch || socket.readyState === 0), state: state, frame: h, completedFrame: completedFrame,
+            pending: !!inflight || !!accepted || queue.length > 0, decoding: !!decode && decodePurpose === 'foreground',
+            acked: !!h && ackedFrames[h.purpose] === h.frame_id,
+            gesture: !!(gesture && gesture.active()) || ownerBusy || submitting || indexBlocked()};
+    }
+    function updateCursor() {
+        V.cursor(el('app-shell'), viewport, V.busy(P, viewerContext()), gesture,
+            !!((drcPanel && drcPanel.boxActive()) || (measurement && measurement.active())));
+    }
     function present() {
-        if (stopped) { return; }
+        if (stopped) { updateCursor(); return; }
         const size = dims(), delta = state && pendingPan();
-        const sameSize = state && size.pixels[0] === state.pixels[0] && size.pixels[1] === state.pixels[1];
-        const at = function (h) { const p = sameSize && delta && P.placement(h, state); return p && [p[0] + delta[0], p[1] + delta[1]]; };
-        const mp = at(marginFrame), fp = at(foregroundFrame);
-        marginCanvas.hidden = !mp;
-        if (mp) { positionBuffer(marginCanvas, size, mp); }
-        const full = mp && marginFrame.complete && mp[0] >= 0 && mp[1] >= 0 &&
-            mp[0] + size.pixels[0] <= marginCanvas.width && mp[1] + size.pixels[1] <= marginCanvas.height;
-        canvas.hidden = !!full;
-        if (fp) { positionBuffer(canvas, size, fp); } else { positionCanvas(size); }
-        lastPlacement = {pixels: size.pixels, margin: mp, full: !!full,
-            foreground: fp || [-Math.round((size.pixels[0] - canvas.width) / 2), -Math.round((size.pixels[1] - canvas.height) / 2)]};
+        lastPlacement = V.compose({protocol: P, canvas: canvas, marginCanvas: marginCanvas, foreground: foregroundFrame,
+            margin: marginFrame, state: state, size: size, delta: delta});
+        const mp = lastPlacement.margin, full = lastPlacement.full;
         if (full) { displayProjection = window.FloeDRC.projection(marginFrame, mp, state.dbu_um); }
         else if (foregroundFrame) { displayProjection = window.FloeDRC.projection(foregroundFrame, lastPlacement.foreground, state.dbu_um); }
         else { displayProjection = frozenProjection && window.FloeDRC.shifted(frozenProjection.projection,
@@ -178,6 +158,7 @@
             (state.margin_working ? 'Prefetching' : (mp ? 'Margin ready' : 'Margin pending')) +
             (marginFrame ? ' · ' + (Number((marginFrame.perf || {}).raster_us || 0) / 1000).toFixed(1) + ' ms bg' : '') +
             (marginFrame && marginFrame.labels_truncated ? ' · labels partial' : '') + (state.margin_failure ? ' · prefetch failed' : '') : '';
+        updateCursor();
     }
     function freezeMargin() {
         // Freeze the actual composite, including a truncated margin's incoming
@@ -185,27 +166,12 @@
         const p = lastPlacement;
         if (displayed && p) {
             frozenProjection = {projection: displayProjection, pixels: p.pixels.slice()};
-            const [w, h] = p.pixels, mp = p.margin, fp = p.foreground;
-            const copy = !!mp || fp[0] !== 0 || fp[1] !== 0 || canvas.width !== w || canvas.height !== h;
-            if (copy) {
-                if (p.full && mp) {
-                    canvas.width = w; canvas.height = h; context.imageSmoothingEnabled = false;
-                    context.drawImage(marginCanvas, mp[0], mp[1], w, h, 0, 0, w, h);
-                } else {
-                    const temp = document.createElement('canvas'); temp.width = w; temp.height = h;
-                    const ctx = temp.getContext('2d', {alpha: false}); ctx.imageSmoothingEnabled = false;
-                    if (mp) { ctx.drawImage(marginCanvas, -mp[0], -mp[1]); }
-                    if (!canvas.hidden) { ctx.drawImage(canvas, -fp[0], -fp[1]); }
-                    canvas.width = w; canvas.height = h; context.imageSmoothingEnabled = false;
-                    context.drawImage(temp, 0, 0); temp.width = 1; temp.height = 1;
-                }
-            }
+            const copy = V.freeze({canvas: canvas, marginCanvas: marginCanvas, placement: p, document: document, size: dims()});
             // A no-op/rejected edit produces no replacement frame. If the
             // pixels were not copied/recomposed, their original receipt is
             // still valid; pending/revision checks already prevent queries
             // during a real state change.
             if (copy) { foregroundFrame = null; }
-            canvas.hidden = false; positionCanvas(dims());
             lastPlacement = {pixels: p.pixels, margin: null, full: false, foreground: [0, 0]};
         }
         marginCanvas.hidden = true;
@@ -214,6 +180,7 @@
         timing.clear();
         if (dumps) { dumps.reset(); }
         foregroundFrame = null; marginFrame = null; foregroundPerf = '';
+        completedFrame = null; decodeFailed = false;
         lastPlacement = null; dragShift = null;
         displayProjection = null; frozenProjection = null;
         canvas.hidden = false; canvas.width = 1; canvas.height = 1;
@@ -222,6 +189,7 @@
             delete target.dataset.frameId; delete target.dataset.renderRev; delete target.dataset.bboxDbu;
         });
         ackedFrames = {foreground: null, margin: null};
+        updateCursor();
     }
     function live() { return !stopped && state && !['closed', 'failed'].includes(state.status); }
     function indexBlocked() { return !!indexOpen && indexOpen.blocked(); }
@@ -281,6 +249,7 @@
         if (picker) { picker.changed(); }
         if (indexOpen) { indexOpen.changed(); }
         if (palette) { palette.changed(); }
+        updateCursor();
     }
     function queryContext() {
         if (!state || !currentId || !lastPlacement) { return null; }
@@ -348,6 +317,7 @@
         if (done) { editCallbacks.set(body, done); }
         const error = ownerBusy || submitting || indexBlocked() ? 'An owner operation or approval is pending. This input was not applied.' : !live() || !epoch ? 'Open a connected view first.' : queue.length >= 64 ? 'Input queue is full. This input was not applied.' : null;
         if (error) { notice(error); settleEdit(body, error); return null; }
+        decodeFailed = false;
         if (!body.navigation || body.navigation.kind !== 'pan' || !body.navigation.snap) { freezeMargin(); }
         const editTiming = timing.beginEdit(body.navigation && body.navigation.kind);
         if (editTiming) { editTimings.set(body, editTiming); }
@@ -359,19 +329,13 @@
         };
     }
     function syncGoto(force) {
-        if (!state || !currentId || (launcher && launcher.blocked()) ||
-            (pendingStartup && pendingStartup.source_id !== currentSource)) { return; }
-        if (gotoView !== currentId) { gotoView = currentId; gotoDirty = false; ++gotoRevision; force = true; }
-        if (!force && (gotoDirty || gotoFields.some(function(k){return document.activeElement === el(k);}))) { return; }
-        const camera = state.camera_um;
-        if (camera !== null && (!Array.isArray(camera) || camera.length !== 3 || Number(P.decimal(camera[2])) <= 0)) { throw Error('Invalid camera coordinates'); }
-        const values = camera === null ? ['','',''] : camera.map(P.decimal);
-        gotoFields.forEach(function(k,i){el(k).value = values[i];});
+        if (viewControls) { viewControls.syncGoto(force); }
     }
     function statusSnapshot(s) {
         if (s.view_id !== currentId || s.connection_epoch !== epoch) { return; }
         if (state && state.connection_epoch === epoch && P.compare(s.state_rev, state.state_rev) < 0) { return; }
         if (s.status === 'closed') { clearClosedView(); return; }
+        if (!state || s.render_rev !== state.render_rev) { decodeFailed = false; }
         if (gesture && gesture.active() && state && (s.state_rev !== state.state_rev || s.connection_epoch !== state.connection_epoch)) { gesture.cancel(); }
         if (marginFrame && !P.placement(marginFrame, s)) {
             freezeMargin(); marginFrame = null; marginCanvas.width = 1; marginCanvas.height = 1;
@@ -391,19 +355,14 @@
         el('rendering').textContent = s.status === 'opening' ? 'Opening index' : 'Rendering';
         if (!displayed) { el('empty-message').textContent = s.status === 'failed' ? message(s.failure) : 'Preparing the first frame…'; }
         if (s.failure) { notice(message(s.failure)); }
-        if (document.activeElement !== el('depth')) { el('depth').value = s.depth; }
-        el('max-depth').textContent = s.max_depth === null ? '' : '/ ' + s.max_depth;
-        ['detail', 'thin'].forEach(function (id) { el(id).value = s[id]; });
-        ['frames', 'labels', 'mono'].forEach(function (id) { el(id).checked = s[id]; });
-        if (document.activeElement !== el('font-px')) { el('font-px').value = s.font_px; }
-        syncGoto(false);
+        viewControls.sync();
         const b = s.bbox_dbu.map(Number), dbu = Number(s.dbu_um);
         el('viewport-info').textContent = ((b[2] - b[0]) * dbu).toPrecision(6) + ' × ' + ((b[3] - b[1]) * dbu).toPrecision(6) + ' µm';
         el('status').textContent = s.status + ' · depth ' + s.depth + ' · thin:' + s.effective_thin + (s.source_stale ? ' · SOURCE STALE' : '');
         pump();
         present();
     }
-    function finishDecode() { if (decode) { decode(); decode = null; } }
+    function finishDecode() { if (decode) { decode(); decode = null; } decodePurpose = null; updateCursor(); }
     function decodeImage(h,data,callback){
         return window.FloeImageDecode.create({Image:Image,ImageData:ImageData,Blob:Blob,URL:URL,
             setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window)},h,data,callback);
@@ -435,20 +394,16 @@
             try {
                 if (draw && valid()) {
                     const target = h.purpose === 'margin' ? marginCanvas : canvas;
-                    const ctx = h.purpose === 'margin' ? marginContext : context;
-                    if (target.width !== h.width || target.height !== h.height) { target.width = h.width; target.height = h.height; }
-                    ctx.imageSmoothingEnabled = false; draw(ctx);
+                    V.paint(target, h, draw);
                     if (dumps) { dumps.received(h, target); }
-                    if (h.purpose === 'margin') { marginFrame = h; } else { foregroundFrame = h; frozenProjection = null; }
+                    if (h.purpose === 'margin') { marginFrame = h; } else { foregroundFrame = h; completedFrame = h; frozenProjection = null; }
                     if (!displayed && document.activeElement === document.body) { viewport.focus(); }
                     displayed = true; el('empty').hidden = true; disposition = 'displayed';
                     target.dataset.frameId = h.frame_id; target.dataset.renderRev = h.render_rev;
                     target.dataset.bboxDbu = JSON.stringify(h.bbox_dbu);
                     const perf = h.perf || {}, ms = function (name) { return perf[name] ? (Number(perf[name]) / 1000).toFixed(1) : '0'; };
                     const fitted = ['fit_pct','fit_cull','fit_over','fit_thin'].some(function (k) { return Number(perf[k] || 0) > 0; });
-                    el('status').textContent = (!h.final ? 'Refining' : h.complete ? 'Live' : 'INCOMPLETE') + (h.approximate ? ' · approximate' : '') +
-                        (fitted ? ' · budget fit' : '') + (Number(perf.shape_cut || 0) > 0 ? ' · short-side cut' : '') +
-                        (h.labels_truncated ? ' · labels partial' : '') + (h.deck_skipped !== '0' ? ' · skipped ' + h.deck_skipped : '') + ' · gen ' + h.generation;
+                    el('status').textContent = V.frameStatus(h);
                     if (h.purpose === 'foreground') {
                         foregroundPerf = 'Rust foreground · plan ' + ms('plan_us') + ' ms · decode ' + ms('decode_us') + ' ms · draw ' + ms('raster_us') +
                             ' ms · ' + (perf.pages || '0') + ' pages · ' + h.width + ' × ' + h.height + ' px · ' + h.format +
@@ -469,13 +424,13 @@
                     present();
                     submitted = true;
                 }
-            } catch (e) { report(e); }
+            } catch (e) { decodeFailed = true; report(e); }
             timing.endFrame(frameTiming, submitted);
-            decode = null; acknowledge(h, disposition, ws, serial);
+            decode = null; decodePurpose = null; acknowledge(h, disposition, ws, serial); updateCursor();
         }
         const task=decodeImage(h,packet.data,
-            function(draw,error){timing.decoded(frameTiming);if(error){notice(error.message);}finish(draw);});
-        decode=function(){task.cancel();timing.endFrame(frameTiming,false);};task.start();
+            function(draw,error){timing.decoded(frameTiming);if(error){decodeFailed=true;notice(error.message);}finish(draw);});
+        decodeFailed=false;decode=function(){task.cancel();timing.endFrame(frameTiming,false);};decodePurpose=h.purpose;updateCursor();task.start();
     }
     function disconnect() {
         timing.interrupt();
@@ -490,13 +445,14 @@
         if (inspector) { inspector.changed(); }
         if (clipper) { clipper.changed(); }
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        updateCursor();
     }
     function connect() {
         disconnect(); if (stopped || pageSuspended || !currentId || !live()) { return; }
         const serial = socketSerial;
         const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/api/v1/events',
             ['floe.v1', 'bundle.' + bundle, 'csrf.' + auth.csrf]);
-        socket = ws; ws.binaryType = 'arraybuffer'; seq = '0'; connection('Connecting', false);
+        socket = ws; ws.binaryType = 'arraybuffer'; seq = '0'; connection('Connecting', false);updateCursor();
         ws.onmessage = function (event) {
             if (socket !== ws || serial !== socketSerial) { return; }
             if (typeof event.data !== 'string') { frame(event.data, ws, serial); return; }
@@ -931,13 +887,9 @@
     }
     el('levels-all').onchange = function () { Array.from(el('level-list').querySelectorAll('input')).forEach(function (box) { box.disabled = el('levels-all').checked; }); };
     el('level-more').onclick = function () { moreLevels().catch(report); };
-    ['depth', 'detail', 'thin'].forEach(function (id) { el(id).onchange = function () { const body = {}; body[id] = el(id).value; edit(body); }; });
-    ['frames', 'labels', 'mono'].forEach(function (id) { el(id).onchange = function () { const body = {}; body[id] = el(id).checked; edit(body); }; });
-    el('font-px').onchange = function () {
-        const n = Number(el('font-px').value);
-        if (!Number.isInteger(n) || n < 6 || n > 96) { notice('Label size must be 6–96 device pixels.'); return; }
-        edit({font_px: n});
-    };
+    viewControls = V.bindControls({el: el, document: document, protocol: P, edit: edit, notice: notice,
+        gesture: function () { return gesture; }, context: function () { return {id: currentId, state: state, ready: live(),
+            gotoBlocked: !currentId || (launcher && launcher.blocked()) || (pendingStartup && pendingStartup.source_id !== currentSource)}; }});
     function patternControls() { el('style-pattern').hidden = el('pattern-label').hidden = el('style-fill').value !== 'pattern'; }
     el('style-fill').onchange = patternControls;
     el('style-cancel').onclick = function () { selectedStyle = null; el('style-editor').hidden = true; };
@@ -957,30 +909,7 @@
         if (delta.fill || delta.width !== undefined) { edit({style_batch: delta}); }
         selectedStyle = null; el('style-editor').hidden = true;
     };
-    const nav = function (n) { edit({navigation: n}); };
-    const zoom = function (factor, anchor) { nav({kind: 'zoom', factor: factor, anchor: anchor || [0.5, 0.5]}); };
-    el('fit').onclick = function () { nav({kind: 'fit'}); };
-    el('zoom-in').onclick = function () { zoom(0.8); };
-    el('zoom-out').onclick = function () { zoom(1.25); };
-    el('goto-form').onsubmit = function (event) {
-        event.preventDefault();
-        try {
-            const values = gotoFields.map(function(k){return P.decimal(el(k).value);}), rev = gotoRevision, id = currentId;
-            gotoDirty = true;
-            edit({navigation:{kind:'goto',center_um:values.slice(0,2),width_um:values[2]}},function(error){
-                if (!error && id === currentId && rev === gotoRevision) { gotoDirty = false; syncGoto(true); }
-            });
-        }
-        catch (e) { report(e); }
-    };
-    gotoFields.forEach(function(k){
-        el(k).addEventListener('input',function(){gotoDirty = true; ++gotoRevision;});
-        el(k).addEventListener('keydown',function(e){
-            if (e.key === 'Escape' && !e.isComposing && e.keyCode !== 229 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-                e.preventDefault(); gotoDirty = false; ++gotoRevision; syncGoto(true);
-            }
-        });
-    });
+    const nav = viewControls.navigate;
     function overlays(mode) {
         if(!['all','focus','none'].includes(mode)){return;}
         overlayMode=mode;el('overlays').value=mode;
@@ -996,15 +925,11 @@
         }
         if (gesture && gesture.active()) { if (event.key === 'Escape') { event.preventDefault(); gesture.cancel(); } return; }
         if (event.metaKey || event.altKey) { return; }
-        let key = event.key;
-        if (key.length === 1 && key.charCodeAt(0) > 127 && /^Key[A-Z]$/.test(event.code || '')) { key = event.shiftKey ? event.code.slice(3) : event.code.slice(3).toLowerCase(); }
+        const key = V.keyName(event);
         if (event.ctrlKey) {
-            if (key.toLowerCase() === 'a') { event.preventDefault(); nav({kind: 'fit'}); }
-            else if (key.toLowerCase() === 'z') { event.preventDefault(); zoom(0.5); }
-            else if (key === '.') { event.preventDefault(); el('goto-x').focus(); el('goto-x').select(); }
-            else if (key === ',' && !event.shiftKey && !event.repeat && event.target === viewport && modeSupported && state.capabilities.mode) {
+            if (key === ',' && !event.shiftKey && !event.repeat && event.target === viewport && modeSupported && state.capabilities.mode) {
                 event.preventDefault(); changeDeckMode(currentMode === 'level' ? 'chip' : 'level').catch(report);
-            }
+            } else { viewControls.key(event); }
             return;
         }
         if(key==='Tab'&&!event.shiftKey&&event.target===viewport){event.preventDefault();const modes=['all','focus','none'];overlays(modes[(modes.indexOf(overlayMode)+1)%3]);return;}
@@ -1015,40 +940,17 @@
         }
         if (drcPanel && drcPanel.key(key)) { event.preventDefault(); return; }
         if (inspector && inspector.key(key)) { event.preventDefault(); return; }
-        const amount = event.shiftKey ? 0.1 : 0.5;
-        const directions = {ArrowLeft: [-amount, 0], ArrowRight: [amount, 0], ArrowUp: [0, amount], ArrowDown: [0, -amount]};
-        if (directions[key]) { event.preventDefault(); nav({kind: 'pan', x: directions[key][0], y: directions[key][1], snap: true}); }
-        else if (key === '+' || key === '=') { event.preventDefault(); zoom(0.8); }
-        else if (key === '-') { event.preventDefault(); zoom(1.25); }
-        else if (key === 'f' || key === 'C') { event.preventDefault(); edit({frames: !state.frames}); }
-        else if (key === 'b') { event.preventDefault(); edit({mono: !state.mono}); }
-        else if (key === 'Z') { event.preventDefault(); zoom(2); }
-        else if (key === 'g') { event.preventDefault(); el('goto-x').focus(); el('goto-x').select(); }
-        else if (key === 'd') { event.preventDefault(); el('detail').focus(); }
-        else if (key === '<' || key === '>') { event.preventDefault(); edit({depth_step:key === '<' ? -1 : 1}); }
-        else if (/^[0-9]$/.test(key)) {
-            event.preventDefault(); const depth = key === '9' && lastDigit === '9' && Date.now() - lastDigitAt < 1000 ? 'full' : key;
-            lastDigit = depth === 'full' ? '' : key; lastDigitAt = Date.now(); edit({depth: depth});
-        }
+        viewControls.key(event);
     });
     viewport.addEventListener('wheel', function (event) {
-        if (!live()) { return; } event.preventDefault();
-        // Match GTK's render-in-flight suppression. Do not queue old wheel
-        // events behind a slow frame, or zoom around an unseen/stale image.
-        // Background margin work keeps phase=idle and does not block input.
-        if (stopped || document.hidden || !displayed || state.status !== 'idle' || !epoch ||
-            !socket || socket.readyState !== WebSocket.OPEN || inflight || accepted || queue.length ||
-            ownerBusy || submitting || indexBlocked() || decode || (gesture && gesture.active()) || !lastPlacement) { return; }
-        let size; try { size = dims(); } catch (_) { return; }
-        const h = lastPlacement.full ? marginFrame : foregroundFrame;
-        if (!h || !h.final || !P.matches(h, state) || ackedFrames[h.purpose] !== h.frame_id ||
-            size.pixels.some(function (n, i) { return n !== state.pixels[i]; })) { return; }
-        const navigation = window.FloeGestures.wheelNavigation(event, size, viewport.getBoundingClientRect());
-        if (navigation) { nav(navigation); }
+        V.wheel({protocol: P, gestures: window.FloeGestures, viewport: viewport, navigate: nav, context: function () {
+            const c = viewerContext(); c.active = c.active && live(); c.decoding = !!decode;
+            try { c.size = dims(); } catch (_) { c.size = null; } return c;
+        }}, event);
     }, {passive: false});
     function reviewCursor() {
         if (measurement && measurement.active() && drcPanel && drcPanel.boxActive()) { measurement.leave(); }
-        viewport.style.cursor = gesture && gesture.bandActive() ? 'crosshair' : gesture && gesture.active() ? 'grabbing' : (drcPanel && drcPanel.boxActive()) || (measurement && measurement.active()) ? 'crosshair' : '';
+        updateCursor();
         if (inspector && (!gesture || !gesture.active())) { inspector.changed(); }
     }
     viewport.addEventListener('mousemove', function (event) {
@@ -1073,13 +975,7 @@
             const h=lastPlacement.full?marginFrame:foregroundFrame;
             return !!h&&P.matches(h,state);
         },
-        bandPreview:function(b){
-            const box=el('zoom-band'),hint=el('zoom-band-hint');box.hidden=hint.hidden=!b;if(!b){return;}
-            const d=b.dimensions,x=b.start[0]*d.pixels[0],y=b.start[1]*d.pixels[1],ex=b.end[0]*d.pixels[0],ey=b.end[1]*d.pixels[1];
-            box.style.left=((d.left||0)+Math.round(Math.min(x,ex))/d.dpr)+'px';box.style.top=((d.top||0)+Math.round(Math.min(y,ey))/d.dpr)+'px';
-            box.style.width=(Math.max(1,Math.round(Math.abs(ex-x)))/d.dpr)+'px';box.style.height=(Math.max(1,Math.round(Math.abs(ey-y)))/d.dpr)+'px';
-            box.style.borderWidth=(1/d.dpr)+'px';hint.textContent=(b.outward?'Zoom out':'Zoom in')+' · release to apply · Esc cancels';
-        },
+        bandPreview:function(b){V.band(el,b);},
         cursor: function(active){if(!active){timing.endGesture();}reviewCursor();}, pan: nav, objectClicks: true, selectionMode: function () { return !!drcPanel && drcPanel.boxActive(); },
         click: function (x, y, twice, modifiers) {
             if (measurement && measurement.active()) { measurement.click(x, y, modifiers); return; }
@@ -1281,7 +1177,7 @@
     function launchReady() {
         // A trusted CLI adds a proposal, not consent to discard current edits.
         // Keep review/approval panels intact even after their editor lost focus.
-        const editing = gotoDirty || ['browse-dialog','index-open-dialog','about-dialog','session-exit-dialog','share-dialog',
+        const editing = viewControls.dirty() || ['browse-dialog','index-open-dialog','about-dialog','session-exit-dialog','share-dialog',
             'notes-editor','notes-review','notes-uncertain','notes-cancel',
             'waives-editor','waives-review','waives-uncertain','waives-cancel',
             'default-review','default-uncertain','default-cancel','recovery-preview','recovery-resolve','recovery-check'].some(function(id){return !el(id).hidden;});
