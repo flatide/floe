@@ -8,7 +8,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-fn data() -> floe_app_core::Result<Value> {
+pub(crate) fn data() -> floe_app_core::Result<Value> {
     let p = floe_app_core::styles::presets::bundled()?;
     let fills: Vec<_> = p
         .fills

@@ -32,6 +32,9 @@ fn main() {
         "ui/protocol.js",
         "ui/gestures.js",
         "ui/minimap.js",
+        "ui/menubar.js",
+        "ui/panes.js",
+        "ui/cells.js",
         "ui/query.js",
         "ui/inspect.js",
         "ui/measure.js",
@@ -154,12 +157,18 @@ fn main() {
             .replace("@@BUNDLE@@", &id);
         if name == "server.html" {
             let owner = fs::read_to_string("ui/index.html").expect("canonical viewer shell");
+            // The server shell shows the same panes as the owner shell; every
+            // id and id reference gets the server- prefix so the shared
+            // modules bind through one prefixed `el`.
             for (marker, slot) in [
-                ("controls", "@@VIEW_CONTROLS@@"),
-                ("toolbar", "@@VIEW_TOOLBAR@@"),
+                ("view-controls", "@@VIEW_CONTROLS@@"),
+                ("view-toolbar", "@@VIEW_TOOLBAR@@"),
+                ("right-pane", "@@RIGHT_PANE@@"),
+                ("layer-menu", "@@LAYER_MENU@@"),
+                ("layer-tools", "@@LAYER_TOOLS@@"),
             ] {
-                let start = format!("<!-- floe-view-{marker}:start -->");
-                let end = format!("<!-- floe-view-{marker}:end -->");
+                let start = format!("<!-- floe-{marker}:start -->");
+                let end = format!("<!-- floe-{marker}:end -->");
                 let fragment = owner
                     .split_once(&start)
                     .expect("viewer fragment start")
@@ -168,7 +177,10 @@ fn main() {
                     .expect("viewer fragment end")
                     .0
                     .replace("id=\"", "id=\"server-")
-                    .replace("for=\"", "for=\"server-");
+                    .replace("for=\"", "for=\"server-")
+                    .replace("aria-controls=\"", "aria-controls=\"server-")
+                    .replace("aria-labelledby=\"", "aria-labelledby=\"server-")
+                    .replace("aria-describedby=\"", "aria-describedby=\"server-");
                 assert_eq!(html.matches(slot).count(), 1, "one viewer slot");
                 html = html.replace(slot, &fragment);
             }

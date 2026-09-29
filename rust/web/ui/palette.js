@@ -1,7 +1,7 @@
 /* Palette UI state only. Rust owns group order, visibility and styles. */
 (function (root) {
     'use strict';
-    const LIMIT = 4096, PAGE = 64;
+    const LIMIT = 4096, PAGE = 64, FULL = 1024;
     function key(pair) {
         if (!Array.isArray(pair) || pair.length !== 2 || !pair.every(function (n) { return Number.isInteger(n) && n >= 0 && n <= 4294967295; })) { throw Error('Invalid layer pair'); }
         return pair.join('/');
@@ -201,15 +201,18 @@
             value.rows.forEach(function (r) {
                 const k = key(r.pair), row = port.document.createElement('div');
                 row.className = 'layer-row' + (r.parent ? ' child' : '') + (r.head ? ' head' : '');
-                const check = port.document.createElement('input'); check.type = 'checkbox'; check.checked = r.visible;
+                row.dataset.visible = String(r.visible);
+                const check = port.document.createElement('input'); check.type = 'checkbox'; check.checked = r.visible; check.className = 'layer-check';
                 check.setAttribute('aria-label', 'Show ' + r.name);
                 check.onchange = function () { const on = check.checked; check.checked = r.visible; if (valid(p)) { change(on ? 'show' : 'hide', new Map([[k,r.children > 0]])); } };
                 const extras = port.styles(r, {id:identity,key:loadedKey}, function () { return valid(p) && editable(); });
                 const expander = port.document.createElement(r.children ? 'button' : 'span'); expander.className = 'layer-fold';
-                if (r.children) { expander.type = 'button'; expander.textContent = r.closed ? '+' : '−'; expander.setAttribute('aria-expanded', String(!r.closed)); expander.setAttribute('aria-label', (r.closed ? 'Expand ' : 'Collapse ') + r.name);
+                if (r.children) { expander.type = 'button'; expander.textContent = r.closed ? '+' : '-'; expander.setAttribute('aria-expanded', String(!r.closed)); expander.setAttribute('aria-label', (r.closed ? 'Expand ' : 'Collapse ') + r.name);
                     expander.onclick = function () { if (usable() && valid(p)) { toggleFold(k); } }; }
                 const name = port.document.createElement('button'); name.type = 'button'; name.className = 'layer-select';
-                const title = port.document.createElement('span'); title.className = 'layer-name'; title.textContent = r.name || k; title.dataset.pair = k;
+                const title = port.document.createElement('span'); title.className = 'layer-name'; title.dataset.pair = k;
+                // A placeholder name equal to the pair reads as Calibre's L.D.
+                title.textContent = !r.name || r.name === k ? (r.pair[1] === 0 ? String(r.pair[0]) : r.pair[0] + '.' + r.pair[1]) : r.name;
                 name.title = k + ' · ' + r.name + (r.aliases.length ? ' · ' + r.aliases.join(', ') : '');
                 name.setAttribute('aria-label', 'Select ' + k + ' ' + r.name); name.setAttribute('aria-haspopup','menu'); name.appendChild(title);
                 let lastClick = null, lastRevision = 0;
@@ -218,11 +221,18 @@
                 name.onkeydown = function (e) { if (!e.isComposing && e.keyCode !== 229 && (e.key === 'ContextMenu' || e.key === 'F10' && e.shiftKey)) { showMenu(e,name); } };
                 row.oncontextmenu = function (e) { showMenu(e,name); };
                 row.onclick = function (e) { if (e.target === row) { select(r,e,p); } };
+                // Calibre reading order (marker, layer.datatype, swatch, name)
+                // is CSS flex order; the DOM keeps check, color, fold, name, style.
+                const pairText = port.document.createElement('span'); pairText.className = 'layer-pair';
+                pairText.textContent = r.pair[1] === 0 ? String(r.pair[0]) : r.pair[0] + '.' + r.pair[1];
+                name.appendChild(pairText);
                 row.appendChild(check); row.appendChild(extras.color); row.appendChild(expander); row.appendChild(name); row.appendChild(extras.style); list.appendChild(row);
                 widgets.push({row:row, key:k, name:name, check:check, color:extras.color, style:extras.style, fold:r.children ? expander : null});
             });
             if (!value.rows.length) { list.textContent = 'No layer rows.'; }
-            el('layers-count').textContent = (value.total ? (start + 1) + '–' + (start + value.rows.length) + ' / ' : '') + value.total;
+            const whole = value.start === 0 && value.next === null;
+            el('layers-count').textContent = whole ? value.total + ' layer' + (value.total === 1 ? '' : 's') : (value.total ? (start + 1) + '–' + (start + value.rows.length) + ' / ' : '') + value.total;
+            el('layers-prev').hidden = el('layers-next').hidden = whole;
             port.painted(); update();
             const target = focused && widgets.find(function (w) { return w.key === focused.key; }); if (target && !target.name.disabled) { target.name.focus(); }
         }
@@ -231,11 +241,20 @@
             cancelRead(); hideMenu(false);
             const f = {kind:'page', token:{}, id:identity, key:s.key, start:start, fold:foldRevision}; flight = f; failed = ''; update();
             try {
-                const value = await port.http('POST', '/api/v1/views/' + f.id + '/palette', {kind:'page', start:start, fold:fold()}, false, f.token);
-                const now = context();
-                if (f.token.cancelled || flight !== f || !now || now.id !== f.id || now.key !== f.key || f.fold !== foldRevision || f.start !== start) { return; }
-                if (value.render_key !== f.key) { failed = f.key; throw Error('Layer state changed. Reload the layer page.'); }
-                if (!Number.isSafeInteger(value.total) || value.total < 0 || value.start !== start || !Array.isArray(value.rows) || value.rows.length > PAGE || value.rows.length !== Math.min(PAGE,value.total-start) || value.next !== (start + value.rows.length < value.total ? start + value.rows.length : null)) { throw Error('Invalid layer page'); }
+                // The GTK list scrolls the whole table; read consecutive
+                // server pages into one list and keep paging only past FULL.
+                let at = start, rows = [], total = null, next = null, stateRev = null;
+                for (;;) {
+                    const page = await port.http('POST', '/api/v1/views/' + f.id + '/palette', {kind:'page', start:at, fold:fold()}, false, f.token);
+                    const now = context();
+                    if (f.token.cancelled || flight !== f || !now || now.id !== f.id || now.key !== f.key || f.fold !== foldRevision || f.start !== start) { return; }
+                    if (page.render_key !== f.key) { failed = f.key; throw Error('Layer state changed. Reload the layer page.'); }
+                    if (!Number.isSafeInteger(page.total) || page.total < 0 || page.start !== at || !Array.isArray(page.rows) || page.rows.length > PAGE || page.rows.length !== Math.min(PAGE,page.total-at) || page.next !== (at + page.rows.length < page.total ? at + page.rows.length : null) || (total !== null && page.total !== total)) { throw Error('Invalid layer page'); }
+                    total = page.total; next = page.next; stateRev = page.state_rev; rows = rows.concat(page.rows);
+                    if (!port.wholeList || next === null || total > FULL || rows.length >= FULL) { break; }
+                    at = next;
+                }
+                const value = {state_rev:stateRev, render_key:f.key, total:total, start:start, next:next, rows:rows};
                 const rowKeys = keys(value.rows.map(function (r) { return r.pair; }));
                 if (rowKeys.some(function (k,i) { return i && order(rowKeys[i-1],k) >= 0; })) { throw Error('Invalid layer order'); }
                 value.rows.forEach(function (r) { checkRow(r); if (!Number.isSafeInteger(r.children) || r.children < 0 || typeof r.closed !== 'boolean' || r.closed !== (r.children > 0 && closed(key(r.pair)))) { throw Error('Invalid layer group'); } });
@@ -306,6 +325,25 @@
         menu.hidden = true; closeStyle(); changed();
         return Object.freeze({changed:changed, stop:function(){stop();presets.stop();}, suspend:suspend, resume:resume, closeStyle:closeStyle});
     }
-    const api = {bind:bind, choose:choose};
+    // Calibre-style swatch: a 1px border in the layer color around the fill
+    // tiled 1:1 in that color. Pixels only; Rust owns the style itself.
+    function swatch(canvas, r) {
+        const w = 31, h = 14, ctx = canvas.getContext('2d');
+        if (!ctx) { return; }
+        canvas.width = w; canvas.height = h;
+        ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
+        ctx.fillStyle = r.color;
+        const kind = r.fill.kind, rows = kind === 'pattern' ? r.fill.rows : null;
+        for (let y = 1; y < h - 1; y++) {
+            for (let x = 1; x < w - 1; x++) {
+                let on = kind === 'solid';
+                if (kind === 'speckle') { on = (y & 1) === 0 && (x & 1) === 0; }
+                else if (rows) { on = ((rows[y & 15] >> (15 - (x & 15))) & 1) === 1; }
+                if (on) { ctx.fillRect(x, y, 1, 1); }
+            }
+        }
+        ctx.fillRect(0, 0, w, 1); ctx.fillRect(0, h - 1, w, 1); ctx.fillRect(0, 0, 1, h); ctx.fillRect(w - 1, 0, 1, h);
+    }
+    const api = {bind:bind, choose:choose, swatch:swatch};
     if (typeof module !== 'undefined' && module.exports) { module.exports = api; } else { root.FloePalette = api; }
 }(typeof window === 'undefined' ? this : window));

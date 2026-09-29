@@ -14,14 +14,18 @@
             if(m.size!==SIZE||typeof m.base!=='string'||!(/^(full|[0-9]|[12][0-9]|3[01])$/).test(m.base)||!Array.isArray(m.marks)||m.marks.length>6||!m.marks.every(rect)||
                (m.die!==null&&(!Array.isArray(m.die)||!rect(m.die.concat([1]))))){throw new Error('Invalid overview projection');}
         }
+        // Under a view root the die is the root cell's box and the baked
+        // frontier of the top does not apply: paint the projection's die only.
+        function rooted(s){return !!(s.root_name||s.root);}
         function paint(s){
-            const m=s.minimap, base=cache.get(m.base), next=JSON.stringify([identity,m,!!base,failed===m.base]);
+            const m=s.minimap, base=rooted(s)?null:cache.get(m.base), next=JSON.stringify([identity,m,!!base,failed===m.base,rooted(s)]);
             if(stamp===next){return;} stamp=next;ctx.fillStyle=COLORS[0];ctx.fillRect(0,0,SIZE,SIZE);
             if(base){ctx.drawImage(base,0,0);}
-            else if(m.die){ctx.fillStyle=COLORS[1];ctx.fillRect.apply(ctx,m.die);}
+            else if(m.die){const d=m.die;ctx.fillStyle=COLORS[1];ctx.fillRect(d[0],d[1],d[2],d[3]);
+                if(rooted(s)){ctx.fillStyle=COLORS[2];ctx.fillRect(d[0],d[1],d[2],1);ctx.fillRect(d[0],d[1]+d[3]-1,d[2],1);ctx.fillRect(d[0],d[1],1,d[3]);ctx.fillRect(d[0]+d[2]-1,d[1],1,d[3]);}}
             m.marks.forEach(function(r){ctx.fillStyle=COLORS[r[4]];ctx.fillRect(r[0],r[1],r[2],r[3]);});
-            el('minimap-note').textContent=failed===m.base?'Overview unavailable; retry to reload.':!base?'Loading structural overview…':m.base==='full'?'Die outline · current view':'Baked depth '+m.base+' · current view';
-            el('minimap-retry').hidden=failed!==m.base;
+            el('minimap-note').textContent=rooted(s)?'Root '+(s.root_name||'cell')+' · current view':failed===m.base?'Overview unavailable; retry to reload.':!base?'Loading structural overview…':m.base==='full'?'Die outline · current view':'Baked depth '+m.base+' · current view';
+            el('minimap-retry').hidden=rooted(s)||failed!==m.base;
         }
         async function fetchBase(s){
             const id=identity, base=s.minimap.base, request={};flight=request;
@@ -43,7 +47,7 @@
             if(!s||stopped){identity='';cache.clear();stamp='';return;}
             try{projection(s.minimap);canvas.hidden=false;}catch(e){el('minimap-note').textContent=e.message;canvas.hidden=true;el('minimap-panel').hidden=false;canvas.setAttribute('aria-disabled','true');return;}
             const id=key(s);if(id!==identity){identity=id;cache.clear();failed='';stamp='';}
-            paint(s);if(!flight&&!cache.has(s.minimap.base)&&failed!==s.minimap.base){fetchBase(s);}
+            paint(s);if(!flight&&!rooted(s)&&!cache.has(s.minimap.base)&&failed!==s.minimap.base){fetchBase(s);}
         }
         function jump(point){
             const s=current();if(!s||stopped||!port.ready()){return;}

@@ -31,6 +31,7 @@ mod tests {
             layers: Layers::All,
             jobs: 1,
             cell_name: "CLIP".into(),
+            root: None,
         }
     }
     #[test]
@@ -128,6 +129,7 @@ impl PrepareDto {
             layers,
             jobs: self.jobs,
             cell_name: self.cell_name,
+            root: None,
         };
         request.validate().map_err(|_| "invalid_request")?;
         Ok(PrepareInput {

@@ -169,7 +169,7 @@ pub(crate) fn counter(fields: &Fields, key: &str) -> Result<u64> {
     }
     Ok(n)
 }
-fn unhex(s: &str) -> Result<String> {
+pub(crate) fn unhex(s: &str) -> Result<String> {
     let bytes = s.as_bytes();
     if !bytes.len().is_multiple_of(2) || !bytes.is_ascii() {
         return Err(Error::protocol("invalid query hex"));

@@ -134,6 +134,18 @@ async fn asset(Path((bundle, name)): Path<(String, String)>) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../ui/minimap.js"),
         ),
+        "menubar.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/menubar.js"),
+        ),
+        "panes.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/panes.js"),
+        ),
+        "cells.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../ui/cells.js"),
+        ),
         "notices.js" => (
             "text/javascript; charset=utf-8",
             include_str!("../ui/notices.js"),

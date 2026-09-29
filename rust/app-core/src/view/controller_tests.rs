@@ -4,7 +4,10 @@ use crate::{
     shots::{Detail, Thin},
     view::{Depth, LayerIsolation, Navigation, Viewport},
 };
-use floe_worker_client::{Fields, Fill, FrameFormat, Layers, QueryScene, QueryStatus};
+use floe_worker_client::{
+    CellFailure, CellFailureCode, CellReply, CellRequest, Fields, Fill, FrameFormat, Layers,
+    QueryScene, QueryStatus,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::atomic::AtomicBool,
@@ -36,6 +39,12 @@ struct Control {
     geometry_partial: AtomicBool,
     query_requests: Mutex<Vec<(u64, QueryRequest)>>,
     query_cancels: Mutex<Vec<QueryKind>>,
+    cell_requests: Mutex<Vec<(u64, CellRequest)>>,
+    /// The `cells` answer's bbox for any cell; None = no shapes.
+    cell_bbox: Mutex<Option<[f64; 4]>>,
+    cell_nohier: AtomicBool,
+    cell_busy: AtomicBool,
+    cell_reply: AtomicBool,
 }
 impl Default for Control {
     fn default() -> Self {
@@ -63,6 +72,11 @@ impl Default for Control {
             geometry_partial: AtomicBool::new(false),
             query_requests: Mutex::new(Vec::new()),
             query_cancels: Mutex::new(Vec::new()),
+            cell_requests: Mutex::new(Vec::new()),
+            cell_bbox: Mutex::new(Some([100., 200., 300., 260.])),
+            cell_nohier: AtomicBool::new(false),
+            cell_busy: AtomicBool::new(false),
+            cell_reply: AtomicBool::new(true),
         }
     }
 }
@@ -77,8 +91,30 @@ struct Fake {
     queries: BTreeMap<u64, QueryRequest>,
     query_frontiers: BTreeMap<QueryKind, u64>,
     query_acks: VecDeque<(QueryKind, u64)>,
+    cell_sequence: u64,
+    cells: BTreeMap<u64, CellRequest>,
 }
 impl Engine for Fake {
+    fn cell_query(&mut self, r: CellRequest) -> Result<u64> {
+        assert!(
+            !(self.deck && r.root().is_some()),
+            "deck root reached the worker"
+        );
+        if self.control.cell_busy.load(Ordering::Relaxed) {
+            return Err(Error::new(ErrorKind::Busy, "cell busy"));
+        }
+        self.cell_sequence += 1;
+        self.control
+            .cell_requests
+            .lock()
+            .unwrap()
+            .push((self.cell_sequence, r.clone()));
+        self.cells.insert(self.cell_sequence, r);
+        Ok(self.cell_sequence)
+    }
+    fn pending_cell_queries(&self) -> usize {
+        self.cells.len()
+    }
     fn query(&mut self, r: QueryRequest) -> Result<u64> {
         assert!(!self.deck);
         if self.control.query_busy.load(Ordering::Relaxed) {
@@ -136,6 +172,35 @@ impl Engine for Fake {
                     kind,
                     before_sequence,
                 }));
+            }
+        }
+        if self.control.cell_reply.load(Ordering::Relaxed) {
+            if let Some((sequence, request)) = self.cells.pop_first() {
+                let reply = if self.control.cell_nohier.load(Ordering::Relaxed) {
+                    Err(CellFailure {
+                        code: CellFailureCode::NoHier,
+                        message: "no summary".into(),
+                    })
+                } else if let CellRequest::Children { source, cell } = request {
+                    let cell = cell.unwrap_or(0);
+                    Ok(CellReply::Children {
+                        source,
+                        cell,
+                        name: format!("CELL{cell}"),
+                        insts: 1,
+                        height: 1,
+                        unit: 0.001,
+                        bbox: *self.control.cell_bbox.lock().unwrap(),
+                        total: 0,
+                        children: Vec::new(),
+                    })
+                } else {
+                    Err(CellFailure {
+                        code: CellFailureCode::Query,
+                        message: "fake engine answers cells only".into(),
+                    })
+                };
+                return Ok(Some(Event::Cell { sequence, reply }));
             }
         }
         if self.control.query_reply.load(Ordering::Relaxed) {
@@ -252,6 +317,11 @@ impl Engine for Fake {
             0,
             "style ACK would swallow query results"
         );
+        assert_eq!(
+            self.pending_cell_queries(),
+            0,
+            "style ACK would swallow cell replies"
+        );
         self.control.styles.lock().unwrap().push(styles.to_vec());
         Ok(())
     }
@@ -271,6 +341,7 @@ impl Engine for Fake {
         self.active = None;
         self.queries.clear();
         self.query_acks.clear();
+        self.cells.clear();
         self.control.closed.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -326,6 +397,8 @@ fn fake(c: Arc<Control>, deck: bool) -> Box<dyn Engine> {
         queries: BTreeMap::new(),
         query_frontiers: BTreeMap::new(),
         query_acks: VecDeque::new(),
+        cell_sequence: 0,
+        cells: BTreeMap::new(),
     })
 }
 fn start(r: &Arc<Resources>, m: Arc<Model>, initial: ViewState, c: Arc<Control>) -> ViewController {
@@ -1340,4 +1413,225 @@ fn deck_or_frame_cache_off_never_prefetches() {
         assert_eq!(c.requests.lock().unwrap()[0].frame_cache, cache);
         v.close().unwrap();
     }
+}
+
+#[test]
+fn a_view_root_is_resolved_from_the_cell_tree_fitted_and_its_own_render_key() {
+    use crate::view::{Root, RootEdit, CELL_WITHOUT_SHAPES};
+    let r = Resources::new(Limits {
+        cpu_slots: 2,
+        foreground_reserve: 0,
+        workers: 1,
+        decoded_mb: 1,
+    })
+    .unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    let v = start(
+        &r,
+        Arc::clone(&m),
+        ViewState::initial(&m, 80, 64).unwrap(),
+        Arc::clone(&c),
+    );
+    wait(|| v.latest().is_some());
+    let before = v.snapshot();
+    assert_eq!(before.state.die(&m), m.bbox);
+    // A direct question goes through the control thread and comes back.
+    let top = v
+        .cell_query(
+            CellRequest::Children {
+                source: 0,
+                cell: None,
+            },
+            Duration::from_secs(3),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(top, CellReply::Children { cell: 0, .. }));
+    // The worker's refusal is an answer, not a controller failure.
+    let refused = v
+        .cell_query(CellRequest::Sources, Duration::from_secs(3))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.code, CellFailureCode::Query);
+    assert_eq!(v.snapshot().phase, Phase::Idle);
+    // Setting the root resolves name/bbox from `cells`, fits, and rekeys.
+    let root_bbox = [100., 200., 300., 260.];
+    let after = v
+        .edit(
+            before.state_rev,
+            Patch {
+                root: Some(RootEdit::Cell {
+                    source: 0,
+                    cell: 17,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        after.state.root,
+        Some(Root {
+            cell: 17,
+            name: "CELL17".into(),
+            bbox: root_bbox
+        })
+    );
+    assert_ne!(after.render_key, before.render_key);
+    assert_eq!(after.state.die(&m), root_bbox);
+    assert_eq!(
+        after.state.viewport,
+        Viewport::fit(root_bbox, 80, 64).unwrap()
+    );
+    assert_eq!(
+        c.cell_requests
+            .lock()
+            .unwrap()
+            .last()
+            .map(|(_, r)| r.clone()),
+        Some(CellRequest::Children {
+            source: 0,
+            cell: Some(17)
+        })
+    );
+    // The overview's die is the root's bbox, on the plain base.
+    let overview = m
+        .minimap
+        .projection(after.state.die(&m), after.state.viewport, None);
+    assert_eq!(overview.base, "full");
+    assert_ne!(
+        overview.die,
+        m.minimap
+            .projection(m.bbox, before.state.viewport, None)
+            .die
+    );
+    // Frames under the root carry it; none rendered before is reused.
+    wait(|| v.latest().is_some_and(|f| f.render_key == after.render_key));
+    assert_eq!(v.latest().unwrap().frame.request.root, Some(17));
+    // Fit under the root is the root's die, not the file's.
+    let panned = v.edit(after.state_rev, pan()).unwrap();
+    let fitted = v
+        .edit(
+            panned.state_rev,
+            Patch {
+                navigation: Some(Navigation::Fit),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(fitted.state.viewport, after.state.viewport);
+    // A cell without shapes has no die: refused before the CAS.
+    *c.cell_bbox.lock().unwrap() = None;
+    let e = v
+        .edit(
+            fitted.state_rev,
+            Patch {
+                root: Some(RootEdit::Cell {
+                    source: 0,
+                    cell: 18,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        (e.kind, e.message.as_str()),
+        (ErrorKind::InvalidInput, CELL_WITHOUT_SHAPES)
+    );
+    assert_eq!(v.snapshot().state_rev, fitted.state_rev);
+    // No summary: the transport can offer to build it.
+    c.cell_nohier.store(true, Ordering::Relaxed);
+    let e = v
+        .edit(
+            fitted.state_rev,
+            Patch {
+                root: Some(RootEdit::Cell {
+                    source: 0,
+                    cell: 18,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Cache);
+    c.cell_nohier.store(false, Ordering::Relaxed);
+    // Back to the top: another key, the file's die again.
+    let cleared = v
+        .edit(
+            fitted.state_rev,
+            Patch {
+                root: Some(RootEdit::Clear),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(cleared.state.root.is_none());
+    assert_ne!(cleared.render_key, after.render_key);
+    assert_eq!(cleared.state.viewport, before.state.viewport);
+    wait(|| {
+        v.latest()
+            .is_some_and(|f| f.render_key == cleared.render_key)
+    });
+    assert_eq!(v.latest().unwrap().frame.request.root, None);
+    // A ticket the worker cannot take yet waits; the caller's deadline
+    // withdraws it without disturbing the view.
+    c.cell_busy.store(true, Ordering::Relaxed);
+    let e = v
+        .cell_query(CellRequest::Sources, Duration::from_millis(50))
+        .unwrap_err();
+    assert_eq!(e.message, crate::view::CELL_TIMEOUT);
+    c.cell_busy.store(false, Ordering::Relaxed);
+    assert!(v
+        .cell_query(CellRequest::Sources, Duration::from_secs(3))
+        .is_ok());
+    assert_eq!(v.snapshot().phase, Phase::Idle);
+    drop(v);
+}
+
+#[test]
+fn a_jobdeck_answers_cell_queries_but_refuses_a_view_root() {
+    use crate::view::{RootEdit, ROOT_UNSUPPORTED};
+    let (_r, _m, c, v) = one_worker();
+    let before = v.snapshot();
+    let top = v
+        .cell_query(
+            CellRequest::Children {
+                source: 1,
+                cell: None,
+            },
+            Duration::from_secs(3),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(top, CellReply::Children { source: 1, .. }));
+    let e = v
+        .cell_query(
+            CellRequest::Bbox {
+                source: 0,
+                cell: 1,
+                root: Some(2),
+            },
+            Duration::from_secs(3),
+        )
+        .unwrap_err();
+    assert_eq!(
+        (e.kind, e.message.as_str()),
+        (ErrorKind::Unsupported, ROOT_UNSUPPORTED)
+    );
+    let e = v
+        .edit(
+            before.state_rev,
+            Patch {
+                root: Some(RootEdit::Cell { source: 0, cell: 1 }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        (e.kind, e.message.as_str()),
+        (ErrorKind::Unsupported, ROOT_UNSUPPORTED)
+    );
+    assert_eq!(c.cell_requests.lock().unwrap().len(), 1);
+    assert_eq!(v.snapshot().state_rev, before.state_rev);
+    assert!(v.snapshot().state.root.is_none());
 }

@@ -55,6 +55,7 @@ fn clip_preparation_freezes_integer_bounds_and_visibility_without_native_work() 
         layers: Layers::None,
         jobs: 1,
         cell_name: "CLIP".into(),
+        root: None,
     };
     let before = v.snapshot().submitted;
     let visible = v.prepare_clip(a, None, true, request.clone()).unwrap();

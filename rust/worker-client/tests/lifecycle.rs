@@ -590,6 +590,7 @@ fn clip_request() -> ClipRequest {
         layers: Layers::Only(vec![(2, 0), (1, 0), (2, 0)]),
         jobs: 8,
         cell_name: "CLIP 한 글".into(),
+        root: None,
     }
 }
 fn clips() {

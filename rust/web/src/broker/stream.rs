@@ -115,7 +115,7 @@ pub(super) fn csrf(headers: &HeaderMap) -> Option<String> {
 fn snapshot(s: &Snapshot, m: &Model, id: &str, epoch: &str) -> Value {
     let mut value = view::snapshot(s, m, id, epoch);
     // DTO reuse must not advertise the standalone owner's unmounted APIs.
-    for name in ["query", "clip", "mode"] {
+    for name in ["query", "clip", "mode", "cells", "cell_root"] {
         value["capabilities"][name] = json!(false);
     }
     value
@@ -362,7 +362,9 @@ pub(super) async fn socket(
                         if connection_epoch!=epoch || view_id!=access.id() {break}
                         let Ok(base)=view::counter(&base_state_rev) else {break};
                         if tx.capacity()<2 {break}
-                        let result=body.core().map_err(|_|Error::Invalid).and_then(|p|runtime.edit(&access,base,p));
+                        // A root resolves against the worker's cell tree
+                        // and would block this loop; the demo has no tree.
+                        let result=body.core().map_err(|_|Error::Invalid).and_then(|p|if p.root.is_some(){Err(Error::Invalid)}else{runtime.edit(&access,base,p)});
                         let Ok(next)=state(&runtime,&access,&epoch) else {break};
                         let event=match result {
                             Ok(())=>json!({"type":"accepted","seq":seq,"state_rev":next["state_rev"],"render_rev":next["render_rev"]}),

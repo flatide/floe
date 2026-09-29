@@ -529,6 +529,12 @@ async fn server_shell_is_static_bounded_and_cannot_load_owner_assets() {
         "gestures.js",
         "viewer.js",
         "viewer.css",
+        "minimap.js",
+        "fill-editor.js",
+        "presets.js",
+        "palette.js",
+        "menubar.js",
+        "panes.js",
     ] {
         let r = s
             .request("GET", &format!("/server-assets/{bundle}/{name}"), &h, "")

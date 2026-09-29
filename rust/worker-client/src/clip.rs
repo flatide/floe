@@ -11,6 +11,9 @@ pub struct ClipRequest {
     pub layers: Layers,
     pub jobs: u16,
     pub cell_name: String,
+    /// The view root the clip is cut from (bbox in ITS coordinates); None =
+    /// the top. Mirrors the render request that showed the clipped view.
+    pub root: Option<u32>,
 }
 impl ClipRequest {
     pub fn validate(&self) -> Result<()> {
@@ -59,6 +62,7 @@ impl WorkerClient {
             || !self.issued.is_empty()
             || !self.queries.is_empty()
             || !self.query_cancels.is_empty()
+            || !self.cells.is_empty()
         {
             return Err(Error::new(
                 ErrorKind::Busy,
@@ -77,11 +81,14 @@ impl WorkerClient {
             write!(&mut name, "{b:02x}").unwrap();
         }
         let [x0, y0, x1, y1] = request.bbox;
-        let command =
+        let mut command =
             format!(
             "clip seq={sequence} box={x0},{y0},{x1},{y1} layers={} jobs={} cell_hex={name} out={}",
             request.layers.wire()?, request.jobs, wire_path(&path)?
         );
+        if let Some(root) = request.root {
+            write!(&mut command, " root={root}").unwrap();
+        }
         let result = (|| {
             self.check_shutdown()?;
             self.send(command)?;

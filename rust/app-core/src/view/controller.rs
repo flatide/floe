@@ -1,23 +1,34 @@
 //! One bounded control thread owns one worker. It polls/drains even without a
 //! frame subscriber; HTTP/WS credit never gates worker cleanup or cancellation.
 use super::{
-    margin, query, Model, Patch, QueryAnchor, QuerySnapshot, ViewQuery, ViewQueryResult, ViewState,
-    Viewport,
+    margin, query, Model, Patch, QueryAnchor, QuerySnapshot, Root, RootEdit, ViewQuery,
+    ViewQueryResult, ViewState, Viewport, CELL_TIMEOUT, CELL_WITHOUT_SHAPES, ROOT_UNSUPPORTED,
 };
 use crate::{
     managed::{ManagedDataset, Permit, Resources},
     render::{RenderOptions, RenderSession},
     Error, ErrorKind, Result,
 };
-use floe_worker_client::{Event, Frame, QueryKind, QueryReply, QueryRequest, RenderRequest, Style};
+use floe_worker_client::{
+    CellFailure, CellFailureCode, CellOutcome, CellReply, CellRequest, Event, Frame, QueryKind,
+    QueryReply, QueryRequest, RenderRequest, Style,
+};
 use std::{
+    collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex, Weak,
+        mpsc, Arc, Mutex, Weak,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+/// Cell-tree tickets waiting for or on the worker. The hier thread answers in
+/// order; a panel needs an expand and a highlight walk, not a backlog.
+const MAX_PENDING_CELLS: usize = 4;
+/// Resolving a root cell happens inside an edit; the panel already opened
+/// the summary to show that cell, so this covers a slow disk, not a build.
+const ROOT_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -102,12 +113,35 @@ pub struct Snapshot {
     /// Local diagnostics only; web maps the kind to a safe message/code.
     pub failure: Option<(ErrorKind, String)>,
 }
+struct CellTicket {
+    id: u64,
+    request: CellRequest,
+    /// The caller blocks on the other end; a departed caller loses nothing
+    /// but its answer.
+    reply: mpsc::SyncSender<Result<CellOutcome>>,
+}
+#[derive(Default)]
+struct Cells {
+    accepted: u64,
+    pending: VecDeque<CellTicket>,
+    in_flight: BTreeMap<u64, CellTicket>,
+}
+impl Cells {
+    fn len(&self) -> usize {
+        self.pending.len() + self.in_flight.len()
+    }
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.in_flight.clear();
+    }
+}
 struct Shared {
     replacement_pending: bool,
     snapshot: Snapshot,
     latest: Option<Arc<DisplayFrame>>,
     margin: Option<Arc<DisplayFrame>>,
     queries: query::Queries,
+    cells: Cells,
 }
 impl Shared {
     fn prune_queries(&mut self, model: &Model) {
@@ -279,6 +313,8 @@ trait Engine: Send {
     fn query(&mut self, request: QueryRequest) -> Result<u64>;
     fn cancel_queries(&mut self, kind: QueryKind) -> Result<u64>;
     fn pending_queries(&self) -> usize;
+    fn cell_query(&mut self, request: CellRequest) -> Result<u64>;
+    fn pending_cell_queries(&self) -> usize;
     fn poll(&mut self, timeout: Duration) -> Result<Option<Event>>;
     fn styles(&mut self, styles: &[Style]) -> Result<()>;
     fn base(&self) -> RenderRequest;
@@ -296,6 +332,12 @@ impl Engine for RenderSession {
     }
     fn pending_queries(&self) -> usize {
         self.pending_queries()
+    }
+    fn cell_query(&mut self, r: CellRequest) -> Result<u64> {
+        self.cell_query(r)
+    }
+    fn pending_cell_queries(&self) -> usize {
+        self.pending_cell_queries()
     }
     fn max_depth(&self) -> Option<u64> {
         Some(self.max_depth())
@@ -557,6 +599,7 @@ impl ViewController {
             latest: None,
             margin: None,
             queries: query::Queries::default(),
+            cells: Cells::default(),
         }));
         let (state, flag, model2) = (Arc::clone(&shared), Arc::clone(&stop), Arc::clone(&model));
         let resources = Arc::clone(resources);
@@ -586,6 +629,8 @@ impl ViewController {
                 s.queries.invalidate();
                 s.queries.in_flight.clear();
                 s.queries.source = None;
+                // Dropping the tickets wakes their callers with Disconnected.
+                s.cells.clear();
                 s.snapshot.margin_working = false;
                 if flag.load(Ordering::Relaxed) != 0 || result.is_ok() {
                     s.snapshot.phase = Phase::Closed;
@@ -652,6 +697,86 @@ impl ViewController {
     pub fn query_snapshot(&self) -> QuerySnapshot {
         self.shared.lock().unwrap().queries.snapshot()
     }
+    /// One cell-tree question, answered synchronously: the control thread
+    /// submits the ticket when the worker can take it and hands the reply
+    /// back over the ticket's channel. The control lock is never held while
+    /// waiting. Bounded: MAX_PENDING_CELLS tickets, else Busy. A daemon
+    /// refusal (no summary, unknown cell) is the Ok(Err) arm, not an error.
+    pub fn cell_query(&self, request: CellRequest, timeout: Duration) -> Result<CellOutcome> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let id = {
+            let mut s = self.shared.lock().unwrap();
+            if self.stop.load(Ordering::Relaxed) != 0
+                || matches!(s.snapshot.phase, Phase::Closed | Phase::Failed)
+            {
+                return Err(Error::new(
+                    ErrorKind::Worker,
+                    "view is closed or failed; reopen required",
+                ));
+            }
+            if s.snapshot.phase == Phase::Opening {
+                return Err(Error::new(ErrorKind::Busy, "view is still opening"));
+            }
+            if self.model.deck && request.root().is_some() {
+                return Err(Error::new(ErrorKind::Unsupported, ROOT_UNSUPPORTED));
+            }
+            if s.cells.len() >= MAX_PENDING_CELLS {
+                return Err(Error::new(ErrorKind::Busy, "cell query queue is full"));
+            }
+            let id = s
+                .cells
+                .accepted
+                .checked_add(1)
+                .ok_or_else(|| Error::input("cell ticket exhausted"))?;
+            s.cells.accepted = id;
+            s.cells.pending.push_back(CellTicket {
+                id,
+                request,
+                reply: tx,
+            });
+            id
+        };
+        match rx.recv_timeout(timeout) {
+            Ok(outcome) => outcome,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Never submit a question nobody waits for; one already on
+                // the worker just loses its listener.
+                self.shared
+                    .lock()
+                    .unwrap()
+                    .cells
+                    .pending
+                    .retain(|t| t.id != id);
+                Err(Error::new(ErrorKind::Busy, CELL_TIMEOUT))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::new(
+                ErrorKind::Worker,
+                "view closed before the cell reply",
+            )),
+        }
+    }
+    /// The root cell's name and recursive bbox (its own coordinates) from
+    /// the daemon's cell tree. A jobdeck has no root; a cell without shapes
+    /// has no die to fit.
+    pub fn resolve_root(&self, source: usize, cell: u32) -> Result<Root> {
+        if self.model.deck {
+            return Err(Error::new(ErrorKind::Unsupported, ROOT_UNSUPPORTED));
+        }
+        let request = CellRequest::Children {
+            source,
+            cell: Some(cell),
+        };
+        match self.cell_query(request, ROOT_RESOLVE_TIMEOUT)? {
+            Ok(CellReply::Children {
+                cell, name, bbox, ..
+            }) => {
+                let bbox = bbox.ok_or_else(|| Error::input(CELL_WITHOUT_SHAPES))?;
+                Ok(Root { cell, name, bbox })
+            }
+            Ok(_) => Err(Error::new(ErrorKind::Worker, "cell reply kind mismatch")),
+            Err(failure) => Err(cell_failure(failure)),
+        }
+    }
     /// Freeze exact clip bounds and the current visible selection on an
     /// authenticated displayed receipt. The gateway checks that receipt's
     /// connection; this method checks its current controller state atomically.
@@ -672,6 +797,8 @@ impl ViewController {
         if visible {
             request.layers = s.snapshot.state.layers.clone();
         }
+        // The bounds are in the displayed root's coordinates; cut there.
+        request.root = s.snapshot.state.root.as_ref().map(|r| r.cell);
         request.validate()?;
         Ok(request)
     }
@@ -780,6 +907,11 @@ impl ViewController {
     /// A conflict changes neither view nor pending render. Caller returns the
     /// authoritative snapshot, rather than retrying relative deltas blindly.
     pub fn edit(&self, base_state_rev: u64, mut patch: Patch) -> Result<Snapshot> {
+        if let Some(RootEdit::Cell { source, cell }) = patch.root {
+            // Resolved against the daemon before the CAS and without the
+            // control lock; the commit below is then an ordinary edit.
+            patch.root = Some(RootEdit::Resolved(self.resolve_root(source, cell)?));
+        }
         let mut s = self.shared.lock().unwrap();
         if matches!(s.snapshot.phase, Phase::Closed | Phase::Failed)
             || self.stop.load(Ordering::Relaxed) != 0
@@ -861,6 +993,17 @@ impl Drop for ViewController {
         let _ = self.close();
     }
 }
+/// A daemon-side refusal as a local error: the kind says what a transport
+/// may do about it (build the summary, retry, reject the input).
+pub fn cell_failure(f: CellFailure) -> Error {
+    let kind = match f.code {
+        CellFailureCode::NoHier => ErrorKind::Cache,
+        CellFailureCode::Superseded => ErrorKind::Busy,
+        CellFailureCode::Query => ErrorKind::InvalidInput,
+        CellFailureCode::State | CellFailureCode::Oversize => ErrorKind::Worker,
+    };
+    Error::new(kind, format!("{}: {}", f.code.wire(), f.message))
+}
 struct Ticket {
     generation: u64,
     snapshot: Snapshot,
@@ -883,7 +1026,14 @@ fn run(
     let mut base = engine.base();
     base.frame_cache = configuration.frame_cache;
     while stop.load(Ordering::Relaxed) == 0 {
-        pump_queries(engine, &mut shared.lock().unwrap(), model)?;
+        {
+            let mut s = shared.lock().unwrap();
+            pump_queries(engine, &mut s, model)?;
+            // A pending style change waits for the worker to drain; do not
+            // put more cell questions in front of it.
+            let hold = s.snapshot.state.styles != styles;
+            pump_cells(engine, &mut s, hold)?;
+        }
         let current = shared.lock().unwrap().snapshot();
         let covered = current.margin.is_some_and(|m| m.crop_safe);
         if current.render_rev != handled_rev && covered {
@@ -935,7 +1085,8 @@ fn run(
             }
             // Synchronous style ACK must not swallow query replies. An edit
             // invalidates/cancels queries; keep draining before changing styles.
-            let waiting_styles = current.state.styles != styles && engine.pending_queries() != 0;
+            let waiting_styles = current.state.styles != styles
+                && (engine.pending_queries() != 0 || engine.pending_cell_queries() != 0);
             if waiting_styles {
                 shared.lock().unwrap().snapshot.phase = Phase::Cancelling;
             }
@@ -982,6 +1133,19 @@ fn run(
         match engine.poll(Duration::from_millis(20))? {
             Some(Event::Query(reply)) => {
                 consume_query(&mut shared.lock().unwrap(), reply, model)?;
+            }
+            Some(Event::Cell { sequence, reply }) => {
+                let ticket = shared
+                    .lock()
+                    .unwrap()
+                    .cells
+                    .in_flight
+                    .remove(&sequence)
+                    .ok_or_else(|| {
+                        Error::new(ErrorKind::Worker, "unissued controller cell reply")
+                    })?;
+                // The caller may have given up already.
+                let _ = ticket.reply.send(Ok(reply));
             }
             Some(Event::Frame(frame)) => {
                 let mut s = shared.lock().unwrap();
@@ -1117,6 +1281,32 @@ fn pump_queries(engine: &mut dyn Engine, s: &mut Shared, model: &Model) -> Resul
                 }
             }
             Err(e) if e.kind == ErrorKind::Busy => (),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Submit waiting cell tickets in order until the worker says Busy. A
+/// request the worker refuses outright fails its own ticket only.
+fn pump_cells(engine: &mut dyn Engine, s: &mut Shared, hold: bool) -> Result<()> {
+    while !hold && !s.cells.pending.is_empty() {
+        let request = s.cells.pending[0].request.clone();
+        match engine.cell_query(request) {
+            Ok(seq) => {
+                let ticket = s.cells.pending.pop_front().expect("checked above");
+                if s.cells.in_flight.insert(seq, ticket).is_some() {
+                    return Err(Error::new(
+                        ErrorKind::Worker,
+                        "duplicate engine cell sequence",
+                    ));
+                }
+            }
+            Err(e) if e.kind == ErrorKind::Busy => break,
+            Err(e) if matches!(e.kind, ErrorKind::InvalidInput | ErrorKind::Unsupported) => {
+                let ticket = s.cells.pending.pop_front().expect("checked above");
+                let _ = ticket.reply.send(Err(e));
+            }
             Err(e) => return Err(e),
         }
     }

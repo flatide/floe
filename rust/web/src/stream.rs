@@ -407,8 +407,20 @@ pub(crate) async fn socket(
                     Control::Set{seq,connection_epoch,view_id,base_state_rev,body}=>{
                         if connection_epoch!=epoch||view_id!=attached.id{break;}
                         let Ok(base)=view::counter(&base_state_rev) else {break;};
-                        let outcome=body.core().map_err(|_|"invalid_request").and_then(|patch|
-                            controller.edit(base,patch).map_err(|e|if e.kind==floe_app_core::ErrorKind::Busy{"stale_state"}else{view::safe_error(e.kind)}));
+                        let blocks=body.blocks();
+                        let outcome=match body.core() {
+                            Err(_)=>Err("invalid_request"),
+                            // A root edit resolves the cell against the worker's
+                            // hier thread: off the reactor, this socket waits.
+                            Ok(patch) if blocks=>{
+                                let c=Arc::clone(controller);
+                                match tokio::task::spawn_blocking(move||c.edit(base,patch)).await {
+                                    Ok(result)=>result.map_err(view::edit_code),
+                                    Err(_)=>Err("worker_failed"),
+                                }
+                            }
+                            Ok(patch)=>controller.edit(base,patch).map_err(view::edit_code),
+                        };
                         let state=controller.snapshot();
                         let event=match outcome {
                             Ok(accepted)=>json!({"type":"accepted","seq":seq,"state_rev":accepted.state_rev.to_string(),"render_rev":accepted.render_rev.to_string()}),

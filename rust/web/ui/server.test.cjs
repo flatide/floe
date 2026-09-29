@@ -14,7 +14,13 @@ function environment(options={}) {
     if(options.resume){storage.set(key,JSON.stringify(auth));}
     let number=0,clock=10000,opened=!!options.resume,code=200,confirm=true,doc;
     class Element {
-        constructor(){this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.style={};this.listeners={};this.attributes={};this.width=this.height=1;}
+        constructor(tag){this.tag=tag||'div';this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.style={};this.listeners={};this.attributes={};this.width=this.height=1;this.children=[];this.dataset={};this.className='';}
+        appendChild(c){this.children.push(c);return c;}
+        contains(n){return this===n||this.children.some(c=>c.contains(n));}
+        querySelectorAll(tag){return this.children.flatMap(c=>[...(c.tag===tag?[c]:[]),...c.querySelectorAll(tag)]);}
+        removeAttribute(k){delete this.attributes[k];}
+        click(){if(this.onclick){this.onclick({preventDefault(){}});}}
+        get textContent(){return this._text||'';}set textContent(v){this._text=v;this.children=[];}
         setAttribute(k,v){this.attributes[k]=String(v);}getAttribute(k){return this.attributes[k]===undefined?null:this.attributes[k];}
         get width(){return this._width;}set width(v){this._width=v;this.resets=(this.resets||0)+1;this.pixels=new Uint8ClampedArray((this._width||1)*(this._height||1)*4);}
         get height(){return this._height;}set height(v){this._height=v;this.resets=(this.resets||0)+1;this.pixels=new Uint8ClampedArray((this._width||1)*(this._height||1)*4);}
@@ -28,7 +34,7 @@ function environment(options={}) {
     }
     const el=k=>{if(!nodes.has(k)){nodes.set(k,new Element());}return nodes.get(k);};
     function listen(k,f){const old=events[k];events[k]=old?e=>{old(e);f(e);}:f;}
-    doc={hidden:false,activeElement:null,querySelector:s=>s==='meta[name="floe-http-test"]'?(options.httpTest===undefined?null:{content:String(options.httpTest)}):{content:bundle},getElementById:el,createElement:()=>new Element(),addEventListener:listen};
+    doc={hidden:false,activeElement:null,querySelector:s=>s==='meta[name="floe-http-test"]'?(options.httpTest===undefined?null:{content:String(options.httpTest)}):{content:bundle},getElementById:el,createElement:tag=>new Element(tag),addEventListener:listen};
     function timer(f,ms,interval=false){timers.set(++number,{f,ms,interval});return number;}
     const win={devicePixelRatio:1,performance:{now:()=>clock},sessionStorage:{getItem(k){reads.push(k);return storage.get(k)||null;},setItem(k,v){if(options.noStorage){throw Error('denied');}storage.set(k,v);},removeItem(k){storage.delete(k);}},
         setTimeout:timer,clearTimeout:n=>timers.delete(n),setInterval:(f,ms)=>timer(f,ms,true),clearInterval:n=>timers.delete(n),
@@ -48,6 +54,8 @@ function environment(options={}) {
             else {assert.equal(this.headers['X-Floe-CSRF'],auth.csrf);status=code;
                 if(this.path===base){data=this.method==='DELETE'?null:{launch_id:id,viewer_ready:true,render_transport:true,public_demo:!!options.demo,principal:{namespace:'teebox',subject:'<img onerror=bad>'}};}
                 else if(this.path===base+'/view'){if(this.method==='POST'){opened=true;status=202;data={status:'opening',view_id:id};}else{data=opened?state():{type:'unopened',view_id:id};}}
+                else if(this.path===base+'/palette'){assert.equal(this.method,'POST');assert.equal(value.kind,'page');data={state_rev:'1',render_key:'1',total:0,all_total:0,start:value.start,next:null,rows:[]};}
+                else if(this.path===base+'/presets'||this.path.startsWith(base+'/minimap/')||this.path.startsWith(base+'/fill-slots/')){status=404;data={error:'unavailable'};}
                 else {throw Error('Unexpected path');}}
             entry.reply=(s=status,v=data)=>{this.status=s;this.responseText=v?JSON.stringify(v):'';this.onload();};entry.fail=()=>this.ontimeout();
             const h=holds.findIndex(h=>h.method===this.method&&this.path.endsWith(h.suffix));if(h>=0){holds.splice(h,1);deferred.push(entry);}else{entry.reply();}
@@ -57,7 +65,8 @@ function environment(options={}) {
         constructor(url,protocols){assert.equal(url,(options.http?'ws://10.0.0.10:8080':'wss://service.example.test')+base+'/stream');assert.deepEqual(protocols,['floe-server-v1','bundle.'+bundle,'csrf.'+auth.csrf]);this.sent=[];this.readyState=1;this.bufferedAmount=0;sockets.push(this);}
         send(text){this.sent.push(JSON.parse(text));}close(){this.readyState=3;}text(v){this.onmessage({data:JSON.stringify(v)});}binary(extra={}){this.onmessage({data:packet({view_id:id,...extra})});}
     }
-    const c=Client.bind({window:win,document:doc,location,history,protocol:P,viewer:require('./viewer.js'),XHR,WebSocket:WS,now:()=>clock,gestures:require('./gestures.js'),
+    const panels=options.panels?{palette:require('./palette.js'),presets:require('./presets.js'),fillEditor:require('./fill-editor.js'),minimap:require('./minimap.js'),panes:require('./panes.js'),menubar:require('./menubar.js')}:{};
+    const c=Client.bind({window:win,document:doc,location,history,protocol:P,viewer:require('./viewer.js'),XHR,WebSocket:WS,now:()=>clock,gestures:require('./gestures.js'),...panels,
         decode(h,d,done){const job=Decode.create({ImageData:class{constructor(data){this.data=data;}},setTimeout:win.setTimeout,clearTimeout:win.clearTimeout},h,d,done);
             return options.holdDecode?{start(){decoders.push({finish:()=>job.start(),fail:()=>done(null,Error('synthetic decode error'))});},cancel:()=>job.cancel()}:job;}});
     function hello(ws=sockets.at(-1),e=epoch){ws.onopen();ws.text({type:'hello',protocol:1,bundle,view_id:id,connection_epoch:e,frame_credit:1,capabilities:{view:true,index:false,review:false,export:false,query:false}});ws.text(state({connection_epoch:e}));}
@@ -251,6 +260,24 @@ if(require.main===module)(async()=>{
     cs.text(chain.state(secondState));cs.binary(secondState);chain.raf();cursor(chain,true);chain.fire(100);cursor(chain,true);
     cs.text({type:'accepted',seq:cs.sent.at(-1).seq,state_rev:'3'});const lastState={state_rev:'3',render_rev:'3',render_key:'3',detail:'medium',thin:'keep'};
     cs.text(chain.state({...lastState,status:'rendering'}));cs.binary(lastState);chain.raf();cursor(chain,true);cs.text(chain.state(lastState));cursor(chain,false);chain.c.stop();
+    // Shared panels: the GTK-style menu bar and the layer pane bind through
+    // the prefixed `el`, read only this session's routes, and edit over the
+    // same serialized view.set path as the toolbar.
+    const shell=environment({demo:true,panels:true});await shell.c.start();shell.hello();
+    assert.deepEqual(shell.el('menubar').children.map(m=>m.children[0].textContent),['File','View']);
+    shell.sockets[0].text(shell.state({fill_slots_key:'0'.repeat(40)}));await tick();
+    const page=shell.requests.filter(r=>r.path.endsWith('/palette'));assert.equal(page.length,1);assert.equal(page[0].headers['X-Floe-CSRF'],'f'.repeat(64));
+    assert.equal(shell.el('layers-count').textContent,'0 layers');assert.equal(shell.el('layers').textContent,'No layer rows.');
+    assert.equal(shell.el('dstatus').textContent,'depth: full/6 · detail: high · thin:auto · frame:on');
+    assert(shell.requests.every(r=>r.path.startsWith(base)&&!r.path.includes('/api/v1/views/')),'owner routes are never addressed');
+    const view=shell.el('menubar').children[1];view.children[0].onclick({preventDefault(){}});assert.equal(view.children[1].hidden,false);
+    const detail=view.children[1].children.find(n=>n.children[0]&&n.children[0].children[1]&&n.children[0].children[1].textContent==='Detail');
+    const low=detail.children[1].children[0];assert.equal(low.children[1].textContent,'Low · 5 px');low.onclick({preventDefault(){}});
+    assert.equal(shell.el('detail').value,'low');assert.deepEqual(shell.sockets[0].sent.at(-1).body,{detail:'low'});assert.equal(view.children[1].hidden,true);
+    assert.equal(shell.el('minimap-panel').hidden,true,'no minimap projection in this snapshot');
+    shell.el('tab-palette').onclick();assert.equal(shell.el('palette-page').hidden,false);assert.equal(shell.el('minimap-page').hidden,true);
+    assert(shell.requests.some(r=>r.path.endsWith('/presets')),'presets load with the palette page');
+    shell.c.stop();
     const fs=require('node:fs'),path=require('node:path');
     assert.match(fs.readFileSync(path.join(__dirname,'server.html'),'utf8'),/<body id="server-shell" data-floe-viewer>/);
     assert.match(fs.readFileSync(path.join(__dirname,'viewer.css'),'utf8'),/\[data-floe-viewer\]\[data-busy="true"\][^{]*\[data-floe-viewer\]\[data-busy="true"\] \*\s*\{\s*cursor:\s*wait\s*!important;/);

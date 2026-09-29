@@ -46,6 +46,9 @@
   <script defer src="/assets/@@BUNDLE@@/fill-editor.js"></script>
   <script defer src="/assets/@@BUNDLE@@/presets.js"></script>
   <script defer src="/assets/@@BUNDLE@@/sharing.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/menubar.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/panes.js"></script>
+  <script defer src="/assets/@@BUNDLE@@/cells.js"></script>
   <script defer src="/assets/@@BUNDLE@@/app.js"></script>
 </head>
 <body id="app-shell" data-floe-viewer>
@@ -58,239 +61,23 @@
     <button id="logout" class="quiet" title="Confirm ending this session (q on canvas)" aria-haspopup="dialog" aria-controls="session-exit-dialog" aria-expanded="false" disabled>End session</button>
     <button id="about-open" class="quiet" aria-haspopup="dialog" aria-controls="about-dialog" aria-expanded="false" disabled>About</button>
   </header>
+  <nav id="menubar" class="menubar" aria-label="Main menu"></nav>
   <div id="app-workspace" class="workspace">
-    <aside class="sidebar" aria-label="Layout controls">
-      <section class="source-panel">
-        <h2>Source</h2>
-        <button id="browse-open" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Browse server files…</button>
-        <button id="drc-open" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Open DRC results…</button>
-        <button id="drc-reconnect" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Reconnect launcher reviewer…</button>
-        <button id="drc-rules-load" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Load SVRF metadata…</button>
-        <label for="source" class="sr-only">Registered source</label>
-        <select id="source"><option>Loading catalog…</option></select>
-        <div class="source-mode"><label for="mode">Open mode</label><select id="mode"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div>
-        <details id="level-options"><summary>Levels to load</summary><label class="check"><input id="levels-all" type="checkbox" checked> All levels</label><div id="level-list"></div><button id="level-more" hidden>More levels</button><button id="reselect-levels" hidden disabled title="Keep camera/current mode; reload layer defaults. Indexing requires separate approval.">Apply levels · keep view</button></details>
-        <div class="button-row"><button id="open" class="primary">Open layout</button><button id="close" disabled>Close</button></div>
-        <p id="source-note" class="note">Sources are registered by the local launcher.</p>
-        <div id="launch-panel" hidden>
-          <p id="launch-status" class="note" role="status"></p>
-          <button id="launch-open" type="button" hidden>Open requested layout</button>
-          <button id="launch-check" type="button" hidden>Check / retry same request</button>
-          <button id="launch-dismiss" type="button">Dismiss request</button>
-        </div>
-      </section>
-      <section class="display-panel">
-        <details id="minimap-panel" open hidden>
-          <summary>Overview</summary>
-          <canvas id="minimap" width="180" height="180" tabindex="0" role="button" aria-label="Structural overview. Click to recenter at the current zoom. Enter or Space centers the layout."></canvas>
-          <p id="minimap-note" class="note" role="status"></p><button id="minimap-retry" type="button" hidden>Retry overview</button>
-          <p class="note">Click to recenter · same zoom · 16px aligned. Structural boxes, not rendered geometry.</p>
-        </details>
-        <h2>Display</h2>
-        <div id="live-mode-row" hidden><div class="form-row"><label for="live-mode">Jobdeck mode</label><select id="live-mode" disabled title="Keep camera and visibility; reload mode defaults"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div><p id="live-mode-note" class="note" role="status">Ctrl+, toggles level/chip · same camera and loaded levels. Mode defaults reload.</p></div>
-        <!-- floe-view-controls:start -->
-        <div class="form-row"><label for="depth">Depth <span id="max-depth"></span></label><input id="depth" value="full" title="full or a nonnegative depth; canvas &lt; / &gt; steps, 9 9 selects full" class="short" disabled></div>
-        <div class="form-row"><label for="detail">Detail</label><select id="detail" disabled><option value="low">Low · 5 px</option><option value="medium" selected>Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>
-        <div class="form-row"><label for="thin">Thin shapes</label><select id="thin" disabled><option value="auto">Auto · keep</option><option value="keep">Keep</option><option value="cull">Cull</option></select></div>
-        <div class="check-row"><label class="check"><input id="frames" type="checkbox" disabled> Frames</label><label class="check"><input id="labels" type="checkbox" disabled> Labels</label><label class="check"><input id="mono" type="checkbox" disabled> Mono</label></div>
-        <div class="form-row"><label for="font-px">Label px</label><input id="font-px" class="short" type="number" min="6" max="96" value="14" disabled></div>
-        <!-- floe-view-controls:end -->
-        <div class="form-row"><label for="overlays">Overlays</label><select id="overlays" disabled><option value="all">All</option><option value="focus">Hide other errors</option><option value="none">Hide all</option></select></div>
-        <p class="note">Tab on canvas cycles overlays; Shift+Tab leaves the canvas. Hiding keeps selections and rulers.</p>
-        <div id="snapshot-panel" hidden>
-          <div class="button-row"><button id="snapshot-copy" type="button" disabled title="Copy the visible layout and annotations (Ctrl/Cmd+C on canvas)">Copy view</button><button id="snapshot-save" type="button" disabled>Save view PNG</button></div>
-          <button id="snapshot-retry" type="button" hidden>Download captured PNG</button>
-          <p id="snapshot-status" class="note" role="status"></p>
-          <p class="note">Visible pixels and annotations, including previews. Not an exact geometry export. Panels and status messages are excluded.</p>
-        </div>
-      </section>
-      <section class="inspect-panel" aria-label="Geometry inspection">
-        <h2>Inspect geometry</h2>
-        <p id="pick-status" role="status">Click a shape to inspect it.</p>
-        <div class="button-row"><button id="pick-prev" disabled title="Previous overlapping shape">←</button><button id="pick-next" disabled title="Next overlapping shape">→</button><button id="pick-clear" disabled>Clear selection</button></div>
-        <pre id="pick-details"></pre>
-        <label class="check"><input id="snap-probe" type="checkbox" disabled> Snap probe (m)</label>
-        <p id="snap-status" tabindex="0" role="region" aria-label="Snap probe result"></p>
-        <p id="query-availability" class="note">Connect a layout to inspect geometry.</p>
-        <p class="note">Click again: next overlap · Shift: add · Ctrl/Cmd: toggle. Snap probes vertices and edges; it does not measure.</p>
-      </section>
-      <section class="inspect-panel" aria-label="Manual and selected bbox rulers">
-        <div class="button-row"><button id="ruler-mode" aria-pressed="false" disabled>Ruler (r)</button><button id="ruler-pop" disabled>Undo (k)</button><button id="ruler-clear" disabled>Clear (Shift+K)</button></div>
-        <label class="check"><input id="ruler-snap" type="checkbox" checked disabled> Edge/vertex snap (m in ruler mode)</label>
-        <p id="ruler-status" role="status">Click two points to measure.</p><pre id="ruler-details"></pre>
-        <p id="ruler-count" class="note">0 rulers</p><p id="ruler-availability" class="note"></p>
-        <pre id="ruler-auto"></pre>
-        <p class="note">Select 2+ shapes, then enter Ruler: nearest-neighbour bbox gaps, not contour distances. Undo follows creation order across manual, bbox and CD rulers.</p>
-        <p class="note">Axis-aligned by default · Shift: free angle · Escape: cancel point, exit mode, clear rulers.</p>
-      </section>
-      <section id="clip-panel" class="clip-panel" aria-label="Exact OASIS export" hidden>
-        <h2>Export exact clip</h2>
-        <button id="clip-open" aria-expanded="false" aria-controls="clip-form" disabled>Clip current viewport…</button>
-        <p class="note">Full-depth source geometry, independent of detail, summary and style. Layout only; no jobdeck, labels, frames or DRC markers.</p>
-        <form id="clip-form" hidden>
-          <div class="form-row"><label for="clip-layers">Layers</label><select id="clip-layers"><option value="visible">Visible layers</option><option value="all">All layers</option><option value="none">None (empty file)</option></select></div>
-          <div class="form-row"><label for="clip-jobs">Jobs</label><input id="clip-jobs" class="short" type="number" min="1" max="16" value="2" required></div>
-          <label for="clip-cell-name">Output cell name</label><input id="clip-cell-name" value="FLOE_CLIP" maxlength="4096" required autocomplete="off" spellcheck="false">
-          <div class="button-row"><button id="clip-prepare" type="submit">Review clip</button><button id="clip-dismiss" type="button">Dismiss</button></div>
-          <div id="clip-review" hidden>
-            <p class="note">Exact bounds: left, bottom, right, top</p><pre id="clip-bounds"></pre>
-            <p id="clip-selection"></p><p id="clip-options"></p>
-            <p id="clip-stale" class="note" hidden>Source changed since indexing. Export uses the indexed geometry, not newer source contents.</p>
-            <button id="clip-approve" type="button" class="primary" disabled>Approve export</button>
-          </div>
-        </form>
-        <p id="clip-status" role="status">No clip requested.</p>
-        <div class="button-row"><button id="clip-cancel" hidden>Cancel clip</button><button id="clip-resolve" hidden>Resolve request</button><button id="clip-refresh">Refresh</button></div>
-        <p id="clip-note" class="note" role="status"></p><p id="clip-usage" class="note"></p>
-        <p id="clip-resources" class="note"></p>
-        <div id="clip-files" aria-label="Available clip files"></div>
-        <p class="note">Files expire after 10 minutes. Maximum 4 files, 512 MiB each. Closing the view does not cancel an approved clip; ending the session does.</p>
-      </section>
-      <section class="layers-panel">
-        <div id="settings-panel" hidden>
-          <div class="button-row"><button id="settings-load" disabled>Load settings…</button><button id="settings-cancel" disabled>Cancel</button></div>
-          <input id="settings-file" type="file" accept=".layerprops,.json" hidden>
-          <div class="button-row"><select id="settings-format" aria-label="Settings save format"><option value="native">Native JSON (lossless)</option><option value="calibre">Calibre layerprops</option></select><button id="settings-save" disabled>Save settings…</button></div>
-          <p class="note">Load applies to this session; Save downloads a file. Native restores the same layer/group table; Calibre flattens inherited styles. These buttons do not write design defaults.</p>
-          <p id="settings-status" role="status" class="note"></p>
-        </div>
-        <div id="default-panel" hidden>
-          <h2>Shared design default</h2>
-          <div class="button-row"><button id="default-prepare" type="button" disabled>Review publication…</button><button id="default-recover" type="button" disabled>Review interrupted-file repair…</button><button id="default-dismiss" type="button" disabled>Dismiss</button></div>
-          <div id="default-review" hidden>
-            <p id="default-target"></p><p id="default-levels" class="note"></p>
-            <p id="default-impact" class="note">This writes the shared Calibre layerprops file for future opens, including other users. It replaces the whole file, not a merge. Existing windows are unchanged.</p>
-            <label class="check"><input id="default-consent" type="checkbox"><span id="default-consent-label">I approve writing this shared default.</span></label>
-            <button id="default-approve" type="button" class="primary" disabled>Publish shared default</button>
-          </div>
-          <p id="default-status" role="status" class="note"></p>
-          <button id="default-check-repair" type="button" hidden>Check repair result (read only)</button>
-          <div class="button-row"><button id="default-cancel" type="button" hidden>Request cancel</button><button id="default-refresh" type="button">Refresh receipt</button></div>
-          <div id="default-uncertain" hidden>
-            <p class="note">Outcome unknown. Resolve sends only the original approved request. Do not start a new publication to retry it.</p>
-            <button id="default-resolve" type="button">Resolve original request</button>
-            <label class="check"><input id="default-checked" type="checkbox">I checked the shared file and want to clear this unresolved local record.</label>
-            <button id="default-forget" type="button" disabled>Clear local record</button>
-          </div>
-          <p id="default-note" class="note" role="status"></p>
-        </div>
-        <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>
-        <div class="palette-tools"><button id="layers-collapse" disabled>Collapse all</button><button id="layers-expand" disabled>Expand all</button></div>
-        <p class="note">Click selects · Ctrl/⌘ toggles selection · Shift selects a range · Double-click shows/hides.</p>
-        <div class="palette-tools"><span id="layers-selected" role="status">0 selected</span><button id="layers-clear" disabled>Clear selection</button></div>
-        <div class="palette-tools"><button id="layers-show" disabled>Show selected</button><button id="layers-hide" disabled>Hide selected</button><button id="layers-toggle" disabled>Toggle</button></div>
-        <button id="layers-style" disabled>Style selected…</button>
-        <details id="palette-presets">
-          <summary>Color and fill presets</summary>
-          <div id="presets-colors" class="preset-grid colors" role="group" aria-label="Color presets"></div>
-          <div id="presets-fills" class="preset-grid fills" role="group" aria-label="Fill presets"></div>
-          <p id="presets-note" class="note" role="status">Select layers, then click a swatch.</p><button id="presets-retry" type="button" hidden>Reload presets</button>
-          <div id="fill-slot-tools" hidden>
-            <label for="fill-slot-choice">Developer bitmap slot</label>
-            <select id="fill-slot-choice"></select><button id="fill-slot-open" type="button" disabled>Edit bitmap…</button>
-          </div>
-          <form id="fill-slot-editor" class="style-editor" hidden>
-            <strong id="fill-slot-title">Edit bitmap</strong>
-            <p id="fill-slot-help" class="note">Click or drag to paint. Arrow keys move; Space/Enter toggles; Escape cancels. Apply changes every layer referencing this slot, not just the selection.</p>
-            <div id="fill-slot-grid" role="group" aria-label="16 by 16 bitmap" aria-describedby="fill-slot-help"></div>
-            <canvas id="fill-slot-preview" width="16" height="16" aria-label="Bitmap preview"></canvas>
-            <div class="button-row"><button id="fill-slot-clear" type="button">Clear</button><button id="fill-slot-solid" type="button">Solid</button><button id="fill-slot-invert" type="button">Invert</button><button id="fill-slot-reset" type="button">Reset</button></div>
-            <p class="note">Reset restores the bundled default. Apply writes no files; save Native JSON to preserve edits and references.</p>
-            <div class="button-row"><button id="fill-slot-apply" type="submit">Apply slot</button><button id="fill-slot-cancel" type="button">Cancel</button></div>
-          </form>
-          <p id="fill-slot-status" class="note" role="status"></p>
-        </details>
-        <form id="palette-style" class="style-editor" hidden>
-          <strong id="palette-style-title">Style selected layers</strong>
-          <p class="note">Only checked/changed fields are assigned. Folded parents include their children. Jobdeck parent colors propagate; child fill/width overrides win in expanded groups.</p>
-          <div class="form-row"><label class="check"><input id="palette-color-on" type="checkbox"> Color</label><input id="palette-color" type="color" value="#00ffff" aria-label="Selected layer color"></div>
-          <div class="form-row"><label for="palette-fill">Fill</label><select id="palette-fill"><option value="">Unchanged</option><option value="solid">Solid</option><option value="clear">Outline</option><option value="speckle">Speckle</option><option value="pattern">16×16 pattern</option></select></div>
-          <label id="palette-pattern-label" for="palette-pattern" hidden>16 rows, four hex digits each</label>
-          <textarea id="palette-pattern" rows="3" maxlength="95" spellcheck="false" hidden></textarea>
-          <div class="form-row"><label for="palette-width">Line px</label><select id="palette-width"><option value="">Unchanged</option><option value="1">1 (inherit)</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="+1">Increase</option><option value="-1">Decrease</option></select></div>
-          <p class="note">1 clears the width override. Increase/decrease steps each row’s assigned width (default 1), not an inherited group width.</p>
-          <div class="button-row"><button id="palette-style-apply" type="submit">Apply to selection</button><button id="palette-style-cancel" type="button">Cancel</button></div>
-        </form>
-        <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>
-        <div class="pagination"><button id="layers-prev" disabled aria-label="Previous layer page">←</button><span id="layers-count">0 layers</span><button id="layers-next" disabled aria-label="Next layer page">→</button></div>
-        <p id="layers-note" class="note" role="status"></p><button id="layers-retry" hidden>Reload layer page</button>
-        <form id="style-editor" class="style-editor" hidden>
-          <strong id="style-title">Layer style</strong>
-          <p class="note">Only changed fields are assigned. A folded parent includes children; expanded jobdeck children retain their fill/width overrides.</p>
-          <div class="form-row"><label for="style-fill">Fill</label><select id="style-fill"><option value="solid">Solid</option><option value="clear">Outline</option><option value="speckle">Speckle</option><option value="pattern">16×16 pattern</option></select></div>
-          <label id="pattern-label" for="style-pattern" hidden>16 rows, four hex digits each</label>
-          <textarea id="style-pattern" rows="3" maxlength="95" spellcheck="false" hidden></textarea>
-          <div class="form-row"><label for="style-width">Line px</label><input id="style-width" class="short" type="number" min="1" max="8" value="1" title="1 clears the override; a child inherits its group width"></div>
-          <div class="button-row"><button type="submit">Apply style</button><button id="style-cancel" type="button">Cancel</button></div>
-        </form>
-      </section>
-      <button id="index-open" type="button" aria-haspopup="dialog" aria-controls="index-open-dialog" hidden disabled>Index and open…</button>
-      <details class="index-panel"><summary>Index this source</summary>
-        <p class="note">Explicit operation. Close views here and in other processes before rebuilding or renaming their cache; reader leases are app-local. Legacy cache names migrate to hidden .ice directories. Completed renames remain if later work fails or is cancelled.</p>
-        <div class="form-row"><label for="index-jobs">Index jobs</label><input id="index-jobs" class="short" type="number" min="1" max="16" value="12"></div>
-        <label class="check"><input id="index-lod" type="checkbox"> Include LOD</label>
-        <label class="check"><input id="index-occupancy" type="checkbox"> Include occupancy summary (default: jobdeck only)</label>
-        <label for="index-occupancy-prune">Occupancy walk</label>
-        <select id="index-occupancy-prune" disabled><option value="">Native default (prune on)</option><option value="1">Prune sub-cell bboxes</option><option value="0">Exact walk (diagnostic)</option></select>
-        <label class="check"><input id="index-representatives" type="checkbox"> Include representative samples (plain layout only)</label>
-        <label for="index-representatives-format">Representative format</label>
-        <select id="index-representatives-format" disabled><option value="">Reuse existing / native default (points)</option><option value="1">Rebuild as points (1)</option><option value="2">Rebuild as shape/tree samples (2)</option></select>
-        <p class="note">Samples are approximate display data, not pickable geometry. An explicit format rebuilds OVR even on a current cache. Occupancy pruning may enlarge sub-cell footprints within one grid cell. Reopen after generation. Adding both summaries to a current cache uses two passes; a completed first pass remains if the second fails.</p>
-        <label class="check"><input id="index-force" type="checkbox"> Force replacement of existing cache</label>
-        <div class="button-row"><button id="index">Run index</button><button id="cancel-job" disabled>Cancel</button></div>
-        <details id="revision-panel" hidden>
-          <summary>Immutable index revisions</summary>
-          <p class="note">Build a complete separate index using the jobs/summary options above. Existing readers keep their index. Force is not used. All selected jobdeck sources must be valid OASIS; missing/GDS/gzip members fail the build. No automatic switch or cleanup; each build requires another full cache's disk space.</p>
-          <label class="check"><input id="revision-approve" type="checkbox"> Approve one full separate index build</label>
-          <button id="revision-build" type="button" disabled>Build new revision</button>
-          <button id="revision-check" type="button" disabled>Check published revision</button>
-          <p id="revision-status" class="note" role="status">No revision checked.</p>
-          <p id="revision-current" class="note"></p>
-          <p class="note">Use is a separate action. Same source/levels/mode keeps camera and display settings if the layer schema matches. Inspection, rulers, DRC selection and unapproved previews reset; save unfinished review edits first. To change source/levels/mode, close the view first. The old and failed revision files remain on disk.</p>
-          <button id="revision-use" type="button" disabled>Use checked revision</button>
-          <button id="revision-usage" type="button" disabled>Refresh revision storage usage</button>
-          <p class="note">Reads the selected source and its registered dependencies, across all loaded-level selections. Logical file bytes, not allocated or reclaimable space. No cleanup is performed. Old-format readers cannot be tracked. Reader status is a point-in-time observation, not permission to delete.</p>
-          <pre id="revision-usage-status" class="note" aria-live="polite">Storage usage not checked.</pre>
-          <fieldset id="reclaim-panel" hidden>
-            <legend>Reclaim an inactive revision set</legend>
-            <p class="note">Only published v3 sets on supported local filesystems. Current/open, old-format, standalone, unpublished and uncertain candidates remain protected. NFS/shared-mount reclamation is disabled. Original layouts and reviews are never targets.</p>
-            <label for="reclaim-choice">Observed sets / recovery evidence</label>
-            <select id="reclaim-choice"><option value="">Refresh storage usage to list sets</option></select>
-            <label for="reclaim-id">Exact set ID (32 lowercase hex characters; not a path)</label>
-            <input id="reclaim-id" maxlength="32" autocomplete="off" spellcheck="false">
-            <button id="reclaim-prepare" type="button" disabled>Preview deletion / check recovery</button>
-            <pre id="reclaim-status" class="note" aria-live="polite">No reclamation preview.</pre>
-            <label class="check"><input id="reclaim-approve" type="checkbox" disabled> Permanently delete exactly the previewed inactive cache files</label>
-            <button id="reclaim-run" type="button" disabled>Delete approved inactive files</button>
-            <p class="note">No automatic retry. After interruption or a new server session, refresh usage, prepare the same set ID again and approve only the newly listed remaining files. Recovery evidence can also describe completed or invalid work. Source files, current revisions and journals are kept.</p>
-          </fieldset>
-        </details>
-        <p id="operation" class="note" role="status">No active operation.</p>
-      </details>
-    </aside>
-    <main class="main">
-      <!-- floe-view-toolbar:start -->
-      <form id="goto-form" class="toolbar" title="Goto draft is kept while editing. Escape in a coordinate restores the current view; Go applies it.">
-        <button id="fit" type="button" disabled title="Fit layout (Ctrl+A)">Fit</button>
-        <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
-        <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
-      </form>
-      <!-- floe-view-toolbar:end -->
-      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. R starts two-point rulers; Shift allows free angles; M toggles snap; K undoes; Shift+K clears rulers. Left or middle drag and arrow keys pan. Right drag rightwards zooms into a box; leftwards zooms out; Escape cancels. Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames. Less/greater steps depth; digits choose depth, 9 9 selects full. Comma/period steps DRC errors; N opens notes; W proposes a waive toggle, with separate save approval. Tab cycles overlays; Shift+Tab leaves the canvas. Ctrl or Command+C copies visible pixels.">
-        <div id="notice" class="notice" role="alert" hidden></div>
-        <canvas id="margin-canvas" class="viewer-frame" width="1" height="1" aria-hidden="true" hidden></canvas>
-        <canvas id="canvas" class="viewer-frame" width="1" height="1" aria-label="Rendered layout"></canvas>
-        <canvas id="query-canvas" width="1" height="1" aria-label="Selected shapes and snap point" hidden></canvas>
-        <canvas id="drc-canvas" width="1" height="1" aria-label="DRC markers and selected violation" hidden></canvas>
-        <canvas id="ruler-canvas" width="1" height="1" aria-label="Manual, bbox gap and CD rulers with measurement preview" hidden></canvas>
-        <div id="zoom-band" class="viewer-band" aria-hidden="true" hidden></div><div id="zoom-band-hint" class="viewer-band-hint" role="status" hidden></div>
-        <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
-        <div id="rendering" class="rendering" hidden>Rendering</div>
-        <div class="viewport-hint">Drag / arrows · pan <span>Right drag · box zoom</span> <span>Shift · 10%</span> <span>+ / − zoom</span> <span>Ctrl+A · fit</span></div>
+    <aside id="left-pane" class="left-pane" aria-label="Cells, DRC and inspection">
+      <div class="pane-tabs" role="tablist" aria-label="Left pane">
+        <button id="tab-cells" class="pane-tab active" type="button" role="tab" aria-selected="true" aria-controls="cells-page">cells</button>
+        <button id="tab-drc" class="pane-tab" type="button" role="tab" aria-selected="false" aria-controls="drc-page">DRC</button>
+        <button id="tab-inspect" class="pane-tab" type="button" role="tab" aria-selected="false" aria-controls="inspect-page">inspect</button>
       </div>
-      <footer class="statusbar"><span id="status">Waiting for session</span><span id="margin-info"></span><span id="viewport-info">Native pixels · Canvas 2D</span></footer>
-      <div id="perf" class="perf">Waiting for a Rust frame · no automatic indexing</div>
-    </main>
+      <section id="cells-page" class="pane-page cells-page" role="tabpanel" aria-labelledby="tab-cells">
+        <form id="cells-search-form" class="cells-search"><input id="cells-search" placeholder="find cell… (* ? wildcards)" maxlength="256" autocomplete="off" spellcheck="false" aria-label="Find cell" disabled></form>
+        <div id="cells-tree" class="cells-tree" role="tree" aria-label="Cell hierarchy"></div>
+        <div class="cells-controls"><label class="check"><input id="cells-highlight" type="checkbox" checked disabled> highlight</label><button id="cells-zoom" type="button" disabled title="Frame the selected cell (Enter)">zoom</button><button id="cells-root" type="button" disabled title="Selected cell as view root (Ctrl+T)">root</button><button id="cells-top" type="button" disabled title="View root: back to the top cell (Ctrl+Shift+T)">top</button></div>
+        <button id="cells-build" type="button" hidden>build cell index…</button>
+        <p id="cells-info" class="note" role="status"></p>
+      </section>
+      <section id="drc-page" class="pane-page drc-page" role="tabpanel" aria-labelledby="tab-drc" hidden>
+        <p id="drc-empty" class="pane-empty">no results database loaded</p>
     <aside id="drc-panel" class="drc-panel" aria-label="DRC review" hidden>
       <div class="drc-heading"><h2>DRC review <span id="drc-review-mode">NO REVIEW WRITES</span></h2><strong id="drc-title">DRC results</strong><p id="drc-summary" class="note"></p></div>
       <details id="recovery-panel" class="notes-panel" aria-label="Interrupted review file recovery" hidden>
@@ -442,6 +229,275 @@
       <p id="drc-sync-status" class="note" role="status"></p>
       <button id="drc-reload" class="quiet" title="Discard unsynchronized local panel changes and restore this view's server state">Reload review</button>
     </aside>
+      </section>
+      <section id="inspect-page" class="pane-page inspect-page" role="tabpanel" aria-labelledby="tab-inspect" hidden>
+      <section class="inspect-panel" aria-label="Geometry inspection">
+        <h2>Inspect geometry</h2>
+        <p id="pick-status" role="status">Click a shape to inspect it.</p>
+        <div class="button-row"><button id="pick-prev" disabled title="Previous overlapping shape">←</button><button id="pick-next" disabled title="Next overlapping shape">→</button><button id="pick-clear" disabled>Clear selection</button></div>
+        <pre id="pick-details"></pre>
+        <label class="check"><input id="snap-probe" type="checkbox" disabled> Snap probe (m)</label>
+        <p id="snap-status" tabindex="0" role="region" aria-label="Snap probe result"></p>
+        <p id="query-availability" class="note">Connect a layout to inspect geometry.</p>
+        <p class="note">Click again: next overlap · Shift: add · Ctrl/Cmd: toggle. Snap probes vertices and edges; it does not measure.</p>
+      </section>
+      <section class="inspect-panel" aria-label="Manual and selected bbox rulers">
+        <div class="button-row"><button id="ruler-mode" aria-pressed="false" disabled>Ruler (r)</button><button id="ruler-pop" disabled>Undo (k)</button><button id="ruler-clear" disabled>Clear (Shift+K)</button></div>
+        <label class="check"><input id="ruler-snap" type="checkbox" checked disabled> Edge/vertex snap (m in ruler mode)</label>
+        <p id="ruler-status" role="status">Click two points to measure.</p><pre id="ruler-details"></pre>
+        <p id="ruler-count" class="note">0 rulers</p><p id="ruler-availability" class="note"></p>
+        <pre id="ruler-auto"></pre>
+        <p class="note">Select 2+ shapes, then enter Ruler: nearest-neighbour bbox gaps, not contour distances. Undo follows creation order across manual, bbox and CD rulers.</p>
+        <p class="note">Axis-aligned by default · Shift: free angle · Escape: cancel point, exit mode, clear rulers.</p>
+      </section>
+      </section>
+    </aside>
+    <div id="left-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the left pane" tabindex="0" title="Drag to resize · double-click resets"></div>
+    <main class="main">
+      <!-- floe-view-toolbar:start -->
+      <form id="goto-form" class="toolbar" title="Goto draft is kept while editing. Escape in a coordinate restores the current view; Go applies it.">
+        <button id="fit" type="button" disabled title="Fit layout (Ctrl+A)">Fit</button>
+        <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
+        <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
+      </form>
+      <!-- floe-view-toolbar:end -->
+      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. R starts two-point rulers; Shift allows free angles; M toggles snap; K undoes; Shift+K clears rulers. Left or middle drag and arrow keys pan. Right drag rightwards zooms into a box; leftwards zooms out; Escape cancels. Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames. Less/greater steps depth; digits choose depth, 9 9 selects full. Comma/period steps DRC errors; N opens notes; W proposes a waive toggle, with separate save approval. Tab cycles overlays; Shift+Tab leaves the canvas. Ctrl or Command+C copies visible pixels.">
+        <div id="notice" class="notice" role="alert" hidden></div>
+        <canvas id="margin-canvas" class="viewer-frame" width="1" height="1" aria-hidden="true" hidden></canvas>
+        <canvas id="canvas" class="viewer-frame" width="1" height="1" aria-label="Rendered layout"></canvas>
+        <canvas id="query-canvas" width="1" height="1" aria-label="Selected shapes and snap point" hidden></canvas>
+        <canvas id="drc-canvas" width="1" height="1" aria-label="DRC markers and selected violation" hidden></canvas>
+        <canvas id="cells-canvas" width="1" height="1" aria-label="Highlighted cell instances" hidden></canvas>
+        <canvas id="ruler-canvas" width="1" height="1" aria-label="Manual, bbox gap and CD rulers with measurement preview" hidden></canvas>
+        <div id="zoom-band" class="viewer-band" aria-hidden="true" hidden></div><div id="zoom-band-hint" class="viewer-band-hint" role="status" hidden></div>
+        <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
+        <div id="rendering" class="rendering" hidden>Rendering</div>
+        <div class="viewport-hint">Drag / arrows · pan <span>Right drag · box zoom</span> <span>Shift · 10%</span> <span>+ / − zoom</span> <span>Ctrl+A · fit</span></div>
+      </div>
+    </main>
+    <div id="right-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the layer pane" tabindex="0" title="Drag to resize · double-click resets"></div>
+    <aside id="right-pane" class="right-pane" aria-label="Layers, minimap and palette">
+      <!-- floe-right-pane:start -->
+      <div class="layers-head"><button id="layers-expand" type="button" disabled>expand all</button><button id="layers-collapse" type="button" disabled>collapse all</button></div>
+        <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>
+        <div class="pagination"><button id="layers-prev" disabled aria-label="Previous layer page">←</button><span id="layers-count">0 layers</span><button id="layers-next" disabled aria-label="Next layer page">→</button></div>
+        <p id="layers-note" class="note" role="status"></p><button id="layers-retry" hidden>Reload layer page</button>
+        <p id="layers-hint" class="note layers-hint">click selects · Ctrl/⌘ toggles · Shift ranges · double-click shows/hides · right-click actions</p>
+        <form id="palette-style" class="style-editor" hidden>
+          <strong id="palette-style-title">Style selected layers</strong>
+          <p class="note">Only checked/changed fields are assigned. Folded parents include their children. Jobdeck parent colors propagate; child fill/width overrides win in expanded groups.</p>
+          <div class="form-row"><label class="check"><input id="palette-color-on" type="checkbox"> Color</label><input id="palette-color" type="color" value="#00ffff" aria-label="Selected layer color"></div>
+          <div class="form-row"><label for="palette-fill">Fill</label><select id="palette-fill"><option value="">Unchanged</option><option value="solid">Solid</option><option value="clear">Outline</option><option value="speckle">Speckle</option><option value="pattern">16×16 pattern</option></select></div>
+          <label id="palette-pattern-label" for="palette-pattern" hidden>16 rows, four hex digits each</label>
+          <textarea id="palette-pattern" rows="3" maxlength="95" spellcheck="false" hidden></textarea>
+          <div class="form-row"><label for="palette-width">Line px</label><select id="palette-width"><option value="">Unchanged</option><option value="1">1 (inherit)</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="+1">Increase</option><option value="-1">Decrease</option></select></div>
+          <p class="note">1 clears the width override. Increase/decrease steps each row’s assigned width (default 1), not an inherited group width.</p>
+          <div class="button-row"><button id="palette-style-apply" type="submit">Apply to selection</button><button id="palette-style-cancel" type="button">Cancel</button></div>
+        </form>
+        <form id="style-editor" class="style-editor" hidden>
+          <strong id="style-title">Layer style</strong>
+          <p class="note">Only changed fields are assigned. A folded parent includes children; expanded jobdeck children retain their fill/width overrides.</p>
+          <div class="form-row"><label for="style-color">Color</label><input id="style-color" type="color" value="#00ffff" aria-label="Layer color"></div>
+          <div class="form-row"><label for="style-fill">Fill</label><select id="style-fill"><option value="solid">Solid</option><option value="clear">Outline</option><option value="speckle">Speckle</option><option value="pattern">16×16 pattern</option></select></div>
+          <label id="pattern-label" for="style-pattern" hidden>16 rows, four hex digits each</label>
+          <textarea id="style-pattern" rows="3" maxlength="95" spellcheck="false" hidden></textarea>
+          <div class="form-row"><label for="style-width">Line px</label><input id="style-width" class="short" type="number" min="1" max="8" value="1" title="1 clears the override; a child inherits its group width"></div>
+          <div class="button-row"><button type="submit">Apply style</button><button id="style-cancel" type="button">Cancel</button></div>
+        </form>
+      <div class="pane-tabs" role="tablist" aria-label="Right pane">
+        <button id="tab-minimap" class="pane-tab active" type="button" role="tab" aria-selected="true" aria-controls="minimap-page">minimap</button>
+        <button id="tab-palette" class="pane-tab" type="button" role="tab" aria-selected="false" aria-controls="palette-page">palette</button>
+      </div>
+      <section id="minimap-page" class="pane-page minimap-page" role="tabpanel" aria-labelledby="tab-minimap">
+        <div id="minimap-panel" hidden>
+          <canvas id="minimap" width="180" height="180" tabindex="0" role="button" aria-label="Structural overview. Click to recenter at the current zoom. Enter or Space centers the layout."></canvas>
+          <p id="minimap-note" class="note" role="status"></p><button id="minimap-retry" type="button" hidden>Retry overview</button>
+          <p class="note">Click to recenter · same zoom · 16px aligned. Structural boxes, not rendered geometry.</p>
+        </div>
+      </section>
+      <section id="palette-page" class="pane-page palette-page" role="tabpanel" aria-labelledby="tab-palette" hidden>
+        <div id="palette-presets">
+          <div id="presets-colors" class="preset-grid colors" role="group" aria-label="Color presets"></div>
+          <div id="presets-fills" class="preset-grid fills" role="group" aria-label="Fill presets"></div>
+          <p id="presets-note" class="note" role="status">Select layers, then click a swatch.</p><button id="presets-retry" type="button" hidden>Reload presets</button>
+          <div id="fill-slot-tools" hidden>
+            <label for="fill-slot-choice">Developer bitmap slot</label>
+            <select id="fill-slot-choice"></select><button id="fill-slot-open" type="button" disabled>Edit bitmap…</button>
+          </div>
+          <form id="fill-slot-editor" class="style-editor" hidden>
+            <strong id="fill-slot-title">Edit bitmap</strong>
+            <p id="fill-slot-help" class="note">Click or drag to paint. Arrow keys move; Space/Enter toggles; Escape cancels. Apply changes every layer referencing this slot, not just the selection.</p>
+            <div id="fill-slot-grid" role="group" aria-label="16 by 16 bitmap" aria-describedby="fill-slot-help"></div>
+            <canvas id="fill-slot-preview" width="16" height="16" aria-label="Bitmap preview"></canvas>
+            <div class="button-row"><button id="fill-slot-clear" type="button">Clear</button><button id="fill-slot-solid" type="button">Solid</button><button id="fill-slot-invert" type="button">Invert</button><button id="fill-slot-reset" type="button">Reset</button></div>
+            <p class="note">Reset restores the bundled default. Apply writes no files; save Native JSON to preserve edits and references.</p>
+            <div class="button-row"><button id="fill-slot-apply" type="submit">Apply slot</button><button id="fill-slot-cancel" type="button">Cancel</button></div>
+          </form>
+          <p id="fill-slot-status" class="note" role="status"></p>
+        </div>
+      </section>
+      <!-- floe-right-pane:end -->
+    </aside>
+  </div>
+  <footer class="statusbar"><span id="cursor-info" class="cursor-info"></span><span id="status">Waiting for session</span><span id="margin-info"></span><span class="status-right"><span id="viewport-info">Native pixels · Canvas 2D</span><span id="dstatus"></span></span></footer>
+  <div id="perf" class="perf">Waiting for a Rust frame · no automatic indexing</div>
+  <div id="menu-proxies" class="menu-proxies" hidden>
+    <!-- floe-layer-tools:start -->
+        <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>
+        <div class="palette-tools"><span id="layers-selected" role="status">0 selected</span><button id="layers-clear" disabled>Clear selection</button></div>
+        <div class="palette-tools"><button id="layers-show" disabled>Show selected</button><button id="layers-hide" disabled>Hide selected</button><button id="layers-toggle" disabled>Toggle</button></div>
+        <button id="layers-style" disabled>Style selected…</button>
+    <!-- floe-layer-tools:end -->
+  </div>
+  <div id="source-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="source-title" tabindex="-1" hidden>
+    <section class="about-card tool-card">
+      <div class="about-heading"><h2 id="source-title">Load layout</h2><button id="source-close" type="button">Close</button></div>
+        <button id="browse-open" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Browse server files…</button>
+        <button id="drc-open" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Open DRC results…</button>
+        <button id="drc-reconnect" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Reconnect launcher reviewer…</button>
+        <button id="drc-rules-load" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Load SVRF metadata…</button>
+        <label for="source" class="sr-only">Registered source</label>
+        <select id="source"><option>Loading catalog…</option></select>
+        <div class="source-mode"><label for="mode">Open mode</label><select id="mode"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div>
+        <details id="level-options"><summary>Levels to load</summary><label class="check"><input id="levels-all" type="checkbox" checked> All levels</label><div id="level-list"></div><button id="level-more" hidden>More levels</button><button id="reselect-levels" hidden disabled title="Keep camera/current mode; reload layer defaults. Indexing requires separate approval.">Apply levels · keep view</button></details>
+        <div class="button-row"><button id="open" class="primary">Open layout</button><button id="close" disabled>Close</button></div>
+        <p id="source-note" class="note">Sources are registered by the local launcher.</p>
+        <div id="launch-panel" hidden>
+          <p id="launch-status" class="note" role="status"></p>
+          <button id="launch-open" type="button" hidden>Open requested layout</button>
+          <button id="launch-check" type="button" hidden>Check / retry same request</button>
+          <button id="launch-dismiss" type="button">Dismiss request</button>
+        </div>
+    </section>
+  </div>
+  <div id="display-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="display-title" tabindex="-1" hidden>
+    <section class="about-card tool-card">
+      <div class="about-heading"><h2 id="display-title">Display options</h2><button id="display-close" type="button">Close</button></div>
+        <div id="live-mode-row" hidden><div class="form-row"><label for="live-mode">Jobdeck mode</label><select id="live-mode" disabled title="Keep camera and visibility; reload mode defaults"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div><p id="live-mode-note" class="note" role="status">Ctrl+, toggles level/chip · same camera and loaded levels. Mode defaults reload.</p></div>
+        <!-- floe-view-controls:start -->
+        <div class="form-row"><label for="depth">Depth <span id="max-depth"></span></label><input id="depth" value="full" title="full or a nonnegative depth; canvas &lt; / &gt; steps, 9 9 selects full" class="short" disabled></div>
+        <div class="form-row"><label for="detail">Detail</label><select id="detail" disabled><option value="low">Low · 5 px</option><option value="medium" selected>Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>
+        <div class="form-row"><label for="thin">Thin shapes</label><select id="thin" disabled><option value="auto">Auto · keep</option><option value="keep">Keep</option><option value="cull">Cull</option></select></div>
+        <div class="check-row"><label class="check"><input id="frames" type="checkbox" disabled> Frames</label><label class="check"><input id="labels" type="checkbox" disabled> Labels</label><label class="check"><input id="mono" type="checkbox" disabled> Mono</label></div>
+        <div class="form-row"><label for="font-px">Label px</label><input id="font-px" class="short" type="number" min="6" max="96" value="14" disabled></div>
+        <!-- floe-view-controls:end -->
+        <div class="form-row"><label for="overlays">Overlays</label><select id="overlays" disabled><option value="all">All</option><option value="focus">Hide other errors</option><option value="none">Hide all</option></select></div>
+        <p class="note">Tab on canvas cycles overlays; Shift+Tab leaves the canvas. Hiding keeps selections and rulers.</p>
+        <div id="snapshot-panel" hidden>
+          <div class="button-row"><button id="snapshot-copy" type="button" disabled title="Copy the visible layout and annotations (Ctrl/Cmd+C on canvas)">Copy view</button><button id="snapshot-save" type="button" disabled>Save view PNG</button></div>
+          <button id="snapshot-retry" type="button" hidden>Download captured PNG</button>
+          <p id="snapshot-status" class="note" role="status"></p>
+          <p class="note">Visible pixels and annotations, including previews. Not an exact geometry export. Panels and status messages are excluded.</p>
+        </div>
+    </section>
+  </div>
+  <div id="clip-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="clip-title" tabindex="-1" hidden>
+    <section class="about-card tool-card">
+      <div class="about-heading"><h2 id="clip-title">Clip region</h2><button id="clip-close" type="button">Close</button></div>
+      <section id="clip-panel" class="clip-panel" aria-label="Exact OASIS export" hidden>
+        <h2>Export exact clip</h2>
+        <button id="clip-open" aria-expanded="false" aria-controls="clip-form" disabled>Clip current viewport…</button>
+        <p class="note">Full-depth source geometry, independent of detail, summary and style. Layout only; no jobdeck, labels, frames or DRC markers.</p>
+        <form id="clip-form" hidden>
+          <div class="form-row"><label for="clip-layers">Layers</label><select id="clip-layers"><option value="visible">Visible layers</option><option value="all">All layers</option><option value="none">None (empty file)</option></select></div>
+          <div class="form-row"><label for="clip-jobs">Jobs</label><input id="clip-jobs" class="short" type="number" min="1" max="16" value="2" required></div>
+          <label for="clip-cell-name">Output cell name</label><input id="clip-cell-name" value="FLOE_CLIP" maxlength="4096" required autocomplete="off" spellcheck="false">
+          <div class="button-row"><button id="clip-prepare" type="submit">Review clip</button><button id="clip-dismiss" type="button">Dismiss</button></div>
+          <div id="clip-review" hidden>
+            <p class="note">Exact bounds: left, bottom, right, top</p><pre id="clip-bounds"></pre>
+            <p id="clip-selection"></p><p id="clip-options"></p>
+            <p id="clip-stale" class="note" hidden>Source changed since indexing. Export uses the indexed geometry, not newer source contents.</p>
+            <button id="clip-approve" type="button" class="primary" disabled>Approve export</button>
+          </div>
+        </form>
+        <p id="clip-status" role="status">No clip requested.</p>
+        <div class="button-row"><button id="clip-cancel" hidden>Cancel clip</button><button id="clip-resolve" hidden>Resolve request</button><button id="clip-refresh">Refresh</button></div>
+        <p id="clip-note" class="note" role="status"></p><p id="clip-usage" class="note"></p>
+        <p id="clip-resources" class="note"></p>
+        <div id="clip-files" aria-label="Available clip files"></div>
+        <p class="note">Files expire after 10 minutes. Maximum 4 files, 512 MiB each. Closing the view does not cancel an approved clip; ending the session does.</p>
+      </section>
+    </section>
+  </div>
+  <div id="settings-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1" hidden>
+    <section class="about-card tool-card">
+      <div class="about-heading"><h2 id="settings-title">Layer settings and shared design default</h2><button id="settings-close" type="button">Close</button></div>
+        <div id="settings-panel" hidden>
+          <div class="button-row"><button id="settings-load" disabled>Load settings…</button><button id="settings-cancel" disabled>Cancel</button></div>
+          <input id="settings-file" type="file" accept=".layerprops,.json" hidden>
+          <div class="button-row"><select id="settings-format" aria-label="Settings save format"><option value="native">Native JSON (lossless)</option><option value="calibre">Calibre layerprops</option></select><button id="settings-save" disabled>Save settings…</button></div>
+          <p class="note">Load applies to this session; Save downloads a file. Native restores the same layer/group table; Calibre flattens inherited styles. These buttons do not write design defaults.</p>
+          <p id="settings-status" role="status" class="note"></p>
+        </div>
+        <div id="default-panel" hidden>
+          <h2>Shared design default</h2>
+          <div class="button-row"><button id="default-prepare" type="button" disabled>Review publication…</button><button id="default-recover" type="button" disabled>Review interrupted-file repair…</button><button id="default-dismiss" type="button" disabled>Dismiss</button></div>
+          <div id="default-review" hidden>
+            <p id="default-target"></p><p id="default-levels" class="note"></p>
+            <p id="default-impact" class="note">This writes the shared Calibre layerprops file for future opens, including other users. It replaces the whole file, not a merge. Existing windows are unchanged.</p>
+            <label class="check"><input id="default-consent" type="checkbox"><span id="default-consent-label">I approve writing this shared default.</span></label>
+            <button id="default-approve" type="button" class="primary" disabled>Publish shared default</button>
+          </div>
+          <p id="default-status" role="status" class="note"></p>
+          <button id="default-check-repair" type="button" hidden>Check repair result (read only)</button>
+          <div class="button-row"><button id="default-cancel" type="button" hidden>Request cancel</button><button id="default-refresh" type="button">Refresh receipt</button></div>
+          <div id="default-uncertain" hidden>
+            <p class="note">Outcome unknown. Resolve sends only the original approved request. Do not start a new publication to retry it.</p>
+            <button id="default-resolve" type="button">Resolve original request</button>
+            <label class="check"><input id="default-checked" type="checkbox">I checked the shared file and want to clear this unresolved local record.</label>
+            <button id="default-forget" type="button" disabled>Clear local record</button>
+          </div>
+          <p id="default-note" class="note" role="status"></p>
+        </div>
+    </section>
+  </div>
+  <div id="index-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="index-title" tabindex="-1" hidden>
+    <section class="about-card tool-card">
+      <div class="about-heading"><h2 id="index-title">Index this source</h2><button id="index-close" type="button">Close</button></div>
+      <button id="index-open" type="button" aria-haspopup="dialog" aria-controls="index-open-dialog" hidden disabled>Index and open…</button>
+      <details class="index-panel"><summary>Index this source</summary>
+        <p class="note">Explicit operation. Close views here and in other processes before rebuilding or renaming their cache; reader leases are app-local. Legacy cache names migrate to hidden .ice directories. Completed renames remain if later work fails or is cancelled.</p>
+        <div class="form-row"><label for="index-jobs">Index jobs</label><input id="index-jobs" class="short" type="number" min="1" max="16" value="12"></div>
+        <label class="check"><input id="index-lod" type="checkbox"> Include LOD</label>
+        <label class="check"><input id="index-occupancy" type="checkbox"> Include occupancy summary (default: jobdeck only)</label>
+        <label for="index-occupancy-prune">Occupancy walk</label>
+        <select id="index-occupancy-prune" disabled><option value="">Native default (prune on)</option><option value="1">Prune sub-cell bboxes</option><option value="0">Exact walk (diagnostic)</option></select>
+        <label class="check"><input id="index-representatives" type="checkbox"> Include representative samples (plain layout only)</label>
+        <label for="index-representatives-format">Representative format</label>
+        <select id="index-representatives-format" disabled><option value="">Reuse existing / native default (points)</option><option value="1">Rebuild as points (1)</option><option value="2">Rebuild as shape/tree samples (2)</option></select>
+        <p class="note">Samples are approximate display data, not pickable geometry. An explicit format rebuilds OVR even on a current cache. Occupancy pruning may enlarge sub-cell footprints within one grid cell. Reopen after generation. Adding both summaries to a current cache uses two passes; a completed first pass remains if the second fails.</p>
+        <label class="check"><input id="index-force" type="checkbox"> Force replacement of existing cache</label>
+        <div class="button-row"><button id="index">Run index</button><button id="cancel-job" disabled>Cancel</button></div>
+        <details id="revision-panel" hidden>
+          <summary>Immutable index revisions</summary>
+          <p class="note">Build a complete separate index using the jobs/summary options above. Existing readers keep their index. Force is not used. All selected jobdeck sources must be valid OASIS; missing/GDS/gzip members fail the build. No automatic switch or cleanup; each build requires another full cache's disk space.</p>
+          <label class="check"><input id="revision-approve" type="checkbox"> Approve one full separate index build</label>
+          <button id="revision-build" type="button" disabled>Build new revision</button>
+          <button id="revision-check" type="button" disabled>Check published revision</button>
+          <p id="revision-status" class="note" role="status">No revision checked.</p>
+          <p id="revision-current" class="note"></p>
+          <p class="note">Use is a separate action. Same source/levels/mode keeps camera and display settings if the layer schema matches. Inspection, rulers, DRC selection and unapproved previews reset; save unfinished review edits first. To change source/levels/mode, close the view first. The old and failed revision files remain on disk.</p>
+          <button id="revision-use" type="button" disabled>Use checked revision</button>
+          <button id="revision-usage" type="button" disabled>Refresh revision storage usage</button>
+          <p class="note">Reads the selected source and its registered dependencies, across all loaded-level selections. Logical file bytes, not allocated or reclaimable space. No cleanup is performed. Old-format readers cannot be tracked. Reader status is a point-in-time observation, not permission to delete.</p>
+          <pre id="revision-usage-status" class="note" aria-live="polite">Storage usage not checked.</pre>
+          <fieldset id="reclaim-panel" hidden>
+            <legend>Reclaim an inactive revision set</legend>
+            <p class="note">Only published v3 sets on supported local filesystems. Current/open, old-format, standalone, unpublished and uncertain candidates remain protected. NFS/shared-mount reclamation is disabled. Original layouts and reviews are never targets.</p>
+            <label for="reclaim-choice">Observed sets / recovery evidence</label>
+            <select id="reclaim-choice"><option value="">Refresh storage usage to list sets</option></select>
+            <label for="reclaim-id">Exact set ID (32 lowercase hex characters; not a path)</label>
+            <input id="reclaim-id" maxlength="32" autocomplete="off" spellcheck="false">
+            <button id="reclaim-prepare" type="button" disabled>Preview deletion / check recovery</button>
+            <pre id="reclaim-status" class="note" aria-live="polite">No reclamation preview.</pre>
+            <label class="check"><input id="reclaim-approve" type="checkbox" disabled> Permanently delete exactly the previewed inactive cache files</label>
+            <button id="reclaim-run" type="button" disabled>Delete approved inactive files</button>
+            <p class="note">No automatic retry. After interruption or a new server session, refresh usage, prepare the same set ID again and approve only the newly listed remaining files. Recovery evidence can also describe completed or invalid work. Source files, current revisions and journals are kept.</p>
+          </fieldset>
+        </details>
+        <p id="operation" class="note" role="status">No active operation.</p>
+      </details>
+    </section>
   </div>
   <div id="browse-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="browse-title" tabindex="-1" hidden>
     <section class="about-card browse-card">
@@ -534,11 +590,13 @@
     </section>
   </div>
   <noscript>This workspace requires JavaScript. All assets are served locally.</noscript>
+  <!-- floe-layer-menu:start -->
   <div id="layer-menu" class="layer-menu" role="menu" aria-label="Selected layer actions" hidden>
     <button id="layer-menu-show" role="menuitem">Show selected</button><button id="layer-menu-hide" role="menuitem">Hide selected</button><button id="layer-menu-toggle" role="menuitem">Toggle selected</button>
     <button id="layer-menu-style" role="menuitem">Style selected…</button>
     <button id="layer-menu-all" role="menuitem">Show all</button><button id="layer-menu-none" role="menuitem">Hide all</button><button id="layer-menu-close" role="menuitem">Close menu</button>
   </div>
+  <!-- floe-layer-menu:end -->
   <div id="share-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="share-heading" hidden>
     <section class="about-dialog">
       <h2 id="share-heading">Read-only local invitation</h2>

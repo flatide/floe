@@ -141,6 +141,12 @@ impl RenderSession {
     pub fn pending_queries(&self) -> usize {
         self.worker.pending_queries()
     }
+    pub fn cell_query(&mut self, request: floe_worker_client::CellRequest) -> Result<u64> {
+        self.worker.cell_query(request).map_err(Into::into)
+    }
+    pub fn pending_cell_queries(&self) -> usize {
+        self.worker.pending_cell_queries()
+    }
     pub fn poll(&mut self, timeout: Duration) -> Result<Option<Event>> {
         let event = self.worker.poll(timeout)?;
         if self.options.debug {

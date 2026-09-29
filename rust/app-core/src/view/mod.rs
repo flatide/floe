@@ -17,15 +17,18 @@ use crate::{
     dataset::Dataset,
     managed::ManagedDataset,
     shots::{Detail, Thin, MAX_PIXELS},
-    Error, Result,
+    Error, ErrorKind, Result,
 };
 pub use controller::{
-    ControllerOptions, DisplayFrame, MarginStatus, Phase, PreparedReplacement, Purpose,
-    ReservedView, Snapshot, ViewController,
+    cell_failure, ControllerOptions, DisplayFrame, MarginStatus, Phase, PreparedReplacement,
+    Purpose, ReservedView, Snapshot, ViewController,
 };
 pub use fill_slots::FillSlotEdit;
+pub use floe_worker_client::{
+    CellChild, CellFailure, CellFailureCode, CellMatch, CellOutcome, CellReply, CellRequest,
+    CellSource, QueryKind, QueryOperation,
+};
 use floe_worker_client::{Layers, RenderRequest, Style};
-pub use floe_worker_client::{QueryKind, QueryOperation};
 pub use palette::{LayerAction, LayerBatch};
 pub use palette_style::{StyleBatch, WidthEdit};
 pub use query::{QueryAnchor, QuerySnapshot, ViewQuery, ViewQueryResult};
@@ -278,6 +281,32 @@ pub enum LayerIsolation {
     Set(Layers),
     Restore,
 }
+/// The view root (SPEC-VIEWER §8c): the selected cell becomes the displayed
+/// top, in ITS coordinates. The die (fit, minimap, clamp) is its recursive
+/// bbox; the name is display text. Resolved once from the daemon's cell
+/// tree, then part of the view state like depth or layers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Root {
+    pub cell: u32,
+    pub name: String,
+    pub bbox: [f64; 4],
+}
+#[derive(Clone, Debug)]
+pub enum RootEdit {
+    /// Back to the file's top cell.
+    Clear,
+    /// A cell of one source; the controller resolves it against the daemon
+    /// (name, bbox) before the revision CAS. Only source 0 exists for a
+    /// layout; a jobdeck has no root at all.
+    Cell { source: usize, cell: u32 },
+    /// Already resolved (the controller's own commit form).
+    Resolved(Root),
+}
+/// Stable error messages a transport may map to its own codes; the kinds
+/// alone do not tell these refusals from other input errors.
+pub const ROOT_UNSUPPORTED: &str = "root_unsupported";
+pub const CELL_WITHOUT_SHAPES: &str = "cell_without_shapes";
+pub const CELL_TIMEOUT: &str = "cell_timeout";
 #[derive(Default, Clone, Debug)]
 pub struct Patch {
     pub navigation: Option<Navigation>,
@@ -305,6 +334,9 @@ pub struct Patch {
     pub properties: Option<crate::layerprops::Document>,
     pub settings: Option<crate::layerprops::Settings>,
     pub prepared_layers: Option<LayerSettings>,
+    /// Setting or clearing the root also fits the viewport to the new die:
+    /// the old viewport was in another cell's coordinates.
+    pub root: Option<RootEdit>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct StyleDelta {
@@ -338,6 +370,7 @@ pub struct ViewState {
     pub mono: bool,
     pub styles: Arc<Vec<Style>>,
     assignments: Arc<properties::Assignments>,
+    pub root: Option<Root>,
 }
 /// Immutable metadata sufficient for validation, without retaining a second
 /// cache mapping or leaking source paths into a transport snapshot.
@@ -545,7 +578,18 @@ impl ViewState {
             ));
         }
         self.validate(next)?;
-        Ok(self.clone())
+        let mut s = self.clone();
+        // A cell index belongs to one index revision; the viewport under a
+        // root is in that cell's coordinates. Return to the top, fitted.
+        if s.root.take().is_some() {
+            s.viewport = Viewport::fit(next.bbox, s.viewport.width, s.viewport.height)?;
+        }
+        Ok(s)
+    }
+    /// The displayed design's extent: the root's recursive bbox under a
+    /// root, else the file's. Fit, overview and clamp all use this.
+    pub fn die(&self, model: &Model) -> [f64; 4] {
+        self.root.as_ref().map_or(model.bbox, |r| r.bbox)
     }
     pub fn initial(model: &Model, width: u32, height: u32) -> Result<Self> {
         Ok(Self {
@@ -561,6 +605,7 @@ impl ViewState {
             mono: false,
             styles: Arc::clone(&model.styles),
             assignments: Arc::clone(&model.assignments),
+            root: None,
         })
     }
     pub fn edit(&self, model: &Model, patch: Patch) -> Result<Self> {
@@ -619,8 +664,31 @@ impl ViewState {
         if let Some((w, h)) = patch.pixels {
             s.viewport = s.viewport.resize(w, h)?;
         }
+        if let Some(root) = patch.root {
+            let next = match root {
+                RootEdit::Clear => None,
+                RootEdit::Resolved(root) => {
+                    if model.deck {
+                        return Err(Error::new(ErrorKind::Unsupported, ROOT_UNSUPPORTED));
+                    }
+                    let [x0, y0, x1, y1] = root.bbox;
+                    if !root.bbox.iter().all(|v| v.is_finite()) || x1 <= x0 || y1 <= y0 {
+                        return Err(Error::input(CELL_WITHOUT_SHAPES));
+                    }
+                    Some(root)
+                }
+                RootEdit::Cell { .. } => {
+                    return Err(Error::input("a root cell needs a live controller"))
+                }
+            };
+            if next != s.root {
+                s.root = next;
+                let v = s.viewport;
+                s.viewport = Viewport::fit(s.die(model), v.width, v.height)?;
+            }
+        }
         if let Some(nav) = patch.navigation {
-            s.viewport = s.viewport.navigate(nav, model.bbox, model.dbu)?;
+            s.viewport = s.viewport.navigate(nav, s.die(model), model.dbu)?;
         }
         if let Some(depth) = patch.depth {
             s.depth = match depth {
@@ -788,6 +856,9 @@ impl ViewState {
         if (model.deck && self.labels) || !(6..=96).contains(&self.font_px) {
             return Err(Error::input("unsupported label policy"));
         }
+        if model.deck && self.root.is_some() {
+            return Err(Error::new(ErrorKind::Unsupported, ROOT_UNSUPPORTED));
+        }
         if self.layers != model.layers(&self.layers)? {
             return Err(Error::input("layers must be normalized"));
         }
@@ -819,7 +890,10 @@ impl ViewState {
     }
     pub fn same_policy(&self, other: &Self, deck: bool) -> bool {
         // Saving/restoring unchanged visibility must not invalidate geometry.
-        self.depth == other.depth
+        // Another root is another coordinate system: no frame or margin
+        // rendered under the old one may be shown under the new one.
+        self.root == other.root
+            && self.depth == other.depth
             && self.detail == other.detail
             && self.thin.effective(deck) == other.thin.effective(deck)
             && self.layers == other.layers
@@ -842,6 +916,7 @@ impl ViewState {
             labels: self.labels,
             font_px: self.font_px,
             mono: self.mono,
+            root: self.root.as_ref().map(|r| r.cell),
             ..base
         }
     }

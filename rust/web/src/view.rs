@@ -2,7 +2,9 @@
 //! commands never enter these APIs. World coordinates and u64 IDs are strings.
 use floe_app_core::{
     shots::{Detail, Thin},
-    view::{Depth, DisplayFrame, LayerIsolation, Model, Navigation, Patch, Phase, Snapshot},
+    view::{
+        Depth, DisplayFrame, LayerIsolation, Model, Navigation, Patch, Phase, RootEdit, Snapshot,
+    },
 };
 use floe_worker_client::{Fill, FrameFormat, Layers, Style};
 use serde::{Deserialize, Deserializer};
@@ -45,7 +47,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Field<T> {
     }
 }
 impl<T> Field<T> {
-    fn optional(self) -> Option<T> {
+    pub(crate) fn optional(self) -> Option<T> {
         match self {
             Self::Absent => None,
             Self::Value(v) => Some(v),
@@ -299,6 +301,14 @@ pub struct PatchDto {
     pub styles: Field<Vec<StyleDto>>,
     pub style_deltas: Field<Vec<StyleDeltaDto>>,
     pub style_batch: Field<StyleBatchDto>,
+    /// null = back to the top cell; an object = that cell as the view root.
+    pub root: Field<Option<RootDto>>,
+}
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct RootDto {
+    src: usize,
+    cell: u32,
 }
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -419,7 +429,31 @@ impl PatchDto {
             settings: None,
             prepared_layers: None,
             fill_slot_edit: None,
+            root: self.root.optional().map(|r| match r {
+                None => RootEdit::Clear,
+                Some(r) => RootEdit::Cell {
+                    source: r.src,
+                    cell: r.cell,
+                },
+            }),
         })
+    }
+    /// A root edit blocks on the worker's cell tree; the socket loop runs
+    /// it off the reactor. Every other patch is a bounded lock-and-commit.
+    pub fn blocks(&self) -> bool {
+        matches!(self.root, Field::Value(Some(_)))
+    }
+}
+/// A view edit's failure as a wire code. Revision conflicts are the
+/// client's cue to resync; the root refusals keep their own names.
+pub fn edit_code(e: floe_app_core::Error) -> &'static str {
+    use floe_app_core::view::{CELL_TIMEOUT, CELL_WITHOUT_SHAPES, ROOT_UNSUPPORTED};
+    match e.message.as_str() {
+        CELL_WITHOUT_SHAPES => "cell_without_shapes",
+        ROOT_UNSUPPORTED => "root_unsupported",
+        CELL_TIMEOUT => "timeout",
+        _ if e.kind == floe_app_core::ErrorKind::Busy => "stale_state",
+        _ => safe_error(e.kind),
     }
 }
 fn phase(p: Phase) -> &'static str {
@@ -463,7 +497,10 @@ pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) 
         Layers::None => json!({"mode":"none"}),
         Layers::Only(pairs) => json!({"mode":"only","pairs":pairs}),
     };
-    let capabilities = json!({"labels":!m.deck,"frames":true,"margin":s.margin_enabled,"query":!m.deck,"clip":!m.deck,"mode":m.deck,"edit_source":false});
+    // cells: the worker's cell tree answers for a layout and a deck alike;
+    // cell_root: a jobdeck has no view root (its sources' tops are its cells).
+    let capabilities = json!({"labels":!m.deck,"frames":true,"margin":s.margin_enabled,"query":!m.deck,"clip":!m.deck,"mode":m.deck,"edit_source":false,
+        "cells":true,"cell_root":!m.deck});
     let mut out = json!({"type":"snapshot","view_id":view_id,"connection_epoch":connection_epoch,"dataset_revision":m.dataset_revision.to_string(),
         "state_rev":s.state_rev.to_string(),"render_rev":s.render_rev.to_string(),"render_key":s.render_key.to_string(),"fill_slots_key":v.fill_slots_key(),"worker_epoch":s.worker_epoch.to_string(),
         "bbox_dbu":v.viewport.bbox.map(|n|n.to_string()),"dbu_um":m.dbu.to_string(),"pixels":[v.viewport.width,v.viewport.height],
@@ -478,8 +515,13 @@ pub fn snapshot(s: &Snapshot, m: &Model, view_id: &str, connection_epoch: &str) 
         "margin":s.margin.map(|v|json!({"frame_id":v.frame_id.to_string(),"origin_px":v.origin_px,"crop_safe":v.crop_safe})),
         "margin_working":s.margin_working,"margin_submitted":s.margin_submitted.to_string(),"crop_hits":s.crop_hits.to_string(),
         "margin_failure":s.margin_failure.as_ref().map(|(kind,_)|safe_error(*kind)),
+        "root":v.root.as_ref().map(|r|json!({"cell":r.cell,"name":r.name})),
+        "root_name":v.root.as_ref().map_or("",|r|r.name.as_str()),
         "capabilities":capabilities});
-    out["minimap"] = serde_json::to_value(m.minimap.projection(m.bbox, v.viewport, v.depth))
+    // Under a root the die is the root's recursive bbox in its own
+    // coordinates; the baked frontiers belong to the top, so the plain base.
+    let depth = if v.root.is_some() { None } else { v.depth };
+    out["minimap"] = serde_json::to_value(m.minimap.projection(v.die(m), v.viewport, depth))
         .expect("finite overview projection");
     out
 }
@@ -796,6 +838,53 @@ mod tests {
         .layer_batch
         .unwrap();
         assert!(batch.collapsed.is_empty());
+    }
+    #[test]
+    fn a_root_patch_is_null_or_a_source_cell_and_only_a_cell_blocks() {
+        let clear = serde_json::from_str::<PatchDto>(r#"{"root":null}"#).unwrap();
+        assert!(!clear.blocks());
+        assert!(matches!(clear.core().unwrap().root, Some(RootEdit::Clear)));
+        let set = serde_json::from_str::<PatchDto>(r#"{"root":{"src":0,"cell":17}}"#).unwrap();
+        assert!(set.blocks());
+        assert!(matches!(
+            set.core().unwrap().root,
+            Some(RootEdit::Cell {
+                source: 0,
+                cell: 17
+            })
+        ));
+        let none = serde_json::from_str::<PatchDto>("{}").unwrap();
+        assert!(!none.blocks());
+        assert!(none.core().unwrap().root.is_none());
+        for text in [
+            r#"{"root":{"src":0}}"#,
+            r#"{"root":{"cell":1}}"#,
+            r#"{"root":{"src":-1,"cell":1}}"#,
+            r#"{"root":{"src":0,"cell":1,"name":"x"}}"#,
+            r#"{"root":{"src":0,"cell":"1"}}"#,
+            r#"{"root":17}"#,
+            r#"{"root":{"src":0,"cell":1},"root":null}"#,
+        ] {
+            assert!(serde_json::from_str::<PatchDto>(text).is_err(), "{text}");
+        }
+        use floe_app_core::{view, Error, ErrorKind as K};
+        assert_eq!(
+            edit_code(Error::input(view::CELL_WITHOUT_SHAPES)),
+            "cell_without_shapes"
+        );
+        assert_eq!(
+            edit_code(Error::new(K::Unsupported, view::ROOT_UNSUPPORTED)),
+            "root_unsupported"
+        );
+        assert_eq!(
+            edit_code(Error::new(K::Busy, view::CELL_TIMEOUT)),
+            "timeout"
+        );
+        assert_eq!(edit_code(Error::new(K::Busy, "stale")), "stale_state");
+        assert_eq!(
+            edit_code(Error::new(K::Cache, "nohier: x")),
+            "index_unavailable"
+        );
     }
     #[test]
     fn camera_text_preserves_half_dbu_phase_and_finite_units() {

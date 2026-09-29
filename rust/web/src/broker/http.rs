@@ -38,6 +38,10 @@ fn router(host: Host) -> Router {
             get(view_state).post(open_view),
         )
         .route("/api/v1/server/sessions/{id}/stream", get(upgrade))
+        .route("/api/v1/server/sessions/{id}/palette", post(palette))
+        .route("/api/v1/server/sessions/{id}/minimap/{base}", get(minimap))
+        .route("/api/v1/server/sessions/{id}/fill-slots/{key}", get(fill_slots))
+        .route("/api/v1/server/sessions/{id}/presets", get(presets))
         .layer(DefaultBodyLimit::max(4096))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&host.broker),
@@ -313,6 +317,82 @@ async fn view_state(
             Json(json!({"type":"unopened","view_id":access.id()})).into_response()
         }
         Err(e) => error(e),
+    }
+}
+// Session-scoped reads for the shared layer/minimap/palette panels. They
+// answer only for the session's own view and never mount owner routes.
+async fn palette(
+    State(host): State<Host>,
+    RoutePath(id): RoutePath<String>,
+    headers: HeaderMap,
+    body: Input<crate::layer_catalog::PaletteRead>,
+) -> Response {
+    let access = match host.broker.authorize(&id, &headers, Instant::now()) {
+        Ok(a) => a,
+        Err(e) => return error(e),
+    };
+    let Ok(Json(body)) = body else {
+        return error(Error::Invalid);
+    };
+    let Some(runtime) = host.runtime else {
+        return error(Error::Unavailable);
+    };
+    match runtime.palette(&access, body) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error(e),
+    }
+}
+async fn minimap(
+    State(host): State<Host>,
+    RoutePath((id, base)): RoutePath<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let access = match host.broker.authorize(&id, &headers, Instant::now()) {
+        Ok(a) => a,
+        Err(e) => return error(e),
+    };
+    let Some(runtime) = host.runtime else {
+        return error(Error::Unavailable);
+    };
+    if base.len() > 4 || !base.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return error(Error::Invalid);
+    }
+    match runtime.minimap(&access, &base) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error(e),
+    }
+}
+async fn fill_slots(
+    State(host): State<Host>,
+    RoutePath((id, key)): RoutePath<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let access = match host.broker.authorize(&id, &headers, Instant::now()) {
+        Ok(a) => a,
+        Err(e) => return error(e),
+    };
+    let Some(runtime) = host.runtime else {
+        return error(Error::Unavailable);
+    };
+    if key.len() != 40 || !key.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+        return error(Error::Invalid);
+    }
+    match runtime.fill_slots(&access, &key) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error(e),
+    }
+}
+async fn presets(
+    State(host): State<Host>,
+    RoutePath(id): RoutePath<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(e) = host.broker.authorize(&id, &headers, Instant::now()) {
+        return error(e);
+    }
+    match crate::presets::data() {
+        Ok(v) => Json(v).into_response(),
+        Err(_) => error(Error::Unavailable),
     }
 }
 async fn upgrade(

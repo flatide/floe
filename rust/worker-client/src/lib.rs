@@ -6,13 +6,20 @@
 #[cfg(not(unix))]
 compile_error!("floe-worker-client currently supports Linux/macOS only");
 
+mod cells;
 mod clip;
 mod files;
 mod protocol;
 mod query;
+pub use cells::{
+    CellChild, CellFailure, CellFailureCode, CellMatch, CellOutcome, CellReply, CellRequest,
+    CellSource, CELLS_CHILD_CAP, CELL_FIND_CAP, CELL_INSTS_CAP, CELL_PATTERN_BYTES,
+};
 pub use clip::{ClipArtifact, ClipRequest};
 use files::{wire_path, Workspace};
-use protocol::{parse_line, style_text, Line, MAX_LINE_BYTES};
+use protocol::{
+    parse_line, parse_prefix, style_text, Line, LINE_PREFIX_BYTES, MAX_LINE_BYTES, MAX_REPLY_BYTES,
+};
 pub use protocol::{Fields, Fill, FrameFormat, Layers, RenderRequest, Style, ThinPolicy};
 pub use query::{
     PickHit, QueryHit, QueryKind, QueryOperation, QueryReply, QueryRequest, QueryScene,
@@ -32,6 +39,9 @@ pub const EXPECTED_RENDERD_VERSION: &str = env!("FLOE_RENDERD_VERSION");
 const QUEUE_CAP: usize = 8;
 const MAX_IN_FLIGHT: usize = 32;
 const MAX_QUERIES: usize = 8;
+/// Cell queries in flight: the hier thread answers in order, and a tree
+/// panel needs one expand and one highlight walk at a time, not a backlog.
+const MAX_CELL_QUERIES: usize = 4;
 const STDERR_BYTES: usize = 8192;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +100,9 @@ pub struct Config {
     pub style_timeout: Duration,
     pub render_timeout: Duration,
     pub query_timeout: Duration,
+    /// The hier thread's first answer may open or build the summary; a cell
+    /// query past this deadline is a worker fault, like a pick/snap one.
+    pub cell_timeout: Duration,
     pub clip_timeout: Duration,
     pub shutdown_grace: Duration,
     pub max_pixels: u64,
@@ -109,6 +122,7 @@ impl Config {
             style_timeout: Duration::from_secs(10),
             render_timeout: Duration::from_secs(300),
             query_timeout: Duration::from_secs(5),
+            cell_timeout: Duration::from_secs(60),
             clip_timeout: Duration::from_secs(300),
             shutdown_grace: Duration::from_millis(1500),
             max_pixels: 16 * 1024 * 1024,
@@ -169,6 +183,11 @@ impl Frame {
 pub enum Event {
     Frame(Frame),
     Query(QueryReply),
+    /// One cell query's answer or the daemon's refusal of it.
+    Cell {
+        sequence: u64,
+        reply: CellOutcome,
+    },
     QueryCancelAcknowledged {
         kind: QueryKind,
         before_sequence: u64,
@@ -200,6 +219,10 @@ struct ActiveQueryCancel {
     before_sequence: u64,
     deadline: Instant,
 }
+struct ActiveCell {
+    request: CellRequest,
+    deadline: Instant,
+}
 
 pub struct WorkerClient {
     config: Config,
@@ -217,8 +240,10 @@ pub struct WorkerClient {
     active: Option<Active>,
     query_sequence: u64,
     clip_sequence: u64,
+    cell_sequence: u64,
     queries: BTreeMap<u64, ActiveQuery>,
     query_cancels: BTreeMap<QueryKind, ActiveQueryCancel>,
+    cells: BTreeMap<u64, ActiveCell>,
 }
 
 impl WorkerClient {
@@ -250,6 +275,7 @@ impl WorkerClient {
             config.style_timeout,
             config.render_timeout,
             config.query_timeout,
+            config.cell_timeout,
             config.clip_timeout,
             config.shutdown_grace,
         ] {
@@ -293,8 +319,10 @@ impl WorkerClient {
             active: None,
             query_sequence: 0,
             clip_sequence: 0,
+            cell_sequence: 0,
             queries: BTreeMap::new(),
             query_cancels: BTreeMap::new(),
+            cells: BTreeMap::new(),
         };
         let tx = response_tx.clone();
         client.threads.push(
@@ -436,6 +464,7 @@ impl WorkerClient {
             || self.opened.is_none()
             || self.active.is_some()
             || self.pending_queries() != 0
+            || !self.cells.is_empty()
         {
             return Err(Error::new(
                 ErrorKind::State,
@@ -477,6 +506,11 @@ impl WorkerClient {
         }
         if self.opened.as_ref().is_some_and(|o| o.is_deck) && request.labels {
             return Err(Error::input("jobdeck labels are not supported"));
+        }
+        // renderd would answer an error event, which ends the view; refuse
+        // here so a deck patch never reaches the wire with a root.
+        if self.opened.as_ref().is_some_and(|o| o.is_deck) && request.root.is_some() {
+            return Err(Error::input("a jobdeck has no view root"));
         }
         let gen = self
             .frontier
@@ -535,6 +569,44 @@ impl WorkerClient {
         self.queries.len() + self.query_cancels.len()
     }
 
+    /// Nonblocking, bounded cell-tree submission (docs/RUST_RENDERER.md
+    /// `cell_*`). Works for decks too; only a view root is layout-only.
+    /// The answer arrives as Event::Cell with this sequence.
+    pub fn cell_query(&mut self, request: CellRequest) -> Result<u64> {
+        let Some(opened) = self.opened.as_ref().filter(|_| self.child.is_some()) else {
+            return Err(Error::new(
+                ErrorKind::State,
+                "cell queries require an open worker",
+            ));
+        };
+        if opened.is_deck && request.root().is_some() {
+            return Err(Error::input("a jobdeck has no view root"));
+        }
+        if self.cells.len() >= MAX_CELL_QUERIES {
+            return Err(Error::new(
+                ErrorKind::Busy,
+                "drain cell replies before submitting more cell queries",
+            ));
+        }
+        let sequence = self
+            .cell_sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::input("cell sequence exhausted"))?;
+        self.send(request.command(sequence)?)?;
+        self.cell_sequence = sequence;
+        self.cells.insert(
+            sequence,
+            ActiveCell {
+                request,
+                deadline: Instant::now() + self.config.cell_timeout,
+            },
+        );
+        Ok(sequence)
+    }
+    pub fn pending_cell_queries(&self) -> usize {
+        self.cells.len()
+    }
+
     /// Cancel one kind without touching renders or releasing request credit.
     /// At most one unacknowledged cancellation per kind; poll all replies/ACKs.
     pub fn cancel_queries(&mut self, kind: QueryKind) -> Result<u64> {
@@ -570,11 +642,13 @@ impl WorkerClient {
         Ok(before_sequence)
     }
 
+    /// The earliest pick/snap, cancellation or cell-query deadline.
     fn query_deadline(&self) -> Option<Instant> {
         self.queries
             .values()
             .map(|q| q.deadline)
             .chain(self.query_cancels.values().map(|q| q.deadline))
+            .chain(self.cells.values().map(|q| q.deadline))
             .min()
     }
 
@@ -739,7 +813,40 @@ impl WorkerClient {
 
     fn handle(&mut self, line: Line) -> Result<Option<Event>> {
         let mut f = line.fields;
+        if line.truncated {
+            // Only a cell answer may be this long, and only its own query
+            // fails: the head still names the sequence.
+            if !cells::is_cell_kind(&line.kind) {
+                return Err(Error::protocol("daemon line exceeds limit"));
+            }
+            let sequence = f.u64("seq")?;
+            let pending = self
+                .cells
+                .remove(&sequence)
+                .ok_or_else(|| Error::protocol("unissued cell reply"))?;
+            if line.kind != pending.request.kind() {
+                return Err(Error::protocol("cell reply kind mismatch"));
+            }
+            return Ok(Some(Event::Cell {
+                sequence,
+                reply: Err(CellFailure {
+                    code: CellFailureCode::Oversize,
+                    message: format!("{} reply exceeds {MAX_REPLY_BYTES} bytes", line.kind),
+                }),
+            }));
+        }
         match line.kind.as_str() {
+            "cell_sources" | "cells" | "cell_find" | "cell_bbox" | "cell_insts" => {
+                let sequence = f.u64("seq")?;
+                let pending = self
+                    .cells
+                    .remove(&sequence)
+                    .ok_or_else(|| Error::protocol("unissued cell reply"))?;
+                Ok(Some(Event::Cell {
+                    sequence,
+                    reply: cells::parse_reply(&line.kind, &f, &pending.request)?,
+                }))
+            }
             "query_cancelled" => {
                 let kind = QueryKind::parse(f.required("kind")?)?;
                 let before_sequence = query::counter(&f, "before_seq")?;
@@ -891,6 +998,7 @@ impl WorkerClient {
         self.issued.clear();
         self.queries.clear();
         self.query_cancels.clear();
+        self.cells.clear();
         self.workspace.cleanup()
     }
 }
@@ -900,8 +1008,12 @@ impl Drop for WorkerClient {
     }
 }
 
+/// Bounded by MAX_REPLY_BYTES. A longer line is consumed to its end without
+/// being kept; its LINE_PREFIX_BYTES head comes back as a truncated Line so
+/// the owner of that sequence can fail, rather than the whole worker.
 fn read_line(reader: &mut impl BufRead) -> Result<Line> {
     let mut bytes = Vec::new();
+    let mut oversize = false;
     loop {
         let available = reader.fill_buf()?;
         if available.is_empty() {
@@ -914,17 +1026,58 @@ fn read_line(reader: &mut impl BufRead) -> Result<Line> {
             .iter()
             .position(|b| *b == b'\n')
             .map_or(available.len(), |i| i + 1);
-        if bytes.len() + count > MAX_LINE_BYTES + 1 {
-            return Err(Error::protocol("daemon line exceeds limit"));
+        let ended = available[count - 1] == b'\n';
+        if oversize {
+            // Dropping; only the newline matters now.
+        } else if bytes.len() + count > MAX_REPLY_BYTES + 1 {
+            oversize = true;
+            let keep = LINE_PREFIX_BYTES.saturating_sub(bytes.len()).min(count);
+            bytes.extend_from_slice(&available[..keep]);
+            bytes.truncate(LINE_PREFIX_BYTES);
+        } else {
+            bytes.extend_from_slice(&available[..count]);
         }
-        bytes.extend_from_slice(&available[..count]);
         reader.consume(count);
-        if bytes.last() == Some(&b'\n') {
+        if ended {
+            if oversize {
+                return parse_prefix(&bytes);
+            }
             bytes.pop();
             if bytes.last() == Some(&b'\r') {
                 bytes.pop();
             }
             return parse_line(&bytes);
         }
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+    #[test]
+    fn oversize_lines_are_dropped_to_their_head_and_the_stream_continues() {
+        let mut long = b"cells seq=7 src=0 found=1 cell=1 name_hex=41 children=".to_vec();
+        long.resize(MAX_REPLY_BYTES + 100, b'a');
+        long.extend_from_slice(b"\nready version=1\n");
+        let mut reader = std::io::Cursor::new(long);
+        let head = read_line(&mut reader).unwrap();
+        assert!(head.truncated);
+        assert_eq!(head.kind, "cells");
+        assert_eq!(head.fields.get("seq"), Some("7"));
+        assert!(head.fields.get("children").is_none());
+        let next = read_line(&mut reader).unwrap();
+        assert!(!next.truncated);
+        assert_eq!(next.kind, "ready");
+        assert!(read_line(&mut reader).is_err(), "EOF");
+        // At the limit itself a line is still whole.
+        let mut exact = b"cells seq=8 found=1 x=".to_vec();
+        exact.resize(MAX_REPLY_BYTES, b'b');
+        exact.push(b'\n');
+        let line = read_line(&mut std::io::Cursor::new(exact)).unwrap();
+        assert!(!line.truncated);
+        assert_eq!(
+            line.fields.get("x").map(str::len),
+            Some(MAX_REPLY_BYTES - 22)
+        );
     }
 }

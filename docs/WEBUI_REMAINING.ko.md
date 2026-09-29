@@ -38,6 +38,7 @@ NFS의 캐시 회수는 계속 차단한다.
 | 인덱스 수명주기 | IR-1~3·IR-4a/4b 구현. owner 회수 UI/API·새 세션 재승인 복구까지 연결: [계약/검증](WEBUI_INDEX_REVISIONS.ko.md). 자동 GC/NFS 회수 아님 |
 | 로컬 Follow/Explore 공유 | 기존 opt-in/loopback 구현 유지. 원격 공개로 확장하지 않음 |
 | 오프라인 개발 번들·고지·무결성/의존성 검사 도구 | 구현됨: [portable](WEBUI_ELECTRON_PORTABLE.ko.md), [고지](WEBUI_ELECTRON_NOTICES.ko.md). 정식 배포 승인이 아님 |
+| GTK 배치의 웹/데모 UI, 셀 트리·view root | 2026-09-30 구현: [배치·셀 트리·데모](WEBUI_GTK_LAYOUT.ko.md). `floe-index hier` 웹 승인 경로와 RHEL/ETX/Electron 실화면 수용은 남음 |
 
 이 목록에서 추가 구현 대상으로 확인된 공유 기본값 복구·일반 게시 불명 처리와
 인덱스 수명주기 연결을 닫았다. 이것을 전체 현장 수용 완료 또는 모든 입력에 대한 무결함 보증으로 쓰지 않는다.

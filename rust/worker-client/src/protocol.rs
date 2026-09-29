@@ -2,7 +2,16 @@ use crate::{Error, ErrorKind, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
+/// A command line: every request the client writes fits comfortably here.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
+/// A reply line. The cell tree's answers carry hex-encoded names by the
+/// thousand (a `cells` answer holds up to 20,000 children, ~150 bytes each
+/// with a 64-byte name), so replies get their own limit. A longer line is
+/// still not buffered: the reader keeps its first LINE_PREFIX_BYTES (the
+/// kind and `seq=`), drops the rest, and the client fails that one cell
+/// query instead of the worker.
+pub const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
+pub const LINE_PREFIX_BYTES: usize = 256;
 
 /// Unknown telemetry fields survive a round trip; required control fields are
 /// strict. Duplicate keys and malformed tokens must never silently win.
@@ -38,10 +47,24 @@ impl Fields {
 pub(crate) struct Line {
     pub kind: String,
     pub fields: Fields,
+    /// Only the LINE_PREFIX_BYTES head of an oversize line was parsed.
+    pub truncated: bool,
+}
+
+/// The parsed head of a line over MAX_REPLY_BYTES: whole tokens only, so the
+/// kind and `seq=` are trustworthy even though the payload is gone.
+pub(crate) fn parse_prefix(bytes: &[u8]) -> Result<Line> {
+    let end = bytes
+        .iter()
+        .rposition(|b| b.is_ascii_whitespace())
+        .unwrap_or(0);
+    let mut line = parse_line(&bytes[..end])?;
+    line.truncated = true;
+    Ok(line)
 }
 
 pub(crate) fn parse_line(bytes: &[u8]) -> Result<Line> {
-    if bytes.len() > MAX_LINE_BYTES {
+    if bytes.len() > MAX_REPLY_BYTES {
         return Err(Error::protocol("daemon line exceeds limit"));
     }
     let text = std::str::from_utf8(bytes).map_err(|_| Error::protocol("non-UTF8 daemon line"))?;
@@ -66,6 +89,11 @@ pub(crate) fn parse_line(bytes: &[u8]) -> Result<Line> {
             | "snap"
             | "query_cancelled"
             | "clip"
+            | "cell_sources"
+            | "cells"
+            | "cell_find"
+            | "cell_bbox"
+            | "cell_insts"
     ) {
         return Err(Error::protocol(format!("unexpected response kind {kind}")));
     }
@@ -87,6 +115,7 @@ pub(crate) fn parse_line(bytes: &[u8]) -> Result<Line> {
     Ok(Line {
         kind: kind.into(),
         fields: Fields(fields),
+        truncated: false,
     })
 }
 
@@ -222,6 +251,9 @@ pub struct RenderRequest {
     pub decode_pages: Option<usize>,
     pub thin: ThinPolicy,
     pub format: FrameFormat,
+    /// The view root (SPEC-VIEWER §8c): the plan starts from this cell in
+    /// ITS coordinates; None = the top. A jobdeck has none.
+    pub root: Option<u32>,
 }
 
 impl Default for RenderRequest {
@@ -248,6 +280,7 @@ impl Default for RenderRequest {
             decode_pages: None,
             thin: ThinPolicy::Cull,
             format: FrameFormat::Raw,
+            root: None,
         }
     }
 }
@@ -299,6 +332,9 @@ impl RenderRequest {
         if let Some(limit) = self.decode_pages {
             write!(command, " decode_pages={limit}").unwrap();
         }
+        if let Some(root) = self.root {
+            write!(command, " root={root}").unwrap();
+        }
         if command.len() > MAX_LINE_BYTES {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -324,13 +360,41 @@ mod tests {
         ] {
             assert!(parse_line(line).is_err(), "{line:?}");
         }
-        assert!(parse_line(&vec![b'x'; MAX_LINE_BYTES + 1]).is_err());
+        assert!(parse_line(&vec![b'x'; MAX_REPLY_BYTES + 1]).is_err());
+        // A reply may exceed the command limit: the cell tree's answers do.
+        let mut long = b"cells seq=1 found=1 children=".to_vec();
+        long.resize(MAX_LINE_BYTES + 1, b'a');
+        assert_eq!(parse_line(&long).unwrap().kind, "cells");
         let fields = parse_line(b"frame final=0 gen=1 new_metric=ok")
             .unwrap()
             .fields;
         assert!(!fields.flag("final").unwrap());
         assert_eq!(fields.get("new_metric"), Some("ok"));
         assert!(fields.u64("absent").is_err());
+    }
+    #[test]
+    fn an_oversize_prefix_keeps_whole_tokens_only() {
+        let head = parse_prefix(b"cell_find seq=12 src=-1 found=1 total=9 n=9 matc").unwrap();
+        assert!(head.truncated);
+        assert_eq!(head.kind, "cell_find");
+        assert_eq!(head.fields.get("seq"), Some("12"));
+        assert_eq!(head.fields.get("n"), Some("9"));
+        assert!(head.fields.get("matc").is_none());
+        assert!(parse_prefix(b"cells").is_err());
+        assert!(parse_prefix(b"surprise seq=1 ").is_err());
+    }
+    #[test]
+    fn a_view_root_is_an_explicit_trailing_field() {
+        let mut r = RenderRequest::default();
+        assert!(!r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .contains(" root="));
+        r.root = Some(17);
+        assert!(r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .ends_with(" root=17"));
     }
     #[test]
     fn request_validation_and_distinct_layer_policies() {

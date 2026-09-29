@@ -85,6 +85,7 @@ pub fn export(
         },
         jobs: options.jobs,
         cell_name: cell_name.into(),
+        root: None,
     };
     request.validate()?;
     let output = artifact::output_path(output, layout)?;

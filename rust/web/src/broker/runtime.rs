@@ -189,6 +189,42 @@ impl Runtime {
             }))
         })
     }
+    /// Read-only panel data for the session's own view: the same bounded
+    /// palette rows, minimap base and fill-slot table the owner shell reads.
+    /// Rows are rebuilt from the immutable model per request; no owner
+    /// catalog, source path or write path is reached.
+    pub fn palette(
+        &self,
+        access: &Access,
+        request: crate::layer_catalog::PaletteRead,
+    ) -> Result<serde_json::Value> {
+        self.with_view(access, |view| {
+            let view = view.ok_or(Error::Invalid)?;
+            crate::layer_catalog::LayerCatalog::model(&view.model)
+                .read(&view.snapshot(), request)
+                .map_err(|_| Error::Invalid)
+        })
+    }
+    pub fn minimap(&self, access: &Access, base: &str) -> Result<serde_json::Value> {
+        self.with_view(access, |view| {
+            let view = view.ok_or(Error::Invalid)?;
+            let model = &view.model;
+            let pixels = model.minimap.base(base).ok_or(Error::Invalid)?;
+            Ok(serde_json::json!({"view_id":access.id(),"dataset_revision":model.dataset_revision.to_string(),
+                "base":base,"size":180,"pixels":pixels}))
+        })
+    }
+    pub fn fill_slots(&self, access: &Access, key: &str) -> Result<serde_json::Value> {
+        self.with_view(access, |view| {
+            let view = view.ok_or(Error::Invalid)?;
+            let state = view.snapshot().state;
+            if state.fill_slots_key() != key {
+                return Err(Error::Invalid);
+            }
+            Ok(serde_json::json!({"version":1,"view_id":access.id(),"fill_slots_key":key,
+                "editable":false,"fills":state.fill_slots()}))
+        })
+    }
     pub fn latest(&self, access: &Access) -> Result<Option<Arc<DisplayFrame>>> {
         self.with_view(access, |view| Ok(view.and_then(ViewController::latest)))
     }

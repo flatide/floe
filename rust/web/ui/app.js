@@ -15,6 +15,12 @@
     el('zoom-band').hidden = el('zoom-band-hint').hidden = true;
     let foregroundFrame = null, marginFrame = null, inflightBody = null, foregroundPerf = '';
     let gesture = null, dragShift = null, lastPlacement = null, viewControls = null, decodePurpose = null;
+    let panes = null, menubar = null, cells = null, currentTitle = '';
+    // The GTK title gains "· root NAME" under a view root.
+    function titleSuffix() {
+        const root = state && state.root_name ? ' · root ' + state.root_name : '';
+        el('document-title').textContent = currentTitle + root; document.title = currentTitle + root + ' · floe2';
+    }
     let completedFrame = null, decodeFailed = false;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
     let inspector = null, measurement = null, clipper = null, snapshots = null, overlayMode = 'all', pickedPairs = [];
@@ -249,6 +255,9 @@
         if (picker) { picker.changed(); }
         if (indexOpen) { indexOpen.changed(); }
         if (palette) { palette.changed(); }
+        if (cells) { cells.changed(); }
+        if (panes) { panes.changed(); }
+        if (menubar) { menubar.refresh(); }
         updateCursor();
     }
     function queryContext() {
@@ -359,6 +368,8 @@
         const b = s.bbox_dbu.map(Number), dbu = Number(s.dbu_um);
         el('viewport-info').textContent = ((b[2] - b[0]) * dbu).toPrecision(6) + ' × ' + ((b[3] - b[1]) * dbu).toPrecision(6) + ' µm';
         el('status').textContent = s.status + ' · depth ' + s.depth + ' · thin:' + s.effective_thin + (s.source_stale ? ' · SOURCE STALE' : '');
+        if (currentTitle) { titleSuffix(); }
+        el('dstatus').textContent = 'depth: ' + s.depth + (s.max_depth == null ? '' : '/' + s.max_depth) + ' · detail: ' + s.detail + ' · thin:' + s.effective_thin + ' · frame:' + (s.frames ? 'on' : 'off');
         pump();
         present();
     }
@@ -528,7 +539,7 @@
         currentId = current.view.view_id; currentSource = current.source_id; currentMode = current.mode; state = current.view;
         currentRevision = current.index_revision || null; currentLevels = current.levels;
         el('revision-current').textContent = currentRevision ? 'Open index revision: ' + currentRevision : 'Open index: legacy mutable cache';
-        el('document-title').textContent = current.title; document.title = current.title + ' · floe2';
+        currentTitle = current.title; titleSuffix();
         // Reconnection restores the live view, not a different pending CLI
         // proposal's source/level form. Its explicit selection must survive.
         if (!launcher || !launcher.blocked()) {
@@ -543,19 +554,20 @@
         syncGoto(false); controls(); connect(); return true;
     }
     function paletteStyle(r, scope, valid) {
-        const color = document.createElement('input'); color.type = 'color'; color.value = r.color; color.setAttribute('aria-label', 'Color ' + r.name);
+        const color = document.createElement('input'); color.type = 'color'; color.value = r.color; color.className = 'layer-edit'; color.setAttribute('aria-label', 'Color ' + r.name);
         color.onchange = function () {
             const value=color.value; color.value=r.color;
             if (!valid()) { notice('Layer styles changed or an input is pending. Select the layer again.'); return; }
             edit({style_batch: {pairs:[r.pair],collapsed:r.closed?[r.pair]:[],color:value}});
         };
-        const style = document.createElement('button'); style.className = 'layer-edit'; style.textContent = '⋯';
-        style.setAttribute('aria-label', 'Edit style ' + r.name);
+        const style = document.createElement('button'); style.type = 'button'; style.className = 'layer-swatch';
+        style.setAttribute('aria-label', 'Edit style ' + r.name); style.title = r.color + ' · ' + r.fill.kind + ' · ' + r.width + ' px';
+        const swatch = document.createElement('canvas'); swatch.setAttribute('aria-hidden', 'true'); window.FloePalette.swatch(swatch, r); style.appendChild(swatch);
         style.onclick = function () {
             if (!valid()) { return; }
             palette.closeStyle();
             selectedStyle = {row: r, key: scope.key, view: scope.id, valid:valid};
-            el('style-title').textContent = r.name; el('style-fill').value = r.fill.kind; el('style-width').value = r.width;
+            el('style-title').textContent = r.name; el('style-fill').value = r.fill.kind; el('style-width').value = r.width; el('style-color').value = r.color;
             el('style-pattern').value = (r.fill.rows || new Array(16).fill(0xaaaa)).map(function (n) { return n.toString(16).padStart(4, '0'); }).join(' ');
             el('style-editor').hidden = false; patternControls(); el('style-fill').focus();
         };
@@ -904,12 +916,17 @@
             fill.rows = rows.map(function (s) { return parseInt(s, 16); });
         }
         const row = selectedStyle.row, delta = {pairs:[row.pair],collapsed:row.closed?[row.pair]:[]};
+        const color = String(el('style-color').value || '').toLowerCase();
+        if (/^#[0-9a-f]{6}$/.test(color) && color !== String(row.color).toLowerCase()) { delta.color = color; }
         if (fill.kind !== row.fill.kind || (fill.kind === 'pattern' && fill.rows.some(function (n, i) { return n !== row.fill.rows[i]; }))) { delta.fill = fill; }
         if (width !== row.width) { delta.width = width; }
-        if (delta.fill || delta.width !== undefined) { edit({style_batch: delta}); }
+        if (delta.fill || delta.color || delta.width !== undefined) { edit({style_batch: delta}); }
         selectedStyle = null; el('style-editor').hidden = true;
     };
     const nav = viewControls.navigate;
+    panes = window.FloePanes.bind({el: el, document: document, window: window, focus: function () { viewport.focus(); },
+        resized: function () { resized(); }, changed: function () { if (menubar) { menubar.refresh(); } },
+        blocked: function () { return stopped; }});
     function overlays(mode) {
         if(!['all','focus','none'].includes(mode)){return;}
         overlayMode=mode;el('overlays').value=mode;
@@ -940,6 +957,7 @@
         }
         if (drcPanel && drcPanel.key(key)) { event.preventDefault(); return; }
         if (inspector && inspector.key(key)) { event.preventDefault(); return; }
+        if (cells && cells.key(key, event)) { event.preventDefault(); return; }
         viewControls.key(event);
     });
     viewport.addEventListener('wheel', function (event) {
@@ -953,14 +971,25 @@
         updateCursor();
         if (inspector && (!gesture || !gesture.active())) { inspector.changed(); }
     }
+    // GTK's cursor readout: a display-only linear projection of the current
+    // viewport; queries and navigation still resolve coordinates in Rust.
+    function cursorReadout(x, y) {
+        const c = el('cursor-info');
+        if (!state || !currentId || !live() || !Number.isFinite(x)) { c.textContent = ''; return; }
+        const r = viewport.getBoundingClientRect(), b = state.bbox_dbu.map(Number), dbu = Number(state.dbu_um);
+        if (!(r.width > 0 && r.height > 0)) { c.textContent = ''; return; }
+        const wx = (b[0] + (x - r.left) / r.width * (b[2] - b[0])) * dbu, wy = (b[3] - (y - r.top) / r.height * (b[3] - b[1])) * dbu;
+        c.textContent = 'x ' + wx.toFixed(3) + '  y ' + wy.toFixed(3) + ' um';
+    }
     viewport.addEventListener('mousemove', function (event) {
+        cursorReadout(event.clientX, event.clientY);
         if (!gesture || !gesture.active()) {
             if (drcPanel) { drcPanel.move(event.clientX, event.clientY); }
             if (measurement && measurement.active()) { measurement.move(event.clientX, event.clientY, event); }
             else if (inspector) { inspector.move(event.clientX, event.clientY); }
         }
     });
-    viewport.addEventListener('mouseleave', function () { if (drcPanel) { drcPanel.move(NaN, NaN); } if (inspector) { inspector.move(NaN, NaN); } if (measurement) { measurement.move(NaN, NaN); } });
+    viewport.addEventListener('mouseleave', function () { cursorReadout(NaN, NaN); if (drcPanel) { drcPanel.move(NaN, NaN); } if (inspector) { inspector.move(NaN, NaN); } if (measurement) { measurement.move(NaN, NaN); } });
     gesture = window.FloeGestures.bind({viewport: viewport, window: window, document: document,
         now: timing.now, previewMeasured: timing.preview,
         dimensions: dims, ready: function () { return !indexBlocked() && live() && displayed && !!epoch && !inflight && queue.length === 0; },
@@ -1110,6 +1139,14 @@
     inspector = window.FloeInspect.bind({document: document, window: window, protocol: P, query: window.FloeQuery, painted:dumpChanged,
         context: queryContext, send: send, layers: highlightPicked, now: function () { return Date.now(); },
         setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window)});
+    cells = window.FloeCells.bind({el: el, document: document, http: http, edit: edit,
+        context: function () { return !stopped && state && currentId ? {id: currentId, state: state,
+            connected: !document.hidden && live() && !!epoch && !!socket && socket.readyState === WebSocket.OPEN && !ownerBusy && !submitting && !indexBlocked()} : null; },
+        size: function () { try { return dims(); } catch (_) { return null; } }, unit: function () { return state ? Number(state.dbu_um) : 1; },
+        focus: function () { viewport.focus(); }, raise: function () { panes.raise('left', 'cells-page'); },
+        rootAllowed: function () { return !!(state && state.capabilities && state.capabilities.cell_root); },
+        buildAllowed: function () { return false; },
+        setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window)});
     measurement = window.FloeMeasure.bind({document: document, window: window, protocol: P, query: window.FloeQuery, rulers: window.FloeRulers, painted:dumpChanged,
         history:rulerHistory, selection:function () { return inspector.selection(); },
         popCD:function (all) { return drcPanel.key(all?'K':'k'); }, cdBusy:function () { return drcPanel.rulersBusy(); },
@@ -1152,7 +1189,7 @@
     settings=window.FloeSettings.bind({el:el,window:window,document:document,XHR:XMLHttpRequest,Blob:Blob,Encoder:TextEncoder,Decoder:TextDecoder,
         csrf:function(){return auth?auth.csrf:'';},message:message,edit:edit,setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),
         context:settingsContext});
-    palette=window.FloePalette.bind({el:el,document:document,window:window,http:http,edit:edit,styles:paletteStyle,presets:window.FloePresets,slotEditor:window.FloeFillEditor,
+    palette=window.FloePalette.bind({el:el,document:document,window:window,http:http,edit:edit,styles:paletteStyle,presets:window.FloePresets,slotEditor:window.FloeFillEditor,wholeList:true,
         editSlot:function(c,body,done){
             const now=settingsContext();
             if(!fillEditSupported||!now||!now.ready||!now.idle||now.id!==c.id||now.epoch!==c.epoch||now.rev!==c.rev||state.fill_slots_key!==c.slotKey){done('View changed; the bitmap was not replayed.');return null;}
@@ -1222,6 +1259,95 @@
         savePending:function(value){const key='floe-index-open:'+auth.session_id;if(value===null){sessionStorage.removeItem(key);}else{sessionStorage.setItem(key,value);}},
         completed:async function(value){if(value.phase==='succeeded'){await restore();pendingStartup=null;notice('');}await operationState();},
         setTimeout:function(fn,ms){return setTimeout(fn,ms);},clearTimeout:function(id){clearTimeout(id);}});
+    function menuModel() {
+        function proxy(label, id, key, extra) { return Object.assign({label: label, proxy: id, key: key}, extra || {}); }
+        function dialogItem(label, name, key, prepare) { return {label: label, key: key, action: function () { panes.show(name, prepare); }}; }
+        const deckHidden = function () { return el('live-mode-row').hidden; };
+        return [
+            {name: 'File', items: [
+                proxy('Load layout…', 'browse-open'), proxy('Load jobdeck…', 'browse-open'),
+                dialogItem('Registered sources…', 'source'), dialogItem('Index this source…', 'index'),
+                {sep: true},
+                dialogItem('Clip region…', 'clip', null, function () { if (!el('clip-open').disabled && el('clip-form').hidden) { el('clip-open').click(); } }),
+                proxy('Copy view to clipboard', 'snapshot-copy', 'Ctrl+C'), proxy('Save view PNG…', 'snapshot-save'),
+                {sep: true},
+                proxy('Load layer settings…', 'settings-load'), proxy('Save layer settings…', 'settings-save'),
+                dialogItem('Shared design default…', 'settings'),
+                {sep: true},
+                proxy('End session', 'logout', 'q')
+            ]},
+            {name: 'View', items: [
+                proxy('Fit (zoom all)', 'fit', 'Ctrl+A'),
+                {label: 'Zoom in 50%', key: 'Ctrl+Z', enabled: function () { return !el('fit').disabled; }, action: function () { nav({kind: 'zoom', factor: 0.5}); }},
+                {label: 'Zoom out 50%', key: 'Shift+Z', enabled: function () { return !el('fit').disabled; }, action: function () { nav({kind: 'zoom', factor: 2}); }},
+                {label: 'Goto position…', key: 'g', enabled: function () { return !el('goto').disabled; }, action: function () { el('goto-x').focus(); el('goto-x').select(); }},
+                {sep: true},
+                {label: 'Detail', sub: [{label: 'Low · 5 px', radio: {id: 'detail', value: 'low'}}, {label: 'Medium · 3 px', radio: {id: 'detail', value: 'medium'}},
+                    {label: 'High · 1 px', radio: {id: 'detail', value: 'high'}}, {label: 'Exact · no cut', radio: {id: 'detail', value: 'exact'}}], key: 'd'},
+                {label: 'Label size…', enabled: function () { return !el('font-px').disabled; }, action: function () { panes.show('display'); el('font-px').focus(); el('font-px').select(); }},
+                {label: 'Depth +1', key: '>', enabled: function () { return !el('depth').disabled; }, action: function () { edit({depth_step: 1}); }},
+                {label: 'Depth −1', key: '<', enabled: function () { return !el('depth').disabled; }, action: function () { edit({depth_step: -1}); }},
+                {label: 'Depth full', key: '9 9', enabled: function () { return !el('depth').disabled; }, action: function () { edit({depth: 'full'}); }},
+                {sep: true},
+                {label: 'Hierarchy frames', key: 'f', toggle: 'frames'}, {label: 'Labels', toggle: 'labels'}, {label: 'Grayscale layers', key: 'b', toggle: 'mono'},
+                {label: 'Thin shapes at wide views', sub: [{label: 'Auto (keep)', radio: {id: 'thin', value: 'auto'}}, {label: 'Keep (thin shapes as hairlines)', radio: {id: 'thin', value: 'keep'}}, {label: 'Cull (drop all-thin pages, faster)', radio: {id: 'thin', value: 'cull'}}]},
+                {label: 'Overlays', key: 'Tab', sub: [{label: 'All', radio: {id: 'overlays', value: 'all'}}, {label: 'Hide other errors', radio: {id: 'overlays', value: 'focus'}}, {label: 'Hide all', radio: {id: 'overlays', value: 'none'}}]},
+                {sep: true},
+                {label: 'Layers', sub: [proxy('Show all', 'layers-all'), proxy('Hide all', 'layers-none'), {sep: true}, proxy('Show selected', 'layers-show'), proxy('Hide selected', 'layers-hide'),
+                    proxy('Toggle selected', 'layers-toggle'), proxy('Style selected…', 'layers-style'), proxy('Clear selection', 'layers-clear'), {sep: true}, proxy('Expand all groups', 'layers-expand'), proxy('Collapse all groups', 'layers-collapse')]},
+                {sep: true},
+                dialogItem('Display options…', 'display')
+            ]},
+            {name: 'Cell', items: [
+                {label: 'Cell tree / find cell…', key: 't', enabled: function () { return !el('cells-search').disabled; }, action: function () { panes.raise('left', 'cells-page'); el('cells-search').focus(); }},
+                proxy('Zoom to selected cell', 'cells-zoom', 'Enter'),
+                {label: 'Highlight instances', toggle: 'cells-highlight'},
+                {label: 'Clear highlight', key: 'Esc', enabled: function () { return cells && cells.hasSelection(); }, action: function () { cells.clearHighlight(); }},
+                {sep: true},
+                proxy('Selected cell as view root', 'cells-root', 'Ctrl+T'), proxy('View root: back to the top cell', 'cells-top', 'Ctrl+Shift+T'),
+                {sep: true},
+                proxy('Build cell index (design.ovh)…', 'cells-build')
+            ]},
+            {name: 'Ruler', items: [
+                {label: 'Ruler mode', key: 'r', enabled: function () { return !el('ruler-mode').disabled; }, check: function () { return el('ruler-mode').getAttribute('aria-pressed') === 'true'; }, action: function () { el('ruler-mode').click(); }},
+                {label: 'Edge/vertex snap', key: 'm', toggle: 'ruler-snap'},
+                {sep: true},
+                proxy('Delete last ruler', 'ruler-pop', 'k'), proxy('Clear rulers', 'ruler-clear', 'Shift+K'),
+                {sep: true},
+                {label: 'Snap probe', key: 'm', toggle: 'snap-probe'}, proxy('Clear shape selection', 'pick-clear', 'Esc'),
+                {label: 'Inspect pane', action: function () { panes.raise('left', 'inspect-page'); }}
+            ]},
+            {name: 'DRC', items: [
+                proxy('Open results .db…', 'drc-open'), proxy('Load SVRF rules…', 'drc-rules-load'), proxy('Reconnect launcher reviewer…', 'drc-reconnect'),
+                {sep: true},
+                proxy('Next error', 'drc-step-next', '.'), proxy('Previous error', 'drc-step-prev', ','),
+                {label: 'Waive/unwaive current error', key: 'w', enabled: function () { return !el('drc-step-next').disabled; }, action: function () { drcPanel.key('w'); }},
+                {sep: true},
+                {label: 'Note (add/edit)', key: 'n', enabled: function () { return !el('drc-step-next').disabled; }, action: function () { drcPanel.key('n'); }},
+                {sep: true},
+                {label: 'Error box-select mode', key: 'e', enabled: function () { return !el('drc-box').disabled; }, check: function () { return el('drc-box').getAttribute('aria-pressed') === 'true'; }, action: function () { el('drc-box').click(); }},
+                proxy('Build pack…', 'drc-build-open'), proxy('Restore layers', 'drc-restore-layers'),
+                {sep: true},
+                {label: 'Show DRC pane', hidden: function () { return el('drc-toggle').hidden; }, check: function () { return !el('drc-panel').hidden; }, action: function () { el('drc-toggle').click(); if (!el('drc-panel').hidden) { panes.raise('left', 'drc-page'); } }}
+            ]},
+            {name: 'Jobdeck', items: [
+                {label: 'Level view (mask levels)', hidden: deckHidden, radio: {id: 'live-mode', value: 'level'}},
+                {label: 'Chip view (CHIP blocks)', hidden: deckHidden, radio: {id: 'live-mode', value: 'chip'}},
+                {label: 'Source layer view (LY/DT)', hidden: deckHidden, radio: {id: 'live-mode', value: 'layer'}},
+                {sep: true},
+                {label: 'Toggle level view / chip view', key: 'Ctrl+,', hidden: deckHidden, enabled: function () { return !el('live-mode').disabled; }, action: function () { changeDeckMode(currentMode === 'level' ? 'chip' : 'level').catch(report); }},
+                {sep: true},
+                {label: 'Select levels to load…', action: function () { panes.show('source', function () { el('level-options').open = true; }); }},
+                dialogItem('Open mode…', 'source')
+            ]},
+            {name: 'Help', items: [
+                proxy('About floe2', 'about-open'), proxy('Open source licenses', 'about-open'),
+                {sep: true},
+                proxy('Share locally…', 'share-open')
+            ]}
+        ];
+    }
+    menubar = window.FloeMenubar.bind({el: el, document: document, window: window, model: menuModel(), focus: function () { viewport.focus(); }, report: report});
     document.addEventListener('visibilitychange', function () { settings.changed(); defaults.changed(); minimap.changed(); palette.changed(); if (document.hidden) { indexOpen.stop(); finishDecode(); inspector.changed(); measurement.changed(); clipper.changed(); } else if (!stopped && !pageSuspended && startupComplete) { indexOpen.resume().catch(report); if(live()){connect();} } });
     window.addEventListener('blur', function () { inspector.move(NaN, NaN); measurement.interrupt(); });
     setInterval(function () { if (socket && socket.readyState === WebSocket.OPEN && epoch) { try { send({type: 'ping'}); } catch (e) { report(e); } } }, 10000);

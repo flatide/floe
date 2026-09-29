@@ -36,6 +36,7 @@ fn request(jobs: u16, layers: Layers) -> ClipRequest {
         layers,
         jobs,
         cell_name: "MANAGED_CLIP".into(),
+        root: None,
     }
 }
 fn options(binary: &Path, jobs: u16) -> ClipOptions {

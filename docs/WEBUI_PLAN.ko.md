@@ -8,6 +8,11 @@ NFS 전체 보류보다 이 요청이 우선하며, 실제 NFS 장애/다중 cli
 수용은 여전히 남는다. 원격 공유 보류와 WK 동결은 바뀌지 않는다.
 
 **최신 잔여 정본:** [비실측 구현/실제 테스트/보류 구분](WEBUI_REMAINING.ko.md).
+
+**2026-09-30 UI 배치 전환:** 사용자 요청으로 웹/데모 UI를 [기존 GTK 배치](WEBUI_GTK_LAYOUT.ko.md)
+(메뉴바, 좌 cells/DRC/inspect pane, 우 레이어 목록 + minimap/palette, 두 행 상태줄)로
+재구성했고 `feature/jobdeck`(cell tree, design.ovh)을 병합했다. 상단 타이틀·세션 부분과
+모든 컨트롤 id는 유지하며, 회사 데모는 파일 열기·색인·DRC·쓰기 경로 없이 같은 배치를 쓴다.
 사용자 요청에 따라 실제 테스트를 제외하고 shared-default 파일 복구와 일반 게시의
 결과 불명 처리를 추가했다([계약·검증](WEBUI_DEFAULT_RECOVERY.ko.md)). 아래 날짜별
 “shared defaults 미구현” 등은 과거 상태다. 실제 GUI/RHEL/NFS 수용이나 전체 goal을

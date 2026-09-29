@@ -72,6 +72,30 @@ pub(super) fn asset(bundle: &str, name: &str) -> Response {
             "text/css; charset=utf-8",
             include_str!("../../ui/server.css"),
         ),
+        "minimap.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../../ui/minimap.js"),
+        ),
+        "fill-editor.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../../ui/fill-editor.js"),
+        ),
+        "presets.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../../ui/presets.js"),
+        ),
+        "palette.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../../ui/palette.js"),
+        ),
+        "menubar.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../../ui/menubar.js"),
+        ),
+        "panes.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../../ui/panes.js"),
+        ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     ([(header::CONTENT_TYPE, mime)], body).into_response()

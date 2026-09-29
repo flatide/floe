@@ -295,7 +295,7 @@ if(process.env.FLOE_TEST_TIMING==='1'){
 window.FloeSessionExit=require('./session-exit.js');
 window.FloeSharing=require('./sharing.js');
 window.FloeNotices=require('./notices.js');
-window.FloeMinimap=require('./minimap.js');
+window.FloeMinimap=require('./minimap.js');window.FloeMenubar=require('./menubar.js');window.FloePanes=require('./panes.js');window.FloeCells=require('./cells.js');
 window.FloeLauncher=require('./launcher.js');
 window.FloeBrowse=require('./browse.js');
 window.FloeIndexOpen=require('./index-open.js');
