@@ -6194,6 +6194,7 @@ class Viewer:
         w = self._cellwin
         store = w._store
         src = res["src"]
+        expanded = False
         if what == "root":
             store.clear()
             it = store.append(None, [res["name"], "", src, res["cell"],
@@ -6202,11 +6203,19 @@ class Viewer:
             if ref is None or not ref.valid():
                 return
             it = store.get_iter(ref.get_path())
+            expanded = w._tree.row_expanded(ref.get_path())
             store[it][4] = True
             if store[it][5] == "source":
                 store[it][3] = res["cell"]
-            while store.iter_has_child(it):
-                store.remove(store.iter_children(it))
+        # the placeholder rows go AFTER the children are in: a row whose
+        # last child is removed is collapsed by GTK, and the user just
+        # opened this one (field 2026-09-29: the first expand closed at
+        # once, later ones worked)
+        stale = []
+        child = store.iter_children(it)
+        while child is not None:
+            stale.append(child)
+            child = store.iter_next(child)
         for c in res["children"]:
             cit = store.append(it, [
                 c["name"],
@@ -6219,7 +6228,9 @@ class Viewer:
         if missing > 0:
             store.append(it, ["… %s more (find by name)" % fmt_count(missing),
                               "", src, -1, True, "more"])
-        if what == "root":
+        for old in stale:
+            store.remove(old)
+        if (what == "root" or expanded) and store.iter_has_child(it):
             w._tree.expand_row(store.get_path(it), False)
             w._info.set_text("%s: %s child%s" % (
                 res["name"], fmt_count(res["total"]),

@@ -659,6 +659,77 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         pixels, stride = disp.get_pixels(), disp.get_rowstride()
         self.assertEqual(rgb(63, 32), (0, 0, 0))
 
+    def test_cell_tree_first_expand_stays_open_and_asks_once(self):
+        """Field 2026-09-29: the first expand of a tree row closed at
+        once (later ones worked) - the placeholder child was removed
+        before the children arrived, and GTK collapses a row whose
+        last child goes. The children go in first; the row stays open,
+        the placeholder is gone, and the row asked for them once."""
+        try:
+            from floe import gui
+            gui.import_gtk()
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        import types
+        from floe.gui import Viewer
+        v = Viewer.__new__(Viewer)
+        v.cache = types.SimpleNamespace(catalog=None)
+        v.dbu = 0.001
+        v._cellwin = None
+        v._cell_seq = 0
+        v._cell_pending = {}
+        v._cell_sources = v._cell_sel = v._cell_hl = None
+        v._cell_hl_on = True
+        v._cell_hl_key = None
+        v._cell_find_seq = v._cell_insts_seq = v._cell_bbox_seq = None
+        v._cell_search_timer = None
+        v._cell_mode = "tree"
+        v._cell_nohier = set()
+        sent = []
+        v.worker = types.SimpleNamespace(alive=lambda: True,
+                                         submit=sent.append)
+        # the panel's box must stay referenced: an unparented container
+        # is destroyed with its widgets when collected, which unsets the
+        # tree view's model
+        panel = v._build_cell_panel()
+        self.addCleanup(panel.destroy)
+        w = v._cellwin
+        store = w._store
+        v._cell_tree_load_roots()
+        v._on_cell_result({
+            "kind": "cell_sources", "seq": sent[-1]["seq"], "found": True,
+            "sources": [{"src": 0, "placements": 1, "path": "/x/.a.ice"}]})
+        v._on_cell_result({
+            "kind": "cells", "seq": sent[-1]["seq"], "found": True,
+            "src": 0, "cell": 6, "name": "TOP", "insts": 1, "height": 2,
+            "unit": 1000.0, "bbox": [0, 0, 1, 1], "total": 2,
+            "children": [
+                {"cell": 4, "members": 9, "leaf": True, "name": "LEAF"},
+                {"cell": 5, "members": 2, "leaf": False, "name": "MID"}]})
+        root = store.get_iter_first()
+        self.assertTrue(w._tree.row_expanded(store.get_path(root)))
+        mid = store.iter_nth_child(root, 1)
+        self.assertEqual(store[store.iter_children(mid)][5], "placeholder")
+        asked = len(sent)
+        w._tree.expand_row(store.get_path(mid), False)
+        self.assertEqual(len(sent), asked + 1)
+        self.assertEqual((sent[-1]["kind"], sent[-1]["cell"]), ("cells", 5))
+        v._on_cell_result({
+            "kind": "cells", "seq": sent[-1]["seq"], "found": True,
+            "src": 0, "cell": 5, "name": "MID", "insts": 2, "height": 1,
+            "unit": 1000.0, "bbox": [0, 0, 1, 1], "total": 1,
+            "children": [
+                {"cell": 3, "members": 4, "leaf": True, "name": "INV"}]})
+        self.assertTrue(w._tree.row_expanded(store.get_path(mid)),
+                        "the first expand closed")
+        self.assertEqual([store[store.iter_nth_child(mid, i)][0]
+                          for i in range(store.iter_n_children(mid))],
+                         ["INV"])
+        # a second open does not ask again
+        w._tree.collapse_row(store.get_path(mid))
+        w._tree.expand_row(store.get_path(mid), False)
+        self.assertEqual(len(sent), asked + 1)
+
     def test_menus_and_dialogs_hand_the_keys_back_to_the_canvas(self):
         """Field 2026-09-05: after using a menu, g and the other key
         commands stayed dead until a canvas click. _focus_view puts the
