@@ -404,9 +404,15 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 - **자리**: 왼쪽 pane Notebook의 `cells` 페이지(§6). 위에서 아래로
   검색 박스(`find cell… (* ? wildcards)`) · 트리/결과 목록(TreeView,
   이름 열 ellipsize END + 개수 열 우정렬, 검은 배경 `.floe-drc-list`,
-  hscroll NEVER) · 버튼 행(`highlight` 체크 = 기본 켬, `zoom`,
-  인덱스가 없을 때만 보이는 `build index…`) · 정보 줄(줄바꿈 라벨).
-  `_build_cell_panel`, 위젯 홀더 `_CellPanel`.
+  hscroll NEVER) · 컨트롤 행(**FlowBox** — `highlight` 체크 = 기본 켬,
+  `zoom`, `root`, `top`; 좁으면 여러 줄로 감김) · 인덱스가 없을 때만
+  보이는 `build index…` 행 · 정보 줄(줄바꿈 라벨). `_build_cell_panel`,
+  위젯 홀더 `_CellPanel`. **페이지 최소 폭 ≤ 156 px**(테스트
+  `test_cell_page_fits_the_left_pane_at_its_start_width`): 현장
+  2026-09-29 "cells 탭이 안 보이고 DRC 탭도 반쯤 가림" = 버튼 4개
+  HBox(276 px)가 pane 시작 폭(196 px)을 넘자 GtkPaned가 첫 자식의
+  **왼쪽**을 잘라 낸 것. pane 시작 폭은 `LEFT_PANE_PX` = 260(0.12.242;
+  옛 196은 미니맵의 하한이었고 미니맵은 오른쪽으로 갔다).
 - **데이터 원천 = design.ovh**(SPEC-FORMATS): 셀별 **서로 다른 자식**과
   자식별 **배치 멤버 수**(반복 전개), 부모 목록, **탑 아래 인스턴스 수**,
   엣지별 자식 배치의 합집합 범위. design.ovm의 배치 레코드는 부모별

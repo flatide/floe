@@ -125,6 +125,9 @@ CELL_FIND_LIMIT = 2000
 CELL_SEARCH_MS = 150
 # zoom to a cell: its extent spans this fraction of the view on both axes
 CELL_VIEW_FRACTION = 0.8
+# the left pane's start width (cells | DRC pages); every page must keep
+# its minimum width under it, or GtkPaned clips the page's left side
+LEFT_PANE_PX = 260
 
 
 class _DrcPanel(object):
@@ -1424,7 +1427,11 @@ class Viewer:
         # report 2026-08-18) - shrinking simply clips the content
         lpaned.pack1(left, resize=False, shrink=True)
         lpaned.pack2(paned, resize=True, shrink=True)
-        lpaned.set_position(MINIMAP_PX + 16)
+        # the cell tree is the pane's default page (2026-09-29): it starts
+        # at LEFT_PANE_PX so cell names and counts read at once (the
+        # old 196 px floor was the minimap's, which moved right); the
+        # pane still shrinks to the pages' minimum
+        lpaned.set_position(LEFT_PANE_PX)
 
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         side.set_size_request(210, -1)
@@ -6035,33 +6042,50 @@ class Viewer:
         tree.get_style_context().add_class("floe-drc-list")
         sc.get_style_context().add_class("floe-layers-frame")
         box.pack_start(sc, True, True, 0)
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        # the control row is a FlowBox: at a narrow pane the buttons wrap
+        # into more rows instead of widening the page (field 2026-09-29:
+        # one HBox of four buttons made the page 276 px wide against the
+        # pane's 196 px start, and GtkPaned shrinks a too-wide first
+        # child by clipping its LEFT side - the tabs went off screen;
+        # the DRC page's filter row wraps the same way)
+        row = Gtk.FlowBox()
+        row.set_selection_mode(Gtk.SelectionMode.NONE)
+        row.set_min_children_per_line(1)
+        row.set_max_children_per_line(8)
+        row.set_homogeneous(False)
+        row.set_column_spacing(4)
+        row.set_row_spacing(2)
         hl = Gtk.CheckButton(label="highlight")
         hl.set_active(True)
         hl.connect("toggled", self._on_cell_hl)
-        row.pack_start(hl, False, False, 2)
+        row.add(hl)
         zoom = Gtk.Button(label="zoom")
         zoom.connect("clicked", lambda *_: self._cell_zoom_selected())
-        row.pack_start(zoom, False, False, 2)
+        row.add(zoom)
         # the view root (SPEC-VIEWER §8c): draw the selected cell as the
         # top, in its own coordinates; `top` returns to the file's top
         root = Gtk.Button(label="root")
         root.set_tooltip_text("draw the selected cell as the view root "
                               "(Ctrl+T)")
         root.connect("clicked", lambda *_: self._cell_set_root())
-        row.pack_start(root, False, False, 2)
+        row.add(root)
         top = Gtk.Button(label="top")
         top.set_tooltip_text("back to the top cell (Ctrl+Shift+T)")
         top.connect("clicked", lambda *_: self._cell_root_top())
         top.set_sensitive(False)
-        row.pack_start(top, False, False, 2)
-        # shown when a source's hierarchy index is missing
+        row.add(top)
+        for child in row.get_children():
+            child.set_can_focus(False)   # the buttons take the focus
+        box.pack_start(row, False, False, 0)
+        # shown when a source's hierarchy index is missing (its own row:
+        # a hidden widget inside the FlowBox would still hold a cell)
         build = Gtk.Button(label="build index…")
         build.connect("clicked",
                       lambda *_: self._cell_index_offer(None, ask=True))
         build.set_no_show_all(True)
-        row.pack_end(build, False, False, 2)
-        box.pack_start(row, False, False, 0)
+        build_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        build_row.pack_start(build, False, False, 2)
+        box.pack_start(build_row, False, False, 0)
         info = Gtk.Label(label="no layout")
         info.set_xalign(0.0)
         info.set_line_wrap(True)
@@ -6087,8 +6111,8 @@ class Viewer:
         if self._cellwin is None:
             return
         self._left_show("cells")
-        if self._lpaned.get_position() < 260:
-            self._lpaned.set_position(260)
+        if self._lpaned.get_position() < LEFT_PANE_PX:
+            self._lpaned.set_position(LEFT_PANE_PX)
         self._cellwin._search.grab_focus()
 
     def _cell_state_reset(self):

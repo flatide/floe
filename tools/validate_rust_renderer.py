@@ -730,6 +730,49 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         w._tree.expand_row(store.get_path(mid), False)
         self.assertEqual(len(sent), asked + 1)
 
+    def test_cell_page_fits_the_left_pane_at_its_start_width(self):
+        """Field 2026-09-29: the left pane opened with the `cells` tab
+        off screen and the DRC tab half hidden - the page's one-row
+        button bar was 276 px against the pane's 196 px, and GtkPaned
+        shrinks a too-wide first child by clipping its LEFT side. The
+        page's minimum width must stay well under the pane's start
+        width; the buttons wrap instead."""
+        try:
+            from floe import gui
+            gui.import_gtk()
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        import types
+        from floe.gui import LEFT_PANE_PX, MINIMAP_PX, Viewer
+        v = Viewer.__new__(Viewer)
+        v.cache = None
+        v._cellwin = None
+        v._cell_seq = 0
+        v._cell_pending = {}
+        v._cell_sources = v._cell_sel = v._cell_hl = None
+        v._cell_hl_on = True
+        v._cell_hl_key = None
+        v._cell_find_seq = v._cell_insts_seq = v._cell_bbox_seq = None
+        v._cell_search_timer = None
+        v._cell_mode = "tree"
+        v._cell_nohier = set()
+        v._view_root = None
+        v.worker = types.SimpleNamespace(alive=lambda: False)
+        panel = v._build_cell_panel()
+        window = gui.Gtk.OffscreenWindow()
+        window.add(panel)
+        window.show_all()
+        self.addCleanup(window.destroy)
+        minimum, _natural = panel.get_preferred_width()
+        # the old floor (the minimap's) and the new start width alike
+        self.assertLessEqual(minimum, MINIMAP_PX + 16 - 40, minimum)
+        self.assertLess(minimum, LEFT_PANE_PX)
+        # the controls sit in a wrapping row, the build button apart
+        row = v._cellwin._zoom.get_parent().get_parent()
+        self.assertIsInstance(row, gui.Gtk.FlowBox)
+        self.assertEqual(len(row.get_children()), 4)
+        self.assertFalse(v._cellwin._build.get_visible())
+
     def test_view_root_moves_the_die_the_render_state_and_the_queries(self):
         """SPEC-VIEWER §8c: the selected cell as the view root - the die
         (fit, clamp, minimap) becomes its bbox, the render state and
