@@ -1456,9 +1456,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "stored_rep_spans": "100", "stored_rep_painted_pixels": "8000",
                 "once_tiles": "5", "once_passes": "400", "once_items": "77",
                 # the density stack's lit/top/lower/covered/claimed pixels, pass
-                # 2's pages planned/in_hand/decoded/over_budget, its times and bins
+                # 2's pages planned/in_hand/decoded/over_budget, its times and bins,
+                # the sub-cut dots' items/over
                 "density_stack": "90/40/30/1000/200", "density_pages": "12/7/4/1",
                 "density_us": "100/20/30/4/50", "density_bin": "600/1/0",
+                "density_dots": "3500/2",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -1537,6 +1539,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["density_us"], {
                 "plan2_us": 100, "scene2_us": 20, "collect_us": 30, "regions_us": 4, "decode2_us": 50})
             self.assertEqual(result["density_bin"], {"items": 600, "deferred": 1, "overflow": 0})
+            self.assertEqual(result["density_dots"], {"items": 3500, "over": 2})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
@@ -1568,6 +1571,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIsNone(partial["density_pages"])
             self.assertIsNone(partial["density_us"])
             self.assertIsNone(partial["density_bin"])
+            self.assertIsNone(partial["density_dots"])
             self.assertEqual(partial["refining"], 1)
             self.assertIn(9, worker._jobs)
             self.assertFalse(os.path.exists(partial_path))

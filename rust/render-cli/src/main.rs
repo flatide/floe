@@ -240,6 +240,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         visible_indices: None,
         fixed_fit: None,
         root: None,
+        sub_cut_dots: None,
     })
 }
 

@@ -1681,6 +1681,7 @@ fn source_plan_request(
         visible_indices: None,
         fixed_fit: None,
         root: None,
+        sub_cut_dots: None,
     };
     plan.validate()?;
     Ok(Some(plan))

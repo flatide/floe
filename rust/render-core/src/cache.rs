@@ -775,6 +775,51 @@ impl Cache {
     /// Encoded (stored) size of one page - what a decode of it will
     /// cost, roughly, before it is decoded (the deck's budget-aware
     /// decode chunking).
+    /// A plan as a density pass that draws `layer` alone reads it (the
+    /// density stack's sub-cut dots plan both of pass 2's sides at once, and
+    /// the top plane's side is its top layer): the pages and dot items of
+    /// that layer. The cells and their placements stay - the walk reaches the
+    /// layer through them, and the scene's layer masks prune the subtrees
+    /// that hold none of it.
+    pub fn plan_layer_only(&self, plan: &HierPlan, layer: u32) -> HierPlan {
+        let of_layer = |page: u32| self.page_layer(page) == Some(layer);
+        let wcells = plan
+            .wcells
+            .iter()
+            .map(|cell| {
+                let kept: Vec<(u32, u8)> = cell
+                    .pages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &page)| of_layer(page))
+                    .map(|(at, &page)| (page, cell.page_levels.get(at).copied().unwrap_or(0)))
+                    .collect();
+                floe_vfs::hier::WsCell {
+                    key: cell.key,
+                    pages: kept.iter().map(|&(page, _)| page).collect(),
+                    page_levels: if cell.page_levels.is_empty() { Vec::new() } else { kept.iter().map(|&(_, level)| level).collect() },
+                    insts: cell.insts.clone(),
+                    frames: Vec::new(),
+                    washes: cell.washes.iter().filter(|(wash_layer, _)| *wash_layer == layer).copied().collect(),
+                    reps: cell.reps.iter().filter(|(rep_layer, _)| *rep_layer == layer).cloned().collect(),
+                }
+            })
+            .collect();
+        let (pages, page_prio) = plan
+            .pages
+            .iter()
+            .zip(&plan.page_prio)
+            .filter(|(&page, _)| of_layer(page))
+            .map(|(&page, &prio)| (page, prio))
+            .unzip();
+        HierPlan { top: plan.top, wcells, pages, page_prio, stats: plan.stats.clone(), explain: Vec::new() }
+    }
+
+    /// The layer (cache layer index) of page `page_id`; None outside the index.
+    pub fn page_layer(&self, page_id: u32) -> Option<u32> {
+        (page_id < self.vfs.ovm.n_pages).then(|| self.vfs.ovm.page(page_id).layer_idx)
+    }
+
     pub fn page_encoded_bytes(&self, page_id: u32) -> u64 {
         if page_id >= self.vfs.ovm.n_pages {
             return 0;
@@ -820,7 +865,7 @@ impl Cache {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit);
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots);
         let plan_us = elapsed_us(started);
         // a request whose every visible layer is summarized (and
         // pruned) plans no working cell at all; the scene still needs

@@ -1142,6 +1142,9 @@ struct FramePixels {
     density_us: Option<[u64; 5]>,
     /// pass 2's bin: items, deferred edges, overflow items
     density_bin: Option<[u64; 3]>,
+    /// pass 2's sub-cut dot items (FLOE_RUST_DENSITY_DOTS=on): planned, and
+    /// the plans' items past the cap (dropped)
+    density_dots: Option<[u64; 2]>,
 }
 
 fn render_worker(
@@ -1263,6 +1266,7 @@ fn run_clip(
         visible_indices: None,
         fixed_fit: None,
         root: command.root,
+        sub_cut_dots: None,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -2385,6 +2389,16 @@ fn density_stack_enabled() -> bool {
     std::env::var("FLOE_RUST_DENSITY_STACK").as_deref() == Ok("top")
 }
 
+/// The density stack's sub-cut dots (floe_vfs HierOpts::sub_cut_dots,
+/// CUT_DENSITY_DESIGN §10.12; user 2026-09-30: "a cell of 3 x 3 px or less
+/// is one dot, no descent"): pass 2 plans the cells at pass 1's cut - a cell
+/// under it stands as dots, never walked into or decoded - and the pages at
+/// the density cut. FLOE_RUST_DENSITY_DOTS=on, diagnostic and off by default
+/// (with the stack only).
+fn density_dots_enabled() -> bool {
+    std::env::var("FLOE_RUST_DENSITY_DOTS").as_deref() == Ok("on")
+}
+
 /// Pass 2's cut (px, the larger side): the shapes under pass 1's cut down to
 /// this size are density. 1 px (user decision 2026-09-27: 0.5 px first, so
 /// the count stays in bounds; then 1 px, which looks fine at detail medium
@@ -3092,6 +3106,7 @@ fn run_render(
 
         let mut density_pages: Option<[u64; 4]> = None;
         let mut density_us: Option<[u64; 5]> = None;
+        let mut density_dots: Option<[u64; 2]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -3142,7 +3157,8 @@ fn run_render(
                         }
                         Err(error) => return Err(error),
                     };
-                    density_pages = Some(counts);
+                    density_pages = Some([counts[0], counts[1], counts[2], counts[3]]);
+                    density_dots = density_dots_enabled().then_some([counts[4], counts[5]]);
                     // both plans / the scenes / the collection / the regions / the decode
                     density_us = Some([times[0], times[1], report.stats.density_collect_us, times[2], times[3]]);
                     report
@@ -3232,6 +3248,7 @@ fn run_render(
                 density_pages,
                 density_us,
                 density_bin: density_plan.is_some().then_some(report.stats.density_bin),
+                density_dots,
             }
         };
         check_generation(cancellation, command.generation)?;
@@ -3311,7 +3328,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} queue_us={} wall_us={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} queue_us={} wall_us={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -3446,6 +3463,10 @@ fn run_render(
                     .map_or_else(|| "-".to_string(), |counts| counts.map(|count| count.to_string()).join("/")),
                 pixels
                     .density_bin
+                    .map_or_else(|| "-".to_string(), |counts| counts.map(|count| count.to_string()).join("/")),
+                // the sub-cut dots' items/over, `-` without them
+                pixels
+                    .density_dots
                     .map_or_else(|| "-".to_string(), |counts| counts.map(|count| count.to_string()).join("/")),
                 queue_us,
                 // up to this frame's response: the phases above account for
@@ -3794,7 +3815,7 @@ fn render_density_frame(
     fit_key: &str,
     density_memory: &mut BTreeMap<String, floe_render_core::FixedFit>,
     background: bool,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 4], [u64; 4]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -3809,7 +3830,8 @@ fn render_density_frame(
     let budget_bytes = page_cache.budget_bytes();
     let top_layer = styled.layers.last().map(|layer| layer.layer_idx);
     let other_layers: Vec<u32> = styled.layers.iter().take(styled.layers.len().saturating_sub(1)).map(|layer| layer.layer_idx).collect();
-    let mut counts = [0u64; 4];
+    // pages planned/in hand/decoded/over the budget, dot items/over the cap
+    let mut counts = [0u64; 6];
     let mut times = [0u64; 4];
     let mut failed: Option<String> = None;
     let (report, _pool_us) = cache.with_decode_pool(
@@ -3834,13 +3856,30 @@ fn render_density_frame(
                     // the other layers over theirs
                     let mut sides: [Option<Arc<FrameScene>>; 2] = [None, None];
                     let mut wanted: Vec<(u64, u32)> = Vec::new();
-                    for (side, (regions, layers)) in [
-                        (regions_top, top_layer.map(|idx| vec![idx]).unwrap_or_default()),
-                        (regions_others, other_layers.clone()),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
+                    // the sub-cut dots (FLOE_RUST_DENSITY_DOTS=on) plan both sides at
+                    // once when the others' space is much of the top plane's: the walk
+                    // that finds the dots is the same for every layer, and the top
+                    // plane's regions hold the others' (it may also take what lower
+                    // originals drew); the top plane's side reads that plan's top layer
+                    // alone. When the originals left the others little (the top layer
+                    // is sparse and they cover the rest - an all-layer view), a joint
+                    // plan would count every layer over the whole top space for
+                    // nothing: the two sides plan apart, as without the dots.
+                    let dots = density_dots_enabled() && command.cut_px > 0.0;
+                    let (top_area, others_area): (f64, f64) = (
+                        regions_top.iter().map(|b| (b.x1 - b.x0).max(0) as f64 * (b.y1 - b.y0).max(0) as f64).sum(),
+                        regions_others.iter().map(|b| (b.x1 - b.x0).max(0) as f64 * (b.y1 - b.y0).max(0) as f64).sum(),
+                    );
+                    let joint = dots && !regions_top.is_empty() && 2.0 * others_area >= top_area;
+                    let jobs = if joint {
+                        vec![(regions_top, styled.layers.iter().map(|layer| layer.layer_idx).collect::<Vec<u32>>())]
+                    } else {
+                        vec![
+                            (regions_top, top_layer.map(|idx| vec![idx]).unwrap_or_default()),
+                            (regions_others, other_layers.clone()),
+                        ]
+                    };
+                    for (side, (regions, layers)) in jobs.into_iter().enumerate() {
                         if regions.is_empty() || layers.is_empty() {
                             continue;
                         }
@@ -3848,7 +3887,16 @@ fn render_density_frame(
                         // pass 2 plans to a reserve of its own (density_budget_bytes; pass 1
                         // plans to the rest) and its budget fit is remembered per scale and
                         // side as pass 1's is: the same pages whatever the frame
-                        let mut fine = make_plan_request_cut(cache, command, density_reserve(budget_bytes), density_cut_px())?;
+                        // the sub-cut dots: the cells keep pass 1's cut - a cell under it
+                        // is a dot item, never walked into or decoded - and the pages
+                        // take the density cut as its share
+                        let mut fine = if dots {
+                            let mut fine = make_plan_request_cut(cache, command, density_reserve(budget_bytes), command.cut_px)?;
+                            fine.sub_cut_dots = Some((density_cut_px() / command.cut_px).clamp(0.0, 1.0));
+                            fine
+                        } else {
+                            make_plan_request_cut(cache, command, density_reserve(budget_bytes), density_cut_px())?
+                        };
                         fine.regions = regions
                             .iter()
                             .map(|b| ViewBox::new(b.x0, b.y0, b.x1, b.y1))
@@ -3868,6 +3916,8 @@ fn render_density_frame(
                                 density_memory.insert(side_key, decision);
                             }
                         }
+                        counts[4] += planned_fine.stats.sub_cut_boxes;
+                        counts[5] += planned_fine.stats.sub_cut_box_over;
                         let density_plan = Arc::new(planned_fine);
                         times[0] += elapsed_us(plan_started);
                         let scene_started = Instant::now();
@@ -3885,7 +3935,22 @@ fn render_density_frame(
                                 wanted.push((prio, page_id));
                             }
                         }
-                        sides[side] = Some(density_scene);
+                        if joint {
+                            // the lower planes' walk reads the whole plan (its plane
+                            // table leaves the top layer out), the top plane's side
+                            // that layer's pages and dots (Cache::plan_layer_only)
+                            if let Some(layer) = top_layer {
+                                let top_plan = Arc::new(cache.plan_layer_only(&density_plan, layer));
+                                let top_scene = Arc::new(FrameScene::new_metadata(cache, top_plan, Arc::from([]), command.label_font_px)?);
+                                for page in decoded_pages {
+                                    let _ = top_scene.set_decoded_page(Arc::clone(page));
+                                }
+                                sides[0] = Some(top_scene);
+                            }
+                            sides[1] = Some(density_scene);
+                        } else {
+                            sides[side] = Some(density_scene);
+                        }
                     }
                     // the plans are within the reserve by the planner's estimate; the
                     // decode takes them in their order (the priority) under the reserve
@@ -4003,6 +4068,7 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         visible_indices: None,
         fixed_fit: None,
         root: command.root,
+        sub_cut_dots: None,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -4649,6 +4715,7 @@ mod tests {
             visible_indices: None,
             fixed_fit: None,
             root: command.root,
+            sub_cut_dots: None,
         };
         assert_ne!(fit_memory_key(&top, &request(&top)), fit_memory_key(&rooted, &request(&rooted)));
         // the clip and the cell queries carry it too

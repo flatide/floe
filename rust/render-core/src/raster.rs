@@ -2880,12 +2880,15 @@ fn replay_plane_items(
                 }
                 check_cancelled(guard)?;
                 let marker = marker_request(request);
+                // a dots plan's washes in a density plane are dot items (render_cell)
+                let dots = band.stacking() && scene.plan().stats.sub_cut_dots;
                 for &point in points {
                     if !point.intersects(&cull_view) { continue; }
                     counters.rect_records = counters.rect_records.saturating_add(1);
                     stats.primitives_tested = stats.primitives_tested.saturating_add(1);
                     stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-                    if paint_world_rect(band, &marker, point, paint)? {
+                    let drawn = if dots { paint_density_dots(band, request, point)? } else { paint_world_rect(band, &marker, point, paint)? };
+                    if drawn {
                         counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
                         stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
                         stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
@@ -5418,18 +5421,30 @@ fn render_cell(
         )?;
     }
     // markers (washes, stored representatives) are originals: pass 2's
-    // combined walk draws none
+    // combined walk draws none - but in a density plane a plan made with the
+    // sub-cut dots (floe_vfs HierOpts::sub_cut_dots) holds dot items as its
+    // washes, drawn as dots in either walk
     let markers = !matches!(selection, GeometrySelection::Planes(_));
+    let dots = band.stacking() && scene.plan().stats.sub_cut_dots;
     for &(layer_idx, wash) in &cell.washes {
         check_cancelled(guard)?;
-        if !markers || !selection.includes(layer_idx) {
+        let Some((plane, _)) = selection.paint_of(layer_idx, paint) else {
+            continue;
+        };
+        if !markers && !dots {
             continue;
         }
         counters.rect_records = counters.rect_records.saturating_add(1);
         stats.primitives_tested = stats.primitives_tested.saturating_add(1);
         stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
         let world = world_transform.apply_bbox(wash)?;
-        if paint_world_rect(band, &marker_request(request), world, paint)? {
+        let drawn = if dots {
+            band.set_density_plane(plane);
+            paint_density_dots(band, request, world)?
+        } else {
+            paint_world_rect(band, &marker_request(request), world, paint)?
+        };
+        if drawn {
             counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
             stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
             stats.primitives_drawn = stats.primitives_drawn.saturating_add(1);
@@ -6302,6 +6317,91 @@ fn paint_world_rect(
 /// rule whatever GeometryRasterRequest::area_true says.
 fn marker_request(request: &GeometryRasterRequest) -> GeometryRasterRequest {
     GeometryRasterRequest { area_true: false, ..*request }
+}
+
+/// The share of its area on screen a sub-cut dot item lights (DOT_SHARE;
+/// FLOE_RUST_DOT_SHARE, diagnostic, in (0, 1]).
+fn dot_share() -> f64 {
+    static SHARE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SHARE.get_or_init(|| {
+        std::env::var("FLOE_RUST_DOT_SHARE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0 && *v <= 1.0)
+            .unwrap_or(DOT_SHARE)
+    })
+}
+
+/// A sub-cut dot item lights this share of its area on screen, whole
+/// pixels rounded down, at least one: 3 x 3 px 4 dots, 2 x 2 px 2, anything
+/// under 2 px 1 (user 2026-09-30).
+const DOT_SHARE: f64 = 0.5;
+
+/// Items touching at most this many pixels pick their dots exactly (the k of
+/// the lowest rank); a larger one - an array run together - lights each
+/// pixel with the chance k / n.
+const DOT_EXACT_PIXELS: i128 = 64;
+
+/// A sub-cut stand-in in a density plane (floe_vfs HierOpts::sub_cut_dots,
+/// CUT_DENSITY_DESIGN §10.12; user 2026-09-30: "a cell of 3 x 3 px or less is
+/// one dot, no descent"): of the n pixels its box touches it lights k =
+/// max(1, floor(area x DOT_SHARE)) - a cell stands in without its shapes -
+/// picked by a hash of its world box and the pixel's place in it, so the
+/// choice does not depend on the tile or on a pan within a pixel's phase. A
+/// dot stands for its own pixel only: what it does not light it does not
+/// claim, and a lower plane's density may still show there. Whether it lit a
+/// pixel of this tile.
+fn paint_density_dots(band: &mut RasterBand, request: &GeometryRasterRequest, world: BBox) -> Result<bool, String> {
+    let (ax, ay) = world_to_device(request, world.x0, world.y0)?;
+    let (bx, by) = world_to_device(request, world.x1, world.y1)?;
+    let (x0, x1, y0, y1) = (ax.min(bx), ax.max(bx), ay.min(by), ay.max(by));
+    let c0 = floor_div(x0, DEVICE_ONE);
+    let c1 = ceil_div(x1, DEVICE_ONE).max(c0 + 1);
+    let r0 = floor_div(y0, DEVICE_ONE);
+    let r1 = ceil_div(y1, DEVICE_ONE).max(r0 + 1);
+    let cols = c1 - c0;
+    let n = cols * (r1 - r0);
+    let area = (x1 - x0) as f64 / DEVICE_ONE as f64 * ((y1 - y0) as f64 / DEVICE_ONE as f64);
+    let k = ((area * dot_share()).floor() as i128).clamp(1, n);
+    // the tile's part of the item
+    let (tc0, tc1) = (c0.max(band.col0 as i128), c1.min(band.col1 as i128));
+    let (tr0, tr1) = (r0.max(band.row0 as i128), r1.min(band.row1 as i128));
+    if tc0 >= tc1 || tr0 >= tr1 {
+        return Ok(false);
+    }
+    let rank = |at: i128| salted_rank(world, 0xD075_0000 ^ at as u64);
+    let mut lit = false;
+    let mut light = |band: &mut RasterBand, col: i128, row: i128| {
+        let pixel = (col, row, col + 1, row + 1);
+        lit |= band.density_shape(Some(pixel), Some(pixel));
+    };
+    if k == n {
+        for row in tr0..tr1 {
+            for col in tc0..tc1 {
+                light(band, col, row);
+            }
+        }
+    } else if n <= DOT_EXACT_PIXELS {
+        // the k lowest ranks of the whole item, whatever part the tile holds
+        let mut order: Vec<(f64, i128)> = (0..n).map(|at| (rank(at), at)).collect();
+        order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        for &(_, at) in &order[..k as usize] {
+            let (col, row) = (c0 + at % cols, r0 + at / cols);
+            if (tc0..tc1).contains(&col) && (tr0..tr1).contains(&row) {
+                light(band, col, row);
+            }
+        }
+    } else {
+        let p = k as f64 / n as f64;
+        for row in tr0..tr1 {
+            for col in tc0..tc1 {
+                if rank((row - r0) * cols + (col - c0)) < p {
+                    light(band, col, row);
+                }
+            }
+        }
+    }
+    Ok(lit)
 }
 
 /// Whether a shape at least a pixel on both sides takes the area-true form
@@ -11476,6 +11576,61 @@ mod tests {
             // write-once off: no pass 2, the plain frame
             let ordered = with_write_once(false, || density_frame(&coarse, &fine, CUT_1 as i64, &request, true, &mut Vec::new()));
             assert_eq!(ordered.frame, off.frame, "{fill:?}");
+        }
+    }
+
+    /// A pass-2 scene of sub-cut dot items (floe_vfs HierOpts::sub_cut_dots):
+    /// one top cell over 0..320 whose washes are the items.
+    fn dots_scene(washes: Vec<(u32, BBox)>) -> FrameScene {
+        let top = (0, REM_FULL);
+        let plan = HierPlan {
+            top,
+            wcells: vec![WsCell { key: top, pages: Vec::new(), page_levels: Vec::new(), insts: Vec::new(), frames: Vec::new(), washes, reps: Vec::new() }],
+            pages: Vec::new(),
+            page_prio: Vec::new(),
+            stats: HierStats { shape_cut: CUT_2, shape_cut_max: true, sub_cut_dots: true, ..HierStats::default() },
+            explain: Vec::new(),
+        };
+        FrameScene::from_test_parts(plan, Vec::new(), BTreeMap::from([(top, BBox { x0: 0, y0: 0, x1: 320, y1: 320 })])).unwrap()
+    }
+
+    /// The sub-cut dots (CUT_DENSITY_DESIGN §10.12; user 2026-09-30: "a cell
+    /// of 3 x 3 px or less is one dot, no descent"): in a density plane a wash
+    /// is a dot item lighting max(1, floor(area / 2)) of the pixels it touches
+    /// - 3 x 3 px 4, 2 x 2 px 2, under a pixel 1, a full 4 x 4 block 8 - where
+    /// the stack lets its plane draw: the top plane's over a lower original,
+    /// a lower plane's only in the space the originals left. 10 units a pixel,
+    /// rows counted from the top (world y inverted); layer 1's original fills
+    /// the left half. The tiling, the workers and the bin change nothing.
+    #[test]
+    fn sub_cut_dot_items_light_their_count_where_their_plane_may_draw() {
+        let b = |x0, y0, x1, y1| BBox { x0, y0, x1, y1 };
+        // (15.4 px wide: its right edge line stays in column 15)
+        let coarse = stack_scene(vec![(1, vec![RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 154, h: 320, rep: Rep::One }], Vec::new())], CUT_1);
+        let dots = Arc::new(dots_scene(vec![
+            (1, b(200, 40, 230, 70)),   // 3 x 3 px, empty space: 4 white
+            (2, b(250, 40, 270, 60)),   // 2 x 2 px: 2 red
+            (2, b(285, 45, 288, 48)),   // 0.3 x 0.3 px: 1 red
+            (3, b(40, 40, 70, 70)),     // the top plane over layer 1's original: 4 green
+            (2, b(100, 100, 130, 130)), // a lower plane under the original: none
+            (2, b(200, 200, 240, 240)), // a full 4 x 4 px block: 8 red
+        ]));
+        let request = stack_request(LayerFill::Solid, DEFAULT_TILE_SIZE, 1);
+        let off = render_geometry_styled(&coarse, &request).unwrap();
+        let on = density_frame(&coarse, &dots, CUT_1 as i64, &request, true, &mut Vec::new());
+        assert_eq!(count(&off.frame, RED, 0..32, 0..32) + count(&off.frame, GREEN, 0..32, 0..32) + count(&off.frame, WHITE, 16..32, 0..32), 0);
+        assert_eq!(count(&on.frame, WHITE, 20..23, 25..28), 4, "3 x 3 px");
+        assert_eq!(count(&on.frame, RED, 25..27, 26..28), 2, "2 x 2 px");
+        assert_eq!(count(&on.frame, RED, 28..29, 27..28), 1, "under a pixel");
+        assert_eq!(count(&on.frame, GREEN, 4..7, 25..28), 4, "the top plane over a lower original");
+        assert_eq!(count(&on.frame, RED, 0..16, 0..32), 0, "a lower plane under an original");
+        assert_eq!(count(&on.frame, RED, 20..24, 8..12), 8, "a full block");
+        assert_eq!(count(&on.frame, WHITE, 16..32, 0..32) + count(&on.frame, RED, 16..32, 0..32), 4 + 2 + 1 + 8, "nothing else lit");
+        assert_eq!(count(&on.frame, WHITE, 0..16, 0..32) + count(&on.frame, GREEN, 0..16, 0..32), 16 * 32, "the original stays");
+        for (tile, workers, bin) in [(8, 2u16, true), (16, 3, false), (DEFAULT_TILE_SIZE, 1, false)] {
+            let request = stack_request(LayerFill::Solid, tile, workers);
+            let again = density_frame(&coarse, &dots, CUT_1 as i64, &request, bin, &mut Vec::new());
+            assert_eq!(again.frame, on.frame, "tile {tile} workers {workers} bin {bin}");
         }
     }
 

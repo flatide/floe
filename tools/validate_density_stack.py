@@ -48,6 +48,21 @@ with the others). Every layer takes the viewer's default speckle; the cut is
     FLOE_RUST_AREA_TRUE=off or FLOE_RUST_WRITE_ONCE=off, which draw as
     without the variable.
 
+The sub-cut dots (FLOE_RUST_DENSITY_DOTS=on with the stack, CUT_DENSITY_DESIGN
+§10.12; user 2026-09-30: "a cell of 3 x 3 px or less is one dot, no
+descent"): a second layout places a cell DOT (a 0.15 um = 1.5 px square on
+1/0) three ways - a 10 x 10 array at a 6 px pitch, a 40 x 40 array that
+abuts, and one alone. Pass 2 plans the cells at pass 1's cut and counts a
+cell under it as dots in 4 x 4 px blocks, never walking into it:
+
+  * the sparse array lights exactly 100 pixels, each within 2 px of a
+    member's centre; the lone DOT one; the abutting array per 4 x 4 block
+    min(8, the members whose centre lies in it) - summed here from the
+    member positions - and nothing else lights;
+  * density_dots reports the items (one per block) and none over the cap;
+    without the variable the stack walks into DOT and reports no dots;
+  * the margin frame draws the view as the viewport frame did.
+
     .venv/bin/python tools/validate_density_stack.py
 """
 import os
@@ -91,6 +106,77 @@ def layout(path):
             x, y = 22.0 + i * 0.8, 11.0 + j * 0.4
             top.shapes(dots).insert(kdb.DBox(x, y, x + SQUARE, y + SQUARE))
     ly.write(str(path))
+
+
+DOT = 0.15                  # um: the DOT cell's square, 1.5 px
+SPARSE = (2030, 2030, 600, 10)      # dbu origin x, y, pitch, n: 6 px apart
+DENSE = (20000, 4000, 150, 40)      # abutting: the pitch is the square
+ALONE_DOT = (12030, 15030)
+
+
+def dots_layout(path):
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    dot = ly.create_cell('DOT')
+    dot.shapes(ly.layer(*LOW)).insert(kdb.DBox(0.0, 0.0, DOT, DOT))
+    for (x, y, pitch, n) in (SPARSE, DENSE):
+        top.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(kdb.Vector(x, y)), kdb.Vector(pitch, 0), kdb.Vector(0, pitch), n, n))
+    top.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(kdb.Vector(*ALONE_DOT))))
+    ly.write(str(path))
+
+
+def dots_checks(temp):
+    src = Path(temp) / 'dots.oas'
+    dots_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    workers = {
+        'stack': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top'}),
+        'dots': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}),
+    }
+    try:
+        on, res = frame(workers['dots'], 1, (LOW,))
+        walked, walked_res = frame(workers['stack'], 1, (LOW,))
+        half = int(round(DOT * 1000)) // 2
+        # the device position of a dbu point (0.1 um a pixel, rows from the top)
+        dev = lambda x, y: (x / 100.0, (VIEW[3] * 1000 - y) / 100.0)
+        # the sparse array: one dot a member, beside its centre
+        x0, y0, pitch, n = SPARSE
+        centres = [dev(x0 + half + i * pitch, y0 + half + j * pitch) for i in range(n) for j in range(n)]
+        sparse = lit(on, range(10, 90), range(110, 195))
+        assert len(sparse) == n * n, 'sparse array: %d px lit, want %d' % (len(sparse), n * n)
+        for (c, r) in sparse:
+            assert min(abs(c + 0.5 - cx) + abs(r + 0.5 - cy) for (cx, cy) in centres) <= 2.0, 'sparse dot (%d, %d) far from a member' % (c, r)
+        alone_px = lit(on, range(110, 135), range(35, 65))
+        assert len(alone_px) == 1, 'the lone DOT: %d px' % len(alone_px)
+        # the abutting array: min(8, the members centred in it) a 4 x 4 block
+        x0, y0, pitch, n = DENSE
+        blocks = {}
+        for i in range(n):
+            for j in range(n):
+                key = ((x0 + half + i * pitch) // 400, (y0 + half + j * pitch) // 400)
+                blocks[key] = blocks.get(key, 0) + 1
+        want = sum(min(8, count) for count in blocks.values())
+        dense = lit(on, range(195, 265), range(95, 165))
+        assert len(dense) == want, 'abutting array: %d px lit, want %d over %d blocks' % (len(dense), want, len(blocks))
+        everything = lit(on, range(W), range(H))
+        assert everything == sparse | alone_px | dense, '%d px lit outside the arrays' % len(everything - sparse - alone_px - dense)
+        dots = res.get('density_dots')
+        assert dots and dots['items'] == SPARSE[3] ** 2 + 1 + len(blocks) and dots['over'] == 0, (dots, len(blocks))
+        assert walked_res.get('density_dots') is None and lit(walked, range(W), range(H)), 'the stack alone draws the DOT squares, no dots'
+        print('density stack dots: sparse array %d dots beside the members, lone DOT 1, abutting array %d px = sum of min(8, members) '
+              'over %d blocks; density_dots %s' % (len(sparse), len(dense), len(blocks), dots))
+        margin, _ = frame_bg(workers['dots'], 2, (LOW,))
+        centre = b''.join(margin[((H // 2 + r) * 2 * W + W // 2) * 4:((H // 2 + r) * 2 * W + W // 2 + W) * 4] for r in range(H))
+        assert centre == on, 'the dots margin draws the view otherwise in %d px' % sum(
+            1 for i in range(0, len(on), 4) if centre[i:i + 4] != on[i:i + 4])
+        print('density stack dots: the margin frame draws the view as the viewport frame did')
+    finally:
+        for w in workers.values():
+            w.stop()
 
 
 def worker(src, env):
@@ -151,7 +237,7 @@ def main():
     os.environ['FLOE_INDEX_BIN'] = str(ROOT / 'rust/target/release/floe-index')
     os.environ['FLOE_RENDERD_BIN'] = str(ROOT / 'rust/target/release/floe-renderd')
     os.environ['FLOE_RUST_RETAINED_MB'] = '0'
-    for name in ('FLOE_RUST_DENSITY_STACK', 'FLOE_RUST_AREA_TRUE', 'FLOE_RUST_WRITE_ONCE'):
+    for name in ('FLOE_RUST_DENSITY_STACK', 'FLOE_RUST_DENSITY_DOTS', 'FLOE_RUST_AREA_TRUE', 'FLOE_RUST_WRITE_ONCE'):
         os.environ.pop(name, None)
     with tempfile.TemporaryDirectory(prefix='floe-density-stack-') as temp:
         src = Path(temp) / 'stack.oas'
@@ -236,6 +322,7 @@ def main():
         finally:
             for w in workers.values():
                 w.stop()
+        dots_checks(temp)
     print('density stack gate: OK')
 
 

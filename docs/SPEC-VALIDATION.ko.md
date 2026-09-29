@@ -103,6 +103,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
   디코드 > 0) 계측을 보고하고, 끈 프레임·`FLOE_RUST_AREA_TRUE=off`·`FLOE_RUST_WRITE_ONCE=off`는 계측 없이 변수 없는 프레임과 같다.
   0.12.233: 뷰어의 여백 프레임(`bg`, 각 축 2배)이 뷰를 뷰포트 프레임과 픽셀까지 같게 그린다(2패스가 자기 예약으로
   계획하고 그 맞춤을 배율·면마다 기억; `over_budget` 0).
+  0.12.247 컷 아래 점(`FLOE_RUST_DENSITY_DOTS=on`, CUT_DENSITY_DESIGN §10.12): 셀 DOT(0.15 µm = 1.5 px)을 6 px 간격
+  10×10 배열, 맞닿은 40×40 배열, 하나로 놓은 둘째 레이아웃에서 — 성긴 배열은 정확히 100픽셀(각각 멤버 중심 2 px
+  안), 하나는 1픽셀, 맞닿은 배열은 4×4 블록마다 min(8, 중심이 그 안인 멤버 수)의 합(게이트가 멤버 위치로 셈)만큼,
+  그 밖은 켜지지 않는다; `density_dots` 항목 = 블록 수, 초과 0; 변수 없이 스택만이면 DOT 안으로 걸어 그리고
+  `density_dots`가 없다; 여백 프레임의 가운데 = 뷰포트 프레임.
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과

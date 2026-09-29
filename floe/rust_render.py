@@ -135,6 +135,8 @@ def _density_stack(value):
 DENSITY_PAGE_COUNTS = ("planned", "in_hand", "decoded", "over_budget")
 DENSITY_TIMES = ("plan2_us", "scene2_us", "collect_us", "regions_us", "decode2_us")
 DENSITY_BIN = ("items", "deferred", "overflow")
+# the sub-cut dots (FLOE_RUST_DENSITY_DOTS=on): items planned, items past the cap
+DENSITY_DOTS = ("items", "over")
 
 
 def _wire_counts(value, names):
@@ -689,6 +691,7 @@ class RustRenderWorker:
             "density_pages": None,
             "density_us": None,
             "density_bin": None,
+            "density_dots": None,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -1305,6 +1308,7 @@ class RustRenderWorker:
         state["density_pages"] = _density_pages(fields.get("density_pages", "-"))
         state["density_us"] = _wire_counts(fields.get("density_us", "-"), DENSITY_TIMES)
         state["density_bin"] = _wire_counts(fields.get("density_bin", "-"), DENSITY_BIN)
+        state["density_dots"] = _wire_counts(fields.get("density_dots", "-"), DENSITY_DOTS)
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1531,6 +1535,7 @@ class RustRenderWorker:
             "density_pages": state["density_pages"],
             "density_us": state["density_us"],
             "density_bin": state["density_bin"],
+            "density_dots": state["density_dots"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on

@@ -96,6 +96,11 @@ pub struct PlanRequest {
     /// (floe_vfs::ViewReq::root; the viewer's view root, SPEC-VIEWER
     /// §8c); None = the top cell.
     pub root: Option<u32>,
+    /// The density stack's sub-cut dots (floe_vfs::hier::HierOpts::
+    /// sub_cut_dots, pass 2 only): `cut_dbu` is the cells' cut - a cell
+    /// under it is a dot item, never walked into or decoded - and pages and
+    /// records take `cut_dbu` times this share. None: one cut for all.
+    pub sub_cut_dots: Option<f64>,
 }
 
 impl PlanRequest {
@@ -149,6 +154,7 @@ mod tests {
             visible_indices: None,
             fixed_fit: None,
             root: None,
+            sub_cut_dots: None,
         };
         assert!(req.validate().is_err());
     }

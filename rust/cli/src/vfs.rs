@@ -7178,6 +7178,12 @@ pub fn plan_cmd(args: &[String]) {
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-box-px") {
             popts.sub_cut_box_px = val.parse().expect("sub-cut-box-px");
         }
+        // --sub-cut-dots SHARE: the density stack's pass 2 (HierOpts::
+        // sub_cut_dots) - the cut is the cells', a cell under it a dot item,
+        // and the pages take the cut times SHARE
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-dots") {
+            popts.sub_cut_dots = Some(val.parse().expect("sub-cut-dots"));
+        }
         // --shape-cut 1: the cut judges every shape by its smaller side
         // (ViewReq::shape_cut; the viewer sets it for thin keep)
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--shape-cut") {
@@ -7255,7 +7261,7 @@ pub fn plan_cmd(args: &[String]) {
              \"sub_cut_boxes\": {},\n  \
              \"sub_cut_box_nodes\": {},\n  \
              \"sub_cut_box_over\": {},\n  \
-             \"sub_cut_box_reads\": {},\n  \"sub_cut_box_strided\": {},\n  \"sub_cut_box_unsure\": {},\n  \"sub_cut_box_level\": {},\n  \
+             \"sub_cut_box_reads\": {},\n  \"sub_cut_box_strided\": {},\n  \"sub_cut_box_members\": {},\n  \"sub_cut_dot_items\": {},\n  \"sub_cut_box_unsure\": {},\n  \"sub_cut_box_level\": {},\n  \
              \"washes\": {},\n  \
              \"plan_ms\": {:.2}\n}}",
             plan.pages.len(),
@@ -7311,6 +7317,8 @@ pub fn plan_cmd(args: &[String]) {
             st.sub_cut_box_over,
             st.sub_cut_box_reads,
             st.sub_cut_box_strided,
+            st.sub_cut_box_members,
+            st.sub_cut_dot_items,
             st.sub_cut_box_unsure,
             st.sub_cut_box_level,
             plan.wcells.iter().map(|c| c.washes.len() as u64).sum::<u64>(),
