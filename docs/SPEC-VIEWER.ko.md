@@ -403,8 +403,12 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 
 - **자리**: 왼쪽 pane Notebook의 `cells` 페이지(§6). 위에서 아래로
   검색 박스(`find cell… (* ? wildcards)`) · 트리/결과 목록(TreeView,
-  이름 열 ellipsize END + 개수 열 우정렬, 검은 배경 `.floe-drc-list`,
-  hscroll NEVER) · 컨트롤 행(**FlowBox** — `highlight` 체크 = 기본 켬,
+  이름 열은 **이름 전체** + 개수 열 우정렬, 검은 배경 `.floe-drc-list`,
+  **hscroll AUTOMATIC** — 사용자 요청 2026-09-29, 0.12.243: 깊이 펼치면
+  들여쓰기만으로 30단계 570 px가 되고, hscroll NEVER에서는 그 폭이
+  페이지 최소 폭이 되어 pane이 왼쪽을 잘라 내며 되돌아올 길이 없었다;
+  DRC 페이지의 "ellipsize + 가로 스크롤 금지" 규약은 그 페이지의 것으로
+  유지) · 컨트롤 행(**FlowBox** — `highlight` 체크 = 기본 켬,
   `zoom`, `root`, `top`; 좁으면 여러 줄로 감김) · 인덱스가 없을 때만
   보이는 `build index…` 행 · 정보 줄(줄바꿈 라벨). `_build_cell_panel`,
   위젯 홀더 `_CellPanel`. **페이지 최소 폭 ≤ 156 px**(테스트

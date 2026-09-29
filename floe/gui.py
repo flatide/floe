@@ -6019,8 +6019,13 @@ class Viewer:
         store = Gtk.TreeStore(str, str, int, int, bool, str)
         results = Gtk.ListStore(str, str, int, int)
         tree = Gtk.TreeView(model=store)
+        # whole names, a horizontal scrollbar when the tree is wider than
+        # the pane (user call 2026-09-29: deep expansions indent the
+        # rows - 30 levels are 570 px - and with hscroll NEVER that
+        # width became the page's minimum, the pane clipped the page's
+        # left side and nothing scrolled back; the DRC pane's
+        # ellipsize-and-never-scroll rule stays its own)
         name_cell = Gtk.CellRendererText()
-        name_cell.set_property("ellipsize", Pango.EllipsizeMode.END)
         col = Gtk.TreeViewColumn("", name_cell, text=0)
         col.set_expand(True)
         tree.append_column(col)
@@ -6034,9 +6039,7 @@ class Viewer:
         tree.connect("row-activated", self._on_cell_activate)
         tree.get_selection().connect("changed", self._on_cell_select)
         sc = Gtk.ScrolledWindow()
-        # NO hscroll: names ellipsize at any pane width (the DRC pane's
-        # rule, user call 2026-08-18)
-        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         sc.add(tree)
         _remote_x_scroll_repaint(sc)
         tree.get_style_context().add_class("floe-drc-list")

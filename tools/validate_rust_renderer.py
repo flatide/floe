@@ -772,6 +772,23 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertIsInstance(row, gui.Gtk.FlowBox)
         self.assertEqual(len(row.get_children()), 4)
         self.assertFalse(v._cellwin._build.get_visible())
+        # user call 2026-09-29: thirty nested levels expanded (570 px of
+        # indentation) must not widen the page - the tree scrolls
+        # sideways instead (hscroll AUTOMATIC), so the pane never clips
+        # the page's left side with no way back
+        store = v._cellwin._store
+        it = None
+        for depth in range(30):
+            it = store.append(it, ["CELL_%02d" % depth, "", 0, depth,
+                                   True, "cell"])
+        v._cellwin._tree.expand_all()
+        while gui.Gtk.events_pending():
+            gui.Gtk.main_iteration()
+        deep, _natural = panel.get_preferred_width()
+        self.assertLessEqual(deep, minimum + 8, (deep, minimum))
+        scroller = v._cellwin._tree.get_parent()
+        self.assertEqual(scroller.get_policy()[0],
+                         gui.Gtk.PolicyType.AUTOMATIC)
 
     def test_view_root_moves_the_die_the_render_state_and_the_queries(self):
         """SPEC-VIEWER §8c: the selected cell as the view root - the die
