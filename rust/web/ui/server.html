@@ -9,7 +9,7 @@
   <script defer src="/server-assets/@@BUNDLE@@/image-decode.js"></script>
   <script defer src="/server-assets/@@BUNDLE@@/gestures.js"></script>
   <script defer src="/server-assets/@@BUNDLE@@/server.js"></script>
-</head><body>
+</head><body id="server-shell">
   <header class="topbar"><div class="brand">floe<span>2</span></div><strong>Server session</strong>
     <span id="server-status" class="document-title" role="status">Connecting…</span>
     <button id="server-reconnect" disabled>Reconnect</button><button id="server-leave" disabled>End my session</button>
@@ -36,7 +36,7 @@
         <label for="server-width">View width (optional)</label><input id="server-width" disabled>
         <button id="server-go" disabled>Go</button>
         <p class="note">Canvas: arrow keys pan 50%, Shift + arrows 10%; + / − zoom, Home fits. Left/middle drag pans; wheel zooms about the cursor. Right drag draws a zoom band: rightward zooms in, leftward zooms out; Esc cancels.</p>
-        <p class="note">During navigation the previous image stays visible until the current frame arrives; it is not the completed new view.</p>
+        <p class="note">During navigation or display-option changes the previous image stays visible until the current frame arrives. A wait cursor marks pending work; the previous image is not the completed new view.</p>
         <p class="note">A lost connection clears the display. Reconnect restores the server's current view without replaying navigation.</p>
       </section>
     </aside>

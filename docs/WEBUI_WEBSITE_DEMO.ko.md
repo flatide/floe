@@ -21,11 +21,17 @@ HTTPS가 기본이며 내부망 HTTP 시험만 아래 명시적 opt-in으로 허
 캔버스에서 좌/중 버튼 드래그는 pan, 우 버튼 드래그는 zoom band다. 오른쪽 방향은 확대,
 왼쪽 방향은 축소이며 release에서 한 번 제출한다. Escape는 취소하고 canvas의 브라우저
 context menu는 막는다. 현재 프레임이 표시되기 전/이전 화면 대기 중에는 band를 받지 않는다.
-줌·자유 pan처럼 이전 프레임의 정확한 16px 위상 배치가 불가능한 경우에도, 같은 세션·연결·
-데이터 revision·worker·render policy의 **이미 표시된 화면**은 새 프레임까지 유지한다.
+줌·자유 pan처럼 이전 프레임의 정확한 16px 위상 배치가 불가능하거나 detail·thin·depth·
+frames·labels·mono가 바뀌어도, 같은 고정 소스 세션·연결·데이터 revision·worker의
+**이미 표시된 화면**은 새 프레임까지 유지한다. 표시 옵션은 렌더 정책이지 접근 권한이 아니다.
 상태줄은 `Previous image · waiting for current frame`으로 구별하며 이를 현재 프레임으로
-승인하거나 stale 수신 프레임을 새로 표시하지 않는다. 연결 해제·hidden·로그아웃·정책/데이터
+승인하거나 stale 수신 프레임을 새로 표시하지 않는다. 수신·디코드·실제 표시 단계의
+render key/revision 일치 검사는 그대로 유지한다. 연결 해제·hidden·로그아웃·데이터/worker
 변경에서는 비운다. pan release의 마지막 미리보기도 유지하되 no-op/거부 시 원래 뷰로 복원한다.
+렌더 대기는 화면과 조작부 전체의 `wait` 커서로 표시한다. 요청 대기열·ACK·서버 상태 전파·
+이미지 디코드·브라우저 표시까지 포함하며, ACK나 서버 idle만으로 해제하지 않는다.
+현재 최종 프레임이 표시되면 복원하고 no-op·거부·실패·연결 종료에서도 대기가 남지 않게 한다.
+최종 프레임이 incomplete인 경우에는 그 상태를 문구로 알리고 커서를 계속 기다리게 하지 않는다.
 현재는 **기본 데모 UI**이며 전체 Electron UI의 레이어 패널·셀 트리·측정·pick/snap은
 이 경로에 연결하지 않았다. 큰 DPR 화면은 내부 렌더 해상도를 제한해 표시한다.
 
@@ -236,10 +242,19 @@ HTTP/HTTPS 각각의 CLI 준비·실제 PNG WebSocket·상한 거부·SIGHUP 회
 
 2026-09-29 데모 입력/화면 유지 회귀: `server.test.cjs`에서 우 버튼 band 확대·축소,
 Escape/blur/state 변경 취소, letterbox 좌표, 좌/중 버튼 13px pan release, no-op/거부 복원,
-버튼/키/휠 줌 대기 화면 유지와 stale 패킷 폐기, render policy/worker/dataset 변경 및
+버튼/키/휠 줌 대기 화면 유지와 stale 패킷 폐기, worker/dataset 변경 및
 hidden/연결 해제/로그아웃 화면 정리를 고정했다. 전체 `validate_web_ui.cjs` 통과.
 `server_runtime` 12건도 통과했고 HTTP/HTTPS 데모 CLI 두 경로에 실제 band 명령 →
 native PNG·bbox 확대/축소·render revision 변경·공용 인덱스 불변 검사를 추가했다.
 이는 합성/loopback 검증이며 수정 후 회사 브라우저에서의 실제 마우스 수용 검사는 별도다.
 UI가 실행 파일에 내장되므로 배포에는 `floe2-web` 재빌드·교체·재시작 후 `/demo`에서
 새 세션 열기가 필요하다. 이 변경에 재인덱싱이나 프록시 설정 변경은 필요 없다.
+
+2026-09-29 표시 옵션/대기 커서 회귀: 위 화면 유지 계약을 detail·thin·depth·frames·labels·
+mono에도 확장했다. `server.test.cjs`는 옵션별 render key 변경 후 캔버스 초기화가 없는지,
+이전 정책의 패킷을 버리는지, ACK/idle 뒤에도 디코드와 표시를 기다리는지 검사한다.
+연속 변경 대기열·지연 디코드 중 새 revision·최종 incomplete·요청 거부/no-op·오류/연결 종료의
+커서 복원도 고정했다. 좌/중/우 드래그의 grab/crosshair → wait → 기본 커서 복원도 검사한다.
+`sh tools/validate_rust.sh --only server_runtime,web_ui` ALL OK
+(native 12건, 전체 ES2017/UI 회귀). 회사 서버 배포 및 실제 브라우저에서의 깜빡임 수용
+검사는 별도다.

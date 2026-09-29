@@ -9,12 +9,13 @@ function environment(options={}) {
     const origin=options.http?'http://10.0.0.10:8080':'https://service.example.test';
     const id=options.id||'a'.repeat(64),auth={launch_id:id,csrf:'f'.repeat(64),bundle,protocol:'floe-server-v1',viewer_ready:true,render_transport:true};
     const base='/api/v1/server/sessions/'+id,key='floe-server-session:'+origin+':'+id;
-    const nodes=new Map(),events={},requests=[],sockets=[],timers=new Map(),rafs=new Map(),reads=[],deferred=[],holds=[];
+    const nodes=new Map(),events={},requests=[],sockets=[],timers=new Map(),rafs=new Map(),reads=[],deferred=[],holds=[],decoders=[];
     const storage=new Map([['floe-session:'+origin,'OWNER'],['floe-server-session:'+origin+':'+'b'.repeat(64),'OTHER']]);
     if(options.resume){storage.set(key,JSON.stringify(auth));}
     let number=0,clock=10000,opened=!!options.resume,code=200,confirm=true,doc;
     class Element {
-        constructor(){this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.style={};this.listeners={};this.width=this.height=1;}
+        constructor(){this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.style={};this.listeners={};this.attributes={};this.width=this.height=1;}
+        setAttribute(k,v){this.attributes[k]=String(v);}getAttribute(k){return this.attributes[k]===undefined?null:this.attributes[k];}
         get width(){return this._width;}set width(v){this._width=v;this.resets=(this.resets||0)+1;this.pixels=new Uint8ClampedArray((this._width||1)*(this._height||1)*4);}
         get height(){return this._height;}set height(v){this._height=v;this.resets=(this.resets||0)+1;this.pixels=new Uint8ClampedArray((this._width||1)*(this._height||1)*4);}
         getContext(){const self=this;return {fillRect(){self.pixels=new Uint8ClampedArray(self.width*self.height*4);},putImageData(i){self.pixels=i.data.slice();},
@@ -54,10 +55,11 @@ function environment(options={}) {
         send(text){this.sent.push(JSON.parse(text));}close(){this.readyState=3;}text(v){this.onmessage({data:JSON.stringify(v)});}binary(extra={}){this.onmessage({data:packet({view_id:id,...extra})});}
     }
     const c=Client.bind({window:win,document:doc,location,history,protocol:P,XHR,WebSocket:WS,now:()=>clock,gestures:require('./gestures.js'),
-        decode(h,d,done){return Decode.create({ImageData:class{constructor(data){this.data=data;}},setTimeout:win.setTimeout,clearTimeout:win.clearTimeout},h,d,done);}});
+        decode(h,d,done){const job=Decode.create({ImageData:class{constructor(data){this.data=data;}},setTimeout:win.setTimeout,clearTimeout:win.clearTimeout},h,d,done);
+            return options.holdDecode?{start(){decoders.push({finish:()=>job.start(),fail:()=>done(null,Error('synthetic decode error'))});},cancel:()=>job.cancel()}:job;}});
     function hello(ws=sockets.at(-1),e=epoch){ws.onopen();ws.text({type:'hello',protocol:1,bundle,view_id:id,connection_epoch:e,frame_credit:1,capabilities:{view:true,index:false,review:false,export:false,query:false}});ws.text(state({connection_epoch:e}));}
     function fire(ms,interval){const item=[...timers].find(([,v])=>v.ms===ms&&(interval===undefined||v.interval===interval));assert(item,'timer '+ms);if(!item[1].interval){timers.delete(item[0]);}clock+=ms;item[1].f();}
-    return {c,el:n=>el('server-'+n),events,doc,win,location,requests,sockets,storage,reads,deferred,timers,hello,state,
+    return {c,el:n=>el('server-'+n),events,doc,win,location,requests,sockets,storage,reads,deferred,timers,decoders,hello,state,
         raf(){for(const [k,f] of [...rafs]){rafs.delete(k);f();}},fire,code(n){code=n;},confirm(v){confirm=v;},opened(v){opened=v;},
         defer(method,suffix){holds.push({method,suffix});}};
 }
@@ -106,9 +108,9 @@ if(require.main===module)(async()=>{
     const handshake=environment();await handshake.c.start();handshake.fire(10000);assert.equal(handshake.sockets[0].readyState,3);handshake.fire(500);await tick();assert.equal(handshake.sockets.length,2);handshake.c.stop();
     const noReply=environment();await noReply.c.start();noReply.hello();noReply.el('in').onclick();
     noReply.fire(10000,false);assert.equal(noReply.sockets[0].readyState,3);noReply.fire(500);await tick();noReply.hello(noReply.sockets[1],'9'.repeat(64));assert.equal(noReply.sockets[1].sent.length,0);noReply.c.stop();
-    // Navigation keeps only pixels already presented within the same render
-    // policy/session. A stale packet still cannot be newly decoded/presented.
-    async function displayed(options={}){const h=environment(options);await h.c.start();h.hello();h.sockets[0].binary();h.raf();return h;}
+    // Only already-presented pixels can survive display-policy edits; stale
+    // packets still cannot be newly decoded/presented and identity stays fixed.
+    async function displayed(options={}){const h=environment(options);await h.c.start();h.hello();h.sockets[0].binary();if(options.holdDecode){h.decoders.shift().finish();}h.raf();return h;}
     const pointer=(x,y,button=0,buttons=1)=>({clientX:x,clientY:y,button,buttons,preventDefault(){}});
     const zoomBounds=['6.4','3.2','57.6','28.8'];
     for(const input of ['in','out','+','-','wheel']){
@@ -150,7 +152,7 @@ if(require.main===module)(async()=>{
     const snEdit=sn.sent.at(-1);assert.equal(snEdit.body.navigation.snap,true);
     sn.text({type:'accepted',seq:snEdit.seq,state_rev:'2'});sn.text(snapped.state({state_rev:'2',render_rev:'2',bbox_dbu:['-32','0','32','32']}));
     assert.deepEqual(snapped.el('canvas').lastBlit,[32,0]);snapped.c.stop();
-    for(const change of [{dataset_revision:'2'},{worker_epoch:'2'},{render_key:'2'},{status:'closed'}]){
+    for(const change of [{dataset_revision:'2'},{worker_epoch:'2'},{status:'closed'}]){
         const h=await displayed(),s=h.sockets[0];s.text(h.state({state_rev:'2',render_rev:'2',bbox_dbu:zoomBounds}));assert.equal(h.el('empty').hidden,true);
         s.text(h.state({state_rev:'3',...change}));assert.equal(h.el('canvas').width,1);assert.equal(h.el('empty').hidden,false);
         s.text(h.state({state_rev:'4'}));assert.equal(h.el('empty').hidden,false,'cleared image resurfaced');h.c.stop();
@@ -185,6 +187,68 @@ if(require.main===module)(async()=>{
     const unpainted=environment();await unpainted.c.start();unpainted.hello();unpainted.el('viewport').listeners.mousedown(pointer(8,8,2,2));unpainted.events.mouseup(pointer(24,24,2,0));assert.equal(unpainted.sockets[0].sent.length,0);unpainted.c.stop();
     const oldView=await displayed();oldView.sockets[0].text(oldView.state({state_rev:'2',render_rev:'2',bbox_dbu:zoomBounds}));
     oldView.el('viewport').listeners.mousedown(pointer(8,8,2,2));oldView.events.mouseup(pointer(24,24,2,0));assert.equal(oldView.sockets[0].sent.length,1,'band used stale display');oldView.c.stop();
+    function cursor(h,busy){assert.equal(h.el('shell').getAttribute('data-busy'),String(busy));assert.equal(h.el('viewport').getAttribute('aria-busy'),String(busy));assert.equal(h.el('viewport').style.cursor,busy?'wait':'');}
+    for(const button of [0,1,2]){
+        const h=await displayed(),s=h.sockets[0],buttons=[1,4,2][button],port=h.el('viewport');
+        port.listeners.mousedown(pointer(8,8,button,buttons));assert.equal(port.style.cursor,button===2?'crosshair':'grabbing');
+        h.events.mouseup(pointer(24,24,button,0));cursor(h,true);
+        s.text({type:'accepted',seq:s.sent.at(-1).seq,state_rev:'1'});cursor(h,false);h.c.stop();
+    }
+    for(const [field,value] of [['detail','medium'],['detail','low'],['detail','exact'],['thin','keep'],['thin','cull'],['depth','1'],['frames',false],['labels',false],['mono',true]]){
+        const h=await displayed(),s=h.sockets[0],c=h.el('canvas'),pixels=c.pixels.slice(),resets=c.resets;
+        if(typeof value==='boolean'){h.el(field).checked=value;}else{h.el(field).value=value;}h.el(field).onchange();
+        const edit=s.sent.at(-1),changed={state_rev:'2',render_rev:'2',render_key:'2',[field]:value};
+        assert.deepEqual(edit.body,{[field]:value});cursor(h,true);
+        // An idle snapshot is not proof that its pixels reached this browser.
+        s.text(h.state(changed));assert.equal(c.resets,resets,field+' cleared displayed pixels');assert.deepEqual(c.pixels,pixels);assert.equal(h.el('empty').hidden,true);
+        assert.match(h.el('frame-status').textContent,/Previous image.*waiting/);cursor(h,true);
+        s.text({type:'accepted',seq:edit.seq,state_rev:'2'});cursor(h,true);
+        s.binary();h.raf();assert.equal(c.resets,resets,'stale policy frame was presented');cursor(h,true);
+        s.binary(changed);cursor(h,true);h.raf();cursor(h,false);assert.match(h.el('frame-status').textContent,/^Complete/);h.c.stop();cursor(h,false);
+    }
+    const startup=environment();cursor(startup,false);startup.defer('POST','/exchange');const starting=startup.c.start();cursor(startup,true);
+    startup.deferred[0].reply();await starting;cursor(startup,true);startup.hello();cursor(startup,true);startup.sockets[0].binary();cursor(startup,true);startup.raf();cursor(startup,false);startup.c.stop();
+    for(const outcome of ['noop','reject']){
+        const h=await displayed(),s=h.sockets[0];h.el('detail').value='high';h.el('detail').onchange();cursor(h,true);
+        s.text(outcome==='noop'?{type:'accepted',seq:s.sent.at(-1).seq,state_rev:'1'}:{type:'error',seq:s.sent.at(-1).seq});cursor(h,false);h.c.stop();
+    }
+    const phases=await displayed(),ps=phases.sockets[0];
+    for(const status of ['rendering','cancelling','opening']){ps.text(phases.state({status}));cursor(phases,true);}
+    ps.text(phases.state());cursor(phases,false);
+    ps.binary({final:false,complete:false});phases.raf();cursor(phases,true);
+    // A terminal but incomplete frame must not leave an eternal wait cursor.
+    ps.binary({final:true,complete:false,labels_truncated:true});phases.raf();cursor(phases,false);phases.c.stop();
+    const delayed=await displayed({holdDecode:true}),ds=delayed.sockets[0];cursor(delayed,false);
+    ds.binary();cursor(delayed,true);delayed.decoders.shift().finish();cursor(delayed,true);delayed.raf();cursor(delayed,false);
+    delayed.el('thin').value='keep';delayed.el('thin').onchange();cursor(delayed,true);
+    ds.text({type:'accepted',seq:ds.sent.at(-1).seq,state_rev:'2'});ds.text(delayed.state({state_rev:'2',render_rev:'2',render_key:'2',thin:'keep'}));
+    ds.binary({state_rev:'2',render_rev:'2',render_key:'2'});cursor(delayed,true);const superseded=delayed.decoders.shift();
+    ds.text(delayed.state({state_rev:'3',render_rev:'3',render_key:'3',thin:'cull'}));const preserved=delayed.el('canvas').resets;
+    superseded.finish();delayed.raf();cursor(delayed,true);assert.equal(delayed.el('canvas').resets,preserved);
+    ds.binary({state_rev:'3',render_rev:'3',render_key:'3'});delayed.decoders.shift().finish();delayed.raf();cursor(delayed,false);delayed.c.stop();
+    for(const lifecycle of ['hide','disconnect','logout','renderer-failed','closed','timeout','decode-failed']){
+        const h=await displayed({holdDecode:true}),s=h.sockets[0];h.el('in').onclick();cursor(h,true);
+        if(lifecycle==='hide'){h.doc.hidden=true;h.events.visibilitychange();}else if(lifecycle==='disconnect'){s.onclose();}
+        else if(lifecycle==='logout'){await h.el('leave').onclick();}else if(lifecycle==='timeout'){h.fire(10000,false);}
+        else if(lifecycle==='decode-failed'){s.binary();h.decoders.shift().fail();}
+        else{s.text(h.state({status:lifecycle==='closed'?'closed':'failed',failure:lifecycle==='closed'?null:'worker_failed'}));}
+        cursor(h,false);h.c.stop();
+    }
+    const failedPolicy=await displayed(),fp=failedPolicy.sockets[0],previous=failedPolicy.el('canvas').pixels.slice();
+    failedPolicy.el('thin').value='keep';failedPolicy.el('thin').onchange();
+    fp.text(failedPolicy.state({state_rev:'2',render_rev:'2',render_key:'2',thin:'keep',status:'failed',failure:'worker_failed'}));
+    assert.deepEqual(failedPolicy.el('canvas').pixels,previous);assert.equal(failedPolicy.el('empty').hidden,true);
+    assert.match(failedPolicy.el('frame-status').textContent,/Last image.*failed/);cursor(failedPolicy,false);failedPolicy.c.stop();
+    const chain=await displayed(),cs=chain.sockets[0];chain.el('detail').value='medium';chain.el('detail').onchange();const first=cs.sent.at(-1);
+    chain.el('thin').value='keep';chain.el('thin').onchange();cursor(chain,true);
+    cs.text({type:'accepted',seq:first.seq,state_rev:'2'});const secondState={state_rev:'2',render_rev:'2',render_key:'2',detail:'medium'};
+    cs.text(chain.state(secondState));cs.binary(secondState);chain.raf();cursor(chain,true);chain.fire(100);cursor(chain,true);
+    cs.text({type:'accepted',seq:cs.sent.at(-1).seq,state_rev:'3'});const lastState={state_rev:'3',render_rev:'3',render_key:'3',detail:'medium',thin:'keep'};
+    cs.text(chain.state({...lastState,status:'rendering'}));cs.binary(lastState);chain.raf();cursor(chain,true);cs.text(chain.state(lastState));cursor(chain,false);chain.c.stop();
+    const fs=require('node:fs'),path=require('node:path');
+    assert.match(fs.readFileSync(path.join(__dirname,'server.html'),'utf8'),/<body id="server-shell">/);
+    assert.match(fs.readFileSync(path.join(__dirname,'server.css'),'utf8'),/#server-shell\[data-busy="true"\][^{]*#server-shell\[data-busy="true"\] \*\s*\{\s*cursor:\s*wait\s*!important;/);
+    console.log('WEB SERVER DISPLAY POLICY: ALL OK (all controls retain pixels; waiting through queue/ACK/state/decode/presentation; failure/no-op/lifecycle resets)');
     console.log('WEB SERVER NAVIGATION: ALL OK (band in/out/cancel/letterbox, retained zoom/free pan, no-op/rejection, stale packet and policy/session isolation)');
     console.log('WEB SERVER SESSION: ALL OK (bootstrap, isolated storage, pixels/ACK, serialized edits, reconnect/no replay, open ambiguity, hidden exchange, revoke/logout)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

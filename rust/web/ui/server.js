@@ -17,10 +17,21 @@
         function valid(a){return !!a&&a.launch_id===id&&/^[0-9a-f]{64}$/.test(a.csrf)&&a.bundle===bundle&&a.protocol==='floe-server-v1';}
         function remove(){try{win.sessionStorage.removeItem(key);}catch(_) {}}
         function ready(){return !stopped&&!hidden&&!!hello&&!!state&&!state.failure&&!['failed','closed'].includes(state.status)&&!!socket&&socket.readyState===1;}
+        function updateCursor(){
+            const terminal=state&&(state.failure||['failed','closed'].includes(state.status));
+            // ACK/idle means the server finished, not that its PNG is displayed.
+            // Keep waiting through queued edits, decode and the presentation rAF.
+            const pending=flight!==null||accepted!==null||queue.length>0||decode!==null||raf!==null;
+            const framePending=state&&(['opening','rendering','cancelling'].includes(state.status)||!image||!P.matches(image.header,state)||!image.header.final);
+            const busy=!!(!stopped&&!hidden&&!terminal&&(joining||requests.size>0||socket&&
+                (socket.readyState===0||socket.readyState===1&&(!hello||!state||pending||framePending))));
+            el('shell').setAttribute('data-busy',String(busy));port.setAttribute('aria-busy',String(busy));
+            port.style.cursor=busy?'wait':gesture&&gesture.active()?(gesture.bandActive()?'crosshair':'grabbing'):'';
+        }
         function controls(){inputs.forEach(function(n){el(n).disabled=!ready()||(n==='labels'&&state.capabilities.labels!==true);});
             el('reconnect').disabled=stopped||!auth||joining||hidden;el('leave').disabled=stopped||!auth;
-            el('open').hidden=!unopened;el('open').disabled=stopped||hidden||joining||!auth;}
-        function clear(){image=null;shift=null;releasedPan=false;canvas.width=canvas.height=1;el('empty').hidden=false;el('frame-status').textContent='No displayed frame';}
+            el('open').hidden=!unopened;el('open').disabled=stopped||hidden||joining||!auth;updateCursor();}
+        function clear(){image=null;shift=null;releasedPan=false;canvas.width=canvas.height=1;el('empty').hidden=false;el('frame-status').textContent='No displayed frame';updateCursor();}
         function timerClear(name){if(name!==null){win.clearTimeout(name);}return null;}
         function disconnect(){serial++;joining=false;const old=socket;socket=null;hello=state=null;flight=accepted=null;queue=[];
             requests.forEach(function(x){if(!x.exchange){x.abort();}});
@@ -33,8 +44,8 @@
         function request(method,suffix,body){
             const allowed={'/exchange':['POST'],'':['GET','DELETE'],'/view':['GET','POST']};
             if(!allowed[suffix]||!allowed[suffix].includes(method)){return Promise.reject(Error('Unsupported server request'));}
-            return new Promise(function(resolve,reject){const x=new o.XHR();x.exchange=suffix==='/exchange';requests.add(x);let done=false;
-                function end(error,value){if(done){return;}done=true;requests.delete(x);if(error){reject(error);}else{resolve(value);}}
+            return new Promise(function(resolve,reject){const x=new o.XHR();x.exchange=suffix==='/exchange';requests.add(x);updateCursor();let done=false;
+                function end(error,value){if(done){return;}done=true;requests.delete(x);updateCursor();if(error){reject(error);}else{resolve(value);}}
                 x.open(method,base+suffix,true);x.timeout=8000;
                 if(auth){x.setRequestHeader('X-Floe-CSRF',auth.csrf);}if(body!==undefined){x.setRequestHeader('Content-Type','application/json');}
                 x.onprogress=function(e){if(e.loaded>256*1024||e.lengthComputable&&e.total>256*1024){end(Error('Server reply limit'));x.abort();}};
@@ -54,12 +65,13 @@
             seq=next;socket.send(text);return seq;}
         function ack(h){send({type:'frame.ack',connection_epoch:hello.connection_epoch,frame_id:h.frame_id});}
         function compose(){if(!state){return;}
-            const same=image&&['view_id','connection_epoch','dataset_revision','worker_epoch','render_key'].every(function(k){return image.header[k]===state[k];});
+            const same=image&&['view_id','connection_epoch','dataset_revision','worker_epoch'].every(function(k){return image.header[k]===state[k];});
             if(!same||state.status==='closed'){clear();return;}
             const exact=P.matches(image.header,state),p=exact?[0,0]:P.placement(image.header,state);
             // placement is an exact raster-phase contract, not a condition for
-            // retaining pixels already displayed in this session. Zoom and a
-            // non-16px pan freeze the last composite until its replacement;
+            // retaining pixels already displayed in this fixed-source session.
+            // Detail/thin/depth/styles change render_key, not authorization.
+            // Such edits, zoom and non-16px pan freeze the last composite;
             // they must never turn it into a current receipt or query target.
             if(p&&!releasedPan){
                 canvas.width=state.pixels[0];canvas.height=state.pixels[1];ctx.imageSmoothingEnabled=false;
@@ -68,21 +80,21 @@
             }
             el('empty').hidden=true;
             if(state.failure){el('frame-status').textContent='Last image · renderer failed';}
-            else if(!exact||releasedPan){el('frame-status').textContent='Previous image · waiting for current frame';}
-            else {const h=image.header;el('frame-status').textContent=(h.complete?'Complete':'Partial / incomplete')+(h.approximate?' · approximate':'')+' · '+h.width+' × '+h.height+' px';}}
+            else if(!exact||releasedPan||flight||accepted||queue.length){el('frame-status').textContent='Previous image · waiting for current frame';}
+            else {const h=image.header;el('frame-status').textContent=(h.complete?'Complete':'Partial / incomplete')+(h.approximate?' · approximate':'')+' · '+h.width+' × '+h.height+' px';}updateCursor();}
         function frame(data,token){const packet=P.packet(data),h=packet.header;
             if(!hello||h.connection_epoch!==hello.connection_epoch||h.view_id!==id||h.purpose!=='foreground'||h.query){throw Error('Wrong server frame identity');}
             if(decode||raf!==null){throw Error('Frame credit exceeded');}if(!ready()||!P.matches(h,state)){ack(h);return;}
             const next=doc.createElement('canvas');next.width=h.width;next.height=h.height;
             const job=o.decode(h,packet.data,function(draw,error){if(token!==serial||stopped||hidden){return;}decode=null;
                 if(error){lost('Frame decode failed; reconnecting.');return;}
-                if(!draw||!ready()||!P.matches(h,state)){ack(h);return;}
+                if(!draw||!ready()||!P.matches(h,state)){ack(h);updateCursor();return;}
                 try{draw(next.getContext('2d',{alpha:false}));}catch(_){lost('Canvas failed; reconnecting.');return;}
                 raf=win.requestAnimationFrame(function(){raf=null;if(token!==serial||stopped||hidden){return;}
-                    try{if(ready()&&P.matches(h,state)){image={header:h,canvas:next};compose();}ack(h);}
+                    try{if(ready()&&P.matches(h,state)){image={header:h,canvas:next};compose();}ack(h);updateCursor();}
                     catch(_){lost('Presentation failed; reconnecting.');}
-                });
-            });decode=job;job.start();
+                });updateCursor();
+            });decode=job;updateCursor();job.start();
         }
         function validate(s){if(!hello||s.view_id!==id||s.connection_epoch!==hello.connection_epoch){throw Error('Wrong server state identity');}
             ['state_rev','render_rev','render_key','dataset_revision','worker_epoch'].forEach(function(k){P.counter(s[k],k==='worker_epoch');});
@@ -94,13 +106,14 @@
         }
         function sync(){['depth','detail','thin'].forEach(function(k){if(doc.activeElement!==el(k)){el(k).value=state[k];}});
             ['frames','labels','mono'].forEach(function(k){el(k).checked=state[k];});}
-        function settle(){if(accepted&&state&&P.compare(state.state_rev,accepted)>=0){accepted=null;if(releasedPan){releasedPan=false;shift=null;compose();}}if(!flight&&!accepted){editTimer=timerClear(editTimer);}flush();}
+        function settle(){if(accepted&&state&&P.compare(state.state_rev,accepted)>=0){accepted=null;releasedPan=false;shift=null;compose();}if(!flight&&!accepted){editTimer=timerClear(editTimer);}flush();updateCursor();}
         function flush(){if(!ready()||flight||accepted||!queue.length){return;}const wait=100-(now()-lastSend);
             if(wait>0){if(flushTimer===null){flushTimer=win.setTimeout(function(){flushTimer=null;flush();},wait);}return;}
             const body=queue.shift();try{flight=send({type:'view.set',connection_epoch:hello.connection_epoch,view_id:id,base_state_rev:state.state_rev,body:body});lastSend=now();
-                editTimer=win.setTimeout(function(){editTimer=null;lost('Edit outcome unknown; checking current view without replay.');},10000);}
+                editTimer=win.setTimeout(function(){editTimer=null;lost('Edit outcome unknown; checking current view without replay.');},10000);updateCursor();}
             catch(_){lost('Input not confirmed; reconnecting without replay.');}}
-        function edit(body){if(!ready()){return;}if(queue.length>=8){status('Input queue full; wait for this view.');return;}queue.push(body);flush();}
+        function edit(body){if(!ready()){return;}if(queue.length>=8){status('Input queue full; wait for this view.');return;}queue.push(body);
+            if(image){el('frame-status').textContent='Previous image · waiting for current frame';}flush();updateCursor();}
         function incoming(event,token){if(token!==serial||stopped||hidden){return;}
             received=now();
             try{if(typeof event.data!=='string'){frame(event.data,token);return;}if(event.data.length>256*1024){throw Error('Control limit');}const v=JSON.parse(event.data);
@@ -108,7 +121,7 @@
                     v.frame_credit!==1||!v.capabilities||v.capabilities.view!==true||['index','review','export','query'].some(function(k){return v.capabilities[k]!==false;})){throw Error('Invalid handshake');}
                     hello=v;connectTimer=timerClear(connectTimer);delay=500;controls();return;}
                 if(!hello){throw Error('Missing handshake');}
-                if(v.type==='opening'){if(v.view_id!==id||v.connection_epoch!==hello.connection_epoch){throw Error('Wrong opening identity');}status('Opening assigned layout…');return;}
+                if(v.type==='opening'){if(v.view_id!==id||v.connection_epoch!==hello.connection_epoch){throw Error('Wrong opening identity');}status('Opening assigned layout…');updateCursor();return;}
                 if(v.type==='snapshot'){validate(v);if(state&&state.state_rev!==v.state_rev){if(gesture){gesture.cancel();}releasedPan=false;shift=null;}state=v;
                     if(v.failure){queue=[];}sync();compose();controls();settle();resized();status(v.failure?'Renderer failed; end this session and request a new launch.':'Connected · '+v.status);return;}
                 if(v.type==='accepted'){if(!flight||v.seq!==flight){throw Error('Wrong acknowledgment');}P.counter(v.state_rev);flight=null;accepted=v.state_rev;settle();return;}
@@ -185,7 +198,7 @@
                 box.style.left=((d.left||0)+Math.round(Math.min(x,ex))/d.dpr)+'px';box.style.top=((d.top||0)+Math.round(Math.min(y,ey))/d.dpr)+'px';
                 box.style.width=(Math.max(1,Math.round(Math.abs(ex-x)))/d.dpr)+'px';box.style.height=(Math.max(1,Math.round(Math.abs(ey-y)))/d.dpr)+'px';
                 box.style.borderWidth=(1/d.dpr)+'px';hint.textContent=(b.outward?'Zoom out':'Zoom in')+' · release to apply · Esc cancels';
-            },cursor:function(d){port.style.cursor=d?(gesture&&gesture.bandActive()?'crosshair':'grabbing'):'';},pan:nav});
+            },cursor:updateCursor,pan:nav});
             port.addEventListener('wheel',function(e){e.preventDefault();if(!ready()||flight||accepted||queue.length){return;}const n=o.gestures.wheelNavigation(e,screen(),port.getBoundingClientRect());if(n){nav(n);}},{passive:false});}
         function pause(){hidden=true;disconnect();status('Hidden · disconnected. Reconnecting does not replay input.');}
         function resume(){hidden=!!doc.hidden;if(!hidden&&!stopped){join();}}
