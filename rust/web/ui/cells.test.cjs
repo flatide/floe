@@ -24,18 +24,19 @@ function harness() {
         el, document: {createElement: tag => new Element(tag)},
         http(method, path, body) { return new Promise((resolve, reject) => { requests.push({method, path, body, resolve, reject}); }); },
         edit(body, done) { edits.push(body); if (done) { done(null); } },
-        context: () => context, size: () => ({pixels: state.pixels}), unit: () => 0.001,
+        context: () => context, size: () => ({pixels: state.pixels}), unit: () => h.unit,
         focus: () => { focusedCanvas++; }, raise: () => { raised++; },
         rootAllowed: () => true, buildAllowed: () => false,
         setTimeout: (f, ms) => { timers.push({f, ms}); return timers.length; }, clearTimeout: n => { if (timers[n - 1]) { timers[n - 1].f = null; } }
     });
-    return {c, el, requests, edits, timers, state,
+    const h = {c, el, requests, edits, timers, state, unit: 0.001,
         connect() { context = {id: 'v1', state, connected: true}; c.changed(); },
         disconnect() { context = null; c.changed(); },
         reply(i, value) { const r = requests[i]; r.resolve(value); return tick(); },
         fail(i, error) { const r = requests[i]; r.reject(error); return tick(); },
         rows() { return el('cells-tree').children.map(n => n.children.length ? n.children.map(x => x.textContent).join('|') : n.textContent); },
         raised: () => raised, focusedCanvas: () => focusedCanvas};
+    return h;
 }
 (async () => {
     const h = harness();
@@ -81,11 +82,31 @@ function harness() {
     h.el('cells-root').onclick();
     assert.deepEqual(h.edits.at(-1), {root: {src: 0, cell: 3}}); assert.equal(h.c.rootName(), 'M1'); assert.equal(h.el('cells-top').disabled, false);
     h.el('cells-top').onclick(); assert.deepEqual(h.edits.at(-1), {root: null}); assert.equal(h.c.rootName(), '');
+    // A root change is another coordinate frame: the placed extent and the
+    // highlight are dropped and asked again in the new frame.
+    const asked = h.requests.length;
+    h.state.root = {cell: 3, name: 'M1'}; h.state.root_name = 'M1'; h.c.changed();
+    assert.equal(h.el('cells-canvas').hidden, true); assert.equal(h.requests[asked].body.kind, 'bbox'); assert.equal(h.requests[asked].body.cell, 3);
+    await h.reply(asked, {insts: 1, approx: false, bbox: [0, 0, 20, 10]});
+    assert.equal(h.requests.at(-1).body.kind, 'insts', 'the extent reply re-asks the highlight'); await h.reply(h.requests.length - 1, {n: 1, more: false, visited: 1, boxes: [[0, 0, 20, 10]]});
+    assert.equal(h.el('cells-canvas').hidden, false);
+    h.el('cells-zoom').onclick();
+    assert.deepEqual(h.edits.at(-1).navigation.center_um, ['0.01', '0.005'], 'zoom uses the extent of the new frame');
+    h.state.root = null; h.state.root_name = ''; h.c.changed();
+    const back = h.requests.findIndex((r, i) => i >= asked + 2 && r.body.kind === 'bbox');
+    assert(back > 0); await h.reply(back, {insts: 1, approx: false, bbox: [10, 10, 30, 20]});
+    await h.reply(h.requests.length - 1, {n: 1, more: false, visited: 1, boxes: [[10, 10, 30, 20]]});
+    // Placed extents are in the view's unit (a deck's DBU), never the source's.
+    h.state.dbu_um = '0.01'; h.unit = 0.01;
+    h.el('cells-zoom').onclick();
+    assert.deepEqual(h.edits.at(-1).navigation, {kind: 'goto', center_um: ['0.2', '0.15'], width_um: '0.25'});
+    h.state.dbu_um = '0.001'; h.unit = 0.001;
     // Search replaces the tree after the debounce and Escape restores it.
     h.el('cells-search').value = 'VI*'; h.el('cells-search').oninput();
     assert.equal(h.timers.at(-1).ms, 150); h.timers.at(-1).f();
-    assert.equal(h.requests[6].body.kind, 'find'); assert.equal(h.requests[6].body.pattern, 'VI*'); assert.equal(h.requests[6].body.src, -1);
-    await h.reply(6, {total: 1, n: 1, matches: [{src: 0, ci: 2, insts: 1, name: 'VIA'}]});
+    const find = h.requests.at(-1);
+    assert.equal(find.body.kind, 'find'); assert.equal(find.body.pattern, 'VI*'); assert.equal(find.body.src, -1);
+    await h.reply(h.requests.length - 1, {total: 1, n: 1, matches: [{src: 0, ci: 2, insts: 1, name: 'VIA'}]});
     assert.deepEqual(h.rows(), ['|VIA|']); assert.equal(h.el('cells-info').textContent, '1 match');
     h.el('cells-search').onkeydown({key: 'Escape', preventDefault() {}});
     assert.deepEqual(h.rows()[0], '▾|TOP|'); assert.equal(h.el('cells-search').value, '');

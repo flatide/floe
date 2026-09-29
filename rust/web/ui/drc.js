@@ -132,6 +132,9 @@
                 references: function () { return grouped ? groups.references() : [{check: ci, error: local}]; }};
         }
         function info(s) { el('drc-message').textContent = s || ''; }
+        // DRC geometry is top-cell geometry; under a view root the canvas is
+        // another frame, so markers, In view and box selection pause.
+        function rooted() { const c = current(); return !!(c && c.state && c.state.root_name); }
         function cancel(key) { const t = tasks[key]; if (t) { t.cancelled = true; if (t.abort) { t.abort(); } delete tasks[key]; } }
         function cancelAll() { Object.keys(tasks).forEach(cancel); }
         function cancelStep() { cancel('step'); stepBusy = false; stepContinuation = null; el('drc-step-continue').hidden = true; }
@@ -213,7 +216,9 @@
             ['drc-step-prev', 'drc-step-next'].forEach(function (id) { el(id).disabled = !filtered || !rule || stepBusy || !!(query && !query.bbox); });
             el('drc-step-continue').disabled = !filtered || stepBusy || !stepContinuation;
             ['drc-cd-pop', 'drc-cd-clear'].forEach(function (id) { el(id).disabled = !available || !hasCD(); });
-            el('drc-box').disabled = !available || !rule || !pageReady || !groups.ready() || !el('drc-markers').checked;
+            el('drc-box').disabled = !available || !rule || !pageReady || !groups.ready() || !el('drc-markers').checked || rooted();
+            el('drc-in-view').disabled = !available || rooted();
+            el('drc-markers').disabled = rooted();
             el('drc-group-clear').disabled = !available || !rule || !groups.ready() || !groups.ids(rule.check).length;
             el('drc-waived').disabled = !available || !groups.ready();
             el('drc-type').disabled = !available || !typeReady || typeBusy;
@@ -399,7 +404,7 @@
             markerHits = []; hitStamp = ''; lastProjection = p; lastSize = size;
             const c = current();
             const geometryVisible=el('drc-markers').checked&&(boxMode||groupRows.length||rows.length||(selected&&focusVisible)||hasCD());
-            if (overlayMode==='none' || !ctx || !p || !size || !c || (!geometryVisible&&!(noteDisplay&&noteDisplay.text()))) { overlay.hidden = true; return; }
+            if (overlayMode==='none' || !ctx || !p || !size || !c || rooted() || (!geometryVisible&&!(noteDisplay&&noteDisplay.text()))) { overlay.hidden = true; return; }
             const w = size.pixels[0], h = size.pixels[1]; P.pixels(w, h);
             if (overlay.width !== w || overlay.height !== h) { overlay.width = w; overlay.height = h; }
             overlay.style.width = w / size.dpr + 'px'; overlay.style.height = h / size.dpr + 'px';
@@ -913,6 +918,7 @@
             if(transfers){transfers.changed();}
             if(recovery){recovery.changed();}
             if (waives && waives.suspended()) { info('Waive save or reader refresh pending. Previous DRC selection and outlines are not active.'); }
+            else if (rooted()) { info('View root active: DRC positions are top-cell coordinates. Markers, In view and box selection pause; going to an error returns to the top.'); }
             else if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC database.'); }
             if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
         }

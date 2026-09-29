@@ -4,7 +4,7 @@ use super::metadata::Metadata;
 use floe_app_core::{
     check_cancelled,
     svrf::Rule,
-    view::{LayerIsolation, Model, Navigation, Patch},
+    view::{LayerIsolation, Model, Navigation, Patch, RootEdit},
     Error, ErrorKind, Result,
 };
 use floe_worker_client::{Layers, Style};
@@ -29,9 +29,12 @@ impl Preparation {
         let rule = metadata.and_then(|m| m.rules.rule(name));
         let (layers, status, count) = select(rule, &self.model.styles, self.model.deck, stop)?;
         check_cancelled(stop)?;
+        // Error coordinates are the top cell's; a jump under a view root
+        // returns to the top in the same edit, before the navigation applies.
         *self.result.lock().unwrap() = Some(Patch {
             navigation: Some(navigation),
             layer_isolation: layers.map(LayerIsolation::Set),
+            root: Some(RootEdit::Clear),
             ..Default::default()
         });
         Ok(

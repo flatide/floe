@@ -30,6 +30,7 @@ pub(super) fn failure(code: super::Failure) -> Response {
         "drc_changed_or_corrupt" | "drc_read_error" => StatusCode::UNPROCESSABLE_ENTITY,
         "drc_read_limit" | "drc_selection_limit" => StatusCode::PAYLOAD_TOO_LARGE,
         "drc_context_changed"
+        | "drc_view_root"
         | "drc_reopen_required"
         | "review_changed"
         | "drc_panel_conflict"
@@ -236,6 +237,11 @@ async fn read(
         let s = v.controller.snapshot();
         if body.state_rev.as_deref() != Some(s.state_rev.to_string().as_str()) {
             return failure("drc_context_changed");
+        }
+        // The viewport is the root cell's frame while errors are top-cell
+        // coordinates; an in-view filter would compare different frames.
+        if s.state.root.is_some() {
+            return failure("drc_view_root");
         }
         Some(super::dto::FocusContext {
             bbox_dbu: s.state.viewport.bbox,

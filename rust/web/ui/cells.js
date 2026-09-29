@@ -4,23 +4,27 @@
  * boxes it was last given for the displayed frame. */
 (function (root) {
     'use strict';
-    const FIND_LIMIT = 2000, INSTS_CAP = 4096, SEARCH_DELAY = 150, FRAME_FRACTION = 0.8;
+    // Children answers may carry 20 000 rows (renderd cap) - well over the
+    // 1 MiB default reply limit of the owner HTTP helper.
+    const FIND_LIMIT = 2000, INSTS_CAP = 4096, SEARCH_DELAY = 150, FRAME_FRACTION = 0.8, REPLY_LIMIT = 8 * 1024 * 1024;
     function bind(port) {
         const el = port.el, doc = port.document, tree = el('cells-tree'), search = el('cells-search'), canvas = el('cells-canvas');
         let identity = '', roots = [], results = null, selected = null, flight = 0, timer = null, stopped = false, suspended = false;
-        let highlight = null, highlightKey = '', highlightFlight = 0, info = '', rootName = '', hier = true;
-        let rootsFlight = false, rootsFailedAt = 0;
+        // Selection info (bbox) and the per-view highlight (insts) are
+        // separate flights: a view change must not drop a pending extent.
+        let highlight = null, highlightKey = '', highlightFlight = 0, bboxFlight = 0, info = '', rootName = '', hier = true;
+        let rootsFlight = false, rootsFailedAt = 0, rootKey = '';
         function context() { return stopped || suspended ? null : port.context(); }
         function available() { const c = context(); return !!c && c.connected && !!c.id; }
         function note(text) { info = text || ''; el('cells-info').textContent = info; }
         function reset() {
             roots = []; results = null; selected = null; highlight = null; highlightKey = ''; rootName = ''; hier = true;
-            tree.textContent = ''; search.value = ''; note(''); ++flight; ++highlightFlight; paintHighlight(); update();
+            tree.textContent = ''; search.value = ''; note(''); ++flight; ++highlightFlight; ++bboxFlight; paintHighlight(); update();
         }
         async function query(body) {
             const c = context(); if (!c) { throw new Error('No open view.'); }
             body.view_id = c.id;
-            return port.http('POST', '/api/v1/views/' + c.id + '/cells', body);
+            return port.http('POST', '/api/v1/views/' + c.id + '/cells', body, false, undefined, {limit: REPLY_LIMIT});
         }
         function label(cell) { return cell.name + (cell.members > 1 ? '  ×' + cell.members : ''); }
         function row(cell, depth, container) {
@@ -102,7 +106,7 @@
         function fill(cell, answer) {
             cell.ci = answer.cell; cell.children = answer.children.map(function (ch) { return cellFrom(cell.src, ch.ci, ch.name, ch.members, ch.leaf); });
             cell.more = Math.max(0, answer.total - answer.n); cell.loading = false; cell.leaf = cell.children.length === 0 && !cell.more;
-            cell.bbox = answer.bbox; cell.insts = answer.insts; cell.height = answer.height; cell.unit = answer.unit;
+            cell.localBbox = answer.bbox; cell.insts = answer.insts; cell.height = answer.height; cell.unit = answer.unit;
         }
         async function expand(cell) {
             if (cell.open) { cell.open = false; paint(); return; }
@@ -120,17 +124,17 @@
         async function choose(cell) {
             selected = cell; paint();
             if (cell.source || cell.ci === null || cell.ci === undefined) { note(cell.name + ': ' + cell.members + ' placements'); return; }
-            const token = ++highlightFlight;
+            const token = ++bboxFlight;
             try {
                 const r = await query({kind: 'bbox', src: cell.src, cell: cell.ci});
-                if (token !== highlightFlight || selected !== cell) { return; }
+                if (token !== bboxFlight || selected !== cell) { return; }
                 cell.bbox = r.bbox; cell.hasShapes = !!r.bbox;
                 if (r.bbox) {
-                    const u = Number(cell.unit || port.unit()), w = (r.bbox[2] - r.bbox[0]) * u, h = (r.bbox[3] - r.bbox[1]) * u;
+                    const u = Number(port.unit()), w = (r.bbox[2] - r.bbox[0]) * u, h = (r.bbox[3] - r.bbox[1]) * u;
                     note(cell.name + ': ' + r.insts + ' instance' + (r.insts === 1 ? '' : 's') + ' · ' + w.toPrecision(5) + ' × ' + h.toPrecision(5) + ' um' + (r.approx ? ' (approx)' : ''));
                 } else { note(cell.name + ': not placed under the top cell'); }
                 update(); refreshHighlight(true);
-            } catch (e) { if (token === highlightFlight) { note(String(e.message || e)); } }
+            } catch (e) { if (token === bboxFlight) { note(String(e.message || e)); } }
         }
         async function refreshHighlight(force) {
             const c = context(); const on = el('cells-highlight').checked;
@@ -168,7 +172,7 @@
         }
         function zoom() {
             if (!selected || !selected.bbox || !available()) { return; }
-            const u = Number(selected.unit || port.unit()), b = selected.bbox;
+            const u = Number(port.unit()), b = selected.bbox;
             const cx = (b[0] + b[2]) / 2 * u, cy = (b[1] + b[3]) / 2 * u, size = port.size();
             const aspect = size ? size.pixels[0] / size.pixels[1] : 1;
             const w = Math.max((b[2] - b[0]) * u, (b[3] - b[1]) * u * aspect) / FRAME_FRACTION;
@@ -215,6 +219,13 @@
             }
             if (id !== identity) { return; }
             if (c && c.state && c.state.root_name !== undefined) { const name = c.state.root_name || ''; if (name !== rootName) { rootName = name; } }
+            // A root change moves the coordinate frame: placed extents and
+            // highlights of the old frame are dropped and asked again.
+            const key = c && c.state ? (c.state.root ? String(c.state.root.cell) : '') : '';
+            if (key !== rootKey) {
+                rootKey = key; ++highlightFlight; ++bboxFlight; highlight = null; highlightKey = '';
+                if (selected) { selected.bbox = null; paintHighlight(); if (available() && settled(c)) { choose(selected); } }
+            }
             update();
             if (available()) { refreshHighlight(false); } else { paintHighlight(); }
         }
@@ -226,7 +237,7 @@
             if (k === 'Escape' && highlight) { selected = null; highlight = null; highlightKey = ''; paint(); paintHighlight(); return true; }
             return false;
         }
-        function suspend() { suspended = true; ++flight; ++highlightFlight; if (timer) { port.clearTimeout(timer); timer = null; } paintHighlight(); update(); }
+        function suspend() { suspended = true; ++flight; ++highlightFlight; ++bboxFlight; if (timer) { port.clearTimeout(timer); timer = null; } paintHighlight(); update(); }
         function resume() { suspended = false; changed(); }
         function stop() { stopped = true; suspend(); }
         update();

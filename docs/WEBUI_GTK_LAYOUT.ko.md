@@ -155,6 +155,24 @@ status  frame status | view 크기 · depth/detail 행 · 아래 세션 주체 �
 - Rust: `cargo check --workspace --all-targets`, `floe-web --lib` 154 · `server_broker` 8 ·
   `permissions_inventory` 3, `floe-app-core --lib` 372, `floe-worker-client` 15+14 통과.
 
+## 5b. 검토 후속 수정(2026-09-30)
+
+외부 검토 5건을 같은 날 반영했다.
+
+- **view root와 DRC 좌표계(P1)**: DRC 오류 좌표는 top 셀 좌표다. DRC 이동(`prepare`
+  patch)은 같은 편집에서 `root: Clear`를 함께 적용해 top으로 복귀한 뒤 이동한다
+  (`drc/focus.rs`). root 상태에서 `In view` 필터는 서버가 `drc_view_root`(409)로 거부하고
+  (`drc/http.rs`), 패널은 마커·In view·box 선택을 멈추고 안내를 표시한다(`drc.js`).
+- **root 전환 뒤 stale bbox(P2)**: `cells.js`가 root(cell) 변경을 감지해 배치 extent·강조를
+  버리고 재조회한다. extent(bbox)와 강조(insts)의 flight를 분리해 view 변경이 진행 중인
+  extent 응답을 버리지 않게 했다.
+- **잡덱 DBU 혼용(P2)**: `cell_bbox`/`cell_insts` 결과는 뷰(덱/root) 좌표이므로 뷰의
+  `dbu_um`만 곱한다. `cells` 응답의 자기 좌표 bbox는 `localBbox`로 분리했다.
+- **대형 트리 응답 한도(P2)**: 소유자 HTTP 도우미의 회신 한도가 요청별 옵션이 되어 셀
+  조회는 8 MiB를 허용한다(renderd 20 000행 상한 내).
+- **서브메뉴 키보드(P2)**: 서브메뉴를 부모·소유 항목 참조를 가진 독립 메뉴로 다뤄
+  →/Enter 진입, ←/Escape 복귀, ↑↓/Home/End 탐색을 고쳤다. `menubar.test.cjs`가 고정한다.
+
 ## 6. 잔여
 
 - 색인 요약 빌드(`floe-index hier`)를 웹 승인 경로로 제공하지 않았다. `build cell index…`

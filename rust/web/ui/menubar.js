@@ -75,18 +75,33 @@
             if (open && open !== menu) { close(false); }
             refresh(menu);
             open = menu; menu.panel.hidden = false; menu.title.setAttribute('aria-expanded', 'true');
-            const first = menu.entries.find(function (e) { return !e.item.sep && !e.node.hidden && !e.node.disabled; });
+            const first = items(menu)[0];
             if (first) { first.node.focus(); }
         }
         function toggle(menu) { if (open === menu) { close(true); } else { show(menu); } }
-        function items(menu, panel) {
-            return menu.entries.filter(function (e) { return e.panel === panel && !e.item.sep && !e.node.hidden && !e.node.disabled; });
+        // A submenu is a menu of its own (its entries live in entry.sub);
+        // parent/owner link it back for Escape, ArrowLeft and refresh.
+        function items(menu) {
+            return menu.entries.filter(function (e) { return !e.item.sep && !e.node.hidden && !e.node.disabled; });
         }
-        function move(menu, node, delta) {
-            const visible = items(menu, node.panel);
-            const i = visible.findIndex(function (e) { return e.node === node.node; });
+        function rootOf(menu) { while (menu.parent) { menu = menu.parent; } return menu; }
+        function move(menu, entry, delta) {
+            const visible = items(menu);
+            const i = visible.findIndex(function (e) { return e.node === entry.node; });
             const next = visible[(i + delta + visible.length) % visible.length];
             if (next) { next.node.focus(); }
+        }
+        function enterSub(entry) {
+            openSub(entry);
+            const first = items(entry.sub)[0];
+            if (first) { first.node.focus(); }
+        }
+        function leaveSub(menu) {
+            closeSubs(menu.parent); menu.owner.node.focus();
+        }
+        function switchTop(menu, delta) {
+            const i = menus.indexOf(rootOf(menu));
+            show(menus[(i + delta + menus.length) % menus.length]);
         }
         function buildPanel(menu, list, parentPanel) {
             const panel = doc.createElement('div'); panel.className = parentPanel ? 'menu-panel menu-sub' : 'menu-panel';
@@ -105,9 +120,9 @@
                 node.appendChild(mark); node.appendChild(label); node.appendChild(key);
                 if (item.title) { node.title = item.title; }
                 if (item.id) { node.id = item.id; }
-                const entry = {item: item, node: node, mark: mark, panel: panel, sub: null};
+                const entry = {item: item, node: node, mark: mark, panel: panel, sub: null, menu: menu};
                 if (item.sub) {
-                    entry.sub = {entries: [], panel: null, title: node};
+                    entry.sub = {entries: [], panel: null, title: node, parent: menu, owner: entry};
                     entry.sub.panel = buildPanel(entry.sub, item.sub, panel);
                     node.setAttribute('aria-haspopup', 'menu'); node.setAttribute('aria-expanded', 'false');
                     const wrap = doc.createElement('div'); wrap.className = 'menu-subwrap';
@@ -129,28 +144,19 @@
         }
         function openSub(entry) {
             if (!open) { return; }
-            closeSubs(open);
+            closeSubs(rootOf(entry.menu));
+            refresh(entry.sub);
             entry.sub.panel.hidden = false; entry.node.setAttribute('aria-expanded', 'true');
         }
         function keyInPanel(menu, entry, e) {
             if (!open || e.isComposing || e.keyCode === 229) { return; }
-            const k = e.key;
-            if (k === 'Escape') { e.preventDefault(); if (entry.panel.className.indexOf('menu-sub') >= 0) { closeSubs(menu); const owner = menu.entries.find(function (x) { return x.sub && x.sub.panel === entry.panel; }); if (owner) { owner.node.focus(); } } else { close(true); } return; }
+            const k = e.key, inSub = !!menu.parent;
+            if (k === 'Escape') { e.preventDefault(); if (inSub) { leaveSub(menu); } else { close(true); } return; }
             if (k === 'ArrowDown' || k === 'ArrowUp') { e.preventDefault(); move(menu, entry, k === 'ArrowDown' ? 1 : -1); return; }
-            if (k === 'ArrowRight') {
-                e.preventDefault();
-                if (entry.sub) { openSub(entry); const first = items(menu, entry.sub.panel)[0]; if (first) { first.node.focus(); } }
-                else { const i = menus.indexOf(menu); show(menus[(i + 1) % menus.length]); }
-                return;
-            }
-            if (k === 'ArrowLeft') {
-                e.preventDefault();
-                if (entry.panel.className.indexOf('menu-sub') >= 0) { const owner = menu.entries.find(function (x) { return x.sub && x.sub.panel === entry.panel; }); closeSubs(menu); if (owner) { owner.node.focus(); } }
-                else { const i = menus.indexOf(menu); show(menus[(i - 1 + menus.length) % menus.length]); }
-                return;
-            }
-            if (k === 'Home' || k === 'End') { e.preventDefault(); const v = items(menu, entry.panel); const t = v[k === 'Home' ? 0 : v.length - 1]; if (t) { t.node.focus(); } return; }
-            if (k === 'Enter' || k === ' ') { e.preventDefault(); if (entry.sub) { openSub(entry); const first = items(menu, entry.sub.panel)[0]; if (first) { first.node.focus(); } } else { activate(entry.item); } }
+            if (k === 'ArrowRight') { e.preventDefault(); if (entry.sub) { enterSub(entry); } else { switchTop(menu, 1); } return; }
+            if (k === 'ArrowLeft') { e.preventDefault(); if (inSub) { leaveSub(menu); } else { switchTop(menu, -1); } return; }
+            if (k === 'Home' || k === 'End') { e.preventDefault(); const v = items(menu); const t = v[k === 'Home' ? 0 : v.length - 1]; if (t) { t.node.focus(); } return; }
+            if (k === 'Enter' || k === ' ') { e.preventDefault(); if (entry.sub) { enterSub(entry); } else { activate(entry.item); } }
         }
         function build(model) {
             bar.textContent = '';

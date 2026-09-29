@@ -70,7 +70,7 @@
         drc_changed_or_corrupt: 'The DRC pack or review sidecar changed or is corrupt. Restart with a valid pack.',
         drc_read_error: 'The registered DRC file cannot be read.',
         drc_read_limit: 'This DRC item exceeds the read/response limit; no partial geometry was accepted.',
-        drc_context_changed: 'The view changed while reading DRC. Select the error again.',
+        drc_context_changed: 'The view changed while reading DRC. Select the error again.', drc_view_root: 'View root active: DRC positions are top-cell coordinates. Return to the top cell first.',
         drc_busy: 'The DRC read queue is busy. Retry this page.',
         drc_closed: 'The DRC reader is closed.',
         drc_selection_conflict: 'Selection changed in another request. Server state will be reloaded; no command is retried.',
@@ -80,8 +80,10 @@
     function notice(text) { el('notice').textContent = text || ''; el('notice').hidden = !text; }
     function message(error) { return errors[error] || String(error || 'Request failed'); }
     function report(error) { notice(message(error.message || error)); }
-    function http(method, path, body, missing, token, upload) {
-        const run = pageRun;
+    function http(method, path, body, missing, token, options) {
+        // options: {blob, headers} for an upload, {limit} for a reply larger
+        // than the 1 MiB default (bounded by the caller's own contract).
+        const run = pageRun, upload = options && options.blob ? options : null, limit = options && options.limit ? options.limit : 1024 * 1024;
         return new Promise(function (resolve, reject) {
             const xhr = new XMLHttpRequest();
             if (token && token.cancelled) { reject(new Error('Request cancelled')); return; }
@@ -96,7 +98,7 @@
                 if (missing && xhr.status === 404) { resolve(null); return; }
                 let value = null;
                 try {
-                    if (xhr.responseText.length > 1024 * 1024) { throw new Error('Reply limit'); }
+                    if (xhr.responseText.length > limit) { throw new Error('Reply limit'); }
                     if (xhr.responseText) { value = JSON.parse(xhr.responseText); }
                 } catch (e) { reject(e); return; }
                 if (xhr.status < 200 || xhr.status >= 300) {
