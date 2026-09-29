@@ -824,8 +824,15 @@ impl Cache {
         let plan_us = elapsed_us(started);
         // a request whose every visible layer is summarized (and
         // pruned) plans no working cell at all; the scene still needs
-        // the top so the summary planes have a frame to paint into
-        if plan.wcells.is_empty() && !request.summary_layers.is_empty() {
+        // the top so the summary planes have a frame to paint into.
+        // So does a view root that holds none of the visible layers, or
+        // lies wholly under the cut (the file's top holds every layer;
+        // a root need not - found 2026-09-30 on the synthetic chip:
+        // `invalid plan: top is missing` instead of an empty picture, and
+        // the density stack's pass 2, which plans the top plane's layer
+        // alone, ran into the same error under most roots).
+        // A jobdeck never has a root: its sub-cut source stays a skipped pass.
+        if plan.wcells.is_empty() && (!request.summary_layers.is_empty() || request.root.is_some()) {
             plan.wcells.push(floe_vfs::hier::WsCell {
                 key: plan.top,
                 pages: Vec::new(),

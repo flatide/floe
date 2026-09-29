@@ -33,7 +33,10 @@ pins the CLI contract:
   C8  the view root (root=): a frame rooted at BLK equals byte for byte
       the frame of a layout whose top is BLK (KLayout copy_tree) over
       three views; cell_bbox / cell_insts under the root count and walk
-      from BLK; a root outside the table is refused
+      from BLK; a root outside the table is refused; a root that holds
+      none of the visible layers is an empty picture, not an error, and
+      the density stack under a root without its top plane's layer draws
+      what the frame without the stack draws
 
 usage: python tools/validate_cell_tree.py
 """
@@ -205,17 +208,21 @@ class Daemon:
                 return res
         raise AssertionError("no %s answer" % kind)
 
-    def render(self, bbox, w, h, root=None, gen=None):
+    def render(self, bbox, w, h, root=None, gen=None, visible=None, raw=False):
         """The settled frame's pixel payload for a view (dbu), through
-        the viewer's own job schema; `root` = the view root cell."""
+        the viewer's own job schema; `root` = the view root cell,
+        `visible` = (layer, datatype) pairs (None = all), `raw` = RGBA."""
         self.seq += 1
         gen = gen or self.seq
-        self.worker.submit({
+        job = {
             "kind": "render", "gen": gen, "scope": "live",
             "bbox": tuple(float(v) for v in bbox), "view": None,
             "w": w, "h": h, "depth": None, "cut_px": 3.0,
-            "visible": None, "frames": True, "labels": False,
-            "abstract": False, "root": root})
+            "visible": visible, "frames": True, "labels": False,
+            "abstract": False, "root": root}
+        if raw:
+            job["frame_format"] = "raw"
+        self.worker.submit(job)
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
             try:
@@ -460,6 +467,29 @@ class CellTreeTests(unittest.TestCase):
         bad = self.daemon.ask("cell_bbox", cell=blk, root=999)
         self.assertFalse(bad["found"])
         self.assertEqual(bad["code"], "query")
+
+    def test_c8_a_view_root_without_the_visible_layers_is_an_empty_picture(self):
+        """VIA holds layer 1/0 only. The file's top holds every layer, so
+        its plan always has a working cell; a root need not (2026-09-30:
+        `invalid plan: top is missing` instead of a frame). With only 2/0
+        on, VIA rooted is a black frame at full depth, frames on or off;
+        with 1/0 it draws. The density stack plans its top plane's layer
+        (2/0) alone - under VIA that plan is empty - and the frame equals
+        the one without the stack."""
+        via = self.ci_of("VIA")
+        view = (-20, -20, 120, 120)
+        blank = self.daemon.render(view, 200, 160, root=via, visible=[(2, 0)], raw=True)
+        self.assertEqual(len(blank), 200 * 160 * 4)
+        self.assertEqual(set(blank[i:i + 4] for i in range(0, len(blank), 4)), {bytes((0, 0, 0, 255))})
+        lit = self.daemon.render(view, 200, 160, root=via, visible=[(1, 0)], raw=True)
+        self.assertNotEqual(lit, blank)
+        plain = self.daemon.render(view, 200, 160, root=via, raw=True)
+        stacked = Daemon(self.src, env=run_env(FLOE_RUST_DENSITY_STACK="top"))
+        try:
+            self.assertEqual(stacked.render(view, 200, 160, root=via, raw=True), plain)
+            self.assertEqual(stacked.render(view, 200, 160, root=via, visible=[(2, 0)], raw=True), blank)
+        finally:
+            stacked.stop()
 
     def test_c7_missing_summary_inline_or_refused_then_picked_up_live(self):
         ovh = self.cache_dir / "design.ovh"
