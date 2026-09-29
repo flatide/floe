@@ -125,6 +125,11 @@ pub struct ViewReq {
     /// HierOpts::frame_cap only says how many, not whether. renderd passes
     /// the viewer's frames switch; everything else plans with frames.
     pub frames: bool,
+    /// The cell the plan starts from, in its own coordinates (the viewer's
+    /// "selected cell as the view root", SPEC-VIEWER §8c); None = the
+    /// file's top cell. Depth counts from it; a value outside the cell
+    /// table plans the top.
+    pub root: Option<u32>,
 }
 
 /// one placement of a page cell in the working-set top. na/nb/va/vb

@@ -1680,6 +1680,7 @@ fn source_plan_request(
         regions: Vec::new(),
         visible_indices: None,
         fixed_fit: None,
+        root: None,
     };
     plan.validate()?;
     Ok(Some(plan))

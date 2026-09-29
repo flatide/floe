@@ -1051,6 +1051,14 @@ impl Cache {
 
     fn view_request(&self, request: &PlanRequest) -> Result<ViewReq, String> {
         request.validate()?;
+        if let Some(root) = request.root {
+            if root >= self.vfs.ovm.n_cells {
+                return Err(format!(
+                    "view root {} is outside the cell table 0..{}",
+                    root, self.vfs.ovm.n_cells
+                ));
+            }
+        }
         Ok(ViewReq {
             view: request.view.as_bbox(),
             cut_dbu: if request.exact { 0 } else { request.cut_dbu },
@@ -1083,6 +1091,7 @@ impl Cache {
             page_wash: request.page_wash,
             lod_swap: request.lod_swap,
             frames: request.frames,
+            root: request.root,
             page_skip: if request.summary_layers.is_empty() {
                 Vec::new()
             } else {

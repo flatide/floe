@@ -2478,6 +2478,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
                     shape_cut: false,
                     shape_cut_max: false,
                     frames: true,
+                    root: None,
                     page_wash: true,
                     lod_swap: true,
         };
@@ -6862,6 +6863,7 @@ fn make_req(
             shape_cut: false,
             shape_cut_max: false,
             frames: true,
+            root: None,
             page_wash: true,
             lod_swap: true,
     }

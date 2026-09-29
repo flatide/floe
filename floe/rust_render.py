@@ -196,6 +196,13 @@ CELL_FIND_LIMIT = 5000
 CELL_INSTS_CAP = 4096
 
 
+def _root_wire(job):
+    """` root=N` when the job names a view root (SPEC-VIEWER §8c), else
+    nothing: absent = the top cell."""
+    root = job.get("root")
+    return "" if root is None else " root=%d" % int(root)
+
+
 def _wire_rows(value, width):
     """A `,`-separated list of `:`-joined rows (`-` = none), each of
     `width` fields; the last field may hold no `:`."""
@@ -712,6 +719,10 @@ class RustRenderWorker:
             # not hold instead of deciding anew (it must look as the
             # viewport already does; 2026-09-27)
             command += " bg=on"
+        if job.get("root") is not None:
+            # the view root (SPEC-VIEWER §8c): the plan starts from this cell
+            # in its own coordinates; absent = the top cell
+            command += " root=%d" % int(job["root"])
         self._send(command)
 
     def _submit_recolor(self, job):
@@ -777,16 +788,17 @@ class RustRenderWorker:
                 else "",
                 int(job.get("limit", CELL_FIND_LIMIT))))
         elif kind == "cell_bbox":
-            self._send("cell_bbox seq=%d src=%d cell=%d" % (
-                seq, int(job.get("src", 0)), int(job["cell"])))
+            self._send("cell_bbox seq=%d src=%d cell=%d%s" % (
+                seq, int(job.get("src", 0)), int(job["cell"]),
+                _root_wire(job)))
         elif kind == "cell_insts":
             view = job["view"]
             if len(view) != 4:
                 raise ValueError("cell_insts view must have four coordinates")
-            self._send("cell_insts seq=%d src=%d cell=%d view=%s cap=%d" % (
+            self._send("cell_insts seq=%d src=%d cell=%d view=%s cap=%d%s" % (
                 seq, int(job.get("src", 0)), int(job["cell"]),
                 ",".join("%r" % float(v) for v in view),
-                int(job.get("cap", CELL_INSTS_CAP))))
+                int(job.get("cap", CELL_INSTS_CAP)), _root_wire(job)))
         else:
             raise ValueError("unknown cell query: %r" % kind)
 

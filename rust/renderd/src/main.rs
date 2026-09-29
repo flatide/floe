@@ -323,9 +323,9 @@ enum HierCommand {
     /// cells whose name matches (source None = every source)
     Find { sequence: i64, source: Option<usize>, pattern: String, limit: usize },
     /// the extent of a cell's instances (view coordinates)
-    Bbox { sequence: i64, source: usize, cell: u32 },
+    Bbox { sequence: i64, source: usize, cell: u32, root: Option<u32> },
     /// a cell's instances inside a view (view coordinates)
-    Insts { sequence: i64, source: usize, cell: u32, view: [f64; 4], cap: usize },
+    Insts { sequence: i64, source: usize, cell: u32, view: [f64; 4], cap: usize, root: Option<u32> },
     Shutdown,
 }
 
@@ -475,6 +475,9 @@ struct RenderCommand {
     /// as 1 px hairlines) or cull (plain layout: dropped whole, the
     /// performance policy). Absent = cull.
     thin_keep: bool,
+    /// The view root (floe_vfs::ViewReq::root): the plan starts from this
+    /// cell in its own coordinates (SPEC-VIEWER §8c). None = the top.
+    root: Option<u32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -504,6 +507,8 @@ struct ClipCommand {
     jobs: Option<u16>,
     cell_name: String,
     out: String,
+    /// the view root the clip is cut from (as a render's); None = the top
+    root: Option<u32>,
 }
 
 struct PickWireResponse {
@@ -574,6 +579,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             }
             allowed.extend([
                 "gen",
+                "root",
                 "view",
                 "w",
                 "h",
@@ -682,6 +688,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     probe_block,
                     background: optional_bool(&fields, "bg")?.unwrap_or(false),
                     thin_keep,
+                    root: optional_parse(&fields, "root")?,
                 },
             ))))
         }
@@ -709,7 +716,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
         "clip" => {
             reject_unknown(
                 &fields,
-                &["seq", "box", "layers", "jobs", "cell_hex", "out"],
+                &["seq", "box", "layers", "jobs", "cell_hex", "out", "root"],
             )?;
             let jobs = optional_parse(&fields, "jobs")?;
             if let Some(jobs) = jobs {
@@ -727,6 +734,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                         .transpose()?
                         .unwrap_or_else(|| "FLOE_CLIP".to_string()),
                     out: required(&fields, "out")?.to_string(),
+                    root: optional_parse(&fields, "root")?,
                 },
             ))))
         }
@@ -760,15 +768,16 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
             })))
         }
         "cell_bbox" => {
-            reject_unknown(&fields, &["seq", "src", "cell"])?;
+            reject_unknown(&fields, &["seq", "src", "cell", "root"])?;
             Ok(Some(InputCommand::Hier(HierCommand::Bbox {
                 sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
                 source: optional_parse(&fields, "src")?.unwrap_or(0),
                 cell: required_parse(&fields, "cell")?,
+                root: optional_parse(&fields, "root")?,
             })))
         }
         "cell_insts" => {
-            reject_unknown(&fields, &["seq", "src", "cell", "view", "cap"])?;
+            reject_unknown(&fields, &["seq", "src", "cell", "view", "cap", "root"])?;
             let cap: usize = optional_parse(&fields, "cap")?.unwrap_or(CELL_INSTS_CAP);
             Ok(Some(InputCommand::Hier(HierCommand::Insts {
                 sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
@@ -776,6 +785,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 cell: required_parse(&fields, "cell")?,
                 view: parse_view(required(&fields, "view")?)?,
                 cap: cap.clamp(1, CELL_INSTS_CAP),
+                root: optional_parse(&fields, "root")?,
             })))
         }
         "cancel" => {
@@ -936,6 +946,9 @@ struct RetainedKey {
     /// and vice versa - 16 tiles reused, the thin lines stayed or
     /// stayed missing; the published query scene shares this key)
     thin_keep: bool,
+    /// the view root the frame was planned from (another root is another
+    /// picture in other coordinates; SPEC-VIEWER §8c)
+    root: Option<u32>,
     /// the occupancy summary the frame was drawn with (M2): its level
     /// and the file's identity, so a frame drawn from an older
     /// design.ovo (or without one) is never reused after a rebuild
@@ -973,6 +986,7 @@ impl RetainedKey {
             decode_pages: command.decode_pages,
             style_epoch,
             thin_keep: command.thin_keep,
+            root: command.root,
             summary,
         }
     }
@@ -1060,8 +1074,8 @@ impl Default for WorkerState {
 /// mode and the scale (a pan keeps it, a zoom changes it).
 fn fit_memory_key(command: &RenderCommand, request: &PlanRequest) -> String {
     format!(
-        "{:?}|{}|{}|{}|{}|{}|{}",
-        command.visible_layers, command.depth, request.cut_dbu, scale_token(request.px_per_dbu), command.thin_keep, request.page_hairline, command.frames
+        "{:?}|{}|{}|{}|{}|{}|{}|{:?}",
+        command.visible_layers, command.depth, request.cut_dbu, scale_token(request.px_per_dbu), command.thin_keep, request.page_hairline, command.frames, command.root
     )
 }
 
@@ -1248,6 +1262,7 @@ fn run_clip(
         regions: Vec::new(),
         visible_indices: None,
         fixed_fit: None,
+        root: command.root,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1619,9 +1634,9 @@ fn handle_hier(hier: &SharedHier, command: HierCommand, responses: &Sender<Strin
                 if matches.is_empty() { "-".to_string() } else { matches.join(",") }
             ))
         }
-        HierCommand::Bbox { source, cell, .. } => {
+        HierCommand::Bbox { source, cell, root, .. } => {
             let src = source_of(*source)?;
-            let extent = floe_render_core::cell_extent(&src.handle, *cell)
+            let extent = floe_render_core::cell_extent(&src.handle, *root, *cell)
                 .map_err(|e| hier_error(kind, sequence, &e))
                 .map_err(HierWire)?;
             let mut union: Option<[f64; 4]> = None;
@@ -1644,7 +1659,7 @@ fn handle_hier(hier: &SharedHier, command: HierCommand, responses: &Sender<Strin
                 union.map(|b| wire_f64_box(&b)).unwrap_or_else(|| "-".to_string())
             ))
         }
-        HierCommand::Insts { source, cell, view, cap, .. } => {
+        HierCommand::Insts { source, cell, view, cap, root, .. } => {
             let src = source_of(*source)?;
             let mut boxes: Vec<String> = Vec::new();
             let mut more = false;
@@ -1659,6 +1674,7 @@ fn handle_hier(hier: &SharedHier, command: HierCommand, responses: &Sender<Strin
                 };
                 let found = floe_render_core::cell_instances(
                     &src.handle,
+                    *root,
                     *cell,
                     local,
                     *cap - boxes.len(),
@@ -2119,6 +2135,9 @@ fn run_deck_render(
     cancellation: &RenderCancellation,
 ) -> Result<(), String> {
     check_generation(cancellation, command.generation)?;
+    if command.root.is_some() {
+        return Err("a jobdeck has no view root (root=): the sources' tops are the deck's cells".to_string());
+    }
     let deck = state
         .deck
         .as_mut()
@@ -2745,7 +2764,9 @@ fn run_render(
     let summary = cache.summary_selection(
         &make_plan_request(cache, &command, state.page_cache.budget_bytes())?,
         policy_allows,
-        std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off"),
+        // design.ovo flattens the TOP cell: under another view root it is
+        // not this picture's summary
+        std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off") || command.root.is_some(),
         // a plain layout draws no summary unless FLOE_RUST_OCCUPANCY=on
         // (user decision 2026-09-24; jobdeck passes keep it)
         !floe_render_core::summary_layout_allowed(),
@@ -3981,6 +4002,7 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         regions: Vec::new(),
         visible_indices: None,
         fixed_fit: None,
+        root: command.root,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -4499,6 +4521,7 @@ mod tests {
                 jobs: Some(6),
                 cell_name: "TOP 한글".to_string(),
                 out: "/tmp/c.oas".to_string(),
+                root: None,
             }
         );
         assert!(parse_command("clip box=4,0,3,1 out=/tmp/c.oas").is_err());
@@ -4574,10 +4597,10 @@ mod tests {
             hier("cell_find seq=7 src=1 limit=999999"),
             HierCommand::Find { sequence: 7, source: Some(1), pattern: String::new(), limit: CELL_FIND_CAP }
         );
-        assert_eq!(hier("cell_bbox seq=8 cell=9"), HierCommand::Bbox { sequence: 8, source: 0, cell: 9 });
+        assert_eq!(hier("cell_bbox seq=8 cell=9"), HierCommand::Bbox { sequence: 8, source: 0, cell: 9, root: None });
         assert_eq!(
             hier("cell_insts seq=9 src=1 cell=9 view=0,-5,10.5,20 cap=7"),
-            HierCommand::Insts { sequence: 9, source: 1, cell: 9, view: [0.0, -5.0, 10.5, 20.0], cap: 7 }
+            HierCommand::Insts { sequence: 9, source: 1, cell: 9, view: [0.0, -5.0, 10.5, 20.0], cap: 7, root: None }
         );
         assert!(parse_command("cell_bbox seq=8").is_err());
         assert!(parse_command("cell_insts seq=9 cell=1 view=0,0,1,1 extra=1").is_err());
@@ -4590,6 +4613,61 @@ mod tests {
     }
 
     #[test]
+    fn a_view_root_is_part_of_the_render_state() {
+        let render = |line: &str| match parse_command(line).unwrap().unwrap() {
+            InputCommand::Worker(WorkerCommand::Render(command)) => command,
+            _ => panic!("expected a render command"),
+        };
+        let top = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
+        let rooted = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off root=17 out=/tmp/a.raw");
+        assert_eq!(top.root, None);
+        assert_eq!(rooted.root, Some(17));
+        // another root is another retained state and another fit memory
+        assert_ne!(RetainedKey::new(&top, Some(1)), RetainedKey::new(&rooted, Some(1)));
+        assert_eq!(RetainedKey::new(&rooted, Some(1)), RetainedKey::new(&render(
+            "render gen=2 view=5,5,325,325 w=32 h=32 frames=off root=17 out=/tmp/b.raw"), Some(1)));
+        let request = |command: &RenderCommand| PlanRequest {
+            view: ViewBox::new(0, 0, 320, 320).unwrap(),
+            cut_dbu: 3,
+            visible_layers: None,
+            depth: FULL_DEPTH,
+            px_per_dbu: 0.1,
+            exact: false,
+            sub_cut_wash: false,
+            page_reps: false,
+            decode_budget: 0,
+            page_hairline: true,
+            summary_layers: Vec::new(),
+            prune_summary: false,
+            sub_cut_box: false,
+            shape_cut: false,
+            shape_cut_max: false,
+            frames: false,
+            page_wash: false,
+            lod_swap: false,
+            regions: Vec::new(),
+            visible_indices: None,
+            fixed_fit: None,
+            root: command.root,
+        };
+        assert_ne!(fit_memory_key(&top, &request(&top)), fit_memory_key(&rooted, &request(&rooted)));
+        // the clip and the cell queries carry it too
+        match parse_command("clip seq=1 box=0,0,10,10 root=17 out=/tmp/c.oas").unwrap().unwrap() {
+            InputCommand::Worker(WorkerCommand::Clip(clip)) => assert_eq!(clip.root, Some(17)),
+            _ => panic!("expected a clip command"),
+        }
+        match parse_command("cell_bbox seq=8 cell=9 root=17").unwrap().unwrap() {
+            InputCommand::Hier(HierCommand::Bbox { root, .. }) => assert_eq!(root, Some(17)),
+            _ => panic!("expected a cell_bbox command"),
+        }
+        match parse_command("cell_insts seq=9 cell=9 view=0,0,1,1 root=17").unwrap().unwrap() {
+            InputCommand::Hier(HierCommand::Insts { root, .. }) => assert_eq!(root, Some(17)),
+            _ => panic!("expected a cell_insts command"),
+        }
+        assert!(parse_command("render gen=1 view=0,0,320,320 w=32 h=32 root=x out=/tmp/a.raw").is_err());
+    }
+
+    #[test]
     fn hier_worker_answers_without_a_cache_and_supersedes_queued_instance_walks() {
         let (tx, rx) = mpsc::channel();
         let (responses, answers) = mpsc::channel();
@@ -4598,9 +4676,9 @@ mod tests {
         // instance query is superseded by the newer one behind it, the
         // rest answer "cache not open"
         tx.send(HierCommand::Cells { sequence: 1, source: 0, cell: None }).unwrap();
-        tx.send(HierCommand::Insts { sequence: 2, source: 0, cell: 1, view: [0.0, 0.0, 1.0, 1.0], cap: 4 })
+        tx.send(HierCommand::Insts { sequence: 2, source: 0, cell: 1, view: [0.0, 0.0, 1.0, 1.0], cap: 4, root: None })
             .unwrap();
-        tx.send(HierCommand::Insts { sequence: 3, source: 0, cell: 1, view: [0.0, 0.0, 2.0, 2.0], cap: 4 })
+        tx.send(HierCommand::Insts { sequence: 3, source: 0, cell: 1, view: [0.0, 0.0, 2.0, 2.0], cap: 4, root: None })
             .unwrap();
         tx.send(HierCommand::Shutdown).unwrap();
         let worker = thread::spawn(move || hier_worker(rx, responses, hier));

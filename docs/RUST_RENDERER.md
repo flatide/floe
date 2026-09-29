@@ -122,6 +122,14 @@ info
 quit
 ```
 
+`root=<cell index>` on `render`, `clip`, `cell_bbox` and `cell_insts` is the
+view root (docs/SPEC-VIEWER.ko.md §8c): the plan starts from that cell in ITS
+coordinates (depth counted from it; the published pick/snap scene, the frame's
+retained state and the fit memory are per root); absent = the top cell. A root
+outside the cell table is an error; a jobdeck refuses a root (its sources' tops
+are its cells). Under a root the occupancy summary (a flattening of the top) is
+not used.
+
 The five `cell_*` commands are the viewer's cell tree (docs/SPEC-VIEWER.ko.md
 §8c). They run on the daemon's own hier thread over the hierarchy summary
 `design.ovh` (docs/SPEC-FORMATS.ko.md) and never touch the render or the

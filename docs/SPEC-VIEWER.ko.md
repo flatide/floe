@@ -148,7 +148,8 @@
   clip·copy·quit) /
   View(fit·줌·goto·detail·depth·토글 체크 5종·오버레이 순환) /
   Cell(셀 트리·검색 `t`, 선택 셀로 줌, 인스턴스 하이라이트 체크,
-  하이라이트 해제, 셀 인덱스 빌드 — §8c) /
+  하이라이트 해제, 선택 셀을 뷰 루트로 `Ctrl+T`·탑으로 `Ctrl+Shift+T`,
+  셀 인덱스 빌드 — §8c) /
   Ruler(모드·스냅 체크, 삭제/전체 삭제) / DRC(open .db·SVRF rules·
   n/p·waive·박스선택 체크). 항목은 키와 **같은 핸들러**를 호출하고
   라벨에 키를 병기(AccelGroup 미등록 — 키는 `_on_key` 단일 경로,
@@ -469,12 +470,33 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   기하 배치 중복 제거)로 덱 dbu로 바뀌어 오고, `cell_insts`의 뷰는 반대로
   소스 좌표로 들어간다(render-core `DeckXf`). 소스가 여러 곳에 놓이면
   박스도 그만큼.
-- **한계(후속)**: Calibre 셀 트리의 "선택한 셀을 뷰 루트로"(탑이 아닌
-  셀만 그리기, VFS_HIER rev 34 관측 정정 참조)는 플래너가 탑에서만
-  출발하므로 아직 없다 — ViewReq에 루트 셀을 두는 플래너 변경이 필요.
-  깊은 셀의 줌 범위가 블록 범위인 것도 요약에 레코드별 변환을 두면
-  정확해진다. 인스턴스 탐색은 뷰를 요약 엣지 범위로 잘라 BVH를 걷지만
-  넓은 뷰에서 큰 블록 안의 드문 셀은 예산에 걸릴 수 있다(`more`, 줌인).
+- **뷰 루트**(2026-09-29, 0.12.241 / RENDERD 0.12.229 — Calibre 셀
+  트리의 "선택한 셀이 표시되는 탑이 된다"): `Ctrl+T` · Cell 메뉴 ·
+  패널 `root` 버튼이 **선택한 셀을 뷰 루트**로 삼고, `Ctrl+Shift+T` ·
+  메뉴 · `top` 버튼(루트일 때만 활성)이 탑 셀로 돌아온다. 뷰 루트가
+  서면 그 셀의 **자기 좌표**가 세계가 된다: 플래너(`ViewReq::root`,
+  `PlanRequest::root`, 와이어 `render … root=CI`)가 그 셀에서 출발하고
+  depth도 그 셀부터 센다; 라벨 플래너도 같은 루트에서 걷는다; 픽/스냅은
+  발행 씬을 그대로 읽으므로 루트 좌표; 클립(`clip … root=`)도 루트에서
+  잘라 낸다. GUI는 다이 bbox를 루트의 재귀 bbox로 바꾼다
+  (`_die_bbox`: fit·clamp·미니맵; 미니맵의 구운 프런티어는 탑 것이라
+  루트에서는 그리지 않음), 렌더 상태 키(`_render_key`)에 루트를 넣어
+  옛 프레임·마진이 새 좌표계에 나타나지 않게 하고(전환 때 화면과
+  in-flight 프레임 키를 비운 뒤 fit), 창 제목 뒤에 `· root NAME`을 붙인다.
+  renderd도 fit 메모리 키와 RetainedKey에 루트를 넣어 팬 재사용·결정
+  기억이 루트별로 갈린다. **루트가 서면 꺼지는 것**: 점유 요약(design.ovo는
+  탑을 평탄화한 것 — `summary: none`), 대표 파일(design.ovr, 탑 기준
+  표본)은 plan 조건상 루트에서는 쓰이지 않음(page_reps 무관). 트리는 계속
+  전체 계층을 보이며, 선택 셀의 정보·하이라이트·줌은 **루트 아래**에서
+  센다(`cell_bbox`/`cell_insts … root=CI`: 루트 직계면 정확한 범위,
+  루트 밖 셀은 "not placed under the view root"). 잡덱은 소스 탑들이
+  덱의 셀이므로 뷰 루트가 없다(renderd가 `render root=`를 거부, GUI는
+  상태줄 안내). 게이트 `cell_tree` C8: 루트=BLK 프레임 == BLK를 탑으로
+  한 별도 레이아웃(KLayout copy_tree)의 프레임, 바이트 동일.
+- **남은 것**: 깊은 셀의 줌 범위가 블록 범위인 것은 요약에 레코드별
+  변환을 두면 정확해진다. 인스턴스 탐색은 뷰를 요약 엣지 범위로 잘라
+  BVH를 걷지만 넓은 뷰에서 큰 블록 안의 드문 셀은 예산에 걸릴 수 있다
+  (`more`, 줌인). 루트 상태의 depth 라벨은 여전히 탑 높이(`*/N`) 기준.
 - **게이트**: `cell_tree`(tools/validate_cell_tree.py — SPEC-VALIDATION),
   렌더 코어 유닛(cells.rs 9종), renderd 파스/워커 유닛, vfs hiersum 유닛,
   워커 와이어 계약(validate_rust_renderer).

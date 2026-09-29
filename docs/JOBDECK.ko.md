@@ -343,6 +343,9 @@ gate: `ViewerCacheTests`(meta·세 모드의 레이어 표와 색·resolve_layer
 하이라이트의 박스는 소스 좌표를 덱 배치(`scale·p + (dx, dy)`)로 옮긴
 덱 dbu로 오며, 한 소스가 여러 자리에 놓이면 박스도 그만큼 온다.
 pick/snap/clip이 덱에서 꺼져 있는 것과 달리 셀 질의는 덱에서도 답한다.
+뷰 루트(SPEC-VIEWER §8c, `render root=`)는 덱에 없다 — 소스 탑들이 덱의
+셀이다; renderd는 `root=`가 붙은 덱 렌더를 오류로 답하고 GUI는 상태줄로
+안내한다.
 
 ## 7. M4 상세 — 헤드리스 shot (`floe2 render`, 소스 종류 무관)
 

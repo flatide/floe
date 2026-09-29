@@ -30,6 +30,10 @@ pins the CLI contract:
       file written); with FLOE_RUST_HIER_INLINE_PLACES=0 the daemon
       answers code=nohier and, once `floe2 index --hier-only` has
       written the file, the SAME daemon answers (live pickup)
+  C8  the view root (root=): a frame rooted at BLK equals byte for byte
+      the frame of a layout whose top is BLK (KLayout copy_tree) over
+      three views; cell_bbox / cell_insts under the root count and walk
+      from BLK; a root outside the table is refused
 
 usage: python tools/validate_cell_tree.py
 """
@@ -144,8 +148,9 @@ class Oracle:
                 total[inst.cell_index] += mine * inst.size()
         return {self.names[ci]: n for ci, n in total.items()}
 
-    def boxes(self, name):
-        """Every instance of `name` under the top as a box in top dbu."""
+    def boxes(self, name, root=None):
+        """Every instance of `name` under `root` (the top) as a box in
+        the root's dbu coordinates."""
         target = self.cell(name).cell_index()
         out = []
 
@@ -159,7 +164,7 @@ class Oracle:
                         out.append((b.left, b.bottom, b.right, b.top))
                     else:
                         walk(child, ct)
-        walk(self.top, db.Trans())
+        walk(self.top if root is None else self.cell(root), db.Trans())
         return out
 
     def union(self, boxes):
@@ -199,6 +204,34 @@ class Daemon:
             if res.get("kind") == kind and res.get("seq") == self.seq:
                 return res
         raise AssertionError("no %s answer" % kind)
+
+    def render(self, bbox, w, h, root=None, gen=None):
+        """The settled frame's pixel payload for a view (dbu), through
+        the viewer's own job schema; `root` = the view root cell."""
+        self.seq += 1
+        gen = gen or self.seq
+        self.worker.submit({
+            "kind": "render", "gen": gen, "scope": "live",
+            "bbox": tuple(float(v) for v in bbox), "view": None,
+            "w": w, "h": h, "depth": None, "cut_px": 3.0,
+            "visible": None, "frames": True, "labels": False,
+            "abstract": False, "root": root})
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            try:
+                res = self.worker.res.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if res.get("kind") == "error":
+                raise AssertionError(res.get("msg"))
+            if res.get("kind") != "frame" or res.get("gen") != gen:
+                continue
+            if res.get("refining"):
+                continue
+            payload = res.get("rgba") or res.get("png")
+            assert payload, res
+            return bytes(payload)
+        raise AssertionError("no settled frame")
 
     def stop(self):
         self.worker.stop()
@@ -376,6 +409,57 @@ class CellTreeTests(unittest.TestCase):
                                       view=(0, 0, 20000, 12000))["boxes"], [])
         self.assertEqual(self.by_name("cell_insts", cell=self.ci_of("VIA"),
                                       view=(30000, 30000, 31000, 31000))["boxes"], [])
+
+    def test_c8_a_view_root_draws_the_cell_as_a_layout_of_its_own(self):
+        """SPEC-VIEWER §8c: rendering the fixture with root=BLK equals,
+        byte for byte, rendering a layout whose top IS BLK (KLayout's
+        copy_tree) over the same BLK-coordinate view; the cell queries
+        under the root count and walk from BLK; a jobdeck-free contract
+        the daemon refuses nothing here."""
+        blk = self.ci_of("BLK")
+        # the standalone BLK layout
+        other = TMP / "blk_top.oas"
+        ly2 = db.Layout(True)
+        ly2.dbu = self.ly.dbu
+        top2 = ly2.create_cell("BLK")
+        top2.copy_tree(self.ly.cell("BLK"))
+        ly2.write(str(other))
+        floe2("index", other, "--jobs", "1")
+        alone = Daemon(other)
+        try:
+            for view in ((-200, -200, 5200, 4200), (100, 100, 1700, 1500),
+                         (4000, 3000, 5000, 4000)):
+                rooted = self.daemon.render(view, 400, 320, root=blk)
+                plain = alone.render(view, 400, 320)
+                self.assertEqual(len(rooted), len(plain), view)
+                self.assertEqual(rooted, plain, "frame differs at %s" % (view,))
+            # the same view at the top is another picture
+            top_view = self.daemon.render((-200, -200, 5200, 4200), 400, 320)
+            self.assertNotEqual(top_view, rooted)
+        finally:
+            alone.stop()
+        # queries under the root: INV is BLK's direct child - exact extent,
+        # 6 instances; VIA's instances from BLK equal KLayout's walk from BLK
+        inv = self.by_name("cell_bbox", cell=self.ci_of("INV"), root=blk)
+        self.assertEqual((inv["insts"], inv["approx"]), (6, False))
+        self.assertEqual(as_int_box(inv["bbox"]),
+                         self.oracle.union(self.oracle.boxes("INV", "BLK")))
+        via = self.by_name("cell_insts", cell=self.ci_of("VIA"), root=blk,
+                           view=(0, 0, 5000, 4000))
+        self.assertFalse(via["more"])
+        self.assertEqual(sorted(as_int_box(b) for b in via["boxes"]),
+                         sorted(self.oracle.boxes("VIA", "BLK")))
+        self.assertEqual(len(via["boxes"]), 12)
+        # a cell above the root is not under it; the root is itself
+        top = self.by_name("cell_bbox", cell=self.ci_of("TOP"), root=blk)
+        self.assertEqual((top["insts"], top["bbox"]), (0, None))
+        me = self.by_name("cell_bbox", cell=blk, root=blk)
+        self.assertEqual((me["insts"], as_int_box(me["bbox"])),
+                         (1, (0, 0, 5000, 4000)))
+        # a root outside the table is refused, not planned as the top
+        bad = self.daemon.ask("cell_bbox", cell=blk, root=999)
+        self.assertFalse(bad["found"])
+        self.assertEqual(bad["code"], "query")
 
     def test_c7_missing_summary_inline_or_refused_then_picked_up_live(self):
         ovh = self.cache_dir / "design.ovh"

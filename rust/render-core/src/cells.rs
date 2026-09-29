@@ -319,16 +319,63 @@ pub struct CellExtent {
     pub approx: bool,
 }
 
-/// The extent of a cell's instances under the top, from the summary's
-/// top-level edges: exact for a cell the top places directly, else the
-/// containers' extent.
-pub fn extent(h: &HierHandle, cell: u32) -> Result<CellExtent, HierError> {
+/// The root a query walks from: the given cell, else the top.
+fn root_of(ovm: &Ovm, root: Option<u32>) -> Result<u32, HierError> {
+    match root {
+        Some(r) if r >= ovm.n_cells => Err(HierError::Other(format!(
+            "root index {} out of range 0..{}",
+            r, ovm.n_cells
+        ))),
+        Some(r) => Ok(r),
+        None => Ok(ovm.top),
+    }
+}
+
+/// Instances of `cell` under `root`: the summary's count when the root
+/// is the top, else a product sum over the cells between them (the
+/// ancestors of `cell`, in topological order, from the root).
+fn insts_under(s: &HierSummary, ovm: &Ovm, root: u32, cell: u32, anc: &[bool]) -> u64 {
+    if root == ovm.top {
+        return s.insts(cell);
+    }
+    let mut inset: Vec<(u32, u32)> = anc
+        .iter()
+        .enumerate()
+        .filter(|(_, &f)| f)
+        .map(|(ci, _)| (ovm.cell(ci as u32).topo_rank, ci as u32))
+        .collect();
+    inset.sort_unstable();
+    let mut counts: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    counts.insert(root, 1);
+    for (_, ci) in inset {
+        let Some(&n) = counts.get(&ci) else {
+            continue;
+        };
+        if n == 0 {
+            continue;
+        }
+        for e in s.children(ci) {
+            if anc.get(e.child as usize).copied().unwrap_or(false) {
+                let add = n.saturating_mul(e.members);
+                let slot = counts.entry(e.child).or_insert(0);
+                *slot = slot.saturating_add(add);
+            }
+        }
+    }
+    counts.get(&cell).copied().unwrap_or(0)
+}
+
+/// The extent of a cell's instances under `root` (None = the top), from
+/// the summary's edges out of the root: exact for a cell the root places
+/// directly, else the containers' extent. Root coordinates.
+pub fn extent(h: &HierHandle, root: Option<u32>, cell: u32) -> Result<CellExtent, HierError> {
     let s = h.summary()?;
     let ovm = h.ovm();
+    let root = root_of(ovm, root)?;
     if cell >= ovm.n_cells {
         return Err(HierError::Other(format!("cell index {} out of range 0..{}", cell, ovm.n_cells)));
     }
-    if cell == ovm.top {
+    if cell == root {
         let b = ovm.cell_rbbox(cell);
         return Ok(CellExtent {
             insts: 1,
@@ -337,12 +384,12 @@ pub fn extent(h: &HierHandle, cell: u32) -> Result<CellExtent, HierError> {
         });
     }
     let anc = s.ancestors(cell);
-    if !anc.get(ovm.top as usize).copied().unwrap_or(false) {
+    if !anc.get(root as usize).copied().unwrap_or(false) {
         return Ok(CellExtent { insts: 0, bbox: None, approx: false });
     }
     let mut bbox = BBox::EMPTY;
     let mut approx = false;
-    for e in s.children(ovm.top) {
+    for e in s.children(root) {
         if anc[e.child as usize] {
             bbox.grow(&e.extent);
             if e.child != cell {
@@ -351,7 +398,7 @@ pub fn extent(h: &HierHandle, cell: u32) -> Result<CellExtent, HierError> {
         }
     }
     Ok(CellExtent {
-        insts: s.insts(cell),
+        insts: insts_under(&s, ovm, root, cell, &anc),
         bbox: (!bbox.is_empty()).then_some(bbox),
         approx,
     })
@@ -602,25 +649,34 @@ impl Walk<'_> {
     }
 }
 
-/// The instances of `cell` whose box meets `view` (top coordinates):
-/// a walk from the top through the cells whose subtree holds it, pruned
-/// by the placement BVH, at most `cap` boxes and `budget` visits.
-pub fn instances(h: &HierHandle, cell: u32, view: BBox, cap: usize, budget: u64) -> Result<Instances, HierError> {
+/// The instances of `cell` whose box meets `view` (root coordinates;
+/// root None = the top): a walk from the root through the cells whose
+/// subtree holds it, pruned by the placement BVH, at most `cap` boxes and
+/// `budget` visits.
+pub fn instances(
+    h: &HierHandle,
+    root: Option<u32>,
+    cell: u32,
+    view: BBox,
+    cap: usize,
+    budget: u64,
+) -> Result<Instances, HierError> {
     let s = h.summary()?;
     let ovm = h.ovm();
+    let root = root_of(ovm, root)?;
     if cell >= ovm.n_cells {
         return Err(HierError::Other(format!("cell index {} out of range 0..{}", cell, ovm.n_cells)));
     }
     if view.is_empty() || cap == 0 {
         return Ok(Instances { boxes: Vec::new(), more: false, visited: 0 });
     }
-    if cell == ovm.top {
+    if cell == root {
         let b = ovm.cell_rbbox(cell);
         let boxes = if !b.is_empty() && b.intersects(&view) { vec![b] } else { Vec::new() };
         return Ok(Instances { boxes, more: false, visited: 1 });
     }
     let inset = s.ancestors(cell);
-    if !inset.get(ovm.top as usize).copied().unwrap_or(false) {
+    if !inset.get(root as usize).copied().unwrap_or(false) {
         return Ok(Instances { boxes: Vec::new(), more: false, visited: 0 });
     }
     let mut walk = Walk {
@@ -635,7 +691,7 @@ pub fn instances(h: &HierHandle, cell: u32, view: BBox, cap: usize, budget: u64)
         more: false,
         reach: std::collections::HashMap::new(),
     };
-    walk.walk(ovm.top, &OrthoTransform::identity(), &view)?;
+    walk.walk(root, &OrthoTransform::identity(), &view)?;
     Ok(Instances {
         boxes: walk.out,
         more: walk.more,
@@ -744,25 +800,25 @@ mod tests {
     fn extent_is_exact_for_direct_children_and_the_container_for_deeper_ones() {
         let h = handle(sample());
         // TOP itself
-        let top = extent(&h, 4).unwrap();
+        let top = extent(&h, None, 4).unwrap();
         assert_eq!(top, CellExtent { insts: 1, bbox: Some(b(0, 0, 1000, 1000)), approx: false });
         // MID: placed directly in TOP, exact
-        let mid = extent(&h, 2).unwrap();
+        let mid = extent(&h, None, 2).unwrap();
         assert_eq!(mid, CellExtent { insts: 2, bbox: Some(b(0, 0, 500, 200)), approx: false });
         // LEAF: in TOP directly (pts at 800,800) and inside both MIDs -> the
         // MIDs' extent joins in, approximate
-        let leaf = extent(&h, 0).unwrap();
+        let leaf = extent(&h, None, 0).unwrap();
         assert_eq!(leaf, CellExtent { insts: 17, bbox: Some(b(0, 0, 860, 850)), approx: true });
         // ORPHAN: not under the top
-        assert_eq!(extent(&h, 3).unwrap(), CellExtent { insts: 0, bbox: None, approx: false });
+        assert_eq!(extent(&h, None, 3).unwrap(), CellExtent { insts: 0, bbox: None, approx: false });
         // EMPTY: placed but without shapes
-        assert_eq!(extent(&h, 1).unwrap(), CellExtent { insts: 1, bbox: None, approx: false });
+        assert_eq!(extent(&h, None, 1).unwrap(), CellExtent { insts: 1, bbox: None, approx: false });
     }
 
     #[test]
     fn instances_walk_every_path_with_rotation_flip_grid_and_pts() {
         let h = handle(sample());
-        let all = instances(&h, 0, b(-1000, -1000, 5000, 5000), 100, 1_000_000).unwrap();
+        let all = instances(&h, None, 0, b(-1000, -1000, 5000, 5000), 100, 1_000_000).unwrap();
         assert_eq!(all.boxes.len(), 17);
         assert!(!all.more);
         let mut boxes = all.boxes.clone();
@@ -780,27 +836,76 @@ mod tests {
         assert!(boxes.contains(&b(850, 796, 860, 800)));
         assert!(boxes.contains(&b(800, 846, 810, 850)));
         // a view around the rotated MID only
-        let part = instances(&h, 0, b(400, 100, 500, 200), 100, 1_000_000).unwrap();
+        let part = instances(&h, None, 0, b(400, 100, 500, 200), 100, 1_000_000).unwrap();
         assert_eq!(part.boxes.len(), 7);
         assert!(part.boxes.iter().all(|k| k.x0 >= 400 && k.x1 <= 500));
         // MID's own instances: two boxes
-        let mids = instances(&h, 2, b(0, 0, 1000, 1000), 100, 1_000_000).unwrap();
+        let mids = instances(&h, None, 2, b(0, 0, 1000, 1000), 100, 1_000_000).unwrap();
         let mut mb = mids.boxes.clone();
         mb.sort_by_key(|k| k.x0);
         assert_eq!(mb, vec![b(0, 0, 100, 100), b(400, 100, 500, 200)]);
         // the cap stops the walk and says so
-        let capped = instances(&h, 0, b(-1000, -1000, 5000, 5000), 3, 1_000_000).unwrap();
+        let capped = instances(&h, None, 0, b(-1000, -1000, 5000, 5000), 3, 1_000_000).unwrap();
         assert_eq!(capped.boxes.len(), 3);
         assert!(capped.more);
         // the budget too
-        let starved = instances(&h, 0, b(-1000, -1000, 5000, 5000), 100, 2).unwrap();
+        let starved = instances(&h, None, 0, b(-1000, -1000, 5000, 5000), 100, 2).unwrap();
         assert!(starved.more);
         assert!(starved.boxes.len() < 17);
         // an unplaced cell has no instances; the top is itself
-        assert!(instances(&h, 3, b(0, 0, 1000, 1000), 10, 100).unwrap().boxes.is_empty());
-        assert_eq!(instances(&h, 4, b(0, 0, 10, 10), 10, 100).unwrap().boxes, vec![b(0, 0, 1000, 1000)]);
+        assert!(instances(&h, None, 3, b(0, 0, 1000, 1000), 10, 100).unwrap().boxes.is_empty());
+        assert_eq!(instances(&h, None, 4, b(0, 0, 10, 10), 10, 100).unwrap().boxes, vec![b(0, 0, 1000, 1000)]);
         // a view that misses everything
-        assert!(instances(&h, 0, b(2000, 2000, 3000, 3000), 10, 100).unwrap().boxes.is_empty());
+        assert!(instances(&h, None, 0, b(2000, 2000, 3000, 3000), 10, 100).unwrap().boxes.is_empty());
+    }
+
+    #[test]
+    fn a_view_root_walks_and_counts_from_that_cell_in_its_coordinates() {
+        let h = handle(sample());
+        // MID (2) as the root: LEAF is its direct child - exact extent,
+        // 7 instances, boxes in MID's coordinates
+        let leaf = extent(&h, Some(2), 0).unwrap();
+        assert_eq!(leaf, CellExtent { insts: 7, bbox: Some(b(5, 5, 60, 74)), approx: false });
+        let got = instances(&h, Some(2), 0, b(-100, -100, 1000, 1000), 100, 1_000_000).unwrap();
+        assert_eq!(got.boxes.len(), 7);
+        assert!(got.boxes.contains(&b(5, 5, 15, 9)));
+        assert!(got.boxes.contains(&b(50, 70, 60, 74)));
+        assert!(got.boxes.iter().all(|k| k.x1 <= 100 && k.y1 <= 100));
+        // the root itself, and a cell above the root
+        assert_eq!(extent(&h, Some(2), 2).unwrap(), CellExtent { insts: 1, bbox: Some(b(0, 0, 100, 100)), approx: false });
+        assert_eq!(instances(&h, Some(2), 2, b(0, 0, 10, 10), 10, 100).unwrap().boxes, vec![b(0, 0, 100, 100)]);
+        assert_eq!(extent(&h, Some(2), 4).unwrap(), CellExtent { insts: 0, bbox: None, approx: false });
+        assert!(instances(&h, Some(2), 4, b(0, 0, 1000, 1000), 10, 100).unwrap().boxes.is_empty());
+        // the top as an explicit root is the default
+        assert_eq!(extent(&h, Some(4), 0).unwrap(), extent(&h, None, 0).unwrap());
+        assert_eq!(
+            instances(&h, Some(4), 0, b(-1000, -1000, 5000, 5000), 100, 1_000_000).unwrap().boxes.len(),
+            17
+        );
+        // a deeper root: count through two levels - a fixture where the
+        // root holds the container twice
+        let ovm = build(
+            &[
+                FCell { name: "X", shape: shape(0, 0, 1, 1), places: vec![] },
+                FCell {
+                    name: "C",
+                    shape: None,
+                    places: vec![(0, 0, 0, 0, false, Rep::Grid { na: 3, nb: 1, va: (10, 0), vb: (0, 10) })],
+                },
+                FCell {
+                    name: "R",
+                    shape: None,
+                    places: vec![(1, 0, 0, 0, false, Rep::One), (1, 100, 0, 0, false, Rep::One)],
+                },
+                FCell { name: "T", shape: None, places: vec![(2, 0, 0, 0, false, Rep::Grid { na: 5, nb: 1, va: (1000, 0), vb: (0, 1) })] },
+            ],
+            3,
+        );
+        let h = handle(ovm);
+        assert_eq!(extent(&h, Some(2), 0).unwrap().insts, 6);
+        assert!(extent(&h, Some(2), 0).unwrap().approx);
+        assert_eq!(extent(&h, None, 0).unwrap().insts, 30);
+        assert!(root_of(h.ovm(), Some(99)).is_err());
     }
 
     #[test]
@@ -831,7 +936,7 @@ mod tests {
         );
         let h = handle(ovm);
         let view = b(100, 100, 400, 150);
-        let got = instances(&h, 0, view, 10_000, 1_000_000).unwrap();
+        let got = instances(&h, None, 0, view, 10_000, 1_000_000).unwrap();
         let mut brute = 0;
         for k in 0..40 {
             for l in 0..30 {
@@ -865,7 +970,7 @@ mod tests {
         cells.push(FCell { name: "T", shape: None, places: top_places });
         let n = cells.len();
         let h = handle(build(&cells, n - 1));
-        let got = instances(&h, 0, b(0, 0, 8000, 800), 100, 1_000_000).unwrap();
+        let got = instances(&h, None, 0, b(0, 0, 8000, 800), 100, 1_000_000).unwrap();
         assert_eq!(got.boxes, vec![b(7010, 10, 7012, 12)]);
         // the top's 8 records and the one block's leaf: nowhere near the
         // 7 x 64 fill members

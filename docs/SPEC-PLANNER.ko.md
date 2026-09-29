@@ -13,6 +13,11 @@
   최소낭비 병합)가 완성된 뒤 자식이 팝된다(고정점 불필요).
 - 출력 HierPlan: wcells(페이지 선택 + 자식 edge + 프레임 + 워시),
   pages(+스트리밍 우선순위 = 뷰 중심 거리²), stats.
+- ViewReq::root (2026-09-29, 뷰어의 뷰 루트 — SPEC-VIEWER §8c): Some(ci)면
+  플랜이 그 셀에서 그 셀의 좌표로 출발하고 depth도 그 셀부터 센다; None
+  또는 셀 테이블 밖이면 탑(`plan_hier`의 `top_ci`, `text.rs plan_labels`
+  동일; brute 오라클도 같은 규칙). HierPlan.top = 루트. 유닛
+  `a_view_root_plans_that_cell_as_the_top_in_its_own_coordinates`.
 - ViewReq: view(BBox dbu), cut_dbu, vis(레이어 비트마스크), depth,
   px_per_dbu(0 = 프로브/톤 없음).
 

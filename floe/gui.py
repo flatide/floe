@@ -137,7 +137,7 @@ class _DrcPanel(object):
 class _CellPanel(object):
     """Widget refs of the cell tree panel (attribute bag)."""
     __slots__ = ("_search", "_tree", "_store", "_results", "_info",
-                 "_hl", "_zoom", "_build")
+                 "_hl", "_zoom", "_build", "_root", "_top")
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -1292,6 +1292,11 @@ class Viewer:
         self._cell_search_timer = None
         self._cell_mode = "tree"
         self._cell_nohier = set()
+        # the view root (SPEC-VIEWER §8c): None = the top cell; else
+        # {"cell", "name", "bbox" (its recursive bbox, its coordinates),
+        # "height"} - every render, clip and cell query starts there
+        self._view_root = None
+        self._title_base = "%s - no layout" % APP
         self._cursor = (0, 0)
         self._pending = None
         self._pending_t0 = 0.0
@@ -1890,8 +1895,8 @@ class Viewer:
         # size + grid live in the WINDOW TITLE (user call
         # 2026-08-22: the side pane's floe/source header is gone)
         if cache is None:
-            self.window.set_title(
-                "%s - no layout (File > load layout…)" % APP)
+            self._title_base = "%s - no layout (File > load layout…)" % APP
+            self.window.set_title(self._title_base)
         elif self.meta.get("jobdeck"):
             jb = self.meta["jobdeck"]
             self.window.set_title(
@@ -1913,11 +1918,12 @@ class Viewer:
                             first["idx"], first["tc"], first["reason"]))
         else:
             src = self.meta["src"]
-            self.window.set_title(
+            self._title_base = (
                 "%s - %s · %.2f GB · grid %dx%d"
                 % (APP, os.path.basename(src["path"]),
                    src["size"] / 1e9, self.meta["grid"]["nx"],
                    self.meta["grid"]["ny"]))
+            self.window.set_title(self._title_base)
         self._build_layer_panel()
         self._apply_props_visibility(rows)
         if getattr(cache, "is_jobdeck", False):
@@ -2545,7 +2551,8 @@ class Viewer:
         _covered() kept the old frame; margin frames share the key)."""
         return (scope, tuple(sorted(self.visible)), self._depth_key(),
                 self._effective_cut_px(), self.lod_on, self.frames_on,
-                self.labels_on, self._color_epoch, self._effective_thin())
+                self.labels_on, self._color_epoch, self._effective_thin(),
+                self._root_ci())
 
     def _effective_cut_px(self):
         """Screen-space detail cut is independent of merged LOD."""
@@ -2797,7 +2804,7 @@ class Viewer:
         """(scale, panel x0, panel y0, die px w, die px h) or None."""
         if self.meta is None:
             return None
-        bb = self.meta["bbox"]
+        bb = self._die_bbox()
         bw, bh = bb[2] - bb[0], bb[3] - bb[1]
         if bw <= 0 or bh <= 0:
             return None
@@ -2817,6 +2824,8 @@ class Viewer:
         mode=frontier, so no runtime requests are needed."""
         if not getattr(self, "_frontier_depths", None):
             return None
+        if getattr(self, "_view_root", None) is not None:
+            return None   # the baked frontier is the top cell's
         d = self.depth_value
         if d >= 999 or d >= len(self._frontier_depths):
             return None
@@ -2831,7 +2840,7 @@ class Viewer:
         if not (x0 <= px <= x0 + mw - 1 and
                 y0 <= py <= y0 + mh - 1):
             return None
-        bb = self.meta["bbox"]
+        bb = self._die_bbox()
         return (bb[0] + (px - x0) / scale,
                 bb[3] - (py - y0) / scale)
 
@@ -2882,7 +2891,7 @@ class Viewer:
         geom = self._minimap_geom()
         if geom is not None:
             scale, x0, y0, mw, mh = geom
-            bb = self.meta["bbox"]
+            bb = self._die_bbox()
             fill_rect(disp, x0, y0, mw, mh, MINIMAP_BG)
             frame_rect(disp, x0, y0, mw, mh, MINIMAP_EDGE)
             if d is not None:
@@ -2915,7 +2924,7 @@ class Viewer:
             self._minimap_image.set_from_pixbuf(disp)
             return
         scale, x0, y0, mw, mh = geom
-        bb = self.meta["bbox"]
+        bb = self._die_bbox()
 
         def mx(v):
             return x0 + (v - bb[0]) * scale
@@ -3268,6 +3277,7 @@ class Viewer:
             "view": tuple(float(v) for v in bbox),
             "w": int(mw), "h": int(mh),
             "depth": depth,
+            "root": self._root_ci(),
             "cut_px": self._effective_cut_px(),
             "lod": self.lod_on,
             "thin": self._effective_thin(),
@@ -3337,6 +3347,7 @@ class Viewer:
             "view": tuple(float(v) for v in bbox),
             "w": int(w), "h": int(h),
             "depth": depth,
+            "root": self._root_ci(),
             "cut_px": self._effective_cut_px(),
             "lod": self.lod_on,
             "thin": self._effective_thin(),
@@ -4009,14 +4020,14 @@ class Viewer:
         if self.cache is None:
             return
         self._fit_after_worker_start = False
-        bb = self.meta["bbox"]
+        bb = self._die_bbox()
         self.cx = (bb[0] + bb[2]) / 2
         self.cy = (bb[1] + bb[3]) / 2
         self.spp = self._fit_spp()
         self.redraw()
 
     def _fit_spp(self):
-        bb = self.meta["bbox"]
+        bb = self._die_bbox()
         w, h = self._viewport_size()
         return max((bb[2] - bb[0]) / w, (bb[3] - bb[1]) / h) * 1.05
 
@@ -4029,7 +4040,7 @@ class Viewer:
         on an axis the viewport is wider than."""
         if self.cache is None:
             return
-        db = self.meta["bbox"]
+        db = self._die_bbox()
         mx = (db[2] - db[0]) * 0.10
         my = (db[3] - db[1]) * 0.10
         bb = (db[0] - mx, db[1] - my, db[2] + mx, db[3] + my)
@@ -4518,6 +4529,10 @@ class Viewer:
             self._jobdeck_toggle_view()         # Ctrl+, level <-> chip
         elif ctrl and name in ("c", "C"):
             self._copy_view()                   # view -> clipboard
+        elif ctrl and name == "t":
+            self._cell_set_root()               # selected cell as view root
+        elif ctrl and name == "T":
+            self._cell_root_top()               # Ctrl+Shift+T: back to top
         elif name == "f":
             self._set_frames(not self.frames_on)
         elif name in ("Left", "Right", "Up", "Down"):
@@ -5312,6 +5327,10 @@ class Viewer:
               lambda: self._cell_hl_on)
         item(m, "clear highlight\tEsc", self._cell_hl_clear)
         sep(m)
+        item(m, "selected cell as view root\tCtrl+T", self._cell_set_root)
+        item(m, "view root: back to the top cell\tCtrl+Shift+T",
+             self._cell_root_top)
+        sep(m)
         item(m, "build cell index (design.ovh)…",
              lambda: self._cell_index_offer(None, ask=True))
 
@@ -6024,6 +6043,18 @@ class Viewer:
         zoom = Gtk.Button(label="zoom")
         zoom.connect("clicked", lambda *_: self._cell_zoom_selected())
         row.pack_start(zoom, False, False, 2)
+        # the view root (SPEC-VIEWER §8c): draw the selected cell as the
+        # top, in its own coordinates; `top` returns to the file's top
+        root = Gtk.Button(label="root")
+        root.set_tooltip_text("draw the selected cell as the view root "
+                              "(Ctrl+T)")
+        root.connect("clicked", lambda *_: self._cell_set_root())
+        row.pack_start(root, False, False, 2)
+        top = Gtk.Button(label="top")
+        top.set_tooltip_text("back to the top cell (Ctrl+Shift+T)")
+        top.connect("clicked", lambda *_: self._cell_root_top())
+        top.set_sensitive(False)
+        row.pack_start(top, False, False, 2)
         # shown when a source's hierarchy index is missing
         build = Gtk.Button(label="build index…")
         build.connect("clicked",
@@ -6040,6 +6071,7 @@ class Viewer:
         win._search, win._tree = se, tree
         win._store, win._results = store, results
         win._info, win._hl, win._zoom, win._build = info, hl, zoom, build
+        win._root, win._top = root, top
         self._cellwin = win
         return box
 
@@ -6070,9 +6102,11 @@ class Viewer:
         self._cell_hl_key = None
         self._cell_nohier = set()
         self._cell_mode = "tree"
+        self._view_root = None
         w = getattr(self, "_cellwin", None)
         if w is None:
             return
+        w._top.set_sensitive(False)
         w._store.clear()
         w._results.clear()
         w._tree.set_model(w._store)
@@ -6154,7 +6188,10 @@ class Viewer:
                                          "placeholder"])
                 w._info.set_text("%d sources" % len(self._cell_sources))
         elif kind == "cells":
-            self._cell_fill(what, ref, res)
+            if what == "root_set":
+                self._apply_view_root(res)
+            else:
+                self._cell_fill(what, ref, res)
         elif kind == "cell_find":
             if res["seq"] != self._cell_find_seq:
                 return
@@ -6269,7 +6306,8 @@ class Viewer:
             return
         self._cell_sel = (src, ci, model[it][0])
         self._cell_bbox_seq = self._cell_query(
-            "cell_bbox", {"src": src, "cell": ci}, ("info", None, src))
+            "cell_bbox", {"src": src, "cell": ci, "root": self._root_ci()},
+            ("info", None, src))
         self._cell_hl_key = None
         self._cell_hl_query()
 
@@ -6280,8 +6318,10 @@ class Viewer:
     def _cell_info_text(self, res):
         name = self._cell_sel[2] if self._cell_sel else "cell"
         insts = res["insts"]
+        under = ("the top cell" if self._view_root is None
+                 else "the view root %s" % self._view_root["name"])
         if not insts:
-            return "%s: not placed under the top cell" % name
+            return "%s: not placed under %s" % (name, under)
         b = res["bbox"]
         if b is None:
             return "%s: %s instance%s, no shapes" % (
@@ -6297,7 +6337,8 @@ class Viewer:
             self._set_live_status("select a cell in the tree first")
             return
         src, ci, _name = self._cell_sel
-        self._cell_query("cell_bbox", {"src": src, "cell": ci},
+        self._cell_query("cell_bbox", {"src": src, "cell": ci,
+                                       "root": self._root_ci()},
                          ("zoom", None, src))
 
     def _cell_frame(self, res):
@@ -6326,6 +6367,103 @@ class Viewer:
             name, fmt_count(insts), "" if insts == 1 else "s",
             " (zoomed to the blocks holding it)" if res["approx"] else ""))
 
+    def _die_bbox(self):
+        """The die the fit, the clamp and the minimap frame: the view
+        root's recursive bbox (its coordinates) when one is set, else
+        the layout's bbox (meta)."""
+        root = getattr(self, "_view_root", None)
+        if root is not None:
+            return root["bbox"]
+        return self.meta["bbox"]
+
+    def _root_ci(self):
+        """The view root's cell index for the render, clip and cell
+        queries; None = the top cell."""
+        root = getattr(self, "_view_root", None)
+        return None if root is None else root["cell"]
+
+    def _cell_set_root(self):
+        """Ctrl+T / Cell menu / `root`: draw the selected cell as the
+        view root (Calibre's cell tree: the selected cell becomes the
+        displayed top). Its recursive bbox comes with a `cells` answer;
+        the root is applied when it lands."""
+        if self.cache is None:
+            self._set_live_status("no layout")
+            return
+        if getattr(self.cache, "is_jobdeck", False):
+            self._set_live_status(
+                "a jobdeck has no view root: its sources' tops are its cells")
+            return
+        if self._cell_sel is None:
+            self._set_live_status("select a cell in the tree first (t)")
+            return
+        src, ci, name = self._cell_sel
+        root = self._view_root
+        if root is not None and root["cell"] == ci:
+            self._set_live_status("%s is the view root already" % name)
+            return
+        seq = self._cell_query("cells", {"src": src, "cell": ci},
+                               ("root_set", None, src))
+        if seq is None:
+            self._set_live_status("no render service")
+
+    def _apply_view_root(self, res):
+        """A `cells` answer for the cell to become the view root: the
+        picture restarts from it - every frame on screen belongs to
+        another coordinate system, so the stale frame and the margin go,
+        the minimap bases are rebuilt around its bbox, and the view fits
+        it. The tree keeps showing the whole hierarchy."""
+        bbox = res.get("bbox")
+        if bbox is None:
+            self._set_live_status("%s has no shapes: nothing to show as "
+                                  "the view root" % res.get("name", "cell"))
+            return
+        self._view_root = {"cell": res["cell"], "name": res["name"],
+                           "bbox": [float(v) for v in bbox],
+                           "height": res.get("height", 0)}
+        self._root_changed()
+        self._set_live_status(
+            "view root: %s (%s, Ctrl+Shift+T = back to the top cell)"
+            % (res["name"], self._depth_label_for_root()))
+
+    def _cell_root_top(self):
+        """Ctrl+Shift+T / Cell menu / `top`: back to the file's top cell."""
+        if self._view_root is None:
+            self._set_live_status("the top cell is the view root already")
+            return
+        self._view_root = None
+        self._root_changed()
+        self._set_live_status("view root: the top cell")
+
+    def _root_changed(self):
+        """The view root moved: nothing on screen or in flight belongs to
+        the new coordinates; fit the new die."""
+        self._minimap_bases = {}
+        self.last_frame = None
+        self._margin_frame = None
+        self._frame_anchor = None
+        self._clear_pending()
+        self._job_keys.clear()
+        self._cell_hl = None
+        self._cell_hl_key = None
+        w = self._cellwin
+        if w is not None:
+            w._top.set_sensitive(self._view_root is not None)
+        root = self._view_root
+        base = getattr(self, "_title_base", APP)
+        self.window.set_title(base if root is None
+                              else "%s · root %s" % (base, root["name"]))
+        self.fit()
+        # the highlight follows the selected cell into the new coordinates
+        self._cell_hl_query()
+
+    def _depth_label_for_root(self):
+        root = self._view_root
+        if root is None:
+            return "top"
+        return "%d level%s below" % (root["height"],
+                                     "" if root["height"] == 1 else "s")
+
     def _cell_hl_query(self):
         """Ask for the selected cell's instances in the current view
         (once per view: the key dedups the frame-landed follow-ups)."""
@@ -6334,13 +6472,15 @@ class Viewer:
             return
         src, ci, _name = self._cell_sel
         b = self.view_bbox()
-        key = (src, ci, tuple(int(round(v)) for v in b))
+        root = self._root_ci()
+        key = (src, ci, root, tuple(int(round(v)) for v in b))
         if key == self._cell_hl_key:
             return
         self._cell_hl_key = key
         self._cell_insts_seq = self._cell_query(
             "cell_insts", {"src": src, "cell": ci, "view": b,
-                           "cap": CELL_INSTS_CAP}, ("insts", key, src))
+                           "cap": CELL_INSTS_CAP, "root": root},
+            ("insts", key, src))
 
     def _cell_hl_follow(self):
         """A frame landed: the highlight follows the view it shows."""
@@ -9697,7 +9837,8 @@ class Viewer:
             return
         self.worker.submit({"kind": "clip",
                             "bbox": tuple(int(round(v)) for v in bbox),
-                            "layers": self._layers_arg(), "out": out})
+                            "layers": self._layers_arg(), "out": out,
+                            "root": self._root_ci()})
         self._set_live_status("clipping…")
 
     # ---- shutdown -------------------------------------------------------------

@@ -730,6 +730,106 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         w._tree.expand_row(store.get_path(mid), False)
         self.assertEqual(len(sent), asked + 1)
 
+    def test_view_root_moves_the_die_the_render_state_and_the_queries(self):
+        """SPEC-VIEWER §8c: the selected cell as the view root - the die
+        (fit, clamp, minimap) becomes its bbox, the render state and
+        every render/clip/cell query carry its index, the stale frame
+        and the margin go, and `top` returns everything."""
+        import types
+        from floe.gui import Viewer
+        v = Viewer.__new__(Viewer)
+        v.cache = types.SimpleNamespace(is_jobdeck=False)
+        v.meta = {"bbox": [0, 0, 20000, 12000], "dbu": 0.001}
+        v.dbu = 0.001
+        v.visible = {(1, 0)}
+        v._depth_key = lambda: 999
+        v._effective_cut_px = lambda: 3.0
+        v.lod_on = v.frames_on = v.labels_on = False
+        v._color_epoch = 0
+        v._effective_thin = lambda: "keep"
+        v._view_root = None
+        v._title_base = "floe - x"
+        v.window = types.SimpleNamespace(set_title=lambda t: titles.append(t))
+        titles = []
+        v._minimap_bases = {"stale": 1}
+        v.last_frame = ("frame",)
+        v._margin_frame = ("margin",)
+        v._frame_anchor = (1, 2)
+        v._job_keys = {3: "k"}
+        v._clear_pending = lambda: None
+        v._cell_hl = {"boxes": []}
+        v._cell_hl_key = "k"
+        v._cell_hl_on = True
+        # the panel: only what the root path touches
+        v._cellwin = types.SimpleNamespace(
+            _top=types.SimpleNamespace(set_sensitive=lambda on: None),
+            _info=types.SimpleNamespace(set_text=lambda t: None))
+        v._cell_sel = (0, 5, "BLK")
+        v._frontier_depths = [[[0, 0, 1, 1, 0]]]
+        v.depth_value = 0
+        fits, status, sent = [], [], []
+        v.fit = lambda: fits.append(v._die_bbox())
+        v._set_live_status = status.append
+        v.view_bbox = lambda: (0.0, 0.0, 100.0, 100.0)
+        v._cell_seq = 0
+        v._cell_pending = {}
+        v.worker = types.SimpleNamespace(alive=lambda: True,
+                                         submit=sent.append)
+        v._cell_insts_seq = None
+        plain_key = v._render_key("live")
+        self.assertIsNone(v._root_ci())
+        self.assertEqual(v._die_bbox(), [0, 0, 20000, 12000])
+        self.assertEqual(v._minimap_frontier_depth(), 0)
+        # Ctrl+T asks for the selected cell; the answer applies the root
+        v._cell_set_root()
+        self.assertEqual((sent[-1]["kind"], sent[-1]["cell"]), ("cells", 5))
+        self.assertEqual(v._cell_pending[sent[-1]["seq"]][0], "root_set")
+        v._on_cell_result({
+            "kind": "cells", "seq": sent[-1]["seq"], "found": True,
+            "src": 0, "cell": 5, "name": "BLK", "insts": 3, "height": 2,
+            "unit": 1000.0, "bbox": [0, 0, 5000, 4000], "total": 0,
+            "children": []})
+        self.assertEqual(v._root_ci(), 5)
+        self.assertEqual(v._die_bbox(), [0.0, 0.0, 5000.0, 4000.0])
+        self.assertEqual(fits, [[0.0, 0.0, 5000.0, 4000.0]])
+        self.assertIsNone(v._minimap_frontier_depth())
+        self.assertEqual(v._minimap_bases, {})
+        self.assertIsNone(v.last_frame)
+        self.assertIsNone(v._margin_frame)
+        self.assertEqual(v._job_keys, {})
+        self.assertNotEqual(v._render_key("live"), plain_key)
+        self.assertEqual(titles[-1], "floe - x · root BLK")
+        self.assertIn("view root: BLK", status[-1])
+        # the highlight was re-asked under the root
+        self.assertEqual(sent[-1]["kind"], "cell_insts")
+        self.assertEqual(sent[-1]["root"], 5)
+        # the same root again is a no-op; a shapeless cell is refused
+        n = len(sent)
+        v._cell_set_root()
+        self.assertEqual(len(sent), n)
+        v._cell_sel = (0, 7, "EMPTY")
+        v._cell_set_root()
+        v._on_cell_result({
+            "kind": "cells", "seq": sent[-1]["seq"], "found": True,
+            "src": 0, "cell": 7, "name": "EMPTY", "insts": 3, "height": 0,
+            "unit": 1000.0, "bbox": None, "total": 0, "children": []})
+        self.assertEqual(v._root_ci(), 5)
+        self.assertIn("no shapes", status[-1])
+        # back to the top
+        v._cell_root_top()
+        self.assertIsNone(v._root_ci())
+        self.assertEqual(v._die_bbox(), [0, 0, 20000, 12000])
+        self.assertEqual(v._render_key("live"), plain_key)
+        self.assertEqual(titles[-1], "floe - x")
+        self.assertEqual(len(fits), 2)
+        # a jobdeck has no view root
+        v.cache = types.SimpleNamespace(is_jobdeck=True)
+        v._cell_sel = (0, 5, "BLK")
+        n = len(sent)
+        v._cell_set_root()
+        self.assertEqual(len(sent), n)
+        self.assertIn("jobdeck", status[-1])
+
     def test_menus_and_dialogs_hand_the_keys_back_to_the_canvas(self):
         """Field 2026-09-05: after using a menu, g and the other key
         commands stayed dead until a canvas click. _focus_view puts the
@@ -1150,6 +1250,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIn("round_paths=1", commands[0])
             self.assertIn("jobs=3 decode_jobs=4 tile_px=384", commands[0])
             self.assertIn("round_pages=%d" % (1 << 30), commands[0])
+            # the view root (SPEC-VIEWER §8c) travels only when set
+            self.assertNotIn(" root=", commands[0])
+            worker._submit_render(dict(job, gen=98, root=17))
+            rooted = commands.pop()
+            self.assertTrue(rooted.endswith(" root=17"), rooted)
             self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
             # the page hairline policy rides with every frame; a plain
@@ -1544,7 +1649,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                     {"kind": "cell_find", "seq": 14, "src": 1},
                     {"kind": "cell_bbox", "seq": 15, "cell": 9},
                     {"kind": "cell_insts", "seq": 16, "src": 1, "cell": 9,
-                     "view": (0, -5, 10.5, 20), "cap": 7}):
+                     "view": (0, -5, 10.5, 20), "cap": 7},
+                    {"kind": "cell_bbox", "seq": 17, "cell": 9, "root": 3},
+                    {"kind": "cell_insts", "seq": 18, "cell": 9,
+                     "view": (0, 0, 1, 1), "root": 3}):
                 self.assertIn(job["kind"], CELL_QUERY_KINDS)
                 worker._submit_cell_query(job)
             self.assertEqual(commands, [
@@ -1557,6 +1665,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "cell_bbox seq=15 src=0 cell=9",
                 "cell_insts seq=16 src=1 cell=9 view=0.0,-5.0,10.5,20.0 "
                 "cap=7",
+                "cell_bbox seq=17 src=0 cell=9 root=3",
+                "cell_insts seq=18 src=0 cell=9 view=0.0,0.0,1.0,1.0 "
+                "cap=4096 root=3",
             ])
             path = "/caches/.a b.oas.ice"
             kind, fields = _parse_wire_line(

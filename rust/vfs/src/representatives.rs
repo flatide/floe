@@ -1369,6 +1369,7 @@ mod tests {
             shape_cut: false,
             shape_cut_max: false,
             frames: true,
+            root: None,
             page_wash: true,
             lod_swap: true,
         }
