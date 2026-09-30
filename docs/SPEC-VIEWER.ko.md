@@ -183,7 +183,7 @@
   clip·copy·quit) /
   View(fit·줌·goto·detail·depth·토글 체크 5종·오버레이 순환) /
   Cell(셀 트리·검색 `t`, 선택 셀로 줌, 인스턴스 하이라이트 체크,
-  하이라이트 해제, 선택 셀을 뷰 루트로 `Ctrl+T`·탑으로 `Ctrl+Shift+T`,
+  하이라이트 해제, 선택 셀을 뷰 루트로(키 없음 — Ctrl+T는 2026-09-30 삭제)·탑으로 `Ctrl+Shift+T`,
   셀 인덱스 빌드 — §8c) /
   Ruler(모드·스냅 체크, 삭제/전체 삭제) / DRC(open .db·SVRF rules·
   n/p·waive·박스선택 체크). 항목은 키와 **같은 핸들러**를 호출하고
@@ -516,8 +516,10 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   소스 좌표로 들어간다(render-core `DeckXf`). 소스가 여러 곳에 놓이면
   박스도 그만큼.
 - **뷰 루트**(2026-09-29, 0.12.241 / RENDERD 0.12.229 — Calibre 셀
-  트리의 "선택한 셀이 표시되는 탑이 된다"): `Ctrl+T` · Cell 메뉴 ·
-  패널 `root` 버튼이 **선택한 셀을 뷰 루트**로 삼고, `Ctrl+Shift+T` ·
+  트리의 "선택한 셀이 표시되는 탑이 된다"): Cell 메뉴 · 패널 `root`
+  버튼이 **선택한 셀을 뷰 루트**로 삼고(Ctrl+T 키는 사용자 요청으로
+  2026-09-30 삭제, 0.12.254 — 눌러도 아무 일 없음, 평문 `t`의 트리 포커스로
+  흘러가지도 않음; 계약 `test_ctrl_t_is_no_shortcut`), `Ctrl+Shift+T` ·
   메뉴 · `top` 버튼(루트일 때만 활성)이 탑 셀로 돌아온다. 뷰 루트가
   서면 그 셀의 **자기 좌표**가 세계가 된다: 플래너(`ViewReq::root`,
   `PlanRequest::root`, 와이어 `render … root=CI`)가 그 셀에서 출발하고

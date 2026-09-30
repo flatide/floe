@@ -4624,8 +4624,6 @@ class Viewer:
             self._jobdeck_toggle_view()         # Ctrl+, level <-> chip
         elif ctrl and name in ("c", "C"):
             self._copy_view()                   # view -> clipboard
-        elif ctrl and name == "t":
-            self._cell_set_root()               # selected cell as view root
         elif ctrl and name == "T":
             self._cell_root_top()               # Ctrl+Shift+T: back to top
         elif name == "f":
@@ -4660,7 +4658,10 @@ class Viewer:
             self._detail_dialog()
         elif name == "g":
             self._goto_dialog()
-        elif name == "t":
+        elif name == "t" and not ctrl:
+            # (Ctrl+T - the view root - was removed, user 2026-09-30: the
+            # Cell menu and the panel's `root` button set it; Ctrl+T does
+            # nothing, it does not fall through to the tree's focus)
             self._cell_tree_focus()
         elif name == "less":
             self._depth_step(-1)
@@ -5422,7 +5423,7 @@ class Viewer:
               lambda: self._cell_hl_on)
         item(m, "clear highlight\tEsc", self._cell_hl_clear)
         sep(m)
-        item(m, "selected cell as view root\tCtrl+T", self._cell_set_root)
+        item(m, "selected cell as view root", self._cell_set_root)
         item(m, "view root: back to the top cell\tCtrl+Shift+T",
              self._cell_root_top)
         sep(m)
@@ -6156,8 +6157,7 @@ class Viewer:
         # the view root (SPEC-VIEWER §8c): draw the selected cell as the
         # top, in its own coordinates; `top` returns to the file's top
         root = Gtk.Button(label="root")
-        root.set_tooltip_text("draw the selected cell as the view root "
-                              "(Ctrl+T)")
+        root.set_tooltip_text("draw the selected cell as the view root")
         root.connect("clicked", lambda *_: self._cell_set_root())
         row.add(root)
         top = Gtk.Button(label="top")
@@ -6498,7 +6498,7 @@ class Viewer:
         return None if root is None else root["cell"]
 
     def _cell_set_root(self):
-        """Ctrl+T / Cell menu / `root`: draw the selected cell as the
+        """Cell menu / `root` button: draw the selected cell as the
         view root (Calibre's cell tree: the selected cell becomes the
         displayed top). Its recursive bbox comes with a `cells` answer;
         the root is applied when it lands."""

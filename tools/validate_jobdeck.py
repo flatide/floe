@@ -1563,6 +1563,33 @@ class JobdeckShortcutTests(unittest.TestCase):
         gui.Viewer._on_key(stub, None, ev)
         return calls, notes
 
+    def test_ctrl_t_is_no_shortcut(self):
+        """User 2026-09-30: Ctrl+T (the selected cell as the view root) was
+        removed - the Cell menu and the panel's `root` button set it. Ctrl+T
+        neither sets the root nor falls through to the plain `t` (the cell
+        tree's focus), and is left unhandled; `t` still focuses the tree and
+        Ctrl+Shift+T still returns to the top cell."""
+        import types
+        from gi.repository import Gdk
+        from floe import gui
+        gui.import_gtk()
+        calls = []
+        stub = types.SimpleNamespace(
+            _gdlg=None,
+            window=types.SimpleNamespace(get_focus=lambda: None),
+            _cell_set_root=lambda: calls.append("root"),
+            _cell_tree_focus=lambda: calls.append("tree"),
+            _cell_root_top=lambda: calls.append("top"),
+        )
+        stub._command_key = lambda ev: gui.Viewer._command_key(stub, ev)
+        press = lambda keyval, state: gui.Viewer._on_key(
+            stub, None, types.SimpleNamespace(keyval=keyval, state=state, hardware_keycode=0))
+        self.assertFalse(press(Gdk.KEY_t, Gdk.ModifierType.CONTROL_MASK))
+        self.assertEqual(calls, [])
+        press(Gdk.KEY_t, 0)
+        press(Gdk.KEY_T, Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK)
+        self.assertEqual(calls, ["tree", "top"])
+
     def test_ctrl_comma_toggles_level_and_chip_view(self):
         self.assertEqual(self._press_ctrl_comma("level")[0], ["chip"])
         self.assertEqual(self._press_ctrl_comma("chip")[0], ["level"])

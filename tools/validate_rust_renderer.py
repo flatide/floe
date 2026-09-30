@@ -1054,7 +1054,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertIsNone(v._root_ci())
         self.assertEqual(v._die_bbox(), [0, 0, 20000, 12000])
         self.assertEqual(v._minimap_frontier_depth(), 0)
-        # Ctrl+T asks for the selected cell; the answer applies the root
+        # the `root` button asks for the selected cell; the answer applies the root
         v._cell_set_root()
         self.assertEqual((sent[-1]["kind"], sent[-1]["cell"]), ("cells", 5))
         self.assertEqual(v._cell_pending[sent[-1]["seq"]][0], "root_set")
