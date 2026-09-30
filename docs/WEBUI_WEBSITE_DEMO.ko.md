@@ -34,7 +34,9 @@ render key/revision 일치 검사는 그대로 유지한다. 연결 해제·hidd
 최종 프레임이 incomplete인 경우에는 그 상태를 문구로 알리고 커서를 계속 기다리게 하지 않는다.
 표시·입력·대기 커서와 Display/Goto 조작부 정의는 일반 웹/Electron과 공통 코드다.
 인증·제한 기능만 별도 어댑터로 유지한다. [공통 뷰어 계약](WEBUI_SHARED_VIEWER.ko.md) 참고.
-전체 Electron UI의 레이어 패널·셀 트리·측정·pick/snap은 이 경로에 연결하지 않았다.
+2026-09-30부터 레이어 패널·minimap·palette와 셀 트리(검색·강조·zoom·view root)도 같은 배치로 제공한다
+([GTK 배치 §4](WEBUI_GTK_LAYOUT.ko.md)). 셀 이름은 공개 샘플의 일부로 노출된다. 측정·pick/snap·DRC는
+여전히 이 경로에 연결하지 않는다.
 큰 DPR 화면은 내부 렌더 해상도를 제한해 표시한다.
 
 파일 업로드·서버 탐색·인덱싱·DRC 읽기/쓰기·원본/clip 내보내기·공유 기본값·초대

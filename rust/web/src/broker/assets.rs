@@ -96,6 +96,10 @@ pub(super) fn asset(bundle: &str, name: &str) -> Response {
             "text/javascript; charset=utf-8",
             include_str!("../../ui/panes.js"),
         ),
+        "cells.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("../../ui/cells.js"),
+        ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     ([(header::CONTENT_TYPE, mime)], body).into_response()

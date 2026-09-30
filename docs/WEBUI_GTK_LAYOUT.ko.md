@@ -112,19 +112,19 @@ valmini의 `cell_sources`/`cells`/`cell_find`/`cell_bbox`/`cell_insts`/`render r
 ## 4. 회사 데모 페이지(`server.html`)
 
 같은 배치를 쓰되 파일 열기·색인·DRC·측정·clip·설정 저장·공유 기본값은 **마운트하지도
-표시하지도 않는다.** `build.rs`가 `index.html`의 canonical 블록 4개(`floe-view-controls`,
-`floe-view-toolbar`, 새 `floe-right-pane`, `floe-layer-menu`, `floe-layer-tools`)를
+표시하지도 않는다.** `build.rs`가 `index.html`의 canonical 블록(`floe-view-controls`,
+`floe-view-toolbar`, `floe-right-pane`, `floe-layer-menu`, `floe-layer-tools`, `floe-cells-page`)을
 `server-` 접두어(id/for/aria-controls/aria-labelledby/aria-describedby)로 주입한다.
 
 ```text
 header  floe2 [DEMO] · 세션 상태 · Reconnect · End my session · Samples
-nav     File(Samples… · Reconnect · End my session) | View(소유자와 동일, overlays 제외)
-canvas + 오른쪽 layers/minimap/palette pane (왼쪽 cells/DRC pane 없음)
+nav     File(Samples… · Reconnect · End my session) | View(소유자와 동일, overlays 제외) | Cell
+왼쪽 cells pane(셀 트리만; DRC·inspect 탭 없음) + canvas + 오른쪽 layers/minimap/palette pane
 status  frame status | view 크기 · depth/detail 행 · 아래 세션 주체 행
 ```
 
 데모 클라이언트(`server.js`)는 공통 모듈(`palette.js`, `presets.js`, `fill-editor.js`,
-`minimap.js`, `menubar.js`, `panes.js`)을 `server-` 접두 `el`로 바인딩하고, 이들이
+`minimap.js`, `menubar.js`, `panes.js`, `cells.js`)을 `server-` 접두 `el`로 바인딩하고, 이들이
 부르는 소유자 경로를 **자기 세션의 읽기 전용 경로로만** 매핑한다:
 
 | 소유자 경로 | 데모 세션 경로 | 응답 |
@@ -133,6 +133,14 @@ status  frame status | view 크기 · depth/detail 행 · 아래 세션 주체 �
 | `GET /api/v1/views/{id}/minimap/{base}` | `GET …/minimap/{base}` | 같은 180×180 palette 문자열 |
 | `GET /api/v1/views/{id}/fill-slots/{key}` | `GET …/fill-slots/{key}` | `editable:false`의 세션 슬롯 표 |
 | `GET /api/v1/palette/presets` | `GET …/presets` | 번들 49색/20채움 |
+| `POST /api/v1/views/{id}/cells` | `POST …/cells` | 같은 셀 트리 DTO(소유자와 공통 `cells.rs`), 소스 이름은 `source N` |
+
+셀 트리(2026-09-30 추가)는 소유자와 같은 기능이다: 검색·펼침·선택 강조·zoom·view root(Ctrl+T/
+Ctrl+Shift+T, Cell 메뉴). 질의는 세션 자신의 뷰 worker에만 가며 `ViewController::cell_ticket`으로
+세션 레지스트리 lock 안에서는 ticket만 받고, 응답 대기는 lock 밖(`spawn_blocking`, 15초)에서 한다.
+view root도 WS `view.set`의 `root`로 가며 해결(`root_ticket`)은 같은 방식, 확정은 일반 편집 CAS다.
+셀 이름은 공개 승인된 샘플의 일부로 노출된다(파일·캐시 경로는 노출하지 않음). 색인 요약 빌드
+제안(`build cell index…`)은 데모에 없다. 회신은 8 MiB(자식 20 000행 상한)까지 허용한다.
 
 레이어 표시/스타일 편집은 이미 허용된 WS `view.set`(`PatchDto`)로만 간다. 비트맵 슬롯
 편집·소유자 파일/쓰기 경로는 계속 없다. `tools/web_permissions.json`에 위 경로를
@@ -229,7 +237,7 @@ status  frame status | view 크기 · depth/detail 행 · 아래 세션 주체 �
 - 색인 요약 빌드(`floe-index hier`)를 웹 승인 경로로 제공하지 않았다. `build cell index…`
   버튼은 안내만 하며 비활성이다.
 - GTK와 다른 점: inspect 탭(웹 전용 pick/snap/ruler 조작부), Goto/zoom toolbar 행 유지,
-  Registered sources/Index 대화상자(웹 전용 등록 소스), Overlays 항목. 데모에는 왼쪽
-  pane이 없다.
+  Registered sources/Index 대화상자(웹 전용 등록 소스), Overlays 항목. 데모의 왼쪽 pane에는
+  cells 탭만 있다(DRC·inspect 없음).
 - 실제 RHEL/ETX/Electron 화면 수용, 회사 서버 배포는 별도다. UI가 실행 파일에 내장되므로
   `floe2-web` 재빌드·교체·재시작이 필요하다.

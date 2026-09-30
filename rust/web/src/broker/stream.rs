@@ -11,7 +11,7 @@ use axum::{
     http::HeaderMap,
 };
 use bytes::Bytes;
-use floe_app_core::view::{Model, Snapshot};
+use floe_app_core::view::{Model, RootEdit, Snapshot};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -115,7 +115,7 @@ pub(super) fn csrf(headers: &HeaderMap) -> Option<String> {
 fn snapshot(s: &Snapshot, m: &Model, id: &str, epoch: &str) -> Value {
     let mut value = view::snapshot(s, m, id, epoch);
     // DTO reuse must not advertise the standalone owner's unmounted APIs.
-    for name in ["query", "clip", "mode", "cells", "cell_root"] {
+    for name in ["query", "clip", "mode"] {
         value["capabilities"][name] = json!(false);
     }
     value
@@ -362,9 +362,25 @@ pub(super) async fn socket(
                         if connection_epoch!=epoch || view_id!=access.id() {break}
                         let Ok(base)=view::counter(&base_state_rev) else {break};
                         if tx.capacity()<2 {break}
-                        // A root resolves against the worker's cell tree
-                        // and would block this loop; the demo has no tree.
-                        let result=body.core().map_err(|_|Error::Invalid).and_then(|p|if p.root.is_some(){Err(Error::Invalid)}else{runtime.edit(&access,base,p)});
+                        // A root cell resolves against the worker's cell tree:
+                        // the ticket is taken under the registry lock, the wait
+                        // runs off the reactor, the resolved root commits under
+                        // the same revision CAS as any other edit.
+                        let result=match body.core().map_err(|_|Error::Invalid) {
+                            Ok(mut p)=>match p.root {
+                                Some(RootEdit::Cell{source,cell})=>match runtime.root_ticket(&access,source,cell) {
+                                    Ok(ticket)=>match tokio::task::spawn_blocking(move||ticket.root()).await {
+                                        Ok(Ok(root))=>{p.root=Some(RootEdit::Resolved(root));runtime.edit(&access,base,p)},
+                                        Ok(Err(e)) if e.kind==floe_app_core::ErrorKind::Busy=>Err(Error::Busy),
+                                        Ok(Err(_))=>Err(Error::Invalid),
+                                        Err(_)=>Err(Error::Unavailable),
+                                    },
+                                    Err(e)=>Err(e),
+                                },
+                                _=>runtime.edit(&access,base,p),
+                            },
+                            Err(e)=>Err(e),
+                        };
                         let Ok(next)=state(&runtime,&access,&epoch) else {break};
                         let event=match result {
                             Ok(())=>json!({"type":"accepted","seq":seq,"state_rev":next["state_rev"],"render_rev":next["render_rev"]}),

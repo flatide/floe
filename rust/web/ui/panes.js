@@ -11,7 +11,10 @@
         const dialogs = {};
         let active = null;
         function notebook(name, tabs, initial) {
-            if (tabs.some(function (t) { return !el(t.tab) || !el(t.page); })) { return null; }
+            // A shell may carry only some pages (the demo has cells only).
+            tabs = tabs.filter(function (t) { return el(t.tab) && el(t.page); });
+            if (!tabs.length) { return null; }
+            if (!tabs.some(function (t) { return t.page === initial; })) { initial = tabs[0].page; }
             const nb = {name: name, tabs: tabs, current: null};
             tabs.forEach(function (t) {
                 el(t.tab).onclick = function () { select(nb, t.page); };

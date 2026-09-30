@@ -10,7 +10,7 @@ use floe_app_core::{
     registered::{AccessScope, RegisteredSource},
     render::RenderOptions,
     server::Config,
-    view::{Navigation, Patch},
+    view::{CellReply, CellRequest, Navigation, Patch, RootEdit},
 };
 use floe_oasis::{
     doc::{RectRec, Rep},
@@ -277,6 +277,56 @@ fn two_users_share_index_bytes_not_view_state_or_cancellation() {
         runtime.latest(&c).unwrap().unwrap().frame.bytes,
         bf.frame.bytes
     );
+    // The public demo's cell tree: questions answer from the session's own
+    // view, and a resolved view root commits as an ordinary revisioned edit
+    // of that view only.
+    let wait = Duration::from_secs(15);
+    let Ok(CellReply::Sources(sources)) = runtime
+        .cell_request(&a, CellRequest::Sources)
+        .unwrap()
+        .wait(wait)
+        .unwrap()
+    else {
+        panic!("sources")
+    };
+    assert_eq!(sources.len(), 1);
+    let Ok(CellReply::Children { cell, name, .. }) = runtime
+        .cell_request(
+            &a,
+            CellRequest::Children {
+                source: 0,
+                cell: None,
+            },
+        )
+        .unwrap()
+        .wait(wait)
+        .unwrap()
+    else {
+        panic!("children")
+    };
+    assert_eq!(name, "TOP");
+    let root = runtime.root_ticket(&a, 0, cell).unwrap().root().unwrap();
+    let s = runtime.snapshot(&a).unwrap().unwrap();
+    runtime
+        .edit(
+            &a,
+            s.state_rev,
+            Patch {
+                root: Some(RootEdit::Resolved(root)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    until(|| {
+        runtime
+            .latest(&a)
+            .unwrap()
+            .is_some_and(|f| f.render_rev > s.render_rev)
+    });
+    let rooted = runtime.snapshot(&a).unwrap().unwrap();
+    assert_eq!(rooted.state.root.as_ref().map(|r| r.cell), Some(cell));
+    assert_ne!(rooted.render_key, s.render_key);
+    assert_eq!(runtime.snapshot(&c).unwrap().unwrap().state.root, None);
     assert_eq!(
         files(&f.0.join("data")),
         data_before,

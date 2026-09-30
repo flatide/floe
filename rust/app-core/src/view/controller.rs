@@ -230,6 +230,49 @@ pub struct ViewController {
     configuration: ControllerOptions,
 }
 
+/// One queued cell question (ViewController::cell_ticket). Waiting never
+/// holds the control lock; dropping it abandons the answer.
+pub struct CellWait {
+    id: u64,
+    reply: mpsc::Receiver<Result<CellOutcome>>,
+    shared: Arc<Mutex<Shared>>,
+}
+impl CellWait {
+    pub fn wait(self, timeout: Duration) -> Result<CellOutcome> {
+        match self.reply.recv_timeout(timeout) {
+            Ok(outcome) => outcome,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Never submit a question nobody waits for; one already on
+                // the worker just loses its listener.
+                self.shared
+                    .lock()
+                    .unwrap()
+                    .cells
+                    .pending
+                    .retain(|t| t.id != self.id);
+                Err(Error::new(ErrorKind::Busy, CELL_TIMEOUT))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::new(
+                ErrorKind::Worker,
+                "view closed before the cell reply",
+            )),
+        }
+    }
+    /// A root_ticket's answer as the root it names.
+    pub fn root(self) -> Result<Root> {
+        match self.wait(ROOT_RESOLVE_TIMEOUT)? {
+            Ok(CellReply::Children {
+                cell, name, bbox, ..
+            }) => {
+                let bbox = bbox.ok_or_else(|| Error::input(CELL_WITHOUT_SHAPES))?;
+                Ok(Root { cell, name, bbox })
+            }
+            Ok(_) => Err(Error::new(ErrorKind::Worker, "cell reply kind mismatch")),
+            Err(failure) => Err(cell_failure(failure)),
+        }
+    }
+}
+
 /// Admission before potentially expensive dataset preparation. Owns no child
 /// yet; start transfers the SAME permit to the controller through child reap.
 pub struct ReservedView {
@@ -703,79 +746,63 @@ impl ViewController {
     /// waiting. Bounded: MAX_PENDING_CELLS tickets, else Busy. A daemon
     /// refusal (no summary, unknown cell) is the Ok(Err) arm, not an error.
     pub fn cell_query(&self, request: CellRequest, timeout: Duration) -> Result<CellOutcome> {
+        self.cell_ticket(request)?.wait(timeout)
+    }
+    /// The queueing half of cell_query. A host that must not hold its own
+    /// locks across the answer (a server session registry) takes the ticket
+    /// under them and waits after releasing them.
+    pub fn cell_ticket(&self, request: CellRequest) -> Result<CellWait> {
         let (tx, rx) = mpsc::sync_channel(1);
-        let id = {
-            let mut s = self.shared.lock().unwrap();
-            if self.stop.load(Ordering::Relaxed) != 0
-                || matches!(s.snapshot.phase, Phase::Closed | Phase::Failed)
-            {
-                return Err(Error::new(
-                    ErrorKind::Worker,
-                    "view is closed or failed; reopen required",
-                ));
-            }
-            if s.snapshot.phase == Phase::Opening {
-                return Err(Error::new(ErrorKind::Busy, "view is still opening"));
-            }
-            if self.model.deck && request.root().is_some() {
-                return Err(Error::new(ErrorKind::Unsupported, ROOT_UNSUPPORTED));
-            }
-            if s.cells.len() >= MAX_PENDING_CELLS {
-                return Err(Error::new(ErrorKind::Busy, "cell query queue is full"));
-            }
-            let id = s
-                .cells
-                .accepted
-                .checked_add(1)
-                .ok_or_else(|| Error::input("cell ticket exhausted"))?;
-            s.cells.accepted = id;
-            s.cells.pending.push_back(CellTicket {
-                id,
-                request,
-                reply: tx,
-            });
-            id
-        };
-        match rx.recv_timeout(timeout) {
-            Ok(outcome) => outcome,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Never submit a question nobody waits for; one already on
-                // the worker just loses its listener.
-                self.shared
-                    .lock()
-                    .unwrap()
-                    .cells
-                    .pending
-                    .retain(|t| t.id != id);
-                Err(Error::new(ErrorKind::Busy, CELL_TIMEOUT))
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::new(
+        let mut s = self.shared.lock().unwrap();
+        if self.stop.load(Ordering::Relaxed) != 0
+            || matches!(s.snapshot.phase, Phase::Closed | Phase::Failed)
+        {
+            return Err(Error::new(
                 ErrorKind::Worker,
-                "view closed before the cell reply",
-            )),
+                "view is closed or failed; reopen required",
+            ));
         }
+        if s.snapshot.phase == Phase::Opening {
+            return Err(Error::new(ErrorKind::Busy, "view is still opening"));
+        }
+        if self.model.deck && request.root().is_some() {
+            return Err(Error::new(ErrorKind::Unsupported, ROOT_UNSUPPORTED));
+        }
+        if s.cells.len() >= MAX_PENDING_CELLS {
+            return Err(Error::new(ErrorKind::Busy, "cell query queue is full"));
+        }
+        let id = s
+            .cells
+            .accepted
+            .checked_add(1)
+            .ok_or_else(|| Error::input("cell ticket exhausted"))?;
+        s.cells.accepted = id;
+        s.cells.pending.push_back(CellTicket {
+            id,
+            request,
+            reply: tx,
+        });
+        Ok(CellWait {
+            id,
+            reply: rx,
+            shared: Arc::clone(&self.shared),
+        })
     }
     /// The root cell's name and recursive bbox (its own coordinates) from
     /// the daemon's cell tree. A jobdeck has no root; a cell without shapes
     /// has no die to fit.
     pub fn resolve_root(&self, source: usize, cell: u32) -> Result<Root> {
+        self.root_ticket(source, cell)?.root()
+    }
+    /// The queueing half of resolve_root; `CellWait::root` waits for it.
+    pub fn root_ticket(&self, source: usize, cell: u32) -> Result<CellWait> {
         if self.model.deck {
             return Err(Error::new(ErrorKind::Unsupported, ROOT_UNSUPPORTED));
         }
-        let request = CellRequest::Children {
+        self.cell_ticket(CellRequest::Children {
             source,
             cell: Some(cell),
-        };
-        match self.cell_query(request, ROOT_RESOLVE_TIMEOUT)? {
-            Ok(CellReply::Children {
-                cell, name, bbox, ..
-            }) => {
-                let bbox = bbox.ok_or_else(|| Error::input(CELL_WITHOUT_SHAPES))?;
-                Ok(Root { cell, name, bbox })
-            }
-            Ok(_) => Err(Error::new(ErrorKind::Worker, "cell reply kind mismatch")),
-            Err(failure) => Err(cell_failure(failure)),
-        }
+        })
     }
     /// Freeze exact clip bounds and the current visible selection on an
     /// authenticated displayed receipt. The gateway checks that receipt's

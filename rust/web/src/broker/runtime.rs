@@ -7,8 +7,8 @@ use floe_app_core::{
     managed::{ManagedDataset, Resources},
     render::RenderOptions,
     view::{
-        ControllerOptions, DisplayFrame, Model, Patch, ReservedView, Snapshot, ViewController,
-        ViewState, Viewport,
+        CellRequest, CellWait, ControllerOptions, DisplayFrame, Model, Patch, ReservedView,
+        Snapshot, ViewController, ViewState, Viewport,
     },
     ErrorKind,
 };
@@ -221,8 +221,45 @@ impl Runtime {
             if state.fill_slots_key() != key {
                 return Err(Error::Invalid);
             }
-            Ok(serde_json::json!({"version":1,"view_id":access.id(),"fill_slots_key":key,
-                "editable":false,"fills":state.fill_slots()}))
+            Ok(
+                serde_json::json!({"version":1,"view_id":access.id(),"fill_slots_key":key,
+                "editable":false,"fills":state.fill_slots()}),
+            )
+        })
+    }
+    /// One cell-tree question for the session's own view. Only the ticket is
+    /// taken under the registry lock; the caller waits for the answer after
+    /// release (off the reactor), so a slow tree never stalls other sessions.
+    /// Extents and instance walks count under the displayed root, as its frame.
+    pub(crate) fn cell_ticket(
+        &self,
+        access: &Access,
+        question: crate::cells::Question,
+    ) -> Result<CellWait> {
+        self.with_view(access, |view| {
+            let view = view.ok_or(Error::Invalid)?;
+            let root = view.snapshot().state.root.map(|r| r.cell);
+            let request = question
+                .core(access.id(), root)
+                .map_err(|_| Error::Invalid)?;
+            view.cell_ticket(request).map_err(core_error)
+        })
+    }
+    /// A cell question already in core form (its root chosen by the caller).
+    pub fn cell_request(&self, access: &Access, request: CellRequest) -> Result<CellWait> {
+        self.with_view(access, |view| {
+            view.ok_or(Error::Invalid)?
+                .cell_ticket(request)
+                .map_err(core_error)
+        })
+    }
+    /// The queueing half of a root edit: the edit that commits the resolved
+    /// root is a separate, non-blocking `edit`.
+    pub fn root_ticket(&self, access: &Access, source: usize, cell: u32) -> Result<CellWait> {
+        self.with_view(access, |view| {
+            view.ok_or(Error::Busy)?
+                .root_ticket(source, cell)
+                .map_err(core_error)
         })
     }
     pub fn latest(&self, access: &Access) -> Result<Option<Arc<DisplayFrame>>> {

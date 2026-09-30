@@ -20,8 +20,8 @@ use crate::{
     Error, ErrorKind, Result,
 };
 pub use controller::{
-    cell_failure, ControllerOptions, DisplayFrame, MarginStatus, Phase, PreparedReplacement,
-    Purpose, ReservedView, Snapshot, ViewController,
+    cell_failure, CellWait, ControllerOptions, DisplayFrame, MarginStatus, Phase,
+    PreparedReplacement, Purpose, ReservedView, Snapshot, ViewController,
 };
 pub use fill_slots::FillSlotEdit;
 pub use floe_worker_client::{

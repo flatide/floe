@@ -40,8 +40,12 @@ fn router(host: Host) -> Router {
         .route("/api/v1/server/sessions/{id}/stream", get(upgrade))
         .route("/api/v1/server/sessions/{id}/palette", post(palette))
         .route("/api/v1/server/sessions/{id}/minimap/{base}", get(minimap))
-        .route("/api/v1/server/sessions/{id}/fill-slots/{key}", get(fill_slots))
+        .route(
+            "/api/v1/server/sessions/{id}/fill-slots/{key}",
+            get(fill_slots),
+        )
         .route("/api/v1/server/sessions/{id}/presets", get(presets))
+        .route("/api/v1/server/sessions/{id}/cells", post(cells))
         .layer(DefaultBodyLimit::max(4096))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&host.broker),
@@ -374,12 +378,45 @@ async fn fill_slots(
     let Some(runtime) = host.runtime else {
         return error(Error::Unavailable);
     };
-    if key.len() != 40 || !key.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+    if key.len() != 40
+        || !key
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         return error(Error::Invalid);
     }
     match runtime.fill_slots(&access, &key) {
         Ok(v) => Json(v).into_response(),
         Err(e) => error(e),
+    }
+}
+/// The session's cell tree (rust/web/ui/cells.js). A public sample is
+/// approved as a whole, its cell names included; sources are named by index.
+async fn cells(
+    State(host): State<Host>,
+    RoutePath(id): RoutePath<String>,
+    headers: HeaderMap,
+    body: Input<crate::cells::Question>,
+) -> Response {
+    let access = match host.broker.authorize(&id, &headers, Instant::now()) {
+        Ok(a) => a,
+        Err(e) => return error(e),
+    };
+    let Ok(Json(question)) = body else {
+        return error(Error::Invalid);
+    };
+    let Some(runtime) = host.runtime else {
+        return error(Error::Unavailable);
+    };
+    let ticket = match runtime.cell_ticket(&access, question) {
+        Ok(t) => t,
+        Err(e) => return error(e),
+    };
+    match tokio::task::spawn_blocking(move || ticket.wait(crate::cells::TIMEOUT)).await {
+        Ok(Ok(Ok(reply))) => Json(crate::cells::reply(reply, true)).into_response(),
+        Ok(Ok(Err(refusal))) => crate::cells::refusal(refusal),
+        Ok(Err(e)) if e.kind == floe_app_core::ErrorKind::Busy => error(Error::Busy),
+        _ => error(Error::Unavailable),
     }
 }
 async fn presets(

@@ -6,6 +6,7 @@ mod assets;
 pub mod auth;
 pub mod broker;
 pub mod browse;
+mod cells;
 mod defaults;
 mod display_test;
 pub mod drc;

@@ -106,7 +106,8 @@
             el('cells-top').disabled = !available() || !rootName;
             search.disabled = !available();
             el('cells-highlight').disabled = !available();
-            el('cells-build').hidden = !available() || hier;
+            // A shell without an index path (the public demo) never offers one.
+            el('cells-build').hidden = !available() || hier || port.buildOffered === false;
             el('cells-build').disabled = !available() || !port.buildAllowed();
             tree.setAttribute('aria-busy', String(busy > 0));
         }
@@ -232,6 +233,7 @@
             const w = size.pixels[0], h = size.pixels[1], dpr = size.dpr || 1;
             if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
             canvas.style.width = (w / dpr) + 'px'; canvas.style.height = (h / dpr) + 'px';
+            canvas.style.left = (size.left || 0) + 'px'; canvas.style.top = (size.top || 0) + 'px';
             const ctx = canvas.getContext('2d'); ctx.clearRect(0, 0, w, h);
             const b = highlight.bbox, sx = w / (b[2] - b[0]), sy = h / (b[3] - b[1]), min = 7 * dpr;
             ctx.strokeStyle = '#40e0ff'; ctx.lineWidth = 2 * dpr;

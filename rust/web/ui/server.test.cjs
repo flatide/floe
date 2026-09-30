@@ -56,6 +56,11 @@ function environment(options={}) {
                 else if(this.path===base+'/view'){if(this.method==='POST'){opened=true;status=202;data={status:'opening',view_id:id};}else{data=opened?state():{type:'unopened',view_id:id};}}
                 else if(this.path===base+'/palette'){assert.equal(this.method,'POST');assert.equal(value.kind,'page');data={state_rev:'1',render_key:'1',total:0,all_total:0,start:value.start,next:null,rows:[]};}
                 else if(this.path===base+'/presets'||this.path.startsWith(base+'/minimap/')||this.path.startsWith(base+'/fill-slots/')){status=404;data={error:'unavailable'};}
+                else if(this.path===base+'/cells'){assert.equal(this.method,'POST');assert.equal(value.view_id,id);data=({
+                    sources:{sources:[{src:0,placements:1,name:'source 0'}]},
+                    children:{cell:7,name:'TOP',insts:1,height:2,unit:0.001,bbox:[0,0,64,32],n:2,total:2,children:[{ci:1,members:4,leaf:false,name:'BLK'},{ci:2,members:1,leaf:true,name:'VIA'}]},
+                    bbox:{insts:1,approx:false,bbox:[10,10,30,20]},insts:{n:1,more:false,visited:1,boxes:[[10,10,30,20]]}})[value.kind];
+                    if(!data){throw Error('Unexpected cell question '+value.kind);}}
                 else {throw Error('Unexpected path');}}
             entry.reply=(s=status,v=data)=>{this.status=s;this.responseText=v?JSON.stringify(v):'';this.onload();};entry.fail=()=>this.ontimeout();
             const h=holds.findIndex(h=>h.method===this.method&&this.path.endsWith(h.suffix));if(h>=0){holds.splice(h,1);deferred.push(entry);}else{entry.reply();}
@@ -65,7 +70,7 @@ function environment(options={}) {
         constructor(url,protocols){assert.equal(url,(options.http?'ws://10.0.0.10:8080':'wss://service.example.test')+base+'/stream');assert.deepEqual(protocols,['floe-server-v1','bundle.'+bundle,'csrf.'+auth.csrf]);this.sent=[];this.readyState=1;this.bufferedAmount=0;sockets.push(this);}
         send(text){this.sent.push(JSON.parse(text));}close(){this.readyState=3;}text(v){this.onmessage({data:JSON.stringify(v)});}binary(extra={}){this.onmessage({data:packet({view_id:id,...extra})});}
     }
-    const panels=options.panels?{palette:require('./palette.js'),presets:require('./presets.js'),fillEditor:require('./fill-editor.js'),minimap:require('./minimap.js'),panes:require('./panes.js'),menubar:require('./menubar.js')}:{};
+    const panels=options.panels?{palette:require('./palette.js'),presets:require('./presets.js'),fillEditor:require('./fill-editor.js'),minimap:require('./minimap.js'),panes:require('./panes.js'),menubar:require('./menubar.js'),cells:require('./cells.js')}:{};
     const c=Client.bind({window:win,document:doc,location,history,protocol:P,viewer:require('./viewer.js'),XHR,WebSocket:WS,now:()=>clock,gestures:require('./gestures.js'),...panels,
         decode(h,d,done){const job=Decode.create({ImageData:class{constructor(data){this.data=data;}},setTimeout:win.setTimeout,clearTimeout:win.clearTimeout},h,d,done);
             return options.holdDecode?{start(){decoders.push({finish:()=>job.start(),fail:()=>done(null,Error('synthetic decode error'))});},cancel:()=>job.cancel()}:job;}});
@@ -264,7 +269,7 @@ if(require.main===module)(async()=>{
     // the prefixed `el`, read only this session's routes, and edit over the
     // same serialized view.set path as the toolbar.
     const shell=environment({demo:true,panels:true});await shell.c.start();shell.hello();
-    assert.deepEqual(shell.el('menubar').children.map(m=>m.children[0].textContent),['File','View']);
+    assert.deepEqual(shell.el('menubar').children.map(m=>m.children[0].textContent),['File','View','Cell']);
     shell.sockets[0].text(shell.state({fill_slots_key:'0'.repeat(40)}));await tick();
     const page=shell.requests.filter(r=>r.path.endsWith('/palette'));assert.equal(page.length,1);assert.equal(page[0].headers['X-Floe-CSRF'],'f'.repeat(64));
     assert.equal(shell.el('layers-count').textContent,'0 layers');assert.equal(shell.el('layers').textContent,'No layer rows.');
@@ -278,6 +283,25 @@ if(require.main===module)(async()=>{
     shell.el('tab-palette').onclick();assert.equal(shell.el('palette-page').hidden,false);assert.equal(shell.el('minimap-page').hidden,true);
     assert(shell.requests.some(r=>r.path.endsWith('/presets')),'presets load with the palette page');
     shell.c.stop();
+    // The cell tree reads this session's cell route only; its root edit is
+    // a view.set on the same serialized path; the Cell menu proxies it.
+    const cellsShell=environment({demo:true,panels:true});await cellsShell.c.start();cellsShell.hello();
+    assert.deepEqual(cellsShell.el('menubar').children.map(m=>m.children[0].textContent),['File','View','Cell']);
+    cellsShell.sockets[0].text(cellsShell.state({dbu_um:'0.001',capabilities:{query:false,clip:false,mode:false,labels:true,cells:true,cell_root:true},root:null,root_name:''}));
+    for(let i=0;i<6;i++){await tick();}
+    const cellRows=()=>cellsShell.el('cells-tree').children.filter(n=>n.children.length).map(n=>n.children[1].textContent);
+    assert.deepEqual(cellRows(),['TOP','BLK','VIA']);
+    const asked=cellsShell.requests.filter(r=>r.path===base+'/cells').map(r=>r.body.kind);assert.deepEqual(asked,['sources','children']);
+    const via=cellsShell.el('cells-tree').children.find(n=>n.children[1]&&n.children[1].textContent==='VIA');via.onclick({target:via.children[1]});
+    for(let i=0;i<6;i++){await tick();}
+    assert.equal(cellsShell.el('cells-root').disabled,false,'the root needs the extent of this frame');
+    assert.equal(cellsShell.el('cells-build').hidden,true,'the demo offers no index build');
+    const sentBefore=cellsShell.sockets[0].sent.length;
+    cellsShell.el('viewport').listeners.keydown({key:'t',code:'KeyT',ctrlKey:true,shiftKey:false,metaKey:false,altKey:false,repeat:false,isComposing:false,keyCode:84,preventDefault(){}});
+    const rootEdit=cellsShell.sockets[0].sent.slice(sentBefore).find(m=>m.type==='view.set');
+    assert.deepEqual(rootEdit.body,{root:{src:0,cell:2}},'Ctrl+T roots the selected cell over view.set');
+    assert(cellsShell.requests.every(r=>r.path.startsWith(base)&&!r.path.includes('/api/v1/views/')),'owner routes are never addressed');
+    cellsShell.c.stop();
     const fs=require('node:fs'),path=require('node:path');
     assert.match(fs.readFileSync(path.join(__dirname,'server.html'),'utf8'),/<body id="server-shell" data-floe-viewer>/);
     assert.match(fs.readFileSync(path.join(__dirname,'viewer.css'),'utf8'),/\[data-floe-viewer\]\[data-busy="true"\][^{]*\[data-floe-viewer\]\[data-busy="true"\] \*\s*\{\s*cursor:\s*wait\s*!important;/);

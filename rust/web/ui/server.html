@@ -16,6 +16,7 @@
   <script defer src="/server-assets/@@BUNDLE@@/palette.js"></script>
   <script defer src="/server-assets/@@BUNDLE@@/menubar.js"></script>
   <script defer src="/server-assets/@@BUNDLE@@/panes.js"></script>
+  <script defer src="/server-assets/@@BUNDLE@@/cells.js"></script>
   <script defer src="/server-assets/@@BUNDLE@@/server.js"></script>
 </head><body id="server-shell" data-floe-viewer>
   <header class="topbar"><div class="brand">floe<span>2</span><small>DEMO</small></div>
@@ -25,6 +26,13 @@
   </header>
   <nav id="server-menubar" class="menubar" aria-label="Main menu"></nav>
   <div class="workspace">
+    <aside id="server-left-pane" class="left-pane" aria-label="Cells">
+      <div class="pane-tabs" role="tablist" aria-label="Left pane">
+        <button id="server-tab-cells" class="pane-tab active" type="button" role="tab" aria-selected="true" aria-controls="server-cells-page">cells</button>
+      </div>
+      @@CELLS_PAGE@@
+    </aside>
+    <div id="server-left-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the cells pane" tabindex="0" title="Drag to resize · double-click resets"></div>
     <main class="main">
       @@VIEW_TOOLBAR@@
       <div id="server-banner" class="server-banner">
@@ -33,6 +41,7 @@
       </div>
       <div id="server-viewport" class="viewport" tabindex="0" aria-label="Assigned layout canvas. Arrow keys pan; plus and minus zoom; Home fits; left or middle drag pans; right drag zooms into a box.">
       <canvas id="server-canvas" class="viewer-frame" width="1" height="1"></canvas>
+      <canvas id="server-cells-canvas" width="1" height="1" aria-label="Highlighted cell instances" hidden></canvas>
       <div id="server-zoom-band" class="viewer-band" hidden></div><div id="server-zoom-band-hint" class="viewer-band-hint" hidden></div>
       <p id="server-empty">Waiting for an authorized frame…</p>
       </div>

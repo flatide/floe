@@ -166,6 +166,7 @@ fn main() {
                 ("right-pane", "@@RIGHT_PANE@@"),
                 ("layer-menu", "@@LAYER_MENU@@"),
                 ("layer-tools", "@@LAYER_TOOLS@@"),
+                ("cells-page", "@@CELLS_PAGE@@"),
             ] {
                 let start = format!("<!-- floe-{marker}:start -->");
                 let end = format!("<!-- floe-{marker}:end -->");

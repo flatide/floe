@@ -21,6 +21,7 @@
     "POST /api/v1/server/launches": ["broker/http.rs","launch","server_delegate"],
     "POST /api/v1/server/sessions/{id}/exchange": ["broker/http.rs","exchange","server_bootstrap"],
     "POST /api/v1/server/sessions/{id}/palette": ["broker/http.rs","palette","server_session"],
+    "POST /api/v1/server/sessions/{id}/cells": ["broker/http.rs","cells","server_session"],
     "GET /api/v1/server/sessions/{id}/minimap/{base}": ["broker/http.rs","minimap","server_session"],
     "HEAD /api/v1/server/sessions/{id}/minimap/{base}": ["broker/http.rs","minimap","server_session"],
     "GET /api/v1/server/sessions/{id}/fill-slots/{key}": ["broker/http.rs","fill_slots","server_session"],

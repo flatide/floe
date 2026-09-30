@@ -505,16 +505,26 @@ async fn server_shell_is_static_bounded_and_cannot_load_owner_assets() {
     assert!(!r.body.contains("/app.js") && !r.body.contains("synthetic.oas"));
     assert!(!r.body.contains("@@VIEW_") && r.body.contains("/viewer.js"));
     let owner = include_str!("../ui/index.html");
-    for name in ["controls", "toolbar"] {
+    for name in [
+        "view-controls",
+        "view-toolbar",
+        "right-pane",
+        "layer-menu",
+        "layer-tools",
+        "cells-page",
+    ] {
         let fragment = owner
-            .split_once(&format!("<!-- floe-view-{name}:start -->"))
+            .split_once(&format!("<!-- floe-{name}:start -->"))
             .unwrap()
             .1
-            .split_once(&format!("<!-- floe-view-{name}:end -->"))
+            .split_once(&format!("<!-- floe-{name}:end -->"))
             .unwrap()
             .0
             .replace("id=\"", "id=\"server-")
-            .replace("for=\"", "for=\"server-");
+            .replace("for=\"", "for=\"server-")
+            .replace("aria-controls=\"", "aria-controls=\"server-")
+            .replace("aria-labelledby=\"", "aria-labelledby=\"server-")
+            .replace("aria-describedby=\"", "aria-describedby=\"server-");
         assert!(r.body.contains(&fragment), "same canonical {name}");
     }
     assert!(!r.headers.contains_key("set-cookie"));
@@ -535,6 +545,7 @@ async fn server_shell_is_static_bounded_and_cannot_load_owner_assets() {
         "palette.js",
         "menubar.js",
         "panes.js",
+        "cells.js",
     ] {
         let r = s
             .request("GET", &format!("/server-assets/{bundle}/{name}"), &h, "")
