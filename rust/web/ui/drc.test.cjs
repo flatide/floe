@@ -22,6 +22,10 @@ assert.deepEqual(D.point(base,20,30),[20,50]);
 assert.deepEqual(D.point(D.shifted(base,[48,0]),20,30),[-28,50]);
 assert.deepEqual(D.point(D.shifted(base,[13,-11]),20,30),[7,61]);
 assert.deepEqual(D.point(D.shifted(base,[-10,-8]),20,30),[30,58]);
+// The display projection and its frozen copies keep the frame's render_key.
+assert.equal(D.projection({...frame,render_key:'7'},[48,48],'1').render_key,'7');
+assert.equal(D.shifted(D.projection({...frame,render_key:'7'},[48,48],'1'),[13,-11]).render_key,'7');
+assert.equal(D.shifted(null,[1,1]),null);assert(!('render_key' in D.shifted(base,[1,1])));
 const calls=[], drawing=[], raf=new Map(), nodes=new Map(); let serial=0, resize=0;
 const ctx = new Proxy({}, {get(target,key){if(key in target)return target[key];return (...args)=>drawing.push([key,...args]);},set(target,key,v){target[key]=v;return true;}});
 class Element {
@@ -130,20 +134,40 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     // A view root is another frame: the in-view filter pauses (the list is
     // re-read without it, the checkbox keeps its value but is disabled),
     // markers and box selection pause, and everything resumes at the top.
-    state={...state,state_rev:'4',root:{cell:3,name:'BLK'},root_name:'BLK'};view={...view,state};panel.contextChanged();
+    const rootSize={pixels:[100,80],dpr:2,left:.5,top:0},rootFrame=D.projection({...frame,bbox_dbu:['-38','-48','158','128'],render_key:'2'},[48,48],'1');
+    state={...state,state_rev:'4',render_key:'2',root:{cell:3,name:'BLK'},root_name:'BLK'};view={...view,state};panel.contextChanged();
     await new Promise(resolve=>setTimeout(resolve,120));
     const rooted=pending('errors');assert.equal(rooted.body.body.in_view,false,'in-view pauses under a root');
     assert.equal(el('drc-in-view').checked,true);assert.equal(el('drc-in-view').disabled,true);assert.equal(el('drc-markers').disabled,true);
     assert(el('drc-message').textContent.includes('View root active'));
     reply('errors',{rows:[b],next:null});await tick();assert.equal(el('drc-box').disabled,true);
-    panel.paint(base,{pixels:[100,80],dpr:2,left:.5,top:0});assert.equal(el('drc-canvas').hidden,true,'markers pause under a root');
+    assert.match(el('drc-message').textContent,/View root active/,'the paused re-read hid why the list is unfiltered');
+    panel.paint(rootFrame,rootSize);assert.equal(el('drc-canvas').hidden,true,'markers pause under a root');
+    // Last painted without a frame identity: only the transition itself can
+    // stop the queued repaint from reusing it.
+    panel.paint(D.projection({...frame,bbox_dbu:['-38','-48','158','128']},[48,48],'1'),rootSize);assert.equal(el('drc-canvas').hidden,true);
     assert.equal(savedChanges.at(-1).in_view,true,'the saved panel keeps the checkbox');
-    state={...state,state_rev:'5',root:null,root_name:''};view={...view,state};panel.contextChanged();
+    // The note is written on entry only: like at the top, a failure survives
+    // pan/zoom snapshots and unrelated control refreshes.
+    el('drc-first').onclick();const busy=pending('errors');busy.done=true;busy.reject(new Error('DRC read queue is busy. Retry this page.'));await tick();
+    state={...state,state_rev:'5'};view={...view,state};panel.contextChanged();panel.contextChanged();
+    assert.equal(el('drc-message').textContent,'DRC read queue is busy. Retry this page.','a pan under the root replaced the failure');
+    state={...state,state_rev:'6',render_key:'3',root:null,root_name:''};view={...view,state};panel.contextChanged();
     await new Promise(resolve=>setTimeout(resolve,120));
     const resumed=pending('errors');assert.equal(resumed.body.body.in_view,true,'in-view resumes at the top');
     reply('errors',{rows:[{...b,bbox_um:['1','1','2','2']}],next:null});await tick();assert.equal(el('drc-in-view').disabled,false);assert.equal(el('drc-markers').disabled,false);
+    // The root picture stays displayed until a top frame lands: neither the
+    // queued repaint nor present()'s projection of it (live or frozen) may
+    // show top-cell markers in its pixels.
+    assert(raf.size>0);paint();assert.equal(el('drc-canvas').hidden,true,'the queued repaint reused the root picture');
+    panel.paint(rootFrame,rootSize);assert.equal(el('drc-canvas').hidden,true,'markers drawn over the root picture');
+    panel.paint(D.shifted(rootFrame,[16,0]),rootSize);assert.equal(el('drc-canvas').hidden,true,'markers drawn over the frozen root picture');
+    // CD rulers (drawn by measure.js) follow the same refusal.
+    assert.equal(panel.cdVisible(),false,'CD rulers over the root picture');
+    panel.paint(D.projection({...frame,render_key:'3'},[48,48],'1'),rootSize);assert.equal(el('drc-canvas').hidden,false);
+    assert.equal(panel.cdVisible(),true,'CD rulers over the top picture');
     panel.paint(base,{pixels:[100,80],dpr:2,left:.5,top:0});assert.equal(el('drc-canvas').hidden,false);
-    state={...state,state_rev:'6'};view={...view,state};panel.contextChanged();assert(el('drc-result-info').textContent.includes('waiting'));
+    state={...state,state_rev:'7'};view={...view,state};panel.contextChanged();assert(el('drc-result-info').textContent.includes('waiting'));
     el('drc-toggle').onclick();assert.equal(resize,1);assert.equal(el('drc-panel').hidden,true);
     // A different source drops rows and all pending requests immediately.
     await new Promise(resolve=>setTimeout(resolve,120));const stale=pending('errors');view={...view,source:'other',id:'view-b'};panel.contextChanged();
@@ -178,6 +202,14 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     reply('query',{rows:[],next:{check:'0',error:'200'}});await queryReload;await tick();
     assert.equal(el('drc-error-next').disabled,false);assert(el('drc-result-info').textContent.includes('earlier-viewport'));
     assert.equal(nav.length,beforeRestoreNav);
+    // In view is disabled under a root, so the stale-query hint sends the
+    // user back to the top first.
+    state={...state,state_rev:'8',render_key:'4',root:{cell:3,name:'BLK'},root_name:'BLK'};view={...view,state};panel.contextChanged();
+    assert.equal(el('drc-in-view').disabled,true);
+    assert.equal(el('drc-result-info').textContent,'Saved earlier-viewport query · return to the top cell, then enable In view for the live current-rule filter.');
+    state={...state,state_rev:'9',render_key:'5',root:null,root_name:''};view={...view,state};panel.contextChanged();
+    assert.equal(el('drc-in-view').disabled,false);
+    assert.equal(el('drc-result-info').textContent,'Saved earlier-viewport query · enable In view for the live current-rule filter.');
     // Selecting another rule from a frozen all-rule query changes the open
     // rule, but never changes that query's box. Comma/period stays in THAT rule.
     const other={...b,check:'1',local:'0',global:'9007199254740996'};

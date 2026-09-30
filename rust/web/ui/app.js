@@ -948,6 +948,10 @@
         if (event.ctrlKey) {
             if (key === ',' && !event.shiftKey && !event.repeat && event.target === viewport && modeSupported && state.capabilities.mode) {
                 event.preventDefault(); changeDeckMode(currentMode === 'level' ? 'chip' : 'level').catch(report);
+            } else if ((key === 't' || key === 'T') && !event.repeat && cells && cells.key(key, event)) {
+                // Ctrl+T / Ctrl+Shift+T: view root / top, once per press - a held
+                // chord would queue a root edit per repeat (a set is a daemon lookup).
+                event.preventDefault();
             } else { viewControls.key(event); }
             return;
         }
@@ -1150,6 +1154,7 @@
         buildAllowed: function () { return false; },
         setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window)});
     measurement = window.FloeMeasure.bind({document: document, window: window, protocol: P, query: window.FloeQuery, rulers: window.FloeRulers, painted:dumpChanged,
+        cdVisible: function () { return drcPanel.cdVisible(); },
         history:rulerHistory, selection:function () { return inspector.selection(); },
         popCD:function (all) { return drcPanel.key(all?'K':'k'); }, cdBusy:function () { return drcPanel.rulersBusy(); },
         context: queryContext, send: send, now: function () { return Date.now(); }, setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window),

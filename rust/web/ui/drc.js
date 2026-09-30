@@ -4,6 +4,7 @@
     'use strict';
     const geometry = typeof module === 'object' && module.exports ? require('./drc-geometry.js') : root.FloeDRCGeometry;
     const projection = geometry.projection, point = geometry.point, shifted = geometry.shifted, vertices = geometry.vertices;
+    const rootNote = 'View root active: DRC positions are top-cell coordinates. Markers, In view and box selection pause; going to an error returns to the top.';
     // These formatters never interpret rule text as markup or compute a DRC
     // measurement in JS. Exact server scalars remain available in the text.
     function metricName(s) {
@@ -58,7 +59,8 @@
         // A canvas click selects without moving. Auto CD belongs to the last
         // accepted focus navigation, not necessarily the selected row.
         let cdTarget = null, cdGlobal = null, cdSegments = null, cdRemaining = 0, cdError = '';
-        let restoring = false;
+        let restoring = false, wasRooted = false;
+        const rootKeys = [];
         let isolationNotice = '', notes = null, waives = null, transfers = null, noteDisplay = null, noteState = null, noteTarget = null;
         let waiveDisplayBlocked = false, recovery = null;
         const groups = o.groups.bind({http: o.http, protocol: P, changed: groupsChanged,
@@ -135,6 +137,14 @@
         // DRC geometry is top-cell geometry; under a view root the canvas is
         // another frame, so markers, In view and box selection pause.
         function rooted() { const c = current(); return !!(c && c.state && c.state.root_name); }
+        // The picture rendered under a root stays displayed after the root
+        // clears until a top frame lands; its projection keeps that frame's
+        // render_key, so remember the keys served under a root (per view).
+        function rootSeen() {
+            const c = o.context(), k = c && c.state && c.state.root_name && c.state.render_key !== undefined ? c.id + ':' + c.state.render_key : null;
+            if (k !== null && rootKeys.indexOf(k) < 0) { if (rootKeys.length === 64) { rootKeys.shift(); } rootKeys.push(k); }
+        }
+        function rootPicture(p, c) { return p.render_key !== undefined && rootKeys.indexOf(c.id + ':' + p.render_key) >= 0; }
         function cancel(key) { const t = tasks[key]; if (t) { t.cancelled = true; if (t.abort) { t.abort(); } delete tasks[key]; } }
         function cancelAll() { Object.keys(tasks).forEach(cancel); }
         function cancelStep() { cancel('step'); stepBusy = false; stepContinuation = null; el('drc-step-continue').hidden = true; }
@@ -236,8 +246,8 @@
         }
         function toggleBox() {
             if (boxMode) { boxReset(true); return true; }
-            if (!current() || restoring || overlayMode === 'none' || !rule || !pageReady || !groups.ready() || !el('drc-markers').checked) {
-                info('Box selection needs a ready rule page with markers on.'); return false;
+            if (!current() || restoring || overlayMode === 'none' || !rule || !pageReady || !groups.ready() || !el('drc-markers').checked || rooted()) {
+                info(rooted() ? rootNote : 'Box selection needs a ready rule page with markers on.'); return false;
             }
             boxMode = true; boxReset(false); return true;
         }
@@ -401,10 +411,10 @@
             if(overlayMode==='all') { markerHits.push({x: x, y: y, row: r}); }
         }
         function paint(p, size) {
-            markerHits = []; hitStamp = ''; lastProjection = p; lastSize = size;
+            markerHits = []; hitStamp = ''; lastProjection = p; lastSize = size; rootSeen();
             const c = current();
             const geometryVisible=el('drc-markers').checked&&(boxMode||groupRows.length||rows.length||(selected&&focusVisible)||hasCD());
-            if (overlayMode==='none' || !ctx || !p || !size || !c || rooted() || (!geometryVisible&&!(noteDisplay&&noteDisplay.text()))) { overlay.hidden = true; return; }
+            if (overlayMode==='none' || !ctx || !p || !size || !c || rooted() || rootPicture(p, c) || (!geometryVisible&&!(noteDisplay&&noteDisplay.text()))) { overlay.hidden = true; return; }
             const w = size.pixels[0], h = size.pixels[1]; P.pixels(w, h);
             if (overlay.width !== w || overlay.height !== h) { overlay.width = w; overlay.height = h; }
             overlay.style.width = w / size.dpr + 'px'; overlay.style.height = h / size.dpr + 'px';
@@ -659,7 +669,8 @@
                 rows = list; errorNext = page.next;
                 if (errorNext !== null) { if (query) { cursor(errorNext.check); cursor(errorNext.error); } else { cursor(errorNext); } }
                 if (JSON.stringify(errorNext) === JSON.stringify(errorStart)) { throw new Error('DRC cursor did not progress'); }
-                pageReady = true; renderErrors(); info('Read-only geometry query · no review file changed by this read.'); savePanel();
+                // A list read while In view pauses is unfiltered; say why.
+                pageReady = true; renderErrors(); info(inViewPaused() ? rootNote : 'Read-only geometry query · no review file changed by this read.'); savePanel();
             } catch (e) {
                 const now = current();
                 if (body.in_view && valid('errors', t, c) && now && (!now.connected || now.pending || now.state.state_rev !== c.state.state_rev)) {
@@ -880,7 +891,7 @@
                     el('drc-selected').textContent = 'Global ' + selected.global + (focusVisible ? ' · bounding-box preview' : ' · focus cleared; comma/period continues without moving the view.');
                     if (focusVisible) { geometry(selected); }
                 }
-                if (cdTarget && cdRemaining) { loadCD(); } showCD();
+                if (cdTarget && cdRemaining && !rooted()) { loadCD(); } showCD(); // a root drops CD in contextChanged(); skip its read
             } finally {
                 if (valid('restore', t, c)) { restoring = false; renderRules(); renderErrors(); contextChanged(); }
             }
@@ -900,12 +911,13 @@
                 if (turn !== restoreTurn || contextKey(current()) !== key) { return; }
                 return persistence.attach({path: path + '/panel', revision: registration.revision, view: c.id});
             }).then(function () {
-                if (turn === restoreTurn && contextKey(current()) === key) { restoring = false; renderRules(); renderErrors(); contextChanged(); groupsChanged(); }
+                // A restored panel is entered afresh: its reads replaced the root note.
+                if (turn === restoreTurn && contextKey(current()) === key) { restoring = false; renderRules(); renderErrors(); wasRooted = false; contextChanged(); groupsChanged(); }
             });
         }
         function contextChanged() {
             if (builds) { builds.contextChanged(); }
-            markerHits = []; hitStamp = ''; tooltip('');
+            markerHits = []; hitStamp = ''; tooltip(''); rootSeen();
             const c = current(), key = contextKey(c);
             if (c && !c.connected) { cancel('focus'); cancel('restore-layers'); }
             if (key !== bound) {
@@ -917,14 +929,25 @@
                 el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = ''; el('drc-rule-metadata').textContent = ''; el('drc-type-info').textContent = '';
                 if (c) { restoreState(); }
             }
+            // Box corners and CD rulers are top-frame geometry. Leaving the
+            // root, the queued repaint must not reuse the root picture's projection.
+            const nowRooted = rooted(), entered = nowRooted && !wasRooted, left = wasRooted && !nowRooted; wasRooted = nowRooted;
+            if (nowRooted && boxMode) { boxReset(true); }
+            if (nowRooted && cdTarget) { resetCD(); savePanel(); }
+            if (left) { lastProjection = null; }
             groupsChanged();
             if(noteDisplay){noteDisplay.sync();}
             if(transfers){transfers.changed();}
             if(recovery){recovery.changed();}
+            // The root note is written on entry only: like at the top, later
+            // failures and step results survive pan/zoom snapshots.
             if (waives && waives.suspended()) { info('Waive save or reader refresh pending. Previous DRC selection and outlines are not active.'); }
-            else if (rooted()) { info('View root active: DRC positions are top-cell coordinates. Markers, In view and box selection pause; going to an error returns to the top.'); }
+            else if (entered) { info(rootNote); }
             else if (registration && !c && registration.phase === 'ready') { info('Open the source associated with this DRC database.'); }
-            if (query && c && query.rev !== c.state.state_rev) { el('drc-result-info').textContent = 'Saved earlier-viewport query · enable In view for the live current-rule filter.'; }
+            else if (left && el('drc-message').textContent === rootNote) { info(''); }
+            if (query && c && query.rev !== c.state.state_rev) {
+                el('drc-result-info').textContent = 'Saved earlier-viewport query · ' + (nowRooted ? 'return to the top cell, then enable In view' : 'enable In view') + ' for the live current-rule filter.';
+            }
         }
         function applyCatalog(v) {
             const grant=v.review_grant;
@@ -1010,6 +1033,8 @@
         el('drc-toggle').onclick = function () { shown = !shown; el('drc-panel').hidden = !shown; el('drc-toggle').setAttribute('aria-expanded', String(shown)); o.resize(); savePanel(); };
         el('drc-reload').onclick = restoreState;
         return {init: refresh, refresh: refresh, contextChanged: contextChanged, paint: paint, click: click, clear: clearSelection,
+            // CD rulers draw where DRC markers may: markers on, top frame, top picture.
+            cdVisible: function () { const c = current(); return el('drc-markers').checked && !!c && !rooted() && !(lastProjection && rootPicture(lastProjection, c)); },
             reviewGrant:function(){return reviewGrant;},
             recoveryBusy:function(){return !!(recovery&&recovery.busy());},
             openContext:function(){
@@ -1034,6 +1059,11 @@
             stop: function (final) { stopped = true; if(recovery){recovery.stop();} if(transfers){transfers.stop(final);} if(noteDisplay){noteDisplay.stop();} if (notes) { notes.stop(final); } if (waives) { waives.stop(final); } if (builds) { builds.stop(); } ++restoreTurn; clearTimeout(filterTimer); filterTimer = null; persistence.close(); groups.close(); bound = ''; boxReset(true); cancelAll(); clearTimeout(timer); if (painting !== null) { o.window.cancelAnimationFrame(painting); painting = null; } overlay.hidden = true; },
             resume: function () { stopped = false; if(recovery){recovery.resume();} if(noteDisplay){noteDisplay.resume();} if (notes) { notes.resume(); } if (waives) { waives.resume(); } if(transfers){transfers.resume();} return builds ? builds.resume() : refresh(); }};
     }
-    const api = {bind: bind, projection: projection, point: point, shifted: shifted, vertices: vertices, metadataText: metadataText, comparisonText: comparisonText};
+    // The panel refuses a picture rendered under a view root by its frame's
+    // render_key, so the display projection and its frozen copies carry it.
+    function keyed(p, key) { if (p && key !== undefined) { p.render_key = key; } return p; }
+    const api = {bind: bind, point: point, vertices: vertices, metadataText: metadataText, comparisonText: comparisonText,
+        projection: function (frame, origin, unit) { return keyed(projection(frame, origin, unit), frame && frame.render_key); },
+        shifted: function (p, delta) { return keyed(shifted(p, delta), p && p.render_key); }};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeDRC = api; }
 }(typeof window === 'object' ? window : this));

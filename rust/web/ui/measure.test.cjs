@@ -114,4 +114,25 @@ const pair=[segment(['1','2.75'],['3','2.75'],'2',['2','0']),segment(['2.25','1'
     for(let n=0;n<257;n++){h.tick();h.m.click(60,60);h.reply(['0','0']);h.tick();h.m.click(61,60);h.reply(['3','0'],segment(['0','0'],['3','0'],'0.003',['0.003','0']));}
     assert.equal(h.el('ruler-count').textContent,'256 rulers');assert.match(h.el('ruler-status').textContent,/256 rulers/);h.m.key('K');assert.equal(h.el('ruler-count').textContent,'0 rulers');h.m.stop();
 }
-console.log('WEB MANUAL RULERS: ALL OK (two points, snap refs, auto bbox gaps, stable mixed CD order, single label pass, late/invalid results, frame lifecycle, caps, cleanup)');
+{
+    // A view root is another frame: rulers and a first point of the old frame
+    // go both ways, not on a same-root style change; CD (DRC top-cell
+    // geometry, reset by the DRC panel) is not drawn under a root.
+    const h=harness();h.c.state.dbu_um='0.001';h.el('drc-markers').checked=true;
+    h.selection.push(...boxes);h.m.key('r');gaps(h,pair);h.m.key('m');
+    h.tick();h.m.click(60,60);h.reply(['0','0']);h.tick();h.m.click(61,60);h.reply(['30','0'],segment(['0','0'],['30','0'],'0.03',['0.03','0']));
+    h.book.set('cd',[{ends:[[0,0],[.03,0]],offset:true,label:'CD 0.03 µm'}]);h.tick();h.m.click(60,60);h.reply(['5','5']);
+    assert.deepEqual(h.book.entries().map(e=>e.kind),['auto','auto','manual','cd']);h.paint();assert.equal(h.lines.at(-1).length,4);
+    const root=(v,key)=>{h.c.state.root=v;h.c.state.root_name=v?v.name:'';h.c.state.render_key=h.c.frame.render_key=key;h.m.changed();h.paint();};
+    root({cell:17,name:'BLK'},'2');assert.deepEqual(h.book.entries().map(e=>e.kind),['cd'],'top-frame rulers survived a view root');
+    assert(!h.m.active());assert.equal(h.el('ruler-details').textContent,'');assert(h.el('ruler-canvas').hidden,'CD drawn under a view root');
+    h.selection.length=0;h.m.key('r');h.tick();h.m.click(60,60);assert.equal(h.request().body.start_dbu,null,'top-frame first point survived');
+    h.reply(['0','0']);h.tick();h.m.click(61,60);h.reply(['3','0'],segment(['0','0'],['3','0'],'0.003',['0.003','0']));
+    root({cell:17,name:'BLK'},'3');assert.equal(h.el('ruler-count').textContent,'2 rulers','same-root style change erased annotation');
+    assert.equal(h.lines.at(-1).length,1);assert(!h.el('ruler-canvas').hidden);
+    root(null,'4');assert.deepEqual(h.book.entries().map(e=>e.kind),['cd'],'root-frame ruler survived the way back to the top');
+    assert.equal(h.lines.at(-1).length,1);assert(h.lines.at(-1)[0].offset,'CD not drawn again at the top');
+    h.m.key('r');h.tick();h.m.click(60,60);h.reply(['0','0']);h.tick();h.m.click(61,60);h.reply(['3','0'],segment(['0','0'],['3','0'],'0.003',['0.003','0']));
+    root(true,'5');assert.deepEqual(h.book.entries().map(e=>e.kind),['cd'],'a guest root flag kept a top-frame ruler');assert(h.el('ruler-canvas').hidden);h.m.stop();
+}
+console.log('WEB MANUAL RULERS: ALL OK (two points, snap refs, auto bbox gaps, stable mixed CD order, single label pass, late/invalid results, frame and view-root lifecycle, caps, cleanup)');

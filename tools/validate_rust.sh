@@ -42,7 +42,7 @@ jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once l
 WEB_APP_GATES="app_cli cache_migration cache_revision server_runtime web_cli_inventory native_revision web_selfcheck web_portable runtime_smoke embedded_host app_render \
 layerprops layer_defaults layer_palette palette_styles display_test app_clip managed_clip app_captures \
 fe_embed drc_captures view_controller zoom_band minimap depth_keys web_wheel worker_queries \
-view_stream managed_index owner_service web_cli web_local_sharing display_cli display_input web_handoff \
+view_stream managed_index owner_service guest_root web_cli web_local_sharing display_cli display_input web_handoff \
 web_browse web_file_display web_startup instance_key web_drc web_drc_notes web_drc_waives web_review_budget \
 web_autosave web_read_reviewer web_drc_open web_drc_rules web_drc_transfer web_review_recovery web_svrf web_ui web_menu_inventory \
 web_hangul app_jobdeck app_jobdeck_sources app_jobdeck_plan app_deck_render app_drc drc_review drc_build \
@@ -296,6 +296,14 @@ if gate managed_index; then RAN="$RAN managed_index"
     .venv/bin/python tools/validate_managed_index.py "$FLOE2_SMOKE_SRC"; fi
 if gate owner_service; then RAN="$RAN owner_service"
     .venv/bin/python tools/validate_owner_service.py "$FLOE2_SMOKE_SRC"; fi
+if gate guest_root; then RAN="$RAN guest_root"
+    # The test builds its own index/pack beside a private copy of the fixture.
+    guest_root_dir=$(mktemp -d "${TMPDIR:-/tmp}/floe-guest-root.XXXXXX")
+    cp "$FLOE2_SMOKE_SRC" "$guest_root_dir/valmini.oas"
+    (cd rust && FLOE_OWNER_FIXTURE="$guest_root_dir/valmini.oas" FLOE_INDEX_BIN="$PWD/target/release/floe-index" \
+        FLOE_RENDERD_BIN="$PWD/target/release/floe-renderd" \
+        cargo test --release --locked --offline -p floe-web --test guest_root -- --ignored) || { rm -rf "$guest_root_dir"; exit 1; }
+    rm -rf "$guest_root_dir"; fi
 if gate web_cli; then RAN="$RAN web_cli"
     .venv/bin/python tools/validate_web_cli.py "$FLOE2_SMOKE_SRC"; fi
 if gate web_local_sharing; then RAN="$RAN web_local_sharing"

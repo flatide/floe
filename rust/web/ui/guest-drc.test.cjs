@@ -139,6 +139,36 @@ if(require.main===module){(async()=>{
         e.context({...e.getContext(),state_rev:'3'});e.panelUI.changed();for(let i=0;i<12;i++){await tick();}
         assert(e.busy());assert.match(e.el('gd-status').textContent,/unconfirmed/);
     }
-    console.log('WEB GUEST DRC UI: ALL OK (explicit grant only, ICE/ASCII geometry, plain text/u64, independent selection/panel, follow cannot move, stale/revoke, uncertain update/no replay)');
+    // Under the owner's view root the viewport is the root cell's frame while
+    // DRC positions are top-cell coordinates: the Current view filter pauses
+    // (the box keeps its value), markers, box selection and jumps pause, and
+    // everything resumes at the top. A list that no longer depends on the
+    // view is read once, not again on every camera change under the root.
+    for(const mode of ['follow','explore']){
+        const e=environment(mode);e.panelUI.changed();await e.settle();
+        const lists=()=>e.calls.filter(c=>c.path==='/drc/read'&&c.body.body.kind==='list');
+        e.el('gd-errors').children[0].onclick({});await e.settle();
+        e.el('gd-in-view').checked=true;e.el('gd-in-view').onchange();await e.settle();
+        assert.equal(lists().at(-1).body.body.in_view,true);assert.equal(lists().at(-1).body.state_rev,'1');
+        e.context({...e.getContext(),state_rev:'2',root:true});e.panelUI.changed();await e.settle();
+        const paused=lists().at(-1).body;assert.equal(paused.body.in_view,false,'in-view pauses under a root');assert(!('state_rev' in paused),'a paused list is not view-fenced');
+        assert.equal(e.el('gd-in-view').checked,true);assert.equal(e.el('gd-in-view').disabled,true);assert.equal(e.el('gd-markers').disabled,true);
+        assert.equal(e.el('gd-box').disabled,true);assert.equal(e.el('gd-go').disabled,true);assert.equal(e.el('gd-fit').disabled,true);
+        assert.equal(e.el('gd-errors').children.length,2);
+        const count=lists().length;e.context({...e.getContext(),state_rev:'3'});e.panelUI.changed();await e.settle();assert.equal(lists().length,count,'no re-read per camera under a root');
+        e.paint();assert.equal(e.drawing.length,0,'markers pause under a root');assert.equal(e.panelUI.click(20,12,false,{}),false);
+        assert.equal(e.panelUI.key('e'),false);e.el('gd-box').onclick();assert(!e.panelUI.active());
+        e.el('gd-step-next').onclick();await e.settle();const step=e.calls.filter(c=>c.body&&c.body.body&&c.body.body.kind==='filtered_step').at(-1).body;
+        assert.equal(step.body.in_view,false);assert(!('state_rev' in step));assert.equal(e.panel().in_view,true,'the saved panel keeps the checkbox');
+        e.el('gd-go').onclick();e.panelUI.key('.');await e.settle();
+        assert(!e.calls.some(c=>c.body&&c.body.body&&c.body.body.kind==='focus'),'no top-frame jump inside a root');assert.equal(e.moves.length,0);
+        e.context({...e.getContext(),state_rev:'4',root:false});e.panelUI.changed();await e.settle();
+        assert.equal(lists().at(-1).body.body.in_view,true,'in-view resumes at the top');assert.equal(lists().at(-1).body.state_rev,'4');
+        assert.equal(e.el('gd-in-view').disabled,false);assert.equal(e.el('gd-markers').disabled,false);assert.equal(e.el('gd-box').disabled,false);
+        e.paint();assert(e.drawing.some(v=>v[0]==='fillRect'),'markers resume at the top');
+        // A box already open when a root arrives is abandoned, not left armed.
+        e.el('gd-box').onclick();assert(e.panelUI.active());e.context({...e.getContext(),state_rev:'5',root:true});e.panelUI.changed();assert(!e.panelUI.active());
+    }
+    console.log('WEB GUEST DRC UI: ALL OK (explicit grant only, ICE/ASCII geometry, plain text/u64, independent selection/panel, follow cannot move, stale/revoke, uncertain update/no replay, view root pause)');
 })().catch(e=>{console.error(e);process.exitCode=1;});}
 module.exports={environment,tick};

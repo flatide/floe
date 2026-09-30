@@ -162,7 +162,13 @@ impl Shares {
                 now,
             ) {
                 let view = entry.explore.take().unwrap();
-                entry.saved = Some(view.controller.snapshot().state);
+                // Never carries a root into the next fork (see explorer).
+                entry.saved = view
+                    .controller
+                    .snapshot()
+                    .state
+                    .at_top(&view.controller.model)
+                    .ok();
                 view.controller.request_close();
                 self.retired.push(view);
                 entry.disconnected_since = None;
@@ -305,10 +311,15 @@ impl Shares {
         {
             return Err(S::TOO_MANY_REQUESTS);
         }
+        // A view root is another cell's frame. DRC positions and navigation
+        // are top-cell coordinates and a guest has no root edit, so a fork
+        // starts at the top, fitted as an index cutover leaves a root.
         let initial = self.entries[index]
             .saved
             .clone()
-            .unwrap_or_else(|| owner.snapshot().state);
+            .unwrap_or_else(|| owner.snapshot().state)
+            .at_top(&owner.model)
+            .map_err(|_| S::CONFLICT)?;
         if owner.model.dataset_revision != lease.scope.dataset_revision
             || !explore::layers_within(&lease.scope.layers, &initial.layers)
         {

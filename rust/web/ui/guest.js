@@ -47,7 +47,7 @@
             rect:function(){return drcCanvas.getBoundingClientRect();},
             hover:function(text){viewport.title=text;},
             context:function(){return !stopped&&!suspended&&hello&&state&&session.drc?{view_id:hello.view_id,epoch:hello.connection_epoch,
-                state_rev:state.state_rev,mode:session.mode,drc:session.drc,camera:state.camera_um,pixels:state.pixels,pending:inputPending(true)||!!dragShift||!!gesture&&gesture.moving()}:null;},
+                state_rev:state.state_rev,mode:session.mode,drc:session.drc,camera:state.camera_um,pixels:state.pixels,root:state.root===true,pending:inputPending(true)||!!dragShift||!!gesture&&gesture.moving()}:null;},
             modeChanged:function(active){if(active&&queryTools&&queryTools.active()){queryTools.leave();}if(active&&gesture){gesture.cancel();}
                 viewport.style.cursor=active?'crosshair':'';},
             repaint:overlayLater,navigate:errorNavigation}):null;
@@ -64,7 +64,9 @@
             if(state&&displayed){try{size=o.display.size(state.pixels,canvas.getBoundingClientRect(),viewport.getBoundingClientRect());
                 projection=o.geometry.projection({bbox_dbu:state.bbox_dbu,width:state.pixels[0],height:state.pixels[1]},dragShift||[0,0],state.dbu_um);}catch(_){size=null;}}
             const key=JSON.stringify(size);if(resizeOnly&&key===overlaySize){return;}overlaySize=key;
-            drcCanvas.hidden=!drc||!session||!session.drc||!projection||!size;
+            // DRC positions are top-cell coordinates; under the owner's view
+            // root this projection is the root cell's frame.
+            drcCanvas.hidden=!drc||!session||!session.drc||!projection||!size||state.root===true;
             if(!drcCanvas.hidden){const w=size.pixels[0],h=size.pixels[1];if(drcCanvas.width!==w||drcCanvas.height!==h){drcCanvas.width=w;drcCanvas.height=h;}
                 drcCanvas.style.width=w/size.dpr+'px';drcCanvas.style.height=h/size.dpr+'px';drcCanvas.style.left=size.left+'px';drcCanvas.style.top=size.top+'px';
                 drcContext.clearRect(0,0,w,h);drc.paint(drcContext,projection,state.pixels,drcCanvas.getBoundingClientRect());}
@@ -150,6 +152,7 @@
             ['dataset_revision','state_rev','render_rev','render_key','worker_epoch'].forEach(function(k){P.counter(s[k],k==='worker_epoch');});P.bbox(s.bbox_dbu);P.pixels(s.pixels[0],s.pixels[1]);
             if(!(Number(P.decimal(s.dbu_um))>0)){throw Error('Invalid shared coordinate unit');}
             if(typeof s.rendering!=='boolean'){throw Error('Invalid guest render status');}
+            if(s.root!==undefined&&typeof s.root!=='boolean'){throw Error('Invalid view root flag');}
             if(state&&P.compare(s.state_rev,state.state_rev)<0){throw Error('Stale guest state');}
             if(session.mode==='explore'&&(!['low','medium','high','exact'].includes(s.detail)||!['auto','keep','cull'].includes(s.thin))){throw Error('Invalid display policy');}
         }
@@ -187,7 +190,8 @@
                     typeof v.query!=='boolean'||v.measure!==(v.mode==='explore')||v.mode==='follow'&&v.query||!['view_id','connection_epoch'].every(function(k){return /^[0-9a-f]{64}$/.test(v[k]);})){throw Error('Invalid guest handshake');}
                     hello=v;delay=500;status(v.mode==='follow'?'Following owner · read-only':'Independent view · read-only');controls();return;}
                 if(!hello){throw Error('Guest handshake missing');}
-                if(v.type==='share.state'){validateState(v);if(gesture&&gesture.active()&&state&&state.state_rev!==v.state_rev){gesture.cancel();}state=v;if(v.failure){failed();}sync();compose();settle();controls();resized();panelsChanged();status((session.mode==='follow'?'Following owner':'Independent view')+' · read-only'+(v.rendering?' · rendering…':''));return;}
+                if(v.type==='share.state'){validateState(v);if(gesture&&gesture.active()&&state&&state.state_rev!==v.state_rev){gesture.cancel();}state=v;if(v.failure){failed();}sync();compose();settle();controls();resized();panelsChanged();
+                    status((session.mode==='follow'?'Following owner':'Independent view')+' · read-only'+(v.root===true&&session.drc?' · view root: DRC markers, Current view and box selection pause':'')+(v.rendering?' · rendering…':''));return;}
                 if(v.type==='accepted'){if(v.seq!==flight||v.view_id!==hello.view_id||v.connection_epoch!==hello.connection_epoch){throw Error('Wrong edit acknowledgment');}P.counter(v.state_rev);flight=null;accepted=v.state_rev;if(focusReceipt){focusReceipt.accepted(v.seq,v.state_rev);}settle();panelsChanged();return;}
                 if(queryTools&&queryTools.receive(v)){return;}
                 if(v.type==='error'){if(v.seq===flight){flight=accepted=null;queue=[];if(focusReceipt){focusReceipt.rejected(v.seq);}panelsChanged();status('View change rejected. No change was replayed.');}else{throw Error('Unexpected guest error');}return;}

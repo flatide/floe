@@ -578,11 +578,16 @@ impl ViewState {
             ));
         }
         self.validate(next)?;
+        // A cell index belongs to one index revision.
+        self.at_top(next)
+    }
+    /// This state on the file's top cell. The viewport under a root is in
+    /// that cell's coordinates, so leaving the root refits the file's die;
+    /// a state at the top is returned unchanged.
+    pub fn at_top(&self, model: &Model) -> Result<Self> {
         let mut s = self.clone();
-        // A cell index belongs to one index revision; the viewport under a
-        // root is in that cell's coordinates. Return to the top, fitted.
         if s.root.take().is_some() {
-            s.viewport = Viewport::fit(next.bbox, s.viewport.width, s.viewport.height)?;
+            s.viewport = Viewport::fit(model.bbox, s.viewport.width, s.viewport.height)?;
         }
         Ok(s)
     }
@@ -1106,6 +1111,77 @@ mod tests {
                 }
             )
             .is_err());
+    }
+    #[test]
+    fn at_top_drops_the_root_and_refits_the_file_die_keeping_display_state() {
+        let layout = |dataset_revision, bbox| Model {
+            minimap: Arc::default(),
+            dataset_revision,
+            dbu: 0.001,
+            bbox,
+            deck: false,
+            skipped: 0,
+            source_stale: false,
+            styles: Arc::new(vec![Style {
+                layer: (1, 0),
+                color: [255; 4],
+                fill: floe_worker_client::Fill::Solid,
+                width: 1,
+            }]),
+            pairs: [(1, 0)].into(),
+            groups: BTreeMap::new(),
+            folded_groups: BTreeSet::new(),
+            initial_layers: Layers::All,
+            assignments: Arc::default(),
+            property_names: Vec::new(),
+        };
+        let model = layout(1, [-50., 0., 950., 400.]);
+        let top = ViewState::initial(&model, 137, 103).unwrap();
+        let rooted = top
+            .edit(
+                &model,
+                Patch {
+                    root: Some(RootEdit::Resolved(Root {
+                        cell: 3,
+                        name: "BLK".into(),
+                        bbox: [10., 20., 30., 25.],
+                    })),
+                    navigation: Some(Navigation::Goto {
+                        center_um: [0.02, 0.022],
+                        width_um: Some(0.005),
+                    }),
+                    depth: Some(Depth::Levels(2)),
+                    mono: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(rooted.root.is_some());
+        let back = rooted.at_top(&model).unwrap();
+        assert_eq!(back.root, None);
+        assert_eq!(back.viewport, Viewport::fit(model.bbox, 137, 103).unwrap());
+        assert_eq!(back.die(&model), model.bbox);
+        assert_eq!((back.depth, back.mono), (Some(2), true));
+        back.validate(&model).unwrap();
+        // The top keeps its own camera: nothing to leave, nothing to refit.
+        let moved = back
+            .edit(
+                &model,
+                Patch {
+                    navigation: Some(Navigation::Goto {
+                        center_um: [0.1, 0.1],
+                        width_um: Some(0.05),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(moved.at_top(&model).unwrap(), moved);
+        // An index revision cutover leaves a root the same way.
+        let next = layout(2, [0., 0., 2000., 800.]);
+        let cut = rooted.for_index_revision(&model, &next).unwrap();
+        assert_eq!(cut.root, None);
+        assert_eq!(cut.viewport, Viewport::fit(next.bbox, 137, 103).unwrap());
     }
     #[test]
     fn pan_phase_zoom_anchor_and_resize_stay_server_side() {

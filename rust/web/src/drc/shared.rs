@@ -55,6 +55,7 @@ impl Read {
             | List { .. }
             | FilteredStep { .. } => (),
         }
+        same_frame(self.needs_view(), state.state.root.is_some())?;
         let selected = self
             .selected()?
             .map(|(r, c)| panel.lock().unwrap().groups.ids(r, c))
@@ -80,6 +81,19 @@ impl Read {
         }
         reader.enqueue_reserved(command, None, Some(permit), Some(revision))
     }
+}
+/// DRC positions are top-cell coordinates; under a view root the target's
+/// viewport, and a box drawn on it, is the root cell's frame. The owner may
+/// still Focus there because its jump clears the root in the same edit
+/// (drc/focus.rs). A guest has no such edit: Follow cannot move the owner's
+/// view and an Explore fork never carries a root (sharing::Shares). So every
+/// viewport operation refuses, Focus included; guest-drc.js never sends
+/// Focus in Follow and pauses the rest while share.state reports a root.
+pub(crate) fn same_frame(needs_view: bool, rooted: bool) -> Result<(), Failure> {
+    if needs_view && rooted {
+        return Err("drc_view_root");
+    }
+    Ok(())
 }
 pub(crate) fn check_selection(
     panel: &Panel,
@@ -340,6 +354,41 @@ mod tests {
             .prepare()
             .unwrap()
             .needs_view());
+    }
+    #[test]
+    fn every_viewport_operation_refuses_under_a_root_focus_included() {
+        let view = [
+            json!({"kind":"in_view","cursor":{"check":"0","error":"0"},"limit":64}),
+            json!({"kind":"list","check":"0","start":"0","in_view":true,"limit":64}),
+            json!({"kind":"filtered_step","check":"0","backwards":false,"in_view":true}),
+            json!({"kind":"focus","check":"0","error":"0","fit":true,"isolate":false}),
+        ];
+        let plain = [
+            json!({"kind":"list","check":"0","start":"0","in_view":false,"limit":64}),
+            json!({"kind":"filtered_step","check":"0","backwards":false,"in_view":false}),
+            json!({"kind":"rules","start":"0","search":"","limit":32}),
+            json!({"kind":"geometry","check":"0","error":"0","start":"0","limit":64}),
+        ];
+        for (bodies, refused) in [(view, true), (plain, false)] {
+            for body in bodies {
+                let r = serde_json::from_value::<Read>(body.clone()).unwrap();
+                assert_eq!(r.needs_view(), refused, "{body}");
+                assert_eq!(same_frame(r.needs_view(), true).is_err(), refused, "{body}");
+                assert_eq!(same_frame(r.needs_view(), false), Ok(()), "{body}");
+            }
+        }
+        let edit = |v: Value| {
+            serde_json::from_value::<SelectionEdit>(v)
+                .unwrap()
+                .prepare()
+                .unwrap()
+        };
+        let boxed = edit(
+            json!({"kind":"apply","check":"0","errors":["0"],"mode":"replace","bbox_um":["0","0","1","1"]}),
+        );
+        assert_eq!(same_frame(boxed.needs_view(), true), Err("drc_view_root"));
+        let listed = edit(json!({"kind":"apply","check":"0","errors":["0"],"mode":"replace"}));
+        assert_eq!(same_frame(listed.needs_view(), true), Ok(()));
     }
     #[test]
     fn projection_never_inherits_owner_metadata_or_nested_notes() {

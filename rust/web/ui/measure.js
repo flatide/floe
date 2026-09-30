@@ -39,7 +39,7 @@
         const P=o.protocol, Q=o.query, el=function (id) { return o.document.getElementById(id); };
         const canvas=el('ruler-canvas'), ctx=canvas.getContext('2d');
         const book=o.history || o.rulers.history();
-        let enabled=false, start=null, preview=null, bound='', stamp='', turn=0, locked=false, stopped=false, auto=null;
+        let enabled=false, start=null, preview=null, bound='', stamp='', turn=0, locked=false, stopped=false, auto=null, rooted=false;
         let pending=null, timer=null, last=-Infinity, painting=null, projection=null, size=null, snapPreference=true;
         const snap=Q.bind({protocol:P,context:o.context,send:o.send,now:o.now,setTimeout:o.setTimeout,clearTimeout:o.clearTimeout});
         function scope() { try { return Q.scope(o.context(),P,true); } catch (e) { return null; } }
@@ -68,8 +68,12 @@
         function interrupt() { retire(); cancelAuto(); snap.cancel('snap'); refresh(); }
         function leave() { enabled=false; start=null; interrupt(); status('Ruler off.'); o.modeChanged(); }
         function changed() {
-            const c=o.context(), key=c?[c.id,c.state.dataset_revision,c.state.worker_epoch].join(':'):'';
-            const s=scope(), next=s?s.key:'';
+            // A view root is another coordinate system: DBU measured under
+            // one root (or the top) mean nothing under another. A guest
+            // state carries only a flag, not the owner's root cell.
+            const c=o.context(), r=c&&c.state.root, root=!r?'':r===true?'root':String(r.cell);
+            const key=c?[c.id,c.state.dataset_revision,c.state.worker_epoch,root].join(':'):'';
+            const s=scope(), next=s?s.key:''; rooted=!!root;
             if (key!==bound) { enabled=false; start=null; bound=key;book.clear('manual');book.clear('auto');interrupt();status('Click two points to measure.');o.modeChanged(); }
             if (next!==stamp) { if (locked || auto) { status('View changed; pending measurement was discarded.'); } stamp=next; interrupt(); }
             snap.changed();
@@ -174,20 +178,23 @@
         }
         let overlayVisible=true;
         function draw() {
-            const entries=book.entries();
-            if (!overlayVisible || !projection || !size || !bound || (!entries.length && !preview)) { canvas.hidden=true;return; }
-            const w=size.pixels[0],h=size.pixels[1],dpr=size.dpr,p=projection;
-            if (canvas.width!==w || canvas.height!==h) { canvas.width=w;canvas.height=h; }
-            canvas.style.width=w/dpr+'px';canvas.style.height=h/dpr+'px';canvas.style.left=size.left+'px';canvas.style.top=size.top+'px';canvas.hidden=false;
-            ctx.clearRect(0,0,w,h);ctx.save();ctx.beginPath();ctx.rect(0,0,w,h);ctx.clip();
-            function xy(x,y) { return [(x-p.bbox[0])/p.step[0]-p.origin[0],(p.bbox[3]-y)/p.step[1]-p.origin[1]]; }
+            const entries=book.entries(), p=projection;
+            if (!overlayVisible || !p || !size || !bound || (!entries.length && !preview)) { canvas.hidden=true;return; }
+            // CD rulers are DRC (top-cell) geometry: like the markers they
+            // pause under a view root.
             const dbu=p.dbu;
-            const list=entries.filter(function (e) { return e.value && (e.kind!=='cd' || ((o.cdVisible?o.cdVisible():el('drc-markers').checked) && dbu>0)); }).map(function (e) {
+            const list=entries.filter(function (e) { return e.value && (e.kind!=='cd' || (!rooted && (o.cdVisible?o.cdVisible():el('drc-markers').checked) && dbu>0)); }).map(function (e) {
                 const s=e.value;
                 return e.kind==='cd'?{ends:s.ends.map(function (p) { return p.map(function (n) { return n/dbu; }); }),offset:s.offset,label:s.label}:
                     {ends:s.endpoints_dbu.map(function (v) { return v.map(Number); }),offset:false,label:format(s.distance_um)+' µm'};
             });
             if (preview && preview.segment) { list.push({ends:preview.segment.endpoints_dbu.map(function (v) { return v.map(Number); }),offset:false,label:format(preview.segment.distance_um)+' µm'}); }
+            if (!list.length && !preview) { canvas.hidden=true;return; }
+            const w=size.pixels[0],h=size.pixels[1],dpr=size.dpr;
+            if (canvas.width!==w || canvas.height!==h) { canvas.width=w;canvas.height=h; }
+            canvas.style.width=w/dpr+'px';canvas.style.height=h/dpr+'px';canvas.style.left=size.left+'px';canvas.style.top=size.top+'px';canvas.hidden=false;
+            ctx.clearRect(0,0,w,h);ctx.save();ctx.beginPath();ctx.rect(0,0,w,h);ctx.clip();
+            function xy(x,y) { return [(x-p.bbox[0])/p.step[0]-p.origin[0],(p.bbox[3]-y)/p.step[1]-p.origin[1]]; }
             o.rulers.paint(ctx,list,xy,size);
             if (preview) {
                 const v=xy(Number(preview.point[0]),Number(preview.point[1])),r=5*dpr;

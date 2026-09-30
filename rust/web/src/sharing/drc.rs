@@ -174,9 +174,10 @@ fn status(code: drc::Failure) -> StatusCode {
     match code {
         "forbidden" => StatusCode::FORBIDDEN,
         "drc_busy" => StatusCode::TOO_MANY_REQUESTS,
-        "drc_context_changed" | "drc_panel_conflict" | "drc_selection_conflict" => {
-            StatusCode::CONFLICT
-        }
+        "drc_context_changed"
+        | "drc_view_root"
+        | "drc_panel_conflict"
+        | "drc_selection_conflict" => StatusCode::CONFLICT,
         "drc_read_limit" | "drc_selection_limit" => StatusCode::PAYLOAD_TOO_LARGE,
         "invalid_drc_request" => StatusCode::BAD_REQUEST,
         _ => StatusCode::UNPROCESSABLE_ENTITY,
@@ -457,6 +458,11 @@ async fn selection_set(
             return Err(StatusCode::BAD_REQUEST);
         }
         fenced(&gate, &t, state, || {
+            // A box is in the displayed frame; state_rev pins which one.
+            shared::same_frame(
+                edit.needs_view(),
+                t.controller.snapshot().state.root.is_some(),
+            )?;
             shared::selection_base(&t.lease.panel.lock().unwrap(), base)
         })?;
         let ticket = admit(&gate, &t, |permit| {
@@ -504,5 +510,11 @@ mod tests {
                 .as_ref(),
             b"allowed"
         );
+    }
+    #[test]
+    fn a_view_root_refusal_is_a_conflict_like_the_owner_route() {
+        assert_eq!(status("drc_view_root"), StatusCode::CONFLICT);
+        assert_eq!(status("drc_context_changed"), StatusCode::CONFLICT);
+        assert_eq!(status("drc_read_error"), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

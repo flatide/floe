@@ -135,10 +135,14 @@ fn frame_scope(frame: &DisplayFrame, scope: &Scope, mode: Mode) -> bool {
         }
 }
 fn state(s: &Snapshot, target: &Target, mode: Mode, epoch: &str) -> Value {
+    // root: bbox_dbu is a root cell's frame while DRC positions are top-cell
+    // coordinates. Only a Follow target can have one (forks start at the
+    // top); the flag alone, not the owner's cell name.
     let mut out = json!({"type":"share.state","view_id":target.id,"connection_epoch":epoch,
         "dataset_revision":target.controller.model.dataset_revision.to_string(),"state_rev":s.state_rev.to_string(),
         "render_rev":s.render_rev.to_string(),"render_key":s.render_key.to_string(),
         "worker_epoch":s.worker_epoch.to_string(),"bbox_dbu":s.state.viewport.bbox.map(|v|v.to_string()),
+        "root":s.state.root.is_some(),
         "dbu_um":target.controller.model.dbu.to_string(),
         "camera_um":view::camera_um(s.state.viewport.bbox,target.controller.model.dbu),
         "pixels":[s.state.viewport.width,s.state.viewport.height],

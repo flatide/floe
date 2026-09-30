@@ -6,7 +6,7 @@
         const P=o.protocol,G=o.geometry,el=o.el,doc=o.document;
         let bound='',turn=0,task=null,ready=false,metadata=null,panelRev='1',groups=null;
         let data=null,rules=[],rows=[],selected=null,points=null,complete=false;
-        let ruleNext=null,errorNext=null,listRev=null,liveDirty=false;
+        let ruleNext=null,errorNext=null,listKey=null,liveDirty=false;
         let continuation=null,continuationStamp='',boxMode=false,boxStart=null,boxEnd=null,painted=null,errorNodes='';
         let effects=0,panelEdit=0,panelSaved=0,cdSegments=null,cdGlobal=null,cdError='';
         const book=o.history||o.rulers.history();
@@ -47,19 +47,28 @@
             finally{t.phase=null;}
         }
         function stamp(){const c=context();return c?bound+':'+c.state_rev:'';}
-        function filterStamp(){return data?[bound,data.check,data.waived,data.in_view?stamp():'',data.selected_only?groups.revision:''].join(':'):'';}
+        // DRC positions are top-cell coordinates; under the owner's view root
+        // the viewport is the root cell's frame. The Current view box keeps its
+        // value, but the filter, markers and box selection pause until the top.
+        function rooted(){const c=context();return !!c&&c.root===true;}
+        function inView(){return !!data&&data.in_view&&!rooted();}
+        // The key a list page answers; a checked Current view follows it.
+        function viewKey(){const c=context();return inView()&&c?'view:'+c.state_rev:'all';}
+        function stale(){return !!data&&data.in_view&&listKey!==viewKey();}
+        function filterStamp(){return data?[bound,data.check,data.waived,inView()?stamp():'',data.selected_only?groups.revision:''].join(':'):'';}
         function clearStep(){continuation=null;continuationStamp='';el('gd-step-continue').hidden=true;el('gd-step-status').textContent='';}
         function boxReset(off){boxStart=boxEnd=null;if(off){boxMode=false;}
             el('gd-box').setAttribute('aria-pressed',String(boxMode));el('gd-box-status').textContent=boxMode?'Click the first corner · drag still pans.':'e: two corners · current rule/page only · Shift adds · Ctrl/Cmd toggles.';
             if(o.modeChanged){o.modeChanged(boxMode);}o.repaint();}
         function controls(){const c=context(),enabled=!!c&&ready&&!task;
             ['search','filter','waived','in-view','selected-only','markers','rule-prev','rule-next','error-prev','error-next','clear','go','fit','step-prev','step-next','step-continue','box'].forEach(function(n){el('gd-'+n).disabled=!enabled;});
-            ['step-prev','step-next','step-continue'].forEach(function(n){el('gd-'+n).disabled=!enabled||data.check===null||data.in_view&&c.pending;});
+            ['step-prev','step-next','step-continue'].forEach(function(n){el('gd-'+n).disabled=!enabled||data.check===null||inView()&&c.pending;});
+            ['in-view','markers'].forEach(function(n){el('gd-'+n).disabled=!enabled||rooted();});
             el('gd-step-continue').hidden=!continuation;
-            el('gd-box').disabled=!enabled||data.check===null||!data.markers||c.pending;
+            el('gd-box').disabled=!enabled||data.check===null||!data.markers||c.pending||rooted();
             el('gd-rule-prev').disabled=!enabled||!ruleBack.length;el('gd-rule-next').disabled=!enabled||ruleNext===null;
             el('gd-error-prev').disabled=!enabled||!errorBack.length;el('gd-error-next').disabled=!enabled||errorNext===null;
-            ['go','fit'].forEach(function(n){el('gd-'+n).disabled=!enabled||!selected||c.mode!=='explore'||c.pending;});
+            ['go','fit'].forEach(function(n){el('gd-'+n).disabled=!enabled||!selected||c.mode!=='explore'||c.pending||rooted();});
             el('gd-end-jump').disabled=!c||!ready||!!task&&task.initial||!data.jump_active&&!(task&&['focus','move'].includes(task.phase));
             el('gd-jump-status').textContent=!data?'':data.jump_active?'Error navigation on · '+(data.zoom_lock?'scale locked':'auto-fit'):'Error navigation off · stepping selects without moving.';
             el('gd-reload').disabled=!c;el('gd-panel').hidden=!bound;
@@ -67,7 +76,7 @@
         function sync(){if(!data){return;}el('gd-search').value=data.search;el('gd-waived').value=data.waived===null?'all':data.waived?'yes':'no';
             ['in-view','selected-only','markers'].forEach(function(n){el('gd-'+n).checked=data[n.replace('-','_')];});}
         function cancel(){turn++;if(task){task.cancelled=true;if(task.abort){task.abort();}}task=null;}
-        function reset(){cancel();bound='';ready=false;metadata=groups=data=null;rules=rows=[];selected=points=null;complete=false;listRev=null;liveDirty=false;
+        function reset(){cancel();bound='';ready=false;metadata=groups=data=null;rules=rows=[];selected=points=null;complete=false;listKey=null;liveDirty=false;
             effects++;panelEdit=panelSaved=0;cdSegments=null;cdGlobal=null;cdError='';showCD();if(o.hover){o.hover('');}
             painted=null;errorNodes='';clearStep();boxReset(true);
             ruleNext=errorNext=null;ruleBack.length=errorBack.length=0;el('gd-rules').textContent=el('gd-errors').textContent=el('gd-description').textContent=el('gd-selected').textContent='';controls();o.repaint();}
@@ -121,11 +130,11 @@
                     if(moved&&t.reframe&&version===effects&&!context().pending){await focusRead(t,r,true);}}
             });return true;
         }
-        function step(backwards,resume){if(!ready||task||!context()||data.check===null||data.in_view&&context().pending){return false;}
+        function step(backwards,resume){if(!ready||task||!context()||data.check===null||inView()&&context().pending){return false;}
             if(resume&&(!continuation||continuationStamp!==filterStamp())){clearStep();return false;}
             const body=resume?continuation:{kind:'filtered_step',check:data.check,backwards:backwards,
                 after:selected&&selected.check===data.check&&(data.waived===null||(selected.status===1)===data.waived)?selected.local:null,
-                cursor:null,waived:data.waived,in_view:data.in_view,selection_rev:data.selected_only?groups.revision:null};
+                cursor:null,waived:data.waived,in_view:inView(),selection_rev:data.selected_only?groups.revision:null};
             clearStep();boxReset(true);const expected=filterStamp(),version=effects,startView=stamp();
             run(async function(t){t.stepRead=true;const v=await read(t,body,body.in_view);t.stepRead=false;if(filterStamp()!==expected){return;}
                 const result=o.steps.decode(v,body,P,record,contains);continuation=result.continuation;continuationStamp=expected;
@@ -151,12 +160,12 @@
             if(v.next!==null){P.counter(v.next,true);if(P.compare(v.next,data.rule_start)<=0||last!==null&&P.compare(v.next,last)<=0){throw Error('Invalid rule cursor');}}
             rules=v.rows;ruleNext=v.next;
         }
-        async function errors(t){if(data.check===null){rows=[];errorNext=null;return;}const rev=context().state_rev;
-            const v=await read(t,{kind:'list',check:data.check,start:data.error_start,waived:data.waived,limit:64,in_view:data.in_view,selection_rev:data.selected_only?groups.revision:null},data.in_view);
+        async function errors(t){if(data.check===null){rows=[];errorNext=null;return;}const live=inView(),page=viewKey();
+            const v=await read(t,{kind:'list',check:data.check,start:data.error_start,waived:data.waived,limit:64,in_view:live,selection_rev:data.selected_only?groups.revision:null},live);
             const values=recordRows(v.rows);let last=null;
             values.forEach(function(r){if(r.check!==data.check||P.compare(r.local,data.error_start)<0||last!==null&&P.compare(r.local,last)<=0||data.waived!==null&&(r.status===1)!==data.waived||data.selected_only&&!contains(r)){throw Error('Invalid filtered error');}last=r.local;});
             if(v.next!==null){P.counter(v.next,true);if(P.compare(v.next,data.error_start)<=0||last!==null&&P.compare(v.next,last)<=0){throw Error('Invalid error cursor');}}
-            rows=values;errorNext=v.next;listRev=rev;
+            rows=values;errorNext=v.next;listKey=page;
         }
         async function geometry(t){if(!selected){return;}const r=selected;let start='0',total=null,units=null;points=null;complete=false;
             for(let page=0;page<128;page++){
@@ -189,19 +198,20 @@
         }
         async function run(fn,initial){if(task||!context()||!initial&&!ready){return;}const t={turn:turn,cancelled:false,abort:null,initial:!!initial,phase:null,notice:null};task=t;render();
             try{await fn(t);check(t);if(panelSaved!==panelEdit){await save(t);}note(t.notice||'Read-only result · private selection/panel; no review files changed.');}
-            catch(e){if(valid(t)){if(e.viewChanged){liveDirty=ready&&data.in_view;if(data.in_view){rows=[];}note(liveDirty?'View changed; updating the current-view list…':'View changed; reload review or repeat the intended action.');}
+            catch(e){if(valid(t)){if(e.viewChanged){liveDirty=ready&&data.in_view;if(data.in_view){rows=[];listKey=null;}note(liveDirty?'View changed; updating the current-view list…':'View changed; reload review or repeat the intended action.');}
                 else{ready=false;rows=[];selected=points=null;complete=false;note('Review unavailable or update unconfirmed: '+e.message+' · Reload review; nothing was replayed.');}}}
-            finally{if(valid(t)){task=null;render();const again=liveDirty&&ready&&data.in_view&&context().state_rev!==listRev;liveDirty=false;
+            finally{if(valid(t)){task=null;render();const again=liveDirty&&ready&&stale();liveDirty=false;
                 if(ready&&panelSaved!==panelEdit){run(save);}else if(again){run(async function(next){data.error_start='0';errorBack.length=0;await errors(next);});}}}
         }
         function reload(){const c=o.context();reset();if(!c||!c.drc){return;}bound=key(c);data=defaults();controls();note('Restoring private review state…');run(restore,true);}
         function changed(){const c=o.context();if(key(c)!==bound){reload();return;}controls();
             if(continuation&&continuationStamp!==filterStamp()){clearStep();}
             if(painted&&(painted.stamp!==stamp()||c.pending)){painted=null;boxReset(true);if(o.hover){o.hover('');}}
-            if(c&&ready&&data.in_view&&listRev!==c.state_rev){if(task){liveDirty=true;}else{run(async function(t){data.error_start='0';errorBack.length=0;await errors(t);});}}
+            if(boxMode&&rooted()){boxReset(true);}
+            if(c&&ready&&stale()){if(task){liveDirty=true;}else{run(async function(t){data.error_start='0';errorBack.length=0;await errors(t);});}}
         }
         function scale(c){if(!c||!Array.isArray(c.camera)||!Array.isArray(c.pixels)||!(c.pixels[0]>0)){throw Error('Missing view scale');}const n=Number(P.decimal(c.camera[2]))/c.pixels[0];if(!(n>0&&Number.isFinite(n))){throw Error('Invalid view scale');}return n;}
-        async function focusRead(t,r,fit){const c=context();if(!c||c.mode!=='explore'||c.pending){return false;}const rev=c.state_rev,version=effects;
+        async function focusRead(t,r,fit){const c=context();if(!c||c.mode!=='explore'||c.pending||c.root){return false;}const rev=c.state_rev,version=effects;
             const locked=fit===false||fit===null&&(data.zoom_lock||data.jump_scale!==null&&Math.abs(scale(c)/Number(data.jump_scale)-1)>1e-6);
             t.phase='focus';try{const v=await read(t,{kind:'focus',check:r.check,error:r.local,fit:!locked,isolate:false},true);
             if(version!==effects){return false;}
@@ -232,7 +242,7 @@
         el('gd-go').onclick=function(){focus(false);};el('gd-fit').onclick=function(){focus(true);};
         el('gd-end-jump').onclick=endJump;
         el('gd-step-prev').onclick=function(){step(true,false);};el('gd-step-next').onclick=function(){step(false,false);};el('gd-step-continue').onclick=function(){step(false,true);};
-        function toggleBox(){if(boxMode){boxReset(true);return true;}const c=context();if(!ready||task||!c||c.pending||data.check===null||!data.markers){return false;}boxMode=true;boxReset(false);return true;}
+        function toggleBox(){if(boxMode){boxReset(true);return true;}const c=context();if(!ready||task||!c||c.pending||c.root||data.check===null||!data.markers){return false;}boxMode=true;boxReset(false);return true;}
         el('gd-box').onclick=toggleBox;
         function hitContext(x,y){const c=context(),v=painted,r=o.rect?o.rect():v&&v.rect;if(!ready||!c||c.pending||!data.markers||!v||v.stamp!==stamp()||!r||
             !Number.isFinite(x)||!Number.isFinite(y)||!(r.width>0&&r.height>0)||x<r.left||y<r.top||x>=r.left+r.width||y>=r.top+r.height){return null;}return Object.assign({},v,{rect:r});}
@@ -259,7 +269,7 @@
             if(k===','||k==='.'||k==='Tab'){return step(k===','||k==='Tab'&&!!shift,false);}return false;
         }
         el('gd-errors').onkeydown=function(e){if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.isComposing&&e.keyCode!==229&&(e.key==='ArrowUp'||e.key==='ArrowDown')){if(step(e.key==='ArrowUp',false)){e.preventDefault();}}};
-        function paint(ctx,p,size,rect){painted=null;if(!p||!size||!context()||!data||!data.markers||!data.shown){return;}const hits=[];ctx.save();
+        function paint(ctx,p,size,rect){painted=null;if(!p||!size||!context()||!data||!data.markers||!data.shown||rooted()){return;}const hits=[];ctx.save();
             const markers=rows.slice();if(selected&&!markers.some(function(r){return r.check===selected.check&&r.local===selected.local;})){markers.push(selected);}
             markers.forEach(function(r){const b=bbox(r.bbox_um),xy=G.point(p,b[0]*.5+b[2]*.5,b[1]*.5+b[3]*.5);if(!xy.every(Number.isFinite)){return;}
                 if(xy[0]<-4||xy[0]>size[0]+4||xy[1]<-4||xy[1]>size[1]+4){return;}

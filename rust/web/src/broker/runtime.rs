@@ -193,7 +193,7 @@ impl Runtime {
     /// palette rows, minimap base and fill-slot table the owner shell reads.
     /// Rows are rebuilt from the immutable model per request; no owner
     /// catalog, source path or write path is reached.
-    pub fn palette(
+    pub(crate) fn palette(
         &self,
         access: &Access,
         request: crate::layer_catalog::PaletteRead,

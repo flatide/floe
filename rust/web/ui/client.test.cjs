@@ -76,6 +76,7 @@ let startupReceipt=null,startupFail=true;
 const startupBody={depth:'17',detail:'high',thin:'keep',frames:true,labels:false,navigation:{kind:'goto',center_um:['1.25','-2.5']}};
 let modeOperation=null,serverMode='chip',serverLevels=['1'],modeReadFailure=false,modeViewReadFailure=false,modeLosePost=false,modeNumber=0;
 let textSelection=null;
+let cellReplies=null,cellsPort=null; // cell tree answers by query kind; unset, a tree query fails as before
 let clipController,clipOp=null,clipFile=null;
 function clipState(){return {available:true,kind:'exact_clip',jobs_default:4,jobs_min:1,jobs_max:16,
     capacity:{cpu_slots:16,workers:2,decoded_mb:'2048',cache_mb:'256'},
@@ -218,6 +219,7 @@ class XHR {
             const rows=(paletteEnabled?paletteRows:[layerRow]).filter(r=>!r.parent||!closed(r.parent)).map(r=>({...r,closed:r.children>0&&closed(r.pair),visible:snapshot.layers.mode==='all'||snapshot.layers.mode==='only'&&snapshot.layers.pairs.some(p=>p.join('/')===r.pair.join('/'))}));
             value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:rows.length,all_total:paletteEnabled?4:1,start:0,next:null,rows};
         }
+        else if(cellReplies&&this.path==='/api/v1/views/'+viewId+'/cells'){value=cellReplies[body.kind];if(!value){throw new Error('Unexpected cell query '+body.kind);}}
         else {throw new Error('Unexpected HTTP '+this.path);}
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
         if((indexOpenEnabled||revisionEnabled)&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
@@ -295,7 +297,7 @@ if(process.env.FLOE_TEST_TIMING==='1'){
 window.FloeSessionExit=require('./session-exit.js');
 window.FloeSharing=require('./sharing.js');
 window.FloeNotices=require('./notices.js');
-window.FloeMinimap=require('./minimap.js');window.FloeMenubar=require('./menubar.js');window.FloePanes=require('./panes.js');window.FloeCells=require('./cells.js');
+window.FloeMinimap=require('./minimap.js');window.FloeMenubar=require('./menubar.js');window.FloePanes=require('./panes.js');window.FloeCells={...require('./cells.js'),bind(o){cellsPort=o;return require('./cells.js').bind(o);}};
 window.FloeLauncher=require('./launcher.js');
 window.FloeBrowse=require('./browse.js');
 window.FloeIndexOpen=require('./index-open.js');
@@ -1570,6 +1572,24 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         }
     }
     assert.equal(second.sent.length,depthCount,'IME shortcut sent a view edit');
+    // The view-root chords reach the cell tree ahead of the viewer's ctrl
+    // keys: Ctrl+T roots the selected cell, Ctrl+Shift+T returns to the top.
+    cellReplies={sources:{sources:[{src:0}]},bbox:{insts:1,approx:false,bbox:[10,10,30,20]},
+        children:{cell:7,name:'TOP',insts:1,height:2,unit:1,bbox:[0,0,80,80],n:2,total:2,children:[{ci:1,name:'BLK',members:4,leaf:false},{ci:2,name:'VIA',members:1,leaf:true}]}};
+    // cells.js retries a failed tree load after 2 s of its port clock (real time here).
+    cellsPort.now=()=>Date.now()+5000;snapshot.capabilities.cell_root=true;second.receive(snapshot);delete cellsPort.now;
+    await wait(()=>node('cells-tree').children.length===3);
+    const via=node('cells-tree').children[2];via.onclick({target:via});await wait(()=>!node('cells-root').disabled);
+    const chord=(k,extra={})=>{let used=false;node('viewport').keydown({key:k,code:'KeyT',ctrlKey:true,target:node('viewport'),preventDefault(){used=true;},...extra});return used;};
+    const roots=()=>second.sent.filter(m=>m.type==='view.set'&&'root' in m.body).map(m=>m.body.root);
+    drcOptions.history.push('manual',{endpoints_dbu:[['0','0'],['30','0']],delta_um:['30','0'],distance_um:'30'});
+    assert(chord('t'),'Ctrl+T did not reach the cell tree');assert.deepEqual(roots(),[{src:0,cell:2}]);
+    for(const extra of [{repeat:true},{altKey:true},{metaKey:true}])assert(!chord('t',extra));
+    assert.equal(roots().length,1,'a repeated or modified Ctrl+T sent a root edit');
+    snapshot.root={cell:2,name:'VIA'};snapshot.root_name='VIA';await applied();await wait(()=>!node('cells-top').disabled);
+    assert.equal(drcOptions.history.entries().length,0,'a top-frame ruler survived the view root');
+    assert(chord('T',{shiftKey:true}),'Ctrl+Shift+T did not reach the cell tree');assert.deepEqual(roots(),[{src:0,cell:2},null]);
+    delete snapshot.capabilities.cell_root;snapshot.root=null;snapshot.root_name='';await applied();
     // Free mouse pan has no network traffic while moving and preserves the
     // translated foreground until its new (non-16px) native phase arrives.
     second.receive(packet('raw','11',snapshot.render_rev,nextEpoch));

@@ -77,6 +77,21 @@ async function box(a,b,mods){paint();assert(click(...a));paint();assert(click(..
     // Escape cancels the first corner, then exits the tool, then clears this rule.
     paint();assert(click(10,10));assert(panel.key('Escape'));assert(panel.boxActive());assert(panel.key('Escape'));assert(!panel.boxActive());
     assert(panel.key('Escape'));await tick();assert.deepEqual(selected('0'),[]);
+    // A view root is another frame: a box in progress ends (no crosshair or
+    // prompt for a corner that cannot land), e refuses like the disabled
+    // button, and the root note leaves with the root.
+    assert(panel.key('e'));paint();assert(click(10,10));assert.equal(cursor,'crosshair');
+    context={...context,state:{...context.state,state_rev:'3',root:{cell:3,name:'BLK'},root_name:'BLK'}};panel.contextChanged();paint();
+    assert(!panel.boxActive(),'box mode survived the root');assert.equal(el('drc-box')['aria-pressed'],'false');assert.equal(cursor,'');
+    assert.match(el('drc-box-status').textContent,/^e: two corners/);assert(el('drc-box').disabled);
+    el('drc-message').textContent='';assert.equal(panel.key('e'),false,'e entered box mode under a root');
+    assert(!panel.boxActive());assert.equal(el('drc-box')['aria-pressed'],'false');assert.equal(cursor,'');
+    assert.match(el('drc-message').textContent,/^View root active/);
+    const underRoot=commands.length;assert(!click(30,30));assert.equal(commands.length,underRoot);
+    await el('drc-reload').onclick();await tick();paint();assert.match(el('drc-message').textContent,/^View root active/,'the restored page hid the root note');
+    context={...context,state:{...context.state,state_rev:'4',root:null,root_name:''}};panel.contextChanged();paint();
+    assert.equal(el('drc-message').textContent,'','the root note outlived the root');assert(!el('drc-box').disabled);
+    assert(panel.key('e'));assert(panel.boxActive());assert(panel.key('e'));assert(!panel.boxActive());
     // Row modifiers mutate groups without triggering a focus/geometry read.
     el('drc-errors').children[0].onclick({ctrlKey:true,detail:1});await tick();assert.deepEqual(selected('0'),[ids[0]]);
     el('drc-errors').children[1].onclick({shiftKey:true,detail:1});await tick();assert.deepEqual(selected('0'),ids.slice(0,2));

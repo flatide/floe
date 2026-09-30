@@ -231,5 +231,18 @@ if(require.main===module)(async()=>{
     lw.text(limits.state({rendering:true}));limits.el('guest-viewport').listeners.wheel(wheel);assert.equal(lw.sent.length,1,'wheel waits for final display');
     lw.text(limits.state());lw.bufferedAmount=16385;click(limits,16,8);assert.equal(lw.sent.length,1,'query never adds to saturated socket');
     assert.equal(lw.readyState,1);lw.bufferedAmount=0;limits.advance();click(limits,16,8);assert.equal(lw.sent.at(-1).type,'explore.query');lw.onclose();
-    console.log('WEB GUEST UI: ALL OK (isolated auth, follow/explore, displayed ACK/margin queries, pick cycling, native rulers, DPR/letterbox overlays, pan/band/wheel, cancellation/backpressure, stale/revoke cleanup)');
+    // share.state carries a view root flag only. Under the owner's root the
+    // DRC overlay (top-cell coordinates) stays hidden with a note and the
+    // panel pauses; a malformed flag is a protocol error like other fields.
+    const rooted=environment('follow','#invite='+secret,'records');await rooted.c.start();rooted.hello();const rw=rooted.sockets[0];
+    rw.text(rooted.state({root:false}));for(let i=0;i<80&&rooted.el('gd-filter').disabled;i++){await tick();}assert.equal(rooted.el('gd-filter').disabled,false);
+    rw.binary(packet());rooted.raf();assert(!rooted.el('guest-drc-canvas').hidden);assert.doesNotMatch(rooted.el('guest-status').textContent,/view root/);
+    assert.equal(rooted.el('gd-in-view').disabled,false);
+    rw.text(rooted.state({state_rev:'2',root:true}));await tick();
+    assert(rooted.el('guest-drc-canvas').hidden,'no top-cell markers over a root frame');assert.match(rooted.el('guest-status').textContent,/view root/);
+    assert.equal(rooted.el('gd-in-view').disabled,true);assert.equal(rooted.el('gd-box').disabled,true);
+    rw.text(rooted.state({state_rev:'3',root:false}));await tick();
+    assert(!rooted.el('guest-drc-canvas').hidden);assert.doesNotMatch(rooted.el('guest-status').textContent,/view root/);assert.equal(rooted.el('gd-in-view').disabled,false);
+    rw.text(rooted.state({state_rev:'4',root:'yes'}));assert.equal(rw.readyState,3,'a malformed root flag is a protocol error');
+    console.log('WEB GUEST UI: ALL OK (isolated auth, follow/explore, displayed ACK/margin queries, pick cycling, native rulers, DPR/letterbox overlays, pan/band/wheel, cancellation/backpressure, stale/revoke cleanup, view root overlay pause)');
 })().catch(e=>{console.error(e);process.exitCode=1;});

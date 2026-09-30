@@ -7,7 +7,7 @@
     'use strict';
     function bind(port) {
         const el = port.el, doc = port.document, bar = el('menubar');
-        const menus = [];
+        const menus = [], all = [];
         let open = null;
         function fire(control, type) {
             if (typeof control.dispatchEvent === 'function' && port.window && typeof port.window.Event === 'function') {
@@ -37,6 +37,9 @@
         }
         function activate(item) {
             if (item.sub) { return; }
+            // Proxies change between refreshes: a stale item must not grant
+            // what its control refuses now, so re-read instead of acting.
+            if (hiddenItem(item) || disabledItem(item)) { update(); return; }
             close(true);
             try {
                 if (typeof item.action === 'function') { item.action(); return; }
@@ -50,51 +53,85 @@
             } catch (e) { if (port.report) { port.report(e); } }
         }
         function refresh(menu) {
+            let last = null;
             menu.entries.forEach(function (entry) {
                 const item = entry.item, node = entry.node;
+                // Separators only divide visible groups: once hidden items are
+                // resolved none may lead, trail or follow another separator.
+                node.hidden = hiddenItem(item) || (!!item.sep && (!last || !!last.item.sep));
+                if (!node.hidden) { last = entry; }
                 if (item.sep) { return; }
-                node.hidden = hiddenItem(item);
-                if (node.hidden) { return; }
-                node.disabled = disabledItem(item);
-                const checked = checkedItem(item);
-                if (checked !== null) {
-                    node.setAttribute('aria-checked', String(checked));
-                    entry.mark.textContent = checked ? (item.radio ? '●' : '✓') : '';
+                if (!node.hidden) {
+                    node.disabled = disabledItem(item);
+                    const checked = checkedItem(item);
+                    if (checked !== null) {
+                        node.setAttribute('aria-checked', String(checked));
+                        entry.mark.textContent = checked ? (item.radio ? '●' : '✓') : '';
+                    }
                 }
-                if (entry.sub) { refresh(entry.sub); }
+                if (entry.sub) { if (usable(entry)) { refresh(entry.sub); } else { collapse(entry); } }
             });
+            if (last && last.item.sep) { last.node.hidden = true; }
+        }
+        // The public refresh. Focus on an item it hid or disabled moves to the
+        // next usable item of that menu (or up to the owner or title): a
+        // browser drops it to the body otherwise, and the arrows go dead.
+        function update() {
+            if (!open) { return; }
+            const a = doc.activeElement;
+            const had = a ? all.find(function (e) { return e.node === a && rootOf(e.menu) === open; }) : null;
+            refresh(open);
+            if (!had) { return; }
+            let e = had;
+            while (e.menu.parent && (e.menu.panel.hidden || !step(e.menu, e, 1))) { e = e.menu.owner; collapse(e); }
+            const next = usable(e) ? e : step(e.menu, e, 1);
+            if (next === had) { return; }
+            if (next) { select(next); } else { e.menu.title.focus(); }
         }
         function close(focusBar) {
             if (!open) { return; }
             const was = open; open = null;
             was.panel.hidden = true; was.title.setAttribute('aria-expanded', 'false');
-            menus.forEach(function (m) { m.entries.forEach(function (e) { if (e.sub) { e.sub.panel.hidden = true; } }); });
+            menus.forEach(function (m) { closeSubs(m); });
             if (focusBar && port.focus) { port.focus(); }
         }
         function show(menu) {
             if (open && open !== menu) { close(false); }
             refresh(menu);
             open = menu; menu.panel.hidden = false; menu.title.setAttribute('aria-expanded', 'true');
-            const first = items(menu)[0];
-            if (first) { first.node.focus(); }
+            const first = step(menu, null, 1);
+            // With nothing usable the title takes the focus: the item that had
+            // it may sit in the panel close() just hid.
+            if (first) { select(first); } else { menu.title.focus(); }
         }
         function toggle(menu) { if (open === menu) { close(true); } else { show(menu); } }
         // A submenu is a menu of its own (its entries live in entry.sub);
         // parent/owner link it back for Escape, ArrowLeft and refresh.
-        function items(menu) {
-            return menu.entries.filter(function (e) { return !e.item.sep && !e.node.hidden && !e.node.disabled; });
+        function usable(entry) { return !entry.item.sep && !entry.node.hidden && !entry.node.disabled; }
+        // The usable entry after (delta 1) or before (-1) `from`, wrapping;
+        // null starts at an edge. `from` itself may have just turned unusable.
+        function step(menu, from, delta) {
+            const list = menu.entries, n = list.length;
+            let i = list.indexOf(from);
+            if (i < 0) { i = delta > 0 ? -1 : n; }
+            for (let k = 0; k < n; k++) { i = (i + delta + n) % n; if (usable(list[i])) { return list[i]; } }
+            return null;
         }
         function rootOf(menu) { while (menu.parent) { menu = menu.parent; } return menu; }
+        // One selection for mouse and keyboard, as in GTK: the focused item is
+        // the only one of its menu whose submenu may stay open.
+        function select(entry) { entry.node.focus(); closeSubs(entry.menu, entry); }
         function move(menu, entry, delta) {
-            const visible = items(menu);
-            const i = visible.findIndex(function (e) { return e.node === entry.node; });
-            const next = visible[(i + delta + visible.length) % visible.length];
-            if (next) { next.node.focus(); }
+            const next = step(menu, entry, delta);
+            if (next) { select(next); }
         }
-        function enterSub(entry) {
-            openSub(entry);
-            const first = items(entry.sub)[0];
-            if (first) { first.node.focus(); }
+        // The pointer selects like the arrows do, so a panel it closes never
+        // keeps the focus. A disabled item cannot hold the selection: hovering
+        // one leaves the selection and its submenu where they are.
+        function hover(entry) {
+            if (entry.menu.panel.hidden || !usable(entry)) { return; }
+            select(entry);
+            if (entry.sub) { openSub(entry, false); }
         }
         function leaveSub(menu) {
             closeSubs(menu.parent); menu.owner.node.focus();
@@ -116,7 +153,7 @@
                 node.setAttribute('role', item.sub ? 'menuitem' : (item.radio ? 'menuitemradio' : (item.toggle || item.check ? 'menuitemcheckbox' : 'menuitem')));
                 const mark = doc.createElement('span'); mark.className = 'menu-mark'; mark.setAttribute('aria-hidden', 'true');
                 const label = doc.createElement('span'); label.className = 'menu-label'; label.textContent = item.label;
-                const key = doc.createElement('span'); key.className = 'menu-key'; key.textContent = item.sub ? '▸' : (item.key || '');
+                const key = doc.createElement('span'); key.className = 'menu-key'; key.textContent = item.sub ? (item.key ? item.key + ' ▸' : '▸') : (item.key || '');
                 node.appendChild(mark); node.appendChild(label); node.appendChild(key);
                 if (item.title) { node.title = item.title; }
                 if (item.id) { node.id = item.id; }
@@ -127,36 +164,41 @@
                     node.setAttribute('aria-haspopup', 'menu'); node.setAttribute('aria-expanded', 'false');
                     const wrap = doc.createElement('div'); wrap.className = 'menu-subwrap';
                     wrap.appendChild(node); wrap.appendChild(entry.sub.panel); panel.appendChild(wrap);
-                    node.onclick = function (e) { if (e && e.preventDefault) { e.preventDefault(); } openSub(entry); };
-                    node.onmouseenter = function () { openSub(entry); };
+                    node.onclick = function (e) { if (e && e.preventDefault) { e.preventDefault(); } hover(entry); };
                 } else {
                     panel.appendChild(node);
                     node.onclick = function (e) { if (e && e.preventDefault) { e.preventDefault(); } activate(item); };
-                    node.onmouseenter = function () { closeSubs(menu); };
                 }
+                node.onmouseenter = function () { hover(entry); };
                 node.onkeydown = function (e) { keyInPanel(menu, entry, e); };
-                menu.entries.push(entry);
+                menu.entries.push(entry); all.push(entry);
             });
             return panel;
         }
-        function closeSubs(menu) {
-            menu.entries.forEach(function (e) { if (e.sub) { e.sub.panel.hidden = true; e.node.setAttribute('aria-expanded', 'false'); } });
-        }
-        function openSub(entry) {
-            if (!open) { return; }
-            closeSubs(rootOf(entry.menu));
+        // Every path that hides a submenu comes through here, so no owner
+        // keeps aria-expanded="true" over a hidden panel.
+        function collapse(entry) { entry.sub.panel.hidden = true; entry.node.setAttribute('aria-expanded', 'false'); closeSubs(entry.sub); }
+        function closeSubs(menu, keep) { menu.entries.forEach(function (e) { if (e.sub && e !== keep) { collapse(e); } }); }
+        // The pointer shows any submenu, greyed items and all. The keyboard
+        // enters only one with a usable item: focus left on the owner of an
+        // open submenu would make ArrowLeft/Escape act on the parent menu.
+        function openSub(entry, enter) {
             refresh(entry.sub);
+            const first = step(entry.sub, null, 1);
+            if (enter && !first) { return; }
+            closeSubs(entry.menu, entry);
             entry.sub.panel.hidden = false; entry.node.setAttribute('aria-expanded', 'true');
+            if (enter) { select(first); }
         }
         function keyInPanel(menu, entry, e) {
             if (!open || e.isComposing || e.keyCode === 229) { return; }
             const k = e.key, inSub = !!menu.parent;
             if (k === 'Escape') { e.preventDefault(); if (inSub) { leaveSub(menu); } else { close(true); } return; }
             if (k === 'ArrowDown' || k === 'ArrowUp') { e.preventDefault(); move(menu, entry, k === 'ArrowDown' ? 1 : -1); return; }
-            if (k === 'ArrowRight') { e.preventDefault(); if (entry.sub) { enterSub(entry); } else { switchTop(menu, 1); } return; }
+            if (k === 'ArrowRight') { e.preventDefault(); if (entry.sub) { openSub(entry, true); } else { switchTop(menu, 1); } return; }
             if (k === 'ArrowLeft') { e.preventDefault(); if (inSub) { leaveSub(menu); } else { switchTop(menu, -1); } return; }
-            if (k === 'Home' || k === 'End') { e.preventDefault(); const v = items(menu); const t = v[k === 'Home' ? 0 : v.length - 1]; if (t) { t.node.focus(); } return; }
-            if (k === 'Enter' || k === ' ') { e.preventDefault(); if (entry.sub) { enterSub(entry); } else { activate(entry.item); } }
+            if (k === 'Home' || k === 'End') { e.preventDefault(); const t = step(menu, null, k === 'Home' ? 1 : -1); if (t) { select(t); } return; }
+            if (k === 'Enter' || k === ' ') { e.preventDefault(); if (entry.sub) { openSub(entry, true); } else { activate(entry.item); } }
         }
         function build(model) {
             bar.textContent = '';
@@ -188,7 +230,7 @@
         doc.addEventListener('keydown', function (e) { if (open && e.key === 'Escape' && !e.isComposing && e.keyCode !== 229 && !bar.contains(e.target)) { close(true); } });
         build(port.model || []);
         return Object.freeze({
-            refresh: function () { if (open) { refresh(open); } },
+            refresh: update,
             close: close,
             open: function (name) { const m = menus.find(function (x) { return x.name === name; }); if (m) { show(m); } },
             isOpen: function () { return !!open; }

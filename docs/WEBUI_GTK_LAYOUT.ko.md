@@ -186,6 +186,36 @@ status  frame status | view 크기 · depth/detail 행 · 아래 세션 주체 �
   어떤 셀이든 선택하면 다시 묻는다. 응답 전에는 zoom/root 버튼이 비활성이고 zoom은
   no-op이다. `cells.test.cjs` 회귀 추가.
 
+3차 검토(dc39390) 후속:
+
+- **더블클릭·Enter 확대 회귀**: 선택이 extent를 즉시 지우고 비동기로 묻게 되면서
+  `choose(); zoom();`의 zoom이 항상 no-op이 됐다. `chooseAndZoom()`이 extent 응답 뒤
+  선택 셀과 root(frame)가 그대로일 때만 확대한다(더블클릭, 행 Enter, 검색창 Enter).
+  `cells.test.cjs`에 응답 전 이동 없음 → 응답 후 이동, root 변경 시 취소 회귀 추가.
+
+자체 적대적 재검토(3차 수정 후, 5개 영역 헌터 + 3인 반박) 후속:
+
+- **셀 트리**: 늦게 도착한 zoom은 제스처 위치에 포커스가 그대로일 때만 캔버스로 옮긴다(검색창·대화상자에서
+  빼앗지 않음). root 변경은 트리 밖(검색 결과) 선택의 extent도 지우고, 뷰가 응답 가능해질 때 한 번 다시 묻는다.
+  뷰를 열 때의 root는 변경으로 치지 않는다. 트리 로드·펼침·검색은 별도 flight라 검색이 로드를 막지 않는다.
+  같은 뷰·선택의 insts는 한 번만 묻고, 새 선택은 이전 상자를 즉시 지운다. 키보드: 재그리기 뒤 같은 셀 행에
+  포커스 유지, ↑↓는 실제 셀 행만, roving tabindex. 검색창 Enter는 대기 중 검색을 먼저 실행한다.
+  root 설정(버튼·메뉴·Ctrl+T)은 현재 프레임 extent가 있어야 하며, 트리 행에서도 Ctrl+T/Ctrl+Shift+T가 동작한다.
+- **단축키**: 캔버스의 Ctrl+T/Ctrl+Shift+T가 셀 트리로 전달된다. Chrome/Firefox(Windows/Linux)는 이 조합을
+  탭용으로 예약해 페이지가 받지 못하므로 메뉴·버튼을 쓴다. Electron과 macOS 브라우저는 전달된다.
+- **DRC**: root 상태에서 `e`(box 선택) 거부, 진행 중 box 선택과 CD ruler는 root 진입 시 해제한다. root 해제 뒤
+  top 프레임이 도착할 때까지 root 프레임의 projection(render_key로 식별)으로는 마커·CD ruler를 그리지 않는다.
+  root 안내는 진입 시 한 번만 표시해 읽기 실패 메시지를 덮지 않는다.
+- **ruler**: root 변경 시 수동·자동 ruler를 지운다(GTK는 유지하지만 좌표계가 달라짐). CD ruler는 root 동안 숨긴다.
+- **메뉴**: 마우스 hover와 키보드가 하나의 선택을 공유하고, 서브메뉴를 숨기는 모든 경로가 owner의
+  `aria-expanded`를 되돌린다. 앞·뒤·연속 구분선은 숨기고, 쓸 항목이 없는 서브메뉴는 키보드로 열지 않으며,
+  숨김/비활성 항목은 실행 시점에 다시 확인한다. 서브메뉴 owner에도 단축키 힌트(`d ▸`)를 표시한다.
+- **guest 공유**: Explore fork와 유휴 저장 상태는 root 없이 top에서 시작한다(`ViewState::at_top`).
+  Follow 대상이 root 상태이면 guest의 뷰 영역 DRC 읽기·box 선택은 `drc_view_root`(409)로 거부된다.
+  guest에는 root를 해제할 편집 경로가 없으므로 Focus도 거부한다. `share.state`에 `root` 플래그를 추가했고,
+  guest는 마커를 숨기며 Current view·box 선택을 멈춘다. 실제 daemon 통합 테스트는 `guest_root` 게이트다
+  (`tests/guest_root.rs`).
+
 ## 6. 잔여
 
 - 색인 요약 빌드(`floe-index hier`)를 웹 승인 경로로 제공하지 않았다. `build cell index…`

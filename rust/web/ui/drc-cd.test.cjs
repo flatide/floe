@@ -4,7 +4,7 @@ const assert=require('node:assert/strict'), D=require('./drc.js'), P=require('./
 const focus=require('./test-focus.cjs');
 const history=process.env.FLOE_TEST_SHARED_RULERS==='1'?R.history():null;
 const nodes=new Map(), raf=new Map(), requests=[], saves=[], moves=[], drawing=[];
-let serial=0, cdHold=false, focusHold=false, heldCD=null, heldFocus=null, restoreData=null, restoreWait=false, releaseRestore=null, badCD=false;
+let serial=0, cdHold=false, focusHold=false, heldCD=null, heldFocus=null, restoreData=null, restoreWait=false, releaseRestore=null, badCD=false, clearRoot=false;
 const ctx=new Proxy({measureText:s=>({width:s.length*6})},{get:(t,k)=>k in t?t[k]:(...v)=>drawing.push([k,...v])});
 class Element {
     constructor(){this.children=[];this.style={};this.hidden=false;this.checked=false;this.value='';this.width=this.height=1;}
@@ -45,7 +45,11 @@ function http(method,path,body,missing,token){
 const panel=D.bind({document:{getElementById:el,createElement:()=>new Element()},
     history,
     window:{requestAnimationFrame:fn=>{raf.set(++serial,fn);return serial;},cancelAnimationFrame:id=>raf.delete(id)},
-    protocol:P,rulers:R,groups:require('./drc-groups.js'),http,context:()=>context,navigate:focus.accept(moves),resize(){},stateStore:{bind:o=>{
+    protocol:P,rulers:R,groups:require('./drc-groups.js'),http,context:()=>context,resize(){},
+    // The app settles a jump after the snapshot that applied it; a jump
+    // served under a view root clears the root in that same edit.
+    navigate:(n,token,done)=>{if(clearRoot){context={...context,state:{...context.state,state_rev:P.next(context.state.state_rev),root:null,root_name:''}};}
+        return focus.accept(moves)(n,token,done);},stateStore:{bind:o=>{
         let ready=false;return {attach:async()=>{ready=false;if(restoreWait)await new Promise(r=>{releaseRestore=r;});await o.apply(restoreData);ready=true;},
             change:v=>{if(ready)saves.push(JSON.parse(JSON.stringify(v)));},close(){ready=false;}};
     }}});
@@ -115,6 +119,17 @@ async function jump(i){el('drc-errors').children[i].ondblclick();await tick();pa
     restoreData=last();cdHold=true;await jump(0);const stale=heldCD;restoreWait=true;
     const reloading=el('drc-reload').onclick();assert(stale.token.cancelled);stale.resolve(cd(stale.q));await tick();assert.equal(values().length,0);
     cdHold=false;releaseRestore();restoreWait=false;await reloading;await tick();assert.equal(values()[0],'Length 70.0000 µm');
+    // A view root is another frame: its CD rulers (top-frame geometry) end on
+    // entry, and a panel restored under the root neither reads nor revives them.
+    await jump(0);assert.equal(values().length,2);const beforeRoot=last();
+    context={...context,state:{...context.state,state_rev:'3',root:{cell:3,name:'BLK'},root_name:'BLK'}};panel.contextChanged();paint();
+    assert.deepEqual(values(),[],'CD rulers survived the root');assert.equal(el('drc-cd-title').textContent,'Go to an error to measure it.');assert.equal(last().cd,null);
+    if(history){assert.deepEqual(history.entries().filter(e=>e.kind==='cd'),[]);}
+    const measured=count('measurements');restoreData=beforeRoot;await el('drc-reload').onclick();await tick();paint();
+    assert.deepEqual(values(),[],'a restore under the root revived CD');assert.equal(count('measurements'),measured);
+    // A jump from under the root clears it in the same edit and keeps its CD.
+    clearRoot=true;await jump(1);clearRoot=false;panel.contextChanged();await tick();paint();
+    assert.equal(context.state.root_name,'');assert.deepEqual(values(),['Length 70.0000 µm']);
     // Rule changes and source changes are explicit CD boundaries.
     el('drc-rules').children[0].onclick();await tick();assert.equal(last().cd,null);assert.deepEqual(values(),[]);
     cdHold=true;await jump(0);const closing=heldCD;context={...context,source:'other',id:'v2'};panel.contextChanged();assert(closing.token.cancelled);
