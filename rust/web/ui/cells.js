@@ -13,7 +13,9 @@
         // The tree load, each expansion and the search are separate flights:
         // a search never drops a tree answer. `epoch` (reset, suspend) drops
         // them all; `busy` counts the tree questions still out (aria-busy).
-        let epoch = 0, busy = 0, findFlight = 0, searched = '';
+        // `searched` is the text whose results are shown; `seeking` the text
+        // of the search still out (null when none).
+        let epoch = 0, busy = 0, findFlight = 0, searched = '', seeking = null;
         // Selection info (bbox) and the per-view highlight (insts) are
         // separate flights: a view change must not drop a pending extent.
         let highlight = null, highlightKey = '', highlightAsked = '', highlightFlight = 0, bboxFlight = 0, info = '', rootName = '', hier = true;
@@ -23,7 +25,7 @@
         function note(text) { info = text || ''; el('cells-info').textContent = info; }
         // Answers still out belong to another view or to a suspended panel:
         // drop them and forget that they are pending.
-        function abandon() { ++epoch; ++bboxFlight; busy = 0; rootsFlight = false; searched = ''; if (timer) { port.clearTimeout(timer); timer = null; } }
+        function abandon() { ++epoch; ++bboxFlight; busy = 0; rootsFlight = false; searched = ''; seeking = null; if (timer) { port.clearTimeout(timer); timer = null; } }
         function dropHighlight() { ++highlightFlight; highlight = null; highlightKey = ''; highlightAsked = ''; }
         function reset() {
             roots = []; results = null; selected = null; shown = []; rootName = ''; hier = true; rootKey = ''; reframe = false;
@@ -261,30 +263,37 @@
         function clearRoot() { if (!available() || !rootName) { return; } port.edit({root: null}, function (error) { if (!error) { rootName = ''; update(); } }); }
         async function find() {
             const text = search.value.trim(), token = ++findFlight, ep = epoch;
-            searched = text;
-            if (!text) { results = null; paint(); return; }
+            if (!text) { searched = text; seeking = null; results = null; paint(); return; }
+            // The shown results stay `searched` until this answer replaces them.
+            seeking = text;
             try {
                 const r = await ask({kind: 'find', src: -1, pattern: text, limit: FIND_LIMIT});
                 if (token !== findFlight || ep !== epoch || search.value.trim() !== text) { return; }
                 results = r.matches.map(function (m) { const cell = cellFrom(m.src, m.ci, m.name, m.insts, true); cell.hasShapes = true; return cell; });
+                searched = text;
                 note(r.total + ' match' + (r.total === 1 ? '' : 'es') + (r.total > r.n ? ' (showing ' + r.n + ')' : ''));
                 paint();
-            } catch (e) { if (token === findFlight && ep === epoch) { searched = ''; note(String(e.message || e)); } }
+            } catch (e) { if (token === findFlight && ep === epoch) { note(String(e.message || e)); } }
+            finally { if (token === findFlight) { seeking = null; } }
         }
         search.oninput = function () { if (timer) { port.clearTimeout(timer); } timer = port.setTimeout(function () { timer = null; find(); }, SEARCH_DELAY); };
         // Enter runs a search still waiting for its debounce (or one that did
-        // not answer); otherwise it frames the selection, and the canvas takes
-        // the focus only from the search box.
+        // not answer); while the search for this text is out it waits for
+        // those results instead of framing the earlier selection. Otherwise
+        // it frames the selection; the canvas takes the focus only from the
+        // search box.
         el('cells-search-form').onsubmit = function (e) {
             e.preventDefault();
-            const typed = !!timer || search.value.trim() !== searched, here = function () { return doc.activeElement === search; };
+            const text = search.value.trim(), here = function () { return doc.activeElement === search; };
+            const typed = !!timer || text !== searched;
             if (timer) { port.clearTimeout(timer); timer = null; }
+            if (seeking !== null && seeking === text) { return; }
             if (typed || !selected || selected.source) { find(); } else if (selected.bbox) { zoom(here()); } else { chooseAndZoom(selected, here); }
         };
         search.onkeydown = function (e) {
             if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) { return; }
             e.preventDefault(); if (timer) { port.clearTimeout(timer); timer = null; }
-            ++findFlight; search.value = ''; searched = ''; results = null; paint(); port.focus();
+            ++findFlight; search.value = ''; searched = ''; seeking = null; results = null; paint(); port.focus();
         };
         el('cells-zoom').onclick = function () { zoom(true); };
         el('cells-root').onclick = setRoot;

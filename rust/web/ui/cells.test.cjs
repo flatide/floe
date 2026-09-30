@@ -221,6 +221,29 @@ const scenarios = [
         from = h.requests.length; form.onsubmit(key('Enter'));
         assert.deepEqual(h.kinds(from), ['find'], 'a failed search is asked again');
     }],
+    ['Enter while the sent search is out', async () => {
+        // The debounce fired and the request is out: Enter must neither frame
+        // the earlier selection nor send the search again; its answer shows.
+        const h = harness(); await h.load(); await h.select('VIA', [100, 100, 130, 130]);
+        const search = h.el('cells-search'), form = h.el('cells-search-form');
+        search.focus(); search.value = 'BL*'; search.oninput(); h.timers.at(-1).f();
+        assert.equal(h.pending('find').length, 1);
+        let from = h.requests.length; form.onsubmit(key('Enter'));
+        assert.deepEqual(h.kinds(from), [], 'no second search, no extent'); assert.deepEqual(h.edits, [], 'no move to the earlier selection');
+        await h.reply(h.last('find'), {total: 1, n: 1, matches: [{src: 0, ci: 1, insts: 4, name: 'BLK'}]});
+        assert.deepEqual(h.rows(), ['|BLK|×4']); assert.deepEqual(h.edits, []);
+        // Typing on while a search is out: Enter searches the new text now.
+        search.value = 'VI*'; search.oninput(); h.timers.at(-1).f(); search.value = 'VIA'; search.oninput();
+        from = h.requests.length; form.onsubmit(key('Enter'));
+        assert.deepEqual(h.requests.slice(from).map(r => r.body.pattern), ['VIA']); assert.deepEqual(h.edits, []);
+        // A failed answer leaves the earlier results searched: Enter asks again.
+        await h.fail(h.last('find'), new Error('busy'));
+        from = h.requests.length; form.onsubmit(key('Enter'));
+        assert.deepEqual(h.requests.slice(from).map(r => r.body.pattern), ['VIA'], 'a failed search is asked again'); assert.deepEqual(h.edits, []);
+        await h.reply(h.last('find'), {total: 1, n: 1, matches: [{src: 0, ci: 2, insts: 1, name: 'VIA'}]});
+        // Once its results are in, Enter frames the selection as before.
+        form.onsubmit(key('Enter')); assert.equal(h.edits.at(-1).navigation.kind, 'goto');
+    }],
     ['R14 Ctrl+T and the menu take the root button guard', async () => {
         const h = harness(); await h.load(); const ctrlT = () => h.c.key('t', {ctrlKey: true, shiftKey: false});
         const via = h.row('VIA'); via.onclick({target: via.children[1]});

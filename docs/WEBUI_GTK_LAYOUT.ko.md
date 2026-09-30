@@ -216,6 +216,14 @@ status  frame status | view 크기 · depth/detail 행 · 아래 세션 주체 �
   guest는 마커를 숨기며 Current view·box 선택을 멈춘다. 실제 daemon 통합 테스트는 `guest_root` 게이트다
   (`tests/guest_root.rs`).
 
+4차 검토(2bdd77e) 후속:
+
+- **검색 응답 대기 중 Enter**: 검색어가 요청 시작 시점에 '검색 완료'로 기록되어, 디바운스 뒤 요청이
+  나간 상태에서 Enter를 누르면 이전 선택 셀로 이동했다. 표시 중인 결과의 검색어(`searched`)는 유효한
+  응답을 반영할 때만 갱신하고, 진행 중인 검색어(`seeking`)를 따로 추적한다. 같은 검색어의 요청이
+  진행 중이면 Enter는 아무것도 하지 않고 그 결과를 기다린다(중복 요청·이동 없음). 실패하면 다음
+  Enter가 다시 검색한다. `cells.test.cjs`에 회귀 추가(수정 전 코드에서 실패 확인).
+
 ## 6. 잔여
 
 - 색인 요약 빌드(`floe-index hier`)를 웹 승인 경로로 제공하지 않았다. `build cell index…`
