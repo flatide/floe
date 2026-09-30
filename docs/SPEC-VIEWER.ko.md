@@ -136,6 +136,28 @@
 상태에서도 하드웨어 키코드로 라틴 키를 복원. 숫자는 `_depth_digit`
 (9-9 1초 내 = full). depth 라벨은 full을 `*`로 표기(`depth: */13`).
 
+- **렌더 중 입력(2026-09-30, 0.12.251; 현장: "rendering… 중에 Esc로 취소가
+  안 되고 새 줌도 안 됨").** 렌더가 진행 중이어도(`_pending`) 마우스는
+  더 이상 기다리지 않는다 — 휠 줌·클릭·드래그가 그대로 동작하고, 새 뷰의
+  렌더가 진행 중인 것을 데몬의 세대 frontier에서 대체한다(키는 원래
+  그랬다; 2c8766c의 "프레임까지 마우스 무시" 관례를 걷음). 커서는 wait 대신
+  progress. **Esc의 첫 단계**는 진행 중인 렌더(또는 그려지는 중인 밀도
+  라운드)의 취소: `_cancel_render` — 디바운스 해제, `gen += 1`(제출 없음:
+  취소된 세대의 늦은 프레임은 이 세대 것이 아니라 버려짐), 어댑터
+  `worker.cancel(gen)` = `cancel before_gen=N`(데몬 입력 스레드가 즉시
+  frontier를 옮기고 진행 중 렌더는 다음 검사에서 멈춤; KLayout 서비스는
+  `latest`로 다음 단계에서 포기), `_refining`·`_pending` 해제, 상태줄
+  "render cancelled", 그림은 얼어 있던 프레임 그대로이고 뷰는 덮이지
+  않은 채라 다음 팬·줌·redraw가 렌더한다. 다음 Esc부터 기존 체인. 늦게
+  도착한 프레임: 뷰가 그동안 움직였으면(덮이지 않음) 착지 뒤 `redraw()`가
+  지금 뷰를 렌더하고, 덮였으면 여백을 채운다. 이전 세대의 `error`는
+  지금 세대의 대기를 풀지 않는다(세대 없는 어댑터 오류는 푼다); 데몬의
+  `cancelled gen=N`은 결과로 올라와 대기 중이던 세대면 대기를 푼다.
+  뷰어 계약(validate_rust_renderer): `test_esc_cancels_the_render_in_flight_before_the_chain`,
+  `test_a_wheel_zoom_during_a_render_supersedes_it`,
+  `test_an_older_generations_error_leaves_the_pending_render`, 어댑터
+  `test_cancel_sends_the_frontier_and_a_cancelled_render_is_told`.
+
 - **빈 시작**(2026-08-22): `floe view`(src 생략)와 인자 없는
   `floe`(= view)는 레이아웃 없이 뜬다 — `_apply_cache(None)` =
   meta None·worker None·레이어 패널 빈 상태·타이틀 APP·상태줄

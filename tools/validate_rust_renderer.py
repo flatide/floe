@@ -440,6 +440,95 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertIsNone(v._pending)
         self.assertEqual(texts[-1], "render dropped (stale)")
 
+    def _render_wait_viewer(self, worker, pending=5):
+        """A Viewer shell in the middle of a render (gen == _pending)."""
+        v = _stub_margin_viewer(worker, True)
+        v.gen = v._pending = pending
+        v._pending_timer = None
+        v._pending_t0 = 0.0
+        v._debounce = None
+        v._refining = False
+        v._preview_gen = None
+        v.texts = []
+        v.rstatus = SimpleNamespace(set_text=v.texts.append)
+        v._set_cursor = lambda cursor: None
+        v._idle_cursor = lambda: "idle"
+        v._display = lambda: None
+        v._set_live_status = v.texts.append
+        v._margin_debug = lambda message: None
+        v.mode = "normal"
+        v.rulers = [object()]
+        return v
+
+    def test_esc_cancels_the_render_in_flight_before_the_chain(self):
+        """Field 2026-09-30: Esc during "rendering…" did nothing to the
+        render. Now the first Esc moves the daemon's frontier past the
+        pending generation (worker.cancel(before_gen)), bumps the viewer's
+        generation so a late frame of the cancelled one is not shown, and
+        clears the pending state; the rulers and the rest of the chain wait
+        for the next Esc. A worker without cancel still unblocks; the density
+        round being drawn (refining, nothing pending) is cancelled the same
+        way."""
+        from floe.gui import Viewer
+
+        cancelled = []
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None, cancel=cancelled.append))
+        Viewer._esc(v)
+        self.assertEqual(cancelled, [6], "before_gen = the cancelled generation + 1")
+        self.assertEqual((v._pending, v.gen, v._refining), (None, 6, False))
+        self.assertEqual(v.texts[-1], "render cancelled")
+        self.assertEqual(len(v.rulers), 1, "the chain waits for the next Esc")
+        # the density round being drawn: refining, nothing pending
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None, cancel=cancelled.append))
+        v._pending = None
+        v._refining = True
+        Viewer._esc(v)
+        self.assertEqual((cancelled[-1], v._refining, v.gen), (6, False, 6))
+        # a worker without cancel (the KLayout service): the state clears anyway
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        Viewer._esc(v)
+        self.assertIsNone(v._pending)
+
+    def test_a_wheel_zoom_during_a_render_supersedes_it(self):
+        """The mouse no longer waits for the frame (2026-09-30): a wheel
+        event while a render is pending reaches _zoom_at (the redraw it
+        triggers submits the next generation, which the daemon runs while
+        the old one stops at its next look)."""
+        from floe import gui
+        from floe.gui import Viewer
+
+        # the handler reads Gdk's masks and directions: a stand-in works
+        # without a display (the margin tests' shell has none)
+        fake_gdk = SimpleNamespace(
+            ModifierType=SimpleNamespace(BUTTON1_MASK=1, BUTTON2_MASK=2, BUTTON3_MASK=4),
+            ScrollDirection=SimpleNamespace(UP="up", DOWN="down", SMOOTH="smooth"))
+        zoomed = []
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        v._drag = v._zoomdrag = None
+        v._zoom_at = lambda x, y, factor: zoomed.append((x, y, factor))
+        ev = SimpleNamespace(state=0, direction="up", x=10.0, y=20.0)
+        with mock.patch.object(gui, "Gdk", fake_gdk):
+            self.assertTrue(Viewer._on_scroll(v, None, ev))
+        self.assertEqual(len(zoomed), 1)
+        self.assertEqual(zoomed[0][:2], (10.0, 20.0))
+
+    def test_an_older_generations_error_leaves_the_pending_render(self):
+        """An error of a superseded generation (its late failure) must not
+        clear the state of the one now pending; the pending one's, and an
+        adapter failure without a generation, must."""
+        from floe.gui import Viewer
+
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        Viewer._handle_result(v, {"kind": "error", "gen": 4, "msg": "late"})
+        self.assertEqual(v._pending, 5)
+        Viewer._handle_result(v, {"kind": "cancelled", "gen": 4, "phase": "render"})
+        self.assertEqual(v._pending, 5, "an older generation's cancellation")
+        Viewer._handle_result(v, {"kind": "cancelled", "gen": 5, "phase": "queued"})
+        self.assertIsNone(v._pending)
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        Viewer._handle_result(v, {"kind": "error", "msg": "submit failed"})
+        self.assertIsNone(v._pending, "an adapter failure carries no generation")
+
     def test_margin_prefetch_is_a_rust_only_reuse_capability(self):
         """P0 review (2026-09-05): the F2R-17 margin prefetch lives in
         the shared GUI and used to fire for ANY backend - stable
@@ -1213,6 +1302,31 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertEqual(events[1:], ["redraw", "repaint"])
         self.assertFalse(Viewer._after_allocate(v, (800, 600)))
         self.assertEqual(events[1:], ["redraw", "repaint"], "superseded")
+
+    def test_cancel_sends_the_frontier_and_a_cancelled_render_is_told(self):
+        """The viewer's Esc (2026-09-30): cancel(before_gen) writes
+        `cancel before_gen=N`; the daemon's `cancelled gen=N phase=...` for a
+        render reaches the GUI as a result and drops the job, its
+        `cancelled before_gen=F` ack (no generation) says nothing."""
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {"FLOE_RENDERD_BIN": binary}, clear=False):
+                worker = RustRenderWorker(FakeCache(directory))
+            sent = []
+            worker._send = sent.append
+            worker.alive = lambda: True
+            worker.cancel(7)
+            self.assertEqual(sent, ["cancel before_gen=7"])
+            with worker._jobs_lock:
+                worker._jobs[6] = {"job": {}}
+            worker._handle_line("cancelled", {"gen": "6", "phase": "render"}, "")
+            self.assertEqual(worker.res.get_nowait(), {"kind": "cancelled", "gen": 6, "phase": "render"})
+            self.assertNotIn(6, worker._jobs)
+            worker._handle_line("cancelled", {"before_gen": "7"}, "")
+            self.assertTrue(worker.res.empty(), "the ack of a cancel is not a result")
 
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(

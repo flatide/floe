@@ -533,6 +533,14 @@ class RustRenderWorker:
         except Exception as exc:
             self.res.put({"kind": "error", "msg": str(exc)})
 
+    def cancel(self, before_gen):
+        """Stop every render older than `before_gen` (the viewer's Esc:
+        the daemon moves its cancellation frontier at once, on its input
+        thread; the render in flight stops at its next look - plan,
+        decode, raster - and answers `cancelled gen=N phase=render`)."""
+        if self.alive():
+            self._send("cancel before_gen=%d" % int(before_gen))
+
     def stop(self):
         with self._lifecycle_lock:
             if self._stopping:
@@ -1001,6 +1009,13 @@ class RustRenderWorker:
             generation = _wire_int(fields, "gen", -1)
             with self._jobs_lock:
                 self._jobs.pop(generation, None)
+            if kind == "cancelled" and generation >= 0:
+                # a superseded or cancelled render stopped (phase=queued
+                # | render): the GUI drops its pending state if it was
+                # still waiting for this one; the `before_gen=` ack of a
+                # cancel has no generation and says nothing
+                self.res.put({"kind": "cancelled", "gen": generation,
+                              "phase": fields.get("phase", "")})
             if kind == "dropped":
                 # a margin the budget fit does not hold (reason=fit) or a
                 # stale render: told, so the GUI can log it and a gate can

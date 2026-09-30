@@ -244,7 +244,10 @@ alone (the originals, before pass 2 plans) at `<out>.gen-N.round-1.partial.<fmt>
 then the final frame - byte for byte what one round draws. Never for a margin
 (`bg`); `FLOE_RUST_DENSITY_PROGRESSIVE=off` draws one round. A newer generation
 cancels the plans too (floe_vfs `HierOpts::stop` through `Cache::plan_cancellable`,
-0.12.235): a zoom during pass 2 no longer waits for its plan to finish. The adapter adds
+0.12.235): a zoom during pass 2 no longer waits for its plan to finish. The
+adapter's `cancel(before_gen)` (the viewer's Esc, 0.12.251) sends
+`cancel before_gen=N`; the daemon's `cancelled gen=N phase=render|queued` is
+forwarded to the viewer as a `cancelled` result (the `before_gen=` ack is not). The adapter adds
 `density_round: True` to that refining result and the viewer's status says
 "drawing the density under the cut...". The pass-2 frame line also carries
 `density_dots=items/over`.

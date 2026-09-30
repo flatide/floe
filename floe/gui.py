@@ -3385,7 +3385,7 @@ class Viewer:
         self._preview_gen = None   # stop a stale preview ticker
         self._pending_t0 = time.perf_counter()
         self.rstatus.set_text("rendering…")
-        self._set_cursor("wait")  # mouse input is ignored until the frame
+        self._set_cursor("progress")  # busy, but the mouse still works
         if self._pending_timer is None:
             self._pending_timer = GLib.timeout_add(400, self._pending_tick)
         return False  # one-shot timeout
@@ -3397,8 +3397,30 @@ class Viewer:
             return False
         el = time.perf_counter() - self._pending_t0
         self.rstatus.set_text("rendering…" if el < 1.5
-                              else "rendering… %.0fs" % el)
+                              else "rendering… %.0fs (Esc cancels)" % el)
         return True
+
+    def _cancel_render(self):
+        """Esc on a render in flight (field 2026-09-30: a slow render
+        could neither be cancelled nor superseded): the daemon's
+        frontier moves past the generation (`cancel before_gen`), so
+        its plan, decode and raster stop at their next look; the
+        frozen picture stays and the view is left uncovered, so the
+        next pan, zoom or redraw renders it. The generation is bumped
+        without a submit: a late frame or refining round of the
+        cancelled one is not this generation's and is dropped."""
+        if self._debounce is not None:
+            GLib.source_remove(self._debounce)
+            self._debounce = None
+        self.gen += 1
+        cancel = getattr(self.worker, "cancel", None)
+        if cancel is not None:
+            cancel(self.gen)   # before_gen: everything older stops
+        self._refining = False
+        self._preview_gen = None
+        self._clear_pending()
+        self.rstatus.set_text("render cancelled")
+        self._display()
 
     def _preview_tick(self, gen):
         """Elapsed-time ticker while the fat parse behind a preview runs
@@ -3937,7 +3959,14 @@ class Viewer:
                     print("%s  view %.1f x %.1f um"
                           % (mode, (b[2] - b[0]) * self.dbu,
                              (b[3] - b[1]) * self.dbu), flush=True)
-                    self._schedule_margin()
+                    # the view may have moved while this frame was
+                    # drawn (the mouse no longer waits, 2026-09-30): a
+                    # frame that covers it tops the margin up, one that
+                    # does not renders the view the user is at
+                    if self._covered(b, "live"):
+                        self._schedule_margin()
+                    else:
+                        self.redraw()
                 self._set_status(self.view_bbox(), mode)
                 # the cell highlight follows the view the frame shows
                 self._cell_hl_follow()
@@ -3956,8 +3985,19 @@ class Viewer:
                 "clip saved: %s (%.2f MB, %d ms)"
                 % (res["path"], res["size_mb"], res["ms"]))
         elif kind == "error":
-            self._clear_pending()
+            # an older generation's late error (a superseded render)
+            # must not clear the one now pending; an adapter failure
+            # carries no generation and must
+            if res.get("gen", -1) in (-1, self._pending):
+                self._clear_pending()
             self._set_live_status("error: %s" % res.get("msg"))
+        elif kind == "cancelled":
+            # the daemon's word that a generation stopped: nothing to
+            # show (the picture stays), only the pending state to drop
+            # if it was still waited for
+            if res.get("gen") == self._pending:
+                self._clear_pending()
+                self.rstatus.set_text("render cancelled")
         elif kind == "dropped":
             # a margin the scale's budget fit does not hold (renderd,
             # reason=fit): nothing lands, the viewport stays as drawn and
@@ -4232,8 +4272,9 @@ class Viewer:
         if self.cache is None:
             return False
         self._focus_view()
-        if self._pending is not None:
-            return True  # render in flight: mouse input waits
+        # a render in flight no longer holds the mouse (2026-09-30): the
+        # next view supersedes it at the daemon's frontier, as the keys
+        # always did
         if ev.type == Gdk.EventType.DOUBLE_BUTTON_PRESS \
                 and ev.button == 1 \
                 and self.mode not in ("ruler", "esel") \
@@ -4297,7 +4338,8 @@ class Viewer:
             self._drag_origin = None
             self._drag_moved = False
             self._drag_btn = None
-            self._set_cursor(self._idle_cursor())
+            self._set_cursor("progress" if self._pending is not None
+                             else self._idle_cursor())
             if panned:
                 self.redraw()   # pan ended: render the final position
             elif was_drag and ev.button == 1:
@@ -4357,25 +4399,9 @@ class Viewer:
         if self.cache is None:
             return False
         self._update_cursor(ev)
-        if self._pending is not None:
-            # render in flight: the VIEW must not move, but gesture
-            # classification has to continue - otherwise a drag done
-            # while pending never sets _drag_moved and the release
-            # fires a spurious pick; tracking the anchor also stops
-            # the view from jumping once the render clears
-            if self._drag is not None and ev.state & (
-                    Gdk.ModifierType.BUTTON1_MASK |
-                    Gdk.ModifierType.BUTTON2_MASK):
-                if not self._drag_moved \
-                        and self._drag_origin is not None:
-                    ox, oy = self._drag_origin
-                    if self._drag_threshold(ox, oy, ev.x, ev.y):
-                        self._drag_moved = True
-                self._drag = (ev.x, ev.y)
-            elif self._zoomdrag is not None and \
-                    ev.state & Gdk.ModifierType.BUTTON3_MASK:
-                self._track_band(ev)
-            return True
+        # (a render in flight no longer freezes the view, 2026-09-30:
+        # the pan moves it live over the frozen frame, and the render
+        # of the new position supersedes the old one)
         if self._drag is not None and ev.state & (
                 Gdk.ModifierType.BUTTON1_MASK |
                 Gdk.ModifierType.BUTTON2_MASK):
@@ -4434,8 +4460,7 @@ class Viewer:
     def _on_scroll(self, _w, ev):
         if self.cache is None:
             return False
-        if self._pending is not None:
-            return True  # render in flight: mouse input waits
+        # (a render in flight is superseded by the zoom, 2026-09-30)
         # some X setups (libinput button-scroll, Exceed pointer emulation)
         # synthesize wheel events while a button is held down - that must
         # never zoom in the middle of a pan or a rubber-band drag
@@ -8838,7 +8863,12 @@ class Viewer:
         ruler-related outranks the selection (field reports): with
         an object selected, Esc first cancels the measurement in
         progress, then clears finished rulers, and only then drops
-        the selection."""
+        the selection. Before all of that, a render in flight
+        ("rendering…" or the density round being drawn) is cancelled
+        (field 2026-09-30) - the next Esc runs the chain."""
+        if self._pending is not None or getattr(self, "_refining", False):
+            self._cancel_render()
+            return
         if self.mode == "esel":
             if self._esel_start is not None:
                 self._esel_start = None

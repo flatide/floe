@@ -116,6 +116,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
   `a_cancellation_during_the_density_collect_ends_the_frame_not_the_thread`: 2패스 bin 수집 중 취소가 프레임을
   `render cancelled`로 끝낸다(이전엔 워커가 barrier에 묶여 영영 돌아오지 않았다; 감시 30 s). 뷰어 계약
   `test_a_dropped_foreground_render_clears_the_pending_state`.
+  0.12.251(렌더 중 입력, SPEC-VIEWER §7): Esc가 진행 중 렌더를 취소(`cancel before_gen`)하고 체인은 다음 Esc,
+  렌더 중 휠 줌이 `_zoom_at`에 닿음, 이전 세대의 error/cancelled는 대기를 풀지 않음; 어댑터 `cancel(7)` →
+  `cancel before_gen=7`, `cancelled gen=6 phase=render` → 결과·job 제거, `before_gen` ack는 결과 아님.
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과
