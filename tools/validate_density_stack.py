@@ -53,14 +53,24 @@ The sub-cut dots (FLOE_RUST_DENSITY_DOTS=on with the stack, CUT_DENSITY_DESIGN
 descent"): a second layout places a cell DOT (a 0.15 um = 1.5 px square on
 1/0) three ways - a 10 x 10 array at a 6 px pitch, a 40 x 40 array that
 abuts, and one alone. Pass 2 plans the cells at pass 1's cut and counts a
-cell under it as dots in 4 x 4 px blocks, never walking into it:
+cell under it as dots in blocks, never walking into it:
 
-  * the sparse array lights exactly 100 pixels, each within 2 px of a
-    member's centre; the lone DOT one; the abutting array per 4 x 4 block
-    min(8, the members whose centre lies in it) - summed here from the
-    member positions - and nothing else lights;
-  * density_dots reports the items (one per block) and none over the cap;
-    without the variable the stack walks into DOT and reports no dots;
+  * by default (8 x 8 px blocks, spread; user 2026-10-01: "less detailed
+    than now seems fine") a block's dots are what it holds - an array its
+    members, not its box - spread over what they stand for within the block:
+    the sparse array lights exactly 100 pixels, each within a block of a
+    member's centre; the lone DOT one; the abutting array per 8 x 8 block
+    min(32, the members whose centre lies in it) - summed here from the
+    member positions - and nothing else lights; the frame reports the block
+    (density_block 8);
+  * under the rules before (FLOE_RUST_DENSITY_BLOCK_PX=4
+    FLOE_RUST_DENSITY_SPREAD=off: 4 x 4 px blocks, a compact box of the
+    count's area) the sparse array lights 100 pixels, each within 2 px of a
+    member's centre, the lone DOT one, the abutting array per 4 x 4 block
+    min(8, the members centred in it);
+  * density_dots reports the items (one per block and layer) and none over
+    the cap; without the variable the stack walks into DOT and reports no
+    dots;
   * the margin frame draws the view as the viewport frame did;
   * step 2 (a floor by the work): TOP's own 0.05 um (0.5 px) squares at a
     3 px pitch are decoded under the dots (their pages fit the reserve at a
@@ -161,38 +171,65 @@ def dots_checks(temp):
         'off': worker(src, {}),
         'stack': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top'}),
         'dots': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}),
+        # the rules before 2026-10-01: 4 px blocks, a count's compact box
+        'dots4': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
+                              'FLOE_RUST_DENSITY_BLOCK_PX': '4', 'FLOE_RUST_DENSITY_SPREAD': 'off'}),
         'one_round': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PROGRESSIVE': 'off'}),
         'floor025': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.25'}),
         'floor06': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.6'}),
     }
     try:
+        on4, res4 = frame(workers['dots4'], 1, (LOW,))
         on, res = frame(workers['dots'], 1, (LOW,))
         walked, walked_res = frame(workers['stack'], 1, (LOW,))
         half = int(round(DOT * 1000)) // 2
         # the device position of a dbu point (0.1 um a pixel, rows from the top)
         dev = lambda x, y: (x / 100.0, (VIEW[3] * 1000 - y) / 100.0)
-        # the sparse array: one dot a member, beside its centre
-        x0, y0, pitch, n = SPARSE
-        centres = [dev(x0 + half + i * pitch, y0 + half + j * pitch) for i in range(n) for j in range(n)]
-        sparse = lit(on, range(10, 90), range(110, 195))
-        assert len(sparse) == n * n, 'sparse array: %d px lit, want %d' % (len(sparse), n * n)
+        centres_of = lambda x0, y0, pitch, n: [(x0 + half + i * pitch, y0 + half + j * pitch) for i in range(n) for j in range(n)]
+        def blocks_of(centres, side):
+            # the members whose centre lies in each block of `side` dbu
+            blocks = {}
+            for (x, y) in centres:
+                blocks[(x // side, y // side)] = blocks.get((x // side, y // side), 0) + 1
+            return blocks
+        sparse_centres, dense_centres = centres_of(*SPARSE), centres_of(*DENSE)
+        sparse_area, alone_area, dense_area = (range(10, 90), range(110, 195)), (range(110, 135), range(35, 65)), (range(195, 265), range(95, 165))
+        specks = (range(295, 365), range(45, 85))
+        # the rules before 2026-10-01 (FLOE_RUST_DENSITY_BLOCK_PX=4
+        # FLOE_RUST_DENSITY_SPREAD=off): the sparse array one dot a member,
+        # beside its centre; the abutting array min(8, the members centred in
+        # it) a 4 x 4 block
+        sparse4 = lit(on4, *sparse_area)
+        assert len(sparse4) == SPARSE[3] ** 2, 'sparse array (4 px): %d px lit, want %d' % (len(sparse4), SPARSE[3] ** 2)
+        for (c, r) in sparse4:
+            assert min(abs(c + 0.5 - cx) + abs(r + 0.5 - cy) for (cx, cy) in (dev(*p) for p in sparse_centres)) <= 2.0, 'sparse dot (%d, %d) far from a member' % (c, r)
+        assert len(lit(on4, *alone_area)) == 1, 'the lone DOT (4 px): %d px' % len(lit(on4, *alone_area))
+        blocks4 = blocks_of(dense_centres, 400)
+        want4 = sum(min(8, count) for count in blocks4.values())
+        dense4 = lit(on4, *dense_area)
+        assert len(dense4) == want4, 'abutting array (4 px): %d px lit, want %d over %d blocks' % (len(dense4), want4, len(blocks4))
+        assert lit(on4, range(W), range(H)) == sparse4 | lit(on4, *alone_area) | dense4 | lit(on4, *specks), 'the 4 px rules light outside the arrays'
+        dots4 = res4.get('density_dots')
+        assert dots4 and dots4['items'] == SPARSE[3] ** 2 + 1 + len(blocks4) and dots4['over'] == 0, (dots4, len(blocks4))
+        assert res4.get('density_block') == 4.0, res4.get('density_block')
+        print('density stack dots (4 px, compact - the rules before): sparse array %d dots beside the members, lone DOT 1, abutting array '
+              '%d px = sum of min(8, members) over %d blocks; density_dots %s' % (len(sparse4), len(dense4), len(blocks4), dots4))
+        # the default (8 px blocks, spread; user 2026-10-01 "less detailed is
+        # fine"): a block's dots are its members' count - the array's members,
+        # not its box - spread over what they stand for within the block; the
+        # abutting array min(32, the members centred in it) an 8 x 8 block
+        sparse = lit(on, *sparse_area)
+        assert len(sparse) == SPARSE[3] ** 2, 'sparse array: %d px lit, want %d' % (len(sparse), SPARSE[3] ** 2)
         for (c, r) in sparse:
-            assert min(abs(c + 0.5 - cx) + abs(r + 0.5 - cy) for (cx, cy) in centres) <= 2.0, 'sparse dot (%d, %d) far from a member' % (c, r)
-        alone_px = lit(on, range(110, 135), range(35, 65))
+            assert min(max(abs(c + 0.5 - cx), abs(r + 0.5 - cy)) for (cx, cy) in (dev(*p) for p in sparse_centres)) <= 8.0, 'sparse dot (%d, %d) a block from every member' % (c, r)
+        alone_px = lit(on, *alone_area)
         assert len(alone_px) == 1, 'the lone DOT: %d px' % len(alone_px)
-        # the abutting array: min(8, the members centred in it) a 4 x 4 block
-        x0, y0, pitch, n = DENSE
-        blocks = {}
-        for i in range(n):
-            for j in range(n):
-                key = ((x0 + half + i * pitch) // 400, (y0 + half + j * pitch) // 400)
-                blocks[key] = blocks.get(key, 0) + 1
-        want = sum(min(8, count) for count in blocks.values())
-        dense = lit(on, range(195, 265), range(95, 165))
+        blocks = blocks_of(dense_centres, 800)
+        want = sum(min(32, count) for count in blocks.values())
+        dense = lit(on, *dense_area)
         assert len(dense) == want, 'abutting array: %d px lit, want %d over %d blocks' % (len(dense), want, len(blocks))
         # step 2: TOP's specks draw as a cut-free frame draws them
         free, _ = frame(workers['stack'], 3, (LOW,), cut_px=0.0)
-        specks = (range(295, 365), range(45, 85))
         tiny = lit(on, *specks)
         assert tiny and tiny == lit(free, *specks), "TOP's specks: %d px lit, %d cut-free" % (len(tiny), len(lit(free, *specks)))
         assert not lit(walked, *specks), "the stack's 1 px floor draws no speck"
@@ -206,11 +243,15 @@ def dots_checks(temp):
         assert floors[0] == 0.0 and abs(floors[1] - 0.25) < 0.02 and abs(floors[2] - 0.6) < 0.02, floors
         everything = lit(on, range(W), range(H))
         assert everything == sparse | alone_px | dense | tiny, '%d px lit outside the arrays' % len(everything - sparse - alone_px - dense - tiny)
+        # one item per 8 px block the sparse array's members are centred in,
+        # the lone DOT's, one per abutting block
         dots = res.get('density_dots')
-        assert dots and dots['items'] == SPARSE[3] ** 2 + 1 + len(blocks) and dots['over'] == 0, (dots, len(blocks))
-        assert walked_res.get('density_dots') is None and lit(walked, range(W), range(H)), 'the stack alone draws the DOT squares, no dots'
-        print('density stack dots: sparse array %d dots beside the members, lone DOT 1, abutting array %d px = sum of min(8, members) '
-              'over %d blocks; density_dots %s; TOP specks %d px as cut-free; floors (density_floor) %s' % (
+        assert dots and dots['items'] == len(blocks_of(sparse_centres, 800)) + 1 + len(blocks) and dots['over'] == 0, (dots, len(blocks))
+        assert res.get('density_block') == 8.0, res.get('density_block')
+        assert walked_res.get('density_dots') is None and walked_res.get('density_block') is None and lit(walked, range(W), range(H)), \
+            'the stack alone draws the DOT squares, no dots'
+        print('density stack dots (8 px, spread): sparse array %d dots within a block of the members, lone DOT 1, abutting array %d px = '
+              'sum of min(32, members) over %d blocks; density_dots %s; TOP specks %d px as cut-free; floors (density_floor) %s' % (
                   len(sparse), len(dense), len(blocks), dots, len(tiny), floors))
         margin, _ = frame_bg(workers['dots'], 2, (LOW,))
         centre = b''.join(margin[((H // 2 + r) * 2 * W + W // 2) * 4:((H // 2 + r) * 2 * W + W // 2 + W) * 4] for r in range(H))

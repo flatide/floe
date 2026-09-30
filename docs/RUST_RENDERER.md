@@ -251,7 +251,16 @@ forwarded to the viewer as a `cancelled` result (the `before_gen=` ack is not).
 `FLOE_RUST_DENSITY_FLOOR_PX` (diagnostic, default 0) is the dots' page and
 record floor in px; the frame line's `density_floor=<px>` is the records' cut
 pass 2 actually planned at (that floor, the density cut, or what a budget fit
-raised it to). The adapter adds
+raised it to). `FLOE_RUST_DENSITY_BLOCK_PX` (diagnostic, default 8, 4..16;
+0.12.257) is the dots' block: the planner walks a cut node down to a block, so
+a larger block is less detail and less work; the frame line's
+`density_block=<px>` reports it and the viewer's status tag shows it
+(`[density: dots, block 8 px, floor 0 px, pass 2 plan N ms, P pages]`).
+`FLOE_RUST_DENSITY_SPREAD=off` is that change's kill switch: a block's dots as a
+compact box whose area is their count, every item by its box (with
+`FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's
+dot item is what its dots stand for within the block, its count carried apart
+(`WsCell::dot_counts`) and lit exactly, spread over it. The adapter adds
 `density_round: True` to that refining result and the viewer's status says
 "drawing the density under the cut...". The pass-2 frame line also carries
 `density_dots=items/over`.

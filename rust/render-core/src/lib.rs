@@ -63,4 +63,6 @@ pub use stats::{place_walks_wire, RenderStats, DENSITY_STACK_COUNTS, PLACE_WALK_
 
 pub use floe_vfs::hier::HierPlan;
 pub use floe_vfs::hier::FixedFit;
+/// the sub-cut dots' block, px (renderd reports it with a density frame)
+pub use floe_vfs::hier::dot_block_px;
 pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;

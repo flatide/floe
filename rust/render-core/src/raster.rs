@@ -2166,7 +2166,9 @@ enum PlaneItem {
     // Rects of the plane in walk order, up to 128 to a chunk: the planner's
     // washes (page washes, sub-cut boxes) and the native display points of
     // design.ovr. A tile rejects a whole chunk instead of checking every rect.
-    Points { world_bbox: BBox, points: Vec<BBox> },
+    /// `counts`: a spread dots plan's count per point (WsCell::dot_counts), or
+    /// empty.
+    Points { world_bbox: BBox, points: Vec<BBox>, counts: Vec<u16> },
     /// Representative SHAPES of design.ovr (OVR2): rects, boundary segments
     /// and fallback points in top coordinates, chunked like Points. They are
     /// painted as the shapes they are (paint_representative), never as a wash.
@@ -2553,10 +2555,11 @@ fn collect_cell(
             lattice,
         });
     }
-    for &(layer_idx, wash) in &cell.washes {
+    for (at, &(layer_idx, wash)) in cell.washes.iter().enumerate() {
         let Some(&plane) = plane_of.get(&layer_idx) else {
             continue;
         };
+        let count = cell.dot_counts.get(at).copied();
         let world_bbox = world_transform.apply_bbox(wash)?;
         if !world_bbox.intersects(&cull_view) {
             continue;
@@ -2567,16 +2570,18 @@ fn collect_cell(
         // wide view of a few layers, and one bin item each overran the item
         // cap and sent the frame down the per-tile, per-plane walk. The order
         // within the plane is the walk's, as before.
-        if let Some(PlaneItem::Points { world_bbox: bounds, points }) = bin.planes[plane].last_mut() {
-            if points.len() < 128 {
+        // (a chunk's points all carry a count, or none does)
+        if let Some(PlaneItem::Points { world_bbox: bounds, points, counts }) = bin.planes[plane].last_mut() {
+            if points.len() < 128 && count.is_some() != counts.is_empty() {
                 bounds.grow(&world_bbox);
                 points.push(world_bbox);
+                counts.extend(count);
                 continue;
             }
         }
         check_cancelled(guard)?;
         bin.charge()?;
-        bin.planes[plane].push(PlaneItem::Points { world_bbox, points: vec![world_bbox] });
+        bin.planes[plane].push(PlaneItem::Points { world_bbox, points: vec![world_bbox], counts: count.into_iter().collect() });
     }
     // OVR2 shapes ride on the top cell only (identity transform)
     if path.len() == 1 {
@@ -2887,7 +2892,7 @@ fn replay_plane_items(
                     )?;
                 }
             }
-            PlaneItem::Points { world_bbox, points } => {
+            PlaneItem::Points { world_bbox, points, counts } => {
                 if !world_bbox.intersects(&cull_view) { continue; }
                 if band.world_box_written(request, *world_bbox, paint.stroke_width) {
                     stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
@@ -2897,12 +2902,16 @@ fn replay_plane_items(
                 let marker = marker_request(request);
                 // a dots plan's washes in a density plane are dot items (render_cell)
                 let dots = band.stacking() && scene.plan().stats.sub_cut_dots;
-                for &point in points {
+                for (at, &point) in points.iter().enumerate() {
                     if !point.intersects(&cull_view) { continue; }
                     counters.rect_records = counters.rect_records.saturating_add(1);
                     stats.primitives_tested = stats.primitives_tested.saturating_add(1);
                     stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
-                    let drawn = if dots { paint_density_dots(band, request, point)? } else { paint_world_rect(band, &marker, point, paint)? };
+                    let drawn = if dots {
+                        paint_density_dots(band, request, point, counts.get(at).map(|&count| count as u32))?
+                    } else {
+                        paint_world_rect(band, &marker, point, paint)?
+                    };
                     if drawn {
                         counters.rectangle_members_drawn = counters.rectangle_members_drawn.saturating_add(1);
                         stats.rep_members_drawn = stats.rep_members_drawn.saturating_add(1);
@@ -5492,7 +5501,7 @@ fn render_cell(
     // washes, drawn as dots in either walk
     let markers = !matches!(selection, GeometrySelection::Planes(_));
     let dots = band.stacking() && scene.plan().stats.sub_cut_dots;
-    for &(layer_idx, wash) in &cell.washes {
+    for (at, &(layer_idx, wash)) in cell.washes.iter().enumerate() {
         check_cancelled(guard)?;
         let Some((plane, _)) = selection.paint_of(layer_idx, paint) else {
             continue;
@@ -5506,7 +5515,7 @@ fn render_cell(
         let world = world_transform.apply_bbox(wash)?;
         let drawn = if dots {
             band.set_density_plane(plane);
-            paint_density_dots(band, request, world)?
+            paint_density_dots(band, request, world, cell.dot_counts.get(at).map(|&count| count as u32))?
         } else {
             paint_world_rect(band, &marker_request(request), world, paint)?
         };
@@ -6404,9 +6413,10 @@ fn dot_share() -> f64 {
 const DOT_SHARE: f64 = 0.5;
 
 /// Items touching at most this many pixels pick their dots exactly (the k of
-/// the lowest rank); a larger one - an array run together - lights each
-/// pixel with the chance k / n.
-const DOT_EXACT_PIXELS: i128 = 64;
+/// the lowest rank): a spread dot item is at most a block, 16 px, and touches
+/// 17 x 17; a larger one - an array run together - lights each pixel with the
+/// chance k / n.
+const DOT_EXACT_PIXELS: i128 = 18 * 18;
 
 /// A sub-cut stand-in in a density plane (floe_vfs HierOpts::sub_cut_dots,
 /// CUT_DENSITY_DESIGN §10.12; user 2026-09-30: "a cell of 3 x 3 px or less is
@@ -6415,9 +6425,11 @@ const DOT_EXACT_PIXELS: i128 = 64;
 /// picked by a hash of its world box and the pixel's place in it, so the
 /// choice does not depend on the tile or on a pan within a pixel's phase. A
 /// dot stands for its own pixel only: what it does not light it does not
-/// claim, and a lower plane's density may still show there. Whether it lit a
+/// claim, and a lower plane's density may still show there. `count`: a spread
+/// item's dots (floe_vfs HierOpts::dot_spread, 2026-10-01: its box is what
+/// they stand for, spread over it) in place of the area's k. Whether it lit a
 /// pixel of this tile.
-fn paint_density_dots(band: &mut RasterBand, request: &GeometryRasterRequest, world: BBox) -> Result<bool, String> {
+fn paint_density_dots(band: &mut RasterBand, request: &GeometryRasterRequest, world: BBox, count: Option<u32>) -> Result<bool, String> {
     let (ax, ay) = world_to_device(request, world.x0, world.y0)?;
     let (bx, by) = world_to_device(request, world.x1, world.y1)?;
     let (x0, x1, y0, y1) = (ax.min(bx), ax.max(bx), ay.min(by), ay.max(by));
@@ -6428,7 +6440,10 @@ fn paint_density_dots(band: &mut RasterBand, request: &GeometryRasterRequest, wo
     let cols = c1 - c0;
     let n = cols * (r1 - r0);
     let area = (x1 - x0) as f64 / DEVICE_ONE as f64 * ((y1 - y0) as f64 / DEVICE_ONE as f64);
-    let k = ((area * dot_share()).floor() as i128).clamp(1, n);
+    let k = match count {
+        Some(count) => (count as i128).clamp(1, n),
+        None => ((area * dot_share()).floor() as i128).clamp(1, n),
+    };
     // the tile's part of the item
     let (tc0, tc1) = (c0.max(band.col0 as i128), c1.min(band.col1 as i128));
     let (tr0, tr1) = (r0.max(band.row0 as i128), r1.min(band.row1 as i128));
@@ -9201,6 +9216,7 @@ mod tests {
                             (index % 4, BBox { x0: x, y0: y, x1: x + 1 + rng.next(50), y1: y + 1 + rng.next(50) })
                         })
                         .collect(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
                 WsCell {
@@ -9210,6 +9226,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: vec![(BBox { x0: 0, y0: 0, x1: 40, y1: 40 }, Rep::One, 1)],
                     washes: vec![(2, BBox { x0: 5, y0: 5, x1: 9, y1: 30 })],
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
             ],
@@ -10072,6 +10089,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             }],
             pages: vec![0, 1],
@@ -10153,6 +10171,7 @@ mod tests {
                 insts: Vec::new(),
                 frames,
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             }],
             pages: vec![0, 1],
@@ -10220,6 +10239,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             }],
             pages: vec![page_id],
@@ -10405,6 +10425,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 }],
                 pages: vec![0],
@@ -10495,6 +10516,7 @@ mod tests {
                     insts: vec![inst(child_a, 2, 2), inst(child_b, 4, 2), inst(child_c, 2, 4)],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
                 WsCell {
@@ -10504,6 +10526,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
                 WsCell {
@@ -10513,6 +10536,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
                 WsCell {
@@ -10522,6 +10546,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
             ],
@@ -10669,6 +10694,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             }],
             pages: vec![0],
@@ -11505,6 +11531,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             }],
             pages: (0..n).collect(),
@@ -11666,10 +11693,15 @@ mod tests {
     /// A pass-2 scene of sub-cut dot items (floe_vfs HierOpts::sub_cut_dots):
     /// one top cell over 0..320 whose washes are the items.
     fn dots_scene(washes: Vec<(u32, BBox)>) -> FrameScene {
+        dots_scene_counted(washes, Vec::new())
+    }
+
+    /// `dots_scene` with the items' counts (a spread dots plan, WsCell::dot_counts).
+    fn dots_scene_counted(washes: Vec<(u32, BBox)>, dot_counts: Vec<u16>) -> FrameScene {
         let top = (0, REM_FULL);
         let plan = HierPlan {
             top,
-            wcells: vec![WsCell { key: top, pages: Vec::new(), page_levels: Vec::new(), insts: Vec::new(), frames: Vec::new(), washes, reps: Vec::new() }],
+            wcells: vec![WsCell { key: top, pages: Vec::new(), page_levels: Vec::new(), insts: Vec::new(), frames: Vec::new(), washes, dot_counts, reps: Vec::new() }],
             pages: Vec::new(),
             page_prio: Vec::new(),
             stats: HierStats { shape_cut: CUT_2, shape_cut_max: true, sub_cut_dots: true, ..HierStats::default() },
@@ -11714,6 +11746,42 @@ mod tests {
         for (tile, workers, bin) in [(8, 2u16, true), (16, 3, false), (DEFAULT_TILE_SIZE, 1, false)] {
             let request = stack_request(LayerFill::Solid, tile, workers);
             let again = density_frame(&coarse, &dots, CUT_1 as i64, &request, bin, &mut Vec::new());
+            assert_eq!(again.frame, on.frame, "tile {tile} workers {workers} bin {bin}");
+        }
+    }
+
+    /// A spread dot item (floe_vfs HierOpts::dot_spread, CUT_DENSITY_DESIGN
+    /// §10.12, 2026-10-01): its box is what its dots stand for within a block
+    /// and it lights exactly its count of the box's pixels, spread over it -
+    /// not half the box, as an item without a count does. Where its plane may
+    /// draw as any dot item; the tiling, the workers and the bin change
+    /// nothing.
+    #[test]
+    fn a_spread_dot_item_lights_its_count_over_its_box() {
+        let b = |x0, y0, x1, y1| BBox { x0, y0, x1, y1 };
+        let coarse = stack_scene(vec![(1, vec![RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 154, h: 320, rep: Rep::One }], Vec::new())], CUT_1);
+        let washes = vec![
+            (2, b(170, 10, 250, 90)),   // 8 x 8 px, empty space: 5 red
+            (2, b(160, 150, 320, 310)), // 16 x 16 px: 100 red
+            (3, b(40, 40, 120, 120)),   // the top plane over layer 1's original: 10 green
+        ];
+        let counted = Arc::new(dots_scene_counted(washes.clone(), vec![5, 100, 10]));
+        let request = stack_request(LayerFill::Solid, DEFAULT_TILE_SIZE, 1);
+        let on = density_frame(&coarse, &counted, CUT_1 as i64, &request, true, &mut Vec::new());
+        assert_eq!(count(&on.frame, RED, 17..25, 23..31), 5, "8 x 8 px, 5 dots");
+        assert_eq!(count(&on.frame, RED, 16..32, 1..17), 100, "16 x 16 px, 100 dots");
+        assert_eq!(count(&on.frame, GREEN, 4..12, 20..28), 10, "the top plane over a lower original");
+        assert_eq!(count(&on.frame, RED, 0..32, 0..32), 105, "nothing else lit");
+        // spread: the 100 dots reach every quarter of their box
+        for (cols, rows) in [(16..24, 1..9), (24..32, 1..9), (16..24, 9..17), (24..32, 9..17)] {
+            assert!(count(&on.frame, RED, cols.clone(), rows.clone()) > 0, "{cols:?} {rows:?}");
+        }
+        // without counts the area's rule: half the box
+        let boxed = density_frame(&coarse, &Arc::new(dots_scene(washes)), CUT_1 as i64, &request, true, &mut Vec::new());
+        assert_eq!(count(&boxed.frame, RED, 17..25, 23..31), 32);
+        for (tile, workers, bin) in [(8, 2u16, true), (16, 3, false), (DEFAULT_TILE_SIZE, 1, false)] {
+            let request = stack_request(LayerFill::Solid, tile, workers);
+            let again = density_frame(&coarse, &counted, CUT_1 as i64, &request, bin, &mut Vec::new());
             assert_eq!(again.frame, on.frame, "tile {tile} workers {workers} bin {bin}");
         }
     }
@@ -11924,6 +11992,7 @@ mod tests {
                     insts: vec![WsInst { child: cell, x, y, rot, flip, rep }],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
                 WsCell {
@@ -11933,6 +12002,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
             ],
@@ -12660,6 +12730,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                     WsCell {
@@ -12669,6 +12740,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                 ],
@@ -12769,6 +12841,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                     WsCell {
@@ -12778,6 +12851,7 @@ mod tests {
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                     WsCell {
@@ -12787,6 +12861,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                 ],
@@ -12888,6 +12963,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                     WsCell {
@@ -12897,6 +12973,7 @@ mod tests {
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                     WsCell {
@@ -12906,6 +12983,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                 ],
@@ -13009,6 +13087,7 @@ mod tests {
                         }],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                     WsCell {
@@ -13018,6 +13097,7 @@ mod tests {
                         insts: leaf_insts,
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                     WsCell {
@@ -13027,6 +13107,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                 ],
@@ -13124,6 +13205,7 @@ mod tests {
                         1,
                     )],
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 }],
                 pages: vec![0, 1],
@@ -13326,6 +13408,7 @@ mod tests {
                         insts: vec![inst(child_a, 2), inst(child_b, 4)],
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                     WsCell {
@@ -13335,6 +13418,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: vec![(unit, Rep::One, 1)],
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                     WsCell {
@@ -13344,6 +13428,7 @@ mod tests {
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     },
                 ],
@@ -13419,6 +13504,7 @@ mod tests {
                     insts: vec![inst(child)],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
                 WsCell {
@@ -13428,6 +13514,7 @@ mod tests {
                     insts: vec![inst(top)],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
             ],
@@ -13837,6 +13924,7 @@ mod tests {
                     }],
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
                 WsCell {
@@ -13846,6 +13934,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
             ],

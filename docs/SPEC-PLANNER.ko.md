@@ -269,6 +269,18 @@
   상자마다 만나는 노드·페이지·배치를 한 번만 센다. 블록마다 wash 하나(면적 = (개수 + ½) × 2 px²)를 내며 상한 초과는
   다시 거칠게 계획하지 않고 버린다(`sub_cut_box_over`). 레이어 수 상한(`sub_cut_box_layers`)은 적용하지 않는다.
   단위 `the_sub_cut_dots_count_what_the_cut_drops_by_block_and_never_walk_into_it`.
+  **읽기(0.12.256):** 점 모드에서 마스크 없는 노드의 배치 읽기는 셀마다 가장 위 가시 레이어를 한 번만 구해 두고
+  (`cell_top`, `top_memo`) 순위만 비교한다; 계획기의 정수 키 맵은 Fx식 해시(`FxMap`/`FxSet`). 그림은 같다.
+  **블록과 퍼뜨림(0.12.257; 사용자 2026-10-01 "지금보다 덜 자세해도 괜찮을 것 같음"):** 블록은
+  `HierOpts::dot_block_px`(기본 **8 px**, `FLOE_RUST_DENSITY_BLOCK_PX` 4~16; 블록당 상한 = 블록 픽셀의 절반,
+  `dot_block_cap`)이고, 노드는 max(컷, 블록)까지만 내려간다 — 걷기량이 블록 크기의 제곱에 반비례한다.
+  `HierOpts::dot_spread`(기본 켬, `FLOE_RUST_DENSITY_SPREAD=off`가 킬 스위치)이면 블록의 wash는 점들이 대표하는 범위
+  (블록 안; 개수를 절반 이하로 담도록 얇은 쪽부터 중심에서 키움 — 작은 항목 하나는 전과 같은 상자)이고 개수는
+  `WsCell::dot_counts`(washes와 나란함, `page_levels`와 같은 방식)에 따로 싣는다. 항목의 개수는 **담은 것까지**다:
+  블록 크기 이하의 배열은 멤버 수 × 멤버당 점(상자 면적이 아니라), 레이어 마스크가 없는 노드(64배치 미만)는 이미 도는
+  배치 읽기에서 `place_head`로 같은 값을 더한다(합이 상자 면적의 개수에 닿고 가장 위 레이어도 찾으면 멈춤; 마스크가
+  있는 노드는 상자 면적). `Cache::plan_layer_only`는 개수를 wash와 함께 거른다. `BLOCK_PX=4 SPREAD=off`가 0.12.256의
+  규칙이다. 단위 `the_dots_blocks_spread_what_they_count_and_count_what_is_there`.
   **탐침(0.12.248):** `HierOpts::probe_limit > 0`(`Vfs::plan_hier_in`의 다섯째 인자, `PlanRequest::probe_limit`)이면
   예산 맞춤 없이 그대로 계획하되 선택한 페이지의 추정 디코드 메모리(`fit_bytes`)가 한도를 넘는 순간 그 패스를
   버린다(`fit_over`) — renderd가 점 모드 2패스의 페이지 하한(0 px)이 예약에 드는지 볼 때 쓴다(CUT_DENSITY_DESIGN

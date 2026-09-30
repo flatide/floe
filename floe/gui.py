@@ -3974,11 +3974,14 @@ class Viewer:
                     # and next to the cut it fell off (field 2026-09-26)
                     stack = ""
                     if res.get("density_stack") is not None:
-                        # with the sub-cut dots: the records' floor pass 2
-                        # planned at, its plan time and the pages it decoded
-                        # (to compare FLOE_RUST_DENSITY_FLOOR_PX, 2026-09-30)
+                        # with the sub-cut dots: their block, the records'
+                        # floor pass 2 planned at, its plan time and the pages
+                        # it decoded (to compare FLOE_RUST_DENSITY_BLOCK_PX,
+                        # 2026-10-01, and FLOE_RUST_DENSITY_FLOOR_PX, 2026-09-30)
                         parts = ["dots" if res.get("density_dots") is not None
                                  else "top + empty"]
+                        if res.get("density_block") is not None:
+                            parts.append("block %g px" % res["density_block"])
                         if res.get("density_floor") is not None:
                             parts.append("floor %.2g px" % res["density_floor"])
                         us = res.get("density_us") or {}

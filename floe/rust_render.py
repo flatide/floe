@@ -701,6 +701,7 @@ class RustRenderWorker:
             "density_bin": None,
             "density_dots": None,
             "density_floor": None,
+            "density_block": None,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -1331,6 +1332,11 @@ class RustRenderWorker:
             state["density_floor"] = float(fields.get("density_floor", "-"))
         except ValueError:
             state["density_floor"] = None
+        # the sub-cut dots' block, px (FLOE_RUST_DENSITY_BLOCK_PX)
+        try:
+            state["density_block"] = float(fields.get("density_block", "-"))
+        except ValueError:
+            state["density_block"] = None
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1559,6 +1565,7 @@ class RustRenderWorker:
             "density_bin": state["density_bin"],
             "density_dots": state["density_dots"],
             "density_floor": state["density_floor"],
+            "density_block": state["density_block"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on

@@ -123,6 +123,18 @@ sh tools/validate_rust.sh --only quick path/to.oas
   라벨 `*/2`·`1/2`, 단계 이동이 [0, 2]로 제한, 전체에서 한 단계 = 1, top으로 돌아오면 `7/16`, 루트 변경이 라벨 갱신.
   0.12.253: 하한 `FLOE_RUST_DENSITY_FLOOR_PX` — 0.25 px는 0.5 px 미세 사각형을 그리고 0.6 px는 뺀다,
   `density_floor` = 0 / 0.25 / 0.59; 어댑터 계약 `density_floor=0.250` → 0.25, 없으면 None.
+  0.12.256(점 모드의 순수 비용): 새 검사 없음 — 기존 단위·게이트가 그대로 통과하고, 7개 표준 뷰(합성 1/10 칩)의 프레임
+  해시가 0.12.255와 같다(CUT_DENSITY_DESIGN §10.12).
+  0.12.257(블록 8 px, 퍼뜨림): 게이트 점 절이 둘이 된다 — 기본(8 px, spread)은 성긴 배열 정확히 100 px(각 점이 멤버
+  중심에서 한 블록 안), 외톨이 1, 맞닿은 배열 = Σ min(32, 8×8 블록에 중심을 둔 멤버), `density_block` 8, 항목 = 성긴
+  배열이 걸친 블록 + 1 + 맞닿은 블록; 이전 규칙(`FLOE_RUST_DENSITY_BLOCK_PX=4 FLOE_RUST_DENSITY_SPREAD=off`)은 예전
+  기대(100 px가 멤버에서 2 px 안, Σ min(8, 4×4 블록), 항목 100 + 1 + 블록, `density_block` 4) 그대로. 하한·점진·확대
+  검사는 기본에서. 단위 `the_dots_blocks_spread_what_they_count_and_count_what_is_there`(8 px: 상한 32, 성긴 배열
+  900점, 맞닿은 36블록 모두 32, 2×2 배열은 상자의 8이 아니라 4, 영역을 나눠도 같은 항목·개수, spread 끔은 개수 없이
+  상자 면적, 4 px보다 항목이 적음; 마스크 없는 노드의 세 LEAF는 3점, 끄면 상자의 24점),
+  `a_spread_dot_item_lights_its_count_over_its_box`(8×8 px 상자에 5점, 16×16 px에 100점이 상자의 네 사분면에 퍼짐,
+  최상위 면은 하위 원본 위에 10점, 개수 없이는 상자 절반 32; 타일·워커·bin 무관); 어댑터 계약 `density_block=8` →
+  8.0, 없으면 None.
   0.12.252: `test_a_settled_frame_of_this_view_does_not_render_again` — margin 끔에서 `_covered`가 거부하는
   뷰포트 프레임(한쪽 2 px 스냅 여유)이 착지해도 다시 렌더하지 않고 여백만, 뷰가 떠났으면 redraw, 디바운스·드래그
   중이면 아무것도 안 함(0.12.251의 무한 재렌더 회귀).

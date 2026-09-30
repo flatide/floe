@@ -707,6 +707,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             }],
             pages: vec![2, 4],
@@ -782,6 +783,7 @@ mod tests {
                     }],
                     frames: Vec::new(),
                     washes: vec![(5, bbox)],
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
                 WsCell {
@@ -793,6 +795,7 @@ mod tests {
                     insts: Vec::new(),
                     frames: vec![(bbox, Rep::One, 2)],
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 },
             ],

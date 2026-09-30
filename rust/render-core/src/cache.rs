@@ -239,6 +239,7 @@ impl PlannedView {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: prims,
                 });
                 self.summary.wc_cells += 1;
@@ -801,6 +802,14 @@ impl Cache {
                     insts: cell.insts.clone(),
                     frames: Vec::new(),
                     washes: cell.washes.iter().filter(|(wash_layer, _)| *wash_layer == layer).copied().collect(),
+                    // a spread dots plan's counts, with their washes
+                    dot_counts: cell
+                        .washes
+                        .iter()
+                        .zip(&cell.dot_counts)
+                        .filter(|((wash_layer, _), _)| *wash_layer == layer)
+                        .map(|(_, &count)| count)
+                        .collect(),
                     reps: cell.reps.iter().filter(|(rep_layer, _)| *rep_layer == layer).cloned().collect(),
                 }
             })
@@ -899,6 +908,7 @@ impl Cache {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             });
         }
@@ -992,7 +1002,7 @@ impl Cache {
                 } else {
                     planned.plan.wcells.push(floe_vfs::hier::WsCell {
                         key: top, pages: Vec::new(), page_levels: Vec::new(), insts: Vec::new(),
-                        frames: Vec::new(), washes: Vec::new(), reps: prims,
+                        frames: Vec::new(), washes: Vec::new(), dot_counts: Vec::new(), reps: prims,
                     });
                     planned.plan.stats.wc_cells += 1;
                     planned.summary.wc_cells += 1;
@@ -1010,7 +1020,7 @@ impl Cache {
                 } else {
                     planned.plan.wcells.push(floe_vfs::hier::WsCell {
                         key: top, pages: Vec::new(), page_levels: Vec::new(), insts: Vec::new(),
-                        frames: Vec::new(), washes: points, reps: Vec::new(),
+                        frames: Vec::new(), washes: points, dot_counts: Vec::new(), reps: Vec::new(),
                     });
                     planned.plan.stats.wc_cells += 1;
                     planned.summary.wc_cells += 1;
@@ -1038,6 +1048,7 @@ impl Cache {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 }],
                 pages: Vec::new(),

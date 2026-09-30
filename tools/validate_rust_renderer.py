@@ -1674,10 +1674,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "once_tiles": "5", "once_passes": "400", "once_items": "77",
                 # the density stack's lit/top/lower/covered/claimed pixels, pass
                 # 2's pages planned/in_hand/decoded/over_budget, its times and bins,
-                # the sub-cut dots' items/over
+                # the sub-cut dots' items/over, floor and block
                 "density_stack": "90/40/30/1000/200", "density_pages": "12/7/4/1",
                 "density_us": "100/20/30/4/50", "density_bin": "600/1/0",
                 "density_dots": "3500/2", "density_floor": "0.250",
+                "density_block": "8",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -1758,6 +1759,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["density_bin"], {"items": 600, "deferred": 1, "overflow": 0})
             self.assertEqual(result["density_dots"], {"items": 3500, "over": 2})
             self.assertEqual(result["density_floor"], 0.25)
+            self.assertEqual(result["density_block"], 8.0)
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
@@ -1791,6 +1793,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIsNone(partial["density_bin"])
             self.assertIsNone(partial["density_dots"])
             self.assertIsNone(partial["density_floor"])
+            self.assertIsNone(partial["density_block"])
             self.assertEqual(partial["refining"], 1)
             self.assertNotIn("density_round", partial)
             self.assertIn(9, worker._jobs)
