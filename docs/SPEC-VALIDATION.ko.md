@@ -119,6 +119,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
   0.12.251(렌더 중 입력, SPEC-VIEWER §7): Esc가 진행 중 렌더를 취소(`cancel before_gen`)하고 체인은 다음 Esc,
   렌더 중 휠 줌이 `_zoom_at`에 닿음, 이전 세대의 error/cancelled는 대기를 풀지 않음; 어댑터 `cancel(7)` →
   `cancel before_gen=7`, `cancelled gen=6 phase=render` → 결과·job 제거, `before_gen` ack는 결과 아님.
+  0.12.252: `test_a_settled_frame_of_this_view_does_not_render_again` — margin 끔에서 `_covered`가 거부하는
+  뷰포트 프레임(한쪽 2 px 스냅 여유)이 착지해도 다시 렌더하지 않고 여백만, 뷰가 떠났으면 redraw, 디바운스·드래그
+  중이면 아무것도 안 함(0.12.251의 무한 재렌더 회귀).
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과

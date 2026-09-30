@@ -3126,6 +3126,38 @@ class Viewer:
         return (fb[0] <= bbox[0] - pad_x and fb[1] <= bbox[1] - pad_y and
                 fb[2] >= bbox[2] + pad_x and fb[3] >= bbox[3] + pad_y)
 
+    def _frame_holds_view(self, bbox):
+        """The frame on screen shows this view whole: the same render
+        state, the same scale, the view inside its box (float slack only).
+        Unlike _covered - whether a frame may be REUSED instead of a render,
+        which with the margin off wants comfort around the view - a
+        viewport frame that was just drawn for this view always holds it."""
+        lf = self.last_frame
+        if lf is None or lf[3] != self._render_key("live"):
+            return False
+        if abs(lf[2] - self.spp) > 1e-9 * self.spp:
+            return False
+        fb, tol = lf[1], 1e-3 * self.spp
+        return (fb[0] <= bbox[0] + tol and fb[1] <= bbox[1] + tol and
+                fb[2] >= bbox[2] - tol and fb[3] >= bbox[3] - tol)
+
+    def _settle_after_frame(self):
+        """A foreground frame settled. The mouse no longer waits for it
+        (2026-09-30), so the view may have moved while it was drawn: when a
+        render of the new view is already on its way (the debounce) or a pan
+        is in progress (its release renders), nothing to do; when the frame
+        does not hold the view the user is at (a pan inside the old margin
+        submitted nothing), render that view; otherwise top the margin up.
+        0.12.251 asked _covered here, which with the margin off never holds
+        a fresh viewport frame (no comfort around it): every frame rendered
+        again, for ever (field 2026-09-30: "rendering repeats")."""
+        if self._debounce is not None or self._drag is not None:
+            return
+        if self._frame_holds_view(self.view_bbox()):
+            self._schedule_margin()
+        else:
+            self.redraw()
+
     def redraw(self, immediate=False):
         if self.cache is None:
             return   # empty start: nothing to render yet
@@ -3959,14 +3991,7 @@ class Viewer:
                     print("%s  view %.1f x %.1f um"
                           % (mode, (b[2] - b[0]) * self.dbu,
                              (b[3] - b[1]) * self.dbu), flush=True)
-                    # the view may have moved while this frame was
-                    # drawn (the mouse no longer waits, 2026-09-30): a
-                    # frame that covers it tops the margin up, one that
-                    # does not renders the view the user is at
-                    if self._covered(b, "live"):
-                        self._schedule_margin()
-                    else:
-                        self.redraw()
+                    self._settle_after_frame()
                 self._set_status(self.view_bbox(), mode)
                 # the cell highlight follows the view the frame shows
                 self._cell_hl_follow()

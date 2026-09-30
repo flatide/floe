@@ -512,6 +512,40 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertEqual(len(zoomed), 1)
         self.assertEqual(zoomed[0][:2], (10.0, 20.0))
 
+    def test_a_settled_frame_of_this_view_does_not_render_again(self):
+        """Field 2026-09-30 ("rendering repeats"): 0.12.251 re-rendered
+        after every settled frame that _covered did not accept - and with the
+        margin off _covered wants comfort around the view that a fresh
+        viewport frame (<= 2 px snap slack) never has. A frame that holds the
+        view tops the margin up; one the view has left renders it; a pending
+        debounce or a pan in progress does neither."""
+        from floe.gui import Viewer
+
+        calls = []
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        v._pending = None
+        v._drag = None
+        v.margin_on = False
+        v.redraw = lambda immediate=False: calls.append("redraw")
+        v._schedule_margin = lambda: calls.append("margin")
+        b = v.view_bbox()
+        # the exact viewport frame: the snap grows it by 2 px on one side only
+        v.last_frame = (None, (b[0], b[1] - 2 * v.spp, b[2] + 2 * v.spp, b[3]), v.spp, _MARGIN_KEY)
+        self.assertFalse(Viewer._covered(v, b, "live"), "the reuse test refuses it (margin off)")
+        Viewer._settle_after_frame(v)
+        self.assertEqual(calls, ["margin"], "a frame of this view renders nothing again")
+        # the view moved away while the frame was drawn, nothing submitted
+        v.cx += 500 * v.spp
+        Viewer._settle_after_frame(v)
+        self.assertEqual(calls[-1], "redraw")
+        # a render of the new view already on its way, or a pan in progress
+        n = len(calls)
+        v._debounce = 17
+        Viewer._settle_after_frame(v)
+        v._debounce, v._drag = None, (1.0, 2.0)
+        Viewer._settle_after_frame(v)
+        self.assertEqual(len(calls), n)
+
     def test_an_older_generations_error_leaves_the_pending_render(self):
         """An error of a superseded generation (its late failure) must not
         clear the state of the one now pending; the pending one's, and an

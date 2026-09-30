@@ -149,8 +149,15 @@
   `latest`로 다음 단계에서 포기), `_refining`·`_pending` 해제, 상태줄
   "render cancelled", 그림은 얼어 있던 프레임 그대로이고 뷰는 덮이지
   않은 채라 다음 팬·줌·redraw가 렌더한다. 다음 Esc부터 기존 체인. 늦게
-  도착한 프레임: 뷰가 그동안 움직였으면(덮이지 않음) 착지 뒤 `redraw()`가
-  지금 뷰를 렌더하고, 덮였으면 여백을 채운다. 이전 세대의 `error`는
+  도착한 프레임(`_settle_after_frame`): 새 뷰의 렌더가 이미 예약돼 있거나
+  (디바운스) 드래그 중이면 아무것도 안 하고, 프레임이 지금 뷰를 담지 않으면
+  (`_frame_holds_view`: 같은 렌더 키·배율, 뷰가 프레임 상자 안 — 여백 판정
+  `_covered`와 다르다) `redraw()`, 담으면 여백을 채운다. 0.12.251은 여기서
+  `_covered`를 물었는데, margin을 끈 기본 설정에서 `_covered`는 뷰 둘레의
+  여유를 요구해 방금 그린 뷰포트 프레임(스냅 여유 ≤ 2 px)을 한 번도 받지
+  않았다 — 확정 프레임마다 다시 렌더하는 무한 반복(현장 2026-09-30
+  "rendering이 계속 반복", 가상 디스플레이에서 가만히 둔 25초에 157번 →
+  0.12.252에서 1번; 계약 `test_a_settled_frame_of_this_view_does_not_render_again`). 이전 세대의 `error`는
   지금 세대의 대기를 풀지 않는다(세대 없는 어댑터 오류는 푼다); 데몬의
   `cancelled gen=N`은 결과로 올라와 대기 중이던 세대면 대기를 푼다.
   뷰어 계약(validate_rust_renderer): `test_esc_cancels_the_render_in_flight_before_the_chain`,
