@@ -70,7 +70,11 @@ cell under it as dots in 4 x 4 px blocks, never walking into it:
     round (final=0) holding pass 1 alone, byte for byte the frame without the
     stack, then the final frame, byte for byte what the dots draw in one
     round (FLOE_RUST_DENSITY_PROGRESSIVE=off); a margin frame has no first
-    round.
+    round;
+  * a zoom while pass 2 is drawing (field 2026-09-30: the viewer looked hung
+    - the next view waited for the old plan): the next generation, submitted
+    on the first round, is answered - its final frame equals its own one-round
+    frame - and the old generation publishes no final frame after that.
 
     .venv/bin/python tools/validate_density_stack.py
 """
@@ -213,6 +217,20 @@ def dots_checks(temp):
         assert len(frames_of(workers['dots'], 11, both, bg=True)) == 1, 'a margin has no first round'
         print('density stack dots: progressive - a refining round of pass 1 (= the frame without the stack), then the one-round frame; '
               'none for a margin')
+        # a zoom while pass 2 draws: the next generation is answered, the old one dropped
+        results, zoomed = zoom_during_pass2(workers['dots'], 20, 21, both)
+        assert not any(gen == 20 and not refining and after for gen, refining, _, after in results), 'the old generation published a final frame after the zoom'
+        final_b = [px for gen, refining, px, _ in results if gen == 21 and not refining][-1]
+        dbu = float(workers['one_round'].cache.meta['dbu'])
+        workers['one_round'].submit({'kind': 'render', 'gen': 21, 'scope': 'live', 'bbox': tuple(v / dbu for v in zoomed), 'view': tuple(v / dbu for v in zoomed),
+                                     'w': W, 'h': H, 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                                     'abstract': False, 'visible': list(both), 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+        while True:
+            res = workers['one_round'].res.get(timeout=300)
+            if res.get('kind') == 'frame' and res.get('gen') == 21 and not res.get('refining'):
+                break
+        assert final_b == bytes(res['rgba']), 'the zoomed view differs from its own one-round frame'
+        print('density stack dots: a zoom on the first round is answered (%d results), the old generation drops' % len(results))
     finally:
         for w in workers.values():
             w.stop()
@@ -243,6 +261,34 @@ def frames_of(w, gen, visible, bg=False):
             if not res.get('refining'):
                 return out
     raise AssertionError('progressive frames timeout')
+
+
+def zoom_during_pass2(w, gen_a, gen_b, visible):
+    """Submit gen_a (VIEW); on its first round submit gen_b (the right half
+    of VIEW, zoomed x2) - a mouse zoom while pass 2 draws. Every result until
+    gen_b's final: [(gen, refining, pixels)]."""
+    dbu = float(w.cache.meta['dbu'])
+    vw, vh = VIEW[2] - VIEW[0], VIEW[3] - VIEW[1]
+    zoomed = (VIEW[0] + vw / 2, VIEW[1] + vh / 4, VIEW[2], VIEW[1] + 3 * vh / 4)
+    def job(gen, box):
+        return {'kind': 'render', 'gen': gen, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': tuple(v / dbu for v in box),
+                'w': W, 'h': H, 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                'abstract': False, 'visible': list(visible), 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False}
+    w.submit(job(gen_a, VIEW))
+    out, zoomed_at = [], None
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+        assert res.get('kind') not in ('error', 'dropped'), res
+        if res.get('kind') != 'frame':
+            continue
+        out.append((res.get('gen'), bool(res.get('refining')), bytes(res.pop('rgba')), zoomed_at is not None))
+        if res.get('gen') == gen_a and res.get('refining') and zoomed_at is None:
+            zoomed_at = len(out)
+            w.submit(job(gen_b, zoomed))
+        if res.get('gen') == gen_b and not res.get('refining'):
+            return out, zoomed
+    raise AssertionError('zoom during pass 2: no final frame for gen %d' % gen_b)
 
 
 def worker(src, env):

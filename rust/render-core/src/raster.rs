@@ -4342,10 +4342,23 @@ impl LayerRasterSession {
                         .iter()
                         .filter_map(|&pass| Self::plane_of(pass)),
                 );
-                let mut guards = tiles
+                // every early exit of this loop goes through `break`: the
+                // workers wait at the barrier for this thread, and only the
+                // stop below releases them - a `?` here would leave them
+                // parked and this thread in the scope's join for ever (found
+                // 2026-09-30: a zoom during pass 2 cancelled the density bin
+                // collection, whose `?` did exactly that - the daemon hung)
+                let mut guards = match tiles
                     .iter()
                     .map(|tile| tile.lock().map_err(|_| "raster tile lock poisoned".to_string()))
-                    .collect::<Result<Vec<_>, String>>()?;
+                    .collect::<Result<Vec<_>, String>>()
+                {
+                    Ok(guards) => guards,
+                    Err(error) => {
+                        result = Err(error);
+                        break;
+                    }
+                };
                 let density_block = density_start == Some(at);
                 let demand = BlockDemand {
                     request: &request,
@@ -4372,6 +4385,7 @@ impl LayerRasterSession {
                     let collect_started = Instant::now();
                     let mut sides: [Option<DensitySide>; 2] = [None, None];
                     let scenes = scenes.unwrap_or(DensityScenes { top: None, others: None });
+                    let collected: Result<(), String> = (|| {
                     for (side, scene) in [scenes.top, scenes.others].into_iter().enumerate() {
                         let Some(scene) = scene else {
                             continue;
@@ -4418,6 +4432,13 @@ impl LayerRasterSession {
                         }
                         sides[side] = Some(DensitySide { scene, bin, table: Vec::new(), words: Vec::new() });
                     }
+                    Ok(())
+                    })();
+                    if let Err(error) = collected {
+                        // (a cancellation mid-collection, most likely)
+                        result = Err(error);
+                        break;
+                    }
                     let [top, others] = sides;
                     if let Ok(mut slot) = density_slot.write() {
                         if let Some(plan) = slot.as_mut() {
@@ -4432,7 +4453,10 @@ impl LayerRasterSession {
                 cursor.store(0, Ordering::Relaxed);
                 barrier.wait();
                 barrier.wait();
-                let failed = failure.lock().map_err(|_| "raster failure lock poisoned".to_string())?.clone();
+                let failed = match failure.lock() {
+                    Ok(failed) => failed.clone(),
+                    Err(_) => Some("raster failure lock poisoned".to_string()),
+                };
                 if let Some(error) = failed {
                     result = Err(error);
                     break;
@@ -11724,6 +11748,54 @@ mod tests {
             again.raster.density_claim_lit = claim_lit;
             assert_eq!(density_frame(&coarse, &fine, CUT_1 as i64, &again, false, &mut Vec::new()).frame, on.frame, "claim_lit {claim_lit}");
         }
+    }
+
+    /// A cancellation that lands while the density bins are collected - after
+    /// before_block answered, before the density passes - ends the frame with
+    /// `render cancelled`. It used to escape the block loop by `?`, past the
+    /// stop that releases the raster workers parked at the barrier, and this
+    /// thread waited in the scope's join for ever (2026-09-30: a zoom during
+    /// the density stack's pass 2 hung the daemon). A watchdog thread tells a
+    /// hang from a return.
+    #[test]
+    fn a_cancellation_during_the_density_collect_ends_the_frame_not_the_thread() {
+        let colors = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255]];
+        let done = std::thread::spawn(move || {
+            let coarse = once_scene_cut(1, false, 100);
+            let fine = Arc::new(once_scene_cut(1, false, 16));
+            let request = StyledGeometryRasterRequest {
+                raster: GeometryRasterRequest {
+                    view: RasterViewBox::new(0.0, 0.0, 3300.0, 2750.0).unwrap(),
+                    width: 96,
+                    height: 80,
+                    workers: 3,
+                    tile_size: 16,
+                    area_true: true,
+                    density_stack: true,
+                    ..request()
+                },
+                layers: (0..4u32).map(|layer| LayerStyle { layer_idx: layer, color: colors[layer as usize], fill: LayerFill::Solid, outline_width: 1 }).collect(),
+                hierarchy_frames: false,
+                mono: false,
+            };
+            let cancellation = crate::RenderCancellation::new();
+            let session = LayerRasterSession::begin_with_density_cancellable(&coarse, &request, true, Some(100), 1, &cancellation).unwrap();
+            let block = session.density_block();
+            session.render_layered_cancellable_with(&coarse, &request, 1, &cancellation, block, |_, demand| {
+                if demand.density_block() {
+                    // a newer generation, between the plan and the collection
+                    cancellation.cancel_before(2);
+                }
+                Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: Some(Arc::clone(&fine)) }))
+            })
+        });
+        let started = Instant::now();
+        while !done.is_finished() && started.elapsed() < std::time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(done.is_finished(), "the frame never returned: the raster workers are parked at the barrier");
+        let result = done.join().unwrap();
+        assert!(matches!(&result, Err(error) if error.contains("render cancelled")), "{:?}", result.map(|_| ()));
     }
 
     /// Under the density stack an array's dropped members stand for their

@@ -417,6 +417,29 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertTrue(item.sensitive)
         self.assertEqual(redraws, [True])
 
+    def test_a_dropped_foreground_render_clears_the_pending_state(self):
+        """Review 2026-09-30: the mouse waits on _pending until the pending
+        generation's first frame; a `dropped` answer for that generation
+        (unreachable today - a stale generation is never sent) must clear it
+        rather than leave the viewer waiting for ever; another generation's
+        `dropped` (a margin's) leaves it be."""
+        from floe.gui import Viewer
+
+        texts = []
+        worker = SimpleNamespace(submit=lambda job: None)
+        v = _stub_margin_viewer(worker, True)
+        v._pending_timer = None
+        v._pending = 5
+        v.rstatus = SimpleNamespace(set_text=texts.append)
+        v._set_cursor = lambda cursor: None
+        v._idle_cursor = lambda: "idle"
+        v._margin_debug = lambda message: None
+        Viewer._handle_result(v, {"kind": "dropped", "gen": 4, "reason": "fit"})
+        self.assertEqual(v._pending, 5, "another generation's drop")
+        Viewer._handle_result(v, {"kind": "dropped", "gen": 5, "reason": "stale"})
+        self.assertIsNone(v._pending)
+        self.assertEqual(texts[-1], "render dropped (stale)")
+
     def test_margin_prefetch_is_a_rust_only_reuse_capability(self):
         """P0 review (2026-09-05): the F2R-17 margin prefetch lives in
         the shared GUI and used to fire for ANY backend - stable

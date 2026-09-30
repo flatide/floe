@@ -111,6 +111,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
   20×10(3 px 간격)이 점 모드(페이지 하한 0)에서 컷 없는 프레임과 같은 픽셀로 그려지고, 스택만(1 px 하한)은 그리지 않는다.
   0.12.249(3단계): 점 모드 프레임은 refining 라운드(1패스만, 2/0 원본까지 스택 없는 프레임과 바이트 동일) 뒤에 최종
   프레임(한 라운드 `FLOE_RUST_DENSITY_PROGRESSIVE=off`와 바이트 동일)이 오고, 여백 프레임은 한 번만 온다.
+  0.12.250: 첫 라운드에서 다른 뷰로 확대하면 새 세대가 답하고(그 최종 = 자기 한 라운드 프레임) 이전 세대는 그 뒤 최종
+  프레임을 내지 않는다(계획 취소 `HierOpts::stop`). 렌더 코어 단위
+  `a_cancellation_during_the_density_collect_ends_the_frame_not_the_thread`: 2패스 bin 수집 중 취소가 프레임을
+  `render cancelled`로 끝낸다(이전엔 워커가 barrier에 묶여 영영 돌아오지 않았다; 감시 30 s). 뷰어 계약
+  `test_a_dropped_foreground_render_clears_the_pending_state`.
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과

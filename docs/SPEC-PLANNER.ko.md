@@ -273,6 +273,11 @@
   예산 맞춤 없이 그대로 계획하되 선택한 페이지의 추정 디코드 메모리(`fit_bytes`)가 한도를 넘는 순간 그 패스를
   버린다(`fit_over`) — renderd가 점 모드 2패스의 페이지 하한(0 px)이 예약에 드는지 볼 때 쓴다(CUT_DENSITY_DESIGN
   §10.12 2단계; 들면 그 계획을 쓰고, 넘치면 밀도 컷 1 px와 예산 맞춤).
+  **취소(0.12.250, renderd 0.12.235):** `HierOpts::stop`(`PlanStop { before, generation }`; `Vfs::plan_hier_in`의
+  여섯째 인자)이 걸리면 — 새 세대가 frontier를 올리면 — 걷기는 다음 셀 확장 또는 노드 방문 1,024회 안에 패스를 끝내고
+  `HierStats::cancelled`를 세운다(계획은 불완전, 버릴 것). `Cache::plan_cancellable(요청, 세대, RenderCancellation)`이
+  그런 계획을 `render cancelled`로 거부한다; renderd의 프레임 계획(1패스, 예산 탐침, 2패스)이 모두 이 경로다(현장
+  2026-09-30: 2패스 계획 중 확대가 계획이 끝날 때까지 기다렸다). 단위 `a_tripped_stop_ends_the_plan_at_once`.
 - **팬 재사용도 결정을 따른다(0.12.237, renderd 0.12.226; 4883533 리뷰 2026-09-28).** (1) 보존 프레임은 자기가
   계획된 결정(`RetainedFrame::fit`)을 지니고, 요청은 그 배율의 기억된 결정과 **같은** 프레임만 재사용한다
   (`prepare_pan_reuse`의 `fit` 인자; 기억은 스냅 전 요청으로 구한다 — 키가 위치에 무관). 이 프레임의 계획이

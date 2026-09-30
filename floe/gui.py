@@ -3967,6 +3967,13 @@ class Viewer:
             if pending is not None and pending[0] == res.get("gen"):
                 self._margin_debug("dropped gen=%d: %s" % (
                     res["gen"], res.get("reason") or "?"))
+            # a foreground render dropped (unreachable today: a stale
+            # generation is never sent) must not leave the mouse waiting
+            # for a frame that never comes (review 2026-09-30)
+            if res.get("gen") == self._pending:
+                self._clear_pending()
+                self.rstatus.set_text("render dropped (%s)" % (
+                    res.get("reason") or "?"))
 
     def _load_note(self, res):
         """The first settled frame after a load: the time from the file's

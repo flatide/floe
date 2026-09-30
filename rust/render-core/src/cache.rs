@@ -862,10 +862,24 @@ impl Cache {
     }
 
     pub fn plan(&self, request: &PlanRequest) -> Result<PlannedView, String> {
+        self.plan_stopping(request, None)
+    }
+
+    /// `plan` under a render cancellation: a newer generation ends the walk
+    /// at its next look (floe_vfs::hier::HierOpts::stop) and the plan is
+    /// refused as `render cancelled`, like any cancelled render step.
+    pub fn plan_cancellable(&self, request: &PlanRequest, generation: u64, cancellation: &crate::RenderCancellation) -> Result<PlannedView, String> {
+        self.plan_stopping(request, Some(cancellation.plan_stop(generation)))
+    }
+
+    fn plan_stopping(&self, request: &PlanRequest, stop: Option<floe_vfs::hier::PlanStop>) -> Result<PlannedView, String> {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.probe_limit);
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.probe_limit, stop);
+        if plan.stats.cancelled {
+            return Err("render cancelled: the plan's generation is superseded".to_string());
+        }
         let plan_us = elapsed_us(started);
         // a request whose every visible layer is summarized (and
         // pruned) plans no working cell at all; the scene still needs

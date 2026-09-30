@@ -2871,7 +2871,7 @@ fn run_render(
                 )?,
                 ..page_request.clone()
             };
-            let decided = cache.plan(&probe)?.plan.stats.fit_decision;
+            let decided = cache.plan_cancellable(&probe, command.generation, cancellation)?.plan.stats.fit_decision;
             check_generation(cancellation, command.generation)?;
             if let Some(decision) = decided {
                 state.fit_memory.insert(fit_key.clone(), decision);
@@ -2902,7 +2902,9 @@ fn run_render(
         cache.empty_plan()
     } else {
         if std::env::var("FLOE_RUST_REPRESENTATIVES").as_deref() == Ok("off") || command.thin_keep {
-            cache.plan(&page_request)?
+            // a newer generation ends the walk (floe_vfs HierOpts::stop): a
+            // chip's plan is seconds, and the next view waited for it
+            cache.plan_cancellable(&page_request, command.generation, cancellation)?
         } else {
             cache.plan_with_representatives_options(&page_request, representative_options,
                 || cancellation.is_cancelled(command.generation))?
@@ -3904,6 +3906,10 @@ fn render_density_frame(
                     if let Some(publish) = first_round.as_mut() {
                         publish(&demand.snapshot()?)?;
                     }
+                    // between pass 2's steps a newer generation stops this one:
+                    // its plans end at their next look, its decode is pooled
+                    // under the guard, its passes check per tile
+                    check_generation(cancellation, command.generation)?;
                     let regions_started = Instant::now();
                     let regions_top = demand.eligible_regions(true);
                     let regions_others = demand.eligible_regions(false);
@@ -3969,7 +3975,7 @@ fn render_density_frame(
                                 fine.probe_limit = reserve;
                             }
                             let fine_pages = cache.page_plan_request(&fine, summary, !command.frames)?;
-                            Ok(cache.plan(&fine_pages)?.plan)
+                            Ok(cache.plan_cancellable(&fine_pages, command.generation, cancellation)?.plan)
                         };
                         // the dots' pages go as low as the reserve holds (step 2 of
                         // CUT_DENSITY_DESIGN §10.12: a floor by the work, not a fixed
@@ -3996,6 +4002,7 @@ fn render_density_frame(
                                 }
                             }
                         }
+                        check_generation(cancellation, command.generation)?;
                         let planned_fine = match floored {
                             Some(plan) => plan,
                             None => {
@@ -4058,6 +4065,7 @@ fn render_density_frame(
                     // the plans are within the reserve by the planner's estimate; the
                     // decode takes them in their order (the priority) under the reserve
                     // as twice the encoded bytes, the generation check below the net
+                    check_generation(cancellation, command.generation)?;
                     wanted.sort_unstable();
                     wanted.dedup_by_key(|entry| entry.1);
                     let limit = density_reserve(budget_bytes);

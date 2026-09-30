@@ -1720,5 +1720,26 @@ pan은 정수 px 스냅). 폭 우선이 지키던 "pan에 폭 불변·평균 폭
 포함), 둘째는 한 라운드(`FLOE_RUST_DENSITY_PROGRESSIVE=off`)와 바이트 동일; 여백은 한 번. 어댑터 계약
 (validate_rust_renderer): `density_round=1`인 중간 결과에 `density_round: True`.
 
+**현장 결함 — 2패스 중 확대하면 멈춘 듯 보임(2026-09-30, 0.12.250 / renderd 0.12.235에서 수정).** 사용자: "렌더링이
+끝난 뒤 컷 아래를 그리는 중에 마우스로 확대하면 rendering...이 뜨고 hang." 원인: 계획기(`plan_hier`)에 취소 훅이 없어
+2패스의 계획(탐침·본 계획·예산 사다리)이 끝날 때까지 다음 요청이 기다렸다 — 합성 칩 ×4에서 확대 뒤 새 뷰의 첫 그림까지
+1.4~2.3 s, 실칩의 2패스 계획은 그보다 훨씬 길다(1패스도 같은 계획기라 큰 뷰의 팬·줌마다 같은 대기가 있었다). 디코드는
+풀의 guard로, 래스터는 타일마다 취소되지만 계획은 아니었다. 수정: `HierOpts::stop`(`PlanStop` = renderd
+`RenderCancellation`의 frontier와 계획의 세대; `Vfs::plan_hier_in` 여섯째 인자) — 걷기는 셀 확장마다, 그리고 노드
+방문 1,024회마다(`STOP_EVERY`) 이를 보고, 걸리면 그 패스를 즉시 끝내고 `HierStats::cancelled`를 세운다(사다리의 남은
+패스도 첫 확장에서 끝난다). `Cache::plan_cancellable(요청, 세대, 취소)`은 취소된 계획을 `render cancelled`로 거부하고,
+renderd는 1패스의 계획·예산 탐침·2패스의 모든 계획을 그것으로 하며 2패스 단계 사이(첫 라운드 뒤, 계획 뒤, 디코드 앞)에
+세대 검사를 둔다. 결과(합성 ×4, 첫 라운드에서 ×8로 확대): 새 뷰의 첫 그림이 확대 뒤 1,449~2,206 ms → **18~36 ms**,
+최종 2.7~3.7 s → 1.5~1.6 s. 확인: 단위 `a_tripped_stop_ends_the_plan_at_once`(미리 걸린 stop은 아무것도 계획하지 않고
+cancelled, 걷는 중 걸리면 거기서 끝, 안 걸리면 같은 계획), 게이트 `density_stack`(첫 라운드에서 확대: 새 세대가 답하고
+그 최종 프레임은 자기 한 라운드와 같으며, 이전 세대는 그 뒤 최종 프레임을 내지 않음).
+같은 조사에서 **진짜 교착**도 나왔다: `render_layered_with`의 2패스 경계에서 bin 수집(`collect_work_bin`)과 미니 준비
+(`prepare_density_minis`)가 오류를 `?`로 되던졌는데, 그 경로는 워커를 풀어 주는 `stop`과 barrier 없이 스코프를 나가서
+워커 스레드가 barrier에 영원히 묶이고 렌더 스레드는 스코프 join에서 멈춘다(0.12.227의 경계 수집부터; 셀마다 guard를 보는
+수집 중에 취소가 걸리면 정확히 그 경로 — 3단계로 2패스 중 조작이 가능해지며 닿게 됐다; 그 뒤 모든 요청이 뒤에 쌓여 daemon이
+멈춘 듯 보인다). 이제 그 루프의 모든 이른 종료가 `break`로 `stop` + barrier를 거친다. 단위
+`a_cancellation_during_the_density_collect_ends_the_frame_not_the_thread`(감시 스레드 30 s: 프레임이 `render cancelled`로
+돌아와야 한다 — 이전 코드는 돌아오지 않는다). 뷰어: 전경 렌더가 `dropped`로 답하면(오늘은 도달 불가) 대기 상태를 푼다.
+
 **다음:** 실칩 확인(MAIN01·MAIN09: 첫 10레이어 fit, 루트 블록, 전 레이어 fit의 첫 그림·최종 시간과 그림), 그리고
 2패스 계획의 걷기(컷 노드를 블록 크기까지 — 첫 10레이어 ×4에서 방문 364만)를 줄이는 것.

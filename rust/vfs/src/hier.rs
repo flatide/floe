@@ -19,6 +19,8 @@ use floe_ovm::{bit_test, masks_intersect, BBox, Ovm, PBVH_NONE};
 use floe_tiler::Xf;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// remaining-depth sentinel: no depth truncation below this WC
 pub const REM_FULL: u32 = u32::MAX;
@@ -534,6 +536,29 @@ impl FixedFit {
     }
 }
 
+/// A plan's cancellation (HierOpts::stop; renderd's RenderCancellation seen
+/// from the planner): the plan is for `generation`, and `before` is the
+/// frontier a newer request raises past it. The walk looks every
+/// STOP_EVERY node visits and every cell expansion; a tripped stop ends the
+/// pass at once with HierStats::cancelled set (the plan is incomplete and
+/// for nothing: the caller drops it). Field 2026-09-30: a zoom while the
+/// density stack's pass 2 was planning waited for that plan to finish - a
+/// long one on a chip - and the viewer looked hung.
+#[derive(Clone, Debug)]
+pub struct PlanStop {
+    pub before: Arc<AtomicU64>,
+    pub generation: u64,
+}
+
+impl PlanStop {
+    pub fn tripped(&self) -> bool {
+        self.generation < self.before.load(Ordering::Acquire)
+    }
+}
+
+/// node visits between two looks at HierOpts::stop
+const STOP_EVERY: u32 = 1024;
+
 #[derive(Clone, Debug)]
 pub struct HierOpts {
     /// A budget fit decided before (FixedFit): applied as it is when the
@@ -643,6 +668,8 @@ pub struct HierOpts {
     /// pass once its pages pass this many decoded bytes (stats.fit_over) -
     /// no budget fit, no second pass. 0: off.
     pub probe_limit: u64,
+    /// The plan's cancellation (PlanStop); None: never cancelled.
+    pub stop: Option<PlanStop>,
     /// The page frontier's decode budget per plan, decoded bytes of
     /// the cut pages kept as representatives (a page is about 1 MiB
     /// decoded; the render cache holds 1 GiB): beyond it the plan is
@@ -719,6 +746,7 @@ impl Default for HierOpts {
             sub_cut_box_level: 0,
             sub_cut_dots: None,
             probe_limit: 0,
+            stop: None,
             rep_decode_bytes: rep_decode_bytes(),
             rep_density: rep_density(),
             fit_budget: fit_budget_enabled(),
@@ -812,6 +840,8 @@ pub struct HierStats {
     /// the plan was made with HierOpts::sub_cut_dots: its washes are dot
     /// items (the density raster draws them as dots, not as marker rects)
     pub sub_cut_dots: bool,
+    /// HierOpts::stop tripped: the pass ended early, the plan is incomplete
+    pub cancelled: bool,
     /// node boxes whose scan ran out of sub_cut_box_reads (layers beyond the
     /// ones found are unknown), and the level the boxes were planned at
     pub sub_cut_box_unsure: u64,
@@ -1541,6 +1571,8 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
             None => req.cut_dbu.max(0) as u64,
         },
         dots: dots.is_some(),
+        ticks: 0,
+        cancelled: false,
         lv: HashMap::new(),
         heap: BinaryHeap::new(),
         out: BTreeMap::new(),
@@ -1680,6 +1712,11 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         }
     }
     while let Some(Reverse((_, ci, r))) = h.heap.pop() {
+        // a newer request: this plan is for nothing (HierOpts::stop)
+        if h.cancelled || h.stop_tripped() {
+            h.cancelled = true;
+            break;
+        }
         h.expand(ci, r);
         if h.fit_limit > 0 && h.st.fit_bytes > h.fit_limit {
             // over the generation budget: this pass is abandoned and
@@ -1693,6 +1730,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
     // the raster's record cut is the pages' (HierOpts::sub_cut_dots lowers it)
     st.shape_cut = if h.shape_cut || h.shape_cut_max { h.page_cut } else { 0 };
     st.sub_cut_dots = h.dots;
+    st.cancelled = h.cancelled;
     st.shape_cut_max = h.shape_cut_max;
     st.wc_cells = h.out.len() as u64;
     st.wc_variants =
@@ -1908,6 +1946,10 @@ struct Hier<'a> {
     page_cut: u64,
     /// HierOpts::sub_cut_dots in force (cut on, a screen scale)
     dots: bool,
+    /// node visits since HierOpts::stop was last looked at, and whether it
+    /// tripped (the walk unwinds)
+    ticks: u32,
+    cancelled: bool,
     lv: HashMap<WsKey, KBox>,
     /// (rank, ci, r) min-heap: every parent has a strictly smaller
     /// rank, so a key's localview is FINAL when it pops - one
@@ -2036,6 +2078,28 @@ impl<'a> Hier<'a> {
                 key.1,
             )));
         }
+    }
+
+    /// HierOpts::stop tripped (a newer request).
+    fn stop_tripped(&self) -> bool {
+        self.opts.stop.as_ref().is_some_and(PlanStop::tripped)
+    }
+
+    /// One node visit: every STOP_EVERY of them looks at HierOpts::stop;
+    /// true once it tripped (the caller unwinds its loop).
+    fn tick(&mut self) -> bool {
+        if self.cancelled {
+            return true;
+        }
+        self.ticks += 1;
+        if self.ticks >= STOP_EVERY {
+            self.ticks = 0;
+            if self.stop_tripped() {
+                self.cancelled = true;
+                return true;
+            }
+        }
+        false
     }
 
     fn expand(&mut self, ci: u32, r: u32) {
@@ -2307,10 +2371,16 @@ impl<'a> Hier<'a> {
             let mut edges: BTreeSet<u64> = BTreeSet::new();
             let mut framed: HashSet<u64> = HashSet::new();
             for b in &boxes {
+                if self.cancelled {
+                    break;
+                }
                 let mut stack = vec![cell.bvh_start];
                 while let Some(ni) = stack.pop() {
                     let node = self.v.bvh(ni);
                     self.st.visited_bvh += 1;
+                    if self.tick() {
+                        break;
+                    }
                     // v8 layer masks: no cell placed below holds a visible
                     // layer - what the per-placement cull_layer test would
                     // find out one placement at a time. Hierarchy frames
@@ -3690,6 +3760,9 @@ impl<'a> Hier<'a> {
         while let Some(ni) = stack.pop() {
             let n = self.v.pbvh(ni);
             self.st.visited_page_bvh += 1;
+            if self.tick() {
+                break;
+            }
             // shape cut: every page below has max_min <= min(max_w, max_h)
             if (n.max_w < self.page_cut && n.max_h < self.page_cut) || (self.shape_cut && n.max_w.min(n.max_h) < self.page_cut) {
                 self.st.culled_page_bvh_cut += 1;
@@ -4419,7 +4492,7 @@ impl crate::Vfs {
     /// hairline policy is the request's (ViewReq::page_hairline);
     /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
-        self.plan_hier_in(req, &[], None, None, 0)
+        self.plan_hier_in(req, &[], None, None, 0, None)
     }
 
     /// `plan_hier` over `regions` of the view instead of the whole view
@@ -4427,12 +4500,14 @@ impl crate::Vfs {
     /// and under a budget fit decided before (HierOpts::fixed_fit); with the
     /// density stack's sub-cut dots (HierOpts::sub_cut_dots, the pages' share
     /// of the cut) or without (None); as a probe of whether it fits
-    /// (HierOpts::probe_limit, 0 = a plan).
-    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>, sub_cut_dots: Option<f64>, probe_limit: u64) -> HierPlan {
+    /// (HierOpts::probe_limit, 0 = a plan); under a cancellation
+    /// (HierOpts::stop: a tripped one ends the plan with stats.cancelled).
+    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>, sub_cut_dots: Option<f64>, probe_limit: u64, stop: Option<PlanStop>) -> HierPlan {
         let mut opts = HierOpts::default();
         opts.fixed_fit = fixed_fit;
         opts.sub_cut_dots = sub_cut_dots;
         opts.probe_limit = probe_limit;
+        opts.stop = stop;
         if !regions.is_empty() {
             opts.regions = regions.to_vec();
             opts.k_boxes = opts.k_boxes.max(regions.len());
@@ -5608,6 +5683,42 @@ mod tests {
             assert_eq!(layers(0b11), vec![1], "masks {masks}");
             assert_eq!(layers(0b01), vec![0], "masks {masks}");
         }
+    }
+
+    #[test]
+    fn a_tripped_stop_ends_the_plan_at_once() {
+        // HierOpts::stop (field 2026-09-30: a zoom during the density stack's
+        // pass 2 waited for its plan): a stop tripped before the walk plans
+        // nothing and says so; one that trips during the walk ends it there;
+        // one never tripped changes nothing.
+        let leaf = FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] };
+        let top = FCell {
+            name: "TOP",
+            pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)],
+            places: vec![(0, 12_000, 0, 0, false, Rep::Grid { na: 30, nb: 30, va: (150, 0), vb: (0, 150) })],
+        };
+        let chip = fixture(&[leaf, top], 1);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        let stop = |before: u64, generation: u64| Some(PlanStop { before: Arc::new(AtomicU64::new(before)), generation });
+        let plain = plan_hier(&chip, &req, &HierOpts::default());
+        let same = plan_hier(&chip, &req, &HierOpts { stop: stop(3, 3), ..HierOpts::default() });
+        assert!(!same.stats.cancelled && same.wcells == plain.wcells && same.pages == plain.pages);
+        let tripped = plan_hier(&chip, &req, &HierOpts { stop: stop(4, 3), ..HierOpts::default() });
+        assert!(tripped.stats.cancelled && tripped.wcells.is_empty() && tripped.pages.is_empty(), "{:?}", tripped.stats);
+        // tripped while walking: the frontier moves once the top's walk began
+        // (the dots' member walk looks every STOP_EVERY visits; the expansion
+        // loop looks per cell) - here after the first cell, so the plan holds
+        // the top and stops before anything else
+        let before = Arc::new(AtomicU64::new(3));
+        let opts = HierOpts { stop: Some(PlanStop { before: Arc::clone(&before), generation: 3 }), ..HierOpts::default() };
+        let mut req2 = req.clone();
+        req2.cut_dbu = 1; // walk into the LEAFs: more than one cell to expand
+        let full = plan_hier(&chip, &req2, &opts);
+        assert!(full.wcells.len() >= 2 && !full.stats.cancelled);
+        before.store(4, Ordering::Release);
+        let late = plan_hier(&chip, &req2, &opts);
+        assert!(late.stats.cancelled && late.wcells.len() < full.wcells.len(), "{} of {}", late.wcells.len(), full.wcells.len());
     }
 
     #[test]
