@@ -59,8 +59,6 @@
                 if (e.key === 'ArrowRight' && !cell.leaf && !cell.open) { e.preventDefault(); expand(cell); }
                 else if (e.key === 'ArrowLeft' && cell.open) { e.preventDefault(); cell.open = false; paint(); }
                 else if (e.key === 'Enter') { e.preventDefault(); chooseAndZoom(cell, gesture()); }
-                // The root chords work where a click leaves the focus, too.
-                else if ((e.key === 't' || e.key === 'T') && e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat) { if (key(e.key, e)) { e.preventDefault(); } }
                 // Only cell rows are stops: '…' and '… N more' are skipped.
                 else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const next = shown[shown.indexOf(cell) + (e.key === 'ArrowDown' ? 1 : -1)]; if (next) { next.node.focus(); } }
             };
@@ -257,7 +255,7 @@
             if (focus) { port.focus(); }
         }
         function setRoot() {
-            // Button, menu and Ctrl+T alike: only with this frame's extent.
+            // Button and menu alike: only with this frame's extent.
             if (!rootable() || selected.ci === null || selected.ci === undefined) { return; }
             const cell = selected;
             port.edit({root: {src: cell.src, cell: cell.ci}}, function (error) { if (error) { note(String(error)); } else { rootName = cell.name; update(); } });
@@ -333,8 +331,6 @@
         function key(k, e) {
             if (!available()) { return false; }
             if (k === 't' && !e.ctrlKey && !e.metaKey) { port.raise(); search.focus(); search.select(); return true; }
-            if ((k === 't' || k === 'T') && e.ctrlKey && !e.shiftKey) { setRoot(); return true; }
-            if ((k === 'T' || k === 't') && e.ctrlKey && e.shiftKey) { clearRoot(); return true; }
             if (k === 'Escape' && highlight) { unselect(); return true; }
             return false;
         }

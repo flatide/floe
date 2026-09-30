@@ -189,11 +189,11 @@
             catch(_){status('Display cleared; server logout unconfirmed. This session will expire automatically. No retry was sent.');}finally{auth=null;controls();}};
         const viewControls=V.bindControls({el:el,document:doc,protocol:P,edit:edit,notice:status,now:now,gesture:function(){return gesture;},
             context:function(){return {id:id,state:state,ready:ready()};}}),nav=viewControls.navigate;
-        // The cell tree's keys (t, Ctrl+T, Ctrl+Shift+T, Escape) come first,
-        // except while a gesture owns Escape.
+        // The cell tree's keys (t, Escape) come first, except while a
+        // gesture owns Escape.
         port.addEventListener('keydown',function(e){
             if(cells&&!e.isComposing&&e.keyCode!==229&&!e.metaKey&&!e.altKey&&!(gesture&&gesture.active())){const k=V.keyName(e);
-                if((k==='t'||k==='T')&&e.ctrlKey&&!e.repeat||k==='t'&&!e.ctrlKey||k==='Escape'&&!e.ctrlKey){if(cells.key(k,e)){e.preventDefault();return;}}}
+                if((k==='t'||k==='Escape')&&!e.ctrlKey){if(cells.key(k,e)){e.preventDefault();return;}}}
             viewControls.key(e);});
         function editable(){return ready()&&!flight&&!accepted&&!queue.length;}
         function paletteContext(){return ready()?{id:id,key:state.render_key,epoch:hello.connection_epoch,rev:state.state_rev,slotKey:state.fill_slots_key,fillEdit:false,connected:true,editable:editable()}:null;}
@@ -269,7 +269,7 @@
                     {label:'Highlight instances',toggle:'cells-highlight'},
                     {label:'Clear highlight',key:'Esc',enabled:function(){return !!cells&&cells.hasSelection();},action:function(){cells.clearHighlight();}},
                     {sep:true},
-                    proxy('Selected cell as view root','cells-root','Ctrl+T'),proxy('View root: back to the top cell','cells-top','Ctrl+Shift+T')]}
+                    proxy('Selected cell as view root','cells-root'),proxy('View root: back to the top cell','cells-top')]}
             ]});
         }
         function screen(){const r=port.getBoundingClientRect();return V.screen(r,state.pixels,V.dimensions(P,r,win.devicePixelRatio||1));}

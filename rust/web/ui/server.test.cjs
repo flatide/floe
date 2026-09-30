@@ -298,8 +298,10 @@ if(require.main===module)(async()=>{
     assert.equal(cellsShell.el('cells-build').hidden,true,'the demo offers no index build');
     const sentBefore=cellsShell.sockets[0].sent.length;
     cellsShell.el('viewport').listeners.keydown({key:'t',code:'KeyT',ctrlKey:true,shiftKey:false,metaKey:false,altKey:false,repeat:false,isComposing:false,keyCode:84,preventDefault(){}});
+    assert.equal(cellsShell.sockets[0].sent.slice(sentBefore).filter(m=>m.type==='view.set').length,0,'Ctrl+T is no shortcut');
+    cellsShell.el('cells-root').onclick();
     const rootEdit=cellsShell.sockets[0].sent.slice(sentBefore).find(m=>m.type==='view.set');
-    assert.deepEqual(rootEdit.body,{root:{src:0,cell:2}},'Ctrl+T roots the selected cell over view.set');
+    assert.deepEqual(rootEdit.body,{root:{src:0,cell:2}},'the root button roots the selected cell over view.set');
     assert(cellsShell.requests.every(r=>r.path.startsWith(base)&&!r.path.includes('/api/v1/views/')),'owner routes are never addressed');
     cellsShell.c.stop();
     const fs=require('node:fs'),path=require('node:path');

@@ -1572,8 +1572,8 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         }
     }
     assert.equal(second.sent.length,depthCount,'IME shortcut sent a view edit');
-    // The view-root chords reach the cell tree ahead of the viewer's ctrl
-    // keys: Ctrl+T roots the selected cell, Ctrl+Shift+T returns to the top.
+    // The view root comes from the cell tree's buttons; Ctrl+T and
+    // Ctrl+Shift+T are no shortcuts (browsers reserve them for tabs).
     cellReplies={sources:{sources:[{src:0}]},bbox:{insts:1,approx:false,bbox:[10,10,30,20]},
         children:{cell:7,name:'TOP',insts:1,height:2,unit:1,bbox:[0,0,80,80],n:2,total:2,children:[{ci:1,name:'BLK',members:4,leaf:false},{ci:2,name:'VIA',members:1,leaf:true}]}};
     // cells.js retries a failed tree load after 2 s of its port clock (real time here).
@@ -1583,12 +1583,13 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     const chord=(k,extra={})=>{let used=false;node('viewport').keydown({key:k,code:'KeyT',ctrlKey:true,target:node('viewport'),preventDefault(){used=true;},...extra});return used;};
     const roots=()=>second.sent.filter(m=>m.type==='view.set'&&'root' in m.body).map(m=>m.body.root);
     drcOptions.history.push('manual',{endpoints_dbu:[['0','0'],['30','0']],delta_um:['30','0'],distance_um:'30'});
-    assert(chord('t'),'Ctrl+T did not reach the cell tree');assert.deepEqual(roots(),[{src:0,cell:2}]);
-    for(const extra of [{repeat:true},{altKey:true},{metaKey:true}])assert(!chord('t',extra));
-    assert.equal(roots().length,1,'a repeated or modified Ctrl+T sent a root edit');
+    for(const extra of [{},{shiftKey:true},{repeat:true}])assert(!chord('t',extra));
+    assert.equal(roots().length,0,'Ctrl+T sent a root edit');
+    node('cells-root').onclick();assert.deepEqual(roots(),[{src:0,cell:2}]);
     snapshot.root={cell:2,name:'VIA'};snapshot.root_name='VIA';await applied();await wait(()=>!node('cells-top').disabled);
     assert.equal(drcOptions.history.entries().length,0,'a top-frame ruler survived the view root');
-    assert(chord('T',{shiftKey:true}),'Ctrl+Shift+T did not reach the cell tree');assert.deepEqual(roots(),[{src:0,cell:2},null]);
+    assert(!chord('T',{shiftKey:true}));assert.equal(roots().length,1,'Ctrl+Shift+T sent a root edit');
+    node('cells-top').onclick();assert.deepEqual(roots(),[{src:0,cell:2},null]);
     delete snapshot.capabilities.cell_root;snapshot.root=null;snapshot.root_name='';await applied();
     // Free mouse pan has no network traffic while moving and preserves the
     // translated foreground until its new (non-16px) native phase arrives.

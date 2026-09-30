@@ -244,20 +244,20 @@ const scenarios = [
         // Once its results are in, Enter frames the selection as before.
         form.onsubmit(key('Enter')); assert.equal(h.edits.at(-1).navigation.kind, 'goto');
     }],
-    ['R14 Ctrl+T and the menu take the root button guard', async () => {
-        const h = harness(); await h.load(); const ctrlT = () => h.c.key('t', {ctrlKey: true, shiftKey: false});
+    ['R14 the root takes the root button guard; no Ctrl+T', async () => {
+        const h = harness(); await h.load();
         const via = h.row('VIA'); via.onclick({target: via.children[1]});
-        assert.equal(ctrlT(), true); h.c.setRoot(); assert.deepEqual(h.edits, [], 'not while the extent is asked');
+        h.c.setRoot(); assert.deepEqual(h.edits, [], 'not while the extent is asked');
         await h.reply(h.last('bbox'), {insts: 0, approx: false, bbox: null});
-        assert.equal(h.el('cells-root').disabled, true); ctrlT(); h.c.setRoot(); assert.deepEqual(h.edits, [], 'not for a cell not placed in this frame');
+        assert.equal(h.el('cells-root').disabled, true); h.c.setRoot(); assert.deepEqual(h.edits, [], 'not for a cell not placed in this frame');
         await h.select('BLK', [0, 0, 100, 50]);
-        assert.equal(h.el('cells-root').disabled, false); ctrlT();
+        // Ctrl+T / Ctrl+Shift+T are not shortcuts (browsers reserve them).
+        assert.equal(h.c.key('t', {ctrlKey: true, shiftKey: false}), false); assert.equal(h.c.key('T', {ctrlKey: true, shiftKey: true}), false);
+        let prevented = 0; h.row('BLK').onkeydown({key: 't', ctrlKey: true, preventDefault() { prevented++; }});
+        assert.deepEqual(h.edits, []); assert.equal(prevented, 0);
+        assert.equal(h.el('cells-root').disabled, false); h.click('cells-root');
         assert.deepEqual(h.edits, [{root: {src: 0, cell: 1}}]); assert.equal(h.c.rootName(), 'BLK');
-        // The chords also work on the focused row a click leaves behind.
-        let prevented = 0; const chord = (k, shift, repeat) => h.row('BLK').onkeydown({key: k, ctrlKey: true, shiftKey: shift, repeat: !!repeat, preventDefault() { prevented++; }});
-        chord('T', true); assert.deepEqual(h.edits.at(-1), {root: null}); assert.equal(prevented, 1);
-        chord('t', false, true); assert.equal(h.edits.length, 2, 'auto-repeat sends nothing');
-        chord('t', false); assert.deepEqual(h.edits.at(-1), {root: {src: 0, cell: 1}}); assert.equal(prevented, 2);
+        h.click('cells-top'); assert.deepEqual(h.edits.at(-1), {root: null});
     }],
     ['R5 one highlight walk per view and selection', async () => {
         const h = harness(); await h.load(); await h.expand('BLK', BLK);

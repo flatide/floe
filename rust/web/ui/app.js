@@ -948,10 +948,6 @@
         if (event.ctrlKey) {
             if (key === ',' && !event.shiftKey && !event.repeat && event.target === viewport && modeSupported && state.capabilities.mode) {
                 event.preventDefault(); changeDeckMode(currentMode === 'level' ? 'chip' : 'level').catch(report);
-            } else if ((key === 't' || key === 'T') && !event.repeat && cells && cells.key(key, event)) {
-                // Ctrl+T / Ctrl+Shift+T: view root / top, once per press - a held
-                // chord would queue a root edit per repeat (a set is a daemon lookup).
-                event.preventDefault();
             } else { viewControls.key(event); }
             return;
         }
@@ -1311,7 +1307,7 @@
                 {label: 'Highlight instances', toggle: 'cells-highlight'},
                 {label: 'Clear highlight', key: 'Esc', enabled: function () { return cells && cells.hasSelection(); }, action: function () { cells.clearHighlight(); }},
                 {sep: true},
-                proxy('Selected cell as view root', 'cells-root', 'Ctrl+T'), proxy('View root: back to the top cell', 'cells-top', 'Ctrl+Shift+T'),
+                proxy('Selected cell as view root', 'cells-root'), proxy('View root: back to the top cell', 'cells-top'),
                 {sep: true},
                 proxy('Build cell index (design.ovh)…', 'cells-build')
             ]},

@@ -135,8 +135,8 @@ status  frame status | view 크기 · depth/detail 행 · 아래 세션 주체 �
 | `GET /api/v1/palette/presets` | `GET …/presets` | 번들 49색/20채움 |
 | `POST /api/v1/views/{id}/cells` | `POST …/cells` | 같은 셀 트리 DTO(소유자와 공통 `cells.rs`), 소스 이름은 `source N` |
 
-셀 트리(2026-09-30 추가)는 소유자와 같은 기능이다: 검색·펼침·선택 강조·zoom·view root(Ctrl+T/
-Ctrl+Shift+T, Cell 메뉴). 질의는 세션 자신의 뷰 worker에만 가며 `ViewController::cell_ticket`으로
+셀 트리(2026-09-30 추가)는 소유자와 같은 기능이다: 검색·펼침·선택 강조·zoom·view root(root/top
+버튼, Cell 메뉴). 질의는 세션 자신의 뷰 worker에만 가며 `ViewController::cell_ticket`으로
 세션 레지스트리 lock 안에서는 ticket만 받고, 응답 대기는 lock 밖(`spawn_blocking`, 15초)에서 한다.
 view root도 WS `view.set`의 `root`로 가며 해결(`root_ticket`)은 같은 방식, 확정은 일반 편집 CAS다.
 셀 이름은 공개 승인된 샘플의 일부로 노출된다(파일·캐시 경로는 노출하지 않음). 색인 요약 빌드
@@ -208,9 +208,9 @@ view root도 WS `view.set`의 `root`로 가며 해결(`root_ticket`)은 같은 �
   뷰를 열 때의 root는 변경으로 치지 않는다. 트리 로드·펼침·검색은 별도 flight라 검색이 로드를 막지 않는다.
   같은 뷰·선택의 insts는 한 번만 묻고, 새 선택은 이전 상자를 즉시 지운다. 키보드: 재그리기 뒤 같은 셀 행에
   포커스 유지, ↑↓는 실제 셀 행만, roving tabindex. 검색창 Enter는 대기 중 검색을 먼저 실행한다.
-  root 설정(버튼·메뉴·Ctrl+T)은 현재 프레임 extent가 있어야 하며, 트리 행에서도 Ctrl+T/Ctrl+Shift+T가 동작한다.
-- **단축키**: 캔버스의 Ctrl+T/Ctrl+Shift+T가 셀 트리로 전달된다. Chrome/Firefox(Windows/Linux)는 이 조합을
-  탭용으로 예약해 페이지가 받지 못하므로 메뉴·버튼을 쓴다. Electron과 macOS 브라우저는 전달된다.
+  root 설정(버튼·메뉴)은 현재 프레임 extent가 있어야 한다.
+- **단축키**: view root의 Ctrl+T/Ctrl+Shift+T는 사용자 결정(2026-09-30)으로 웹에서 삭제했다. 브라우저가
+  탭용으로 예약한 조합이라 환경마다 동작이 달랐다. root/top 버튼과 Cell 메뉴를 쓴다(GTK 앱은 그대로).
 - **DRC**: root 상태에서 `e`(box 선택) 거부, 진행 중 box 선택과 CD ruler는 root 진입 시 해제한다. root 해제 뒤
   top 프레임이 도착할 때까지 root 프레임의 projection(render_key로 식별)으로는 마커·CD ruler를 그리지 않는다.
   root 안내는 진입 시 한 번만 표시해 읽기 실패 메시지를 덮지 않는다.
