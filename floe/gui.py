@@ -3522,6 +3522,8 @@ class Viewer:
                 if res.get("refining"):
                     self._refining = True
                     self.rstatus.set_text(
+                        "drawing the density under the cut..."
+                        if res.get("density_round") else
                         "refining %d pages..." % res["refining"])
                 elif getattr(self, "_refining", False):
                     self._refining = False

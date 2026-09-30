@@ -65,7 +65,12 @@ cell under it as dots in 4 x 4 px blocks, never walking into it:
   * step 2 (a floor by the work): TOP's own 0.05 um (0.5 px) squares at a
     3 px pitch are decoded under the dots (their pages fit the reserve at a
     zero floor) and draw as a cut-free frame draws them there; the stack's
-    1 px floor alone leaves them out.
+    1 px floor alone leaves them out;
+  * step 3 (progressive): the dots' frame arrives twice - first a refining
+    round (final=0) holding pass 1 alone, byte for byte the frame without the
+    stack, then the final frame, byte for byte what the dots draw in one
+    round (FLOE_RUST_DENSITY_PROGRESSIVE=off); a margin frame has no first
+    round.
 
     .venv/bin/python tools/validate_density_stack.py
 """
@@ -135,6 +140,8 @@ def dots_layout(path):
         for i in range(TINY[2]):
             x, y = TINY[0] + i * 0.3, TINY[1] + j * 0.3
             top.shapes(low).insert(kdb.DBox(x, y, x + 0.05, y + 0.05))
+    # an original for pass 1 to draw (2/0, away from the rest)
+    top.shapes(ly.layer(*MID)).insert(kdb.DBox(36.0, 1.0, 39.0, 5.0))
     ly.write(str(path))
 
 
@@ -145,8 +152,10 @@ def dots_checks(temp):
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     workers = {
+        'off': worker(src, {}),
         'stack': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top'}),
         'dots': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}),
+        'one_round': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PROGRESSIVE': 'off'}),
     }
     try:
         on, res = frame(workers['dots'], 1, (LOW,))
@@ -191,9 +200,49 @@ def dots_checks(temp):
         assert centre == on, 'the dots margin draws the view otherwise in %d px' % sum(
             1 for i in range(0, len(on), 4) if centre[i:i + 4] != on[i:i + 4])
         print('density stack dots: the margin frame draws the view as the viewport frame did')
+        # step 3: pass 1 first, then the frame with the dots
+        both = (LOW, MID)
+        rounds = frames_of(workers['dots'], 10, both)
+        single = frames_of(workers['one_round'], 10, both)
+        plain, _ = frame(workers['off'], 10, both)
+        assert len(single) == 1 and len(rounds) == 2 and rounds[0][1].get('refining'), [r.get('refining') for _, r in rounds]
+        assert lit(plain, range(W), range(H)), 'pass 1 draws the 2/0 original'
+        assert rounds[0][0] == plain, 'the first round is not pass 1 alone (%d px differ)' % sum(
+            1 for i in range(0, len(plain), 4) if rounds[0][0][i:i + 4] != plain[i:i + 4])
+        assert rounds[1][0] == single[0][0] and rounds[1][0] != plain, 'the final round differs from one round'
+        assert len(frames_of(workers['dots'], 11, both, bg=True)) == 1, 'a margin has no first round'
+        print('density stack dots: progressive - a refining round of pass 1 (= the frame without the stack), then the one-round frame; '
+              'none for a margin')
     finally:
         for w in workers.values():
             w.stop()
+
+
+def frames_of(w, gen, visible, bg=False):
+    """Every frame answer of one render, the refining rounds first: [(pixels,
+    result)], the last one final."""
+    dbu = float(w.cache.meta['dbu'])
+    if bg:
+        vw, vh = VIEW[2] - VIEW[0], VIEW[3] - VIEW[1]
+        box, size = (VIEW[0] - vw / 2, VIEW[1] - vh / 2, VIEW[2] + vw / 2, VIEW[3] + vh / 2), (2 * W, 2 * H)
+    else:
+        box, size = VIEW, (W, H)
+    job = {'kind': 'render', 'gen': gen, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': tuple(v / dbu for v in VIEW),
+           'w': size[0], 'h': size[1], 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+           'abstract': False, 'visible': list(visible), 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False}
+    if bg:
+        job['bg'] = True
+    w.submit(job)
+    out = []
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+        assert res.get('kind') not in ('error', 'dropped'), res
+        if res.get('kind') == 'frame' and res.get('gen') == gen:
+            out.append((bytes(res.pop('rgba')), res))
+            if not res.get('refining'):
+                return out
+    raise AssertionError('progressive frames timeout')
 
 
 def worker(src, env):

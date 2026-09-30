@@ -237,6 +237,15 @@ coalesced into its predecessor. The default is 128 and `decode_pages=N` remains
 the total page cap. Every successful response for the same generation includes
 `round=N final=0|1 partial=0|1`; the output path is atomically replaced after
 each round. A newer generation cancels the remaining decode/raster rounds.
+Under the density stack's sub-cut dots (`FLOE_RUST_DENSITY_DOTS=on`,
+CUT_DENSITY_DESIGN §10.12 step 3) a frame first answers
+`frame gen=N round=1 final=0 partial=1 deferred=1 density_round=1` with pass 1
+alone (the originals, before pass 2 plans) at `<out>.gen-N.round-1.partial.<fmt>`,
+then the final frame - byte for byte what one round draws. Never for a margin
+(`bg`); `FLOE_RUST_DENSITY_PROGRESSIVE=off` draws one round. The adapter adds
+`density_round: True` to that refining result and the viewer's status says
+"drawing the density under the cut...". The pass-2 frame line also carries
+`density_dots=items/over`.
 Before this cache-aware policy, a 506-page `sample9` run with `round_pages=64`
 published its first 600x600 partial frame in roughly 10ms over eight rounds;
 the final PNG was byte-identical to single-shot rendering.

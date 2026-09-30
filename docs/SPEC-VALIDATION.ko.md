@@ -109,6 +109,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
   그 밖은 켜지지 않는다; `density_dots` 항목 = 블록 수, 초과 0; 변수 없이 스택만이면 DOT 안으로 걸어 그리고
   `density_dots`가 없다; 여백 프레임의 가운데 = 뷰포트 프레임. 0.12.248(2단계): TOP 자신의 0.05 µm(0.5 px) 사각형
   20×10(3 px 간격)이 점 모드(페이지 하한 0)에서 컷 없는 프레임과 같은 픽셀로 그려지고, 스택만(1 px 하한)은 그리지 않는다.
+  0.12.249(3단계): 점 모드 프레임은 refining 라운드(1패스만, 2/0 원본까지 스택 없는 프레임과 바이트 동일) 뒤에 최종
+  프레임(한 라운드 `FLOE_RUST_DENSITY_PROGRESSIVE=off`와 바이트 동일)이 오고, 여백 프레임은 한 번만 온다.
 - `layer_decode`(tools/validate_layer_decode.py, 약 20초; `render` 별칭에 포함): 레이어 순서 디코드
   검증(docs/LAYER_DECODE_PROBE_PLAN.ko.md 1단계)의 `render_probe`. klayout.db로 만든 5레이어
   레이아웃(불투명 블록, 그 아래 성긴 배열, 가로지르는 헤어라인, 두 번 놓인 셀)에서 `mode=baseline`과

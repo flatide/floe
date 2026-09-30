@@ -2406,6 +2406,14 @@ fn density_stack_enabled() -> bool {
 /// synthetic chip's all-layer fit view), and no view there was between.
 const DOT_PAGE_FLOORS: [f64; 1] = [0.0];
 
+/// The sub-cut dots show pass 1 as a first round (final=0) before pass 2
+/// (CUT_DENSITY_DESIGN §10.12 step 3; the viewer's refining path): on with the
+/// dots, FLOE_RUST_DENSITY_PROGRESSIVE=off the kill switch. The last frame is
+/// the one a single round draws.
+fn density_progressive_enabled() -> bool {
+    std::env::var("FLOE_RUST_DENSITY_PROGRESSIVE").as_deref() != Ok("off")
+}
+
 /// The density stack's sub-cut dots (floe_vfs HierOpts::sub_cut_dots,
 /// CUT_DENSITY_DESIGN §10.12; user 2026-09-30: "a cell of 3 x 3 px or less
 /// is one dot, no descent"): pass 2 plans the cells at pass 1's cut - a cell
@@ -3151,6 +3159,26 @@ fn run_render(
                         },
                         None => styled.clone(),
                     };
+                    // the sub-cut dots show pass 1 first (CUT_DENSITY_DESIGN §10.12
+                    // step 3): a round of its own, final=0, then the frame with the
+                    // density - never for a margin (it is not shown before it lands)
+                    let progressive = density_dots_enabled() && density_progressive_enabled() && command.unique_round_paths && !command.background;
+                    let mut publish_first = |frame: &floe_render_core::RgbaFrame| -> Result<(), String> {
+                        check_generation(cancellation, command.generation)?;
+                        let format = if command.raw_frame { "raw" } else { "png" };
+                        let path = format!("{}.gen-{}.round-1.partial.{}", command.out, command.generation, format);
+                        let (header, png);
+                        let parts: Vec<&[u8]> = if command.raw_frame {
+                            header = raw_frame_header(frame.width(), frame.height());
+                            vec![header.as_slice(), frame.pixels()]
+                        } else {
+                            png = frame.png_bytes()?;
+                            vec![png.as_slice()]
+                        };
+                        publish_frame(&path, command.generation, &parts, cancellation)?;
+                        respond(responses, format!("frame gen={} round=1 final=0 png={} format={} partial=1 deferred=1 density_round=1", command.generation, path, format));
+                        Ok(())
+                    };
                     let (report, counts, times) = match render_density_frame(
                         cache,
                         &mut state.page_cache,
@@ -3167,6 +3195,7 @@ fn run_render(
                         &mut state.density_fit_memory,
                         &mut state.density_floor_memory,
                         command.background,
+                        if progressive { Some(&mut publish_first) } else { None },
                     ) {
                         Ok(rendered) => rendered,
                         Err(error) if error == DROPPED_FIT => {
@@ -3836,6 +3865,7 @@ fn render_density_frame(
     density_memory: &mut BTreeMap<String, floe_render_core::FixedFit>,
     floor_memory: &mut BTreeMap<String, u8>,
     background: bool,
+    mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
 ) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
@@ -3868,6 +3898,11 @@ fn render_density_frame(
                 |_, demand| {
                     if !demand.density_block() {
                         return Ok(None);
+                    }
+                    // pass 1 is painted: shown first, while pass 2 plans, decodes
+                    // and draws (FLOE_RUST_DENSITY_PROGRESSIVE)
+                    if let Some(publish) = first_round.as_mut() {
+                        publish(&demand.snapshot()?)?;
                     }
                     let regions_started = Instant::now();
                     let regions_top = demand.eligible_regions(true);

@@ -1573,8 +1573,22 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIsNone(partial["density_bin"])
             self.assertIsNone(partial["density_dots"])
             self.assertEqual(partial["refining"], 1)
+            self.assertNotIn("density_round", partial)
             self.assertIn(9, worker._jobs)
             self.assertFalse(os.path.exists(partial_path))
+            # the sub-cut dots' first round (pass 1 alone) says so
+            with open(partial_path, "wb") as frame:
+                frame.write(_RAW_SIGNATURE)
+                frame.write((20).to_bytes(4, "little"))
+                frame.write((10).to_bytes(4, "little"))
+                frame.write(raw_pixels)
+            worker._emit_frame({
+                "gen": "9", "png": partial_path, "format": "raw",
+                "partial": "1", "deferred": "1", "final": "0", "density_round": "1",
+            })
+            first_round = worker.res.get_nowait()
+            self.assertEqual((first_round["refining"], first_round["density_round"]), (1, True))
+            self.assertIn(9, worker._jobs)
 
     def test_raw_frame_kill_switch_restores_png_frames(self):
         with tempfile.TemporaryDirectory() as directory:

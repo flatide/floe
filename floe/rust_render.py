@@ -1545,6 +1545,10 @@ class RustRenderWorker:
             output["png"] = payload
         if refining:
             output["refining"] = refining
+            # the sub-cut dots' first round: pass 1 alone, the density under
+            # the cut is being drawn (CUT_DENSITY_DESIGN §10.12 step 3)
+            if _wire_int(fields, "density_round"):
+                output["density_round"] = True
         elif deferred:
             # a settled frame that could not decode everything: the
             # jobdeck composite stops a pass at the page budget and

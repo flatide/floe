@@ -3823,6 +3823,33 @@ impl BlockDemand<'_> {
         self.density_block
     }
 
+    /// The frame as the passes so far painted it - at the density stack's
+    /// boundary, pass 1: the originals, before pass 2 plans (a progressive
+    /// viewer shows it first; CUT_DENSITY_DESIGN §10.12 step 3). The frame
+    /// bands under the planes and the labels come later.
+    pub fn snapshot(&self) -> Result<RgbaFrame, String> {
+        let (width, height) = (self.request.width, self.request.height);
+        let byte_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| "image byte length overflow".to_string())?;
+        let mut pixels = vec![0u8; byte_len];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&self.request.background);
+        }
+        let stride = width as usize * 4;
+        for tile in self.tiles {
+            let band = &tile.band;
+            let tile_stride = (band.col1 - band.col0) as usize * 4;
+            for row in band.row0..band.row1 {
+                let src = (row - band.row0) as usize * tile_stride;
+                let dst = row as usize * stride + band.col0 as usize * 4;
+                pixels[dst..dst + tile_stride].copy_from_slice(&band.pixels[src..src + tile_stride]);
+            }
+        }
+        RgbaFrame::from_pixels(width, height, pixels)
+    }
+
     /// The world regions where the density of the top plane (`top`) or of
     /// any other plane may still take a pixel (DensityStack: outside what the
     /// top plane's originals wrote or cover; outside what any original wrote
