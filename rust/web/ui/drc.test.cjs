@@ -127,7 +127,23 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     el('drc-error-next').onclick();assert.equal(pending('errors').body.body.start,'100');
     reply('errors',{rows:[{...b,bbox_um:['1','1','2','2']}],next:null});await tick();
     el('drc-error-prev').onclick();reply('errors',{rows:[],next:'100'});await tick();
-    state={...state,state_rev:'4'};view={...view,state};panel.contextChanged();assert(el('drc-result-info').textContent.includes('waiting'));
+    // A view root is another frame: the in-view filter pauses (the list is
+    // re-read without it, the checkbox keeps its value but is disabled),
+    // markers and box selection pause, and everything resumes at the top.
+    state={...state,state_rev:'4',root:{cell:3,name:'BLK'},root_name:'BLK'};view={...view,state};panel.contextChanged();
+    await new Promise(resolve=>setTimeout(resolve,120));
+    const rooted=pending('errors');assert.equal(rooted.body.body.in_view,false,'in-view pauses under a root');
+    assert.equal(el('drc-in-view').checked,true);assert.equal(el('drc-in-view').disabled,true);assert.equal(el('drc-markers').disabled,true);
+    assert(el('drc-message').textContent.includes('View root active'));
+    reply('errors',{rows:[b],next:null});await tick();assert.equal(el('drc-box').disabled,true);
+    panel.paint(base,{pixels:[100,80],dpr:2,left:.5,top:0});assert.equal(el('drc-canvas').hidden,true,'markers pause under a root');
+    assert.equal(savedChanges.at(-1).in_view,true,'the saved panel keeps the checkbox');
+    state={...state,state_rev:'5',root:null,root_name:''};view={...view,state};panel.contextChanged();
+    await new Promise(resolve=>setTimeout(resolve,120));
+    const resumed=pending('errors');assert.equal(resumed.body.body.in_view,true,'in-view resumes at the top');
+    reply('errors',{rows:[{...b,bbox_um:['1','1','2','2']}],next:null});await tick();assert.equal(el('drc-in-view').disabled,false);assert.equal(el('drc-markers').disabled,false);
+    panel.paint(base,{pixels:[100,80],dpr:2,left:.5,top:0});assert.equal(el('drc-canvas').hidden,false);
+    state={...state,state_rev:'6'};view={...view,state};panel.contextChanged();assert(el('drc-result-info').textContent.includes('waiting'));
     el('drc-toggle').onclick();assert.equal(resize,1);assert.equal(el('drc-panel').hidden,true);
     // A different source drops rows and all pending requests immediately.
     await new Promise(resolve=>setTimeout(resolve,120));const stale=pending('errors');view={...view,source:'other',id:'view-b'};panel.contextChanged();

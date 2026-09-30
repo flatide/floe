@@ -32,8 +32,8 @@ function harness() {
     const h = {c, el, requests, edits, timers, state, unit: 0.001,
         connect() { context = {id: 'v1', state, connected: true}; c.changed(); },
         disconnect() { context = null; c.changed(); },
-        reply(i, value) { const r = requests[i]; r.resolve(value); return tick(); },
-        fail(i, error) { const r = requests[i]; r.reject(error); return tick(); },
+        reply(i, value) { const r = requests[i]; r.done = true; r.resolve(value); return tick(); },
+        fail(i, error) { const r = requests[i]; r.done = true; r.reject(error); return tick(); },
         rows() { return el('cells-tree').children.map(n => n.children.length ? n.children.map(x => x.textContent).join('|') : n.textContent); },
         raised: () => raised, focusedCanvas: () => focusedCanvas};
     return h;
@@ -92,8 +92,21 @@ function harness() {
     assert.equal(h.el('cells-canvas').hidden, false);
     h.el('cells-zoom').onclick();
     assert.deepEqual(h.edits.at(-1).navigation.center_um, ['0.01', '0.005'], 'zoom uses the extent of the new frame');
+    // Every cached extent belongs to the old frame: reselecting another cell
+    // asks again, and zoom stays off until that answer lands.
+    const via = h.el('cells-tree').children.find(n => n.children[1] && n.children[1].textContent === 'VIA');
+    via.onclick({target: via.children[1]});
+    assert.equal(h.el('cells-zoom').disabled, true, 'no zoom before the extent of this frame');
+    const editsBefore = h.edits.length; h.el('cells-zoom').onclick(); assert.equal(h.edits.length, editsBefore, 'zoom is a no-op without an extent');
+    assert.equal(h.requests.at(-1).body.kind, 'bbox'); assert.equal(h.requests.at(-1).body.cell, 2);
+    await h.reply(h.requests.length - 1, {insts: 1, approx: false, bbox: [100, 100, 130, 130]});
+    assert.equal(h.el('cells-zoom').disabled, false); h.el('cells-zoom').onclick();
+    assert.deepEqual(h.edits.at(-1).navigation.center_um, ['0.115', '0.115'], 'zoom uses the freshly asked extent');
+    await h.reply(h.requests.length - 1, {n: 1, more: false, visited: 1, boxes: [[100, 100, 130, 130]]});
+    m1.onclick({target: m1.children[1]}); await h.reply(h.requests.length - 1, {insts: 2, approx: false, bbox: [0, 0, 20, 10]});
+    await h.reply(h.requests.length - 1, {n: 1, more: false, visited: 1, boxes: [[0, 0, 20, 10]]});
     h.state.root = null; h.state.root_name = ''; h.c.changed();
-    const back = h.requests.findIndex((r, i) => i >= asked + 2 && r.body.kind === 'bbox');
+    const back = h.requests.findIndex((r, i) => i >= asked + 2 && r.body.kind === 'bbox' && r.body.cell === 3 && !r.done);
     assert(back > 0); await h.reply(back, {insts: 1, approx: false, bbox: [10, 10, 30, 20]});
     await h.reply(h.requests.length - 1, {n: 1, more: false, visited: 1, boxes: [[10, 10, 30, 20]]});
     // Placed extents are in the view's unit (a deck's DBU), never the source's.

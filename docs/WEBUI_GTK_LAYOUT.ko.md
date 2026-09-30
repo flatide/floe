@@ -173,6 +173,19 @@ status  frame status | view 크기 · depth/detail 행 · 아래 세션 주체 �
 - **서브메뉴 키보드(P2)**: 서브메뉴를 부모·소유 항목 참조를 가진 독립 메뉴로 다뤄
   →/Enter 진입, ←/Escape 복귀, ↑↓/Home/End 탐색을 고쳤다. `menubar.test.cjs`가 고정한다.
 
+2차 검토(3919d85) 후속:
+
+- **DRC 오류 이동이 root 차단에 걸림**: `drc_view_root` 거부는 뷰 영역 기반 읽기
+  (`in_view` 목록/단계, 저장 viewport 질의)로 한정하고, `Focus`(이동)는 허용해 patch의
+  `root: Clear`가 적용되도록 했다(`drc/http.rs`의 `area`/`focused` 분리).
+- **root에서 In-view 체크 유지 시 빈 목록**: 체크값은 보존·비활성화하고 필터만 멈춘다
+  (`inView()`는 root에서 false, `inViewPaused()`로 재조회). 패널 저장은 체크값
+  (`inViewChecked()`)을 쓴다. root 해제 시 필터가 다시 살아나 재조회한다. `drc.test.cjs`
+  회귀 추가.
+- **다른 셀의 옛 bbox 캐시**: root 변경 시 트리·검색 결과의 모든 배치 extent를 버리고,
+  어떤 셀이든 선택하면 다시 묻는다. 응답 전에는 zoom/root 버튼이 비활성이고 zoom은
+  no-op이다. `cells.test.cjs` 회귀 추가.
+
 ## 6. 잔여
 
 - 색인 요약 빌드(`floe-index hier`)를 웹 승인 경로로 제공하지 않았다. `build cell index…`

@@ -193,13 +193,15 @@ async fn read(
     let Some(drc) = gate.drc.as_ref().and_then(|r| r.current(&id)) else {
         return failure("drc_unavailable");
     };
-    let focused = matches!(
+    // Reads filtered by the viewport compare frames; a Focus (jump) only
+    // sizes its navigation from the viewport and returns to the top itself.
+    let area = matches!(
         &body.body,
-        Request::Focus { .. }
-            | Request::InView { .. }
+        Request::InView { .. }
             | Request::List { in_view: true, .. }
             | Request::FilteredStep { in_view: true, .. }
     );
+    let focused = area || matches!(&body.body, Request::Focus { .. });
     let selection_filter = match body.body.selection_filter() {
         Ok(v) => v,
         Err(e) => return failure(e),
@@ -240,7 +242,7 @@ async fn read(
         }
         // The viewport is the root cell's frame while errors are top-cell
         // coordinates; an in-view filter would compare different frames.
-        if s.state.root.is_some() {
+        if area && s.state.root.is_some() {
             return failure("drc_view_root");
         }
         Some(super::dto::FocusContext {

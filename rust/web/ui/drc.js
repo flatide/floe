@@ -544,7 +544,11 @@
             } catch (e) { if (valid('comparison', t, c)) { el('drc-comparison').textContent = 'Comparison unavailable · ' + e.message; } }
         }
         function filter() { return el('drc-waived').value === 'all' ? null : el('drc-waived').value === 'waived'; }
-        function inView() { return !query && el('drc-in-view').checked; }
+        // The checkbox keeps its value under a view root; the filter itself
+        // pauses (the viewport is another frame) until the top returns.
+        function inViewChecked() { return !query && el('drc-in-view').checked; }
+        function inView() { return inViewChecked() && !rooted(); }
+        function inViewPaused() { return inViewChecked() && rooted(); }
         function selectedOnly() { return !query && el('drc-selected-only').checked; }
         function filtersReady(c) {
             return !!c && (!inView() || c.connected && !c.pending) && (!selectedOnly() || groups.ready());
@@ -560,7 +564,7 @@
         }
         function followFilters() {
             const c = current();
-            if (!c || restoring || !rule || query || (!inView() && !selectedOnly())) { return; }
+            if (!c || restoring || !rule || query || (!inView() && !selectedOnly() && !inViewPaused())) { return; }
             if (!filtersReady(c)) {
                 if (filterStamp !== 'waiting') { resetFilterPage(); filterStamp = 'waiting'; info('Waiting for the current view/selection before filtering…'); }
                 return;
@@ -801,7 +805,7 @@
             return {search: el('drc-search').value.trim(), metric: metric, rule_start: ruleStart, check: rule ? rule.check : null,
                 error_start: query ? '0' : errorStart, query: query ? {bbox_um: query.bbox, state_rev: query.rev, cursor: errorStart} : null,
                 waived: filter(), selected: selected ? {check: selected.check, error: selected.local} : null,
-                in_view: inView(), selected_only: selectedOnly(),
+                in_view: inViewChecked(), selected_only: selectedOnly(),
                 markers: el('drc-markers').checked, shown: shown, jump_scale: jumpScale === null ? null : String(jumpScale), zoom_lock: zoomLock,
                 jump_active: jumpActive, focus_visible: focusVisible,
                 note_target: noteTarget || undefined,

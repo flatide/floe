@@ -66,8 +66,10 @@
         }
         function update() {
             const ok = available() && hier;
-            el('cells-zoom').disabled = !ok || !selected;
-            el('cells-root').disabled = !ok || !selected || !port.rootAllowed() || (selected.leaf && !selected.hasShapes);
+            // Zoom and root need the extent of the current frame: a reselected
+            // or re-rooted cell waits for its bbox answer.
+            el('cells-zoom').disabled = !ok || !selected || !selected.bbox;
+            el('cells-root').disabled = !ok || !selected || !selected.bbox || !port.rootAllowed() || !selected.hasShapes;
             el('cells-top').disabled = !available() || !rootName;
             search.disabled = !available();
             el('cells-highlight').disabled = !available();
@@ -121,7 +123,14 @@
                 fill(cell, r); paint();
             } catch (e) { if (token === flight) { cell.loading = false; cell.open = false; note(String(e.message || e)); paint(); } }
         }
+        function forget(cell) {
+            cell.bbox = null; cell.hasShapes = undefined;
+            if (cell.children) { cell.children.forEach(forget); }
+        }
         async function choose(cell) {
+            // Extents are placed in the current frame: never trust a cached
+            // one across selections, ask again and keep zoom/root off meanwhile.
+            cell.bbox = null; cell.hasShapes = undefined;
             selected = cell; paint();
             if (cell.source || cell.ci === null || cell.ci === undefined) { note(cell.name + ': ' + cell.members + ' placements'); return; }
             const token = ++bboxFlight;
@@ -224,7 +233,9 @@
             const key = c && c.state ? (c.state.root ? String(c.state.root.cell) : '') : '';
             if (key !== rootKey) {
                 rootKey = key; ++highlightFlight; ++bboxFlight; highlight = null; highlightKey = '';
-                if (selected) { selected.bbox = null; paintHighlight(); if (available() && settled(c)) { choose(selected); } }
+                roots.forEach(forget); if (results) { results.forEach(forget); }
+                paintHighlight();
+                if (selected && available() && settled(c)) { choose(selected); }
             }
             update();
             if (available()) { refreshHighlight(false); } else { paintHighlight(); }
