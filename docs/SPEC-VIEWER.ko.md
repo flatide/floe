@@ -553,7 +553,17 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 - **남은 것**: 깊은 셀의 줌 범위가 블록 범위인 것은 요약에 레코드별
   변환을 두면 정확해진다. 인스턴스 탐색은 뷰를 요약 엣지 범위로 잘라
   BVH를 걷지만 넓은 뷰에서 큰 블록 안의 드문 셀은 예산에 걸릴 수 있다
-  (`more`, 줌인). 루트 상태의 depth 라벨은 여전히 탑 높이(`*/N`) 기준.
+  (`more`, 줌인).
+- **루트의 depth(2026-09-30, 0.12.255; 사용자: "cell이 root가 되면 depth가 달라질
+  수 있는데 고려가 안 된 것 같음").** 플래너는 처음부터 루트에서 depth를 셌지만
+  뷰어는 파일 top의 높이(데몬이 매 프레임 알려 주는 `max_depth`)를 그대로 썼다 —
+  라벨이 `d/16`, `<`/`>`는 루트 높이를 넘는, 그림이 바뀌지 않는 단계를 걸었다.
+  이제 `_max_depth()` = 루트가 서면 루트 셀의 높이(`cells` 답의 `height`), 아니면
+  top의 높이: 라벨 `depth: d/h`(d ≥ h면 `*` — 그 루트 전체), 단계 이동은 [0, h]로
+  제한(전체·h 초과는 h에서 한 단계 내려감), depth 값 자체는 보존해 `top`으로 돌아오면
+  원래 뷰; 루트가 바뀌면 라벨을 바로 갱신, depth 대화상자는 "0 = the view root only".
+  계약 `test_under_a_view_root_the_depth_counts_to_the_roots_height`(이전 코드는
+  `depth: 3/16`으로 실패).
 - **게이트**: `cell_tree`(tools/validate_cell_tree.py — SPEC-VALIDATION),
   렌더 코어 유닛(cells.rs 9종), renderd 파스/워커 유닛, vfs hiersum 유닛,
   워커 와이어 계약(validate_rust_renderer).

@@ -1004,6 +1004,52 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIsNone(v._minimap_world_point(x0 - MINIMAP_PAD - 1,
                                                      mid_y))
 
+    def test_under_a_view_root_the_depth_counts_to_the_roots_height(self):
+        """User 2026-09-30: under a view root the depth counts from the root
+        (the planner always did) but the viewer kept the file top's height -
+        the label read d/16 and `<` walked through levels that changed
+        nothing. Now the deepest level is the root's height: the label
+        shows d/h (`*` at or past h), the steps clamp to [0, h], and the
+        depth itself is kept so `top` gives the view back."""
+        import types
+        from floe.gui import Viewer
+        v = Viewer.__new__(Viewer)
+        v.meta = {}
+        v.abstract = False
+        v.max_depth = 16
+        v._view_root = None
+        v._ddlg = None
+        v._on_depth = lambda: None
+        v.depth_value = 3
+        self.assertEqual(Viewer._depth_label(v), "depth: 3/16")
+        v._view_root = {"cell": 5, "name": "BLK", "bbox": [0, 0, 5000, 4000], "height": 2}
+        self.assertEqual(Viewer._depth_label(v), "depth: */2", "3 >= 2 levels: the whole root")
+        Viewer._depth_step(v, -1)
+        self.assertEqual((v.depth_value, Viewer._depth_label(v)), (1, "depth: 1/2"))
+        Viewer._depth_step(v, +1)
+        Viewer._depth_step(v, +1)
+        self.assertEqual(v.depth_value, 2, "clamped to the root's height")
+        v.depth_value = 999
+        Viewer._depth_step(v, -1)
+        self.assertEqual(v.depth_value, 1, "full steps down from the root's deepest level")
+        v.depth_value = 7
+        v._view_root = None
+        self.assertEqual(Viewer._depth_label(v), "depth: 7/16", "back at the top, the depth kept")
+        titles, labels = [], []
+        v._minimap_bases, v.last_frame, v._margin_frame, v._frame_anchor = {}, None, None, None
+        v._clear_pending = lambda: None
+        v._job_keys = {}
+        v._cell_hl = v._cell_hl_key = None
+        v._cellwin = None
+        v._title_base = "floe - x"
+        v.window = types.SimpleNamespace(set_title=titles.append)
+        v.dstatus = types.SimpleNamespace(set_text=labels.append)
+        v.fit = lambda: None
+        v._cell_hl_query = lambda: None
+        v._view_root = {"cell": 5, "name": "BLK", "bbox": [0, 0, 5000, 4000], "height": 2}
+        Viewer._root_changed(v)
+        self.assertEqual(labels[-1], "depth: */2", "a root change refreshes the label")
+
     def test_view_root_moves_the_die_the_render_state_and_the_queries(self):
         """SPEC-VIEWER §8c: the selected cell as the view root - the die
         (fit, clamp, minimap) becomes its bbox, the render state and

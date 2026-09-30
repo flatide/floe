@@ -4720,13 +4720,25 @@ class Viewer:
         """Status-line suffix naming the depth a frame rendered at."""
         return "" if used is None else ", depth %d" % used
 
+    def _max_depth(self):
+        """The deepest level the view holds: the view root's height under
+        a root (depth counts from the root - SPEC-VIEWER §8c; the planner
+        always did, the viewer kept the file top's), else the file top's
+        height the daemon reports; None while unknown."""
+        root = getattr(self, "_view_root", None)
+        if root is not None and isinstance(root.get("height"), int):
+            return max(0, root["height"])
+        return self.max_depth
+
     def _depth_label(self):
         if self.meta is None:
             return "depth: -"
         d = self._depth()
-        current = "*" if d is None else str(d)
-        maximum = ("?" if self.max_depth is None
-                   else str(self.max_depth))
+        cap = self._max_depth()
+        # at or past the deepest level the view is whole: `*`, as full
+        current = "*" if d is None or (cap is not None and d >= cap) \
+            else str(d)
+        maximum = "?" if cap is None else str(cap)
         lbl = "depth: %s/%s" % (current, maximum)
         if self.meta.get("bands") or self.meta.get("vfs"):
             lbl += " · detail: %s" % DETAIL_LEVELS[self.detail]
@@ -4744,13 +4756,14 @@ class Viewer:
         return lbl
 
     def _depth_step(self, delta):
-        """< / > step the depth by one, clamped to [0, max_depth].
-        'full' (999) is treated as the deepest explicit level so a
-        step down lands on real geometry rather than jumping to 0."""
-        cap = self.max_depth if self.max_depth is not None else 999
-        cur = self.depth_value
-        if cur >= 999:
-            cur = cap
+        """< / > step the depth by one, clamped to [0, the view's deepest
+        level] (the view root's height under a root, 2026-09-30).
+        'full' (999) - or any depth past that level - is treated as the
+        deepest explicit level so a step down lands on real geometry
+        rather than walking through levels that change nothing."""
+        cap = self._max_depth()
+        cap = cap if cap is not None else 999
+        cur = min(self.depth_value, cap)
         self._set_depth(max(0, min(cap, cur + delta)))
 
     def _set_depth(self, n, redraw=True):
@@ -4960,7 +4973,9 @@ class Viewer:
         box.set_margin_end(14)
         dlg.add(box)
         box.pack_start(Gtk.Label(
-            label="hierarchy depth (0 = top only, 999 = full)"),
+            label="hierarchy depth (0 = %s only, 999 = full)" % (
+                "the view root" if getattr(self, "_view_root", None)
+                else "top")),
             False, False, 0)
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(row, False, False, 0)
@@ -6568,6 +6583,11 @@ class Viewer:
         base = getattr(self, "_title_base", APP)
         self.window.set_title(base if root is None
                               else "%s · root %s" % (base, root["name"]))
+        # the depth counts from the root: its deepest level is the root's
+        # height (the depth itself is kept, so `top` restores the view)
+        dstatus = getattr(self, "dstatus", None)
+        if dstatus is not None:
+            dstatus.set_text(self._depth_label())
         self.fit()
         # the highlight follows the selected cell into the new coordinates
         self._cell_hl_query()
