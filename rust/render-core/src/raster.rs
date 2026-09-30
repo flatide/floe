@@ -6448,10 +6448,17 @@ fn paint_density_dots(band: &mut RasterBand, request: &GeometryRasterRequest, wo
             }
         }
     } else if n <= DOT_EXACT_PIXELS {
-        // the k lowest ranks of the whole item, whatever part the tile holds
-        let mut order: Vec<(f64, i128)> = (0..n).map(|at| (rank(at), at)).collect();
-        order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        // the k lowest ranks of the whole item (ties by place), whatever part
+        // the tile holds: selected in place, not sorted (a million items in a
+        // wide view; 2026-10-01)
+        let mut order = [(0.0f64, 0u32); DOT_EXACT_PIXELS as usize];
+        let order = &mut order[..n as usize];
+        for (at, slot) in order.iter_mut().enumerate() {
+            *slot = (rank(at as i128), at as u32);
+        }
+        order.select_nth_unstable_by(k as usize - 1, |a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         for &(_, at) in &order[..k as usize] {
+            let at = at as i128;
             let (col, row) = (c0 + at % cols, r0 + at / cols);
             if (tc0..tc1).contains(&col) && (tr0..tr1).contains(&row) {
                 light(band, col, row);

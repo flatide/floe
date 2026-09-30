@@ -324,6 +324,55 @@ pub const DOT_AREA_PX: f64 = 2.0;
 /// The dots one block holds at most: half its pixels.
 pub const DOT_BLOCK_CAP: u32 = 8;
 
+/// An Fx-style hasher (rustc's) for the planner's integer keys: the dot
+/// blocks, the dedup set and the layer memos take millions of lookups in a
+/// dots plan, where SipHash was an eighth of the plan (2026-10-01). Only
+/// lookups use it - nothing is iterated in hash order.
+#[derive(Default, Clone, Copy)]
+struct FxHasher(u64);
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.add(u64::from_le_bytes(word));
+        }
+    }
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, v: u64) {
+        self.add(v);
+    }
+    #[inline]
+    fn write_i64(&mut self, v: i64) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn write_usize(&mut self, v: usize) {
+        self.add(v as u64);
+    }
+}
+
+type FxBuild = std::hash::BuildHasherDefault<FxHasher>;
+type FxMap<K, V> = HashMap<K, V, FxBuild>;
+type FxSet<K> = HashSet<K, FxBuild>;
+
 /// HierOpts::rep_decode_bytes default: 256 MiB
 pub const REP_DECODE_BYTES: u64 = 256 << 20;
 
@@ -1595,17 +1644,18 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         box_stride: 1i64 << opts.sub_cut_box_level.min(8),
         reads_left: opts.sub_cut_box_reads,
         vis_layers: Vec::new(),
-        cell_bits_memo: HashMap::new(),
-        node_bits_memo: HashMap::new(),
-        mask_bits_memo: HashMap::new(),
+        cell_bits_memo: FxMap::default(),
+        node_bits_memo: FxMap::default(),
+        mask_bits_memo: FxMap::default(),
+        top_memo: Vec::new(),
         vis_rank: HashMap::new(),
         set_words: 1,
         boxes_left: opts.sub_cut_box_max,
         reps: req.page_reps && !req.sub_cut_wash && req.cut_dbu > 0,
         rep_page_level: page_level,
         dot_lattice: HashSet::new(),
-        dot_blocks: HashMap::new(),
-        dot_seen: HashSet::new(),
+        dot_blocks: FxMap::default(),
+        dot_seen: FxSet::default(),
         fit_limit,
         page_levels: HashMap::new(),
         wash_walk_budget: opts.sub_cut_walk_budget,
@@ -1665,6 +1715,9 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
             h.vis_layers = layers.iter().map(|&(_, _, idx)| idx).collect();
             h.vis_rank = h.vis_layers.iter().enumerate().map(|(rank, &idx)| (idx, rank)).collect();
             h.set_words = h.vis_layers.len().div_ceil(64).max(1);
+            if h.dots {
+                h.top_memo = vec![0; v.n_cells as usize];
+            }
         }
     }
     // the view root (ViewReq::root): the plan starts from this cell in
@@ -2005,10 +2058,13 @@ struct Hier<'a> {
     vis_layers: Vec<u32>,
     /// cell_bits / node_bits of this pass: (cell | node, remaining depth) ->
     /// which of `vis_layers` (bit k = vis_layers[k]) are really there
-    cell_bits_memo: HashMap<(u32, u32), LayerSet>,
-    node_bits_memo: HashMap<(u32, u32), LayerSet>,
+    cell_bits_memo: FxMap<(u32, u32), LayerSet>,
+    node_bits_memo: FxMap<(u32, u32), LayerSet>,
     /// layer bitset index -> its visible layers, and layer index -> paint rank
-    mask_bits_memo: HashMap<u32, LayerSet>,
+    mask_bits_memo: FxMap<u32, LayerSet>,
+    /// HierOpts::sub_cut_dots: per cell, its topmost visible layer at full
+    /// depth (cell_top: 0 not yet known, 1 none, 2 + paint rank)
+    top_memo: Vec<u32>,
     vis_rank: HashMap<u32, usize>,
     /// LayerSet words in use
     set_words: usize,
@@ -2026,8 +2082,8 @@ struct Hier<'a> {
     /// and the child-BVH nodes (1 << 60 | node), pages (2 << 60 | page) and
     /// placements (3 << 60 | placement) already counted (the walk meets one
     /// once per view box)
-    dot_blocks: HashMap<(i64, i64, u32), (u32, BBox)>,
-    dot_seen: HashSet<u64>,
+    dot_blocks: FxMap<(i64, i64, u32), (u32, BBox)>,
+    dot_seen: FxSet<u64>,
     /// stop the pass once the selected pages' estimated memory passes this (0 = never)
     fit_limit: u64,
     /// the levels a kept representative page hands to the raster
@@ -2951,6 +3007,25 @@ impl<'a> Hier<'a> {
         found
     }
 
+    /// The topmost of `cell_bits(ci, rem)` (None: no visible layer), at full
+    /// depth memoized per cell (top_memo): the dots' node reads ask it once
+    /// per placement below the node.
+    fn cell_top(&mut self, ci: u32, rem: u32) -> Option<usize> {
+        if rem != REM_FULL {
+            return self.cell_bits(ci, rem).top(self.set_words);
+        }
+        match self.top_memo.get(ci as usize).copied() {
+            Some(1) => return None,
+            Some(known) if known >= 2 => return Some(known as usize - 2),
+            _ => {}
+        }
+        let top = self.cell_bits(ci, REM_FULL).top(self.set_words);
+        if let Some(slot) = self.top_memo.get_mut(ci as usize) {
+            *slot = top.map_or(1, |rank| rank as u32 + 2);
+        }
+        top
+    }
+
     /// `fp` as a box on EVERY visible layer in `found`, within the box count
     /// budget. 0.12.171 kept the topmost layer's rect alone, reasoning that
     /// it covers the ones below - true only for fills that light the same
@@ -3023,6 +3098,36 @@ impl<'a> Hier<'a> {
             Some((least, most)) => (least, most),
             None => (LayerSet::EMPTY, upper),
         };
+        if self.dots {
+            // the dots count on the topmost layer alone: the placements below
+            // are read - each child's topmost visible layer, memoized per cell
+            // (cell_top) - until the highest the node can hold is found
+            let n = self.set_words;
+            let goal = upper.top(n);
+            let mut top = least.top(n);
+            if top != goal {
+                let (lo, hi) = self.cbvh_places(ni);
+                let v = self.v;
+                for pli in lo as u64..hi as u64 {
+                    if self.reads_left == 0 {
+                        self.st.sub_cut_box_unsure += 1;
+                        break;
+                    }
+                    self.reads_left -= 1;
+                    self.st.sub_cut_box_reads += 1;
+                    let child = v.place_child(pli);
+                    top = top.max(self.cell_top(child, self.child_rem(child, r)));
+                    if top == goal {
+                        break;
+                    }
+                }
+            }
+            if let Some(rank) = top {
+                self.add_dots(self.vis_layers[rank], *fp);
+                self.st.sub_cut_box_nodes += 1;
+            }
+            return;
+        }
         let found = match self.node_bits_memo.get(&(ni, r)) {
             Some(&known) => known,
             None => {
