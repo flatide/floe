@@ -75,6 +75,10 @@
         <div id="cells-tree" class="cells-tree" role="tree" aria-label="Cell hierarchy"></div>
         <div class="cells-controls"><label class="check"><input id="cells-highlight" type="checkbox" checked disabled> highlight</label><button id="cells-zoom" type="button" disabled title="Frame the selected cell (Enter)">zoom</button><button id="cells-root" type="button" disabled title="Selected cell as view root">root</button><button id="cells-top" type="button" disabled title="View root: back to the top cell">top</button></div>
         <button id="cells-build" type="button" hidden>build cell index…</button>
+        <div id="cells-build-confirm" class="cells-confirm" role="group" aria-label="Build the cell index" aria-describedby="cells-build-note" hidden>
+          <p id="cells-build-note" class="note">Adds design.ovh beside this layout's cache; the layout file is not changed. Large layouts can take minutes; the view waits meanwhile.</p>
+          <div class="cells-controls"><button id="cells-build-run" type="button">Build</button><button id="cells-build-cancel" type="button">Cancel</button></div>
+        </div>
         <p id="cells-info" class="note" role="status"></p>
       </section>
       <!-- floe-cells-page:end -->

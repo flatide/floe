@@ -7,6 +7,8 @@
     // Children answers may carry 20 000 rows (renderd cap) - well over the
     // 1 MiB default reply limit of the owner HTTP helper.
     const FIND_LIMIT = 2000, INSTS_CAP = 4096, SEARCH_DELAY = 150, FRAME_FRACTION = 0.8, REPLY_LIMIT = 8 * 1024 * 1024;
+    const NOHIER = 'No cell index (design.ovh) for this source.';
+    function nohier(e) { return !!e && /nohier/.test(String(e.code || e.message)); }
     function bind(port) {
         const el = port.el, doc = port.document, tree = el('cells-tree'), search = el('cells-search'), canvas = el('cells-canvas');
         let identity = '', roots = [], results = null, selected = null, shown = [], timer = null, stopped = false, suspended = false;
@@ -20,6 +22,10 @@
         // separate flights: a view change must not drop a pending extent.
         let highlight = null, highlightKey = '', highlightAsked = '', highlightFlight = 0, bboxFlight = 0, info = '', rootName = '', hier = true;
         let rootsFlight = false, rootsFailedAt = 0, rootKey = '', reframe = false;
+        // The summary build: `lacking` is a deck source that answered nohier
+        // (the tree itself did not); `confirming` the inline approval shown;
+        // `building` the owner operation still out.
+        let lacking = false, confirming = false, building = false;
         function context() { return stopped || suspended ? null : port.context(); }
         function available() { const c = context(); return !!c && c.connected && !!c.id; }
         function note(text) { info = text || ''; el('cells-info').textContent = info; }
@@ -28,7 +34,7 @@
         function abandon() { ++epoch; ++bboxFlight; busy = 0; rootsFlight = false; searched = ''; seeking = null; if (timer) { port.clearTimeout(timer); timer = null; } }
         function dropHighlight() { ++highlightFlight; highlight = null; highlightKey = ''; highlightAsked = ''; }
         function reset() {
-            roots = []; results = null; selected = null; shown = []; rootName = ''; hier = true; rootKey = ''; reframe = false;
+            roots = []; results = null; selected = null; shown = []; rootName = ''; hier = true; rootKey = ''; reframe = false; lacking = false; confirming = false;
             tree.textContent = ''; search.value = ''; note(''); abandon(); dropHighlight(); paintHighlight(); update();
         }
         async function query(body) {
@@ -105,10 +111,14 @@
             search.disabled = !available();
             el('cells-highlight').disabled = !available();
             // A shell without an index path (the public demo) never offers one.
-            el('cells-build').hidden = !available() || hier || port.buildOffered === false;
-            el('cells-build').disabled = !available() || !port.buildAllowed();
+            const offered = port.buildOffered !== false;
+            el('cells-build').hidden = !offered || !available() || (hier && !lacking) || confirming || building;
+            el('cells-build').disabled = !buildable();
+            el('cells-build-confirm').hidden = !offered || !confirming;
+            el('cells-build-run').disabled = !buildable();
             tree.setAttribute('aria-busy', String(busy > 0));
         }
+        function buildable() { return available() && !building && port.buildOffered !== false && typeof port.build === 'function' && port.buildAllowed(); }
         function rootable() { return available() && hier && !!selected && !!selected.bbox && port.rootAllowed() && !!selected.hasShapes; }
         function cellFrom(src, ci, name, members, leaf) { return {src: src, ci: ci, name: name, members: members, leaf: leaf, open: false, children: null, loading: false, more: 0}; }
         function settled(c) { return !!(c && c.state && ['idle', 'rendering'].includes(c.state.status)); }
@@ -134,7 +144,7 @@
                 paint();
             } catch (e) {
                 if (ep !== epoch) { return; }
-                if (e && /nohier/.test(String(e.code || e.message))) { hier = false; note('No cell index (design.ovh) for this source.'); }
+                if (nohier(e)) { hier = false; note(NOHIER); }
                 else { rootsFailedAt = port.now ? port.now() : Date.now(); note(String(e.message || e)); }
                 update();
             } finally { if (ep === epoch) { rootsFlight = false; } }
@@ -156,7 +166,13 @@
                 const r = await ask(body);
                 if (ep !== epoch) { return; }
                 fill(cell, r); paint();
-            } catch (e) { if (ep === epoch) { cell.loading = false; cell.open = false; note(String(e.message || e)); paint(); } }
+            } catch (e) {
+                if (ep !== epoch) { return; }
+                cell.loading = false; cell.open = false;
+                // A deck source without its own summary offers the build too.
+                if (nohier(e)) { lacking = true; note(NOHIER); } else { note(String(e.message || e)); }
+                paint();
+            }
         }
         function forget(cell) {
             cell.bbox = null; cell.hasShapes = undefined;
@@ -299,7 +315,33 @@
         el('cells-root').onclick = setRoot;
         el('cells-top').onclick = clearRoot;
         el('cells-highlight').onchange = function () { refreshHighlight(true); };
-        el('cells-build').onclick = function () { if (port.build) { port.build(); } };
+        // Building needs an explicit second step on this page: the menu item
+        // and the button only show the note and its Build / Cancel.
+        el('cells-build').onclick = function () {
+            if (!buildable() || (hier && !lacking)) { return; }
+            confirming = true; update(); port.raise(); el('cells-build-run').focus();
+        };
+        function unconfirm() { if (!confirming) { return; } confirming = false; update(); if (!el('cells-build').hidden) { el('cells-build').focus(); } }
+        el('cells-build-cancel').onclick = unconfirm;
+        el('cells-build-confirm').onkeydown = function (e) { if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); unconfirm(); } };
+        el('cells-build-run').onclick = function () {
+            if (!confirming || !buildable()) { return; }
+            const view = identity;
+            confirming = false; building = true; note('Building the cell index (design.ovh)…'); update();
+            let pending;
+            try { pending = Promise.resolve(port.build()); } catch (e) { pending = Promise.reject(e); }
+            pending.then(function () {
+                building = false;
+                if (stopped || view !== identity) { update(); return; }
+                // Read the tree again from the new summary once the view settles.
+                reset(); rootsFailedAt = 0; rootKey = frameOf(context());
+                note('Cell index built; reading the tree…'); changed();
+            }, function (e) {
+                building = false;
+                if (!stopped && view === identity) { note('Cell index not built: ' + String(e && e.message || e)); }
+                update();
+            });
+        };
         function frameOf(c) { return c && c.state && c.state.root ? String(c.state.root.cell) : ''; }
         function changed() {
             const c = context();
@@ -347,6 +389,15 @@
             clearHighlight: unselect, hasSelection: function () { return !!selected; }, rootName: function () { return rootName; },
             suspend: suspend, resume: resume, stop: stop});
     }
-    const api = {bind: bind};
+    // The owner operation line for kind cell_index; counts only, no paths.
+    function operationText(op, message) {
+        let text = 'cell index · ' + op.phase;
+        if (op.phase === 'running' && op.total) { text += ' · ' + (op.stage || 'preparing') + ' ' + op.current + '/' + op.total; }
+        else if (op.total !== undefined && op.phase !== 'queued' && op.phase !== 'running') {
+            text += ' · ' + op.built + ' built, ' + op.kept + ' kept' + (op.skipped ? ', ' + op.skipped + ' skipped' : '') + (op.failed ? ', ' + op.failed + ' failed' : '');
+        }
+        return text + (op.error ? ' · ' + message(op.error) : '');
+    }
+    const api = {bind: bind, operationText: operationText};
     if (typeof module !== 'undefined' && module.exports) { module.exports = api; } else { root.FloeCells = api; }
 }(typeof window === 'undefined' ? this : window));

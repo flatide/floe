@@ -62,6 +62,7 @@ const frameStatusEnabled=process.env.FLOE_TEST_FRAME_STATUS==='1';
 const workerFailure=process.env.FLOE_TEST_WORKER_FAILURE||'';
 const indexDefaultsEnabled=process.env.FLOE_TEST_INDEX_DEFAULTS==='1';
 const revisionEnabled=process.env.FLOE_TEST_REVISIONS==='1',revisionHistory=[];
+const cellIndexEnabled=process.env.FLOE_TEST_CELL_INDEX==='1';let cellOperation=null;
 let checkedRevision=null;
 let reclaimCounter=0,reclaimTimeout=false,reclaimComplete=false,reclaimReadFailure=false;
 const reclaimId='6'.repeat(32);
@@ -193,6 +194,8 @@ class XHR {
         else if(this.path==='/api/v1/operations'&&this.method==='POST') {
             open=true;lastSeq=body.seq;value={seq:lastSeq,kind:body.kind,phase:['mode','reselect_levels'].includes(body.kind)?'preparing':'succeeded',view_id:viewId};status=202;
             if(['mode','reselect_levels'].includes(body.kind)) {assert(modeEnabled);modeOperation=value;}
+            if(body.kind==='cell_index'){assert(cellIndexEnabled);value={seq:lastSeq,kind:'cell_index',phase:'queued'};
+                cellOperation={seq:lastSeq,kind:'cell_index',phase:'running',view_id:body.view_id,stage:'building',current:1,total:1,built:0,kept:0,skipped:0,failed:0,error:null};}
             if(startupEnabled){open=body.kind==='open'&&!startupFail;startupReceipt=value={seq:lastSeq,kind:body.kind,phase:body.kind==='open'&&startupFail?'failed':'succeeded',view_id:open?viewId:null,error:body.kind==='open'&&startupFail?'index_required':null};}
             if(indexOpenEnabled){
                 open=body.kind==='index_open';
@@ -206,6 +209,7 @@ class XHR {
             if(startupEnabled){value.history=startupReceipt?[startupReceipt]:[];}
             if(indexOpenEnabled){value={last_seq:lastSeq,active:null,history:indexOperations};}
             if(modeReadFailure){modeReadFailure=false;status=503;value={error:'unavailable'};}
+            if(cellOperation){value={last_seq:lastSeq,active:cellOperation.phase==='running'?lastSeq:null,history:[cellOperation]};}
         }
         else if(this.path==='/api/v1/view') {status=open?200:404;value=open?{title:'synthetic',source_id:indexOpenEnabled?indexSource:modeEnabled?'deck':'src',mode:modeEnabled?serverMode:'level',levels:modeEnabled?serverLevels:null,view:{...snapshot,connection_epoch:''}}:null;
             if(modeViewReadFailure){modeViewReadFailure=false;status=503;value={error:'unavailable'};}}
@@ -219,7 +223,8 @@ class XHR {
             const rows=(paletteEnabled?paletteRows:[layerRow]).filter(r=>!r.parent||!closed(r.parent)).map(r=>({...r,closed:r.children>0&&closed(r.pair),visible:snapshot.layers.mode==='all'||snapshot.layers.mode==='only'&&snapshot.layers.pairs.some(p=>p.join('/')===r.pair.join('/'))}));
             value={state_rev:snapshot.state_rev,render_key:snapshot.render_key,total:rows.length,all_total:paletteEnabled?4:1,start:0,next:null,rows};
         }
-        else if(cellReplies&&this.path==='/api/v1/views/'+viewId+'/cells'){value=cellReplies[body.kind];if(!value){throw new Error('Unexpected cell query '+body.kind);}}
+        else if(cellReplies&&this.path==='/api/v1/views/'+viewId+'/cells'){value=cellReplies[body.kind];if(!value){throw new Error('Unexpected cell query '+body.kind);}
+            if(value.refusal){status=409;value=value.refusal;}}
         else {throw new Error('Unexpected HTTP '+this.path);}
         if(launchEnabled&&this.path==='/api/v1/startup'){value={request:null};}
         if((indexOpenEnabled||revisionEnabled)&&this.path==='/api/v1/startup'){value.request.source_id=indexSource;}
@@ -1204,6 +1209,45 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     assert.equal(draws.length,1);assert.deepEqual(draws[0].data.slice(0,4),[16,0,127,255]);
     assert.equal(ws.sent.at(-1).disposition,'displayed');
     assert.equal(node('canvas').style.width,'100px');
+    if(cellIndexEnabled){
+        // design.ovh for the open view: an inline approval, then ONE owner
+        // operation naming only that view; the tree is read again after it.
+        const builds=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations'&&r.body.kind==='cell_index');
+        // Operation polls run on the real 500 ms timer.
+        async function settle(test){for(let i=0;i<400&&!test();i++){await new Promise(r=>setTimeout(r,10));}assert(test(),'client did not progress');}
+        cellReplies={sources:{refusal:{error:'nohier',message:'No cell index (design.ovh) for this source.'}}};
+        // The first tree read (no scripted answer) fails; retry past its 2 s.
+        for(let i=0;i<5;i++){await new Promise(setImmediate);}
+        cellsPort.now=()=>Date.now()+5000;ws.receive(snapshot);delete cellsPort.now;
+        await wait(()=>!node('cells-build').hidden&&!node('cells-build').disabled);
+        assert.equal(node('cells-info').textContent,'No cell index (design.ovh) for this source.');assert(node('cells-build-confirm').hidden);
+        node('cells-build').onclick();assert(!node('cells-build-confirm').hidden);assert(node('cells-build').hidden);
+        await new Promise(setImmediate);assert.equal(builds().length,0,'the offer alone started a build');
+        node('cells-build-cancel').onclick();assert(node('cells-build-confirm').hidden);
+        node('cells-build').onclick();node('cells-build-run').onclick();
+        await wait(()=>builds().length===1&&/running/.test(node('operation').textContent));
+        assert.deepEqual(builds()[0].body,{kind:'cell_index',view_id:viewId,seq:'2'});
+        assert.equal(node('operation').textContent,'cell index · running · building 1/1');
+        assert(node('cells-build').hidden);assert(node('cells-build-confirm').hidden);assert(node('fit').disabled,'view input during the build');
+        assert.equal(node('cells-info').textContent,'Building the cell index (design.ovh)…');
+        // A failed receipt keeps the note and the offer; nothing is retried.
+        cellOperation={...cellOperation,phase:'failed',error:'busy'};
+        await settle(()=>/not built/.test(node('cells-info').textContent));
+        assert.equal(node('cells-info').textContent,'Cell index not built: '+node('notice').textContent);
+        assert.match(node('notice').textContent,/busy/);assert.equal(builds().length,1);
+        await wait(()=>!node('cells-build').hidden&&!node('cells-build').disabled);
+        node('cells-build').onclick();node('cells-build-run').onclick();
+        await wait(()=>builds().length===2&&/running/.test(node('operation').textContent));
+        assert.deepEqual(builds()[1].body,{kind:'cell_index',view_id:viewId,seq:'3'});
+        cellReplies={sources:{sources:[{src:0,placements:1,name:'synthetic.oas'}]},
+            children:{cell:7,name:'TOP',insts:1,height:2,unit:1,bbox:[0,0,80,80],n:2,total:2,children:[{ci:1,name:'BLK',members:4,leaf:false},{ci:2,name:'VIA',members:1,leaf:true}]}};
+        cellOperation={...cellOperation,phase:'succeeded',stage:'done',built:1};
+        await settle(()=>node('cells-tree').children.length===3);
+        assert.equal(node('cells-info').textContent,'TOP: 2 children');assert(node('cells-build').hidden);
+        assert.equal(node('operation').textContent,'cell index · succeeded · 1 built, 0 kept');
+        assert.equal(builds().length,2,'a build was replayed');assert.equal(sockets.length,1,'the view was replaced');assert(!node('fit').disabled);
+        listeners.pagehide();console.log('WEB CELL INDEX CLIENT: ALL OK (nohier offer, inline approval, one view-scoped operation per approval, progress line, failure note, tree reread, view kept)');return;
+    }
     if(modeEnabled){
         const commands=()=>requests.filter(r=>r.method==='POST'&&r.path==='/api/v1/operations'&&r.body.kind==='mode');
         const key=(extra={})=>{let used=false;node('viewport').keydown({key:',',ctrlKey:true,target:node('viewport'),preventDefault(){used=true;},...extra});return used;};

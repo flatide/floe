@@ -46,6 +46,8 @@
     let selectedStyle = null;
     let levelNext = null, levelSource = '', levelIds = new Set(), levelLoad = 0, levelBusy = false;
     let operationTimer = null, resizeTimer = null, displayed = false;
+    // The cell tree's pending design.ovh build: settled by its ledger receipt.
+    let cellIndexWait = null;
     const errors = {
         index_unavailable: 'A current index is required. Review “Index and open…” or use “Index this source”; opening never indexes automatically.',
         busy: 'Resources or cache are busy. Wait, choose fewer index jobs, or explicitly close a reader before rebuilding its cache.',
@@ -58,6 +60,7 @@
         invalid_request: 'The requested value or selection is not supported.',
         preview_unavailable: 'This reclamation preview is no longer valid. Prepare the exact source/set again and give new approval; deletion was not replayed.',
         approval_required: 'Separate explicit approval is required for this operation.',
+        index_revision_sealed: 'This view reads a sealed index revision; its cell index cannot be added. A newly built revision includes it.',
         fill_edit_disabled: 'Bitmap-slot editing requires FLOE_FILL_EDIT at launch. Nothing was applied.',
         invalid_palette: 'The layer page or group is no longer valid. Reload the layer list.',
         palette_anchor_hidden: 'The range anchor is hidden by a folded group. Select its visible parent first.',
@@ -635,6 +638,7 @@
     }
     function operationLabel(op) {
         if (op.kind === 'index_open') { return window.FloeIndexOpen.resultText(op,message); }
+        if (op.kind === 'cell_index') { return window.FloeCells.operationText(op, message); }
         if (op.kind === 'index_revision' && op.phase === 'succeeded') { return 'New index published: ' + op.index_revision + '. Current view unchanged. Check, then Use to switch.' + (op.revision_sync_warning ? ' WARNING: published, sync or retirement receipt incomplete.' : ''); }
         const p = op.native || {};
         return op.kind + ' · ' + op.phase + (p.phase ? ' · ' + p.phase : '') + (op.error ? ' · ' + message(op.error) : '') +
@@ -662,6 +666,7 @@
         ownerBusy = all.active !== null; el('cancel-job').disabled = !ownerBusy;
         el('cancel-job').dataset.seq = all.active || ''; controls();
         const recent = all.history || [], last = recent[recent.length - 1];
+        settleCellIndex(recent);
         revisionCandidate = window.FloeIndexRevisions.candidate(recent);
         revisionUsage = window.FloeIndexRevisions.usage(recent);
         observeReclamation(recent);
@@ -687,6 +692,26 @@
         if (!currentPage(run)) { return all; }
         if (!ownerBusy && !submitting) { pump(); }
         return all;
+    }
+    function settleCellIndex(recent) {
+        const wait = cellIndexWait, op = wait && wait.seq ? recent.find(function (r) { return r.seq === wait.seq && r.kind === 'cell_index'; }) : null;
+        if (!op || !['succeeded', 'incomplete', 'failed', 'cancelled'].includes(op.phase)) { return; }
+        cellIndexWait = null;
+        if (op.phase === 'succeeded' || op.phase === 'incomplete') { wait.resolve(op); } else { wait.reject(new Error(message(op.error || op.phase))); }
+    }
+    function cellIndexReady() {
+        return !stopped && !!currentId && !currentRevision && !ownerBusy && !submitting && !indexBlocked() && !cellIndexWait && !(launcher && launcher.blocked());
+    }
+    // Resolves with the terminal receipt; the view stays open meanwhile.
+    function buildCellIndex() {
+        if (!cellIndexReady()) { return Promise.reject(new Error('Wait for the open view and any pending operation before building the cell index.')); }
+        const request = {kind: 'cell_index', view_id: currentId};
+        return new Promise(function (resolve, reject) {
+            const wait = {seq: '', resolve: resolve, reject: reject};
+            submitOperation(request, function () { wait.seq = request.seq; cellIndexWait = wait; }).then(function () {
+                if (!wait.seq) { reject(new Error('The cell index build was not submitted.')); }
+            }, function (e) { if (cellIndexWait === wait) { cellIndexWait = null; } reject(e); });
+        });
     }
     async function submitOperation(request, beforeSend) {
         const run = pageRun;
@@ -1147,7 +1172,7 @@
         size: function () { try { return dims(); } catch (_) { return null; } }, unit: function () { return state ? Number(state.dbu_um) : 1; },
         focus: function () { viewport.focus(); }, raise: function () { panes.raise('left', 'cells-page'); },
         rootAllowed: function () { return !!(state && state.capabilities && state.capabilities.cell_root); },
-        buildAllowed: function () { return false; },
+        buildAllowed: cellIndexReady, build: buildCellIndex,
         setTimeout: setTimeout.bind(window), clearTimeout: clearTimeout.bind(window)});
     measurement = window.FloeMeasure.bind({document: document, window: window, protocol: P, query: window.FloeQuery, rulers: window.FloeRulers, painted:dumpChanged,
         cdVisible: function () { return drcPanel.cdVisible(); },

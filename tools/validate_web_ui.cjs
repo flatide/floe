@@ -186,6 +186,8 @@ acorn.parse(fs.readFileSync(path.join(ui, 'minimap.js'), 'utf8'), options);
 for(const name of ['menubar','panes','cells']){acorn.parse(fs.readFileSync(path.join(ui,name+'.js'),'utf8'),options);}
 const cells=spawnSync(process.execPath,[path.join(ui,'cells.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(cells.status,0,'cells.test.cjs: '+cells.error);
+const cellIndexClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_CELL_INDEX:'1'}});
+assert.equal(cellIndexClient.status,0,'cell index client: '+cellIndexClient.error);
 const menubar=spawnSync(process.execPath,[path.join(ui,'menubar.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(menubar.status,0,'menubar.test.cjs: '+menubar.error);
 const minimap=spawnSync(process.execPath,[path.join(ui,'minimap.test.cjs')],{stdio:'inherit',timeout:15000});

@@ -1,6 +1,7 @@
 //! One bounded owner operation thread; filesystem/prepare/native waits never
 //! run on the HTTP reactor. View rendering and index progress are independent
 //! of browser subscriptions. No implicit indexing or destructive reopen.
+mod cell_index;
 mod index_open;
 mod levels;
 mod open;
@@ -239,6 +240,11 @@ pub enum OperationDto {
         levels: LevelSelection,
         options: IndexArgs,
     },
+    /// The open view's own summary: no source, level or path on the wire.
+    CellIndex {
+        seq: String,
+        view_id: String,
+    },
 }
 enum Command {
     PrepareReclaim {
@@ -278,6 +284,11 @@ enum Command {
         levels: Option<BTreeSet<i64>>,
         options: Box<IndexOptions>,
         immutable: bool,
+    },
+    CellIndex {
+        view_id: String,
+        source: Arc<RegisteredSource>,
+        levels: Option<BTreeSet<i64>>,
     },
 }
 #[derive(Clone)]
@@ -638,7 +649,8 @@ impl Service {
             | OperationDto::PrepareReclaim { seq, .. }
             | OperationDto::ReclaimRevision { seq, .. }
             | OperationDto::UseRevision { seq, .. }
-            | OperationDto::IndexOpen { seq, .. } => view::counter(seq)?,
+            | OperationDto::IndexOpen { seq, .. }
+            | OperationDto::CellIndex { seq, .. } => view::counter(seq)?,
         };
         // A completed mode change has retired its original view ID. Replays
         // must be resolved before consulting that mutable current attachment.
@@ -930,6 +942,24 @@ impl Service {
                     },
                 )
             }
+            OperationDto::CellIndex { view_id, .. } => {
+                let (source_id, levels) = {
+                    let s = self.inner.state.lock().unwrap();
+                    cell_index::admit(s.view.as_deref().map(cell_index::Facts::of), &view_id)?
+                };
+                let source = source(&source_id)?;
+                source
+                    .validate_levels(levels.as_ref())
+                    .map_err(|_| "invalid_request")?;
+                (
+                    "cell_index",
+                    Command::CellIndex {
+                        view_id,
+                        source,
+                        levels,
+                    },
+                )
+            }
         };
         let mut s = self.inner.state.lock().unwrap();
         if s.closed {
@@ -1088,6 +1118,7 @@ fn run(inner: Arc<Inner>) {
             Command::RevisionUsage { .. } => "revision_usage",
             Command::PrepareReclaim { .. } => "prepare_reclaim",
             Command::ReclaimRevision { .. } => "reclaim_revision",
+            Command::CellIndex { .. } => "cell_index",
         };
         let retry = match &work.command {
             Command::Open(open) if open.index_revision.is_none() => Some((**open).clone()),
@@ -1285,6 +1316,11 @@ fn execute(inner: &Inner, work: Work) -> Result<Value> {
             request_id,
             open_seq,
         } => index_open::execute(inner, seq, *open, *options, stop, &request_id, open_seq),
+        Command::CellIndex {
+            view_id,
+            source,
+            levels,
+        } => cell_index::execute(inner, seq, view_id, source, levels, &stop),
         Command::Index {
             source,
             levels,

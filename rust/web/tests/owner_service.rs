@@ -775,3 +775,118 @@ async fn authenticated_catalog_index_open_reopen_and_logout() {
     }
     println!("RUST OWNER SERVICE: ALL OK (auth/catalog, index idempotency, startup, layers/deck reopen, logout/shutdown child reap)");
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "run tools/validate_owner_service.py with private source files"]
+async fn cell_index_is_added_beside_the_open_view_cache() {
+    let fixture = PathBuf::from(std::env::var_os("FLOE_OWNER_FIXTURE").expect("private fixture"));
+    let root = fixture.parent().unwrap().join("cell index");
+    fs::create_dir(&root).unwrap();
+    let source = root.join("셀 layout.oas");
+    fs::copy(&fixture, &source).unwrap();
+    // A cache built before design.ovh existed.
+    let dir = cache::default_cache_path(&source).unwrap();
+    let built = std::process::Command::new(native().path())
+        .arg("vfs")
+        .arg(&source)
+        .arg(&dir)
+        .args(["--jobs", "2", "--no-lod", "--no-hier"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(built.success());
+    let summary = dir.join("design.ovh");
+    assert!(!summary.exists());
+    let ovm = fs::read(dir.join("design.ovm")).unwrap();
+    let h = Harness::start(std::slice::from_ref(&source), native()).await;
+    let login = h.login().await;
+    let (_, catalog) = h.call(&login, "GET", "/api/v1/catalog", Value::Null).await;
+    let id = catalog["sources"][0]["source_id"].clone();
+    let request = |seq: &str, view: &Value| json!({"kind":"cell_index","seq":seq,"view_id":view});
+    // No view yet: nothing to amend.
+    let absent = json!("a".repeat(64));
+    let (status, body) = h
+        .call(&login, "POST", "/api/v1/operations", request("1", &absent))
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (404, Some("view_unavailable"))
+    );
+    assert_eq!(
+        h.call(
+            &login,
+            "POST",
+            "/api/v1/operations",
+            open("1", &id, "level", json!({"mode":"all"}))
+        )
+        .await
+        .0,
+        202
+    );
+    let opened = h.finished(&login, 1).await;
+    assert_eq!(opened["phase"], "succeeded", "{opened}");
+    let view = opened["view_id"].clone();
+    for (bad, status, code) in [
+        (json!("b".repeat(64)), 404, "view_unavailable"),
+        (json!("B".repeat(64)), 400, "invalid_request"),
+    ] {
+        let (s, body) = h
+            .call(&login, "POST", "/api/v1/operations", request("2", &bad))
+            .await;
+        assert_eq!((s, body["error"].as_str()), (status, Some(code)));
+    }
+    let mut extra = request("2", &view);
+    extra["source_id"] = id.clone();
+    assert_eq!(
+        h.call(&login, "POST", "/api/v1/operations", extra).await.0,
+        400
+    );
+    assert_eq!(
+        h.call(&login, "POST", "/api/v1/operations", request("2", &view))
+            .await
+            .0,
+        202
+    );
+    let done = h.finished(&login, 2).await;
+    assert_eq!(
+        (&done["kind"], &done["phase"], &done["view_id"]),
+        (&json!("cell_index"), &json!("succeeded"), &view),
+        "{done}"
+    );
+    assert_eq!(
+        (
+            &done["total"],
+            &done["built"],
+            &done["kept"],
+            &done["skipped"]
+        ),
+        (&json!(1), &json!(1), &json!(0), &json!(0))
+    );
+    assert!(summary.is_file());
+    assert!(!dir.join("design.ovh.tmp").exists());
+    assert_eq!(fs::read(dir.join("design.ovm")).unwrap(), ovm);
+    // The same view stays open and a replay is the same receipt.
+    let current = h.call(&login, "GET", "/api/v1/view", Value::Null).await.1;
+    assert_eq!(current["view"]["view_id"], view);
+    let (status, replay) = h
+        .call(&login, "POST", "/api/v1/operations", request("2", &view))
+        .await;
+    assert_eq!((status, &replay), (202, &done));
+    assert_eq!(
+        h.call(&login, "POST", "/api/v1/operations", request("3", &view))
+            .await
+            .0,
+        202
+    );
+    let kept = h.finished(&login, 3).await;
+    assert_eq!(
+        (&kept["phase"], &kept["built"], &kept["kept"]),
+        (&json!("succeeded"), &json!(0), &json!(1)),
+        "{kept}"
+    );
+    h.shutdown().await;
+    fs::remove_dir_all(&root).unwrap();
+    println!("RUST OWNER CELL INDEX: ALL OK (open view kept, built then kept, replay, view/id refusals, no paths)");
+}

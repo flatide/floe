@@ -27,8 +27,10 @@ const TOP = {cell: 7, name: 'TOP', insts: 1, height: 3, unit: 0.001, bbox: [0, 0
     children: [{ci: 1, members: 4, leaf: false, name: 'BLK'}, {ci: 2, members: 1, leaf: true, name: 'VIA'}]};
 const BLK = {cell: 1, name: 'BLK', insts: 4, height: 2, unit: 0.001, bbox: [0, 0, 100, 50], n: 1, total: 5, children: [{ci: 3, members: 2, leaf: true, name: 'M1'}]};
 const NONE = {n: 0, more: false, visited: 0, boxes: []}, key = k => ({key: k, preventDefault() {}});
-function harness() {
-    const nodes = new Map(), requests = [], edits = [], timers = [];
+// opts.offered false and opts.noBuild model the public demo's port.
+function harness(opts) {
+    opts = opts || {};
+    const nodes = new Map(), requests = [], edits = [], timers = [], builds = [];
     const doc = {createElement: tag => new Element(tag, doc)};
     doc.body = doc.activeElement = new Element('body', doc, 'body');
     const el = id => { if (!nodes.has(id)) { nodes.set(id, new Element(id === 'cells-canvas' ? 'canvas' : 'div', doc, id)); } return nodes.get(id); };
@@ -41,10 +43,11 @@ function harness() {
         edit(body, done) { edits.push(body); if (done) { done(null); } },
         context: () => context, size: () => ({pixels: state.pixels}), unit: () => h.unit,
         focus: () => { focusedCanvas++; el('viewport').focus(); }, raise: () => { raised++; },
-        rootAllowed: () => true, buildAllowed: () => false,
+        rootAllowed: () => true, buildAllowed: () => h.allowBuild, buildOffered: opts.offered,
+        build: opts.noBuild ? undefined : () => new Promise((resolve, reject) => { builds.push({resolve, reject}); }),
         setTimeout: (f, ms) => { timers.push({f, ms}); return timers.length; }, clearTimeout: n => { if (timers[n - 1]) { timers[n - 1].f = null; } }
     });
-    const h = {c, el, doc, requests, edits, timers, state, unit: 0.001, context: () => context,
+    const h = {c, el, doc, requests, edits, timers, builds, state, unit: 0.001, allowBuild: false, context: () => context,
         connect(id, st) { context = {id: id || 'v1', state: st || state, connected: true}; c.changed(); },
         disconnect() { context = null; c.changed(); },
         reply(i, value) { const r = requests[i]; r.done = true; r.resolve(value); return tick(); },
@@ -65,7 +68,9 @@ function harness() {
             await h.reply(h.last('bbox'), {insts: 1, approx: false, bbox});
             await h.reply(h.last('insts'), {n: 1, more: false, visited: 1, boxes: [bbox]});
         },
-        type(text) { el('cells-search').value = text; el('cells-search').oninput(); timers.at(-1).f(); }};
+        type(text) { el('cells-search').value = text; el('cells-search').oninput(); timers.at(-1).f(); },
+        async nohier() { h.connect(); await h.fail(h.last('sources'), Object.assign(new Error('no hierarchy summary'), {code: 'nohier'})); },
+        shown(id) { return !el(id).hidden; }};
     return h;
 }
 // Review follow-ups, each on a fresh view.
@@ -259,6 +264,76 @@ const scenarios = [
         assert.deepEqual(h.edits, [{root: {src: 0, cell: 1}}]); assert.equal(h.c.rootName(), 'BLK');
         h.click('cells-top'); assert.deepEqual(h.edits.at(-1), {root: null});
     }],
+    ['B1 build cell index: confirm, one build, the tree reloads', async () => {
+        const h = harness(); h.allowBuild = true; await h.nohier();
+        assert.equal(h.el('cells-info').textContent, 'No cell index (design.ovh) for this source.');
+        assert(h.shown('cells-build')); assert.equal(h.el('cells-build').disabled, false); assert(!h.shown('cells-build-confirm'));
+        // The button (or its menu proxy) only asks; Cancel builds nothing.
+        h.click('cells-build');
+        assert(h.shown('cells-build-confirm')); assert(!h.shown('cells-build')); assert.equal(h.doc.activeElement, h.el('cells-build-run'));
+        assert.equal(h.builds.length, 0); assert.equal(h.raised(), 1, 'the cells page is raised for the note');
+        h.click('cells-build-cancel'); assert(!h.shown('cells-build-confirm')); assert(h.shown('cells-build')); assert.equal(h.builds.length, 0);
+        h.click('cells-build'); h.el('cells-build-confirm').onkeydown({key: 'Escape', preventDefault() {}});
+        assert(!h.shown('cells-build-confirm')); assert.equal(h.builds.length, 0);
+        h.click('cells-build'); h.click('cells-build-run'); h.click('cells-build-run');
+        assert.equal(h.builds.length, 1, 'one build per approval');
+        assert.equal(h.el('cells-info').textContent, 'Building the cell index (design.ovh)…');
+        assert(!h.shown('cells-build-confirm')); assert(!h.shown('cells-build'));
+        let from = h.requests.length; h.c.changed(); assert.deepEqual(h.kinds(from), [], 'no tree read while building');
+        h.builds[0].resolve({phase: 'succeeded', built: 1}); await tick();
+        assert.deepEqual(h.kinds(from), ['sources'], 'the tree is read again');
+        await h.reply(h.last('sources'), SOURCES); await h.reply(h.last('children'), TOP);
+        assert.deepEqual(h.rows(), ['▾|TOP|', '▸|BLK|×4', '|VIA|']); assert.equal(h.el('cells-info').textContent, 'TOP: 2 children');
+        assert(!h.shown('cells-build')); assert(!h.shown('cells-build-confirm'));
+        assert.equal(h.el('cells-zoom').disabled, true); assert.equal(h.el('cells-search').disabled, false);
+    }],
+    ['B2 a failed build keeps the note and the offer', async () => {
+        const h = harness(); h.allowBuild = true; await h.nohier();
+        h.click('cells-build'); h.click('cells-build-run');
+        const from = h.requests.length; h.builds[0].reject(new Error('Resources or cache are busy.')); await tick();
+        assert.equal(h.el('cells-info').textContent, 'Cell index not built: Resources or cache are busy.');
+        assert.deepEqual(h.kinds(from), [], 'no tree read after a failure');
+        assert(h.shown('cells-build')); assert.equal(h.el('cells-build').disabled, false); assert(!h.shown('cells-build-confirm'));
+        // Not allowed (operation pending, sealed revision): nothing to confirm.
+        h.allowBuild = false; h.c.changed(); assert.equal(h.el('cells-build').disabled, true);
+        h.el('cells-build').onclick(); assert(!h.shown('cells-build-confirm'));
+        h.allowBuild = true; h.c.changed(); h.click('cells-build'); h.allowBuild = false; h.c.changed();
+        assert.equal(h.el('cells-build-run').disabled, true); h.el('cells-build-run').onclick(); assert.equal(h.builds.length, 1);
+        // A build answered after the view changed does not touch the new tree.
+        h.allowBuild = true; h.c.changed(); h.click('cells-build-run'); assert.equal(h.builds.length, 2);
+        h.connect('v2'); const next = h.requests.length; h.builds[1].resolve({phase: 'succeeded'}); await tick();
+        assert.deepEqual(h.kinds(next), []); assert.equal(h.pending('sources').length, 1, 'only the new view asks');
+    }],
+    ['B3 a deck source without its summary offers the build', async () => {
+        const h = harness(); h.allowBuild = true; h.connect();
+        await h.reply(h.last('sources'), {sources: [{src: 0, placements: 2, name: 'a.oas'}, {src: 1, placements: 1, name: 'b.oas'}]});
+        assert.deepEqual(h.rows(), ['▸|a.oas|×2', '▸|b.oas|']); assert(!h.shown('cells-build'));
+        const a = h.row('a.oas'); a.onclick({target: a.children[0]});
+        await h.fail(h.last('children'), Object.assign(new Error('nohier'), {code: 'nohier'}));
+        assert.equal(h.el('cells-info').textContent, 'No cell index (design.ovh) for this source.');
+        assert(h.shown('cells-build')); assert.equal(h.el('cells-search').disabled, false);
+        h.click('cells-build'); h.click('cells-build-run'); const from = h.requests.length;
+        h.builds[0].resolve({phase: 'incomplete'}); await tick();
+        assert.deepEqual(h.kinds(from), ['sources']); assert(!h.shown('cells-build'));
+    }],
+    ['B4 the demo shell never offers or confirms a build', async () => {
+        const h = harness({offered: false, noBuild: true}); h.allowBuild = true; await h.nohier();
+        assert.match(h.el('cells-info').textContent, /No cell index/);
+        assert(!h.shown('cells-build')); assert(!h.shown('cells-build-confirm'));
+        h.el('cells-build').onclick(); h.el('cells-build-run').onclick();
+        assert(!h.shown('cells-build-confirm')); assert.equal(h.builds.length, 0);
+        const offered = harness({offered: false}); offered.allowBuild = true; await offered.nohier();
+        offered.el('cells-build').onclick(); offered.el('cells-build-run').onclick();
+        assert(!offered.shown('cells-build-confirm')); assert.equal(offered.builds.length, 0, 'buildOffered:false wins over a port.build');
+    }],
+    ['B5 operation line: counts, never paths', async () => {
+        const t = Cells.operationText, m = e => 'M:' + e;
+        assert.equal(t({kind: 'cell_index', phase: 'queued'}, m), 'cell index · queued');
+        assert.equal(t({kind: 'cell_index', phase: 'running', stage: 'building', current: 2, total: 3, built: 1, kept: 0, skipped: 0, failed: 0, error: null}, m), 'cell index · running · building 2/3');
+        assert.equal(t({kind: 'cell_index', phase: 'succeeded', total: 1, built: 1, kept: 0, skipped: 0, failed: 0, error: null}, m), 'cell index · succeeded · 1 built, 0 kept');
+        assert.equal(t({kind: 'cell_index', phase: 'incomplete', total: 3, built: 1, kept: 0, skipped: 1, failed: 1, error: 'worker_failed'}, m), 'cell index · incomplete · 1 built, 0 kept, 1 skipped, 1 failed · M:worker_failed');
+        assert.equal(t({kind: 'cell_index', phase: 'failed', error: 'busy'}, m), 'cell index · failed · M:busy');
+    }],
     ['R5 one highlight walk per view and selection', async () => {
         const h = harness(); await h.load(); await h.expand('BLK', BLK);
         const canvas = h.el('cells-canvas'), pick = name => h.row(name).onclick({target: h.row(name).children[1]});
@@ -406,5 +481,5 @@ const scenarios = [
     h.connect(); await h.fail(h.requests.length - 1, Object.assign(new Error('no hierarchy summary'), {code: 'nohier'}));
     assert.match(h.el('cells-info').textContent, /No cell index/); assert.equal(h.el('cells-build').hidden, false);
     for (const [, run] of scenarios) { await run(); }
-    console.log('WEB CELLS: ALL OK (lazy tree, search debounce, extent/instances per view, zoom, view root, keys, nohier; root frames, zoom focus, tree keys, flights, search Enter, root guard, walks)');
+    console.log('WEB CELLS: ALL OK (lazy tree, search debounce, extent/instances per view, zoom, view root, keys, nohier; root frames, zoom focus, tree keys, flights, search Enter, root guard, walks; cell index confirm/build/reload, failure, deck source, demo)');
 })().catch(e => { console.error(e); process.exitCode = 1; });

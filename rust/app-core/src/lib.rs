@@ -11,6 +11,7 @@ pub mod browser;
 pub mod cache;
 pub mod captures;
 pub mod catalog;
+pub mod cell_index;
 pub mod clip;
 pub mod dataset;
 pub mod drc;

@@ -109,6 +109,55 @@ Escape는 강조 해제. 색인 요약이 없으면(`nohier`) 안내와 `build c
 valmini의 `cell_sources`/`cells`/`cell_find`/`cell_bbox`/`cell_insts`/`render root=3`을
 확인했다(`design.ovh` cells=7). 색인 시 `design.ovh`가 함께 생성된다.
 
+## 3b. 셀 색인 빌드(`design.ovh`, 소유자 승인)
+
+9월 30일 이전 캐시에는 `design.ovh`가 없고, renderd는 배치 레코드 4 M 이하 캐시만 메모리에서
+요약하므로 실제 칩에서는 트리가 `nohier`로 답했다(합성 MAIN01 복사본에서 재현). GTK가 제안하는
+`floe-index hier <cache>`를 웹에서는 **명시적 소유자 작업**으로 제공한다. 뷰는 닫지 않는다.
+
+- **UI**(`cells.js`, `index.html`의 `floe-cells-page` 블록): 단일 레이아웃의 트리 로드나 잡덱 소스
+  펼침이 `nohier`면 `build cell index…`가 보인다. 활성 조건은 소유자 뷰가 열려 있고 index
+  revision 뷰가 아니며 다른 작업·승인이 대기 중이 아닐 때다(`app.js` `cellIndexReady`). 버튼과
+  Cell 메뉴 항목은 cells 페이지 안의 확인 블록(`#cells-build-confirm`: "Adds design.ovh beside this
+  layout's cache; the layout file is not changed. Large layouts can take minutes; the view waits
+  meanwhile.", Build/Cancel, Escape = Cancel)만 연다. Build가 작업을 **한 번** 보내고 진행은 작업
+  줄(`cell index · running · building 1/1`)과 `#cells-info`에 보인다. 성공·incomplete면 트리를 처음부터
+  다시 읽고(뷰 재오픈 없음), 실패는 안내를 남기며 자동 재시도하지 않는다. 데모(`server.js`)는
+  `buildOffered:false`이고 `build`가 없어 버튼도 확인 블록도 나타나지 않는다(주입된 `server-` 블록은
+  숨김 유지).
+- **작업**(`POST /api/v1/operations`, `service/cell_index.rs`): `{kind:"cell_index",seq,view_id}`.
+  wire에는 경로·소스·레벨·옵션이 없고(`deny_unknown_fields`), 대상은 활성 뷰뿐이다(불일치 404
+  `view_unavailable`, 형식 오류 400). 소스와 로드 레벨은 뷰에서 얻는다. index revision 뷰는 400
+  `index_revision_sealed`로 거부한다: 봉인된 revision은 고치지 않으며, 새 revision은 `floe-index vfs`
+  기본값으로 `design.ovh`를 포함한다(`cache/revision.rs` `FILES`). seq/replay 원장, 단일 활성 작업,
+  `…/cancel`은 기존 작업과 같다. 진행은 `{"phase":"running","stage":"preparing|checking|building",
+  "current","total","built","kept","skipped","failed"}`, 종료는 `succeeded|incomplete|failed|cancelled`에
+  같은 개수와 `error`(`view::safe_error`, 경로 없음)다. 새 HTTP 경로는 없다.
+- **app-core**(`cell_index.rs`): 소스마다 색인과 같은 프로세스 간 writer 잠금(`WriteLease::
+  acquire_aliases`)을 잡고, 잠금 안에서 해석한 캐시가 `Current`가 아니면 Cache 오류(먼저 색인)다.
+  `floe-index hier <dir> --check`가 exit 0이면 kept, 아니면 `floe-index hier <dir>`를 실행하고 보고 줄의
+  숫자 꼬리(`cells= edges= records= unplaced= bytes=`)만 읽는다. 프로세스 안에서는 managed-index
+  단일 슬롯과 CPU 1을 **읽기** lease로 잡는다(`index_planning`): 열린 뷰의 읽기 lease와 공존하고
+  managed 재색인과는 배타다. `design.ovh`는 `hiersum::write`가 `.tmp`에 쓴 뒤 rename하므로 열린
+  renderer는 다음 셀 질의에서 stat으로 새 파일을 읽는다. legacy 이름 캐시는 rename하지 않는다(뷰가
+  그 이름으로 읽음). 출력은 두 pipe를 비차단으로 비우며 꼬리 16 KiB만 두고, 취소는 SIGTERM → 1초 →
+  SIGKILL 뒤 `design.ovh.tmp`를 지운다. 잡덱은 뷰의 선택 레벨 소스마다 적용하며, current 캐시가 없는
+  소스는 skipped, 개별 실패는 failed로 세고 나머지를 계속한다.
+- **검증**: `floe-app-core --lib cell_index` 4(가짜 `hier`로 kept/built/실패 temp 정리/실행 중 취소,
+  숫자 꼬리 파싱, 덱·없는·stale 캐시·Busy 거부), 실제 바이너리 `tests/cell_index.rs`(`--no-hier` 캐시 +
+  읽기 lease 중 빌드 → `--check` 통과·`design.ovm` 불변, 재실행 kept, 깨진 요약 재빌드, stale/없는
+  캐시 거부, 덱 3소스 kept 1·skipped 2, managed 재색인 중 Busy, 취소)는 `validate_rust.sh`의 `cell_index`
+  게이트다. `floe-web --lib` `service::cell_index` 3, `owner_service`의 `cell_index_is_added_beside_the_
+  open_view_cache`(실제 renderd/indexer: 뷰 유지, built → kept, replay, view id 거부, 경로 비노출;
+  `validate_owner_service.py`가 표식 확인), `cells.test.cjs` B1–B5, `client.test.cjs`
+  `FLOE_TEST_CELL_INDEX`(nohier 제안 → 확인 → `{kind,view_id,seq}` 한 건 → 진행 줄 → 실패 안내 → 재시도
+  성공 → 트리 재조회, 소켓 유지), `server.test.cjs` 데모 확인 블록 숨김.
+- **MAIN01 복사본**(합성, 원본 116 MB, `design.ovm` 777 MB, APFS clone): 실제 `floe2-web view`에서
+  `children` → 409 `nohier`, `cell_index` 1.19초(`hier` 빌드 약 1.0초, `design.ovh` 3.2 MB), 같은 뷰가
+  `idle`로 유지된 채 `children` → 200(TOP, 자식 302), 재실행은 kept 0.12초, 세션 종료 204·잔여 프로세스 없음.
+  Chrome에서도 같은 복사본으로 안내 → `build cell index…` → 확인 블록(Build/Cancel) → Build → 작업 줄
+  `cell index · succeeded · 1 built, 0 kept`, 트리 `TOP: 302 children`(재오픈 없음)을 확인했다.
+
 ## 4. 회사 데모 페이지(`server.html`)
 
 같은 배치를 쓰되 파일 열기·색인·DRC·측정·clip·설정 저장·공유 기본값은 **마운트하지도
@@ -234,8 +283,9 @@ view root도 WS `view.set`의 `root`로 가며 해결(`root_ticket`)은 같은 �
 
 ## 6. 잔여
 
-- 색인 요약 빌드(`floe-index hier`)를 웹 승인 경로로 제공하지 않았다. `build cell index…`
-  버튼은 안내만 하며 비활성이다.
+- 색인 요약 빌드(`floe-index hier`)는 §3b의 소유자 승인 작업으로 제공한다(데모에는 없음). 잡덱 전체
+  검색(`find`, `src:-1`)이 요약 없는 소스를 만날 때의 안내와 실제 잡덱 뷰에서의 브라우저 확인은 따로
+  하지 않았다(덱 경로는 app-core 실제 바이너리 테스트와 `cells.test.cjs` B3로만 확인).
 - GTK와 다른 점: inspect 탭(웹 전용 pick/snap/ruler 조작부), Goto/zoom toolbar 행 유지,
   Registered sources/Index 대화상자(웹 전용 등록 소스), Overlays 항목. 데모의 왼쪽 pane에는
   cells 탭만 있다(DRC·inspect 없음).

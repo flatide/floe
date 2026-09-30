@@ -296,6 +296,8 @@ if(require.main===module)(async()=>{
     for(let i=0;i<6;i++){await tick();}
     assert.equal(cellsShell.el('cells-root').disabled,false,'the root needs the extent of this frame');
     assert.equal(cellsShell.el('cells-build').hidden,true,'the demo offers no index build');
+    cellsShell.el('cells-build').onclick();cellsShell.el('cells-build-run').onclick();
+    assert.equal(cellsShell.el('cells-build-confirm').hidden,true,'the demo never confirms an index build');
     const sentBefore=cellsShell.sockets[0].sent.length;
     cellsShell.el('viewport').listeners.keydown({key:'t',code:'KeyT',ctrlKey:true,shiftKey:false,metaKey:false,altKey:false,repeat:false,isComposing:false,keyCode:84,preventDefault(){}});
     assert.equal(cellsShell.sockets[0].sent.slice(sentBefore).filter(m=>m.type==='view.set').length,0,'Ctrl+T is no shortcut');
