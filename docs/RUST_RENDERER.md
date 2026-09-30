@@ -247,7 +247,11 @@ cancels the plans too (floe_vfs `HierOpts::stop` through `Cache::plan_cancellabl
 0.12.235): a zoom during pass 2 no longer waits for its plan to finish. The
 adapter's `cancel(before_gen)` (the viewer's Esc, 0.12.251) sends
 `cancel before_gen=N`; the daemon's `cancelled gen=N phase=render|queued` is
-forwarded to the viewer as a `cancelled` result (the `before_gen=` ack is not). The adapter adds
+forwarded to the viewer as a `cancelled` result (the `before_gen=` ack is not).
+`FLOE_RUST_DENSITY_FLOOR_PX` (diagnostic, default 0) is the dots' page and
+record floor in px; the frame line's `density_floor=<px>` is the records' cut
+pass 2 actually planned at (that floor, the density cut, or what a budget fit
+raised it to). The adapter adds
 `density_round: True` to that refining result and the viewer's status says
 "drawing the density under the cut...". The pass-2 frame line also carries
 `density_dots=items/over`.

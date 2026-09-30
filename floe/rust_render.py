@@ -700,6 +700,7 @@ class RustRenderWorker:
             "density_us": None,
             "density_bin": None,
             "density_dots": None,
+            "density_floor": None,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -1324,6 +1325,12 @@ class RustRenderWorker:
         state["density_us"] = _wire_counts(fields.get("density_us", "-"), DENSITY_TIMES)
         state["density_bin"] = _wire_counts(fields.get("density_bin", "-"), DENSITY_BIN)
         state["density_dots"] = _wire_counts(fields.get("density_dots", "-"), DENSITY_DOTS)
+        # the records' cut pass 2 planned at, px (the dots' floor,
+        # FLOE_RUST_DENSITY_FLOOR_PX, or the density cut)
+        try:
+            state["density_floor"] = float(fields.get("density_floor", "-"))
+        except ValueError:
+            state["density_floor"] = None
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1551,6 +1558,7 @@ class RustRenderWorker:
             "density_us": state["density_us"],
             "density_bin": state["density_bin"],
             "density_dots": state["density_dots"],
+            "density_floor": state["density_floor"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on

@@ -3972,8 +3972,23 @@ class Viewer:
                     # CUT_DENSITY_DESIGN §10.10): the frame stacked its density.
                     # First in the line - the bar is ellipsized at its end,
                     # and next to the cut it fell off (field 2026-09-26)
-                    stack = (" [density: top + empty]"
-                             if res.get("density_stack") is not None else "")
+                    stack = ""
+                    if res.get("density_stack") is not None:
+                        # with the sub-cut dots: the records' floor pass 2
+                        # planned at, its plan time and the pages it decoded
+                        # (to compare FLOE_RUST_DENSITY_FLOOR_PX, 2026-09-30)
+                        parts = ["dots" if res.get("density_dots") is not None
+                                 else "top + empty"]
+                        if res.get("density_floor") is not None:
+                            parts.append("floor %.2g px" % res["density_floor"])
+                        us = res.get("density_us") or {}
+                        if us:
+                            parts.append("pass 2 plan %d ms" % round(
+                                us.get("plan2_us", 0) / 1000))
+                        pages = res.get("density_pages") or {}
+                        if pages:
+                            parts.append("%d pages" % pages.get("decoded", 0))
+                        stack = " [density: %s]" % ", ".join(parts)
                     mode = "live%s (%d tiles, +%d new, %d ms" \
                            "%s%s%s%s%s%s)" \
                         % (stack, res["tiles"], res.get("new", 0) or 0,

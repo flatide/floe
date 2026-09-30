@@ -65,7 +65,9 @@ cell under it as dots in 4 x 4 px blocks, never walking into it:
   * step 2 (a floor by the work): TOP's own 0.05 um (0.5 px) squares at a
     3 px pitch are decoded under the dots (their pages fit the reserve at a
     zero floor) and draw as a cut-free frame draws them there; the stack's
-    1 px floor alone leaves them out;
+    1 px floor alone leaves them out; FLOE_RUST_DENSITY_FLOOR_PX sets that
+    floor - 0.25 px still draws them, 0.6 px leaves them out - and the frame
+    reports the floor it planned at (density_floor);
   * step 3 (progressive): the dots' frame arrives twice - first a refining
     round (final=0) holding pass 1 alone, byte for byte the frame without the
     stack, then the final frame, byte for byte what the dots draw in one
@@ -160,6 +162,8 @@ def dots_checks(temp):
         'stack': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top'}),
         'dots': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}),
         'one_round': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PROGRESSIVE': 'off'}),
+        'floor025': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.25'}),
+        'floor06': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.6'}),
     }
     try:
         on, res = frame(workers['dots'], 1, (LOW,))
@@ -192,13 +196,22 @@ def dots_checks(temp):
         tiny = lit(on, *specks)
         assert tiny and tiny == lit(free, *specks), "TOP's specks: %d px lit, %d cut-free" % (len(tiny), len(lit(free, *specks)))
         assert not lit(walked, *specks), "the stack's 1 px floor draws no speck"
+        # the floor is the user's (FLOE_RUST_DENSITY_FLOOR_PX): 0.25 px keeps
+        # the 0.5 px specks, 0.6 px drops them; the frame says which it took
+        at025, res025 = frame(workers['floor025'], 3, (LOW,))
+        at06, res06 = frame(workers['floor06'], 3, (LOW,))
+        assert lit(at025, *specks) == tiny and not lit(at06, *specks), 'floors 0.25 / 0.6: %d / %d speck px' % (
+            len(lit(at025, *specks)), len(lit(at06, *specks)))
+        floors = (res.get('density_floor'), res025.get('density_floor'), res06.get('density_floor'))
+        assert floors[0] == 0.0 and abs(floors[1] - 0.25) < 0.02 and abs(floors[2] - 0.6) < 0.02, floors
         everything = lit(on, range(W), range(H))
         assert everything == sparse | alone_px | dense | tiny, '%d px lit outside the arrays' % len(everything - sparse - alone_px - dense - tiny)
         dots = res.get('density_dots')
         assert dots and dots['items'] == SPARSE[3] ** 2 + 1 + len(blocks) and dots['over'] == 0, (dots, len(blocks))
         assert walked_res.get('density_dots') is None and lit(walked, range(W), range(H)), 'the stack alone draws the DOT squares, no dots'
         print('density stack dots: sparse array %d dots beside the members, lone DOT 1, abutting array %d px = sum of min(8, members) '
-              'over %d blocks; density_dots %s; TOP specks %d px as cut-free' % (len(sparse), len(dense), len(blocks), dots, len(tiny)))
+              'over %d blocks; density_dots %s; TOP specks %d px as cut-free; floors (density_floor) %s' % (
+                  len(sparse), len(dense), len(blocks), dots, len(tiny), floors))
         margin, _ = frame_bg(workers['dots'], 2, (LOW,))
         centre = b''.join(margin[((H // 2 + r) * 2 * W + W // 2) * 4:((H // 2 + r) * 2 * W + W // 2 + W) * 4] for r in range(H))
         assert centre == on, 'the dots margin draws the view otherwise in %d px' % sum(
