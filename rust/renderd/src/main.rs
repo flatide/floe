@@ -1043,19 +1043,32 @@ struct WorkerState {
     styles: Vec<LayerStyle>,
     style_epoch: Option<u64>,
     /// The budget fit decided per render state and scale (fit_memory_key):
-    /// every later frame there - the viewport's, its margin, a pan's - is
-    /// planned under the same decision, so the picture does not change when
-    /// one replaces another (SPEC-PLANNER, 2026-09-27); a frame the decision
-    /// does not fit decides anew and replaces it.
+    /// every later frame there that has to thin - the viewport's, its
+    /// margin, a pan's - is planned under the same decision, so the picture
+    /// does not change when one replaces another (SPEC-PLANNER, 2026-09-27);
+    /// a frame the decision does not fit decides anew and replaces it. A
+    /// frame its budget holds whole keeps every page whatever the decision
+    /// (floe_vfs plan_hier_fixed, user 2026-10-01: the key has no place, the
+    /// viewer's zoom steps recur everywhere, and a dense view's decision
+    /// emptied a sparse one).
     fit_memory: BTreeMap<String, floe_render_core::FixedFit>,
+    /// The render states and scales whose last viewport frame its budget
+    /// held whole: a margin there that has to thin would show less than the
+    /// viewport did when it lands - dropped, as one that must decide anew.
+    fit_whole: BTreeSet<String>,
     /// The same for the density stack's pass 2, per side (the top plane's
     /// plan, the other planes'): its plans are budget-fitted to a reserve of
     /// their own and must thin alike in every frame at a scale too.
     density_fit_memory: BTreeMap<String, floe_render_core::FixedFit>,
     /// The sub-cut dots' page floor per scale and side (the rung of
-    /// DOT_PAGE_FLOORS pass 2 planned at; its length = the density cut with
-    /// the planner's fit): every frame at a scale reads the same pages.
+    /// DOT_PAGE_FLOORS the last viewport frame's pass 2 planned at; its
+    /// length = the density cut with the planner's fit): a margin must plan
+    /// at it or is dropped. A viewport frame probes from the lowest rung
+    /// again (user 2026-10-01: a probe that failed in a dense view kept
+    /// every later view at that zoom step off the floor).
     density_floor_memory: BTreeMap<String, u8>,
+    /// fit_whole for the density stack's pass 2, per scale and side.
+    density_whole: BTreeSet<String>,
 }
 
 impl Default for WorkerState {
@@ -1069,8 +1082,10 @@ impl Default for WorkerState {
             styles: Vec::new(),
             style_epoch: None,
             fit_memory: BTreeMap::new(),
+            fit_whole: BTreeSet::new(),
             density_fit_memory: BTreeMap::new(),
             density_floor_memory: BTreeMap::new(),
+            density_whole: BTreeSet::new(),
         }
     }
 }
@@ -1427,6 +1442,8 @@ fn handle_open(
                 state.fit_memory.clear();
                 state.density_fit_memory.clear();
                 state.density_floor_memory.clear();
+                state.fit_whole.clear();
+                state.density_whole.clear();
                 state.jobs = command.jobs;
                 state.styles.clear();
                 state.style_epoch = None;
@@ -1481,6 +1498,8 @@ fn handle_open(
                 state.fit_memory.clear();
                 state.density_fit_memory.clear();
                 state.density_floor_memory.clear();
+                state.fit_whole.clear();
+                state.density_whole.clear();
             state.jobs = command.jobs;
             state.styles.clear();
             state.style_epoch = None;
@@ -1781,6 +1800,8 @@ fn handle_style(state: &mut WorkerState, command: StyleCommand, responses: &Send
                 state.fit_memory.clear();
                 state.density_fit_memory.clear();
                 state.density_floor_memory.clear();
+                state.fit_whole.clear();
+                state.density_whole.clear();
             respond(
                 responses,
                 format!(
@@ -2889,13 +2910,28 @@ fn run_render(
     // the budget fit a retained frame must have been planned under to serve
     // this request: the scale's remembered decision (the fit key does not
     // depend on the view's position, so the request before the snap gives it)
-    let expected_fit = if command.exact {
-        None
+    // ... or every page at the asked cut: a frame its budget holds whole keeps
+    // them all whatever the decision (floe_vfs plan_hier_fixed, user
+    // 2026-10-01) - which of the two this frame is, its plan says, and a
+    // reuse drawn under the other is dropped then
+    let (expected_fit, expected_whole) = if command.exact {
+        (None, None)
     } else {
         let pre = make_plan_request(cache, &command, pass1_decode_budget(state.page_cache.budget_bytes(), &command))?;
-        if pre.decode_budget > 0 { state.fit_memory.get(&fit_memory_key(&command, &pre)).copied() } else { None }
+        if pre.decode_budget > 0 {
+            (state.fit_memory.get(&fit_memory_key(&command, &pre)).copied(), Some(floe_render_core::FixedFit::everything(pre.cut_dbu)))
+        } else {
+            (None, None)
+        }
     };
+    let mut reuse_fit = expected_fit;
     let mut pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key, expected_fit);
+    if pan_reuse.is_none() && expected_fit.is_some() && expected_whole != expected_fit {
+        pan_reuse = prepare_pan_reuse(state, &mut command, &summary_key, expected_whole);
+        if pan_reuse.is_some() {
+            reuse_fit = expected_whole;
+        }
+    }
     let command = &command;
     check_generation(cancellation, command.generation)?;
     // the density stack's pass 2 decodes within a reserve of its own
@@ -2917,9 +2953,14 @@ fn run_render(
     // decode pages, style - and a view containing this one). A layer
     // toggle A -> B -> A reuses A's retained frame in full but must
     // replan and republish, or picks on A-only layers would fail.
+    // A retained frame drawn under a thinning decision serves only after the
+    // plan: this view may be one its budget holds whole (2026-10-01), which
+    // only planning tells; a frame drawn whole holds every page of any view
+    // inside it.
     let label_only = pan_reuse
         .as_ref()
         .is_some_and(|reuse| reuse.valid == [0, 0, command.width, command.height])
+        && (reuse_fit.is_none() || reuse_fit == expected_whole)
         && published_scene_serves(published_scene, command, state.style_epoch, &summary_key)?;
     // the budget fit decided at this scale before, if any (WorkerState::
     // fit_memory); the first frame at a scale decides it over the extent the
@@ -2988,12 +3029,16 @@ fn run_render(
     check_generation(cancellation, command.generation)?;
     // remember the fit this plan decided (a redecision replaces the old one)
     if !label_only && !command.exact {
-        if command.background && planned.plan.stats.fit_redecided {
+        // every page as asked (or no budget fit at all)
+        let whole = planned.plan.stats.fit_whole || planned.plan.stats.fit_decision.is_none();
+        if command.background && (planned.plan.stats.fit_redecided || (!whole && state.fit_whole.contains(&fit_key))) {
             // the viewer's margin does not fit under the scale's decision
             // (denser content than the frame that decided it): drawn under
             // another it would change the picture when it lands (field
             // 2026-09-27: 50% pans into the chip, 1,772 px of the viewport)
-            // - dropped; the decision and the viewport stay, pans render
+            // - dropped; the decision and the viewport stay, pans render.
+            // So is one that has to thin where the viewport was held whole
+            // (2026-10-01): it would show fewer pages than the viewport did
             respond(responses, format!("dropped gen={} reason=fit", command.generation));
             return Ok(());
         }
@@ -3002,15 +3047,24 @@ fn run_render(
                 state.fit_memory.insert(fit_key.clone(), decision);
             }
         }
-        if planned.plan.stats.fit_redecided && pan_reuse.is_some() {
-            // the reused tiles were drawn under the decision this frame
-            // replaced: the pages the new one drops or adds would sit beside
-            // them (review 2026-09-28) - the whole frame is drawn anew
+        if !command.background {
+            if whole {
+                state.fit_whole.insert(fit_key.clone());
+            } else {
+                state.fit_whole.remove(&fit_key);
+            }
+        }
+        if pan_reuse.is_some() && reuse_fit != planned.plan.stats.fit_decision {
+            // the reused tiles were drawn under another selection - the
+            // decision this frame replaced (review 2026-09-28), or every page
+            // where this frame has to thin, or the reverse (2026-10-01): the
+            // pages one drops or adds would sit beside them - the whole
+            // frame is drawn anew
             pan_reuse = None;
         }
     }
     // the fit this frame is drawn under, for the retained frame it leaves
-    let frame_fit = if label_only { expected_fit } else { planned.plan.stats.fit_decision };
+    let frame_fit = if label_only { reuse_fit } else { planned.plan.stats.fit_decision };
     let planned_labels = if command.labels {
         Some(cache.plan_labels(&request, command.frames, command.label_font_px)?)
     } else {
@@ -3273,6 +3327,7 @@ fn run_render(
                         &fit_key,
                         &mut state.density_fit_memory,
                         &mut state.density_floor_memory,
+                        &mut state.density_whole,
                         command.background,
                         if progressive { Some(&mut publish_first) } else { None },
                     ) {
@@ -3954,6 +4009,7 @@ fn render_density_frame(
     fit_key: &str,
     density_memory: &mut BTreeMap<String, floe_render_core::FixedFit>,
     floor_memory: &mut BTreeMap<String, u8>,
+    whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
 ) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 11]), String> {
@@ -4098,8 +4154,14 @@ fn render_density_frame(
                         }
                         let floors = dot_page_floors();
                         if dots && !one_walk {
+                            // the last viewport's rung: a margin must plan at it (it
+                            // starts there and is dropped past it); a viewport probes
+                            // from the lowest rung, as its own budget decides (user
+                            // 2026-10-01: a probe that failed in a dense view kept every
+                            // later view at the zoom step off the floor)
                             let known = floor_memory.get(&side_key).copied();
-                            for rung in usize::from(known.unwrap_or(0))..floors.len() {
+                            let first = if background { usize::from(known.unwrap_or(0)) } else { 0 };
+                            for rung in first..floors.len() {
                                 let probe_started = Instant::now();
                                 let plan = plan_at(Some(floors[rung]), false)?;
                                 plan2[0] += elapsed_us(probe_started);
@@ -4179,9 +4241,11 @@ fn render_density_frame(
                                     None => {
                                         let planned_fine = plan_at(dots.then(density_cut_px), true)?;
                                         plan2[3] += u64::from(planned_fine.stats.fit_passes);
-                                        if background && planned_fine.stats.fit_redecided {
-                                            // the margin's pass 2 does not fit under the scale's decision:
-                                            // drawn otherwise it would change the picture when it lands
+                                        let whole = planned_fine.stats.fit_whole || planned_fine.stats.fit_decision.is_none();
+                                        if background && (planned_fine.stats.fit_redecided || (!whole && whole_memory.contains(&side_key))) {
+                                            // the margin's pass 2 does not fit under the scale's decision,
+                                            // or has to thin where the viewport's was held whole: drawn
+                                            // otherwise it would change the picture when it lands
                                             return Err(DROPPED_FIT.to_string());
                                         }
                                         if let Some(decision) = planned_fine.stats.fit_decision {
@@ -4196,6 +4260,16 @@ fn render_density_frame(
                                 planned_fine
                             }
                         };
+                        if !background {
+                            // whether this viewport's pass 2 kept every page as asked (a
+                            // floor's probe and the bands' merge plan as asked): a margin
+                            // that has to thin here is dropped
+                            if planned_fine.stats.fit_whole || planned_fine.stats.fit_decision.is_none() {
+                                whole_memory.insert(side_key.clone());
+                            } else {
+                                whole_memory.remove(&side_key);
+                            }
+                        }
                         plan2[5] += planned_fine.stats.visited_bvh;
                         plan2[6] += planned_fine.stats.visited_page_bvh;
                         plan2[7] += planned_fine.stats.page_candidates;

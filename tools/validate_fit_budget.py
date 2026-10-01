@@ -35,7 +35,12 @@ chip (tools/gen_main01_like.py) under a small budget:
     fit), the corner draws the same after it, and the whole layout as a
     viewport frame refits (fit_redecided 1) - reusing no tile of the corner's
     retained frame (drawn under the old decision) and equal to a fresh render;
-    the same view again reuses tiles under the new decision.
+    the same view again reuses tiles under the new decision;
+  * a frame its budget holds whole keeps every page whatever the scale
+    remembers (user 2026-10-01: the decision is kept per scale, not per place,
+    and a dense view's emptied a sparse view at the same zoom step): after the
+    refit the corner draws exactly as at first (fit_thin 0, not refit) and the
+    whole layout again under the refit's decision.
 
     .venv/bin/python tools/validate_fit_budget.py
 """
@@ -234,8 +239,20 @@ def main():
                 # under the new decision the frame is retained and serves the same view again
                 again, ra_ = frame(tiny, 5, whole, size=PX)
                 assert ra_['tiles_reused'] > 0 and bytes(again) == bytes(view), (ra_['plan_culls'], ra_['tiles_reused'])
+                # the corner at the same scale is still one its budget holds whole: it keeps
+                # every page whatever the scale now remembers (user 2026-10-01: a dense
+                # view's decision, kept per scale, emptied a sparse view at the same zoom
+                # step) - drawn as at first, not from the thinned frames that cover it -
+                # and the remembered decision stays for the frames that have to thin
+                corner3, rq3 = frame(tiny, 6, quarter, size=PX // 4)
+                assert bytes(corner3) == bytes(corner) and rq3['plan_culls']['fit_thin'] == 0 \
+                    and rq3['plan_culls']['fit_redecided'] == 0, 'the corner after the refit: %s' % (rq3['plan_culls'],)
+                again2, ra2_ = frame(tiny, 7, whole, size=PX)
+                assert bytes(again2) == bytes(view) and ra2_['plan_culls']['fit_redecided'] == 0 \
+                    and ra2_['plan_culls']['fit_thin'] == rv['plan_culls']['fit_thin'], ra2_['plan_culls']
                 print('fit budget: a margin the decision does not hold is dropped (reason fit) and the corner draws the same after it; '
-                      'the same extent as a viewport refits (1/%d) reusing no tile and equals a fresh render; the same view again reuses %d tiles'
+                      'the same extent as a viewport refits (1/%d) reusing no tile and equals a fresh render; the same view again reuses %d tiles; '
+                      'the corner after it, held whole, draws as at first'
                       % (1 << rv['plan_culls']['fit_thin'], ra_['tiles_reused']))
             finally:
                 tiny.stop()

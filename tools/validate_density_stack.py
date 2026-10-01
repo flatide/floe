@@ -99,6 +99,12 @@ cell under it as dots in blocks, never walking into it:
     on the first round, is answered - its final frame equals its own one-round
     frame - and the old generation publishes no final frame after that.
 
+Pass 2's budget decision is the frame's own (user 2026-10-01: kept per scale,
+not per place, a dense view's decision emptied a sparse view at the same zoom
+step): on an uneven layout under a 1 MB pass-2 reserve the whole extent thins
+its pass 2 and the corner quarter, drawn after it at the same scale, equals
+the corner a fresh worker draws (history_checks).
+
     .venv/bin/python tools/validate_density_stack.py
 """
 import os
@@ -342,6 +348,87 @@ def dots_checks(temp):
             w.stop()
 
 
+def uneven_layout(path):
+    """400 x 400 um: four distinct cells in the corner quarter, two hundred
+    more in the far half (tools/validate_fit_budget.py's layout_uneven), each
+    a hundred 1-1.3 um boxes - shapes of 1.5-2 px at the scale below, under
+    medium's 3 px cut and over pass 2's 1 px floor, in pages pass 1 leaves."""
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(*LOW)
+    cells = 0
+
+    def place(x_um, y_um):
+        nonlocal cells
+        cell = ly.create_cell('C%03d' % cells)
+        for j in range(10):
+            for i in range(10):
+                x, y = i * 1.8 + 0.1 * ((i * 7 + j * 3) % 4), j * 1.8 + 0.1 * ((i + j * 5) % 3)
+                edge = 1.0 + 0.05 * ((i + j * 3 + cells) % 6)
+                cell.shapes(layer).insert(kdb.DBox(x, y, x + edge, y + edge))
+        top.insert(kdb.DCellInstArray(cell.cell_index(), kdb.DTrans(kdb.DVector(x_um, y_um))))
+        cells += 1
+
+    for j in range(2):
+        for i in range(2):
+            place(10.0 + i * 50.0, 10.0 + j * 50.0)
+    for j in range(20):
+        for i in range(10):
+            place(200.0 + i * 20.0, j * 20.0)
+    ly.write(str(path))
+
+
+def history_checks(temp):
+    """Pass 2's budget decision is remembered per scale, not per place, and
+    the viewer's zoom steps recur everywhere (user 2026-10-01, the synthetic
+    chip: a view planned 28 pass-2 pages and lit 85k px fresh, 0 pages and
+    69k px after a dense view at the same zoom step had decided). Under a
+    1 MB pass-2 reserve the uneven layout's whole extent has to thin and its
+    corner quarter fits whole: the corner drawn after the whole layout at the
+    same scale equals the corner drawn first by a fresh worker."""
+    src = Path(temp) / 'uneven.oas'
+    uneven_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BUDGET_MB': '1'}
+    fresh, after, roomy = worker(src, env), worker(src, env), worker(src, {k: v for k, v in env.items() if k != 'FLOE_RUST_DENSITY_BUDGET_MB'})
+    try:
+        dbu = float(fresh.cache.meta['dbu'])
+        side, um_per_px = 400.0, 400.0 / 600
+
+        def view(w, gen, box_um):
+            px_w = round((box_um[2] - box_um[0]) / um_per_px)
+            w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in box_um), 'view': None,
+                      'w': px_w, 'h': px_w, 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('uneven frame timeout')
+
+        whole, corner = (0.0, 0.0, side, side), (0.0, 0.0, side / 4, side / 4)
+        first, rf = view(fresh, 1, corner)
+        thinned, rt = view(after, 1, whole)
+        full, rr = view(roomy, 1, whole)
+        assert rt['density_stack']['lit'] < rr['density_stack']['lit'], (
+            'the whole layout must thin its pass 2 under the 1 MB reserve: lit %d, %d under 128 MB' % (rt['density_stack']['lit'], rr['density_stack']['lit']))
+        again, ra = view(after, 2, corner)
+        assert rf['density_stack']['lit'] > 0 and again == first, (
+            'the corner after the whole layout at the same scale differs from a fresh one in %d px (lit %d vs %d)' % (
+                sum(1 for i in range(0, len(first), 4) if first[i:i + 4] != again[i:i + 4]), ra['density_stack']['lit'], rf['density_stack']['lit']))
+        print('density stack: pass 2 is decided per frame - the corner lights %d px fresh and the same after the whole layout thinned '
+              'its pass 2 (%d px lit, %d under 128 MB)' % (rf['density_stack']['lit'], rt['density_stack']['lit'], rr['density_stack']['lit']))
+    finally:
+        for w in (fresh, after, roomy):
+            w.stop()
+
+
 def frames_of(w, gen, visible, bg=False):
     """Every frame answer of one render, the refining rounds first: [(pixels,
     result)], the last one final."""
@@ -541,6 +628,7 @@ def main():
             for w in workers.values():
                 w.stop()
         dots_checks(temp)
+        history_checks(temp)
     print('density stack gate: OK')
 
 

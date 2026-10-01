@@ -125,6 +125,10 @@ sh tools/validate_rust.sh --only quick path/to.oas
   `density_floor` = 0 / 0.25 / 0.59; 어댑터 계약 `density_floor=0.250` → 0.25, 없으면 None.
   0.12.262(2패스 계획을 스레드로, 선택): 게이트 점 절 — `FLOE_RUST_DENSITY_PLAN_THREADS=2`의 프레임이 기본과 바이트 동일하고
   `density_plan2` threads 2; 어댑터 계약 `density_plan2`(…/threads/reads/items).
+  0.12.265(2패스의 결정은 프레임마다, 사용자 2026-10-01): `uneven` 레이아웃(400 µm, 구석 1/4에 서로 다른 셀 4개·먼 절반에
+  200개, 각 1~1.3 µm 사각형 100개 = 0.667 µm/px에서 1.5~2 px, medium 컷 아래·하한 위)과 2패스 예약 1 MB
+  (`FLOE_RUST_DENSITY_BUDGET_MB=1`)에서 전체를 먼저 그리면 2패스가 솎이고(lit이 128 MB 워커보다 적다) 그 뒤 같은
+  배율의 구석이 새 워커의 구석과 바이트까지 같다(0.12.264: 1,137 px 대신 858 px).
   0.12.261(블록 4 px, 한 번 걷기는 선택, 하한 1 px, 페이지 점 끔): 게이트 점 절의 기본은 4 px·퍼뜨림·맞춤·하한 1 px —
   성긴 배열 100 px가 각 멤버에서 1.5 px 안, 맞닿은 배열 = Σ min(8, 4×4 블록의 멤버), 항목 = 성긴 배열 100 + 1 + 맞닿은
   블록, TOP의 0.5 px 점은 그리지도 점으로 서지도 않음, `density_floor` 1, `density_plan2` 탐침 0·맞춤 1; 하한 0·0.25 px는
@@ -188,7 +192,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
   첫 가운데도 여백의 가운데와 같음, 픽셀 일부만큼 옮긴 가운데가 기억을 공유, 예산 안의 근접뷰도 결정(everything)을
   지님(`fit_fixed` 1, `fit_thin` 0); 구석 1/4에 서로 다른 셀 4개, 먼 절반에 200개인 전용 레이아웃(`layout_uneven`,
   예산 1 MB)에서 구석이 everything으로 결정한 뒤 전체를 여백(`bg`)으로 청하면 `dropped`(reason fit)로 떨어지고 구석은
-  같은 그림, 전체를 뷰포트로 청하면 다시 결정(`fit_redecided` 1), 약 35초; `planner`·`render` 별칭에 포함): 합성
+  같은 그림, 전체를 뷰포트로 청하면 다시 결정(`fit_redecided` 1); 0.12.265: 그 뒤 같은 배율의 구석이 처음 구석과 바이트까지
+  같고(`fit_thin` 0, 다시 결정 아님 — 예산이 통째로 담는 프레임은 결정과 무관; 0.12.264는 솎인 전체 프레임을 잘라
+  썼다), 전체를 다시 청하면 그 결정 그대로, 약 35초; `planner`·`render` 별칭에 포함): 합성
   MAIN01 칩의 keep + cut 1 px 광역뷰가 48 MB 예산에서 오류 대신 낮춘 밀도(`fit_thin` > 0)로
   그려지고 **빈 프레임이 아닌지**, `FLOE_RUST_FIT_THIN=off`는 컷을 올리고(`fit_pct` > 100)
   `FLOE_RUST_FIT_BUDGET=off`는 종전 오류인지, 예산 안의 프레임은 픽셀이 바뀌지 않는지.

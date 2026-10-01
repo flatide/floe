@@ -1021,6 +1021,11 @@ pub struct HierStats {
     pub fit_decision: Option<FixedFit>,
     pub fit_fixed: bool,
     pub fit_redecided: bool,
+    /// the budget held the frame whole: every page as asked, at the asked
+    /// cut (FixedFit::everything), whatever decision was given - a frame
+    /// that has to thin applies the given one (plan_hier_fixed; user
+    /// 2026-10-01)
+    pub fit_whole: bool,
     /// dots emitted for representative cut placements (kept members
     /// in view, before the layer fan-out) and for cut child-BVH
     /// subtrees within the dot pitch (one each)
@@ -1360,6 +1365,7 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
     if !asked.stats.fit_over {
         let mut plan = asked;
         plan.stats.fit_passes = passes;
+        plan.stats.fit_whole = true;
         return plan;
     }
     let rungs = fit_rungs(req.cut_dbu, req.px_per_dbu);
@@ -1430,6 +1436,7 @@ fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         if at == 0 && bytes <= req.decode_budget {
             plan.stats.fit_passes = passes;
             plan.stats.fit_decision = Some(FixedFit::everything(req.cut_dbu));
+            plan.stats.fit_whole = true;
             return plan;
         }
         let mut used = at;
@@ -1611,9 +1618,37 @@ fn keep_pages(v: &Ovm, plan: &mut HierPlan, keep: &[bool]) -> u64 {
 /// A budget fit decided before, applied as it is (HierOpts::fixed_fit): the
 /// complete plan at the decision's cut keeps the pages whose `fit_priority`
 /// is at most the decision's - the same pages, whatever the frame - so every
-/// frame at a scale thins alike. None when those pages do not fit the
-/// budget: the caller decides anew.
+/// frame at a scale that has to thin thins alike. None when those pages do
+/// not fit the budget: the caller decides anew.
+///
+/// A frame its budget holds whole keeps every page as asked, whatever was
+/// decided (user 2026-10-01, synthetic chip at one zoom step: the view at
+/// (15567, 17094) um planned 28 pass-2 pages and lit 85k px fresh, but 0
+/// pages and 69k px after a dense view at (15000, 16000) um had decided -
+/// the decision is kept per scale, not per place, and the viewer's zoom
+/// steps recur everywhere). Its decision is FixedFit::everything at the
+/// asked cut - the pages it holds - and the remembered one stays for the
+/// frames that have to thin.
 fn plan_hier_fixed(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedFit) -> Option<HierPlan> {
+    let whole = |mut plan: HierPlan, bytes: u64, passes: u32| {
+        plan.stats.fit_decision = Some(FixedFit::everything(req.cut_dbu));
+        plan.stats.fit_whole = true;
+        plan.stats.fit_fixed = true;
+        plan.stats.fit_passes = passes;
+        plan.stats.fit_bytes = bytes;
+        plan
+    };
+    if fixed.cut_dbu > req.cut_dbu {
+        // the decision raised the cut: the frame as asked first, abandoned
+        // past the fit's overshoot like the fit's own first pass
+        let asked = plan_hier_as_asked(v, req, opts, req.decode_budget.saturating_mul(FIT_OVERSHOOT));
+        if !asked.stats.fit_over {
+            let bytes = unique_page_memory(v, &asked);
+            if req.decode_budget == 0 || bytes <= req.decode_budget {
+                return Some(whole(asked, bytes, 1));
+            }
+        }
+    }
     let mut attempt = req.clone();
     attempt.cut_dbu = fixed.cut_dbu.max(req.cut_dbu);
     let mut plan = plan_hier_as_asked(v, &attempt, opts, 0);
@@ -1627,6 +1662,12 @@ fn plan_hier_fixed(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedFit) -> 
     };
     let threshold = (std::cmp::Reverse(fixed.class), fixed.phase, fixed.page);
     let metas: Vec<floe_ovm::PageV> = plan.pages.iter().map(|&pi| v.page(pi)).collect();
+    if attempt.cut_dbu == req.cut_dbu {
+        let total: u64 = metas.iter().map(|p| page_memory(p.records, p.usize_)).sum();
+        if req.decode_budget == 0 || total <= req.decode_budget {
+            return Some(whole(plan, total, 1));
+        }
+    }
     let prio: Vec<_> = metas.iter().zip(&plan.pages).map(|(p, &pi)| fit_priority(p, key, pi)).collect();
     let keep: Vec<bool> = prio.iter().map(|p| *p <= threshold).collect();
     let bytes: u64 = metas.iter().zip(&keep).filter(|(_, k)| **k).map(|(p, _)| page_memory(p.records, p.usize_)).sum();
@@ -1637,10 +1678,6 @@ fn plan_hier_fixed(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedFit) -> 
     plan.stats.fit_fixed = true;
     plan.stats.fit_passes = 1;
     plan.stats.fit_bytes = bytes;
-    if keep.iter().all(|&k| k) && attempt.cut_dbu == req.cut_dbu {
-        // the frame is lighter than the one decided on: nothing thinned
-        return Some(plan);
-    }
     fit_class_stats(&mut plan, &prio, &keep, fixed.class, req.cut_dbu);
     plan.stats.fit_pct = ((attempt.cut_dbu as f64 / req.cut_dbu.max(1) as f64) * 100.0).round().max(100.0) as u32;
     if attempt.cut_dbu > req.cut_dbu {
@@ -5628,13 +5665,29 @@ mod tests {
         assert_eq!((six.pages.clone(), state(&six)), (vec![0, 4, 8, 12, 16, 17], (false, true, 2)));
         let decision = six.stats.fit_decision.expect("a thinned plan records its decision");
         assert_eq!((decision.cut_dbu, decision.class), (50, 7));
-        // under the six-page decision a frame with room for everything keeps
-        // exactly those pages - the same pages whatever the frame
-        let held = plan_hier(&chip, &ask(18 * per), &under(Some(decision)));
+        // under the six-page decision a frame that has to thin keeps exactly
+        // those pages - the same pages whatever the frame ...
+        let held = plan_hier(&chip, &ask(10 * per), &under(Some(decision)));
         assert_eq!((held.pages.clone(), held.stats.fit_decision, state(&held)), (six.pages.clone(), Some(decision), (true, false, 2)));
+        // ... and one its budget holds whole keeps every page, whatever was
+        // decided (user 2026-10-01: a dense view's decision, kept per scale,
+        // emptied a sparse view at the same zoom step), its decision the
+        // everything at its cut and the remembered one left as it was
+        let roomy_now = plan_hier(&chip, &ask(18 * per), &under(Some(decision)));
+        assert_eq!((roomy_now.pages.len(), roomy_now.stats.fit_decision, state(&roomy_now)), (18, Some(FixedFit::everything(50)), (true, false, 0)));
         // a decision the budget of this frame cannot hold: decided anew
         let three = plan_hier(&chip, &ask(3 * per), &under(Some(decision)));
         assert_eq!((three.pages.clone(), state(&three)), (vec![0, 16, 17], (false, true, 4)));
+        // a decision that raised the cut (one page of 1600 at the cut of 256)
+        // does not raise it for a frame that holds its pages whole at its own
+        let one = plan_hier(&chip, &ask(per), &under(None));
+        let raised = one.stats.fit_decision.expect("a fitted plan records its decision");
+        assert_eq!((one.pages.len(), raised.cut_dbu > 50), (1, true));
+        let whole = plan_hier(&chip, &ask(18 * per), &under(Some(raised)));
+        assert_eq!((whole.pages.len(), whole.stats.fit_decision, whole.stats.fit_pct, state(&whole)), (18, Some(FixedFit::everything(50)), 0, (true, false, 0)));
+        // and one that does not hold them still plans under it
+        let under_raised = plan_hier(&chip, &ask(per), &under(Some(raised)));
+        assert_eq!((under_raised.pages.clone(), under_raised.stats.fit_decision, under_raised.stats.fit_fixed), (one.pages.clone(), Some(raised), true));
     }
 
     #[test]
