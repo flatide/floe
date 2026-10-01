@@ -123,6 +123,13 @@ sh tools/validate_rust.sh --only quick path/to.oas
   라벨 `*/2`·`1/2`, 단계 이동이 [0, 2]로 제한, 전체에서 한 단계 = 1, top으로 돌아오면 `7/16`, 루트 변경이 라벨 갱신.
   0.12.253: 하한 `FLOE_RUST_DENSITY_FLOOR_PX` — 0.25 px는 0.5 px 미세 사각형을 그리고 0.6 px는 뺀다,
   `density_floor` = 0 / 0.25 / 0.59; 어댑터 계약 `density_floor=0.250` → 0.25, 없으면 None.
+  0.12.259(한 번 걷기, CUT_DENSITY_DESIGN §10.12): 게이트 점 절 — 기본(한 번 걷기)에서 TOP의 0.5 px 점 200개 페이지는
+  정확히 50점(면적이 켜는 양)이고 하한 0.25·0.6 px에도 같으며 `density_floor` 0 / 0.25 / 0.59, `density_plan2`는 탐침 0·
+  맞춤 1패스; 탐침과 맞춤(`FLOE_RUST_DENSITY_ONE_WALK=off`)은 예전 기대(점이 컷 없는 프레임과 같고 0.25는 그림·0.6은 뺌);
+  이전 규칙(4 px, 퍼뜨림 끔, 한 번 걷기 끔)은 예전 기대 그대로. 단위
+  `the_dots_one_walk_takes_pass_1s_pages_and_dots_the_pages_under_the_cut`(큰 페이지만 계획, 레코드 컷 0·75, 작은 페이지는
+  도형 수만큼의 점, LEAF 1점, 예산이 있어도 맞춤 없음, 몫 모드는 작은 페이지를 계획), `a_wash_the_walk_pushes_itself_carries_no_dot_count`
+  (M7-C 페이지 wash는 개수 0, 블록 항목은 제 개수 — 개수와 wash가 나란함); 어댑터 계약 `density_plan2`.
   0.12.258(타일 걷기의 인스턴스 색인, RUST_RENDERER.md): 렌더 코어 단위 `a_tile_walks_the_instances_that_meet_it` —
   인스턴스 303개(무작위 자리·방향의 단일 배치 300, 30×2 격자, 점 목록, 빈 자식)의 셀을 색인 켬·끔으로 그린 프레임과
   사각형 칠 수가 같다(타일 8·16·128, 워커 1~3, bin 켬·끔); 8 px 타일에서 색인은 검사한 멤버가 4분의 1 미만.

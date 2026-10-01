@@ -2254,8 +2254,12 @@ fn visible_members_within(
     }
 }
 
-/// Item cap (~64MB of items); past it the round falls back to the
-/// per-tile walk (`work_bin_items=0` telemetry), pixels unchanged.
+/// Item cap: a PlaneItem is 120 bytes (size_of, 2026-10-01), so about
+/// 90 MiB of items at the cap, beside the planes' vectors' growth and the
+/// wash chunks' points (32 bytes each, 128 to an item); past it the round
+/// falls back to the per-tile walk (`work_bin_items=0` telemetry), pixels
+/// unchanged - since 0.12.258 a tile walks the instances that meet it
+/// (FrameScene::inst_index), so the fallback's cost follows the area.
 const WORK_BIN_MAX_ITEMS: u64 = 768 * 1024;
 
 /// Internal marker: the collection walk aborts through the normal
@@ -2559,7 +2563,8 @@ fn collect_cell(
         let Some(&plane) = plane_of.get(&layer_idx) else {
             continue;
         };
-        let count = cell.dot_counts.get(at).copied();
+        // (0: a wash the walk pushed itself, no count - floe_vfs flush_dots)
+        let count = cell.dot_counts.get(at).copied().filter(|&count| count > 0);
         let world_bbox = world_transform.apply_bbox(wash)?;
         if !world_bbox.intersects(&cull_view) {
             continue;
@@ -5515,7 +5520,7 @@ fn render_cell(
         let world = world_transform.apply_bbox(wash)?;
         let drawn = if dots {
             band.set_density_plane(plane);
-            paint_density_dots(band, request, world, cell.dot_counts.get(at).map(|&count| count as u32))?
+            paint_density_dots(band, request, world, cell.dot_counts.get(at).filter(|&&count| count > 0).map(|&count| count as u32))?
         } else {
             paint_world_rect(band, &marker_request(request), world, paint)?
         };

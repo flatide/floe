@@ -256,7 +256,14 @@ raised it to). `FLOE_RUST_DENSITY_BLOCK_PX` (diagnostic, default 8, 4..16;
 a larger block is less detail and less work; the frame line's
 `density_block=<px>` reports it and the viewer's status tag shows it
 (`[density: dots, block 8 px, floor 0 px, pass 2 plan N ms, P pages]`).
-`FLOE_RUST_DENSITY_SPREAD=off` is that change's kill switch: a block's dots as a
+Since 0.12.259 pass 2 plans once (`FLOE_RUST_DENSITY_ONE_WALK=off` restores the
+floor probe and the budget fit, which walked the view up to five times on the
+first frame at a scale): its pages at the cells' cut - pass 1's, in hand, nothing
+more decoded - its records at `FLOE_RUST_DENSITY_FLOOR_PX` (now the records'
+floor), a page all under the cut a dot item. The frame line's
+`density_plan2=probe_us/fit_us/probes/passes/regions/nodes/page_nodes/page_candidates`
+breaks pass 2's plans down (the status tag shows it after `pass 2 plan`).
+`FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's
 dot item is what its dots stand for within the block, its count carried apart

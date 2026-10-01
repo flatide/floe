@@ -3986,8 +3986,23 @@ class Viewer:
                             parts.append("floor %.2g px" % res["density_floor"])
                         us = res.get("density_us") or {}
                         if us:
-                            parts.append("pass 2 plan %d ms" % round(
-                                us.get("plan2_us", 0) / 1000))
+                            plan = "pass 2 plan %d ms" % round(
+                                us.get("plan2_us", 0) / 1000)
+                            # where it went (diagnostic, 2026-10-01): the
+                            # floor probes, the fitted plans and their passes,
+                            # the regions, the final plans' nodes
+                            p2 = res.get("density_plan2") or {}
+                            if p2:
+                                plan += (" (probe %d ms x%d, fit %d ms x%d"
+                                         " passes, %d regions, nodes %s,"
+                                         " page nodes %s, pages %s)") % (
+                                    round(p2["probe_us"] / 1000),
+                                    p2["probes"],
+                                    round(p2["fit_us"] / 1000), p2["passes"],
+                                    p2["regions"], fmt_count(p2["nodes"]),
+                                    fmt_count(p2["page_nodes"]),
+                                    fmt_count(p2["page_candidates"]))
+                            parts.append(plan)
                         pages = res.get("density_pages") or {}
                         if pages:
                             parts.append("%d pages" % pages.get("decoded", 0))

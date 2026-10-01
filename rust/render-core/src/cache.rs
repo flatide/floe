@@ -885,7 +885,7 @@ impl Cache {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.probe_limit, stop);
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, stop);
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }

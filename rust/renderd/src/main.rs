@@ -1154,6 +1154,12 @@ struct FramePixels {
     /// the dots' floor (FLOE_RUST_DENSITY_FLOOR_PX), the density cut, or
     /// what a budget fit raised it to
     density_floor: Option<f64>,
+    /// pass 2's plans, summed over its sides (diagnostic, 2026-10-01: on the
+    /// field chip the plan took 6.9 s whatever the dot block): the floor
+    /// probes' and the fitted plans' wall time (us), the probes, the fitted
+    /// plans' passes (HierStats::fit_passes), the regions planned over, and
+    /// the final plans' child-BVH nodes, page-BVH nodes and page candidates
+    density_plan2: Option<[u64; 8]>,
 }
 
 fn render_worker(
@@ -1276,6 +1282,7 @@ fn run_clip(
         fixed_fit: None,
         root: command.root,
         sub_cut_dots: None,
+        dot_records: None,
         probe_limit: 0,
     };
     let plan_started = Instant::now();
@@ -2410,6 +2417,28 @@ fn density_stack_enabled() -> bool {
 /// view). FLOE_RUST_DENSITY_FLOOR_PX, diagnostic (user 2026-09-30: compare
 /// 0.5 and 0.25 px); unset, empty or out of range means 0; a floor at or
 /// above the density cut goes straight to it.
+/// The sub-cut dots' one walk (CUT_DENSITY_DESIGN §10.12, 2026-10-01; field:
+/// pass 2 planned 6.9 s whatever the dot block - the floor probe and the
+/// budget fit's ladder walk the view up to five times on the first frame at a
+/// scale, and every zoom is one): pass 2 plans once, its pages at the cells'
+/// cut (pass 1's, in hand - nothing more is decoded), its records at
+/// dot_record_floor_px, a page all under the cut a dot item.
+/// FLOE_RUST_DENSITY_ONE_WALK=off is the kill switch (the probe and the fit).
+fn density_one_walk_enabled() -> bool {
+    std::env::var("FLOE_RUST_DENSITY_ONE_WALK").as_deref() != Ok("off")
+}
+
+/// The one walk's record floor (px, the larger side): FLOE_RUST_DENSITY_FLOOR_PX,
+/// unset, empty or invalid 0 - every record of the pages in hand under pass
+/// 1's cut.
+fn dot_record_floor_px() -> f64 {
+    std::env::var("FLOE_RUST_DENSITY_FLOOR_PX")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(0.0)
+}
+
 fn dot_page_floors() -> Vec<f64> {
     let floor = std::env::var("FLOE_RUST_DENSITY_FLOOR_PX")
         .ok()
@@ -3150,6 +3179,7 @@ fn run_render(
         let mut density_us: Option<[u64; 5]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
+        let mut density_plan2: Option<[u64; 8]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -3195,7 +3225,7 @@ fn run_render(
                         respond(responses, format!("frame gen={} round=1 final=0 png={} format={} partial=1 deferred=1 density_round=1", command.generation, path, format));
                         Ok(())
                     };
-                    let (report, counts, times, floor) = match render_density_frame(
+                    let (report, counts, times, floor, plan2) = match render_density_frame(
                         cache,
                         &mut state.page_cache,
                         command,
@@ -3224,6 +3254,7 @@ fn run_render(
                     };
                     density_pages = Some([counts[0], counts[1], counts[2], counts[3]]);
                     density_floor = floor;
+                    density_plan2 = Some(plan2);
                     density_dots = density_dots_enabled().then_some([counts[4], counts[5]]);
                     // both plans / the scenes / the collection / the regions / the decode
                     density_us = Some([times[0], times[1], report.stats.density_collect_us, times[2], times[3]]);
@@ -3316,6 +3347,7 @@ fn run_render(
                 density_bin: density_plan.is_some().then_some(report.stats.density_bin),
                 density_dots,
                 density_floor,
+                density_plan2,
             }
         };
         check_generation(cancellation, command.generation)?;
@@ -3395,7 +3427,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} queue_us={} wall_us={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -3538,6 +3570,10 @@ fn run_render(
                 pixels.density_floor.map_or_else(|| "-".to_string(), |floor| format!("{floor:.3}")),
                 // the sub-cut dots' block (FLOE_RUST_DENSITY_BLOCK_PX), px
                 if pixels.density_dots.is_some() { format!("{}", floe_render_core::dot_block_px()) } else { "-".to_string() },
+                // pass 2's plans: probe_us/fit_us/probes/passes/regions/nodes/page_nodes/page_candidates
+                pixels
+                    .density_plan2
+                    .map_or_else(|| "-".to_string(), |counts| counts.map(|count| count.to_string()).join("/")),
                 queue_us,
                 // up to this frame's response: the phases above account for
                 // part of it, the rest is time no phase timer covers
@@ -3887,7 +3923,7 @@ fn render_density_frame(
     floor_memory: &mut BTreeMap<String, u8>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 8]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -3911,6 +3947,8 @@ fn render_density_frame(
         (command.width as f64 / (x1 - x0)).min(command.height as f64 / (y1 - y0))
     };
     let mut times = [0u64; 4];
+    // the plans' breakdown (RenderPixels::density_plan2)
+    let mut plan2 = [0u64; 8];
     let mut failed: Option<String> = None;
     let (report, _pool_us) = cache.with_decode_pool(
         decode_workers,
@@ -3953,6 +3991,7 @@ fn render_density_frame(
                     // plan would count every layer over the whole top space for
                     // nothing: the two sides plan apart, as without the dots.
                     let dots = density_dots_enabled() && command.cut_px > 0.0;
+                    let one_walk = dots && density_one_walk_enabled();
                     let (top_area, others_area): (f64, f64) = (
                         regions_top.iter().map(|b| (b.x1 - b.x0).max(0) as f64 * (b.y1 - b.y0).max(0) as f64).sum(),
                         regions_others.iter().map(|b| (b.x1 - b.x0).max(0) as f64 * (b.y1 - b.y0).max(0) as f64).sum(),
@@ -3970,6 +4009,7 @@ fn render_density_frame(
                         if regions.is_empty() || layers.is_empty() {
                             continue;
                         }
+                        plan2[4] += regions.len() as u64;
                         let plan_started = Instant::now();
                         let region_boxes = regions
                             .iter()
@@ -4009,12 +4049,28 @@ fn render_density_frame(
                         // scale reads the same pages; a margin that would have to go up
                         // is dropped. Past the floors, the density cut with the
                         // planner's budget fit (as without the dots).
+                        // the one walk (density_one_walk_enabled): no probe, no fit
                         let mut floored = None;
+                        if one_walk {
+                            let walk_started = Instant::now();
+                            let mut fine = make_plan_request_cut(cache, command, 0, command.cut_px)?;
+                            fine.sub_cut_dots = Some(1.0);
+                            fine.dot_records = Some((dot_record_floor_px() / command.cut_px).clamp(0.0, 1.0));
+                            fine.regions = region_boxes.clone();
+                            fine.visible_indices = Some(layers.clone());
+                            let fine = cache.page_plan_request(&fine, summary, !command.frames)?;
+                            floored = Some(cache.plan_cancellable(&fine, command.generation, cancellation)?.plan);
+                            plan2[1] += elapsed_us(walk_started);
+                            plan2[3] += 1;
+                        }
                         let floors = dot_page_floors();
-                        if dots {
+                        if dots && !one_walk {
                             let known = floor_memory.get(&side_key).copied();
                             for rung in usize::from(known.unwrap_or(0))..floors.len() {
+                                let probe_started = Instant::now();
                                 let plan = plan_at(Some(floors[rung]), false)?;
+                                plan2[0] += elapsed_us(probe_started);
+                                plan2[2] += 1;
                                 let fits = !plan.stats.fit_over && plan.stats.fit_bytes <= reserve;
                                 if !fits || known != Some(rung as u8) {
                                     if background && known.is_some() {
@@ -4038,7 +4094,10 @@ fn render_density_frame(
                                 // pass 2 plans to a reserve of its own (density_budget_bytes;
                                 // pass 1 plans to the rest) and its budget fit is remembered per
                                 // scale and side as pass 1's is: the same pages whatever the frame
+                                let fit_started = Instant::now();
                                 let planned_fine = plan_at(dots.then(density_cut_px), true)?;
+                                plan2[1] += elapsed_us(fit_started);
+                                plan2[3] += u64::from(planned_fine.stats.fit_passes);
                                 if background && planned_fine.stats.fit_redecided {
                                     // the margin's pass 2 does not fit under the scale's decision:
                                     // drawn otherwise it would change the picture when it lands
@@ -4052,6 +4111,9 @@ fn render_density_frame(
                                 planned_fine
                             }
                         };
+                        plan2[5] += planned_fine.stats.visited_bvh;
+                        plan2[6] += planned_fine.stats.visited_page_bvh;
+                        plan2[7] += planned_fine.stats.page_candidates;
                         counts[4] += planned_fine.stats.sub_cut_boxes;
                         counts[5] += planned_fine.stats.sub_cut_box_over;
                         // the records' cut this side planned at, px (the floor, or
@@ -4071,6 +4133,10 @@ fn render_density_frame(
                         for (&page_id, &prio) in density_plan.pages.iter().zip(density_plan.page_prio.iter()) {
                             if density_scene.page(page_id).is_some() {
                                 counts[1] += 1;
+                            } else if one_walk {
+                                // the one walk reads no page: one pass 1 left
+                                // out (its fit) stays out, counted as over
+                                counts[3] += 1;
                             } else {
                                 wanted.push((prio, page_id));
                             }
@@ -4141,7 +4207,7 @@ fn render_density_frame(
     if let Some(error) = failed {
         return Err(error);
     }
-    Ok((report?, counts, times, floor_px))
+    Ok((report?, counts, times, floor_px, plan2))
 }
 
 fn make_plan_request(cache: &Cache, command: &RenderCommand, decode_budget: u64) -> Result<PlanRequest, String> {
@@ -4210,6 +4276,7 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         fixed_fit: None,
         root: command.root,
         sub_cut_dots: None,
+        dot_records: None,
         probe_limit: 0,
     };
     request.validate()?;
@@ -4858,6 +4925,7 @@ mod tests {
             fixed_fit: None,
             root: command.root,
             sub_cut_dots: None,
+            dot_records: None,
             probe_limit: 0,
         };
         assert_ne!(fit_memory_key(&top, &request(&top)), fit_memory_key(&rooted, &request(&rooted)));

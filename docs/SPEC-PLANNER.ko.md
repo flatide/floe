@@ -281,6 +281,12 @@
   배치 읽기에서 `place_head`로 같은 값을 더한다(합이 상자 면적의 개수에 닿고 가장 위 레이어도 찾으면 멈춤; 마스크가
   있는 노드는 상자 면적). `Cache::plan_layer_only`는 개수를 wash와 함께 거른다. `BLOCK_PX=4 SPREAD=off`가 0.12.256의
   규칙이다. 단위 `the_dots_blocks_spread_what_they_count_and_count_what_is_there`.
+  **한 번 걷기(0.12.259):** `HierOpts::dot_records = Some(몫)`(`Vfs::plan_hier_in`의 다섯째 인자,
+  `PlanRequest::dot_records`)이면 페이지는 셀의 컷에서 고르고(`Hier::page_cut` = 컷), 래스터의 레코드 컷
+  (`HierStats::shape_cut`)은 컷 × 몫, 크기 컷된 페이지는 크기와 무관하게 점 항목(`box_page`; 개수 `page_dots`)이다.
+  `plan_hier`는 이때 예산 맞춤을 하지 않는다. 점 모드의 크기 컷 페이지 BVH 노드도 점 항목이고(퍼뜨림에서), 걷기가 직접 넣은
+  wash는 `dot_counts` 0으로 맞춰 둔다. 여러 블록에 걸친 항목의 몫은 소수점을 다음 블록으로 넘긴다. 단위
+  `the_dots_one_walk_takes_pass_1s_pages_and_dots_the_pages_under_the_cut`, `a_wash_the_walk_pushes_itself_carries_no_dot_count`.
   **탐침(0.12.248):** `HierOpts::probe_limit > 0`(`Vfs::plan_hier_in`의 다섯째 인자, `PlanRequest::probe_limit`)이면
   예산 맞춤 없이 그대로 계획하되 선택한 페이지의 추정 디코드 메모리(`fit_bytes`)가 한도를 넘는 순간 그 패스를
   버린다(`fit_over`) — renderd가 점 모드 2패스의 페이지 하한(0 px)이 예약에 드는지 볼 때 쓴다(CUT_DENSITY_DESIGN

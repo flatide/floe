@@ -1684,6 +1684,7 @@ fn source_plan_request(
         fixed_fit: None,
         root: None,
         sub_cut_dots: None,
+        dot_records: None,
         probe_limit: 0,
     };
     plan.validate()?;

@@ -751,6 +751,15 @@ pub struct HierOpts {
     /// about their centre and every item by its box, the rules before.
     pub dot_block_px: f64,
     pub dot_spread: bool,
+    /// The sub-cut dots' one walk (CUT_DENSITY_DESIGN §10.12, 2026-10-01):
+    /// Some(share) selects the pages at the cells' cut - those pass 1 drew,
+    /// decoded already - while the raster's record cut
+    /// (HierStats::shape_cut) is the cut times `share`, so their smaller
+    /// shapes draw from the page in hand; a page whose every shape is under
+    /// the cut stands as dots over its box (at most one a shape under
+    /// dot_spread), never decoded. No floor probe and no budget fit: one
+    /// walk. None: pages and records at the sub_cut_dots share, as before.
+    pub dot_records: Option<f64>,
     /// A probe of whether a plan fits (renderd's page floors of the sub-cut
     /// dots, CUT_DENSITY_DESIGN §10.12): > 0 plans as asked and abandons the
     /// pass once its pages pass this many decoded bytes (stats.fit_over) -
@@ -835,6 +844,7 @@ impl Default for HierOpts {
             sub_cut_dots: None,
             dot_block_px: dot_block_px(),
             dot_spread: dot_spread(),
+            dot_records: None,
             probe_limit: 0,
             stop: None,
             rep_decode_bytes: rep_decode_bytes(),
@@ -1304,6 +1314,11 @@ pub fn walk_vis(req: &ViewReq) -> Vec<u8> {
 }
 
 pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
+    // the sub-cut dots' one walk (HierOpts::dot_records): as asked, never
+    // fitted - its pages are pass 1's
+    if opts.dot_records.is_some() && opts.sub_cut_dots.is_some() {
+        return plan_hier_as_asked(v, req, opts, 0);
+    }
     if opts.probe_limit > 0 {
         return plan_hier_as_asked(v, req, opts, opts.probe_limit);
     }
@@ -1661,10 +1676,12 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         opts,
         cut: req.cut_dbu.max(0) as u64,
         page_cut: match dots {
+            Some(_) if opts.dot_records.is_some() => req.cut_dbu.max(0) as u64,
             Some(share) => (req.cut_dbu.max(0) as f64 * share.clamp(0.0, 1.0)).floor() as u64,
             None => req.cut_dbu.max(0) as u64,
         },
         dots: dots.is_some(),
+        one_walk: dots.is_some() && opts.dot_records.is_some(),
         block_px: opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX),
         block_cap: dot_block_cap(opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX)),
         spread: opts.dot_spread,
@@ -1828,8 +1845,13 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
     }
     let mut st = h.st;
     st.rep_page_level = page_level;
-    // the raster's record cut is the pages' (HierOpts::sub_cut_dots lowers it)
-    st.shape_cut = if h.shape_cut || h.shape_cut_max { h.page_cut } else { 0 };
+    // the raster's record cut is the pages' (HierOpts::sub_cut_dots lowers
+    // it), or under the one walk the cut times HierOpts::dot_records
+    st.shape_cut = match opts.dot_records.filter(|_| h.one_walk) {
+        _ if !(h.shape_cut || h.shape_cut_max) => 0,
+        Some(share) => (h.cut as f64 * share.clamp(0.0, 1.0)).floor() as u64,
+        None => h.page_cut,
+    };
     st.sub_cut_dots = h.dots;
     st.cancelled = h.cancelled;
     st.shape_cut_max = h.shape_cut_max;
@@ -2052,6 +2074,9 @@ struct Hier<'a> {
     block_px: f64,
     block_cap: u32,
     spread: bool,
+    /// HierOpts::dot_records in force: pages at the cells' cut, every size-cut
+    /// page in view a dot item
+    one_walk: bool,
     /// node visits since HierOpts::stop was last looked at, and whether it
     /// tripped (the walk unwinds)
     ticks: u32,
@@ -2814,6 +2839,9 @@ impl<'a> Hier<'a> {
         let (by0, by1) = ((fp.y0 as f64 / block).floor() as i64, (fp.y1 as f64 / block).floor() as i64);
         // a point or a line: one dot in each block it meets
         let degenerate = !(w * h > 0.0);
+        // scaled down, each block's share carries its fraction on (block
+        // order): the item's dots add up to what it holds, not one a block
+        let mut carry = 0.0f64;
         for by in by0..=by1 {
             for bx in bx0..=bx1 {
                 // the part of fp in this block, px^2
@@ -2823,7 +2851,16 @@ impl<'a> Hier<'a> {
                 if part <= 0.0 {
                     continue;
                 }
-                let dots = ((part / DOT_AREA_PX * scale).floor() as u32).max(1);
+                let dots = if scale < 1.0 {
+                    let share = part / DOT_AREA_PX * scale + carry;
+                    carry = share - share.floor();
+                    if share < 1.0 {
+                        continue;
+                    }
+                    share.floor() as u32
+                } else {
+                    ((part / DOT_AREA_PX).floor() as u32).max(1)
+                };
                 let piece = BBox {
                     x0: fp.x0.max((bx as f64 * block).floor() as i64),
                     y0: fp.y0.max((by as f64 * block).floor() as i64),
@@ -2931,6 +2968,11 @@ impl<'a> Hier<'a> {
         let mut blocks: Vec<((i64, i64, u32), (u32, BBox))> = self.dot_blocks.drain().collect();
         blocks.sort_unstable_by_key(|&(key, _)| key);
         self.dot_seen.clear();
+        if self.spread {
+            // washes the walk pushed itself (a page wash) carry no count (0):
+            // the counts stay aligned with the washes
+            wc.dot_counts.resize(wc.washes.len(), 0);
+        }
         for ((bx, by, layer), (count, union)) in blocks {
             if !self.take_box(1) {
                 continue;
@@ -2997,10 +3039,14 @@ impl<'a> Hier<'a> {
 
     /// A size-cut page in view under the sub-cut boxes: true when it stays
     /// as its bbox on its own layer (never decoded).
+    /// Under the sub-cut dots a page no wider than a box - any size-cut page
+    /// under the one walk (HierOpts::dot_records) - is a dot item, at most one
+    /// dot a shape under HierOpts::dot_spread.
     fn box_page(&mut self, p: &floe_ovm::PageV, pi: u32, washes: &mut Vec<(u32, BBox)>, ci: u32) -> bool {
-        if self.dots && self.boxm && self.box_small(&p.bbox) {
+        if self.dots && self.boxm && (self.one_walk || self.box_small(&p.bbox)) {
             if self.dot_seen.insert(2 << 60 | pi as u64) {
-                self.add_dots(p.layer_idx, p.bbox, u64::MAX);
+                let holds = if self.spread { self.page_dots(p) } else { u64::MAX };
+                self.add_dots(p.layer_idx, p.bbox, holds);
                 self.note_page("dots", ci, p, pi);
             }
             return true;
@@ -3721,6 +3767,18 @@ impl<'a> Hier<'a> {
         }
     }
 
+    /// The sub-cut dots a page all under the cut stands for (never decoded):
+    /// its shapes, each at most its largest shape's box on screen - add_dots'
+    /// rule from a pixel up (max(1, floor(area / DOT_AREA_PX))), under a pixel
+    /// its area (what the area-true raster lights on average: 200 squares of
+    /// 0.5 px light 50) - at least one.
+    fn page_dots(&self, p: &floe_ovm::PageV) -> u64 {
+        let ppd = self.px_per_dbu;
+        let area = p.max_w as f64 * ppd * (p.max_h as f64 * ppd);
+        let each = if area >= 1.0 { (area / DOT_AREA_PX).floor().max(1.0) } else { area };
+        ((p.members as f64 * each).ceil() as u64).max(1)
+    }
+
     /// The sub-cut dots one member of cell box `rb` stands for on screen:
     /// max(1, floor(area / DOT_AREA_PX)) (add_dots' rule for its own box).
     fn member_dots(&self, rb: &BBox) -> u64 {
@@ -4013,7 +4071,17 @@ impl<'a> Hier<'a> {
                     // (a page BVH is per (cell, layer): the layer is
                     // exact); a wider one walks on to its pages
                     if self.box_small(&n.bbox) {
-                        if self.take_box(1) {
+                        if self.dots && self.spread {
+                            // a dot item like any other (its count rides in
+                            // WsCell::dot_counts), at most one dot a shape of
+                            // the pages below
+                            if self.dot_seen.insert(4 << 60 | ni as u64) {
+                                let (lo, hi) = self.pbvh_pages(ni);
+                                let holds: u64 = (lo..hi).map(|pi| self.page_dots(&self.v.page(pi))).sum();
+                                self.add_dots(layer_idx, n.bbox, holds.max(1));
+                                self.st.sub_cut_box_nodes += 1;
+                            }
+                        } else if self.take_box(1) {
                             washes.push((layer_idx, n.bbox));
                             self.st.sub_cut_box_nodes += 1;
                         }
@@ -4722,7 +4790,7 @@ impl crate::Vfs {
     /// hairline policy is the request's (ViewReq::page_hairline);
     /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
-        self.plan_hier_in(req, &[], None, None, 0, None)
+        self.plan_hier_in(req, &[], None, None, None, 0, None)
     }
 
     /// `plan_hier` over `regions` of the view instead of the whole view
@@ -4732,10 +4800,12 @@ impl crate::Vfs {
     /// of the cut) or without (None); as a probe of whether it fits
     /// (HierOpts::probe_limit, 0 = a plan); under a cancellation
     /// (HierOpts::stop: a tripped one ends the plan with stats.cancelled).
-    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>, sub_cut_dots: Option<f64>, probe_limit: u64, stop: Option<PlanStop>) -> HierPlan {
+    #[allow(clippy::too_many_arguments)]
+    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>, sub_cut_dots: Option<f64>, dot_records: Option<f64>, probe_limit: u64, stop: Option<PlanStop>) -> HierPlan {
         let mut opts = HierOpts::default();
         opts.fixed_fit = fixed_fit;
         opts.sub_cut_dots = sub_cut_dots;
+        opts.dot_records = dot_records;
         opts.probe_limit = probe_limit;
         opts.stop = stop;
         if !regions.is_empty() {
@@ -6008,6 +6078,80 @@ mod tests {
             }
         };
         assert_eq!((node_dots(true), node_dots(false)), (3, 24));
+    }
+
+    #[test]
+    fn the_dots_one_walk_takes_pass_1s_pages_and_dots_the_pages_under_the_cut() {
+        // HierOpts::dot_records (CUT_DENSITY_DESIGN §10.12; field 2026-10-01:
+        // pass 2's floor probe and budget fit walked the view up to five times
+        // on the first frame at a scale). 0.02 px/dbu, the cut 150 dbu (3 px),
+        // 8 px blocks (400 dbu). TOP holds a page with a shape at the cut, a
+        // page whose shapes are all 1.2 px over a 40 x 40 px box (one shape:
+        // the fixture's pages hold one member) and a LEAF placed alone.
+        let leaf = FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] };
+        let big = bx(0, 0, 5000, 5000);
+        let small = bx(6000, 0, 8000, 2000);
+        let top = FCell {
+            name: "TOP",
+            pages: vec![(big, 5000, 5000), (small, 60, 60)],
+            places: vec![(0, 0, 7000, 0, false, Rep::One)],
+        };
+        let chip = fixture(&[leaf, top], 1);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = false;
+        // the raster cuts records by their larger side (renderd's max mode)
+        req.shape_cut_max = true;
+        let page_of = |b: BBox| (0..chip.n_pages).find(|&pi| chip.page(pi).bbox == b).unwrap();
+        let one = HierOpts { sub_cut_dots: Some(1.0), dot_records: Some(0.0), dot_block_px: 8.0, dot_spread: true, ..HierOpts::default() };
+        let plan = plan_hier(&chip, &req, &one);
+        // the pages at the cut: the big page (pass 1's), not the small one
+        assert!(plan.pages.contains(&page_of(big)) && !plan.pages.contains(&page_of(small)), "{:?}", plan.pages);
+        // the records under the cut draw from the pages in hand
+        assert_eq!(plan.stats.shape_cut, 0);
+        assert_eq!(plan_hier(&chip, &req, &HierOpts { dot_records: Some(0.5), ..one.clone() }).stats.shape_cut, 75);
+        // the small page is dots over its box, as many as its shapes stand for
+        // (page_dots: one 1.2 px shape, one dot); the LEAF one dot
+        let cell = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        assert_eq!(cell.washes.len(), cell.dot_counts.len());
+        let dots_within = |b: BBox| -> u32 {
+            cell.washes.iter().zip(&cell.dot_counts).filter(|((_, w), _)| w.intersects(&b)).map(|(_, &n)| n as u32).sum()
+        };
+        assert_eq!(dots_within(small), chip.page(page_of(small)).members as u32);
+        assert_eq!(dots_within(bx(0, 6800, 400, 7200)), 1);
+        // one walk: no budget fit, whatever the budget
+        let mut tight = req.clone();
+        tight.decode_budget = 1;
+        let fitted = plan_hier(&chip, &tight, &one);
+        assert_eq!((fitted.stats.fit_passes, &fitted.pages), (0, &plan.pages));
+        // without it the pages take the share of the cut: the small page is
+        // planned (60 dbu over the 50 dbu page cut), the records at 50
+        let shared = plan_hier(&chip, &req, &HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_records: None, ..one.clone() });
+        assert!(shared.pages.contains(&page_of(small)) && shared.stats.shape_cut == 50);
+    }
+
+    #[test]
+    fn a_wash_the_walk_pushes_itself_carries_no_dot_count() {
+        // the spread dots' counts ride beside the washes (WsCell::dot_counts):
+        // a page wash the walk pushes itself (M7-C: a page whose whole image
+        // fits in 2 px) holds count 0 - the raster's area rule - and the
+        // block items after it keep their own
+        let leaf = FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] };
+        let top = FCell {
+            name: "TOP",
+            pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000), (bx(6000, 0, 6100, 100), 60, 60)],
+            places: vec![(0, 0, 7000, 0, false, Rep::One)],
+        };
+        let chip = fixture(&[leaf, top], 1);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = true;
+        let plan = plan_hier(&chip, &req, &HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, ..HierOpts::default() });
+        let cell = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        assert_eq!(cell.washes.len(), cell.dot_counts.len());
+        let raw = cell.washes.iter().position(|(_, b)| *b == bx(6000, 0, 6100, 100)).expect("the page wash");
+        assert_eq!(cell.dot_counts[raw], 0);
+        assert!(cell.dot_counts.iter().enumerate().all(|(at, &n)| (at == raw) == (n == 0)), "{:?}", cell.dot_counts);
     }
 
     #[test]

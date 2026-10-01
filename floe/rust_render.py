@@ -137,6 +137,10 @@ DENSITY_TIMES = ("plan2_us", "scene2_us", "collect_us", "regions_us", "decode2_u
 DENSITY_BIN = ("items", "deferred", "overflow")
 # the sub-cut dots (FLOE_RUST_DENSITY_DOTS=on): items planned, items past the cap
 DENSITY_DOTS = ("items", "over")
+# pass 2's plans (diagnostic, 2026-10-01): the floor probes' and the fitted
+# plans' wall time, the probes, the fitted plans' passes, the regions planned
+# over, the final plans' child-BVH nodes, page-BVH nodes and page candidates
+DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "page_nodes", "page_candidates")
 
 
 def _wire_counts(value, names):
@@ -702,6 +706,7 @@ class RustRenderWorker:
             "density_dots": None,
             "density_floor": None,
             "density_block": None,
+            "density_plan2": None,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -1326,6 +1331,7 @@ class RustRenderWorker:
         state["density_us"] = _wire_counts(fields.get("density_us", "-"), DENSITY_TIMES)
         state["density_bin"] = _wire_counts(fields.get("density_bin", "-"), DENSITY_BIN)
         state["density_dots"] = _wire_counts(fields.get("density_dots", "-"), DENSITY_DOTS)
+        state["density_plan2"] = _wire_counts(fields.get("density_plan2", "-"), DENSITY_PLAN2)
         # the records' cut pass 2 planned at, px (the dots' floor,
         # FLOE_RUST_DENSITY_FLOOR_PX, or the density cut)
         try:
@@ -1566,6 +1572,7 @@ class RustRenderWorker:
             "density_dots": state["density_dots"],
             "density_floor": state["density_floor"],
             "density_block": state["density_block"],
+            "density_plan2": state["density_plan2"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on

@@ -7184,6 +7184,12 @@ pub fn plan_cmd(args: &[String]) {
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-dots") {
             popts.sub_cut_dots = Some(val.parse().expect("sub-cut-dots"));
         }
+        // --dot-records SHARE: the dots' one walk (HierOpts::dot_records) -
+        // pages at the cut, records at the cut times SHARE, a page all under
+        // the cut a dot item
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--dot-records") {
+            popts.dot_records = Some(val.parse().expect("dot-records"));
+        }
         // --shape-cut 1: the cut judges every shape by its smaller side
         // (ViewReq::shape_cut; the viewer sets it for thin keep)
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--shape-cut") {

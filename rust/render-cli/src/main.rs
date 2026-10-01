@@ -242,6 +242,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         fixed_fit: None,
         root: None,
         sub_cut_dots: None,
+        dot_records: None,
         probe_limit: 0,
     })
 }
