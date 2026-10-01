@@ -563,6 +563,122 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         Viewer._handle_result(v, {"kind": "error", "msg": "submit failed"})
         self.assertIsNone(v._pending, "an adapter failure carries no generation")
 
+    def test_the_bar_shows_the_brief_perf_line_and_the_log_keeps_the_whole(self):
+        """User 2026-10-01: "the log has it all; the bar should show only
+        what is needed now, without an ellipsis". perf_status gives the
+        full line - the terminal log and the bar's tooltip, unchanged - and
+        the brief one the lower bar shows: the frame's time and its load /
+        draw split, pass 2's plan (nodes, reads, dot items; a probe, a fit
+        past one pass with its floor, threads and decoded pages only when
+        there are any), the work bin (with the hierarchy walk when it is
+        off), the cut and its budget fit, and what the picture lacks."""
+        from floe.gui import Viewer, perf_status
+
+        # the field's frame of 2026-10-01 (renderd 0.12.242)
+        res = {
+            "tiles": 10552, "new": 9172, "ms": 4324, "load_ms": 250,
+            "draw_ms": 3916, "phase_plan": 6, "phase_delta": 152,
+            "phase_apply": 92, "cut_um": 7.56, "plan_ms": 6.1,
+            "frame_rects": 0, "png_ms": 0.0, "publish_ms": 7.3,
+            "frame_format": "raw", "raster_jobs": 4, "render_tiles": 15,
+            "tile_px": 384, "frame_width": 1920, "frame_height": 1080,
+            "work_bin_items": 2196, "member_paints": 686000,
+            "hier_cells_visited": 2007763, "subtrees_pruned": 1735783,
+            "plan_culls": {"shape_cut": 1, "shape_cut_max": 1,
+                           "pages_size": 538, "child_bvh": 31601},
+            "summary": {"none": "off"},
+            "density_stack": {"lit": 619861}, "density_dots": {"items": 589148},
+            "density_block": 4.0, "density_floor": 1.0,
+            "density_us": {"plan2_us": 3494000},
+            "density_plan2": {"probe_us": 0, "probes": 0, "fit_us": 3494000,
+                              "passes": 1, "regions": 24, "nodes": 4000000,
+                              "page_nodes": 0, "page_candidates": 19000,
+                              "threads": 1, "reads": 15235408,
+                              "items": 2655158},
+            "density_pages": {"planned": 266, "in_hand": 266, "decoded": 0},
+        }
+        full, brief = perf_status(res, ", depth 3")
+        self.assertEqual(
+            brief,
+            "4324 ms = 250 load + 3916 draw · density: pass 2 plan 3494 ms"
+            " (nodes 4.0M, reads 15.2M, dot items 2.7M) · bin 2196 items"
+            " · cut<7.56um")
+        # the log line keeps every diagnostic, as before
+        for part in (
+                "live [density: dots, block 4 px, floor 1 px, pass 2 plan"
+                " 3494 ms (probe 0 ms x0, fit 3494 ms x1 passes on 1 threads,"
+                " 24 regions, nodes 4.0M, page nodes 0, pages 19k, reads"
+                " 15.2M, dot items 2.7M), 0 pages] (10552 tiles, +9172 new,"
+                " 4324 ms = 250 load [6 plan+152 delta+92 apply] + 3916 draw"
+                ", depth 3, cut<7.56um (larger side), plan 6.1ms/0 frontier",
+                ", rust 4j 15tiles@384px 1920x1080", ", bin 2196 items",
+                ", paints 686k", ", hier 2.0M/1.7M pruned",
+                ", cut pages 538/", ", summary: none (off))"):
+            self.assertIn(part, full)
+
+        # what the bar adds only when it is there: the bin off with its
+        # walk, a probe, a fit with its floor, threads, decoded pages, the
+        # budget fit, a picture short of pages, partial labels, evictions
+        res.pop("work_bin_items")
+        res.update(work_bin_overflow_items=786433, other_ms=1693,
+                   over_budget_pages=3, labels_truncated=True,
+                   cache_evicted=1200, density_floor=15.0)
+        res["plan_culls"].update(fit_pct=200, fit_over=1)
+        res["density_plan2"].update(probes=1, probe_us=637000, passes=5,
+                                    threads=4)
+        res["density_pages"]["decoded"] = 206
+        _, brief = perf_status(res)
+        self.assertEqual(
+            brief,
+            "4324 ms = 250 load + 3916 draw + 1693 other · density: pass 2"
+            " plan 3494 ms (probe 637 ms x1, 5 passes, floor 15 px,"
+            " 4 threads, nodes 4.0M, reads 15.2M, dot items 2.7M), 206"
+            " pages decoded · bin off(cap@786k), hier 2.0M/1.7M pruned"
+            " · cut<7.56um x2 to fit budget, STILL OVER · 3 pages over"
+            " budget (not drawn) · labels partial · evict 1200")
+
+        # a frame without the density stack, a deck's passes
+        _, brief = perf_status({"tiles": 4, "ms": 52, "load_ms": 2,
+                                "draw_ms": 50, "deck": {
+                                    "passes": 12, "frame_passes": 3,
+                                    "passes_skipped": 1, "unique_pages": 40,
+                                    "pages_summed": 90, "scene_us": 12000,
+                                    "frame_raster_us": 55000,
+                                    "composite_us": 3000,
+                                    "pass_bytes_max": 5e7,
+                                    "summary_passes": 2}})
+        self.assertEqual(
+            brief,
+            "52 ms = 2 load + 50 draw · deck 12 passes, summary 2 passes"
+            " (not pickable)")
+
+        # the bar shows the brief line, its tooltip the whole; a state
+        # without a brief one (a pan, no layers) shows as given
+        shown = {}
+        v = SimpleNamespace(
+            dbu=0.001,
+            vstatus=SimpleNamespace(set_text=lambda t: shown.update(view=t)),
+            pstatus=SimpleNamespace(
+                set_text=lambda t: shown.update(text=t),
+                set_tooltip_text=lambda t: shown.update(tip=t)))
+        Viewer._set_status(v, (0, 0, 1000, 500), full, brief)
+        self.assertEqual((shown["text"], shown["tip"]), (brief, full))
+        Viewer._set_status(v, (0, 0, 1000, 500), "no layers visible")
+        self.assertEqual((shown["text"], shown["tip"]),
+                         ("no layers visible", "no layers visible"))
+
+        # the first frame after a load: the log line splits the load, the
+        # bar says how long it took
+        v._load_marks = {"t0": 100.0, "cache": 101.0, "service": 110.0,
+                         "open": {"renderd_open_ms": 8800}}
+        with mock.patch("floe.gui.time.monotonic", return_value=112.5):
+            load, load_brief = Viewer._load_note(v, {})
+        self.assertEqual(
+            load, "loaded in 12.5 s (cache 1.0 s + service 9.0 s [renderd"
+            " open 8.8 s] + first frame 2.50 s) · ")
+        self.assertEqual(load_brief, "loaded in 12.5 s · ")
+        self.assertEqual(Viewer._load_note(v, {}), ("", ""))
+
     def test_margin_prefetch_is_a_rust_only_reuse_capability(self):
         """P0 review (2026-09-05): the F2R-17 margin prefetch lives in
         the shared GUI and used to fire for ANY backend - stable

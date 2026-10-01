@@ -710,6 +710,430 @@ def fmt_count(n):
     return str(int(n))
 
 
+def perf_status(res, depth_note=""):
+    """The perf line of a settled (or refining) frame: (full, brief). The
+    full line goes to the terminal log and the lower bar's tooltip, every
+    diagnostic in it; the brief one is what the lower bar shows - only what
+    is checked frame by frame, so it fits without being cut off (user
+    2026-10-01: "the log has it all; the bar should show only what is needed
+    now, without an ellipsis")."""
+    split = ""
+    brief_split = ""
+    if res.get("load_ms") is not None:
+        ph = ""
+        if res.get("phase_apply") is not None:
+            # load = plan (rust) + delta (author/IPC)
+            #        + apply (klayout parse + WC build)
+            ph = " [%d plan+%d delta+%d apply]" % (
+                res.get("phase_plan", 0),
+                res.get("phase_delta", 0),
+                res.get("phase_apply", 0))
+        # the label plan is not part of load; shown only
+        # when it is worth a look (2026-09-21)
+        text = res.get("text_plan_ms", 0) or 0
+        split = " = %d load%s%s + %d draw" % (
+            res["load_ms"], ph,
+            " + %d text" % text if text >= 100 else "",
+            res["draw_ms"])
+        # renderd time no phase covers, and time spent
+        # waiting behind earlier commands (queue + pipe)
+        if res.get("other_ms", 0) > 200:
+            split += " + %d other" % res["other_ms"]
+        if res.get("wait_ms", 0) > 200:
+            split += " + %d wait" % res["wait_ms"]
+        # the bar: the same without the load's phases
+        brief_split = split.replace(ph, "", 1) if ph else split
+    cut = ""
+    brief_cut = ""
+    if res.get("cut_um"):
+        cut = ", cut<%.3gum" % res["cut_um"]
+        brief_cut = "cut<%.3gum" % res["cut_um"]
+        # thin keep: each shape by its larger side (0.12.214,
+        # the hairlines stay) or, under FLOE_RUST_SHAPE_CUT=min,
+        # by its smaller side (0.12.173..0.12.213)
+        culls = res.get("plan_culls") or {}
+        if culls.get("shape_cut"):
+            cut += " (larger side)" if culls.get("shape_cut_max") else " (min side)"
+    fit = (res.get("plan_culls") or {})
+    if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
+            or fit.get("fit_thin")):
+        # budget-fitted cut (0.12.162): the planner raised
+        # the cut so the frame fits the decoded budget.
+        # Shown HERE, next to the cut, because the bar is
+        # ellipsized at its end and the long diagnostics
+        # tail hid it (field 2026-09-18)
+        factor = max(100, int(fit.get("fit_pct", 0) or 100)) / 100.0
+        thin = int(fit.get("fit_thin", 0) or 0)
+        full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
+        none = int(fit.get("fit_none_pct", 0) or 0) / 100.0
+        if thin or none:
+            # budget-fitted density (0.12.169): size classes
+            # largest first - complete from xF up, the class
+            # the budget ends in about 1 in 2^k, nothing
+            # under xG
+            parts = []
+            if factor > 1:
+                parts.append("x%.3g" % factor)
+            if thin:
+                parts.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
+            if none:
+                parts.append("none below x%.3g" % none)
+            fitted = " %s to fit budget" % ", ".join(parts)
+        else:
+            fitted = " x%.3g to fit budget" % factor
+        fitted += "%s%s%s" % (
+            ", hairlines culled" if fit.get("fit_cull") else "",
+            ", STILL OVER" if fit.get("fit_over") else "",
+            # the fit remembered for this scale did not hold
+            # this frame: decided anew, the picture may have
+            # changed (SPEC-PLANNER 2026-09-27)
+            " (refit)" if fit.get("fit_redecided") else "")
+        cut += fitted
+        brief_cut += fitted
+    drawn = ""
+    if res.get("drawn") is not None:
+        drawn = ", ~%s drawn" % fmt_count(res["drawn"])
+    refin = ""
+    if res.get("refining"):
+        refin = ", refining %d" % res["refining"]
+    text = ""
+    if res.get("plan_ms") is not None:
+        # "frontier", not "frames": the planner's
+        # depth-cut record count. floe2 computes it
+        # regardless of the frames toggle (the depth
+        # frontier is plan-integral, +2.4ms measured),
+        # so it stays non-zero with frames off - that
+        # is not geometry being drawn (field question
+        # 2026-09-02).
+        text += ", plan %.1fms/%s frontier" % (
+            res["plan_ms"],
+            fmt_count(res.get("frame_rects", 0)))
+    if res.get("text_plan_ms") is not None:
+        text += ", text %.1fms/%s places" % (
+            res["text_plan_ms"],
+            fmt_count(res.get("text_place_records", 0)))
+    if res.get("png_ms") is not None:
+        text += ", %s %.1fms/pub %.1fms" % (
+            "raw" if res.get("frame_format") == "raw"
+            else "png",
+            res["png_ms"], res.get("publish_ms", 0.0))
+        # NNtiles is CUMULATIVE over the refinement
+        # rounds (9 tiles x 5 rounds = 45), not a
+        # thread count - raster threads are the Nj
+        text += ", rust %dj %dtiles@%spx %sx%s" % (
+            res.get("raster_jobs", 0),
+            res.get("render_tiles", 0),
+            res.get("tile_px", 0),
+            res.get("frame_width", 0),
+            res.get("frame_height", 0))
+    # F2R diagnostics: refinement round count, decode
+    # pool shape (sum/max vs wall exposes idle workers
+    # and stragglers, idx = record-index build share),
+    # slowest raster tile, and traversal visit/prune
+    # counts for the 2c work-bin verdict.
+    if res.get("rounds", 0) > 1:
+        text += ", rounds %d" % res["rounds"]
+    if res.get("decode_sum_ms"):
+        text += ", dec sum %.0f/max %.0f/idx %.0fms" % (
+            res["decode_sum_ms"],
+            res.get("decode_max_ms", 0.0),
+            res.get("index_ms", 0.0))
+    if res.get("raster_tile_max_ms"):
+        text += ", tile-max %.0fms" % (
+            res["raster_tile_max_ms"])
+    if res.get("tiles_reused"):
+        # §F2R-16 pan reuse engaged for this frame
+        text += ", pan-reuse %d tiles" % (
+            res["tiles_reused"])
+    if res.get("work_bin_items"):
+        text += ", bin %s items" % fmt_count(
+            res["work_bin_items"])
+        # deferral causes: Nr = repetition edges past
+        # the member-product gate, Ns = single
+        # placements past the item budget (wNNN = the
+        # heaviest such subtree weight) - names the
+        # next 2c lever without a diagnostic build
+        if res.get("work_bin_defer_rep") or \
+                res.get("work_bin_defer_single"):
+            text += " (defer %sr+%ss w%s)" % (
+                fmt_count(res.get(
+                    "work_bin_defer_rep", 0)),
+                fmt_count(res.get(
+                    "work_bin_defer_single", 0)),
+                fmt_count(res.get(
+                    "work_bin_defer_wmax", 0)))
+    elif res.get("work_bin_overflow_items"):
+        # bin hit its item cap and fell back to the
+        # per-tile walk (pixels identical, slower)
+        text += ", bin off(cap@%s)" % fmt_count(
+            res["work_bin_overflow_items"])
+    if res.get("member_paints"):
+        # geometry member paints - the paint-vs-
+        # traversal split for the F2R-03c judgment
+        text += ", paints %s" % fmt_count(
+            res["member_paints"])
+    if res.get("cache_evicted"):
+        # decoded-LRU churn: the working set no longer
+        # fits FLOE_RUST_BUDGET_MB this session (§3.18)
+        text += ", evict %s" % fmt_count(
+            res["cache_evicted"])
+    if res.get("retained_mb"):
+        # §F2R-20: geometry frames renderd holds for
+        # pan reuse (bounded by FLOE_RUST_RETAINED_MB)
+        text += ", retained %dMB" % round(
+            res["retained_mb"])
+    if res.get("hier_cells_visited"):
+        text += ", hier %s/%s pruned" % (
+            fmt_count(res["hier_cells_visited"]),
+            fmt_count(res.get("subtrees_pruned", 0)))
+    if res.get("once_full_tiles") or res.get("once_items_skipped"):
+        # F2R-28 write-once tiles: tiles that filled up (and the
+        # passes they skipped), items skipped as fully covered
+        text += ", once %s tiles/%s passes/%s items" % (
+            fmt_count(res.get("once_full_tiles", 0)),
+            fmt_count(res.get("once_passes_skipped", 0)),
+            fmt_count(res.get("once_items_skipped", 0)))
+    culls = res.get("plan_culls") or {}
+    if any(culls.values()):
+        # planner verdicts (field 2026-09-10): pages
+        # culled by size/hairline, page-BVH nodes,
+        # child-BVH nodes pruned, child cells omitted,
+        # layer skips, washes, thin frames
+        text += (", cut pages %s/pbvh %s/cbvh %s/cells %s"
+                 ", layer %s, washed %s, thin %s"
+                 % tuple(fmt_count(culls.get(k, 0)) for k in (
+                     "pages_size", "page_bvh", "child_bvh",
+                     "children_size", "layer", "washed",
+                     "thin_frames")))
+        if culls.get("thin_pages"):
+            # all-thin pages the page hairline rule
+            # would have dropped (2026-09-10): their
+            # decode / raster cost is what the field
+            # measurement of the lifted rule reads
+            text += ", thin pages %s kept" % fmt_count(
+                culls["thin_pages"])
+        if culls.get("sub_cut_washes") or culls.get("sub_cut_sparse"):
+            # sub-cut pages/nodes washed as footprints
+            # and kept or expanded as sparse (2026-09-16)
+            text += ", sub-cut washes %s/sparse %s" % (
+                fmt_count(culls.get("sub_cut_washes", 0)),
+                fmt_count(culls.get("sub_cut_sparse", 0)))
+        if culls.get("sub_cut_boxes") or culls.get("sub_cut_box_over"):
+            # sub-cut boxes (0.12.168): what the size cut
+            # drops, kept as boxes under thin keep
+            text += ", boxes %s%s%s%s" % (
+                fmt_count(culls.get("sub_cut_boxes", 0)),
+                " x%d coarser" % (1 << culls["sub_cut_box_level"])
+                if culls.get("sub_cut_box_level") else "",
+                " (+%s over)" % fmt_count(culls["sub_cut_box_over"])
+                if culls.get("sub_cut_box_over") else "",
+                " (%s unsure)" % fmt_count(culls["sub_cut_box_unsure"])
+                if culls.get("sub_cut_box_unsure") else "")
+        if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
+            # dropped by the per-plan sub-cut budgets
+            # (sparse ink / wash area): the frame is
+            # showing less than the rules would
+            text += ", sub-cut over %s/%s" % (
+                fmt_count(culls.get("sub_cut_sparse_over", 0)),
+                fmt_count(culls.get("sub_cut_wash_over", 0)))
+        if (culls.get("rep_kept") or culls.get("rep_washed")
+                or culls.get("rep_children")):
+            # the page frontier (2026-09-17): cut pages
+            # kept (drawn) and cut placements expanded
+            # with thinned members - one in 4^k
+            # (rep_washed stays 0: representatives are
+            # never washed since the field's boxes)
+            text += ", reps %s pages/%s children" % (
+                fmt_count(culls.get("rep_kept", 0)),
+                fmt_count(culls.get("rep_children", 0)))
+            if culls.get("rep_level"):
+                # the item budget's level: one cut item
+                # in 2^L
+                text += " L%d" % culls["rep_level"]
+            if culls.get("rep_page_level"):
+                # the decode budget thinned the pages
+                # themselves (one in 2^P by index)
+                text += " P%d" % culls["rep_page_level"]
+    if culls.get("stored_rep_points") or culls.get("stored_rep_limited"):
+        text += ", stored reps %s/tested %s%s" % (
+            fmt_count(culls.get("stored_rep_points", 0)),
+            fmt_count(culls.get("stored_rep_tested", 0)),
+            " (capped)" if culls.get("stored_rep_limited") else "")
+    summ = res.get("summary") or {}
+    if summ.get("layers"):
+        # occupancy summary (M2): these layers were
+        # drawn from design.ovo, not their pages -
+        # pick/snap do not see them in this view
+        text += (", summary %d layers %s cells (level %d,"
+                 " %g um; not pickable)" % (
+                     summ["layers"], fmt_count(summ["cells"]),
+                     summ["level"], summ["cell_um"]))
+    elif summ.get("none") not in (None, "-", "policy",
+                                  "exact"):
+        # since 2026-09-18 the summary serves cull too,
+        # so its absence is worth a word under either
+        text += ", summary: none (%s)" % summ["none"]
+    if res.get("labels_truncated"):
+        text += ", labels partial"
+    if res.get("over_budget_pages"):
+        text += ", %d pages over budget (not drawn)" % (
+            res["over_budget_pages"])
+    if res.get("deck"):
+        d = res["deck"]
+        # raster/frame ms are SUMS over passes; "wall"
+        # is the batches' real elapsed time, and the
+        # pass parallelism (x tile workers) beside it
+        # (review 2026-09-09 (5th))
+        text += (", deck %d passes (%d frame, %d skipped, "
+                 "%d scene reuses) "
+                 "%d/%d pages, scene %d + frame sum %d + "
+                 "composite %d ms, raster wall %d ms "
+                 "%dp x %dt, %d batches, pass max %dMB, "
+                 "batch max %dMB" % (
+                     d["passes"], d["frame_passes"],
+                     d["passes_skipped"],
+                     d.get("scene_reuses", 0),
+                     d["unique_pages"],
+                     d["pages_summed"],
+                     round(d["scene_us"] / 1000),
+                     round(d["frame_raster_us"] / 1000),
+                     round(d["composite_us"] / 1000),
+                     round(d.get("raster_wall_us", 0)
+                           / 1000),
+                     d.get("pass_workers", 0),
+                     res.get("workers", 0),
+                     d.get("batches", 0),
+                     round(d["pass_bytes_max"] / 1e6),
+                     round(d.get("batch_bytes_max", 0)
+                           / 1e6)))
+        if d.get("streamed_passes"):
+            text += ", %d streamed in %d slices" % (
+                d["streamed_passes"], d["slices"])
+        if d.get("wide_washes"):
+            text += ", %s sub-cut washes" % fmt_count(
+                d["wide_washes"])
+        if d.get("summary_passes"):
+            # passes drawn from their source's design.ovo
+            # (M4); pick/snap do not see those layers
+            text += ", summary %d passes %s cells (not pickable)" % (
+                d["summary_passes"],
+                fmt_count(d.get("summary_cells", 0)))
+        if d.get("summary_none_passes"):
+            text += ", %d passes without summary" % (
+                d["summary_none_passes"])
+    # tiles = plan total (resident pages included);
+    # +new = pages actually shipped for this view
+    # (cache misses, summed over its stream rounds)
+    # the density stack (diagnostic FLOE_RUST_DENSITY_STACK=top,
+    # CUT_DENSITY_DESIGN §10.10): the frame stacked its density.
+    # First in the line - the bar, which showed this line until
+    # 2026-10-01, is ellipsized at its end, and next to the cut
+    # it fell off (field 2026-09-26)
+    stack = ""
+    if res.get("density_stack") is not None:
+        # with the sub-cut dots: their block, the records'
+        # floor pass 2 planned at, its plan time and the pages
+        # it decoded (to compare FLOE_RUST_DENSITY_BLOCK_PX,
+        # 2026-10-01, and FLOE_RUST_DENSITY_FLOOR_PX, 2026-09-30)
+        parts = ["dots" if res.get("density_dots") is not None
+                 else "top + empty"]
+        if res.get("density_block") is not None:
+            parts.append("block %g px" % res["density_block"])
+        if res.get("density_floor") is not None:
+            parts.append("floor %.2g px" % res["density_floor"])
+        us = res.get("density_us") or {}
+        if us:
+            plan = "pass 2 plan %d ms" % round(
+                us.get("plan2_us", 0) / 1000)
+            # where it went (diagnostic, 2026-10-01): the
+            # floor probes, the fitted plans and their passes,
+            # the regions, the final plans' nodes
+            p2 = res.get("density_plan2") or {}
+            if p2:
+                plan += (" (probe %d ms x%d, fit %d ms x%d"
+                         " passes on %d threads, %d regions,"
+                         " nodes %s, page nodes %s, pages %s,"
+                         " reads %s, dot items %s)") % (
+                    round(p2["probe_us"] / 1000),
+                    p2["probes"],
+                    round(p2["fit_us"] / 1000), p2["passes"],
+                    max(1, p2.get("threads", 1)),
+                    p2["regions"], fmt_count(p2["nodes"]),
+                    fmt_count(p2["page_nodes"]),
+                    fmt_count(p2["page_candidates"]),
+                    fmt_count(p2.get("reads", 0)),
+                    fmt_count(p2.get("items", 0)))
+            parts.append(plan)
+        pages = res.get("density_pages") or {}
+        if pages:
+            parts.append("%d pages" % pages.get("decoded", 0))
+        stack = " [density: %s]" % ", ".join(parts)
+        # the bar: pass 2's plan time and what it walked (nodes, the
+        # placements it read, the dot items it made); a floor probe, a
+        # budget fit past one pass (with the floor it raised), threads and
+        # decoded pages only when there are any; the block and the regions
+        # stay in the log line
+        brief = [] if res.get("density_dots") is not None else ["top + empty"]
+        if us:
+            plan = "pass 2 plan %d ms" % round(us.get("plan2_us", 0) / 1000)
+            if p2:
+                inner = []
+                if p2.get("probes"):
+                    inner.append("probe %d ms x%d" % (round(p2["probe_us"] / 1000), p2["probes"]))
+                if p2.get("passes", 0) > 1:
+                    inner.append("%d passes%s" % (
+                        p2["passes"], ", floor %.2g px" % res["density_floor"]
+                        if res.get("density_floor") is not None else ""))
+                if p2.get("threads", 1) > 1:
+                    inner.append("%d threads" % p2["threads"])
+                inner.append("nodes %s, reads %s, dot items %s" % (
+                    fmt_count(p2["nodes"]), fmt_count(p2.get("reads", 0)),
+                    fmt_count(p2.get("items", 0))))
+                plan += " (%s)" % ", ".join(inner)
+            brief.append(plan)
+        if pages.get("decoded"):
+            brief.append("%d pages decoded" % pages["decoded"])
+        brief_stack = "density: %s" % ", ".join(brief) if brief else "density"
+    mode = "live%s (%d tiles, +%d new, %d ms" \
+           "%s%s%s%s%s%s)" \
+        % (stack, res["tiles"], res.get("new", 0) or 0,
+           res["ms"], split,
+           depth_note, cut, drawn,
+           refin, text)
+    # The lower bar: the frame's time and where it went, the density's
+    # pass 2, the work bin (with the hierarchy walk it falls back to when
+    # it is off), the cut and its budget fit, and what the picture lacks.
+    # The depth sits in the bar above; the rest is in the log line.
+    brief = ["%d ms%s" % (res["ms"], brief_split)]
+    if res.get("deck"):
+        brief.append("deck %d passes%s" % (
+            res["deck"]["passes"],
+            ", summary %d passes (not pickable)" % res["deck"]["summary_passes"]
+            if res["deck"].get("summary_passes") else ""))
+    if stack:
+        brief.append(brief_stack)
+    if res.get("work_bin_items"):
+        brief.append("bin %s items" % fmt_count(res["work_bin_items"]))
+    elif res.get("work_bin_overflow_items"):
+        brief.append("bin off(cap@%s)%s" % (
+            fmt_count(res["work_bin_overflow_items"]),
+            ", hier %s/%s pruned" % (
+                fmt_count(res["hier_cells_visited"]),
+                fmt_count(res.get("subtrees_pruned", 0)))
+            if res.get("hier_cells_visited") else ""))
+    if brief_cut.strip():
+        brief.append(brief_cut.strip())
+    if res.get("over_budget_pages"):
+        brief.append("%d pages over budget (not drawn)" % res["over_budget_pages"])
+    if res.get("labels_truncated"):
+        brief.append("labels partial")
+    if res.get("cache_evicted"):
+        brief.append("evict %s" % fmt_count(res["cache_evicted"]))
+    if summ.get("layers"):
+        brief.append("summary %d layers (not pickable)" % summ["layers"])
+    return mode, " · ".join(brief)
+
+
 def frame_rect(buf, x0, y0, w, h, color):
     """1-px rectangle border (rect_outline is too heavy for the minimap)."""
     fill_rect(buf, x0, y0, w, 1, color)
@@ -3668,358 +4092,11 @@ class Viewer:
                 self._depth_used = used
                 self.dstatus.set_text(self._depth_label())
                 if True:
-                    split = ""
-                    if res.get("load_ms") is not None:
-                        ph = ""
-                        if res.get("phase_apply") is not None:
-                            # load = plan (rust) + delta (author/IPC)
-                            #        + apply (klayout parse + WC build)
-                            ph = " [%d plan+%d delta+%d apply]" % (
-                                res.get("phase_plan", 0),
-                                res.get("phase_delta", 0),
-                                res.get("phase_apply", 0))
-                        # the label plan is not part of load; shown only
-                        # when it is worth a look (2026-09-21)
-                        text = res.get("text_plan_ms", 0) or 0
-                        split = " = %d load%s%s + %d draw" % (
-                            res["load_ms"], ph,
-                            " + %d text" % text if text >= 100 else "",
-                            res["draw_ms"])
-                        # renderd time no phase covers, and time spent
-                        # waiting behind earlier commands (queue + pipe)
-                        if res.get("other_ms", 0) > 200:
-                            split += " + %d other" % res["other_ms"]
-                        if res.get("wait_ms", 0) > 200:
-                            split += " + %d wait" % res["wait_ms"]
-                    cut = ""
-                    if res.get("cut_um"):
-                        cut = ", cut<%.3gum" % res["cut_um"]
-                        # thin keep: each shape by its larger side (0.12.214,
-                        # the hairlines stay) or, under FLOE_RUST_SHAPE_CUT=min,
-                        # by its smaller side (0.12.173..0.12.213)
-                        culls = res.get("plan_culls") or {}
-                        if culls.get("shape_cut"):
-                            cut += " (larger side)" if culls.get("shape_cut_max") else " (min side)"
-                    fit = (res.get("plan_culls") or {})
-                    if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
-                            or fit.get("fit_thin")):
-                        # budget-fitted cut (0.12.162): the planner raised
-                        # the cut so the frame fits the decoded budget.
-                        # Shown HERE, next to the cut, because the bar is
-                        # ellipsized at its end and the long diagnostics
-                        # tail hid it (field 2026-09-18)
-                        factor = max(100, int(fit.get("fit_pct", 0) or 100)) / 100.0
-                        thin = int(fit.get("fit_thin", 0) or 0)
-                        full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
-                        none = int(fit.get("fit_none_pct", 0) or 0) / 100.0
-                        if thin or none:
-                            # budget-fitted density (0.12.169): size classes
-                            # largest first - complete from xF up, the class
-                            # the budget ends in about 1 in 2^k, nothing
-                            # under xG
-                            parts = []
-                            if factor > 1:
-                                parts.append("x%.3g" % factor)
-                            if thin:
-                                parts.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
-                            if none:
-                                parts.append("none below x%.3g" % none)
-                            cut += " %s to fit budget" % ", ".join(parts)
-                        else:
-                            cut += " x%.3g to fit budget" % factor
-                        cut += "%s%s%s" % (
-                            ", hairlines culled" if fit.get("fit_cull") else "",
-                            ", STILL OVER" if fit.get("fit_over") else "",
-                            # the fit remembered for this scale did not hold
-                            # this frame: decided anew, the picture may have
-                            # changed (SPEC-PLANNER 2026-09-27)
-                            " (refit)" if fit.get("fit_redecided") else "")
-                    drawn = ""
-                    if res.get("drawn") is not None:
-                        drawn = ", ~%s drawn" % fmt_count(res["drawn"])
-                    refin = ""
-                    if res.get("refining"):
-                        refin = ", refining %d" % res["refining"]
-                    text = ""
-                    if res.get("plan_ms") is not None:
-                        # "frontier", not "frames": the planner's
-                        # depth-cut record count. floe2 computes it
-                        # regardless of the frames toggle (the depth
-                        # frontier is plan-integral, +2.4ms measured),
-                        # so it stays non-zero with frames off - that
-                        # is not geometry being drawn (field question
-                        # 2026-09-02).
-                        text += ", plan %.1fms/%s frontier" % (
-                            res["plan_ms"],
-                            fmt_count(res.get("frame_rects", 0)))
-                    if res.get("text_plan_ms") is not None:
-                        text += ", text %.1fms/%s places" % (
-                            res["text_plan_ms"],
-                            fmt_count(res.get("text_place_records", 0)))
-                    if res.get("png_ms") is not None:
-                        text += ", %s %.1fms/pub %.1fms" % (
-                            "raw" if res.get("frame_format") == "raw"
-                            else "png",
-                            res["png_ms"], res.get("publish_ms", 0.0))
-                        # NNtiles is CUMULATIVE over the refinement
-                        # rounds (9 tiles x 5 rounds = 45), not a
-                        # thread count - raster threads are the Nj
-                        text += ", rust %dj %dtiles@%spx %sx%s" % (
-                            res.get("raster_jobs", 0),
-                            res.get("render_tiles", 0),
-                            res.get("tile_px", 0),
-                            res.get("frame_width", 0),
-                            res.get("frame_height", 0))
-                    # F2R diagnostics: refinement round count, decode
-                    # pool shape (sum/max vs wall exposes idle workers
-                    # and stragglers, idx = record-index build share),
-                    # slowest raster tile, and traversal visit/prune
-                    # counts for the 2c work-bin verdict.
-                    if res.get("rounds", 0) > 1:
-                        text += ", rounds %d" % res["rounds"]
-                    if res.get("decode_sum_ms"):
-                        text += ", dec sum %.0f/max %.0f/idx %.0fms" % (
-                            res["decode_sum_ms"],
-                            res.get("decode_max_ms", 0.0),
-                            res.get("index_ms", 0.0))
-                    if res.get("raster_tile_max_ms"):
-                        text += ", tile-max %.0fms" % (
-                            res["raster_tile_max_ms"])
-                    if res.get("tiles_reused"):
-                        # §F2R-16 pan reuse engaged for this frame
-                        text += ", pan-reuse %d tiles" % (
-                            res["tiles_reused"])
-                    if res.get("work_bin_items"):
-                        text += ", bin %s items" % fmt_count(
-                            res["work_bin_items"])
-                        # deferral causes: Nr = repetition edges past
-                        # the member-product gate, Ns = single
-                        # placements past the item budget (wNNN = the
-                        # heaviest such subtree weight) - names the
-                        # next 2c lever without a diagnostic build
-                        if res.get("work_bin_defer_rep") or \
-                                res.get("work_bin_defer_single"):
-                            text += " (defer %sr+%ss w%s)" % (
-                                fmt_count(res.get(
-                                    "work_bin_defer_rep", 0)),
-                                fmt_count(res.get(
-                                    "work_bin_defer_single", 0)),
-                                fmt_count(res.get(
-                                    "work_bin_defer_wmax", 0)))
-                    elif res.get("work_bin_overflow_items"):
-                        # bin hit its item cap and fell back to the
-                        # per-tile walk (pixels identical, slower)
-                        text += ", bin off(cap@%s)" % fmt_count(
-                            res["work_bin_overflow_items"])
-                    if res.get("member_paints"):
-                        # geometry member paints - the paint-vs-
-                        # traversal split for the F2R-03c judgment
-                        text += ", paints %s" % fmt_count(
-                            res["member_paints"])
-                    if res.get("cache_evicted"):
-                        # decoded-LRU churn: the working set no longer
-                        # fits FLOE_RUST_BUDGET_MB this session (§3.18)
-                        text += ", evict %s" % fmt_count(
-                            res["cache_evicted"])
-                    if res.get("retained_mb"):
-                        # §F2R-20: geometry frames renderd holds for
-                        # pan reuse (bounded by FLOE_RUST_RETAINED_MB)
-                        text += ", retained %dMB" % round(
-                            res["retained_mb"])
-                    if res.get("hier_cells_visited"):
-                        text += ", hier %s/%s pruned" % (
-                            fmt_count(res["hier_cells_visited"]),
-                            fmt_count(res.get("subtrees_pruned", 0)))
-                    if res.get("once_full_tiles") or res.get("once_items_skipped"):
-                        # F2R-28 write-once tiles: tiles that filled up (and the
-                        # passes they skipped), items skipped as fully covered
-                        text += ", once %s tiles/%s passes/%s items" % (
-                            fmt_count(res.get("once_full_tiles", 0)),
-                            fmt_count(res.get("once_passes_skipped", 0)),
-                            fmt_count(res.get("once_items_skipped", 0)))
-                    culls = res.get("plan_culls") or {}
-                    if any(culls.values()):
-                        # planner verdicts (field 2026-09-10): pages
-                        # culled by size/hairline, page-BVH nodes,
-                        # child-BVH nodes pruned, child cells omitted,
-                        # layer skips, washes, thin frames
-                        text += (", cut pages %s/pbvh %s/cbvh %s/cells %s"
-                                 ", layer %s, washed %s, thin %s"
-                                 % tuple(fmt_count(culls.get(k, 0)) for k in (
-                                     "pages_size", "page_bvh", "child_bvh",
-                                     "children_size", "layer", "washed",
-                                     "thin_frames")))
-                        if culls.get("thin_pages"):
-                            # all-thin pages the page hairline rule
-                            # would have dropped (2026-09-10): their
-                            # decode / raster cost is what the field
-                            # measurement of the lifted rule reads
-                            text += ", thin pages %s kept" % fmt_count(
-                                culls["thin_pages"])
-                        if culls.get("sub_cut_washes") or culls.get("sub_cut_sparse"):
-                            # sub-cut pages/nodes washed as footprints
-                            # and kept or expanded as sparse (2026-09-16)
-                            text += ", sub-cut washes %s/sparse %s" % (
-                                fmt_count(culls.get("sub_cut_washes", 0)),
-                                fmt_count(culls.get("sub_cut_sparse", 0)))
-                        if culls.get("sub_cut_boxes") or culls.get("sub_cut_box_over"):
-                            # sub-cut boxes (0.12.168): what the size cut
-                            # drops, kept as boxes under thin keep
-                            text += ", boxes %s%s%s%s" % (
-                                fmt_count(culls.get("sub_cut_boxes", 0)),
-                                " x%d coarser" % (1 << culls["sub_cut_box_level"])
-                                if culls.get("sub_cut_box_level") else "",
-                                " (+%s over)" % fmt_count(culls["sub_cut_box_over"])
-                                if culls.get("sub_cut_box_over") else "",
-                                " (%s unsure)" % fmt_count(culls["sub_cut_box_unsure"])
-                                if culls.get("sub_cut_box_unsure") else "")
-                        if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
-                            # dropped by the per-plan sub-cut budgets
-                            # (sparse ink / wash area): the frame is
-                            # showing less than the rules would
-                            text += ", sub-cut over %s/%s" % (
-                                fmt_count(culls.get("sub_cut_sparse_over", 0)),
-                                fmt_count(culls.get("sub_cut_wash_over", 0)))
-                        if (culls.get("rep_kept") or culls.get("rep_washed")
-                                or culls.get("rep_children")):
-                            # the page frontier (2026-09-17): cut pages
-                            # kept (drawn) and cut placements expanded
-                            # with thinned members - one in 4^k
-                            # (rep_washed stays 0: representatives are
-                            # never washed since the field's boxes)
-                            text += ", reps %s pages/%s children" % (
-                                fmt_count(culls.get("rep_kept", 0)),
-                                fmt_count(culls.get("rep_children", 0)))
-                            if culls.get("rep_level"):
-                                # the item budget's level: one cut item
-                                # in 2^L
-                                text += " L%d" % culls["rep_level"]
-                            if culls.get("rep_page_level"):
-                                # the decode budget thinned the pages
-                                # themselves (one in 2^P by index)
-                                text += " P%d" % culls["rep_page_level"]
-                    if culls.get("stored_rep_points") or culls.get("stored_rep_limited"):
-                        text += ", stored reps %s/tested %s%s" % (
-                            fmt_count(culls.get("stored_rep_points", 0)),
-                            fmt_count(culls.get("stored_rep_tested", 0)),
-                            " (capped)" if culls.get("stored_rep_limited") else "")
-                    summ = res.get("summary") or {}
-                    if summ.get("layers"):
-                        # occupancy summary (M2): these layers were
-                        # drawn from design.ovo, not their pages -
-                        # pick/snap do not see them in this view
-                        text += (", summary %d layers %s cells (level %d,"
-                                 " %g um; not pickable)" % (
-                                     summ["layers"], fmt_count(summ["cells"]),
-                                     summ["level"], summ["cell_um"]))
-                    elif summ.get("none") not in (None, "-", "policy",
-                                                  "exact"):
-                        # since 2026-09-18 the summary serves cull too,
-                        # so its absence is worth a word under either
-                        text += ", summary: none (%s)" % summ["none"]
-                    if res.get("labels_truncated"):
-                        text += ", labels partial"
-                    if res.get("over_budget_pages"):
-                        text += ", %d pages over budget (not drawn)" % (
-                            res["over_budget_pages"])
-                    if res.get("deck"):
-                        d = res["deck"]
-                        # raster/frame ms are SUMS over passes; "wall"
-                        # is the batches' real elapsed time, and the
-                        # pass parallelism (x tile workers) beside it
-                        # (review 2026-09-09 (5th))
-                        text += (", deck %d passes (%d frame, %d skipped, "
-                                 "%d scene reuses) "
-                                 "%d/%d pages, scene %d + frame sum %d + "
-                                 "composite %d ms, raster wall %d ms "
-                                 "%dp x %dt, %d batches, pass max %dMB, "
-                                 "batch max %dMB" % (
-                                     d["passes"], d["frame_passes"],
-                                     d["passes_skipped"],
-                                     d.get("scene_reuses", 0),
-                                     d["unique_pages"],
-                                     d["pages_summed"],
-                                     round(d["scene_us"] / 1000),
-                                     round(d["frame_raster_us"] / 1000),
-                                     round(d["composite_us"] / 1000),
-                                     round(d.get("raster_wall_us", 0)
-                                           / 1000),
-                                     d.get("pass_workers", 0),
-                                     res.get("workers", 0),
-                                     d.get("batches", 0),
-                                     round(d["pass_bytes_max"] / 1e6),
-                                     round(d.get("batch_bytes_max", 0)
-                                           / 1e6)))
-                        if d.get("streamed_passes"):
-                            text += ", %d streamed in %d slices" % (
-                                d["streamed_passes"], d["slices"])
-                        if d.get("wide_washes"):
-                            text += ", %s sub-cut washes" % fmt_count(
-                                d["wide_washes"])
-                        if d.get("summary_passes"):
-                            # passes drawn from their source's design.ovo
-                            # (M4); pick/snap do not see those layers
-                            text += ", summary %d passes %s cells (not pickable)" % (
-                                d["summary_passes"],
-                                fmt_count(d.get("summary_cells", 0)))
-                        if d.get("summary_none_passes"):
-                            text += ", %d passes without summary" % (
-                                d["summary_none_passes"])
-                    # tiles = plan total (resident pages included);
-                    # +new = pages actually shipped for this view
-                    # (cache misses, summed over its stream rounds)
-                    # the density stack (diagnostic FLOE_RUST_DENSITY_STACK=top,
-                    # CUT_DENSITY_DESIGN §10.10): the frame stacked its density.
-                    # First in the line - the bar is ellipsized at its end,
-                    # and next to the cut it fell off (field 2026-09-26)
-                    stack = ""
-                    if res.get("density_stack") is not None:
-                        # with the sub-cut dots: their block, the records'
-                        # floor pass 2 planned at, its plan time and the pages
-                        # it decoded (to compare FLOE_RUST_DENSITY_BLOCK_PX,
-                        # 2026-10-01, and FLOE_RUST_DENSITY_FLOOR_PX, 2026-09-30)
-                        parts = ["dots" if res.get("density_dots") is not None
-                                 else "top + empty"]
-                        if res.get("density_block") is not None:
-                            parts.append("block %g px" % res["density_block"])
-                        if res.get("density_floor") is not None:
-                            parts.append("floor %.2g px" % res["density_floor"])
-                        us = res.get("density_us") or {}
-                        if us:
-                            plan = "pass 2 plan %d ms" % round(
-                                us.get("plan2_us", 0) / 1000)
-                            # where it went (diagnostic, 2026-10-01): the
-                            # floor probes, the fitted plans and their passes,
-                            # the regions, the final plans' nodes
-                            p2 = res.get("density_plan2") or {}
-                            if p2:
-                                plan += (" (probe %d ms x%d, fit %d ms x%d"
-                                         " passes on %d threads, %d regions,"
-                                         " nodes %s, page nodes %s, pages %s,"
-                                         " reads %s, dot items %s)") % (
-                                    round(p2["probe_us"] / 1000),
-                                    p2["probes"],
-                                    round(p2["fit_us"] / 1000), p2["passes"],
-                                    max(1, p2.get("threads", 1)),
-                                    p2["regions"], fmt_count(p2["nodes"]),
-                                    fmt_count(p2["page_nodes"]),
-                                    fmt_count(p2["page_candidates"]),
-                                    fmt_count(p2.get("reads", 0)),
-                                    fmt_count(p2.get("items", 0)))
-                            parts.append(plan)
-                        pages = res.get("density_pages") or {}
-                        if pages:
-                            parts.append("%d pages" % pages.get("decoded", 0))
-                        stack = " [density: %s]" % ", ".join(parts)
-                    mode = "live%s (%d tiles, +%d new, %d ms" \
-                           "%s%s%s%s%s%s)" \
-                        % (stack, res["tiles"], res.get("new", 0) or 0,
-                           res["ms"], split,
-                           self._depth_note(used), cut, drawn,
-                           refin, text)
+                    mode, brief = perf_status(res, self._depth_note(used))
                     # the first frame after a load also says how long the
                     # load took (the frame's own ms is only its render)
-                    mode = self._load_note(res) + mode
+                    load, load_brief = self._load_note(res)
+                    mode, brief = load + mode, load_brief + brief
                 # Also keep a terminal performance log (only the settled
                 # frame prints; refining rounds would spam every ~0.4s).
                 # The same line now remains in the persistent lower bar.
@@ -4029,7 +4106,7 @@ class Viewer:
                           % (mode, (b[2] - b[0]) * self.dbu,
                              (b[3] - b[1]) * self.dbu), flush=True)
                     self._settle_after_frame()
-                self._set_status(self.view_bbox(), mode)
+                self._set_status(self.view_bbox(), mode, brief)
                 # the cell highlight follows the view the frame shows
                 self._cell_hl_follow()
         elif kind in CELL_QUERY_KINDS:
@@ -4082,21 +4159,22 @@ class Viewer:
         selection to this frame, split into the cache and layer panel, the
         render service's open (renderd's own cache open in brackets) and the
         first frame (field 2026-09-22: a 10 s service open showed as the
-        frame's 52 ms). Empty for every other frame."""
+        frame's 52 ms). A pair like perf_status's: the log line's note and
+        the bar's, the total alone; empty for every other frame."""
         marks = getattr(self, "_load_marks", None)
         if not marks or "service" not in marks or res.get("refining"):
-            return ""
+            return "", ""
         self._load_marks = None
         now = time.monotonic()
         service = "service %.1f s" % (marks["service"] - marks["cache"])
         opened = (marks.get("open") or {}).get("renderd_open_ms")
         if opened is not None:
             service += " [renderd open %.1f s]" % (opened / 1000.0)
-        return "loaded in %.1f s (cache %.1f s + %s + first frame %.2f s) · " % (
+        return ("loaded in %.1f s (cache %.1f s + %s + first frame %.2f s) · " % (
             now - marks["t0"], marks["cache"] - marks["t0"], service,
-            now - marks["service"])
+            now - marks["service"]), "loaded in %.1f s · " % (now - marks["t0"]))
 
-    def _set_status(self, bbox, mode):
+    def _set_status(self, bbox, mode, brief=None):
         w_um = (bbox[2] - bbox[0]) * self.dbu
         h_um = (bbox[3] - bbox[1]) * self.dbu
         # CD-zoom views are far below 0.1um: fixed %.1f showed them all
@@ -4104,7 +4182,9 @@ class Viewer:
         fmt = lambda v: ("%.4f" if v < 0.1 else
                          "%.3f" if v < 1 else "%.1f") % v
         self.vstatus.set_text("view %s x %s um" % (fmt(w_um), fmt(h_um)))
-        self.pstatus.set_text(mode)
+        # a frame's bar shows its brief line, the tooltip the full one
+        # (perf_status); other states are short already
+        self.pstatus.set_text(mode if brief is None else brief)
         self.pstatus.set_tooltip_text(mode)
 
     def _loading_show(self, text):

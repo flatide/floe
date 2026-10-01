@@ -258,8 +258,11 @@ raised it to). `FLOE_RUST_DENSITY_BLOCK_PX` (diagnostic, default 4 - 8 in 0.12.2
 4..256 - 4..16 before 0.12.260;
 0.12.257) is the dots' block: the planner walks a cut node down to a block, so
 a larger block is less detail and less work; the frame line's
-`density_block=<px>` reports it and the viewer's status tag shows it
-(`[density: dots, block 8 px, floor 0 px, pass 2 plan N ms, P pages]`).
+`density_block=<px>` reports it and the viewer's log line shows it
+(`[density: dots, block 4 px, floor 1 px, pass 2 plan N ms (...), P pages]`;
+since 0.12.263 the lower bar shows only `density: pass 2 plan N ms (nodes ..,
+reads .., dot items ..)`, the whole tag being in the log line and the bar's
+tooltip - `floe.gui.perf_status`).
 `FLOE_RUST_DENSITY_ONE_WALK=on` (diagnostic; the default in 0.12.259-0.12.260,
 opt-in since 0.12.261 - its small-shape pages as dots were far denser than their
 shapes and a field root view drew 13.8 s against 7.9 s) makes pass 2 plan once
@@ -268,7 +271,9 @@ times on the first frame at a scale: its pages at the cells' cut - pass 1's, in
 hand, nothing more decoded - its records at `FLOE_RUST_DENSITY_FLOOR_PX` (there
 the records' floor), a page all under the cut a dot item. The frame line's
 `density_plan2=probe_us/fit_us/probes/passes/regions/nodes/page_nodes/page_candidates`
-breaks pass 2's plans down (the status tag shows it after `pass 2 plan`); since
+breaks pass 2's plans down (the log line's tag shows it after `pass 2 plan`,
+the bar its nodes, reads and dot items, and a probe, a fit past one pass with
+the floor it raised and threads when there are any); since
 0.12.262 it ends `/threads/reads/items` - the threads its regions were planned
 on, the placement reads and the dot items. `FLOE_RUST_DENSITY_PLAN_THREADS=N`
 (diagnostic, default 1) plans pass 2's regions in N bands on N threads and

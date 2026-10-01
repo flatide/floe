@@ -48,6 +48,28 @@
   labels, **color_epoch**) — 팔레트 recolor/repattern이 epoch를 올려
   캐시 프레임 재사용을 무효화.
 - bbox는 끝까지 float dbu(딥줌 스케일 왜곡 방지 — int 라운딩 금지).
+- **하단 상태줄 = 지금 확인할 것만**(0.12.263, 사용자 2026-10-01: "어차피 로그로 나오고
+  있으니 상태줄에는 현재 필요한 부분만 나와야 생략없이 확인이 가능함"). `perf_status(res)`가
+  (전체 줄, 요약 줄)을 만든다.
+  - **전체 줄**은 이전과 같은 문자열이다. 터미널 로그(`live [density: …] (N tiles, …)  view W x H um`)와
+    하단 줄의 툴팁에 나온다.
+  - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
+    - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
+      붙는다. load의 `[plan+delta+apply]`는 빠진다.
+    - 밀도 스택: `density: pass 2 plan N ms (nodes …, reads …, dot items …)`.
+      - 괄호 안에 있을 때만 붙는 것: 탐침(`probe M ms xP`), 두 번 이상의 맞춤과 그것이 올린
+        하한(`Q passes, floor F px`), 스레드.
+      - 디코드한 페이지가 있으면 `P pages decoded`가 따로 붙는다.
+      - 블록·하한·구역 수는 전체 줄에만 있다.
+    - work bin: `bin N items` 또는 `bin off(cap@N), hier V/P pruned`. 넘치면 타일마다 걷는 양을
+      함께 보인다.
+    - 컷: `cut<X um`과 예산 맞춤(`… to fit budget`, `STILL OVER`). `(larger side)`는 빠진다.
+    - 그림이 모자란 것: `N pages over budget (not drawn)`, `labels partial`, `evict N`,
+      `summary N layers (not pickable)`.
+    - 덱: `deck N passes`.
+  - 로드 직후 첫 프레임은 `loaded in X s · `만 앞에 붙는다. 내역은 로그에 있다.
+  - depth는 위 줄(`depth: d/max · detail: …`)에 있다.
+  - 팬·캐시 프레임(`live (N tiles)`), `no layers visible` 같은 짧은 상태는 그대로 보인다.
 
 ## 3. 스트리밍 라운드 (service._svc_render_vfs)
 
