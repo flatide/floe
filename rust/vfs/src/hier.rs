@@ -318,10 +318,12 @@ pub const SUB_CUT_BOX_ARRAY_MAX: u64 = 1 << 18;
 /// 8 px since 2026-10-01 (user: "less detailed than now seems fine"): the
 /// walk goes down to a block, so its size sets the plan's work - a third at
 /// 8 px, a ninth at 16 px. FLOE_RUST_DENSITY_BLOCK_PX sets it (diagnostic,
-/// DOT_BLOCK_PX_MIN..=DOT_BLOCK_PX_MAX).
+/// DOT_BLOCK_PX_MIN..=DOT_BLOCK_PX_MAX; up to 256 px since 2026-10-01, user:
+/// "let FLOE_RUST_DENSITY_BLOCK_PX go past 16" - a block's count rides in a
+/// u16, WsCell::dot_counts, and a 256 px block holds 32,768 at most).
 pub const DOT_BLOCK_PX: f64 = 8.0;
 pub const DOT_BLOCK_PX_MIN: f64 = 4.0;
-pub const DOT_BLOCK_PX_MAX: f64 = 16.0;
+pub const DOT_BLOCK_PX_MAX: f64 = 256.0;
 
 /// HierOpts::dot_block_px default: DOT_BLOCK_PX, FLOE_RUST_DENSITY_BLOCK_PX
 /// overrides (diagnostic; clamped to DOT_BLOCK_PX_MIN..=DOT_BLOCK_PX_MAX).
@@ -3229,7 +3231,8 @@ impl<'a> Hier<'a> {
         };
         let (least, upper) = match known {
             Some((least, most)) if least.same(&most, self.set_words) => {
-                if self.box_layers(wc, most, *fp, u64::MAX) {
+                let holds = if self.dots && self.spread { self.node_holds(ni, fp) } else { u64::MAX };
+                if self.box_layers(wc, most, *fp, holds) {
                     self.st.sub_cut_box_nodes += 1;
                 }
                 return;
@@ -3765,6 +3768,39 @@ impl<'a> Hier<'a> {
             1 => (h.na as u64).saturating_mul(h.nb as u64),
             _ => self.v.pts_ref(pli).map(|p| p.count as u64).unwrap_or(1),
         }
+    }
+
+    /// HierOpts::dot_spread: the dots a child-BVH node whose layers its masks
+    /// answer holds - its placements' members, read until they reach what its
+    /// box counts - when its box counts more than it has placements (a large
+    /// block over a sparse node, FLOE_RUST_DENSITY_BLOCK_PX past about 11 px:
+    /// a masked node holds 64 placements or more); u64::MAX when the box is
+    /// the bound.
+    fn node_holds(&mut self, ni: u32, fp: &BBox) -> u64 {
+        let ppd = self.px_per_dbu;
+        let (w, h) = ((fp.x1 - fp.x0).max(0) as f64 * ppd, (fp.y1 - fp.y0).max(0) as f64 * ppd);
+        let boxed = ((w * h / DOT_AREA_PX).floor() as u64).max(1);
+        let (lo, hi) = self.cbvh_places(ni);
+        if boxed <= (hi - lo) as u64 {
+            return u64::MAX;
+        }
+        let v = self.v;
+        let mut holds = 0u64;
+        for pli in lo as u64..hi as u64 {
+            if self.reads_left == 0 {
+                self.st.sub_cut_box_unsure += 1;
+                return u64::MAX;
+            }
+            self.reads_left -= 1;
+            self.st.sub_cut_box_reads += 1;
+            let head = v.place_head(pli);
+            let rb = v.cell_rbbox(head.child);
+            holds = holds.saturating_add(self.place_members(pli, &head).saturating_mul(self.member_dots(&rb)));
+            if holds >= boxed {
+                return u64::MAX;
+            }
+        }
+        holds.max(1)
     }
 
     /// The sub-cut dots a page all under the cut stands for (never decoded):
@@ -6078,6 +6114,56 @@ mod tests {
             }
         };
         assert_eq!((node_dots(true), node_dots(false)), (3, 24));
+    }
+
+    #[test]
+    fn a_block_past_16_px_counts_what_its_items_hold() {
+        // FLOE_RUST_DENSITY_BLOCK_PX up to 256 px (user 2026-10-01): a block
+        // holds half its pixels (a u16 at 256 px), and a large block over a
+        // sparse node counts the node's placements, not its box - masks or not
+        assert_eq!((dot_block_cap(64.0), dot_block_cap(256.0)), (2048, 32_768));
+        let leaf = FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] };
+        let top = FCell {
+            name: "TOP",
+            pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)],
+            places: vec![
+                (0, 12_000, 0, 0, false, Rep::Grid { na: 30, nb: 30, va: (150, 0), vb: (0, 150) }),
+                (0, 0, 12_000, 0, false, Rep::Grid { na: 40, nb: 40, va: (60, 0), vb: (0, 60) }),
+            ],
+        };
+        let chip = fixture(&[leaf, top], 1);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = false;
+        // 64 px blocks: 3,200 dbu
+        let opts = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 64.0, dot_spread: true, ..HierOpts::default() };
+        let plan = plan_hier(&chip, &req, &opts);
+        let cell = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        let within = |x0: i64, y0: i64, x1: i64, y1: i64| -> Vec<u16> {
+            cell.washes.iter().zip(&cell.dot_counts).filter(|((_, b), _)| b.x0 >= x0 && b.y0 >= y0 && b.x1 <= x1 && b.y1 <= y1).map(|(_, &n)| n).collect()
+        };
+        // the sparse array (88 px a side) its 900 members over the blocks; the
+        // abutting one (48 px) is one item no wider than a block: half its box,
+        // 1,152 - its 1,600 members fill it
+        assert_eq!(within(9_600, -3_200, 19_200, 6_400).iter().map(|&n| n as u32).sum::<u32>(), 900);
+        assert_eq!(within(-3_200, 9_600, 3_200, 16_000), vec![1152]);
+        // three LEAFs at the corners of a 7 px square under one node: 24 dots by
+        // its box, 3 by its placements - read whether the masks answer the
+        // layers or not
+        let cells = [
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] },
+            FCell {
+                name: "TOP",
+                pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)],
+                places: vec![(0, 9000, 9000, 0, false, Rep::One), (0, 9290, 9000, 0, false, Rep::One), (0, 9000, 9290, 0, false, Rep::One)],
+            },
+        ];
+        for (masks, block) in [(true, 8.0), (true, 64.0), (false, 64.0)] {
+            let chip = fixture_with(&cells, 1, masks);
+            let plan = plan_hier(&chip, &req, &HierOpts { dot_block_px: block, ..opts.clone() });
+            let cell = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+            assert_eq!(cell.dot_counts.iter().map(|&n| n as u32).sum::<u32>(), 3, "masks {masks} block {block}");
+        }
     }
 
     #[test]

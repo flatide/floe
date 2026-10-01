@@ -123,6 +123,10 @@ sh tools/validate_rust.sh --only quick path/to.oas
   라벨 `*/2`·`1/2`, 단계 이동이 [0, 2]로 제한, 전체에서 한 단계 = 1, top으로 돌아오면 `7/16`, 루트 변경이 라벨 갱신.
   0.12.253: 하한 `FLOE_RUST_DENSITY_FLOOR_PX` — 0.25 px는 0.5 px 미세 사각형을 그리고 0.6 px는 뺀다,
   `density_floor` = 0 / 0.25 / 0.59; 어댑터 계약 `density_floor=0.250` → 0.25, 없으면 None.
+  0.12.260(16 px 넘는 블록): 단위 `a_block_past_16_px_counts_what_its_items_hold`(상한 2,048·32,768, 64 px 블록에서 성긴
+  배열 900점·맞닿은 48 px 배열은 한 항목 1,152, 7 px 정사각형 모서리의 LEAF 셋은 마스크 유무·블록 8·64 px 모두 3점),
+  렌더 코어 `a_large_counted_dot_item_lights_exactly_its_count`(30×30 px 상자 — 스택 배열 18×18을 넘는 900픽셀 — 에 200점·1점이
+  정확히, 타일·워커·bin 무관).
   0.12.259(한 번 걷기, CUT_DENSITY_DESIGN §10.12): 게이트 점 절 — 기본(한 번 걷기)에서 TOP의 0.5 px 점 200개 페이지는
   정확히 50점(면적이 켜는 양)이고 하한 0.25·0.6 px에도 같으며 `density_floor` 0 / 0.25 / 0.59, `density_plan2`는 탐침 0·
   맞춤 1패스; 탐침과 맞춤(`FLOE_RUST_DENSITY_ONE_WALK=off`)은 예전 기대(점이 컷 없는 프레임과 같고 0.25는 그림·0.6은 뺌);

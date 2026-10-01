@@ -6425,10 +6425,14 @@ fn dot_share() -> f64 {
 const DOT_SHARE: f64 = 0.5;
 
 /// Items touching at most this many pixels pick their dots exactly (the k of
-/// the lowest rank): a spread dot item is at most a block, 16 px, and touches
-/// 17 x 17; a larger one - an array run together - lights each pixel with the
-/// chance k / n.
+/// the lowest rank) from a stack array; a larger one without a count - an
+/// array run together - lights each pixel with the chance k / n.
 const DOT_EXACT_PIXELS: i128 = 18 * 18;
+
+/// A counted (spread) dot item is at most a block (floe_vfs DOT_BLOCK_PX_MAX,
+/// 256 px) and touches 257 x 257 pixels: up to this many it is exact too,
+/// from a vector - its count is what it stands for, a lone dot included.
+const DOT_EXACT_COUNTED_PIXELS: i128 = 258 * 258;
 
 /// A sub-cut stand-in in a density plane (floe_vfs HierOpts::sub_cut_dots,
 /// CUT_DENSITY_DESIGN §10.12; user 2026-09-30: "a cell of 3 x 3 px or less is
@@ -6474,12 +6478,19 @@ fn paint_density_dots(band: &mut RasterBand, request: &GeometryRasterRequest, wo
                 light(band, col, row);
             }
         }
-    } else if n <= DOT_EXACT_PIXELS {
+    } else if n <= DOT_EXACT_PIXELS || (count.is_some() && n <= DOT_EXACT_COUNTED_PIXELS) {
         // the k lowest ranks of the whole item (ties by place), whatever part
         // the tile holds: selected in place, not sorted (a million items in a
-        // wide view; 2026-10-01)
-        let mut order = [(0.0f64, 0u32); DOT_EXACT_PIXELS as usize];
-        let order = &mut order[..n as usize];
+        // wide view; 2026-10-01); a counted item past the stack array (a
+        // block over 17 px) from a vector
+        let mut stack = [(0.0f64, 0u32); DOT_EXACT_PIXELS as usize];
+        let mut heap: Vec<(f64, u32)> = Vec::new();
+        let order: &mut [(f64, u32)] = if n <= DOT_EXACT_PIXELS {
+            &mut stack[..n as usize]
+        } else {
+            heap.resize(n as usize, (0.0, 0));
+            &mut heap
+        };
         for (at, slot) in order.iter_mut().enumerate() {
             *slot = (rank(at as i128), at as u32);
         }
@@ -11795,6 +11806,25 @@ mod tests {
             let request = stack_request(LayerFill::Solid, tile, workers);
             let again = density_frame(&coarse, &counted, CUT_1 as i64, &request, bin, &mut Vec::new());
             assert_eq!(again.frame, on.frame, "tile {tile} workers {workers} bin {bin}");
+        }
+    }
+
+    /// A counted dot item of a block past 17 px (FLOE_RUST_DENSITY_BLOCK_PX up
+    /// to 256, 2026-10-01) touches more pixels than the stack array holds and
+    /// still lights exactly its count - a lone dot included - with any tiling.
+    #[test]
+    fn a_large_counted_dot_item_lights_exactly_its_count() {
+        let coarse = stack_scene(vec![(1, vec![RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 154, h: 320, rep: Rep::One }], Vec::new())], CUT_1);
+        for want in [200u16, 1] {
+            // the top plane's 30 x 30 px box: 900 pixels
+            let dots = Arc::new(dots_scene_counted(vec![(3, BBox { x0: 10, y0: 10, x1: 310, y1: 310 })], vec![want]));
+            let request = stack_request(LayerFill::Solid, DEFAULT_TILE_SIZE, 1);
+            let on = density_frame(&coarse, &dots, CUT_1 as i64, &request, true, &mut Vec::new());
+            assert_eq!(count(&on.frame, GREEN, 0..32, 0..32), want as usize, "count {want}");
+            for (tile, workers, bin) in [(8, 2u16, true), (16, 3, false)] {
+                let again = density_frame(&coarse, &dots, CUT_1 as i64, &stack_request(LayerFill::Solid, tile, workers), bin, &mut Vec::new());
+                assert_eq!(again.frame, on.frame, "count {want} tile {tile}");
+            }
         }
     }
 

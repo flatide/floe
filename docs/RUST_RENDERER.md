@@ -251,7 +251,8 @@ forwarded to the viewer as a `cancelled` result (the `before_gen=` ack is not).
 `FLOE_RUST_DENSITY_FLOOR_PX` (diagnostic, default 0) is the dots' page and
 record floor in px; the frame line's `density_floor=<px>` is the records' cut
 pass 2 actually planned at (that floor, the density cut, or what a budget fit
-raised it to). `FLOE_RUST_DENSITY_BLOCK_PX` (diagnostic, default 8, 4..16;
+raised it to). `FLOE_RUST_DENSITY_BLOCK_PX` (diagnostic, default 8, 4..256 - 4..16 before
+0.12.260;
 0.12.257) is the dots' block: the planner walks a cut node down to a block, so
 a larger block is less detail and less work; the frame line's
 `density_block=<px>` reports it and the viewer's status tag shows it
