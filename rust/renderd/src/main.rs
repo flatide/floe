@@ -2409,42 +2409,50 @@ fn density_stack_enabled() -> bool {
     std::env::var("FLOE_RUST_DENSITY_STACK").as_deref() == Ok("top")
 }
 
+/// The sub-cut dots' one walk (CUT_DENSITY_DESIGN §10.12): pass 2 plans once,
+/// its pages at the cells' cut (pass 1's, in hand - nothing more is decoded),
+/// its records at dot_record_floor_px, a page all under the cut a dot item -
+/// no floor probe, no budget fit. The default for a day (0.12.259, field: pass
+/// 2 planned 6.9 s whatever the dot block, the probe and the fit's ladder
+/// walking the view up to five times on the first frame at a scale), opt-in
+/// since (0.12.261, field: a root's first view drew 13.8 s against 7.9 s -
+/// every record under the cut of pass 1's pages drawn, the small-shape pages
+/// as dots far denser than their shapes: x16 lit 0.26 against 0.058 drawn
+/// cut-free, 0.080 under the fit). FLOE_RUST_DENSITY_ONE_WALK=on, diagnostic.
+fn density_one_walk_enabled() -> bool {
+    std::env::var("FLOE_RUST_DENSITY_ONE_WALK").as_deref() == Ok("on")
+}
+
+/// The sub-cut dots' floor (px, the larger side): FLOE_RUST_DENSITY_FLOOR_PX
+/// (diagnostic), unset, empty or invalid DOT_FLOOR_PX. The one walk's record
+/// floor, and the page floor dot_page_floors probes under it.
+fn dot_record_floor_px() -> f64 {
+    std::env::var("FLOE_RUST_DENSITY_FLOOR_PX")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(DOT_FLOOR_PX)
+}
+
+/// The sub-cut dots' default floor: 1 px (user 2026-10-01: "isn't it the
+/// 0 px floor? what about fixing the floor at 1 px"). 0 px before: on the
+/// field chip its probe overflowed the reserve on the first frame at a scale
+/// and the fit walked again at 1 px; at the density cut there is no probe.
+/// Shapes under it in the cells above the cut are not drawn (nor dotted,
+/// HierOpts::dot_pages): the synthetic chip's first 10 layers x16 light 0.076
+/// against 0.058 drawn without a cut (0.080 at 0 px).
+const DOT_FLOOR_PX: f64 = 1.0;
+
 /// The page floor (px, the larger side) pass 2 of the sub-cut dots tries
 /// first: taken per scale and side when its pages fit the density reserve
 /// (render_density_frame), else the density cut (density_cut_px) with the
 /// planner's budget fit. One rung: each that does not fit costs a probe on the
 /// first frame at a scale (about 0.4 s on the synthetic chip's all-layer fit
 /// view). FLOE_RUST_DENSITY_FLOOR_PX, diagnostic (user 2026-09-30: compare
-/// 0.5 and 0.25 px); unset, empty or out of range means 0; a floor at or
-/// above the density cut goes straight to it.
-/// The sub-cut dots' one walk (CUT_DENSITY_DESIGN §10.12, 2026-10-01; field:
-/// pass 2 planned 6.9 s whatever the dot block - the floor probe and the
-/// budget fit's ladder walk the view up to five times on the first frame at a
-/// scale, and every zoom is one): pass 2 plans once, its pages at the cells'
-/// cut (pass 1's, in hand - nothing more is decoded), its records at
-/// dot_record_floor_px, a page all under the cut a dot item.
-/// FLOE_RUST_DENSITY_ONE_WALK=off is the kill switch (the probe and the fit).
-fn density_one_walk_enabled() -> bool {
-    std::env::var("FLOE_RUST_DENSITY_ONE_WALK").as_deref() != Ok("off")
-}
-
-/// The one walk's record floor (px, the larger side): FLOE_RUST_DENSITY_FLOOR_PX,
-/// unset, empty or invalid 0 - every record of the pages in hand under pass
-/// 1's cut.
-fn dot_record_floor_px() -> f64 {
-    std::env::var("FLOE_RUST_DENSITY_FLOOR_PX")
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(0.0)
-}
-
+/// 0.5 and 0.25 px); unset, empty or out of range means DOT_FLOOR_PX (1 px);
+/// a floor at or above the density cut goes straight to it - no probe.
 fn dot_page_floors() -> Vec<f64> {
-    let floor = std::env::var("FLOE_RUST_DENSITY_FLOOR_PX")
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(0.0);
+    let floor = dot_record_floor_px();
     if floor < density_cut_px() { vec![floor] } else { Vec::new() }
 }
 

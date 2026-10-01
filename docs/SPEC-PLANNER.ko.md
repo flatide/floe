@@ -272,7 +272,7 @@
   **읽기(0.12.256):** 점 모드에서 마스크 없는 노드의 배치 읽기는 셀마다 가장 위 가시 레이어를 한 번만 구해 두고
   (`cell_top`, `top_memo`) 순위만 비교한다; 계획기의 정수 키 맵은 Fx식 해시(`FxMap`/`FxSet`). 그림은 같다.
   **블록과 퍼뜨림(0.12.257; 사용자 2026-10-01 "지금보다 덜 자세해도 괜찮을 것 같음"):** 블록은
-  `HierOpts::dot_block_px`(기본 **8 px**, `FLOE_RUST_DENSITY_BLOCK_PX` 4~256 — 0.12.260 전에는 4~16; 블록당 상한 = 블록 픽셀의 절반,
+  `HierOpts::dot_block_px`(기본 **4 px** — 0.12.257~0.12.260은 8 px, 블록이 크면 점이 없는 곳·경계 너머에 찍힘; `FLOE_RUST_DENSITY_BLOCK_PX` 4~256 — 0.12.260 전에는 4~16; 블록당 상한 = 블록 픽셀의 절반,
   `dot_block_cap`)이고, 노드는 max(컷, 블록)까지만 내려간다 — 걷기량이 블록 크기의 제곱에 반비례한다.
   `HierOpts::dot_spread`(기본 켬, `FLOE_RUST_DENSITY_SPREAD=off`가 킬 스위치)이면 블록의 wash는 점들이 대표하는 범위
   (블록 안; 개수를 절반 이하로 담도록 얇은 쪽부터 중심에서 키움 — 작은 항목 하나는 전과 같은 상자)이고 개수는
@@ -291,6 +291,8 @@
   이상)도 상자 면적의 개수가 배치 수보다 많으면(블록이 약 11 px를 넘을 때) 배치의 멤버를 읽어 담은 만큼 센다(`node_holds`;
   상자 개수에 닿으면 멈춤). 기본 8 px에서는 상자 개수(최대 32)가 배치 수(64 이상)보다 작아 그대로다. 단위
   `a_block_past_16_px_counts_what_its_items_hold`.
+  **페이지 점 끔(0.12.261):** `HierOpts::dot_pages`(기본 끔, `FLOE_RUST_DENSITY_PAGE_DOTS=on`)가 꺼져 있으면 점 모드에서
+  모든 도형이 페이지 컷 아래인 페이지(`box_page`)와 그런 페이지 BVH 노드(`walk_pbvh`)는 점도 wash도 아니고 그리지 않는다.
   **탐침(0.12.248):** `HierOpts::probe_limit > 0`(`Vfs::plan_hier_in`의 다섯째 인자, `PlanRequest::probe_limit`)이면
   예산 맞춤 없이 그대로 계획하되 선택한 페이지의 추정 디코드 메모리(`fit_bytes`)가 한도를 넘는 순간 그 패스를
   버린다(`fit_over`) — renderd가 점 모드 2패스의 페이지 하한(0 px)이 예약에 드는지 볼 때 쓴다(CUT_DENSITY_DESIGN

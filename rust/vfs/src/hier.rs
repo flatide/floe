@@ -314,14 +314,16 @@ pub const SUB_CUT_BOX_ARRAY_MAX: u64 = 1 << 18;
 /// HierOpts::sub_cut_dots gathers the dots of a cell's walk in cell-local
 /// blocks of HierOpts::dot_block_px screen pixels on a side: one dot item per
 /// block and layer, whatever the cells, nodes, pages and array members under
-/// it. 4 px first (user 2026-09-30: "query in 4 x 4 units of the screen"),
-/// 8 px since 2026-10-01 (user: "less detailed than now seems fine"): the
-/// walk goes down to a block, so its size sets the plan's work - a third at
-/// 8 px, a ninth at 16 px. FLOE_RUST_DENSITY_BLOCK_PX sets it (diagnostic,
-/// DOT_BLOCK_PX_MIN..=DOT_BLOCK_PX_MAX; up to 256 px since 2026-10-01, user:
-/// "let FLOE_RUST_DENSITY_BLOCK_PX go past 16" - a block's count rides in a
-/// u16, WsCell::dot_counts, and a 256 px block holds 32,768 at most).
-pub const DOT_BLOCK_PX: f64 = 8.0;
+/// it. 4 px (user 2026-09-30: "query in 4 x 4 units of the screen"); 8 px for
+/// a day (2026-10-01, user: "less detailed than now seems fine": the walk
+/// goes down to a block, so its size sets the plan's work), and back to 4 px
+/// the same day (field: "past 4 px dots land where nothing is and cross
+/// boundaries - 4 px is in effect the limit"; on the field chip the block
+/// did not move pass 2's time). FLOE_RUST_DENSITY_BLOCK_PX sets it
+/// (diagnostic, DOT_BLOCK_PX_MIN..=DOT_BLOCK_PX_MAX - up to 256 px: a block's
+/// count rides in a u16, WsCell::dot_counts, and a 256 px block holds 32,768
+/// at most).
+pub const DOT_BLOCK_PX: f64 = 4.0;
 pub const DOT_BLOCK_PX_MIN: f64 = 4.0;
 pub const DOT_BLOCK_PX_MAX: f64 = 256.0;
 
@@ -340,6 +342,13 @@ pub fn dot_block_px() -> f64 {
 
 /// HierOpts::dot_spread default: on; FLOE_RUST_DENSITY_SPREAD=off is the kill
 /// switch (diagnostic) - the rules before 2026-10-01.
+/// HierOpts::dot_pages default: off; FLOE_RUST_DENSITY_PAGE_DOTS=on (diagnostic)
+/// stands a page under the floor in as dots, as before 2026-10-01.
+pub fn dot_pages() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_PAGE_DOTS").as_deref() == Ok("on"))
+}
+
 pub fn dot_spread() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_SPREAD").map(|v| v.trim() != "off").unwrap_or(true))
@@ -753,6 +762,14 @@ pub struct HierOpts {
     /// about their centre and every item by its box, the rules before.
     pub dot_block_px: f64,
     pub dot_spread: bool,
+    /// The sub-cut dots: a page whose every shape is under the pages' cut
+    /// (and a page-BVH node of such pages) stands as dots - its shapes'
+    /// count of its largest shape's dots over its box (page_dots) - instead
+    /// of not being drawn. Off since 2026-10-01: against frames drawn
+    /// without a cut the page dots were far denser than their shapes (the
+    /// synthetic chip's first 10 layers x16 at a 1 px floor: lit 0.217, drawn
+    /// cut-free 0.058, without them 0.076). FLOE_RUST_DENSITY_PAGE_DOTS=on.
+    pub dot_pages: bool,
     /// The sub-cut dots' one walk (CUT_DENSITY_DESIGN §10.12, 2026-10-01):
     /// Some(share) selects the pages at the cells' cut - those pass 1 drew,
     /// decoded already - while the raster's record cut
@@ -846,6 +863,7 @@ impl Default for HierOpts {
             sub_cut_dots: None,
             dot_block_px: dot_block_px(),
             dot_spread: dot_spread(),
+            dot_pages: dot_pages(),
             dot_records: None,
             probe_limit: 0,
             stop: None,
@@ -1684,6 +1702,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         },
         dots: dots.is_some(),
         one_walk: dots.is_some() && opts.dot_records.is_some(),
+        page_dots: opts.dot_pages,
         block_px: opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX),
         block_cap: dot_block_cap(opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX)),
         spread: opts.dot_spread,
@@ -2077,8 +2096,10 @@ struct Hier<'a> {
     block_cap: u32,
     spread: bool,
     /// HierOpts::dot_records in force: pages at the cells' cut, every size-cut
-    /// page in view a dot item
+    /// page in view a dot item (under HierOpts::dot_pages)
     one_walk: bool,
+    /// HierOpts::dot_pages
+    page_dots: bool,
     /// node visits since HierOpts::stop was last looked at, and whether it
     /// tripped (the walk unwinds)
     ticks: u32,
@@ -3045,6 +3066,11 @@ impl<'a> Hier<'a> {
     /// under the one walk (HierOpts::dot_records) - is a dot item, at most one
     /// dot a shape under HierOpts::dot_spread.
     fn box_page(&mut self, p: &floe_ovm::PageV, pi: u32, washes: &mut Vec<(u32, BBox)>, ci: u32) -> bool {
+        if self.dots && !self.page_dots {
+            // a page whose every shape is under the floor is not drawn
+            // (HierOpts::dot_pages)
+            return false;
+        }
         if self.dots && self.boxm && (self.one_walk || self.box_small(&p.bbox)) {
             if self.dot_seen.insert(2 << 60 | pi as u64) {
                 let holds = if self.spread { self.page_dots(p) } else { u64::MAX };
@@ -4106,6 +4132,11 @@ impl<'a> Hier<'a> {
                     // sub-cut boxes: a node no wider than a box is one
                     // (a page BVH is per (cell, layer): the layer is
                     // exact); a wider one walks on to its pages
+                    if self.dots && !self.page_dots {
+                        // every page below is under the floor: not drawn
+                        // (HierOpts::dot_pages)
+                        continue;
+                    }
                     if self.box_small(&n.bbox) {
                         if self.dots && self.spread {
                             // a dot item like any other (its count rides in
@@ -6189,7 +6220,7 @@ mod tests {
         // the raster cuts records by their larger side (renderd's max mode)
         req.shape_cut_max = true;
         let page_of = |b: BBox| (0..chip.n_pages).find(|&pi| chip.page(pi).bbox == b).unwrap();
-        let one = HierOpts { sub_cut_dots: Some(1.0), dot_records: Some(0.0), dot_block_px: 8.0, dot_spread: true, ..HierOpts::default() };
+        let one = HierOpts { sub_cut_dots: Some(1.0), dot_records: Some(0.0), dot_block_px: 8.0, dot_spread: true, dot_pages: true, ..HierOpts::default() };
         let plan = plan_hier(&chip, &req, &one);
         // the pages at the cut: the big page (pass 1's), not the small one
         assert!(plan.pages.contains(&page_of(big)) && !plan.pages.contains(&page_of(small)), "{:?}", plan.pages);
@@ -6205,6 +6236,14 @@ mod tests {
         };
         assert_eq!(dots_within(small), chip.page(page_of(small)).members as u32);
         assert_eq!(dots_within(bx(0, 6800, 400, 7200)), 1);
+        // without the page dots (HierOpts::dot_pages, the default) the small
+        // page is not drawn at all; the LEAF's dot stays
+        let bare = plan_hier(&chip, &req, &HierOpts { dot_pages: false, ..one.clone() });
+        let bare = bare.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+        let bare_within = |b: BBox| -> u32 {
+            bare.washes.iter().zip(&bare.dot_counts).filter(|((_, w), _)| w.intersects(&b)).map(|(_, &n)| n as u32).sum()
+        };
+        assert_eq!((bare_within(small), bare_within(bx(0, 6800, 400, 7200))), (0, 1));
         // one walk: no budget fit, whatever the budget
         let mut tight = req.clone();
         tight.decode_budget = 1;

@@ -248,20 +248,25 @@ cancels the plans too (floe_vfs `HierOpts::stop` through `Cache::plan_cancellabl
 adapter's `cancel(before_gen)` (the viewer's Esc, 0.12.251) sends
 `cancel before_gen=N`; the daemon's `cancelled gen=N phase=render|queued` is
 forwarded to the viewer as a `cancelled` result (the `before_gen=` ack is not).
-`FLOE_RUST_DENSITY_FLOOR_PX` (diagnostic, default 0) is the dots' page and
-record floor in px; the frame line's `density_floor=<px>` is the records' cut
+`FLOE_RUST_DENSITY_FLOOR_PX` (diagnostic, default 1 since 0.12.261 - 0 before;
+at the density cut there is no floor probe) is the dots' page and record floor
+in px; a page whose every shape is under it is not drawn
+(`FLOE_RUST_DENSITY_PAGE_DOTS=on` stands it in as dots, as before 0.12.261 -
+they were far denser than the shapes); the frame line's `density_floor=<px>` is the records' cut
 pass 2 actually planned at (that floor, the density cut, or what a budget fit
-raised it to). `FLOE_RUST_DENSITY_BLOCK_PX` (diagnostic, default 8, 4..256 - 4..16 before
-0.12.260;
+raised it to). `FLOE_RUST_DENSITY_BLOCK_PX` (diagnostic, default 4 - 8 in 0.12.257-0.12.260;
+4..256 - 4..16 before 0.12.260;
 0.12.257) is the dots' block: the planner walks a cut node down to a block, so
 a larger block is less detail and less work; the frame line's
 `density_block=<px>` reports it and the viewer's status tag shows it
 (`[density: dots, block 8 px, floor 0 px, pass 2 plan N ms, P pages]`).
-Since 0.12.259 pass 2 plans once (`FLOE_RUST_DENSITY_ONE_WALK=off` restores the
-floor probe and the budget fit, which walked the view up to five times on the
-first frame at a scale): its pages at the cells' cut - pass 1's, in hand, nothing
-more decoded - its records at `FLOE_RUST_DENSITY_FLOOR_PX` (now the records'
-floor), a page all under the cut a dot item. The frame line's
+`FLOE_RUST_DENSITY_ONE_WALK=on` (diagnostic; the default in 0.12.259-0.12.260,
+opt-in since 0.12.261 - its small-shape pages as dots were far denser than their
+shapes and a field root view drew 13.8 s against 7.9 s) makes pass 2 plan once
+instead of the floor probe and the budget fit, which walk the view up to five
+times on the first frame at a scale: its pages at the cells' cut - pass 1's, in
+hand, nothing more decoded - its records at `FLOE_RUST_DENSITY_FLOOR_PX` (there
+the records' floor), a page all under the cut a dot item. The frame line's
 `density_plan2=probe_us/fit_us/probes/passes/regions/nodes/page_nodes/page_candidates`
 breaks pass 2's plans down (the status tag shows it after `pass 2 plan`).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a

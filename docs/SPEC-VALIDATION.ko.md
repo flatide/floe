@@ -123,6 +123,13 @@ sh tools/validate_rust.sh --only quick path/to.oas
   라벨 `*/2`·`1/2`, 단계 이동이 [0, 2]로 제한, 전체에서 한 단계 = 1, top으로 돌아오면 `7/16`, 루트 변경이 라벨 갱신.
   0.12.253: 하한 `FLOE_RUST_DENSITY_FLOOR_PX` — 0.25 px는 0.5 px 미세 사각형을 그리고 0.6 px는 뺀다,
   `density_floor` = 0 / 0.25 / 0.59; 어댑터 계약 `density_floor=0.250` → 0.25, 없으면 None.
+  0.12.261(블록 4 px, 한 번 걷기는 선택, 하한 1 px, 페이지 점 끔): 게이트 점 절의 기본은 4 px·퍼뜨림·맞춤·하한 1 px —
+  성긴 배열 100 px가 각 멤버에서 1.5 px 안, 맞닿은 배열 = Σ min(8, 4×4 블록의 멤버), 항목 = 성긴 배열 100 + 1 + 맞닿은
+  블록, TOP의 0.5 px 점은 그리지도 점으로 서지도 않음, `density_floor` 1, `density_plan2` 탐침 0·맞춤 1; 하한 0·0.25 px는
+  점을 컷 없는 프레임과 같게(하한 0은 탐침 1), 0.6 px는 뺌; 한 번 걷기(`FLOE_RUST_DENSITY_ONE_WALK=on`)는 탐침 0·맞춤 1에
+  점 없음, 페이지 점(`FLOE_RUST_DENSITY_PAGE_DOTS=on`, 하한 0)과 함께면 TOP의 점 50; 이전 규칙
+  (`SPREAD=off FLOOR_PX=0 PAGE_DOTS=on`)은 예전 기대. 단위 `the_dots_one_walk_takes_pass_1s_pages_and_dots_the_pages_under_the_cut`에
+  페이지 점 끔(작은 페이지 0점, LEAF 1점). 실제(컷 없이 그린 프레임)와의 켜진 비율 대조는 CUT_DENSITY_DESIGN §10.12.
   0.12.260(16 px 넘는 블록): 단위 `a_block_past_16_px_counts_what_its_items_hold`(상한 2,048·32,768, 64 px 블록에서 성긴
   배열 900점·맞닿은 48 px 배열은 한 항목 1,152, 7 px 정사각형 모서리의 LEAF 셋은 마스크 유무·블록 8·64 px 모두 3점),
   렌더 코어 `a_large_counted_dot_item_lights_exactly_its_count`(30×30 px 상자 — 스택 배열 18×18을 넘는 900픽셀 — 에 200점·1점이
