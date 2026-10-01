@@ -268,7 +268,11 @@ times on the first frame at a scale: its pages at the cells' cut - pass 1's, in
 hand, nothing more decoded - its records at `FLOE_RUST_DENSITY_FLOOR_PX` (there
 the records' floor), a page all under the cut a dot item. The frame line's
 `density_plan2=probe_us/fit_us/probes/passes/regions/nodes/page_nodes/page_candidates`
-breaks pass 2's plans down (the status tag shows it after `pass 2 plan`).
+breaks pass 2's plans down (the status tag shows it after `pass 2 plan`); since
+0.12.262 it ends `/threads/reads/items` - the threads its regions were planned
+on, the placement reads and the dot items. `FLOE_RUST_DENSITY_PLAN_THREADS=N`
+(diagnostic, default 1) plans pass 2's regions in N bands on N threads and
+merges them (`Cache::merge_plans`), when their pages fit the reserve.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

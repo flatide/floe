@@ -1158,8 +1158,11 @@ struct FramePixels {
     /// field chip the plan took 6.9 s whatever the dot block): the floor
     /// probes' and the fitted plans' wall time (us), the probes, the fitted
     /// plans' passes (HierStats::fit_passes), the regions planned over, and
-    /// the final plans' child-BVH nodes, page-BVH nodes and page candidates
-    density_plan2: Option<[u64; 8]>,
+    /// the final plans' child-BVH nodes, page-BVH nodes and page candidates,
+    /// the threads the regions were planned apart on (1: one plan), and the
+    /// final plans' placement reads (a dot node's layers and count) and dot
+    /// items
+    density_plan2: Option<[u64; 11]>,
 }
 
 fn render_worker(
@@ -2419,6 +2422,28 @@ fn density_stack_enabled() -> bool {
 /// every record under the cut of pass 1's pages drawn, the small-shape pages
 /// as dots far denser than their shapes: x16 lit 0.26 against 0.058 drawn
 /// cut-free, 0.080 under the fit). FLOE_RUST_DENSITY_ONE_WALK=on, diagnostic.
+/// The threads pass 2 of the sub-cut dots plans its regions on (2026-10-01,
+/// field: one plan of a 5.2 mm view walked 4.0 M nodes in 3.5 s on one core
+/// while the raster workers waited): the regions in that many bands, each
+/// planned as asked on its own thread and the plans merged
+/// (Cache::merge_plans: a block's item the one of the most dots), used when
+/// their pages fit the reserve (then that is the plan the budget fit makes)
+/// and the scale keeps every page; else the one fitted plan. Off by default:
+/// on the synthetic chip the bands' work was uneven (the heaviest of 8 held
+/// 2.1 M of 3.7 M node visits) and the merge cost up to 0.15 s - 1.1 to 2.4x
+/// - and a cell's view boxes, merged per plan, differed on one view by 27 px;
+/// whether the field chip's walk - four times slower a node, its index read
+/// cold - gains more is the field's to say. FLOE_RUST_DENSITY_PLAN_THREADS=N
+/// (diagnostic), 1 or unset one plan; the decode workers bound nothing here.
+fn density_plan_threads(_decode_workers: u16) -> usize {
+    std::env::var("FLOE_RUST_DENSITY_PLAN_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&threads| threads >= 1)
+        .unwrap_or(1)
+        .min(16)
+}
+
 fn density_one_walk_enabled() -> bool {
     std::env::var("FLOE_RUST_DENSITY_ONE_WALK").as_deref() == Ok("on")
 }
@@ -3187,7 +3212,7 @@ fn run_render(
         let mut density_us: Option<[u64; 5]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 8]> = None;
+        let mut density_plan2: Option<[u64; 11]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -3578,7 +3603,7 @@ fn run_render(
                 pixels.density_floor.map_or_else(|| "-".to_string(), |floor| format!("{floor:.3}")),
                 // the sub-cut dots' block (FLOE_RUST_DENSITY_BLOCK_PX), px
                 if pixels.density_dots.is_some() { format!("{}", floe_render_core::dot_block_px()) } else { "-".to_string() },
-                // pass 2's plans: probe_us/fit_us/probes/passes/regions/nodes/page_nodes/page_candidates
+                // pass 2's plans: probe_us/fit_us/probes/passes/regions/nodes/page_nodes/page_candidates/threads/reads/items
                 pixels
                     .density_plan2
                     .map_or_else(|| "-".to_string(), |counts| counts.map(|count| count.to_string()).join("/")),
@@ -3931,7 +3956,7 @@ fn render_density_frame(
     floor_memory: &mut BTreeMap<String, u8>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 8]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 11]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -3956,7 +3981,7 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 8];
+    let mut plan2 = [0u64; 11];
     let mut failed: Option<String> = None;
     let (report, _pool_us) = cache.with_decode_pool(
         decode_workers,
@@ -4103,25 +4128,80 @@ fn render_density_frame(
                                 // pass 1 plans to the rest) and its budget fit is remembered per
                                 // scale and side as pass 1's is: the same pages whatever the frame
                                 let fit_started = Instant::now();
-                                let planned_fine = plan_at(dots.then(density_cut_px), true)?;
-                                plan2[1] += elapsed_us(fit_started);
-                                plan2[3] += u64::from(planned_fine.stats.fit_passes);
-                                if background && planned_fine.stats.fit_redecided {
-                                    // the margin's pass 2 does not fit under the scale's decision:
-                                    // drawn otherwise it would change the picture when it lands
-                                    return Err(DROPPED_FIT.to_string());
-                                }
-                                if let Some(decision) = planned_fine.stats.fit_decision {
-                                    if planned_fine.stats.fit_redecided || !density_memory.contains_key(&side_key) {
-                                        density_memory.insert(side_key.clone(), decision);
+                                // the regions planned apart on threads (density_plan_threads) while
+                                // the scale keeps every page (or has no decision yet): as asked, and
+                                // when their pages fit the reserve that is the plan the fit makes
+                                let threads = density_plan_threads(decode_workers).min(region_boxes.len());
+                                let fine_cut = {
+                                    let mut fine = make_plan_request_cut(cache, command, 0, command.cut_px)?;
+                                    fine.sub_cut_dots = Some((density_cut_px() / command.cut_px).clamp(0.0, 1.0));
+                                    cache.plan_cut_dbu(&fine)?
+                                };
+                                let keeps_all = density_memory
+                                    .get(&side_key)
+                                    .is_none_or(|known| *known == floe_render_core::FixedFit::everything(fine_cut));
+                                let apart = if dots && threads > 1 && keeps_all {
+                                    // the regions in contiguous groups (tile order: bands of the view)
+                                    let chunk = region_boxes.len().div_ceil(threads);
+                                    let plans = std::thread::scope(|scope| {
+                                        let handles: Vec<_> = region_boxes
+                                            .chunks(chunk)
+                                            .map(|regions| {
+                                                let (regions, layers) = (regions.to_vec(), layers.clone());
+                                                scope.spawn(move || -> Result<HierPlan, String> {
+                                                    let mut fine = make_plan_request_cut(cache, command, 0, command.cut_px)?;
+                                                    fine.sub_cut_dots = Some((density_cut_px() / command.cut_px).clamp(0.0, 1.0));
+                                                    fine.regions = regions;
+                                                    fine.visible_indices = Some(layers);
+                                                    let fine = cache.page_plan_request(&fine, summary, !command.frames)?;
+                                                    Ok(cache.plan_cancellable(&fine, command.generation, cancellation)?.plan)
+                                                })
+                                            })
+                                            .collect();
+                                        handles
+                                            .into_iter()
+                                            .map(|handle| handle.join().unwrap_or_else(|_| Err("pass 2 plan thread panicked".to_string())))
+                                            .collect::<Result<Vec<HierPlan>, String>>()
+                                    })?;
+                                    let groups = plans.len() as u64;
+                                    let merged = floe_render_core::Cache::merge_plans(plans, floe_render_core::dot_block_px() / px_per_dbu);
+                                    (cache.plan_page_memory(&merged) <= reserve).then_some((merged, groups))
+                                } else {
+                                    None
+                                };
+                                let planned_fine = match apart {
+                                    Some((merged, groups)) => {
+                                        density_memory.entry(side_key.clone()).or_insert(floe_render_core::FixedFit::everything(fine_cut));
+                                        plan2[3] += 1;
+                                        plan2[8] = plan2[8].max(groups);
+                                        merged
                                     }
-                                }
+                                    None => {
+                                        let planned_fine = plan_at(dots.then(density_cut_px), true)?;
+                                        plan2[3] += u64::from(planned_fine.stats.fit_passes);
+                                        if background && planned_fine.stats.fit_redecided {
+                                            // the margin's pass 2 does not fit under the scale's decision:
+                                            // drawn otherwise it would change the picture when it lands
+                                            return Err(DROPPED_FIT.to_string());
+                                        }
+                                        if let Some(decision) = planned_fine.stats.fit_decision {
+                                            if planned_fine.stats.fit_redecided || !density_memory.contains_key(&side_key) {
+                                                density_memory.insert(side_key.clone(), decision);
+                                            }
+                                        }
+                                        planned_fine
+                                    }
+                                };
+                                plan2[1] += elapsed_us(fit_started);
                                 planned_fine
                             }
                         };
                         plan2[5] += planned_fine.stats.visited_bvh;
                         plan2[6] += planned_fine.stats.visited_page_bvh;
                         plan2[7] += planned_fine.stats.page_candidates;
+                        plan2[8] = plan2[8].max(1);
+                        plan2[9] += planned_fine.stats.sub_cut_box_reads;
+                        plan2[10] += planned_fine.stats.sub_cut_dot_items;
                         counts[4] += planned_fine.stats.sub_cut_boxes;
                         counts[5] += planned_fine.stats.sub_cut_box_over;
                         // the records' cut this side planned at, px (the floor, or

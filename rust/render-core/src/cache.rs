@@ -776,6 +776,139 @@ impl Cache {
     /// Encoded (stored) size of one page - what a decode of it will
     /// cost, roughly, before it is decoded (the deck's budget-aware
     /// decode chunking).
+    /// The plans of one view's regions planned apart (renderd's pass 2 of the
+    /// sub-cut dots, its regions split over threads; 2026-10-01) as the one
+    /// plan of all of them: the working cells by key - their pages, instances
+    /// and frames a union, their counted dot items one per block and layer
+    /// (`block_dbu`: the dots' block in the cell's frame; a dot item lies in
+    /// its block) - the one of the most dots: a plan reaches every item of a
+    /// block within a block of its regions, a block further away only through
+    /// the items it met, so the larger count is the whole one - the pages a
+    /// union at their best priority, the walk's counters summed. Equal to the
+    /// plan of every region at once as asked, up to the order of a cell's
+    /// instances and washes, which the raster does not see.
+    pub fn merge_plans(mut plans: Vec<HierPlan>, block_dbu: f64) -> HierPlan {
+        use std::collections::{BTreeMap, HashMap, HashSet};
+        let mut out = plans.remove(0);
+        let mut cells: BTreeMap<floe_vfs::hier::WsKey, floe_vfs::hier::WsCell> = out.wcells.drain(..).map(|cell| (cell.key, cell)).collect();
+        let mut pages: BTreeMap<u32, u64> = out.pages.iter().copied().zip(out.page_prio.iter().copied()).collect();
+        for plan in plans {
+            for cell in plan.wcells {
+                let Some(have) = cells.get_mut(&cell.key) else {
+                    cells.insert(cell.key, cell);
+                    continue;
+                };
+                // pages, with their levels when the plan has them
+                let mut levels: BTreeMap<u32, u8> = have.pages.iter().enumerate().map(|(at, &page)| (page, have.page_levels.get(at).copied().unwrap_or(0))).collect();
+                let levelled = !have.page_levels.is_empty() || !cell.page_levels.is_empty();
+                for (at, &page) in cell.pages.iter().enumerate() {
+                    levels.entry(page).or_insert(cell.page_levels.get(at).copied().unwrap_or(0));
+                }
+                have.pages = levels.keys().copied().collect();
+                have.page_levels = if levelled { levels.values().copied().collect() } else { Vec::new() };
+                // instances, once each
+                let mut placed: HashMap<(floe_vfs::hier::WsKey, i64, i64, u8, bool), Vec<usize>> = HashMap::new();
+                for (at, inst) in have.insts.iter().enumerate() {
+                    placed.entry((inst.child, inst.x, inst.y, inst.rot, inst.flip)).or_default().push(at);
+                }
+                for inst in cell.insts {
+                    let key = (inst.child, inst.x, inst.y, inst.rot, inst.flip);
+                    if placed.get(&key).is_some_and(|ats| ats.iter().any(|&at| have.insts[at] == inst)) {
+                        continue;
+                    }
+                    placed.entry(key).or_default().push(have.insts.len());
+                    have.insts.push(inst);
+                }
+                for frame in cell.frames {
+                    if !have.frames.contains(&frame) {
+                        have.frames.push(frame);
+                    }
+                }
+                // washes with their counts (0: none): a counted one per block and
+                // layer, the most dots; the rest once each
+                let counted = !have.dot_counts.is_empty() || !cell.dot_counts.is_empty();
+                if counted {
+                    have.dot_counts.resize(have.washes.len(), 0);
+                }
+                let block_of = |layer: u32, b: &floe_ovm::BBox| {
+                    let at = |a: i64, z: i64| ((a as f64 + z as f64) / 2.0 / block_dbu).floor() as i64;
+                    (layer, at(b.x0, b.x1), at(b.y0, b.y1))
+                };
+                let mut blocks: HashMap<(u32, i64, i64), usize> = HashMap::new();
+                let mut seen: HashSet<(u32, floe_ovm::BBox)> = HashSet::new();
+                for (at, &(layer, b)) in have.washes.iter().enumerate() {
+                    if have.dot_counts.get(at).copied().unwrap_or(0) > 0 {
+                        blocks.insert(block_of(layer, &b), at);
+                    } else {
+                        seen.insert((layer, b));
+                    }
+                }
+                for (at, &(layer, b)) in cell.washes.iter().enumerate() {
+                    let count = cell.dot_counts.get(at).copied().unwrap_or(0);
+                    if count == 0 {
+                        if seen.insert((layer, b)) {
+                            have.washes.push((layer, b));
+                            if counted {
+                                have.dot_counts.push(0);
+                            }
+                        }
+                        continue;
+                    }
+                    match blocks.get(&block_of(layer, &b)) {
+                        Some(&known) => {
+                            if count > have.dot_counts[known] {
+                                have.washes[known] = (layer, b);
+                                have.dot_counts[known] = count;
+                            }
+                        }
+                        None => {
+                            blocks.insert(block_of(layer, &b), have.washes.len());
+                            have.washes.push((layer, b));
+                            have.dot_counts.push(count);
+                        }
+                    }
+                }
+                have.reps.extend(cell.reps);
+            }
+            for (page, prio) in plan.pages.into_iter().zip(plan.page_prio) {
+                pages.entry(page).and_modify(|have| *have = (*have).min(prio)).or_insert(prio);
+            }
+            let (st, more) = (&mut out.stats, &plan.stats);
+            st.visited_bvh += more.visited_bvh;
+            st.visited_page_bvh += more.visited_page_bvh;
+            st.page_candidates += more.page_candidates;
+            st.sub_cut_boxes += more.sub_cut_boxes;
+            st.sub_cut_box_over += more.sub_cut_box_over;
+            st.sub_cut_box_nodes += more.sub_cut_box_nodes;
+            st.sub_cut_box_reads += more.sub_cut_box_reads;
+            st.sub_cut_box_unsure += more.sub_cut_box_unsure;
+            st.sub_cut_dot_items += more.sub_cut_dot_items;
+            st.cancelled |= more.cancelled;
+            st.fit_over |= more.fit_over;
+        }
+        out.wcells = cells.into_values().collect();
+        out.stats.wc_cells = out.wcells.len() as u64;
+        (out.pages, out.page_prio) = pages.into_iter().unzip();
+        out
+    }
+
+    /// The estimated decoded memory of a plan's pages, each once - what the
+    /// planner's budget fit holds against its budget (floe_vfs page_memory).
+    pub fn plan_page_memory(&self, plan: &HierPlan) -> u64 {
+        plan.pages
+            .iter()
+            .map(|&page| {
+                let p = self.vfs.ovm.page(page);
+                floe_vfs::hier::page_memory(p.records, p.usize_)
+            })
+            .sum()
+    }
+
+    /// The cut a request plans at, dbu (what a budget fit's decision records).
+    pub fn plan_cut_dbu(&self, request: &PlanRequest) -> Result<i64, String> {
+        Ok(self.view_request(request)?.cut_dbu)
+    }
+
     /// A plan as a density pass that draws `layer` alone reads it (the
     /// density stack's sub-cut dots plan both of pass 2's sides at once, and
     /// the top plane's side is its top layer): the pages and dot items of

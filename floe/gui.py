@@ -3994,14 +3994,18 @@ class Viewer:
                             p2 = res.get("density_plan2") or {}
                             if p2:
                                 plan += (" (probe %d ms x%d, fit %d ms x%d"
-                                         " passes, %d regions, nodes %s,"
-                                         " page nodes %s, pages %s)") % (
+                                         " passes on %d threads, %d regions,"
+                                         " nodes %s, page nodes %s, pages %s,"
+                                         " reads %s, dot items %s)") % (
                                     round(p2["probe_us"] / 1000),
                                     p2["probes"],
                                     round(p2["fit_us"] / 1000), p2["passes"],
+                                    max(1, p2.get("threads", 1)),
                                     p2["regions"], fmt_count(p2["nodes"]),
                                     fmt_count(p2["page_nodes"]),
-                                    fmt_count(p2["page_candidates"]))
+                                    fmt_count(p2["page_candidates"]),
+                                    fmt_count(p2.get("reads", 0)),
+                                    fmt_count(p2.get("items", 0)))
                             parts.append(plan)
                         pages = res.get("density_pages") or {}
                         if pages:

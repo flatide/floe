@@ -123,6 +123,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
   라벨 `*/2`·`1/2`, 단계 이동이 [0, 2]로 제한, 전체에서 한 단계 = 1, top으로 돌아오면 `7/16`, 루트 변경이 라벨 갱신.
   0.12.253: 하한 `FLOE_RUST_DENSITY_FLOOR_PX` — 0.25 px는 0.5 px 미세 사각형을 그리고 0.6 px는 뺀다,
   `density_floor` = 0 / 0.25 / 0.59; 어댑터 계약 `density_floor=0.250` → 0.25, 없으면 None.
+  0.12.262(2패스 계획을 스레드로, 선택): 게이트 점 절 — `FLOE_RUST_DENSITY_PLAN_THREADS=2`의 프레임이 기본과 바이트 동일하고
+  `density_plan2` threads 2; 어댑터 계약 `density_plan2`(…/threads/reads/items).
   0.12.261(블록 4 px, 한 번 걷기는 선택, 하한 1 px, 페이지 점 끔): 게이트 점 절의 기본은 4 px·퍼뜨림·맞춤·하한 1 px —
   성긴 배열 100 px가 각 멤버에서 1.5 px 안, 맞닿은 배열 = Σ min(8, 4×4 블록의 멤버), 항목 = 성긴 배열 100 + 1 + 맞닿은
   블록, TOP의 0.5 px 점은 그리지도 점으로 서지도 않음, `density_floor` 1, `density_plan2` 탐침 0·맞춤 1; 하한 0·0.25 px는

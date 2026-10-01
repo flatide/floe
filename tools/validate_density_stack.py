@@ -86,6 +86,9 @@ cell under it as dots in blocks, never walking into it:
     at the cells' cut; the squares' page, all under the cut, is not drawn -
     with the page dots at a zero floor it stands as exactly ceil(200 x 0.25)
     = 50 dots, what the squares' area lights cut-free;
+  * pass 2's regions planned apart on two threads and merged
+    (FLOE_RUST_DENSITY_PLAN_THREADS=2, density_plan2 threads 2) draw the
+    frame one plan draws;
   * step 3 (progressive): the dots' frame arrives twice - first a refining
     round (final=0) holding pass 1 alone, byte for byte the frame without the
     stack, then the final frame, byte for byte what the dots draw in one
@@ -189,6 +192,8 @@ def dots_checks(temp):
         'floor0': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0'}),
         'floor025': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.25'}),
         'floor06': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.6'}),
+        # pass 2's regions planned apart on two threads and merged
+        'split': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PLAN_THREADS': '2'}),
         # the one walk (FLOE_RUST_DENSITY_ONE_WALK=on, opt-in), and with the
         # page dots (FLOE_RUST_DENSITY_PAGE_DOTS=on) at a zero floor
         'one': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_ONE_WALK': 'on'}),
@@ -267,6 +272,12 @@ def dots_checks(temp):
         plan2, plan2_0 = res.get('density_plan2'), res0.get('density_plan2')
         assert plan2 and plan2['probes'] == 0 and plan2['passes'] == 1, plan2
         assert plan2_0 and plan2_0['probes'] == 1 and plan2_0['passes'] == 0, plan2_0
+        # the regions planned apart (FLOE_RUST_DENSITY_PLAN_THREADS=2): the
+        # same frame from two merged plans
+        split, split_res = frame(workers['split'], 1, (LOW,))
+        split_plan2 = split_res.get('density_plan2')
+        assert split_plan2 and split_plan2['threads'] == 2, split_plan2
+        assert split == on, 'two threads draw otherwise in %d px' % sum(1 for i in range(0, len(on), 4) if split[i:i + 4] != on[i:i + 4])
         # the one walk (FLOE_RUST_DENSITY_ONE_WALK=on): one fitted pass, no
         # probe; the specks' page (all under the cut) is not drawn - with the
         # page dots at a zero floor it stands as dots over its box, as many as

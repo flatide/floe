@@ -1679,7 +1679,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "density_us": "100/20/30/4/50", "density_bin": "600/1/0",
                 "density_dots": "3500/2", "density_floor": "0.250",
                 "density_block": "8",
-                "density_plan2": "3000/4000/1/3/24/120000/900000/45000",
+                "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -1763,7 +1763,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["density_block"], 8.0)
             self.assertEqual(result["density_plan2"], {
                 "probe_us": 3000, "fit_us": 4000, "probes": 1, "passes": 3, "regions": 24,
-                "nodes": 120000, "page_nodes": 900000, "page_candidates": 45000})
+                "nodes": 120000, "page_nodes": 900000, "page_candidates": 45000, "threads": 4,
+                "reads": 700000, "items": 90000})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)

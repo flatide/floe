@@ -139,8 +139,11 @@ DENSITY_BIN = ("items", "deferred", "overflow")
 DENSITY_DOTS = ("items", "over")
 # pass 2's plans (diagnostic, 2026-10-01): the floor probes' and the fitted
 # plans' wall time, the probes, the fitted plans' passes, the regions planned
-# over, the final plans' child-BVH nodes, page-BVH nodes and page candidates
-DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "page_nodes", "page_candidates")
+# over, the final plans' child-BVH nodes, page-BVH nodes and page candidates,
+# the threads its regions were planned on (1: one plan), the final plans'
+# placement reads and dot items
+DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "page_nodes", "page_candidates", "threads",
+                 "reads", "items")
 
 
 def _wire_counts(value, names):
