@@ -1073,6 +1073,14 @@ def perf_status(res, depth_note=""):
         pages = res.get("density_pages") or {}
         if pages:
             parts.append("%d pages" % pages.get("decoded", 0))
+        # what pass 2's reserve kept out (2026-10-01): a floor probe past it,
+        # a plan its fit thinned, pages its decode left out
+        p2 = res.get("density_plan2") or {}
+        over = [what for what, there in (
+            ("floor probe", p2.get("probes_over")), ("thinned", p2.get("thinned")),
+            ("%d pages left out" % pages.get("over_budget", 0), pages.get("over_budget"))) if there]
+        if over:
+            parts.append("pass 2 over budget: %s" % ", ".join(over))
         stack = " [density: %s]" % ", ".join(parts)
         # the bar: what pass 2 lit, its plan time and what it walked (nodes,
         # the placements it read, the cells' dot items it made); a floor
@@ -1100,6 +1108,8 @@ def perf_status(res, depth_note=""):
             brief.append(plan)
         if pages.get("decoded"):
             brief.append("%d pages decoded" % pages["decoded"])
+        if over:
+            brief.append("pass 2 over budget: %s" % ", ".join(over))
         brief_stack = "density: %s" % ", ".join(brief) if brief else "density"
     mode = "live%s (%d tiles, +%d new, %d ms" \
            "%s%s%s%s%s%s)" \

@@ -281,6 +281,21 @@
     18쪽 전부(everything)이고, 예산 10이면 그 여섯이다. 컷을 올린 결정 아래에서도 예산이 담으면 요청 컷이다.
   - 게이트: `fit_budget`(다시 정한 뒤의 구석 = 처음 구석), `density_stack`(`uneven` 레이아웃, 2패스 예약 1 MB: 전체를
     먼저 그린 뒤의 구석 = 새 워커의 구석).
+- **이미 들고 있는 페이지는 예산에서 0(0.12.266, renderd 0.12.245; 사용자 2026-10-01).** `HierOpts::free_pages`
+  (`PlanRequest::free_pages`, 정렬된 페이지 번호)는 프레임이 이미 디코드해 든 페이지다. renderd는 밀도 스택 2패스의 계획에
+  1패스의 페이지를 넘긴다.
+  - 그 페이지는 예산이 묻는 곳에서 0으로 센다: 걷기의 `fit_bytes`(탐침의 한도), `unique_page_memory`, `thin_to_budget`,
+    `plan_hier_fixed`. 맞춤의 문턱은 비용이 드는 페이지에 대해서만 정하고, 든 페이지는 문턱과 무관하게 남긴다.
+  - 사례: 합성 칩 (15999.7, 15997.6) µm, 979.7 µm 뷰, 990×1000 px.
+    - detail high + 하한 0 px: 탐침이 고른 37페이지가 모두 1패스의 것(새 페이지 0)인데 추정 201 MB로 128 MB 예약을
+      넘어 실패했다. 그래서 `lit 0`이었고, 뷰의 3/4 오른쪽(그 페이지들이 빠진 곳)에서는 226k px였다. 이제 첫 뷰가
+      113k px다(새 페이지 108개).
+    - medium 기본: 2패스가 27페이지로 2.7k px였는데, 이제 86페이지 136k px다(예약을 크게 준 것과 같다).
+  - 영역을 띠로 나눠 계획한 2패스의 예약 비교도 새로 디코드할 것만 센다(`Cache::plan_page_memory_beyond`).
+  - 단위: `pages_the_frame_holds_cost_the_budget_nothing`.
+    - 12쪽을 들면 남은 6쪽이 예산 6에 통째로 든다(들지 않으면 6쪽으로 솎임).
+    - 탐침 한도도 새 6쪽만 센다.
+    - 솎는 맞춤도 든 두 쪽을 문턱 밖에서 남기고, 같은 결정을 다시 적용해도 같다.
 - **컷 아래 점(0.12.247, renderd 0.12.232; 진단 `FLOE_RUST_DENSITY_DOTS=on`, CUT_DENSITY_DESIGN §10.12).**
   `HierOpts::sub_cut_dots = Some(몫)`(`Vfs::plan_hier_in`의 넷째 인자, `PlanRequest::sub_cut_dots`)이면 요청의
   컷은 **셀·자식 BVH 노드의 컷**이고 페이지·레코드는 컷 × 몫(`Hier::page_cut`; 래스터의 레코드 컷

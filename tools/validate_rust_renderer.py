@@ -629,15 +629,18 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                    cache_evicted=1200, density_floor=15.0)
         res["plan_culls"].update(fit_pct=200, fit_over=1)
         res["density_plan2"].update(probes=1, probe_us=637000, passes=5,
-                                    threads=4)
-        res["density_pages"]["decoded"] = 206
-        _, brief = perf_status(res)
+                                    threads=4, probes_over=1, thinned=1)
+        res["density_pages"].update(decoded=206, over_budget=3)
+        full, brief = perf_status(res)
+        # what pass 2's reserve kept out (2026-10-01): in the log line too
+        self.assertIn(", 206 pages, pass 2 over budget: floor probe, thinned, 3 pages left out]", full)
         self.assertEqual(
             brief,
             "4324 ms = 250 load + 3916 draw + 1693 other · density: lit 620k"
             " px, pass 2 plan 3494 ms (probe 637 ms x1, 5 passes, floor 15 px,"
             " 4 threads, nodes 4.0M, reads 15.2M, cell dots 2.7M), 206"
-            " pages decoded · bin off(cap@786k), hier 2.0M/1.7M pruned"
+            " pages decoded, pass 2 over budget: floor probe, thinned, 3 pages"
+            " left out · bin off(cap@786k), hier 2.0M/1.7M pruned"
             " · cut<7.56um x2 to fit budget, STILL OVER · 3 pages over"
             " budget (not drawn) · labels partial · evict 1200")
 
@@ -1819,7 +1822,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "density_us": "100/20/30/4/50", "density_bin": "600/1/0",
                 "density_dots": "3500/2", "density_floor": "0.250",
                 "density_block": "8",
-                "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000",
+                "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -1904,7 +1907,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["density_plan2"], {
                 "probe_us": 3000, "fit_us": 4000, "probes": 1, "passes": 3, "regions": 24,
                 "nodes": 120000, "page_nodes": 900000, "page_candidates": 45000, "threads": 4,
-                "reads": 700000, "items": 90000})
+                "reads": 700000, "items": 90000, "probes_over": 1, "thinned": 2})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)

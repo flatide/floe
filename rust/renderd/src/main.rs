@@ -1176,8 +1176,9 @@ struct FramePixels {
     /// the final plans' child-BVH nodes, page-BVH nodes and page candidates,
     /// the threads the regions were planned apart on (1: one plan), and the
     /// final plans' placement reads (a dot node's layers and count) and dot
-    /// items
-    density_plan2: Option<[u64; 11]>,
+    /// items; then the floor probes past the reserve and the sides whose plan
+    /// the budget fit thinned (2026-10-01)
+    density_plan2: Option<[u64; 13]>,
 }
 
 fn render_worker(
@@ -1302,6 +1303,7 @@ fn run_clip(
         sub_cut_dots: None,
         dot_records: None,
         probe_limit: 0,
+        free_pages: None,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -3266,7 +3268,7 @@ fn run_render(
         let mut density_us: Option<[u64; 5]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 11]> = None;
+        let mut density_plan2: Option<[u64; 13]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4012,7 +4014,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 11]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 13]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4037,7 +4039,18 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 11];
+    let mut plan2 = [0u64; 13];
+    // pass 1's pages: pass 2 holds them already, so they cost its reserve
+    // nothing (floe_vfs HierOpts::free_pages; user 2026-10-01: 37 pages of
+    // pass 1's, 201 MB by estimate, failed the 0 px floor's probe of a 128 MB
+    // reserve with nothing new to decode, and the view drew nothing under the
+    // cut until a pan took them out of it)
+    let held: Arc<[u32]> = {
+        let mut pages: Vec<u32> = decoded_pages.iter().map(|page| page.page_id).collect();
+        pages.sort_unstable();
+        pages.dedup();
+        Arc::from(pages)
+    };
     let mut failed: Option<String> = None;
     let (report, _pool_us) = cache.with_decode_pool(
         decode_workers,
@@ -4123,6 +4136,7 @@ fn render_density_frame(
                             };
                             fine.regions = region_boxes.clone();
                             fine.visible_indices = Some(layers.clone());
+                            fine.free_pages = Some(Arc::clone(&held));
                             if fit {
                                 fine.fixed_fit = density_memory.get(&side_key).copied();
                             } else {
@@ -4167,6 +4181,9 @@ fn render_density_frame(
                                 plan2[0] += elapsed_us(probe_started);
                                 plan2[2] += 1;
                                 let fits = !plan.stats.fit_over && plan.stats.fit_bytes <= reserve;
+                                if !fits {
+                                    plan2[11] += 1;
+                                }
                                 if !fits || known != Some(rung as u8) {
                                     if background && known.is_some() {
                                         return Err(DROPPED_FIT.to_string());
@@ -4227,7 +4244,7 @@ fn render_density_frame(
                                     })?;
                                     let groups = plans.len() as u64;
                                     let merged = floe_render_core::Cache::merge_plans(plans, floe_render_core::dot_block_px() / px_per_dbu);
-                                    (cache.plan_page_memory(&merged) <= reserve).then_some((merged, groups))
+                                    (cache.plan_page_memory_beyond(&merged, &held) <= reserve).then_some((merged, groups))
                                 } else {
                                     None
                                 };
@@ -4269,6 +4286,10 @@ fn render_density_frame(
                             } else {
                                 whole_memory.remove(&side_key);
                             }
+                        }
+                        if planned_fine.stats.fit_decision.is_some() && !planned_fine.stats.fit_whole {
+                            // the budget fit dropped pages or raised the cut
+                            plan2[12] += 1;
                         }
                         plan2[5] += planned_fine.stats.visited_bvh;
                         plan2[6] += planned_fine.stats.visited_page_bvh;
@@ -4440,6 +4461,7 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         sub_cut_dots: None,
         dot_records: None,
         probe_limit: 0,
+        free_pages: None,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -5089,6 +5111,7 @@ mod tests {
             sub_cut_dots: None,
             dot_records: None,
             probe_limit: 0,
+            free_pages: None,
         };
         assert_ne!(fit_memory_key(&top, &request(&top)), fit_memory_key(&rooted, &request(&rooted)));
         // the clip and the cell queries carry it too

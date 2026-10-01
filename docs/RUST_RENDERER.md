@@ -280,7 +280,13 @@ breaks pass 2's plans down (the log line's tag shows it after `pass 2 plan`,
 the bar its nodes, reads and cell dots, and a probe, a fit past one pass with
 the floor it raised and threads when there are any); since
 0.12.262 it ends `/threads/reads/items` - the threads its regions were planned
-on, the placement reads and the cells' dot items. `FLOE_RUST_DENSITY_PLAN_THREADS=N`
+on, the placement reads and the cells' dot items; since 0.12.266 it ends
+`/probes_over/thinned` - the floor probes past pass 2's reserve and the sides
+whose plan its budget fit thinned (the bar says `pass 2 over budget: floor probe,
+thinned, N pages left out`, the last from `density_pages`). Pass 1's pages cost
+that reserve nothing (`PlanRequest::free_pages`, floe_vfs `HierOpts::free_pages`;
+user 2026-10-01: 37 pages of pass 1's, 201 MB by estimate, failed a 0 px probe
+of the 128 MB reserve with nothing new to decode). `FLOE_RUST_DENSITY_PLAN_THREADS=N`
 (diagnostic, default 1) plans pass 2's regions in N bands on N threads and
 merges them (`Cache::merge_plans`), when their pages fit the reserve.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a

@@ -784,6 +784,13 @@ pub struct HierOpts {
     /// pass once its pages pass this many decoded bytes (stats.fit_over) -
     /// no budget fit, no second pass. 0: off.
     pub probe_limit: u64,
+    /// Pages the frame holds decoded already, sorted (the density stack's
+    /// pass 1, planning its pass 2): the budget - the probe's limit and the
+    /// fit - charges them nothing, and a fit keeps them whatever its
+    /// threshold (user 2026-10-01: pass 2's 128 MB reserve was charged 201 MB
+    /// of pass 1's own pages, so a view drew nothing under the cut until a
+    /// pan took them out of it). None: every page costs.
+    pub free_pages: Option<Arc<[u32]>>,
     /// The plan's cancellation (PlanStop); None: never cancelled.
     pub stop: Option<PlanStop>,
     /// The page frontier's decode budget per plan, decoded bytes of
@@ -866,6 +873,7 @@ impl Default for HierOpts {
             dot_pages: dot_pages(),
             dot_records: None,
             probe_limit: 0,
+            free_pages: None,
             stop: None,
             rep_decode_bytes: rep_decode_bytes(),
             rep_density: rep_density(),
@@ -1432,7 +1440,7 @@ fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         if plan.stats.fit_over {
             continue;
         }
-        let bytes = unique_page_memory(v, &plan);
+        let bytes = unique_page_memory(v, opts, &plan);
         if at == 0 && bytes <= req.decode_budget {
             plan.stats.fit_passes = passes;
             plan.stats.fit_decision = Some(FixedFit::everything(req.cut_dbu));
@@ -1454,7 +1462,7 @@ fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
         } else {
             FitKey::LongerSide { hairline: if attempt.page_hairline { opts.hairline } else { 0.0 } }
         };
-        if !thin_to_budget(v, &mut plan, key, req.cut_dbu, req.decode_budget) {
+        if !thin_to_budget(v, opts, &mut plan, key, req.cut_dbu, req.decode_budget) {
             break;
         }
         if let Some(decision) = plan.stats.fit_decision.as_mut() {
@@ -1477,9 +1485,28 @@ fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
     plan
 }
 
-/// The estimated decoded memory of a plan's pages, each counted once.
-fn unique_page_memory(v: &Ovm, plan: &HierPlan) -> u64 {
-    plan.pages.iter().map(|&pi| { let p = v.page(pi); page_memory(p.records, p.usize_) }).sum()
+/// The estimated decoded memory of a plan's pages, each counted once - those
+/// the frame holds already (HierOpts::free_pages) at nothing.
+fn unique_page_memory(v: &Ovm, opts: &HierOpts, plan: &HierPlan) -> u64 {
+    plan.pages.iter().map(|&pi| page_cost(v, opts, pi)).sum()
+}
+
+impl HierOpts {
+    /// The frame holds this page decoded already (HierOpts::free_pages).
+    pub fn page_is_free(&self, page: u32) -> bool {
+        self.free_pages.as_ref().is_some_and(|free| free.binary_search(&page).is_ok())
+    }
+}
+
+/// What a page costs a budget: its estimated decoded memory, nothing for a
+/// page the frame holds already.
+fn page_cost(v: &Ovm, opts: &HierOpts, page: u32) -> u64 {
+    if opts.page_is_free(page) {
+        0
+    } else {
+        let p = v.page(page);
+        page_memory(p.records, p.usize_)
+    }
 }
 
 /// Which cut rule the budget ranks pages by - the one the pass selected them
@@ -1515,9 +1542,12 @@ pub fn fit_priority(p: &floe_ovm::PageV, key: FitKey, page: u32) -> (std::cmp::R
 
 /// Keeps of a complete plan the longest prefix in `fit_priority` order that
 /// `budget` holds. False when not even the first page fits.
-fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, budget: u64) -> bool {
+fn thin_to_budget(v: &Ovm, opts: &HierOpts, plan: &mut HierPlan, key: FitKey, asked_cut: i64, budget: u64) -> bool {
     let metas: Vec<floe_ovm::PageV> = plan.pages.iter().map(|&pi| v.page(pi)).collect();
-    let mem: Vec<u64> = metas.iter().map(|p| page_memory(p.records, p.usize_)).collect();
+    // a page the frame holds already (HierOpts::free_pages) costs nothing and
+    // stays whatever the threshold, which is over the pages that cost
+    let free: Vec<bool> = plan.pages.iter().map(|&pi| opts.page_is_free(pi)).collect();
+    let mem: Vec<u64> = metas.iter().zip(&free).map(|(p, &held)| if held { 0 } else { page_memory(p.records, p.usize_) }).collect();
     let total: u64 = mem.iter().sum();
     // the pass summed per working cell; the generation holds a page once
     plan.stats.fit_bytes = total;
@@ -1527,9 +1557,9 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, bud
         return true;
     }
     let prio: Vec<_> = metas.iter().zip(&plan.pages).map(|(p, &pi)| fit_priority(p, key, pi)).collect();
-    let mut order: Vec<usize> = (0..metas.len()).collect();
+    let mut order: Vec<usize> = (0..metas.len()).filter(|&i| !free[i]).collect();
     order.sort_by_key(|&i| prio[i]);
-    let mut keep = vec![false; metas.len()];
+    let mut keep = free.clone();
     let (mut bytes, mut kept) = (0u64, 0usize);
     for &i in &order {
         if bytes + mem[i] > budget {
@@ -1542,20 +1572,13 @@ fn thin_to_budget(v: &Ovm, plan: &mut HierPlan, key: FitKey, asked_cut: i64, bud
     if kept == 0 {
         return false;
     }
-    // the class the prefix ends in, what it keeps of it, and whether
-    // anything lies below it
-    let class_of = |i: usize| prio[i].0 .0;
-    let edge = class_of(order[kept]);
-    let in_edge = order.iter().filter(|&&i| class_of(i) == edge).count() as u64;
-    let kept_edge = order[..kept].iter().filter(|&&i| class_of(i) == edge).count() as u64;
-    let below = order.iter().any(|&i| class_of(i) < edge);
+    // the class the prefix ends in (the pages that cost are over the
+    // budget, so one is left out)
+    let edge = prio[order[kept]].0 .0;
     // the decision: the last page kept (its cut is the caller's)
     let last = prio[order[kept - 1]];
     plan.stats.fit_decision = Some(FixedFit { cut_dbu: asked_cut, class: last.0 .0, phase: last.1, page: last.2 });
     fit_class_stats(plan, &prio, &keep, edge, asked_cut);
-    debug_assert_eq!(in_edge, prio.iter().filter(|p| p.0 .0 == edge).count() as u64);
-    debug_assert_eq!(kept_edge, prio.iter().zip(&keep).filter(|(p, k)| p.0 .0 == edge && **k).count() as u64);
-    debug_assert_eq!(below, prio.iter().any(|p| p.0 .0 < edge));
     plan.stats.page_bytes = keep_pages(v, plan, &keep);
     plan.stats.fit_bytes = bytes;
     true
@@ -1643,7 +1666,7 @@ fn plan_hier_fixed(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedFit) -> 
         // past the fit's overshoot like the fit's own first pass
         let asked = plan_hier_as_asked(v, req, opts, req.decode_budget.saturating_mul(FIT_OVERSHOOT));
         if !asked.stats.fit_over {
-            let bytes = unique_page_memory(v, &asked);
+            let bytes = unique_page_memory(v, opts, &asked);
             if req.decode_budget == 0 || bytes <= req.decode_budget {
                 return Some(whole(asked, bytes, 1));
             }
@@ -1662,15 +1685,17 @@ fn plan_hier_fixed(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedFit) -> 
     };
     let threshold = (std::cmp::Reverse(fixed.class), fixed.phase, fixed.page);
     let metas: Vec<floe_ovm::PageV> = plan.pages.iter().map(|&pi| v.page(pi)).collect();
+    // a page the frame holds already costs nothing and stays (thin_to_budget)
+    let cost: Vec<u64> = plan.pages.iter().map(|&pi| page_cost(v, opts, pi)).collect();
     if attempt.cut_dbu == req.cut_dbu {
-        let total: u64 = metas.iter().map(|p| page_memory(p.records, p.usize_)).sum();
+        let total: u64 = cost.iter().sum();
         if req.decode_budget == 0 || total <= req.decode_budget {
             return Some(whole(plan, total, 1));
         }
     }
     let prio: Vec<_> = metas.iter().zip(&plan.pages).map(|(p, &pi)| fit_priority(p, key, pi)).collect();
-    let keep: Vec<bool> = prio.iter().map(|p| *p <= threshold).collect();
-    let bytes: u64 = metas.iter().zip(&keep).filter(|(_, k)| **k).map(|(p, _)| page_memory(p.records, p.usize_)).sum();
+    let keep: Vec<bool> = prio.iter().zip(&plan.pages).map(|(p, &pi)| *p <= threshold || opts.page_is_free(pi)).collect();
+    let bytes: u64 = cost.iter().zip(&keep).filter(|(_, k)| **k).map(|(c, _)| *c).sum();
     if req.decode_budget > 0 && bytes > req.decode_budget {
         return None;
     }
@@ -2529,7 +2554,9 @@ impl<'a> Hier<'a> {
         for &p in &wc.pages {
             let page = self.v.page(p);
             self.st.page_bytes = self.st.page_bytes.saturating_add(page.usize_ as u64);
-            self.st.fit_bytes = self.st.fit_bytes.saturating_add(page_memory(page.records, page.usize_));
+            if !self.opts.page_is_free(p) {
+                self.st.fit_bytes = self.st.fit_bytes.saturating_add(page_memory(page.records, page.usize_));
+            }
         }
         // ---- children (r = 0: depth exhausted - children render
         // as outline frames; own pages above carry the geometry)
@@ -4894,7 +4921,7 @@ impl crate::Vfs {
     /// hairline policy is the request's (ViewReq::page_hairline);
     /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
-        self.plan_hier_in(req, &[], None, None, None, 0, None)
+        self.plan_hier_in(req, &[], None, None, None, 0, None, None)
     }
 
     /// `plan_hier` over `regions` of the view instead of the whole view
@@ -4905,12 +4932,13 @@ impl crate::Vfs {
     /// (HierOpts::probe_limit, 0 = a plan); under a cancellation
     /// (HierOpts::stop: a tripped one ends the plan with stats.cancelled).
     #[allow(clippy::too_many_arguments)]
-    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>, sub_cut_dots: Option<f64>, dot_records: Option<f64>, probe_limit: u64, stop: Option<PlanStop>) -> HierPlan {
+    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>, sub_cut_dots: Option<f64>, dot_records: Option<f64>, probe_limit: u64, free_pages: Option<Arc<[u32]>>, stop: Option<PlanStop>) -> HierPlan {
         let mut opts = HierOpts::default();
         opts.fixed_fit = fixed_fit;
         opts.sub_cut_dots = sub_cut_dots;
         opts.dot_records = dot_records;
         opts.probe_limit = probe_limit;
+        opts.free_pages = free_pages;
         opts.stop = stop;
         if !regions.is_empty() {
             opts.regions = regions.to_vec();
@@ -5688,6 +5716,55 @@ mod tests {
         // and one that does not hold them still plans under it
         let under_raised = plan_hier(&chip, &ask(per), &under(Some(raised)));
         assert_eq!((under_raised.pages.clone(), under_raised.stats.fit_decision, under_raised.stats.fit_fixed), (one.pages.clone(), Some(raised), true));
+    }
+
+    #[test]
+    fn pages_the_frame_holds_cost_the_budget_nothing() {
+        // user 2026-10-01: the density stack's pass 2 was charged pass 1's own
+        // pages - 37 of them, 201 MB by estimate, all decoded already - against
+        // its 128 MB reserve, so its 0 px probe failed and its fit thinned with
+        // nothing new to decode. HierOpts::free_pages: such pages cost nothing,
+        // in the probe's limit and in the fit, and a fit keeps them whatever its
+        // threshold. The fixture of the fit tests: sixteen 200-squares and two
+        // 1600s, cut 50, one page each.
+        let mut pages = Vec::new();
+        for i in 0..16 {
+            pages.push((bx(i * 400, 0, i * 400 + 200, 200), 200, 200));
+        }
+        for i in 0..2 {
+            pages.push((bx(i * 3200, 3000, i * 3200 + 1600, 4600), 1600, 1600));
+        }
+        let chip = fixture(&[FCell { name: "TOP", pages, places: vec![] }], 0);
+        let view = bx(-10, -10, 20_000_000, 20_000_000);
+        let per = page_memory(1, 0);
+        let ask = |budget: u64| {
+            let mut r = rq(view, 50, u32::MAX);
+            r.px_per_dbu = 0.02;
+            r.decode_budget = budget;
+            r
+        };
+        let with = |free: Option<Arc<[u32]>>, fixed: Option<FixedFit>, probe: u64| HierOpts { free_pages: free, fixed_fit: fixed, probe_limit: probe, ..HierOpts::default() };
+        let held: Arc<[u32]> = Arc::from((0..12u32).collect::<Vec<_>>());
+        // twelve pages held: the other six fit a budget of six, the frame whole
+        let whole = plan_hier(&chip, &ask(6 * per), &with(Some(held.clone()), None, 0));
+        assert_eq!((whole.pages.len(), whole.stats.fit_whole, whole.stats.fit_bytes), (18, true, 6 * per));
+        // ... where charged for all eighteen the fit thins to six
+        let thinned = plan_hier(&chip, &ask(6 * per), &with(None, None, 0));
+        assert_eq!((thinned.pages.len(), thinned.stats.fit_whole), (6, false));
+        // a probe's limit counts what the frame would add only
+        let probe = plan_hier(&chip, &ask(0), &with(Some(held.clone()), None, 6 * per));
+        assert_eq!((probe.stats.fit_over, probe.stats.fit_bytes, probe.pages.len()), (false, 6 * per, 18));
+        assert!(plan_hier(&chip, &ask(0), &with(None, None, 6 * per)).stats.fit_over);
+        // a fit that has to thin keeps the held pages whatever its threshold:
+        // the three the budget holds (as without them) and the two held
+        let two: Arc<[u32]> = Arc::from(vec![14u32, 15]);
+        let alone = plan_hier(&chip, &ask(3 * per), &with(None, None, 0));
+        assert_eq!(alone.pages, vec![0, 16, 17]);
+        let fit = plan_hier(&chip, &ask(3 * per), &with(Some(two.clone()), None, 0));
+        assert_eq!((fit.pages.clone(), fit.stats.fit_decision, fit.stats.fit_bytes), (vec![0, 14, 15, 16, 17], alone.stats.fit_decision, 3 * per));
+        // ... and so does the decision applied again
+        let again = plan_hier(&chip, &ask(3 * per), &with(Some(two), alone.stats.fit_decision, 0));
+        assert_eq!((again.pages.clone(), again.stats.fit_fixed, again.stats.fit_redecided), (vec![0, 14, 15, 16, 17], true, false));
     }
 
     #[test]

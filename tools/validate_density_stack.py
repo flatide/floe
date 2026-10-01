@@ -103,7 +103,9 @@ Pass 2's budget decision is the frame's own (user 2026-10-01: kept per scale,
 not per place, a dense view's decision emptied a sparse view at the same zoom
 step): on an uneven layout under a 1 MB pass-2 reserve the whole extent thins
 its pass 2 and the corner quarter, drawn after it at the same scale, equals
-the corner a fresh worker draws (history_checks).
+the corner a fresh worker draws (history_checks). Pass 1's pages cost pass 2's
+reserve nothing: under a 1 MB reserve, which pass 1's own pages pass, the frame
+equals the default reserve's and reports nothing over budget (held_checks).
 
     .venv/bin/python tools/validate_density_stack.py
 """
@@ -429,6 +431,91 @@ def history_checks(temp):
             w.stop()
 
 
+def held_layout(path):
+    """300 x 200 um: a BIG cell of 3,000 boxes of 2.1-2.4 um at a 2.5 um pitch
+    over (0..150, 0..125) um - over 3 px at the scale below, over medium's
+    3 px cut: pass 1's - and thirty distinct cells of a hundred 1-1.3 um boxes
+    (1.5-2 px: pass 2's) beside it over (220..295, 0..200) um, every box at a
+    random place and size (boxes alike at regular offsets would be written as
+    repetitions and indexed as a few records, too light for the budget). Under
+    a 1 MB reserve the two pass it together, not alone (a page over the budget
+    by itself makes the fit give up and plan everything)."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(*LOW)
+    big = ly.create_cell('BIG')
+    # random jitter of a few nm: boxes at regular offsets would be written as
+    # repetitions and indexed as a few records, too light for the budget
+    rnd = random.Random(7)
+    for j in range(50):
+        for i in range(60):
+            x, y = i * 2.5 + rnd.randrange(50) / 1000.0, j * 2.5 + rnd.randrange(50) / 1000.0
+            w, h = 2.1 + rnd.randrange(300) / 1000.0, 2.1 + rnd.randrange(300) / 1000.0
+            big.shapes(layer).insert(kdb.DBox(x, y, x + w, y + h))
+    top.insert(kdb.DCellInstArray(big.cell_index(), kdb.DTrans(kdb.DVector(0.0, 0.0))))
+    cells = 0
+    for j in range(10):
+        for i in range(3):
+            cell = ly.create_cell('S%03d' % cells)
+            for b in range(10):
+                for a in range(10):
+                    x, y = a * 1.8 + rnd.randrange(100) / 1000.0, b * 1.8 + rnd.randrange(100) / 1000.0
+                    w, h = 1.0 + rnd.randrange(300) / 1000.0, 1.0 + rnd.randrange(300) / 1000.0
+                    cell.shapes(layer).insert(kdb.DBox(x, y, x + w, y + h))
+            top.insert(kdb.DCellInstArray(cell.cell_index(), kdb.DTrans(kdb.DVector(220.0 + i * 25.0, j * 20.0))))
+            cells += 1
+    ly.write(str(path))
+
+
+def held_checks(temp):
+    """Pass 1's pages cost pass 2's reserve nothing (user 2026-10-01: 37 pages
+    of pass 1's, 201 MB by estimate, failed the 0 px floor's probe of the 128 MB
+    reserve with nothing new to decode, and medium's pass 2 lit 2.7k px where
+    a larger reserve lit 136k): under a 1 MB reserve, which pass 1's BIG page
+    and pass 2's new pages pass together, the frame equals the frame under the
+    default reserve and reports nothing over budget."""
+    src = Path(temp) / 'held.oas'
+    held_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    tight, roomy = worker(src, dict(env, FLOE_RUST_DENSITY_BUDGET_MB='1')), worker(src, env)
+    try:
+        dbu = float(tight.cache.meta['dbu'])
+        box_um, px_w, px_h = (0.0, 0.0, 300.0, 200.0), 450, 300
+
+        def view(w, gen):
+            w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in box_um), 'view': None,
+                      'w': px_w, 'h': px_h, 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('held frame timeout')
+
+        a, ra = view(tight, 1)
+        b, rb = view(roomy, 1)
+        assert ra['density_pages']['in_hand'] > 0 and ra['density_pages']['decoded'] > 0 and ra['density_stack']['lit'] > 0, (
+            ra['density_pages'], ra['density_stack'])
+        p2 = ra['density_plan2']
+        assert a == b and (p2['probes_over'], p2['thinned'], ra['density_pages']['over_budget']) == (0, 0, 0), (
+            'under the 1 MB reserve pass 2 differs in %d px (lit %d vs %d; pages %s vs %s; plan %s)' % (
+                sum(1 for i in range(0, len(a), 4) if a[i:i + 4] != b[i:i + 4]), ra['density_stack']['lit'], rb['density_stack']['lit'],
+                ra['density_pages'], rb['density_pages'], p2))
+        print('density stack: pass 1\'s pages cost pass 2 nothing - under a 1 MB reserve it lights %d px from %d new pages beside %d '
+              'held, as under 128 MB' % (ra['density_stack']['lit'], ra['density_pages']['decoded'], ra['density_pages']['in_hand']))
+    finally:
+        tight.stop()
+        roomy.stop()
+
+
 def frames_of(w, gen, visible, bg=False):
     """Every frame answer of one render, the refining rounds first: [(pixels,
     result)], the last one final."""
@@ -629,6 +716,7 @@ def main():
                 w.stop()
         dots_checks(temp)
         history_checks(temp)
+        held_checks(temp)
     print('density stack gate: OK')
 
 

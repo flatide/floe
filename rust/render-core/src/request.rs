@@ -110,6 +110,10 @@ pub struct PlanRequest {
     /// probe_limit): planned as asked, abandoned once its pages pass this
     /// many decoded bytes (stats.fit_over). 0: a plan.
     pub probe_limit: u64,
+    /// Pages the frame holds decoded already, sorted
+    /// (floe_vfs::hier::HierOpts::free_pages): the density stack's pass 1,
+    /// whose pages cost its pass 2's budget nothing.
+    pub free_pages: Option<std::sync::Arc<[u32]>>,
 }
 
 impl PlanRequest {
@@ -166,6 +170,7 @@ mod tests {
             sub_cut_dots: None,
             dot_records: None,
             probe_limit: 0,
+            free_pages: None,
         };
         assert!(req.validate().is_err());
     }

@@ -65,6 +65,9 @@
       - 괄호 안에 있을 때만 붙는 것: 탐침(`probe M ms xP`), 두 번 이상의 맞춤과 그것이 올린
         하한(`Q passes, floor F px`), 스레드.
       - 디코드한 페이지가 있으면 `P pages decoded`가 따로 붙는다.
+      - 2패스의 예약이 무엇을 막았으면 `pass 2 over budget: floor probe, thinned, N pages left out`이 붙는다(0.12.266).
+        `floor probe`는 하한 탐침이 예약을 넘은 것, `thinned`는 예산 맞춤이 페이지를 솎은 것,
+        `N pages left out`은 디코드가 예약에서 뺀 페이지다. 로그 줄의 태그에도 같은 문구가 붙는다.
       - 블록·하한·구역 수는 전체 줄에만 있다.
     - work bin: `bin N items` 또는 `bin off(cap@N), hier V/P pruned`. 넘치면 타일마다 걷는 양을
       함께 보인다.

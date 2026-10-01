@@ -894,6 +894,19 @@ impl Cache {
 
     /// The estimated decoded memory of a plan's pages, each once - what the
     /// planner's budget fit holds against its budget (floe_vfs page_memory).
+    /// plan_page_memory less the pages in `held` (sorted): what the plan
+    /// would add to a frame that holds those already.
+    pub fn plan_page_memory_beyond(&self, plan: &HierPlan, held: &[u32]) -> u64 {
+        plan.pages
+            .iter()
+            .filter(|page| held.binary_search(page).is_err())
+            .map(|&page| {
+                let p = self.vfs.ovm.page(page);
+                floe_vfs::hier::page_memory(p.records, p.usize_)
+            })
+            .sum()
+    }
+
     pub fn plan_page_memory(&self, plan: &HierPlan) -> u64 {
         plan.pages
             .iter()
@@ -1018,7 +1031,7 @@ impl Cache {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, stop);
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop);
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }

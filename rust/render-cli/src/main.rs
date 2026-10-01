@@ -244,6 +244,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         sub_cut_dots: None,
         dot_records: None,
         probe_limit: 0,
+        free_pages: None,
     })
 }
 

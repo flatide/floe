@@ -143,7 +143,7 @@ DENSITY_DOTS = ("items", "over")
 # the threads its regions were planned on (1: one plan), the final plans'
 # placement reads and dot items
 DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "page_nodes", "page_candidates", "threads",
-                 "reads", "items")
+                 "reads", "items", "probes_over", "thinned")
 
 
 def _wire_counts(value, names):

@@ -1686,6 +1686,7 @@ fn source_plan_request(
         sub_cut_dots: None,
         dot_records: None,
         probe_limit: 0,
+        free_pages: None,
     };
     plan.validate()?;
     Ok(Some(plan))
