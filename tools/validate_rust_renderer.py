@@ -566,12 +566,15 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
     def test_the_bar_shows_the_brief_perf_line_and_the_log_keeps_the_whole(self):
         """User 2026-10-01: "the log has it all; the bar should show only
         what is needed now, without an ellipsis". perf_status gives the
-        full line - the terminal log and the bar's tooltip, unchanged - and
-        the brief one the lower bar shows: the frame's time and its load /
-        draw split, pass 2's plan (nodes, reads, dot items; a probe, a fit
-        past one pass with its floor, threads and decoded pages only when
-        there are any), the work bin (with the hierarchy walk when it is
-        off), the cut and its budget fit, and what the picture lacks."""
+        full line - the terminal log and the bar's tooltip - and the brief
+        one the lower bar shows: the frame's time and its load / draw split,
+        what pass 2 lit and its plan (nodes, reads, the cells' dots; a
+        probe, a fit past one pass with its floor, threads and decoded pages
+        only when there are any), the work bin (with the hierarchy walk when
+        it is off), the cut and its budget fit, and what the picture lacks.
+        Pass 2's shapes under the cut look like dots too but are no cell's:
+        a frame lights them with no cell dot (user 2026-10-01: "two draws
+        and dots, yet dot items 0")."""
         from floe.gui import Viewer, perf_status
 
         # the field's frame of 2026-10-01 (renderd 0.12.242)
@@ -600,15 +603,16 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         full, brief = perf_status(res, ", depth 3")
         self.assertEqual(
             brief,
-            "4324 ms = 250 load + 3916 draw · density: pass 2 plan 3494 ms"
-            " (nodes 4.0M, reads 15.2M, dot items 2.7M) · bin 2196 items"
-            " · cut<7.56um")
+            "4324 ms = 250 load + 3916 draw · density: lit 620k px, pass 2"
+            " plan 3494 ms (nodes 4.0M, reads 15.2M, cell dots 2.7M) · bin"
+            " 2196 items · cut<7.56um")
         # the log line keeps every diagnostic, as before
         for part in (
-                "live [density: dots, block 4 px, floor 1 px, pass 2 plan"
-                " 3494 ms (probe 0 ms x0, fit 3494 ms x1 passes on 1 threads,"
-                " 24 regions, nodes 4.0M, page nodes 0, pages 19k, reads"
-                " 15.2M, dot items 2.7M), 0 pages] (10552 tiles, +9172 new,"
+                "live [density: dots, lit 620k px, block 4 px, floor 1 px,"
+                " pass 2 plan 3494 ms (probe 0 ms x0, fit 3494 ms x1 passes"
+                " on 1 threads, 24 regions, nodes 4.0M, page nodes 0, pages"
+                " 19k, reads 15.2M, cell dots 2.7M), 0 pages] (10552 tiles,"
+                " +9172 new,"
                 " 4324 ms = 250 load [6 plan+152 delta+92 apply] + 3916 draw"
                 ", depth 3, cut<7.56um (larger side), plan 6.1ms/0 frontier",
                 ", rust 4j 15tiles@384px 1920x1080", ", bin 2196 items",
@@ -630,12 +634,32 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         _, brief = perf_status(res)
         self.assertEqual(
             brief,
-            "4324 ms = 250 load + 3916 draw + 1693 other · density: pass 2"
-            " plan 3494 ms (probe 637 ms x1, 5 passes, floor 15 px,"
-            " 4 threads, nodes 4.0M, reads 15.2M, dot items 2.7M), 206"
+            "4324 ms = 250 load + 3916 draw + 1693 other · density: lit 620k"
+            " px, pass 2 plan 3494 ms (probe 637 ms x1, 5 passes, floor 15 px,"
+            " 4 threads, nodes 4.0M, reads 15.2M, cell dots 2.7M), 206"
             " pages decoded · bin off(cap@786k), hier 2.0M/1.7M pruned"
             " · cut<7.56um x2 to fit budget, STILL OVER · 3 pages over"
             " budget (not drawn) · labels partial · evict 1200")
+
+        # the synthetic chip at medium, 694 um around (14722, 17090) um: no
+        # cell under the cut, the shapes of 1-3 px drawn from 54 pages
+        _, brief = perf_status({
+            "tiles": 54, "ms": 69, "load_ms": 0, "draw_ms": 63,
+            "cut_um": 2.08, "work_bin_items": 43000,
+            "density_stack": {"lit": 83810, "top": 0, "lower": 78555,
+                              "covered": 24786, "claimed": 83810},
+            "density_dots": {"items": 0, "over": 0},
+            "density_us": {"plan2_us": 1200},
+            "density_plan2": {"probe_us": 0, "probes": 0, "fit_us": 1200,
+                              "passes": 1, "regions": 15, "nodes": 3153,
+                              "page_nodes": 0, "page_candidates": 54,
+                              "threads": 1, "reads": 0, "items": 0},
+            "density_pages": {"planned": 54, "in_hand": 18, "decoded": 36}})
+        self.assertEqual(
+            brief,
+            "69 ms = 0 load + 63 draw · density: lit 84k px, pass 2 plan 1 ms"
+            " (nodes 3153, reads 0, cell dots 0), 36 pages decoded · bin 43k"
+            " items · cut<2.08um")
 
         # a frame without the density stack, a deck's passes
         _, brief = perf_status({"tiles": 4, "ms": 52, "load_ms": 2,

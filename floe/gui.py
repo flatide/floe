@@ -1037,6 +1037,12 @@ def perf_status(res, depth_note=""):
         # 2026-10-01, and FLOE_RUST_DENSITY_FLOOR_PX, 2026-09-30)
         parts = ["dots" if res.get("density_dots") is not None
                  else "top + empty"]
+        # what pass 2 lit: the dots standing for the cells under the cut
+        # and the shapes under the cut it draws from pages by their area -
+        # both look like dots on screen, only the cells' count as dot items
+        # (user 2026-10-01: "two draws and dots, yet dot items 0")
+        lit = "lit %s px" % fmt_count(res["density_stack"].get("lit", 0))
+        parts.append(lit)
         if res.get("density_block") is not None:
             parts.append("block %g px" % res["density_block"])
         if res.get("density_floor") is not None:
@@ -1053,7 +1059,7 @@ def perf_status(res, depth_note=""):
                 plan += (" (probe %d ms x%d, fit %d ms x%d"
                          " passes on %d threads, %d regions,"
                          " nodes %s, page nodes %s, pages %s,"
-                         " reads %s, dot items %s)") % (
+                         " reads %s, cell dots %s)") % (
                     round(p2["probe_us"] / 1000),
                     p2["probes"],
                     round(p2["fit_us"] / 1000), p2["passes"],
@@ -1068,12 +1074,13 @@ def perf_status(res, depth_note=""):
         if pages:
             parts.append("%d pages" % pages.get("decoded", 0))
         stack = " [density: %s]" % ", ".join(parts)
-        # the bar: pass 2's plan time and what it walked (nodes, the
-        # placements it read, the dot items it made); a floor probe, a
-        # budget fit past one pass (with the floor it raised), threads and
-        # decoded pages only when there are any; the block and the regions
-        # stay in the log line
+        # the bar: what pass 2 lit, its plan time and what it walked (nodes,
+        # the placements it read, the cells' dot items it made); a floor
+        # probe, a budget fit past one pass (with the floor it raised),
+        # threads and decoded pages only when there are any; the block and
+        # the regions stay in the log line
         brief = [] if res.get("density_dots") is not None else ["top + empty"]
+        brief.append(lit)
         if us:
             plan = "pass 2 plan %d ms" % round(us.get("plan2_us", 0) / 1000)
             if p2:
@@ -1086,7 +1093,7 @@ def perf_status(res, depth_note=""):
                         if res.get("density_floor") is not None else ""))
                 if p2.get("threads", 1) > 1:
                     inner.append("%d threads" % p2["threads"])
-                inner.append("nodes %s, reads %s, dot items %s" % (
+                inner.append("nodes %s, reads %s, cell dots %s" % (
                     fmt_count(p2["nodes"]), fmt_count(p2.get("reads", 0)),
                     fmt_count(p2.get("items", 0))))
                 plan += " (%s)" % ", ".join(inner)

@@ -48,15 +48,20 @@
   labels, **color_epoch**) — 팔레트 recolor/repattern이 epoch를 올려
   캐시 프레임 재사용을 무효화.
 - bbox는 끝까지 float dbu(딥줌 스케일 왜곡 방지 — int 라운딩 금지).
-- **하단 상태줄 = 지금 확인할 것만**(0.12.263, 사용자 2026-10-01: "어차피 로그로 나오고
+- **하단 상태줄 = 지금 확인할 것만**(0.12.263, `lit`·`cell dots` 0.12.264; 사용자 2026-10-01: "어차피 로그로 나오고
   있으니 상태줄에는 현재 필요한 부분만 나와야 생략없이 확인이 가능함"). `perf_status(res)`가
   (전체 줄, 요약 줄)을 만든다.
-  - **전체 줄**은 이전과 같은 문자열이다. 터미널 로그(`live [density: …] (N tiles, …)  view W x H um`)와
-    하단 줄의 툴팁에 나온다.
+  - **전체 줄**은 터미널 로그(`live [density: …] (N tiles, …)  view W x H um`)와 하단 줄의 툴팁에 나온다.
+    0.12.262의 줄과 같은데, 0.12.264부터 밀도 태그에 `lit L px`가 붙고 `dot items`가 `cell dots`로 바뀌었다.
   - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
     - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
       붙는다. load의 `[plan+delta+apply]`는 빠진다.
-    - 밀도 스택: `density: pass 2 plan N ms (nodes …, reads …, dot items …)`.
+    - 밀도 스택: `density: lit L px, pass 2 plan N ms (nodes …, reads …, cell dots …)`.
+      - `lit`은 2패스가 켠 픽셀이다. 컷 아래 셀을 대신하는 점과, 2패스가 페이지에서 꺼내 면적대로
+        그리는 컷 아래 도형이 모두 들어간다. 둘 다 화면에서는 점처럼 보인다.
+      - `cell dots`는 그중 셀(셀·BVH 노드·배열)을 대신한 점 항목 수다. 0.12.263까지는 `dot items`였다.
+      - 사용자 2026-10-01: "두번 그리고 점들이 찍히는데 dot items가 0". 합성 칩의 694 µm 뷰를 medium으로
+        보면 컷 아래 셀이 없어 cell dots는 0이지만, 1~3 px 도형을 54페이지에서 그려 84k px를 켠다.
       - 괄호 안에 있을 때만 붙는 것: 탐침(`probe M ms xP`), 두 번 이상의 맞춤과 그것이 올린
         하한(`Q passes, floor F px`), 스레드.
       - 디코드한 페이지가 있으면 `P pages decoded`가 따로 붙는다.

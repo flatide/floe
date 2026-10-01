@@ -259,10 +259,15 @@ raised it to). `FLOE_RUST_DENSITY_BLOCK_PX` (diagnostic, default 4 - 8 in 0.12.2
 0.12.257) is the dots' block: the planner walks a cut node down to a block, so
 a larger block is less detail and less work; the frame line's
 `density_block=<px>` reports it and the viewer's log line shows it
-(`[density: dots, block 4 px, floor 1 px, pass 2 plan N ms (...), P pages]`;
-since 0.12.263 the lower bar shows only `density: pass 2 plan N ms (nodes ..,
-reads .., dot items ..)`, the whole tag being in the log line and the bar's
-tooltip - `floe.gui.perf_status`).
+(`[density: dots, lit L px, block 4 px, floor 1 px, pass 2 plan N ms (...), P pages]`;
+since 0.12.263 the lower bar shows only `density: lit L px, pass 2 plan N ms
+(nodes .., reads .., cell dots ..)`, the whole tag being in the log line and the
+bar's tooltip - `floe.gui.perf_status`). `lit` (since 0.12.264, the frame line's
+`density_stack` lit count) is every pixel pass 2 lit - the dots standing for the
+cells under the cut and the shapes under the cut it draws from pages by their
+area, which look like dots too; `cell dots` (`dot items` until 0.12.263) counts
+only the cells' dot items, so a view with no cell under the cut lights its
+shapes with `cell dots 0`.
 `FLOE_RUST_DENSITY_ONE_WALK=on` (diagnostic; the default in 0.12.259-0.12.260,
 opt-in since 0.12.261 - its small-shape pages as dots were far denser than their
 shapes and a field root view drew 13.8 s against 7.9 s) makes pass 2 plan once
@@ -272,10 +277,10 @@ hand, nothing more decoded - its records at `FLOE_RUST_DENSITY_FLOOR_PX` (there
 the records' floor), a page all under the cut a dot item. The frame line's
 `density_plan2=probe_us/fit_us/probes/passes/regions/nodes/page_nodes/page_candidates`
 breaks pass 2's plans down (the log line's tag shows it after `pass 2 plan`,
-the bar its nodes, reads and dot items, and a probe, a fit past one pass with
+the bar its nodes, reads and cell dots, and a probe, a fit past one pass with
 the floor it raised and threads when there are any); since
 0.12.262 it ends `/threads/reads/items` - the threads its regions were planned
-on, the placement reads and the dot items. `FLOE_RUST_DENSITY_PLAN_THREADS=N`
+on, the placement reads and the cells' dot items. `FLOE_RUST_DENSITY_PLAN_THREADS=N`
 (diagnostic, default 1) plans pass 2's regions in N bands on N threads and
 merges them (`Cache::merge_plans`), when their pages fit the reserve.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
