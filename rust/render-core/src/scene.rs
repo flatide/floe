@@ -1,6 +1,9 @@
-use floe_vfs::hier::{HierPlan, WsCell, WsKey};
+use floe_oasis::doc::Rep;
+use floe_vfs::hier::{HierPlan, WsCell, WsInst, WsKey};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use crate::transform::OrthoTransform;
 
 use crate::{validate_font_px, Cache, DecodedPage, RenderLabel, DEFAULT_LABEL_FONT_PX};
 
@@ -25,6 +28,221 @@ pub struct FrameScene {
     /// where a round paints only what it has already decoded and the work bin
     /// and the masks are right to be built from that.
     meta: Option<PageMeta>,
+    /// Per working cell (row-aligned with `plan.wcells`): its instances by
+    /// place, built the first time a tile's walk asks (`inst_index`), and
+    /// whether it is used (FLOE_RUST_INST_INDEX).
+    inst_index: Vec<OnceLock<Option<InstIndex>>>,
+    inst_index_on: bool,
+}
+
+/// A working cell's instances by place, for the per-tile walk
+/// (raster::render_cell; field 2026-10-01: at one scale a 2076 x 1232 frame
+/// drew in 12 times the time of a 796 x 804 one). The plan lists a cell's
+/// instances for the whole frame, and a tile's walk - the work bin past its
+/// item cap, a binned cell item, the density stack's lower planes - read
+/// every one of them for every plane to keep those that meet the tile: per
+/// tile a cost of the whole frame, so a frame's cost grew with the square of
+/// its area. Each instance's footprint - the union of its members' boxes in
+/// the cell's frame, what for_each_visible_offset tests a member against -
+/// is bucketed on a grid, and a tile asks for the instances whose footprint
+/// meets its view, in their order; those it skips have no member there.
+pub(crate) struct InstIndex {
+    origin: (i128, i128),
+    step: (i128, i128),
+    dims: (usize, usize),
+    /// bucket b's instances are entries[starts[b]..starts[b + 1]]
+    starts: Vec<u32>,
+    entries: Vec<u32>,
+    /// instances over more than INST_INDEX_WIDE buckets, or whose footprint
+    /// is unknown (ALWAYS: the walk reports what is wrong with them), asked
+    /// of every view
+    wide: Vec<u32>,
+    feet: Vec<floe_ovm::BBox>,
+}
+
+/// A cell of fewer instances is walked as before: its list is cheaper than
+/// the grid.
+pub(crate) const INST_INDEX_MIN: usize = 64;
+/// An instance over more buckets than this is asked of every view instead.
+const INST_INDEX_WIDE: i128 = 64;
+/// The instances a bucket holds on average, and the grid's largest side.
+const INST_INDEX_PER_BUCKET: f64 = 4.0;
+const INST_INDEX_MAX_SIDE: usize = 1024;
+/// The footprint of an instance the index cannot place: met by every view.
+const ALWAYS: floe_ovm::BBox = floe_ovm::BBox { x0: i64::MIN, y0: i64::MIN, x1: i64::MAX, y1: i64::MAX };
+
+/// FLOE_RUST_INST_INDEX=off (diagnostic kill switch): the per-tile walk
+/// reads every instance of a cell, as before 2026-10-01.
+fn inst_index_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_INST_INDEX").as_deref() != Ok("off"))
+}
+
+/// The union of an instance's members' boxes in its cell's frame: the child's
+/// box placed, grown by the repetition's extent (a grid's four corner
+/// offsets, every point of a list). EMPTY for an empty child (the walk skips
+/// it); ALWAYS when the child's box is missing or a coordinate overflows (the
+/// walk reports it).
+fn inst_footprint(bounds: &BTreeMap<WsKey, floe_ovm::BBox>, inst: &WsInst) -> floe_ovm::BBox {
+    let Some(child) = bounds.get(&inst.child).copied() else {
+        return ALWAYS;
+    };
+    if child.is_empty() {
+        return floe_ovm::BBox::EMPTY;
+    }
+    let Ok(base) = OrthoTransform::place(inst.x, inst.y, inst.rot, inst.flip).and_then(|place| place.apply_bbox(child)) else {
+        return ALWAYS;
+    };
+    let (mut lo_x, mut lo_y, mut hi_x, mut hi_y) = (0i128, 0i128, 0i128, 0i128);
+    let mut grow = |dx: i128, dy: i128| {
+        lo_x = lo_x.min(dx);
+        lo_y = lo_y.min(dy);
+        hi_x = hi_x.max(dx);
+        hi_y = hi_y.max(dy);
+    };
+    match &inst.rep {
+        Rep::One => {}
+        Rep::Grid { na, nb, va, vb } => {
+            if *na == 0 || *nb == 0 {
+                return ALWAYS;
+            }
+            let (a, b) = ((*na - 1) as i128, (*nb - 1) as i128);
+            for (i, j) in [(0, 0), (a, 0), (0, b), (a, b)] {
+                grow(i * va.0 as i128 + j * vb.0 as i128, i * va.1 as i128 + j * vb.1 as i128);
+            }
+        }
+        Rep::Pts(points) => {
+            if points.is_empty() {
+                return ALWAYS;
+            }
+            for &(dx, dy) in points.iter() {
+                grow(dx as i128, dy as i128);
+            }
+        }
+    }
+    let clamp = |v: i128| v.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+    floe_ovm::BBox {
+        x0: clamp(base.x0 as i128 + lo_x),
+        y0: clamp(base.y0 as i128 + lo_y),
+        x1: clamp(base.x1 as i128 + hi_x),
+        y1: clamp(base.y1 as i128 + hi_y),
+    }
+}
+
+impl InstIndex {
+    fn build(cell: &WsCell, bounds: &BTreeMap<WsKey, floe_ovm::BBox>) -> InstIndex {
+        let feet: Vec<floe_ovm::BBox> = cell.insts.iter().map(|inst| inst_footprint(bounds, inst)).collect();
+        let placed = |foot: &floe_ovm::BBox| !foot.is_empty() && *foot != ALWAYS;
+        let mut union = floe_ovm::BBox::EMPTY;
+        let mut count = 0usize;
+        for foot in feet.iter().filter(|foot| placed(foot)) {
+            union.grow(foot);
+            count += 1;
+        }
+        let (width, height) = if count == 0 {
+            (1i128, 1i128)
+        } else {
+            ((union.x1 as i128 - union.x0 as i128).max(1), (union.y1 as i128 - union.y0 as i128).max(1))
+        };
+        // about INST_INDEX_PER_BUCKET instances a bucket, the buckets as
+        // square as the instances' extent allows
+        let buckets = (count as f64 / INST_INDEX_PER_BUCKET).max(1.0);
+        let aspect = width as f64 / height as f64;
+        let gx = ((buckets * aspect).sqrt().round() as usize).clamp(1, INST_INDEX_MAX_SIDE);
+        let gy = ((buckets / gx as f64).round() as usize).clamp(1, INST_INDEX_MAX_SIDE);
+        let origin = if count == 0 { (0, 0) } else { (union.x0 as i128, union.y0 as i128) };
+        let step = (((width + gx as i128 - 1) / gx as i128).max(1), ((height + gy as i128 - 1) / gy as i128).max(1));
+        let mut index = InstIndex { origin, step, dims: (gx, gy), starts: vec![0; gx * gy + 1], entries: Vec::new(), wide: Vec::new(), feet };
+        // two passes: the buckets' sizes, then their instances in order
+        let mut spans: Vec<Option<(usize, usize, usize, usize)>> = Vec::with_capacity(index.feet.len());
+        for (at, foot) in index.feet.iter().enumerate() {
+            if *foot == ALWAYS {
+                index.wide.push(at as u32);
+                spans.push(None);
+                continue;
+            }
+            if !placed(foot) {
+                spans.push(None);
+                continue;
+            }
+            let span = index.span(foot);
+            let (kx0, kx1, ky0, ky1) = span;
+            if (kx1 - kx0 + 1) as i128 * (ky1 - ky0 + 1) as i128 > INST_INDEX_WIDE {
+                index.wide.push(at as u32);
+                spans.push(None);
+                continue;
+            }
+            for ky in ky0..=ky1 {
+                for kx in kx0..=kx1 {
+                    index.starts[ky * gx + kx + 1] += 1;
+                }
+            }
+            spans.push(Some(span));
+        }
+        for b in 0..gx * gy {
+            index.starts[b + 1] += index.starts[b];
+        }
+        let mut fill: Vec<u32> = index.starts[..gx * gy].to_vec();
+        index.entries = vec![0; index.starts[gx * gy] as usize];
+        for (at, span) in spans.iter().enumerate() {
+            let Some((kx0, kx1, ky0, ky1)) = *span else {
+                continue;
+            };
+            for ky in ky0..=ky1 {
+                for kx in kx0..=kx1 {
+                    let b = ky * gx + kx;
+                    index.entries[fill[b] as usize] = at as u32;
+                    fill[b] += 1;
+                }
+            }
+        }
+        index
+    }
+
+    /// The buckets a box meets, clamped to the grid: (kx0, kx1, ky0, ky1).
+    fn span(&self, bbox: &floe_ovm::BBox) -> (usize, usize, usize, usize) {
+        let at = |v: i64, origin: i128, step: i128, dim: usize| (((v as i128 - origin).div_euclid(step)).clamp(0, dim as i128 - 1)) as usize;
+        (
+            at(bbox.x0, self.origin.0, self.step.0, self.dims.0),
+            at(bbox.x1, self.origin.0, self.step.0, self.dims.0),
+            at(bbox.y0, self.origin.1, self.step.1, self.dims.1),
+            at(bbox.y1, self.origin.1, self.step.1, self.dims.1),
+        )
+    }
+
+    /// The instances (indices into the cell's `insts`, ascending) whose
+    /// footprint meets `view` - a closed box, as for_each_visible_offset
+    /// meets it - and those it cannot place. None when the view holds half
+    /// the grid or more: the list itself is then the cheaper walk.
+    pub(crate) fn query(&self, view: &floe_ovm::BBox) -> Option<Vec<u32>> {
+        let mut out: Vec<u32> = Vec::new();
+        if !view.is_empty() {
+            let (kx0, kx1, ky0, ky1) = self.span(view);
+            let (gx, gy) = self.dims;
+            if 2 * (kx1 - kx0 + 1) * (ky1 - ky0 + 1) >= gx * gy {
+                return None;
+            }
+            for ky in ky0..=ky1 {
+                for kx in kx0..=kx1 {
+                    let b = ky * gx + kx;
+                    for &at in &self.entries[self.starts[b] as usize..self.starts[b + 1] as usize] {
+                        if self.feet[at as usize].intersects(view) {
+                            out.push(at);
+                        }
+                    }
+                }
+            }
+        }
+        for &at in &self.wide {
+            let foot = &self.feet[at as usize];
+            if *foot == ALWAYS || foot.intersects(view) {
+                out.push(at);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        Some(out)
+    }
 }
 
 /// Per-page metadata of a plan, aligned with `HierPlan::pages`, and the slots
@@ -363,6 +581,7 @@ impl FrameScene {
             }
         }
         let masks = SceneMasks::build(&plan, &pages, None);
+        let plan_cells = plan.wcells.len();
         Ok(Self {
             plan,
             pages,
@@ -373,6 +592,8 @@ impl FrameScene {
             masks,
             summaries: Vec::new(),
             meta: None,
+            inst_index: (0..plan_cells).map(|_| OnceLock::new()).collect(),
+            inst_index_on: inst_index_enabled(),
         })
     }
 
@@ -465,6 +686,27 @@ impl FrameScene {
 
     pub fn plan(&self) -> &HierPlan {
         self.plan.as_ref()
+    }
+
+    /// Working cell `key`'s instances by place (InstIndex), built the first
+    /// time a tile asks; None for a cell of fewer than INST_INDEX_MIN
+    /// instances or with FLOE_RUST_INST_INDEX=off.
+    pub(crate) fn inst_index(&self, key: WsKey) -> Option<&InstIndex> {
+        if !self.inst_index_on {
+            return None;
+        }
+        let row = self.plan.wcells.binary_search_by_key(&key, |cell| cell.key).ok()?;
+        let cell = &self.plan.wcells[row];
+        if cell.insts.len() < INST_INDEX_MIN {
+            return None;
+        }
+        self.inst_index[row].get_or_init(|| Some(InstIndex::build(cell, &self.cell_bounds))).as_ref()
+    }
+
+    /// The instance index on or off (tests; FLOE_RUST_INST_INDEX in the field).
+    #[cfg(test)]
+    pub(crate) fn set_inst_index(&mut self, on: bool) {
+        self.inst_index_on = on;
     }
 
     pub fn cell(&self, key: WsKey) -> Option<&WsCell> {

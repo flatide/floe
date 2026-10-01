@@ -5549,7 +5549,14 @@ fn render_cell(
             .deferred_frame_records
             .saturating_add(cell.frames.len().try_into().unwrap_or(u64::MAX));
     }
-    for instance in &cell.insts {
+    // a cell of many instances: only those whose footprint meets this tile's
+    // view, in their order (FrameScene::inst_index; the plan lists them for
+    // the whole frame, and reading them all per tile and plane made a frame's
+    // cost grow with the square of its area - field 2026-10-01)
+    let picked = scene.inst_index(key).and_then(|index| index.query(&local_view));
+    let count = picked.as_ref().map_or(cell.insts.len(), Vec::len);
+    for at in 0..count {
+        let instance = &cell.insts[picked.as_ref().map_or(at, |picked| picked[at] as usize)];
         check_cancelled(guard)?;
         let child_bbox = scene
             .cell_bbox(instance.child)
@@ -11832,6 +11839,123 @@ mod tests {
     /// thread waited in the scope's join for ever (2026-09-30: a zoom during
     /// the density stack's pass 2 hung the daemon). A watchdog thread tells a
     /// hang from a return.
+    /// A cell of many instances for the instance index: 300 single
+    /// placements of a 0.6 px leaf at random places and orientations, a 30 x 2
+    /// grid, a point list and one with an empty child, over the 32 px frame.
+    fn many_instances_scene(on: bool) -> FrameScene {
+        let (top, leaf, empty) = ((0, REM_FULL), (1, REM_FULL), (2, REM_FULL));
+        let unit = BBox { x0: 0, y0: 0, x1: 6, y1: 6 };
+        let mut rng = Lcg(7);
+        let mut insts: Vec<WsInst> = (0..300)
+            .map(|_| WsInst { child: leaf, x: rng.next(314), y: rng.next(314), rot: rng.next(4) as u8, flip: rng.next(2) == 1, rep: Rep::One })
+            .collect();
+        insts.push(WsInst { child: leaf, x: 5, y: 300, rot: 0, flip: false, rep: Rep::Grid { na: 30, nb: 2, va: (10, 0), vb: (0, 9) } });
+        insts.push(WsInst { child: leaf, x: 200, y: 10, rot: 1, flip: false, rep: Rep::Pts(Arc::from(vec![(0, 0), (40, 7), (90, 100)])) });
+        insts.push(WsInst { child: empty, x: 100, y: 100, rot: 0, flip: false, rep: Rep::One });
+        let cell = |key, pages: Vec<u32>, insts: Vec<WsInst>| WsCell {
+            key,
+            pages,
+            page_levels: Vec::new(),
+            insts,
+            frames: Vec::new(),
+            washes: Vec::new(),
+            dot_counts: Vec::new(),
+            reps: Vec::new(),
+        };
+        let plan = HierPlan {
+            top,
+            wcells: vec![cell(top, Vec::new(), insts), cell(leaf, vec![0], Vec::new()), cell(empty, Vec::new(), Vec::new())],
+            pages: vec![0],
+            page_prio: vec![0],
+            stats: HierStats::default(),
+            explain: Vec::new(),
+        };
+        let bounds = BTreeMap::from([(top, BBox { x0: -10, y0: -10, x1: 330, y1: 330 }), (leaf, unit), (empty, BBox::EMPTY)]);
+        let mut scene = FrameScene::from_test_parts(plan, vec![styled_page(0, 1, unit)], bounds).unwrap();
+        scene.set_inst_index(on);
+        scene
+    }
+
+    /// FrameScene::inst_index (field 2026-10-01: at one scale a 2076 x 1232
+    /// frame drew in 12 times the time of a 796 x 804 one - past the work
+    /// bin's cap every tile read every instance of a cell for every plane):
+    /// a tile walks the instances whose footprint meets its view, and the
+    /// frame is the one the whole list draws, with any tiling and workers,
+    /// binned or not, while the walk tests a fraction of the members.
+    #[test]
+    fn a_tile_walks_the_instances_that_meet_it() {
+        for (tile, workers) in [(8u16, 1u16), (16, 3), (DEFAULT_TILE_SIZE, 2)] {
+            let mut request = hairline_request();
+            request.raster.tile_size = tile;
+            request.raster.workers = workers;
+            let off = render_geometry_styled_unbinned(&many_instances_scene(false), &request).unwrap();
+            let on = render_geometry_styled_unbinned(&many_instances_scene(true), &request).unwrap();
+            assert!(!lit_pixels(&off.frame).is_empty());
+            assert_eq!(on.frame.pixels(), off.frame.pixels(), "tile {tile} workers {workers}");
+            assert_eq!(on.rectangle_member_paints, off.rectangle_member_paints, "tile {tile}");
+            let binned = render_geometry_styled(&many_instances_scene(true), &request).unwrap();
+            assert_eq!(binned.frame.pixels(), off.frame.pixels(), "binned, tile {tile}");
+            if tile == 8 {
+                // 16 tiles: each reads its own instances, not all of them
+                assert!(on.stats.rep_members_tested * 4 < off.stats.rep_members_tested, "{} vs {}", on.stats.rep_members_tested, off.stats.rep_members_tested);
+            }
+        }
+    }
+
+    /// InstIndex::query never leaves out an instance with a member whose box
+    /// meets the view - a closed box, as for_each_visible_offset meets it -
+    /// whatever the view: inside, across, touching the edges, past the
+    /// instances, empty; its answer is ascending, and the empty child is never
+    /// asked for. (The members are enumerated here: a grid's own range is a
+    /// superset - grid_ranges rounds outwards - whose extra members lie
+    /// outside the view and draw nothing.)
+    #[test]
+    fn the_instance_index_keeps_every_instance_with_a_member_in_view() {
+        let scene = many_instances_scene(true);
+        let top = scene.top();
+        let index = scene.inst_index(top).expect("an index for 303 instances");
+        let cell = scene.cell(top).unwrap();
+        let mut rng = Lcg(11);
+        let mut views = vec![
+            BBox { x0: 0, y0: 0, x1: 0, y1: 0 },
+            BBox { x0: 400, y0: 400, x1: 500, y1: 500 },
+            BBox { x0: -50, y0: -50, x1: -20, y1: -20 },
+            BBox { x0: 100, y0: 100, x1: 106, y1: 106 },
+        ];
+        for _ in 0..400 {
+            let (x, y, w, h) = (rng.next(340) - 10, rng.next(340) - 10, rng.next(40), rng.next(40));
+            views.push(BBox { x0: x, y0: y, x1: x + w, y1: y + h });
+        }
+        let mut asked = 0;
+        for view in views {
+            let Some(picked) = index.query(&view) else {
+                continue;
+            };
+            asked += 1;
+            assert!(picked.windows(2).all(|pair| pair[0] < pair[1]), "ascending");
+            for (at, inst) in cell.insts.iter().enumerate() {
+                let child = scene.cell_bbox(inst.child).unwrap();
+                if child.is_empty() {
+                    assert!(!picked.contains(&(at as u32)), "the empty child");
+                    continue;
+                }
+                let base = OrthoTransform::place(inst.x, inst.y, inst.rot, inst.flip).unwrap().apply_bbox(child).unwrap();
+                let offsets: Vec<(i64, i64)> = match &inst.rep {
+                    Rep::One => vec![(0, 0)],
+                    Rep::Grid { na, nb, va, vb } => (0..*na as i64)
+                        .flat_map(|i| (0..*nb as i64).map(move |j| (i * va.0 + j * vb.0, i * va.1 + j * vb.1)))
+                        .collect(),
+                    Rep::Pts(points) => points.to_vec(),
+                };
+                let visible = offsets.iter().any(|&(dx, dy)| translate_bbox(base, dx, dy).unwrap().intersects(&view));
+                if visible {
+                    assert!(picked.contains(&(at as u32)), "instance {at} has a member in {view:?}");
+                }
+            }
+        }
+        assert!(asked > 300, "{asked} views answered by the index");
+    }
+
     #[test]
     fn a_cancellation_during_the_density_collect_ends_the_frame_not_the_thread() {
         let colors = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255]];

@@ -296,6 +296,34 @@ coordinator copies every tile to its fixed framebuffer position. On the styled
 former band renderer byte-for-byte. With 128px tiles, five-run median
 `raster_us` was 94.733/27.511/23.083ms for 1/4/8 workers (3.44x and 4.10x).
 
+Per-tile walk instance index (0.12.258; field 2026-10-01). Past the work bin's
+item cap (`bin off(cap@786k)` in the status line), for a binned cell item and in
+the density stack's lower-plane walk, each tile walks the hierarchy itself,
+plane by plane. The plan lists a working cell's instances for the whole frame,
+and that walk read every one of them per tile and plane to keep those meeting
+the tile: a per-tile cost of the whole frame, so a frame's cost grew with the
+square of its area. In the field a 2076x1232 frame drew in 21.4 s against
+1.75 s for 796x804 at the same scale - 4x the pixels, 12x the time; the
+instances read and pruned (`hier N/M pruned`) were 884.7 M against 83.8 M,
+10.6x = 2.7x the tiles times 4x per tile. `FrameScene::inst_index` now buckets
+the footprint of every instance of a cell of 64 or more - the union of its
+members' boxes in the cell's frame (a grid's four corners, every point of a
+list), what `for_each_visible_offset` meets the view with - on a grid built the
+first time a tile asks; a tile walks the instances whose footprint meets its
+view, in their order (a view over half the grid or more walks the list). An
+instance it skips has no member box in the view: the old walk drew nothing of
+it there, and frames are byte-identical. Kill switch `FLOE_RUST_INST_INDEX=off`
+(diagnostic). Synthetic 1/10 chip, all layers, 1 um/px, the per-tile walk
+forced (`FLOE_RUST_WORK_BIN=off`), warm: raster 9.1 -> 2.7 ms at 796x804 and
+139.3 -> 13.8 ms at 2076x1232 (instances read 1.38 M -> 170 k and 13.8 M ->
+636 k: 4x the pixels now read 3.8x); with the density stack and dots 11.8 ->
+8.7 ms and 149.5 -> 24.8 ms; the 7 standard dots views (work bin on) hash as
+before. A grid's own member range rounds outwards (`grid_ranges`), so the old
+walk also visited a member just past the view; it draws nothing there unless
+the child draws past its own box (a sub-cut dot box grown about a lone item at
+a cell's edge can), which the bin path already leaves out of the tiles that
+box misses.
+
 See [RUST_RENDERER_PLAN.ko.md](RUST_RENDERER_PLAN.ko.md) for scope and gates.
 
 ## floe2 product boundary
