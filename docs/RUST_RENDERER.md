@@ -328,6 +328,12 @@ the reserve, the cells' cut - pass 1's - never raised, and the threads' merged
 plan fitted alike (field 2026-10-02: the top cell at depth 1 took `fit 75019 ms
 x6 passes on 1 threads` up the cut ladder, the dots walked again each step).
 `FLOE_RUST_DENSITY_FIT_LADDER=on` is the kill switch.
+`FLOE_RUST_DENSITY_PAGE_SPREAD=on` (diagnostic, 0.12.272, off by default) draws
+a page whose every shape is under the records' floor on both sides as its
+shapes' dots without decoding it - over its box when it is wider than a box,
+each block of the view taking its part's share, rounded by the block's dither
+(floe_vfs `HierOpts::dot_page_spread`): even content keeps its look, lines of
+shapes become dots spread over their pages.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

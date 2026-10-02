@@ -356,6 +356,23 @@ pub fn dot_grid() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_DOT_GRID").as_deref() != Ok("off"))
 }
 
+/// HierOpts::dot_page_spread default: off; FLOE_RUST_DENSITY_PAGE_SPREAD=on
+/// (diagnostic, 2026-10-02) turns it on.
+pub fn dot_page_spread() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_PAGE_SPREAD").as_deref() == Ok("on"))
+}
+
+/// A number in [0, 1) of a block and a salt - the same in every frame: the
+/// dither of a spread page's share (HierOpts::dot_page_spread).
+fn block_dither(bx: i64, by: i64, salt: u64) -> f64 {
+    let mut z = (bx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (by as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ salt.wrapping_mul(0x1656_67B1_9E37_79F9);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64
+}
+
 /// HierOpts::dot_fit_at_cut default: on; FLOE_RUST_DENSITY_FIT_LADDER=on (the
 /// kill switch) fits a dots plan by the cut ladder, as before 2026-10-02.
 pub fn dot_fit_at_cut() -> bool {
@@ -913,6 +930,16 @@ pub struct HierOpts {
     /// synthetic chip's first 10 layers x16 at a 1 px floor: lit 0.217, drawn
     /// cut-free 0.058, without them 0.076). FLOE_RUST_DENSITY_PAGE_DOTS=on.
     pub dot_pages: bool,
+    /// A page whose every shape is under the records' floor on both sides as
+    /// dots, whatever its size, not decoded: its shapes' dots (page_dots: its
+    /// members at its largest shape's area) over its box - a page wider than
+    /// a box gives each block of the view it meets the share its part of the
+    /// box holds, rounded by a dither of the block (user 2026-10-02, the field
+    /// chip at depth 0: a root's own shapes under a pixel passed every reserve
+    /// and nothing was drawn; then "go on with the pages, see the result").
+    /// Where in the page its shapes lie is not known: they are spread over
+    /// its box. FLOE_RUST_DENSITY_PAGE_SPREAD=on (diagnostic, off by default).
+    pub dot_page_spread: bool,
     /// The sub-cut dots' blocks in a dense grid over the cell's view (DotGrid)
     /// rather than a hash map sorted when the cell is done - the same counts,
     /// unions and order - and a point list's topmost layer found once, not a
@@ -1043,6 +1070,7 @@ impl Default for HierOpts {
             dot_block_px: dot_block_px(),
             dot_spread: dot_spread(),
             dot_pages: dot_pages(),
+            dot_page_spread: dot_page_spread(),
             dot_grid: dot_grid(),
             dot_boxes: dot_boxes(),
             dot_records: None,
@@ -2056,6 +2084,8 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         dots: dots.is_some(),
         one_walk: dots.is_some() && opts.dot_records.is_some(),
         page_dots: opts.dot_pages,
+        page_spread: opts.dot_page_spread,
+        cell_view: BBox::EMPTY,
         grid_on: opts.dot_grid,
         dot_boxes: opts.dot_boxes,
         grid: DotGrid::default(),
@@ -2457,6 +2487,10 @@ struct Hier<'a> {
     one_walk: bool,
     /// HierOpts::dot_pages
     page_dots: bool,
+    /// HierOpts::dot_page_spread, and the bounds of the boxes of the cell
+    /// being walked (a spread page's blocks are those in them)
+    page_spread: bool,
+    cell_view: BBox,
     /// HierOpts::dot_grid, the grid of the cell being walked, and the run of
     /// dot items of one block being summed - the block and layer, the dots,
     /// the union of what they stand for - put into the blocks when an item
@@ -3265,6 +3299,47 @@ impl<'a> Hier<'a> {
         }
     }
 
+    /// HierOpts::dot_page_spread: `holds` dots of a page of `layer` over its
+    /// box `bbox`: each block in the cell's view that the box meets takes the
+    /// share its part of the box holds, its fraction rounded by the block's
+    /// dither (salted with the page `salt`: the same in every frame), and what
+    /// it stands for is that part. One dot item.
+    fn spread_page(&mut self, layer: u32, bbox: BBox, holds: u64, salt: u64) {
+        let ppd = self.px_per_dbu;
+        if !(ppd > 0.0) || bbox.is_empty() {
+            return;
+        }
+        let block = self.block_px / ppd;
+        let area = ((bbox.x1 - bbox.x0) as f64 * (bbox.y1 - bbox.y0) as f64).max(1.0);
+        let shown = bbox.intersect(&self.cell_view);
+        if shown.is_empty() {
+            return;
+        }
+        self.st.sub_cut_dot_items += 1;
+        let (bx0, bx1) = ((shown.x0 as f64 / block).floor() as i64, (shown.x1 as f64 / block).floor() as i64);
+        let (by0, by1) = ((shown.y0 as f64 / block).floor() as i64, (shown.y1 as f64 / block).floor() as i64);
+        for by in by0..=by1 {
+            for bx in bx0..=bx1 {
+                let ox = (bbox.x1 as f64).min((bx + 1) as f64 * block) - (bbox.x0 as f64).max(bx as f64 * block);
+                let oy = (bbox.y1 as f64).min((by + 1) as f64 * block) - (bbox.y0 as f64).max(by as f64 * block);
+                if !(ox > 0.0 && oy > 0.0) {
+                    continue;
+                }
+                let dots = (holds as f64 * ox * oy / area + block_dither(bx, by, salt)).floor();
+                if dots < 1.0 {
+                    continue;
+                }
+                let piece = BBox {
+                    x0: bbox.x0.max((bx as f64 * block).floor() as i64),
+                    y0: bbox.y0.max((by as f64 * block).floor() as i64),
+                    x1: bbox.x1.min(((bx + 1) as f64 * block).ceil() as i64),
+                    y1: bbox.y1.min(((by + 1) as f64 * block).ceil() as i64),
+                };
+                self.put_dots((bx, by, layer), dots.min(self.block_cap as f64) as u32, &piece);
+            }
+        }
+    }
+
     /// `dots` and what they stand for (`piece`) into the dot block `key`.
     /// HierOpts::dot_grid: summed into the run while the items go to one
     /// block (the walk's BVH order, a point list's Morton order), the run put
@@ -3344,6 +3419,10 @@ impl<'a> Hier<'a> {
     /// behind (one that stopped) go to the hash map, as they stayed there.
     fn begin_grid(&mut self, boxes: &[BBox]) {
         self.end_run();
+        self.cell_view = BBox::EMPTY;
+        for b in boxes {
+            self.cell_view.grow(b);
+        }
         if !self.grid.touched.is_empty() {
             let mut left = Vec::new();
             self.grid.drain_into(&mut left);
@@ -3565,6 +3644,22 @@ impl<'a> Hier<'a> {
     /// under the one walk (HierOpts::dot_records) - is a dot item, at most one
     /// dot a shape under HierOpts::dot_spread.
     fn box_page(&mut self, p: &floe_ovm::PageV, pi: u32, washes: &mut Vec<(u32, BBox)>, ci: u32) -> bool {
+        // HierOpts::dot_page_spread: a page whose every shape is under the
+        // floor on both sides as its shapes' dots, spread over its box when
+        // wider than a box
+        if self.dots && self.page_spread && !self.one_walk && p.max_w < self.page_cut && p.max_h < self.page_cut {
+            if self.dot_seen.insert(2 << 60 | pi as u64) {
+                let holds = self.page_dots(p);
+                self.st.dot_by[7] += 1;
+                if self.box_small(&p.bbox) {
+                    self.add_dots(p.layer_idx, p.bbox, holds);
+                } else {
+                    self.spread_page(p.layer_idx, p.bbox, holds, pi as u64);
+                }
+                self.note_page("dots", ci, p, pi);
+            }
+            return true;
+        }
         if self.dots && !self.page_dots {
             // a page whose every shape is under the floor is not drawn
             // (HierOpts::dot_pages)
@@ -4682,9 +4777,9 @@ impl<'a> Hier<'a> {
                     // sub-cut boxes: a node no wider than a box is one
                     // (a page BVH is per (cell, layer): the layer is
                     // exact); a wider one walks on to its pages
-                    if self.dots && !self.page_dots {
+                    if self.dots && !self.page_dots && !(self.page_spread && n.max_w < self.page_cut && n.max_h < self.page_cut) {
                         // every page below is under the floor: not drawn
-                        // (HierOpts::dot_pages)
+                        // (HierOpts::dot_pages, HierOpts::dot_page_spread)
                         continue;
                     }
                     if self.box_small(&n.bbox) {
@@ -7043,6 +7138,56 @@ mod tests {
     }
 
     #[test]
+    fn a_page_under_the_floor_spreads_its_shapes_dots_over_its_box() {
+        // HierOpts::dot_page_spread (user 2026-10-02, the field chip at depth 0:
+        // a root's own shapes under a pixel passed every reserve and nothing
+        // was drawn). 0.02 px/dbu, the cut 150 dbu (3 px), the floor 50 dbu
+        // (1 px), 8 px blocks of 400 dbu. TOP's page A: 40,000 members no
+        // larger than 0.5 px (0.25 px^2 each: 10,000 dots) over 6,000 dbu
+        // (120 px); page B: one 2 px member (over the floor: decoded).
+        let cells = [FCell {
+            name: "TOP",
+            pages: vec![(bx(0, 0, 6_000, 6_000), 25, 25), (bx(8_000, 0, 8_100, 100), 100, 100)],
+            places: vec![],
+        }];
+        let chip = fixture_members(&cells, 0, true, &|_, k| if k == 0 { 40_000 } else { 1 });
+        let ask = |view: BBox| {
+            let mut r = rq(view, 150, 0);
+            r.px_per_dbu = 0.02;
+            r.page_wash = false;
+            r
+        };
+        let opts = |spread: bool| HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, dot_page_spread: spread, ..HierOpts::default() };
+        let whole = bx(-10, -10, 9_000, 9_000);
+        let plan = plan_hier(&chip, &ask(whole), &opts(true));
+        let cell = plan.wcells.iter().find(|w| w.key.0 == 0).unwrap();
+        let items: Vec<(BBox, u32)> = cell.washes.iter().zip(&cell.dot_counts).map(|(&(_, b), &n)| (b, n as u32)).collect();
+        // page B is the plan's, page A is not decoded: its dots, inside its box,
+        // one item a block of it, about its 10,000 (each block of 16 x 16 px
+        // holds 625 of them: the cap, 32)
+        assert_eq!(plan.pages, vec![1]);
+        assert_eq!(plan.stats.dot_by[7], 1);
+        assert!(items.iter().all(|&(b, _)| b.x0 >= 0 && b.y0 >= 0 && b.x1 <= 6_000 && b.y1 <= 6_000), "{items:?}");
+        assert_eq!(items.len(), 15 * 15);
+        assert!(items.iter().all(|&(_, n)| n == dot_block_cap(8.0)));
+        // the same in every frame; a view of a corner takes those blocks' dots
+        let again = plan_hier(&chip, &ask(whole), &opts(true));
+        assert_eq!(again.wcells.iter().find(|w| w.key.0 == 0).unwrap().washes, cell.washes);
+        let corner = plan_hier(&chip, &ask(bx(-10, -10, 1_990, 1_990)), &opts(true));
+        let corner = corner.wcells.iter().find(|w| w.key.0 == 0).unwrap();
+        assert!(!corner.washes.is_empty() && corner.washes.iter().all(|w| cell.washes.contains(w)));
+        // a sparse page: its share rounded by the blocks' dither - about its
+        // count, not one a block
+        let sparse = fixture_members(&cells, 0, true, &|_, k| if k == 0 { 400 } else { 1 });
+        let sparse = plan_hier(&sparse, &ask(whole), &opts(true));
+        let dots: u32 = sparse.wcells[0].dot_counts.iter().map(|&n| n as u32).sum();
+        assert!((60..=140).contains(&dots) && sparse.wcells[0].washes.len() < 15 * 15, "{dots} dots over {} blocks", sparse.wcells[0].washes.len());
+        // off: the page under the floor is not drawn
+        let off = plan_hier(&chip, &ask(whole), &opts(false));
+        assert!(off.wcells.iter().all(|w| w.washes.is_empty()) && off.stats.dot_by[7] == 0);
+    }
+
+    #[test]
     fn a_dot_grid_and_the_hash_map_beyond_it_drain_in_key_order() {
         // DotGrid::put / drain_into and merge_by_key against a sorted map: the
         // same counts (capped at 8), unions and key order, keys beyond the grid
@@ -8132,6 +8277,11 @@ mod tests {
     /// `masks` false: an index without the v8 node layer masks (the planner
     /// reads placements instead)
     fn fixture_with(cells: &[FCell], top: usize, masks: bool) -> Ovm {
+        fixture_members(cells, top, masks, &|_, _| 1)
+    }
+
+    /// fixture_with, page k of cell ci holding `members(ci, k)` members
+    fn fixture_members(cells: &[FCell], top: usize, masks: bool, members: &dyn Fn(usize, usize) -> u64) -> Ovm {
         let n = cells.len();
         let mut height = vec![0u32; n];
         let mut rbb = vec![BBox::EMPTY; n];
@@ -8205,7 +8355,7 @@ mod tests {
                 cells[ci].pages.iter().enumerate()
             {
                 b.page(
-                    ci as u32, layer_of(ci), k as u32, pb, 0, 0, 0, 1, 1, *mw,
+                    ci as u32, layer_of(ci), k as u32, pb, 0, 0, 0, 1, members(ci, k), *mw,
                     *mh, floe_ovm::LOD_EXACT,
                     floe_ovm::LOD_PAGE_NONE,
                 );
