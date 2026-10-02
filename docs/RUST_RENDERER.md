@@ -286,13 +286,26 @@ whose plan its budget fit thinned (the bar says `pass 2 over budget: floor probe
 thinned, N pages left out`, the last from `density_pages`). Pass 1's pages cost
 that reserve nothing (`PlanRequest::free_pages`, floe_vfs `HierOpts::free_pages`;
 user 2026-10-01: 37 pages of pass 1's, 201 MB by estimate, failed a 0 px probe
-of the 128 MB reserve with nothing new to decode). `FLOE_RUST_DENSITY_PLAN_THREADS=N`
-(diagnostic, default 1) deals pass 2's regions round robin to N bands planned
-on N threads, merges them (`Cache::merge_plans`) and fits the merge to the
-reserve as the one plan would be (`Cache::fit_plan`, floe_vfs `fit_planned`;
-since 0.12.267 - before, only a view the reserve held whole took the threads);
-a fit that would plan again - a decision at a coarser cut, pages past the
-fit's overshoot - plans as one.
+of the 128 MB reserve with nothing new to decode). Pass 2's regions are dealt
+round robin to bands planned on threads - four, or the cores there are, by
+default since 0.12.268 (user 2026-10-02: MAIN01's `ltv_top_RTG` fit view went
+from over 6 s to under 4 on four threads); `FLOE_RUST_DENSITY_PLAN_THREADS=N`
+(diagnostic) sets them, 1 one plan (the kill switch; the default until
+0.12.267) - merged (`Cache::merge_plans`) and the merge fitted to the reserve
+as the one plan would be (`Cache::fit_plan`, floe_vfs `fit_planned`; since
+0.12.267 - before, only a view the reserve held whole took the threads); a fit
+that would plan again - a decision at a coarser cut, pages past the fit's
+overshoot - plans as one. Since 0.12.268 `density_plan2` ends with the cells'
+dot items by where they came from - `/by_nodes/by_placements/by_arrays/
+by_list_members/by_list_chunks/by_chunk_members/by_array_members/by_pages` - and
+`/map_updates`, the dot block updates past the cells' grids (22 values; the log
+line's tag shows them after `cell dots N [...]`, the nonzero ones). A cell's dot
+blocks are kept in a dense grid over its view (floe_vfs `HierOpts::dot_grid`,
+items of one block in a row summed, a point list's topmost layer found once and
+a chunk of it in one block counted at once): the hash map's counts, unions and
+order for less (the synthetic chip's `H01_00001` fit view: pass 2 planned
+431-450 -> 376-400 ms on four threads, 768-771 -> 657-662 on one, the frames
+byte for byte alike); `FLOE_RUST_DENSITY_DOT_GRID=off` is its kill switch.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

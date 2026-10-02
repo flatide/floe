@@ -143,7 +143,11 @@ DENSITY_DOTS = ("items", "over")
 # the threads its regions were planned on (1: one plan), the final plans'
 # placement reads and dot items
 DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "page_nodes", "page_candidates", "threads",
-                 "reads", "items", "probes_over", "thinned")
+                 "reads", "items", "probes_over", "thinned",
+                 # the dot items by where they came from, then the dot block updates
+                 # the hash map took past the cells' grids (2026-10-02)
+                 "by_nodes", "by_placements", "by_arrays", "by_list_members", "by_list_chunks", "by_chunk_members",
+                 "by_array_members", "by_pages", "map_updates")
 
 
 def _wire_counts(value, names):

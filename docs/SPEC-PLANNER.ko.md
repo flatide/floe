@@ -327,6 +327,20 @@
   배치 읽기에서 `place_head`로 같은 값을 더한다(합이 상자 면적의 개수에 닿고 가장 위 레이어도 찾으면 멈춤; 마스크가
   있는 노드는 상자 면적). `Cache::plan_layer_only`는 개수를 wash와 함께 거른다. `BLOCK_PX=4 SPREAD=off`가 0.12.256의
   규칙이다. 단위 `the_dots_blocks_spread_what_they_count_and_count_what_is_there`.
+  **점 블록 격자(0.12.268, renderd 0.12.247; 사용자 2026-10-02, 실칩 `cell dots 87.2M`):** `HierOpts::dot_grid`(기본 켬,
+  `FLOE_RUST_DENSITY_DOT_GRID=off`가 킬 스위치)는 해시맵과 개수·합집합·순서가 같은 결과를 더 싸게 만든다.
+  - 셀을 걷기 전에(`begin_grid`) 블록 격자 `DotGrid`를 연다. 범위는 셀의 뷰 상자들의 범위에 `box_px`와 두 블록을
+    더한 것이고, 블록 수 상한은 `DOT_GRID_MAX` = 2^21이다.
+  - 점 항목은 `put_dots`로 들어간다. 같은 블록이면 런(`dot_run`)에 합친다. 다른 블록이면 런을 `put_block`으로
+    격자에 넣고, 격자 밖이면 `dot_blocks` 해시맵에 넣는다.
+  - 격자의 블록은 레이어 순 목록이다. `flush_dots`는 처음 만난 블록 번호를 정렬해 읽고(번호 순서가 키 순서다),
+    해시맵의 정렬된 블록과 `merge_by_key`로 합친다.
+  - 점 리스트는 가장 위 레이어를 배치마다 한 번 구한다. 뷰에 통째로 든 청크의 멤버 중심이 한 블록이면 한 번에
+    센다(`dot_chunk`). 점 수와 상한은 멤버별로 센 것과 같고, 상자는 멤버 상자들의 합집합(b0 + 청크 범위)이다.
+  - `HierStats::dot_by`(9개)는 출처별 항목 수다. 출처는 노드·배치·배열·리스트 멤버·리스트 청크와 그 멤버·배열
+    멤버·페이지이고, 마지막 값은 해시맵 갱신 수다. 항목 수(`sub_cut_dot_items`)는 청크 멤버를 뺀 합과 같다.
+  - 단위: `the_dots_grid_counts_and_orders_the_blocks_as_the_hash_map_does`,
+    `a_dot_grid_and_the_hash_map_beyond_it_drain_in_key_order`.
   **한 번 걷기(0.12.259):** `HierOpts::dot_records = Some(몫)`(`Vfs::plan_hier_in`의 다섯째 인자,
   `PlanRequest::dot_records`)이면 페이지는 셀의 컷에서 고르고(`Hier::page_cut` = 컷), 래스터의 레코드 컷
   (`HierStats::shape_cut`)은 컷 × 몫, 크기 컷된 페이지는 크기와 무관하게 점 항목(`box_page`; 개수 `page_dots`)이다.

@@ -630,8 +630,18 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         res["plan_culls"].update(fit_pct=200, fit_over=1)
         res["density_plan2"].update(probes=1, probe_us=637000, passes=5,
                                     threads=4, probes_over=1, thinned=1)
+        # where the cells' dot items came from (2026-10-02): the ones there
+        # are, a chunk of a point list one item, in the log line only
+        res["density_plan2"].update(by_nodes=900000, by_placements=1200000, by_arrays=55158,
+                                    by_list_members=480000, by_list_chunks=20000,
+                                    by_chunk_members=5120000, by_array_members=0,
+                                    by_pages=0, map_updates=12)
         res["density_pages"].update(decoded=206, over_budget=3)
         full, brief = perf_status(res)
+        self.assertIn(
+            "reads 15.2M, cell dots 2.7M [nodes 900k, placements 1.2M, arrays"
+            " 55k, list members 480k, list chunks 20k of 5.1M members; hash"
+            " map 12]), 206 pages", full)
         # what pass 2's reserve kept out (2026-10-01): in the log line too
         self.assertIn(", 206 pages, pass 2 over budget: floor probe, thinned, 3 pages left out]", full)
         self.assertEqual(
@@ -1822,7 +1832,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "density_us": "100/20/30/4/50", "density_bin": "600/1/0",
                 "density_dots": "3500/2", "density_floor": "0.250",
                 "density_block": "8",
-                "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2",
+                "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2"
+                                 "/30000/20000/5000/34860/40/9000/100/0/7",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -1907,7 +1918,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["density_plan2"], {
                 "probe_us": 3000, "fit_us": 4000, "probes": 1, "passes": 3, "regions": 24,
                 "nodes": 120000, "page_nodes": 900000, "page_candidates": 45000, "threads": 4,
-                "reads": 700000, "items": 90000, "probes_over": 1, "thinned": 2})
+                "reads": 700000, "items": 90000, "probes_over": 1, "thinned": 2,
+                "by_nodes": 30000, "by_placements": 20000, "by_arrays": 5000, "by_list_members": 34860,
+                "by_list_chunks": 40, "by_chunk_members": 9000, "by_array_members": 100, "by_pages": 0,
+                "map_updates": 7})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)

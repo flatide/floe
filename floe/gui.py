@@ -1056,10 +1056,22 @@ def perf_status(res, depth_note=""):
             # the regions, the final plans' nodes
             p2 = res.get("density_plan2") or {}
             if p2:
+                # where the cells' dot items came from (2026-10-02, the
+                # field's `cell dots 87.2M`): the ones there are, a point
+                # list's chunk counted at once one item, and the dot block
+                # updates past the cells' grids
+                by = ", ".join("%s %s" % (name, fmt_count(p2[key])) for key, name in (
+                    ("by_nodes", "nodes"), ("by_placements", "placements"), ("by_arrays", "arrays"),
+                    ("by_list_members", "list members"), ("by_list_chunks", "list chunks"),
+                    ("by_array_members", "array members"), ("by_pages", "pages")) if p2.get(key))
+                if p2.get("by_list_chunks"):
+                    by += " of %s members" % fmt_count(p2.get("by_chunk_members", 0))
+                if p2.get("map_updates"):
+                    by += "; hash map %s" % fmt_count(p2["map_updates"])
                 plan += (" (probe %d ms x%d, fit %d ms x%d"
                          " passes on %d threads, %d regions,"
                          " nodes %s, page nodes %s, pages %s,"
-                         " reads %s, cell dots %s)") % (
+                         " reads %s, cell dots %s%s)") % (
                     round(p2["probe_us"] / 1000),
                     p2["probes"],
                     round(p2["fit_us"] / 1000), p2["passes"],
@@ -1068,7 +1080,8 @@ def perf_status(res, depth_note=""):
                     fmt_count(p2["page_nodes"]),
                     fmt_count(p2["page_candidates"]),
                     fmt_count(p2.get("reads", 0)),
-                    fmt_count(p2.get("items", 0)))
+                    fmt_count(p2.get("items", 0)),
+                    " [%s]" % by if by else "")
             parts.append(plan)
         pages = res.get("density_pages") or {}
         if pages:

@@ -141,6 +141,19 @@ sh tools/validate_rust.sh --only quick path/to.oas
     thinned, 3 pages left out`.
   0.12.267(솎아야 하는 2패스도 스레드로): `uneven` 레이아웃·예약 1 MB의 전체 뷰를 `FLOE_RUST_DENSITY_PLAN_THREADS=2`로 계획하면
   한 스레드의 솎인 프레임과 바이트까지 같고, `density_plan2`가 threads 2·thinned 1이다(0.12.266은 threads 1).
+  0.12.268(2패스 스레드 기본 min(코어, 4), 점 블록 격자):
+  - 게이트 점 절:
+    - 기본 스레드·1 스레드·2 스레드의 프레임이 같고, `FLOE_RUST_DENSITY_DOT_GRID=off`(해시맵)의 프레임과도 같다.
+    - `density_plan2`의 출처 합(청크 멤버 제외)이 항목 수와 같다.
+    - `map_updates`는 격자에서 0, 해시맵에서 양수다.
+  - `uneven` 기록 절: 기준 워커를 한 계획(`FLOE_RUST_DENSITY_PLAN_THREADS=1`)으로 고정했다. 기본 스레드도 솎인
+    프레임이 바이트까지 같고, threads = min(4, 코어, 영역), thinned 1이다.
+  - 단위 `the_dots_grid_counts_and_orders_the_blocks_as_the_hash_map_does`:
+    - 픽스처: LEAF·LEAF@2, 한 블록씩 든 청크 넷, 흩어진 리스트, 배열, 영역 셋으로 나눈 경우.
+    - 격자의 결과가 해시맵과 같다. 청크 4개(멤버 1,024)를 한 번에 세고, 해시맵 갱신은 격자 0 / 해시맵 양수다.
+      항목 수는 출처 합과 같다.
+  - 단위 `a_dot_grid_and_the_hash_map_beyond_it_drain_in_key_order`: 무작위 갱신 2,000개가 정렬 맵과 같다.
+  - 어댑터 계약: `density_plan2` 22개 값. 상태줄 테스트: 로그 줄의 출처(요약 줄에는 없음).
   0.12.261(블록 4 px, 한 번 걷기는 선택, 하한 1 px, 페이지 점 끔): 게이트 점 절의 기본은 4 px·퍼뜨림·맞춤·하한 1 px —
   성긴 배열 100 px가 각 멤버에서 1.5 px 안, 맞닿은 배열 = Σ min(8, 4×4 블록의 멤버), 항목 = 성긴 배열 100 + 1 + 맞닿은
   블록, TOP의 0.5 px 점은 그리지도 점으로 서지도 않음, `density_floor` 1, `density_plan2` 탐침 0·맞춤 1; 하한 0·0.25 px는

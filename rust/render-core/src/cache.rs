@@ -883,6 +883,9 @@ impl Cache {
             st.sub_cut_box_reads += more.sub_cut_box_reads;
             st.sub_cut_box_unsure += more.sub_cut_box_unsure;
             st.sub_cut_dot_items += more.sub_cut_dot_items;
+            for (have, add) in st.dot_by.iter_mut().zip(more.dot_by.iter()) {
+                *have += add;
+            }
             st.cancelled |= more.cancelled;
             st.fit_over |= more.fit_over;
         }

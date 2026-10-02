@@ -1177,8 +1177,12 @@ struct FramePixels {
     /// the threads the regions were planned apart on (1: one plan), and the
     /// final plans' placement reads (a dot node's layers and count) and dot
     /// items; then the floor probes past the reserve and the sides whose plan
-    /// the budget fit thinned (2026-10-01)
-    density_plan2: Option<[u64; 13]>,
+    /// the budget fit thinned (2026-10-01); then the dot items by where they
+    /// came from - child-BVH nodes, placements, arrays, point-list members one
+    /// by one, point-list chunks at once and their members, array members one
+    /// by one, pages - and the dot block updates the hash map took
+    /// (2026-10-02)
+    density_plan2: Option<[u64; 22]>,
 }
 
 fn render_worker(
@@ -2455,21 +2459,28 @@ fn density_stack_enabled() -> bool {
 /// before, only a view the reserve held whole took the threads, and the slow
 /// ones thin: user 2026-10-01, a 4.3 s pass 2 of a root's fit view, `thinned`).
 /// A fit that would plan again (a decision at a coarser cut, pages past its
-/// overshoot) plans as one. Off by default: the work is uneven - on the
-/// synthetic chip's H01_00001 fit view (796 x 798 px) one of nine tiles held
-/// over half of it, 785 ms on one thread, 517 / 439 / 487 ms on 2 / 4 / 8
-/// (bands 376 ms and a single-threaded merge of 68-122 ms at 4-8), frames
-/// byte for byte the one plan's; a cell's view boxes, merged per plan,
-/// differed on another view by 27 px. FLOE_RUST_DENSITY_PLAN_THREADS=N
-/// (diagnostic), 1 or unset one plan; the decode workers bound nothing here.
+/// overshoot) plans as one. The work is uneven - on the synthetic chip's
+/// H01_00001 fit view (796 x 798 px) one of nine tiles held over half of it,
+/// 785 ms on one thread, 517 / 439 / 487 ms on 2 / 4 / 8 (bands 376 ms and a
+/// single-threaded merge of 68-122 ms at 4-8), frames byte for byte the one
+/// plan's; a cell's view boxes, merged per plan, differed on another view by
+/// 27 px. On by default since 0.12.268 (DENSITY_PLAN_THREADS, field
+/// 2026-10-02). FLOE_RUST_DENSITY_PLAN_THREADS=N (diagnostic) sets the threads,
+/// 1 one plan (the kill switch); the decode workers bound nothing here.
 fn density_plan_threads(_decode_workers: u16) -> usize {
     std::env::var("FLOE_RUST_DENSITY_PLAN_THREADS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&threads| threads >= 1)
-        .unwrap_or(1)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |cores| cores.get()).min(DENSITY_PLAN_THREADS))
         .min(16)
 }
+
+/// density_plan_threads' default: four, or the cores there are (user
+/// 2026-10-02: on four threads MAIN01's `ltv_top_RTG` fit view went from over
+/// 6 s to under 4, pass 2 planned 2,922 ms; on eight 2,847 ms, the picture
+/// alike to the eye).
+const DENSITY_PLAN_THREADS: usize = 4;
 
 fn density_one_walk_enabled() -> bool {
     std::env::var("FLOE_RUST_DENSITY_ONE_WALK").as_deref() == Ok("on")
@@ -3272,7 +3283,7 @@ fn run_render(
         let mut density_us: Option<[u64; 5]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 13]> = None;
+        let mut density_plan2: Option<[u64; 22]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4018,7 +4029,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 13]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 22]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4043,7 +4054,7 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 13];
+    let mut plan2 = [0u64; 22];
     // pass 1's pages: pass 2 holds them already, so they cost its reserve
     // nothing (floe_vfs HierOpts::free_pages; user 2026-10-01: 37 pages of
     // pass 1's, 201 MB by estimate, failed the 0 px floor's probe of a 128 MB
@@ -4302,6 +4313,9 @@ fn render_density_frame(
                         plan2[8] = plan2[8].max(1);
                         plan2[9] += planned_fine.stats.sub_cut_box_reads;
                         plan2[10] += planned_fine.stats.sub_cut_dot_items;
+                        for (at, count) in planned_fine.stats.dot_by.iter().enumerate() {
+                            plan2[13 + at] += count;
+                        }
                         counts[4] += planned_fine.stats.sub_cut_boxes;
                         counts[5] += planned_fine.stats.sub_cut_box_over;
                         // the records' cut this side planned at, px (the floor, or

@@ -86,9 +86,13 @@ cell under it as dots in blocks, never walking into it:
     at the cells' cut; the squares' page, all under the cut, is not drawn -
     with the page dots at a zero floor it stands as exactly ceil(200 x 0.25)
     = 50 dots, what the squares' area lights cut-free;
-  * pass 2's regions planned apart on two threads and merged
-    (FLOE_RUST_DENSITY_PLAN_THREADS=2, density_plan2 threads 2) draw the
-    frame one plan draws;
+  * pass 2's regions planned apart and merged - on two threads
+    (FLOE_RUST_DENSITY_PLAN_THREADS=2, density_plan2 threads 2) and on the
+    default's four or the cores there are (0.12.268) - draw the frame one
+    plan draws (FLOE_RUST_DENSITY_PLAN_THREADS=1);
+  * the dot blocks kept in a grid over each cell's view (0.12.268) draw the
+    frame the hash map draws (FLOE_RUST_DENSITY_DOT_GRID=off), and the dot
+    items are what came from where (density_plan2's by_*);
   * step 3 (progressive): the dots' frame arrives twice - first a refining
     round (final=0) holding pass 1 alone, byte for byte the frame without the
     stack, then the final frame, byte for byte what the dots draw in one
@@ -104,7 +108,8 @@ not per place, a dense view's decision emptied a sparse view at the same zoom
 step): on an uneven layout under a 1 MB pass-2 reserve the whole extent thins
 its pass 2 and the corner quarter, drawn after it at the same scale, equals
 the corner a fresh worker draws, and the whole extent planned on two threads
-(FLOE_RUST_DENSITY_PLAN_THREADS=2) thins to the same frame (history_checks). Pass 1's pages cost pass 2's
+(FLOE_RUST_DENSITY_PLAN_THREADS=2) and on the default's thins to one plan's
+frame (history_checks). Pass 1's pages cost pass 2's
 reserve nothing: under a 1 MB reserve, which pass 1's own pages pass, the frame
 equals the default reserve's and reports nothing over budget (held_checks).
 
@@ -201,8 +206,12 @@ def dots_checks(temp):
         'floor0': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0'}),
         'floor025': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.25'}),
         'floor06': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.6'}),
-        # pass 2's regions planned apart on two threads and merged
+        # pass 2's regions planned apart on two threads and merged, as one plan
+        # (the default since 0.12.268: four threads, or the cores there are)
         'split': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PLAN_THREADS': '2'}),
+        'one_plan': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PLAN_THREADS': '1'}),
+        # the dot blocks in the hash map, as before 2026-10-02
+        'map': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_DOT_GRID': 'off'}),
         # the one walk (FLOE_RUST_DENSITY_ONE_WALK=on, opt-in), and with the
         # page dots (FLOE_RUST_DENSITY_PAGE_DOTS=on) at a zero floor
         'one': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_ONE_WALK': 'on'}),
@@ -281,12 +290,26 @@ def dots_checks(temp):
         plan2, plan2_0 = res.get('density_plan2'), res0.get('density_plan2')
         assert plan2 and plan2['probes'] == 0 and plan2['passes'] == 1, plan2
         assert plan2_0 and plan2_0['probes'] == 1 and plan2_0['passes'] == 0, plan2_0
-        # the regions planned apart (FLOE_RUST_DENSITY_PLAN_THREADS=2): the
-        # same frame from two merged plans
+        # the regions planned apart (FLOE_RUST_DENSITY_PLAN_THREADS=2, and the
+        # default's four threads or the cores there are): the same frame from
+        # the merged plans as from one
         split, split_res = frame(workers['split'], 1, (LOW,))
         split_plan2 = split_res.get('density_plan2')
         assert split_plan2 and split_plan2['threads'] == 2, split_plan2
-        assert split == on, 'two threads draw otherwise in %d px' % sum(1 for i in range(0, len(on), 4) if split[i:i + 4] != on[i:i + 4])
+        single, single_res = frame(workers['one_plan'], 1, (LOW,))
+        assert single_res['density_plan2']['threads'] == 1, single_res['density_plan2']
+        assert plan2['threads'] == min(4, os.cpu_count() or 1, plan2['regions']), plan2
+        for name, other in (('two threads', split), ('the default threads', on)):
+            assert other == single, '%s draw otherwise than one plan in %d px' % (name, sum(1 for i in range(0, len(on), 4) if other[i:i + 4] != single[i:i + 4]))
+        # the dot blocks in a grid over each cell's view (FLOE_RUST_DENSITY_DOT_GRID,
+        # 2026-10-02): the frame of the hash map, every block in it; the dot
+        # items are what came from where
+        mapped, mapped_res = frame(workers['map'], 1, (LOW,))
+        assert mapped == on, 'the dot grid draws otherwise than the hash map in %d px' % sum(1 for i in range(0, len(on), 4) if mapped[i:i + 4] != on[i:i + 4])
+        for p2 in (plan2, mapped_res['density_plan2']):
+            assert p2['items'] == sum(p2[k] for k in ('by_nodes', 'by_placements', 'by_arrays', 'by_list_members', 'by_list_chunks',
+                                                        'by_array_members', 'by_pages')), p2
+        assert plan2['map_updates'] == 0 < mapped_res['density_plan2']['map_updates'], (plan2, mapped_res['density_plan2'])
         # the one walk (FLOE_RUST_DENSITY_ONE_WALK=on): one fitted pass, no
         # probe; the specks' page (all under the cut) is not drawn - with the
         # page dots at a zero floor it stands as dots over its box, as many as
@@ -396,9 +419,12 @@ def history_checks(temp):
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BUDGET_MB': '1'}
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BUDGET_MB': '1',
+           'FLOE_RUST_DENSITY_PLAN_THREADS': '1'}
     fresh, after, roomy = worker(src, env), worker(src, env), worker(src, {k: v for k, v in env.items() if k != 'FLOE_RUST_DENSITY_BUDGET_MB'})
     split = worker(src, dict(env, FLOE_RUST_DENSITY_PLAN_THREADS='2'))
+    # the default: four threads, or the cores there are (0.12.268)
+    default = worker(src, {k: v for k, v in env.items() if k != 'FLOE_RUST_DENSITY_PLAN_THREADS'})
     try:
         dbu = float(fresh.cache.meta['dbu'])
         side, um_per_px = 400.0, 400.0 / 600
@@ -429,6 +455,11 @@ def history_checks(temp):
         assert apart == thinned and (rs['density_plan2']['threads'], rs['density_plan2']['thinned']) == (2, 1), (
             'the threaded pass 2 that thins differs in %d px: %s' % (
                 sum(1 for i in range(0, len(apart), 4) if apart[i:i + 4] != thinned[i:i + 4]), rs['density_plan2']))
+        dealt, rd = view(default, 1, whole)
+        threads = min(4, os.cpu_count() or 1, rd['density_plan2']['regions'])
+        assert dealt == thinned and (rd['density_plan2']['threads'], rd['density_plan2']['thinned']) == (threads, 1), (
+            'the default threads that thin differ in %d px: %s' % (
+                sum(1 for i in range(0, len(dealt), 4) if dealt[i:i + 4] != thinned[i:i + 4]), rd['density_plan2']))
         again, ra = view(after, 2, corner)
         assert rf['density_stack']['lit'] > 0 and again == first, (
             'the corner after the whole layout at the same scale differs from a fresh one in %d px (lit %d vs %d)' % (
@@ -437,7 +468,7 @@ def history_checks(temp):
               'its pass 2 (%d px lit, %d under 128 MB); on two threads it thins alike' % (
                   rf['density_stack']['lit'], rt['density_stack']['lit'], rr['density_stack']['lit']))
     finally:
-        for w in (fresh, after, roomy, split):
+        for w in (fresh, after, roomy, split, default):
             w.stop()
 
 

@@ -349,6 +349,119 @@ pub fn dot_pages() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_PAGE_DOTS").as_deref() == Ok("on"))
 }
 
+/// HierOpts::dot_grid default: on; FLOE_RUST_DENSITY_DOT_GRID=off (the kill
+/// switch) keeps every dot block in the hash map, as before 2026-10-02.
+pub fn dot_grid() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_DOT_GRID").as_deref() != Ok("off"))
+}
+
+/// HierOpts::dot_grid: the most blocks a cell's grid spans (its head: 4 B a
+/// block) - a view of 5,600 x 5,600 px at 4 px blocks; a cell whose boxes
+/// span more keeps its blocks in the hash map.
+const DOT_GRID_MAX: i64 = 1 << 21;
+
+/// No entry (DotGrid).
+const DOT_GRID_NONE: u32 = u32::MAX;
+
+/// Two runs of distinct keys, each in key order, as one in key order
+/// (flush_dots: a cell's grid's blocks and the hash map's beyond it).
+fn merge_by_key<V>(a: Vec<((i64, i64, u32), V)>, b: Vec<((i64, i64, u32), V)>) -> Vec<((i64, i64, u32), V)> {
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    let mut merged = Vec::with_capacity(a.len() + b.len());
+    let (mut a, mut b) = (a.into_iter().peekable(), b.into_iter().peekable());
+    loop {
+        let from_a = match (a.peek(), b.peek()) {
+            (Some(x), Some(y)) => x.0 < y.0,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        merged.extend(if from_a { a.next() } else { b.next() });
+    }
+    merged
+}
+
+/// HierOpts::dot_grid: the dot blocks of the cell being walked over its view
+/// - the bounds of its boxes and a margin, in its own blocks - by index: a
+/// block's layers in a short list in layer order, the blocks with any in the
+/// order they were first met. No hashing and no sort of the blocks (the
+/// field's routing cell: `cell dots 87.2M`); flush_dots reads them in key
+/// order, as the hash map's sorted drain. Blocks beyond it: dot_blocks.
+#[derive(Default)]
+struct DotGrid {
+    /// the blocks [bx0, bx0 + nx) x [by0, by0 + ny); nx 0: no grid
+    bx0: i64,
+    by0: i64,
+    nx: i64,
+    ny: i64,
+    /// per block, at (bx - bx0) * ny + (by - by0) - the key order: its first
+    /// entry (DOT_GRID_NONE outside a cell's walk)
+    head: Vec<u32>,
+    /// (layer, count, union, the block's next entry - by layer)
+    entries: Vec<(u32, u32, BBox, u32)>,
+    /// the blocks with an entry
+    touched: Vec<u32>,
+}
+
+impl DotGrid {
+    /// `dots` (capped at `cap`) and `piece` into block `key`; false beyond
+    /// the grid.
+    fn put(&mut self, key: (i64, i64, u32), dots: u32, piece: &BBox, cap: u32) -> bool {
+        let (bx, by) = (key.0.wrapping_sub(self.bx0), key.1.wrapping_sub(self.by0));
+        if !(0..self.nx).contains(&bx) || !(0..self.ny).contains(&by) {
+            return false;
+        }
+        let at = (bx * self.ny + by) as usize;
+        let (mut before, mut entry) = (DOT_GRID_NONE, self.head[at]);
+        while entry != DOT_GRID_NONE && self.entries[entry as usize].0 < key.2 {
+            before = entry;
+            entry = self.entries[entry as usize].3;
+        }
+        if entry != DOT_GRID_NONE && self.entries[entry as usize].0 == key.2 {
+            let e = &mut self.entries[entry as usize];
+            e.1 = (e.1 + dots).min(cap);
+            e.2.grow(piece);
+            return true;
+        }
+        let new = self.entries.len() as u32;
+        let mut union = BBox::EMPTY;
+        union.grow(piece);
+        self.entries.push((key.2, dots.min(cap), union, entry));
+        if before == DOT_GRID_NONE {
+            if self.head[at] == DOT_GRID_NONE {
+                self.touched.push(at as u32);
+            }
+            self.head[at] = new;
+        } else {
+            self.entries[before as usize].3 = new;
+        }
+        true
+    }
+
+    /// The grid's blocks in key order - (bx, by, layer) - into `out`, the
+    /// grid emptied.
+    fn drain_into(&mut self, out: &mut Vec<((i64, i64, u32), (u32, BBox))>) {
+        self.touched.sort_unstable();
+        for &at in &self.touched {
+            let (bx, by) = (self.bx0 + at as i64 / self.ny, self.by0 + at as i64 % self.ny);
+            let mut entry = std::mem::replace(&mut self.head[at as usize], DOT_GRID_NONE);
+            while entry != DOT_GRID_NONE {
+                let (layer, count, union, next) = self.entries[entry as usize];
+                out.push(((bx, by, layer), (count, union)));
+                entry = next;
+            }
+        }
+        self.touched.clear();
+        self.entries.clear();
+    }
+}
+
 pub fn dot_spread() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_SPREAD").map(|v| v.trim() != "off").unwrap_or(true))
@@ -770,6 +883,13 @@ pub struct HierOpts {
     /// synthetic chip's first 10 layers x16 at a 1 px floor: lit 0.217, drawn
     /// cut-free 0.058, without them 0.076). FLOE_RUST_DENSITY_PAGE_DOTS=on.
     pub dot_pages: bool,
+    /// The sub-cut dots' blocks in a dense grid over the cell's view (DotGrid)
+    /// rather than a hash map sorted when the cell is done - the same counts,
+    /// unions and order - and a point list's topmost layer found once, not a
+    /// member at a time (user 2026-10-02, field: `cell dots 87.2M` on 2.6 M
+    /// nodes, a routing cell's fit view planned 2.9 s on four threads). Off:
+    /// the hash map.
+    pub dot_grid: bool,
     /// The sub-cut dots' one walk (CUT_DENSITY_DESIGN §10.12, 2026-10-01):
     /// Some(share) selects the pages at the cells' cut - those pass 1 drew,
     /// decoded already - while the raster's record cut
@@ -871,6 +991,7 @@ impl Default for HierOpts {
             dot_block_px: dot_block_px(),
             dot_spread: dot_spread(),
             dot_pages: dot_pages(),
+            dot_grid: dot_grid(),
             dot_records: None,
             probe_limit: 0,
             free_pages: None,
@@ -969,6 +1090,14 @@ pub struct HierStats {
     /// HierOpts::sub_cut_dots: the items counted into dot blocks (the dot
     /// items emitted are sub_cut_boxes)
     pub sub_cut_dot_items: u64,
+    /// ... by where they came from: child-BVH nodes, placements (one item
+    /// each), arrays (one each, counted by block), point-list members one by
+    /// one, point-list chunks at once (one item each) and the members they
+    /// held, array members one by one, pages and page-BVH nodes
+    /// (HierOpts::dot_pages) - the items are those but the chunks' members -
+    /// then the dot block updates the hash map took: beyond a cell's grid, or
+    /// every one without it (HierOpts::dot_grid) (2026-10-02)
+    pub dot_by: [u64; 9],
     /// the plan was made with HierOpts::sub_cut_dots: its washes are dot
     /// items (the density raster draws them as dots, not as marker rects)
     pub sub_cut_dots: bool,
@@ -1828,6 +1957,9 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         dots: dots.is_some(),
         one_walk: dots.is_some() && opts.dot_records.is_some(),
         page_dots: opts.dot_pages,
+        grid_on: opts.dot_grid,
+        grid: DotGrid::default(),
+        dot_run: None,
         block_px: opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX),
         block_cap: dot_block_cap(opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX)),
         spread: opts.dot_spread,
@@ -2225,6 +2357,13 @@ struct Hier<'a> {
     one_walk: bool,
     /// HierOpts::dot_pages
     page_dots: bool,
+    /// HierOpts::dot_grid, the grid of the cell being walked, and the run of
+    /// dot items of one block being summed - the block and layer, the dots,
+    /// the union of what they stand for - put into the blocks when an item
+    /// goes to another and before the cell's blocks are flushed
+    grid_on: bool,
+    grid: DotGrid,
+    dot_run: Option<((i64, i64, u32), u64, BBox)>,
     /// node visits since HierOpts::stop was last looked at, and whether it
     /// tripped (the walk unwinds)
     ticks: u32,
@@ -2388,6 +2527,9 @@ impl<'a> Hier<'a> {
         let key = (ci, r);
         self.explain_owner = key;
         let boxes = self.lv.get(&key).expect("lv seeded").boxes.clone();
+        if self.dots {
+            self.begin_grid(&boxes);
+        }
         let cell = self.v.cell(ci);
         let mut wc = WsCell {
             key,
@@ -2977,9 +3119,7 @@ impl<'a> Hier<'a> {
             let (cx, cy) = ((fp.x0 as f64 + fp.x1 as f64) / 2.0, (fp.y0 as f64 + fp.y1 as f64) / 2.0);
             let key = ((cx / block).floor() as i64, (cy / block).floor() as i64, layer);
             let dots = ((w * h / DOT_AREA_PX).floor() as u64).max(1).min(holds.max(1)).min(cap as u64) as u32;
-            let entry = self.dot_blocks.entry(key).or_insert((0, BBox::EMPTY));
-            entry.0 = (entry.0 + dots).min(cap);
-            entry.1.grow(&fp);
+            self.put_dots(key, dots, &fp);
             return;
         }
         // an item holding less than its box: every block's share scaled down
@@ -3017,10 +3157,127 @@ impl<'a> Hier<'a> {
                     x1: fp.x1.min(((bx + 1) as f64 * block).ceil() as i64),
                     y1: fp.y1.min(((by + 1) as f64 * block).ceil() as i64),
                 };
-                let entry = self.dot_blocks.entry((bx, by, layer)).or_insert((0, BBox::EMPTY));
-                entry.0 = (entry.0 + dots).min(cap);
-                entry.1.grow(&piece);
+                self.put_dots((bx, by, layer), dots, &piece);
             }
+        }
+    }
+
+    /// `dots` and what they stand for (`piece`) into the dot block `key`.
+    /// HierOpts::dot_grid: summed into the run while the items go to one
+    /// block (the walk's BVH order, a point list's Morton order), the run put
+    /// into its block when one goes to another. A block's count is the sum
+    /// capped at block_cap and its box the union, in any order.
+    fn put_dots(&mut self, key: (i64, i64, u32), dots: u32, piece: &BBox) {
+        if !self.grid_on {
+            self.put_block(key, dots, piece);
+            return;
+        }
+        if let Some((at, count, union)) = &mut self.dot_run {
+            if *at == key {
+                *count = count.saturating_add(dots as u64);
+                union.grow(piece);
+                return;
+            }
+        }
+        self.end_run();
+        let mut union = BBox::EMPTY;
+        union.grow(piece);
+        self.dot_run = Some((key, dots as u64, union));
+    }
+
+    /// The run of dot items (put_dots) into its block.
+    fn end_run(&mut self) {
+        if let Some((key, count, union)) = self.dot_run.take() {
+            self.put_block(key, count.min(self.block_cap as u64) as u32, &union);
+        }
+    }
+
+    /// `dots` and `piece` into the block `key`: the cell's grid's
+    /// (HierOpts::dot_grid), else the hash map's.
+    fn put_block(&mut self, key: (i64, i64, u32), dots: u32, piece: &BBox) {
+        if self.grid.put(key, dots, piece, self.block_cap) {
+            return;
+        }
+        self.st.dot_by[8] += 1;
+        let entry = self.dot_blocks.entry(key).or_insert((0, BBox::EMPTY));
+        entry.0 = (entry.0 + dots).min(self.block_cap);
+        entry.1.grow(piece);
+    }
+
+    /// HierOpts::dot_grid: `n` members of a point list - `b0` moved to every
+    /// point of `chunk` (its points' bounds) - on `layer` at once, when their
+    /// centres share one block: what add_dots makes of them member by member
+    /// (the same dots each, capped alike, the union of their boxes). False
+    /// where the centres meet two blocks or a member is wider than a block.
+    fn dot_chunk(&mut self, layer: u32, b0: &BBox, chunk: &BBox, n: u64) -> bool {
+        let ppd = self.px_per_dbu;
+        let (block_px, cap) = (self.block_px, self.block_cap);
+        let block = block_px / ppd;
+        let (w, h) = ((b0.x1 - b0.x0).max(0) as f64 * ppd, (b0.y1 - b0.y0).max(0) as f64 * ppd);
+        if !(w <= block_px && h <= block_px) {
+            return false;
+        }
+        // a member's centre as add_dots takes it, at the chunk's two corners:
+        // a block the same at both (the centre grows with the point) is every
+        // member's
+        let centre = |lo: i64, hi: i64, at: i64| (lo.saturating_add(at) as f64 + hi.saturating_add(at) as f64) / 2.0;
+        let (bx0, bx1) = ((centre(b0.x0, b0.x1, chunk.x0) / block).floor() as i64, (centre(b0.x0, b0.x1, chunk.x1) / block).floor() as i64);
+        let (by0, by1) = ((centre(b0.y0, b0.y1, chunk.y0) / block).floor() as i64, (centre(b0.y0, b0.y1, chunk.y1) / block).floor() as i64);
+        if bx0 != bx1 || by0 != by1 {
+            return false;
+        }
+        let each = ((w * h / DOT_AREA_PX).floor() as u64).max(1).min(cap as u64);
+        let dots = each.saturating_mul(n).min(cap as u64) as u32;
+        self.put_dots((bx0, by0, layer), dots, &grow_by_offsets(b0, chunk));
+        self.st.sub_cut_dot_items += 1;
+        self.st.dot_by[4] += 1;
+        self.st.dot_by[5] += n;
+        true
+    }
+
+    /// HierOpts::dot_grid: the grid over a cell's view `boxes` - their bounds
+    /// and the widest dot item (box_px) and two blocks more - before its walk;
+    /// none where it would span over DOT_GRID_MAX blocks. Blocks a walk left
+    /// behind (one that stopped) go to the hash map, as they stayed there.
+    fn begin_grid(&mut self, boxes: &[BBox]) {
+        self.end_run();
+        if !self.grid.touched.is_empty() {
+            let mut left = Vec::new();
+            self.grid.drain_into(&mut left);
+            for (key, (count, union)) in left {
+                let entry = self.dot_blocks.entry(key).or_insert((0, BBox::EMPTY));
+                entry.0 = (entry.0 + count).min(self.block_cap);
+                entry.1.grow(&union);
+            }
+        }
+        self.grid.nx = 0;
+        self.grid.ny = 0;
+        let ppd = self.px_per_dbu;
+        if !self.grid_on || !(ppd > 0.0) {
+            return;
+        }
+        let mut view = BBox::EMPTY;
+        for b in boxes {
+            view.grow(b);
+        }
+        if view.is_empty() {
+            return;
+        }
+        let block = self.block_px / ppd;
+        let margin = (self.box_px + 2.0 * self.block_px) / ppd;
+        let (bx0, bx1) = (((view.x0 as f64 - margin) / block).floor(), ((view.x1 as f64 + margin) / block).floor());
+        let (by0, by1) = (((view.y0 as f64 - margin) / block).floor(), ((view.y1 as f64 + margin) / block).floor());
+        let (nx, ny) = (bx1 - bx0 + 1.0, by1 - by0 + 1.0);
+        if !(nx * ny <= DOT_GRID_MAX as f64) || !(bx0.abs() < 1e15 && by0.abs() < 1e15) {
+            return;
+        }
+        self.grid.bx0 = bx0 as i64;
+        self.grid.by0 = by0 as i64;
+        self.grid.nx = nx as i64;
+        self.grid.ny = ny as i64;
+        let blocks = (nx * ny) as usize;
+        if self.grid.head.len() < blocks {
+            self.grid.head.resize(blocks, DOT_GRID_NONE);
         }
     }
 
@@ -3076,6 +3333,7 @@ impl<'a> Hier<'a> {
         };
         let per_member = ((member_px / DOT_AREA_PX).floor() as u64).max(1);
         self.st.sub_cut_dot_items += 1;
+        self.st.dot_by[2] += 1;
         for by in by0..=by1 {
             let (ylo, yhi) = (by as f64 * block, (by + 1) as f64 * block);
             let ys = range(cy, y_step, y_range, ylo, yhi);
@@ -3093,9 +3351,7 @@ impl<'a> Hier<'a> {
                 // what those members cover: the same union the member walk makes
                 let ((x0, x1), (y0, y1)) = (span(b0.x0, b0.x1, x_step, xs), span(b0.y0, b0.y1, y_step, ys));
                 let piece = BBox { x0, y0, x1, y1 };
-                let entry = self.dot_blocks.entry((bx, by, layer)).or_insert((0, BBox::EMPTY));
-                entry.0 = (entry.0 + dots).min(cap);
-                entry.1.grow(&piece);
+                self.put_dots((bx, by, layer), dots, &piece);
             }
         }
         true
@@ -3115,8 +3371,16 @@ impl<'a> Hier<'a> {
     fn flush_dots(&mut self, wc: &mut WsCell) {
         let ppd = self.px_per_dbu;
         let block = self.block_px / ppd;
+        self.end_run();
         let mut blocks: Vec<((i64, i64, u32), (u32, BBox))> = self.dot_blocks.drain().collect();
         blocks.sort_unstable_by_key(|&(key, _)| key);
+        if !self.grid.touched.is_empty() {
+            // the grid's blocks in key order, merged with the hash map's
+            // (beyond the grid: other keys)
+            let mut grid = Vec::with_capacity(self.grid.entries.len());
+            self.grid.drain_into(&mut grid);
+            blocks = merge_by_key(blocks, grid);
+        }
         self.dot_seen.clear();
         if self.spread {
             // washes the walk pushed itself (a page wash) carry no count (0):
@@ -3201,6 +3465,7 @@ impl<'a> Hier<'a> {
         if self.dots && self.boxm && (self.one_walk || self.box_small(&p.bbox)) {
             if self.dot_seen.insert(2 << 60 | pi as u64) {
                 let holds = if self.spread { self.page_dots(p) } else { u64::MAX };
+                self.st.dot_by[7] += 1;
                 self.add_dots(p.layer_idx, p.bbox, holds);
                 self.note_page("dots", ci, p, pi);
             }
@@ -3386,6 +3651,9 @@ impl<'a> Hier<'a> {
             Some((least, most)) if least.same(&most, self.set_words) => {
                 let holds = if self.dots && self.spread { self.node_holds(ni, fp) } else { u64::MAX };
                 if self.box_layers(wc, most, *fp, holds) {
+                    if self.dots {
+                        self.st.dot_by[0] += 1;
+                    }
                     self.st.sub_cut_box_nodes += 1;
                 }
                 return;
@@ -3440,6 +3708,7 @@ impl<'a> Hier<'a> {
                 }
             }
             if let Some(rank) = top {
+                self.st.dot_by[0] += 1;
                 self.add_dots(self.vis_layers[rank], *fp, if count && read_all { holds } else { u64::MAX });
                 self.st.sub_cut_box_nodes += 1;
             }
@@ -3507,6 +3776,9 @@ impl<'a> Hier<'a> {
         if h.kind == 0 || self.box_small(&fp) {
             // HierOpts::dot_spread: an array counts its members, not its box
             let holds = if self.dots && self.spread { self.place_members(pli, h).saturating_mul(self.member_dots(rb)) } else { u64::MAX };
+            if self.dots {
+                self.st.dot_by[1] += 1;
+            }
             self.box_layers(wc, found, fp, holds);
             return;
         }
@@ -3522,11 +3794,32 @@ impl<'a> Hier<'a> {
             let region = minkowski_neg(&view, &b0);
             let stride = self.box_stride;
             let mut members = 0u64;
+            // the dots: box_layers' topmost layer, found once for the members
+            // (HierOpts::dot_grid)
+            let top = if self.dots && self.grid_on { found.top(self.set_words).map(|rank| self.vis_layers[rank]) } else { None };
             for k in 0..pr.n_chunks {
-                if !pr.chunk_bbox(k).intersects(&region) {
+                let chunk = pr.chunk_bbox(k);
+                if !chunk.intersects(&region) {
                     continue;
                 }
                 let (lo, hi) = pr.chunk_range(k);
+                // the dots: a chunk in view whole whose members' centres share
+                // one block, at once (HierOpts::dot_grid)
+                let held = (hi - lo) as u64;
+                if let Some(layer) = top {
+                    if stride == 1
+                        && members + held <= SUB_CUT_BOX_ARRAY_MAX
+                        && region.x0 <= chunk.x0
+                        && chunk.x1 <= region.x1
+                        && region.y0 <= chunk.y0
+                        && chunk.y1 <= region.y1
+                        && self.dot_chunk(layer, &b0, &chunk, held)
+                    {
+                        members += held;
+                        self.st.sub_cut_box_members += held;
+                        continue;
+                    }
+                }
                 for slot in (lo..hi).filter(|slot| *slot as i64 % stride == 0) {
                     let (ox, oy) = pr.pt(slot);
                     let at = pt_box(ox, oy);
@@ -3538,8 +3831,14 @@ impl<'a> Hier<'a> {
                         self.st.sub_cut_box_over += 1;
                         return;
                     }
-                    if !self.box_layers(wc, found, grow_by_offsets(&b0, &at), u64::MAX) {
+                    let member = grow_by_offsets(&b0, &at);
+                    if let Some(layer) = top {
+                        self.add_dots(layer, member, u64::MAX);
+                    } else if !self.box_layers(wc, found, member, u64::MAX) {
                         return;
+                    }
+                    if self.dots {
+                        self.st.dot_by[3] += 1;
                     }
                     self.st.sub_cut_box_members += 1;
                 }
@@ -3598,6 +3897,9 @@ impl<'a> Hier<'a> {
                 let member = grow_by_offsets(&b0, &grid_ovis(ia, ib, ja, jb, va, vb));
                 if !self.box_layers(wc, found, member, u64::MAX) {
                     return;
+                }
+                if self.dots {
+                    self.st.dot_by[6] += 1;
                 }
                 self.st.sub_cut_box_members += 1;
             }
@@ -4272,6 +4574,7 @@ impl<'a> Hier<'a> {
                             if self.dot_seen.insert(4 << 60 | ni as u64) {
                                 let (lo, hi) = self.pbvh_pages(ni);
                                 let holds: u64 = (lo..hi).map(|pi| self.page_dots(&self.v.page(pi))).sum();
+                                self.st.dot_by[7] += 1;
                                 self.add_dots(layer_idx, n.bbox, holds.max(1));
                                 self.st.sub_cut_box_nodes += 1;
                             }
@@ -6405,6 +6708,112 @@ mod tests {
             }
         };
         assert_eq!((node_dots(true), node_dots(false)), (3, 24));
+    }
+
+    #[test]
+    fn the_dots_grid_counts_and_orders_the_blocks_as_the_hash_map_does() {
+        // HierOpts::dot_grid (user 2026-10-02, field: `cell dots 87.2M`): the
+        // grid over the cell's view, the runs, a point list's chunk in one
+        // block at once and its topmost layer found once make the same dot
+        // items, counts and order as the hash map item by item. 0.02 px/dbu,
+        // 8 px blocks of 400 dbu; LEAF (L1) and LEAF@2 (L2) are 60 dbu.
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |n: i64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % n as u64) as i64
+        };
+        // four clusters of PTS_CHUNK members 3,200 dbu (eight blocks) apart -
+        // one chunk each (Morton order), each in one block, at once - and 2,000
+        // members over the view (their chunks meet several blocks: member by
+        // member)
+        let cluster: Vec<(i64, i64)> = (0..4 * floe_ovm::PTS_CHUNK as i64).map(|at| (at / 256 * 3_200 + next(250), next(250))).collect();
+        let spread: Vec<(i64, i64)> = (0..2000).map(|_| (next(15_000), next(15_000))).collect();
+        let cells = [
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] },
+            FCell { name: "LEAF@2", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] },
+            FCell {
+                name: "TOP",
+                pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)],
+                places: vec![
+                    (0, 4_010, 4_010, 0, false, Rep::Pts(cluster.into())),
+                    (1, 0, 0, 0, false, Rep::Pts(spread.into())),
+                    (0, 7_000, 0, 0, false, Rep::One),
+                    (1, 7_030, 30, 0, false, Rep::One),
+                    (0, 12_000, 0, 0, false, Rep::Grid { na: 30, nb: 30, va: (150, 0), vb: (0, 150) }),
+                    (1, 0, 12_000, 0, false, Rep::Grid { na: 40, nb: 40, va: (60, 0), vb: (0, 60) }),
+                ],
+            },
+        ];
+        let chip = fixture(&cells, 2);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = false;
+        let opts = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, ..HierOpts::default() };
+        let items = |plan: &HierPlan| plan.wcells.iter().map(|w| (w.key, w.washes.clone(), w.dot_counts.clone())).collect::<Vec<_>>();
+        for split in [false, true] {
+            let opts = if split {
+                HierOpts {
+                    regions: vec![bx(-10, -10, 4_200, 20_000), bx(4_200, -10, 20_000, 7_000), bx(4_200, 7_000, 20_000, 20_000)],
+                    k_boxes: 4,
+                    ..opts.clone()
+                }
+            } else {
+                opts.clone()
+            };
+            let grid = plan_hier(&chip, &req, &HierOpts { dot_grid: true, ..opts.clone() });
+            let map = plan_hier(&chip, &req, &HierOpts { dot_grid: false, ..opts.clone() });
+            assert!(grid.wcells.iter().any(|w| w.washes.iter().any(|&(layer, _)| layer == 1)), "both layers dotted");
+            assert_eq!(items(&grid), items(&map), "split {split}");
+            assert_eq!((grid.stats.sub_cut_boxes, grid.stats.sub_cut_box_members), (map.stats.sub_cut_boxes, map.stats.sub_cut_box_members));
+            // the grid took every block, the cluster's chunks at once, the
+            // spread list member by member
+            let (g, m) = (grid.stats.dot_by, map.stats.dot_by);
+            assert!(g[4] >= 4 && g[5] == 4 * floe_ovm::PTS_CHUNK as u64 && g[3] > 0 && g[8] == 0, "{g:?}");
+            assert!(m[4] == 0 && m[3] == g[3] + g[5] && m[8] > 0, "{m:?} {g:?}");
+            // the items are what came from where, a chunk one
+            for (plan, by) in [(&grid, g), (&map, m)] {
+                assert_eq!(plan.stats.sub_cut_dot_items, by[0] + by[1] + by[2] + by[3] + by[4] + by[6] + by[7], "{by:?}");
+            }
+            assert!(grid.stats.sub_cut_dot_items < map.stats.sub_cut_dot_items);
+        }
+    }
+
+    #[test]
+    fn a_dot_grid_and_the_hash_map_beyond_it_drain_in_key_order() {
+        // DotGrid::put / drain_into and merge_by_key against a sorted map: the
+        // same counts (capped at 8), unions and key order, keys beyond the grid
+        // left to the caller
+        let mut grid = DotGrid { bx0: -3, by0: 5, nx: 7, ny: 4, ..DotGrid::default() };
+        grid.head.resize(28, DOT_GRID_NONE);
+        let mut beyond: FxMap<(i64, i64, u32), (u32, BBox)> = FxMap::default();
+        let mut truth: std::collections::BTreeMap<(i64, i64, u32), (u32, BBox)> = std::collections::BTreeMap::new();
+        let mut rng = 12_345u64;
+        for _ in 0..2_000 {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let key = (((rng >> 33) % 11) as i64 - 5, ((rng >> 40) % 7) as i64 + 3, ((rng >> 50) % 5) as u32);
+            let dots = ((rng >> 20) % 3) as u32 + 1;
+            let piece = bx(key.0 * 10 + (rng % 7) as i64, key.1 * 10, key.0 * 10 + 9, key.1 * 10 + (rng % 5) as i64);
+            let inside = (-3..4).contains(&key.0) && (5..9).contains(&key.1);
+            assert_eq!(grid.put(key, dots, &piece, 8), inside);
+            if !inside {
+                let e = beyond.entry(key).or_insert((0, BBox::EMPTY));
+                e.0 = (e.0 + dots).min(8);
+                e.1.grow(&piece);
+            }
+            let e = truth.entry(key).or_insert((0, BBox::EMPTY));
+            e.0 = (e.0 + dots).min(8);
+            e.1.grow(&piece);
+        }
+        let mut drained = Vec::new();
+        grid.drain_into(&mut drained);
+        let mut rest: Vec<_> = beyond.into_iter().collect();
+        rest.sort_unstable_by_key(|&(key, _)| key);
+        assert!(!drained.is_empty() && !rest.is_empty());
+        assert_eq!(merge_by_key(rest, drained), truth.into_iter().collect::<Vec<_>>());
+        // drained: every head back to none, ready for the next cell
+        assert!(grid.head.iter().all(|&h| h == DOT_GRID_NONE) && grid.entries.is_empty() && grid.touched.is_empty());
     }
 
     #[test]
