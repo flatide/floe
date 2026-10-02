@@ -1047,6 +1047,9 @@ def perf_status(res, depth_note=""):
             parts.append("block %g px" % res["density_block"])
         if res.get("density_floor") is not None:
             parts.append("floor %.2g px" % res["density_floor"])
+        # pass 2's reserve: the fixed one or what pass 1 left (2026-10-02)
+        if (res.get("density_plan2") or {}).get("reserve_mb"):
+            parts.append("reserve %s MB" % fmt_count(res["density_plan2"]["reserve_mb"]))
         us = res.get("density_us") or {}
         if us:
             plan = "pass 2 plan %d ms" % round(

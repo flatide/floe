@@ -161,6 +161,14 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 센 멤버: 4 스레드는 1 스레드의 1.25배 이하, 끈 경우는 1.5배 이상(4,000 / 4,201 / 4,204 / 11,822).
   - 단위 `a_point_list_is_walked_by_each_box_and_a_block_no_box_holds_whole_is_left_out`.
   - 상태줄 테스트: 로그 줄의 `list chunks C of M members`가 청크 바로 뒤에 온다(0.12.268은 배열 멤버 뒤였다).
+  0.12.270(2패스 예약 = 1패스가 남긴 만큼):
+  - 게이트 `density_stack` `left_checks`:
+    - 픽스처: TOP이 0.05~0.3 µm 상자 6만 개를 직접 가진 300 µm 레이아웃(레코드 38,554, 추정 7.7 MB). 예산 32 MB(고정
+      예약 4 MB), 깊이 0, 하한 0.
+    - 2패스가 컷 없는 프레임과 같은 픽셀을 켠다(19,982 px). 예약은 32 MB이고 탐침 초과는 없다.
+    - `FLOE_RUST_DENSITY_RESERVE_LEFT=off`는 아무것도 켜지 않고 하한 탐침이 초과한다.
+  - `history_checks`·`held_checks`는 예약 1 MB가 요점이라 고정 예약(`FLOE_RUST_DENSITY_RESERVE_LEFT=off`)으로 고정했다.
+  - 어댑터 계약: `density_plan2` 23개 값(…/reserve_mb). 상태줄 테스트: 로그 줄의 `reserve R MB`.
   0.12.261(블록 4 px, 한 번 걷기는 선택, 하한 1 px, 페이지 점 끔): 게이트 점 절의 기본은 4 px·퍼뜨림·맞춤·하한 1 px —
   성긴 배열 100 px가 각 멤버에서 1.5 px 안, 맞닿은 배열 = Σ min(8, 4×4 블록의 멤버), 항목 = 성긴 배열 100 + 1 + 맞닿은
   블록, TOP의 0.5 px 점은 그리지도 점으로 서지도 않음, `density_floor` 1, `density_plan2` 탐침 0·맞춤 1; 하한 0·0.25 px는

@@ -636,8 +636,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                                     by_list_members=470000, by_list_chunks=20000,
                                     by_chunk_members=5120000, by_array_members=10000,
                                     by_pages=0, map_updates=12)
+        # pass 2's reserve, what pass 1 left (2026-10-02): the log line's
+        res["density_plan2"].update(reserve_mb=896)
         res["density_pages"].update(decoded=206, over_budget=3)
         full, brief = perf_status(res)
+        self.assertIn("[density: dots, lit 620k px, block 4 px, floor 15 px, reserve 896 MB, pass 2 plan", full)
         # the chunks' members right after the chunks (0.12.268 put them last:
         # the field's `list chunks 78, array members 57k of 354 members`)
         self.assertIn(
@@ -1835,7 +1838,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "density_dots": "3500/2", "density_floor": "0.250",
                 "density_block": "8",
                 "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2"
-                                 "/30000/20000/5000/34860/40/9000/100/0/7",
+                                 "/30000/20000/5000/34860/40/9000/100/0/7/896",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -1923,7 +1926,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "reads": 700000, "items": 90000, "probes_over": 1, "thinned": 2,
                 "by_nodes": 30000, "by_placements": 20000, "by_arrays": 5000, "by_list_members": 34860,
                 "by_list_chunks": 40, "by_chunk_members": 9000, "by_array_members": 100, "by_pages": 0,
-                "map_updates": 7})
+                "map_updates": 7, "reserve_mb": 896})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)

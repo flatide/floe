@@ -147,7 +147,10 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  # the dot items by where they came from, then the dot block updates
                  # the hash map took past the cells' grids (2026-10-02)
                  "by_nodes", "by_placements", "by_arrays", "by_list_members", "by_list_chunks", "by_chunk_members",
-                 "by_array_members", "by_pages", "map_updates")
+                 "by_array_members", "by_pages", "map_updates",
+                 # pass 2's reserve in the frame, MB: the fixed one or what pass 1
+                 # left of the budget (2026-10-02)
+                 "reserve_mb")
 
 
 def _wire_counts(value, names):

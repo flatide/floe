@@ -314,6 +314,14 @@ vias, 1 / 2 / 4 threads counted 1 / 2 / 2.96 M) - and puts out only the
 blocks a box holds whole (floe_vfs `dot_block_whole`), so the merge never keeps
 a block counted in part; `Cache::merge_plans` looks its blocks up with the
 planner's Fx hasher. `FLOE_RUST_DENSITY_DOT_BOXES=off` is the kill switch.
+Since 0.12.270 pass 2's reserve in a frame is the fixed one (pass 1 plans to
+leave it) or, when larger, what pass 1 left of the generation budget - its
+pages' bytes taken off (`density_frame_reserve`; user 2026-10-02, the field
+chip at depth 0: a root's own shapes under a pixel failed the 0 px floor's
+probe of the 128 MB reserve while pass 1 held a few pages, and the view drew
+nothing under the cut). The probe, the fit, the threads' fit and the decode
+take it; `density_plan2`'s 23rd value is it in MB (`reserve_mb`, the log line's
+`reserve R MB`). `FLOE_RUST_DENSITY_RESERVE_LEFT=off` is the kill switch.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

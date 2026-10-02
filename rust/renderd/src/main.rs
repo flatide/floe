@@ -1181,8 +1181,9 @@ struct FramePixels {
     /// came from - child-BVH nodes, placements, arrays, point-list members one
     /// by one, point-list chunks at once and their members, array members one
     /// by one, pages - and the dot block updates the hash map took
-    /// (2026-10-02)
-    density_plan2: Option<[u64; 22]>,
+    /// (2026-10-02); then pass 2's reserve in MB (density_frame_reserve,
+    /// 2026-10-02)
+    density_plan2: Option<[u64; 23]>,
 }
 
 fn render_worker(
@@ -2583,6 +2584,24 @@ fn density_reserve(budget: u64) -> u64 {
     density_budget_bytes().min(budget / 8).max(1)
 }
 
+/// Pass 2's reserve in a frame: density_reserve - pass 1 plans to leave it -
+/// or, when larger, what pass 1 left of the generation budget (its pages'
+/// bytes, `pass1_bytes`), so a frame whose pass 1 is light gives pass 2 the
+/// rest (user 2026-10-02, the field chip at depth 0: a root's own shapes under
+/// a pixel - in a test, a million boxes, 192 MB by estimate - failed the 0 px
+/// floor's probe of the 128 MB reserve while pass 1 held a few pages of the
+/// 1024 MB, and the view drew nothing under the cut). The budget stays the
+/// generation's. FLOE_RUST_DENSITY_RESERVE_LEFT=off (the kill switch): the
+/// fixed reserve, as before.
+fn density_frame_reserve(budget: u64, pass1_bytes: u64) -> u64 {
+    let fixed = density_reserve(budget);
+    if std::env::var("FLOE_RUST_DENSITY_RESERVE_LEFT").as_deref() == Ok("off") {
+        fixed
+    } else {
+        fixed.max(budget.saturating_sub(pass1_bytes))
+    }
+}
+
 /// The error a margin's pass 2 raises when its budget fit does not hold the
 /// scale's decision: the frame is dropped like a pass-1 refit of a margin.
 const DROPPED_FIT: &str = "dropped:fit";
@@ -3283,7 +3302,7 @@ fn run_render(
         let mut density_us: Option<[u64; 5]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 22]> = None;
+        let mut density_plan2: Option<[u64; 23]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4029,7 +4048,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 22]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 23]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4042,6 +4061,8 @@ fn render_density_frame(
     )?;
     let block = session.density_block();
     let budget_bytes = page_cache.budget_bytes();
+    // pass 2's reserve: the fixed one or what pass 1 left (density_frame_reserve)
+    let reserve_bytes = density_frame_reserve(budget_bytes, *generation_bytes);
     let top_layer = styled.layers.last().map(|layer| layer.layer_idx);
     let other_layers: Vec<u32> = styled.layers.iter().take(styled.layers.len().saturating_sub(1)).map(|layer| layer.layer_idx).collect();
     // pages planned/in hand/decoded/over the budget, dot items/over the cap
@@ -4054,7 +4075,8 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 22];
+    let mut plan2 = [0u64; 23];
+    plan2[22] = reserve_bytes >> 20;
     // pass 1's pages: pass 2 holds them already, so they cost its reserve
     // nothing (floe_vfs HierOpts::free_pages; user 2026-10-01: 37 pages of
     // pass 1's, 201 MB by estimate, failed the 0 px floor's probe of a 128 MB
@@ -4133,7 +4155,7 @@ fn render_density_frame(
                             .map(|b| ViewBox::new(b.x0, b.y0, b.x1, b.y1))
                             .collect::<Result<Vec<_>, _>>()?;
                         let side_key = format!("{fit_key}|density{side}");
-                        let reserve = density_reserve(budget_bytes);
+                        let reserve = reserve_bytes;
                         // one plan of this side: the sub-cut dots' (the cells at pass 1's
                         // cut - a cell under it is a dot item, never walked into or
                         // decoded - and the pages at `floor` px) or the plain finer cut;
@@ -4366,7 +4388,7 @@ fn render_density_frame(
                     check_generation(cancellation, command.generation)?;
                     wanted.sort_unstable();
                     wanted.dedup_by_key(|entry| entry.1);
-                    let limit = density_reserve(budget_bytes);
+                    let limit = reserve_bytes;
                     let mut estimate = 0u64;
                     let mut take = Vec::with_capacity(wanted.len());
                     for (_, page_id) in wanted {

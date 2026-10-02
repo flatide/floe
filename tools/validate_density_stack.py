@@ -115,7 +115,10 @@ equals the default reserve's and reports nothing over budget (held_checks).
 Pass 2's threads walk a point list's members in their own regions: over nine
 tiles one, two and four threads and the bounds (FLOE_RUST_DENSITY_DOT_BOXES=off)
 draw one frame, four threads count the members about once, the bounds about
-twice (lists_checks).
+twice (lists_checks). Pass 2's reserve is what pass 1 left of the budget when
+that is more: at depth 0 a TOP's own boxes under a pixel, past a 32 MB
+budget's fixed 4 MB reserve, are drawn as a cut-free frame draws them, and the
+fixed reserve (FLOE_RUST_DENSITY_RESERVE_LEFT=off) draws none (left_checks).
 
     .venv/bin/python tools/validate_density_stack.py
 """
@@ -423,8 +426,10 @@ def history_checks(temp):
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
+    # the fixed reserve (FLOE_RUST_DENSITY_RESERVE_LEFT=off): what pass 1
+    # leaves would hold the whole layout (0.12.270)
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BUDGET_MB': '1',
-           'FLOE_RUST_DENSITY_PLAN_THREADS': '1'}
+           'FLOE_RUST_DENSITY_PLAN_THREADS': '1', 'FLOE_RUST_DENSITY_RESERVE_LEFT': 'off'}
     fresh, after, roomy = worker(src, env), worker(src, env), worker(src, {k: v for k, v in env.items() if k != 'FLOE_RUST_DENSITY_BUDGET_MB'})
     split = worker(src, dict(env, FLOE_RUST_DENSITY_PLAN_THREADS='2'))
     # the default: four threads, or the cores there are (0.12.268)
@@ -528,7 +533,9 @@ def held_checks(temp):
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
-    tight, roomy = worker(src, dict(env, FLOE_RUST_DENSITY_BUDGET_MB='1')), worker(src, env)
+    # the fixed reserve (FLOE_RUST_DENSITY_RESERVE_LEFT=off): what pass 1
+    # leaves would hold it all (0.12.270)
+    tight, roomy = worker(src, dict(env, FLOE_RUST_DENSITY_BUDGET_MB='1', FLOE_RUST_DENSITY_RESERVE_LEFT='off')), worker(src, env)
     try:
         dbu = float(tight.cache.meta['dbu'])
         box_um, px_w, px_h = (0.0, 0.0, 300.0, 200.0), 450, 300
@@ -627,6 +634,77 @@ def lists_checks(temp):
               'counted %s' % (one_res['density_stack']['lit'], ' / '.join('%s %d' % kv for kv in members.items())))
     finally:
         for w in workers.values():
+            w.stop()
+
+
+def own_layout(path):
+    """A TOP whose own shapes are 60,000 boxes of 0.05-0.3 um at random over
+    300 x 300 um - under a pixel at 1000 px; of 62,500 sizes, so the writer
+    keeps most one record each (boxes of a size become a repetition): 38,554
+    records, 7.7 MB by the planner's estimate, in a page pass 1 leaves (a box
+    over the cut beside them would put it in pass 1's hands, free in pass 2's
+    budget)."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(*LOW)
+    rnd = random.Random(9)
+    for _ in range(60_000):
+        x, y = rnd.randrange(300_000) / 1000.0, rnd.randrange(300_000) / 1000.0
+        w, h = 0.05 + rnd.randrange(250) / 1000.0, 0.05 + rnd.randrange(250) / 1000.0
+        top.shapes(layer).insert(kdb.DBox(x, y, x + w, y + h))
+    ly.write(str(path))
+
+
+def left_checks(temp):
+    """Pass 2's reserve is what pass 1 left of the budget when that is more
+    (user 2026-10-02, the field chip at depth 0: a root's own shapes under a
+    pixel failed the 0 px floor's probe of the fixed reserve and the view drew
+    nothing under the cut - `lit 0 px, cell dots 0, 0 pages, pass 2 over
+    budget`). A 32 MB budget (a fixed reserve of 4 MB) and the TOP's own
+    boxes, 7.7 MB by estimate, at depth 0 with a zero floor: pass 2 draws them
+    as a cut-free frame does; FLOE_RUST_DENSITY_RESERVE_LEFT=off draws none
+    and reports the floor probe over budget."""
+    src = Path(temp) / 'own.oas'
+    own_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0', 'FLOE_RUST_BUDGET_MB': '32'}
+    left, fixed, free = worker(src, env), worker(src, dict(env, FLOE_RUST_DENSITY_RESERVE_LEFT='off')), worker(src, {'FLOE_RUST_BUDGET_MB': '32'})
+    try:
+        dbu = float(left.cache.meta['dbu'])
+        side = 1000
+
+        def view(w, cut_px=3.0):
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'headless', 'bbox': (0.0, 0.0, 300.2 / dbu, 300.2 / dbu), 'view': None,
+                      'w': side, 'h': side, 'depth': 0, 'cut_px': cut_px, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('own shapes frame timeout')
+
+        drawn, rd = view(left)
+        old, ro = view(fixed)
+        truth, _ = view(free, cut_px=0.0)
+        # the lit pixels of a whole frame, by index (the frame is side x side)
+        lit_of = lambda pixels: {i // 4 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK}
+        want = lit_of(truth)
+        pd, po = rd['density_plan2'], ro['density_plan2']
+        assert want and lit_of(drawn) == want and rd['density_floor'] == 0.0 and pd['probes_over'] == 0 and pd['reserve_mb'] > 4, (
+            'what pass 1 left: %d px lit, %d cut-free; floor %s, plan %s' % (len(lit_of(drawn)), len(want), rd['density_floor'], pd))
+        assert not lit_of(old) and po['probes_over'] == 1 and po['reserve_mb'] == 4, (
+            'the fixed reserve: %d px lit, plan %s' % (len(lit_of(old)), po))
+        print('density stack: pass 2 takes what pass 1 left - %d MB, the TOP\'s own boxes under a pixel lit as cut-free (%d px) at '
+              'depth 0; the fixed 4 MB draws none (floor probe over)' % (pd['reserve_mb'], len(want)))
+    finally:
+        for w in (left, fixed, free):
             w.stop()
 
 
@@ -832,6 +910,7 @@ def main():
         history_checks(temp)
         held_checks(temp)
         lists_checks(temp)
+        left_checks(temp)
     print('density stack gate: OK')
 
 
