@@ -177,6 +177,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 사다리(`FLOE_RUST_DENSITY_FIT_LADDER=on`)는 6번 걸어 같은 프레임에 이른다.
     - 기본 예산은 그 페이지를 디코드한다.
   - 단위 `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
+  0.12.273(라우팅 합성 칩): `tools/gen_route_chip.py`. 탑 자신의 1 px 미만 배선·비아, 칩 전체 비아 점 리스트,
+  블록과 표준 셀을 만든다. 조건별 재현은 CUT_DENSITY_DESIGN §10.12에 있다. 작업 프로세스 수와 무관하게 바이트까지
+  같은 파일을 만든다(규모 0.02로 확인). 게이트에는 넣지 않았다(데이터 생성 도구).
   0.12.272(하한 아래 페이지 퍼뜨리기, 선택): 단위 `a_page_under_the_floor_spreads_its_shapes_dots_over_its_box`.
   비교 이미지(정답 | 퍼뜨리기 | 지금)는 CUT_DENSITY_DESIGN §10.12에 있다(기본이 꺼져 있어 게이트에는 넣지 않았다).
   0.12.261(블록 4 px, 한 번 걷기는 선택, 하한 1 px, 페이지 점 끔): 게이트 점 절의 기본은 4 px·퍼뜨림·맞춤·하한 1 px —
