@@ -103,7 +103,8 @@ Pass 2's budget decision is the frame's own (user 2026-10-01: kept per scale,
 not per place, a dense view's decision emptied a sparse view at the same zoom
 step): on an uneven layout under a 1 MB pass-2 reserve the whole extent thins
 its pass 2 and the corner quarter, drawn after it at the same scale, equals
-the corner a fresh worker draws (history_checks). Pass 1's pages cost pass 2's
+the corner a fresh worker draws, and the whole extent planned on two threads
+(FLOE_RUST_DENSITY_PLAN_THREADS=2) thins to the same frame (history_checks). Pass 1's pages cost pass 2's
 reserve nothing: under a 1 MB reserve, which pass 1's own pages pass, the frame
 equals the default reserve's and reports nothing over budget (held_checks).
 
@@ -397,6 +398,7 @@ def history_checks(temp):
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BUDGET_MB': '1'}
     fresh, after, roomy = worker(src, env), worker(src, env), worker(src, {k: v for k, v in env.items() if k != 'FLOE_RUST_DENSITY_BUDGET_MB'})
+    split = worker(src, dict(env, FLOE_RUST_DENSITY_PLAN_THREADS='2'))
     try:
         dbu = float(fresh.cache.meta['dbu'])
         side, um_per_px = 400.0, 400.0 / 600
@@ -420,14 +422,22 @@ def history_checks(temp):
         full, rr = view(roomy, 1, whole)
         assert rt['density_stack']['lit'] < rr['density_stack']['lit'], (
             'the whole layout must thin its pass 2 under the 1 MB reserve: lit %d, %d under 128 MB' % (rt['density_stack']['lit'], rr['density_stack']['lit']))
+        # the regions planned on two threads and merged are fitted as the one
+        # plan is (Cache::fit_plan; 0.12.267 - before, a view that thins
+        # took one thread): the same frame, two threads, thinned
+        apart, rs = view(split, 1, whole)
+        assert apart == thinned and (rs['density_plan2']['threads'], rs['density_plan2']['thinned']) == (2, 1), (
+            'the threaded pass 2 that thins differs in %d px: %s' % (
+                sum(1 for i in range(0, len(apart), 4) if apart[i:i + 4] != thinned[i:i + 4]), rs['density_plan2']))
         again, ra = view(after, 2, corner)
         assert rf['density_stack']['lit'] > 0 and again == first, (
             'the corner after the whole layout at the same scale differs from a fresh one in %d px (lit %d vs %d)' % (
                 sum(1 for i in range(0, len(first), 4) if first[i:i + 4] != again[i:i + 4]), ra['density_stack']['lit'], rf['density_stack']['lit']))
         print('density stack: pass 2 is decided per frame - the corner lights %d px fresh and the same after the whole layout thinned '
-              'its pass 2 (%d px lit, %d under 128 MB)' % (rf['density_stack']['lit'], rt['density_stack']['lit'], rr['density_stack']['lit']))
+              'its pass 2 (%d px lit, %d under 128 MB); on two threads it thins alike' % (
+                  rf['density_stack']['lit'], rt['density_stack']['lit'], rr['density_stack']['lit']))
     finally:
-        for w in (fresh, after, roomy):
+        for w in (fresh, after, roomy, split):
             w.stop()
 
 

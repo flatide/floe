@@ -287,8 +287,12 @@ thinned, N pages left out`, the last from `density_pages`). Pass 1's pages cost
 that reserve nothing (`PlanRequest::free_pages`, floe_vfs `HierOpts::free_pages`;
 user 2026-10-01: 37 pages of pass 1's, 201 MB by estimate, failed a 0 px probe
 of the 128 MB reserve with nothing new to decode). `FLOE_RUST_DENSITY_PLAN_THREADS=N`
-(diagnostic, default 1) plans pass 2's regions in N bands on N threads and
-merges them (`Cache::merge_plans`), when their pages fit the reserve.
+(diagnostic, default 1) deals pass 2's regions round robin to N bands planned
+on N threads, merges them (`Cache::merge_plans`) and fits the merge to the
+reserve as the one plan would be (`Cache::fit_plan`, floe_vfs `fit_planned`;
+since 0.12.267 - before, only a view the reserve held whole took the threads);
+a fit that would plan again - a decision at a coarser cut, pages past the
+fit's overshoot - plans as one.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

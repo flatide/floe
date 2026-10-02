@@ -1457,12 +1457,7 @@ fn plan_hier_thinned(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
             passes += 1;
             plan = plan_hier_as_asked(v, &attempt, opts, 0);
         }
-        let key = if attempt.shape_cut {
-            FitKey::SmallerSide
-        } else {
-            FitKey::LongerSide { hairline: if attempt.page_hairline { opts.hairline } else { 0.0 } }
-        };
-        if !thin_to_budget(v, opts, &mut plan, key, req.cut_dbu, req.decode_budget) {
+        if !thin_to_budget(v, opts, &mut plan, fit_key_of(&attempt, opts), req.cut_dbu, req.decode_budget) {
             break;
         }
         if let Some(decision) = plan.stats.fit_decision.as_mut() {
@@ -1520,6 +1515,62 @@ pub enum FitKey {
     /// shapes reaches the cut on both sides - max_min (review 2026-09-20: the
     /// longer side kept a page of 10000 x 4 wires over a page of 64-squares)
     SmallerSide,
+}
+
+/// The rule a budget fit ranks a request's pages by (FitKey).
+fn fit_key_of(req: &ViewReq, opts: &HierOpts) -> FitKey {
+    if req.shape_cut {
+        FitKey::SmallerSide
+    } else {
+        FitKey::LongerSide { hairline: if req.page_hairline { opts.hairline } else { 0.0 } }
+    }
+}
+
+/// The budget fit of a plan made as asked elsewhere - the density stack's
+/// pass 2 planned in bands on threads and merged (renderd
+/// density_plan_threads; user 2026-10-01: the threads were for views the
+/// reserve held whole only, and the slow ones thin) - as plan_hier would
+/// fit the same view: held whole when the budget holds it, under the
+/// remembered decision (HierOpts::fixed_fit) when that keeps it within the
+/// budget, else decided anew by thin_to_budget. `plan` is the complete plan
+/// at the asked cut. None where the fit would plan again - a decision at a
+/// coarser cut, pages past FIT_OVERSHOOT budgets (coarser cuts), not one
+/// page fitting, the cut ladder (HierOpts::fit_thin off) - the caller plans
+/// the fit itself.
+pub fn fit_planned(v: &Ovm, req: &ViewReq, opts: &HierOpts, plan: HierPlan) -> Option<HierPlan> {
+    if !opts.fit_budget || req.decode_budget == 0 || req.cut_dbu <= 0 {
+        return Some(plan);
+    }
+    if !opts.fit_thin {
+        return None;
+    }
+    if let Some(fixed) = opts.fixed_fit {
+        if fixed.cut_dbu > req.cut_dbu {
+            return None;
+        }
+        if let Some(fitted) = fit_under(v, req, req, opts, plan.clone(), fixed) {
+            return Some(fitted);
+        }
+    }
+    // plan_hier_thinned's first pass, with the plan in hand
+    let total = unique_page_memory(v, opts, &plan);
+    if total > req.decode_budget.saturating_mul(FIT_OVERSHOOT) {
+        return None;
+    }
+    let mut plan = plan;
+    plan.stats.fit_passes = 1;
+    plan.stats.fit_redecided = opts.fixed_fit.is_some();
+    if total <= req.decode_budget {
+        plan.stats.fit_decision = Some(FixedFit::everything(req.cut_dbu));
+        plan.stats.fit_whole = true;
+        plan.stats.fit_bytes = total;
+        return Some(plan);
+    }
+    if !thin_to_budget(v, opts, &mut plan, fit_key_of(req, opts), req.cut_dbu, req.decode_budget) {
+        return None;
+    }
+    plan.stats.fit_pct = 100;
+    Some(plan)
 }
 
 /// The largest cut that still selects the page. Its octave is the page's
@@ -1674,15 +1725,27 @@ fn plan_hier_fixed(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedFit) -> 
     }
     let mut attempt = req.clone();
     attempt.cut_dbu = fixed.cut_dbu.max(req.cut_dbu);
-    let mut plan = plan_hier_as_asked(v, &attempt, opts, 0);
+    let plan = plan_hier_as_asked(v, &attempt, opts, 0);
     if plan.stats.fit_over {
         return None;
     }
-    let key = if attempt.shape_cut {
-        FitKey::SmallerSide
-    } else {
-        FitKey::LongerSide { hairline: if attempt.page_hairline { opts.hairline } else { 0.0 } }
+    fit_under(v, req, &attempt, opts, plan, fixed)
+}
+
+/// plan_hier_fixed on a complete plan at the decision's cut (`attempt`):
+/// held whole when the budget holds it at the asked cut, else the pages the
+/// decision keeps (and those the frame holds already); None when those do
+/// not fit the budget - the fit is decided anew.
+fn fit_under(v: &Ovm, req: &ViewReq, attempt: &ViewReq, opts: &HierOpts, mut plan: HierPlan, fixed: FixedFit) -> Option<HierPlan> {
+    let whole = |mut plan: HierPlan, bytes: u64, passes: u32| {
+        plan.stats.fit_decision = Some(FixedFit::everything(req.cut_dbu));
+        plan.stats.fit_whole = true;
+        plan.stats.fit_fixed = true;
+        plan.stats.fit_passes = passes;
+        plan.stats.fit_bytes = bytes;
+        plan
     };
+    let key = fit_key_of(attempt, opts);
     let threshold = (std::cmp::Reverse(fixed.class), fixed.phase, fixed.page);
     let metas: Vec<floe_ovm::PageV> = plan.pages.iter().map(|&pi| v.page(pi)).collect();
     // a page the frame holds already costs nothing and stays (thin_to_budget)
@@ -4954,6 +5017,24 @@ impl crate::Vfs {
         }
     }
 
+    /// fit_planned with plan_hier_in's options: the budget fit of `plan`, a
+    /// complete plan of this request made as asked elsewhere (the density
+    /// stack's pass 2 in bands on threads, merged), under `fixed_fit` and
+    /// with `free_pages` at no cost. None: the caller plans the fit.
+    pub fn fit_planned_in(&self, req: &ViewReq, fixed_fit: Option<FixedFit>, free_pages: Option<Arc<[u32]>>, plan: HierPlan) -> Option<HierPlan> {
+        let mut opts = HierOpts::default();
+        opts.fixed_fit = fixed_fit;
+        opts.free_pages = free_pages;
+        match std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() {
+            Ok("cull") | Ok("keep") => {
+                let mut req = req.clone();
+                req.page_hairline = std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() == Ok("cull");
+                fit_planned(&self.ovm, &req, &opts, plan)
+            }
+            _ => fit_planned(&self.ovm, req, &opts, plan),
+        }
+    }
+
     /// hier delta (par.3.2): ONE OASIS = new pages spliced verbatim
     /// + authored working-set cells (identity page instances, child
     /// CellInstArray edges, frame rects on FRAME_LAYER). Resident
@@ -5765,6 +5846,55 @@ mod tests {
         // ... and so does the decision applied again
         let again = plan_hier(&chip, &ask(3 * per), &with(Some(two), alone.stats.fit_decision, 0));
         assert_eq!((again.pages.clone(), again.stats.fit_fixed, again.stats.fit_redecided), (vec![0, 14, 15, 16, 17], true, false));
+    }
+
+    #[test]
+    fn a_plan_made_elsewhere_fits_as_plan_hier_would() {
+        // fit_planned (user 2026-10-01: the density stack's pass 2 planned in
+        // bands on threads only where its reserve held the view whole; the slow
+        // views thin): a complete plan made as asked, fitted to a budget, is
+        // the plan plan_hier makes - held whole, thinned anew, under a decision
+        // or past it decided anew - and None where the fit plans again.
+        let mut pages = Vec::new();
+        for i in 0..16 {
+            pages.push((bx(i * 400, 0, i * 400 + 200, 200), 200, 200));
+        }
+        for i in 0..2 {
+            pages.push((bx(i * 3200, 3000, i * 3200 + 1600, 4600), 1600, 1600));
+        }
+        let chip = fixture(&[FCell { name: "TOP", pages, places: vec![] }], 0);
+        let view = bx(-10, -10, 20_000_000, 20_000_000);
+        let per = page_memory(1, 0);
+        let ask = |budget: u64| {
+            let mut r = rq(view, 50, u32::MAX);
+            r.px_per_dbu = 0.02;
+            r.decode_budget = budget;
+            r
+        };
+        let under = |fixed: Option<FixedFit>| HierOpts { fixed_fit: fixed, ..HierOpts::default() };
+        let asked = plan_hier(&chip, &ask(0), &under(None));
+        assert_eq!(asked.pages.len(), 18);
+        let same = |a: &HierPlan, b: &HierPlan| {
+            (a.pages.clone(), a.stats.fit_decision, a.stats.fit_whole, a.stats.fit_fixed, a.stats.fit_redecided, a.stats.fit_thin)
+                == (b.pages.clone(), b.stats.fit_decision, b.stats.fit_whole, b.stats.fit_fixed, b.stats.fit_redecided, b.stats.fit_thin)
+        };
+        for (budget, fixed) in [(18 * per, None), (6 * per, None), (3 * per, None)] {
+            let fitted = fit_planned(&chip, &ask(budget), &under(fixed), asked.clone()).expect("a plan within the overshoot fits");
+            assert!(same(&fitted, &plan_hier(&chip, &ask(budget), &under(fixed))), "budget {budget}");
+        }
+        // under the six-page decision: one with room for ten keeps those six,
+        // one with room for all keeps all, one with room for three decides anew
+        let six = plan_hier(&chip, &ask(6 * per), &under(None)).stats.fit_decision;
+        for budget in [10 * per, 18 * per, 3 * per] {
+            let fitted = fit_planned(&chip, &ask(budget), &under(six), asked.clone()).expect("a decision at the asked cut fits");
+            assert!(same(&fitted, &plan_hier(&chip, &ask(budget), &under(six))), "budget {budget} under the decision");
+        }
+        // a decision that raised the cut, and pages past FIT_OVERSHOOT
+        // budgets: the fit plans again
+        let raised = plan_hier(&chip, &ask(per), &under(None)).stats.fit_decision;
+        assert!(raised.is_some_and(|d| d.cut_dbu > 50));
+        assert!(fit_planned(&chip, &ask(per), &under(raised), asked.clone()).is_none());
+        assert!(fit_planned(&chip, &ask(2 * per), &under(None), asked.clone()).is_none(), "18 pages past 8 x 2");
     }
 
     #[test]

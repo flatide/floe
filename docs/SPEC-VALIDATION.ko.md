@@ -139,6 +139,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
   - 0.12.265에서는 21페이지로 솎여 5,990 px였다(새 빌드는 31페이지, 8,955 px).
   - 어댑터 계약: `density_plan2` 13개 값(…/probes_over/thinned). 상태줄 테스트: `pass 2 over budget: floor probe,
     thinned, 3 pages left out`.
+  0.12.267(솎아야 하는 2패스도 스레드로): `uneven` 레이아웃·예약 1 MB의 전체 뷰를 `FLOE_RUST_DENSITY_PLAN_THREADS=2`로 계획하면
+  한 스레드의 솎인 프레임과 바이트까지 같고, `density_plan2`가 threads 2·thinned 1이다(0.12.266은 threads 1).
   0.12.261(블록 4 px, 한 번 걷기는 선택, 하한 1 px, 페이지 점 끔): 게이트 점 절의 기본은 4 px·퍼뜨림·맞춤·하한 1 px —
   성긴 배열 100 px가 각 멤버에서 1.5 px 안, 맞닿은 배열 = Σ min(8, 4×4 블록의 멤버), 항목 = 성긴 배열 100 + 1 + 맞닿은
   블록, TOP의 0.5 px 점은 그리지도 점으로 서지도 않음, `density_floor` 1, `density_plan2` 탐침 0·맞춤 1; 하한 0·0.25 px는

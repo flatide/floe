@@ -894,19 +894,6 @@ impl Cache {
 
     /// The estimated decoded memory of a plan's pages, each once - what the
     /// planner's budget fit holds against its budget (floe_vfs page_memory).
-    /// plan_page_memory less the pages in `held` (sorted): what the plan
-    /// would add to a frame that holds those already.
-    pub fn plan_page_memory_beyond(&self, plan: &HierPlan, held: &[u32]) -> u64 {
-        plan.pages
-            .iter()
-            .filter(|page| held.binary_search(page).is_err())
-            .map(|&page| {
-                let p = self.vfs.ovm.page(page);
-                floe_vfs::hier::page_memory(p.records, p.usize_)
-            })
-            .sum()
-    }
-
     pub fn plan_page_memory(&self, plan: &HierPlan) -> u64 {
         plan.pages
             .iter()
@@ -1014,6 +1001,16 @@ impl Cache {
             ));
         }
         Ok(self.vfs.ovm.cell_rbbox(cell_id))
+    }
+
+    /// The budget fit of `plan`, a complete plan of `request` made as asked
+    /// elsewhere (renderd's pass 2 in bands on threads, merged): as
+    /// `plan_cancellable` would fit the request - held whole, under
+    /// `request.fixed_fit`, or decided anew (floe_vfs::hier::fit_planned).
+    /// None where the fit would plan again; the caller plans it.
+    pub fn fit_plan(&self, request: &PlanRequest, plan: HierPlan) -> Result<Option<HierPlan>, String> {
+        let req = self.view_request(request)?;
+        Ok(self.vfs.fit_planned_in(&req, request.fixed_fit, request.free_pages.clone(), plan))
     }
 
     pub fn plan(&self, request: &PlanRequest) -> Result<PlannedView, String> {
