@@ -177,6 +177,24 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 사다리(`FLOE_RUST_DENSITY_FIT_LADDER=on`)는 6번 걸어 같은 프레임에 이른다.
     - 기본 예산은 그 페이지를 디코드한다.
   - 단위 `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
+  0.12.274(페이지 점유 비트, design.ovb):
+  - 게이트 `density_stack` `occ_checks`:
+    - 픽스처: TOP이 0.3 µm 상자 4만 개를 직접 가진 600 µm 레이아웃(100 µm 정사각형 둘을 양 끝 모서리에 둠, 점 리스트로
+      색인, 페이지 하나). 1000×1000 px, 깊이 0, 페이지 퍼뜨리기 켬.
+    - design.ovb가 `64 + 512 × 페이지`(576 B)다.
+    - 두 정사각형 사이(200~800 px)에는 아무것도 켜지 않는다(컷 없는 프레임도 0). `occ_pages`는 1 이상이다.
+    - `FLOE_RUST_DENSITY_PAGE_OCC=off`는 상자 전체에 퍼뜨려 사이에 3,627 px를 켠다.
+    - `--no-page-occupancy`로 색인한 캐시, 그리고 그 캐시에 다른 색인(한 시간 이른 mtime)의 design.ovb를 둔 경우도
+      `PAGE_OCC=off`와 바이트까지 같고 `occ_pages`는 0이다.
+  - 단위:
+    - ovm `a_page_occupancy_file_attaches_to_its_own_index`: `occ_cell`이 `occ_edge`의 칸에 넣는다(길이 1~4,097).
+      출처·페이지·격자·길이가 다르거나 magic이 아니면 붙지 않는다. 기록 없는 페이지는 None이다.
+    - 인덱서 `page_occupancy_marks_the_cells_of_every_member_and_no_other`: 점 리스트 둘(떨어진 무리 포함), 직교 Grid,
+      비스듬한 Grid, 단일 상자의 페이지마다, payload를 펼친 멤버로 칠한 격자와 같다. 반 넘게 빈 페이지가 있다.
+    - 플래너 `a_page_spread_over_its_occupancy_grid_leaves_its_empty_cells_empty`(SPEC-PLANNER §3).
+  - 어댑터 계약: `density_plan2` 24개 값(…/reserve_mb/occ_pages). 상태줄 테스트: 로그 줄의 `pages 257 (250 by
+    occupancy)`.
+  - 실측 비교(정답 | 상자 전체 | 점유 비트)와 색인 비용은 CUT_DENSITY_DESIGN §10.12와 SPEC-FORMATS에 있다.
   0.12.273(라우팅 합성 칩): `tools/gen_route_chip.py`. 탑 자신의 1 px 미만 배선·비아, 칩 전체 비아 점 리스트,
   블록과 표준 셀을 만든다. 조건별 재현은 CUT_DENSITY_DESIGN §10.12에 있다. 작업 프로세스 수와 무관하게 바이트까지
   같은 파일을 만든다(규모 0.02로 확인). 게이트에는 넣지 않았다(데이터 생성 도구).

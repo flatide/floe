@@ -397,6 +397,10 @@ def _run_rust_index(args, binary, coverage_only=False,
         # LOD off by default (retirement, 2026-08-28); --lod opts back in
         if not getattr(args, "lod", False):
             command.append("--no-lod")
+        # the pages' occupancy grids, design.ovb, are built by default
+        # (2026-10-02); --no-page-occupancy (the kill switch) leaves them out
+        if getattr(args, "no_page_occupancy", False):
+            command.append("--no-page-occupancy")
         if args.slow_cell_s is not None:
             command += ["--slow-cell-s", str(args.slow_cell_s)]
         if args.p2_shard_limit_mb is not None:
@@ -519,6 +523,7 @@ def cmd_index(args):
             "--profile-snapshot")
     rust_options = any((args.page_target_mb is not None, args.coverage,
                         args.coverage_only, args.no_lod,
+                        getattr(args, "no_page_occupancy", False),
                         args.occupancy, args.occupancy_only,
                         args.slow_cell_s is not None,
                         args.p2_shard_limit_mb is not None, profiling,
@@ -1756,6 +1761,8 @@ def _jobdeck_index(args, catalog):
                 cmd.append("--force")
             if getattr(args, "lod", False):
                 cmd.append("--lod")
+            if getattr(args, "no_page_occupancy", False):
+                cmd.append("--no-page-occupancy")
             if occupancy or occupancy_only:
                 cmd.append("--occupancy")
                 cmd += _occupancy_args(args)
@@ -1906,6 +1913,11 @@ def main(argv=None, *, prog=None, rust_only=None):
     rust.add_argument("--lod", action="store_true",
                       help="keep merged LOD page variants (opt back in; "
                            "off by default since 2026-08-28)")
+    rust.add_argument("--no-page-occupancy", action="store_true",
+                      help="do not write design.ovb, the pages' occupancy "
+                           "grids - where in its box a page's shapes lie, "
+                           "for the density dots of a page under the floor "
+                           "(written by default since 2026-10-02)")
     rust.add_argument("--slow-cell-s", type=_nonnegative_float,
                       default=None, metavar="S",
                       help="slow-cell log threshold in seconds (default: "

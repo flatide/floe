@@ -121,7 +121,11 @@ budget's fixed 4 MB reserve, are drawn as a cut-free frame draws them, and the
 fixed reserve (FLOE_RUST_DENSITY_RESERVE_LEFT=off) draws none (left_checks).
 Pass 2's budget fit keeps the cells' cut: its pages past eight reserves are
 fitted in one pass, on the threads; the ladder (FLOE_RUST_DENSITY_FIT_LADDER=on)
-takes passes up the cut (ladder_checks).
+takes passes up the cut (ladder_checks). A page under the floor, with the page
+spread on, puts its dots where its occupancy grid (design.ovb) holds shapes:
+none between two squares one page holds, as a cut-free frame; the kill switch
+(FLOE_RUST_DENSITY_PAGE_OCC=off), a cache without design.ovb and one with
+another index's spread it over its box (occ_checks).
 
     .venv/bin/python tools/validate_density_stack.py
 """
@@ -792,6 +796,101 @@ def ladder_checks(temp):
             w.stop()
 
 
+def occ_layout(path):
+    """A TOP whose own shapes are 40,000 boxes of 0.3 um (0.5 px at 1000 px
+    over 600 um) in two 100 um squares at the corners of a 600 um span - the
+    writer makes point lists of them, one page whose box is the span."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(*LOW)
+    rnd = random.Random(17)
+    for x0, y0 in ((0, 0), (500, 500)):
+        for _ in range(20_000):
+            x, y = x0 + rnd.randrange(100_000) / 1000.0, y0 + rnd.randrange(100_000) / 1000.0
+            top.shapes(layer).insert(kdb.DBox(x, y, x + 0.3, y + 0.3))
+    options = kdb.SaveLayoutOptions()
+    options.format = 'OASIS'
+    options.oasis_compression_level = 10
+    ly.write(str(path), options)
+
+
+def occ_checks(temp):
+    """A page under the floor spreads its dots over the cells of its
+    occupancy grid (design.ovb) that hold a shape (user 2026-10-02: the page
+    spread "filled places where nothing is"; then "go with the occupancy
+    bits"). The two squares' page at depth 0 with the page spread on
+    (FLOE_RUST_DENSITY_PAGE_SPREAD=on): the index writes design.ovb (64 bytes
+    and 512 a page), the frame lights nothing between the squares - as a
+    cut-free frame - and places the page by its grid (density_plan2
+    occ_pages); FLOE_RUST_DENSITY_PAGE_OCC=off (the kill switch) spreads it
+    over its box, the space between lit; a cache indexed with
+    --no-page-occupancy, and that cache holding another index's design.ovb,
+    draw that frame."""
+    import shutil
+    src = Path(temp) / 'occ.oas'
+    occ_layout(src)
+    bare = Path(temp) / 'occ_bare.oas'
+    shutil.copyfile(src, bare)
+    # an hour older: the other index's source by its mtime
+    when = src.stat().st_mtime - 3600
+    os.utime(bare, (when, when))
+    for path, extra in ((src, []), (bare, ['--no-page-occupancy'])):
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path)] + extra,
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+    ice, bare_ice = Path(temp) / '.occ.oas.ice', Path(temp) / '.occ_bare.oas.ice'
+    pages = int.from_bytes((ice / 'design.ovm').read_bytes()[52:56], 'little')
+    assert (ice / 'design.ovb').stat().st_size == 64 + 512 * pages and not (bare_ice / 'design.ovb').exists(), pages
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PAGE_SPREAD': 'on'}
+    workers = {'occ': worker(src, env), 'box': worker(src, dict(env, FLOE_RUST_DENSITY_PAGE_OCC='off')),
+               'bare': worker(bare, env), 'truth': worker(src, {})}
+    try:
+        side = 1000
+
+        def view(w, cut_px=3.0):
+            dbu = float(w.cache.meta['dbu'])
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'headless', 'bbox': (0.0, 0.0, 600.3 / dbu, 600.3 / dbu), 'view': None,
+                      'w': side, 'h': side, 'depth': 0, 'cut_px': cut_px, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('occupancy frame timeout')
+
+        def lit_in(pixels, lo, hi):
+            return sum(1 for r in range(lo, hi) for c in range(lo, hi) if pixels[(r * side + c) * 4:(r * side + c) * 4 + 4] != BLACK)
+
+        frames = {name: view(w, 0.0 if name == 'truth' else 3.0) for name, w in workers.items()}
+        lit = {name: res['density_stack']['lit'] if res.get('density_stack') else None for name, (_, res) in frames.items()}
+        occ_pages = {name: (res.get('density_plan2') or {}).get('occ_pages') for name, (_, res) in frames.items()}
+        # the space between the squares: 200-800 px (120-480 um) on both axes
+        between = {name: lit_in(pixels, 200, 800) for name, (pixels, _) in frames.items()}
+        assert between['truth'] == 0 and lit_in(frames['truth'][0], 0, side) > 0, between
+        assert between['occ'] == 0 and lit['occ'] > 0 and occ_pages['occ'] >= 1, (between, lit, occ_pages)
+        assert between['box'] > 0 and occ_pages['box'] == 0, (between, occ_pages)
+        assert frames['bare'][0] == frames['box'][0] and occ_pages['bare'] == 0, (between, occ_pages)
+        # another index's design.ovb (the other source's mtime): left out
+        shutil.copyfile(ice / 'design.ovb', bare_ice / 'design.ovb')
+        stale = worker(bare, env)
+        try:
+            pixels, res = view(stale)
+            assert pixels == frames['box'][0] and res['density_plan2']['occ_pages'] == 0, res['density_plan2']
+        finally:
+            stale.stop()
+        print('density stack: a page under the floor spread over its occupancy grid (%d pages, design.ovb %d B) lights %d px, none '
+              'between its squares (cut-free none); over its box %d px between; no design.ovb, or another index\'s, as over the box'
+              % (pages, 64 + 512 * pages, lit['occ'], between['box']))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def frames_of(w, gen, visible, bg=False):
     """Every frame answer of one render, the refining rounds first: [(pixels,
     result)], the last one final."""
@@ -996,6 +1095,7 @@ def main():
         lists_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
+        occ_checks(temp)
     print('density stack gate: OK')
 
 

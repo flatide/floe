@@ -103,6 +103,54 @@ pub const LOD_GRID: i64 = 128;
 /// codec 0 = plain OASIS single-cell file (CBLOCK inside)
 pub const CODEC_OASIS: u8 = 0;
 
+/// design.ovb (2026-10-02): which cells of an OCC_GRID x OCC_GRID grid over
+/// each page's bbox hold a shape - where in its box a page under the floor
+/// puts its dots (floe_vfs hier.rs, HierOpts::dot_page_occ). A file beside
+/// the marker, written before it by a build; a cache without one (an older
+/// build, `floe-index vfs --no-page-occupancy`) reads as before. Layout: a
+/// OVB_HEADER_LEN header - magic, version, grid, n_pages, OCC_BYTES, then
+/// the source size and mtime and the ovp length of the index it was built
+/// with (u32 x4, u64 x3, zero to the end) - and OCC_BYTES per page in page
+/// order: OCC_GRID rows of OCC_GRID bits, row y a little-endian u64 whose
+/// bit x is cell (x, y); all zero = not recorded (an LOD variant).
+pub const OVB_MAGIC: &[u8; 8] = b"FLOEOVB1";
+pub const OVB_VERSION: u32 = 1;
+pub const OVB_HEADER_LEN: usize = 64;
+/// cells per axis of a page's occupancy grid
+pub const OCC_GRID: i64 = 64;
+/// bytes of one page's occupancy grid
+pub const OCC_BYTES: usize = (OCC_GRID * OCC_GRID / 8) as usize;
+
+/// design.ovb's header for `n_pages` pages of the index built from a source
+/// of `src_size` bytes and `src_mtime` with `ovp_len` bytes of pages
+pub fn ovb_header(n_pages: u32, src_size: u64, src_mtime: u64, ovp_len: u64) -> [u8; OVB_HEADER_LEN] {
+    let mut h = [0u8; OVB_HEADER_LEN];
+    h[..8].copy_from_slice(OVB_MAGIC);
+    h[8..12].copy_from_slice(&OVB_VERSION.to_le_bytes());
+    h[12..16].copy_from_slice(&(OCC_GRID as u32).to_le_bytes());
+    h[16..20].copy_from_slice(&n_pages.to_le_bytes());
+    h[20..24].copy_from_slice(&(OCC_BYTES as u32).to_le_bytes());
+    h[24..32].copy_from_slice(&src_size.to_le_bytes());
+    h[32..40].copy_from_slice(&src_mtime.to_le_bytes());
+    h[40..48].copy_from_slice(&ovp_len.to_le_bytes());
+    h
+}
+
+/// The low edge of occupancy cell `k` (0..=OCC_GRID) over [lo, lo + ext):
+/// cell k is [occ_edge(k), occ_edge(k + 1)).
+pub fn occ_edge(lo: i64, ext: i64, k: i64) -> i64 {
+    lo + (k as i128 * ext.max(1) as i128 / OCC_GRID as i128) as i64
+}
+
+/// The occupancy cell over [lo, lo + ext) that holds `x` (occ_edge's cells,
+/// the first or last for a coordinate outside).
+pub fn occ_cell(lo: i64, ext: i64, x: i64) -> i64 {
+    let ext = ext.max(1);
+    // the last k with occ_edge(k) <= x: floor(k ext / G) <= d, k ext < G (d + 1)
+    let d = x.saturating_sub(lo).clamp(-1, ext);
+    ((OCC_GRID * (d + 1) - 1).div_euclid(ext)).clamp(0, OCC_GRID - 1)
+}
+
 /// prange.pbvh_root value meaning "no BVH, linear-scan the run"
 pub const PBVH_NONE: u32 = u32::MAX;
 /// offsets per pts chunk (fixed; chunk bboxes are built over
@@ -1736,6 +1784,8 @@ pub struct Ovm {
     pub ovt_len: u64,
     pub bs_width: usize,
     secs: [(u64, u64); N_SECTIONS],
+    /// design.ovb when attached (attach_page_occ): the pages' occupancy grids
+    page_occ: Option<Backing>,
 }
 
 fn corrupt(msg: impl std::fmt::Display) -> String {
@@ -2634,7 +2684,64 @@ impl Ovm {
             bs_width,
             secs,
             data,
+            page_occ: None,
         })
+    }
+
+    /// Attach design.ovb at `path` (the pages' occupancy grids): Ok(false)
+    /// when there is none, Err when it is not this index's - built from
+    /// other source bytes or pages, or short - and then nothing is attached.
+    pub fn attach_page_occ(&mut self, path: &str) -> Result<bool, String> {
+        if !std::path::Path::new(path).exists() {
+            return Ok(false);
+        }
+        self.attach_page_occ_backing(map_file(path)?)?;
+        Ok(true)
+    }
+
+    /// attach_page_occ over bytes in hand (design.ovb's image)
+    pub fn attach_page_occ_backing(&mut self, data: Backing) -> Result<(), String> {
+        let want = ovb_header(self.n_pages, self.src_size, self.src_mtime, self.ovp_len);
+        if data.len() < OVB_HEADER_LEN || data[..8] != want[..8] {
+            return Err("design.ovb: not an occupancy file".into());
+        }
+        if data[8..24] != want[8..24] {
+            return Err(format!(
+                "design.ovb: version {} grid {} pages {} of {} bytes, the index has {} pages (this build reads v{} of {} x {})",
+                g32(&data, 8),
+                g32(&data, 12),
+                g32(&data, 16),
+                g32(&data, 20),
+                self.n_pages,
+                OVB_VERSION,
+                OCC_GRID,
+                OCC_GRID
+            ));
+        }
+        if data[24..OVB_HEADER_LEN] != want[24..] {
+            return Err("design.ovb: built with another index (source or pages differ)".into());
+        }
+        let len = OVB_HEADER_LEN as u64 + self.n_pages as u64 * OCC_BYTES as u64;
+        if data.len() as u64 != len {
+            return Err(format!("design.ovb: {} bytes, expected {}", data.len(), len));
+        }
+        self.page_occ = Some(data);
+        Ok(())
+    }
+
+    /// whether design.ovb is attached
+    pub fn has_page_occ(&self) -> bool {
+        self.page_occ.is_some()
+    }
+
+    /// The occupancy grid of page `pi` (OCC_BYTES: OCC_GRID rows of OCC_GRID
+    /// bits, see OVB_MAGIC); None without design.ovb or when the page has
+    /// none recorded.
+    pub fn page_occ(&self, pi: u32) -> Option<&[u8]> {
+        let data = self.page_occ.as_ref()?;
+        let at = OVB_HEADER_LEN + pi as usize * OCC_BYTES;
+        let grid = data.get(at..at + OCC_BYTES)?;
+        grid.iter().any(|&b| b != 0).then_some(grid)
     }
 
     fn sec(&self, i: usize) -> &[u8] {
@@ -3500,6 +3607,56 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         }
+    }
+
+    /// design.ovb (2026-10-02): occ_cell puts a coordinate in the cell whose
+    /// occ_edge span holds it, and a file attaches only to the index it was
+    /// built with - its pages, source and ovp length
+    #[test]
+    fn a_page_occupancy_file_attaches_to_its_own_index() {
+        for ext in [1i64, 7, 63, 64, 65, 100, 1_000, 4_097] {
+            for x in -3..ext + 3 {
+                let k = occ_cell(10, ext, 10 + x);
+                assert!((0..OCC_GRID).contains(&k));
+                if (0..ext).contains(&x) {
+                    assert!(occ_edge(10, ext, k) <= 10 + x && 10 + x < occ_edge(10, ext, k + 1), "ext {ext} x {x} cell {k}");
+                }
+            }
+            assert_eq!((occ_edge(10, ext, 0), occ_edge(10, ext, OCC_GRID)), (10, 10 + ext));
+        }
+        let mut ovm = Ovm::from_bytes(build_sample()).unwrap();
+        assert!(!ovm.has_page_occ() && ovm.page_occ(1).is_none());
+        let image = |pages: u32, size: u64, ovp: u64| {
+            let mut v = ovb_header(pages, size, 7, ovp).to_vec();
+            v.resize(OVB_HEADER_LEN + pages as usize * OCC_BYTES, 0);
+            v
+        };
+        let (pages, size, ovp) = (ovm.n_pages, ovm.src_size, ovm.ovp_len);
+        assert_eq!(ovm.src_mtime, 7);
+        let mut good = image(pages, size, ovp);
+        // page 1: cell (3, 5)
+        good[OVB_HEADER_LEN + OCC_BYTES + 5 * 8] = 1 << 3;
+        let mut other_grid = good.clone();
+        other_grid[12] = 32;
+        for (bad, why) in [
+            (image(pages, size + 1, ovp), "another index"),
+            (image(pages, size, ovp + 1), "another index"),
+            (image(pages + 1, size, ovp), "pages"),
+            (other_grid, "grid"),
+            (good[..good.len() - 1].to_vec(), "bytes"),
+            (b"FLOEOVM1".to_vec(), "not an occupancy file"),
+        ] {
+            let e = ovm.attach_page_occ_backing(Backing::Vec(bad)).unwrap_err();
+            assert!(e.contains(why) && !ovm.has_page_occ(), "{e}");
+        }
+        ovm.attach_page_occ_backing(Backing::Vec(good)).unwrap();
+        // page 0 recorded none; page 1 its cell
+        assert!(ovm.has_page_occ() && ovm.page_occ(0).is_none());
+        let grid = ovm.page_occ(1).unwrap();
+        assert_eq!(grid.len(), OCC_BYTES);
+        assert_eq!(u64::from_le_bytes(grid[40..48].try_into().unwrap()), 1 << 3);
+        // none on disk: nothing attached
+        assert_eq!(Ovm::from_bytes(build_sample()).unwrap().attach_page_occ("/nonexistent/design.ovb"), Ok(false));
     }
 
     #[test]

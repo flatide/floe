@@ -172,6 +172,12 @@ impl Vfs {
         } else {
             floe_ovm::map_file(&ovt_path)?
         };
+        // design.ovb, the pages' occupancy grids (2026-10-02): optional - a
+        // cache without it, or with one of another build, plans without
+        let mut ovm = ovm;
+        if let Err(e) = ovm.attach_page_occ(&format!("{}/design.ovb", dir)) {
+            eprintln!("[vfs] {}: {} - pages under the floor spread over their boxes", dir, e);
+        }
         Ok(Vfs { ovm, ovp_path, ovt })
     }
 

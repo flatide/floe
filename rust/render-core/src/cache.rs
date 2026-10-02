@@ -891,6 +891,7 @@ impl Cache {
             for (have, add) in st.dot_by.iter_mut().zip(more.dot_by.iter()) {
                 *have += add;
             }
+            st.dot_occ_pages += more.dot_occ_pages;
             st.dot_partial += more.dot_partial;
             st.cancelled |= more.cancelled;
             st.fit_over |= more.fit_over;

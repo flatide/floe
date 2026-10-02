@@ -131,6 +131,40 @@ design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀
   11.4 s → 188,065 엣지·10.6 MB. 레코드 400만 이하 캐시는 데몬이 메모리
   요약(`HIER_INLINE_PLACES`).
 
+## design.ovb — 페이지 점유 비트 (FLOEOVB1, 2026-10-02)
+
+정본: `rust/ovm/src/lib.rs`(`ovb_header`, `occ_cell`/`occ_edge`,
+`Ovm::attach_page_occ`), 생성 `rust/cli/src/vfs.rs`(`page_occupancy`,
+`OvbWriter`). 페이지마다 bbox를 64×64칸(`OCC_GRID`)으로 나눠 도형이 있는 칸을
+표시한다. 2패스 점이 하한 아래 페이지의 점을 그 칸에만 뿌린다(SPEC-PLANNER
+§3, `HierOpts::dot_page_occ`).
+
+- 인덱서가 페이지를 쓰는 순서대로 `design.ovb.tmp`에 쓰고, 빌드 끝에 머리말을 채워
+  rename한다. design.ovm(마커)보다 먼저 공개하며 재빌드 삭제 목록에 들어 있다.
+  `--no-page-occupancy`(= `floe2 index --no-page-occupancy`)면 만들지 않는다.
+- 머리말 64 B: magic `FLOEOVB1`, version u32(1), grid u32(64), n_pages u32,
+  칸 바이트 u32(512), src_size u64, src_mtime u64, ovp_len u64, 나머지 0.
+- 본문: 페이지 순서대로 512 B씩. 64행이고 행 y는 little-endian u64이며 비트 x가
+  칸 (x, y)다. 칸 k는 `[lo + ⌊k·ext/64⌋, lo + ⌊(k+1)·ext/64⌋)`(`occ_edge`)이고,
+  좌표는 그 경계로 칸에 넣는다(`occ_cell`). 전부 0이면 기록 없음(LOD 변종 페이지)이다.
+- 표시는 멤버마다 도형 상자가 닿는 칸이다. polygon·path는 상자로 표시한다.
+  - 점 리스트는 멤버마다 표시한다.
+  - 직교 Grid는 축마다 따로 표시한다(`occ_axis_cells`, 멤버 수와 무관하게 O(64)).
+  - 비스듬한 Grid는 2^16 멤버까지 멤버마다, 그 이상은 레코드 상자로 표시한다.
+- 출처 검사: `Vfs::open`이 붙인다. 머리말의 n_pages·src_size·src_mtime·ovp_len·grid가
+  design.ovm과 다르거나 길이가 `64 + 512·n_pages`가 아니면 붙이지 않는다(stderr 한 줄).
+  그런 캐시와 이 파일이 없는 캐시는 이전처럼 상자 전체에 뿌린다.
+- 크기와 시간(`--no-lod`, `--jobs 12`, 2026-10-02):
+
+  | 칩 | 페이지 | design.ovb | 색인 대비 | 색인 시간(없음 → 있음) |
+  |---|---|---|---|---|
+  | 라우팅 합성 칩 | 588 | 294 KB | 0.07 % | 13.3~14.8 s → 14.4 s |
+  | sample9 | 9,760 | 4.8 MB | 3.9 % | 2.9 s → 3.0~3.1 s |
+  | 합성 MAIN01 1/10 | 226,153 | 110 MB | 1.6 % | 60.0/49.0 s → 52.7/48.8 s |
+
+  - 시간 차이는 잡음 범위다. 표시 계산은 인코드 작업자 CPU로 MAIN01 1/10에서 2.9~3.0 s다.
+  - 크기는 페이지 수에 비례한다. 작은 페이지가 많은 칩(sample9 평균 13 KB)에서 비중이 크다.
+
 ## meta.json (CACHE_VERSION = 8)
 
 ```json

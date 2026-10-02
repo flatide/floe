@@ -333,7 +333,16 @@ a page whose every shape is under the records' floor on both sides as its
 shapes' dots without decoding it - over its box when it is wider than a box,
 each block of the view taking its part's share, rounded by the block's dither
 (floe_vfs `HierOpts::dot_page_spread`): even content keeps its look, lines of
-shapes become dots spread over their pages.
+shapes become dots spread over their pages. Since 0.12.274 a page whose
+occupancy grid the cache holds (`design.ovb`, docs/SPEC-FORMATS.ko.md: which of
+64 x 64 cells over its box hold a shape, written by the indexer unless
+`--no-page-occupancy`) spreads over those cells only, an even share each, and
+a page no wider than a box stands at their bounds (`HierOpts::dot_page_occ`;
+user 2026-10-02: the spread "filled places where nothing is").
+`FLOE_RUST_DENSITY_PAGE_OCC=off` is the kill switch; a cache without the file,
+or with one built for another index (its pages, source size and mtime, ovp
+length), spreads over the boxes. `density_plan2`'s 24th value is the pages so
+placed (`occ_pages`, the log line's `pages N (M by occupancy)`).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

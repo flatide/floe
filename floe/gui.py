@@ -1065,8 +1065,11 @@ def perf_status(res, depth_note=""):
                 # updates past the cells' grids
                 # (the chunks' members right after them: 0.12.268 put them
                 # last, after the array members - user 2026-10-02)
+                # (a page's dots placed by its occupancy grid, design.ovb, say
+                # so after the pages: whether the cache has one, 2026-10-02)
                 by = ", ".join("%s %s%s" % (name, fmt_count(p2[key]), " of %s members" % fmt_count(
-                    p2.get("by_chunk_members", 0)) if key == "by_list_chunks" else "") for key, name in (
+                    p2.get("by_chunk_members", 0)) if key == "by_list_chunks" else " (%s by occupancy)" % fmt_count(
+                    p2["occ_pages"]) if key == "by_pages" and p2.get("occ_pages") else "") for key, name in (
                     ("by_nodes", "nodes"), ("by_placements", "placements"), ("by_arrays", "arrays"),
                     ("by_list_members", "list members"), ("by_list_chunks", "list chunks"),
                     ("by_array_members", "array members"), ("by_pages", "pages")) if p2.get(key))

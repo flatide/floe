@@ -363,6 +363,36 @@ pub fn dot_page_spread() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_PAGE_SPREAD").as_deref() == Ok("on"))
 }
 
+/// HierOpts::dot_page_occ default: on; FLOE_RUST_DENSITY_PAGE_OCC=off (the kill
+/// switch) spreads a page over its whole box, as before 2026-10-02.
+pub fn dot_page_occ() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_PAGE_OCC").as_deref() != Ok("off"))
+}
+
+/// The bounds of the cells of a page's occupancy grid `occ` (design.ovb, over
+/// the page's `bbox`) that hold a shape; the box when none does.
+fn occ_bounds(bbox: &BBox, occ: &[u8]) -> BBox {
+    let (mut cols, mut rows) = (0u64, 0u64);
+    for (y, w) in occ.chunks_exact(8).enumerate() {
+        let row = u64::from_le_bytes(w.try_into().expect("occupancy row"));
+        cols |= row;
+        if row != 0 {
+            rows |= 1 << y;
+        }
+    }
+    if cols == 0 {
+        return *bbox;
+    }
+    let (ext_x, ext_y) = (bbox.x1 - bbox.x0, bbox.y1 - bbox.y0);
+    BBox {
+        x0: floe_ovm::occ_edge(bbox.x0, ext_x, cols.trailing_zeros() as i64),
+        y0: floe_ovm::occ_edge(bbox.y0, ext_y, rows.trailing_zeros() as i64),
+        x1: floe_ovm::occ_edge(bbox.x0, ext_x, 64 - cols.leading_zeros() as i64),
+        y1: floe_ovm::occ_edge(bbox.y0, ext_y, 64 - rows.leading_zeros() as i64),
+    }
+}
+
 /// A number in [0, 1) of a block and a salt - the same in every frame: the
 /// dither of a spread page's share (HierOpts::dot_page_spread).
 fn block_dither(bx: i64, by: i64, salt: u64) -> f64 {
@@ -940,6 +970,14 @@ pub struct HierOpts {
     /// Where in the page its shapes lie is not known: they are spread over
     /// its box. FLOE_RUST_DENSITY_PAGE_SPREAD=on (diagnostic, off by default).
     pub dot_page_spread: bool,
+    /// Under dot_page_spread, a page whose occupancy grid the index holds
+    /// (design.ovb: which of 64 x 64 cells over its box hold a shape) puts its
+    /// dots in those cells only, an even share each, and a page no wider than
+    /// a box stands at their bounds (user 2026-10-02: the spread "filled
+    /// places where nothing is"; then "go with the occupancy bits"). A cache
+    /// without design.ovb spreads over the box. FLOE_RUST_DENSITY_PAGE_OCC=off
+    /// is the kill switch.
+    pub dot_page_occ: bool,
     /// The sub-cut dots' blocks in a dense grid over the cell's view (DotGrid)
     /// rather than a hash map sorted when the cell is done - the same counts,
     /// unions and order - and a point list's topmost layer found once, not a
@@ -1071,6 +1109,7 @@ impl Default for HierOpts {
             dot_spread: dot_spread(),
             dot_pages: dot_pages(),
             dot_page_spread: dot_page_spread(),
+            dot_page_occ: dot_page_occ(),
             dot_grid: dot_grid(),
             dot_boxes: dot_boxes(),
             dot_records: None,
@@ -1180,6 +1219,9 @@ pub struct HierStats {
     /// then the dot block updates the hash map took: beyond a cell's grid, or
     /// every one without it (HierOpts::dot_grid) (2026-10-02)
     pub dot_by: [u64; 9],
+    /// HierOpts::dot_page_occ: the pages of dot_by[7] placed by their
+    /// occupancy grids (design.ovb)
+    pub dot_occ_pages: u64,
     /// HierOpts::dot_boxes: the dot blocks left out, no box holding them whole
     pub dot_partial: u64,
     /// the plan was made with HierOpts::sub_cut_dots: its washes are dot
@@ -2085,6 +2127,8 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         one_walk: dots.is_some() && opts.dot_records.is_some(),
         page_dots: opts.dot_pages,
         page_spread: opts.dot_page_spread,
+        page_occ: opts.dot_page_occ,
+        occ_blocks: Vec::new(),
         cell_view: BBox::EMPTY,
         grid_on: opts.dot_grid,
         dot_boxes: opts.dot_boxes,
@@ -2491,6 +2535,10 @@ struct Hier<'a> {
     /// being walked (a spread page's blocks are those in them)
     page_spread: bool,
     cell_view: BBox,
+    /// HierOpts::dot_page_occ, and a spread page's blocks being summed (the
+    /// share of its cells in each, the union of their parts)
+    page_occ: bool,
+    occ_blocks: Vec<(f64, BBox)>,
     /// HierOpts::dot_grid, the grid of the cell being walked, and the run of
     /// dot items of one block being summed - the block and layer, the dots,
     /// the union of what they stand for - put into the blocks when an item
@@ -3340,6 +3388,97 @@ impl<'a> Hier<'a> {
         }
     }
 
+    /// HierOpts::dot_page_occ: spread_page over the page's occupancy grid
+    /// `occ` (design.ovb: floe_ovm::OCC_GRID x OCC_GRID cells over `bbox`) -
+    /// each cell that holds a shape an even share of `holds`, each block of
+    /// the cell's view taking the share of the cells' parts in it (the whole
+    /// block's, whatever the view: rounded by the block's dither) and
+    /// standing for the union of those parts. One dot item.
+    fn spread_page_occ(&mut self, layer: u32, bbox: BBox, occ: &[u8], holds: u64, salt: u64) {
+        let ppd = self.px_per_dbu;
+        if !(ppd > 0.0) || bbox.is_empty() {
+            return;
+        }
+        let shown = bbox.intersect(&self.cell_view);
+        if shown.is_empty() {
+            return;
+        }
+        let rows: Vec<u64> = occ.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().expect("occupancy row"))).collect();
+        let cells: u32 = rows.iter().map(|r| r.count_ones()).sum();
+        if cells == 0 {
+            return;
+        }
+        self.st.sub_cut_dot_items += 1;
+        let g = floe_ovm::OCC_GRID;
+        let ex: Vec<i64> = (0..=g).map(|k| floe_ovm::occ_edge(bbox.x0, bbox.x1 - bbox.x0, k)).collect();
+        let ey: Vec<i64> = (0..=g).map(|k| floe_ovm::occ_edge(bbox.y0, bbox.y1 - bbox.y0, k)).collect();
+        let block = self.block_px / ppd;
+        let (bx0, bx1) = ((shown.x0 as f64 / block).floor() as i64, (shown.x1 as f64 / block).floor() as i64);
+        let (by0, by1) = ((shown.y0 as f64 / block).floor() as i64, (shown.y1 as f64 / block).floor() as i64);
+        let nbx = (bx1 - bx0 + 1) as usize;
+        let mut sums = std::mem::take(&mut self.occ_blocks);
+        sums.clear();
+        sums.resize(nbx * (by1 - by0 + 1) as usize, (0.0, BBox::EMPTY));
+        let share = holds as f64 / cells as f64;
+        // the blocks' extent: a cell beyond it is passed over
+        let (lo_x, hi_x) = (bx0 as f64 * block, (bx1 + 1) as f64 * block);
+        let (lo_y, hi_y) = (by0 as f64 * block, (by1 + 1) as f64 * block);
+        for (cy, &row) in rows.iter().enumerate() {
+            let (y0, y1) = (ey[cy], ey[cy + 1]);
+            if row == 0 || y1 <= y0 || y1 as f64 <= lo_y || y0 as f64 >= hi_y {
+                continue;
+            }
+            let cby0 = ((y0 as f64 / block).floor() as i64).max(by0);
+            let cby1 = ((y1 as f64 / block).ceil() as i64 - 1).min(by1);
+            let mut bits = row;
+            while bits != 0 {
+                let cx = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let (x0, x1) = (ex[cx], ex[cx + 1]);
+                if x1 <= x0 || x1 as f64 <= lo_x || x0 as f64 >= hi_x {
+                    continue;
+                }
+                let cell_area = (x1 - x0) as f64 * (y1 - y0) as f64;
+                let cbx0 = ((x0 as f64 / block).floor() as i64).max(bx0);
+                let cbx1 = ((x1 as f64 / block).ceil() as i64 - 1).min(bx1);
+                for by in cby0..=cby1 {
+                    let oy = (y1 as f64).min((by + 1) as f64 * block) - (y0 as f64).max(by as f64 * block);
+                    if !(oy > 0.0) {
+                        continue;
+                    }
+                    for bx in cbx0..=cbx1 {
+                        let ox = (x1 as f64).min((bx + 1) as f64 * block) - (x0 as f64).max(bx as f64 * block);
+                        if !(ox > 0.0) {
+                            continue;
+                        }
+                        let (sum, union) = &mut sums[(by - by0) as usize * nbx + (bx - bx0) as usize];
+                        *sum += share * ox * oy / cell_area;
+                        union.grow(&BBox {
+                            x0: x0.max((bx as f64 * block).floor() as i64),
+                            y0: y0.max((by as f64 * block).floor() as i64),
+                            x1: x1.min(((bx + 1) as f64 * block).ceil() as i64),
+                            y1: y1.min(((by + 1) as f64 * block).ceil() as i64),
+                        });
+                    }
+                }
+            }
+        }
+        for by in by0..=by1 {
+            for bx in bx0..=bx1 {
+                let (sum, piece) = sums[(by - by0) as usize * nbx + (bx - bx0) as usize];
+                if !(sum > 0.0) {
+                    continue;
+                }
+                let dots = (sum + block_dither(bx, by, salt)).floor();
+                if dots < 1.0 {
+                    continue;
+                }
+                self.put_dots((bx, by, layer), dots.min(self.block_cap as f64) as u32, &piece);
+            }
+        }
+        self.occ_blocks = sums;
+    }
+
     /// `dots` and what they stand for (`piece`) into the dot block `key`.
     /// HierOpts::dot_grid: summed into the run while the items go to one
     /// block (the walk's BVH order, a point list's Morton order), the run put
@@ -3646,15 +3785,24 @@ impl<'a> Hier<'a> {
     fn box_page(&mut self, p: &floe_ovm::PageV, pi: u32, washes: &mut Vec<(u32, BBox)>, ci: u32) -> bool {
         // HierOpts::dot_page_spread: a page whose every shape is under the
         // floor on both sides as its shapes' dots, spread over its box when
-        // wider than a box
+        // wider than a box - over the cells of its occupancy grid that hold a
+        // shape, when the index has one (HierOpts::dot_page_occ)
         if self.dots && self.page_spread && !self.one_walk && p.max_w < self.page_cut && p.max_h < self.page_cut {
             if self.dot_seen.insert(2 << 60 | pi as u64) {
                 let holds = self.page_dots(p);
                 self.st.dot_by[7] += 1;
-                if self.box_small(&p.bbox) {
-                    self.add_dots(p.layer_idx, p.bbox, holds);
-                } else {
-                    self.spread_page(p.layer_idx, p.bbox, holds, pi as u64);
+                let v = self.v;
+                match v.page_occ(pi).filter(|_| self.page_occ) {
+                    Some(occ) => {
+                        self.st.dot_occ_pages += 1;
+                        if self.box_small(&p.bbox) {
+                            self.add_dots(p.layer_idx, occ_bounds(&p.bbox, occ), holds);
+                        } else {
+                            self.spread_page_occ(p.layer_idx, p.bbox, occ, holds, pi as u64);
+                        }
+                    }
+                    None if self.box_small(&p.bbox) => self.add_dots(p.layer_idx, p.bbox, holds),
+                    None => self.spread_page(p.layer_idx, p.bbox, holds, pi as u64),
                 }
                 self.note_page("dots", ci, p, pi);
             }
@@ -7185,6 +7333,93 @@ mod tests {
         // off: the page under the floor is not drawn
         let off = plan_hier(&chip, &ask(whole), &opts(false));
         assert!(off.wcells.iter().all(|w| w.washes.is_empty()) && off.stats.dot_by[7] == 0);
+    }
+
+    /// design.ovb's image for `ovm` holding the occupancy grids `grids`
+    /// (page, OCC_GRID rows of bits), the other pages none
+    fn ovb_of(ovm: &Ovm, grids: &[(u32, [u64; 64])]) -> floe_ovm::Backing {
+        let mut v = floe_ovm::ovb_header(ovm.n_pages, ovm.src_size, ovm.src_mtime, ovm.ovp_len).to_vec();
+        v.resize(floe_ovm::OVB_HEADER_LEN + ovm.n_pages as usize * floe_ovm::OCC_BYTES, 0);
+        for (page, rows) in grids {
+            let at = floe_ovm::OVB_HEADER_LEN + *page as usize * floe_ovm::OCC_BYTES;
+            for (y, row) in rows.iter().enumerate() {
+                v[at + 8 * y..at + 8 * y + 8].copy_from_slice(&row.to_le_bytes());
+            }
+        }
+        floe_ovm::Backing::Vec(v)
+    }
+
+    #[test]
+    fn a_page_spread_over_its_occupancy_grid_leaves_its_empty_cells_empty() {
+        // HierOpts::dot_page_occ (user 2026-10-02: the spread "filled places
+        // where nothing is"; then "go with the occupancy bits"). The spread
+        // test's scale: 0.02 px/dbu, the floor 50 dbu, 8 px blocks of 400 dbu.
+        // Page A, 6,000 dbu, holds its shapes in two corners of its grid -
+        // cells 0-15 (0-1,500 dbu) and 56-63 (5,250-6,000) on both axes; page
+        // C, 400 dbu (8 px: no wider than a box) across the blocks at 400, in
+        // its first 8 x 8 cells (300-350 / 6,300-6,350).
+        let cells = [FCell {
+            name: "TOP",
+            pages: vec![(bx(0, 0, 6_000, 6_000), 25, 25), (bx(8_000, 0, 8_100, 100), 100, 100), (bx(300, 6_300, 700, 6_700), 25, 25)],
+            places: vec![],
+        }];
+        let a: [u64; 64] = std::array::from_fn(|y| if y < 16 { 0xFFFF } else if y >= 56 { 0xFF << 56 } else { 0 });
+        let c: [u64; 64] = std::array::from_fn(|y| if y < 8 { 0xFF } else { 0 });
+        let chip = |members: u64| {
+            let mut chip = fixture_members(&cells, 0, true, &|_, k| if k == 0 { members } else { 1 });
+            let ovb = ovb_of(&chip, &[(0, a), (2, c)]);
+            chip.attach_page_occ_backing(ovb).unwrap();
+            chip
+        };
+        let ask = |view: BBox| {
+            let mut r = rq(view, 150, 0);
+            r.px_per_dbu = 0.02;
+            r.page_wash = false;
+            r
+        };
+        let opts = |occ: bool| HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, dot_page_spread: true, dot_page_occ: occ, ..HierOpts::default() };
+        let whole = bx(-10, -10, 9_000, 9_000);
+        let items = |plan: &HierPlan| -> Vec<(BBox, u32)> {
+            let cell = plan.wcells.iter().find(|w| w.key.0 == 0).unwrap();
+            cell.washes.iter().zip(&cell.dot_counts).map(|(&(_, b), &n)| (b, n as u32)).collect()
+        };
+        // a block's item: its box grown from the centre of what its dots stand
+        // for to hold them at half its pixels, inside the block (flush_dots)
+        let in_corners = |b: &BBox| (b.x1 <= 1_600 && b.y1 <= 1_600) || (b.x0 >= 5_200 && b.y0 >= 5_200);
+        let centre = |b: &BBox| ((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2);
+        let dense = chip(40_000);
+        let plan = plan_hier(&dense, &ask(whole), &opts(true));
+        let (of_a, of_c): (Vec<_>, Vec<_>) = items(&plan).into_iter().partition(|(b, _)| b.y1 <= 6_000);
+        // page A's 10,000 dots in the blocks of its two corners only - 4 x 4
+        // and 2 x 2, each at the cap - none in the 3,600 dbu between
+        assert_eq!(plan.stats.dot_by[7], 2);
+        assert_eq!(plan.stats.dot_occ_pages, 2);
+        assert!(of_a.iter().all(|(b, _)| in_corners(b)), "{of_a:?}");
+        assert_eq!(of_a.len(), 16 + 4);
+        assert!(of_a.iter().all(|&(_, n)| n == dot_block_cap(8.0)));
+        // page C's one dot at its cells (300-350): in the block at 0, not at
+        // its box's centre (500) in the block at 400
+        assert_eq!(of_c.len(), 1);
+        let (cx, cy) = centre(&of_c[0].0);
+        assert!(of_c[0].1 == 1 && (300..350).contains(&cx) && (6_300..6_350).contains(&cy) && of_c[0].0.x1 <= 400, "{of_c:?}");
+        // the same in every frame
+        assert_eq!(items(&plan_hier(&dense, &ask(whole), &opts(true))), items(&plan));
+        // a sparse page: about its 100 dots, in the corners
+        let sparse = plan_hier(&chip(400), &ask(whole), &opts(true));
+        let of_a: Vec<_> = items(&sparse).into_iter().filter(|(b, _)| b.y1 <= 6_000).collect();
+        let dots: u32 = of_a.iter().map(|&(_, n)| n).sum();
+        assert!((60..=140).contains(&dots) && of_a.len() <= 20, "{dots} dots over {} blocks", of_a.len());
+        assert!(of_a.iter().all(|(b, _)| in_corners(b)), "{of_a:?}");
+        // off (the kill switch), or no grid: over the boxes
+        let off = plan_hier(&dense, &ask(whole), &opts(false));
+        let bare = plan_hier(&fixture_members(&cells, 0, true, &|_, k| if k == 0 { 40_000 } else { 1 }), &ask(whole), &opts(true));
+        for plan in [&off, &bare] {
+            assert_eq!(plan.stats.dot_occ_pages, 0);
+            let (of_a, of_c): (Vec<_>, Vec<_>) = items(plan).into_iter().partition(|(b, _)| b.y1 <= 6_000);
+            assert_eq!(of_a.len(), 15 * 15);
+            // page C at its box's centre: in the block at 400
+            assert!(of_c.len() == 1 && of_c[0].0.x0 >= 400 && of_c[0].0.y0 >= 6_400, "{of_c:?}");
+        }
     }
 
     #[test]

@@ -371,6 +371,20 @@
   - 박스 이하이면 항목 하나다. 더 넓으면 `spread_page`가 셀 뷰(`cell_view`) 안의 블록마다 `page_dots × (블록 ∩
     페이지) / 페이지 면적`을 블록 디더(`block_dither`)로 반올림해 넣는다.
   - 페이지 BVH 노드도 같은 조건이면 통과시켜(박스 이하는 노드 항목) 페이지에서 퍼뜨린다.
+  - **점유 비트(2026-10-02, 0.12.274):** `HierOpts::dot_page_occ`(기본 켬, `FLOE_RUST_DENSITY_PAGE_OCC=off`가 킬
+    스위치).
+    - 색인에 design.ovb(SPEC-FORMATS)가 있으면 `spread_page_occ`가 페이지의 64×64칸 중 도형이 있는 칸에만
+      `page_dots`를 같은 몫으로 나눈다.
+    - 블록은 그 블록에 든 칸 부분들의 몫을 받는다. 뷰와 무관하게 블록 전체 기준이라 스레드 병합이 그대로 맞는다.
+      소수는 블록 디더로 반올림하고, 항목은 그 부분들의 합집합을 나타낸다.
+    - 박스 이하 페이지는 표시된 칸들의 범위(`occ_bounds`)에 항목 하나로 놓는다.
+    - 표시가 없는 캐시는 상자 전체에 뿌린다. 표시로 놓은 페이지 수는 `HierStats::dot_occ_pages`(renderd
+      `density_plan2`의 24번째 값 `occ_pages`)다.
+    - 단위: `a_page_spread_over_its_occupancy_grid_leaves_its_empty_cells_empty`.
+      - 6,000 dbu 페이지의 두 모서리 칸(0~15, 56~63)만 표시하면, 점은 두 모서리의 블록 4×4와 2×2에만 상한까지 찬다.
+      - 400 멤버면 약 100점이다.
+      - 박스 이하 페이지는 표시된 칸 쪽 블록에 놓인다.
+      - 끄거나 표시가 없으면 상자 전체(15×15 블록)다.
   - 단위: `a_page_under_the_floor_spreads_its_shapes_dots_over_its_box`.
     - 4만 멤버 페이지: 15×15 블록이 상한까지 찬다. 범위 안에만 그리고, 다시 계획해도 같으며, 구석 뷰는 그 블록들만 낸다.
     - 400 멤버 페이지: 블록 수보다 적은 약 100점이다.

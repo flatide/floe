@@ -10,7 +10,7 @@
 <dir>/.<name>.ice`(소스 옆 숨김 폴더, `floe/cachepath.py`; 2026-09-16까지의
 `<src>.floe`는 발견 시 자동 개명)를 shell 없이 subprocess로 실행한다. `--jobs`,
 `--page-target-mb`, `--coverage`/`--coverage-only`, `--no-lod`,
-`--slow-cell-s`, `--p2-shard-limit-mb`, `--profile-cell`/
+`--no-page-occupancy`, `--slow-cell-s`, `--p2-shard-limit-mb`, `--profile-cell`/
 `--profile-cell-ci`, `--profile-jobs`, `--profile-repeat`,
 `--profile-snapshot`/`--profile-snapshot-refresh`를 같은 이름의 Rust
 옵션으로 전달한다.
@@ -47,7 +47,7 @@ error다. 전체 누락도 빌드/설치 지침을 포함한 hard error다. 동�
 
 ```
 floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
-    [--encode-batch N] [--page-target-mb N] [--no-lod]
+    [--encode-batch N] [--page-target-mb N] [--no-lod] [--no-page-occupancy]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
     [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1]
     [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N]
@@ -202,6 +202,11 @@ floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
    - 커미터(메인): 순서대로 `append_cell_sink` 리베이스, lod_page
      전역화, 텍스트/비트셋/cell 레코드 커밋. 윈도 채워지면 청크 인코드
      + 아레나 해제. 메모리 거버너: MemAvailable<4GB면 윈도 반감.
+     **페이지 점유 비트(design.ovb, SPEC-FORMATS, 2026-10-02)**: page
+     encode 작업자가 exact 페이지마다 payload 옆에서 64×64 점유 격자
+     (`page_occupancy`)를 만들고, 커미터가 페이지 순서대로 쓴다. 빌드 끝에
+     `[vfs] page occupancy design.ovb: N pages, SIZE (Ts over the encode
+     workers)` 한 줄을 남긴다. `--no-page-occupancy`면 만들지 않는다.
      page encode는 persistent planner와 별도의 최대 `jobs` scoped
      스레드를 사용하므로 청크 경계에서 OS thread 수가 잠시 약
      `2×jobs`로 보일 수 있다. 이는 cell-plan 병렬도와 다른 계측이며
