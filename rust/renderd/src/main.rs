@@ -4325,8 +4325,9 @@ fn render_density_frame(
                                 whole_memory.remove(&side_key);
                             }
                         }
-                        if planned_fine.stats.fit_decision.is_some() && !planned_fine.stats.fit_whole {
-                            // the budget fit dropped pages or raised the cut
+                        if (planned_fine.stats.fit_decision.is_some() && !planned_fine.stats.fit_whole) || planned_fine.stats.fit_dropped {
+                            // the budget fit dropped pages or raised the cut (or, at
+                            // the asked cut, kept none that cost: fit_dropped)
                             plan2[12] += 1;
                         }
                         plan2[5] += planned_fine.stats.visited_bvh;

@@ -169,6 +169,14 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - `FLOE_RUST_DENSITY_RESERVE_LEFT=off`는 아무것도 켜지 않고 하한 탐침이 초과한다.
   - `history_checks`·`held_checks`는 예약 1 MB가 요점이라 고정 예약(`FLOE_RUST_DENSITY_RESERVE_LEFT=off`)으로 고정했다.
   - 어댑터 계약: `density_plan2` 23개 값(…/reserve_mb). 상태줄 테스트: 로그 줄의 `reserve R MB`.
+  0.12.271(2패스 예산 맞춤은 셀의 컷을 두고 한 번에):
+  - 게이트 `density_stack` `ladder_checks`:
+    - 픽스처: VIA 2만 개(셀 점)와, TOP이 직접 가진 0.3~0.9 µm 상자 6만 개(한 페이지, 추정 10.6 MB). 예산 4 MB(고정
+      예약 0.5 MB).
+    - 1·2 스레드 모두 한 번에 맞추고, 그 페이지를 빼며(thinned), 같은 프레임을 그린다.
+    - 사다리(`FLOE_RUST_DENSITY_FIT_LADDER=on`)는 6번 걸어 같은 프레임에 이른다.
+    - 기본 예산은 그 페이지를 디코드한다.
+  - 단위 `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
   0.12.261(블록 4 px, 한 번 걷기는 선택, 하한 1 px, 페이지 점 끔): 게이트 점 절의 기본은 4 px·퍼뜨림·맞춤·하한 1 px —
   성긴 배열 100 px가 각 멤버에서 1.5 px 안, 맞닿은 배열 = Σ min(8, 4×4 블록의 멤버), 항목 = 성긴 배열 100 + 1 + 맞닿은
   블록, TOP의 0.5 px 점은 그리지도 점으로 서지도 않음, `density_floor` 1, `density_plan2` 탐침 0·맞춤 1; 하한 0·0.25 px는

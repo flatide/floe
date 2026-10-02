@@ -322,6 +322,12 @@ probe of the 128 MB reserve while pass 1 held a few pages, and the view drew
 nothing under the cut). The probe, the fit, the threads' fit and the decode
 take it; `density_plan2`'s 23rd value is it in MB (`reserve_mb`, the log line's
 `reserve R MB`). `FLOE_RUST_DENSITY_RESERVE_LEFT=off` is the kill switch.
+Since 0.12.271 pass 2's budget fit is at the asked cut (floe_vfs
+`HierOpts::dot_fit_at_cut`): one complete plan, its pages kept by priority to
+the reserve, the cells' cut - pass 1's - never raised, and the threads' merged
+plan fitted alike (field 2026-10-02: the top cell at depth 1 took `fit 75019 ms
+x6 passes on 1 threads` up the cut ladder, the dots walked again each step).
+`FLOE_RUST_DENSITY_FIT_LADDER=on` is the kill switch.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

@@ -119,6 +119,9 @@ twice (lists_checks). Pass 2's reserve is what pass 1 left of the budget when
 that is more: at depth 0 a TOP's own boxes under a pixel, past a 32 MB
 budget's fixed 4 MB reserve, are drawn as a cut-free frame draws them, and the
 fixed reserve (FLOE_RUST_DENSITY_RESERVE_LEFT=off) draws none (left_checks).
+Pass 2's budget fit keeps the cells' cut: its pages past eight reserves are
+fitted in one pass, on the threads; the ladder (FLOE_RUST_DENSITY_FIT_LADDER=on)
+takes passes up the cut (ladder_checks).
 
     .venv/bin/python tools/validate_density_stack.py
 """
@@ -708,6 +711,87 @@ def left_checks(temp):
             w.stop()
 
 
+def ladder_layout(path):
+    """Pass 2's work on both sides of the budget: a 0.1 um VIA cell placed at
+    20,000 random places over 300 um (cells under the cut: dots, no page) and
+    the TOP's own 60,000 boxes of 0.3-0.9 um (1-3 px at 1000 px: records under
+    the cut over the 1 px floor - one page of 55,164 records, 10.6 MB by
+    estimate)."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(*LOW)
+    rnd = random.Random(13)
+    for _ in range(60_000):
+        x, y = rnd.randrange(300_000) / 1000.0, rnd.randrange(300_000) / 1000.0
+        w, h = 0.3 + rnd.randrange(600) / 1000.0, 0.3 + rnd.randrange(600) / 1000.0
+        top.shapes(layer).insert(kdb.DBox(x, y, x + w, y + h))
+    via = ly.create_cell('VIA')
+    via.shapes(ly.layer(*MID)).insert(kdb.DBox(0, 0, 0.1, 0.1))
+    for _ in range(20_000):
+        top.insert(kdb.DCellInstArray(via.cell_index(), kdb.DTrans(kdb.DVector(rnd.randrange(300_000) / 1000.0, rnd.randrange(300_000) / 1000.0))))
+    options = kdb.SaveLayoutOptions()
+    options.format = 'OASIS'
+    options.oasis_compression_level = 10
+    ly.write(str(path), options)
+
+
+def ladder_checks(temp):
+    """Pass 2's budget fit keeps the cells' cut and fits its pages in one
+    pass (user 2026-10-02, field: the top cell at depth 1, `fit 75019 ms x6
+    passes on 1 threads … cell dots 219.3M` - its pages past eight reserves
+    sent the fit up the cut ladder, the cells' cut with the pages', the view
+    walked again each step, and the threads' merged plan to the one plan).
+    Under a 4 MB budget (a fixed reserve of 0.5 MB) the TOP's page, 10.6 MB,
+    is past eight reserves and fits none: one pass, the page left out
+    (thinned), the VIAs' dots; two threads draw what one draws; the ladder
+    (FLOE_RUST_DENSITY_FIT_LADDER=on) takes passes up the cut to the same
+    frame. The default budget decodes the page."""
+    src = Path(temp) / 'ladder.oas'
+    ladder_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    tight = dict(env, FLOE_RUST_BUDGET_MB='4', FLOE_RUST_DENSITY_RESERVE_LEFT='off')
+    workers = {'roomy': worker(src, env), 'one': worker(src, dict(tight, FLOE_RUST_DENSITY_PLAN_THREADS='1')),
+               'two': worker(src, dict(tight, FLOE_RUST_DENSITY_PLAN_THREADS='2')),
+               'ladder': worker(src, dict(tight, FLOE_RUST_DENSITY_PLAN_THREADS='1', FLOE_RUST_DENSITY_FIT_LADDER='on'))}
+    try:
+        dbu = float(workers['roomy'].cache.meta['dbu'])
+        side = 1000
+
+        def view(w):
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'headless', 'bbox': (0.0, 0.0, 300.2 / dbu, 300.2 / dbu), 'view': None,
+                      'w': side, 'h': side, 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW, MID], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('ladder frame timeout')
+
+        frames = {name: view(w) for name, w in workers.items()}
+        plans = {name: res['density_plan2'] for name, (_, res) in frames.items()}
+        lit = {name: res['density_stack']['lit'] for name, (_, res) in frames.items()}
+        one, two, ladder = plans['one'], plans['two'], plans['ladder']
+        assert (one['passes'], one['thinned'], two['passes'], two['threads'], two['thinned']) == (1, 1, 1, 2, 1), plans
+        assert ladder['passes'] > 1 and ladder['items'] == one['items'] > 0, plans
+        for name in ('two', 'ladder'):
+            assert frames[name][0] == frames['one'][0], '%s draws otherwise than one thread in %d px' % (
+                name, sum(1 for i in range(0, len(frames['one'][0]), 4) if frames[name][0][i:i + 4] != frames['one'][0][i:i + 4]))
+        assert frames['roomy'][1]['density_pages']['decoded'] > 0 and lit['roomy'] > lit['one'], (frames['roomy'][1]['density_pages'], lit)
+        print('density stack: pass 2 past eight reserves fits in one pass (two threads alike, %d px of VIA dots, the page left out); '
+              'the ladder %d passes to the same frame; the default budget %d px with the page' % (lit['one'], ladder['passes'], lit['roomy']))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def frames_of(w, gen, visible, bg=False):
     """Every frame answer of one render, the refining rounds first: [(pixels,
     result)], the last one final."""
@@ -911,6 +995,7 @@ def main():
         held_checks(temp)
         lists_checks(temp)
         left_checks(temp)
+        ladder_checks(temp)
     print('density stack gate: OK')
 
 

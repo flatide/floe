@@ -356,6 +356,13 @@ pub fn dot_grid() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_DOT_GRID").as_deref() != Ok("off"))
 }
 
+/// HierOpts::dot_fit_at_cut default: on; FLOE_RUST_DENSITY_FIT_LADDER=on (the
+/// kill switch) fits a dots plan by the cut ladder, as before 2026-10-02.
+pub fn dot_fit_at_cut() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_FIT_LADDER").as_deref() != Ok("on"))
+}
+
 /// HierOpts::dot_boxes default: on; FLOE_RUST_DENSITY_DOT_BOXES=off (the kill
 /// switch) walks a point list's members over the bounds of the cell's boxes
 /// and keeps every block, as before 2026-10-02.
@@ -967,6 +974,17 @@ pub struct HierOpts {
     /// a plan over its budget lowers the density before the detail
     /// (FLOE_RUST_FIT_THIN=off: the cut ladder)
     pub fit_thin: bool,
+    /// The budget fit of a sub-cut dots plan (HierOpts::sub_cut_dots: the
+    /// density stack's pass 2) at the asked cut: one complete plan, its pages
+    /// kept by priority to the budget (thin_to_budget), never a coarser cut.
+    /// Its cut is the cells' - pass 1's - and the budget is over its pages:
+    /// the ladder raised the cells' cut with the pages' and walked the view -
+    /// its dots - again each step, from scratch past FIT_OVERSHOOT budgets
+    /// (user 2026-10-02, field: the top cell at depth 1, `fit 75019 ms x6
+    /// passes on 1 threads … cell dots 219.3M`, the floor at 17 px - a merged
+    /// plan past the overshoot also left the threads for the one plan's
+    /// ladder). FLOE_RUST_DENSITY_FIT_LADDER=on: the ladder.
+    pub dot_fit_at_cut: bool,
     /// Field diagnosis (2026-09-10): record one ExplainRow per page,
     /// page-BVH node, child placement / child-BVH node and frame the
     /// walk judged INSIDE the view - kept, culled by size, hairline,
@@ -1035,6 +1053,7 @@ impl Default for HierOpts {
             rep_density: rep_density(),
             fit_budget: fit_budget_enabled(),
             fit_thin: fit_thin_enabled(),
+            dot_fit_at_cut: dot_fit_at_cut(),
             explain: false,
         }
     }
@@ -1195,6 +1214,9 @@ pub struct HierStats {
     pub fit_decision: Option<FixedFit>,
     pub fit_fixed: bool,
     pub fit_redecided: bool,
+    /// HierOpts::dot_fit_at_cut: not one page that costs fit the budget -
+    /// they were all left out, no decision taken (2026-10-02)
+    pub fit_dropped: bool,
     /// the budget held the frame whole: every page as asked, at the asked
     /// cut (FixedFit::everything), whatever decision was given - a frame
     /// that has to thin applies the given one (plan_hier_fixed; user
@@ -1524,6 +1546,10 @@ pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
     if !opts.fit_budget || req.decode_budget == 0 || req.cut_dbu <= 0 {
         return plan_hier_as_asked(v, req, opts, 0);
     }
+    if opts.fit_thin && opts.sub_cut_dots.is_some() && opts.dot_fit_at_cut {
+        let plan = plan_hier_as_asked(v, req, opts, 0);
+        return fit_at_cut(v, req, opts, plan);
+    }
     if opts.fit_thin {
         if let Some(fixed) = opts.fixed_fit {
             if let Some(plan) = plan_hier_fixed(v, req, opts, fixed) {
@@ -1710,6 +1736,10 @@ pub fn fit_planned(v: &Ovm, req: &ViewReq, opts: &HierOpts, plan: HierPlan) -> O
     if !opts.fit_thin {
         return None;
     }
+    // a dots plan (its stats say so: the caller's options need not)
+    if (opts.sub_cut_dots.is_some() || plan.stats.sub_cut_dots) && opts.dot_fit_at_cut {
+        return Some(fit_at_cut(v, req, opts, plan));
+    }
     if let Some(fixed) = opts.fixed_fit {
         if fixed.cut_dbu > req.cut_dbu {
             return None;
@@ -1737,6 +1767,38 @@ pub fn fit_planned(v: &Ovm, req: &ViewReq, opts: &HierOpts, plan: HierPlan) -> O
     }
     plan.stats.fit_pct = 100;
     Some(plan)
+}
+
+/// HierOpts::dot_fit_at_cut: the budget fit of `plan`, complete at the asked
+/// cut - held whole when the budget holds it, under the remembered decision
+/// (HierOpts::fixed_fit, one at this cut) when that keeps it within the
+/// budget, else its pages kept by priority to the budget (thin_to_budget) -
+/// in one pass, never a coarser cut. When not one page that costs fits, those
+/// the frame holds stay and no decision is taken.
+fn fit_at_cut(v: &Ovm, req: &ViewReq, opts: &HierOpts, mut plan: HierPlan) -> HierPlan {
+    if let Some(fixed) = opts.fixed_fit.filter(|fixed| fixed.cut_dbu == req.cut_dbu) {
+        if let Some(fitted) = fit_under(v, req, req, opts, plan.clone(), fixed) {
+            return fitted;
+        }
+    }
+    plan.stats.fit_passes = 1;
+    plan.stats.fit_redecided = opts.fixed_fit.is_some();
+    let total = unique_page_memory(v, opts, &plan);
+    if total <= req.decode_budget {
+        plan.stats.fit_decision = Some(FixedFit::everything(req.cut_dbu));
+        plan.stats.fit_whole = true;
+        plan.stats.fit_bytes = total;
+        return plan;
+    }
+    if !thin_to_budget(v, opts, &mut plan, fit_key_of(req, opts), req.cut_dbu, req.decode_budget) {
+        let keep: Vec<bool> = plan.pages.iter().map(|&pi| opts.page_is_free(pi)).collect();
+        plan.stats.page_bytes = keep_pages(v, &mut plan, &keep);
+        plan.stats.fit_bytes = 0;
+        plan.stats.fit_decision = None;
+        plan.stats.fit_dropped = true;
+    }
+    plan.stats.fit_pct = 100;
+    plan
 }
 
 /// The largest cut that still selects the page. Its octave is the page's
@@ -6257,6 +6319,68 @@ mod tests {
         assert!(raised.is_some_and(|d| d.cut_dbu > 50));
         assert!(fit_planned(&chip, &ask(per), &under(raised), asked.clone()).is_none());
         assert!(fit_planned(&chip, &ask(2 * per), &under(None), asked.clone()).is_none(), "18 pages past 8 x 2");
+    }
+
+    #[test]
+    fn a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass() {
+        // HierOpts::dot_fit_at_cut (user 2026-10-02, field: the top cell at
+        // depth 1, `fit 75019 ms x6 passes on 1 threads … cell dots 219.3M`,
+        // the floor at 17 px): pass 2's pages past FIT_OVERSHOOT budgets sent
+        // its fit up the cut ladder - the cells' cut with the pages', the view
+        // walked again each step - and the threads' merged plan to the one
+        // plan. 0.02 px/dbu, the cells' cut 150 dbu (3 px), the pages' 50 (a
+        // third); TOP's eighteen pages, sixteen of 2 px and two of 32 px, over
+        // a budget of two (eighteen are past 8 x 2); LEAFs under the cut as dots.
+        let mut pages = Vec::new();
+        for i in 0..16 {
+            pages.push((bx(i * 400, 0, i * 400 + 100, 100), 100, 100));
+        }
+        for i in 0..2 {
+            pages.push((bx(i * 3200, 3000, i * 3200 + 1600, 4600), 1600, 1600));
+        }
+        let cells = [
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] },
+            FCell {
+                name: "TOP",
+                pages,
+                places: vec![
+                    (0, 9_000, 9_000, 0, false, Rep::One),
+                    (0, 12_000, 0, 0, false, Rep::Grid { na: 30, nb: 30, va: (150, 0), vb: (0, 150) }),
+                ],
+            },
+        ];
+        let chip = fixture(&cells, 1);
+        let per = page_memory(1, 0);
+        let ask = |budget: u64| {
+            let mut r = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+            r.px_per_dbu = 0.02;
+            r.page_wash = false;
+            r.decode_budget = budget;
+            r
+        };
+        let dots = |at_cut: bool| HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, dot_fit_at_cut: at_cut, ..HierOpts::default() };
+        let items = |plan: &HierPlan| plan.wcells.iter().map(|w| (w.key, w.washes.clone(), w.dot_counts.clone())).collect::<Vec<_>>();
+        let asked = plan_hier(&chip, &ask(0), &dots(true));
+        assert!(asked.pages.len() == 18 && asked.stats.sub_cut_dots);
+        // at the asked cut: one pass, the cells' dots as without a budget, the
+        // two pages of the larger class kept
+        let fitted = plan_hier(&chip, &ask(2 * per), &dots(true));
+        assert_eq!((fitted.stats.fit_passes, fitted.stats.fit_whole), (1, false));
+        assert_eq!(fitted.stats.fit_decision.map(|d| d.cut_dbu), Some(150));
+        // (LEAF's page is 0: TOP's large two are 17 and 18)
+        assert_eq!(fitted.pages, vec![17, 18]);
+        assert_eq!(items(&fitted), items(&asked), "the cells' dots");
+        // a merged plan (the threads') fits alike - its stats say it is a dots
+        // plan whatever the options - and is never handed back to plan again
+        let merged = fit_planned(&chip, &ask(2 * per), &HierOpts::default(), asked.clone()).expect("a dots plan fits at its cut");
+        assert_eq!((merged.pages.clone(), merged.stats.fit_decision), (fitted.pages.clone(), fitted.stats.fit_decision));
+        // the ladder (FLOE_RUST_DENSITY_FIT_LADDER=on): passes up the cut
+        let ladder = plan_hier(&chip, &ask(2 * per), &dots(false));
+        assert!(ladder.stats.fit_passes > 1 && ladder.stats.fit_decision.is_some_and(|d| d.cut_dbu > 150), "{:?}", ladder.stats.fit_decision);
+        assert!(fit_planned(&chip, &ask(2 * per), &HierOpts { dot_fit_at_cut: false, ..HierOpts::default() }, asked.clone()).is_none());
+        // a budget no page that costs fits: the cells' dots, no page, no decision
+        let none = plan_hier(&chip, &ask(per / 2), &dots(true));
+        assert!(none.pages.is_empty() && none.stats.fit_decision.is_none() && none.stats.fit_dropped && items(&none) == items(&asked));
     }
 
     #[test]

@@ -351,6 +351,21 @@
     - 따라서 영역별 계획이 내는 블록은 한 계획의 블록과 같고, `merge_plans`의 "개수가 큰 것"이 부분 개수를 고르지
       않는다.
   - 단위: `a_point_list_is_walked_by_each_box_and_a_block_no_box_holds_whole_is_left_out`.
+  **점 계획의 예산 맞춤은 요청한 컷에서 한 번(0.12.271, renderd 0.12.250; 사용자 2026-10-02, 실칩 `fit 75019 ms x6
+  passes on 1 threads`):** `HierOpts::dot_fit_at_cut`(기본 켬, `FLOE_RUST_DENSITY_FIT_LADDER=on`이 킬 스위치).
+  - 점 계획(`sub_cut_dots`)은 `plan_hier`가 요청한 컷에서 한 번 끝까지 계획하고 `fit_at_cut`으로 맞춘다.
+    - 예산이 통째로 담으면 everything이다.
+    - 같은 컷의 기억된 결정이 담으면 그 결정을 쓴다(`fit_under`).
+    - 둘 다 아니면 `thin_to_budget`으로 페이지만 우선순위대로 남긴다.
+    - 한 페이지도 들지 않으면 든 페이지만 남기고 결정은 없다(`HierStats::fit_dropped`).
+  - 셀의 컷(점이 되는 컷)은 바뀌지 않는다. 컷 사다리는 셀의 컷을 페이지의 컷과 함께 올려 단마다 다시 걸었다.
+  - `fit_planned`도 점 계획이면(옵션 또는 `stats.sub_cut_dots`) 같은 맞춤을 하고, None을 내지 않는다.
+  - 단위: `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
+    - 픽스처: 페이지 18쪽, 예산 2쪽.
+    - 결과: 한 번에 큰 등급의 두 쪽이 남고, 점은 예산 없는 계획과 같다.
+    - 합친 계획도 같은 결과를 낸다.
+    - 사다리는 여러 번 걷고 컷을 올린다.
+    - 반 쪽 예산이면 페이지 0, `fit_dropped`.
     - 픽스처: 무작위 3,000점 리스트, 사분면 넷을 대각선 둘로 나눔.
     - 각 계획은 멤버의 70 % 미만만 센다.
     - 낸 블록은 한 계획의 블록과 같고, 자기 사분면이 보는 블록을 모두 내며, 둘이 합쳐 뷰를 덮는다.

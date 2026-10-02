@@ -894,6 +894,7 @@ impl Cache {
             st.dot_partial += more.dot_partial;
             st.cancelled |= more.cancelled;
             st.fit_over |= more.fit_over;
+            st.fit_dropped |= more.fit_dropped;
         }
         out.wcells = cells.into_values().collect();
         out.stats.wc_cells = out.wcells.len() as u64;
