@@ -788,7 +788,8 @@ impl Cache {
     /// plan of every region at once as asked, up to the order of a cell's
     /// instances and washes, which the raster does not see.
     pub fn merge_plans(mut plans: Vec<HierPlan>, block_dbu: f64) -> HierPlan {
-        use std::collections::{BTreeMap, HashMap, HashSet};
+        use floe_vfs::hier::{FxMap, FxSet};
+        use std::collections::BTreeMap;
         let mut out = plans.remove(0);
         let mut cells: BTreeMap<floe_vfs::hier::WsKey, floe_vfs::hier::WsCell> = out.wcells.drain(..).map(|cell| (cell.key, cell)).collect();
         let mut pages: BTreeMap<u32, u64> = out.pages.iter().copied().zip(out.page_prio.iter().copied()).collect();
@@ -806,8 +807,11 @@ impl Cache {
                 }
                 have.pages = levels.keys().copied().collect();
                 have.page_levels = if levelled { levels.values().copied().collect() } else { Vec::new() };
-                // instances, once each
-                let mut placed: HashMap<(floe_vfs::hier::WsKey, i64, i64, u8, bool), Vec<usize>> = HashMap::new();
+                // instances, once each (the maps here are looked up, never
+                // iterated: the Fx hasher, 2026-10-02 - SipHash and growing
+                // were most of a dots merge)
+                let mut placed: FxMap<(floe_vfs::hier::WsKey, i64, i64, u8, bool), Vec<usize>> =
+                    FxMap::with_capacity_and_hasher(have.insts.len() + cell.insts.len(), Default::default());
                 for (at, inst) in have.insts.iter().enumerate() {
                     placed.entry((inst.child, inst.x, inst.y, inst.rot, inst.flip)).or_default().push(at);
                 }
@@ -834,8 +838,9 @@ impl Cache {
                     let at = |a: i64, z: i64| ((a as f64 + z as f64) / 2.0 / block_dbu).floor() as i64;
                     (layer, at(b.x0, b.x1), at(b.y0, b.y1))
                 };
-                let mut blocks: HashMap<(u32, i64, i64), usize> = HashMap::new();
-                let mut seen: HashSet<(u32, floe_ovm::BBox)> = HashSet::new();
+                let mut blocks: FxMap<(u32, i64, i64), usize> =
+                    FxMap::with_capacity_and_hasher(have.washes.len() + cell.washes.len(), Default::default());
+                let mut seen: FxSet<(u32, floe_ovm::BBox)> = FxSet::default();
                 for (at, &(layer, b)) in have.washes.iter().enumerate() {
                     if have.dot_counts.get(at).copied().unwrap_or(0) > 0 {
                         blocks.insert(block_of(layer, &b), at);
@@ -886,6 +891,7 @@ impl Cache {
             for (have, add) in st.dot_by.iter_mut().zip(more.dot_by.iter()) {
                 *have += add;
             }
+            st.dot_partial += more.dot_partial;
             st.cancelled |= more.cancelled;
             st.fit_over |= more.fit_over;
         }

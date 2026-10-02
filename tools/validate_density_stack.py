@@ -112,6 +112,10 @@ the corner a fresh worker draws, and the whole extent planned on two threads
 frame (history_checks). Pass 1's pages cost pass 2's
 reserve nothing: under a 1 MB reserve, which pass 1's own pages pass, the frame
 equals the default reserve's and reports nothing over budget (held_checks).
+Pass 2's threads walk a point list's members in their own regions: over nine
+tiles one, two and four threads and the bounds (FLOE_RUST_DENSITY_DOT_BOXES=off)
+draw one frame, four threads count the members about once, the bounds about
+twice (lists_checks).
 
     .venv/bin/python tools/validate_density_stack.py
 """
@@ -557,6 +561,75 @@ def held_checks(temp):
         roomy.stop()
 
 
+def lists_layout(path):
+    """A routing cell's vias: a 0.1 um VIA placed at 4,000 random places over
+    300 x 300 um, written with KLayout's strongest compression - an irregular
+    repetition, indexed as point lists."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    via = ly.create_cell('VIA')
+    via.shapes(ly.layer(*LOW)).insert(kdb.DBox(0, 0, 0.1, 0.1))
+    rnd = random.Random(5)
+    for _ in range(4000):
+        top.insert(kdb.DCellInstArray(via.cell_index(), kdb.DTrans(kdb.DVector(rnd.randrange(300_000) / 1000.0, rnd.randrange(300_000) / 1000.0))))
+    options = kdb.SaveLayoutOptions()
+    options.format = 'OASIS'
+    options.oasis_compression_level = 10
+    ly.write(str(path), options)
+
+
+def lists_checks(temp):
+    """Pass 2's threads walk a point list's members in their own regions
+    (user 2026-10-02, field: `list members 86.6M`): renderd deals the regions
+    round robin, so a thread's regions span the view, and each thread counted
+    every member of a list across it - a million random vias, 1 / 2 / 4
+    threads: 1 / 2 / 2.96 M members, pass 2 planned 28 / 46 / 71 ms. Over 9
+    tiles (1000 x 1000 px) the frame of one, two and four threads and of the
+    bounds (FLOE_RUST_DENSITY_DOT_BOXES=off) is one; four threads count the
+    members once and a block's edge more, the bounds about twice."""
+    src = Path(temp) / 'lists.oas'
+    lists_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    workers = {threads: worker(src, dict(env, FLOE_RUST_DENSITY_PLAN_THREADS=threads)) for threads in ('1', '2', '4')}
+    workers['bounds'] = worker(src, dict(env, FLOE_RUST_DENSITY_PLAN_THREADS='4', FLOE_RUST_DENSITY_DOT_BOXES='off'))
+    try:
+        dbu = float(workers['1'].cache.meta['dbu'])
+        side = 1000
+
+        def view(w):
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'headless', 'bbox': (0.0, 0.0, 300.1 / dbu, 300.1 / dbu), 'view': None,
+                      'w': side, 'h': side, 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('point list frame timeout')
+
+        frames = {name: view(w) for name, w in workers.items()}
+        one, one_res = frames['1']
+        members = {name: res['density_plan2']['by_list_members'] for name, (_, res) in frames.items()}
+        assert one_res['density_stack']['lit'] > 0 and 3_000 <= members['1'] <= 4_000, (one_res['density_stack'], members)
+        for name, (pixels, res) in frames.items():
+            assert pixels == one, '%s draws otherwise than one thread in %d px' % (
+                name, sum(1 for i in range(0, len(one), 4) if pixels[i:i + 4] != one[i:i + 4]))
+        assert frames['4'][1]['density_plan2']['threads'] == 4, frames['4'][1]['density_plan2']
+        assert members['4'] <= 1.25 * members['1'] and members['bounds'] >= 1.5 * members['1'], members
+        print('density stack: point lists - one, two and four threads and the bounds draw alike (%d px lit); members '
+              'counted %s' % (one_res['density_stack']['lit'], ' / '.join('%s %d' % kv for kv in members.items())))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def frames_of(w, gen, visible, bg=False):
     """Every frame answer of one render, the refining rounds first: [(pixels,
     result)], the last one final."""
@@ -758,6 +831,7 @@ def main():
         dots_checks(temp)
         history_checks(temp)
         held_checks(temp)
+        lists_checks(temp)
     print('density stack gate: OK')
 
 

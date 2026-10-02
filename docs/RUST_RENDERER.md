@@ -306,6 +306,14 @@ a chunk of it in one block counted at once): the hash map's counts, unions and
 order for less (the synthetic chip's `H01_00001` fit view: pass 2 planned
 431-450 -> 376-400 ms on four threads, 768-771 -> 657-662 on one, the frames
 byte for byte alike); `FLOE_RUST_DENSITY_DOT_GRID=off` is its kill switch.
+Since 0.12.269 a plan of some regions (the threads' bands) walks a point
+list's members by each of the cell's boxes, not by their bounds - the regions
+dealt round robin span the view, so every thread counted every member of a
+list across it (field 2026-10-02: `list members 86.6M`; a million random
+vias, 1 / 2 / 4 threads counted 1 / 2 / 2.96 M) - and puts out only the
+blocks a box holds whole (floe_vfs `dot_block_whole`), so the merge never keeps
+a block counted in part; `Cache::merge_plans` looks its blocks up with the
+planner's Fx hasher. `FLOE_RUST_DENSITY_DOT_BOXES=off` is the kill switch.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

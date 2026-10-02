@@ -356,6 +356,28 @@ pub fn dot_grid() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_DOT_GRID").as_deref() != Ok("off"))
 }
 
+/// HierOpts::dot_boxes default: on; FLOE_RUST_DENSITY_DOT_BOXES=off (the kill
+/// switch) walks a point list's members over the bounds of the cell's boxes
+/// and keeps every block, as before 2026-10-02.
+pub fn dot_boxes() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_DOT_BOXES").as_deref() != Ok("off"))
+}
+
+/// HierOpts::dot_boxes: every item counted into block (bx, by) - by its
+/// centre, a half dbu step (add_dots' key), or over it when wider than a block,
+/// within the cell's `rbbox` - meets one of `boxes`: the block holds all it
+/// stands for. A block the view or a region meets is one: the boxes reach a
+/// block further.
+fn dot_block_whole(bx: i64, by: i64, block: f64, boxes: &[BBox], rbbox: &BBox) -> bool {
+    // the centre a half step past a box's side, or the cell's edge, is in
+    // another block: so is every centre beyond it
+    let side = |lo: i64, hi: i64, cell_lo: i64, cell_hi: i64, at: i64| {
+        (lo <= cell_lo || ((lo as f64 - 0.5) / block).floor() < at as f64) && (hi >= cell_hi || ((hi as f64 + 0.5) / block).floor() > at as f64)
+    };
+    boxes.iter().any(|b| side(b.x0, b.x1, rbbox.x0, rbbox.x1, bx) && side(b.y0, b.y1, rbbox.y0, rbbox.y1, by))
+}
+
 /// HierOpts::dot_grid: the most blocks a cell's grid spans (its head: 4 B a
 /// block) - a view of 5,600 x 5,600 px at 4 px blocks; a cell whose boxes
 /// span more keeps its blocks in the hash map.
@@ -479,10 +501,11 @@ pub fn dot_block_cap(block_px: f64) -> u32 {
 
 /// An Fx-style hasher (rustc's) for the planner's integer keys: the dot
 /// blocks, the dedup set and the layer memos take millions of lookups in a
-/// dots plan, where SipHash was an eighth of the plan (2026-10-01). Only
-/// lookups use it - nothing is iterated in hash order.
+/// dots plan, where SipHash was an eighth of the plan (2026-10-01); and the
+/// merge of pass 2's band plans (render-core Cache::merge_plans, 2026-10-02).
+/// Only lookups use it - nothing is iterated in hash order.
 #[derive(Default, Clone, Copy)]
-struct FxHasher(u64);
+pub struct FxHasher(u64);
 
 impl FxHasher {
     #[inline]
@@ -522,9 +545,9 @@ impl std::hash::Hasher for FxHasher {
     }
 }
 
-type FxBuild = std::hash::BuildHasherDefault<FxHasher>;
-type FxMap<K, V> = HashMap<K, V, FxBuild>;
-type FxSet<K> = HashSet<K, FxBuild>;
+pub type FxBuild = std::hash::BuildHasherDefault<FxHasher>;
+pub type FxMap<K, V> = HashMap<K, V, FxBuild>;
+pub type FxSet<K> = HashSet<K, FxBuild>;
 
 /// HierOpts::rep_decode_bytes default: 256 MiB
 pub const REP_DECODE_BYTES: u64 = 256 << 20;
@@ -890,6 +913,17 @@ pub struct HierOpts {
     /// nodes, a routing cell's fit view planned 2.9 s on four threads). Off:
     /// the hash map.
     pub dot_grid: bool,
+    /// The sub-cut dots of a plan of some regions (renderd's pass-2 threads,
+    /// each dealt regions round robin): a point list's members walked by each
+    /// of the cell's boxes, not by their bounds - which spanned the view, so
+    /// every thread counted every member of a list across it (user
+    /// 2026-10-02, field: `list members 86.6M` of `cell dots 97.2M`; a
+    /// million random vias: 1 / 2 / 4 threads counted 1 / 2 / 2.96 M, pass 2
+    /// planned 28 / 46 / 71 ms) - and a block no box holds whole (dot_block_whole:
+    /// one the plan may have counted in part, out of its regions' sight) left
+    /// out, so a merge never keeps a part for the whole. Off: the bounds, every
+    /// block.
+    pub dot_boxes: bool,
     /// The sub-cut dots' one walk (CUT_DENSITY_DESIGN §10.12, 2026-10-01):
     /// Some(share) selects the pages at the cells' cut - those pass 1 drew,
     /// decoded already - while the raster's record cut
@@ -992,6 +1026,7 @@ impl Default for HierOpts {
             dot_spread: dot_spread(),
             dot_pages: dot_pages(),
             dot_grid: dot_grid(),
+            dot_boxes: dot_boxes(),
             dot_records: None,
             probe_limit: 0,
             free_pages: None,
@@ -1098,6 +1133,8 @@ pub struct HierStats {
     /// then the dot block updates the hash map took: beyond a cell's grid, or
     /// every one without it (HierOpts::dot_grid) (2026-10-02)
     pub dot_by: [u64; 9],
+    /// HierOpts::dot_boxes: the dot blocks left out, no box holding them whole
+    pub dot_partial: u64,
     /// the plan was made with HierOpts::sub_cut_dots: its washes are dot
     /// items (the density raster draws them as dots, not as marker rects)
     pub sub_cut_dots: bool,
@@ -1958,6 +1995,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         one_walk: dots.is_some() && opts.dot_records.is_some(),
         page_dots: opts.dot_pages,
         grid_on: opts.dot_grid,
+        dot_boxes: opts.dot_boxes,
         grid: DotGrid::default(),
         dot_run: None,
         block_px: opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX),
@@ -2363,6 +2401,8 @@ struct Hier<'a> {
     /// goes to another and before the cell's blocks are flushed
     grid_on: bool,
     grid: DotGrid,
+    /// HierOpts::dot_boxes
+    dot_boxes: bool,
     dot_run: Option<((i64, i64, u32), u64, BBox)>,
     /// node visits since HierOpts::stop was last looked at, and whether it
     /// tripped (the walk unwinds)
@@ -3098,7 +3138,8 @@ impl<'a> Hier<'a> {
             }
         }
         if self.dots {
-            self.flush_dots(&mut wc);
+            let rbbox = self.v.cell(ci).rbbox;
+            self.flush_dots(&mut wc, &boxes, &rbbox);
         }
         self.out.insert(key, wc);
     }
@@ -3367,8 +3408,9 @@ impl<'a> Hier<'a> {
     /// draw the blocks' lattice). Else a box around the centre of what they
     /// stand for, inside the block, of DOT_AREA_PX per dot and half a dot
     /// more (the raster lights floor(area / DOT_AREA_PX)); a full block is
-    /// the block.
-    fn flush_dots(&mut self, wc: &mut WsCell) {
+    /// the block. HierOpts::dot_boxes: a block none of the cell's `boxes`
+    /// holds whole (dot_block_whole, the cell's `rbbox`) is left out.
+    fn flush_dots(&mut self, wc: &mut WsCell, boxes: &[BBox], rbbox: &BBox) {
         let ppd = self.px_per_dbu;
         let block = self.block_px / ppd;
         self.end_run();
@@ -3388,6 +3430,10 @@ impl<'a> Hier<'a> {
             wc.dot_counts.resize(wc.washes.len(), 0);
         }
         for ((bx, by, layer), (count, union)) in blocks {
+            if self.dot_boxes && !dot_block_whole(bx, by, block, boxes, rbbox) {
+                self.st.dot_partial += 1;
+                continue;
+            }
             if !self.take_box(1) {
                 continue;
             }
@@ -3787,34 +3833,47 @@ impl<'a> Hier<'a> {
             view.grow(b);
         }
         if h.kind == 2 {
-            // a point list: the members in view, chunk by chunk
+            // a point list: the members in view, chunk by chunk - under the
+            // dots in each of the cell's boxes, not their bounds
+            // (HierOpts::dot_boxes: a plan of regions dealt round robin had
+            // bounds across the view)
             let Some(pr) = self.v.pts_ref(pli) else {
                 return;
             };
-            let region = minkowski_neg(&view, &b0);
+            let regions: Vec<BBox> = if self.dots && self.dot_boxes {
+                boxes.iter().map(|b| minkowski_neg(b, &b0)).filter(|r| !r.is_empty()).collect()
+            } else {
+                vec![minkowski_neg(&view, &b0)]
+            };
+            let mut bounds = BBox::EMPTY;
+            for r in &regions {
+                bounds.grow(r);
+            }
+            let holds = |r: &BBox, c: &BBox| r.x0 <= c.x0 && c.x1 <= r.x1 && r.y0 <= c.y0 && c.y1 <= r.y1;
             let stride = self.box_stride;
             let mut members = 0u64;
+            let mut meets: Vec<BBox> = Vec::with_capacity(regions.len());
             // the dots: box_layers' topmost layer, found once for the members
             // (HierOpts::dot_grid)
             let top = if self.dots && self.grid_on { found.top(self.set_words).map(|rank| self.vis_layers[rank]) } else { None };
             for k in 0..pr.n_chunks {
                 let chunk = pr.chunk_bbox(k);
-                if !chunk.intersects(&region) {
+                if !chunk.intersects(&bounds) {
                     continue;
                 }
+                meets.clear();
+                meets.extend(regions.iter().filter(|r| chunk.intersects(r)).copied());
+                if meets.is_empty() {
+                    continue;
+                }
+                // every member in view: no member asked
+                let whole = meets.iter().any(|r| holds(r, &chunk));
                 let (lo, hi) = pr.chunk_range(k);
                 // the dots: a chunk in view whole whose members' centres share
                 // one block, at once (HierOpts::dot_grid)
                 let held = (hi - lo) as u64;
                 if let Some(layer) = top {
-                    if stride == 1
-                        && members + held <= SUB_CUT_BOX_ARRAY_MAX
-                        && region.x0 <= chunk.x0
-                        && chunk.x1 <= region.x1
-                        && region.y0 <= chunk.y0
-                        && chunk.y1 <= region.y1
-                        && self.dot_chunk(layer, &b0, &chunk, held)
-                    {
+                    if stride == 1 && members + held <= SUB_CUT_BOX_ARRAY_MAX && whole && self.dot_chunk(layer, &b0, &chunk, held) {
                         members += held;
                         self.st.sub_cut_box_members += held;
                         continue;
@@ -3823,7 +3882,7 @@ impl<'a> Hier<'a> {
                 for slot in (lo..hi).filter(|slot| *slot as i64 % stride == 0) {
                     let (ox, oy) = pr.pt(slot);
                     let at = pt_box(ox, oy);
-                    if !at.intersects(&region) {
+                    if !whole && !meets.iter().any(|r| at.intersects(r)) {
                         continue;
                     }
                     members += 1;
@@ -6778,6 +6837,85 @@ mod tests {
             }
             assert!(grid.stats.sub_cut_dot_items < map.stats.sub_cut_dot_items);
         }
+    }
+
+    #[test]
+    fn a_point_list_is_walked_by_each_box_and_a_block_no_box_holds_whole_is_left_out() {
+        // HierOpts::dot_boxes (user 2026-10-02, field: `list members 86.6M`):
+        // renderd deals pass 2's regions round robin to threads, so a thread's
+        // regions span the view; a point list's members were walked over their
+        // bounds and every thread counted them all. 3,000 LEAFs (60 dbu) at
+        // random over 20 x 20 um, 0.02 px/dbu, 8 px blocks of 400 dbu; the view
+        // in four quadrants, dealt to two plans as round robin deals them.
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: i64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % n as u64) as i64
+        };
+        let pts: Vec<(i64, i64)> = (0..3000).map(|_| (next(19_900), next(19_900))).collect();
+        let cells = [
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] },
+            FCell { name: "TOP", pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)], places: vec![(0, 0, 0, 0, false, Rep::Pts(pts.into()))] },
+        ];
+        let chip = fixture(&cells, 1);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = false;
+        let quad = [bx(-10, -10, 10_000, 10_000), bx(10_000, -10, 20_000, 10_000), bx(-10, 10_000, 10_000, 20_000), bx(10_000, 10_000, 20_000, 20_000)];
+        let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, k_boxes: 4, ..HierOpts::default() };
+        let plan = |regions: Vec<BBox>, on: bool| plan_hier(&chip, &req, &HierOpts { regions, dot_boxes: on, ..base.clone() });
+        // a dot item's block, from its box's centre
+        let blocks = |plan: &HierPlan| -> BTreeMap<(i64, i64, u32), (BBox, u16)> {
+            let cell = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+            cell.washes.iter().zip(&cell.dot_counts).map(|(&(layer, b), &n)| (((b.x0 + b.x1).div_euclid(800), (b.y0 + b.y1).div_euclid(800), layer), (b, n))).collect()
+        };
+        let whole = plan(quad.to_vec(), true);
+        let all = blocks(&whole);
+        let mut seen = BTreeMap::new();
+        for (part, mine) in [(vec![quad[0], quad[3]], [quad[0], quad[3]]), (vec![quad[1], quad[2]], [quad[1], quad[2]])] {
+            let apart = plan(part.clone(), true);
+            // its members, not the whole list's
+            assert!(apart.stats.dot_by[3] * 10 < whole.stats.dot_by[3] * 7, "{} of {}", apart.stats.dot_by[3], whole.stats.dot_by[3]);
+            // what it puts out is the whole plan's, block for block
+            let got = blocks(&apart);
+            for (key, item) in &got {
+                assert_eq!(all.get(key), Some(item), "block {key:?}");
+            }
+            // ... and every block its quadrants see
+            for key in all.keys() {
+                let b = bx(key.0 * 400, key.1 * 400, key.0 * 400 + 400, key.1 * 400 + 400);
+                if mine.iter().any(|q| q.intersects(&b) && b.x0 < q.x1 && q.x0 < b.x1 && b.y0 < q.y1 && q.y0 < b.y1) {
+                    assert!(got.contains_key(key), "block {key:?} of its quadrants");
+                }
+            }
+            assert!(apart.stats.dot_partial > 0);
+            seen.extend(got);
+            // the bounds (FLOE_RUST_DENSITY_DOT_BOXES=off): every member, every
+            // block
+            let bounds = plan(part, false);
+            assert_eq!((bounds.stats.dot_by[3], bounds.stats.dot_partial), (whole.stats.dot_by[3], 0));
+        }
+        // the two plans hold every block of the whole view
+        let view = bx(-10, -10, 20_000, 20_000);
+        for key in all.keys() {
+            let b = bx(key.0 * 400 + 1, key.1 * 400 + 1, key.0 * 400 + 399, key.1 * 400 + 399);
+            if view.intersects(&b) {
+                assert!(seen.contains_key(key), "block {key:?}");
+            }
+        }
+        // a block is whole when its centres - half dbu steps - lie in a box,
+        // or past the cell's edge where none can
+        let cell = bx(-5_000, -5_000, 5_000, 5_000);
+        let one = [bx(0, 0, 1_000, 1_000)];
+        assert!(dot_block_whole(0, 0, 400.0, &one, &cell));
+        assert!(!dot_block_whole(2, 0, 400.0, &one, &cell) && !dot_block_whole(-1, 0, 400.0, &one, &cell));
+        assert!(dot_block_whole(-1, 0, 400.0, &one, &bx(0, 0, 5_000, 5_000)) && dot_block_whole(2, 0, 400.0, &one, &bx(-5_000, -5_000, 1_000, 5_000)));
+        // the last centre of block 2 is 1,199.5: a box to 1,200 holds it
+        assert!(!dot_block_whole(2, 0, 400.0, &[bx(800, 0, 1_199, 400)], &cell));
+        assert!(dot_block_whole(2, 0, 400.0, &[bx(800, 0, 1_200, 400)], &cell));
+        assert!(dot_block_whole(2, 0, 400.0, &[bx(0, 0, 100, 100), bx(799, -1, 1_200, 400)], &cell));
     }
 
     #[test]

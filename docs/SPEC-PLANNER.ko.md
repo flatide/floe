@@ -341,6 +341,21 @@
     멤버·페이지이고, 마지막 값은 해시맵 갱신 수다. 항목 수(`sub_cut_dot_items`)는 청크 멤버를 뺀 합과 같다.
   - 단위: `the_dots_grid_counts_and_orders_the_blocks_as_the_hash_map_does`,
     `a_dot_grid_and_the_hash_map_beyond_it_drain_in_key_order`.
+  **영역별 계획의 점 리스트(0.12.269, renderd 0.12.248; 사용자 2026-10-02, 실칩 `list members 86.6M`):**
+  `HierOpts::dot_boxes`(기본 켬, `FLOE_RUST_DENSITY_DOT_BOXES=off`가 킬 스위치)는 다음 둘을 한다.
+  - 점 리스트의 멤버를 셀 상자들의 범위가 아니라 상자 하나하나로 거른다. renderd가 번갈아 나눈 영역은 범위가 뷰를
+    가로질러, 스레드마다 리스트의 멤버를 다 셌다.
+  - `flush_dots`가 어떤 상자에도 통째로 들지 않는 블록을 뺀다(`dot_block_whole`, `HierStats::dot_partial`).
+    - 판정: 블록의 중심(반 dbu 간격)이 모두 한 상자 안에 있거나, 상자가 셀의 끝까지 닿아야 한다.
+    - 계획의 영역이 보는 블록은 늘 통째다(시작 상자가 한 블록 더 넓고, 자식의 상자는 부모 상자의 역상을 포함한다).
+    - 따라서 영역별 계획이 내는 블록은 한 계획의 블록과 같고, `merge_plans`의 "개수가 큰 것"이 부분 개수를 고르지
+      않는다.
+  - 단위: `a_point_list_is_walked_by_each_box_and_a_block_no_box_holds_whole_is_left_out`.
+    - 픽스처: 무작위 3,000점 리스트, 사분면 넷을 대각선 둘로 나눔.
+    - 각 계획은 멤버의 70 % 미만만 센다.
+    - 낸 블록은 한 계획의 블록과 같고, 자기 사분면이 보는 블록을 모두 내며, 둘이 합쳐 뷰를 덮는다.
+    - 스위치를 끄면 멤버를 전부 센다.
+    - `dot_block_whole`의 경계 사례.
   **한 번 걷기(0.12.259):** `HierOpts::dot_records = Some(몫)`(`Vfs::plan_hier_in`의 다섯째 인자,
   `PlanRequest::dot_records`)이면 페이지는 셀의 컷에서 고르고(`Hier::page_cut` = 컷), 래스터의 레코드 컷
   (`HierStats::shape_cut`)은 컷 × 몫, 크기 컷된 페이지는 크기와 무관하게 점 항목(`box_page`; 개수 `page_dots`)이다.

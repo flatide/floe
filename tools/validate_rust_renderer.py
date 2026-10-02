@@ -633,15 +633,17 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # where the cells' dot items came from (2026-10-02): the ones there
         # are, a chunk of a point list one item, in the log line only
         res["density_plan2"].update(by_nodes=900000, by_placements=1200000, by_arrays=55158,
-                                    by_list_members=480000, by_list_chunks=20000,
-                                    by_chunk_members=5120000, by_array_members=0,
+                                    by_list_members=470000, by_list_chunks=20000,
+                                    by_chunk_members=5120000, by_array_members=10000,
                                     by_pages=0, map_updates=12)
         res["density_pages"].update(decoded=206, over_budget=3)
         full, brief = perf_status(res)
+        # the chunks' members right after the chunks (0.12.268 put them last:
+        # the field's `list chunks 78, array members 57k of 354 members`)
         self.assertIn(
             "reads 15.2M, cell dots 2.7M [nodes 900k, placements 1.2M, arrays"
-            " 55k, list members 480k, list chunks 20k of 5.1M members; hash"
-            " map 12]), 206 pages", full)
+            " 55k, list members 470k, list chunks 20k of 5.1M members, array"
+            " members 10k; hash map 12]), 206 pages", full)
         # what pass 2's reserve kept out (2026-10-01): in the log line too
         self.assertIn(", 206 pages, pass 2 over budget: floor probe, thinned, 3 pages left out]", full)
         self.assertEqual(

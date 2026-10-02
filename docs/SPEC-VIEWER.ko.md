@@ -55,7 +55,8 @@
     0.12.262의 줄과 같은데, 0.12.264부터 밀도 태그에 `lit L px`가 붙고 `dot items`가 `cell dots`로 바뀌었다.
     0.12.268부터는 로그 줄의 `cell dots N` 뒤에 출처가 붙는다. 형식은 `[nodes …, placements …, arrays …, list
     members …, list chunks … of … members, array members …, pages …; hash map …]`이고, 0이 아닌 것만 보인다
-    (사용자 2026-10-02, 실칩 `cell dots 87.2M`). 하단 줄에는 붙지 않는다.
+    (사용자 2026-10-02, 실칩 `cell dots 87.2M`). 하단 줄에는 붙지 않는다. 0.12.268은 `of … members`를 맨 끝(배열
+    멤버 뒤)에 붙였고, 0.12.269부터 청크 바로 뒤에 붙는다.
   - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
     - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
       붙는다. load의 `[plan+delta+apply]`는 빠진다.

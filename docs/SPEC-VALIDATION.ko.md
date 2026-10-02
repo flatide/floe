@@ -154,6 +154,13 @@ sh tools/validate_rust.sh --only quick path/to.oas
       항목 수는 출처 합과 같다.
   - 단위 `a_dot_grid_and_the_hash_map_beyond_it_drain_in_key_order`: 무작위 갱신 2,000개가 정렬 맵과 같다.
   - 어댑터 계약: `density_plan2` 22개 값. 상태줄 테스트: 로그 줄의 출처(요약 줄에는 없음).
+  0.12.269(점 리스트는 스레드마다 자기 영역의 멤버만):
+  - 게이트 `density_stack` `lists_checks`:
+    - 픽스처: 0.1 µm VIA를 300 µm 정사각형에 무작위로 4,000개(KLayout 압축 10, 점 리스트로 색인), 1000×1000 px(타일 9개).
+    - 1/2/4 스레드와 `FLOE_RUST_DENSITY_DOT_BOXES=off`의 프레임이 같다.
+    - 센 멤버: 4 스레드는 1 스레드의 1.25배 이하, 끈 경우는 1.5배 이상(4,000 / 4,201 / 4,204 / 11,822).
+  - 단위 `a_point_list_is_walked_by_each_box_and_a_block_no_box_holds_whole_is_left_out`.
+  - 상태줄 테스트: 로그 줄의 `list chunks C of M members`가 청크 바로 뒤에 온다(0.12.268은 배열 멤버 뒤였다).
   0.12.261(블록 4 px, 한 번 걷기는 선택, 하한 1 px, 페이지 점 끔): 게이트 점 절의 기본은 4 px·퍼뜨림·맞춤·하한 1 px —
   성긴 배열 100 px가 각 멤버에서 1.5 px 안, 맞닿은 배열 = Σ min(8, 4×4 블록의 멤버), 항목 = 성긴 배열 100 + 1 + 맞닿은
   블록, TOP의 0.5 px 점은 그리지도 점으로 서지도 않음, `density_floor` 1, `density_plan2` 탐침 0·맞춤 1; 하한 0·0.25 px는

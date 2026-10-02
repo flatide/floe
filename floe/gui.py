@@ -1060,12 +1060,13 @@ def perf_status(res, depth_note=""):
                 # field's `cell dots 87.2M`): the ones there are, a point
                 # list's chunk counted at once one item, and the dot block
                 # updates past the cells' grids
-                by = ", ".join("%s %s" % (name, fmt_count(p2[key])) for key, name in (
+                # (the chunks' members right after them: 0.12.268 put them
+                # last, after the array members - user 2026-10-02)
+                by = ", ".join("%s %s%s" % (name, fmt_count(p2[key]), " of %s members" % fmt_count(
+                    p2.get("by_chunk_members", 0)) if key == "by_list_chunks" else "") for key, name in (
                     ("by_nodes", "nodes"), ("by_placements", "placements"), ("by_arrays", "arrays"),
                     ("by_list_members", "list members"), ("by_list_chunks", "list chunks"),
                     ("by_array_members", "array members"), ("by_pages", "pages")) if p2.get(key))
-                if p2.get("by_list_chunks"):
-                    by += " of %s members" % fmt_count(p2.get("by_chunk_members", 0))
                 if p2.get("map_updates"):
                     by += "; hash map %s" % fmt_count(p2["map_updates"])
                 plan += (" (probe %d ms x%d, fit %d ms x%d"
