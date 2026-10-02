@@ -131,39 +131,50 @@ design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀
   11.4 s → 188,065 엣지·10.6 MB. 레코드 400만 이하 캐시는 데몬이 메모리
   요약(`HIER_INLINE_PLACES`).
 
-## design.ovb — 페이지 점유 비트 (FLOEOVB1, 2026-10-02)
+## design.ovb — 페이지 점유 격자 (FLOEOVB1 v2, 2026-10-03)
 
-정본: `rust/ovm/src/lib.rs`(`ovb_header`, `occ_cell`/`occ_edge`,
-`Ovm::attach_page_occ`), 생성 `rust/cli/src/vfs.rs`(`page_occupancy`,
-`OvbWriter`). 페이지마다 bbox를 64×64칸(`OCC_GRID`)으로 나눠 도형이 있는 칸을
-표시한다. 2패스 점이 하한 아래 페이지의 점을 그 칸에만 뿌린다(SPEC-PLANNER
-§3, `HierOpts::dot_page_occ`).
+정본: `rust/ovm/src/lib.rs`(`ovb_header`, `ovb_image`, `occ_cell`/`occ_edge`,
+`occ_level`/`occ_coverage`, `occ_encode`/`occ_decode`, `Ovm::attach_page_occ`), 생성
+`rust/cli/src/vfs.rs`(`page_occupancy`, `page_occupancy_areas`, `occ_axis_lengths`,
+`OvbWriter`). 페이지마다 bbox를 64×64칸(`OCC_GRID`)으로 나눠, 칸마다 도형이 덮는 면적의
+비율을 단계로 남긴다. 2패스 점이 하한 아래 페이지의 점을 그 칸에, 덮인 면적만큼 놓는다
+(SPEC-PLANNER §3, `HierOpts::dot_page_occ`·`dot_occ_cover`).
 
-- 인덱서가 페이지를 쓰는 순서대로 `design.ovb.tmp`에 쓰고, 빌드 끝에 머리말을 채워
+- v1(0.12.274)은 칸마다 비트 하나(도형 유무)였다. v2 리더는 v1 파일을 붙이지 않는다
+  (stderr 한 줄, 상자 전체 퍼뜨리기). 다시 색인하면 v2가 된다.
+- 인덱서가 페이지를 쓰는 순서대로 `design.ovb.tmp`에 쓰고, 끝에 페이지 표와 머리말을 채워
   rename한다. design.ovm(마커)보다 먼저 공개하며 재빌드 삭제 목록에 들어 있다.
   `--no-page-occupancy`(= `floe2 index --no-page-occupancy`)면 만들지 않는다.
-- 머리말 64 B: magic `FLOEOVB1`, version u32(1), grid u32(64), n_pages u32,
-  칸 바이트 u32(512), src_size u64, src_mtime u64, ovp_len u64, 나머지 0.
-- 본문: 페이지 순서대로 512 B씩. 64행이고 행 y는 little-endian u64이며 비트 x가
-  칸 (x, y)다. 칸 k는 `[lo + ⌊k·ext/64⌋, lo + ⌊(k+1)·ext/64⌋)`(`occ_edge`)이고,
-  좌표는 그 경계로 칸에 넣는다(`occ_cell`). 전부 0이면 기록 없음(LOD 변종 페이지)이다.
-- 표시는 멤버마다 도형 상자가 닿는 칸이다. polygon·path는 상자로 표시한다.
-  - 점 리스트는 멤버마다 표시한다.
-  - 직교 Grid는 축마다 따로 표시한다(`occ_axis_cells`, 멤버 수와 무관하게 O(64)).
-  - 비스듬한 Grid는 2^16 멤버까지 멤버마다, 그 이상은 레코드 상자로 표시한다.
-- 출처 검사: `Vfs::open`이 붙인다. 머리말의 n_pages·src_size·src_mtime·ovp_len·grid가
-  design.ovm과 다르거나 길이가 `64 + 512·n_pages`가 아니면 붙이지 않는다(stderr 한 줄).
-  그런 캐시와 이 파일이 없는 캐시는 이전처럼 상자 전체에 뿌린다.
-- 크기와 시간(`--no-lod`, `--jobs 12`, 2026-10-02):
-
-  | 칩 | 페이지 | design.ovb | 색인 대비 | 색인 시간(없음 → 있음) |
-  |---|---|---|---|---|
-  | 라우팅 합성 칩 | 588 | 294 KB | 0.07 % | 13.3~14.8 s → 14.4 s |
-  | sample9 | 9,760 | 4.8 MB | 3.9 % | 2.9 s → 3.0~3.1 s |
-  | 합성 MAIN01 1/10 | 226,153 | 110 MB | 1.6 % | 60.0/49.0 s → 52.7/48.8 s |
-
-  - 시간 차이는 잡음 범위다. 표시 계산은 인코드 작업자 CPU로 MAIN01 1/10에서 2.9~3.0 s다.
-  - 크기는 페이지 수에 비례한다. 작은 페이지가 많은 칩(sample9 평균 13 KB)에서 비중이 크다.
+- 머리말 64 B: magic `FLOEOVB1`, version u32(2), grid u32(64), n_pages u32, 단계 수 u32(15),
+  src_size u64, src_mtime u64, ovp_len u64, 페이지 표 위치 u64, 나머지 0.
+- 본문: 페이지 순서대로 각 페이지의 기록(가변 길이), 그다음 페이지 표. 기록은 셋 중 하나다(`occ_record`).
+  - 격자: 칸마다 단계 4비트(행 우선, 짝수 x가 아래 니블)를 raw deflate로 압축한 것이다(`occ_encode`).
+    페이지 범위(긴 변)가 가장 큰 도형(긴 변)의 16배(`OCC_GRID_SHAPE`)보다 넓을 때만 둔다
+    (`occ_wants_grid`).
+  - 합계 8 B: 그보다 큰 도형이 있는 페이지는 도형들이 덮는 면적(dbu², f64)만 둔다(`occ_total`). 이런
+    페이지는 모든 도형이 하한 아래일 때 화면에서 16 px(하한 1 px 기준) 미만이라 격자가 쓸모없다.
+    작은 셀의 레이어 페이지가 대부분 여기 속한다(sample9는 9,760페이지 전부).
+  - 길이 0: 기록 없음(LOD 변종 페이지, 또는 덮인 칸이 없는 페이지)이다.
+  - 페이지 표: (n_pages + 1)개의 u64 시작 위치다. 페이지 i의 격자는 [표[i], 표[i+1])이고, 마지막
+    값은 표 자신의 위치다.
+- 칸과 단계:
+  - 칸 k는 `[lo + ⌊k·ext/64⌋, lo + ⌊(k+1)·ext/64⌋)`(`occ_edge`)이고, 좌표는 그 경계로 칸에
+    넣는다(`occ_cell`).
+  - 단계 0은 도형이 닿지 않은 칸이다. 단계 k(1~15)는 덮인 비율 약 2^(k−15)를 뜻한다(로그 반올림,
+    2배 간격). 2^−14.5보다 작은 것은 1, 1을 넘는 것(겹침)은 15다.
+- 면적: 멤버의 도형 상자가 칸과 겹친 넓이를 더한다. polygon은 넓이(shoelace) / 상자 넓이,
+  path는 (길이 + 연장) × 폭 / 상자 넓이의 비율로 상자에 퍼뜨린다.
+  - 점 리스트는 멤버마다 더한다.
+  - 직교 Grid는 x 구간들과 y 구간들의 곱이므로, 칸의 넓이 = (그 열에 든 x 길이) × (그 행에 든
+    y 길이)다. 축마다 한 모서리 왼쪽에 든 길이를 등차급수 닫힌 식으로 구한다(`occ_axis_lengths`).
+    멤버 수, 겹침(폭 > 간격), 음의 간격과 무관하게 O(64)다.
+  - 비스듬한 Grid는 2^16 멤버까지 멤버마다, 그 이상은 멤버 넓이 합을 레코드 상자에 고르게
+    퍼뜨린다.
+- 출처 검사: `Vfs::open`이 붙인다. 다음 경우에는 붙이지 않는다(stderr 한 줄).
+  - 머리말의 version·grid·n_pages·단계 수·src_size·src_mtime·ovp_len이 design.ovm과 다르다.
+  - 페이지 표가 파일 끝에 맞지 않거나 순서가 어긋난다.
+  - 풀리지 않는 격자는 그 페이지만 기록 없음으로 본다.
+- 크기와 시간: CUT_DENSITY_DESIGN §10.12의 표.
 
 ## meta.json (CACHE_VERSION = 8)
 

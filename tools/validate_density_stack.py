@@ -843,7 +843,10 @@ def occ_checks(temp):
         assert done.returncode == 0, done.stdout + done.stderr
     ice, bare_ice = Path(temp) / '.occ.oas.ice', Path(temp) / '.occ_bare.oas.ice'
     pages = int.from_bytes((ice / 'design.ovm').read_bytes()[52:56], 'little')
-    assert (ice / 'design.ovb').stat().st_size == 64 + 512 * pages and not (bare_ice / 'design.ovb').exists(), pages
+    # v2: a header, each page's grid of levels deflated, the page table
+    ovb = (ice / 'design.ovb').read_bytes()
+    assert ovb[:8] == b'FLOEOVB1' and int.from_bytes(ovb[8:12], 'little') == 2 and int.from_bytes(ovb[16:20], 'little') == pages, ovb[:24]
+    assert len(ovb) < 64 + 8 * (pages + 1) + 2048 * pages and not (bare_ice / 'design.ovb').exists(), (len(ovb), pages)
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PAGE_SPREAD': 'on'}
     workers = {'occ': worker(src, env), 'box': worker(src, dict(env, FLOE_RUST_DENSITY_PAGE_OCC='off')),
                'bare': worker(bare, env), 'truth': worker(src, {})}
@@ -885,7 +888,89 @@ def occ_checks(temp):
             stale.stop()
         print('density stack: a page under the floor spread over its occupancy grid (%d pages, design.ovb %d B) lights %d px, none '
               'between its squares (cut-free none); over its box %d px between; no design.ovb, or another index\'s, as over the box'
-              % (pages, 64 + 512 * pages, lit['occ'], between['box']))
+              % (pages, len(ovb), lit['occ'], between['box']))
+    finally:
+        for w in workers.values():
+            w.stop()
+    mixed_checks(temp)
+
+
+def mixed_layout(path):
+    """One page of two sizes: TOP's own 20,000 boxes of 0.2 um at random over
+    the lower half of 300 x 300 um (2 % of it covered) and 30,000 of 1.2 um over
+    the upper half (about all of it)."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(*LOW)
+    rnd = random.Random(23)
+    for side, y0, n in ((0.2, 0, 20_000), (1.2, 150, 30_000)):
+        for _ in range(n):
+            x, y = rnd.randrange(300_000) / 1000.0, y0 + rnd.randrange(150_000) / 1000.0
+            top.shapes(layer).insert(kdb.DBox(x, y, x + side, y + side))
+    options = kdb.SaveLayoutOptions()
+    options.format = 'OASIS'
+    options.oasis_compression_level = 10
+    ly.write(str(path), options)
+
+
+def mixed_checks(temp):
+    """A page's dots are what its shapes cover, cell by cell (design.ovb v2;
+    user 2026-10-03, the routing chip's fill: 0.3 um squares paged with 1 um
+    array squares were blank where the page was decoded and, one zoom step out,
+    as dense as the arrays - "without their density"). The two sizes' page at
+    depth 0 with the page spread on, 1000 px:
+      * over 300 um (0.3 um a px): the 1.2 um boxes are pass 1's and the page
+        decoded - its 0.2 um boxes, under the floor, light the lower half as a
+        cut-free frame does (FLOE_RUST_DENSITY_UNDER_FLOOR=drop: none);
+      * over 1,600 um (1.6 um a px): every box is under the floor and the page
+        spread - the lower half's dots are what its boxes cover (within a
+        third of the cut-free frame's) where an even share of the members at
+        the largest box's area (FLOE_RUST_DENSITY_OCC_COVER=off) lights it
+        three times over."""
+    src = Path(temp) / 'mixed.oas'
+    mixed_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PAGE_SPREAD': 'on'}
+    workers = {'new': worker(src, env), 'drop': worker(src, dict(env, FLOE_RUST_DENSITY_UNDER_FLOOR='drop')),
+               'even': worker(src, dict(env, FLOE_RUST_DENSITY_OCC_COVER='off')), 'truth': worker(src, {})}
+    try:
+        side = 1000
+
+        def view(w, gen, span, cut_px=3.0):
+            dbu = float(w.cache.meta['dbu'])
+            w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': (0.0, 0.0, span / dbu, span / dbu), 'view': None,
+                      'w': side, 'h': side, 'depth': 0, 'cut_px': cut_px, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('mixed frame timeout')
+
+        def lit(pixels, c0, r0, c1, r1):
+            return sum(1 for r in range(r0, r1) for c in range(c0, c1) if pixels[(r * side + c) * 4:(r * side + c) * 4 + 4] != BLACK)
+
+        # the lower half on screen (rows from the top): over 300 um rows 520-980,
+        # over 1,600 um the layout is the bottom left 188 px, its lower half rows
+        # 909-996, columns 4-184
+        near = {name: view(w, 1, 300.0, 0.0 if name == 'truth' else 3.0) for name, w in workers.items() if name != 'even'}
+        low = {name: lit(px, 20, 520, 980, 980) for name, (px, _) in near.items()}
+        assert near['new'][1]['density_pages']['decoded'] + near['new'][1]['density_pages']['in_hand'] > 0, near['new'][1]['density_pages']
+        assert low['truth'] > 1000 and abs(low['new'] - low['truth']) <= low['truth'] // 4 and low['drop'] == 0, low
+        far = {name: view(w, 2, 1600.0, 0.0 if name == 'truth' else 3.0) for name, w in workers.items() if name != 'drop'}
+        low_far = {name: lit(px, 4, 909, 184, 996) for name, (px, _) in far.items()}
+        assert far['new'][1]['density_plan2']['occ_pages'] >= 1, far['new'][1]['density_plan2']
+        assert low_far['truth'] > 0 and abs(low_far['new'] - low_far['truth']) <= low_far['truth'] // 3 and low_far['even'] >= 3 * low_far['truth'], low_far
+        print('density stack: a page of 0.2 and 1.2 um boxes - decoded, its 0.2 um ones light %d px (cut-free %d, dropped 0); spread, '
+              'the 0.2 um half %d px by its cells\' cover (cut-free %d, an even share %d)'
+              % (low['new'], low['truth'], low_far['new'], low_far['truth'], low_far['even']))
     finally:
         for w in workers.values():
             w.stop()

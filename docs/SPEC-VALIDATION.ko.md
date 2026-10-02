@@ -177,6 +177,25 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 사다리(`FLOE_RUST_DENSITY_FIT_LADDER=on`)는 6번 걸어 같은 프레임에 이른다.
     - 기본 예산은 그 페이지를 디코드한다.
   - 단위 `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
+  0.12.275(점유 격자 v2: 칸마다 덮인 면적, 디코드된 페이지의 하한 아래 도형):
+  - 게이트 `density_stack` `occ_checks`: design.ovb가 v2(머리말 version 2, 페이지 수가 맞음)이고 페이지마다
+    2 KB보다 작다(두 정사각형 픽스처 185 B). 나머지 기대는 0.12.274와 같다.
+  - 게이트 `density_stack` `mixed_checks`:
+    - 픽스처: 300 µm 레이아웃. 아래 절반에 0.2 µm 상자 2만 개(2 % 덮임), 위 절반에 1.2 µm 상자 3만 개(거의 다
+      덮임)를 둔다. 한 페이지다. 1000 px, 깊이 0, 페이지 퍼뜨리기 켬.
+    - 300 µm 뷰(0.3 µm/px)에서는 1.2 µm 상자가 1패스의 것이고 페이지가 디코드된다. 아래 절반의 0.2 µm 상자가
+      컷 없는 프레임과 같은 7,821 px를 켠다. `FLOE_RUST_DENSITY_UNDER_FLOOR=drop`은 0이다.
+    - 1,600 µm 뷰(1.6 µm/px)에서는 모두 하한 아래라 퍼뜨려진다. 아래 절반이 298 px로 컷 없는 275 px의 3분의 1
+      안이다. `FLOE_RUST_DENSITY_OCC_COVER=off`(같은 몫)는 7,823 px로 3배 이상이다.
+  - 단위:
+    - ovm `a_page_occupancy_file_attaches_to_its_own_index`: 단계(2배 간격, 0·1·15 경계), 격자 압축 왕복, 합계
+      기록(NaN·음수 거부), `occ_wants_grid`. v1 머리말, 다른 출처·ovp·페이지 수, 잘린 표, 순서가 어긋난 표,
+      magic 불일치는 붙지 않는다.
+    - 인덱서 `page_occupancy_holds_the_area_of_every_member_in_its_cells`: 점 리스트 둘, 직교 Grid 둘(폭 > 간격,
+      음의 간격 포함), 비스듬한 Grid, 단일 상자의 페이지마다, 칸 넓이가 payload 멤버로 잰 것과 1e−9 안에서 같고
+      단계도 같다. 큰 상자가 있는 페이지는 멤버 넓이의 합(8 B)만 남긴다.
+    - 플래너 `a_page_spread_over_its_occupancy_grid_puts_the_area_its_cells_cover`,
+      `a_page_without_a_grid_spreads_the_area_its_shapes_cover_over_its_box`(SPEC-PLANNER §3).
   0.12.274(페이지 점유 비트, design.ovb):
   - 게이트 `density_stack` `occ_checks`:
     - 픽스처: TOP이 0.3 µm 상자 4만 개를 직접 가진 600 µm 레이아웃(100 µm 정사각형 둘을 양 끝 모서리에 둠, 점 리스트로

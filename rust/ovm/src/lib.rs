@@ -103,37 +103,150 @@ pub const LOD_GRID: i64 = 128;
 /// codec 0 = plain OASIS single-cell file (CBLOCK inside)
 pub const CODEC_OASIS: u8 = 0;
 
-/// design.ovb (2026-10-02): which cells of an OCC_GRID x OCC_GRID grid over
-/// each page's bbox hold a shape - where in its box a page under the floor
-/// puts its dots (floe_vfs hier.rs, HierOpts::dot_page_occ). A file beside
-/// the marker, written before it by a build; a cache without one (an older
-/// build, `floe-index vfs --no-page-occupancy`) reads as before. Layout: a
-/// OVB_HEADER_LEN header - magic, version, grid, n_pages, OCC_BYTES, then
-/// the source size and mtime and the ovp length of the index it was built
-/// with (u32 x4, u64 x3, zero to the end) - and OCC_BYTES per page in page
-/// order: OCC_GRID rows of OCC_GRID bits, row y a little-endian u64 whose
-/// bit x is cell (x, y); all zero = not recorded (an LOD variant).
+/// design.ovb (2026-10-02; v2 2026-10-03): how much of each cell of an
+/// OCC_GRID x OCC_GRID grid over each page's bbox its shapes cover - where in
+/// its box, and how densely, a page under the floor puts its dots (floe_vfs
+/// hier.rs, HierOpts::dot_page_occ). A file beside the marker, written before
+/// it by a build; a cache without one (an older build, `floe-index vfs
+/// --no-page-occupancy`) or with one of another version reads as before.
+/// Layout: a OVB_HEADER_LEN header - magic, version, grid, n_pages, levels
+/// per cell (OCC_LEVEL_MAX), the source size and mtime and the ovp length of
+/// the index it was built with, and where the page table starts (u32 x4, u64
+/// x4, zero to the end) - then each page's record (occ_encode: its grid of
+/// levels deflated; occ_total: the area its shapes cover, 8 bytes, for a page
+/// whose largest shape is past OCC_GRID_SHAPE of its extent; empty = not
+/// recorded, an LOD variant) and the table: n_pages + 1 offsets (u64) of the
+/// records, the last one the table's own.
 pub const OVB_MAGIC: &[u8; 8] = b"FLOEOVB1";
-pub const OVB_VERSION: u32 = 1;
+pub const OVB_VERSION: u32 = 2;
 pub const OVB_HEADER_LEN: usize = 64;
 /// cells per axis of a page's occupancy grid
 pub const OCC_GRID: i64 = 64;
-/// bytes of one page's occupancy grid
-pub const OCC_BYTES: usize = (OCC_GRID * OCC_GRID / 8) as usize;
+/// cells of a page's occupancy grid, row by row (y * OCC_GRID + x)
+pub const OCC_CELLS: usize = (OCC_GRID * OCC_GRID) as usize;
+/// a cell's level: 0 = no shape meets it, k in 1..=OCC_LEVEL_MAX = its shapes
+/// cover about 2^(k - OCC_LEVEL_MAX) of it (occ_level, occ_coverage)
+pub const OCC_LEVEL_MAX: u8 = 15;
+/// A page gets a grid when its extent is past this many of its largest shape
+/// (the larger side of each): only such a page is spread over more than this
+/// many floors (px) - one with a larger shape is under the floor only when
+/// it is a few px wide, and keeps its covered area alone (occ_total).
+pub const OCC_GRID_SHAPE: i64 = 16;
+
+/// A page's occupancy record (design.ovb): its cells' levels, or the area
+/// (dbu^2) its shapes cover when it has no grid
+#[derive(Clone, Debug, PartialEq)]
+pub enum PageOcc {
+    Grid(Box<[u8; OCC_CELLS]>),
+    Total(f64),
+}
+
+/// Whether a page of `bbox` whose largest shape is `max_w` x `max_h` gets a
+/// grid (OCC_GRID_SHAPE)
+pub fn occ_wants_grid(bbox: &BBox, max_w: i64, max_h: i64) -> bool {
+    let extent = (bbox.x1 - bbox.x0).max(bbox.y1 - bbox.y0) as i128;
+    (max_w.max(max_h).max(1) as i128) * (OCC_GRID_SHAPE as i128) < extent
+}
+
+/// A page's covered area as stored without a grid: 8 bytes, an f64
+pub fn occ_total(area: f64) -> Vec<u8> {
+    area.max(0.0).to_le_bytes().to_vec()
+}
 
 /// design.ovb's header for `n_pages` pages of the index built from a source
-/// of `src_size` bytes and `src_mtime` with `ovp_len` bytes of pages
-pub fn ovb_header(n_pages: u32, src_size: u64, src_mtime: u64, ovp_len: u64) -> [u8; OVB_HEADER_LEN] {
+/// of `src_size` bytes and `src_mtime` with `ovp_len` bytes of pages, the
+/// page table at `table_at`
+pub fn ovb_header(n_pages: u32, src_size: u64, src_mtime: u64, ovp_len: u64, table_at: u64) -> [u8; OVB_HEADER_LEN] {
     let mut h = [0u8; OVB_HEADER_LEN];
     h[..8].copy_from_slice(OVB_MAGIC);
     h[8..12].copy_from_slice(&OVB_VERSION.to_le_bytes());
     h[12..16].copy_from_slice(&(OCC_GRID as u32).to_le_bytes());
     h[16..20].copy_from_slice(&n_pages.to_le_bytes());
-    h[20..24].copy_from_slice(&(OCC_BYTES as u32).to_le_bytes());
+    h[20..24].copy_from_slice(&(OCC_LEVEL_MAX as u32).to_le_bytes());
     h[24..32].copy_from_slice(&src_size.to_le_bytes());
     h[32..40].copy_from_slice(&src_mtime.to_le_bytes());
     h[40..48].copy_from_slice(&ovp_len.to_le_bytes());
+    h[48..56].copy_from_slice(&table_at.to_le_bytes());
     h
+}
+
+/// A cell's level for its shapes' area over its own (0: none; past the
+/// lowest level's half, the lowest)
+pub fn occ_level(coverage: f64) -> u8 {
+    if !(coverage > 0.0) {
+        return 0;
+    }
+    (coverage.log2().round() + OCC_LEVEL_MAX as f64).clamp(1.0, OCC_LEVEL_MAX as f64) as u8
+}
+
+/// The part of a cell its level stands for (occ_level's inverse)
+pub fn occ_coverage(level: u8) -> f64 {
+    if level == 0 {
+        0.0
+    } else {
+        (2.0f64).powi(level.min(OCC_LEVEL_MAX) as i32 - OCC_LEVEL_MAX as i32)
+    }
+}
+
+/// A page's grid of levels (OCC_CELLS, row by row) as stored: two cells a
+/// byte, the even x in the low nibble, deflated; empty when no cell has one
+pub fn occ_encode(levels: &[u8]) -> Vec<u8> {
+    assert_eq!(levels.len(), OCC_CELLS, "occupancy grid");
+    if levels.iter().all(|&l| l == 0) {
+        return Vec::new();
+    }
+    let packed: Vec<u8> = levels.chunks_exact(2).map(|p| (p[0].min(OCC_LEVEL_MAX)) | (p[1].min(OCC_LEVEL_MAX) << 4)).collect();
+    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+    std::io::Write::write_all(&mut enc, &packed).expect("deflate occupancy");
+    enc.finish().expect("deflate occupancy")
+}
+
+/// A page's stored record as a grid (occ_encode) or a total (occ_total):
+/// None for an empty or broken one
+pub fn occ_record(stored: &[u8]) -> Option<PageOcc> {
+    if stored.len() == 8 {
+        let area = f64::from_le_bytes(stored.try_into().ok()?);
+        return (area.is_finite() && area >= 0.0).then_some(PageOcc::Total(area));
+    }
+    occ_decode(stored).map(PageOcc::Grid)
+}
+
+/// occ_encode's inverse: None for an empty or broken grid
+pub fn occ_decode(stored: &[u8]) -> Option<Box<[u8; OCC_CELLS]>> {
+    if stored.is_empty() {
+        return None;
+    }
+    let mut packed = Vec::with_capacity(OCC_CELLS / 2);
+    let mut dec = flate2::read::DeflateDecoder::new(stored);
+    std::io::Read::read_to_end(&mut dec, &mut packed).ok()?;
+    if packed.len() != OCC_CELLS / 2 {
+        return None;
+    }
+    let mut levels = Box::new([0u8; OCC_CELLS]);
+    for (pair, byte) in levels.chunks_exact_mut(2).zip(packed) {
+        pair[0] = byte & 0x0f;
+        pair[1] = byte >> 4;
+    }
+    Some(levels)
+}
+
+/// design.ovb's image from the pages' stored grids (occ_encode), in page
+/// order (the build writes the same bytes as it goes)
+pub fn ovb_image(src_size: u64, src_mtime: u64, ovp_len: u64, grids: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = vec![0u8; OVB_HEADER_LEN];
+    let mut offsets = Vec::with_capacity(grids.len() + 1);
+    for grid in grids {
+        offsets.push(out.len() as u64);
+        out.extend_from_slice(grid);
+    }
+    let table_at = out.len() as u64;
+    offsets.push(table_at);
+    for at in offsets {
+        out.extend_from_slice(&at.to_le_bytes());
+    }
+    let pages = u32::try_from(grids.len()).expect("ovb pages");
+    out[..OVB_HEADER_LEN].copy_from_slice(&ovb_header(pages, src_size, src_mtime, ovp_len, table_at));
+    out
 }
 
 /// The low edge of occupancy cell `k` (0..=OCC_GRID) over [lo, lo + ext):
@@ -2701,13 +2814,14 @@ impl Ovm {
 
     /// attach_page_occ over bytes in hand (design.ovb's image)
     pub fn attach_page_occ_backing(&mut self, data: Backing) -> Result<(), String> {
-        let want = ovb_header(self.n_pages, self.src_size, self.src_mtime, self.ovp_len);
-        if data.len() < OVB_HEADER_LEN || data[..8] != want[..8] {
+        if data.len() < OVB_HEADER_LEN || data[..8] != OVB_MAGIC[..] {
             return Err("design.ovb: not an occupancy file".into());
         }
+        let table_at = g64(&data, 48);
+        let want = ovb_header(self.n_pages, self.src_size, self.src_mtime, self.ovp_len, table_at);
         if data[8..24] != want[8..24] {
             return Err(format!(
-                "design.ovb: version {} grid {} pages {} of {} bytes, the index has {} pages (this build reads v{} of {} x {})",
+                "design.ovb: version {} grid {} pages {} levels {}, the index has {} pages (this build reads v{} of {} x {}, {} levels; rebuild: floe2 index <src> --force)",
                 g32(&data, 8),
                 g32(&data, 12),
                 g32(&data, 16),
@@ -2715,15 +2829,29 @@ impl Ovm {
                 self.n_pages,
                 OVB_VERSION,
                 OCC_GRID,
-                OCC_GRID
+                OCC_GRID,
+                OCC_LEVEL_MAX
             ));
         }
         if data[24..OVB_HEADER_LEN] != want[24..] {
             return Err("design.ovb: built with another index (source or pages differ)".into());
         }
-        let len = OVB_HEADER_LEN as u64 + self.n_pages as u64 * OCC_BYTES as u64;
-        if data.len() as u64 != len {
-            return Err(format!("design.ovb: {} bytes, expected {}", data.len(), len));
+        // the page table: n_pages + 1 offsets to the end, rising, the last
+        // one the table's own
+        let entries = self.n_pages as u64 + 1;
+        if table_at < OVB_HEADER_LEN as u64 || table_at.checked_add(entries * 8) != Some(data.len() as u64) {
+            return Err(format!("design.ovb: {} bytes, a page table of {} at {}", data.len(), entries, table_at));
+        }
+        let mut last = OVB_HEADER_LEN as u64;
+        for k in 0..entries as usize {
+            let at = g64(&data, table_at as usize + 8 * k);
+            if at < last || at > table_at {
+                return Err(format!("design.ovb: page {} at {} out of order", k, at));
+            }
+            last = at;
+        }
+        if last != table_at {
+            return Err("design.ovb: the pages end before the table".into());
         }
         self.page_occ = Some(data);
         Ok(())
@@ -2734,14 +2862,17 @@ impl Ovm {
         self.page_occ.is_some()
     }
 
-    /// The occupancy grid of page `pi` (OCC_BYTES: OCC_GRID rows of OCC_GRID
-    /// bits, see OVB_MAGIC); None without design.ovb or when the page has
-    /// none recorded.
-    pub fn page_occ(&self, pi: u32) -> Option<&[u8]> {
+    /// The occupancy record of page `pi` (occ_record): its cells' levels
+    /// (OCC_CELLS, row by row; occ_coverage) or the area its shapes cover;
+    /// None without design.ovb or when the page has none recorded.
+    pub fn page_occ(&self, pi: u32) -> Option<PageOcc> {
         let data = self.page_occ.as_ref()?;
-        let at = OVB_HEADER_LEN + pi as usize * OCC_BYTES;
-        let grid = data.get(at..at + OCC_BYTES)?;
-        grid.iter().any(|&b| b != 0).then_some(grid)
+        if pi >= self.n_pages {
+            return None;
+        }
+        let table = g64(data, 48) as usize;
+        let (lo, hi) = (g64(data, table + 8 * pi as usize) as usize, g64(data, table + 8 * pi as usize + 8) as usize);
+        occ_record(&data[lo..hi])
     }
 
     fn sec(&self, i: usize) -> &[u8] {
@@ -3609,9 +3740,10 @@ mod tests {
         }
     }
 
-    /// design.ovb (2026-10-02): occ_cell puts a coordinate in the cell whose
-    /// occ_edge span holds it, and a file attaches only to the index it was
-    /// built with - its pages, source and ovp length
+    /// design.ovb (2026-10-02, v2 2026-10-03): occ_cell puts a coordinate in
+    /// the cell whose occ_edge span holds it, a grid of levels comes back as
+    /// stored, and a file attaches only to the index it was built with - its
+    /// pages, source and ovp length - and as this build's version
     #[test]
     fn a_page_occupancy_file_attaches_to_its_own_index() {
         for ext in [1i64, 7, 63, 64, 65, 100, 1_000, 4_097] {
@@ -3624,37 +3756,52 @@ mod tests {
             }
             assert_eq!((occ_edge(10, ext, 0), occ_edge(10, ext, OCC_GRID)), (10, 10 + ext));
         }
+        // levels: a factor of two a step, the lowest and the full clamped
+        assert_eq!((occ_level(0.0), occ_level(1.0), occ_level(0.5), occ_level(0.36), occ_level(1e-9), occ_level(3.0)), (0, 15, 14, 14, 1, 15));
+        for level in 1..=OCC_LEVEL_MAX {
+            assert_eq!(occ_level(occ_coverage(level)), level);
+        }
+        let mut levels = [0u8; OCC_CELLS];
+        let mut rng = 7u64;
+        for cell in levels.iter_mut() {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            *cell = ((rng >> 33) % 16) as u8 * ((rng >> 40) % 3 == 0) as u8;
+        }
+        assert_eq!(occ_decode(&occ_encode(&levels)).as_deref(), Some(&levels));
+        assert!(occ_encode(&[0u8; OCC_CELLS]).is_empty() && occ_decode(&[]).is_none() && occ_decode(b"not deflate").is_none());
         let mut ovm = Ovm::from_bytes(build_sample()).unwrap();
         assert!(!ovm.has_page_occ() && ovm.page_occ(1).is_none());
-        let image = |pages: u32, size: u64, ovp: u64| {
-            let mut v = ovb_header(pages, size, 7, ovp).to_vec();
-            v.resize(OVB_HEADER_LEN + pages as usize * OCC_BYTES, 0);
-            v
-        };
         let (pages, size, ovp) = (ovm.n_pages, ovm.src_size, ovm.ovp_len);
-        assert_eq!(ovm.src_mtime, 7);
-        let mut good = image(pages, size, ovp);
-        // page 1: cell (3, 5)
-        good[OVB_HEADER_LEN + OCC_BYTES + 5 * 8] = 1 << 3;
-        let mut other_grid = good.clone();
-        other_grid[12] = 32;
+        assert_eq!((pages, ovm.src_mtime), (2, 7));
+        // page 0 none; page 1 cell (3, 5) at level 9
+        let mut one = [0u8; OCC_CELLS];
+        one[5 * 64 + 3] = 9;
+        let grids = vec![Vec::new(), occ_encode(&one)];
+        assert_eq!(occ_record(&occ_total(12.5)), Some(PageOcc::Total(12.5)));
+        assert!(occ_record(&f64::NAN.to_le_bytes()).is_none() && occ_record(&(-1.0f64).to_le_bytes()).is_none());
+        let wide = BBox { x0: 0, y0: 0, x1: 1_600, y1: 100 };
+        assert!(occ_wants_grid(&wide, 99, 99) && !occ_wants_grid(&wide, 100, 3) && !occ_wants_grid(&wide, 3, 100));
+        let good = ovb_image(size, 7, ovp, &grids);
+        let mut v1 = good.clone();
+        v1[8] = 1;
+        let mut shuffled = good.clone();
+        let table = good.len() - 3 * 8;
+        shuffled[table + 8..table + 16].copy_from_slice(&(good.len() as u64).to_le_bytes());
         for (bad, why) in [
-            (image(pages, size + 1, ovp), "another index"),
-            (image(pages, size, ovp + 1), "another index"),
-            (image(pages + 1, size, ovp), "pages"),
-            (other_grid, "grid"),
-            (good[..good.len() - 1].to_vec(), "bytes"),
+            (ovb_image(size + 1, 7, ovp, &grids), "another index"),
+            (ovb_image(size, 7, ovp + 1, &grids), "another index"),
+            (ovb_image(size, 7, ovp, &[Vec::new(), Vec::new(), Vec::new()]), "pages"),
+            (v1, "version 1"),
+            (good[..good.len() - 1].to_vec(), "page table"),
+            (shuffled, "out of order"),
             (b"FLOEOVM1".to_vec(), "not an occupancy file"),
         ] {
             let e = ovm.attach_page_occ_backing(Backing::Vec(bad)).unwrap_err();
             assert!(e.contains(why) && !ovm.has_page_occ(), "{e}");
         }
         ovm.attach_page_occ_backing(Backing::Vec(good)).unwrap();
-        // page 0 recorded none; page 1 its cell
-        assert!(ovm.has_page_occ() && ovm.page_occ(0).is_none());
-        let grid = ovm.page_occ(1).unwrap();
-        assert_eq!(grid.len(), OCC_BYTES);
-        assert_eq!(u64::from_le_bytes(grid[40..48].try_into().unwrap()), 1 << 3);
+        assert!(ovm.has_page_occ() && ovm.page_occ(0).is_none() && ovm.page_occ(2).is_none());
+        assert_eq!(ovm.page_occ(1), Some(PageOcc::Grid(Box::new(one))));
         // none on disk: nothing attached
         assert_eq!(Ovm::from_bytes(build_sample()).unwrap().attach_page_occ("/nonexistent/design.ovb"), Ok(false));
     }

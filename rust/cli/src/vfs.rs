@@ -3554,13 +3554,14 @@ fn encode_job(
         .expect("page payload")
 }
 
-/// design.ovb being written (floe_ovm::OVB_MAGIC): a grid per page in page
-/// order after a header written last, published by tmp + rename before the
-/// marker
+/// design.ovb being written (floe_ovm::OVB_MAGIC, ovb_image's bytes): the
+/// pages' stored grids in page order after a header written last, then the
+/// page table; published by tmp + rename before the marker
 struct OvbWriter {
     w: std::io::BufWriter<std::fs::File>,
     dir: String,
-    pages: u32,
+    offsets: Vec<u64>,
+    at: u64,
     secs: f64,
 }
 
@@ -3569,24 +3570,26 @@ impl OvbWriter {
         let f = std::fs::File::create(format!("{}/design.ovb.tmp", dir)).expect("create ovb");
         let mut w = std::io::BufWriter::new(f);
         std::io::Write::write_all(&mut w, &[0u8; floe_ovm::OVB_HEADER_LEN]).expect("write ovb");
-        OvbWriter { w, dir: dir.to_string(), pages: 0, secs: 0.0 }
+        OvbWriter { w, dir: dir.to_string(), offsets: Vec::new(), at: floe_ovm::OVB_HEADER_LEN as u64, secs: 0.0 }
     }
 
-    /// the next page's grid; None (an LOD variant) is recorded as none
-    fn put(&mut self, grid: Option<&[u64; OCC_ROWS]>) {
-        let mut bytes = [0u8; floe_ovm::OCC_BYTES];
-        if let Some(grid) = grid {
-            for (row, word) in bytes.chunks_exact_mut(8).zip(grid.iter()) {
-                row.copy_from_slice(&word.to_le_bytes());
-            }
-        }
-        std::io::Write::write_all(&mut self.w, &bytes).expect("write ovb");
-        self.pages = self.pages.checked_add(1).expect("ovb page count");
+    /// the next page's stored grid (floe_ovm::occ_encode; empty: none, as
+    /// for an LOD variant)
+    fn put(&mut self, grid: &[u8]) {
+        self.offsets.push(self.at);
+        std::io::Write::write_all(&mut self.w, grid).expect("write ovb");
+        self.at += grid.len() as u64;
     }
 
-    fn finish(self, src_size: u64, src_mtime: u64, ovp_len: u64) {
+    fn finish(mut self, src_size: u64, src_mtime: u64, ovp_len: u64) {
         use std::io::{Seek, Write};
-        let header = floe_ovm::ovb_header(self.pages, src_size, src_mtime, ovp_len);
+        let pages = narrow_u32(self.offsets.len() as u64, "ovb pages");
+        let table_at = self.at;
+        self.offsets.push(table_at);
+        for at in &self.offsets {
+            self.w.write_all(&at.to_le_bytes()).expect("write ovb");
+        }
+        let header = floe_ovm::ovb_header(pages, src_size, src_mtime, ovp_len, table_at);
         let mut f = self.w.into_inner().expect("flush ovb");
         f.seek(std::io::SeekFrom::Start(0)).expect("seek ovb");
         f.write_all(&header).expect("write ovb header");
@@ -3594,37 +3597,108 @@ impl OvbWriter {
         std::fs::rename(format!("{}/design.ovb.tmp", self.dir), format!("{}/design.ovb", self.dir)).expect("publish ovb");
         eprintln!(
             "[vfs] page occupancy design.ovb: {} pages, {} ({:.1}s over the encode workers)",
-            self.pages,
-            fmt_size(floe_ovm::OVB_HEADER_LEN as u64 + self.pages as u64 * floe_ovm::OCC_BYTES as u64),
+            pages,
+            fmt_size(table_at + 8 * self.offsets.len() as u64),
             self.secs
         );
     }
 }
 
-/// rows of a page's occupancy grid (floe_ovm::OCC_GRID), a u64 each
-const OCC_ROWS: usize = floe_ovm::OCC_GRID as usize;
+/// The occupancy grid of an exact page (design.ovb): the area its members'
+/// shapes cover in each of floe_ovm::OCC_GRID x OCC_GRID cells over the page
+/// bbox, as a level (floe_ovm::occ_level) - a rectangle's own, a polygon's
+/// and a path's spread over its box. Point lists go member by member, an
+/// orthogonal grid by axis (occ_axis_lengths: O(OCC_GRID) for any count), a
+/// skew one member by member up to LOD_ENUM_CAP and over its box beyond.
+fn page_occupancy(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJob) -> Vec<u8> {
+    let g = floe_ovm::OCC_GRID as usize;
+    let (area, ex, ey) = page_occupancy_areas(cell, arena, job);
+    let mut levels = vec![0u8; floe_ovm::OCC_CELLS];
+    for cy in 0..g {
+        for cx in 0..g {
+            let cell_area = (ex[cx + 1] - ex[cx]) as f64 * (ey[cy + 1] - ey[cy]) as f64;
+            if cell_area > 0.0 {
+                levels[cy * g + cx] = floe_ovm::occ_level(area[cy * g + cx] / cell_area);
+            }
+        }
+    }
+    levels
+}
 
-/// The occupancy grid of an exact page (design.ovb): every member's shape
-/// box marked on floe_ovm::OCC_GRID x OCC_GRID cells over the page bbox
-/// (floe_ovm::occ_cell) - a polygon or path by its box. An orthogonal
-/// grid is marked by axis (lod_axis_cells: O(OCC_GRID) for any count), a
-/// skew one member by member up to LOD_ENUM_CAP and by its box beyond.
-fn page_occupancy(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJob) -> [u64; OCC_ROWS] {
+/// The part of its box a record's shape covers: a rectangle all of it, a
+/// polygon its area (shoelace), a path its length (and extensions) by its width
+fn rec_fill(cell: &floe_oasis::doc::Cell, r: &PRec, boxed: f64) -> f64 {
+    if !(boxed > 0.0) {
+        return 0.0;
+    }
+    match r.kind {
+        0 => 1.0,
+        1 => {
+            let pts = &cell.polys[r.idx as usize].pts;
+            let twice: i128 = pts.iter().zip(pts.iter().cycle().skip(1)).map(|(a, b)| a.0 as i128 * b.1 as i128 - b.0 as i128 * a.1 as i128).sum();
+            (twice.unsigned_abs() as f64 / 2.0 / boxed).min(1.0)
+        }
+        _ => {
+            let pa = &cell.paths[r.idx as usize];
+            let length: f64 = pa.pts.windows(2).map(|w| ((w[1].0 - w[0].0) as f64).hypot((w[1].1 - w[0].1) as f64)).sum();
+            ((length + (pa.es + pa.ee).max(0) as f64) * 2.0 * pa.hw.max(0) as f64 / boxed).min(1.0)
+        }
+    }
+}
+
+/// An exact page's design.ovb record: its grid (page_occupancy) when it is
+/// wide enough for its shapes (floe_ovm::occ_wants_grid), else the area they
+/// cover - its members at their shape's covered area, record by record
+fn page_occupancy_record(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJob) -> Vec<u8> {
+    if floe_ovm::occ_wants_grid(&job.bbox, job.max_w, job.max_h) {
+        return floe_ovm::occ_encode(&page_occupancy(cell, arena, job));
+    }
+    let area: f64 = job
+        .recs
+        .iter()
+        .map(|r| {
+            let sb = rec_shape_box(cell, r);
+            let boxed = (sb.x1 - sb.x0).max(0) as f64 * (sb.y1 - sb.y0).max(0) as f64;
+            r.members as f64 * boxed * rec_fill(cell, r, boxed)
+        })
+        .sum();
+    floe_ovm::occ_total(area)
+}
+
+/// page_occupancy's areas (dbu^2, row by row) and its cells' edges on x and y
+fn page_occupancy_areas(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJob) -> (Vec<f64>, Vec<i64>, Vec<i64>) {
+    let g = floe_ovm::OCC_GRID;
     let bb = job.bbox;
     let (bw, bh) = ((bb.x1 - bb.x0).max(1), (bb.y1 - bb.y0).max(1));
-    let mut rows = [0u64; OCC_ROWS];
-    // a box [x0, x1) x [y0, y1): the cells it meets
-    let mark_box = |rows: &mut [u64; OCC_ROWS], x0: i64, y0: i64, x1: i64, y1: i64| {
-        let (cx0, cx1) = (floe_ovm::occ_cell(bb.x0, bw, x0), floe_ovm::occ_cell(bb.x0, bw, (x1 - 1).max(x0)));
-        let (cy0, cy1) = (floe_ovm::occ_cell(bb.y0, bh, y0), floe_ovm::occ_cell(bb.y0, bh, (y1 - 1).max(y0)));
-        let span = if cx1 - cx0 >= 63 { u64::MAX } else { ((1u64 << (cx1 - cx0 + 1)) - 1) << cx0 };
-        for row in &mut rows[cy0 as usize..=cy1 as usize] {
-            *row |= span;
+    let ex: Vec<i64> = (0..=g).map(|k| floe_ovm::occ_edge(bb.x0, bw, k)).collect();
+    let ey: Vec<i64> = (0..=g).map(|k| floe_ovm::occ_edge(bb.y0, bh, k)).collect();
+    let mut area = vec![0f64; floe_ovm::OCC_CELLS];
+    // a box [x0, x1) x [y0, y1) whose `fill` of its area is shape: its part
+    // of each cell it meets
+    let add_box = |area: &mut [f64], x0: i64, y0: i64, x1: i64, y1: i64, fill: f64| {
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let (cx0, cx1) = (floe_ovm::occ_cell(bb.x0, bw, x0), floe_ovm::occ_cell(bb.x0, bw, x1 - 1));
+        let (cy0, cy1) = (floe_ovm::occ_cell(bb.y0, bh, y0), floe_ovm::occ_cell(bb.y0, bh, y1 - 1));
+        for cy in cy0..=cy1 {
+            let oy = y1.min(ey[cy as usize + 1]) - y0.max(ey[cy as usize]);
+            if oy <= 0 {
+                continue;
+            }
+            for cx in cx0..=cx1 {
+                let ox = x1.min(ex[cx as usize + 1]) - x0.max(ex[cx as usize]);
+                if ox > 0 {
+                    area[(cy * g + cx) as usize] += ox as f64 * oy as f64 * fill;
+                }
+            }
         }
     };
     for r in &job.recs {
         let sb = rec_shape_box(cell, r);
-        let mark = |rows: &mut [u64; OCC_ROWS], ox: i64, oy: i64| mark_box(rows, sb.x0 + ox, sb.y0 + oy, sb.x1 + ox, sb.y1 + oy);
+        let boxed = (sb.x1 - sb.x0).max(0) as f64 * (sb.y1 - sb.y0).max(0) as f64;
+        let fill = rec_fill(cell, r, boxed);
+        let member = |area: &mut [f64], ox: i64, oy: i64| add_box(area, sb.x0 + ox, sb.y0 + oy, sb.x1 + ox, sb.y1 + oy, fill);
         match (r.frag, rec_rep(cell, r)) {
             (Frag::Pts { arena: a, lo, hi }, rep) => {
                 let src = match rep {
@@ -3633,7 +3707,7 @@ fn page_occupancy(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJob) ->
                 };
                 for &slot in &arena[a as usize].order[lo as usize..hi as usize] {
                     let (ox, oy) = src[slot as usize];
-                    mark(&mut rows, ox, oy);
+                    member(&mut area, ox, oy);
                 }
             }
             (frag, Rep::Grid { na, nb, va, vb }) => {
@@ -3645,75 +3719,72 @@ fn page_occupancy(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJob) ->
                 let (ni, nj) = (i1 - i0, j1 - j0);
                 let ortho = (va.1 == 0 && vb.0 == 0) || (va.0 == 0 && vb.1 == 0);
                 if ortho {
-                    // lod_axis_cells' closed intervals over the cells' edges
-                    // (floe_ovm::occ_edge): a member's half-open box is one
-                    // dbu short of its far edge
+                    // the members are the x intervals by the y intervals: a
+                    // cell's area is the product of their lengths in it
                     let (bx0, by0) = (i0 * va.0 + j0 * vb.0, i0 * va.1 + j0 * vb.1);
                     let (xs_step, xs_n, ys_step, ys_n) = if va.1 == 0 && vb.0 == 0 { (va.0, ni, vb.1, nj) } else { (vb.0, nj, va.1, ni) };
-                    let xs = occ_axis_cells(sb.x0 + bx0, (sb.x1 - 1).max(sb.x0) + bx0, xs_step, xs_n, bb.x0, bw);
-                    let ys = occ_axis_cells(sb.y0 + by0, (sb.y1 - 1).max(sb.y0) + by0, ys_step, ys_n, bb.y0, bh);
-                    let mut span = 0u64;
-                    for (x, &on) in xs.iter().enumerate() {
-                        if on {
-                            span |= 1u64 << x;
-                        }
-                    }
-                    for (y, &on) in ys.iter().enumerate() {
-                        if on {
-                            rows[y] |= span;
+                    let lx = occ_axis_lengths(sb.x0 + bx0, sb.x1 + bx0, xs_step, xs_n, &ex);
+                    let ly = occ_axis_lengths(sb.y0 + by0, sb.y1 + by0, ys_step, ys_n, &ey);
+                    for (cy, &h) in ly.iter().enumerate() {
+                        if h > 0.0 {
+                            for (cx, &w) in lx.iter().enumerate() {
+                                area[cy * g as usize + cx] += w * h * fill;
+                            }
                         }
                     }
                 } else if (ni as u64).saturating_mul(nj as u64) > LOD_ENUM_CAP {
-                    // a skew mega-grid is never looped: its box
-                    mark_box(&mut rows, r.bbox.x0, r.bbox.y0, r.bbox.x1, r.bbox.y1);
+                    // a skew mega-grid is never looped: its members' area
+                    // over its box
+                    let rb = (r.bbox.x1 - r.bbox.x0).max(1) as f64 * (r.bbox.y1 - r.bbox.y0).max(1) as f64;
+                    add_box(&mut area, r.bbox.x0, r.bbox.y0, r.bbox.x1, r.bbox.y1, (r.members as f64 * boxed * fill / rb).min(1.0));
                 } else {
                     for i in i0..i1 {
                         for j in j0..j1 {
-                            mark(&mut rows, i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                            member(&mut area, i * va.0 + j * vb.0, i * va.1 + j * vb.1);
                         }
                     }
                 }
             }
-            (Frag::Whole, Rep::One) => mark(&mut rows, 0, 0),
+            (Frag::Whole, Rep::One) => member(&mut area, 0, 0),
             (Frag::Whole, Rep::Pts(pl)) => {
                 for &(ox, oy) in pl.iter() {
-                    mark(&mut rows, ox, oy);
+                    member(&mut area, ox, oy);
                 }
             }
             (Frag::Grid { .. }, _) => unreachable!("grid frag on non-grid"),
         }
     }
-    rows
+    (area, ex, ey)
 }
 
-/// lod_axis_cells on the occupancy grid's cells (floe_ovm::occ_edge): which
-/// of the OCC_GRID cells over [b0, b0 + bext) the intervals [lo + m step,
-/// hi + m step], m in [0, n), meet
-fn occ_axis_cells(lo: i64, hi: i64, step: i64, n: i64, b0: i64, bext: i64) -> Vec<bool> {
-    let g = floe_ovm::OCC_GRID;
-    let mut out = vec![false; g as usize];
-    if n <= 0 {
-        return out;
+/// The lengths of the intervals [lo + m step, hi + m step), m in [0, n), in
+/// each cell between the edges `edges` (floe_ovm::occ_edge): from their
+/// length left of each edge, in closed form for any n
+fn occ_axis_lengths(lo: i64, hi: i64, step: i64, n: i64, edges: &[i64]) -> Vec<f64> {
+    let cells = edges.len() - 1;
+    let w = (hi - lo) as i128;
+    if n <= 0 || w <= 0 {
+        return vec![0.0; cells];
     }
-    for k in 0..g {
-        // the cell's closed span [edge(k), edge(k + 1) - 1]
-        let (c0, c1) = (floe_ovm::occ_edge(b0, bext, k), floe_ovm::occ_edge(b0, bext, k + 1) - 1);
-        if c1 < c0 {
-            continue;
+    // the first interval leftmost
+    let (lo, step) = if step < 0 { (lo + (n - 1) * step, -step) } else { (lo, step) };
+    let left_of = |x: i64| -> i128 {
+        if step == 0 {
+            return n as i128 * ((x - lo) as i128).clamp(0, w);
         }
-        out[k as usize] = if step == 0 {
-            hi >= c0 && lo <= c1
-        } else {
-            // lo + m step <= c1 and hi + m step >= c0
-            let (mlo, mhi) = if step > 0 {
-                (floe_tiler::div_ceil(c0 - hi, step), floe_tiler::div_floor(c1 - lo, step))
-            } else {
-                (floe_tiler::div_ceil(c1 - lo, step), floe_tiler::div_floor(c0 - hi, step))
-            };
-            mlo.max(0) <= mhi.min(n - 1)
-        };
-    }
-    out
+        // whole left of x: lo + w + m step <= x
+        let whole = (floe_tiler::div_floor(x - lo - w as i64, step) + 1).clamp(0, n);
+        // cut by x: lo + m step < x < lo + w + m step
+        let cut = (floe_tiler::div_ceil(x - lo, step) - 1).min(n - 1);
+        let mut sum = whole as i128 * w;
+        if cut >= whole {
+            let k = (cut - whole + 1) as i128;
+            sum += k * (x - lo) as i128 - step as i128 * (whole as i128 + cut as i128) * k / 2;
+        }
+        sum
+    };
+    let at: Vec<i128> = edges.iter().map(|&x| left_of(x)).collect();
+    (0..cells).map(|k| (at[k + 1] - at[k]) as f64).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3726,7 +3797,7 @@ fn write_encoded_page(
     ovp_off: &mut u64,
     pages_bytes: &mut u64,
     ovb: &mut Option<OvbWriter>,
-    occ: Option<&[u64; OCC_ROWS]>,
+    occ: &[u8],
 ) {
     if let Some(ovb) = ovb {
         ovb.put(occ);
@@ -3789,16 +3860,16 @@ fn encode_write_pages(
             .expect("page cell after arena batch")
             .as_slice()
     };
-    // design.ovb: an exact page's occupancy grid, worked out beside its
-    // payload (and the seconds it took)
+    // design.ovb: an exact page's occupancy grid, worked out and stored
+    // beside its payload (and the seconds it took)
     let with_occ = ovb.is_some();
-    let occ_of = |job: &PageJob| -> (Option<Box<[u64; OCC_ROWS]>>, f64) {
+    let occ_of = |job: &PageJob| -> (Vec<u8>, f64) {
         if !with_occ || job.lod != floe_ovm::LOD_EXACT {
-            return (None, 0.0);
+            return (Vec::new(), 0.0);
         }
         let t = std::time::Instant::now();
-        let grid = page_occupancy(&doc.cells[job.ci], arena_at(arena_for(job), job.arena_slot), job);
-        (Some(Box::new(grid)), t.elapsed().as_secs_f64())
+        let record = page_occupancy_record(&doc.cells[job.ci], arena_at(arena_for(job), job.arena_slot), job);
+        (record, t.elapsed().as_secs_f64())
     };
     if workers <= 1 || ptotal == 1 {
         for job in page_jobs {
@@ -3816,14 +3887,14 @@ fn encode_write_pages(
                 ovp_off,
                 pages_bytes,
                 ovb,
-                occ.as_deref(),
+                &occ,
             );
             encoded_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         return;
     }
 
-    type Encoded = (Vec<u8>, u64, Option<Box<[u64; OCC_ROWS]>>, f64);
+    type Encoded = (Vec<u8>, u64, Vec<u8>, f64);
     let result_batch = batch_limit.max(1).min(ptotal);
     std::thread::scope(|s| {
         let (task_tx, task_rx) =
@@ -3877,7 +3948,7 @@ fn encode_write_pages(
                     ovp_off,
                     pages_bytes,
                     ovb,
-                    occ.as_deref(),
+                    &occ,
                 );
                 encoded_done
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -10168,13 +10239,14 @@ mod split_tests {
         assert_eq!(mems.len(), 90_000, "rep not kept verbatim");
     }
 
-    /// design.ovb (2026-10-02): a page's occupancy grid marks the cells its
-    /// members' boxes meet (floe_ovm::occ_cell) and no other - point lists
-    /// member by member, an orthogonal grid by axis, a small skew grid member
-    /// by member - against the members its payload expands to; a cluster
-    /// apart from the rest leaves the cells between empty
+    /// design.ovb (2026-10-02, v2 2026-10-03): a page's occupancy grid holds
+    /// the area its members' boxes cover in each cell (floe_ovm::occ_edge's
+    /// cells) - point lists member by member, an orthogonal grid by axis in
+    /// closed form, a small skew grid member by member - against the members
+    /// its payload expands to; a cluster apart from the rest leaves the cells
+    /// between empty, and a cell's level is its part covered (occ_level)
     #[test]
-    fn page_occupancy_marks_the_cells_of_every_member_and_no_other() {
+    fn page_occupancy_holds_the_area_of_every_member_in_its_cells() {
         const DIE: i64 = 1_000_000;
         // past a page's MiB (4 bytes a point): the split makes pages
         let mut far = pts_rec(13, 60_000, DIE / 8, 60);
@@ -10183,35 +10255,63 @@ mod split_tests {
         let doc = mini_doc(vec![
             pts_rec(7, 300_000, DIE / 3, 100),
             far,
+            // members wider than their step (overlapping) and ones apart
             RectRec { layer: 1, dt: 0, x: 500, y: 700, w: 120, h: 90, rep: Rep::Grid { na: 40, nb: 30, va: (24_000, 0), vb: (0, 23_000) } },
+            RectRec { layer: 1, dt: 0, x: 40_000, y: 700_000, w: 9_000, h: 300, rep: Rep::Grid { na: 50, nb: 3, va: (0, 7_000), vb: (-3_000, 0) } },
             RectRec { layer: 1, dt: 0, x: 3_000, y: 9_000, w: 80, h: 60, rep: Rep::Grid { na: 30, nb: 20, va: (2_900, 1_150), vb: (-600, 2_800) } },
             RectRec { layer: 1, dt: 0, x: 900_000, y: 100_000, w: 5_000, h: 300, rep: Rep::One },
         ]);
         let plan = plan_of(&doc);
-        let (mut pages, mut emptiest) = (0, OCC_ROWS * 64);
+        let g = floe_ovm::OCC_GRID as usize;
+        let (mut pages, mut emptiest) = (0, floe_ovm::OCC_CELLS);
         for (k, page) in plan.pages.iter().enumerate() {
             if page.lod != floe_ovm::LOD_EXACT {
                 continue;
             }
-            let grid = page_occupancy(&doc.cells[0], arena_at(plan.arenas.as_slice(), page.arena_slot), page);
-            let bb = page.bbox;
-            let (bw, bh) = (bb.x1 - bb.x0, bb.y1 - bb.y0);
-            let mut want = [0u64; OCC_ROWS];
+            let arena = arena_at(plan.arenas.as_slice(), page.arena_slot);
+            let (area, ex, ey) = page_occupancy_areas(&doc.cells[0], arena, page);
+            let mut want = vec![0f64; floe_ovm::OCC_CELLS];
             for m in page_mems(&doc, &plan, k) {
-                let (x0, x1) = (floe_ovm::occ_cell(bb.x0, bw, m.3), floe_ovm::occ_cell(bb.x0, bw, (m.5 - 1).max(m.3)));
-                let (y0, y1) = (floe_ovm::occ_cell(bb.y0, bh, m.4), floe_ovm::occ_cell(bb.y0, bh, (m.6 - 1).max(m.4)));
-                for row in &mut want[y0 as usize..=y1 as usize] {
-                    for x in x0..=x1 {
-                        *row |= 1 << x;
+                for cy in 0..g {
+                    let oy = m.6.min(ey[cy + 1]) - m.4.max(ey[cy]);
+                    for cx in 0..g {
+                        let ox = m.5.min(ex[cx + 1]) - m.3.max(ex[cx]);
+                        if ox > 0 && oy > 0 {
+                            want[cy * g + cx] += ox as f64 * oy as f64;
+                        }
                     }
                 }
             }
-            assert_eq!(grid, want, "page {k} of {}", plan.pages.len());
-            emptiest = emptiest.min(grid.iter().map(|r| r.count_ones() as usize).sum());
+            for (cell, (&got, &want)) in area.iter().zip(&want).enumerate() {
+                assert!((got - want).abs() <= 1e-9 * want.max(1.0), "page {k} cell {cell}: {got} of {want}");
+            }
+            let levels = page_occupancy(&doc.cells[0], arena, page);
+            for (cell, &level) in levels.iter().enumerate() {
+                let (cx, cy) = (cell % g, cell / g);
+                let part = want[cell] / ((ex[cx + 1] - ex[cx]) as f64 * (ey[cy + 1] - ey[cy]) as f64);
+                assert_eq!(level, floe_ovm::occ_level(part), "page {k} cell {cell}");
+            }
+            emptiest = emptiest.min(levels.iter().filter(|&&l| l > 0).count());
             pages += 1;
         }
         assert!(pages >= 2, "{pages} pages");
-        assert!(emptiest < OCC_ROWS * 64 / 2, "every page's grid over half full: {emptiest}");
+        assert!(emptiest < floe_ovm::OCC_CELLS / 2, "every page's grid over half full: {emptiest}");
+        // the record: these pages' grids; a page whose largest shape is past
+        // a sixteenth of it keeps the area its members cover alone
+        for page in plan.pages.iter().filter(|p| p.lod == floe_ovm::LOD_EXACT) {
+            let record = page_occupancy_record(&doc.cells[0], arena_at(plan.arenas.as_slice(), page.arena_slot), page);
+            assert!(matches!(floe_ovm::occ_record(&record), Some(floe_ovm::PageOcc::Grid(_))), "{:?}", page.bbox);
+        }
+        let wide = mini_doc(vec![
+            RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 200_000, h: 1_000, rep: Rep::One },
+            RectRec { layer: 1, dt: 0, x: 500, y: 7_000, w: 30, h: 20, rep: Rep::Grid { na: 300, nb: 40, va: (600, 0), vb: (0, 900) } },
+            pts_rec(5, 1_000, 150_000, 50),
+        ]);
+        let plan = plan_of(&wide);
+        let page = &plan.pages[0];
+        assert!(!floe_ovm::occ_wants_grid(&page.bbox, page.max_w, page.max_h) && plan.pages.iter().filter(|p| p.lod == floe_ovm::LOD_EXACT).count() == 1);
+        let record = page_occupancy_record(&wide.cells[0], arena_at(plan.arenas.as_slice(), page.arena_slot), page);
+        assert_eq!(floe_ovm::occ_record(&record), Some(floe_ovm::PageOcc::Total(200_000.0 * 1_000.0 + 12_000.0 * 600.0 + 1_000.0 * 2_500.0)));
     }
 
     /// v6 max_min: mixed-orientation thin wires keep max_w AND

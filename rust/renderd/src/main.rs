@@ -2553,6 +2553,18 @@ fn density_cut_px() -> f64 {
         .unwrap_or(1.0)
 }
 
+/// With the page spread (floe_vfs HierOpts::dot_page_spread) pass 2 draws a
+/// decoded page's shapes under the records' floor, by the area they cover as
+/// every shape under a pixel, rather than leaving them out: the spread pages
+/// under the floor stand for theirs by area, and a page holding shapes on
+/// both sides of the floor was left blank between them (user 2026-10-03, the
+/// routing chip's fill: 0.3 um squares paged with 1 um array squares were
+/// blank where their page was decoded and dense where it was spread).
+/// FLOE_RUST_DENSITY_UNDER_FLOOR=drop is the kill switch.
+fn density_under_floor_drawn() -> bool {
+    floe_render_core::dot_page_spread() && std::env::var("FLOE_RUST_DENSITY_UNDER_FLOOR").as_deref() != Ok("drop")
+}
+
 /// What pass 2 may decode on top of pass 1 (bytes, encoded x 2 as the
 /// estimate): FLOE_RUST_DENSITY_BUDGET_MB, diagnostic, default 256 MB - and
 /// never more than half of what the generation budget has left.
@@ -4348,6 +4360,12 @@ fn render_density_frame(
                         // the density cut, or what a budget fit raised it to)
                         let side_floor = planned_fine.stats.shape_cut as f64 * px_per_dbu;
                         floor_px = Some(floor_px.map_or(side_floor, |known: f64| known.max(side_floor)));
+                        let mut planned_fine = planned_fine;
+                        if density_under_floor_drawn() {
+                            // a decoded page's shapes under the floor are drawn,
+                            // by area, as the spread pages under it are
+                            planned_fine.stats.shape_cut = 0;
+                        }
                         let density_plan = Arc::new(planned_fine);
                         times[0] += elapsed_us(plan_started);
                         let scene_started = Instant::now();

@@ -202,9 +202,9 @@ floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
    - 커미터(메인): 순서대로 `append_cell_sink` 리베이스, lod_page
      전역화, 텍스트/비트셋/cell 레코드 커밋. 윈도 채워지면 청크 인코드
      + 아레나 해제. 메모리 거버너: MemAvailable<4GB면 윈도 반감.
-     **페이지 점유 비트(design.ovb, SPEC-FORMATS, 2026-10-02)**: page
-     encode 작업자가 exact 페이지마다 payload 옆에서 64×64 점유 격자
-     (`page_occupancy`)를 만들고, 커미터가 페이지 순서대로 쓴다. 빌드 끝에
+     **페이지 점유 격자(design.ovb, SPEC-FORMATS, 2026-10-02; v2 2026-10-03)**: page
+     encode 작업자가 exact 페이지마다 payload 옆에서 64×64칸의 덮인 면적 단계
+     (`page_occupancy`)를 만들어 deflate하고, 커미터가 페이지 순서대로 쓴 뒤 끝에 페이지 표를 붙인다. 빌드 끝에
      `[vfs] page occupancy design.ovb: N pages, SIZE (Ts over the encode
      workers)` 한 줄을 남긴다. `--no-page-occupancy`면 만들지 않는다.
      page encode는 persistent planner와 별도의 최대 `jobs` scoped

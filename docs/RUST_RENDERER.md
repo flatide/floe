@@ -342,7 +342,18 @@ user 2026-10-02: the spread "filled places where nothing is").
 `FLOE_RUST_DENSITY_PAGE_OCC=off` is the kill switch; a cache without the file,
 or with one built for another index (its pages, source size and mtime, ovp
 length), spreads over the boxes. `density_plan2`'s 24th value is the pages so
-placed (`occ_pages`, the log line's `pages N (M by occupancy)`).
+placed (`occ_pages`, the log line's `pages N (M by occupancy)`). Since 0.12.275
+the file holds each cell's covered area as a level (design.ovb v2: 4 bits, a
+factor of two apart, deflated per page; a v1 file is not attached) and a
+cell's dots are that area in px^2 - what the area-true raster lights - not an
+even share of the page's members at its largest shape's area
+(`HierOpts::dot_occ_cover`; user 2026-10-03, the routing chip's fill one zoom
+step out: 0.3 um squares paged with 1 um array squares were drawn as dense as
+the arrays); `FLOE_RUST_DENSITY_OCC_COVER=off` is the kill switch. With the
+page spread on, pass 2 also draws a decoded page's shapes under the floor (its
+raster's lower cut 0): a page decoded for its larger shapes no longer leaves
+its small ones blank where a spread page draws theirs by area;
+`FLOE_RUST_DENSITY_UNDER_FLOOR=drop` is the kill switch.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's
