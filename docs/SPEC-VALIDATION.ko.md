@@ -177,6 +177,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 사다리(`FLOE_RUST_DENSITY_FIT_LADDER=on`)는 6번 걸어 같은 프레임에 이른다.
     - 기본 예산은 그 페이지를 디코드한다.
   - 단위 `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
+  0.12.276(페이지 BVH 노드 항목도 색인 면적으로): 단위 `a_page_bvh_node_under_the_floor_counts_the_area_its_pages_cover`
+  (SPEC-PLANNER §3), ovm 테스트에 `page_occ_area`(격자 페이지의 칸 넓이 × 단계, 두 번째 호출도 같은 값, 기록 없음은
+  None). 라우팅 합성 칩의 fit·4배 넓은 뷰는 이 노드가 생기지 않아 0.12.275와 같다.
   0.12.275(점유 격자 v2: 칸마다 덮인 면적, 디코드된 페이지의 하한 아래 도형):
   - 게이트 `density_stack` `occ_checks`: design.ovb가 v2(머리말 version 2, 페이지 수가 맞음)이고 페이지마다
     2 KB보다 작다(두 정사각형 픽스처 185 B). 나머지 기대는 0.12.274와 같다.

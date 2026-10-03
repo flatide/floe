@@ -4693,6 +4693,43 @@ impl<'a> Hier<'a> {
         holds.max(1)
     }
 
+    /// A page-BVH node no wider than a box whose pages are all under the
+    /// floor as one dot item at its box: the area their shapes cover when the
+    /// index has it (design.ovb, Ovm::page_occ_area, under the page spread with
+    /// HierOpts::dot_page_occ and dot_occ_cover; user 2026-10-03), rounded by
+    /// the node's dither - none under a dot - with the pages it lacks by their
+    /// members (page_dots); else every page's page_dots, at least one.
+    fn node_dots(&mut self, ni: u32, layer_idx: u32, bbox: BBox) {
+        let (lo, hi) = self.pbvh_pages(ni);
+        self.st.dot_by[7] += 1;
+        let v = self.v;
+        if self.page_spread && self.page_occ && self.occ_cover && v.has_page_occ() {
+            let ppd = self.px_per_dbu;
+            let (mut covered, mut known) = (0.0f64, false);
+            for pi in lo..hi {
+                match v.page_occ_area(pi) {
+                    Some(area) => {
+                        covered += area * ppd * ppd;
+                        known = true;
+                    }
+                    None => covered += self.page_dots(&v.page(pi)) as f64,
+                }
+            }
+            if known {
+                self.st.dot_occ_pages += 1;
+                let block = self.block_px / ppd;
+                let at = ((bbox.x0 as f64 / block).floor() as i64, (bbox.y0 as f64 / block).floor() as i64);
+                let holds = (covered + block_dither(at.0, at.1, 4 << 60 | ni as u64)).floor() as u64;
+                if holds > 0 {
+                    self.add_dots(layer_idx, bbox, holds);
+                }
+                return;
+            }
+        }
+        let holds: u64 = (lo..hi).map(|pi| self.page_dots(&v.page(pi))).sum();
+        self.add_dots(layer_idx, bbox, holds.max(1));
+    }
+
     /// The sub-cut dots a page all under the cut stands for (never decoded):
     /// its shapes, each at most its largest shape's box on screen - add_dots'
     /// rule from a pixel up (max(1, floor(area / DOT_AREA_PX))), under a pixel
@@ -5007,10 +5044,7 @@ impl<'a> Hier<'a> {
                             // WsCell::dot_counts), at most one dot a shape of
                             // the pages below
                             if self.dot_seen.insert(4 << 60 | ni as u64) {
-                                let (lo, hi) = self.pbvh_pages(ni);
-                                let holds: u64 = (lo..hi).map(|pi| self.page_dots(&self.v.page(pi))).sum();
-                                self.st.dot_by[7] += 1;
-                                self.add_dots(layer_idx, n.bbox, holds.max(1));
+                                self.node_dots(ni, layer_idx, n.bbox);
                                 self.st.sub_cut_box_nodes += 1;
                             }
                         } else if self.take_box(1) {
@@ -7554,6 +7588,58 @@ mod tests {
         // off (the kill switch): its members at the largest shape's area
         let (dots, blocks, _) = counts(&plan_hier(&chip, &ask, &opts(false)));
         assert!(dots >= 15 * 15 * 30 && blocks == 15 * 15, "{dots} dots over {blocks} blocks");
+    }
+
+    #[test]
+    fn a_page_bvh_node_under_the_floor_counts_the_area_its_pages_cover() {
+        // node_dots (user 2026-10-03: "node items too from the index's area"):
+        // 20 pages of 90 x 1,500 dbu, 4,000 members each no larger than 10 dbu
+        // (their dots by members: 4,000 x 0.0025 px^2 = 10 a page), under a page
+        // BVH of two leaves of ten - at 0 and at 2,000 dbu, 990 x 1,500 dbu:
+        // 4.95 x 7.5 px at 0.005 px/dbu, no wider than a box, in blocks 0 and 1 -
+        // and a root wider than a box. The index says each page covers 20,000
+        // dbu^2 (0.5 px^2): a leaf stands for 5 dots, not its members' 100 (the
+        // box's own 18 at most).
+        let mk = || -> Ovm {
+            let mut b = Builder::new(1000.0, 0, 0, 1);
+            b.top = 0;
+            b.layer(1, 0, "L1", 0, 0);
+            let m1 = b.bitset(&[1]);
+            for k in 0..20u32 {
+                let x = (k / 10) as i64 * 2_000 + (k % 10) as i64 * 100;
+                b.page(0, 0, k, &bx(x, 0, x + 90, 1_500), 0, 0, 0, 1, 4_000, 10, 10, floe_ovm::LOD_EXACT, floe_ovm::LOD_PAGE_NONE);
+            }
+            let l0 = b.pbvh_node(&bx(0, 0, 990, 1_500), 0, 10, true, 10, 10);
+            let _l1 = b.pbvh_node(&bx(2_000, 0, 2_990, 1_500), 10, 10, true, 10, 10);
+            let root = b.pbvh_node(&bx(0, 0, 2_990, 1_500), l0, 2, false, 10, 10);
+            let pr = b.prange(0, 0, 20, root);
+            b.cell("T", 0, 0, &bx(0, 0, 2_990, 1_500), &bx(0, 0, 2_990, 1_500), 0, 0, 0, 20, 0, 0, pr, 1, m1, m1, 1, 0, 0, m1);
+            Ovm::from_bytes(b.finish(0, 0)).unwrap()
+        };
+        let mut chip = mk();
+        let records: Vec<Vec<u8>> = (0..20).map(|_| floe_ovm::occ_total(20_000.0)).collect();
+        let image = floe_ovm::ovb_image(chip.src_size, chip.src_mtime, chip.ovp_len, &records);
+        chip.attach_page_occ_backing(floe_ovm::Backing::Vec(image)).unwrap();
+        let mut ask = rq(bx(-10, -10, 3_000, 1_510), 600, 0);
+        ask.px_per_dbu = 0.005;
+        ask.page_wash = false;
+        let opts = |cover: bool| HierOpts {
+            sub_cut_dots: Some(1.0 / 3.0),
+            dot_block_px: 8.0,
+            dot_spread: true,
+            dot_page_spread: true,
+            dot_occ_cover: cover,
+            ..HierOpts::default()
+        };
+        let counts = |plan: &HierPlan| -> Vec<u16> { plan.wcells.iter().find(|w| w.key.0 == 0).map_or(Vec::new(), |w| w.dot_counts.clone()) };
+        let with = plan_hier(&chip, &ask, &opts(true));
+        assert_eq!((with.stats.dot_by[7], with.stats.dot_occ_pages, with.stats.sub_cut_box_nodes), (2, 2, 2));
+        assert_eq!(counts(&with), vec![5, 5]);
+        // the index's cover off (its kill switch), or no index: by members
+        for plan in [plan_hier(&chip, &ask, &opts(false)), plan_hier(&mk(), &ask, &opts(true))] {
+            assert_eq!((plan.stats.dot_by[7], plan.stats.dot_occ_pages), (2, 0));
+            assert_eq!(counts(&plan), vec![18, 18]);
+        }
     }
 
     #[test]

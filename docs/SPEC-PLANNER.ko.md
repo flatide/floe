@@ -383,6 +383,11 @@
       (`occ_area_px`)을 페이지 디더로 반올림한 것이고, 0이면 항목을 내지 않는다.
     - 격자 없이 면적 합만 있는 페이지(큰 도형이 있는 페이지, SPEC-FORMATS)는 상자 전체에 뿌리되 점 수는 그
       면적(px²)이다(`spread_page`의 몫을 면적으로). 박스 이하면 같은 반올림으로 항목 하나다.
+    - 페이지 BVH 노드(0.12.276, `node_dots`): 하한 아래이고 박스 이하인 노드는 노드 상자에 항목 하나로 선다. 점 수는
+      노드 아래 페이지들의 덮인 면적 합(`Ovm::page_occ_area`: 합계는 그대로, 격자는 칸 단계 × 칸 넓이, 인덱스를 연
+      동안 페이지마다 한 번 계산)을 노드 디더로 반올림한 것이다. 기록이 없는 페이지는 `page_dots`로 더한다. 0이면
+      항목을 내지 않는다. 색인이 없거나 `dot_occ_cover`가 꺼져 있으면 이전처럼 `page_dots`의 합(최소 1)이다.
+      `dot_occ_pages`는 색인을 쓴 노드를 하나로 센다.
     - 표시가 없는 캐시는 상자 전체에 뿌린다. 표시로 놓은 페이지 수는 `HierStats::dot_occ_pages`(renderd
       `density_plan2`의 24번째 값 `occ_pages`)다.
     - 퍼뜨리기가 켜져 있으면 renderd는 디코드된 페이지의 하한 아래 도형도 그린다(2패스 래스터의 아래 컷 0,
@@ -398,6 +403,8 @@
     - 단위: `a_page_without_a_grid_spreads_the_area_its_shapes_cover_over_its_box` — 합계 50 px²인 120 px
       페이지(멤버 4만, 멤버 기준 1만 점)는 상자 위에 약 50점, 2.5 px²인 박스 이하 페이지는 2~3점이다.
       `dot_occ_cover`를 끄면 멤버 기준(블록마다 상한)이다.
+    - 단위: `a_page_bvh_node_under_the_floor_counts_the_area_its_pages_cover` — 4.95×7.5 px 잎 노드 둘(페이지 10개씩,
+      멤버 기준 페이지당 10점, 색인 기준 0.5 px²)은 색인으로 5점씩, 끄거나 색인이 없으면 상자 상한 18점씩이다.
   - 단위: `a_page_under_the_floor_spreads_its_shapes_dots_over_its_box`.
     - 4만 멤버 페이지: 15×15 블록이 상한까지 찬다. 범위 안에만 그리고, 다시 계획해도 같으며, 구석 뷰는 그 블록들만 낸다.
     - 400 멤버 페이지: 블록 수보다 적은 약 100점이다.

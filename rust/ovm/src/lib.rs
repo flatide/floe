@@ -1899,7 +1899,13 @@ pub struct Ovm {
     secs: [(u64, u64); N_SECTIONS],
     /// design.ovb when attached (attach_page_occ): the pages' occupancy grids
     page_occ: Option<Backing>,
+    /// per page the area its shapes cover by design.ovb (page_occ_area), f64
+    /// bits once worked out (OCC_AREA_UNKNOWN before, OCC_AREA_NONE: none)
+    page_occ_area: Vec<std::sync::atomic::AtomicU64>,
 }
+
+const OCC_AREA_UNKNOWN: u64 = u64::MAX;
+const OCC_AREA_NONE: u64 = u64::MAX - 1;
 
 fn corrupt(msg: impl std::fmt::Display) -> String {
     format!("corrupt cache; rebuild: {}", msg)
@@ -2798,6 +2804,7 @@ impl Ovm {
             secs,
             data,
             page_occ: None,
+            page_occ_area: Vec::new(),
         })
     }
 
@@ -2854,6 +2861,7 @@ impl Ovm {
             return Err("design.ovb: the pages end before the table".into());
         }
         self.page_occ = Some(data);
+        self.page_occ_area = (0..self.n_pages).map(|_| std::sync::atomic::AtomicU64::new(OCC_AREA_UNKNOWN)).collect();
         Ok(())
     }
 
@@ -2873,6 +2881,39 @@ impl Ovm {
         let table = g64(data, 48) as usize;
         let (lo, hi) = (g64(data, table + 8 * pi as usize) as usize, g64(data, table + 8 * pi as usize + 8) as usize);
         occ_record(&data[lo..hi])
+    }
+
+    /// The area (dbu^2) page `pi`'s shapes cover by its design.ovb record - a
+    /// total as stored, a grid's cells' levels over their areas - worked out
+    /// once per open index; None without one.
+    pub fn page_occ_area(&self, pi: u32) -> Option<f64> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let slot = self.page_occ_area.get(pi as usize)?;
+        let known = slot.load(Relaxed);
+        if known != OCC_AREA_UNKNOWN {
+            return (known != OCC_AREA_NONE).then(|| f64::from_bits(known));
+        }
+        let area = match self.page_occ(pi) {
+            Some(PageOcc::Total(area)) => Some(area),
+            Some(PageOcc::Grid(levels)) => {
+                let bb = self.page(pi).bbox;
+                let (ext_x, ext_y) = (bb.x1 - bb.x0, bb.y1 - bb.y0);
+                let mut sum = 0.0;
+                for cy in 0..OCC_GRID {
+                    let h = (occ_edge(bb.y0, ext_y, cy + 1) - occ_edge(bb.y0, ext_y, cy)) as f64;
+                    for cx in 0..OCC_GRID {
+                        let level = levels[(cy * OCC_GRID + cx) as usize];
+                        if level > 0 {
+                            sum += occ_coverage(level) * (occ_edge(bb.x0, ext_x, cx + 1) - occ_edge(bb.x0, ext_x, cx)) as f64 * h;
+                        }
+                    }
+                }
+                Some(sum)
+            }
+            None => None,
+        };
+        slot.store(area.map_or(OCC_AREA_NONE, f64::to_bits), Relaxed);
+        area
     }
 
     fn sec(&self, i: usize) -> &[u8] {
@@ -3802,6 +3843,9 @@ mod tests {
         ovm.attach_page_occ_backing(Backing::Vec(good)).unwrap();
         assert!(ovm.has_page_occ() && ovm.page_occ(0).is_none() && ovm.page_occ(2).is_none());
         assert_eq!(ovm.page_occ(1), Some(PageOcc::Grid(Box::new(one))));
+        // its cell (3, 5) at 2^-6 of the 100 x 50 page's 1/4096th, twice alike
+        let cell = (occ_edge(0, 100, 4) - occ_edge(0, 100, 3)) as f64 * (occ_edge(0, 50, 6) - occ_edge(0, 50, 5)) as f64;
+        assert_eq!((ovm.page_occ_area(1), ovm.page_occ_area(1), ovm.page_occ_area(0)), (Some(cell / 64.0), Some(cell / 64.0), None));
         // none on disk: nothing attached
         assert_eq!(Ovm::from_bytes(build_sample()).unwrap().attach_page_occ("/nonexistent/design.ovb"), Ok(false));
     }
