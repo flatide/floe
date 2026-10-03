@@ -192,6 +192,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
         `FLOE_RUST_DENSITY_TOP_HELD=off`에서는 위의 0.12.282 경우다.
       - DEEP(TOP > NEST > DEEP_CELL, 두 단계 아래의 0.1 µm 정사각형 240개)을 켠 depth 1 프레임은 LOW·MID 프레임과
         같다(DEEP이 빠짐). depth 2에서는 DEEP이 위층이다. 킬 스위치에서는 depth 1의 위층이 0 px다.
+  - 0.12.284 `shift_checks`(세계에 고정한 칸, 칸의 실제 면적):
+    - LOW 위의 통로 14개(0.6~1.4 µm, 3.7 µm 간격)에 MID 비아 점, 맨 위는 TOP 반점이다. 0/3/7/11 px 팬에서 하위
+      밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
+    - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
+      0 / 725 px였다.
   - `ladder_checks`: 맞춤은 계획마다 한 번이다(칸 방식은 위층·아래층 두 계획: passes 2).
   - 단위 `a_small_point_list_in_full_blocks_is_passed_over_whole`.
   - 어댑터 계약: `density_plan2` 31개 값(…/free_top/free_others). 상태줄 테스트: `24 regions (free top 1.3M, others 210k

@@ -884,6 +884,84 @@ def cells_checks(temp):
             w.stop()
 
 
+def shift_layouts(pan_path, edge_path):
+    """Pass 2's cells under a pan and at a frame's edge: (pan) LOW over the
+    view but 14 channels 0.6-1.4 um wide every 3.7 um, MID's 0.1 um VIA
+    every 0.2 um over them, a speck of TOP far left (the top plane); (edge)
+    LOW to x 38.4 um, MID's VIAs every 0.2 um from 30 um, the speck."""
+    import klayout.db as kdb
+    for path, edges in ((pan_path, [(1.0 + k * 3.7, 1.6 + k * 3.7 + 0.1 * (k % 9)) for k in range(14)]), (edge_path, None)):
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        low = ly.layer(*LOW)
+        via = ly.create_cell('VIA')
+        via.shapes(ly.layer(*MID)).insert(kdb.DBox(0, 0, 0.1, 0.1))
+        if edges:
+            lo = -10.0
+            for (a, b) in edges:
+                top.shapes(low).insert(kdb.DBox(lo, -1.0, a, 21.0))
+                lo = b
+            top.shapes(low).insert(kdb.DBox(lo, -1.0, 80.0, 21.0))
+            top.insert(kdb.DCellInstArray(via.cell_index(), kdb.DTrans(kdb.DVector(-5.0, 0.05)), kdb.DVector(0.2, 0), kdb.DVector(0, 0.2), 300, 100))
+        else:
+            top.shapes(low).insert(kdb.DBox(-10.0, -1.0, 38.4, 21.0))
+            top.insert(kdb.DCellInstArray(via.cell_index(), kdb.DTrans(kdb.DVector(30.05, 0.05)), kdb.DVector(0.2, 0), kdb.DVector(0, 0.2), 100, 100))
+        top.shapes(ly.layer(*TOP)).insert(kdb.DBox(-8.0, 10.0, -7.9, 10.1))
+        ly.write(str(path))
+
+
+def shift_checks(temp):
+    """Pass 2's cells are the world's, a cell's share by its part in the frame
+    (a reviewer, 2026-10-03: cells from a tile's corner kept or dropped one
+    channel by where a pan put it - a lower density of 47 px to none - and a
+    cell cut by the frame's edge to 1 x 32 px, all free, fell under the 128
+    px of a whole one). Channels across the cells, panned by 0, 3, 7 and 11
+    px: the lower density and the cells' free pixels the same each time, as
+    the tile boxes' (FLOE_RUST_DENSITY_FREE_CELLS=off); the open strip at a
+    frame's right edge, 386 and 400 px wide (its last cell 2 and 16 px): the
+    lower density the tile boxes'."""
+    pan_src, edge_src = Path(temp) / 'pan.oas', Path(temp) / 'edge.oas'
+    shift_layouts(pan_src, edge_src)
+    for src in (pan_src, edge_src):
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    workers = {(src, mode): worker(src, dict(env, **extra)) for src in (pan_src, edge_src)
+               for mode, extra in (('cells', {}), ('tiles', {'FLOE_RUST_DENSITY_FREE_CELLS': 'off'}))}
+    try:
+        def view(w, gen, x0, width):
+            dbu = float(w.cache.meta['dbu'])
+            box = (x0, VIEW[1], x0 + width * PX_UM, VIEW[3])
+            w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(c / dbu for c in box), 'view': None,
+                      'w': width, 'h': H, 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW, MID, TOP], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    return res
+            raise AssertionError('shift frame timeout')
+
+        pans = {}
+        for mode in ('cells', 'tiles'):
+            pans[mode] = [view(workers[(pan_src, mode)], gen, -shift * PX_UM, W) for gen, shift in enumerate((0, 3, 7, 11), 1)]
+        lower = {mode: [res['density_stack']['lower'] for res in found] for mode, found in pans.items()}
+        free = [res['density_plan2']['free_others'] for res in pans['cells']]
+        assert len(set(lower['cells'])) == 1 and len(set(free)) == 1 and lower['cells'] == lower['tiles'] and lower['cells'][0] > 0, (lower, free)
+        edge = {mode: [view(workers[(edge_src, mode)], gen, 0.0, width)['density_stack']['lower'] for gen, width in ((1, 386), (2, 400))]
+                for mode in ('cells', 'tiles')}
+        assert edge['cells'] == edge['tiles'] and edge['cells'][0] > 0, edge
+        print('density stack: pass 2\'s cells the world\'s - panned 0/3/7/11 px the lower density %d px and the cells\' free %d px each '
+              'time, as the tile boxes; a frame\'s edge cell by its part: %s px lower density at 386 / 400 px wide, as the tile boxes' % (
+                  lower['cells'][0], free[0], ' / '.join(str(n) for n in edge['cells'])))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def own_layout(path):
     """A TOP whose own shapes are 60,000 boxes of 0.05-0.3 um at random over
     300 x 300 um - under a pixel at 1000 px; of 62,500 sizes, so the writer
@@ -1486,6 +1564,7 @@ def main():
         lists_checks(temp)
         dense_lists_checks(temp)
         cells_checks(temp)
+        shift_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

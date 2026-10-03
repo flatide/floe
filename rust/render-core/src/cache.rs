@@ -398,47 +398,69 @@ pub struct Cache {
     /// record (field 2026-09-22: ~10 s of every layout's open, a plain
     /// layout with no design.ovo included)
     layer_depth: std::sync::OnceLock<Vec<u32>>,
-    /// Cache::layers_held per (cell, levels left), on first use
-    held_layers: std::sync::Mutex<std::collections::HashMap<(u32, u32), std::sync::Arc<Vec<u8>>>>,
+    /// Cache::layer_held per (cell, levels left, layer), on first use
+    held_layers: std::sync::Mutex<std::collections::HashMap<(u32, u32, u32), bool>>,
     // Immutable for this open cache; reopen after publishing design.ovr.
     representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
 }
 
-/// Cache::layers_held of (`ci`, `rem`), the cells below memoized in `memo`.
-fn layers_held_in(ovm: &floe_ovm::Ovm, ci: u32, rem: u32, memo: &mut std::collections::HashMap<(u32, u32), Vec<u8>>) -> Vec<u8> {
-    let or = |out: &mut Vec<u8>, bits: &[u8]| {
-        if out.len() < bits.len() {
-            out.resize(bits.len(), 0);
-        }
-        for (have, add) in out.iter_mut().zip(bits) {
-            *have |= *add;
-        }
-    };
-    let mut out = Vec::new();
-    if rem == floe_vfs::hier::REM_FULL || rem >= ovm.cell_height(ci) {
-        or(&mut out, ovm.bitset(ovm.cell_lmask_rec(ci)));
-        return out;
+/// Cache::layer_held: the most placements one question reads
+const LAYER_HELD_READS: u64 = 1 << 18;
+
+/// Cache::layer_held of (`ci`, `rem`, `layer`) under a budget of `reads`
+/// placements (None: spent), the cells below memoized in `memo`.
+fn layer_held_in(ovm: &floe_ovm::Ovm, ci: u32, rem: u32, layer: u32, reads: &mut u64, memo: &mut std::collections::HashMap<(u32, u32), bool>) -> Option<bool> {
+    let has = |mask: u32| mask == floe_ovm::LMASK_UNKNOWN || ovm.bitset(mask).get(layer as usize / 8).is_some_and(|byte| (byte >> (layer % 8)) & 1 == 1);
+    if !has(ovm.cell_lmask_rec(ci)) {
+        return Some(false);
     }
-    if let Some(known) = memo.get(&(ci, rem)) {
-        return known.clone();
+    if rem == floe_vfs::hier::REM_FULL || rem >= ovm.cell_height(ci) || ovm.cell_lmask_direct(ci) != floe_ovm::LMASK_UNKNOWN && has(ovm.cell_lmask_direct(ci)) {
+        return Some(true);
     }
-    or(&mut out, ovm.bitset(ovm.cell_lmask_direct(ci)));
     if rem == 0 {
-        return out;
+        return Some(false);
     }
-    let (start, count) = ovm.cell_places(ci);
-    let mut seen = std::collections::HashSet::new();
-    for pli in start as u64..start as u64 + count as u64 {
-        let child = ovm.place_child(pli);
-        if child >= ovm.n_cells || !seen.insert(child) {
+    if let Some(&known) = memo.get(&(ci, rem)) {
+        return Some(known);
+    }
+    let (bvh_start, bvh_count) = ovm.cell_bvh(ci);
+    let mut found = false;
+    let mut stack = if bvh_count != 0 { vec![bvh_start] } else { Vec::new() };
+    'walk: while let Some(ni) = stack.pop() {
+        let node = ovm.bvh(ni);
+        if !has(node.lmask_rec) {
             continue;
         }
-        let below = if rem - 1 >= ovm.cell_height(child) { floe_vfs::hier::REM_FULL } else { rem - 1 };
-        let held = layers_held_in(ovm, child, below, memo);
-        or(&mut out, &held);
+        // its children with none left below: their own layers
+        if rem == 1 && node.lmask_direct != floe_ovm::LMASK_UNKNOWN {
+            if has(node.lmask_direct) {
+                found = true;
+                break;
+            }
+            continue;
+        }
+        if !node.leaf {
+            stack.extend((0..u32::from(node.count)).map(|k| node.first + k));
+            continue;
+        }
+        for k in 0..u64::from(node.count) {
+            if *reads == 0 {
+                return None;
+            }
+            *reads -= 1;
+            let child = ovm.place_child(u64::from(node.first) + k);
+            if child >= ovm.n_cells {
+                continue;
+            }
+            let below = if rem - 1 >= ovm.cell_height(child) { floe_vfs::hier::REM_FULL } else { rem - 1 };
+            if layer_held_in(ovm, child, below, layer, reads, memo)? {
+                found = true;
+                break 'walk;
+            }
+        }
     }
-    memo.insert((ci, rem), out.clone());
-    out
+    memo.insert((ci, rem), found);
+    Some(found)
 }
 
 /// The longest top-to-cell path of every cell (None = unreachable
@@ -554,25 +576,25 @@ impl Cache {
             .unwrap_or(0)
     }
 
-    /// The layers cell `ci` shows shapes of with `rem` levels left below it
-    /// (floe_vfs::hier::REM_FULL: all), a bit per layer index: its own, and
-    /// its children's at a level less - none left, its own alone (the
-    /// planner draws every child of such a cell as an outline) - past its
-    /// height its recursive layers: the planner's cell_bits for every layer.
-    /// What a plan with that top draws on is among them. Worked out once per
-    /// (cell, rem) and open cache.
-    pub fn layers_held(&self, ci: u32, rem: u32) -> std::sync::Arc<Vec<u8>> {
-        if let Some(known) = self.held_layers.lock().ok().and_then(|held| held.get(&(ci, rem)).cloned()) {
+    /// Whether cell `ci` shows shapes of `layer` with `rem` levels left below
+    /// it (floe_vfs::hier::REM_FULL: all) - the planner's cell_bits rule: its
+    /// own, its children's a level down, with none left its own alone (the
+    /// planner draws such a cell's children as outlines), past its height
+    /// its recursive layers. Found through the child-BVH nodes' masks - a
+    /// subtree whose cells lack the layer passed, a level above the last its
+    /// children's own layers at once - and stopped at the first; past
+    /// LAYER_HELD_READS placements read without an answer, held (kept on a
+    /// doubt: a reviewer, 2026-10-03 - reading every placement to the depth
+    /// took the synthetic MAIN01 at depth 4 5.5 s before its first frame).
+    /// Once per (cell, rem, layer) and open cache.
+    pub fn layer_held(&self, ci: u32, rem: u32, layer: u32) -> bool {
+        if let Some(&known) = self.held_layers.lock().ok().and_then(|held| held.get(&(ci, rem, layer)).copied()).as_ref() {
             return known;
         }
         let ovm = &self.vfs.ovm;
-        let held = if ci < ovm.n_cells {
-            std::sync::Arc::new(layers_held_in(ovm, ci, rem, &mut std::collections::HashMap::new()))
-        } else {
-            std::sync::Arc::new(Vec::new())
-        };
+        let held = ci >= ovm.n_cells || layer_held_in(ovm, ci, rem, layer, &mut LAYER_HELD_READS.clone(), &mut std::collections::HashMap::new()).unwrap_or(true);
         if let Ok(mut known) = self.held_layers.lock() {
-            known.insert((ci, rem), std::sync::Arc::clone(&held));
+            known.insert((ci, rem, layer), held);
         }
         held
     }

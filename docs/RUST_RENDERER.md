@@ -385,18 +385,22 @@ Since 0.12.281 a whole list whose blocks are all full is passed over too
 regions are cells of the free space rather than a tile's bounding box of it
 (a reviewer, 2026-10-03: a tile 1 % free spanned the tile, and the joint plan
 was decided by those boxes' area): 32 px cells
-(`FLOE_RUST_DENSITY_FREE_CELL_PX`, diagnostic), the top plane's where any
-pixel is free, the others' where an eighth is (`FLOE_RUST_DENSITY_OTHERS_MIN`,
-diagnostic; fewer: the originals show the cell), the two sides planned apart -
-no joint plan of every layer over the whole top space.
+(`FLOE_RUST_DENSITY_FREE_CELL_PX`, diagnostic) on a grid anchored to the world
+- kept by a pan by whole pixels - counted over the frame whatever the tiles
+(since 0.12.284), the top plane's where any pixel is free, the others' where
+an eighth of the cell's part in the frame is (`FLOE_RUST_DENSITY_OTHERS_MIN`,
+diagnostic; fewer: the originals show the cell), their runs cut by the tiles
+for the threads, the two sides planned apart - no joint plan of every layer
+over the whole top space.
 `FLOE_RUST_DENSITY_FREE_CELLS=off` is the kill switch (the tile boxes, the
 joint plan by area). `density_plan2` ends with the free pixels of the cells
 planned, the top plane's and the others' (31 values). Since 0.12.283 the top
 plane is the topmost visible layer the view's cell holds shapes of within the
 depth (user 2026-10-03; renderd `density_held_top`, render-core
-`Cache::layers_held` - the planner's cell_bits rule): visible layers above it
-with neither shapes nor texts there leave the density stack's planes (they
-draw nothing at that depth). `FLOE_RUST_DENSITY_TOP_HELD=off` is the kill
+`Cache::layer_held` - the planner's cell_bits rule, a layer at a time from
+the top, through the child-BVH nodes' masks, held past 2^18 placements read):
+visible layers above it with neither shapes nor texts there leave the density
+stack's planes (they draw nothing at that depth). `FLOE_RUST_DENSITY_TOP_HELD=off` is the kill
 switch (the topmost visible layer, shapes or not).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with

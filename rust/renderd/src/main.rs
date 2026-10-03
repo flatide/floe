@@ -2455,25 +2455,24 @@ fn density_stack_enabled() -> bool {
 /// cut-free, 0.080 under the fit). FLOE_RUST_DENSITY_ONE_WALK=on, diagnostic.
 /// The density stack's planes without the visible layers above the topmost
 /// one the plan's top cell shows shapes of within its depth
-/// (Cache::layers_held) that hold no text below it either: the top plane is
+/// (Cache::layer_held) that hold no text below it either: the top plane is
 /// the topmost visible layer with shapes (user 2026-10-03: "the topmost of
 /// the layers on that has shapes" - the routing chip's BOUNDARY 100/0, named
 /// and empty, on top of every layer on, left the top plane's density empty).
 /// Such a layer draws nothing in either pass. None of them with shapes: as
 /// they are.
 fn density_held_top(cache: &Cache, top: (u32, u32), mut styled: StyledGeometryRasterRequest) -> StyledGeometryRasterRequest {
-    let held = cache.layers_held(top.0, top.1);
-    let has = |bits: &[u8], idx: u32| bits.get(idx as usize / 8).is_some_and(|byte| (byte >> (idx % 8)) & 1 == 1);
-    if !styled.layers.iter().any(|layer| has(&held, layer.layer_idx)) {
-        return styled;
-    }
     let texted = cache.layers_texted(top.0);
-    while let Some(last) = styled.layers.last() {
-        if has(&held, last.layer_idx) || has(&texted, last.layer_idx) {
-            break;
-        }
-        styled.layers.pop();
-    }
+    let has = |bits: &[u8], idx: u32| bits.get(idx as usize / 8).is_some_and(|byte| (byte >> (idx % 8)) & 1 == 1);
+    // the topmost one with shapes, from the top; none: as they are
+    let Some(keep) = styled
+        .layers
+        .iter()
+        .rposition(|layer| has(&texted, layer.layer_idx) || cache.layer_held(top.0, top.1, layer.layer_idx))
+    else {
+        return styled;
+    };
+    styled.layers.truncate(keep + 1);
     styled
 }
 
@@ -4193,13 +4192,14 @@ fn render_density_frame(
                     // pixel is free, the others' where enough is to add to; else
                     // a tile's bounding box of its free pixels, by area
                     let cells = density_free_cells();
-                    let (regions_top, regions_others, top_free, others_free) = match cells {
-                        Some((cell, others_min)) => {
-                            let (top, top_free) = demand.eligible_cells(true, cell, 1);
-                            let need = ((others_min * (cell * cell) as f64).ceil() as u32).max(1);
-                            let (others, others_free) = demand.eligible_cells(false, cell, need);
-                            (top, others, top_free as f64, others_free as f64)
-                        }
+                    let by_cells = cells.and_then(|(cell, others_min)| {
+                        let (top, top_free) = demand.eligible_cells(true, cell, 0.0)?;
+                        let (others, others_free) = demand.eligible_cells(false, cell, others_min)?;
+                        Some((top, others, top_free as f64, others_free as f64))
+                    });
+                    let cells = cells.filter(|_| by_cells.is_some());
+                    let (regions_top, regions_others, top_free, others_free) = match by_cells {
+                        Some(found) => found,
                         None => {
                             let (top, others) = (demand.eligible_regions(true), demand.eligible_regions(false));
                             let (top_area, others_area): (f64, f64) = (
