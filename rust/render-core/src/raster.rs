@@ -3947,8 +3947,11 @@ impl BlockDemand<'_> {
         }
         let cell = (cell.max(1)) as i64;
         // columns run with x, rows against y: a cell's bounds at multiples of
-        // `cell` px of x / sx and -y / sy
-        let (ox, oy) = ((view.x0 as f64 / sx).round() as i64, (-(view.y1 as f64) / sy).round() as i64);
+        // `cell` px of x / sx and -y / sy - rounded half up alike on both
+        // sides of the origin (round() took -0.5 to -1 and 0.5 to 1: a pan by
+        // a pixel across the origin moved the cells by two; a reviewer,
+        // 2026-10-03)
+        let (ox, oy) = ((view.x0 as f64 / sx + 0.5).floor() as i64, (-(view.y1 as f64) / sy + 0.5).floor() as i64);
         let (gx, gy) = (ox.div_euclid(cell), oy.div_euclid(cell));
         let nx = ((width - 1 + ox).div_euclid(cell) - gx + 1) as usize;
         let ny = ((height - 1 + oy).div_euclid(cell) - gy + 1) as usize;

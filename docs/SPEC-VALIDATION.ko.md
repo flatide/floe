@@ -197,6 +197,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.285: 세계 원점을 가로지르는 1 px 팬(x0 −0.05 / +0.05 µm)에서, 칸 경계에 걸친 통로 하나(x 2.88~3.58 µm)의 하위
+      밀도가 308 / 308 px로 타일 bbox와 같다. fd4fdcb는 0 / 308 px였다(오프셋의 round()).
   - `ladder_checks`: 맞춤은 계획마다 한 번이다(칸 방식은 위층·아래층 두 계획: passes 2).
   - 단위 `a_small_point_list_in_full_blocks_is_passed_over_whole`.
   - 어댑터 계약: `density_plan2` 31개 값(…/free_top/free_others). 상태줄 테스트: `24 regions (free top 1.3M, others 210k

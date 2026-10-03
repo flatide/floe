@@ -884,13 +884,16 @@ def cells_checks(temp):
             w.stop()
 
 
-def shift_layouts(pan_path, edge_path):
+def shift_layouts(pan_path, edge_path, origin_path):
     """Pass 2's cells under a pan and at a frame's edge: (pan) LOW over the
     view but 14 channels 0.6-1.4 um wide every 3.7 um, MID's 0.1 um VIA
     every 0.2 um over them, a speck of TOP far left (the top plane); (edge)
-    LOW to x 38.4 um, MID's VIAs every 0.2 um from 30 um, the speck."""
+    LOW to x 38.4 um, MID's VIAs every 0.2 um from 30 um, the speck;
+    (origin) as pan with one channel, x 2.88-3.58 um (7 px across the 3.2 um
+    bound of the cells from the world's origin)."""
     import klayout.db as kdb
-    for path, edges in ((pan_path, [(1.0 + k * 3.7, 1.6 + k * 3.7 + 0.1 * (k % 9)) for k in range(14)]), (edge_path, None)):
+    for path, edges in ((pan_path, [(1.0 + k * 3.7, 1.6 + k * 3.7 + 0.1 * (k % 9)) for k in range(14)]), (edge_path, None),
+                        (origin_path, [(2.88, 3.58)])):
         ly = kdb.Layout()
         ly.dbu = 0.001
         top = ly.create_cell('TOP')
@@ -920,15 +923,18 @@ def shift_checks(temp):
     px: the lower density and the cells' free pixels the same each time, as
     the tile boxes' (FLOE_RUST_DENSITY_FREE_CELLS=off); the open strip at a
     frame's right edge, 386 and 400 px wide (its last cell 2 and 16 px): the
-    lower density the tile boxes'."""
-    pan_src, edge_src = Path(temp) / 'pan.oas', Path(temp) / 'edge.oas'
-    shift_layouts(pan_src, edge_src)
-    for src in (pan_src, edge_src):
+    lower density the tile boxes'; a pan by a pixel across the world's origin
+    (x0 -0.05 and 0.05 um at 0.1 um a pixel - the grid's offset rounded half
+    away from zero moved by two, a reviewer on fd4fdcb: 0 against 20 px):
+    the one channel's lower density the same, the tile boxes'."""
+    pan_src, edge_src, origin_src = Path(temp) / 'pan.oas', Path(temp) / 'edge.oas', Path(temp) / 'origin.oas'
+    shift_layouts(pan_src, edge_src, origin_src)
+    for src in (pan_src, edge_src, origin_src):
         done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
-    workers = {(src, mode): worker(src, dict(env, **extra)) for src in (pan_src, edge_src)
+    workers = {(src, mode): worker(src, dict(env, **extra)) for src in (pan_src, edge_src, origin_src)
                for mode, extra in (('cells', {}), ('tiles', {'FLOE_RUST_DENSITY_FREE_CELLS': 'off'}))}
     try:
         def view(w, gen, x0, width):
@@ -954,9 +960,13 @@ def shift_checks(temp):
         edge = {mode: [view(workers[(edge_src, mode)], gen, 0.0, width)['density_stack']['lower'] for gen, width in ((1, 386), (2, 400))]
                 for mode in ('cells', 'tiles')}
         assert edge['cells'] == edge['tiles'] and edge['cells'][0] > 0, edge
+        origin = {mode: [view(workers[(origin_src, mode)], gen, x0, W)['density_stack']['lower'] for gen, x0 in ((1, -0.05), (2, 0.05))]
+                  for mode in ('cells', 'tiles')}
+        assert origin['cells'] == origin['tiles'] and origin['cells'][0] > 0, origin
         print('density stack: pass 2\'s cells the world\'s - panned 0/3/7/11 px the lower density %d px and the cells\' free %d px each '
-              'time, as the tile boxes; a frame\'s edge cell by its part: %s px lower density at 386 / 400 px wide, as the tile boxes' % (
-                  lower['cells'][0], free[0], ' / '.join(str(n) for n in edge['cells'])))
+              'time, as the tile boxes; a frame\'s edge cell by its part: %s px lower density at 386 / 400 px wide, as the tile boxes; '
+              'a pixel\'s pan across the origin %s px, as the tile boxes' % (
+                  lower['cells'][0], free[0], ' / '.join(str(n) for n in edge['cells']), ' / '.join(str(n) for n in origin['cells'])))
     finally:
         for w in workers.values():
             w.stop()
