@@ -401,7 +401,13 @@ depth (user 2026-10-03; renderd `density_held_top`, render-core
 the top, through the child-BVH nodes' masks, held past 2^18 placements read):
 visible layers above it with neither shapes nor texts there leave the density
 stack's planes (they draw nothing at that depth). `FLOE_RUST_DENSITY_TOP_HELD=off` is the kill
-switch (the topmost visible layer, shapes or not).
+switch (the topmost visible layer, shapes or not). Since 0.12.286 a sub-cut
+member under a pixel stands for its area in dots - a fraction kept in whole
+dots by a dither of its block and itself - not one dot (user 2026-10-04, the
+routing chip's fit view: 0.02 px VIAs a dot each lit a quarter of the frame
+where their area is 0.03 %; `HierOpts::dot_area_share`,
+`FLOE_RUST_DENSITY_AREA_SHARE=off` is the kill switch); from a pixel up as
+before.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

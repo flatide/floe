@@ -682,6 +682,39 @@ pub fn dot_spread() -> bool {
 /// - the raster's DOT_SHARE of 0.5 read the other way: a dot item's box is
 /// sized so the raster lights its count.
 pub const DOT_AREA_PX: f64 = 2.0;
+
+/// HierOpts::dot_area_share default: on; FLOE_RUST_DENSITY_AREA_SHARE=off (the
+/// kill switch) counts a member under a pixel one dot, as 0.12.285.
+pub fn dot_area_share() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_AREA_SHARE").as_deref() != Ok("off"))
+}
+
+/// The sub-cut dots one member of `area` px^2 stands for: from a pixel up
+/// floor(area / DOT_AREA_PX), at least one (user 2026-09-30); under a pixel,
+/// with `share` (HierOpts::dot_area_share), its area - what the area-true
+/// raster lights on average (page_dots' rule) - else one.
+fn member_share(area: f64, share: bool) -> f64 {
+    if area >= 1.0 || !share {
+        (area / DOT_AREA_PX).floor().max(1.0)
+    } else {
+        area.max(0.0)
+    }
+}
+
+/// `dots` in whole ones, its fraction kept by the dither of block (bx, by)
+/// and `salt` (the item's: the same in every frame and plan).
+fn whole_dots(dots: f64, bx: i64, by: i64, salt: u64) -> u64 {
+    if dots >= u64::MAX as f64 {
+        return u64::MAX;
+    }
+    (dots + block_dither(bx, by, salt)).floor().max(0.0) as u64
+}
+
+/// whole_dots' salt for an item at `b` on `layer`.
+fn item_salt(b: &BBox, layer: u32) -> u64 {
+    (b.x0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (b.y0 as u64).rotate_left(29) ^ (layer as u64).rotate_left(47) ^ 0xA5A5_5A5A_0F0F_F0F0
+}
 /// The dots one block of `block_px` holds at most: half its pixels (8 in a
 /// 4 px block, 32 in an 8 px one).
 pub fn dot_block_cap(block_px: f64) -> u32 {
@@ -1171,6 +1204,14 @@ pub struct HierOpts {
     /// members read count toward a list's SUB_CUT_BOX_ARRAY_MAX.
     /// FLOE_RUST_DENSITY_LIST_SAMPLE=off is the kill switch.
     pub dot_list_sample: bool,
+    /// A sub-cut member under a pixel stands for its area in dots (a
+    /// fraction, kept in whole dots by a dither of its block and itself),
+    /// not one dot (user 2026-10-03, the routing chip's fit view at depth 1:
+    /// its 0.16 um VIAs, 4 M of them in point lists, a dot each, lit 26.3 %
+    /// of the frame on 57/0 where their area is 0.03 %; "the dots cover the
+    /// whole view, it feels too much" - "by area"). From a pixel up as
+    /// before. FLOE_RUST_DENSITY_AREA_SHARE=off is the kill switch.
+    pub dot_area_share: bool,
     /// The sub-cut dots' blocks in a dense grid over the cell's view (DotGrid)
     /// rather than a hash map sorted when the cell is done - the same counts,
     /// unions and order - and a point list's topmost layer found once, not a
@@ -1310,6 +1351,7 @@ impl Default for HierOpts {
             dot_list_fast: dot_list_fast(),
             dot_list_full: dot_list_full(),
             dot_list_sample: dot_list_sample(),
+            dot_area_share: dot_area_share(),
             dot_grid: dot_grid(),
             dot_boxes: dot_boxes(),
             dot_records: None,
@@ -2407,6 +2449,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         list_fast: opts.dot_list_fast,
         list_full: opts.dot_list_full,
         list_sample: opts.dot_list_sample,
+        area_share: opts.dot_area_share,
         cell_view: BBox::EMPTY,
         cell_rbbox: BBox::EMPTY,
         zone: Vec::new(),
@@ -2844,6 +2887,8 @@ struct Hier<'a> {
     list_fast: bool,
     list_full: bool,
     list_sample: bool,
+    /// HierOpts::dot_area_share
+    area_share: bool,
     /// HierOpts::dot_grid, the grid of the cell being walked, and the run of
     /// dot items of one block being summed - the block and layer, the dots,
     /// the union of what they stand for - put into the blocks when an item
@@ -3613,11 +3658,19 @@ impl<'a> Hier<'a> {
         let block = block_px / ppd;
         let (w, h) = ((fp.x1 - fp.x0).max(0) as f64 * ppd, (fp.y1 - fp.y0).max(0) as f64 * ppd);
         self.st.sub_cut_dot_items += 1;
+        if holds == 0 {
+            // under a dot by its members' area (HierOpts::dot_area_share)
+            return;
+        }
         if w <= block_px && h <= block_px {
             let (cx, cy) = ((fp.x0 as f64 + fp.x1 as f64) / 2.0, (fp.y0 as f64 + fp.y1 as f64) / 2.0);
             let key = ((cx / block).floor() as i64, (cy / block).floor() as i64, layer);
-            let dots = ((w * h / DOT_AREA_PX).floor() as u64).max(1).min(holds.max(1)).min(cap as u64) as u32;
-            self.put_dots(key, dots, &fp);
+            let own = member_share(w * h, self.area_share);
+            let dots = if own >= 1.0 { own as u64 } else { whole_dots(own, key.0, key.1, item_salt(&fp, layer)) };
+            let dots = dots.min(holds).min(cap as u64) as u32;
+            if dots > 0 {
+                self.put_dots(key, dots, &fp);
+            }
             return;
         }
         // an item holding less than its box: every block's share scaled down
@@ -3865,12 +3918,11 @@ impl<'a> Hier<'a> {
     }
 
     /// HierOpts::dot_list_fast: a run of a point list's members in one block
-    /// into it - `each` dots a member, as add_dots puts them one by one - the
-    /// run counting the members it stands for (HierOpts::dot_list_sample:
-    /// a member read for `step`)
-    fn end_list_run(&mut self, run: &mut Option<((i64, i64, u32), u64, BBox)>, each: u64) {
-        if let Some((key, count, union)) = run.take() {
-            self.put_dots(key, count.saturating_mul(each).min(u32::MAX as u64) as u32, &union);
+    /// into it - the dots they stand for, each member's as add_dots puts it
+    /// (HierOpts::dot_list_sample: a member read for `step`)
+    fn end_list_run(&mut self, run: &mut Option<((i64, i64, u32), u64, BBox)>) {
+        if let Some((key, dots, union)) = run.take() {
+            self.put_dots(key, dots.min(u32::MAX as u64) as u32, &union);
         }
     }
 
@@ -4067,9 +4119,12 @@ impl<'a> Hier<'a> {
         if bx0 != bx1 || by0 != by1 {
             return false;
         }
-        let each = ((w * h / DOT_AREA_PX).floor() as u64).max(1).min(cap as u64);
-        let dots = each.saturating_mul(n).min(cap as u64) as u32;
-        self.put_dots((bx0, by0, layer), dots, &grow_by_offsets(b0, chunk));
+        let each = member_share(w * h, self.area_share).min(cap as f64);
+        let members = grow_by_offsets(b0, chunk);
+        let dots = whole_dots(each * n as f64, bx0, by0, item_salt(&members, layer)).min(cap as u64) as u32;
+        if dots > 0 {
+            self.put_dots((bx0, by0, layer), dots, &members);
+        }
         self.st.sub_cut_dot_items += 1;
         self.st.dot_by[4] += 1;
         self.st.dot_by[5] += n;
@@ -4181,7 +4236,8 @@ impl<'a> Hier<'a> {
             let (p, q) = (lo_k * step, hi_k * step);
             (a0 + p.min(q), a1 + p.max(q))
         };
-        let per_member = ((member_px / DOT_AREA_PX).floor() as u64).max(1);
+        let per_member = member_share(member_px, self.area_share);
+        let salt = item_salt(b0, layer);
         self.st.sub_cut_dot_items += 1;
         self.st.dot_by[2] += 1;
         for by in by0..=by1 {
@@ -4197,7 +4253,10 @@ impl<'a> Hier<'a> {
                     continue;
                 }
                 let members = (ys.1 - ys.0 + 1) as u64 * (xs.1 - xs.0 + 1) as u64;
-                let dots = members.saturating_mul(per_member).min(cap as u64) as u32;
+                let dots = whole_dots(members as f64 * per_member, bx, by, salt).min(cap as u64) as u32;
+                if dots == 0 {
+                    continue;
+                }
                 // what those members cover: the same union the member walk makes
                 let ((x0, x1), (y0, y1)) = (span(b0.x0, b0.x1, x_step, xs), span(b0.y0, b0.y1, y_step, ys));
                 let piece = BBox { x0, y0, x1, y1 };
@@ -4615,7 +4674,7 @@ impl<'a> Hier<'a> {
             } else {
                 0
             };
-            let mut holds = 0u64;
+            let mut holds = 0f64;
             let mut read_all = true;
             if top != goal || count {
                 let (lo, hi) = self.cbvh_places(ni);
@@ -4631,21 +4690,28 @@ impl<'a> Hier<'a> {
                     let child = if count {
                         let head = v.place_head(pli);
                         let rb = v.cell_rbbox(head.child);
-                        holds = holds.saturating_add(self.place_members(pli, &head).saturating_mul(self.member_dots(&rb)));
+                        holds += self.place_members(pli, &head) as f64 * self.member_dots(&rb);
                         head.child
                     } else {
                         v.place_child(pli)
                     };
                     top = top.max(self.cell_top(child, self.child_rem(child, r)));
-                    if top == goal && holds >= boxed {
-                        read_all = holds >= boxed;
+                    if top == goal && holds >= boxed as f64 {
+                        read_all = holds >= boxed as f64;
                         break;
                     }
                 }
             }
             if let Some(rank) = top {
                 self.st.dot_by[0] += 1;
-                self.add_dots(self.vis_layers[rank], *fp, if count && read_all { holds } else { u64::MAX });
+                let holds = if count && read_all {
+                    let ppb = self.px_per_dbu / self.block_px;
+                    let (cx, cy) = (((fp.x0 as f64 + fp.x1 as f64) / 2.0 * ppb).floor() as i64, ((fp.y0 as f64 + fp.y1 as f64) / 2.0 * ppb).floor() as i64);
+                    whole_dots(holds, cx, cy, item_salt(fp, ni))
+                } else {
+                    u64::MAX
+                };
+                self.add_dots(self.vis_layers[rank], *fp, holds);
                 self.st.sub_cut_box_nodes += 1;
             }
             return;
@@ -4711,7 +4777,12 @@ impl<'a> Hier<'a> {
         }
         if h.kind == 0 || self.box_small(&fp) {
             // HierOpts::dot_spread: an array counts its members, not its box
-            let holds = if self.dots && self.spread { self.place_members(pli, h).saturating_mul(self.member_dots(rb)) } else { u64::MAX };
+            let holds = if self.dots && self.spread {
+                let (cx, cy) = (((fp.x0 as f64 + fp.x1 as f64) / 2.0 * self.px_per_dbu / self.block_px).floor() as i64, ((fp.y0 as f64 + fp.y1 as f64) / 2.0 * self.px_per_dbu / self.block_px).floor() as i64);
+                whole_dots(self.place_members(pli, h) as f64 * self.member_dots(rb), cx, cy, item_salt(&fp, pli as u32))
+            } else {
+                u64::MAX
+            };
             if self.dots {
                 self.st.dot_by[1] += 1;
             }
@@ -4767,7 +4838,7 @@ impl<'a> Hier<'a> {
             let block = self.block_px / ppd;
             let (mw, mh) = ((b0.x1 - b0.x0).max(0) as f64 * ppd, (b0.y1 - b0.y0).max(0) as f64 * ppd);
             let fast = (self.list_fast && top.is_some() && !b0.is_empty() && ppd > 0.0 && mw <= self.block_px && mh <= self.block_px)
-                .then(|| ((mw * mh / DOT_AREA_PX).floor() as u64).max(1).min(self.block_cap as u64));
+                .then(|| member_share(mw * mh, self.area_share).min(self.block_cap as f64));
             let mut run: Option<((i64, i64, u32), u64, BBox)> = None;
             for k in 0..pr.n_chunks {
                 let chunk = pr.chunk_bbox(k);
@@ -4819,7 +4890,7 @@ impl<'a> Hier<'a> {
                         }
                         members += 1;
                         if members > SUB_CUT_BOX_ARRAY_MAX {
-                            self.end_list_run(&mut run, each);
+                            self.end_list_run(&mut run);
                             self.st.sub_cut_box_over += 1;
                             return;
                         }
@@ -4837,14 +4908,25 @@ impl<'a> Hier<'a> {
                             ((member.y0 as f64 + member.y1 as f64) / 2.0 / block).floor() as i64,
                             layer,
                         );
+                        // its dots (the step's members' share), a fraction under a
+                        // dot kept by the dither of its block and itself - as
+                        // add_dots keeps it, whatever the runs
+                        let dots = if each >= 1.0 {
+                            (step as f64 * each) as u64
+                        } else {
+                            whole_dots(step as f64 * each, key.0, key.1, item_salt(&member, layer))
+                        };
+                        if dots == 0 {
+                            continue;
+                        }
                         match &mut run {
                             Some((at, count, union)) if *at == key => {
-                                *count += step as u64;
+                                *count += dots;
                                 union.grow(&member);
                             }
                             _ => {
-                                self.end_list_run(&mut run, each);
-                                run = Some((key, step as u64, member));
+                                self.end_list_run(&mut run);
+                                run = Some((key, dots, member));
                             }
                         }
                     }
@@ -4873,8 +4955,8 @@ impl<'a> Hier<'a> {
                     self.st.sub_cut_box_members += 1;
                 }
             }
-            if let Some(each) = fast {
-                self.end_list_run(&mut run, each);
+            if fast.is_some() {
+                self.end_list_run(&mut run);
             }
             return;
         }
@@ -5273,7 +5355,7 @@ impl<'a> Hier<'a> {
             return u64::MAX;
         }
         let v = self.v;
-        let mut holds = 0u64;
+        let mut holds = 0f64;
         for pli in lo as u64..hi as u64 {
             if self.reads_left == 0 {
                 self.st.sub_cut_box_unsure += 1;
@@ -5283,12 +5365,16 @@ impl<'a> Hier<'a> {
             self.st.sub_cut_box_reads += 1;
             let head = v.place_head(pli);
             let rb = v.cell_rbbox(head.child);
-            holds = holds.saturating_add(self.place_members(pli, &head).saturating_mul(self.member_dots(&rb)));
-            if holds >= boxed {
+            holds += self.place_members(pli, &head) as f64 * self.member_dots(&rb);
+            if holds >= boxed as f64 {
                 return u64::MAX;
             }
         }
-        holds.max(1)
+        // under a dot by their area (HierOpts::dot_area_share): kept by the
+        // node's dither
+        let ppb = self.px_per_dbu / self.block_px;
+        let (cx, cy) = (((fp.x0 as f64 + fp.x1 as f64) / 2.0 * ppb).floor() as i64, ((fp.y0 as f64 + fp.y1 as f64) / 2.0 * ppb).floor() as i64);
+        if self.area_share { whole_dots(holds, cx, cy, item_salt(fp, ni)) } else { (holds as u64).max(1) }
     }
 
     /// A page-BVH node no wider than a box whose pages are all under the
@@ -5340,12 +5426,13 @@ impl<'a> Hier<'a> {
         ((p.members as f64 * each).ceil() as u64).max(1)
     }
 
-    /// The sub-cut dots one member of cell box `rb` stands for on screen:
-    /// max(1, floor(area / DOT_AREA_PX)) (add_dots' rule for its own box).
-    fn member_dots(&self, rb: &BBox) -> u64 {
+    /// The sub-cut dots one member of cell box `rb` stands for on screen
+    /// (member_share: add_dots' rule for its own box), a fraction under a
+    /// pixel (HierOpts::dot_area_share).
+    fn member_dots(&self, rb: &BBox) -> f64 {
         let ppd = self.px_per_dbu;
         let (w, h) = ((rb.x1 - rb.x0).max(0) as f64 * ppd, (rb.y1 - rb.y0).max(0) as f64 * ppd);
-        ((w * h / DOT_AREA_PX).floor() as u64).max(1)
+        member_share(w * h, self.area_share)
     }
 
     /// A representative cut placement drawn as DOTS: one rect of the
@@ -7966,6 +8053,41 @@ mod tests {
             assert_eq!(items(&alone), items(&quick));
             assert_eq!((quick.stats.dot_sampled_chunks, quick.stats.dot_by[3] + quick.stats.dot_by[5]), (0, alone.stats.dot_by[3] + alone.stats.dot_by[5]));
         }
+    }
+
+    #[test]
+    fn a_member_under_a_pixel_stands_for_its_area_in_dots() {
+        // HierOpts::dot_area_share (user 2026-10-03, the routing chip's fit
+        // view: a dot each for 0.02 px VIAs lit a quarter of the frame where
+        // their area is 0.03 %): 6,000 LEAFs of 10 dbu (0.2 px a side, 0.04
+        // px^2 at 0.02 px/dbu) at random over 20 um - about 240 dots by area,
+        // 6,000 by one a member - the same items read one by one (the fast
+        // path off) and in four regions as one plan.
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: i64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % n as u64) as i64
+        };
+        let pts: Vec<(i64, i64)> = (0..6000).map(|_| (next(19_900), next(19_900))).collect();
+        let chip = fixture(&[FCell { name: "LEAF", pages: vec![(bx(0, 0, 10, 10), 10, 10)], places: vec![] }, FCell { name: "TOP", pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)], places: vec![(0, 0, 0, 0, false, Rep::Pts(pts.into()))] }], 1);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = false;
+        let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, k_boxes: 4, ..HierOpts::default() };
+        let dots = |plan: &HierPlan| plan.wcells.iter().flat_map(|w| w.dot_counts.iter()).map(|&n| n as u64).sum::<u64>();
+        let items = |plan: &HierPlan| plan.wcells.iter().map(|w| (w.key, w.washes.clone(), w.dot_counts.clone())).collect::<Vec<_>>();
+        let share = plan_hier(&chip, &req, &HierOpts { dot_area_share: true, ..base.clone() });
+        let one = plan_hier(&chip, &req, &HierOpts { dot_area_share: false, ..base.clone() });
+        let slow = plan_hier(&chip, &req, &HierOpts { dot_area_share: true, dot_list_fast: false, ..base.clone() });
+        let quad = vec![bx(-10, -10, 10_000, 10_000), bx(10_000, -10, 20_000, 10_000), bx(-10, 10_000, 10_000, 20_000), bx(10_000, 10_000, 20_000, 20_000)];
+        let apart = plan_hier(&chip, &req, &HierOpts { dot_area_share: true, regions: quad, ..base.clone() });
+        let area = 6000.0 * 0.04;
+        assert!((dots(&share) as f64 - area).abs() < area * 0.15, "{} dots for {area} px^2", dots(&share));
+        assert!(dots(&one) > 5000, "{}", dots(&one));
+        assert_eq!(items(&share), items(&slow));
+        assert_eq!(dots(&apart), dots(&share));
     }
 
     #[test]

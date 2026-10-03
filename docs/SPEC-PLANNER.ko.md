@@ -315,6 +315,18 @@
   상자마다 만나는 노드·페이지·배치를 한 번만 센다. 블록마다 wash 하나(면적 = (개수 + ½) × 2 px²)를 내며 상한 초과는
   다시 거칠게 계획하지 않고 버린다(`sub_cut_box_over`). 레이어 수 상한(`sub_cut_box_layers`)은 적용하지 않는다.
   단위 `the_sub_cut_dots_count_what_the_cut_drops_by_block_and_never_walk_into_it`.
+  **1점보다 작은 멤버(0.12.286, renderd 0.12.264; 사용자 2026-10-04, 루트 칩 fit depth 1 "밀도점이 전체를 덮어 버림"):**
+  `HierOpts::dot_area_share`(기본 켬, `FLOE_RUST_DENSITY_AREA_SHARE=off`가 킬 스위치).
+  - 멤버 하나의 점 `member_share(면적)`: 1 px² 이상은 max(1, floor(면적/2))이고, 1 px² 미만은 면적 그대로의 분수다
+    (`page_dots`와 같다).
+  - 분수는 `whole_dots(점, 블록, item_salt(항목 상자, 레이어))`로 정수로 만든다. 블록과 항목으로 정한 디더라 프레임·
+    계획·스레드와 무관하다. 0이면 점을 내지 않는다.
+  - 적용하는 곳:
+    - `add_dots`의 블록 이하 항목(`holds` 0이면 없음).
+    - `array_dots`의 블록별 수, `dot_chunk`.
+    - 리스트의 빠른 길(멤버마다 같은 규칙, 런은 정수 점을 모은다).
+    - `box_child`·`box_node`·`node_holds`의 담는 수(멤버 수 × `member_dots`를 f64로 더한 뒤 정수로).
+  - 단위 `a_member_under_a_pixel_stands_for_its_area_in_dots`.
   **읽기(0.12.256):** 점 모드에서 마스크 없는 노드의 배치 읽기는 셀마다 가장 위 가시 레이어를 한 번만 구해 두고
   (`cell_top`, `top_memo`) 순위만 비교한다; 계획기의 정수 키 맵은 Fx식 해시(`FxMap`/`FxSet`). 그림은 같다.
   **블록과 퍼뜨림(0.12.257; 사용자 2026-10-01 "지금보다 덜 자세해도 괜찮을 것 같음"):** 블록은
