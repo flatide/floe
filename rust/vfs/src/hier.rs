@@ -356,9 +356,19 @@ pub fn dot_grid() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_DOT_GRID").as_deref() != Ok("off"))
 }
 
-/// HierOpts::dot_page_spread default: off; FLOE_RUST_DENSITY_PAGE_SPREAD=on
-/// (diagnostic, 2026-10-02) turns it on.
+/// HierOpts::dot_page_spread default: on (user 2026-10-03: "turn the spread on
+/// by default"), in effect where the index holds design.ovb;
+/// FLOE_RUST_DENSITY_PAGE_SPREAD=off is the kill switch, =on spreads a page
+/// without an occupancy record over its box too (HierOpts::dot_page_spread_boxes,
+/// the diagnostic of 0.12.272).
 pub fn dot_page_spread() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_PAGE_SPREAD").as_deref() != Ok("off"))
+}
+
+/// HierOpts::dot_page_spread_boxes default: off; FLOE_RUST_DENSITY_PAGE_SPREAD=on
+/// turns it on.
+pub fn dot_page_spread_boxes() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_PAGE_SPREAD").as_deref() == Ok("on"))
 }
@@ -996,8 +1006,15 @@ pub struct HierOpts {
     /// chip at depth 0: a root's own shapes under a pixel passed every reserve
     /// and nothing was drawn; then "go on with the pages, see the result").
     /// Where in the page its shapes lie is not known: they are spread over
-    /// its box. FLOE_RUST_DENSITY_PAGE_SPREAD=on (diagnostic, off by default).
+    /// its box. On by default since 0.12.277 (user 2026-10-03), in effect for
+    /// an index with design.ovb only - a page with no occupancy record is not
+    /// drawn (as without the spread) unless dot_page_spread_boxes;
+    /// FLOE_RUST_DENSITY_PAGE_SPREAD=off is the kill switch.
     pub dot_page_spread: bool,
+    /// Under dot_page_spread, a page with no occupancy record (an index
+    /// without design.ovb, dot_page_occ off) spread over its box by its
+    /// members, as 0.12.272's diagnostic. FLOE_RUST_DENSITY_PAGE_SPREAD=on.
+    pub dot_page_spread_boxes: bool,
     /// Under dot_page_spread, a page whose occupancy grid the index holds
     /// (design.ovb: which of 64 x 64 cells over its box hold a shape) puts its
     /// dots in those cells only, an even share each, and a page no wider than
@@ -1145,6 +1162,7 @@ impl Default for HierOpts {
             dot_spread: dot_spread(),
             dot_pages: dot_pages(),
             dot_page_spread: dot_page_spread(),
+            dot_page_spread_boxes: dot_page_spread_boxes(),
             dot_page_occ: dot_page_occ(),
             dot_occ_cover: dot_occ_cover(),
             dot_grid: dot_grid(),
@@ -2163,7 +2181,9 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         dots: dots.is_some(),
         one_walk: dots.is_some() && opts.dot_records.is_some(),
         page_dots: opts.dot_pages,
-        page_spread: opts.dot_page_spread,
+        // the spread with no record to go by only when asked for
+        page_spread: opts.dot_page_spread && (opts.dot_page_spread_boxes || (opts.dot_page_occ && v.has_page_occ())),
+        spread_boxes: opts.dot_page_spread_boxes,
         page_occ: opts.dot_page_occ,
         occ_cover: opts.dot_occ_cover,
         occ_blocks: Vec::new(),
@@ -2569,9 +2589,11 @@ struct Hier<'a> {
     one_walk: bool,
     /// HierOpts::dot_pages
     page_dots: bool,
-    /// HierOpts::dot_page_spread, and the bounds of the boxes of the cell
-    /// being walked (a spread page's blocks are those in them)
+    /// HierOpts::dot_page_spread in effect (an index with design.ovb, or
+    /// dot_page_spread_boxes), dot_page_spread_boxes, and the bounds of the
+    /// boxes of the cell being walked (a spread page's blocks are those in them)
     page_spread: bool,
+    spread_boxes: bool,
     cell_view: BBox,
     /// HierOpts::dot_page_occ, and a spread page's blocks being summed (the
     /// share of its cells in each, the union of their parts)
@@ -3833,6 +3855,10 @@ impl<'a> Hier<'a> {
         // wider than a box - over the cells of its occupancy grid that hold a
         // shape, when the index has one (HierOpts::dot_page_occ)
         if self.dots && self.page_spread && !self.one_walk && p.max_w < self.page_cut && p.max_h < self.page_cut {
+            if !self.spread_boxes && !(self.page_occ && self.v.page_occ_area(pi).is_some()) {
+                // no occupancy record: not drawn, as without the spread
+                return false;
+            }
             if self.dot_seen.insert(2 << 60 | pi as u64) {
                 let holds = self.page_dots(p);
                 self.st.dot_by[7] += 1;
@@ -7410,7 +7436,9 @@ mod tests {
             r.page_wash = false;
             r
         };
-        let opts = |spread: bool| HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, dot_page_spread: spread, ..HierOpts::default() };
+        // over the boxes: dot_page_spread_boxes (FLOE_RUST_DENSITY_PAGE_SPREAD=on;
+        // the fixture has no design.ovb)
+        let opts = |spread: bool| HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, dot_page_spread: spread, dot_page_spread_boxes: spread, ..HierOpts::default() };
         let whole = bx(-10, -10, 9_000, 9_000);
         let plan = plan_hier(&chip, &ask(whole), &opts(true));
         let cell = plan.wcells.iter().find(|w| w.key.0 == 0).unwrap();
@@ -7435,9 +7463,12 @@ mod tests {
         let sparse = plan_hier(&sparse, &ask(whole), &opts(true));
         let dots: u32 = sparse.wcells[0].dot_counts.iter().map(|&n| n as u32).sum();
         assert!((60..=140).contains(&dots) && sparse.wcells[0].washes.len() < 15 * 15, "{dots} dots over {} blocks", sparse.wcells[0].washes.len());
-        // off: the page under the floor is not drawn
+        // off: the page under the floor is not drawn - nor by default (the
+        // spread on, 0.12.277) for an index without design.ovb
         let off = plan_hier(&chip, &ask(whole), &opts(false));
         assert!(off.wcells.iter().all(|w| w.washes.is_empty()) && off.stats.dot_by[7] == 0);
+        let bare = plan_hier(&chip, &ask(whole), &HierOpts { dot_page_spread_boxes: false, ..opts(true) });
+        assert!(bare.wcells.iter().all(|w| w.washes.is_empty()) && bare.stats.dot_by[7] == 0 && bare.pages == vec![1]);
     }
 
     /// design.ovb's image for `ovm` holding the occupancy grids `grids` (page,
@@ -7533,17 +7564,21 @@ mod tests {
         assert!(of_a.len() == 20 && of_a.iter().all(|&(b, n)| in_corners(&b) && n == dot_block_cap(8.0)), "{of_a:?}");
         let (of_a, _) = items(&plan_hier(&full, &ask(whole), &opts(true, false)));
         assert!((60..=140).contains(&dots(&of_a)), "{} dots", dots(&of_a));
-        // dot_page_occ off (the kill switch), or no grid: over the boxes
-        let off = plan_hier(&full, &ask(whole), &opts(false, true));
-        let bare = plan_hier(&fixture_members(&cells, 0, true, &|_, k| if k == 0 { 40_000 } else { 1 }), &ask(whole), &opts(true, true));
-        for plan in [&off, &bare] {
+        // dot_page_occ off (the kill switch), or no grid: not drawn by default,
+        // over the boxes with dot_page_spread_boxes
+        let bare_chip = fixture_members(&cells, 0, true, &|_, k| if k == 0 { 40_000 } else { 1 });
+        for (chip, occ) in [(&full, false), (&bare_chip, true)] {
+            let plain = plan_hier(chip, &ask(whole), &opts(occ, true));
+            assert!(plain.wcells.iter().all(|w| w.washes.is_empty()) && plain.stats.dot_by[7] == 0, "{:?}", plain.stats.dot_by);
+            let plan = plan_hier(chip, &ask(whole), &HierOpts { dot_page_spread_boxes: true, ..opts(occ, true) });
             assert_eq!(plan.stats.dot_occ_pages, 0);
-            let (of_a, of_c) = items(plan);
+            let (of_a, of_c) = items(&plan);
             // page C at its box's centre: in the block at 400
             assert!(of_c.len() == 1 && of_c[0].0.x0 >= 400 && of_c[0].0.y0 >= 6_400, "{of_c:?}");
-            if std::ptr::eq(plan, &bare) {
-                assert_eq!(of_a.len(), 15 * 15);
+            if !occ {
+                continue;
             }
+            assert_eq!(of_a.len(), 15 * 15);
         }
     }
 
@@ -7635,11 +7670,15 @@ mod tests {
         let with = plan_hier(&chip, &ask, &opts(true));
         assert_eq!((with.stats.dot_by[7], with.stats.dot_occ_pages, with.stats.sub_cut_box_nodes), (2, 2, 2));
         assert_eq!(counts(&with), vec![5, 5]);
-        // the index's cover off (its kill switch), or no index: by members
-        for plan in [plan_hier(&chip, &ask, &opts(false)), plan_hier(&mk(), &ask, &opts(true))] {
+        // the index's cover off (its kill switch), or no index with the boxes'
+        // spread asked for: by members; no index by default: not drawn
+        let boxes = HierOpts { dot_page_spread_boxes: true, ..opts(true) };
+        for plan in [plan_hier(&chip, &ask, &opts(false)), plan_hier(&mk(), &ask, &boxes)] {
             assert_eq!((plan.stats.dot_by[7], plan.stats.dot_occ_pages), (2, 0));
             assert_eq!(counts(&plan), vec![18, 18]);
         }
+        let plain = plan_hier(&mk(), &ask, &opts(true));
+        assert!(plain.stats.dot_by[7] == 0 && counts(&plain).is_empty());
     }
 
     #[test]

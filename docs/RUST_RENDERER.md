@@ -328,7 +328,13 @@ the reserve, the cells' cut - pass 1's - never raised, and the threads' merged
 plan fitted alike (field 2026-10-02: the top cell at depth 1 took `fit 75019 ms
 x6 passes on 1 threads` up the cut ladder, the dots walked again each step).
 `FLOE_RUST_DENSITY_FIT_LADDER=on` is the kill switch.
-`FLOE_RUST_DENSITY_PAGE_SPREAD=on` (diagnostic, 0.12.272, off by default) draws
+Since 0.12.277 the page spread is on by default where the index has
+`design.ovb` (an index without it, or a page without a record, is not spread -
+as before); `FLOE_RUST_DENSITY_PAGE_SPREAD=off` is the kill switch and `=on`
+also spreads a page without a record over its box (`HierOpts::
+dot_page_spread_boxes`), and pass 2 draws a decoded page's shapes under the
+floor only where the spread is in effect. As 0.12.272 introduced it,
+`FLOE_RUST_DENSITY_PAGE_SPREAD=on` (diagnostic, then off by default) draws
 a page whose every shape is under the records' floor on both sides as its
 shapes' dots without decoding it - over its box when it is wider than a box,
 each block of the view taking its part's share, rounded by the block's dither

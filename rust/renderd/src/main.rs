@@ -2560,9 +2560,13 @@ fn density_cut_px() -> f64 {
 /// both sides of the floor was left blank between them (user 2026-10-03, the
 /// routing chip's fill: 0.3 um squares paged with 1 um array squares were
 /// blank where their page was decoded and dense where it was spread).
+/// The page spread in effect: on by default where the index has design.ovb,
+/// anywhere with FLOE_RUST_DENSITY_PAGE_SPREAD=on (floe_vfs Hier's page_spread).
 /// FLOE_RUST_DENSITY_UNDER_FLOOR=drop is the kill switch.
-fn density_under_floor_drawn() -> bool {
-    floe_render_core::dot_page_spread() && std::env::var("FLOE_RUST_DENSITY_UNDER_FLOOR").as_deref() != Ok("drop")
+fn density_under_floor_drawn(cache: &Cache) -> bool {
+    let spread = floe_render_core::dot_page_spread()
+        && (floe_render_core::dot_page_spread_boxes() || (floe_render_core::dot_page_occ() && cache.has_page_occ()));
+    spread && std::env::var("FLOE_RUST_DENSITY_UNDER_FLOOR").as_deref() != Ok("drop")
 }
 
 /// What pass 2 may decode on top of pass 1 (bytes, encoded x 2 as the
@@ -4361,7 +4365,7 @@ fn render_density_frame(
                         let side_floor = planned_fine.stats.shape_cut as f64 * px_per_dbu;
                         floor_px = Some(floor_px.map_or(side_floor, |known: f64| known.max(side_floor)));
                         let mut planned_fine = planned_fine;
-                        if density_under_floor_drawn() {
+                        if density_under_floor_drawn(cache) {
                             // a decoded page's shapes under the floor are drawn,
                             // by area, as the spread pages under it are
                             planned_fine.stats.shape_cut = 0;

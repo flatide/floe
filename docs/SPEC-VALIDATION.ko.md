@@ -177,6 +177,16 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 사다리(`FLOE_RUST_DENSITY_FIT_LADDER=on`)는 6번 걸어 같은 프레임에 이른다.
     - 기본 예산은 그 페이지를 디코드한다.
   - 단위 `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
+  0.12.277(페이지 퍼뜨리기 기본 켬, design.ovb가 있을 때):
+  - 게이트 점 절: 1 px 하한 아래 TOP의 0.5 px 점은 기본에서 컷 없는 프레임의 4분의 1 안(48 / 50 px)으로 켜지고,
+    `occ_pages`가 1 이상이다. `FLOE_RUST_DENSITY_PAGE_SPREAD=off`는 0 px이고 나머지 픽셀은 같으며, 점 항목은 셀의
+    것뿐이다. 0.6 px 하한 검사는 퍼뜨리기를 끈 채로 한다.
+  - `left_checks`: 고정 예약 4 MB(탐침 초과)도 기본에서는 TOP의 1 px 미만 상자를 색인으로 컷 없는 프레임의
+    4분의 1 안(20,541 / 19,982 px)으로 켠다. 퍼뜨리기를 끄면 0이다.
+  - `occ_checks`·`mixed_checks`는 기본 설정으로 돈다. design.ovb 없는 캐시는 기본에서 아무것도 켜지 않고,
+    `=on`에서 상자 퍼뜨리기다.
+  - 단위: 색인이 없는 픽스처는 기본에서 그리지 않고, `dot_page_spread_boxes`일 때 상자에 퍼뜨린다(퍼뜨리기·점유
+    격자·노드 테스트).
   0.12.276(페이지 BVH 노드 항목도 색인 면적으로): 단위 `a_page_bvh_node_under_the_floor_counts_the_area_its_pages_cover`
   (SPEC-PLANNER §3), ovm 테스트에 `page_occ_area`(격자 페이지의 칸 넓이 × 단계, 두 번째 호출도 같은 값, 기록 없음은
   None). 라우팅 합성 칩의 fit·4배 넓은 뷰는 이 노드가 생기지 않아 0.12.275와 같다.

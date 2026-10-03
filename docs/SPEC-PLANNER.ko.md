@@ -366,7 +366,11 @@
     - 합친 계획도 같은 결과를 낸다.
     - 사다리는 여러 번 걷고 컷을 올린다.
     - 반 쪽 예산이면 페이지 0, `fit_dropped`.
-  **하한 아래 페이지를 점으로 퍼뜨리기(0.12.272, 선택):** `HierOpts::dot_page_spread`(`FLOE_RUST_DENSITY_PAGE_SPREAD=on`).
+  **하한 아래 페이지를 점으로 퍼뜨리기(0.12.272 선택, 0.12.277 기본):** `HierOpts::dot_page_spread`.
+  - 0.12.277부터 기본으로 켜진다(사용자 2026-10-03 "퍼뜨리기를 기본으로 켜줘"). 단, 색인에 design.ovb가 있을 때만 효과가 있다.
+    design.ovb가 없는 색인이나 기록이 없는 페이지는 이전처럼 그리지 않는다.
+  - `FLOE_RUST_DENSITY_PAGE_SPREAD=off`가 킬 스위치다. `=on`은 기록이 없는 페이지도 상자 전체에 멤버 기준으로 퍼뜨린다
+    (`HierOpts::dot_page_spread_boxes`, 0.12.272의 진단 동작).
   - 대상: 모든 도형이 가로·세로 모두 레코드 하한(`page_cut`) 아래인 페이지. 디코드하지 않는다.
   - 박스 이하이면 항목 하나다. 더 넓으면 `spread_page`가 셀 뷰(`cell_view`) 안의 블록마다 `page_dots × (블록 ∩
     페이지) / 페이지 면적`을 블록 디더(`block_dither`)로 반올림해 넣는다.

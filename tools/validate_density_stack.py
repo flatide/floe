@@ -74,10 +74,13 @@ cell under it as dots in blocks, never walking into it:
     dots;
   * the margin frame draws the view as the viewport frame did;
   * the floor (1 px since 2026-10-01; 0 px before): TOP's own 0.05 um
-    (0.5 px) squares at a 3 px pitch (one page of 200) are under it - not
-    drawn and not dotted (FLOE_RUST_DENSITY_PAGE_DOTS off: page dots were far
-    denser than their shapes) - and pass 2 fits at the density cut with no
-    probe (density_plan2: no probe, one pass); FLOE_RUST_DENSITY_FLOOR_PX
+    (0.5 px) squares at a 3 px pitch (one page of 200) are under it - spread
+    by their page's occupancy grid (design.ovb; the page spread on by default
+    since 0.12.277) about as many pixels as a cut-free frame lights, none with
+    FLOE_RUST_DENSITY_PAGE_SPREAD=off (as before; FLOE_RUST_DENSITY_PAGE_DOTS
+    off: page dots were far denser than their shapes) - and pass 2 fits at
+    the density cut with no probe (density_plan2: no probe, one pass);
+    FLOE_RUST_DENSITY_FLOOR_PX
     lowers it - 0 and 0.25 px decode the squares and draw them as a cut-free
     frame does (a zero floor's probe fits), 0.6 px leaves them out - and the
     frame reports the floor it planned at (density_floor 1 / 0 / 0.25 / 0.59);
@@ -219,7 +222,11 @@ def dots_checks(temp):
         'one_round': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PROGRESSIVE': 'off'}),
         'floor0': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0'}),
         'floor025': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.25'}),
-        'floor06': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.6'}),
+        # (the page spread off: a floor taken leaves the specks out)
+        'floor06': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0.6',
+                                'FLOE_RUST_DENSITY_PAGE_SPREAD': 'off'}),
+        # the page spread off (its kill switch; the default since 0.12.277)
+        'nospread': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PAGE_SPREAD': 'off'}),
         # pass 2's regions planned apart on two threads and merged, as one plan
         # (the default since 0.12.268: four threads, or the cores there are)
         'split': worker(src, {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PLAN_THREADS': '2'}),
@@ -284,14 +291,23 @@ def dots_checks(temp):
         dense = lit(on, *dense_area)
         assert len(dense) == want, 'abutting array: %d px lit, want %d over %d blocks' % (len(dense), want, len(blocks))
         # the floor (step 2; 1 px since 2026-10-01, user "what about fixing the
-        # floor at 1 px"): TOP's 0.5 px specks are under it - not drawn, not
-        # dotted (FLOE_RUST_DENSITY_PAGE_DOTS off) - and no probe is made (one
-        # fitted pass at the density cut); FLOE_RUST_DENSITY_FLOOR_PX lowers
-        # it: 0 and 0.25 px draw the specks as a cut-free frame does, 0.6 px
-        # does not; the frame says which floor it took
+        # floor at 1 px"): TOP's 0.5 px specks are under it and no probe is made
+        # (one fitted pass at the density cut). Their page is spread by its
+        # occupancy grid (design.ovb; the page spread on by default since
+        # 0.12.277, user 2026-10-03): about the pixels a cut-free frame lights,
+        # in their own place; FLOE_RUST_DENSITY_PAGE_SPREAD=off (the kill
+        # switch) neither draws nor dots them, as before.
+        # FLOE_RUST_DENSITY_FLOOR_PX lowers the floor: 0 and 0.25 px draw the
+        # specks as a cut-free frame does, 0.6 px (the spread off) does not;
+        # the frame says which floor it took
         free, _ = frame(workers['stack'], 3, (LOW,), cut_px=0.0)
         tiny = lit(on, *specks)
-        assert not tiny, "TOP's specks under the 1 px floor: %d px" % len(tiny)
+        want_free = len(lit(free, *specks))
+        assert want_free and abs(len(tiny) - want_free) <= want_free // 4 and res['density_plan2']['occ_pages'] >= 1, \
+            "TOP's specks under the 1 px floor, spread: %d px, cut-free %d (%s)" % (len(tiny), want_free, res['density_plan2'])
+        unspread, unspread_res = frame(workers['nospread'], 1, (LOW,))
+        assert not lit(unspread, *specks), "TOP's specks under the 1 px floor, the spread off: %d px" % len(lit(unspread, *specks))
+        assert lit(unspread, range(W), range(H)) == lit(on, range(W), range(H)) - tiny, 'the spread changes more than the specks'
         assert not lit(walked, *specks), "the stack's 1 px floor draws no speck"
         at0, res0 = frame(workers['floor0'], 3, (LOW,))
         at025, res025 = frame(workers['floor025'], 3, (LOW,))
@@ -343,14 +359,19 @@ def dots_checks(temp):
         # the lone DOT's, one per abutting block
         dots = res.get('density_dots')
         cells_items = len(blocks_of(sparse_centres, 400)) + 1 + len(blocks)
-        assert dots and dots['items'] == cells_items and dots['over'] == 0, (dots, cells_items)
+        # the cells' items, and the specks' blocks with the spread
+        unspread_dots = unspread_res.get('density_dots')
+        assert unspread_dots and unspread_dots['items'] == cells_items and unspread_dots['over'] == 0, (unspread_dots, cells_items)
+        assert dots and dots['items'] > cells_items and dots['over'] == 0, (dots, cells_items)
         assert res.get('density_block') == 4.0, res.get('density_block')
         assert walked_res.get('density_dots') is None and walked_res.get('density_block') is None and lit(walked, range(W), range(H)), \
             'the stack alone draws the DOT squares, no dots'
         print('density stack dots (4 px, spread): sparse array %d dots on the members, lone DOT 1, abutting array %d px = '
-              'sum of min(8, members) over %d blocks; density_dots %s; TOP specks none under the 1 px floor, %d px as cut-free at 0 / 0.25 px '
+              'sum of min(8, members) over %d blocks; density_dots %s; TOP specks spread under the 1 px floor %d px (cut-free %d; '
+              'the spread off none), %d px as cut-free at 0 / 0.25 px '
               '(floors %s; plans %s / %s); one walk %s, %d dots with the page dots (floors %s)' % (
-                  len(sparse), len(dense), len(blocks), dots, len(drawn), floors, plan2, plan2_0, one_plan2, len(one_tiny), one_floors))
+                  len(sparse), len(dense), len(blocks), dots, len(tiny), want_free, len(drawn), floors, plan2, plan2_0, one_plan2, len(one_tiny),
+                  one_floors))
         margin, _ = frame_bg(workers['dots'], 2, (LOW,))
         centre = b''.join(margin[((H // 2 + r) * 2 * W + W // 2) * 4:((H // 2 + r) * 2 * W + W // 2 + W) * 4] for r in range(H))
         assert centre == on, 'the dots margin draws the view otherwise in %d px' % sum(
@@ -681,6 +702,8 @@ def left_checks(temp):
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0', 'FLOE_RUST_BUDGET_MB': '32'}
     left, fixed, free = worker(src, env), worker(src, dict(env, FLOE_RUST_DENSITY_RESERVE_LEFT='off')), worker(src, {'FLOE_RUST_BUDGET_MB': '32'})
+    # the fixed reserve without the page spread (on by default since 0.12.277)
+    unspread = worker(src, dict(env, FLOE_RUST_DENSITY_RESERVE_LEFT='off', FLOE_RUST_DENSITY_PAGE_SPREAD='off'))
     try:
         dbu = float(left.cache.meta['dbu'])
         side = 1000
@@ -699,6 +722,7 @@ def left_checks(temp):
 
         drawn, rd = view(left)
         old, ro = view(fixed)
+        bare, rb = view(unspread)
         truth, _ = view(free, cut_px=0.0)
         # the lit pixels of a whole frame, by index (the frame is side x side)
         lit_of = lambda pixels: {i // 4 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK}
@@ -706,12 +730,17 @@ def left_checks(temp):
         pd, po = rd['density_plan2'], ro['density_plan2']
         assert want and lit_of(drawn) == want and rd['density_floor'] == 0.0 and pd['probes_over'] == 0 and pd['reserve_mb'] > 4, (
             'what pass 1 left: %d px lit, %d cut-free; floor %s, plan %s' % (len(lit_of(drawn)), len(want), rd['density_floor'], pd))
-        assert not lit_of(old) and po['probes_over'] == 1 and po['reserve_mb'] == 4, (
-            'the fixed reserve: %d px lit, plan %s' % (len(lit_of(old)), po))
+        # the fixed reserve: the zero floor's probe over, the 1 px floor's page
+        # spread by its occupancy grid - about the cut-free count; without the
+        # spread none (0.12.270's case)
+        assert abs(len(lit_of(old)) - len(want)) <= len(want) // 4 and po['probes_over'] == 1 and po['reserve_mb'] == 4 and po['occ_pages'] >= 1, (
+            'the fixed reserve: %d px lit (cut-free %d), plan %s' % (len(lit_of(old)), len(want), po))
+        assert not lit_of(bare) and rb['density_plan2']['probes_over'] == 1, ('the fixed reserve, the spread off: %d px lit' % len(lit_of(bare)), rb['density_plan2'])
         print('density stack: pass 2 takes what pass 1 left - %d MB, the TOP\'s own boxes under a pixel lit as cut-free (%d px) at '
-              'depth 0; the fixed 4 MB draws none (floor probe over)' % (pd['reserve_mb'], len(want)))
+              'depth 0; the fixed 4 MB (floor probe over) spreads them by the index, %d px - the spread off none'
+              % (pd['reserve_mb'], len(want), len(lit_of(old))))
     finally:
-        for w in (left, fixed, free):
+        for w in (left, fixed, free, unspread):
             w.stop()
 
 
@@ -847,9 +876,13 @@ def occ_checks(temp):
     ovb = (ice / 'design.ovb').read_bytes()
     assert ovb[:8] == b'FLOEOVB1' and int.from_bytes(ovb[8:12], 'little') == 2 and int.from_bytes(ovb[16:20], 'little') == pages, ovb[:24]
     assert len(ovb) < 64 + 8 * (pages + 1) + 2048 * pages and not (bare_ice / 'design.ovb').exists(), (len(ovb), pages)
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PAGE_SPREAD': 'on'}
-    workers = {'occ': worker(src, env), 'box': worker(src, dict(env, FLOE_RUST_DENSITY_PAGE_OCC='off')),
-               'bare': worker(bare, env), 'truth': worker(src, {})}
+    # the page spread is on by default (0.12.277) where the index has
+    # design.ovb; FLOE_RUST_DENSITY_PAGE_SPREAD=on spreads a page with no
+    # record over its box too
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    boxes = dict(env, FLOE_RUST_DENSITY_PAGE_SPREAD='on')
+    workers = {'occ': worker(src, env), 'box': worker(src, dict(boxes, FLOE_RUST_DENSITY_PAGE_OCC='off')),
+               'bare': worker(bare, boxes), 'bare_default': worker(bare, env), 'truth': worker(src, {})}
     try:
         side = 1000
 
@@ -878,9 +911,11 @@ def occ_checks(temp):
         assert between['occ'] == 0 and lit['occ'] > 0 and occ_pages['occ'] >= 1, (between, lit, occ_pages)
         assert between['box'] > 0 and occ_pages['box'] == 0, (between, occ_pages)
         assert frames['bare'][0] == frames['box'][0] and occ_pages['bare'] == 0, (between, occ_pages)
+        # no design.ovb, by default: the page under the floor is not drawn
+        assert lit_in(frames['bare_default'][0], 0, side) == 0 and not occ_pages['bare_default'], (lit, occ_pages)
         # another index's design.ovb (the other source's mtime): left out
         shutil.copyfile(ice / 'design.ovb', bare_ice / 'design.ovb')
-        stale = worker(bare, env)
+        stale = worker(bare, boxes)
         try:
             pixels, res = view(stale)
             assert pixels == frames['box'][0] and res['density_plan2']['occ_pages'] == 0, res['density_plan2']
@@ -935,7 +970,8 @@ def mixed_checks(temp):
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_PAGE_SPREAD': 'on'}
+    # the page spread on by default (0.12.277): the index has design.ovb
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
     workers = {'new': worker(src, env), 'drop': worker(src, dict(env, FLOE_RUST_DENSITY_UNDER_FLOOR='drop')),
                'even': worker(src, dict(env, FLOE_RUST_DENSITY_OCC_COVER='off')), 'truth': worker(src, {})}
     try:

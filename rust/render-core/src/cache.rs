@@ -973,6 +973,11 @@ impl Cache {
         (page_id < self.vfs.ovm.n_pages).then(|| self.vfs.ovm.page(page_id).layer_idx)
     }
 
+    /// whether the index has design.ovb attached (its pages' occupancy records)
+    pub fn has_page_occ(&self) -> bool {
+        self.vfs.ovm.has_page_occ()
+    }
+
     pub fn page_encoded_bytes(&self, page_id: u32) -> u64 {
         if page_id >= self.vfs.ovm.n_pages {
             return 0;
