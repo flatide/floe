@@ -398,8 +398,47 @@ pub struct Cache {
     /// record (field 2026-09-22: ~10 s of every layout's open, a plain
     /// layout with no design.ovo included)
     layer_depth: std::sync::OnceLock<Vec<u32>>,
+    /// Cache::layers_held per (cell, levels left), on first use
+    held_layers: std::sync::Mutex<std::collections::HashMap<(u32, u32), std::sync::Arc<Vec<u8>>>>,
     // Immutable for this open cache; reopen after publishing design.ovr.
     representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
+}
+
+/// Cache::layers_held of (`ci`, `rem`), the cells below memoized in `memo`.
+fn layers_held_in(ovm: &floe_ovm::Ovm, ci: u32, rem: u32, memo: &mut std::collections::HashMap<(u32, u32), Vec<u8>>) -> Vec<u8> {
+    let or = |out: &mut Vec<u8>, bits: &[u8]| {
+        if out.len() < bits.len() {
+            out.resize(bits.len(), 0);
+        }
+        for (have, add) in out.iter_mut().zip(bits) {
+            *have |= *add;
+        }
+    };
+    let mut out = Vec::new();
+    if rem == floe_vfs::hier::REM_FULL || rem >= ovm.cell_height(ci) {
+        or(&mut out, ovm.bitset(ovm.cell_lmask_rec(ci)));
+        return out;
+    }
+    if let Some(known) = memo.get(&(ci, rem)) {
+        return known.clone();
+    }
+    or(&mut out, ovm.bitset(ovm.cell_lmask_direct(ci)));
+    if rem == 0 {
+        return out;
+    }
+    let (start, count) = ovm.cell_places(ci);
+    let mut seen = std::collections::HashSet::new();
+    for pli in start as u64..start as u64 + count as u64 {
+        let child = ovm.place_child(pli);
+        if child >= ovm.n_cells || !seen.insert(child) {
+            continue;
+        }
+        let below = if rem - 1 >= ovm.cell_height(child) { floe_vfs::hier::REM_FULL } else { rem - 1 };
+        let held = layers_held_in(ovm, child, below, memo);
+        or(&mut out, &held);
+    }
+    memo.insert((ci, rem), out.clone());
+    out
 }
 
 /// The longest top-to-cell path of every cell (None = unreachable
@@ -501,6 +540,7 @@ impl Cache {
             hier,
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
             layer_depth: std::sync::OnceLock::new(),
+            held_layers: std::sync::Mutex::new(std::collections::HashMap::new()),
             representatives: std::sync::OnceLock::new(),
         })
     }
@@ -512,6 +552,39 @@ impl Cache {
             .get(idx as usize)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// The layers cell `ci` shows shapes of with `rem` levels left below it
+    /// (floe_vfs::hier::REM_FULL: all), a bit per layer index: its own, and
+    /// its children's at a level less - none left, its own alone (the
+    /// planner draws every child of such a cell as an outline) - past its
+    /// height its recursive layers: the planner's cell_bits for every layer.
+    /// What a plan with that top draws on is among them. Worked out once per
+    /// (cell, rem) and open cache.
+    pub fn layers_held(&self, ci: u32, rem: u32) -> std::sync::Arc<Vec<u8>> {
+        if let Some(known) = self.held_layers.lock().ok().and_then(|held| held.get(&(ci, rem)).cloned()) {
+            return known;
+        }
+        let ovm = &self.vfs.ovm;
+        let held = if ci < ovm.n_cells {
+            std::sync::Arc::new(layers_held_in(ovm, ci, rem, &mut std::collections::HashMap::new()))
+        } else {
+            std::sync::Arc::new(Vec::new())
+        };
+        if let Ok(mut known) = self.held_layers.lock() {
+            known.insert((ci, rem), std::sync::Arc::clone(&held));
+        }
+        held
+    }
+
+    /// The layers cell `ci` or any cell below it holds texts of (its
+    /// recursive text mask), a bit per layer index.
+    pub fn layers_texted(&self, ci: u32) -> Vec<u8> {
+        let ovm = &self.vfs.ovm;
+        if ci >= ovm.n_cells {
+            return Vec::new();
+        }
+        ovm.bitset(ovm.cell_tmask_rec(ci)).to_vec()
     }
 
     /// Whether the per-layer depths have been computed (a plain open must

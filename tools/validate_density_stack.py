@@ -153,6 +153,7 @@ from floe.rust_render import RustRenderWorker
 W, H = 400, 200
 PX_UM = 0.1
 LOW, MID, ALONE, TOP = (1, 0), (2, 0), (3, 0), (4, 0)
+DEEP = (5, 0)
 BLACK = bytes((0, 0, 0, 255))
 VIEW = (0.0, 0.0, W * PX_UM, H * PX_UM)
 SQUARE = 0.15               # um: 1.5 px, under the 3 px cut, over pass 2's 1 px
@@ -763,8 +764,8 @@ def cells_layout(path):
     0-32 um (3 px gaps: a 32 px cell a gap crosses has 96 px free, under an
     eighth), the right 8 um open; a 0.1 um VIA on MID every 0.5 um over the
     view (an array, its dots); TOP's 0.1 um specks every 2 um (the top
-    plane's dots, over LOW too); ALONE named and empty (a layer of the file
-    no cell holds)."""
+    plane's dots, over LOW too); DEEP's squares two levels down in the open
+    part; ALONE named and empty (a layer of the file no cell holds)."""
     import klayout.db as kdb
     ly = kdb.Layout()
     ly.dbu = 0.001
@@ -780,6 +781,16 @@ def cells_layout(path):
     for i in range(20):
         for j in range(10):
             top.shapes(specks).insert(kdb.DBox(1.0 + i * 2.0, 1.0 + j * 2.0, 1.1 + i * 2.0, 1.1 + j * 2.0))
+    # DEEP two levels down (TOP > NEST > DEEP_CELL, a 0.1 um square placed
+    # 240 times in the open right part): within depth 2, not 1 (a cell at the
+    # depth draws its children as outlines)
+    deep = ly.create_cell('DEEP_CELL')
+    deep.shapes(ly.layer(*DEEP)).insert(kdb.DBox(0, 0, 0.1, 0.1))
+    nest = ly.create_cell('NEST')
+    for i in range(12):
+        for j in range(20):
+            nest.insert(kdb.DCellInstArray(deep.cell_index(), kdb.DTrans(kdb.DVector(i * 0.5, j * 0.5))))
+    top.insert(kdb.DCellInstArray(nest.cell_index(), kdb.DTrans(kdb.DVector(33.0, 6.0))))
     # ALONE named and empty: a layer of the file (its LAYERNAME) no cell holds
     ly.layer(kdb.LayerInfo(ALONE[0], ALONE[1], 'ALONE'))
     options = kdb.SaveLayoutOptions()
@@ -800,7 +811,10 @@ def cells_checks(temp):
     crosses alone is left to the originals, its MID dots out - with fewer
     items, and the frame is the joint plan's but in the gaps; every cell
     with a free pixel (FLOE_RUST_DENSITY_OTHERS_MIN=0) draws it whole. A
-    topmost layer no cell holds plans an empty top plane's side, drawn."""
+    topmost layer on that no cell holds is not the top plane: the topmost
+    with shapes is (the frame of the layers without it); the kill switch
+    (FLOE_RUST_DENSITY_TOP_HELD=off) plans an empty top plane's side,
+    drawn."""
     src = Path(temp) / 'cells.oas'
     cells_layout(src)
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
@@ -808,7 +822,8 @@ def cells_checks(temp):
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
     workers = {'cells': worker(src, env), 'tiles': worker(src, dict(env, FLOE_RUST_DENSITY_FREE_CELLS='off')),
-               'any': worker(src, dict(env, FLOE_RUST_DENSITY_OTHERS_MIN='0'))}
+               'any': worker(src, dict(env, FLOE_RUST_DENSITY_OTHERS_MIN='0')),
+               'top_any': worker(src, dict(env, FLOE_RUST_DENSITY_TOP_HELD='off'))}
     try:
         layers = (LOW, MID, TOP)
         frames = {name: frame(w, 1, layers) for name, w in workers.items()}
@@ -823,11 +838,44 @@ def cells_checks(temp):
             1 for i in range(0, len(tiles), 4) if any_free[i:i + 4] != tiles[i:i + 4])
         p_cells, p_tiles = cells_res['density_plan2'], tiles_res['density_plan2']
         assert (p_cells['passes'], p_tiles['passes']) == (2, 1) and p_cells['items'] < p_tiles['items'], (p_cells, p_tiles)
-        # the topmost layer one no cell holds (ALONE named and empty - the
+        # the topmost layer on one no cell holds (ALONE named and empty - the
         # routing chip's BOUNDARY, user 2026-10-03: "the density never
-        # finishes"): the top plane's plans hold nothing, the frame is drawn
-        _, empty_res = frame(workers['cells'], 2, (LOW, MID, ALONE))
+        # finishes"; "the topmost of the layers on that has shapes"): the top
+        # plane is MID's, the frame the one of LOW and MID alone; the topmost
+        # layer on whatever it holds (FLOE_RUST_DENSITY_TOP_HELD=off) plans an
+        # empty top plane's side, the frame drawn
+        held, held_res = frame(workers['cells'], 2, (LOW, MID, ALONE))
+        two, two_res = frame(workers['cells'], 3, (LOW, MID))
+        assert held == two and held_res['density_stack'] == two_res['density_stack'] and held_res['density_stack']['top'] > 0, (
+            held_res['density_stack'], two_res['density_stack'])
+        _, empty_res = frame(workers['top_any'], 2, (LOW, MID, ALONE))
         assert empty_res['density_stack']['top'] == 0 < empty_res['density_stack']['lower'], empty_res['density_stack']
+
+        # the layers a cell holds within the depth (Cache::layers_held): DEEP
+        # two levels down is not the top plane at depth 1 (the frame of LOW
+        # and MID), it is at depth 2 (its dots, the top plane's)
+        def at_depth(w, gen, layers, depth):
+            dbu = float(w.cache.meta['dbu'])
+            w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in VIEW), 'view': None,
+                      'w': W, 'h': H, 'depth': depth, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': list(layers), 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('depth frame timeout')
+
+        deep1, deep1_res = at_depth(workers['cells'], 4, (LOW, MID, DEEP), 1)
+        plain1, plain1_res = at_depth(workers['cells'], 5, (LOW, MID), 1)
+        deep2, deep2_res = at_depth(workers['cells'], 6, (LOW, MID, DEEP), 2)
+        plain2, _ = at_depth(workers['cells'], 7, (LOW, MID), 2)
+        assert deep1 == plain1 and deep1_res['density_stack'] == plain1_res['density_stack'] and deep1_res['density_stack']['top'] > 0, (
+            deep1_res['density_stack'], plain1_res['density_stack'])
+        assert deep2 != plain2 and deep2_res['density_stack']['top'] > 0, deep2_res['density_stack']
+        _, any1_res = at_depth(workers['top_any'], 4, (LOW, MID, DEEP), 1)
+        assert any1_res['density_stack']['top'] == 0, any1_res['density_stack']
         print('density stack: pass 2 by cells - the sides apart (the tile boxes joint), LOW\'s gaps\' lone cells left to the originals: '
               '%d px differ from the tile boxes, all in the gaps, the lower dots %d px against %d; every free cell as the tile boxes; '
               'items %d against %d' % (len(differ), lower[0], lower[1], p_cells['items'], p_tiles['items']))

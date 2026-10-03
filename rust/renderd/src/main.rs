@@ -2453,6 +2453,37 @@ fn density_stack_enabled() -> bool {
 /// every record under the cut of pass 1's pages drawn, the small-shape pages
 /// as dots far denser than their shapes: x16 lit 0.26 against 0.058 drawn
 /// cut-free, 0.080 under the fit). FLOE_RUST_DENSITY_ONE_WALK=on, diagnostic.
+/// The density stack's planes without the visible layers above the topmost
+/// one the plan's top cell shows shapes of within its depth
+/// (Cache::layers_held) that hold no text below it either: the top plane is
+/// the topmost visible layer with shapes (user 2026-10-03: "the topmost of
+/// the layers on that has shapes" - the routing chip's BOUNDARY 100/0, named
+/// and empty, on top of every layer on, left the top plane's density empty).
+/// Such a layer draws nothing in either pass. None of them with shapes: as
+/// they are.
+fn density_held_top(cache: &Cache, top: (u32, u32), mut styled: StyledGeometryRasterRequest) -> StyledGeometryRasterRequest {
+    let held = cache.layers_held(top.0, top.1);
+    let has = |bits: &[u8], idx: u32| bits.get(idx as usize / 8).is_some_and(|byte| (byte >> (idx % 8)) & 1 == 1);
+    if !styled.layers.iter().any(|layer| has(&held, layer.layer_idx)) {
+        return styled;
+    }
+    let texted = cache.layers_texted(top.0);
+    while let Some(last) = styled.layers.last() {
+        if has(&held, last.layer_idx) || has(&texted, last.layer_idx) {
+            break;
+        }
+        styled.layers.pop();
+    }
+    styled
+}
+
+/// density_held_top default: on; FLOE_RUST_DENSITY_TOP_HELD=off (the kill
+/// switch) keeps the topmost visible layer the top plane, shapes or not.
+fn density_top_held() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_TOP_HELD").as_deref() != Ok("off"))
+}
+
 /// Pass 2's regions by cells of the free space (2026-10-03, a reviewer: "per
 /// tile the bounding box of its free pixels is nearly the tile when 1 % of
 /// it is free, and the joint plan was decided by those boxes' area"): (cell
@@ -3372,6 +3403,7 @@ fn run_render(
                         },
                         None => styled.clone(),
                     };
+                    let density_styled = if density_top_held() { density_held_top(cache, plan.top, density_styled) } else { density_styled };
                     // the sub-cut dots show pass 1 first (CUT_DENSITY_DESIGN §10.12
                     // step 3): a round of its own, final=0, then the frame with the
                     // density - never for a margin (it is not shown before it lands)

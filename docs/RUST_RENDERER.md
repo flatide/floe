@@ -391,7 +391,13 @@ diagnostic; fewer: the originals show the cell), the two sides planned apart -
 no joint plan of every layer over the whole top space.
 `FLOE_RUST_DENSITY_FREE_CELLS=off` is the kill switch (the tile boxes, the
 joint plan by area). `density_plan2` ends with the free pixels of the cells
-planned, the top plane's and the others' (31 values).
+planned, the top plane's and the others' (31 values). Since 0.12.283 the top
+plane is the topmost visible layer the view's cell holds shapes of within the
+depth (user 2026-10-03; renderd `density_held_top`, render-core
+`Cache::layers_held` - the planner's cell_bits rule): visible layers above it
+with neither shapes nor texts there leave the density stack's planes (they
+draw nothing at that depth). `FLOE_RUST_DENSITY_TOP_HELD=off` is the kill
+switch (the topmost visible layer, shapes or not).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

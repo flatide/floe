@@ -187,6 +187,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - `FLOE_RUST_DENSITY_OTHERS_MIN=0`은 타일 bbox의 프레임과 바이트까지 같다.
     - 0.12.282: 이름만 있는 빈 레이어 ALONE을 맨 위로 보이면 위층 계획이 비지만 프레임이 그려진다(위층 0 px, 아래층 > 0;
       0.12.281은 `invalid plan: top … is missing`). 루트 칩의 BOUNDARY 100/0과 같은 경우다.
+    - 0.12.283(도형이 있는 켜진 레이어 중 최상위):
+      - ALONE을 맨 위로 켜면 MID가 위층이 되고, 프레임과 밀도 수가 LOW·MID만 켠 것과 같다(위층 > 0). 킬 스위치
+        `FLOE_RUST_DENSITY_TOP_HELD=off`에서는 위의 0.12.282 경우다.
+      - DEEP(TOP > NEST > DEEP_CELL, 두 단계 아래의 0.1 µm 정사각형 240개)을 켠 depth 1 프레임은 LOW·MID 프레임과
+        같다(DEEP이 빠짐). depth 2에서는 DEEP이 위층이다. 킬 스위치에서는 depth 1의 위층이 0 px다.
   - `ladder_checks`: 맞춤은 계획마다 한 번이다(칸 방식은 위층·아래층 두 계획: passes 2).
   - 단위 `a_small_point_list_in_full_blocks_is_passed_over_whole`.
   - 어댑터 계약: `density_plan2` 31개 값(…/free_top/free_others). 상태줄 테스트: `24 regions (free top 1.3M, others 210k
