@@ -387,6 +387,15 @@
       (`occ_area_px`)을 페이지 디더로 반올림한 것이고, 0이면 항목을 내지 않는다.
     - 격자 없이 면적 합만 있는 페이지(큰 도형이 있는 페이지, SPEC-FORMATS)는 상자 전체에 뿌리되 점 수는 그
       면적(px²)이다(`spread_page`의 몫을 면적으로). 박스 이하면 같은 반올림으로 항목 하나다.
+    - 칸이 큰 페이지(0.12.278, `HierOpts::dot_occ_decode`, 킬 스위치 `FLOE_RUST_DENSITY_OCC_DECODE=off`): 하한 아래
+      페이지라도 칸(긴 변 / 64)이 화면에서 `dot_occ_cell_px`(4 px)를 넘으면 컷을 건너뛰고 선택해 디코드한다(선형 경로와
+      페이지 BVH 잎 모두, `decode_under_floor`). 그 페이지의 퍼뜨리기 항목(`occ_items`)은 셀 키와 함께
+      `HierStats::occ_fallback`에 따로 둔다. `fit_at_cut`이 끝나면 `settle_occ_fallback`이 빠진 페이지의 항목만 셀의
+      washes에 더하고, 남은 페이지 수를 `dot_occ_decoded`로 둔다. 병합된 계획은 (셀, 페이지, 레이어, 블록)마다 큰 쪽
+      하나만 쓴다. 예산 맞춤이 없는 계획은 모두 디코드한다.
+      - 단위 `a_page_under_the_floor_too_coarse_for_its_grid_is_decoded_or_its_dots_stand_in`: 600 px 페이지(칸 9.4 px)는
+        예산이 넉넉하면 디코드되어 점이 없다. 예산이 없으면 그 점이 퍼뜨리기와 같은 항목 수·점 수로 선다. 40 px 페이지는
+        그대로 퍼뜨린다.
     - 페이지 BVH 노드(0.12.276, `node_dots`): 하한 아래이고 박스 이하인 노드는 노드 상자에 항목 하나로 선다. 점 수는
       노드 아래 페이지들의 덮인 면적 합(`Ovm::page_occ_area`: 합계는 그대로, 격자는 칸 단계 × 칸 넓이, 인덱스를 연
       동안 페이지마다 한 번 계산)을 노드 디더로 반올림한 것이다. 기록이 없는 페이지는 `page_dots`로 더한다. 0이면

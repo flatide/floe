@@ -152,8 +152,9 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  # left of the budget (2026-10-02)
                  "reserve_mb",
                  # the pages of by_pages placed by their occupancy grids
-                 # (design.ovb, 2026-10-02)
-                 "occ_pages")
+                 # (design.ovb, 2026-10-02), the pages under the floor decoded
+                 # as too coarse for theirs (2026-10-03)
+                 "occ_pages", "occ_decoded")
 
 
 def _wire_counts(value, names):

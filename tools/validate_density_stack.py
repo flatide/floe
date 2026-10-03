@@ -878,8 +878,9 @@ def occ_checks(temp):
     assert len(ovb) < 64 + 8 * (pages + 1) + 2048 * pages and not (bare_ice / 'design.ovb').exists(), (len(ovb), pages)
     # the page spread is on by default (0.12.277) where the index has
     # design.ovb; FLOE_RUST_DENSITY_PAGE_SPREAD=on spreads a page with no
-    # record over its box too
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    # record over its box too. The page shows 1000 px here, cells of 15.6 px:
+    # spread, not decoded (FLOE_RUST_DENSITY_OCC_DECODE=off; coarse_checks)
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_OCC_DECODE': 'off'}
     boxes = dict(env, FLOE_RUST_DENSITY_PAGE_SPREAD='on')
     workers = {'occ': worker(src, env), 'box': worker(src, dict(boxes, FLOE_RUST_DENSITY_PAGE_OCC='off')),
                'bare': worker(bare, boxes), 'bare_default': worker(bare, env), 'truth': worker(src, {})}
@@ -927,7 +928,54 @@ def occ_checks(temp):
     finally:
         for w in workers.values():
             w.stop()
+    coarse_checks(temp, src)
     mixed_checks(temp)
+
+
+def coarse_checks(temp, src):
+    """A page under the floor too large on screen for its occupancy cells is
+    decoded (HierOpts::dot_occ_decode; user 2026-10-03, the field chip: dots
+    "where there is no shape"). occ_checks' page at 1 um a px - 600 px, cells
+    of 9.4 px, its 0.3 um boxes under the 1 px floor: drawn as a cut-free frame
+    draws them (density_plan2 occ_decoded); FLOE_RUST_DENSITY_OCC_DECODE=off
+    spreads it; under a budget whose fit leaves the page out (a fixed 128 KB
+    reserve) the dots its spread made stand in - as many as the spread lights."""
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    tight = dict(env, FLOE_RUST_BUDGET_MB='1', FLOE_RUST_DENSITY_RESERVE_LEFT='off')
+    workers = {'decode': worker(src, env), 'spread': worker(src, dict(env, FLOE_RUST_DENSITY_OCC_DECODE='off')),
+               'tight': worker(src, tight), 'tight_spread': worker(src, dict(tight, FLOE_RUST_DENSITY_OCC_DECODE='off')),
+               'truth': worker(src, {})}
+    try:
+        side = 1000
+
+        def view(w, cut_px=3.0):
+            dbu = float(w.cache.meta['dbu'])
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'headless', 'bbox': (0.0, 0.0, 1000.0 / dbu, 1000.0 / dbu), 'view': None,
+                      'w': side, 'h': side, 'depth': 0, 'cut_px': cut_px, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('coarse frame timeout')
+
+        lit_of = lambda pixels: {i // 4 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK}
+        frames = {name: view(w, 0.0 if name == 'truth' else 3.0) for name, w in workers.items()}
+        lit = {name: lit_of(px) for name, (px, _) in frames.items()}
+        plan2 = {name: res.get('density_plan2') or {} for name, (_, res) in frames.items()}
+        assert lit['truth'] and lit['decode'] == lit['truth'] and plan2['decode']['occ_decoded'] >= 1, (
+            len(lit['decode']), len(lit['truth']), plan2['decode'])
+        assert lit['spread'] != lit['truth'] and plan2['spread']['occ_decoded'] == 0 and plan2['spread']['occ_pages'] >= 1, plan2['spread']
+        assert plan2['tight']['occ_decoded'] == 0 and plan2['tight']['occ_pages'] >= 1 and lit['tight'] != lit['truth'], plan2['tight']
+        assert abs(len(lit['tight']) - len(lit['tight_spread'])) <= len(lit['tight_spread']) // 50, (len(lit['tight']), len(lit['tight_spread']))
+        print('density stack: a page under the floor too coarse for its cells (9.4 px) decoded - %d px as cut-free; spread %d px; '
+              'left out by a 128 KB reserve, its spread\'s dots stand in, %d px (the spread %d)'
+              % (len(lit['decode']), len(lit['spread']), len(lit['tight']), len(lit['tight_spread'])))
+    finally:
+        for w in workers.values():
+            w.stop()
 
 
 def mixed_layout(path):

@@ -1183,8 +1183,10 @@ struct FramePixels {
     /// by one, pages - and the dot block updates the hash map took
     /// (2026-10-02); then pass 2's reserve in MB (density_frame_reserve,
     /// 2026-10-02); then the pages placed by their occupancy grids
-    /// (design.ovb, HierOpts::dot_page_occ, 2026-10-02)
-    density_plan2: Option<[u64; 24]>,
+    /// (design.ovb, HierOpts::dot_page_occ, 2026-10-02); then the pages under
+    /// the floor decoded, their occupancy cells too coarse on screen
+    /// (HierOpts::dot_occ_decode, 2026-10-03)
+    density_plan2: Option<[u64; 25]>,
 }
 
 fn render_worker(
@@ -3319,7 +3321,7 @@ fn run_render(
         let mut density_us: Option<[u64; 5]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 24]> = None;
+        let mut density_plan2: Option<[u64; 25]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4065,7 +4067,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 24]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 25]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4092,7 +4094,7 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 24];
+    let mut plan2 = [0u64; 25];
     plan2[22] = reserve_bytes >> 20;
     // pass 1's pages: pass 2 holds them already, so they cost its reserve
     // nothing (floe_vfs HierOpts::free_pages; user 2026-10-01: 37 pages of
@@ -4358,6 +4360,8 @@ fn render_density_frame(
                         }
                         // the pages placed by their occupancy grids (design.ovb)
                         plan2[23] += planned_fine.stats.dot_occ_pages;
+                        // the pages under the floor decoded, their cells too coarse
+                        plan2[24] += planned_fine.stats.dot_occ_decoded;
                         counts[4] += planned_fine.stats.sub_cut_boxes;
                         counts[5] += planned_fine.stats.sub_cut_box_over;
                         // the records' cut this side planned at, px (the floor, or

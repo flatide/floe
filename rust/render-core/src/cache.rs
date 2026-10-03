@@ -892,6 +892,8 @@ impl Cache {
                 *have += add;
             }
             st.dot_occ_pages += more.dot_occ_pages;
+            st.dot_occ_decoded += more.dot_occ_decoded;
+            st.occ_fallback.extend(more.occ_fallback.iter().cloned());
             st.dot_partial += more.dot_partial;
             st.cancelled |= more.cancelled;
             st.fit_over |= more.fit_over;

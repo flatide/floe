@@ -177,6 +177,16 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 사다리(`FLOE_RUST_DENSITY_FIT_LADDER=on`)는 6번 걸어 같은 프레임에 이른다.
     - 기본 예산은 그 페이지를 디코드한다.
   - 단위 `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
+  0.12.278(칸이 큰 페이지는 디코드):
+  - 게이트 `density_stack` `coarse_checks`: `occ_checks`의 두 정사각형 페이지를 1 µm/px로 본다(600 px, 칸 9.4 px, 0.3 µm
+    상자는 하한 아래).
+    - 기본은 디코드해 컷 없는 프레임과 같은 픽셀(3,311 px)을 켜고, `occ_decoded`가 1 이상이다.
+    - `FLOE_RUST_DENSITY_OCC_DECODE=off`는 퍼뜨린다(3,933 px).
+    - 고정 예약 128 KB(`FLOE_RUST_BUDGET_MB=1`, `RESERVE_LEFT=off`)로 예산 맞춤이 페이지를 빼면, 예비 점이 퍼뜨리기와 같은
+      수(2 % 안)로 켜진다.
+  - `occ_checks`는 칸 15.6 px 뷰라 `OCC_DECODE=off`로 퍼뜨리기만 검사한다.
+  - 단위 `a_page_under_the_floor_too_coarse_for_its_grid_is_decoded_or_its_dots_stand_in`. 어댑터 계약: `density_plan2` 25개
+    값(…/occ_pages/occ_decoded). 상태줄 테스트: `pages decoded under the floor 6`.
   0.12.277(페이지 퍼뜨리기 기본 켬, design.ovb가 있을 때):
   - 게이트 점 절: 1 px 하한 아래 TOP의 0.5 px 점은 기본에서 컷 없는 프레임의 4분의 1 안(48 / 50 px)으로 켜지고,
     `occ_pages`가 1 이상이다. `FLOE_RUST_DENSITY_PAGE_SPREAD=off`는 0 px이고 나머지 픽셀은 같으며, 점 항목은 셀의

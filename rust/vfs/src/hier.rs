@@ -380,6 +380,29 @@ pub fn dot_page_occ() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_PAGE_OCC").as_deref() != Ok("off"))
 }
 
+/// HierOpts::dot_occ_decode default: on; FLOE_RUST_DENSITY_OCC_DECODE=off (the
+/// kill switch) spreads a page under the floor however large its occupancy
+/// cells show, as 0.12.277 - and so does FLOE_RUST_DENSITY_UNDER_FLOOR=drop,
+/// under which renderd would leave out every shape of such a page.
+pub fn dot_occ_decode() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("FLOE_RUST_DENSITY_OCC_DECODE").as_deref() != Ok("off") && std::env::var("FLOE_RUST_DENSITY_UNDER_FLOOR").as_deref() != Ok("drop")
+    })
+}
+
+/// HierOpts::dot_occ_cell_px default (px): a cell past it on screen is too
+/// coarse a place for a dot (user 2026-10-03, field: dots "where there is no
+/// shape"). FLOE_RUST_DENSITY_OCC_CELL_PX overrides (diagnostic).
+pub const OCC_DECODE_CELL_PX: f64 = 4.0;
+
+fn dot_occ_cell_px() -> f64 {
+    static PX: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *PX.get_or_init(|| {
+        std::env::var("FLOE_RUST_DENSITY_OCC_CELL_PX").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite() && *v > 0.0).unwrap_or(OCC_DECODE_CELL_PX)
+    })
+}
+
 /// HierOpts::dot_occ_cover default: on; FLOE_RUST_DENSITY_OCC_COVER=off (the
 /// kill switch) gives every cell with a shape an even share, as 0.12.274.
 pub fn dot_occ_cover() -> bool {
@@ -1031,6 +1054,15 @@ pub struct HierOpts {
     /// density"); a page no wider than a box takes its cells' sum.
     /// FLOE_RUST_DENSITY_OCC_COVER=off is the kill switch.
     pub dot_occ_cover: bool,
+    /// Under the page spread, a page under the floor whose occupancy cells
+    /// would show past dot_occ_cell_px (its larger side / OCC_GRID, px) is
+    /// decoded and drawn - its shapes by area, as a decoded page's under the
+    /// floor - rather than spread: a dot of a coarse cell lands anywhere in
+    /// it, where no shape may be (user 2026-10-03, the field chip: "dots
+    /// where there is no shape"). Such a page shows large: few are in view.
+    /// FLOE_RUST_DENSITY_OCC_DECODE=off is the kill switch.
+    pub dot_occ_decode: bool,
+    pub dot_occ_cell_px: f64,
     /// The sub-cut dots' blocks in a dense grid over the cell's view (DotGrid)
     /// rather than a hash map sorted when the cell is done - the same counts,
     /// unions and order - and a point list's topmost layer found once, not a
@@ -1165,6 +1197,8 @@ impl Default for HierOpts {
             dot_page_spread_boxes: dot_page_spread_boxes(),
             dot_page_occ: dot_page_occ(),
             dot_occ_cover: dot_occ_cover(),
+            dot_occ_decode: dot_occ_decode(),
+            dot_occ_cell_px: dot_occ_cell_px(),
             dot_grid: dot_grid(),
             dot_boxes: dot_boxes(),
             dot_records: None,
@@ -1224,6 +1258,19 @@ pub struct WsCell {
     pub reps: Vec<(u32, crate::representatives::Prim)>,
 }
 
+/// HierOpts::dot_occ_decode: a dot item of a page decoded under the floor,
+/// kept aside in case the budget fit leaves the page out - then drawn in its
+/// cell (`key`) as the spread would have (settle_occ_fallback)
+#[derive(Clone, Debug, PartialEq)]
+pub struct OccFallback {
+    pub key: WsKey,
+    pub page: u32,
+    pub layer: u32,
+    pub block: (i64, i64),
+    pub piece: BBox,
+    pub dots: u16,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HierStats {
     /// pages of summarized layers left unselected (ViewReq::page_skip)
@@ -1277,6 +1324,12 @@ pub struct HierStats {
     /// HierOpts::dot_page_occ: the pages of dot_by[7] placed by their
     /// occupancy grids (design.ovb)
     pub dot_occ_pages: u64,
+    /// HierOpts::dot_occ_decode: the pages under the floor decoded, their
+    /// occupancy cells too coarse on screen (after a budget fit: those it kept)
+    pub dot_occ_decoded: u64,
+    /// HierOpts::dot_occ_decode: the dot items of those pages kept aside until
+    /// the budget fit (settle_occ_fallback)
+    pub occ_fallback: Vec<OccFallback>,
     /// HierOpts::dot_boxes: the dot blocks left out, no box holding them whole
     pub dot_partial: u64,
     /// the plan was made with HierOpts::sub_cut_dots: its washes are dot
@@ -1900,7 +1953,45 @@ pub fn fit_planned(v: &Ovm, req: &ViewReq, opts: &HierOpts, plan: HierPlan) -> O
 /// budget, else its pages kept by priority to the budget (thin_to_budget) -
 /// in one pass, never a coarser cut. When not one page that costs fits, those
 /// the frame holds stay and no decision is taken.
-fn fit_at_cut(v: &Ovm, req: &ViewReq, opts: &HierOpts, mut plan: HierPlan) -> HierPlan {
+fn fit_at_cut(v: &Ovm, req: &ViewReq, opts: &HierOpts, plan: HierPlan) -> HierPlan {
+    let mut plan = fit_at_cut_pages(v, req, opts, plan);
+    settle_occ_fallback(&mut plan);
+    plan
+}
+
+/// The pages under the floor decoded for their coarse occupancy cells
+/// (HierOpts::dot_occ_decode) after a budget fit: a page it left out is drawn
+/// by the dot items its spread made (HierStats::occ_fallback) - in its cell,
+/// a block twice from the threads' plans once, at its most - one it kept is
+/// decoded; dot_occ_decoded counts those, dot_occ_pages and dot_by[7] the
+/// others.
+pub fn settle_occ_fallback(plan: &mut HierPlan) {
+    let mut aside = std::mem::take(&mut plan.stats.occ_fallback);
+    if aside.is_empty() {
+        return;
+    }
+    aside.sort_by(|a, b| (a.key, a.page, a.layer, a.block).cmp(&(b.key, b.page, b.layer, b.block)).then(b.dots.cmp(&a.dots)));
+    aside.dedup_by(|a, b| (a.key, a.page, a.layer, a.block) == (b.key, b.page, b.layer, b.block));
+    let (mut decoded, mut spread) = (FxSet::default(), FxSet::default());
+    for item in aside {
+        if plan.pages.binary_search(&item.page).is_ok() {
+            decoded.insert(item.page);
+            continue;
+        }
+        spread.insert(item.page);
+        if let Ok(at) = plan.wcells.binary_search_by(|w| w.key.cmp(&item.key)) {
+            let wc = &mut plan.wcells[at];
+            wc.washes.push((item.layer, item.piece));
+            wc.dot_counts.push(item.dots);
+        }
+    }
+    plan.stats.dot_occ_decoded = decoded.len() as u64;
+    plan.stats.dot_occ_pages += spread.len() as u64;
+    plan.stats.dot_by[7] += spread.len() as u64;
+}
+
+/// fit_at_cut's pages
+fn fit_at_cut_pages(v: &Ovm, req: &ViewReq, opts: &HierOpts, mut plan: HierPlan) -> HierPlan {
     if let Some(fixed) = opts.fixed_fit.filter(|fixed| fixed.cut_dbu == req.cut_dbu) {
         if let Some(fitted) = fit_under(v, req, req, opts, plan.clone(), fixed) {
             return fitted;
@@ -2187,6 +2278,13 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         page_occ: opts.dot_page_occ,
         occ_cover: opts.dot_occ_cover,
         occ_blocks: Vec::new(),
+        occ_decode_px: (dots.is_some()
+            && opts.dot_records.is_none()
+            && opts.dot_occ_decode
+            && opts.dot_page_spread
+            && (opts.dot_page_spread_boxes || (opts.dot_page_occ && v.has_page_occ())))
+        .then_some(opts.dot_occ_cell_px),
+        cell_fallback: Vec::new(),
         cell_view: BBox::EMPTY,
         grid_on: opts.dot_grid,
         dot_boxes: opts.dot_boxes,
@@ -2600,6 +2698,11 @@ struct Hier<'a> {
     page_occ: bool,
     occ_cover: bool,
     occ_blocks: Vec<(f64, BBox)>,
+    /// HierOpts::dot_occ_decode under the spread in effect: the cell px past
+    /// which a page under the floor is decoded, and the dot items of the cell's
+    /// so decoded pages kept aside
+    occ_decode_px: Option<f64>,
+    cell_fallback: Vec<OccFallback>,
     /// HierOpts::dot_grid, the grid of the cell being walked, and the run of
     /// dot items of one block being summed - the block and layer, the dots,
     /// the union of what they stand for - put into the blocks when an item
@@ -2819,8 +2922,11 @@ impl<'a> Hier<'a> {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
                     let size_cut = p.max_w < self.page_cut && p.max_h < self.page_cut;
+                    // a page under the floor too large on screen for its
+                    // occupancy cells: selected, decoded (HierOpts::dot_occ_decode)
+                    let decoded = size_cut && boxes.iter().any(|b| p.bbox.intersects(b)) && self.decode_under_floor(&p, pi);
                     // shape cut: no shape of the page reaches the cut on both sides
-                    if size_cut || p.max_min < self.page_hair || (self.shape_cut && p.max_min < self.page_cut) {
+                    if !decoded && (size_cut || p.max_min < self.page_hair || (self.shape_cut && p.max_min < self.page_cut)) {
                         let in_view = boxes.iter().any(|b| p.bbox.intersects(b));
                         // washable under the sub-cut rules (a size cut
                         // always, a hairline cut under cull with the
@@ -3346,6 +3452,10 @@ impl<'a> Hier<'a> {
             let rbbox = self.v.cell(ci).rbbox;
             self.flush_dots(&mut wc, &boxes, &rbbox);
         }
+        for mut aside in self.cell_fallback.drain(..) {
+            aside.key = key;
+            self.st.occ_fallback.push(aside);
+        }
         self.out.insert(key, wc);
     }
 
@@ -3457,21 +3567,33 @@ impl<'a> Hier<'a> {
     /// the view: rounded by the block's dither) and standing for the union of
     /// those parts. One dot item.
     fn spread_page_occ(&mut self, layer: u32, bbox: BBox, levels: &[u8; floe_ovm::OCC_CELLS], holds: u64, salt: u64) {
+        let items = self.occ_items(layer, bbox, levels, holds, salt);
+        if items.is_empty() {
+            return;
+        }
+        self.st.sub_cut_dot_items += 1;
+        for (key, dots, piece) in items {
+            self.put_dots(key, dots, &piece);
+        }
+    }
+
+    /// spread_page_occ's blocks: (block and layer, dots, what they stand for)
+    fn occ_items(&mut self, layer: u32, bbox: BBox, levels: &[u8; floe_ovm::OCC_CELLS], holds: u64, salt: u64) -> Vec<((i64, i64, u32), u32, BBox)> {
+        let mut items = Vec::new();
         let ppd = self.px_per_dbu;
         if !(ppd > 0.0) || bbox.is_empty() {
-            return;
+            return items;
         }
         let shown = bbox.intersect(&self.cell_view);
         if shown.is_empty() {
-            return;
+            return items;
         }
         let cols = floe_ovm::OCC_GRID as usize;
         let rows: Vec<u64> = levels.chunks_exact(cols).map(|row| row.iter().enumerate().fold(0u64, |bits, (x, &level)| bits | ((level > 0) as u64) << x)).collect();
         let cells: u32 = rows.iter().map(|r| r.count_ones()).sum();
         if cells == 0 {
-            return;
+            return items;
         }
-        self.st.sub_cut_dot_items += 1;
         let g = floe_ovm::OCC_GRID;
         let ex: Vec<i64> = (0..=g).map(|k| floe_ovm::occ_edge(bbox.x0, bbox.x1 - bbox.x0, k)).collect();
         let ey: Vec<i64> = (0..=g).map(|k| floe_ovm::occ_edge(bbox.y0, bbox.y1 - bbox.y0, k)).collect();
@@ -3540,10 +3662,11 @@ impl<'a> Hier<'a> {
                 if dots < 1.0 {
                     continue;
                 }
-                self.put_dots((bx, by, layer), dots.min(self.block_cap as f64) as u32, &piece);
+                items.push(((bx, by, layer), dots.min(self.block_cap as f64) as u32, piece));
             }
         }
         self.occ_blocks = sums;
+        items
     }
 
     /// `dots` and what they stand for (`piece`) into the dot block `key`.
@@ -3826,6 +3949,32 @@ impl<'a> Hier<'a> {
     /// visible layer of the child's recursive layer mask, when the
     /// footprint meets a view box.
     /// At most box_px on screen in both axes: one box.
+    /// HierOpts::dot_occ_decode: a page under the floor whose occupancy cells
+    /// show past dot_occ_cell_px - decoded and drawn rather than spread. Its
+    /// spread's dot items are kept aside (cell_fallback, then
+    /// HierStats::occ_fallback): the budget fit draws them when it leaves the
+    /// page out (settle_occ_fallback).
+    fn decode_under_floor(&mut self, p: &floe_ovm::PageV, pi: u32) -> bool {
+        let Some(px) = self.occ_decode_px else {
+            return false;
+        };
+        let cell = (p.bbox.x1 - p.bbox.x0).max(p.bbox.y1 - p.bbox.y0) as f64 / floe_ovm::OCC_GRID as f64 * self.px_per_dbu;
+        if !(p.max_w < self.page_cut && p.max_h < self.page_cut && cell > px) {
+            return false;
+        }
+        if self.dot_seen.insert(6 << 60 | pi as u64) {
+            self.st.dot_occ_decoded += 1;
+            let v = self.v;
+            if let Some(floe_ovm::PageOcc::Grid(levels)) = v.page_occ(pi) {
+                let holds = self.page_dots(p);
+                for ((bx, by, layer), dots, piece) in self.occ_items(p.layer_idx, p.bbox, &levels, holds, pi as u64) {
+                    self.cell_fallback.push(OccFallback { key: (0, 0), page: pi, layer, block: (bx, by), piece, dots: dots.min(u16::MAX as u32) as u16 });
+                }
+            }
+        }
+        true
+    }
+
     fn box_small(&self, fp: &BBox) -> bool {
         let ppd = self.px_per_dbu;
         let fw = (fp.x1 - fp.x0).max(0) as f64 * ppd;
@@ -5138,8 +5287,10 @@ impl<'a> Hier<'a> {
                     self.st.page_candidates += 1;
                     let p = self.v.page(pi);
                     let size_cut = p.max_w < self.page_cut && p.max_h < self.page_cut;
+                    // see the linear page loop (HierOpts::dot_occ_decode)
+                    let decoded = size_cut && p.bbox.intersects(b) && self.decode_under_floor(&p, pi);
                     // shape cut: no shape of the page reaches the cut on both sides
-                    if size_cut || p.max_min < self.page_hair || (self.shape_cut && p.max_min < self.page_cut) {
+                    if !decoded && (size_cut || p.max_min < self.page_hair || (self.shape_cut && p.max_min < self.page_cut)) {
                         let in_view = p.bbox.intersects(b);
                         // see the linear page loop
                         let rep = in_view
@@ -7679,6 +7830,65 @@ mod tests {
         }
         let plain = plan_hier(&mk(), &ask, &opts(true));
         assert!(plain.stats.dot_by[7] == 0 && counts(&plain).is_empty());
+    }
+
+    #[test]
+    fn a_page_under_the_floor_too_coarse_for_its_grid_is_decoded_or_its_dots_stand_in() {
+        // HierOpts::dot_occ_decode (user 2026-10-03, the field chip: dots "where
+        // there is no shape"). At 0.1 px/dbu, the floor 10 dbu: page A (6,000
+        // dbu: 600 px, cells of 9.4 px; its shapes 5 dbu) is too coarse for its
+        // grid - decoded; page C (400 dbu: cells of 0.6 px) spread as ever.
+        // When the budget fit leaves A out, the dots its spread made stand in.
+        let cells = [FCell {
+            name: "TOP",
+            pages: vec![(bx(0, 0, 6_000, 6_000), 5, 5), (bx(8_000, 0, 8_100, 100), 100, 100), (bx(300, 6_300, 700, 6_700), 5, 5)],
+            places: vec![],
+        }];
+        let mut chip = fixture_members(&cells, 0, true, &|_, k| if k == 0 { 40_000 } else { 1 });
+        let a: Box<[u8; floe_ovm::OCC_CELLS]> = Box::new(std::array::from_fn(|at| if (at % 64 < 16 && at / 64 < 16) || (at % 64 >= 56 && at / 64 >= 56) { 15 } else { 0 }));
+        let c: Box<[u8; floe_ovm::OCC_CELLS]> = Box::new(std::array::from_fn(|at| if at % 64 < 8 && at / 64 < 8 { 15 } else { 0 }));
+        let ovb = ovb_of(&chip, &[(0, a), (2, c)]);
+        chip.attach_page_occ_backing(ovb).unwrap();
+        let ask = |budget: u64| {
+            let mut r = rq(bx(-10, -10, 9_000, 9_000), 30, 0);
+            r.px_per_dbu = 0.1;
+            r.page_wash = false;
+            r.decode_budget = budget;
+            r
+        };
+        let opts = |decode: bool| HierOpts {
+            sub_cut_dots: Some(1.0 / 3.0),
+            dot_block_px: 8.0,
+            dot_spread: true,
+            dot_page_spread: true,
+            dot_occ_decode: decode,
+            dot_occ_cell_px: 4.0,
+            ..HierOpts::default()
+        };
+        let in_a = |b: &BBox| b.y1 <= 6_000 && b.x1 <= 6_000;
+        let of = |plan: &HierPlan, f: &dyn Fn(&BBox) -> bool| -> (usize, u32) {
+            let cell = plan.wcells.iter().find(|w| w.key.0 == 0).unwrap();
+            let picked: Vec<u32> = cell.washes.iter().zip(&cell.dot_counts).filter(|(&(_, b), _)| f(&b)).map(|(_, &n)| n as u32).collect();
+            (picked.len(), picked.iter().sum())
+        };
+        // the budget holds it: decoded - no dots of A - C spread
+        let roomy = plan_hier(&chip, &ask(1 << 40), &opts(true));
+        assert!(roomy.pages.contains(&0) && roomy.pages.contains(&1), "{:?}", roomy.pages);
+        assert_eq!((roomy.stats.dot_occ_decoded, of(&roomy, &in_a).0), (1, 0));
+        assert!(of(&roomy, &|b: &BBox| b.y0 >= 6_300).0 > 0 && roomy.stats.occ_fallback.is_empty());
+        // the budget holds none: A's dots stand in, as its spread draws them
+        // (the decode off, the kill switch)
+        let tight = plan_hier(&chip, &ask(1), &opts(true));
+        let spread = plan_hier(&chip, &ask(1), &opts(false));
+        assert!(!tight.pages.contains(&0) && tight.stats.dot_occ_decoded == 0, "{:?}", tight.pages);
+        let (items, dots) = of(&tight, &in_a);
+        assert!(items > 0 && (items, dots) == of(&spread, &in_a), "{items} items, {dots} dots against {:?}", of(&spread, &in_a));
+        let cell = tight.wcells.iter().find(|w| w.key.0 == 0).unwrap();
+        assert!(cell.washes.iter().filter(|(_, b)| in_a(b)).all(|(_, b)| (b.x1 <= 1_600 && b.y1 <= 1_600) || (b.x0 >= 5_200 && b.y0 >= 5_200)));
+        assert!(of(&tight, &|b: &BBox| b.y0 >= 6_300).0 > 0 && tight.stats.occ_fallback.is_empty());
+        // no budget fit: decoded, nothing stands in
+        let plain = plan_hier(&chip, &ask(0), &opts(true));
+        assert!(plain.pages.contains(&0) && of(&plain, &in_a).0 == 0);
     }
 
     #[test]

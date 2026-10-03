@@ -359,7 +359,14 @@ the arrays); `FLOE_RUST_DENSITY_OCC_COVER=off` is the kill switch. With the
 page spread on, pass 2 also draws a decoded page's shapes under the floor (its
 raster's lower cut 0): a page decoded for its larger shapes no longer leaves
 its small ones blank where a spread page draws theirs by area;
-`FLOE_RUST_DENSITY_UNDER_FLOOR=drop` is the kill switch.
+`FLOE_RUST_DENSITY_UNDER_FLOOR=drop` is the kill switch. Since 0.12.278 a page
+under the floor whose occupancy cells would show past 4 px
+(`FLOE_RUST_DENSITY_OCC_CELL_PX`, diagnostic) is decoded and drawn rather than
+spread - a coarse cell's dots landed where no shape is (user 2026-10-03, the
+field chip) - its spread's dots standing in when the budget fit leaves it out
+(`HierOpts::dot_occ_decode`; `FLOE_RUST_DENSITY_OCC_DECODE=off` is the kill
+switch, and UNDER_FLOOR=drop turns it off too); `density_plan2`'s 25th value
+is the pages so decoded (`occ_decoded`).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

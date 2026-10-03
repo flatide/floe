@@ -1072,7 +1072,10 @@ def perf_status(res, depth_note=""):
                     p2["occ_pages"]) if key == "by_pages" and p2.get("occ_pages") else "") for key, name in (
                     ("by_nodes", "nodes"), ("by_placements", "placements"), ("by_arrays", "arrays"),
                     ("by_list_members", "list members"), ("by_list_chunks", "list chunks"),
-                    ("by_array_members", "array members"), ("by_pages", "pages")) if p2.get(key))
+                    ("by_array_members", "array members"), ("by_pages", "pages"),
+                    # pages under the floor decoded, their occupancy cells too
+                    # coarse on screen for dots (2026-10-03)
+                    ("occ_decoded", "pages decoded under the floor")) if p2.get(key))
                 if p2.get("map_updates"):
                     by += "; hash map %s" % fmt_count(p2["map_updates"])
                 plan += (" (probe %d ms x%d, fit %d ms x%d"
