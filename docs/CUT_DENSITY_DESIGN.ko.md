@@ -1476,7 +1476,8 @@ draw 16.5 s. 재현(1920×1777): 1패스 40~70 ms인데 스택을 켜면 래스�
   돈다(`LayerRasterSession::render_layered_with`: 경계 콜백이 `DensityScenes`를 돌려준다).
 - bin이 상한을 넘기면 그쪽의 밀도는 이번 프레임에서 빼고 넘침을 보고한다(`density_bin`). 타일별 걷기로
   물러나지 않는다.
-- 계측 `density_us=plan2/scene2/collect/regions/decode2`, `density_pages=planned/in_hand/decoded/over_budget`,
+- 계측 `density_us=plan2/scene2/collect/regions/decode2`(0.12.279부터 `/raster2`: 2패스 래스터 패스의 벽시계 시간,
+  `RenderStats::density_raster_us`; 뷰어 로그 줄의 `pass 2 decode D ms, raster R ms`), `density_pages=planned/in_hand/decoded/over_budget`,
   `density_bin=items/deferred/overflow`.
 
 같은 뷰의 결과: 2패스 계획 561 → 33 ms, 장면 준비 334 → 7 ms, 계획된 페이지 5,902 → 108(그중 43은 1패스가

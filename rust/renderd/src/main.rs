@@ -1159,7 +1159,7 @@ struct FramePixels {
     density_pages: Option<[u64; 4]>,
     /// pass 2's time (us): the finer plans, their scenes, the bins and minis,
     /// the regions, the decode
-    density_us: Option<[u64; 5]>,
+    density_us: Option<[u64; 6]>,
     /// pass 2's bin: items, deferred edges, overflow items
     density_bin: Option<[u64; 3]>,
     /// pass 2's sub-cut dot items (FLOE_RUST_DENSITY_DOTS=on): planned, and
@@ -3318,7 +3318,7 @@ fn run_render(
         check_generation(cancellation, command.generation)?;
 
         let mut density_pages: Option<[u64; 4]> = None;
-        let mut density_us: Option<[u64; 5]> = None;
+        let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
         let mut density_plan2: Option<[u64; 25]> = None;
@@ -3400,7 +3400,7 @@ fn run_render(
                     density_plan2 = Some(plan2);
                     density_dots = density_dots_enabled().then_some([counts[4], counts[5]]);
                     // both plans / the scenes / the collection / the regions / the decode
-                    density_us = Some([times[0], times[1], report.stats.density_collect_us, times[2], times[3]]);
+                    density_us = Some([times[0], times[1], report.stats.density_collect_us, times[2], times[3], report.stats.density_raster_us]);
                     report
                 } else if std::env::var("FLOE_RUST_WORK_BIN").as_deref() == Ok("off") {
                     render_geometry_styled_unbinned_cancellable(

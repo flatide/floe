@@ -133,7 +133,8 @@ def _density_stack(value):
 
 
 DENSITY_PAGE_COUNTS = ("planned", "in_hand", "decoded", "over_budget")
-DENSITY_TIMES = ("plan2_us", "scene2_us", "collect_us", "regions_us", "decode2_us")
+# (pass 2's raster wall since 2026-10-03, the field's 449-layer view)
+DENSITY_TIMES = ("plan2_us", "scene2_us", "collect_us", "regions_us", "decode2_us", "raster2_us")
 DENSITY_BIN = ("items", "deferred", "overflow")
 # the sub-cut dots (FLOE_RUST_DENSITY_DOTS=on): items planned, items past the cap
 DENSITY_DOTS = ("items", "over")

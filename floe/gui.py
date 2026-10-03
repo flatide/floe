@@ -1104,6 +1104,11 @@ def perf_status(res, depth_note=""):
             ("%d pages left out" % pages.get("over_budget", 0), pages.get("over_budget"))) if there]
         if over:
             parts.append("pass 2 over budget: %s" % ", ".join(over))
+        # pass 2's decode and raster wall (2026-10-03, the field's 449-layer
+        # view took 35 s): the log line only
+        if us.get("decode2_us") is not None:
+            parts.append("pass 2 decode %d ms%s" % (round(us["decode2_us"] / 1000), ", raster %d ms" % round(us["raster2_us"] / 1000)
+                                                     if us.get("raster2_us") is not None else ""))
         stack = " [density: %s]" % ", ".join(parts)
         # the bar: what pass 2 lit, its plan time and what it walked (nodes,
         # the placements it read, the cells' dot items it made); a floor

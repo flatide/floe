@@ -592,7 +592,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             "summary": {"none": "off"},
             "density_stack": {"lit": 619861}, "density_dots": {"items": 589148},
             "density_block": 4.0, "density_floor": 1.0,
-            "density_us": {"plan2_us": 3494000},
+            "density_us": {"plan2_us": 3494000, "decode2_us": 812000, "raster2_us": 24310000},
             "density_plan2": {"probe_us": 0, "probes": 0, "fit_us": 3494000,
                               "passes": 1, "regions": 24, "nodes": 4000000,
                               "page_nodes": 0, "page_candidates": 19000,
@@ -611,7 +611,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "live [density: dots, lit 620k px, block 4 px, floor 1 px,"
                 " pass 2 plan 3494 ms (probe 0 ms x0, fit 3494 ms x1 passes"
                 " on 1 threads, 24 regions, nodes 4.0M, page nodes 0, pages"
-                " 19k, reads 15.2M, cell dots 2.7M), 0 pages] (10552 tiles,"
+                " 19k, reads 15.2M, cell dots 2.7M), 0 pages, pass 2 decode 812"
+                " ms, raster 24310 ms] (10552 tiles,"
                 " +9172 new,"
                 " 4324 ms = 250 load [6 plan+152 delta+92 apply] + 3916 draw"
                 ", depth 3, cut<7.56um (larger side), plan 6.1ms/0 frontier",
@@ -651,7 +652,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             " 55k, list members 470k, list chunks 20k of 5.1M members, array"
             " members 10k, pages 257 (250 by occupancy), pages decoded under the floor 6; hash map 12]), 206 pages", full)
         # what pass 2's reserve kept out (2026-10-01): in the log line too
-        self.assertIn(", 206 pages, pass 2 over budget: floor probe, thinned, 3 pages left out]", full)
+        self.assertIn(", 206 pages, pass 2 over budget: floor probe, thinned, 3 pages left out, pass 2 decode 812 ms, raster 24310 ms]", full)
         self.assertEqual(
             brief,
             "4324 ms = 250 load + 3916 draw + 1693 other · density: lit 620k"
@@ -1837,7 +1838,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 # 2's pages planned/in_hand/decoded/over_budget, its times and bins,
                 # the sub-cut dots' items/over, floor and block
                 "density_stack": "90/40/30/1000/200", "density_pages": "12/7/4/1",
-                "density_us": "100/20/30/4/50", "density_bin": "600/1/0",
+                "density_us": "100/20/30/4/50/60", "density_bin": "600/1/0",
                 "density_dots": "3500/2", "density_floor": "0.250",
                 "density_block": "8",
                 "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2"
@@ -1918,7 +1919,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["density_pages"], {
                 "planned": 12, "in_hand": 7, "decoded": 4, "over_budget": 1})
             self.assertEqual(result["density_us"], {
-                "plan2_us": 100, "scene2_us": 20, "collect_us": 30, "regions_us": 4, "decode2_us": 50})
+                "plan2_us": 100, "scene2_us": 20, "collect_us": 30, "regions_us": 4, "decode2_us": 50, "raster2_us": 60})
             self.assertEqual(result["density_bin"], {"items": 600, "deferred": 1, "overflow": 0})
             self.assertEqual(result["density_dots"], {"items": 3500, "over": 2})
             self.assertEqual(result["density_floor"], 0.25)

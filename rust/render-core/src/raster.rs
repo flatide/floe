@@ -4349,6 +4349,8 @@ impl LayerRasterSession {
             }
             let mut result = Ok(());
             let mut planes: Vec<usize> = Vec::with_capacity(block);
+            // pass 2's raster: from its collection to the last pass
+            let mut density_raster_started: Option<Instant> = None;
             for at in (0..passes.len()).step_by(block) {
                 planes.clear();
                 planes.extend(
@@ -4461,6 +4463,7 @@ impl LayerRasterSession {
                         }
                     }
                     stats.density_collect_us = elapsed_us_of(collect_started);
+                    density_raster_started = Some(Instant::now());
                 }
                 drop(guards);
                 pass_index.store(at, Ordering::Relaxed);
@@ -4475,6 +4478,9 @@ impl LayerRasterSession {
                     result = Err(error);
                     break;
                 }
+            }
+            if let Some(started) = density_raster_started {
+                stats.density_raster_us = elapsed_us_of(started);
             }
             stop.store(true, Ordering::Release);
             barrier.wait();

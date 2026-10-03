@@ -177,6 +177,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 사다리(`FLOE_RUST_DENSITY_FIT_LADDER=on`)는 6번 걸어 같은 프레임에 이른다.
     - 기본 예산은 그 페이지를 디코드한다.
   - 단위 `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
+  0.12.279(2패스 디코드·래스터 시간을 로그 줄에): 어댑터 계약 `density_us` 6개 값(…/decode2_us/raster2_us), 상태줄 테스트
+  `pass 2 decode 812 ms, raster 24310 ms`(로그 줄에만).
   0.12.278(칸이 큰 페이지는 디코드):
   - 게이트 `density_stack` `coarse_checks`: `occ_checks`의 두 정사각형 페이지를 1 µm/px로 본다(600 px, 칸 9.4 px, 0.3 µm
     상자는 하한 아래).
