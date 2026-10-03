@@ -375,6 +375,22 @@
       - 표본으로 읽은 멤버가 더 적다.
       - 성긴 리스트는 표본을 쓰지 않는다.
       - 사분면 영역 넷으로 나눠도 위가 그대로다.
+  **리스트 단위 건너뛰기(0.12.281, renderd 0.12.259; 사용자 2026-10-03, 실칩 0.12.280 `list chunks in full blocks 7.1M
+  of 69.1M members` - 청크 평균 10개, 표준 셀형 작은 리스트):** `dot_list_full`이 청크보다 먼저 리스트 전체를 본다.
+  - 가장 위 레이어가 있고 멤버가 블록 이하이면, 멤버 중심의 범위(`chunk_blocks(b0, extent)`)의 블록이 모두
+    상한이거나 통째가 아닌지(`blocks_full`) 본다. 그러면 영역도 만들지 않고 리스트를 건너뛴다. 그 청크 수와 멤버 수를
+    `dot_full_chunks`·`dot_full_members`에 더한다.
+  - `blocks_full`은 격자 안의 범위만 본다(격자 밖 블록은 통째가 아니다; `dot_boxes`가 꺼져 있으면 범위가 격자 안이어야
+    한다). `LIST_FULL_BLOCKS`(2^16) 블록까지다.
+    - 먼저 지난번에 찾은 덜 찬 블록(`full_witness`)을 본다.
+    - 8×8 블록 묶음(`DOT_FULL_SIDE`)은 상한에 찬 통째 블록 수(`DotGrid::full`, 레이어별)가 그 묶음의 통째 블록
+      수(`square_whole`, 셀 걷기마다 처음 볼 때 셈)와 같으면 한 번에 통과한다. 아니면 블록마다 본다.
+    - `DotGrid::put`은 블록이 상한에 닿았는지(`GRID_FILLED`)를 돌려주고, `put_block`이 통째 블록이면 그 묶음에 센다.
+      격자를 비울 때 함께 비운다.
+  - `chunk_full`도 사각형마다 `blocks_full`을 쓴다. 64개(`CHUNK_ZONE_MIN`) 미만 청크는 구간을 구하지 않는다.
+  - 단위: `a_small_point_list_in_full_blocks_is_passed_over_whole`.
+    - 4,096점 리스트가 블록을 채운 뒤, 그 안의 8점 리스트 7개를 리스트째 건너뛴다.
+    - 전부 읽은 경우와 항목이 같다.
   **점 계획의 예산 맞춤은 요청한 컷에서 한 번(0.12.271, renderd 0.12.250; 사용자 2026-10-02, 실칩 `fit 75019 ms x6
   passes on 1 threads`):** `HierOpts::dot_fit_at_cut`(기본 켬, `FLOE_RUST_DENSITY_FIT_LADDER=on`이 킬 스위치).
   - 점 계획(`sub_cut_dots`)은 `plan_hier`가 요청한 컷에서 한 번 끝까지 계획하고 `fit_at_cut`으로 맞춘다.

@@ -17,6 +17,9 @@ const MAX_IMAGE_PIXELS: u64 = 268_435_456;
 const MAX_WORKERS: u16 = 256;
 pub const MAX_TILE_SIZE: u16 = 4096;
 pub const DEFAULT_TILE_SIZE: u16 = 128;
+/// RasterBand::free_cells: the most boxes a tile's cells make in runs (past
+/// it a cell row's kept cells are one box)
+const FREE_CELL_BOXES: usize = 64;
 const DEVICE_ONE: i128 = 1i128 << 32;
 const DEVICE_HALF: i128 = DEVICE_ONE / 2;
 const MAX_DEVICE_COORD: i128 = 1i128 << 96;
@@ -1642,6 +1645,85 @@ impl RasterBand {
             stack.covered.iter().map(|word| u64::from(word.count_ones())).sum(),
             stack.claimed.iter().map(|word| u64::from(word.count_ones())).sum(),
         )
+    }
+
+    /// The cells of `cell` x `cell` px (from the tile's corner) holding at
+    /// least `min_free` pixels the density of the top plane (`top`) or of any
+    /// other plane may still take, as boxes [r0, r1, c0, c1] (tile rows and
+    /// columns) - a cell row's kept cells in runs, a run alike in the next
+    /// cell row joined; past FREE_CELL_BOXES boxes, a cell row's kept cells
+    /// in one - and the free pixels of the kept cells.
+    fn free_cells(&self, top: bool, cell: usize, min_free: u32) -> (Vec<[usize; 4]>, u64) {
+        let (tile_width, tile_rows) = (self.tile_width() as usize, (self.row1 - self.row0) as usize);
+        let Some(stack) = self.stack.as_ref() else {
+            return (Vec::new(), 0);
+        };
+        let cell = cell.max(1);
+        let words = stack.words;
+        let inside_last = if tile_width % 64 != 0 { (1u64 << (tile_width % 64)) - 1 } else { !0u64 };
+        let (nx, ny) = (tile_width.div_ceil(cell), tile_rows.div_ceil(cell));
+        let mut counts = vec![0u32; nx * ny];
+        for row in 0..tile_rows {
+            let line = &mut counts[(row / cell) * nx..(row / cell + 1) * nx];
+            for word in 0..words {
+                let inside = if word == words - 1 { inside_last } else { !0u64 };
+                let mut free = !self.taken_word(top, row * words + word) & inside;
+                while free != 0 {
+                    let cx = (word * 64 + free.trailing_zeros() as usize) / cell;
+                    let end = ((cx + 1) * cell).min(word * 64 + 64) - word * 64;
+                    let mask = if end >= 64 { !0u64 } else { (1u64 << end) - 1 };
+                    line[cx] += (free & mask).count_ones();
+                    free &= !mask;
+                }
+            }
+        }
+        let (mut boxes, mut open, mut kept) = (Vec::new(), Vec::<[usize; 4]>::new(), 0u64);
+        for cy in 0..ny {
+            let (r0, r1) = (cy * cell, ((cy + 1) * cell).min(tile_rows));
+            let mut next = Vec::new();
+            let mut cx = 0;
+            while cx < nx {
+                if counts[cy * nx + cx] < min_free.max(1) {
+                    cx += 1;
+                    continue;
+                }
+                let start = cx;
+                while cx < nx && counts[cy * nx + cx] >= min_free.max(1) {
+                    kept += u64::from(counts[cy * nx + cx]);
+                    cx += 1;
+                }
+                let (c0, c1) = (start * cell, (cx * cell).min(tile_width));
+                match open.iter().position(|b| b[2] == c0 && b[3] == c1) {
+                    Some(at) => {
+                        let mut joined = open.swap_remove(at);
+                        joined[1] = r1;
+                        next.push(joined);
+                    }
+                    None => next.push([r0, r1, c0, c1]),
+                }
+            }
+            boxes.append(&mut open);
+            open = next;
+        }
+        boxes.append(&mut open);
+        if boxes.len() > FREE_CELL_BOXES {
+            // a cell row's kept cells in one box
+            let mut rows: Vec<[usize; 4]> = Vec::new();
+            for b in &boxes {
+                for cy in b[0] / cell..b[1].div_ceil(cell) {
+                    let (r0, r1) = (cy * cell, ((cy + 1) * cell).min(tile_rows));
+                    match rows.iter_mut().find(|row| row[0] == r0) {
+                        Some(row) => {
+                            row[2] = row[2].min(b[2]);
+                            row[3] = row[3].max(b[3]);
+                        }
+                        None => rows.push([r0, r1, b[2], b[3]]),
+                    }
+                }
+            }
+            boxes = rows;
+        }
+        (boxes, kept)
     }
 
     /// The bounding box [r0, r1, c0, c1] (tile rows and columns) of the
@@ -3889,6 +3971,32 @@ impl BlockDemand<'_> {
             }
         }
         regions
+    }
+
+    /// The world regions of eligible_regions by cells (RasterBand::
+    /// free_cells): per tile the boxes of its `cell` px cells holding at least
+    /// `min_free` pixels the density may still take, one pixel and the stroke
+    /// margin wider; and those cells' free pixels.
+    pub fn eligible_cells(&self, top: bool, cell: usize, min_free: u32) -> (Vec<BBox>, u64) {
+        let (mut regions, mut free) = (Vec::new(), 0u64);
+        for tile in self.tiles {
+            let (boxes, kept) = tile.band.free_cells(top, cell, min_free);
+            free += kept;
+            let (col0, row0) = (tile.band.col0, tile.band.row0);
+            for [r0, r1, c0, c1] in boxes {
+                if let Ok(view) = tile_world_view(
+                    self.request,
+                    col0 + c0 as u32,
+                    col0 + c1 as u32,
+                    row0 + r0 as u32,
+                    row0 + r1 as u32,
+                    self.stroke_pixels.saturating_add(1),
+                ) {
+                    regions.push(view);
+                }
+            }
+        }
+        (regions, free)
     }
 
     /// The box can reach a pixel of the frame at all.

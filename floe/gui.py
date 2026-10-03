@@ -1085,14 +1085,18 @@ def perf_status(res, depth_note=""):
                 if p2.get("map_updates"):
                     by += "; hash map %s" % fmt_count(p2["map_updates"])
                 plan += (" (probe %d ms x%d, fit %d ms x%d"
-                         " passes on %d threads, %d regions,"
+                         " passes on %d threads, %d regions%s,"
                          " nodes %s, page nodes %s, pages %s,"
                          " reads %s, cell dots %s%s)") % (
                     round(p2["probe_us"] / 1000),
                     p2["probes"],
                     round(p2["fit_us"] / 1000), p2["passes"],
                     max(1, p2.get("threads", 1)),
-                    p2["regions"], fmt_count(p2["nodes"]),
+                    # the free pixels of the cells planned (2026-10-03)
+                    p2["regions"], " (free top %s, others %s px)" % (
+                        fmt_count(p2["free_top"]), fmt_count(p2["free_others"]))
+                    if p2.get("free_top") or p2.get("free_others") else "",
+                    fmt_count(p2["nodes"]),
                     fmt_count(p2["page_nodes"]),
                     fmt_count(p2["page_candidates"]),
                     fmt_count(p2.get("reads", 0)),

@@ -758,6 +758,73 @@ def dense_lists_checks(temp):
             w.stop()
 
 
+def cells_layout(path):
+    """Pass 2's space by cells: LOW's 7.7 um boxes on an 8 um pitch over x
+    0-32 um (3 px gaps: a 32 px cell a gap crosses has 96 px free, under an
+    eighth), the right 8 um open; a 0.1 um VIA on MID every 0.5 um over the
+    view (an array, its dots); TOP's 0.1 um specks every 2 um (the top
+    plane's dots, over LOW too)."""
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    low = ly.layer(*LOW)
+    for i in range(4):
+        for j in range(3):
+            top.shapes(low).insert(kdb.DBox(i * 8.0, j * 8.0, i * 8.0 + 7.7, min(20.0, j * 8.0 + 7.7)))
+    via = ly.create_cell('VIA')
+    via.shapes(ly.layer(*MID)).insert(kdb.DBox(0, 0, 0.1, 0.1))
+    top.insert(kdb.DCellInstArray(via.cell_index(), kdb.DTrans(kdb.DVector(0.2, 0.2)), kdb.DVector(0.5, 0), kdb.DVector(0, 0.5), 80, 40))
+    specks = ly.layer(*TOP)
+    for i in range(20):
+        for j in range(10):
+            top.shapes(specks).insert(kdb.DBox(1.0 + i * 2.0, 1.0 + j * 2.0, 1.1 + i * 2.0, 1.1 + j * 2.0))
+    ly.write(str(path))
+
+
+def cells_checks(temp):
+    """Pass 2 plans the space by cells (a reviewer, 2026-10-03: per tile the
+    bounding box of its free pixels was nearly the tile when 1 % of it was
+    free, and the joint plan was decided by those boxes' area - an all-layer
+    fit view at full depth walked every layer over the whole frame). LOW's
+    boxes cover x 0-32 um but for 3 px gaps, MID's VIAs are dots over the
+    view, TOP's specks the top plane's: the tile boxes
+    (FLOE_RUST_DENSITY_FREE_CELLS=off) span the frame and plan both sides
+    jointly, one pass; by cells (the default) the sides plan apart, the
+    others' over cells with an eighth of their pixels free - a cell a gap
+    crosses alone is left to the originals, its MID dots out - with fewer
+    items, and the frame is the joint plan's but in the gaps; every cell
+    with a free pixel (FLOE_RUST_DENSITY_OTHERS_MIN=0) draws it whole."""
+    src = Path(temp) / 'cells.oas'
+    cells_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    workers = {'cells': worker(src, env), 'tiles': worker(src, dict(env, FLOE_RUST_DENSITY_FREE_CELLS='off')),
+               'any': worker(src, dict(env, FLOE_RUST_DENSITY_OTHERS_MIN='0'))}
+    try:
+        layers = (LOW, MID, TOP)
+        frames = {name: frame(w, 1, layers) for name, w in workers.items()}
+        (cells, cells_res), (tiles, tiles_res), (any_free, _) = frames['cells'], frames['tiles'], frames['any']
+        differ = [(c, r) for r in range(H) for c in range(W) if px(cells, c, r) != px(tiles, c, r)]
+        # LOW's gaps (a pixel either side) left of 32 um: 77-80 px of every 80
+        gaps = {(c, r) for r in range(H) for c in range(320) if c % 80 >= 76 or (H - 1 - r) % 80 >= 76}
+        assert differ and set(differ) <= gaps, 'by cells the frame differs off the gaps: %d px, %d in them' % (len(differ), len(set(differ) & gaps))
+        lower = (cells_res['density_stack']['lower'], tiles_res['density_stack']['lower'])
+        assert lower[0] < lower[1] and cells_res['density_stack']['top'] == tiles_res['density_stack']['top'], (cells_res['density_stack'], tiles_res['density_stack'])
+        assert any_free == tiles, 'every free cell draws otherwise than the tile boxes in %d px' % sum(
+            1 for i in range(0, len(tiles), 4) if any_free[i:i + 4] != tiles[i:i + 4])
+        p_cells, p_tiles = cells_res['density_plan2'], tiles_res['density_plan2']
+        assert (p_cells['passes'], p_tiles['passes']) == (2, 1) and p_cells['items'] < p_tiles['items'], (p_cells, p_tiles)
+        print('density stack: pass 2 by cells - the sides apart (the tile boxes joint), LOW\'s gaps\' lone cells left to the originals: '
+              '%d px differ from the tile boxes, all in the gaps, the lower dots %d px against %d; every free cell as the tile boxes; '
+              'items %d against %d' % (len(differ), lower[0], lower[1], p_cells['items'], p_tiles['items']))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def own_layout(path):
     """A TOP whose own shapes are 60,000 boxes of 0.05-0.3 um at random over
     300 x 300 um - under a pixel at 1000 px; of 62,500 sizes, so the writer
@@ -905,7 +972,10 @@ def ladder_checks(temp):
         plans = {name: res['density_plan2'] for name, (_, res) in frames.items()}
         lit = {name: res['density_stack']['lit'] for name, (_, res) in frames.items()}
         one, two, ladder = plans['one'], plans['two'], plans['ladder']
-        assert (one['passes'], one['thinned'], two['passes'], two['threads'], two['thinned']) == (1, 1, 1, 2, 1), plans
+        # one pass a side: by cells of the free space the top plane's layer
+        # and the other plane's plan apart (FLOE_RUST_DENSITY_FREE_CELLS,
+        # 2026-10-03), each fitted once
+        assert (one['passes'], one['thinned'], two['passes'], two['threads'], two['thinned']) == (2, 1, 2, 2, 1), plans
         assert ladder['passes'] > 1 and ladder['items'] == one['items'] > 0, plans
         for name in ('two', 'ladder'):
             assert frames[name][0] == frames['one'][0], '%s draws otherwise than one thread in %d px' % (
@@ -1356,6 +1426,7 @@ def main():
         held_checks(temp)
         lists_checks(temp)
         dense_lists_checks(temp)
+        cells_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

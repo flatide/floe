@@ -380,6 +380,18 @@ their blocks run by run (`HierOpts::dot_list_fast`;
 count toward a list's SUB_CUT_BOX_ARRAY_MAX. `density_plan2` ends with the
 chunks passed over and their members, and the chunks sampled and theirs
 (29 values).
+Since 0.12.281 a whole list whose blocks are all full is passed over too
+(`blocks_full`, the grid's 8 x 8 squares of full whole blocks), and pass 2's
+regions are cells of the free space rather than a tile's bounding box of it
+(a reviewer, 2026-10-03: a tile 1 % free spanned the tile, and the joint plan
+was decided by those boxes' area): 32 px cells
+(`FLOE_RUST_DENSITY_FREE_CELL_PX`, diagnostic), the top plane's where any
+pixel is free, the others' where an eighth is (`FLOE_RUST_DENSITY_OTHERS_MIN`,
+diagnostic; fewer: the originals show the cell), the two sides planned apart -
+no joint plan of every layer over the whole top space.
+`FLOE_RUST_DENSITY_FREE_CELLS=off` is the kill switch (the tile boxes, the
+joint plan by area). `density_plan2` ends with the free pixels of the cells
+planned, the top plane's and the others' (31 values).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

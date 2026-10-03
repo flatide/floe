@@ -423,6 +423,12 @@ pub fn dot_list_full() -> bool {
 /// and the most squares its Morton run is cut into (chunk_zone)
 pub const CHUNK_FULL_BLOCKS: i64 = 64;
 pub const CHUNK_ZONE_SQUARES: usize = 24;
+/// ... and the fewest members a chunk has for its run to be worked out (a
+/// smaller one is read: its run costs about as much; a list's last chunk)
+pub const CHUNK_ZONE_MIN: u64 = 64;
+/// HierOpts::dot_list_full: the most blocks a whole list's members' centres
+/// may span to be looked up (DotGrid::full: 64 a look where full)
+pub const LIST_FULL_BLOCKS: i64 = 1 << 16;
 
 /// HierOpts::dot_list_sample default: on; FLOE_RUST_DENSITY_LIST_SAMPLE=off
 /// (the kill switch) reads every member of a chunk not passed over.
@@ -577,15 +583,27 @@ struct DotGrid {
     entries: Vec<(u32, u32, BBox, u32)>,
     /// the blocks with an entry
     touched: Vec<u32>,
+    /// HierOpts::dot_list_full: the blocks at their cap a box holds whole
+    /// (dot_block_whole; every one without HierOpts::dot_boxes) in each square
+    /// of DOT_FULL_SIDE x DOT_FULL_SIDE blocks from the grid's corner, by
+    /// layer (Hier::put_block)
+    full: FxMap<(i64, i64, u32), u32>,
 }
 
+/// DotGrid::full: the side of its squares, blocks
+const DOT_FULL_SIDE: i64 = 8;
+/// DotGrid::put: beyond the grid, put, put and the block at its cap
+const GRID_BEYOND: u8 = 0;
+const GRID_PUT: u8 = 1;
+const GRID_FILLED: u8 = 2;
+
 impl DotGrid {
-    /// `dots` (capped at `cap`) and `piece` into block `key`; false beyond
-    /// the grid.
-    fn put(&mut self, key: (i64, i64, u32), dots: u32, piece: &BBox, cap: u32) -> bool {
+    /// `dots` (capped at `cap`) and `piece` into block `key`: GRID_BEYOND
+    /// beyond the grid, GRID_FILLED when the block reached its cap with them.
+    fn put(&mut self, key: (i64, i64, u32), dots: u32, piece: &BBox, cap: u32) -> u8 {
         let (bx, by) = (key.0.wrapping_sub(self.bx0), key.1.wrapping_sub(self.by0));
         if !(0..self.nx).contains(&bx) || !(0..self.ny).contains(&by) {
-            return false;
+            return GRID_BEYOND;
         }
         let at = (bx * self.ny + by) as usize;
         let (mut before, mut entry) = (DOT_GRID_NONE, self.head[at]);
@@ -595,9 +613,10 @@ impl DotGrid {
         }
         if entry != DOT_GRID_NONE && self.entries[entry as usize].0 == key.2 {
             let e = &mut self.entries[entry as usize];
+            let was = e.1;
             e.1 = (e.1 + dots).min(cap);
             e.2.grow(piece);
-            return true;
+            return if was < cap && e.1 >= cap { GRID_FILLED } else { GRID_PUT };
         }
         let new = self.entries.len() as u32;
         let mut union = BBox::EMPTY;
@@ -611,7 +630,11 @@ impl DotGrid {
         } else {
             self.entries[before as usize].3 = new;
         }
-        true
+        if dots >= cap {
+            GRID_FILLED
+        } else {
+            GRID_PUT
+        }
     }
 
     /// The count of block `key` (0: none yet); None beyond the grid.
@@ -646,6 +669,7 @@ impl DotGrid {
         }
         self.touched.clear();
         self.entries.clear();
+        self.full.clear();
     }
 }
 
@@ -2386,6 +2410,9 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         cell_view: BBox::EMPTY,
         cell_rbbox: BBox::EMPTY,
         zone: Vec::new(),
+        full_witness: std::cell::Cell::new(None),
+        cell_boxes: Vec::new(),
+        square_wholes: std::cell::RefCell::new(FxMap::default()),
         grid_on: opts.dot_grid,
         dot_boxes: opts.dot_boxes,
         grid: DotGrid::default(),
@@ -2797,6 +2824,12 @@ struct Hier<'a> {
     cell_rbbox: BBox,
     /// chunk_zone: the squares a point-list chunk's Morton run covers
     zone: Vec<BBox>,
+    /// blocks_full: the block it last found short of its cap (whole), looked
+    /// at first; the boxes of the cell being walked, and the whole blocks of
+    /// its grid's squares (square_whole) - cleared with the grid
+    full_witness: std::cell::Cell<Option<(i64, i64, u32)>>,
+    cell_boxes: Vec<BBox>,
+    square_wholes: std::cell::RefCell<FxMap<(i64, i64), u32>>,
     /// HierOpts::dot_page_occ, and a spread page's blocks being summed (the
     /// share of its cells in each, the union of their parts)
     page_occ: bool,
@@ -3811,8 +3844,19 @@ impl<'a> Hier<'a> {
     /// `dots` and `piece` into the block `key`: the cell's grid's
     /// (HierOpts::dot_grid), else the hash map's.
     fn put_block(&mut self, key: (i64, i64, u32), dots: u32, piece: &BBox) {
-        if self.grid.put(key, dots, piece, self.block_cap) {
-            return;
+        match self.grid.put(key, dots, piece, self.block_cap) {
+            GRID_BEYOND => {}
+            GRID_FILLED => {
+                // HierOpts::dot_list_full: a block a box holds whole, counted
+                // full in its square
+                let block = self.block_px / self.px_per_dbu;
+                if self.list_full && (!self.dot_boxes || dot_block_whole(key.0, key.1, block, &self.cell_boxes, &self.cell_rbbox)) {
+                    let (sx, sy) = ((key.0 - self.grid.bx0) / DOT_FULL_SIDE, (key.1 - self.grid.by0) / DOT_FULL_SIDE);
+                    *self.grid.full.entry((sx, sy, key.2)).or_insert(0) += 1;
+                }
+                return;
+            }
+            _ => return,
         }
         self.st.dot_by[8] += 1;
         let entry = self.dot_blocks.entry(key).or_insert((0, BBox::EMPTY));
@@ -3909,11 +3953,9 @@ impl<'a> Hier<'a> {
     /// none of the cell's `boxes` holds it whole), at most CHUNK_FULL_BLOCKS
     /// blocks.
     fn chunk_full(&self, layer: u32, b0: &BBox, boxes: &[BBox]) -> bool {
-        let ppd = self.px_per_dbu;
-        if !(ppd > 0.0) || b0.is_empty() || self.zone.is_empty() || self.grid.nx == 0 {
+        if !(self.px_per_dbu > 0.0) || b0.is_empty() || self.zone.is_empty() || self.grid.nx == 0 {
             return false;
         }
-        let block = self.block_px / ppd;
         let mut blocks = 0;
         for square in &self.zone {
             let (bx0, bx1, by0, by1) = self.chunk_blocks(b0, square);
@@ -3922,26 +3964,82 @@ impl<'a> Hier<'a> {
                 return false;
             }
         }
-        let cap = self.block_cap;
-        for square in &self.zone {
-            let (bx0, bx1, by0, by1) = self.chunk_blocks(b0, square);
-            for bx in bx0..=bx1 {
-            for by in by0..=by1 {
-                if self.dot_boxes && !dot_block_whole(bx, by, block, boxes, &self.cell_rbbox) {
-                    continue;
-                }
-                let key = (bx, by, layer);
-                let Some(count) = self.grid.count(key) else {
-                    return false;
-                };
-                let run = match &self.dot_run {
-                    Some((at, count, _)) if *at == key => *count,
-                    _ => 0,
-                };
-                if (count as u64).saturating_add(run) < cap as u64 {
-                    return false;
+        self.zone.iter().all(|square| self.blocks_full(layer, self.chunk_blocks(b0, square), boxes))
+    }
+
+    /// HierOpts::dot_list_full: the blocks of the grid's square (sx, sy)
+    /// (DotGrid::full) a box holds whole - every one without
+    /// HierOpts::dot_boxes - worked out once a cell's walk.
+    fn square_whole(&self, sx: i64, sy: i64) -> u32 {
+        if let Some(&n) = self.square_wholes.borrow().get(&(sx, sy)) {
+            return n;
+        }
+        let g = &self.grid;
+        let block = self.block_px / self.px_per_dbu;
+        let (x0, y0) = (g.bx0 + sx * DOT_FULL_SIDE, g.by0 + sy * DOT_FULL_SIDE);
+        let (x1, y1) = ((x0 + DOT_FULL_SIDE).min(g.bx0 + g.nx), (y0 + DOT_FULL_SIDE).min(g.by0 + g.ny));
+        let mut n = 0;
+        for bx in x0..x1 {
+            for by in y0..y1 {
+                if !self.dot_boxes || dot_block_whole(bx, by, block, &self.cell_boxes, &self.cell_rbbox) {
+                    n += 1;
                 }
             }
+        }
+        self.square_wholes.borrow_mut().insert((sx, sy), n);
+        n
+    }
+
+    /// HierOpts::dot_list_full: every block of [bx0, bx1] x [by0, by1] on
+    /// `layer` is at its cap - in the cell's dot grid with the run not yet
+    /// put - or left out (HierOpts::dot_boxes: none of the cell's `boxes`
+    /// holds it whole; a block beyond the grid is none's). A grid's square of
+    /// DOT_FULL_SIDE blocks all full (DotGrid::full) is one look; at most
+    /// LIST_FULL_BLOCKS blocks.
+    fn blocks_full(&self, layer: u32, span: (i64, i64, i64, i64), boxes: &[BBox]) -> bool {
+        let (bx0, bx1, by0, by1) = span;
+        let g = &self.grid;
+        if g.nx == 0 || bx1 < bx0 || by1 < by0 || (bx1 - bx0 + 1).saturating_mul(by1 - by0 + 1) > LIST_FULL_BLOCKS {
+            return false;
+        }
+        // the block last found short, first: still short, the answer
+        let short = |bx: i64, by: i64| {
+            let key = (bx, by, layer);
+            let run = match &self.dot_run {
+                Some((at, count, _)) if *at == key => *count,
+                _ => 0,
+            };
+            (g.count(key).unwrap_or(0) as u64).saturating_add(run) < self.block_cap as u64
+        };
+        if let Some((wx, wy, wl)) = self.full_witness.get() {
+            if wl == layer && (bx0..=bx1).contains(&wx) && (by0..=by1).contains(&wy) && short(wx, wy) {
+                return false;
+            }
+        }
+        // the span within the grid; beyond it no block is whole
+        let (cx0, cx1) = (bx0.max(g.bx0), bx1.min(g.bx0 + g.nx - 1));
+        let (cy0, cy1) = (by0.max(g.by0), by1.min(g.by0 + g.ny - 1));
+        if !self.dot_boxes && (cx0, cx1, cy0, cy1) != (bx0, bx1, by0, by1) {
+            return false;
+        }
+        if cx1 < cx0 || cy1 < cy0 {
+            return true;
+        }
+        let block = self.block_px / self.px_per_dbu;
+        let side = DOT_FULL_SIDE;
+        for sx in (cx0 - g.bx0) / side..=(cx1 - g.bx0) / side {
+            for sy in (cy0 - g.by0) / side..=(cy1 - g.by0) / side {
+                if g.full.get(&(sx, sy, layer)).is_some_and(|&n| n >= self.square_whole(sx, sy)) {
+                    continue;
+                }
+                for bx in cx0.max(g.bx0 + sx * side)..=cx1.min(g.bx0 + sx * side + side - 1) {
+                    for by in cy0.max(g.by0 + sy * side)..=cy1.min(g.by0 + sy * side + side - 1) {
+                        if short(bx, by) && !(self.dot_boxes && !dot_block_whole(bx, by, block, boxes, &self.cell_rbbox)) {
+                            self.full_witness.set(Some((bx, by, layer)));
+                            return false;
+                        }
+                    }
+                }
             }
         }
         true
@@ -3998,6 +4096,11 @@ impl<'a> Hier<'a> {
             }
         }
         self.grid.nx = 0;
+        self.grid.full.clear();
+        self.full_witness.set(None);
+        self.square_wholes.get_mut().clear();
+        self.cell_boxes.clear();
+        self.cell_boxes.extend_from_slice(boxes);
         self.grid.ny = 0;
         let ppd = self.px_per_dbu;
         if !self.grid_on || !(ppd > 0.0) {
@@ -4627,6 +4730,20 @@ impl<'a> Hier<'a> {
             let Some(pr) = self.v.pts_ref(pli) else {
                 return;
             };
+            // HierOpts::dot_list_full: every block the list's members' centres
+            // may fall in full - the list passed over, its chunks counted
+            if self.dots && self.grid_on && self.list_full && self.grid.nx > 0 && self.px_per_dbu > 0.0 && !b0.is_empty() {
+                let (mw, mh) = ((b0.x1 - b0.x0).max(0) as f64 * self.px_per_dbu, (b0.y1 - b0.y0).max(0) as f64 * self.px_per_dbu);
+                if let (Some(rank), true) = (found.top(self.set_words), mw <= self.block_px && mh <= self.block_px) {
+                    let layer = self.vis_layers[rank];
+                    let span = self.chunk_blocks(&b0, &pr.extent());
+                    if self.blocks_full(layer, span, boxes) {
+                        self.st.dot_full_chunks += pr.n_chunks as u64;
+                        self.st.dot_full_members += pr.count as u64;
+                        return;
+                    }
+                }
+            }
             let regions: Vec<BBox> = if self.dots && self.dot_boxes {
                 boxes.iter().map(|b| minkowski_neg(b, &b0)).filter(|r| !r.is_empty()).collect()
             } else {
@@ -4673,7 +4790,7 @@ impl<'a> Hier<'a> {
                 if let Some(layer) = top {
                     // where the chunk's members are (HierOpts::dot_list_full and
                     // dot_list_sample), from its first and last
-                    area = if stride == 1 && fast.is_some() && (self.list_full || self.list_sample) { self.chunk_zone(&pr, lo, hi) } else { 0.0 };
+                    area = if stride == 1 && fast.is_some() && held >= CHUNK_ZONE_MIN && (self.list_full || self.list_sample) { self.chunk_zone(&pr, lo, hi) } else { 0.0 };
                     // HierOpts::dot_list_full: every block its members' centres
                     // may fall in at its cap - whichever of them are in view
                     if self.list_full && area > 0.0 && self.chunk_full(layer, &b0, boxes) {
@@ -7852,6 +7969,42 @@ mod tests {
     }
 
     #[test]
+    fn a_small_point_list_in_full_blocks_is_passed_over_whole() {
+        // HierOpts::dot_list_full at a list (user 2026-10-03, the field chip:
+        // chunks of about ten members passed over - its lists are small, a
+        // standard cell's places): a list of 4,096 LEAFs on a 20 dbu grid
+        // fills the blocks of its 1,280 dbu square (about 400 a block of 400
+        // dbu), then 7 lists of 8 at random inside it are passed over whole,
+        // read none - the same items as every member read.
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |n: i64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % n as u64) as i64
+        };
+        let mut places: Vec<(usize, i64, i64, u8, bool, Rep)> =
+            vec![(0, 0, 0, 0, false, Rep::Pts((0..4096).map(|i| (2_000 + (i % 64) * 20, 3_000 + (i / 64) * 20)).collect::<Vec<_>>().into()))];
+        for _ in 0..7 {
+            places.push((0, 0, 0, 0, false, Rep::Pts((0..8).map(|_| (2_000 + next(1_260), 3_000 + next(1_260))).collect::<Vec<_>>().into())));
+        }
+        let chip = fixture(&[FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] }, FCell { name: "TOP", pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)], places }], 1);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = false;
+        let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, k_boxes: 4, dot_list_sample: false, ..HierOpts::default() };
+        let (every, full) = (plan_hier(&chip, &req, &HierOpts { dot_list_full: false, ..base.clone() }), plan_hier(&chip, &req, &HierOpts { dot_list_full: true, ..base }));
+        let items = |plan: &HierPlan| plan.wcells.iter().map(|w| (w.key, w.washes.clone(), w.dot_counts.clone())).collect::<Vec<_>>();
+        assert_eq!(items(&every), items(&full));
+        assert_eq!(every.stats.dot_by[3] + every.stats.dot_by[5], 4096 + 7 * 8);
+        // the small lists all passed over, a chunk each (under CHUNK_ZONE_MIN:
+        // by the list), and some of the large one's chunks of 256 by their run
+        let (chunks, held) = (full.stats.dot_full_chunks, full.stats.dot_full_members);
+        assert!(chunks >= 7 && held % 256 == 7 * 8 && (chunks - 7) * 256 == held - 7 * 8, "{chunks} {held}");
+        assert_eq!(full.stats.dot_by[3] + full.stats.dot_by[5] + full.stats.dot_full_members, 4096 + 7 * 8);
+    }
+
+    #[test]
     fn a_point_list_is_walked_by_each_box_and_a_block_no_box_holds_whole_is_left_out() {
         // HierOpts::dot_boxes (user 2026-10-02, field: `list members 86.6M`):
         // renderd deals pass 2's regions round robin to threads, so a thread's
@@ -8270,7 +8423,7 @@ mod tests {
             let dots = ((rng >> 20) % 3) as u32 + 1;
             let piece = bx(key.0 * 10 + (rng % 7) as i64, key.1 * 10, key.0 * 10 + 9, key.1 * 10 + (rng % 5) as i64);
             let inside = (-3..4).contains(&key.0) && (5..9).contains(&key.1);
-            assert_eq!(grid.put(key, dots, &piece, 8), inside);
+            assert_eq!(grid.put(key, dots, &piece, 8) != GRID_BEYOND, inside);
             if !inside {
                 let e = beyond.entry(key).or_insert((0, BBox::EMPTY));
                 e.0 = (e.0 + dots).min(8);

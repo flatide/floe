@@ -159,7 +159,10 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  # the point-list chunks passed over unread, their blocks
                  # full, and their members; the chunks read at a step, and
                  # their members (2026-10-03)
-                 "full_chunks", "full_members", "sampled_chunks", "sampled_members")
+                 "full_chunks", "full_members", "sampled_chunks", "sampled_members",
+                 # the free pixels of the cells pass 2 planned, the top
+                 # plane's and the others' (2026-10-03)
+                 "free_top", "free_others")
 
 
 def _wire_counts(value, names):

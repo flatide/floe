@@ -1186,7 +1186,7 @@ struct FramePixels {
     /// (design.ovb, HierOpts::dot_page_occ, 2026-10-02); then the pages under
     /// the floor decoded, their occupancy cells too coarse on screen
     /// (HierOpts::dot_occ_decode, 2026-10-03)
-    density_plan2: Option<[u64; 29]>,
+    density_plan2: Option<[u64; 31]>,
 }
 
 fn render_worker(
@@ -2453,6 +2453,31 @@ fn density_stack_enabled() -> bool {
 /// every record under the cut of pass 1's pages drawn, the small-shape pages
 /// as dots far denser than their shapes: x16 lit 0.26 against 0.058 drawn
 /// cut-free, 0.080 under the fit). FLOE_RUST_DENSITY_ONE_WALK=on, diagnostic.
+/// Pass 2's regions by cells of the free space (2026-10-03, a reviewer: "per
+/// tile the bounding box of its free pixels is nearly the tile when 1 % of
+/// it is free, and the joint plan was decided by those boxes' area"): (cell
+/// px, the others' least free share of a cell). FLOE_RUST_DENSITY_FREE_CELLS=
+/// off is the kill switch (a tile's bounding box, by area);
+/// FLOE_RUST_DENSITY_FREE_CELL_PX and FLOE_RUST_DENSITY_OTHERS_MIN are
+/// diagnostics.
+fn density_free_cells() -> Option<(usize, f64)> {
+    static CELLS: std::sync::OnceLock<Option<(usize, f64)>> = std::sync::OnceLock::new();
+    *CELLS.get_or_init(|| {
+        if std::env::var("FLOE_RUST_DENSITY_FREE_CELLS").as_deref() == Ok("off") {
+            return None;
+        }
+        let cell = std::env::var("FLOE_RUST_DENSITY_FREE_CELL_PX").ok().and_then(|v| v.trim().parse::<usize>().ok()).filter(|v| (4..=1024).contains(v)).unwrap_or(DENSITY_FREE_CELL_PX);
+        let min = std::env::var("FLOE_RUST_DENSITY_OTHERS_MIN").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| (0.0..=1.0).contains(v)).unwrap_or(DENSITY_OTHERS_MIN);
+        Some((cell, min))
+    })
+}
+
+/// density_free_cells: the cell, px, and the least share of a cell's pixels
+/// free for the other planes' density to plan it (fewer: the cell is shown
+/// enough by the originals)
+const DENSITY_FREE_CELL_PX: usize = 32;
+const DENSITY_OTHERS_MIN: f64 = 0.125;
+
 /// The threads pass 2 of the sub-cut dots plans its regions on (2026-10-01,
 /// field: one plan of a 5.2 mm view walked 4.0 M nodes in 3.5 s on one core
 /// while the raster workers waited): the regions dealt round robin to that
@@ -3321,7 +3346,7 @@ fn run_render(
         let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 29]> = None;
+        let mut density_plan2: Option<[u64; 31]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4067,7 +4092,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 29]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 31]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4094,7 +4119,7 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 29];
+    let mut plan2 = [0u64; 31];
     plan2[22] = reserve_bytes >> 20;
     // pass 1's pages: pass 2 holds them already, so they cost its reserve
     // nothing (floe_vfs HierOpts::free_pages; user 2026-10-01: 37 pages of
@@ -4132,9 +4157,33 @@ fn render_density_frame(
                     // under the guard, its passes check per tile
                     check_generation(cancellation, command.generation)?;
                     let regions_started = Instant::now();
-                    let regions_top = demand.eligible_regions(true);
-                    let regions_others = demand.eligible_regions(false);
+                    // by cells (density_free_cells): the top plane's where any
+                    // pixel is free, the others' where enough is to add to; else
+                    // a tile's bounding box of its free pixels, by area
+                    let cells = density_free_cells();
+                    let (regions_top, regions_others, top_free, others_free) = match cells {
+                        Some((cell, others_min)) => {
+                            let (top, top_free) = demand.eligible_cells(true, cell, 1);
+                            let need = ((others_min * (cell * cell) as f64).ceil() as u32).max(1);
+                            let (others, others_free) = demand.eligible_cells(false, cell, need);
+                            (top, others, top_free as f64, others_free as f64)
+                        }
+                        None => {
+                            let (top, others) = (demand.eligible_regions(true), demand.eligible_regions(false));
+                            let (top_area, others_area): (f64, f64) = (
+                                top.iter().map(|b| (b.x1 - b.x0).max(0) as f64 * (b.y1 - b.y0).max(0) as f64).sum(),
+                                others.iter().map(|b| (b.x1 - b.x0).max(0) as f64 * (b.y1 - b.y0).max(0) as f64).sum(),
+                            );
+                            (top, others, top_area, others_area)
+                        }
+                    };
                     times[2] += elapsed_us(regions_started);
+                    if cells.is_some() {
+                        // the free pixels of the cells planned: the top plane's,
+                        // the others'
+                        plan2[29] = top_free as u64;
+                        plan2[30] = others_free as u64;
+                    }
                     // the finer plans: the top plane's layer over its regions,
                     // the other layers over theirs
                     let mut sides: [Option<Arc<FrameScene>>; 2] = [None, None];
@@ -4150,11 +4199,12 @@ fn render_density_frame(
                     // nothing: the two sides plan apart, as without the dots.
                     let dots = density_dots_enabled() && command.cut_px > 0.0;
                     let one_walk = dots && density_one_walk_enabled();
-                    let (top_area, others_area): (f64, f64) = (
-                        regions_top.iter().map(|b| (b.x1 - b.x0).max(0) as f64 * (b.y1 - b.y0).max(0) as f64).sum(),
-                        regions_others.iter().map(|b| (b.x1 - b.x0).max(0) as f64 * (b.y1 - b.y0).max(0) as f64).sum(),
-                    );
-                    let joint = dots && !regions_top.is_empty() && 2.0 * others_area >= top_area;
+                    // by cells (density_free_cells) the sides plan apart: the top
+                    // plane's layer over its cells, the others over theirs - a joint
+                    // plan walked every layer over the whole top space, where the
+                    // originals may have left the others little (a reviewer,
+                    // 2026-10-03: an all-layer fit view at full depth)
+                    let joint = dots && cells.is_none() && !regions_top.is_empty() && 2.0 * others_free >= top_free;
                     let jobs = if joint {
                         vec![(regions_top, styled.layers.iter().map(|layer| layer.layer_idx).collect::<Vec<u32>>())]
                     } else {

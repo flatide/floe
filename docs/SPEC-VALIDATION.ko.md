@@ -177,6 +177,18 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 사다리(`FLOE_RUST_DENSITY_FIT_LADDER=on`)는 6번 걸어 같은 프레임에 이른다.
     - 기본 예산은 그 페이지를 디코드한다.
   - 단위 `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
+  0.12.281(2패스 영역을 빈 칸으로, 위층과 아래층은 따로; 리스트 단위 건너뛰기):
+  - 게이트 `density_stack` `cells_checks`: LOW의 7.7 µm 상자가 x 0~32 µm를 3 px 틈만 남기고 덮는다. MID의 0.1 µm 비아는
+    0.5 µm마다 점이고, TOP의 반점은 위층 점이다.
+    - 타일 bbox(`FLOE_RUST_DENSITY_FREE_CELLS=off`)는 joint로 맞춤 1번이다. 칸 방식은 분리 계획으로 2번이고 항목이 더
+      적다(880 / 3,360).
+    - 틈만 지나는 칸(빈 픽셀 96 px, 1/8 미만)은 하위 밀도를 생략한다. 아래층 점이 더 적고(652 / 721 px) 위층은 같다.
+      다른 픽셀(69)은 모두 틈에 있다.
+    - `FLOE_RUST_DENSITY_OTHERS_MIN=0`은 타일 bbox의 프레임과 바이트까지 같다.
+  - `ladder_checks`: 맞춤은 계획마다 한 번이다(칸 방식은 위층·아래층 두 계획: passes 2).
+  - 단위 `a_small_point_list_in_full_blocks_is_passed_over_whole`.
+  - 어댑터 계약: `density_plan2` 31개 값(…/free_top/free_others). 상태줄 테스트: `24 regions (free top 1.3M, others 210k
+    px)`.
   0.12.280(점 리스트: 꽉 찬 블록의 청크는 건너뛰고, 조밀한 청크는 표본으로):
   - 게이트 `density_stack` `dense_lists_checks`: 비아 셀 두 개의 0.1 µm 비아를 20 µm에 무작위 6만 개씩 둔다(KLayout
     압축, 셀마다 점 리스트).

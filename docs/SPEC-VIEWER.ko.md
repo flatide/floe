@@ -63,7 +63,8 @@
     래스터 벽시계 시간 `pass 2 decode D ms, raster R ms`가 붙는다(사용자 2026-10-03, 449개 레이어 뷰가 35초 이상 걸림).
     0.12.280부터 출처의 `list chunks … of … members` 뒤에, 있으면 `list chunks in full blocks C of M members`(읽지 않고
     건너뛴 청크)와 `list chunks sampled C of M members`(표본으로 읽은 청크)가 붙는다. `list members`는 하나씩 읽은 멤버
-    수다.
+    수다. 0.12.281부터 `N regions` 뒤에, 칸으로 계획했으면 그 칸들의 빈 픽셀 `(free top T, others O px)`가 붙는다(위층,
+    아래층).
   - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
     - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
       붙는다. load의 `[plan+delta+apply]`는 빠진다.
