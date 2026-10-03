@@ -649,9 +649,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # the free pixels of the cells pass 2 planned (2026-10-03): after the
         # regions, in the log line
         res["density_plan2"].update(free_top=1310850, free_others=210000)
+        # zoomed out past the fit view the dots thin (2026-10-04): after the
+        # reserve, in the log line
+        res["density_plan2"].update(dot_gain_milli=640)
         res["density_pages"].update(decoded=206, over_budget=3)
         full, brief = perf_status(res)
-        self.assertIn("[density: dots, lit 620k px, block 4 px, floor 15 px, reserve 896 MB, pass 2 plan", full)
+        self.assertIn("[density: dots, lit 620k px, block 4 px, floor 15 px, reserve 896 MB, dots x0.64, pass 2 plan", full)
         self.assertIn(" passes on 4 threads, 24 regions (free top 1.3M, others 210k px), nodes ", full)
         # the chunks' members right after the chunks (0.12.268 put them last:
         # the field's `list chunks 78, array members 57k of 354 members`)
@@ -1771,6 +1774,13 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             worker._submit_render(dict(job, gen=98, root=17))
             rooted = commands.pop()
             self.assertTrue(rooted.endswith(" root=17"), rooted)
+            # the viewport travels when the frame is not it (a margin: the
+            # dots' fit view is the viewport's, 2026-10-04); not for itself
+            self.assertNotIn(" vw=", commands[0])
+            worker._submit_render(dict(job, gen=99, view=job["bbox"]))
+            self.assertNotIn(" vw=", commands.pop())
+            worker._submit_render(dict(job, gen=100, bg=True, bbox=(-9.5, -3.5, 30.5, 16.5), w=40, h=20, view=job["bbox"]))
+            self.assertTrue(commands.pop().endswith(" bg=on vw=20 vh=10"))
             self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
             # the page hairline policy rides with every frame; a plain
@@ -1851,7 +1861,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "density_dots": "3500/2", "density_floor": "0.250",
                 "density_block": "8",
                 "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2"
-                                 "/30000/20000/5000/34860/40/9000/100/3/7/896/2/1/500/128000/60/15360/40000/7000",
+                                 "/30000/20000/5000/34860/40/9000/100/3/7/896/2/1/500/128000/60/15360/40000/7000/640",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -1941,7 +1951,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "by_list_chunks": 40, "by_chunk_members": 9000, "by_array_members": 100, "by_pages": 3,
                 "map_updates": 7, "reserve_mb": 896, "occ_pages": 2, "occ_decoded": 1,
                 "full_chunks": 500, "full_members": 128000, "sampled_chunks": 60, "sampled_members": 15360,
-                "free_top": 40000, "free_others": 7000})
+                "free_top": 40000, "free_others": 7000, "dot_gain_milli": 640})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)

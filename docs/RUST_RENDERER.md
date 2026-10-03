@@ -407,7 +407,16 @@ dots by a dither of its block and itself - not one dot (user 2026-10-04, the
 routing chip's fit view: 0.02 px VIAs a dot each lit a quarter of the frame
 where their area is 0.03 %; `HierOpts::dot_area_share`,
 `FLOE_RUST_DENSITY_AREA_SHARE=off` is the kill switch); from a pixel up as
-before.
+before. Since 0.12.287 a frame zoomed out past the viewer's fit view of its
+die (the plan's top cell's box, the view root or the layout's top, and the
+viewer's 5 %) thins pass 2's dot items by (the fit's scale / the frame's)^power
+- each keeps floor(count x gain + a dither of its cell and box) dots, none
+dropped - decoded shapes as they are (user 2026-10-04: "draw it sparser the
+more it is zoomed out"; renderd `density_zoom_gain`, `thin_dot_items`;
+`FLOE_RUST_DENSITY_ZOOM_OUT=off` is the kill switch,
+`FLOE_RUST_DENSITY_ZOOM_OUT_POWER` (1) diagnostic). A margin's render command
+carries its viewport, `vw=`/`vh=`, the fit view being the viewport's.
+`density_plan2` ends with the gain in thousandths (32 values).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

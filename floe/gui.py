@@ -1050,6 +1050,10 @@ def perf_status(res, depth_note=""):
         # pass 2's reserve: the fixed one or what pass 1 left (2026-10-02)
         if (res.get("density_plan2") or {}).get("reserve_mb"):
             parts.append("reserve %s MB" % fmt_count(res["density_plan2"]["reserve_mb"]))
+        # zoomed out past the fit view the dots thin (2026-10-04): their gain
+        gain = (res.get("density_plan2") or {}).get("dot_gain_milli")
+        if gain is not None and 0 < gain < 1000:
+            parts.append("dots x%.2f" % (gain / 1000.0))
         us = res.get("density_us") or {}
         if us:
             plan = "pass 2 plan %d ms" % round(

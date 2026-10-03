@@ -1110,6 +1110,12 @@ impl Cache {
         Ok(self.vfs.ovm.cell(cell_id).name)
     }
 
+    /// The recursive box of cell `cell_id` (its shapes and every cell below);
+    /// None out of range.
+    pub fn cell_rbbox(&self, cell_id: u32) -> Option<BBox> {
+        (cell_id < self.vfs.ovm.n_cells).then(|| self.vfs.ovm.cell_rbbox(cell_id))
+    }
+
     pub(crate) fn cell_bbox(&self, cell_id: u32) -> Result<BBox, String> {
         if cell_id >= self.vfs.ovm.n_cells {
             return Err(format!(

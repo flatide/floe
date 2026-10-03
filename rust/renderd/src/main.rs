@@ -478,6 +478,10 @@ struct RenderCommand {
     /// The view root (floe_vfs::ViewReq::root): the plan starts from this
     /// cell in its own coordinates (SPEC-VIEWER §8c). None = the top.
     root: Option<u32>,
+    /// `vw=`/`vh=`: the viewer's viewport, px, when the frame is not it (a
+    /// margin's 2W x 2H): the fit view the dots thin past is the viewport's
+    /// (density_zoom_gain). None: the frame's own size.
+    viewport: Option<(u32, u32)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -603,6 +607,8 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 "out",
                 "thin",
                 "bg",
+                "vw",
+                "vh",
             ]);
             reject_unknown(&fields, &allowed)?;
             let thin_keep = match fields.get("thin").map(|s| s.as_str()) {
@@ -689,6 +695,10 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     background: optional_bool(&fields, "bg")?.unwrap_or(false),
                     thin_keep,
                     root: optional_parse(&fields, "root")?,
+                    viewport: match (optional_parse::<u32>(&fields, "vw")?, optional_parse::<u32>(&fields, "vh")?) {
+                        (Some(vw), Some(vh)) if vw > 0 && vh > 0 => Some((vw, vh)),
+                        _ => None,
+                    },
                 },
             ))))
         }
@@ -1186,7 +1196,7 @@ struct FramePixels {
     /// (design.ovb, HierOpts::dot_page_occ, 2026-10-02); then the pages under
     /// the floor decoded, their occupancy cells too coarse on screen
     /// (HierOpts::dot_occ_decode, 2026-10-03)
-    density_plan2: Option<[u64; 31]>,
+    density_plan2: Option<[u64; 32]>,
 }
 
 fn render_worker(
@@ -2483,6 +2493,98 @@ fn density_top_held() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_TOP_HELD").as_deref() != Ok("off"))
 }
 
+/// The viewer's fit view: the die and this margin (floe gui._fit_spp).
+const VIEWER_FIT_MARGIN: f64 = 1.05;
+
+/// density_zoom_gain's power: FLOE_RUST_DENSITY_ZOOM_OUT=off is the kill
+/// switch (None: no thinning); FLOE_RUST_DENSITY_ZOOM_OUT_POWER, diagnostic,
+/// the power (1 by default, 0..=4).
+fn density_zoom_out() -> Option<f64> {
+    static POWER: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *POWER.get_or_init(|| {
+        if std::env::var("FLOE_RUST_DENSITY_ZOOM_OUT").as_deref() == Ok("off") {
+            return None;
+        }
+        Some(
+            std::env::var("FLOE_RUST_DENSITY_ZOOM_OUT_POWER")
+                .ok()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .filter(|v| (0.0..=4.0).contains(v))
+                .unwrap_or(1.0),
+        )
+    })
+}
+
+/// The sub-cut dots' gain of a frame zoomed out past the viewer's fit view
+/// of its die - the plan's top cell's box, the view root or the layout's top
+/// (gui._die_bbox) - in its viewport (the frame's own size, or a margin's
+/// `vw`/`vh`): (the fit's scale / the frame's)^power, 1 at the fit view and
+/// within it (user 2026-10-04: zooming out, more shapes fall under a pixel
+/// as the die's part of the screen shrinks - "how about drawing it sparser
+/// the more it is zoomed out"; the routing chip at depth 0, two steps out
+/// from fit, its wire pieces all under the 1 px floor at once: dots over the
+/// die where the step before drew lines).
+fn density_zoom_gain(cache: &Cache, command: &RenderCommand, top: u32) -> f64 {
+    let Some(power) = density_zoom_out() else {
+        return 1.0;
+    };
+    let Some(die) = cache.cell_rbbox(top) else {
+        return 1.0;
+    };
+    let [x0, y0, x1, y1] = command.view;
+    let spp = ((x1 - x0) / command.width as f64).max((y1 - y0) / command.height as f64);
+    let (vw, vh) = command.viewport.unwrap_or((command.width, command.height));
+    let fit = ((die.x1 - die.x0).max(0) as f64 / vw as f64).max((die.y1 - die.y0).max(0) as f64 / vh as f64) * VIEWER_FIT_MARGIN;
+    if !(spp > 0.0 && fit > 0.0) || spp <= fit {
+        return 1.0;
+    }
+    (fit / spp).powf(power).clamp(0.0, 1.0)
+}
+
+/// A gain under 1 (density_zoom_gain) on a pass 2 plan's dot items: a
+/// counted one keeps floor(count x gain + its dither) dots - the dither of
+/// its cell, layer and box, the same in every frame and plan - and goes when
+/// none is left; a wash without a count (a page wash) stays.
+fn thin_dot_items(plan: &mut HierPlan, gain: f64) {
+    if !(gain < 1.0) {
+        return;
+    }
+    for cell in &mut plan.wcells {
+        if !cell.dot_counts.iter().any(|&count| count > 0) {
+            continue;
+        }
+        let mut washes = Vec::with_capacity(cell.washes.len());
+        let mut counts = Vec::with_capacity(cell.washes.len());
+        for (at, &(layer, b)) in cell.washes.iter().enumerate() {
+            let count = cell.dot_counts.get(at).copied().unwrap_or(0);
+            if count == 0 {
+                washes.push((layer, b));
+                counts.push(0);
+                continue;
+            }
+            let mut z = (cell.key.0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (cell.key.1 as u64).rotate_left(17)
+                ^ (layer as u64).rotate_left(31)
+                ^ (b.x0 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+                ^ (b.y0 as u64).rotate_left(23)
+                ^ (b.x1 as u64).rotate_left(41)
+                ^ (b.y1 as u64).rotate_left(53);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let dither = (z >> 11) as f64 / (1u64 << 53) as f64;
+            let kept = (count as f64 * gain + dither).floor();
+            if kept < 1.0 {
+                continue;
+            }
+            washes.push((layer, b));
+            counts.push(kept.min(u16::MAX as f64) as u16);
+        }
+        cell.washes = washes;
+        cell.dot_counts = counts;
+    }
+}
+
 /// Pass 2's regions by cells of the free space (2026-10-03, a reviewer: "per
 /// tile the bounding box of its free pixels is nearly the tile when 1 % of
 /// it is free, and the joint plan was decided by those boxes' area"): (cell
@@ -3376,7 +3478,7 @@ fn run_render(
         let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 31]> = None;
+        let mut density_plan2: Option<[u64; 32]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4123,7 +4225,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 31]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 32]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4139,6 +4241,8 @@ fn render_density_frame(
     // pass 2's reserve: the fixed one or what pass 1 left (density_frame_reserve)
     let reserve_bytes = density_frame_reserve(budget_bytes, *generation_bytes);
     let top_layer = styled.layers.last().map(|layer| layer.layer_idx);
+    // zoomed out past the viewer's fit view, the dots thin (density_zoom_gain)
+    let dot_gain = density_zoom_gain(cache, command, plan.top.0);
     let other_layers: Vec<u32> = styled.layers.iter().take(styled.layers.len().saturating_sub(1)).map(|layer| layer.layer_idx).collect();
     // pages planned/in hand/decoded/over the budget, dot items/over the cap
     let mut counts = [0u64; 6];
@@ -4150,8 +4254,10 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 31];
+    let mut plan2 = [0u64; 32];
     plan2[22] = reserve_bytes >> 20;
+    // the dots' gain past the fit view, in thousandths (density_zoom_gain)
+    plan2[31] = (dot_gain * 1000.0).round() as u64;
     // pass 1's pages: pass 2 holds them already, so they cost its reserve
     // nothing (floe_vfs HierOpts::free_pages; user 2026-10-01: 37 pages of
     // pass 1's, 201 MB by estimate, failed the 0 px floor's probe of a 128 MB
@@ -4457,6 +4563,7 @@ fn render_density_frame(
                         let side_floor = planned_fine.stats.shape_cut as f64 * px_per_dbu;
                         floor_px = Some(floor_px.map_or(side_floor, |known: f64| known.max(side_floor)));
                         let mut planned_fine = planned_fine;
+                        thin_dot_items(&mut planned_fine, dot_gain);
                         if density_under_floor_drawn(cache) {
                             // a decoded page's shapes under the floor are drawn,
                             // by area, as the spread pages under it are

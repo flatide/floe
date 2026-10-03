@@ -972,6 +972,89 @@ def shift_checks(temp):
             w.stop()
 
 
+def zoom_layout(path):
+    """A 40 x 20 um die of 3,000 0.1 um VIAs on MID at random (a point list:
+    the dots under the cut), a speck of TOP (the top plane)."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    via = ly.create_cell('VIA')
+    via.shapes(ly.layer(*MID)).insert(kdb.DBox(0, 0, 0.1, 0.1))
+    rnd = random.Random(21)
+    for _ in range(3000):
+        top.insert(kdb.DCellInstArray(via.cell_index(), kdb.DTrans(kdb.DVector(rnd.randrange(39_800) / 1000.0, rnd.randrange(19_800) / 1000.0))))
+    top.shapes(ly.layer(*TOP)).insert(kdb.DBox(0.0, 0.0, 0.1, 0.1))
+    options = kdb.SaveLayoutOptions()
+    options.format = 'OASIS'
+    options.oasis_compression_level = 10
+    ly.write(str(path), options)
+
+
+def zoom_out_checks(temp):
+    """Zoomed out past the viewer's fit view of the die, the dots thin by the
+    fit's scale over the frame's (user 2026-10-04: "how about drawing it
+    sparser the more it is zoomed out"; renderd density_zoom_gain): at the
+    fit view a gain of 1; two times out (0.2 um a pixel) the fit's scale -
+    the die over the viewport, and 5 % - over the frame's, about 0.52, the
+    dots that many of the kill switch's (FLOE_RUST_DENSITY_ZOOM_OUT=off);
+    the margin around that view (the viewport's `vw`/`vh` sent) draws the
+    view as the viewport frame did. The other checks run with the thinning
+    off (main): their VIEW is wider than their dies."""
+    src = Path(temp) / 'zoom.oas'
+    zoom_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_ZOOM_OUT='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_ZOOM_OUT='off'))}
+    try:
+        dbu = float(workers['on'].cache.meta['dbu'])
+        die = [v * dbu for v in workers['on'].cache.meta['bbox']]
+        cx, cy = (die[0] + die[2]) / 2, (die[1] + die[3]) / 2
+        layers = [MID, TOP]
+
+        def view(w, gen, spp, margin=False):
+            box = (cx - W * spp / 2, cy - H * spp / 2, cx + W * spp / 2, cy + H * spp / 2)
+            job = {'kind': 'render', 'gen': gen, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': None, 'w': W, 'h': H,
+                   'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': layers,
+                   'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False}
+            if margin:
+                bw, bh = box[2] - box[0], box[3] - box[1]
+                big = (box[0] - bw / 2, box[1] - bh / 2, box[2] + bw / 2, box[3] + bh / 2)
+                job.update(bg=True, bbox=tuple(v / dbu for v in big), view=tuple(v / dbu for v in box), w=2 * W, h=2 * H)
+            w.submit(job)
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('zoom frame timeout')
+
+        fit = max((die[2] - die[0]) / W, (die[3] - die[1]) / H) * 1.05
+        _, at_fit = view(workers['on'], 1, fit)
+        assert at_fit['density_plan2']['dot_gain_milli'] == 1000, at_fit['density_plan2']
+        spp = 0.2
+        out, out_res = view(workers['on'], 2, spp)
+        _, off_res = view(workers['off'], 2, spp)
+        gain = out_res['density_plan2']['dot_gain_milli']
+        assert gain == round(1000 * fit / spp) and off_res['density_plan2']['dot_gain_milli'] == 1000, (out_res['density_plan2'], fit)
+        dots, all_dots = out_res['density_stack']['lit'], off_res['density_stack']['lit']
+        assert all_dots > 0 and abs(dots - all_dots * gain / 1000) <= max(3, 0.12 * all_dots), (dots, all_dots, gain)
+        margin, margin_res = view(workers['on'], 3, spp, margin=True)
+        assert margin_res['density_plan2']['dot_gain_milli'] == gain, margin_res['density_plan2']
+        centre = b''.join(margin[((H // 2 + r) * 2 * W + W // 2) * 4:((H // 2 + r) * 2 * W + W // 2 + W) * 4] for r in range(H))
+        assert centre == out, 'the zoomed-out margin draws the view otherwise in %d px' % sum(
+            1 for i in range(0, len(out), 4) if centre[i:i + 4] != out[i:i + 4])
+        print('density stack: zoomed out past the fit view the dots thin - gain 1 at the fit, %.3f two times out: %d px of dots against '
+              '%d (the switch off); the margin (vw/vh) draws the view alike' % (gain / 1000, dots, all_dots))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def own_layout(path):
     """A TOP whose own shapes are 60,000 boxes of 0.05-0.3 um at random over
     300 x 300 um - under a pixel at 1000 px; of 62,500 sizes, so the writer
@@ -1426,14 +1509,18 @@ def zoom_during_pass2(w, gen_a, gen_b, visible):
 
 
 def worker(src, env):
+    saved = {name: os.environ.get(name) for name in env}
     for name, value in env.items():
         os.environ[name] = value
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
     w.start()
-    for name in env:
-        os.environ.pop(name, None)
+    for name, value in saved.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
     return w
 
 
@@ -1485,6 +1572,10 @@ def main():
     os.environ['FLOE_RUST_RETAINED_MB'] = '0'
     for name in ('FLOE_RUST_DENSITY_STACK', 'FLOE_RUST_DENSITY_DOTS', 'FLOE_RUST_AREA_TRUE', 'FLOE_RUST_WRITE_ONCE'):
         os.environ.pop(name, None)
+    # the fixed VIEW (W x H at PX_UM) is wider than most of these dies: past
+    # their fit views the dots would thin (density_zoom_gain); the checks
+    # count dots as drawn at a fit, zoom_out_checks alone thins them
+    os.environ['FLOE_RUST_DENSITY_ZOOM_OUT'] = 'off'
     with tempfile.TemporaryDirectory(prefix='floe-density-stack-') as temp:
         src = Path(temp) / 'stack.oas'
         layout(src)
@@ -1575,6 +1666,7 @@ def main():
         dense_lists_checks(temp)
         cells_checks(temp)
         shift_checks(temp)
+        zoom_out_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

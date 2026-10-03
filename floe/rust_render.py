@@ -162,7 +162,29 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  "full_chunks", "full_members", "sampled_chunks", "sampled_members",
                  # the free pixels of the cells pass 2 planned, the top
                  # plane's and the others' (2026-10-03)
-                 "free_top", "free_others")
+                 "free_top", "free_others",
+                 # the dots' gain past the fit view, thousandths
+                 # (2026-10-04)
+                 "dot_gain_milli")
+
+
+def _viewport_px(job, bbox):
+    """The viewport (w, h px) of a job whose `view` is not its frame (a
+    margin: the viewport and the margin around it, at the viewport's
+    scale); None when the frame is the viewport or no view is given."""
+    view = job.get("view")
+    if not view or not bbox:
+        return None
+    w, h = int(job["w"]), int(job["h"])
+    spp_x = (float(bbox[2]) - float(bbox[0])) / max(1, w)
+    spp_y = (float(bbox[3]) - float(bbox[1])) / max(1, h)
+    if not (spp_x > 0 and spp_y > 0):
+        return None
+    vw = int(round((float(view[2]) - float(view[0])) / spp_x))
+    vh = int(round((float(view[3]) - float(view[1])) / spp_y))
+    if vw <= 0 or vh <= 0 or (vw, vh) == (w, h):
+        return None
+    return vw, vh
 
 
 def _wire_counts(value, names):
@@ -763,6 +785,11 @@ class RustRenderWorker:
             # the view root (SPEC-VIEWER §8c): the plan starts from this cell
             # in its own coordinates; absent = the top cell
             command += " root=%d" % int(job["root"])
+        viewport = _viewport_px(job, bbox)
+        if viewport is not None:
+            # the viewer's viewport when the frame is not it (a margin): the
+            # fit view the dots thin past is the viewport's (2026-10-04)
+            command += " vw=%d vh=%d" % viewport
         self._send(command)
 
     def _submit_recolor(self, job):

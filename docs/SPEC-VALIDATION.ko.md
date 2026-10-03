@@ -197,6 +197,16 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.287(축소할수록 성기게) `zoom_out_checks`:
+      - 40×20 µm 다이에 무작위 0.1 µm 비아 3,000개(MID)와 TOP 반점을 둔다.
+      - fit 뷰에서 `dot_gain_milli`는 1000이다. 2배 축소(0.2 µm/px)에서는 round(1000 × fit / 0.2) = 524이고, 점(lit)은
+        킬 스위치(`FLOE_RUST_DENSITY_ZOOM_OUT=off`)의 그만큼(±12 %, 760 → 393 px)이다.
+      - 그 뷰의 여백(bg, 2W×2H, 어댑터가 `vw`/`vh`를 보냄)은 같은 비율이고, 가운데가 뷰포트 프레임과 바이트까지 같다.
+      - 게이트의 다른 검사는 감쇠를 끈다(`main`이 `FLOE_RUST_DENSITY_ZOOM_OUT=off`, `worker`는 이전 값을 되돌림). 고정
+        뷰(400×200 px, 0.1 µm/px)가 대부분의 다이보다 넓어서, 켜 두면 fit 기준의 점 개수(예: `dots_checks`의 성긴
+        배열 100 px → 96)가 줄어든다.
+      - 어댑터 계약: 여백 작업의 명령 줄이 ` bg=on vw=20 vh=10`으로 끝나고, 뷰포트 자신(view = bbox)이나 view가 없으면
+        `vw`가 없다. `density_plan2`는 32개 값(…/free_others/dot_gain_milli)이다. 상태줄 테스트: `reserve 896 MB, dots x0.64`.
     - 0.12.286(1점보다 작은 멤버는 면적만큼): 단위 `a_member_under_a_pixel_stands_for_its_area_in_dots`.
       - 0.2 px LEAF 6,000개(0.04 px²)가 약 240점으로 면적 ±15 % 안이다. 끄면 5,000점을 넘는다.
       - 빠른 길을 끈 것과 항목이 같고, 영역 넷으로 나눠도 점 수가 같다.
