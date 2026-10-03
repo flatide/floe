@@ -185,6 +185,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 틈만 지나는 칸(빈 픽셀 96 px, 1/8 미만)은 하위 밀도를 생략한다. 아래층 점이 더 적고(652 / 721 px) 위층은 같다.
       다른 픽셀(69)은 모두 틈에 있다.
     - `FLOE_RUST_DENSITY_OTHERS_MIN=0`은 타일 bbox의 프레임과 바이트까지 같다.
+    - 0.12.282: 이름만 있는 빈 레이어 ALONE을 맨 위로 보이면 위층 계획이 비지만 프레임이 그려진다(위층 0 px, 아래층 > 0;
+      0.12.281은 `invalid plan: top … is missing`). 루트 칩의 BOUNDARY 100/0과 같은 경우다.
   - `ladder_checks`: 맞춤은 계획마다 한 번이다(칸 방식은 위층·아래층 두 계획: passes 2).
   - 단위 `a_small_point_list_in_full_blocks_is_passed_over_whole`.
   - 어댑터 계약: `density_plan2` 31개 값(…/free_top/free_others). 상태줄 테스트: `24 regions (free top 1.3M, others 210k

@@ -763,7 +763,8 @@ def cells_layout(path):
     0-32 um (3 px gaps: a 32 px cell a gap crosses has 96 px free, under an
     eighth), the right 8 um open; a 0.1 um VIA on MID every 0.5 um over the
     view (an array, its dots); TOP's 0.1 um specks every 2 um (the top
-    plane's dots, over LOW too)."""
+    plane's dots, over LOW too); ALONE named and empty (a layer of the file
+    no cell holds)."""
     import klayout.db as kdb
     ly = kdb.Layout()
     ly.dbu = 0.001
@@ -779,7 +780,11 @@ def cells_layout(path):
     for i in range(20):
         for j in range(10):
             top.shapes(specks).insert(kdb.DBox(1.0 + i * 2.0, 1.0 + j * 2.0, 1.1 + i * 2.0, 1.1 + j * 2.0))
-    ly.write(str(path))
+    # ALONE named and empty: a layer of the file (its LAYERNAME) no cell holds
+    ly.layer(kdb.LayerInfo(ALONE[0], ALONE[1], 'ALONE'))
+    options = kdb.SaveLayoutOptions()
+    options.format = 'OASIS'
+    ly.write(str(path), options)
 
 
 def cells_checks(temp):
@@ -794,7 +799,8 @@ def cells_checks(temp):
     others' over cells with an eighth of their pixels free - a cell a gap
     crosses alone is left to the originals, its MID dots out - with fewer
     items, and the frame is the joint plan's but in the gaps; every cell
-    with a free pixel (FLOE_RUST_DENSITY_OTHERS_MIN=0) draws it whole."""
+    with a free pixel (FLOE_RUST_DENSITY_OTHERS_MIN=0) draws it whole. A
+    topmost layer no cell holds plans an empty top plane's side, drawn."""
     src = Path(temp) / 'cells.oas'
     cells_layout(src)
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
@@ -817,6 +823,11 @@ def cells_checks(temp):
             1 for i in range(0, len(tiles), 4) if any_free[i:i + 4] != tiles[i:i + 4])
         p_cells, p_tiles = cells_res['density_plan2'], tiles_res['density_plan2']
         assert (p_cells['passes'], p_tiles['passes']) == (2, 1) and p_cells['items'] < p_tiles['items'], (p_cells, p_tiles)
+        # the topmost layer one no cell holds (ALONE named and empty - the
+        # routing chip's BOUNDARY, user 2026-10-03: "the density never
+        # finishes"): the top plane's plans hold nothing, the frame is drawn
+        _, empty_res = frame(workers['cells'], 2, (LOW, MID, ALONE))
+        assert empty_res['density_stack']['top'] == 0 < empty_res['density_stack']['lower'], empty_res['density_stack']
         print('density stack: pass 2 by cells - the sides apart (the tile boxes joint), LOW\'s gaps\' lone cells left to the originals: '
               '%d px differ from the tile boxes, all in the gaps, the lower dots %d px against %d; every free cell as the tile boxes; '
               'items %d against %d' % (len(differ), lower[0], lower[1], p_cells['items'], p_tiles['items']))

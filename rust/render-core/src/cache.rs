@@ -1065,7 +1065,13 @@ impl Cache {
         // the density stack's pass 2, which plans the top plane's layer
         // alone, ran into the same error under most roots).
         // A jobdeck never has a root: its sub-cut source stays a skipped pass.
-        if plan.wcells.is_empty() && (!request.summary_layers.is_empty() || request.root.is_some()) {
+        // So does pass 2's plan of a side over its regions (they are pass 2's
+        // alone) whose layers the top never holds - a layer of the file no
+        // cell has, the top plane's under the free cells (renderd
+        // density_free_cells; user 2026-10-03, the routing chip at full depth:
+        // its BOUNDARY 100/0 named, empty, the topmost - "the density never
+        // finishes").
+        if plan.wcells.is_empty() && (!request.summary_layers.is_empty() || request.root.is_some() || !request.regions.is_empty()) {
             plan.wcells.push(floe_vfs::hier::WsCell {
                 key: plan.top,
                 pages: Vec::new(),
