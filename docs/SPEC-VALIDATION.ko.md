@@ -177,6 +177,16 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 사다리(`FLOE_RUST_DENSITY_FIT_LADDER=on`)는 6번 걸어 같은 프레임에 이른다.
     - 기본 예산은 그 페이지를 디코드한다.
   - 단위 `a_dots_plan_over_its_budget_keeps_the_cells_cut_and_thins_its_pages_in_one_pass`.
+  0.12.280(점 리스트: 꽉 찬 블록의 청크는 건너뛰고, 조밀한 청크는 표본으로):
+  - 게이트 `density_stack` `dense_lists_checks`: 비아 셀 두 개의 0.1 µm 비아를 20 µm에 무작위 6만 개씩 둔다(KLayout
+    압축, 셀마다 점 리스트).
+    - 100·200 px에서 기본, 1 스레드, `FLOE_RUST_DENSITY_LIST_FULL=off`, `FLOE_RUST_DENSITY_LIST_SAMPLE=off`가 모두 셋을
+      끈 프레임(0.12.279의 걷기, 12만 개 모두 읽음)과 바이트까지 같다.
+    - 두 번째 리스트의 청크는 첫 리스트의 꽉 찬 블록에서 건너뛴다(`full_chunks` 약 200).
+    - 100 px에서는 조밀한 청크를 표본으로 읽어 멤버를 5분의 1 미만 읽는다(20,128개). 200 px에서는 표본이 없다.
+  - 단위 `a_point_list_chunk_in_full_blocks_is_passed_over_and_a_dense_one_read_at_a_step`. 어댑터 계약: `density_plan2`
+    29개 값(…/occ_decoded/full_chunks/full_members/sampled_chunks/sampled_members). 상태줄 테스트: `list chunks in full
+    blocks 2.9M of 742.0M members, list chunks sampled 60k of 15.4M members`.
   0.12.279(2패스 디코드·래스터 시간을 로그 줄에): 어댑터 계약 `density_us` 6개 값(…/decode2_us/raster2_us), 상태줄 테스트
   `pass 2 decode 812 ms, raster 24310 ms`(로그 줄에만).
   0.12.278(칸이 큰 페이지는 디코드):

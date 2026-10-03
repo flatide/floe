@@ -713,6 +713,23 @@ pub fn morton_key(x: i64, y: i64, min_x: i64, min_y: i64) -> u128 {
     spread_bits(zx) | (spread_bits(zy) << 1)
 }
 
+/// the even bits of a u128 gathered into a u64 (spread_bits undone)
+fn gather_bits(z: u128) -> u64 {
+    let mut x = z & 0x5555_5555_5555_5555_5555_5555_5555_5555;
+    x = (x | (x >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+    x = (x | (x >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+    x = (x | (x >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+    x = (x | (x >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+    x = (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+    x = (x | (x >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
+    x as u64
+}
+
+/// The place a Morton key stands for over (min_x, min_y): morton_key undone.
+pub fn morton_place(key: u128, min_x: i64, min_y: i64) -> (i64, i64) {
+    ((min_x as i128 + gather_bits(key) as i128) as i64, (min_y as i128 + gather_bits(key >> 1) as i128) as i64)
+}
+
 pub fn prepare_pts(src: &[(i64, i64)]) -> PtsPrepared {
     let mut extent = BBox::EMPTY;
     for &(x, y) in src {

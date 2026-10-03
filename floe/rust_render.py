@@ -155,7 +155,11 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  # the pages of by_pages placed by their occupancy grids
                  # (design.ovb, 2026-10-02), the pages under the floor decoded
                  # as too coarse for theirs (2026-10-03)
-                 "occ_pages", "occ_decoded")
+                 "occ_pages", "occ_decoded",
+                 # the point-list chunks passed over unread, their blocks
+                 # full, and their members; the chunks read at a step, and
+                 # their members (2026-10-03)
+                 "full_chunks", "full_members", "sampled_chunks", "sampled_members")
 
 
 def _wire_counts(value, names):

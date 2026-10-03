@@ -403,6 +403,39 @@ fn dot_occ_cell_px() -> f64 {
     })
 }
 
+/// HierOpts::dot_list_fast default: on; FLOE_RUST_DENSITY_LIST_FAST=off (the
+/// kill switch) counts a point list's members through add_dots one by one, as
+/// 0.12.279.
+pub fn dot_list_fast() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_LIST_FAST").as_deref() != Ok("off"))
+}
+
+/// HierOpts::dot_list_full default: on; FLOE_RUST_DENSITY_LIST_FULL=off (the
+/// kill switch) reads every member of a chunk in full blocks, as 0.12.279.
+pub fn dot_list_full() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_LIST_FULL").as_deref() != Ok("off"))
+}
+
+/// HierOpts::dot_list_full: the most blocks a point-list chunk's members'
+/// centres may fall in to be looked up (a wider chunk's members are read),
+/// and the most squares its Morton run is cut into (chunk_zone)
+pub const CHUNK_FULL_BLOCKS: i64 = 64;
+pub const CHUNK_ZONE_SQUARES: usize = 24;
+
+/// HierOpts::dot_list_sample default: on; FLOE_RUST_DENSITY_LIST_SAMPLE=off
+/// (the kill switch) reads every member of a chunk not passed over.
+pub fn dot_list_sample() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_LIST_SAMPLE").as_deref() != Ok("off"))
+}
+
+/// HierOpts::dot_list_sample: the members a sampled chunk reads at least for
+/// a block's area of its Morton run, on average, and its largest step
+pub const CHUNK_SAMPLE_PER_BLOCK: u64 = 16;
+pub const CHUNK_SAMPLE_STEP_MAX: usize = 32;
+
 /// HierOpts::dot_occ_cover default: on; FLOE_RUST_DENSITY_OCC_COVER=off (the
 /// kill switch) gives every cell with a shape an even share, as 0.12.274.
 pub fn dot_occ_cover() -> bool {
@@ -579,6 +612,23 @@ impl DotGrid {
             self.entries[before as usize].3 = new;
         }
         true
+    }
+
+    /// The count of block `key` (0: none yet); None beyond the grid.
+    fn count(&self, key: (i64, i64, u32)) -> Option<u32> {
+        let (bx, by) = (key.0.wrapping_sub(self.bx0), key.1.wrapping_sub(self.by0));
+        if !(0..self.nx).contains(&bx) || !(0..self.ny).contains(&by) {
+            return None;
+        }
+        let mut entry = self.head[(bx * self.ny + by) as usize];
+        while entry != DOT_GRID_NONE {
+            let e = &self.entries[entry as usize];
+            if e.0 >= key.2 {
+                return Some(if e.0 == key.2 { e.1 } else { 0 });
+            }
+            entry = e.3;
+        }
+        Some(0)
     }
 
     /// The grid's blocks in key order - (bx, by, layer) - into `out`, the
@@ -1063,6 +1113,40 @@ pub struct HierOpts {
     /// FLOE_RUST_DENSITY_OCC_DECODE=off is the kill switch.
     pub dot_occ_decode: bool,
     pub dot_occ_cell_px: f64,
+    /// A point list's members no wider than a dot block counted straight
+    /// from their offsets - add_dots' block and dots, the same for every
+    /// member of the list - and summed while consecutive members (Morton
+    /// order) share a block, one put_dots a run, the same counts and unions
+    /// (user 2026-10-03, the field chip with all 449 layers: `cell dots 876.0M
+    /// [... list members 765.7M ...]`, pass 2 planned 32 s).
+    /// FLOE_RUST_DENSITY_LIST_FAST=off is the kill switch.
+    pub dot_list_fast: bool,
+    /// A point-list chunk (256 members in Morton order over the list's
+    /// extent) whose members' centres all fall in blocks already at their
+    /// cap is passed over unread: a full block's item is the whole block
+    /// whatever else lands in it (flush_dots: its count's room is past the
+    /// block), so the frame is the same. Where its members are is the Morton
+    /// run between its first and last - two members read - cut into the
+    /// aligned squares it covers (chunk_zone; the chunk's box can be ten
+    /// times the run), at most CHUNK_FULL_BLOCKS blocks, looked up in the
+    /// cell's dot grid; a block no box holds whole (HierOpts::dot_boxes) is
+    /// left out anyway. Its members do not count toward a list's
+    /// SUB_CUT_BOX_ARRAY_MAX (past it a list dropped the rest: the field
+    /// chip's lists, `list members 765.7M` on four threads - user
+    /// 2026-10-03, all 449 layers, pass 2 planned 32 s).
+    /// FLOE_RUST_DENSITY_LIST_FULL=off is the kill switch.
+    pub dot_list_full: bool,
+    /// A point-list chunk read (not passed over, nor at once in one block)
+    /// whose members are dense on their Morton run - at least
+    /// 2 x CHUNK_SAMPLE_PER_BLOCK in a block's area of it - is read every
+    /// step-th member, each standing for step (a power of two up to
+    /// CHUNK_SAMPLE_STEP_MAX, CHUNK_SAMPLE_PER_BLOCK read for a block's area):
+    /// the members are in Morton order, so a step's spread over the run as
+    /// the chunk's do, and a dot lands only in a block a member is in.
+    /// Decided by the chunk alone (the threads' frames are one). Only the
+    /// members read count toward a list's SUB_CUT_BOX_ARRAY_MAX.
+    /// FLOE_RUST_DENSITY_LIST_SAMPLE=off is the kill switch.
+    pub dot_list_sample: bool,
     /// The sub-cut dots' blocks in a dense grid over the cell's view (DotGrid)
     /// rather than a hash map sorted when the cell is done - the same counts,
     /// unions and order - and a point list's topmost layer found once, not a
@@ -1199,6 +1283,9 @@ impl Default for HierOpts {
             dot_occ_cover: dot_occ_cover(),
             dot_occ_decode: dot_occ_decode(),
             dot_occ_cell_px: dot_occ_cell_px(),
+            dot_list_fast: dot_list_fast(),
+            dot_list_full: dot_list_full(),
+            dot_list_sample: dot_list_sample(),
             dot_grid: dot_grid(),
             dot_boxes: dot_boxes(),
             dot_records: None,
@@ -1327,6 +1414,14 @@ pub struct HierStats {
     /// HierOpts::dot_occ_decode: the pages under the floor decoded, their
     /// occupancy cells too coarse on screen (after a budget fit: those it kept)
     pub dot_occ_decoded: u64,
+    /// HierOpts::dot_list_full: the point-list chunks passed over unread, all
+    /// their blocks full, and the members they held
+    pub dot_full_chunks: u64,
+    pub dot_full_members: u64,
+    /// HierOpts::dot_list_sample: the point-list chunks read at a step, and
+    /// the members they held
+    pub dot_sampled_chunks: u64,
+    pub dot_sampled_members: u64,
     /// HierOpts::dot_occ_decode: the dot items of those pages kept aside until
     /// the budget fit (settle_occ_fallback)
     pub occ_fallback: Vec<OccFallback>,
@@ -2285,7 +2380,12 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
             && (opts.dot_page_spread_boxes || (opts.dot_page_occ && v.has_page_occ())))
         .then_some(opts.dot_occ_cell_px),
         cell_fallback: Vec::new(),
+        list_fast: opts.dot_list_fast,
+        list_full: opts.dot_list_full,
+        list_sample: opts.dot_list_sample,
         cell_view: BBox::EMPTY,
+        cell_rbbox: BBox::EMPTY,
+        zone: Vec::new(),
         grid_on: opts.dot_grid,
         dot_boxes: opts.dot_boxes,
         grid: DotGrid::default(),
@@ -2693,6 +2793,10 @@ struct Hier<'a> {
     page_spread: bool,
     spread_boxes: bool,
     cell_view: BBox,
+    /// the box of the cell being walked (its own, dot_block_whole's)
+    cell_rbbox: BBox,
+    /// chunk_zone: the squares a point-list chunk's Morton run covers
+    zone: Vec<BBox>,
     /// HierOpts::dot_page_occ, and a spread page's blocks being summed (the
     /// share of its cells in each, the union of their parts)
     page_occ: bool,
@@ -2703,6 +2807,10 @@ struct Hier<'a> {
     /// so decoded pages kept aside
     occ_decode_px: Option<f64>,
     cell_fallback: Vec<OccFallback>,
+    /// HierOpts::dot_list_fast, HierOpts::dot_list_full, HierOpts::dot_list_sample
+    list_fast: bool,
+    list_full: bool,
+    list_sample: bool,
     /// HierOpts::dot_grid, the grid of the cell being walked, and the run of
     /// dot items of one block being summed - the block and layer, the dots,
     /// the union of what they stand for - put into the blocks when an item
@@ -2877,6 +2985,7 @@ impl<'a> Hier<'a> {
         let boxes = self.lv.get(&key).expect("lv seeded").boxes.clone();
         if self.dots {
             self.begin_grid(&boxes);
+            self.cell_rbbox = self.v.cell(ci).rbbox;
         }
         let cell = self.v.cell(ci);
         let mut wc = WsCell {
@@ -3711,6 +3820,133 @@ impl<'a> Hier<'a> {
         entry.1.grow(piece);
     }
 
+    /// HierOpts::dot_list_fast: a run of a point list's members in one block
+    /// into it - `each` dots a member, as add_dots puts them one by one - the
+    /// run counting the members it stands for (HierOpts::dot_list_sample:
+    /// a member read for `step`)
+    fn end_list_run(&mut self, run: &mut Option<((i64, i64, u32), u64, BBox)>, each: u64) {
+        if let Some((key, count, union)) = run.take() {
+            self.put_dots(key, count.saturating_mul(each).min(u32::MAX as u64) as u32, &union);
+        }
+    }
+
+    /// The blocks a point-list chunk's members' centres span - member `b0`
+    /// moved to every point of `chunk` (its points' bounds), the centres as
+    /// add_dots takes them at the chunk's corners: (bx0, bx1, by0, by1).
+    fn chunk_blocks(&self, b0: &BBox, chunk: &BBox) -> (i64, i64, i64, i64) {
+        let block = self.block_px / self.px_per_dbu;
+        let centre = |lo: i64, hi: i64, at: i64| (lo.saturating_add(at) as f64 + hi.saturating_add(at) as f64) / 2.0;
+        (
+            (centre(b0.x0, b0.x1, chunk.x0) / block).floor() as i64,
+            (centre(b0.x0, b0.x1, chunk.x1) / block).floor() as i64,
+            (centre(b0.y0, b0.y1, chunk.y0) / block).floor() as i64,
+            (centre(b0.y0, b0.y1, chunk.y1) / block).floor() as i64,
+        )
+    }
+
+    /// HierOpts::dot_list_full / dot_list_sample: where a point-list
+    /// chunk's members are, from its first and last (slots `lo` and
+    /// `hi` - 1): the members are in Morton order over the list's extent, so
+    /// all of them lie on the Morton run between those two keys - its area
+    /// (dbu^2, the keys' span) - and in the aligned squares that run covers,
+    /// cut no finer than a quarter of a block (the run widened to them; into
+    /// self.zone, as offset boxes). A chunk's box can be ten times its run's
+    /// area (a run crossing a large square's edge). The area alone, the
+    /// squares none, past CHUNK_ZONE_SQUARES.
+    fn chunk_zone(&mut self, pr: &floe_ovm::PtsRef, lo: u32, hi: u32) -> f64 {
+        self.zone.clear();
+        let ext = pr.extent();
+        let ((x0, y0), (x1, y1)) = (pr.pt(lo), pr.pt(hi - 1));
+        let (k0, k1) = (floe_ovm::morton_key(x0, y0, ext.x0, ext.y0), floe_ovm::morton_key(x1, y1, ext.x0, ext.y0));
+        let area = (k1.saturating_sub(k0) as f64) + 1.0;
+        // squares of 2^j dbu a side, j at least a quarter block's
+        let quarter = self.block_px / self.px_per_dbu / 4.0;
+        let jm = if quarter >= 2.0 { (quarter.log2().floor() as u32).min(62) } else { 0 };
+        let unit = 1u128 << (2 * jm);
+        let (mut at, end) = (k0 / unit * unit, (k1 / unit).saturating_add(1).saturating_mul(unit).saturating_sub(1));
+        loop {
+            let mut j = jm;
+            while j < 62 {
+                let size = 1u128 << (2 * (j + 1));
+                if at % size != 0 || at.saturating_add(size - 1) > end {
+                    break;
+                }
+                j += 1;
+            }
+            if self.zone.len() == CHUNK_ZONE_SQUARES {
+                self.zone.clear();
+                return area;
+            }
+            let (sx, sy) = floe_ovm::morton_place(at, ext.x0, ext.y0);
+            let side = (1i64 << j) - 1;
+            self.zone.push(BBox { x0: sx, y0: sy, x1: sx.saturating_add(side), y1: sy.saturating_add(side) });
+            match at.checked_add(1u128 << (2 * j)) {
+                Some(next) if next <= end => at = next,
+                _ => break,
+            }
+        }
+        area
+    }
+
+    /// HierOpts::dot_list_sample: the step a point-list chunk of `n` members
+    /// on a Morton run of `area` dbu^2 (chunk_zone) is read at - a power of
+    /// two, its members at least CHUNK_SAMPLE_PER_BLOCK read for a block's
+    /// area of the run on average, at most CHUNK_SAMPLE_STEP_MAX; 1 (every
+    /// member) for a chunk sparser than that.
+    fn chunk_step(&self, area: f64, n: u64) -> usize {
+        let block = self.block_px / self.px_per_dbu;
+        let per = n as f64 * (block * block / area.max(1.0)) / CHUNK_SAMPLE_PER_BLOCK as f64;
+        if !(per >= 2.0) {
+            return 1;
+        }
+        1usize << (per.log2().floor() as u32).min(CHUNK_SAMPLE_STEP_MAX.trailing_zeros())
+    }
+
+    /// HierOpts::dot_list_full: every block on `layer` the centres of a
+    /// point-list chunk's members (member `b0`, their offsets in the squares
+    /// of self.zone, chunk_zone) may fall in is at its cap - in the cell's
+    /// dot grid with the run not yet put - or left out (HierOpts::dot_boxes:
+    /// none of the cell's `boxes` holds it whole), at most CHUNK_FULL_BLOCKS
+    /// blocks.
+    fn chunk_full(&self, layer: u32, b0: &BBox, boxes: &[BBox]) -> bool {
+        let ppd = self.px_per_dbu;
+        if !(ppd > 0.0) || b0.is_empty() || self.zone.is_empty() || self.grid.nx == 0 {
+            return false;
+        }
+        let block = self.block_px / ppd;
+        let mut blocks = 0;
+        for square in &self.zone {
+            let (bx0, bx1, by0, by1) = self.chunk_blocks(b0, square);
+            blocks += (bx1 - bx0 + 1).saturating_mul(by1 - by0 + 1);
+            if blocks > CHUNK_FULL_BLOCKS {
+                return false;
+            }
+        }
+        let cap = self.block_cap;
+        for square in &self.zone {
+            let (bx0, bx1, by0, by1) = self.chunk_blocks(b0, square);
+            for bx in bx0..=bx1 {
+            for by in by0..=by1 {
+                if self.dot_boxes && !dot_block_whole(bx, by, block, boxes, &self.cell_rbbox) {
+                    continue;
+                }
+                let key = (bx, by, layer);
+                let Some(count) = self.grid.count(key) else {
+                    return false;
+                };
+                let run = match &self.dot_run {
+                    Some((at, count, _)) if *at == key => *count,
+                    _ => 0,
+                };
+                if (count as u64).saturating_add(run) < cap as u64 {
+                    return false;
+                }
+            }
+            }
+        }
+        true
+    }
+
     /// HierOpts::dot_grid: `n` members of a point list - `b0` moved to every
     /// point of `chunk` (its points' bounds) - on `layer` at once, when their
     /// centres share one block: what add_dots makes of them member by member
@@ -4407,6 +4643,15 @@ impl<'a> Hier<'a> {
             // the dots: box_layers' topmost layer, found once for the members
             // (HierOpts::dot_grid)
             let top = if self.dots && self.grid_on { found.top(self.set_words).map(|rank| self.vis_layers[rank]) } else { None };
+            // HierOpts::dot_list_fast: a member no wider than a block - add_dots'
+            // block of its centre and its dots, alike for every member - and
+            // the run of members in one block (key, members, union)
+            let ppd = self.px_per_dbu;
+            let block = self.block_px / ppd;
+            let (mw, mh) = ((b0.x1 - b0.x0).max(0) as f64 * ppd, (b0.y1 - b0.y0).max(0) as f64 * ppd);
+            let fast = (self.list_fast && top.is_some() && !b0.is_empty() && ppd > 0.0 && mw <= self.block_px && mh <= self.block_px)
+                .then(|| ((mw * mh / DOT_AREA_PX).floor() as u64).max(1).min(self.block_cap as u64));
+            let mut run: Option<((i64, i64, u32), u64, BBox)> = None;
             for k in 0..pr.n_chunks {
                 let chunk = pr.chunk_bbox(k);
                 if !chunk.intersects(&bounds) {
@@ -4423,12 +4668,70 @@ impl<'a> Hier<'a> {
                 // the dots: a chunk in view whole whose members' centres share
                 // one block, at once (HierOpts::dot_grid)
                 let held = (hi - lo) as u64;
+                // a chunk's Morton run's area, dbu^2 (chunk_zone; 0: not asked)
+                let mut area = 0.0;
                 if let Some(layer) = top {
+                    // where the chunk's members are (HierOpts::dot_list_full and
+                    // dot_list_sample), from its first and last
+                    area = if stride == 1 && fast.is_some() && (self.list_full || self.list_sample) { self.chunk_zone(&pr, lo, hi) } else { 0.0 };
+                    // HierOpts::dot_list_full: every block its members' centres
+                    // may fall in at its cap - whichever of them are in view
+                    if self.list_full && area > 0.0 && self.chunk_full(layer, &b0, boxes) {
+                        self.st.dot_full_chunks += 1;
+                        self.st.dot_full_members += held;
+                        continue;
+                    }
                     if stride == 1 && members + held <= SUB_CUT_BOX_ARRAY_MAX && whole && self.dot_chunk(layer, &b0, &chunk, held) {
                         members += held;
                         self.st.sub_cut_box_members += held;
                         continue;
                     }
+                }
+                if let (Some(layer), Some(each)) = (top, fast) {
+                    // HierOpts::dot_list_sample: every step-th member, each
+                    // standing for step - by the chunk alone
+                    let step = if self.list_sample && area > 0.0 { self.chunk_step(area, held) } else { 1 };
+                    if step > 1 {
+                        self.st.dot_sampled_chunks += 1;
+                        self.st.dot_sampled_members += held;
+                    }
+                    for slot in (lo..hi).step_by(step).filter(|slot| *slot as i64 % stride == 0) {
+                        let (ox, oy) = pr.pt(slot);
+                        if !whole && !meets.iter().any(|r| pt_box(ox, oy).intersects(r)) {
+                            continue;
+                        }
+                        members += 1;
+                        if members > SUB_CUT_BOX_ARRAY_MAX {
+                            self.end_list_run(&mut run, each);
+                            self.st.sub_cut_box_over += 1;
+                            return;
+                        }
+                        self.st.sub_cut_dot_items += 1;
+                        self.st.dot_by[3] += 1;
+                        self.st.sub_cut_box_members += 1;
+                        let member = BBox {
+                            x0: b0.x0.saturating_add(ox),
+                            y0: b0.y0.saturating_add(oy),
+                            x1: b0.x1.saturating_add(ox),
+                            y1: b0.y1.saturating_add(oy),
+                        };
+                        let key = (
+                            ((member.x0 as f64 + member.x1 as f64) / 2.0 / block).floor() as i64,
+                            ((member.y0 as f64 + member.y1 as f64) / 2.0 / block).floor() as i64,
+                            layer,
+                        );
+                        match &mut run {
+                            Some((at, count, union)) if *at == key => {
+                                *count += step as u64;
+                                union.grow(&member);
+                            }
+                            _ => {
+                                self.end_list_run(&mut run, each);
+                                run = Some((key, step as u64, member));
+                            }
+                        }
+                    }
+                    continue;
                 }
                 for slot in (lo..hi).filter(|slot| *slot as i64 % stride == 0) {
                     let (ox, oy) = pr.pt(slot);
@@ -4452,6 +4755,9 @@ impl<'a> Hier<'a> {
                     }
                     self.st.sub_cut_box_members += 1;
                 }
+            }
+            if let Some(each) = fast {
+                self.end_list_run(&mut run, each);
             }
             return;
         }
@@ -7485,6 +7791,63 @@ mod tests {
                 assert_eq!(plan.stats.sub_cut_dot_items, by[0] + by[1] + by[2] + by[3] + by[4] + by[6] + by[7], "{by:?}");
             }
             assert!(grid.stats.sub_cut_dot_items < map.stats.sub_cut_dot_items);
+        }
+    }
+
+    #[test]
+    fn a_point_list_chunk_in_full_blocks_is_passed_over_and_a_dense_one_read_at_a_step() {
+        // HierOpts::dot_list_full and dot_list_sample (user 2026-10-03, the
+        // field chip with all 449 layers: 765.7 M list members read, pass 2
+        // planned 32 s). Two lists of 4,096 LEAFs (60 dbu, a dot each) on a
+        // 20 dbu grid, 1,280 dbu square - about 400 a block of 400 dbu (8 px
+        // at 0.02 px/dbu), every block past its cap of 32 - the second 10 dbu
+        // off the first; and a sparse list, 3,000 at random over 20 um (under
+        // 8 a block: its chunks span hundreds).
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: i64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % n as u64) as i64
+        };
+        let dense: Vec<(i64, i64)> = (0..4096).map(|i| (2_000 + (i % 64) * 20, 3_000 + (i / 64) * 20)).collect();
+        let sparse: Vec<(i64, i64)> = (0..3000).map(|_| (next(19_900), next(19_900))).collect();
+        let chip = |places: Vec<(usize, i64, i64, u8, bool, Rep)>| {
+            fixture(&[FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] }, FCell { name: "TOP", pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)], places }], 1)
+        };
+        let both = chip(vec![
+            (0, 0, 0, 0, false, Rep::Pts(dense.clone().into())),
+            (0, 10, 10, 0, false, Rep::Pts(dense.clone().into())),
+            (0, 0, 0, 0, false, Rep::Pts(sparse.clone().into())),
+        ]);
+        let thin = chip(vec![(0, 0, 0, 0, false, Rep::Pts(sparse.into()))]);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = false;
+        let quad = vec![bx(-10, -10, 10_000, 10_000), bx(10_000, -10, 20_000, 10_000), bx(-10, 10_000, 10_000, 20_000), bx(10_000, 10_000, 20_000, 20_000)];
+        let items = |plan: &HierPlan| plan.wcells.iter().map(|w| (w.key, w.washes.clone(), w.dot_counts.clone())).collect::<Vec<_>>();
+        for regions in [Vec::new(), quad] {
+            let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, k_boxes: 4, regions, ..HierOpts::default() };
+            let plan = |chip: &Ovm, full: bool, sample: bool| plan_hier(chip, &req, &HierOpts { dot_list_full: full, dot_list_sample: sample, ..base.clone() });
+            let (every, full, sampled) = (plan(&both, false, false), plan(&both, true, false), plan(&both, true, true));
+            // the same frame: what lands in a full block changes nothing
+            assert!(!items(&every).is_empty());
+            assert_eq!(items(&every), items(&full));
+            assert_eq!(items(&every), items(&sampled));
+            // every member read, at once or one by one, or passed over
+            let (e, f, s) = (every.stats.dot_by, full.stats.dot_by, sampled.stats.dot_by);
+            assert_eq!(e[3] + e[5], 2 * 4096 + 3000, "{e:?}");
+            assert_eq!((every.stats.dot_full_chunks, every.stats.dot_sampled_chunks), (0, 0));
+            // the second list in the first's full blocks: most of its 16 chunks
+            assert!(full.stats.dot_full_chunks >= 12 && full.stats.dot_full_members >= 12 * 256, "{} {}", full.stats.dot_full_chunks, full.stats.dot_full_members);
+            assert_eq!(f[3] + f[5] + full.stats.dot_full_members, e[3] + e[5]);
+            // the first's chunks over two blocks or more read at a step
+            assert!(sampled.stats.dot_sampled_chunks > 0 && sampled.stats.dot_sampled_members >= 256 * sampled.stats.dot_sampled_chunks / 2);
+            assert!(s[3] < f[3], "{s:?} {f:?}");
+            // a sparse list: every member read
+            let (alone, quick) = (plan(&thin, false, false), plan(&thin, true, true));
+            assert_eq!(items(&alone), items(&quick));
+            assert_eq!((quick.stats.dot_sampled_chunks, quick.stats.dot_by[3] + quick.stats.dot_by[5]), (0, alone.stats.dot_by[3] + alone.stats.dot_by[5]));
         }
     }
 

@@ -366,7 +366,20 @@ spread - a coarse cell's dots landed where no shape is (user 2026-10-03, the
 field chip) - its spread's dots standing in when the budget fit leaves it out
 (`HierOpts::dot_occ_decode`; `FLOE_RUST_DENSITY_OCC_DECODE=off` is the kill
 switch, and UNDER_FLOOR=drop turns it off too); `density_plan2`'s 25th value
-is the pages so decoded (`occ_decoded`).
+is the pages so decoded (`occ_decoded`). Since 0.12.280 a point list's chunk
+(256 members in Morton order) whose blocks are all at their cap is passed over
+unread - where its members are is the Morton run between its first and last,
+in aligned squares (`HierOpts::dot_list_full`;
+`FLOE_RUST_DENSITY_LIST_FULL=off` is the kill switch) - a dense chunk is read
+every step-th member, each standing for the step, at least 16 for a block's
+area of its run (`HierOpts::dot_list_sample`;
+`FLOE_RUST_DENSITY_LIST_SAMPLE=off`), and the members read are counted into
+their blocks run by run (`HierOpts::dot_list_fast`;
+`FLOE_RUST_DENSITY_LIST_FAST=off`) - user 2026-10-03, the field chip with all
+449 layers: `list members 765.7M`, pass 2 planned 32 s. Only the members read
+count toward a list's SUB_CUT_BOX_ARRAY_MAX. `density_plan2` ends with the
+chunks passed over and their members, and the chunks sampled and theirs
+(29 values).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

@@ -118,7 +118,12 @@ equals the default reserve's and reports nothing over budget (held_checks).
 Pass 2's threads walk a point list's members in their own regions: over nine
 tiles one, two and four threads and the bounds (FLOE_RUST_DENSITY_DOT_BOXES=off)
 draw one frame, four threads count the members about once, the bounds about
-twice (lists_checks). Pass 2's reserve is what pass 1 left of the budget when
+twice (lists_checks). A point list's chunk whose blocks are full is passed
+over unread and a dense one read at a step: two via cells' lists of 60,000
+random vias over 20 um, at 100 and 200 px, draw the frame every member read
+draws (FLOE_RUST_DENSITY_LIST_FULL=off, FLOE_RUST_DENSITY_LIST_SAMPLE=off and
+FLOE_RUST_DENSITY_LIST_FAST=off) and one thread's, reading under a fifth of
+the members at 100 px (dense_lists_checks). Pass 2's reserve is what pass 1 left of the budget when
 that is more: at depth 0 a TOP's own boxes under a pixel, past a 32 MB
 budget's fixed 4 MB reserve, are drawn as a cut-free frame draws them, and the
 fixed reserve (FLOE_RUST_DENSITY_RESERVE_LEFT=off) draws none (left_checks).
@@ -660,6 +665,94 @@ def lists_checks(temp):
         assert members['4'] <= 1.25 * members['1'] and members['bounds'] >= 1.5 * members['1'], members
         print('density stack: point lists - one, two and four threads and the bounds draw alike (%d px lit); members '
               'counted %s' % (one_res['density_stack']['lit'], ' / '.join('%s %d' % kv for kv in members.items())))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
+def dense_lists_layout(path):
+    """Two via cells' 0.1 um VIAs, 60,000 each at random over 20 x 20 um,
+    written with KLayout's strongest compression - a point list a cell, the
+    second over the first's blocks."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    rnd = random.Random(7)
+    for name in ('VIA_A', 'VIA_B'):
+        via = ly.create_cell(name)
+        via.shapes(ly.layer(*LOW)).insert(kdb.DBox(0, 0, 0.1, 0.1))
+        for _ in range(60_000):
+            top.insert(kdb.DCellInstArray(via.cell_index(), kdb.DTrans(kdb.DVector(rnd.randrange(20_000) / 1000.0, rnd.randrange(20_000) / 1000.0))))
+    options = kdb.SaveLayoutOptions()
+    options.format = 'OASIS'
+    options.oasis_compression_level = 10
+    ly.write(str(path), options)
+
+
+def dense_lists_checks(temp):
+    """A point list's chunks (256 members in Morton order) whose blocks are
+    full are passed over unread, and dense ones read every step-th member,
+    each standing for the step (user 2026-10-03, the field chip with all 449
+    layers: `list members 765.7M`, pass 2 planned 32 s). Two lists of 60,000
+    random vias over 20 um - about 380 a list in a block at 100 px, 96 at
+    200 px - draw the frame of every member read (the three switches off:
+    0.12.279's walk) on four threads and on one; the chunks of the second
+    list in the first's full blocks are passed over, and at 100 px the dense
+    ones read at a step - under a fifth of the members read (at 200 px none
+    is dense enough)."""
+    src = Path(temp) / 'dense_lists.oas'
+    dense_lists_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    every = {'FLOE_RUST_DENSITY_LIST_FULL': 'off', 'FLOE_RUST_DENSITY_LIST_SAMPLE': 'off', 'FLOE_RUST_DENSITY_LIST_FAST': 'off'}
+    workers = {
+        'default': worker(src, env),
+        'one thread': worker(src, dict(env, FLOE_RUST_DENSITY_PLAN_THREADS='1')),
+        'full off': worker(src, dict(env, FLOE_RUST_DENSITY_LIST_FULL='off')),
+        'sample off': worker(src, dict(env, FLOE_RUST_DENSITY_LIST_SAMPLE='off')),
+        'every member': worker(src, dict(env, **every)),
+    }
+    try:
+        dbu = float(workers['default'].cache.meta['dbu'])
+
+        def view(w, gen, side):
+            w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': (0.0, 0.0, 20.01 / dbu, 20.01 / dbu), 'view': None,
+                      'w': side, 'h': side, 'depth': None, 'cut_px': 1.0, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('dense list frame timeout')
+
+        for gen, side in ((1, 100), (2, 200)):
+            frames = {name: view(w, gen, side) for name, w in workers.items()}
+            want, want_res = frames['every member']
+            assert want_res['density_stack']['lit'] > 0, want_res['density_stack']
+            for name, (pixels, res) in frames.items():
+                assert pixels == want, '%d px: %s draws otherwise than every member read in %d px' % (
+                    side, name, sum(1 for i in range(0, len(want), 4) if pixels[i:i + 4] != want[i:i + 4]))
+            p2 = {name: res['density_plan2'] for name, (_, res) in frames.items()}
+            read = {name: p['by_list_members'] for name, p in p2.items()}
+            assert read['every member'] == 120_000 and p2['every member']['full_chunks'] == p2['every member']['sampled_chunks'] == 0, p2['every member']
+            assert p2['full off']['full_chunks'] == 0 < p2['sample off']['full_chunks'] and p2['sample off']['sampled_chunks'] == 0, (p2['full off'], p2['sample off'])
+            assert p2['default']['full_chunks'] > 0, p2['default']
+            assert read['default'] == read['one thread'] and read['sample off'] < read['every member'], read
+            if side == 100:
+                # 380 a block: dense enough to read at a step (twice
+                # CHUNK_SAMPLE_PER_BLOCK on a block's area of a chunk's run)
+                assert p2['default']['sampled_chunks'] > 0 and read['default'] * 5 < read['every member'], (read, p2['default'])
+            else:
+                assert p2['default']['sampled_chunks'] == 0 and read['default'] == read['sample off'], (read, p2['default'])
+            print('density stack: dense point lists at %d px - one frame (%d px lit), members read %s; default: %d chunks in full '
+                  'blocks, %d sampled' % (side, want_res['density_stack']['lit'], ' / '.join('%s %d' % kv for kv in read.items()),
+                                          p2['default']['full_chunks'], p2['default']['sampled_chunks']))
     finally:
         for w in workers.values():
             w.stop()
@@ -1262,6 +1355,7 @@ def main():
         history_checks(temp)
         held_checks(temp)
         lists_checks(temp)
+        dense_lists_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

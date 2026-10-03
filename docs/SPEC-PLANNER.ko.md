@@ -351,6 +351,30 @@
     - 따라서 영역별 계획이 내는 블록은 한 계획의 블록과 같고, `merge_plans`의 "개수가 큰 것"이 부분 개수를 고르지
       않는다.
   - 단위: `a_point_list_is_walked_by_each_box_and_a_block_no_box_holds_whole_is_left_out`.
+  **점 리스트의 빠른 길, 꽉 찬 블록, 표본(0.12.280, renderd 0.12.258; 사용자 2026-10-03, 실칩 449 레이어
+  `list members 765.7M`, `pass 2 plan 36130ms`):** 리스트의 청크마다(가장 위 레이어가 있고 멤버가 블록 이하일 때) 이
+  순서로 본다.
+  1. `HierOpts::dot_list_full`(기본 켬, `FLOE_RUST_DENSITY_LIST_FULL=off`가 킬 스위치): `chunk_zone`이 청크의 첫·마지막
+     멤버의 Morton 키로 멤버가 놓인 구간을 구한다. 그 구간을 정렬된 사각형(블록 1/4보다 작게 자르지 않음,
+     `CHUNK_ZONE_SQUARES` 24개까지)으로 나누고, 넓이는 키 차이(dbu²)다. 사각형들의 중심 블록(`CHUNK_FULL_BLOCKS` 64개까지)이
+     모두 격자에서 상한이면(런 포함) 청크를 건너뛴다(`chunk_full`). 어떤 상자에도 통째로 들지 않는 블록은 본다 치지
+     않는다. 상한 블록의 항목은 블록 전체라 결과가 같다. 통계 `dot_full_chunks`·`dot_full_members`.
+  2. `dot_chunk`(한 블록이면 한 번에, 그대로).
+  3. `HierOpts::dot_list_fast`(기본 켬, `FLOE_RUST_DENSITY_LIST_FAST=off`가 킬 스위치): 멤버를 오프셋에서 바로 블록으로
+     세고, 같은 블록이 이어지면 `end_list_run`으로 한 번에 넣는다(add_dots와 같은 결과).
+     `HierOpts::dot_list_sample`(기본 켬, `FLOE_RUST_DENSITY_LIST_SAMPLE=off`가 킬 스위치): `chunk_step`이 블록 면적당
+     멤버 수(n × 블록² / 구간 넓이)를 `CHUNK_SAMPLE_PER_BLOCK`(16)으로 나눈 값이 2 이상이면 그 2의 거듭제곱(최대
+     `CHUNK_SAMPLE_STEP_MAX` 32)을 step으로 한다. step번째 멤버만 읽고 step개로 센다. 통계
+     `dot_sampled_chunks`·`dot_sampled_members`.
+  - 리스트의 `SUB_CUT_BOX_ARRAY_MAX`에는 하나씩 읽은 멤버만 센다. `dot_by[3]`(리스트 멤버)와 항목 수도 읽은 멤버다.
+  - 단위: `a_point_list_chunk_in_full_blocks_is_passed_over_and_a_dense_one_read_at_a_step`.
+    - 픽스처: 20 dbu 격자의 4,096점 리스트 둘(두 번째는 10 dbu 비킴, 블록마다 약 400개)과 무작위 3,000점 리스트.
+    - 확인하는 것:
+      - 세 경우(전부 읽기 / 건너뛰기 / 건너뛰기+표본)의 항목이 같다.
+      - 두 번째 리스트의 청크 12개 이상을 건너뛴다.
+      - 표본으로 읽은 멤버가 더 적다.
+      - 성긴 리스트는 표본을 쓰지 않는다.
+      - 사분면 영역 넷으로 나눠도 위가 그대로다.
   **점 계획의 예산 맞춤은 요청한 컷에서 한 번(0.12.271, renderd 0.12.250; 사용자 2026-10-02, 실칩 `fit 75019 ms x6
   passes on 1 threads`):** `HierOpts::dot_fit_at_cut`(기본 켬, `FLOE_RUST_DENSITY_FIT_LADDER=on`이 킬 스위치).
   - 점 계획(`sub_cut_dots`)은 `plan_hier`가 요청한 컷에서 한 번 끝까지 계획하고 `fit_at_cut`으로 맞춘다.

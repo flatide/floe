@@ -893,6 +893,10 @@ impl Cache {
             }
             st.dot_occ_pages += more.dot_occ_pages;
             st.dot_occ_decoded += more.dot_occ_decoded;
+            st.dot_full_chunks += more.dot_full_chunks;
+            st.dot_full_members += more.dot_full_members;
+            st.dot_sampled_chunks += more.dot_sampled_chunks;
+            st.dot_sampled_members += more.dot_sampled_members;
             st.occ_fallback.extend(more.occ_fallback.iter().cloned());
             st.dot_partial += more.dot_partial;
             st.cancelled |= more.cancelled;

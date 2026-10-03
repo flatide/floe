@@ -642,6 +642,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # the pages placed by their occupancy grids (design.ovb, 2026-10-02):
         # after the pages, in the log line
         res["density_plan2"].update(occ_pages=250, occ_decoded=6)
+        # the point-list chunks passed over in full blocks and those read at
+        # a step (2026-10-03): right after the chunks, with their members
+        res["density_plan2"].update(full_chunks=2900000, full_members=742000000,
+                                    sampled_chunks=60000, sampled_members=15360000)
         res["density_pages"].update(decoded=206, over_budget=3)
         full, brief = perf_status(res)
         self.assertIn("[density: dots, lit 620k px, block 4 px, floor 15 px, reserve 896 MB, pass 2 plan", full)
@@ -649,8 +653,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # the field's `list chunks 78, array members 57k of 354 members`)
         self.assertIn(
             "reads 15.2M, cell dots 2.7M [nodes 900k, placements 1.2M, arrays"
-            " 55k, list members 470k, list chunks 20k of 5.1M members, array"
-            " members 10k, pages 257 (250 by occupancy), pages decoded under the floor 6; hash map 12]), 206 pages", full)
+            " 55k, list members 470k, list chunks 20k of 5.1M members, list"
+            " chunks in full blocks 2.9M of 742.0M members, list chunks sampled"
+            " 60k of 15.4M members, array members 10k, pages 257 (250 by occupancy), pages decoded under the floor 6; hash map 12]), 206 pages", full)
         # what pass 2's reserve kept out (2026-10-01): in the log line too
         self.assertIn(", 206 pages, pass 2 over budget: floor probe, thinned, 3 pages left out, pass 2 decode 812 ms, raster 24310 ms]", full)
         self.assertEqual(
@@ -1842,7 +1847,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "density_dots": "3500/2", "density_floor": "0.250",
                 "density_block": "8",
                 "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2"
-                                 "/30000/20000/5000/34860/40/9000/100/3/7/896/2/1",
+                                 "/30000/20000/5000/34860/40/9000/100/3/7/896/2/1/500/128000/60/15360",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -1930,7 +1935,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "reads": 700000, "items": 90000, "probes_over": 1, "thinned": 2,
                 "by_nodes": 30000, "by_placements": 20000, "by_arrays": 5000, "by_list_members": 34860,
                 "by_list_chunks": 40, "by_chunk_members": 9000, "by_array_members": 100, "by_pages": 3,
-                "map_updates": 7, "reserve_mb": 896, "occ_pages": 2, "occ_decoded": 1})
+                "map_updates": 7, "reserve_mb": 896, "occ_pages": 2, "occ_decoded": 1,
+                "full_chunks": 500, "full_members": 128000, "sampled_chunks": 60, "sampled_members": 15360})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)

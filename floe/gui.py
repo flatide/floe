@@ -1067,11 +1067,17 @@ def perf_status(res, depth_note=""):
                 # last, after the array members - user 2026-10-02)
                 # (a page's dots placed by its occupancy grid, design.ovb, say
                 # so after the pages: whether the cache has one, 2026-10-02)
+                # (the point-list chunks passed over in full blocks and those
+                # read at a step right after the chunks, with their members:
+                # 2026-10-03)
+                held = {"by_list_chunks": "by_chunk_members", "full_chunks": "full_members",
+                        "sampled_chunks": "sampled_members"}
                 by = ", ".join("%s %s%s" % (name, fmt_count(p2[key]), " of %s members" % fmt_count(
-                    p2.get("by_chunk_members", 0)) if key == "by_list_chunks" else " (%s by occupancy)" % fmt_count(
+                    p2.get(held[key], 0)) if key in held else " (%s by occupancy)" % fmt_count(
                     p2["occ_pages"]) if key == "by_pages" and p2.get("occ_pages") else "") for key, name in (
                     ("by_nodes", "nodes"), ("by_placements", "placements"), ("by_arrays", "arrays"),
                     ("by_list_members", "list members"), ("by_list_chunks", "list chunks"),
+                    ("full_chunks", "list chunks in full blocks"), ("sampled_chunks", "list chunks sampled"),
                     ("by_array_members", "array members"), ("by_pages", "pages"),
                     # pages under the floor decoded, their occupancy cells too
                     # coarse on screen for dots (2026-10-03)

@@ -61,6 +61,9 @@
     놓은 것이 있으면 `pages N (M by occupancy)`로 보인다. 캐시에 그 파일이 있는지 이것으로 안다. 0.12.278부터 칸이 너무 커서
 디코드한 하한 아래 페이지가 있으면 `pages decoded under the floor K`가 붙는다. 0.12.279부터 밀도 태그 끝에 2패스의 디코드와
     래스터 벽시계 시간 `pass 2 decode D ms, raster R ms`가 붙는다(사용자 2026-10-03, 449개 레이어 뷰가 35초 이상 걸림).
+    0.12.280부터 출처의 `list chunks … of … members` 뒤에, 있으면 `list chunks in full blocks C of M members`(읽지 않고
+    건너뛴 청크)와 `list chunks sampled C of M members`(표본으로 읽은 청크)가 붙는다. `list members`는 하나씩 읽은 멤버
+    수다.
   - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
     - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
       붙는다. load의 `[plan+delta+apply]`는 빠진다.
