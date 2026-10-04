@@ -197,6 +197,24 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.294(1패스 도형이 먼저: 모든 평면의 밀도는 원본이 없는 곳에만) `shapes_first_checks`:
+      - 장면:
+        - LOW의 18×16 µm 원본(x 2~20 µm).
+        - TOP(4/0)의 0.05 µm 사각형 40,000개. 띠(x 10~30 µm)가 LOW의 오른쪽 가장자리를 가로지른다.
+        - TOP1(4/1)의 점(띠 밖).
+      - TOP이 맨 위 평면(LOW, TOP)이든 TOP1 아래의 최상위 평면(LOW, TOP, TOP1)이든 다음이 성립한다.
+        - LOW 원본 위(x 10~20 µm)에 TOP이 없고, 그 칸은 LOW 단독과 같다.
+        - 오른쪽(x 20~30 µm)은 LOW 단독이 비워 둔 픽셀에서 TOP 단독과 같다(4,625 px). LOW 외곽선이 가장자리 다음 열을
+          칠한다.
+        - 2패스 최상위 면이 계획한 빈 픽셀(`free_top`)은 50,859 px로, 킬 스위치를 켰을 때(80,000)보다 적다.
+      - 킬 스위치(`FLOE_RUST_DENSITY_SHAPES_FIRST=off`)면 LOW 원본 위에도 TOP 단독처럼 켠다(4,664 px).
+      - 이 게이트의 다른 검사는 `main`이 `FLOE_RUST_DENSITY_SHAPES_FIRST=off`로 고정한다. "최상위 평면은 아래 원본 위에도"
+        규칙(§10.10) 위에서 만든 검사들이다.
+      - 단위 `with_the_shapes_first_no_plane_draws_its_density_over_an_original`:
+        - 최상위 평면 1개 / 2개: 원본 위에 없고 빈 곳은 단독과 같다. 2패스 최상위 면이 받는 영역은 아래 평면의 영역과
+          같다.
+        - 끄면 원본 위에도 그리고, 받는 영역도 더 넓다. 타일·워커와 무관하다.
+      - vfs 단위 `a_page_decoded_under_the_floor_keeps_aside_the_blocks_a_box_holds_whole`(`HierOpts::dot_occ_boxes`).
     - 0.12.293(최상위 평면은 그리기 순서상 위에서 8개, 평면마다 따로 계획; 0.12.292는 맨 위 레이어 번호) `top_group_checks`:
       - LOW의 36×16 µm 원본, TOP(4/0)의 0.05 µm 사각형 40,000개(띠), TOP1(4/1)의 점 몇 개(띠 밖, 맨 위 평면).
       - TOP의 띠 안 픽셀(9,330 px)이 LOW를 켜도 같다. 킬 스위치(`FLOE_RUST_DENSITY_TOP_GROUP=off`)면 TOP은 아래 평면이라

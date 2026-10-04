@@ -2517,6 +2517,21 @@ fn density_top_group(_cache: &Cache, mut styled: StyledGeometryRasterRequest) ->
     styled
 }
 
+/// Pass 1's shapes come first (user 2026-10-04, the real chip: 787 and 789
+/// draw nothing in pass 1 - in pass 2 787 covers 789 or some of 789's density
+/// goes; "if pass 1 drew the shapes past the cut, density drawn only in the
+/// space left will hardly jar"; then "go on with the simplification too"): no
+/// plane's density, the top planes' neither, shows where pass 1 wrote or
+/// covers (render-core GeometryRasterRequest::density_shapes_first) - the top
+/// planes, each planned on its own (density_top_group), fill the space left
+/// top first, the planes under them what is left after. FLOE_RUST_DENSITY_SHAPES_FIRST=off
+/// is the kill switch: each top plane's density over the originals of the
+/// planes below it (0.12.293).
+fn density_shapes_first() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_SHAPES_FIRST").as_deref() != Ok("off"))
+}
+
 /// The density stack's pass 2 alone (user 2026-10-04: "789's dots still go
 /// when 787 is on - it may be pass 1's budget; an option to pass the shapes
 /// by and draw the density alone, to compare"): pass 1 decodes no page and
@@ -3381,6 +3396,8 @@ fn run_render(
         // the sub-cut dots' composition: a density shape claims what it lights
         density_claim_lit: density_dots_enabled(),
         density_top_planes: 1,
+        // pass 1's shapes first: every plane's density in the space they left
+        density_shapes_first: density_shapes_first(),
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache

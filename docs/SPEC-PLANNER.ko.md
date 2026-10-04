@@ -456,6 +456,14 @@
       `HierStats::occ_fallback`에 따로 둔다. `fit_at_cut`이 끝나면 `settle_occ_fallback`이 빠진 페이지의 항목만 셀의
       washes에 더하고, 남은 페이지 수를 `dot_occ_decoded`로 둔다. 병합된 계획은 (셀, 페이지, 레이어, 블록)마다 큰 쪽
       하나만 쓴다. 예산 맞춤이 없는 계획은 모두 디코드한다.
+      - 0.12.294(`HierOpts::dot_occ_boxes`, 킬 스위치 `FLOE_RUST_DENSITY_OCC_BOXES=off`): 따로 두는 항목은 셀의 상자가
+        통째로 담는 블록(`dot_block_whole`)만이다. `flush_dots`의 `dot_boxes` 규칙과 같다.
+        - 전에는 셀 뷰(상자들의 경계) 안의 모든 블록이었다.
+        - 영역을 스레드에 나눠 주면 스레드마다 같은 블록을 두었고, 맞춤이 그만큼 더 정렬했다.
+      - 단위 `a_page_decoded_under_the_floor_keeps_aside_the_blocks_a_box_holds_whole`:
+        - 영역은 두 상자다. 하나는 페이지의 왼쪽 아래 모서리, 다른 하나는 오른쪽 위 모서리 너머에 있다.
+        - 두 상자의 경계는 오른쪽 위 모서리를 담지만, 어느 상자도 그 모서리를 담지 않는다.
+        - 켜면 왼쪽 아래에만 항목이 선다. 끄면 오른쪽 위에도 선다.
       - 단위 `a_page_under_the_floor_too_coarse_for_its_grid_is_decoded_or_its_dots_stand_in`: 600 px 페이지(칸 9.4 px)는
         예산이 넉넉하면 디코드되어 점이 없다. 예산이 없으면 그 점이 퍼뜨리기와 같은 항목 수·점 수로 선다. 40 px 페이지는
         그대로 퍼뜨린다.

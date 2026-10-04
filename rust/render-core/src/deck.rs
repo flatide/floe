@@ -1224,6 +1224,7 @@ fn stream_pass(
         density_stack: false,
         density_claim_lit: false,
         density_top_planes: 1,
+        density_shapes_first: false,
     };
     let mut report = StreamReport {
         pass_bytes_max: first_bytes,
@@ -1400,6 +1401,7 @@ fn raster_pass(
         density_stack: false,
         density_claim_lit: false,
         density_top_planes: 1,
+        density_shapes_first: false,
     };
     // a frames-only pass only when this placement's plan holds a
     // hierarchy frame at all (analysis 2026-09-09: the pass ran, and

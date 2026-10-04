@@ -1296,7 +1296,9 @@ def top_group_checks(temp):
     switch off TOP is a lower plane and LOW's original keeps them out; LOW
     shows where TOP does not light. Standard cells under the cut holding LOW
     and MID, both top planes, are dots of each - planned as one, a plan
-    counts a cell for its topmost layer alone and LOW had none."""
+    counts a cell for its topmost layer alone and LOW had none. The top planes
+    over the originals below them: with the shapes first off (main;
+    shapes_first_checks the default)."""
     src = Path(temp) / 'top_group.oas'
     top_group_layout(src)
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
@@ -1354,6 +1356,81 @@ def top_group_checks(temp):
         assert low_on > 0 and mid_on > 0 and abs(low_on - low_off) <= 0.1 * low_off, ('standard cells of two top planes', low_on, low_off, mid_on)
         print('density stack: standard cells under the cut, LOW and MID top planes each planned on its own - LOW %d px (a lower plane %d), '
               'MID %d px' % (low_on, low_off, mid_on))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
+def shapes_first_layout(path):
+    """LOW's 18 x 16 um square (an original past every cut, x 2-20 um); TOP's
+    40,000 0.05 um squares at random over a 20 x 10 um band across its right
+    edge - over it left of x 20 um, where no original is right of it - and
+    TOP1's 0.1 um specks every 4 um above y 18 um, clear of the band."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    top.shapes(ly.layer(*LOW)).insert(kdb.DBox(2, 2, 20, 18))
+    dense = ly.layer(*TOP)
+    rnd = random.Random(29)
+    for _ in range(40_000):
+        x, y = 10 + rnd.randrange(20_000) / 1000.0, 5 + rnd.randrange(10_000) / 1000.0
+        top.shapes(dense).insert(kdb.DBox(x, y, x + 0.05, y + 0.05))
+    upper = ly.layer(*TOP1)
+    for i in range(10):
+        top.shapes(upper).insert(kdb.DBox(1.0 + i * 4.0, 18.5, 1.1 + i * 4.0, 18.6))
+    ly.write(str(path))
+
+
+def shapes_first_checks(temp):
+    """Pass 1's shapes come first (user 2026-10-04, the real chip: "if pass 1
+    drew the shapes past the cut, density drawn only in the space left will
+    hardly jar"; renderd density_shapes_first, FLOE_RUST_DENSITY_SHAPES_FIRST=off
+    the kill switch): no plane's density, the top planes' neither, shows where
+    an original is. TOP's dense specks across LOW's right edge - TOP the
+    topmost plane, or a top plane under TOP1 - light nothing over LOW's
+    original, which shows as LOW alone, and right of it the pixels they light
+    without LOW where LOW alone leaves the frame dark (its outline takes the
+    column past its edge); pass 2's top side plans less free space than with
+    the switch off, where they light over LOW's original as without it."""
+    src = Path(temp) / 'shapes_first.oas'
+    shapes_first_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_TOP_GROUP': 'on'}
+    workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_SHAPES_FIRST='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_SHAPES_FIRST='off'))}
+    try:
+        low_c, top_c = layer_colour(workers['on'], LOW), layer_colour(workers['on'], TOP)
+        # the band over LOW's original (x 10-20 um) and right of it (20-30 um)
+        over, free = (range(100, 200), range(50, 150)), (range(200, 300), range(50, 150))
+
+        def of(pixels, colour, part):
+            return {(c, r) for r in part[1] for c in part[0] if px(pixels, c, r) == colour}
+
+        def same(a, b, part):
+            return all(px(a, c, r) == px(b, c, r) for r in part[1] for c in part[0])
+
+        alone = frame(workers['on'], 1, (TOP,))[0]
+        low_alone = frame(workers['on'], 2, (LOW,))[0]
+        want_free, want_over = of(alone, top_c, free), of(alone, top_c, over)
+        # where no original is: LOW alone leaves it dark
+        empty = {(c, r) for (c, r) in want_free if px(low_alone, c, r) == BLACK}
+        assert want_free and want_over and len(empty) < len(want_free), ('TOP alone', len(want_free), len(want_over), len(empty))
+        gen = 2
+        for visible in ((LOW, TOP), (LOW, TOP, TOP1)):
+            gen += 1
+            on, res_on = frame(workers['on'], gen, visible)
+            off, res_off = frame(workers['off'], gen, visible)
+            assert not of(on, top_c, over) and same(on, low_alone, over), (visible, 'TOP over LOW', len(of(on, top_c, over)))
+            assert of(on, top_c, free) == empty, (visible, 'TOP where no original is', len(of(on, top_c, free)), len(empty))
+            assert of(off, top_c, over) == want_over and of(off, top_c, free) == want_free, (visible, 'the switch off', len(of(off, top_c, over)))
+            free_on, free_off = res_on['density_plan2']['free_top'], res_off['density_plan2']['free_top']
+            assert 0 < free_on < free_off, (visible, 'the top side planned', free_on, free_off)
+            print('density stack: pass 1\'s shapes first, %s - TOP none over LOW\'s original (the switch off %d px, as alone), '
+                  '%d px right of it as alone; the top side planned %d free px (off %d)'
+                  % ('TOP topmost' if len(visible) == 2 else 'TOP under TOP1', len(of(off, top_c, over)), len(empty), free_on, free_off))
     finally:
         for w in workers.values():
             w.stop()
@@ -1889,6 +1966,10 @@ def main():
     # the originals below it - every plane of these small views): top_group_checks
     # alone draws the eight
     os.environ['FLOE_RUST_DENSITY_TOP_GROUP'] = 'off'
+    # and the top planes' density over the originals below them, as these
+    # checks were made (renderd density_shapes_first: every plane's density
+    # where no original is): shapes_first_checks alone keeps it to that space
+    os.environ['FLOE_RUST_DENSITY_SHAPES_FIRST'] = 'off'
     with tempfile.TemporaryDirectory(prefix='floe-density-stack-') as temp:
         src = Path(temp) / 'stack.oas'
         layout(src)
@@ -1984,6 +2065,7 @@ def main():
         top_first_checks(temp)
         density_only_checks(temp)
         top_group_checks(temp)
+        shapes_first_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

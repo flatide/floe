@@ -380,6 +380,14 @@ pub fn dot_page_occ() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_PAGE_OCC").as_deref() != Ok("off"))
 }
 
+/// HierOpts::dot_occ_boxes default: on; FLOE_RUST_DENSITY_OCC_BOXES=off (the
+/// kill switch) keeps aside every block in view of a page decoded under the
+/// floor, as before 2026-10-04.
+pub fn dot_occ_boxes() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_OCC_BOXES").as_deref() != Ok("off"))
+}
+
 /// HierOpts::dot_occ_decode default: on; FLOE_RUST_DENSITY_OCC_DECODE=off (the
 /// kill switch) spreads a page under the floor however large its occupancy
 /// cells show, as 0.12.277 - and so does FLOE_RUST_DENSITY_UNDER_FLOOR=drop,
@@ -1219,6 +1227,18 @@ pub struct HierOpts {
     /// FLOE_RUST_DENSITY_OCC_DECODE=off is the kill switch.
     pub dot_occ_decode: bool,
     pub dot_occ_cell_px: f64,
+    /// Under dot_boxes, a page decoded under the floor (dot_occ_decode) keeps
+    /// aside the dot items of its spread for the blocks the cell's boxes hold
+    /// whole (dot_block_whole), as flush_dots keeps a cell's - not every block
+    /// of the page in the cell's view (2026-10-04: pass 2's regions dealt to
+    /// four threads, each thread's plan kept every block in view aside and the
+    /// fit sorted four times them; a top plane's regions cut into 21 boxes by
+    /// the originals of the planes below it - every plane's density where no
+    /// original is - planned a dense layer's page at depth 0 in 50 ms against
+    /// 13 for 9 boxes). A block no box holds whole lies where the plan's
+    /// density does not show. FLOE_RUST_DENSITY_OCC_BOXES=off is the kill
+    /// switch: every block in view.
+    pub dot_occ_boxes: bool,
     /// A point list's members no wider than a dot block counted straight
     /// from their offsets - add_dots' block and dots, the same for every
     /// member of the list - and summed while consecutive members (Morton
@@ -1414,6 +1434,7 @@ impl Default for HierOpts {
             dot_occ_cover: dot_occ_cover(),
             dot_occ_decode: dot_occ_decode(),
             dot_occ_cell_px: dot_occ_cell_px(),
+            dot_occ_boxes: dot_occ_boxes(),
             dot_list_fast: dot_list_fast(),
             dot_list_full: dot_list_full(),
             dot_list_sample: dot_list_sample(),
@@ -2524,6 +2545,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
             && (opts.dot_page_spread_boxes || (opts.dot_page_occ && v.has_page_occ())))
         .then_some(opts.dot_occ_cell_px),
         cell_fallback: Vec::new(),
+        occ_boxes: opts.dot_occ_boxes && opts.dot_boxes,
         list_fast: opts.dot_list_fast,
         list_full: opts.dot_list_full,
         list_sample: opts.dot_list_sample,
@@ -2962,6 +2984,8 @@ struct Hier<'a> {
     /// which a page under the floor is decoded, and the dot items of the cell's
     /// so decoded pages kept aside
     occ_decode_px: Option<f64>,
+    /// HierOpts::dot_occ_boxes (and dot_boxes)
+    occ_boxes: bool,
     cell_fallback: Vec<OccFallback>,
     /// HierOpts::dot_list_fast, HierOpts::dot_list_full, HierOpts::dot_list_sample
     list_fast: bool,
@@ -4452,7 +4476,13 @@ impl<'a> Hier<'a> {
             let v = self.v;
             if let Some(floe_ovm::PageOcc::Grid(levels)) = v.page_occ(pi) {
                 let holds = self.page_dots(p);
+                let block = self.block_px / self.px_per_dbu;
                 for ((bx, by, layer), dots, piece) in self.occ_items(p.layer_idx, p.bbox, &levels, holds, pi as u64) {
+                    // HierOpts::dot_occ_boxes: a block no box of the cell holds
+                    // whole is left out, as flush_dots leaves it
+                    if self.occ_boxes && !dot_block_whole(bx, by, block, &self.cell_boxes, &self.cell_rbbox) {
+                        continue;
+                    }
                     self.cell_fallback.push(OccFallback { key: (0, 0), page: pi, layer, block: (bx, by), piece, dots: dots.min(u16::MAX as u32) as u16 });
                 }
             }
@@ -8662,6 +8692,55 @@ mod tests {
         // no budget fit: decoded, nothing stands in
         let plain = plan_hier(&chip, &ask(0), &opts(true));
         assert!(plain.pages.contains(&0) && of(&plain, &in_a).0 == 0);
+    }
+
+    #[test]
+    fn a_page_decoded_under_the_floor_keeps_aside_the_blocks_a_box_holds_whole() {
+        // HierOpts::dot_occ_boxes (2026-10-04: pass 2's regions dealt to four
+        // threads, each thread's plan kept a dense page's every block in view
+        // aside). The fixture above under a budget that holds no page, planned
+        // over two regions - page A's lower left corner and a box past its
+        // upper right one: their bounds hold that corner, no box does. A's
+        // dots stand in for the lower left corner alone; off (the kill
+        // switch), for the upper right one too, every block in view.
+        let cells = [FCell {
+            name: "TOP",
+            pages: vec![(bx(0, 0, 6_000, 6_000), 5, 5), (bx(8_000, 0, 8_100, 100), 100, 100), (bx(300, 6_300, 700, 6_700), 5, 5)],
+            places: vec![],
+        }];
+        let mut chip = fixture_members(&cells, 0, true, &|_, k| if k == 0 { 40_000 } else { 1 });
+        let a: Box<[u8; floe_ovm::OCC_CELLS]> = Box::new(std::array::from_fn(|at| if (at % 64 < 16 && at / 64 < 16) || (at % 64 >= 56 && at / 64 >= 56) { 15 } else { 0 }));
+        let c: Box<[u8; floe_ovm::OCC_CELLS]> = Box::new(std::array::from_fn(|at| if at % 64 < 8 && at / 64 < 8 { 15 } else { 0 }));
+        let ovb = ovb_of(&chip, &[(0, a), (2, c)]);
+        chip.attach_page_occ_backing(ovb).unwrap();
+        let mut ask = rq(bx(-10, -10, 9_000, 9_000), 30, 0);
+        ask.px_per_dbu = 0.1;
+        ask.page_wash = false;
+        ask.decode_budget = 1;
+        let opts = |on: bool| HierOpts {
+            sub_cut_dots: Some(1.0 / 3.0),
+            dot_block_px: 8.0,
+            dot_spread: true,
+            dot_page_spread: true,
+            dot_occ_decode: true,
+            dot_occ_cell_px: 4.0,
+            dot_occ_boxes: on,
+            regions: vec![bx(-10, -10, 2_000, 2_000), bx(7_000, 6_000, 7_200, 6_800)],
+            k_boxes: 4,
+            ..HierOpts::default()
+        };
+        let of = |plan: &HierPlan, f: &dyn Fn(&BBox) -> bool| -> (usize, u32) {
+            let cell = plan.wcells.iter().find(|w| w.key.0 == 0).unwrap();
+            let picked: Vec<u32> = cell.washes.iter().zip(&cell.dot_counts).filter(|(&(_, b), _)| f(&b)).map(|(_, &n)| n as u32).collect();
+            (picked.len(), picked.iter().sum())
+        };
+        let lower_left = |b: &BBox| b.x1 <= 2_000 && b.y1 <= 2_000;
+        let upper_right = |b: &BBox| b.x0 >= 5_200 && b.y0 >= 5_200 && b.x1 <= 6_000 && b.y1 <= 6_000;
+        let (on, off) = (plan_hier(&chip, &ask, &opts(true)), plan_hier(&chip, &ask, &opts(false)));
+        assert!(!on.pages.contains(&0) && !off.pages.contains(&0), "{:?} {:?}", on.pages, off.pages);
+        assert!(of(&on, &lower_left).0 > 0 && of(&on, &lower_left) == of(&off, &lower_left), "{:?} {:?}", of(&on, &lower_left), of(&off, &lower_left));
+        assert_eq!(of(&on, &upper_right).0, 0);
+        assert!(of(&off, &upper_right).0 > 0);
     }
 
     #[test]

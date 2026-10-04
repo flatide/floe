@@ -137,6 +137,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             density_stack: false,
             density_claim_lit: false,
             density_top_planes: 1,
+            density_shapes_first: false,
         };
         let (mode, raster) = if args.styles.is_empty() {
             (

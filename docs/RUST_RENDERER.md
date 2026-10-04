@@ -366,7 +366,12 @@ spread - a coarse cell's dots landed where no shape is (user 2026-10-03, the
 field chip) - its spread's dots standing in when the budget fit leaves it out
 (`HierOpts::dot_occ_decode`; `FLOE_RUST_DENSITY_OCC_DECODE=off` is the kill
 switch, and UNDER_FLOOR=drop turns it off too); `density_plan2`'s 25th value
-is the pages so decoded (`occ_decoded`). Since 0.12.280 a point list's chunk
+is the pages so decoded (`occ_decoded`). Since 0.12.294 such a page keeps
+aside the dots of the blocks the cell's boxes hold whole, as a cell's own
+dots are kept (`HierOpts::dot_occ_boxes`; `FLOE_RUST_DENSITY_OCC_BOXES=off` is
+the kill switch: every block in view) - pass 2's regions dealt to four
+threads each kept a dense page's every block in view aside, and the fit
+sorted four times them. Since 0.12.280 a point list's chunk
 (256 members in Morton order) whose blocks are all at their cap is passed over
 unread - where its members are is the Morton run between its first and last,
 in aligned squares (`HierOpts::dot_list_full`;
@@ -451,7 +456,15 @@ walk, where no original is (renderd `density_top_group`;
 `FLOE_RUST_DENSITY_TOP_PLANES` sets how many, diagnostic;
 `FLOE_RUST_DENSITY_TOP_GROUP=off` is the kill switch: the topmost alone).
 Pass 2 decodes the pages in the drawing order down, each plane's after the
-planes above it (`density_top_first`).
+planes above it (`density_top_first`). Since 0.12.294 pass 1's shapes come
+first: no plane's density, the top planes' neither, shows where an original
+wrote or covers - the top planes, each still planned on its own, fill the
+space left top first, and pass 2's top side plans that space alone (user
+2026-10-04: "if pass 1 drew the shapes past the cut, density drawn only in
+the space left will hardly jar"; render-core
+`GeometryRasterRequest::density_shapes_first`, renderd `density_shapes_first`;
+`FLOE_RUST_DENSITY_SHAPES_FIRST=off` is the kill switch: each top plane's
+density over the originals below it, as 0.12.293).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's
