@@ -438,15 +438,20 @@ density alone: pass 1 of a density frame reads no page and draws no shape
 (its plan keeps the hierarchy), so pass 2's reserve is the whole budget - to
 tell pass 1's budget from pass 2's own (user 2026-10-04: "789's dots still go
 when 787 is on"); the viewer's density tag says `density only`. Since
-0.12.292 every visible datatype of the topmost layer number is a top plane
-(render-core `GeometryRasterRequest::density_top_planes`): pass 2's top side
-plans them all and each draws its density over the originals below it, the
-top first, kept out by the originals of the top planes above it and its own;
-the layers under them in one walk, where no original is (user 2026-10-04:
-with 787.* and 789.* on, 789's datatypes under the topmost one went under
-787's shapes; renderd `density_top_group`, `FLOE_RUST_DENSITY_TOP_GROUP=off`
-is the kill switch). Pass 2 decodes the pages in the drawing order down,
-each plane's after the planes above it (`density_top_first`).
+0.12.293 the top planes are the topmost eight visible layers by the drawing
+order - (layer, datatype) ascending, the last on top (user 2026-10-04:
+"789.55 first, then 789.20, 789.0, 787.55, 787.20, 787.0, filling what is
+empty"; 0.12.292 took the topmost layer number's datatypes): each is planned
+on its own (a plan counts a sub-cut cell for its topmost layer alone), the
+plans merged into pass 2's top side, and each draws its density over the
+originals below it, the top first, kept out by the originals of the top
+planes above it and its own (render-core
+`GeometryRasterRequest::density_top_planes`); the layers under them in one
+walk, where no original is (renderd `density_top_group`;
+`FLOE_RUST_DENSITY_TOP_PLANES` sets how many, diagnostic;
+`FLOE_RUST_DENSITY_TOP_GROUP=off` is the kill switch: the topmost alone).
+Pass 2 decodes the pages in the drawing order down, each plane's after the
+planes above it (`density_top_first`).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

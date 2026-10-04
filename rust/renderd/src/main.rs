@@ -2495,25 +2495,25 @@ fn density_top_held() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_TOP_HELD").as_deref() != Ok("off"))
 }
 
-/// The density stack's top planes are every visible datatype of the topmost
-/// layer number (user 2026-10-04, 0.12.291 on the real chip: "789's density
-/// still shrinks when 787 is on - in places 787 covers where 789 was, in
-/// places 789's dots are simply gone"; with 787.* and 789.* on only 789's
-/// topmost datatype was the top plane - the others' density, a lower plane's,
-/// showed only where no original was, and 787's shapes took it): pass 2's top
-/// side plans them all, each drawing over the originals below it, the top
-/// first (render-core GeometryRasterRequest::density_top_planes).
-/// FLOE_RUST_DENSITY_TOP_GROUP=off is the kill switch: the topmost one alone.
-fn density_top_group(cache: &Cache, mut styled: StyledGeometryRasterRequest) -> StyledGeometryRasterRequest {
-    let mut count = 1usize;
-    if std::env::var("FLOE_RUST_DENSITY_TOP_GROUP").as_deref() != Ok("off") {
-        let layers = cache.layers();
-        let number = |idx: u32| layers.iter().find(|layer| layer.index == idx).map(|layer| layer.layer);
-        if let Some(top) = styled.layers.last().and_then(|layer| number(layer.layer_idx)) {
-            count = styled.layers.iter().rev().take_while(|layer| number(layer.layer_idx) == Some(top)).count().max(1);
-        }
-    }
-    styled.raster.density_top_planes = count.min(u16::MAX as usize) as u16;
+/// The density stack's top planes are the topmost DENSITY_TOP_PLANES of the
+/// visible layers by the drawing order - (layer, datatype) ascending, the last
+/// on top (user 2026-10-04: "787.0, 787.20, 787.55, 789.0, 789.20, 789.55 -
+/// the top layer is 789.55 ... we draw from the top, filling what is empty:
+/// 789.55 first, then 789.20, 789.0, 787.55, 787.20, 787.0"): each is planned
+/// on its own and draws its density over the originals below it, the top
+/// first (render-core GeometryRasterRequest::density_top_planes); the layers
+/// under them in one walk where no original is. FLOE_RUST_DENSITY_TOP_PLANES
+/// sets how many (diagnostic); FLOE_RUST_DENSITY_TOP_GROUP=off is the kill
+/// switch: the topmost one alone.
+const DENSITY_TOP_PLANES: usize = 8;
+
+fn density_top_group(_cache: &Cache, mut styled: StyledGeometryRasterRequest) -> StyledGeometryRasterRequest {
+    let count = if std::env::var("FLOE_RUST_DENSITY_TOP_GROUP").as_deref() == Ok("off") {
+        1
+    } else {
+        std::env::var("FLOE_RUST_DENSITY_TOP_PLANES").ok().and_then(|v| v.trim().parse::<usize>().ok()).filter(|&k| k > 0).unwrap_or(DENSITY_TOP_PLANES)
+    };
+    styled.raster.density_top_planes = count.clamp(1, styled.layers.len().max(1)).min(u16::MAX as usize) as u16;
     styled
 }
 
@@ -4422,15 +4422,20 @@ fn render_density_frame(
                     // originals may have left the others little (a reviewer,
                     // 2026-10-03: an all-layer fit view at full depth)
                     let joint = dots && cells.is_none() && !regions_top.is_empty() && 2.0 * others_free >= top_free;
-                    let jobs = if joint {
-                        vec![(regions_top, styled.layers.iter().map(|layer| layer.layer_idx).collect::<Vec<u32>>())]
+                    // the jobs: (side, regions, layers) - the top planes each on its own
+                    // (a plan counts a sub-cut item for its topmost layer alone: the
+                    // top planes planned as one lost the lower ones' dots), merged
+                    // into the top side; the others in one plan
+                    let jobs: Vec<(usize, _, Vec<u32>)> = if joint {
+                        vec![(0, regions_top, styled.layers.iter().map(|layer| layer.layer_idx).collect::<Vec<u32>>())]
                     } else {
-                        vec![
-                            (regions_top, top_layers.clone()),
-                            (regions_others, other_layers.clone()),
-                        ]
+                        let mut jobs: Vec<(usize, _, Vec<u32>)> = top_layers.iter().rev().map(|&layer| (0, regions_top.clone(), vec![layer])).collect();
+                        jobs.push((1, regions_others, other_layers.clone()));
+                        jobs
                     };
-                    for (side, (regions, layers)) in jobs.into_iter().enumerate() {
+                    let top_jobs = if joint { 1 } else { top_layers.len() };
+                    let mut top_plans: Vec<HierPlan> = Vec::new();
+                    for (side, regions, layers) in jobs {
                         if regions.is_empty() || layers.is_empty() {
                             continue;
                         }
@@ -4440,7 +4445,7 @@ fn render_density_frame(
                             .iter()
                             .map(|b| ViewBox::new(b.x0, b.y0, b.x1, b.y1))
                             .collect::<Result<Vec<_>, _>>()?;
-                        let side_key = format!("{fit_key}|density{side}");
+                        let side_key = if side == 0 && top_jobs > 1 { format!("{fit_key}|density0|{}", layers[0]) } else { format!("{fit_key}|density{side}") };
                         let reserve = reserve_bytes;
                         // one plan of this side: the sub-cut dots' (the cells at pass 1's
                         // cut - a cell under it is a dot item, never walked into or
@@ -4651,6 +4656,15 @@ fn render_density_frame(
                             // a decoded page's shapes under the floor are drawn,
                             // by area, as the spread pages under it are
                             planned_fine.stats.shape_cut = 0;
+                        }
+                        if side == 0 && top_jobs > 1 {
+                            // a top plane's plan: the top side is all of them, merged
+                            top_plans.push(planned_fine);
+                            if top_plans.len() < top_jobs {
+                                times[0] += elapsed_us(plan_started);
+                                continue;
+                            }
+                            planned_fine = floe_render_core::Cache::merge_plans(std::mem::take(&mut top_plans), floe_render_core::dot_block_px() / px_per_dbu);
                         }
                         let density_plan = Arc::new(planned_fine);
                         times[0] += elapsed_us(plan_started);

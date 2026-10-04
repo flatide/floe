@@ -3481,7 +3481,7 @@ fn raster_tile_pass(
             let Some(density) = density else {
                 unreachable!("checked above");
             };
-            let side = usize::from(plane + 1 != styled.layers.len());
+            let side = usize::from(!density_is_top(styled, plane));
             let layer = &styled.layers[plane];
             let paint = plane_paint(styled, plane);
             match density.bin {

@@ -1285,15 +1285,18 @@ def top_group_layout(path):
 
 
 def top_group_checks(temp):
-    """Every visible datatype of the topmost layer number is a top plane
-    (user 2026-10-04, the real chip: with 787.* and 789.* on, "789's density
-    still shrinks when 787 is on - in places 787 covers where 789 was, in
-    places 789's dots are simply gone"; renderd density_top_group,
+    """The topmost planes by the drawing order are top planes, each planned
+    on its own (user 2026-10-04, the real chip: with 787.* and 789.* on,
+    "789's density still shrinks when 787 is on"; then "787.0 ... 789.55: the
+    top layer is 789.55 - we draw 789.55 first, then 789.20, 789.0, 787.55,
+    787.20, 787.0, filling what is empty"; renderd density_top_group,
     FLOE_RUST_DENSITY_TOP_GROUP=off the kill switch): TOP1 is the topmost
-    plane, TOP - its layer number's other datatype - a top plane too, so its
-    dense specks over LOW's original light the same pixels with LOW on as
-    without it; with the switch off TOP is a lower plane and LOW's original
-    keeps them out; LOW shows where TOP does not light."""
+    plane, TOP under it a top plane too, so its dense specks over LOW's
+    original light the same pixels with LOW on as without it; with the
+    switch off TOP is a lower plane and LOW's original keeps them out; LOW
+    shows where TOP does not light. Standard cells under the cut holding LOW
+    and MID, both top planes, are dots of each - planned as one, a plan
+    counts a cell for its topmost layer alone and LOW had none."""
     src = Path(temp) / 'top_group.oas'
     top_group_layout(src)
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
@@ -1316,8 +1319,41 @@ def top_group_checks(temp):
         assert kept_off < 0.5 * len(alone['on']), ('the switch off', kept_off, len(alone['on']))
         low_on = of(both['on'], low_c)
         assert low_on and not (low_on & alone['on']), ('LOW where TOP does not light', len(low_on))
-        print('density stack: the topmost layer number\'s datatypes are top planes - TOP %d px in its band with LOW on as without it '
+        print('density stack: the topmost planes are top planes - TOP %d px in its band with LOW on as without it '
               '(the switch off kept %d); LOW %d px there where TOP does not light' % (len(alone['on']), kept_off, len(low_on)))
+    finally:
+        for w in workers.values():
+            w.stop()
+    # standard cells under the cut, each holding LOW (its box) and MID (inside
+    # it) - both top planes: planned as one a cell counts for its topmost layer
+    # alone and LOW had no dot; each on its own, LOW as when it is a lower plane
+    src = Path(temp) / 'top_cells.oas'
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    rnd = random.Random(23)
+    for t in range(4):
+        cell = ly.create_cell('S%d' % t)
+        w = 0.02 * (1 + 2 * t)
+        cell.shapes(ly.layer(*LOW)).insert(kdb.DBox(0, 0, w, 0.12))
+        cell.shapes(ly.layer(*MID)).insert(kdb.DBox(0.005, 0.01, w - 0.005, 0.03))
+        for _ in range(1500):
+            top.insert(kdb.DCellInstArray(cell.cell_index(), kdb.DTrans(kdb.DVector(rnd.randrange(39_800) / 1000.0, rnd.randrange(19_800) / 1000.0))))
+    ly.write(str(src))
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_TOP_GROUP='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_TOP_GROUP='off'))}
+    try:
+        low_c, mid_c = layer_colour(workers['on'], LOW), layer_colour(workers['on'], MID)
+        frames = {name: frame(w, 3, (LOW, MID))[0] for name, w in workers.items()}
+        count = lambda pixels, colour: sum(1 for r in range(H) for c in range(W) if px(pixels, c, r) == colour)
+        low_on, low_off, mid_on = count(frames['on'], low_c), count(frames['off'], low_c), count(frames['on'], mid_c)
+        assert low_on > 0 and mid_on > 0 and abs(low_on - low_off) <= 0.1 * low_off, ('standard cells of two top planes', low_on, low_off, mid_on)
+        print('density stack: standard cells under the cut, LOW and MID top planes each planned on its own - LOW %d px (a lower plane %d), '
+              'MID %d px' % (low_on, low_off, mid_on))
     finally:
         for w in workers.values():
             w.stop()
@@ -1848,6 +1884,11 @@ def main():
     # block too sparse is left out, floe_vfs HierOpts::dot_gate): gate_checks
     # alone gates them
     os.environ['FLOE_RUST_DENSITY_GATE'] = 'off'
+    # and one top plane over the lower planes' walk, as these checks were made
+    # (renderd density_top_group: the topmost eight are top planes, each over
+    # the originals below it - every plane of these small views): top_group_checks
+    # alone draws the eight
+    os.environ['FLOE_RUST_DENSITY_TOP_GROUP'] = 'off'
     with tempfile.TemporaryDirectory(prefix='floe-density-stack-') as temp:
         src = Path(temp) / 'stack.oas'
         layout(src)
