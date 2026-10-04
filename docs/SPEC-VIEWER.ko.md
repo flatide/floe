@@ -488,7 +488,8 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   페이지 최소 폭이 되어 pane이 왼쪽을 잘라 내며 되돌아올 길이 없었다;
   DRC 페이지의 "ellipsize + 가로 스크롤 금지" 규약은 그 페이지의 것으로
   유지) · 컨트롤 행(**FlowBox** — `highlight` 체크 = 기본 켬,
-  `zoom`, `root`, `top`; 좁으면 여러 줄로 감김) · 인덱스가 없을 때만
+  `zoom`; 좁으면 여러 줄로 감김. `root`·`top` 버튼은 0.12.289에서 뺐다 —
+  뷰 루트는 행 더블클릭, 아래 **뷰 루트**) · 인덱스가 없을 때만
   보이는 `build index…` 행 · 정보 줄(줄바꿈 라벨). `_build_cell_panel`,
   위젯 홀더 `_CellPanel`. **페이지 최소 폭 ≤ 156 px**(테스트
   `test_cell_page_fits_the_left_pane_at_its_start_width`): 현장
@@ -537,7 +538,8 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   뷰 키(src, ci, 뷰 박스 반올림)가 바뀌었으면 다시 묻는다
   (`_cell_hl_follow`; 데몬은 대기 중인 더 새 insts 질의가 있으면 옛것을
   `superseded`로 즉시 답한다). Tab 오버레이 숨김 상태에서는 그리지 않음.
-- **줌**(더블클릭·Enter·`zoom`·메뉴): `cell_bbox`의 범위를 DRC 점프와
+- **줌**(`zoom`·검색 박스 Enter·메뉴; 잡덱은 행 더블클릭·Enter도 — 레이아웃의
+  행 더블클릭은 0.12.289부터 뷰 루트): `cell_bbox`의 범위를 DRC 점프와
   같은 규칙으로 프레이밍(양 축 0.8, `CELL_VIEW_FRACTION`). 범위 =
   탑이 **직접 배치한 셀은 그 인스턴스 박스들의 정확한 합집합**, 더 깊은
   셀은 **그 셀을 품은 탑 직계 블록들의 범위**(요약이 엣지별 합집합만
@@ -560,11 +562,16 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   소스 좌표로 들어간다(render-core `DeckXf`). 소스가 여러 곳에 놓이면
   박스도 그만큼.
 - **뷰 루트**(2026-09-29, 0.12.241 / RENDERD 0.12.229 — Calibre 셀
-  트리의 "선택한 셀이 표시되는 탑이 된다"): Cell 메뉴 · 패널 `root`
-  버튼이 **선택한 셀을 뷰 루트**로 삼고(Ctrl+T 키는 사용자 요청으로
-  2026-09-30 삭제, 0.12.254 — 눌러도 아무 일 없음, 평문 `t`의 트리 포커스로
-  흘러가지도 않음; 계약 `test_ctrl_t_is_no_shortcut`), `Ctrl+Shift+T` ·
-  메뉴 · `top` 버튼(루트일 때만 활성)이 탑 셀로 돌아온다. 뷰 루트가
+  트리의 "선택한 셀이 표시되는 탑이 된다"): Cell 메뉴 · **트리 행 더블클릭**
+  (Enter도 같다; 찾기 결과 목록의 행도)이 **그 셀을 뷰 루트**로 삼고(Ctrl+T 키는
+  사용자 요청으로 2026-09-30 삭제, 0.12.254 — 눌러도 아무 일 없음, 평문 `t`의
+  트리 포커스로 흘러가지도 않음; 계약 `test_ctrl_t_is_no_shortcut`),
+  `Ctrl+Shift+T` · 메뉴 · **탑 셀 행 더블클릭**이 탑 셀로 돌아온다. 0.12.289
+  (사용자 2026-10-04: "셀 트리에서 셀을 더블클릭하면 해당 cell을 root로
+  변경하도록 해줘(root 버튼 기능). root 버튼과 top 버튼은 제거해줘."): 패널의
+  `root`·`top` 버튼을 뺐고, 더블클릭은 `_on_cell_activate`가 받는다 — 자리표시·
+  `more` 행은 무시, 잡덱의 행은 뷰 루트가 없으므로 전처럼 줌(계약
+  `test_a_double_click_in_the_cell_tree_sets_the_view_root`). 뷰 루트가
   서면 그 셀의 **자기 좌표**가 세계가 된다: 플래너(`ViewReq::root`,
   `PlanRequest::root`, 와이어 `render … root=CI`)가 그 셀에서 출발하고
   depth도 그 셀부터 센다; 라벨 플래너도 같은 루트에서 걷는다; 픽/스냅은

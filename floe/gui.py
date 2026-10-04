@@ -140,7 +140,7 @@ class _DrcPanel(object):
 class _CellPanel(object):
     """Widget refs of the cell tree panel (attribute bag)."""
     __slots__ = ("_search", "_tree", "_store", "_results", "_info",
-                 "_hl", "_zoom", "_build", "_root", "_top")
+                 "_hl", "_zoom", "_build")
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -4829,8 +4829,8 @@ class Viewer:
             self._goto_dialog()
         elif name == "t" and not ctrl:
             # (Ctrl+T - the view root - was removed, user 2026-09-30: the
-            # Cell menu and the panel's `root` button set it; Ctrl+T does
-            # nothing, it does not fall through to the tree's focus)
+            # Cell menu and a double-click in the cell tree set it; Ctrl+T
+            # does nothing, it does not fall through to the tree's focus)
             self._cell_tree_focus()
         elif name == "less":
             self._depth_step(-1)
@@ -6338,17 +6338,8 @@ class Viewer:
         zoom = Gtk.Button(label="zoom")
         zoom.connect("clicked", lambda *_: self._cell_zoom_selected())
         row.add(zoom)
-        # the view root (SPEC-VIEWER §8c): draw the selected cell as the
-        # top, in its own coordinates; `top` returns to the file's top
-        root = Gtk.Button(label="root")
-        root.set_tooltip_text("draw the selected cell as the view root")
-        root.connect("clicked", lambda *_: self._cell_set_root())
-        row.add(root)
-        top = Gtk.Button(label="top")
-        top.set_tooltip_text("back to the top cell (Ctrl+Shift+T)")
-        top.connect("clicked", lambda *_: self._cell_root_top())
-        top.set_sensitive(False)
-        row.add(top)
+        # (the view root is a double-click on a row, _on_cell_activate:
+        # the `root` and `top` buttons went, user 2026-10-04)
         for child in row.get_children():
             child.set_can_focus(False)   # the buttons take the focus
         box.pack_start(row, False, False, 0)
@@ -6370,7 +6361,6 @@ class Viewer:
         win._search, win._tree = se, tree
         win._store, win._results = store, results
         win._info, win._hl, win._zoom, win._build = info, hl, zoom, build
-        win._root, win._top = root, top
         self._cellwin = win
         return box
 
@@ -6405,7 +6395,6 @@ class Viewer:
         w = getattr(self, "_cellwin", None)
         if w is None:
             return
-        w._top.set_sensitive(False)
         w._store.clear()
         w._results.clear()
         w._tree.set_model(w._store)
@@ -6610,9 +6599,40 @@ class Viewer:
         self._cell_hl_key = None
         self._cell_hl_query()
 
-    def _on_cell_activate(self, _tree, _path, _col):
-        """Double-click / Enter on a row: zoom to the cell."""
-        self._cell_zoom_selected()
+    def _on_cell_activate(self, tree, path, _col):
+        """Double-click / Enter on a cell row: draw that cell as the view
+        root (SPEC-VIEWER §8c; user 2026-10-04: "double-clicking a cell in
+        the cell tree makes it the root" - the panel's `root` and `top`
+        buttons went); on the layout's top cell, back to the top. A
+        jobdeck has no view root: its rows zoom, as every row did before.
+        A placeholder or a `more` row does nothing."""
+        w = self._cellwin
+        if w is None:
+            return
+        model = tree.get_model()
+        row = model[path]
+        src, ci = row[2], row[3]
+        kind = "cell" if model is w._results else row[5]
+        if ci < 0 or kind not in ("cell", "source"):
+            return
+        self._cell_sel = (src, ci, row[0])
+        if getattr(self.cache, "is_jobdeck", False):
+            self._cell_zoom_selected()
+        elif ci == self._cell_top_ci():
+            self._cell_root_top()
+        else:
+            self._cell_set_root()
+
+    def _cell_top_ci(self):
+        """The layout's top cell as the tree shows it - its one root row -
+        or None (a jobdeck's sources, no tree yet)."""
+        w = self._cellwin
+        if w is None or len(getattr(self, "_cell_sources", None) or ()) != 1:
+            return None
+        it = w._store.get_iter_first()
+        if it is None or w._store[it][5] != "cell":
+            return None
+        return w._store[it][3]
 
     def _cell_info_text(self, res):
         name = self._cell_sel[2] if self._cell_sel else "cell"
@@ -6682,10 +6702,10 @@ class Viewer:
         return None if root is None else root["cell"]
 
     def _cell_set_root(self):
-        """Cell menu / `root` button: draw the selected cell as the
-        view root (Calibre's cell tree: the selected cell becomes the
-        displayed top). Its recursive bbox comes with a `cells` answer;
-        the root is applied when it lands."""
+        """Cell menu / a double-click on a tree row: draw the selected
+        cell as the view root (Calibre's cell tree: the selected cell
+        becomes the displayed top). Its recursive bbox comes with a
+        `cells` answer; the root is applied when it lands."""
         if self.cache is None:
             self._set_live_status("no layout")
             return
@@ -6722,11 +6742,12 @@ class Viewer:
                            "height": res.get("height", 0)}
         self._root_changed()
         self._set_live_status(
-            "view root: %s (%s, Ctrl+Shift+T = back to the top cell)"
-            % (res["name"], self._depth_label_for_root()))
+            "view root: %s (%s; back to the top: double-click the top cell "
+            "or Ctrl+Shift+T)" % (res["name"], self._depth_label_for_root()))
 
     def _cell_root_top(self):
-        """Ctrl+Shift+T / Cell menu / `top`: back to the file's top cell."""
+        """Ctrl+Shift+T / Cell menu / a double-click on the top cell's row:
+        back to the file's top cell."""
         if self._view_root is None:
             self._set_live_status("the top cell is the view root already")
             return
@@ -6745,15 +6766,12 @@ class Viewer:
         self._job_keys.clear()
         self._cell_hl = None
         self._cell_hl_key = None
-        w = self._cellwin
-        if w is not None:
-            w._top.set_sensitive(self._view_root is not None)
         root = self._view_root
         base = getattr(self, "_title_base", APP)
         self.window.set_title(base if root is None
                               else "%s · root %s" % (base, root["name"]))
         # the depth counts from the root: its deepest level is the root's
-        # height (the depth itself is kept, so `top` restores the view)
+        # height (the depth itself is kept, so the top restores the view)
         dstatus = getattr(self, "dstatus", None)
         if dstatus is not None:
             dstatus.set_text(self._depth_label())

@@ -1091,10 +1091,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # the old floor (the minimap's) and the new start width alike
         self.assertLessEqual(minimum, MINIMAP_PX + 16 - 40, minimum)
         self.assertLess(minimum, LEFT_PANE_PX)
-        # the controls sit in a wrapping row, the build button apart
+        # the controls sit in a wrapping row, the build button apart: the
+        # highlight check and `zoom` (the `root` and `top` buttons went,
+        # user 2026-10-04 - a double-click on a row sets the view root)
         row = v._cellwin._zoom.get_parent().get_parent()
         self.assertIsInstance(row, gui.Gtk.FlowBox)
-        self.assertEqual(len(row.get_children()), 4)
+        self.assertEqual(len(row.get_children()), 2)
         self.assertFalse(v._cellwin._build.get_visible())
         # user call 2026-09-29: thirty nested levels expanded (570 px of
         # indentation) must not widen the page - the tree scrolls
@@ -1232,7 +1234,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         """SPEC-VIEWER §8c: the selected cell as the view root - the die
         (fit, clamp, minimap) becomes its bbox, the render state and
         every render/clip/cell query carry its index, the stale frame
-        and the margin go, and `top` returns everything."""
+        and the margin go, and back at the top everything returns."""
         import types
         from floe.gui import Viewer
         v = Viewer.__new__(Viewer)
@@ -1260,7 +1262,6 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v._cell_hl_on = True
         # the panel: only what the root path touches
         v._cellwin = types.SimpleNamespace(
-            _top=types.SimpleNamespace(set_sensitive=lambda on: None),
             _info=types.SimpleNamespace(set_text=lambda t: None))
         v._cell_sel = (0, 5, "BLK")
         v._frontier_depths = [[[0, 0, 1, 1, 0]]]
@@ -1278,7 +1279,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertIsNone(v._root_ci())
         self.assertEqual(v._die_bbox(), [0, 0, 20000, 12000])
         self.assertEqual(v._minimap_frontier_depth(), 0)
-        # the `root` button asks for the selected cell; the answer applies the root
+        # the Cell menu (a double-click on the row alike) asks for the
+        # selected cell; the answer applies the root
         v._cell_set_root()
         self.assertEqual((sent[-1]["kind"], sent[-1]["cell"]), ("cells", 5))
         self.assertEqual(v._cell_pending[sent[-1]["seq"]][0], "root_set")
@@ -1327,6 +1329,54 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v._cell_set_root()
         self.assertEqual(len(sent), n)
         self.assertIn("jobdeck", status[-1])
+
+    def test_a_double_click_in_the_cell_tree_sets_the_view_root(self):
+        """User 2026-10-04: "double-clicking a cell in the cell tree makes
+        it the root (the root button's job); remove the root and top
+        buttons". A double-click (row-activated, Enter alike) on a cell
+        row sets it as the view root - the tree's rows and the find
+        results alike; on the layout's top cell it goes back to the top;
+        a placeholder or a `more` row does nothing; a jobdeck has no view
+        root, its rows zoom as before."""
+        import types
+        from floe import gui
+        gui.import_gtk()
+        Gtk = gui.Gtk
+        store = Gtk.TreeStore(str, str, int, int, bool, str)
+        results = Gtk.ListStore(str, str, int, int)
+        top = store.append(None, ["TOP", "", 0, 0, True, "cell"])
+        blk = store.append(top, ["BLK", "×3", 0, 5, True, "cell"])
+        holder = store.append(blk, ["…", "", 0, 5, False, "placeholder"])
+        more = store.append(top, ["… 2 more (find by name)", "", 0, -1, True, "more"])
+        found = [results.append(["BLK", "3", 0, 5]), results.append(["TOP", "", 0, 0])]
+        v = gui.Viewer.__new__(gui.Viewer)
+        v._cellwin = types.SimpleNamespace(_store=store, _results=results)
+        v._cell_sources = [{"src": 0}]
+        v.cache = types.SimpleNamespace(is_jobdeck=False)
+        v._cell_sel = None
+        calls = []
+        v._cell_set_root = lambda: calls.append(("root", v._cell_sel))
+        v._cell_root_top = lambda: calls.append(("top", v._cell_sel))
+        v._cell_zoom_selected = lambda: calls.append(("zoom", v._cell_sel))
+
+        def click(model, it):
+            gui.Viewer._on_cell_activate(v, types.SimpleNamespace(get_model=lambda: model), model.get_path(it), None)
+
+        click(store, blk)
+        click(store, top)
+        click(store, holder)
+        click(store, more)
+        self.assertEqual(calls, [("root", (0, 5, "BLK")), ("top", (0, 0, "TOP"))])
+        del calls[:]
+        for it in found:
+            click(results, it)
+        self.assertEqual(calls, [("root", (0, 5, "BLK")), ("top", (0, 0, "TOP"))])
+        # a jobdeck: its sources are the roots, a cell row zooms
+        del calls[:]
+        v.cache = types.SimpleNamespace(is_jobdeck=True)
+        v._cell_sources = [{"src": 0}, {"src": 1}]
+        click(store, blk)
+        self.assertEqual(calls, [("zoom", (0, 5, "BLK"))])
 
     def test_menus_and_dialogs_hand_the_keys_back_to_the_canvas(self):
         """Field 2026-09-05: after using a menu, g and the other key

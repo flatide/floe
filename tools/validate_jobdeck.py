@@ -1565,7 +1565,8 @@ class JobdeckShortcutTests(unittest.TestCase):
 
     def test_ctrl_t_is_no_shortcut(self):
         """User 2026-09-30: Ctrl+T (the selected cell as the view root) was
-        removed - the Cell menu and the panel's `root` button set it. Ctrl+T
+        removed - the Cell menu and a double-click in the cell tree set it
+        (the panel's `root` button went too, 2026-10-04). Ctrl+T
         neither sets the root nor falls through to the plain `t` (the cell
         tree's focus), and is left unhandled; `t` still focuses the tree and
         Ctrl+Shift+T still returns to the top cell."""
