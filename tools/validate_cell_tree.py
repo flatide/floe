@@ -37,6 +37,9 @@ pins the CLI contract:
       none of the visible layers is an empty picture, not an error, and
       the density stack under a root without its top plane's layer draws
       what the frame without the stack draws
+  C9  a layer the file names and no cell holds, alone on, is an empty
+      picture at full depth and depth 0, frames on and off, with the
+      density stack too - not `invalid plan: top is missing`
 
 usage: python tools/validate_cell_tree.py
 """
@@ -208,17 +211,18 @@ class Daemon:
                 return res
         raise AssertionError("no %s answer" % kind)
 
-    def render(self, bbox, w, h, root=None, gen=None, visible=None, raw=False):
+    def render(self, bbox, w, h, root=None, gen=None, visible=None, raw=False, depth=None, frames=True):
         """The settled frame's pixel payload for a view (dbu), through
         the viewer's own job schema; `root` = the view root cell,
-        `visible` = (layer, datatype) pairs (None = all), `raw` = RGBA."""
+        `visible` = (layer, datatype) pairs (None = all), `raw` = RGBA,
+        `depth` None = full."""
         self.seq += 1
         gen = gen or self.seq
         job = {
             "kind": "render", "gen": gen, "scope": "live",
             "bbox": tuple(float(v) for v in bbox), "view": None,
-            "w": w, "h": h, "depth": None, "cut_px": 3.0,
-            "visible": visible, "frames": True, "labels": False,
+            "w": w, "h": h, "depth": depth, "cut_px": 3.0,
+            "visible": visible, "frames": frames, "labels": False,
             "abstract": False, "root": root}
         if raw:
             job["frame_format"] = "raw"
@@ -490,6 +494,53 @@ class CellTreeTests(unittest.TestCase):
             self.assertEqual(stacked.render(view, 200, 160, root=via, visible=[(2, 0)], raw=True), blank)
         finally:
             stacked.stop()
+
+    def test_c9_a_named_layer_no_cell_holds_is_an_empty_picture(self):
+        """3/0 is named in the file (NOTHING) and holds no shape - as the
+        routing chip's BOUNDARY 100/0. The file's top does not hold it, so
+        its plan had no working cell and the frame failed (user 2026-10-04:
+        `invalid plan: top is missing` - at full depth, and at depth 0 with
+        the frames off). Alone on it is a black frame at full depth, frames
+        on and off, and at depth 0 with the frames off; at depth 0 with them
+        on, the outlines of the cells past the depth alone - those of the
+        frame with 1/0 on, whatever the layers. The density stack's dots
+        alike; with 1/0 on the frame draws."""
+        src = TMP / "named_empty.oas"
+        ly = db.Layout(True)
+        ly.dbu = 0.001
+        l1 = ly.layer(db.LayerInfo(1, 0))
+        ly.layer(db.LayerInfo(3, 0, "NOTHING"))
+        leaf = ly.create_cell("LEAF")
+        leaf.shapes(l1).insert(db.Box(0, 0, 400, 300))
+        top = ly.create_cell("TOP")
+        top.shapes(l1).insert(db.Box(0, 0, 5000, 100))
+        top.insert(db.CellInstArray(leaf.cell_index(), db.Trans(db.Vector(1000, 1000)), db.Vector(800, 0), db.Vector(0, 600), 4, 3))
+        options = db.SaveLayoutOptions()
+        options.format = "OASIS"
+        ly.write(str(src), options)
+        floe2("index", src)
+        view = (-100, -100, 5100, 3100)
+        black = {bytes((0, 0, 0, 255))}
+        for env in (run_env(), run_env(FLOE_RUST_DENSITY_STACK="top", FLOE_RUST_DENSITY_DOTS="on")):
+            daemon = Daemon(src, env=env)
+            try:
+                self.assertIn((3, 0), [(l["layer"], l["datatype"]) for l in daemon.cache.meta["layers"]])
+                for depth, frames in ((None, True), (None, False), (0, False)):
+                    blank = daemon.render(view, 260, 160, visible=[(3, 0)], raw=True, depth=depth, frames=frames)
+                    self.assertEqual(len(blank), 260 * 160 * 4)
+                    self.assertEqual(set(blank[i:i + 4] for i in range(0, len(blank), 4)), black, (depth, frames))
+                # depth 0, frames on: the outlines of LEAF past the depth, as
+                # with 1/0 on (its own shapes aside)
+                outlined = daemon.render(view, 260, 160, visible=[(3, 0)], raw=True, depth=0, frames=True)
+                drawn = daemon.render(view, 260, 160, visible=[(1, 0)], raw=True, depth=0, frames=True)
+                bare = daemon.render(view, 260, 160, visible=[(1, 0)], raw=True, depth=0, frames=False)
+                outline = {i for i in range(0, len(drawn), 4) if drawn[i:i + 4] != bare[i:i + 4]}
+                self.assertTrue(outline)
+                self.assertEqual({i for i in range(0, len(outlined), 4) if outlined[i:i + 4] not in black}, outline)
+                lit = daemon.render(view, 260, 160, visible=[(1, 0)], raw=True)
+                self.assertNotEqual(set(lit[i:i + 4] for i in range(0, len(lit), 4)), black)
+            finally:
+                daemon.stop()
 
     def test_c7_missing_summary_inline_or_refused_then_picked_up_live(self):
         ovh = self.cache_dir / "design.ovh"

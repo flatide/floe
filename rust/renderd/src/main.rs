@@ -1324,6 +1324,7 @@ fn run_clip(
         dot_records: None,
         probe_limit: 0,
         free_pages: None,
+        empty_top: true,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -4907,6 +4908,8 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         dot_records: None,
         probe_limit: 0,
         free_pages: None,
+        // a view whose visible layers no cell holds is an empty picture
+        empty_top: true,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -5557,6 +5560,7 @@ mod tests {
             dot_records: None,
             probe_limit: 0,
             free_pages: None,
+            empty_top: true,
         };
         assert_ne!(fit_memory_key(&top, &request(&top)), fit_memory_key(&rooted, &request(&rooted)));
         // the clip and the cell queries carry it too

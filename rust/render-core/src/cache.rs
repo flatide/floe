@@ -1194,8 +1194,11 @@ impl Cache {
         // cell has, the top plane's under the free cells (renderd
         // density_free_cells; user 2026-10-03, the routing chip at full depth:
         // its BOUNDARY 100/0 named, empty, the topmost - "the density never
-        // finishes").
-        if plan.wcells.is_empty() && (!request.summary_layers.is_empty() || request.root.is_some() || !request.regions.is_empty()) {
+        // finishes"). And so does any view's plan when the request asks
+        // (PlanRequest::empty_top: the viewer's frames - a layer the file
+        // names and no cell holds, alone on, is an empty picture; user
+        // 2026-10-04) - a jobdeck's source's does not.
+        if plan.wcells.is_empty() && (request.empty_top || !request.summary_layers.is_empty() || request.root.is_some() || !request.regions.is_empty()) {
             plan.wcells.push(floe_vfs::hier::WsCell {
                 key: plan.top,
                 pages: Vec::new(),

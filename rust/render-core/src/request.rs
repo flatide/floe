@@ -114,6 +114,12 @@ pub struct PlanRequest {
     /// (floe_vfs::hier::HierOpts::free_pages): the density stack's pass 1,
     /// whose pages cost its pass 2's budget nothing.
     pub free_pages: Option<std::sync::Arc<[u32]>>,
+    /// An empty plan keeps its top working cell, empty: the frame is an
+    /// empty picture (renderd, render-cli; user 2026-10-04: a layer the file
+    /// names and no cell holds, alone on, drew `invalid plan: top is missing`
+    /// - the routing chip's BOUNDARY 100/0). False: an empty plan has no
+    /// working cell - a jobdeck source's, whose empty plan is a skipped pass.
+    pub empty_top: bool,
 }
 
 impl PlanRequest {
@@ -171,6 +177,7 @@ mod tests {
             dot_records: None,
             probe_limit: 0,
             free_pages: None,
+            empty_top: true,
         };
         assert!(req.validate().is_err());
     }

@@ -1691,6 +1691,8 @@ fn source_plan_request(
         dot_records: None,
         probe_limit: 0,
         free_pages: None,
+        // an empty plan is a skipped pass (the planner dropped the source)
+        empty_top: false,
     };
     plan.validate()?;
     Ok(Some(plan))
