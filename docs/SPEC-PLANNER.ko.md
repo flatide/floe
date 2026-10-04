@@ -327,6 +327,17 @@
     - 리스트의 빠른 길(멤버마다 같은 규칙, 런은 정수 점을 모은다).
     - `box_child`·`box_node`·`node_holds`의 담는 수(멤버 수 × `member_dots`를 f64로 더한 뒤 정수로).
   - 단위 `a_member_under_a_pixel_stands_for_its_area_in_dots`.
+  **detail 문턱(0.12.288, renderd 0.12.266; 사용자 2026-10-04, 루트 칩 depth 0 "축소하면 없던 공간에 점이 나타남", "하나의
+  픽셀에 도형 크기의 합이 일정 수준을 넘어야 켜는 방식"):** `HierOpts::dot_gate`(기본 켬, `FLOE_RUST_DENSITY_GATE=off`가
+  킬 스위치), `HierOpts::dot_gate_share`(None이면 컷으로; 진단 `FLOE_RUST_DENSITY_GATE_SHARE`).
+  - 블록에 필요한 점 `dot_gate_min` = ceil(몫 × 블록 px² − 0.01), 최소 1, 최대 블록 상한. 몫은
+    `dot_gate_share_of_cut(cut_px)` = (컷 − 1) / 16을 [0, ½]로 자른 값이다. high 1 px → 0, medium 3 px → 1/8(4 px 블록에
+    2점), low 5 px → 1/4(4점).
+  - `flush_dots`가 그보다 적은 블록을 빼고(`HierStats::dot_gated`), `settle_occ_fallback`도 미룬 항목에 같은 문턱
+    (`HierStats::dot_gate_min`)을 쓴다. 블록은 한 계획 안에서 통째로 세므로(`dot_boxes`) 스레드 수와 무관하다.
+  - 디코드한 페이지의 도형은 거르지 않는다(도형이 있는 자리에 그린다).
+  - 병합(`Cache::merge_plans`)은 `dot_gated`를 더하고 `dot_gate_min`은 최댓값을 둔다.
+  - 단위 `a_dot_block_too_sparse_for_the_detail_is_left_out`. 점 수 규칙을 보는 단위는 `dot_gate: false`로 고정한다.
   **읽기(0.12.256):** 점 모드에서 마스크 없는 노드의 배치 읽기는 셀마다 가장 위 가시 레이어를 한 번만 구해 두고
   (`cell_top`, `top_memo`) 순위만 비교한다; 계획기의 정수 키 맵은 Fx식 해시(`FxMap`/`FxSet`). 그림은 같다.
   **블록과 퍼뜨림(0.12.257; 사용자 2026-10-01 "지금보다 덜 자세해도 괜찮을 것 같음"):** 블록은

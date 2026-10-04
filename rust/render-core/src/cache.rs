@@ -994,6 +994,8 @@ impl Cache {
             st.dot_sampled_members += more.dot_sampled_members;
             st.occ_fallback.extend(more.occ_fallback.iter().cloned());
             st.dot_partial += more.dot_partial;
+            st.dot_gated += more.dot_gated;
+            st.dot_gate_min = st.dot_gate_min.max(more.dot_gate_min);
             st.cancelled |= more.cancelled;
             st.fit_over |= more.fit_over;
             st.fit_dropped |= more.fit_dropped;

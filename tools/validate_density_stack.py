@@ -1055,6 +1055,93 @@ def zoom_out_checks(temp):
             w.stop()
 
 
+def gate_layout(path):
+    """MID's own shapes, 0.05 um squares under every floor: 4,000 at random
+    over the left 40 x 40 um (0.6 % of it) and a 20 x 20 um field of them at
+    0.1 um (25 %) on the right."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    mid = ly.layer(*MID)
+    rnd = random.Random(11)
+    for _ in range(4000):
+        x, y = rnd.randrange(40_000) / 1000.0, rnd.randrange(40_000) / 1000.0
+        top.shapes(mid).insert(kdb.DBox(x, y, x + 0.05, y + 0.05))
+    for i in range(200):
+        for j in range(200):
+            x, y = 50 + i * 0.1, 10 + j * 0.1
+            top.shapes(mid).insert(kdb.DBox(x, y, x + 0.05, y + 0.05))
+    options = kdb.SaveLayoutOptions()
+    options.format = 'OASIS'
+    options.oasis_compression_level = 10
+    ly.write(str(path), options)
+
+
+def gate_checks(temp):
+    """A dot block too sparse for the detail is left out (user 2026-10-04:
+    "a pixel should light only when the shapes' size in it passes a level";
+    floe_vfs HierOpts::dot_gate): MID's squares at 0.4 um a pixel, all under
+    the floor and spread over their page's occupancy (the user's case: the
+    routing chip zoomed out past where its wires were decoded). At medium's
+    cut (3 px) a 4 px block needs 2 dots: the 0.6 % half lights nothing, the
+    25 % field its dots; the kill switch (FLOE_RUST_DENSITY_GATE=off) lights
+    the sparse half too, the field alike; high's cut (1 px) gates nothing."""
+    src = Path(temp) / 'gate.oas'
+    gate_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_GATE='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_GATE='off'))}
+    try:
+        dbu = float(workers['on'].cache.meta['dbu'])
+        spp = 0.4
+        x0, y0 = -10.0, -20.0
+
+        def view(w, gen, cut_px):
+            box = (x0, y0, x0 + W * spp, y0 + H * spp)
+            w.submit({'kind': 'render', 'gen': gen, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': None, 'w': W, 'h': H,
+                      'depth': None, 'cut_px': cut_px, 'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': [MID],
+                      'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('gate frame timeout')
+
+        def cols(um0, um1):
+            return range(max(0, int((um0 - x0) / spp)), min(W, int((um1 - x0) / spp)))
+
+        def rows(um0, um1):
+            # frame rows run down from the view's top
+            return range(max(0, int((y0 + H * spp - um1) / spp)), min(H, int((y0 + H * spp - um0) / spp)))
+
+        sparse, field = (cols(0, 40), rows(0, 40)), (cols(50, 70), rows(10, 30))
+        on, on_res = view(workers['on'], 1, 3.0)
+        off, off_res = view(workers['off'], 1, 3.0)
+        high, high_res = view(workers['on'], 2, 1.0)
+        plan2, pages = on_res['density_plan2'], on_res['density_pages']
+        # the squares spread over their page's occupancy, none decoded
+        assert plan2['occ_pages'] >= 1 and pages['decoded'] == 0, (plan2, pages)
+        assert plan2['dot_gate_min'] == 2 and plan2['dot_gated'] > 0, plan2
+        assert off_res['density_plan2']['dot_gate_min'] == 1 and high_res['density_plan2']['dot_gate_min'] == 1, (off_res['density_plan2'], high_res['density_plan2'])
+        lit_on, lit_off, lit_high = (len(lit(f, *sparse)) for f in (on, off, high))
+        assert lit_on == 0 and lit_off > 0 and lit_high > 0, ('the sparse half', lit_on, lit_off, lit_high)
+        field_on, field_off = len(lit(on, *field)), len(lit(off, *field))
+        n = len(field[0]) * len(field[1])
+        assert field_on >= 0.15 * n and field_on >= 0.9 * field_off, ('the field', field_on, field_off, n)
+        print('density stack: a dot block too sparse for the detail is left out - medium (2 dots of 16 px): the 0.6 %% half %d px '
+              '(the switch off %d, high %d), the 25 %% field %d px of %d (off %d); %d blocks out'
+              % (lit_on, lit_off, lit_high, field_on, n, field_off, plan2['dot_gated']))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def own_layout(path):
     """A TOP whose own shapes are 60,000 boxes of 0.05-0.3 um at random over
     300 x 300 um - under a pixel at 1000 px; of 62,500 sizes, so the writer
@@ -1576,6 +1663,10 @@ def main():
     # their fit views the dots would thin (density_zoom_gain); the checks
     # count dots as drawn at a fit, zoom_out_checks alone thins them
     os.environ['FLOE_RUST_DENSITY_ZOOM_OUT'] = 'off'
+    # and their dots are counted as drawn without the detail's gate (a
+    # block too sparse is left out, floe_vfs HierOpts::dot_gate): gate_checks
+    # alone gates them
+    os.environ['FLOE_RUST_DENSITY_GATE'] = 'off'
     with tempfile.TemporaryDirectory(prefix='floe-density-stack-') as temp:
         src = Path(temp) / 'stack.oas'
         layout(src)
@@ -1667,6 +1758,7 @@ def main():
         cells_checks(temp)
         shift_checks(temp)
         zoom_out_checks(temp)
+        gate_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

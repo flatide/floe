@@ -1054,6 +1054,14 @@ def perf_status(res, depth_note=""):
         gain = (res.get("density_plan2") or {}).get("dot_gain_milli")
         if gain is not None and 0 < gain < 1000:
             parts.append("dots x%.2f" % (gain / 1000.0))
+        # a dot block too sparse for the detail is left out (2026-10-04):
+        # the dots it needs of its pixels, the blocks left out
+        gate = (res.get("density_plan2") or {}).get("dot_gate_min") or 0
+        if gate > 1:
+            block = res.get("density_block") or 4
+            gated = res["density_plan2"].get("dot_gated") or 0
+            parts.append("gate %d/%d px" % (gate, round(block * block))
+                         + (" (%s out)" % fmt_count(gated) if gated else ""))
         us = res.get("density_us") or {}
         if us:
             plan = "pass 2 plan %d ms" % round(

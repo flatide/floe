@@ -65,7 +65,8 @@
     건너뛴 청크)와 `list chunks sampled C of M members`(표본으로 읽은 청크)가 붙는다. `list members`는 하나씩 읽은 멤버
     수다. 0.12.281부터 `N regions` 뒤에, 칸으로 계획했으면 그 칸들의 빈 픽셀 `(free top T, others O px)`가 붙는다(위층,
     아래층). 0.12.287부터 fit view보다 축소해 점이 성겨지면 예약 뒤에 `dots xG`(그 비율)가 붙는다. 여백 렌더의 명령에는
-    뷰포트 크기 `vw=`/`vh=`가 붙는다(렌더러가 fit view를 뷰포트 기준으로 구한다).
+    뷰포트 크기 `vw=`/`vh=`가 붙는다(렌더러가 fit view를 뷰포트 기준으로 구한다). 0.12.288부터 detail의 밀도 문턱이 있으면
+    (medium, low) 그 뒤에 `gate D/B px (N out)`이 붙는다: 블록 B px 중 D점 이상이어야 그리고, N은 빠진 블록 수다.
   - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
     - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
       붙는다. load의 `[plan+delta+apply]`는 빠진다.

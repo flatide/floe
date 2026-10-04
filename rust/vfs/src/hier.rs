@@ -711,6 +711,55 @@ fn whole_dots(dots: f64, bx: i64, by: i64, salt: u64) -> u64 {
     (dots + block_dither(bx, by, salt)).floor().max(0.0) as u64
 }
 
+/// HierOpts::dot_gate default: on; FLOE_RUST_DENSITY_GATE=off (the kill
+/// switch) draws every dot block, as 0.12.287.
+pub fn dot_gate() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_GATE").as_deref() != Ok("off"))
+}
+
+/// HierOpts::dot_gate_share default: None (by the cut, dot_gate_share_of_cut);
+/// FLOE_RUST_DENSITY_GATE_SHARE sets it (diagnostic, 0..=DOT_GATE_SHARE_MAX).
+pub fn dot_gate_share() -> Option<f64> {
+    static SHARE: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *SHARE.get_or_init(|| {
+        std::env::var("FLOE_RUST_DENSITY_GATE_SHARE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, DOT_GATE_SHARE_MAX))
+    })
+}
+
+/// The gate's share for each px of the cells' cut past one (dot_gate_share_of_cut).
+pub const DOT_GATE_SHARE_PER_CUT_PX: f64 = 1.0 / 16.0;
+/// The gate's share at most: a block's cap (dot_block_cap, half its pixels).
+pub const DOT_GATE_SHARE_MAX: f64 = 0.5;
+
+/// HierOpts::dot_gate's share of a block's pixels its dots must light, by the
+/// detail - the cells' cut of the dots' plan, `cut_px` (floe DETAIL_PX): (cut
+/// - 1) x DOT_GATE_SHARE_PER_CUT_PX - high (1 px) none, medium (3 px) 1/8 (2
+/// dots of a 4 px block's 16 px), low (5 px) 1/4.
+pub fn dot_gate_share_of_cut(cut_px: f64) -> f64 {
+    if !cut_px.is_finite() {
+        return 0.0;
+    }
+    ((cut_px - 1.0) * DOT_GATE_SHARE_PER_CUT_PX).clamp(0.0, DOT_GATE_SHARE_MAX)
+}
+
+/// The dots a block of `opts`' needs to be drawn in a plan of `req`
+/// (HierOpts::dot_gate; 1: every block).
+fn dot_gate_min(opts: &HierOpts, req: &ViewReq) -> u32 {
+    if !opts.dot_gate {
+        return 1;
+    }
+    let block_px = opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX);
+    let share = opts.dot_gate_share.unwrap_or_else(|| dot_gate_share_of_cut(req.cut_dbu.max(0) as f64 * req.px_per_dbu)).clamp(0.0, DOT_GATE_SHARE_MAX);
+    // the cut comes back from whole dbu a little off (the routing chip's fit
+    // view: 3.0004 px, 2.0005 dots): a hundredth of a dot is let go
+    ((share * block_px * block_px - 0.01).ceil().max(1.0) as u32).min(dot_block_cap(block_px))
+}
+
 /// whole_dots' salt for an item at `b` on `layer`.
 fn item_salt(b: &BBox, layer: u32) -> u64 {
     (b.x0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (b.y0 as u64).rotate_left(29) ^ (layer as u64).rotate_left(47) ^ 0xA5A5_5A5A_0F0F_F0F0
@@ -1212,6 +1261,23 @@ pub struct HierOpts {
     /// whole view, it feels too much" - "by area"). From a pixel up as
     /// before. FLOE_RUST_DENSITY_AREA_SHARE=off is the kill switch.
     pub dot_area_share: bool,
+    /// A cell's dot block (of one layer) is drawn only when its dots light
+    /// at least dot_gate_share of its pixels - too sparse, none: neither its
+    /// dots nor the pixels they stand for (user 2026-10-04, the routing chip
+    /// at depth 0 with its fill off: two steps out from the fit view "dots
+    /// appear where there was no space" - its wires all under the floor at
+    /// once, spread by area over their blocks; "a pixel should light only
+    /// when the shapes' size in it passes a level ... it need not be precise
+    /// and must not cost speed ... medium may leave some density out as long
+    /// as the distribution shows, high more"). Every dot item: a cell's
+    /// members, nodes and placements, the pages spread over their occupancy
+    /// and those set aside (settle_occ_fallback); a decoded page's shapes are
+    /// drawn where they are, not gated. FLOE_RUST_DENSITY_GATE=off is the
+    /// kill switch.
+    pub dot_gate: bool,
+    /// dot_gate's share; None: by the cut (dot_gate_share_of_cut).
+    /// FLOE_RUST_DENSITY_GATE_SHARE (diagnostic).
+    pub dot_gate_share: Option<f64>,
     /// The sub-cut dots' blocks in a dense grid over the cell's view (DotGrid)
     /// rather than a hash map sorted when the cell is done - the same counts,
     /// unions and order - and a point list's topmost layer found once, not a
@@ -1352,6 +1418,8 @@ impl Default for HierOpts {
             dot_list_full: dot_list_full(),
             dot_list_sample: dot_list_sample(),
             dot_area_share: dot_area_share(),
+            dot_gate: dot_gate(),
+            dot_gate_share: dot_gate_share(),
             dot_grid: dot_grid(),
             dot_boxes: dot_boxes(),
             dot_records: None,
@@ -1493,6 +1561,11 @@ pub struct HierStats {
     pub occ_fallback: Vec<OccFallback>,
     /// HierOpts::dot_boxes: the dot blocks left out, no box holding them whole
     pub dot_partial: u64,
+    /// HierOpts::dot_gate: the dots a block needed to be drawn in this plan
+    /// (0 or 1: every block) and the dot blocks (and set-aside items) left
+    /// out under it
+    pub dot_gate_min: u32,
+    pub dot_gated: u64,
     /// the plan was made with HierOpts::sub_cut_dots: its washes are dot
     /// items (the density raster draws them as dots, not as marker rects)
     pub sub_cut_dots: bool,
@@ -2140,6 +2213,11 @@ pub fn settle_occ_fallback(plan: &mut HierPlan) {
             continue;
         }
         spread.insert(item.page);
+        if u32::from(item.dots) < plan.stats.dot_gate_min {
+            // too sparse to draw at this detail (HierOpts::dot_gate)
+            plan.stats.dot_gated += 1;
+            continue;
+        }
         if let Ok(at) = plan.wcells.binary_search_by(|w| w.key.cmp(&item.key)) {
             let wc = &mut plan.wcells[at];
             wc.washes.push((item.layer, item.piece));
@@ -2450,6 +2528,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         list_full: opts.dot_list_full,
         list_sample: opts.dot_list_sample,
         area_share: opts.dot_area_share,
+        gate_min: if dots.is_some() { dot_gate_min(opts, req) } else { 1 },
         cell_view: BBox::EMPTY,
         cell_rbbox: BBox::EMPTY,
         zone: Vec::new(),
@@ -2631,6 +2710,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         None => h.page_cut,
     };
     st.sub_cut_dots = h.dots;
+    st.dot_gate_min = if h.dots { h.gate_min } else { 0 };
     st.cancelled = h.cancelled;
     st.shape_cut_max = h.shape_cut_max;
     st.wc_cells = h.out.len() as u64;
@@ -2889,6 +2969,8 @@ struct Hier<'a> {
     list_sample: bool,
     /// HierOpts::dot_area_share
     area_share: bool,
+    /// HierOpts::dot_gate: the dots a block needs to be drawn (dot_gate_min)
+    gate_min: u32,
     /// HierOpts::dot_grid, the grid of the cell being walked, and the run of
     /// dot items of one block being summed - the block and layer, the dots,
     /// the union of what they stand for - put into the blocks when an item
@@ -4300,6 +4382,11 @@ impl<'a> Hier<'a> {
         for ((bx, by, layer), (count, union)) in blocks {
             if self.dot_boxes && !dot_block_whole(bx, by, block, boxes, rbbox) {
                 self.st.dot_partial += 1;
+                continue;
+            }
+            if count < self.gate_min {
+                // too sparse to draw at this detail (HierOpts::dot_gate)
+                self.st.dot_gated += 1;
                 continue;
             }
             if !self.take_box(1) {
@@ -7776,7 +7863,7 @@ mod tests {
         req.page_wash = false;
         // the 4 px blocks and compact boxes of the first rules (the 8 px spread
         // blocks: the_dots_blocks_spread_what_they_count_and_count_what_is_there)
-        let opts = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 4.0, dot_spread: false, ..HierOpts::default() };
+        let opts = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 4.0, dot_spread: false, dot_gate: false, ..HierOpts::default() };
         let plan = plan_hier(&chip, &req, &opts);
         // the density cut alone (1 px) walks into the LEAFs; the dots do not,
         // and the pages take the lower cut
@@ -7860,7 +7947,7 @@ mod tests {
         let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
         req.px_per_dbu = 0.02;
         req.page_wash = false;
-        let opts = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, ..HierOpts::default() };
+        let opts = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, dot_gate: false, ..HierOpts::default() };
         let plan = plan_hier(&chip, &req, &opts);
         let cell = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         assert_eq!(cell.washes.len(), cell.dot_counts.len());
@@ -8075,7 +8162,7 @@ mod tests {
         let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
         req.px_per_dbu = 0.02;
         req.page_wash = false;
-        let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, k_boxes: 4, ..HierOpts::default() };
+        let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, k_boxes: 4, dot_gate: false, ..HierOpts::default() };
         let dots = |plan: &HierPlan| plan.wcells.iter().flat_map(|w| w.dot_counts.iter()).map(|&n| n as u64).sum::<u64>();
         let items = |plan: &HierPlan| plan.wcells.iter().map(|w| (w.key, w.washes.clone(), w.dot_counts.clone())).collect::<Vec<_>>();
         let share = plan_hier(&chip, &req, &HierOpts { dot_area_share: true, ..base.clone() });
@@ -8088,6 +8175,54 @@ mod tests {
         assert!(dots(&one) > 5000, "{}", dots(&one));
         assert_eq!(items(&share), items(&slow));
         assert_eq!(dots(&apart), dots(&share));
+    }
+
+    #[test]
+    fn a_dot_block_too_sparse_for_the_detail_is_left_out() {
+        // HierOpts::dot_gate (user 2026-10-04: "a pixel should light only
+        // when the shapes' size in it passes a level"; medium may leave some
+        // density out, high more): 100 LEAFs of 60 dbu (1.2 px, one dot) a
+        // block each, 1,000 dbu apart, and four in one block (four dots), at
+        // 0.02 px/dbu in 4 px blocks of 200 dbu. Medium's cut (3 px) needs 2
+        // dots of a block's 16 px: the lone ones go, the four stay - the same
+        // in four regions; the kill switch draws all; a quarter (4 of 16)
+        // keeps the four, past it none. The other counting tests pin it off.
+        let mut pts: Vec<(i64, i64)> = (0..100).map(|i| (100 + (i % 10) * 1_000, 100 + (i / 10) * 1_000)).collect();
+        pts.extend([(12_000, 12_000), (12_070, 12_000), (12_000, 12_070), (12_070, 12_070)]);
+        let chip = fixture(&[FCell { name: "LEAF", pages: vec![(bx(0, 0, 60, 60), 60, 60)], places: vec![] }, FCell { name: "TOP", pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)], places: vec![(0, 0, 0, 0, false, Rep::Pts(pts.into()))] }], 1);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = false;
+        let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 4.0, dot_spread: true, k_boxes: 4, dot_gate: true, dot_gate_share: None, ..HierOpts::default() };
+        let counts = |plan: &HierPlan| {
+            let mut all: Vec<u16> = plan.wcells.iter().flat_map(|w| w.dot_counts.iter().copied()).filter(|&n| n > 0).collect();
+            all.sort_unstable();
+            all
+        };
+        let items = |plan: &HierPlan| plan.wcells.iter().map(|w| (w.key, w.washes.clone(), w.dot_counts.clone())).collect::<Vec<_>>();
+        assert_eq!((dot_gate_share_of_cut(1.0), dot_gate_share_of_cut(3.0), dot_gate_share_of_cut(5.0)), (0.0, 0.125, 0.25));
+        let medium = plan_hier(&chip, &req, &base);
+        assert_eq!(counts(&medium), vec![4]);
+        assert_eq!((medium.stats.dot_gate_min, medium.stats.dot_gated), (2, 100));
+        let quad = vec![bx(-10, -10, 10_000, 10_000), bx(10_000, -10, 20_000, 10_000), bx(-10, 10_000, 10_000, 20_000), bx(10_000, 10_000, 20_000, 20_000)];
+        let apart = plan_hier(&chip, &req, &HierOpts { regions: quad, ..base.clone() });
+        assert_eq!(items(&apart), items(&medium));
+        let off = plan_hier(&chip, &req, &HierOpts { dot_gate: false, ..base.clone() });
+        assert_eq!(counts(&off), [vec![1; 100], vec![4]].concat());
+        assert_eq!((off.stats.dot_gate_min, off.stats.dot_gated), (1, 0));
+        assert_eq!(counts(&plan_hier(&chip, &req, &HierOpts { dot_gate_share: Some(0.25), ..base.clone() })), vec![4]);
+        assert!(counts(&plan_hier(&chip, &req, &HierOpts { dot_gate_share: Some(0.3), ..base.clone() })).is_empty());
+        // a page's dots set aside for the budget fit (settle_occ_fallback):
+        // one left out, another drawn - by the plan's gate
+        let mut plan = medium.clone();
+        let key = plan.wcells[0].key;
+        let before = plan.wcells[0].washes.len();
+        for (page, dots) in [(900_001u32, 1u16), (900_002, 3)] {
+            plan.stats.occ_fallback.push(OccFallback { key, page, layer: 0, block: (0, 0), piece: bx(0, 0, 200, 200), dots });
+        }
+        settle_occ_fallback(&mut plan);
+        assert_eq!(&plan.wcells[0].dot_counts[before..], &[3]);
+        assert_eq!(plan.stats.dot_gated, 101);
     }
 
     #[test]
@@ -8227,7 +8362,7 @@ mod tests {
         };
         // over the boxes: dot_page_spread_boxes (FLOE_RUST_DENSITY_PAGE_SPREAD=on;
         // the fixture has no design.ovb)
-        let opts = |spread: bool| HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, dot_page_spread: spread, dot_page_spread_boxes: spread, ..HierOpts::default() };
+        let opts = |spread: bool| HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, dot_page_spread: spread, dot_page_spread_boxes: spread, dot_gate: false, ..HierOpts::default() };
         let whole = bx(-10, -10, 9_000, 9_000);
         let plan = plan_hier(&chip, &ask(whole), &opts(true));
         let cell = plan.wcells.iter().find(|w| w.key.0 == 0).unwrap();
@@ -8310,7 +8445,7 @@ mod tests {
             dot_page_spread: true,
             dot_page_occ: occ,
             dot_occ_cover: cover,
-            ..HierOpts::default()
+            dot_gate: false, ..HierOpts::default()
         };
         let whole = bx(-10, -10, 9_000, 9_000);
         let items = |plan: &HierPlan| -> (Vec<(BBox, u32)>, Vec<(BBox, u32)>) {
@@ -8397,7 +8532,7 @@ mod tests {
             dot_spread: true,
             dot_page_spread: true,
             dot_occ_cover: cover,
-            ..HierOpts::default()
+            dot_gate: false, ..HierOpts::default()
         };
         let counts = |plan: &HierPlan| -> (u32, usize, u32) {
             let cell = plan.wcells.iter().find(|w| w.key.0 == 0).unwrap();
@@ -8453,7 +8588,7 @@ mod tests {
             dot_spread: true,
             dot_page_spread: true,
             dot_occ_cover: cover,
-            ..HierOpts::default()
+            dot_gate: false, ..HierOpts::default()
         };
         let counts = |plan: &HierPlan| -> Vec<u16> { plan.wcells.iter().find(|w| w.key.0 == 0).map_or(Vec::new(), |w| w.dot_counts.clone()) };
         let with = plan_hier(&chip, &ask, &opts(true));
@@ -8585,7 +8720,7 @@ mod tests {
         req.px_per_dbu = 0.02;
         req.page_wash = false;
         // 64 px blocks: 3,200 dbu
-        let opts = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 64.0, dot_spread: true, ..HierOpts::default() };
+        let opts = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 64.0, dot_spread: true, dot_gate: false, ..HierOpts::default() };
         let plan = plan_hier(&chip, &req, &opts);
         let cell = plan.wcells.iter().find(|w| w.key.0 == 1).unwrap();
         let within = |x0: i64, y0: i64, x1: i64, y1: i64| -> Vec<u16> {
@@ -8638,7 +8773,7 @@ mod tests {
         // the raster cuts records by their larger side (renderd's max mode)
         req.shape_cut_max = true;
         let page_of = |b: BBox| (0..chip.n_pages).find(|&pi| chip.page(pi).bbox == b).unwrap();
-        let one = HierOpts { sub_cut_dots: Some(1.0), dot_records: Some(0.0), dot_block_px: 8.0, dot_spread: true, dot_pages: true, ..HierOpts::default() };
+        let one = HierOpts { sub_cut_dots: Some(1.0), dot_records: Some(0.0), dot_block_px: 8.0, dot_spread: true, dot_pages: true, dot_gate: false, ..HierOpts::default() };
         let plan = plan_hier(&chip, &req, &one);
         // the pages at the cut: the big page (pass 1's), not the small one
         assert!(plan.pages.contains(&page_of(big)) && !plan.pages.contains(&page_of(small)), "{:?}", plan.pages);

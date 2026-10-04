@@ -416,7 +416,17 @@ more it is zoomed out"; renderd `density_zoom_gain`, `thin_dot_items`;
 `FLOE_RUST_DENSITY_ZOOM_OUT=off` is the kill switch,
 `FLOE_RUST_DENSITY_ZOOM_OUT_POWER` (1) diagnostic). A margin's render command
 carries its viewport, `vw=`/`vh=`, the fit view being the viewport's.
-`density_plan2` ends with the gain in thousandths (32 values).
+`density_plan2`'s 32nd value is the gain in thousandths. Since 0.12.288 a
+cell's dot block of one layer is drawn only when its dots light a share of
+its pixels set by the detail's cut - (cut - 1) / 16: high (1 px) none, medium
+(3 px) 2 of a 4 px block's 16, low (5 px) 4 - too sparse, neither its dots nor
+the pixels they stand for; decoded shapes are drawn where they are, not gated
+(user 2026-10-04: zoomed out, the routing chip's wires spread over their
+blocks "fill space where nothing was"; "a pixel should light only when the
+shapes' size in it passes a level"; floe_vfs `HierOpts::dot_gate`,
+`FLOE_RUST_DENSITY_GATE=off` is the kill switch,
+`FLOE_RUST_DENSITY_GATE_SHARE` diagnostic). `density_plan2` ends with the
+blocks left out and the dots a block needed (34 values).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

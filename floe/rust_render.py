@@ -165,7 +165,10 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  "free_top", "free_others",
                  # the dots' gain past the fit view, thousandths
                  # (2026-10-04)
-                 "dot_gain_milli")
+                 "dot_gain_milli",
+                 # the dot blocks left out as too sparse for the detail and
+                 # the dots a block needed (2026-10-04)
+                 "dot_gated", "dot_gate_min")
 
 
 def _viewport_px(job, bbox):

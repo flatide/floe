@@ -197,6 +197,18 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.288(detail 밀도 문턱) `gate_checks`:
+      - MID의 0.05 µm 사각형: 왼쪽 40×40 µm에 무작위 4,000개(0.6 %), 오른쪽 20×20 µm에 0.1 µm 간격(25 %).
+      - 0.4 µm/px에서 모두 하한 아래라 점유로 퍼뜨린다(`occ_pages` ≥ 1, 디코드 0). medium 컷(3 px)은 블록에 2점이 필요하다
+        (`dot_gate_min` 2, `dot_gated` > 0).
+      - 성긴 반쪽은 0 px이고, 킬 스위치(`FLOE_RUST_DENSITY_GATE=off`)와 high 컷(1 px, 문턱 없음)은 80 px다. 25 % 영역은
+        601 px로 끈 것과 같다(≥ 영역의 15 %, ≥ 끈 것의 90 %).
+      - 이 게이트의 다른 검사는 `main`이 문턱을 끈다(점 수를 문턱 없이 센다).
+      - 단위 `a_dot_block_too_sparse_for_the_detail_is_left_out`: 1점 블록 100개는 빠지고 4점 블록은 남는다. 영역 넷으로
+        나눠도 같고, 킬 스위치는 모두, 몫 1/4은 4점 블록, 0.3은 없음이다. 미룬 항목(`settle_occ_fallback`)도 1점은 빠진다.
+        점 수 규칙을 보는 기존 단위 9개는 `dot_gate: false`로 고정했다.
+      - 어댑터 계약: `density_plan2`는 34개 값(…/dot_gain_milli/dot_gated/dot_gate_min)이다. 상태줄 테스트:
+        `dots x0.64, gate 2/16 px (12k out)`(한 번만).
     - 0.12.287(축소할수록 성기게) `zoom_out_checks`:
       - 40×20 µm 다이에 무작위 0.1 µm 비아 3,000개(MID)와 TOP 반점을 둔다.
       - fit 뷰에서 `dot_gain_milli`는 1000이다. 2배 축소(0.2 µm/px)에서는 round(1000 × fit / 0.2) = 524이고, 점(lit)은

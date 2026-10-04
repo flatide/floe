@@ -1195,8 +1195,10 @@ struct FramePixels {
     /// 2026-10-02); then the pages placed by their occupancy grids
     /// (design.ovb, HierOpts::dot_page_occ, 2026-10-02); then the pages under
     /// the floor decoded, their occupancy cells too coarse on screen
-    /// (HierOpts::dot_occ_decode, 2026-10-03)
-    density_plan2: Option<[u64; 32]>,
+    /// (HierOpts::dot_occ_decode, 2026-10-03); ...; then the dot blocks left
+    /// out as too sparse and the dots a block needed (HierOpts::dot_gate,
+    /// 2026-10-04)
+    density_plan2: Option<[u64; 34]>,
 }
 
 fn render_worker(
@@ -3478,7 +3480,7 @@ fn run_render(
         let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 32]> = None;
+        let mut density_plan2: Option<[u64; 34]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4225,7 +4227,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 32]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 34]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4254,7 +4256,7 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 32];
+    let mut plan2 = [0u64; 34];
     plan2[22] = reserve_bytes >> 20;
     // the dots' gain past the fit view, in thousandths (density_zoom_gain)
     plan2[31] = (dot_gain * 1000.0).round() as u64;
@@ -4556,6 +4558,10 @@ fn render_density_frame(
                         // the point-list chunks read at a step, their members
                         plan2[27] += planned_fine.stats.dot_sampled_chunks;
                         plan2[28] += planned_fine.stats.dot_sampled_members;
+                        // the dot blocks too sparse to draw, the dots a block needed
+                        // (HierOpts::dot_gate)
+                        plan2[32] += planned_fine.stats.dot_gated;
+                        plan2[33] = plan2[33].max(u64::from(planned_fine.stats.dot_gate_min));
                         counts[4] += planned_fine.stats.sub_cut_boxes;
                         counts[5] += planned_fine.stats.sub_cut_box_over;
                         // the records' cut this side planned at, px (the floor, or
