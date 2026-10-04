@@ -1037,6 +1037,10 @@ def perf_status(res, depth_note=""):
         # 2026-10-01, and FLOE_RUST_DENSITY_FLOOR_PX, 2026-09-30)
         parts = ["dots" if res.get("density_dots") is not None
                  else "top + empty"]
+        # pass 1's shapes passed by, the density alone (diagnostic
+        # FLOE_RUST_DENSITY_ONLY=on, 2026-10-04; renderd shares the env)
+        if os.environ.get("FLOE_RUST_DENSITY_ONLY") == "on":
+            parts.append("density only")
         # what pass 2 lit: the dots standing for the cells under the cut
         # and the shapes under the cut it draws from pages by their area -
         # both look like dots on screen, only the cells' count as dot items

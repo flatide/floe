@@ -67,6 +67,8 @@
     아래층). 0.12.287부터 fit view보다 축소해 점이 성겨지면 예약 뒤에 `dots xG`(그 비율)가 붙는다. 여백 렌더의 명령에는
     뷰포트 크기 `vw=`/`vh=`가 붙는다(렌더러가 fit view를 뷰포트 기준으로 구한다). 0.12.288부터 detail의 밀도 문턱이 있으면
     (medium, low) 그 뒤에 `gate D/B px (N out)`이 붙는다: 블록 B px 중 D점 이상이어야 그리고, N은 빠진 블록 수다.
+    0.12.291부터 진단 `FLOE_RUST_DENSITY_ONLY=on`(1패스의 도형을 건너뛰고 밀도만)이면 태그 맨 앞 `dots` 뒤에
+    `density only`가 붙는다(뷰어가 같은 환경 변수를 읽는다).
   - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
     - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
       붙는다. load의 `[plan+delta+apply]`는 빠진다.

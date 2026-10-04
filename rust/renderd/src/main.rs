@@ -2495,6 +2495,18 @@ fn density_top_held() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_TOP_HELD").as_deref() != Ok("off"))
 }
 
+/// The density stack's pass 2 alone (user 2026-10-04: "789's dots still go
+/// when 787 is on - it may be pass 1's budget; an option to pass the shapes
+/// by and draw the density alone, to compare"): pass 1 decodes no page and
+/// draws no shape (its plan keeps the hierarchy), so pass 2 has the whole
+/// budget as its reserve (density_frame_reserve: nothing left by pass 1).
+/// FLOE_RUST_DENSITY_ONLY=on, diagnostic, off by default; the viewer's density
+/// tag says `density only`.
+fn density_only() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_ONLY").as_deref() == Ok("on"))
+}
+
 /// Pass 2 serves the top plane first (user 2026-10-04: the dots 789 lit alone
 /// went, many of them, with 787 on - "the density draws 789 first, then 787,
 /// so 789's dots should stay"): the pages to decode are the top plane's side's
@@ -3390,6 +3402,24 @@ fn run_render(
         && command.probe.is_none()
         && std::env::var("FLOE_RUST_WRITE_ONCE").as_deref() != Ok("off"))
     .then_some(());
+    // the density alone (density_only, diagnostic): pass 1 reads no page and
+    // draws no shape - its plan keeps the hierarchy only - so pass 2 has the
+    // whole budget
+    let selected = if density_plan.is_some() && density_only() {
+        let pass1 = Arc::make_mut(&mut plan);
+        for cell in &mut pass1.wcells {
+            cell.pages.clear();
+            cell.page_levels.clear();
+            cell.washes.clear();
+            cell.dot_counts.clear();
+            cell.reps.clear();
+        }
+        pass1.pages.clear();
+        pass1.page_prio.clear();
+        Vec::new()
+    } else {
+        selected
+    };
     // pass 2 plans by plane, so its planes are the VISIBLE layers only (the
     // style list holds every layer; pass 1 leaves the plan to pick the pages
     // - field 2026-09-27: with one layer on, the others' density showed and

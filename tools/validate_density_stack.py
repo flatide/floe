@@ -1208,6 +1208,57 @@ def top_first_checks(temp):
             w.stop()
 
 
+def density_only_layout(path):
+    """LOW's 36 x 16 um square (an original past every cut) under MID's
+    40,000 0.05 um squares at random over a 20 x 10 um band in its middle
+    (each under a pixel at 0.1 um)."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    top.shapes(ly.layer(*LOW)).insert(kdb.DBox(2, 2, 38, 18))
+    mid = ly.layer(*MID)
+    rnd = random.Random(13)
+    for _ in range(40_000):
+        x, y = 10 + rnd.randrange(20_000) / 1000.0, 5 + rnd.randrange(10_000) / 1000.0
+        top.shapes(mid).insert(kdb.DBox(x, y, x + 0.05, y + 0.05))
+    ly.write(str(path))
+
+
+def density_only_checks(temp):
+    """The density alone (user 2026-10-04: "an option to pass the shapes by
+    and draw the density alone, to compare" - is it pass 1's budget that
+    takes 789's dots; renderd density_only, FLOE_RUST_DENSITY_ONLY=on,
+    diagnostic): under a 64 MB budget pass 1 reads no page (none in hand
+    for pass 2) and draws no shape - LOW's original is gone - while MID's
+    density lights as it does with the shapes, and pass 2's reserve is the
+    whole budget."""
+    src = Path(temp) / 'density_only.oas'
+    density_only_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_BUDGET_MB': '64'}
+    workers = {'shapes': worker(src, env), 'only': worker(src, dict(env, FLOE_RUST_DENSITY_ONLY='on'))}
+    try:
+        low_c, mid_c = layer_colour(workers['shapes'], LOW), layer_colour(workers['shapes'], MID)
+        (shapes, shapes_res), (only, only_res) = (frame(w, 1, (LOW, MID)) for w in (workers['shapes'], workers['only']))
+
+        def of(pixels, colour):
+            return {(c, r) for r in range(H) for c in range(W) if px(pixels, c, r) == colour}
+
+        assert of(shapes, low_c) and not of(only, low_c), ('LOW original', len(of(shapes, low_c)), len(of(only, low_c)))
+        assert of(only, mid_c) and of(only, mid_c) == of(shapes, mid_c), ('MID density', len(of(only, mid_c)), len(of(shapes, mid_c)))
+        assert shapes_res['density_pages']['in_hand'] > 0 and only_res['density_pages']['in_hand'] == 0, (shapes_res['density_pages'], only_res['density_pages'])
+        assert only_res['density_plan2']['reserve_mb'] == 64, only_res['density_plan2']
+        print('density stack: the density alone - LOW\'s original %d px -> none, MID %d px either way, pass 1 pages in hand %d -> 0, '
+              'reserve %d MB' % (len(of(shapes, low_c)), len(of(only, mid_c)), shapes_res['density_pages']['in_hand'], only_res['density_plan2']['reserve_mb']))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def own_layout(path):
     """A TOP whose own shapes are 60,000 boxes of 0.05-0.3 um at random over
     300 x 300 um - under a pixel at 1000 px; of 62,500 sizes, so the writer
@@ -1826,6 +1877,7 @@ def main():
         zoom_out_checks(temp)
         gate_checks(temp)
         top_first_checks(temp)
+        density_only_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

@@ -659,6 +659,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         full, brief = perf_status(res)
         self.assertIn("[density: dots, lit 620k px, block 4 px, floor 15 px, reserve 896 MB, dots x0.64, gate 2/16 px (12k out), pass 2 plan", full)
         self.assertEqual(full.count("gate 2/16 px"), 1, full)
+        # the density alone (FLOE_RUST_DENSITY_ONLY=on, 2026-10-04): said
+        # first, the viewer and renderd sharing the environment
+        with mock.patch.dict(os.environ, {"FLOE_RUST_DENSITY_ONLY": "on"}):
+            alone, _ = perf_status(res)
+        self.assertIn("[density: dots, density only, lit 620k px, block 4 px", alone)
         self.assertIn(" passes on 4 threads, 24 regions (free top 1.3M, others 210k px), nodes ", full)
         # the chunks' members right after the chunks (0.12.268 put them last:
         # the field's `list chunks 78, array members 57k of 354 members`)

@@ -197,6 +197,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.291(밀도만, 진단) `density_only_checks`:
+      - LOW의 36×16 µm 원본 아래, MID의 0.05 µm 사각형 40,000개(띠). 예산 64 MB.
+      - `FLOE_RUST_DENSITY_ONLY=on`이면 LOW의 원본이 0 px(끄면 24,911 px), MID의 밀도는 같은 픽셀(9,443 px), 1패스가 든
+        페이지 0(끄면 1), 2패스 예약 64 MB(예산 전체).
+      - 상태줄 테스트: 환경 변수를 켜면 `[density: dots, density only, lit …`.
     - 0.12.290(위층 페이지 먼저) `top_first_checks`:
       - 루트 칩을 1/4 배율로 만들어(`tools/gen_route_chip.py --scale 0.25`, 약 4 s) 색인하고, 예산 64 MB
         (`FLOE_RUST_BUDGET_MB`), fit(1350×971), depth 0에서 M8(38/0)과 M1(31/0)을 본다.

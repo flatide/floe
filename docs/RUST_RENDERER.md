@@ -433,6 +433,11 @@ lower layer on took pages from the top plane: the routing chip's M8 over M1
 under 256 MB kept 76 % of M8's pixels); the others take what is left (user
 2026-10-04: "789's dots, lit alone, went with 787 on"; renderd
 `density_top_first`, `FLOE_RUST_DENSITY_TOP_FIRST=off` is the kill switch).
+`FLOE_RUST_DENSITY_ONLY=on` (0.12.291, diagnostic, off by default) draws the
+density alone: pass 1 of a density frame reads no page and draws no shape
+(its plan keeps the hierarchy), so pass 2's reserve is the whole budget - to
+tell pass 1's budget from pass 2's own (user 2026-10-04: "789's dots still go
+when 787 is on"); the viewer's density tag says `density only`.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's
