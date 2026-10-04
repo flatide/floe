@@ -2495,6 +2495,28 @@ fn density_top_held() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_TOP_HELD").as_deref() != Ok("off"))
 }
 
+/// The density stack's top planes are every visible datatype of the topmost
+/// layer number (user 2026-10-04, 0.12.291 on the real chip: "789's density
+/// still shrinks when 787 is on - in places 787 covers where 789 was, in
+/// places 789's dots are simply gone"; with 787.* and 789.* on only 789's
+/// topmost datatype was the top plane - the others' density, a lower plane's,
+/// showed only where no original was, and 787's shapes took it): pass 2's top
+/// side plans them all, each drawing over the originals below it, the top
+/// first (render-core GeometryRasterRequest::density_top_planes).
+/// FLOE_RUST_DENSITY_TOP_GROUP=off is the kill switch: the topmost one alone.
+fn density_top_group(cache: &Cache, mut styled: StyledGeometryRasterRequest) -> StyledGeometryRasterRequest {
+    let mut count = 1usize;
+    if std::env::var("FLOE_RUST_DENSITY_TOP_GROUP").as_deref() != Ok("off") {
+        let layers = cache.layers();
+        let number = |idx: u32| layers.iter().find(|layer| layer.index == idx).map(|layer| layer.layer);
+        if let Some(top) = styled.layers.last().and_then(|layer| number(layer.layer_idx)) {
+            count = styled.layers.iter().rev().take_while(|layer| number(layer.layer_idx) == Some(top)).count().max(1);
+        }
+    }
+    styled.raster.density_top_planes = count.min(u16::MAX as usize) as u16;
+    styled
+}
+
 /// The density stack's pass 2 alone (user 2026-10-04: "789's dots still go
 /// when 787 is on - it may be pass 1's budget; an option to pass the shapes
 /// by and draw the density alone, to compare"): pass 1 decodes no page and
@@ -2513,7 +2535,9 @@ fn density_only() -> bool {
 /// before the others' (they were in one list by distance from the view's
 /// centre, under one reserve: the routing chip's M8 over M1 under a 256 MB
 /// budget kept 76 % of M8's pixels); the others take what is left, as they
-/// planned. FLOE_RUST_DENSITY_TOP_FIRST=off is the kill switch.
+/// planned - since 0.12.292 each plane's pages in the drawing order down (789's
+/// lower datatypes before 787's, in the others' side). FLOE_RUST_DENSITY_TOP_FIRST=off
+/// is the kill switch.
 fn density_top_first() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_TOP_FIRST").as_deref() != Ok("off"))
@@ -3356,6 +3380,7 @@ fn run_render(
         density_stack: !command.exact && area_true_enabled() && density_stack_enabled(),
         // the sub-cut dots' composition: a density shape claims what it lights
         density_claim_lit: density_dots_enabled(),
+        density_top_planes: 1,
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache
@@ -3549,6 +3574,8 @@ fn run_render(
                         None => styled.clone(),
                     };
                     let density_styled = if density_top_held() { density_held_top(cache, plan.top, density_styled) } else { density_styled };
+                    // every visible datatype of the topmost layer number a top plane
+                    let density_styled = density_top_group(cache, density_styled);
                     // the sub-cut dots show pass 1 first (CUT_DENSITY_DESIGN §10.12
                     // step 3): a round of its own, final=0, then the frame with the
                     // density - never for a margin (it is not shown before it lands)
@@ -4284,10 +4311,15 @@ fn render_density_frame(
     let budget_bytes = page_cache.budget_bytes();
     // pass 2's reserve: the fixed one or what pass 1 left (density_frame_reserve)
     let reserve_bytes = density_frame_reserve(budget_bytes, *generation_bytes);
-    let top_layer = styled.layers.last().map(|layer| layer.layer_idx);
+    // the top planes (density_top_group): their layers plan as the top side
+    let top_planes = (styled.raster.density_top_planes as usize).clamp(1, styled.layers.len().max(1));
+    let top_layers: Vec<u32> = styled.layers[styled.layers.len().saturating_sub(top_planes)..].iter().map(|layer| layer.layer_idx).collect();
+    // each layer's place from the top (0 the top plane): pass 2 decodes the
+    // upper planes' pages first (density_top_first)
+    let from_top: BTreeMap<u32, u16> = styled.layers.iter().rev().enumerate().map(|(at, layer)| (layer.layer_idx, at.min(u16::MAX as usize) as u16)).collect();
     // zoomed out past the viewer's fit view, the dots thin (density_zoom_gain)
     let dot_gain = density_zoom_gain(cache, command, plan.top.0);
-    let other_layers: Vec<u32> = styled.layers.iter().take(styled.layers.len().saturating_sub(1)).map(|layer| layer.layer_idx).collect();
+    let other_layers: Vec<u32> = styled.layers.iter().take(styled.layers.len().saturating_sub(top_planes)).map(|layer| layer.layer_idx).collect();
     // pages planned/in hand/decoded/over the budget, dot items/over the cap
     let mut counts = [0u64; 6];
     // the records' cut pass 2 planned at (px), and the frame's scale
@@ -4371,7 +4403,7 @@ fn render_density_frame(
                     let mut sides: [Option<Arc<FrameScene>>; 2] = [None, None];
                     // the pages to decode: the top plane's first (density_top_first),
                     // then by the plan's priority
-                    let mut wanted: Vec<(u8, u64, u32)> = Vec::new();
+                    let mut wanted: Vec<(u16, u64, u32)> = Vec::new();
                     let top_first = density_top_first();
                     // the sub-cut dots (FLOE_RUST_DENSITY_DOTS=on) plan both sides at
                     // once when the others' space is much of the top plane's: the walk
@@ -4394,7 +4426,7 @@ fn render_density_frame(
                         vec![(regions_top, styled.layers.iter().map(|layer| layer.layer_idx).collect::<Vec<u32>>())]
                     } else {
                         vec![
-                            (regions_top, top_layer.map(|idx| vec![idx]).unwrap_or_default()),
+                            (regions_top, top_layers.clone()),
                             (regions_others, other_layers.clone()),
                         ]
                     };
@@ -4638,12 +4670,12 @@ fn render_density_frame(
                                 // out (its fit) stays out, counted as over
                                 counts[3] += 1;
                             } else {
-                                // the top plane's pages first: as the joint plan's, those
-                                // of its layer
-                                let rank = match (top_first, joint) {
-                                    (false, _) => 0,
-                                    (true, false) => side as u8,
-                                    (true, true) => u8::from(cache.page_layer(page_id) != top_layer),
+                                // the upper planes' pages first: the top plane's, then
+                                // each lower plane's in the drawing order down
+                                let rank = if top_first {
+                                    cache.page_layer(page_id).and_then(|layer| from_top.get(&layer).copied()).unwrap_or(u16::MAX)
+                                } else {
+                                    0
                                 };
                                 wanted.push((rank, prio, page_id));
                             }
@@ -4652,8 +4684,8 @@ fn render_density_frame(
                             // the lower planes' walk reads the whole plan (its plane
                             // table leaves the top layer out), the top plane's side
                             // that layer's pages and dots (Cache::plan_layer_only)
-                            if let Some(layer) = top_layer {
-                                let top_plan = Arc::new(cache.plan_layer_only(&density_plan, layer));
+                            if !top_layers.is_empty() {
+                                let top_plan = Arc::new(cache.plan_layers_only(&density_plan, &top_layers));
                                 let top_scene = Arc::new(FrameScene::new_metadata(cache, top_plan, Arc::from([]), command.label_font_px)?);
                                 for page in decoded_pages {
                                     let _ = top_scene.set_decoded_page(Arc::clone(page));

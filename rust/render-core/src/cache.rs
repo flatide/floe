@@ -1030,7 +1030,13 @@ impl Cache {
     /// layer through them, and the scene's layer masks prune the subtrees
     /// that hold none of it.
     pub fn plan_layer_only(&self, plan: &HierPlan, layer: u32) -> HierPlan {
-        let of_layer = |page: u32| self.page_layer(page) == Some(layer);
+        self.plan_layers_only(plan, &[layer])
+    }
+
+    /// `plan_layer_only` for several layers (the density stack's top planes,
+    /// GeometryRasterRequest::density_top_planes).
+    pub fn plan_layers_only(&self, plan: &HierPlan, layers: &[u32]) -> HierPlan {
+        let of_layer = |page: u32| self.page_layer(page).is_some_and(|layer| layers.contains(&layer));
         let wcells = plan
             .wcells
             .iter()
@@ -1048,16 +1054,16 @@ impl Cache {
                     page_levels: if cell.page_levels.is_empty() { Vec::new() } else { kept.iter().map(|&(_, level)| level).collect() },
                     insts: cell.insts.clone(),
                     frames: Vec::new(),
-                    washes: cell.washes.iter().filter(|(wash_layer, _)| *wash_layer == layer).copied().collect(),
+                    washes: cell.washes.iter().filter(|(wash_layer, _)| layers.contains(wash_layer)).copied().collect(),
                     // a spread dots plan's counts, with their washes
                     dot_counts: cell
                         .washes
                         .iter()
                         .zip(&cell.dot_counts)
-                        .filter(|((wash_layer, _), _)| *wash_layer == layer)
+                        .filter(|((wash_layer, _), _)| layers.contains(wash_layer))
                         .map(|(_, &count)| count)
                         .collect(),
-                    reps: cell.reps.iter().filter(|(rep_layer, _)| *rep_layer == layer).cloned().collect(),
+                    reps: cell.reps.iter().filter(|(rep_layer, _)| layers.contains(rep_layer)).cloned().collect(),
                 }
             })
             .collect();

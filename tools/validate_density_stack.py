@@ -1259,6 +1259,70 @@ def density_only_checks(temp):
             w.stop()
 
 
+TOP1 = (TOP[0], 1)
+
+
+def top_group_layout(path):
+    """LOW's 36 x 16 um square (an original past every cut); TOP's 40,000
+    0.05 um squares at random over a 20 x 10 um band across it and TOP1's (the
+    same layer number, its next datatype) 0.1 um specks every 4 um above y 18
+    um, clear of the band."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    top.shapes(ly.layer(*LOW)).insert(kdb.DBox(2, 2, 38, 18))
+    dense = ly.layer(*TOP)
+    rnd = random.Random(19)
+    for _ in range(40_000):
+        x, y = 10 + rnd.randrange(20_000) / 1000.0, 5 + rnd.randrange(10_000) / 1000.0
+        top.shapes(dense).insert(kdb.DBox(x, y, x + 0.05, y + 0.05))
+    upper = ly.layer(*TOP1)
+    for i in range(10):
+        top.shapes(upper).insert(kdb.DBox(1.0 + i * 4.0, 18.5, 1.1 + i * 4.0, 18.6))
+    ly.write(str(path))
+
+
+def top_group_checks(temp):
+    """Every visible datatype of the topmost layer number is a top plane
+    (user 2026-10-04, the real chip: with 787.* and 789.* on, "789's density
+    still shrinks when 787 is on - in places 787 covers where 789 was, in
+    places 789's dots are simply gone"; renderd density_top_group,
+    FLOE_RUST_DENSITY_TOP_GROUP=off the kill switch): TOP1 is the topmost
+    plane, TOP - its layer number's other datatype - a top plane too, so its
+    dense specks over LOW's original light the same pixels with LOW on as
+    without it; with the switch off TOP is a lower plane and LOW's original
+    keeps them out; LOW shows where TOP does not light."""
+    src = Path(temp) / 'top_group.oas'
+    top_group_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_TOP_GROUP='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_TOP_GROUP='off'))}
+    try:
+        low_c, top_c = layer_colour(workers['on'], LOW), layer_colour(workers['on'], TOP)
+        band = (range(100, 300), range(50, 150))
+
+        def of(pixels, colour):
+            return {(c, r) for r in band[1] for c in band[0] if px(pixels, c, r) == colour}
+
+        alone = {name: of(frame(w, 1, (TOP, TOP1))[0], top_c) for name, w in workers.items()}
+        both = {name: frame(w, 2, (LOW, TOP, TOP1))[0] for name, w in workers.items()}
+        assert alone['on'] and alone['on'] == alone['off'], ('TOP without LOW', len(alone['on']), len(alone['off']))
+        assert of(both['on'], top_c) == alone['on'], ('TOP over LOW', len(of(both['on'], top_c)), len(alone['on']))
+        kept_off = len(of(both['off'], top_c) & alone['on'])
+        assert kept_off < 0.5 * len(alone['on']), ('the switch off', kept_off, len(alone['on']))
+        low_on = of(both['on'], low_c)
+        assert low_on and not (low_on & alone['on']), ('LOW where TOP does not light', len(low_on))
+        print('density stack: the topmost layer number\'s datatypes are top planes - TOP %d px in its band with LOW on as without it '
+              '(the switch off kept %d); LOW %d px there where TOP does not light' % (len(alone['on']), kept_off, len(low_on)))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def own_layout(path):
     """A TOP whose own shapes are 60,000 boxes of 0.05-0.3 um at random over
     300 x 300 um - under a pixel at 1000 px; of 62,500 sizes, so the writer
@@ -1878,6 +1942,7 @@ def main():
         gate_checks(temp)
         top_first_checks(temp)
         density_only_checks(temp)
+        top_group_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)
