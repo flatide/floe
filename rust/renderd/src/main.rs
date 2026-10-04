@@ -2495,6 +2495,18 @@ fn density_top_held() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_TOP_HELD").as_deref() != Ok("off"))
 }
 
+/// Pass 2 serves the top plane first (user 2026-10-04: the dots 789 lit alone
+/// went, many of them, with 787 on - "the density draws 789 first, then 787,
+/// so 789's dots should stay"): the pages to decode are the top plane's side's
+/// before the others' (they were in one list by distance from the view's
+/// centre, under one reserve: the routing chip's M8 over M1 under a 256 MB
+/// budget kept 76 % of M8's pixels); the others take what is left, as they
+/// planned. FLOE_RUST_DENSITY_TOP_FIRST=off is the kill switch.
+fn density_top_first() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_TOP_FIRST").as_deref() != Ok("off"))
+}
+
 /// The viewer's fit view: the die and this margin (floe gui._fit_spp).
 const VIEWER_FIT_MARGIN: f64 = 1.05;
 
@@ -4327,7 +4339,10 @@ fn render_density_frame(
                     // the finer plans: the top plane's layer over its regions,
                     // the other layers over theirs
                     let mut sides: [Option<Arc<FrameScene>>; 2] = [None, None];
-                    let mut wanted: Vec<(u64, u32)> = Vec::new();
+                    // the pages to decode: the top plane's first (density_top_first),
+                    // then by the plan's priority
+                    let mut wanted: Vec<(u8, u64, u32)> = Vec::new();
+                    let top_first = density_top_first();
                     // the sub-cut dots (FLOE_RUST_DENSITY_DOTS=on) plan both sides at
                     // once when the others' space is much of the top plane's: the walk
                     // that finds the dots is the same for every layer, and the top
@@ -4593,7 +4608,14 @@ fn render_density_frame(
                                 // out (its fit) stays out, counted as over
                                 counts[3] += 1;
                             } else {
-                                wanted.push((prio, page_id));
+                                // the top plane's pages first: as the joint plan's, those
+                                // of its layer
+                                let rank = match (top_first, joint) {
+                                    (false, _) => 0,
+                                    (true, false) => side as u8,
+                                    (true, true) => u8::from(cache.page_layer(page_id) != top_layer),
+                                };
+                                wanted.push((rank, prio, page_id));
                             }
                         }
                         if joint {
@@ -4618,11 +4640,12 @@ fn render_density_frame(
                     // as twice the encoded bytes, the generation check below the net
                     check_generation(cancellation, command.generation)?;
                     wanted.sort_unstable();
-                    wanted.dedup_by_key(|entry| entry.1);
+                    let mut seen = std::collections::HashSet::with_capacity(wanted.len());
+                    wanted.retain(|entry| seen.insert(entry.2));
                     let limit = reserve_bytes;
                     let mut estimate = 0u64;
                     let mut take = Vec::with_capacity(wanted.len());
-                    for (_, page_id) in wanted {
+                    for (_, _, page_id) in wanted {
                         let bytes = cache.page_encoded_bytes(page_id).saturating_mul(2).max(1);
                         if estimate.saturating_add(bytes) > limit {
                             counts[3] += 1;

@@ -1142,6 +1142,72 @@ def gate_checks(temp):
             w.stop()
 
 
+def layer_colour(w, layer):
+    """A layer's colour as the renderer paints it (the cache's style)."""
+    for l in w.cache.meta['layers']:
+        if (l['layer'], l['datatype']) == tuple(layer):
+            c = l['color'].lstrip('#')
+            return bytes((int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16), 255))
+    raise AssertionError('layer %s not found' % (layer,))
+
+
+def top_first_checks(temp):
+    """Pass 2 decodes the top plane's pages first (user 2026-10-04: "789's
+    dots, lit alone, went with 787 on - the density draws 789 first, so they
+    should stay"; renderd density_top_first, FLOE_RUST_DENSITY_TOP_FIRST=off
+    the kill switch): the routing chip at a quarter scale (tools/
+    gen_route_chip.py) at its fit view, depth 0, under a 64 MB budget - its
+    M8 (38/0) lights the same pixels with M1 (31/0) on as alone; with the
+    switch off the two sides' pages shared one list by distance and M8 lost
+    some to M1."""
+    src = Path(temp) / 'route.oas'
+    done = subprocess.run([sys.executable, '-B', str(ROOT / 'tools/gen_route_chip.py'), str(src), '--scale', '0.25'],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_BUDGET_MB': '64'}
+    workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_TOP_FIRST='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_TOP_FIRST='off'))}
+    try:
+        cache = workers['on'].cache
+        x0, y0, x1, y1 = cache.meta['bbox']
+        fw, fh = 1350, 971
+        spp = max((x1 - x0) / fw, (y1 - y0) / fh) * 1.05
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        box = (cx - fw * spp / 2, cy - fh * spp / 2, cx + fw * spp / 2, cy + fh * spp / 2)
+        up, low = (38, 0), (31, 0)
+        up_c = layer_colour(workers['on'], up)
+
+        def lit_up(w, gen, visible):
+            w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': box, 'view': None, 'w': fw, 'h': fh, 'depth': 0, 'cut_px': 3.0,
+                      'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': visible, 'frame_format': 'raw',
+                      'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    rgba = bytes(res.pop('rgba'))
+                    return {i for i in range(0, len(rgba), 4) if rgba[i:i + 4] == up_c}, res
+            raise AssertionError('top first frame timeout')
+
+        alone, _ = lit_up(workers['on'], 1, [up])
+        both, both_res = lit_up(workers['on'], 2, [low, up])
+        alone_off, _ = lit_up(workers['off'], 1, [up])
+        both_off, off_res = lit_up(workers['off'], 2, [low, up])
+        assert alone and alone == alone_off, ('M8 alone', len(alone), len(alone_off))
+        assert off_res['density_pages']['over_budget'] > 0, ('the reserve must not hold both', off_res['density_pages'])
+        assert both == alone, ('M8 with M1 on', len(both), len(alone), both_res['density_pages'])
+        kept_off = len(both_off & alone) / len(alone)
+        assert kept_off < 0.95, ('the switch off', kept_off)
+        print('density stack: pass 2 decodes the top plane first - M8 %d px alone, all kept with M1 on (the switch off kept %.0f %%; '
+              '%d pages over the reserve)' % (len(alone), 100 * kept_off, off_res['density_pages']['over_budget']))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def own_layout(path):
     """A TOP whose own shapes are 60,000 boxes of 0.05-0.3 um at random over
     300 x 300 um - under a pixel at 1000 px; of 62,500 sizes, so the writer
@@ -1759,6 +1825,7 @@ def main():
         shift_checks(temp)
         zoom_out_checks(temp)
         gate_checks(temp)
+        top_first_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

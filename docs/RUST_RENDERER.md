@@ -426,7 +426,13 @@ blocks "fill space where nothing was"; "a pixel should light only when the
 shapes' size in it passes a level"; floe_vfs `HierOpts::dot_gate`,
 `FLOE_RUST_DENSITY_GATE=off` is the kill switch,
 `FLOE_RUST_DENSITY_GATE_SHARE` diagnostic). `density_plan2` ends with the
-blocks left out and the dots a block needed (34 values).
+blocks left out and the dots a block needed (34 values). Since 0.12.290
+pass 2 decodes the top plane's side's pages before the others' (they were
+one list by distance from the view's centre under one reserve, and turning a
+lower layer on took pages from the top plane: the routing chip's M8 over M1
+under 256 MB kept 76 % of M8's pixels); the others take what is left (user
+2026-10-04: "789's dots, lit alone, went with 787 on"; renderd
+`density_top_first`, `FLOE_RUST_DENSITY_TOP_FIRST=off` is the kill switch).
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

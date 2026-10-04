@@ -197,6 +197,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.290(위층 페이지 먼저) `top_first_checks`:
+      - 루트 칩을 1/4 배율로 만들어(`tools/gen_route_chip.py --scale 0.25`, 약 4 s) 색인하고, 예산 64 MB
+        (`FLOE_RUST_BUDGET_MB`), fit(1350×971), depth 0에서 M8(38/0)과 M1(31/0)을 본다.
+      - M8만 켠 픽셀(1,877 px)이 M1을 켠 프레임에서 모두 같다. 킬 스위치(`FLOE_RUST_DENSITY_TOP_FIRST=off`)는 페이지가
+        예약을 넘고(`over_budget` > 0) M8을 95 % 미만(66 %) 남긴다.
     - 0.12.288(detail 밀도 문턱) `gate_checks`:
       - MID의 0.05 µm 사각형: 왼쪽 40×40 µm에 무작위 4,000개(0.6 %), 오른쪽 20×20 µm에 0.1 µm 간격(25 %).
       - 0.4 µm/px에서 모두 하한 아래라 점유로 퍼뜨린다(`occ_pages` ≥ 1, 디코드 0). medium 컷(3 px)은 블록에 2점이 필요하다
