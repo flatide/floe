@@ -1018,6 +1018,21 @@ impl Cache {
             .sum()
     }
 
+    /// `plan_page_memory` past the pages the frame holds already (`free`,
+    /// sorted; floe_vfs HierOpts::free_pages): what a floor probe's pages
+    /// cost pass 2's reserve (floe_vfs page_cost), the plans of its bands
+    /// merged (renderd density_probe_threads).
+    pub fn plan_page_cost(&self, plan: &HierPlan, free: &[u32]) -> u64 {
+        plan.pages
+            .iter()
+            .filter(|page| free.binary_search(page).is_err())
+            .map(|&page| {
+                let p = self.vfs.ovm.page(page);
+                floe_vfs::hier::page_memory(p.records, p.usize_)
+            })
+            .sum()
+    }
+
     /// The cut a request plans at, dbu (what a budget fit's decision records).
     pub fn plan_cut_dbu(&self, request: &PlanRequest) -> Result<i64, String> {
         Ok(self.view_request(request)?.cut_dbu)

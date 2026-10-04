@@ -389,7 +389,18 @@
      멤버 수(n × 블록² / 구간 넓이)를 `CHUNK_SAMPLE_PER_BLOCK`(16)으로 나눈 값이 2 이상이면 그 2의 거듭제곱(최대
      `CHUNK_SAMPLE_STEP_MAX` 32)을 step으로 한다. step번째 멤버만 읽고 step개로 센다. 통계
      `dot_sampled_chunks`·`dot_sampled_members`.
+     `HierOpts::dot_list_by_dot`(0.12.295, 기본 켬, `FLOE_RUST_DENSITY_LIST_BY_DOT=off`가 킬 스위치): 멤버의 점 몫 each가
+     0.5 미만이면 `by_dot_step(each)`(each × 창 ≤ 1인 가장 큰 2의 거듭제곱, 청크 256 이하) 창마다 하나만 읽는다.
+     - 창 안의 멤버는 `block_dither(창 시작, 청크 번호, 청크 상자·레이어의 salt)`로 고른다.
+     - 그 멤버가 창의 실제 멤버 수 × each 점을 낸다(`whole_dots`).
+     - `dot_list_sample`의 step보다 클 때만 쓰고, stride가 1일 때만 쓴다.
+     - 통계는 `dot_sampled_*`에 함께 센다.
   - 리스트의 `SUB_CUT_BOX_ARRAY_MAX`에는 하나씩 읽은 멤버만 센다. `dot_by[3]`(리스트 멤버)와 항목 수도 읽은 멤버다.
+  - 단위 `a_list_member_under_a_dot_is_read_one_in_the_members_that_make_a_dot`(0.12.295):
+    - 0.04 px² LEAF 3만 개 리스트 하나는 16개에 하나를 읽는다(1,875개). 점 수는 모두 읽을 때와 면적의 10 % 안이다.
+      사분면 영역 넷으로 나눠도 같다.
+    - 셀 여덟에 10개짜리 리스트 여덟(2,000 dbu, 블록 다섯에 걸침)은 리스트마다 한 번만 읽는다(640 → 64).
+    - `a_member_under_a_pixel_stands_for_its_area_in_dots`는 이 옵션을 끄고, 빠른 길과 느린 길이 같은지 본다.
   - 단위: `a_point_list_chunk_in_full_blocks_is_passed_over_and_a_dense_one_read_at_a_step`.
     - 픽스처: 20 dbu 격자의 4,096점 리스트 둘(두 번째는 10 dbu 비킴, 블록마다 약 400개)과 무작위 3,000점 리스트.
     - 확인하는 것:

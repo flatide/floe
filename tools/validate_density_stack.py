@@ -602,6 +602,49 @@ def held_checks(temp):
         roomy.stop()
 
 
+def probe_threads_checks(temp):
+    """Pass 2's floor probe plans on the threads its fit does (user
+    2026-10-04, the field chip with a floor under the density cut: the probe
+    planned as one, and one that fits is the plan - `pass 2 plan 7258 ms`;
+    renderd density_probe_threads, FLOE_RUST_DENSITY_PROBE_THREADS=off the
+    kill switch). The point-list vias of lists_layout at a zero floor, 9
+    tiles: the probe holds, the frame is the one plan's to the pixel, planned
+    on four threads (one with the switch off)."""
+    src = Path(temp) / 'probe_lists.oas'
+    lists_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0', 'FLOE_RUST_DENSITY_PLAN_THREADS': '4'}
+    workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_PROBE_THREADS='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_PROBE_THREADS='off'))}
+    try:
+        dbu = float(workers['on'].cache.meta['dbu'])
+
+        def view(w):
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'headless', 'bbox': (0.0, 0.0, 300.1 / dbu, 300.1 / dbu), 'view': None,
+                      'w': 1000, 'h': 1000, 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                      'abstract': False, 'visible': [LOW], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') != 'error', res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('probe frame timeout')
+
+        (on, ron), (off, roff) = view(workers['on']), view(workers['off'])
+        p_on, p_off = ron['density_plan2'], roff['density_plan2']
+        assert p_on['probes'] == p_off['probes'] == 1 and p_on['probes_over'] == p_off['probes_over'] == 0, (p_on, p_off)
+        assert ron['density_floor'] == 0.0 and ron['density_stack']['lit'] > 0, (ron['density_floor'], ron['density_stack'])
+        assert on == off and (p_on['threads'], p_off['threads']) == (4, 1), (
+            sum(1 for i in range(0, len(on), 4) if on[i:i + 4] != off[i:i + 4]), p_on['threads'], p_off['threads'])
+        print('density stack: the floor probe on four threads - its frame the one plan\'s (%d px lit), probe %d / %d us'
+              % (ron['density_stack']['lit'], p_on['probe_us'], p_off['probe_us']))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def lists_layout(path):
     """A routing cell's vias: a 0.1 um VIA placed at 4,000 random places over
     300 x 300 um, written with KLayout's strongest compression - an irregular
@@ -630,13 +673,26 @@ def lists_checks(temp):
     threads: 1 / 2 / 2.96 M members, pass 2 planned 28 / 46 / 71 ms. Over 9
     tiles (1000 x 1000 px) the frame of one, two and four threads and of the
     bounds (FLOE_RUST_DENSITY_DOT_BOXES=off) is one; four threads count the
-    members once and a block's edge more, the bounds about twice."""
+    members once and a block's edge more, the bounds about twice - every
+    member read (FLOE_RUST_DENSITY_LIST_BY_DOT=off). A member reads for the
+    members that make a dot (floe_vfs HierOpts::dot_list_by_dot, 0.12.295:
+    a 0.11 px^2 VIA one in 8): the frames of the threads and the bounds
+    are one too, from an eighth of the members or fewer."""
     src = Path(temp) / 'lists.oas'
     lists_layout(src)
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    every = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_LIST_BY_DOT': 'off'}
+    by_dot = dict(every, FLOE_RUST_DENSITY_LIST_BY_DOT='on')
+    by_members = None
+    for env in (every, by_dot):
+        by_members = lists_threads(src, env, by_members)
+
+
+def lists_threads(src, env, every_members):
+    """lists_checks under `env`: every member read (`every_members` None) or
+    a member for those that make a dot (the counts every member gave)."""
     workers = {threads: worker(src, dict(env, FLOE_RUST_DENSITY_PLAN_THREADS=threads)) for threads in ('1', '2', '4')}
     workers['bounds'] = worker(src, dict(env, FLOE_RUST_DENSITY_PLAN_THREADS='4', FLOE_RUST_DENSITY_DOT_BOXES='off'))
     try:
@@ -658,14 +714,20 @@ def lists_checks(temp):
         frames = {name: view(w) for name, w in workers.items()}
         one, one_res = frames['1']
         members = {name: res['density_plan2']['by_list_members'] for name, (_, res) in frames.items()}
-        assert one_res['density_stack']['lit'] > 0 and 3_000 <= members['1'] <= 4_000, (one_res['density_stack'], members)
+        if every_members is None:
+            assert one_res['density_stack']['lit'] > 0 and 3_000 <= members['1'] <= 4_000, (one_res['density_stack'], members)
+        else:
+            # a member for the members that make a dot: an eighth or fewer
+            assert one_res['density_stack']['lit'] > 0 and 0 < members['1'] * 8 <= every_members['1'], (one_res['density_stack'], members, every_members)
         for name, (pixels, res) in frames.items():
             assert pixels == one, '%s draws otherwise than one thread in %d px' % (
                 name, sum(1 for i in range(0, len(one), 4) if pixels[i:i + 4] != one[i:i + 4]))
         assert frames['4'][1]['density_plan2']['threads'] == 4, frames['4'][1]['density_plan2']
         assert members['4'] <= 1.25 * members['1'] and members['bounds'] >= 1.5 * members['1'], members
-        print('density stack: point lists - one, two and four threads and the bounds draw alike (%d px lit); members '
-              'counted %s' % (one_res['density_stack']['lit'], ' / '.join('%s %d' % kv for kv in members.items())))
+        print('density stack: point lists%s - one, two and four threads and the bounds draw alike (%d px lit); members '
+              'counted %s' % ('' if every_members is None else ', a member for those that make a dot', one_res['density_stack']['lit'],
+                              ' / '.join('%s %d' % kv for kv in members.items())))
+        return members
     finally:
         for w in workers.values():
             w.stop()
@@ -702,13 +764,15 @@ def dense_lists_checks(temp):
     0.12.279's walk) on four threads and on one; the chunks of the second
     list in the first's full blocks are passed over, and at 100 px the dense
     ones read at a step - under a fifth of the members read (at 200 px none
-    is dense enough)."""
+    is dense enough). A member read for those that make a dot (floe_vfs
+    HierOpts::dot_list_by_dot) draws otherwise: off here, lists_checks has
+    it."""
     src = Path(temp) / 'dense_lists.oas'
     dense_lists_layout(src)
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_LIST_BY_DOT': 'off'}
     every = {'FLOE_RUST_DENSITY_LIST_FULL': 'off', 'FLOE_RUST_DENSITY_LIST_SAMPLE': 'off', 'FLOE_RUST_DENSITY_LIST_FAST': 'off'}
     workers = {
         'default': worker(src, env),
@@ -2058,6 +2122,7 @@ def main():
         held_checks(temp)
         lists_checks(temp)
         dense_lists_checks(temp)
+        probe_threads_checks(temp)
         cells_checks(temp)
         shift_checks(temp)
         zoom_out_checks(temp)

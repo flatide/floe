@@ -197,6 +197,21 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.295(하한 탐색 스레드, 점 하나어치 리스트 표본, 정확한 빠른 연산):
+      - `probe_threads_checks`: `lists_layout`의 비아를 하한 0, 9타일(1,000 px)로 본다. 탐색이 맞고, 프레임이 계획 하나의
+        것과 픽셀까지 같다. 스레드는 4이고, 킬 스위치(`FLOE_RUST_DENSITY_PROBE_THREADS=off`)면 1이다.
+      - `lists_checks`는 두 번 돈다.
+        - 모든 멤버를 읽을 때(`FLOE_RUST_DENSITY_LIST_BY_DOT=off`): 지금까지와 같다(4,000개).
+        - 점 하나어치에 하나를 읽을 때(0.11 px² 비아, 8개에 하나): 1·2·4 스레드와 bounds의 프레임이 하나이고, 멤버를
+          8분의 1 이하로 읽는다(500개).
+      - `dense_lists_checks`는 `FLOE_RUST_DENSITY_LIST_BY_DOT=off`로 고정한다. 모든 멤버를 읽은 프레임과 바이트까지
+        같은지가 그 검사의 기준이다.
+      - 단위:
+        - vfs `a_list_member_under_a_dot_is_read_one_in_the_members_that_make_a_dot`.
+        - render-core `the_fast_arithmetic_is_the_i128_one`: 2의 거듭제곱(2^0~2^59)과 아닌 제수로 나눈 floor·ceil,
+          i128→f64, 장치 좌표(i64 밖 포함)가 i128 연산과 같다.
+        - render-core `the_i64_rows_are_the_i128_sums`: 8방향, i64 양 끝 좌표에서 변환이 i128 합과 같다(넘침은 오류로
+          같다).
     - 0.12.294(1패스 도형이 먼저: 모든 평면의 밀도는 원본이 없는 곳에만) `shapes_first_checks`:
       - 장면:
         - LOW의 18×16 µm 원본(x 2~20 µm).

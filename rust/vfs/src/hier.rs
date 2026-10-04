@@ -450,6 +450,27 @@ pub fn dot_list_sample() -> bool {
 pub const CHUNK_SAMPLE_PER_BLOCK: u64 = 16;
 pub const CHUNK_SAMPLE_STEP_MAX: usize = 32;
 
+/// HierOpts::dot_list_by_dot default: on; FLOE_RUST_DENSITY_LIST_BY_DOT=off
+/// (the kill switch) reads every member no step passes over, as 0.12.294.
+pub fn dot_list_by_dot() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_LIST_BY_DOT").as_deref() != Ok("off"))
+}
+
+/// HierOpts::dot_list_by_dot: the window a point-list member standing for
+/// `each` dots is read one in - the most members (a power of two, a chunk at
+/// most) that make a dot at most; 1 for a member of half a dot or more, a
+/// chunk for one of none.
+fn by_dot_step(each: f64) -> usize {
+    if each >= 0.5 {
+        return 1;
+    }
+    if !(each > 0.0) {
+        return floe_ovm::PTS_CHUNK;
+    }
+    1usize << ((1.0 / each).log2().floor() as u32).min(floe_ovm::PTS_CHUNK.trailing_zeros())
+}
+
 /// HierOpts::dot_occ_cover default: on; FLOE_RUST_DENSITY_OCC_COVER=off (the
 /// kill switch) gives every cell with a shape an even share, as 0.12.274.
 pub fn dot_occ_cover() -> bool {
@@ -1273,6 +1294,19 @@ pub struct HierOpts {
     /// members read count toward a list's SUB_CUT_BOX_ARRAY_MAX.
     /// FLOE_RUST_DENSITY_LIST_SAMPLE=off is the kill switch.
     pub dot_list_sample: bool,
+    /// A point-list member under a pixel standing for a share of a dot (its
+    /// area, dot_area_share) is read one in a window of the most members that
+    /// make a dot at most (by_dot_step: a power of two, a chunk at most),
+    /// picked in the window by a dither of the chunk, standing for the
+    /// window's members - the dots a block gets are the same on average, and
+    /// land where a member is (user 2026-10-04, the field chip, 789.0 alone at
+    /// depth 1: `list members 59.1M`, pass 2 planned 7.5 s for 15k px lit - its
+    /// lists hold dozens of members, under the 64 a chunk's step needs, so
+    /// dot_list_sample read every one; a 0.15 um via at its fit view stands
+    /// for 0.0003 of a dot). Where it reads more than dot_list_sample's step
+    /// it takes the place of that step. Only with every member asked (no
+    /// stride). FLOE_RUST_DENSITY_LIST_BY_DOT=off is the kill switch.
+    pub dot_list_by_dot: bool,
     /// A sub-cut member under a pixel stands for its area in dots (a
     /// fraction, kept in whole dots by a dither of its block and itself),
     /// not one dot (user 2026-10-03, the routing chip's fit view at depth 1:
@@ -1438,6 +1472,7 @@ impl Default for HierOpts {
             dot_list_fast: dot_list_fast(),
             dot_list_full: dot_list_full(),
             dot_list_sample: dot_list_sample(),
+            dot_list_by_dot: dot_list_by_dot(),
             dot_area_share: dot_area_share(),
             dot_gate: dot_gate(),
             dot_gate_share: dot_gate_share(),
@@ -2549,6 +2584,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         list_fast: opts.dot_list_fast,
         list_full: opts.dot_list_full,
         list_sample: opts.dot_list_sample,
+        list_by_dot: opts.dot_list_by_dot,
         area_share: opts.dot_area_share,
         gate_min: if dots.is_some() { dot_gate_min(opts, req) } else { 1 },
         cell_view: BBox::EMPTY,
@@ -2991,6 +3027,8 @@ struct Hier<'a> {
     list_fast: bool,
     list_full: bool,
     list_sample: bool,
+    /// HierOpts::dot_list_by_dot
+    list_by_dot: bool,
     /// HierOpts::dot_area_share
     area_share: bool,
     /// HierOpts::dot_gate: the dots a block needs to be drawn (dot_gate_min)
@@ -4995,12 +5033,33 @@ impl<'a> Hier<'a> {
                 if let (Some(layer), Some(each)) = (top, fast) {
                     // HierOpts::dot_list_sample: every step-th member, each
                     // standing for step - by the chunk alone
-                    let step = if self.list_sample && area > 0.0 { self.chunk_step(area, held) } else { 1 };
+                    let mut step = if self.list_sample && area > 0.0 { self.chunk_step(area, held) } else { 1 };
+                    // HierOpts::dot_list_by_dot: one member a window of those
+                    // that make a dot at most, standing for the window
+                    let by_dot = self.list_by_dot && stride == 1 && by_dot_step(each) > step;
+                    if by_dot {
+                        step = by_dot_step(each);
+                    }
                     if step > 1 {
                         self.st.dot_sampled_chunks += 1;
                         self.st.dot_sampled_members += held;
                     }
-                    for slot in (lo..hi).step_by(step).filter(|slot| *slot as i64 % stride == 0) {
+                    // the window's pick: a dither of the chunk (its box, its
+                    // index) and the window - the same in every frame and plan
+                    let pick_salt = item_salt(&chunk, layer) ^ (k as u64).rotate_left(17);
+                    let mut start = lo;
+                    while start < hi {
+                        // the member read and how many it stands for
+                        let (slot, stands) = if by_dot {
+                            let n = (hi - start).min(step as u32);
+                            (start + ((block_dither(start as i64, k as i64, pick_salt) * n as f64) as u32).min(n - 1), n as u64)
+                        } else {
+                            (start, step as u64)
+                        };
+                        start = start.saturating_add(step as u32);
+                        if slot as i64 % stride != 0 {
+                            continue;
+                        }
                         let (ox, oy) = pr.pt(slot);
                         if !whole && !meets.iter().any(|r| pt_box(ox, oy).intersects(r)) {
                             continue;
@@ -5025,13 +5084,13 @@ impl<'a> Hier<'a> {
                             ((member.y0 as f64 + member.y1 as f64) / 2.0 / block).floor() as i64,
                             layer,
                         );
-                        // its dots (the step's members' share), a fraction under a
-                        // dot kept by the dither of its block and itself - as
-                        // add_dots keeps it, whatever the runs
+                        // its dots (the members' share it stands for), a fraction
+                        // under a dot kept by the dither of its block and itself -
+                        // as add_dots keeps it, whatever the runs
                         let dots = if each >= 1.0 {
-                            (step as f64 * each) as u64
+                            (stands as f64 * each) as u64
                         } else {
-                            whole_dots(step as f64 * each, key.0, key.1, item_salt(&member, layer))
+                            whole_dots(stands as f64 * each, key.0, key.1, item_salt(&member, layer))
                         };
                         if dots == 0 {
                             continue;
@@ -8192,7 +8251,9 @@ mod tests {
         let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
         req.px_per_dbu = 0.02;
         req.page_wash = false;
-        let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, k_boxes: 4, dot_gate: false, ..HierOpts::default() };
+        // every member read (HierOpts::dot_list_by_dot off): the fast path as
+        // the slow one, item for item
+        let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, k_boxes: 4, dot_gate: false, dot_list_by_dot: false, ..HierOpts::default() };
         let dots = |plan: &HierPlan| plan.wcells.iter().flat_map(|w| w.dot_counts.iter()).map(|&n| n as u64).sum::<u64>();
         let items = |plan: &HierPlan| plan.wcells.iter().map(|w| (w.key, w.washes.clone(), w.dot_counts.clone())).collect::<Vec<_>>();
         let share = plan_hier(&chip, &req, &HierOpts { dot_area_share: true, ..base.clone() });
@@ -8205,6 +8266,59 @@ mod tests {
         assert!(dots(&one) > 5000, "{}", dots(&one));
         assert_eq!(items(&share), items(&slow));
         assert_eq!(dots(&apart), dots(&share));
+    }
+
+    #[test]
+    fn a_list_member_under_a_dot_is_read_one_in_the_members_that_make_a_dot() {
+        // HierOpts::dot_list_by_dot (2026-10-04, the field chip: lists of
+        // dozens of vias of 0.0003 of a dot each, `list members 59.1M`). LEAFs
+        // of 10 dbu (0.04 px^2 at 0.02 px/dbu) over 20 um. One list of 30,000
+        // at random: read one in 16 (0.64 of a dot), the dots within 10 % of
+        // every member's; four regions as one plan alike. Eight cells of
+        // eight lists of 10 over 2,000 dbu (five blocks; under the 64 members
+        // a chunk's step needs): each list read once.
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: i64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % n as u64) as i64
+        };
+        let one: Vec<(i64, i64)> = (0..30_000).map(|_| (next(19_900), next(19_900))).collect();
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = false;
+        let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, k_boxes: 4, dot_gate: false, ..HierOpts::default() };
+        let dots = |plan: &HierPlan| plan.wcells.iter().flat_map(|w| w.dot_counts.iter()).map(|&n| n as u64).sum::<u64>();
+        let quad = vec![bx(-10, -10, 10_000, 10_000), bx(10_000, -10, 20_000, 10_000), bx(-10, 10_000, 10_000, 20_000), bx(10_000, 10_000, 20_000, 20_000)];
+        let leaf = || FCell { name: "LEAF", pages: vec![(bx(0, 0, 10, 10), 10, 10)], places: vec![] };
+        let chip = fixture(&[leaf(), FCell { name: "TOP", pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)], places: vec![(0, 0, 0, 0, false, Rep::Pts(one.into()))] }], 1);
+        let every = plan_hier(&chip, &req, &HierOpts { dot_list_by_dot: false, ..base.clone() });
+        let by = plan_hier(&chip, &req, &base);
+        let apart = plan_hier(&chip, &req, &HierOpts { regions: quad.clone(), ..base.clone() });
+        let area = 30_000.0 * 0.04;
+        assert!((dots(&every) as f64 - area).abs() < area * 0.1, "every member: {} dots for {area} px^2", dots(&every));
+        assert!((dots(&by) as f64 - dots(&every) as f64).abs() < area * 0.1, "{} dots against {}", dots(&by), dots(&every));
+        assert_eq!((every.stats.dot_by[3], by.stats.dot_by[3]), (30_000, 30_000 / 16));
+        assert_eq!(dots(&apart), dots(&by));
+        // small lists: eight cells of eight
+        let mut cells = vec![leaf()];
+        for c in 0..8 {
+            let places = (0..8)
+                .map(|_| {
+                    let (cx, cy) = (next(17_900), next(17_900));
+                    let pts: Vec<(i64, i64)> = (0..10).map(|_| (cx + next(1_990), cy + next(1_990))).collect();
+                    (0, 0, 0, 0, false, Rep::Pts(pts.into()))
+                })
+                .collect();
+            cells.push(FCell { name: ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7"][c], pages: vec![], places });
+        }
+        cells.push(FCell { name: "TOP", pages: vec![], places: (1..=8).map(|c| (c, 0, 0, 0, false, Rep::One)).collect() });
+        let chip = fixture(&cells, 9);
+        let every = plan_hier(&chip, &req, &HierOpts { dot_list_by_dot: false, ..base.clone() });
+        let by = plan_hier(&chip, &req, &base);
+        assert_eq!((every.stats.dot_by[3], by.stats.dot_by[3]), (640, 64));
+        assert!(dots(&by) > 0 && dots(&every) > 0);
     }
 
     #[test]

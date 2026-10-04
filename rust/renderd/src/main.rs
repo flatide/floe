@@ -2708,6 +2708,21 @@ fn density_plan_threads(_decode_workers: u16) -> usize {
 /// alike to the eye).
 const DENSITY_PLAN_THREADS: usize = 4;
 
+/// Pass 2's floor probe on the threads its fit plans on (density_plan_threads;
+/// user 2026-10-04, the field chip, 789.0 alone at depth 1 with a floor under
+/// the density cut: `pass 2 plan 7499 ms` with the probe over a 128 MB
+/// reserve, 7258 ms with it held by 1 GB - the probe planned as one, and a
+/// probe that fits is the plan, so the threads never ran): the regions dealt
+/// round robin, each band a probe to the reserve, the bands merged
+/// (Cache::merge_plans) - over when a band is or the merge's pages
+/// (Cache::plan_page_cost) pass the reserve; one that fits is the plan.
+/// FLOE_RUST_DENSITY_PROBE_THREADS=off is the kill switch: the probe as one
+/// plan.
+fn density_probe_threads() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_PROBE_THREADS").as_deref() != Ok("off"))
+}
+
 fn density_one_walk_enabled() -> bool {
     std::env::var("FLOE_RUST_DENSITY_ONE_WALK").as_deref() == Ok("on")
 }
@@ -4511,6 +4526,44 @@ fn render_density_frame(
                             plan2[1] += elapsed_us(walk_started);
                             plan2[3] += 1;
                         }
+                        // a floor's probe planned in bands on threads and merged
+                        // (density_probe_threads; None: as one plan)
+                        let probe_apart = |floor: f64| -> Result<Option<(HierPlan, u64)>, String> {
+                            let threads = density_plan_threads(decode_workers).min(region_boxes.len());
+                            if !density_probe_threads() || threads <= 1 {
+                                return Ok(None);
+                            }
+                            let dealt: Vec<Vec<ViewBox>> = (0..threads).map(|t| region_boxes.iter().skip(t).step_by(threads).cloned().collect()).collect();
+                            let plans = std::thread::scope(|scope| {
+                                let handles: Vec<_> = dealt
+                                    .iter()
+                                    .map(|regions| {
+                                        let (regions, layers, held) = (regions.clone(), layers.clone(), Arc::clone(&held));
+                                        scope.spawn(move || -> Result<HierPlan, String> {
+                                            let mut fine = make_plan_request_cut(cache, command, 0, command.cut_px)?;
+                                            fine.sub_cut_dots = Some((floor / command.cut_px).clamp(0.0, 1.0));
+                                            fine.regions = regions;
+                                            fine.visible_indices = Some(layers);
+                                            fine.free_pages = Some(held);
+                                            fine.probe_limit = reserve;
+                                            let fine = cache.page_plan_request(&fine, summary, !command.frames)?;
+                                            Ok(cache.plan_cancellable(&fine, command.generation, cancellation)?.plan)
+                                        })
+                                    })
+                                    .collect();
+                                handles
+                                    .into_iter()
+                                    .map(|handle| handle.join().unwrap_or_else(|_| Err("pass 2 probe thread panicked".to_string())))
+                                    .collect::<Result<Vec<HierPlan>, String>>()
+                            })?;
+                            let groups = plans.len() as u64;
+                            // over: a band past the reserve, or the merge's pages
+                            let over = plans.iter().any(|plan| plan.stats.fit_over);
+                            let mut merged = floe_render_core::Cache::merge_plans(plans, floe_render_core::dot_block_px() / px_per_dbu);
+                            merged.stats.fit_bytes = cache.plan_page_cost(&merged, &held);
+                            merged.stats.fit_over = over;
+                            Ok(Some((merged, groups)))
+                        };
                         let floors = dot_page_floors();
                         if dots && !one_walk {
                             // the last viewport's rung: a margin must plan at it (it
@@ -4522,9 +4575,13 @@ fn render_density_frame(
                             let first = if background { usize::from(known.unwrap_or(0)) } else { 0 };
                             for rung in first..floors.len() {
                                 let probe_started = Instant::now();
-                                let plan = plan_at(Some(floors[rung]), false)?;
+                                let (plan, groups) = match probe_apart(floors[rung])? {
+                                    Some(apart) => apart,
+                                    None => (plan_at(Some(floors[rung]), false)?, 1),
+                                };
                                 plan2[0] += elapsed_us(probe_started);
                                 plan2[2] += 1;
+                                plan2[8] = plan2[8].max(groups);
                                 let fits = !plan.stats.fit_over && plan.stats.fit_bytes <= reserve;
                                 if !fits {
                                     plan2[11] += 1;

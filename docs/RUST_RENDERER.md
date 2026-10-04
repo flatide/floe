@@ -384,7 +384,22 @@ their blocks run by run (`HierOpts::dot_list_fast`;
 449 layers: `list members 765.7M`, pass 2 planned 32 s. Only the members read
 count toward a list's SUB_CUT_BOX_ARRAY_MAX. `density_plan2` ends with the
 chunks passed over and their members, and the chunks sampled and theirs
-(29 values).
+(29 values). Since 0.12.295 a list member standing for a share of a dot
+(under half) is read one in the window of members that make a dot at most -
+a power of two, a chunk at most, picked in the window by a dither of the
+chunk, standing for the window's members (`HierOpts::dot_list_by_dot`;
+`FLOE_RUST_DENSITY_LIST_BY_DOT=off` is the kill switch; user 2026-10-04, the
+field chip: lists of dozens of vias, `list members 59.1M`, under the 64 a
+chunk's step needs); the chunks count as sampled. Pass 2's floor probe plans
+on the threads its fit does, the bands merged - over when a band or the
+merge's pages pass the reserve (renderd `density_probe_threads`;
+`FLOE_RUST_DENSITY_PROBE_THREADS=off` is the kill switch: the probe as one
+plan, which is the plan when it holds - the field's 7.3 s on one thread). The raster
+takes i64 and shifts where they give the i128 arithmetic's values: floor
+and ceil divisions by a power of two, the orthogonal transform's rows, device
+coordinates and widths within i64 (render-core `fast_arith`;
+`FLOE_RUST_FAST_ARITH=off` is the kill switch; frames byte for byte alike,
+the density raster 8-14 % faster on the synthetic chips).
 Since 0.12.281 a whole list whose blocks are all full is passed over too
 (`blocks_full`, the grid's 8 x 8 squares of full whole blocks), and pass 2's
 regions are cells of the free space rather than a tile's bounding box of it

@@ -8027,11 +8027,12 @@ fn width_first_span(v0: i128, v1: i128, t: f64) -> Option<(i128, i128)> {
 /// 0 to 1 over a whole pixel's fraction, so the mean width stays continuous
 /// at whole widths (f / c alone would drop from 1.99 to 1.495 px at c = 2).
 fn width_first_span_c(v0: i128, v1: i128, t: f64, c: f64) -> Option<(i128, i128)> {
-    let w = (v1 - v0).max(0) as f64 / DEVICE_ONE as f64;
+    let w = i128_f64((v1 - v0).max(0)) / DEVICE_ONE as f64;
     let whole = w.floor();
     let f = w - whole;
     let p = if c > 1.0 { f / (c - (c - 1.0) * f) } else { f };
-    let m = whole as i128 + i128::from(t < p);
+    let whole = if crate::transform::fast_arith() && whole < I64_EXACT { whole as i64 as i128 } else { whole as i128 };
+    let m = whole + i128::from(t < p);
     if m < 1 {
         return None;
     }
@@ -9114,11 +9115,36 @@ fn scale_device_f64(offset: f64, pixels: u32, span: f64, field: &str) -> Result<
     if !value.is_finite() || value < -(MAX_DEVICE_COORD as f64) || value > MAX_DEVICE_COORD as f64 {
         return Err(format!("coordinate overflow: {}", field));
     }
-    Ok(value.floor() as i128)
+    let floor = value.floor();
+    // within i64 the conversion is the same value (fast_arith)
+    if crate::transform::fast_arith() && floor.abs() < I64_EXACT {
+        return Ok(floor as i64 as i128);
+    }
+    Ok(floor as i128)
+}
+
+/// |x| under this converts through i64 exactly (fast_arith).
+const I64_EXACT: f64 = 9.0e18;
+
+/// `v as f64`, through i64 where `v` is within it (fast_arith; the same
+/// value: both round to the nearest).
+#[inline]
+fn i128_f64(v: i128) -> f64 {
+    if crate::transform::fast_arith() {
+        if let Ok(v) = i64::try_from(v) {
+            return v as f64;
+        }
+    }
+    v as f64
 }
 
 fn floor_div(numerator: i128, denominator: i128) -> i128 {
     debug_assert!(denominator > 0);
+    // by a power of two (DEVICE_ONE and its multiples): an arithmetic shift
+    // floors alike (fast_arith)
+    if denominator & (denominator - 1) == 0 && crate::transform::fast_arith() {
+        return numerator >> denominator.trailing_zeros();
+    }
     let quotient = numerator / denominator;
     let remainder = numerator % denominator;
     if remainder < 0 {
@@ -9130,6 +9156,11 @@ fn floor_div(numerator: i128, denominator: i128) -> i128 {
 
 fn ceil_div(numerator: i128, denominator: i128) -> i128 {
     debug_assert!(denominator > 0);
+    // by a power of two: the floor's shift, one up past a remainder
+    // (fast_arith)
+    if denominator & (denominator - 1) == 0 && crate::transform::fast_arith() {
+        return (numerator >> denominator.trailing_zeros()) + i128::from(numerator & (denominator - 1) != 0);
+    }
     let quotient = numerator / denominator;
     let remainder = numerator % denominator;
     if remainder > 0 {
@@ -11837,6 +11868,58 @@ mod tests {
                 Ok(Some(DensityScenes { top: Some(Arc::clone(density)), others: Some(Arc::clone(density)) }))
             })
             .unwrap()
+    }
+
+    /// fast_arith: a floor or ceil division by a power of two as a shift, a
+    /// device coordinate and a width through i64 - the values of the i128
+    /// arithmetic, for numerators of either sign up to 2^100 and the
+    /// denominators the raster divides by (and others, which keep the
+    /// division).
+    #[test]
+    fn the_fast_arithmetic_is_the_i128_one() {
+        let floor_ref = |n: i128, d: i128| {
+            let (q, r) = (n / d, n % d);
+            if r < 0 { q - 1 } else { q }
+        };
+        let ceil_ref = |n: i128, d: i128| {
+            let (q, r) = (n / d, n % d);
+            if r > 0 { q + 1 } else { q }
+        };
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut numerators: Vec<i128> = vec![0, 1, -1, DEVICE_ONE, -DEVICE_ONE, DEVICE_ONE - 1, -DEVICE_ONE + 1, DEVICE_ONE + 1, -DEVICE_ONE - 1, 1 << 100, -(1 << 100)];
+        for _ in 0..2_000 {
+            let magnitude = ((next() as i128) << 40 | next() as i128) >> (next() % 90);
+            numerators.push(if next() % 2 == 0 { magnitude } else { -magnitude });
+        }
+        let denominators: Vec<i128> = (0..60).map(|k| 1i128 << k).chain([3, 6, 2 * DEVICE_ONE + 2, 3 * DEVICE_ONE]).collect();
+        for &d in &denominators {
+            for &n in &numerators {
+                assert_eq!(floor_div(n, d), floor_ref(n, d), "floor {n} / {d}");
+                assert_eq!(ceil_div(n, d), ceil_ref(n, d), "ceil {n} / {d}");
+            }
+        }
+        for &n in &numerators {
+            assert_eq!(i128_f64(n), n as f64, "{n} as f64");
+        }
+        // offsets scaled by DEVICE_ONE (one pixel over a span of one): device
+        // values of either sign up to MAX_DEVICE_COORD, past i64 too
+        for _ in 0..4_000 {
+            let offset = f64::from_bits(next() & 0x7FFF_FFFF_FFFF_FFFF) % 1.8e19 * if next() % 2 == 0 { 1.0 } else { -1.0 };
+            if !offset.is_finite() {
+                continue;
+            }
+            let device = offset * DEVICE_ONE as f64;
+            if device.abs() > MAX_DEVICE_COORD as f64 {
+                continue;
+            }
+            assert_eq!(scale_device_f64(offset, 1, 1.0, "test").unwrap(), device.floor() as i128, "{offset}");
+        }
     }
 
     fn count(frame: &RgbaFrame, color: [u8; 4], cols: std::ops::Range<usize>, rows: std::ops::Range<usize>) -> usize {
