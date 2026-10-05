@@ -1213,8 +1213,12 @@ struct FramePixels {
     /// 2026-10-04); then the brightness's gain in thousandths
     /// (density_bright_gain, 2026-10-05; 0: the dots as lit pixels); then the
     /// pages a budget left out that their occupancy records stand in for
-    /// (floe_vfs HierOpts::dot_stand_in, 2026-10-05)
-    density_plan2: Option<[u64; 36]>,
+    /// (floe_vfs HierOpts::dot_stand_in, 2026-10-05); then whether a sub-cut
+    /// cell stands for its cover (1; 0: for its box - floe_render_core
+    /// Cache::cell_cover), the cells whose cover the plans worked out, and
+    /// the nodes that counted what their placements hold (HierOpts::
+    /// dot_node_sample, 2026-10-05)
+    density_plan2: Option<[u64; 39]>,
 }
 
 fn render_worker(
@@ -3264,6 +3268,12 @@ fn run_render(
         .cache
         .as_ref()
         .ok_or_else(|| "cache not open".to_string())?;
+    // the cells' cover (floe_render_core Cache::cell_cover) is asked for as
+    // the frame begins: its table is worked out on a thread of its own
+    // while pass 1 draws, ahead of pass 2's plans that read it
+    if density_bright_gain(&command).is_some() {
+        let _ = cache.cell_cover();
+    }
     // occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): decided per
     // request before any reuse, since the retained-frame and published-
     // scene keys carry it; FLOE_RUST_OCCUPANCY=off is the kill switch
@@ -3667,7 +3677,7 @@ fn run_render(
         let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 36]> = None;
+        let mut density_plan2: Option<[u64; 39]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4421,7 +4431,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 36]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 39]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4456,8 +4466,11 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 36];
+    let mut plan2 = [0u64; 39];
     plan2[22] = reserve_bytes >> 20;
+    // a sub-cut cell stands for the area its shapes cover, not its box
+    // (floe_render_core Cache::cell_cover: design.ovb and a hierarchy summary)
+    plan2[36] = u64::from(density_bright_gain(command).is_some() && cache.cell_cover().is_some());
     // the dots' gain past the fit view, in thousandths (density_zoom_gain)
     plan2[31] = (dot_gain * 1000.0).round() as u64;
     // the brightness's gain, in thousandths (density_bright_gain; 0: off)
@@ -4850,6 +4863,8 @@ fn render_density_frame(
                         // the pages the planner's own fit left out and their occupancy
                         // records stand in for (floe_vfs HierOpts::dot_stand_in)
                         plan2[35] += planned_fine.stats.dot_stood_in;
+                        plan2[37] += planned_fine.stats.dot_cover_cells;
+                        plan2[38] += planned_fine.stats.dot_node_sampled;
                         let density_plan = planned_fine;
                         times[0] += elapsed_us(plan_started);
                         counts[0] += density_plan.pages.len() as u64;

@@ -506,7 +506,31 @@ member read for a window standing over its block's part of the chunk
 (`HierOpts::dot_bright_sums`; `FLOE_RUST_DENSITY_BRIGHT_SUMS=off` is the kill
 switch). A reviewer 2026-10-05, checked against the exact cover: the routing
 chip's fit view under 1 GB kept 110 of the 277 pages pass 2 decoded and drew
-x0.49 of them; now x1.01 in a third of the time. Since 0.12.297 the
+x0.49 of them; now x1.01 in a third of the time. Since 0.12.300 the
+brightness no longer depends on the hierarchy the shapes are stored in: a
+cell under the cut stands for the area its visible layers cover - its own
+pages by design.ovb, its children by the hierarchy summary's member counts
+(design.ovh, or one made in memory for a cache of 4 M placement records or
+fewer), worked out on first use and ahead of it on a thread of its own - not
+for its whole box (floe_vfs `cover::CellCover`, `HierOpts::cell_cover`,
+`Cache::cell_cover`; `FLOE_RUST_DENSITY_CELL_COVER=off` is the kill switch,
+`FLOE_RUST_DENSITY_COVER_WARM=off`, diagnostic, leaves it to the first use;
+without design.ovb or a summary the box as before - `density_plan2`'s 37th
+value says which, the viewer's tag `cell cover` / `cells by box`); a node no
+wider than a box counts what its placements hold - all of them up to 32, past
+that 16 of them, one in each equal run, each standing for its run - where it
+counted its whole box once it had as many placements as sixteenths
+(`HierOpts::dot_node_sample`; `FLOE_RUST_DENSITY_NODE_SAMPLE=off` is the kill
+switch, `FLOE_RUST_DENSITY_NODE_READ_ALL` / `FLOE_RUST_DENSITY_NODE_SAMPLES`,
+diagnostic, the two counts); and an item across a block boundary is shared
+between the blocks it meets by its area, an array's members likewise, a point
+list's members past a quarter block put one by one (`HierOpts::dot_item_share`;
+`FLOE_RUST_DENSITY_ITEM_SHARE=off` is the kill switch). The three off draw
+0.12.299 byte for byte. Measured against the exact cover: a reviewer's 4,096
+squares of 1 dbu as a cell each 121 px at full colour -> 0 px, as flat; the
+standard-cell layout's 2/0 alone x6.9 -> x1.01; cells of mixed cover placed
+one by one x1.36 / x0.85 on their sparse / dense halves -> x1.01 / x1.01, 4 px
+blocks corr 0.88 -> 0.99. Since 0.12.297 the
 density is a brightness: a pixel shows min(1, g x the area pass 2's shapes
 cover in it) of its plane's colour - never past it - the planes over one
 another, the top first, g by the detail, 2^((5 - cut) / 2): low (5 px) 1,

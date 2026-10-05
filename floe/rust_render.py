@@ -175,7 +175,12 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  "bright_milli",
                  # the pages a budget left out that their occupancy records
                  # (design.ovb) stand in for (2026-10-05)
-                 "stood_in")
+                 "stood_in",
+                 # a sub-cut cell stands for the area its shapes cover (1; 0:
+                 # for its box - no design.ovb or hierarchy summary), the
+                 # cells whose cover the plans worked out, the nodes that
+                 # counted what their placements hold (2026-10-05)
+                 "cell_cover", "cover_cells", "node_sampled")
 
 
 def _viewport_px(job, bbox):

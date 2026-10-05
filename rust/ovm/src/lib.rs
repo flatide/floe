@@ -3026,6 +3026,14 @@ impl Ovm {
         (g32(b, 80), g32(b, 84))
     }
 
+    /// (prange_start, prange_count) without materializing the name (the
+    /// cells' cover, floe_vfs::cover)
+    pub fn cell_pranges(&self, i: u32) -> (u32, u32) {
+        assert!(i < self.n_cells, "cell index");
+        let b = &self.sec(SEC_CELLS)[i as usize * CELL_LEN..];
+        (g32(b, 120), g32(b, 124))
+    }
+
     /// child-BVH node range (start, count) of a cell without
     /// materializing the name (the cell tree's instance walk)
     pub fn cell_bvh(&self, i: u32) -> (u32, u32) {

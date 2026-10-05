@@ -738,7 +738,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # of the dots' gain and gate
         bright = dict(res, density_plan2=dict(res["density_plan2"], bright_milli=2000, dot_gain_milli=1000, dot_gate_min=1, dot_gated=0))
         full_bright, _ = perf_status(bright)
-        self.assertIn("reserve 896 MB, bright x2, pass 2 plan", full_bright)
+        self.assertIn("reserve 896 MB, bright x2, cells by box, pass 2 plan", full_bright)
+        # what a cell under the cut stands for (2026-10-05): its shapes'
+        # cover where the index has it
+        covered = dict(bright, density_plan2=dict(bright["density_plan2"], cell_cover=1))
+        self.assertIn("bright x2, cell cover, pass 2 plan", perf_status(covered)[0])
         # the pages a budget left out that their occupancy stands in for
         # (2026-10-05): with what went over the budget
         stood = dict(res, density_plan2=dict(res["density_plan2"], stood_in=7))
@@ -2014,7 +2018,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "density_dots": "3500/2", "density_floor": "0.250",
                 "density_block": "8",
                 "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2"
-                                 "/30000/20000/5000/34860/40/9000/100/3/7/896/2/1/500/128000/60/15360/40000/7000/640/1200/2/2000/9",
+                                 "/30000/20000/5000/34860/40/9000/100/3/7/896/2/1/500/128000/60/15360/40000/7000/640/1200/2/2000/9/1/1500/800",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
                 # its phases above add up to 45.25 ms
                 "queue_us": "1500", "wall_us": "60000",
@@ -2105,7 +2109,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "map_updates": 7, "reserve_mb": 896, "occ_pages": 2, "occ_decoded": 1,
                 "full_chunks": 500, "full_members": 128000, "sampled_chunks": 60, "sampled_members": 15360,
                 "free_top": 40000, "free_others": 7000, "dot_gain_milli": 640, "dot_gated": 1200, "dot_gate_min": 2,
-                "bright_milli": 2000, "stood_in": 9})
+                "bright_milli": 2000, "stood_in": 9,
+                "cell_cover": 1, "cover_cells": 1500, "node_sampled": 800})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)

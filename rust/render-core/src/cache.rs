@@ -402,7 +402,20 @@ pub struct Cache {
     held_layers: std::sync::Mutex<std::collections::HashMap<(u32, u32, u32), bool>>,
     // Immutable for this open cache; reopen after publishing design.ovr.
     representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
+    /// The cells' cover (Cache::cell_cover), made on first use
+    cell_cover: std::sync::Mutex<CoverSlot>,
 }
+
+/// Cache::cell_cover: the table, or when it was last looked for in vain
+#[derive(Default)]
+struct CoverSlot {
+    table: Option<std::sync::Arc<floe_vfs::cover::CellCover>>,
+    missed: Option<Instant>,
+}
+
+/// Cache::cell_cover: how long a cache without a hierarchy summary waits
+/// before it looks for one again
+const COVER_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Cache::layer_held: the most placements one question reads
 const LAYER_HELD_READS: u64 = 1 << 18;
@@ -564,7 +577,47 @@ impl Cache {
             layer_depth: std::sync::OnceLock::new(),
             held_layers: std::sync::Mutex::new(std::collections::HashMap::new()),
             representatives: std::sync::OnceLock::new(),
+            cell_cover: std::sync::Mutex::new(CoverSlot::default()),
         })
+    }
+
+    /// The cells' cover (floe_vfs::cover::CellCover; floe_vfs HierOpts::
+    /// cell_cover): the area each cell's shapes cover by layer, worked out
+    /// cell by cell on first use from the pages' occupancy records
+    /// (design.ovb) and the hierarchy summary (design.ovh, or one made in
+    /// memory for a small cache: cells::HierHandle::summary) - what a sub-cut
+    /// placement stands for under the density stack's brightness. None
+    /// without design.ovb, without a summary (looked for again every
+    /// COVER_RETRY: the viewer may build design.ovh while the daemon is up),
+    /// or with FLOE_RUST_DENSITY_CELL_COVER=off (the kill switch).
+    pub fn cell_cover(&self) -> Option<std::sync::Arc<floe_vfs::cover::CellCover>> {
+        if !floe_vfs::hier::dot_cell_cover() || !self.vfs.ovm.has_page_occ() {
+            return None;
+        }
+        let mut slot = match self.cell_cover.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if slot.table.is_none() && !slot.missed.is_some_and(|at| at.elapsed() < COVER_RETRY) {
+            slot.table = self.hier.summary().ok().and_then(|summary| floe_vfs::cover::CellCover::new(&self.vfs.ovm, summary)).map(std::sync::Arc::new);
+            slot.missed = if slot.table.is_none() { Some(Instant::now()) } else { None };
+            // every cell's areas ahead of the plans that ask, on a thread of
+            // its own: a plan that needs a cell first works it out itself -
+            // the first frame two steps out of fit on the synthetic MAIN01
+            // 1/10 planned 0.33 s longer for it (FLOE_RUST_DENSITY_COVER_WARM=off,
+            // diagnostic: on first use alone)
+            if let Some(table) = slot.table.clone() {
+                if std::env::var("FLOE_RUST_DENSITY_COVER_WARM").as_deref() != Ok("off") {
+                    let vfs = std::sync::Arc::clone(&self.vfs);
+                    let _ = std::thread::Builder::new().name("floe-cover-warm".to_string()).spawn(move || {
+                        let started = Instant::now();
+                        table.warm(&vfs.ovm);
+                        eprintln!("[render-core] cells' cover: {} cells worked out in {} ms", vfs.ovm.n_cells, started.elapsed().as_millis());
+                    });
+                }
+            }
+        }
+        slot.table.clone()
     }
 
     /// The deepest placement level holding pages of layer `idx`.
@@ -1004,6 +1057,9 @@ impl Cache {
             st.occ_fallback.extend(more.occ_fallback.iter().cloned());
             st.occ_aside.extend(more.occ_aside.iter().cloned());
             st.dot_stood_in += more.dot_stood_in;
+            st.dot_cover_on |= more.dot_cover_on;
+            st.dot_cover_cells += more.dot_cover_cells;
+            st.dot_node_sampled += more.dot_node_sampled;
             st.dot_partial += more.dot_partial;
             st.dot_gated += more.dot_gated;
             st.dot_gate_min = st.dot_gate_min.max(more.dot_gate_min);
@@ -1198,7 +1254,9 @@ impl Cache {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright, request.dot_occ_first);
+        // the cells' cover: the brightness's dots plans alone ask for it
+        let cover = if request.dot_bright.is_some() && request.sub_cut_dots.is_some() { self.cell_cover() } else { None };
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright, request.dot_occ_first, cover);
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }

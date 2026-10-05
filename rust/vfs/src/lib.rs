@@ -2,6 +2,7 @@
 //! without touching geometry, keep a working-set session, and build
 //! delta OASIS files by splicing page payload bytes verbatim.
 
+pub mod cover;
 pub mod coverage;
 pub mod hier;
 pub mod hiersum;

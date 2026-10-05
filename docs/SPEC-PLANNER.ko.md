@@ -389,6 +389,47 @@
     `under_the_brightness_an_items_cover_keeps_its_fraction`,
     `under_the_brightness_a_list_member_read_for_a_window_stands_over_its_block`,
     `under_the_brightness_a_page_no_wider_than_a_box_counts_in_sixteenths_too`.
+  **셀의 덮임·노드 표본·항목 나눔(0.12.300, renderd 0.12.277; 리뷰어 2026-10-05, CUT_DENSITY_DESIGN §10.12
+  "리뷰 보완 2").** 셋 다 `dot_bright`가 있는 점 계획에서만 걸린다.
+  - `HierOpts::cell_cover = Some(table)`(`Vfs::plan_hier_in`의 마지막 인자; render-core `Cache::cell_cover`,
+    `FLOE_RUST_DENSITY_CELL_COVER=off`가 킬 스위치).
+    - `cover::CellCover`(`rust/vfs/src/cover.rs`): `areas(ovm, ci, rem)`이 셀의 (레이어, dbu²) 목록을 준다. 자기
+      prange들의 페이지 면적(`Ovm::page_occ_area`, 레코드 없는 페이지는 0)에, `rem`이 0이 아니면
+      `HierSummary::children(ci)`의 엣지마다 `members × areas(child, rem − 1)`을 더한다. `rem`이 REM_FULL이거나 셀
+      높이 이상이면 셀마다 한 번(`OnceLock`), 그보다 작으면 (셀, rem)마다 한 번 계산해 둔다. 자식은 부모보다 낮은 셀만
+      따라간다. `warm`은 top부터 전부 계산한다.
+    - `Hier::cell_cover(ci, rem, rb)`: `cover_within(areas, 상자 면적, 보이는 레이어)` = 상자 × (1 − Π(1 − 면적 / 상자)).
+      보이는 레이어는 `wash_vis`(요약이 그리는 레이어 제외)다. 계획마다 셀별로 기억한다(`cover_memo`, 깊이 제한은
+      `cover_limited`).
+    - `Hier::member_cover(ci, rem, rb)` = min(상자 단위, 덮임 × ppd² × `dot_units()`). 표가 없으면 `member_dots(rb)`다.
+      쓰는 곳: `box_child`의 작은 경우, 리스트의 `fast`·`dot_chunk`·한 멤버씩 경로, `array_dots`의 멤버 면적, 배열을
+      멤버로 그릴 때의 묶음, `box_node`의 합산, `node_holds`·`node_sampled`.
+    - `Cache::cell_cover`: design.ovb가 있고 `HierHandle::summary()`가 되면 표를 만들어 둔다. 없으면 2초 뒤 다시
+      찾는다. 표를 만들면 `floe-cover-warm` 스레드가 `warm`을 돈다(`FLOE_RUST_DENSITY_COVER_WARM=off`, 진단).
+      renderd는 밀도 프레임 시작에 한 번 부른다.
+  - `HierOpts::dot_node_sample`(기본 켬, `FLOE_RUST_DENSITY_NODE_SAMPLE=off`), `dot_node_read_all`(32),
+    `dot_node_samples`(16).
+    - `node_holds`는 켜져 있으면 늘 `node_sampled(ni, fp, r, (lo, hi), boxed)`다. 배치 n개가 `read_all` 이하면 전부,
+      넘으면 k = `samples`개 구간 [lo + i·n/k, lo + (i+1)·n/k)에서 `block_dither(i, ni, item_salt(fp, ni))`로 하나씩
+      읽는다. 읽은 값 × n/k를 더해 가다 `boxed`에 닿으면 u64::MAX(상자)다. 읽기 예산이 다해도 상자다.
+    - `box_node`의 점 분기: 마스크가 있는데 위아래가 다르거나, 마스크 없는 노드의 배치가 `read_all`을 넘으면
+      가장 위 레이어만 찾고 담은 것은 `node_sampled`로 센다. 마스크가 같고 계획의 레이어가 하나도 없는 노드는 읽지 않는다.
+    - 끄면 `boxed <= 배치 수`일 때 상자, 아니면 전부 읽는다(0.12.299).
+  - `HierOpts::dot_item_share`(기본 켬, `FLOE_RUST_DENSITY_ITEM_SHARE=off`; `dot_bright_sums`가 켜져 있어야 한다).
+    - `add_dots`: 블록 이하 항목이라도 x나 y로 블록 경계를 넘으면 넓은 항목의 경로로 간다. 블록마다 든 면적만큼을
+      `whole_dots`(담은 것이 상자보다 적으면 올림 나머지를 넘기는 기존 방식)로 싣고 조각은 그 블록 안 부분이다.
+    - `array_dots`: 축마다 블록 [lo, hi) 안에 든 멤버 수를 면적으로 센다(통째로 든 멤버는 산술로, 걸친 멤버는 하나씩.
+      멤버가 서로 겹쳐 길이 / 피치가 64를 넘으면 중심 세기로 남는다). 블록 값 = 가로 × 세로 × 멤버 값, 조각은 그
+      멤버들의 블록 안 범위다.
+    - 리스트: 멤버가 블록의 1/4보다 넓고 리스트 멤버가 `SUB_CUT_BOX_ARRAY_MAX` 이하면 빠른 경로와 `dot_chunk`를 쓰지 않고
+      `add_dots`로 한 멤버씩 넣는다.
+  - 통계: `dot_cover_on`, `dot_cover_cells`, `dot_node_sampled`(병합은 OR와 합).
+  - 단위: `a_cells_cover_is_its_pages_and_its_childrens_by_layer`,
+    `under_the_brightness_a_sub_cut_cell_stands_for_its_shapes_cover_not_its_box`,
+    `under_the_brightness_a_node_counts_what_its_placements_hold_not_its_box`,
+    `under_the_brightness_an_item_across_blocks_is_shared_between_them`,
+    `under_the_brightness_an_arrays_and_a_lists_members_are_shared_between_blocks_by_their_area`,
+    cover.rs `layers_cover_a_box_as_if_independent_and_never_past_it`.
   **읽기(0.12.256):** 점 모드에서 마스크 없는 노드의 배치 읽기는 셀마다 가장 위 가시 레이어를 한 번만 구해 두고
   (`cell_top`, `top_memo`) 순위만 비교한다; 계획기의 정수 키 맵은 Fx식 해시(`FxMap`/`FxSet`). 그림은 같다.
   **블록과 퍼뜨림(0.12.257; 사용자 2026-10-01 "지금보다 덜 자세해도 괜찮을 것 같음"):** 블록은

@@ -107,6 +107,8 @@ rect·path뿐인 레이어)는 `empty`(비트맵 없음, 레벨 항목은 0)로 
 ## design.ovh — 계층 요약 (FLOEOVH1, 2026-09-29)
 
 정본: `rust/vfs/src/hiersum.rs`. 뷰어 셀 트리(SPEC-VIEWER §8c)의 색인.
+0.12.300부터 밀도의 셀 덮임(`rust/vfs/src/cover.rs`, SPEC-PLANNER)도 이 파일의
+엣지(자식과 멤버 수)를 읽는다. 파일 형식은 그대로다.
 design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀의 서로
 다른 자식과 멤버 수"는 그 셀의 레코드 전부, "셀의 부모"는 레코드 전부를
 읽어야 하므로 한 번 훑어 요약한다. 인덱서가 빌드 끝에 쓰고(`--no-hier`로

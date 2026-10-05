@@ -1580,6 +1580,185 @@ def sums_checks(temp):
             w.stop()
 
 
+def hier_layouts(flat_path, cells_path, cover_path, even_path):
+    """At 1 um a pixel. flat / cells: 160 x 160 squares of 0.05 um (0.0025
+    px^2) every 0.25 um from (10, 10) um - 64 px^2 over 40 x 40 px, a 25th of
+    it - as TOP's own shapes, and each a cell of its own placed once (256
+    placements under a 4 px node: as many as its box has sixteenths). cover:
+    a cell of 1 um (a 1/0 box) holding a 2/0 square of 0.2 um, a 25th of it -
+    as an array of 60 x 60 from (10, 100), 2,000 at random over 150 x 60 um
+    from (100, 10) (a point list) and 500 cells of their own placed once over
+    150 x 60 um from (100, 100). even: 48 x 48 cells of their own, a 2/0
+    square of 0.5 um each, every 1 um from (10, 10) - a quarter covered - and
+    an array of 40 x 40 every 1.5 um from (100, 10) of a cell of 1.2 um (a
+    1/0 box) holding a 2/0 square of 0.6 um (two or three of its members a
+    side to a 4 px block; 0.36 px^2 of every 2.25 covered)."""
+    import random
+    import klayout.db as kdb
+    for path, lone in ((flat_path, False), (cells_path, True)):
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        mid = ly.layer(*MID)
+        for j in range(160):
+            for i in range(160):
+                x, y = 10_000 + i * 250, 10_000 + j * 250
+                if lone:
+                    leaf = ly.create_cell('S%d_%d' % (i, j))
+                    leaf.shapes(mid).insert(kdb.Box(0, 0, 50, 50))
+                    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(x, y)))
+                else:
+                    top.shapes(mid).insert(kdb.Box(x, y, x + 50, y + 50))
+        ly.write(str(path))
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    low, mid = ly.layer(*LOW), ly.layer(*MID)
+
+    def cell(name):
+        c = ly.create_cell(name)
+        c.shapes(low).insert(kdb.Box(0, 0, 1000, 1000))
+        c.shapes(mid).insert(kdb.Box(400, 400, 600, 600))
+        return c.cell_index()
+
+    one = cell('C')
+    top.insert(kdb.CellInstArray(one, kdb.Trans(10_000, 100_000), kdb.Vector(1000, 0), kdb.Vector(0, 1000), 60, 60))
+    rnd = random.Random(7)
+    for _ in range(2000):
+        top.insert(kdb.CellInstArray(one, kdb.Trans(100_000 + rnd.randrange(149_000), 10_000 + rnd.randrange(59_000))))
+    for n in range(500):
+        top.insert(kdb.CellInstArray(cell('D%d' % n), kdb.Trans(100_000 + rnd.randrange(149_000), 100_000 + rnd.randrange(59_000))))
+    ly.write(str(cover_path))
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    mid = ly.layer(*MID)
+    for j in range(48):
+        for i in range(48):
+            leaf = ly.create_cell('E%d_%d' % (i, j))
+            leaf.shapes(mid).insert(kdb.Box(0, 0, 500, 500))
+            top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(10_000 + i * 1000, 10_000 + j * 1000)))
+    member = ly.create_cell('F')
+    member.shapes(ly.layer(*LOW)).insert(kdb.Box(0, 0, 1200, 1200))
+    member.shapes(mid).insert(kdb.Box(300, 300, 900, 900))
+    top.insert(kdb.CellInstArray(member.cell_index(), kdb.Trans(100_000, 10_000), kdb.Vector(1500, 0), kdb.Vector(0, 1500), 40, 40))
+    ly.write(str(even_path))
+
+
+def hier_checks(temp):
+    """The brightness does not depend on the hierarchy the shapes are stored
+    in (a reviewer 2026-10-05: 4,096 squares of 1 dbu drew 0 px flat and 121
+    px at full colour as a cell each; the standard-cell layout's 2/0 alone
+    drew x6.9 of its exact cover). hier_layouts at 1 um a pixel, 2/0 alone,
+    g = 2. A node counts what its placements hold (floe_vfs HierOpts::
+    dot_node_sample, FLOE_RUST_DENSITY_NODE_SAMPLE=off the kill switch): the
+    squares as cells of their own draw what they draw as TOP's shapes, g x
+    their area - the switch off, their nodes' boxes at the colour. A cell
+    stands for the area its shapes cover (HierOpts::cell_cover, render-core
+    Cache::cell_cover, FLOE_RUST_DENSITY_CELL_COVER=off): the array's, the
+    list's and the lone cells' members g x their 2/0 square each - the switch
+    off, their 1 um boxes. An item across a block boundary is shared between
+    the blocks (HierOpts::dot_item_share, FLOE_RUST_DENSITY_ITEM_SHARE=off):
+    the even field is even - the switch off, blocks at the colour beside
+    blocks left dark - and so is an array whose pitch does not divide the
+    block (the switch off: blocks of four, six and nine members)."""
+    names = ('hier_flat', 'hier_cells', 'hier_cover', 'hier_even')
+    paths = {name: Path(temp) / (name + '.oas') for name in names}
+    hier_layouts(*(paths[name] for name in names))
+    for src in paths.values():
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on'}
+    workers = {
+        'flat': worker(paths['hier_flat'], env),
+        'cells': worker(paths['hier_cells'], env),
+        'cells_off': worker(paths['hier_cells'], dict(env, FLOE_RUST_DENSITY_NODE_SAMPLE='off')),
+        'cover': worker(paths['hier_cover'], env),
+        'cover_off': worker(paths['hier_cover'], dict(env, FLOE_RUST_DENSITY_CELL_COVER='off')),
+        'even': worker(paths['hier_even'], env),
+        'even_off': worker(paths['hier_even'], dict(env, FLOE_RUST_DENSITY_ITEM_SHARE='off')),
+    }
+    try:
+        w0 = workers['flat']
+        dbu = float(w0.cache.meta['dbu'])
+        colour = layer_colour(w0, MID)
+        k = max(range(3), key=lambda i: colour[i])
+
+        def view(w):
+            box = (0.0, 0.0, float(W), float(H))
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': None, 'w': W, 'h': H,
+                      'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': [MID],
+                      'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('hier frame timeout')
+
+        # (rows count from the top: y um from the bottom is row H - y)
+        def alphas(pixels, x, y):
+            return [px(pixels, c, H - 1 - r)[k] / colour[k] for r in range(*y) for c in range(*x)]
+
+        got, plan2 = {}, {}
+        for key, w in workers.items():
+            got[key], res = view(w)
+            plan2[key] = res.get('density_plan2') or {}
+        # a node counts what its placements hold
+        want = 2 * 160 * 160 * 0.05 ** 2
+        field = ((5, 55), (5, 55))
+        flat, cells, boxed = (sum(alphas(got[key], *field)) for key in ('flat', 'cells', 'cells_off'))
+        assert abs(flat - want) < 0.12 * want, ('the squares as shapes', flat, want)
+        assert abs(cells - want) < 0.2 * want, ('the squares as cells', cells, want)
+        assert plan2['cells'].get('by_nodes', 0) > 0 and plan2['cells'].get('node_sampled', 0) > 0, plan2['cells']
+        assert boxed > 5 * want and plan2['cells_off'].get('node_sampled', 0) == 0, ('the switch off', boxed, want, plan2['cells_off'])
+        print('density stack: a node counts what its placements hold - 25,600 squares of 0.0025 px^2: alphas %.0f as shapes, %.0f as a cell '
+              'each (g x area %.0f; %d nodes by their placements) - the switch off %.0f, the nodes\' boxes'
+              % (flat, cells, want, plan2['cells'].get('node_sampled', 0), boxed))
+        # a cell stands for the area its shapes cover
+        regions = {'array': ((8, 72), (98, 162)), 'list': ((98, 252), (8, 72)), 'lone': ((98, 252), (98, 162))}
+        members = {'array': 3600, 'list': 2000, 'lone': 500}
+        said = []
+        for name, region in regions.items():
+            want = 2 * members[name] * 0.2 ** 2
+            on, off = sum(alphas(got['cover'], *region)), sum(alphas(got['cover_off'], *region))
+            assert abs(on - want) < 0.15 * want, (name, on, want)
+            assert off > 4 * want, (name, 'the switch off', off, want)
+            said.append('%s %.0f for %.0f (off %.0f)' % (name, on, want, off))
+        assert plan2['cover'].get('cell_cover') == 1 and plan2['cover'].get('cover_cells', 0) >= 1, plan2['cover']
+        assert plan2['cover_off'].get('cell_cover') == 0 and plan2['cover_off'].get('cover_cells', 0) == 0, plan2['cover_off']
+        print('density stack: a cell stands for its shapes\' cover - a 2/0 square of 0.04 px^2 in a 1 px cell: %s' % ', '.join(said))
+        # an item across a block boundary is shared between the blocks
+        inner = ((14, 54), (14, 54))
+        on, off = alphas(got['even'], *inner), alphas(got['even_off'], *inner)
+        mean_on, mean_off = sum(on) / len(on), sum(off) / len(off)
+        dev_on = (sum((v - mean_on) ** 2 for v in on) / len(on)) ** 0.5 / mean_on
+        dev_off = (sum((v - mean_off) ** 2 for v in off) / len(off)) ** 0.5 / mean_off
+        assert abs(mean_on - 0.5) < 0.06 and dev_on < 0.35 and 0.05 < min(on) and max(on) < 0.8, ('the even field', mean_on, dev_on, min(on), max(on))
+        assert abs(mean_off - 0.5) < 0.06 and dev_off > 0.5 and min(off) == 0.0 and max(off) >= 0.99, ('the even field, the switch off', mean_off, dev_off, min(off), max(off))
+        print('density stack: an item across blocks is shared between them - cells a quarter covered, every 1 px: alpha %.2f, deviation %.2f '
+              'of it, %.2f to %.2f - the switch off %.2f, deviation %.2f, %.2f to %.2f (blocks at the colour beside dark ones)'
+              % (mean_on, dev_on, min(on), max(on), mean_off, dev_off, min(off), max(off)))
+        # an array every 1.5 px: by 4 px blocks (the frame's own: the view starts at a block's corner)
+        def by_blocks(pixels):
+            cells = []
+            for by in range(4, 13):
+                for bx in range(26, 39):
+                    cells.append(sum(alphas(pixels, (bx * 4, bx * 4 + 4), (by * 4, by * 4 + 4))) / 16.0)
+            mean = sum(cells) / len(cells)
+            return mean, (sum((v - mean) ** 2 for v in cells) / len(cells)) ** 0.5 / mean
+        (mean_on, dev_on), (mean_off, dev_off) = by_blocks(got['even']), by_blocks(got['even_off'])
+        assert abs(mean_on - 0.32) < 0.03 and dev_on < 0.12, ('the array', mean_on, dev_on)
+        assert abs(mean_off - 0.32) < 0.03 and dev_off > 0.18, ('the array, the switch off', mean_off, dev_off)
+        print('density stack: an array every 1.5 px takes its members\' parts in a block by their area - alpha %.2f for 0.32, its 4 px blocks '
+              'within %.2f of it - the switch off %.2f (blocks of four, six and nine members)' % (mean_on, dev_on, dev_off))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def layer_colour(w, layer):
     """A layer's colour as the renderer paints it (the cache's style)."""
     for l in w.cache.meta['layers']:
@@ -2513,6 +2692,7 @@ def main():
         toggle_checks(temp)
         first_checks(temp)
         sums_checks(temp)
+        hier_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)
