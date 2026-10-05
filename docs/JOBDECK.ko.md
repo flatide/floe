@@ -142,7 +142,7 @@ KLayout 툴은 "소스 → 하나의 flat-ish layout 재작성" 구조였다. fl
 | M1 | Python 포팅(`floe/jobdeck/`), `floe2 jobdeck` CLI, 일괄 인덱싱, 손계산 gate | ✅ 2026-09-08 (main) |
 | M2 | renderd 다중 캐시 합성(`open deck=`), 루트 배율/오프셋, headless 렌더, 오라클 gate | ✅ 2026-09-08 (`feature/jobdeck`) |
 | M3 | 뷰어에서 덱 열기(`floe2 view deck.jb`), 색 모드 메뉴, `view/info/index/render`가 .jb를 직접 받음 | ✅ 2026-09-09 (`feature/jobdeck`) |
-| M4 | `floe2 render`의 헤드리스 shot: `--at/--size/--anchor`, 단위 접미사, `--px WxH`(확장/`--stretch`), mosaic, `--batch`(한 번 열고 여러 장), `--report` | ✅ 2026-09-09 (`feature/jobdeck`) |
+| M4 | `floe2 render`의 헤드리스 shot: `--at/--size/--anchor`, 단위 접미사, `--px WxH`(확장/`--stretch`), mosaic, `--batch`(한 번 열고 여러 장), `--report`; 칩 on/off(`--chip/--chip-off/--fit-chip`, 값 없는 `--corners`, §7) | ✅ 2026-09-09, 칩 2026-10-06 (`feature/jobdeck`) |
 | M5 | KLayout LayoutView를 독립 오라클로: 배율 인스턴스로 만든 덱을 KLayout이 직접 그린 그림과 합성 프레임을 배터리 픽셀 정책으로 비교하는 gate | ✅ 2026-09-09 (`feature/jobdeck`) |
 
 M2 전에 확인할 것: 실덱의 `mag` 분포(1이 아닌 값이 흔한지), 소스 자체에
@@ -379,6 +379,72 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   영역·픽셀·시간(mosaic은 타일 영역과 선 규칙) JSON.
 - 출력은 보관용이므로 solid 채움(뷰어의 speckle은 표시용). 단일 shot은 renderd의
   PNG 그대로, mosaic은 raw 타일을 stdlib zlib으로 PNG 인코딩(Pillow 불필요).
+
+### 칩 on/off 캡처 (사용자 2026-10-06)
+
+사용자 요청은 두 가지였다. "cli로 jobdeck 캡쳐 … 특정 레벨과 특정 칩을 지정해서
+캡쳐할 수 있어야 함. 그리고 네 모서리를 캡쳐해서 하나의 이미지로", 그리고 "칩을
+여러 개 지정할 수 있어야 함. 즉, 칩 on/off". 레벨 선택(`--level`)과 네 모서리
+mosaic(`--corners`)은 위에서 본 대로 이미 있었다. 이번에 칩 단위 on/off와 칩으로
+정하는 영역을 더했다(`floe/jobdeck/chips.py`).
+
+```sh
+floe2 info   deck.jb --level 2 --chips      # 레벨 2의 칩: 이름, CHIP, 배치 #K와 범위
+floe2 render deck.jb --level 2 --chip MAIN.oas --px 1600 --out main.png
+floe2 render deck.jb --level 2 --chip MAIN.oas,FRAME.oas --fit-chip MAIN.oas \
+             --corners --size 300um,300um --px 800 --out main4.png   # FRAME도 켜고 MAIN의 네 모서리
+floe2 render deck.jb --level 2 --chip-off 'TEST*' --out level2.png    # TEST로 시작하는 칩만 끔
+floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.png
+```
+
+**칩을 고르는 방법**
+- 칩은 칩뷰의 행, 곧 레벨 아래의 소스 하나다(§1a). 뷰어가 켜고 끄는 단위이고, 키는 뷰의 L/D 쌍이다.
+- 이름으로는 셋 중 무엇이든 받는다. 칩뷰가 보이는 소스 파일 이름, TC 경로, CHIP id다. CHIP id는 그 CHIP 블록이 배치하는 칩들을 가리킨다.
+- `N:이름`은 레벨 N의 칩만 고른다. `*`, `?`, `[..]` 와일드카드를 쓸 수 있다(셸에서는 따옴표로 감싼다). 쉼표로 여럿을 준다.
+- `--chip`은 그 칩들만 켠다(`--level`로 로드한 레벨 안에서). `--chip-off`는 그 칩들만 끄고 나머지를 켠다. 둘을 함께 주면 켠 칩에서 끈 칩을 뺀다.
+- `--layers`와 `--chip`/`--chip-off`는 함께 쓸 수 없다. 둘 다 무엇을 켤지 정하기 때문이다.
+- 같은 레벨에서 두 CHIP 블록이 한 소스를 공유하면, 그 행은 두 블록 몫이 함께 켜지고 꺼진다. 행이 뷰가 그리는 단위이기 때문이다.
+
+**영역**
+- `--bbox`, `--at`, `--mosaic-at`, `--corners X1,..`가 없으면 영역은 켠 칩들의 배치 범위다. 덱의 BX..UY를 배치한 값이므로 소스를 읽지 않는다.
+- `--fit-chip NAME[#K]`는 영역만 그 칩의 배치로 정한다. 그 칩이 켜져 있지 않아도 된다.
+  - `#K`는 K번째 배치 하나다. 순서는 덱 순서(CHIP 블록 순서, 그 안에서 ROWS 순서)다.
+  - CHIP id로 고르면 그 블록의 배치만 영역에 들어간다.
+  - `floe2 info deck.jb --chips`가 칩마다 배치 번호와 범위를 `--bbox`/`--corners` 형식으로 보여 준다.
+- `--corners`를 값 없이(또는 `fit`으로) 쓰면 기본 영역의 네 모서리를 찍는다. 기본 영역은 칩 범위이고, 칩을 고르지 않았으면 소스 전체다. 타일은 위의 규칙대로 영역 안쪽에 놓인다.
+
+**누락 처리**
+- 캡처는 켠 칩의 skip만 부족한 것으로 센다.
+- 꺼진 칩의 skip은 `note:` 한 줄과 report의 `jobdeck.skipped_off`에만 남고, 종료 코드는 0이다.
+- 켠 칩에 skip이 있으면 이전과 같다. WARNING, `complete=false`, exit 3이다.
+- `--layers`로 고른 캡처도 같은 규칙을 따른다. 이전에는 로드한 덱의 skip을 모두 세어, 꺼 둔 레벨 때문에 exit 3이 났다.
+
+**batch와 report**
+- `--batch`에 키 `chip`, `chip_off`, `fit_chip`과 값 `corners=fit`을 더했다.
+- 영역 키의 대체 규칙:
+  - 줄에 자기 영역(bbox, at, mosaic, corners 좌표)이 있으면, 명령행의 영역 키를 fit_chip까지 모두 버린다.
+  - 줄에 fit_chip이나 corners=fit만 있으면, 명령행의 좌표 영역만 버린다.
+- 켤 칩 키의 대체 규칙: 줄의 layers는 명령행의 chip/chip_off를, 줄의 chip/chip_off는 명령행의 layers를 버린다.
+- report:
+  - shot마다 `chips` 항목이 붙는다. 켠 칩 목록(`N:이름`), chip/chip_off/fit_chip, region_um, placements다.
+  - `jobdeck.skipped`는 캡처들이 실제로 빠뜨린 것만 담는다.
+  - `jobdeck.skipped_off`는 어떤 캡처도 켜지 않은 칩의 skip을 담는다.
+- 색은 render의 level view 그대로다(칩마다 다른 색이 아니다).
+
+**검증**: gate `ChipShotTests`(6개).
+- 해석: 이름·레벨·와일드카드·CHIP id를 해석하고, 잘못된 입력을 거부한다. 거부하는 경우는 없는 이름, on/off에 쓴 `#K`, 덱에 없는 레벨, 로드하지 않은 레벨, 켠 칩이 하나도 남지 않을 때다.
+- 범위: 손계산 배치(`jobdeck_expected.json`의 mag/dx/dy와 BX..UY)와 일치한다. `#K`의 덱 순서, CHIP id가 그 블록만 고르는 것, 레벨 2만 로드했을 때의 번호를 포함한다.
+- 같은 그림(바이트 동일):
+  - `--chip`·`--chip-off` 캡처와, 같은 키의 `--layers` + `--bbox` 캡처.
+  - 값 없는 `--corners`와, 범위 좌표를 준 `--corners`.
+  - `--fit-chip ID002#2`와, 그 범위의 `--bbox`.
+  - batch의 한 줄과, 같은 옵션의 단일 캡처.
+- 그 밖에:
+  - 그림에는 켠 칩의 레벨 색만 나온다.
+  - 꺼진 칩의 skip은 exit 0, 켠 칩의 skip은 exit 3이다.
+  - batch 키의 대체 규칙을 지킨다.
+  - `info --chips`가 칩 목록을 낸다.
+- 변이 확인: 꺼진 칩의 skip을 세게 바꾸거나 칩 범위를 무시하게 바꾸면 테스트가 실패한다.
 
 ## 8. M5 상세 — KLayout 독립 오라클
 

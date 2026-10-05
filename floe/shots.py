@@ -19,9 +19,15 @@ reference tool's cli-spec, decisions kept):
                --corners X1,Y1,X2,Y2 --size W,H            the region's four
                W,H corner rectangles, INSIDE the region (the tl tile's
                top-left corner is the region's top-left corner)
+               --corners (alone, or `fit`) --size W,H      the same of the
+               default region: the chips' extent, else the whole source
                --line W (px, centred on the seam: floor(W/2) solid each
                side, the remainder one blended pixel each side; 0 = none)
                --line-color COLOR, --keep-tiles (<out>_tl/_tr/_bl/_br.png)
+  chips        a jobdeck's chip view rows on and off (floe/jobdeck/chips.py,
+               user 2026-10-06): --chip NAME[,NAME...] those alone on,
+               --chip-off NAME[,...] those off; the default region is
+               then the chips' extent, or --fit-chip NAME[#K][,...]'s
 
 Nothing here needs Pillow: single shots write renderd's PNG as is; a
 mosaic composes raw RGBA tiles and encodes the PNG with zlib.
@@ -39,6 +45,7 @@ import zlib
 
 ANCHORS = ("center", "lb")
 MOSAIC_ORDER = ("tl", "tr", "bl", "br")
+FIT = "fit"         # --corners alone: the corners of the default region
 
 _UNITS = {"nm": 1e-3, "um": 1.0, "µm": 1.0, "μm": 1.0,
           "mm": 1e3, "cm": 1e4, "m": 1e6}
@@ -149,7 +156,7 @@ class Shot:
     def __init__(self, name, bbox=None, at=None, size=None, anchor="center",
                  px=(1200, None), stretch=False, layers=None, depth=None,
                  mosaic=None, corners=None, line=2.0, line_color="#ffffff",
-                 keep_tiles=False):
+                 keep_tiles=False, chip=None, chip_off=None, fit_chip=None):
         if anchor not in ANCHORS:
             raise ValueError("anchor must be one of %s" % (ANCHORS,))
         self.name = name
@@ -162,10 +169,15 @@ class Shot:
         self.layers = layers
         self.depth = depth
         self.mosaic = mosaic
-        self.corners = corners
+        self.corners = corners          # X1,Y1,X2,Y2 or FIT
         self.line = float(line)
         self.line_color = line_color
         self.keep_tiles = bool(keep_tiles)
+        # a jobdeck's chips (floe/jobdeck/chips.py): those on, those
+        # off, and those whose placements frame the default region
+        self.chip = chip or None
+        self.chip_off = chip_off or None
+        self.fit_chip = fit_chip or None
         if self.line < 0:
             raise ValueError("line width must be >= 0")
         forms = sum(1 for f in (bbox, at, mosaic, corners) if f is not None)
@@ -176,10 +188,30 @@ class Shot:
                 and size is None:
             raise ValueError("%s: --at / --mosaic-at / --corners need "
                              "--size W,H" % name)
+        if self.fit_chip and self.explicit_region:
+            raise ValueError("%s: --fit-chip frames the default region; "
+                             "--bbox, --at, --mosaic-at and --corners "
+                             "X1,Y1,X2,Y2 give a region of their own"
+                             % name)
+        if layers and (self.chip or self.chip_off):
+            raise ValueError("%s: --layers and --chip/--chip-off both say "
+                             "what is on; give one" % name)
 
     @property
     def is_mosaic(self):
         return self.mosaic is not None or self.corners is not None
+
+    @property
+    def explicit_region(self):
+        """A region of its own - not the default region (the chips' or
+        the whole source), which --corners alone also takes."""
+        return (self.bbox is not None or self.at is not None
+                or self.mosaic is not None
+                or (self.corners is not None and self.corners != FIT))
+
+    @property
+    def names_chips(self):
+        return bool(self.chip or self.chip_off or self.fit_chip)
 
     def tile_boxes(self, default_box):
         """The region(s) to capture, each already fitted to the pixel
@@ -195,8 +227,10 @@ class Shot:
         elif self.corners is not None:
             # the region's four W,H corner rectangles, inside it (the
             # reference tool's rule; review 2026-09-09 P2-5: centring
-            # the tiles on the corners shot half outside the region)
-            x0, y0, x1, y1 = normalize_box(self.corners)
+            # the tiles on the corners shot half outside the region);
+            # FIT takes the default region's
+            x0, y0, x1, y1 = normalize_box(
+                default_box if self.corners == FIT else self.corners)
             w, h = self.size
             if w <= 0 or h <= 0:
                 raise ValueError("--size must be positive")
@@ -225,14 +259,20 @@ class Shot:
 
 BATCH_KEYS = ("bbox", "at", "size", "anchor", "px", "stretch", "layers",
               "depth", "mosaic", "corners", "line", "linecolor",
-              "keep_tiles")
+              "keep_tiles", "chip", "chip_off", "fit_chip")
+
+
+def _is_fit(value):
+    return str(value).strip().lower() == FIT
 
 
 def parse_batch(text, defaults=None):
     """One shot per line: `NAME key=value ...` (# comments). Keys are the
     render options: bbox, at, size, anchor, px, stretch, layers, depth,
-    mosaic (four points), corners, line, linecolor, keep_tiles. Values
-    with blanks go in quotes. Unset keys take the command line's."""
+    mosaic (four points), corners, line, linecolor, keep_tiles, chip,
+    chip_off, fit_chip. Values with blanks go in quotes. Unset keys
+    take the command line's - a line's own region and its own say of
+    what is on replace the command line's (see below)."""
     import shlex
     defaults = defaults or {}
     shots = []
@@ -248,13 +288,7 @@ def parse_batch(text, defaults=None):
         if "=" in name or "/" in name or name in (".", ".."):
             raise ValueError("batch line %d: first token is the shot name"
                              % line_no)
-        fields = dict(defaults)
-        # a line's own region form replaces the defaults' form
-        for key in ("bbox", "at", "mosaic", "corners"):
-            if any(tok.split("=", 1)[0] in ("bbox", "at", "mosaic",
-                                            "corners")
-                   for tok in tokens[1:] if "=" in tok):
-                fields.pop(key, None)
+        own = {}
         for tok in tokens[1:]:
             if "=" not in tok:
                 raise ValueError("batch line %d: expected key=value, got %r"
@@ -263,7 +297,30 @@ def parse_batch(text, defaults=None):
             if key not in BATCH_KEYS:
                 raise ValueError("batch line %d: unknown key %r (known: %s)"
                                  % (line_no, key, ", ".join(BATCH_KEYS)))
-            fields[key] = value
+            own[key] = value
+        fields = dict(defaults)
+        # a line's own region form replaces the defaults' form - every
+        # region key, fit_chip too; fit_chip or corners=fit, which
+        # frame the default region, replace the explicit forms alone
+        if any(k in ("bbox", "at", "mosaic")
+               or (k == "corners" and not _is_fit(v))
+               for k, v in own.items()):
+            for key in ("bbox", "at", "mosaic", "corners", "fit_chip"):
+                fields.pop(key, None)
+        elif any(k == "fit_chip" or (k == "corners" and _is_fit(v))
+                 for k, v in own.items()):
+            for key in ("bbox", "at", "mosaic"):
+                fields.pop(key, None)
+            if fields.get("corners") and not _is_fit(fields["corners"]):
+                fields.pop("corners")
+        # and a line's own say of what is on: its layers replace the
+        # defaults' chips, its chips the defaults' layers
+        if "layers" in own:
+            fields.pop("chip", None)
+            fields.pop("chip_off", None)
+        if "chip" in own or "chip_off" in own:
+            fields.pop("layers", None)
+        fields.update(own)
         try:
             shots.append(shot_from_fields(name, fields))
         except ValueError as exc:
@@ -292,6 +349,13 @@ def shot_from_fields(name, f):
     layers = f.get("layers")
     if layers in ("", "all"):
         layers = None
+    corners = f.get("corners")
+    if not corners:
+        corners = None
+    elif isinstance(corners, str) and _is_fit(corners):
+        corners = FIT
+    elif not isinstance(corners, tuple):
+        corners = parse_lengths(corners, 4, "corners")
     return Shot(
         name,
         bbox=parse_lengths(f["bbox"], 4, "bbox") if f.get("bbox") else None,
@@ -303,11 +367,13 @@ def shot_from_fields(name, f):
         layers=layers,
         depth=depth,
         mosaic=parse_points(f["mosaic"]) if f.get("mosaic") else None,
-        corners=parse_lengths(f["corners"], 4, "corners")
-        if f.get("corners") else None,
+        corners=corners,
         line=float(f.get("line", 2.0)),
         line_color=str(f.get("linecolor", "#ffffff")),
         keep_tiles=_flag(f.get("keep_tiles", False)),
+        chip=f.get("chip") or None,
+        chip_off=f.get("chip_off") or None,
+        fit_chip=f.get("fit_chip") or None,
     )
 
 
@@ -507,41 +573,112 @@ class ShotRunner:
             return data, result
 
 
+class ShotPlan:
+    """What one shot draws, settled before the worker starts: its
+    visible keys (None: every layer), its default region (um), its
+    chips (a chips.Selection or None) and the ledger records it lacks."""
+
+    def __init__(self, shot, layers, region, chips, lacks):
+        self.shot = shot
+        self.layers = layers
+        self.region = region
+        self.chips = chips
+        self.lacks = lacks
+
+
+def plan_shots(cache, shots):
+    """Every shot's plan, and the ledger: (plans, skipped). A name that
+    resolves to nothing stops the run here, before anything is drawn.
+
+    A jobdeck's skipped placements (missing source, absent layer,
+    unsupported container) are absent from every capture that has their
+    chips on: each shot lacks those of its own chips - every one with
+    every chip on (review 2026-09-09: complete=true rows under an
+    incomplete report) - and a chip turned off takes its records with it
+    (user 2026-10-06, chip on/off: what an image lacks, nothing else)."""
+    dbu = float(cache.meta["dbu"])
+    bb = cache.meta["bbox"]
+    whole = (bb[0] * dbu, bb[1] * dbu, bb[2] * dbu, bb[3] * dbu)
+    skipped = list((cache.meta.get("jobdeck") or {}).get("skipped") or [])
+    table = None
+    if getattr(cache, "is_jobdeck", False) and hasattr(cache, "chips"):
+        table = cache.chips()
+    plans = []
+    for shot in shots:
+        sel = None
+        if shot.names_chips:
+            if table is None:
+                raise ValueError("%s: --chip, --chip-off and --fit-chip "
+                                 "name a jobdeck's chips; %s is a layout"
+                                 % (shot.name, os.path.basename(
+                                     str(cache.src))))
+            sel = table.select(shot.chip, shot.chip_off, shot.fit_chip)
+        if sel is not None and sel.keys is not None:
+            layers = sel.keys
+        else:
+            layers = (cache.resolve_layers(shot.layers)
+                      if shot.layers else None)
+        region = whole
+        if sel is not None and not shot.explicit_region:
+            if sel.region is None:
+                raise ValueError("%s: the chips on have nothing placed "
+                                 "(their sources are skipped: see "
+                                 "'skipped' above)" % shot.name)
+            region = sel.region
+        lacks = (table.skipped_in(skipped, layers) if table is not None
+                 else list(skipped))
+        plans.append(ShotPlan(shot, layers, region, sel, lacks))
+    return plans, skipped
+
+
 def run_shots(cache, shots, out, report=None, frames=False, labels=False,
               label_font_px=14, log=print, batch=False, cut_px=0.0,
-              thin=None):
+              thin=None, summary=None):
     """Render every shot through one open. `out` is the PNG path of the
     one shot, or with `batch` a directory (<out>/<name>.png) - stated
     by the caller, never inferred from the shot count or from whether
     the directory already exists (review 2026-09-09 P2-6: a one-line
     batch into a new directory wrote a PNG named like the directory).
-    Returns the report rows (also written as JSON to `report`)."""
+    Returns the report rows (also written as JSON to `report`); a dict
+    `summary` gets the ledger records the shots lack ("skipped") and
+    those of chips no shot had on ("skipped_off")."""
     single = not batch
     if single and len(shots) != 1:
         raise ValueError("a single --out PNG takes exactly one shot")
+    plans, skipped = plan_shots(cache, shots)
     if not single:
         os.makedirs(out, exist_ok=True)
     dbu = float(cache.meta["dbu"])
-    bb = cache.meta["bbox"]
-    default_box = (bb[0] * dbu, bb[1] * dbu, bb[2] * dbu, bb[3] * dbu)
-    # a jobdeck's skipped placements (missing source, absent layer,
-    # unsupported container) are absent from EVERY capture: each shot
-    # row carries them so a per-shot reader sees the same verdict as
-    # the report (review 2026-09-09: complete=true rows under an
-    # incomplete report)
-    skipped = list((cache.meta.get("jobdeck") or {}).get("skipped") or [])
+    shown = set()
+    for plan in plans:
+        shown.update(id(rec) for rec in plan.lacks)
+    lacking = [rec for rec in skipped if id(rec) in shown]
+    skipped_off = [rec for rec in skipped if id(rec) not in shown]
+    table = cache.chips() if any(p.chips for p in plans) else None
     rows = []
     runner = ShotRunner(cache, frames=frames, labels=labels,
                         label_font_px=label_font_px, cut_px=cut_px, thin=thin)
     try:
-        for shot in shots:
+        for plan in plans:
+            shot = plan.shot
             t0 = time.perf_counter()
             path = out if single else os.path.join(out, shot.name + ".png")
-            layers = (cache.resolve_layers(shot.layers)
-                      if shot.layers else None)
-            boxes, (w, h) = shot.tile_boxes(default_box)
+            layers = plan.layers
+            boxes, (w, h) = shot.tile_boxes(plan.region)
             row = {"name": shot.name, "out": path, "pixel": [w, h],
                    "layers": shot.layers, "depth": shot.depth}
+            if plan.chips is not None:
+                sel = plan.chips
+                row["chips"] = {
+                    "on": None if sel.rows is None
+                    else [r.label for r in sel.rows],
+                    "chip": shot.chip, "chip_off": shot.chip_off,
+                    "fit_chip": shot.fit_chip,
+                    "region_um": None if shot.explicit_region
+                    else list(plan.region),
+                    "placements": sel.placements}
+                if log:
+                    log("[floe] %s: %s" % (shot.name, table.describe(sel)))
             over_budget = 0
             if shot.is_mosaic:
                 tiles = []
@@ -571,8 +708,8 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
                 row["bbox_um"] = list(boxes[0])
             row["ms"] = round((time.perf_counter() - t0) * 1000)
             row["over_budget_pages"] = over_budget
-            row["skipped_placements"] = len(skipped)
-            row["complete"] = over_budget == 0 and not skipped
+            row["skipped_placements"] = len(plan.lacks)
+            row["complete"] = over_budget == 0 and not plan.lacks
             if over_budget and log:
                 log("[floe] WARNING: %s stopped at the page budget: %d "
                     "page(s) not drawn" % (path, over_budget))
@@ -593,12 +730,20 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
     # a jobdeck that could not draw every placement says so in the
     # report and the log, and the caller exits non-zero (review
     # 2026-09-09 P1-1: a thinner PNG must never look complete)
-    if skipped and log:
+    def brief(recs):
+        return "; ".join(
+            "CHIP %s $%d %s %s" % (r["chip"], r["idx"], r["tc"],
+                                   r["reason"]) for r in recs[:5]) + (
+            " ..." if len(recs) > 5 else "")
+    if lacking and log:
         log("[floe] WARNING: %d jobdeck placement(s) not drawn: %s"
-            % (len(skipped), "; ".join(
-                "CHIP %s $%d %s %s" % (r["chip"], r["idx"], r["tc"],
-                                       r["reason"]) for r in skipped[:5])
-               + (" ..." if len(skipped) > 5 else "")))
+            % (len(lacking), brief(lacking)))
+    if skipped_off and log:
+        log("[floe] note: %d placement(s) the load skips are in chips no "
+            "shot had on: %s" % (len(skipped_off), brief(skipped_off)))
+    if summary is not None:
+        summary["skipped"] = lacking
+        summary["skipped_off"] = skipped_off
     over_budget_total = sum(r["over_budget_pages"] for r in rows)
     if report:
         doc = {"source": cache.src, "dbu": dbu, "shots": rows,
@@ -606,7 +751,8 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
                "complete": all(r["complete"] for r in rows)}
         if cache.meta.get("jobdeck"):
             doc["jobdeck"] = {"complete": doc["complete"],
-                              "skipped": skipped,
+                              "skipped": lacking,
+                              "skipped_off": skipped_off,
                               "over_budget_pages": over_budget_total,
                               "view": cache.meta["jobdeck"].get("mode"),
                               "levels": cache.meta["jobdeck"].get("levels")}
@@ -615,5 +761,5 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
         if log:
             log("[floe] report %s (%d shot(s)%s)" % (
                 report, len(rows),
-                ", INCOMPLETE" if (skipped or over_budget_total) else ""))
+                ", INCOMPLETE" if (lacking or over_budget_total) else ""))
     return rows

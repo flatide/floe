@@ -183,12 +183,17 @@ floe2 render deck.jb --bbox 40000,80000,60000,95000 --px 1200 --out deck.png
 floe2 render chip.oas --bbox 0,0,2000,2000 --px 800 --out a.png --detail high   # 뷰어와 같은 1 px cut으로 캡처(기본 exact = cut 없음; low/medium/high = 5/3/1 px)
 floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
 floe2 render deck.jb --corners 40000,80000,60000,95000 --size 4mm,3mm --px 600x450 --out quad.png  # 영역 안쪽 네 꼭짓점 4장 mosaic
+floe2 info   deck.jb --level 2 --chips      # 레벨 2의 칩(칩뷰 행): CHIP, 배치 #K, 범위
+floe2 render deck.jb --level 2 --chip A.oas,B.oas --px 1600 --out ab.png   # 칩 on/off: 그 칩들만 켜고 그 범위를 캡처 (--chip-off 'TEST*'는 끄기)
+floe2 render deck.jb --level 2 --chip A.oas --corners --size 300um,300um --px 800 --out a4.png   # 칩의 네 모서리를 한 장으로
 floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json     # 한 번 열고 여러 장
 floe2 jobdeck deck.jb --level 2 --mode chip --placements --report r.json   # 분석·보고
 ```
 
 `render`의 `--at/--size/--anchor`, 단위 접미사(nm/um/mm/cm/m), `--px WxH`,
-mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다.
+mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/off
+(`--chip/--chip-off/--fit-chip`, 이름·`N:이름`·CHIP id·와일드카드)는 덱
+전용이다(`docs/JOBDECK.ko.md` §7).
 
 renderd가 소스 캐시들을 그대로 열어 합성하며(배율은 씬 루트에만), 포맷의
 확정/미확정 사항과 단계별 설계는 `docs/JOBDECK.ko.md`에 있다. 실제 jobdeck과

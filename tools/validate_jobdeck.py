@@ -2083,6 +2083,297 @@ class ShotTests(unittest.TestCase):
         self.assertEqual(self._png_size(out), (200, 255))
 
 
+class ChipShotTests(unittest.TestCase):
+    """Chip on/off in captures (user 2026-10-06: "a capture names a level
+    and a chip"; "several chips - chip on/off"): the chip view's rows
+    named by source, TC path or CHIP id, `N:` and wildcards; the region
+    their placements' extent - against the hand-computed placements - or
+    --fit-chip's (#K one placement); --corners alone their four corners;
+    a capture lacks the skipped placements of its own chips alone.
+
+    Its own copy of the decks and sources: the classes run by name, and
+    CliTests - after this one - wants the CLI copy not yet indexed."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" /
+                                         "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" /
+                                           "release" / "floe-renderd")}
+        cls.dir = CLI / "chipshots"
+        cls.dir.mkdir(exist_ok=True)
+        for name in ("chipA.oas", "chipB.oas", "mark.oas", "test.jb",
+                     "test_missing_layer.jb"):
+            shutil.copy2(TMP / name, cls.dir / name)
+        for deck in ("test.jb", "test_missing_layer.jb"):
+            run_floe2("index", cls.dir / deck, "--jobs", "2", env=cls.env,
+                      ok=0)
+        cls.out = cls.dir / "out"
+        cls.out.mkdir(exist_ok=True)
+        # (CHIP, level, ROWS index) -> extent um, from the hand-computed
+        # mag/dx/dy and the entries' BX..UY
+        deck = jd.parse_jobdeck(str(cls.dir / "test.jb"))
+        cls.hand = {}
+        for p in EXPECTED["placements"]:
+            e = [c for c in deck.chips if c.id == p["chip"]][0].entry(
+                p["idx"])
+            cls.hand[(p["chip"], p["idx"], p["row"])] = (
+                p["dx"] + p["mag"] * e.bx, p["dy"] + p["mag"] * e.by,
+                p["dx"] + p["mag"] * e.ux, p["dy"] + p["mag"] * e.uy)
+
+    def h(self, keys):
+        boxes = [self.hand[k] for k in keys]
+        return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+    def table(self, ids=None):
+        from floe.jobdeck.viewer import DeckCache
+        c = DeckCache(str(self.dir / "test.jb"), ids=ids)
+        c.load()
+        self.addCleanup(c.close)
+        return c.chips()
+
+    def render(self, name, *args, ok=0, deck="test.jb"):
+        return run_floe2("render", self.dir / deck, *args, "--out",
+                         self.out / name, env=self.env, ok=ok)
+
+    def test_names_levels_wildcards_and_chip_ids(self):
+        t = self.table()
+        self.assertEqual([r.label for r in t.rows],
+                         ["1:chipA.oas", "2:chipA.oas", "2:chipB.oas",
+                          "3:mark.oas", "5:chipB.oas"])
+
+        def on(*a, **k):
+            return [r.label for r in t.select(*a, **k).rows]
+        self.assertEqual(on("chipA.oas"), ["1:chipA.oas", "2:chipA.oas"])
+        self.assertEqual(on("2:chipA.oas"), ["2:chipA.oas"])
+        self.assertEqual(on("./chipA.oas"), ["1:chipA.oas", "2:chipA.oas"],
+                         "a TC path, normalised")
+        self.assertEqual(on("ID003"), ["1:chipA.oas", "3:mark.oas"],
+                         "a CHIP id: the chips that block places")
+        self.assertEqual(on("chip?.oas", off="5:*"),
+                         ["1:chipA.oas", "2:chipA.oas", "2:chipB.oas"])
+        self.assertEqual(on(off="chipA.oas"),
+                         ["2:chipB.oas", "3:mark.oas", "5:chipB.oas"])
+        self.assertEqual(on("2:*,mark.oas"),
+                         ["2:chipA.oas", "2:chipB.oas", "3:mark.oas"])
+        # the keys are the view's L/D pairs - the render's visible set
+        self.assertEqual(t.select("3:mark.oas").keys, [(3, 2)])
+        for bad, why in (("nope.oas", "matches no chip"),
+                         ("1:ID002x", "matches no chip"),
+                         ("mark.oas#2", "on or off as a whole"),
+                         ("#2", "names nothing"),
+                         ("4:chipA.oas", "level 4 is not in the deck")):
+            with self.assertRaisesRegex(ValueError, why):
+                t.select(bad)
+        with self.assertRaisesRegex(ValueError, "no chip is left on"):
+            t.select("chipA.oas", "chipA.oas")
+        # a load of level 2: its chips alone
+        t2 = self.table(ids=[2])
+        self.assertEqual([r.label for r in t2.rows],
+                         ["2:chipA.oas", "2:chipB.oas"])
+        with self.assertRaisesRegex(ValueError, "level 3 is not loaded"):
+            t2.select("3:mark.oas")
+        with self.assertRaisesRegex(ValueError, "matches no chip"):
+            t2.select("mark.oas")
+
+    def test_regions_are_the_hand_placements_extent(self):
+        t = self.table()
+        h = self.h
+        self.assertEqual(t.select("3:mark.oas").region,
+                         h([("ID001", 3, 0), ("ID001", 3, 1),
+                            ("ID003", 3, 0)]))
+        sel = t.select("chipB.oas")
+        self.assertEqual(sel.region,
+                         h([("ID002", i, r) for i in (2, 5)
+                            for r in range(3)]))
+        self.assertEqual(sel.placements, 3,
+                         "a CHIP block at one ROWS position is one placement")
+        # --fit-chip: the K-th placement in deck order; a CHIP id frames
+        # its own placements alone (ID001 and ID003 place chipA too)
+        self.assertEqual(t.fit("ID002#2"),
+                         (h([("ID002", i, 1) for i in (1, 2, 5)]), 1))
+        self.assertEqual(t.fit("chipA.oas#6")[0], h([("ID003", 1, 0)]))
+        self.assertEqual(t.fit("1:ID002")[0],
+                         h([("ID002", 1, r) for r in range(3)]))
+        self.assertEqual(t.fit("mark.oas#3,chipB.oas#1"),
+                         (h([("ID003", 3, 0), ("ID002", 2, 0),
+                             ("ID002", 5, 0)]), 2))
+        with self.assertRaisesRegex(ValueError, "it has 3 placements"):
+            t.fit("mark.oas#4")
+        # the fit needs no chip on; a selection keeps both
+        sel = t.select(on="2:*", fit="ID003")
+        self.assertEqual([r.label for r in sel.rows],
+                         ["2:chipA.oas", "2:chipB.oas"])
+        self.assertEqual(sel.region, h([("ID003", 1, 0), ("ID003", 3, 0)]))
+        # a load of level 2 counts its own placements
+        self.assertEqual(self.table(ids=[2]).fit("chipA.oas#2")[0],
+                         h([("ID001", 2, 1)]))
+
+    def test_cli_capture_is_the_layers_and_region_it_names(self):
+        from floe.jobdeck.chips import box_text
+        from PIL import Image
+        out = self.out
+        region = self.h([("ID002", i, r) for i in (2, 5) for r in range(3)])
+        res = self.render("on.png", "--chip", "chipB.oas", "--px", "240",
+                          "--report", out / "on.json")
+        self.assertIn("chips on 2 of 5 (2:chipB.oas, 5:chipB.oas); region "
+                      "%s um (the chips on, 3 placements)"
+                      % box_text(region), res.stdout)
+        # the same picture as the keys and the bbox named by hand
+        self.render("keys.png", "--layers", "2/3,5/3", "--bbox",
+                    box_text(region), "--px", "240")
+        self.render("off.png", "--chip-off", "chipA.oas,3:*", "--px", "240")
+        on = (out / "on.png").read_bytes()
+        self.assertEqual(on, (out / "keys.png").read_bytes())
+        self.assertEqual(on, (out / "off.png").read_bytes(),
+                         "the same chips on by --chip-off")
+        colours = {c for c in Image.open(out / "on.png").convert("RGB")
+                   .getdata()}
+        self.assertEqual(colours, {(0, 0, 0), (255, 255, 0),
+                                   (255, 192, 203)},
+                         "chipB alone: level 2 yellow, level 5 pink")
+        rep = json.loads((out / "on.json").read_text())
+        chips = rep["shots"][0]["chips"]
+        self.assertEqual(chips["on"], ["2:chipB.oas", "5:chipB.oas"])
+        self.assertEqual(chips["region_um"], list(region))
+        self.assertEqual(chips["placements"], 3)
+        # --corners alone: the four corners of that extent
+        self.render("quad.png", "--chip", "chipB.oas", "--corners", "--size",
+                    "500,500", "--px", "100x100", "--report",
+                    out / "quad.json")
+        self.render("quad_keys.png", "--layers", "2/3,5/3", "--corners",
+                    box_text(region), "--size", "500,500", "--px",
+                    "100x100")
+        self.assertEqual((out / "quad.png").read_bytes(),
+                         (out / "quad_keys.png").read_bytes())
+        rep = json.loads((out / "quad.json").read_text())
+        x0, y0, x1, y1 = region
+        self.assertEqual(rep["shots"][0]["tiles"]["tl"],
+                         [x0, y1 - 500, x0 + 500, y1])
+        self.assertEqual(rep["shots"][0]["tiles"]["br"],
+                         [x1 - 500, y0, x1, y0 + 500])
+        # --fit-chip frames one placement, every chip on
+        fit = self.h([("ID002", i, 1) for i in (1, 2, 5)])
+        res = self.render("fit.png", "--fit-chip", "ID002#2", "--px", "200")
+        self.assertIn("region %s um (--fit-chip ID002#2, 1 placement)"
+                      % box_text(fit), res.stdout)
+        self.render("fit_bbox.png", "--bbox", box_text(fit), "--px", "200")
+        self.assertEqual((out / "fit.png").read_bytes(),
+                         (out / "fit_bbox.png").read_bytes())
+        # refused before anything is drawn
+        self.render("x.png", "--fit-chip", "ID002", "--bbox", box_text(fit),
+                    ok=1)
+        self.render("x.png", "--layers", "METAL1", "--chip", "mark.oas",
+                    ok=1)
+        res = self.render("x.png", "--chip", "nope.oas", ok=1)
+        self.assertIn("chips of the loaded levels (1,2,3,5): chipA.oas, "
+                      "chipB.oas, mark.oas", res.stderr)
+        res = self.render("x.png", "--level", "2", "--chip", "3:mark.oas",
+                          ok=1)
+        self.assertIn("level 3 is not loaded (--level 2)", res.stderr)
+        res = run_floe2("render", self.dir / "chipA.oas", "--chip", "x",
+                        "--out", out / "x.png", env=self.env, ok=1)
+        self.assertIn("name a jobdeck's chips", res.stderr)
+        self.assertFalse((out / "x.png").exists())
+
+    def test_a_capture_lacks_its_own_chips_skips_alone(self):
+        # level 2 of test_missing_layer.jb names a layer chipA lacks
+        rep = self.out / "ml.json"
+        res = self.render("ml.png", "--chip", "1:chipA.oas", "--px", "100",
+                          "--report", rep, deck="test_missing_layer.jb")
+        doc = json.loads(rep.read_text())
+        self.assertTrue(doc["complete"])
+        self.assertTrue(doc["shots"][0]["complete"])
+        self.assertEqual(doc["shots"][0]["skipped_placements"], 0)
+        self.assertEqual(doc["jobdeck"]["skipped"], [])
+        self.assertEqual([r["reason"] for r in doc["jobdeck"]["skipped_off"]],
+                         ["empty_layer"])
+        self.assertIn("in chips no shot had on", res.stdout)
+        self.assertNotIn("WARNING", res.stdout)
+        # its own chip on: incomplete, exit 3
+        res = self.render("ml.png", "--chip", "2:*", "--px", "100",
+                          "--report", rep, deck="test_missing_layer.jb",
+                          ok=3)
+        doc = json.loads(rep.read_text())
+        self.assertFalse(doc["shots"][0]["complete"])
+        self.assertEqual(doc["shots"][0]["skipped_placements"], 1)
+        self.assertIn("rendered incomplete - 1 jobdeck placement(s) missing",
+                      res.stderr)
+        # --layers alike; every chip on as before
+        self.render("ml.png", "--layers", "METAL1", "--px", "100",
+                    deck="test_missing_layer.jb")
+        self.render("ml.png", "--px", "100", deck="test_missing_layer.jb",
+                    ok=3)
+
+    def test_batch_chip_keys(self):
+        from floe import shots as sh
+        a, b, c, d, e = sh.parse_batch(
+            "a corners=fit size=500,500\n"
+            "b bbox=1,2,3,4\n"
+            "c layers=METAL1\n"
+            "d chip_off=mark.oas\n"
+            "e corners=1,2,3,4\n",
+            {"chip": "chipB.oas", "fit_chip": "ID002", "corners": "fit",
+             "size": "9,9"})
+        # corners=fit and fit_chip frame the default region together;
+        # a line's own region drops the command line's fit_chip
+        self.assertEqual((a.corners, a.fit_chip, a.chip),
+                         (sh.FIT, "ID002", "chipB.oas"))
+        self.assertEqual((b.bbox, b.corners, b.fit_chip),
+                         ((1.0, 2.0, 3.0, 4.0), None, None))
+        self.assertEqual(e.corners, (1.0, 2.0, 3.0, 4.0))
+        self.assertIsNone(e.fit_chip)
+        # a line's layers drop the command line's chips, and its chips
+        # the command line's layers
+        self.assertEqual((c.layers, c.chip, c.fit_chip),
+                         ("METAL1", None, "ID002"))
+        self.assertEqual((d.chip, d.chip_off), ("chipB.oas", "mark.oas"))
+        with self.assertRaisesRegex(ValueError, "frames the default region"):
+            sh.parse_batch("x bbox=1,2,3,4 fit_chip=ID001")
+        out = self.out / "batch"
+        (self.out / "chips.txt").write_text(
+            "b2    chip=chipB.oas\n"
+            "quad  chip=chipB.oas corners=fit size=500,500 px=50x50\n"
+            "one   fit_chip=ID002#2\n"
+            "lvl2  chip=2:*\n")
+        run_floe2("render", self.dir / "test.jb", "--batch",
+                  self.out / "chips.txt", "--px", "120", "--out", out,
+                  "--report", out / "r.json", env=self.env, ok=0)
+        rows = {r["name"]: r for r in json.loads(
+            (out / "r.json").read_text())["shots"]}
+        self.assertEqual(rows["b2"]["chips"]["on"],
+                         ["2:chipB.oas", "5:chipB.oas"])
+        self.assertEqual(rows["quad"]["pixel"], [100, 100])
+        self.assertIsNone(rows["one"]["chips"]["on"])
+        self.assertEqual(rows["one"]["bbox_um"],
+                         list(self.h([("ID002", i, 1) for i in (1, 2, 5)])))
+        self.assertEqual(rows["lvl2"]["chips"]["on"],
+                         ["2:chipA.oas", "2:chipB.oas"])
+        # one open, the same picture as a capture of its own
+        self.render("b2.png", "--chip", "chipB.oas", "--px", "120")
+        self.assertEqual((out / "b2.png").read_bytes(),
+                         (self.out / "b2.png").read_bytes())
+
+    def test_info_lists_the_chips(self):
+        from floe.jobdeck.chips import box_text
+        res = run_floe2("info", self.dir / "test.jb", "--chips",
+                        env=self.env, ok=0)
+        self.assertIn("chip rows : 5 in levels 1,2,3,5", res.stdout)
+        marks = [("ID001", 3, 0), ("ID001", 3, 1), ("ID003", 3, 0)]
+        self.assertIn("3/2 mark.oas  CHIP ID001,ID003  3 placements  %s um"
+                      % box_text(self.h(marks)), res.stdout)
+        self.assertIn("#2 CHIP ID001 ROWS 2 at 55020,85120: %s um"
+                      % box_text(self.h(marks[1:2])), res.stdout)
+        res = run_floe2("info", self.dir / "test.jb", "--level", "2",
+                        "--chips", env=self.env, ok=0)
+        listing = res.stdout.split("chip rows :")[1]
+        self.assertIn(" 2 in level 2 ", listing)
+        self.assertNotIn("mark.oas", listing)
+        run_floe2("info", self.dir / "chipA.oas", "--chips", env=self.env,
+                  ok=1)
+
+
 class ReviewFixTests(unittest.TestCase):
     """Review 2026-09-09 (six findings): each one pinned."""
 
