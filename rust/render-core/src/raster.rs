@@ -144,6 +144,19 @@ pub struct GeometryRasterRequest {
     /// drawn only in the space left will hardly jar"). Off: each top plane's
     /// density shows over the originals of the planes below it (0.12.293).
     pub density_shapes_first: bool,
+    /// Under the density stack, the density's brightness (user 2026-10-05:
+    /// "the brightness of a pixel by the shapes' size that gathers on it",
+    /// "never brighter than the original colour"; renderd sets it with the
+    /// sub-cut dots): g > 0 - a density shape adds the area it covers to its
+    /// pixels (a sub-cut dot item its count, in floe_vfs DOT_BRIGHT_UNITS of a
+    /// px^2, over its box), and a pixel its plane may take shows min(1, g x
+    /// that area) of the plane's colour over what is under it - the top
+    /// planes each in its own pass, the top first, then the planes under
+    /// them in their one walk (the highest one's colour over the others'
+    /// mixed by their areas). Density pixels stay open: the frame bands under
+    /// the planes paint them and show through, the tile's end composes them.
+    /// 0: the density as lit pixels.
+    pub density_bright: f32,
 }
 
 impl GeometryRasterRequest {
@@ -1201,6 +1214,144 @@ struct DensityStack {
     /// the plane (1-based) of the page being painted in that walk; 0 = the
     /// per-plane masks (the top plane's pass)
     plane: u16,
+    /// GeometryRasterRequest::density_bright: the gain g (0: off) - the
+    /// density is covered area, a pixel shows min(1, g x its area) of its
+    /// plane's colour
+    bright: f32,
+    /// under `bright`: what a member of the running record stands for (a
+    /// page thinned to level l: 2^l), 1 outside a page's records
+    weight: f32,
+    /// under `bright`, the colour of the page's plane in the lower planes'
+    /// walk (0..255)
+    color: [f32; 3],
+    /// under `bright`: the tile's pixels, and the lower planes' one walk runs
+    pixels: usize,
+    lower: bool,
+    /// under `bright`, per tile pixel: the running top plane's covered area,
+    /// px^2 (made when a shape first covers the tile, `bright_ready`)
+    cov: Vec<f32>,
+    /// under `bright`, the lower planes' walk, per tile pixel: the highest
+    /// plane (1-based, 0 = none) that covered it and its area, and every
+    /// plane's colour times its area with the areas' sum
+    low_plane: Vec<u16>,
+    low_cov: Vec<f32>,
+    low_mix: Vec<[f32; 4]>,
+    /// under `bright`, per tile pixel: the density shown so far - its colour
+    /// premultiplied (0..255) and its alpha (made when a plane first shows in
+    /// the tile); composed over the pixel at the tile's end (`finish_bright`)
+    shown: Vec<[f32; 4]>,
+    /// the tile rows [lo, hi) `shown` holds density in (lo >= hi: none)
+    shown_rows: (usize, usize),
+    /// scratch, one entry a tile column and a tile row: a box's shares
+    /// (`bright_spread`), a lattice's sums (`bright_lattice`)
+    xs: Vec<f32>,
+    ys: Vec<f32>,
+}
+
+/// A density pixel whose alpha reaches this is opaque: nothing under it
+/// shows, and it is claimed (DensityStack::bright).
+const BRIGHT_OPAQUE: f32 = 0.999;
+
+/// The pixels of the interval [a, b) (px, either order) in [lo, hi) (pixel
+/// indexes), each with its overlap's share of the interval's length times
+/// `weight` added to `sums` (index from lo); an interval of no length gives
+/// its pixel the whole. The entries touched, None outside.
+#[inline]
+fn add_px_shares(a: f64, b: f64, lo: i64, hi: i64, weight: f64, sums: &mut [f32]) -> Option<(usize, usize)> {
+    let (a, b) = (a.min(b), a.max(b));
+    let p0 = a.floor() as i64;
+    if !(b > a) {
+        if p0 < lo || p0 >= hi {
+            return None;
+        }
+        let at = (p0 - lo) as usize;
+        sums[at] += weight as f32;
+        return Some((at, at + 1));
+    }
+    let (first, end) = (p0.max(lo), (b.ceil() as i64).min(hi));
+    if first >= end {
+        return None;
+    }
+    let per = weight / (b - a);
+    for p in first..end {
+        let overlap = b.min((p + 1) as f64) - a.max(p as f64);
+        if overlap > 0.0 {
+            sums[(p - lo) as usize] += (overlap * per) as f32;
+        }
+    }
+    Some(((first - lo) as usize, (end - lo) as usize))
+}
+
+/// A world point in device px, unrounded (world_to_device's scale): x from
+/// the view's left, y from its top.
+#[inline]
+fn world_px(request: &GeometryRasterRequest, x: i64, y: i64) -> (f64, f64) {
+    let view = request.view;
+    (
+        (x as f64 - view.x0) * request.width as f64 / (view.x1 - view.x0),
+        (view.y1 - y as f64) * request.height as f64 / (view.y1 - view.y0),
+    )
+}
+
+impl DensityStack {
+    /// Under `bright`: the running plane's buffers, made the first time a
+    /// shape covers the tile - the top plane's area, or the lower planes'
+    /// walk's (tiles the density never reaches hold none).
+    #[inline]
+    fn bright_ready(&mut self) {
+        if self.plane == 0 {
+            if self.cov.is_empty() {
+                self.cov = vec![0.0; self.pixels];
+            }
+        } else if self.low_plane.is_empty() {
+            self.low_plane = vec![0; self.pixels];
+            self.low_cov = vec![0.0; self.pixels];
+            self.low_mix = vec![[0.0; 4]; self.pixels];
+        }
+    }
+
+    /// Under `bright`: `area` px^2 of covered area at tile pixel `at` - the
+    /// running top plane's, or in the lower planes' walk the page's plane's
+    /// (`bright_ready` made their buffers).
+    #[inline]
+    fn bright_add(&mut self, at: usize, area: f32) {
+        if self.plane == 0 {
+            self.cov[at] += area;
+            return;
+        }
+        let mix = &mut self.low_mix[at];
+        mix[0] += self.color[0] * area;
+        mix[1] += self.color[1] * area;
+        mix[2] += self.color[2] * area;
+        mix[3] += area;
+        let front = &mut self.low_plane[at];
+        if self.plane > *front {
+            *front = self.plane;
+            self.low_cov[at] = area;
+        } else if self.plane == *front {
+            self.low_cov[at] += area;
+        }
+    }
+
+    /// Under `bright`: `pre` (a premultiplied colour, 0..255) of alpha `alpha`
+    /// shows at tile pixel `at` (tile row `row`) under what showed there before
+    /// - the over operator, the density above first. Whether the pixel is
+    /// opaque now.
+    #[inline]
+    fn bright_compose(&mut self, at: usize, row: usize, pre: [f32; 3], alpha: f32) -> bool {
+        if self.shown.is_empty() {
+            self.shown = vec![[0.0; 4]; self.pixels];
+        }
+        let shown = &mut self.shown[at];
+        let open = 1.0 - shown[3];
+        shown[0] += pre[0] * open;
+        shown[1] += pre[1] * open;
+        shown[2] += pre[2] * open;
+        shown[3] += alpha * open;
+        let opaque = shown[3] >= BRIGHT_OPAQUE;
+        self.shown_rows = if self.shown_rows.0 >= self.shown_rows.1 { (row, row + 1) } else { (self.shown_rows.0.min(row), self.shown_rows.1.max(row + 1)) };
+        opaque
+    }
 }
 
 /// Raises the plane map entries of the set bits of one mask word to `plane`.
@@ -1366,12 +1517,15 @@ impl RasterBand {
     }
 
     /// Starts the density stack of a write-once tile (DensityStack): pass 2
-    /// draws the records under `upper_cut` (dbu, pass 1's cut).
-    fn enable_density_stack(&mut self, upper_cut: i64, claim_lit: bool) {
+    /// draws the records under `upper_cut` (dbu, pass 1's cut); `bright` is
+    /// GeometryRasterRequest::density_bright.
+    fn enable_density_stack(&mut self, upper_cut: i64, claim_lit: bool, bright: f32) {
+        let (width, rows) = (self.tile_width() as usize, (self.row1 - self.row0) as usize);
         let Some(once) = &self.once else {
             return;
         };
         let n = once.bits.len();
+        let bright = if bright.is_finite() && bright > 0.0 { bright } else { 0.0 };
         self.stack = Some(Box::new(DensityStack {
             words: once.words,
             phase: StackPhase::Off,
@@ -1391,19 +1545,128 @@ impl RasterBand {
             lit_plane: Vec::new(),
             foot_plane: Vec::new(),
             plane: 0,
+            bright,
+            weight: 1.0,
+            color: [0.0; 3],
+            pixels: width * rows,
+            lower: false,
+            cov: Vec::new(),
+            low_plane: Vec::new(),
+            low_cov: Vec::new(),
+            low_mix: Vec::new(),
+            shown: Vec::new(),
+            shown_rows: (0, 0),
+            xs: if bright > 0.0 { vec![0.0; width] } else { Vec::new() },
+            ys: if bright > 0.0 { vec![0.0; rows] } else { Vec::new() },
         }));
     }
 
     /// The plane (1-based) of the page about to be painted in the lower
-    /// planes' one walk; a no-op outside it (`plane` stays 0).
+    /// planes' one walk, and its colour; a no-op outside it (`plane` stays 0).
     #[inline]
-    fn set_density_plane(&mut self, plane: u16) {
+    fn set_density_plane(&mut self, plane: u16, color: [u8; 4]) {
         if plane == 0 {
             return;
         }
-        if let Some(stack) = self.stack.as_mut().filter(|stack| !stack.lit_plane.is_empty()) {
+        if let Some(stack) = self.stack.as_mut().filter(|stack| !stack.lit_plane.is_empty() || stack.lower) {
             stack.plane = plane;
+            stack.color = [f32::from(color[0]), f32::from(color[1]), f32::from(color[2])];
         }
+    }
+
+    /// The density's brightness is on in a density plane (DensityStack::
+    /// bright): its paints add covered area.
+    #[inline]
+    fn bright_stacking(&self) -> bool {
+        matches!(&self.stack, Some(stack) if stack.phase == StackPhase::Density && stack.bright > 0.0)
+    }
+
+    /// Under the density's brightness: the members of the page's records
+    /// about to be painted stand for 2^`level` (a page thinned to its level);
+    /// 0 after them.
+    #[inline]
+    fn set_bright_weight(&mut self, level: u8) {
+        if let Some(stack) = self.stack.as_mut() {
+            stack.weight = (1u64 << level.min(60)) as f32;
+        }
+    }
+
+    /// Under the density's brightness: `area` px^2 of covered area (times the
+    /// running record's weight) spread evenly over the device box `rect` =
+    /// (x0, y0, x1, y1), each pixel of this tile taking its overlap's share;
+    /// a box of no width on an axis gives its pixel along it the whole.
+    /// Whether it reached a pixel of this tile.
+    fn bright_spread(&mut self, rect: (i128, i128, i128, i128), area: f64) -> bool {
+        let one = DEVICE_ONE as f64;
+        let (x0, y0, x1, y1) = rect;
+        self.bright_spread_px((i128_f64(x0) / one, i128_f64(y0) / one, i128_f64(x1) / one, i128_f64(y1) / one), area)
+    }
+
+    /// `bright_spread` over a box in device px (x0, y0, x1, y1), unrounded.
+    fn bright_spread_px(&mut self, rect: (f64, f64, f64, f64), area: f64) -> bool {
+        let (col0, col1, row0, row1) = (i64::from(self.col0), i64::from(self.col1), i64::from(self.row0), i64::from(self.row1));
+        let width = self.tile_width() as usize;
+        let Some(stack) = self.stack.as_mut() else {
+            return false;
+        };
+        let area = area * f64::from(stack.weight);
+        if !(area > 0.0) {
+            return false;
+        }
+        let (x0, y0, x1, y1) = rect;
+        let Some((c_lo, c_hi)) = add_px_shares(x0, x1, col0, col1, 1.0, &mut stack.xs) else {
+            return false;
+        };
+        let Some((r_lo, r_hi)) = add_px_shares(y0, y1, row0, row1, 1.0, &mut stack.ys) else {
+            stack.xs[c_lo..c_hi].fill(0.0);
+            return false;
+        };
+        stack.bright_ready();
+        for row in r_lo..r_hi {
+            let fy = std::mem::take(&mut stack.ys[row]);
+            if fy <= 0.0 {
+                continue;
+            }
+            for col in c_lo..c_hi {
+                let fx = stack.xs[col];
+                if fx > 0.0 {
+                    stack.bright_add(row * width + col, (area * f64::from(fx) * f64::from(fy)) as f32);
+                }
+            }
+        }
+        stack.xs[c_lo..c_hi].fill(0.0);
+        stack.touch(Some((r_lo, r_hi)));
+        true
+    }
+
+    /// Under the density's brightness, the tile's end: the density shown over
+    /// each pixel as the passes left it (the frame bands under the planes
+    /// included) - shown + (1 - alpha) x pixel.
+    fn finish_bright(&mut self) {
+        let width = self.tile_width() as usize;
+        let Some(stack) = self.stack.as_mut() else {
+            return;
+        };
+        if stack.shown.is_empty() {
+            return;
+        }
+        let (lo, hi) = stack.shown_rows;
+        for row in lo..hi {
+            for col in 0..width {
+                let at = row * width + col;
+                let shown = stack.shown[at];
+                if shown[3] <= 0.0 {
+                    continue;
+                }
+                let open = (1.0 - shown[3]).max(0.0);
+                let pixel = &mut self.pixels[at * 4..at * 4 + 3];
+                for k in 0..3 {
+                    pixel[k] = (shown[k] + open * f32::from(pixel[k])).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        stack.shown = Vec::new();
+        stack.cov = Vec::new();
     }
 
     /// Starts the lower planes' one walk (TilePass::DensityLower): the plane
@@ -1412,8 +1675,16 @@ impl RasterBand {
         self.begin_density_plane(false);
         let pixels = self.tile_width() as usize * (self.row1 - self.row0) as usize;
         if let Some(stack) = self.stack.as_mut() {
-            stack.lit_plane = vec![0; pixels];
-            stack.foot_plane = vec![0; pixels];
+            if stack.bright > 0.0 {
+                // the brightness: the planes' areas (DensityStack::low_plane,
+                // made when a page first covers the tile); the top planes'
+                // are done
+                stack.lower = true;
+                stack.cov = Vec::new();
+            } else {
+                stack.lit_plane = vec![0; pixels];
+                stack.foot_plane = vec![0; pixels];
+            }
             stack.plane = 0;
         }
     }
@@ -1424,6 +1695,9 @@ impl RasterBand {
     /// plane's density); what the planes stand for joins the claimed pixels.
     /// (density pixels lit, pixels written)
     fn end_density_lower(&mut self, colors: &[[u8; 4]]) -> (u64, u64) {
+        if self.stack.as_ref().is_some_and(|stack| stack.bright > 0.0) {
+            return self.end_bright_lower(colors);
+        }
         let width = self.tile_width() as usize;
         let Some(stack) = self.stack.as_ref() else {
             return (0, 0);
@@ -1470,6 +1744,129 @@ impl RasterBand {
             stack.lit_plane = Vec::new();
             stack.foot_plane = Vec::new();
             stack.plane = 0;
+            stack.rows = (0, 0);
+            stack.phase = StackPhase::Off;
+        }
+        (lit_px, written)
+    }
+
+    /// `end_density_lower` under the density's brightness: a pixel no
+    /// original wrote or covers and no density above made opaque shows its
+    /// highest plane's colour at min(1, g x that plane's area) over the
+    /// other planes' colours, mixed by their areas, at min(1, g x their
+    /// areas' sum) - under what showed there. (pixels covered, pixels shown)
+    fn end_bright_lower(&mut self, colors: &[[u8; 4]]) -> (u64, u64) {
+        let width = self.tile_width() as usize;
+        let Some(stack) = self.stack.as_ref() else {
+            return (0, 0);
+        };
+        let ((lo, hi), words, gain) = (stack.rows, stack.words, stack.bright);
+        // no page covered the tile: its buffers were never made
+        let (lo, hi) = if stack.low_plane.is_empty() { (0, 0) } else { (lo, hi) };
+        let (mut lit_px, mut written) = (0u64, 0u64);
+        for row in lo..hi {
+            for word in 0..words {
+                let index = row * words + word;
+                let taken = self.taken_word(false, index);
+                let Some(stack) = self.stack.as_mut() else {
+                    break;
+                };
+                let origin = word << 6;
+                for col in origin..(origin + 64).min(width) {
+                    let at = row * width + col;
+                    let mix = stack.low_mix[at];
+                    if mix[3] <= 0.0 {
+                        continue;
+                    }
+                    lit_px += 1;
+                    let bit = 1u64 << (col - origin);
+                    let front = usize::from(stack.low_plane[at]);
+                    let Some(color) = front.checked_sub(1).and_then(|plane| colors.get(plane)) else {
+                        continue;
+                    };
+                    if taken & bit != 0 {
+                        continue;
+                    }
+                    let rgb = [f32::from(color[0]), f32::from(color[1]), f32::from(color[2])];
+                    let area = stack.low_cov[at];
+                    let a = (gain * area).min(1.0);
+                    let mut pre = [rgb[0] * a, rgb[1] * a, rgb[2] * a];
+                    let mut alpha = a;
+                    // the planes under the highest one, mixed by their areas
+                    let under = mix[3] - area;
+                    if under > 1e-6 {
+                        let b = (gain * under).min(1.0);
+                        let k = b * (1.0 - a) / under;
+                        for c in 0..3 {
+                            pre[c] += (mix[c] - rgb[c] * area).max(0.0) * k;
+                        }
+                        alpha += b * (1.0 - a);
+                    }
+                    if stack.bright_compose(at, row, pre, alpha) {
+                        stack.claimed[index] |= bit;
+                    }
+                    written += 1;
+                }
+            }
+        }
+        if let Some(stack) = self.stack.as_mut() {
+            stack.low_plane = Vec::new();
+            stack.low_cov = Vec::new();
+            stack.low_mix = Vec::new();
+            stack.lower = false;
+            stack.plane = 0;
+            stack.rows = (0, 0);
+            stack.phase = StackPhase::Off;
+        }
+        (lit_px, written)
+    }
+
+    /// `end_density_plane` under the density's brightness: a pixel the plane
+    /// may take shows min(1, g x its covered area) of `color` under what
+    /// showed there. (pixels covered, pixels shown)
+    fn end_bright_plane(&mut self, color: [u8; 4], plane: usize) -> (u64, u64) {
+        let width = self.tile_width() as usize;
+        let Some(stack) = self.stack.as_ref() else {
+            return (0, 0);
+        };
+        let (top, words, (lo, hi), gain) = (stack.top, stack.words, stack.rows, stack.bright);
+        // no shape covered the tile: its buffer was never made
+        let (lo, hi) = if stack.cov.is_empty() { (0, 0) } else { (lo, hi) };
+        // one of several top planes: what its own snapshot keeps out
+        let own = if top { stack.group_blocked.iter().position(|(at, _)| *at == plane) } else { None };
+        let rgb = [f32::from(color[0]), f32::from(color[1]), f32::from(color[2])];
+        let (mut lit_px, mut written) = (0u64, 0u64);
+        for row in lo..hi {
+            for word in 0..words {
+                let index = row * words + word;
+                let taken = match (own, self.stack.as_ref()) {
+                    (Some(at), Some(stack)) => stack.group_blocked[at].1[index] | stack.claimed[index],
+                    _ => self.taken_word(top, index),
+                };
+                let Some(stack) = self.stack.as_mut() else {
+                    break;
+                };
+                let origin = word << 6;
+                for col in origin..(origin + 64).min(width) {
+                    let at = row * width + col;
+                    let area = std::mem::take(&mut stack.cov[at]);
+                    if area <= 0.0 {
+                        continue;
+                    }
+                    lit_px += 1;
+                    let bit = 1u64 << (col - origin);
+                    if taken & bit != 0 {
+                        continue;
+                    }
+                    let a = (gain * area).min(1.0);
+                    if stack.bright_compose(at, row, [rgb[0] * a, rgb[1] * a, rgb[2] * a], a) {
+                        stack.claimed[index] |= bit;
+                    }
+                    written += 1;
+                }
+            }
+        }
+        if let Some(stack) = self.stack.as_mut() {
             stack.rows = (0, 0);
             stack.phase = StackPhase::Off;
         }
@@ -1527,7 +1924,8 @@ impl RasterBand {
                 mark_rect(&mut stack.covered, stack.words, col0, col1, band_row0, band_row1, rect);
             }
             StackPhase::Density => {
-                if stack.array_foot {
+                // the brightness counts what is covered, not what it stands for
+                if stack.array_foot || stack.bright > 0.0 {
                     return;
                 }
                 let rows = if stack.plane != 0 {
@@ -1558,6 +1956,25 @@ impl RasterBand {
             return false;
         };
         let width = (col1 - col0) as usize;
+        if stack.bright > 0.0 {
+            // the brightness: a pixel's worth a pixel it lights
+            let Some((x0, y0, x1, y1)) = lit else {
+                return false;
+            };
+            let (c0, c1) = (x0.max(col0 as i128), x1.min(col1 as i128));
+            let (r0, r1) = (y0.max(row0 as i128), y1.min(row1 as i128));
+            if c0 >= c1 || r0 >= r1 {
+                return false;
+            }
+            let weight = stack.weight;
+            stack.bright_ready();
+            for row in (r0 - row0 as i128) as usize..(r1 - row0 as i128) as usize {
+                for col in (c0 - col0 as i128) as usize..(c1 - col0 as i128) as usize {
+                    stack.bright_add(row * width + col, weight);
+                }
+            }
+            return stack.touch(Some(((r0 - row0 as i128) as usize, (r1 - row0 as i128) as usize)));
+        }
         // claiming what it lights only: its footprint is its lit pixels
         let foot = if stack.claim_lit { lit } else { foot };
         if !stack.array_foot {
@@ -1643,6 +2060,9 @@ impl RasterBand {
     /// paint around them); what it stands for joins the claimed pixels.
     /// (density pixels lit, pixels written)
     fn end_density_plane(&mut self, color: [u8; 4], plane: usize) -> (u64, u64) {
+        if self.stack.as_ref().is_some_and(|stack| stack.bright > 0.0) {
+            return self.end_bright_plane(color, plane);
+        }
         let width = self.tile_width() as usize;
         let Some(stack) = self.stack.as_ref() else {
             return (0, 0);
@@ -1915,6 +2335,14 @@ impl RasterBand {
                 StackPhase::Off => {}
                 StackPhase::Originals => stack.covered[at] |= bit,
                 StackPhase::Density => {
+                    if stack.bright > 0.0 {
+                        // the brightness: the pixel's whole area
+                        let weight = stack.weight;
+                        stack.bright_ready();
+                        stack.bright_add(local_row * width + local_col, weight);
+                        stack.touch(Some((local_row, local_row + 1)));
+                        return;
+                    }
                     // density: to the masks (or the plane maps), not to the pixels
                     if stack.plane != 0 {
                         let pixel = local_row * width + local_col;
@@ -1970,6 +2398,29 @@ impl RasterBand {
         // span is covered, holes included
         if let Some(stack) = self.stack.as_mut().filter(|stack| stack.phase == StackPhase::Density) {
             let mut lit_any = false;
+            if stack.bright > 0.0 {
+                // the brightness: each pixel the rule lights, its whole area
+                let weight = stack.weight;
+                stack.bright_ready();
+                for row in row0..row1 {
+                    let rule = rule_of(row);
+                    let local_row = row - band_row0;
+                    for word in w0..w1 + 1 {
+                        let origin = word << 6;
+                        let lo = c0.max(origin) - origin;
+                        let hi = c1.min(origin + 64) - origin;
+                        let span = if hi - lo == 64 { !0u64 } else { ((1u64 << (hi - lo)) - 1) << lo };
+                        let mut lit = span & rule.mask(col_base + origin);
+                        lit_any |= lit != 0;
+                        while lit != 0 {
+                            stack.bright_add(local_row * width + origin + lit.trailing_zeros() as usize, weight);
+                            lit &= lit - 1;
+                        }
+                    }
+                }
+                stack.touch(Some((row0 - band_row0, row1 - band_row0)));
+                return lit_any;
+            }
             let plane = stack.plane;
             for row in row0..row1 {
                 let rule = rule_of(row);
@@ -3304,7 +3755,7 @@ impl TileWork {
         if write_once {
             band.enable_write_once();
             if let Some(upper_cut) = density {
-                band.enable_density_stack(upper_cut, request.density_claim_lit);
+                band.enable_density_stack(upper_cut, request.density_claim_lit, request.density_bright);
             }
         }
         Ok(TileWork {
@@ -3357,7 +3808,9 @@ impl TileWork {
         Ok(())
     }
 
-    fn output(self) -> RasterTileOutput {
+    fn output(mut self) -> RasterTileOutput {
+        // the density's brightness: composed over what the passes left
+        self.band.finish_bright();
         RasterTileOutput {
             tile: self.band,
             stats: self.stats,
@@ -5324,6 +5777,33 @@ fn raster_page_records(
     guard: Option<RenderGuard<'_>>,
     record_scratch: &mut RecordSet,
 ) -> Result<(), String> {
+    // the density's brightness: a member of a page thinned to `level` stands
+    // for 2^level
+    band.set_bright_weight(level);
+    let painted = raster_page_records_at(band, request, page, page_id, level, shape_cut, shape_cut_max, local_view, world_transform, lattice, stats, counters, paint, guard, record_scratch);
+    band.set_bright_weight(0);
+    painted
+}
+
+/// `raster_page_records` under the weight it set.
+#[allow(clippy::too_many_arguments)]
+fn raster_page_records_at(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    page: &crate::DecodedPage,
+    page_id: u32,
+    level: u8,
+    shape_cut: i64,
+    shape_cut_max: bool,
+    local_view: BBox,
+    world_transform: OrthoTransform,
+    lattice: Option<(i64, i64)>,
+    stats: &mut RenderStats,
+    counters: &mut RasterCounters,
+    paint: PaintStyle,
+    guard: Option<RenderGuard<'_>>,
+    record_scratch: &mut RecordSet,
+) -> Result<(), String> {
     let geometry = page
         .doc
         .cells
@@ -5391,6 +5871,14 @@ fn raster_page_records(
                 stats.once_items_skipped = stats.once_items_skipped.saturating_add(1);
                 return Ok(());
             }
+            // the density's brightness: a lattice array's cover at once
+            if band.bright_stacking() {
+                let area = world_px_area(request, rect.w as f64 * rect.h as f64);
+                if let Some(members) = bright_lattice(band, request, &rep, base, area, local_view, &world_transform)? {
+                    stats.rep_members_tested = stats.rep_members_tested.saturating_add(members);
+                    return Ok(());
+                }
+            }
             let chunks = if matches!(rep, std::borrow::Cow::Borrowed(_)) {
                 page.index.pts_chunks(&rect.rep)
             } else {
@@ -5410,7 +5898,8 @@ fn raster_page_records(
             };
             let mut drawn = 0u64;
             let mut cancel_member = 0u16;
-            let walk = survivor_walk(request, grid.as_ref(), &rep, base, local_view, &world_transform)?;
+            // (the brightness counts every member: no survivor walk)
+            let walk = if band.bright_stacking() { None } else { survivor_walk(request, grid.as_ref(), &rep, base, local_view, &world_transform)? };
             // the density stack: a lattice array's footprints at once, the
             // same for the survivor walk and the member walk
             let array_foot = band.stacking()
@@ -5493,8 +5982,21 @@ fn raster_page_records(
             };
             // the placement lattice: a sub-pixel polygon keeps by its lattice
             // rank - its own array's, or the placement array's for a single one
+            // the density's brightness: a lattice array of members under a
+            // pixel on a side, its cover at once (each spreads its area over
+            // its box, as one alone does)
+            if band.bright_stacking() {
+                let area = polygon_area(&polygon.pts);
+                if area_true_density_box(request, world_transform.apply_bbox(base)?, paint, area)?.is_some() {
+                    if let Some(members) = bright_lattice(band, request, &rep, base, world_px_area(request, area), local_view, &world_transform)? {
+                        stats.rep_members_tested = stats.rep_members_tested.saturating_add(members);
+                        return Ok(());
+                    }
+                }
+            }
             let keep_lattice = area_keep_lattice(request, paint, &polygon.rep, matches!(rep, std::borrow::Cow::Borrowed(_)), &world_transform, lattice)?;
             let walk = match keep_lattice {
+                Some(_) if band.bright_stacking() => None,
                 Some((px, py)) => area_survivor_walk(request, &polygon.rep, base, polygon_area(&polygon.pts), local_view, &world_transform, px, py)?,
                 None => None,
             };
@@ -5694,7 +6196,7 @@ fn render_cell(
             }
         }
         // the lower planes' one walk: the page's plane for the density maps
-        band.set_density_plane(plane);
+        band.set_density_plane(plane, paint.color);
         raster_page_records(
             band,
             request,
@@ -5721,10 +6223,16 @@ fn render_cell(
     let dots = band.stacking() && scene.plan().stats.sub_cut_dots;
     for (at, &(layer_idx, wash)) in cell.washes.iter().enumerate() {
         check_cancelled(guard)?;
-        let Some((plane, _)) = selection.paint_of(layer_idx, paint) else {
+        let Some((plane, plane_paint)) = selection.paint_of(layer_idx, paint) else {
             continue;
         };
         if !markers && !dots {
+            continue;
+        }
+        // what cannot reach the tile's open pixels, in the cell's frame (the
+        // work bin's chunks are culled alike): a dots plan's top cell holds
+        // every dot item of the view, and each tile walks them
+        if !wash.intersects(&local_view) {
             continue;
         }
         counters.rect_records = counters.rect_records.saturating_add(1);
@@ -5732,7 +6240,7 @@ fn render_cell(
         stats.rep_members_tested = stats.rep_members_tested.saturating_add(1);
         let world = world_transform.apply_bbox(wash)?;
         let drawn = if dots {
-            band.set_density_plane(plane);
+            band.set_density_plane(plane, plane_paint.color);
             paint_density_dots(band, request, world, cell.dot_counts.get(at).filter(|&&count| count > 0).map(|&count| count as u32))?
         } else {
             paint_world_rect(band, &marker_request(request), world, paint)?
@@ -6490,6 +6998,183 @@ fn area_true_density(
     Ok(Some((area_true_box(device, sub_x, sub_y)?, area_true_kept(world, device, Some(px_area), rank))))
 }
 
+/// `area_true_density`'s shape under the density's brightness: its device box
+/// (x0, y0, x1, y1) and its area in px^2, when it is density there (the
+/// area-true rim, under a pixel on a side).
+fn area_true_density_box(
+    request: &GeometryRasterRequest,
+    world: BBox,
+    paint: PaintStyle,
+    area: f64,
+) -> Result<Option<((i128, i128, i128, i128), f64)>, String> {
+    if !request.area_true || !matches!(paint.stroke, StrokeStyle::Solid) || paint.stroke_width != 1 {
+        return Ok(None);
+    }
+    let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
+    let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
+    if x1 - x0 >= DEVICE_ONE && y1 - y0 >= DEVICE_ONE {
+        return Ok(None);
+    }
+    Ok(Some(((x0, y0, x1, y1), world_px_area(request, area))))
+}
+
+/// A world area (units^2) on screen, px^2.
+fn world_px_area(request: &GeometryRasterRequest, area: f64) -> f64 {
+    let view = request.view;
+    area * (request.width as f64 / (view.x1 - view.x0)) * (request.height as f64 / (view.y1 - view.y0))
+}
+
+/// A rectangle under the density's brightness (GeometryRasterRequest::
+/// density_bright): its area, exactly, on the pixels it overlaps - each
+/// takes its overlap (bright_spread over its own box).
+fn bright_world_rect(band: &mut RasterBand, request: &GeometryRasterRequest, world: BBox) -> Result<bool, String> {
+    let (x0, y1) = world_px(request, world.x0, world.y0);
+    let (x1, y0) = world_px(request, world.x1, world.y1);
+    let area = world_px_area(request, (world.x1 - world.x0).max(0) as f64 * (world.y1 - world.y0).max(0) as f64);
+    Ok(band.bright_spread_px((x0, y0, x1, y1), area))
+}
+
+/// Past this many members along an axis of a tile, `bright_lattice` takes
+/// them as spread evenly over their hull (many to a pixel).
+const BRIGHT_LATTICE_ENUM: i64 = 1 << 16;
+
+/// Under the density's brightness, a Grid array whose repeating vectors run
+/// along the world axes: its visible members' cover at once. Member (i, j)
+/// spreads `area` px^2 over its world box (as bright_spread does one alone),
+/// its box's columns follow one index and its rows the other, so the tile's
+/// cover is `area` times the members' column shares summed times their row
+/// shares summed - the member walk's cover, in the time of the members along
+/// each axis. Some(the members it stands for); None for any other array (its
+/// members add theirs one by one). `base` is the record's first member (local).
+fn bright_lattice(
+    band: &mut RasterBand,
+    request: &GeometryRasterRequest,
+    rep: &Rep,
+    base: BBox,
+    area: f64,
+    local_view: BBox,
+    world_transform: &OrthoTransform,
+) -> Result<Option<u64>, String> {
+    let Rep::Grid { na, nb, va, vb } = rep else {
+        return Ok(None);
+    };
+    let (wa, wb) = world_vectors(*va, *vb, world_transform)?;
+    if world_lattice(*na, *nb, wa, wb).is_none() {
+        return Ok(None);
+    }
+    let Some((i0, i1, j0, j1)) = visible_grid_range(rep, base, local_view) else {
+        return Ok(Some(0));
+    };
+    let members = (i1 - i0 + 1).max(0) as u64 * (j1 - j0 + 1).max(0) as u64;
+    let world = world_transform.apply_bbox(base)?;
+    // the index and step that move each world axis (array_footprint's)
+    let driver = |axis: usize| -> (i64, (i64, i64)) {
+        let along = |v: (i64, i64)| if axis == 0 { v.0 } else { v.1 };
+        if *na > 1 && along(wa) != 0 {
+            (along(wa), (i0, i1))
+        } else if *nb > 1 && along(wb) != 0 {
+            (along(wb), (j0, j1))
+        } else {
+            (0, (0, 0))
+        }
+    };
+    let (col0, col1, row0, row1) = (i64::from(band.col0), i64::from(band.col1), i64::from(band.row0), i64::from(band.row1));
+    let width = band.tile_width() as usize;
+    let Some(stack) = band.stack.as_mut() else {
+        return Ok(None);
+    };
+    let area = area * f64::from(stack.weight);
+    if !(area > 0.0) {
+        return Ok(Some(members));
+    }
+    let (step, range) = driver(0);
+    let columns = bright_axis_sums(request, 0, (world.x0, world.x1, world.y0), step, range, (col0, col1), &mut stack.xs)?;
+    let (step, range) = driver(1);
+    let rows = bright_axis_sums(request, 1, (world.y0, world.y1, world.x0), step, range, (row0, row1), &mut stack.ys)?;
+    let (Some((c_lo, c_hi)), Some((r_lo, r_hi))) = (columns, rows) else {
+        if let Some((c_lo, c_hi)) = columns {
+            stack.xs[c_lo..c_hi].fill(0.0);
+        }
+        if let Some((r_lo, r_hi)) = rows {
+            stack.ys[r_lo..r_hi].fill(0.0);
+        }
+        return Ok(Some(members));
+    };
+    stack.bright_ready();
+    for row in r_lo..r_hi {
+        let fy = std::mem::take(&mut stack.ys[row]);
+        if fy <= 0.0 {
+            continue;
+        }
+        for col in c_lo..c_hi {
+            let fx = stack.xs[col];
+            if fx > 0.0 {
+                stack.bright_add(row * width + col, (area * f64::from(fx) * f64::from(fy)) as f32);
+            }
+        }
+    }
+    stack.xs[c_lo..c_hi].fill(0.0);
+    stack.touch(Some((r_lo, r_hi)));
+    Ok(Some(members))
+}
+
+/// One axis of `bright_lattice`: the shares (add_px_shares) of members
+/// k0..=k1 along world axis `axis` - member k's side is [lo, hi] + k step,
+/// `other` a coordinate on the other axis - summed into `sums` over the tile
+/// pixels [clip.0, clip.1). Only the members whose side can meet the clip are
+/// looked at; past BRIGHT_LATTICE_ENUM of them, their shares are spread evenly
+/// over their hull. The entries touched, None: none.
+#[allow(clippy::too_many_arguments)]
+fn bright_axis_sums(
+    request: &GeometryRasterRequest,
+    axis: usize,
+    (lo, hi, other): (i64, i64, i64),
+    step: i64,
+    (k0, k1): (i64, i64),
+    clip: (i64, i64),
+    sums: &mut [f32],
+) -> Result<Option<(usize, usize)>, String> {
+    // member k's side in px: the first member's moved by k steps
+    let (a0, b0) = if axis == 0 {
+        (world_px(request, lo, other).0, world_px(request, hi, other).0)
+    } else {
+        (world_px(request, other, hi).1, world_px(request, other, lo).1)
+    };
+    let view = request.view;
+    let scale = if axis == 0 { request.width as f64 / (view.x1 - view.x0) } else { -(request.height as f64) / (view.y1 - view.y0) };
+    // px a step
+    let pitch = step as f64 * scale;
+    let side = |k: i64| {
+        let shift = (k as f64) * pitch;
+        (a0 + shift, b0 + shift)
+    };
+    let (mut first, mut last) = (k0, k1);
+    if step != 0 && last > first && pitch != 0.0 {
+        // the members whose side can meet the clip, a pixel of margin
+        let (s0, s1) = side(first);
+        let centre = (s0 + s1) / 2.0;
+        let margin = (s1 - s0).abs() + 2.0;
+        let a = (clip.0 as f64 - margin - centre) / pitch;
+        let b = (clip.1 as f64 + margin - centre) / pitch;
+        let bound = |v: f64| (k0 as f64 + v).clamp(k0 as f64, k1 as f64) as i64;
+        (first, last) = (bound(a.min(b).floor()), bound(a.max(b).ceil()));
+    }
+    if last as i128 - first as i128 >= BRIGHT_LATTICE_ENUM as i128 {
+        // many to a pixel: their shares spread evenly over their hull
+        let (a, b) = (side(first), side(last));
+        let hull = (a.0.min(a.1).min(b.0.min(b.1)), a.0.max(a.1).max(b.0.max(b.1)));
+        return Ok(add_px_shares(hull.0, hull.1, clip.0, clip.1, (last - first + 1) as f64, sums));
+    }
+    let mut touched: Option<(usize, usize)> = None;
+    for k in first..=last {
+        let (a, b) = side(k);
+        if let Some((s, e)) = add_px_shares(a, b, clip.0, clip.1, 1.0, sums) {
+            touched = Some(touched.map_or((s, e), |(lo, hi)| (lo.min(s), hi.max(e))));
+        }
+    }
+    Ok(touched)
+}
+
 /// A polygon's area in world units squared (shoelace, even-odd net).
 fn polygon_area(points: &[(i64, i64)]) -> f64 {
     let mut twice: i128 = 0;
@@ -6590,6 +7275,9 @@ fn paint_world_rect(
     world: BBox,
     paint: PaintStyle,
 ) -> Result<bool, String> {
+    if band.bright_stacking() {
+        return bright_world_rect(band, request, world);
+    }
     if area_true_rim(request, paint) {
         return paint_area_true_rect(band, request, world, paint);
     }
@@ -6659,6 +7347,18 @@ const DOT_EXACT_COUNTED_PIXELS: i128 = 258 * 258;
 /// they stand for, spread over it) in place of the area's k. Whether it lit a
 /// pixel of this tile.
 fn paint_density_dots(band: &mut RasterBand, request: &GeometryRasterRequest, world: BBox, count: Option<u32>) -> Result<bool, String> {
+    if band.bright_stacking() {
+        // the density's brightness: the count is covered area (floe_vfs
+        // DOT_BRIGHT_UNITS a px^2) over the box; an item without one covers
+        // DOT_SHARE of it
+        let (x0, y1) = world_px(request, world.x0, world.y0);
+        let (x1, y0) = world_px(request, world.x1, world.y1);
+        let cover = match count.filter(|&count| count > 0) {
+            Some(count) => f64::from(count) / floe_vfs::hier::DOT_BRIGHT_UNITS,
+            None => (x1 - x0).abs() * (y1 - y0).abs() * dot_share(),
+        };
+        return Ok(band.bright_spread_px((x0, y0, x1, y1), cover));
+    }
     let (ax, ay) = world_to_device(request, world.x0, world.y0)?;
     let (bx, by) = world_to_device(request, world.x1, world.y1)?;
     let (x0, x1, y0, y1) = (ax.min(bx), ax.max(bx), ay.min(by), ay.max(by));
@@ -6666,9 +7366,9 @@ fn paint_density_dots(band: &mut RasterBand, request: &GeometryRasterRequest, wo
     let c1 = ceil_div(x1, DEVICE_ONE).max(c0 + 1);
     let r0 = floor_div(y0, DEVICE_ONE);
     let r1 = ceil_div(y1, DEVICE_ONE).max(r0 + 1);
+    let area = (x1 - x0) as f64 / DEVICE_ONE as f64 * ((y1 - y0) as f64 / DEVICE_ONE as f64);
     let cols = c1 - c0;
     let n = cols * (r1 - r0);
-    let area = (x1 - x0) as f64 / DEVICE_ONE as f64 * ((y1 - y0) as f64 / DEVICE_ONE as f64);
     let k = match count {
         Some(count) => (count as i128).clamp(1, n),
         None => ((area * dot_share()).floor() as i128).clamp(1, n),
@@ -6768,6 +7468,9 @@ fn paint_width_first_rect(
     paint: PaintStyle,
     ranks: (f64, f64),
 ) -> Result<bool, String> {
+    if band.bright_stacking() {
+        return bright_world_rect(band, request, world);
+    }
     let (x0, y1) = world_to_device(request, world.x0, world.y0)?;
     let (x1, y0) = world_to_device(request, world.x1, world.y1)?;
     if band.stacking() && (x1 - x0 < DEVICE_ONE || y1 - y0 < DEVICE_ONE) {
@@ -7880,8 +8583,9 @@ fn array_footprint(
     let Rep::Grid { na, nb, va, vb } = rep else {
         return Ok(false);
     };
-    // claiming what they light only, the members mark their own (none dropped)
-    if band.stack.as_ref().is_some_and(|stack| stack.claim_lit) {
+    // claiming what they light only, the members mark their own (none
+    // dropped); the brightness claims nothing
+    if band.stack.as_ref().is_some_and(|stack| stack.claim_lit || stack.bright > 0.0) {
         return Ok(false);
     }
     let (wa, wb) = world_vectors(*va, *vb, world_transform)?;
@@ -8242,7 +8946,12 @@ fn paint_world_polygon_ranked(
 ) -> Result<bool, String> {
     if let Some(world) = polygon_bbox(points) {
         let area = if request.area_true { Some(polygon_area(points)) } else { None };
-        if band.stacking() {
+        if band.bright_stacking() {
+            // the density's brightness: its area over its box
+            if let Some((device, px_area)) = area_true_density_box(request, world, paint, area.unwrap_or(0.0))? {
+                return Ok(band.bright_spread(device, px_area));
+            }
+        } else if band.stacking() {
             if let Some((foot, kept)) = area_true_density(request, world, paint, area.unwrap_or(0.0), rank)? {
                 return Ok(band.density_shape(Some(foot), kept.then_some(foot)));
             }
@@ -8292,7 +9001,12 @@ fn paint_world_path_ranked(
 ) -> Result<bool, String> {
     if let Some(world) = polygon_bbox(outline) {
         let area = if request.area_true { Some(polygon_area(outline)) } else { None };
-        if band.stacking() {
+        if band.bright_stacking() {
+            // the density's brightness: its area over its box
+            if let Some((device, px_area)) = area_true_density_box(request, world, paint, area.unwrap_or(0.0))? {
+                return Ok(band.bright_spread(device, px_area));
+            }
+        } else if band.stacking() {
             if let Some((foot, kept)) = area_true_density(request, world, paint, area.unwrap_or(0.0), rank)? {
                 return Ok(band.density_shape(Some(foot), kept.then_some(foot)));
             }
@@ -9330,6 +10044,7 @@ mod tests {
             density_claim_lit: false,
             density_top_planes: 1,
             density_shapes_first: false,
+            density_bright: 0.0,
         }
     }
 
@@ -9636,6 +10351,7 @@ mod tests {
                         density_claim_lit: false,
                         density_top_planes: 1,
                         density_shapes_first: false,
+                        density_bright: 0.0,
                         ..request()
                     },
                     layers,
@@ -9828,6 +10544,7 @@ mod tests {
             density_claim_lit: false,
             density_top_planes: 1,
             density_shapes_first: false,
+            density_bright: 0.0,
         };
         let mut pattern = [0u16; 16];
         for (row, word) in pattern.iter_mut().enumerate() {
@@ -9956,6 +10673,7 @@ mod tests {
             density_claim_lit: false,
             density_top_planes: 1,
             density_shapes_first: false,
+            density_bright: 0.0,
         };
         let segments = [
             ((4.0, 9.0), (21.0, 9.0)),   // horizontal inside the tile
@@ -10038,6 +10756,7 @@ mod tests {
             density_claim_lit: false,
             density_top_planes: 1,
             density_shapes_first: false,
+            density_bright: 0.0,
         };
         let mut band = full_band(&request);
         paint_world_rect(
@@ -10200,6 +10919,7 @@ mod tests {
             density_claim_lit: false,
             density_top_planes: 1,
             density_shapes_first: false,
+            density_bright: 0.0,
         };
         let mut frame = full_band(&request);
         fill_world_polygon_with_phase(
@@ -10730,6 +11450,7 @@ mod tests {
             density_claim_lit: false,
             density_top_planes: 1,
             density_shapes_first: false,
+            density_bright: 0.0,
         };
         let pruned =
             render_geometry_occupancy(&scene_with(crate::PageIndex::build), &request).unwrap();
@@ -12223,6 +12944,176 @@ mod tests {
         assert!(!over.is_empty());
         assert_eq!(lit_of(&off, RED, 0..32, 0..32), left.union(&over).copied().collect::<BTreeSet<_>>(), "off: over layer 1's original too");
         assert!(regions.iter().any(|(top_side, others)| top_side != others), "off: the top side offered more");
+    }
+
+    /// The colour a pixel shows under the density's brightness: `color` at
+    /// min(1, g x area) over black.
+    fn bright_px(color: [u8; 4], g: f32, area: f32) -> [u8; 4] {
+        let a = (g * area).min(1.0);
+        [(color[0] as f32 * a).round() as u8, (color[1] as f32 * a).round() as u8, (color[2] as f32 * a).round() as u8, 255]
+    }
+
+    /// Whether two frames differ by at most one in every channel (the
+    /// brightness sums its areas in another order on another path).
+    fn within_one(a: &RgbaFrame, b: &RgbaFrame) -> bool {
+        a.width == b.width && a.height == b.height && a.pixels.iter().zip(&b.pixels).all(|(x, y)| x.abs_diff(*y) <= 1)
+    }
+
+    /// GeometryRasterRequest::density_bright (user 2026-10-05: "the
+    /// brightness of a pixel by the shapes' size that gathers on it", "never
+    /// brighter than the original colour"; g = 2, detail medium): the top
+    /// plane's density (layer 3, green) shows min(1, 2 x covered area) of its
+    /// colour - a 0.6 x 0.5 px square 0.6 of it, two 0.64 px^2 squares on one
+    /// pixel the colour itself and no more, a 1 x 1 px square across four
+    /// pixels a half on each - and nothing where it covers nothing. Pass 1's
+    /// original (layer 1, white, the left quarter) keeps its pixels but one,
+    /// where the top plane's density covers 1.28 of it (shapes first off: a
+    /// top plane's density over the originals below it). The tiling, the
+    /// workers and the bin change nothing.
+    #[test]
+    fn under_the_brightness_a_pixel_shows_its_covered_area_never_past_the_colour() {
+        let rect = |layer, x, y, w, h| RectRec { layer, dt: 0, x, y, w, h, rep: Rep::One };
+        let pages = || {
+            vec![
+                (1, vec![rect(1, 0, 0, 80, 320)], Vec::new()),
+                // column 20, row 5 (y 260..270): 0.3 px^2
+                (3, vec![rect(3, 202, 262, 6, 5), rect(3, 221, 261, 8, 8), rect(3, 222, 262, 8, 8), rect(3, 235, 255, 10, 10), rect(3, 32, 262, 8, 8)], Vec::new()),
+            ]
+        };
+        let coarse = stack_scene(pages(), CUT_1);
+        let fine = Arc::new(stack_scene(pages(), CUT_2));
+        let frame = |tile: u16, workers: u16, bin: bool| {
+            let mut request = stack_request(LayerFill::Solid, tile, workers);
+            request.raster.density_bright = 2.0;
+            density_frame(&coarse, &fine, CUT_1 as i64, &request, bin, &mut Vec::new()).frame
+        };
+        let on = frame(DEFAULT_TILE_SIZE, 1, true);
+        assert_eq!(pixel(&on, 20, 5), bright_px(GREEN, 2.0, 0.3), "0.3 px^2: 0.6 of the colour");
+        assert_eq!(pixel(&on, 22, 5), GREEN, "1.28 px^2 on a pixel: the colour, no brighter");
+        for (col, row) in [(23, 5), (24, 5), (23, 6), (24, 6)] {
+            assert_eq!(pixel(&on, col, row), bright_px(GREEN, 2.0, 0.25), "a 1 px square over four pixels ({col}, {row})");
+        }
+        assert_eq!(pixel(&on, 3, 5), GREEN, "the density over a lower original");
+        // (its right edge line at 8 px is column 8: nine columns)
+        assert_eq!(count(&on, WHITE, 0..9, 0..32), 32 * 9 - 1, "the original keeps its other pixels");
+        let shown = (0..32).flat_map(|row| (9..32).map(move |col| (col, row))).filter(|&(col, row)| pixel(&on, col, row) != BLACK).count();
+        assert_eq!(shown, 6, "nothing else");
+        for (tile, workers, bin) in [(8, 2u16, false), (16, 3, true), (5, 4, true)] {
+            assert_eq!(frame(tile, workers, bin), on, "tile {tile} workers {workers} bin {bin}");
+        }
+    }
+
+    /// Under the density's brightness the planes compose over one another,
+    /// the top first: two top planes (layers 3 and 2) on one pixel, a
+    /// quarter px^2 each at g = 2, show green at a half and red at a half of
+    /// the half left, over the lower walk's white at a half of what is left;
+    /// with one top plane the lower planes' one walk shows its highest plane
+    /// (red) at a half over the mix of the planes under it (white) at a half,
+    /// under green - the same. A plane alone shows where it alone covers. The
+    /// tiling and the workers change nothing.
+    #[test]
+    fn under_the_brightness_the_planes_compose_over_one_another_the_top_first() {
+        let rect = |layer, x, y, w, h| RectRec { layer, dt: 0, x, y, w, h, rep: Rep::One };
+        // column 15, row 15 (x 150..160, y 160..170): a half by a half pixel each
+        let pages = || {
+            vec![
+                (1, vec![rect(1, 151, 161, 5, 5), rect(1, 50, 50, 5, 5)], Vec::new()),
+                (2, vec![rect(2, 152, 162, 5, 5)], Vec::new()),
+                (3, vec![rect(3, 153, 163, 5, 5)], Vec::new()),
+            ]
+        };
+        let coarse = stack_scene(pages(), CUT_1);
+        let fine = Arc::new(stack_scene(pages(), CUT_2));
+        let frame = |top: u16, tile: u16, workers: u16| {
+            let mut request = stack_request(LayerFill::Solid, tile, workers);
+            request.raster.density_bright = 2.0;
+            request.raster.density_top_planes = top;
+            density_frame(&coarse, &fine, CUT_1 as i64, &request, true, &mut Vec::new()).frame
+        };
+        // the over operator on premultiplied colours (0..255)
+        let over = |pre: [f32; 3], alpha: f32, under: [f32; 3]| [pre[0] + (1.0 - alpha) * under[0], pre[1] + (1.0 - alpha) * under[1], pre[2] + (1.0 - alpha) * under[2]];
+        let px = |c: [f32; 3]| [c[0].round() as u8, c[1].round() as u8, c[2].round() as u8, 255];
+        // green at a half over red at a half over white at a half
+        let want = px(over([0.0, 127.5, 0.0], 0.5, over([127.5, 0.0, 0.0], 0.5, [127.5, 127.5, 127.5])));
+        assert_eq!(want, [96, 159, 32, 255]);
+        let two = frame(2, DEFAULT_TILE_SIZE, 1);
+        assert_eq!(pixel(&two, 15, 15), want, "two top planes over the lower walk's white");
+        // the lower walk: red, its highest plane, at a half over white at a
+        // half - the same under green
+        let one = frame(1, DEFAULT_TILE_SIZE, 1);
+        assert!(pixel(&one, 15, 15).iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 1), "{:?} vs {want:?}", pixel(&one, 15, 15));
+        // layer 1 alone at (5, 26): white at a half
+        assert_eq!(pixel(&one, 5, 26), bright_px(WHITE, 2.0, 0.25));
+        for (tile, workers) in [(8, 2u16), (16, 3)] {
+            assert_eq!(frame(2, tile, workers), two, "two top planes, tile {tile} workers {workers}");
+            assert_eq!(frame(1, tile, workers), one, "one top plane, tile {tile} workers {workers}");
+        }
+    }
+
+    /// Under the density's brightness a lattice array's cover is added at
+    /// once (bright_lattice: the columns' shares times the rows'), and it is
+    /// the cover of its members one by one - the same members as a point list
+    /// (no lattice) - within the rounding; a thinner pitch than a pixel
+    /// included, its members many to a pixel.
+    #[test]
+    fn under_the_brightness_a_lattice_array_covers_as_its_members_one_by_one() {
+        let lattice = |layer, x, y, w, h, n: u64, p: i64| RectRec { layer, dt: 0, x, y, w, h, rep: Rep::Grid { na: n, nb: n / 2, va: (p, 0), vb: (0, p + 1) } };
+        let listed = |r: &RectRec| {
+            let Rep::Grid { na, nb, va, vb } = r.rep else { unreachable!() };
+            let pts: Vec<(i64, i64)> = (0..nb as i64).flat_map(|j| (0..na as i64).map(move |i| (i * va.0 + j * vb.0, i * va.1 + j * vb.1))).collect();
+            RectRec { rep: Rep::Pts(Arc::from(pts)), ..r.clone() }
+        };
+        // (members of 0.6 px at a pitch of 0.2 px overlap: their areas add)
+        let arrays = [lattice(3, 13, 17, 3, 6, 60, 4), lattice(3, 170, 9, 7, 2, 40, 3), lattice(2, 20, 200, 6, 2, 90, 2)];
+        for (k, array) in arrays.iter().enumerate() {
+            let scene = |r: RectRec| {
+                let layer = r.layer;
+                (stack_scene(vec![(layer, vec![r.clone()], Vec::new())], CUT_1), Arc::new(stack_scene(vec![(layer, vec![r], Vec::new())], CUT_2)))
+            };
+            let frame = |r: RectRec, tile: u16, workers: u16| {
+                let (coarse, fine) = scene(r);
+                let mut request = stack_request(LayerFill::Solid, tile, workers);
+                request.raster.density_bright = 2.0;
+                density_frame(&coarse, &fine, CUT_1 as i64, &request, true, &mut Vec::new()).frame
+            };
+            let at_once = frame(array.clone(), DEFAULT_TILE_SIZE, 1);
+            let one_by_one = frame(listed(array), DEFAULT_TILE_SIZE, 1);
+            assert!(at_once.pixels.chunks(4).any(|p| p[..3] != [0, 0, 0]), "array {k} shows");
+            assert!(within_one(&at_once, &one_by_one), "array {k}: the lattice's cover is its members'");
+            for (tile, workers) in [(8, 2u16), (16, 3)] {
+                assert!(within_one(&frame(array.clone(), tile, workers), &at_once), "array {k} tile {tile} workers {workers}");
+            }
+        }
+    }
+
+    /// One axis of a lattice's cover (bright_axis_sums): a comb of 0.1 px
+    /// members every 0.2 px gives each pixel its five members, one by one;
+    /// past BRIGHT_LATTICE_ENUM members along the axis in a tile they are
+    /// spread over their hull - 200,000 members a unit apart (31,250 a pixel)
+    /// add up to all of them, about as many to each pixel they fill.
+    #[test]
+    fn a_lattice_of_many_members_to_a_pixel_spreads_them_over_its_hull() {
+        // 1,000,000 units over 32 px: 31,250 a pixel
+        let mut request = area_true_request(32, DEFAULT_TILE_SIZE, 1).raster;
+        request.view = RasterViewBox::new(0.0, 0.0, 1_000_000.0, 1_000_000.0).unwrap();
+        // a member of 0.1 px every 0.2 px, past the frame's 32 px
+        let (unit, pitch) = (3_125, 6_250);
+        let mut combed = vec![0f32; 32];
+        let touched = bright_axis_sums(&request, 0, (0, unit, 0), pitch, (0, 999), (0, 32), &mut combed).unwrap();
+        assert_eq!(touched, Some((0, 32)));
+        for (p, &v) in combed.iter().enumerate() {
+            assert!((v - 5.0).abs() < 1e-3, "pixel {p}: {v}");
+        }
+        let n = 200_000i64;
+        assert!(BRIGHT_LATTICE_ENUM < n);
+        let mut many = vec![0f32; 32];
+        let touched = bright_axis_sums(&request, 0, (0, unit, 0), 1, (0, n - 1), (0, 32), &mut many).unwrap();
+        assert_eq!(touched, Some((0, 7)), "6.5 px of members");
+        let total: f32 = many.iter().sum();
+        assert!((total - n as f32).abs() / (n as f32) < 1e-3, "all of them: {total}");
+        for (p, &v) in many.iter().enumerate().take(6) {
+            assert!((v - 31_250.0).abs() / 31_250.0 < 0.03, "pixel {p}: {v}");
+        }
     }
 
     /// GeometryRasterRequest::density_claim_lit (the sub-cut dots'
@@ -14589,6 +15480,7 @@ mod tests {
             density_claim_lit: false,
             density_top_planes: 1,
             density_shapes_first: false,
+            density_bright: 0.0,
         };
         let report = render_geometry_occupancy(&scene, &raster_request).unwrap();
         raster_request.workers = 1;
@@ -14673,6 +15565,7 @@ mod tests {
             density_claim_lit: false,
             density_top_planes: 1,
             density_shapes_first: false,
+            density_bright: 0.0,
         }
     }
 

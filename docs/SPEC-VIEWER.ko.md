@@ -68,7 +68,9 @@
     뷰포트 크기 `vw=`/`vh=`가 붙는다(렌더러가 fit view를 뷰포트 기준으로 구한다). 0.12.288부터 detail의 밀도 문턱이 있으면
     (medium, low) 그 뒤에 `gate D/B px (N out)`이 붙는다: 블록 B px 중 D점 이상이어야 그리고, N은 빠진 블록 수다.
     0.12.291부터 진단 `FLOE_RUST_DENSITY_ONLY=on`(1패스의 도형을 건너뛰고 밀도만)이면 태그 맨 앞 `dots` 뒤에
-    `density only`가 붙는다(뷰어가 같은 환경 변수를 읽는다).
+    `density only`가 붙는다(뷰어가 같은 환경 변수를 읽는다). 0.12.297부터 밀도가 밝기로 그려지면(기본; 픽셀이 덮인 면적
+    × g만큼, 원본 색을 넘지 않게) 예약 뒤에 `bright xG`(g: low 1, medium 2, high 4)가 붙고, `dots xG`와 `gate …`는
+    붙지 않는다(밝기가 둘을 대신한다). 킬 스위치 `FLOE_RUST_DENSITY_BRIGHT=off`면 예전처럼 붙는다.
   - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
     - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
       붙는다. load의 `[plan+delta+apply]`는 빠진다.

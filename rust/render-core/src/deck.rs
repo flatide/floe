@@ -1225,6 +1225,7 @@ fn stream_pass(
         density_claim_lit: false,
         density_top_planes: 1,
         density_shapes_first: false,
+        density_bright: 0.0,
     };
     let mut report = StreamReport {
         pass_bytes_max: first_bytes,
@@ -1402,6 +1403,7 @@ fn raster_pass(
         density_claim_lit: false,
         density_top_planes: 1,
         density_shapes_first: false,
+        density_bright: 0.0,
     };
     // a frames-only pass only when this placement's plan holds a
     // hierarchy frame at all (analysis 2026-09-09: the pass ran, and
@@ -1693,6 +1695,7 @@ fn source_plan_request(
         free_pages: None,
         // an empty plan is a skipped pass (the planner dropped the source)
         empty_top: false,
+        dot_bright: None,
     };
     plan.validate()?;
     Ok(Some(plan))

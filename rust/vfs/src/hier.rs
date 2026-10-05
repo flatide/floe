@@ -340,6 +340,21 @@ pub fn dot_block_px() -> f64 {
     })
 }
 
+/// HierOpts::dot_bright's largest dot block (px): a block's cover in
+/// DOT_BRIGHT_UNITS rides in a u16 (WsCell::dot_counts) - a 64 px block's
+/// whole at g = 1 is 64 x 64 x 16, the u16's end and the full colour; a
+/// larger one would show at most a quarter of its colour.
+pub const DOT_BRIGHT_BLOCK_PX_MAX: f64 = 64.0;
+
+/// The dot block (px) of a plan whose HierOpts::dot_block_px is `px`:
+/// clamped to DOT_BLOCK_PX_MIN..=DOT_BLOCK_PX_MAX, and under the brightness
+/// (`bright`, HierOpts::dot_bright) to DOT_BRIGHT_BLOCK_PX_MAX at most - the
+/// planner's blocks and Cache::merge_plans' alike.
+pub fn dot_block_px_of(px: f64, bright: bool) -> f64 {
+    let px = px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX);
+    if bright { px.min(DOT_BRIGHT_BLOCK_PX_MAX) } else { px }
+}
+
 /// HierOpts::dot_spread default: on; FLOE_RUST_DENSITY_SPREAD=off is the kill
 /// switch (diagnostic) - the rules before 2026-10-01.
 /// HierOpts::dot_pages default: off; FLOE_RUST_DENSITY_PAGE_DOTS=on (diagnostic)
@@ -711,6 +726,10 @@ pub fn dot_spread() -> bool {
 /// - the raster's DOT_SHARE of 0.5 read the other way: a dot item's box is
 /// sized so the raster lights its count.
 pub const DOT_AREA_PX: f64 = 2.0;
+
+/// HierOpts::dot_bright: the dots a px^2 of covered area counts (a dot is
+/// 1/16 px^2 of it), so a block's count keeps the fraction of its cover.
+pub const DOT_BRIGHT_UNITS: f64 = 16.0;
 
 /// HierOpts::dot_area_share default: on; FLOE_RUST_DENSITY_AREA_SHARE=off (the
 /// kill switch) counts a member under a pixel one dot, as 0.12.285.
@@ -1260,6 +1279,16 @@ pub struct HierOpts {
     /// density does not show. FLOE_RUST_DENSITY_OCC_BOXES=off is the kill
     /// switch: every block in view.
     pub dot_occ_boxes: bool,
+    /// The density stack's brightness (user 2026-10-05: "the brightness of a
+    /// pixel by the shapes' size that gathers on it, never past the original
+    /// colour"; renderd density_bright): Some(g), the raster's gain - a block
+    /// counts the area its content covers in 1/DOT_BRIGHT_UNITS px^2 (every
+    /// size alike, not floor(area / DOT_AREA_PX) from a pixel up), at most
+    /// the block's area over g (where the raster's min(1, g x covered share)
+    /// is the full colour), every block drawn (no dot_gate) and a spread
+    /// item's box what it stands for, not widened for its dots. None: the
+    /// dots as lit pixels.
+    pub dot_bright: Option<f64>,
     /// A point list's members no wider than a dot block counted straight
     /// from their offsets - add_dots' block and dots, the same for every
     /// member of the list - and summed while consecutive members (Morton
@@ -1469,6 +1498,7 @@ impl Default for HierOpts {
             dot_occ_decode: dot_occ_decode(),
             dot_occ_cell_px: dot_occ_cell_px(),
             dot_occ_boxes: dot_occ_boxes(),
+            dot_bright: None,
             dot_list_fast: dot_list_fast(),
             dot_list_full: dot_list_full(),
             dot_list_sample: dot_list_sample(),
@@ -2586,7 +2616,7 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         list_sample: opts.dot_list_sample,
         list_by_dot: opts.dot_list_by_dot,
         area_share: opts.dot_area_share,
-        gate_min: if dots.is_some() { dot_gate_min(opts, req) } else { 1 },
+        gate_min: if dots.is_some() && opts.dot_bright.is_none() { dot_gate_min(opts, req) } else { 1 },
         cell_view: BBox::EMPTY,
         cell_rbbox: BBox::EMPTY,
         zone: Vec::new(),
@@ -2597,9 +2627,19 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         dot_boxes: opts.dot_boxes,
         grid: DotGrid::default(),
         dot_run: None,
-        block_px: opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX),
-        block_cap: dot_block_cap(opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX)),
-        spread: opts.dot_spread,
+        block_px: dot_block_px_of(opts.dot_block_px, opts.dot_bright.is_some()),
+        block_cap: match opts.dot_bright {
+            // the block's area over the gain, where the full colour is reached
+            Some(g) => {
+                let px = dot_block_px_of(opts.dot_block_px, true);
+                ((px * px * DOT_BRIGHT_UNITS / g.max(1.0)).ceil() as u32).clamp(1, u16::MAX as u32)
+            }
+            None => dot_block_cap(opts.dot_block_px.clamp(DOT_BLOCK_PX_MIN, DOT_BLOCK_PX_MAX)),
+        },
+        bright: opts.dot_bright.is_some(),
+        dot_area: if opts.dot_bright.is_some() { 1.0 / DOT_BRIGHT_UNITS } else { DOT_AREA_PX },
+        // the brightness's counts are cover: they ride with their boxes
+        spread: opts.dot_spread || opts.dot_bright.is_some(),
         ticks: 0,
         cancelled: false,
         lv: HashMap::new(),
@@ -2989,6 +3029,11 @@ struct Hier<'a> {
     dots: bool,
     block_px: f64,
     block_cap: u32,
+    /// HierOpts::dot_bright: the dots are covered area (DOT_BRIGHT_UNITS a px^2)
+    bright: bool,
+    /// the area of a dot from a pixel up, px^2 (DOT_AREA_PX; 1/DOT_BRIGHT_UNITS
+    /// under dot_bright)
+    dot_area: f64,
     spread: bool,
     /// HierOpts::dot_records in force: pages at the cells' cut, every size-cut
     /// page in view a dot item (under HierOpts::dot_pages)
@@ -3809,7 +3854,7 @@ impl<'a> Hier<'a> {
         if w <= block_px && h <= block_px {
             let (cx, cy) = ((fp.x0 as f64 + fp.x1 as f64) / 2.0, (fp.y0 as f64 + fp.y1 as f64) / 2.0);
             let key = ((cx / block).floor() as i64, (cy / block).floor() as i64, layer);
-            let own = member_share(w * h, self.area_share);
+            let own = self.member_share_of(w * h);
             let dots = if own >= 1.0 { own as u64 } else { whole_dots(own, key.0, key.1, item_salt(&fp, layer)) };
             let dots = dots.min(holds).min(cap as u64) as u32;
             if dots > 0 {
@@ -3818,7 +3863,7 @@ impl<'a> Hier<'a> {
             return;
         }
         // an item holding less than its box: every block's share scaled down
-        let boxed = (w * h / DOT_AREA_PX).floor().max(1.0);
+        let boxed = (w * h / self.dot_area).floor().max(1.0);
         let scale = if (holds as f64) < boxed { holds.max(1) as f64 / boxed } else { 1.0 };
         let (bx0, bx1) = ((fp.x0 as f64 / block).floor() as i64, (fp.x1 as f64 / block).floor() as i64);
         let (by0, by1) = ((fp.y0 as f64 / block).floor() as i64, (fp.y1 as f64 / block).floor() as i64);
@@ -3832,19 +3877,19 @@ impl<'a> Hier<'a> {
                 // the part of fp in this block, px^2
                 let ox = (fp.x1 as f64).min((bx + 1) as f64 * block) - (fp.x0 as f64).max(bx as f64 * block);
                 let oy = (fp.y1 as f64).min((by + 1) as f64 * block) - (fp.y0 as f64).max(by as f64 * block);
-                let part = if degenerate { DOT_AREA_PX } else { ox.max(0.0) * ppd * (oy.max(0.0) * ppd) };
+                let part = if degenerate { self.dot_area } else { ox.max(0.0) * ppd * (oy.max(0.0) * ppd) };
                 if part <= 0.0 {
                     continue;
                 }
                 let dots = if scale < 1.0 {
-                    let share = part / DOT_AREA_PX * scale + carry;
+                    let share = part / self.dot_area * scale + carry;
                     carry = share - share.floor();
                     if share < 1.0 {
                         continue;
                     }
                     share.floor() as u32
                 } else {
-                    ((part / DOT_AREA_PX).floor() as u32).max(1)
+                    ((part / self.dot_area).floor() as u32).max(1)
                 };
                 let piece = BBox {
                     x0: fp.x0.max((bx as f64 * block).floor() as i64),
@@ -3966,7 +4011,7 @@ impl<'a> Hier<'a> {
                     continue;
                 }
                 let cell_area = (x1 - x0) as f64 * (y1 - y0) as f64;
-                let per_dbu2 = if cover { floe_ovm::occ_coverage(levels[cy * cols + cx]) * ppd * ppd } else { even / cell_area };
+                let per_dbu2 = if cover { floe_ovm::occ_coverage(levels[cy * cols + cx]) * ppd * ppd * self.dot_units() } else { even / cell_area };
                 let cbx0 = ((x0 as f64 / block).floor() as i64).max(bx0);
                 let cbx1 = ((x1 as f64 / block).ceil() as i64 - 1).min(bx1);
                 for by in cby0..=cby1 {
@@ -4263,7 +4308,7 @@ impl<'a> Hier<'a> {
         if bx0 != bx1 || by0 != by1 {
             return false;
         }
-        let each = member_share(w * h, self.area_share).min(cap as f64);
+        let each = self.member_share_of(w * h).min(cap as f64);
         let members = grow_by_offsets(b0, chunk);
         let dots = whole_dots(each * n as f64, bx0, by0, item_salt(&members, layer)).min(cap as u64) as u32;
         if dots > 0 {
@@ -4380,7 +4425,7 @@ impl<'a> Hier<'a> {
             let (p, q) = (lo_k * step, hi_k * step);
             (a0 + p.min(q), a1 + p.max(q))
         };
-        let per_member = member_share(member_px, self.area_share);
+        let per_member = self.member_share_of(member_px);
         let salt = item_salt(b0, layer);
         self.st.sub_cut_dot_items += 1;
         self.st.dot_by[2] += 1;
@@ -4461,8 +4506,10 @@ impl<'a> Hier<'a> {
                 let ((x0, x1), (y0, y1)) = (clip(union.x0, union.x1, lo_x), clip(union.y0, union.y1, lo_y));
                 let (mut w, mut h) = ((x1 - x0).max(0.0), (y1 - y0).max(0.0));
                 // room for the count at half the pixels: the thinner side first
+                // (HierOpts::dot_bright: the count is cover, what it stands for
+                // the box)
                 let need = (count as f64 + 0.5) * DOT_AREA_PX / (ppd * ppd);
-                if w * h < need {
+                if !self.bright && w * h < need {
                     let side = need.sqrt();
                     if w <= h {
                         w = w.max((need / h.max(side)).min(block));
@@ -4825,7 +4872,7 @@ impl<'a> Hier<'a> {
             let ppd = self.px_per_dbu;
             let boxed = if count {
                 let (w, h) = ((fp.x1 - fp.x0).max(0) as f64 * ppd, (fp.y1 - fp.y0).max(0) as f64 * ppd);
-                ((w * h / DOT_AREA_PX).floor() as u64).max(1)
+                ((w * h / self.dot_area).floor() as u64).max(1)
             } else {
                 0
             };
@@ -4993,7 +5040,7 @@ impl<'a> Hier<'a> {
             let block = self.block_px / ppd;
             let (mw, mh) = ((b0.x1 - b0.x0).max(0) as f64 * ppd, (b0.y1 - b0.y0).max(0) as f64 * ppd);
             let fast = (self.list_fast && top.is_some() && !b0.is_empty() && ppd > 0.0 && mw <= self.block_px && mh <= self.block_px)
-                .then(|| member_share(mw * mh, self.area_share).min(self.block_cap as f64));
+                .then(|| self.member_share_of(mw * mh).min(self.block_cap as f64));
             let mut run: Option<((i64, i64, u32), u64, BBox)> = None;
             for k in 0..pr.n_chunks {
                 let chunk = pr.chunk_bbox(k);
@@ -5036,9 +5083,9 @@ impl<'a> Hier<'a> {
                     let mut step = if self.list_sample && area > 0.0 { self.chunk_step(area, held) } else { 1 };
                     // HierOpts::dot_list_by_dot: one member a window of those
                     // that make a dot at most, standing for the window
-                    let by_dot = self.list_by_dot && stride == 1 && by_dot_step(each) > step;
+                    let by_dot = self.list_by_dot && stride == 1 && by_dot_step(each / self.dot_units()) > step;
                     if by_dot {
-                        step = by_dot_step(each);
+                        step = by_dot_step(each / self.dot_units());
                     }
                     if step > 1 {
                         self.st.dot_sampled_chunks += 1;
@@ -5525,7 +5572,7 @@ impl<'a> Hier<'a> {
     fn node_holds(&mut self, ni: u32, fp: &BBox) -> u64 {
         let ppd = self.px_per_dbu;
         let (w, h) = ((fp.x1 - fp.x0).max(0) as f64 * ppd, (fp.y1 - fp.y0).max(0) as f64 * ppd);
-        let boxed = ((w * h / DOT_AREA_PX).floor() as u64).max(1);
+        let boxed = ((w * h / self.dot_area).floor() as u64).max(1);
         let (lo, hi) = self.cbvh_places(ni);
         if boxed <= (hi - lo) as u64 {
             return u64::MAX;
@@ -5569,7 +5616,7 @@ impl<'a> Hier<'a> {
             for pi in lo..hi {
                 match v.page_occ_area(pi) {
                     Some(area) => {
-                        covered += area * ppd * ppd;
+                        covered += area * ppd * ppd * self.dot_units();
                         known = true;
                     }
                     None => covered += self.page_dots(&v.page(pi)) as f64,
@@ -5598,8 +5645,32 @@ impl<'a> Hier<'a> {
     fn page_dots(&self, p: &floe_ovm::PageV) -> u64 {
         let ppd = self.px_per_dbu;
         let area = p.max_w as f64 * ppd * (p.max_h as f64 * ppd);
-        let each = if area >= 1.0 { (area / DOT_AREA_PX).floor().max(1.0) } else { area };
+        let each = if self.bright {
+            area * DOT_BRIGHT_UNITS
+        } else if area >= 1.0 {
+            (area / DOT_AREA_PX).floor().max(1.0)
+        } else {
+            area
+        };
         ((p.members as f64 * each).ceil() as u64).max(1)
+    }
+
+    /// member_share under the walk's units: HierOpts::dot_bright counts the
+    /// covered area itself, every size alike.
+    #[inline]
+    fn member_share_of(&self, area: f64) -> f64 {
+        if self.bright {
+            area.max(0.0) * DOT_BRIGHT_UNITS
+        } else {
+            member_share(area, self.area_share)
+        }
+    }
+
+    /// The dots a px^2 of covered area counts: DOT_BRIGHT_UNITS under
+    /// HierOpts::dot_bright, else one.
+    #[inline]
+    fn dot_units(&self) -> f64 {
+        if self.bright { DOT_BRIGHT_UNITS } else { 1.0 }
     }
 
     /// The sub-cut dots one member of cell box `rb` stands for on screen
@@ -5608,7 +5679,7 @@ impl<'a> Hier<'a> {
     fn member_dots(&self, rb: &BBox) -> f64 {
         let ppd = self.px_per_dbu;
         let (w, h) = ((rb.x1 - rb.x0).max(0) as f64 * ppd, (rb.y1 - rb.y0).max(0) as f64 * ppd);
-        member_share(w * h, self.area_share)
+        self.member_share_of(w * h)
     }
 
     /// A representative cut placement drawn as DOTS: one rect of the
@@ -6619,7 +6690,7 @@ impl crate::Vfs {
     /// hairline policy is the request's (ViewReq::page_hairline);
     /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
-        self.plan_hier_in(req, &[], None, None, None, 0, None, None)
+        self.plan_hier_in(req, &[], None, None, None, 0, None, None, None)
     }
 
     /// `plan_hier` over `regions` of the view instead of the whole view
@@ -6630,8 +6701,9 @@ impl crate::Vfs {
     /// (HierOpts::probe_limit, 0 = a plan); under a cancellation
     /// (HierOpts::stop: a tripped one ends the plan with stats.cancelled).
     #[allow(clippy::too_many_arguments)]
-    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>, sub_cut_dots: Option<f64>, dot_records: Option<f64>, probe_limit: u64, free_pages: Option<Arc<[u32]>>, stop: Option<PlanStop>) -> HierPlan {
+    pub fn plan_hier_in(&self, req: &ViewReq, regions: &[BBox], fixed_fit: Option<FixedFit>, sub_cut_dots: Option<f64>, dot_records: Option<f64>, probe_limit: u64, free_pages: Option<Arc<[u32]>>, stop: Option<PlanStop>, dot_bright: Option<f64>) -> HierPlan {
         let mut opts = HierOpts::default();
+        opts.dot_bright = dot_bright;
         opts.fixed_fit = fixed_fit;
         opts.sub_cut_dots = sub_cut_dots;
         opts.dot_records = dot_records;
@@ -6656,8 +6728,9 @@ impl crate::Vfs {
     /// complete plan of this request made as asked elsewhere (the density
     /// stack's pass 2 in bands on threads, merged), under `fixed_fit` and
     /// with `free_pages` at no cost. None: the caller plans the fit.
-    pub fn fit_planned_in(&self, req: &ViewReq, fixed_fit: Option<FixedFit>, free_pages: Option<Arc<[u32]>>, plan: HierPlan) -> Option<HierPlan> {
+    pub fn fit_planned_in(&self, req: &ViewReq, fixed_fit: Option<FixedFit>, free_pages: Option<Arc<[u32]>>, plan: HierPlan, dot_bright: Option<f64>) -> Option<HierPlan> {
         let mut opts = HierOpts::default();
+        opts.dot_bright = dot_bright;
         opts.fixed_fit = fixed_fit;
         opts.free_pages = free_pages;
         match std::env::var("FLOE_RUST_PAGE_HAIRLINE").as_deref() {
@@ -8266,6 +8339,73 @@ mod tests {
         assert!(dots(&one) > 5000, "{}", dots(&one));
         assert_eq!(items(&share), items(&slow));
         assert_eq!(dots(&apart), dots(&share));
+    }
+
+    #[test]
+    fn under_the_brightness_a_block_counts_the_area_its_content_covers() {
+        // HierOpts::dot_bright (user 2026-10-05: "the brightness of a pixel by
+        // the shapes' size that gathers on it", "never brighter than the
+        // original colour"; g = 2, detail medium). 6,000 LEAFs of 10 dbu (0.2
+        // px a side, 0.04 px^2 at 0.02 px/dbu) at random over 20 um: the
+        // counts add up to their area in DOT_BRIGHT_UNITS a px^2 (240 px^2,
+        // 3,840), no block left out as too sparse (the gate is on), and a
+        // lone LEAF's item is its own box - not one grown to hold its count
+        // at half its pixels, as the dots' is. 4,096 LEAFs of 60 dbu on a 20
+        // dbu grid (1.44 px^2 each, nine to a pixel): a block counts its area
+        // over the gain at most (8 x 8 px x 16 / 2 = 512), where the raster's
+        // min(1, g x cover) is the full colour.
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: i64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % n as u64) as i64
+        };
+        let pts: Vec<(i64, i64)> = (0..6000).map(|_| (next(19_900), next(19_900))).collect();
+        let leaf = |side: i64| FCell { name: "LEAF", pages: vec![(bx(0, 0, side, side), side as u64, side as u64)], places: vec![] };
+        let chip = fixture(&[leaf(10), FCell { name: "TOP", pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)], places: vec![(0, 0, 0, 0, false, Rep::Pts(pts.into()))] }], 1);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 150, u32::MAX);
+        req.px_per_dbu = 0.02;
+        req.page_wash = false;
+        let base = HierOpts { sub_cut_dots: Some(1.0 / 3.0), dot_block_px: 8.0, dot_spread: true, k_boxes: 4, dot_list_by_dot: false, ..HierOpts::default() };
+        let counts = |plan: &HierPlan| plan.wcells.iter().flat_map(|w| w.dot_counts.iter().copied()).collect::<Vec<u16>>();
+        let bright = plan_hier(&chip, &req, &HierOpts { dot_bright: Some(2.0), ..base.clone() });
+        let dots = plan_hier(&chip, &req, &base);
+        let units = 6000.0 * 0.04 * DOT_BRIGHT_UNITS;
+        let sum: u64 = counts(&bright).iter().map(|&n| u64::from(n)).sum();
+        assert!((sum as f64 - units).abs() < units * 0.1, "{sum} units for {units}");
+        assert_eq!(bright.stats.dot_gated, 0);
+        assert!(dots.stats.dot_gated > 0, "the dots' gate leaves sparse blocks out");
+        // a lone LEAF's item: its box, 10 dbu a side (the dots' grows past it)
+        let side = |plan: &HierPlan| plan.wcells.iter().flat_map(|w| w.washes.iter().zip(w.dot_counts.iter())).filter(|(_, &n)| n > 0).map(|((_, b), _)| (b.x1 - b.x0).min(b.y1 - b.y0)).min().unwrap();
+        let ungated = plan_hier(&chip, &req, &HierOpts { dot_gate: false, ..base.clone() });
+        assert!(side(&bright) <= 11, "{}", side(&bright));
+        assert!(side(&ungated) >= 20, "{}", side(&ungated));
+        // the dense grid: a block's count at its area over the gain
+        let dense: Vec<(i64, i64)> = (0..4096).map(|i| (2_000 + (i % 64) * 20, 3_000 + (i / 64) * 20)).collect();
+        let chip = fixture(&[leaf(60), FCell { name: "TOP", pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)], places: vec![(0, 0, 0, 0, false, Rep::Pts(dense.into()))] }], 1);
+        for (g, cap) in [(1.0, 1024u16), (2.0, 512), (4.0, 256)] {
+            let full = plan_hier(&chip, &req, &HierOpts { dot_bright: Some(g), ..base.clone() });
+            let most = counts(&full).into_iter().max().unwrap();
+            assert_eq!(most, cap, "g {g}");
+        }
+        // a field of 1 px LEAFs abutting over 200 px, under 128 px blocks
+        // (FLOE_RUST_DENSITY_BLOCK_PX): the brightness's blocks are 64 px at
+        // most (DOT_BRIGHT_BLOCK_PX_MAX) - a u16 holds a 64 px block's whole
+        // cover - so every item counts its box's whole area at g = 1
+        let field: Vec<(i64, i64)> = (0..40_000).map(|i| ((i % 200) * 50, (i / 200) * 50)).collect();
+        let chip = fixture(&[leaf(50), FCell { name: "TOP", pages: vec![(bx(0, 0, 5000, 5000), 5000, 5000)], places: vec![(0, 0, 0, 0, false, Rep::Pts(field.into()))] }], 1);
+        let wide = plan_hier(&chip, &req, &HierOpts { dot_bright: Some(1.0), dot_block_px: 128.0, ..base.clone() });
+        let mut items = 0;
+        for w in &wide.wcells {
+            for (&(_, b), &n) in w.washes.iter().zip(w.dot_counts.iter()) {
+                let (bw, bh) = ((b.x1 - b.x0) as f64 * req.px_per_dbu, (b.y1 - b.y0) as f64 * req.px_per_dbu);
+                assert!(bw <= 64.5 && bh <= 64.5, "a block past 64 px: {bw} x {bh}");
+                assert!(f64::from(n) / DOT_BRIGHT_UNITS >= 0.95 * bw * bh, "{n} units for {bw} x {bh} px");
+                items += 1;
+            }
+        }
+        assert!(items >= 9, "{items}");
     }
 
     #[test]

@@ -1206,6 +1206,117 @@ def gate_checks(temp):
             w.stop()
 
 
+def bright_checks(temp):
+    """The density's brightness (user 2026-10-05: "the brightness of a pixel
+    by the shapes' size that gathers on it", "never brighter than the original
+    colour", then "g = 1, 2, 4"; renderd density_bright_gain,
+    FLOE_RUST_DENSITY_BRIGHT=off the kill switch): gate_layout's MID squares
+    at 0.4 um a pixel, under every floor (0.016 px^2 each). A pixel shows
+    min(1, g x its covered area) of MID's colour - every lit pixel a multiple
+    of the colour, none past it - g by the detail: low (5 px) 1, medium (3 px)
+    2, high (1 px) 4. The 0.6 % half's alphas add up to g x its squares' area
+    (62.5 px^2) - nothing left out as too sparse, as the dots' gate does -
+    and the 25 % field shows a quarter, a half and the colour itself; two
+    steps out (0.8 um a pixel) the half's alphas are a quarter of the fit's,
+    not thinned past it. Pass 1's shapes stay: shapes_first_layout's LOW
+    original is the same pixels with the brightness on and off, TOP's density
+    where LOW alone leaves the frame dark. The switch off: the dots as lit
+    pixels, the gate's frame."""
+    src = Path(temp) / 'bright.oas'
+    gate_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_GATE': 'on', 'FLOE_RUST_DENSITY_ZOOM_OUT': 'on'}
+    workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='off'))}
+    try:
+        dbu = float(workers['on'].cache.meta['dbu'])
+        colour = layer_colour(workers['on'], MID)
+        x0, y0 = -10.0, -20.0
+
+        def view(w, gen, cut_px, spp):
+            box = (x0, y0, x0 + W * spp, y0 + H * spp)
+            w.submit({'kind': 'render', 'gen': gen, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': None, 'w': W, 'h': H,
+                      'depth': None, 'cut_px': cut_px, 'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': [MID],
+                      'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('bright frame timeout')
+
+        def part(spp, um):
+            (ux0, uy0, ux1, uy1) = um
+            cs = range(max(0, int((ux0 - x0) / spp)), min(W, int((ux1 - x0) / spp)))
+            rs = range(max(0, int((y0 + H * spp - uy1) / spp)), min(H, int((y0 + H * spp - uy0) / spp)))
+            return cs, rs
+
+        # the channel MID's colour is brightest in: a pixel's alpha
+        k = max(range(3), key=lambda i: colour[i])
+
+        def alphas(pixels, cs, rs):
+            out = []
+            for r in rs:
+                for c in cs:
+                    p = px(pixels, c, r)
+                    for i in range(3):
+                        # never past the colour, and of its hue
+                        assert p[i] <= colour[i], ('past the colour', (c, r), tuple(p), tuple(colour))
+                        assert abs(p[i] - colour[i] * p[k] / colour[k]) <= 1.0, ('another hue', (c, r), tuple(p), tuple(colour))
+                    out.append(p[k] / colour[k])
+            return out
+
+        gen, sums = 0, {}
+        sparse_area = 4000 * (0.05 / 0.4) ** 2
+        for cut, g in ((5.0, 1), (3.0, 2), (1.0, 4)):
+            gen += 1
+            on, res = view(workers['on'], gen, cut, 0.4)
+            assert res['density_plan2']['dot_gated'] == 0, res['density_plan2']
+            sparse, field = alphas(on, *part(0.4, (0, 0, 40, 40))), alphas(on, *part(0.4, (50.5, 10.5, 69.5, 29.5)))
+            sums[g] = sum(sparse)
+            assert abs(sums[g] - g * sparse_area) < 0.15 * g * sparse_area, ('the sparse half', g, sums[g], g * sparse_area)
+            mean = sum(field) / len(field)
+            assert abs(mean - min(1.0, g * 0.25)) < 0.06, ('the field', g, mean)
+            print('density stack: the brightness, g %d (cut %g px) - the 0.6 %% half alphas %.1f for %.1f px^2 x g, the 25 %% field %.2f of the colour, '
+                  'none past it' % (g, cut, sums[g], sparse_area, mean))
+        # two steps out: a quarter of the area in px^2, not thinned past it
+        gen += 1
+        out, _ = view(workers['on'], gen, 3.0, 0.8)
+        far = sum(alphas(out, *part(0.8, (0, 0, 40, 40))))
+        assert abs(far - sums[2] / 4) < 0.2 * sums[2] / 4, ('two steps out', far, sums[2] / 4)
+        # the switch off: the dots, the gate leaves the sparse half out
+        gen += 1
+        off, off_res = view(workers['off'], gen, 3.0, 0.4)
+        assert not lit(off, *part(0.4, (0, 0, 40, 40))) and off_res['density_plan2']['dot_gated'] > 0, off_res['density_plan2']
+        assert all(px(off, c, r) in (BLACK, colour) for r in range(H) for c in range(W)), 'the switch off: lit pixels in the colour'
+        print('density stack: the brightness two steps out - the half %.1f (a quarter of %.1f); the switch off: the dots, the half gated' % (far, sums[2]))
+    finally:
+        for w in workers.values():
+            w.stop()
+    # pass 1's shapes stay
+    src = Path(temp) / 'bright_first.oas'
+    shapes_first_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on'}
+    workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='off'))}
+    try:
+        low_alone = frame(workers['on'], 1, (LOW,))[0]
+        on = frame(workers['on'], 2, (LOW, TOP))[0]
+        off = frame(workers['off'], 2, (LOW, TOP))[0]
+        low_px = {(c, r) for r in range(H) for c in range(W) if px(low_alone, c, r) != BLACK}
+        assert low_px and all(px(on, c, r) == px(off, c, r) == px(low_alone, c, r) for (c, r) in low_px), 'pass 1 changed'
+        shown = {(c, r) for r in range(H) for c in range(W) if px(on, c, r) != BLACK} - low_px
+        assert shown, 'TOP\'s density where LOW leaves the frame dark'
+        print('density stack: the brightness keeps pass 1 - LOW\'s %d px as with it off and alone, TOP\'s density on %d px around it' % (len(low_px), len(shown)))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def layer_colour(w, layer):
     """A layer's colour as the renderer paints it (the cache's style)."""
     for l in w.cache.meta['layers']:
@@ -2034,6 +2145,10 @@ def main():
     # checks were made (renderd density_shapes_first: every plane's density
     # where no original is): shapes_first_checks alone keeps it to that space
     os.environ['FLOE_RUST_DENSITY_SHAPES_FIRST'] = 'off'
+    # and the dots as lit pixels, as these checks were made (renderd
+    # density_bright_gain: a pixel shows its covered area's brightness):
+    # bright_checks alone draws the brightness
+    os.environ['FLOE_RUST_DENSITY_BRIGHT'] = 'off'
     with tempfile.TemporaryDirectory(prefix='floe-density-stack-') as temp:
         src = Path(temp) / 'stack.oas'
         layout(src)
@@ -2131,6 +2246,7 @@ def main():
         density_only_checks(temp)
         top_group_checks(temp)
         shapes_first_checks(temp)
+        bright_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

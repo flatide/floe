@@ -888,6 +888,18 @@ impl Cache {
         let mut out = plans.remove(0);
         let mut cells: BTreeMap<floe_vfs::hier::WsKey, floe_vfs::hier::WsCell> = out.wcells.drain(..).map(|cell| (cell.key, cell)).collect();
         let mut pages: BTreeMap<u32, u64> = out.pages.iter().copied().zip(out.page_prio.iter().copied()).collect();
+        // per cell merged into, kept over the plans (a cell's maps were made
+        // anew at every plan, from all it held - the top planes' eight plans
+        // went over the top cell's dot items 28 times, 2026-10-05): its
+        // instances, its counted washes by block and layer, its other washes
+        type Placed = FxMap<(floe_vfs::hier::WsKey, i64, i64, u8, bool), Vec<usize>>;
+        type Blocks = FxMap<(u32, i64, i64), usize>;
+        type Seen = FxSet<(u32, floe_ovm::BBox)>;
+        let mut index: FxMap<floe_vfs::hier::WsKey, (Placed, Blocks, Seen)> = FxMap::default();
+        let block_of = |layer: u32, b: &floe_ovm::BBox| {
+            let at = |a: i64, z: i64| ((a as f64 + z as f64) / 2.0 / block_dbu).floor() as i64;
+            (layer, at(b.x0, b.x1), at(b.y0, b.y1))
+        };
         for plan in plans {
             for cell in plan.wcells {
                 let Some(have) = cells.get_mut(&cell.key) else {
@@ -902,14 +914,31 @@ impl Cache {
                 }
                 have.pages = levels.keys().copied().collect();
                 have.page_levels = if levelled { levels.values().copied().collect() } else { Vec::new() };
-                // instances, once each (the maps here are looked up, never
-                // iterated: the Fx hasher, 2026-10-02 - SipHash and growing
-                // were most of a dots merge)
-                let mut placed: FxMap<(floe_vfs::hier::WsKey, i64, i64, u8, bool), Vec<usize>> =
-                    FxMap::with_capacity_and_hasher(have.insts.len() + cell.insts.len(), Default::default());
-                for (at, inst) in have.insts.iter().enumerate() {
-                    placed.entry((inst.child, inst.x, inst.y, inst.rot, inst.flip)).or_default().push(at);
+                // washes with their counts (0: none): a counted one per block and
+                // layer, the most dots; the rest once each
+                let counted = !have.dot_counts.is_empty() || !cell.dot_counts.is_empty();
+                if counted {
+                    have.dot_counts.resize(have.washes.len(), 0);
                 }
+                // (the maps here are looked up, never iterated: the Fx hasher,
+                // 2026-10-02 - SipHash and growing were most of a dots merge)
+                let (placed, blocks, seen) = index.entry(cell.key).or_insert_with(|| {
+                    let mut placed: Placed = FxMap::with_capacity_and_hasher(have.insts.len() + cell.insts.len(), Default::default());
+                    for (at, inst) in have.insts.iter().enumerate() {
+                        placed.entry((inst.child, inst.x, inst.y, inst.rot, inst.flip)).or_default().push(at);
+                    }
+                    let mut blocks: Blocks = FxMap::with_capacity_and_hasher(have.washes.len() + cell.washes.len(), Default::default());
+                    let mut seen: Seen = FxSet::default();
+                    for (at, &(layer, b)) in have.washes.iter().enumerate() {
+                        if have.dot_counts.get(at).copied().unwrap_or(0) > 0 {
+                            blocks.insert(block_of(layer, &b), at);
+                        } else {
+                            seen.insert((layer, b));
+                        }
+                    }
+                    (placed, blocks, seen)
+                });
+                // instances, once each
                 for inst in cell.insts {
                     let key = (inst.child, inst.x, inst.y, inst.rot, inst.flip);
                     if placed.get(&key).is_some_and(|ats| ats.iter().any(|&at| have.insts[at] == inst)) {
@@ -921,26 +950,6 @@ impl Cache {
                 for frame in cell.frames {
                     if !have.frames.contains(&frame) {
                         have.frames.push(frame);
-                    }
-                }
-                // washes with their counts (0: none): a counted one per block and
-                // layer, the most dots; the rest once each
-                let counted = !have.dot_counts.is_empty() || !cell.dot_counts.is_empty();
-                if counted {
-                    have.dot_counts.resize(have.washes.len(), 0);
-                }
-                let block_of = |layer: u32, b: &floe_ovm::BBox| {
-                    let at = |a: i64, z: i64| ((a as f64 + z as f64) / 2.0 / block_dbu).floor() as i64;
-                    (layer, at(b.x0, b.x1), at(b.y0, b.y1))
-                };
-                let mut blocks: FxMap<(u32, i64, i64), usize> =
-                    FxMap::with_capacity_and_hasher(have.washes.len() + cell.washes.len(), Default::default());
-                let mut seen: FxSet<(u32, floe_ovm::BBox)> = FxSet::default();
-                for (at, &(layer, b)) in have.washes.iter().enumerate() {
-                    if have.dot_counts.get(at).copied().unwrap_or(0) > 0 {
-                        blocks.insert(block_of(layer, &b), at);
-                    } else {
-                        seen.insert((layer, b));
                     }
                 }
                 for (at, &(layer, b)) in cell.washes.iter().enumerate() {
@@ -1156,7 +1165,7 @@ impl Cache {
     /// None where the fit would plan again; the caller plans it.
     pub fn fit_plan(&self, request: &PlanRequest, plan: HierPlan) -> Result<Option<HierPlan>, String> {
         let req = self.view_request(request)?;
-        Ok(self.vfs.fit_planned_in(&req, request.fixed_fit, request.free_pages.clone(), plan))
+        Ok(self.vfs.fit_planned_in(&req, request.fixed_fit, request.free_pages.clone(), plan, request.dot_bright))
     }
 
     pub fn plan(&self, request: &PlanRequest) -> Result<PlannedView, String> {
@@ -1174,7 +1183,7 @@ impl Cache {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop);
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright);
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }

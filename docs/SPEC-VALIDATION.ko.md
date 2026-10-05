@@ -197,6 +197,30 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.297(밝기: 픽셀에 모인 도형 면적만큼, 원본 색을 넘지 않게) `bright_checks`:
+      - `gate_layout`의 MID 0.05 µm 사각형(0.016 px²)을 0.4 µm/px에서 본다. 모두 하한 아래라 점유 격자로 퍼뜨린다.
+      - 켜진 픽셀은 모두 MID 색의 배수이고, 어느 채널도 색을 넘지 않는다.
+      - 0.6 % 반쪽의 알파 합이 g × 사각형 면적(62.5 px²)의 15 % 안이다: g 1·2·4(low·medium·high)에서 61.5·123.1·246.2.
+        문턱으로 빠지는 블록이 없다(`dot_gated` 0).
+      - 25 % 마당은 색의 0.25·0.49·0.98이다.
+      - 두 단계 축소(0.8 µm/px)하면 반쪽의 알파 합이 fit의 4분의 1이다(30.4). 줌아웃 이득처럼 더 줄지 않는다.
+      - 킬 스위치(`FLOE_RUST_DENSITY_BRIGHT=off`): 점 모드다. 반쪽은 문턱으로 빠지고, 켜진 픽셀은 색 그대로다.
+      - `shapes_first_layout`에서 LOW 원본 14,910 px는 밝기를 켜도 끄고 혼자일 때와 같다. TOP의 밀도는 그 둘레 10,100 px에
+        보인다.
+      - 이 게이트의 다른 검사는 `FLOE_RUST_DENSITY_BRIGHT=off`로 고정한다. 점을 켜진 픽셀로 센 검사들이다.
+      - 어댑터 계약(`rust_renderer`): `density_plan2`는 35개 값(…/dot_gate_min/bright_milli)이다. 상태줄 테스트: 밝기
+        g 2면 `reserve 896 MB, bright x2, pass 2 plan`(줌아웃 이득·문턱 없음).
+      - 단위:
+        - vfs `under_the_brightness_a_block_counts_the_area_its_content_covers`(64 px 블록 상한 포함).
+        - render-core `under_the_brightness_a_pixel_shows_its_covered_area_never_past_the_colour`: 0.3 px²는 색의 0.6,
+          한 픽셀의 1.28 px²는 색 그대로, 1×1 px가 네 픽셀에 걸치면 각각 0.5. 타일 5·8·16·128 px, 작업자 1~4, bin 켬·끔이
+          같다.
+        - render-core `under_the_brightness_the_planes_compose_over_one_another_the_top_first`: 초록·빨강·흰색이 0.25 px²씩
+          한 픽셀에 있으면 (96, 159, 32). 최상위 평면 둘이든, 하나에 아래 평면 한 번 걷기든 같다.
+        - render-core `under_the_brightness_a_lattice_array_covers_as_its_members_one_by_one`: 격자 배열을 한 번에 더한 것
+          (`bright_lattice`)이 같은 멤버를 점 리스트로 하나씩 더한 것과 채널 1 안에서 같다.
+        - render-core `a_lattice_of_many_members_to_a_pixel_spreads_them_over_its_hull`: 0.2 px 간격 0.1 px 멤버는 픽셀마다
+          5. 한 축에 타일당 65,536개를 넘는 20만 개는 헐에 고르게 퍼져 합이 20만이다.
     - 0.12.295(하한 탐색 스레드, 점 하나어치 리스트 표본, 정확한 빠른 연산):
       - `probe_threads_checks`: `lists_layout`의 비아를 하한 0, 9타일(1,000 px)로 본다. 탐색이 맞고, 프레임이 계획 하나의
         것과 픽셀까지 같다. 스레드는 4이고, 킬 스위치(`FLOE_RUST_DENSITY_PROBE_THREADS=off`)면 1이다.

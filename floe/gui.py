@@ -1054,6 +1054,11 @@ def perf_status(res, depth_note=""):
         # pass 2's reserve: the fixed one or what pass 1 left (2026-10-02)
         if (res.get("density_plan2") or {}).get("reserve_mb"):
             parts.append("reserve %s MB" % fmt_count(res["density_plan2"]["reserve_mb"]))
+        # the brightness by the area covered (2026-10-05): its gain by the
+        # detail - a pixel at min(1, g x its area) of the colour
+        bright = (res.get("density_plan2") or {}).get("bright_milli")
+        if bright:
+            parts.append("bright x%g" % (bright / 1000.0))
         # zoomed out past the fit view the dots thin (2026-10-04): their gain
         gain = (res.get("density_plan2") or {}).get("dot_gain_milli")
         if gain is not None and 0 < gain < 1000:

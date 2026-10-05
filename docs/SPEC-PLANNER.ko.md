@@ -338,6 +338,25 @@
   - 디코드한 페이지의 도형은 거르지 않는다(도형이 있는 자리에 그린다).
   - 병합(`Cache::merge_plans`)은 `dot_gated`를 더하고 `dot_gate_min`은 최댓값을 둔다.
   - 단위 `a_dot_block_too_sparse_for_the_detail_is_left_out`. 점 수 규칙을 보는 단위는 `dot_gate: false`로 고정한다.
+  **밝기(0.12.297, renderd 0.12.274; 사용자 2026-10-05 "한 점에 누적되는 도형 크기 … 밝기 조절로 표시", "밝기는 원본
+  색상보다 밝아질 수 없게", "g = 1·2·4로 진행"):** `HierOpts::dot_bright = Some(g)`(`Vfs::plan_hier_in`·`fit_planned_in`의
+  마지막 인자, `PlanRequest::dot_bright`; renderd `density_bright_gain`이 점 모드에서 detail로 정한다. 기본 켬,
+  `FLOE_RUST_DENSITY_BRIGHT=off`가 킬 스위치). 블록의 수는 점이 아니라 **덮은 면적**이다.
+  - 단위는 1/16 px²(`DOT_BRIGHT_UNITS`)다. 멤버 하나는 크기와 무관하게 면적 × 16이다(`member_share_of`; 1 px² 이상도
+    floor(면적/2)가 아니다). `page_dots`, 점유 격자(`occ_items`)의 칸별 덮임, `node_dots`의 페이지 덮임도 같은 단위다.
+    상자로 세는 항목의 면적 단위(`dot_area`)는 1/16 px²다.
+  - 블록 상한은 블록 면적 / g다(ceil(블록² × 16 / g)). 래스터의 min(1, g × 덮임)이 원본 색이 되는 곳이라, 그 이상은
+    그림이 같다.
+  - 블록은 64 px 이하다(`DOT_BRIGHT_BLOCK_PX_MAX`, `dot_block_px_of`). 수는 u16에 실리고, 64 px 블록 전체의 덮임이 g = 1에서
+    64 × 64 × 16으로 그 끝이다. 진단 `FLOE_RUST_DENSITY_BLOCK_PX`가 더 커도 그렇다. renderd의 병합(`Cache::merge_plans`)과
+    보고(`density_block`)도 같은 값을 쓴다.
+  - 문턱이 없다(`gate_min` = 1). 리스트 표본(`by_dot_step`)은 면적(px²)으로 본다(점 모드와 같은 걸음).
+  - 늘 퍼뜨림 경로로 수를 싣는다(`spread`). 항목 상자는 대표하는 범위(합집합 ∩ 블록) 그대로다. 수를 반 픽셀에 담으려고
+    키우지 않는다.
+  - 단위 `under_the_brightness_a_block_counts_the_area_its_content_covers`: 0.04 px² LEAF 6,000개의 수가 면적 × 16의 10 %
+    안(문턱 켬, 빠진 블록 0), 외톨이 LEAF의 상자는 자기 상자(점 모드는 키운 상자), 9겹 격자의 블록은 g = 1·2·4에서
+    1,024·512·256으로 멈춘다. 200 px를 빈틈없이 덮은 1 px LEAF를 128 px 블록으로 계획하면 항목이 64 px 이하이고, 모두
+    상자 넓이를 센다.
   **읽기(0.12.256):** 점 모드에서 마스크 없는 노드의 배치 읽기는 셀마다 가장 위 가시 레이어를 한 번만 구해 두고
   (`cell_top`, `top_memo`) 순위만 비교한다; 계획기의 정수 키 맵은 Fx식 해시(`FxMap`/`FxSet`). 그림은 같다.
   **블록과 퍼뜨림(0.12.257; 사용자 2026-10-01 "지금보다 덜 자세해도 괜찮을 것 같음"):** 블록은

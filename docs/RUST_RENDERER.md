@@ -446,7 +446,8 @@ blocks "fill space where nothing was"; "a pixel should light only when the
 shapes' size in it passes a level"; floe_vfs `HierOpts::dot_gate`,
 `FLOE_RUST_DENSITY_GATE=off` is the kill switch,
 `FLOE_RUST_DENSITY_GATE_SHARE` diagnostic). `density_plan2` ends with the
-blocks left out and the dots a block needed (34 values). Since 0.12.290
+blocks left out and the dots a block needed (34 values; since 0.12.297 a
+35th, the brightness's gain in thousandths, 0 when off). Since 0.12.290
 pass 2 decodes the top plane's side's pages before the others' (they were
 one list by distance from the view's centre under one reserve, and turning a
 lower layer on took pages from the top plane: the routing chip's M8 over M1
@@ -479,7 +480,22 @@ space left top first, and pass 2's top side plans that space alone (user
 the space left will hardly jar"; render-core
 `GeometryRasterRequest::density_shapes_first`, renderd `density_shapes_first`;
 `FLOE_RUST_DENSITY_SHAPES_FIRST=off` is the kill switch: each top plane's
-density over the originals below it, as 0.12.293).
+density over the originals below it, as 0.12.293). Since 0.12.297 the
+density is a brightness: a pixel shows min(1, g x the area pass 2's shapes
+cover in it) of its plane's colour - never past it - the planes over one
+another, the top first, g by the detail, 2^((5 - cut) / 2): low (5 px) 1,
+medium (3 px) 2, high (1 px) 4; it replaces the dots' gate and the zoomed-out
+gain (user 2026-10-05: "the brightness of a pixel by the shapes' size that
+gathers on it", "never brighter than the original colour", "go on with g = 1,
+2, 4"; renderd `density_bright_gain`; floe_vfs `HierOpts::dot_bright` - a
+block counts the area its content covers in 1/16 px^2, at most its area over
+g, none gated, an item's box what it stands for; render-core
+`GeometryRasterRequest::density_bright` - a rectangle adds its overlaps, a
+dot item its count over its box, a lattice array its column shares times its
+row shares at once; `FLOE_RUST_DENSITY_BRIGHT=off` is the kill switch: the
+dots as lit pixels, as 0.12.296; `FLOE_RUST_DENSITY_BRIGHT_GAIN`, diagnostic,
+fixes g). A density pixel stays open: the frame bands under the planes paint
+it and show through what the density leaves, composed at the tile's end.
 `FLOE_RUST_DENSITY_SPREAD=off` is the spread's kill switch: a block's dots as a
 compact box whose area is their count, every item by its box (with
 `FLOE_RUST_DENSITY_BLOCK_PX=4`, the frames of 0.12.256); by default a block's

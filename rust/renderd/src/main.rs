@@ -1197,8 +1197,9 @@ struct FramePixels {
     /// the floor decoded, their occupancy cells too coarse on screen
     /// (HierOpts::dot_occ_decode, 2026-10-03); ...; then the dot blocks left
     /// out as too sparse and the dots a block needed (HierOpts::dot_gate,
-    /// 2026-10-04)
-    density_plan2: Option<[u64; 34]>,
+    /// 2026-10-04); then the brightness's gain in thousandths
+    /// (density_bright_gain, 2026-10-05; 0: the dots as lit pixels)
+    density_plan2: Option<[u64; 35]>,
 }
 
 fn render_worker(
@@ -1325,6 +1326,7 @@ fn run_clip(
         probe_limit: 0,
         free_pages: None,
         empty_top: true,
+        dot_bright: None,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -2779,6 +2781,29 @@ fn density_dots_enabled() -> bool {
     std::env::var("FLOE_RUST_DENSITY_DOTS").as_deref() == Ok("on")
 }
 
+/// The density stack's brightness (user 2026-10-05: "the brightness of a
+/// pixel by the shapes' size that gathers on it", "never brighter than the
+/// original colour", then "go on with g = 1, 2, 4"): with the sub-cut dots,
+/// pass 2 counts the area its shapes cover (floe_vfs HierOpts::dot_bright)
+/// and a pixel shows min(1, g x its covered share) of its plane's colour, the
+/// top plane over the others (render-core GeometryRasterRequest::
+/// density_bright) - in place of the dots' gate (HierOpts::dot_gate) and the
+/// zoomed-out gain (density_zoom_gain). g by the detail, 2^((5 - cut) / 2):
+/// low (5 px) 1, medium (3 px) 2, high (1 px) 4. None: no brightness - the
+/// dots as lit pixels (FLOE_RUST_DENSITY_BRIGHT=off is the kill switch, as
+/// 0.12.296), or no dots. FLOE_RUST_DENSITY_BRIGHT_GAIN, diagnostic: g itself
+/// (1..=64).
+fn density_bright_gain(cut_px: f64) -> Option<f64> {
+    if std::env::var("FLOE_RUST_DENSITY_BRIGHT").as_deref() == Ok("off") || !density_dots_enabled() || !density_stack_enabled() || !(cut_px > 0.0) {
+        return None;
+    }
+    let fixed = std::env::var("FLOE_RUST_DENSITY_BRIGHT_GAIN")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|g| g.is_finite() && (1.0..=64.0).contains(g));
+    Some(fixed.unwrap_or_else(|| 2f64.powf((5.0 - cut_px) / 2.0).clamp(1.0, 4.0)))
+}
+
 /// Pass 2's cut (px, the larger side): the shapes under pass 1's cut down to
 /// this size are density. 1 px (user decision 2026-09-27: 0.5 px first, so
 /// the count stays in bounds; then 1 px, which looks fine at detail medium
@@ -3414,6 +3439,12 @@ fn run_render(
         density_top_planes: 1,
         // pass 1's shapes first: every plane's density in the space they left
         density_shapes_first: density_shapes_first(),
+        // the density's brightness by the area it covers (density_bright_gain)
+        density_bright: if !command.exact && area_true_enabled() && density_stack_enabled() {
+            density_bright_gain(command.cut_px).unwrap_or(0.0) as f32
+        } else {
+            0.0
+        },
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache
@@ -3580,7 +3611,7 @@ fn run_render(
         let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 34]> = None;
+        let mut density_plan2: Option<[u64; 35]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -3974,7 +4005,12 @@ fn run_render(
                     .map_or_else(|| "-".to_string(), |counts| counts.map(|count| count.to_string()).join("/")),
                 pixels.density_floor.map_or_else(|| "-".to_string(), |floor| format!("{floor:.3}")),
                 // the sub-cut dots' block (FLOE_RUST_DENSITY_BLOCK_PX), px
-                if pixels.density_dots.is_some() { format!("{}", floe_render_core::dot_block_px()) } else { "-".to_string() },
+                // (64 px at most under the brightness: floe_vfs dot_block_px_of)
+                if pixels.density_dots.is_some() {
+                    format!("{}", floe_render_core::dot_block_px_of(floe_render_core::dot_block_px(), pixels.density_plan2.is_some_and(|plan2| plan2[34] > 0)))
+                } else {
+                    "-".to_string()
+                },
                 // pass 2's plans: probe_us/fit_us/probes/passes/regions/nodes/page_nodes/page_candidates/threads/reads/items
                 pixels
                     .density_plan2
@@ -4329,7 +4365,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 34]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 35]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4350,8 +4386,9 @@ fn render_density_frame(
     // each layer's place from the top (0 the top plane): pass 2 decodes the
     // upper planes' pages first (density_top_first)
     let from_top: BTreeMap<u32, u16> = styled.layers.iter().rev().enumerate().map(|(at, layer)| (layer.layer_idx, at.min(u16::MAX as usize) as u16)).collect();
-    // zoomed out past the viewer's fit view, the dots thin (density_zoom_gain)
-    let dot_gain = density_zoom_gain(cache, command, plan.top.0);
+    // zoomed out past the viewer's fit view, the dots thin (density_zoom_gain);
+    // under the brightness (density_bright_gain) they keep their cover
+    let dot_gain = if density_bright_gain(command.cut_px).is_some() { 1.0 } else { density_zoom_gain(cache, command, plan.top.0) };
     let other_layers: Vec<u32> = styled.layers.iter().take(styled.layers.len().saturating_sub(top_planes)).map(|layer| layer.layer_idx).collect();
     // pages planned/in hand/decoded/over the budget, dot items/over the cap
     let mut counts = [0u64; 6];
@@ -4363,10 +4400,15 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 34];
+    let mut plan2 = [0u64; 35];
     plan2[22] = reserve_bytes >> 20;
     // the dots' gain past the fit view, in thousandths (density_zoom_gain)
     plan2[31] = (dot_gain * 1000.0).round() as u64;
+    // the brightness's gain, in thousandths (density_bright_gain; 0: off)
+    plan2[34] = density_bright_gain(command.cut_px).map_or(0, |g| (g * 1000.0).round() as u64);
+    // the dot block the plans take and merge by (64 px at most under the
+    // brightness: floe_vfs dot_block_px_of)
+    let dot_block = floe_render_core::dot_block_px_of(floe_render_core::dot_block_px(), plan2[34] > 0);
     // pass 1's pages: pass 2 holds them already, so they cost its reserve
     // nothing (floe_vfs HierOpts::free_pages; user 2026-10-01: 37 pages of
     // pass 1's, 201 MB by estimate, failed the 0 px floor's probe of a 128 MB
@@ -4560,7 +4602,7 @@ fn render_density_frame(
                             let groups = plans.len() as u64;
                             // over: a band past the reserve, or the merge's pages
                             let over = plans.iter().any(|plan| plan.stats.fit_over);
-                            let mut merged = floe_render_core::Cache::merge_plans(plans, floe_render_core::dot_block_px() / px_per_dbu);
+                            let mut merged = floe_render_core::Cache::merge_plans(plans, dot_block / px_per_dbu);
                             merged.stats.fit_bytes = cache.plan_page_cost(&merged, &held);
                             merged.stats.fit_over = over;
                             Ok(Some((merged, groups)))
@@ -4645,7 +4687,7 @@ fn render_density_frame(
                                             .collect::<Result<Vec<HierPlan>, String>>()
                                     })?;
                                     let groups = plans.len() as u64;
-                                    let merged = floe_render_core::Cache::merge_plans(plans, floe_render_core::dot_block_px() / px_per_dbu);
+                                    let merged = floe_render_core::Cache::merge_plans(plans, dot_block / px_per_dbu);
                                     let mut fit = make_plan_request_cut(cache, command, reserve, command.cut_px)?;
                                     fit.sub_cut_dots = Some((density_cut_px() / command.cut_px).clamp(0.0, 1.0));
                                     fit.regions = region_boxes.clone();
@@ -4739,7 +4781,7 @@ fn render_density_frame(
                                 times[0] += elapsed_us(plan_started);
                                 continue;
                             }
-                            planned_fine = floe_render_core::Cache::merge_plans(std::mem::take(&mut top_plans), floe_render_core::dot_block_px() / px_per_dbu);
+                            planned_fine = floe_render_core::Cache::merge_plans(std::mem::take(&mut top_plans), dot_block / px_per_dbu);
                         }
                         let density_plan = Arc::new(planned_fine);
                         times[0] += elapsed_us(plan_started);
@@ -4910,6 +4952,8 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         free_pages: None,
         // a view whose visible layers no cell holds is an empty picture
         empty_top: true,
+        // the dots' brightness by the detail (density_bright_gain)
+        dot_bright: density_bright_gain(command.cut_px),
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -5561,6 +5605,7 @@ mod tests {
             probe_limit: 0,
             free_pages: None,
             empty_top: true,
+            dot_bright: None,
         };
         assert_ne!(fit_memory_key(&top, &request(&top)), fit_memory_key(&rooted, &request(&rooted)));
         // the clip and the cell queries carry it too

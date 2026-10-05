@@ -120,6 +120,10 @@ pub struct PlanRequest {
     /// - the routing chip's BOUNDARY 100/0). False: an empty plan has no
     /// working cell - a jobdeck source's, whose empty plan is a skipped pass.
     pub empty_top: bool,
+    /// The density stack's brightness (floe_vfs HierOpts::dot_bright): Some(g)
+    /// with GeometryRasterRequest::density_bright - pass 2's dots count the
+    /// area they cover. None: the dots as lit pixels.
+    pub dot_bright: Option<f64>,
 }
 
 impl PlanRequest {
@@ -178,6 +182,7 @@ mod tests {
             probe_limit: 0,
             free_pages: None,
             empty_top: true,
+            dot_bright: None,
         };
         assert!(req.validate().is_err());
     }

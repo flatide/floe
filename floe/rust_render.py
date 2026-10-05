@@ -168,7 +168,11 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  "dot_gain_milli",
                  # the dot blocks left out as too sparse for the detail and
                  # the dots a block needed (2026-10-04)
-                 "dot_gated", "dot_gate_min")
+                 "dot_gated", "dot_gate_min",
+                 # the brightness's gain, thousandths: a pixel shows min(1,
+                 # g x the area its density covers) of its colour (2026-10-05;
+                 # 0: the dots as lit pixels)
+                 "bright_milli")
 
 
 def _viewport_px(job, bbox):

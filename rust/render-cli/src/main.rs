@@ -138,6 +138,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             density_claim_lit: false,
             density_top_planes: 1,
             density_shapes_first: false,
+            density_bright: 0.0,
         };
         let (mode, raster) = if args.styles.is_empty() {
             (
@@ -248,6 +249,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         probe_limit: 0,
         free_pages: None,
         empty_top: true,
+        dot_bright: None,
     })
 }
 
