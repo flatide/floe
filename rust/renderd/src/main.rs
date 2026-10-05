@@ -3411,6 +3411,11 @@ fn run_render_attempt(
     // viewer's margin frame will have - twice the view per axis - so the
     // margin, when it lands, thins as the viewport did (no flip after a zoom)
     let fit_key = fit_memory_key(command, &request);
+    // what that decision took (the frame line's fit_probe_us): it is no part
+    // of the plan's time, and was time under no phase (field 2026-10-05)
+    let mut fit_probe_us = 0u64;
+    // (it walked every cell of the extent: no hierarchy summary to go by)
+    let mut fit_probe_walked = false;
     if !command.exact && !label_only && page_request.decode_budget > 0 {
         if let Some(decision) = state.fit_memory.get(&fit_key).copied() {
             page_request.fixed_fit = Some(decision);
@@ -3431,9 +3436,14 @@ fn run_render_attempt(
                 )?,
                 ..page_request.clone()
             };
-            let decided = cache.plan_cancellable(&probe, command.generation, cancellation)?.plan.stats.fit_decision;
+            // (for its decision alone: cells the extent covers whole are
+            // not walked, floe_render_core Cache::fit_decision_cancellable)
+            let probe_started = Instant::now();
+            let probed = cache.fit_decision_cancellable(&probe, command.generation, cancellation)?;
+            fit_probe_us = elapsed_us(probe_started);
+            fit_probe_walked = probed.walked;
             check_generation(cancellation, command.generation)?;
-            if let Some(decision) = decided {
+            if let Some(decision) = probed.decision {
                 state.fit_memory.insert(fit_key.clone(), decision);
                 page_request.fixed_fit = Some(decision);
             }
@@ -4074,7 +4084,7 @@ fn run_render_attempt(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -4235,6 +4245,10 @@ fn run_render_attempt(
                 // the plans of this frame that passed the budget before it
                 budget_scale.map_or(0, |scale| (scale * 1000.0).round() as u64),
                 refits,
+                // the new scale's fit decision before the plan (0: a scale
+                // decided before, or no fit), and whether it walked
+                fit_probe_us,
+                fit_probe_walked as u8,
             ),
         );
         // Representative batches bound query work, not the number of full

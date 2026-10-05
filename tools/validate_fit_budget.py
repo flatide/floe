@@ -71,7 +71,16 @@ chip (tools/gen_main01_like.py) under a small budget:
     and FLOE_RUST_BUDGET_REFIT=off gives the old error. Under 1 MB, less
     than one of those pages as it was charged, no plan holds: the frame
     draws what the budget holds - nothing here - and reports the pages over
-    it, where it was an error too.
+    it, where it was an error too;
+  * the fit of a new scale is decided by a plan made for that alone, which
+    goes by the hierarchy summary where the walk read every placement of the
+    margin's extent (field 2026-10-05: the first frame at a scale was slow,
+    the time under `other`): 21 first frames of the chip - whole, and
+    windows of a half to a sixteenth of it about five places, each a scale
+    of its own - are the same pixels, pages and fit with the summary and
+    with FLOE_RUST_FIT_PROBE_SUMMARY=off (the walk), both report the probe's
+    time (fit_probe_ms; fit_probe_walk says which), and a scale decided
+    before is not probed again.
 
     .venv/bin/python tools/validate_fit_budget.py
 """
@@ -110,6 +119,20 @@ def worker(src, budget_mb, fit=True, thin=True, retained_mb=0):
     os.environ.pop('FLOE_RUST_FIT_THIN', None)
     os.environ['FLOE_RUST_RETAINED_MB'] = '0'
     return w
+
+
+def worker_with(src, env, budget_mb):
+    """worker() started under `env` (renderd reads it at its start)."""
+    saved = {name: os.environ.get(name) for name in env}
+    os.environ.update(env)
+    try:
+        return worker(src, budget_mb)
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def frame(w, gen, bbox, size=PX, bg=False, density=None):
@@ -214,17 +237,7 @@ def refit_checks(temp):
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
 
-    def start(src, env, budget_mb):
-        saved = {name: os.environ.get(name) for name in env}
-        os.environ.update(env)
-        try:
-            return worker(src, budget_mb)
-        finally:
-            for name, value in saved.items():
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
+    start = worker_with
 
     # the field's case: plain boxes whose pages, as the parser reads them, are
     # charged past their estimate by the room their record lists keep. 400 um
@@ -379,6 +392,53 @@ def refit_checks(temp):
             w.stop()
 
 
+def probe_checks(src):
+    """The fit of a new scale is decided by a plan made for that alone,
+    which goes by the hierarchy summary where the walk read every placement
+    of the extent (render-core Cache::fit_decision_cancellable, floe_vfs
+    HierOpts::decide_by): the same decision - the same pages, fit and pixels
+    in every first frame at a scale - and its time a phase of its own."""
+    by_summary, walked = worker_with(src, {}, 48), worker_with(src, {'FLOE_RUST_FIT_PROBE_SUMMARY': 'off'}, 48)
+    try:
+        x0, y0, x1, y1 = map(float, by_summary.cache.meta['bbox'])
+        w, h = x1 - x0, y1 - y0
+        views = []
+        # the whole chip, then windows of a half, a quarter, an eighth and a
+        # sixteenth of it about five places - each a scale of its own
+        for zoom in (1, 2, 4, 8, 16):
+            for at, (fx, fy) in enumerate(((0.5, 0.5), (0.25, 0.3), (0.7, 0.2), (0.3, 0.75), (0.9, 0.9))):
+                if zoom == 1 and at:
+                    continue
+                side = (1.0 + 1e-4 * at) / zoom
+                cx, cy = x0 + w * fx, y0 + h * fy
+                views.append((cx - w * side / 2, cy - h * side / 2, cx + w * side / 2, cy + h * side / 2))
+        fit_of = lambda res: tuple(res['plan_culls'][key] for key in ('fit_pct', 'fit_thin', 'fit_full_pct', 'fit_none_pct', 'fit_fixed', 'fit_redecided', 'fit_over'))
+        thinned, times = 0, [0.0, 0.0]
+        for gen, view in enumerate(views, 1):
+            a, ra = frame(by_summary, gen, view, size=800)
+            b, rb = frame(walked, gen, view, size=800)
+            assert a is not None and b is not None, (view, ra, rb)
+            assert bytes(a) == bytes(b), 'the summary\'s decision draws another picture than the walk\'s at %r' % (view,)
+            assert (ra['tiles'], fit_of(ra)) == (rb['tiles'], fit_of(rb)), (view, ra['tiles'], fit_of(ra), rb['tiles'], fit_of(rb))
+            # each the first frame at its scale: decided by a probe, the
+            # summary's or the walk's, its time reported
+            assert ra['fit_probe_ms'] > 0 and rb['fit_probe_ms'] > 0, (ra['fit_probe_ms'], rb['fit_probe_ms'])
+            assert ra['fit_probe_walk'] is False and rb['fit_probe_walk'] is True, (ra['fit_probe_walk'], rb['fit_probe_walk'])
+            thinned += ra['plan_culls']['fit_thin'] > 0
+            times[0] += ra['fit_probe_ms']
+            times[1] += rb['fit_probe_ms']
+        assert thinned >= 3, 'the views must need the fit: %d of %d thinned' % (thinned, len(views))
+        # a scale decided before is not probed again
+        _, rr = frame(by_summary, len(views) + 1, views[1], size=800)
+        assert rr['fit_probe_ms'] == 0 and rr['plan_culls']['fit_fixed'] == 1, (rr['fit_probe_ms'], rr['plan_culls'])
+        print('fit budget: a new scale\'s fit is decided by the hierarchy summary as by the walk - %d first frames (%d thinned) the same pages, fit '
+              'and pixels; the probes %.0f ms by the summary, %.0f ms walked; a scale decided before is not probed'
+              % (len(views), thinned, times[0], times[1]))
+    finally:
+        by_summary.stop()
+        walked.stop()
+
+
 def main():
     os.environ['FLOE_INDEX_BIN'] = str(ROOT / 'rust/target/release/floe-index')
     os.environ['FLOE_RENDERD_BIN'] = str(ROOT / 'rust/target/release/floe-renderd')
@@ -515,6 +575,7 @@ def main():
             for w in (tight, tight_off, ladder, roomy, roomy_off):
                 w.stop()
         refit_checks(temp)
+        probe_checks(src)
     print('FIT BUDGET: ALL OK')
 
 

@@ -25,7 +25,7 @@ mod summary;
 mod transform;
 
 pub use cache::{
-    Cache, CacheInfo, CacheLayer, DecodePool, DecodedPage, PagePayload, PlanSummary, PlannedLabels,
+    Cache, CacheInfo, CacheLayer, DecodePool, DecodedPage, FitProbe, PagePayload, PlanSummary, PlannedLabels,
     PlannedView, RenderLabel,
 };
 pub use cancel::RenderCancellation;

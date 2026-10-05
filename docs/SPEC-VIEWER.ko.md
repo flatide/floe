@@ -76,7 +76,7 @@
     덮는 면적. design.ovb와 계층 요약이 있을 때)나 `cells by box`(셀 상자. 둘 중 하나가 없거나
     `FLOE_RUST_DENSITY_CELL_COVER=off`).
   - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
-    - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
+    - 시간: `N ms = L load + D draw`. `+ T text`·`+ P fit probe`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
       붙는다. load의 `[plan+delta+apply]`는 빠진다.
     - 밀도 스택: `density: lit L px, pass 2 plan N ms (nodes …, reads …, cell dots …)`.
       - `lit`은 2패스가 켠 픽셀이다. 컷 아래 셀을 대신하는 점과, 2패스가 페이지에서 꺼내 면적대로

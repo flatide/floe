@@ -698,6 +698,28 @@ one the planner does not fit - no cut (an export at cut 0), or
 `FLOE_RUST_FIT_BUDGET=off` - fail as before. Every frame that drew before
 draws the same bytes.
 
+Since 0.12.302 the fit of a new scale is decided by a plan made for that
+alone (field 2026-10-05: the first frame at a scale was slow, the time under
+`other`). The first frame at a scale plans the extent the viewer's margin
+frame would have - twice the view a side - to decide the scale's budget fit,
+and that plan walked every placement of the extent, most of it outside the
+view, to keep its decision alone; its time was no phase's. Now it goes by
+the hierarchy summary (design.ovh, or the one the daemon makes in memory): a
+cell the extent covers whole takes its children from the summary and its
+placements are not read; in a cell covered in part the walk looks only for
+the children the summary leaves open and ends once each has a member whole
+within the extent. The pages and the decision are the walk's - 975 first
+frames compared, pixel for pixel - and with nothing of the index in the page
+cache the first frame zoomed in 16 times on the synthetic MAIN01 1/10 takes
+279-287 ms for 551-566 (the probe 63 for 336). `FLOE_RUST_FIT_PROBE_SUMMARY=off`
+is the kill switch; a cache of more than four million placement records
+without design.ovh walks as before (`floe-index hier` adds it).
+`FLOE_RUST_FIT_PROBE_CHECK=on` (diagnostic) plans both ways and prints
+`fit probe check: the same|DIFFERENT`. The frame line carries
+`fit_probe_us=` and `fit_probe_walk=`; the status line shows `+ N fit probe`
+from 100 ms and the log line `, fit probe N ms` (` (walk)` without a
+summary).
+
 The operational knobs are `FLOE_RENDERD_BIN`, `FLOE_RUST_JOBS` (page decode,
 default up to 8 host CPUs), `FLOE_RUST_RASTER_JOBS` (default up to 4 and never
 above decode jobs), `FLOE_RUST_BUDGET_MB` (1024), `FLOE_RUST_ROUND_PAGES` (1024),

@@ -280,6 +280,15 @@ pub struct PagePayload {
     pub bytes: Vec<u8>,
 }
 
+/// Cache::fit_decision_cancellable's answer: the budget fit a plan of the
+/// request decides (None: no fit), and whether the plan walked every cell -
+/// no hierarchy summary to go by, or the kill switch.
+#[derive(Clone, Copy, Debug)]
+pub struct FitProbe {
+    pub decision: Option<floe_vfs::hier::FixedFit>,
+    pub walked: bool,
+}
+
 pub struct DecodedPage {
     pub page_id: u32,
     pub layer_idx: u32,
@@ -439,6 +448,14 @@ impl SharedLists {
 fn charge_shared_once() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FLOE_RUST_CHARGE_SHARED").as_deref() != Ok("off"))
+}
+
+/// The probe of a new scale's budget fit goes by the hierarchy summary
+/// (Cache::fit_decision_cancellable): on; FLOE_RUST_FIT_PROBE_SUMMARY=off is
+/// the kill switch.
+fn fit_probe_by_summary() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_FIT_PROBE_SUMMARY").as_deref() != Ok("off"))
 }
 
 /// A decoded page's record lists are cut to their length (decode_payload):
@@ -1348,13 +1365,61 @@ impl Cache {
         self.plan_stopping(request, Some(cancellation.plan_stop(generation)))
     }
 
+    /// The budget fit a plan of `request` decides, and nothing else of it:
+    /// renderd's probe of a new scale, over the extent the viewer's margin
+    /// frame would have. The plan is made for its decision alone
+    /// (floe_vfs HierOpts::decide_by): a cell the extent covers whole takes
+    /// its children from the hierarchy summary (design.ovh, or the one the
+    /// daemon made in memory) and its placements are not read - the same
+    /// pages and the same decision as the walk's, without the index of what
+    /// lies inside the extent (field 2026-10-05: the first frame at a scale
+    /// waited for it, the time under no phase; on the synthetic MAIN01 1/10
+    /// with nothing of the index in the page cache 0.77 s zoomed in 4 times
+    /// and 0.34 s zoomed in 16, where the view's own plan took 0.02 s).
+    /// FLOE_RUST_FIT_PROBE_SUMMARY=off is the kill switch: the walk, as
+    /// 0.12.301 - as without a summary (a cache of more than
+    /// HIER_INLINE_PLACES placement records that has no design.ovh:
+    /// `floe-index hier` adds it). FLOE_RUST_FIT_PROBE_CHECK=on (diagnostic)
+    /// walks as well and says where the two differ; the walk's decision is
+    /// then the one taken.
+    pub fn fit_decision_cancellable(&self, request: &PlanRequest, generation: u64, cancellation: &crate::RenderCancellation) -> Result<FitProbe, String> {
+        let summary = if fit_probe_by_summary() { self.hier.summary().ok().filter(|summary| summary.n_cells == self.vfs.ovm.n_cells) } else { None };
+        let walked = summary.is_none();
+        let checked = summary.is_some() && std::env::var("FLOE_RUST_FIT_PROBE_CHECK").as_deref() == Ok("on");
+        let decided = self.plan_deciding(request, Some(cancellation.plan_stop(generation)), summary)?;
+        if checked {
+            let walked = self.plan_deciding(request, Some(cancellation.plan_stop(generation)), None)?;
+            let same = decided.plan.pages == walked.plan.pages && decided.plan.stats.fit_decision == walked.plan.stats.fit_decision;
+            // (the lines a field run is asked for)
+            eprintln!(
+                "[render-core] fit probe check: {} - by the summary {} pages in {} us ({} cells whole, {} nodes read), by the walk {} pages in {} us ({} nodes read)",
+                if same { "the same" } else { "DIFFERENT" },
+                decided.plan.pages.len(),
+                decided.stats.plan_us,
+                decided.plan.stats.whole_cells,
+                decided.plan.stats.visited_bvh,
+                walked.plan.pages.len(),
+                walked.stats.plan_us,
+                walked.plan.stats.visited_bvh,
+            );
+            return Ok(FitProbe { decision: walked.plan.stats.fit_decision, walked: true });
+        }
+        Ok(FitProbe { decision: decided.plan.stats.fit_decision, walked })
+    }
+
     fn plan_stopping(&self, request: &PlanRequest, stop: Option<floe_vfs::hier::PlanStop>) -> Result<PlannedView, String> {
+        self.plan_deciding(request, stop, None)
+    }
+
+    /// plan_stopping; with `decide_by` the plan is for its fit decision alone
+    /// (fit_decision_cancellable).
+    fn plan_deciding(&self, request: &PlanRequest, stop: Option<floe_vfs::hier::PlanStop>, decide_by: Option<std::sync::Arc<floe_vfs::hiersum::HierSummary>>) -> Result<PlannedView, String> {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
         // the cells' cover: the brightness's dots plans alone ask for it
         let cover = if request.dot_bright.is_some() && request.sub_cut_dots.is_some() { self.cell_cover() } else { None };
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright, request.dot_occ_first, cover);
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright, request.dot_occ_first, cover, decide_by);
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }

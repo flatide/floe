@@ -1404,6 +1404,24 @@ pub struct HierOpts {
     /// FLOE_RUST_DENSITY_CELL_COVER=off is the kill switch). None: every
     /// member its box, as 0.12.299.
     pub cell_cover: Option<Arc<crate::cover::CellCover>>,
+    /// The plan is made for its fit decision alone (renderd's probe of a new
+    /// scale, over the extent the viewer's margin frame would have) and goes
+    /// by the hierarchy summary where it can (Hier::decide_children): a
+    /// working cell one of its boxes covers whole takes its children from
+    /// the summary's edges - every distinct child the walk would expand,
+    /// covered whole in its turn - and its placements are not read; in a
+    /// cell covered in part a child whose placements all lie within a box
+    /// is covered whole too, one whose placements lie outside the boxes is
+    /// not there, and the walk looks for the others alone, ending once each
+    /// of them has a member whole within a box (field 2026-10-05: the
+    /// probe's walk read the index of the whole extent, most of it outside
+    /// the view, before the first frame at a scale; on the synthetic MAIN01
+    /// 1/10 with nothing of the index in the page cache 0.58 of its 0.63 s
+    /// zoomed in 4 times and 0.25 of 0.33 s zoomed in 16 went on cells
+    /// covered whole). The plan's pages, and so its decision, are the
+    /// walk's; its instances, frames, boxes and counts are not - the caller
+    /// keeps the decision alone. None: the walk.
+    pub decide_by: Option<Arc<crate::hiersum::HierSummary>>,
     /// Under HierOpts::dot_bright, a child-BVH node no wider than a box
     /// counts what its placements hold where it counted its whole box - a
     /// node with as many placements as its box has sixteenths (node_holds: "a
@@ -1649,6 +1667,7 @@ impl Default for HierOpts {
             dot_bright: None,
             dot_bright_sums: dot_bright_sums(),
             cell_cover: None,
+            decide_by: None,
             dot_node_sample: dot_node_sample(),
             dot_node_read_all: dot_node_counts().0,
             dot_node_samples: dot_node_counts().1,
@@ -1899,6 +1918,9 @@ pub struct HierStats {
     /// that has to thin applies the given one (plan_hier_fixed; user
     /// 2026-10-01)
     pub fit_whole: bool,
+    /// HierOpts::decide_by: the working cells a box covered whole, their
+    /// children taken from the hierarchy summary and no placement read
+    pub whole_cells: u64,
     /// dots emitted for representative cut placements (kept members
     /// in view, before the layer fan-out) and for cut child-BVH
     /// subtrees within the dot pitch (one each)
@@ -2209,6 +2231,11 @@ pub fn walk_vis(req: &ViewReq) -> Vec<u8> {
     } else {
         req.vis.clone()
     }
+}
+
+/// `outer` holds all of `inner`.
+fn box_covers(outer: &BBox, inner: &BBox) -> bool {
+    outer.x0 <= inner.x0 && outer.y0 <= inner.y0 && outer.x1 >= inner.x1 && outer.y1 >= inner.y1
 }
 
 pub fn plan_hier(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
@@ -3154,7 +3181,8 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         thin_bins: HashSet::new(),
         frames_total: 0,
     };
-    if (req.sub_cut_box || h.dots)
+    // (a plan for its decision alone, HierOpts::decide_by, draws no box)
+    if (req.sub_cut_box && opts.decide_by.is_none() || h.dots)
         && req.cut_dbu > 0
         && req.px_per_dbu > 0.0
         && !req.sub_cut_wash
@@ -3964,7 +3992,11 @@ impl<'a> Hier<'a> {
         }
         // ---- children (r = 0: depth exhausted - children render
         // as outline frames; own pages above carry the geometry)
-        if cell.bvh_count != 0 {
+        // (a plan for its decision alone settles what it can of them by the
+        // hierarchy summary, HierOpts::decide_by: `open` are the children the
+        // walk is still to find - none: no placement is read)
+        let mut open = self.decide_children(ci, r, &cell.rbbox, &boxes);
+        if !open.as_ref().is_some_and(|open| open.is_empty()) && cell.bvh_count != 0 {
             // Inline triage during the walk (field fix, 9.8G class:
             // 184M placements). Collecting every visible instance
             // into a set BEFORE cut classification made a wide view
@@ -3997,11 +4029,15 @@ impl<'a> Hier<'a> {
             let mut edges: BTreeSet<u64> = BTreeSet::new();
             let mut framed: HashSet<u64> = HashSet::new();
             for b in &boxes {
-                if self.cancelled {
+                if self.cancelled || open.as_ref().is_some_and(|open| open.is_empty()) {
                     break;
                 }
                 let mut stack = vec![cell.bvh_start];
                 while let Some(ni) = stack.pop() {
+                    // (every child left to find was found whole)
+                    if open.as_ref().is_some_and(|open| open.is_empty()) {
+                        break;
+                    }
                     let node = self.v.bvh(ni);
                     self.st.visited_bvh += 1;
                     if self.tick() {
@@ -4121,6 +4157,23 @@ impl<'a> Hier<'a> {
                         let rb = self.v.cell_rbbox(h.child);
                         if rb.is_empty() {
                             continue;
+                        }
+                        if let Some(open) = open.as_mut() {
+                            // HierOpts::decide_by: a child the summary
+                            // settled is not looked at again; of the others,
+                            // one with every member of this record within a
+                            // box is covered whole - no other placement of
+                            // it adds a page
+                            if !open.contains(&h.child) {
+                                continue;
+                            }
+                            let extent = crate::hiersum::record_extent(self.v, pli, &h, &rb);
+                            if boxes.iter().any(|b| box_covers(b, &extent)) {
+                                let child_r = if r == REM_FULL { REM_FULL } else { self.norm_r(h.child, r - 1) };
+                                self.contribute((h.child, child_r), rb);
+                                open.remove(&h.child);
+                                continue;
+                            }
                         }
                         let cw = (rb.x1 - rb.x0).max(0) as u64;
                         let chh = (rb.y1 - rb.y0).max(0) as u64;
@@ -4318,6 +4371,73 @@ impl<'a> Hier<'a> {
             self.cell_under.clear();
         }
         self.out.insert(key, wc);
+    }
+
+    /// HierOpts::decide_by: what the hierarchy summary settles of cell
+    /// `ci`'s children, `r` levels left below it, under its `boxes` - and
+    /// the children left for the walk to find (None: the plan is not for its
+    /// decision alone, or draws what only the walk makes - dots,
+    /// representatives, washes - and the walk goes as it is).
+    ///
+    /// The walk expands a placement by its child cell alone - its box
+    /// against the cut and the hairline, its layers, the depth left (a
+    /// child-BVH node's size and layer prunes say the same of every child
+    /// below it) - and a child with a member whole within a box is covered
+    /// whole: every page of its own that the request takes, and its children
+    /// in their turn. So of the summary's distinct children that the walk
+    /// would expand:
+    ///  - in a cell a box covers whole, each is covered whole (a placement's
+    ///    box lies within its parent's);
+    ///  - one whose placements' extent a box covers is covered whole;
+    ///  - one whose placements' extent meets no box is not there;
+    ///  - the others are left to the walk, which ends once each has a member
+    ///    whole within a box (the placements of the rest are not looked at).
+    /// At the depth's end the children are outlines, no page of theirs:
+    /// nothing is left.
+    fn decide_children(&mut self, ci: u32, r: u32, rbbox: &BBox, boxes: &[BBox]) -> Option<FxSet<u32>> {
+        let summary = self.opts.decide_by.clone()?;
+        if self.dots || self.reps || self.sub_cut_wash || summary.n_cells != self.v.n_cells {
+            return None;
+        }
+        let mut open = FxSet::default();
+        if r == 0 {
+            return Some(open);
+        }
+        let whole = !rbbox.is_empty() && boxes.iter().any(|b| box_covers(b, rbbox));
+        if whole {
+            self.st.whole_cells += 1;
+        }
+        let (cut, hair) = (self.cut, self.child_hair());
+        for edge in summary.children(ci) {
+            if self.tick() {
+                break;
+            }
+            if edge.child >= self.v.n_cells {
+                continue;
+            }
+            let rb = self.v.cell_rbbox(edge.child);
+            if rb.is_empty() {
+                continue;
+            }
+            let cw = (rb.x1 - rb.x0).max(0) as u64;
+            let ch = (rb.y1 - rb.y0).max(0) as u64;
+            // (the placement loop's: a sub-cut or hairline-thin child folds)
+            if (cw < cut && ch < cut) || cw.min(ch) < hair {
+                continue;
+            }
+            // (a finite depth walks structure for the frames whatever the
+            // layers; full depth, and frames off, only where a layer shows)
+            if (r == REM_FULL || self.frame_cap == 0) && !masks_intersect(self.v.bitset(self.v.cell_lmask_rec(edge.child)), &self.walk_vis) {
+                continue;
+            }
+            if whole || (!edge.extent.is_empty() && boxes.iter().any(|b| box_covers(b, &edge.extent))) {
+                let child_r = if r == REM_FULL { REM_FULL } else { self.norm_r(edge.child, r - 1) };
+                self.contribute((edge.child, child_r), rb);
+            } else if edge.extent.is_empty() || boxes.iter().any(|b| b.intersects(&edge.extent)) {
+                open.insert(edge.child);
+            }
+        }
+        Some(open)
     }
 
     /// HierOpts::sub_cut_dots: `fp` (cell-local) stands for sub-cut content
@@ -7324,7 +7444,7 @@ impl crate::Vfs {
     /// hairline policy is the request's (ViewReq::page_hairline);
     /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
-        self.plan_hier_in(req, &[], None, None, None, 0, None, None, None, None, None)
+        self.plan_hier_in(req, &[], None, None, None, 0, None, None, None, None, None, None)
     }
 
     /// `plan_hier` over `regions` of the view instead of the whole view
@@ -7348,11 +7468,13 @@ impl crate::Vfs {
         dot_bright: Option<f64>,
         dot_occ_first: Option<f64>,
         cell_cover: Option<Arc<crate::cover::CellCover>>,
+        decide_by: Option<Arc<crate::hiersum::HierSummary>>,
     ) -> HierPlan {
         let mut opts = HierOpts::default();
         opts.dot_bright = dot_bright;
         opts.dot_occ_first = dot_occ_first;
         opts.cell_cover = cell_cover;
+        opts.decide_by = decide_by;
         opts.fixed_fit = fixed_fit;
         opts.sub_cut_dots = sub_cut_dots;
         opts.dot_records = dot_records;
@@ -8326,6 +8448,150 @@ mod tests {
         // a budget no page that costs fits: the cells' dots, no page, no decision
         let none = plan_hier(&chip, &ask(per / 2), &dots(true));
         assert!(none.pages.is_empty() && none.stats.fit_decision.is_none() && none.stats.fit_dropped && items(&none) == items(&asked));
+    }
+
+    #[test]
+    fn a_plan_for_its_decision_alone_takes_a_covered_cells_children_from_the_summary() {
+        // HierOpts::decide_by (field 2026-10-05: the first frame at a scale
+        // waited for a walk of the whole extent its margin would have): the
+        // same pages, the same decision; the placements of a cell covered
+        // whole are not read, and in a cell covered in part the walk ends
+        // once every child there has a member whole within the view.
+        // Children first: A (layer 1), S@2 (60 x 60: under a cut of 100),
+        // W@2 (layer 2), H (a hairline: 2000 x 8); MID holds A five times -
+        // turned, mirrored, an array of two - and S, H and a page of its
+        // own; BLOCK nine MIDs, W and A; TOP four BLOCKs, a MID, two pages.
+        let page = |x0: i64, y0: i64, w: i64, h: i64| (bx(x0, y0, x0 + w, y0 + h), w as u64, h as u64);
+        let mut mids = Vec::new();
+        for j in 0..3 {
+            for i in 0..3 {
+                mids.push((4usize, i * 4000, j * 4000, 0u8, false, Rep::One));
+            }
+        }
+        mids.push((2, 500, 12_000, 0, false, Rep::One));
+        mids.push((0, 9_000, 12_000, 0, false, Rep::One));
+        let chip = fixture(
+            &[
+                FCell { name: "A", pages: vec![page(0, 0, 400, 400), page(500, 0, 400, 300), page(0, 500, 150, 150)], places: vec![] },
+                FCell { name: "S@2", pages: vec![page(0, 0, 60, 60)], places: vec![] },
+                FCell { name: "W@2", pages: vec![page(0, 0, 900, 900), page(0, 0, 80, 80)], places: vec![] },
+                FCell { name: "H", pages: vec![page(0, 0, 2000, 8)], places: vec![] },
+                FCell {
+                    name: "MID",
+                    pages: vec![page(0, 2000, 300, 300)],
+                    places: vec![
+                        (0, 0, 0, 0, false, Rep::One),
+                        (0, 2000, 0, 1, false, Rep::One),
+                        (0, 0, 1000, 0, true, Rep::One),
+                        (0, 1000, 1700, 0, false, Rep::Grid { na: 2, nb: 1, va: (950, 0), vb: (0, 0) }),
+                        (1, 2900, 2500, 0, false, Rep::One),
+                        (3, 0, 2400, 0, false, Rep::One),
+                    ],
+                },
+                FCell { name: "BLOCK", pages: vec![], places: mids },
+                FCell {
+                    name: "TOP",
+                    pages: vec![page(0, 30_000, 5000, 5000), page(40_000, 30_000, 120, 120)],
+                    places: vec![
+                        (5, 0, 0, 0, false, Rep::One),
+                        (5, 20_000, 0, 0, false, Rep::One),
+                        (5, 0, 15_000, 0, false, Rep::One),
+                        (5, 20_000, 15_000, 2, false, Rep::One),
+                        (4, 45_000, 0, 0, false, Rep::One),
+                    ],
+                },
+            ],
+            6,
+        );
+        let summary = Arc::new(crate::hiersum::HierSummary::from_bytes(crate::hiersum::build(&chip).0).unwrap());
+        let walk = HierOpts::default();
+        let by_summary = HierOpts { decide_by: Some(Arc::clone(&summary)), ..HierOpts::default() };
+        let views = [
+            bx(-100, -100, 100_000, 100_000), // everything
+            bx(-100, -100, 25_000, 14_000),   // a block whole, the next one cut
+            bx(3900, -100, 7100, 2700),       // a MID whole within a block
+            bx(2500, 500, 6500, 3000),        // MIDs cut
+            bx(100, 100, 300, 300),           // within an A
+            bx(60_000, 60_000, 70_000, 70_000), // nothing
+        ];
+        let per = page_memory(1, 0);
+        let (mut combos, mut whole, mut nodes) = (0u32, 0u64, [0u64; 2]);
+        for view in views {
+            for depth in [u32::MAX, 0, 1, 2, 3] {
+                for cut in [10i64, 100, 500, 1000] {
+                    for budget in [0u64, 1, 2 * per, 5 * per + per / 2, 1000 * per] {
+                        for vis in [0b11u8, 0b01, 0b10] {
+                            for (frames, root) in [(true, None), (false, None), (true, Some(5u32))] {
+                                let mut r = rq(view, cut, depth);
+                                r.px_per_dbu = 0.02;
+                                r.decode_budget = budget;
+                                r.vis = vec![vis];
+                                r.frames = frames;
+                                r.root = root;
+                                let (a, b) = (plan_hier(&chip, &r, &walk), plan_hier(&chip, &r, &by_summary));
+                                let what = format!("view {view:?} depth {depth} cut {cut} budget {budget} vis {vis:#b} frames {frames} root {root:?}");
+                                assert_eq!(a.pages, b.pages, "{what}");
+                                let fit = |p: &HierPlan| (p.stats.fit_decision, p.stats.fit_whole, p.stats.fit_over, p.stats.fit_bytes, p.stats.fit_pct, p.stats.fit_thin, p.stats.fit_passes);
+                                assert_eq!(fit(&a), fit(&b), "{what}");
+                                assert_eq!(a.stats.whole_cells, 0);
+                                combos += 1;
+                                whole += b.stats.whole_cells;
+                                nodes[0] += a.stats.visited_bvh;
+                                nodes[1] += b.stats.visited_bvh;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // cells were covered whole, and their placements not read
+        assert!(combos == 5400 && whole > combos as u64 / 2, "{whole} cells covered whole in {combos} plans");
+        assert!(nodes[1] * 3 < nodes[0] * 2, "child-BVH nodes read: {} by the walk, {} with the summary", nodes[0], nodes[1]);
+        // everything in view: the top itself is covered - no placement read at all
+        let mut r = rq(views[0], 100, u32::MAX);
+        r.px_per_dbu = 0.02;
+        r.decode_budget = 3 * per;
+        let (a, b) = (plan_hier(&chip, &r, &walk), plan_hier(&chip, &r, &by_summary));
+        assert!(a.stats.visited_bvh > 0 && b.stats.visited_bvh == 0 && b.stats.whole_cells >= 4, "{} / {} nodes, {} cells", a.stats.visited_bvh, b.stats.visited_bvh, b.stats.whole_cells);
+        assert!(a.stats.fit_decision.is_some() && a.stats.fit_decision == b.stats.fit_decision);
+        // a cell covered in part: 64 placements of two cells in rows (a leaf
+        // a row), the view over three rows and a half - a member of each is
+        // whole in view in the first leaf that meets it, and the walk ends
+        // there
+        let mut rows = Vec::new();
+        for j in 0..8i64 {
+            for i in 0..8i64 {
+                rows.push((((i + j) % 2) as usize, i * 1000, j * 1000, 0u8, false, Rep::One));
+            }
+        }
+        let flat = fixture(
+            &[
+                FCell { name: "P", pages: vec![page(0, 0, 400, 400), page(450, 0, 200, 200)], places: vec![] },
+                FCell { name: "Q@2", pages: vec![page(0, 0, 500, 300)], places: vec![] },
+                FCell { name: "TOP", pages: vec![], places: rows },
+            ],
+            2,
+        );
+        let rows_summary = HierOpts { decide_by: Some(Arc::new(crate::hiersum::HierSummary::from_bytes(crate::hiersum::build(&flat).0).unwrap())), ..HierOpts::default() };
+        for (view, least) in [(bx(-50, -50, 8000, 3500), 9u64), (bx(2100, 2100, 2300, 2300), 2), (bx(2100, 2100, 4300, 2300), 2)] {
+            let mut r = rq(view, 100, u32::MAX);
+            r.px_per_dbu = 0.02;
+            r.decode_budget = 2 * per + per / 2;
+            let (a, b) = (plan_hier(&flat, &r, &walk), plan_hier(&flat, &r, &rows_summary));
+            assert_eq!((a.pages.clone(), a.stats.fit_decision, a.stats.fit_bytes), (b.pages.clone(), b.stats.fit_decision, b.stats.fit_bytes), "{view:?}");
+            assert!(a.stats.visited_bvh >= least && b.stats.visited_bvh <= a.stats.visited_bvh, "{view:?}: {} / {} nodes", a.stats.visited_bvh, b.stats.visited_bvh);
+            if least == 9 {
+                // (the walk looks at the root and its eight leaves, and reads
+                // the four in view; with the summary it stops at the first of
+                // them, the fifth leaf off the stack)
+                assert_eq!((a.pages.len(), a.stats.visited_bvh, b.stats.visited_bvh), (2, 9, 6), "{view:?}");
+            }
+        }
+        // a summary of another index is not gone by: the walk
+        let other = fixture(&[FCell { name: "TOP", pages: vec![page(0, 0, 400, 400)], places: vec![] }], 0);
+        let foreign = HierOpts { decide_by: Some(Arc::new(crate::hiersum::HierSummary::from_bytes(crate::hiersum::build(&other).0).unwrap())), ..HierOpts::default() };
+        let c = plan_hier(&chip, &r, &foreign);
+        assert_eq!((c.pages.clone(), c.stats.whole_cells, c.stats.visited_bvh), (a.pages.clone(), 0, a.stats.visited_bvh));
     }
 
     #[test]

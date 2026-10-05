@@ -532,6 +532,15 @@ sh tools/validate_rust.sh --only quick path/to.oas
   - 0.12.300의 부과로 1 MB(페이지 하나보다 작음): 오류가 아니라 예산이 담는 만큼 그린 프레임이고
     `over_budget_pages`가 1 이상, `fit_over` 1이다.
   - 어댑터 계약: 프레임 줄의 `fit_scale`·`fit_refits`, 상태줄 `x2 to fit budget, STILL OVER, pages x1.18 their estimate`.
+  0.12.302 `probe_checks`(실칩 2026-10-05: 새 배율의 첫 프레임이 느리고 원인이 other): 합성 칩(48 MB)의 첫 프레임
+  21개 — 칩 전체, 그리고 다섯 곳에서 1/2·1/4·1/8·1/16 크기의 창, 저마다 다른 배율 — 를 기본 워커와
+  `FLOE_RUST_FIT_PROBE_SUMMARY=off` 워커로 그린다.
+  - 프레임마다 픽셀, 계획한 페이지 수, 맞춤 통계(`fit_pct`·`fit_thin`·`fit_full_pct`·`fit_none_pct`·`fit_fixed`·
+    `fit_redecided`·`fit_over`)가 같다. 맞춤이 솎은 프레임이 3개 이상이어야 한다(실측 9개).
+  - 둘 다 `fit_probe_ms` > 0이고 `fit_probe_walk`는 기본 False, 스위치를 끈 쪽 True다.
+  - 이미 결정한 배율을 다시 청하면 `fit_probe_ms` 0, `fit_fixed` 1이다.
+  - 어댑터 계약: 프레임 줄의 `fit_probe_us`·`fit_probe_walk`, 단계 합에 든 사전 계획(`other_ms` 15 → 12), 상태줄
+    `… + 3916 draw + 1054 fit probe + 639 other`(100 ms 미만은 로그 줄에만), 로그 줄 `, fit probe 28.0ms (walk)`.
 - `representatives`(tools/validate_representatives.py, 약 10초; `render`·`indexer`
   별칭에 포함): design.ovr 추가 생성이 캐시를 보존하는지, depth 0 제외·kill switch·
   손상 파일 폴백, 그리고 결합 인덱스 실행에서 OVR 생성이 실패해도(`--kill-at

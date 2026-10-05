@@ -777,6 +777,18 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # (2026-10-05): the scale its budget was cut by, with the fit
         scaled = dict(res, plan_culls=dict(res["plan_culls"], fit_scale=1180))
         self.assertIn("x2 to fit budget, STILL OVER, pages x1.18 their estimate", perf_status(scaled)[0])
+        # the budget fit decided for a new scale before its plan (2026-10-05:
+        # it was part of `other`): its own item from 100 ms, in the log line
+        # whenever there was one
+        probed_full, probed_brief = perf_status(dict(res, fit_probe_ms=1054.2, other_ms=639))
+        self.assertTrue(probed_brief.startswith("4324 ms = 250 load + 3916 draw + 1054 fit probe + 639 other · "), probed_brief)
+        self.assertIn(", fit probe 1054.2ms", probed_full)
+        quick_full, quick_brief = perf_status(dict(res, fit_probe_ms=28.0))
+        self.assertNotIn("fit probe", quick_brief)
+        self.assertIn(", fit probe 28.0ms,", quick_full)
+        # no hierarchy summary to go by: the probe walked every cell
+        self.assertIn(", fit probe 28.0ms (walk),", perf_status(dict(res, fit_probe_ms=28.0, fit_probe_walk=True))[0])
+        self.assertNotIn("fit probe", full)
 
         # the synthetic chip at medium, 694 um around (14722, 17090) um: no
         # cell under the cut, the shapes of 1-3 px drawn from 54 pages
@@ -2025,8 +2037,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2"
                                  "/30000/20000/5000/34860/40/9000/100/3/7/896/2/1/500/128000/60/15360/40000/7000/640/1200/2/2000/9/1/1500/800",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
-                # its phases above add up to 45.25 ms
+                # its phases above add up to 45.25 ms, and 3 ms went on the
+                # new scale's fit decision before the plan
                 "queue_us": "1500", "wall_us": "60000",
+                "fit_probe_us": "3000", "fit_probe_walk": "1",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
@@ -2071,7 +2085,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             # the time no phase covers: renderd's own (other) and the
             # client's beyond renderd's wall (wait = queue + pipe)
             self.assertEqual((result["queue_ms"], result["wall_ms"]), (1.5, 60.0))
-            self.assertEqual(result["other_ms"], 15)
+            # (the fit probe is a phase of its own, no longer `other`)
+            self.assertEqual((result["fit_probe_ms"], result["fit_probe_walk"]), (3.0, True))
+            self.assertEqual(result["other_ms"], 12)
             self.assertTrue(900 <= result["wait_ms"] <= 945, result["wait_ms"])
             self.assertEqual(result["cache_hit"], 14)
             self.assertEqual(result["cache_miss"], 2)

@@ -735,6 +735,11 @@ def perf_status(res, depth_note=""):
             res["load_ms"], ph,
             " + %d text" % text if text >= 100 else "",
             res["draw_ms"])
+        # the budget fit decided for a new scale before its
+        # plan (field 2026-10-05: it was part of `other`)
+        probe = res.get("fit_probe_ms", 0) or 0
+        if probe >= 100:
+            split += " + %d fit probe" % round(probe)
         # renderd time no phase covers, and time spent
         # waiting behind earlier commands (queue + pipe)
         if res.get("other_ms", 0) > 200:
@@ -815,6 +820,12 @@ def perf_status(res, depth_note=""):
         text += ", plan %.1fms/%s frontier" % (
             res["plan_ms"],
             fmt_count(res.get("frame_rects", 0)))
+        if res.get("fit_probe_ms"):
+            # "walk": no hierarchy summary to go by (design.ovh,
+            # `floe-index hier`) - every cell of the extent read
+            text += ", fit probe %.1fms%s" % (
+                res["fit_probe_ms"],
+                " (walk)" if res.get("fit_probe_walk") else "")
     if res.get("text_plan_ms") is not None:
         text += ", text %.1fms/%s places" % (
             res["text_plan_ms"],

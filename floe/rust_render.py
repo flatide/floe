@@ -741,6 +741,7 @@ class RustRenderWorker:
             "started": time.monotonic(), "new": 0,
             "read_us": 0, "decode_us": 0, "scene_us": 0,
             "draw_us": 0, "png_us": 0, "plan_us": 0,
+            "fit_probe_us": 0, "fit_probe_walk": 0,
             "publish_write_us": 0, "publish_sync_us": 0,
             "publish_rename_us": 0, "adapter_read_us": 0,
             "cache_hit": 0, "cache_evicted": 0, "render_tiles": 0,
@@ -1358,6 +1359,11 @@ class RustRenderWorker:
             refining = 0
 
         state["plan_us"] = _wire_int(fields, "plan_us")
+        # the budget fit decided for a new scale before the plan (0.12.302:
+        # its own phase - it was time under none, the status line's `other`)
+        state["fit_probe_us"] = _wire_int(fields, "fit_probe_us")
+        # (it walked every cell of the extent: no hierarchy summary to go by)
+        state["fit_probe_walk"] = _wire_int(fields, "fit_probe_walk")
         state["read_us"] += _wire_int(fields, "read_us")
         state["decode_us"] += _wire_int(fields, "decode_us")
         state["scene_us"] += _wire_int(fields, "scene_us")
@@ -1450,6 +1456,7 @@ class RustRenderWorker:
                                    state["adapter_read_us"] / 1000.0))
             if not probe:
                 phases_us = (state["plan_us"] + state["text_plan_us"] +
+                             state["fit_probe_us"] +
                              state["read_us"] + state["decode_us"] +
                              state["scene_us"] + state["draw_us"] +
                              state["png_us"] + state["publish_write_us"] +
@@ -1510,6 +1517,8 @@ class RustRenderWorker:
             "other_ms": other_ms,
             "ms": round(elapsed_ms),
             "plan_ms": state["plan_us"] / 1000.0,
+            "fit_probe_ms": state["fit_probe_us"] / 1000.0,
+            "fit_probe_walk": bool(state["fit_probe_walk"]),
             "wc_cells": _wire_int(fields, "wc_cells"),
             "inst_edges": _wire_int(fields, "inst_edges"),
             "frame_rects": _wire_int(fields, "frame_rects"),
