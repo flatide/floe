@@ -28,7 +28,46 @@ sh tools/validate_rust.sh --only quick path/to.oas
   소스보다 새로우면 그대로 쓴다(`== VFS cache reused` 줄). `--only` 없는 전체
   배터리는 캐시를 매번 다시 만들어 형식 변경이 묵은 캐시 뒤에 숨지 못하게 한다.
 - 유닛 게이트: `unit`(워크스페이스 debug `cargo test`), `unit_vfs`·`unit_render`
-  (release `--lib`; release 프로필의 doctest는 LTO와 어긋나 제외).
+  (release `--lib`; release 프로필의 doctest는 LTO와 어긋나 제외), `unit_renderd`(release, renderd의 유닛;
+  0.12.304 — `render` 별칭에 포함).
+- **바뀐 파일로 고르기(`--changed`, 2026-10-06; 사용자: "매번 배터리 통과를 기다리는 것은 비효율적 — 관련 있는 검사만").**
+
+  ```sh
+  sh tools/validate_rust.sh --changed              # HEAD와 다른 파일(작업 트리·인덱스·새 파일)이 부르는 게이트
+  sh tools/validate_rust.sh --changed=origin/feature/jobdeck   # 그 리비전 이후 바뀐 파일
+  sh tools/validate_rust.sh --changed --dry-run    # 무엇을 돌릴지만 말한다
+  sh tools/validate_rust.sh --files=rust/vfs/src/hier.rs,floe/gui.py --dry-run   # 그 경로들이 부르는 게이트
+  ```
+
+  - 경로마다 게이트가 정해져 있다(스크립트의 `gates_for`; 먼저 맞는 규칙이 이긴다).
+    - 문서(`docs/`, `*.md`), 게이트가 쓰지 않는 도구(벤치·실험·생성기): 없음. 전부 그런 파일이면 아무것도 돌리지
+      않고 `RUST VALIDATION: ALL OK (--changed; gates: none)`으로 끝난다.
+    - `tools/validate_<게이트>.py`: 그 게이트.
+    - 버전 줄만 바뀐 `floe/__init__.py`·`Cargo.toml`·`Cargo.lock`(푸시마다 바뀐다): `rust_renderer`, `floe2`,
+      `index_cli`. 다른 줄도 바뀌었으면 전체.
+    - `floe/gui.py` 등 뷰어: `rust_renderer`, `floe2`, `jobdeck`, `density_stack`.
+    - renderd·render-core·render-cli·`floe/rust_render.py`(그리는 경로): `unit_render`, `unit_renderd`,
+      `rust_renderer`, `jobdeck`, `occupancy`, `fit_budget`, `sub_cut_box`, `shape_cut`, `write_once`,
+      `layer_decode`, `area_true`, `density_stack`, `cell_tree`, `representatives`, `oasis_shapes`, `floe2`,
+      `klayout`. `deck.rs`·`cells.rs`는 더 좁다.
+    - 계획기(`rust/vfs/src/hier.rs`·`cover.rs`): 위에 `unit_vfs`, `vfs_hier`, `vfs_lifecycle`, `vfs_marker`,
+      `vfs_split`, `vfs_text`, `vfs_profile`. `hiersum.rs`·`occupancy.rs`·`representatives`는 더 좁다.
+    - 모든 것이 걸린 파일 — 파서(`rust/oasis`), 인덱스 형식(`rust/ovm`), tiler, VFS의 나머지, floe-index
+      (`rust/cli`), vendor, `floe/cache.py`·`cachepath.py`, 이 스크립트, `gen_valmini.py` — 과 표에 없는 경로:
+      **전체 배터리**.
+  - 시작할 때 `== gates to run:`과 `== gates left out:`을 찍는다. 빠진 게이트가 무엇인지가 그 실행의 한계다.
+  - 실행마다 끝에 게이트별 시간이 나온다: `== gate seconds (513s in all): setup=0s unit=38s …`.
+    2026-10-06 전체 배터리 513초 가운데 jobdeck 122, vfs_lifecycle 117, unit 38, occupancy 36, vfs_render 32,
+    density_stack 28, fit_budget 26, rust_renderer 14초이고 나머지는 11초 아래다(아래 빌드 수정 전에는 607초:
+    준비 39, unit 80초).
+  - 고르는 것으로 줄어드는 양(지난 커밋들의 파일이 부르는 게이트의 위 시간을 더한 어림): 문서만 0초, 게이트
+    스크립트 하나 몇 초~30초, 뷰어만 약 3분, 그리는 경로 약 5분, 계획기 약 7분 반, 형식·인덱서 8분 반(전체).
+    계획기·렌더러 변경은 느린 두 게이트(jobdeck, vfs_lifecycle)가 관련 게이트라 절반 넘게 남는다.
+  - 운영: 커밋·푸시는 `--changed`가 통과하면 한다. 전체 배터리는 표가 전체를 부를 때와 사용자가 청할 때 돌린다.
+- **linked work tree의 빌드(0.12.304).** renderd와 floe-index의 `build.rs`가 `.git/HEAD`를 지켜보는데, `git worktree
+  add`로 만든 트리는 `.git`이 파일이라 그 경로가 없어 **빌드마다 두 바이너리를 다시 컴파일했다**(리뷰 트리와 게이트
+  실행마다 16초). 이제 `.git` 파일이 가리키는 디렉터리의 HEAD와 `commondir`의 ref를 지켜본다: 바뀐 것이 없으면
+  `cargo build` 0.01초.
 - `gen_main01`(tools/validate_gen_main01.py, 약 10초; `python` 별칭에 포함): 합성 MAIN01 생성기.
   `--geometry legacy`가 2026-09-17의 파일과 바이트 동일(sha256 고정)한지, `--geometry chip`이
   `--jobs`와 무관하게 결정적이고 KLayout·floe-index가 읽으며 칩의 모양(가늘고 긴 배선, 여러
