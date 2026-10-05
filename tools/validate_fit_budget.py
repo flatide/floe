@@ -40,7 +40,38 @@ chip (tools/gen_main01_like.py) under a small budget:
     remembers (user 2026-10-01: the decision is kept per scale, not per place,
     and a dense view's emptied a sparse view at the same zoom step): after the
     refit the corner draws exactly as at first (fit_thin 0, not refit) and the
-    whole layout again under the refit's decision.
+    whole layout again under the refit's decision;
+  * a frame the planner fitted holds the budget once decoded, and one whose
+    pages pass it is planned anew, not failed (field 2026-10-05, two layers
+    alone with the density off: "most frames fail with `decoded generation
+    budget exceeded`"): the planner fits the pages to the budget by an
+    estimate of their decoded size, and pages charged more passed it. On
+    plain boxes whose pages' record lists, as the parser reads them, are
+    about half full (layout_plain: a page charged 1.12 of its estimate)
+    under 26 MB: with the lists as read (FLOE_RUST_DECODE_SHRINK=off) and
+    FLOE_RUST_BUDGET_REFIT=off the old error - or the layout no longer
+    reproduces it and the gate fails; now the lists are cut to their length
+    and the fitted plan is drawn whole (fit_refits 0, fit_scale 0); with the
+    lists as read the frame is planned anew under the budget over what its
+    pages took (fit_refits 1 or more, fit_scale past 1000, no page over the
+    budget, fewer pages than the whole plan) and drawn, the next frame of
+    the layers starts there (fit_refits 0, the same pixels), and a frame
+    with the density stack, whose pass 1 has pass 2's reserve to spare, is
+    not planned under less (fit_scale 0); the density stack counts its pages
+    as read, so its frame is the same bytes with the lists cut. The viewer's
+    margin (bg) - a viewport inside one page, its margin over four: drawn
+    now; with the lists as read dropped (reason budget), where
+    FLOE_RUST_BUDGET_REFIT=off gives the error, the next viewport frame
+    planned under the raised scale with the same pixels and the margin after
+    it a frame or dropped (reason fit), no error. On a layout whose records
+    share their repetition lists (layout_shared) under 4 MB: the pages'
+    charge counts a shared list once, so the fitted frame holds (fit_refits
+    0); with 0.12.300's charge (FLOE_RUST_CHARGE_SHARED=off and the lists as
+    read) the frame is planned anew and drawn, the next frame starts there,
+    and FLOE_RUST_BUDGET_REFIT=off gives the old error. Under 1 MB, less
+    than one of those pages as it was charged, no plan holds: the frame
+    draws what the budget holds - nothing here - and reports the pages over
+    it, where it was an error too.
 
     .venv/bin/python tools/validate_fit_budget.py
 """
@@ -81,12 +112,15 @@ def worker(src, budget_mb, fit=True, thin=True, retained_mb=0):
     return w
 
 
-def frame(w, gen, bbox, size=PX, bg=False):
+def frame(w, gen, bbox, size=PX, bg=False, density=None):
     keys = [(int(l['layer']), int(l['datatype'])) for l in w.cache.meta['layers']]
-    w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': bbox, 'view': None,
-              'w': size, 'h': size, 'depth': None, 'cut_px': 1, 'lod': False, 'frames': False,
-              'labels': False, 'abstract': False, 'visible': keys, 'frame_format': 'raw',
-              'thin': 'keep', 'bg': bg})
+    job = {'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': bbox, 'view': None,
+           'w': size, 'h': size, 'depth': None, 'cut_px': 1, 'lod': False, 'frames': False,
+           'labels': False, 'abstract': False, 'visible': keys, 'frame_format': 'raw',
+           'thin': 'keep', 'bg': bg}
+    if density is not None:
+        job['density'] = density
+    w.submit(job)
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
@@ -128,6 +162,221 @@ def layout_uneven(path):
         for i in range(10):
             place(200.0 + i * 20.0, j * 20.0)
     ly.write(str(path))
+
+
+def layout_shared(path):
+    """3 x 3 mm: forty box sizes (0.10 to 0.49 um), each at the same 30,000
+    scattered places - the writer gives each size one record with the places
+    as its repetition, and a page's forty records share the list."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(1, 0)
+    rnd = random.Random(22)
+    spots = [(rnd.randrange(3_000_000), rnd.randrange(3_000_000)) for _ in range(30_000)]
+    for size in range(40):
+        side = 100 + 10 * size
+        for (x, y) in spots:
+            top.shapes(layer).insert(kdb.Box(x, y, x + side, y + side))
+    ly.write(str(path))
+
+
+def layout_plain(path):
+    """3 x 3 mm: 600,000 scattered boxes of 0.6 to 1.0 um and nothing else.
+    The indexer's pages of them hold some 33 thousand records, a little past
+    half of the room the parser's record lists grow to (65,536), and a page's
+    charge counts that room: 1.12 of the planner's estimate of the page."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    layer = ly.layer(1, 0)
+    rnd = random.Random(21)
+    for _ in range(600_000):
+        x, y = rnd.randrange(3_000_000), rnd.randrange(3_000_000)
+        top.shapes(layer).insert(kdb.Box(x, y, x + 600 + rnd.randrange(400), y + 600 + rnd.randrange(400)))
+    ly.write(str(path))
+
+
+def refit_checks(temp):
+    """A frame the planner fitted to the budget holds it once decoded - its
+    pages' record lists are cut to their length and a list they share is
+    charged once (render-core decode_shrink, DecodedPage::estimated_bytes) -
+    and one whose pages pass it all the same is planned anew under less of
+    it, not failed (renderd budget_refit_enabled)."""
+    lit = lambda pixels: sum(1 for i in range(0, len(pixels), 4) if pixels[i:i + 3] != b'\x00\x00\x00')
+
+    def index(src):
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+
+    def start(src, env, budget_mb):
+        saved = {name: os.environ.get(name) for name in env}
+        os.environ.update(env)
+        try:
+            return worker(src, budget_mb)
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+    # the field's case: plain boxes whose pages, as the parser reads them, are
+    # charged past their estimate by the room their record lists keep. 400 um
+    # about the centre at 800 px (boxes of 1.2 to 2 px) reads four pages:
+    # 25.7 MB estimated, 28.9 MB as read - under 26 MB the plan fits and its
+    # pages as read do not
+    plain = Path(temp) / 'plain.oas'
+    layout_plain(plain)
+    index(plain)
+    budget_mb = 26
+    budget = budget_mb << 20
+    view = (1_300_000, 1_300_000, 1_700_000, 1_700_000)
+    # the lists as the parser grew them: 0.12.300's charge
+    as_read = {'FLOE_RUST_DECODE_SHRINK': 'off'}
+    as_300 = dict(as_read, FLOE_RUST_BUDGET_REFIT='off')
+    now, read, old = start(plain, {}, budget_mb), start(plain, as_read, budget_mb), start(plain, as_300, budget_mb)
+    try:
+        # as 0.12.300: the error (were it not, the layout's pages no longer
+        # pass their estimate and the checks below would check nothing)
+        failed, re_ = frame(old, 1, view, size=800)
+        assert failed is None and 'decoded generation budget exceeded' in str(re_.get('msg')), \
+            ('the plain boxes no longer reproduce the field error with the lists as read and FLOE_RUST_BUDGET_REFIT=off',
+             re_.get('msg'), re_.get('plan_culls'))
+        # now: the lists cut to their length, the fitted plan holds whole
+        whole, rw = frame(now, 1, view, size=800)
+        assert whole is not None, rw
+        fit = rw['plan_culls']
+        assert fit['fit_refits'] == 0 and fit['fit_scale'] == 0 and fit['fit_over'] == 0 and lit(whole) > 0, fit
+        assert not rw.get('over_budget_pages') and rw['resident_mb'] * (1 << 20) <= budget, (rw.get('over_budget_pages'), rw['resident_mb'])
+        # the lists as read (FLOE_RUST_DECODE_SHRINK=off): planned anew once,
+        # drawn within the budget; the layers' next frames start there
+        first, r1 = frame(read, 1, view, size=800)
+        assert first is not None, r1
+        culls = r1['plan_culls']
+        assert culls['fit_refits'] >= 1 and culls['fit_scale'] > 1000 and culls['fit_over'] == 0 and lit(first) > 0, culls
+        assert not r1.get('over_budget_pages') and r1['resident_mb'] * (1 << 20) <= budget, (r1.get('over_budget_pages'), r1['resident_mb'])
+        again, r2 = frame(read, 2, view, size=800)
+        assert again is not None and bytes(again) == bytes(first), r2
+        assert r2['plan_culls']['fit_refits'] == 0 and r2['plan_culls']['fit_scale'] == culls['fit_scale'], r2['plan_culls']
+        # (the plan anew gives pages up; the cut lists hold the first plan)
+        assert rw['tiles'] > r1['tiles'] and lit(whole) > lit(first) and rw['resident_mb'] < r1['resident_mb'], \
+            (rw['tiles'], r1['tiles'], lit(whole), lit(first), rw['resident_mb'], r1['resident_mb'])
+        # the scale is the plain frames': with the density stack pass 1 plans
+        # to the budget less pass 2's reserve, which holds what its pages
+        # take, and is not planned under less for it
+        stacked, rs = frame(read, 3, view, size=800, density=True)
+        assert stacked is not None, rs
+        assert rs['plan_culls']['fit_refits'] == 0 and rs['plan_culls']['fit_scale'] == 0, rs['plan_culls']
+        back, r3 = frame(read, 4, view, size=800, density=False)
+        assert back is not None and bytes(back) == bytes(first) and r3['plan_culls']['fit_scale'] == culls['fit_scale'], r3['plan_culls']
+        # the density stack counts its pages as read (renderd
+        # density_as_read): its frame is the same with the lists cut
+        dense, rn = frame(now, 2, view, size=800, density=True)
+        assert dense is not None and bytes(dense) == bytes(stacked), (rn.get('density_pages'), rs.get('density_pages'))
+        print('fit budget: a fitted frame holds the budget once decoded - plain boxes under %d MB: the lists as read and '
+              'FLOE_RUST_BUDGET_REFIT=off (0.12.300): %s; now the plan drawn whole (%d pages, %.1f MB, %d px lit, no plan anew); '
+              'the lists as read (FLOE_RUST_DECODE_SHRINK=off): planned anew %d time(s) at 1/%.3f of the budget and drawn (%d pages, '
+              '%.1f MB, %d px lit), the next frame starts there, a frame with the density stack is not planned under less (fit_scale %d) '
+              'and is the same picture with the lists cut'
+              % (budget_mb, re_.get('msg'), rw['tiles'], rw['resident_mb'], lit(whole), culls['fit_refits'], culls['fit_scale'] / 1000.0,
+                 r1['tiles'], r1['resident_mb'], lit(first), rs['plan_culls']['fit_scale']))
+    finally:
+        for w in (now, read, old):
+            w.stop()
+
+    # the viewer's margin (bg: the viewport's scale, twice its pixels a
+    # side). A viewport of 200 um inside one page, its margin over the four:
+    # the viewport's pages hold, the margin's as read pass the budget
+    now, read, old = start(plain, {}, budget_mb), start(plain, as_read, budget_mb), start(plain, as_300, budget_mb)
+    try:
+        port, margin = (1_550_000, 1_550_000, 1_750_000, 1_750_000), (1_450_000, 1_450_000, 1_850_000, 1_850_000)
+        # as 0.12.300: the viewport draws and its margin is the error the
+        # status line showed
+        shown, ro = frame(old, 1, port, size=800)
+        assert shown is not None and lit(shown) > 0, ro
+        failed, re_ = frame(old, 2, margin, size=1600, bg=True)
+        assert failed is None and re_.get('kind') == 'error' and 'decoded generation budget exceeded' in str(re_.get('msg')), \
+            ('the margin of the plain boxes no longer reproduces the field error with the lists as read and FLOE_RUST_BUDGET_REFIT=off', re_)
+        # the lists as read: the margin is dropped - its viewport is on the
+        # screen as it was planned, and a margin planned under less would
+        # change the picture when it lands - the layers' scale is raised and
+        # their fits forgotten; the next viewport frame decides anew over its
+        # margin's extent, and no margin after it is an error
+        first, r1 = frame(read, 1, port, size=800)
+        assert first is not None and bytes(first) == bytes(shown) and r1['plan_culls']['fit_scale'] == 0, r1['plan_culls']
+        gone, rd = frame(read, 2, margin, size=1600, bg=True)
+        assert gone is None and rd.get('kind') == 'dropped' and rd.get('reason') == 'budget', rd
+        again, r2 = frame(read, 3, port, size=800)
+        assert again is not None, r2
+        assert r2['plan_culls']['fit_scale'] > 1000 and r2['plan_culls']['fit_refits'] == 0, r2['plan_culls']
+        # (the viewport's own pages hold whole under any decision: the same pixels)
+        assert bytes(again) == bytes(first), r2['plan_culls']
+        later, rl = frame(read, 4, margin, size=1600, bg=True)
+        assert rl.get('kind') in ('frame', 'dropped'), rl
+        assert later is not None or rl.get('reason') == 'fit', rl
+        # now: the margin's pages hold too
+        port_now, rp = frame(now, 1, port, size=800)
+        assert port_now is not None and bytes(port_now) == bytes(shown), rp
+        margin_now, rm = frame(now, 2, margin, size=1600, bg=True)
+        assert margin_now is not None and rm['plan_culls']['fit_scale'] == 0 and rm['plan_culls']['fit_refits'] == 0, rm
+        print('fit budget: a margin whose pages pass the budget is dropped, not an error - the lists as read and FLOE_RUST_BUDGET_REFIT=off '
+              '(0.12.300): %s; now the margin drawn (%d pages, %.1f MB); the lists as read: dropped (reason %s), the next viewport frame '
+              'planned at 1/%.3f of the budget with the same pixels, the margin after it: %s'
+              % (re_.get('msg'), rm['tiles'], rm['resident_mb'], rd.get('reason'), r2['plan_culls']['fit_scale'] / 1000.0,
+                 'drawn' if later is not None else 'dropped (reason %s: it would thin where the viewport is whole)' % rl.get('reason')))
+    finally:
+        for w in (now, read, old):
+            w.stop()
+
+    # a list the records share: forty box sizes at the same 30,000 places
+    src = Path(temp) / 'shared.oas'
+    layout_shared(src)
+    index(src)
+    # 0.12.300's charge: the list once a record, the record lists as read
+    as_before = {'FLOE_RUST_CHARGE_SHARED': 'off', 'FLOE_RUST_DECODE_SHRINK': 'off'}
+    now, refit, old = start(src, {}, 4), start(src, as_before, 4), start(src, dict(as_before, FLOE_RUST_BUDGET_REFIT='off'), 4)
+    small = start(src, as_before, 1)
+    try:
+        # 126 um about the centre at 800 px: boxes of 0.6 to 3 px, 8 pages of them
+        view = (1_437_000, 1_437_000, 1_563_000, 1_563_000)
+        budget = 4 << 20
+        # the charge as it is: the fitted frame holds
+        held, rh = frame(now, 1, view, size=800)
+        assert held is not None, rh
+        assert rh['plan_culls']['fit_refits'] == 0 and rh['plan_culls']['fit_scale'] == 0 and lit(held) > 0, rh['plan_culls']
+        assert rh['resident_mb'] * (1 << 20) <= budget, rh['resident_mb']
+        # the charge as it was: planned anew, drawn; the layers' next frame starts there
+        first, r1 = frame(refit, 1, view, size=800)
+        assert first is not None, r1
+        culls = r1['plan_culls']
+        assert culls['fit_refits'] >= 1 and culls['fit_scale'] > 1000 and lit(first) > 0, culls
+        assert r1['resident_mb'] * (1 << 20) <= budget, r1['resident_mb']
+        again, r2 = frame(refit, 2, view, size=800)
+        assert again is not None and bytes(again) == bytes(first), r2
+        assert r2['plan_culls']['fit_refits'] == 0 and r2['plan_culls']['fit_scale'] == culls['fit_scale'], r2['plan_culls']
+        # the kill switch: the error
+        failed, re_ = frame(old, 1, view, size=800)
+        assert failed is None and 'decoded generation budget exceeded' in str(re_.get('msg')), re_
+        # a budget under one page: no plan holds - the frame is what the budget
+        # holds, its pages over the budget counted, not an error
+        bare, rb = frame(small, 1, view, size=800)
+        assert bare is not None, rb
+        assert rb.get('over_budget_pages', 0) >= 1 and rb['plan_culls']['fit_over'] == 1 and rb['plan_culls']['fit_refits'] <= 1, (rb.get('over_budget_pages'), rb['plan_culls'])
+        print('fit budget: a frame whose pages pass the budget is planned anew, not failed - records on shared repetition lists under 4 MB: '
+              'as charged now the fitted frame holds (%.1f MB, %d px lit); as charged before it is planned anew %d time(s) at 1/%.2f of the '
+              'budget (%.1f MB, %d px lit) and the next frame starts there; FLOE_RUST_BUDGET_REFIT=off: %s; under 1 MB (less than a page) '
+              'the frame draws what the budget holds, %d pages over it'
+              % (rh['resident_mb'], lit(held), culls['fit_refits'], culls['fit_scale'] / 1000.0, r1['resident_mb'], lit(first), re_.get('msg'),
+                 rb.get('over_budget_pages', 0)))
+    finally:
+        for w in (now, refit, old, small):
+            w.stop()
 
 
 def main():
@@ -265,6 +514,7 @@ def main():
         finally:
             for w in (tight, tight_off, ladder, roomy, roomy_off):
                 w.stop()
+        refit_checks(temp)
     print('FIT BUDGET: ALL OK')
 
 

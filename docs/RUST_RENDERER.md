@@ -669,6 +669,35 @@ pan/zoom burst. It passed on both `valmini` and the 506-page `sample9`: none of
 the previous 99 generations published a frame, only the latest generation
 settled, and no partial file or pending adapter job remained.
 
+Since 0.12.301 a frame whose pages' decoded charge passes the generation
+budget is no longer an error (field 2026-10-05: two layers alone with the
+density off failed most frames with `decoded generation budget exceeded:
+1093017130 > 1073741824 bytes`). The planner fits a frame's pages to the
+budget by an estimate of their decoded size; the charge of some pages was
+past it - a page's record lists kept the room the parser grew them to, up to
+twice their length, and a repetition list shared by a page's records was
+charged once a record. Now a decoded page's record lists are cut to their
+length (`FLOE_RUST_DECODE_SHRINK=off` is the kill switch: 0.12.300's charge) -
+a rectangle page 124-217 B -> 120-124 B a record, no page of the synthetic
+chips past its estimate - and a shared list is charged once
+(`FLOE_RUST_CHARGE_SHARED=off`), so the fitted plan is drawn whole. The
+density stack counts its pages as the parser read them
+(`FLOE_RUST_DENSITY_AS_READ=off` counts them as held, and pass 2 has what the
+cut lists free: the synthetic MAIN01 1/10 at full depth 8-20 % slower for the
+same picture), so a density frame is the picture it was. Should a frame pass
+the budget all the same, it is planned anew under the budget over what its
+pages took, remembered for its layer set, depth, root and the density stack
+on or off (`FLOE_RUST_BUDGET_REFIT=off`: the error, as 0.12.300; the frame
+line's `fit_scale=` / `fit_refits=`, the viewer's `pages xN their
+estimate`), and where no plan holds it draws the pages the budget holds and
+reports the rest (`N pages over budget (not drawn)`). The viewer's margin
+frame is not planned anew: it answers `dropped gen=N reason=budget`, and the
+layers' remembered fits are forgotten with the raised scale, so the next
+viewport frame decides over its margin's extent under it. An exact frame and
+one the planner does not fit - no cut (an export at cut 0), or
+`FLOE_RUST_FIT_BUDGET=off` - fail as before. Every frame that drew before
+draws the same bytes.
+
 The operational knobs are `FLOE_RENDERD_BIN`, `FLOE_RUST_JOBS` (page decode,
 default up to 8 host CPUs), `FLOE_RUST_RASTER_JOBS` (default up to 4 and never
 above decode jobs), `FLOE_RUST_BUDGET_MB` (1024), `FLOE_RUST_ROUND_PAGES` (1024),

@@ -291,14 +291,43 @@ pub struct DecodedPage {
     /// Record-extent index built once per decode and reused by every frame
     /// and raster tile that holds this page (F2R-03b).
     pub index: crate::PageIndex,
+    /// The page's charge as the parser read it - estimated_bytes before its
+    /// record lists were cut to their length (decode_shrink); 0 when they
+    /// were not cut (grown_charge: the charge itself).
+    pub grown_bytes: u64,
 }
 
 impl DecodedPage {
-    /// Conservative charge used by the decoded-page LRU. This is an estimate,
-    /// not allocator telemetry: shared repetition pools may be counted more
-    /// than once, which is preferable to silently exceeding the budget.
+    /// The page's charge as the parser read it, its record lists holding the
+    /// room they grew to - what a page was charged up to 0.12.300. The
+    /// density stack counts its pages by it (renderd density_as_read), so
+    /// what pass 2 has of the budget, and with it a density frame's picture
+    /// and time, did not change when the lists were cut (decode_shrink); a
+    /// jobdeck pass counts its pages by it too (deck.rs: its slices are what
+    /// they were). The frame's own check of the generation budget and the
+    /// page cache go by what the page holds (estimated_bytes).
+    pub fn grown_charge(&self) -> u64 {
+        if self.grown_bytes > 0 {
+            self.grown_bytes
+        } else {
+            self.estimated_bytes()
+        }
+    }
+
+    /// The charge of the decoded-page LRU and of a frame's generation budget:
+    /// the page's records, their point lists and its index, by the lists'
+    /// capacities. A repetition's offsets that several records share
+    /// (floe_oasis Rep::Pts: one Arc for the records that reuse the modal
+    /// repetition) are charged once (charge_shared_once): charged once a
+    /// record, a page of 40 records on one list of 30,000 offsets was 8.7
+    /// times the planner's estimate of it (floe_vfs page_memory, by its
+    /// stored bytes) - and a frame the planner had fitted to the budget
+    /// failed with `decoded generation budget exceeded` (field 2026-10-05).
     pub fn estimated_bytes(&self) -> u64 {
-        let mut bytes = std::mem::size_of::<Self>() as u64;
+        // (less grown_bytes, a count kept beside the page: with the lists as
+        // read the charge is to the byte what 0.12.300's was)
+        let mut bytes = (std::mem::size_of::<Self>() - std::mem::size_of::<u64>()) as u64;
+        let mut lists = SharedLists { once: charge_shared_once(), ..SharedLists::default() };
         bytes = bytes.saturating_add(
             self.doc.cells.capacity() as u64 * std::mem::size_of::<floe_oasis::doc::Cell>() as u64,
         );
@@ -329,26 +358,26 @@ impl DecodedPage {
                     * std::mem::size_of::<floe_oasis::doc::TextRec>() as u64,
             );
             for rect in &cell.rects {
-                bytes = bytes.saturating_add(rep_heap_bytes(&rect.rep));
+                bytes = bytes.saturating_add(lists.heap_bytes(&rect.rep));
             }
             for poly in &cell.polys {
                 bytes = bytes.saturating_add(
                     poly.pts.capacity() as u64 * std::mem::size_of::<(i64, i64)>() as u64,
                 );
-                bytes = bytes.saturating_add(rep_heap_bytes(&poly.rep));
+                bytes = bytes.saturating_add(lists.heap_bytes(&poly.rep));
             }
             for path in &cell.paths {
                 bytes = bytes.saturating_add(
                     path.pts.capacity() as u64 * std::mem::size_of::<(i64, i64)>() as u64,
                 );
-                bytes = bytes.saturating_add(rep_heap_bytes(&path.rep));
+                bytes = bytes.saturating_add(lists.heap_bytes(&path.rep));
             }
             for place in &cell.places {
-                bytes = bytes.saturating_add(rep_heap_bytes(&place.rep));
+                bytes = bytes.saturating_add(lists.heap_bytes(&place.rep));
             }
             for text in &cell.texts {
                 bytes = bytes.saturating_add(text.s.capacity() as u64);
-                bytes = bytes.saturating_add(rep_heap_bytes(&text.rep));
+                bytes = bytes.saturating_add(lists.heap_bytes(&text.rep));
             }
         }
         for name in self.doc.layer_names.values() {
@@ -373,6 +402,60 @@ fn rep_heap_bytes(rep: &Rep) -> u64 {
         Rep::Pts(points) => points.len() as u64 * std::mem::size_of::<(i64, i64)>() as u64,
         Rep::One | Rep::Grid { .. } => 0,
     }
+}
+
+/// DecodedPage::estimated_bytes: the repetition offset lists of a page's
+/// records, a list that records share charged once. Records share a list by
+/// reusing the modal repetition (floe_oasis read_rep), so they follow one
+/// another - a record without a repetition between them leaves the modal
+/// one as it is: the list of the last record that had one is the one to
+/// know (no table of lists: the charge is taken every frame).
+#[derive(Default)]
+struct SharedLists {
+    once: bool,
+    last: usize,
+}
+
+impl SharedLists {
+    fn heap_bytes(&mut self, rep: &Rep) -> u64 {
+        let Rep::Pts(points) = rep else {
+            return 0;
+        };
+        if !self.once {
+            return rep_heap_bytes(rep);
+        }
+        let at = points.as_ptr() as usize;
+        if at == self.last {
+            return 0;
+        }
+        self.last = at;
+        rep_heap_bytes(rep)
+    }
+}
+
+/// A repetition's offsets shared by several records of a page are charged
+/// once (DecodedPage::estimated_bytes): on; FLOE_RUST_CHARGE_SHARED=off (the
+/// kill switch) charges them once a record, as 0.12.300.
+fn charge_shared_once() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_CHARGE_SHARED").as_deref() != Ok("off"))
+}
+
+/// A decoded page's record lists are cut to their length (decode_payload):
+/// on; FLOE_RUST_DECODE_SHRINK=off (the kill switch) keeps them as the
+/// parser grew them, as 0.12.300. The parser grows the lists as it reads, to
+/// as much as twice what they hold, and the page's charge counts that room:
+/// a page of 33 k rectangles was charged 216 B a record for its 96 and 24 of
+/// index, past the planner's 192 (floe_vfs FIT_RECORD_BYTES) - and a frame
+/// of such pages, fitted to the budget by the planner's estimate, failed
+/// with `decoded generation budget exceeded` (field 2026-10-05). Cut, a
+/// rectangle page is 120-124 B a record, under two thirds of its estimate,
+/// and no page of the synthetic chips is charged past its estimate (the
+/// worst 1.231 -> 0.787 of it). The charge as read is kept
+/// (DecodedPage::grown_bytes) for the density stack's count.
+fn decode_shrink() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DECODE_SHRINK").as_deref() != Ok("off"))
 }
 
 /// Read-only cache adapter. All parser and planner behavior comes from the
@@ -1078,6 +1161,21 @@ impl Cache {
     pub fn plan_page_memory(&self, plan: &HierPlan) -> u64 {
         plan.pages
             .iter()
+            .map(|&page| {
+                let p = self.vfs.ovm.page(page);
+                floe_vfs::hier::page_memory(p.records, p.usize_)
+            })
+            .sum()
+    }
+
+    /// The estimated decoded memory of `pages` (floe_vfs page_memory): what
+    /// the planner counted for them - against their decoded charge
+    /// (DecodedPage::estimated_bytes), how far it fell short (renderd
+    /// budget_refit_enabled).
+    pub fn pages_memory(&self, pages: &[u32]) -> u64 {
+        pages
+            .iter()
+            .filter(|&&page| page < self.vfs.ovm.n_pages)
             .map(|&page| {
                 let p = self.vfs.ovm.page(page);
                 floe_vfs::hier::page_memory(p.records, p.usize_)
@@ -1957,19 +2055,37 @@ fn decode_payload(
         check_decode_cancelled(guard)
     })?;
     let index_us = elapsed_us(index_started);
-    Ok((
-        DecodedPage {
-            page_id: payload.page_id,
-            layer_idx: payload.meta.layer_idx,
-            bbox: payload.meta.bbox,
-            encoded_bytes: payload.meta.usize_,
-            records: payload.meta.records,
-            members: payload.meta.members,
-            doc,
-            index,
-        },
-        index_us,
-    ))
+    let mut page = DecodedPage {
+        page_id: payload.page_id,
+        layer_idx: payload.meta.layer_idx,
+        bbox: payload.meta.bbox,
+        encoded_bytes: payload.meta.usize_,
+        records: payload.meta.records,
+        members: payload.meta.members,
+        doc,
+        index,
+        grown_bytes: 0,
+    };
+    // the record lists at their length (decode_shrink), the charge as read
+    // kept for the density stack's count (the index goes by the records'
+    // places in their lists, which stay)
+    if decode_shrink() {
+        let grown = page.estimated_bytes();
+        shrink_records(&mut page.doc);
+        page.grown_bytes = grown;
+    }
+    Ok((page, index_us))
+}
+
+/// decode_shrink: a parsed page's record lists cut to their length.
+fn shrink_records(doc: &mut Doc) {
+    for cell in &mut doc.cells {
+        cell.rects.shrink_to_fit();
+        cell.polys.shrink_to_fit();
+        cell.paths.shrink_to_fit();
+        cell.places.shrink_to_fit();
+        cell.texts.shrink_to_fit();
+    }
 }
 
 fn check_decode_cancelled(guard: Option<(u64, &RenderCancellation)>) -> Result<(), String> {
@@ -1987,6 +2103,132 @@ fn elapsed_us(started: Instant) -> u64 {
 mod tests {
     use super::*;
     use floe_oasis::write::W;
+    use std::sync::Arc;
+
+    /// a decoded page of `rects` (their lists as given)
+    fn page_of(rects: Vec<floe_oasis::doc::RectRec>) -> DecodedPage {
+        let doc = Doc {
+            unit: 1000.0,
+            cells: vec![floe_oasis::doc::Cell { rects, ..Default::default() }],
+            top: 0,
+            layer_order: Vec::new(),
+            norm_s: 0.0,
+            layer_names: std::collections::HashMap::new(),
+            layer_aliases: std::collections::HashMap::new(),
+        };
+        DecodedPage { page_id: 0, layer_idx: 0, bbox: BBox { x0: 0, y0: 0, x1: 10, y1: 10 }, encoded_bytes: 1, records: 0, members: 0, index: crate::PageIndex::build(&doc), doc, grown_bytes: 0 }
+    }
+
+    #[test]
+    fn a_repetition_list_shared_by_a_pages_records_is_charged_once() {
+        // DecodedPage::estimated_bytes (field 2026-10-05: 787 and 789 alone
+        // failed most frames with `decoded generation budget exceeded` - the
+        // planner fits the pages by their stored bytes, where a list that
+        // forty records reuse is stored once; charged once a record the page
+        // was 8.7 times its estimate). Forty records on one list of 10,000
+        // offsets are charged the list once; forty lists of their own, forty;
+        // and a record without a repetition between two that share one does
+        // not part them (OASIS: the modal repetition stays).
+        let offsets: Vec<(i64, i64)> = (0..10_000).map(|k| (k * 7, k * 3)).collect();
+        let list: Arc<[(i64, i64)]> = offsets.clone().into();
+        let rect = |rep: Rep| floe_oasis::doc::RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 10, h: 10, rep };
+        let list_bytes = 10_000 * std::mem::size_of::<(i64, i64)>() as u64;
+        let plain = page_of((0..40).map(|_| rect(Rep::One)).collect()).estimated_bytes();
+        let shared = page_of((0..40).map(|_| rect(Rep::Pts(Arc::clone(&list)))).collect()).estimated_bytes();
+        let apart = page_of((0..40).map(|_| rect(Rep::Pts(offsets.clone().into()))).collect()).estimated_bytes();
+        // (the lists' chunk index beside them: one table a list)
+        assert!((plain + list_bytes..plain + list_bytes + list_bytes / 4).contains(&shared), "{shared} for {plain} + {list_bytes}");
+        assert!(apart >= plain + 40 * list_bytes, "{apart}");
+        let own: Arc<[(i64, i64)]> = offsets.clone().into();
+        let parted = page_of(vec![rect(Rep::Pts(Arc::clone(&list))), rect(Rep::One), rect(Rep::Pts(Arc::clone(&list))), rect(Rep::Pts(Arc::clone(&own))), rect(Rep::Pts(own))]).estimated_bytes();
+        assert!(parted >= 2 * list_bytes && parted < 2 * list_bytes + list_bytes / 2, "{parted} for two lists");
+    }
+
+    #[test]
+    fn a_decoded_pages_record_lists_are_cut_to_their_length() {
+        // decode_shrink: the parser grows a cell's record lists as it reads,
+        // to as much as twice what they hold, and the page's charge counts
+        // what they hold room for (a page of 33 k rectangles: 216 B a record
+        // for its 96, past the planner's 192)
+        let rect = floe_oasis::doc::RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 10, h: 10, rep: Rep::One };
+        let mut rects = Vec::new();
+        for _ in 0..33_000 {
+            rects.push(rect.clone());
+        }
+        let grown = rects.capacity();
+        assert!(grown > 33_000);
+        let mut doc = page_of(rects).doc;
+        shrink_records(&mut doc);
+        assert_eq!(doc.cells[0].rects.capacity(), 33_000);
+        let (before, after) = (page_of({ let mut v = Vec::with_capacity(grown); v.extend((0..33_000).map(|_| rect.clone())); v }).estimated_bytes(), page_of(doc.cells.remove(0).rects).estimated_bytes());
+        assert!(after < before && after < 33_000 * 192, "{after} against {before}: under the planner's 192 B a record");
+    }
+
+    #[test]
+    fn a_decoded_page_keeps_the_charge_it_was_read_at() {
+        // decode_payload: 1,000 rectangles, read into a list grown to 1,024
+        let mut w = W::new();
+        w.out.extend_from_slice(b"%SEMI-OASIS\r\n");
+        w.uint(1);
+        w.string(b"1.0");
+        w.real_f64(1000.0);
+        w.uint(0);
+        for _ in 0..12 {
+            w.uint(0);
+        }
+        w.uint(14);
+        w.string(b"TOP");
+        for at in 0..1_000u64 {
+            w.uint(20);
+            w.byte(0x7b); // layer, datatype, width, height, x, y
+            w.uint(1);
+            w.uint(0);
+            w.uint(10);
+            w.uint(10);
+            w.sint(at as i64 * 20);
+            w.sint(0);
+        }
+        w.uint(2);
+        let payload = PagePayload {
+            page_id: 5,
+            meta: PageV {
+                cell: 0,
+                layer_idx: 0,
+                seq: 0,
+                lod: 0,
+                codec: CODEC_OASIS,
+                bbox: BBox { x0: 0, y0: 0, x1: 20_000, y1: 10 },
+                file_off: 0,
+                csize: w.out.len() as u32,
+                usize_: w.out.len() as u32,
+                records: 1_000,
+                lod_page: u32::MAX,
+                members: 1_000,
+                max_w: 10,
+                max_h: 10,
+                max_min: 10,
+            },
+            bytes: w.out,
+        };
+        let (page, _) = decode_payload(&payload, None).unwrap();
+        let rects = &page.doc.cells[0].rects;
+        assert_eq!(rects.len(), 1_000);
+        let record = std::mem::size_of::<floe_oasis::doc::RectRec>() as u64;
+        if decode_shrink() {
+            // cut to its length, and the charge as read kept beside it: the
+            // room of the 24 records the list had grown past its length
+            assert_eq!(rects.capacity(), 1_000);
+            assert_eq!(page.grown_bytes, page.estimated_bytes() + 24 * record);
+            assert_eq!(page.grown_charge(), page.grown_bytes);
+        } else {
+            // FLOE_RUST_DECODE_SHRINK=off: as read, one charge
+            assert_eq!(rects.capacity(), 1_024);
+            assert_eq!((page.grown_bytes, page.grown_charge()), (0, page.estimated_bytes()));
+        }
+        // a page built as it is (a test's, or with the lists as read) is charged as it is
+        let plain = page_of(vec![floe_oasis::doc::RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 10, h: 10, rep: Rep::One }]);
+        assert_eq!(plain.grown_charge(), plain.estimated_bytes());
+    }
 
     #[test]
     fn corrupt_page_repetition_count_returns_a_decode_error() {

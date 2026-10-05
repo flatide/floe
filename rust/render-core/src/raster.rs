@@ -10154,6 +10154,7 @@ mod tests {
             members: 1,
             index: crate::PageIndex::build(&doc),
             doc,
+            grown_bytes: 0,
         })
     }
 
@@ -11057,6 +11058,7 @@ mod tests {
             members: 1,
             index: crate::PageIndex::build(&doc),
             doc,
+            grown_bytes: 0,
         })
     }
 
@@ -11276,6 +11278,7 @@ mod tests {
             members: 1,
             index: crate::PageIndex::build(&doc),
             doc,
+            grown_bytes: 0,
         });
         let scene = FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)]))
             .unwrap();
@@ -11413,6 +11416,7 @@ mod tests {
                 members: 1,
                 index: index(&doc),
                 doc,
+                grown_bytes: 0,
             });
             let top = (0, REM_FULL);
             let plan = HierPlan {
@@ -11588,6 +11592,7 @@ mod tests {
                 members: 1,
                 index: crate::PageIndex::build(&doc),
                 doc,
+                grown_bytes: 0,
             })
         } else {
             styled_page(2, 1, unit)
@@ -11685,6 +11690,7 @@ mod tests {
             members: 1,
             index: crate::PageIndex::build(&doc),
             doc,
+            grown_bytes: 0,
         });
         let top = (0, REM_FULL);
         let plan = HierPlan {
@@ -12521,6 +12527,7 @@ mod tests {
                     members: 1,
                     index: crate::PageIndex::build(&doc),
                     doc,
+                    grown_bytes: 0,
                 })
             })
             .collect();
@@ -13425,6 +13432,7 @@ mod tests {
                 members: 1,
                 index: crate::PageIndex::build(&doc),
                 doc,
+                grown_bytes: 0,
             }));
         }
         let n = pages.len() as u32;
@@ -15451,6 +15459,7 @@ mod tests {
             members: 1,
             index: crate::PageIndex::build(&decoded_doc),
             doc: decoded_doc,
+            grown_bytes: 0,
         });
         let mut bounds = BTreeMap::new();
         bounds.insert(

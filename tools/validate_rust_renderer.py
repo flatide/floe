@@ -773,6 +773,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             " left out · bin off(cap@786k), hier 2.0M/1.7M pruned"
             " · cut<7.56um x2 to fit budget, STILL OVER · 3 pages over"
             " budget (not drawn) · labels partial · evict 1200")
+        # these layers' pages decode larger than the planner estimates
+        # (2026-10-05): the scale its budget was cut by, with the fit
+        scaled = dict(res, plan_culls=dict(res["plan_culls"], fit_scale=1180))
+        self.assertIn("x2 to fit budget, STILL OVER, pages x1.18 their estimate", perf_status(scaled)[0])
 
         # the synthetic chip at medium, 694 um around (14722, 17090) um: no
         # cell under the cut, the shapes of 1-3 px drawn from 54 pages
@@ -2001,6 +2005,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "fit_pct": "283", "fit_cull": "1", "fit_over": "0",
                 "fit_thin": "3", "fit_full_pct": "850", "fit_none_pct": "400",
                 "fit_fixed": "1", "fit_redecided": "0",
+                "fit_scale": "1180", "fit_refits": "1",
                 "sub_cut_boxes": "1234", "sub_cut_box_over": "5",
                 "sub_cut_box_level": "1", "sub_cut_box_unsure": "2",
                 "shape_cut": "4392", "shape_cut_max": "1",
@@ -2036,6 +2041,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "fit_pct": 283, "fit_cull": 1, "fit_over": 0,
                 "fit_thin": 3, "fit_full_pct": 850, "fit_none_pct": 400,
                 "fit_fixed": 1, "fit_redecided": 0,
+                "fit_scale": 1180, "fit_refits": 1,
                 "sub_cut_boxes": 1234, "sub_cut_box_over": 5,
                 "sub_cut_box_level": 1, "sub_cut_box_unsure": 2,
                 "shape_cut": 4392, "shape_cut_max": 1,

@@ -1092,6 +1092,13 @@ struct WorkerState {
     density_floor_memory: BTreeMap<String, u8>,
     /// fit_whole for the density stack's pass 2, per scale and side.
     density_whole: BTreeSet<String>,
+    /// How far the planner's page estimates fell short of the pages' decoded
+    /// charge, per layer set, depth, root and the density stack on or off
+    /// (budget_scale_key): the charge of a frame's pages over their estimate
+    /// when it passed the generation budget (run_render: the frame is planned
+    /// again under the budget less that much, not failed). Every later frame
+    /// of the key plans its pages to the budget over it.
+    budget_scale: BTreeMap<String, f64>,
 }
 
 impl Default for WorkerState {
@@ -1109,6 +1116,7 @@ impl Default for WorkerState {
             density_fit_memory: BTreeMap::new(),
             density_floor_memory: BTreeMap::new(),
             density_whole: BTreeSet::new(),
+            budget_scale: BTreeMap::new(),
         }
     }
 }
@@ -1116,10 +1124,14 @@ impl Default for WorkerState {
 /// The key a budget fit is remembered under: the layers, depth, cut, thin
 /// mode and the scale (a pan keeps it, a zoom changes it).
 fn fit_memory_key(command: &RenderCommand, request: &PlanRequest) -> String {
-    format!(
-        "{:?}|{}|{}|{}|{}|{}|{}|{:?}",
-        command.visible_layers, command.depth, request.cut_dbu, scale_token(request.px_per_dbu), command.thin_keep, request.page_hairline, command.frames, command.root
-    )
+    let (head, tail) = fit_memory_scope(command);
+    format!("{head}{}|{}|{}|{}|{}{tail}", request.cut_dbu, scale_token(request.px_per_dbu), command.thin_keep, request.page_hairline, command.frames)
+}
+
+/// What a fit_memory_key begins and ends with: the layers and the depth, and
+/// the root - every key of a layer set between them (forget_fits).
+fn fit_memory_scope(command: &RenderCommand) -> (String, String) {
+    (format!("{:?}|{}|", command.visible_layers, command.depth), format!("|{:?}", command.root))
 }
 
 /// The scale as the fit memory keys it: nine significant digits. The exact
@@ -1489,6 +1501,7 @@ fn handle_open(
                 state.density_floor_memory.clear();
                 state.fit_whole.clear();
                 state.density_whole.clear();
+                state.budget_scale.clear();
                 state.jobs = command.jobs;
                 state.styles.clear();
                 state.style_epoch = None;
@@ -1545,6 +1558,7 @@ fn handle_open(
                 state.density_floor_memory.clear();
                 state.fit_whole.clear();
                 state.density_whole.clear();
+                state.budget_scale.clear();
             state.jobs = command.jobs;
             state.styles.clear();
             state.style_epoch = None;
@@ -2944,6 +2958,25 @@ fn density_frame_reserve(budget: u64, pass1_bytes: u64) -> u64 {
     }
 }
 
+/// The density stack counts its pages as the parser read them
+/// (DecodedPage::grown_charge), their record lists holding the room they
+/// grew to: on. Since 0.12.301 a decoded page's lists are cut to their
+/// length (floe_render_core decode_shrink) and a page is charged a fifth to
+/// a third less; pass 2 has what pass 1's pages leave of the budget
+/// (density_frame_reserve), so counted as held pass 2 would have more and
+/// decode more - the synthetic MAIN01 1/10 at full depth 8-17 % slower at
+/// fit and 14-20 % two steps out for the same picture, the routing chip two
+/// steps in with 133 pages decoded for 86 (2026-10-05).
+/// Counted as read, pass 2's reserve and its last check are what they were
+/// and a density frame is the same picture in the same time; the pages
+/// themselves are held smaller. FLOE_RUST_DENSITY_AS_READ=off counts them as
+/// held: pass 2 has what the cut lists free - the user's to choose, with
+/// pass 2's reserve.
+fn density_as_read() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_AS_READ").as_deref() != Ok("off"))
+}
+
 /// The error a margin's pass 2 raises when its budget fit does not hold the
 /// scale's decision: the frame is dropped like a pass-1 refit of a margin.
 const DROPPED_FIT: &str = "dropped:fit";
@@ -3263,6 +3296,33 @@ fn run_render(
     // wall_us counts from here, queue_us up to here (see RenderCommand::received)
     let run_started = Instant::now();
     let queue_us = queued_us(command, run_started);
+    // a frame whose pages pass the generation budget is planned anew under
+    // less of it (budget_refit_enabled)
+    let mut refits = 0u32;
+    loop {
+        match run_render_attempt(state, command, responses, cancellation, published_scene, run_started, queue_us, refits) {
+            Err(error) if error == REFIT_BUDGET => refits += 1,
+            result => return result,
+        }
+    }
+}
+
+/// run_render once: `refits` plans of this frame before it passed the budget.
+#[allow(clippy::too_many_arguments)]
+fn run_render_attempt(
+    state: &mut WorkerState,
+    command: &RenderCommand,
+    responses: &Sender<String>,
+    cancellation: &RenderCancellation,
+    published_scene: &SharedPublishedScene,
+    run_started: Instant,
+    queue_us: u64,
+    refits: u32,
+) -> Result<(), String> {
+    // the layers' pages decode larger than estimated by this much
+    // (WorkerState::budget_scale): planned to the budget over it
+    let scale_key = budget_scale_key(command);
+    let budget_scale = state.budget_scale.get(&scale_key).copied();
     let mut command = command.clone();
     let cache = state
         .cache
@@ -3301,7 +3361,7 @@ fn run_render(
     let (expected_fit, expected_whole) = if command.exact {
         (None, None)
     } else {
-        let pre = make_plan_request(cache, &command, pass1_decode_budget(state.page_cache.budget_bytes(), &command))?;
+        let pre = make_plan_request(cache, &command, scaled_decode_budget(state.page_cache.budget_bytes(), &command, budget_scale))?;
         if pre.decode_budget > 0 {
             (state.fit_memory.get(&fit_memory_key(&command, &pre)).copied(), Some(floe_render_core::FixedFit::everything(pre.cut_dbu)))
         } else {
@@ -3320,7 +3380,7 @@ fn run_render(
     check_generation(cancellation, command.generation)?;
     // the density stack's pass 2 decodes within a reserve of its own
     // (density_budget_bytes): pass 1 plans to what the generation has left
-    let request = make_plan_request(cache, command, pass1_decode_budget(state.page_cache.budget_bytes(), command))?;
+    let request = make_plan_request(cache, command, scaled_decode_budget(state.page_cache.budget_bytes(), command, budget_scale))?;
     // the summarized layers leave the page plan (§6 step 3): no page
     // selection, page BVH or child walk for them
     let mut page_request = cache.page_plan_request(&request, &summary, !command.frames)?;
@@ -3621,8 +3681,14 @@ fn run_render(
     })?;
     let mut decoded_pages = Vec::with_capacity(selected.len());
     let mut generation_bytes = 0u64;
+    // the same pages as the parser read them (DecodedPage::grown_charge):
+    // what the density stack counts pass 1 by (density_as_read)
+    let mut generation_grown = 0u64;
     let mut round_index = 0usize;
     let mut drain_representatives = false;
+    // the budget's last resort (budget_refit_enabled): the frame draws the
+    // pages the budget holds and reports the rest as over it
+    let mut cut_short = false;
     while round_index < rounds.len() {
         if round_index > 0 && planned.representative_stream.is_some() {
             // COW preserves the previously published query scene. Resume the
@@ -3651,11 +3717,88 @@ fn run_render(
                 .checked_add(page.estimated_bytes())
                 .ok_or_else(|| "decoded generation byte charge overflow".to_string())
         })?;
-        generation_bytes = checked_generation_bytes(
-            generation_bytes,
-            round_bytes,
-            state.page_cache.budget_bytes(),
-        )?;
+        generation_bytes = match checked_generation_bytes(generation_bytes, round_bytes, state.page_cache.budget_bytes()) {
+            Ok(bytes) => bytes,
+            // the pages read so far pass the budget: their charge over their
+            // estimate is what the planner's fit was short by - remembered
+            // for these layers, and the frame planned anew (budget_refit_enabled)
+            Err(error) => {
+                // (an exact frame is every page or none; a frame the planner
+                // does not fit - no budget, no cut, or its fit switched off,
+                // FLOE_RUST_FIT_BUDGET=off - is as it was: an export at cut 0
+                // must not come out short of pages)
+                let fitted = request.decode_budget > 0 && request.cut_dbu > 0 && std::env::var("FLOE_RUST_FIT_BUDGET").as_deref() != Ok("off");
+                if !budget_refit_enabled() || command.exact || !fitted {
+                    return Err(error);
+                }
+                if !plan.stats.fit_over {
+                    // (a plan over by its own estimate, `STILL OVER`, says
+                    // nothing of the pages' charge)
+                    let read: Vec<u32> = decoded_pages.iter().chain(round_pages.iter()).map(|page| page.page_id).collect();
+                    let estimate = cache.pages_memory(&read).max(1);
+                    let charged = generation_bytes.saturating_add(round_bytes);
+                    let short = charged as f64 / estimate as f64;
+                    // (at least 5 % past the scale it was planned under: a next
+                    // plan is a smaller one)
+                    let scale = (short * 1.03).max(budget_scale.unwrap_or(1.0) * 1.05);
+                    eprintln!(
+                        "[renderd] gen {}: {} pages charged {} bytes for {} estimated ({short:.3}x) pass the budget {}: the layers are planned at 1/{scale:.3} of it",
+                        command.generation,
+                        read.len(),
+                        charged,
+                        estimate,
+                        state.page_cache.budget_bytes(),
+                    );
+                    state.budget_scale.insert(scale_key.clone(), scale);
+                    // the fits decided under the budget as it was go with it
+                    forget_fits(&mut state.fit_memory, &mut state.fit_whole, command);
+                }
+                if command.background {
+                    // the viewer's margin: its viewport is on the screen as
+                    // planned under the budget as it was, and a margin
+                    // planned under less - or cut short - would change the
+                    // picture when it lands. Dropped, as one its scale's fit
+                    // does not hold; the next viewport frame decides anew
+                    // over its margin's extent
+                    respond(responses, format!("dropped gen={} reason=budget", command.generation));
+                    return Ok(());
+                }
+                if plan.stats.fit_over || refits >= BUDGET_REFITS {
+                    // no plan under less of the budget holds either - the
+                    // fit's reach is spent (its plan was over by its own
+                    // estimate, `STILL OVER`): the pages the budget holds are
+                    // drawn, nearest the view's centre first as they were
+                    // read, and the rest are the frame's pages over the
+                    // budget (`deferred`, the viewer's `N pages over budget
+                    // (not drawn)`)
+                    let budget = state.page_cache.budget_bytes();
+                    let mut held = generation_bytes;
+                    let asked = round_pages.len();
+                    round_pages.retain(|page| {
+                        let next = held.saturating_add(page.estimated_bytes());
+                        let fits = next <= budget;
+                        if fits {
+                            held = next;
+                        }
+                        fits
+                    });
+                    eprintln!(
+                        "[renderd] gen {}: the pages pass the budget {} after {} plans: {} of this round's {} pages drawn, the rest left out",
+                        command.generation,
+                        budget,
+                        refits + 1,
+                        round_pages.len(),
+                        asked,
+                    );
+                    rounds.truncate(round_index + 1);
+                    cut_short = true;
+                    held
+                } else {
+                    return Err(REFIT_BUDGET.to_string());
+                }
+            }
+        };
+        generation_grown = round_pages.iter().fold(generation_grown, |total, page| total.saturating_add(page.grown_charge()));
         decoded_pages.append(&mut round_pages);
         check_generation(cancellation, command.generation)?;
         let scene_started = Instant::now();
@@ -3737,7 +3880,7 @@ fn run_render(
                         &plan,
                         &decoded_pages,
                         decode_workers,
-                        &mut generation_bytes,
+                        if density_as_read() { &mut generation_grown } else { &mut generation_bytes },
                         &fit_key,
                         &mut state.density_fit_memory,
                         &mut state.density_floor_memory,
@@ -3908,7 +4051,9 @@ fn run_render(
                     None
                 }
             });
-            if let Some(frame) = geometry {
+            // (a frame cut short at the budget serves no other: its pages
+            // are not its plan's)
+            if let Some(frame) = geometry.filter(|_| !cut_short) {
                 store_retained(
                     &mut state.retained,
                     RetainedFrame {
@@ -3929,7 +4074,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -4085,6 +4230,11 @@ fn run_render(
                 // up to this frame's response: the phases above account for
                 // part of it, the rest is time no phase timer covers
                 elapsed_us(run_started),
+                // the layers' pages decode larger than estimated: the scale
+                // the plan's budget was cut by, thousandths (0: none), and
+                // the plans of this frame that passed the budget before it
+                budget_scale.map_or(0, |scale| (scale * 1000.0).round() as u64),
+                refits,
             ),
         );
         // Representative batches bound query work, not the number of full
@@ -4176,6 +4326,67 @@ fn refinement_batches(
         batches[0] = first;
     }
     Ok(batches)
+}
+
+/// A frame whose pages' decoded charge passes the generation budget is
+/// planned again under less of it, not failed (field 2026-10-05, 787 and 789
+/// alone with the density off: "most frames fail with `decoded generation
+/// budget exceeded: 1093017130 > 1073741824 bytes`; with every layer on
+/// hardly ever"). The planner fits a frame's pages to the budget by an
+/// estimate of their decoded size (floe_vfs page_memory: its record count
+/// and stored bytes); pages that decode larger than it - with every layer
+/// on the others' generous estimates covered them - passed the budget, and
+/// the frame was an error. Now the charge of the pages read so far over
+/// their estimate is remembered for the layer set (WorkerState::
+/// budget_scale, 3 % added) and the frame is planned anew to the budget over
+/// it - a fitted plan under what its pages really take, not the first one
+/// cut short - up to BUDGET_REFITS times; every later frame of the layers
+/// starts there. FLOE_RUST_BUDGET_REFIT=off is the kill switch: the error,
+/// as 0.12.300.
+fn budget_refit_enabled() -> bool {
+    std::env::var("FLOE_RUST_BUDGET_REFIT").as_deref() != Ok("off")
+}
+
+/// budget_refit_enabled: the most a frame is planned anew
+const BUDGET_REFITS: u32 = 4;
+
+/// run_render_attempt's answer when its pages passed the budget and the
+/// frame is to be planned anew (WorkerState::budget_scale raised)
+const REFIT_BUDGET: &str = "refit:budget";
+
+/// The key of WorkerState::budget_scale: what decides which pages a frame
+/// reads - the layers, the depth and the root - whatever the view, and
+/// whether the density stack is on: with it pass 1 plans to the budget less
+/// pass 2's reserve (pass1_decode_budget), which holds what its pages take
+/// past their estimates - a scale the plain frames of the layers needed
+/// would only take pages from it.
+fn budget_scale_key(command: &RenderCommand) -> String {
+    format!("{:?}|{}|{:?}|{}", command.visible_layers, command.depth, command.root, density_stack_on(command) as u8)
+}
+
+/// The budget fits remembered for a command's layers, depth and root, at
+/// every scale and cut (WorkerState::fit_memory, fit_whole; fit_memory_key),
+/// are forgotten when their budget scale is raised (budget_refit_enabled):
+/// they were decided under the budget as it was. A viewport frame a decision
+/// still held for would keep it, and its margin - wider - be dropped under
+/// it every time (the two layers of the synthetic MAIN01 1/10 two steps in
+/// under 24 MB: the viewport drew, each margin was dropped). The next
+/// viewport frame decides anew, over its margin's extent.
+fn forget_fits(fits: &mut BTreeMap<String, floe_render_core::FixedFit>, whole: &mut BTreeSet<String>, command: &RenderCommand) {
+    let (head, tail) = fit_memory_scope(command);
+    fits.retain(|key, _| !(key.starts_with(&head) && key.ends_with(&tail)));
+    whole.retain(|key| !(key.starts_with(&head) && key.ends_with(&tail)));
+}
+
+/// Pass 1's decode budget (pass1_decode_budget) over the layers' remembered
+/// scale (WorkerState::budget_scale): what the planner fits the pages'
+/// estimates to, so their charge stays within the budget.
+fn scaled_decode_budget(budget: u64, command: &RenderCommand, scale: Option<f64>) -> u64 {
+    let pass1 = pass1_decode_budget(budget, command);
+    match scale {
+        Some(scale) if scale > 1.0 && pass1 > 0 => ((pass1 as f64 / scale) as u64).max(1),
+        _ => pass1,
+    }
 }
 
 fn checked_generation_bytes(current: u64, incoming: u64, budget: u64) -> Result<u64, String> {
@@ -4918,7 +5129,9 @@ fn render_density_frame(
                         let (pages, _decode_stats) = page_cache.load_pooled(pool, &take)?;
                         times[3] += elapsed_us(decode_started);
                         for page in pages {
-                            let bytes = page.estimated_bytes();
+                            // (as the parser read it or as it is held: the
+                            // count pass 1's pages came in by, density_as_read)
+                            let bytes = if density_as_read() { page.grown_charge() } else { page.estimated_bytes() };
                             if generation_bytes.saturating_add(bytes) > budget_bytes {
                                 counts[3] += 1;
                                 left_out.push(page.page_id);
@@ -5492,6 +5705,39 @@ mod tests {
         assert!(parse_command("render gen=1 view=0,0,320,320 w=32 h=32 frames=off density=maybe out=/tmp/a.raw").is_err());
     }
 
+    /// budget_refit_enabled: pass 1's decode budget over what the layers'
+    /// pages took past their estimates, and the key it is remembered by.
+    #[test]
+    fn a_layer_sets_budget_scale_cuts_the_plans_budget() {
+        let parse = |extra: &str| {
+            render(
+                parse_command(&format!("render gen=1 view=0,0,320,320 w=32 h=32 frames=off {extra} out=/tmp/a.raw"))
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
+        let (off, on) = (parse("density=off"), parse("density=on"));
+        let budget = 1024u64 << 20;
+        // no scale, or one that is none: pass 1's budget as it is
+        assert_eq!(scaled_decode_budget(budget, &off, None), budget);
+        assert_eq!(scaled_decode_budget(budget, &off, Some(0.8)), budget);
+        assert_eq!(scaled_decode_budget(budget, &off, Some(1.25)), (budget as f64 / 1.25) as u64);
+        // with the density stack, of what pass 1 has: the budget less pass 2's reserve
+        let pass1 = pass1_decode_budget(budget, &on);
+        assert!(pass1 < budget);
+        assert_eq!(scaled_decode_budget(budget, &on, Some(2.0)), pass1 / 2);
+        assert_eq!(scaled_decode_budget(0, &off, Some(2.0)), 0);
+        // the key: the layers, the depth, the root and the density stack on
+        // or off (its pass 1 has pass 2's reserve to spare) - not the view
+        let key = |extra: &str| budget_scale_key(&parse(extra));
+        assert_ne!(key("density=off"), key("density=on"));
+        assert_eq!(key("density=off"), key("density=off"));
+        assert_eq!(budget_scale_key(&parse("")), budget_scale_key(&render(parse_command("render gen=2 view=50,50,90,90 w=64 h=64 frames=off out=/tmp/b.raw").unwrap().unwrap())));
+        assert_ne!(key("layers=1/0"), key("layers=2/0"));
+        assert_ne!(key("depth=1"), key("depth=2"));
+        assert_ne!(key("root=3"), key(""));
+    }
+
     fn snap(command: InputCommand) -> SnapCommand {
         match command {
             InputCommand::Snap(snap) => snap,
@@ -5697,21 +5943,9 @@ mod tests {
         assert_eq!(wire_f64_box(&[1.0, 2.5, -3.0, 4e9]), "1,2.5,-3,4000000000");
     }
 
-    #[test]
-    fn a_view_root_is_part_of_the_render_state() {
-        let render = |line: &str| match parse_command(line).unwrap().unwrap() {
-            InputCommand::Worker(WorkerCommand::Render(command)) => command,
-            _ => panic!("expected a render command"),
-        };
-        let top = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
-        let rooted = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off root=17 out=/tmp/a.raw");
-        assert_eq!(top.root, None);
-        assert_eq!(rooted.root, Some(17));
-        // another root is another retained state and another fit memory
-        assert_ne!(RetainedKey::new(&top, Some(1)), RetainedKey::new(&rooted, Some(1)));
-        assert_eq!(RetainedKey::new(&rooted, Some(1)), RetainedKey::new(&render(
-            "render gen=2 view=5,5,325,325 w=32 h=32 frames=off root=17 out=/tmp/b.raw"), Some(1)));
-        let request = |command: &RenderCommand| PlanRequest {
+    /// A plan request of a render command for the fit memory's keys.
+    fn fit_request(command: &RenderCommand) -> PlanRequest {
+        PlanRequest {
             view: ViewBox::new(0, 0, 320, 320).unwrap(),
             cut_dbu: 3,
             visible_layers: None,
@@ -5741,8 +5975,56 @@ mod tests {
             empty_top: true,
             dot_bright: None,
             dot_occ_first: None,
+        }
+    }
+
+    /// forget_fits (budget_refit_enabled): when a layer set's budget scale is
+    /// raised its fits go, at every cut and scale; another layer set's,
+    /// depth's or root's stay.
+    #[test]
+    fn a_raised_budget_scale_forgets_the_layer_sets_fits() {
+        let render = |extra: &str| match parse_command(&format!("render gen=1 view=0,0,320,320 w=32 h=32 frames=off {extra} out=/tmp/a.raw")).unwrap().unwrap() {
+            InputCommand::Worker(WorkerCommand::Render(command)) => command,
+            _ => panic!("expected a render command"),
         };
-        assert_ne!(fit_memory_key(&top, &request(&top)), fit_memory_key(&rooted, &request(&rooted)));
+        let (top, layered, shallow, rooted) = (render(""), render("layers=1/0"), render("depth=1"), render("root=17"));
+        let fine = |command: &RenderCommand| PlanRequest { cut_dbu: 1, px_per_dbu: 0.4, ..fit_request(command) };
+        let mut fits = BTreeMap::new();
+        let mut whole = BTreeSet::new();
+        for command in [&top, &layered, &shallow, &rooted] {
+            for key in [fit_memory_key(command, &fit_request(command)), fit_memory_key(command, &fine(command))] {
+                fits.insert(key.clone(), floe_render_core::FixedFit::everything(3));
+                whole.insert(key);
+            }
+        }
+        assert_eq!((fits.len(), whole.len()), (8, 8));
+        forget_fits(&mut fits, &mut whole, &top);
+        let kept: BTreeSet<String> = [&layered, &shallow, &rooted]
+            .into_iter()
+            .flat_map(|command| [fit_memory_key(command, &fit_request(command)), fit_memory_key(command, &fine(command))])
+            .collect();
+        assert_eq!(fits.keys().cloned().collect::<BTreeSet<_>>(), kept);
+        assert_eq!(whole, kept);
+        // the margin's key is its viewport's: the same layers at the same scale
+        let margin = render("bg=on");
+        assert_eq!(fit_memory_key(&margin, &fit_request(&margin)), fit_memory_key(&top, &fit_request(&top)));
+    }
+
+    #[test]
+    fn a_view_root_is_part_of_the_render_state() {
+        let render = |line: &str| match parse_command(line).unwrap().unwrap() {
+            InputCommand::Worker(WorkerCommand::Render(command)) => command,
+            _ => panic!("expected a render command"),
+        };
+        let top = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
+        let rooted = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off root=17 out=/tmp/a.raw");
+        assert_eq!(top.root, None);
+        assert_eq!(rooted.root, Some(17));
+        // another root is another retained state and another fit memory
+        assert_ne!(RetainedKey::new(&top, Some(1)), RetainedKey::new(&rooted, Some(1)));
+        assert_eq!(RetainedKey::new(&rooted, Some(1)), RetainedKey::new(&render(
+            "render gen=2 view=5,5,325,325 w=32 h=32 frames=off root=17 out=/tmp/b.raw"), Some(1)));
+        assert_ne!(fit_memory_key(&top, &fit_request(&top)), fit_memory_key(&rooted, &fit_request(&rooted)));
         // the clip and the cell queries carry it too
         match parse_command("clip seq=1 box=0,0,10,10 root=17 out=/tmp/c.oas").unwrap().unwrap() {
             InputCommand::Worker(WorkerCommand::Clip(clip)) => assert_eq!(clip.root, Some(17)),

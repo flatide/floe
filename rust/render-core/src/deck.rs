@@ -948,8 +948,11 @@ impl Deck {
                         )?;
                         accumulate_decode(&mut stats, &decode_stats);
                         for page in chunk_pages {
+                            // (as the parser read it, DecodedPage::grown_charge:
+                            // a pass's slices and its budget's stop are where
+                            // they were before the pages' lists were cut)
                             pass_bytes = pass_bytes
-                                .checked_add(page.estimated_bytes())
+                                .checked_add(page.grown_charge())
                                 .ok_or_else(|| "decoded generation byte charge overflow".to_string())?;
                             unique_pages.insert((source_index, page.page_id));
                             decoded.push(page);
@@ -1319,7 +1322,7 @@ fn stream_pass(
             accumulate_decode(stats, &decode_stats);
             for page in chunk_pages {
                 slice_bytes = slice_bytes
-                    .checked_add(page.estimated_bytes())
+                    .checked_add(page.grown_charge())
                     .ok_or_else(|| "decoded generation byte charge overflow".to_string())?;
                 unique_pages.insert((source_index, page.page_id));
                 slice.push(page);

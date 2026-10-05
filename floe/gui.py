@@ -788,6 +788,13 @@ def perf_status(res, depth_note=""):
             # this frame: decided anew, the picture may have
             # changed (SPEC-PLANNER 2026-09-27)
             " (refit)" if fit.get("fit_redecided") else "")
+        # these layers' pages decode larger than the planner
+        # estimates: fitted to the budget over that much
+        # (2026-10-05; a frame that passed the budget is
+        # planned anew, not failed)
+        scale = int(fit.get("fit_scale", 0) or 0)
+        if scale > 1000:
+            fitted += ", pages x%.3g their estimate" % (scale / 1000.0)
         cut += fitted
         brief_cut += fitted
     drawn = ""

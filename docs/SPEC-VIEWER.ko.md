@@ -93,9 +93,13 @@
       - 블록·하한·구역 수는 전체 줄에만 있다.
     - work bin: `bin N items` 또는 `bin off(cap@N), hier V/P pruned`. 넘치면 타일마다 걷는 양을
       함께 보인다.
-    - 컷: `cut<X um`과 예산 맞춤(`… to fit budget`, `STILL OVER`). `(larger side)`는 빠진다.
+    - 컷: `cut<X um`과 예산 맞춤(`… to fit budget`, `STILL OVER`). `(larger side)`는 빠진다. 0.12.301부터 그 레이어들의
+      페이지가 추정보다 크게 디코드돼 예산을 줄여 계획했으면 `, pages xN their estimate`가 붙는다.
     - 그림이 모자란 것: `N pages over budget (not drawn)`, `labels partial`, `evict N`,
-      `summary N layers (not pickable)`.
+      `summary N layers (not pickable)`. `N pages over budget`은 0.12.301부터 단일 레이아웃에서도 나온다(어떤 계획도
+      예산에 들지 않을 때 오류 대신 예산이 담는 만큼 그린다). 여백(margin) 프레임이 예산을 넘으면 오류 대신
+      `dropped`(reason `budget`)이라 상태줄에 아무것도 뜨지 않는다(0.12.300은 `error: decoded generation budget
+      exceeded`를 보였다).
     - 덱: `deck N passes`.
   - 로드 직후 첫 프레임은 `loaded in X s · `만 앞에 붙는다. 내역은 로그에 있다.
   - depth는 위 줄(`depth: d/max · detail: …`)에 있다.

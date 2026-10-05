@@ -500,6 +500,38 @@ sh tools/validate_rust.sh --only quick path/to.oas
   MAIN01 칩의 keep + cut 1 px 광역뷰가 48 MB 예산에서 오류 대신 낮춘 밀도(`fit_thin` > 0)로
   그려지고 **빈 프레임이 아닌지**, `FLOE_RUST_FIT_THIN=off`는 컷을 올리고(`fit_pct` > 100)
   `FLOE_RUST_FIT_BUDGET=off`는 종전 오류인지, 예산 안의 프레임은 픽셀이 바뀌지 않는지.
+  0.12.301 `refit_checks`(실칩 2026-10-05: 두 레이어만 켜고 밀도를 끄면 `decoded generation budget exceeded`).
+  먼저 레코드 벡터의 여유다. 0.6~1.0 µm 상자 60만 개만 있는 레이아웃(`layout_plain`: 페이지당 레코드 3.3만 개 —
+  파서가 읽은 그대로는 벡터가 절반쯤 차서 부과가 추정의 1.12배)의 가운데 400 µm를 26 MB 예산으로 본다(네 페이지:
+  추정 25.7 MB, 읽은 그대로 28.9 MB).
+  - 읽은 그대로(`FLOE_RUST_DECODE_SHRINK=off`) + `FLOE_RUST_BUDGET_REFIT=off`: 0.12.300의 오류
+    (`28883786 > 27262976`). 오류가 안 나면 레이아웃이 더는 재현하지 못하는 것이라 게이트가 실패한다.
+  - 기본: 맞춘 계획이 통째로 든다(`fit_refits` 0, `fit_scale` 0, `fit_over` 0, 예산을 넘긴 페이지 없음, 4쪽,
+    상주 15.8 MB).
+  - 읽은 그대로(`FLOE_RUST_DECODE_SHRINK=off`): 프레임을 한 번 다시 계획해 그린다(`fit_refits` 1 이상, `fit_scale`
+    1000 초과 — 실측 1,158, 3쪽, 상주 20.7 MB ≤ 예산). 같은 뷰를 다시 청하면 `fit_refits` 0, 같은 픽셀이다.
+    기본보다 페이지·켜진 픽셀이 적고 상주는 크다.
+  - 그 워커에서 밀도 스택을 켠 프레임은 줄여 계획하지 않는다(`fit_scale` 0, `fit_refits` 0). 다시 밀도를 끄면
+    처음과 같은 픽셀, 같은 `fit_scale`이다.
+  - 밀도 스택을 켠 프레임은 벡터를 줄여도 같은 그림이다(기본 워커의 프레임 = 읽은 그대로 워커의 프레임, 바이트
+    단위 — `density_as_read`).
+  - 여백(bg): 한 페이지 안의 200 µm 뷰포트와 네 페이지에 걸친 그 여백(같은 배율, 변마다 두 배 픽셀).
+    - 읽은 그대로 + `FLOE_RUST_BUDGET_REFIT=off`: 뷰포트가 그려지고 여백이 오류다(0.12.300).
+    - 기본: 뷰포트는 같은 픽셀, 여백도 그려진다(4쪽, `fit_scale` 0).
+    - 읽은 그대로: 여백이 `dropped`(reason `budget`)이고, 다음 뷰포트 프레임이 `fit_scale` 1000 초과·`fit_refits`
+      0·같은 픽셀이며, 그 뒤의 여백은 프레임이거나 `dropped`(reason `fit`)다 — 오류가 아니다(실측: 뷰포트가 통째로
+      드는 곳에서 여백이 솎아야 해서 reason `fit`).
+
+  다음은 공유 목록이다. 상자 크기 40가지를 같은 30,000곳에 둔 레이아웃(`layout_shared`: 페이지의 40개 레코드가 반복
+  목록 하나를 공유)을 4 MB 예산으로 본다.
+  - 기본: 맞춘 프레임이 그대로 든다(`fit_refits` 0, `fit_scale` 0, 상주 1.7 MB, 켜진 픽셀 있음).
+  - 부과를 0.12.300대로(`FLOE_RUST_CHARGE_SHARED=off` + `FLOE_RUST_DECODE_SHRINK=off`): 프레임을 다시 계획해 그린다
+    (`fit_refits` 1 이상 — 실측 2번, `fit_scale` 1000 초과 — 4,463, 상주가 예산 이하). 같은 뷰를 다시 청하면
+    `fit_refits` 0, 같은 `fit_scale`, 같은 픽셀이다.
+  - 거기에 `FLOE_RUST_BUDGET_REFIT=off`: 종전 오류다(`7265394 > 4194304`).
+  - 0.12.300의 부과로 1 MB(페이지 하나보다 작음): 오류가 아니라 예산이 담는 만큼 그린 프레임이고
+    `over_budget_pages`가 1 이상, `fit_over` 1이다.
+  - 어댑터 계약: 프레임 줄의 `fit_scale`·`fit_refits`, 상태줄 `x2 to fit budget, STILL OVER, pages x1.18 their estimate`.
 - `representatives`(tools/validate_representatives.py, 약 10초; `render`·`indexer`
   별칭에 포함): design.ovr 추가 생성이 캐시를 보존하는지, depth 0 제외·kill switch·
   손상 파일 폴백, 그리고 결합 인덱스 실행에서 OVR 생성이 실패해도(`--kill-at

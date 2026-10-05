@@ -1097,9 +1097,10 @@ class RustRenderWorker:
                 self.res.put({"kind": "cancelled", "gen": generation,
                               "phase": fields.get("phase", "")})
             if kind == "dropped":
-                # a margin the budget fit does not hold (reason=fit) or a
-                # stale render: told, so the GUI can log it and a gate can
-                # wait for it; the GUI shows nothing for it
+                # a margin the budget fit does not hold (reason=fit), one
+                # whose pages passed the budget (reason=budget) or a stale
+                # render: told, so the GUI can log it and a gate can wait
+                # for it; the GUI shows nothing for it
                 self.res.put({"kind": "dropped", "gen": generation,
                               "reason": fields.get("reason", "")})
         elif kind == "error":
@@ -1563,6 +1564,12 @@ class RustRenderWorker:
                 # did not fit this frame and was decided anew (fit_redecided)
                 "fit_fixed": _wire_int(fields, "fit_fixed"),
                 "fit_redecided": _wire_int(fields, "fit_redecided"),
+                # the layers' pages decode larger than the planner estimates
+                # (2026-10-05): the scale its budget was cut by, thousandths
+                # (0: none), and how often this frame was planned anew
+                # after its pages passed the budget
+                "fit_scale": _wire_int(fields, "fit_scale"),
+                "fit_refits": _wire_int(fields, "fit_refits"),
                 # sub-cut boxes (thin keep, few layers): what the size cut drops
                 # drawn as boxes from index metadata; boxes beyond the plan cap
                 "sub_cut_boxes": _wire_int(fields, "sub_cut_boxes"),
