@@ -482,6 +482,12 @@ struct RenderCommand {
     /// margin's 2W x 2H): the fit view the dots thin past is the viewport's
     /// (density_zoom_gain). None: the frame's own size.
     viewport: Option<(u32, u32)>,
+    /// `density=on|off`: the density stack of this frame - the viewer's
+    /// toggle (user 2026-10-05: "add a density on/off option to the
+    /// viewer"): on draws pass 2 with the sub-cut dots (density_dots_on),
+    /// off none. None (absent): FLOE_RUST_DENSITY_STACK and
+    /// FLOE_RUST_DENSITY_DOTS decide, as before.
+    density: Option<bool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -609,6 +615,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 "bg",
                 "vw",
                 "vh",
+                "density",
             ]);
             reject_unknown(&fields, &allowed)?;
             let thin_keep = match fields.get("thin").map(|s| s.as_str()) {
@@ -699,6 +706,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                         (Some(vw), Some(vh)) if vw > 0 && vh > 0 => Some((vw, vh)),
                         _ => None,
                     },
+                    density: optional_bool(&fields, "density")?,
                 },
             ))))
         }
@@ -959,6 +967,10 @@ struct RetainedKey {
     /// the view root the frame was planned from (another root is another
     /// picture in other coordinates; SPEC-VIEWER §8c)
     root: Option<u32>,
+    /// the density stack and its dots the frame was drawn with (the viewer's
+    /// toggle, 2026-10-05: a frame drawn with the density must not serve a
+    /// pan without it, nor the other way round)
+    density: (bool, bool),
     /// the occupancy summary the frame was drawn with (M2): its level
     /// and the file's identity, so a frame drawn from an older
     /// design.ovo (or without one) is never reused after a rebuild
@@ -997,6 +1009,7 @@ impl RetainedKey {
             style_epoch,
             thin_keep: command.thin_keep,
             root: command.root,
+            density: (density_stack_on(command), density_dots_on(command)),
             summary,
         }
     }
@@ -2781,6 +2794,25 @@ fn density_dots_enabled() -> bool {
     std::env::var("FLOE_RUST_DENSITY_DOTS").as_deref() == Ok("on")
 }
 
+/// The density stack of this frame: the command's `density=` (the viewer's
+/// toggle, 2026-10-05), or without it FLOE_RUST_DENSITY_STACK=top
+/// (density_stack_enabled).
+fn density_stack_on(command: &RenderCommand) -> bool {
+    command.density.unwrap_or_else(density_stack_enabled)
+}
+
+/// The sub-cut dots of this frame: with the command's `density=on` on unless
+/// FLOE_RUST_DENSITY_DOTS=off - the viewer's density is the dots' - with
+/// `density=off` none, without it FLOE_RUST_DENSITY_DOTS=on
+/// (density_dots_enabled).
+fn density_dots_on(command: &RenderCommand) -> bool {
+    match command.density {
+        Some(true) => std::env::var("FLOE_RUST_DENSITY_DOTS").as_deref() != Ok("off"),
+        Some(false) => false,
+        None => density_dots_enabled(),
+    }
+}
+
 /// The density stack's brightness (user 2026-10-05: "the brightness of a
 /// pixel by the shapes' size that gathers on it", "never brighter than the
 /// original colour", then "go on with g = 1, 2, 4"): with the sub-cut dots,
@@ -2793,8 +2825,9 @@ fn density_dots_enabled() -> bool {
 /// dots as lit pixels (FLOE_RUST_DENSITY_BRIGHT=off is the kill switch, as
 /// 0.12.296), or no dots. FLOE_RUST_DENSITY_BRIGHT_GAIN, diagnostic: g itself
 /// (1..=64).
-fn density_bright_gain(cut_px: f64) -> Option<f64> {
-    if std::env::var("FLOE_RUST_DENSITY_BRIGHT").as_deref() == Ok("off") || !density_dots_enabled() || !density_stack_enabled() || !(cut_px > 0.0) {
+fn density_bright_gain(command: &RenderCommand) -> Option<f64> {
+    let cut_px = command.cut_px;
+    if std::env::var("FLOE_RUST_DENSITY_BRIGHT").as_deref() == Ok("off") || !density_dots_on(command) || !density_stack_on(command) || !(cut_px > 0.0) {
         return None;
     }
     let fixed = std::env::var("FLOE_RUST_DENSITY_BRIGHT_GAIN")
@@ -2852,7 +2885,7 @@ fn density_budget_bytes() -> u64 {
 /// left, the margin's pass 2 decoded 23 pages where the viewport's decoded
 /// 2,208 and the fit view changed when the margin landed).
 fn pass1_decode_budget(budget: u64, command: &RenderCommand) -> u64 {
-    if budget > 0 && density_stack_enabled() && !command.exact {
+    if budget > 0 && density_stack_on(command) && !command.exact {
         budget.saturating_sub(density_reserve(budget))
     } else {
         budget
@@ -3433,15 +3466,15 @@ fn run_render(
         survivor_list: std::env::var("FLOE_RUST_SURVIVOR_LIST").as_deref() != Ok("off"),
         place_lattice: std::env::var("FLOE_RUST_PLACE_LATTICE").as_deref() == Ok("on"),
         // the density stack sorts the area-true drawing: none without it
-        density_stack: !command.exact && area_true_enabled() && density_stack_enabled(),
+        density_stack: !command.exact && area_true_enabled() && density_stack_on(command),
         // the sub-cut dots' composition: a density shape claims what it lights
-        density_claim_lit: density_dots_enabled(),
+        density_claim_lit: density_dots_on(command),
         density_top_planes: 1,
         // pass 1's shapes first: every plane's density in the space they left
         density_shapes_first: density_shapes_first(),
         // the density's brightness by the area it covers (density_bright_gain)
-        density_bright: if !command.exact && area_true_enabled() && density_stack_enabled() {
-            density_bright_gain(command.cut_px).unwrap_or(0.0) as f32
+        density_bright: if !command.exact && area_true_enabled() && density_stack_on(command) {
+            density_bright_gain(command).unwrap_or(0.0) as f32
         } else {
             0.0
         },
@@ -3643,7 +3676,7 @@ fn run_render(
                     // the sub-cut dots show pass 1 first (CUT_DENSITY_DESIGN §10.12
                     // step 3): a round of its own, final=0, then the frame with the
                     // density - never for a margin (it is not shown before it lands)
-                    let progressive = density_dots_enabled() && density_progressive_enabled() && command.unique_round_paths && !command.background;
+                    let progressive = density_dots_on(command) && density_progressive_enabled() && command.unique_round_paths && !command.background;
                     let mut publish_first = |frame: &floe_render_core::RgbaFrame| -> Result<(), String> {
                         check_generation(cancellation, command.generation)?;
                         let format = if command.raw_frame { "raw" } else { "png" };
@@ -3691,7 +3724,7 @@ fn run_render(
                     density_pages = Some([counts[0], counts[1], counts[2], counts[3]]);
                     density_floor = floor;
                     density_plan2 = Some(plan2);
-                    density_dots = density_dots_enabled().then_some([counts[4], counts[5]]);
+                    density_dots = density_dots_on(command).then_some([counts[4], counts[5]]);
                     // both plans / the scenes / the collection / the regions / the decode
                     density_us = Some([times[0], times[1], report.stats.density_collect_us, times[2], times[3], report.stats.density_raster_us]);
                     report
@@ -4388,7 +4421,7 @@ fn render_density_frame(
     let from_top: BTreeMap<u32, u16> = styled.layers.iter().rev().enumerate().map(|(at, layer)| (layer.layer_idx, at.min(u16::MAX as usize) as u16)).collect();
     // zoomed out past the viewer's fit view, the dots thin (density_zoom_gain);
     // under the brightness (density_bright_gain) they keep their cover
-    let dot_gain = if density_bright_gain(command.cut_px).is_some() { 1.0 } else { density_zoom_gain(cache, command, plan.top.0) };
+    let dot_gain = if density_bright_gain(command).is_some() { 1.0 } else { density_zoom_gain(cache, command, plan.top.0) };
     let other_layers: Vec<u32> = styled.layers.iter().take(styled.layers.len().saturating_sub(top_planes)).map(|layer| layer.layer_idx).collect();
     // pages planned/in hand/decoded/over the budget, dot items/over the cap
     let mut counts = [0u64; 6];
@@ -4405,7 +4438,7 @@ fn render_density_frame(
     // the dots' gain past the fit view, in thousandths (density_zoom_gain)
     plan2[31] = (dot_gain * 1000.0).round() as u64;
     // the brightness's gain, in thousandths (density_bright_gain; 0: off)
-    plan2[34] = density_bright_gain(command.cut_px).map_or(0, |g| (g * 1000.0).round() as u64);
+    plan2[34] = density_bright_gain(command).map_or(0, |g| (g * 1000.0).round() as u64);
     // the dot block the plans take and merge by (64 px at most under the
     // brightness: floe_vfs dot_block_px_of)
     let dot_block = floe_render_core::dot_block_px_of(floe_render_core::dot_block_px(), plan2[34] > 0);
@@ -4489,7 +4522,7 @@ fn render_density_frame(
                     // is sparse and they cover the rest - an all-layer view), a joint
                     // plan would count every layer over the whole top space for
                     // nothing: the two sides plan apart, as without the dots.
-                    let dots = density_dots_enabled() && command.cut_px > 0.0;
+                    let dots = density_dots_on(command) && command.cut_px > 0.0;
                     let one_walk = dots && density_one_walk_enabled();
                     // by cells (density_free_cells) the sides plan apart: the top
                     // plane's layer over its cells, the others over theirs - a joint
@@ -4953,7 +4986,7 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         // a view whose visible layers no cell holds is an empty picture
         empty_top: true,
         // the dots' brightness by the detail (density_bright_gain)
-        dot_bright: density_bright_gain(command.cut_px),
+        dot_bright: density_bright_gain(command),
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -5356,6 +5389,29 @@ mod tests {
             "render gen=1 view=0,0,320,320 w=32 h=32 frames=off thin=maybe out=/tmp/a.raw"
         )
         .is_err());
+    }
+
+    /// The viewer's density toggle (2026-10-05): `density=on|off` is the
+    /// frame's own and a retained frame never serves the other setting;
+    /// absent, the environment's (here: no stack).
+    #[test]
+    fn retained_key_tracks_the_density_toggle() {
+        let parse = |extra: &str| {
+            render(
+                parse_command(&format!("render gen=1 view=0,0,320,320 w=32 h=32 frames=off {extra} out=/tmp/a.raw"))
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
+        let (on, off, absent) = (parse("density=on"), parse("density=off"), parse(""));
+        assert_eq!((on.density, off.density, absent.density), (Some(true), Some(false), None));
+        assert!(density_stack_on(&on) && density_dots_on(&on));
+        assert!(!density_stack_on(&off) && !density_dots_on(&off));
+        assert_ne!(RetainedKey::new(&on, Some(1)), RetainedKey::new(&off, Some(1)));
+        if std::env::var("FLOE_RUST_DENSITY_STACK").is_err() {
+            assert_eq!(RetainedKey::new(&absent, Some(1)), RetainedKey::new(&off, Some(1)));
+        }
+        assert!(parse_command("render gen=1 view=0,0,320,320 w=32 h=32 frames=off density=maybe out=/tmp/a.raw").is_err());
     }
 
     fn snap(command: InputCommand) -> SnapCommand {

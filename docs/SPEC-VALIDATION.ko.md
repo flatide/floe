@@ -197,6 +197,19 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.298(뷰어의 밀도 켜기/끄기) `toggle_checks`:
+      - `gate_layout`의 MID 사각형을 0.4 µm/px에서 본다.
+      - 환경 변수 없는 워커의 `density=on` 프레임은 `FLOE_RUST_DENSITY_STACK=top` + `FLOE_RUST_DENSITY_DOTS=on` 워커의
+        필드 없는 프레임과 바이트까지 같다(706 px). 그 워커의 `density=off`는 환경 변수 없는 프레임과 같다(0 px).
+      - 한 뷰에서 끔 → 켬 → 끔: 켬은 밀도를 그린다(재사용 0타일). 다시 끔은 처음 프레임과 같다(보관 프레임에서 28타일).
+        `RetainedKey::density`를 빼면 켬이 밀도 없는 보관 프레임으로 통째로 그려져 실패한다(확인함).
+      - 단위:
+        - renderd `retained_key_tracks_the_density_toggle`: `density=on|off`와 없음의 파싱, 켬·끔의 키가 다름, 없음은
+          환경 기본, `density=maybe`는 오류.
+        - rust_renderer 어댑터 계약: 작업의 `density`가 있을 때만 명령 끝에 ` density=on|off`가 붙는다.
+        - rust_renderer 뷰어 계약 `test_gui_density_toggle_follows_backend_capability`: 밀도가 없는 렌더러에서는 토글이
+          아무것도 바꾸지 않고 메뉴가 비활성이다. Rust 렌더러에서는 토글이 렌더 키를 바꾸고 다시 그린다. `v`, 메뉴,
+          상태줄, 두 렌더 작업에 실리고, 넘어온 `density=`가 상태를 바꾼다.
     - 0.12.297(밝기: 픽셀에 모인 도형 면적만큼, 원본 색을 넘지 않게) `bright_checks`:
       - `gate_layout`의 MID 0.05 µm 사각형(0.016 px²)을 0.4 µm/px에서 본다. 모두 하한 아래라 점유 격자로 퍼뜨린다.
       - 켜진 픽셀은 모두 MID 색의 배수이고, 어느 채널도 색을 넘지 않는다.

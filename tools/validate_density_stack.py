@@ -1317,6 +1317,70 @@ def bright_checks(temp):
             w.stop()
 
 
+def toggle_checks(temp):
+    """The viewer's density toggle (user 2026-10-05: "a density on/off option
+    in the viewer"; a render command's density=on|off, renderd
+    density_stack_on / density_dots_on): gate_layout's MID squares at 0.4 um
+    a pixel. A worker without FLOE_RUST_DENSITY_STACK draws with density=on
+    what a FLOE_RUST_DENSITY_STACK=top FLOE_RUST_DENSITY_DOTS=on worker draws
+    without the field, byte for byte, and that worker with density=off what
+    the first draws without it. The setting is part of a retained frame's
+    identity: at one view, off, then on (the `v` key), then off again - the
+    second frame draws the density as a fresh worker does (a frame retained
+    without it covering the view would have served it whole), the third the
+    first's pixels."""
+    src = Path(temp) / 'toggle.oas'
+    gate_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    retained = {'FLOE_RUST_RETAINED_MB': '256'}
+    workers = {
+        'plain': worker(src, dict(retained)),
+        'env': worker(src, dict(retained, FLOE_RUST_DENSITY_STACK='top', FLOE_RUST_DENSITY_DOTS='on')),
+        'fresh': worker(src, dict(retained)),
+    }
+    try:
+        dbu = float(workers['plain'].cache.meta['dbu'])
+        spp, x0, y0 = 0.4, -10.0, -20.0
+
+        def view(w, gen, density):
+            box = (x0, y0, x0 + W * spp, y0 + H * spp)
+            job = {'kind': 'render', 'gen': gen, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': None, 'w': W, 'h': H,
+                   'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': [MID],
+                   'frame_format': 'raw', 'thin': 'keep', 'frame_cache': True}
+            if density is not None:
+                job['density'] = density
+            w.submit(job)
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('toggle frame timeout')
+
+        on, on_res = view(workers['plain'], 1, True)
+        env_on, _ = view(workers['env'], 1, None)
+        assert on_res.get('density_stack') and on == env_on, ('density=on as the environment\'s', on_res.get('density_stack'))
+        off, off_res = view(workers['env'], 2, False)
+        plain, _ = view(workers['plain'], 2, None)
+        assert off_res.get('density_stack') is None and off == plain, ('density=off as without the environment', off_res.get('density_stack'))
+        assert len(lit(on, range(W), range(H))) > len(lit(off, range(W), range(H))), 'the density shows'
+        # one view: off, on, off - the setting is part of the retained frame's identity
+        first, _ = view(workers['fresh'], 1, False)
+        toggled, toggled_res = view(workers['fresh'], 2, True)
+        again, again_res = view(workers['fresh'], 3, False)
+        assert toggled == on and toggled_res.get('density_stack'), 'the toggle at one view: not the retained frame without the density'
+        assert again == first and again_res.get('density_stack') is None, 'back off: the frame without it'
+        print('density stack: the viewer\'s toggle - density=on draws as FLOE_RUST_DENSITY_STACK=top + DOTS=on (%d px lit), density=off as '
+              'without them (%d px); at one view off -> on -> off the retained frames keep to their setting (reused %d / %d tiles)'
+              % (len(lit(on, range(W), range(H))), len(lit(off, range(W), range(H))), toggled_res.get('tiles_reused', 0), again_res.get('tiles_reused', 0)))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def layer_colour(w, layer):
     """A layer's colour as the renderer paints it (the cache's style)."""
     for l in w.cache.meta['layers']:
@@ -2247,6 +2311,7 @@ def main():
         top_group_checks(temp)
         shapes_first_checks(temp)
         bright_checks(temp)
+        toggle_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

@@ -1660,7 +1660,7 @@ class Viewer:
                  label_font_px=DEFAULT_LABEL_FONT_PX,
                  frame_cache=True, margin=False,
                  stream_kb=None, stream_target_ms=500,
-                 render_debug=False, thin="auto"):
+                 render_debug=False, thin="auto", density=None):
         self.server_sock = server_sock
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
@@ -1722,6 +1722,14 @@ class Viewer:
         # too; it was cull); "keep" / "cull" explicit
         # (View > keep thin shapes, --thin, a forwarded thin=)
         self.thin_mode = thin if thin in ("auto", "keep", "cull") else "auto"
+        # the density under the cut (renderd's density stack, user
+        # 2026-10-05: "a density on/off option in the viewer"): View >
+        # density under the cut / `v` switch it live, --density (or a
+        # forwarded density=) sets it; unset, the environment the viewer
+        # shares with renderd decides - FLOE_RUST_DENSITY_STACK=top, the
+        # switch the field turned it on with before
+        self.density_on = (os.environ.get("FLOE_RUST_DENSITY_STACK") == "top"
+                           if density is None else bool(density))
         self.frames_on = bool(frames)
         # Frame is the normal UI control for both hierarchy outlines and
         # texts. An explicit --labels off remains available as a startup/
@@ -2453,6 +2461,7 @@ class Viewer:
         self._worker_starting = False
         self._sync_label_font_capability()
         self._sync_abstract_capability()
+        self._sync_density_capability()
         if cache is not None:
             marks = getattr(self, "_load_marks", None)
             if marks is not None and "cache" not in marks:
@@ -2493,6 +2502,7 @@ class Viewer:
             marks["open"] = getattr(worker, "open_report", None) or {}
         self._sync_label_font_capability()
         self._sync_abstract_capability()
+        self._sync_density_capability()
         if self._fit_after_worker_start:
             # The window was already sized before this layout was attached.
             # Do not key this off _did_fit alone: on a cold initial open GTK
@@ -2958,7 +2968,8 @@ class Viewer:
                 opts[key] = value
         before = (self.detail, self.depth_value, self.lod_on,
                   self.frames_on, self.labels_on, self.label_font_px,
-                  getattr(self, "thin_mode", "auto"))
+                  getattr(self, "thin_mode", "auto"),
+                  getattr(self, "density_on", None))
         detail = opts.get("detail")
         if detail in DETAIL_LEVELS:
             self._set_detail(DETAIL_LEVELS.index(detail), redraw=False)
@@ -2970,6 +2981,9 @@ class Viewer:
                 pass
         if opts.get("thin") in ("auto", "keep", "cull"):
             self._set_thin(opts["thin"], redraw=False)
+        # --density / a forwarded density= (2026-10-05)
+        if opts.get("density") in ("on", "off"):
+            self.density_on = opts["density"] == "on"
         frames = opts.get("frames")
         labels = opts.get("labels")
         if frames in ("on", "off"):
@@ -2992,7 +3006,8 @@ class Viewer:
         changed = before != (
             self.detail, self.depth_value, self.lod_on,
             self.frames_on, self.labels_on, self.label_font_px,
-            getattr(self, "thin_mode", "auto"))
+            getattr(self, "thin_mode", "auto"),
+            getattr(self, "density_on", None))
         if changed:
             self.dstatus.set_text(self._depth_label())
         return changed
@@ -3064,7 +3079,16 @@ class Viewer:
         return (scope, tuple(sorted(self.visible)), self._depth_key(),
                 self._effective_cut_px(), self.lod_on, self.frames_on,
                 self.labels_on, self._color_epoch, self._effective_thin(),
-                self._root_ci())
+                self._root_ci(), self._density_key())
+
+    def _density_key(self):
+        """Render-key component: the density toggle where the renderer
+        has one (the Rust renderer's density stack), None elsewhere - a
+        frame drawn with the density never covers a view without it."""
+        if not getattr(getattr(self, "worker", None), "supports_density",
+                       False):
+            return None
+        return bool(getattr(self, "density_on", False))
 
     def _effective_cut_px(self):
         """Screen-space detail cut is independent of merged LOD."""
@@ -3823,7 +3847,7 @@ class Viewer:
         self.gen += 1
         self._job_keys[self.gen] = self._render_key("live")
         self._job_depth[self.gen] = depth
-        self.worker.submit({
+        job = {
             "kind": "render", "gen": self.gen, "scope": "live",
             "bg": True, "t_sub": time.time(),
             "bbox": tuple(float(v) for v in eb),
@@ -3849,7 +3873,11 @@ class Viewer:
             "label_font_px": self.label_font_px,
             "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
-            "visible": self._layers_arg()})
+            "visible": self._layers_arg()}
+        if self._density_key() is not None:
+            # the margin is the view's: the same density setting
+            job["density"] = self.density_on
+        self.worker.submit(job)
         self._margin_pending = (self.gen, self.cx, self.cy)
         self._margin_debug("submitted gen=%d %dx%d" % (self.gen, mw, mh))
         return False
@@ -3912,6 +3940,9 @@ class Viewer:
             "visible": self._layers_arg()}
         if HAS_DENSITY_COVERAGE:
             job["coverage"] = self.coverage_on
+        if self._density_key() is not None:
+            # the density under the cut, on or off (View > density)
+            job["density"] = self.density_on
         self.worker.submit(job)
         self._pending = self.gen
         self._preview_gen = None   # stop a stale preview ticker
@@ -4849,6 +4880,8 @@ class Viewer:
             self._toggle_abstract()
         elif name == "v" and HAS_DENSITY_COVERAGE:
             self._toggle_coverage()
+        elif name == "v":
+            self._toggle_density()
         elif name == "b":
             self._set_mono(not self._mono)
         elif name == "e":
@@ -4929,6 +4962,10 @@ class Viewer:
             lbl += " · thin:%s" % self._effective_thin()
             lbl += " · frame:%s" % (
                 "on" if self.frames_on else "off")
+            # the density under the cut (View > density, `v`)
+            if self._density_key() is not None:
+                lbl += " · density:%s" % (
+                    "on" if self.density_on else "off")
         if self.abstract:
             lbl += " · abstract"
         return lbl
@@ -4981,6 +5018,22 @@ class Viewer:
             return
         self.coverage_on = not self.coverage_on
         self._on_depth()
+
+    def _toggle_density(self):
+        """`v` / View > density under the cut (user 2026-10-05: "a density
+        on/off option in the viewer"): the shapes the detail's cut drops,
+        drawn as the density of the area they cover (renderd's density
+        stack, CUT_DENSITY_DESIGN §10.12) - on or off from the next frame;
+        the status line says which. The Rust renderer only."""
+        if self._density_key() is None:
+            return
+        self.density_on = not self.density_on
+        self._on_depth()
+
+    def _sync_density_capability(self):
+        item = getattr(self, "_density_menu_item", None)
+        if item is not None:
+            item.set_sensitive(self._density_key() is not None)
 
     def _effective_thin(self):
         """The page hairline policy in force: the explicit mode, or
@@ -5573,6 +5626,14 @@ class Viewer:
         check(m, "hierarchy frames\tf",
               lambda: self._set_frames(not self.frames_on),
               lambda: self.frames_on)
+        if not HAS_DENSITY_COVERAGE:
+            # the density under the cut (user 2026-10-05): the Rust
+            # renderer's density stack, on or off live (stable floe's `v`
+            # is its coverage overlay)
+            self._density_menu_item = check(
+                m, "density under the cut\tv", self._toggle_density,
+                lambda: self._density_key() is True)
+            self._density_menu_item.set_sensitive(False)
         self._abstract_menu_item = check(
             m, "abstract cells\ta", self._toggle_abstract,
             lambda: self.abstract)
@@ -10223,7 +10284,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                frame_cache=True, margin=False,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
-               thin="auto"):
+               thin="auto", density=None):
     """`pending_open`: a layout/jobdeck given on the command line that
     has no index yet - the viewer starts empty, asks, indexes and
     opens it (user call 2026-09-09), then applies `pending_fields`
@@ -10235,7 +10296,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                     frame_cache=frame_cache, margin=margin,
                     stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
-                    render_debug=render_debug, thin=thin)
+                    render_debug=render_debug, thin=thin, density=density)
     smoke_ms = os.environ.get("FLOE_GUI_SMOKE_MS")
     smoke_error = []
     if smoke_ms is not None:

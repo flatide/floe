@@ -537,8 +537,10 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   `g` goto 다이얼로그, `c` detail cut 다이얼로그, `a` abstract 모드,
   `e` DRC 브라우저,
   `n`/`p` 다음/이전 DRC 에러, `0`-`9` depth, `Esc` 단계 해제,
-  `q` 종료 (확인 다이얼로그). 안정판 floe만 `v` density coverage 토글을
-  유지한다.
+  `q` 종료 (확인 다이얼로그). `v`는 floe2에서 컷 아래 밀도(View > density
+  under the cut) 켜기/끄기이고(2026-10-05; 시작값 `floe2 view --density
+  on|off`, 없으면 `FLOE_RUST_DENSITY_STACK=top`일 때 켬), 안정판 floe에서는
+  density coverage 토글이다.
 - 마우스: 왼쪽 드래그는 패닝(짧은 클릭은 객체 선택), 오른쪽 드래그는
   영역 줌(오른쪽 방향은 확대, 왼쪽 방향은 축소)이다. 휠은 커서 위치를
   기준으로 이벤트당 최대 한 단계(4%)만 줌한다. 가운데 드래그도 패닝을

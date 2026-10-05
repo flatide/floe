@@ -240,6 +240,22 @@
   실상태(frames_on/abstract/coverage_on/_mono/snap_on/mode)를
   반영하며 `_menu_guard`로 set_active의 핸들러 역발화를 차단.
   단, floe2는 density coverage 상태와 메뉴/키 입력 자체를 노출하지 않는다.
+- **밀도 켜기/끄기**(2026-10-05, 0.12.298; 사용자: "뷰어에서 밀도 켜기/끄기 옵션을 추가해줘"): floe2(Rust 렌더러)의
+  View > **density under the cut**(체크, `v`). 컷 아래 도형을 덮인 면적의 밀도로 그리는 renderd의 밀도 스택
+  (CUT_DENSITY_DESIGN §10.12)을 켜고 끈다. `_toggle_density`가 `density_on`을 뒤집고 `_on_depth`(상태줄과 다시
+  그리기)를 부른다.
+  - 시작값은 `floe2 view --density on|off`다. 실행 중인 창에는 `density=`로 넘어가고, 인덱스가 없어 열기를 미룬 경우는
+    pending_fields로 간다. 옵션이 없으면 뷰어와 renderd가 함께 보는 환경 `FLOE_RUST_DENSITY_STACK=top`일 때 켜진다.
+  - 렌더 작업(뷰포트와 여백)에 `density`가 실리고, 어댑터는 렌더 명령에 `density=on|off`를 붙인다.
+    - renderd는 켬이면 스택과 점을 그린다(`FLOE_RUST_DENSITY_DOTS=off`가 아니면 점). 끔이면 2패스가 없다.
+    - 필드가 없는 요청(CLI 내보내기, 게이트)은 예전처럼 환경 변수가 정한다.
+  - 렌더 키(`_render_key`)에 `_density_key()`가 들어간다. 토글하면 화면 프레임과 여백 프레임이 지금 상태를 담지 않은
+    것이 되어 다시 그린다.
+  - renderd도 보관 프레임의 키(`RetainedKey::density`)에 이 설정을 넣는다. 키에 없으면 밀도 없이 그려 보관한 프레임이
+    같은 뷰의 켬 요청을 통째로(라벨만 다시 그리는 경로로) 대신해, 토글한 뷰에 밀도가 나오지 않는다.
+  - 상태줄(깊이 라벨)에 ` · density:on/off`가 붙는다.
+  - stable floe(KLayout)는 `v`가 coverage 오버레이라 이 항목이 없다. 렌더러가 밀도 스택을 갖지 않으면
+    (`supports_density` 없음) 메뉴 항목이 비활성이고 키도 아무 일을 하지 않는다.
   LOD 토글(메뉴 항목·`l` 키·깊이 라벨의 `lod:on/off`·`floe2 view --lod`)은 제거됐다(2026-09-22
   사용자 결정: LOD는 쓰지 않는다 — 토글은 Rust 경로의 renderd에 닿지도 않았다). 실행 중인 창으로
   넘어오는 `lod=` 필드는 받아서 무시하고, renderd의 LOD 교체는 기본 끔이다(SPEC-PLANNER §3).

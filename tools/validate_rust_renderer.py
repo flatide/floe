@@ -207,6 +207,7 @@ class WorkerContractTests(unittest.TestCase):
             _did_fit=True,
             _sync_label_font_capability=lambda: None,
             _sync_abstract_capability=lambda: None,
+            _sync_density_capability=lambda: None,
             fit=lambda: calls.append("fit"),
             redraw=lambda immediate=False: calls.append(
                 ("redraw", immediate)),
@@ -227,6 +228,7 @@ class WorkerContractTests(unittest.TestCase):
             _did_fit=True,
             _sync_label_font_capability=lambda: None,
             _sync_abstract_capability=lambda: None,
+            _sync_density_capability=lambda: None,
             fit=lambda: calls.append("fit"),
             redraw=lambda immediate=False: calls.append(
                 ("redraw", immediate)),
@@ -416,6 +418,79 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertTrue(viewer.abstract)
         self.assertTrue(item.sensitive)
         self.assertEqual(redraws, [True])
+
+    def test_gui_density_toggle_follows_backend_capability(self):
+        """The viewer's density toggle (user 2026-10-05: "a density on/off
+        option in the viewer"): View > density under the cut / `v` flip it
+        where the renderer has the density stack - the frame identity
+        changes with it (the displayed and the margin frame are redrawn),
+        the status line says it, the job carries it, a forwarded density=
+        sets it; a renderer without it keeps no state, the menu item is
+        insensitive."""
+        import inspect
+        from types import SimpleNamespace
+        from floe import gui
+
+        class Item:
+            sensitive = None
+
+            def set_sensitive(self, value):
+                self.sensitive = bool(value)
+
+        v = gui.Viewer.__new__(gui.Viewer)
+        v.visible = {(1, 0)}
+        v._depth_key = lambda: ("d", 3)
+        v.cut_px = 3.0
+        v.lod_on = False
+        v.frames_on = True
+        v.labels_on = True
+        v._color_epoch = 1
+        v.cache = SimpleNamespace(is_jobdeck=False)
+        v.thin_mode = "auto"
+        v._density_menu_item = Item()
+        v.density_on = False
+        redraws = []
+        v._on_depth = lambda: redraws.append(True)
+        # without the density stack: nothing to toggle
+        v.worker = SimpleNamespace(supports_label_font_px=True)
+        gui.Viewer._sync_density_capability(v)
+        self.assertFalse(v._density_menu_item.sensitive)
+        self.assertIsNone(gui.Viewer._density_key(v))
+        gui.Viewer._toggle_density(v)
+        self.assertFalse(v.density_on)
+        self.assertEqual(redraws, [])
+        # the Rust renderer's
+        v.worker = SimpleNamespace(supports_density=True)
+        gui.Viewer._sync_density_capability(v)
+        self.assertTrue(v._density_menu_item.sensitive)
+        off = gui.Viewer._render_key(v, "live")
+        gui.Viewer._toggle_density(v)
+        self.assertTrue(v.density_on)
+        self.assertEqual(redraws, [True])
+        self.assertNotEqual(gui.Viewer._render_key(v, "live"), off)
+        # the key, the menu, the status line and both render jobs
+        self.assertIn("self._toggle_density()", inspect.getsource(gui.Viewer._on_key))
+        self.assertIn('"density under the cut\\tv"', inspect.getsource(gui.Viewer._build_menubar))
+        self.assertIn("density:%s", inspect.getsource(gui.Viewer._depth_label))
+        self.assertIn('job["density"] = self.density_on', inspect.getsource(gui.Viewer._submit_render))
+        self.assertIn('job["density"] = self.density_on', inspect.getsource(gui.Viewer._submit_margin))
+        # a forwarded density= (and --density through pending_fields)
+
+        class Status:
+            text = None
+
+            def set_text(self, value):
+                self.text = value
+
+        v.detail, v.depth_value, v.label_font_px = 1, 0, 14
+        v._ddlg = v._fontdlg = None
+        v.dstatus = Status()
+        v._depth_label = lambda: "forwarded state"
+        self.assertTrue(gui.Viewer._forwarded_view_options(v, ["density=off"]))
+        self.assertFalse(v.density_on)
+        self.assertFalse(gui.Viewer._forwarded_view_options(v, ["density=off"]))
+        self.assertTrue(gui.Viewer._forwarded_view_options(v, ["density=on"]))
+        self.assertTrue(v.density_on)
 
     def test_a_dropped_foreground_render_clears_the_pending_state(self):
         """Review 2026-09-30: the mouse waits on _pending until the pending
@@ -1845,6 +1920,14 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertNotIn(" vw=", commands.pop())
             worker._submit_render(dict(job, gen=100, bg=True, bbox=(-9.5, -3.5, 30.5, 16.5), w=40, h=20, view=job["bbox"]))
             self.assertTrue(commands.pop().endswith(" bg=on vw=20 vh=10"))
+            # the viewer's density toggle (2026-10-05) travels when set;
+            # absent, renderd's environment decides
+            self.assertTrue(RustRenderWorker.supports_density)
+            self.assertNotIn(" density=", commands[0])
+            worker._submit_render(dict(job, gen=101, density=True))
+            self.assertTrue(commands.pop().endswith(" density=on"))
+            worker._submit_render(dict(job, gen=102, density=False))
+            self.assertTrue(commands.pop().endswith(" density=off"))
             self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
             # the page hairline policy rides with every frame; a plain

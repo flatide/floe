@@ -436,6 +436,16 @@ more it is zoomed out"; renderd `density_zoom_gain`, `thin_dot_items`;
 `FLOE_RUST_DENSITY_ZOOM_OUT=off` is the kill switch,
 `FLOE_RUST_DENSITY_ZOOM_OUT_POWER` (1) diagnostic). A margin's render command
 carries its viewport, `vw=`/`vh=`, the fit view being the viewport's.
+Since 0.12.298 a render command may carry `density=on|off`, the viewer's
+density toggle (View > density under the cut, `v`, `floe2 view --density`;
+user 2026-10-05: "add a density on/off option to the viewer"): on draws the
+density stack with the sub-cut dots (unless `FLOE_RUST_DENSITY_DOTS=off`),
+off draws no pass 2; without it `FLOE_RUST_DENSITY_STACK` and
+`FLOE_RUST_DENSITY_DOTS` decide as before (renderd `density_stack_on`,
+`density_dots_on`). The setting is part of a retained frame's key
+(`RetainedKey::density`): without it a frame retained without the density
+would serve a request with it whole (the label-only path) - toggling at one
+view would draw no density.
 `density_plan2`'s 32nd value is the gain in thousandths. Since 0.12.288 a
 cell's dot block of one layer is drawn only when its dots light a share of
 its pixels set by the detail's cut - (cut - 1) / 16: high (1 px) none, medium

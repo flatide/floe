@@ -359,6 +359,11 @@ class RustRenderWorker:
 
     supports_label_font_px = True
     supports_abstract = False
+    # the density under the cut (renderd's density stack, CUT_DENSITY_DESIGN
+    # §10.12): a render job's `density` turns it on or off for that frame
+    # (the viewer's View > density toggle, 2026-10-05); absent, renderd's
+    # environment decides (FLOE_RUST_DENSITY_STACK / _DOTS)
+    supports_density = True
     # §F2R-17: the GUI's background margin prefetch (an enlarged frame
     # around the view whose crops serve later pans) is a Rust-only
     # optimization: renderd honors bg=True, cancels it at the
@@ -797,6 +802,10 @@ class RustRenderWorker:
             # the viewer's viewport when the frame is not it (a margin): the
             # fit view the dots thin past is the viewport's (2026-10-04)
             command += " vw=%d vh=%d" % viewport
+        if job.get("density") is not None:
+            # the viewer's density toggle (2026-10-05): this frame's density
+            # stack, over renderd's environment default
+            command += " density=%s" % ("on" if job["density"] else "off")
         self._send(command)
 
     def _submit_recolor(self, job):

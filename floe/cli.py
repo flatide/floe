@@ -1533,6 +1533,9 @@ def cmd_view(args):
         # keep could not be told to return to its default)
         if getattr(args, "thin", None) is not None:
             request += "\tthin=" + args.thin
+        # an explicit --density reaches the running window (2026-10-05)
+        if getattr(args, "density", None) is not None:
+            request += "\tdensity=" + args.density
         for _ in range(5):
             code = instance.try_forward(addr, request)
             if code is not None:
@@ -1569,7 +1572,9 @@ def cmd_view(args):
                "labelpx=%d" % args.label_font_px]
             + (["levels=" + ",".join(str(i) for i in levels)]
                if levels else [])
-            + (["thin=" + thin_mode] if thin_mode != "auto" else []))
+            + (["thin=" + thin_mode] if thin_mode != "auto" else [])
+            + (["density=" + args.density]
+               if getattr(args, "density", None) is not None else []))
         c = None
         goto = None
     else:
@@ -1587,7 +1592,9 @@ def cmd_view(args):
                stream_target_ms=args.stream_target_ms,
                render_debug=args.render_debug,
                pending_open=pending_open, pending_fields=pending_fields,
-               thin=thin_mode)
+               thin=thin_mode,
+               density=(None if getattr(args, "density", None) is None
+                        else args.density == "on"))
 
 
 def _add_thin_option(p):
@@ -2266,6 +2273,16 @@ def main(argv=None, *, prog=None, rust_only=None):
                         "Digits / the `d` dialog change it at runtime. "
                         "Forwarded to a running instance")
     _add_thin_option(p)
+    if rust_only:
+        # the density under the cut (user 2026-10-05: "a density on/off
+        # option in the viewer"): the Rust renderer's density stack
+        p.add_argument("--density", choices=("on", "off"), default=None,
+                       help="start with the density under the cut on or off "
+                            "- the shapes the detail's cut drops, drawn by "
+                            "the area they cover; View > density under the "
+                            "cut (`v`) switches it live. Default: on when "
+                            "FLOE_RUST_DENSITY_STACK=top, else off. "
+                            "Forwarded to a running instance")
     p.add_argument("--refinement", choices=("on", "off"), default="on",
                    help="publish progressive intermediate frames (default "
                         "on); off waits for one settled frame in both floe "

@@ -3036,3 +3036,14 @@ detail medium과 high에서 차이가 나는 밀도 디테일 표현으로 mediu
   거칠다. 2패스 예약을 늘리거나, 빠진 페이지를 점유로 퍼뜨려 채우는 길이 있다.
 - 라우팅 칩처럼 가는 배선은 덮임이 작아 medium에서 어둡다(라우팅 칩 fit 평균 밝기 8/255). 원본 색이 되는 덮임이
   1/g라서다. g를 더 키우면 밝아진다(`FLOE_RUST_DENSITY_BRIGHT_GAIN`으로 실칩에서 비교).
+
+**뷰어의 밀도 켜기/끄기(2026-10-05, 0.12.298 / renderd 0.12.275).** 사용자: "뷰어에서 밀도 켜기/끄기 옵션을
+추가해줘."
+
+- floe2 View > **density under the cut**(`v`)로 켜고 끈다. 시작값은 `floe2 view --density on|off`이고, 없으면
+  `FLOE_RUST_DENSITY_STACK=top`일 때 켜진다. 상태줄에 `density:on/off`가 붙는다.
+- 렌더 명령의 `density=on|off`가 프레임마다 renderd의 환경 기본을 대신한다. 켬은 스택과 점(밝기 포함)이고, 끔은
+  2패스가 없다. 환경 변수 없이도 뷰어에서 바로 켤 수 있다.
+- 보관 프레임 키에 이 설정을 넣었다. 키에 없으면 같은 뷰에서 밀도를 켰을 때 밀도 없이 보관된 프레임이 통째로
+  쓰여 밀도가 나오지 않는다(키에서 빼고 게이트 `toggle_checks`로 확인했다).
+- 세부: SPEC-VIEWER §7, RUST_RENDERER.
