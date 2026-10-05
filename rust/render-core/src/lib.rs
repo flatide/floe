@@ -65,5 +65,5 @@ pub use floe_vfs::hier::HierPlan;
 pub use floe_vfs::hier::FixedFit;
 /// the sub-cut dots' block, px (renderd reports it with a density frame)
 pub use floe_vfs::hier::{dot_block_px, dot_block_px_of};
-pub use floe_vfs::hier::{dot_page_occ, dot_page_spread, dot_page_spread_boxes};
+pub use floe_vfs::hier::{dot_occ_decode, dot_page_occ, dot_page_spread, dot_page_spread_boxes};
 pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;

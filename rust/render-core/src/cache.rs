@@ -1002,6 +1002,8 @@ impl Cache {
             st.dot_sampled_chunks += more.dot_sampled_chunks;
             st.dot_sampled_members += more.dot_sampled_members;
             st.occ_fallback.extend(more.occ_fallback.iter().cloned());
+            st.occ_aside.extend(more.occ_aside.iter().cloned());
+            st.dot_stood_in += more.dot_stood_in;
             st.dot_partial += more.dot_partial;
             st.dot_gated += more.dot_gated;
             st.dot_gate_min = st.dot_gate_min.max(more.dot_gate_min);
@@ -1165,7 +1167,20 @@ impl Cache {
     /// None where the fit would plan again; the caller plans it.
     pub fn fit_plan(&self, request: &PlanRequest, plan: HierPlan) -> Result<Option<HierPlan>, String> {
         let req = self.view_request(request)?;
-        Ok(self.vfs.fit_planned_in(&req, request.fixed_fit, request.free_pages.clone(), plan, request.dot_bright))
+        Ok(self.vfs.fit_planned_in(&req, request.fixed_fit, request.free_pages.clone(), plan, request.dot_bright, request.dot_occ_first))
+    }
+
+    /// The pages `left` (sorted) of `plan` - a plan of `request` - that the
+    /// caller's budget could not decode after all, drawn by their occupancy
+    /// records instead (floe_vfs HierOpts::dot_stand_in). The pages stood in
+    /// for; none where the plan noted none (no brightness, no design.ovb,
+    /// FLOE_RUST_DENSITY_STAND_IN=off).
+    pub fn stand_in_pages(&self, request: &PlanRequest, plan: &mut HierPlan, left: &[u32]) -> Result<u64, String> {
+        if left.is_empty() || plan.stats.occ_aside.is_empty() {
+            return Ok(0);
+        }
+        let req = self.view_request(request)?;
+        Ok(self.vfs.stand_in_pages(&req, plan, left, request.dot_bright))
     }
 
     pub fn plan(&self, request: &PlanRequest) -> Result<PlannedView, String> {
@@ -1183,7 +1198,7 @@ impl Cache {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright);
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright, request.dot_occ_first);
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }

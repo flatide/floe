@@ -357,6 +357,38 @@
     안(문턱 켬, 빠진 블록 0), 외톨이 LEAF의 상자는 자기 상자(점 모드는 키운 상자), 9겹 격자의 블록은 g = 1·2·4에서
     1,024·512·256으로 멈춘다. 200 px를 빈틈없이 덮은 1 px LEAF를 128 px 블록으로 계획하면 항목이 64 px 이하이고, 모두
     상자 넓이를 센다.
+  **점유 격자 먼저·빠진 페이지의 대체·항목의 소수부(0.12.299, renderd 0.12.276; 리뷰어 2026-10-05, CUT_DENSITY_DESIGN
+  §10.12 "리뷰 보완 1").** 셋 다 `dot_bright`가 있을 때만 걸린다.
+  - `HierOpts::dot_occ_first = Some(share)`(`PlanRequest::dot_occ_first`; renderd `density_ovb_first`,
+    `FLOE_RUST_DENSITY_OVB_FIRST=off`가 킬 스위치). 호출자는 `sub_cut_dots`를 1로 준다(페이지 컷 = 셀 컷).
+    - `decode_under_floor`: 페이지 컷 아래 페이지는 격자 칸이 `dot_occ_cell_px`보다 크게 보이거나, **격자가 없고**
+      (`Ovm::page_occ_grid` ≠ Some(true)) 가장 큰 도형이 floor(cut_dbu × share) 이상이면 디코드한다. 나머지는
+      `box_page`가 격자(또는 면적)로 퍼뜨린다.
+    - 그래서 달라지는 것은 격자가 있고 칸이 충분히 작으며 가장 큰 도형이 [share × 컷, 컷)인 페이지뿐이다.
+  - `HierOpts::dot_stand_in`(기본 켬, `FLOE_RUST_DENSITY_STAND_IN=off`). 걸리는 조건은 `stand_in_on`: 밝기, 점 계획,
+    one walk 아님, 페이지 퍼뜨림과 점유가 켜져 있고 design.ovb가 있음.
+    - `expand` 끝에서 작업 셀의 페이지 중 공짜가 아니고(`page_is_free`) 점유 레코드가 있는 것을
+      `HierStats::occ_aside`에 적는다: `OccAside { key, page, under, boxes }`. `under`는 페이지 컷 아래인데 디코드한
+      페이지다.
+    - `stand_in_left_out(v, req, opts, plan, left)`: `left`가 None이면 계획에 더는 없는 페이지(맞춤이 버림), Some이면
+      그 페이지들을 처리한다. (셀, 페이지)마다 상자를 모아 `occ_grid_items`(격자) 또는 `occ_total_items`(면적)로 블록
+      항목을 만들고, `dot_occ_boxes`면 상자가 통째로 든 블록만 남겨 그 작업 셀의 wash와 수로 넣는다.
+    - 부르는 곳은 `fit_at_cut`(맞춤 직후)과 `Vfs::stand_in_pages`(`Cache::stand_in_pages`, renderd의 디코드 뒤)다.
+    - 통계: `dot_stood_in`(대체한 페이지), `dot_occ_pages`·`dot_by[7]`에 더하고, `dot_occ_decoded`는 남은 `under`
+      페이지 수로 다시 센다. 병합(`Cache::merge_plans`)은 `occ_aside`를 잇는다.
+    - 이 경로에서는 `decode_under_floor`가 즉시 대체(`occ_fallback`)를 만들지 않는다.
+  - `HierOpts::dot_bright_sums`(기본 켬, `FLOE_RUST_DENSITY_BRIGHT_SUMS=off`).
+    - `add_dots`, 블록 이하 항목: 담는 수가 있으면 min(담는 수, ceil(상자 단위)), 없으면 `whole_dots(상자 단위)`.
+      끄면 1단위 이상에서 버림, 그리고 담는 수와의 최솟값.
+    - `add_dots`, 넓은 항목: 블록 몫을 `whole_dots`로(0이면 내지 않음). 끄면 floor에 최소 1.
+    - 리스트 멤버: 늘 `whole_dots(대표 수 × each)`. 대표 수가 1보다 크면 상자를 멤버 ∪ (블록 ∩ 청크 범위)로 하고,
+      한 변이 블록의 절반보다 작으면 그 변을 블록 전체로 한다.
+    - `box_page`: 상자 이하 격자 페이지와 면적만 있는 페이지의 덮임에 `dot_units()`를 곱한다.
+  - 단위: `with_the_occupancy_first_a_page_under_the_cut_is_spread_by_a_fine_grid_whatever_its_shapes`,
+    `a_page_a_budget_leaves_out_is_drawn_by_its_occupancy_record_instead`,
+    `under_the_brightness_an_items_cover_keeps_its_fraction`,
+    `under_the_brightness_a_list_member_read_for_a_window_stands_over_its_block`,
+    `under_the_brightness_a_page_no_wider_than_a_box_counts_in_sixteenths_too`.
   **읽기(0.12.256):** 점 모드에서 마스크 없는 노드의 배치 읽기는 셀마다 가장 위 가시 레이어를 한 번만 구해 두고
   (`cell_top`, `top_memo`) 순위만 비교한다; 계획기의 정수 키 맵은 Fx식 해시(`FxMap`/`FxSet`). 그림은 같다.
   **블록과 퍼뜨림(0.12.257; 사용자 2026-10-01 "지금보다 덜 자세해도 괜찮을 것 같음"):** 블록은

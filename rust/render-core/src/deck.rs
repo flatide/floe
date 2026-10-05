@@ -1696,6 +1696,7 @@ fn source_plan_request(
         // an empty plan is a skipped pass (the planner dropped the source)
         empty_top: false,
         dot_bright: None,
+        dot_occ_first: None,
     };
     plan.validate()?;
     Ok(Some(plan))

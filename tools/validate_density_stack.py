@@ -1381,6 +1381,205 @@ def toggle_checks(temp):
             w.stop()
 
 
+def first_layout(path):
+    """MID's own shapes, 0.6 um squares - 1.5 px at 0.4 um a pixel: under the
+    3 px cut, over the 1 px density cut: 1,000 at random over the left 60 x 60
+    um (about a tenth of it), a 20 x 20 um field of them every 1.2 um (a
+    quarter) on the right, and 16,000 more over the strip above both (y 62-78
+    um) - the page (one point list) past a 128 KB reserve."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    mid = ly.layer(*MID)
+    rnd = random.Random(17)
+    for _ in range(1000):
+        x, y = rnd.randrange(59_000) / 1000.0, rnd.randrange(59_000) / 1000.0
+        top.shapes(mid).insert(kdb.DBox(x, y, x + 0.6, y + 0.6))
+    for i in range(16):
+        for j in range(16):
+            x, y = 70 + i * 1.2, 10 + j * 1.2
+            top.shapes(mid).insert(kdb.DBox(x, y, x + 0.6, y + 0.6))
+    for _ in range(16000):
+        x, y = rnd.randrange(88_000) / 1000.0, 62 + rnd.randrange(16_000) / 1000.0
+        top.shapes(mid).insert(kdb.DBox(x, y, x + 0.6, y + 0.6))
+    options = kdb.SaveLayoutOptions()
+    options.format = 'OASIS'
+    options.oasis_compression_level = 10
+    ly.write(str(path), options)
+
+
+def first_checks(temp):
+    """The occupancy first and the stand-in for a page a budget leaves out (a
+    reviewer 2026-10-05, then the exact cover: on the routing chip's fit view
+    pass 2 kept 110 of the 277 pages it decodes from 1 px up under 1 GB and
+    drew x0.49 of them; their occupancy grids draw x1.01 in a third of the
+    time). first_layout's 1.5 px squares at 0.4 um a pixel under the
+    brightness: by default (renderd density_ovb_first) pass 2 decodes no page
+    - the page is spread by its grid, whose cells show 3 px - and the kill
+    switch (FLOE_RUST_DENSITY_OVB_FIRST=off) decodes it. Spread, the alphas
+    add up to g x the squares' area and the field shows a half of the colour;
+    decoded, each square is drawn where it is and a pixel it covers stops at
+    the colour (min(1, g x cover) a pixel: about 3.3 of the 4.5 a 1.5 px
+    square's area makes), so the sum is less - the two agree by 16 px cells
+    within that. Under a reserve that holds no page (1 MB, the
+    fixed 128 KB) with the page decoded as before, its grid stands in (floe_vfs
+    HierOpts::dot_stand_in: density_plan2 stood_in) and draws that area too;
+    FLOE_RUST_DENSITY_STAND_IN=off draws nothing, as 0.12.298."""
+    src = Path(temp) / 'first.oas'
+    first_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on'}
+    tight = dict(env, FLOE_RUST_BUDGET_MB='1', FLOE_RUST_DENSITY_RESERVE_LEFT='off', FLOE_RUST_DENSITY_OVB_FIRST='off')
+    workers = {'first': worker(src, env), 'decode': worker(src, dict(env, FLOE_RUST_DENSITY_OVB_FIRST='off')),
+               'stand_in': worker(src, tight), 'none': worker(src, dict(tight, FLOE_RUST_DENSITY_STAND_IN='off'))}
+    try:
+        dbu = float(workers['first'].cache.meta['dbu'])
+        colour = layer_colour(workers['first'], MID)
+        k = max(range(3), key=lambda i: colour[i])
+        spp, x0, y0 = 0.4, -10.0, -10.0
+
+        def view(w):
+            box = (x0, y0, x0 + W * spp, y0 + H * spp)
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': None, 'w': W, 'h': H,
+                      'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': [MID],
+                      'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('first frame timeout')
+
+        def alpha(pixels, c, r):
+            p = px(pixels, c, r)
+            assert all(p[i] <= colour[i] for i in range(3)), ('past the colour', (c, r), tuple(p))
+            return p[k] / colour[k]
+
+        def total(pixels, um):
+            cs = range(max(0, int((um[0] - x0) / spp)), min(W, int((um[2] - x0) / spp)))
+            rs = range(max(0, int((y0 + H * spp - um[3]) / spp)), min(H, int((y0 + H * spp - um[1]) / spp)))
+            return sum(alpha(pixels, c, r) for r in rs for c in cs), len(cs) * len(rs)
+
+        frames = {name: view(w) for name, w in workers.items()}
+        pages = {name: res.get('density_pages') or {} for name, (_, res) in frames.items()}
+        plan2 = {name: res.get('density_plan2') or {} for name, (_, res) in frames.items()}
+        sparse, field = (-1, -1, 61, 61), (70.2, 10.2, 88.8, 28.8)
+        # the squares' area on screen, px^2 (overlaps counted twice: about 2 %), and g = 2
+        want = 2 * 1000 * (0.6 / spp) ** 2
+        got = {name: total(pixels, sparse)[0] for name, (pixels, _) in frames.items()}
+        assert pages['first']['decoded'] == 0 and plan2['first']['occ_pages'] >= 1, (pages['first'], plan2['first'])
+        assert pages['decode']['decoded'] >= 1, pages['decode']
+        # spread: the area itself; decoded: each pixel a square covers stops at
+        # the colour - 3.3 to 3.5 of the 4.5 a square's area makes at g = 2
+        assert abs(got['first'] - want) < 0.15 * want, ('spread', got['first'], want)
+        assert 0.62 * want < got['decode'] < 0.85 * want, ('decoded', got['decode'], want)
+        fields = {name: total(frames[name][0], field) for name in ('first', 'decode')}
+        assert abs(fields['first'][0] / fields['first'][1] - 0.5) < 0.08, ('the field, spread', fields['first'][0] / fields['first'][1])
+        assert 0.3 < fields['decode'][0] / fields['decode'][1] < 0.45, ('the field, decoded', fields['decode'][0] / fields['decode'][1])
+        # by 16 px cells the two agree within that: the mean difference under
+        # two fifths of the mean
+        cells = [(c, r) for r in range(0, H - 15, 16) for c in range(0, W - 15, 16)]
+        sums = {name: [sum(alpha(frames[name][0], c + i, r + j) for j in range(16) for i in range(16)) for (c, r) in cells] for name in ('first', 'decode')}
+        mean = sum(sums['decode']) / len(cells)
+        differ = sum(abs(a - b) for a, b in zip(sums['first'], sums['decode'])) / len(cells)
+        assert mean > 0 and differ < 0.4 * mean, ('16 px cells', differ, mean)
+        # the page left out: its grid stands in, or nothing does
+        assert plan2['stand_in']['stood_in'] >= 1 and pages['stand_in']['decoded'] == 0, (plan2['stand_in'], pages['stand_in'])
+        assert abs(got['stand_in'] - want) < 0.15 * want, ('the stand-in', got['stand_in'], want)
+        assert plan2['none']['stood_in'] == 0 and got['none'] == 0 and not lit(frames['none'][0], range(W), range(H)), (plan2['none'], got['none'])
+        print('density stack: the occupancy first - the 1.5 px squares\' page spread by its grid, no page decoded: alphas %.0f for g x %.0f px^2 '
+              '(decoded, the switch off: %.0f; by 16 px cells they differ by %.2f of %.2f); a reserve that holds no page: its grid stands in, '
+              '%.0f (%d pages) - the stand-in off: nothing'
+              % (got['first'], want / 2, got['decode'], differ, mean, got['stand_in'], plan2['stand_in']['stood_in']))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
+def sums_layout(single_path, list_path):
+    """2,000 cells of 0.32 um (0.32 px at 1 um a pixel: 0.1024 px^2, 1.64
+    sixteenths) at random over 990 x 190 um: each its own cell placed once
+    (lone placements), and one cell placed 2,000 times (KLayout writes a point
+    list)."""
+    import random
+    import klayout.db as kdb
+    for path, lone in ((single_path, True), (list_path, False)):
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        mid = ly.layer(*MID)
+        rnd = random.Random(5)
+        leaf = None
+        for n in range(2000):
+            if lone or leaf is None:
+                leaf = ly.create_cell('L%d' % n)
+                leaf.shapes(mid).insert(kdb.Box(0, 0, 320, 320))
+            top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(rnd.randrange(390_000), rnd.randrange(190_000))))
+        ly.write(str(path))
+
+
+def sums_checks(temp):
+    """Under the brightness an item's cover keeps its fraction (a reviewer
+    2026-10-05: "0.1 px^2 is 1.6 sixteenths, cut to 1"; floe_vfs
+    HierOpts::dot_bright_sums, FLOE_RUST_DENSITY_BRIGHT_SUMS=off the kill
+    switch). sums_layout's 2,000 cells of 0.1024 px^2 at 1 um a pixel, g = 2:
+    as lone placements their alphas add up to g x their area (410) - the
+    switch off 0.61 of it, each cut to a sixteenth; as one point list read one
+    member for a window, each window stands over its block's part of the
+    chunk - the area again, no pixel past half the colour - where the switch
+    off gathers it on the member's own pixel (pixels at the colour itself)."""
+    single, listed = Path(temp) / 'sums_single.oas', Path(temp) / 'sums_list.oas'
+    sums_layout(single, listed)
+    for src in (single, listed):
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on'}
+    off = dict(env, FLOE_RUST_DENSITY_BRIGHT_SUMS='off')
+    workers = {('single', 'on'): worker(single, env), ('single', 'off'): worker(single, off), ('list', 'on'): worker(listed, env), ('list', 'off'): worker(listed, off)}
+    try:
+        w0 = workers[('single', 'on')]
+        dbu = float(w0.cache.meta['dbu'])
+        colour = layer_colour(w0, MID)
+        k = max(range(3), key=lambda i: colour[i])
+
+        def view(w):
+            box = (0.0, 0.0, float(W), float(H))
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': None, 'w': W, 'h': H,
+                      'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': [MID],
+                      'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('sums frame timeout')
+
+        alphas = {}
+        for key, w in workers.items():
+            pixels, res = view(w)
+            alphas[key] = [px(pixels, c, r)[k] / colour[k] for r in range(H) for c in range(W)]
+        want = 2 * 2000 * 0.32 ** 2
+        got = {key: sum(a) for key, a in alphas.items()}
+        top = {key: max(a) for key, a in alphas.items()}
+        assert abs(got[('single', 'on')] - want) < 0.06 * want, ('lone cells', got[('single', 'on')], want)
+        assert abs(got[('single', 'off')] - want / 1.6384) < 0.06 * want, ('lone cells, the switch off', got[('single', 'off')], want / 1.6384)
+        assert abs(got[('list', 'on')] - want) < 0.06 * want and top[('list', 'on')] <= 0.5, ('the list', got[('list', 'on')], want, top[('list', 'on')])
+        assert got[('list', 'off')] < 0.85 * want and top[('list', 'off')] >= 0.99, ('the list, the switch off', got[('list', 'off')], top[('list', 'off')])
+        print('density stack: the brightness keeps an item\'s fraction - 2,000 lone cells of 1.64 sixteenths: alphas %.0f for g x area %.0f '
+              '(the switch off %.0f); as one point list %.0f, no pixel past %.2f of the colour (off %.0f, pixels at %.2f)'
+              % (got[('single', 'on')], want, got[('single', 'off')], got[('list', 'on')], top[('list', 'on')], got[('list', 'off')], top[('list', 'off')]))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
 def layer_colour(w, layer):
     """A layer's colour as the renderer paints it (the cache's style)."""
     for l in w.cache.meta['layers']:
@@ -2312,6 +2511,8 @@ def main():
         shapes_first_checks(temp)
         bright_checks(temp)
         toggle_checks(temp)
+        first_checks(temp)
+        sums_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)

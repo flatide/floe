@@ -197,6 +197,23 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.299(점유 격자 먼저, 빠진 페이지의 대체, 항목의 소수부):
+      - `first_checks`: `first_layout`의 0.6 µm 사각형(0.4 µm/px에서 1.5 px)을 밝기로 본다.
+        - 기본: 2패스가 디코드한 페이지 0, 격자로 놓은 페이지 1 이상. 성긴 구역의 알파 합이 g × 면적의 15 % 안이다
+          (4,643 / 4,500). 마당은 색의 0.5다.
+        - `FLOE_RUST_DENSITY_OVB_FIRST=off`: 디코드 1쪽 이상. 사각형이 덮은 픽셀이 색에서 멈춰 합이 0.62~0.85배다
+          (3,305). 마당은 0.30~0.45다. 16 px 칸으로 둘의 평균 차가 평균의 0.4 미만이다.
+        - 예산 1 MB에 고정 예약 128 KB(위 스위치는 끔): `stood_in` 1 이상, 디코드 0, 알파 합이 다시 g × 면적이다.
+        - 거기에 `FLOE_RUST_DENSITY_STAND_IN=off`: 켜진 픽셀이 없다.
+      - `sums_checks`: 0.32 px 셀 2,000개(1.64단위)를 1 µm/px로 본다.
+        - 셀마다 다른 셀로 한 번씩 놓으면(단일 배치) 알파 합이 g × 면적의 6 % 안이다(407 / 410).
+          `FLOE_RUST_DENSITY_BRIGHT_SUMS=off`면 1/1.64배다(250).
+        - 한 셀을 2,000번 놓으면(점 리스트) 합이 같고 어느 픽셀도 색의 0.5를 넘지 않는다(0.20). 끄면 합이 0.85배
+          미만이고(296) 색 그대로인 픽셀이 있다.
+      - 어댑터 계약(`rust_renderer`): `density_plan2`는 36개 값(…/bright_milli/stood_in)이다. 상태줄 테스트:
+        `3 pages left out, 7 pages by occupancy instead`.
+      - 단위는 SPEC-PLANNER의 다섯 개다. 마지막 예산 검사에서 빠지는 경로는 게이트로 만들지 못했다. 단위의
+        `stand_in_left_out(Some)`과 라우팅 칩 2배 확대 측정(172쪽)이 확인이다.
     - 0.12.298(뷰어의 밀도 켜기/끄기) `toggle_checks`:
       - `gate_layout`의 MID 사각형을 0.4 µm/px에서 본다.
       - 환경 변수 없는 워커의 `density=on` 프레임은 `FLOE_RUST_DENSITY_STACK=top` + `FLOE_RUST_DENSITY_DOTS=on` 워커의

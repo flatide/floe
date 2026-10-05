@@ -1211,8 +1211,10 @@ struct FramePixels {
     /// (HierOpts::dot_occ_decode, 2026-10-03); ...; then the dot blocks left
     /// out as too sparse and the dots a block needed (HierOpts::dot_gate,
     /// 2026-10-04); then the brightness's gain in thousandths
-    /// (density_bright_gain, 2026-10-05; 0: the dots as lit pixels)
-    density_plan2: Option<[u64; 35]>,
+    /// (density_bright_gain, 2026-10-05; 0: the dots as lit pixels); then the
+    /// pages a budget left out that their occupancy records stand in for
+    /// (floe_vfs HierOpts::dot_stand_in, 2026-10-05)
+    density_plan2: Option<[u64; 36]>,
 }
 
 fn render_worker(
@@ -1340,6 +1342,7 @@ fn run_clip(
         free_pages: None,
         empty_top: true,
         dot_bright: None,
+        dot_occ_first: None,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -2867,6 +2870,26 @@ fn density_under_floor_drawn(cache: &Cache) -> bool {
     spread && std::env::var("FLOE_RUST_DENSITY_UNDER_FLOOR").as_deref() != Ok("drop")
 }
 
+/// The occupancy first (floe_vfs HierOpts::dot_occ_first; a reviewer
+/// 2026-10-05, then the exact cover: on the routing chip's fit view the pages
+/// pass 2 decoded from 1 px up were 277, 110 of them within 1 GB - x0.49 of
+/// what all of them draw - where their occupancy grids draw x1.01 in a third
+/// of the time): under the brightness, on an index with design.ovb, pass 2's
+/// pages are cut at pass 1's cut, not at the density cut - a page all under
+/// it is spread by its occupancy grid while the grid's cells show no larger
+/// than FLOE_RUST_DENSITY_OCC_CELL_PX (4), decoded past that or with no grid
+/// to go by; no floor is probed. FLOE_RUST_DENSITY_OVB_FIRST=off is the kill
+/// switch: the pages from the density cut up decoded, as 0.12.298.
+fn density_ovb_first(cache: &Cache, command: &RenderCommand) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_OVB_FIRST").as_deref() != Ok("off"))
+        && density_bright_gain(command).is_some()
+        && floe_render_core::dot_page_occ()
+        && floe_render_core::dot_occ_decode()
+        && cache.has_page_occ()
+        && density_under_floor_drawn(cache)
+}
+
 /// What pass 2 may decode on top of pass 1 (bytes, encoded x 2 as the
 /// estimate): FLOE_RUST_DENSITY_BUDGET_MB, diagnostic, default 256 MB - and
 /// never more than half of what the generation budget has left.
@@ -3644,7 +3667,7 @@ fn run_render(
         let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 35]> = None;
+        let mut density_plan2: Option<[u64; 36]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4398,7 +4421,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 35]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 36]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4433,7 +4456,7 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 35];
+    let mut plan2 = [0u64; 36];
     plan2[22] = reserve_bytes >> 20;
     // the dots' gain past the fit view, in thousandths (density_zoom_gain)
     plan2[31] = (dot_gain * 1000.0).round() as u64;
@@ -4442,6 +4465,9 @@ fn render_density_frame(
     // the dot block the plans take and merge by (64 px at most under the
     // brightness: floe_vfs dot_block_px_of)
     let dot_block = floe_render_core::dot_block_px_of(floe_render_core::dot_block_px(), plan2[34] > 0);
+    // the cut pass 2's dots plans take their pages at, px: the density cut, or
+    // pass 1's under the occupancy first (density_ovb_first)
+    let page_cut_px = if density_ovb_first(cache, command) { command.cut_px } else { density_cut_px() };
     // pass 1's pages: pass 2 holds them already, so they cost its reserve
     // nothing (floe_vfs HierOpts::free_pages; user 2026-10-01: 37 pages of
     // pass 1's, 201 MB by estimate, failed the 0 px floor's probe of a 128 MB
@@ -4507,8 +4533,11 @@ fn render_density_frame(
                         plan2[30] = others_free as u64;
                     }
                     // the finer plans: the top plane's layer over its regions,
-                    // the other layers over theirs
-                    let mut sides: [Option<Arc<FrameScene>>; 2] = [None, None];
+                    // the other layers over theirs: each side's plan is kept until
+                    // the decode below is settled - a page it leaves out is drawn
+                    // by its occupancy record instead (Cache::stand_in_pages) - and
+                    // its scene made then
+                    let mut side_plans: Vec<(usize, HierPlan)> = Vec::new();
                     // the pages to decode: the top plane's first (density_top_first),
                     // then by the plan's priority
                     let mut wanted: Vec<(u16, u64, u32)> = Vec::new();
@@ -4640,7 +4669,9 @@ fn render_density_frame(
                             merged.stats.fit_over = over;
                             Ok(Some((merged, groups)))
                         };
-                        let floors = dot_page_floors();
+                        // (the occupancy first probes no floor: its pages are spread
+                        // or decoded by their grids' cells, whatever fits)
+                        let floors = if density_ovb_first(cache, command) { Vec::new() } else { dot_page_floors() };
                         if dots && !one_walk {
                             // the last viewport's rung: a margin must plan at it (it
                             // starts there and is dropped past it); a viewport probes
@@ -4706,7 +4737,7 @@ fn render_density_frame(
                                                 let (regions, layers) = (regions.clone(), layers.clone());
                                                 scope.spawn(move || -> Result<HierPlan, String> {
                                                     let mut fine = make_plan_request_cut(cache, command, 0, command.cut_px)?;
-                                                    fine.sub_cut_dots = Some((density_cut_px() / command.cut_px).clamp(0.0, 1.0));
+                                                    fine.sub_cut_dots = Some((page_cut_px / command.cut_px).clamp(0.0, 1.0));
                                                     fine.regions = regions;
                                                     fine.visible_indices = Some(layers);
                                                     let fine = cache.page_plan_request(&fine, summary, !command.frames)?;
@@ -4722,7 +4753,7 @@ fn render_density_frame(
                                     let groups = plans.len() as u64;
                                     let merged = floe_render_core::Cache::merge_plans(plans, dot_block / px_per_dbu);
                                     let mut fit = make_plan_request_cut(cache, command, reserve, command.cut_px)?;
-                                    fit.sub_cut_dots = Some((density_cut_px() / command.cut_px).clamp(0.0, 1.0));
+                                    fit.sub_cut_dots = Some((page_cut_px / command.cut_px).clamp(0.0, 1.0));
                                     fit.regions = region_boxes.clone();
                                     fit.visible_indices = Some(layers.clone());
                                     fit.free_pages = Some(Arc::clone(&held));
@@ -4737,7 +4768,7 @@ fn render_density_frame(
                                         plan2[8] = plan2[8].max(groups);
                                         plan
                                     }
-                                    None => plan_at(dots.then(density_cut_px), true)?,
+                                    None => plan_at(dots.then_some(page_cut_px), true)?,
                                 };
                                 plan2[3] += u64::from(planned_fine.stats.fit_passes.max(1));
                                 let whole = planned_fine.stats.fit_whole || planned_fine.stats.fit_decision.is_none();
@@ -4816,18 +4847,15 @@ fn render_density_frame(
                             }
                             planned_fine = floe_render_core::Cache::merge_plans(std::mem::take(&mut top_plans), dot_block / px_per_dbu);
                         }
-                        let density_plan = Arc::new(planned_fine);
+                        // the pages the planner's own fit left out and their occupancy
+                        // records stand in for (floe_vfs HierOpts::dot_stand_in)
+                        plan2[35] += planned_fine.stats.dot_stood_in;
+                        let density_plan = planned_fine;
                         times[0] += elapsed_us(plan_started);
-                        let scene_started = Instant::now();
-                        let density_scene = Arc::new(FrameScene::new_metadata(cache, Arc::clone(&density_plan), Arc::from([]), command.label_font_px)?);
-                        for page in decoded_pages {
-                            // pass 1's pages the finer plan holds too; the rest are not its
-                            let _ = density_scene.set_decoded_page(Arc::clone(page));
-                        }
-                        times[1] += elapsed_us(scene_started);
                         counts[0] += density_plan.pages.len() as u64;
                         for (&page_id, &prio) in density_plan.pages.iter().zip(density_plan.page_prio.iter()) {
-                            if density_scene.page(page_id).is_some() {
+                            // pass 1's pages the finer plan holds too are in hand
+                            if held.binary_search(&page_id).is_ok() {
                                 counts[1] += 1;
                             } else if one_walk {
                                 // the one walk reads no page: one pass 1 left
@@ -4844,22 +4872,8 @@ fn render_density_frame(
                                 wanted.push((rank, prio, page_id));
                             }
                         }
-                        if joint {
-                            // the lower planes' walk reads the whole plan (its plane
-                            // table leaves the top layer out), the top plane's side
-                            // that layer's pages and dots (Cache::plan_layer_only)
-                            if !top_layers.is_empty() {
-                                let top_plan = Arc::new(cache.plan_layers_only(&density_plan, &top_layers));
-                                let top_scene = Arc::new(FrameScene::new_metadata(cache, top_plan, Arc::from([]), command.label_font_px)?);
-                                for page in decoded_pages {
-                                    let _ = top_scene.set_decoded_page(Arc::clone(page));
-                                }
-                                sides[0] = Some(top_scene);
-                            }
-                            sides[1] = Some(density_scene);
-                        } else {
-                            sides[side] = Some(density_scene);
-                        }
+                        // (a joint plan is both sides': side 2 marks it)
+                        side_plans.push((if joint { 2 } else { side }, density_plan));
                     }
                     // the plans are within the reserve by the planner's estimate; the
                     // decode takes them in their order (the priority) under the reserve
@@ -4871,15 +4885,19 @@ fn render_density_frame(
                     let limit = reserve_bytes;
                     let mut estimate = 0u64;
                     let mut take = Vec::with_capacity(wanted.len());
+                    // the pages this budget leaves out after all
+                    let mut left_out: Vec<u32> = Vec::new();
                     for (_, _, page_id) in wanted {
                         let bytes = cache.page_encoded_bytes(page_id).saturating_mul(2).max(1);
                         if estimate.saturating_add(bytes) > limit {
                             counts[3] += 1;
+                            left_out.push(page_id);
                             continue;
                         }
                         estimate += bytes;
                         take.push(page_id);
                     }
+                    let mut decoded_fine: Vec<Arc<floe_render_core::DecodedPage>> = Vec::new();
                     if !take.is_empty() {
                         let decode_started = Instant::now();
                         let (pages, _decode_stats) = page_cache.load_pooled(pool, &take)?;
@@ -4888,20 +4906,61 @@ fn render_density_frame(
                             let bytes = page.estimated_bytes();
                             if generation_bytes.saturating_add(bytes) > budget_bytes {
                                 counts[3] += 1;
+                                left_out.push(page.page_id);
                                 continue;
                             }
                             *generation_bytes += bytes;
                             counts[2] += 1;
-                            for side in sides.iter().flatten() {
-                                // a page of the other side's plan is not this one's
-                                if let Err(error) = side.set_decoded_page(Arc::clone(&page)) {
-                                    if !error.contains("outside the plan") && !error.contains("already in the scene") {
-                                        failed.get_or_insert(error);
-                                    }
+                            decoded_fine.push(page);
+                        }
+                    }
+                    // the sides' scenes: a page left out drawn by its occupancy
+                    // record (floe_vfs HierOpts::dot_stand_in), pass 1's pages the
+                    // finer plan holds too and those decoded here set
+                    let scene_started = Instant::now();
+                    left_out.sort_unstable();
+                    left_out.dedup();
+                    let stand_in_request = if left_out.is_empty() { None } else { Some(make_plan_request_cut(cache, command, 0, command.cut_px)?) };
+                    let mut sides: [Option<Arc<FrameScene>>; 2] = [None, None];
+                    let scene_of = |plan: Arc<HierPlan>, failed: &mut Option<String>| -> Result<Arc<FrameScene>, String> {
+                        let scene = Arc::new(FrameScene::new_metadata(cache, plan, Arc::from([]), command.label_font_px)?);
+                        for page in decoded_pages {
+                            // pass 1's pages the finer plan holds too; the rest are not its
+                            let _ = scene.set_decoded_page(Arc::clone(page));
+                        }
+                        for page in &decoded_fine {
+                            // a page of the other side's plan is not this one's
+                            if let Err(error) = scene.set_decoded_page(Arc::clone(page)) {
+                                if !error.contains("outside the plan") && !error.contains("already in the scene") {
+                                    failed.get_or_insert(error);
                                 }
                             }
                         }
+                        Ok(scene)
+                    };
+                    for (side, mut density_plan) in side_plans {
+                        if let Some(request) = &stand_in_request {
+                            let stood = cache.stand_in_pages(request, &mut density_plan, &left_out)?;
+                            plan2[35] += stood;
+                            // (pages placed by their occupancy records, as the others)
+                            plan2[20] += stood;
+                            plan2[23] += stood;
+                        }
+                        let density_plan = Arc::new(density_plan);
+                        if side == 2 {
+                            // the lower planes' walk reads the whole plan (its plane
+                            // table leaves the top layer out), the top plane's side
+                            // that layer's pages and dots (Cache::plan_layer_only)
+                            if !top_layers.is_empty() {
+                                let top_plan = Arc::new(cache.plan_layers_only(&density_plan, &top_layers));
+                                sides[0] = Some(scene_of(top_plan, &mut failed)?);
+                            }
+                            sides[1] = Some(scene_of(density_plan, &mut failed)?);
+                        } else {
+                            sides[side] = Some(scene_of(density_plan, &mut failed)?);
+                        }
                     }
+                    times[1] += elapsed_us(scene_started);
                     let [top, others] = sides;
                     Ok(Some(floe_render_core::DensityScenes { top, others }))
                 },
@@ -4987,6 +5046,10 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         empty_top: true,
         // the dots' brightness by the detail (density_bright_gain)
         dot_bright: density_bright_gain(command),
+        // the occupancy first (density_ovb_first): in a dots plan at the cells'
+        // cut, a page with no grid to spread it by is decoded from the
+        // density cut up, as before
+        dot_occ_first: density_ovb_first(cache, command).then(|| (density_cut_px() / command.cut_px).clamp(0.0, 1.0)),
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -5662,6 +5725,7 @@ mod tests {
             free_pages: None,
             empty_top: true,
             dot_bright: None,
+            dot_occ_first: None,
         };
         assert_ne!(fit_memory_key(&top, &request(&top)), fit_memory_key(&rooted, &request(&rooted)));
         // the clip and the cell queries carry it too

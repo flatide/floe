@@ -172,7 +172,10 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  # the brightness's gain, thousandths: a pixel shows min(1,
                  # g x the area its density covers) of its colour (2026-10-05;
                  # 0: the dots as lit pixels)
-                 "bright_milli")
+                 "bright_milli",
+                 # the pages a budget left out that their occupancy records
+                 # (design.ovb) stand in for (2026-10-05)
+                 "stood_in")
 
 
 def _viewport_px(job, bbox):

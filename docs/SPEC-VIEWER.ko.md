@@ -70,7 +70,9 @@
     0.12.291부터 진단 `FLOE_RUST_DENSITY_ONLY=on`(1패스의 도형을 건너뛰고 밀도만)이면 태그 맨 앞 `dots` 뒤에
     `density only`가 붙는다(뷰어가 같은 환경 변수를 읽는다). 0.12.297부터 밀도가 밝기로 그려지면(기본; 픽셀이 덮인 면적
     × g만큼, 원본 색을 넘지 않게) 예약 뒤에 `bright xG`(g: low 1, medium 2, high 4)가 붙고, `dots xG`와 `gate …`는
-    붙지 않는다(밝기가 둘을 대신한다). 킬 스위치 `FLOE_RUST_DENSITY_BRIGHT=off`면 예전처럼 붙는다.
+    붙지 않는다(밝기가 둘을 대신한다). 킬 스위치 `FLOE_RUST_DENSITY_BRIGHT=off`면 예전처럼 붙는다. 0.12.299부터 예산에서
+    빠진 페이지를 점유 격자가 대신 그렸으면 `pass 2 over budget: …` 안에 `N pages by occupancy instead`가 붙는다
+    (하단 요약 줄에도).
   - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
     - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
       붙는다. load의 `[plan+delta+apply]`는 빠진다.

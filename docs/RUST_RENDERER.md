@@ -490,7 +490,23 @@ space left top first, and pass 2's top side plans that space alone (user
 the space left will hardly jar"; render-core
 `GeometryRasterRequest::density_shapes_first`, renderd `density_shapes_first`;
 `FLOE_RUST_DENSITY_SHAPES_FIRST=off` is the kill switch: each top plane's
-density over the originals below it, as 0.12.293). Since 0.12.297 the
+density over the originals below it, as 0.12.293). Since 0.12.299, under the
+brightness on an index with design.ovb: pass 2's pages are cut at pass 1's
+cut, so a page all under it is spread by its occupancy grid while the grid's
+cells show no larger than `FLOE_RUST_DENSITY_OCC_CELL_PX` (4), whatever its
+shapes' size - decoded past that or with no grid to go by, no floor probed
+(renderd `density_ovb_first`, floe_vfs `HierOpts::dot_occ_first`;
+`FLOE_RUST_DENSITY_OVB_FIRST=off` is the kill switch: the pages from the
+density cut up decoded, as 0.12.298); a page a budget leaves out - the
+planner's fit, or the frame's last check - is drawn by its occupancy record
+instead (`HierOpts::dot_stand_in`, `Cache::stand_in_pages`;
+`FLOE_RUST_DENSITY_STAND_IN=off` is the kill switch; `density_plan2`'s 36th
+value counts the pages); and an item's cover keeps its fraction, a list
+member read for a window standing over its block's part of the chunk
+(`HierOpts::dot_bright_sums`; `FLOE_RUST_DENSITY_BRIGHT_SUMS=off` is the kill
+switch). A reviewer 2026-10-05, checked against the exact cover: the routing
+chip's fit view under 1 GB kept 110 of the 277 pages pass 2 decoded and drew
+x0.49 of them; now x1.01 in a third of the time. Since 0.12.297 the
 density is a brightness: a pixel shows min(1, g x the area pass 2's shapes
 cover in it) of its plane's colour - never past it - the planes over one
 another, the top first, g by the detail, 2^((5 - cut) / 2): low (5 px) 1,

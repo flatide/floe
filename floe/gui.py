@@ -1132,7 +1132,10 @@ def perf_status(res, depth_note=""):
         p2 = res.get("density_plan2") or {}
         over = [what for what, there in (
             ("floor probe", p2.get("probes_over")), ("thinned", p2.get("thinned")),
-            ("%d pages left out" % pages.get("over_budget", 0), pages.get("over_budget"))) if there]
+            ("%d pages left out" % pages.get("over_budget", 0), pages.get("over_budget")),
+            # what the budget left out, drawn by its occupancy records
+            # instead (2026-10-05)
+            ("%d pages by occupancy instead" % p2.get("stood_in", 0), p2.get("stood_in"))) if there]
         if over:
             parts.append("pass 2 over budget: %s" % ", ".join(over))
         # pass 2's decode and raster wall (2026-10-03, the field's 449-layer

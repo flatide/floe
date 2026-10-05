@@ -124,6 +124,12 @@ pub struct PlanRequest {
     /// with GeometryRasterRequest::density_bright - pass 2's dots count the
     /// area they cover. None: the dots as lit pixels.
     pub dot_bright: Option<f64>,
+    /// The occupancy first (floe_vfs HierOpts::dot_occ_first): Some(share)
+    /// with `sub_cut_dots` at 1 - a page under the cells' cut is spread by a
+    /// fine enough occupancy grid whatever its shapes' size; one without
+    /// such a grid whose largest shape reaches `share` of the cut is decoded.
+    /// None: the pages cut where `sub_cut_dots` says.
+    pub dot_occ_first: Option<f64>,
 }
 
 impl PlanRequest {
@@ -183,6 +189,7 @@ mod tests {
             free_pages: None,
             empty_top: true,
             dot_bright: None,
+            dot_occ_first: None,
         };
         assert!(req.validate().is_err());
     }
