@@ -3328,12 +3328,9 @@ fn run_render_attempt(
         .cache
         .as_ref()
         .ok_or_else(|| "cache not open".to_string())?;
-    // the cells' cover (floe_render_core Cache::cell_cover) is asked for as
-    // the frame begins: its table is worked out on a thread of its own
-    // while pass 1 draws, ahead of pass 2's plans that read it
-    if density_bright_gain(&command).is_some() {
-        let _ = cache.cell_cover();
-    }
+    // Cell coverage is initialized only after pass 1 leaves space for
+    // density (render_density_frame). A fully covered frame needs neither
+    // pass-2 plans nor a whole-hierarchy coverage warm-up.
     // occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): decided per
     // request before any reuse, since the retained-frame and published-
     // scene keys carry it; FLOE_RUST_OCCUPANCY=off is the kill switch
@@ -4693,9 +4690,6 @@ fn render_density_frame(
     // the plans' breakdown (RenderPixels::density_plan2)
     let mut plan2 = [0u64; 39];
     plan2[22] = reserve_bytes >> 20;
-    // a sub-cut cell stands for the area its shapes cover, not its box
-    // (floe_render_core Cache::cell_cover: design.ovb and a hierarchy summary)
-    plan2[36] = u64::from(density_bright_gain(command).is_some() && cache.cell_cover().is_some());
     // the dots' gain past the fit view, in thousandths (density_zoom_gain)
     plan2[31] = (dot_gain * 1000.0).round() as u64;
     // the brightness's gain, in thousandths (density_bright_gain; 0: off)
@@ -4770,6 +4764,15 @@ fn render_density_frame(
                         plan2[29] = top_free as u64;
                         plan2[30] = others_free as u64;
                     }
+                    if regions_top.is_empty() && regions_others.is_empty() {
+                        // Every density plane is blocked. In particular, do
+                        // not initialize/warm the hierarchy's cell coverage
+                        // when pass 1 already covers the frame.
+                        return Ok(None);
+                    }
+                    // A sub-cut cell stands for the area its shapes cover,
+                    // not its box (design.ovb and a hierarchy summary).
+                    plan2[36] = u64::from(density_bright_gain(command).is_some() && cache.cell_cover().is_some());
                     // the finer plans: the top plane's layer over its regions,
                     // the other layers over theirs: each side's plan is kept until
                     // the decode below is settled - a page it leaves out is drawn

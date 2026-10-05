@@ -303,6 +303,12 @@ sh tools/validate_rust.sh --only quick path/to.oas
           같다.
         - 끄면 원본 위에도 그리고, 받는 영역도 더 넓다. 타일·워커와 무관하다.
       - vfs 단위 `a_page_decoded_under_the_floor_keeps_aside_the_blocks_a_box_holds_whole`(`HierOpts::dot_occ_boxes`).
+      - 0.12.303(2026-10-06) `full_shapes_first_checks`: 원본으로 가득 찬 타일이 plane 0을 건너뛰어도 빈 영역은 0이다.
+        채움 사각형·맞닿은 1 px 선(스페클 레이어)·큰 스페클 사각형, 타일 64/512에서 스택 끔과 바이트 동일하고
+        2패스 계획·장면 준비·추가 디코드·`cell_cover` 준비가 0, `covered`는 화면 전체다. 절반만 덮으면 그 절반은
+        그대로이고 빈 절반에는 밀도가 나온다. 단위 `shapes_first_full_tiles_leave_no_density_demand`는 최상위 평면
+        1/2/3개, 밝기 끔/켬, bin/walk, 타일·워커 조합도 확인한다. 수정 전에는 채워진 타일 전체가 최상위 밀도 영역으로
+        나와 실패한다.
     - 0.12.293(최상위 평면은 그리기 순서상 위에서 8개, 평면마다 따로 계획; 0.12.292는 맨 위 레이어 번호) `top_group_checks`:
       - LOW의 36×16 µm 원본, TOP(4/0)의 0.05 µm 사각형 40,000개(띠), TOP1(4/1)의 점 몇 개(띠 밖, 맨 위 평면).
       - TOP의 띠 안 픽셀(9,330 px)이 LOW를 켜도 같다. 킬 스위치(`FLOE_RUST_DENSITY_TOP_GROUP=off`)면 TOP은 아래 평면이라

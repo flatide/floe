@@ -2053,6 +2053,75 @@ def shapes_first_checks(temp):
             w.stop()
 
 
+def full_shapes_first_checks(temp):
+    """A full tile stops before the last original plane. Freeze its mask
+    at the pass-2 boundary anyway: no density plans, decode or coverage
+    initialization, and the same frame as with density off. Abutting 1 px
+    hairlines exercise the early exit with the viewer's speckle fill; one
+    large speckled shape blocks density through coverage instead of ink.
+    With only half covered, keep drawing density into the other half.
+    """
+    import klayout.db as kdb
+    env = {
+        'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
+        'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_TOP_PLANES': '2',
+        'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
+        'FLOE_RUST_DENSITY_FREE_CELLS': 'on', 'FLOE_RUST_OCCUPANCY': 'off',
+        'FLOE_RUST_SHAPE_CUT': 'max',
+    }
+    for kind in ('solid', 'hairlines', 'speckle', 'half'):
+        src = Path(temp) / ('full_shapes_first_%s.oas' % kind)
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        top.shapes(ly.layer(*LOW)).insert(kdb.Box(50_000, 30_000, 51_000, 31_000))
+        for y in range(50, 20_000, 500):
+            for x in range(50, 40_000, 500):
+                top.shapes(ly.layer(*MID)).insert(kdb.Box(x, y, x + 150, y + 150))
+        layer = ly.layer(*TOP)
+        if kind == 'hairlines':
+            for x in range(0, 40_000, 100):
+                top.shapes(layer).insert(kdb.Box(x, -1_000, x + 100, 21_000))
+        else:
+            top.shapes(layer).insert(kdb.Box(-1_000, -1_000, 20_000 if kind == 'half' else 41_000, 21_000))
+        ly.write(str(src))
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+        # An edge tile as well as full tiles, and a one-tile frame.
+        for tile in (64, 512):
+            settings = dict(env, FLOE_RUST_TILE_PX=str(tile))
+            workers = {
+                'on': worker(src, settings),
+                'off': worker(src, dict(settings, FLOE_RUST_DENSITY_STACK='off')),
+            }
+            try:
+                for w in workers.values():
+                    if kind in ('solid', 'half'):
+                        w._fills[TOP] = 'solid'
+                        w._publish_style(wait=True)
+                off, _ = frame(workers['off'], 1, (LOW, MID, TOP))
+                on, res = frame(workers['on'], 1, (LOW, MID, TOP))
+                p2, pages, stack = res['density_plan2'], res['density_pages'], res['density_stack']
+                if kind == 'half':
+                    assert all(px(on, c, r) == px(off, c, r) for r in range(H) for c in range(W // 2)), 'covered half changed'
+                    assert any(px(on, c, r) != px(off, c, r) for r in range(H) for c in range(W // 2 + 2, W)), 'open half lost its density'
+                    assert 0 < p2['free_top'] < W * H and p2['passes'] > 0, p2
+                else:
+                    assert on == off, (kind, tile, 'density changed a fully covered frame')
+                    assert p2['free_top'] == p2['free_others'] == p2['passes'] == p2['regions'] == p2['cell_cover'] == 0, p2
+                    assert pages['planned'] == pages['decoded'] == 0, pages
+                    assert res['density_us']['plan2_us'] == res['density_us']['scene2_us'] == res['density_us']['decode2_us'] == 0, res['density_us']
+                    assert stack['covered'] == W * H and stack['lit'] == stack['top'] == stack['lower'] == 0, stack
+                    if kind != 'speckle':
+                        assert res['once_full_tiles'] > 0, 'must exercise early full-tile exit'
+                print('density stack: shapes first, %s tile %d - free %d/%d px, %d plans, %d decoded pages'
+                      % (kind, tile, p2['free_top'], p2['free_others'], p2['passes'], pages['decoded']))
+            finally:
+                for w in workers.values():
+                    w.stop()
+
+
 def own_layout(path):
     """A TOP whose own shapes are 60,000 boxes of 0.05-0.3 um at random over
     300 x 300 um - under a pixel at 1000 px; of 62,500 sizes, so the writer
@@ -2688,6 +2757,7 @@ def main():
         density_only_checks(temp)
         top_group_checks(temp)
         shapes_first_checks(temp)
+        full_shapes_first_checks(temp)
         bright_checks(temp)
         toggle_checks(temp)
         first_checks(temp)

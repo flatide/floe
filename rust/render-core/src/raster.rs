@@ -2001,8 +2001,9 @@ impl RasterBand {
     /// The top plane's originals are painted: what its density may not take
     /// is fixed now - the pixels written so far (frame band 0 and its own
     /// originals) and what its originals cover. With
-    /// GeometryRasterRequest::density_shapes_first it is taken when the last
-    /// plane's are: what every original wrote or covers, for every top plane.
+    /// GeometryRasterRequest::density_shapes_first it is taken at the pass-2
+    /// boundary, even when full tiles skipped the last original planes:
+    /// what every original wrote or covers, for every top plane.
     fn snapshot_top_blocked(&mut self) {
         let (Some(stack), Some(once)) = (self.stack.as_mut(), self.once.as_ref()) else {
             return;
@@ -3811,6 +3812,11 @@ impl TileWork {
     fn output(mut self) -> RasterTileOutput {
         // the density's brightness: composed over what the passes left
         self.band.finish_bright();
+        // A full tile can skip the lower density pass entirely. Count its
+        // masks at completion, not in a pass that may never run.
+        let (covered, claimed) = self.band.density_totals();
+        self.stats.density_stack[3] = covered;
+        self.stats.density_stack[4] = claimed;
         RasterTileOutput {
             tile: self.band,
             stats: self.stats,
@@ -4075,24 +4081,17 @@ fn plane_paint(styled: &StyledGeometryRasterRequest, plane: usize) -> PaintStyle
     }
 }
 
-/// The end of a pass of a density-stacked tile (DensityStack): after the top
-/// plane's originals (density_shapes_first: after the last plane's) what its
-/// density may not take is fixed; after a density
-/// plane its density shows where it may, and after the last one (plane 0)
-/// the totals are counted.
+/// The end of a pass of a density-stacked tile (DensityStack). The legacy
+/// policy freezes each top plane's original coverage here; shapes-first
+/// freezes all originals at the pass-2 boundary, including skipped tiles.
+/// After a density plane its density shows where it may.
 fn end_density_pass(work: &mut TileWork, styled: &StyledGeometryRasterRequest, pass: TilePass) {
     if work.band.stack.is_none() {
         return;
     }
     match pass {
         TilePass::Plane(plane) => {
-            if styled.raster.density_shapes_first {
-                // pass 1's shapes come first (density_shapes_first): what the top
-                // planes' density may not take is fixed when the last plane is done
-                if plane == 0 {
-                    work.band.snapshot_top_blocked();
-                }
-            } else {
+            if !styled.raster.density_shapes_first {
                 if plane + 1 == styled.layers.len() {
                     work.band.snapshot_top_blocked();
                 }
@@ -4108,12 +4107,6 @@ fn end_density_pass(work: &mut TileWork, styled: &StyledGeometryRasterRequest, p
             let counts = &mut work.stats.density_stack;
             counts[0] = counts[0].saturating_add(lit);
             counts[if top { 1 } else { 2 }] = counts[if top { 1 } else { 2 }].saturating_add(written);
-            // the last density pass when every plane is a top one
-            if density_top_count(styled) >= styled.layers.len() && plane == 0 {
-                let (covered, claimed) = work.band.density_totals();
-                counts[3] = counts[3].saturating_add(covered);
-                counts[4] = counts[4].saturating_add(claimed);
-            }
         }
         TilePass::DensityLower => {
             let colors: Vec<[u8; 4]> = (0..styled.layers.len().saturating_sub(density_top_count(styled))).map(|plane| plane_paint(styled, plane).color).collect();
@@ -4121,9 +4114,6 @@ fn end_density_pass(work: &mut TileWork, styled: &StyledGeometryRasterRequest, p
             let counts = &mut work.stats.density_stack;
             counts[0] = counts[0].saturating_add(lit);
             counts[2] = counts[2].saturating_add(written);
-            let (covered, claimed) = work.band.density_totals();
-            counts[3] = counts[3].saturating_add(covered);
-            counts[4] = counts[4].saturating_add(claimed);
         }
         TilePass::Frames(_) => {}
     }
@@ -5036,6 +5026,14 @@ impl LayerRasterSession {
                     }
                 };
                 let density_block = density_start == Some(at);
+                if density_block && styled.raster.density_shapes_first {
+                    // Workers have finished pass 1. A tile that filled early
+                    // skipped its remaining original planes, including plane
+                    // 0, so finalize every tile here before planning pass 2.
+                    for tile in &mut guards {
+                        tile.band.snapshot_top_blocked();
+                    }
+                }
                 let demand = BlockDemand {
                     request: &request,
                     styled,
@@ -12951,6 +12949,52 @@ mod tests {
         assert!(!over.is_empty());
         assert_eq!(lit_of(&off, RED, 0..32, 0..32), left.union(&over).copied().collect::<BTreeSet<_>>(), "off: over layer 1's original too");
         assert!(regions.iter().any(|(top_side, others)| top_side != others), "off: the top side offered more");
+    }
+
+    /// A tile may fill before the last original plane, which is then never
+    /// run. Shapes-first must still freeze that tile's original coverage
+    /// before asking for density, including solid hairlines in a speckle
+    /// layer. Keep a lower density plane too: it is skipped on a full tile,
+    /// but must not be needed to account for the original coverage.
+    #[test]
+    fn shapes_first_full_tiles_leave_no_density_demand() {
+        let rect = |layer, x, y, w, h, rep| RectRec { layer, dt: 0, x, y, w, h, rep };
+        for hairlines in [false, true] {
+            let original = if hairlines {
+                rect(3, 0, -20, 10, 360, Rep::Grid { na: 32, nb: 1, va: (10, 0), vb: (0, 0) })
+            } else {
+                rect(3, -20, -20, 360, 360, Rep::One)
+            };
+            let pages = || vec![
+                (1, vec![rect(1, 400, 400, 40, 40, Rep::One)], Vec::new()),
+                (2, vec![rect(2, 5, 5, 15, 15, Rep::Grid { na: 10, nb: 10, va: (30, 0), vb: (0, 30) })], Vec::new()),
+                (3, vec![original.clone()], Vec::new()),
+            ];
+            let coarse = stack_scene(pages(), CUT_1);
+            let fine = Arc::new(stack_scene(pages(), CUT_2));
+            for top in [1, 2, 3] {
+                for bright in [0.0, 2.0] {
+                    for (tile, workers, bin) in [(32, 1, true), (8, 3, true), (16, 2, false)] {
+                        let mut request = stack_request(if hairlines { LayerFill::Speckle } else { LayerFill::Solid }, tile, workers);
+                        request.raster.density_top_planes = top;
+                        request.raster.density_shapes_first = true;
+                        request.raster.density_bright = bright;
+                        let mut baseline = request.clone();
+                        baseline.raster.density_stack = false;
+                        let expected = render_geometry_styled(&coarse, &baseline).unwrap().frame;
+                        assert_eq!(count(&expected, GREEN, 0..32, 0..32), 32 * 32);
+                        let mut regions = Vec::new();
+                        let got = density_frame(&coarse, &fine, CUT_1 as i64, &request, bin, &mut regions);
+                        assert!(got.stats.once_full_tiles > 0, "exercise the early full-tile exit");
+                        assert_eq!(regions.len(), 1);
+                        assert!(regions[0].0.is_empty() && regions[0].1.is_empty(),
+                            "hairlines {hairlines} top {top} bright {bright} tile {tile} bin {bin}: {regions:?}");
+                        assert_eq!(got.frame, expected);
+                        assert_eq!(got.stats.density_stack, [0, 0, 0, 32 * 32, 0]);
+                    }
+                }
+            }
+        }
     }
 
     /// The colour a pixel shows under the density's brightness: `color` at
