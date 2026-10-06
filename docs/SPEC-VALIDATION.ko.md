@@ -137,6 +137,14 @@ sh tools/validate_rust.sh --only quick path/to.oas
   - `density_stack`의 `pattern_checks`: 기본값=명시적 켬, `FLOE_RUST_DENSITY_PATTERN=off`의 밝기 복원,
     원본·스페클 구멍 보존, 불투명한 레이어 색, 타일64/워커1과 타일127/워커4의 바이트 일치.
     `full_shapes_first_checks`는 기본 패턴에서도 완전 가림이면 추가 계획·디코드가 0임을 확인한다.
+    `nearly_full_pattern_checks`는 99.9%가 원본인 화면에서 남은 칸이 공통 위상의 금지 자리이면 계획·디코드가 0이고,
+    허용 자리로 옮기면 밀도가 유지되며 타일64/127에서 같은지 검사한다.
+  - `unit_render`의 `occupancy_summary_claims_speckle_holes_for_density`: occupancy의 실제 점유 내부는
+    Solid/Speckle/Pattern/Clear 모두 차단하고 실제 빈 점유 셀은 밀도에 남긴다. 공통 패턴의 금지 자리 생략은
+    `density_pattern_forbidden_holes_need_no_regions_and_keep_real_free_counts`로 정수 pan과 실제 빈 공간 비율을 확인한다.
+  - `original_union_mask_matches_solid_fill_*` 두 단위 검사는 동일한 계획을 Solid로 그린 픽셀과
+    Speckle/Pattern/Clear의 원본 차단 마스크를 직접 대조한다. 사각형·다각형·경로, Grid/Pts,
+    회전·반사 계층, 가득 찬 타일 조기 종료와 deferred 배치를 포함한다.
   - `rust_renderer`: `density_plan2` 끝에 `pattern`을 더한 40개 값. 이전 39개 응답은 `pattern=0`으로 읽는다.
     상태줄은 백엔드 값으로 `pattern, cover x2` 또는 `bright x2`를 표시한다.
     아래의 기존 밝기·면적 보존 검사는 패턴 스위치를 끈 대조군으로 유지한다.

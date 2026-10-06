@@ -2176,6 +2176,84 @@ def full_shapes_first_checks(temp):
                     w.stop()
 
 
+def nearly_full_pattern_checks(temp):
+    """One open pixel per 32 x 32 block must not request density when
+    every hole is on the shared pattern's forbidden parity. The old demand
+    planned all eight top layers over the whole view for zero added pixels.
+    Move the holes one column: real drawable gaps must remain eligible.
+    """
+    import klayout.db as kdb
+    size = 512
+    visible = [(i, 0) for i in range(9)]
+    env = {
+        'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
+        'FLOE_RUST_DENSITY_BRIGHT': 'on', 'FLOE_RUST_DENSITY_PATTERN': 'on',
+        'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_TOP_PLANES': '8',
+        'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on', 'FLOE_RUST_DENSITY_FREE_CELLS': 'on',
+        'FLOE_RUST_DENSITY_FREE_CELL_PX': '32', 'FLOE_RUST_DENSITY_OTHERS_MIN': '0.125',
+        'FLOE_RUST_OCCUPANCY': 'off', 'FLOE_RUST_SHAPE_CUT': 'max',
+        'FLOE_RUST_EDGE_EXACT': 'on',
+    }
+    for allowed in (False, True):
+        src = Path(temp) / ('nearly_full_%s.oas' % allowed)
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        own = top.shapes(ly.layer(0, 0))
+        hx = 30 if allowed else 29
+        for y in range(0, size, 32):
+            for x in range(0, size, 32):
+                # The edge-exact rim leaves only (x+hx, y+31) open.
+                # The right strip is tall enough to survive the 3 px cut.
+                own.insert(kdb.Box(x * 100, y * 100, (x + 32) * 100, (y + 30) * 100))
+                own.insert(kdb.Box(x * 100, (y + 30) * 100, (x + hx - 1) * 100, (y + 32) * 100))
+                own.insert(kdb.Box((x + hx + 1) * 100, y * 100, (x + 32) * 100, (y + 32) * 100))
+        for layer in range(1, 9):
+            leaf = ly.create_cell('DOT%d' % layer)
+            leaf.shapes(ly.layer(layer, 0)).insert(kdb.Box(0, 0, 150, 150))
+            top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(hx * 100 - 25, 3075),
+                                        kdb.Vector(3200, 0), kdb.Vector(0, 3200), 16, 16))
+        ly.write(str(src))
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+        images = []
+        for tile in (64, 127):
+            w = worker(src, dict(env, FLOE_RUST_TILE_PX=str(tile)))
+            try:
+                frames = []
+                for gen, density in ((1, False), (2, True)):
+                    w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless',
+                              'bbox': (0, 0, size * 100, size * 100), 'w': size, 'h': size,
+                              'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False,
+                              'labels': False, 'abstract': False, 'visible': visible,
+                              'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False,
+                              'density': density})
+                    deadline = time.monotonic() + 60
+                    while True:
+                        res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                        assert res.get('kind') != 'error', res
+                        if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                            frames.append(bytes(res.pop('rgba')))
+                            break
+                p2, stack = res['density_plan2'], res['density_stack']
+                assert stack['covered'] == size * size - 256, stack
+                if allowed:
+                    assert frames[0] != frames[1] and stack['top'] > 0, 'drawable holes lost their density'
+                    assert p2['free_top'] == 256 and p2['passes'] > 0, p2
+                else:
+                    assert frames[0] == frames[1], 'forbidden holes changed the frame'
+                    assert p2['passes'] == p2['regions'] == p2['cell_cover'] == 0, p2
+                    assert res['density_pages']['planned'] == res['density_pages']['decoded'] == 0, res
+                    assert res['density_us']['plan2_us'] == 0, res
+                images.append(frames[1])
+                print('density stack: 99.9%% covered, %s holes, tile %d - %d plans, %d added px'
+                      % ('drawable' if allowed else 'forbidden', tile, p2['passes'], stack['top']))
+            finally:
+                w.stop()
+        assert images[0] == images[1], 'near-full pattern depends on tile size'
+
+
 def own_layout(path):
     """A TOP whose own shapes are 60,000 boxes of 0.05-0.3 um at random over
     300 x 300 um - under a pixel at 1000 px; of 62,500 sizes, so the writer
@@ -2815,6 +2893,7 @@ def main():
         top_group_checks(temp)
         shapes_first_checks(temp)
         full_shapes_first_checks(temp)
+        nearly_full_pattern_checks(temp)
         bright_checks(temp)
         pattern_checks(temp)
         toggle_checks(temp)
