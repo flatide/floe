@@ -95,29 +95,37 @@ impl OccLayer {
     }
 }
 
-/// The level a view of `px_dbu` per pixel draws the occupancy density at,
-/// for design.ovs's `n_levels` levels of `cell_dbu` doubling: the coarsest
-/// whose cell is at most a pixel (as the summary takes it; past it, a finer
-/// one costs more and shows no more), else - and when that one's layers
-/// would hold more than `cap` bytes (`bytes_at`) - the next coarser ones
-/// while their cell is at most `max_cell_px` pixels; None when none is (the
-/// plans draw the view).
-pub fn choose_level(cell_dbu: i64, n_levels: u32, px_dbu: f64, max_cell_px: f64, bytes_at: impl Fn(u32) -> u64, cap: u64) -> Option<u32> {
-    if cell_dbu <= 0 || !(px_dbu > 0.0) {
+/// The level a view of `px_dbu` per pixel whose pass 1 cuts at `cut_dbu`
+/// (its plan's per-shape cut, a budget's raise in it) draws the occupancy
+/// density at, for design.ovs's `n_levels` levels of `cell_dbu` doubling:
+/// the finest whose own cut (OVS_SUB_CUT_CELLS of its cells) reaches the
+/// frame's - every shape pass 1 leaves out counted there (review 2026-10-07:
+/// the coarsest level within a pixel cut at 3 of its cells, under the frame's
+/// 3 pixels, and 3.5 um squares over 1 um cells vanished at 1.25-1.9 um/px) -
+/// while its cell is at most `max_cell_px` pixels, or two thirds of the cut
+/// when a budget raised it past that; past `cap` bytes of its layers
+/// (`bytes_at`) the next coarser one within those; None when none will do
+/// (the plans draw the view).
+pub fn choose_level(cell_dbu: i64, n_levels: u32, px_dbu: f64, cut_dbu: f64, max_cell_px: f64, bytes_at: impl Fn(u32) -> u64, cap: u64) -> Option<u32> {
+    if cell_dbu <= 0 || !(px_dbu > 0.0) || !(cut_dbu > 0.0) {
         return None;
     }
     let cell = |lv: u32| cell_dbu as f64 * f64::from(1u32 << lv.min(31));
-    let start = (0..n_levels).filter(|&lv| cell(lv) <= px_dbu).max().unwrap_or(0);
-    (start..n_levels).take_while(|&lv| cell(lv) <= max_cell_px * px_dbu).find(|&lv| bytes_at(lv) <= cap)
+    let cells = floe_vfs::occ_density::OVS_SUB_CUT_CELLS as f64;
+    let first = (0..n_levels).find(|&lv| cells * cell(lv) >= cut_dbu)?;
+    let widest = (max_cell_px * px_dbu).max(2.0 * cut_dbu / cells);
+    (first..n_levels).take_while(|&lv| cell(lv) <= widest).find(|&lv| bytes_at(lv) <= cap)
 }
 
 /// One layer's OccLayer at `lv` for `depth` (None: every plane): the OR of
 /// the planes the depth draws, each group at its planes' means weighted by
-/// the cells each marks; None where it has no density there.
-pub(crate) fn combine(ovs: &OvsFile, k: usize, lv: usize, depth: Option<u32>) -> Option<Arc<OccLayer>> {
-    let planes = ovs.layers.get(k)?;
+/// the cells each marks; None where it has no density there; an error where
+/// a plane drawn will not read (review 2026-10-07: it was passed over, the
+/// layer's density short and the plans not asked).
+pub(crate) fn combine(ovs: &OvsFile, k: usize, lv: usize, depth: Option<u32>) -> Result<Option<Arc<OccLayer>>, String> {
+    let Some(planes) = ovs.layers.get(k) else { return Ok(None) };
     if lv as u32 >= ovs.grid.n_levels {
-        return None;
+        return Ok(None);
     }
     let (w, h) = ovs.grid.level_dims(lv as u32);
     let row_bytes = (w as usize).div_ceil(8);
@@ -132,7 +140,9 @@ pub(crate) fn combine(ovs: &OvsFile, k: usize, lv: usize, depth: Option<u32>) ->
         if !plane_drawn_at(plane.depth, depth) {
             continue;
         }
-        let (Some(pbits), Some(means)) = (ovs.bits(k, p, lv), ovs.means(k, p, lv)) else { continue };
+        let (Some(pbits), Some(means)) = (ovs.bits(k, p, lv), ovs.means(k, p, lv)) else {
+            return Err(format!("design.ovs: layer {} plane {} level {} will not read", k, p, lv));
+        };
         bits.iter_mut().zip(&pbits).for_each(|(a, b)| *a |= b);
         for gj in 0..gh {
             for gi in 0..gw {
@@ -159,7 +169,7 @@ pub(crate) fn combine(ovs: &OvsFile, k: usize, lv: usize, depth: Option<u32>) ->
             any = true;
         }
     }
-    any.then(|| Arc::new(OccLayer { bits: Arc::from(bits), row_bytes, means: Arc::from(means), gw, w, h }))
+    Ok(any.then(|| Arc::new(OccLayer { bits: Arc::from(bits), row_bytes, means: Arc::from(means), gw, w, h })))
 }
 
 #[cfg(test)]
@@ -206,7 +216,7 @@ mod tests {
         let ovs = files();
         // every plane: the low left group's 64 cells all set, at
         // (100 x 64 + 200 x 32) / 64 = 200; the high right one at 50
-        let all = combine(&ovs, 0, 0, None).unwrap();
+        let all = combine(&ovs, 0, 0, None).unwrap().unwrap();
         assert_eq!(all.cover(2, 2), 200.0 / 255.0);
         assert_eq!(all.cover(6, 7), 200.0 / 255.0);
         assert_eq!(all.cover(12, 12), 50.0 / 255.0);
@@ -214,17 +224,17 @@ mod tests {
         assert_eq!(all.cover(16, 2), 0.0);
         assert!(all.any_in(8, 15, 8, 15) && !all.any_in(8, 15, 0, 7) && !all.any_in(20, 30, 0, 15));
         // depth 1 draws both planes, as every plane does
-        let one = combine(&ovs, 0, 0, Some(1)).unwrap();
+        let one = combine(&ovs, 0, 0, Some(1)).unwrap().unwrap();
         assert_eq!((one.cover(2, 2), one.cover(12, 12)), (all.cover(2, 2), all.cover(12, 12)));
         // depth 0: its own plane alone, the high right group not there
-        let top = combine(&ovs, 0, 0, Some(0)).unwrap();
+        let top = combine(&ovs, 0, 0, Some(0)).unwrap().unwrap();
         assert_eq!(top.cover(2, 2), 100.0 / 255.0);
         assert_eq!(top.cover(12, 12), 0.0);
         assert!(!top.any_in(8, 15, 8, 15));
         assert_eq!(top.bytes(), 2 * 16 + 4);
         // no such layer or level
-        assert!(combine(&ovs, 1, 0, None).is_none());
-        assert!(combine(&ovs, 0, 1, None).is_none());
+        assert!(combine(&ovs, 1, 0, None).unwrap().is_none());
+        assert!(combine(&ovs, 0, 1, None).unwrap().is_none());
     }
 
     #[test]
@@ -233,27 +243,56 @@ mod tests {
         let g = OvsGrid::new(1000.0, 0.1, (0, 0, 1600, 1600)).unwrap();
         let blobs = vec![vec![(0, vec![(deflate(&bits(&[(0, 8, 0, 8)])), Vec::new())]), (1, vec![(Vec::new(), Vec::new())])]];
         let empty = OvsFile::from_bytes(encode(11, 22, &g, &blobs)).unwrap();
-        assert!(combine(&empty, 0, 0, None).is_none());
+        assert!(combine(&empty, 0, 0, None).unwrap().is_none());
     }
 
     #[test]
-    fn the_level_is_the_coarsest_within_a_pixel_and_the_cap() {
+    fn a_plane_that_will_not_read_is_an_error_not_an_empty_layer() {
+        let g = OvsGrid::new(1000.0, 0.1, (0, 0, 1600, 1600)).unwrap();
+        // the depth-1 plane's bits: deflate of 3 bytes, not the 32 of a level
+        let blobs = vec![vec![
+            (0, vec![(deflate(&bits(&[(0, 8, 0, 8)])), deflate(&[100, 0, 0, 0]))]),
+            (1, vec![(deflate(&[1, 2, 3]), deflate(&[200, 0, 0, 50]))]),
+        ]];
+        let bad = OvsFile::from_bytes(encode(11, 22, &g, &blobs)).unwrap();
+        match combine(&bad, 0, 0, None) {
+            Err(e) => assert!(e.contains("layer 0 plane 1 level 0"), "{}", e),
+            Ok(_) => panic!("a plane that will not read made a layer"),
+        }
+        // depth 0 draws the plane that reads alone
+        assert!(combine(&bad, 0, 0, Some(0)).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_level_is_the_finest_whose_cut_covers_the_frames() {
         let free = |_| 0u64;
-        // cells of 100, 200, 400, ... dbu
-        assert_eq!(choose_level(100, 6, 250.0, 2.0, free, 1), Some(1));
-        assert_eq!(choose_level(100, 6, 150.0, 2.0, free, 1), Some(0));
-        assert_eq!(choose_level(100, 6, 10_000.0, 2.0, free, 1), Some(5));
-        // closer in than a cell a pixel: level 0 while it is at most two
-        assert_eq!(choose_level(100, 6, 80.0, 2.0, free, 1), Some(0));
-        assert_eq!(choose_level(100, 6, 40.0, 2.0, free, 1), None);
-        assert_eq!(choose_level(100, 6, 40.0, 4.0, free, 1), Some(0));
-        // over the cap: the next coarser level while its cell is within the
-        // pixels allowed, else none
+        // cells of 1000, 2000, 4000, ... dbu, each level's cut 3 of them
+        // 3.5 um squares over 1 um cells (review 2026-10-07): at 1.25-1.9
+        // um a pixel and a 3 px cut (3.75-5.7 um) level 1, whose 6 um cut
+        // holds them - level 0's 3 um did not
+        for px in [1_250.0, 1_500.0, 1_900.0] {
+            assert_eq!(choose_level(1_000, 6, px, 3.0 * px, 2.0, free, 1), Some(1), "{}", px);
+        }
+        assert_eq!(choose_level(1_000, 6, 1_000.0, 3_000.0, 2.0, free, 1), Some(0));
+        assert_eq!(choose_level(1_000, 6, 2_000.0, 6_000.0, 2.0, free, 1), Some(1));
+        assert_eq!(choose_level(1_000, 6, 10_000.0, 30_000.0, 2.0, free, 1), Some(4));
+        // closer in than a cell over two pixels: none
+        assert_eq!(choose_level(16_000, 6, 7_000.0, 21_000.0, 2.0, free, 1), None);
+        assert_eq!(choose_level(16_000, 6, 8_000.0, 24_000.0, 2.0, free, 1), Some(0));
+        assert_eq!(choose_level(16_000, 6, 5_000.0, 15_000.0, 4.0, free, 1), Some(0));
+        // a budget's raise: 10 um a pixel cut at 60 um - level 1 (32 um, 3.2
+        // px) within two thirds of the cut
+        assert_eq!(choose_level(16_000, 6, 10_000.0, 60_000.0, 2.0, free, 1), Some(1));
+        // a cut past the coarsest level's: none
+        assert_eq!(choose_level(1_000, 2, 1_000.0, 7_000.0, 2.0, free, 1), None);
+        // over the cap: the next coarser level within the cells allowed (4
+        // px here; at 2 px level 2's 2.7 px is not)
         let costly = |lv: u32| if lv < 2 { 10 } else { 1 };
-        assert_eq!(choose_level(100, 6, 250.0, 2.0, costly, 5), Some(2));
-        assert_eq!(choose_level(100, 6, 250.0, 1.5, costly, 5), None);
-        assert_eq!(choose_level(100, 6, 250.0, 2.0, |_| 10, 5), None);
-        assert_eq!(choose_level(100, 0, 250.0, 2.0, free, 1), None);
-        assert_eq!(choose_level(0, 6, 250.0, 2.0, free, 1), None);
+        assert_eq!(choose_level(1_000, 6, 1_500.0, 4_500.0, 4.0, costly, 5), Some(2));
+        assert_eq!(choose_level(1_000, 6, 1_500.0, 4_500.0, 2.0, costly, 5), None);
+        assert_eq!(choose_level(1_000, 6, 1_500.0, 4_500.0, 4.0, |_| 10, 5), None);
+        assert_eq!(choose_level(1_000, 0, 1_500.0, 4_500.0, 2.0, free, 1), None);
+        assert_eq!(choose_level(0, 6, 1_500.0, 4_500.0, 2.0, free, 1), None);
+        assert_eq!(choose_level(1_000, 6, 1_500.0, 0.0, 2.0, free, 1), None);
     }
 }

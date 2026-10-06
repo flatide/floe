@@ -173,6 +173,22 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - depth 0: TOP 자신의 정사각형만 같은 수로 남고 한 단계 아래 DOT은 없다(`occ_layers` 1).
     - 0.25 µm/px(셀 4 px > `FLOE_RUST_DENSITY_OCC_PX` 2), `FLOE_RUST_DENSITY_OCC_MB=0.0001`,
       design.ovs가 없는 캐시는 계획 경로로 그리며, 스위치를 끈 프레임과 바이트 동일하다.
+  - `density_stack`의 `occ_review_checks`(0.12.311, b4ca42e 리뷰 재현):
+    - 픽스처: 1/0에 3.5 µm 사각형 40×20(8 µm 간격), 2/0에 0.4 × 32 µm 선 32개(2 µm 간격). 따로 0.4 µm 정사각형
+      하나뿐인 TOP. `--um 1`(작은 TOP은 자동)로 만든다.
+    - 사각형, 1.5 µm/px(컷 4.5 µm): `occ_layers` 1, `occ_cell_nm` 2000(6 µm 컷의 1단계). 2,549 px로 walk(3,839)의
+      0.25~4배 안이고, 밀도 끔은 0 px다. 이전 바이너리는 1.25~1.9 µm/px에서 0 px였다.
+    - 선, 1 µm/px: `occ_layers` 0, 프레임이 walk·밀도 끔과 바이트 동일하다(429 px). 이전 바이너리는 673 px였다.
+    - 작은 TOP: version 3 파일에 깊이 0 평면이 있고 셀이 켜져 있다. 이전 바이너리는 평면이 없었다.
+    - design.ovs의 사각형 1단계 비트를 0xff로 덮으면 프레임이 walk와 바이트 동일하다(`occ_layers` 0).
+    - design.ovp를 16 B로 자른 사본은 `floe-index ovs`가 exit 1(`page`)로 끝나고, 사본의 design.ovs가 그대로다.
+  - 단위: vfs `a_page_counts_its_shapes_by_their_larger_side_and_a_path_with_its_ends`:
+    - 3.5 µm 사각형은 class 1, 0.4 × 32 µm 선은 어디에도 없다.
+    - 확장 1.5 µm의 경로는 외곽 4 µm(class 1)로 셀 3~7을 덮는다(중심선 + 반폭이면 4~6).
+  - 단위: render-core `the_level_is_the_finest_whose_cut_covers_the_frames`:
+    - 1 µm 셀, 1.25/1.5/1.9 µm/px에 3 px 컷이면 1단계다.
+    - 예산으로 올린 컷(10 µm/px, 60 µm)은 32 µm 셀(3.2 px)을 허용한다.
+  - 단위: render-core `a_plane_that_will_not_read_is_an_error_not_an_empty_layer`.
   - 단위: vfs `occ_density::tests` 6개:
     - 크기 등급 `class_of`
     - 멤버 순회와 4,096 초과 퍼뜨리기

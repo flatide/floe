@@ -2986,6 +2986,151 @@ def occ_density_checks(temp):
     finally:
         bare.stop()
     print('density stack: no design.ovs - the walk\'s frame; floe-index ovs refuses a cache without design.ovb, builds the same bytes again')
+    occ_review_checks(temp, env, occ)
+
+
+def ovs_table(path):
+    """design.ovs's table (version 3): (version, n_levels, per layer [(depth,
+    [(bits off, len, means off, len) per level])])."""
+    import struct
+    data = Path(path).read_bytes()
+    assert data[:8] == b'FLOEOVS1', data[:8]
+    version, n_levels, n_layers = struct.unpack_from('<I', data, 8)[0], *struct.unpack_from('<II', data, 72)
+    at, layers = 80, []
+    for _ in range(n_layers):
+        n_planes, at = data[at], at + 1
+        planes = []
+        for _ in range(n_planes):
+            depth, at = data[at], at + 1
+            planes.append((depth, [struct.unpack_from('<4Q', data, at + 32 * lv) for lv in range(n_levels)]))
+            at += 32 * n_levels
+        layers.append(planes)
+    return version, n_levels, layers
+
+
+CUT_SQUARES = (2.0, 2.0, 8.0, 40, 20)       # um: x, y, pitch, columns, rows of 3.5 um squares (1/0)
+CUT_WIRES = (330.0, 100.0, 2.0, 32)         # um: x, y, pitch, count of 0.4 x 32 um wires (2/0)
+
+
+def occ_cut_layout(path, tiny_path):
+    """1/0: 3.5 um squares at 8 um, a 40 x 20 array - under a 3 px cut from
+    1.17 um a pixel on, over the 3 um cut of 1 um cells; 2/0: 32 wires of
+    0.4 x 32 um at 2 um - under the cut by their smaller side alone. And a
+    TOP that is a 0.4 um square of 1/0 alone."""
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    x0, y0, pitch, nx, ny = CUT_SQUARES
+    low = ly.layer(*LOW)
+    for j in range(ny):
+        for i in range(nx):
+            x, y = x0 + i * pitch, y0 + j * pitch
+            top.shapes(low).insert(kdb.DBox(x, y, x + 3.5, y + 3.5))
+    x0, y0, pitch, n = CUT_WIRES
+    mid = ly.layer(*MID)
+    for i in range(n):
+        x = x0 + i * pitch
+        top.shapes(mid).insert(kdb.DBox(x, y0, x + 0.4, y0 + 32.0))
+    ly.write(str(path))
+    tiny = kdb.Layout()
+    tiny.dbu = 0.001
+    tiny.create_cell('TOP').shapes(tiny.layer(*LOW)).insert(kdb.DBox(1.0, 1.0, 1.4, 1.4))
+    tiny.write(str(tiny_path))
+
+
+def occ_review_checks(temp, env, occ):
+    """The occupancy density against the frame's own cut (review 2026-10-07,
+    each reproduced first): design.ovs classes shapes by their larger side at
+    the level whose cut reaches the frame's - 3.5 um squares over 1 um cells
+    at 1.5 um a pixel (cut 4.5 um) light dots where they lit none (level 0's 3
+    um cut left them out, pass 1's 4.5 um too), and 0.4 x 32 um wires, pass
+    1's hairlines, come back as no dot (by their smaller side they did: 639 px
+    for 396) - the frame byte for byte the walk's and the one without the
+    stack; a TOP under the cut (a 0.4 um square alone) has its plane; a
+    design.ovs plane that will not read sends the frame to the plans, byte for
+    byte the walk's; a page that will not read fails `floe-index ovs`, the
+    last design.ovs left as it was."""
+    import shutil
+    src, tiny = Path(temp) / 'occcut.oas', Path(temp) / 'occtiny.oas'
+    occ_cut_layout(src, tiny)
+    for path in (src, tiny):
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+    ice, tiny_ice = Path(temp) / '.occcut.oas.ice', Path(temp) / '.occtiny.oas.ice'
+    index_bin = os.environ['FLOE_INDEX_BIN']
+    for cache, extra in ((ice, ['--um', '1']), (tiny_ice, [])):
+        built = subprocess.run([index_bin, 'ovs', str(cache)] + extra, capture_output=True, text=True, timeout=600)
+        assert built.returncode == 0, built.stdout + built.stderr
+    # the tiny TOP: a plane of 1/0 at depth 0 with cells set
+    version, _, layers = ovs_table(tiny_ice / 'design.ovs')
+    assert version == 3 and any(depth == 0 and levels[0][1] > 0 for planes in layers for depth, levels in planes), layers
+
+    def view(w, gen, box_um, size, visible):
+        dbu = float(w.cache.meta['dbu'])
+        w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in box_um), 'view': None,
+                  'w': size[0], 'h': size[1], 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                  'abstract': False, 'visible': list(visible), 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+            assert res.get('kind') != 'error', res
+            if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                return bytes(res.pop('rgba')), res
+        raise AssertionError('occupancy review frame timeout')
+
+    def lit_px(pixels):
+        return sum(1 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK)
+
+    squares = ((0.0, 0.0, 300.0, 150.0), (200, 100), (LOW,))
+    wires = ((320.0, 90.0, 400.0, 140.0), (80, 50), (MID,))
+    plain = {name: value for name, value in env.items() if not name.startswith('FLOE_RUST_DENSITY')}
+    workers = {'walk': worker(src, env), 'occ': worker(src, occ), 'off': worker(src, plain)}
+    try:
+        sq = {name: view(w, 1, *squares) for name, w in workers.items()}
+        p2 = sq['occ'][1]['density_plan2']
+        # level 1 (2 um cells, 6 um cut) for the 4.5 um cut
+        assert p2['occ_layers'] == 1 and p2['occ_cell_nm'] == 2000, p2
+        dots, walk_dots, bare = lit_px(sq['occ'][0]), lit_px(sq['walk'][0]), lit_px(sq['off'][0])
+        assert bare == 0 and walk_dots > 0 and 0.25 * walk_dots <= dots <= 4 * walk_dots, (dots, walk_dots, bare)
+        wi = {name: view(w, 2, *wires) for name, w in workers.items()}
+        assert wi['occ'][1]['density_plan2']['occ_layers'] == 0, wi['occ'][1]['density_plan2']
+        assert wi['occ'][0] == wi['walk'][0] == wi['off'][0], 'the wires: %d px with the occupancy density, %d walked, %d without the stack' % (
+            lit_px(wi['occ'][0]), lit_px(wi['walk'][0]), lit_px(wi['off'][0]))
+    finally:
+        for w in workers.values():
+            w.stop()
+    # a plane that will not read: the squares' level 1 bits (the frame's;
+    # level 0 holds none of them) overwritten - the plans draw
+    table = ovs_table(ice / 'design.ovs')[2]
+    assert table[0] and table[0][0][1][0][1] == 0 < table[0][0][1][1][1], table[0]
+    off, length = table[0][0][1][1][:2]
+    data = bytearray((ice / 'design.ovs').read_bytes())
+    data[off:off + length] = b'\xff' * length
+    good = (ice / 'design.ovs').read_bytes()
+    (ice / 'design.ovs').write_bytes(bytes(data))
+    workers = {'walk': worker(src, env), 'bad': worker(src, occ)}
+    try:
+        walked, _ = view(workers['walk'], 3, *squares)
+        bad, bad_res = view(workers['bad'], 3, *squares)
+        assert bad == walked and bad_res['density_plan2']['occ_layers'] == 0, bad_res['density_plan2']
+    finally:
+        for w in workers.values():
+            w.stop()
+    (ice / 'design.ovs').write_bytes(good)
+    # a page that will not read: the build fails, the last file stays
+    broken = Path(temp) / 'occbroken.oas'
+    shutil.copy2(src, broken)
+    shutil.copytree(ice, Path(temp) / '.occbroken.oas.ice')
+    broken_ice = Path(temp) / '.occbroken.oas.ice'
+    with open(broken_ice / 'design.ovp', 'r+b') as fh:
+        fh.truncate(16)
+    failed = subprocess.run([index_bin, 'ovs', str(broken_ice), '--um', '1'], capture_output=True, text=True, timeout=600)
+    assert failed.returncode == 1 and 'page' in failed.stderr and (broken_ice / 'design.ovs').read_bytes() == good, (failed.returncode, failed.stderr)
+    print('density stack: occupancy density at the frame\'s cut - 3.5 um squares at 1.5 um/px %d px over 2 um cells (walk %d, none '
+          'without the stack), 0.4 x 32 um wires the walk\'s frame byte for byte; a TOP under the cut has its plane; a plane that '
+          'will not read draws the walk\'s frame; a page that will not read fails the build, the last file kept' % (dots, walk_dots))
 
 
 def frames_of(w, gen, visible, bg=False):

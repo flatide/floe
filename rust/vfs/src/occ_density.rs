@@ -16,8 +16,11 @@
 //! (the cell holds a shape under the cut of that layer and depth) and per
 //! group of OVS_GROUP x OVS_GROUP cells a byte: the area those shapes cover
 //! over the cells the bits mark (255: all of them). A shape is under a level's
-//! cut while its smaller side is under OVS_SUB_CUT_CELLS of the level's cells
-//! (class_of: pass 1 draws the larger ones at the views the level serves).
+//! cut while its larger side is under OVS_SUB_CUT_CELLS of the level's cells -
+//! the frame's per-shape cut (renderd ShapeCut::Larger, the default; class_of:
+//! pass 1 draws the larger ones at the views the level serves, a thin one
+//! longer than the cut as a hairline). A frame draws at the level whose cut
+//! covers its own (floe_render_core::occ::choose_level).
 //!
 //! Version 1 (91ecf7a) took its bits from design.ovo: 3,362 s for the
 //! synthetic MAIN01 1/10 on a laptop, past 5 hours on the real chip (user
@@ -34,8 +37,12 @@
 //!   hold (1,649 pages; layer 59/1 alone drew no dots where the walk drew 309
 //!   px).
 //! Coarser levels OR the bits and sum the areas, the classes up to the level.
+//! A page that will not read or decode fails the build (the last file stays).
+//! Version 3 (review 2026-10-07) classes shapes by the larger side (version 2
+//! by the smaller one brought the frame's hairlines back as dots) and counts a
+//! top under the cut; a version-2 file is refused until built again.
 //!
-//! File (little-endian), version 2: magic "FLOEOVS1", version u32, group u32,
+//! File (little-endian), version 3: magic "FLOEOVS1", version u32, group u32,
 //! src_size u64, src_mtime u64 (the index's), unit f64 (dbu per um),
 //! cell_dbu i64, x0 i64, y0 i64, w u32, h u32 (level 0's cells), n_levels u32,
 //! n_layers u32 (the index's), then per layer: n_planes u8, per plane: depth
@@ -55,10 +62,10 @@ use std::io::{Read, Seek, Write};
 use std::rc::Rc;
 
 pub const OVS_MAGIC: &[u8; 8] = b"FLOEOVS1";
-pub const OVS_VERSION: u32 = 2;
+pub const OVS_VERSION: u32 = 3;
 /// cells per side of a group: one byte of a row
 pub const OVS_GROUP: u32 = 8;
-/// a shape counts at a level while its smaller side is under this many of the
+/// a shape counts at a level while its larger side is under this many of the
 /// level's cells; a cell under it on both sides is counted, not walked
 pub const OVS_SUB_CUT_CELLS: i64 = 3;
 /// the coarsest level has at most this many cells a side
@@ -420,13 +427,16 @@ fn members_of(rep: &Rep, mut each: impl FnMut(i64, i64)) -> Option<(f64, (i64, i
     None
 }
 
-/// A shape's class by its smaller side: the first level whose cut (`thr` at
-/// level 0, OVS_SUB_CUT_CELLS of its cells, doubling a level) it is under;
-/// None at or past the last level's
-pub fn class_of(thr: i64, n_levels: u32, min_side: i64) -> Option<u8> {
+/// A shape's class by its larger side - the frame's per-shape cut (renderd
+/// ShapeCut::Larger, the default: a thin shape longer than the cut is pass
+/// 1's, a hairline; review 2026-10-07: by the smaller side 32 wires of 0.4 x
+/// 32 um came back as dots, 639 px where the frame drew 396): the first
+/// level whose cut (`thr` at level 0, OVS_SUB_CUT_CELLS of its cells,
+/// doubling a level) it is under; None at or past the last level's
+pub fn class_of(thr: i64, n_levels: u32, side: i64) -> Option<u8> {
     let mut t = thr;
     for c in 0..n_levels {
-        if min_side < t {
+        if side < t {
             return Some(c as u8);
         }
         t = t.saturating_mul(2);
@@ -482,22 +492,29 @@ fn deflate(bytes: &[u8]) -> Vec<u8> {
     enc.finish().expect("deflate design.ovs")
 }
 
-/// Page `pi` decoded for its shapes by class (PageSub) with its stored bytes;
-/// None where it will not decode.
-fn decode_page(ovm: &Ovm, ovp: &mut std::fs::File, pi: u32, g: &OvsGrid, thr: i64) -> Option<(PageSub, u64)> {
+/// Page `pi` decoded for its shapes by class (PageSub) with its stored
+/// bytes; an error where it will not read or decode (review 2026-10-07: a
+/// page that failed was taken for an empty one, and the build wrote a file
+/// short of it over the last one)
+fn decode_page(ovm: &Ovm, ovp: &mut std::fs::File, pi: u32, g: &OvsGrid, thr: i64) -> Result<(PageSub, u64), String> {
     let pg = ovm.page(pi);
     if pg.codec != floe_ovm::CODEC_OASIS {
-        return None;
+        return Err(format!("page {}: codec {} (OASIS only)", pi, pg.codec));
     }
     let mut buf = vec![0u8; pg.csize as usize];
-    ovp.seek(std::io::SeekFrom::Start(pg.file_off)).ok()?;
-    ovp.read_exact(&mut buf).ok()?;
-    let doc = floe_oasis::doc::parse_doc(&buf).ok()?;
-    let cell = doc.cells.first()?;
-    let (c0, bx, by, n_levels) = (g.cell_dbu, pg.bbox.x0, pg.bbox.y0, g.n_levels);
+    ovp.seek(std::io::SeekFrom::Start(pg.file_off)).map_err(|e| format!("page {}: {}", pi, e))?;
+    ovp.read_exact(&mut buf).map_err(|e| format!("page {}: {}", pi, e))?;
+    let doc = floe_oasis::doc::parse_doc(&buf).map_err(|e| format!("page {}: {}", pi, e))?;
+    let cell = doc.cells.first().ok_or_else(|| format!("page {}: no cell", pi))?;
+    Ok((page_cells(cell, (pg.bbox.x0, pg.bbox.y0), g.cell_dbu, thr, g.n_levels), buf.len() as u64))
+}
+
+/// A page's shapes under the cut by class (PageSub): each record's box at
+/// each member - a path's by its outline, extensions included - with its
+/// area over the local cells of `c0` from `origin` it covers, by their
+/// overlap
+fn page_cells(cell: &floe_oasis::doc::Cell, (bx, by): (i64, i64), c0: i64, thr: i64, n_levels: u32) -> PageSub {
     let mut cells: FxMap<(i32, i32, u8), f32> = FxMap::default();
-    // a record's box (local) at a member: its area over the local cells it
-    // covers, by their overlap
     let mut put = |class: u8, (x0, y0, x1, y1): (i64, i64, i64, i64), area: f64| {
         let at = |v: i64, o: i64| (v - o).div_euclid(c0);
         let (i0, i1, j0, j1) = (at(x0, bx), at((x1 - 1).max(x0), bx), at(y0, by), at((y1 - 1).max(y0), by));
@@ -510,28 +527,31 @@ fn decode_page(ovm: &Ovm, ovp: &mut std::fs::File, pi: u32, g: &OvsGrid, thr: i6
             }
         }
     };
-    let mut record = |min_side: i64, (x0, y0, x1, y1): (i64, i64, i64, i64), area: f64, rep: &Rep| {
-        let Some(class) = class_of(thr, n_levels, min_side) else { return };
+    let mut record = |(x0, y0, x1, y1): (i64, i64, i64, i64), area: f64, rep: &Rep| {
+        let Some(class) = class_of(thr, n_levels, (x1 - x0).max(y1 - y0)) else { return };
         let spread = members_of(rep, |dx, dy| put(class, (x0 + dx, y0 + dy, x1 + dx, y1 + dy), area));
         if let Some((n, (fx0, fy0, fx1, fy1))) = spread {
             put(class, (x0 + fx0, y0 + fy0, x1 + fx1, y1 + fy1), n * area);
         }
     };
     for r in &cell.rects {
-        record(r.w.min(r.h), (r.x, r.y, r.x + r.w, r.y + r.h), r.w as f64 * r.h as f64, &r.rep);
+        record((r.x, r.y, r.x + r.w, r.y + r.h), r.w as f64 * r.h as f64, &r.rep);
     }
     for p in &cell.polys {
         let (Some(x0), Some(x1)) = (p.pts.iter().map(|q| q.0).min(), p.pts.iter().map(|q| q.0).max()) else { continue };
         let (y0, y1) = (p.pts.iter().map(|q| q.1).min().unwrap_or(0), p.pts.iter().map(|q| q.1).max().unwrap_or(0));
         let twice: i128 = p.pts.iter().zip(p.pts.iter().cycle().skip(1)).map(|(a, b)| a.0 as i128 * b.1 as i128 - b.0 as i128 * a.1 as i128).sum();
-        record((x1 - x0).min(y1 - y0), (x0, y0, x1, y1), twice.unsigned_abs() as f64 / 2.0, &p.rep);
+        record((x0, y0, x1, y1), twice.unsigned_abs() as f64 / 2.0, &p.rep);
     }
     for p in &cell.paths {
-        let (Some(x0), Some(x1)) = (p.pts.iter().map(|q| q.0).min(), p.pts.iter().map(|q| q.0).max()) else { continue };
-        let (y0, y1) = (p.pts.iter().map(|q| q.1).min().unwrap_or(0), p.pts.iter().map(|q| q.1).max().unwrap_or(0));
-        let (x0, y0, x1, y1) = (x0 - p.hw, y0 - p.hw, x1 + p.hw, y1 + p.hw);
+        if p.pts.is_empty() {
+            continue;
+        }
+        // the outline's box, the extensions in it (review 2026-10-07: the
+        // spine's box grown by the half width left the ends' density out)
+        let bbox = floe_tiler::path_bbox(&p.pts, p.hw, p.es, p.ee);
         let len: f64 = p.pts.windows(2).map(|s| (((s[1].0 - s[0].0) as f64).powi(2) + ((s[1].1 - s[0].1) as f64).powi(2)).sqrt()).sum();
-        record((x1 - x0).min(y1 - y0), (x0, y0, x1, y1), (len + (p.es + p.ee) as f64).max(0.0) * 2.0 * p.hw as f64, &p.rep);
+        record(bbox, (len + (p.es + p.ee) as f64).max(0.0) * 2.0 * p.hw as f64, &p.rep);
     }
     // in order: the walk sums them as they come (a file the same bytes
     // every build)
@@ -544,12 +564,14 @@ fn decode_page(ovm: &Ovm, ovp: &mut std::fs::File, pi: u32, g: &OvsGrid, thr: i6
             _ => by_class.push((class, vec![(i, j, area)])),
         }
     }
-    Some((PageSub { classes: by_class }, buf.len() as u64))
+    PageSub { classes: by_class }
 }
 
-/// Whether the walk decodes page `pi` (a shape over the cut, or no grid)
+/// Whether the walk decodes page `pi`: a shape whose larger side reaches
+/// the cut (class_of), or no grid
 fn decoded_by_walk(ovm: &Ovm, pi: u32, thr: i64) -> bool {
-    (ovm.page(pi).max_min as i64) >= thr || !matches!(ovm.page_occ(pi), Some(PageOcc::Grid(_)))
+    let pg = ovm.page(pi);
+    (pg.max_w.max(pg.max_h) as i64) >= thr || !matches!(ovm.page_occ(pi), Some(PageOcc::Grid(_)))
 }
 
 /// The pages the walk decodes: those of the cells it walks into - from the
@@ -584,32 +606,43 @@ fn pages_to_decode(ovm: &Ovm, small: &[bool], thr: i64) -> Vec<u32> {
 /// top cell's own pages of a million records each would hold one thread
 /// while the rest stood idle: the synthetic MAIN01 1/10 decoded 55 s on 8
 /// threads by runs in file order)
-fn decode_pages(ovm: &Ovm, ovp: &str, pages: &[u32], g: &OvsGrid, thr: i64, jobs: usize) -> Result<Vec<(u32, Option<(PageSub, u64)>)>, String> {
+fn decode_pages(ovm: &Ovm, ovp: &str, pages: &[u32], g: &OvsGrid, thr: i64, jobs: usize) -> Result<Vec<(u32, (PageSub, u64))>, String> {
     let mut order: Vec<u32> = pages.to_vec();
     order.sort_unstable_by_key(|&pi| std::cmp::Reverse(ovm.page(pi).csize));
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::sync::atomic::AtomicBool::new(false);
     let jobs = jobs.clamp(1, order.len().max(1));
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..jobs)
             .map(|_| {
-                let (order, next) = (&order, &next);
-                scope.spawn(move || -> Result<Vec<(u32, Option<(PageSub, u64)>)>, String> {
+                let (order, next, failed) = (&order, &next, &failed);
+                scope.spawn(move || -> Result<Vec<(u32, (PageSub, u64))>, String> {
                     let mut f = std::fs::File::open(ovp).map_err(|e| format!("{}: {}", ovp, e))?;
                     let mut out = Vec::new();
-                    loop {
+                    while !failed.load(std::sync::atomic::Ordering::Relaxed) {
                         let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(&pi) = order.get(at) else { break };
-                        out.push((pi, decode_page(ovm, &mut f, pi, g, thr)));
+                        match decode_page(ovm, &mut f, pi, g, thr) {
+                            Ok(made) => out.push((pi, made)),
+                            Err(e) => {
+                                failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return Err(e);
+                            }
+                        }
                     }
                     Ok(out)
                 })
             })
             .collect();
         let mut out = Vec::with_capacity(order.len());
+        let mut first_error = None;
         for handle in handles {
-            out.extend(handle.join().map_err(|_| "a decode thread panicked".to_string())??);
+            match handle.join().map_err(|_| "a decode thread panicked".to_string()).and_then(|r| r) {
+                Ok(made) => out.extend(made),
+                Err(e) => first_error = first_error.or(Some(e)),
+            }
         }
-        Ok(out)
+        first_error.map_or(Ok(out), Err)
     })
 }
 
@@ -628,7 +661,9 @@ struct Builder<'a> {
     planes: FxMap<(u32, u8, u8), PlaneAcc>,
     /// design.ovp, for the pages decoded, and their shapes once decoded
     ovp: std::fs::File,
-    subs: FxMap<u32, Option<Rc<PageSub>>>,
+    subs: FxMap<u32, Rc<PageSub>>,
+    /// the first page that would not read or decode (the build fails)
+    error: Option<String>,
     stats: OvsStats,
 }
 
@@ -650,20 +685,31 @@ impl Builder<'_> {
     }
 
     /// Page `pi`'s shapes by class (PageSub): decoded before the walk
-    /// (decode_pages), else here; None where the page will not decode
+    /// (decode_pages), else here; None where it will not read or decode -
+    /// its error kept, the build fails
     fn page_sub(&mut self, pi: u32) -> Option<Rc<PageSub>> {
         if let Some(known) = self.subs.get(&pi) {
-            return known.clone();
+            return Some(Rc::clone(known));
+        }
+        if self.error.is_some() {
+            return None;
         }
         let started = std::time::Instant::now();
-        let made = decode_page(self.ovm, &mut self.ovp, pi, &self.g, self.thr).map(|(sub, bytes)| {
-            self.stats.decoded += 1;
-            self.stats.decoded_bytes += bytes;
-            Rc::new(sub)
-        });
+        let made = decode_page(self.ovm, &mut self.ovp, pi, &self.g, self.thr);
         self.stats.decode_s += started.elapsed().as_secs_f64();
-        self.subs.insert(pi, made.clone());
-        made
+        match made {
+            Ok((sub, bytes)) => {
+                self.stats.decoded += 1;
+                self.stats.decoded_bytes += bytes;
+                let sub = Rc::new(sub);
+                self.subs.insert(pi, Rc::clone(&sub));
+                Some(sub)
+            }
+            Err(e) => {
+                self.error = Some(e);
+                None
+            }
+        }
     }
 
     fn walk(&mut self, ci: u32, xf: &Xf, depth: u32) {
@@ -863,25 +909,35 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
         planes: FxMap::default(),
         ovp,
         subs: FxMap::default(),
+        error: None,
         stats: OvsStats::default(),
     };
-    if !b.small[ovm.top as usize] {
+    if b.small[ovm.top as usize] {
+        // a top under the cut (review 2026-10-07: a 0.4 um square alone made
+        // a file without a plane): its box and its cover, at depth 0
+        let cells = b.fast.cells((top.x0, top.y0, top.x1, top.y1));
+        let (gw, tiles_w) = (b.gw0, b.tiles_w);
+        let acc = b.smalls.entry((ovm.top, 0)).or_default();
+        acc.tiles.set(tiles_w, cells);
+        acc.count(((cells.2 + cells.3) / 2 / OVS_GROUP) * gw + (cells.0 + cells.1) / 2 / OVS_GROUP, 1.0);
+        b.stats.small += 1;
+    } else {
         let started = std::time::Instant::now();
         let jobs = if jobs == 0 { std::thread::available_parallelism().map_or(4, |n| n.get()) } else { jobs };
         let pages = pages_to_decode(ovm, &b.small, thr);
-        for (pi, made) in decode_pages(ovm, ovp_path, &pages, &g, thr, jobs)? {
-            let made = made.map(|(sub, bytes)| {
-                b.stats.decoded += 1;
-                b.stats.decoded_bytes += bytes;
-                Rc::new(sub)
-            });
-            b.subs.insert(pi, made);
+        for (pi, (sub, bytes)) in decode_pages(ovm, ovp_path, &pages, &g, thr, jobs)? {
+            b.stats.decoded += 1;
+            b.stats.decoded_bytes += bytes;
+            b.subs.insert(pi, Rc::new(sub));
         }
         b.stats.decode_s = started.elapsed().as_secs_f64();
         b.stats.decode_jobs = jobs as u64;
         let started = std::time::Instant::now();
         b.walk(ovm.top, &Xf::identity(), 0);
         b.stats.walk_s = started.elapsed().as_secs_f64();
+        if let Some(e) = b.error.take() {
+            return Err(e);
+        }
     }
     b.subs.clear();
     let started = std::time::Instant::now();
@@ -1260,6 +1316,44 @@ mod tests {
     }
 
     #[test]
+    fn a_page_counts_its_shapes_by_their_larger_side_and_a_path_with_its_ends() {
+        use floe_oasis::doc::{Cell, PathRec, RectRec};
+        // cells of 1000 from (0, 0); the cut 3000 at level 0, 6000 at 1
+        let rect = |x, y, w, h| RectRec { layer: 1, dt: 0, x, y, w, h, rep: Rep::One };
+        let cell = Cell {
+            rects: vec![
+                // 3.5 x 3.5: class 1 (its larger side past level 0's cut)
+                rect(10_000, 10_000, 3_500, 3_500),
+                // a 0.4 x 32 wire: past every level's cut by its larger side
+                rect(20_000, 0, 400, 32_000),
+                // 0.5 x 0.5: class 0
+                rect(1_200, 1_200, 500, 500),
+            ],
+            paths: vec![PathRec { layer: 1, dt: 0, pts: vec![(5_000, 30_500), (6_000, 30_500)], hw: 200, es: 1_500, ee: 1_500, rep: Rep::One }],
+            ..Cell::default()
+        };
+        let sub = page_cells(&cell, (0, 0), 1_000, 3_000, 2);
+        let class = |c: u8| sub.classes.iter().find(|(k, _)| *k == c).map(|(_, cells)| cells.clone()).unwrap_or_default();
+        let cells = |c: u8| class(c).iter().map(|&(i, j, _)| (i, j)).collect::<Vec<_>>();
+        // the square's 4 x 4 cells at class 1, the wire nowhere
+        let square: Vec<(i32, i32)> = cells(1).into_iter().filter(|&(_, j)| j < 30).collect();
+        assert_eq!(square.len(), 16);
+        assert!(square.iter().all(|&(i, j)| (10..=13).contains(&i) && (10..=13).contains(&j)));
+        assert!(class(0).iter().chain(class(1).iter()).all(|&(i, _, _)| i != 20));
+        let area: f32 = class(1).iter().filter(|c| c.1 < 30).map(|c| c.2).sum();
+        assert!((area - 3_500.0 * 3_500.0).abs() < 1.0, "{}", area);
+        // the small square in its cell, at class 0
+        assert_eq!(cells(0), vec![(1, 1)]);
+        // the path's outline 3.5 to 7.5 um with its extensions - 4 um, class
+        // 1 by its larger side - in row 30: cells 3 to 7 (its spine's box
+        // grown by the half width took 4 to 6, class 0)
+        let row: Vec<i32> = cells(1).iter().filter(|&&(_, j)| j == 30).map(|&(i, _)| i).collect();
+        assert_eq!(row, vec![3, 4, 5, 6, 7]);
+        let path_area: f32 = class(1).iter().filter(|c| c.1 == 30).map(|c| c.2).sum();
+        assert!((path_area - 4_000.0 * 400.0).abs() < 1.0, "{}", path_area);
+    }
+
+    #[test]
     fn the_file_reads_back_what_was_written() {
         let g = OvsGrid::new(1000.0, 1.0, (-10, -20, 16_000 - 10, 9_000 - 20)).unwrap();
         assert_eq!((g.w, g.h, g.n_levels), (16, 9, 1));
@@ -1283,9 +1377,11 @@ mod tests {
         let mut other = bytes.clone();
         other[0] = b'X';
         assert!(OvsFile::from_bytes(other).is_err());
-        let mut version = bytes.clone();
-        version[8] = 1;
-        assert!(OvsFile::from_bytes(version).unwrap_err().contains("version 1"));
+        for old in [1u8, 2] {
+            let mut version = bytes.clone();
+            version[8] = old;
+            assert!(OvsFile::from_bytes(version).unwrap_err().contains(&format!("version {}", old)));
+        }
         assert!(OvsFile::from_bytes(bytes[..bytes.len() - 3].to_vec()).is_err());
     }
 }

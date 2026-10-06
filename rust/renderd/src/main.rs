@@ -2586,8 +2586,10 @@ fn density_stages(styled: &StyledGeometryRasterRequest) -> bool {
 /// of its group. The synthetic MAIN01 1/10 at full depth: pass 2's plan
 /// 53-170 ms to none, frames about a third sooner, 75-83 % of the walk's
 /// dots; the field's full-depth view walked 25 M nodes in 20 s. A view the
-/// file cannot serve (a root, a cell past FLOE_RUST_DENSITY_OCC_PX pixels,
-/// layers past FLOE_RUST_DENSITY_OCC_MB, no design.ovs) plans as before.
+/// file cannot serve (a root, a frame not cut by the larger side, a level
+/// whose cut reaches pass 1's with a cell past FLOE_RUST_DENSITY_OCC_PX
+/// pixels, layers past FLOE_RUST_DENSITY_OCC_MB, no design.ovs or one that
+/// will not read) plans as before.
 fn density_occ_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_OCC").as_deref() == Ok("on"))
@@ -4810,13 +4812,24 @@ fn render_density_frame(
                     // design.ovs's cell bits and mean cover stand for the
                     // plans - every density plane paints its layer from
                     // them, no walk and no decode (floe_render_core::occ)
-                    if density_occ_enabled() && styled.raster.density_pattern && staged_plane.is_none() && command.root.is_none() {
+                    // design.ovs classes shapes by the larger side: frames cut
+                    // so alone (ShapeCut::Larger, the default), at the plan's
+                    // cut (upper_cut; a budget's raise in it)
+                    if density_occ_enabled()
+                        && styled.raster.density_pattern
+                        && staged_plane.is_none()
+                        && command.root.is_none()
+                        && !command.exact
+                        && command.thin_keep
+                        && shape_cut_mode() == ShapeCut::Larger
+                        && upper_cut > 0
+                    {
                         let occ_started = Instant::now();
                         let px_dbu = ((command.view[2] - command.view[0]) / f64::from(command.width))
                             .max((command.view[3] - command.view[1]) / f64::from(command.height));
                         let ids: Vec<u32> = styled.layers.iter().map(|layer| layer.layer_idx).collect();
                         let depth = (command.depth < FULL_DEPTH).then_some(command.depth);
-                        if let Some(occ) = cache.occ_density(&ids, px_dbu, density_occ_max_px(), density_occ_cap_bytes(), depth) {
+                        if let Some(occ) = cache.occ_density(&ids, px_dbu, upper_cut as f64, density_occ_max_px(), density_occ_cap_bytes(), depth) {
                             let built = elapsed_us(occ_started);
                             times[0] += built;
                             plan2[1] += built;

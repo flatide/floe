@@ -793,16 +793,19 @@ impl Cache {
 
     /// The density stack's pass 2 from the occupancy density (crate::occ,
     /// opt-in): of each of `layer_ids`, the planes `depth` draws (None: all)
-    /// of design.ovs, at its level for a pixel of `px_dbu`
-    /// (crate::occ::choose_level: its cell at most `max_cell_px` pixels, its
-    /// layers' grids within `cap_bytes`). The layers made are kept for the
-    /// next frame at that level and depth, those of others let go. None
-    /// without design.ovs (looked for once per open cache) or one built for
-    /// another index, or where no level will do.
+    /// of design.ovs, at its level for a pixel of `px_dbu` and pass 1's cut
+    /// `cut_dbu` (crate::occ::choose_level: the finest whose cut reaches it,
+    /// its cell at most `max_cell_px` pixels, its layers' grids within
+    /// `cap_bytes`). The layers made are kept for the next frame at that
+    /// level and depth, those of others let go. None without design.ovs
+    /// (looked for once per open cache), one built for another index or
+    /// another version, where no level will do - or where a plane will not
+    /// read: the file is let go and the plans draw.
     pub fn occ_density(
         &self,
         layer_ids: &[u32],
         px_dbu: f64,
+        cut_dbu: f64,
         max_cell_px: f64,
         cap_bytes: u64,
         depth: Option<u32>,
@@ -828,7 +831,7 @@ impl Cache {
             let (w, h) = (u64::from(w), u64::from(h));
             layer_ids.len() as u64 * (w.div_ceil(8) * h + w.div_ceil(8) * h.div_ceil(8))
         };
-        let level = crate::occ::choose_level(grid.cell_dbu, grid.n_levels, px_dbu, max_cell_px, bytes_at, cap_bytes)?;
+        let level = crate::occ::choose_level(grid.cell_dbu, grid.n_levels, px_dbu, cut_dbu, max_cell_px, bytes_at, cap_bytes)?;
         let (w, h) = grid.level_dims(level);
         let depth_key = depth.map_or(u32::MAX, |d| d.min(floe_vfs::occupancy::DEPTH_CAP as u32));
         slot.layers.retain(|&(_, lv, d), _| lv == level && d == depth_key);
@@ -840,7 +843,8 @@ impl Cache {
         missing.sort_unstable();
         missing.dedup();
         let threads = occ_threads().min(missing.len()).max(1);
-        let made: Vec<(u32, Option<std::sync::Arc<crate::occ::OccLayer>>)> = if threads == 1 {
+        type Made = Result<Option<std::sync::Arc<crate::occ::OccLayer>>, String>;
+        let made: Vec<(u32, Made)> = if threads == 1 {
             missing.iter().map(|&id| (id, crate::occ::combine(&ovs, id as usize, level as usize, depth))).collect()
         } else {
             let next = std::sync::atomic::AtomicUsize::new(0);
@@ -862,7 +866,17 @@ impl Cache {
             })
         };
         for (id, layer) in made {
-            slot.layers.insert((id, level, depth_key), layer);
+            match layer {
+                Ok(layer) => {
+                    slot.layers.insert((id, level, depth_key), layer);
+                }
+                Err(e) => {
+                    eprintln!("[render-core] occupancy density {}/design.ovs: {} - the plans draw", self.dir, e);
+                    slot.file = None;
+                    slot.layers.clear();
+                    return None;
+                }
+            }
         }
         let mut layers: Vec<Option<std::sync::Arc<crate::occ::OccLayer>>> = vec![None; ovs.layers.len()];
         for &id in layer_ids {
