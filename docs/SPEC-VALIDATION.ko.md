@@ -130,6 +130,16 @@ sh tools/validate_rust.sh --only quick path/to.oas
   프레임 결과의 `place_walks`에 그 배열의 걷기(`walked2`)가 오고, 목록 끔에서는 비어 있다(0.12.211).
   occupancy·jobdeck·representatives·sub_cut_box 게이트는 KLayout 규칙에 대한 비교라 이 킬 스위치를
   모든 워커에 고정한다(sub_cut_box: 상자는 표시용 점, 그 기준인 멤버 직접 그리기도 KLayout 규칙).
+- 컷 아래 공통 위상 패턴(2026-10-06, `CUT_DENSITY_DESIGN` §10.13):
+  - `unit_render`의 `density_pattern_*`: 3×3의 두 위상(4/5점), 2×2(2점), 3×2(3점), 1×1의 빈칸,
+    도형의 전체 차단 영역과 요약의 점만 차단하는 영역, 중복·하위 레이어 순회 순서, 배열/멤버 저장,
+    정수 패닝 및 소수 위상의 타일·워커 일치, 1×1 사각형/다각형/경로 일치를 확인한다.
+  - `density_stack`의 `pattern_checks`: 기본값=명시적 켬, `FLOE_RUST_DENSITY_PATTERN=off`의 밝기 복원,
+    원본·스페클 구멍 보존, 불투명한 레이어 색, 타일64/워커1과 타일127/워커4의 바이트 일치.
+    `full_shapes_first_checks`는 기본 패턴에서도 완전 가림이면 추가 계획·디코드가 0임을 확인한다.
+  - `rust_renderer`: `density_plan2` 끝에 `pattern`을 더한 40개 값. 이전 39개 응답은 `pattern=0`으로 읽는다.
+    상태줄은 백엔드 값으로 `pattern, cover x2` 또는 `bright x2`를 표시한다.
+    아래의 기존 밝기·면적 보존 검사는 패턴 스위치를 끈 대조군으로 유지한다.
 - `density_stack`(tools/validate_density_stack.py, 약 10초; `render` 별칭에 포함): 밀도 스택 진단
   (0.12.226, `FLOE_RUST_DENSITY_STACK=top`, CUT_DENSITY_DESIGN §10.10 — 컷 아래 도형을 2패스로 빈 공간에).
   klayout.db로 만든 0.1 µm/px 400×200 레이아웃(1/0: 뷰 전체의 0.15 µm(1.5 px) 사각형 격자와 오른쪽 위 사분면의

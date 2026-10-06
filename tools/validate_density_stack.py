@@ -1227,7 +1227,8 @@ def bright_checks(temp):
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_GATE': 'on', 'FLOE_RUST_DENSITY_ZOOM_OUT': 'on'}
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_GATE': 'on', 'FLOE_RUST_DENSITY_ZOOM_OUT': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': 'off'}
     workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='off'))}
     try:
         dbu = float(workers['on'].cache.meta['dbu'])
@@ -1301,7 +1302,8 @@ def bright_checks(temp):
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on'}
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': 'off'}
     workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='off'))}
     try:
         low_alone = frame(workers['on'], 1, (LOW,))[0]
@@ -1312,6 +1314,53 @@ def bright_checks(temp):
         shown = {(c, r) for r in range(H) for c in range(W) if px(on, c, r) != BLACK} - low_px
         assert shown, 'TOP\'s density where LOW leaves the frame dark'
         print('density stack: the brightness keeps pass 1 - LOW\'s %d px as with it off and alone, TOP\'s density on %d px around it' % (len(low_px), len(shown)))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
+def pattern_checks(temp):
+    """The default density display uses opaque layer-colour dots. Its switch
+    off restores accumulated brightness, with the same originals and plans.
+    A speckled original's holes remain protected, and tile size or raster
+    worker count cannot change the pattern.
+    """
+    src = Path(temp) / 'pattern.oas'
+    shapes_first_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {
+        'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
+        'FLOE_RUST_DENSITY_BRIGHT': 'on', 'FLOE_RUST_DENSITY_PATTERN': None,
+        'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on',
+        'FLOE_RUST_TILE_PX': '64', 'FLOE_RUST_RASTER_JOBS': '1',
+    }
+    workers = {
+        'default': worker(src, env),
+        'on': worker(src, dict(env, FLOE_RUST_DENSITY_PATTERN='on')),
+        'off': worker(src, dict(env, FLOE_RUST_DENSITY_PATTERN='off')),
+        'parallel': worker(src, dict(env, FLOE_RUST_TILE_PX='127', FLOE_RUST_RASTER_JOBS='4')),
+    }
+    try:
+        low_c, top_c = layer_colour(workers['default'], LOW), layer_colour(workers['default'], TOP)
+        frames = {name: frame(w, 1, (LOW, TOP)) for name, w in workers.items()}
+        on, result = frames['default']
+        legacy, legacy_result = frames['off']
+        for name, (_, reported) in frames.items():
+            assert reported['density_plan2']['pattern'] == int(name != 'off'), (name, reported['density_plan2'])
+        assert on == frames['on'][0] == frames['parallel'][0], 'default, explicit on, or tile/worker pattern differs'
+        assert on != legacy, 'pattern switch must restore the legacy brightness'
+        palette = (BLACK, low_c, top_c)
+        assert all(on[i:i + 4] in palette for i in range(0, len(on), 4)), 'pattern contains blended colours'
+        assert any(legacy[i:i + 4] not in palette for i in range(0, len(legacy), 4)), 'legacy brightness needs fractional coverage'
+        alone, _ = frame(workers['default'], 2, (LOW,))
+        covered = ((c, r) for r in range(20, 180) for c in range(20, 200))
+        assert all(px(on, c, r) == px(legacy, c, r) == px(alone, c, r) for c, r in covered), 'original or its speckle holes changed'
+        shown = sum(on[i:i + 4] == top_c for i in range(0, len(on), 4))
+        assert shown > 0 and result['density_stack']['lit'] > 0, 'pattern lost the open-space density'
+        assert result['density_pages'] == legacy_result['density_pages'], ('pattern changed page planning', result['density_pages'], legacy_result['density_pages'])
+        print('density stack: opaque pattern default/on, legacy brightness off, originals protected; %d density px, identical across tiles/workers' % shown)
     finally:
         for w in workers.values():
             w.stop()
@@ -1432,7 +1481,8 @@ def first_checks(temp):
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on'}
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': 'off'}
     tight = dict(env, FLOE_RUST_BUDGET_MB='1', FLOE_RUST_DENSITY_RESERVE_LEFT='off', FLOE_RUST_DENSITY_OVB_FIRST='off')
     workers = {'first': worker(src, env), 'decode': worker(src, dict(env, FLOE_RUST_DENSITY_OVB_FIRST='off')),
                'stand_in': worker(src, tight), 'none': worker(src, dict(tight, FLOE_RUST_DENSITY_STAND_IN='off'))}
@@ -1539,7 +1589,8 @@ def sums_checks(temp):
         done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on'}
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': 'off'}
     off = dict(env, FLOE_RUST_DENSITY_BRIGHT_SUMS='off')
     workers = {('single', 'on'): worker(single, env), ('single', 'off'): worker(single, off), ('list', 'on'): worker(listed, env), ('list', 'off'): worker(listed, off)}
     try:
@@ -1669,7 +1720,8 @@ def hier_checks(temp):
         done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on'}
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': 'off'}
     workers = {
         'flat': worker(paths['hier_flat'], env),
         'cells': worker(paths['hier_cells'], env),
@@ -2066,6 +2118,7 @@ def full_shapes_first_checks(temp):
         'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
         'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_TOP_PLANES': '2',
         'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
+        'FLOE_RUST_DENSITY_PATTERN': None,
         'FLOE_RUST_DENSITY_FREE_CELLS': 'on', 'FLOE_RUST_OCCUPANCY': 'off',
         'FLOE_RUST_SHAPE_CUT': 'max',
     }
@@ -2103,6 +2156,7 @@ def full_shapes_first_checks(temp):
                 off, _ = frame(workers['off'], 1, (LOW, MID, TOP))
                 on, res = frame(workers['on'], 1, (LOW, MID, TOP))
                 p2, pages, stack = res['density_plan2'], res['density_pages'], res['density_stack']
+                assert p2['pattern'] == 1, p2
                 if kind == 'half':
                     assert all(px(on, c, r) == px(off, c, r) for r in range(H) for c in range(W // 2)), 'covered half changed'
                     assert any(px(on, c, r) != px(off, c, r) for r in range(H) for c in range(W // 2 + 2, W)), 'open half lost its density'
@@ -2578,7 +2632,10 @@ def zoom_during_pass2(w, gen_a, gen_b, visible):
 def worker(src, env):
     saved = {name: os.environ.get(name) for name in env}
     for name, value in env.items():
-        os.environ[name] = value
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
@@ -2637,7 +2694,7 @@ def main():
     os.environ['FLOE_INDEX_BIN'] = str(ROOT / 'rust/target/release/floe-index')
     os.environ['FLOE_RENDERD_BIN'] = str(ROOT / 'rust/target/release/floe-renderd')
     os.environ['FLOE_RUST_RETAINED_MB'] = '0'
-    for name in ('FLOE_RUST_DENSITY_STACK', 'FLOE_RUST_DENSITY_DOTS', 'FLOE_RUST_AREA_TRUE', 'FLOE_RUST_WRITE_ONCE'):
+    for name in ('FLOE_RUST_DENSITY_STACK', 'FLOE_RUST_DENSITY_DOTS', 'FLOE_RUST_AREA_TRUE', 'FLOE_RUST_WRITE_ONCE', 'FLOE_RUST_DENSITY_PATTERN'):
         os.environ.pop(name, None)
     # the fixed VIEW (W x H at PX_UM) is wider than most of these dies: past
     # their fit views the dots would thin (density_zoom_gain); the checks
@@ -2759,6 +2816,7 @@ def main():
         shapes_first_checks(temp)
         full_shapes_first_checks(temp)
         bright_checks(temp)
+        pattern_checks(temp)
         toggle_checks(temp)
         first_checks(temp)
         sums_checks(temp)

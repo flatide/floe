@@ -1072,11 +1072,12 @@ def perf_status(res, depth_note=""):
         # pass 2's reserve: the fixed one or what pass 1 left (2026-10-02)
         if (res.get("density_plan2") or {}).get("reserve_mb"):
             parts.append("reserve %s MB" % fmt_count(res["density_plan2"]["reserve_mb"]))
-        # the brightness by the area covered (2026-10-05): its gain by the
-        # detail - a pixel at min(1, g x its area) of the colour
+        # The backend reports the display mode; both use the covered-area
+        # gain, while only the legacy mode varies pixel brightness.
         bright = (res.get("density_plan2") or {}).get("bright_milli")
         if bright:
-            parts.append("bright x%g" % (bright / 1000.0))
+            pattern = (res.get("density_plan2") or {}).get("pattern", 0)
+            parts.append(("pattern, cover x%g" if pattern else "bright x%g") % (bright / 1000.0))
             # what a cell under the cut stands for (2026-10-05): the area its
             # shapes cover, or - an index without design.ovb or a hierarchy
             # summary - its whole box

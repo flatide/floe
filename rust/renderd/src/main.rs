@@ -1229,8 +1229,9 @@ struct FramePixels {
     /// cell stands for its cover (1; 0: for its box - floe_render_core
     /// Cache::cell_cover), the cells whose cover the plans worked out, and
     /// the nodes that counted what their placements hold (HierOpts::
-    /// dot_node_sample, 2026-10-05)
-    density_plan2: Option<[u64; 39]>,
+    /// dot_node_sample, 2026-10-05); then whether the density draws an
+    /// opaque pattern (1) instead of accumulated brightness (0)
+    density_plan2: Option<[u64; 40]>,
 }
 
 fn render_worker(
@@ -3538,6 +3539,11 @@ fn run_render_attempt(
         .collect();
     let raster_workers = command.jobs.unwrap_or(state.jobs);
     let decode_workers = command.decode_jobs.or(command.jobs).unwrap_or(state.jobs);
+    let density_bright = if !command.exact && area_true_enabled() && density_stack_on(command) {
+        density_bright_gain(command).unwrap_or(0.0) as f32
+    } else {
+        0.0
+    };
     let raster_request = GeometryRasterRequest {
         view: RasterViewBox::new(
             command.view[0],
@@ -3572,12 +3578,11 @@ fn run_render_attempt(
         density_top_planes: 1,
         // pass 1's shapes first: every plane's density in the space they left
         density_shapes_first: density_shapes_first(),
-        // the density's brightness by the area it covers (density_bright_gain)
-        density_bright: if !command.exact && area_true_enabled() && density_stack_on(command) {
-            density_bright_gain(command).unwrap_or(0.0) as f32
-        } else {
-            0.0
-        },
+        // Both forms use the same covered-area planning; the switch restores
+        // the accumulated brightness instead of the opaque display pattern.
+        density_bright,
+        density_pattern: density_bright > 0.0
+            && std::env::var("FLOE_RUST_DENSITY_PATTERN").as_deref() != Ok("off"),
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache
@@ -3827,7 +3832,7 @@ fn run_render_attempt(
         let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 39]> = None;
+        let mut density_plan2: Option<[u64; 40]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4653,7 +4658,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 39]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 40]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4688,12 +4693,15 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 39];
+    let mut plan2 = [0u64; 40];
     plan2[22] = reserve_bytes >> 20;
     // the dots' gain past the fit view, in thousandths (density_zoom_gain)
     plan2[31] = (dot_gain * 1000.0).round() as u64;
     // the brightness's gain, in thousandths (density_bright_gain; 0: off)
     plan2[34] = density_bright_gain(command).map_or(0, |g| (g * 1000.0).round() as u64);
+    // Report the raster's actual display mode, including fully covered
+    // frames that need no pass-2 plans.
+    plan2[39] = u64::from(styled.raster.density_pattern);
     // the dot block the plans take and merge by (64 px at most under the
     // brightness: floe_vfs dot_block_px_of)
     let dot_block = floe_render_core::dot_block_px_of(floe_render_core::dot_block_px(), plan2[34] > 0);

@@ -180,7 +180,9 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  # for its box - no design.ovb or hierarchy summary), the
                  # cells whose cover the plans worked out, the nodes that
                  # counted what their placements hold (2026-10-05)
-                 "cell_cover", "cover_cells", "node_sampled")
+                 "cell_cover", "cover_cells", "node_sampled",
+                 # the raster's opaque density pattern; older replies omit it
+                 "pattern")
 
 
 def _viewport_px(job, bbox):
@@ -213,6 +215,16 @@ def _wire_counts(value, names):
     if len(counts) != len(names):
         return None
     return dict(zip(names, counts))
+
+
+def _density_plan2(value):
+    """Pass-2 diagnostics, with the optional display mode defaulting to legacy."""
+    counts = _wire_counts(value, DENSITY_PLAN2)
+    if counts is None:
+        counts = _wire_counts(value, DENSITY_PLAN2[:-1])
+        if counts is not None:
+            counts["pattern"] = 0
+    return counts
 
 
 def _density_pages(value):
@@ -1411,7 +1423,7 @@ class RustRenderWorker:
         state["density_us"] = _wire_counts(fields.get("density_us", "-"), DENSITY_TIMES)
         state["density_bin"] = _wire_counts(fields.get("density_bin", "-"), DENSITY_BIN)
         state["density_dots"] = _wire_counts(fields.get("density_dots", "-"), DENSITY_DOTS)
-        state["density_plan2"] = _wire_counts(fields.get("density_plan2", "-"), DENSITY_PLAN2)
+        state["density_plan2"] = _density_plan2(fields.get("density_plan2", "-"))
         # the records' cut pass 2 planned at, px (the dots' floor,
         # FLOE_RUST_DENSITY_FLOOR_PX, or the density cut)
         try:

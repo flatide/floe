@@ -18,7 +18,9 @@ sys.path.insert(0, str(ROOT))
 from floe import RENDERD_VERSION, __version__  # noqa: E402
 from floe.rust_render import (  # noqa: E402
     CELL_QUERY_KINDS,
+    DENSITY_PLAN2,
     RustRenderWorker,
+    _density_plan2,
     _parse_wire_line,
     _pattern_fill,
     _RAW_HEADER_LEN,
@@ -743,6 +745,16 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # cover where the index has it
         covered = dict(bright, density_plan2=dict(bright["density_plan2"], cell_cover=1))
         self.assertIn("bright x2, cell cover, pass 2 plan", perf_status(covered)[0])
+        patterned = dict(covered, density_plan2=dict(covered["density_plan2"], pattern=1))
+        with mock.patch.dict(os.environ, {"FLOE_RUST_DENSITY_PATTERN": "off"}):
+            full_pattern, _ = perf_status(patterned)
+        self.assertIn("pattern, cover x2, cell cover, pass 2 plan", full_pattern)
+        self.assertNotIn("bright x2", full_pattern)
+        # The result, not the GUI's environment, decides the label. Old
+        # replies and an explicit kill-switch reply keep the legacy label.
+        legacy = dict(covered, density_plan2=dict(covered["density_plan2"], pattern=0))
+        with mock.patch.dict(os.environ, {"FLOE_RUST_DENSITY_PATTERN": "on"}):
+            self.assertIn("bright x2, cell cover", perf_status(legacy)[0])
         # the pages a budget left out that their occupancy stands in for
         # (2026-10-05): with what went over the budget
         stood = dict(res, density_plan2=dict(res["density_plan2"], stood_in=7))
@@ -1898,6 +1910,15 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             worker._handle_line("styled", {"epoch": "1"}, "")
             self.assertFalse(os.path.exists(style_path))
 
+    def test_density_plan2_accepts_the_optional_pattern_field(self):
+        legacy = "/".join(str(i) for i in range(len(DENSITY_PLAN2) - 1))
+        expected = dict(zip(DENSITY_PLAN2[:-1], range(len(DENSITY_PLAN2) - 1)))
+        self.assertEqual(_density_plan2(legacy), dict(expected, pattern=0))
+        self.assertEqual(_density_plan2(legacy + "/1"), dict(expected, pattern=1))
+        self.assertEqual(_density_plan2(legacy + "/0"), dict(expected, pattern=0))
+        for malformed in ("-", "", "1/2", legacy + "/bad", legacy + "/1/2"):
+            self.assertIsNone(_density_plan2(malformed), malformed)
+
     def test_render_command_and_frame_result_match_parent_schema(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = os.path.join(directory, "floe-renderd")
@@ -2132,7 +2153,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "full_chunks": 500, "full_members": 128000, "sampled_chunks": 60, "sampled_members": 15360,
                 "free_top": 40000, "free_others": 7000, "dot_gain_milli": 640, "dot_gated": 1200, "dot_gate_min": 2,
                 "bright_milli": 2000, "stood_in": 9,
-                "cell_cover": 1, "cover_cells": 1500, "node_sampled": 800})
+                "cell_cover": 1, "cover_cells": 1500, "node_sampled": 800, "pattern": 0})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
