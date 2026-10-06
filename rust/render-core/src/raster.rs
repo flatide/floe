@@ -4019,6 +4019,7 @@ fn raster_tile_pass(
     styled: &StyledGeometryRasterRequest,
     bin: Option<&WorkBin>,
     density: Option<DensityScene<'_>>,
+    occ: Option<&crate::occ::OccDensity>,
     work: &mut TileWork,
     pass: TilePass,
     remaining: usize,
@@ -4055,7 +4056,7 @@ fn raster_tile_pass(
         end_density_pass(work, styled, pass);
         return Ok(());
     }
-    if matches!(pass, TilePass::Density(_) | TilePass::DensityLower) && density.is_none() {
+    if matches!(pass, TilePass::Density(_) | TilePass::DensityLower) && density.is_none() && occ.is_none() {
         // nothing planned for this side: nothing to draw
         end_density_pass(work, styled, pass);
         return Ok(());
@@ -4072,68 +4073,72 @@ fn raster_tile_pass(
     } = work;
     match pass {
         TilePass::DensityLower => {
-            let Some(density) = density else {
-                unreachable!("checked above");
-            };
+            if let Some(occ) = occ {
+                paint_occ_lower(band, request, styled, occ);
+            }
             // one walk over the lower planes' scene: every page draws with
             // its own plane's paint into the plane maps
-            render_cell(
-                density.scene,
-                request,
-                band,
-                cull_view,
-                stats,
-                counters,
-                GeometrySelection::Planes(density.table),
-                SubtreePrune::Layers(density.words),
-                PaintStyle::solid(request.background),
-                guard,
-                density.scene.top(),
-                OrthoTransform::identity(),
-                None,
-                path,
-                record_scratch,
-            )?;
-        }
-        TilePass::Density(plane) => {
-            let Some(density) = density else {
-                unreachable!("checked above");
-            };
-            let layer = &styled.layers[plane];
-            let paint = plane_paint(styled, plane);
-            match density.bin {
-                Some(bin) => replay_plane_items(
+            if let Some(density) = density {
+                render_cell(
                     density.scene,
                     request,
                     band,
                     cull_view,
                     stats,
                     counters,
-                    guard,
-                    record_scratch,
-                    layer,
-                    plane,
-                    paint,
-                    &bin.planes[plane],
-                    Some(&density_minis[density.mini_side]),
-                )?,
-                None => render_cell(
-                    density.scene,
-                    request,
-                    band,
-                    cull_view,
-                    stats,
-                    counters,
-                    GeometrySelection::Layer(layer.layer_idx),
-                    SubtreePrune::Layer(density.scene.layer_mask_bit(layer.layer_idx)),
-                    paint,
+                    GeometrySelection::Planes(density.table),
+                    SubtreePrune::Layers(density.words),
+                    PaintStyle::solid(request.background),
                     guard,
                     density.scene.top(),
                     OrthoTransform::identity(),
                     None,
                     path,
                     record_scratch,
-                )?,
+                )?;
+            }
+        }
+        TilePass::Density(plane) => {
+            let layer = &styled.layers[plane];
+            if let Some(occ) = occ {
+                paint_occ_plane(band, request, occ, layer.layer_idx, density_is_top(styled, plane));
+            }
+            let paint = plane_paint(styled, plane);
+            if let Some(density) = density {
+                match density.bin {
+                    Some(bin) => replay_plane_items(
+                        density.scene,
+                        request,
+                        band,
+                        cull_view,
+                        stats,
+                        counters,
+                        guard,
+                        record_scratch,
+                        layer,
+                        plane,
+                        paint,
+                        &bin.planes[plane],
+                        Some(&density_minis[density.mini_side]),
+                    )?,
+                    None => render_cell(
+                        density.scene,
+                        request,
+                        band,
+                        cull_view,
+                        stats,
+                        counters,
+                        GeometrySelection::Layer(layer.layer_idx),
+                        SubtreePrune::Layer(density.scene.layer_mask_bit(layer.layer_idx)),
+                        paint,
+                        guard,
+                        density.scene.top(),
+                        OrthoTransform::identity(),
+                        None,
+                        path,
+                        record_scratch,
+                    )?,
+                }
             }
         }
         TilePass::Frames(frame_band) => match bin {
@@ -4211,6 +4216,141 @@ fn raster_tile_pass(
     }
     end_density_pass(work, styled, pass);
     Ok(())
+}
+
+/// The occupancy density's cell of each column and row of a tile (the pixel
+/// centres', crate::occ::OccDensity::cell_of).
+fn occ_axes(band: &RasterBand, request: &GeometryRasterRequest, occ: &crate::occ::OccDensity) -> (Vec<i64>, Vec<i64>) {
+    let view = request.view;
+    let sx = (view.x1 - view.x0) / f64::from(request.width);
+    let sy = (view.y1 - view.y0) / f64::from(request.height);
+    let cols = (band.col0..band.col1).map(|c| occ.cell_of(view.x0 + (f64::from(c) + 0.5) * sx, true)).collect();
+    let rows = (band.row0..band.row1).map(|r| occ.cell_of(view.y1 - (f64::from(r) + 0.5) * sy, false)).collect();
+    (cols, rows)
+}
+
+/// A top plane's density from the occupancy density (crate::occ): each pixel
+/// the plane may take, at its cell's cover, as a summary item - lit by the
+/// pattern's rank, claiming only what it lights.
+fn paint_occ_plane(band: &mut RasterBand, request: &GeometryRasterRequest, occ: &crate::occ::OccDensity, layer_idx: u32, top: bool) {
+    let Some(layer) = occ.layer(layer_idx) else { return };
+    let (cols, rows) = occ_axes(band, request, occ);
+    let (Some(&i0), Some(&i1), Some(&j0), Some(&j1)) = (cols.iter().min(), cols.iter().max(), rows.iter().min(), rows.iter().max()) else {
+        return;
+    };
+    if !layer.any_in(i0, i1, j0, j1) {
+        return;
+    }
+    let width = cols.len();
+    let Some(words) = band.stack.as_ref().map(|stack| stack.words) else { return };
+    if let Some(stack) = band.stack.as_mut() {
+        stack.bright_ready();
+    }
+    let mut cand = vec![0u64; words];
+    let (mut lo, mut hi) = (usize::MAX, 0usize);
+    for (r, &j) in rows.iter().enumerate() {
+        if j < 0 || j >= i64::from(occ.h) {
+            continue;
+        }
+        for (w, word) in cand.iter_mut().enumerate() {
+            *word = band.density_candidate_word(top, r * words + w);
+        }
+        let Some(stack) = band.stack.as_mut() else { return };
+        for (w, &word) in cand.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let c = w * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if c >= width {
+                    break;
+                }
+                let i = cols[c];
+                if i < 0 {
+                    continue;
+                }
+                let cover = layer.cover(i as u32, j as u32);
+                if cover > 0.0 {
+                    stack.bright_add_source(r * width + c, cover, DensitySource::Summary { singleton: false });
+                    lo = lo.min(r);
+                    hi = hi.max(r + 1);
+                }
+            }
+        }
+    }
+    if lo < hi {
+        if let Some(stack) = band.stack.as_mut() {
+            stack.touch(Some((lo, hi)));
+        }
+    }
+}
+
+/// The lower planes' density from the occupancy density, in one walk of the
+/// tile's open pixels: the highest lower plane whose layer the pattern's rank
+/// lights at the pixel takes it (a summary item claims what it lights, so a
+/// lower one could not). The pattern display alone (renderd asks for no
+/// other).
+fn paint_occ_lower(band: &mut RasterBand, request: &GeometryRasterRequest, styled: &StyledGeometryRasterRequest, occ: &crate::occ::OccDensity) {
+    let Some((words, Some(pattern), gain)) = band.stack.as_ref().map(|stack| (stack.words, stack.pattern, stack.bright)) else {
+        return;
+    };
+    let (cols, rows) = occ_axes(band, request, occ);
+    let (Some(&i0), Some(&i1), Some(&j0), Some(&j1)) = (cols.iter().min(), cols.iter().max(), rows.iter().min(), rows.iter().max()) else {
+        return;
+    };
+    let lower = styled.layers.len().saturating_sub(density_top_count(styled));
+    // the lower planes that mark a cell of this tile, highest first
+    let present: Vec<(u16, &crate::occ::OccLayer)> = (0..lower)
+        .rev()
+        .filter_map(|plane| {
+            let layer = occ.layer(styled.layers[plane].layer_idx)?;
+            layer.any_in(i0, i1, j0, j1).then_some(((plane + 1) as u16, layer))
+        })
+        .collect();
+    if present.is_empty() {
+        return;
+    }
+    let width = cols.len();
+    let mut cand = vec![0u64; words];
+    let (mut lo, mut hi) = (usize::MAX, 0usize);
+    for (r, &j) in rows.iter().enumerate() {
+        if j < 0 || j >= i64::from(occ.h) {
+            continue;
+        }
+        for (w, word) in cand.iter_mut().enumerate() {
+            *word = band.density_candidate_word(false, r * words + w);
+        }
+        let Some(stack) = band.stack.as_mut() else { return };
+        for (w, &word) in cand.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let c = w * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if c >= width {
+                    break;
+                }
+                let i = cols[c];
+                if i < 0 {
+                    continue;
+                }
+                let at = r * width + c;
+                for &(plane, layer) in &present {
+                    let cover = layer.cover(i as u32, j as u32);
+                    if cover > 0.0 && pattern.selected(at, DensitySource::Summary { singleton: false }, cover, gain) {
+                        stack.lit_plane[at] = stack.lit_plane[at].max(plane);
+                        stack.foot_plane[at] = stack.foot_plane[at].max(plane);
+                        lo = lo.min(r);
+                        hi = hi.max(r + 1);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if lo < hi {
+        if let Some(stack) = band.stack.as_mut() {
+            stack.touch(Some((lo, hi)));
+        }
+    }
 }
 
 /// The paint of styled plane `plane`.
@@ -4324,6 +4464,7 @@ fn raster_tile(
                     styled,
                     bin,
                     None,
+                    None,
                     &mut work,
                     pass,
                     passes.len() - done,
@@ -4433,6 +4574,10 @@ pub struct LayerRasterSession {
 pub struct DensityScenes {
     pub top: Option<Arc<FrameScene>>,
     pub others: Option<Arc<FrameScene>>,
+    /// pass 2 from the occupancy density instead of scenes: every density
+    /// plane paints its layer from it (crate::occ; renderd's
+    /// FLOE_RUST_DENSITY_OCC=on)
+    pub occ: Option<Arc<crate::occ::OccDensity>>,
 }
 
 /// One side of pass 2: its scene and, for the top plane's side with the
@@ -4451,6 +4596,8 @@ struct DensitySide {
 struct DensityPlan {
     top: Option<DensitySide>,
     others: Option<DensitySide>,
+    /// DensityScenes::occ
+    occ: Option<Arc<crate::occ::OccDensity>>,
     start: usize,
 }
 
@@ -4974,6 +5121,7 @@ impl LayerRasterSession {
         let density = density.map(|_| DensityPlan {
             top: None,
             others: None,
+            occ: None,
             start: passes.iter().position(|pass| matches!(pass, TilePass::Density(_))).unwrap_or(passes.len()),
         });
         Ok(LayerRasterSession {
@@ -5199,12 +5347,17 @@ impl LayerRasterSession {
                                 (TilePass::DensityLower, Some(Some(plan))) => plan.side(false),
                                 _ => None,
                             };
+                            let occ = match (passes[at], plan.as_deref()) {
+                                (TilePass::Density(_) | TilePass::DensityLower, Some(Some(plan))) => plan.occ.as_deref(),
+                                _ => None,
+                            };
                             if let Err(error) = raster_tile_pass(
                                 scene,
                                 &request,
                                 styled,
                                 bin,
                                 density_pass,
+                                occ,
                                 &mut tile,
                                 passes[at],
                                 passes.len() - at,
@@ -5319,9 +5472,10 @@ impl LayerRasterSession {
                     // minis per tile, then the workers may read them
                     let collect_started = Instant::now();
                     let mut sides: [Option<DensitySide>; 2] = [None, None];
-                    let scenes = scenes.unwrap_or(DensityScenes { top: None, others: None });
+                    let DensityScenes { top: scene_top, others: scene_others, occ: scene_occ } =
+                        scenes.unwrap_or(DensityScenes { top: None, others: None, occ: None });
                     let collected: Result<(), String> = (|| {
-                    for (side, scene) in [scenes.top, scenes.others].into_iter().enumerate() {
+                    for (side, scene) in [scene_top, scene_others].into_iter().enumerate() {
                         if density_stages && side != 0 { continue; }
                         let Some(scene) = scene else {
                             continue;
@@ -5381,6 +5535,7 @@ impl LayerRasterSession {
                         if let Some(plan) = slot.as_mut() {
                             plan.top = top;
                             plan.others = others;
+                            plan.occ = scene_occ;
                         }
                     }
                     stats.density_collect_us = stats.density_collect_us.saturating_add(elapsed_us_of(collect_started));
@@ -13105,7 +13260,7 @@ mod tests {
                     return Ok(None);
                 }
                 regions.push((demand.eligible_regions(true), demand.eligible_regions(false)));
-                Ok(Some(DensityScenes { top: Some(Arc::clone(density)), others: Some(Arc::clone(density)) }))
+                Ok(Some(DensityScenes { top: Some(Arc::clone(density)), others: Some(Arc::clone(density)), occ: None }))
             })
             .unwrap()
     }
@@ -13566,7 +13721,7 @@ mod tests {
                     if plane == 2 {
                         assert_eq!(count(&demand.snapshot()?, RED, 0..32, 0..32), 0);
                     }
-                    Ok((plane == 1).then(|| DensityScenes { top: Some(Arc::clone(&fine)), others: None }))
+                    Ok((plane == 1).then(|| DensityScenes { top: Some(Arc::clone(&fine)), others: None, occ: None }))
                 }).unwrap();
             assert_eq!(stages, [2, 1, 0]);
             assert_eq!(got.frame, expected, "tile {tile}, workers {workers}, bin {bin}");
@@ -13616,7 +13771,7 @@ mod tests {
                     }
                     // Intentionally give both layers: collection must select
                     // only this stage, including when it is a lower plane.
-                    Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: None }))
+                    Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: None, occ: None }))
                 }).unwrap();
             assert_eq!(stages, [2, 1]);
             assert_eq!(got.frame, expected, "tile {tile}, workers {workers}, bin {bin}");
@@ -13697,7 +13852,7 @@ mod tests {
                 if plane == 1 {
                     cancellation.cancel_before(2);
                 }
-                Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: None }))
+                Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: None, occ: None }))
             });
             assert_eq!(stages, [2, 1]);
             result
@@ -14289,7 +14444,7 @@ mod tests {
                     // a newer generation, between the plan and the collection
                     cancellation.cancel_before(2);
                 }
-                Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: Some(Arc::clone(&fine)) }))
+                Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: Some(Arc::clone(&fine)), occ: None }))
             })
         });
         let started = Instant::now();

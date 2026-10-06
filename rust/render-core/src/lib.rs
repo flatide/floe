@@ -16,6 +16,7 @@ mod page_index;
 mod png;
 mod query;
 mod layer_decode;
+pub mod occ;
 mod raster;
 mod repetition;
 mod request;

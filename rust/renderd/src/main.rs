@@ -1231,7 +1231,7 @@ struct FramePixels {
     /// the nodes that counted what their placements hold (HierOpts::
     /// dot_node_sample, 2026-10-05); then whether the density draws an
     /// opaque pattern (1) instead of accumulated brightness (0)
-    density_plan2: Option<[u64; 44]>,
+    density_plan2: Option<[u64; 46]>,
 }
 
 fn render_worker(
@@ -2580,6 +2580,45 @@ fn density_stages(styled: &StyledGeometryRasterRequest) -> bool {
         && std::env::var("FLOE_RUST_DENSITY_STAGES").as_deref() == Ok("on")
 }
 
+/// Pass 2 from the occupancy density (design.ovo + design.ovs,
+/// floe_render_core::occ; 2026-10-06): FLOE_RUST_DENSITY_OCC=on, off by
+/// default - no plan, no walk: each layer present where design.ovo's cell
+/// bit is set, at design.ovs's mean cover of its group. The synthetic MAIN01
+/// 1/10 at full depth: pass 2's plan 167-733 ms to none, frames 25-53 %
+/// sooner, about 80 % of the walk's dots; the field's full-depth view walked
+/// 25 M nodes in 20 s. A view the file cannot serve (a root, a cell past
+/// FLOE_RUST_DENSITY_OCC_PX pixels, layers past FLOE_RUST_DENSITY_OCC_MB, no
+/// design.ovs) plans as before.
+fn density_occ_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_OCC").as_deref() == Ok("on"))
+}
+
+/// The largest occupancy cell, in screen pixels, the occupancy density is
+/// drawn with: FLOE_RUST_DENSITY_OCC_PX (default 2; a dot in a coarser cell
+/// would show the cells as blocks); a closer view plans as before.
+fn density_occ_max_px() -> f64 {
+    std::env::var("FLOE_RUST_DENSITY_OCC_PX")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(2.0)
+}
+
+/// What the occupancy density's layers of one frame may hold, bytes:
+/// FLOE_RUST_DENSITY_OCC_MB (default 256) - each visible layer's cell bits
+/// and group means over the whole chip at the level drawn (a 20 mm chip at
+/// 16 um cells: about 0.2 MB a layer); past it a coarser level, else the
+/// plans.
+fn density_occ_cap_bytes() -> u64 {
+    let mb = std::env::var("FLOE_RUST_DENSITY_OCC_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(256.0);
+    (mb * 1048576.0) as u64
+}
+
 fn density_mask_enabled(styled: &StyledGeometryRasterRequest) -> bool {
     styled.raster.density_pattern && styled.raster.density_shapes_first
         && std::env::var("FLOE_RUST_DENSITY_MASK").as_deref() != Ok("off")
@@ -3847,7 +3886,7 @@ fn run_render_attempt(
         let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 44]> = None;
+        let mut density_plan2: Option<[u64; 46]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4673,7 +4712,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 44]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 46]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4714,7 +4753,7 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 44];
+    let mut plan2 = [0u64; 46];
     plan2[22] = reserve_bytes >> 20;
     // the dots' gain past the fit view, in thousandths (density_zoom_gain)
     plan2[31] = (dot_gain * 1000.0).round() as u64;
@@ -4768,6 +4807,25 @@ fn render_density_frame(
                     // its plans end at their next look, its decode is pooled
                     // under the guard, its passes check per tile
                     check_generation(cancellation, command.generation)?;
+                    // the occupancy density (FLOE_RUST_DENSITY_OCC=on):
+                    // design.ovo's bits and design.ovs's mean cover stand for
+                    // the plans - every density plane paints its layer from
+                    // them, no walk and no decode (floe_render_core::occ)
+                    if density_occ_enabled() && styled.raster.density_pattern && staged_plane.is_none() && command.root.is_none() {
+                        let occ_started = Instant::now();
+                        let px_dbu = ((command.view[2] - command.view[0]) / f64::from(command.width))
+                            .max((command.view[3] - command.view[1]) / f64::from(command.height));
+                        let ids: Vec<u32> = styled.layers.iter().map(|layer| layer.layer_idx).collect();
+                        let depth = (command.depth < FULL_DEPTH).then_some(command.depth);
+                        if let Some(occ) = cache.occ_density(&ids, px_dbu, density_occ_max_px(), density_occ_cap_bytes(), depth) {
+                            let built = elapsed_us(occ_started);
+                            times[0] += built;
+                            plan2[1] += built;
+                            plan2[44] = occ.layers_present() as u64;
+                            plan2[45] = (occ.cell_um * 1000.0).round() as u64;
+                            return Ok(Some(floe_render_core::DensityScenes { top: None, others: None, occ: Some(occ) }));
+                        }
+                    }
                     let regions_started = Instant::now();
                     let density_mask = if density_mask_enabled(styled) {
                         Some(demand.density_mask(true)?)
@@ -5269,7 +5327,7 @@ fn render_density_frame(
                     }
                     times[1] += elapsed_us(scene_started);
                     let [top, others] = sides;
-                    Ok(Some(floe_render_core::DensityScenes { top, others }))
+                    Ok(Some(floe_render_core::DensityScenes { top, others, occ: None }))
                 },
             )
         },

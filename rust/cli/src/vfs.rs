@@ -2184,6 +2184,74 @@ fn write_hier(ovm: &floe_ovm::Ovm, outdir: &str) {
     }
 }
 
+/// `floe-index ovs <cache>` (floe_vfs::occ_density, 2026-10-06): add (or
+/// rebuild) design.ovs - the mean cover under the cut of design.ovo's cell
+/// groups, what the density stack's pass 2 draws by with
+/// FLOE_RUST_DENSITY_OCC=on - from the cache's index (design.ovm, design.ovb,
+/// design.ovh, design.ovp) and its design.ovo. The cache's other files are
+/// untouched; a cache without design.ovo is refused (`floe2 index
+/// --occupancy-only` adds one).
+pub fn ovs_cmd(args: &[String]) {
+    let mut dir: Option<String> = None;
+    for a in args {
+        if a.starts_with("--") {
+            crate::unknown_option("ovs", a);
+        }
+        dir = Some(a.to_string());
+    }
+    let dir = dir.unwrap_or_else(|| {
+        eprintln!("usage: floe-index ovs <cache>");
+        std::process::exit(2);
+    });
+    let fail = |what: &str, e: String| -> ! {
+        eprintln!("ovs: {}: {}", what, e);
+        std::process::exit(1);
+    };
+    let started = std::time::Instant::now();
+    let mut ovm = floe_ovm::Ovm::open(&format!("{}/design.ovm", dir)).unwrap_or_else(|e| fail("design.ovm", e));
+    match ovm.attach_page_occ(&format!("{}/design.ovb", dir)) {
+        Ok(true) => {}
+        Ok(false) => fail("design.ovb", "missing (an index built without the pages' occupancy: index again)".into()),
+        Err(e) => fail("design.ovb", e),
+    }
+    let summary = floe_vfs::hiersum::HierSummary::open(&format!("{}/design.ovh", dir))
+        .and_then(|s| s.validate_against(&ovm).map(|()| s))
+        .unwrap_or_else(|e| fail("design.ovh", format!("{} (floe-index hier adds it)", e)));
+    let ovo = floe_vfs::occupancy::OvoFile::open(&format!("{}/design.ovo", dir))
+        .unwrap_or_else(|e| fail("design.ovo", format!("{} (floe2 index --occupancy-only adds it)", e)));
+    let cover = floe_vfs::cover::CellCover::new(&ovm, std::sync::Arc::new(summary))
+        .unwrap_or_else(|| fail("cell cover", "no design.ovb or another summary".into()));
+    let opened = started.elapsed().as_secs_f64();
+    let ovp = format!("{}/design.ovp", dir);
+    let (bytes, stats) = floe_vfs::occ_density::build(&ovm, &ovo, &cover, Some(&ovp)).unwrap_or_else(|e| fail("build", e));
+    // tmp + rename: a viewer reading the old file meanwhile keeps it whole
+    let path = format!("{}/design.ovs", dir);
+    let tmp = format!("{}.tmp", path);
+    std::fs::write(&tmp, &bytes).unwrap_or_else(|e| fail(&tmp, e.to_string()));
+    std::fs::rename(&tmp, &path).unwrap_or_else(|e| fail(&path, e.to_string()));
+    println!(
+        "ovs file={} bytes={} base_um={} levels={} walked={} small={} spread={} pages={} big_pages={} decoded={} decoded_mb={:.1} decode_s={:.2} grids={} grid_mb={:.1} plane_levels={} empty={} open_s={:.2} total_s={:.2}",
+        path,
+        bytes.len(),
+        ovo.base_um(),
+        ovo.n_levels,
+        stats.walked,
+        stats.small,
+        stats.spread,
+        stats.pages,
+        stats.big_pages,
+        stats.decoded,
+        stats.decoded_bytes as f64 / 1e6,
+        stats.decode_s,
+        stats.grids,
+        stats.grid_bytes as f64 / 1e6,
+        stats.levels,
+        stats.empty_levels,
+        opened,
+        started.elapsed().as_secs_f64()
+    );
+}
+
 /// `floe-index hier <cache> [--check]`: add (or rebuild) design.ovh on an
 /// existing cache; --check reports the file's identity against the cache
 /// instead. The cache's other files are untouched.

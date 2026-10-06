@@ -156,6 +156,26 @@ sh tools/validate_rust.sh --only quick path/to.oas
     이전 39/40개 응답은 생략된 필드를 0으로 읽는다.
     상태줄은 백엔드 값으로 `pattern, cover x2` 또는 `bright x2`를 표시한다.
     아래의 기존 밝기·면적 보존 검사는 패턴 스위치를 끈 대조군으로 유지한다.
+- 점유 밀도로 그리는 2패스(0.12.308, `FLOE_RUST_DENSITY_OCC=on`, 기본 끔, `CUT_DENSITY_DESIGN` §10.16):
+  - `density_stack`의 `occ_density_checks`:
+    - 픽스처: 1/0 DOT 셀(0.5 µm 정사각형)을 3 µm 간격 66×33 배열로 둔다. TOP 자신의 3/0에는 80 µm 상자와
+      그 옆 0.4 µm 정사각형 26×26(3 µm 간격)을 둔다. 컷을 넘는 도형과 컷 아래 도형이 한 페이지에 있다.
+      간격이 2 µm이면 1 µm/px에서 모든 멤버가 점 체커의 같은 반대 자리에 놓여 walk·점유 모두 0이 된다.
+    - `--occupancy-um 1`로 색인하고 `floe-index ovs`로 design.ovs를 만든다. 큰 페이지 1개를 디코드한다.
+      design.ovo가 없는 캐시는 exit 1로 거절하고 design.ovs를 만들지 않는다.
+    - 400×200 px, 1 µm/px, full depth(셀 1 px): `density_plan2`가 `occ_layers` 2, `occ_cell_nm` 1000,
+      regions 0, nodes 0이다. 1/0 점은 배열 범위 안 1/0 색으로만, 3/0 점은 정사각형 범위 안 3/0 색으로만
+      켜진다. 그 밖에는 1패스 상자만 있다. 점 수는 DOT 556 px(walk 471), 정사각형 115 px(walk 169)이다.
+      타일 64/워커 1과 타일 127/워커 4가 바이트 동일하다.
+    - depth 0: TOP 자신의 정사각형만 같은 수로 남고 한 단계 아래 DOT은 없다(`occ_layers` 1).
+    - 0.25 µm/px(셀 4 px > `FLOE_RUST_DENSITY_OCC_PX` 2), `FLOE_RUST_DENSITY_OCC_MB=0.0001`,
+      design.ovs가 없는 캐시는 계획 경로로 그리며, 스위치를 끈 프레임과 바이트 동일하다.
+  - 단위: vfs `occ_density::tests` 3개(크기 등급 `class_of`, 멤버 순회/4,096 초과 퍼뜨리기, 파일 쓰기·읽기와
+    magic·버전·잘림 거절). render-core `occ::tests` 3개(요청 depth의 평면 OR과 점유 셀 수 가중 평균,
+    평균이 모두 0인 레이어는 None, 레벨 선택: 1 px 이하 가장 거친 레벨, 상한 초과 시 2 px까지 더 거친 레벨).
+  - `rust_renderer`: `density_plan2` 46개 값(…/stages/occ_layers/occ_cell_nm). 이전 39/40/44개 응답은
+    새 필드를 0으로 읽고 45개는 거절한다. 상태줄과 로그 줄은 계획 내역 대신
+    `pass 2 by occupancy 12 ms (16 um cells, 449 layers)`를 표시한다.
 - `density_stack`(tools/validate_density_stack.py, 약 10초; `render` 별칭에 포함): 밀도 스택 진단
   (0.12.226, `FLOE_RUST_DENSITY_STACK=top`, CUT_DENSITY_DESIGN §10.10 — 컷 아래 도형을 2패스로 빈 공간에).
   klayout.db로 만든 0.1 µm/px 400×200 레이아웃(1/0: 뷰 전체의 0.15 µm(1.5 px) 사각형 격자와 오른쪽 위 사분면의

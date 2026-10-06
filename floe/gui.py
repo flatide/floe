@@ -710,6 +710,16 @@ def fmt_count(n):
     return str(int(n))
 
 
+def occ_note(res):
+    """Pass 2 drawn from the occupancy density (FLOE_RUST_DENSITY_OCC=on,
+    design.ovs; 2026-10-06): its cell and the layers it held, as the status
+    line says them; "" when the plans drew it."""
+    p2 = res.get("density_plan2") or {}
+    if not p2.get("occ_layers"):
+        return ""
+    return "%g um cells, %d layers" % (p2.get("occ_cell_nm", 0) / 1000.0, p2["occ_layers"])
+
+
 def perf_status(res, depth_note=""):
     """The perf line of a settled (or refining) frame: (full, brief). The
     full line goes to the terminal log and the lower bar's tooltip, every
@@ -1095,7 +1105,13 @@ def perf_status(res, depth_note=""):
             parts.append("gate %d/%d px" % (gate, round(block * block))
                          + (" (%s out)" % fmt_count(gated) if gated else ""))
         us = res.get("density_us") or {}
-        if us:
+        # pass 2 drawn from the occupancy density instead of the plans
+        # (FLOE_RUST_DENSITY_OCC=on, 2026-10-06): the time it took, its
+        # cell and layers in place of the plans' breakdown
+        occ = occ_note(res)
+        if us and occ:
+            parts.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ))
+        elif us:
             plan = "pass 2 plan %d ms" % round(
                 us.get("plan2_us", 0) / 1000)
             # where it went (diagnostic, 2026-10-01): the
@@ -1181,7 +1197,9 @@ def perf_status(res, depth_note=""):
         # the regions stay in the log line
         brief = [] if res.get("density_dots") is not None else ["top + empty"]
         brief.append(lit)
-        if us:
+        if us and occ:
+            brief.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ))
+        elif us:
             plan = "pass 2 plan %d ms" % round(us.get("plan2_us", 0) / 1000)
             if p2:
                 inner = []

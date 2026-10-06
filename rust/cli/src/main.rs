@@ -109,6 +109,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "hier" {
         return vfs::hier_cmd(&args[2..]);
     }
+    if args.len() >= 3 && args[1] == "ovs" {
+        return vfs::ovs_cmd(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "vfsd" {
         return vfs::vfsd_cmd(&args[2..]);
     }
@@ -143,6 +146,7 @@ fn main() {
              [--dump]\n       \
              floe-index bvh <outdir> --cell NAME  (TSV dump of a cell's child BVH: nodes and leaf placements)\n       \
              floe-index hier <outdir> [--check]  (add design.ovh, the cell tree's index, to a cache; --check = report it)\n       \
+             floe-index ovs <outdir>  (add design.ovs, the occupancy density FLOE_RUST_DENSITY_OCC=on draws by; needs design.ovo)\n       \
              floe-index drc <results.db> [out.tray] \
              [--pack] [--jobs N]\n       \
              floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]... [-I DIR]... \

@@ -488,6 +488,8 @@ pub struct Cache {
     /// mtime changes (a rename publish from --occupancy-only while the
     /// viewer is up; docs/OCCUPANCY_PLAN.ko.md §4)
     occupancy: std::sync::Mutex<OccupancySlot>,
+    /// design.ovs for the density stack's pass 2 (crate::occ, opt-in)
+    occ_density: std::sync::Mutex<OccDensitySlot>,
     /// per layer index: the longest top-to-cell path (in placement
     /// levels) of any cell holding the layer's own pages - a request
     /// depth at or above it draws every shape of the layer, so the
@@ -661,6 +663,15 @@ struct OccupancySlot {
     planes: crate::summary::PlaneCache,
 }
 
+/// design.ovs (the occupancy density, crate::occ): opened once, and the
+/// layers it made per (layer, level, depth key) - one level and depth's
+#[derive(Default)]
+struct OccDensitySlot {
+    tried: bool,
+    file: Option<std::sync::Arc<floe_vfs::occ_density::OvsFile>>,
+    layers: std::collections::HashMap<(u32, u32, u32), Option<std::sync::Arc<crate::occ::OccLayer>>>,
+}
+
 impl Cache {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
@@ -674,6 +685,7 @@ impl Cache {
             dir: dir.to_string(),
             hier,
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
+            occ_density: std::sync::Mutex::new(OccDensitySlot::default()),
             layer_depth: std::sync::OnceLock::new(),
             held_layers: std::sync::Mutex::new(std::collections::HashMap::new()),
             representatives: std::sync::OnceLock::new(),
@@ -766,6 +778,74 @@ impl Cache {
     /// not pay for them; tests read this).
     pub fn layer_depths_computed(&self) -> bool {
         self.layer_depth.get().is_some()
+    }
+
+    /// The density stack's pass 2 from the occupancy density (crate::occ,
+    /// opt-in): of each of `layer_ids`, the planes `depth` draws (None: all)
+    /// with design.ovs's mean cover, at design.ovo's level for a pixel of
+    /// `px_dbu` (crate::occ::choose_level: its cell at most `max_cell_px`
+    /// pixels, its layers' grids within `cap_bytes`). The layers made are
+    /// kept for the next frame at that level and depth, those of others
+    /// let go. None without both files (design.ovs is looked for once per
+    /// open cache), or where no level will do.
+    pub fn occ_density(
+        &self,
+        layer_ids: &[u32],
+        px_dbu: f64,
+        max_cell_px: f64,
+        cap_bytes: u64,
+        depth: Option<u32>,
+    ) -> Option<std::sync::Arc<crate::occ::OccDensity>> {
+        let (ovo, _, _) = self.occupancy_file();
+        let ovo = ovo?;
+        let mut slot = match self.occ_density.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !slot.tried {
+            slot.tried = true;
+            let path = format!("{}/design.ovs", self.dir);
+            match floe_vfs::occ_density::OvsFile::open(&path).and_then(|f| f.validate_against(&ovo).map(|()| f)) {
+                Ok(file) => slot.file = Some(std::sync::Arc::new(file)),
+                Err(e) => eprintln!("[render-core] occupancy density {}: none ({})", path, e),
+            }
+        }
+        let ovs = slot.file.clone()?;
+        // each level's grid (every plane's alike), and what the layers asked
+        // for would hold there at most: their bits and their groups' means
+        let dims = |lv: u32| ovo.layers.iter().enumerate().find_map(|(k, _)| ovo.plane_level(k, 0, lv as usize).map(|(w, h, _)| (w, h)));
+        let bytes_at = |lv: u32| {
+            dims(lv).map_or(u64::MAX, |(w, h)| {
+                let (w, h) = (u64::from(w), u64::from(h));
+                layer_ids.len() as u64 * (w.div_ceil(8) * h + w.div_ceil(8) * h.div_ceil(8))
+            })
+        };
+        let level = crate::occ::choose_level(ovo.cell_dbu, ovo.n_levels, px_dbu, max_cell_px, bytes_at, cap_bytes)?;
+        let (w, h) = dims(level)?;
+        let depth_key = depth.map_or(u32::MAX, |d| d.min(floe_vfs::occupancy::DEPTH_CAP as u32));
+        slot.layers.retain(|&(_, lv, d), _| lv == level && d == depth_key);
+        let mut layers: Vec<Option<std::sync::Arc<crate::occ::OccLayer>>> = vec![None; ovo.layers.len()];
+        for &id in layer_ids {
+            if id as usize >= layers.len() {
+                continue;
+            }
+            let made = slot
+                .layers
+                .entry((id, level, depth_key))
+                .or_insert_with(|| crate::occ::combine(&ovo, &ovs, id as usize, level as usize, depth))
+                .clone();
+            layers[id as usize] = made;
+        }
+        Some(std::sync::Arc::new(crate::occ::OccDensity {
+            level,
+            cell: ovo.cell_dbu << level,
+            x0: ovo.bbox.0,
+            y0: ovo.bbox.1,
+            w,
+            h,
+            layers,
+            cell_um: ovo.base_um() * f64::from(1u32 << level.min(31)),
+        }))
     }
 
     /// The cache's design.ovo if present and valid for THIS cache

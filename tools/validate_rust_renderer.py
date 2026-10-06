@@ -798,6 +798,15 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         quick_full, quick_brief = perf_status(dict(res, fit_probe_ms=28.0))
         self.assertNotIn("fit probe", quick_brief)
         self.assertIn(", fit probe 28.0ms,", quick_full)
+        # pass 2 drawn from the occupancy density (FLOE_RUST_DENSITY_OCC=on,
+        # 2026-10-06): its time, cell and layers in place of the plans'
+        # breakdown, in the bar and the log line
+        occ_res = dict(res, density_plan2=dict(res["density_plan2"], occ_layers=449, occ_cell_nm=16000),
+                       density_us=dict(res["density_us"], plan2_us=12000))
+        occ_full, occ_brief = perf_status(occ_res)
+        self.assertIn("density: lit 620k px, pass 2 by occupancy 12 ms (16 um cells, 449 layers), 206 pages decoded", occ_brief)
+        self.assertIn(", pass 2 by occupancy 12 ms (16 um cells, 449 layers), 206 pages,", occ_full)
+        self.assertNotIn("pass 2 plan", occ_full + occ_brief)
         # no hierarchy summary to go by: the probe walked every cell
         self.assertIn(", fit probe 28.0ms (walk),", perf_status(dict(res, fit_probe_ms=28.0, fit_probe_walk=True))[0])
         self.assertNotIn("fit probe", full)
@@ -1910,7 +1919,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             worker._handle_line("styled", {"epoch": "1"}, "")
             self.assertFalse(os.path.exists(style_path))
 
-    def test_density_plan2_accepts_the_optional_pattern_field(self):
+    def test_density_plan2_accepts_the_optional_fields(self):
         legacy = "/".join(str(i) for i in range(39))
         expected = dict(zip(DENSITY_PLAN2[:39], range(39)))
         expected.update(dict.fromkeys(DENSITY_PLAN2[40:], 0))
@@ -1919,7 +1928,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertEqual(_density_plan2(legacy + "/0"), dict(expected, pattern=0))
         self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9"),
                          dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9))
-        for malformed in ("-", "", "1/2", legacy + "/bad", legacy + "/1/2"):
+        # the occupancy density's layers and cell, nm (2026-10-06)
+        self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9/449/16000"),
+                         dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9,
+                              occ_layers=449, occ_cell_nm=16000))
+        for malformed in ("-", "", "1/2", legacy + "/bad", legacy + "/1/2", legacy + "/1/300/200/4/9/449"):
             self.assertIsNone(_density_plan2(malformed), malformed)
 
     def test_render_command_and_frame_result_match_parent_schema(self):
@@ -2157,7 +2170,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "free_top": 40000, "free_others": 7000, "dot_gain_milli": 640, "dot_gated": 1200, "dot_gate_min": 2,
                 "bright_milli": 2000, "stood_in": 9,
                 "cell_cover": 1, "cover_cells": 1500, "node_sampled": 800, "pattern": 0,
-                "mask_tests": 0, "mask_pruned": 0, "mask_fallbacks": 0, "stages": 0})
+                "mask_tests": 0, "mask_pruned": 0, "mask_fallbacks": 0, "stages": 0,
+                # an older reply: the occupancy density's fields read as 0
+                "occ_layers": 0, "occ_cell_nm": 0})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
