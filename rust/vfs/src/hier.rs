@@ -14,6 +14,7 @@
 //! pts chunk-coarse, i128 saturation) only ever ADDS members.
 
 use crate::{xf_bbox, ViewReq};
+pub use crate::density_mask::{DensityLayerMemo, DensityMask};
 use floe_oasis::doc::Rep;
 use floe_ovm::{bit_test, masks_intersect, BBox, Ovm, PBVH_NONE};
 use floe_tiler::Xf;
@@ -1178,6 +1179,10 @@ pub struct HierOpts {
     /// density stack's pass 2 plans the space the originals left). `k_boxes`
     /// should hold them all.
     pub regions: Vec<BBox>,
+    /// Exact density demand, independent of the conservative region boxes.
+    pub density_mask: Option<Arc<DensityMask>>,
+    /// Bounded frame-shared unions for unknown child-BVH layer masks.
+    pub density_layers: Option<Arc<DensityLayerMemo>>,
     /// localview boxes kept per WsKey before least-waste merging
     pub k_boxes: usize,
     /// pts reps at or below this emit a full (rebased) rep - above
@@ -1634,6 +1639,8 @@ impl Default for HierOpts {
         HierOpts {
             fixed_fit: None,
             regions: Vec::new(),
+            density_mask: None,
+            density_layers: None,
             k_boxes: 4,
             pts_full_rep: 8192,
             pts_enum_budget: 200_000,
@@ -1840,6 +1847,11 @@ pub struct HierStats {
     /// HierOpts::cell_cover in force, and the cells whose cover the plan
     /// worked out; HierOpts::dot_node_sample: the nodes that counted what
     /// their placements hold where their box was counted
+    /// Summary-only nodes/chunks/pages skipped by exact demand.
+    pub dot_mask_tests: u64,
+    pub dot_mask_pruned: u64,
+    /// Instance context or budget limits requiring conservative fallback.
+    pub dot_mask_fallbacks: u64,
     pub dot_cover_on: bool,
     pub dot_cover_cells: u64,
     pub dot_node_sampled: u64,
@@ -3112,6 +3124,15 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         sums: opts.dot_bright.is_some() && opts.dot_bright_sums,
         cover: if dots.is_some() && opts.dot_bright.is_some() { opts.cell_cover.clone() } else { None },
         cover_memo: Vec::new(),
+        mask_contexts: HashMap::new(),
+        mask_skipped_boxes: 0,
+        mask_cell_skipped_boxes: 0,
+        mask_cell_box_limit: u64::MAX,
+        mask_skipped_reads: 0,
+        layer_pruned: false,
+        mask_cell_list_full: false,
+        mask_full_conflict: false,
+        mask_seen: FxSet::default(),
         cover_limited: FxMap::default(),
         node_sample: dots.is_some() && opts.dot_bright.is_some() && opts.dot_node_sample,
         // (the parts keep their fractions by HierOpts::dot_bright_sums' dither)
@@ -3229,7 +3250,8 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
         top_ci,
         if req.depth == u32::MAX { REM_FULL } else { req.depth },
     );
-    if v.n_cells > 0 {
+    if opts.density_mask.is_some() { h.mask_contexts.insert((top_ci, r0), Some(vec![(0, 0, 0, false)])); }
+    if v.n_cells > 0 && !opts.density_mask.as_ref().is_some_and(|mask| dots.is_some() && mask.is_empty()) {
         let tc = v.cell(top_ci);
         let w = (tc.rbbox.x1 - tc.rbbox.x0).max(0) as u64;
         let hh = (tc.rbbox.y1 - tc.rbbox.y0).max(0) as u64;
@@ -3278,6 +3300,38 @@ fn plan_hier_pass(v: &Ovm, req: &ViewReq, opts: &HierOpts, page_level: u32, fit_
             h.st.fit_over = true;
             break;
         }
+    }
+    // A list's full-block shortcut consults saturation of all its blocks.
+    // Removing dead blocks can stop that shortcut and enlarge a live union.
+    // Until saturation has its own immutable proof, retain baseline output
+    // whenever mask pruning and this shortcut meet in one working cell.
+    if h.mask_full_conflict && !h.cancelled {
+        let mut unmasked = opts.clone();
+        unmasked.density_mask = None;
+        let mask_tests = h.st.dot_mask_tests;
+        // Release the discarded working set before constructing its replacement.
+        drop(h);
+        let mut plan = plan_hier_pass(v, req, &unmasked, page_level, fit_limit);
+        plan.stats.dot_mask_tests += mask_tests;
+        plan.stats.dot_mask_fallbacks += 1;
+        return plan;
+    }
+    // Skipped work must not free a cap and change later visible output.
+    // If its conservative upper bound could exhaust a cap, plan normally.
+    if (h.st.dot_mask_pruned > 0 || h.layer_pruned) && !h.cancelled &&
+        (h.st.sub_cut_boxes.saturating_add(h.mask_skipped_boxes) >= opts.sub_cut_box_max ||
+         h.st.sub_cut_box_reads.saturating_add(h.mask_skipped_reads) >= opts.sub_cut_box_reads)
+    {
+        let mut unmasked = opts.clone();
+        unmasked.density_mask = None;
+        unmasked.density_layers = None;
+        let mask_tests = h.st.dot_mask_tests;
+        // Release the discarded working set before constructing its replacement.
+        drop(h);
+        let mut plan = plan_hier_pass(v, req, &unmasked, page_level, fit_limit);
+        plan.stats.dot_mask_tests += mask_tests;
+        plan.stats.dot_mask_fallbacks += 1;
+        return plan;
     }
     let mut st = h.st;
     st.rep_page_level = page_level;
@@ -3518,6 +3572,16 @@ struct Hier<'a> {
     /// so far: at full depth by cell (NaN: not yet), else by cell and levels
     cover: Option<Arc<crate::cover::CellCover>>,
     cover_memo: Vec<f64>,
+    // All local-to-view instances of a working cell; None means unknown.
+    mask_contexts: HashMap<WsKey, Option<Vec<(i64, i64, u8, bool)>>>,
+    mask_skipped_boxes: u64,
+    mask_cell_skipped_boxes: u64,
+    mask_cell_box_limit: u64,
+    mask_skipped_reads: u64,
+    layer_pruned: bool,
+    mask_cell_list_full: bool,
+    mask_full_conflict: bool,
+    mask_seen: FxSet<u64>,
     cover_limited: FxMap<(u32, u32), f64>,
     /// HierOpts::dot_node_sample under it
     node_sample: bool,
@@ -3708,6 +3772,110 @@ impl<'a> Hier<'a> {
         }
     }
 
+    /// Query whole destination blocks, never individual members: a covered
+    /// member can change the count and union of a live aggregate.
+    fn mask_blocks_empty(&mut self, footprint: BBox, source: u64, node: Option<u32>) -> bool {
+        if !self.dots || !self.bright || !self.boxm || self.sub_cut_wash || self.reps || self.explain_owner.1 != REM_FULL { return false; }
+        let Some(mask) = self.opts.density_mask.as_ref() else { return false; };
+        if source != u64::MAX && self.mask_seen.contains(&source) { return true; }
+        let Some(Some(contexts)) = self.mask_contexts.get(&self.explain_owner) else { return false; };
+        let block = self.block_px / self.px_per_dbu;
+        if !(block > 0.0 && block.is_finite()) || footprint.is_empty() { return false; }
+        let coords = [footprint.x0, footprint.y0, footprint.x1, footprint.y1];
+        if coords.iter().any(|v| v.unsigned_abs() > (1u64 << 48)) { return false; }
+        let bx0 = (footprint.x0 as f64 / block).floor();
+        let by0 = (footprint.y0 as f64 / block).floor();
+        let bx1 = (footprint.x1 as f64 / block).floor() + 1.0;
+        let by1 = (footprint.y1 as f64 / block).floor() + 1.0;
+        // flush_dots rounds block-clipped support outwards in integer DBU.
+        // One extra DBU covers floating point block-boundary error too.
+        let local = [bx0.mul_add(block, -1.0).floor(), by0.mul_add(block, -1.0).floor(),
+                     bx1.mul_add(block, 1.0).ceil(), by1.mul_add(block, 1.0).ceil()];
+        if !local.iter().all(|v| v.is_finite() && v.abs() < (1u64 << 48) as f64) { return false; }
+        self.st.dot_mask_tests += 1;
+        for &(tx, ty, rot, flip) in contexts {
+            if tx.unsigned_abs() > (1u64 << 48) || ty.unsigned_abs() > (1u64 << 48) { return false; }
+            let xf = Xf::place(tx, ty, rot, flip);
+            let support = xf_bbox(&xf, &BBox { x0: local[0] as i64, y0: local[1] as i64, x1: local[2] as i64, y1: local[3] as i64 });
+            if mask.world_box_has_open([support.x0 as f64, support.y0 as f64, support.x1 as f64, support.y1 as f64]) { return false; }
+        }
+        if source != u64::MAX { self.mask_seen.insert(source); }
+        self.st.dot_mask_pruned += 1;
+        let blocks = ((bx1 - bx0 + 2.0) * (by1 - by0 + 2.0)).ceil().min(u64::MAX as f64) as u64;
+        let previous = self.mask_cell_skipped_boxes.min(self.mask_cell_box_limit);
+        self.mask_cell_skipped_boxes = self.mask_cell_skipped_boxes.saturating_add(blocks.saturating_mul(self.vis_layers.len() as u64));
+        self.mask_skipped_boxes = self.mask_skipped_boxes.saturating_add(self.mask_cell_skipped_boxes.min(self.mask_cell_box_limit) - previous);
+        if let Some(ni) = node {
+            let (lo, hi) = self.cbvh_places(ni);
+            self.mask_skipped_reads = self.mask_skipped_reads.saturating_add(u64::from(hi.saturating_sub(lo)).saturating_mul(2));
+        }
+        true
+    }
+
+    /// Closed-form arrays count blocks independently. Reject a blocked
+    /// destination before doing its member-range/area arithmetic.
+    fn mask_array_block_empty(&mut self, bx: i64, by: i64, block: f64) -> bool {
+        if self.opts.density_mask.is_none() { return false; }
+        let edges = [bx as f64 * block, by as f64 * block, (bx as f64 + 1.0) * block, (by as f64 + 1.0) * block];
+        if !edges.iter().all(|v| v.is_finite() && v.abs() < (1u64 << 48) as f64) { return false; }
+        self.mask_blocks_empty(BBox { x0: edges[0].floor() as i64, y0: edges[1].floor() as i64,
+            x1: edges[2].ceil() as i64, y1: edges[3].ceil() as i64 }, u64::MAX, None)
+    }
+
+    /// Shared cells need the union of every instance's demand. The topo
+    /// sweep supplies all parent contexts before a child is expanded.
+    /// Large repetitions fall back to unknown, never to a sampled union.
+    fn propagate_mask_contexts(&mut self, key: WsKey, insts: &[WsInst]) {
+        const MAX_CONTEXTS: usize = 64;
+        if self.opts.density_mask.is_none() || !self.dots { return; }
+        let parents = self.mask_contexts.get(&key).cloned().flatten();
+        for inst in insts {
+            let offsets: Option<Vec<(i64, i64)>> = match &inst.rep {
+                Rep::One => Some(vec![(0, 0)]),
+                Rep::Grid { na, nb, va, vb } if na.saturating_mul(*nb) <= MAX_CONTEXTS as u64 => {
+                    let mut found = Vec::new();
+                    let mut valid = true;
+                    for j in 0..*nb { for i in 0..*na {
+                        let x = i128::from(i) * i128::from(va.0) + i128::from(j) * i128::from(vb.0);
+                        let y = i128::from(i) * i128::from(va.1) + i128::from(j) * i128::from(vb.1);
+                        match (i64::try_from(x), i64::try_from(y)) {
+                            (Ok(x), Ok(y)) => found.push((x, y)), _ => valid = false,
+                        }
+                    }}
+                    valid.then_some(found)
+                }
+                Rep::Pts(points) if points.len() <= MAX_CONTEXTS => Some(points.to_vec()),
+                _ => None,
+            };
+            let made = parents.as_ref().zip(offsets.as_ref()).and_then(|(parents, offsets)| {
+                if parents.len().saturating_mul(offsets.len()) > MAX_CONTEXTS { return None; }
+                let mut made = Vec::new();
+                for &(x, y, rot, flip) in parents { for &(ox, oy) in offsets {
+                    let outer = Xf::place(x, y, rot, flip);
+                    let u = outer.apply_vec(1, 0); let v = outer.apply_vec(0, 1);
+                    let lx = i128::from(inst.x) + i128::from(ox);
+                    let ly = i128::from(inst.y) + i128::from(oy);
+                    let tx = i128::from(x) + lx * i128::from(u.0) + ly * i128::from(v.0);
+                    let ty = i128::from(y) + lx * i128::from(u.1) + ly * i128::from(v.1);
+                    let (tx, ty) = (i64::try_from(tx).ok()?, i64::try_from(ty).ok()?);
+                    let (_, _, rot, flip) = outer.compose(&Xf::place(0, 0, inst.rot, inst.flip)).decompose();
+                    let context = (tx, ty, rot, flip);
+                    if !made.contains(&context) { made.push(context); }
+                }}
+                Some(made)
+            });
+            let slot = self.mask_contexts.entry(inst.child).or_insert_with(|| Some(Vec::new()));
+            match (slot.as_mut(), made) {
+                (Some(existing), Some(made)) => {
+                    for context in made { if !existing.contains(&context) { existing.push(context); } }
+                    if existing.len() > MAX_CONTEXTS { *slot = None; self.st.dot_mask_fallbacks += 1; }
+                }
+                (_, None) => { if slot.is_some() { self.st.dot_mask_fallbacks += 1; } *slot = None; }
+                (None, Some(_)) => {}
+            }
+        }
+    }
+
     fn contribute(&mut self, key: WsKey, b: BBox) {
         if b.is_empty() {
             return;
@@ -3749,6 +3917,21 @@ impl<'a> Hier<'a> {
     fn expand(&mut self, ci: u32, r: u32) {
         let key = (ci, r);
         self.explain_owner = key;
+        self.mask_seen.clear();
+        self.mask_cell_list_full = false;
+        let mask_pruned_before = self.st.dot_mask_pruned;
+        self.mask_cell_skipped_boxes = 0;
+        // Even many overlapping rejected sources cannot emit more than the
+        // owning cell's block grid. Bound cap usage by that grid as well.
+        if self.opts.density_mask.is_some() {
+            let rb = self.v.cell_rbbox(ci);
+            let block = self.block_px / self.px_per_dbu;
+            self.mask_cell_box_limit = if block > 0.0 && block.is_finite() {
+                let nx = (rb.x1 as f64 / block).floor() - (rb.x0 as f64 / block).floor() + 3.0;
+                let ny = (rb.y1 as f64 / block).floor() - (rb.y0 as f64 / block).floor() + 3.0;
+                (nx * ny * self.vis_layers.len() as f64).ceil().clamp(0.0, u64::MAX as f64) as u64
+            } else { u64::MAX };
+        }
         let boxes = self.lv.get(&key).expect("lv seeded").boxes.clone();
         if self.dots {
             self.begin_grid(&boxes);
@@ -4055,12 +4238,32 @@ impl<'a> Hier<'a> {
                         self.st.culled_bvh_layer += 1;
                         continue;
                     }
+                    if !node.bbox.intersects(b) { continue; }
+                    // Old indexes omit masks on small nodes. Their exact
+                    // recursive layer union is reusable across this frame's
+                    // ordered layer plans; a bounded unknown is never pruned.
+                    if self.dots && self.bright && !self.sub_cut_wash && !self.reps && r == REM_FULL
+                        && (node.max_dim as u64) < cut
+                        && node.lmask_rec == floe_ovm::LMASK_UNKNOWN
+                        && self.opts.density_layers.as_ref().and_then(|memo| memo.has_layer(self.v, ni, &self.walk_vis)) == Some(false)
+                    {
+                        self.st.culled_bvh_layer += 1;
+                        self.layer_pruned = true;
+                        if self.mask_seen.insert(5 << 60 | u64::from(ni)) {
+                            let (lo, hi) = self.cbvh_places(ni);
+                            self.mask_skipped_reads = self.mask_skipped_reads.saturating_add(u64::from(hi.saturating_sub(lo)).saturating_mul(2));
+                        }
+                        continue;
+                    }
                     // rev 43: v7 size annotations - a subtree whose
                     // every child cell is under the cut (or
                     // hairline-thin) prunes wholesale; the fit-view
                     // walk stops paying O(boundary placements) for
                     // boxes the cut was always going to drop (150M
                     // field case: 4.5s plan for 1023 boxes)
+                    if self.dots && r == REM_FULL && (node.max_dim as u64) < cut
+                        && self.mask_blocks_empty(node.bbox, 1 << 60 | ni as u64, Some(ni))
+                    { continue; }
                     if (node.max_dim as u64) < cut
                         || (node.max_min as u64) < hair_prune
                     {
@@ -4370,6 +4573,8 @@ impl<'a> Hier<'a> {
             }
             self.cell_under.clear();
         }
+        self.mask_full_conflict |= self.mask_cell_list_full && self.st.dot_mask_pruned > mask_pruned_before;
+        self.propagate_mask_contexts(key, &wc.insts);
         self.out.insert(key, wc);
     }
 
@@ -5021,6 +5226,7 @@ impl<'a> Hier<'a> {
                     continue;
                 };
                 for (bx, column) in (bx0..=bx1).zip(columns.iter()) {
+                    if self.mask_array_block_empty(bx, by, block) { continue; }
                     let Some((cols, x0, x1)) = *column else {
                         continue;
                     };
@@ -5039,6 +5245,7 @@ impl<'a> Hier<'a> {
                 continue;
             }
             for bx in bx0..=bx1 {
+                if self.mask_array_block_empty(bx, by, block) { continue; }
                 let (xlo, xhi) = (bx as f64 * block, (bx + 1) as f64 * block);
                 let xs = range(cx, x_step, x_range, xlo, xhi);
                 if xs.0 > xs.1 {
@@ -5221,6 +5428,7 @@ impl<'a> Hier<'a> {
                 // no occupancy record: not drawn, as without the spread
                 return false;
             }
+            if self.mask_blocks_empty(p.bbox, 2 << 60 | pi as u64, None) { return true; }
             if self.dot_seen.insert(2 << 60 | pi as u64) {
                 let holds = self.page_dots(p);
                 self.st.dot_by[7] += 1;
@@ -5599,6 +5807,7 @@ impl<'a> Hier<'a> {
         if fp.is_empty() || !boxes.iter().any(|b| fp.intersects(b)) {
             return;
         }
+        if r == REM_FULL && self.mask_blocks_empty(fp, 3 << 60 | pli, None) { return; }
         let found = self.cell_bits(h.child, self.child_rem(h.child, r));
         if found.is_empty(self.set_words) {
             return;
@@ -5623,6 +5832,7 @@ impl<'a> Hier<'a> {
             view.grow(b);
         }
         if h.kind == 2 {
+            self.mask_cell_list_full |= self.list_full && self.grid_on && self.grid.nx > 0;
             // a point list: the members in view, chunk by chunk - under the
             // dots in each of the cell's boxes, not their bounds
             // (HierOpts::dot_boxes: a plan of regions dealt round robin had
@@ -5681,6 +5891,9 @@ impl<'a> Hier<'a> {
             let mut run: Option<((i64, i64, u32), u64, BBox)> = None;
             for k in 0..pr.n_chunks {
                 let chunk = pr.chunk_bbox(k);
+                if pr.count as u64 <= SUB_CUT_BOX_ARRAY_MAX && r == REM_FULL &&
+                    self.mask_blocks_empty(grow_by_offsets(&b0, &chunk), u64::MAX, None)
+                { continue; }
                 if !chunk.intersects(&bounds) {
                     continue;
                 }
@@ -7444,7 +7657,7 @@ impl crate::Vfs {
     /// hairline policy is the request's (ViewReq::page_hairline);
     /// FLOE_RUST_PAGE_HAIRLINE=cull|keep overrides it for diagnosis.
     pub fn plan_hier(&self, req: &ViewReq) -> HierPlan {
-        self.plan_hier_in(req, &[], None, None, None, 0, None, None, None, None, None, None)
+        self.plan_hier_in(req, &[], None, None, None, None, None, 0, None, None, None, None, None, None)
     }
 
     /// `plan_hier` over `regions` of the view instead of the whole view
@@ -7459,6 +7672,8 @@ impl crate::Vfs {
         &self,
         req: &ViewReq,
         regions: &[BBox],
+        density_mask: Option<Arc<DensityMask>>,
+        density_layers: Option<Arc<DensityLayerMemo>>,
         fixed_fit: Option<FixedFit>,
         sub_cut_dots: Option<f64>,
         dot_records: Option<f64>,
@@ -7471,6 +7686,8 @@ impl crate::Vfs {
         decide_by: Option<Arc<crate::hiersum::HierSummary>>,
     ) -> HierPlan {
         let mut opts = HierOpts::default();
+        opts.density_mask = density_mask;
+        opts.density_layers = density_layers;
         opts.dot_bright = dot_bright;
         opts.dot_occ_first = dot_occ_first;
         opts.cell_cover = cell_cover;
@@ -11526,6 +11743,199 @@ mod tests {
                     page_wash: true,
                     lod_swap: true,
         }
+    }
+
+    fn density_test_mask(open: &[(usize, usize)]) -> Arc<DensityMask> {
+        let mut bits = vec![0u64; 64];
+        for &(x, y) in open { bits[y] |= 1u64 << x; }
+        Arc::new(DensityMask::new([0., 0., 640., 640.], 64, 64, bits).unwrap())
+    }
+
+    fn density_test_opts(mask: Option<Arc<DensityMask>>) -> HierOpts {
+        HierOpts { sub_cut_dots: Some(1.0), dot_bright: Some(2.0), dot_block_px: 4.0,
+            dot_gate: false, density_mask: mask, ..HierOpts::default() }
+    }
+
+    #[test]
+    fn density_mask_prunes_covered_subtrees_before_counting_their_members() {
+        let chip = fixture(&[
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 10, 10), 10, 10)], places: vec![] },
+            FCell { name: "TOP", pages: vec![], places: (0..64).map(|i| (0, (i % 8) * 10, (i / 8) * 10, 0, false, Rep::One)).collect() },
+        ], 1);
+        let req = rq_px(bx(0, 0, 640, 640), 30, REM_FULL, 0.1);
+        let baseline = plan_hier(&chip, &req, &density_test_opts(None));
+        let opts = density_test_opts(Some(density_test_mask(&[(50, 50)])));
+        let masked = plan_hier(&chip, &req, &opts);
+        assert!(baseline.stats.sub_cut_dot_items > 0);
+        assert_eq!(masked.stats.sub_cut_dot_items, 0);
+        assert!(masked.stats.visited_bvh < baseline.stats.visited_bvh);
+        assert!(masked.stats.dot_mask_pruned > 0);
+        assert!(masked.wcells.iter().all(|cell| cell.washes.is_empty()));
+        let empty = plan_hier(&chip, &req, &density_test_opts(Some(density_test_mask(&[]))));
+        assert_eq!(empty.stats.visited_bvh, 0);
+        assert!(empty.wcells.is_empty());
+        // If invisible work could have exhausted an output/read cap, retain
+        // the old cap ordering by running the unchanged planner.
+        for limits in [(1, SUB_CUT_BOX_READS), (SUB_CUT_BOX_MAX, 1)] {
+            let limited = HierOpts { sub_cut_box_max: limits.0, sub_cut_box_reads: limits.1, ..opts.clone() };
+            let mut plain = limited.clone(); plain.density_mask = None;
+            let got = plan_hier(&chip, &req, &limited);
+            assert_eq!(got.wcells, plan_hier(&chip, &req, &plain).wcells);
+            assert!(got.stats.dot_mask_fallbacks > 0);
+        }
+    }
+
+    #[test]
+    fn density_mask_keeps_all_contributors_to_a_live_block() {
+        let chip = fixture(&[
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 10, 10), 10, 10)], places: vec![] },
+            FCell { name: "TOP", pages: vec![], places: vec![(0, 0, 0, 0, false, Rep::One), (0, 20, 0, 0, false, Rep::One)] },
+        ], 1);
+        let req = rq_px(bx(0, 0, 640, 640), 30, REM_FULL, 0.1);
+        // This candidate is between the members; both contribute to the
+        // same block's count/support and neither may be filtered alone.
+        for item_share in [false, true] {
+            let opts = HierOpts { dot_item_share: item_share, ..density_test_opts(Some(density_test_mask(&[(1, 63)]))) };
+            let mut plain = opts.clone(); plain.density_mask = None;
+            let masked = plan_hier(&chip, &req, &opts);
+            let baseline = plan_hier(&chip, &req, &plain);
+            assert_eq!(masked.wcells, baseline.wcells);
+            assert!(masked.stats.dot_mask_tests > 0);
+            assert_eq!(masked.stats.dot_mask_pruned, 0);
+        }
+    }
+
+    #[test]
+    fn density_mask_unions_shared_rotated_and_reflected_instance_demand() {
+        for (rot, flip) in [(0, false), (1, false), (2, true), (3, true)] {
+            let chip = fixture(&[
+                FCell { name: "LEAF", pages: vec![(bx(0, 0, 10, 10), 10, 10)], places: vec![] },
+                FCell { name: "SHARED", pages: vec![], places: vec![(0, 0, 0, 0, false, Rep::One), (0, 100, 100, 0, false, Rep::One)] },
+                FCell { name: "TOP", pages: vec![], places: vec![(1, 0, 0, 0, false, Rep::One), (1, 320, 320, rot, flip, Rep::One)] },
+            ], 2);
+            let req = rq_px(bx(0, 0, 640, 640), 30, REM_FULL, 0.1);
+            // Only the second instance has candidates. Compare the shared
+            // cell's live summaries, which must not be removed due to the
+            // first instance being covered.
+            let xf = Xf::place(320, 320, rot, flip);
+            let point = xf.apply(5, 5);
+            let pixel = ((point.0 / 10) as usize, ((640 - point.1) / 10) as usize);
+            let masked = plan_hier(&chip, &req, &density_test_opts(Some(density_test_mask(&[pixel]))));
+            let baseline = plan_hier(&chip, &req, &density_test_opts(None));
+            let before = baseline.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+            let after = masked.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+            assert!(!after.washes.is_empty(), "rotation {rot} reflection {flip}");
+            for (at, item) in after.washes.iter().enumerate() {
+                let index = before.washes.iter().position(|entry| entry == item).unwrap();
+                assert_eq!(after.dot_counts[at], before.dot_counts[index]);
+            }
+        }
+    }
+
+    #[test]
+    fn density_mask_large_instance_unions_fall_back_without_sampling() {
+        let chip = fixture(&[
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 10, 10), 10, 10)], places: vec![] },
+            FCell { name: "SHARED", pages: vec![], places: vec![(0, 0, 0, 0, false, Rep::One), (0, 100, 100, 0, false, Rep::One)] },
+            FCell { name: "TOP", pages: vec![], places: vec![(1, 0, 0, 0, false, Rep::Grid { na: 65, nb: 1, va: (120, 0), vb: (0, 0) })] },
+        ], 2);
+        let req = rq_px(bx(0, 0, 640, 640), 30, REM_FULL, 0.1);
+        let baseline = plan_hier(&chip, &req, &density_test_opts(None));
+        let masked = plan_hier(&chip, &req, &density_test_opts(Some(density_test_mask(&[(50, 50)]))));
+        assert_eq!(masked.wcells, baseline.wcells);
+        assert!(masked.stats.dot_mask_fallbacks > 0);
+    }
+
+    #[test]
+    fn density_mask_prunes_array_blocks_and_point_chunks_without_changing_live_aggregates() {
+        for listed in [false, true] {
+            let rep = if listed {
+                Rep::Pts((0..64).flat_map(|y| (0..64).map(move |x| (x * 10, y * 10))).collect::<Vec<_>>().into())
+            } else { Rep::Grid { na: 64, nb: 64, va: (10, 0), vb: (0, 10) } };
+            let chip = fixture(&[
+                FCell { name: "LEAF", pages: vec![(bx(0, 0, 10, 10), 10, 10)], places: vec![] },
+                FCell { name: "TOP", pages: vec![], places: vec![(0, 0, 0, 0, false, rep)] },
+            ], 1);
+            let req = rq_px(bx(0, 0, 640, 640), 30, REM_FULL, 0.1);
+            let mask = density_test_mask(&[(30, 30)]);
+            let plain = HierOpts { dot_list_full: false, ..density_test_opts(None) };
+            let opts = HierOpts { density_mask: Some(mask.clone()), ..plain.clone() };
+            let baseline = plan_hier(&chip, &req, &plain);
+            let masked = plan_hier(&chip, &req, &opts);
+            if listed {
+                let full = HierOpts { dot_list_full: true, ..opts.clone() };
+                let unmasked = HierOpts { density_mask: None, ..full.clone() };
+                let guarded = plan_hier(&chip, &req, &full);
+                assert_eq!(guarded.wcells, plan_hier(&chip, &req, &unmasked).wcells);
+                assert!(guarded.stats.dot_mask_fallbacks > 0);
+            }
+            assert!(masked.stats.dot_mask_pruned > 0, "listed={listed}");
+            let before = baseline.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+            let after = masked.wcells.iter().find(|w| w.key.0 == 1).unwrap();
+            assert!(after.washes.len() < before.washes.len(), "listed={listed}");
+            for (at, &(layer, b)) in before.washes.iter().enumerate() {
+                if mask.world_box_has_open([b.x0 as f64, b.y0 as f64, b.x1 as f64, b.y1 as f64]) {
+                    let kept = after.washes.iter().position(|entry| *entry == (layer, b)).expect("live block retained");
+                    assert_eq!(after.dot_counts[kept], before.dot_counts[at], "all contributors to live aggregate retained");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn density_layer_memo_prunes_unknown_absent_nodes_and_reuses_exact_unions() {
+        let places = (0..64).map(|i| {
+            let child = if i < 32 { 1 } else { 0 };
+            let x = if i < 32 { 0 } else { 200 } + (i % 8);
+            (child, x, (i / 8) * 20, 0, false, Rep::One)
+        }).collect();
+        let chip = fixture_with(&[
+            FCell { name: "L1", pages: vec![(bx(0, 0, 10, 10), 10, 10)], places: vec![] },
+            FCell { name: "L2@2", pages: vec![(bx(0, 0, 10, 10), 10, 10)], places: vec![] },
+            FCell { name: "TOP", pages: vec![], places },
+        ], 2, false);
+        let memo = Arc::new(DensityLayerMemo::new());
+        for vis in [1, 2, 1] {
+            let mut req = rq_px(bx(0, 0, 640, 640), 30, REM_FULL, 0.1);
+            req.vis = vec![vis];
+            let plain = density_test_opts(None);
+            let cached = HierOpts { density_layers: Some(memo.clone()), ..plain.clone() };
+            let expected = plan_hier(&chip, &req, &plain);
+            let actual = plan_hier(&chip, &req, &cached);
+            assert_eq!(actual.wcells, expected.wcells);
+            assert!(actual.stats.culled_bvh_layer > expected.stats.culled_bvh_layer);
+            assert!(actual.stats.sub_cut_box_reads < expected.stats.sub_cut_box_reads);
+        }
+    }
+
+    #[test]
+    fn density_mask_preserves_live_support_when_dead_pages_enabled_a_full_list_skip() {
+        let mut pages = Vec::new();
+        for _ in 0..20 {
+            pages.push((bx(40, 45, 43, 48), 1, 1));
+            pages.push((bx(60, 45, 63, 48), 1, 1));
+        }
+        let chip = fixture_members(&[
+            FCell { name: "LEAF", pages: vec![(bx(0, 0, 3, 3), 3, 3)], places: vec![] },
+            FCell { name: "TOP", pages, places: vec![(0, 0, 0, 0, false, Rep::Pts(vec![(40, 40), (53, 40), (64, 51)].into()))] },
+        ], 1, true, &|_, _| 100);
+        let mut req = rq_px(bx(0, 0, 120, 120), 10, REM_FULL, 0.3);
+        req.page_wash = false;
+        req.frames = false;
+        let base = HierOpts { sub_cut_dots: Some(1.0), dot_bright: Some(2.0), dot_block_px: 4.0,
+            dot_gate: false, dot_page_spread_boxes: true, dot_occ_decode: false, dot_list_sample: false,
+            ..HierOpts::default() };
+        let mut bits = vec![0u64; 36]; bits[22] = 1 << 18;
+        let mask = Arc::new(DensityMask::new([0., 0., 120., 120.], 36, 36, bits).unwrap());
+        let plain = plan_hier(&chip, &req, &base);
+        let guarded = plan_hier(&chip, &req, &HierOpts { density_mask: Some(mask), ..base });
+        assert!(plain.stats.dot_full_members > 0);
+        assert_eq!(guarded.wcells, plain.wcells);
+        assert!(guarded.stats.dot_mask_fallbacks > 0);
+        // Without the guard the live 128-unit support grew from 3x3 to
+        // 14x14 dbu. At candidate (18,22), its summary probability dropped
+        // below the common hash rank and the only visible pixel disappeared.
+        assert!(guarded.wcells.iter().any(|cell| cell.washes.iter().any(|(_, b)| *b == bx(60, 45, 63, 48))));
     }
 
     // ---- fixture: cells listed CHILDREN-FIRST (index order is a

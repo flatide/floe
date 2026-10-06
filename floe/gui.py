@@ -1128,6 +1128,13 @@ def perf_status(res, depth_note=""):
                     ("occ_decoded", "pages decoded under the floor")) if p2.get(key))
                 if p2.get("map_updates"):
                     by += "; hash map %s" % fmt_count(p2["map_updates"])
+                if p2.get("stages"):
+                    by += "; %d layer stages" % p2["stages"]
+                if p2.get("mask_tests") or p2.get("mask_fallbacks"):
+                    by += "; mask %s/%s pruned, %s fallback" % (
+                        fmt_count(p2.get("mask_pruned", 0)), fmt_count(p2.get("mask_tests", 0)),
+                        fmt_count(p2.get("mask_fallbacks", 0)))
+                by = by.lstrip("; ")
                 plan += (" (probe %d ms x%d, fit %d ms x%d"
                          " passes on %d threads, %d regions%s,"
                          " nodes %s, page nodes %s, pages %s,"

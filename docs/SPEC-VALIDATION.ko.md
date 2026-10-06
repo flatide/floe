@@ -145,7 +145,15 @@ sh tools/validate_rust.sh --only quick path/to.oas
   - `original_union_mask_matches_solid_fill_*` 두 단위 검사는 동일한 계획을 Solid로 그린 픽셀과
     Speckle/Pattern/Clear의 원본 차단 마스크를 직접 대조한다. 사각형·다각형·경로, Grid/Pts,
     회전·반사 계층, 가득 찬 타일 조기 종료와 deferred 배치를 포함한다.
-  - `rust_renderer`: `density_plan2` 끝에 `pattern`을 더한 40개 값. 이전 39개 응답은 `pattern=0`으로 읽는다.
+  - 직접 마스크 탐색·레이어 단계(`CUT_DENSITY_DESIGN` §10.15): `unit_vfs`는 가려진 하위 트리 생략,
+    살아 있는 합성 블록의 모든 기여 유지, 공유 셀의 회전·반사, 변환 상한과 예산의 보수적 복귀를 검사한다.
+    `unit_render`는 프레임 비트마스크 내보내기의 타일/워드 경계, 위 밀도 뒤의 마스크 갱신, 완전 가림의
+    남은 단계 생략, 두 번째 단계 중 취소와 워커 종료를 검사한다.
+    `density_stack`의 `planner_mask_checks`는 마스크만 끈 대조군과 픽셀 일치 및 탐색 감소,
+    `staged_density_checks`는 기본값의 공동 계획 유지와 명시적 `FLOE_RUST_DENSITY_STAGES=on`에서
+    상위 8개 밖의 레이어까지 순서대로 그린 뒤 아래 계획을 생략하는지 확인한다.
+  - `rust_renderer`: `density_plan2`는 `pattern` 뒤의 `mask_tests/mask_pruned/mask_fallbacks/stages`까지 44개 값.
+    이전 39/40개 응답은 생략된 필드를 0으로 읽는다.
     상태줄은 백엔드 값으로 `pattern, cover x2` 또는 `bright x2`를 표시한다.
     아래의 기존 밝기·면적 보존 검사는 패턴 스위치를 끈 대조군으로 유지한다.
 - `density_stack`(tools/validate_density_stack.py, 약 10초; `render` 별칭에 포함): 밀도 스택 진단

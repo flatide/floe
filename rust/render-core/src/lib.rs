@@ -67,3 +67,5 @@ pub use floe_vfs::hier::FixedFit;
 pub use floe_vfs::hier::{dot_block_px, dot_block_px_of};
 pub use floe_vfs::hier::{dot_occ_decode, dot_page_occ, dot_page_spread, dot_page_spread_boxes};
 pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;
+
+pub use floe_vfs::hier::{DensityLayerMemo, DensityMask};

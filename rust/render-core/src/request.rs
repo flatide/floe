@@ -84,6 +84,9 @@ pub struct PlanRequest {
     /// empty = the whole view): the density stack's pass 2 plans the space
     /// the originals left (CUT_DENSITY_DESIGN §10.10).
     pub regions: Vec<ViewBox>,
+    /// Exact density demand at the pass boundary (None for ordinary plans).
+    pub density_mask: Option<std::sync::Arc<floe_vfs::hier::DensityMask>>,
+    pub density_layers: Option<std::sync::Arc<floe_vfs::hier::DensityLayerMemo>>,
     /// Visible layers by cache layer index, in place of `visible_layers`
     /// when Some (the density stack's pass 2: the top plane's layer alone,
     /// then the others).
@@ -180,6 +183,8 @@ mod tests {
             page_wash: true,
             lod_swap: true,
             regions: Vec::new(),
+            density_mask: None,
+            density_layers: None,
             visible_indices: None,
             fixed_fit: None,
             root: None,

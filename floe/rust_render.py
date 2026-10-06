@@ -182,7 +182,8 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  # counted what their placements hold (2026-10-05)
                  "cell_cover", "cover_cells", "node_sampled",
                  # the raster's opaque density pattern; older replies omit it
-                 "pattern")
+                 "pattern",
+                 "mask_tests", "mask_pruned", "mask_fallbacks", "stages")
 
 
 def _viewport_px(job, bbox):
@@ -218,13 +219,13 @@ def _wire_counts(value, names):
 
 
 def _density_plan2(value):
-    """Pass-2 diagnostics, with the optional display mode defaulting to legacy."""
-    counts = _wire_counts(value, DENSITY_PLAN2)
-    if counts is None:
-        counts = _wire_counts(value, DENSITY_PLAN2[:-1])
+    """Pass-2 diagnostics; older renderers omit pattern and/or mask fields."""
+    for size in (len(DENSITY_PLAN2), 40, 39):
+        counts = _wire_counts(value, DENSITY_PLAN2[:size])
         if counts is not None:
-            counts["pattern"] = 0
-    return counts
+            counts.update(dict.fromkeys(DENSITY_PLAN2[size:], 0))
+            return counts
+    return None
 
 
 def _density_pages(value):

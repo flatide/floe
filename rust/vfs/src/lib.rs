@@ -4,6 +4,7 @@
 
 pub mod cover;
 pub mod coverage;
+mod density_mask;
 pub mod hier;
 pub mod hiersum;
 pub mod occupancy;

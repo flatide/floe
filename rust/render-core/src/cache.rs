@@ -1157,6 +1157,9 @@ impl Cache {
             st.occ_fallback.extend(more.occ_fallback.iter().cloned());
             st.occ_aside.extend(more.occ_aside.iter().cloned());
             st.dot_stood_in += more.dot_stood_in;
+            st.dot_mask_tests += more.dot_mask_tests;
+            st.dot_mask_pruned += more.dot_mask_pruned;
+            st.dot_mask_fallbacks += more.dot_mask_fallbacks;
             st.dot_cover_on |= more.dot_cover_on;
             st.dot_cover_cells += more.dot_cover_cells;
             st.dot_node_sampled += more.dot_node_sampled;
@@ -1418,8 +1421,8 @@ impl Cache {
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
         // the cells' cover: the brightness's dots plans alone ask for it
-        let cover = if request.dot_bright.is_some() && request.sub_cut_dots.is_some() { self.cell_cover() } else { None };
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright, request.dot_occ_first, cover, decide_by);
+        let cover = if request.dot_bright.is_some() && request.sub_cut_dots.is_some() && !request.density_mask.as_ref().is_some_and(|mask| mask.is_empty()) { self.cell_cover() } else { None };
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.density_mask.clone(), request.density_layers.clone(), request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright, request.dot_occ_first, cover, decide_by);
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }

@@ -1911,11 +1911,14 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertFalse(os.path.exists(style_path))
 
     def test_density_plan2_accepts_the_optional_pattern_field(self):
-        legacy = "/".join(str(i) for i in range(len(DENSITY_PLAN2) - 1))
-        expected = dict(zip(DENSITY_PLAN2[:-1], range(len(DENSITY_PLAN2) - 1)))
+        legacy = "/".join(str(i) for i in range(39))
+        expected = dict(zip(DENSITY_PLAN2[:39], range(39)))
+        expected.update(dict.fromkeys(DENSITY_PLAN2[40:], 0))
         self.assertEqual(_density_plan2(legacy), dict(expected, pattern=0))
         self.assertEqual(_density_plan2(legacy + "/1"), dict(expected, pattern=1))
         self.assertEqual(_density_plan2(legacy + "/0"), dict(expected, pattern=0))
+        self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9"),
+                         dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9))
         for malformed in ("-", "", "1/2", legacy + "/bad", legacy + "/1/2"):
             self.assertIsNone(_density_plan2(malformed), malformed)
 
@@ -2153,7 +2156,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "full_chunks": 500, "full_members": 128000, "sampled_chunks": 60, "sampled_members": 15360,
                 "free_top": 40000, "free_others": 7000, "dot_gain_milli": 640, "dot_gated": 1200, "dot_gate_min": 2,
                 "bright_milli": 2000, "stood_in": 9,
-                "cell_cover": 1, "cover_cells": 1500, "node_sampled": 800, "pattern": 0})
+                "cell_cover": 1, "cover_cells": 1500, "node_sampled": 800, "pattern": 0,
+                "mask_tests": 0, "mask_pruned": 0, "mask_fallbacks": 0, "stages": 0})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)

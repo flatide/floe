@@ -1334,6 +1334,9 @@ def pattern_checks(temp):
         'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
         'FLOE_RUST_DENSITY_BRIGHT': 'on', 'FLOE_RUST_DENSITY_PATTERN': None,
         'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on',
+        # This check isolates the display mode; the evolving-mask planner
+        # is tested separately by staged_density_checks.
+        'FLOE_RUST_DENSITY_STAGES': 'off',
         'FLOE_RUST_TILE_PX': '64', 'FLOE_RUST_RASTER_JOBS': '1',
     }
     workers = {
@@ -2157,6 +2160,7 @@ def full_shapes_first_checks(temp):
                 on, res = frame(workers['on'], 1, (LOW, MID, TOP))
                 p2, pages, stack = res['density_plan2'], res['density_pages'], res['density_stack']
                 assert p2['pattern'] == 1, p2
+                assert p2['stages'] == 0, 'layer staging must remain opt-in'
                 if kind == 'half':
                     assert all(px(on, c, r) == px(off, c, r) for r in range(H) for c in range(W // 2)), 'covered half changed'
                     assert any(px(on, c, r) != px(off, c, r) for r in range(H) for c in range(W // 2 + 2, W)), 'open half lost its density'
@@ -2164,6 +2168,7 @@ def full_shapes_first_checks(temp):
                 else:
                     assert on == off, (kind, tile, 'density changed a fully covered frame')
                     assert p2['free_top'] == p2['free_others'] == p2['passes'] == p2['regions'] == p2['cell_cover'] == 0, p2
+                    assert p2['nodes'] == p2['page_nodes'] == p2['page_candidates'] == p2['reads'] == p2['items'] == 0, p2
                     assert pages['planned'] == pages['decoded'] == 0, pages
                     assert res['density_us']['plan2_us'] == res['density_us']['scene2_us'] == res['density_us']['decode2_us'] == 0, res['density_us']
                     assert stack['covered'] == W * H and stack['lit'] == stack['top'] == stack['lower'] == 0, stack
@@ -2252,6 +2257,173 @@ def nearly_full_pattern_checks(temp):
             finally:
                 w.stop()
         assert images[0] == images[1], 'near-full pattern depends on tile size'
+
+
+def masked_density_frame(w, gen, visible, size=128, density=True):
+    """A square 0.1 um/px view for the direct-mask and staged-plan cases."""
+    w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless',
+              'bbox': (0, 0, size * 100, size * 100), 'w': size, 'h': size,
+              'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False,
+              'labels': False, 'abstract': False, 'visible': list(visible),
+              'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False,
+              'density': density})
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+        assert res.get('kind') not in ('error', 'dropped'), res
+        if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+            return bytes(res.pop('rgba')), res
+    raise AssertionError('masked density frame timeout')
+
+
+def masked_density_env():
+    return {
+        'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
+        'FLOE_RUST_DENSITY_BRIGHT': 'on', 'FLOE_RUST_DENSITY_PATTERN': 'on',
+        'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_TOP_PLANES': '8',
+        'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on', 'FLOE_RUST_DENSITY_FREE_CELLS': 'on',
+        'FLOE_RUST_DENSITY_FREE_CELL_PX': '32', 'FLOE_RUST_DENSITY_OTHERS_MIN': '0',
+        'FLOE_RUST_DENSITY_STAGES': None, 'FLOE_RUST_DENSITY_MASK': None,
+        'FLOE_RUST_OCCUPANCY': 'off', 'FLOE_RUST_SHAPE_CUT': 'max',
+        'FLOE_RUST_EDGE_EXACT': 'on', 'FLOE_RUST_DENSITY_OVB_FIRST': 'off',
+        'FLOE_RUST_RETAINED_MB': '0',
+    }
+
+
+def planner_mask_checks(temp):
+    """Every 32px demand cell has one drawable hole. Its covered interior
+    contains shared, rotated and mirrored repeated subtrees: the planner's
+    pixel mask must skip them before walking their dots, while preserving
+    repeated, rotated instances of the same dot cell at each hole. Both
+    modes use staged planning;
+    only FLOE_RUST_DENSITY_MASK=off removes the direct mask query.
+    """
+    import klayout.db as kdb
+    src = Path(temp) / 'planner_mask.oas'
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    own = top.shapes(ly.layer(0, 0))
+    for y in range(0, 128, 32):
+        for x in range(0, 128, 32):
+            own.insert(kdb.Box(x * 100, y * 100, (x + 32) * 100, (y + 30) * 100))
+            own.insert(kdb.Box(x * 100, (y + 30) * 100, (x + 29) * 100, (y + 32) * 100))
+            own.insert(kdb.Box((x + 31) * 100, y * 100, (x + 32) * 100, (y + 32) * 100))
+    leaf = ly.create_cell('BLOCKED_DOT')
+    leaf.shapes(ly.layer(1, 0)).insert(kdb.Box(0, 0, 150, 150))
+    group = ly.create_cell('BLOCKED_GROUP')
+    # Distinct cells require a real BVH walk; a single regular array can
+    # aggregate all its members in one item without visiting child nodes.
+    for row in range(12):
+        for col in range(12):
+            dot = leaf if row == col == 0 else ly.create_cell('BLOCKED_%d_%d' % (row, col))
+            if dot != leaf:
+                dot.shapes(ly.layer(1, 0)).insert(kdb.Box(0, 0, 150 + row, 150 + col))
+            group.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(col * 200, row * 200)))
+    for row, y in enumerate(range(0, 128, 32)):
+        for col, x in enumerate(range(0, 128, 32)):
+            transform = kdb.Trans((row + col) % 4, bool(row % 2), 0, 0)
+            box = group.bbox().transformed(transform)
+            placed = kdb.Trans(transform.rot, transform.is_mirror(),
+                               (x + 2) * 100 - box.left, (y + 2) * 100 - box.bottom)
+            top.insert(kdb.CellInstArray(group.cell_index(), placed))
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(2975, 3075),
+                                kdb.Vector(3200, 0), kdb.Vector(0, 3200), 4, 2))
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(1, False, 3125, 9475),
+                                kdb.Vector(3200, 0), kdb.Vector(0, 3200), 4, 2))
+    ly.write(str(src))
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    images = []
+    for tile in (64, 127):
+        frames = {}
+        for mode in ('on', 'off'):
+            env = dict(masked_density_env(), FLOE_RUST_TILE_PX=str(tile),
+                       FLOE_RUST_DENSITY_MASK=mode, FLOE_RUST_DENSITY_STAGES='on')
+            w = worker(src, env)
+            try:
+                baseline, _ = masked_density_frame(w, 1, [(0, 0), (1, 0)], density=False)
+                frames[mode] = masked_density_frame(w, 2, [(0, 0), (1, 0)])
+                pixels, result = frames[mode]
+                assert result['density_stack']['covered'] == 128 * 128 - 16, result['density_stack']
+                assert sum(pixels[i:i + 4] != baseline[i:i + 4] for i in range(0, len(pixels), 4)) == 16, 'visible repeated dots lost'
+            finally:
+                w.stop()
+        assert frames['on'][0] == frames['off'][0], 'direct mask changed visible density'
+        on, off = (frames[mode][1]['density_plan2'] for mode in ('on', 'off'))
+        assert on['mask_tests'] > 0 and on['mask_pruned'] > 0 and off['mask_tests'] == 0, (on, off)
+        assert on['nodes'] < off['nodes'] and on['items'] < off['items'], (on, off)
+        images.append(frames['on'][0])
+        print('density stack: direct mask tile %d - nodes %d/%d, items %d/%d, same 16 visible dots'
+              % (tile, on['nodes'], off['nodes'], on['items'], off['items']))
+    assert images[0] == images[1], 'direct mask depends on tile size'
+
+
+def staged_density_checks(temp):
+    """A density shape fills the drawable slots of each 3x3 original hole.
+    Plans below it must observe the completed draw, including its unlit
+    pattern support. Twelve visible layers put the filling layer either
+    first or ninth, beyond the former eight top planes. The lower layers
+    have identical support, making the legacy frame an exact oracle. The
+    default retains legacy planning; staged planning is explicitly enabled.
+    """
+    import klayout.db as kdb
+    visible = [(layer, 0) for layer in range(12)]
+    for active in (11, 3):
+        src = Path(temp) / ('staged_density_%d.oas' % active)
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        own = top.shapes(ly.layer(0, 0))
+        for y in range(0, 128, 32):
+            for x in range(0, 128, 32):
+                own.insert(kdb.Box(x * 100, y * 100, (x + 32) * 100, (y + 12) * 100))
+                own.insert(kdb.Box(x * 100, (y + 16) * 100, (x + 32) * 100, (y + 32) * 100))
+                own.insert(kdb.Box(x * 100, (y + 12) * 100, (x + 12) * 100, (y + 16) * 100))
+                own.insert(kdb.Box((x + 16) * 100, (y + 12) * 100, (x + 32) * 100, (y + 16) * 100))
+        for layer in range(1, 12):
+            shapes = top.shapes(ly.layer(layer, 0))
+            at = 1325 if layer <= active else 400
+            for y in range(0, 128, 32):
+                for x in range(0, 128, 32):
+                    shapes.insert(kdb.Box(x * 100 + at, y * 100 + at,
+                                          x * 100 + at + 250, y * 100 + at + 250))
+        ly.write(str(src))
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+        frames = {}
+        for mode, tile, workers in (('default', 64, 1), ('on', 64, 1), ('parallel', 127, 4), ('off', 64, 1)):
+            stages = {'default': None, 'off': 'off'}.get(mode, 'on')
+            env = dict(masked_density_env(), FLOE_RUST_TILE_PX=str(tile),
+                       FLOE_RUST_RASTER_JOBS=str(workers),
+                       FLOE_RUST_DENSITY_STAGES=stages)
+            w = worker(src, env)
+            try:
+                baseline, _ = masked_density_frame(w, 1, visible, density=False)
+                frames[mode] = masked_density_frame(w, 2, visible)
+                pixels, result = frames[mode]
+                assert result['density_stack']['covered'] == 128 * 128 - 16 * 9, result['density_stack']
+                assert sum(pixels[i:i + 4] != baseline[i:i + 4] for i in range(0, len(pixels), 4)) == 64, 'density shape lost its visible slots'
+                colour = layer_colour(w, (active, 0))
+                assert sum(pixels[i:i + 4] == colour for i in range(0, len(pixels), 4)) == 64, 'wrong staged layer owns the density'
+            finally:
+                w.stop()
+        assert frames['default'][0] == frames['on'][0] == frames['parallel'][0] == frames['off'][0], 'staged pattern, tile or worker count changed this controlled frame'
+        current, legacy = frames['on'][1], frames['off'][1]
+        default = frames['default'][1]
+        assert default['density_plan2']['stages'] == 0 and default['density_plan2']['passes'] == 9, default['density_plan2']
+        assert default['density_pages'] == legacy['density_pages'], (default['density_pages'], legacy['density_pages'])
+        assert current['density_plan2']['stages'] == 12 - active and legacy['density_plan2']['stages'] == 0, (current['density_plan2'], legacy['density_plan2'])
+        assert current['density_pages']['decoded'] < legacy['density_pages']['decoded'], (current['density_pages'], legacy['density_pages'])
+        if active == 11:
+            assert current['density_plan2']['passes'] == 1 < legacy['density_plan2']['passes'], (current['density_plan2'], legacy['density_plan2'])
+        else:
+            assert current['density_pages']['decoded'] <= 9, current['density_pages']
+        print('density stack: staged layer %d - %d/%d plans, %d/%d decoded pages, same 64 visible pixels'
+              % (active, current['density_plan2']['passes'], legacy['density_plan2']['passes'],
+                 current['density_pages']['decoded'], legacy['density_pages']['decoded']))
 
 
 def own_layout(path):
@@ -2772,7 +2944,8 @@ def main():
     os.environ['FLOE_INDEX_BIN'] = str(ROOT / 'rust/target/release/floe-index')
     os.environ['FLOE_RENDERD_BIN'] = str(ROOT / 'rust/target/release/floe-renderd')
     os.environ['FLOE_RUST_RETAINED_MB'] = '0'
-    for name in ('FLOE_RUST_DENSITY_STACK', 'FLOE_RUST_DENSITY_DOTS', 'FLOE_RUST_AREA_TRUE', 'FLOE_RUST_WRITE_ONCE', 'FLOE_RUST_DENSITY_PATTERN'):
+    for name in ('FLOE_RUST_DENSITY_STACK', 'FLOE_RUST_DENSITY_DOTS', 'FLOE_RUST_AREA_TRUE', 'FLOE_RUST_WRITE_ONCE',
+                 'FLOE_RUST_DENSITY_PATTERN', 'FLOE_RUST_DENSITY_MASK', 'FLOE_RUST_DENSITY_STAGES'):
         os.environ.pop(name, None)
     # the fixed VIEW (W x H at PX_UM) is wider than most of these dies: past
     # their fit views the dots would thin (density_zoom_gain); the checks
@@ -2894,6 +3067,8 @@ def main():
         shapes_first_checks(temp)
         full_shapes_first_checks(temp)
         nearly_full_pattern_checks(temp)
+        planner_mask_checks(temp)
+        staged_density_checks(temp)
         bright_checks(temp)
         pattern_checks(temp)
         toggle_checks(temp)

@@ -242,6 +242,8 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         page_wash: true,
         lod_swap: true,
         regions: Vec::new(),
+        density_mask: None,
+        density_layers: None,
         visible_indices: None,
         fixed_fit: None,
         root: None,
