@@ -512,6 +512,38 @@ sh tools/validate_rust.sh --only quick path/to.oas
 | C1~C9 | `tools/validate_cell_tree.py` (`cell_tree`, `render`·`indexer` 별칭, 약 20초) | 셀 트리(SPEC-VIEWER §8c, design.ovh): 계층 픽스처(블록 3배치 = 평·90°·미러, 블록 안 3×2 격자, 탑 직접+깊은 배치 셀, 도형 없는 셀, 미배치 셀)를 KLayout으로 대조 — C1 `floe2 index`가 design.ovh를 쓰고 `floe-index hier --check` identity=ok·타 캐시 파일 거부(rc 1), C2 모든 셀의 서로 다른 자식과 멤버 수 = KLayout 인스턴스 배열 size 합·leaf 표기, C3 탑 아래 인스턴스 수 = 탑다운 곱셈 합(탑 1·orphan 0), C4 cell_find 부분일치/글롭 대소문자 무시·이름순·total+limit, C5 cell_bbox 탑 직계 = 인스턴스 박스 정확 합집합·깊은 셀 = 블록 범위 상위집합(approx=1)·orphan/도형 없음 None, C6 cell_insts 뷰 안 박스 = KLayout 전개 탐색(회전·미러·격자·불규칙 반복)·cap → more=1·탑 = 자기 박스, C7 파일 삭제 시 소형 캐시 메모리 요약(파일 안 씀)·`FLOE_RUST_HIER_INLINE_PLACES=0`이면 code=nohier·`--hier-only` 뒤 **같은 데몬**이 집어 듦·캐시 없는 소스 거부, C8 뷰 루트(`root=BLK`) 프레임 == BLK를 탑으로 한 별도 레이아웃(KLayout copy_tree) 프레임 바이트 동일(3뷰)·탑 뷰와는 다름·루트 아래 cell_bbox(직계 정확·6)·cell_insts(KLayout BLK 탐색 12)·루트 위 셀 0·테이블 밖 루트 거부·보이는 레이어가 없는 루트(VIA에 2/0만) = 검은 프레임(오류 아님)·1/0이면 그려짐·density stack 켬 == 끔, C9(0.12.296) 파일이 이름만 둔 빈 레이어(3/0 NOTHING)만 켬 = full depth(프레임 켬·끔)·depth 0 프레임 끔은 검은 프레임, depth 0 프레임 켬은 1/0을 켰을 때와 같은 depth 밖 외곽선 픽셀만(오류 아님, 0.12.295는 `invalid plan: top … is missing`)·density stack 점 켬도 같음·1/0이면 그려짐 |
 | R1~R5 | `tools/validate_svrf.py` | SVRF 서브셋 파서 `floe-index svrf`(.rules.json; 2026-09-29 floe/svrf.py에서 이식 — 게이트는 게이트 전용 `--dump-state`로 파스 상태를 읽는다): R1 전처리(INCLUDE 상대경로 병합·순환 경고·#IFDEF/#ELSE -D 분기·#DEFINE 값 치환→제약·VARIABLE 수치 해석·--scan 양분기), R2 derivation 그래프(다이아몬드 폐쇄→전 원천 LAYER+MAP dt·순환 종료·미정의→unresolved·연산자 비누출), R3 체크 추출(다중 @ 결합·이중 한계 2제약·붙은 op·`ABUT<90` 비제약·측정 우변 할당문·미지 문장 카운트·따옴표 체크명·DMACRO 통스킵), R4 gen_drcdb --svrf 엔드투엔드(db 체크명 100% 매칭·제약값 생성식 일치·전 체크 gds 도달·-D SYNTH_EXTRA 정확히 1룰 추가·JSON 왕복), R5 명령 계약(사이드카 = 파이썬 json.dump(indent=1, sort_keys=True) 바이트 — 비ASCII·따옴표·1e-05/1e+16·null dt, 기본 `<deck>.rules.json`, --scan은 파일 안 씀, `-DNAME`/`-D=NAME`/`--define=NAME`, 없는 덱 rc 1·모르는 옵션 rc 2(파일 없음), `floe2 svrf`는 floe-index 명령줄 안내 후 rc 2, 빌더 연산자 단어 == 뷰어 rhs_operands) |
 
+추가 DRC 게이트(2026-10-05):
+
+- `drc_clusters`: `validate_drc_clusters.py`와
+  `validate_drc_cluster_spatial.py` — 임의 번호/범위 파일, 10억 번호의
+  bounded 조회, 클러스터 상태 카운트 공유, 트리/페이지, cap 전 소속 판정.
+- `drc_markers`: `validate_drc_markers.py`와
+  `validate_drc_marker_gui.py` — 실제 pack의 100만 에러를 빠짐없이 집계,
+  8192 이하 출력, 축소 시 geometry 해독 0회, 정확한 확대/화면 경계/
+  singleton, 클러스터·status 필터, 메모리/캐시 한도, 취소·오래된 결과
+  폐기, 페이지 독립, 동결/리사이즈된 화면 좌표, 묶음 hit 분리,
+  5000개 초과 박스 선택의 비부분 적용. GUI 그리기/이벤트는 headless
+  mock으로 검증하며 GTK 실화면 검증을 대체하지 않는다.
+
+- `drc_delta`: `validate_drc_delta.py`, `validate_drc_delta_worker.py`,
+  `validate_drc_delta_gui.py` — CD/기준/델타의 다섯 자리 정밀도,
+  절대 델타·델타 비율의 비음수 크기, 구간 경계와 0/음수 기준값,
+  큰 수 비율의 정수 계산·오버플로 처리, 실제 pack 해독,
+  클러스터 교집합·waive·페이지, 비동기 측정 재사용/취소/오래된 결과 폐기,
+  그룹별 선택 격리와 전체 그룹 마커. GUI 동작은 headless 검증이다.
+  2026-10-06 추가: CD 후보의 최소/최대 요구 방향, 단일·복수 후보와
+  추정 표시/개수, 구간의 양쪽 조건, 일치하지 않거나 모호한 기준,
+  좌표 뺄셈 오차의 엄격/포함/동등 경계 비교와 미해석 대안의 추정 표시,
+  대각 룰러의 X/Y 보조선 제외. `drc_ice` D8은 비평행·원거리 평행
+  에지의 중점 대체가 최소 거리를 바꾸지 않는지와 끝점 순서 불변성을 검증한다.
+  notch/enclosure/overlap/extension 측정, 사각형 오류 방향의 단일/양쪽
+  룰러·판단 불가 폴백, GUI와 CLI 임베드 방향 일치, 거리 칩과 수동 측정
+  상태줄의 다섯 자리 표시도 검사한다.
+  area 전용/혼합 검사의 면적 라벨, 사각형·삼각형·오목 폴리곤의 실제
+  면적, GUI 라벨 수명주기 및 PNG 텍스트 주석도 검사한다.
+
+`sh tools/validate_rust.sh --only drc_clusters,drc_markers,drc_delta`로 실행한다.
+
 ## 3. 러스트 유닛 (핵심만)
 
 hier.rs: `hairline_min_side_cut`(rev 41), `frames_split_into_size_bands`

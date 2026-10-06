@@ -31,6 +31,11 @@ against).
       leading-dot values; comparator-leading next lines continue
       the wrapped measurement (multi-line too), without leaking
       across a block close.
+  R3c dimensional metrics: two-layer INTERNAL overlap, one-layer
+      EXTERNAL NOTCH, ENCLOSURE for enclosure/extension; intersection
+      OVERLAP options do not rename a metric. Wrapped options remain
+      in statement text and cannot introduce a second primary bound.
+      The reader refines old v1 sidecars with preserved statement text.
   R4  end-to-end vs gen_drcdb --svrf: every db check name resolves
       in the sidecar, constraint values match the generator formula
       through all five emitted syntax styles (spaced/fused/range/
@@ -617,6 +622,77 @@ def r3b(tmp):
           str((sorted(d.layers), d.warnings)))
 
 
+def r3c(tmp):
+    print("[R3c] dimensional metric classification")
+    # Mentor Graphics, Calibre Rule Writing: Basic Concepts, slides
+    # 1-85, 1-91, 1-102 and 1-140. Compound layer expressions are outside
+    # this refinement; counting their identifiers would invent arity.
+    cases = [
+        ("single-layer internal stays width", "INT a < .1", ["width"]),
+        ("two-layer internal is overlap", "INT a b < .1", ["overlap"]),
+        ("long internal name and fused range", "INTERNAL a b >0<.1",
+         ["overlap", "overlap"]),
+        ("simple directed layers preserve arity", "INT [a] (b) < .1", ["overlap"]),
+        ("compound single-layer expression not guessed", "INT (a AND b) < .1", ["width"]),
+        ("external notch option", "EXT a < .1 NOTCH", ["notch"]),
+        ("long external name case insensitive", "external a < .1 notch", ["notch"]),
+        ("wrapped notch updates every chain bound", "EXT a >0\n <.1\n NOTCH",
+         ["notch", "notch"]),
+        ("wrapped layer then bound then notch", "EXT a\n <.1\n NOTCH", ["notch"]),
+        ("notch substring is not an option", "EXT a < .1 NOTCHED", ["space"]),
+        ("notch two-layer syntax not invented", "EXT a b < .1 NOTCH", ["space"]),
+        ("space option stays space", "EXT a < .1 SPACE", ["space"]),
+        ("external overlap option stays space", "EXT a b < .1 OVERLAP", ["space"]),
+        ("enclosure overlap option stays enclosure", "ENC a b < .1 OVERLAP", ["enclosure"]),
+        ("extension uses enclosure operation", "ENCLOSURE a b < .1", ["enclosure"]),
+        ("wrapped internal still overlap", "INT a b\n >0\n <.1", ["overlap", "overlap"]),
+        ("wrapped intersection option retained", "EXT a b < .1\n OVERLAP\n INTERSECTING ONLY", ["space"]),
+        ("wrapped extended option has no primary bound", "EXT a b < .1\n OPPOSITE EXTENDED\n <.05", ["space"]),
+        ("assignment measurement retains overlap", "err = INT a b < .1", ["overlap"]),
+    ]
+    for label, stmt, want in cases:
+        p = os.path.join(tmp, "metric.svrf")
+        w(p, "LAYER a 1\nLAYER b 2\nX {\n %s\n}\n"
+             "NEXT {\n EXT a < .2\n}\n" % stmt)
+        d = svrf.parse_deck(p)
+        c = d.checks["X"]
+        got = [con["metric"] for con in c.constraints]
+        text = " ".join((stmt.split("=", 1)[1] if stmt.startswith("err =")
+                         else stmt).split())
+        check(label, got == want
+              and all(" ".join(con["text"].split()) == text for con in c.constraints)
+              and d.checks["NEXT"].constraints[0]["metric"] == "space",
+              str(c.constraints))
+        # This compares parser state (raw Rust output, not loader-refined)
+        # against the old-sidecar reader's exact classification contract.
+        check("reader parity: " + label,
+              all(reader.constraint_metric(
+                  "width" if con["metric"] == "overlap" else
+                  "space" if con["metric"] == "notch" else con["metric"],
+                  con["text"]) == con["metric"] for con in c.constraints))
+    check("intersection option words are never layer operands",
+          reader.rhs_operands("EXT a b < .1 OVERLAP INTERSECTING ONLY OPPOSITE EXTENDED")
+          == ["a", "b"])
+    p = os.path.join(tmp, "old-metric.json")
+    w(p, json.dumps({"format": reader.FORMAT, "version": 1, "checks": {
+        "old": {"constraints": [
+            {"metric": "width", "text": "INT a b < .1", "value": .1, "op": "<"},
+            {"metric": "space", "text": "EXT a < .1 NOTCH", "value": .1, "op": "<"},
+            {"metric": "space", "text": "EXT a b < .1 OVERLAP", "value": .1, "op": "<"},
+            {"metric": "enclosure", "text": "ENC a b < .1", "value": .1, "op": "<"},
+            {"metric": "extension", "text": "ENC a b < .1", "value": .1, "op": "<"},
+            {"metric": "space", "value": .1, "op": "<"},
+        ]}}}))
+    check("old v1 reader refines only evidenced width/space",
+          [c["metric"] for c in reader.load_rules(p)["checks"]["old"]["constraints"]]
+          == ["overlap", "notch", "space", "enclosure", "extension", "space"])
+    p = os.path.join(tmp, "not-heads.svrf")
+    w(p, "LAYER a 1\nX {\n NOTCH a < .1\n OVERLAP a < .1\n EXTENSION a < .1\n}\n")
+    d = svrf.parse_deck(p)
+    check("option names not invented as measurement heads",
+          not d.checks["X"].constraints and d.stats["unknown_in_block"] == 3)
+
+
 def r4(tmp):
     print("[R4] end-to-end vs gen_drcdb --svrf")
     db = os.path.join(tmp, "e2e.db")
@@ -758,6 +834,7 @@ def main():
         r2(tmp)
         r3(tmp)
         r3b(tmp)
+        r3c(tmp)
         r4(tmp)
         r5(tmp)
     print("validate_svrf:", "FAIL" if FAIL else "all green")

@@ -37,7 +37,8 @@ pack; D2 keeps the retirement honest.)
       sync across toggles made after it is built.
   D8  diagonal closest endpoints of a parallel edge pair retain the
       true minimum first and add deterministic horizontal + vertical
-      component rulers; facing and non-parallel pairs stay single.
+      component rulers; midpoint placement never changes the numeric
+      minimum, and facing/non-parallel pairs stay single.
   D9  waive autosave (user calls 2026-08-28: per-reviewer dotfile
       BESIDE the pack - server-side floe forwards the display, so
       $HOME may be absent; durable records = explicit save-as; the
@@ -57,6 +58,7 @@ pack; D2 keeps the retirement honest.)
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
 
+import math
 import os
 import struct
 import subprocess
@@ -569,7 +571,34 @@ def main():
                          (2.0, 1.0), (3.0, 2.0)])
     if len(drc.cd_segments(skew)) != 1:
         fail("non-parallel pair gained component rulers")
-    print("D8 OK: diagonal parallel gap + X/Y component rulers")
+    eq(drc.cd_segments(facing), [(1.5, 0.0, 1.5, 1.0)],
+       "facing parallel ruler lost its midpoint placement")
+
+    # The former dmin * 1.0001 midpoint allowance turned this exact
+    # 1.00000 minimum into 1.00005, despite the edges not being parallel.
+    near_parallel = [(0.0, 0.0), (2.0, 0.0),
+                     (0.0, 1.0), (2.0, 1.0001)]
+    # Parallel alone is not sufficient: with disjoint projections, a
+    # remote midpoint used to pass the same relative tolerance too.
+    far_parallel = [(0.0, 0.0), (2.0, 0.0),
+                    (3.0, 1000.0), (4.0, 1000.0)]
+    for pts, expected, component_count in (
+            (near_parallel, 1.0, 1),
+            (far_parallel, math.hypot(1.0, 1000.0), 3)):
+        for reverse_a in (False, True):
+            for reverse_b in (False, True):
+                a = pts[:2][::-1] if reverse_a else pts[:2]
+                b = pts[2:][::-1] if reverse_b else pts[2:]
+                for edges in (a + b, b + a):
+                    segments = drc.cd_segments(drc.DrcError("e", 5, edges))
+                    eq(len(segments), component_count,
+                       "edge reversal changed minimum/component classification")
+                    x0, y0, x1, y1 = segments[0]
+                    distance = math.hypot(x1 - x0, y1 - y0)
+                    eq(distance, expected, "midpoint changed the numeric minimum")
+                    eq("%.5f" % distance, "%.5f" % expected,
+                       "minimum CD changed at five decimal places")
+    print("D8 OK: exact minima + safe midpoint + endpoint-invariant components")
 
     # D9: waive autosave - save-as/load, refusal, read-only pack,
     # corrupt-aside, in-pack seed migration

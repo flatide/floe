@@ -37,7 +37,7 @@ cd "$(dirname "$0")/.."
 GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
-render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
+render_goldens render_speckle render_frames drc_ice drc_clusters drc_markers drc_delta svrf oasis_shapes \
 jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree rust_renderer klayout"
 alias_gates() {
     case "$1" in
@@ -46,7 +46,7 @@ alias_gates() {
         occ)      echo "unit_vfs occupancy" ;;
         render)   echo "unit_render rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree render_goldens render_speckle render_frames klayout" ;;
         indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives cell_tree" ;;
-        python)   echo "index_cli vfs_profile floe2 drc_ice svrf gen_main01" ;;
+        python)   echo "index_cli vfs_profile floe2 drc_ice drc_clusters drc_markers drc_delta svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
     esac
@@ -274,6 +274,19 @@ if gate render_frames; then RAN="$RAN render_frames"
 # DRC pack (.<db>.tray): reading through the pack == ASCII parse
 if gate drc_ice; then RAN="$RAN drc_ice"
     .venv/bin/python tools/validate_drc_ice.py; fi
+# Compact user clusters, viewer navigation, and pre-cap spatial membership.
+if gate drc_clusters; then RAN="$RAN drc_clusters"
+    .venv/bin/python tools/validate_drc_clusters.py
+    .venv/bin/python tools/validate_drc_cluster_spatial.py; fi
+# Whole-rule/cluster adaptive markers and asynchronous viewer interaction.
+if gate drc_markers; then RAN="$RAN drc_markers"
+    .venv/bin/python tools/validate_drc_markers.py
+    .venv/bin/python tools/validate_drc_marker_gui.py; fi
+# Fixed-precision CD delta groups, worker cancellation, and viewer scopes.
+if gate drc_delta; then RAN="$RAN drc_delta"
+    .venv/bin/python tools/validate_drc_delta.py
+    .venv/bin/python tools/validate_drc_delta_worker.py
+    .venv/bin/python tools/validate_drc_delta_gui.py; fi
 # SVRF subset parser: preprocessing / derivation closure / check
 # extraction / end-to-end vs gen_drcdb --svrf
 if gate svrf; then RAN="$RAN svrf"

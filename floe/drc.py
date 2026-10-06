@@ -161,26 +161,30 @@ def cd_segments(e):
             return []   # edges properly cross: gap is zero
         cand = [(p, foot(p, b0, b1)) for p in (a0, a1)]
         cand += [(foot(p, a0, a1), p) for p in (b0, b1)]
-        dmin = min(dist(p, q) for p, q in cand)
+        p, q = min(cand, key=lambda c: dist(c[0], c[1]))
+        dmin = dist(p, q)
         if dmin <= 0:
             return []   # touching edges: no gap
-        mid = ((a0[0] + a1[0]) / 2.0, (a0[1] + a1[1]) / 2.0)
-        fm = foot(mid, b0, b1)
-        if dist(mid, fm) <= dmin * 1.0001:
-            return [seg(mid, fm)]
-        p, q = min(cand, key=lambda c: dist(c[0], c[1]))
-        out = [seg(p, q)]
-
-        # Disjoint projections of parallel edges produce a diagonal
-        # endpoint-to-endpoint minimum.  Keep that true minimum first,
-        # then expose its X/Y components as an L between the same points.
-        # The sorted endpoints make the elbow independent of record order.
         adx, ady = a1[0] - a0[0], a1[1] - a0[1]
         bdx, bdy = b1[0] - b0[0], b1[1] - b0[1]
         al2, bl2 = adx * adx + ady * ady, bdx * bdx + bdy * bdy
         cross = adx * bdy - ady * bdx
         parallel = (al2 > 0 and bl2 > 0
                     and abs(cross) <= 1e-12 * math.sqrt(al2 * bl2))
+        mid = ((a0[0] + a1[0]) / 2.0, (a0[1] + a1[1]) / 2.0)
+        fm = foot(mid, b0, b1)
+        # Centering is only a drawing choice: it must not change the
+        # numeric minimum consumed by CD details and delta grouping.
+        # A relative tolerance admitted skew edges and even disjoint
+        # parallel projections, changing the displayed five-decimal CD.
+        if parallel and dist(mid, fm) == dmin:
+            return [seg(mid, fm)]
+        out = [seg(p, q)]
+
+        # Disjoint projections of parallel edges produce a diagonal
+        # endpoint-to-endpoint minimum.  Keep that true minimum first,
+        # then expose its X/Y components as an L between the same points.
+        # The sorted endpoints make the elbow independent of record order.
         if parallel and p[0] != q[0] and p[1] != q[1]:
             lo, hi = sorted((p, q))
             elbow = (hi[0], lo[1])
@@ -1283,7 +1287,7 @@ class IcePack(object):
         return self._block(bi)[rel % _ICE2_BLOCK]
 
     def query_rect(self, x0_um, y0_um, x1_um, y1_um, cap=2000,
-                   checks=None, waived=None):
+                   checks=None, waived=None, members=None):
         """Errors intersecting the um rect -> [(ci, ei, DrcError)].
 
         STREAMING with early exit (2026-08-14): per check the BLOCK
@@ -1297,7 +1301,12 @@ class IcePack(object):
         `checks` restricts the query to those rules; None = all.
         `waived` = None/True/False filters by review status INSIDE
         the query, before the cap - a caller-side post-filter over
-        a capped result silently drops matches past the cap."""
+        a capped result silently drops matches past the cap.
+        `members` maps rule indices to cluster memberships exposing
+        mask(start, count), a boolean mask over a rule-local range.
+        Missing rules are unrestricted. Membership is intersected
+        with the spatial/status mask before geometry decode and the
+        cap, without materializing all indices of a large cluster."""
         import math as _math
         import numpy as np
         prec = self.precision
@@ -1317,6 +1326,7 @@ class IcePack(object):
         out = []
         for ci in hitc:
             ci = int(ci)
+            membership = members.get(ci) if members is not None else None
             if waived is True and int(self._wcount[ci]) == 0:
                 continue   # O(1) skip: rule has no waived errors
             cx0, cy0, cx1, cy1 = (int(v) for v in cbb[ci])
@@ -1358,6 +1368,8 @@ class IcePack(object):
                               (qs[:, 2] >= qlx) &
                               (qs[:, 1] <= qhy) &
                               (qs[:, 3] >= qly))
+                        if membership is not None:
+                            qm &= membership.mask(base, rcnt)
                         if waived is not None:
                             ssl = self._status[es + base:
                                                es + base + rcnt]
@@ -1384,6 +1396,8 @@ class IcePack(object):
                 qs = self._qbox[es + r0:es + r0 + rcnt]
                 qm = ((qs[:, 0] <= qhx) & (qs[:, 2] >= qlx) &
                       (qs[:, 1] <= qhy) & (qs[:, 3] >= qly))
+                if membership is not None:
+                    qm &= membership.mask(r0, rcnt)
                 if waived is not None:
                     ssl = self._status[es + r0:es + r0 + rcnt]
                     qm &= ((ssl == STATUS_WAIVED) if waived

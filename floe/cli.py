@@ -747,7 +747,7 @@ def _drc_layer_legend(c, layers):
 
 
 def _embed_error_png(path, e, bb_um, px, waived, rule, local,
-                     legend=None):
+                     legend=None, constraints=()):
     """flateyes-embed annotations (user call 2026-08-19): the error
     geometry, its CD ruler(s) and the length labels ride INSIDE the
     PNG as the flateyes iTXt chunk (fe_embed format, vendored) -
@@ -757,6 +757,7 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local,
     the rulers in um by itself.  A one-edge ruler uses the viewer's
     same 14 px normal offset, without endpoint extension lines."""
     from . import drc as drc_mod
+    from .drc_delta import area_label, ruler_segments
     from . import fe_embed as fe
     x0, y0, x1, y1 = bb_um
     ppu = px / max(1e-9, x1 - x0)          # square frame
@@ -789,27 +790,31 @@ def _embed_error_png(path, e, bb_um, px, waived, rule, local,
                                      color=col, width=2,
                                      casing=False))
     offset_single_edge = e.kind == "e" and len(e.pts) == 2
-    for sx0, sy0, sx1, sy1 in drc_mod.cd_segments(e):
+    for sx0, sy0, sx1, sy1 in ruler_segments(e, constraints):
         a, b = P(sx0, sy0), P(sx1, sy1)
         if a != b:
             if offset_single_edge:
                 a, b = drc_mod.offset_screen_segment(a, b)
             annos.append(fe.ruler(a[0], a[1], b[0], b[1]))
+    label = area_label(e, constraints)
+    if label is not None:
+        x, y, text = label
+        x, y = P(x, y)
+        annos.append(fe.text(x, y, text))
     note = "%s #%d(%d)%s" % (rule, local, e.num,
                              " - waived" if waived else "")
     fe.embed(path, annos, ppu=ppu, unit="um", note=note,
              legend=legend)
 
 
-def _drc_isolate_layers_cli(args, c, d, rule):
-    """SVRF sidecar layer isolation for snapshots (viewer double-
-    click parity): only the rule's source GDS layers stay on.
-    Returns resolved [(l, d), ...] or None = no metadata (render
-    all layers, note on stderr). Sidecar search mirrors the
-    viewer: --drc-rules, deck-basename NEXT TO the db, recorded
-    deck path, <db>.rules.json."""
+def _drc_rule_meta_cli(args, d):
+    """Load snapshot metadata for both rulers and layer isolation.
+
+    Search order mirrors the viewer: --drc-rules, deck-basename next
+    to the db, recorded deck path, then <db>.rules.json.
+    """
     from . import svrf
-    path = args.drc_rules
+    path = getattr(args, "drc_rules", None)
     if path is None:
         deck = None
         for ch in d.checks[:50]:
@@ -828,15 +833,22 @@ def _drc_isolate_layers_cli(args, c, d, rule):
         cands.append(args.drc + ".rules.json")
         path = next((p for p in cands if os.path.isfile(p)), None)
         if path is None:
-            print("[floe] no rules.json sidecar found - rendering "
-                  "all layers", file=sys.stderr)
-            return None
+            print("[floe] no rules.json sidecar found - "
+                  "using geometry-only rulers", file=sys.stderr)
+            return {}
     try:
-        meta = svrf.load_rules(path)
+        return svrf.load_rules(path)
     except (OSError, ValueError) as exc:
-        print("[floe][warn] rules sidecar unusable (%s) - all "
-              "layers" % exc, file=sys.stderr)
-        return None
+        print("[floe][warn] rules sidecar unusable (%s) - "
+              "using geometry-only rulers" % exc, file=sys.stderr)
+        return {}
+
+
+def _drc_isolate_layers_cli(args, c, d, rule, meta=None):
+    """SVRF layer isolation for snapshots; explicit --layers stays independent
+    of the metadata used to choose ruler directions."""
+    if meta is None:
+        meta = _drc_rule_meta_cli(args, d)
     ent = (meta.get("checks") or {}).get(rule) or {}
     sg = ent.get("source_gds") or []
     if not sg:
@@ -890,10 +902,12 @@ def _render_drc_errors(args, c):
         raise SystemExit("floe: rule %r has no errors"
                          % args.drc_rule)
     dbu = c.meta["dbu"]
+    rule_meta = _drc_rule_meta_cli(args, d)
+    constraints = ((rule_meta.get("checks") or {}).get(ch.name) or {}).get("constraints")
     if args.layers is not None:
         layers = c.resolve_layers(args.layers)  # explicit wins
     else:
-        layers = _drc_isolate_layers_cli(args, c, d, ch.name)
+        layers = _drc_isolate_layers_cli(args, c, d, ch.name, meta=rule_meta)
     depth = (None if args.depth is None or args.depth >= 999
              else args.depth)
     frac = min(max(args.drc_frac, 0.02), 1.0)
@@ -954,7 +968,7 @@ def _render_drc_errors(args, c):
             waived = (has_st and d.get_status(ci, k)
                       == drc_mod.STATUS_WAIVED)
             _embed_error_png(path, e, bb_um, _px_width(args), waived,
-                             ch.name, k + 1, legend=legend)
+                             ch.name, k + 1, legend=legend, constraints=constraints)
             print("%d\t%d\t%s" % (k + 1, e.num, path))
     finally:
         w.stop()

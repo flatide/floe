@@ -40,7 +40,53 @@ KEYWORDS = set(MEAS) | {
     "RECTANGLE", "SQUARE", "COUNT", "COINCIDENT", "EXPAND",
     "TOP", "LEFT", "RIGHT", "BOTTOM", "GOOD", "BAD", "MAX", "MIN",
     "EVEN", "ODD", "MULTI", "ORTHOGONAL", "POLYGON", "CORNER",
-    "CENTERLINE", "SPACE", "WIDTH", "NOTCH"}
+    "CENTERLINE", "SPACE", "WIDTH", "NOTCH", "OVERLAP",
+    "INTERSECTING", "EXTENDED"}
+
+_OP_RX = re.compile(r"(?<![A-Za-z_])(?:<=|>=|==|!=|<|>)")
+_BOUND_RX = re.compile(r"(?<![A-Za-z_])(?:<=|>=|==|!=|<|>)\s*[A-Za-z0-9_.+\-]+")
+
+
+def constraint_metric(metric, text):
+    """Refine old sidecar labels only when the statement gives evidence.
+
+    Mentor's Calibre Rule Writing: Basic Concepts, slides 1-85, 1-91,
+    1-102 and 1-140: two-layer INTERNAL measures overlap, single-layer
+    EXTERNAL NOTCH measures a notch, and ENCLOSURE covers both enclosure
+    and extension. OVERLAP is also an intersection OPTION for INT/EXT/ENC;
+    it must never change EXTERNAL or ENCLOSURE into an overlap metric.
+    Compound layer expressions are deliberately not guessed from ID count.
+    Keep this classification in sync with rust/cli/src/svrf.rs.
+    """
+    if metric not in ("width", "space") or not isinstance(text, str):
+        return metric
+    parts = text.split(None, 1)
+    if len(parts) != 2 or MEAS.get(parts[0].upper()) != metric:
+        return metric
+    rest = parts[1]
+    first = _OP_RX.search(rest)
+    operands = rest[:first.start()] if first else rest
+    names = operands.split()
+    for name in names:
+        if ((name.startswith("[") and name.endswith("]")) or
+                (name.startswith("(") and name.endswith(")"))):
+            name = name[1:-1]
+        if not _ID_RX.fullmatch(name) or name.upper() in KEYWORDS:
+            return metric
+    if metric == "width" and len(names) == 2:
+        return "overlap"
+    if metric == "space" and len(names) == 1 and first:
+        end = first.start()
+        while True:
+            bound = _BOUND_RX.match(rest, end)
+            if bound is None:
+                break
+            end = bound.end()
+            while end < len(rest) and rest[end].isspace():
+                end += 1
+        if "NOTCH" in (word.upper() for word in _ID_RX.findall(rest[end:])):
+            return "notch"
+    return metric
 
 
 def rhs_operands(rhs):
@@ -61,4 +107,12 @@ def load_rules(path):
         sys.stderr.write("[floe][warn] %s is a newer rules format "
                          "(v%s > v%d)\n"
                          % (path, data.get("version"), VERSION))
+    # Existing v1 sidecars already retain the statement text, so this
+    # refinement does not require users to rebuild their metadata.
+    for check in data.get("checks", {}).values():
+        for constraint in check.get("constraints", ()):
+            metric = constraint.get("metric")
+            refined = constraint_metric(metric, constraint.get("text"))
+            if refined != metric:
+                constraint["metric"] = refined
     return data

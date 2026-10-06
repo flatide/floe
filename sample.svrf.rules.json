@@ -1,0 +1,223 @@
+{
+ "checks": {
+  "M1.AREA": {
+   "constraints": [
+    {
+     "metric": "area",
+     "op": "<",
+     "text": "AREA M1 < 0.01000",
+     "value": 0.01
+    }
+   ],
+   "desc": "Local #1: rectangle 0.00400 um^2; #2: triangle 0.00600 um^2; #3: L-shape 0.00360 um^2.\nShow polygon area instead of width/height rulers. Deltas: 0.00600 / 0.00400 / 0.00640.",
+   "layers": [
+    "M1"
+   ],
+   "source_gds": [
+    [
+     1,
+     null
+    ]
+   ]
+  },
+  "M1.EXTENSION": {
+   "constraints": [
+    {
+     "metric": "enclosure",
+     "op": "<",
+     "text": "ENCLOSURE M1 M2 < 0.05000",
+     "value": 0.05
+    }
+   ],
+   "desc": "Extension uses ENCLOSURE too. Local #1: horizontal only; #2: edge gap 0.03000.",
+   "layers": [
+    "M1",
+    "M2"
+   ],
+   "source_gds": [
+    [
+     1,
+     null
+    ],
+    [
+     2,
+     null
+    ]
+   ]
+  },
+  "M1.M2.OVERLAP": {
+   "constraints": [
+    {
+     "metric": "overlap",
+     "op": "<",
+     "text": "INTERNAL M1 M2 < 0.05000",
+     "value": 0.05
+    }
+   ],
+   "desc": "Two-layer INTERNAL is overlap. Local #1: vertical only; #2: edge gap 0.01500.",
+   "layers": [
+    "M1",
+    "M2"
+   ],
+   "source_gds": [
+    [
+     1,
+     null
+    ],
+    [
+     2,
+     null
+    ]
+   ]
+  },
+  "M1.NOTCH": {
+   "constraints": [
+    {
+     "metric": "notch",
+     "op": ">",
+     "text": "EXTERNAL M1 > 0 < 0.05000 NOTCH",
+     "value": 0.0
+    },
+    {
+     "metric": "notch",
+     "op": "<",
+     "text": "EXTERNAL M1 > 0 < 0.05000 NOTCH",
+     "value": 0.05
+    }
+   ],
+   "desc": "Local #1: horizontal only, #2: vertical only, #3: edge gap 0.02345.\nThe wrapped range and NOTCH option belong to one measurement statement.",
+   "layers": [
+    "M1"
+   ],
+   "source_gds": [
+    [
+     1,
+     null
+    ]
+   ]
+  },
+  "M1.SPACE.1": {
+   "constraints": [
+    {
+     "metric": "space",
+     "op": "<",
+     "text": "EXTERNAL M1 < 0.05000 SPACE",
+     "value": 0.05
+    }
+   ],
+   "desc": "20 edge-pair errors; CD = 0.01001 / 0.01500 / 0.02000 / 0.02345 / 0.03000.\nExisting sample.db.clusters groups arbitrary local error numbers.",
+   "layers": [
+    "M1"
+   ],
+   "source_gds": [
+    [
+     1,
+     null
+    ]
+   ]
+  },
+  "M1.WIDTH.MAX": {
+   "constraints": [
+    {
+     "metric": "width",
+     "op": ">",
+     "text": "INTERNAL M1 > 0.08000",
+     "value": 0.08
+    }
+   ],
+   "desc": "Local #1: horizontal only, #2: vertical only, #3: both directions.\nRectangle sizes: 0.10000 x 0.02000, 0.02000 x 0.10000, 0.10000 x 0.12000.\nMaximum requirement: choose the larger violating CD; estimated CD.",
+   "layers": [
+    "M1"
+   ],
+   "source_gds": [
+    [
+     1,
+     null
+    ]
+   ]
+  },
+  "M1.WIDTH.MIN": {
+   "constraints": [
+    {
+     "metric": "width",
+     "op": "<",
+     "text": "INTERNAL M1 < 0.05000",
+     "value": 0.05
+    }
+   ],
+   "desc": "Local #1: horizontal only, #2: vertical only, #3: both directions.\nRectangle sizes: 0.02000 x 0.10000, 0.10000 x 0.02000, 0.02000 x 0.03000.\nMinimum requirement: choose the smaller violating CD; estimated CD.",
+   "layers": [
+    "M1"
+   ],
+   "source_gds": [
+    [
+     1,
+     null
+    ]
+   ]
+  },
+  "VIA1.ENCLOSURE": {
+   "constraints": [
+    {
+     "metric": "enclosure",
+     "op": "<",
+     "text": "ENCLOSURE VIA1 M1 < 0.05000",
+     "value": 0.05
+    }
+   ],
+   "desc": "Local #1: 0.02000 x 0.10000 rectangle; #2: edge gap 0.02500.",
+   "layers": [
+    "VIA1",
+    "M1"
+   ],
+   "source_gds": [
+    [
+     1,
+     null
+    ],
+    [
+     3,
+     null
+    ]
+   ]
+  }
+ },
+ "deck": "sample.svrf",
+ "defines": {},
+ "derived": {},
+ "format": "floe-svrf-rules",
+ "generated_by": "floe-index 0.12.275",
+ "layers": {
+  "M1": [
+   [
+    1,
+    null
+   ]
+  ],
+  "M2": [
+   [
+    2,
+    null
+   ]
+  ],
+  "VIA1": [
+   [
+    3,
+    null
+   ]
+  ]
+ },
+ "stats": {
+  "checks": 8,
+  "cmacro_calls": 0,
+  "derivations": 0,
+  "env_switches": {},
+  "files": 1,
+  "includes": [],
+  "lines": 59,
+  "skipped": 0,
+  "warnings": []
+ },
+ "variables": {},
+ "version": 1
+}
