@@ -464,6 +464,40 @@ class DeltaViewerTests(unittest.TestCase):
         self.assertEqual(win._delta_store[1][1], "1")
         self.assertEqual(win._delta_store[1][2].estimated_count, 1)
 
+    def test_group_rows_number_bins_independently_of_matching_condition(self):
+        cases = [
+            ([edge(0.7), edge(0.9)],
+             [constraint("length", 0.1), constraint("length", 1)],
+             ["Group #1 · condition 2 ·", "Group #2 · condition 2 ·"],
+             [(1, 1), (1, 3)], [[1], [0]]),
+            ([edge(0.7)],
+             [constraint("length", 0.1), constraint("length", 0.2),
+              constraint("length", 1)],
+             ["Group #1 · condition 3 ·"], [(2, 3)], [[0]]),
+            ([edge(0.7)], [constraint("length", 0.1)],
+             ["Group #1 · Unmeasurable"], [(-1, 0)], [[0]]),
+        ]
+        for errors, constraints, prefixes, keys, memberships in cases:
+            with self.subTest(prefixes=prefixes):
+                viewer = fixture(errors, constraints)
+                win = viewer._drcwin
+                win._delta_store = GroupStore()
+                win._delta_tree = Mock()
+                win._delta_label = Mock()
+                win._delta_prev, win._delta_next = Mock(), Mock()
+                viewer._drc_delta_refresh()
+                rows = win._delta_store[1:]
+                self.assertEqual(len(rows), len(prefixes))
+                self.assertEqual([row[2].key for row in rows], keys)
+                self.assertEqual([row[2].page(0, 1000) for row in rows], memberships)
+                for row, prefix in zip(rows, prefixes):
+                    self.assertTrue(row[0].startswith(prefix), row[0])
+                selected = rows[-1][2]
+                viewer._drc_delta_choose(selected)
+                self.assertIs(viewer._drc_active_members(), selected)
+                self.assertEqual(viewer._drc_active_members().page(0, 1000),
+                                 memberships[-1])
+
     def test_unresolved_alternative_explanation_is_shown_with_estimated_cd(self):
         error = drc.DrcError("e", 1, [(0, 0), (1, 0), (0, 0.05), (1, 0.05)])
         constraints = [constraint("space", 0.1),
@@ -763,17 +797,23 @@ class DeltaViewerTests(unittest.TestCase):
         self.assertEqual(win._delta_store[0][0], "All errors")
         self.assertEqual([row[2].key for row in win._delta_store[1:]],
                          [(0, ei) for ei in range(50)])
+        self.assertEqual([row[0].split(" · ", 1)[0] for row in win._delta_store[1:]],
+                         ["Group #%d" % number for number in range(1, 51)])
         win._delta_tree.get_selection().select_iter.assert_called_with(8)
         win._delta_tree.get_selection().select_iter.reset_mock()
         viewer._drc_delta_page_step(1)
         self.assertEqual([row[2].key for row in win._delta_store[1:]],
                          [(0, ei) for ei in range(50, 100)])
+        self.assertEqual([row[0].split(" · ", 1)[0] for row in win._delta_store[1:]],
+                         ["Group #%d" % number for number in range(51, 101)])
         win._delta_tree.get_selection().select_iter.assert_not_called()
         self.assertEqual(viewer._drc_delta_group.key, (0, 7))
         self.assertEqual(viewer._drc_page, 11)
         viewer._drc_delta_page_step(100)
         self.assertEqual(len(win._delta_store), 4)
         self.assertEqual(viewer._drc_delta_page, 3)
+        self.assertEqual([row[0].split(" · ", 1)[0] for row in win._delta_store[1:]],
+                         ["Group #151", "Group #152", "Group #153"])
 
     def test_status_changes_update_groups_without_remeasuring_finished_index(self):
         viewer = fixture([rect(0.8), rect(1.2)])

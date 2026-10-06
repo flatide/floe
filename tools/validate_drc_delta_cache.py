@@ -112,6 +112,34 @@ class PersistentDeltaTests(unittest.TestCase):
         self.assertEqual([os.stat(path).st_mtime_ns for path in (measurement, membership)], stamps)
         self.assertEqual(members(first), members(second))
 
+    def test_restored_group_names_number_bins_not_condition_indices(self):
+        constraints = [{"metric": "width", "op": "<", "value": 0.01},
+                       CONSTRAINTS[0]]
+        index = cache.process_measure(self.index(constraints))
+        reopened = drc.IcePack(self.db.path, review=False,
+                               review_path=self.db._waive_path)
+        self.addCleanup(reopened.close)
+        restored_index = delta.DeltaIndex(reopened, 0, constraints)
+        with patch.object(cache, "_run_child", side_effect=AssertionError("CD child restarted")):
+            cache.process_measure(restored_index)
+        for mode in ("absolute", "percent"):
+            with self.subTest(mode=mode):
+                first = cache.process_group(index, 100, mode=mode)
+                expected = index.group(100, mode=mode)
+                self.assertEqual(len(first), 5)
+                names = [group.name for group in first.page(0, 10)]
+                for number, name in enumerate(names, 1):
+                    self.assertTrue(name.startswith("Group #%d · condition 2 ·" % number),
+                                    name)
+                membership = first._ids.filename
+                stamp = os.stat(membership).st_mtime_ns
+                restored = cache.process_group(restored_index, 100, mode=mode)
+                self.assertEqual([group.name for group in restored.page(0, 10)], names)
+                self.assertEqual([group.name for group in expected.page(0, 10)], names)
+                self.assertEqual(members(restored), members(expected))
+                self.assertEqual(restored._ids.filename, membership)
+                self.assertEqual(os.stat(membership).st_mtime_ns, stamp)
+
     def test_cluster_empty_unknown_and_noncontiguous_membership(self):
         index = cache.process_measure(self.index())
         cluster = Cluster("scattered", self.db, 0, [0, 17, 4093, 8100],

@@ -809,11 +809,15 @@ class DeltaGroup:
             self.unit = "%" if owner.mode == "percent" else (
                 "um2" if self.metric == "area" else "um")
             bound = owner.index.bound_ticks[self.constraint_index]
-            self.name = "#%d %s %s %s: [%s, %s) %s" % (
+            self.name = "condition %d · %s %s %s: [%s, %s) %s" % (
                 self.constraint_index + 1, self.metric,
                 con.get("op", "?"), format_ticks(bound),
                 format_ticks(self.low_ticks),
                 format_ticks(self.high_ticks), self.unit)
+        # A condition can produce several bins, and earlier conditions may
+        # produce none. Number directory rows, including the unknown group,
+        # independently of the condition provenance and stable membership key.
+        self.name = "Group #%d · %s" % (row + 1, self.name)
         if self.estimated_count:
             self.name += " · estimated %d total" % self.estimated_count
 

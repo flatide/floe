@@ -356,6 +356,29 @@ def fill_rect(buf, x, y, w, h, rgba):
         buf.new_subpixbuf(x, y, w, h).fill(rgba)
 
 
+def stamp_drc_circle(buf, x, y, radius, color, secondary=None, sprites=None):
+    """Composite a reusable circle sprite, clipped at the canvas edges."""
+    from .drc_marker_style import circle_rgba
+    if sprites is None:
+        sprites = {}
+    key = (radius, color, secondary)
+    sprite = sprites.get(key)
+    side = 2 * radius + 1
+    if sprite is None:
+        sprite = GdkPixbuf.Pixbuf.new_from_bytes(
+            GLib.Bytes.new(circle_rgba(radius, color, secondary)),
+            GdkPixbuf.Colorspace.RGB, True, 8, side, side, side * 4)
+        sprites[key] = sprite
+    origin_x, origin_y = int(round(x)) - radius, int(round(y)) - radius
+    left, top = max(0, origin_x), max(0, origin_y)
+    right = min(buf.get_width(), origin_x + side)
+    bottom = min(buf.get_height(), origin_y + side)
+    if right > left and bottom > top:
+        sprite.composite(buf, left, top, right - left, bottom - top,
+                         origin_x, origin_y, 1, 1,
+                         GdkPixbuf.InterpType.NEAREST, 255)
+
+
 def stamp_segment(buf, a, b, casing, core, px=2):
     """Line segment: flat rects for H/V, dabs for free angles.
     px=1 draws a hairline core (rulers/zoom band, user call
@@ -9457,6 +9480,7 @@ class Viewer:
 
     def _drc_stamp_markers(self, disp, obox, ospp):
         """Cache one transparent marker layer; repaint costs one composite."""
+        from .drc_marker_style import aggregate_radius
         width, height = disp.get_width(), disp.get_height()
         markers = self._drc_marker_request(obox, ospp, width, height)
         if not markers:
@@ -9467,37 +9491,38 @@ class Viewer:
             layer = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True,
                                        8, width, height)
             layer.fill(0)
-            singles, groups = [], []
-            for marker in sorted(markers, key=lambda m: m.count == 1):
+            singles, groups, sprites = [], [], {}
+            # Small circles and singleton picks stay above dense aggregates.
+            for marker in sorted(markers, key=lambda m: -m.count):
                 x = (marker.x / self.dbu - obox[0]) / ospp
                 y = (obox[3] - marker.y / self.dbu) / ospp
-                x = min(max(0, x), width - 1)
-                y = min(max(0, y), height - 1)
+                x = int(round(min(max(0, x), width - 1)))
+                y = int(round(min(max(0, y), height - 1)))
                 color = DRC_GREEN if marker.waived == marker.count else DRC_RED
                 if marker.count == 1:
                     fill_rect(layer, x - 2, y - 2, 5, 5, color)
                     singles.append((x, y, marker.ci, marker.ei))
                 else:
-                    # Hollow square = group; mixed review status shows both
-                    # colors. Counts live in hover/detail, avoiding text soup.
-                    fill_rect(layer, x - 4, y - 4, 9, 9, color)
-                    if 0 < marker.waived < marker.count:
-                        fill_rect(layer, x, y - 4, 5, 9, DRC_GREEN)
-                    fill_rect(layer, x - 2, y - 2, 5, 5, 0)
-                    groups.append((x, y, marker))
+                    radius = aggregate_radius(marker.count, width, height)
+                    secondary = (DRC_GREEN if 0 < marker.waived < marker.count
+                                 else None)
+                    stamp_drc_circle(layer, x, y, radius, color, secondary,
+                                     sprites=sprites)
+                    groups.append((x, y, radius, marker))
             cached = self._drc_marker_overlay = (key, layer, singles, groups)
         cached[1].composite(disp, 0, 0, width, height, 0, 0, 1, 1,
                             GdkPixbuf.InterpType.NEAREST, 255)
         self._drc_hits.extend(cached[2])
         self._drc_group_hits.extend(cached[3])
 
-    def _drc_group_at(self, x, y, r=7):
-        nearest, distance = None, r * r + 1
-        for hx, hy, marker in getattr(self, "_drc_group_hits", ()):
+    def _drc_group_at(self, x, y, r=0):
+        # Match the painted disk, including its edge; overlapping circles
+        # select the visible top one. Singleton hits are checked first.
+        for hx, hy, radius, marker in reversed(getattr(self, "_drc_group_hits", ())):
             d = (hx - x) ** 2 + (hy - y) ** 2
-            if d <= r * r and d < distance:
-                nearest, distance = marker, d
-        return nearest
+            if d <= (radius + r) ** 2:
+                return marker
+        return None
 
     def _drc_group_text(self, marker):
         return "%s · %d errors (%d waived) · double-click to zoom" % (

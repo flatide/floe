@@ -19,6 +19,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from floe import drc, gui  # noqa: E402
 from floe import drc_marker_worker as worker_mod  # noqa: E402
+from floe.drc_marker_style import aggregate_radius, circle_rgba  # noqa: E402
 from floe.drc_markers import Marker, MarkerQueryCancelled  # noqa: E402
 
 
@@ -48,6 +49,110 @@ def viewer_fixture():
     viewer.mode = "normal"
     viewer.overlay_mode = 0
     return viewer
+
+
+class MarkerCircleStyleTests(unittest.TestCase):
+    def test_count_bands_have_distinct_sizes_and_no_within_band_jitter(self):
+        bands = ((2, 9, 6), (10, 49, 8), (50, 99, 10),
+                 (100, 999, 12), (1000, 9999, 14),
+                 (10000, 99999, 16), (100000, 999999, 18),
+                 (1000000, 9999999, 20))
+        for first, last, radius in bands:
+            with self.subTest(band=(first, last)):
+                self.assertEqual(aggregate_radius(first, 1200, 800), radius)
+                self.assertEqual(aggregate_radius(last, 1200, 800), radius)
+
+    def test_viewport_scale_uses_short_side_and_keeps_size_bounded(self):
+        radius = aggregate_radius(1000, 1200, 800)
+        self.assertEqual(radius, aggregate_radius(1000, 800, 1200))
+        self.assertEqual(radius, aggregate_radius(1000, 12000, 800))
+        self.assertLess(aggregate_radius(1000, 600, 600), radius)
+        self.assertEqual(aggregate_radius(1000, 600, 600),
+                         aggregate_radius(1000, 60, 60))
+        self.assertEqual(aggregate_radius(1000, 1200, 1200), 21)
+        self.assertEqual(aggregate_radius(1000, 1200, 1200),
+                         aggregate_radius(1000, 12000, 12000))
+        self.assertEqual(aggregate_radius(10 ** 50, 12000, 12000), 32)
+        for count in (2, 10, 50, 100, 1000, 10000, 10 ** 12):
+            for width, height in ((1, 1), (800, 800), (10000, 10000)):
+                with self.subTest(count=count, viewport=(width, height)):
+                    value = aggregate_radius(count, width, height)
+                    self.assertIsInstance(value, int)
+                    self.assertGreater(value, 0)
+                    self.assertLessEqual(value, 32)
+
+    def test_circle_is_filled_translucent_with_antialiased_outline(self):
+        radius = 12
+        side = 2 * radius + 1
+        pixels = circle_rgba(radius, gui.DRC_RED)
+        self.assertEqual(len(pixels), side * side * 4)
+
+        def pixel(x, y):
+            start = (y * side + x) * 4
+            return tuple(pixels[start:start + 4])
+
+        center = pixel(radius, radius)
+        self.assertEqual(center[:3], (255, 82, 82))
+        self.assertGreater(center[3], 0, "aggregate center was hollow")
+        self.assertLess(center[3], 255, "fill obscured underlying layout")
+        for x, y in ((0, 0), (0, side - 1), (side - 1, 0),
+                     (side - 1, side - 1)):
+            self.assertEqual(pixel(x, y)[3], 0)
+        alpha = pixels[3::4]
+        self.assertGreater(max(alpha), center[3], "outline is not visible")
+        self.assertTrue(any(0 < a < center[3] for a in alpha),
+                        "edge lacks antialias coverage")
+        # Geometry and opacity must remain symmetric around the center.
+        for y in range(side):
+            for x in range(side):
+                self.assertEqual(pixel(x, y)[3], pixel(side - 1 - x, y)[3])
+                self.assertEqual(pixel(x, y)[3], pixel(x, side - 1 - y)[3])
+
+    def test_mixed_waiver_fill_has_both_colors_without_hollow_center(self):
+        radius = 10
+        side = 2 * radius + 1
+        pixels = circle_rgba(radius, gui.DRC_RED, gui.DRC_GREEN)
+        offset = radius * side * 4
+        left = tuple(pixels[offset + (radius - 2) * 4:
+                            offset + (radius - 2) * 4 + 4])
+        right = tuple(pixels[offset + (radius + 2) * 4:
+                             offset + (radius + 2) * 4 + 4])
+        self.assertEqual(left[:3], (255, 82, 82))
+        self.assertEqual(right[:3], (0, 230, 118))
+        self.assertGreater(left[3], 0)
+        self.assertEqual(left[3], right[3])
+        self.assertLess(left[3], 255)
+
+    def test_sprite_cache_reuses_identical_styles_and_clips_canvas_edges(self):
+        buf, sprite = Mock(), Mock()
+        buf.get_width.return_value = 100
+        buf.get_height.return_value = 80
+        make = Mock(return_value=sprite)
+        pixbuf = SimpleNamespace(Pixbuf=SimpleNamespace(new_from_bytes=make),
+                                 Colorspace=SimpleNamespace(RGB=0),
+                                 InterpType=SimpleNamespace(NEAREST=0))
+        glib = SimpleNamespace(Bytes=SimpleNamespace(new=lambda data: data))
+        sprites = {}
+        with patch.object(gui, "GdkPixbuf", pixbuf), patch.object(gui, "GLib", glib):
+            gui.stamp_drc_circle(buf, 0, 0, 8, gui.DRC_RED, sprites=sprites)
+            self.assertEqual(make.call_count, 1)
+            self.assertEqual(make.call_args.args[1:], (0, True, 8, 17, 17, 68))
+            self.assertEqual(len(make.call_args.args[0]), 17 * 17 * 4)
+            sprite.composite.assert_called_once_with(
+                buf, 0, 0, 9, 9, -8, -8, 1, 1, 0, 255)
+            gui.stamp_drc_circle(buf, 99, 79, 8, gui.DRC_RED, sprites=sprites)
+            self.assertEqual(make.call_count, 1, "same style rebuilt its sprite")
+            self.assertEqual(sprite.composite.call_args.args,
+                             (buf, 91, 71, 9, 9, 91, 71, 1, 1, 0, 255))
+            gui.stamp_drc_circle(buf, 200, 200, 8, gui.DRC_RED, sprites=sprites)
+            self.assertEqual(sprite.composite.call_count, 2)
+            gui.stamp_drc_circle(buf, 50, 50, 10, gui.DRC_RED, sprites=sprites)
+            gui.stamp_drc_circle(buf, 50, 50, 8, gui.DRC_GREEN, sprites=sprites)
+            gui.stamp_drc_circle(buf, 50, 50, 8, gui.DRC_RED,
+                                gui.DRC_GREEN, sprites=sprites)
+            self.assertEqual(make.call_count, 4,
+                             "different size/review colors shared a sprite")
+            self.assertEqual(len(sprites), 4)
 
 
 class MarkerViewerTests(unittest.TestCase):
@@ -115,7 +220,7 @@ class MarkerViewerTests(unittest.TestCase):
         old_key = viewer._drc_marker_key
         viewer._drc_marker_result = (old_key, ["old colors"])
         viewer._drc_hits = [(5, 5, 0, 1)]
-        viewer._drc_group_hits = [(6, 6, "old group")]
+        viewer._drc_group_hits = [(6, 6, 8, "old group")]
         viewer._drc_marker_invalidate()
         self.assertEqual(viewer._drc_hits, [])
         self.assertEqual(viewer._drc_group_hits, [])
@@ -197,9 +302,15 @@ class MarkerViewerTests(unittest.TestCase):
                                  Colorspace=SimpleNamespace(RGB=0),
                                  InterpType=SimpleNamespace(NEAREST=0))
         with patch.object(gui, "GdkPixbuf", pixbuf), \
-                patch.object(gui, "fill_rect") as fill:
+                patch.object(gui, "fill_rect") as fill, \
+                patch.object(gui, "stamp_drc_circle") as circle:
             viewer._drc_stamp_markers(disp, self.bounds, 10)
             first_calls = fill.call_count
+            circle.assert_called_once()
+            self.assertEqual(circle.call_args.args,
+                             (layer, 80, 50, aggregate_radius(200000, 100, 100),
+                              gui.DRC_RED, gui.DRC_GREEN))
+            fill.assert_called_once_with(layer, 18, 68, 5, 5, gui.DRC_RED)
             self.assertEqual(viewer._drc_hit_at(20, 70), (0, 1507))
             self.assertIsNone(viewer._drc_hit_at(80, 50))
             self.assertIs(viewer._drc_group_at(80, 50), group)
@@ -208,19 +319,63 @@ class MarkerViewerTests(unittest.TestCase):
             viewer._drc_group_hits.clear()
             viewer._drc_stamp_markers(disp, self.bounds, 10)
             self.assertEqual(fill.call_count, first_calls,
-                             "unchanged viewport repainted all marker squares")
+                             "unchanged viewport repainted singleton markers")
+            self.assertEqual(circle.call_count, 1,
+                             "unchanged viewport repainted aggregate circles")
             self.assertEqual(len(viewer._drc_hits), 1)
             self.assertEqual(len(viewer._drc_group_hits), 1)
             self.assertEqual(layer.composite.call_count, 2)
-            self.assertIn(gui.DRC_GREEN, [call.args[-1] for call in fill.call_args_list])
         self.assertIn("200000 errors (75000 waived)", viewer._drc_group_text(group))
+
+    def test_group_hit_uses_circle_size_and_topmost_painted_group(self):
+        viewer = self.viewer
+        large, small = object(), object()
+        viewer._drc_group_hits = [(30, 30, 20, large)]
+        self.assertIs(viewer._drc_group_at(50, 30), large)
+        self.assertIsNone(viewer._drc_group_at(50.01, 30))
+        self.assertIsNone(viewer._drc_group_at(49, 49),
+                          "transparent bounding-box corner received a hit")
+        # Both contain (30, 30), but the later/smaller painted circle wins
+        # even though its center is farther from the mouse.
+        viewer._drc_group_hits.append((34, 30, 6, small))
+        self.assertIs(viewer._drc_group_at(30, 30), small)
+        self.assertIs(viewer._drc_group_at(45, 30), large)
+
+    def test_dense_groups_paint_first_and_singleton_picks_remain_visible(self):
+        viewer = self.viewer
+        single = Marker(0, 9071, 0.5, 0.5, 1, 0, (0.5, 0.5, 0.5, 0.5), False)
+        small = Marker(0, 13, 0.5, 0.5, 10, 10, (0.4, 0.4, 0.6, 0.6), True)
+        large = Marker(0, 17, 0.5, 0.5, 10000, 0, (0.1, 0.1, 0.9, 0.9), True)
+        viewer._drc_marker_request = Mock(return_value=[small, single, large])
+        viewer._drc_marker_key = ("overlap",)
+        disp, layer = Mock(), Mock()
+        disp.get_width.return_value = disp.get_height.return_value = 100
+        pixbuf = SimpleNamespace(Pixbuf=SimpleNamespace(new=Mock(return_value=layer)),
+                                 Colorspace=SimpleNamespace(RGB=0),
+                                 InterpType=SimpleNamespace(NEAREST=0))
+        paints = Mock()
+        with patch.object(gui, "GdkPixbuf", pixbuf), \
+                patch.object(gui, "stamp_drc_circle", paints.circle), \
+                patch.object(gui, "fill_rect", paints.singleton):
+            viewer._drc_stamp_markers(disp, self.bounds, 10)
+        self.assertEqual([entry[0] for entry in paints.mock_calls],
+                         ["circle", "circle", "singleton"])
+        self.assertGreater(paints.circle.call_args_list[0].args[3],
+                           paints.circle.call_args_list[1].args[3])
+        self.assertEqual(paints.circle.call_args_list[1].args[4:],
+                         (gui.DRC_GREEN, None))
+        self.assertIs(paints.circle.call_args_list[0].kwargs["sprites"],
+                      paints.circle.call_args_list[1].kwargs["sprites"])
+        self.assertEqual([hit[-1] for hit in viewer._drc_group_hits], [large, small])
+        self.assertIs(viewer._drc_group_at(50, 50), small)
+        self.assertEqual(viewer._drc_hit_at(50, 50), (0, 9071))
 
     def test_hidden_overlays_clear_both_pick_lists(self):
         viewer = self.viewer
         viewer.overlay_mode = 2
         viewer._zoomdrag = None
         viewer._drc_hits = [(5, 5, 0, 1)]
-        viewer._drc_group_hits = [(6, 6, "group")]
+        viewer._drc_group_hits = [(6, 6, 8, "group")]
         viewer._draw_overlays(Mock(), self.bounds, 10)
         self.assertEqual(viewer._drc_hits, [])
         self.assertEqual(viewer._drc_group_hits, [])
