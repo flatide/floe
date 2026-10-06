@@ -435,7 +435,7 @@ class DeltaIndex:
                                         dtype=np.int64)
         self._auto_steps = {}
 
-    def _errors(self, cancelled):
+    def _errors(self, cancelled, blocks=None):
         db, ci = self.db, self.ci
         if not isinstance(db, IcePack):
             for ei, error in enumerate(db.checks[ci].errors):
@@ -447,7 +447,9 @@ class DeltaIndex:
         n = len(db.checks[ci].errors)
         bs, es = int(db._dir_bs[ci]), int(db._dir_es[ci])
         buf, precision = db._map, db.precision
-        for block in range((n + _ICE2_BLOCK - 1) // _ICE2_BLOCK):
+        if blocks is None:
+            blocks = range((n + _ICE2_BLOCK - 1) // _ICE2_BLOCK)
+        for block in blocks:
             _cancel(cancelled)
             rec = db._blk[bs + block]
             pos, count = int(rec["off"]), int(rec["cnt"])
@@ -493,22 +495,45 @@ class DeltaIndex:
         for ei, error in errors:
             if progress is not None and not ei % _CHUNK:
                 progress(ei, len(values))
-            pick = self._selector.pick(error)
-            if pick is None or self.bound_ticks[pick[0]] is None:
-                continue
-            try:
-                actual, _bound, _delta = measurement_ticks(pick)
-            except ValueError:
-                continue
-            values[ei] = actual
-            choices[ei] = pick[0]
-            estimated[ei] = pick.estimated
+            self._record_measurement(ei, error, values, choices, estimated)
         _cancel(cancelled)
         # Publish only a complete table so cancellation is safely reusable.
         values.flags.writeable = choices.flags.writeable = estimated.flags.writeable = False
         self.measured_ticks, self.constraint_indices = values, choices
         self.estimated_flags = estimated
         return self
+
+    def _record_measurement(self, ei, error, values, choices, estimated):
+        pick = self._selector.pick(error)
+        if pick is None or self.bound_ticks[pick[0]] is None:
+            return
+        try:
+            actual, _bound, _delta = measurement_ticks(pick)
+        except ValueError:
+            return
+        values[ei] = actual
+        choices[ei] = pick[0]
+        estimated[ei] = pick.estimated
+
+    def _native_fallback(self, values, choices, estimated, cancelled=None,
+                         progress=None):
+        """Recheck only native precision sentinels, decoding touched blocks."""
+        fallback = 0
+        for start in range(0, len(choices), _CHUNK):
+            _cancel(cancelled)
+            ids = np.flatnonzero(choices[start:start + _CHUNK] == -2) + start
+            if not len(ids):
+                continue
+            fallback += len(ids)
+            if progress is not None:
+                progress("Rechecking %d CD precision boundary cases" % fallback)
+            blocks = np.unique(ids // _ICE2_BLOCK)
+            for ei, error in self._errors(cancelled, blocks=blocks):
+                if choices[ei] != -2:
+                    continue
+                values[ei], choices[ei], estimated[ei] = 0, _UNKNOWN, False
+                self._record_measurement(ei, error, values, choices, estimated)
+        return fallback
 
     def _difference_chunk(self, ids, mode, cancelled):
         """Shared exact delta/ratio calculation for ranges and membership."""

@@ -131,6 +131,40 @@ class PersistentDeltaTests(unittest.TestCase):
         no_errors = cache.process_measure(self.index(ci=1))
         self.assertEqual(len(cache.process_group(no_errors)), 0)
 
+    def test_empty_rule_measure_and_groups_need_no_child_cache_or_temporary_files(self):
+        forbidden = AssertionError("empty rule touched preprocessing or cache I/O")
+        pids = []
+        with patch.object(cache, "_run_child", side_effect=forbidden), \
+                patch.object(cache, "load_measurements", side_effect=forbidden), \
+                patch.object(cachepath, "drc_analysis_dir", side_effect=forbidden), \
+                patch.object(cache.tempfile, "mkdtemp", side_effect=forbidden), \
+                patch.object(np, "memmap", side_effect=forbidden):
+            index = self.index(ci=1)
+            self.assertIs(cache.process_measure(index, process_callback=pids.append), index)
+            self.assertEqual(index.measured_ticks.tolist(), [])
+            self.assertEqual(index.constraint_indices.tolist(), [])
+            self.assertEqual(index.estimated_flags.tolist(), [])
+            self.assertEqual(cache.prepare_group_cache(index), 0)
+            for mode in ("absolute", "percent"):
+                for step in (None, 123):
+                    with self.subTest(mode=mode, step=step):
+                        groups = cache.process_group(self.index(ci=1), step, mode=mode,
+                                                     process_callback=pids.append)
+                        self.assertEqual((len(groups), groups.total), (0, 0))
+                        self.assertEqual(groups.page(0, 1000), [])
+                        self.assertEqual(groups._offsets.tolist(), [0])
+                        self.assertEqual(groups.step_ticks, 1 if step is None else step)
+                        self.assertEqual(groups.auto_step, step is None)
+                        self.assertEqual(groups.mode, mode)
+            with self.assertRaises(delta.DeltaQueryCancelled):
+                cache.process_measure(self.index(ci=1), cancelled=lambda: True)
+            with self.assertRaises(delta.DeltaQueryCancelled):
+                cache.process_group(self.index(ci=1), cancelled=lambda: True)
+            for options in ({"step": 0}, {"step": -1}, {"mode": "invalid"}):
+                with self.subTest(options=options), self.assertRaises(ValueError):
+                    cache.process_group(self.index(ci=1), **options)
+        self.assertEqual(pids, [])
+
     def test_status_pages_ranks_updates_and_private_snapshots(self):
         original = [0, 1, 4095, 4096, 4097, 8191, 8208]
         for ei in original:

@@ -12,6 +12,9 @@ use std::time::Instant;
 
 mod drcice;
 mod drcpack;
+mod drcprepare;
+mod drcmeasure;
+mod drcmeasure_math;
 mod svrf;
 mod vfs;
 
@@ -112,6 +115,12 @@ fn main() {
     if args.len() >= 3 && args[1] == "vfsd" {
         return vfs::vfsd_cmd(&args[2..]);
     }
+    if args.len() >= 2 && args[1] == "drc-prepare" {
+        return drcprepare::drcprepare_cmd(&args[2..]);
+    }
+    if args.len() >= 2 && args[1] == "drc-measure" {
+        return drcmeasure::drcmeasure_cmd(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "drc" {
         return drcice::drc_cmd(&args[2..]);
     }
@@ -145,6 +154,9 @@ fn main() {
              floe-index hier <outdir> [--check]  (add design.ovh, the cell tree's index, to a cache; --check = report it)\n       \
              floe-index drc <results.db> [out.tray] \
              [--pack] [--jobs N]\n       \
+             floe-index drc-prepare <results.db|pack.tray> [--svrf RULES_JSON] [--jobs N] [--rule NAME] [--backend auto|rust|python] [--spatial-only|--delta-only]\n       \
+             floe-index drc-measure <pack.tray> --rule-index N --plan PATH --out DIR [--jobs N] [--progress PATH]\n       \
+             floe-index drc-measure --protocol\n       \
              floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]... [-I DIR]... \
              [--follow-verbatim] [--no-env-switches]  (SVRF rule deck subset -> <deck>.rules.json)"
         );

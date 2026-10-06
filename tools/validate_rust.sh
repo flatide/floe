@@ -289,7 +289,9 @@ if gate drc_delta; then RAN="$RAN drc_delta"
     .venv/bin/python tools/validate_drc_delta_worker.py
     .venv/bin/python tools/validate_drc_delta_gui.py
     .venv/bin/python tools/validate_drc_delta_cache.py
+    .venv/bin/python tools/validate_drc_native.py
     .venv/bin/python tools/validate_drc_analysis.py
+    .venv/bin/python tools/validate_drc_prepare_cli.py
     .venv/bin/python tools/validate_drc_large_gui.py; fi
 # SVRF subset parser: preprocessing / derivation closure / check
 # extraction / end-to-end vs gen_drcdb --svrf

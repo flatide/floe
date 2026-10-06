@@ -487,6 +487,7 @@ floe(KLayout)와 floe2(Rust) 실행 파일을 모두 제공한다.
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/selfcheck
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 view /path/to/chip.oas
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 index /path/to/chip.oas
+    /opt/${FLOE_PORTABLE_PRODUCT}-portable/runtime/bin/floe-index drc-prepare /path/to/results.db --svrf /path/to/deck.rules.json --jobs 4
     # KLayout 포함 floe-portable에서만:
     /opt/floe-portable/floe view /path/to/chip.oas
 

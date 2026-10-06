@@ -41,11 +41,13 @@ no-op. 좌표 토큰이 정수가 아닌 db는 명확한 메시지와 함께 거
 ### 대규모 룰의 공간·CD/델타 사전 준비
 
 ```bash
-python -m floe2 drc-prepare results.db --svrf deck.svrf.rules.json
+floe-index drc-prepare results.db --svrf deck.svrf.rules.json
+# Rust CD 측정을 사용하고 한 룰 안의 좌표 블록을 작업자 4개로 병렬 처리
+floe-index drc-prepare results.db --svrf deck.svrf.rules.json --backend rust --jobs 4
 # 특정 룰만 준비 (--rule 반복 가능)
-python -m floe2 drc-prepare results.db --svrf deck.svrf.rules.json --rule M1.SPACE
+floe-index drc-prepare results.db --svrf deck.svrf.rules.json --rule M1.SPACE
 # SVRF 없이 공간 인덱스만 준비
-python -m floe2 drc-prepare results.db --spatial-only
+floe-index drc-prepare results.db --spatial-only
 ```
 
 기존 `.tray`를 읽고 룰별 쿼드트리, 측정 CD, 절대/비율 델타 기본 그룹을
@@ -53,12 +55,61 @@ python -m floe2 drc-prepare results.db --spatial-only
 않는다. pack이 없거나 낡으면 중단하며 ASCII 전체 로딩으로 우회하지 않는다.
 `--delta-only`로 CD/델타만 준비할 수 있다. 진행률은 stderr, 취소는 Ctrl+C이며
 완료된 캐시는 재실행 때 사용한다. 진행 중인 룰은 다시 준비한다.
+실제 에러가 0개인 룰은 전처리·캐시 생성·자식 프로세스 실행을 건너뛰고,
+완료 메시지에서 준비한 룰 수와 건너뛴 룰 수를 따로 표시한다.
+
+`floe-index drc-prepare`는 Rust CD 엔진과 기존 Python/NumPy 캐시 관리 계층을
+함께 실행한다. Portable에서는 `runtime/bin/floe-index` 옆의 Python을 자동으로
+사용하며 별도 활성화가 필요 없다. 개발 환경에서는 활성 가상환경 또는 소스의
+`.venv`를 찾고, 특정 런타임은 `FLOE_PYTHON_BIN=/path/to/python`으로 지정할 수 있다.
+바이너리만 단독 복사한 환경에는 `floe` Python 패키지와 NumPy도 필요하다.
+내부 CD 작업에는 지금 실행한 `floe-index`를 사용한다. 기존
+`python -m floe2 drc-prepare ...` 진입점과 옵션·캐시는 호환된다.
+
+`--backend auto`가 기본이며 호환되는 `floe-index`가 있으면 Rust로 CD를 측정한다.
+구형/미설치 바이너리에서는 Python으로 처리한다고 진행 메시지에 표시한다.
+`--backend rust`는 Rust를 사용할 수 없으면 중단하고, `--backend python`은
+기존 측정 경로를 지정한다. Rust 바이너리는 `cd rust && cargo build --release -p floe-index`로
+빌드하거나 최신 portable 번들의 바이너리를 사용한다.
+`--jobs N`은 Rust의 룰 내부 병렬 작업자 수(1~256), 기본은 CPU 수와 4 중 작은 값이다.
+환경변수 `FLOE_DRC_JOBS=N`으로 뷰어의 대규모 CD 측정에도 같은 수를 적용할 수 있다.
+
+Rust는 기존 `.tray`의 64개 에러 단위 블록들을 묶어 독립적으로 복호화·측정하고,
+원래 에러 순서대로 동일한 측정 캐시를 기록한다. 원본 DB 재파싱이나 pack 재생성은
+필요하지 않다. 수치 반올림/비교 경계는 해당 블록만 별도 Python 프로세스에서
+재확인하여 기존 CD 선택·추정 표시·소수점 다섯 자리 결과를 보존한다.
+공간 인덱스와 델타 그룹은 기존 NumPy 경로로 생성하며, CLI는 그룹의 영구 캐시만
+준비한다. 뷰어용 리뷰 상태 복사본과 페이지 인덱스를 CLI에서 임시 생성하지 않는다.
 
 읽기 전용/네트워크 결과 폴더라면 `FLOE_DRC_ANALYSIS_ROOT=/local/ssd/drc-cache`로
 별도 저장소를 지정한다. 뷰어에도 같은 환경변수를 지정해야 같은 캐시를 사용한다.
 전체 14억 건의 측정표와 두 모드 그룹은 약 40.6GB(공간 인덱스·임시 정렬 파일
 제외)이므로 필요한 룰부터 준비할 수 있다. `--svrf`에는 원문 SVRF가 아니라
 `floe-index svrf`로 생성한 `.rules.json`을 지정한다.
+
+동일한 합성 사각형 데이터로 Python 측정과 Rust 1/4 작업자를 비교하려면:
+
+```bash
+python tools/bench_drc_prepare.py --counts 10000 1000000 --jobs 1 4
+```
+
+실행마다 별도 임시 분석 캐시를 사용하며, 각 단계 시간과 최초/재사용 시간을
+JSON으로 출력한다. 결과값 검증과 DB 생성 시간은 처리 시간에서 제외한다.
+
+2026-10-06 macOS arm64(논리 CPU 8개), Python 3.14.6에서 합성 사각형과
+단일 width 조건으로 측정한 최초 전처리 시간이다. 프로그램 시작·공간 인덱스·
+CD 측정·두 델타 그룹을 포함하며, 분석 캐시는 없고 OS 파일 캐시는 유지했다.
+
+| 룰의 에러 수 | Python CD 백엔드 | Rust CD 작업자 4개 |
+| ---: | ---: | ---: |
+| 1만 | 0.74초 | 0.43초 |
+| 100만 | 24.09초 | 1.05초 |
+| 1000만 | 미측정 | 7.18초 |
+
+1000만 개의 Rust CD 단계는 1개 작업자 1.61초, 4개 작업자 1.00초였다.
+4개 작업자의 나머지 주요 단계는 공간 인덱스 2.92초, 두 그룹 합계 3.06초였다.
+모든 측정값·조건 번호·추정 표시를 검증했으며 이 벤치의 정밀도 보정 대상은 0개였다.
+실제 형상, 조건 수, 수치 경계 보정 비율과 저장장치에 따라 처리 시간은 달라진다.
 
 ## 1. 룰 목록: `floe drc <db> --rules`
 

@@ -177,11 +177,17 @@ def _remove_invalid(folder):
 
 
 @contextmanager
-def _build_lock(destination):
+def _build_lock(destination, cancelled=None):
     """Serialize same-key publishers; process death releases the OS lock."""
     import fcntl
     with open(destination + ".lock", "a+b") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        while True:
+            _cancel(cancelled)
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(0.025)
         try:
             yield
         finally:
@@ -218,16 +224,16 @@ def _progress(job, text):
         _write_json(path, {"text": str(text)})
 
 
-def _build_measure(index, job):
+def _build_measure(index, job, cancelled=None, progress=None, process_callback=None):
     if load_measurements(index):
         return
     base, _key = _rule_dir(index)
     os.makedirs(base, exist_ok=True)
-    with _build_lock(os.path.join(base, "measure")):
-        _build_measure_locked(index, job)
+    with _build_lock(os.path.join(base, "measure"), cancelled):
+        _build_measure_locked(index, job, cancelled, progress, process_callback)
 
 
-def _build_measure_locked(index, job):
+def _build_measure_locked(index, job, cancelled=None, progress=None, process_callback=None):
     if load_measurements(index):
         return
     base, key = _rule_dir(index)
@@ -236,21 +242,53 @@ def _build_measure_locked(index, job):
     _remove_invalid(destination)
     staging = _staging(base, ".measure-", job)
     try:
-        arrays = [_array(staging, name, dtype, key["count"], "w+")
-                  for name, dtype in _MEASURE.items()]
-        values, choices, estimated = arrays
-        choices.fill(_UNKNOWN)
-        index._measure_arrays(values, choices, estimated,
-                              progress=lambda done, total: _progress(
-                                  job, "CD measurement %d / %d" % (done, total)))
+        _check_identity(index)
+        fallback_count = 0
+        if job.get("native_binary"):
+            from .drc_native import measure
+            measure(index, staging, job["native_binary"], jobs=job.get("jobs"),
+                    cancelled=cancelled, progress=progress,
+                    process_callback=process_callback)
+            arrays = [_array(staging, name, dtype, key["count"], "r+")
+                      for name, dtype in _MEASURE.items()]
+            values, choices, estimated = arrays
+            for start in range(0, len(choices), _CHUNK):
+                _cancel(cancelled)
+                fallback_count += int(np.count_nonzero(choices[start:start + _CHUNK] == -2))
+            if fallback_count:
+                # A whole rule can sit on a numeric boundary. Keep even
+                # that worst-case Python recheck outside the viewer GIL.
+                _run_child({"phase": "precision", "pack": os.path.abspath(index.db.path),
+                            "pack_identity": key["pack"], "ci": index.ci,
+                            "constraints": index.constraints, "arrays": staging},
+                           cancelled, progress, process_callback)
+            values.flags.writeable = choices.flags.writeable = estimated.flags.writeable = False
+            index.measured_ticks, index.constraint_indices, index.estimated_flags = arrays
+        else:
+            arrays = [_array(staging, name, dtype, key["count"], "w+")
+                      for name, dtype in _MEASURE.items()]
+            values, choices, estimated = arrays
+            choices.fill(_UNKNOWN)
+            index._measure_arrays(values, choices, estimated, cancelled=cancelled,
+                                  progress=lambda done, total: _progress(
+                                      job, "CD measurement %d / %d" % (done, total)))
         _progress(job, "Computing absolute and ratio delta ranges")
+        if progress is not None:
+            progress("Computing absolute and ratio delta ranges")
         for mode in ("absolute", "percent"):
-            index._automatic_step(mode, None)
+            index._automatic_step(mode, cancelled)
         _flush(*arrays)
+        _cancel(cancelled)
         _check_identity(index)
         _write_json(os.path.join(staging, "complete.json"),
-                    {"key": key, "auto_steps": index._auto_steps})
+                    {"key": key, "auto_steps": index._auto_steps,
+                     "backend": "rust" if job.get("native_binary") else "python",
+                     "precision_fallback_count": fallback_count})
         _publish(staging, destination)
+    except BaseException:
+        index.measured_ticks = index.constraint_indices = index.estimated_flags = None
+        index._auto_steps.clear()
+        raise
     finally:
         if os.path.isdir(staging):
             shutil.rmtree(staging)
@@ -587,7 +625,15 @@ def _child(job):
         index = DeltaIndex(db, request["ci"], request["constraints"])
         if _rule_key(index)["pack"] != request["pack_identity"]:
             raise ValueError("DRC pack changed while opening delta preprocessing")
-        if request["phase"] == "measure":
+        if request["phase"] == "precision":
+            arrays = [_array(request["arrays"], name, dtype,
+                             len(db.checks[index.ci].errors), "r+")
+                      for name, dtype in _MEASURE.items()]
+            count = index._native_fallback(*arrays, progress=lambda text: _progress(request, text))
+            _flush(*arrays)
+            _check_identity(index)
+            result = {"precision_fallback_count": count}
+        elif request["phase"] == "measure":
             _build_measure(index, request)
             result = {"ok": True}
         else:
@@ -663,13 +709,27 @@ def _run_child(request, cancelled=None, progress=None, process_callback=None):
                     shutil.rmtree(folder, ignore_errors=True)
 
 
-def process_measure(index, cancelled=None, progress=None, process_callback=None):
+def process_measure(index, cancelled=None, progress=None, process_callback=None,
+                    *, backend="auto", jobs=None):
     """Ensure a persistent measurement cache without computing in this process."""
     _cancel(cancelled)
+    if backend not in ("auto", "rust", "python"):
+        raise ValueError("unknown DRC preprocessing backend %r" % backend)
+    from .drc_native import find_binary, worker_count
+    jobs = worker_count(jobs)
+    if not len(index.db.checks[index.ci].errors):
+        return index.measure(cancelled=cancelled)
     if load_measurements(index):
         return index
+    binary = find_binary(required=backend == "rust") if backend != "python" else None
+    if binary is not None:
+        _build_measure(index, {"native_binary": binary, "jobs": jobs},
+                       cancelled, progress, process_callback)
+        _cancel(cancelled)
+        return index
     if progress is not None:
-        progress("Preparing CD measurements in a separate process")
+        progress("Preparing CD measurements in a Python process" +
+                 (" (compatible Rust helper unavailable)" if backend == "auto" else ""))
     _run_child({"phase": "measure", "pack": os.path.abspath(index.db.path),
                 "pack_identity": _rule_key(index)["pack"],
                 "ci": index.ci, "constraints": index.constraints},
@@ -680,10 +740,23 @@ def process_measure(index, cancelled=None, progress=None, process_callback=None)
     return index
 
 
+def prepare_group_cache(index, step=None, mode="absolute"):
+    """CLI-only immutable groups: no disposable review snapshot or child."""
+    if index.measured_ticks is None:
+        raise ValueError("measure the rule before preparing delta groups")
+    if not len(index.measured_ticks):
+        return len(index.group(step, mode=mode))
+    key, _automatic = _group_key(index, step, mode, "all")
+    _folder, data = _build_group(index, key, None, {})
+    return data[0]["groups"]
+
+
 def process_group(index, step=None, mode="absolute", cluster=None,
                   cancelled=None, progress=None, process_callback=None):
     """Group from disk and return ready-to-page maps, without an O(N) restore."""
     _cancel(cancelled)
+    if not len(index.db.checks[index.ci].errors):
+        return index.group(step, cluster=cluster, mode=mode, cancelled=cancelled)
     if index.measured_ticks is None or not hasattr(index, "_measurement_cache"):
         process_measure(index, cancelled, progress, process_callback)
     scratch = tempfile.mkdtemp(prefix="floe-delta-review-")
