@@ -484,8 +484,15 @@ class DeltaIndex:
         values = np.zeros(n, dtype=np.int64)
         choices = np.full(n, _UNKNOWN, dtype=np.int32)
         estimated = np.zeros(n, dtype=bool)
+        return self._measure_arrays(values, choices, estimated, cancelled)
+
+    def _measure_arrays(self, values, choices, estimated, cancelled=None,
+                        progress=None):
+        """Fill caller-owned arrays (disk maps in the preprocessing child)."""
         errors = self._errors(cancelled) if self._selector.can_measure else ()
         for ei, error in errors:
+            if progress is not None and not ei % _CHUNK:
+                progress(ei, len(values))
             pick = self._selector.pick(error)
             if pick is None or self.bound_ticks[pick[0]] is None:
                 continue
@@ -615,7 +622,10 @@ class DeltaIndex:
 
 def _read_status(db, ci, indices):
     if hasattr(db, "_status") and hasattr(db, "_dir_es"):
-        return db._status[int(db._dir_es[ci]) + indices] == STATUS_WAIVED
+        # Persistent membership IDs can be uint32. Promote the rule's global
+        # start before adding so packs exceeding 2**32 total rows cannot wrap.
+        absolute = np.add(indices, db._dir_es[ci], dtype=np.int64)
+        return db._status[absolute] == STATUS_WAIVED
     if hasattr(db, "get_status"):
         return np.fromiter((db.get_status(ci, int(ei)) == STATUS_WAIVED
                             for ei in indices), dtype=bool, count=len(indices))
@@ -707,6 +717,11 @@ class DeltaGroups:
 
     def reset_status(self, cancelled=None):
         """Refresh review counts after imported or externally replaced waives."""
+        if getattr(self, "_persistent", False):
+            # The GUI re-submits persistent groups to their process worker.
+            # Direct callers can still refresh explicitly, but must discard
+            # precomputed prefixes rather than return obsolete page ranks.
+            self._page_prefix = self._page_offsets = None
         self._waived.fill(0)
         db, ci = self.index.db, self.index.ci
         for start in range(0, len(self._ids), _CHUNK):
@@ -728,6 +743,18 @@ class DeltaGroups:
         status = _read_status(self.index.db, self.index.ci, ids)
         changes = status.astype(np.int64) - self._statuses[ids]
         np.add.at(self._waived, self._row_for_error[ids], changes)
+        if getattr(self, "_page_prefix", None) is not None:
+            # Precomputed group page prefixes are only N/4096 entries.
+            # Update affected suffixes without rereading a million members.
+            rows = self._row_for_error[ids]
+            for row in np.unique(rows[changes != 0]):
+                match = (rows == row) & (changes != 0)
+                members = self._ids[self._offsets[row]:self._offsets[row + 1]]
+                chunks = np.searchsorted(members, ids[match]) // _PAGE_CHUNK
+                lo, hi = self._page_offsets[row:row + 2]
+                increments = np.zeros(int(hi - lo), dtype=np.int64)
+                np.add.at(increments, chunks, changes[match])
+                self._page_prefix[lo:hi] += np.cumsum(increments, dtype=np.int64)
         self._statuses[ids] = status
         self._revision += 1
         self._visible_rows.clear()
@@ -800,11 +827,15 @@ class DeltaGroup:
     def _status_prefix(self, waived):
         owner = self._owner
         if self._prefix_revision != owner._revision:
-            ids = self._ids
-            starts = np.arange(0, len(ids), _PAGE_CHUNK)
-            counts = np.add.reduceat(owner._statuses[ids], starts,
-                                     dtype=np.int64)
-            self._prefix = np.cumsum(counts, dtype=np.int64)
+            if getattr(owner, "_page_prefix", None) is not None:
+                lo, hi = owner._page_offsets[self._row:self._row + 2]
+                self._prefix = owner._page_prefix[lo:hi]
+            else:
+                ids = self._ids
+                starts = np.arange(0, len(ids), _PAGE_CHUNK)
+                counts = np.add.reduceat(owner._statuses[ids], starts,
+                                         dtype=np.int64)
+                self._prefix = np.cumsum(counts, dtype=np.int64)
             self._prefix_revision = owner._revision
         if waived:
             return self._prefix

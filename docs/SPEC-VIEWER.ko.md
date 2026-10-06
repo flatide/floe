@@ -376,6 +376,11 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   피하고, 그룹 디렉터리와 소속도 수치 배열로 유지한다. 그룹 행은
   요청한 페이지에 대해서만 생성하며, 구형 결과는 새 범위에 설치하지
   않는다. waive 갱신은 그룹 카운트와 상태별 page/rank를 함께 갱신한다.
+  10만 건 이상 packed 룰은 별도 프로세스에서 측정/그룹을 만들며 완료본을
+  `.analysis` 디렉터리에 저장해 룰 왕복과 재시작에서 재사용한다.
+  큰 룰의 마커 집계와 in-view 조회도 프로세스로 분리하고, 그리드 채우기는
+  사용되지 않는 페이지 geometry를 디코딩하지 않는다. 대규모 전처리,
+  쿼드트리 요약과 캐시 저장 비용은 [DRC.ko.md §5](DRC.ko.md#5-성능-경로와-검증) 참고.
 - **룰 유형 필터**(2026-08-17, rules.json 필요): nav 행 콤보 —
   "all types" + 사이드카 constraint **metric별 룰 수**(width/space/notch/
   enclosure/overlap/extension/area/density/… DRC_METRICS 정순, 그 외 알파벳순;

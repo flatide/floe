@@ -544,6 +544,18 @@ sh tools/validate_rust.sh --only quick path/to.oas
 
 `sh tools/validate_rust.sh --only drc_clusters,drc_markers,drc_delta`로 실행한다.
 
+대규모 룰의 UI 응답성 회귀도 위 게이트에 포함한다.
+`validate_drc_spatial.py`는 공간 계층/원본 ID posting, 경계·필터 개수의 정확성,
+취소·캐시 무효화·프로세스 membership 전달을 검사한다.
+`validate_drc_delta_cache.py`는 별도 프로세스의 CD/그룹과 기존 계산의 일치,
+mmap 재사용, 임시 파일 및 상태 스냅샷 격리를 검사한다.
+`validate_drc_analysis.py`는 읽기 전용 pack 열기, 룰 bbox 캐시와 `drc-prepare`를
+검사하고, `validate_drc_large_gui.py`는 가상 총 14억/룰 천만 건에서 클릭 시
+도형 디코드가 없음을 검사한다. 실제 합성 pack과 child 프로세스를 연결하여
+계산 중 페이지 이동·룰 전환·in-view·필터·상태 재계산의 callback 진행도 확인한다.
+네이티브 GTK/X 서버의 응답 시간은 이 헤드리스 게이트의 측정 범위에 포함하지 않는다.
+선택 실측: `python tools/validate_drc_spatial.py --benchmark-10m`.
+
 ## 3. 러스트 유닛 (핵심만)
 
 hier.rs: `hairline_min_side_cut`(rev 41), `frames_split_into_size_bands`

@@ -281,12 +281,16 @@ if gate drc_clusters; then RAN="$RAN drc_clusters"
 # Whole-rule/cluster adaptive markers and asynchronous viewer interaction.
 if gate drc_markers; then RAN="$RAN drc_markers"
     .venv/bin/python tools/validate_drc_markers.py
-    .venv/bin/python tools/validate_drc_marker_gui.py; fi
+    .venv/bin/python tools/validate_drc_marker_gui.py
+    .venv/bin/python tools/validate_drc_spatial.py; fi
 # Fixed-precision CD delta groups, worker cancellation, and viewer scopes.
 if gate drc_delta; then RAN="$RAN drc_delta"
     .venv/bin/python tools/validate_drc_delta.py
     .venv/bin/python tools/validate_drc_delta_worker.py
-    .venv/bin/python tools/validate_drc_delta_gui.py; fi
+    .venv/bin/python tools/validate_drc_delta_gui.py
+    .venv/bin/python tools/validate_drc_delta_cache.py
+    .venv/bin/python tools/validate_drc_analysis.py
+    .venv/bin/python tools/validate_drc_large_gui.py; fi
 # SVRF subset parser: preprocessing / derivation closure / check
 # extraction / end-to-end vs gen_drcdb --svrf
 if gate svrf; then RAN="$RAN svrf"

@@ -137,3 +137,14 @@ def db_path_of(pack):
     """The .db path a pack belongs to (same folder, `db_name_of`)."""
     return os.path.join(os.path.dirname(os.path.abspath(pack)),
                         db_name_of(pack))
+
+
+def drc_analysis_dir(pack):
+    """Derived spatial/CD caches for a DRC pack, independent of review files."""
+    root = os.environ.get("FLOE_DRC_ANALYSIS_ROOT")
+    if root:
+        import hashlib
+        # Identical filenames in different result folders must not collide.
+        key = hashlib.sha256(os.path.abspath(pack).encode("utf-8")).hexdigest()[:20]
+        return os.path.join(os.path.abspath(os.path.expanduser(root)), key)
+    return hidden_sibling(db_path_of(pack), ".analysis")

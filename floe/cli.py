@@ -2208,6 +2208,12 @@ def main(argv=None, *, prog=None, rust_only=None):
     _add_reviewer_option(p)
     p.set_defaults(fn=cmd_drc)
 
+    from .drc_prepare import add_arguments as add_drc_prepare_arguments
+    from .drc_prepare import run as run_drc_prepare
+    p = sub.add_parser("drc-prepare", help="precompute spatial and CD/delta caches for large DRC rules")
+    add_drc_prepare_arguments(p)
+    p.set_defaults(fn=lambda args: sys.exit(run_drc_prepare(args)))
+
     p = sub.add_parser("svrf", help="MOVED: `floe-index svrf <deck>` "
                                     "builds <deck>.rules.json (same "
                                     "options); this prints that command")

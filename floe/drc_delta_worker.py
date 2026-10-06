@@ -4,6 +4,10 @@ import copy
 import threading
 
 from .drc_delta import DeltaIndex, DeltaQueryCancelled
+from .drc import IcePack
+
+
+PROCESS_THRESHOLD = 100_000
 
 
 class DeltaWorker:
@@ -30,6 +34,8 @@ class DeltaWorker:
         self._pending = None
         self._result = None
         self._closed = False
+        self.progress = None
+        self._process_pid = None
         self._thread = threading.Thread(target=self._run,
                                         name="drc-delta", daemon=True)
         self._thread.start()
@@ -51,6 +57,7 @@ class DeltaWorker:
             self._pending = (self._generation, self._scope_generation,
                              key, db, ci, constraints, step, mode, cluster)
             self._result = None
+            self.progress = None
             self._condition.notify()
 
     def poll(self):
@@ -64,6 +71,7 @@ class DeltaWorker:
             self._generation += 1
             self._scope_generation += 1
             self._scope = self._pending = self._result = None
+            self.progress = None
             self._condition.notify()
 
     def close(self):
@@ -73,6 +81,7 @@ class DeltaWorker:
             self._generation += 1
             self._scope_generation += 1
             self._scope = self._pending = self._result = None
+            self.progress = None
             self._condition.notify()
 
     def _run(self):
@@ -104,23 +113,47 @@ class DeltaWorker:
 
             result, error = None, None
             try:
+                isolated = (isinstance(db, IcePack) and
+                            len(db.checks[ci].errors) >= PROCESS_THRESHOLD)
+
+                def progress(message):
+                    if not grouping_cancelled():
+                        self.progress = message
+
+                def process_changed(pid):
+                    self._process_pid = pid
+
                 if indexed_scope != scope_generation:
                     # Release the old rule before allocating the next one.
                     index = None
                     indexed_scope = None
                     index = DeltaIndex(db, ci, constraints)
-                    index.measure(cancelled=measure_cancelled)
+                    if isolated:
+                        from .drc_delta_cache import process_measure
+                        process_measure(index, cancelled=measure_cancelled,
+                                        progress=progress,
+                                        process_callback=process_changed)
+                    else:
+                        index.measure(cancelled=measure_cancelled)
                     if measure_cancelled():
                         raise DeltaQueryCancelled()
                     indexed_scope = scope_generation
                 if grouping_cancelled():
                     continue
-                result = index.group(step, cluster=cluster, mode=mode,
-                                     cancelled=grouping_cancelled)
+                if isolated:
+                    from .drc_delta_cache import process_group
+                    result = process_group(index, step, cluster=cluster, mode=mode,
+                                           cancelled=grouping_cancelled,
+                                           progress=progress,
+                                           process_callback=process_changed)
+                else:
+                    result = index.group(step, cluster=cluster, mode=mode,
+                                         cancelled=grouping_cancelled)
             except DeltaQueryCancelled:
                 continue
             except Exception as exc:
                 error = str(exc)
             with self._condition:
                 if not grouping_cancelled():
+                    self.progress = None
                     self._result = (key, result, error)

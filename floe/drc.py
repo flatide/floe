@@ -581,13 +581,20 @@ class IcePack(object):
                  "_wcount", "_wcount_off", "_wchunk",
                  "_waive_path", "_waive_hdr",
                  "_notes", "_note_of", "_note_next", "_note_path",
-                 "_note_tag")
+                 "_note_tag", "_review", "_analysis_identity")
 
-    def __init__(self, path, src_path=None, verify_src=False):
+    def __init__(self, path, src_path=None, verify_src=False, *,
+                 review=True, review_path=None):
+        """Open the pack; analysis children use review=False without writes.
+
+        An explicit review_path maps an existing, matching review sidecar
+        read-only. Without it analysis reads the embedded initial statuses.
+        """
         self._wfd = None
         self._map = None
+        self._review = bool(review)
         try:
-            self._load(path, src_path, verify_src)
+            self._load(path, src_path, verify_src, review_path)
         except (struct.error, IndexError, OverflowError) as exc:
             # every parse mishap on a damaged file normalizes to
             # ONE catchable story: corrupt pack -> rebuild
@@ -625,9 +632,11 @@ class IcePack(object):
         except Exception:
             pass
 
-    def _load(self, path, src_path, verify_src):
+    def _load(self, path, src_path, verify_src, review_path=None):
         import mmap
         import numpy as np
+        from .drc_analysis import pack_identity
+        self._analysis_identity = pack_identity(path)
         with open(path, "rb") as f:
             head = f.read(_ICE_HEADER.size)
             if len(head) != _ICE_HEADER.size:
@@ -722,26 +731,39 @@ class IcePack(object):
             err_total, check_cnt)
         wstatus_off = _WAIVE_HEADER.size
         wwcount_off = _WAIVE_HEADER.size + err_total
-        try:
-            wpath = self._ensure_waive_autosave(
-                waive_autosave_path(path), path, err_total,
-                check_cnt, status_off, wcount_off)
-        except OSError:
+        if not self._review:
+            if review_path is None or os.path.abspath(review_path) == os.path.abspath(path):
+                wpath, wstatus_off, wwcount_off = path, status_off, wcount_off
+            else:
+                wpath = review_path
+                with open(wpath, "rb") as stream:
+                    head = stream.read(_WAIVE_HEADER.size)
+                    stream.seek(0, os.SEEK_END)
+                    valid = (head == self._waive_hdr and stream.tell() ==
+                             _WAIVE_HEADER.size + err_total + 4 * check_cnt)
+                if not valid:
+                    raise ValueError("analysis review snapshot does not match pack")
+        else:
             try:
                 wpath = self._ensure_waive_autosave(
-                    _waive_tmp_fallback(path), path, err_total,
+                    waive_autosave_path(path), path, err_total,
                     check_cnt, status_off, wcount_off)
-                sys.stderr.write(
-                    "[drc] results folder not writable; waive "
-                    "autosave in %s (save waives as… to keep the "
-                    "review)\n" % wpath)
-            except OSError as exc:
-                sys.stderr.write(
-                    "[drc] waive autosave unavailable (%s); "
-                    "statuses fall back INTO the pack (shared, "
-                    "needs write permission)\n" % exc)
-                wpath, wstatus_off, wwcount_off = \
-                    path, status_off, wcount_off
+            except OSError:
+                try:
+                    wpath = self._ensure_waive_autosave(
+                        _waive_tmp_fallback(path), path, err_total,
+                        check_cnt, status_off, wcount_off)
+                    sys.stderr.write(
+                        "[drc] results folder not writable; waive "
+                        "autosave in %s (save waives as… to keep the "
+                        "review)\n" % wpath)
+                except OSError as exc:
+                    sys.stderr.write(
+                        "[drc] waive autosave unavailable (%s); "
+                        "statuses fall back INTO the pack (shared, "
+                        "needs write permission)\n" % exc)
+                    wpath, wstatus_off, wwcount_off = \
+                        path, status_off, wcount_off
         self._waive_path = wpath
         # shared read mapping stays coherent with in-place pwrite
         # updates (set_status)
@@ -767,11 +789,16 @@ class IcePack(object):
         self._note_of = {}    # gid -> note_id
         self._note_next = 1
         self._note_path = notes_autosave_path(path)
-        self._load_notes(err_total)
+        if self._review:
+            self._load_notes(err_total)
         self.checks = []
         drefs = struct.unpack("<%dI" % descref_cnt, descbuf)
         es, bs, ec = [], [], []
-        cbb = np.zeros((check_cnt, 4), dtype=np.int64)
+        from .drc_analysis import load_rule_bounds, save_rule_bounds
+        cbb = load_rule_bounds(path, check_cnt, self._analysis_identity)
+        cached_bounds = cbb is not None
+        if not cached_bounds:
+            cbb = np.zeros((check_cnt, 4), dtype=np.int64)
         for ci in range(check_cnt):
             (name_ref, dstart, dcnt, _pad, estart, ecnt, declared,
              _orig, bstart, bcnt) = _ICE2_CHECK.unpack_from(
@@ -786,7 +813,9 @@ class IcePack(object):
             es.append(estart)
             bs.append(bstart)
             ec.append(ecnt)
-            if bcnt:
+            if cached_bounds:
+                pass
+            elif bcnt:
                 sl = self._blk[bstart:bstart + bcnt]
                 cbb[ci] = (sl["x0"].min(), sl["y0"].min(),
                            sl["x1"].max(), sl["y1"].max())
@@ -799,6 +828,10 @@ class IcePack(object):
         self._dir_bs = np.array(bs, dtype=np.int64)
         self._ecnt = np.array(ec, dtype=np.int64)
         self._cbb = cbb
+        if pack_identity(path) != self._analysis_identity:
+            raise ValueError("DRC pack changed while opening; reopen the results")
+        if not cached_bounds:
+            save_rule_bounds(path, cbb, self._analysis_identity)
         self._cache = {}       # block idx -> [DrcError]; tiny LRU
         self._order = []
         self._wchunk = {}      # ci -> per-chunk waived counts
@@ -826,21 +859,27 @@ class IcePack(object):
                 "(DRC re-run?); moved aside: %s\n" % aside)
         except FileNotFoundError:
             pass
-        with open(path, "rb") as f:
-            f.seek(status_off)
-            st = f.read(err_total)
-            f.seek(wcount_off)
-            wc = f.read(4 * check_cnt)
-        if len(st) != err_total or len(wc) != 4 * check_cnt:
-            raise OSError("pack status sections truncated")
         tmp = "%s.tmp-%d" % (side, os.getpid())
-        with open(tmp, "wb") as f:
-            f.write(want)
-            f.write(st)
-            f.write(wc)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, side)
+        try:
+            with open(path, "rb") as source, open(tmp, "wb") as target:
+                target.write(want)
+                for offset, length in ((status_off, err_total),
+                                       (wcount_off, 4 * check_cnt)):
+                    source.seek(offset)
+                    while length:
+                        block = source.read(min(length, 1 << 20))
+                        if not block:
+                            raise OSError("pack status sections truncated")
+                        target.write(block)
+                        length -= len(block)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(tmp, side)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
         return side
 
     def waive_export(self, dst):
@@ -874,6 +913,7 @@ class IcePack(object):
         errors, so old statuses must not silently apply. wcount is
         recomputed from the imported statuses (never trusted).
         Returns the waived-error count."""
+        self._require_review()
         import numpy as np
         with open(src, "rb") as f:
             data = f.read()
@@ -949,6 +989,7 @@ class IcePack(object):
         waive sidecar; the read mapping is coherent) and keep the
         rule's [wcount] waived counter in sync. Raises OSError if
         the store is not writable."""
+        self._require_review()
         gid = int(self._dir_es[ci]) + ei
         if not 0 <= gid < self.total:
             raise IndexError((ci, ei))
@@ -992,6 +1033,7 @@ class IcePack(object):
         """Attach ONE shared note to `gids` (global ids). Each id is
         detached from any prior note first, so a new selection forms a
         fresh shared note; empty text just clears. Autosaves the .fe."""
+        self._require_review()
         gids = [g for g in gids if 0 <= g < self.total]
         self._note_detach(gids)
         text = (text or "").strip()
@@ -1006,6 +1048,7 @@ class IcePack(object):
     def clear_note(self, gids):
         """Remove `gids` from their notes (a note with no members left
         disappears). Autosaves the .fe."""
+        self._require_review()
         self._note_detach([g for g in gids if 0 <= g < self.total])
         self._note_write()
 
@@ -1176,6 +1219,7 @@ class IcePack(object):
         """REPLACE the notes from a saved .fe. Refuses a file recorded
         against a different pack (mismatched fingerprint). Returns the
         note count."""
+        self._require_review()
         with open(src, "r", encoding="utf-8") as f:
             text = f.read()
         if not self._parse_notes(text, self.total):
@@ -1184,6 +1228,10 @@ class IcePack(object):
                 "(different DRC run / re-packed db?)" % src)
         self._note_write()
         return len(self._notes)
+
+    def _require_review(self):
+        if not getattr(self, "_review", True):
+            raise OSError("analysis pack is read-only")
 
     def status_eis(self, ci, waived):
         """Rule-local error indices whose waived-ness matches.

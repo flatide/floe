@@ -93,6 +93,30 @@ class _Bins:
             self.approximate[occupied] = True
 
 
+    def add_aggregates(self, ci, indices, boxes, counts, waived, centers):
+        """Merge tree summaries into the same bounded screen bins."""
+        if not len(indices):
+            return
+        x0, y0, x1, y1 = self.bounds
+        x, y = np.clip(centers[:, 0], x0, x1), np.clip(centers[:, 1], y0, y1)
+        ix = np.minimum(((x - x0) / (x1 - x0) * self.nx).astype(np.int64), self.nx - 1)
+        iy = np.minimum(((y - y0) / (y1 - y0) * self.ny).astype(np.int64), self.ny - 1)
+        keys = iy * self.nx + ix
+        occupied, first = np.unique(keys, return_index=True)
+        new = self.count[occupied] == 0
+        self.ci[occupied[new]], self.ei[occupied[new]] = ci, indices[first[new]]
+        size = len(self.count)
+        self.count += np.bincount(keys, weights=counts, minlength=size).astype(np.int64)
+        self.waived += np.bincount(keys, weights=waived, minlength=size).astype(np.int64)
+        self.sx += np.bincount(keys, weights=x * counts, minlength=size)
+        self.sy += np.bincount(keys, weights=y * counts, minlength=size)
+        for col in (0, 1):
+            np.minimum.at(self.bbox[:, col], keys, boxes[:, col])
+        for col in (2, 3):
+            np.maximum.at(self.bbox[:, col], keys, boxes[:, col])
+        self.approximate[occupied] = True
+
+
 class MarkerIndex:
     """Screen-space aggregation with bounded working memory.
 
@@ -103,12 +127,15 @@ class MarkerIndex:
     only geometry is cached and status changes cannot stale the cache.
     """
 
-    def __init__(self, db, cache_bytes=32 * 1024 * 1024):
+    def __init__(self, db, cache_bytes=32 * 1024 * 1024, spatial=False):
         self.db = db
         self.cache_bytes = max(0, int(cache_bytes))
         self._cache = OrderedDict()
         self._cache_size = 0
         self._packed = isinstance(db, IcePack)
+        self.spatial = bool(spatial)
+        self._spatial_rules = OrderedDict()
+        self._spatial_unavailable = set()
 
     def _decode_block(self, ci, block, cancelled=None):
         """Read exact um bboxes without constructing geometry objects."""
@@ -191,6 +218,127 @@ class MarkerIndex:
                                dtype=bool, count=count)
         return np.zeros(count, dtype=bool)
 
+    @staticmethod
+    def _member_values(member, indices):
+        if member is None:
+            return np.ones(len(indices), dtype=bool)
+        if hasattr(member, 'contains_many'):
+            return member.contains_many(indices)
+        owner = getattr(member, '_owner', None)
+        if owner is not None and hasattr(owner, '_row_for_error'):
+            return owner._row_for_error[indices] == member._row
+        if hasattr(member, '_starts'):
+            starts, stops = member._starts, member._stops
+            k = np.searchsorted(starts, indices, side='right') - 1
+            if not len(starts):
+                return np.zeros(len(indices), dtype=bool)
+            return (k >= 0) & (indices < stops[np.maximum(k, 0)])
+        if hasattr(member, 'indices'):
+            k = np.searchsorted(member.indices, indices)
+            if not len(member.indices):
+                return np.zeros(len(indices), dtype=bool)
+            return (k < len(member.indices)) & (member.indices[np.minimum(k, len(member.indices)-1)] == indices)
+        # Protocol fallback stays bounded even if original IDs are scattered.
+        out = np.zeros(len(indices), dtype=bool)
+        chunks = indices // _CHUNK
+        for chunk in np.unique(chunks):
+            keep = chunks == chunk
+            start = int(chunk) * _CHUNK
+            out[keep] = member.mask(start, _CHUNK)[indices[keep] - start]
+        return out
+
+    def _spatial_query(self, ci, membership, waived, bins, bounds,
+                       width, height, cancelled):
+        from .drc_spatial import prepare_rule
+        tree = self._spatial_rules.get(ci)
+        if tree is None:
+            try:
+                tree = prepare_rule(self.db, ci, cancelled=cancelled)
+            except OSError:
+                # Unwritable/shared cache: preserve full counts through the
+                # original scanner, still isolated in the worker process.
+                self._spatial_unavailable.add(ci)
+                return False
+            self._spatial_rules[ci] = tree
+            # Fixed node/filtered-summary memory independent of visited rules.
+            while len(self._spatial_rules) > 2:
+                self._spatial_rules.popitem(last=False)
+        else:
+            self._spatial_rules.move_to_end(ci)
+        nodes, wcounts = tree.summaries(membership, waived, cancelled)
+        if nodes is None:
+            return True
+        db = self.db
+        cb = np.asarray(db._cbb[ci], dtype=float) / db.precision
+        origin, step = cb[:2], (cb[2:] - cb[:2]) / 255
+        roundoff = (np.abs(origin) + 255 * np.abs(step)) * (4 * np.finfo(float).eps)
+        x0, y0, x1, y1 = bounds
+        pixels = np.array([width / (x1-x0), height / (y1-y0)])
+        refine = bool(np.any(step * pixels > bins.cell_px / 2))
+        es = int(db._dir_es[ci])
+
+        def boxes_um(q):
+            boxes = np.empty((len(q), 4), dtype=float)
+            boxes[:, :2] = np.maximum(np.nextafter(origin + q[:, :2] * step - roundoff, -np.inf), cb[:2])
+            boxes[:, 2:] = np.minimum(np.nextafter(origin + q[:, 2:] * step + roundoff, np.inf), cb[2:])
+            return boxes
+
+        aggregates, aggregate_boxes = [], []
+        current = np.array([0], dtype=np.int64)
+        level = 0
+        while len(current):
+            _check_cancelled(cancelled)
+            current = current[nodes['count'][current] > 0]
+            boxes = boxes_um(nodes['box'][current])
+            hit = _intersects(boxes, bounds)
+            current, boxes = current[hit], boxes[hit]
+            # Vectorized breadth-first traversal keeps overview cost tied to
+            # visible tree nodes, without one Python/Numpy call per node.
+            small = np.all((256 / (2 ** level) + 1) * step * pixels <= bins.cell_px)
+            inside = ((boxes[:, 0] >= x0) & (boxes[:, 1] >= y0) &
+                      (boxes[:, 2] <= x1) & (boxes[:, 3] <= y1))
+            aggregate = inside if small else np.zeros(len(current), dtype=bool)
+            aggregates.extend(current[aggregate].tolist())
+            aggregate_boxes.extend(boxes[aggregate])
+            current = current[~aggregate]
+            if level < tree.depth:
+                current = (current[:, None] * 4 + np.arange(1, 5)).reshape(-1)
+                level += 1
+                continue
+            break
+        for node in current:
+            _check_cancelled(cancelled)
+            ids = tree.leaf_ids(node)
+            for start in range(0, len(ids), _CHUNK):
+                _check_cancelled(cancelled)
+                indices = np.sort(np.asarray(ids[start:start+_CHUNK], dtype=np.int64))
+                keep = self._member_values(membership, indices)
+                status = db._status[es + indices] == STATUS_WAIVED
+                if waived is not None:
+                    keep &= status if waived else ~status
+                indices, status = indices[keep], status[keep]
+                if not len(indices):
+                    continue
+                boxes = boxes_um(db._qbox[es + indices])
+                hit = _intersects(boxes, bounds)
+                indices, status, boxes = indices[hit], status[hit], boxes[hit]
+                inside_rows = ((boxes[:, 0] >= x0) & (boxes[:, 1] >= y0) &
+                               (boxes[:, 2] <= x1) & (boxes[:, 3] <= y1))
+                exact = np.ones(len(indices), dtype=bool) if refine else ~inside_rows
+                bins.add(ci, indices[~exact], boxes[~exact], status[~exact], approximate=True)
+                if np.any(exact):
+                    exact_boxes = self._exact_boxes(ci, indices[exact], cancelled)
+                    hit = _intersects(exact_boxes, bounds)
+                    bins.add(ci, indices[exact][hit], exact_boxes[hit], status[exact][hit])
+        if aggregates:
+            ids = np.asarray(aggregates, dtype=np.int64)
+            counts = nodes['count'][ids].astype(np.int64)
+            centers = origin + np.column_stack((nodes['sx'][ids], nodes['sy'][ids])) / counts[:, None] * step
+            bins.add_aggregates(ci, nodes['rep'][ids].astype(np.int64),
+                                np.asarray(aggregate_boxes), counts,
+                                np.zeros(len(ids), dtype=np.int64) if wcounts is None else wcounts[ids], centers)
+        return True
+
     def query(self, bounds_um, width_px, height_px, checks=None,
               members=None, waived=None, cell_px=16, cancelled=None):
         """Return at most 8192 immutable ``Marker`` values.
@@ -226,6 +374,10 @@ class MarkerIndex:
             membership = members.get(ci) if members is not None else None
             if not n:
                 continue
+            if self.spatial and self._packed and ci not in self._spatial_unavailable:
+                if self._spatial_query(ci, membership, waived, bins, bounds,
+                                       width, height, cancelled):
+                    continue
             if self._packed:
                 cb = db._cbb[ci]
                 cb_um = np.asarray(cb, dtype=np.float64) / db.precision

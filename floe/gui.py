@@ -1909,6 +1909,8 @@ class Viewer:
         self._drc_marker_overlay = None
         self._drc_marker_busy = False
         self._drc_group_hits = []   # aggregate markers never pick a member
+        self._drc_query_worker = None
+        self._drc_hl_key = None
         self._drc_delta_worker = None
         self._drc_delta_key = None
         self._drc_delta_groups = None
@@ -4134,6 +4136,10 @@ class Viewer:
             self._drc_delta_poll()
         except Exception as exc:
             sys.stderr.write("[drc] delta result failed: %s\n" % exc)
+        try:
+            self._drc_query_poll()
+        except Exception as exc:
+            sys.stderr.write("[drc] in-view result failed: %s\n" % exc)
         # push buffered X output to the server: with cairo's core-protocol
         # fallback (CAIRO_DEBUG=xrender-version=-1, the XQuartz black-image
         # workaround) drawn updates otherwise sit in Xlib's output buffer
@@ -7233,6 +7239,20 @@ class Viewer:
                 "DRC filter: select a rule in the browser first")
             return []
         k = self.dbu
+        from .drc_marker_worker import LARGE_RULE
+        if isinstance(self._drc, drc_mod.IcePack) and len(self._drc.checks[ci].errors) >= LARGE_RULE:
+            if key != getattr(self, "_drc_hl_key", None):
+                from .drc_query_worker import ExactQueryWorker
+                self._drc_hl_key = key
+                self._drc_hl_res = None
+                worker = getattr(self, "_drc_query_worker", None)
+                if worker is None:
+                    worker = self._drc_query_worker = ExactQueryWorker()
+                worker.submit(key, self._drc, ci, tuple(v * k for v in bb),
+                              DRC_HL_CAP, membership,
+                              None if self._drc_wfilter == "all" else self._drc_wfilter == "waived")
+                self._set_live_status("DRC filter: querying errors in view…")
+            return []
         kw = {}
         if membership is not None:
             kw["members"] = {ci: membership}
@@ -7262,6 +7282,31 @@ class Viewer:
         if self._drc_hl and self._drc_grid_ci == ci:
             GLib.idle_add(self._drc_grid_fill, ci)
         return lst
+
+    def _drc_query_poll(self):
+        worker = getattr(self, "_drc_query_worker", None)
+        result = worker.poll() if worker is not None else None
+        if result is None:
+            return
+        key, values, error = result
+        if key != getattr(self, "_drc_hl_key", None):
+            return
+        # Only an in-flight query owns this key. Notes/toggle paths can
+        # invalidate the completed result without changing the viewport.
+        self._drc_hl_key = None
+        # Coordinates are converted only for the bounded returned page.
+        k = self.dbu
+        items = [(ci, ei, kind, [(x / k, y / k) for x, y in points])
+                 for ci, ei, kind, points in (values or ())]
+        self._drc_hl_res = (key, items)
+        if error:
+            self._set_live_status("DRC in-view query failed: %s" % error)
+        elif self._drc_hl:
+            self._set_live_status("DRC filter: %d in view%s" % (
+                len(items), " (capped)" if len(items) >= DRC_HL_CAP else ""))
+        if self._drc_hl and self._drc_open is not None:
+            self._drc_grid_fill(self._drc_open)
+            self._display()
 
     def _drc_open_dialog(self):
         dlg = Gtk.FileChooserDialog(title="open DRC results (.db)",
@@ -7925,6 +7970,8 @@ class Viewer:
         self._drc_delta_key = None
         self._drc_delta_groups = self._drc_delta_group = None
         self._drc_delta_busy = False
+        self._drc_delta_restore = None
+        self._drc_delta_progress = None
         self._drc_delta_error = None
         self._drc_delta_page = 0
         self._drc_delta_refresh()
@@ -7952,6 +7999,8 @@ class Viewer:
             self._drc_delta_refresh()
             return False
         self._drc_delta_key = key
+        self._drc_delta_restore = None
+        self._drc_delta_progress = None
         self._drc_delta_groups = self._drc_delta_group = None
         self._drc_delta_page = 0
         self._drc_delta_error = None
@@ -8003,7 +8052,8 @@ class Viewer:
         message = getattr(self, "_drc_delta_error", None)
         if not message:
             if getattr(self, "_drc_delta_busy", False):
-                message = "measuring CD / grouping…"
+                progress = getattr(getattr(self, "_drc_delta_worker", None), "progress", None)
+                message = progress if isinstance(progress, str) and progress else "measuring CD / grouping…"
             elif getattr(self, "_drc_delta_mode", "absolute") == "off":
                 message = "grouping off"
             elif self._drc_open is None:
@@ -8033,6 +8083,11 @@ class Viewer:
         worker = getattr(self, "_drc_delta_worker", None)
         result = worker.poll() if worker is not None else None
         if result is None:
+            progress = getattr(worker, "progress", None)
+            if (getattr(self, "_drc_delta_busy", False) and isinstance(progress, str)
+                    and progress != getattr(self, "_drc_delta_progress", None)):
+                self._drc_delta_progress = progress
+                self._drc_delta_refresh()
             return
         key, groups, error = result
         if key != getattr(self, "_drc_delta_key", None):
@@ -8050,6 +8105,12 @@ class Viewer:
                     win._delta_step.get_text() == self._drc_delta_step_text):
                 # Preserve a draft typed while the worker was measuring.
                 self._drc_delta_write_step(groups.step_ticks)
+            restore = getattr(self, "_drc_delta_restore", None)
+            if restore is not None and restore[0] == key:
+                row = groups.find(restore[1])
+                self._drc_delta_group = groups[row] if row is not None else None
+                self._drc_delta_restore = None
+                self._drc_delta_scope_refresh()
         self._drc_delta_refresh()
         if error:
             self._set_live_status(self._drc_delta_error)
@@ -8142,6 +8203,15 @@ class Viewer:
         groups = getattr(self, "_drc_delta_groups", None)
         if groups is not None:
             if eis is None:
+                if getattr(groups, "_persistent", False):
+                    active = getattr(self, "_drc_delta_group", None)
+                    if self._drc_sel is not None:
+                        self._drc_sels[self._drc_scope_key()] = self._drc_sel
+                    self._drc_delta_revision = getattr(self, "_drc_delta_revision", 0) + 1
+                    self._drc_delta_sync(force=True)
+                    if active is not None:
+                        self._drc_delta_restore = (self._drc_delta_key, active.key)
+                    return
                 groups.reset_status()
             else:
                 groups.status_changed(eis)
@@ -8390,25 +8460,9 @@ class Viewer:
         elif f is not None and f[1] in eis:
             idx = eis.index(f[1])
             self._drc_cell_mark(idx // W, idx % W)
-        # Keep the bounded page geometry cache for grid interactions.
-        # The canvas population is queried independently by MarkerWorker.
-        k = self.dbu
-        marks = []
-        if self._drc_hl and hasattr(db, "query_rect"):
-            have = {rei: (k2, p2)
-                    for rci, rei, k2, p2 in self._drc_hl_list()
-                    if rci == ci}
-            for ei in eis:
-                kp = have.get(ei)
-                if kp is not None:
-                    marks.append((ci, ei, kp[0], kp[1]))
-        else:
-            errs = c.errors
-            for ei in eis:
-                e = errs[ei]
-                marks.append((ci, ei, e.kind,
-                              [(x / k, y / k) for x, y in e.pts]))
-        self._drc_page_marks = marks
+        # Grid rows only need IDs/statuses. Geometry is decoded on an
+        # explicit jump or by the marker worker, never eagerly on a click.
+        self._drc_page_marks = []
         if _DRC_PROF:
             dt = (time.perf_counter() - _t0) * 1e3
             if dt >= 1.0:
@@ -9324,6 +9378,15 @@ class Viewer:
         self._drc_marker_busy = False
         self._drc_hits = []
         self._drc_group_hits = []
+        self._drc_hl_key = None
+        self._drc_hl_res = None
+        query_worker = getattr(self, "_drc_query_worker", None)
+        if query_worker is not None:
+            if drop_worker:
+                query_worker.close()
+                self._drc_query_worker = None
+            else:
+                query_worker.cancel()
         worker = getattr(self, "_drc_marker_worker", None)
         if worker is not None:
             if drop_worker:
@@ -11028,6 +11091,9 @@ class Viewer:
         delta_worker = getattr(self, "_drc_delta_worker", None)
         if delta_worker is not None:
             delta_worker.close()
+        query_worker = getattr(self, "_drc_query_worker", None)
+        if query_worker is not None:
+            query_worker.close()
         if self.server_sock is not None:
             try:
                 self.server_sock.close()

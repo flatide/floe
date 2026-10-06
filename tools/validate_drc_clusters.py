@@ -553,9 +553,9 @@ class ClusterTests(unittest.TestCase):
             expected = list(range(100 + page * gui.DRC_PAGE,
                                   100 + (page + 1) * gui.DRC_PAGE))
             self.assertEqual(viewer._drc_grid_map, expected)
-            self.assertEqual(errors.decoded, expected)
-            self.assertEqual(viewer._drc_page_marks,
-                             [(0, ei, "p", [(ei, 1.0)]) for ei in expected])
+            self.assertEqual(errors.decoded, [],
+                             "number-grid pages must not decode error geometry")
+            self.assertEqual(viewer._drc_page_marks, [])
             self.assertEqual(viewer._drc_grid_base, ("cluster", group, None))
             self.assertEqual(len(viewer._drcwin._gstore), gui.DRC_PAGE)
 
@@ -576,8 +576,7 @@ class ClusterTests(unittest.TestCase):
             viewer._drc_grid_fill(0)
             self.assertEqual(viewer._drc_page, 0)
             self.assertEqual(viewer._drc_grid_map, expected)
-            self.assertEqual(viewer._drc_page_marks,
-                             [mark for mark in marks if mark[1] in expected])
+            self.assertEqual(viewer._drc_page_marks, [])
         viewer._drc_sel = None
         viewer._drc_grid_fill(0)
         self.assertEqual(viewer._drc_grid_map, [])

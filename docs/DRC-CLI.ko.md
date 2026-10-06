@@ -38,6 +38,28 @@ pack을 자동 사용한다(소스 size/mtime 대조). pack이 없거나 낡으�
 느리므로 스크립트는 pack을 먼저 만들 것. `--pack`은 호환용
 no-op. 좌표 토큰이 정수가 아닌 db는 명확한 메시지와 함께 거부.
 
+### 대규모 룰의 공간·CD/델타 사전 준비
+
+```bash
+python -m floe2 drc-prepare results.db --svrf deck.svrf.rules.json
+# 특정 룰만 준비 (--rule 반복 가능)
+python -m floe2 drc-prepare results.db --svrf deck.svrf.rules.json --rule M1.SPACE
+# SVRF 없이 공간 인덱스만 준비
+python -m floe2 drc-prepare results.db --spatial-only
+```
+
+기존 `.tray`를 읽고 룰별 쿼드트리, 측정 CD, 절대/비율 델타 기본 그룹을
+`.results.db.analysis/`에 저장한다. pack이나 개인 waive/notes는 변경하지
+않는다. pack이 없거나 낡으면 중단하며 ASCII 전체 로딩으로 우회하지 않는다.
+`--delta-only`로 CD/델타만 준비할 수 있다. 진행률은 stderr, 취소는 Ctrl+C이며
+완료된 캐시는 재실행 때 사용한다. 진행 중인 룰은 다시 준비한다.
+
+읽기 전용/네트워크 결과 폴더라면 `FLOE_DRC_ANALYSIS_ROOT=/local/ssd/drc-cache`로
+별도 저장소를 지정한다. 뷰어에도 같은 환경변수를 지정해야 같은 캐시를 사용한다.
+전체 14억 건의 측정표와 두 모드 그룹은 약 40.6GB(공간 인덱스·임시 정렬 파일
+제외)이므로 필요한 룰부터 준비할 수 있다. `--svrf`에는 원문 SVRF가 아니라
+`floe-index svrf`로 생성한 `.rules.json`을 지정한다.
+
 ## 1. 룰 목록: `floe drc <db> --rules`
 
 ```bash
