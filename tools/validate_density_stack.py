@@ -2856,35 +2856,41 @@ def occ_density_layout(path):
 
 def occ_density_checks(temp):
     """Pass 2 from the occupancy density (FLOE_RUST_DENSITY_OCC=on, user
-    2026-10-06: "push it, I will try it on a real chip"): `floe-index ovs`
-    adds design.ovs to a cache indexed with --occupancy (and refuses one
-    without design.ovo); at 1 um a pixel over 1 um cells the frame draws
-    pass 2 with no plan (density_plan2 occ_layers 2, occ_cell_nm 1000, no
-    region, no node) - the DOT array's dots within its extent and in 1/0's
-    colour, the 3/0 squares' within theirs, though their page holds a box
-    over the cut (decoded at the build for its smaller shapes), nothing
-    elsewhere but the box pass 1 draws, the same frame over other tiles and
-    raster workers; at depth 0 TOP's own squares alone; the plans draw
-    a view whose cells pass FLOE_RUST_DENSITY_OCC_PX pixels, one whose layers
-    pass FLOE_RUST_DENSITY_OCC_MB, and a cache without design.ovs - that one
-    byte for byte the frame without the switch."""
+    2026-10-06: "push it, I will try it on a real chip"; then, design.ovo
+    taking 3,362 s on the synthetic chip: "this won't do"): `floe-index ovs`
+    adds design.ovs to a plain index, its bits and means in one walk (a cache
+    without design.ovb refused), the same bytes built twice; at 1 um a pixel
+    over 1 um cells the frame draws pass 2 with no plan (density_plan2
+    occ_layers 2, occ_cell_nm 1000, no region, no node) - the DOT array's
+    dots within its extent and in 1/0's colour, the 3/0 squares' within
+    theirs, though their page holds a box over the cut (decoded at the build
+    for its smaller shapes), nothing elsewhere but the box pass 1 draws, the
+    same frame over other tiles and raster workers; at depth 0 TOP's own
+    squares alone; the plans draw a view whose cells pass
+    FLOE_RUST_DENSITY_OCC_PX pixels, one whose layers pass
+    FLOE_RUST_DENSITY_OCC_MB, and a cache without design.ovs - that one byte
+    for byte the frame without the switch."""
     import shutil
     src = Path(temp) / 'occd.oas'
     occ_density_layout(src)
     plain = Path(temp) / 'occd_plain.oas'
     shutil.copyfile(src, plain)
-    for path, extra in ((src, ['--occupancy-um', '1']), (plain, [])):
+    for path, extra in ((src, []), (plain, ['--no-page-occupancy'])):
         done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path)] + extra,
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
     ice, plain_ice = Path(temp) / '.occd.oas.ice', Path(temp) / '.occd_plain.oas.ice'
+    assert not (ice / 'design.ovo').exists(), 'the occupancy density needs no design.ovo'
     index_bin = os.environ['FLOE_INDEX_BIN']
     refused = subprocess.run([index_bin, 'ovs', str(plain_ice)], capture_output=True, text=True, timeout=600)
-    assert refused.returncode == 1 and 'design.ovo' in refused.stderr and not (plain_ice / 'design.ovs').exists(), refused.stderr
-    built = subprocess.run([index_bin, 'ovs', str(ice)], capture_output=True, text=True, timeout=600)
+    assert refused.returncode == 1 and 'design.ovb' in refused.stderr and not (plain_ice / 'design.ovs').exists(), refused.stderr
+    built = subprocess.run([index_bin, 'ovs', str(ice), '--um', '1'], capture_output=True, text=True, timeout=600)
     assert built.returncode == 0 and (ice / 'design.ovs').read_bytes()[:8] == b'FLOEOVS1', built.stdout + built.stderr
     stats = dict(kv.split('=', 1) for kv in built.stdout.split()[1:])
-    assert int(stats['big_pages']) >= 1 and int(stats['decoded']) >= 1, stats
+    assert int(stats['big_pages']) >= 1 and int(stats['decoded']) >= 1 and stats['base_um'] == '1', stats
+    first = (ice / 'design.ovs').read_bytes()
+    again = subprocess.run([index_bin, 'ovs', str(ice), '--um', '1', '--jobs', '1'], capture_output=True, text=True, timeout=600)
+    assert again.returncode == 0 and (ice / 'design.ovs').read_bytes() == first, 'design.ovs differs built again (one decode thread)'
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
            'FLOE_RUST_DENSITY_PATTERN': None, 'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on',
            'FLOE_RUST_DENSITY_STAGES': 'off', 'FLOE_RUST_TILE_PX': '64', 'FLOE_RUST_RASTER_JOBS': '1'}
@@ -2975,7 +2981,7 @@ def occ_density_checks(temp):
         assert res['density_plan2']['occ_layers'] == 0 and pixels == walk, res['density_plan2']
     finally:
         bare.stop()
-    print('density stack: no design.ovs - the walk\'s frame; floe-index ovs refuses a cache without design.ovo')
+    print('density stack: no design.ovs - the walk\'s frame; floe-index ovs refuses a cache without design.ovb, builds the same bytes again')
 
 
 def frames_of(w, gen, visible, bg=False):

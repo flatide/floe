@@ -2184,23 +2184,43 @@ fn write_hier(ovm: &floe_ovm::Ovm, outdir: &str) {
     }
 }
 
-/// `floe-index ovs <cache>` (floe_vfs::occ_density, 2026-10-06): add (or
-/// rebuild) design.ovs - the mean cover under the cut of design.ovo's cell
-/// groups, what the density stack's pass 2 draws by with
-/// FLOE_RUST_DENSITY_OCC=on - from the cache's index (design.ovm, design.ovb,
-/// design.ovh, design.ovp) and its design.ovo. The cache's other files are
-/// untouched; a cache without design.ovo is refused (`floe2 index
-/// --occupancy-only` adds one).
+/// `floe-index ovs <cache> [--um F] [--jobs N]` (floe_vfs::occ_density, 2026-10-06):
+/// add (or rebuild) design.ovs - per layer and depth the cells holding
+/// shapes under the cut and their groups' mean cover, what the density
+/// stack's pass 2 draws by with FLOE_RUST_DENSITY_OCC=on - from the cache's
+/// index (design.ovm, design.ovb, design.ovh, design.ovp) in one walk; the
+/// cache's other files are untouched. --um: the base cell in microns
+/// (default: the smallest power of two keeping the chip's longer side within
+/// 2,048 cells); --jobs: the threads decoding pages (default: all).
 pub fn ovs_cmd(args: &[String]) {
     let mut dir: Option<String> = None;
-    for a in args {
-        if a.starts_with("--") {
+    let mut base_um: Option<f64> = None;
+    let mut jobs = 0usize;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--jobs" {
+            i += 1;
+            jobs = args.get(i).and_then(|v| v.parse::<usize>().ok()).unwrap_or_else(|| {
+                eprintln!("--jobs wants a number of threads");
+                std::process::exit(2);
+            });
+        } else if a == "--um" {
+            i += 1;
+            base_um = args.get(i).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite() && *v > 0.0);
+            if base_um.is_none() {
+                eprintln!("--um wants a positive number of microns");
+                std::process::exit(2);
+            }
+        } else if a.starts_with("--") {
             crate::unknown_option("ovs", a);
+        } else {
+            dir = Some(a.to_string());
         }
-        dir = Some(a.to_string());
+        i += 1;
     }
     let dir = dir.unwrap_or_else(|| {
-        eprintln!("usage: floe-index ovs <cache>");
+        eprintln!("usage: floe-index ovs <cache> [--um F] [--jobs N]");
         std::process::exit(2);
     });
     let fail = |what: &str, e: String| -> ! {
@@ -2217,32 +2237,40 @@ pub fn ovs_cmd(args: &[String]) {
     let summary = floe_vfs::hiersum::HierSummary::open(&format!("{}/design.ovh", dir))
         .and_then(|s| s.validate_against(&ovm).map(|()| s))
         .unwrap_or_else(|e| fail("design.ovh", format!("{} (floe-index hier adds it)", e)));
-    let ovo = floe_vfs::occupancy::OvoFile::open(&format!("{}/design.ovo", dir))
-        .unwrap_or_else(|e| fail("design.ovo", format!("{} (floe2 index --occupancy-only adds it)", e)));
     let cover = floe_vfs::cover::CellCover::new(&ovm, std::sync::Arc::new(summary))
         .unwrap_or_else(|| fail("cell cover", "no design.ovb or another summary".into()));
     let opened = started.elapsed().as_secs_f64();
     let ovp = format!("{}/design.ovp", dir);
-    let (bytes, stats) = floe_vfs::occ_density::build(&ovm, &ovo, &cover, Some(&ovp)).unwrap_or_else(|e| fail("build", e));
+    let (bytes, stats) = floe_vfs::occ_density::build(&ovm, &cover, &ovp, base_um, jobs).unwrap_or_else(|e| fail("build", e));
+    let file = floe_vfs::occ_density::OvsFile::from_bytes(bytes.clone()).unwrap_or_else(|e| fail("build", e));
     // tmp + rename: a viewer reading the old file meanwhile keeps it whole
     let path = format!("{}/design.ovs", dir);
     let tmp = format!("{}.tmp", path);
     std::fs::write(&tmp, &bytes).unwrap_or_else(|e| fail(&tmp, e.to_string()));
     std::fs::rename(&tmp, &path).unwrap_or_else(|e| fail(&path, e.to_string()));
+    let g = file.grid;
     println!(
-        "ovs file={} bytes={} base_um={} levels={} walked={} small={} spread={} pages={} big_pages={} decoded={} decoded_mb={:.1} decode_s={:.2} grids={} grid_mb={:.1} plane_levels={} empty={} open_s={:.2} total_s={:.2}",
+        "ovs file={} bytes={} base_um={} grid={}x{} levels={} walked={} small={} spread={} small_keys={} small_tiles={} pages={} big_pages={} decoded={} decoded_mb={:.1} decode_s={:.2} decode_jobs={} walk_s={:.2} settle_s={:.2} write_s={:.2} planes={} plane_mb={:.1} plane_levels={} empty={} open_s={:.2} total_s={:.2}",
         path,
         bytes.len(),
-        ovo.base_um(),
-        ovo.n_levels,
+        g.base_um(),
+        g.w,
+        g.h,
+        g.n_levels,
         stats.walked,
         stats.small,
         stats.spread,
+        stats.small_keys,
+        stats.small_tiles,
         stats.pages,
         stats.big_pages,
         stats.decoded,
         stats.decoded_bytes as f64 / 1e6,
         stats.decode_s,
+        stats.decode_jobs,
+        stats.walk_s,
+        stats.settle_s,
+        stats.write_s,
         stats.grids,
         stats.grid_bytes as f64 / 1e6,
         stats.levels,

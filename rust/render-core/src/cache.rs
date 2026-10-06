@@ -782,12 +782,12 @@ impl Cache {
 
     /// The density stack's pass 2 from the occupancy density (crate::occ,
     /// opt-in): of each of `layer_ids`, the planes `depth` draws (None: all)
-    /// with design.ovs's mean cover, at design.ovo's level for a pixel of
-    /// `px_dbu` (crate::occ::choose_level: its cell at most `max_cell_px`
-    /// pixels, its layers' grids within `cap_bytes`). The layers made are
-    /// kept for the next frame at that level and depth, those of others
-    /// let go. None without both files (design.ovs is looked for once per
-    /// open cache), or where no level will do.
+    /// of design.ovs, at its level for a pixel of `px_dbu`
+    /// (crate::occ::choose_level: its cell at most `max_cell_px` pixels, its
+    /// layers' grids within `cap_bytes`). The layers made are kept for the
+    /// next frame at that level and depth, those of others let go. None
+    /// without design.ovs (looked for once per open cache) or one built for
+    /// another index, or where no level will do.
     pub fn occ_density(
         &self,
         layer_ids: &[u32],
@@ -796,8 +796,6 @@ impl Cache {
         cap_bytes: u64,
         depth: Option<u32>,
     ) -> Option<std::sync::Arc<crate::occ::OccDensity>> {
-        let (ovo, _, _) = self.occupancy_file();
-        let ovo = ovo?;
         let mut slot = match self.occ_density.lock() {
             Ok(slot) => slot,
             Err(poisoned) => poisoned.into_inner(),
@@ -805,26 +803,25 @@ impl Cache {
         if !slot.tried {
             slot.tried = true;
             let path = format!("{}/design.ovs", self.dir);
-            match floe_vfs::occ_density::OvsFile::open(&path).and_then(|f| f.validate_against(&ovo).map(|()| f)) {
+            match floe_vfs::occ_density::OvsFile::open(&path).and_then(|f| f.validate_against(&self.vfs.ovm).map(|()| f)) {
                 Ok(file) => slot.file = Some(std::sync::Arc::new(file)),
                 Err(e) => eprintln!("[render-core] occupancy density {}: none ({})", path, e),
             }
         }
         let ovs = slot.file.clone()?;
-        // each level's grid (every plane's alike), and what the layers asked
-        // for would hold there at most: their bits and their groups' means
-        let dims = |lv: u32| ovo.layers.iter().enumerate().find_map(|(k, _)| ovo.plane_level(k, 0, lv as usize).map(|(w, h, _)| (w, h)));
+        let grid = ovs.grid;
+        // what the layers asked for would hold at a level at most: their
+        // bits and their groups' means
         let bytes_at = |lv: u32| {
-            dims(lv).map_or(u64::MAX, |(w, h)| {
-                let (w, h) = (u64::from(w), u64::from(h));
-                layer_ids.len() as u64 * (w.div_ceil(8) * h + w.div_ceil(8) * h.div_ceil(8))
-            })
+            let (w, h) = grid.level_dims(lv);
+            let (w, h) = (u64::from(w), u64::from(h));
+            layer_ids.len() as u64 * (w.div_ceil(8) * h + w.div_ceil(8) * h.div_ceil(8))
         };
-        let level = crate::occ::choose_level(ovo.cell_dbu, ovo.n_levels, px_dbu, max_cell_px, bytes_at, cap_bytes)?;
-        let (w, h) = dims(level)?;
+        let level = crate::occ::choose_level(grid.cell_dbu, grid.n_levels, px_dbu, max_cell_px, bytes_at, cap_bytes)?;
+        let (w, h) = grid.level_dims(level);
         let depth_key = depth.map_or(u32::MAX, |d| d.min(floe_vfs::occupancy::DEPTH_CAP as u32));
         slot.layers.retain(|&(_, lv, d), _| lv == level && d == depth_key);
-        let mut layers: Vec<Option<std::sync::Arc<crate::occ::OccLayer>>> = vec![None; ovo.layers.len()];
+        let mut layers: Vec<Option<std::sync::Arc<crate::occ::OccLayer>>> = vec![None; ovs.layers.len()];
         for &id in layer_ids {
             if id as usize >= layers.len() {
                 continue;
@@ -832,19 +829,19 @@ impl Cache {
             let made = slot
                 .layers
                 .entry((id, level, depth_key))
-                .or_insert_with(|| crate::occ::combine(&ovo, &ovs, id as usize, level as usize, depth))
+                .or_insert_with(|| crate::occ::combine(&ovs, id as usize, level as usize, depth))
                 .clone();
             layers[id as usize] = made;
         }
         Some(std::sync::Arc::new(crate::occ::OccDensity {
             level,
-            cell: ovo.cell_dbu << level,
-            x0: ovo.bbox.0,
-            y0: ovo.bbox.1,
+            cell: grid.cell_dbu << level,
+            x0: grid.x0,
+            y0: grid.y0,
             w,
             h,
             layers,
-            cell_um: ovo.base_um() * f64::from(1u32 << level.min(31)),
+            cell_um: grid.base_um() * f64::from(1u32 << level.min(31)),
         }))
     }
 

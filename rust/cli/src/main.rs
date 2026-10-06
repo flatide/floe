@@ -146,7 +146,7 @@ fn main() {
              [--dump]\n       \
              floe-index bvh <outdir> --cell NAME  (TSV dump of a cell's child BVH: nodes and leaf placements)\n       \
              floe-index hier <outdir> [--check]  (add design.ovh, the cell tree's index, to a cache; --check = report it)\n       \
-             floe-index ovs <outdir>  (add design.ovs, the occupancy density FLOE_RUST_DENSITY_OCC=on draws by; needs design.ovo)\n       \
+             floe-index ovs <outdir> [--um F] [--jobs N]  (add design.ovs, the occupancy density FLOE_RUST_DENSITY_OCC=on draws by)\n       \
              floe-index drc <results.db> [out.tray] \
              [--pack] [--jobs N]\n       \
              floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]... [-I DIR]... \

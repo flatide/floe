@@ -2580,15 +2580,14 @@ fn density_stages(styled: &StyledGeometryRasterRequest) -> bool {
         && std::env::var("FLOE_RUST_DENSITY_STAGES").as_deref() == Ok("on")
 }
 
-/// Pass 2 from the occupancy density (design.ovo + design.ovs,
-/// floe_render_core::occ; 2026-10-06): FLOE_RUST_DENSITY_OCC=on, off by
-/// default - no plan, no walk: each layer present where design.ovo's cell
-/// bit is set, at design.ovs's mean cover of its group. The synthetic MAIN01
-/// 1/10 at full depth: pass 2's plan 167-733 ms to none, frames 25-53 %
-/// sooner, about 80 % of the walk's dots; the field's full-depth view walked
-/// 25 M nodes in 20 s. A view the file cannot serve (a root, a cell past
-/// FLOE_RUST_DENSITY_OCC_PX pixels, layers past FLOE_RUST_DENSITY_OCC_MB, no
-/// design.ovs) plans as before.
+/// Pass 2 from the occupancy density (design.ovs, floe_render_core::occ;
+/// 2026-10-06): FLOE_RUST_DENSITY_OCC=on, off by default - no plan, no walk:
+/// each layer present where design.ovs's cell bit is set, at the mean cover
+/// of its group. The synthetic MAIN01 1/10 at full depth: pass 2's plan
+/// 53-170 ms to none, frames about a third sooner, 75-83 % of the walk's
+/// dots; the field's full-depth view walked 25 M nodes in 20 s. A view the
+/// file cannot serve (a root, a cell past FLOE_RUST_DENSITY_OCC_PX pixels,
+/// layers past FLOE_RUST_DENSITY_OCC_MB, no design.ovs) plans as before.
 fn density_occ_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_OCC").as_deref() == Ok("on"))
@@ -4808,8 +4807,8 @@ fn render_density_frame(
                     // under the guard, its passes check per tile
                     check_generation(cancellation, command.generation)?;
                     // the occupancy density (FLOE_RUST_DENSITY_OCC=on):
-                    // design.ovo's bits and design.ovs's mean cover stand for
-                    // the plans - every density plane paints its layer from
+                    // design.ovs's cell bits and mean cover stand for the
+                    // plans - every density plane paints its layer from
                     // them, no walk and no decode (floe_render_core::occ)
                     if density_occ_enabled() && styled.raster.density_pattern && staged_plane.is_none() && command.root.is_none() {
                         let occ_started = Instant::now();

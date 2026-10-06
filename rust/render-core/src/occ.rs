@@ -1,20 +1,18 @@
 //! The density stack's pass 2 from the occupancy density (design.ovs,
 //! floe_vfs::occ_density; 2026-10-06, opt-in): no plan, no walk, no decode -
 //! for each pixel pass 1 left open, the visible layers from the top, each
-//! present where design.ovo's bit of the pixel's cell is set (the planes a
+//! present where design.ovs's bit of the pixel's cell is set (the planes a
 //! request depth draws, OR'd) at its group's mean cover, lit by the density
 //! pattern's rank like a summary item (raster.rs paint_occ_plane /
-//! paint_occ_lower). FLOE_RUST_DENSITY_OCC=on (renderd) asks for it; the
-//! synthetic MAIN01 1/10 at full depth: pass 2's plan 167-733 ms to none,
-//! the frame 25-53 % sooner, about 80 % of the walk's dots.
+//! paint_occ_lower). FLOE_RUST_DENSITY_OCC=on (renderd) asks for it.
 
 use std::sync::Arc;
 
 use floe_vfs::occ_density::{OvsFile, OVS_GROUP};
-use floe_vfs::occupancy::{plane_drawn_at, OvoFile, STATUS_OK};
+use floe_vfs::occupancy::plane_drawn_at;
 
 /// One visible layer at one level for one request depth: the OR of the
-/// design.ovo planes that depth draws, and per group the mean cover of the
+/// design.ovs planes that depth draws, and per group the mean cover of the
 /// cells they mark (each plane's mean weighted by the cells it marks).
 pub struct OccLayer {
     bits: Arc<[u8]>,
@@ -62,7 +60,7 @@ impl OccLayer {
 /// visible layers by cache layer index.
 pub struct OccDensity {
     pub level: u32,
-    /// the level's cell, dbu, and the grid's corner (design.ovo's bbox)
+    /// the level's cell, dbu, and the grid's corner (design.ovs's)
     pub cell: i64,
     pub x0: i64,
     pub y0: i64,
@@ -98,7 +96,7 @@ impl OccLayer {
 }
 
 /// The level a view of `px_dbu` per pixel draws the occupancy density at,
-/// for design.ovo's `n_levels` levels of `cell_dbu` doubling: the coarsest
+/// for design.ovs's `n_levels` levels of `cell_dbu` doubling: the coarsest
 /// whose cell is at most a pixel (as the summary takes it; past it, a finer
 /// one costs more and shows no more), else - and when that one's layers
 /// would hold more than `cap` bytes (`bytes_at`) - the next coarser ones
@@ -113,46 +111,34 @@ pub fn choose_level(cell_dbu: i64, n_levels: u32, px_dbu: f64, max_cell_px: f64,
     (start..n_levels).take_while(|&lv| cell(lv) <= max_cell_px * px_dbu).find(|&lv| bytes_at(lv) <= cap)
 }
 
-/// One layer's OccLayer at `lv` for `depth` (None: every plane), None where
-/// it has no density there.
-pub(crate) fn combine(ovo: &OvoFile, ovs: &OvsFile, k: usize, lv: usize, depth: Option<u32>) -> Option<Arc<OccLayer>> {
-    let layer = ovo.layers.get(k)?;
-    if layer.status != STATUS_OK {
+/// One layer's OccLayer at `lv` for `depth` (None: every plane): the OR of
+/// the planes the depth draws, each group at its planes' means weighted by
+/// the cells each marks; None where it has no density there.
+pub(crate) fn combine(ovs: &OvsFile, k: usize, lv: usize, depth: Option<u32>) -> Option<Arc<OccLayer>> {
+    let planes = ovs.layers.get(k)?;
+    if lv as u32 >= ovs.grid.n_levels {
         return None;
     }
-    let (w, h, bits) = ovo.level_at_depth(k, lv, depth)?;
-    if w == 0 || h == 0 || bits.is_empty() {
-        return None;
-    }
+    let (w, h) = ovs.grid.level_dims(lv as u32);
     let row_bytes = (w as usize).div_ceil(8);
     let (gw, gh) = (w.div_ceil(OVS_GROUP), h.div_ceil(OVS_GROUP));
     let occ_in = |plane_bits: &[u8], gi: u32, gj: u32| -> u32 {
-        let mut occ = 0u32;
-        for r in 0..OVS_GROUP {
-            let row = gj * OVS_GROUP + r;
-            if row >= h {
-                break;
-            }
-            occ += plane_bits[row as usize * row_bytes + gi as usize].count_ones();
-        }
-        occ
+        (gj * OVS_GROUP..((gj + 1) * OVS_GROUP).min(h)).map(|row| plane_bits[row as usize * row_bytes + gi as usize].count_ones()).sum()
     };
+    let mut bits = vec![0u8; row_bytes * h as usize];
     // sum over the planes drawn of mean x the cells the plane marks
     let mut sum = vec![0f64; (gw * gh) as usize];
-    for (p, plane) in layer.planes.iter().enumerate() {
+    for (p, plane) in planes.iter().enumerate() {
         if !plane_drawn_at(plane.depth, depth) {
             continue;
         }
-        let Some((pw, ph, pbits)) = ovo.plane_level(k, p, lv) else { continue };
-        let Some((mgw, mgh, means)) = ovs.means(k, p, lv) else { continue };
-        if (pw, ph) != (w, h) || (mgw, mgh) != (gw, gh) {
-            continue;
-        }
+        let (Some(pbits), Some(means)) = (ovs.bits(k, p, lv), ovs.means(k, p, lv)) else { continue };
+        bits.iter_mut().zip(&pbits).for_each(|(a, b)| *a |= b);
         for gj in 0..gh {
             for gi in 0..gw {
                 let m = means[(gj * gw + gi) as usize];
                 if m != 0 {
-                    sum[(gj * gw + gi) as usize] += f64::from(m) * f64::from(occ_in(pbits, gi, gj));
+                    sum[(gj * gw + gi) as usize] += f64::from(m) * f64::from(occ_in(&pbits, gi, gj));
                 }
             }
         }
@@ -173,13 +159,13 @@ pub(crate) fn combine(ovo: &OvoFile, ovs: &OvsFile, k: usize, lv: usize, depth: 
             any = true;
         }
     }
-    any.then(|| Arc::new(OccLayer { bits: Arc::from(bits.into_owned()), row_bytes, means: Arc::from(means), gw, w, h }))
+    any.then(|| Arc::new(OccLayer { bits: Arc::from(bits), row_bytes, means: Arc::from(means), gw, w, h }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use floe_vfs::occupancy::{write_ovo, Layer, Level, Occupancy, Plane};
+    use floe_vfs::occ_density::{encode, OvsGrid};
     use std::io::Write;
 
     fn deflate(bytes: &[u8]) -> Vec<u8> {
@@ -188,8 +174,9 @@ mod tests {
         enc.finish().unwrap()
     }
 
-    /// a 16 x 16 level whose cells in [i0, i1) x [j0, j1) are set
-    fn bits(boxes: &[(u32, u32, u32, u32)]) -> Level {
+    /// 16 x 16 cells' row-padded bytes with the cells in [i0, i1) x [j0, j1)
+    /// set
+    fn bits(boxes: &[(u32, u32, u32, u32)]) -> Vec<u8> {
         let mut bits = vec![0u8; 2 * 16];
         for &(i0, i1, j0, j1) in boxes {
             for j in j0..j1 {
@@ -198,49 +185,28 @@ mod tests {
                 }
             }
         }
-        Level { w: 16, h: 16, bits }
+        bits
     }
 
-    /// design.ovo: one layer, 16 x 16 cells of 100 dbu at one level, its
-    /// depth-0 plane over the low left group, its depth-1 plane over half of
-    /// that group and all of the high right one; design.ovs: depth 0's low
-    /// left group at mean 100, depth 1's at 200 and its high right one at 50
-    fn files() -> (OvoFile, OvsFile) {
-        let occ = Occupancy {
-            unit: 1000.0,
-            src_size: 11,
-            src_mtime: 22,
-            top: "TOP".into(),
-            cell_dbu: 100,
-            bbox: (0, 0, 1600, 1600),
-            w: 16,
-            h: 16,
-            n_levels: 1,
-            layers: vec![Layer {
-                layer: 1,
-                dt: 0,
-                status: STATUS_OK,
-                work: 0,
-                planes: vec![
-                    Plane { depth: 0, levels: vec![bits(&[(0, 8, 0, 8)])] },
-                    Plane { depth: 1, levels: vec![bits(&[(0, 4, 0, 8), (8, 16, 8, 16)])] },
-                ],
-            }],
-            paths_skipped: 0,
-        };
-        let ovo = OvoFile::from_bytes(write_ovo(&occ)).unwrap();
-        let blobs = vec![vec![(0, vec![(2, 2, deflate(&[100, 0, 0, 0]))]), (1, vec![(2, 2, deflate(&[200, 0, 0, 50]))])]];
-        let ovs = OvsFile::from_bytes(floe_vfs::occ_density::encode(11, 22, 100, (0, 0, 1600, 1600), 1, &blobs)).unwrap();
-        ovs.validate_against(&ovo).unwrap();
-        (ovo, ovs)
+    /// design.ovs: one layer, 16 x 16 cells of 100 dbu at one level; its
+    /// depth-0 plane over the low left group at mean 100, its depth-1 plane
+    /// over half of that group at 200 and all of the high right one at 50
+    fn files() -> OvsFile {
+        let g = OvsGrid::new(1000.0, 0.1, (0, 0, 1600, 1600)).unwrap();
+        assert_eq!((g.cell_dbu, g.w, g.h, g.n_levels), (100, 16, 16, 1));
+        let blobs = vec![vec![
+            (0, vec![(deflate(&bits(&[(0, 8, 0, 8)])), deflate(&[100, 0, 0, 0]))]),
+            (1, vec![(deflate(&bits(&[(0, 4, 0, 8), (8, 16, 8, 16)])), deflate(&[200, 0, 0, 50]))]),
+        ]];
+        OvsFile::from_bytes(encode(11, 22, &g, &blobs)).unwrap()
     }
 
     #[test]
     fn a_depth_draws_its_planes_bits_at_their_weighted_mean() {
-        let (ovo, ovs) = files();
+        let ovs = files();
         // every plane: the low left group's 64 cells all set, at
         // (100 x 64 + 200 x 32) / 64 = 200; the high right one at 50
-        let all = combine(&ovo, &ovs, 0, 0, None).unwrap();
+        let all = combine(&ovs, 0, 0, None).unwrap();
         assert_eq!(all.cover(2, 2), 200.0 / 255.0);
         assert_eq!(all.cover(6, 7), 200.0 / 255.0);
         assert_eq!(all.cover(12, 12), 50.0 / 255.0);
@@ -248,25 +214,26 @@ mod tests {
         assert_eq!(all.cover(16, 2), 0.0);
         assert!(all.any_in(8, 15, 8, 15) && !all.any_in(8, 15, 0, 7) && !all.any_in(20, 30, 0, 15));
         // depth 1 draws both planes, as every plane does
-        let one = combine(&ovo, &ovs, 0, 0, Some(1)).unwrap();
+        let one = combine(&ovs, 0, 0, Some(1)).unwrap();
         assert_eq!((one.cover(2, 2), one.cover(12, 12)), (all.cover(2, 2), all.cover(12, 12)));
         // depth 0: its own plane alone, the high right group not there
-        let top = combine(&ovo, &ovs, 0, 0, Some(0)).unwrap();
+        let top = combine(&ovs, 0, 0, Some(0)).unwrap();
         assert_eq!(top.cover(2, 2), 100.0 / 255.0);
         assert_eq!(top.cover(12, 12), 0.0);
         assert!(!top.any_in(8, 15, 8, 15));
         assert_eq!(top.bytes(), 2 * 16 + 4);
         // no such layer or level
-        assert!(combine(&ovo, &ovs, 1, 0, None).is_none());
-        assert!(combine(&ovo, &ovs, 0, 1, None).is_none());
+        assert!(combine(&ovs, 1, 0, None).is_none());
+        assert!(combine(&ovs, 0, 1, None).is_none());
     }
 
     #[test]
     fn a_layer_with_no_density_where_its_bits_are_is_none() {
-        let (ovo, _) = files();
-        let blobs = vec![vec![(0, vec![(2, 2, Vec::new())]), (1, vec![(2, 2, Vec::new())])]];
-        let empty = OvsFile::from_bytes(floe_vfs::occ_density::encode(11, 22, 100, (0, 0, 1600, 1600), 1, &blobs)).unwrap();
-        assert!(combine(&ovo, &empty, 0, 0, None).is_none());
+        // bits with no means, and no bits at all
+        let g = OvsGrid::new(1000.0, 0.1, (0, 0, 1600, 1600)).unwrap();
+        let blobs = vec![vec![(0, vec![(deflate(&bits(&[(0, 8, 0, 8)])), Vec::new())]), (1, vec![(Vec::new(), Vec::new())])]];
+        let empty = OvsFile::from_bytes(encode(11, 22, &g, &blobs)).unwrap();
+        assert!(combine(&empty, 0, 0, None).is_none());
     }
 
     #[test]
