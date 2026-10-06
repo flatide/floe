@@ -807,6 +807,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertIn("density: lit 620k px, pass 2 by occupancy 12 ms (16 um cells, 449 layers), 206 pages decoded", occ_brief)
         self.assertIn(", pass 2 by occupancy 12 ms (16 um cells, 449 layers), 206 pages,", occ_full)
         self.assertNotIn("pass 2 plan", occ_full + occ_brief)
+        # nor what a cell under the cut stands for: the plans' alone
+        occ_bright = dict(occ_res, density_plan2=dict(occ_res["density_plan2"], bright_milli=2000, pattern=1))
+        bright_full, _ = perf_status(occ_bright)
+        self.assertIn("pattern, cover x2, dots x0.64, gate 2/16 px (12k out), pass 2 by occupancy 12 ms", bright_full)
+        self.assertNotIn("cells by box", bright_full)
+        self.assertNotIn("cell cover", bright_full)
         # no hierarchy summary to go by: the probe walked every cell
         self.assertIn(", fit probe 28.0ms (walk),", perf_status(dict(res, fit_probe_ms=28.0, fit_probe_walk=True))[0])
         self.assertNotIn("fit probe", full)

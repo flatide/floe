@@ -663,6 +663,17 @@ struct OccupancySlot {
     planes: crate::summary::PlaneCache,
 }
 
+/// The threads Cache::occ_density makes a frame's layers on:
+/// FLOE_RUST_DENSITY_OCC_THREADS (1: one at a time, as first built), else the
+/// cores there are, at most 8.
+fn occ_threads() -> usize {
+    std::env::var("FLOE_RUST_DENSITY_OCC_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()).min(8))
+}
+
 /// design.ovs (the occupancy density, crate::occ): opened once, and the
 /// layers it made per (layer, level, depth key) - one level and depth's
 #[derive(Default)]
@@ -821,17 +832,43 @@ impl Cache {
         let (w, h) = grid.level_dims(level);
         let depth_key = depth.map_or(u32::MAX, |d| d.min(floe_vfs::occupancy::DEPTH_CAP as u32));
         slot.layers.retain(|&(_, lv, d), _| lv == level && d == depth_key);
+        // the layers this level and depth lack, made on threads, a layer
+        // each at a time (a laptop's first frame of 449 layers took 352 ms on
+        // one; FLOE_RUST_DENSITY_OCC_THREADS=1 makes them so)
+        let mut missing: Vec<u32> =
+            layer_ids.iter().copied().filter(|&id| (id as usize) < ovs.layers.len() && !slot.layers.contains_key(&(id, level, depth_key))).collect();
+        missing.sort_unstable();
+        missing.dedup();
+        let threads = occ_threads().min(missing.len()).max(1);
+        let made: Vec<(u32, Option<std::sync::Arc<crate::occ::OccLayer>>)> = if threads == 1 {
+            missing.iter().map(|&id| (id, crate::occ::combine(&ovs, id as usize, level as usize, depth))).collect()
+        } else {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            let mut out = Vec::new();
+                            loop {
+                                let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let Some(&id) = missing.get(at) else { break };
+                                out.push((id, crate::occ::combine(&ovs, id as usize, level as usize, depth)));
+                            }
+                            out
+                        })
+                    })
+                    .collect();
+                handles.into_iter().flat_map(|handle| handle.join().expect("occupancy density thread")).collect()
+            })
+        };
+        for (id, layer) in made {
+            slot.layers.insert((id, level, depth_key), layer);
+        }
         let mut layers: Vec<Option<std::sync::Arc<crate::occ::OccLayer>>> = vec![None; ovs.layers.len()];
         for &id in layer_ids {
-            if id as usize >= layers.len() {
-                continue;
+            if let Some(made) = slot.layers.get(&(id, level, depth_key)) {
+                layers[id as usize] = made.clone();
             }
-            let made = slot
-                .layers
-                .entry((id, level, depth_key))
-                .or_insert_with(|| crate::occ::combine(&ovs, id as usize, level as usize, depth))
-                .clone();
-            layers[id as usize] = made;
         }
         Some(std::sync::Arc::new(crate::occ::OccDensity {
             level,

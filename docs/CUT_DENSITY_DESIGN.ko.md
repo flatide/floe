@@ -3562,6 +3562,10 @@ design.ovo는 필요 없다. 탑에서 한 번 걷는다.
 - 보이는 레이어의 셀 비트와 묶음 평균이 `FLOE_RUST_DENSITY_OCC_MB`(기본 256 MB)를 넘으면 2 px 안의 더 거친
   레벨을 쓰고, 그것도 넘으면 계획 경로로 간다. 20 mm 칩·16 µm 셀이면 레이어당 약 0.2 MB다.
 - 같은 레벨·depth의 결합 결과는 다음 프레임에 재사용하고, 다른 레벨·depth로 가면 버린다.
+- 레이어 결합은 레이어마다 따로 스레드에 나눈다(0.12.310). 기본 스레드는 코어 수이고 최대 8이다.
+  `FLOE_RUST_DENSITY_OCC_THREADS=1`이면 하나씩 결합하며, 프레임은 바이트까지 같다.
+  - 사용자 노트북에서 449레이어 첫 프레임이 `pass 2 by occupancy 352 ms`였다(2026-10-06).
+  - 이 머신의 합성 칩 fit에서는 1스레드 355~361 ms, 8스레드 70~72 ms였다.
 - 다음은 기존 계획 경로로 그린다:
   - root 뷰(design.ovs는 탑 기준)
   - 레이어별 단계(`FLOE_RUST_DENSITY_STAGES=on`)
@@ -3571,6 +3575,7 @@ design.ovo는 필요 없다. 탑에서 한 번 걷는다.
 - design.ovs는 캐시를 연 뒤 한 번 찾는다. 뷰어를 띄운 뒤 만들었다면 다시 띄워야 한다.
 - 프레임은 `density_plan2`의 `occ_layers`(사용한 레이어 수)와 `occ_cell_nm`(셀)을 싣는다. 상태줄은 계획 내역 대신
   `pass 2 by occupancy N ms (16 um cells, 449 layers)`를 보인다. N은 첫 프레임의 레이어 결합 시간이다.
+  계획 경로에만 의미가 있는 `cell cover`/`cells by box`는 표시하지 않는다(0.12.310 전에는 늘 `cells by box`였다).
 
 **합성 칩 비교**(main01_chip_p10, 전 레이어, cut 3 px, 1350×971, 모드마다 새 워커 2회 warm, 둘째 판 파일):
 

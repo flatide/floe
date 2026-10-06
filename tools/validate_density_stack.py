@@ -2865,7 +2865,8 @@ def occ_density_checks(temp):
     dots within its extent and in 1/0's colour, the 3/0 squares' within
     theirs, though their page holds a box over the cut (decoded at the build
     for its smaller shapes), nothing elsewhere but the box pass 1 draws, the
-    same frame over other tiles and raster workers; at depth 0 TOP's own
+    same frame over other tiles and raster workers and with the layers made
+    one at a time (FLOE_RUST_DENSITY_OCC_THREADS=1); at depth 0 TOP's own
     squares alone; the plans draw a view whose cells pass
     FLOE_RUST_DENSITY_OCC_PX pixels, one whose layers pass
     FLOE_RUST_DENSITY_OCC_MB, and a cache without design.ovs - that one byte
@@ -2897,6 +2898,7 @@ def occ_density_checks(temp):
     occ = dict(env, FLOE_RUST_DENSITY_OCC='on')
     workers = {'walk': worker(src, env), 'occ': worker(src, occ),
                'tiles': worker(src, dict(occ, FLOE_RUST_TILE_PX='127', FLOE_RUST_RASTER_JOBS='4')),
+               'serial': worker(src, dict(occ, FLOE_RUST_DENSITY_OCC_THREADS='1')),
                'capped': worker(src, dict(occ, FLOE_RUST_DENSITY_OCC_MB='0.0001'))}
     side_w, side_h = 400, 200
 
@@ -2956,6 +2958,8 @@ def occ_density_checks(temp):
         # squares at theirs (a sixth of 676), where the walk lights half
         assert 300 <= a <= 900 and 0.25 * wa <= a <= 4 * wa and 0.15 * ws <= s <= 2 * ws, (a, wa, s, ws)
         assert tiles == on, 'the occupancy density differs over other tiles and workers'
+        serial, serial_res = view(workers['serial'], 1)
+        assert serial == on and serial_res['density_plan2']['occ_layers'] == 2, 'the layers made one at a time differ'
         # depth 0: TOP's own squares, not the DOT cells a level down
         top_only, top_res = view(workers['occ'], 2, depth=0)
         ta, ts, trest = where(top_only)

@@ -1090,8 +1090,10 @@ def perf_status(res, depth_note=""):
             parts.append(("pattern, cover x%g" if pattern else "bright x%g") % (bright / 1000.0))
             # what a cell under the cut stands for (2026-10-05): the area its
             # shapes cover, or - an index without design.ovb or a hierarchy
-            # summary - its whole box
-            parts.append("cell cover" if (res.get("density_plan2") or {}).get("cell_cover") else "cells by box")
+            # summary - its whole box; nothing when the occupancy density drew
+            # pass 2 (its frames reported `cells by box`, user 2026-10-06)
+            if not occ_note(res):
+                parts.append("cell cover" if (res.get("density_plan2") or {}).get("cell_cover") else "cells by box")
         # zoomed out past the fit view the dots thin (2026-10-04): their gain
         gain = (res.get("density_plan2") or {}).get("dot_gain_milli")
         if gain is not None and 0 < gain < 1000:
