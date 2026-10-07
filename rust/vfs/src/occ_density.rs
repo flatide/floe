@@ -574,20 +574,72 @@ fn decoded_by_walk(ovm: &Ovm, pi: u32, thr: i64) -> bool {
     (pg.max_w.max(pg.max_h) as i64) >= thr || !matches!(ovm.page_occ(pi), Some(PageOcc::Grid(_)))
 }
 
+/// How often a long phase of the build says where it is (user 2026-10-07:
+/// "no log while ovs indexes - 11 minutes into the real chip and no telling
+/// how far it got"): FLOE_OVS_PROGRESS_S seconds (default 10; 0 at every
+/// check).
+fn progress_every() -> std::time::Duration {
+    let s = std::env::var("FLOE_OVS_PROGRESS_S").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite() && *v >= 0.0);
+    std::time::Duration::from_secs_f64(s.unwrap_or(10.0))
+}
+
+/// The build's progress lines: each phase as it starts and ends, and
+/// within a long one what it has done every progress_every(), each with the
+/// seconds since the build began.
+pub struct Progress<'a> {
+    say: &'a dyn Fn(&str),
+    started: std::time::Instant,
+    last: std::time::Instant,
+    every: std::time::Duration,
+}
+
+impl<'a> Progress<'a> {
+    pub fn new(say: &'a dyn Fn(&str)) -> Progress<'a> {
+        let now = std::time::Instant::now();
+        Progress { say, started: now, last: now, every: progress_every() }
+    }
+
+    fn line(&mut self, text: &str) {
+        (self.say)(&format!("{} ({:.1} s)", text, self.started.elapsed().as_secs_f64()));
+        self.last = std::time::Instant::now();
+    }
+
+    /// whether a long phase should say where it is
+    fn due(&self) -> bool {
+        self.last.elapsed() >= self.every
+    }
+}
+
+/// a count for a progress line: 1.2M, 34k, 567
+fn count(n: u64) -> String {
+    match n {
+        0..=9_999 => n.to_string(),
+        10_000..=999_999 => format!("{}k", n / 1000),
+        1_000_000..=999_999_999 => format!("{:.1}M", n as f64 / 1e6),
+        _ => format!("{:.1}G", n as f64 / 1e9),
+    }
+}
+
 /// The pages the walk decodes: those of the cells it walks into - from the
 /// top through cells over the cut
-fn pages_to_decode(ovm: &Ovm, small: &[bool], thr: i64) -> Vec<u32> {
+fn pages_to_decode(ovm: &Ovm, small: &[bool], thr: i64, progress: &mut Progress) -> Vec<u32> {
     let mut seen = vec![false; ovm.n_cells as usize];
     let mut stack = vec![ovm.top];
     seen[ovm.top as usize] = true;
     let mut out = Vec::new();
+    let (mut cells, mut read) = (0u64, 0u64);
     while let Some(ci) = stack.pop() {
+        cells += 1;
+        if progress.due() {
+            progress.line(&format!("listing the pages to decode: {} cells, {} placements read, {} pages", count(cells), count(read), count(out.len() as u64)));
+        }
         let (start, count) = ovm.cell_pranges(ci);
         for pri in start..start.saturating_add(count) {
             let pr = ovm.prange(pri);
             out.extend((pr.page_lo..pr.page_lo.saturating_add(pr.page_count)).filter(|&pi| decoded_by_walk(ovm, pi, thr)));
         }
         let (ps, pc) = ovm.cell_places(ci);
+        read += pc as u64;
         for i in ps as u64..ps as u64 + pc as u64 {
             let child = ovm.place(i).child;
             if child < ovm.n_cells && !small[child as usize] && !seen[child as usize] {
@@ -606,26 +658,33 @@ fn pages_to_decode(ovm: &Ovm, small: &[bool], thr: i64) -> Vec<u32> {
 /// top cell's own pages of a million records each would hold one thread
 /// while the rest stood idle: the synthetic MAIN01 1/10 decoded 55 s on 8
 /// threads by runs in file order)
-fn decode_pages(ovm: &Ovm, ovp: &str, pages: &[u32], g: &OvsGrid, thr: i64, jobs: usize) -> Result<Vec<(u32, (PageSub, u64))>, String> {
+fn decode_pages(ovm: &Ovm, ovp: &str, pages: &[u32], g: &OvsGrid, thr: i64, jobs: usize, progress: &mut Progress) -> Result<Vec<(u32, (PageSub, u64))>, String> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     let mut order: Vec<u32> = pages.to_vec();
     order.sort_unstable_by_key(|&pi| std::cmp::Reverse(ovm.page(pi).csize));
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let failed = std::sync::atomic::AtomicBool::new(false);
+    let total_bytes: u64 = order.iter().map(|&pi| u64::from(ovm.page(pi).csize)).sum();
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let (done, done_bytes) = (AtomicUsize::new(0), AtomicU64::new(0));
     let jobs = jobs.clamp(1, order.len().max(1));
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..jobs)
             .map(|_| {
-                let (order, next, failed) = (&order, &next, &failed);
+                let (order, next, failed, done, done_bytes) = (&order, &next, &failed, &done, &done_bytes);
                 scope.spawn(move || -> Result<Vec<(u32, (PageSub, u64))>, String> {
                     let mut f = std::fs::File::open(ovp).map_err(|e| format!("{}: {}", ovp, e))?;
                     let mut out = Vec::new();
-                    while !failed.load(std::sync::atomic::Ordering::Relaxed) {
-                        let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    while !failed.load(Ordering::Relaxed) {
+                        let at = next.fetch_add(1, Ordering::Relaxed);
                         let Some(&pi) = order.get(at) else { break };
                         match decode_page(ovm, &mut f, pi, g, thr) {
-                            Ok(made) => out.push((pi, made)),
+                            Ok(made) => {
+                                done.fetch_add(1, Ordering::Relaxed);
+                                done_bytes.fetch_add(made.1, Ordering::Relaxed);
+                                out.push((pi, made));
+                            }
                             Err(e) => {
-                                failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                failed.store(true, Ordering::Relaxed);
                                 return Err(e);
                             }
                         }
@@ -634,6 +693,20 @@ fn decode_pages(ovm: &Ovm, ovp: &str, pages: &[u32], g: &OvsGrid, thr: i64, jobs
                 })
             })
             .collect();
+        // where the threads are, while they work
+        while !handles.iter().all(|handle| handle.is_finished()) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if progress.due() {
+                progress.line(&format!(
+                    "decode: {}/{} pages, {:.0}/{:.0} MB on {} threads",
+                    count(done.load(Ordering::Relaxed) as u64),
+                    count(order.len() as u64),
+                    done_bytes.load(Ordering::Relaxed) as f64 / 1e6,
+                    total_bytes as f64 / 1e6,
+                    jobs
+                ));
+            }
+        }
         let mut out = Vec::with_capacity(order.len());
         let mut first_error = None;
         for handle in handles {
@@ -665,6 +738,12 @@ struct Builder<'a> {
     /// the first page that would not read or decode (the build fails)
     error: Option<String>,
     stats: OvsStats,
+    progress: Progress<'a>,
+    /// where the walk is: (placement, of) at the top, and in the cell it
+    /// walks under it
+    at: [(u64, u64); 2],
+    at_cell: u32,
+    ticks: u64,
 }
 
 impl Builder<'_> {
@@ -712,6 +791,32 @@ impl Builder<'_> {
         }
     }
 
+    /// every few thousand placements or members, what the walk has done -
+    /// when progress_every() has passed
+    fn tick(&mut self, n: u64) {
+        self.ticks += n;
+        if self.ticks < 4096 {
+            return;
+        }
+        self.ticks = 0;
+        if !self.progress.due() {
+            return;
+        }
+        let (top, sub) = (self.at[0], self.at[1]);
+        let under = if sub.1 > 0 { format!(", in {} {}/{}", self.ovm.cell(self.at_cell).name, count(sub.0), count(sub.1)) } else { String::new() };
+        let line = format!(
+            "walk: top placement {}/{}{}; {} cells walked into, {} members under the cut, {} pages by grid, {} decoded",
+            count(top.0),
+            count(top.1),
+            under,
+            count(self.stats.walked),
+            count(self.stats.small),
+            count(self.stats.pages),
+            count(self.stats.big_pages)
+        );
+        self.progress.line(&line);
+    }
+
     fn walk(&mut self, ci: u32, xf: &Xf, depth: u32) {
         let ovm = self.ovm;
         let d = depth.min(DEPTH_CAP as u32) as u8;
@@ -755,7 +860,17 @@ impl Builder<'_> {
         // its placements: a cell under the cut counted where its members
         // are, a larger one walked
         let (ps, pc) = ovm.cell_places(ci);
+        if depth == 1 {
+            self.at_cell = ci;
+        }
         for i in ps as u64..ps as u64 + pc as u64 {
+            if depth < 2 {
+                self.at[depth as usize] = (i - ps as u64 + 1, pc as u64);
+                if depth == 0 {
+                    self.at[1] = (0, 0);
+                }
+            }
+            self.tick(1);
             let pl = ovm.place(i);
             let child = pl.child;
             if child >= ovm.n_cells {
@@ -817,6 +932,8 @@ impl Builder<'_> {
                         }
                     }
                 }
+                let members = pl.rep.members().min(SPREAD_MEMBERS);
+                self.tick(members);
             } else {
                 let members: Vec<(i64, i64)> = match &pl.rep {
                     Rep::One => vec![(0, 0)],
@@ -851,7 +968,11 @@ impl Builder<'_> {
         self.stats.small_tiles = smalls.iter().map(|(_, acc)| acc.tiles.tiles.len() as u64).sum();
         let (words, h, tiles_w) = (self.words, self.g.h, self.tiles_w);
         let mut slices: HashMap<u32, Rc<Vec<Vec<(u32, f64)>>>> = HashMap::new();
-        for ((child, cd), acc) in smalls {
+        let n = smalls.len();
+        for (at, ((child, cd), acc)) in smalls.into_iter().enumerate() {
+            if self.progress.due() {
+                self.progress.line(&format!("settle: {}/{} cells under the cut", count(at as u64), count(n as u64)));
+            }
             let sl = Rc::clone(slices.entry(child).or_insert_with(|| Rc::new(depth_slices(self.ovm, self.cover, child))));
             for (j, layers) in sl.iter().enumerate() {
                 let d = (cd as usize + j).min(DEPTH_CAP as usize) as u8;
@@ -872,7 +993,9 @@ impl Builder<'_> {
 /// (the file's bytes, what the build did).
 /// `jobs` threads decode the pages the walk needs before it (0: as many as
 /// the machine has).
-pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs: usize) -> Result<(Vec<u8>, OvsStats), String> {
+/// `say` gets the progress lines (Progress).
+pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs: usize, say: &dyn Fn(&str)) -> Result<(Vec<u8>, OvsStats), String> {
+    let mut progress = Progress::new(say);
     if !ovm.has_page_occ() {
         return Err("design.ovs needs design.ovb (the pages' occupancy grids)".into());
     }
@@ -892,6 +1015,17 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
             !b.is_empty() && b.x1 - b.x0 < thr && b.y1 - b.y0 < thr
         })
         .collect();
+    progress.line(&format!(
+        "grid {} um, {}x{} cells, {} levels; {} cells ({} under the cut), {} pages, {} layers",
+        g.base_um(),
+        g.w,
+        g.h,
+        g.n_levels,
+        count(u64::from(ovm.n_cells)),
+        count(small.iter().filter(|&&s| s).count() as u64),
+        count(u64::from(ovm.n_pages)),
+        ovm.n_layers
+    ));
     let ovp_path = ovp;
     let ovp = std::fs::File::open(ovp).map_err(|e| format!("{}: {}", ovp, e))?;
     let mut b = Builder {
@@ -911,6 +1045,10 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
         subs: FxMap::default(),
         error: None,
         stats: OvsStats::default(),
+        progress,
+        at: [(0, 0); 2],
+        at_cell: 0,
+        ticks: 0,
     };
     if b.small[ovm.top as usize] {
         // a top under the cut (review 2026-10-07: a 0.4 um square alone made
@@ -924,23 +1062,40 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
     } else {
         let started = std::time::Instant::now();
         let jobs = if jobs == 0 { std::thread::available_parallelism().map_or(4, |n| n.get()) } else { jobs };
-        let pages = pages_to_decode(ovm, &b.small, thr);
-        for (pi, (sub, bytes)) in decode_pages(ovm, ovp_path, &pages, &g, thr, jobs)? {
+        b.progress.line("listing the pages to decode (a shape over the cut, or no grid)");
+        let pages = pages_to_decode(ovm, &b.small, thr, &mut b.progress);
+        let mb: f64 = pages.iter().map(|&pi| f64::from(ovm.page(pi).csize)).sum::<f64>() / 1e6;
+        b.progress.line(&format!("decode: {} pages, {:.0} MB on {} threads", count(pages.len() as u64), mb, jobs));
+        for (pi, (sub, bytes)) in decode_pages(ovm, ovp_path, &pages, &g, thr, jobs, &mut b.progress)? {
             b.stats.decoded += 1;
             b.stats.decoded_bytes += bytes;
             b.subs.insert(pi, Rc::new(sub));
         }
         b.stats.decode_s = started.elapsed().as_secs_f64();
         b.stats.decode_jobs = jobs as u64;
+        b.progress.line(&format!("decoded {} pages in {:.1} s", count(b.stats.decoded), b.stats.decode_s));
         let started = std::time::Instant::now();
+        b.progress.line(&format!("walk: {} placements at the top", count(u64::from(ovm.cell_places(ovm.top).1))));
         b.walk(ovm.top, &Xf::identity(), 0);
         b.stats.walk_s = started.elapsed().as_secs_f64();
+        let line = format!(
+            "walked in {:.1} s: {} cells walked into, {} members under the cut ({} arrays spread), {} pages by grid, {} decoded",
+            b.stats.walk_s,
+            count(b.stats.walked),
+            count(b.stats.small),
+            count(b.stats.spread),
+            count(b.stats.pages),
+            count(b.stats.big_pages)
+        );
+        b.progress.line(&line);
         if let Some(e) = b.error.take() {
             return Err(e);
         }
     }
     b.subs.clear();
     let started = std::time::Instant::now();
+    let line = format!("settle: {} cells under the cut by their cover", count(b.smalls.len() as u64));
+    b.progress.line(&line);
     b.settle();
     b.stats.settle_s = started.elapsed().as_secs_f64();
     let write_started = std::time::Instant::now();
@@ -952,8 +1107,21 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
             list.push((d, c));
         }
     }
+    let line = format!(
+        "settled in {:.1} s; write: {} planes ({:.0} MB) of {} layers",
+        b.stats.settle_s,
+        count(b.stats.grids),
+        b.stats.grid_bytes as f64 / 1e6,
+        by_layer.iter().filter(|list| !list.is_empty()).count()
+    );
+    b.progress.line(&line);
+    let n_layers = by_layer.len();
+    let mut written = 0u64;
     let mut blobs: Blobs = Vec::with_capacity(by_layer.len());
     for (k, list) in by_layer.iter_mut().enumerate() {
+        if b.progress.due() {
+            b.progress.line(&format!("write: layer {}/{}, {:.1} MB so far", k, n_layers, written as f64 / 1e6));
+        }
         list.sort_unstable();
         let mut depths: Vec<u8> = list.iter().map(|&(d, _)| d).collect();
         depths.dedup();
@@ -1010,7 +1178,9 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
                     levels.push((Vec::new(), Vec::new()));
                     continue;
                 }
-                levels.push((deflate(&row_bytes(&bits, words, w, h)), if any { deflate(&means) } else { Vec::new() }));
+                let level = (deflate(&row_bytes(&bits, words, w, h)), if any { deflate(&means) } else { Vec::new() });
+                written += (level.0.len() + level.1.len()) as u64;
+                levels.push(level);
             }
             planes_out.push((d, levels));
         }
@@ -1019,6 +1189,8 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
     let out = encode(ovm.src_size, ovm.src_mtime, &g, &blobs);
     b.stats.write_s = write_started.elapsed().as_secs_f64();
     b.stats.bytes = out.len() as u64;
+    let line = format!("written in {:.1} s: {:.1} MB", b.stats.write_s, b.stats.bytes as f64 / 1e6);
+    b.progress.line(&line);
     Ok((out, b.stats))
 }
 

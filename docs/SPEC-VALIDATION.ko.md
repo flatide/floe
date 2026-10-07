@@ -163,6 +163,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
       그 옆 0.4 µm 정사각형 26×26(3 µm 간격)을 둔다. 컷을 넘는 도형과 컷 아래 도형이 한 페이지에 있다.
       간격이 2 µm이면 1 µm/px에서 모든 멤버가 점 체커의 같은 반대 자리에 놓여 walk·점유 모두 0이 된다.
     - 보통 색인(design.ovo 없음)에 `floe-index ovs --um 1`로 design.ovs를 만든다. 큰 페이지 1개를 디코드한다.
+      표준 오류에 단계 줄(`index open`, `grid 1 um`, `decoded`, `walked in`, `settled in`, `written in`)이 나온다.
+      `FLOE_OVS_PROGRESS_S=0`으로 다시 만들면 긴 단계 줄(`listing the pages to decode: `, `settle: 0/`,
+      `write: layer 0/`)도 나온다(0.12.314).
       `--jobs 1`로 다시 만들어도 바이트 동일하다. `--no-page-occupancy` 캐시는 design.ovb가 없어 exit 1로
       거절하고 design.ovs를 만들지 않는다.
     - 400×200 px, 1 µm/px, full depth(셀 1 px): `density_plan2`가 `occ_layers` 2, `occ_cell_nm` 1000,

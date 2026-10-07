@@ -2240,8 +2240,12 @@ pub fn ovs_cmd(args: &[String]) {
     let cover = floe_vfs::cover::CellCover::new(&ovm, std::sync::Arc::new(summary))
         .unwrap_or_else(|| fail("cell cover", "no design.ovb or another summary".into()));
     let opened = started.elapsed().as_secs_f64();
+    eprintln!("[ovs] {}: index open ({:.1} s)", dir, opened);
     let ovp = format!("{}/design.ovp", dir);
-    let (bytes, stats) = floe_vfs::occ_density::build(&ovm, &cover, &ovp, base_um, jobs).unwrap_or_else(|e| fail("build", e));
+    // where the build is (user 2026-10-07: "no log while ovs indexes - 11
+    // minutes into the real chip and no telling how far it got")
+    let say = |line: &str| eprintln!("[ovs] {}", line);
+    let (bytes, stats) = floe_vfs::occ_density::build(&ovm, &cover, &ovp, base_um, jobs, &say).unwrap_or_else(|e| fail("build", e));
     let file = floe_vfs::occ_density::OvsFile::from_bytes(bytes.clone()).unwrap_or_else(|e| fail("build", e));
     // tmp + rename: a viewer reading the old file meanwhile keeps it whole
     let path = format!("{}/design.ovs", dir);

@@ -2889,9 +2889,16 @@ def occ_density_checks(temp):
     assert built.returncode == 0 and (ice / 'design.ovs').read_bytes()[:8] == b'FLOEOVS1', built.stdout + built.stderr
     stats = dict(kv.split('=', 1) for kv in built.stdout.split()[1:])
     assert int(stats['big_pages']) >= 1 and int(stats['decoded']) >= 1 and stats['base_um'] == '1', stats
+    # where the build is (user 2026-10-07: no log for 11 minutes on the real
+    # chip): its phases, and at FLOE_OVS_PROGRESS_S=0 the long ones' lines
+    for phase in ('index open', 'grid 1 um', 'decoded', 'walked in', 'settled in', 'written in'):
+        assert '[ovs] ' in built.stderr and phase in built.stderr, (phase, built.stderr)
     first = (ice / 'design.ovs').read_bytes()
-    again = subprocess.run([index_bin, 'ovs', str(ice), '--um', '1', '--jobs', '1'], capture_output=True, text=True, timeout=600)
+    again = subprocess.run([index_bin, 'ovs', str(ice), '--um', '1', '--jobs', '1'], capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, FLOE_OVS_PROGRESS_S='0'))
     assert again.returncode == 0 and (ice / 'design.ovs').read_bytes() == first, 'design.ovs differs built again (one decode thread)'
+    for beat in ('listing the pages to decode: ', 'settle: 0/', 'write: layer 0/'):
+        assert '[ovs] ' + beat in again.stderr, (beat, again.stderr)
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
            'FLOE_RUST_DENSITY_PATTERN': None, 'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on',
            'FLOE_RUST_DENSITY_STAGES': 'off', 'FLOE_RUST_TILE_PX': '64', 'FLOE_RUST_RASTER_JOBS': '1'}
