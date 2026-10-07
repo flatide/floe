@@ -6592,8 +6592,8 @@ mod tests {
             fit,
         };
         let (a, b) = (
-            Some(floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 3, phase: 7, page: 9 }),
-            Some(floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 4, phase: 7, page: 9 }),
+            Some(floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 3, phase: 7, page: 9, below: u32::MAX }),
+            Some(floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 4, phase: 7, page: 9, below: u32::MAX }),
         );
         let mut retained = vec![frame(64, [-160.0, -160.0, 480.0, 480.0], a)];
         // the same fit: the containing margin stays
@@ -6614,7 +6614,7 @@ mod tests {
         let a_cmd = cmd("render gen=0 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
         let b_cmd = cmd("render gen=1 view=0,0,640,640 w=32 h=32 frames=off out=/tmp/b.raw");
         let frame = |px: u32| floe_render_core::RgbaFrame::from_pixels(px, px, vec![3u8; (px * px * 4) as usize]).unwrap();
-        let fit = floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 3, phase: 7, page: 9 };
+        let fit = floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 3, phase: 7, page: 9, below: u32::MAX };
         state.retained = vec![
             RetainedFrame { key: RetainedKey::new(&a_cmd, None), view: [0.0, 0.0, 320.0, 320.0], frame: frame(32), fit: Some(fit) },
             RetainedFrame { key: RetainedKey::new(&b_cmd, None), view: [0.0, 0.0, 640.0, 640.0], frame: frame(32), fit: Some(fit) },
@@ -6622,7 +6622,7 @@ mod tests {
         let mut again = cmd("render gen=2 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/c.raw");
         let reuse = prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), Some(fit)).expect("the older frame at this scale serves");
         assert_eq!(reuse.valid, [0, 0, 32, 32]);
-        let other = floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 4, phase: 7, page: 9 };
+        let other = floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 4, phase: 7, page: 9, below: u32::MAX };
         assert!(prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), Some(other)).is_none(), "another decision: nothing to reuse");
         assert!(prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), None).is_none());
     }

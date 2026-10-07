@@ -711,7 +711,9 @@ sh tools/validate_rust.sh --only quick path/to.oas
     `a_page_two_working_cells_hold_counts_once_against_the_planes_above`(두 깊이에 놓인 셀의 페이지를 한 번만 세어 예산이
     담는 프레임은 네 페이지 전부, 세 페이지 예산은 위 plane만이고 결정은 "전부"가 아님 — 두 번 세면 실패),
     `a_decision_applied_again_says_what_its_plane_lacks`(아래 plane의 바닥 하한, 맨 위 plane의 올린 컷으로 내린 결정을
-    다시 적용해도 페이지와 상태 — 온전·잘림·빠짐 레이어 수, `fit_none_pct`, `fit_pct` — 가 같음; `lacks`를 빼면 실패).
+    다시 적용해도 페이지와 상태 — 온전·잘림·빠짐 레이어 수, `fit_none_pct`, `fit_pct` — 가 같음; `lacks`를 빼면 실패;
+    0.12.320(15c464d 리뷰): 남긴 1600(등급 10)과 처음 뺀 200(등급 7) 사이 등급이 빈 위 plane도 다시 적용해 `none below
+    x5.12` 그대로 — `below` 대신 결정의 등급 − 1을 쓰면 `x20.5`로 실패).
 - `representatives`(tools/validate_representatives.py, 약 10초; `render`·`indexer`
   별칭에 포함): design.ovr 추가 생성이 캐시를 보존하는지, depth 0 제외·kill switch·
   손상 파일 폴백, 그리고 결합 인덱스 실행에서 OVR 생성이 실패해도(`--kill-at

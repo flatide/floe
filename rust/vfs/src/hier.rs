@@ -1124,7 +1124,14 @@ pub type WsKey = (u32, u32);
 /// it replaced the viewport's): the cut the plan was made at and the
 /// `fit_priority` of the last page kept - a page is kept when its priority is
 /// at most this, whatever the frame. `rank` is that page's drawing rank
-/// under HierOpts::fit_rank (0 without).
+/// under HierOpts::fit_rank (0 without). `below` (HierOpts::fit_rank only;
+/// u32::MAX otherwise): the size class the deciding fit left out first in
+/// the decision's plane - u32::MAX when it left that plane whole - so the
+/// decision applied again says where the plane stops as the deciding frame
+/// did (review of 15c464d: `none below x5.12` became `x20.5` for the same
+/// view, the classes between empty). A decision that ends at a class of its
+/// own (phase and page u32::MAX: thin_to_budget's `short`) lacks `below`
+/// - its pages never collected; one that ends at a page left out `below`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FixedFit {
     pub cut_dbu: i64,
@@ -1132,6 +1139,7 @@ pub struct FixedFit {
     pub class: u32,
     pub phase: u32,
     pub page: u32,
+    pub below: u32,
 }
 
 impl FixedFit {
@@ -1141,7 +1149,7 @@ impl FixedFit {
     /// its own fit and the picture changed when it landed), so that a wider
     /// frame under it either fits whole as well or decides anew.
     pub fn everything(cut_dbu: i64) -> Self {
-        Self { cut_dbu, rank: u16::MAX, class: 0, phase: u32::MAX, page: u32::MAX }
+        Self { cut_dbu, rank: u16::MAX, class: 0, phase: u32::MAX, page: u32::MAX, below: u32::MAX }
     }
 
     /// The priority threshold (fit_priority's order): a page at most this
@@ -2626,8 +2634,18 @@ fn plan_hier_fixed_ranked(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedF
             let rank = page_rank(opts, &p);
             rank == fixed.rank && fit_priority(&p, key, pi, rank) > fixed.threshold()
         });
-    let lacks = past.then_some((fixed.rank, std::cmp::Reverse(fixed.class.saturating_sub(1)), 0, 0));
-    let plan = plan_hier_as_asked(v, &attempt, &walking(fixed.rank.saturating_add(1), Some((fixed.rank, 1u64 << fixed.class.min(62))), 0), 0);
+    // where the plane stops: the class the deciding fit left out first
+    // (`below`) - collected from it when that fit ended at a page left out,
+    // so the same page ends it again; a decision ending at a class of its own
+    // never collected it, and stops at it
+    let short_decision = fixed.phase == u32::MAX && fixed.page == u32::MAX;
+    let (floor_class, lacks_class) = match fixed.below {
+        u32::MAX => (fixed.class, fixed.class.saturating_sub(1)),
+        below if short_decision => (fixed.class, below),
+        below => (fixed.class.min(below), below),
+    };
+    let lacks = past.then_some((fixed.rank, std::cmp::Reverse(lacks_class), 0, 0));
+    let plan = plan_hier_as_asked(v, &attempt, &walking(fixed.rank.saturating_add(1), Some((fixed.rank, 1u64 << floor_class.min(62))), 0), 0);
     let mut plan = fit_under(v, req, &attempt, opts, plan, fixed, false, lacks)?;
     plan.stats.fit_passes = 2;
     Some(plan)
@@ -3125,8 +3143,9 @@ fn thin_to_budget(v: &Ovm, opts: &HierOpts, plan: &mut HierPlan, key: FitKey, as
         // every page it holds, the decision just short of where it lacks:
         // the planes above that one whole, that one from its floor's class
         // up (or none of it)
-        let (rank, class) = if edge.1 .0 == u32::MAX { (edge.0.saturating_sub(1), 0) } else { (edge.0, edge.1 .0.saturating_add(1)) };
-        plan.stats.fit_decision = Some(FixedFit { cut_dbu: asked_cut, rank, class, phase: u32::MAX, page: u32::MAX });
+        let (rank, class, below) =
+            if edge.1 .0 == u32::MAX { (edge.0.saturating_sub(1), 0, u32::MAX) } else { (edge.0, edge.1 .0.saturating_add(1), edge.1 .0) };
+        plan.stats.fit_decision = Some(FixedFit { cut_dbu: asked_cut, rank, class, phase: u32::MAX, page: u32::MAX, below });
         fit_class_stats(plan, opts, &prio, &vec![true; prio.len()], edge, asked_cut);
         return true;
     }
@@ -3150,7 +3169,10 @@ fn thin_to_budget(v: &Ovm, opts: &HierOpts, plan: &mut HierPlan, key: FitKey, as
     let edge = prio[order[kept]];
     // the decision: the last page kept (its cut is the caller's)
     let last = prio[order[kept - 1]];
-    plan.stats.fit_decision = Some(FixedFit { cut_dbu: asked_cut, rank: last.0, class: last.1 .0, phase: last.2, page: last.3 });
+    // top plane first, where its plane stops: the class of the first page
+    // left out, when that is of the decision's plane
+    let below = if opts.fit_rank.is_some() && edge.0 == last.0 { edge.1 .0 } else { u32::MAX };
+    plan.stats.fit_decision = Some(FixedFit { cut_dbu: asked_cut, rank: last.0, class: last.1 .0, phase: last.2, page: last.3, below });
     fit_class_stats(plan, opts, &prio, &keep, edge, asked_cut);
     plan.stats.page_bytes = keep_pages(v, plan, &keep);
     plan.stats.fit_bytes = bytes;
@@ -9139,6 +9161,22 @@ mod tests {
         let first = plan_hier(&top, &ask(per), &ranked(None));
         assert_eq!((first.pages.len(), account(&first)), (1, (0, 2, 1, 512, 512)));
         let again = plan_hier(&top, &ask(per), &ranked(first.stats.fit_decision));
+        assert_eq!((again.pages.clone(), account(&again), again.stats.fit_fixed), (first.pages.clone(), account(&first), true));
+        // review of 15c464d: the classes between the page kept and the first
+        // left out empty - UPPER's 1600 (class 10), 200 (class 7) and 99 of
+        // 50 (their pages wide: not one blob on screen); the top plane
+        // laddered to 64, its 1600 kept and its 200 the first left out: `none
+        // below x5.12`, and so again (the decision carries class 7, `below` -
+        // it said x20.5, from class 10)
+        let gap: Vec<(BBox, u64, u64)> = [(bx(0, 0, 1600, 1600), 1600, 1600), (bx(0, 3000, 200, 3200), 200, 200)]
+            .into_iter()
+            .chain((0..99).map(|i| (bx(0, 5000 + i, 40_000, 45_000 + i), 50, 50)))
+            .collect();
+        let gapped = make(gap, two());
+        let first = plan_hier(&gapped, &ask(per), &ranked(None));
+        assert_eq!((first.pages.len(), account(&first)), (1, (0, 2, 1, 512, 128)));
+        assert_eq!(first.stats.fit_decision.map(|d| (d.class, d.below)), Some((10, 7)));
+        let again = plan_hier(&gapped, &ask(per), &ranked(first.stats.fit_decision));
         assert_eq!((again.pages.clone(), account(&again), again.stats.fit_fixed), (first.pages.clone(), account(&first), true));
     }
 

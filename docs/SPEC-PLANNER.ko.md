@@ -836,6 +836,11 @@
       페이지를 아예 수집하지 않는다. 요청 그대로의 패스가 그 plane을 혼자 `FIT_OVERSHOOT` 예산 넘게 떨궜거나 결정 밖
       페이지를 지녔으면, 그 plane은 "잘림"이다(`fit_under`의 `lacks`). 종전엔 `top 2 whole`이라 했는데 결정한 프레임은
       그 plane의 100페이지가 빠졌다고 했다.
+    - 15c464d 리뷰 수정(0.12.320, renderd 0.12.295): 결정이 그 plane에서 처음 뺀 크기 등급(`FixedFit::below`)을 지닌다.
+      다시 적용할 때 남긴 페이지의 등급과 처음 뺀 등급 사이가 비어 있어도 같은 경계를 말한다(종전: 같은 뷰가 처음
+      `none below x5.12`, 다시 `x20.5` — 결정의 등급 − 1을 썼다). 뺀 페이지로 끝난 결정은 그 등급부터 다시 모아 같은
+      페이지가 경계가 되고, 자기 등급에서 끝난 결정(`short`: 하한 아래는 모으지 않았다)은 결정의 등급부터 모으고 경계는
+      `below`다. 크기 순(킬 스위치)에서는 `below`가 늘 `u32::MAX`라 종전과 같다.
   - 단위 vfs `the_budget_fit_keeps_the_top_plane_first`, `a_plane_past_the_ladders_reach_is_left_out_and_the_planes_above_kept_whole`,
     `a_page_two_working_cells_hold_counts_once_against_the_planes_above`,
     `a_decision_applied_again_says_what_its_plane_lacks`; 게이트 `fit_budget`의 `top_first_checks`(SPEC-VALIDATION).
