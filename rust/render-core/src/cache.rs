@@ -674,12 +674,14 @@ fn occ_threads() -> usize {
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()).min(8))
 }
 
-/// design.ovs (the occupancy density, crate::occ): opened once, and the
-/// layers it made per (layer, level, depth key) - one level and depth's
+/// design.ovs (the occupancy density, crate::occ) and the big cells'
+/// design.ovs.<cell>: each looked for once, the file if it will do (None:
+/// the top's); and the layers made per (layer, level, depth key) - one
+/// file's, level's and depth's (`layers_of`: the file's view root)
 #[derive(Default)]
 struct OccDensitySlot {
-    tried: bool,
-    file: Option<std::sync::Arc<floe_vfs::occ_density::OvsFile>>,
+    files: std::collections::HashMap<Option<u32>, Option<std::sync::Arc<floe_vfs::occ_density::OvsFile>>>,
+    layers_of: Option<u32>,
     layers: std::collections::HashMap<(u32, u32, u32), Option<std::sync::Arc<crate::occ::OccLayer>>>,
 }
 
@@ -801,10 +803,13 @@ impl Cache {
     /// to make would pass `cap_bytes`, those this frame does not ask for
     /// (review 2026-10-07: the cap was the frame's, the layers turned on and
     /// off at one zoom stayed). The layers are made until `stop` (a newer
-    /// frame): None then, the ones made kept. None without design.ovs (looked
-    /// for once per open cache), one built for another index or another
-    /// version, where no level will do - or where a plane will not read: the
-    /// file is let go and the plans draw.
+    /// frame): None then, the ones made kept. A view `root` draws by its
+    /// cell's file, design.ovs.<cell> - a big cell's under the top (floe-index
+    /// ovs --roots; user 2026-10-07: two cells under the top drew their root
+    /// views by the plans) -, its layers made in place of the top's. None
+    /// without the file (looked for once per open cache), one built for
+    /// another index, cell or version, where no level will do - or where a
+    /// plane will not read: the file is let go and the plans draw.
     #[allow(clippy::too_many_arguments)]
     pub fn occ_density(
         &self,
@@ -814,21 +819,41 @@ impl Cache {
         max_cell_px: f64,
         cap_bytes: u64,
         depth: Option<u32>,
+        root: Option<u32>,
         stop: &(dyn Fn() -> bool + Sync),
     ) -> Option<std::sync::Arc<crate::occ::OccDensity>> {
         let mut slot = match self.occ_density.lock() {
             Ok(slot) => slot,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if !slot.tried {
-            slot.tried = true;
-            let path = format!("{}/design.ovs", self.dir);
-            match floe_vfs::occ_density::OvsFile::open(&path).and_then(|f| f.validate_against(&self.vfs.ovm).map(|()| f)) {
-                Ok(file) => slot.file = Some(std::sync::Arc::new(file)),
-                Err(e) => eprintln!("[render-core] occupancy density {}: none ({})", path, e),
-            }
+        // the top as the view root: its own file
+        let root = root.filter(|&ci| ci != self.vfs.ovm.top);
+        let path = match root {
+            Some(ci) => format!("{}/design.ovs.{}", self.dir, ci),
+            None => format!("{}/design.ovs", self.dir),
+        };
+        if !slot.files.contains_key(&root) {
+            let opened = floe_vfs::occ_density::OvsFile::open(&path).and_then(|f| f.validate_against(&self.vfs.ovm).map(|()| f)).and_then(|f| {
+                if f.root.map(|r| r.ci) == root {
+                    Ok(f)
+                } else {
+                    Err("another cell's file".to_string())
+                }
+            });
+            let file = match opened {
+                Ok(file) => Some(std::sync::Arc::new(file)),
+                Err(e) => {
+                    eprintln!("[render-core] occupancy density {}: none ({})", path, e);
+                    None
+                }
+            };
+            slot.files.insert(root, file);
         }
-        let ovs = slot.file.clone()?;
+        let ovs = slot.files.get(&root).cloned().flatten()?;
+        if slot.layers_of != root {
+            slot.layers.clear();
+            slot.layers_of = root;
+        }
         let grid = ovs.grid;
         // what the layers asked for would hold at a level at most: their
         // bits and their groups' means
@@ -866,8 +891,8 @@ impl Cache {
                     slot.layers.insert((id, level, depth_key), layer);
                 }
                 Err(e) => {
-                    eprintln!("[render-core] occupancy density {}/design.ovs: {} - the plans draw", self.dir, e);
-                    slot.file = None;
+                    eprintln!("[render-core] occupancy density {}: {} - the plans draw", path, e);
+                    slot.files.insert(root, None);
                     slot.layers.clear();
                     return None;
                 }
@@ -884,6 +909,7 @@ impl Cache {
         }
         Some(std::sync::Arc::new(crate::occ::OccDensity {
             level,
+            to_file: ovs.root.map(|r| floe_tiler::Xf::place(r.x, r.y, r.rot, r.flip)),
             cell: grid.cell_dbu << level,
             x0: grid.x0,
             y0: grid.y0,

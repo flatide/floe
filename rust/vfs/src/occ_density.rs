@@ -63,6 +63,11 @@ use std::rc::Rc;
 
 pub const OVS_MAGIC: &[u8; 8] = b"FLOEOVS1";
 pub const OVS_VERSION: u32 = 3;
+/// a big cell's file (a root view's): version 3 and its placement in the top
+pub const OVS_VERSION_ROOT: u32 = 4;
+/// a cell under the top this share of its box's area or more gets a file of
+/// its own (`floe-index ovs --roots`)
+pub const OVS_ROOT_SHARE: f64 = 0.25;
 /// cells per side of a group: one byte of a row
 pub const OVS_GROUP: u32 = 8;
 /// a shape counts at a level while its larger side is under this many of the
@@ -77,6 +82,8 @@ const BASE_STEPS_UM: [f64; 11] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.
 /// its members instead of placed member by member
 const SPREAD_MEMBERS: u64 = 4096;
 const HEADER_LEN: usize = 80;
+/// version 4: the root cell, its placement's rot, flip and x, y
+const ROOT_LEN: usize = 24;
 /// cells a side of a sparse tile (Tiles): a u64 word a row
 const TILE: u32 = 64;
 
@@ -107,13 +114,7 @@ impl OvsGrid {
         }
         let cells = |span: i64| u32::try_from((span as i128 + cell_dbu as i128 - 1) / cell_dbu as i128).ok();
         let (w, h) = (cells(x1 - x0)?, cells(y1 - y0)?);
-        let (mut a, mut b, mut n) = (w, h, 1u32);
-        while a > OVS_TOP_GRID || b > OVS_TOP_GRID {
-            a = a.div_ceil(2);
-            b = b.div_ceil(2);
-            n += 1;
-        }
-        Some(OvsGrid { unit, cell_dbu, x0, y0, w, h, n_levels: n })
+        Some(OvsGrid { unit, cell_dbu, x0, y0, w, h, n_levels: level_count(w, h) })
     }
 
     /// The automatic base cell (um) for a box `span` dbu on its longer side:
@@ -144,6 +145,18 @@ impl OvsGrid {
     fn cells(&self, (x0, y0, x1, y1): (i64, i64, i64, i64)) -> (u32, u32, u32, u32) {
         (self.cell_of(x0, true), self.cell_of((x1 - 1).max(x0), true), self.cell_of(y0, false), self.cell_of((y1 - 1).max(y0), false))
     }
+}
+
+/// The levels of a grid of `w` x `h` cells: 2x coarser each down to
+/// OVS_TOP_GRID a side
+fn level_count(w: u32, h: u32) -> u32 {
+    let (mut a, mut b, mut n) = (w, h, 1u32);
+    while a > OVS_TOP_GRID || b > OVS_TOP_GRID {
+        a = a.div_ceil(2);
+        b = b.div_ceil(2);
+        n += 1;
+    }
+    n
 }
 
 /// Level 0's cells of coordinates, by a reciprocal corrected to the exact
@@ -221,6 +234,8 @@ pub struct OvsStats {
     pub levels: u64,
     pub empty_levels: u64,
     pub bytes: u64,
+    /// the cells under the top that got a file of their own
+    pub roots: u64,
 }
 
 /// u64 words a row of `w` cells takes
@@ -719,19 +734,60 @@ fn decode_pages(ovm: &Ovm, ovp: &str, pages: &[u32], g: &OvsGrid, thr: i64, jobs
     })
 }
 
+/// One file's share of the walk (an owner): the top's own content, or a big
+/// cell's under the top (its first placement's) - on a part of the top's
+/// grid aligned to its groups, its depths counted from the cell (user
+/// 2026-10-07: two cells under the top drew their root views by the plans;
+/// "record the cells over 25 % as the top unfolds and make them at once")
+struct Owner {
+    ci: u32,
+    /// the top grid's cell of its corner (multiples of OVS_GROUP), its cells
+    i0: u32,
+    j0: u32,
+    w: u32,
+    h: u32,
+    fast: FastCells,
+    words: usize,
+    gw: u32,
+    gh: u32,
+    tiles_w: u32,
+    /// the cell's placement depth under the top (0: the top)
+    depth0: u32,
+    /// the cell's coordinates to the top's (its first placement)
+    xf: Xf,
+}
+
+impl Owner {
+    fn new(ci: u32, g: &OvsGrid, (i0, j0, w, h): (u32, u32, u32, u32), depth0: u32, xf: Xf) -> Owner {
+        let fast = FastCells::new(&Owner::part(g, (i0, j0, w, h)));
+        Owner { ci, i0, j0, w, h, fast, words: words_of(w), gw: w.div_ceil(OVS_GROUP), gh: h.div_ceil(OVS_GROUP), tiles_w: w.div_ceil(TILE), depth0, xf }
+    }
+
+    /// cells [i0, i0 + w) x [j0, j0 + h) of `g` as a grid, its own levels
+    fn part(g: &OvsGrid, (i0, j0, w, h): (u32, u32, u32, u32)) -> OvsGrid {
+        let (x0, y0) = (g.x0 + i64::from(i0) * g.cell_dbu, g.y0 + i64::from(j0) * g.cell_dbu);
+        OvsGrid { unit: g.unit, cell_dbu: g.cell_dbu, x0, y0, w, h, n_levels: level_count(w, h) }
+    }
+
+    /// its own file's grid
+    fn grid(&self, g: &OvsGrid) -> OvsGrid {
+        Owner::part(g, (self.i0, self.j0, self.w, self.h))
+    }
+}
+
 struct Builder<'a> {
     ovm: &'a Ovm,
     cover: &'a CellCover,
     g: OvsGrid,
-    fast: FastCells,
-    words: usize,
-    gw0: u32,
-    gh0: u32,
-    tiles_w: u32,
     thr: i64,
     small: Vec<bool>,
-    smalls: FxMap<(u32, u8), SmallAcc>,
-    planes: FxMap<(u32, u8, u8), PlaneAcc>,
+    /// the top's own (0) and each big cell's under it, as met
+    owners: Vec<Owner>,
+    owner: usize,
+    /// the big cells under the top, true until their first placement is met
+    roots: FxMap<u32, bool>,
+    smalls: FxMap<(u16, u32, u8), SmallAcc>,
+    planes: FxMap<(u16, u32, u8, u8), PlaneAcc>,
     /// design.ovp, for the pages decoded, and their shapes once decoded
     ovp: std::fs::File,
     subs: FxMap<u32, Rc<PageSub>>,
@@ -747,20 +803,37 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    fn plane(&mut self, k: u32, d: u8, class: u8) -> &mut PlaneAcc {
-        let (n_bits, n_groups) = (self.words * self.g.h as usize, (self.gw0 * self.gh0) as usize);
-        self.planes.entry((k, d, class)).or_insert_with(|| PlaneAcc { bits: vec![0; n_bits], area: vec![0.0; n_groups] })
+    fn plane(&mut self, owner: usize, k: u32, d: u8, class: u8) -> &mut PlaneAcc {
+        let o = &self.owners[owner];
+        let (n_bits, n_groups) = (o.words * o.h as usize, (o.gw * o.gh) as usize);
+        self.planes.entry((owner as u16, k, d, class)).or_insert_with(|| PlaneAcc { bits: vec![0; n_bits], area: vec![0.0; n_groups] })
     }
 
-    /// `area` over the cells a world box covers, an even share each
+    /// `area` over the cells a world box covers, an even share each - the
+    /// owner's
     fn add_rect(&mut self, k: u32, d: u8, class: u8, rect: (i64, i64, i64, i64), area: f64) {
-        let cells = self.fast.cells(rect);
+        let owner = self.owner;
+        let (fast, words, gw) = (self.owners[owner].fast, self.owners[owner].words, self.owners[owner].gw);
+        let cells = fast.cells(rect);
         let (i0, i1, j0, j1) = cells;
-        let (words, gw) = (self.words, self.gw0);
         let n = f64::from(i1 - i0 + 1) * f64::from(j1 - j0 + 1);
-        let plane = self.plane(k, d, class);
+        let plane = self.plane(owner, k, d, class);
         set_cells(&mut plane.bits, words, cells);
         groups_of(gw, cells, |g, c| plane.area[g as usize] += (area * f64::from(c) / n) as f32);
+    }
+
+    /// A placement of `child` from the top under `xf`: the owner it starts
+    /// - a big cell's first - else None (the top's)
+    fn root_owner(&mut self, child: u32, xf: &Xf) -> Option<usize> {
+        if self.roots.get(&child) != Some(&true) {
+            return None;
+        }
+        self.roots.insert(child, false);
+        let rb = self.ovm.cell_rbbox(child);
+        let (i0, i1, j0, j1) = self.g.cells(world_rect(xf, (rb.x0, rb.y0, rb.x1, rb.y1)));
+        let (i0, j0) = (i0 / OVS_GROUP * OVS_GROUP, j0 / OVS_GROUP * OVS_GROUP);
+        self.owners.push(Owner::new(child, &self.g, (i0, j0, i1 - i0 + 1, j1 - j0 + 1), 1, *xf));
+        Some(self.owners.len() - 1)
     }
 
     /// Page `pi`'s shapes by class (PageSub): decoded before the walk
@@ -819,7 +892,9 @@ impl Builder<'_> {
 
     fn walk(&mut self, ci: u32, xf: &Xf, depth: u32) {
         let ovm = self.ovm;
-        let d = depth.min(DEPTH_CAP as u32) as u8;
+        let owner = self.owner;
+        let depth0 = self.owners[owner].depth0;
+        let d = (depth - depth0).min(DEPTH_CAP as u32) as u8;
         // its own pages: by their occupancy grids, or decoded
         let (start, count) = ovm.cell_pranges(ci);
         for pri in start..start.saturating_add(count) {
@@ -886,9 +961,9 @@ impl Builder<'_> {
                     let (ox, oy) = xf.apply_vec(dx, dy);
                     (base.0 + ox, base.1 + oy, base.2 + ox, base.3 + oy)
                 };
-                let cd = (depth + 1).min(DEPTH_CAP as u32) as u8;
-                let (fc, gw, tiles_w) = (self.fast, self.gw0, self.tiles_w);
-                let acc = self.smalls.entry((child, cd)).or_default();
+                let cd = (depth + 1 - depth0).min(DEPTH_CAP as u32) as u8;
+                let (fc, gw, tiles_w) = (self.owners[owner].fast, self.owners[owner].gw, self.owners[owner].tiles_w);
+                let acc = self.smalls.entry((owner as u16, child, cd)).or_default();
                 let mark = |acc: &mut SmallAcc, rect: (i64, i64, i64, i64)| {
                     let cells = fc.cells(rect);
                     acc.tiles.set(tiles_w, cells);
@@ -950,7 +1025,15 @@ impl Builder<'_> {
                 };
                 for (dx, dy) in members {
                     self.stats.walked += 1;
-                    self.walk(child, &at(dx, dy), depth + 1);
+                    let placed = at(dx, dy);
+                    // a big cell's first placement under the top: its own
+                    // file's share
+                    let next = if depth == 0 { self.root_owner(child, &placed) } else { None };
+                    if let Some(next) = next {
+                        self.owner = next;
+                    }
+                    self.walk(child, &placed, depth + 1);
+                    self.owner = owner;
                 }
             }
         }
@@ -961,15 +1044,16 @@ impl Builder<'_> {
     fn settle(&mut self) {
         // in order: the planes sum them as they come (a file the same bytes
         // every build)
-        let mut smalls: Vec<((u32, u8), SmallAcc)> = std::mem::take(&mut self.smalls).into_iter().collect();
+        let mut smalls: Vec<((u16, u32, u8), SmallAcc)> = std::mem::take(&mut self.smalls).into_iter().collect();
         smalls.sort_unstable_by_key(|&(key, _)| key);
         smalls.iter_mut().for_each(|(_, acc)| acc.flush());
         self.stats.small_keys = smalls.len() as u64;
         self.stats.small_tiles = smalls.iter().map(|(_, acc)| acc.tiles.tiles.len() as u64).sum();
-        let (words, h, tiles_w) = (self.words, self.g.h, self.tiles_w);
         let mut slices: HashMap<u32, Rc<Vec<Vec<(u32, f64)>>>> = HashMap::new();
         let n = smalls.len();
-        for (at, ((child, cd), acc)) in smalls.into_iter().enumerate() {
+        for (at, ((owner, child, cd), acc)) in smalls.into_iter().enumerate() {
+            let owner = owner as usize;
+            let (words, h, tiles_w) = (self.owners[owner].words, self.owners[owner].h, self.owners[owner].tiles_w);
             if self.progress.due() {
                 self.progress.line(&format!("settle: {}/{} cells under the cut", count(at as u64), count(n as u64)));
             }
@@ -977,7 +1061,7 @@ impl Builder<'_> {
             for (j, layers) in sl.iter().enumerate() {
                 let d = (cd as usize + j).min(DEPTH_CAP as usize) as u8;
                 for &(k, area) in layers {
-                    let plane = self.plane(k, d, 0);
+                    let plane = self.plane(owner, k, d, 0);
                     acc.tiles.or_into(tiles_w, &mut plane.bits, words, h);
                     for (&g, &n) in &acc.groups {
                         plane.area[g as usize] += (f64::from(n) * area) as f32;
@@ -988,13 +1072,98 @@ impl Builder<'_> {
     }
 }
 
+/// The levels of one plane on `g` from its classes at level 0 (bits, area):
+/// each level's (bits stored, means stored) - the classes up to the level
+/// OR'd and summed, pooled a level at a time; and the bytes stored.
+fn plane_levels(g: &OvsGrid, mut cls: Vec<(u8, Vec<u64>, Vec<f32>)>, stats: &mut OvsStats) -> (Vec<(Vec<u8>, Vec<u8>)>, u64) {
+    let (mut w, mut h) = (g.w, g.h);
+    let (mut gw, mut gh) = (w.div_ceil(OVS_GROUP), h.div_ceil(OVS_GROUP));
+    let mut levels = Vec::with_capacity(g.n_levels as usize);
+    let mut stored = 0u64;
+    for lv in 0..g.n_levels {
+        if lv > 0 {
+            for (_, bits, area) in cls.iter_mut() {
+                *bits = pool_bits(bits, w, h);
+                *area = pool_area(area, gw, gh);
+            }
+            (w, h) = g.level_dims(lv);
+            (gw, gh) = (w.div_ceil(OVS_GROUP), h.div_ceil(OVS_GROUP));
+        }
+        let words = words_of(w);
+        let mut bits = vec![0u64; words * h as usize];
+        let mut area = vec![0f32; (gw * gh) as usize];
+        for (c, cb, ca) in &cls {
+            if u32::from(*c) <= lv {
+                bits.iter_mut().zip(cb).for_each(|(a, b)| *a |= b);
+                area.iter_mut().zip(ca).for_each(|(a, b)| *a += b);
+            }
+        }
+        let cell = g.cell_dbu as f64 * f64::from(1u32 << lv);
+        let mut means = vec![0u8; (gw * gh) as usize];
+        let mut any = false;
+        for gj in 0..gh {
+            for gi in 0..gw {
+                let a = f64::from(area[(gj * gw + gi) as usize]);
+                if !(a > 0.0) {
+                    continue;
+                }
+                let occ = group_occ(&bits, words, h, gi, gj);
+                if occ == 0 {
+                    continue;
+                }
+                let mean = (a / (f64::from(occ) * cell * cell)).clamp(0.0, 1.0);
+                means[(gj * gw + gi) as usize] = ((mean * 255.0).round() as u8).max(1);
+                any = true;
+            }
+        }
+        stats.levels += 1;
+        if !bits.iter().any(|&word| word != 0) {
+            stats.empty_levels += 1;
+            levels.push((Vec::new(), Vec::new()));
+            continue;
+        }
+        let level = (deflate(&row_bytes(&bits, words, w, h)), if any { deflate(&means) } else { Vec::new() });
+        stored += (level.0.len() + level.1.len()) as u64;
+        levels.push(level);
+    }
+    (levels, stored)
+}
+
+/// ORs an owner's level-0 bits (`w` x `h`, `src_words` a row) into the top's
+/// (`dst_words` a row) at its cell (i0, j0)
+fn or_shifted(dst: &mut [u64], dst_words: usize, src: &[u64], src_words: usize, h: u32, (i0, j0): (u32, u32)) {
+    let (word0, shift) = ((i0 / 64) as usize, i0 % 64);
+    for r in 0..h as usize {
+        let row = (j0 as usize + r) * dst_words;
+        for w in 0..src_words {
+            let v = src[r * src_words + w];
+            if v == 0 {
+                continue;
+            }
+            dst[row + word0 + w] |= v << shift;
+            if shift > 0 && word0 + w + 1 < dst_words {
+                dst[row + word0 + w + 1] |= v >> (64 - shift);
+            }
+        }
+    }
+}
+
+/// What a build made: the top's design.ovs, each big cell's (its cell, its
+/// name, its bytes - design.ovs.<cell>), and what the build did.
+pub struct Built {
+    pub top: Vec<u8>,
+    pub roots: Vec<(u32, String, Vec<u8>)>,
+    pub stats: OvsStats,
+}
+
 /// design.ovs for an index (`ovm` with design.ovb attached, its pages at
-/// `ovp`) and its cells' cover, on a grid of `base_um` cells (None: auto):
-/// (the file's bytes, what the build did).
-/// `jobs` threads decode the pages the walk needs before it (0: as many as
-/// the machine has).
+/// `ovp`) and its cells' cover, on a grid of `base_um` cells (None: auto),
+/// and of each cell under the top whose box is `root_share` of the top's or
+/// more (0: none) one of its own, in the same walk. `jobs` threads decode
+/// the pages the walk needs before it (0: as many as the machine has).
 /// `say` gets the progress lines (Progress).
-pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs: usize, say: &dyn Fn(&str)) -> Result<(Vec<u8>, OvsStats), String> {
+#[allow(clippy::too_many_arguments)]
+pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs: usize, root_share: f64, say: &dyn Fn(&str)) -> Result<Built, String> {
     let mut progress = Progress::new(say);
     if !ovm.has_page_occ() {
         return Err("design.ovs needs design.ovb (the pages' occupancy grids)".into());
@@ -1015,8 +1184,23 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
             !b.is_empty() && b.x1 - b.x0 < thr && b.y1 - b.y0 < thr
         })
         .collect();
+    // the big cells under the top: their boxes `root_share` of its or more
+    let area = |b: &floe_ovm::BBox| (b.x1 - b.x0) as f64 * (b.y1 - b.y0) as f64;
+    let mut roots: FxMap<u32, bool> = FxMap::default();
+    if root_share > 0.0 {
+        let (ps, pc) = ovm.cell_places(ovm.top);
+        for i in ps as u64..ps as u64 + pc as u64 {
+            let child = ovm.place(i).child;
+            if child < ovm.n_cells && !small[child as usize] {
+                let b = ovm.cell_rbbox(child);
+                if !b.is_empty() && area(&b) >= root_share * area(&top) {
+                    roots.insert(child, true);
+                }
+            }
+        }
+    }
     progress.line(&format!(
-        "grid {} um, {}x{} cells, {} levels; {} cells ({} under the cut), {} pages, {} layers",
+        "grid {} um, {}x{} cells, {} levels; {} cells ({} under the cut), {} pages, {} layers; {} cells under the top of {} % its box or more",
         g.base_um(),
         g.w,
         g.h,
@@ -1024,7 +1208,9 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
         count(u64::from(ovm.n_cells)),
         count(small.iter().filter(|&&s| s).count() as u64),
         count(u64::from(ovm.n_pages)),
-        ovm.n_layers
+        ovm.n_layers,
+        roots.len(),
+        (root_share * 100.0).round()
     ));
     let ovp_path = ovp;
     let ovp = std::fs::File::open(ovp).map_err(|e| format!("{}: {}", ovp, e))?;
@@ -1032,13 +1218,11 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
         ovm,
         cover,
         g,
-        fast: FastCells::new(&g),
-        words: words_of(g.w),
-        gw0: g.w.div_ceil(OVS_GROUP),
-        gh0: g.h.div_ceil(OVS_GROUP),
-        tiles_w: g.w.div_ceil(TILE),
         thr,
         small,
+        owners: vec![Owner::new(ovm.top, &g, (0, 0, g.w, g.h), 0, Xf::identity())],
+        owner: 0,
+        roots,
         smalls: FxMap::default(),
         planes: FxMap::default(),
         ovp,
@@ -1053,9 +1237,9 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
     if b.small[ovm.top as usize] {
         // a top under the cut (review 2026-10-07: a 0.4 um square alone made
         // a file without a plane): its box and its cover, at depth 0
-        let cells = b.fast.cells((top.x0, top.y0, top.x1, top.y1));
-        let (gw, tiles_w) = (b.gw0, b.tiles_w);
-        let acc = b.smalls.entry((ovm.top, 0)).or_default();
+        let (fast, gw, tiles_w) = (b.owners[0].fast, b.owners[0].gw, b.owners[0].tiles_w);
+        let cells = fast.cells((top.x0, top.y0, top.x1, top.y1));
+        let acc = b.smalls.entry((0, ovm.top, 0)).or_default();
         acc.tiles.set(tiles_w, cells);
         acc.count(((cells.2 + cells.3) / 2 / OVS_GROUP) * gw + (cells.0 + cells.1) / 2 / OVS_GROUP, 1.0);
         b.stats.small += 1;
@@ -1064,7 +1248,8 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
         let jobs = if jobs == 0 { std::thread::available_parallelism().map_or(4, |n| n.get()) } else { jobs };
         b.progress.line("listing the pages to decode (a shape over the cut, or no grid)");
         let pages = pages_to_decode(ovm, &b.small, thr, &mut b.progress);
-        let mb: f64 = pages.iter().map(|&pi| f64::from(ovm.page(pi).csize)).sum::<f64>() / 1e6;
+        // from 0.0: an empty f64 sum is -0.0 ("-0 MB")
+        let mb = pages.iter().fold(0.0, |mb, &pi| mb + f64::from(ovm.page(pi).csize) / 1e6);
         b.progress.line(&format!("decode: {} pages, {:.0} MB on {} threads", count(pages.len() as u64), mb, jobs));
         for (pi, (sub, bytes)) in decode_pages(ovm, ovp_path, &pages, &g, thr, jobs, &mut b.progress)? {
             b.stats.decoded += 1;
@@ -1101,110 +1286,141 @@ pub fn build(ovm: &Ovm, cover: &CellCover, ovp: &str, base_um: Option<f64>, jobs
     let write_started = std::time::Instant::now();
     b.stats.grids = b.planes.len() as u64;
     b.stats.grid_bytes = b.planes.values().map(|p| (p.bits.len() * 8 + p.area.len() * 4) as u64).sum();
-    let mut by_layer: Vec<Vec<(u8, u8)>> = vec![Vec::new(); ovm.n_layers as usize];
-    for &(k, d, c) in b.planes.keys() {
-        if let Some(list) = by_layer.get_mut(k as usize) {
+    // the planes by owner and layer: (depth, class) each
+    let n_layers = ovm.n_layers as usize;
+    let mut by_owner: Vec<Vec<Vec<(u8, u8)>>> = vec![vec![Vec::new(); n_layers]; b.owners.len()];
+    for &(o, k, d, c) in b.planes.keys() {
+        if let Some(list) = by_owner[o as usize].get_mut(k as usize) {
             list.push((d, c));
         }
     }
+    by_owner.iter_mut().flatten().for_each(|list| list.sort_unstable());
     let line = format!(
-        "settled in {:.1} s; write: {} planes ({:.0} MB) of {} layers",
+        "settled in {:.1} s; write: {} planes ({:.0} MB) of {} layers, {} cells of their own",
         b.stats.settle_s,
         count(b.stats.grids),
         b.stats.grid_bytes as f64 / 1e6,
-        by_layer.iter().filter(|list| !list.is_empty()).count()
+        by_owner.iter().map(|layers| layers.iter().filter(|list| !list.is_empty()).count()).max().unwrap_or(0),
+        b.owners.len() - 1
     );
     b.progress.line(&line);
-    let n_layers = by_layer.len();
+    let mut stats = std::mem::take(&mut b.stats);
+    // each big cell's file first, its planes kept for the top's
+    let mut roots = Vec::with_capacity(b.owners.len() - 1);
+    for o in 1..b.owners.len() {
+        let og = b.owners[o].grid(&g);
+        let mut blobs: Blobs = Vec::with_capacity(n_layers);
+        for (k, list) in by_owner[o].iter().enumerate() {
+            let mut planes_out = Vec::new();
+            let mut at = 0;
+            while at < list.len() {
+                let d = list[at].0;
+                let cls: Vec<(u8, Vec<u64>, Vec<f32>)> = list[at..]
+                    .iter()
+                    .take_while(|&&(pd, _)| pd == d)
+                    .filter_map(|&(_, c)| b.planes.get(&(o as u16, k as u32, d, c)).map(|p| (c, p.bits.clone(), p.area.clone())))
+                    .collect();
+                at += list[at..].iter().take_while(|&&(pd, _)| pd == d).count();
+                planes_out.push((d, plane_levels(&og, cls, &mut stats).0));
+            }
+            blobs.push(planes_out);
+        }
+        let (x, y, rot, flip) = b.owners[o].xf.decompose();
+        let root = OvsRoot { ci: b.owners[o].ci, x, y, rot, flip };
+        let bytes = encode_file(ovm.src_size, ovm.src_mtime, &og, Some(&root), &blobs);
+        let name = ovm.cell(b.owners[o].ci).name;
+        b.progress.line(&format!("cell {} (#{}): {}x{} cells, {:.1} MB", name, b.owners[o].ci, og.w, og.h, bytes.len() as f64 / 1e6));
+        roots.push((b.owners[o].ci, name, bytes));
+    }
+    // the top's: its own planes with every owner's at its place, its depths
+    // one deeper
     let mut written = 0u64;
-    let mut blobs: Blobs = Vec::with_capacity(by_layer.len());
-    for (k, list) in by_layer.iter_mut().enumerate() {
+    let mut blobs: Blobs = Vec::with_capacity(n_layers);
+    for k in 0..n_layers {
         if b.progress.due() {
             b.progress.line(&format!("write: layer {}/{}, {:.1} MB so far", k, n_layers, written as f64 / 1e6));
         }
-        list.sort_unstable();
-        let mut depths: Vec<u8> = list.iter().map(|&(d, _)| d).collect();
-        depths.dedup();
-        let mut planes_out = Vec::with_capacity(depths.len());
-        for d in depths {
-            // the plane's classes at level 0, pooled a level at a time
-            let mut cls: Vec<(u8, Vec<u64>, Vec<f32>)> = list
-                .iter()
-                .filter(|&&(pd, _)| pd == d)
-                .filter_map(|&(_, c)| b.planes.remove(&(k as u32, d, c)).map(|p| (c, p.bits, p.area)))
-                .collect();
-            let (mut w, mut h) = (g.w, g.h);
-            let (mut gw, mut gh) = (b.gw0, b.gh0);
-            let mut levels = Vec::with_capacity(g.n_levels as usize);
-            for lv in 0..g.n_levels {
-                if lv > 0 {
-                    for (_, bits, area) in cls.iter_mut() {
-                        *bits = pool_bits(bits, w, h);
-                        *area = pool_area(area, gw, gh);
-                    }
-                    (w, h) = g.level_dims(lv);
-                    (gw, gh) = (w.div_ceil(OVS_GROUP), h.div_ceil(OVS_GROUP));
-                }
-                let words = words_of(w);
-                let mut bits = vec![0u64; words * h as usize];
-                let mut area = vec![0f32; (gw * gh) as usize];
-                for (c, cb, ca) in &cls {
-                    if u32::from(*c) <= lv {
-                        bits.iter_mut().zip(cb).for_each(|(a, b)| *a |= b);
-                        area.iter_mut().zip(ca).for_each(|(a, b)| *a += b);
-                    }
-                }
-                let cell = g.cell_dbu as f64 * f64::from(1u32 << lv);
-                let mut means = vec![0u8; (gw * gh) as usize];
-                let mut any = false;
-                for gj in 0..gh {
-                    for gi in 0..gw {
-                        let a = f64::from(area[(gj * gw + gi) as usize]);
-                        if !(a > 0.0) {
-                            continue;
-                        }
-                        let occ = group_occ(&bits, words, h, gi, gj);
-                        if occ == 0 {
-                            continue;
-                        }
-                        let mean = (a / (f64::from(occ) * cell * cell)).clamp(0.0, 1.0);
-                        means[(gj * gw + gi) as usize] = ((mean * 255.0).round() as u8).max(1);
-                        any = true;
-                    }
-                }
-                b.stats.levels += 1;
-                if !bits.iter().any(|&word| word != 0) {
-                    b.stats.empty_levels += 1;
-                    levels.push((Vec::new(), Vec::new()));
-                    continue;
-                }
-                let level = (deflate(&row_bytes(&bits, words, w, h)), if any { deflate(&means) } else { Vec::new() });
-                written += (level.0.len() + level.1.len()) as u64;
-                levels.push(level);
+        // (top depth, class, owner, owner depth) of every plane of the layer
+        let mut parts: Vec<(u8, u8, usize, u8)> = Vec::new();
+        for (o, owner) in b.owners.iter().enumerate() {
+            for &(d, c) in &by_owner[o][k] {
+                let td = (u32::from(d) + owner.depth0).min(DEPTH_CAP as u32) as u8;
+                parts.push((td, c, o, d));
             }
-            planes_out.push((d, levels));
+        }
+        parts.sort_unstable();
+        let mut planes_out = Vec::new();
+        let mut at = 0;
+        while at < parts.len() {
+            let td = parts[at].0;
+            let mut cls: Vec<(u8, Vec<u64>, Vec<f32>)> = Vec::new();
+            while at < parts.len() && parts[at].0 == td {
+                let (_, c, o, d) = parts[at];
+                at += 1;
+                let Some(p) = b.planes.remove(&(o as u16, k as u32, d, c)) else { continue };
+                let (top_words, top_gw) = (b.owners[0].words, b.owners[0].gw);
+                if cls.last().map(|cl| cl.0) != Some(c) {
+                    cls.push((c, vec![0u64; top_words * g.h as usize], vec![0f32; (top_gw * b.owners[0].gh) as usize]));
+                }
+                let (_, bits, area) = cls.last_mut().expect("a class");
+                if o == 0 {
+                    bits.iter_mut().zip(&p.bits).for_each(|(a, b)| *a |= b);
+                    area.iter_mut().zip(&p.area).for_each(|(a, b)| *a += b);
+                } else {
+                    let owner = &b.owners[o];
+                    or_shifted(bits, top_words, &p.bits, owner.words, owner.h, (owner.i0, owner.j0));
+                    let (gi0, gj0) = (owner.i0 / OVS_GROUP, owner.j0 / OVS_GROUP);
+                    for gj in 0..owner.gh {
+                        for gi in 0..owner.gw {
+                            area[((gj0 + gj) * top_gw + gi0 + gi) as usize] += p.area[(gj * owner.gw + gi) as usize];
+                        }
+                    }
+                }
+            }
+            let (levels, stored) = plane_levels(&g, cls, &mut stats);
+            written += stored;
+            planes_out.push((td, levels));
         }
         blobs.push(planes_out);
     }
     let out = encode(ovm.src_size, ovm.src_mtime, &g, &blobs);
-    b.stats.write_s = write_started.elapsed().as_secs_f64();
-    b.stats.bytes = out.len() as u64;
-    let line = format!("written in {:.1} s: {:.1} MB", b.stats.write_s, b.stats.bytes as f64 / 1e6);
+    stats.write_s = write_started.elapsed().as_secs_f64();
+    stats.bytes = out.len() as u64;
+    stats.roots = roots.len() as u64;
+    let line = format!("written in {:.1} s: {:.1} MB, {} cells of their own", stats.write_s, stats.bytes as f64 / 1e6, roots.len());
     b.progress.line(&line);
-    Ok((out, b.stats))
+    Ok(Built { top: out, roots, stats })
 }
 
 /// Per layer, per plane, its (depth, per level (the bits stored, the means
 /// stored): each empty for all zero, else deflated).
 pub type Blobs = Vec<Vec<(u8, Vec<(Vec<u8>, Vec<u8>)>)>>;
 
+/// A big cell's file's cell and its placement in the top (the cell's
+/// coordinates to the top's: Xf::place(x, y, rot, flip))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OvsRoot {
+    pub ci: u32,
+    pub x: i64,
+    pub y: i64,
+    pub rot: u8,
+    pub flip: bool,
+}
+
 /// design.ovs's bytes: header, table, body (the module's format; build
 /// writes it, tests make small ones)
 pub fn encode(src_size: u64, src_mtime: u64, g: &OvsGrid, blobs: &Blobs) -> Vec<u8> {
+    encode_file(src_size, src_mtime, g, None, blobs)
+}
+
+/// A file's bytes: the top's (version 3) or, with `root`, a big cell's
+/// (version 4: the root block after the header)
+pub fn encode_file(src_size: u64, src_mtime: u64, g: &OvsGrid, root: Option<&OvsRoot>, blobs: &Blobs) -> Vec<u8> {
+    let head = HEADER_LEN + if root.is_some() { ROOT_LEN } else { 0 };
     let table_len: usize = blobs.iter().map(|planes| 1 + planes.iter().map(|(_, levels)| 1 + levels.len() * 32).sum::<usize>()).sum();
-    let mut out = Vec::with_capacity(HEADER_LEN + table_len);
+    let mut out = Vec::with_capacity(head + table_len);
     out.extend_from_slice(OVS_MAGIC);
-    out.extend_from_slice(&OVS_VERSION.to_le_bytes());
+    out.extend_from_slice(&(if root.is_some() { OVS_VERSION_ROOT } else { OVS_VERSION }).to_le_bytes());
     out.extend_from_slice(&OVS_GROUP.to_le_bytes());
     out.extend_from_slice(&src_size.to_le_bytes());
     out.extend_from_slice(&src_mtime.to_le_bytes());
@@ -1217,7 +1433,13 @@ pub fn encode(src_size: u64, src_mtime: u64, g: &OvsGrid, blobs: &Blobs) -> Vec<
     out.extend_from_slice(&g.n_levels.to_le_bytes());
     out.extend_from_slice(&(blobs.len() as u32).to_le_bytes());
     debug_assert_eq!(out.len(), HEADER_LEN);
-    let body_start = (HEADER_LEN + table_len) as u64;
+    if let Some(r) = root {
+        out.extend_from_slice(&r.ci.to_le_bytes());
+        out.extend_from_slice(&[r.rot, u8::from(r.flip), 0, 0]);
+        out.extend_from_slice(&r.x.to_le_bytes());
+        out.extend_from_slice(&r.y.to_le_bytes());
+    }
+    let body_start = (head + table_len) as u64;
     let mut body: Vec<u8> = Vec::new();
     for planes in blobs {
         out.push(planes.len() as u8);
@@ -1253,6 +1475,8 @@ pub struct OvsFile {
     pub src_size: u64,
     pub src_mtime: u64,
     pub grid: OvsGrid,
+    /// a big cell's file: its cell and placement (None: the top's)
+    pub root: Option<OvsRoot>,
     pub layers: Vec<Vec<OvsPlane>>,
 }
 
@@ -1286,8 +1510,8 @@ impl OvsFile {
             return Err("design.ovs: not an occupancy density file".into());
         }
         let version = g32(&data, 8)?;
-        if version != OVS_VERSION {
-            return Err(format!("design.ovs: version {} (this build reads {}: floe-index ovs builds it again)", version, OVS_VERSION));
+        if version != OVS_VERSION && version != OVS_VERSION_ROOT {
+            return Err(format!("design.ovs: version {} (this build reads {} and {}: floe-index ovs builds it again)", version, OVS_VERSION, OVS_VERSION_ROOT));
         }
         let group = g32(&data, 12)?;
         let (src_size, src_mtime) = (g64(&data, 16)?, g64(&data, 24)?);
@@ -1305,6 +1529,14 @@ impl OvsFile {
         }
         let n_layers = g32(&data, 76)?;
         let mut at = HEADER_LEN;
+        let root = if version == OVS_VERSION_ROOT {
+            let flags = data.get(at + 4..at + 6).ok_or("design.ovs: truncated")?;
+            let root = OvsRoot { ci: g32(&data, at)?, rot: flags[0] & 3, flip: flags[1] != 0, x: g64(&data, at + 8)? as i64, y: g64(&data, at + 16)? as i64 };
+            at += ROOT_LEN;
+            Some(root)
+        } else {
+            None
+        };
         let mut layers = Vec::with_capacity(n_layers as usize);
         for _ in 0..n_layers {
             let n_planes = *data.get(at).ok_or("design.ovs: truncated")? as usize;
@@ -1328,7 +1560,7 @@ impl OvsFile {
             }
             layers.push(planes);
         }
-        Ok(OvsFile { data, group, src_size, src_mtime, grid, layers })
+        Ok(OvsFile { data, group, src_size, src_mtime, grid, root, layers })
     }
 
     /// Whether this file was built for the index `ovm`: the same source and
@@ -1339,6 +1571,9 @@ impl OvsFile {
         }
         if self.group != OVS_GROUP || self.layers.len() != ovm.n_layers as usize {
             return Err("design.ovs: another group or layer table".into());
+        }
+        if self.root.is_some_and(|r| r.ci >= ovm.n_cells) {
+            return Err("design.ovs: a cell the index does not have".into());
         }
         Ok(())
     }
@@ -1549,11 +1784,48 @@ mod tests {
         let mut other = bytes.clone();
         other[0] = b'X';
         assert!(OvsFile::from_bytes(other).is_err());
+        // a big cell's file: its cell and placement after the header
+        let root = OvsRoot { ci: 7, x: -1_234_567, y: 89, rot: 3, flip: true };
+        let rooted = encode_file(123, 456, &g, Some(&root), &blobs);
+        let r = OvsFile::from_bytes(rooted).unwrap();
+        assert_eq!((r.root, r.grid), (Some(root), g));
+        assert_eq!((r.bits(0, 0, 0), r.means(0, 1, 0)), (f.bits(0, 0, 0), f.means(0, 1, 0)));
+        assert_eq!(f.root, None);
         for old in [1u8, 2] {
             let mut version = bytes.clone();
             version[8] = old;
             assert!(OvsFile::from_bytes(version).unwrap_err().contains(&format!("version {}", old)));
         }
         assert!(OvsFile::from_bytes(bytes[..bytes.len() - 3].to_vec()).is_err());
+    }
+
+    #[test]
+    fn a_cells_bits_go_into_the_tops_at_its_place() {
+        // a 100 x 10 owner at the top's cell (72, 16): its words cross the
+        // top's, shifted by 8
+        let (w, h, tw, th) = (100u32, 10u32, 200u32, 40u32);
+        let (words, top_words) = (words_of(w), words_of(tw));
+        let mut src = vec![0u64; words * h as usize];
+        let marks = [(0u32, 0u32), (63, 0), (64, 5), (55, 9), (99, 9)];
+        for &(i, j) in &marks {
+            set_cells(&mut src, words, (i, i, j, j));
+        }
+        let mut dst = vec![0u64; top_words * th as usize];
+        set_cells(&mut dst, top_words, (3, 3, 2, 2));
+        or_shifted(&mut dst, top_words, &src, words, h, (72, 16));
+        let mut want = vec![0u64; top_words * th as usize];
+        set_cells(&mut want, top_words, (3, 3, 2, 2));
+        for &(i, j) in &marks {
+            set_cells(&mut want, top_words, (72 + i, 72 + i, 16 + j, 16 + j));
+        }
+        assert_eq!(dst, want);
+        // at a word's start: as it is
+        let mut at0 = vec![0u64; top_words * th as usize];
+        or_shifted(&mut at0, top_words, &src, words, h, (64, 0));
+        let mut want0 = vec![0u64; top_words * th as usize];
+        for &(i, j) in &marks {
+            set_cells(&mut want0, top_words, (64 + i, 64 + i, j, j));
+        }
+        assert_eq!(at0, want0);
     }
 }

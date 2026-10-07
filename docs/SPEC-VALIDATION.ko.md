@@ -200,13 +200,24 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 1 µm 셀, 1.25/1.5/1.9 µm/px에 3 px 컷이면 1단계다.
     - 예산으로 올린 컷(10 µm/px, 60 µm)은 32 µm 셀(3.2 px)을 허용한다.
   - 단위: render-core `a_plane_that_will_not_read_is_an_error_not_an_empty_layer`.
-  - 단위: vfs `occ_density::tests` 6개:
+  - `density_stack`의 `occ_root_checks`(0.12.315, root 뷰):
+    - 픽스처: 215 × 200 µm TOP 아래 BLK(DOT 배열 40×20과 자기 3/0 정사각형)를 R90으로 1번, 같은 내용의 BLK2를
+      대칭으로 2번 배치한다. 둘 다 TOP 박스의 25 % 이상이다. 작은 SML(DOT 5×5)도 하나 둔다.
+    - `floe-index ovs --um 1`: `roots=2`이고, design.ovs.<셀>이 BLK·BLK2용으로 생긴다(version 4, 배치 R90 (100, 0)과
+      대칭). SML용 파일은 없다. design.ovs는 `--roots 0`과 바이트 같다.
+    - BLK·BLK2 root 뷰(120×100 px, 1 µm/px): `occ_layers` 2, `occ_cell_nm` 1000, regions 0, nodes 0이다.
+      DOT 점은 배열 범위 안에만, 정사각형 점은 그 범위 안에만 켜진다(셀 좌표, 그 밖 0).
+      점 수는 BLK 196/44, BLK2 200/40 px이고, walk는 174/37, 174/38 px다.
+    - depth 0: 자기 정사각형만 같은 수로 남는다.
+    - SML root 뷰와, `--roots 0`으로 다시 만든 뒤(셀 파일 삭제, `removed`)의 BLK root 뷰는 walk와 바이트 동일하다.
+  - 단위: vfs `occ_density::tests` 8개:
     - 크기 등급 `class_of`
     - 멤버 순회와 4,096 초과 퍼뜨리기
     - 격자: 자동 셀, 레벨 크기, 범위 밖 셀, 역수 셀과 정확한 셀의 일치
     - 셀 찍기, 2×2 OR 풀링, 묶음 점유 수, 저장 바이트
     - 희소 타일과 직접 찍기의 일치
-    - 파일 쓰기·읽기와 magic·버전(version 1 포함)·잘림 거절
+    - 파일 쓰기·읽기와 magic·버전(version 1 포함)·잘림 거절. version 4(셀 파일)의 셀·배치 읽기도 본다.
+    - 셀 몫 비트를 탑 격자 제자리에 밀어 넣기(`a_cells_bits_go_into_the_tops_at_its_place`, 단어 경계 걸침 포함)
   - 단위: render-core `occ::tests` 3개:
     - 요청 depth의 평면 OR과 점유 셀 수 가중 평균
     - 평균이 없는 레이어는 None

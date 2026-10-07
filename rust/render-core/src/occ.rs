@@ -60,6 +60,9 @@ impl OccLayer {
 /// visible layers by cache layer index.
 pub struct OccDensity {
     pub level: u32,
+    /// a root view's coordinates to the file's - its cell's placement in the
+    /// top (design.ovs.<cell>'s); None: the same
+    pub to_file: Option<floe_tiler::Xf>,
     /// the level's cell, dbu, and the grid's corner (design.ovs's)
     pub cell: i64,
     pub x0: i64,

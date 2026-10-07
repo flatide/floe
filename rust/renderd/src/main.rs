@@ -4814,11 +4814,11 @@ fn render_density_frame(
                     // them, no walk and no decode (floe_render_core::occ)
                     // design.ovs classes shapes by the larger side: frames cut
                     // so alone (ShapeCut::Larger, the default), at the plan's
-                    // cut (upper_cut; a budget's raise in it)
+                    // cut (upper_cut; a budget's raise in it); a view root by
+                    // its cell's design.ovs.<cell> (none: the plans draw)
                     if density_occ_enabled()
                         && styled.raster.density_pattern
                         && staged_plane.is_none()
-                        && command.root.is_none()
                         && !command.exact
                         && command.thin_keep
                         && shape_cut_mode() == ShapeCut::Larger
@@ -4838,7 +4838,7 @@ fn render_density_frame(
                         // a newer frame stops the layers being made (those
                         // made kept for it)
                         let stale = || cancellation.is_cancelled(command.generation);
-                        let made = cache.occ_density(&ids, px_dbu, upper_cut as f64, density_occ_max_px(), density_occ_cap_bytes(), depth, &stale);
+                        let made = cache.occ_density(&ids, px_dbu, upper_cut as f64, density_occ_max_px(), density_occ_cap_bytes(), depth, command.root, &stale);
                         check_generation(cancellation, command.generation)?;
                         if let Some(occ) = made {
                             let built = elapsed_us(occ_started);

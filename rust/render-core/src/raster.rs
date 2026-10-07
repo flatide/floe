@@ -4218,15 +4218,60 @@ fn raster_tile_pass(
     Ok(())
 }
 
-/// The occupancy density's cell of each column and row of a tile (the pixel
-/// centres', crate::occ::OccDensity::cell_of).
-fn occ_axes(band: &RasterBand, request: &GeometryRasterRequest, occ: &crate::occ::OccDensity) -> (Vec<i64>, Vec<i64>) {
-    let view = request.view;
-    let sx = (view.x1 - view.x0) / f64::from(request.width);
-    let sy = (view.y1 - view.y0) / f64::from(request.height);
-    let cols = (band.col0..band.col1).map(|c| occ.cell_of(view.x0 + (f64::from(c) + 0.5) * sx, true)).collect();
-    let rows = (band.row0..band.row1).map(|r| occ.cell_of(view.y1 - (f64::from(r) + 0.5) * sy, false)).collect();
-    (cols, rows)
+/// The occupancy density's cell along each column and row of a tile (the
+/// pixel centres', crate::occ::OccDensity::cell_of) - through a root view's
+/// placement in the file (its to_file): a quarter turn takes the columns
+/// along the file's y and the rows along its x (`swap`).
+struct OccAxes {
+    cols: Vec<i64>,
+    rows: Vec<i64>,
+    swap: bool,
+}
+
+impl OccAxes {
+    fn new(band: &RasterBand, request: &GeometryRasterRequest, occ: &crate::occ::OccDensity) -> OccAxes {
+        let view = request.view;
+        let sx = (view.x1 - view.x0) / f64::from(request.width);
+        let sy = (view.y1 - view.y0) / f64::from(request.height);
+        let x_at = |c: u32| view.x0 + (f64::from(c) + 0.5) * sx;
+        let y_at = |r: u32| view.y1 - (f64::from(r) + 0.5) * sy;
+        // the file's (x', y') = (a x + b y + tx, c x + d y + ty)
+        let xf = occ.to_file.unwrap_or_else(floe_tiler::Xf::identity);
+        let ((a, c), (b, d), (tx, ty)) = (xf.apply_vec(1, 0), xf.apply_vec(0, 1), xf.apply(0, 0));
+        let swap = a == 0;
+        let (cols, rows) = if swap {
+            (
+                (band.col0..band.col1).map(|col| occ.cell_of(c as f64 * x_at(col) + ty as f64, false)).collect(),
+                (band.row0..band.row1).map(|row| occ.cell_of(b as f64 * y_at(row) + tx as f64, true)).collect(),
+            )
+        } else {
+            (
+                (band.col0..band.col1).map(|col| occ.cell_of(a as f64 * x_at(col) + tx as f64, true)).collect(),
+                (band.row0..band.row1).map(|row| occ.cell_of(d as f64 * y_at(row) + ty as f64, false)).collect(),
+            )
+        };
+        OccAxes { cols, rows, swap }
+    }
+
+    /// the cells (i0, i1, j0, j1) the tile spans
+    fn span(&self) -> Option<(i64, i64, i64, i64)> {
+        let (c0, c1) = (*self.cols.iter().min()?, *self.cols.iter().max()?);
+        let (r0, r1) = (*self.rows.iter().min()?, *self.rows.iter().max()?);
+        Some(if self.swap { (r0, r1, c0, c1) } else { (c0, c1, r0, r1) })
+    }
+
+    /// whether a row's cell is on the grid (j, or i when swapped)
+    #[inline]
+    fn row_on(&self, occ: &crate::occ::OccDensity, v: i64) -> bool {
+        v >= 0 && v < i64::from(if self.swap { occ.w } else { occ.h })
+    }
+
+    /// cell (i, j) of a row's value and a column's
+    #[inline]
+    fn cell(&self, row: i64, col: i64) -> (u32, u32) {
+        let (i, j) = if self.swap { (row, col) } else { (col, row) };
+        (i as u32, j as u32)
+    }
 }
 
 /// A top plane's density from the occupancy density (crate::occ): each pixel
@@ -4234,13 +4279,12 @@ fn occ_axes(band: &RasterBand, request: &GeometryRasterRequest, occ: &crate::occ
 /// pattern's rank, claiming only what it lights.
 fn paint_occ_plane(band: &mut RasterBand, request: &GeometryRasterRequest, occ: &crate::occ::OccDensity, layer_idx: u32, top: bool) {
     let Some(layer) = occ.layer(layer_idx) else { return };
-    let (cols, rows) = occ_axes(band, request, occ);
-    let (Some(&i0), Some(&i1), Some(&j0), Some(&j1)) = (cols.iter().min(), cols.iter().max(), rows.iter().min(), rows.iter().max()) else {
-        return;
-    };
+    let axes = OccAxes::new(band, request, occ);
+    let Some((i0, i1, j0, j1)) = axes.span() else { return };
     if !layer.any_in(i0, i1, j0, j1) {
         return;
     }
+    let (cols, rows) = (&axes.cols, &axes.rows);
     let width = cols.len();
     let Some(words) = band.stack.as_ref().map(|stack| stack.words) else { return };
     if let Some(stack) = band.stack.as_mut() {
@@ -4248,8 +4292,8 @@ fn paint_occ_plane(band: &mut RasterBand, request: &GeometryRasterRequest, occ: 
     }
     let mut cand = vec![0u64; words];
     let (mut lo, mut hi) = (usize::MAX, 0usize);
-    for (r, &j) in rows.iter().enumerate() {
-        if j < 0 || j >= i64::from(occ.h) {
+    for (r, &rv) in rows.iter().enumerate() {
+        if !axes.row_on(occ, rv) {
             continue;
         }
         for (w, word) in cand.iter_mut().enumerate() {
@@ -4264,11 +4308,11 @@ fn paint_occ_plane(band: &mut RasterBand, request: &GeometryRasterRequest, occ: 
                 if c >= width {
                     break;
                 }
-                let i = cols[c];
-                if i < 0 {
+                if cols[c] < 0 {
                     continue;
                 }
-                let cover = layer.cover(i as u32, j as u32);
+                let (i, j) = axes.cell(rv, cols[c]);
+                let cover = layer.cover(i, j);
                 if cover > 0.0 {
                     stack.bright_add_source(r * width + c, cover, DensitySource::Summary { singleton: false });
                     lo = lo.min(r);
@@ -4293,10 +4337,9 @@ fn paint_occ_lower(band: &mut RasterBand, request: &GeometryRasterRequest, style
     let Some((words, Some(pattern), gain)) = band.stack.as_ref().map(|stack| (stack.words, stack.pattern, stack.bright)) else {
         return;
     };
-    let (cols, rows) = occ_axes(band, request, occ);
-    let (Some(&i0), Some(&i1), Some(&j0), Some(&j1)) = (cols.iter().min(), cols.iter().max(), rows.iter().min(), rows.iter().max()) else {
-        return;
-    };
+    let axes = OccAxes::new(band, request, occ);
+    let Some((i0, i1, j0, j1)) = axes.span() else { return };
+    let (cols, rows) = (&axes.cols, &axes.rows);
     let lower = styled.layers.len().saturating_sub(density_top_count(styled));
     // the lower planes that mark a cell of this tile, highest first
     let present: Vec<(u16, &crate::occ::OccLayer)> = (0..lower)
@@ -4312,8 +4355,8 @@ fn paint_occ_lower(band: &mut RasterBand, request: &GeometryRasterRequest, style
     let width = cols.len();
     let mut cand = vec![0u64; words];
     let (mut lo, mut hi) = (usize::MAX, 0usize);
-    for (r, &j) in rows.iter().enumerate() {
-        if j < 0 || j >= i64::from(occ.h) {
+    for (r, &rv) in rows.iter().enumerate() {
+        if !axes.row_on(occ, rv) {
             continue;
         }
         for (w, word) in cand.iter_mut().enumerate() {
@@ -4328,13 +4371,13 @@ fn paint_occ_lower(band: &mut RasterBand, request: &GeometryRasterRequest, style
                 if c >= width {
                     break;
                 }
-                let i = cols[c];
-                if i < 0 {
+                if cols[c] < 0 {
                     continue;
                 }
+                let (i, j) = axes.cell(rv, cols[c]);
                 let at = r * width + c;
                 for &(plane, layer) in &present {
-                    let cover = layer.cover(i as u32, j as u32);
+                    let cover = layer.cover(i, j);
                     if cover > 0.0 && pattern.selected(at, DensitySource::Summary { singleton: false }, cover, gain) {
                         stack.lit_plane[at] = stack.lit_plane[at].max(plane);
                         stack.foot_plane[at] = stack.foot_plane[at].max(plane);

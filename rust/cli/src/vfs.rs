@@ -2184,18 +2184,22 @@ fn write_hier(ovm: &floe_ovm::Ovm, outdir: &str) {
     }
 }
 
-/// `floe-index ovs <cache> [--um F] [--jobs N]` (floe_vfs::occ_density, 2026-10-06):
+/// `floe-index ovs <cache> [--um F] [--jobs N] [--roots F]` (floe_vfs::occ_density, 2026-10-06):
 /// add (or rebuild) design.ovs - per layer and depth the cells holding
 /// shapes under the cut and their groups' mean cover, what the density
 /// stack's pass 2 draws by with FLOE_RUST_DENSITY_OCC=on - from the cache's
 /// index (design.ovm, design.ovb, design.ovh, design.ovp) in one walk; the
 /// cache's other files are untouched. --um: the base cell in microns
 /// (default: the smallest power of two keeping the chip's longer side within
-/// 2,048 cells); --jobs: the threads decoding pages (default: all).
+/// 2,048 cells); --jobs: the threads decoding pages (default: all); --roots:
+/// the cells under the top whose box is this share of the top's or more get
+/// a file of their own, design.ovs.<cell>, their root views' (default 0.25;
+/// 0: none) - made in the same walk (user 2026-10-07).
 pub fn ovs_cmd(args: &[String]) {
     let mut dir: Option<String> = None;
     let mut base_um: Option<f64> = None;
     let mut jobs = 0usize;
+    let mut root_share = floe_vfs::occ_density::OVS_ROOT_SHARE;
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -2212,6 +2216,12 @@ pub fn ovs_cmd(args: &[String]) {
                 eprintln!("--um wants a positive number of microns");
                 std::process::exit(2);
             }
+        } else if a == "--roots" {
+            i += 1;
+            root_share = args.get(i).and_then(|v| v.parse::<f64>().ok()).filter(|v| (0.0..=1.0).contains(v)).unwrap_or_else(|| {
+                eprintln!("--roots wants a share of the top's box from 0 (none) to 1");
+                std::process::exit(2);
+            });
         } else if a.starts_with("--") {
             crate::unknown_option("ovs", a);
         } else {
@@ -2220,7 +2230,7 @@ pub fn ovs_cmd(args: &[String]) {
         i += 1;
     }
     let dir = dir.unwrap_or_else(|| {
-        eprintln!("usage: floe-index ovs <cache> [--um F] [--jobs N]");
+        eprintln!("usage: floe-index ovs <cache> [--um F] [--jobs N] [--roots F]");
         std::process::exit(2);
     });
     let fail = |what: &str, e: String| -> ! {
@@ -2245,22 +2255,47 @@ pub fn ovs_cmd(args: &[String]) {
     // where the build is (user 2026-10-07: "no log while ovs indexes - 11
     // minutes into the real chip and no telling how far it got")
     let say = |line: &str| eprintln!("[ovs] {}", line);
-    let (bytes, stats) = floe_vfs::occ_density::build(&ovm, &cover, &ovp, base_um, jobs, &say).unwrap_or_else(|e| fail("build", e));
+    let built = floe_vfs::occ_density::build(&ovm, &cover, &ovp, base_um, jobs, root_share, &say).unwrap_or_else(|e| fail("build", e));
+    let (bytes, stats) = (&built.top, &built.stats);
     let file = floe_vfs::occ_density::OvsFile::from_bytes(bytes.clone()).unwrap_or_else(|e| fail("build", e));
     // tmp + rename: a viewer reading the old file meanwhile keeps it whole
+    let write = |path: &str, bytes: &[u8]| {
+        let tmp = format!("{}.tmp", path);
+        std::fs::write(&tmp, bytes).unwrap_or_else(|e| fail(&tmp, e.to_string()));
+        std::fs::rename(&tmp, path).unwrap_or_else(|e| fail(path, e.to_string()));
+    };
+    // the big cells' files, and none left of an earlier build's other cells
+    let mut root_bytes = 0usize;
+    for (ci, name, rb) in &built.roots {
+        let path = format!("{}/design.ovs.{}", dir, ci);
+        floe_vfs::occ_density::OvsFile::from_bytes(rb.clone()).unwrap_or_else(|e| fail(&path, e));
+        write(&path, rb);
+        root_bytes += rb.len();
+        eprintln!("[ovs] {}: cell {}'s root views, {:.1} MB", path, name, rb.len() as f64 / 1e6);
+    }
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let ci = name.strip_prefix("design.ovs.").and_then(|n| n.parse::<u32>().ok());
+            if ci.is_some_and(|ci| !built.roots.iter().any(|r| r.0 == ci)) {
+                std::fs::remove_file(entry.path()).unwrap_or_else(|e| fail(&name, e.to_string()));
+                eprintln!("[ovs] {}/{}: removed (an earlier build's)", dir, name);
+            }
+        }
+    }
     let path = format!("{}/design.ovs", dir);
-    let tmp = format!("{}.tmp", path);
-    std::fs::write(&tmp, &bytes).unwrap_or_else(|e| fail(&tmp, e.to_string()));
-    std::fs::rename(&tmp, &path).unwrap_or_else(|e| fail(&path, e.to_string()));
+    write(&path, bytes);
     let g = file.grid;
     println!(
-        "ovs file={} bytes={} base_um={} grid={}x{} levels={} walked={} small={} spread={} small_keys={} small_tiles={} pages={} big_pages={} decoded={} decoded_mb={:.1} decode_s={:.2} decode_jobs={} walk_s={:.2} settle_s={:.2} write_s={:.2} planes={} plane_mb={:.1} plane_levels={} empty={} open_s={:.2} total_s={:.2}",
+        "ovs file={} bytes={} base_um={} grid={}x{} levels={} roots={} root_bytes={} walked={} small={} spread={} small_keys={} small_tiles={} pages={} big_pages={} decoded={} decoded_mb={:.1} decode_s={:.2} decode_jobs={} walk_s={:.2} settle_s={:.2} write_s={:.2} planes={} plane_mb={:.1} plane_levels={} empty={} open_s={:.2} total_s={:.2}",
         path,
         bytes.len(),
         g.base_um(),
         g.w,
         g.h,
         g.n_levels,
+        built.roots.len(),
+        root_bytes,
         stats.walked,
         stats.small,
         stats.spread,

@@ -2995,6 +2995,7 @@ def occ_density_checks(temp):
         bare.stop()
     print('density stack: no design.ovs - the walk\'s frame; floe-index ovs refuses a cache without design.ovb, builds the same bytes again')
     occ_review_checks(temp, env, occ)
+    occ_root_checks(temp, env, occ)
 
 
 def occ_cost_checks(src, ice, env, occ):
@@ -3191,6 +3192,178 @@ def occ_review_checks(temp, env, occ):
     print('density stack: occupancy density at the frame\'s cut - 3.5 um squares at 1.5 um/px %d px over 2 um cells (walk %d, none '
           'without the stack), 0.4 x 32 um wires the walk\'s frame byte for byte; a TOP under the cut has its plane; a plane that '
           'will not read draws the walk\'s frame; a page that will not read fails the build, the last file kept' % (dots, walk_dots))
+
+
+ROOT_ARRAY = (40, 20)        # a big cell's DOT array at OCC_PITCH: x 0-118, y 0-58 um
+ROOT_SPECKS = (0.0, 70.0, 3.0, 26, 10)  # its own 3/0 0.4 um squares: x, y, pitch, columns, rows - y 70-98 um
+ROOT_VIEW = (0.0, 0.0, 120.0, 100.0)    # um: a big cell's box in its own coordinates
+
+
+def occ_root_layout(path):
+    """TOP over 215 x 200 um: BLK - a DOT array and squares of its own -
+    turned a quarter (R90) at (100, 0), BLK2 - the same content - mirrored
+    at (100, 100) and (100, 200), each a quarter of TOP's box and more; and
+    SML, a 5 x 5 DOT array, at (10, 130)."""
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    dot = ly.create_cell('DOT')
+    dot.shapes(ly.layer(*LOW)).insert(kdb.DBox(0.25, 0.25, 0.25 + OCC_DOT, 0.25 + OCC_DOT))
+    pitch = int(OCC_PITCH * 1000)
+    alone = ly.layer(*ALONE)
+    for name, trans in (('BLK', ((1, False, 100000, 0),)), ('BLK2', ((0, True, 100000, 100000), (0, True, 100000, 200000)))):
+        cell = ly.create_cell(name)
+        cell.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(), kdb.Vector(pitch, 0), kdb.Vector(0, pitch), *ROOT_ARRAY))
+        x0, y0, step, nx, ny = ROOT_SPECKS
+        for j in range(ny):
+            for i in range(nx):
+                x, y = x0 + i * step + 0.3, y0 + j * step + 0.3
+                cell.shapes(alone).insert(kdb.DBox(x, y, x + 0.4, y + 0.4))
+        for rot, mirror, x, y in trans:
+            top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(rot, mirror, x, y)))
+    sml = ly.create_cell('SML')
+    sml.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(), kdb.Vector(pitch, 0), kdb.Vector(0, pitch), 5, 5))
+    top.insert(kdb.CellInstArray(sml.cell_index(), kdb.Trans(10000, 130000)))
+    ly.write(str(path))
+
+
+def occ_root_checks(temp, env, occ):
+    """A view root by its cell's own occupancy density (user 2026-10-07: two
+    cells under the field chip's top drew their root views by the plans,
+    1.6 s; "record the cells over 25 % as the top unfolds and make them at
+    once"): `floe-index ovs` writes design.ovs.<cell> for BLK and BLK2 - a
+    quarter of TOP's box and more - in the same walk (roots=2, version 4,
+    their placements in it), none for SML; design.ovs the same bytes as with
+    --roots 0 (TOP's own made of the cells' at their places). BLK's root view
+    - turned a quarter in TOP - and BLK2's - mirrored, placed twice - draw
+    pass 2 with no plan over 1 um cells, the DOT array's dots within its
+    extent and the squares' within theirs in their own coordinates, as many
+    as the walk's within a few times, nothing elsewhere; at depth 0 their own
+    squares alone; SML's root view the plans, byte for byte the walk's; built
+    again with --roots 0, the cells' files go and BLK's root view is the
+    walk's frame byte for byte."""
+    import struct
+    src = Path(temp) / 'occroot.oas'
+    occ_root_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    ice = Path(temp) / '.occroot.oas.ice'
+    index_bin = os.environ['FLOE_INDEX_BIN']
+
+    def ovs(*extra):
+        built = subprocess.run([index_bin, 'ovs', str(ice), '--um', '1'] + list(extra), capture_output=True, text=True, timeout=600)
+        assert built.returncode == 0, built.stdout + built.stderr
+        return dict(kv.split('=', 1) for kv in built.stdout.split()[1:]), built.stderr
+
+    stats, _ = ovs('--roots', '0')
+    assert stats['roots'] == '0' and not list(ice.glob('design.ovs.*')), (stats, list(ice.glob('design.ovs.*')))
+    alone_top = (ice / 'design.ovs').read_bytes()
+    stats, said = ovs()
+    roots = {}
+    for line in said.splitlines():
+        if line.startswith('[ovs] ') and "'s root views" in line:
+            path, _, rest = line[len('[ovs] '):].partition(': cell ')
+            roots[rest.split("'s root views")[0]] = int(path.rsplit('.', 1)[1])
+    assert stats['roots'] == '2' and sorted(roots) == ['BLK', 'BLK2'], (stats, said)
+    assert (ice / 'design.ovs').read_bytes() == alone_top, 'design.ovs differs made of the cells\' own'
+    placed = {}
+    for name, ci in roots.items():
+        data = (ice / ('design.ovs.%d' % ci)).read_bytes()
+        assert data[:8] == b'FLOEOVS1' and struct.unpack_from('<I', data, 8)[0] == 4, data[:12]
+        placed[name] = (struct.unpack_from('<I', data, 80)[0], data[84], data[85], *struct.unpack_from('<qq', data, 88))
+    assert placed['BLK'] == (roots['BLK'], 1, 0, 100000, 0), placed
+    assert placed['BLK2'][:3] == (roots['BLK2'], 0, 1) and placed['BLK2'][3] == 100000, placed
+    side_w, side_h = int(ROOT_VIEW[2] - ROOT_VIEW[0]), int(ROOT_VIEW[3] - ROOT_VIEW[1])
+
+    def view(w, gen, root, depth=None):
+        dbu = float(w.cache.meta['dbu'])
+        w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in ROOT_VIEW), 'view': None,
+                  'w': side_w, 'h': side_h, 'depth': depth, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                  'abstract': False, 'visible': [LOW, ALONE], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False,
+                  'root': root})
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+            assert res.get('kind') not in ('error', 'dropped'), res
+            if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                return bytes(res.pop('rgba')), res
+        raise AssertionError('occupancy root frame timeout')
+
+    def cell_of(w, name):
+        w.submit({'kind': 'cell_find', 'seq': 7, 'pattern': name})
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+            assert res.get('kind') != 'error', res
+            if res.get('kind') == 'cell_find' and res.get('seq') == 7:
+                return [m['cell'] for m in res['matches'] if m['name'] == name][0]
+        raise AssertionError('cell_find timeout')
+
+    # the array's extent and the squares', in the cell's own coordinates
+    # (rows from the top; a pixel of slack about each)
+    array = (range(0, int(OCC_PITCH * ROOT_ARRAY[0]) + 1), range(side_h - int(OCC_PITCH * ROOT_ARRAY[1]) - 1, side_h))
+    x0, y0, step, nx, ny = ROOT_SPECKS
+    specks = (range(int(x0), int(x0 + step * nx) + 2), range(side_h - int(y0 + step * ny) - 2, side_h - int(y0) + 1))
+    workers = {'walk': worker(src, env), 'occ': worker(src, occ)}
+    try:
+        low_c, alone_c = layer_colour(workers['occ'], LOW), layer_colour(workers['occ'], ALONE)
+
+        def where(pixels):
+            a = s = 0
+            rest = []
+            for r in range(side_h):
+                for c in range(side_w):
+                    p = pixels[(r * side_w + c) * 4:(r * side_w + c) * 4 + 4]
+                    if p == BLACK:
+                        continue
+                    if p == low_c and c in array[0] and r in array[1]:
+                        a += 1
+                    elif p == alone_c and c in specks[0] and r in specks[1]:
+                        s += 1
+                    else:
+                        rest.append((c, r, p))
+            return a, s, rest
+
+        counts = {}
+        # a worker's generations rise (an older one is dropped)
+        for gen, name in ((1, 'BLK'), (3, 'BLK2')):
+            walked, walk_res = view(workers['walk'], gen, roots[name])
+            drawn, res = view(workers['occ'], gen, roots[name])
+            p2 = res['density_plan2']
+            assert (p2['occ_layers'], p2['occ_cell_nm'], p2['regions'], p2['nodes']) == (2, 1000, 0, 0), (name, p2)
+            assert walk_res['density_plan2']['occ_layers'] == 0, walk_res['density_plan2']
+            (a, s, rest), (wa, ws, wrest) = where(drawn), where(walked)
+            assert not wrest and wa > 0 and ws > 0, (name, wa, ws, wrest[:5])
+            assert a > 0 and s > 0 and not rest, (name, a, s, rest[:5])
+            assert 0.25 * wa <= a <= 4 * wa and 0.15 * ws <= s <= 2 * ws, (name, a, wa, s, ws)
+            # depth 0: the cell's own squares alone
+            own, own_res = view(workers['occ'], gen + 1, roots[name], depth=0)
+            oa, os_, orest = where(own)
+            assert own_res['density_plan2']['occ_layers'] == 1 and oa == 0 and os_ == s and not orest, (name, own_res['density_plan2'], oa, os_, s)
+            counts[name] = (a, s, wa, ws)
+        sml = cell_of(workers['occ'], 'SML')
+        walked, _ = view(workers['walk'], 20, sml)
+        drawn, res = view(workers['occ'], 20, sml)
+        assert res['density_plan2']['occ_layers'] == 0 and drawn == walked, res['density_plan2']
+    finally:
+        for w in workers.values():
+            w.stop()
+    # built again with --roots 0: the cells' files go, the plans draw BLK
+    stats, said = ovs('--roots', '0')
+    assert stats['roots'] == '0' and not list(ice.glob('design.ovs.*')) and 'removed' in said, (stats, said)
+    workers = {'walk': worker(src, env), 'occ': worker(src, occ)}
+    try:
+        walked, _ = view(workers['walk'], 30, roots['BLK'])
+        drawn, res = view(workers['occ'], 30, roots['BLK'])
+        assert res['density_plan2']['occ_layers'] == 0 and drawn == walked, res['density_plan2']
+    finally:
+        for w in workers.values():
+            w.stop()
+    print('density stack: occupancy density by view root - design.ovs.<cell> for BLK (R90) and BLK2 (mirrored, placed twice) '
+          'in the same walk, design.ovs the same bytes; their root views by their files (DOT px, square px; the walk\'s): %s; '
+          'depth 0 their own squares alone; SML and BLK without its file the walk\'s frame' % counts)
 
 
 def frames_of(w, gen, visible, bg=False):
