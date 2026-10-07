@@ -3534,7 +3534,8 @@ occupancy 45개, jobdeck 90개, 밀도 통합 게이트와 KLayout 픽셀 대조
 - 둘째 판(0.12.309)은 비트를 design.ovs 빌더가 직접 찍는다. 컷 아래 도형의 존재만 찍으므로, 큰 도형의 가장자리
   셀까지 켜던 design.ovo 비트보다 2패스에 맞다. 59/1 단독 fit은 walk 309 px에 대해 첫 판 220 px, 둘째 판 302 px다.
 
-**빌드**(`floe-index ovs <cache> [--um F] [--jobs N] [--roots F]`, floe_vfs::occ_density). 입력은 design.ovm·ovb·ovh·ovp이고,
+**빌드**(`floe-index ovs <cache> [--um F] [--jobs N] [--roots F]`, floe_vfs::occ_density; 0.12.316부터 색인 끝에 기본으로
+만든다 — 아래 "색인에 기본 포함"). 입력은 design.ovm·ovb·ovh·ovp이고,
 design.ovo는 필요 없다. 탑에서 한 번 걷는다.
 - 컷 아래 셀(박스가 양쪽 모두 셀 3개 미만)은 걸어 들어가지 않는다. (셀, depth)별로 멤버 박스가 덮는 셀을 64×64 셀
   희소 타일에 찍고, 묶음별 멤버 수를 센다.
@@ -3669,6 +3670,23 @@ design.ovs가 탑 기준이라 root 뷰는 계획 경로로 갔다. 사용자 �
 
   - 점은 16,395 px다. 감싸지 않은 칩의 탑 뷰는 16,149 px이고, 픽셀 0.23 %가 다르다. 격자를 반대쪽 모서리에 맞추기 때문이다.
 - 메모리: 큰 셀 둘이 같은 레이어를 가지면 평면을 owner마다 따로 둔다. 최악이면 평면 메모리가 두 배다.
+- 현장(2026-10-07): 실칩에서 탑 바로 아래 8개 셀이 대상이었다. `floe-index ovs`는 약 700 s 걸렸고 파일은 약 40 MB였다.
+  사용자 판정은 "괜찮음"이었다.
+
+**색인에 기본 포함(0.12.316, 2026-10-07).** 사용자 요청: "ovs를 인덱싱에 기본 포함해줘"(위 현장 결과 뒤).
+- 경로: `floe-index vfs`(`floe2 index`, 뷰어의 색인)가 design.ovm(마커)을 쓴 직후 design.ovs와 셀 파일을 만든다.
+  - 먼저 파싱 결과(Doc)와 만든 인덱스 바이트를 내려놓는다. 그래서 색인 최대 메모리 위에 얹히지 않는다.
+  - 디코드 스레드는 색인의 `--jobs`를 쓴다.
+- design.ovh처럼 덧붙이는 파일이고 마커 프로토콜 밖이다. 실패하면 design.ovs 없이 캐시를 마치고, 나중에
+  `floe-index ovs <cache>`로 추가하라고 알린다.
+- 입력이 빠진 색인(`--no-page-occupancy`, `--no-hier`)은 만들지 않고 한 줄로 이유를 말한다.
+- 생략:
+  - `floe-index vfs --no-ovs`(= `floe2 index --no-ovs`)
+  - 잡덱 소스: `floe2 index deck.jb`가 늘 `--no-ovs`를 넘긴다. 덱 화면은 design.ovs를 읽지 않고, 덱 소스는 수백 개일 수 있다.
+    소스를 따로 열어 쓰려면 `floe-index ovs`로 추가한다.
+- 재색인: design.ovs, 그 tmp, 셀 파일(design.ovs.<n>과 tmp)도 다른 출력과 함께 먼저 지운다.
+- 이미 있는 캐시는 다시 색인하거나 `floe-index ovs`를 돌려야 생긴다. 그리기는 여전히 `FLOE_RUST_DENSITY_OCC=on`일 때만 쓴다.
+- 색인 시간은 ovs 빌드만큼 는다. 실칩은 약 700 s, 합성 1/10은 부하 12~14에서 179~225 s다.
 
 **합성 칩 비교**(main01_chip_p10, 전 레이어, cut 3 px, 1350×971, 모드마다 새 워커 2회 warm, 둘째 판 파일):
 

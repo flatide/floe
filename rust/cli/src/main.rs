@@ -131,7 +131,7 @@ fn main() {
              floe-index vfs <file.oas> [outdir] [--jobs N] \
              [--plan-batch N] [--encode-batch N] \
              [--page-target-mb N] \
-             [--coverage | --coverage-only] [--no-lod] [--no-hier] [--frontier-only] \
+             [--coverage | --coverage-only] [--no-lod] [--no-hier] [--no-ovs] [--frontier-only] \
              [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1] [--occupancy-prune 0|1] \
              [--slow-cell-s S] [--p2-shard-limit-mb N] \
              [--profile-cell NAME | --profile-cell-ci N] \

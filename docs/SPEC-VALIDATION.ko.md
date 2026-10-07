@@ -162,6 +162,10 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 픽스처: 1/0 DOT 셀(0.5 µm 정사각형)을 3 µm 간격 66×33 배열로 둔다. TOP 자신의 3/0에는 80 µm 상자와
       그 옆 0.4 µm 정사각형 26×26(3 µm 간격)을 둔다. 컷을 넘는 도형과 컷 아래 도형이 한 페이지에 있다.
       간격이 2 µm이면 1 µm/px에서 모든 멤버가 점 체커의 같은 반대 자리에 놓여 walk·점유 모두 0이 된다.
+    - `floe2 index`가 design.ovs를 기본으로 만든다(0.12.316, 로그 `[vfs] ovs design.ovs: `).
+      `--no-page-occupancy` 캐시는 만들지 않고 `[vfs] ovs: none`을 낸다.
+      `--force --no-ovs`로 다시 색인하면 이전 design.ovs가 지워지고 새로 만들지 않는다.
+      `jobdeck`의 `JobdeckIndexLodTests`: `floe2 index deck.jb`로 만든 소스 캐시에는 design.ovs가 없다.
     - 보통 색인(design.ovo 없음)에 `floe-index ovs --um 1`로 design.ovs를 만든다. 큰 페이지 1개를 디코드한다.
       표준 오류에 단계 줄(`index open`, `grid 1 um`, `decoded`, `walked in`, `settled in`, `written in`)이 나온다.
       `FLOE_OVS_PROGRESS_S=0`으로 다시 만들면 긴 단계 줄(`listing the pages to decode: `, `settle: 0/`,
@@ -203,6 +207,7 @@ sh tools/validate_rust.sh --only quick path/to.oas
   - `density_stack`의 `occ_root_checks`(0.12.315, root 뷰):
     - 픽스처: 215 × 200 µm TOP 아래 BLK(DOT 배열 40×20과 자기 3/0 정사각형)를 R90으로 1번, 같은 내용의 BLK2를
       대칭으로 2번 배치한다. 둘 다 TOP 박스의 25 % 이상이다. 작은 SML(DOT 5×5)도 하나 둔다.
+    - `floe2 index`가 셀 파일 2개를 기본으로 만든다. `--force --no-ovs`로 다시 색인하면 design.ovs와 셀 파일이 모두 지워진다.
     - `floe-index ovs --um 1`: `roots=2`이고, design.ovs.<셀>이 BLK·BLK2용으로 생긴다(version 4, 배치 R90 (100, 0)과
       대칭). SML용 파일은 없다. design.ovs는 `--roots 0`과 바이트 같다.
     - BLK·BLK2 root 뷰(120×100 px, 1 µm/px): `occ_layers` 2, `occ_cell_nm` 1000, regions 0, nodes 0이다.

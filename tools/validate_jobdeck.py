@@ -808,6 +808,10 @@ class JobdeckIndexLodTests(unittest.TestCase):
             first = run_floe2("index", deck, "--jobs", "2", env=env, ok=0)
             self.assertIn("3 built, 0 failed, 0 kept", first.stdout)
             self.assertEqual(lod_sources(), set())
+            # the deck view never reads design.ovs: its sources get none
+            # (a layout's own index makes it, 2026-10-07)
+            for name in names:
+                self.assertFalse((marker(name).parent / "design.ovs").exists(), name)
             before = {name: marker(name).read_bytes() for name in names}
             kept = run_floe2("index", deck, "--lod", "--jobs", "2",
                              env=env, ok=0)

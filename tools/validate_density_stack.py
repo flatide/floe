@@ -2876,12 +2876,22 @@ def occ_density_checks(temp):
     occ_density_layout(src)
     plain = Path(temp) / 'occd_plain.oas'
     shutil.copyfile(src, plain)
+    said = {}
     for path, extra in ((src, []), (plain, ['--no-page-occupancy'])):
         done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path)] + extra,
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
+        said[path] = done.stderr
     ice, plain_ice = Path(temp) / '.occd.oas.ice', Path(temp) / '.occd_plain.oas.ice'
     assert not (ice / 'design.ovo').exists(), 'the occupancy density needs no design.ovo'
+    # the index makes design.ovs (user 2026-10-07: "include ovs in indexing
+    # by default"); without design.ovb it says why it made none
+    assert (ice / 'design.ovs').read_bytes()[:8] == b'FLOEOVS1' and '[vfs] ovs design.ovs: ' in said[src], said[src][-2000:]
+    assert not (plain_ice / 'design.ovs').exists() and '[vfs] ovs: none' in said[plain], said[plain][-2000:]
+    # indexed again with --no-ovs: the last one gone, none made
+    again = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--force', '--no-ovs'],
+                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert again.returncode == 0 and not (ice / 'design.ovs').exists() and '[vfs] ovs' not in again.stderr, again.stderr[-2000:]
     index_bin = os.environ['FLOE_INDEX_BIN']
     refused = subprocess.run([index_bin, 'ovs', str(plain_ice)], capture_output=True, text=True, timeout=600)
     assert refused.returncode == 1 and 'design.ovb' in refused.stderr and not (plain_ice / 'design.ovs').exists(), refused.stderr
@@ -3251,6 +3261,12 @@ def occ_root_checks(temp, env, occ):
     assert done.returncode == 0, done.stdout + done.stderr
     ice = Path(temp) / '.occroot.oas.ice'
     index_bin = os.environ['FLOE_INDEX_BIN']
+    # the index makes the cells' files with design.ovs; indexed again (here
+    # with --no-ovs) they all go first
+    assert len(list(ice.glob('design.ovs.*'))) == 2 and "cell BLK's root views" in done.stderr, done.stderr[-2000:]
+    again = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--force', '--no-ovs'],
+                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert again.returncode == 0 and not list(ice.glob('design.ovs*')), (again.returncode, list(ice.glob('design.ovs*')))
 
     def ovs(*extra):
         built = subprocess.run([index_bin, 'ovs', str(ice), '--um', '1'] + list(extra), capture_output=True, text=True, timeout=600)

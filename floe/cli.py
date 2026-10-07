@@ -401,6 +401,10 @@ def _run_rust_index(args, binary, coverage_only=False,
         # (2026-10-02); --no-page-occupancy (the kill switch) leaves them out
         if getattr(args, "no_page_occupancy", False):
             command.append("--no-page-occupancy")
+        # the occupancy density, design.ovs, is built by default
+        # (2026-10-07); --no-ovs leaves it out
+        if getattr(args, "no_ovs", False):
+            command.append("--no-ovs")
         if args.slow_cell_s is not None:
             command += ["--slow-cell-s", str(args.slow_cell_s)]
         if args.p2_shard_limit_mb is not None:
@@ -524,6 +528,7 @@ def cmd_index(args):
     rust_options = any((args.page_target_mb is not None, args.coverage,
                         args.coverage_only, args.no_lod,
                         getattr(args, "no_page_occupancy", False),
+                        getattr(args, "no_ovs", False),
                         args.occupancy, args.occupancy_only,
                         args.slow_cell_s is not None,
                         args.p2_shard_limit_mb is not None, profiling,
@@ -1791,6 +1796,10 @@ def _jobdeck_index(args, catalog):
                 cmd.append("--lod")
             if getattr(args, "no_page_occupancy", False):
                 cmd.append("--no-page-occupancy")
+            # a deck's sources need no design.ovs: the deck view never
+            # reads it (a layout's own index makes it; `floe-index ovs`
+            # adds it to a source opened alone)
+            cmd.append("--no-ovs")
             if occupancy or occupancy_only:
                 cmd.append("--occupancy")
                 cmd += _occupancy_args(args)
@@ -1946,6 +1955,12 @@ def main(argv=None, *, prog=None, rust_only=None):
                            "grids - where in its box a page's shapes lie, "
                            "for the density dots of a page under the floor "
                            "(written by default since 2026-10-02)")
+    rust.add_argument("--no-ovs", action="store_true",
+                      help="do not write design.ovs, the occupancy density "
+                           "FLOE_RUST_DENSITY_OCC=on draws pass 2 by, nor "
+                           "the big cells' design.ovs.<cell> (written by "
+                           "default since 2026-10-07; a jobdeck's sources "
+                           "never get it; `floe-index ovs <cache>` adds it)")
     rust.add_argument("--slow-cell-s", type=_nonnegative_float,
                       default=None, metavar="S",
                       help="slow-cell log threshold in seconds (default: "
