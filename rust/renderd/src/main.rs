@@ -1362,6 +1362,7 @@ fn run_clip(
         empty_top: true,
         dot_bright: None,
         dot_occ_first: None,
+        fit_rank: None,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -2653,6 +2654,62 @@ fn density_top_first() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_TOP_FIRST").as_deref() != Ok("off"))
 }
 
+/// Pass 1's budget fit top plane first (user 2026-10-07, the field chip: with
+/// 7.59 and 14.367 on, 7.59 alone drew - `none below x28.2` - its pages of
+/// larger shapes first in a fit that ranked every layer's pages by size
+/// alone; "the drawing goes from the top, so 14.367 should have been drawn";
+/// the speckle leaves the lower shapes' lines showing, and a screen full of
+/// them is how it is - unlike pass 2, pass 1 draws the lower shapes in the
+/// upper ones' speckle holes, as the write-once tiles do): the fit keeps the
+/// visible layers' pages in the drawing order - the planes above the one the
+/// budget ends in whole, that one by size class largest first, none under it
+/// (floe_vfs::hier::HierOpts::fit_rank, pass1_fit_rank). Pass 2 keeps its
+/// own order (density_top_first). FLOE_RUST_FIT_TOP_FIRST=off is the kill
+/// switch: by size class alone, every layer at once, as before.
+fn fit_top_first() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_FIT_TOP_FIRST").as_deref() != Ok("off"))
+}
+
+/// Pass 1's drawing ranks (fit_top_first): per cache layer index the rank of
+/// a visible layer from the top plane (0) down - the style list's order, its
+/// last line the top, as the raster's planes (every layer in the cache's
+/// order when the list is empty); a visible layer the list does not hold
+/// after them all - and u16::MAX for the rest. None when off, or for an
+/// exact frame (no fit).
+fn pass1_fit_rank(cache: &Cache, command: &RenderCommand, styles: &[LayerStyle]) -> Option<Arc<[u16]>> {
+    if !fit_top_first() || command.exact {
+        return None;
+    }
+    let layers = cache.layers();
+    let visible: Option<BTreeSet<u32>> =
+        command.visible_layers.as_deref().map(|specs| specs.iter().filter_map(|spec| resolve_layer(spec, &layers).map(|layer| layer.index)).collect());
+    let shown = |idx: u32| visible.as_ref().is_none_or(|visible| visible.contains(&idx));
+    let planes: Vec<u32> = if styles.is_empty() { layers.iter().map(|layer| layer.index).collect() } else { styles.iter().map(|style| style.layer_idx).collect() };
+    let mut ranks = vec![u16::MAX; layers.iter().map(|layer| layer.index as usize + 1).max().unwrap_or(0)];
+    let mut next = 0u16;
+    for &idx in planes.iter().rev() {
+        if let Some(rank) = ranks.get_mut(idx as usize).filter(|rank| **rank == u16::MAX && shown(idx)) {
+            *rank = next;
+            next = next.saturating_add(1);
+        }
+    }
+    for layer in &layers {
+        if let Some(rank) = ranks.get_mut(layer.index as usize).filter(|rank| **rank == u16::MAX && shown(layer.index)) {
+            *rank = next;
+        }
+    }
+    Some(Arc::from(ranks))
+}
+
+/// The layer a top-plane-first fit ended in (PlanCullCounts::fit_layer_edge,
+/// its index + 1) as `layer/datatype`; `-` for none.
+fn fit_edge_spec(cache: &Cache, edge: u64) -> String {
+    edge.checked_sub(1)
+        .and_then(|idx| cache.layers().into_iter().find(|layer| u64::from(layer.index) == idx))
+        .map_or_else(|| "-".to_string(), |layer| format!("{}/{}", layer.layer, layer.datatype))
+}
+
 /// The viewer's fit view: the die and this margin (floe gui._fit_spp).
 const VIEWER_FIT_MARGIN: f64 = 1.05;
 
@@ -3435,7 +3492,10 @@ fn run_render_attempt(
     check_generation(cancellation, command.generation)?;
     // the density stack's pass 2 decodes within a reserve of its own
     // (density_budget_bytes): pass 1 plans to what the generation has left
-    let request = make_plan_request(cache, command, scaled_decode_budget(state.page_cache.budget_bytes(), command, budget_scale))?;
+    let mut request = make_plan_request(cache, command, scaled_decode_budget(state.page_cache.budget_bytes(), command, budget_scale))?;
+    // its budget fit top plane first (fit_top_first) - the probe of a new
+    // scale's too, made of this request
+    request.fit_rank = pass1_fit_rank(cache, command, &state.styles);
     // the summarized layers leave the page plan (§6 step 3): no page
     // selection, page BVH or child walk for them
     let mut page_request = cache.page_plan_request(&request, &summary, !command.frames)?;
@@ -4143,7 +4203,7 @@ fn run_render_attempt(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={} fit_ranked={} fit_layers_whole={} fit_layer_edge={} fit_layers_out={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -4308,6 +4368,12 @@ fn run_render_attempt(
                 // decided before, or no fit), and whether it walked
                 fit_probe_us,
                 fit_probe_walked as u8,
+                // the fit top plane first (fit_top_first): the layers kept
+                // whole above the one it ended in, that layer, those left out
+                planned.summary.culls.fit_ranked,
+                planned.summary.culls.fit_layers_whole,
+                fit_edge_spec(cache, planned.summary.culls.fit_layer_edge),
+                planned.summary.culls.fit_layers_out,
             ),
         );
         // Representative batches bound query work, not the number of full
@@ -5444,6 +5510,9 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         // cut, a page with no grid to spread it by is decoded from the
         // density cut up, as before
         dot_occ_first: density_ovb_first(cache, command).then(|| (density_cut_px() / command.cut_px).clamp(0.0, 1.0)),
+        // pass 1's is set where it is planned (pass1_fit_rank); pass 2's
+        // keep the size classes
+        fit_rank: None,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -6143,6 +6212,7 @@ mod tests {
             empty_top: true,
             dot_bright: None,
             dot_occ_first: None,
+            fit_rank: None,
         }
     }
 
@@ -6522,8 +6592,8 @@ mod tests {
             fit,
         };
         let (a, b) = (
-            Some(floe_render_core::FixedFit { cut_dbu: 5, class: 3, phase: 7, page: 9 }),
-            Some(floe_render_core::FixedFit { cut_dbu: 5, class: 4, phase: 7, page: 9 }),
+            Some(floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 3, phase: 7, page: 9 }),
+            Some(floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 4, phase: 7, page: 9 }),
         );
         let mut retained = vec![frame(64, [-160.0, -160.0, 480.0, 480.0], a)];
         // the same fit: the containing margin stays
@@ -6544,7 +6614,7 @@ mod tests {
         let a_cmd = cmd("render gen=0 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
         let b_cmd = cmd("render gen=1 view=0,0,640,640 w=32 h=32 frames=off out=/tmp/b.raw");
         let frame = |px: u32| floe_render_core::RgbaFrame::from_pixels(px, px, vec![3u8; (px * px * 4) as usize]).unwrap();
-        let fit = floe_render_core::FixedFit { cut_dbu: 5, class: 3, phase: 7, page: 9 };
+        let fit = floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 3, phase: 7, page: 9 };
         state.retained = vec![
             RetainedFrame { key: RetainedKey::new(&a_cmd, None), view: [0.0, 0.0, 320.0, 320.0], frame: frame(32), fit: Some(fit) },
             RetainedFrame { key: RetainedKey::new(&b_cmd, None), view: [0.0, 0.0, 640.0, 640.0], frame: frame(32), fit: Some(fit) },
@@ -6552,7 +6622,7 @@ mod tests {
         let mut again = cmd("render gen=2 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/c.raw");
         let reuse = prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), Some(fit)).expect("the older frame at this scale serves");
         assert_eq!(reuse.valid, [0, 0, 32, 32]);
-        let other = floe_render_core::FixedFit { cut_dbu: 5, class: 4, phase: 7, page: 9 };
+        let other = floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 4, phase: 7, page: 9 };
         assert!(prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), Some(other)).is_none(), "another decision: nothing to reuse");
         assert!(prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), None).is_none());
     }

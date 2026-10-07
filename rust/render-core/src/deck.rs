@@ -1704,6 +1704,8 @@ fn source_plan_request(
         empty_top: false,
         dot_bright: None,
         dot_occ_first: None,
+        // (a deck's sources keep the size classes alone)
+        fit_rank: None,
     };
     plan.validate()?;
     Ok(Some(plan))

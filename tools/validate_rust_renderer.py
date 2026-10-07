@@ -789,6 +789,18 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # (2026-10-05): the scale its budget was cut by, with the fit
         scaled = dict(res, plan_culls=dict(res["plan_culls"], fit_scale=1180))
         self.assertIn("x2 to fit budget, STILL OVER, pages x1.18 their estimate", perf_status(scaled)[0])
+        # pass 1's fit top plane first (0.12.318, the field chip 2026-10-07:
+        # with 7.59 and 14.367 on, 7.59 alone drew): the layers kept whole
+        # from the top, the one it ended in with its classes, those left out
+        ranked = dict(res, plan_culls=dict(res["plan_culls"], fit_pct=100, fit_over=0, fit_thin=1, fit_full_pct=862,
+                                           fit_none_pct=431, fit_ranked=1, fit_layers_whole=225,
+                                           fit_layer_edge="56/3", fit_layers_out=223))
+        self.assertIn("cut<7.56um top 225 whole, 56/3 (1/2 below x8.62, none below x4.31), 223 left out to fit budget",
+                      perf_status(ranked)[1])
+        dropped = dict(res, plan_culls=dict(res["plan_culls"], fit_pct=100, fit_over=0, fit_thin=0, fit_full_pct=0,
+                                            fit_none_pct=0, fit_ranked=1, fit_layers_whole=1,
+                                            fit_layer_edge=None, fit_layers_out=1))
+        self.assertIn("cut<7.56um top 1 whole, 1 left out to fit budget", perf_status(dropped)[1])
         # the budget fit decided for a new scale before its plan (2026-10-05:
         # it was part of `other`): its own item from 100 ms, in the log line
         # whenever there was one
@@ -2072,6 +2084,10 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "fit_thin": "3", "fit_full_pct": "850", "fit_none_pct": "400",
                 "fit_fixed": "1", "fit_redecided": "0",
                 "fit_scale": "1180", "fit_refits": "1",
+                # pass 1's fit top plane first (0.12.318): the layers whole,
+                # the one it ended in, those left out
+                "fit_ranked": "1", "fit_layers_whole": "3",
+                "fit_layer_edge": "7/59", "fit_layers_out": "2",
                 "sub_cut_boxes": "1234", "sub_cut_box_over": "5",
                 "sub_cut_box_level": "1", "sub_cut_box_unsure": "2",
                 "shape_cut": "4392", "shape_cut_max": "1",
@@ -2110,6 +2126,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "fit_thin": 3, "fit_full_pct": 850, "fit_none_pct": 400,
                 "fit_fixed": 1, "fit_redecided": 0,
                 "fit_scale": 1180, "fit_refits": 1,
+                "fit_ranked": 1, "fit_layers_whole": 3,
+                "fit_layer_edge": "7/59", "fit_layers_out": 2,
                 "sub_cut_boxes": 1234, "sub_cut_box_over": 5,
                 "sub_cut_box_level": 1, "sub_cut_box_unsure": 2,
                 "shape_cut": 4392, "shape_cut_max": 1,

@@ -787,7 +787,30 @@ def perf_status(res, depth_note=""):
         thin = int(fit.get("fit_thin", 0) or 0)
         full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
         none = int(fit.get("fit_none_pct", 0) or 0) / 100.0
-        if thin or none:
+        if fit.get("fit_ranked"):
+            # top plane first (pass 1, 2026-10-07: the drawing goes from
+            # the top): the layers above the one the budget ends in
+            # whole, that layer by its size classes as below, the
+            # layers under it left out
+            parts = []
+            if factor > 1:
+                parts.append("x%.3g" % factor)
+            whole_n = int(fit.get("fit_layers_whole", 0) or 0)
+            if whole_n:
+                parts.append("top %d whole" % whole_n)
+            edge = fit.get("fit_layer_edge")
+            if edge:
+                classes = []
+                if thin:
+                    classes.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
+                if none:
+                    classes.append("none below x%.3g" % none)
+                parts.append(edge + (" (%s)" % ", ".join(classes) if classes else ""))
+            out_n = int(fit.get("fit_layers_out", 0) or 0)
+            if out_n:
+                parts.append("%d left out" % out_n)
+            fitted = " %s to fit budget" % ", ".join(parts)
+        elif thin or none:
             # budget-fitted density (0.12.169): size classes
             # largest first - complete from xF up, the class
             # the budget ends in about 1 in 2^k, nothing

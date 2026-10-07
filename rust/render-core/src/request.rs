@@ -133,6 +133,11 @@ pub struct PlanRequest {
     /// such a grid whose largest shape reaches `share` of the cut is decoded.
     /// None: the pages cut where `sub_cut_dots` says.
     pub dot_occ_first: Option<f64>,
+    /// The budget fit top plane first (floe_vfs::hier::HierOpts::fit_rank):
+    /// per cache layer index its rank in the drawing order from the top plane
+    /// (0) down, u16::MAX for a layer not drawn - renderd's pass 1 (user
+    /// 2026-10-07). None: by size class alone.
+    pub fit_rank: Option<std::sync::Arc<[u16]>>,
 }
 
 impl PlanRequest {
@@ -195,6 +200,7 @@ mod tests {
             empty_top: true,
             dot_bright: None,
             dot_occ_first: None,
+            fit_rank: None,
         };
         assert!(req.validate().is_err());
     }

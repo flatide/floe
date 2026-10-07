@@ -112,6 +112,14 @@ pub struct PlanCullCounts {
     /// fit was decided anew (1)
     pub fit_fixed: u64,
     pub fit_redecided: u64,
+    /// the fit top plane first (floe_vfs::hier::HierOpts::fit_rank,
+    /// 2026-10-07): it ranked by the drawing order (1), the layers above the
+    /// one its prefix ends in kept whole, that layer (its index + 1; 0 when
+    /// it kept no page) and the layers under it left out
+    pub fit_ranked: u64,
+    pub fit_layers_whole: u64,
+    pub fit_layer_edge: u64,
+    pub fit_layers_out: u64,
     /// sub-cut boxes (floe_vfs::ViewReq::sub_cut_box): box rects the plan
     /// emitted, boxes dropped beyond the per-plan cap
     pub sub_cut_boxes: u64,
@@ -156,6 +164,10 @@ impl PlanCullCounts {
             fit_none_pct: st.fit_none_pct as u64,
             fit_fixed: st.fit_fixed as u64,
             fit_redecided: st.fit_redecided as u64,
+            fit_ranked: u64::from(st.fit_ranked),
+            fit_layers_whole: u64::from(st.fit_layers_whole),
+            fit_layer_edge: u64::from(st.fit_layer_edge),
+            fit_layers_out: u64::from(st.fit_layers_out),
             sub_cut_boxes: st.sub_cut_boxes,
             sub_cut_box_over: st.sub_cut_box_over,
             sub_cut_box_level: st.sub_cut_box_level as u64,
@@ -193,6 +205,11 @@ impl PlanCullCounts {
         self.fit_none_pct = self.fit_none_pct.max(other.fit_none_pct);
         self.fit_fixed = self.fit_fixed.max(other.fit_fixed);
         self.fit_redecided = self.fit_redecided.max(other.fit_redecided);
+        // (one fit's account: the other's when this has none)
+        if self.fit_ranked == 0 {
+            (self.fit_ranked, self.fit_layers_whole, self.fit_layer_edge, self.fit_layers_out) =
+                (other.fit_ranked, other.fit_layers_whole, other.fit_layer_edge, other.fit_layers_out);
+        }
         self.sub_cut_boxes = self.sub_cut_boxes.saturating_add(other.sub_cut_boxes);
         self.sub_cut_box_over = self.sub_cut_box_over.saturating_add(other.sub_cut_box_over);
         self.sub_cut_box_level = self.sub_cut_box_level.max(other.sub_cut_box_level);
@@ -1584,7 +1601,7 @@ impl Cache {
         let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
         // the cells' cover: the brightness's dots plans alone ask for it
         let cover = if request.dot_bright.is_some() && request.sub_cut_dots.is_some() && !request.density_mask.as_ref().is_some_and(|mask| mask.is_empty()) { self.cell_cover() } else { None };
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.density_mask.clone(), request.density_layers.clone(), request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright, request.dot_occ_first, cover, decide_by);
+        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.density_mask.clone(), request.density_layers.clone(), request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright, request.dot_occ_first, cover, decide_by, request.fit_rank.clone());
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }

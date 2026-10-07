@@ -1593,6 +1593,16 @@ class RustRenderWorker:
                 # did not fit this frame and was decided anew (fit_redecided)
                 "fit_fixed": _wire_int(fields, "fit_fixed"),
                 "fit_redecided": _wire_int(fields, "fit_redecided"),
+                # the fit top plane first (pass 1, 2026-10-07; older renderers
+                # omit it): it ranked the pages by the drawing order, the
+                # layers kept whole above the one it ended in, that layer
+                # (`layer/datatype`, None when it kept nothing) and the layers
+                # left out under it
+                "fit_ranked": _wire_int(fields, "fit_ranked"),
+                "fit_layers_whole": _wire_int(fields, "fit_layers_whole"),
+                "fit_layer_edge": (None if fields.get("fit_layer_edge", "-") == "-"
+                                   else fields.get("fit_layer_edge")),
+                "fit_layers_out": _wire_int(fields, "fit_layers_out"),
                 # the layers' pages decode larger than the planner estimates
                 # (2026-10-05): the scale its budget was cut by, thousandths
                 # (0: none), and how often this frame was planned anew

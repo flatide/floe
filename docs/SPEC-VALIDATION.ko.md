@@ -689,6 +689,25 @@ sh tools/validate_rust.sh --only quick path/to.oas
   - 이미 결정한 배율을 다시 청하면 `fit_probe_ms` 0, `fit_fixed` 1이다.
   - 어댑터 계약: 프레임 줄의 `fit_probe_us`·`fit_probe_walk`, 단계 합에 든 사전 계획(`other_ms` 15 → 12), 상태줄
     `… + 3916 draw + 1054 fit probe + 639 other`(100 ms 미만은 로그 줄에만), 로그 줄 `, fit probe 28.0ms (walk)`.
+  0.12.318 `top_first_checks`(실칩 2026-10-07: 7.59와 14.367을 함께 켜면 7.59만, `none below x28.2`). 1패스의 예산은
+  위 plane부터다(SPEC-PLANNER). 위의 검사들은 크기 순으로 만든 것이라 `main()`이 `FLOE_RUST_FIT_TOP_FIRST=off`로
+  고정하고, 이 검사만 켠다(기본).
+  - 두 레이어(`layout_pair`: 7/59 4 µm 사각형 4,000개, 14/367 1.5 µm 4,000개, 레코드 하나씩 — 레이어마다 약 0.8 MB의
+    한 페이지)의 400 µm 뷰, cut 3 px, 예산 1 MB(1패스 약 0.9 MB).
+    - 각 레이어만 켜면 통째로 그려진다(색으로 센 픽셀: 7/59 97,216, 14/367 21,060).
+    - 함께 켜면 맨 위 14/367이 혼자일 때와 같고 7/59는 0이다. `fit_ranked` 1, `fit_layers_whole` 1, 끝난 레이어 없음,
+      `fit_layers_out` 1, 상태줄 `top 1 whole, 1 left out to fit budget`.
+    - 다음 프레임은 기억한 결정으로 같은 픽셀이다(`fit_fixed` 1, `fit_redecided` 0).
+    - `FLOE_RUST_FIT_TOP_FIRST=off`는 종전 맞춤이다: 7/59가 혼자일 때와 같고 14/367은 0.
+  - 스페클 구멍(`layout_over`: 7/59의 20 µm 사각형마다 14/367의 30 µm 사각형이 덮음, 1 GB): 둘을 함께 켜면 7/59만
+    켰을 때 칠한 픽셀 가운데 일부가 7/59 색으로 남는다(구멍; 실측 108,484 px 중 6,172), 나머지는 14/367 색이다.
+  - 합성 칩 전 레이어(48 MB): 광역뷰가 위 plane부터 맞춰진다(`fit_ranked` 1; 온전한 레이어 + 끝난 레이어 + 빠진 레이어
+    = 전 레이어, 실측 168 + 0 + 281). 가운데 → 여백(전체) → 가운데 순서로 결정이 기억·적용되고 두 가운데가 여백의
+    가운데와 같다.
+  - 단위 vfs `the_budget_fit_keeps_the_top_plane_first`(예산별로 위 plane부터 완전·솎음·빠짐, 걷기가 닿지 않는 plane을
+    수집하지 않음, 기억한 결정의 재적용·통째로 듦·다시 결정, 맨 위 plane만 홀로 사다리, 순위 없으면 종전 순서),
+    `a_plane_past_the_ladders_reach_is_left_out_and_the_planes_above_kept_whole`(사다리 끝에서도 넘치는 plane은 빠지고
+    결정은 그 위 plane들까지, 다시 적용해도 같음).
 - `representatives`(tools/validate_representatives.py, 약 10초; `render`·`indexer`
   별칭에 포함): design.ovr 추가 생성이 캐시를 보존하는지, depth 0 제외·kill switch·
   손상 파일 폴백, 그리고 결합 인덱스 실행에서 OVR 생성이 실패해도(`--kill-at

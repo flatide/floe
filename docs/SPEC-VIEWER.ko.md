@@ -94,7 +94,10 @@
     - work bin: `bin N items` 또는 `bin off(cap@N), hier V/P pruned`. 넘치면 타일마다 걷는 양을
       함께 보인다.
     - 컷: `cut<X um`과 예산 맞춤(`… to fit budget`, `STILL OVER`). `(larger side)`는 빠진다. 0.12.301부터 그 레이어들의
-      페이지가 추정보다 크게 디코드돼 예산을 줄여 계획했으면 `, pages xN their estimate`가 붙는다.
+      페이지가 추정보다 크게 디코드돼 예산을 줄여 계획했으면 `, pages xN their estimate`가 붙는다. 0.12.318부터 1패스의
+      맞춤은 위 plane부터라 `top N whole, L/D (1/M below xF, none below xG), K left out to fit budget`이다(위에서 온전한
+      레이어 수, 예산이 끝난 레이어와 그 등급, 빠진 레이어 수; SPEC-PLANNER). `FLOE_RUST_FIT_TOP_FIRST=off`면 종전
+      `1/M below xF, none below xG to fit budget`이다.
     - 그림이 모자란 것: `N pages over budget (not drawn)`, `labels partial`, `evict N`,
       `summary N layers (not pickable)`. `N pages over budget`은 0.12.301부터 단일 레이아웃에서도 나온다(어떤 계획도
       예산에 들지 않을 때 오류 대신 예산이 담는 만큼 그린다). 여백(margin) 프레임이 예산을 넘으면 오류 대신

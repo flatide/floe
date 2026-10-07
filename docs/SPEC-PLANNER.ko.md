@@ -792,6 +792,44 @@
   결정 일치가 필요하다 — 다른 결정 아래의 포함 프레임이 자리를 지켜 그 배율에서는 아무것도 다시 재사용되지
   않았다(컬러 A → 흑백의 조밀한 B에서 재결정 → A 복귀: A를 반복 요청해도 재사용 0). 단위
   `a_containing_frame_under_another_fit_does_not_keep_its_place`.
+- **1패스 예산은 위 plane부터(0.12.318, renderd 0.12.293; 사용자 2026-10-07 — 기본, `FLOE_RUST_FIT_TOP_FIRST=off`면
+  크기 등급만).** 현장: 실칩에서 7.59와 14.367만 켜면 각각은 보이는데, 함께 켜면 7.59만 나오고 `none below x28.2`였다.
+  우선순위가 켜진 모든 레이어의 페이지를 크기 등급으로만 늘어놓아, 큰 도형이 있는 7.59의 페이지가 예산을 먼저
+  차지하고 14.367은 통째로 빠졌다. 그리기는 위 plane부터인데 예산은 크기부터였다. 사용자: "상위부터 그려야 하니
+  14.367이 그려졌어야", "위에서부터 그려도 스페클로 채우므로 아래 도형의 선은 나타난다 — 선이 많아 화면이 가득 차는
+  건 어쩔 수 없다", "1패스는 2패스와 달리 스페클 구멍에 아래 도형이 그려져야 한다".
+  - 순위: renderd(`pass1_fit_rank`)가 켜진 레이어마다 그리기 순위를 준다. 스타일 목록의 순서이고 마지막 줄(맨 위)이
+    0이다. 스타일이 없는 켜진 레이어는 그 뒤다. 1패스 요청에만 실린다(`PlanRequest::fit_rank` →
+    `HierOpts::fit_rank`). 2패스는 자기 순서(`density_top_first`)를 그대로 쓴다.
+  - 우선순위: `fit_priority` = (순위, 크기 등급 역순, 비트 반전 위상, 페이지). 접두사는 그대로 엄격하다. 예산이 끝나는
+    plane 위는 요청 컷에서 완전하고, 그 plane은 크기 등급 큰 것부터, 그 아래는 없다. `FixedFit`에 `rank`가 붙어 기억한
+    결정도 같은 순서로 적용된다.
+  - 패스(`plan_hier_ranked`): 요청 컷의 한 패스다.
+    - 위 순위들이 예산을 넘긴 순위는 그 순간 수집을 멈추고 걷기의 레이어(`walk_vis`)에서 빠진다
+      (`RankWalk::budget`). 프레임이 필요한 곳은 종전 조건대로 걷는다.
+    - 그래서 패스는 예산이 닿는 plane만 담는다. 한 plane이 혼자 `FIT_OVERSHOOT` 예산을 넘을 때만 그 plane과 아래를
+      떨군다(`fit_rank_over`).
+    - 위가 자리를 남기면 그 plane만 하한을 한 옥타브씩 올려 다시 계획한다(크기 사다리를 그 plane에만; 맨 위 plane이면
+      하한이 계획의 컷).
+  - 기억한 결정의 적용(`plan_hier_fixed_ranked`): 요청 그대로의 패스가 통째로 들면 전부 남긴다(종전 규칙). 아니면 결정의
+    plane 위는 완전, 그 plane은 결정의 등급 이상이고, 그 아래는 걷지 않는다.
+  - 상태줄: `cut<…um top N whole, L/D (1/M below xF, none below xG), K left out to fit budget`. 위에서 온전한 레이어 수,
+    예산이 끝난 레이어와 그 등급, 빠진 레이어 수다. 프레임 줄은 `fit_ranked`, `fit_layers_whole`, `fit_layer_edge`,
+    `fit_layers_out`이다.
+  - 1패스의 스페클 구멍: write-once 타일은 "마지막에 쓴 plane이 이긴다"와 바이트 동일이라, 위 도형의 스페클 구멍에 아래
+    도형이 그려진다(바꾸지 않음). 게이트로 확인했다: 14.367의 30 µm 사각형 아래 7.59 픽셀 108,484개 중 6,172개가
+    보인다. 2패스의 밀도는 위 도형이 덮는 곳(구멍 포함)에 그리지 않는다(shapes first).
+  - 측정(합성 MAIN01 1/10, 전 레이어, 1350×971, cut 3 px, 1 GB):
+    - 계획과 사전 계획 시간은 같다(fit 30·31 ms, ×4 8·10 ms, ×64 110·113 ms).
+    - 그림: fit 뷰가 `top 225 whole, 56/3 (1/2, none below x4.31), 223 left out`이다. 종전은 `1/8 below x4.31, none
+      below x2.16`이었다.
+    - 위 plane의 작은 도형까지 그려 그리는 양이 늘었다. ×4 프레임이 111~115 → 157~182 ms다. 예산 64 MB에서는 위 25개
+      레이어가 완전하고 프레임이 42~52 → 960~1,315 ms다.
+  - 사다리 끝에서도 `FIT_OVERSHOOT` 예산을 넘는 plane은 빠지고 그 위는 완전하다. 이때 결정은 "전부"가 아니라 그 위
+    plane들까지다(`thin_to_budget`의 `short`: 계획이 프레임보다 모자란 지점; 바닥 하한으로 다시 계획한 plane이 예산에 꼭
+    맞을 때도 같다).
+  - 단위 vfs `the_budget_fit_keeps_the_top_plane_first`, `a_plane_past_the_ladders_reach_is_left_out_and_the_planes_above_kept_whole`;
+    게이트 `fit_budget`의 `top_first_checks`(SPEC-VALIDATION).
 - 한계: 솎는 단위가 페이지라 밀집 영역이 페이지 크기의 조각으로 빈다. 인스턴스가 공유하는
   페이지는 모든 인스턴스에서 같이 빠진다. 접두사가 끝난 등급 아래는 표본도 남지 않는다
   (0.12.166은 모든 등급에 표본을 남겼지만 확대 시 포함 관계를 지킬 수 없었다). 추정이 실측보다

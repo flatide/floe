@@ -254,6 +254,7 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         empty_top: true,
         dot_bright: None,
         dot_occ_first: None,
+        fit_rank: None,
     })
 }
 

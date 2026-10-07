@@ -464,6 +464,15 @@ lower layer on took pages from the top plane: the routing chip's M8 over M1
 under 256 MB kept 76 % of M8's pixels); the others take what is left (user
 2026-10-04: "789's dots, lit alone, went with 787 on"; renderd
 `density_top_first`, `FLOE_RUST_DENSITY_TOP_FIRST=off` is the kill switch).
+Since 0.12.318 pass 1's budget fit keeps the pages top plane first as well
+(user 2026-10-07, the field chip: with 7.59 and 14.367 on, 7.59 alone drew -
+`none below x28.2` - its pages of larger shapes first in a fit by size alone):
+the planes above the one the budget ends in whole at the asked cut, that one
+by size class, none under it (floe_vfs `HierOpts::fit_rank`, renderd
+`pass1_fit_rank` from the style list's order; the frame line's `fit_ranked`,
+`fit_layers_whole`, `fit_layer_edge`, `fit_layers_out`; the status bar `top N
+whole, L/D (...), K left out to fit budget`). `FLOE_RUST_FIT_TOP_FIRST=off` is
+the kill switch: by size class alone, every layer at once.
 `FLOE_RUST_DENSITY_ONLY=on` (0.12.291, diagnostic, off by default) draws the
 density alone: pass 1 of a density frame reads no page and draws no shape
 (its plan keeps the hierarchy), so pass 2's reserve is the whole budget - to

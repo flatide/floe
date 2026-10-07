@@ -224,6 +224,187 @@ def layout_plain(path):
     ly.write(str(path))
 
 
+def layout_pair(path):
+    """800 x 800 um: 7/59 4,000 squares of 4 um and 14/367 4,000 of 1.5 um
+    beside them, each a little off its lattice and written one record each
+    (the writer's compression off) - each layer one page of about 0.8 MB,
+    every shape over a 0.9 um cut."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    low, up = ly.layer(7, 59), ly.layer(14, 367)
+    rnd = random.Random(7)
+    for k in range(4000):
+        i, j = k % 64, k // 64
+        x, y = i * 12.5 + rnd.randrange(0, 2000) / 1000, j * 12.5 + rnd.randrange(0, 2000) / 1000
+        top.shapes(low).insert(kdb.DBox(x, y, x + 4, y + 4))
+        top.shapes(up).insert(kdb.DBox(x + 6, y + 6, x + 7.5, y + 7.5))
+    opts = kdb.SaveLayoutOptions()
+    opts.format = 'OASIS'
+    opts.oasis_compression_level = 0
+    ly.write(str(path), opts)
+
+
+def layout_over(path):
+    """7/59's 20 um squares, each under a 30 um square of 14/367, 8 x 8 at
+    50 um."""
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    low, up = ly.layer(7, 59), ly.layer(14, 367)
+    for j in range(8):
+        for i in range(8):
+            x, y = i * 50.0, j * 50.0
+            top.shapes(low).insert(kdb.DBox(x + 5, y + 5, x + 25, y + 25))
+            top.shapes(up).insert(kdb.DBox(x, y, x + 30, y + 30))
+    ly.write(str(path))
+
+
+def top_first_worker(src, budget_mb, on=True):
+    """worker() with pass 1's budget fit top plane first (the default) or
+    by size alone (FLOE_RUST_FIT_TOP_FIRST=off; main() pins it so for the
+    checks made by it)."""
+    saved = os.environ.get('FLOE_RUST_FIT_TOP_FIRST')
+    if on:
+        os.environ.pop('FLOE_RUST_FIT_TOP_FIRST', None)
+    else:
+        os.environ['FLOE_RUST_FIT_TOP_FIRST'] = 'off'
+    try:
+        return worker(src, budget_mb)
+    finally:
+        if saved is None:
+            os.environ.pop('FLOE_RUST_FIT_TOP_FIRST', None)
+        else:
+            os.environ['FLOE_RUST_FIT_TOP_FIRST'] = saved
+
+
+def pair_frame(w, gen, centre_um, width_um, layers, size=(1350, 971)):
+    """A frame of the visible `layers` ((layer, datatype)) around `centre_um`,
+    `width_um` across, at cut 3 px with the density - the viewer's defaults:
+    (pixels as 4-byte colours, result)."""
+    dbu = float(w.cache.meta['dbu'])
+    wpx, hpx = size
+    spp = width_um / wpx / dbu
+    cx, cy = centre_um[0] / dbu, centre_um[1] / dbu
+    view = (cx - wpx * spp / 2, cy - hpx * spp / 2, cx + wpx * spp / 2, cy + hpx * spp / 2)
+    w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': view, 'view': None, 'w': wpx, 'h': hpx,
+              'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False, 'abstract': False,
+              'visible': list(layers), 'frame_format': 'raw', 'thin': 'keep', 'density': True})
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+        if res.get('kind') == 'error':
+            raise AssertionError(res)
+        if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+            pixels = bytes(res.pop('rgba'))
+            return [pixels[i:i + 4] for i in range(0, len(pixels), 4)], res
+    raise AssertionError('top first frame timeout')
+
+
+def top_first_checks(temp, src):
+    """Pass 1's budget fit top plane first (user 2026-10-07, the field chip:
+    7.59 and 14.367 on, 7.59 alone drew - `none below x28.2`, its pages of
+    larger shapes first in a fit by size alone; "the drawing goes from the
+    top, so 14.367 should have been drawn"; the speckle leaves the lower
+    shapes' lines showing - pass 1, unlike pass 2, draws the lower shapes in
+    the upper ones' speckle holes). On layout_pair, a 400 um view at cut 3
+    px under 1 MB (pass 1 about 0.9 MB, a layer's page about 0.8): each layer
+    alone draws whole; together the top plane 14/367 draws as alone and
+    7/59 is left out (fit_ranked 1, fit_layers_whole 1, no edge layer,
+    fit_layers_out 1; the bar `top 1 whole, 1 left out to fit budget`), the
+    frame after it under the remembered decision the same pixels; with
+    FLOE_RUST_FIT_TOP_FIRST=off the old fit - 7/59 as alone, 14/367 none.
+    On layout_over under 1 GB both draw, 7/59's colour inside 14/367's
+    squares - its lines in the speckle's holes. On the chip of the checks
+    above, every layer under 48 MB: its wide view fits top plane first (the
+    layers whole, the one it ended in and those left out make every layer)
+    with something lit, and the fit is remembered per scale as by size: the
+    middle decides over its margin, the margin and the middle again apply
+    it, both middles equal to the margin's centre."""
+    pair = Path(temp) / 'pair.oas'
+    over = Path(temp) / 'over.oas'
+    layout_pair(pair)
+    layout_over(over)
+    for path in (pair, over):
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path), '--jobs', '2'],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+    from floe.gui import perf_status
+    low, up = (7, 59), (14, 367)
+    top, old = top_first_worker(pair, 1), top_first_worker(pair, 1, on=False)
+    try:
+        alone = {lay: pair_frame(top, g, (400, 400), 400, [lay])[0] for g, lay in ((1, low), (2, up))}
+        background = alone[low][0]
+        colours = {lay: {c for c in px if c != background} for lay, px in alone.items()}
+        assert all(colours.values()) and not (colours[low] & colours[up]), 'each layer draws in a colour of its own'
+
+        def lit(px):
+            return {lay: sum(1 for c in px if c in colours[lay]) for lay in (low, up)}
+        whole = lit(alone[low])[low], lit(alone[up])[up]
+        both, res = pair_frame(top, 3, (400, 400), 400, [low, up])
+        culls = res['plan_culls']
+        assert lit(both) == {low: 0, up: whole[1]}, ('top first: 14/367 as alone, 7/59 left out', lit(both), whole)
+        account = (culls['fit_ranked'], culls['fit_layers_whole'], culls['fit_layer_edge'], culls['fit_layers_out'])
+        assert account == (1, 1, None, 1), culls
+        bar = perf_status(res)[1]
+        assert 'top 1 whole, 1 left out to fit budget' in bar, bar
+        after, res2 = pair_frame(top, 4, (400, 400), 400, [low, up])
+        assert after == both and res2['plan_culls']['fit_fixed'] == 1 and res2['plan_culls']['fit_redecided'] == 0, res2['plan_culls']
+        by_size, ros = pair_frame(old, 1, (400, 400), 400, [low, up])
+        assert lit(by_size) == {low: whole[0], up: 0} and ros['plan_culls']['fit_ranked'] == 0, (lit(by_size), ros['plan_culls'])
+        print('fit budget: top plane first - 7/59 and 14/367 under 1 MB: 14/367 as alone (%d px), 7/59 left out (`%s`), '
+              'the frame after the same; by size (FLOE_RUST_FIT_TOP_FIRST=off) 7/59 as alone (%d px), 14/367 none'
+              % (whole[1], bar.split('cut<', 1)[-1].split(' ', 1)[-1], whole[0]))
+    finally:
+        top.stop()
+        old.stop()
+    roomy = top_first_worker(over, 1024)
+    try:
+        lower, _ = pair_frame(roomy, 1, (200, 200), 420, [low])
+        upper, _ = pair_frame(roomy, 2, (200, 200), 420, [up])
+        both, _ = pair_frame(roomy, 3, (200, 200), 420, [low, up])
+        background = lower[0]
+        low_colours = {c for c in lower if c != background}
+        up_colours = {c for c in upper if c != background}
+        under = [i for i, c in enumerate(lower) if c != background]
+        shown = sum(1 for i in under if both[i] in low_colours)
+        covered = sum(1 for i in under if both[i] in up_colours)
+        assert 0 < shown < len(under) and covered > 0, ('7/59 in the holes of 14/367', shown, covered, len(under))
+        print('fit budget: pass 1 draws the lower shapes in the upper speckle\'s holes - of 7/59\'s %d px under 14/367, %d show'
+              % (len(under), shown))
+    finally:
+        roomy.stop()
+    sticky = top_first_worker(src, 48)
+    try:
+        x0, y0, x1, y1 = map(float, sticky.cache.meta['bbox'])
+        wide = (x0, y0, x1, y1)
+        layers = len(sticky.cache.meta['layers'])
+        fitted, res = frame(sticky, 1, wide)
+        culls = res['plan_culls']
+        edge = 1 if culls['fit_layer_edge'] else 0
+        assert culls['fit_ranked'] == 1 and culls['fit_over'] == 0 and \
+            culls['fit_layers_whole'] + edge + culls['fit_layers_out'] == layers, culls
+        assert any(bytes(fitted[i:i + 4]) != bytes(fitted[:4]) for i in range(0, len(fitted), 4)), 'the top-first frame is empty'
+        mid = (x0 + (x1 - x0) / 4, y0 + (y1 - y0) / 4, x0 + 3 * (x1 - x0) / 4, y0 + 3 * (y1 - y0) / 4)
+        first, rf = frame(sticky, 2, mid)
+        margin, rm = frame(sticky, 3, wide, size=2 * PX)
+        again, ra = frame(sticky, 4, mid)
+        fits = (rf['plan_culls'], rm['plan_culls'], ra['plan_culls'])
+        assert fits[0]['fit_ranked'] == 1, 'the middle must need the fit: %s' % (fits[0],)
+        assert all(f['fit_fixed'] == 1 and f['fit_redecided'] == 0 for f in fits), fits
+        q = PX // 2
+        centre = b''.join(bytes(margin[((q + r) * 2 * PX + q) * 4:((q + r) * 2 * PX + q + PX) * 4]) for r in range(PX))
+        assert bytes(first) == centre and bytes(again) == centre, 'top first: the middle and the margin\'s centre differ'
+        print('fit budget: top plane first over every layer of the chip under 48 MB - %d whole, %s, %d left out; '
+              'the middle decided over its margin, the margin and the middle again apply it (= margin centre)'
+              % (culls['fit_layers_whole'], culls['fit_layer_edge'] or 'no layer thinned', culls['fit_layers_out']))
+    finally:
+        sticky.stop()
+
+
 def refit_checks(temp):
     """A frame the planner fitted to the budget holds it once decoded - its
     pages' record lists are cut to their length and a list they share is
@@ -443,6 +624,9 @@ def main():
     os.environ['FLOE_INDEX_BIN'] = str(ROOT / 'rust/target/release/floe-index')
     os.environ['FLOE_RENDERD_BIN'] = str(ROOT / 'rust/target/release/floe-renderd')
     os.environ['FLOE_RUST_RETAINED_MB'] = '0'
+    # pass 1's fit by size alone, as these checks were made (the top plane
+    # first, the default since 0.12.318: top_first_checks)
+    os.environ['FLOE_RUST_FIT_TOP_FIRST'] = 'off'
     with tempfile.TemporaryDirectory(prefix='floe-fit-') as temp:
         src = Path(temp) / 'chip.oas'
         for argv in ([sys.executable, '-B', str(ROOT / 'tools/gen_main01_like.py'), str(src),
@@ -576,6 +760,7 @@ def main():
                 w.stop()
         refit_checks(temp)
         probe_checks(src)
+        top_first_checks(temp, src)
     print('FIT BUDGET: ALL OK')
 
 
