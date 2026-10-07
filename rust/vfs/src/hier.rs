@@ -1129,9 +1129,10 @@ pub type WsKey = (u32, u32);
 /// the decision's plane - u32::MAX when it left that plane whole - so the
 /// decision applied again says where the plane stops as the deciding frame
 /// did (review of 15c464d: `none below x5.12` became `x20.5` for the same
-/// view, the classes between empty). A decision that ends at a class of its
-/// own (phase and page u32::MAX: thin_to_budget's `short`) lacks `below`
-/// - its pages never collected; one that ends at a page left out `below`.
+/// view, the classes between empty) - for the account alone: the decision
+/// applied again collects its plane from its own class up (review of
+/// 7801d4c), and the pages it leaves out under that class are where `below`
+/// says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FixedFit {
     pub cut_dbu: i64,
@@ -2634,18 +2635,15 @@ fn plan_hier_fixed_ranked(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedF
             let rank = page_rank(opts, &p);
             rank == fixed.rank && fit_priority(&p, key, pi, rank) > fixed.threshold()
         });
-    // where the plane stops: the class the deciding fit left out first
-    // (`below`) - collected from it when that fit ended at a page left out,
-    // so the same page ends it again; a decision ending at a class of its own
-    // never collected it, and stops at it
-    let short_decision = fixed.phase == u32::MAX && fixed.page == u32::MAX;
-    let (floor_class, lacks_class) = match fixed.below {
-        u32::MAX => (fixed.class, fixed.class.saturating_sub(1)),
-        below if short_decision => (fixed.class, below),
-        below => (fixed.class.min(below), below),
-    };
+    // where the plane stops, for the account alone: the class the deciding
+    // fit left out first (`below`), under the decision's own (its pages are
+    // collected from the decision's class up, whatever the account - review
+    // of 7801d4c: collecting from `below` up gathered the pages it would
+    // leave out, 143 ms and 81 MB a pan of 500k pages where 20 ms and 0.5 MB
+    // planned the same pages)
+    let lacks_class = fixed.below.min(fixed.class.saturating_sub(1));
     let lacks = past.then_some((fixed.rank, std::cmp::Reverse(lacks_class), 0, 0));
-    let plan = plan_hier_as_asked(v, &attempt, &walking(fixed.rank.saturating_add(1), Some((fixed.rank, 1u64 << floor_class.min(62))), 0), 0);
+    let plan = plan_hier_as_asked(v, &attempt, &walking(fixed.rank.saturating_add(1), Some((fixed.rank, 1u64 << fixed.class.min(62))), 0), 0);
     let mut plan = fit_under(v, req, &attempt, opts, plan, fixed, false, lacks)?;
     plan.stats.fit_passes = 2;
     Some(plan)
@@ -9178,6 +9176,10 @@ mod tests {
         assert_eq!(first.stats.fit_decision.map(|d| (d.class, d.below)), Some((10, 7)));
         let again = plan_hier(&gapped, &ask(per), &ranked(first.stats.fit_decision));
         assert_eq!((again.pages.clone(), account(&again), again.stats.fit_fixed), (first.pages.clone(), account(&first), true));
+        // ... collecting UPPER from the decision's class up alone - its 1600,
+        // not the 200 it leaves out (review of 7801d4c: from `below` up a pan
+        // gathered the pages it would leave out, 81 MB of 500k)
+        assert_eq!(again.stats.fit_rank_bytes.first(), Some(&per));
     }
 
     #[test]

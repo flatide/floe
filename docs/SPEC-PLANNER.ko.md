@@ -838,9 +838,13 @@
       그 plane의 100페이지가 빠졌다고 했다.
     - 15c464d 리뷰 수정(0.12.320, renderd 0.12.295): 결정이 그 plane에서 처음 뺀 크기 등급(`FixedFit::below`)을 지닌다.
       다시 적용할 때 남긴 페이지의 등급과 처음 뺀 등급 사이가 비어 있어도 같은 경계를 말한다(종전: 같은 뷰가 처음
-      `none below x5.12`, 다시 `x20.5` — 결정의 등급 − 1을 썼다). 뺀 페이지로 끝난 결정은 그 등급부터 다시 모아 같은
-      페이지가 경계가 되고, 자기 등급에서 끝난 결정(`short`: 하한 아래는 모으지 않았다)은 결정의 등급부터 모으고 경계는
-      `below`다. 크기 순(킬 스위치)에서는 `below`가 늘 `u32::MAX`라 종전과 같다.
+      `none below x5.12`, 다시 `x20.5` — 결정의 등급 − 1을 썼다). 크기 순(킬 스위치)에서는 `below`가 늘 `u32::MAX`라
+      종전과 같다.
+    - 7801d4c 리뷰 수정(0.12.321, renderd 0.12.296): `below`는 표시에만 쓴다. 다시 적용하는 계획은 그 plane을 늘 결정의
+      등급부터 모은다. 0.12.320은 뺀 페이지로 끝난 결정을 `below`부터 모아 같은 페이지로 경계를 잡았다. 그런데 그
+      계획에는 수집 상한이 없어 버릴 페이지까지 모았다(리뷰: 50만 페이지 합성의 같은 배율 팬에서 계획 143 ms, 계획 중
+      힙 81 MB; 결정의 등급부터면 20 ms, 0.47 MB, 고른 페이지는 같다). 경계는 결정의 등급 아래에서 `below`(그 등급
+      안에서 끝난 결정은 등급 − 1)로 말한다.
   - 단위 vfs `the_budget_fit_keeps_the_top_plane_first`, `a_plane_past_the_ladders_reach_is_left_out_and_the_planes_above_kept_whole`,
     `a_page_two_working_cells_hold_counts_once_against_the_planes_above`,
     `a_decision_applied_again_says_what_its_plane_lacks`; 게이트 `fit_budget`의 `top_first_checks`(SPEC-VALIDATION).
