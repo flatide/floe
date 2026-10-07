@@ -707,7 +707,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
   - 단위 vfs `the_budget_fit_keeps_the_top_plane_first`(예산별로 위 plane부터 완전·솎음·빠짐, 걷기가 닿지 않는 plane을
     수집하지 않음, 기억한 결정의 재적용·통째로 듦·다시 결정, 맨 위 plane만 홀로 사다리, 순위 없으면 종전 순서),
     `a_plane_past_the_ladders_reach_is_left_out_and_the_planes_above_kept_whole`(사다리 끝에서도 넘치는 plane은 빠지고
-    결정은 그 위 plane들까지, 다시 적용해도 같음).
+    결정은 그 위 plane들까지, 다시 적용해도 같음), 0.12.319(777ee08 리뷰)
+    `a_page_two_working_cells_hold_counts_once_against_the_planes_above`(두 깊이에 놓인 셀의 페이지를 한 번만 세어 예산이
+    담는 프레임은 네 페이지 전부, 세 페이지 예산은 위 plane만이고 결정은 "전부"가 아님 — 두 번 세면 실패),
+    `a_decision_applied_again_says_what_its_plane_lacks`(아래 plane의 바닥 하한, 맨 위 plane의 올린 컷으로 내린 결정을
+    다시 적용해도 페이지와 상태 — 온전·잘림·빠짐 레이어 수, `fit_none_pct`, `fit_pct` — 가 같음; `lacks`를 빼면 실패).
 - `representatives`(tools/validate_representatives.py, 약 10초; `render`·`indexer`
   별칭에 포함): design.ovr 추가 생성이 캐시를 보존하는지, depth 0 제외·kill switch·
   손상 파일 폴백, 그리고 결합 인덱스 실행에서 OVR 생성이 실패해도(`--kill-at

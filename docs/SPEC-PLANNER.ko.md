@@ -828,8 +828,17 @@
   - 사다리 끝에서도 `FIT_OVERSHOOT` 예산을 넘는 plane은 빠지고 그 위는 완전하다. 이때 결정은 "전부"가 아니라 그 위
     plane들까지다(`thin_to_budget`의 `short`: 계획이 프레임보다 모자란 지점; 바닥 하한으로 다시 계획한 plane이 예산에 꼭
     맞을 때도 같다).
-  - 단위 vfs `the_budget_fit_keeps_the_top_plane_first`, `a_plane_past_the_ladders_reach_is_left_out_and_the_planes_above_kept_whole`;
-    게이트 `fit_budget`의 `top_first_checks`(SPEC-VALIDATION).
+  - 777ee08 리뷰 수정(0.12.319, renderd 0.12.294):
+    - 순위별 비용은 페이지마다 한 번만 센다. 같은 셀이 두 깊이에 놓이면 같은 페이지를 지닌 작업 셀이 둘이다. 이를 두 번
+      세어(예산 17,152바이트에 25,728) 예산이 통째로 담는 프레임에서 아래 plane을 떨궜고 결정은 "전부"였다.
+    - 걷기가 plane을 떨군 계획의 결정은 어떤 경우에도 "전부"가 아니다(`short`).
+    - 기억한 결정을 다시 적용할 때, 결정의 plane을 그 등급부터(바닥 하한, 또는 맨 위 plane의 올린 컷) 계획하면 결정 밖의
+      페이지를 아예 수집하지 않는다. 요청 그대로의 패스가 그 plane을 혼자 `FIT_OVERSHOOT` 예산 넘게 떨궜거나 결정 밖
+      페이지를 지녔으면, 그 plane은 "잘림"이다(`fit_under`의 `lacks`). 종전엔 `top 2 whole`이라 했는데 결정한 프레임은
+      그 plane의 100페이지가 빠졌다고 했다.
+  - 단위 vfs `the_budget_fit_keeps_the_top_plane_first`, `a_plane_past_the_ladders_reach_is_left_out_and_the_planes_above_kept_whole`,
+    `a_page_two_working_cells_hold_counts_once_against_the_planes_above`,
+    `a_decision_applied_again_says_what_its_plane_lacks`; 게이트 `fit_budget`의 `top_first_checks`(SPEC-VALIDATION).
 - 한계: 솎는 단위가 페이지라 밀집 영역이 페이지 크기의 조각으로 빈다. 인스턴스가 공유하는
   페이지는 모든 인스턴스에서 같이 빠진다. 접두사가 끝난 등급 아래는 표본도 남지 않는다
   (0.12.166은 모든 등급에 표본을 남겼지만 확대 시 포함 관계를 지킬 수 없었다). 추정이 실측보다

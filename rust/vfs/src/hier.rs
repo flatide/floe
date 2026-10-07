@@ -2556,6 +2556,9 @@ fn plan_hier_ranked(v: &Ovm, req: &ViewReq, opts: &HierOpts) -> HierPlan {
             }
         }
     }
+    // a plan whose planes were left out from one on lacks them, whatever its
+    // pages come to: its decision is never everything (review of 777ee08)
+    let short = short.or_else(|| plan.stats.fit_rank_live.map(|live| (live, std::cmp::Reverse(u32::MAX), 0, 0)));
     if !thin_to_budget(v, opts, &mut plan, fit_key_of(req, opts), req.cut_dbu, budget, short) {
         // not even the top plane's first page fits: flagged, as plan_hier_thinned
         plan.stats.fit_over = true;
@@ -2606,13 +2609,27 @@ fn plan_hier_fixed_ranked(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedF
     let mut attempt = req.clone();
     attempt.cut_dbu = fixed.cut_dbu.max(req.cut_dbu);
     let holds = attempt.cut_dbu == req.cut_dbu && asked.stats.fit_rank_live.is_none_or(|live| live > fixed.rank);
-    let plan = if holds {
-        asked
-    } else {
-        plan_hier_as_asked(v, &attempt, &walking(fixed.rank.saturating_add(1), Some((fixed.rank, 1u64 << fixed.class.min(62))), 0), 0)
-    };
-    let mut plan = fit_under(v, req, &attempt, opts, plan, fixed, false)?;
-    plan.stats.fit_passes = 1 + u32::from(!holds);
+    if holds {
+        let mut plan = fit_under(v, req, &attempt, opts, asked, fixed, false, None)?;
+        plan.stats.fit_passes = 1;
+        return Some(plan);
+    }
+    // the decision's plane has pages past it this plan will not collect
+    // (under its floor or the raised cut) when the frame as asked dropped
+    // that plane alone past FIT_OVERSHOOT budgets or holds such pages: it is
+    // short there, not whole (review of 777ee08: `top 2 whole` where the
+    // decision's frame said a hundred pages of it were left out)
+    let key = fit_key_of(req, opts);
+    let past = asked.stats.fit_rank_over == Some(fixed.rank)
+        || asked.pages.iter().any(|&pi| {
+            let p = v.page(pi);
+            let rank = page_rank(opts, &p);
+            rank == fixed.rank && fit_priority(&p, key, pi, rank) > fixed.threshold()
+        });
+    let lacks = past.then_some((fixed.rank, std::cmp::Reverse(fixed.class.saturating_sub(1)), 0, 0));
+    let plan = plan_hier_as_asked(v, &attempt, &walking(fixed.rank.saturating_add(1), Some((fixed.rank, 1u64 << fixed.class.min(62))), 0), 0);
+    let mut plan = fit_under(v, req, &attempt, opts, plan, fixed, false, lacks)?;
+    plan.stats.fit_passes = 2;
     Some(plan)
 }
 
@@ -2688,7 +2705,7 @@ pub fn fit_planned(v: &Ovm, req: &ViewReq, opts: &HierOpts, plan: HierPlan) -> O
         if fixed.cut_dbu > req.cut_dbu {
             return None;
         }
-        if let Some(fitted) = fit_under(v, req, req, opts, plan.clone(), fixed, true) {
+        if let Some(fitted) = fit_under(v, req, req, opts, plan.clone(), fixed, true, None) {
             return Some(fitted);
         }
     }
@@ -3034,7 +3051,7 @@ fn page_units(p: &floe_ovm::PageV, ppd: f64, bright: bool) -> u64 {
 /// fit_at_cut's pages
 fn fit_at_cut_pages(v: &Ovm, req: &ViewReq, opts: &HierOpts, mut plan: HierPlan) -> HierPlan {
     if let Some(fixed) = opts.fixed_fit.filter(|fixed| fixed.cut_dbu == req.cut_dbu) {
-        if let Some(fitted) = fit_under(v, req, req, opts, plan.clone(), fixed, true) {
+        if let Some(fitted) = fit_under(v, req, req, opts, plan.clone(), fixed, true, None) {
             return fitted;
         }
     }
@@ -3253,14 +3270,15 @@ fn plan_hier_fixed(v: &Ovm, req: &ViewReq, opts: &HierOpts, fixed: FixedFit) -> 
     if plan.stats.fit_over {
         return None;
     }
-    fit_under(v, req, &attempt, opts, plan, fixed, true)
+    fit_under(v, req, &attempt, opts, plan, fixed, true, None)
 }
 
 /// plan_hier_fixed on a complete plan at the decision's cut (`attempt`):
 /// held whole when the budget holds it at the asked cut, else the pages the
 /// decision keeps (and those the frame holds already); None when those do
 /// not fit the budget - the fit is decided anew.
-fn fit_under(v: &Ovm, req: &ViewReq, attempt: &ViewReq, opts: &HierOpts, mut plan: HierPlan, fixed: FixedFit, complete: bool) -> Option<HierPlan> {
+#[allow(clippy::too_many_arguments)]
+fn fit_under(v: &Ovm, req: &ViewReq, attempt: &ViewReq, opts: &HierOpts, mut plan: HierPlan, fixed: FixedFit, complete: bool, lacks: Option<FitPrio>) -> Option<HierPlan> {
     let whole = |mut plan: HierPlan, bytes: u64, passes: u32| {
         plan.stats.fit_decision = Some(FixedFit::everything(req.cut_dbu));
         plan.stats.fit_whole = true;
@@ -3293,12 +3311,13 @@ fn fit_under(v: &Ovm, req: &ViewReq, attempt: &ViewReq, opts: &HierOpts, mut pla
     plan.stats.fit_passes = 1;
     plan.stats.fit_bytes = bytes;
     // where the pages kept end: the decision's class, or top plane first
-    // the first page left out (thin_to_budget's account) - past the
-    // decision's plane when that is whole (the planes under it were not
-    // collected: plan_hier_fixed_ranked)
+    // the first page left out (thin_to_budget's account) - or where the plan
+    // lacks pages it did not collect (`lacks`), or past the decision's plane
+    // when that is whole (the planes under it were not collected:
+    // plan_hier_fixed_ranked)
     let edge = if opts.fit_rank.is_some() {
         let first_out = prio.iter().zip(&keep).filter(|(_, kept)| !**kept).map(|(p, _)| *p).min();
-        first_out.unwrap_or((threshold.0.saturating_add(1), std::cmp::Reverse(0), 0, 0))
+        first_out.or(lacks).unwrap_or((threshold.0.saturating_add(1), std::cmp::Reverse(0), 0, 0))
     } else {
         threshold
     };
@@ -3853,8 +3872,12 @@ struct RankState {
     walk: RankWalk,
     key: FitKey,
     /// per rank the estimated decoded memory of its pages collected (those
-    /// that cost); a rank past the table's in the last slot
+    /// that cost), each page once - a cell placed at two depths is two
+    /// working cells holding the same pages (review of 777ee08: counted
+    /// twice, a lower plane was dropped from a frame the budget held whole);
+    /// a rank past the table's in the last slot
     bytes: Vec<u64>,
+    counted: FxSet<u32>,
     /// the rank that alone held past FIT_OVERSHOOT budgets with room left
     /// above it (HierStats::fit_rank_over)
     over: Option<u16>,
@@ -3864,7 +3887,7 @@ impl RankState {
     fn new(opts: &HierOpts, req: &ViewReq) -> RankState {
         let of = opts.fit_rank.clone().unwrap_or_else(|| Arc::from(Vec::new()));
         let ranks = of.iter().filter(|&&r| r != u16::MAX).map(|&r| r as usize + 1).max().unwrap_or(0);
-        RankState { of, walk: opts.rank_walk, key: fit_key_of(req, opts), bytes: vec![0; ranks + 1], over: None }
+        RankState { of, walk: opts.rank_walk, key: fit_key_of(req, opts), bytes: vec![0; ranks + 1], counted: FxSet::default(), over: None }
     }
 
     fn on(&self) -> bool {
@@ -3890,8 +3913,11 @@ impl RankState {
         rank < self.walk.live && !self.walk.floor.is_some_and(|(floor_rank, key)| floor_rank == rank && fit_key(p, self.key) < key)
     }
 
-    /// a collected page of `layer` that costs `bytes`
-    fn add(&mut self, layer: u32, bytes: u64) {
+    /// a collected page `page` of `layer` that costs `bytes` - once
+    fn add(&mut self, page: u32, layer: u32, bytes: u64) {
+        if !self.counted.insert(page) {
+            return;
+        }
         let slot = (self.rank(layer) as usize).min(self.bytes.len() - 1);
         self.bytes[slot] = self.bytes[slot].saturating_add(bytes);
     }
@@ -4569,7 +4595,7 @@ impl<'a> Hier<'a> {
                 let bytes = page_memory(page.records, page.usize_);
                 self.st.fit_bytes = self.st.fit_bytes.saturating_add(bytes);
                 if self.rank.on() {
-                    self.rank.add(page.layer_idx, bytes);
+                    self.rank.add(p, page.layer_idx, bytes);
                 }
             }
         }
@@ -9027,6 +9053,93 @@ mod tests {
         assert_eq!((decision.rank, decision.class, decision == FixedFit::everything(50)), (0, 0, false));
         let again = plan_hier(&chip, &ask, &ranked(Some(decision)));
         assert_eq!((again.pages.clone(), again.stats.fit_fixed, again.stats.fit_redecided, again.stats.fit_layers_out), (left.pages.clone(), true, false, 1));
+    }
+
+    #[test]
+    fn a_page_two_working_cells_hold_counts_once_against_the_planes_above() {
+        // review of 777ee08: SHARED@2 (the top plane) placed at two depths -
+        // under WRAP at the depth's end (r 0) and under TOP folded to full -
+        // is two working cells holding its three pages; the ranks counted
+        // them twice (25,728 of a 17,152-byte budget) and dropped LOW, the
+        // plane under it, from a frame the budget held whole (four pages),
+        // recording everything for it
+        let chip = fixture(
+            &[
+                FCell { name: "LOW", pages: vec![(bx(0, 0, 200, 200), 200, 200)], places: vec![] },
+                FCell { name: "SHARED@2", pages: (0..3).map(|i| (bx(i * 400, 0, i * 400 + 200, 200), 200, 200)).collect(), places: vec![(0, 0, 1000, 0, false, Rep::One)] },
+                FCell { name: "WRAP", pages: vec![], places: vec![(1, 0, 0, 0, false, Rep::One)] },
+                FCell { name: "TOP", pages: vec![], places: vec![(2, 0, 0, 0, false, Rep::One), (1, 10_000, 0, 0, false, Rep::One)] },
+            ],
+            3,
+        );
+        let per = page_memory(1, 0);
+        let mut req = rq(bx(-10, -10, 20_000, 20_000), 50, 2);
+        req.px_per_dbu = 0.02;
+        req.decode_budget = 4 * per;
+        req.shape_cut_max = true;
+        req.frames = false;
+        req.page_wash = false;
+        req.lod_swap = false;
+        let ranked = |fixed: Option<FixedFit>| HierOpts { fit_rank: Some(Arc::from(vec![1u16, 0])), fixed_fit: fixed, ..HierOpts::default() };
+        let plan = plan_hier(&chip, &req, &ranked(None));
+        assert!(plan.wcells.iter().filter(|w| w.key.0 == 1).count() == 2, "the fixture's shared cell is two working cells");
+        assert_eq!((plan.pages.clone(), plan.stats.fit_whole, plan.stats.fit_decision), (vec![0, 1, 2, 3], true, Some(FixedFit::everything(50))));
+        let again = plan_hier(&chip, &req, &ranked(plan.stats.fit_decision));
+        assert_eq!((again.pages.clone(), again.stats.fit_whole), (vec![0, 1, 2, 3], true));
+        // three pages of budget: SHARED whole, LOW left out - a decision that
+        // keeps SHARED, not everything
+        req.decode_budget = 3 * per;
+        let three = plan_hier(&chip, &req, &ranked(None));
+        assert_eq!((three.pages.clone(), three.stats.fit_layers_whole, three.stats.fit_layers_out), (vec![1, 2, 3], 1, 1));
+        assert!(three.stats.fit_decision.is_some_and(|d| d.rank == 0), "{:?}", three.stats.fit_decision);
+    }
+
+    #[test]
+    fn a_decision_applied_again_says_what_its_plane_lacks() {
+        // review of 777ee08: a decision that keeps a plane from a class up
+        // (its ladder's floor, or the top plane's raised cut) applied again
+        // planned that plane from the class up - none of its pages past the
+        // decision collected - and called it whole: `top 2 whole` where the
+        // deciding frame said a hundred of its pages were left out. Fixture:
+        // UPPER@2 (L2) and LOWER (L1), each one page of 1600 and a hundred of
+        // 200 or two of 1600, under a budget of three or one
+        let make = |upper: Vec<(BBox, u64, u64)>, lower: Vec<(BBox, u64, u64)>| {
+            fixture(
+                &[
+                    FCell { name: "LOWER", pages: lower, places: vec![] },
+                    FCell { name: "UPPER@2", pages: upper, places: vec![] },
+                    FCell { name: "TOP", pages: vec![], places: vec![(0, 0, 0, 0, false, Rep::One), (1, 0, 100_000, 0, false, Rep::One)] },
+                ],
+                2,
+            )
+        };
+        let many = || -> Vec<(BBox, u64, u64)> {
+            std::iter::once((bx(0, 0, 1600, 1600), 1600, 1600)).chain((0..100).map(|i| (bx(i * 400, 3000, i * 400 + 200, 3200), 200, 200))).collect()
+        };
+        let two = || -> Vec<(BBox, u64, u64)> { (0..2).map(|i| (bx(i * 3200, 0, i * 3200 + 1600, 1600), 1600, 1600)).collect() };
+        let per = page_memory(1, 0);
+        let ranks: Arc<[u16]> = Arc::from(vec![1u16, 0]);
+        let ranked = |fixed: Option<FixedFit>| HierOpts { fit_rank: Some(ranks.clone()), fixed_fit: fixed, ..HierOpts::default() };
+        let account = |p: &HierPlan| (p.stats.fit_layers_whole, p.stats.fit_layer_edge, p.stats.fit_layers_out, p.stats.fit_none_pct, p.stats.fit_pct);
+        let ask = |budget: u64| {
+            let mut r = rq(bx(-10, -10, 2_000_000, 2_000_000), 50, u32::MAX);
+            r.px_per_dbu = 0.02;
+            r.decode_budget = budget;
+            r
+        };
+        // the lower plane laddered to 256: UPPER whole, LOWER's 1600 alone
+        // (its hundred of 200 under the floor), the budget held exactly
+        let lower = make(two(), many());
+        let first = plan_hier(&lower, &ask(3 * per), &ranked(None));
+        assert_eq!((first.pages.len(), account(&first)), (3, (1, 1, 0, 512, 100)));
+        let again = plan_hier(&lower, &ask(3 * per), &ranked(first.stats.fit_decision));
+        assert_eq!((again.pages.clone(), account(&again), again.stats.fit_fixed), (first.pages.clone(), account(&first), true));
+        // the top plane laddered: its cut raised to 256, LOWER left out
+        let top = make(many(), two());
+        let first = plan_hier(&top, &ask(per), &ranked(None));
+        assert_eq!((first.pages.len(), account(&first)), (1, (0, 2, 1, 512, 512)));
+        let again = plan_hier(&top, &ask(per), &ranked(first.stats.fit_decision));
+        assert_eq!((again.pages.clone(), account(&again), again.stats.fit_fixed), (first.pages.clone(), account(&first), true));
     }
 
     #[test]
