@@ -710,14 +710,20 @@ def fmt_count(n):
     return str(int(n))
 
 
-def occ_note(res):
+def occ_note(res, full=False):
     """Pass 2 drawn from the occupancy density (FLOE_RUST_DENSITY_OCC=on,
-    design.ovs; 2026-10-06): its cell and the layers it held, as the status
-    line says them; "" when the plans drew it."""
+    design.ovs; 2026-10-06): its cell, the layers it held and those this
+    frame made, as the status line says them - the log line (`full`) with
+    what its cache holds (2026-10-07); "" when the plans drew it."""
     p2 = res.get("density_plan2") or {}
     if not p2.get("occ_layers"):
         return ""
-    return "%g um cells, %d layers" % (p2.get("occ_cell_nm", 0) / 1000.0, p2["occ_layers"])
+    note = "%g um cells, %d layers" % (p2.get("occ_cell_nm", 0) / 1000.0, p2["occ_layers"])
+    if p2.get("occ_made"):
+        note += ", %d made" % p2["occ_made"]
+    if full and p2.get("occ_cache_kb"):
+        note += "; cache %.1f MB" % (p2["occ_cache_kb"] / 1024.0)
+    return note
 
 
 def perf_status(res, depth_note=""):
@@ -1112,7 +1118,7 @@ def perf_status(res, depth_note=""):
         # cell and layers in place of the plans' breakdown
         occ = occ_note(res)
         if us and occ:
-            parts.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ))
+            parts.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ_note(res, full=True)))
         elif us:
             plan = "pass 2 plan %d ms" % round(
                 us.get("plan2_us", 0) / 1000)

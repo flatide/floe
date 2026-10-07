@@ -186,8 +186,10 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  "mask_tests", "mask_pruned", "mask_fallbacks", "stages",
                  # pass 2 drawn from the occupancy density (design.ovs,
                  # FLOE_RUST_DENSITY_OCC=on; 2026-10-06): the layers it held,
-                 # the cell it drew at in nm (0, 0: the plans drew it)
-                 "occ_layers", "occ_cell_nm")
+                 # the cell it drew at in nm (0, 0: the plans drew it); the
+                 # layers this frame made and what its cache holds, KiB
+                 # (2026-10-07)
+                 "occ_layers", "occ_cell_nm", "occ_made", "occ_cache_kb")
 
 
 def _viewport_px(job, bbox):
@@ -223,9 +225,9 @@ def _wire_counts(value, names):
 
 
 def _density_plan2(value):
-    """Pass-2 diagnostics; older renderers omit the occupancy density's,
-    the mask and/or the pattern fields."""
-    for size in (len(DENSITY_PLAN2), 44, 40, 39):
+    """Pass-2 diagnostics; older renderers omit the occupancy density's
+    (all four, or its cache's two), the mask and/or the pattern fields."""
+    for size in (len(DENSITY_PLAN2), 46, 44, 40, 39):
         counts = _wire_counts(value, DENSITY_PLAN2[:size])
         if counts is not None:
             counts.update(dict.fromkeys(DENSITY_PLAN2[size:], 0))

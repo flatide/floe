@@ -4684,6 +4684,14 @@ impl BlockDemand<'_> {
         self.density_plane
     }
 
+    /// Whether a pixel is left that a density plane may take - the top
+    /// planes' or the others'; none: pass 1 covered the frame and pass 2 has
+    /// nothing to draw (the occupancy density asks before it makes its layers:
+    /// review 2026-10-07, a covered frame made them for nothing)
+    pub fn has_density_candidate(&self) -> bool {
+        self.tiles.iter().any(|tile| tile.band.has_density_candidate(true) || tile.band.has_density_candidate(false))
+    }
+
     /// Exact density eligibility in frame coordinates. Each row holds
     /// ceil(width / 64) words; set bits are pixels a density source may
     /// light. Tile padding and pattern-forbidden slots are never exported.

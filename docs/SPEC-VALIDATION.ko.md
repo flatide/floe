@@ -173,6 +173,14 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - depth 0: TOP 자신의 정사각형만 같은 수로 남고 한 단계 아래 DOT은 없다(`occ_layers` 1).
     - 0.25 µm/px(셀 4 px > `FLOE_RUST_DENSITY_OCC_PX` 2), `FLOE_RUST_DENSITY_OCC_MB=0.0001`,
       design.ovs가 없는 캐시는 계획 경로로 그리며, 스위치를 끈 프레임과 바이트 동일하다.
+  - `density_stack`의 `occ_cost_checks`(0.12.312, 비용 리뷰):
+    - 3/0 상자로 다 덮인 70×70 px 뷰: `occ_made` 0, `occ_layers` 0, 프레임이 walk와 바이트 동일하다.
+    - `FLOE_RUST_DENSITY_OCC_MB`를 레벨 0 레이어 하나의 1.5배로 둔다. 같은 뷰에서 1/0, 3/0, 1/0을 차례로 켠다.
+      - 기대: `occ_made`가 [1, 1, 1](첫 레이어가 둘째 때 밀려나 다시 만들어짐), `occ_cache_kb`가 매번 상한 안이다.
+      - 프레임은 기본 상한의 프레임과 바이트 동일하다.
+  - 단위: render-core `the_layers_stop_where_a_newer_frame_asks`(1·3스레드, 멈춤 신호가 있으면 아무것도 만들지 않음).
+  - `rust_renderer`: `density_plan2` 48개 값(…/occ_layers/occ_cell_nm/occ_made/occ_cache_kb). 46개 응답은 뒤의 둘을
+    0으로 읽고, 47개는 거절한다. 상태줄은 `…, 12 made)`이고 로그 줄은 `…, 12 made; cache 84.0 MB)`이다.
   - `density_stack`의 `occ_review_checks`(0.12.311, b4ca42e 리뷰 재현):
     - 픽스처: 1/0에 3.5 µm 사각형 40×20(8 µm 간격), 2/0에 0.4 × 32 µm 선 32개(2 µm 간격). 따로 0.4 µm 정사각형
       하나뿐인 TOP. `--um 1`(작은 TOP은 자동)로 만든다.

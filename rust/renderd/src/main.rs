@@ -1231,7 +1231,7 @@ struct FramePixels {
     /// the nodes that counted what their placements hold (HierOpts::
     /// dot_node_sample, 2026-10-05); then whether the density draws an
     /// opaque pattern (1) instead of accumulated brightness (0)
-    density_plan2: Option<[u64; 46]>,
+    density_plan2: Option<[u64; 48]>,
 }
 
 fn render_worker(
@@ -3887,7 +3887,7 @@ fn run_render_attempt(
         let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 46]> = None;
+        let mut density_plan2: Option<[u64; 48]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -4713,7 +4713,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 46]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 48]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4754,7 +4754,7 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 46];
+    let mut plan2 = [0u64; 48];
     plan2[22] = reserve_bytes >> 20;
     // the dots' gain past the fit view, in thousandths (density_zoom_gain)
     plan2[31] = (dot_gain * 1000.0).round() as u64;
@@ -4824,17 +4824,30 @@ fn render_density_frame(
                         && shape_cut_mode() == ShapeCut::Larger
                         && upper_cut > 0
                     {
+                        // pass 1 covered the frame: nothing for pass 2, its
+                        // layers not made (review 2026-10-07: a covered frame
+                        // made them for nothing - 78 ms, 240 ms at 8 um cells)
+                        if !demand.has_density_candidate() {
+                            return Ok(None);
+                        }
                         let occ_started = Instant::now();
                         let px_dbu = ((command.view[2] - command.view[0]) / f64::from(command.width))
                             .max((command.view[3] - command.view[1]) / f64::from(command.height));
                         let ids: Vec<u32> = styled.layers.iter().map(|layer| layer.layer_idx).collect();
                         let depth = (command.depth < FULL_DEPTH).then_some(command.depth);
-                        if let Some(occ) = cache.occ_density(&ids, px_dbu, upper_cut as f64, density_occ_max_px(), density_occ_cap_bytes(), depth) {
+                        // a newer frame stops the layers being made (those
+                        // made kept for it)
+                        let stale = || cancellation.is_cancelled(command.generation);
+                        let made = cache.occ_density(&ids, px_dbu, upper_cut as f64, density_occ_max_px(), density_occ_cap_bytes(), depth, &stale);
+                        check_generation(cancellation, command.generation)?;
+                        if let Some(occ) = made {
                             let built = elapsed_us(occ_started);
                             times[0] += built;
                             plan2[1] += built;
                             plan2[44] = occ.layers_present() as u64;
                             plan2[45] = (occ.cell_um * 1000.0).round() as u64;
+                            plan2[46] = u64::from(occ.made);
+                            plan2[47] = occ.held_bytes >> 10;
                             return Ok(Some(floe_render_core::DensityScenes { top: None, others: None, occ: Some(occ) }));
                         }
                     }

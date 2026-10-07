@@ -2977,6 +2977,7 @@ def occ_density_checks(temp):
     finally:
         for w in workers.values():
             w.stop()
+    occ_cost_checks(src, ice, env, occ)
     # no design.ovs: the plans, byte for byte the frame without the switch
     (ice / 'design.ovs').unlink()
     bare = worker(src, occ)
@@ -2987,6 +2988,58 @@ def occ_density_checks(temp):
         bare.stop()
     print('density stack: no design.ovs - the walk\'s frame; floe-index ovs refuses a cache without design.ovb, builds the same bytes again')
     occ_review_checks(temp, env, occ)
+
+
+def occ_cost_checks(src, ice, env, occ):
+    """What the occupancy density costs (review 2026-10-07): a frame pass 1
+    covers - the 3/0 box filling the view - makes no layer (density_plan2
+    occ_made 0, the walk's frame byte for byte); the layers turned on and off
+    at one zoom keep the cache within FLOE_RUST_DENSITY_OCC_MB - one layer's
+    worth and a half: 1/0, 3/0, 1/0 each made again (the first let go for the
+    second), the cache at most a layer, the frames those the default cap
+    draws."""
+    import struct
+    head = (ice / 'design.ovs').read_bytes()[:80]
+    w, h = struct.unpack_from('<II', head, 64)
+    layer = -(-w // 8) * (h + -(-h // 8))
+    cap = layer * 3 // 2
+    workers = {'walk': worker(src, env), 'occ': worker(src, occ),
+               'capped': worker(src, dict(occ, FLOE_RUST_DENSITY_OCC_MB=repr(cap / 1048576.0)))}
+
+    def view(w, gen, box_um, size, visible):
+        dbu = float(w.cache.meta['dbu'])
+        w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in box_um), 'view': None,
+                  'w': size[0], 'h': size[1], 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                  'abstract': False, 'visible': list(visible), 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+            assert res.get('kind') != 'error', res
+            if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                return bytes(res.pop('rgba')), res
+        raise AssertionError('occupancy cost frame timeout')
+
+    try:
+        covered = ((225.0, 25.0, 295.0, 95.0), (70, 70), (ALONE,))
+        walked, _ = view(workers['walk'], 1, *covered)
+        drawn, res = view(workers['occ'], 1, *covered)
+        p2 = res['density_plan2']
+        assert drawn == walked and p2['occ_made'] == 0 and p2['occ_layers'] == 0, p2
+        whole = ((0.0, 0.0, 400.0, 200.0), (400, 200))
+        made, held = [], []
+        for gen, visible in enumerate(((LOW,), (ALONE,), (LOW,)), 2):
+            free, _ = view(workers['occ'], gen, *whole, visible)
+            capped, res = view(workers['capped'], gen, *whole, visible)
+            p2 = res['density_plan2']
+            assert capped == free and p2['occ_layers'] == 1, (visible, p2)
+            made.append(p2['occ_made'])
+            held.append(p2['occ_cache_kb'])
+        assert made == [1, 1, 1] and all(kb * 1024 <= cap for kb in held), (made, held, cap)
+    finally:
+        for w in workers.values():
+            w.stop()
+    print('density stack: occupancy density - a covered frame makes no layer (the walk\'s frame); layers turned on and off '
+          'keep its cache within the cap (%d B: made %s, held %s KiB)' % (cap, made, held))
 
 
 def ovs_table(path):

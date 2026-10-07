@@ -69,6 +69,10 @@ pub struct OccDensity {
     pub layers: Vec<Option<Arc<OccLayer>>>,
     /// the level's cell, um (the frame reports it)
     pub cell_um: f64,
+    /// the layers this frame made (the rest the cache held), and what the
+    /// cache holds after it, bytes (the frame reports them)
+    pub made: u32,
+    pub held_bytes: u64,
 }
 
 impl OccDensity {
@@ -115,6 +119,43 @@ pub fn choose_level(cell_dbu: i64, n_levels: u32, px_dbu: f64, cut_dbu: f64, max
     let first = (0..n_levels).find(|&lv| cells * cell(lv) >= cut_dbu)?;
     let widest = (max_cell_px * px_dbu).max(2.0 * cut_dbu / cells);
     (first..n_levels).take_while(|&lv| cell(lv) <= widest).find(|&lv| bytes_at(lv) <= cap)
+}
+
+/// The layers `ids` at `lv` for `depth`, made on `threads` threads, each
+/// taking the next layer as it is done; they stop taking where `stop` says
+/// so - a newer frame (review 2026-10-07: the combine ran to its end under a
+/// zoom): (the layers made, whether it stopped short).
+pub(crate) fn make_layers(
+    ovs: &OvsFile,
+    ids: &[u32],
+    lv: usize,
+    depth: Option<u32>,
+    threads: usize,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> (Vec<(u32, Result<Option<Arc<OccLayer>>, String>)>, bool) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let (next, stopped) = (AtomicUsize::new(0), AtomicBool::new(false));
+    let work = || {
+        let mut out = Vec::new();
+        loop {
+            if stop() {
+                stopped.store(true, Ordering::Relaxed);
+                break;
+            }
+            let Some(&id) = ids.get(next.fetch_add(1, Ordering::Relaxed)) else { break };
+            out.push((id, combine(ovs, id as usize, lv, depth)));
+        }
+        out
+    };
+    let made = if threads <= 1 {
+        work()
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads).map(|_| scope.spawn(&work)).collect();
+            handles.into_iter().flat_map(|handle| handle.join().expect("occupancy density thread")).collect()
+        })
+    };
+    (made, stopped.load(Ordering::Relaxed))
 }
 
 /// One layer's OccLayer at `lv` for `depth` (None: every plane): the OR of
@@ -244,6 +285,17 @@ mod tests {
         let blobs = vec![vec![(0, vec![(deflate(&bits(&[(0, 8, 0, 8)])), Vec::new())]), (1, vec![(Vec::new(), Vec::new())])]];
         let empty = OvsFile::from_bytes(encode(11, 22, &g, &blobs)).unwrap();
         assert!(combine(&empty, 0, 0, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_layers_stop_where_a_newer_frame_asks() {
+        let ovs = files();
+        for threads in [1, 3] {
+            let (made, stopped) = make_layers(&ovs, &[0], 0, None, threads, &|| false);
+            assert!(!stopped && made.len() == 1 && made[0].1.as_ref().unwrap().is_some());
+            let (made, stopped) = make_layers(&ovs, &[0], 0, None, threads, &|| true);
+            assert!(stopped && made.is_empty());
+        }
     }
 
     #[test]

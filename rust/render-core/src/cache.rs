@@ -797,10 +797,15 @@ impl Cache {
     /// `cut_dbu` (crate::occ::choose_level: the finest whose cut reaches it,
     /// its cell at most `max_cell_px` pixels, its layers' grids within
     /// `cap_bytes`). The layers made are kept for the next frame at that
-    /// level and depth, those of others let go. None without design.ovs
-    /// (looked for once per open cache), one built for another index or
-    /// another version, where no level will do - or where a plane will not
-    /// read: the file is let go and the plans draw.
+    /// level and depth, those of others let go - and, where they and those
+    /// to make would pass `cap_bytes`, those this frame does not ask for
+    /// (review 2026-10-07: the cap was the frame's, the layers turned on and
+    /// off at one zoom stayed). The layers are made until `stop` (a newer
+    /// frame): None then, the ones made kept. None without design.ovs (looked
+    /// for once per open cache), one built for another index or another
+    /// version, where no level will do - or where a plane will not read: the
+    /// file is let go and the plans draw.
+    #[allow(clippy::too_many_arguments)]
     pub fn occ_density(
         &self,
         layer_ids: &[u32],
@@ -809,6 +814,7 @@ impl Cache {
         max_cell_px: f64,
         cap_bytes: u64,
         depth: Option<u32>,
+        stop: &(dyn Fn() -> bool + Sync),
     ) -> Option<std::sync::Arc<crate::occ::OccDensity>> {
         let mut slot = match self.occ_density.lock() {
             Ok(slot) => slot,
@@ -842,29 +848,18 @@ impl Cache {
             layer_ids.iter().copied().filter(|&id| (id as usize) < ovs.layers.len() && !slot.layers.contains_key(&(id, level, depth_key))).collect();
         missing.sort_unstable();
         missing.dedup();
+        // what the layers held and those to make would come to: past the
+        // cap, the ones this frame does not ask for go first
+        let per_layer = u64::from(w.div_ceil(8)) * (u64::from(h) + u64::from(h.div_ceil(8)));
+        let held: u64 = slot.layers.values().flatten().map(|layer| layer.bytes() as u64).sum();
+        if held + missing.len() as u64 * per_layer > cap_bytes {
+            let mut asked = layer_ids.to_vec();
+            asked.sort_unstable();
+            slot.layers.retain(|&(id, _, _), _| asked.binary_search(&id).is_ok());
+        }
         let threads = occ_threads().min(missing.len()).max(1);
-        type Made = Result<Option<std::sync::Arc<crate::occ::OccLayer>>, String>;
-        let made: Vec<(u32, Made)> = if threads == 1 {
-            missing.iter().map(|&id| (id, crate::occ::combine(&ovs, id as usize, level as usize, depth))).collect()
-        } else {
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        scope.spawn(|| {
-                            let mut out = Vec::new();
-                            loop {
-                                let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let Some(&id) = missing.get(at) else { break };
-                                out.push((id, crate::occ::combine(&ovs, id as usize, level as usize, depth)));
-                            }
-                            out
-                        })
-                    })
-                    .collect();
-                handles.into_iter().flat_map(|handle| handle.join().expect("occupancy density thread")).collect()
-            })
-        };
+        let (made, stopped) = crate::occ::make_layers(&ovs, &missing, level as usize, depth, threads, stop);
+        let n_made = made.len() as u32;
         for (id, layer) in made {
             match layer {
                 Ok(layer) => {
@@ -877,6 +872,9 @@ impl Cache {
                     return None;
                 }
             }
+        }
+        if stopped {
+            return None;
         }
         let mut layers: Vec<Option<std::sync::Arc<crate::occ::OccLayer>>> = vec![None; ovs.layers.len()];
         for &id in layer_ids {
@@ -893,6 +891,8 @@ impl Cache {
             h,
             layers,
             cell_um: grid.base_um() * f64::from(1u32 << level.min(31)),
+            made: n_made,
+            held_bytes: slot.layers.values().flatten().map(|layer| layer.bytes() as u64).sum(),
         }))
     }
 

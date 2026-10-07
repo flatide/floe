@@ -807,6 +807,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertIn("density: lit 620k px, pass 2 by occupancy 12 ms (16 um cells, 449 layers), 206 pages decoded", occ_brief)
         self.assertIn(", pass 2 by occupancy 12 ms (16 um cells, 449 layers), 206 pages,", occ_full)
         self.assertNotIn("pass 2 plan", occ_full + occ_brief)
+        # the layers this frame made, in both; what the cache holds, in the
+        # log line (2026-10-07)
+        made = dict(occ_res, density_plan2=dict(occ_res["density_plan2"], occ_made=12, occ_cache_kb=86016))
+        made_full, made_brief = perf_status(made)
+        self.assertIn("pass 2 by occupancy 12 ms (16 um cells, 449 layers, 12 made)", made_brief)
+        self.assertIn("pass 2 by occupancy 12 ms (16 um cells, 449 layers, 12 made; cache 84.0 MB)", made_full)
         # nor what a cell under the cut stands for: the plans' alone
         occ_bright = dict(occ_res, density_plan2=dict(occ_res["density_plan2"], bright_milli=2000, pattern=1))
         bright_full, _ = perf_status(occ_bright)
@@ -1938,7 +1944,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9/449/16000"),
                          dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9,
                               occ_layers=449, occ_cell_nm=16000))
-        for malformed in ("-", "", "1/2", legacy + "/bad", legacy + "/1/2", legacy + "/1/300/200/4/9/449"):
+        # and the layers made, the cache's KiB (2026-10-07)
+        self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9/449/16000/12/86016"),
+                         dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9,
+                              occ_layers=449, occ_cell_nm=16000, occ_made=12, occ_cache_kb=86016))
+        for malformed in ("-", "", "1/2", legacy + "/bad", legacy + "/1/2", legacy + "/1/300/200/4/9/449",
+                          legacy + "/1/300/200/4/9/449/16000/12"):
             self.assertIsNone(_density_plan2(malformed), malformed)
 
     def test_render_command_and_frame_result_match_parent_schema(self):
@@ -2178,7 +2189,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "cell_cover": 1, "cover_cells": 1500, "node_sampled": 800, "pattern": 0,
                 "mask_tests": 0, "mask_pruned": 0, "mask_fallbacks": 0, "stages": 0,
                 # an older reply: the occupancy density's fields read as 0
-                "occ_layers": 0, "occ_cell_nm": 0})
+                "occ_layers": 0, "occ_cell_nm": 0, "occ_made": 0, "occ_cache_kb": 0})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
