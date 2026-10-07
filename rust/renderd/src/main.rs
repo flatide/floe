@@ -2581,18 +2581,20 @@ fn density_stages(styled: &StyledGeometryRasterRequest) -> bool {
 }
 
 /// Pass 2 from the occupancy density (design.ovs, floe_render_core::occ;
-/// 2026-10-06): FLOE_RUST_DENSITY_OCC=on, off by default - no plan, no walk:
+/// 2026-10-06; on by default since 0.12.317, user 2026-10-07 after the field
+/// chip's 20 s pass 2 took under 0.2 s: "turn OCC on by default";
+/// FLOE_RUST_DENSITY_OCC=off, the kill switch, plans as before) - no plan, no walk:
 /// each layer present where design.ovs's cell bit is set, at the mean cover
 /// of its group. The synthetic MAIN01 1/10 at full depth: pass 2's plan
 /// 53-170 ms to none, frames about a third sooner, 75-83 % of the walk's
 /// dots; the field's full-depth view walked 25 M nodes in 20 s. A view the
-/// file cannot serve (a root, a frame not cut by the larger side, a level
+/// file cannot serve (a root without its file, a frame not cut by the larger side, a level
 /// whose cut reaches pass 1's with a cell past FLOE_RUST_DENSITY_OCC_PX
 /// pixels, layers past FLOE_RUST_DENSITY_OCC_MB, no design.ovs or one that
 /// will not read) plans as before.
 fn density_occ_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_OCC").as_deref() == Ok("on"))
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_OCC").as_deref() != Ok("off"))
 }
 
 /// The largest occupancy cell, in screen pixels, the occupancy density is
@@ -4808,7 +4810,7 @@ fn render_density_frame(
                     // its plans end at their next look, its decode is pooled
                     // under the guard, its passes check per tile
                     check_generation(cancellation, command.generation)?;
-                    // the occupancy density (FLOE_RUST_DENSITY_OCC=on):
+                    // the occupancy density (on unless FLOE_RUST_DENSITY_OCC=off):
                     // design.ovs's cell bits and mean cover stand for the
                     // plans - every density plane paints its layer from
                     // them, no walk and no decode (floe_render_core::occ)

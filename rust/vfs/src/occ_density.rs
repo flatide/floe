@@ -1,5 +1,6 @@
-//! Occupancy density (design.ovs; 2026-10-06, opt-in): what the density
-//! stack's pass 2 draws by with FLOE_RUST_DENSITY_OCC=on - no plan, no walk
+//! Occupancy density (design.ovs; 2026-10-06, drawn by default since
+//! 0.12.317): what the density stack's pass 2 draws by unless
+//! FLOE_RUST_DENSITY_OCC=off - no plan, no walk
 //! and no decode at frame time (floe_render_core::occ).
 //!
 //! User 2026-10-06: "for one pixel's dot the search goes much too far - put

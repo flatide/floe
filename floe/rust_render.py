@@ -185,7 +185,7 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  "pattern",
                  "mask_tests", "mask_pruned", "mask_fallbacks", "stages",
                  # pass 2 drawn from the occupancy density (design.ovs,
-                 # FLOE_RUST_DENSITY_OCC=on; 2026-10-06): the layers it held,
+                 # on unless FLOE_RUST_DENSITY_OCC=off; 2026-10-06): the layers it held,
                  # the cell it drew at in nm (0, 0: the plans drew it); the
                  # layers this frame made and what its cache holds, KiB
                  # (2026-10-07)

@@ -4618,8 +4618,8 @@ pub struct DensityScenes {
     pub top: Option<Arc<FrameScene>>,
     pub others: Option<Arc<FrameScene>>,
     /// pass 2 from the occupancy density instead of scenes: every density
-    /// plane paints its layer from it (crate::occ; renderd's
-    /// FLOE_RUST_DENSITY_OCC=on)
+    /// plane paints its layer from it (crate::occ; renderd's, unless
+    /// FLOE_RUST_DENSITY_OCC=off)
     pub occ: Option<Arc<crate::occ::OccDensity>>,
 }
 

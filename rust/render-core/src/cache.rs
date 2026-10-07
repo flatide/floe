@@ -488,7 +488,7 @@ pub struct Cache {
     /// mtime changes (a rename publish from --occupancy-only while the
     /// viewer is up; docs/OCCUPANCY_PLAN.ko.md §4)
     occupancy: std::sync::Mutex<OccupancySlot>,
-    /// design.ovs for the density stack's pass 2 (crate::occ, opt-in)
+    /// design.ovs for the density stack's pass 2 (crate::occ)
     occ_density: std::sync::Mutex<OccDensitySlot>,
     /// per layer index: the longest top-to-cell path (in placement
     /// levels) of any cell holding the layer's own pages - a request
@@ -842,6 +842,14 @@ impl Cache {
             });
             let file = match opened {
                 Ok(file) => Some(std::sync::Arc::new(file)),
+                // none: an index made before design.ovs came with it, or a
+                // cell without a file of its own (most - said for the top's)
+                Err(_) if !std::path::Path::new(&path).exists() => {
+                    if root.is_none() {
+                        eprintln!("[render-core] occupancy density: no {} - pass 2 plans (`floe-index ovs {}` makes it)", path, self.dir);
+                    }
+                    None
+                }
                 Err(e) => {
                     eprintln!("[render-core] occupancy density {}: none ({})", path, e);
                     None

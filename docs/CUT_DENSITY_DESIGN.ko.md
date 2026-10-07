@@ -3504,7 +3504,7 @@ occupancy 45개, jobdeck 90개, 밀도 통합 게이트와 KLayout 픽셀 대조
 아홉 번째 레이어가 채우는 사례, 중간 빈 레이어, 회전·반사 공유 셀, 중간 취소도 통과했다.
 
 
-### 10.16 점유 밀도(design.ovs)로 2패스 그리기 (opt-in, 2026-10-06)
+### 10.16 점유 밀도(design.ovs)로 2패스 그리기 (2026-10-06, 0.12.317부터 기본)
 
 **배경.** 현장의 full depth 전 레이어 뷰에서 1패스가 화면을 거의 채워도 2패스 계획이 19~20 s 걸렸다(노드
 25.0M, 읽기 15.0M). 빈 픽셀 937개만 남긴 뷰도 855 ms였다(노드 7.5M). 마스크 가지치기(§10.15)는 빈 픽셀이
@@ -3574,7 +3574,7 @@ design.ovo는 필요 없다. 탑에서 한 번 걷는다.
 - 합성 칩(부하 12)에서 진행 줄을 넣기 전과 후의 시간이 같고(150~156 s) 파일은 바이트 동일하다.
   - 걷기 줄 예: `walk: top placement 1.5M/2.8M, in H01_00004 1.3M/2.6M; 16k cells walked into, 3.0G members under the cut, 41k pages by grid, 172k decoded (119.4 s)`
 
-**그리기**(renderd `FLOE_RUST_DENSITY_OCC=on`, floe_render_core::occ):
+**그리기**(renderd, floe_render_core::occ; 0.12.317부터 기본 — `FLOE_RUST_DENSITY_OCC=off`면 계획 경로):
 - 레벨은 셀이 1 px 이하인 가장 거친 레벨이다. 없으면 셀이 `FLOE_RUST_DENSITY_OCC_PX`(기본 2) px 이하인 레벨이다.
 - 보이는 레이어의 셀 비트와 묶음 평균이 `FLOE_RUST_DENSITY_OCC_MB`(기본 256 MB)를 넘으면 2 px 안의 더 거친
   레벨을 쓰고, 그것도 넘으면 계획 경로로 간다. 20 mm 칩·16 µm 셀이면 레이어당 약 0.2 MB다.
@@ -3685,8 +3685,16 @@ design.ovs가 탑 기준이라 root 뷰는 계획 경로로 갔다. 사용자 �
   - 잡덱 소스: `floe2 index deck.jb`가 늘 `--no-ovs`를 넘긴다. 덱 화면은 design.ovs를 읽지 않고, 덱 소스는 수백 개일 수 있다.
     소스를 따로 열어 쓰려면 `floe-index ovs`로 추가한다.
 - 재색인: design.ovs, 그 tmp, 셀 파일(design.ovs.<n>과 tmp)도 다른 출력과 함께 먼저 지운다.
-- 이미 있는 캐시는 다시 색인하거나 `floe-index ovs`를 돌려야 생긴다. 그리기는 여전히 `FLOE_RUST_DENSITY_OCC=on`일 때만 쓴다.
+- 이미 있는 캐시는 다시 색인하거나 `floe-index ovs`를 돌려야 생긴다. 그리기는 0.12.317부터 기본이다(아래).
 - 색인 시간은 ovs 빌드만큼 는다. 실칩은 약 700 s, 합성 1/10은 부하 12~14에서 179~225 s다.
+
+**그리기 기본 켜기(0.12.317, 2026-10-07).** 사용자 요청: "OCC를 기본으로 켜줘"(현장 판정 — 전날 20 s이던 2패스가
+0.2 s 이내, root 뷰 지원 뒤).
+- renderd는 `FLOE_RUST_DENSITY_OCC`가 `off`가 아니면 점유 밀도로 2패스를 그린다.
+- 파일이 없거나 쓸 수 없는 뷰(위 "다음은 기존 계획 경로로 그린다" 목록)는 계획 경로로 그린다.
+- 킬 스위치는 `FLOE_RUST_DENSITY_OCC=off`다. 이전 그림이 나온다.
+- 게이트: `density_stack`은 검사들을 만든 때처럼 계획 경로로 고정한다(다른 새 기본값과 같음). 점유 검사는 이를
+  켜고, 그중 하나는 스위치 없이 그려 켠 것과 바이트 동일함을 본다.
 
 **합성 칩 비교**(main01_chip_p10, 전 레이어, cut 3 px, 1350×971, 모드마다 새 워커 2회 warm, 둘째 판 파일):
 

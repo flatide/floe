@@ -1,10 +1,10 @@
 //! The density stack's pass 2 from the occupancy density (design.ovs,
-//! floe_vfs::occ_density; 2026-10-06, opt-in): no plan, no walk, no decode -
+//! floe_vfs::occ_density; 2026-10-06, on by default since 0.12.317): no plan, no walk, no decode -
 //! for each pixel pass 1 left open, the visible layers from the top, each
 //! present where design.ovs's bit of the pixel's cell is set (the planes a
 //! request depth draws, OR'd) at its group's mean cover, lit by the density
 //! pattern's rank like a summary item (raster.rs paint_occ_plane /
-//! paint_occ_lower). FLOE_RUST_DENSITY_OCC=on (renderd) asks for it.
+//! paint_occ_lower). renderd asks for it unless FLOE_RUST_DENSITY_OCC=off.
 
 use std::sync::Arc;
 

@@ -711,8 +711,8 @@ def fmt_count(n):
 
 
 def occ_note(res, full=False):
-    """Pass 2 drawn from the occupancy density (FLOE_RUST_DENSITY_OCC=on,
-    design.ovs; 2026-10-06): its cell, the layers it held and those this
+    """Pass 2 drawn from the occupancy density (design.ovs; 2026-10-06, by
+    default since 0.12.317 - FLOE_RUST_DENSITY_OCC=off the plans): its cell, the layers it held and those this
     frame made, as the status line says them - the log line (`full`) with
     what its cache holds (2026-10-07); "" when the plans drew it."""
     p2 = res.get("density_plan2") or {}
@@ -1114,7 +1114,7 @@ def perf_status(res, depth_note=""):
                          + (" (%s out)" % fmt_count(gated) if gated else ""))
         us = res.get("density_us") or {}
         # pass 2 drawn from the occupancy density instead of the plans
-        # (FLOE_RUST_DENSITY_OCC=on, 2026-10-06): the time it took, its
+        # (2026-10-06; FLOE_RUST_DENSITY_OCC=off: the plans): the time it took, its
         # cell and layers in place of the plans' breakdown
         occ = occ_note(res)
         if us and occ:

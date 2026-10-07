@@ -2209,7 +2209,7 @@ fn write_hier(ovm: &floe_ovm::Ovm, outdir: &str) {
 /// `floe-index ovs <cache> [--um F] [--jobs N] [--roots F]` (floe_vfs::occ_density, 2026-10-06):
 /// add (or rebuild) design.ovs - per layer and depth the cells holding
 /// shapes under the cut and their groups' mean cover, what the density
-/// stack's pass 2 draws by with FLOE_RUST_DENSITY_OCC=on - from the cache's
+/// stack's pass 2 draws by (FLOE_RUST_DENSITY_OCC=off: the plans) - from the cache's
 /// index (design.ovm, design.ovb, design.ovh, design.ovp) in one walk; the
 /// cache's other files are untouched. --um: the base cell in microns
 /// (default: the smallest power of two keeping the chip's longer side within

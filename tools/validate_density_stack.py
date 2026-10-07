@@ -2916,7 +2916,8 @@ def occ_density_checks(temp):
     workers = {'walk': worker(src, env), 'occ': worker(src, occ),
                'tiles': worker(src, dict(occ, FLOE_RUST_TILE_PX='127', FLOE_RUST_RASTER_JOBS='4')),
                'serial': worker(src, dict(occ, FLOE_RUST_DENSITY_OCC_THREADS='1')),
-               'capped': worker(src, dict(occ, FLOE_RUST_DENSITY_OCC_MB='0.0001'))}
+               'capped': worker(src, dict(occ, FLOE_RUST_DENSITY_OCC_MB='0.0001')),
+               'default': worker(src, dict(env, FLOE_RUST_DENSITY_OCC=None))}
     side_w, side_h = 400, 200
 
     def view(w, gen, box_um=(0.0, 0.0, 400.0, 200.0), depth=None):
@@ -2963,6 +2964,10 @@ def occ_density_checks(temp):
         walk, walk_res = view(workers['walk'], 1)
         on, on_res = view(workers['occ'], 1)
         tiles, _ = view(workers['tiles'], 1)
+        # the switch unset: the occupancy density (user 2026-10-07: "turn
+        # OCC on by default")
+        default, default_res = view(workers['default'], 1)
+        assert default == on and default_res['density_plan2']['occ_layers'] == 2, default_res['density_plan2']
         p2 = on_res['density_plan2']
         assert (p2['occ_layers'], p2['occ_cell_nm'], p2['regions'], p2['nodes']) == (2, 1000, 0, 0), p2
         assert walk_res['density_plan2']['occ_layers'] == 0 and walk_res['density_plan2']['regions'] > 0, walk_res['density_plan2']
@@ -3526,6 +3531,11 @@ def main():
     # density_bright_gain: a pixel shows its covered area's brightness):
     # bright_checks alone draws the brightness
     os.environ['FLOE_RUST_DENSITY_BRIGHT'] = 'off'
+    # and pass 2 by the plans, as these checks were made (the occupancy
+    # density, on by default since 0.12.317 where an index has design.ovs -
+    # every index here makes it): occ_density_checks turn it on, one with
+    # the switch unset
+    os.environ['FLOE_RUST_DENSITY_OCC'] = 'off'
     with tempfile.TemporaryDirectory(prefix='floe-density-stack-') as temp:
         src = Path(temp) / 'stack.oas'
         layout(src)

@@ -1957,7 +1957,8 @@ def main(argv=None, *, prog=None, rust_only=None):
                            "(written by default since 2026-10-02)")
     rust.add_argument("--no-ovs", action="store_true",
                       help="do not write design.ovs, the occupancy density "
-                           "FLOE_RUST_DENSITY_OCC=on draws pass 2 by, nor "
+                           "the density's pass 2 draws by (FLOE_RUST_DENSITY_OCC"
+                           "=off: the plans), nor "
                            "the big cells' design.ovs.<cell> (written by "
                            "default since 2026-10-07; a jobdeck's sources "
                            "never get it; `floe-index ovs <cache>` adds it)")
