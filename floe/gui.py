@@ -3359,11 +3359,6 @@ class Viewer:
                 for j in range(0, len(pts) - 1, 2):
                     stamp_segment(disp, pts[j], pts[j + 1], None,
                                   mcol)
-        if self.mode == "esel" and self._esel_start is not None:
-            ax, ay = self._esel_start
-            bx, by = self._cursor
-            rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
-                         None, RULER_CORE, px=1)
         if self.overlay_mode == 0 and self._drc is not None \
                 and self._drc_open is not None:
             # All matching errors contribute, independently of list pages.
@@ -3396,6 +3391,13 @@ class Viewer:
                               CELL_MARK_PX, CELL_MARK_PX, CELL_HL)
                 else:
                     rect_outline(disp, ax, ay, bx, by, None, CELL_HL)
+        if self.mode == "esel" and self._esel_start is not None:
+            # Keep the live selection boundary above dense marker rasters,
+            # focused errors and cell highlights, with contrast on either.
+            ax, ay = self._esel_start
+            bx, by = self._cursor
+            rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
+                         BLACK, RULER_CORE, px=1)
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
