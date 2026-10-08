@@ -11,12 +11,14 @@ def marker_cell_px(width, height):
 
 
 def aggregate_radius(count, width, height):
-    """Return a bounded pixel radius for an aggregate's population.
+    """Return the density-budget radius for an aggregate's population.
 
     Count bands are 2--9, 10--49, 50--99, 100--999, then decades.
     Their base diameters are 8, 10, 12, 14, 16, ... pixels. Scaling
     with the viewport's shorter dimension keeps these readable on both
     small windows and large displays without growing with layout zoom.
+    This is a grouping heuristic, not the rendered bbox rectangle size;
+    keeping it stable preserves group counts when marker shapes change.
     """
     count = max(2, int(count))
     if count < 10:
@@ -37,14 +39,14 @@ def aggregate_radius(count, width, height):
 
 
 @lru_cache(maxsize=96)
-def circle_rgba(radius, color, secondary=None):
+def circle_rgba(radius, color, secondary=None, solid=False):
     """Return a filled circle sprite as tightly packed RGBA bytes.
 
     The sprite is ``(2 * radius + 1)`` pixels square. Colors use
     ``0xRRGGBBAA``; an optional secondary color occupies its right half.
     A translucent center preserves layout visibility, while the roughly
     two-pixel outline and one-pixel antialiased edge make the count-sized
-    boundary legible. Aggregate radii are bounded by ``aggregate_radius``.
+    boundary legible. ``solid`` makes singleton markers opaque inside.
     """
     radius = int(radius)
     if radius < 1:
@@ -55,7 +57,7 @@ def circle_rgba(radius, color, secondary=None):
     coverage = np.clip(radius + 0.5 - distance, 0.0, 1.0)
     stroke = min(2.0, radius / 2.0)
     outline = distance >= radius - stroke
-    alpha = (72.0 + 136.0 * outline) * coverage
+    alpha = (255.0 if solid else 72.0 + 136.0 * outline) * coverage
 
     def channels(rgba):
         rgba = int(rgba)

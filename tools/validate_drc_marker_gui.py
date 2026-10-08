@@ -39,6 +39,9 @@ def viewer_fixture():
     viewer._drc_page_marks = []
     viewer._drc_hits = []
     viewer._drc_group_hits = []
+    viewer._drc_ruler = []
+    viewer.rulers = []
+    viewer.drc_mark = None
     viewer._drc_grid_fill = Mock()
     viewer._drc_info_refresh = Mock()
     viewer._set_live_status = Mock()
@@ -129,6 +132,18 @@ class MarkerCircleStyleTests(unittest.TestCase):
         self.assertEqual(left[3], right[3])
         self.assertLess(left[3], 255)
 
+    def test_solid_singleton_disk_has_opaque_center_and_transparent_corners(self):
+        for radius in (2, 4):
+            with self.subTest(radius=radius):
+                side = 2 * radius + 1
+                pixels = circle_rgba(radius, gui.DRC_RED, solid=True)
+                center = (radius * side + radius) * 4
+                self.assertEqual(tuple(pixels[center:center + 4]),
+                                 (255, 82, 82, 255))
+                self.assertEqual(pixels[3], 0)
+                self.assertEqual(pixels[-1], 0)
+                self.assertTrue(any(0 < a < 255 for a in pixels[3::4]))
+
     def test_sprite_cache_reuses_identical_styles_and_clips_canvas_edges(self):
         buf, sprite = Mock(), Mock()
         buf.get_width.return_value = 100
@@ -159,6 +174,49 @@ class MarkerCircleStyleTests(unittest.TestCase):
             self.assertEqual(make.call_count, 4,
                              "different size/review colors shared a sprite")
             self.assertEqual(len(sprites), 4)
+            gui.stamp_drc_circle(buf, 50, 50, 8, gui.DRC_RED,
+                                 sprites=sprites, solid=True)
+            self.assertEqual(make.call_count, 5,
+                             "solid singleton reused translucent sprite")
+            center = (8 * 17 + 8) * 4
+            self.assertEqual(make.call_args.args[0][center + 3], 255)
+
+    def test_group_outline_preserves_empty_interior_and_mixed_review_colors(self):
+        pixels = {}
+
+        def fill(_buf, x, y, width, height, color):
+            for row in range(int(y), int(y + height)):
+                for column in range(int(x), int(x + width)):
+                    pixels[column, row] = color
+
+        with patch.object(gui, "fill_rect", side_effect=fill):
+            gui.stamp_drc_group_box(Mock(), (10, 20, 30, 40),
+                                    gui.DRC_RED, gui.DRC_GREEN)
+        self.assertNotIn((20, 30), pixels, "aggregate filled its interior")
+        self.assertEqual(pixels[10, 30], gui.DRC_RED)
+        self.assertEqual(pixels[30, 30], gui.DRC_GREEN)
+        self.assertEqual(pixels[12, 20], gui.DRC_RED)
+        self.assertEqual(pixels[28, 40], gui.DRC_GREEN)
+        self.assertEqual(len(pixels), 80)
+
+    def test_group_box_excludes_geometry_wholly_outside_canvas(self):
+        for bbox in ((1.01, 0.4, 1.2, 0.6), (0.4, -0.2, 0.6, -0.01),
+                     (-0.2, 0.4, -0.01, 0.6), (0.4, 1.01, 0.6, 1.2)):
+            with self.subTest(bbox=bbox):
+                self.assertIsNone(gui.drc_group_screen_box(
+                    bbox, 0.001, (0, 0, 1000, 1000), 10, 100, 100))
+
+    def test_group_box_on_closed_viewport_boundary_keeps_valid_visible_bounds(self):
+        for bbox, axis in (((1, 0.4, 1.2, 0.6), 0),
+                           ((0.4, -0.2, 0.6, 0), 1)):
+            with self.subTest(bbox=bbox):
+                box = gui.drc_group_screen_box(
+                    bbox, 0.001, (0, 0, 1000, 1000), 10, 100, 100)
+                self.assertIsNotNone(box)
+                self.assertEqual(box[axis], 99)
+                self.assertEqual(box[axis + 2], 99)
+                self.assertLessEqual(box[0], box[2])
+                self.assertLessEqual(box[1], box[3])
 
 
 class MarkerViewerTests(unittest.TestCase):
@@ -299,28 +357,34 @@ class MarkerViewerTests(unittest.TestCase):
         self.assertTrue(query["declutter"])
         self.assertEqual(query["cell_px"], marker_cell_px(150, 80))
 
+    @staticmethod
+    def canvas(width=100, height=100):
+        disp, layer = Mock(), Mock()
+        disp.get_width.return_value = width
+        disp.get_height.return_value = height
+        pixbuf = SimpleNamespace(Pixbuf=SimpleNamespace(new=Mock(return_value=layer)),
+                                 Colorspace=SimpleNamespace(RGB=0),
+                                 InterpType=SimpleNamespace(NEAREST=0))
+        return disp, layer, pixbuf
+
     def test_painter_caches_layer_and_separates_exact_from_group_hits(self):
         viewer = self.viewer
         single = Marker(0, 1507, 0.2, 0.3, 1, 0, (0.2, 0.3, 0.2, 0.3), False)
         group = Marker(0, 9, 0.8, 0.5, 200000, 75000,
-                       (0.7, 0.4, 0.9, 0.6), True)
+                       (0.75, 0.4, 0.9, 0.6), True)
         viewer._drc_marker_request = Mock(return_value=[single, group])
         viewer._drc_marker_key = ("render",)
-        disp, layer = Mock(), Mock()
-        disp.get_width.return_value = disp.get_height.return_value = 100
-        pixbuf = SimpleNamespace(Pixbuf=SimpleNamespace(new=Mock(return_value=layer)),
-                                 Colorspace=SimpleNamespace(RGB=0),
-                                 InterpType=SimpleNamespace(NEAREST=0))
+        disp, layer, pixbuf = self.canvas()
         with patch.object(gui, "GdkPixbuf", pixbuf), \
-                patch.object(gui, "fill_rect") as fill, \
+                patch.object(gui, "stamp_drc_group_box") as box, \
                 patch.object(gui, "stamp_drc_circle") as circle:
             viewer._drc_stamp_markers(disp, self.bounds, 10)
-            first_calls = fill.call_count
             circle.assert_called_once()
             self.assertEqual(circle.call_args.args,
-                             (layer, 80, 50, aggregate_radius(200000, 100, 100),
-                              gui.DRC_RED, gui.DRC_GREEN))
-            fill.assert_called_once_with(layer, 18, 68, 5, 5, gui.DRC_RED)
+                             (layer, 20, 70, 2, gui.DRC_RED))
+            self.assertTrue(circle.call_args.kwargs["solid"])
+            box.assert_called_once_with(layer, (75, 40, 90, 60),
+                                        gui.DRC_RED, gui.DRC_GREEN)
             self.assertEqual(viewer._drc_hit_at(20, 70), (0, 1507))
             self.assertIsNone(viewer._drc_hit_at(80, 50))
             self.assertIs(viewer._drc_group_at(80, 50), group)
@@ -328,28 +392,87 @@ class MarkerViewerTests(unittest.TestCase):
             viewer._drc_hits.clear()
             viewer._drc_group_hits.clear()
             viewer._drc_stamp_markers(disp, self.bounds, 10)
-            self.assertEqual(fill.call_count, first_calls,
-                             "unchanged viewport repainted singleton markers")
             self.assertEqual(circle.call_count, 1,
-                             "unchanged viewport repainted aggregate circles")
+                             "unchanged viewport repainted singleton circles")
+            self.assertEqual(box.call_count, 1,
+                             "unchanged viewport repainted aggregate boxes")
             self.assertEqual(len(viewer._drc_hits), 1)
-            self.assertEqual(len(viewer._drc_group_hits), 1)
+            self.assertEqual(viewer._drc_group_hits,
+                             [(75, 40, 90, 60, group)])
             self.assertEqual(layer.composite.call_count, 2)
+            # Picking adds a highlight to the display, not to the reusable
+            # cached layer, so changing selection never rerenders all groups.
+            viewer._drc_group_pick(viewer._drc_group_at(80, 50, cycle=True))
+            box.reset_mock()
+            viewer._drc_hits.clear()
+            viewer._drc_group_hits.clear()
+            viewer._drc_stamp_markers(disp, self.bounds, 10)
+            self.assertEqual(circle.call_count, 1)
+            self.assertTrue(box.called)
+            self.assertTrue(all(call.args[0] is disp for call in box.call_args_list))
+            self.assertEqual(layer.composite.call_count, 3)
+            pixbuf.Pixbuf.new.assert_called_once()
         self.assertIn("200000 errors (75000 waived)", viewer._drc_group_text(group))
 
-    def test_group_hit_uses_circle_size_and_topmost_painted_group(self):
+    def test_group_boxes_follow_geometry_not_count_and_round_outward(self):
+        viewer = self.viewer
+        groups = [
+            Marker(0, 0, 0.5, 0.5, 10, 0, (0.101, 0.201, 0.899, 0.799), True),
+            Marker(0, 1, 0.5, 0.5, 100000000, 0,
+                   (0.101, 0.201, 0.899, 0.799), True),
+            Marker(0, 2, 0.5, 0.5, 20, 0, (-1.0, 0.45, 2.0, 0.55), True),
+            Marker(0, 3, 0.5, 0.5, 30, 0, (0.5, 0.5, 0.5, 0.5), True),
+        ]
+        viewer._drc_marker_request = Mock(return_value=groups)
+        viewer._drc_marker_key = ("geometry",)
+        disp, _layer, pixbuf = self.canvas()
+        with patch.object(gui, "GdkPixbuf", pixbuf), \
+                patch.object(gui, "stamp_drc_group_box"), \
+                patch.object(gui, "stamp_drc_circle") as circle:
+            viewer._drc_stamp_markers(disp, self.bounds, 10)
+        boxes = {hit[-1].ei: hit[:4] for hit in viewer._drc_group_hits}
+        self.assertEqual(boxes[0], (10, 20, 90, 80))
+        self.assertEqual(boxes[1], boxes[0], "count resized a geometry bbox")
+        self.assertEqual(boxes[2][0], 0)
+        self.assertEqual(boxes[2][2], 99)
+        self.assertEqual(boxes[2][1:4:2], (45, 55))
+        left, top, right, bottom = boxes[3]
+        self.assertLessEqual(left, 50)
+        self.assertLessEqual(top, 50)
+        self.assertGreaterEqual(right, 50)
+        self.assertGreaterEqual(bottom, 50)
+        self.assertGreaterEqual(right - left, 4)
+        self.assertGreaterEqual(bottom - top, 4)
+        self.assertEqual(len(boxes), len(groups), "renderer changed group count")
+        circle.assert_not_called()
+
+    def test_group_hit_uses_rectangle_and_cycles_overlaps_without_hover_advance(self):
         viewer = self.viewer
         large, small = object(), object()
-        viewer._drc_group_hits = [(30, 30, 20, large)]
-        self.assertIs(viewer._drc_group_at(50, 30), large)
-        self.assertIsNone(viewer._drc_group_at(50.01, 30))
-        self.assertIsNone(viewer._drc_group_at(49, 49),
-                          "transparent bounding-box corner received a hit")
-        # Both contain (30, 30), but the later/smaller painted circle wins
-        # even though its center is farther from the mouse.
-        viewer._drc_group_hits.append((34, 30, 6, small))
+        viewer._drc_marker_key = ("cycle",)
+        viewer._drc_group_hits = [(10, 10, 50, 50, large),
+                                 (24, 24, 36, 36, small)]
+        self.assertIs(viewer._drc_group_at(49, 49), large,
+                      "bbox corner should be selectable")
+        self.assertIsNone(viewer._drc_group_at(53.01, 30))
         self.assertIs(viewer._drc_group_at(30, 30), small)
-        self.assertIs(viewer._drc_group_at(45, 30), large)
+        self.assertIs(viewer._drc_group_at(30, 30, cycle=True), small)
+        self.assertIs(viewer._drc_group_at(30, 30, cycle=True), large)
+        for _ in range(3):
+            self.assertIs(viewer._drc_group_at(30, 30), large,
+                          "hover/double-click changed chosen overlap")
+        self.assertIs(viewer._drc_group_at(31, 31, cycle=True), small,
+                      "nearby click did not wrap the overlap cycle")
+        # Movement to a different candidate set, then back, starts at top.
+        self.assertIs(viewer._drc_group_at(48, 48, cycle=True), large)
+        self.assertIs(viewer._drc_group_at(30, 30, cycle=True), small)
+        self.assertIs(viewer._drc_group_at(30, 30, cycle=True), large)
+        viewer._drc_marker_key = ("new viewport",)
+        self.assertIs(viewer._drc_group_at(30, 30, cycle=True), small)
+        # Same location and viewport but different candidates also resets.
+        third = object()
+        viewer._drc_group_hits.append((25, 25, 35, 35, third))
+        self.assertIs(viewer._drc_group_at(30, 30, cycle=True), third)
 
     def test_dense_groups_paint_first_and_singleton_picks_remain_visible(self):
         viewer = self.viewer
@@ -358,27 +481,65 @@ class MarkerViewerTests(unittest.TestCase):
         large = Marker(0, 17, 0.5, 0.5, 10000, 0, (0.1, 0.1, 0.9, 0.9), True)
         viewer._drc_marker_request = Mock(return_value=[small, single, large])
         viewer._drc_marker_key = ("overlap",)
-        disp, layer = Mock(), Mock()
-        disp.get_width.return_value = disp.get_height.return_value = 100
-        pixbuf = SimpleNamespace(Pixbuf=SimpleNamespace(new=Mock(return_value=layer)),
-                                 Colorspace=SimpleNamespace(RGB=0),
-                                 InterpType=SimpleNamespace(NEAREST=0))
+        disp, layer, pixbuf = self.canvas()
         paints = Mock()
         with patch.object(gui, "GdkPixbuf", pixbuf), \
                 patch.object(gui, "stamp_drc_circle", paints.circle), \
-                patch.object(gui, "fill_rect", paints.singleton):
+                patch.object(gui, "stamp_drc_group_box", paints.box):
             viewer._drc_stamp_markers(disp, self.bounds, 10)
         self.assertEqual([entry[0] for entry in paints.mock_calls],
-                         ["circle", "circle", "singleton"])
-        self.assertGreater(paints.circle.call_args_list[0].args[3],
-                           paints.circle.call_args_list[1].args[3])
-        self.assertEqual(paints.circle.call_args_list[1].args[4:],
+                         ["box", "box", "circle"])
+        self.assertEqual(paints.box.call_args_list[0].args[1], (10, 10, 90, 90))
+        self.assertEqual(paints.box.call_args_list[1].args[1], (40, 40, 60, 60))
+        self.assertEqual(paints.box.call_args_list[1].args[2:],
                          (gui.DRC_GREEN, None))
-        self.assertIs(paints.circle.call_args_list[0].kwargs["sprites"],
-                      paints.circle.call_args_list[1].kwargs["sprites"])
+        self.assertTrue(paints.circle.call_args.kwargs["solid"])
         self.assertEqual([hit[-1] for hit in viewer._drc_group_hits], [large, small])
         self.assertIs(viewer._drc_group_at(50, 50), small)
         self.assertEqual(viewer._drc_hit_at(50, 50), (0, 9071))
+
+    def test_plain_click_cycles_and_double_click_zooms_current_overlap(self):
+        viewer = self.viewer
+        a = Marker(0, 1, 0.5, 0.5, 20, 0, (0.1, 0.1, 0.9, 0.9), True)
+        b = Marker(0, 2, 0.5, 0.5, 10, 0, (0.2, 0.2, 0.8, 0.8), True)
+        viewer._drc_group_hits = [(10, 10, 90, 90, a), (20, 20, 80, 80, b)]
+        viewer._drc_marker_key = ("click",)
+        viewer._drcwin = SimpleNamespace(_detail=Mock())
+        viewer._update_cursor = Mock()
+        viewer._cursor = (50, 50)
+        viewer._drc_group_zoom = Mock()
+        viewer._focus_view = Mock()
+        viewer._set_cursor = Mock()
+        viewer._idle_cursor = Mock()
+        viewer.cache = object()
+        gdk = SimpleNamespace(ModifierType=SimpleNamespace(CONTROL_MASK=4,
+                                                         SHIFT_MASK=1),
+                              EventType=SimpleNamespace(DOUBLE_BUTTON_PRESS=5))
+        event = SimpleNamespace(x=50, y=50, state=0, button=1, type=5)
+        with patch.object(gui, "Gdk", gdk):
+            viewer._pick_click(event)
+            self.assertIs(viewer._drc_group_at(50, 50), b)
+            self.assertIn("overlap 1/2", viewer._drcwin._detail.set_text.call_args.args[0])
+            viewer._pick_click(event)
+            self.assertIs(viewer._drc_group_at(50, 50), a)
+            self.assertIn("overlap 2/2", viewer._drcwin._detail.set_text.call_args.args[0])
+            self.assertTrue(viewer._on_press(None, event))
+            viewer._drc_group_zoom.assert_called_once_with(a)
+            self.assertIs(viewer._drc_group_at(50, 50), a)
+            viewer._pick_click(event)
+            self.assertIs(viewer._drc_group_at(50, 50), b)
+            viewer._drc_hits = [(50, 50, 0, 99)]
+            viewer._drc.checks[0].errors = [None] * 99 + [
+                SimpleNamespace(kind="p", pts=[(0.5, 0.5)])]
+            viewer._drc_goto_cell = Mock()
+            viewer._drc_show_detail = Mock()
+            viewer._pick_click(event)
+            self.assertEqual(viewer._drc_focus[:2], (0, 99))
+            viewer._drc_show_detail.assert_called_once_with(0, 99)
+            viewer._drc_hits.clear()
+            viewer._pick_click(event)
+            self.assertIs(viewer._drc_group_at(50, 50), b,
+                          "single error click did not reset group cycle")
 
     def test_hidden_overlays_clear_both_pick_lists(self):
         viewer = self.viewer
@@ -389,6 +550,144 @@ class MarkerViewerTests(unittest.TestCase):
         viewer._draw_overlays(Mock(), self.bounds, 10)
         self.assertEqual(viewer._drc_hits, [])
         self.assertEqual(viewer._drc_group_hits, [])
+
+    def test_group_cycle_restarts_after_scope_status_viewport_or_hide_reset(self):
+        viewer = self.viewer
+        a, b = object(), object()
+        hits = [(10, 10, 90, 90, a), (20, 20, 80, 80, b)]
+        self.request()
+        for reset in ("scope", "status", "viewport", "hide"):
+            with self.subTest(reset=reset):
+                viewer._drc_group_hits = list(hits)
+                self.assertIs(viewer._drc_group_at(50, 50, cycle=True), b)
+                self.assertIs(viewer._drc_group_at(50, 50, cycle=True), a)
+                if reset == "scope":
+                    viewer._drc_cluster = object()
+                    self.request()
+                elif reset == "status":
+                    viewer._drc_marker_invalidate()
+                    self.request()
+                elif reset == "viewport":
+                    self.bounds = (1000, 0, 2000, 1000)
+                    self.request()
+                else:
+                    viewer.overlay_mode = 2
+                    viewer._zoomdrag = None
+                    viewer._draw_overlays(Mock(), self.bounds, 10)
+                viewer._drc_group_hits = list(hits)
+                self.assertIs(viewer._drc_group_at(50, 50, cycle=True), b)
+                # No saved second-position cycle leaks into the next case.
+                viewer._drc_marker_invalidate()
+                self.request()
+
+    def test_focused_error_marker_is_a_larger_circle(self):
+        viewer = self.viewer
+        viewer._drc_focus = (0, 11, "p", [(100, 100)])
+        viewer._drc_pos = -1
+        viewer._drc_cum = []
+        disp = Mock()
+        marks = [(0, 11, "p", [(100, 100)]),
+                 (0, 12, "p", [(200, 200)])]
+        with patch.object(gui, "stamp_drc_circle") as circle, \
+                patch.object(gui, "fill_rect") as fill:
+            viewer._drc_stamp_errs(disp, lambda x: x, lambda y: y,
+                                  marks, gui.DRC_RED)
+        self.assertEqual(circle.call_count, 2)
+        self.assertEqual(circle.call_args_list[0].args[:5],
+                         (disp, 100, 100, 4, gui.DRC_RED))
+        self.assertEqual(circle.call_args_list[1].args[:5],
+                         (disp, 200, 200, gui.DRC_MARK_PX // 2, gui.DRC_RED))
+        self.assertTrue(all(call.kwargs["solid"] for call in circle.call_args_list))
+        fill.assert_not_called()
+        self.assertEqual(viewer._drc_hits, [(100, 100, 0, 11), (200, 200, 0, 12)])
+
+    def test_outside_click_and_escape_clear_group_selection_and_cycle(self):
+        viewer = self.viewer
+        a = Marker(0, 1, 0.5, 0.5, 20, 0, (0.1, 0.1, 0.9, 0.9), True)
+        b = Marker(0, 2, 0.5, 0.5, 10, 0, (0.2, 0.2, 0.8, 0.8), True)
+        viewer._drc_group_hits = [(10, 10, 90, 90, a), (20, 20, 80, 80, b)]
+        viewer._drc_marker_key = ("reset",)
+        viewer._pending = None
+        viewer._ruler_start = None
+        viewer.selection = None
+        viewer._cell_hl = None
+        viewer._drc_lyr_saved = None
+        viewer._update_cursor = Mock()
+        viewer._cursor = (1000, 1000)
+        viewer._pick_px = None
+        viewer.tiles_spanned = Mock(return_value=5)
+        gdk = SimpleNamespace(ModifierType=SimpleNamespace(CONTROL_MASK=4,
+                                                         SHIFT_MASK=1))
+        for reset in ("outside click", "escape"):
+            with self.subTest(reset=reset):
+                viewer._drc_group_at(50, 50, cycle=True)
+                selected = viewer._drc_group_at(50, 50, cycle=True)
+                self.assertIs(selected, a)
+                viewer._drc_group_pick(selected)
+                if reset == "escape":
+                    viewer._esc()
+                else:
+                    with patch.object(gui, "Gdk", gdk):
+                        viewer._pick_click(SimpleNamespace(x=1000, y=1000, state=0))
+                self.assertIs(viewer._drc_group_at(50, 50), b)
+                self.assertIs(viewer._drc_group_at(50, 50, cycle=True), b)
+                viewer._drc_marker_invalidate()
+                viewer._drc_marker_key = ("reset",)
+                viewer._drc_group_hits = [(10, 10, 90, 90, a),
+                                         (20, 20, 80, 80, b)]
+
+    def test_grid_step_and_jump_clear_prior_group_selection_and_cycle(self):
+        a = Marker(0, 1, 0.5, 0.5, 20, 0, (0.1, 0.1, 0.9, 0.9), True)
+        b = Marker(0, 2, 0.5, 0.5, 10, 0, (0.2, 0.2, 0.8, 0.8), True)
+        for action in ("grid", "step", "jump"):
+            with self.subTest(action=action):
+                viewer = viewer_fixture()
+                error = drc.DrcError("p", 1, [(0.4, 0.4), (0.6, 0.6)])
+                viewer._drc = SimpleNamespace(
+                    checks=[SimpleNamespace(name="R", errors=[error])])
+                viewer._drc_marker_key = ("navigation",)
+                viewer._drc_group_hits = [(10, 10, 90, 90, a),
+                                         (20, 20, 80, 80, b)]
+                viewer._drc_group_at(50, 50, cycle=True)
+                viewer._drc_group_pick(viewer._drc_group_at(50, 50, cycle=True))
+                self.assertIs(viewer._drc_group_at(50, 50), a)
+                viewer._drc_grid_ci = 0
+                viewer._drc_grid_base = None
+                viewer._drc_cum = [0]
+                viewer._drc_jump_spp = None
+                viewer._drc_show_detail = Mock()
+                viewer._viewport_size = Mock(return_value=(100, 100))
+                viewer._drc_cd_ruler = Mock(return_value=[])
+                viewer.goto = Mock()
+                if action == "grid":
+                    viewer._drc_grid_rows = viewer._drc_gridw = 1
+                    viewer._drc_grid_map = [0]
+                    viewer._drc_cell_mark = Mock()
+                    column = object()
+                    tree = Mock()
+                    tree.get_path_at_pos.return_value = (
+                        SimpleNamespace(get_indices=lambda: [0]), column, 0, 0)
+                    tree.get_columns.return_value = [column]
+                    gdk = SimpleNamespace(
+                        ModifierType=SimpleNamespace(CONTROL_MASK=4, SHIFT_MASK=1),
+                        EventType=SimpleNamespace(BUTTON_PRESS=1, DOUBLE_BUTTON_PRESS=5))
+                    with patch.object(gui, "Gdk", gdk):
+                        viewer._on_drc_grid_click(
+                            tree, SimpleNamespace(x=0, y=0, button=1, state=0, type=1))
+                    viewer._drc_cell_mark.assert_called_once_with(0, 0)
+                elif action == "step":
+                    viewer._drc_step(1)
+                else:
+                    viewer._drc_jump(0, 0)
+                    self.assertIsNotNone(viewer.drc_mark)
+                    viewer.goto.assert_called_once()
+                viewer._drc_show_detail.assert_called_once_with(0, 0)
+                if action != "jump":
+                    self.assertEqual(viewer._drc_focus[:2], (0, 0))
+                self.assertIs(viewer._drc_group_at(50, 50), b,
+                              "individual navigation retained prior group selection")
+                self.assertIs(viewer._drc_group_at(50, 50, cycle=True), b,
+                              "individual navigation retained prior overlap cycle")
 
 
 class BoxSelectionTests(unittest.TestCase):

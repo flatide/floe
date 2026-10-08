@@ -69,7 +69,7 @@ DRC_HL_CAP = 1000          # highlight-in-view marker budget
 DRC_SEL_CAP = 5000         # box-select budget ('e' mode)
 DRC_GREEN = 0x00E676FF     # WAIVED errors (geometry+numbers;
                            # cyan->green, user call 2026-08-17)
-DRC_MARK_PX = 5            # collapsed-marker square side; geometry
+DRC_MARK_PX = 5            # collapsed-marker circle diameter; geometry
                            # whose screen span shrinks BELOW this
                            # paints as the marker (no gap where the
                            # shape draws smaller than the marker)
@@ -356,17 +356,18 @@ def fill_rect(buf, x, y, w, h, rgba):
         buf.new_subpixbuf(x, y, w, h).fill(rgba)
 
 
-def stamp_drc_circle(buf, x, y, radius, color, secondary=None, sprites=None):
+def stamp_drc_circle(buf, x, y, radius, color, secondary=None, sprites=None,
+                     solid=False):
     """Composite a reusable circle sprite, clipped at the canvas edges."""
     from .drc_marker_style import circle_rgba
     if sprites is None:
         sprites = {}
-    key = (radius, color, secondary)
+    key = (radius, color, secondary, solid)
     sprite = sprites.get(key)
     side = 2 * radius + 1
     if sprite is None:
         sprite = GdkPixbuf.Pixbuf.new_from_bytes(
-            GLib.Bytes.new(circle_rgba(radius, color, secondary)),
+            GLib.Bytes.new(circle_rgba(radius, color, secondary, solid)),
             GdkPixbuf.Colorspace.RGB, True, 8, side, side, side * 4)
         sprites[key] = sprite
     origin_x, origin_y = int(round(x)) - radius, int(round(y)) - radius
@@ -377,6 +378,43 @@ def stamp_drc_circle(buf, x, y, radius, color, secondary=None, sprites=None):
         sprite.composite(buf, left, top, right - left, bottom - top,
                          origin_x, origin_y, 1, 1,
                          GdkPixbuf.InterpType.NEAREST, 255)
+
+
+def drc_group_screen_box(bbox, dbu, obox, ospp, width, height):
+    """Outward-rounded visible bounds, never a count-sized substitute."""
+    x0, y0, x1, y1 = bbox
+    left = math.floor((x0 / dbu - obox[0]) / ospp)
+    right = math.ceil((x1 / dbu - obox[0]) / ospp)
+    top = math.floor((obox[3] - y1 / dbu) / ospp)
+    bottom = math.ceil((obox[3] - y0 / dbu) / ospp)
+    if right < 0 or bottom < 0 or left > width or top > height:
+        return None
+    # A coincident/line-like group still needs a visible rectangle. Expand
+    # only subpixel/degenerate spans; all actual locations remain enclosed.
+    if right - left < 4:
+        left -= (4 - (right - left)) // 2
+        right = left + 4
+    if bottom - top < 4:
+        top -= (4 - (bottom - top)) // 2
+        bottom = top + 4
+    return (min(width - 1, max(0, left)), min(height - 1, max(0, top)),
+            min(width - 1, right), min(height - 1, bottom))
+
+
+def stamp_drc_group_box(buf, box, color, secondary=None, px=1):
+    """Outline only: even overlapping large extents leave layout visible."""
+    left, top, right, bottom = box
+    if secondary is None:
+        rect_outline(buf, left, top, right, bottom, None, color, px=px)
+        return
+    middle = (left + right) // 2
+    # Keep the existing red/green mixed-review indication on the boundary.
+    for x0, x1, edge_color in ((left, middle, color),
+                               (middle, right, secondary)):
+        stamp_segment(buf, (x0, top), (x1, top), None, edge_color, px=px)
+        stamp_segment(buf, (x0, bottom), (x1, bottom), None, edge_color, px=px)
+    stamp_segment(buf, (left, top), (left, bottom), None, color, px=px)
+    stamp_segment(buf, (right, top), (right, bottom), None, secondary, px=px)
 
 
 def stamp_segment(buf, a, b, casing, core, px=2):
@@ -1932,6 +1970,8 @@ class Viewer:
         self._drc_marker_overlay = None
         self._drc_marker_busy = False
         self._drc_group_hits = []   # aggregate markers never pick a member
+        self._drc_group_cycle = None
+        self._drc_group_selected = None
         self._drc_query_worker = None
         self._drc_hl_key = None
         self._drc_delta_worker = None
@@ -3270,6 +3310,8 @@ class Viewer:
                       off_x, off_y, scale, scale, interp, 255)
 
     def _draw_overlays(self, disp, obox, ospp):
+        if self.overlay_mode != 0:
+            self._drc_group_reset()
         self._drc_marker_view = (tuple(obox), ospp,
                                  disp.get_width(), disp.get_height())
         def sx(v):
@@ -3336,7 +3378,7 @@ class Viewer:
             # wash (2026-08-22, replaced the opaque checker that
             # could phase-align with the design speckle and hide
             # the layers underneath at some zooms); spans below the
-            # marker size collapse to the marker square (user call
+            # marker size collapse to a marker circle (user call
             # 2026-08-16: no in-between zoom range where the shape
             # paints smaller than the marker)
             pts = [(sx(x), sy(y)) for x, y in self.drc_mark["pts"]]
@@ -3347,9 +3389,8 @@ class Viewer:
                     and max(mys) - min(mys) < DRC_MARK_PX):
                 cxp = (min(mxs) + max(mxs)) / 2.0
                 cyp = (min(mys) + max(mys)) / 2.0
-                fill_rect(disp, cxp - DRC_MARK_PX // 2,
-                          cyp - DRC_MARK_PX // 2,
-                          DRC_MARK_PX, DRC_MARK_PX, mcol)
+                stamp_drc_circle(disp, cxp, cyp, DRC_MARK_PX // 2,
+                                 mcol, solid=True)
             elif self.drc_mark["kind"] == "p":
                 self._drc_fill_translucent(disp, pts, mcol)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
@@ -9182,6 +9223,7 @@ class Viewer:
         db = self._drc
         if db is None or ei >= len(db.checks[ci].errors):
             return False
+        self._drc_group_reset()
         if ev.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
             self._drc_jump(ci, ei, isolate=True)
             return False
@@ -9273,6 +9315,7 @@ class Viewer:
         db = self._drc
         check = db.checks[ci]
         e = check.errors[ei]
+        self._drc_group_reset()
         # user call 2026-09-08: a framing jump shrinks the in-view
         # list to this one error and every other number vanishes -
         # release the filter first (the button's handler refills the
@@ -9401,6 +9444,7 @@ class Viewer:
         self._drc_marker_busy = False
         self._drc_hits = []
         self._drc_group_hits = []
+        self._drc_group_reset()
         self._drc_hl_key = None
         self._drc_hl_res = None
         query_worker = getattr(self, "_drc_query_worker", None)
@@ -9440,6 +9484,7 @@ class Viewer:
                getattr(self, "_drc_marker_revision", 0), selected,
                bounds, width, height)
         if key != getattr(self, "_drc_marker_key", None):
+            self._drc_group_reset()
             self._drc_marker_key = key
             self._drc_marker_result = None
             self._drc_marker_overlay = None
@@ -9482,7 +9527,6 @@ class Viewer:
 
     def _drc_stamp_markers(self, disp, obox, ospp):
         """Cache one transparent marker layer; repaint costs one composite."""
-        from .drc_marker_style import aggregate_radius
         width, height = disp.get_width(), disp.get_height()
         markers = self._drc_marker_request(obox, ospp, width, height)
         if not markers:
@@ -9494,7 +9538,7 @@ class Viewer:
                                        8, width, height)
             layer.fill(0)
             singles, groups, sprites = [], [], {}
-            # Small circles and singleton picks stay above dense aggregates.
+            # Draw singleton circles last, above the group extent outlines.
             for marker in sorted(markers, key=lambda m: -m.count):
                 x = (marker.x / self.dbu - obox[0]) / ospp
                 y = (obox[3] - marker.y / self.dbu) / ospp
@@ -9502,36 +9546,73 @@ class Viewer:
                 y = int(round(min(max(0, y), height - 1)))
                 color = DRC_GREEN if marker.waived == marker.count else DRC_RED
                 if marker.count == 1:
-                    fill_rect(layer, x - 2, y - 2, 5, 5, color)
+                    stamp_drc_circle(layer, x, y, DRC_MARK_PX // 2, color,
+                                     sprites=sprites, solid=True)
                     singles.append((x, y, marker.ci, marker.ei))
                 else:
-                    radius = aggregate_radius(marker.count, width, height)
+                    box = drc_group_screen_box(marker.bbox, self.dbu, obox,
+                                               ospp, width, height)
+                    if box is None:
+                        continue
                     secondary = (DRC_GREEN if 0 < marker.waived < marker.count
                                  else None)
-                    stamp_drc_circle(layer, x, y, radius, color, secondary,
-                                     sprites=sprites)
-                    groups.append((x, y, radius, marker))
+                    stamp_drc_group_box(layer, box, color, secondary)
+                    groups.append((*box, marker))
             cached = self._drc_marker_overlay = (key, layer, singles, groups)
         cached[1].composite(disp, 0, 0, width, height, 0, 0, 1, 1,
                             GdkPixbuf.InterpType.NEAREST, 255)
         self._drc_hits.extend(cached[2])
         self._drc_group_hits.extend(cached[3])
+        selected = getattr(self, "_drc_group_selected", None)
+        if selected is not None:
+            for *box, marker in cached[3]:
+                if marker == selected:
+                    stamp_drc_group_box(disp, box, SEL_CORE, px=2)
+                    break
 
-    def _drc_group_at(self, x, y, r=0):
-        # Match the painted disk, including its edge; overlapping circles
-        # select the visible top one. Singleton hits are checked first.
-        for hx, hy, radius, marker in reversed(getattr(self, "_drc_group_hits", ())):
-            d = (hx - x) ** 2 + (hy - y) ** 2
-            if d <= (radius + r) ** 2:
-                return marker
-        return None
+    def _drc_group_reset(self):
+        self._drc_group_cycle = None
+        self._drc_group_selected = None
+
+    def _drc_group_at(self, x, y, r=3, cycle=False):
+        """Pick bbox interiors/edges; advance only on an explicit click."""
+        matches = tuple(marker for left, top, right, bottom, marker in
+                        reversed(getattr(self, "_drc_group_hits", ()))
+                        if left - r <= x <= right + r and
+                        top - r <= y <= bottom + r)
+        if not matches:
+            if cycle:
+                self._drc_group_reset()
+            return None
+        key = getattr(self, "_drc_marker_key", None)
+        previous = getattr(self, "_drc_group_cycle", None)
+        same = (previous is not None and previous[0] == key and
+                abs(x - previous[1]) <= 4 and abs(y - previous[2]) <= 4 and
+                previous[3] == matches)
+        if cycle:
+            position = (previous[4] + 1) % len(matches) if same else 0
+            # Keep the initial anchor so a series of small movements cannot
+            # carry an old click cycle all the way across a large rectangle.
+            anchor_x, anchor_y = (previous[1:3] if same else (x, y))
+            self._drc_group_cycle = (key, anchor_x, anchor_y, matches, position)
+            return matches[position]
+        if same:
+            return matches[previous[4]]
+        selected = getattr(self, "_drc_group_selected", None)
+        return selected if selected in matches else matches[0]
 
     def _drc_group_text(self, marker):
-        return "%s · %d errors (%d waived) · double-click to zoom" % (
+        text = "%s · %d errors (%d waived)" % (
             self._drc.checks[marker.ci].name, marker.count, marker.waived)
+        cycle = getattr(self, "_drc_group_cycle", None)
+        if (cycle is not None and cycle[0] == getattr(self, "_drc_marker_key", None)
+                and len(cycle[3]) > 1 and cycle[3][cycle[4]] == marker):
+            text += " · overlap %d/%d · click again to cycle" % (cycle[4] + 1, len(cycle[3]))
+        return text + " · double-click to zoom"
 
     def _drc_group_pick(self, marker):
         # A group is navigation, never an arbitrary member selected for w/n.
+        self._drc_group_selected = marker
         self._drc_focus = None
         self._drc_pos = -1
         self.drc_mark = None
@@ -9568,7 +9649,7 @@ class Viewer:
         green). ONLY the jumped error (double-click / n-p - the one
         drc_mark points at) draws its real shape, collapsing to a
         marker when its screen span is below the marker size; every
-        OTHER error is a DRC_MARK_PX square at ANY zoom (user call
+        OTHER error is a DRC_MARK_PX circle at ANY zoom (user call
         2026-08-18 - shape soup at wide views; the focused one:
         9x9). A 20k segment budget bounds pathological frames."""
         db = self._drc
@@ -9580,6 +9661,7 @@ class Viewer:
                                       self._drc_pos) - 1
             jei = self._drc_pos - self._drc_cum[jci]
         budget = 20000
+        sprites = {}
         for ci_, ei_, kind, spts in items:
             col = color
             if col is None:
@@ -9597,8 +9679,8 @@ class Viewer:
                 s_px = 9 if (focus is not None
                              and focus[0] == ci_
                              and focus[1] == ei_) else DRC_MARK_PX
-                fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
-                          s_px, s_px, col)
+                stamp_drc_circle(disp, cxp, cyp, s_px // 2, col,
+                                 sprites=sprites, solid=True)
                 self._drc_hits.append((cxp, cyp, ci_, ei_))
                 budget -= 1
             else:
@@ -9801,6 +9883,7 @@ class Viewer:
                 "no errors in the current list (rule %s)"
                 % db.checks[ci].name)
             return
+        self._drc_group_reset()
         if win is not None:
             self._drc_goto_cell(ci, ei)
         if self.drc_mark is not None:
@@ -10053,6 +10136,8 @@ class Viewer:
             self._drc_set_sel(None)
             if self._drc_grid_ci is not None:
                 self._drc_grid_fill(self._drc_grid_ci)
+        elif getattr(self, "_drc_group_selected", None) is not None:
+            self._drc_group_reset()
         elif self._drc_lyr_saved is not None:
             self._drc_restore_layers()
             # restoring isolation ALSO ends the jump (user call
@@ -10111,6 +10196,8 @@ class Viewer:
         flateyes-parity clean look) -> all shown. (Rulers are removed
         with Esc, not Tab.)"""
         self.overlay_mode = (self.overlay_mode + 1) % 3
+        if self.overlay_mode != 0:
+            self._drc_group_reset()
         self._set_live_status(
             {0: "overlays shown",
              1: "other errors hidden (Tab cycles)",
@@ -10221,6 +10308,7 @@ class Viewer:
         (user call 2026-08-18, rev 2): select the error - grid
         cell, focus, detail - the view does not move. The full
         jump lives on the canvas DOUBLE click (_on_press)."""
+        self._drc_group_reset()
         db = self._drc
         e = db.checks[ci].errors[ei]
         if self._drcwin is not None:
@@ -10244,10 +10332,11 @@ class Viewer:
             if hit is not None:
                 self._drc_pick(*hit)
                 return
-            group = self._drc_group_at(ev.x, ev.y)
+            group = self._drc_group_at(ev.x, ev.y, cycle=True)
             if group is not None:
                 self._drc_group_pick(group)
                 return
+        self._drc_group_reset()
         if state & Gdk.ModifierType.CONTROL_MASK:
             mode = "toggle"  # add unselected / remove selected
         elif state & Gdk.ModifierType.SHIFT_MASK:

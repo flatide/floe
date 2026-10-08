@@ -139,6 +139,71 @@ class MarkerTests(unittest.TestCase):
         with self.assertRaises((AttributeError, TypeError)):
             marker.count = 0
 
+    def test_coarse_cluster_bbox_contains_every_member_without_decode(self):
+        # The arbitrary members do not touch the rule bbox extremes. This
+        # exercises outward lattice bounds, rather than just the exact
+        # rule-wide bbox that happens to contain every error already.
+        indices = (101, 202, 1707, 2243, 3566)
+        group = self.cluster(",".join(str(ei + 1) for ei in indices))
+        markers = self.index.query((-1, -1, 100, 50), 400, 200,
+                                   checks=[0], members={0: group}, cell_px=400)
+        self.assert_counts(markers, len(indices))
+        self.assertEqual(len(markers), 1)
+        marker = markers[0]
+        self.assertTrue(marker.approximate)
+        x0, y0, x1, y1 = marker.bbox
+        for ei in indices:
+            x, y = self.grid[ei]
+            self.assertLessEqual(x0, x)
+            self.assertLessEqual(y0, y)
+            self.assertGreaterEqual(x1, x)
+            self.assertGreaterEqual(y1, y)
+        self.assertEqual(self.index.decoded, [])
+        self.assertEqual(self.pack.geometry_decodes, 0)
+
+    def test_coarse_bbox_contains_negative_degenerate_and_extended_geometry(self):
+        # Includes a point, horizontal/vertical segments, a polygon, and a
+        # two-edge record. Containment covers full geometry, not its center.
+        markers = self.index.query((-20, -20, 20, 20), 400, 400,
+                                   checks=[1], cell_px=400)
+        self.assert_counts(markers, len(self.edge_boxes))
+        self.assertEqual(len(markers), 1)
+        self.assertTrue(markers[0].approximate)
+        x0, y0, x1, y1 = markers[0].bbox
+        for a, b, c, d in self.edge_boxes:
+            self.assertLessEqual(x0, a)
+            self.assertLessEqual(y0, b)
+            self.assertGreaterEqual(x1, c)
+            self.assertGreaterEqual(y1, d)
+        self.assertEqual(self.index.decoded, [])
+        self.assertEqual(self.pack.geometry_decodes, 0)
+
+    def test_compacted_overview_bboxes_keep_full_population_coverage(self):
+        bounds = (-1, -1, 100, 50)
+        raw = self.index.query(bounds, 100, 50, checks=[0], cell_px=16)
+        markers = self.index.query(bounds, 100, 50, checks=[0], cell_px=16,
+                                   declutter=True)
+        self.assert_counts(raw, len(self.grid))
+        self.assert_counts(markers, len(self.grid))
+        self.assertLess(len(markers), len(raw))
+
+        def union(items):
+            return (min(m.bbox[0] for m in items),
+                    min(m.bbox[1] for m in items),
+                    max(m.bbox[2] for m in items),
+                    max(m.bbox[3] for m in items))
+
+        self.assertEqual(union(markers), union(raw))
+        points = np.asarray(self.grid)
+        covered = np.zeros(len(points), dtype=bool)
+        for marker in markers:
+            x0, y0, x1, y1 = marker.bbox
+            covered |= ((x0 <= points[:, 0]) & (points[:, 0] <= x1) &
+                        (y0 <= points[:, 1]) & (points[:, 1] <= y1))
+        self.assertTrue(np.all(covered), "compacted boxes omit error locations")
+        self.assertEqual(self.index.decoded, [])
+        self.assertEqual(self.pack.geometry_decodes, 0)
+
     def test_arbitrary_cluster_and_review_filters_are_complete(self):
         group = self.cluster("1,3000,4001-5000")
         chosen = {0, 2999} | set(range(4000, 5000))
