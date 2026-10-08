@@ -175,6 +175,18 @@
   센터링(`_minimap_world_point`). 테스트
   `test_minimap_die_outline_keeps_a_margin_from_the_edge_and_the_view_box`. fit/clip·
   open .db…·rules… 버튼은 2026-08-22 메뉴 바로 이전(패널 정보줄만 잔류).
+- **레이어 목록에 넣는 것(2026-10-08, app 0.12.322; 사용자: 현장 EBEAM 파일을 레이아웃 모드로 열면
+  Calibre는 3.0·3.300만, floe는 3.0·3.1·3.2·3.300을 보이고 3.1·3.2에는 도형이 없음).**
+  - 원인: 파일의 LAYERNAME 표가 3/1·3/2를 이름으로 두고 그 위의 도형·텍스트는 없다. 색인은 KLayout처럼 그런 쌍도
+    레이어 표에 두고(`stored_shapes` 0), 뷰어는 표를 그대로 목록에 올렸다. Calibre는 무엇이 놓인 레이어만 보인다.
+  - 이제 레이아웃의 목록은 `gui.listed_meta`가 정한다. `stored_shapes`가 0인 쌍(도형도 텍스트도 없음)은 패널·visible
+    집합·레이어 속성에서 빠진다. 열 때 터미널에 한 줄로 알린다(`[floe2] 2 layers not listed - the file's layer table
+    names them, no shape or text is on them: 3/1, 3/2 (FLOE_EMPTY_LAYERS=show lists them)`).
+  - 그대로인 것: 색인·`floe2 info`(모든 쌍과 stored shapes; 0 = 이름만)·렌더러의 스타일, 텍스트만 있는 레이어(라벨로
+    그려지므로 목록에 있음), 잡덱의 표(level 머리 행은 원래 아무것도 갖지 않음). 모든 레이어를 켜면 요청은 레이어
+    목록 없이(전부) 가므로 그림도 같다.
+  - 킬 스위치 `FLOE_EMPTY_LAYERS=show`: 모든 쌍을 예전처럼 보인다. 게이트: cell_tree C10, rust_renderer
+    `LayerListTests`.
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
   마커(흰 십자+사각), DRC 마크(**상태색** — 2026-08-14: not waived

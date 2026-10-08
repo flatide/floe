@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Validate the in-tree Rust render worker contract and real daemon bridge."""
 
+import inspect
+import io
 import os
 import queue
 import subprocess
@@ -2918,6 +2920,96 @@ class IndexOnOpenTests(unittest.TestCase):
                              ["vfs-index", "open"])
         finally:
             del os.environ["FLOE_INDEX_ON_OPEN"]
+
+
+class LayerListTests(unittest.TestCase):
+    """The layer panel lists a layout's pairs that hold something (user
+    2026-10-08, the field's EBEAM files: Calibre listed 3.0 and 3.300
+    where floe listed 3.1 and 3.2 too, nothing drawn on them - pairs only
+    the file's LAYERNAME table names, stored_shapes 0)."""
+
+    @staticmethod
+    def _layout(directory):
+        cache = FakeCache(directory)
+        cache.meta["layers"] = [
+            {"layer": 3, "datatype": 0, "name": "MAIN",
+             "color": "#3fff77", "stored_shapes": 20},
+            {"layer": 3, "datatype": 1, "name": "NAMED1",
+             "color": "#3fff77", "stored_shapes": 0},
+            {"layer": 3, "datatype": 2, "name": "NAMED2",
+             "color": "#3fff77", "stored_shapes": 0},
+            {"layer": 3, "datatype": 300, "name": "3/300",
+             "color": "#3fff77", "stored_shapes": 20},
+            # a text alone is drawn as a label: listed
+            {"layer": 5, "datatype": 0, "name": "5/0",
+             "color": "#ff0000", "stored_shapes": 1},
+            # a table without the count: listed
+            {"layer": 6, "datatype": 0, "name": "6/0", "color": "#00ff00"},
+        ]
+        return cache
+
+    @staticmethod
+    def _keys(meta):
+        return [(l["layer"], l["datatype"]) for l in meta["layers"]]
+
+    def test_a_layouts_pairs_with_nothing_on_them_are_not_listed(self):
+        from floe import gui
+        with tempfile.TemporaryDirectory() as directory:
+            cache = self._layout(directory)
+            with mock.patch.dict(os.environ, {"FLOE_EMPTY_LAYERS": ""}), \
+                    mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                listed = gui.listed_meta(cache)
+            self.assertEqual(self._keys(listed),
+                             [(3, 0), (3, 300), (5, 0), (6, 0)])
+            self.assertEqual(listed["dbu"], cache.meta["dbu"])
+            # the cache's own table (the renderer's styles) keeps every pair
+            self.assertEqual(len(cache.meta["layers"]), 6)
+            self.assertIn("2 layers not listed", err.getvalue())
+            self.assertIn("3/1, 3/2 (FLOE_EMPTY_LAYERS=show", err.getvalue())
+            # the kill switch lists every pair as before
+            with mock.patch.dict(os.environ, {"FLOE_EMPTY_LAYERS": "show"}):
+                self.assertIs(gui.listed_meta(cache), cache.meta)
+            # a jobdeck's table is the deck's (its level heads hold nothing)
+            cache.is_jobdeck = True
+            with mock.patch.dict(os.environ, {"FLOE_EMPTY_LAYERS": ""}):
+                self.assertIs(gui.listed_meta(cache), cache.meta)
+            # a table whose every pair holds something: as it is, no note
+            full = FakeCache(directory)
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertIs(gui.listed_meta(full), full.meta)
+            self.assertEqual(err.getvalue(), "")
+        # the viewer adopts a cache's table through it
+        self.assertIn("self.meta = listed_meta(cache)",
+                      inspect.getsource(gui.Viewer._apply_cache))
+
+    def test_the_panel_and_the_visible_set_hold_the_listed_pairs(self):
+        try:
+            from floe import gui
+            gui.import_gtk()
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        with tempfile.TemporaryDirectory() as directory:
+            cache = self._layout(directory)
+            v = gui.Viewer.__new__(gui.Viewer)
+            v.cache = cache
+            with mock.patch("sys.stderr", new_callable=io.StringIO):
+                v.meta = gui.listed_meta(cache)
+            v.visible = set(self._keys(v.meta))
+            v._layers_box = gui.Gtk.Box(
+                orientation=gui.Gtk.Orientation.VERTICAL)
+            self.addCleanup(v._layers_box.destroy)
+            v._layer_patterns, v._fill_patterns = {}, []
+            v.selections = []
+            v.redraw = lambda **kw: None
+            v._build_layer_panel()
+            self.assertEqual(set(v._layer_rows),
+                             {(3, 0), (3, 300), (5, 0), (6, 0)})
+            # layer 3 as Calibre lists it: 3.0 heading 3.300
+            self.assertEqual(v._layer_groups, {(3, 0): [(3, 300)]})
+            # every listed pair on: the request names no list (all layers)
+            self.assertIsNone(v._layers_arg())
+            v._layer_rows[(5, 0)].set_active(False)
+            self.assertEqual(v._layers_arg(), [(3, 0), (3, 300), (6, 0)])
 
 
 @unittest.skipUnless(os.environ.get("FLOE_INTEGRATION_SOURCE"),

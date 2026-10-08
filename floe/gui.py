@@ -1444,6 +1444,35 @@ def _remote_x_scroll_repaint(scroller):
         pass
 
 
+def listed_meta(cache):
+    """The cache's meta with the layer table the viewer lists (user
+    2026-10-08, the field's EBEAM files: Calibre listed 3.0 and 3.300
+    where floe listed 3.1 and 3.2 too, nothing drawn on them). A
+    layout's pair that holds no shape and no text (stored_shapes 0: only
+    the file's LAYERNAME table names it - KLayout lists it, and so does
+    the index) is left out of the panel, the visible set and the layer
+    properties; the index, `info` and the renderer keep every pair. A
+    jobdeck's table is the deck's (its level heads hold nothing by
+    design). FLOE_EMPTY_LAYERS=show lists every pair as before."""
+    meta = cache.meta
+    if getattr(cache, "is_jobdeck", False) or \
+            os.environ.get("FLOE_EMPTY_LAYERS") == "show":
+        return meta
+    layers = meta.get("layers", [])
+    listed = [l for l in layers if l.get("stored_shapes") != 0]
+    if len(listed) == len(layers):
+        return meta
+    left = ["%d/%d" % (l["layer"], l["datatype"])
+            for l in layers if l.get("stored_shapes") == 0]
+    sys.stderr.write(
+        "[%s] %d layer%s not listed - the file's layer table names "
+        "them, no shape or text is on them: %s%s (FLOE_EMPTY_LAYERS=show "
+        "lists them)\n" % (APP, len(left), "" if len(left) == 1 else "s",
+                           ", ".join(left[:8]),
+                           ", ..." if len(left) > 8 else ""))
+    return dict(meta, layers=listed)
+
+
 class LayerRow(object):
     """One layer row: [marker][layer.datatype][swatch][name].
 
@@ -2407,7 +2436,8 @@ class Viewer:
             self._frontier_depths = []
             self._minimap_bases = {}
         else:
-            self.meta = cache.meta
+            # a layout's pairs with nothing on them stay off the panel
+            self.meta = listed_meta(cache)
             self.dbu = self.meta["dbu"]
             bb = self.meta["bbox"]
             self.cx = (bb[0] + bb[2]) / 2

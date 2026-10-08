@@ -562,6 +562,11 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   alias를 패널 이름으로 표시한다. 이름 기반 `--layers`는 모든 alias를
   허용한다. 기존 캐시에는 aliases가 없으므로 새 규칙을 보려면
   재인덱싱해야 한다.
+  레이아웃에서 `LAYERNAME` 표에만 있고 도형도 텍스트도 없는
+  `(layer, datatype)`은 Calibre처럼 목록에 넣지 않는다(2026-10-08; 열 때
+  터미널에 `N layers not listed …` 한 줄). `floe2 info`는 모든 쌍을
+  stored shapes와 함께 보이며(0이 그런 쌍), `FLOE_EMPTY_LAYERS=show`이면
+  패널도 예전처럼 모두 보인다. 잡덱의 레이어 표는 그대로다.
   그룹이 접혀 있을 때 부모를 온/오프하면 자식도 함께 바뀐다. 그룹을
   펼치면 부모와 각 자식 datatype이 모두 개별적으로 토글된다.
   자식 없는 레이어는 마커 자리가 공백이라 모든 이름이 좌측 정렬된다.
