@@ -10,9 +10,9 @@ use crate::{
     },
     Error, ErrorKind, Result,
 };
-use floe_worker_client::FrameFormat;
+use floe_worker_client::{FrameFormat, Layers};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     sync::{atomic::AtomicUsize, Arc},
@@ -31,6 +31,46 @@ struct Plan<'a> {
     display: PathBuf,
     target: PathBuf,
     keep: Vec<PathBuf>,
+    /// The skipped placements this capture lacks (indices into the ledger).
+    lacks: Vec<usize>,
+}
+/// The ledger records a capture drawing `layers` lacks (floe.shots
+/// plan_shots, jobdeck.chips ChipTable.skipped_in): every record with every
+/// layer on, else those of the chips on - a chip is a deck view row with a
+/// source, keyed by its layer/datatype, and a record no row names counts, to
+/// be safe. A layout skips nothing.
+fn lacks(dataset: &Dataset, layers: &Layers) -> Vec<usize> {
+    let skipped = dataset.skipped();
+    let on: BTreeSet<(i64, i64)> = match layers {
+        Layers::All => return (0..skipped.len()).collect(),
+        Layers::None => BTreeSet::new(),
+        Layers::Only(keys) => keys
+            .iter()
+            .map(|&(l, d)| (i64::from(l), i64::from(d)))
+            .collect(),
+    };
+    let Dataset::Deck(deck) = dataset else {
+        return Vec::new();
+    };
+    let rows: BTreeMap<(i64, String), (i64, i64)> = deck
+        .metadata
+        .layers
+        .iter()
+        .filter(|l| !l.jobdeck_head)
+        .filter_map(|l| {
+            let tc = crate::jobdeck::view::normalize_tc(l.jobdeck_source.as_deref()?);
+            Some(((l.layer, tc), (l.layer, l.datatype)))
+        })
+        .collect();
+    skipped
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            rows.get(&(r.idx, crate::jobdeck::view::normalize_tc(&r.tc)))
+                .is_none_or(|key| on.contains(key))
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
 fn sidecars(path: &Path) -> Result<Vec<PathBuf>> {
     let filename = path
@@ -97,7 +137,10 @@ pub fn run(
                 "jobdeck labels are not supported",
             ));
         }
-        dataset.resolve_layers(named.capture.shot.layers.as_deref())?;
+        let lacks = lacks(
+            dataset,
+            &dataset.resolve_layers(named.capture.shot.layers.as_deref())?,
+        );
         for tile in &tiles {
             if tile
                 .bbox
@@ -128,6 +171,7 @@ pub fn run(
             display,
             target,
             keep,
+            lacks,
         });
     }
     let report = options
@@ -184,7 +228,7 @@ pub fn run(
             let mut kept = Vec::new();
             let mut png = None;
             let mut deferred = 0u64;
-            let mut all_complete = dataset.skipped().is_empty();
+            let mut all_complete = plan.lacks.is_empty();
             for (i, tile) in plan.tiles.iter().enumerate() {
                 let mut request = session.shot_request(dataset, tile)?;
                 if canvas.is_some() {
@@ -218,7 +262,7 @@ pub fn run(
             }
             let mut row = serde_json::json!({"name":plan.named.name,"out":plan.display,"pixel":[width,height],
                 "layers":capture.shot.layers,"depth":capture.shot.depth,"over_budget_pages":deferred,
-                "skipped_placements":dataset.skipped().len(),"complete":all_complete});
+                "skipped_placements":plan.lacks.len(),"complete":all_complete});
             let staged = if let Some(canvas) = canvas {
                 let (rgba, info) = canvas.finish(capture.line, &capture.line_color, cancelled)?;
                 row["pixel"] = serde_json::json!([width * 2, height * 2]);
@@ -281,6 +325,22 @@ pub fn run(
         rows.push(row);
     }
     let complete = rows.iter().all(|r| r["complete"] == true);
+    // what the images lack - the skipped placements of the chips some shot
+    // had on - and the rest, in chips no shot had on (floe.shots run_shots)
+    let shown: BTreeSet<usize> = plans.iter().flat_map(|p| p.lacks.iter().copied()).collect();
+    let (lacking, off): (Vec<_>, Vec<_>) = dataset
+        .skipped()
+        .iter()
+        .enumerate()
+        .partition(|(i, _)| shown.contains(i));
+    let lacking: Vec<_> = lacking.into_iter().map(|(_, r)| r).collect();
+    let off: Vec<_> = off.into_iter().map(|(_, r)| r).collect();
+    if !off.is_empty() {
+        log(&format!(
+            "[floe2-web] note: {} placement(s) the load skips are in chips no shot had on",
+            off.len()
+        ));
+    }
     if let Some(path) = report {
         let mut doc = serde_json::json!({"source":dataset.source(),"dbu":dataset.dbu(),"shots":rows,
             "cut_px":shots[0].capture.shot.detail.cut_px(),"thin":shots[0].capture.shot.thin.name(),"complete":complete});
@@ -293,7 +353,7 @@ pub fn run(
                     n.checked_add(r["over_budget_pages"].as_u64().unwrap())
                 })
                 .ok_or_else(|| Error::input("report page count overflow"))?;
-            doc["jobdeck"] = serde_json::json!({"complete":complete,"skipped":dataset.skipped(),"over_budget_pages":over_budget,
+            doc["jobdeck"] = serde_json::json!({"complete":complete,"skipped":lacking,"skipped_off":off,"over_budget_pages":over_budget,
                 "view":deck.metadata.jobdeck.mode,"levels":deck.metadata.jobdeck.levels});
         }
         let result = (|| {
@@ -309,7 +369,7 @@ pub fn run(
         ));
     }
     if !complete {
-        log(&format!("[floe2-web] rendered INCOMPLETE: {} skipped placement(s), see per-shot over-budget counts [exit 3]",dataset.skipped().len()));
+        log(&format!("[floe2-web] rendered INCOMPLETE: {} skipped placement(s), see per-shot over-budget counts [exit 3]",lacking.len()));
     }
     Ok(complete)
 }

@@ -272,6 +272,11 @@ empty bbox=1000000,1000000,1000001,1000001 px=17
             args = ["--corners="+','.join(map(str,bbox)), "--size="+','.join(map(str,size)),"--px=39x27","--keep-tiles"]
             compare(path,work,env,"deck"+str(i),args,code=0 if i==0 else 3)
             compare(path,work,env,"deck-batch"+str(i),["--px=31x23"],"fit\nmask layers=METAL1\n",code=0 if i==0 else 3)
+        # Chips no shot has on take their skipped placements out of what the
+        # images lack (floe.shots, 2026-10-06): absent.oas is ALIGN's alone.
+        off = compare(missing,work,env,"deck-off",["--px=31x23","--layers=METAL1"])["jobdeck"]
+        assert off["skipped"] == [] and off["skipped_off"] and off["complete"], off
+        assert {r["tc"] for r in off["skipped_off"]} == {"absent.oas"}, off
         info = json.loads(invoke(["info",deck,"--json"],env).stdout)["metadata"]
         safety(source,work,env,deck,info["dbu"])
         assert all(digest(p)==before for p,before in caches.items()), "source caches changed"
