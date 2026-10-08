@@ -935,6 +935,7 @@ mod tests {
             members: 0,
             index: crate::PageIndex::build(&doc),
             doc,
+            grown_bytes: 0,
         })
     }
 

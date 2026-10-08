@@ -172,7 +172,24 @@ DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "
                  # the brightness's gain, thousandths: a pixel shows min(1,
                  # g x the area its density covers) of its colour (2026-10-05;
                  # 0: the dots as lit pixels)
-                 "bright_milli")
+                 "bright_milli",
+                 # the pages a budget left out that their occupancy records
+                 # (design.ovb) stand in for (2026-10-05)
+                 "stood_in",
+                 # a sub-cut cell stands for the area its shapes cover (1; 0:
+                 # for its box - no design.ovb or hierarchy summary), the
+                 # cells whose cover the plans worked out, the nodes that
+                 # counted what their placements hold (2026-10-05)
+                 "cell_cover", "cover_cells", "node_sampled",
+                 # the raster's opaque density pattern; older replies omit it
+                 "pattern",
+                 "mask_tests", "mask_pruned", "mask_fallbacks", "stages",
+                 # pass 2 drawn from the occupancy density (design.ovs,
+                 # on unless FLOE_RUST_DENSITY_OCC=off; 2026-10-06): the layers it held,
+                 # the cell it drew at in nm (0, 0: the plans drew it); the
+                 # layers this frame made and what its cache holds, KiB
+                 # (2026-10-07)
+                 "occ_layers", "occ_cell_nm", "occ_made", "occ_cache_kb")
 
 
 def _viewport_px(job, bbox):
@@ -205,6 +222,17 @@ def _wire_counts(value, names):
     if len(counts) != len(names):
         return None
     return dict(zip(names, counts))
+
+
+def _density_plan2(value):
+    """Pass-2 diagnostics; older renderers omit the occupancy density's
+    (all four, or its cache's two), the mask and/or the pattern fields."""
+    for size in (len(DENSITY_PLAN2), 46, 44, 40, 39):
+        counts = _wire_counts(value, DENSITY_PLAN2[:size])
+        if counts is not None:
+            counts.update(dict.fromkeys(DENSITY_PLAN2[size:], 0))
+            return counts
+    return None
 
 
 def _density_pages(value):
@@ -733,6 +761,7 @@ class RustRenderWorker:
             "started": time.monotonic(), "new": 0,
             "read_us": 0, "decode_us": 0, "scene_us": 0,
             "draw_us": 0, "png_us": 0, "plan_us": 0,
+            "fit_probe_us": 0, "fit_probe_walk": 0,
             "publish_write_us": 0, "publish_sync_us": 0,
             "publish_rename_us": 0, "adapter_read_us": 0,
             "cache_hit": 0, "cache_evicted": 0, "render_tiles": 0,
@@ -1089,9 +1118,10 @@ class RustRenderWorker:
                 self.res.put({"kind": "cancelled", "gen": generation,
                               "phase": fields.get("phase", "")})
             if kind == "dropped":
-                # a margin the budget fit does not hold (reason=fit) or a
-                # stale render: told, so the GUI can log it and a gate can
-                # wait for it; the GUI shows nothing for it
+                # a margin the budget fit does not hold (reason=fit), one
+                # whose pages passed the budget (reason=budget) or a stale
+                # render: told, so the GUI can log it and a gate can wait
+                # for it; the GUI shows nothing for it
                 self.res.put({"kind": "dropped", "gen": generation,
                               "reason": fields.get("reason", "")})
         elif kind == "error":
@@ -1349,6 +1379,11 @@ class RustRenderWorker:
             refining = 0
 
         state["plan_us"] = _wire_int(fields, "plan_us")
+        # the budget fit decided for a new scale before the plan (0.12.302:
+        # its own phase - it was time under none, the status line's `other`)
+        state["fit_probe_us"] = _wire_int(fields, "fit_probe_us")
+        # (it walked every cell of the extent: no hierarchy summary to go by)
+        state["fit_probe_walk"] = _wire_int(fields, "fit_probe_walk")
         state["read_us"] += _wire_int(fields, "read_us")
         state["decode_us"] += _wire_int(fields, "decode_us")
         state["scene_us"] += _wire_int(fields, "scene_us")
@@ -1396,7 +1431,7 @@ class RustRenderWorker:
         state["density_us"] = _wire_counts(fields.get("density_us", "-"), DENSITY_TIMES)
         state["density_bin"] = _wire_counts(fields.get("density_bin", "-"), DENSITY_BIN)
         state["density_dots"] = _wire_counts(fields.get("density_dots", "-"), DENSITY_DOTS)
-        state["density_plan2"] = _wire_counts(fields.get("density_plan2", "-"), DENSITY_PLAN2)
+        state["density_plan2"] = _density_plan2(fields.get("density_plan2", "-"))
         # the records' cut pass 2 planned at, px (the dots' floor,
         # FLOE_RUST_DENSITY_FLOOR_PX, or the density cut)
         try:
@@ -1441,6 +1476,7 @@ class RustRenderWorker:
                                    state["adapter_read_us"] / 1000.0))
             if not probe:
                 phases_us = (state["plan_us"] + state["text_plan_us"] +
+                             state["fit_probe_us"] +
                              state["read_us"] + state["decode_us"] +
                              state["scene_us"] + state["draw_us"] +
                              state["png_us"] + state["publish_write_us"] +
@@ -1501,6 +1537,8 @@ class RustRenderWorker:
             "other_ms": other_ms,
             "ms": round(elapsed_ms),
             "plan_ms": state["plan_us"] / 1000.0,
+            "fit_probe_ms": state["fit_probe_us"] / 1000.0,
+            "fit_probe_walk": bool(state["fit_probe_walk"]),
             "wc_cells": _wire_int(fields, "wc_cells"),
             "inst_edges": _wire_int(fields, "inst_edges"),
             "frame_rects": _wire_int(fields, "frame_rects"),
@@ -1555,6 +1593,22 @@ class RustRenderWorker:
                 # did not fit this frame and was decided anew (fit_redecided)
                 "fit_fixed": _wire_int(fields, "fit_fixed"),
                 "fit_redecided": _wire_int(fields, "fit_redecided"),
+                # the fit top plane first (pass 1, 2026-10-07; older renderers
+                # omit it): it ranked the pages by the drawing order, the
+                # layers kept whole above the one it ended in, that layer
+                # (`layer/datatype`, None when it kept nothing) and the layers
+                # left out under it
+                "fit_ranked": _wire_int(fields, "fit_ranked"),
+                "fit_layers_whole": _wire_int(fields, "fit_layers_whole"),
+                "fit_layer_edge": (None if fields.get("fit_layer_edge", "-") == "-"
+                                   else fields.get("fit_layer_edge")),
+                "fit_layers_out": _wire_int(fields, "fit_layers_out"),
+                # the layers' pages decode larger than the planner estimates
+                # (2026-10-05): the scale its budget was cut by, thousandths
+                # (0: none), and how often this frame was planned anew
+                # after its pages passed the budget
+                "fit_scale": _wire_int(fields, "fit_scale"),
+                "fit_refits": _wire_int(fields, "fit_refits"),
                 # sub-cut boxes (thin keep, few layers): what the size cut drops
                 # drawn as boxes from index metadata; boxes beyond the plan cap
                 "sub_cut_boxes": _wire_int(fields, "sub_cut_boxes"),

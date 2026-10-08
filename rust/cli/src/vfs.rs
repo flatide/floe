@@ -99,6 +99,12 @@ pub fn vfs_cmd(args: &[String]) {
     // floe_vfs::hiersum): written at the end of every build unless
     // --no-hier; `floe-index hier <cache>` adds it to an older cache
     let mut hier = true;
+    // the occupancy density design.ovs and its big cells' design.ovs.<cell>
+    // (floe_vfs::occ_density): built after the marker from the committed
+    // index unless --no-ovs (user 2026-10-07, ~700 s and ~40 MB on the field
+    // chip: "include ovs in indexing by default"); `floe-index ovs <cache>`
+    // adds or rebuilds it
+    let mut ovs = true;
     // slow-cell log threshold in seconds; 0 logs every cell (the
     // S6/S7 gates use it to observe fanout uptake). CLI state, not
     // an env var - same rule as --kill-at above.
@@ -236,6 +242,10 @@ pub fn vfs_cmd(args: &[String]) {
             }
             "--no-hier" => {
                 hier = false;
+                i += 1;
+            }
+            "--no-ovs" => {
+                ovs = false;
                 i += 1;
             }
             "--frontier-only" => {
@@ -693,6 +703,8 @@ pub fn vfs_cmd(args: &[String]) {
             "design.ovh.tmp",
             "design.ovb",
             "design.ovb.tmp",
+            "design.ovs",
+            "design.ovs.tmp",
             "labels.tsv",
             // legacy (pre-0.10) viewer file: scrub on rebuild so a
             // re-index actually reclaims the skeleton's bytes
@@ -702,6 +714,7 @@ pub fn vfs_cmd(args: &[String]) {
         ] {
             let _ = std::fs::remove_file(format!("{}/{}", outdir, f));
         }
+        let _ = remove_cell_ovs(&outdir, &[]);
         if kill_at.as_deref() == Some("marker-deleted") {
             eprintln!("[vfs] --kill-at marker-deleted");
             std::process::exit(9);
@@ -781,6 +794,15 @@ pub fn vfs_cmd(args: &[String]) {
             "[vfs] commit design.ovm ({})",
             fmt_size(ovm_bytes.len() as u64)
         );
+        if ovs {
+            // the occupancy density (additive, outside the marker protocol
+            // like design.ovh), from the committed index: the parse and the
+            // built bytes let go first, a failure costs the file, never the
+            // cache
+            drop(ovm_bytes);
+            drop(doc);
+            write_ovs_after_build(&outdir, jobs, page_occ, hier);
+        }
     }
     eprintln!(
         "[vfs] done in {:.1}s -> {}",
@@ -2179,6 +2201,208 @@ fn write_hier(ovm: &floe_ovm::Ovm, outdir: &str) {
         ),
         Err(e) => eprintln!(
             "[vfs] hier: {} - the cache is completed without design.ovh; add it later with `floe-index hier {}`",
+            e, outdir
+        ),
+    }
+}
+
+/// `floe-index ovs <cache> [--um F] [--jobs N] [--roots F]` (floe_vfs::occ_density, 2026-10-06):
+/// add (or rebuild) design.ovs - per layer and depth the cells holding
+/// shapes under the cut and their groups' mean cover, what the density
+/// stack's pass 2 draws by (FLOE_RUST_DENSITY_OCC=off: the plans) - from the cache's
+/// index (design.ovm, design.ovb, design.ovh, design.ovp) in one walk; the
+/// cache's other files are untouched. --um: the base cell in microns
+/// (default: the smallest power of two keeping the chip's longer side within
+/// 2,048 cells); --jobs: the threads decoding pages (default: all); --roots:
+/// the cells under the top whose box is this share of the top's or more get
+/// a file of their own, design.ovs.<cell>, their root views' (default 0.25;
+/// 0: none) - made in the same walk (user 2026-10-07).
+pub fn ovs_cmd(args: &[String]) {
+    let mut dir: Option<String> = None;
+    let mut base_um: Option<f64> = None;
+    let mut jobs = 0usize;
+    let mut root_share = floe_vfs::occ_density::OVS_ROOT_SHARE;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--jobs" {
+            i += 1;
+            jobs = args.get(i).and_then(|v| v.parse::<usize>().ok()).unwrap_or_else(|| {
+                eprintln!("--jobs wants a number of threads");
+                std::process::exit(2);
+            });
+        } else if a == "--um" {
+            i += 1;
+            base_um = args.get(i).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite() && *v > 0.0);
+            if base_um.is_none() {
+                eprintln!("--um wants a positive number of microns");
+                std::process::exit(2);
+            }
+        } else if a == "--roots" {
+            i += 1;
+            root_share = args.get(i).and_then(|v| v.parse::<f64>().ok()).filter(|v| (0.0..=1.0).contains(v)).unwrap_or_else(|| {
+                eprintln!("--roots wants a share of the top's box from 0 (none) to 1");
+                std::process::exit(2);
+            });
+        } else if a.starts_with("--") {
+            crate::unknown_option("ovs", a);
+        } else {
+            dir = Some(a.to_string());
+        }
+        i += 1;
+    }
+    let dir = dir.unwrap_or_else(|| {
+        eprintln!("usage: floe-index ovs <cache> [--um F] [--jobs N] [--roots F]");
+        std::process::exit(2);
+    });
+    let started = std::time::Instant::now();
+    // where the build is (user 2026-10-07: "no log while ovs indexes - 11
+    // minutes into the real chip and no telling how far it got")
+    let say = |line: &str| eprintln!("[ovs] {}", line);
+    let w = write_ovs(&dir, base_um, jobs, root_share, &say).unwrap_or_else(|e| {
+        eprintln!("ovs: {}", e);
+        std::process::exit(1);
+    });
+    let (g, stats) = (w.grid, &w.stats);
+    println!(
+        "ovs file={} bytes={} base_um={} grid={}x{} levels={} roots={} root_bytes={} walked={} small={} spread={} small_keys={} small_tiles={} pages={} big_pages={} decoded={} decoded_mb={:.1} decode_s={:.2} decode_jobs={} walk_s={:.2} settle_s={:.2} write_s={:.2} planes={} plane_mb={:.1} plane_levels={} empty={} open_s={:.2} total_s={:.2}",
+        w.path,
+        w.bytes,
+        g.base_um(),
+        g.w,
+        g.h,
+        g.n_levels,
+        w.roots,
+        w.root_bytes,
+        stats.walked,
+        stats.small,
+        stats.spread,
+        stats.small_keys,
+        stats.small_tiles,
+        stats.pages,
+        stats.big_pages,
+        stats.decoded,
+        stats.decoded_bytes as f64 / 1e6,
+        stats.decode_s,
+        stats.decode_jobs,
+        stats.walk_s,
+        stats.settle_s,
+        stats.write_s,
+        stats.grids,
+        stats.grid_bytes as f64 / 1e6,
+        stats.levels,
+        stats.empty_levels,
+        w.open_s,
+        started.elapsed().as_secs_f64()
+    );
+}
+
+/// What write_ovs wrote: the top's design.ovs (its path, bytes and grid),
+/// the big cells' files, and what the build did
+struct OvsWritten {
+    path: String,
+    bytes: usize,
+    grid: floe_vfs::occ_density::OvsGrid,
+    roots: usize,
+    root_bytes: usize,
+    stats: floe_vfs::occ_density::OvsStats,
+    open_s: f64,
+}
+
+/// design.ovs and the big cells' design.ovs.<cell> for the cache at `dir`,
+/// from its index (design.ovm, design.ovb, design.ovh, design.ovp) in one
+/// walk (floe_vfs::occ_density::build), each by tmp + rename - a viewer
+/// reading the old file meanwhile keeps it whole - and an earlier build's
+/// cell files no longer made removed; `say` gets the progress lines. An
+/// error names the file or the step.
+fn write_ovs(dir: &str, base_um: Option<f64>, jobs: usize, root_share: f64, say: &dyn Fn(&str)) -> Result<OvsWritten, String> {
+    let started = std::time::Instant::now();
+    let mut ovm = floe_ovm::Ovm::open(&format!("{}/design.ovm", dir)).map_err(|e| format!("design.ovm: {}", e))?;
+    match ovm.attach_page_occ(&format!("{}/design.ovb", dir)) {
+        Ok(true) => {}
+        Ok(false) => return Err("design.ovb: missing (an index built without the pages' occupancy: index again)".into()),
+        Err(e) => return Err(format!("design.ovb: {}", e)),
+    }
+    let summary = floe_vfs::hiersum::HierSummary::open(&format!("{}/design.ovh", dir))
+        .and_then(|s| s.validate_against(&ovm).map(|()| s))
+        .map_err(|e| format!("design.ovh: {} (floe-index hier adds it)", e))?;
+    let cover = floe_vfs::cover::CellCover::new(&ovm, std::sync::Arc::new(summary)).ok_or("cell cover: no design.ovb or another summary")?;
+    let open_s = started.elapsed().as_secs_f64();
+    say(&format!("{}: index open ({:.1} s)", dir, open_s));
+    let ovp = format!("{}/design.ovp", dir);
+    let floe_vfs::occ_density::Built { top, roots, stats } =
+        floe_vfs::occ_density::build(&ovm, &cover, &ovp, base_um, jobs, root_share, say).map_err(|e| format!("build: {}", e))?;
+    let grid = floe_vfs::occ_density::OvsFile::from_bytes(top.clone()).map_err(|e| format!("build: {}", e))?.grid;
+    let write = |path: &str, bytes: &[u8]| -> Result<(), String> {
+        let tmp = format!("{}.tmp", path);
+        std::fs::write(&tmp, bytes).map_err(|e| format!("{}: {}", tmp, e))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("{}: {}", path, e))
+    };
+    // the big cells' files, and none left of an earlier build's other cells
+    let mut root_bytes = 0usize;
+    for (ci, name, rb) in &roots {
+        let path = format!("{}/design.ovs.{}", dir, ci);
+        floe_vfs::occ_density::OvsFile::from_bytes(rb.clone()).map_err(|e| format!("{}: {}", path, e))?;
+        write(&path, rb)?;
+        root_bytes += rb.len();
+        say(&format!("{}: cell {}'s root views, {:.1} MB", path, name, rb.len() as f64 / 1e6));
+    }
+    let kept: Vec<u32> = roots.iter().map(|r| r.0).collect();
+    for removed in remove_cell_ovs(dir, &kept)? {
+        say(&format!("{}: removed (an earlier build's)", removed));
+    }
+    let path = format!("{}/design.ovs", dir);
+    write(&path, &top)?;
+    Ok(OvsWritten { path, bytes: top.len(), grid, roots: roots.len(), root_bytes, stats, open_s })
+}
+
+/// The cells' design.ovs.<cell> (and their .tmp) in `dir` but those of the
+/// cells `kept`, removed: their paths
+fn remove_cell_ovs(dir: &str, kept: &[u32]) -> Result<Vec<String>, String> {
+    let mut removed = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(removed) };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix("design.ovs.") else { continue };
+        let (number, tmp) = match rest.strip_suffix(".tmp") {
+            Some(number) => (number, true),
+            None => (rest, false),
+        };
+        let Ok(ci) = number.parse::<u32>() else { continue };
+        if tmp || !kept.contains(&ci) {
+            let path = format!("{}/{}", dir, name);
+            std::fs::remove_file(entry.path()).map_err(|e| format!("{}: {}", path, e))?;
+            removed.push(path);
+        }
+    }
+    removed.sort();
+    Ok(removed)
+}
+
+/// design.ovs at the end of a build (`floe-index vfs`, unless --no-ovs):
+/// from the committed index, its decode on the build's `jobs` threads; left
+/// out where its inputs were (--no-page-occupancy, --no-hier); a failure
+/// says how to add it later and leaves the cache as it is.
+fn write_ovs_after_build(outdir: &str, jobs: usize, page_occ: bool, hier: bool) {
+    if !page_occ || !hier {
+        eprintln!(
+            "[vfs] ovs: none - design.ovs is made of design.ovb and design.ovh ({} left one out)",
+            if page_occ { "--no-hier" } else { "--no-page-occupancy" }
+        );
+        return;
+    }
+    let started = std::time::Instant::now();
+    let say = |line: &str| eprintln!("[ovs] {}", line);
+    match write_ovs(outdir, None, jobs, floe_vfs::occ_density::OVS_ROOT_SHARE, &say) {
+        Ok(w) => eprintln!(
+            "[vfs] ovs design.ovs: {} and {} cell file(s) of {} ({:.1}s)",
+            fmt_size(w.bytes as u64),
+            w.roots,
+            fmt_size(w.root_bytes as u64),
+            started.elapsed().as_secs_f64()
+        ),
+        Err(e) => eprintln!(
+            "[vfs] ovs: {} - the cache is completed without design.ovs; add it later with `floe-index ovs {}`",
             e, outdir
         ),
     }

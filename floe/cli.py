@@ -401,6 +401,10 @@ def _run_rust_index(args, binary, coverage_only=False,
         # (2026-10-02); --no-page-occupancy (the kill switch) leaves them out
         if getattr(args, "no_page_occupancy", False):
             command.append("--no-page-occupancy")
+        # the occupancy density, design.ovs, is built by default
+        # (2026-10-07); --no-ovs leaves it out
+        if getattr(args, "no_ovs", False):
+            command.append("--no-ovs")
         if args.slow_cell_s is not None:
             command += ["--slow-cell-s", str(args.slow_cell_s)]
         if args.p2_shard_limit_mb is not None:
@@ -524,6 +528,7 @@ def cmd_index(args):
     rust_options = any((args.page_target_mb is not None, args.coverage,
                         args.coverage_only, args.no_lod,
                         getattr(args, "no_page_occupancy", False),
+                        getattr(args, "no_ovs", False),
                         args.occupancy, args.occupancy_only,
                         args.slow_cell_s is not None,
                         args.p2_shard_limit_mb is not None, profiling,
@@ -653,8 +658,21 @@ def cmd_info(args):
         for l in m["layers"]:
             print(f"{l['layer']:>5}/{l['datatype']:<2} {l['name']:<20} "
                   f"{l['stored_shapes']:>11,}")
+        if args.chips:
+            # what `render --chip / --chip-off / --fit-chip` name: the
+            # chip view's rows, their CHIP blocks and placements
+            table = c.chips()
+            print("[jobdeck] chip rows : %d in level%s %s - the chips "
+                  "render --chip / --chip-off / --fit-chip NAME[#K] name"
+                  % (len(table.rows), "" if len(table.levels) == 1
+                     else "s", ",".join(map(str, table.levels))))
+            for line in table.listing():
+                print("  " + line)
         c.close()
         return
+    if args.chips:
+        raise SystemExit("floe: --chips lists a jobdeck's chips; %s is a "
+                         "layout" % args.src)
 
     def _du(path):
         tot = 0
@@ -986,7 +1004,9 @@ def _render_shots(args, c):
     """`floe render` on the Rust backend (jobdeck M4, any source): one
     open, one or many shots - --bbox / --at --size / --mosaic-at /
     --corners on the command line, or a --batch file of named shots -
-    written by floe.shots with the archival solid fills."""
+    written by floe.shots with the archival solid fills. A jobdeck's
+    chips go on and off with --chip / --chip-off and frame the region
+    (--fit-chip; user 2026-10-06)."""
     from . import shots as shots_mod
     if not 6 <= args.label_font_px <= 96:
         raise SystemExit("floe: --label-font-px must be 6..96")
@@ -996,6 +1016,8 @@ def _render_shots(args, c):
         "layers": args.layers, "depth": args.depth, "mosaic": args.mosaic_at,
         "corners": args.corners, "line": args.line,
         "linecolor": args.line_color, "keep_tiles": args.keep_tiles,
+        "chip": args.chip, "chip_off": args.chip_off,
+        "fit_chip": args.fit_chip,
     }
     defaults = {k: v for k, v in defaults.items()
                 if v is not None and v is not False}
@@ -1012,27 +1034,28 @@ def _render_shots(args, c):
             shots = [shots_mod.shot_from_fields(stem, defaults)]
     except (OSError, ValueError) as exc:
         raise SystemExit("floe: %s" % exc)
-    for shot in shots:
-        if shot.layers:
-            try:
-                c.resolve_layers(shot.layers)
-            except ValueError as exc:
-                raise SystemExit("floe: %s" % exc)
+    # every shot's layers, chips and region before the worker starts
+    try:
+        shots_mod.plan_shots(c, shots)
+    except ValueError as exc:
+        raise SystemExit("floe: %s" % exc)
     # --detail: the viewer's size cut (low/medium/high = 5/3/1 px);
     # exact (default) captures with no cut, as `floe render` always did
     from .service import DETAIL_PX
     cut_px = {"exact": 0.0, "low": DETAIL_PX[0], "medium": DETAIL_PX[1],
               "high": DETAIL_PX[2]}[args.detail]
     thin = None if args.thin in (None, "auto") else args.thin
+    summary = {}
     try:
         rows = shots_mod.run_shots(c, shots, args.out, report=args.report,
                                    frames=args.frames, labels=args.labels,
                                    label_font_px=args.label_font_px,
                                    log=print, batch=bool(args.batch),
-                                   cut_px=cut_px, thin=thin)
+                                   cut_px=cut_px, thin=thin, summary=summary)
     except (RuntimeError, ValueError) as exc:
         raise SystemExit("floe: Rust render service: %s" % exc)
-    skipped = _deck_skipped(c)
+    # what the images lack: the skipped placements of the chips on
+    skipped = summary.get("skipped", [])
     over_budget = sum(r.get("over_budget_pages", 0) for r in rows)
     if skipped or over_budget:
         print("floe: rendered incomplete - %d jobdeck placement(s) missing, "
@@ -1055,6 +1078,9 @@ def cmd_render(args):
     if args.batch or args.at or args.mosaic_at or args.corners:
         raise SystemExit("floe: --batch/--at/--mosaic-at/--corners "
                          "require FLOE_RENDERER=rust")
+    if args.chip or args.chip_off or args.fit_chip:
+        raise SystemExit("floe: --chip/--chip-off/--fit-chip name a "
+                         "jobdeck's chips (FLOE_RENDERER=rust)")
     if args.detail != "exact":
         raise SystemExit("floe: --detail requires FLOE_RENDERER=rust")
     if not args.bbox:
@@ -1784,6 +1810,10 @@ def _jobdeck_index(args, catalog):
                 cmd.append("--lod")
             if getattr(args, "no_page_occupancy", False):
                 cmd.append("--no-page-occupancy")
+            # a deck's sources need no design.ovs: the deck view never
+            # reads it (a layout's own index makes it; `floe-index ovs`
+            # adds it to a source opened alone)
+            cmd.append("--no-ovs")
             if occupancy or occupancy_only:
                 cmd.append("--occupancy")
                 cmd += _occupancy_args(args)
@@ -1939,6 +1969,13 @@ def main(argv=None, *, prog=None, rust_only=None):
                            "grids - where in its box a page's shapes lie, "
                            "for the density dots of a page under the floor "
                            "(written by default since 2026-10-02)")
+    rust.add_argument("--no-ovs", action="store_true",
+                      help="do not write design.ovs, the occupancy density "
+                           "the density's pass 2 draws by (FLOE_RUST_DENSITY_OCC"
+                           "=off: the plans), nor "
+                           "the big cells' design.ovs.<cell> (written by "
+                           "default since 2026-10-07; a jobdeck's sources "
+                           "never get it; `floe-index ovs <cache>` adds it)")
     rust.add_argument("--slow-cell-s", type=_nonnegative_float,
                       default=None, metavar="S",
                       help="slow-cell log threshold in seconds (default: "
@@ -2051,6 +2088,10 @@ def main(argv=None, *, prog=None, rust_only=None):
     p = sub.add_parser("info", help="show cache/layout summary")
     p.add_argument("src")
     _add_level_option(p)
+    p.add_argument("--chips", action="store_true",
+                   help="jobdeck: list every chip of the levels loaded - "
+                        "its CHIP blocks, placements (#K) and extents, "
+                        "the names render --chip/--fit-chip take")
     p.set_defaults(fn=cmd_info)
 
     p = sub.add_parser("render", help="render a region to PNG "
@@ -2091,20 +2132,40 @@ def main(argv=None, *, prog=None, rust_only=None):
                         help="four points clockwise from top-left, each "
                              "read with --size and --anchor like --at; "
                              "tiles tl,tr / bl,br, image twice --px")
-    mosaic.add_argument("--corners", default=None, metavar="X1,Y1,X2,Y2",
+    mosaic.add_argument("--corners", default=None, nargs="?", const="fit",
+                        metavar="X1,Y1,X2,Y2",
                         help="a region whose four W,H corners are the "
-                             "tiles")
+                             "tiles; alone (or 'fit'): the default "
+                             "region's - the chips' extent with --chip/"
+                             "--chip-off/--fit-chip, else the whole "
+                             "source")
     mosaic.add_argument("--line", type=float, default=2.0, metavar="W",
                         help="separator width in px drawn over the tile "
                              "edges (default 2; 0 = none)")
     mosaic.add_argument("--line-color", default="#ffffff", metavar="COLOR")
     mosaic.add_argument("--keep-tiles", action="store_true",
                         help="also write <out>_tl/_tr/_bl/_br.png")
+    chips = p.add_argument_group(
+        "jobdeck chips: on/off like the chip view (a NAME is the source "
+        "file name the chip view lists, its TC path or a CHIP id; N:NAME "
+        "level N alone; wildcards * ? [..], quoted)")
+    chips.add_argument("--chip", default=None, metavar="NAME[,NAME...]",
+                       help="these chips alone on (of the --level "
+                            "loaded); the region is then their extent")
+    chips.add_argument("--chip-off", default=None, metavar="NAME[,NAME...]",
+                       help="these chips off, the others on")
+    chips.add_argument("--fit-chip", default=None,
+                       metavar="NAME[#K][,NAME...]",
+                       help="the region is these chips' extent instead "
+                            "(on or not); #K their K-th placement alone, "
+                            "deck order (`floe2 info deck.jb --chips` "
+                            "lists them)")
     batch = p.add_argument_group("read once, shoot many")
     batch.add_argument("--batch", default=None, metavar="FILE",
                        help="one shot per line: NAME key=value ... (keys "
                             "bbox at size anchor px stretch layers depth "
-                            "mosaic corners line linecolor keep_tiles; "
+                            "mosaic corners line linecolor keep_tiles "
+                            "chip chip_off fit_chip; corners=fit; "
                             "'-' = stdin); --out is the directory")
     batch.add_argument("--report", default=None, metavar="FILE",
                        help="JSON: every shot's region, pixels and time")

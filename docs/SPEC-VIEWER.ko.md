@@ -70,9 +70,13 @@
     0.12.291부터 진단 `FLOE_RUST_DENSITY_ONLY=on`(1패스의 도형을 건너뛰고 밀도만)이면 태그 맨 앞 `dots` 뒤에
     `density only`가 붙는다(뷰어가 같은 환경 변수를 읽는다). 0.12.297부터 밀도가 밝기로 그려지면(기본; 픽셀이 덮인 면적
     × g만큼, 원본 색을 넘지 않게) 예약 뒤에 `bright xG`(g: low 1, medium 2, high 4)가 붙고, `dots xG`와 `gate …`는
-    붙지 않는다(밝기가 둘을 대신한다). 킬 스위치 `FLOE_RUST_DENSITY_BRIGHT=off`면 예전처럼 붙는다.
+    붙지 않는다(밝기가 둘을 대신한다). 킬 스위치 `FLOE_RUST_DENSITY_BRIGHT=off`면 예전처럼 붙는다. 0.12.299부터 예산에서
+    빠진 페이지를 점유 격자가 대신 그렸으면 `pass 2 over budget: …` 안에 `N pages by occupancy instead`가 붙는다
+    (하단 요약 줄에도). 0.12.300부터 `bright xG` 뒤에 컷 아래 셀이 무엇을 대표하는지가 붙는다: `cell cover`(셀의 도형이
+    덮는 면적. design.ovb와 계층 요약이 있을 때)나 `cells by box`(셀 상자. 둘 중 하나가 없거나
+    `FLOE_RUST_DENSITY_CELL_COVER=off`).
   - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
-    - 시간: `N ms = L load + D draw`. `+ T text`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
+    - 시간: `N ms = L load + D draw`. `+ T text`·`+ P fit probe`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
       붙는다. load의 `[plan+delta+apply]`는 빠진다.
     - 밀도 스택: `density: lit L px, pass 2 plan N ms (nodes …, reads …, cell dots …)`.
       - `lit`은 2패스가 켠 픽셀이다. 컷 아래 셀을 대신하는 점과, 2패스가 페이지에서 꺼내 면적대로
@@ -89,9 +93,16 @@
       - 블록·하한·구역 수는 전체 줄에만 있다.
     - work bin: `bin N items` 또는 `bin off(cap@N), hier V/P pruned`. 넘치면 타일마다 걷는 양을
       함께 보인다.
-    - 컷: `cut<X um`과 예산 맞춤(`… to fit budget`, `STILL OVER`). `(larger side)`는 빠진다.
+    - 컷: `cut<X um`과 예산 맞춤(`… to fit budget`, `STILL OVER`). `(larger side)`는 빠진다. 0.12.301부터 그 레이어들의
+      페이지가 추정보다 크게 디코드돼 예산을 줄여 계획했으면 `, pages xN their estimate`가 붙는다. 0.12.318부터 1패스의
+      맞춤은 위 plane부터라 `top N whole, L/D (1/M below xF, none below xG), K left out to fit budget`이다(위에서 온전한
+      레이어 수, 예산이 끝난 레이어와 그 등급, 빠진 레이어 수; SPEC-PLANNER). `FLOE_RUST_FIT_TOP_FIRST=off`면 종전
+      `1/M below xF, none below xG to fit budget`이다.
     - 그림이 모자란 것: `N pages over budget (not drawn)`, `labels partial`, `evict N`,
-      `summary N layers (not pickable)`.
+      `summary N layers (not pickable)`. `N pages over budget`은 0.12.301부터 단일 레이아웃에서도 나온다(어떤 계획도
+      예산에 들지 않을 때 오류 대신 예산이 담는 만큼 그린다). 여백(margin) 프레임이 예산을 넘으면 오류 대신
+      `dropped`(reason `budget`)이라 상태줄에 아무것도 뜨지 않는다(0.12.300은 `error: decoded generation budget
+      exceeded`를 보였다).
     - 덱: `deck N passes`.
   - 로드 직후 첫 프레임은 `loaded in X s · `만 앞에 붙는다. 내역은 로그에 있다.
   - depth는 위 줄(`depth: d/max · detail: …`)에 있다.
@@ -164,6 +175,18 @@
   센터링(`_minimap_world_point`). 테스트
   `test_minimap_die_outline_keeps_a_margin_from_the_edge_and_the_view_box`. fit/clip·
   open .db…·rules… 버튼은 2026-08-22 메뉴 바로 이전(패널 정보줄만 잔류).
+- **레이어 목록에 넣는 것(2026-10-08, app 0.12.322; 사용자: 현장 EBEAM 파일을 레이아웃 모드로 열면
+  Calibre는 3.0·3.300만, floe는 3.0·3.1·3.2·3.300을 보이고 3.1·3.2에는 도형이 없음).**
+  - 원인: 파일의 LAYERNAME 표가 3/1·3/2를 이름으로 두고 그 위의 도형·텍스트는 없다. 색인은 KLayout처럼 그런 쌍도
+    레이어 표에 두고(`stored_shapes` 0), 뷰어는 표를 그대로 목록에 올렸다. Calibre는 무엇이 놓인 레이어만 보인다.
+  - 이제 레이아웃의 목록은 `gui.listed_meta`가 정한다. `stored_shapes`가 0인 쌍(도형도 텍스트도 없음)은 패널·visible
+    집합·레이어 속성에서 빠진다. 열 때 터미널에 한 줄로 알린다(`[floe2] 2 layers not listed - the file's layer table
+    names them, no shape or text is on them: 3/1, 3/2 (FLOE_EMPTY_LAYERS=show lists them)`).
+  - 그대로인 것: 색인·`floe2 info`(모든 쌍과 stored shapes; 0 = 이름만)·렌더러의 스타일, 텍스트만 있는 레이어(라벨로
+    그려지므로 목록에 있음), 잡덱의 표(level 머리 행은 원래 아무것도 갖지 않음). 모든 레이어를 켜면 요청은 레이어
+    목록 없이(전부) 가므로 그림도 같다.
+  - 킬 스위치 `FLOE_EMPTY_LAYERS=show`: 모든 쌍을 예전처럼 보인다. 게이트: cell_tree C10, rust_renderer
+    `LayerListTests`.
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
   마커(흰 십자+사각), DRC 마크(**상태색** — 2026-08-14: not waived

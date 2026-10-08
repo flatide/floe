@@ -464,6 +464,15 @@ lower layer on took pages from the top plane: the routing chip's M8 over M1
 under 256 MB kept 76 % of M8's pixels); the others take what is left (user
 2026-10-04: "789's dots, lit alone, went with 787 on"; renderd
 `density_top_first`, `FLOE_RUST_DENSITY_TOP_FIRST=off` is the kill switch).
+Since 0.12.318 pass 1's budget fit keeps the pages top plane first as well
+(user 2026-10-07, the field chip: with 7.59 and 14.367 on, 7.59 alone drew -
+`none below x28.2` - its pages of larger shapes first in a fit by size alone):
+the planes above the one the budget ends in whole at the asked cut, that one
+by size class, none under it (floe_vfs `HierOpts::fit_rank`, renderd
+`pass1_fit_rank` from the style list's order; the frame line's `fit_ranked`,
+`fit_layers_whole`, `fit_layer_edge`, `fit_layers_out`; the status bar `top N
+whole, L/D (...), K left out to fit budget`). `FLOE_RUST_FIT_TOP_FIRST=off` is
+the kill switch: by size class alone, every layer at once.
 `FLOE_RUST_DENSITY_ONLY=on` (0.12.291, diagnostic, off by default) draws the
 density alone: pass 1 of a density frame reads no page and draws no shape
 (its plan keeps the hierarchy), so pass 2's reserve is the whole budget - to
@@ -490,7 +499,47 @@ space left top first, and pass 2's top side plans that space alone (user
 the space left will hardly jar"; render-core
 `GeometryRasterRequest::density_shapes_first`, renderd `density_shapes_first`;
 `FLOE_RUST_DENSITY_SHAPES_FIRST=off` is the kill switch: each top plane's
-density over the originals below it, as 0.12.293). Since 0.12.297 the
+density over the originals below it, as 0.12.293). Since 0.12.299, under the
+brightness on an index with design.ovb: pass 2's pages are cut at pass 1's
+cut, so a page all under it is spread by its occupancy grid while the grid's
+cells show no larger than `FLOE_RUST_DENSITY_OCC_CELL_PX` (4), whatever its
+shapes' size - decoded past that or with no grid to go by, no floor probed
+(renderd `density_ovb_first`, floe_vfs `HierOpts::dot_occ_first`;
+`FLOE_RUST_DENSITY_OVB_FIRST=off` is the kill switch: the pages from the
+density cut up decoded, as 0.12.298); a page a budget leaves out - the
+planner's fit, or the frame's last check - is drawn by its occupancy record
+instead (`HierOpts::dot_stand_in`, `Cache::stand_in_pages`;
+`FLOE_RUST_DENSITY_STAND_IN=off` is the kill switch; `density_plan2`'s 36th
+value counts the pages); and an item's cover keeps its fraction, a list
+member read for a window standing over its block's part of the chunk
+(`HierOpts::dot_bright_sums`; `FLOE_RUST_DENSITY_BRIGHT_SUMS=off` is the kill
+switch). A reviewer 2026-10-05, checked against the exact cover: the routing
+chip's fit view under 1 GB kept 110 of the 277 pages pass 2 decoded and drew
+x0.49 of them; now x1.01 in a third of the time. Since 0.12.300 the
+brightness no longer depends on the hierarchy the shapes are stored in: a
+cell under the cut stands for the area its visible layers cover - its own
+pages by design.ovb, its children by the hierarchy summary's member counts
+(design.ovh, or one made in memory for a cache of 4 M placement records or
+fewer), worked out on first use and ahead of it on a thread of its own - not
+for its whole box (floe_vfs `cover::CellCover`, `HierOpts::cell_cover`,
+`Cache::cell_cover`; `FLOE_RUST_DENSITY_CELL_COVER=off` is the kill switch,
+`FLOE_RUST_DENSITY_COVER_WARM=off`, diagnostic, leaves it to the first use;
+without design.ovb or a summary the box as before - `density_plan2`'s 37th
+value says which, the viewer's tag `cell cover` / `cells by box`); a node no
+wider than a box counts what its placements hold - all of them up to 32, past
+that 16 of them, one in each equal run, each standing for its run - where it
+counted its whole box once it had as many placements as sixteenths
+(`HierOpts::dot_node_sample`; `FLOE_RUST_DENSITY_NODE_SAMPLE=off` is the kill
+switch, `FLOE_RUST_DENSITY_NODE_READ_ALL` / `FLOE_RUST_DENSITY_NODE_SAMPLES`,
+diagnostic, the two counts); and an item across a block boundary is shared
+between the blocks it meets by its area, an array's members likewise, a point
+list's members past a quarter block put one by one (`HierOpts::dot_item_share`;
+`FLOE_RUST_DENSITY_ITEM_SHARE=off` is the kill switch). The three off draw
+0.12.299 byte for byte. Measured against the exact cover: a reviewer's 4,096
+squares of 1 dbu as a cell each 121 px at full colour -> 0 px, as flat; the
+standard-cell layout's 2/0 alone x6.9 -> x1.01; cells of mixed cover placed
+one by one x1.36 / x0.85 on their sparse / dense halves -> x1.01 / x1.01, 4 px
+blocks corr 0.88 -> 0.99. Since 0.12.297 the
 density is a brightness: a pixel shows min(1, g x the area pass 2's shapes
 cover in it) of its plane's colour - never past it - the planes over one
 another, the top first, g by the detail, 2^((5 - cut) / 2): low (5 px) 1,
@@ -628,6 +677,57 @@ The real parent `Cache` integration test also submits a 100-generation
 pan/zoom burst. It passed on both `valmini` and the 506-page `sample9`: none of
 the previous 99 generations published a frame, only the latest generation
 settled, and no partial file or pending adapter job remained.
+
+Since 0.12.301 a frame whose pages' decoded charge passes the generation
+budget is no longer an error (field 2026-10-05: two layers alone with the
+density off failed most frames with `decoded generation budget exceeded:
+1093017130 > 1073741824 bytes`). The planner fits a frame's pages to the
+budget by an estimate of their decoded size; the charge of some pages was
+past it - a page's record lists kept the room the parser grew them to, up to
+twice their length, and a repetition list shared by a page's records was
+charged once a record. Now a decoded page's record lists are cut to their
+length (`FLOE_RUST_DECODE_SHRINK=off` is the kill switch: 0.12.300's charge) -
+a rectangle page 124-217 B -> 120-124 B a record, no page of the synthetic
+chips past its estimate - and a shared list is charged once
+(`FLOE_RUST_CHARGE_SHARED=off`), so the fitted plan is drawn whole. The
+density stack counts its pages as the parser read them
+(`FLOE_RUST_DENSITY_AS_READ=off` counts them as held, and pass 2 has what the
+cut lists free: the synthetic MAIN01 1/10 at full depth 8-20 % slower for the
+same picture), so a density frame is the picture it was. Should a frame pass
+the budget all the same, it is planned anew under the budget over what its
+pages took, remembered for its layer set, depth, root and the density stack
+on or off (`FLOE_RUST_BUDGET_REFIT=off`: the error, as 0.12.300; the frame
+line's `fit_scale=` / `fit_refits=`, the viewer's `pages xN their
+estimate`), and where no plan holds it draws the pages the budget holds and
+reports the rest (`N pages over budget (not drawn)`). The viewer's margin
+frame is not planned anew: it answers `dropped gen=N reason=budget`, and the
+layers' remembered fits are forgotten with the raised scale, so the next
+viewport frame decides over its margin's extent under it. An exact frame and
+one the planner does not fit - no cut (an export at cut 0), or
+`FLOE_RUST_FIT_BUDGET=off` - fail as before. Every frame that drew before
+draws the same bytes.
+
+Since 0.12.302 the fit of a new scale is decided by a plan made for that
+alone (field 2026-10-05: the first frame at a scale was slow, the time under
+`other`). The first frame at a scale plans the extent the viewer's margin
+frame would have - twice the view a side - to decide the scale's budget fit,
+and that plan walked every placement of the extent, most of it outside the
+view, to keep its decision alone; its time was no phase's. Now it goes by
+the hierarchy summary (design.ovh, or the one the daemon makes in memory): a
+cell the extent covers whole takes its children from the summary and its
+placements are not read; in a cell covered in part the walk looks only for
+the children the summary leaves open and ends once each has a member whole
+within the extent. The pages and the decision are the walk's - 975 first
+frames compared, pixel for pixel - and with nothing of the index in the page
+cache the first frame zoomed in 16 times on the synthetic MAIN01 1/10 takes
+279-287 ms for 551-566 (the probe 63 for 336). `FLOE_RUST_FIT_PROBE_SUMMARY=off`
+is the kill switch; a cache of more than four million placement records
+without design.ovh walks as before (`floe-index hier` adds it).
+`FLOE_RUST_FIT_PROBE_CHECK=on` (diagnostic) plans both ways and prints
+`fit probe check: the same|DIFFERENT`. The frame line carries
+`fit_probe_us=` and `fit_probe_walk=`; the status line shows `+ N fit probe`
+from 100 ms and the log line `, fit probe N ms` (` (walk)` without a
+summary).
 
 The operational knobs are `FLOE_RENDERD_BIN`, `FLOE_RUST_JOBS` (page decode,
 default up to 8 host CPUs), `FLOE_RUST_RASTER_JOBS` (default up to 4 and never

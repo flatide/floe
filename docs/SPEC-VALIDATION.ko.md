@@ -28,7 +28,62 @@ sh tools/validate_rust.sh --only quick path/to.oas
   소스보다 새로우면 그대로 쓴다(`== VFS cache reused` 줄). `--only` 없는 전체
   배터리는 캐시를 매번 다시 만들어 형식 변경이 묵은 캐시 뒤에 숨지 못하게 한다.
 - 유닛 게이트: `unit`(워크스페이스 debug `cargo test`), `unit_vfs`·`unit_render`
-  (release `--lib`; release 프로필의 doctest는 LTO와 어긋나 제외).
+  (release `--lib`; release 프로필의 doctest는 LTO와 어긋나 제외), `unit_renderd`(release, renderd의 유닛;
+  0.12.304 — `render` 별칭에 포함).
+- **바뀐 파일로 고르기(`--changed`, 2026-10-06; 사용자: "매번 배터리 통과를 기다리는 것은 비효율적 — 관련 있는 검사만").**
+
+  ```sh
+  sh tools/validate_rust.sh --changed              # HEAD와 다른 파일(작업 트리·인덱스·새 파일)이 부르는 게이트
+  sh tools/validate_rust.sh --changed=origin/feature/jobdeck   # 그 리비전 이후 바뀐 파일
+  sh tools/validate_rust.sh --changed --dry-run    # 무엇을 돌릴지만 말한다
+  sh tools/validate_rust.sh --files=rust/vfs/src/hier.rs,floe/gui.py --dry-run   # 그 경로들이 부르는 게이트
+  ```
+
+  - 경로마다 게이트가 정해져 있다(스크립트의 `gates_for`; 먼저 맞는 규칙이 이긴다).
+    - 문서(`docs/`, `*.md`), 게이트가 쓰지 않는 도구(벤치·실험·생성기): 없음. 전부 그런 파일이면 아무것도 돌리지
+      않고 `RUST VALIDATION: ALL OK (--changed; gates: none)`으로 끝난다.
+    - `tools/validate_<게이트>.py`: 그 게이트. 여러 스크립트를 묶는 DRC 게이트는 별도 경로 표를 먼저 적용한다.
+      `validate_drc_cluster_spatial.py`는 `drc_clusters`, points·marker GUI·selection·status_bulk·spatial은
+      `drc_markers`, delta·native·analysis·prepare_cli·large_gui는 `drc_delta`다. 다른 테스트의 GUI 픽스처를
+      제공하는 `validate_drc_clusters.py`와 `validate_drc_marker_gui.py`는 `drc_delta`도 실행한다.
+      새 `validate_drc_*.py`가 표에 없으면 DRC 게이트 전체를 선택하여 조용히 검사를 생략하지 않는다.
+    - 버전 줄만 바뀐 `floe/__init__.py`·`Cargo.toml`·`Cargo.lock`(푸시마다 바뀐다): `rust_renderer`, `floe2`,
+      `index_cli`. 다른 줄도 바뀌었으면 전체.
+    - `floe/gui.py` 등 뷰어: `rust_renderer`, `floe2`, `jobdeck`, `density_stack`.
+      `gui.py`는 DRC GUI가 들어 있는 `drc_clusters`, `drc_markers`, `drc_delta`도 실행한다.
+      `service.py`·`fe_embed.py`는 DRC 주석·CLI 이미지 검증인 `drc_ice`, `drc_delta`,
+      `hangul.py`는 노트 입력 검증인 `drc_ice`를 추가한다.
+    - DRC 공통 reader·캐시 identity(`drc.py`, `drc_analysis.py`)는 DRC 게이트 전체,
+      `drc_clusters.py`는 세 DRC GUI 게이트, delta·prepare 모듈은 `drc_delta`,
+      marker·points·spatial·query·selection·native 모듈은 `drc_markers`, `drc_delta`를 실행한다.
+      `svrf.py`는 `drc_ice`, `svrf`, `drc_delta`다. `sample.db`·`sample.svrf.rules.json` 변경도
+      이 파일을 사용하는 준비 CLI·분석 테스트가 든 `drc_delta`를 실행한다.
+    - DRC 전용 Rust 모듈은 `unit`과 관련 DRC 게이트를 고른다. pack·ice는 DRC 전체,
+      CD 수식·prepare는 `drc_delta`, 공유 decoder·centers는 `drc_markers`, `drc_delta`,
+      SVRF 파서는 `svrf`, `drc_delta`다.
+    - renderd·render-core·render-cli·`floe/rust_render.py`(그리는 경로): `unit_render`, `unit_renderd`,
+      `rust_renderer`, `jobdeck`, `occupancy`, `fit_budget`, `sub_cut_box`, `shape_cut`, `write_once`,
+      `layer_decode`, `area_true`, `density_stack`, `cell_tree`, `representatives`, `oasis_shapes`, `floe2`,
+      `klayout`. `deck.rs`·`cells.rs`는 더 좁다.
+    - 계획기(`rust/vfs/src/hier.rs`·`cover.rs`): 위에 `unit_vfs`, `vfs_hier`, `vfs_lifecycle`, `vfs_marker`,
+      `vfs_split`, `vfs_text`, `vfs_profile`. `hiersum.rs`·`occupancy.rs`·`representatives`는 더 좁다.
+    - 모든 것이 걸린 파일 — 파서(`rust/oasis`), 인덱스 형식(`rust/ovm`), tiler, VFS의 나머지, floe-index
+      (위 DRC 전용 모듈을 제외한 `rust/cli`), vendor, `floe/cache.py`·`cachepath.py`, 이 스크립트,
+      `gen_valmini.py` — 과 표에 없는 경로:
+      **전체 배터리**.
+  - 시작할 때 `== gates to run:`과 `== gates left out:`을 찍는다. 빠진 게이트가 무엇인지가 그 실행의 한계다.
+  - 실행마다 끝에 게이트별 시간이 나온다: `== gate seconds (513s in all): setup=0s unit=38s …`.
+    2026-10-06 전체 배터리 513초 가운데 jobdeck 122, vfs_lifecycle 117, unit 38, occupancy 36, vfs_render 32,
+    density_stack 28, fit_budget 26, rust_renderer 14초이고 나머지는 11초 아래다(아래 빌드 수정 전에는 607초:
+    준비 39, unit 80초).
+  - 고르는 것으로 줄어드는 양(지난 커밋들의 파일이 부르는 게이트의 위 시간을 더한 어림): 문서만 0초, 게이트
+    스크립트 하나 몇 초~30초, 뷰어만 약 3분, 그리는 경로 약 5분, 계획기 약 7분 반, 형식·인덱서 8분 반(전체).
+    계획기·렌더러 변경은 느린 두 게이트(jobdeck, vfs_lifecycle)가 관련 게이트라 절반 넘게 남는다.
+  - 운영: 커밋·푸시는 `--changed`가 통과하면 한다. 전체 배터리는 표가 전체를 부를 때와 사용자가 청할 때 돌린다.
+- **linked work tree의 빌드(0.12.304).** renderd와 floe-index의 `build.rs`가 `.git/HEAD`를 지켜보는데, `git worktree
+  add`로 만든 트리는 `.git`이 파일이라 그 경로가 없어 **빌드마다 두 바이너리를 다시 컴파일했다**(리뷰 트리와 게이트
+  실행마다 16초). 이제 `.git` 파일이 가리키는 디렉터리의 HEAD와 `commondir`의 ref를 지켜본다: 바뀐 것이 없으면
+  `cargo build` 0.01초.
 - `gen_main01`(tools/validate_gen_main01.py, 약 10초; `python` 별칭에 포함): 합성 MAIN01 생성기.
   `--geometry legacy`가 2026-09-17의 파일과 바이트 동일(sha256 고정)한지, `--geometry chip`이
   `--jobs`와 무관하게 결정적이고 KLayout·floe-index가 읽으며 칩의 모양(가늘고 긴 배선, 여러
@@ -91,6 +146,109 @@ sh tools/validate_rust.sh --only quick path/to.oas
   프레임 결과의 `place_walks`에 그 배열의 걷기(`walked2`)가 오고, 목록 끔에서는 비어 있다(0.12.211).
   occupancy·jobdeck·representatives·sub_cut_box 게이트는 KLayout 규칙에 대한 비교라 이 킬 스위치를
   모든 워커에 고정한다(sub_cut_box: 상자는 표시용 점, 그 기준인 멤버 직접 그리기도 KLayout 규칙).
+- 컷 아래 공통 위상 패턴(2026-10-06, `CUT_DENSITY_DESIGN` §10.13):
+  - `unit_render`의 `density_pattern_*`: 3×3의 두 위상(4/5점), 2×2(2점), 3×2(3점), 1×1의 빈칸,
+    도형의 전체 차단 영역과 요약의 점만 차단하는 영역, 중복·하위 레이어 순회 순서, 배열/멤버 저장,
+    정수 패닝 및 소수 위상의 타일·워커 일치, 1×1 사각형/다각형/경로 일치를 확인한다.
+  - `density_stack`의 `pattern_checks`: 기본값=명시적 켬, `FLOE_RUST_DENSITY_PATTERN=off`의 밝기 복원,
+    원본·스페클 구멍 보존, 불투명한 레이어 색, 타일64/워커1과 타일127/워커4의 바이트 일치.
+    `full_shapes_first_checks`는 기본 패턴에서도 완전 가림이면 추가 계획·디코드가 0임을 확인한다.
+    `nearly_full_pattern_checks`는 99.9%가 원본인 화면에서 남은 칸이 공통 위상의 금지 자리이면 계획·디코드가 0이고,
+    허용 자리로 옮기면 밀도가 유지되며 타일64/127에서 같은지 검사한다.
+  - `unit_render`의 `occupancy_summary_claims_speckle_holes_for_density`: occupancy의 실제 점유 내부는
+    Solid/Speckle/Pattern/Clear 모두 차단하고 실제 빈 점유 셀은 밀도에 남긴다. 공통 패턴의 금지 자리 생략은
+    `density_pattern_forbidden_holes_need_no_regions_and_keep_real_free_counts`로 정수 pan과 실제 빈 공간 비율을 확인한다.
+  - `original_union_mask_matches_solid_fill_*` 두 단위 검사는 동일한 계획을 Solid로 그린 픽셀과
+    Speckle/Pattern/Clear의 원본 차단 마스크를 직접 대조한다. 사각형·다각형·경로, Grid/Pts,
+    회전·반사 계층, 가득 찬 타일 조기 종료와 deferred 배치를 포함한다.
+  - 직접 마스크 탐색·레이어 단계(`CUT_DENSITY_DESIGN` §10.15): `unit_vfs`는 가려진 하위 트리 생략,
+    살아 있는 합성 블록의 모든 기여 유지, 공유 셀의 회전·반사, 변환 상한과 예산의 보수적 복귀를 검사한다.
+    `unit_render`는 프레임 비트마스크 내보내기의 타일/워드 경계, 위 밀도 뒤의 마스크 갱신, 완전 가림의
+    남은 단계 생략, 두 번째 단계 중 취소와 워커 종료를 검사한다.
+    `density_stack`의 `planner_mask_checks`는 마스크만 끈 대조군과 픽셀 일치 및 탐색 감소,
+    `staged_density_checks`는 기본값의 공동 계획 유지와 명시적 `FLOE_RUST_DENSITY_STAGES=on`에서
+    상위 8개 밖의 레이어까지 순서대로 그린 뒤 아래 계획을 생략하는지 확인한다.
+  - `rust_renderer`: `density_plan2`는 `pattern` 뒤의 `mask_tests/mask_pruned/mask_fallbacks/stages`까지 44개 값.
+    이전 39/40개 응답은 생략된 필드를 0으로 읽는다.
+    상태줄은 백엔드 값으로 `pattern, cover x2` 또는 `bright x2`를 표시한다.
+    아래의 기존 밝기·면적 보존 검사는 패턴 스위치를 끈 대조군으로 유지한다.
+- 점유 밀도로 그리는 2패스(0.12.308 design.ovo 비트, 0.12.309 design.ovs 자체 비트; 0.12.317부터 기본,
+  `FLOE_RUST_DENSITY_OCC=off`가 킬 스위치, `CUT_DENSITY_DESIGN` §10.16). `density_stack`의 `main()`은 계획 경로로 만든
+  검사들을 위해 `off`로 고정하고, 점유 검사가 켠다:
+  - `density_stack`의 `occ_density_checks`:
+    - 픽스처: 1/0 DOT 셀(0.5 µm 정사각형)을 3 µm 간격 66×33 배열로 둔다. TOP 자신의 3/0에는 80 µm 상자와
+      그 옆 0.4 µm 정사각형 26×26(3 µm 간격)을 둔다. 컷을 넘는 도형과 컷 아래 도형이 한 페이지에 있다.
+      간격이 2 µm이면 1 µm/px에서 모든 멤버가 점 체커의 같은 반대 자리에 놓여 walk·점유 모두 0이 된다.
+    - `floe2 index`가 design.ovs를 기본으로 만든다(0.12.316, 로그 `[vfs] ovs design.ovs: `).
+      `--no-page-occupancy` 캐시는 만들지 않고 `[vfs] ovs: none`을 낸다.
+      `--force --no-ovs`로 다시 색인하면 이전 design.ovs가 지워지고 새로 만들지 않는다.
+      `jobdeck`의 `JobdeckIndexLodTests`: `floe2 index deck.jb`로 만든 소스 캐시에는 design.ovs가 없다.
+    - 보통 색인(design.ovo 없음)에 `floe-index ovs --um 1`로 design.ovs를 만든다. 큰 페이지 1개를 디코드한다.
+      표준 오류에 단계 줄(`index open`, `grid 1 um`, `decoded`, `walked in`, `settled in`, `written in`)이 나온다.
+      `FLOE_OVS_PROGRESS_S=0`으로 다시 만들면 긴 단계 줄(`listing the pages to decode: `, `settle: 0/`,
+      `write: layer 0/`)도 나온다(0.12.314).
+      `--jobs 1`로 다시 만들어도 바이트 동일하다. `--no-page-occupancy` 캐시는 design.ovb가 없어 exit 1로
+      거절하고 design.ovs를 만들지 않는다.
+    - 스위치를 지운 워커(기본)의 프레임이 켠 워커와 바이트 동일하고 `occ_layers` 2다(0.12.317).
+    - 400×200 px, 1 µm/px, full depth(셀 1 px): `density_plan2`가 `occ_layers` 2, `occ_cell_nm` 1000,
+      regions 0, nodes 0이다. 1/0 점은 배열 범위 안 1/0 색으로만, 3/0 점은 정사각형 범위 안 3/0 색으로만
+      켜진다. 그 밖에는 1패스 상자만 있다. 점 수는 DOT 556 px(walk 471), 정사각형 118 px(walk 169)이다.
+      타일 64/워커 1과 타일 127/워커 4가 바이트 동일하다. 레이어를 하나씩 결합한
+      `FLOE_RUST_DENSITY_OCC_THREADS=1`도 바이트 동일하다(0.12.310).
+    - depth 0: TOP 자신의 정사각형만 같은 수로 남고 한 단계 아래 DOT은 없다(`occ_layers` 1).
+    - 0.25 µm/px(셀 4 px > `FLOE_RUST_DENSITY_OCC_PX` 2), `FLOE_RUST_DENSITY_OCC_MB=0.0001`,
+      design.ovs가 없는 캐시는 계획 경로로 그리며, 스위치를 끈 프레임과 바이트 동일하다.
+  - `density_stack`의 `occ_cost_checks`(0.12.312, 비용 리뷰):
+    - 3/0 상자로 다 덮인 70×70 px 뷰: `occ_made` 0, `occ_layers` 0, 프레임이 walk와 바이트 동일하다.
+    - `FLOE_RUST_DENSITY_OCC_MB`를 레벨 0 레이어 하나의 1.5배로 둔다. 같은 뷰에서 1/0, 3/0, 1/0을 차례로 켠다.
+      - 기대: `occ_made`가 [1, 1, 1](첫 레이어가 둘째 때 밀려나 다시 만들어짐), `occ_cache_kb`가 매번 상한 안이다.
+      - 프레임은 기본 상한의 프레임과 바이트 동일하다.
+  - 단위: render-core `the_layers_stop_where_a_newer_frame_asks`(1·3스레드, 멈춤 신호가 있으면 아무것도 만들지 않음).
+  - `rust_renderer`: `density_plan2` 48개 값(…/occ_layers/occ_cell_nm/occ_made/occ_cache_kb). 46개 응답은 뒤의 둘을
+    0으로 읽고, 47개는 거절한다. 상태줄은 `…, 12 made)`이고 로그 줄은 `…, 12 made; cache 84.0 MB)`이다.
+  - `density_stack`의 `occ_review_checks`(0.12.311, b4ca42e 리뷰 재현):
+    - 픽스처: 1/0에 3.5 µm 사각형 40×20(8 µm 간격), 2/0에 0.4 × 32 µm 선 32개(2 µm 간격). 따로 0.4 µm 정사각형
+      하나뿐인 TOP. `--um 1`(작은 TOP은 자동)로 만든다.
+    - 사각형, 1.5 µm/px(컷 4.5 µm): `occ_layers` 1, `occ_cell_nm` 2000(6 µm 컷의 1단계). 2,549 px로 walk(3,839)의
+      0.25~4배 안이고, 밀도 끔은 0 px다. 이전 바이너리는 1.25~1.9 µm/px에서 0 px였다.
+    - 선, 1 µm/px: `occ_layers` 0, 프레임이 walk·밀도 끔과 바이트 동일하다(429 px). 이전 바이너리는 673 px였다.
+    - 작은 TOP: version 3 파일에 깊이 0 평면이 있고 셀이 켜져 있다. 이전 바이너리는 평면이 없었다.
+    - design.ovs의 사각형 1단계 비트를 0xff로 덮으면 프레임이 walk와 바이트 동일하다(`occ_layers` 0).
+    - design.ovp를 16 B로 자른 사본은 `floe-index ovs`가 exit 1(`page`)로 끝나고, 사본의 design.ovs가 그대로다.
+  - 단위: vfs `a_page_counts_its_shapes_by_their_larger_side_and_a_path_with_its_ends`:
+    - 3.5 µm 사각형은 class 1, 0.4 × 32 µm 선은 어디에도 없다.
+    - 확장 1.5 µm의 경로는 외곽 4 µm(class 1)로 셀 3~7을 덮는다(중심선 + 반폭이면 4~6).
+  - 단위: render-core `the_level_is_the_finest_whose_cut_covers_the_frames`:
+    - 1 µm 셀, 1.25/1.5/1.9 µm/px에 3 px 컷이면 1단계다.
+    - 예산으로 올린 컷(10 µm/px, 60 µm)은 32 µm 셀(3.2 px)을 허용한다.
+  - 단위: render-core `a_plane_that_will_not_read_is_an_error_not_an_empty_layer`.
+  - `density_stack`의 `occ_root_checks`(0.12.315, root 뷰):
+    - 픽스처: 215 × 200 µm TOP 아래 BLK(DOT 배열 40×20과 자기 3/0 정사각형)를 R90으로 1번, 같은 내용의 BLK2를
+      대칭으로 2번 배치한다. 둘 다 TOP 박스의 25 % 이상이다. 작은 SML(DOT 5×5)도 하나 둔다.
+    - `floe2 index`가 셀 파일 2개를 기본으로 만든다. `--force --no-ovs`로 다시 색인하면 design.ovs와 셀 파일이 모두 지워진다.
+    - `floe-index ovs --um 1`: `roots=2`이고, design.ovs.<셀>이 BLK·BLK2용으로 생긴다(version 4, 배치 R90 (100, 0)과
+      대칭). SML용 파일은 없다. design.ovs는 `--roots 0`과 바이트 같다.
+    - BLK·BLK2 root 뷰(120×100 px, 1 µm/px): `occ_layers` 2, `occ_cell_nm` 1000, regions 0, nodes 0이다.
+      DOT 점은 배열 범위 안에만, 정사각형 점은 그 범위 안에만 켜진다(셀 좌표, 그 밖 0).
+      점 수는 BLK 196/44, BLK2 200/40 px이고, walk는 174/37, 174/38 px다.
+    - depth 0: 자기 정사각형만 같은 수로 남는다.
+    - SML root 뷰와, `--roots 0`으로 다시 만든 뒤(셀 파일 삭제, `removed`)의 BLK root 뷰는 walk와 바이트 동일하다.
+  - 단위: vfs `occ_density::tests` 8개:
+    - 크기 등급 `class_of`
+    - 멤버 순회와 4,096 초과 퍼뜨리기
+    - 격자: 자동 셀, 레벨 크기, 범위 밖 셀, 역수 셀과 정확한 셀의 일치
+    - 셀 찍기, 2×2 OR 풀링, 묶음 점유 수, 저장 바이트
+    - 희소 타일과 직접 찍기의 일치
+    - 파일 쓰기·읽기와 magic·버전(version 1 포함)·잘림 거절. version 4(셀 파일)의 셀·배치 읽기도 본다.
+    - 셀 몫 비트를 탑 격자 제자리에 밀어 넣기(`a_cells_bits_go_into_the_tops_at_its_place`, 단어 경계 걸침 포함)
+  - 단위: render-core `occ::tests` 3개:
+    - 요청 depth의 평면 OR과 점유 셀 수 가중 평균
+    - 평균이 없는 레이어는 None
+    - 레벨 선택: 1 px 이하 가장 거친 레벨, 상한 초과 시 2 px까지 더 거친 레벨
+  - `rust_renderer`: `density_plan2` 46개 값(…/stages/occ_layers/occ_cell_nm). 이전 39/40/44개 응답은
+    새 필드를 0으로 읽고 45개는 거절한다. 상태줄과 로그 줄은 계획 내역 대신
+    `pass 2 by occupancy 12 ms (16 um cells, 449 layers)`를 표시한다. 밝기 계수가 있어도
+    `cells by box`/`cell cover`는 표시하지 않는다(0.12.310).
 - `density_stack`(tools/validate_density_stack.py, 약 10초; `render` 별칭에 포함): 밀도 스택 진단
   (0.12.226, `FLOE_RUST_DENSITY_STACK=top`, CUT_DENSITY_DESIGN §10.10 — 컷 아래 도형을 2패스로 빈 공간에).
   klayout.db로 만든 0.1 µm/px 400×200 레이아웃(1/0: 뷰 전체의 0.15 µm(1.5 px) 사각형 격자와 오른쪽 위 사분면의
@@ -197,6 +355,42 @@ sh tools/validate_rust.sh --only quick path/to.oas
       밀도(4,570 px)와 남은 칸의 빈 픽셀(17,200 px)이 매번 같고, 타일 bbox와도 같다. 16ea8fc는 흔들렸다.
     - 오른쪽 끝(x ≥ 38.4 µm)의 빈 띠를 폭 386 / 400 px로 보면 하위 밀도(47 / 740 px)가 타일 bbox와 같다. 16ea8fc는
       0 / 725 px였다.
+    - 0.12.300(셀의 덮임, 노드 표본, 항목 나눔) `hier_checks`: `hier_layouts`를 1 µm/px, 2/0만, g = 2로 본다.
+      - 노드: 0.05 µm 사각형 160×160개(0.25 µm 간격, 4 px 노드에 배치 256개).
+        - TOP의 도형으로 두면 알파 합이 g × 면적의 12 % 안이다(129 / 128).
+        - 사각형마다 셀을 만들어 한 번씩 놓으면 20 % 안이고(128) `by_nodes`와 `node_sampled`가 0보다 크다.
+        - `FLOE_RUST_DENSITY_NODE_SAMPLE=off`: 5배가 넘는다(1,579). `node_sampled`는 0이다.
+      - 덮임: 1 µm 셀(1/0 상자) 안의 0.2 µm 2/0 사각형.
+        - 60×60 배열, 2,000개 점 리스트, 한 번씩 놓은 셀 500개가 각각 g × 멤버 × 0.04의 15 % 안이다
+          (290 / 288, 161 / 160, 40 / 40). `cell_cover`는 1, `cover_cells`는 1 이상이다.
+        - `FLOE_RUST_DENSITY_CELL_COVER=off`: 각각 4배가 넘는다(3,600 / 3,725 / 954). `cell_cover`는 0이다.
+      - 나눔: 0.5 µm 사각형 셀 48×48개(1 µm 간격, 1/4 덮임).
+        - 안쪽 픽셀의 알파 평균이 0.5의 0.06 안, 편차가 평균의 0.35 미만, 최소 0.05 초과, 최대 0.8 미만이다
+          (0.48, 0.23, 0.13~0.55).
+        - `FLOE_RUST_DENSITY_ITEM_SHARE=off`: 편차 0.5 초과, 최소 0, 최대 0.99 이상이다(0.75).
+      - 배열: 1.2 µm 셀(0.6 µm 사각형)을 1.5 µm 간격으로 40×40.
+        - 4 px 블록 평균이 0.32의 0.03 안, 블록 편차 0.12 미만이다(0.06). 스위치를 끄면 0.18 초과다(0.26).
+      - 어댑터 계약: `density_plan2`는 39개 값(…/stood_in/cell_cover/cover_cells/node_sampled)이다. 상태줄 테스트:
+        `bright x2, cells by box`와 `bright x2, cell cover`.
+      - 단위는 SPEC-PLANNER의 여섯 개다. 세 스위치를 모두 끈 프레임이 0.12.299와 바이트 단위로 같은 것, 기본 프레임이
+        실행·스레드 수·미리 계산 여부와 무관하게 같은 것은 게이트가 아니라 측정으로 확인했다(11개 뷰, 6개 뷰).
+    - 0.12.299(점유 격자 먼저, 빠진 페이지의 대체, 항목의 소수부):
+      - `first_checks`: `first_layout`의 0.6 µm 사각형(0.4 µm/px에서 1.5 px)을 밝기로 본다.
+        - 기본: 2패스가 디코드한 페이지 0, 격자로 놓은 페이지 1 이상. 성긴 구역의 알파 합이 g × 면적의 15 % 안이다
+          (4,643 / 4,500). 마당은 색의 0.5다.
+        - `FLOE_RUST_DENSITY_OVB_FIRST=off`: 디코드 1쪽 이상. 사각형이 덮은 픽셀이 색에서 멈춰 합이 0.62~0.85배다
+          (3,305). 마당은 0.30~0.45다. 16 px 칸으로 둘의 평균 차가 평균의 0.4 미만이다.
+        - 예산 1 MB에 고정 예약 128 KB(위 스위치는 끔): `stood_in` 1 이상, 디코드 0, 알파 합이 다시 g × 면적이다.
+        - 거기에 `FLOE_RUST_DENSITY_STAND_IN=off`: 켜진 픽셀이 없다.
+      - `sums_checks`: 0.32 px 셀 2,000개(1.64단위)를 1 µm/px로 본다.
+        - 셀마다 다른 셀로 한 번씩 놓으면(단일 배치) 알파 합이 g × 면적의 6 % 안이다(407 / 410. 0.12.300부터 항목 나눔으로 408).
+          `FLOE_RUST_DENSITY_BRIGHT_SUMS=off`면 1/1.64배다(250).
+        - 한 셀을 2,000번 놓으면(점 리스트) 합이 같고 어느 픽셀도 색의 0.5를 넘지 않는다(0.20). 끄면 합이 0.85배
+          미만이고(296) 색 그대로인 픽셀이 있다.
+      - 어댑터 계약(`rust_renderer`): `density_plan2`는 36개 값(…/bright_milli/stood_in)이다. 상태줄 테스트:
+        `3 pages left out, 7 pages by occupancy instead`.
+      - 단위는 SPEC-PLANNER의 다섯 개다. 마지막 예산 검사에서 빠지는 경로는 게이트로 만들지 못했다. 단위의
+        `stand_in_left_out(Some)`과 라우팅 칩 2배 확대 측정(172쪽)이 확인이다.
     - 0.12.298(뷰어의 밀도 켜기/끄기) `toggle_checks`:
       - `gate_layout`의 MID 사각형을 0.4 µm/px에서 본다.
       - 환경 변수 없는 워커의 `density=on` 프레임은 `FLOE_RUST_DENSITY_STACK=top` + `FLOE_RUST_DENSITY_DOTS=on` 워커의
@@ -267,6 +461,12 @@ sh tools/validate_rust.sh --only quick path/to.oas
           같다.
         - 끄면 원본 위에도 그리고, 받는 영역도 더 넓다. 타일·워커와 무관하다.
       - vfs 단위 `a_page_decoded_under_the_floor_keeps_aside_the_blocks_a_box_holds_whole`(`HierOpts::dot_occ_boxes`).
+      - 0.12.303(2026-10-06) `full_shapes_first_checks`: 원본으로 가득 찬 타일이 plane 0을 건너뛰어도 빈 영역은 0이다.
+        채움 사각형·맞닿은 1 px 선(스페클 레이어)·큰 스페클 사각형, 타일 64/512에서 스택 끔과 바이트 동일하고
+        2패스 계획·장면 준비·추가 디코드·`cell_cover` 준비가 0, `covered`는 화면 전체다. 절반만 덮으면 그 절반은
+        그대로이고 빈 절반에는 밀도가 나온다. 단위 `shapes_first_full_tiles_leave_no_density_demand`는 최상위 평면
+        1/2/3개, 밝기 끔/켬, bin/walk, 타일·워커 조합도 확인한다. 수정 전에는 채워진 타일 전체가 최상위 밀도 영역으로
+        나와 실패한다.
     - 0.12.293(최상위 평면은 그리기 순서상 위에서 8개, 평면마다 따로 계획; 0.12.292는 맨 위 레이어 번호) `top_group_checks`:
       - LOW의 36×16 µm 원본, TOP(4/0)의 0.05 µm 사각형 40,000개(띠), TOP1(4/1)의 점 몇 개(띠 밖, 맨 위 평면).
       - TOP의 띠 안 픽셀(9,330 px)이 LOW를 켜도 같다. 킬 스위치(`FLOE_RUST_DENSITY_TOP_GROUP=off`)면 TOP은 아래 평면이라
@@ -464,6 +664,73 @@ sh tools/validate_rust.sh --only quick path/to.oas
   MAIN01 칩의 keep + cut 1 px 광역뷰가 48 MB 예산에서 오류 대신 낮춘 밀도(`fit_thin` > 0)로
   그려지고 **빈 프레임이 아닌지**, `FLOE_RUST_FIT_THIN=off`는 컷을 올리고(`fit_pct` > 100)
   `FLOE_RUST_FIT_BUDGET=off`는 종전 오류인지, 예산 안의 프레임은 픽셀이 바뀌지 않는지.
+  0.12.301 `refit_checks`(실칩 2026-10-05: 두 레이어만 켜고 밀도를 끄면 `decoded generation budget exceeded`).
+  먼저 레코드 벡터의 여유다. 0.6~1.0 µm 상자 60만 개만 있는 레이아웃(`layout_plain`: 페이지당 레코드 3.3만 개 —
+  파서가 읽은 그대로는 벡터가 절반쯤 차서 부과가 추정의 1.12배)의 가운데 400 µm를 26 MB 예산으로 본다(네 페이지:
+  추정 25.7 MB, 읽은 그대로 28.9 MB).
+  - 읽은 그대로(`FLOE_RUST_DECODE_SHRINK=off`) + `FLOE_RUST_BUDGET_REFIT=off`: 0.12.300의 오류
+    (`28883786 > 27262976`). 오류가 안 나면 레이아웃이 더는 재현하지 못하는 것이라 게이트가 실패한다.
+  - 기본: 맞춘 계획이 통째로 든다(`fit_refits` 0, `fit_scale` 0, `fit_over` 0, 예산을 넘긴 페이지 없음, 4쪽,
+    상주 15.8 MB).
+  - 읽은 그대로(`FLOE_RUST_DECODE_SHRINK=off`): 프레임을 한 번 다시 계획해 그린다(`fit_refits` 1 이상, `fit_scale`
+    1000 초과 — 실측 1,158, 3쪽, 상주 20.7 MB ≤ 예산). 같은 뷰를 다시 청하면 `fit_refits` 0, 같은 픽셀이다.
+    기본보다 페이지·켜진 픽셀이 적고 상주는 크다.
+  - 그 워커에서 밀도 스택을 켠 프레임은 줄여 계획하지 않는다(`fit_scale` 0, `fit_refits` 0). 다시 밀도를 끄면
+    처음과 같은 픽셀, 같은 `fit_scale`이다.
+  - 밀도 스택을 켠 프레임은 벡터를 줄여도 같은 그림이다(기본 워커의 프레임 = 읽은 그대로 워커의 프레임, 바이트
+    단위 — `density_as_read`).
+  - 여백(bg): 한 페이지 안의 200 µm 뷰포트와 네 페이지에 걸친 그 여백(같은 배율, 변마다 두 배 픽셀).
+    - 읽은 그대로 + `FLOE_RUST_BUDGET_REFIT=off`: 뷰포트가 그려지고 여백이 오류다(0.12.300).
+    - 기본: 뷰포트는 같은 픽셀, 여백도 그려진다(4쪽, `fit_scale` 0).
+    - 읽은 그대로: 여백이 `dropped`(reason `budget`)이고, 다음 뷰포트 프레임이 `fit_scale` 1000 초과·`fit_refits`
+      0·같은 픽셀이며, 그 뒤의 여백은 프레임이거나 `dropped`(reason `fit`)다 — 오류가 아니다(실측: 뷰포트가 통째로
+      드는 곳에서 여백이 솎아야 해서 reason `fit`).
+
+  다음은 공유 목록이다. 상자 크기 40가지를 같은 30,000곳에 둔 레이아웃(`layout_shared`: 페이지의 40개 레코드가 반복
+  목록 하나를 공유)을 4 MB 예산으로 본다.
+  - 기본: 맞춘 프레임이 그대로 든다(`fit_refits` 0, `fit_scale` 0, 상주 1.7 MB, 켜진 픽셀 있음).
+  - 부과를 0.12.300대로(`FLOE_RUST_CHARGE_SHARED=off` + `FLOE_RUST_DECODE_SHRINK=off`): 프레임을 다시 계획해 그린다
+    (`fit_refits` 1 이상 — 실측 2번, `fit_scale` 1000 초과 — 4,463, 상주가 예산 이하). 같은 뷰를 다시 청하면
+    `fit_refits` 0, 같은 `fit_scale`, 같은 픽셀이다.
+  - 거기에 `FLOE_RUST_BUDGET_REFIT=off`: 종전 오류다(`7265394 > 4194304`).
+  - 0.12.300의 부과로 1 MB(페이지 하나보다 작음): 오류가 아니라 예산이 담는 만큼 그린 프레임이고
+    `over_budget_pages`가 1 이상, `fit_over` 1이다.
+  - 어댑터 계약: 프레임 줄의 `fit_scale`·`fit_refits`, 상태줄 `x2 to fit budget, STILL OVER, pages x1.18 their estimate`.
+  0.12.302 `probe_checks`(실칩 2026-10-05: 새 배율의 첫 프레임이 느리고 원인이 other): 합성 칩(48 MB)의 첫 프레임
+  21개 — 칩 전체, 그리고 다섯 곳에서 1/2·1/4·1/8·1/16 크기의 창, 저마다 다른 배율 — 를 기본 워커와
+  `FLOE_RUST_FIT_PROBE_SUMMARY=off` 워커로 그린다.
+  - 프레임마다 픽셀, 계획한 페이지 수, 맞춤 통계(`fit_pct`·`fit_thin`·`fit_full_pct`·`fit_none_pct`·`fit_fixed`·
+    `fit_redecided`·`fit_over`)가 같다. 맞춤이 솎은 프레임이 3개 이상이어야 한다(실측 9개).
+  - 둘 다 `fit_probe_ms` > 0이고 `fit_probe_walk`는 기본 False, 스위치를 끈 쪽 True다.
+  - 이미 결정한 배율을 다시 청하면 `fit_probe_ms` 0, `fit_fixed` 1이다.
+  - 어댑터 계약: 프레임 줄의 `fit_probe_us`·`fit_probe_walk`, 단계 합에 든 사전 계획(`other_ms` 15 → 12), 상태줄
+    `… + 3916 draw + 1054 fit probe + 639 other`(100 ms 미만은 로그 줄에만), 로그 줄 `, fit probe 28.0ms (walk)`.
+  0.12.318 `top_first_checks`(실칩 2026-10-07: 7.59와 14.367을 함께 켜면 7.59만, `none below x28.2`). 1패스의 예산은
+  위 plane부터다(SPEC-PLANNER). 위의 검사들은 크기 순으로 만든 것이라 `main()`이 `FLOE_RUST_FIT_TOP_FIRST=off`로
+  고정하고, 이 검사만 켠다(기본).
+  - 두 레이어(`layout_pair`: 7/59 4 µm 사각형 4,000개, 14/367 1.5 µm 4,000개, 레코드 하나씩 — 레이어마다 약 0.8 MB의
+    한 페이지)의 400 µm 뷰, cut 3 px, 예산 1 MB(1패스 약 0.9 MB).
+    - 각 레이어만 켜면 통째로 그려진다(색으로 센 픽셀: 7/59 97,216, 14/367 21,060).
+    - 함께 켜면 맨 위 14/367이 혼자일 때와 같고 7/59는 0이다. `fit_ranked` 1, `fit_layers_whole` 1, 끝난 레이어 없음,
+      `fit_layers_out` 1, 상태줄 `top 1 whole, 1 left out to fit budget`.
+    - 다음 프레임은 기억한 결정으로 같은 픽셀이다(`fit_fixed` 1, `fit_redecided` 0).
+    - `FLOE_RUST_FIT_TOP_FIRST=off`는 종전 맞춤이다: 7/59가 혼자일 때와 같고 14/367은 0.
+  - 스페클 구멍(`layout_over`: 7/59의 20 µm 사각형마다 14/367의 30 µm 사각형이 덮음, 1 GB): 둘을 함께 켜면 7/59만
+    켰을 때 칠한 픽셀 가운데 일부가 7/59 색으로 남는다(구멍; 실측 108,484 px 중 6,172), 나머지는 14/367 색이다.
+  - 합성 칩 전 레이어(48 MB): 광역뷰가 위 plane부터 맞춰진다(`fit_ranked` 1; 온전한 레이어 + 끝난 레이어 + 빠진 레이어
+    = 전 레이어, 실측 168 + 0 + 281). 가운데 → 여백(전체) → 가운데 순서로 결정이 기억·적용되고 두 가운데가 여백의
+    가운데와 같다.
+  - 단위 vfs `the_budget_fit_keeps_the_top_plane_first`(예산별로 위 plane부터 완전·솎음·빠짐, 걷기가 닿지 않는 plane을
+    수집하지 않음, 기억한 결정의 재적용·통째로 듦·다시 결정, 맨 위 plane만 홀로 사다리, 순위 없으면 종전 순서),
+    `a_plane_past_the_ladders_reach_is_left_out_and_the_planes_above_kept_whole`(사다리 끝에서도 넘치는 plane은 빠지고
+    결정은 그 위 plane들까지, 다시 적용해도 같음), 0.12.319(777ee08 리뷰)
+    `a_page_two_working_cells_hold_counts_once_against_the_planes_above`(두 깊이에 놓인 셀의 페이지를 한 번만 세어 예산이
+    담는 프레임은 네 페이지 전부, 세 페이지 예산은 위 plane만이고 결정은 "전부"가 아님 — 두 번 세면 실패),
+    `a_decision_applied_again_says_what_its_plane_lacks`(아래 plane의 바닥 하한, 맨 위 plane의 올린 컷으로 내린 결정을
+    다시 적용해도 페이지와 상태 — 온전·잘림·빠짐 레이어 수, `fit_none_pct`, `fit_pct` — 가 같음; `lacks`를 빼면 실패;
+    0.12.320(15c464d 리뷰): 남긴 1600(등급 10)과 처음 뺀 200(등급 7) 사이 등급이 빈 위 plane도 다시 적용해 `none below
+    x5.12` 그대로 — `below` 대신 결정의 등급 − 1을 쓰면 `x20.5`로 실패; 0.12.321(7801d4c 리뷰): 다시 적용하는 계획이
+    그 plane을 결정의 등급부터만 모음 — 1600 한 쪽, `below`부터 모으면 200까지 두 쪽으로 실패).
 - `representatives`(tools/validate_representatives.py, 약 10초; `render`·`indexer`
   별칭에 포함): design.ovr 추가 생성이 캐시를 보존하는지, depth 0 제외·kill switch·
   손상 파일 폴백, 그리고 결합 인덱스 실행에서 OVR 생성이 실패해도(`--kill-at
@@ -509,7 +776,7 @@ sh tools/validate_rust.sh --only quick path/to.oas
 | render-frames | `tools/validate_render_frames.py` | 페인트 순서 회색<디자인<흰, 1px 외곽, 흰-위/회-아래 |
 | PX1~PX5 | `tools/validate_render_goldens.py` | 러스트 렌더러 픽셀 정책 골든(klayout 오라클, 커밋 안 함 — 버전 종속 자동 재베이크): PX1 반픽셀·¼픽셀·음수 원점·원점 교차 반올림, PX2 수평/수직/45°/임의 기울기 엣지, PX3 1~8px 선폭 H/V/45°, PX4 concave(L/U/plus/comb/예각 노치), PX5 PATH flush/square/round/비대칭 ext+90/45/135° 꺾임 — 각 정렬+반픽셀 뷰(13뷰). 정책 P-a(diff는 1px 밴드 안만)/P-b(성분 소멸 금지)/P-c(면적 드리프트 ≤0.75×경계픽셀). 자기검사 = 재렌더 결정성 + 판별력(shift1 통과·shift2/dilate/소멸 실패); 외부 렌더러는 `--candidate DIR`로 대조 |
 | D1~D7 | `tools/validate_drc_ice.py` | DRC pack `.<db>.tray`(v1 오프셋 사이드카는 2026-08-19 폐기; 2026-09-16 개명 — 기본 이름·`<db>.ice` 자동 개명·db 이름 기준 사이드카·`FLOE_CACHE_MIGRATE=off`): D1 pack 경유 == ASCII 파스(적대 픽스처 — 결과0 체크·중복 체크명·카운트줄 없음·미지 레코드·절단·CRLF·Waiver Criteria·`*_RDBS` 빈 것 드롭/에러 보유 시 유지·`__RVE_ERROR_TAG2__` 중간 배치 = 레코드 포함 드롭+전역 번호 무공백·전역 파일순 번호), D2 디스패치(신선 pack 자동 선택 / 스테일 pack·폐기 v1 = ASCII 폴백, v1 직접 오픈 = 거부, corrupt 3종 = 12B 스텁·중간 절단·푸터 오프셋 오염 → 전부 ValueError+사이드 폴백), D3 줄 단위 dedup+lazy 슬라이싱, D4 gen_drcdb 자산 왕복 == ASCII, D5 pack 바이트 --jobs 무관(2KB 픽스처 5분할 = 체크 중간 이음새 강제), D5b 강제 스트리밍 인코더(FLOE_DRC_QBOX_RESIDENT=0) 바이트 동일, D6 query_rect == 브루트포스 bbox 스캔, D6b waived= 필터 = 쿼리 내부 cap 이전 적용(소형 cap에서 유일 waived 에러 발견·비필터 결과 불변·[wcount]=0 스킵), D7 status 바이트 제자리 set/get·재오픈 지속·이웃 무오염·[wcount] 동기·청크 카운트 캐시 토글 후 동기 |
-| C1~C9 | `tools/validate_cell_tree.py` (`cell_tree`, `render`·`indexer` 별칭, 약 20초) | 셀 트리(SPEC-VIEWER §8c, design.ovh): 계층 픽스처(블록 3배치 = 평·90°·미러, 블록 안 3×2 격자, 탑 직접+깊은 배치 셀, 도형 없는 셀, 미배치 셀)를 KLayout으로 대조 — C1 `floe2 index`가 design.ovh를 쓰고 `floe-index hier --check` identity=ok·타 캐시 파일 거부(rc 1), C2 모든 셀의 서로 다른 자식과 멤버 수 = KLayout 인스턴스 배열 size 합·leaf 표기, C3 탑 아래 인스턴스 수 = 탑다운 곱셈 합(탑 1·orphan 0), C4 cell_find 부분일치/글롭 대소문자 무시·이름순·total+limit, C5 cell_bbox 탑 직계 = 인스턴스 박스 정확 합집합·깊은 셀 = 블록 범위 상위집합(approx=1)·orphan/도형 없음 None, C6 cell_insts 뷰 안 박스 = KLayout 전개 탐색(회전·미러·격자·불규칙 반복)·cap → more=1·탑 = 자기 박스, C7 파일 삭제 시 소형 캐시 메모리 요약(파일 안 씀)·`FLOE_RUST_HIER_INLINE_PLACES=0`이면 code=nohier·`--hier-only` 뒤 **같은 데몬**이 집어 듦·캐시 없는 소스 거부, C8 뷰 루트(`root=BLK`) 프레임 == BLK를 탑으로 한 별도 레이아웃(KLayout copy_tree) 프레임 바이트 동일(3뷰)·탑 뷰와는 다름·루트 아래 cell_bbox(직계 정확·6)·cell_insts(KLayout BLK 탐색 12)·루트 위 셀 0·테이블 밖 루트 거부·보이는 레이어가 없는 루트(VIA에 2/0만) = 검은 프레임(오류 아님)·1/0이면 그려짐·density stack 켬 == 끔, C9(0.12.296) 파일이 이름만 둔 빈 레이어(3/0 NOTHING)만 켬 = full depth(프레임 켬·끔)·depth 0 프레임 끔은 검은 프레임, depth 0 프레임 켬은 1/0을 켰을 때와 같은 depth 밖 외곽선 픽셀만(오류 아님, 0.12.295는 `invalid plan: top … is missing`)·density stack 점 켬도 같음·1/0이면 그려짐 |
+| C1~C10 | `tools/validate_cell_tree.py` (`cell_tree`, `render`·`indexer` 별칭, 약 20초) | 셀 트리(SPEC-VIEWER §8c, design.ovh): 계층 픽스처(블록 3배치 = 평·90°·미러, 블록 안 3×2 격자, 탑 직접+깊은 배치 셀, 도형 없는 셀, 미배치 셀)를 KLayout으로 대조 — C1 `floe2 index`가 design.ovh를 쓰고 `floe-index hier --check` identity=ok·타 캐시 파일 거부(rc 1), C2 모든 셀의 서로 다른 자식과 멤버 수 = KLayout 인스턴스 배열 size 합·leaf 표기, C3 탑 아래 인스턴스 수 = 탑다운 곱셈 합(탑 1·orphan 0), C4 cell_find 부분일치/글롭 대소문자 무시·이름순·total+limit, C5 cell_bbox 탑 직계 = 인스턴스 박스 정확 합집합·깊은 셀 = 블록 범위 상위집합(approx=1)·orphan/도형 없음 None, C6 cell_insts 뷰 안 박스 = KLayout 전개 탐색(회전·미러·격자·불규칙 반복)·cap → more=1·탑 = 자기 박스, C7 파일 삭제 시 소형 캐시 메모리 요약(파일 안 씀)·`FLOE_RUST_HIER_INLINE_PLACES=0`이면 code=nohier·`--hier-only` 뒤 **같은 데몬**이 집어 듦·캐시 없는 소스 거부, C8 뷰 루트(`root=BLK`) 프레임 == BLK를 탑으로 한 별도 레이아웃(KLayout copy_tree) 프레임 바이트 동일(3뷰)·탑 뷰와는 다름·루트 아래 cell_bbox(직계 정확·6)·cell_insts(KLayout BLK 탐색 12)·루트 위 셀 0·테이블 밖 루트 거부·보이는 레이어가 없는 루트(VIA에 2/0만) = 검은 프레임(오류 아님)·1/0이면 그려짐·density stack 켬 == 끔, C9(0.12.296) 파일이 이름만 둔 빈 레이어(3/0 NOTHING)만 켬 = full depth(프레임 켬·끔)·depth 0 프레임 끔은 검은 프레임, depth 0 프레임 켬은 1/0을 켰을 때와 같은 depth 밖 외곽선 픽셀만(오류 아님, 0.12.295는 `invalid plan: top … is missing`)·density stack 점 켬도 같음·1/0이면 그려짐, C10(0.12.322; 현장 EBEAM 파일: Calibre는 3.0·3.300, floe는 3.1·3.2까지 목록) 색인은 LAYERNAME만 있는 3/1·3/2를 그대로 두고 stored_shapes 0(텍스트만 있는 5/0은 1), 뷰어 목록(`gui.listed_meta`)은 3/0·3/300·5/0만·`FLOE_EMPTY_LAYERS=show`면 전부 — 패널 행·그룹(3.0 아래 3.300만)·visible 집합·`_layers_arg`(모두 켜면 None)·잡덱 표 그대로·안내 줄·`_apply_cache`가 이 목록을 씀은 `rust_renderer`의 `LayerListTests` |
 | R1~R5 | `tools/validate_svrf.py` | SVRF 서브셋 파서 `floe-index svrf`(.rules.json; 2026-09-29 floe/svrf.py에서 이식 — 게이트는 게이트 전용 `--dump-state`로 파스 상태를 읽는다): R1 전처리(INCLUDE 상대경로 병합·순환 경고·#IFDEF/#ELSE -D 분기·#DEFINE 값 치환→제약·VARIABLE 수치 해석·--scan 양분기), R2 derivation 그래프(다이아몬드 폐쇄→전 원천 LAYER+MAP dt·순환 종료·미정의→unresolved·연산자 비누출), R3 체크 추출(다중 @ 결합·이중 한계 2제약·붙은 op·`ABUT<90` 비제약·측정 우변 할당문·미지 문장 카운트·따옴표 체크명·DMACRO 통스킵), R4 gen_drcdb --svrf 엔드투엔드(db 체크명 100% 매칭·제약값 생성식 일치·전 체크 gds 도달·-D SYNTH_EXTRA 정확히 1룰 추가·JSON 왕복), R5 명령 계약(사이드카 = 파이썬 json.dump(indent=1, sort_keys=True) 바이트 — 비ASCII·따옴표·1e-05/1e+16·null dt, 기본 `<deck>.rules.json`, --scan은 파일 안 씀, `-DNAME`/`-D=NAME`/`--define=NAME`, 없는 덱 rc 1·모르는 옵션 rc 2(파일 없음), `floe2 svrf`는 floe-index 명령줄 안내 후 rc 2, 빌더 연산자 단어 == 뷰어 rhs_operands) |
 
 추가 DRC 게이트(2026-10-05):

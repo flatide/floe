@@ -131,6 +131,7 @@ class DeckCache:
         self._loaded_mtime = None
         self.layout_mode = None    # KLayout worker option, unused
         self._visibility = {}      # session only; level/chip share leaf keys
+        self._chips = None         # (placements, ChipTable) of this load
 
     # ---- Cache protocol ---------------------------------------------
     def exists(self) -> bool:
@@ -286,6 +287,15 @@ class DeckCache:
 
     def view_rows(self):
         return view_layers(self.deck, self.stats, self.scheme, self.colormap)
+
+    def chips(self):
+        """The chip view's rows of this load, for chip on/off in
+        captures (floe/jobdeck/chips.py)."""
+        from .chips import ChipTable
+        if self._chips is None or self._chips[0] is not self.placements:
+            self._chips = (self.placements, ChipTable(
+                self.deck, self.placements, self.meta["layers"], self.ids))
+        return self._chips[1]
 
     @property
     def skipped(self):

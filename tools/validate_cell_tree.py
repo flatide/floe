@@ -40,6 +40,9 @@ pins the CLI contract:
   C9  a layer the file names and no cell holds, alone on, is an empty
       picture at full depth and depth 0, frames on and off, with the
       density stack too - not `invalid plan: top is missing`
+  C10 the index keeps such layers (stored_shapes 0, a text alone
+      counted); the viewer lists the layers something is on, as Calibre
+      does (FLOE_EMPTY_LAYERS=show: every layer)
 
 usage: python tools/validate_cell_tree.py
 """
@@ -541,6 +544,48 @@ class CellTreeTests(unittest.TestCase):
                 self.assertNotEqual(set(lit[i:i + 4] for i in range(0, len(lit), 4)), black)
             finally:
                 daemon.stop()
+
+    def test_c10_the_viewer_lists_the_layers_something_is_on(self):
+        """The field's EBEAM file (user 2026-10-08): Calibre listed 3.0 and
+        3.300 where floe listed 3.1 and 3.2 too, nothing drawn on them -
+        pairs the file's LAYERNAME table names and no shape uses (KLayout
+        lists them; so does the index). The index keeps every pair, the
+        named ones with stored_shapes 0, a text alone counted; the viewer
+        lists the pairs that hold something (a text is drawn as a label),
+        FLOE_EMPTY_LAYERS=show every pair."""
+        from floe import cache as cache_mod, gui
+        src = TMP / "named_list.oas"
+        ly = db.Layout(True)
+        ly.dbu = 0.001
+        main = ly.layer(db.LayerInfo(3, 0, "MAIN"))
+        for d in (1, 2):
+            ly.layer(db.LayerInfo(3, d, "NAMED%d" % d))
+        frame = ly.layer(db.LayerInfo(3, 300))
+        label = ly.layer(db.LayerInfo(5, 0))
+        leaf = ly.create_cell("LEAF")
+        leaf.shapes(main).insert(db.Box(0, 0, 400, 300))
+        leaf.shapes(label).insert(db.Text("L", db.Trans(db.Vector(10, 10))))
+        top = ly.create_cell("TOP")
+        top.shapes(frame).insert(db.Box(0, 0, 5000, 100))
+        top.insert(db.CellInstArray(leaf.cell_index(), db.Trans(db.Vector(1000, 1000)), db.Vector(800, 0), db.Vector(0, 600), 4, 3))
+        options = db.SaveLayoutOptions()
+        options.format = "OASIS"
+        ly.write(str(src), options)
+        floe2("index", src)
+        cache = cache_mod.Cache(str(src))
+        cache.load()
+        stored = {(l["layer"], l["datatype"]): l["stored_shapes"] for l in cache.meta["layers"]}
+        self.assertEqual(stored, {(3, 0): 1, (3, 1): 0, (3, 2): 0, (3, 300): 1, (5, 0): 1})
+        keys = lambda meta: sorted((l["layer"], l["datatype"]) for l in meta["layers"])
+        saved = os.environ.pop("FLOE_EMPTY_LAYERS", None)
+        try:
+            self.assertEqual(keys(gui.listed_meta(cache)), [(3, 0), (3, 300), (5, 0)])
+            os.environ["FLOE_EMPTY_LAYERS"] = "show"
+            self.assertEqual(keys(gui.listed_meta(cache)), sorted(stored))
+        finally:
+            os.environ.pop("FLOE_EMPTY_LAYERS", None)
+            if saved is not None:
+                os.environ["FLOE_EMPTY_LAYERS"] = saved
 
     def test_c7_missing_summary_inline_or_refused_then_picked_up_live(self):
         ovh = self.cache_dir / "design.ovh"

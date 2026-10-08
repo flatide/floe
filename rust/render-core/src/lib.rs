@@ -16,6 +16,7 @@ mod page_index;
 mod png;
 mod query;
 mod layer_decode;
+pub mod occ;
 mod raster;
 mod repetition;
 mod request;
@@ -25,7 +26,7 @@ mod summary;
 mod transform;
 
 pub use cache::{
-    Cache, CacheInfo, CacheLayer, DecodePool, DecodedPage, PagePayload, PlanSummary, PlannedLabels,
+    Cache, CacheInfo, CacheLayer, DecodePool, DecodedPage, FitProbe, PagePayload, PlanSummary, PlannedLabels,
     PlannedView, RenderLabel,
 };
 pub use cancel::RenderCancellation;
@@ -65,5 +66,7 @@ pub use floe_vfs::hier::HierPlan;
 pub use floe_vfs::hier::FixedFit;
 /// the sub-cut dots' block, px (renderd reports it with a density frame)
 pub use floe_vfs::hier::{dot_block_px, dot_block_px_of};
-pub use floe_vfs::hier::{dot_page_occ, dot_page_spread, dot_page_spread_boxes};
+pub use floe_vfs::hier::{dot_occ_decode, dot_page_occ, dot_page_spread, dot_page_spread_boxes};
 pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;
+
+pub use floe_vfs::hier::{DensityLayerMemo, DensityMask};

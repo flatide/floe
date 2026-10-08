@@ -747,6 +747,22 @@ def fmt_count(n):
     return str(int(n))
 
 
+def occ_note(res, full=False):
+    """Pass 2 drawn from the occupancy density (design.ovs; 2026-10-06, by
+    default since 0.12.317 - FLOE_RUST_DENSITY_OCC=off the plans): its cell, the layers it held and those this
+    frame made, as the status line says them - the log line (`full`) with
+    what its cache holds (2026-10-07); "" when the plans drew it."""
+    p2 = res.get("density_plan2") or {}
+    if not p2.get("occ_layers"):
+        return ""
+    note = "%g um cells, %d layers" % (p2.get("occ_cell_nm", 0) / 1000.0, p2["occ_layers"])
+    if p2.get("occ_made"):
+        note += ", %d made" % p2["occ_made"]
+    if full and p2.get("occ_cache_kb"):
+        note += "; cache %.1f MB" % (p2["occ_cache_kb"] / 1024.0)
+    return note
+
+
 def perf_status(res, depth_note=""):
     """The perf line of a settled (or refining) frame: (full, brief). The
     full line goes to the terminal log and the lower bar's tooltip, every
@@ -772,6 +788,11 @@ def perf_status(res, depth_note=""):
             res["load_ms"], ph,
             " + %d text" % text if text >= 100 else "",
             res["draw_ms"])
+        # the budget fit decided for a new scale before its
+        # plan (field 2026-10-05: it was part of `other`)
+        probe = res.get("fit_probe_ms", 0) or 0
+        if probe >= 100:
+            split += " + %d fit probe" % round(probe)
         # renderd time no phase covers, and time spent
         # waiting behind earlier commands (queue + pipe)
         if res.get("other_ms", 0) > 200:
@@ -803,7 +824,30 @@ def perf_status(res, depth_note=""):
         thin = int(fit.get("fit_thin", 0) or 0)
         full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
         none = int(fit.get("fit_none_pct", 0) or 0) / 100.0
-        if thin or none:
+        if fit.get("fit_ranked"):
+            # top plane first (pass 1, 2026-10-07: the drawing goes from
+            # the top): the layers above the one the budget ends in
+            # whole, that layer by its size classes as below, the
+            # layers under it left out
+            parts = []
+            if factor > 1:
+                parts.append("x%.3g" % factor)
+            whole_n = int(fit.get("fit_layers_whole", 0) or 0)
+            if whole_n:
+                parts.append("top %d whole" % whole_n)
+            edge = fit.get("fit_layer_edge")
+            if edge:
+                classes = []
+                if thin:
+                    classes.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
+                if none:
+                    classes.append("none below x%.3g" % none)
+                parts.append(edge + (" (%s)" % ", ".join(classes) if classes else ""))
+            out_n = int(fit.get("fit_layers_out", 0) or 0)
+            if out_n:
+                parts.append("%d left out" % out_n)
+            fitted = " %s to fit budget" % ", ".join(parts)
+        elif thin or none:
             # budget-fitted density (0.12.169): size classes
             # largest first - complete from xF up, the class
             # the budget ends in about 1 in 2^k, nothing
@@ -825,6 +869,13 @@ def perf_status(res, depth_note=""):
             # this frame: decided anew, the picture may have
             # changed (SPEC-PLANNER 2026-09-27)
             " (refit)" if fit.get("fit_redecided") else "")
+        # these layers' pages decode larger than the planner
+        # estimates: fitted to the budget over that much
+        # (2026-10-05; a frame that passed the budget is
+        # planned anew, not failed)
+        scale = int(fit.get("fit_scale", 0) or 0)
+        if scale > 1000:
+            fitted += ", pages x%.3g their estimate" % (scale / 1000.0)
         cut += fitted
         brief_cut += fitted
     drawn = ""
@@ -845,6 +896,12 @@ def perf_status(res, depth_note=""):
         text += ", plan %.1fms/%s frontier" % (
             res["plan_ms"],
             fmt_count(res.get("frame_rects", 0)))
+        if res.get("fit_probe_ms"):
+            # "walk": no hierarchy summary to go by (design.ovh,
+            # `floe-index hier`) - every cell of the extent read
+            text += ", fit probe %.1fms%s" % (
+                res["fit_probe_ms"],
+                " (walk)" if res.get("fit_probe_walk") else "")
     if res.get("text_plan_ms") is not None:
         text += ", text %.1fms/%s places" % (
             res["text_plan_ms"],
@@ -1091,11 +1148,18 @@ def perf_status(res, depth_note=""):
         # pass 2's reserve: the fixed one or what pass 1 left (2026-10-02)
         if (res.get("density_plan2") or {}).get("reserve_mb"):
             parts.append("reserve %s MB" % fmt_count(res["density_plan2"]["reserve_mb"]))
-        # the brightness by the area covered (2026-10-05): its gain by the
-        # detail - a pixel at min(1, g x its area) of the colour
+        # The backend reports the display mode; both use the covered-area
+        # gain, while only the legacy mode varies pixel brightness.
         bright = (res.get("density_plan2") or {}).get("bright_milli")
         if bright:
-            parts.append("bright x%g" % (bright / 1000.0))
+            pattern = (res.get("density_plan2") or {}).get("pattern", 0)
+            parts.append(("pattern, cover x%g" if pattern else "bright x%g") % (bright / 1000.0))
+            # what a cell under the cut stands for (2026-10-05): the area its
+            # shapes cover, or - an index without design.ovb or a hierarchy
+            # summary - its whole box; nothing when the occupancy density drew
+            # pass 2 (its frames reported `cells by box`, user 2026-10-06)
+            if not occ_note(res):
+                parts.append("cell cover" if (res.get("density_plan2") or {}).get("cell_cover") else "cells by box")
         # zoomed out past the fit view the dots thin (2026-10-04): their gain
         gain = (res.get("density_plan2") or {}).get("dot_gain_milli")
         if gain is not None and 0 < gain < 1000:
@@ -1109,7 +1173,13 @@ def perf_status(res, depth_note=""):
             parts.append("gate %d/%d px" % (gate, round(block * block))
                          + (" (%s out)" % fmt_count(gated) if gated else ""))
         us = res.get("density_us") or {}
-        if us:
+        # pass 2 drawn from the occupancy density instead of the plans
+        # (2026-10-06; FLOE_RUST_DENSITY_OCC=off: the plans): the time it took, its
+        # cell and layers in place of the plans' breakdown
+        occ = occ_note(res)
+        if us and occ:
+            parts.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ_note(res, full=True)))
+        elif us:
             plan = "pass 2 plan %d ms" % round(
                 us.get("plan2_us", 0) / 1000)
             # where it went (diagnostic, 2026-10-01): the
@@ -1142,6 +1212,13 @@ def perf_status(res, depth_note=""):
                     ("occ_decoded", "pages decoded under the floor")) if p2.get(key))
                 if p2.get("map_updates"):
                     by += "; hash map %s" % fmt_count(p2["map_updates"])
+                if p2.get("stages"):
+                    by += "; %d layer stages" % p2["stages"]
+                if p2.get("mask_tests") or p2.get("mask_fallbacks"):
+                    by += "; mask %s/%s pruned, %s fallback" % (
+                        fmt_count(p2.get("mask_pruned", 0)), fmt_count(p2.get("mask_tests", 0)),
+                        fmt_count(p2.get("mask_fallbacks", 0)))
+                by = by.lstrip("; ")
                 plan += (" (probe %d ms x%d, fit %d ms x%d"
                          " passes on %d threads, %d regions%s,"
                          " nodes %s, page nodes %s, pages %s,"
@@ -1169,7 +1246,10 @@ def perf_status(res, depth_note=""):
         p2 = res.get("density_plan2") or {}
         over = [what for what, there in (
             ("floor probe", p2.get("probes_over")), ("thinned", p2.get("thinned")),
-            ("%d pages left out" % pages.get("over_budget", 0), pages.get("over_budget"))) if there]
+            ("%d pages left out" % pages.get("over_budget", 0), pages.get("over_budget")),
+            # what the budget left out, drawn by its occupancy records
+            # instead (2026-10-05)
+            ("%d pages by occupancy instead" % p2.get("stood_in", 0), p2.get("stood_in"))) if there]
         if over:
             parts.append("pass 2 over budget: %s" % ", ".join(over))
         # pass 2's decode and raster wall (2026-10-03, the field's 449-layer
@@ -1185,7 +1265,9 @@ def perf_status(res, depth_note=""):
         # the regions stay in the log line
         brief = [] if res.get("density_dots") is not None else ["top + empty"]
         brief.append(lit)
-        if us:
+        if us and occ:
+            brief.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ))
+        elif us:
             plan = "pass 2 plan %d ms" % round(us.get("plan2_us", 0) / 1000)
             if p2:
                 inner = []
@@ -1397,6 +1479,35 @@ def _remote_x_scroll_repaint(scroller):
         scroller.set_kinetic_scrolling(False)
     except AttributeError:
         pass
+
+
+def listed_meta(cache):
+    """The cache's meta with the layer table the viewer lists (user
+    2026-10-08, the field's EBEAM files: Calibre listed 3.0 and 3.300
+    where floe listed 3.1 and 3.2 too, nothing drawn on them). A
+    layout's pair that holds no shape and no text (stored_shapes 0: only
+    the file's LAYERNAME table names it - KLayout lists it, and so does
+    the index) is left out of the panel, the visible set and the layer
+    properties; the index, `info` and the renderer keep every pair. A
+    jobdeck's table is the deck's (its level heads hold nothing by
+    design). FLOE_EMPTY_LAYERS=show lists every pair as before."""
+    meta = cache.meta
+    if getattr(cache, "is_jobdeck", False) or \
+            os.environ.get("FLOE_EMPTY_LAYERS") == "show":
+        return meta
+    layers = meta.get("layers", [])
+    listed = [l for l in layers if l.get("stored_shapes") != 0]
+    if len(listed) == len(layers):
+        return meta
+    left = ["%d/%d" % (l["layer"], l["datatype"])
+            for l in layers if l.get("stored_shapes") == 0]
+    sys.stderr.write(
+        "[%s] %d layer%s not listed - the file's layer table names "
+        "them, no shape or text is on them: %s%s (FLOE_EMPTY_LAYERS=show "
+        "lists them)\n" % (APP, len(left), "" if len(left) == 1 else "s",
+                           ", ".join(left[:8]),
+                           ", ..." if len(left) > 8 else ""))
+    return dict(meta, layers=listed)
 
 
 class LayerRow(object):
@@ -2388,7 +2499,8 @@ class Viewer:
             self._frontier_depths = []
             self._minimap_bases = {}
         else:
-            self.meta = cache.meta
+            # a layout's pairs with nothing on them stay off the panel
+            self.meta = listed_meta(cache)
             self.dbu = self.meta["dbu"]
             bb = self.meta["bbox"]
             self.cx = (bb[0] + bb[2]) / 2

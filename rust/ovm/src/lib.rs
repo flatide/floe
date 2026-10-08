@@ -2900,6 +2900,24 @@ impl Ovm {
         occ_record(&data[lo..hi])
     }
 
+    /// What design.ovb records of page `pi`, by its record's length alone (no
+    /// grid inflated): Some(true) a grid of levels, Some(false) the area its
+    /// shapes cover alone (occ_total), None nothing (no design.ovb, an LOD
+    /// variant).
+    pub fn page_occ_grid(&self, pi: u32) -> Option<bool> {
+        let data = self.page_occ.as_ref()?;
+        if pi >= self.n_pages {
+            return None;
+        }
+        let table = g64(data, 48) as usize;
+        let (lo, hi) = (g64(data, table + 8 * pi as usize) as usize, g64(data, table + 8 * pi as usize + 8) as usize);
+        match hi.saturating_sub(lo) {
+            0 => None,
+            8 => Some(false),
+            _ => Some(true),
+        }
+    }
+
     /// The area (dbu^2) page `pi`'s shapes cover by its design.ovb record - a
     /// total as stored, a grid's cells' levels over their areas - worked out
     /// once per open index; None without one.
@@ -3006,6 +3024,14 @@ impl Ovm {
         assert!(i < self.n_cells, "cell index");
         let b = &self.sec(SEC_CELLS)[i as usize * CELL_LEN..];
         (g32(b, 80), g32(b, 84))
+    }
+
+    /// (prange_start, prange_count) without materializing the name (the
+    /// cells' cover, floe_vfs::cover)
+    pub fn cell_pranges(&self, i: u32) -> (u32, u32) {
+        assert!(i < self.n_cells, "cell index");
+        let b = &self.sec(SEC_CELLS)[i as usize * CELL_LEN..];
+        (g32(b, 120), g32(b, 124))
     }
 
     /// child-BVH node range (start, count) of a cell without

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Validate the in-tree Rust render worker contract and real daemon bridge."""
 
+import inspect
+import io
 import os
 import queue
 import subprocess
@@ -18,7 +20,9 @@ sys.path.insert(0, str(ROOT))
 from floe import RENDERD_VERSION, __version__  # noqa: E402
 from floe.rust_render import (  # noqa: E402
     CELL_QUERY_KINDS,
+    DENSITY_PLAN2,
     RustRenderWorker,
+    _density_plan2,
     _parse_wire_line,
     _pattern_fill,
     _RAW_HEADER_LEN,
@@ -738,7 +742,27 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # of the dots' gain and gate
         bright = dict(res, density_plan2=dict(res["density_plan2"], bright_milli=2000, dot_gain_milli=1000, dot_gate_min=1, dot_gated=0))
         full_bright, _ = perf_status(bright)
-        self.assertIn("reserve 896 MB, bright x2, pass 2 plan", full_bright)
+        self.assertIn("reserve 896 MB, bright x2, cells by box, pass 2 plan", full_bright)
+        # what a cell under the cut stands for (2026-10-05): its shapes'
+        # cover where the index has it
+        covered = dict(bright, density_plan2=dict(bright["density_plan2"], cell_cover=1))
+        self.assertIn("bright x2, cell cover, pass 2 plan", perf_status(covered)[0])
+        patterned = dict(covered, density_plan2=dict(covered["density_plan2"], pattern=1))
+        with mock.patch.dict(os.environ, {"FLOE_RUST_DENSITY_PATTERN": "off"}):
+            full_pattern, _ = perf_status(patterned)
+        self.assertIn("pattern, cover x2, cell cover, pass 2 plan", full_pattern)
+        self.assertNotIn("bright x2", full_pattern)
+        # The result, not the GUI's environment, decides the label. Old
+        # replies and an explicit kill-switch reply keep the legacy label.
+        legacy = dict(covered, density_plan2=dict(covered["density_plan2"], pattern=0))
+        with mock.patch.dict(os.environ, {"FLOE_RUST_DENSITY_PATTERN": "on"}):
+            self.assertIn("bright x2, cell cover", perf_status(legacy)[0])
+        # the pages a budget left out that their occupancy stands in for
+        # (2026-10-05): with what went over the budget
+        stood = dict(res, density_plan2=dict(res["density_plan2"], stood_in=7))
+        full_stood, brief_stood = perf_status(stood)
+        self.assertIn("3 pages left out, 7 pages by occupancy instead", full_stood)
+        self.assertIn("7 pages by occupancy instead", brief_stood)
         # the density alone (FLOE_RUST_DENSITY_ONLY=on, 2026-10-04): said
         # first, the viewer and renderd sharing the environment
         with mock.patch.dict(os.environ, {"FLOE_RUST_DENSITY_ONLY": "on"}):
@@ -763,6 +787,55 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             " left out · bin off(cap@786k), hier 2.0M/1.7M pruned"
             " · cut<7.56um x2 to fit budget, STILL OVER · 3 pages over"
             " budget (not drawn) · labels partial · evict 1200")
+        # these layers' pages decode larger than the planner estimates
+        # (2026-10-05): the scale its budget was cut by, with the fit
+        scaled = dict(res, plan_culls=dict(res["plan_culls"], fit_scale=1180))
+        self.assertIn("x2 to fit budget, STILL OVER, pages x1.18 their estimate", perf_status(scaled)[0])
+        # pass 1's fit top plane first (0.12.318, the field chip 2026-10-07:
+        # with 7.59 and 14.367 on, 7.59 alone drew): the layers kept whole
+        # from the top, the one it ended in with its classes, those left out
+        ranked = dict(res, plan_culls=dict(res["plan_culls"], fit_pct=100, fit_over=0, fit_thin=1, fit_full_pct=862,
+                                           fit_none_pct=431, fit_ranked=1, fit_layers_whole=225,
+                                           fit_layer_edge="56/3", fit_layers_out=223))
+        self.assertIn("cut<7.56um top 225 whole, 56/3 (1/2 below x8.62, none below x4.31), 223 left out to fit budget",
+                      perf_status(ranked)[1])
+        dropped = dict(res, plan_culls=dict(res["plan_culls"], fit_pct=100, fit_over=0, fit_thin=0, fit_full_pct=0,
+                                            fit_none_pct=0, fit_ranked=1, fit_layers_whole=1,
+                                            fit_layer_edge=None, fit_layers_out=1))
+        self.assertIn("cut<7.56um top 1 whole, 1 left out to fit budget", perf_status(dropped)[1])
+        # the budget fit decided for a new scale before its plan (2026-10-05:
+        # it was part of `other`): its own item from 100 ms, in the log line
+        # whenever there was one
+        probed_full, probed_brief = perf_status(dict(res, fit_probe_ms=1054.2, other_ms=639))
+        self.assertTrue(probed_brief.startswith("4324 ms = 250 load + 3916 draw + 1054 fit probe + 639 other · "), probed_brief)
+        self.assertIn(", fit probe 1054.2ms", probed_full)
+        quick_full, quick_brief = perf_status(dict(res, fit_probe_ms=28.0))
+        self.assertNotIn("fit probe", quick_brief)
+        self.assertIn(", fit probe 28.0ms,", quick_full)
+        # pass 2 drawn from the occupancy density (FLOE_RUST_DENSITY_OCC=on,
+        # 2026-10-06): its time, cell and layers in place of the plans'
+        # breakdown, in the bar and the log line
+        occ_res = dict(res, density_plan2=dict(res["density_plan2"], occ_layers=449, occ_cell_nm=16000),
+                       density_us=dict(res["density_us"], plan2_us=12000))
+        occ_full, occ_brief = perf_status(occ_res)
+        self.assertIn("density: lit 620k px, pass 2 by occupancy 12 ms (16 um cells, 449 layers), 206 pages decoded", occ_brief)
+        self.assertIn(", pass 2 by occupancy 12 ms (16 um cells, 449 layers), 206 pages,", occ_full)
+        self.assertNotIn("pass 2 plan", occ_full + occ_brief)
+        # the layers this frame made, in both; what the cache holds, in the
+        # log line (2026-10-07)
+        made = dict(occ_res, density_plan2=dict(occ_res["density_plan2"], occ_made=12, occ_cache_kb=86016))
+        made_full, made_brief = perf_status(made)
+        self.assertIn("pass 2 by occupancy 12 ms (16 um cells, 449 layers, 12 made)", made_brief)
+        self.assertIn("pass 2 by occupancy 12 ms (16 um cells, 449 layers, 12 made; cache 84.0 MB)", made_full)
+        # nor what a cell under the cut stands for: the plans' alone
+        occ_bright = dict(occ_res, density_plan2=dict(occ_res["density_plan2"], bright_milli=2000, pattern=1))
+        bright_full, _ = perf_status(occ_bright)
+        self.assertIn("pattern, cover x2, dots x0.64, gate 2/16 px (12k out), pass 2 by occupancy 12 ms", bright_full)
+        self.assertNotIn("cells by box", bright_full)
+        self.assertNotIn("cell cover", bright_full)
+        # no hierarchy summary to go by: the probe walked every cell
+        self.assertIn(", fit probe 28.0ms (walk),", perf_status(dict(res, fit_probe_ms=28.0, fit_probe_walk=True))[0])
+        self.assertNotIn("fit probe", full)
 
         # the synthetic chip at medium, 694 um around (14722, 17090) um: no
         # cell under the cut, the shapes of 1-3 px drawn from 54 pages
@@ -1872,6 +1945,27 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             worker._handle_line("styled", {"epoch": "1"}, "")
             self.assertFalse(os.path.exists(style_path))
 
+    def test_density_plan2_accepts_the_optional_fields(self):
+        legacy = "/".join(str(i) for i in range(39))
+        expected = dict(zip(DENSITY_PLAN2[:39], range(39)))
+        expected.update(dict.fromkeys(DENSITY_PLAN2[40:], 0))
+        self.assertEqual(_density_plan2(legacy), dict(expected, pattern=0))
+        self.assertEqual(_density_plan2(legacy + "/1"), dict(expected, pattern=1))
+        self.assertEqual(_density_plan2(legacy + "/0"), dict(expected, pattern=0))
+        self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9"),
+                         dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9))
+        # the occupancy density's layers and cell, nm (2026-10-06)
+        self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9/449/16000"),
+                         dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9,
+                              occ_layers=449, occ_cell_nm=16000))
+        # and the layers made, the cache's KiB (2026-10-07)
+        self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9/449/16000/12/86016"),
+                         dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9,
+                              occ_layers=449, occ_cell_nm=16000, occ_made=12, occ_cache_kb=86016))
+        for malformed in ("-", "", "1/2", legacy + "/bad", legacy + "/1/2", legacy + "/1/300/200/4/9/449",
+                          legacy + "/1/300/200/4/9/449/16000/12"):
+            self.assertIsNone(_density_plan2(malformed), malformed)
+
     def test_render_command_and_frame_result_match_parent_schema(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = os.path.join(directory, "floe-renderd")
@@ -1991,6 +2085,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "fit_pct": "283", "fit_cull": "1", "fit_over": "0",
                 "fit_thin": "3", "fit_full_pct": "850", "fit_none_pct": "400",
                 "fit_fixed": "1", "fit_redecided": "0",
+                "fit_scale": "1180", "fit_refits": "1",
+                # pass 1's fit top plane first (0.12.318): the layers whole,
+                # the one it ended in, those left out
+                "fit_ranked": "1", "fit_layers_whole": "3",
+                "fit_layer_edge": "7/59", "fit_layers_out": "2",
                 "sub_cut_boxes": "1234", "sub_cut_box_over": "5",
                 "sub_cut_box_level": "1", "sub_cut_box_unsure": "2",
                 "shape_cut": "4392", "shape_cut_max": "1",
@@ -2008,10 +2107,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "density_dots": "3500/2", "density_floor": "0.250",
                 "density_block": "8",
                 "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2"
-                                 "/30000/20000/5000/34860/40/9000/100/3/7/896/2/1/500/128000/60/15360/40000/7000/640/1200/2/2000",
+                                 "/30000/20000/5000/34860/40/9000/100/3/7/896/2/1/500/128000/60/15360/40000/7000/640/1200/2/2000/9/1/1500/800",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
-                # its phases above add up to 45.25 ms
+                # its phases above add up to 45.25 ms, and 3 ms went on the
+                # new scale's fit decision before the plan
                 "queue_us": "1500", "wall_us": "60000",
+                "fit_probe_us": "3000", "fit_probe_walk": "1",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
@@ -2026,6 +2127,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "fit_pct": 283, "fit_cull": 1, "fit_over": 0,
                 "fit_thin": 3, "fit_full_pct": 850, "fit_none_pct": 400,
                 "fit_fixed": 1, "fit_redecided": 0,
+                "fit_scale": 1180, "fit_refits": 1,
+                "fit_ranked": 1, "fit_layers_whole": 3,
+                "fit_layer_edge": "7/59", "fit_layers_out": 2,
                 "sub_cut_boxes": 1234, "sub_cut_box_over": 5,
                 "sub_cut_box_level": 1, "sub_cut_box_unsure": 2,
                 "shape_cut": 4392, "shape_cut_max": 1,
@@ -2055,7 +2159,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             # the time no phase covers: renderd's own (other) and the
             # client's beyond renderd's wall (wait = queue + pipe)
             self.assertEqual((result["queue_ms"], result["wall_ms"]), (1.5, 60.0))
-            self.assertEqual(result["other_ms"], 15)
+            # (the fit probe is a phase of its own, no longer `other`)
+            self.assertEqual((result["fit_probe_ms"], result["fit_probe_walk"]), (3.0, True))
+            self.assertEqual(result["other_ms"], 12)
             self.assertTrue(900 <= result["wait_ms"] <= 945, result["wait_ms"])
             self.assertEqual(result["cache_hit"], 14)
             self.assertEqual(result["cache_miss"], 2)
@@ -2099,7 +2205,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "map_updates": 7, "reserve_mb": 896, "occ_pages": 2, "occ_decoded": 1,
                 "full_chunks": 500, "full_members": 128000, "sampled_chunks": 60, "sampled_members": 15360,
                 "free_top": 40000, "free_others": 7000, "dot_gain_milli": 640, "dot_gated": 1200, "dot_gate_min": 2,
-                "bright_milli": 2000})
+                "bright_milli": 2000, "stood_in": 9,
+                "cell_cover": 1, "cover_cells": 1500, "node_sampled": 800, "pattern": 0,
+                "mask_tests": 0, "mask_pruned": 0, "mask_fallbacks": 0, "stages": 0,
+                # an older reply: the occupancy density's fields read as 0
+                "occ_layers": 0, "occ_cell_nm": 0, "occ_made": 0, "occ_cache_kb": 0})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
@@ -2810,6 +2920,96 @@ class IndexOnOpenTests(unittest.TestCase):
                              ["vfs-index", "open"])
         finally:
             del os.environ["FLOE_INDEX_ON_OPEN"]
+
+
+class LayerListTests(unittest.TestCase):
+    """The layer panel lists a layout's pairs that hold something (user
+    2026-10-08, the field's EBEAM files: Calibre listed 3.0 and 3.300
+    where floe listed 3.1 and 3.2 too, nothing drawn on them - pairs only
+    the file's LAYERNAME table names, stored_shapes 0)."""
+
+    @staticmethod
+    def _layout(directory):
+        cache = FakeCache(directory)
+        cache.meta["layers"] = [
+            {"layer": 3, "datatype": 0, "name": "MAIN",
+             "color": "#3fff77", "stored_shapes": 20},
+            {"layer": 3, "datatype": 1, "name": "NAMED1",
+             "color": "#3fff77", "stored_shapes": 0},
+            {"layer": 3, "datatype": 2, "name": "NAMED2",
+             "color": "#3fff77", "stored_shapes": 0},
+            {"layer": 3, "datatype": 300, "name": "3/300",
+             "color": "#3fff77", "stored_shapes": 20},
+            # a text alone is drawn as a label: listed
+            {"layer": 5, "datatype": 0, "name": "5/0",
+             "color": "#ff0000", "stored_shapes": 1},
+            # a table without the count: listed
+            {"layer": 6, "datatype": 0, "name": "6/0", "color": "#00ff00"},
+        ]
+        return cache
+
+    @staticmethod
+    def _keys(meta):
+        return [(l["layer"], l["datatype"]) for l in meta["layers"]]
+
+    def test_a_layouts_pairs_with_nothing_on_them_are_not_listed(self):
+        from floe import gui
+        with tempfile.TemporaryDirectory() as directory:
+            cache = self._layout(directory)
+            with mock.patch.dict(os.environ, {"FLOE_EMPTY_LAYERS": ""}), \
+                    mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                listed = gui.listed_meta(cache)
+            self.assertEqual(self._keys(listed),
+                             [(3, 0), (3, 300), (5, 0), (6, 0)])
+            self.assertEqual(listed["dbu"], cache.meta["dbu"])
+            # the cache's own table (the renderer's styles) keeps every pair
+            self.assertEqual(len(cache.meta["layers"]), 6)
+            self.assertIn("2 layers not listed", err.getvalue())
+            self.assertIn("3/1, 3/2 (FLOE_EMPTY_LAYERS=show", err.getvalue())
+            # the kill switch lists every pair as before
+            with mock.patch.dict(os.environ, {"FLOE_EMPTY_LAYERS": "show"}):
+                self.assertIs(gui.listed_meta(cache), cache.meta)
+            # a jobdeck's table is the deck's (its level heads hold nothing)
+            cache.is_jobdeck = True
+            with mock.patch.dict(os.environ, {"FLOE_EMPTY_LAYERS": ""}):
+                self.assertIs(gui.listed_meta(cache), cache.meta)
+            # a table whose every pair holds something: as it is, no note
+            full = FakeCache(directory)
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertIs(gui.listed_meta(full), full.meta)
+            self.assertEqual(err.getvalue(), "")
+        # the viewer adopts a cache's table through it
+        self.assertIn("self.meta = listed_meta(cache)",
+                      inspect.getsource(gui.Viewer._apply_cache))
+
+    def test_the_panel_and_the_visible_set_hold_the_listed_pairs(self):
+        try:
+            from floe import gui
+            gui.import_gtk()
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        with tempfile.TemporaryDirectory() as directory:
+            cache = self._layout(directory)
+            v = gui.Viewer.__new__(gui.Viewer)
+            v.cache = cache
+            with mock.patch("sys.stderr", new_callable=io.StringIO):
+                v.meta = gui.listed_meta(cache)
+            v.visible = set(self._keys(v.meta))
+            v._layers_box = gui.Gtk.Box(
+                orientation=gui.Gtk.Orientation.VERTICAL)
+            self.addCleanup(v._layers_box.destroy)
+            v._layer_patterns, v._fill_patterns = {}, []
+            v.selections = []
+            v.redraw = lambda **kw: None
+            v._build_layer_panel()
+            self.assertEqual(set(v._layer_rows),
+                             {(3, 0), (3, 300), (5, 0), (6, 0)})
+            # layer 3 as Calibre lists it: 3.0 heading 3.300
+            self.assertEqual(v._layer_groups, {(3, 0): [(3, 300)]})
+            # every listed pair on: the request names no list (all layers)
+            self.assertIsNone(v._layers_arg())
+            v._layer_rows[(5, 0)].set_active(False)
+            self.assertEqual(v._layers_arg(), [(3, 0), (3, 300), (6, 0)])
 
 
 @unittest.skipUnless(os.environ.get("FLOE_INTEGRATION_SOURCE"),

@@ -107,6 +107,8 @@ rect·path뿐인 레이어)는 `empty`(비트맵 없음, 레벨 항목은 0)로 
 ## design.ovh — 계층 요약 (FLOEOVH1, 2026-09-29)
 
 정본: `rust/vfs/src/hiersum.rs`. 뷰어 셀 트리(SPEC-VIEWER §8c)의 색인.
+0.12.300부터 밀도의 셀 덮임(`rust/vfs/src/cover.rs`, SPEC-PLANNER)도 이 파일의
+엣지(자식과 멤버 수)를 읽는다. 파일 형식은 그대로다.
 design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀의 서로
 다른 자식과 멤버 수"는 그 셀의 레코드 전부, "셀의 부모"는 레코드 전부를
 읽어야 하므로 한 번 훑어 요약한다. 인덱서가 빌드 끝에 쓰고(`--no-hier`로
@@ -175,6 +177,44 @@ design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀
   - 페이지 표가 파일 끝에 맞지 않거나 순서가 어긋난다.
   - 풀리지 않는 격자는 그 페이지만 기록 없음으로 본다.
 - 크기와 시간: CUT_DENSITY_DESIGN §10.12의 표.
+
+## design.ovs — 점유 밀도 (FLOEOVS1 v3/v4, 2026-10-06)
+
+정본: `rust/vfs/src/occ_density.rs`(`build`, `encode_file`, `OvsFile`), 생성 `rust/cli/src/vfs.rs`(`write_ovs`,
+`write_ovs_after_build`, `remove_cell_ovs`), 그리기 `rust/render-core/src/occ.rs`·`cache.rs`(`occ_density`).
+밀도 스택 2패스를 계획 없이 그리는 레이어 × 배치 depth 평면이다(0.12.317부터 기본, `FLOE_RUST_DENSITY_OCC=off`면
+쓰지 않음; CUT_DENSITY_DESIGN §10.16).
+
+- 파일:
+  - `design.ovs`: 탑의 파일, version 3.
+  - `design.ovs.<셀 번호>`: 탑 바로 아래에서 박스가 탑 박스의 `--roots`(기본 0.25) 이상인 셀의 파일, version 4.
+    그 셀의 root 뷰가 쓴다.
+- 생성:
+  - 색인 끝에 기본으로 만든다(0.12.316). design.ovm(마커) 뒤에 만들며 마커 프로토콜 밖이다(design.ovh와 같음).
+  - `--no-ovs`(= `floe2 index --no-ovs`)면 만들지 않는다. 잡덱 소스도 만들지 않는다.
+  - `floe-index ovs <cache> [--um F] [--jobs N] [--roots F]`가 이전 캐시에 덧붙이거나 다시 만든다.
+    이번에 만들지 않은 셀의 이전 파일은 지운다.
+  - 파일마다 tmp + rename으로 공개한다. 재빌드 때 삭제 목록에 들어 있다(셀 파일 포함).
+- 머리말 80 B:
+  - magic `FLOEOVS1`, version u32(3 또는 4), group u32(8)
+  - src_size u64, src_mtime u64
+  - unit f64(dbu/µm), cell_dbu i64, x0 i64, y0 i64
+  - w u32, h u32(레벨 0 셀 수), n_levels u32, n_layers u32
+- version 4는 머리말 뒤에 24 B를 더 둔다.
+  - 셀 u32, rot u8, flip u8, 예약 2 B, x i64, y i64
+  - 이 값은 그 셀의 (첫) 배치다. 셀 좌표를 탑 좌표로 옮기는 `Xf::place(x, y, rot, flip)`다.
+  - 격자는 탑 좌표다. 탑 격자 중 그 배치 박스를 덮는 부분이고, 시작 셀은 8의 배수다.
+- 표: 레이어마다 다음을 둔다.
+  - 평면 수 u8
+  - 평면마다 depth u8(0 = 그 파일 셀 자신의 도형, 15 = 그 depth와 그 아래 전부)
+  - 레벨마다 (비트 위치, 길이, 평균 위치, 길이) 4×u64
+- 본문: raw deflate로 압축한다. 레벨 L은 셀이 2^L배이고, 셀 수가 64 이하가 될 때까지 둔다.
+  - 비트: 행마다 ⌈w/8⌉ B. 셀 i는 바이트 i/8의 비트 i%8이다.
+  - 평균: 8×8 셀 묶음마다 u8 하나. 비트가 켜진 셀을 덮는 평균 비율이고, 255가 전부다.
+  - 셀이 하나도 없는 레벨은 길이 0이다.
+- 출처 검사(`validate_against`): src_size·src_mtime·n_layers·group이 design.ovm과 같아야 한다. 셀 파일은 셀 번호가
+  그 캐시 안에 있어야 하고, 요청한 root와 같아야 한다. 아니면 "파일 없음"으로 읽혀 계획 경로로 그린다(stderr 한 줄).
+  version 1·2는 거절한다.
 
 ## meta.json (CACHE_VERSION = 8)
 

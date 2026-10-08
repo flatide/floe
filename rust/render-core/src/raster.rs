@@ -157,6 +157,9 @@ pub struct GeometryRasterRequest {
     /// the planes paint them and show through, the tile's end composes them.
     /// 0: the density as lit pixels.
     pub density_bright: f32,
+    /// Present the area/summary density path as opaque, world-phased dots.
+    /// Only pass 2 changes. False preserves the area-brightness presentation.
+    pub density_pattern: bool,
 }
 
 impl GeometryRasterRequest {
@@ -1218,6 +1221,7 @@ struct DensityStack {
     /// density is covered area, a pixel shows min(1, g x its area) of its
     /// plane's colour
     bright: f32,
+    pattern: Option<DensityPattern>,
     /// under `bright`: what a member of the running record stands for (a
     /// page thinned to level l: 2^l), 1 outside a page's records
     weight: f32,
@@ -1251,6 +1255,57 @@ struct DensityStack {
 /// A density pixel whose alpha reaches this is opaque: nothing under it
 /// shows, and it is claimed (DensityStack::bright).
 const BRIGHT_OPAQUE: f32 = 0.999;
+
+/// One common lattice for every record and layer. Coordinates are world
+/// coordinates measured in pixels at this scale, with the view origin
+/// rounded once for the whole frame (never once per tile or shape).
+#[derive(Clone, Copy)]
+struct DensityPattern {
+    width: usize,
+    x: i64,
+    y: i64,
+}
+
+#[derive(Clone, Copy)]
+enum DensitySource {
+    /// Known member support. A singleton uses one of four common slots;
+    /// larger support uses the checker and claims its unlit holes too.
+    Shape { singleton: bool },
+    /// An area spread over a summary box, which can contain real empty
+    /// space. Only selected pixels may be claimed, never this whole box.
+    Summary { singleton: bool },
+}
+
+// Subtracting two projected edges can move an exactly one-pixel member
+// a few ulps above one. Do not change its slot class with its position.
+fn density_singleton(width: f64, height: f64) -> bool {
+    width <= 1.0 + 1e-9 && height <= 1.0 + 1e-9
+}
+
+impl DensityPattern {
+    fn selected(self, at: usize, source: DensitySource, area: f32, gain: f32) -> bool {
+        let x = self.x.wrapping_add((at % self.width) as i64);
+        let y = self.y.wrapping_add((at / self.width) as i64);
+        let singleton = match source {
+            DensitySource::Shape { singleton } | DensitySource::Summary { singleton } => singleton,
+        };
+        if (x ^ y) & 1 != 0 || (singleton && x & 1 != 0) {
+            return false;
+        }
+        if matches!(source, DensitySource::Shape { .. }) {
+            return true;
+        }
+        // The rank is shared across layers and independent of record IDs,
+        // page splits and traversal order. Adding a second identical item
+        // cannot fill the holes of the first one's pattern.
+        let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).rotate_left(29);
+        h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        h ^= h >> 31;
+        let rank = ((h >> 40) as f32 + 0.5) / 16_777_216.0;
+        rank < (area * gain).min(1.0)
+    }
+}
 
 /// The pixels of the interval [a, b) (px, either order) in [lo, hi) (pixel
 /// indexes), each with its overlap's share of the interval's length times
@@ -1299,6 +1354,9 @@ impl DensityStack {
     /// walk's (tiles the density never reaches hold none).
     #[inline]
     fn bright_ready(&mut self) {
+        if self.pattern.is_some() {
+            return;
+        }
         if self.plane == 0 {
             if self.cov.is_empty() {
                 self.cov = vec![0.0; self.pixels];
@@ -1315,6 +1373,34 @@ impl DensityStack {
     /// (`bright_ready` made their buffers).
     #[inline]
     fn bright_add(&mut self, at: usize, area: f32) {
+        self.bright_add_source(at, area, DensitySource::Shape { singleton: false });
+    }
+
+    #[inline]
+    fn bright_add_source(&mut self, at: usize, area: f32, source: DensitySource) {
+        if let Some(pattern) = self.pattern {
+            if !(area > 0.0) {
+                return;
+            }
+            let lit = pattern.selected(at, source, area, self.bright);
+            let foot = lit || matches!(source, DensitySource::Shape { singleton: false });
+            if self.plane != 0 {
+                if lit {
+                    self.lit_plane[at] = self.lit_plane[at].max(self.plane);
+                }
+                if foot {
+                    self.foot_plane[at] = self.foot_plane[at].max(self.plane);
+                }
+            } else {
+                let row = at / pattern.width;
+                let col = at % pattern.width;
+                let index = row * self.words + col / 64;
+                let bit = 1u64 << (col % 64);
+                if lit { self.lit[index] |= bit; }
+                if foot { self.foot[index] |= bit; }
+            }
+            return;
+        }
         if self.plane == 0 {
             self.cov[at] += area;
             return;
@@ -1519,7 +1605,7 @@ impl RasterBand {
     /// Starts the density stack of a write-once tile (DensityStack): pass 2
     /// draws the records under `upper_cut` (dbu, pass 1's cut); `bright` is
     /// GeometryRasterRequest::density_bright.
-    fn enable_density_stack(&mut self, upper_cut: i64, claim_lit: bool, bright: f32) {
+    fn enable_density_stack(&mut self, upper_cut: i64, claim_lit: bool, bright: f32, request: &GeometryRasterRequest) {
         let (width, rows) = (self.tile_width() as usize, (self.row1 - self.row0) as usize);
         let Some(once) = &self.once else {
             return;
@@ -1546,6 +1632,11 @@ impl RasterBand {
             foot_plane: Vec::new(),
             plane: 0,
             bright,
+            pattern: (bright > 0.0 && request.density_pattern).then(|| DensityPattern {
+                width,
+                x: ((request.view.x0 * request.width as f64 / (request.view.x1 - request.view.x0) + 0.5).floor() as i64).wrapping_add(i64::from(self.col0)),
+                y: ((-request.view.y1 * request.height as f64 / (request.view.y1 - request.view.y0) + 0.5).floor() as i64).wrapping_add(i64::from(self.row0)),
+            }),
             weight: 1.0,
             color: [0.0; 3],
             pixels: width * rows,
@@ -1604,6 +1695,11 @@ impl RasterBand {
 
     /// `bright_spread` over a box in device px (x0, y0, x1, y1), unrounded.
     fn bright_spread_px(&mut self, rect: (f64, f64, f64, f64), area: f64) -> bool {
+        let singleton = density_singleton((rect.2 - rect.0).abs(), (rect.3 - rect.1).abs());
+        self.bright_spread_source(rect, area, DensitySource::Shape { singleton })
+    }
+
+    fn bright_spread_source(&mut self, rect: (f64, f64, f64, f64), area: f64, source: DensitySource) -> bool {
         let (col0, col1, row0, row1) = (i64::from(self.col0), i64::from(self.col1), i64::from(self.row0), i64::from(self.row1));
         let width = self.tile_width() as usize;
         let Some(stack) = self.stack.as_mut() else {
@@ -1630,7 +1726,7 @@ impl RasterBand {
             for col in c_lo..c_hi {
                 let fx = stack.xs[col];
                 if fx > 0.0 {
-                    stack.bright_add(row * width + col, (area * f64::from(fx) * f64::from(fy)) as f32);
+                    stack.bright_add_source(row * width + col, (area * f64::from(fx) * f64::from(fy)) as f32, source);
                 }
             }
         }
@@ -1675,7 +1771,7 @@ impl RasterBand {
         self.begin_density_plane(false);
         let pixels = self.tile_width() as usize * (self.row1 - self.row0) as usize;
         if let Some(stack) = self.stack.as_mut() {
-            if stack.bright > 0.0 {
+            if stack.bright > 0.0 && stack.pattern.is_none() {
                 // the brightness: the planes' areas (DensityStack::low_plane,
                 // made when a page first covers the tile); the top planes'
                 // are done
@@ -1695,7 +1791,7 @@ impl RasterBand {
     /// plane's density); what the planes stand for joins the claimed pixels.
     /// (density pixels lit, pixels written)
     fn end_density_lower(&mut self, colors: &[[u8; 4]]) -> (u64, u64) {
-        if self.stack.as_ref().is_some_and(|stack| stack.bright > 0.0) {
+        if self.stack.as_ref().is_some_and(|stack| stack.bright > 0.0 && stack.pattern.is_none()) {
             return self.end_bright_lower(colors);
         }
         let width = self.tile_width() as usize;
@@ -2001,8 +2097,9 @@ impl RasterBand {
     /// The top plane's originals are painted: what its density may not take
     /// is fixed now - the pixels written so far (frame band 0 and its own
     /// originals) and what its originals cover. With
-    /// GeometryRasterRequest::density_shapes_first it is taken when the last
-    /// plane's are: what every original wrote or covers, for every top plane.
+    /// GeometryRasterRequest::density_shapes_first it is taken at the pass-2
+    /// boundary, even when full tiles skipped the last original planes:
+    /// what every original wrote or covers, for every top plane.
     fn snapshot_top_blocked(&mut self) {
         let (Some(stack), Some(once)) = (self.stack.as_mut(), self.once.as_ref()) else {
             return;
@@ -2038,21 +2135,35 @@ impl RasterBand {
         let words = stack.words;
         let mut eligible = 0u32;
         for index in 0..stack.claimed.len() {
-            let taken = self.taken_word_at(top, index);
             // the padding past the tile is never eligible
             let width = if index % words == words - 1 && tile_width % 64 != 0 { tile_width % 64 } else { 64 };
             let inside = if width == 64 { !0u64 } else { (1u64 << width) - 1 };
-            eligible += (!taken & inside).count_ones();
+            eligible += (self.density_candidate_word(top, index) & inside).count_ones();
         }
         if let Some(stack) = self.stack.as_mut() {
             stack.eligible = eligible;
         }
     }
 
-    /// `taken_word` for a stack borrowed mutably alongside (the same value).
+    /// Open pixels that some density source can actually light. Every
+    /// pattern source uses the same checker; singleton slots are a subset
+    /// of it, so only the common checker is safe for this demand test.
+    /// This does not mark the forbidden slots covered or claimed: those
+    /// masks still describe the originals and the actual density support.
+    /// The caller removes word padding outside the tile.
     #[inline]
-    fn taken_word_at(&self, top: bool, index: usize) -> u64 {
-        self.taken_word(top, index)
+    fn density_candidate_word(&self, top: bool, index: usize) -> u64 {
+        let free = !self.taken_word(top, index);
+        let Some(stack) = self.stack.as_ref() else {
+            return free;
+        };
+        let Some(pattern) = stack.pattern else {
+            return free;
+        };
+        // Every word starts at an even column (a multiple of 64).
+        let row = index / stack.words;
+        let even = (pattern.x ^ pattern.y.wrapping_add(row as i64)) & 1 == 0;
+        free & if even { 0x5555_5555_5555_5555 } else { 0xaaaa_aaaa_aaaa_aaaa }
     }
 
     /// Ends a density plane: its lit pixels show where the plane may take
@@ -2060,7 +2171,7 @@ impl RasterBand {
     /// paint around them); what it stands for joins the claimed pixels.
     /// (density pixels lit, pixels written)
     fn end_density_plane(&mut self, color: [u8; 4], plane: usize) -> (u64, u64) {
-        if self.stack.as_ref().is_some_and(|stack| stack.bright > 0.0) {
+        if self.stack.as_ref().is_some_and(|stack| stack.bright > 0.0 && stack.pattern.is_none()) {
             return self.end_bright_plane(color, plane);
         }
         let width = self.tile_width() as usize;
@@ -2122,8 +2233,9 @@ impl RasterBand {
     /// any other plane may still take, per cell of `cell` px of the frame's
     /// grid (BlockDemand::eligible_cells): absolute column `c` in cell column
     /// (c + ox).div_euclid(cell) - gx, row `r` in (r + oy).div_euclid(cell) -
-    /// gy, `nx` cells a row.
-    fn count_free_cells(&self, top: bool, cell: i64, grid: (i64, i64, i64, i64), nx: usize, free: &mut [u32]) {
+    /// gy, `nx` cells a row. `candidates` counts only the common pattern's
+    /// drawable slots; `free` retains the physical count for min_share.
+    fn count_free_cells(&self, top: bool, cell: i64, grid: (i64, i64, i64, i64), nx: usize, free: &mut [u32], candidates: &mut [u32]) {
         let (ox, oy, gx, gy) = grid;
         let (tile_width, tile_rows) = (self.tile_width() as usize, (self.row1 - self.row0) as usize);
         let Some(stack) = self.stack.as_ref() else {
@@ -2134,9 +2246,11 @@ impl RasterBand {
         for row in 0..tile_rows {
             let cy = ((self.row0 as i64 + row as i64 + oy).div_euclid(cell) - gy) as usize;
             let line = &mut free[cy * nx..(cy + 1) * nx];
+            let possible = &mut candidates[cy * nx..(cy + 1) * nx];
             for word in 0..words {
                 let inside = if word == words - 1 { inside_last } else { !0u64 };
                 let mut bits = !self.taken_word(top, row * words + word) & inside;
+                let drawable = self.density_candidate_word(top, row * words + word) & inside;
                 let first = self.col0 as i64 + (word * 64) as i64;
                 while bits != 0 {
                     let cx = (first + bits.trailing_zeros() as i64 + ox).div_euclid(cell);
@@ -2144,10 +2258,22 @@ impl RasterBand {
                     let end = (cx + 1) * cell - ox - first;
                     let mask = if end >= 64 { !0u64 } else { (1u64 << end) - 1 };
                     line[(cx - gx) as usize] += (bits & mask).count_ones();
+                    possible[(cx - gx) as usize] += (drawable & bits & mask).count_ones();
                     bits &= !mask;
                 }
             }
         }
+    }
+
+    /// Whether any density candidate remains, without computing its bounds.
+    fn has_density_candidate(&self, top: bool) -> bool {
+        let Some(stack) = self.stack.as_ref() else { return false; };
+        let width = self.tile_width() as usize;
+        let last = if width % 64 != 0 { (1u64 << (width % 64)) - 1 } else { !0u64 };
+        (0..stack.claimed.len()).any(|index| {
+            let inside = if index % stack.words == stack.words - 1 { last } else { !0u64 };
+            self.density_candidate_word(top, index) & inside != 0
+        })
     }
 
     /// The bounding box [r0, r1, c0, c1] (tile rows and columns) of the
@@ -2162,7 +2288,7 @@ impl RasterBand {
         for row in 0..tile_rows {
             for word in 0..words {
                 let inside = if word == words - 1 { inside_last } else { !0u64 };
-                let free = !self.taken_word(top, row * words + word) & inside;
+                let free = self.density_candidate_word(top, row * words + word) & inside;
                 if free == 0 {
                     continue;
                 }
@@ -2202,7 +2328,7 @@ impl RasterBand {
         for row in 0..if r0 == usize::MAX { rows } else { 0 } {
             for word in 0..words {
                 let inside = if word == words - 1 { inside_last } else { !0u64 };
-                let free = !self.taken_word(top, row * words + word) & inside;
+                let free = self.density_candidate_word(top, row * words + word) & inside;
                 if free == 0 {
                     continue;
                 }
@@ -2969,18 +3095,39 @@ fn collect_work_bin(
     stats: &mut RenderStats,
     window: Option<[u32; 4]>,
 ) -> Result<Option<WorkBin>, String> {
+    collect_work_bin_plane(scene, request, styled, stroke_pixels, guard, stats, window, None)
+}
+
+/// A density stage collects only its current layer, retaining the original
+/// styled-plane indices so deferred minis and replay use the same slots.
+#[allow(clippy::too_many_arguments)]
+fn collect_work_bin_plane(
+    scene: &FrameScene,
+    request: &GeometryRasterRequest,
+    styled: &StyledGeometryRasterRequest,
+    stroke_pixels: u8,
+    guard: Option<RenderGuard<'_>>,
+    stats: &mut RenderStats,
+    window: Option<[u32; 4]>,
+    only_plane: Option<usize>,
+) -> Result<Option<WorkBin>, String> {
     let [wc0, wr0, wc1, wr1] = window.unwrap_or([0, 0, request.width, request.height]);
     let cull_view = tile_world_view(request, wc0, wc1, wr0, wr1, stroke_pixels)?;
     let mut plane_of = std::collections::HashMap::new();
     for (plane, layer) in styled.layers.iter().enumerate() {
-        plane_of.insert(layer.layer_idx, plane);
+        if only_plane.is_none_or(|only| only == plane) {
+            plane_of.insert(layer.layer_idx, plane);
+        }
     }
-    let layer_indices: Vec<u32> = styled.layers.iter().map(|layer| layer.layer_idx).collect();
+    let layer_indices: Vec<u32> = styled.layers.iter().enumerate()
+        .filter(|(plane, _)| only_plane.is_none_or(|only| only == *plane))
+        .map(|(_, layer)| layer.layer_idx).collect();
     let query = scene.layer_query_words(&layer_indices);
     let plane_bits: Vec<Option<usize>> = styled
         .layers
         .iter()
-        .map(|layer| scene.layer_mask_bit(layer.layer_idx))
+        .enumerate()
+        .map(|(plane, layer)| only_plane.is_none_or(|only| only == plane).then(|| scene.layer_mask_bit(layer.layer_idx)).flatten())
         .collect();
     let mut bin = WorkBin::empty(styled.layers.len(), true);
     let ranking = PlaceRanking {
@@ -3000,7 +3147,7 @@ fn collect_work_bin(
         &query,
         &plane_bits,
         &ranking,
-        styled.hierarchy_frames,
+        only_plane.is_none() && styled.hierarchy_frames,
         cull_view,
         guard,
         scene.top(),
@@ -3755,7 +3902,7 @@ impl TileWork {
         if write_once {
             band.enable_write_once();
             if let Some(upper_cut) = density {
-                band.enable_density_stack(upper_cut, request.density_claim_lit, request.density_bright);
+                band.enable_density_stack(upper_cut, request.density_claim_lit, request.density_bright, request);
             }
         }
         Ok(TileWork {
@@ -3802,6 +3949,7 @@ impl TileWork {
         bin: Option<&WorkBin>,
         guard: Option<RenderGuard<'_>>,
     ) -> Result<(), String> {
+        self.density_minis[side].clear();
         if let Some(bin) = bin.filter(|bin| !bin.deferred_edges.is_empty()) {
             self.density_minis[side] = build_deferred_minis(scene, bin, false, self.tile_view, guard, &mut self.stats)?;
         }
@@ -3811,6 +3959,11 @@ impl TileWork {
     fn output(mut self) -> RasterTileOutput {
         // the density's brightness: composed over what the passes left
         self.band.finish_bright();
+        // A full tile can skip the lower density pass entirely. Count its
+        // masks at completion, not in a pass that may never run.
+        let (covered, claimed) = self.band.density_totals();
+        self.stats.density_stack[3] = covered;
+        self.stats.density_stack[4] = claimed;
         RasterTileOutput {
             tile: self.band,
             stats: self.stats,
@@ -3852,6 +4005,7 @@ struct DensityScene<'a> {
     bin: Option<&'a WorkBin>,
     table: &'a [Option<(u16, PaintStyle)>],
     words: &'a [u64],
+    mini_side: usize,
 }
 
 /// One pass of one tile: the bin's item lists when the collection holds them,
@@ -3865,6 +4019,7 @@ fn raster_tile_pass(
     styled: &StyledGeometryRasterRequest,
     bin: Option<&WorkBin>,
     density: Option<DensityScene<'_>>,
+    occ: Option<&crate::occ::OccDensity>,
     work: &mut TileWork,
     pass: TilePass,
     remaining: usize,
@@ -3901,7 +4056,7 @@ fn raster_tile_pass(
         end_density_pass(work, styled, pass);
         return Ok(());
     }
-    if matches!(pass, TilePass::Density(_) | TilePass::DensityLower) && density.is_none() {
+    if matches!(pass, TilePass::Density(_) | TilePass::DensityLower) && density.is_none() && occ.is_none() {
         // nothing planned for this side: nothing to draw
         end_density_pass(work, styled, pass);
         return Ok(());
@@ -3918,69 +4073,72 @@ fn raster_tile_pass(
     } = work;
     match pass {
         TilePass::DensityLower => {
-            let Some(density) = density else {
-                unreachable!("checked above");
-            };
+            if let Some(occ) = occ {
+                paint_occ_lower(band, request, styled, occ);
+            }
             // one walk over the lower planes' scene: every page draws with
             // its own plane's paint into the plane maps
-            render_cell(
-                density.scene,
-                request,
-                band,
-                cull_view,
-                stats,
-                counters,
-                GeometrySelection::Planes(density.table),
-                SubtreePrune::Layers(density.words),
-                PaintStyle::solid(request.background),
-                guard,
-                density.scene.top(),
-                OrthoTransform::identity(),
-                None,
-                path,
-                record_scratch,
-            )?;
-        }
-        TilePass::Density(plane) => {
-            let Some(density) = density else {
-                unreachable!("checked above");
-            };
-            let side = usize::from(!density_is_top(styled, plane));
-            let layer = &styled.layers[plane];
-            let paint = plane_paint(styled, plane);
-            match density.bin {
-                Some(bin) => replay_plane_items(
+            if let Some(density) = density {
+                render_cell(
                     density.scene,
                     request,
                     band,
                     cull_view,
                     stats,
                     counters,
-                    guard,
-                    record_scratch,
-                    layer,
-                    plane,
-                    paint,
-                    &bin.planes[plane],
-                    Some(&density_minis[side]),
-                )?,
-                None => render_cell(
-                    density.scene,
-                    request,
-                    band,
-                    cull_view,
-                    stats,
-                    counters,
-                    GeometrySelection::Layer(layer.layer_idx),
-                    SubtreePrune::Layer(density.scene.layer_mask_bit(layer.layer_idx)),
-                    paint,
+                    GeometrySelection::Planes(density.table),
+                    SubtreePrune::Layers(density.words),
+                    PaintStyle::solid(request.background),
                     guard,
                     density.scene.top(),
                     OrthoTransform::identity(),
                     None,
                     path,
                     record_scratch,
-                )?,
+                )?;
+            }
+        }
+        TilePass::Density(plane) => {
+            let layer = &styled.layers[plane];
+            if let Some(occ) = occ {
+                paint_occ_plane(band, request, occ, layer.layer_idx, density_is_top(styled, plane));
+            }
+            let paint = plane_paint(styled, plane);
+            if let Some(density) = density {
+                match density.bin {
+                    Some(bin) => replay_plane_items(
+                        density.scene,
+                        request,
+                        band,
+                        cull_view,
+                        stats,
+                        counters,
+                        guard,
+                        record_scratch,
+                        layer,
+                        plane,
+                        paint,
+                        &bin.planes[plane],
+                        Some(&density_minis[density.mini_side]),
+                    )?,
+                    None => render_cell(
+                        density.scene,
+                        request,
+                        band,
+                        cull_view,
+                        stats,
+                        counters,
+                        GeometrySelection::Layer(layer.layer_idx),
+                        SubtreePrune::Layer(density.scene.layer_mask_bit(layer.layer_idx)),
+                        paint,
+                        guard,
+                        density.scene.top(),
+                        OrthoTransform::identity(),
+                        None,
+                        path,
+                        record_scratch,
+                    )?,
+                }
             }
         }
         TilePass::Frames(frame_band) => match bin {
@@ -4060,6 +4218,184 @@ fn raster_tile_pass(
     Ok(())
 }
 
+/// The occupancy density's cell along each column and row of a tile (the
+/// pixel centres', crate::occ::OccDensity::cell_of) - through a root view's
+/// placement in the file (its to_file): a quarter turn takes the columns
+/// along the file's y and the rows along its x (`swap`).
+struct OccAxes {
+    cols: Vec<i64>,
+    rows: Vec<i64>,
+    swap: bool,
+}
+
+impl OccAxes {
+    fn new(band: &RasterBand, request: &GeometryRasterRequest, occ: &crate::occ::OccDensity) -> OccAxes {
+        let view = request.view;
+        let sx = (view.x1 - view.x0) / f64::from(request.width);
+        let sy = (view.y1 - view.y0) / f64::from(request.height);
+        let x_at = |c: u32| view.x0 + (f64::from(c) + 0.5) * sx;
+        let y_at = |r: u32| view.y1 - (f64::from(r) + 0.5) * sy;
+        // the file's (x', y') = (a x + b y + tx, c x + d y + ty)
+        let xf = occ.to_file.unwrap_or_else(floe_tiler::Xf::identity);
+        let ((a, c), (b, d), (tx, ty)) = (xf.apply_vec(1, 0), xf.apply_vec(0, 1), xf.apply(0, 0));
+        let swap = a == 0;
+        let (cols, rows) = if swap {
+            (
+                (band.col0..band.col1).map(|col| occ.cell_of(c as f64 * x_at(col) + ty as f64, false)).collect(),
+                (band.row0..band.row1).map(|row| occ.cell_of(b as f64 * y_at(row) + tx as f64, true)).collect(),
+            )
+        } else {
+            (
+                (band.col0..band.col1).map(|col| occ.cell_of(a as f64 * x_at(col) + tx as f64, true)).collect(),
+                (band.row0..band.row1).map(|row| occ.cell_of(d as f64 * y_at(row) + ty as f64, false)).collect(),
+            )
+        };
+        OccAxes { cols, rows, swap }
+    }
+
+    /// the cells (i0, i1, j0, j1) the tile spans
+    fn span(&self) -> Option<(i64, i64, i64, i64)> {
+        let (c0, c1) = (*self.cols.iter().min()?, *self.cols.iter().max()?);
+        let (r0, r1) = (*self.rows.iter().min()?, *self.rows.iter().max()?);
+        Some(if self.swap { (r0, r1, c0, c1) } else { (c0, c1, r0, r1) })
+    }
+
+    /// whether a row's cell is on the grid (j, or i when swapped)
+    #[inline]
+    fn row_on(&self, occ: &crate::occ::OccDensity, v: i64) -> bool {
+        v >= 0 && v < i64::from(if self.swap { occ.w } else { occ.h })
+    }
+
+    /// cell (i, j) of a row's value and a column's
+    #[inline]
+    fn cell(&self, row: i64, col: i64) -> (u32, u32) {
+        let (i, j) = if self.swap { (row, col) } else { (col, row) };
+        (i as u32, j as u32)
+    }
+}
+
+/// A top plane's density from the occupancy density (crate::occ): each pixel
+/// the plane may take, at its cell's cover, as a summary item - lit by the
+/// pattern's rank, claiming only what it lights.
+fn paint_occ_plane(band: &mut RasterBand, request: &GeometryRasterRequest, occ: &crate::occ::OccDensity, layer_idx: u32, top: bool) {
+    let Some(layer) = occ.layer(layer_idx) else { return };
+    let axes = OccAxes::new(band, request, occ);
+    let Some((i0, i1, j0, j1)) = axes.span() else { return };
+    if !layer.any_in(i0, i1, j0, j1) {
+        return;
+    }
+    let (cols, rows) = (&axes.cols, &axes.rows);
+    let width = cols.len();
+    let Some(words) = band.stack.as_ref().map(|stack| stack.words) else { return };
+    if let Some(stack) = band.stack.as_mut() {
+        stack.bright_ready();
+    }
+    let mut cand = vec![0u64; words];
+    let (mut lo, mut hi) = (usize::MAX, 0usize);
+    for (r, &rv) in rows.iter().enumerate() {
+        if !axes.row_on(occ, rv) {
+            continue;
+        }
+        for (w, word) in cand.iter_mut().enumerate() {
+            *word = band.density_candidate_word(top, r * words + w);
+        }
+        let Some(stack) = band.stack.as_mut() else { return };
+        for (w, &word) in cand.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let c = w * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if c >= width {
+                    break;
+                }
+                if cols[c] < 0 {
+                    continue;
+                }
+                let (i, j) = axes.cell(rv, cols[c]);
+                let cover = layer.cover(i, j);
+                if cover > 0.0 {
+                    stack.bright_add_source(r * width + c, cover, DensitySource::Summary { singleton: false });
+                    lo = lo.min(r);
+                    hi = hi.max(r + 1);
+                }
+            }
+        }
+    }
+    if lo < hi {
+        if let Some(stack) = band.stack.as_mut() {
+            stack.touch(Some((lo, hi)));
+        }
+    }
+}
+
+/// The lower planes' density from the occupancy density, in one walk of the
+/// tile's open pixels: the highest lower plane whose layer the pattern's rank
+/// lights at the pixel takes it (a summary item claims what it lights, so a
+/// lower one could not). The pattern display alone (renderd asks for no
+/// other).
+fn paint_occ_lower(band: &mut RasterBand, request: &GeometryRasterRequest, styled: &StyledGeometryRasterRequest, occ: &crate::occ::OccDensity) {
+    let Some((words, Some(pattern), gain)) = band.stack.as_ref().map(|stack| (stack.words, stack.pattern, stack.bright)) else {
+        return;
+    };
+    let axes = OccAxes::new(band, request, occ);
+    let Some((i0, i1, j0, j1)) = axes.span() else { return };
+    let (cols, rows) = (&axes.cols, &axes.rows);
+    let lower = styled.layers.len().saturating_sub(density_top_count(styled));
+    // the lower planes that mark a cell of this tile, highest first
+    let present: Vec<(u16, &crate::occ::OccLayer)> = (0..lower)
+        .rev()
+        .filter_map(|plane| {
+            let layer = occ.layer(styled.layers[plane].layer_idx)?;
+            layer.any_in(i0, i1, j0, j1).then_some(((plane + 1) as u16, layer))
+        })
+        .collect();
+    if present.is_empty() {
+        return;
+    }
+    let width = cols.len();
+    let mut cand = vec![0u64; words];
+    let (mut lo, mut hi) = (usize::MAX, 0usize);
+    for (r, &rv) in rows.iter().enumerate() {
+        if !axes.row_on(occ, rv) {
+            continue;
+        }
+        for (w, word) in cand.iter_mut().enumerate() {
+            *word = band.density_candidate_word(false, r * words + w);
+        }
+        let Some(stack) = band.stack.as_mut() else { return };
+        for (w, &word) in cand.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let c = w * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if c >= width {
+                    break;
+                }
+                if cols[c] < 0 {
+                    continue;
+                }
+                let (i, j) = axes.cell(rv, cols[c]);
+                let at = r * width + c;
+                for &(plane, layer) in &present {
+                    let cover = layer.cover(i, j);
+                    if cover > 0.0 && pattern.selected(at, DensitySource::Summary { singleton: false }, cover, gain) {
+                        stack.lit_plane[at] = stack.lit_plane[at].max(plane);
+                        stack.foot_plane[at] = stack.foot_plane[at].max(plane);
+                        lo = lo.min(r);
+                        hi = hi.max(r + 1);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if lo < hi {
+        if let Some(stack) = band.stack.as_mut() {
+            stack.touch(Some((lo, hi)));
+        }
+    }
+}
+
 /// The paint of styled plane `plane`.
 fn plane_paint(styled: &StyledGeometryRasterRequest, plane: usize) -> PaintStyle {
     let layer = &styled.layers[plane];
@@ -4075,24 +4411,17 @@ fn plane_paint(styled: &StyledGeometryRasterRequest, plane: usize) -> PaintStyle
     }
 }
 
-/// The end of a pass of a density-stacked tile (DensityStack): after the top
-/// plane's originals (density_shapes_first: after the last plane's) what its
-/// density may not take is fixed; after a density
-/// plane its density shows where it may, and after the last one (plane 0)
-/// the totals are counted.
+/// The end of a pass of a density-stacked tile (DensityStack). The legacy
+/// policy freezes each top plane's original coverage here; shapes-first
+/// freezes all originals at the pass-2 boundary, including skipped tiles.
+/// After a density plane its density shows where it may.
 fn end_density_pass(work: &mut TileWork, styled: &StyledGeometryRasterRequest, pass: TilePass) {
     if work.band.stack.is_none() {
         return;
     }
     match pass {
         TilePass::Plane(plane) => {
-            if styled.raster.density_shapes_first {
-                // pass 1's shapes come first (density_shapes_first): what the top
-                // planes' density may not take is fixed when the last plane is done
-                if plane == 0 {
-                    work.band.snapshot_top_blocked();
-                }
-            } else {
+            if !styled.raster.density_shapes_first {
                 if plane + 1 == styled.layers.len() {
                     work.band.snapshot_top_blocked();
                 }
@@ -4108,12 +4437,6 @@ fn end_density_pass(work: &mut TileWork, styled: &StyledGeometryRasterRequest, p
             let counts = &mut work.stats.density_stack;
             counts[0] = counts[0].saturating_add(lit);
             counts[if top { 1 } else { 2 }] = counts[if top { 1 } else { 2 }].saturating_add(written);
-            // the last density pass when every plane is a top one
-            if density_top_count(styled) >= styled.layers.len() && plane == 0 {
-                let (covered, claimed) = work.band.density_totals();
-                counts[3] = counts[3].saturating_add(covered);
-                counts[4] = counts[4].saturating_add(claimed);
-            }
         }
         TilePass::DensityLower => {
             let colors: Vec<[u8; 4]> = (0..styled.layers.len().saturating_sub(density_top_count(styled))).map(|plane| plane_paint(styled, plane).color).collect();
@@ -4121,9 +4444,6 @@ fn end_density_pass(work: &mut TileWork, styled: &StyledGeometryRasterRequest, p
             let counts = &mut work.stats.density_stack;
             counts[0] = counts[0].saturating_add(lit);
             counts[2] = counts[2].saturating_add(written);
-            let (covered, claimed) = work.band.density_totals();
-            counts[3] = counts[3].saturating_add(covered);
-            counts[4] = counts[4].saturating_add(claimed);
         }
         TilePass::Frames(_) => {}
     }
@@ -4186,6 +4506,7 @@ fn raster_tile(
                     request,
                     styled,
                     bin,
+                    None,
                     None,
                     &mut work,
                     pass,
@@ -4284,15 +4605,22 @@ pub struct LayerRasterSession {
     density: Option<DensityPlan>,
     /// the work-bin collection is on (the density scenes' bins too)
     work_bin: bool,
+    /// Plan and paint every density layer separately, highest first.
+    density_stages: bool,
 }
 
 /// The density stack's pass-2 scenes (LayerRasterSession::render_layered_with):
 /// the finer plan of the top plane's layer over the space its density may
 /// take, and of the other layers over the space theirs may
 /// (BlockDemand::eligible_regions); None: nothing to draw on that side.
+/// A staged session reads only `top`, as the current layer's scene.
 pub struct DensityScenes {
     pub top: Option<Arc<FrameScene>>,
     pub others: Option<Arc<FrameScene>>,
+    /// pass 2 from the occupancy density instead of scenes: every density
+    /// plane paints its layer from it (crate::occ; renderd's, unless
+    /// FLOE_RUST_DENSITY_OCC=off)
+    pub occ: Option<Arc<crate::occ::OccDensity>>,
 }
 
 /// One side of pass 2: its scene and, for the top plane's side with the
@@ -4311,6 +4639,8 @@ struct DensitySide {
 struct DensityPlan {
     top: Option<DensitySide>,
     others: Option<DensitySide>,
+    /// DensityScenes::occ
+    occ: Option<Arc<crate::occ::OccDensity>>,
     start: usize,
 }
 
@@ -4319,7 +4649,7 @@ impl DensityPlan {
     /// plane).
     fn side(&self, top: bool) -> Option<DensityScene<'_>> {
         let side = if top { self.top.as_ref() } else { self.others.as_ref() };
-        side.map(|side| DensityScene { scene: side.scene.as_ref(), bin: side.bin.as_ref(), table: &side.table, words: &side.words })
+        side.map(|side| DensityScene { scene: side.scene.as_ref(), bin: side.bin.as_ref(), table: &side.table, words: &side.words, mini_side: usize::from(!top) })
     }
 }
 
@@ -4338,6 +4668,8 @@ pub struct BlockDemand<'a> {
     /// the block that starts is the density stack's pass 2: the caller plans
     /// it over `eligible_regions` and returns its scenes
     density_block: bool,
+    /// The styled-plane index about to run in a staged density session.
+    density_plane: Option<usize>,
 }
 
 /// Why the pages of one plane were asked for or left out.
@@ -4387,6 +4719,51 @@ impl BlockDemand<'_> {
     /// The block that starts is the density stack's pass 2.
     pub fn density_block(&self) -> bool {
         self.density_block
+    }
+
+    /// The density layer about to be planned and painted. Legacy two-side
+    /// sessions and original blocks return None.
+    pub fn density_plane(&self) -> Option<usize> {
+        self.density_plane
+    }
+
+    /// Whether a pixel is left that a density plane may take - the top
+    /// planes' or the others'; none: pass 1 covered the frame and pass 2 has
+    /// nothing to draw (the occupancy density asks before it makes its layers:
+    /// review 2026-10-07, a covered frame made them for nothing)
+    pub fn has_density_candidate(&self) -> bool {
+        self.tiles.iter().any(|tile| tile.band.has_density_candidate(true) || tile.band.has_density_candidate(false))
+    }
+
+    /// Exact density eligibility in frame coordinates. Each row holds
+    /// ceil(width / 64) words; set bits are pixels a density source may
+    /// light. Tile padding and pattern-forbidden slots are never exported.
+    pub fn density_mask(&self, top: bool) -> Result<Arc<floe_vfs::hier::DensityMask>, String> {
+        let width = self.request.width as usize;
+        let words = width.div_ceil(64);
+        let mut bits = vec![0u64; words * self.request.height as usize];
+        for tile in self.tiles {
+            let band = &tile.band;
+            let Some(stack) = band.stack.as_ref() else { continue; };
+            let tile_width = band.tile_width() as usize;
+            for row in 0..(band.row1 - band.row0) as usize {
+                let target_row = (band.row0 as usize + row) * words;
+                for word in 0..stack.words {
+                    let count = (tile_width - word * 64).min(64);
+                    let inside = if count == 64 { !0u64 } else { (1u64 << count) - 1 };
+                    let open = band.density_candidate_word(top, row * stack.words + word) & inside;
+                    let col = band.col0 as usize + word * 64;
+                    let at = target_row + col / 64;
+                    let shift = col % 64;
+                    bits[at] |= open << shift;
+                    if shift != 0 && count > 64 - shift {
+                        bits[at + 1] |= open >> (64 - shift);
+                    }
+                }
+            }
+        }
+        let view = self.request.view;
+        floe_vfs::hier::DensityMask::new([view.x0, view.y0, view.x1, view.y1], self.request.width, self.request.height, bits).map(Arc::new)
     }
 
     /// The frame as the passes so far painted it - at the density stack's
@@ -4473,8 +4850,9 @@ impl BlockDemand<'_> {
         let nx = ((width - 1 + ox).div_euclid(cell) - gx + 1) as usize;
         let ny = ((height - 1 + oy).div_euclid(cell) - gy + 1) as usize;
         let mut free = vec![0u32; nx * ny];
+        let mut candidates = vec![0u32; nx * ny];
         for tile in self.tiles {
-            tile.band.count_free_cells(top, cell, (ox, oy, gx, gy), nx, &mut free);
+            tile.band.count_free_cells(top, cell, (ox, oy, gx, gy), nx, &mut free, &mut candidates);
         }
         // a cell's columns (rows) in the frame
         let span = |at: usize, o: i64, g: i64, n: i64| {
@@ -4486,7 +4864,10 @@ impl BlockDemand<'_> {
             .map(|k| {
                 let ((c0, c1), (r0, r1)) = (span(k % nx, ox, gx, width), span(k / nx, oy, gy, height));
                 let area = ((c1 - c0).max(0) * (r1 - r0).max(0)) as f64;
-                let kept = free[k] > 0 && free[k] as f64 >= (min_share * area).ceil();
+                // Preserve the physical free-share threshold: using only
+                // checker slots would double it and discard visible dots.
+                // A cell with no drawable position, however, needs no plan.
+                let kept = candidates[k] > 0 && free[k] as f64 >= (min_share * area).ceil();
                 if kept {
                     kept_px += u64::from(free[k]);
                 }
@@ -4791,6 +5172,7 @@ impl LayerRasterSession {
         let density = density.map(|_| DensityPlan {
             top: None,
             others: None,
+            occ: None,
             start: passes.iter().position(|pass| matches!(pass, TilePass::Density(_))).unwrap_or(passes.len()),
         });
         Ok(LayerRasterSession {
@@ -4809,7 +5191,24 @@ impl LayerRasterSession {
             pages_by_plane,
             density,
             work_bin,
+            density_stages: false,
         })
+    }
+
+    /// Plan and paint density one layer at a time, descending through every
+    /// visible layer. Pass 1 runs as one block; each later density callback
+    /// returns that layer's scene in `DensityScenes::top`. This schedule is
+    /// intended for shapes-first opaque density, whose reservations can be
+    /// passed to the next layer without retaining previous density scenes.
+    pub fn with_density_stages(mut self) -> Self {
+        if self.density.is_some() {
+            let planes = self.pages_by_plane.len();
+            let at = self.density.as_ref().unwrap().start;
+            self.passes.retain(|pass| !matches!(pass, TilePass::Density(_) | TilePass::DensityLower));
+            self.passes.splice(at..at, (0..planes).rev().map(TilePass::Density));
+            self.density_stages = true;
+        }
+        self
     }
 
     /// The passes before the density stack's pass 2 - the block size that
@@ -4896,7 +5295,9 @@ impl LayerRasterSession {
     /// before the block the density passes start, `before_block` sees
     /// `BlockDemand::density_block`, plans the finer scenes over
     /// `eligible_regions` and returns them; their bins are collected here,
-    /// and the density passes read them.
+    /// and the density passes read them. With `with_density_stages`, `block`
+    /// is superseded by one original block and one block per density layer;
+    /// each callback reads the masks left by the preceding layer.
     pub fn render_layered_with<F>(
         self,
         scene: &FrameScene,
@@ -4925,23 +5326,43 @@ impl LayerRasterSession {
             pages_by_plane,
             density,
             work_bin,
+            density_stages,
         } = self;
         let mut stats = stats;
         let tiles: Vec<std::sync::Mutex<TileWork>> =
             tiles.into_iter().map(std::sync::Mutex::new).collect();
         let (bin, passes) = (bin.as_ref(), passes.as_slice());
         let density_start = density.as_ref().map(|plan| plan.start);
+        let blocks: Vec<(usize, usize)> = if density_stages {
+            let start = density_start.unwrap_or(passes.len());
+            let mut blocks = Vec::new();
+            if start > 0 {
+                blocks.push((0, start));
+            }
+            let mut at = start;
+            while at < passes.len() && matches!(passes[at], TilePass::Density(_)) {
+                blocks.push((at, at + 1));
+                at += 1;
+            }
+            if at < passes.len() {
+                blocks.push((at, passes.len()));
+            }
+            blocks
+        } else {
+            (0..passes.len()).step_by(block).map(|at| (at, (at + block).min(passes.len()))).collect()
+        };
         // the pass-2 scenes arrive at the block boundary; the workers read
         // them per density pass
         let density_slot: std::sync::RwLock<Option<DensityPlan>> = std::sync::RwLock::new(density);
         let density_slot = &density_slot;
         let barrier = std::sync::Barrier::new(workers + 1);
         let pass_index = AtomicUsize::new(0);
+        let pass_end = AtomicUsize::new(0);
         let cursor = AtomicUsize::new(0);
         let stop = std::sync::atomic::AtomicBool::new(false);
         let failure = std::sync::Mutex::new(None::<String>);
-        let (tiles_ref, barrier, pass_index, cursor, stop, failure) = (
-            &tiles, &barrier, &pass_index, &cursor, &stop, &failure,
+        let (tiles_ref, barrier, pass_index, pass_end, cursor, stop, failure) = (
+            &tiles, &barrier, &pass_index, &pass_end, &cursor, &stop, &failure,
         );
         std::thread::scope(|scope| -> Result<(), String> {
             for _ in 0..workers {
@@ -4951,7 +5372,7 @@ impl LayerRasterSession {
                         return;
                     }
                     let first = pass_index.load(Ordering::Relaxed);
-                    let last = (first + block).min(passes.len());
+                    let last = pass_end.load(Ordering::Relaxed);
                     loop {
                         let tile_index = cursor.fetch_add(1, Ordering::Relaxed);
                         let Some(slot) = tiles_ref.get(tile_index) else {
@@ -4973,8 +5394,12 @@ impl LayerRasterSession {
                                 _ => None,
                             };
                             let density_pass = match (passes[at], plan.as_deref()) {
-                                (TilePass::Density(plane), Some(Some(plan))) => plan.side(density_is_top(styled, plane)),
+                                (TilePass::Density(plane), Some(Some(plan))) => plan.side(density_stages || density_is_top(styled, plane)),
                                 (TilePass::DensityLower, Some(Some(plan))) => plan.side(false),
+                                _ => None,
+                            };
+                            let occ = match (passes[at], plan.as_deref()) {
+                                (TilePass::Density(_) | TilePass::DensityLower, Some(Some(plan))) => plan.occ.as_deref(),
                                 _ => None,
                             };
                             if let Err(error) = raster_tile_pass(
@@ -4983,6 +5408,7 @@ impl LayerRasterSession {
                                 styled,
                                 bin,
                                 density_pass,
+                                occ,
                                 &mut tile,
                                 passes[at],
                                 passes.len() - at,
@@ -5009,12 +5435,14 @@ impl LayerRasterSession {
             }
             let mut result = Ok(());
             let mut planes: Vec<usize> = Vec::with_capacity(block);
-            // pass 2's raster: from its collection to the last pass
-            let mut density_raster_started: Option<Instant> = None;
-            for at in (0..passes.len()).step_by(block) {
+            let mut density_exhausted = false;
+            for (at, last) in blocks {
+                if density_stages && density_exhausted && matches!(passes[at], TilePass::Density(_)) {
+                    continue;
+                }
                 planes.clear();
                 planes.extend(
-                    passes[at..(at + block).min(passes.len())]
+                    passes[at..last]
                         .iter()
                         .filter_map(|&pass| Self::plane_of(pass)),
                 );
@@ -5035,7 +5463,40 @@ impl LayerRasterSession {
                         break;
                     }
                 };
-                let density_block = density_start == Some(at);
+                let density_plane = if density_stages {
+                    match passes[at] { TilePass::Density(plane) => Some(plane), _ => None }
+                } else { None };
+                let density_block = density_plane.is_some() || density_start == Some(at);
+                if density_plane.is_some() && density_start != Some(at)
+                    && guards.iter().all(|tile| !tile.band.has_density_candidate(true))
+                {
+                    // Still expose the initial boundary (the caller may
+                    // publish pass 1), but once no candidate remains skip
+                    // every later density callback and mask allocation.
+                    density_exhausted = true;
+                    continue;
+                }
+                if density_start == Some(at) && styled.raster.density_shapes_first {
+                    // Workers have finished pass 1. A tile that filled early
+                    // skipped its remaining original planes, including plane
+                    // 0, so finalize every tile here before planning pass 2.
+                    for tile in &mut guards {
+                        tile.band.snapshot_top_blocked();
+                    }
+                }
+                if density_stages && density_block {
+                    // No worker holds the previous stage here. Release it
+                    // before the callback plans and decodes its successor.
+                    if let Ok(mut slot) = density_slot.write() {
+                        if let Some(plan) = slot.as_mut() {
+                            plan.top = None;
+                            plan.others = None;
+                        }
+                    }
+                    for tile in &mut guards {
+                        for minis in &mut tile.density_minis { minis.clear(); }
+                    }
+                }
                 let demand = BlockDemand {
                     request: &request,
                     styled,
@@ -5045,6 +5506,7 @@ impl LayerRasterSession {
                     pages_by_plane: &pages_by_plane,
                     stroke_pixels,
                     density_block,
+                    density_plane,
                 };
                 let asked = before_block(&planes, &demand);
                 drop(demand);
@@ -5055,14 +5517,17 @@ impl LayerRasterSession {
                         break;
                     }
                 };
+                let mut empty_density_stage = false;
                 if density_block {
                     // the pass-2 scenes: their bins, their deferred edges'
                     // minis per tile, then the workers may read them
                     let collect_started = Instant::now();
                     let mut sides: [Option<DensitySide>; 2] = [None, None];
-                    let scenes = scenes.unwrap_or(DensityScenes { top: None, others: None });
+                    let DensityScenes { top: scene_top, others: scene_others, occ: scene_occ } =
+                        scenes.unwrap_or(DensityScenes { top: None, others: None, occ: None });
                     let collected: Result<(), String> = (|| {
-                    for (side, scene) in [scenes.top, scenes.others].into_iter().enumerate() {
+                    for (side, scene) in [scene_top, scene_others].into_iter().enumerate() {
+                        if density_stages && side != 0 { continue; }
                         let Some(scene) = scene else {
                             continue;
                         };
@@ -5087,7 +5552,7 @@ impl LayerRasterSession {
                         }
                         let bin = if work_bin {
                             let mut density_stats = RenderStats::default();
-                            let bin = collect_work_bin(&scene, &request, styled, stroke_pixels, guard, &mut density_stats, None)?;
+                            let bin = collect_work_bin_plane(&scene, &request, styled, stroke_pixels, guard, &mut density_stats, None, density_plane)?;
                             stats.density_bin[0] += bin.as_ref().map_or(0, |bin| bin.items);
                             stats.density_bin[1] += bin.as_ref().map_or(0, |bin| bin.deferred_edges.len() as u64);
                             stats.density_bin[2] += density_stats.work_bin_overflow_items;
@@ -5116,20 +5581,39 @@ impl LayerRasterSession {
                         break;
                     }
                     let [top, others] = sides;
+                    empty_density_stage = density_stages && density_plane.is_some() && top.is_none();
                     if let Ok(mut slot) = density_slot.write() {
                         if let Some(plan) = slot.as_mut() {
                             plan.top = top;
                             plan.others = others;
+                            plan.occ = scene_occ;
                         }
                     }
-                    stats.density_collect_us = elapsed_us_of(collect_started);
-                    density_raster_started = Some(Instant::now());
+                    stats.density_collect_us = stats.density_collect_us.saturating_add(elapsed_us_of(collect_started));
                 }
                 drop(guards);
+                if empty_density_stage {
+                    // The callback still observes each layer and the first
+                    // boundary still publishes pass 1. No scene can change
+                    // the mask, so keep the workers parked until real work
+                    // or the trailing frame passes arrive.
+                    if let Err(error) = check_cancelled(guard) {
+                        result = Err(error);
+                        break;
+                    }
+                    continue;
+                }
+                // Measure only raster work, excluding every stage's plan,
+                // decode and bin collection while workers are stopped.
+                let density_raster_started = density_start.filter(|&start| at >= start).map(|_| Instant::now());
                 pass_index.store(at, Ordering::Relaxed);
+                pass_end.store(last, Ordering::Relaxed);
                 cursor.store(0, Ordering::Relaxed);
                 barrier.wait();
                 barrier.wait();
+                if let Some(started) = density_raster_started {
+                    stats.density_raster_us = stats.density_raster_us.saturating_add(elapsed_us_of(started));
+                }
                 let failed = match failure.lock() {
                     Ok(failed) => failed.clone(),
                     Err(_) => Some("raster failure lock poisoned".to_string()),
@@ -5138,9 +5622,6 @@ impl LayerRasterSession {
                     result = Err(error);
                     break;
                 }
-            }
-            if let Some(started) = density_raster_started {
-                stats.density_raster_us = elapsed_us_of(started);
             }
             stop.store(true, Ordering::Release);
             barrier.wait();
@@ -7080,6 +7561,9 @@ fn bright_lattice(
     };
     let (col0, col1, row0, row1) = (i64::from(band.col0), i64::from(band.col1), i64::from(band.row0), i64::from(band.row1));
     let width = band.tile_width() as usize;
+    let (px0, py0) = world_px(request, world.x0, world.y0);
+    let (px1, py1) = world_px(request, world.x1, world.y1);
+    let source = DensitySource::Shape { singleton: density_singleton((px1 - px0).abs(), (py1 - py0).abs()) };
     let Some(stack) = band.stack.as_mut() else {
         return Ok(None);
     };
@@ -7109,7 +7593,7 @@ fn bright_lattice(
         for col in c_lo..c_hi {
             let fx = stack.xs[col];
             if fx > 0.0 {
-                stack.bright_add(row * width + col, (area * f64::from(fx) * f64::from(fy)) as f32);
+                stack.bright_add_source(row * width + col, (area * f64::from(fx) * f64::from(fy)) as f32, source);
             }
         }
     }
@@ -7357,7 +7841,8 @@ fn paint_density_dots(band: &mut RasterBand, request: &GeometryRasterRequest, wo
             Some(count) => f64::from(count) / floe_vfs::hier::DOT_BRIGHT_UNITS,
             None => (x1 - x0).abs() * (y1 - y0).abs() * dot_share(),
         };
-        return Ok(band.bright_spread_px((x0, y0, x1, y1), cover));
+        let singleton = density_singleton((x1 - x0).abs(), (y1 - y0).abs());
+        return Ok(band.bright_spread_source((x0, y0, x1, y1), cover, DensitySource::Summary { singleton }));
     }
     let (ax, ay) = world_to_device(request, world.x0, world.y0)?;
     let (bx, by) = world_to_device(request, world.x1, world.y1)?;
@@ -8944,9 +9429,17 @@ fn paint_world_polygon_ranked(
     paint: PaintStyle,
     rank: Option<f64>,
 ) -> Result<bool, String> {
+    let paint = if band.bright_stacking() && request.density_pattern { PaintStyle::solid(paint.color) } else { paint };
     if let Some(world) = polygon_bbox(points) {
         let area = if request.area_true { Some(polygon_area(points)) } else { None };
         if band.bright_stacking() {
+            if request.density_pattern {
+                let (x0, y1) = world_px(request, world.x0, world.y0);
+                let (x1, y0) = world_px(request, world.x1, world.y1);
+                if density_singleton((x1 - x0).abs(), (y1 - y0).abs()) {
+                    return Ok(band.bright_spread_px((x0, y0, x1, y1), world_px_area(request, area.unwrap_or(0.0))));
+                }
+            }
             // the density's brightness: its area over its box
             if let Some((device, px_area)) = area_true_density_box(request, world, paint, area.unwrap_or(0.0))? {
                 return Ok(band.bright_spread(device, px_area));
@@ -8999,9 +9492,17 @@ fn paint_world_path_ranked(
     paint: PaintStyle,
     rank: Option<f64>,
 ) -> Result<bool, String> {
+    let paint = if band.bright_stacking() && request.density_pattern { PaintStyle::solid(paint.color) } else { paint };
     if let Some(world) = polygon_bbox(outline) {
         let area = if request.area_true { Some(polygon_area(outline)) } else { None };
         if band.bright_stacking() {
+            if request.density_pattern {
+                let (x0, y1) = world_px(request, world.x0, world.y0);
+                let (x1, y0) = world_px(request, world.x1, world.y1);
+                if density_singleton((x1 - x0).abs(), (y1 - y0).abs()) {
+                    return Ok(band.bright_spread_px((x0, y0, x1, y1), world_px_area(request, area.unwrap_or(0.0))));
+                }
+            }
             // the density's brightness: its area over its box
             if let Some((device, px_area)) = area_true_density_box(request, world, paint, area.unwrap_or(0.0))? {
                 return Ok(band.bright_spread(device, px_area));
@@ -9182,6 +9683,7 @@ fn paint_summary_plane(
         row_lit[mr as usize] = true;
     }
     let tile_width = band.tile_width() as usize;
+    let cover_originals = matches!(&band.stack, Some(stack) if stack.phase == StackPhase::Originals);
     let mut painted = 0u64;
     for r in band.row0..band.row1 {
         let mr = (r as i64 - hr0) as usize;
@@ -9190,10 +9692,20 @@ fn paint_summary_plane(
         if !row_lit[mr] {
             continue;
         }
+        let mut covered_from = None;
         for c in band.col0..band.col1 {
             let mc = (c as i64 - hc0) as usize;
             if !mask[mr * hw + mc] {
+                if let Some(first) = covered_from.take() {
+                    band.cover_rows(r as usize, r as usize + 1, first, c as usize);
+                }
                 continue;
+            }
+            // The occupied mask is the original's footprint. Its style may
+            // leave speckle/stipple/clear holes, but pass 2 cannot use them.
+            // Mark occupied runs only, preserving real holes in the summary.
+            if cover_originals && covered_from.is_none() {
+                covered_from = Some(c as usize);
             }
             let boundary = !mask[mr * hw + mc - 1]
                 || !mask[mr * hw + mc + 1]
@@ -9208,6 +9720,9 @@ fn paint_summary_plane(
                 let offset = ((r - band.row0) as usize * tile_width + (c - band.col0) as usize) * 4;
                 band.pixels[offset..offset + 4].copy_from_slice(&paint.color);
             }
+        }
+        if let Some(first) = covered_from {
+            band.cover_rows(r as usize, r as usize + 1, first, band.col1 as usize);
         }
     }
     counters.summary_pixels_drawn = counters.summary_pixels_drawn.saturating_add(painted);
@@ -10045,6 +10560,7 @@ mod tests {
             density_top_planes: 1,
             density_shapes_first: false,
             density_bright: 0.0,
+            density_pattern: false,
         }
     }
 
@@ -10154,6 +10670,7 @@ mod tests {
             members: 1,
             index: crate::PageIndex::build(&doc),
             doc,
+            grown_bytes: 0,
         })
     }
 
@@ -10352,6 +10869,7 @@ mod tests {
                         density_top_planes: 1,
                         density_shapes_first: false,
                         density_bright: 0.0,
+                        density_pattern: false,
                         ..request()
                     },
                     layers,
@@ -10425,6 +10943,196 @@ mod tests {
         let offset =
             ((y - band.row0 as usize) * band.tile_width() as usize + x - band.col0 as usize) * 4;
         band.pixels[offset..offset + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn occupancy_summary_claims_speckle_holes_for_density() {
+        use floe_vfs::occupancy::{write_ovo, Layer, Level, Occupancy, OvoFile, Plane, STATUS_OK};
+        for actual_hole in [false, true] {
+            let mut bits = vec![255u8; 32 * 4];
+            if actual_hole {
+                for y in 12..20 {
+                    for x in 12..20 {
+                        bits[y * 4 + x / 8] &= !(1 << (x % 8));
+                    }
+                }
+            }
+            let occ = Occupancy {
+                unit: 1000.0, src_size: 1, src_mtime: 2, top: "T".into(),
+                cell_dbu: 10, bbox: (0, 0, 320, 320), w: 32, h: 32, n_levels: 1,
+                layers: vec![Layer { layer: 3, dt: 0, status: STATUS_OK, work: 1,
+                    planes: vec![Plane { depth: 0, levels: vec![Level { w: 32, h: 32, bits }] }] }],
+                paths_skipped: 0,
+            };
+            let file = Arc::new(OvoFile::from_bytes(write_ovo(&occ)).unwrap());
+            let summaries = crate::summary::planes_for(&file, 0, [(3, 0)], None, None);
+            let pages = || vec![(2, vec![RectRec { layer: 2, dt: 0, x: 0, y: 0, w: 25, h: 25,
+                rep: Rep::Grid { na: 11, nb: 11, va: (30, 0), vb: (0, 30) } }], Vec::new())];
+            let mut coarse = stack_scene(pages(), CUT_1);
+            coarse.set_summaries(summaries);
+            let fine = Arc::new(stack_scene(pages(), CUT_2));
+            for fill in [LayerFill::Solid, LayerFill::Speckle, LayerFill::Pattern([0x2222; 16]), LayerFill::Clear] {
+                for (tile, workers, bin) in [(32, 1, true), (7, 3, true), (16, 2, false)] {
+                    let mut request = stack_request(fill, tile, workers);
+                    request.raster.density_shapes_first = true;
+                    request.raster.density_bright = 2.0;
+                    request.raster.density_pattern = true;
+                    let mut baseline = request.clone();
+                    baseline.raster.density_stack = false;
+                    let expected = render_geometry_styled(&coarse, &baseline).unwrap().frame;
+                    let mut regions = Vec::new();
+                    let got = density_frame(&coarse, &fine, CUT_1 as i64, &request, bin, &mut regions);
+                    assert_eq!(got.stats.density_stack[3], if actual_hole { 960 } else { 1024 }, "summary coverage, {fill:?}");
+                    assert_eq!(regions.len(), 1);
+                    if actual_hole {
+                        assert!(!regions[0].0.is_empty() && !regions[0].1.is_empty(), "real empty cells remain eligible");
+                        assert!(count(&got.frame, RED, 12..20, 12..20) > 0, "density belongs in the real hole");
+                    } else {
+                        assert!(regions[0].0.is_empty() && regions[0].1.is_empty(), "styled holes cannot demand density: {fill:?}, {regions:?}");
+                        assert_eq!(got.frame, expected);
+                    }
+                    for y in 0..32 {
+                        for x in 0..32 {
+                            if !actual_hole || !(12..20).contains(&x) || !(12..20).contains(&y) {
+                                assert_eq!(pixel(&got.frame, x, y), pixel(&expected, x, y), "occupied summary changed: {fill:?}, ({x},{y})");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Compare the actual pass-2 exclusion mask with the same original
+    /// geometry painted solid. The plan, pages, cut and stroke stay fixed;
+    /// only the fill changes, so stylistic holes must not become demand.
+    fn check_original_union_against_solid(
+        scene: &FrameScene,
+        styled: &StyledGeometryRasterRequest,
+        work_bin: bool,
+        case: &str,
+    ) -> GeometryRasterReport {
+        let mut solid = styled.clone();
+        for layer in &mut solid.layers {
+            layer.fill = LayerFill::Solid;
+        }
+        let reference = with_write_once(true, || render_geometry_styled_unbinned(scene, &solid).unwrap().frame);
+        let mut checked = false;
+        let report = with_write_once(true, || {
+            let session = LayerRasterSession::begin_with_density(
+                scene, styled, work_bin, Some(scene.plan().stats.shape_cut as i64), None,
+            ).unwrap();
+            let block = session.density_block();
+            session.render_layered_with(scene, styled, None, block, |_, demand| {
+                if !demand.density_block() {
+                    return Ok(None);
+                }
+                checked = true;
+                for tile in demand.tiles {
+                    let band = &tile.band;
+                    let stack = band.stack.as_ref().unwrap();
+                    let once = band.once.as_ref().unwrap();
+                    for row in band.row0..band.row1 {
+                        for col in band.col0..band.col1 {
+                            let local_col = (col - band.col0) as usize;
+                            let index = (row - band.row0) as usize * stack.words + local_col / 64;
+                            let bit = 1u64 << (local_col % 64);
+                            let expected = pixel(&reference, col as usize, row as usize) != styled.raster.background;
+                            let union = (once.bits[index] | stack.covered[index]) & bit != 0;
+                            assert_eq!(union, expected, "original union vs solid: {case}, bin {work_bin}, ({col},{row})");
+                            assert_eq!(stack.top_blocked[index] & bit != 0, expected, "frozen pass-2 mask: {case}, bin {work_bin}, ({col},{row})");
+                            if expected {
+                                assert_eq!(band.density_candidate_word(true, index) & bit, 0, "solid footprint offered to top density: {case}, ({col},{row})");
+                                assert_eq!(band.density_candidate_word(false, index) & bit, 0, "solid footprint offered to lower density: {case}, ({col},{row})");
+                            }
+                        }
+                    }
+                }
+                Ok(None)
+            }).unwrap()
+        });
+        assert!(checked, "the pass-1 boundary must be inspected: {case}");
+        report
+    }
+
+    #[test]
+    fn original_union_mask_matches_solid_fill_across_geometry_paths() {
+        let grid = Rep::Grid { na: 3, nb: 2, va: (80, 0), vb: (0, 130) };
+        let points = Rep::Pts(Arc::from(vec![(0, 0), (80, 0), (160, 0), (0, 130), (80, 130)]));
+        let mut scenes = Vec::new();
+        for (name, rep) in [("grid", grid), ("points", points)] {
+            scenes.push((format!("rect {name}"), hairline_scene(
+                vec![RectRec { layer: 1, dt: 0, x: 10, y: 12, w: 65, h: 95, rep: rep.clone() }], Vec::new(), Vec::new(),
+            )));
+            scenes.push((format!("polygon {name}"), hairline_scene(
+                Vec::new(), vec![PolyRec { layer: 1, dt: 0, pts: vec![(10, 12), (70, 20), (55, 107), (15, 75)], rep: rep.clone() }], Vec::new(),
+            )));
+            scenes.push((format!("path {name}"), hairline_scene(
+                Vec::new(), Vec::new(), vec![PathRec { layer: 1, dt: 0, pts: vec![(22, 25), (60, 25), (60, 90)], hw: 12, es: 3, ee: 0, rep }],
+            )));
+        }
+        // Same four-layer hierarchy and decoded pages in both paints:
+        // rotated/flipped placements, record arrays, and a nonzero max cut.
+        scenes.push(("hierarchy sparse".into(), once_scene_cut(1, false, 0)));
+        scenes.push(("hierarchy dense cut".into(), once_scene_cut(2, true, 20)));
+        let mut style_holes = 0usize;
+        let mut full_tiles = 0u32;
+        for (name, scene) in scenes {
+            for (area_true, tile, workers, pattern) in [(false, 16, 1, false), (true, 7, 3, true)] {
+                for fill in [LayerFill::Speckle, LayerFill::Pattern([0x8421; 16]), LayerFill::Clear] {
+                    let request = StyledGeometryRasterRequest {
+                        raster: GeometryRasterRequest {
+                            view: RasterViewBox::new(-2.5, 1.25, 317.5, 321.25).unwrap(),
+                            width: 48, height: 48, tile_size: tile, workers, area_true,
+                            density_stack: true, density_shapes_first: true,
+                            density_bright: 2.0, density_pattern: pattern,
+                            ..request()
+                        },
+                        layers: (0..4).map(|layer_idx| LayerStyle { layer_idx, color: WHITE, fill, outline_width: 1 }).collect(),
+                        hierarchy_frames: false,
+                        mono: false,
+                    };
+                    let case = format!("{name}, {fill:?}, area_true {area_true}, tile {tile}, pattern {pattern}");
+                    for bin in [true, false] {
+                        let report = check_original_union_against_solid(&scene, &request, bin, &case);
+                        full_tiles += report.stats.once_full_tiles;
+                        let written = report.frame.pixels().chunks_exact(4).filter(|p| **p != request.raster.background).count();
+                        style_holes += (report.stats.density_stack[3] as usize).saturating_sub(written);
+                    }
+                }
+            }
+        }
+        assert!(style_holes > 0, "the comparison must include unpainted fill pixels inside covered shapes");
+        assert!(full_tiles > 0, "the dense hierarchy must also exercise original-pass early exits");
+    }
+
+    #[test]
+    fn original_union_mask_matches_solid_fill_through_deferred_placements() {
+        let world = BBox { x0: 0, y0: 0, x1: 1600, y1: 1600 };
+        let mut request = lattice_request(world, 32, 16, 2, true, true);
+        request.raster.density_stack = true;
+        request.raster.density_shapes_first = true;
+        request.raster.density_bright = 2.0;
+        request.raster.density_pattern = true;
+        for layer in &mut request.layers {
+            layer.fill = LayerFill::Speckle;
+        }
+        for (full, rect) in [
+            (false, RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 1, h: 30, rep: Rep::One }),
+            // Every placement encloses the frame, so its only unwritten
+            // pixels are speckle holes, never gaps between actual shapes.
+            (true, RectRec { layer: 1, dt: 0, x: -2000, y: -2000, w: 4800, h: 4800, rep: Rep::One }),
+        ] {
+            let leaf = (1, vec![rect], Vec::new());
+            let scene = placed_scene(vec![leaf], (0, 0, 0, false, Rep::Grid { na: 800, nb: 800, va: (2, 0), vb: (0, 2) }), world);
+            let report = check_original_union_against_solid(&scene, &request, true, "deferred placement array");
+            assert!(report.stats.work_bin_defer_rep > 0, "the coverage comparison must traverse a real deferred edge");
+            if full {
+                assert_eq!(report.stats.density_stack[3], 32 * 32, "the original covers every pixel");
+                let written = report.frame.pixels().chunks_exact(4).filter(|p| **p != request.raster.background).count();
+                assert_eq!(written, 32 * 32 / 2, "half the covered pixels are unpainted speckle holes");
+            }
+        }
     }
 
     #[test]
@@ -10545,6 +11253,7 @@ mod tests {
             density_top_planes: 1,
             density_shapes_first: false,
             density_bright: 0.0,
+            density_pattern: false,
         };
         let mut pattern = [0u16; 16];
         for (row, word) in pattern.iter_mut().enumerate() {
@@ -10674,6 +11383,7 @@ mod tests {
             density_top_planes: 1,
             density_shapes_first: false,
             density_bright: 0.0,
+            density_pattern: false,
         };
         let segments = [
             ((4.0, 9.0), (21.0, 9.0)),   // horizontal inside the tile
@@ -10757,6 +11467,7 @@ mod tests {
             density_top_planes: 1,
             density_shapes_first: false,
             density_bright: 0.0,
+            density_pattern: false,
         };
         let mut band = full_band(&request);
         paint_world_rect(
@@ -10920,6 +11631,7 @@ mod tests {
             density_top_planes: 1,
             density_shapes_first: false,
             density_bright: 0.0,
+            density_pattern: false,
         };
         let mut frame = full_band(&request);
         fill_world_polygon_with_phase(
@@ -11057,6 +11769,7 @@ mod tests {
             members: 1,
             index: crate::PageIndex::build(&doc),
             doc,
+            grown_bytes: 0,
         })
     }
 
@@ -11276,6 +11989,7 @@ mod tests {
             members: 1,
             index: crate::PageIndex::build(&doc),
             doc,
+            grown_bytes: 0,
         });
         let scene = FrameScene::from_test_parts(plan, vec![decoded], BTreeMap::from([(top, bbox)]))
             .unwrap();
@@ -11413,6 +12127,7 @@ mod tests {
                 members: 1,
                 index: index(&doc),
                 doc,
+                grown_bytes: 0,
             });
             let top = (0, REM_FULL);
             let plan = HierPlan {
@@ -11451,6 +12166,7 @@ mod tests {
             density_top_planes: 1,
             density_shapes_first: false,
             density_bright: 0.0,
+            density_pattern: false,
         };
         let pruned =
             render_geometry_occupancy(&scene_with(crate::PageIndex::build), &request).unwrap();
@@ -11588,6 +12304,7 @@ mod tests {
                 members: 1,
                 index: crate::PageIndex::build(&doc),
                 doc,
+                grown_bytes: 0,
             })
         } else {
             styled_page(2, 1, unit)
@@ -11685,6 +12402,7 @@ mod tests {
             members: 1,
             index: crate::PageIndex::build(&doc),
             doc,
+            grown_bytes: 0,
         });
         let top = (0, REM_FULL);
         let plan = HierPlan {
@@ -12489,6 +13207,12 @@ mod tests {
                 // tests against the tiles
                 let mut bbox = BBox::EMPTY;
                 for r in &rects {
+                    if let Rep::Pts(points) = &r.rep {
+                        for &(x, y) in points.iter() {
+                            bbox.grow(&BBox { x0: r.x + x, y0: r.y + y, x1: r.x + x + r.w, y1: r.y + y + r.h });
+                        }
+                        continue;
+                    }
                     let (nx, ny) = match &r.rep {
                         Rep::Grid { na, nb, va, vb } => ((*na as i64 - 1) * va.0 + (*nb as i64 - 1) * vb.0, (*na as i64 - 1) * va.1 + (*nb as i64 - 1) * vb.1),
                         _ => (0, 0),
@@ -12521,6 +13245,7 @@ mod tests {
                     members: 1,
                     index: crate::PageIndex::build(&doc),
                     doc,
+                    grown_bytes: 0,
                 })
             })
             .collect();
@@ -12586,7 +13311,7 @@ mod tests {
                     return Ok(None);
                 }
                 regions.push((demand.eligible_regions(true), demand.eligible_regions(false)));
-                Ok(Some(DensityScenes { top: Some(Arc::clone(density)), others: Some(Arc::clone(density)) }))
+                Ok(Some(DensityScenes { top: Some(Arc::clone(density)), others: Some(Arc::clone(density)), occ: None }))
             })
             .unwrap()
     }
@@ -12946,6 +13671,252 @@ mod tests {
         assert!(regions.iter().any(|(top_side, others)| top_side != others), "off: the top side offered more");
     }
 
+    /// A tile may fill before the last original plane, which is then never
+    /// run. Shapes-first must still freeze that tile's original coverage
+    /// before asking for density, including solid hairlines in a speckle
+    /// layer. Keep a lower density plane too: it is skipped on a full tile,
+    /// but must not be needed to account for the original coverage.
+    #[test]
+    fn shapes_first_full_tiles_leave_no_density_demand() {
+        let rect = |layer, x, y, w, h, rep| RectRec { layer, dt: 0, x, y, w, h, rep };
+        for hairlines in [false, true] {
+            let original = if hairlines {
+                rect(3, 0, -20, 10, 360, Rep::Grid { na: 32, nb: 1, va: (10, 0), vb: (0, 0) })
+            } else {
+                rect(3, -20, -20, 360, 360, Rep::One)
+            };
+            let pages = || vec![
+                (1, vec![rect(1, 400, 400, 40, 40, Rep::One)], Vec::new()),
+                (2, vec![rect(2, 5, 5, 15, 15, Rep::Grid { na: 10, nb: 10, va: (30, 0), vb: (0, 30) })], Vec::new()),
+                (3, vec![original.clone()], Vec::new()),
+            ];
+            let coarse = stack_scene(pages(), CUT_1);
+            let fine = Arc::new(stack_scene(pages(), CUT_2));
+            for top in [1, 2, 3] {
+                for bright in [0.0, 2.0] {
+                    for (tile, workers, bin) in [(32, 1, true), (8, 3, true), (16, 2, false)] {
+                        let mut request = stack_request(if hairlines { LayerFill::Speckle } else { LayerFill::Solid }, tile, workers);
+                        request.raster.density_top_planes = top;
+                        request.raster.density_shapes_first = true;
+                        request.raster.density_bright = bright;
+                        let mut baseline = request.clone();
+                        baseline.raster.density_stack = false;
+                        let expected = render_geometry_styled(&coarse, &baseline).unwrap().frame;
+                        assert_eq!(count(&expected, GREEN, 0..32, 0..32), 32 * 32);
+                        let mut regions = Vec::new();
+                        let got = density_frame(&coarse, &fine, CUT_1 as i64, &request, bin, &mut regions);
+                        assert!(got.stats.once_full_tiles > 0, "exercise the early full-tile exit");
+                        assert_eq!(regions.len(), 1);
+                        assert!(regions[0].0.is_empty() && regions[0].1.is_empty(),
+                            "hairlines {hairlines} top {top} bright {bright} tile {tile} bin {bin}: {regions:?}");
+                        assert_eq!(got.frame, expected);
+                        assert_eq!(got.stats.density_stack, [0, 0, 0, 32 * 32, 0]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn staged_density_full_originals_export_empty_mask_and_skip_later_stages() {
+        let coarse = stack_scene(vec![(3, vec![RectRec {
+            layer: 3, dt: 0, x: -20, y: -20, w: 360, h: 360, rep: Rep::One,
+        }], Vec::new())], CUT_1);
+        for (tile, workers, bin) in [(32, 1, true), (7, 3, true), (16, 2, false)] {
+            let mut request = stack_request(LayerFill::Solid, tile, workers);
+            request.raster.density_shapes_first = true;
+            request.raster.density_bright = 2.0;
+            request.raster.density_pattern = true;
+            let mut originals = 0;
+            let mut stages = Vec::new();
+            let got = LayerRasterSession::begin_with_density(&coarse, &request, bin, Some(CUT_1 as i64), None)
+                .unwrap().with_density_stages()
+                .render_layered_with(&coarse, &request, None, 1, |planes, demand| {
+                    if let Some(plane) = demand.density_plane() {
+                        assert!(demand.density_block());
+                        assert!(demand.density_mask(true)?.is_empty());
+                        assert!(demand.density_mask(false)?.is_empty());
+                        stages.push(plane);
+                    } else {
+                        originals += 1;
+                        assert_eq!(planes, &[2, 1, 0], "pass 1 is one block even when block=1");
+                    }
+                    Ok(None)
+                }).unwrap();
+            assert_eq!(originals, 1);
+            assert_eq!(stages, [2], "fully blocked layers need one initial callback only");
+            assert!(got.stats.once_full_tiles > 0, "exercise the early original-pass exit");
+            assert_eq!(got.stats.density_stack, [0, 0, 0, 1024, 0]);
+            assert_eq!(count(&got.frame, GREEN, 0..32, 0..32), 1024);
+        }
+    }
+
+    #[test]
+    fn staged_density_empty_scenes_continue_to_a_later_nonempty_layer() {
+        let coarse = stack_scene(Vec::new(), CUT_1);
+        let fine = Arc::new(stack_scene(vec![(2, vec![RectRec {
+            layer: 2, dt: 0, x: 160, y: 80, w: 20, h: 20, rep: Rep::One,
+        }], Vec::new())], CUT_2));
+        for (tile, workers, bin) in [(32, 1, true), (7, 3, true), (16, 2, false)] {
+            let mut request = stack_request(LayerFill::Solid, tile, workers);
+            request.raster.density_shapes_first = true;
+            request.raster.density_bright = 2.0;
+            request.raster.density_pattern = true;
+            let expected = density_frame(&coarse, &fine, CUT_1 as i64, &request, bin, &mut Vec::new()).frame;
+            let mut stages = Vec::new();
+            let got = LayerRasterSession::begin_with_density(&coarse, &request, bin, Some(CUT_1 as i64), None)
+                .unwrap().with_density_stages()
+                .render_layered_with(&coarse, &request, None, 1, |_, demand| {
+                    let Some(plane) = demand.density_plane() else { return Ok(None); };
+                    stages.push(plane);
+                    if plane == 2 {
+                        assert_eq!(count(&demand.snapshot()?, RED, 0..32, 0..32), 0);
+                    }
+                    Ok((plane == 1).then(|| DensityScenes { top: Some(Arc::clone(&fine)), others: None, occ: None }))
+                }).unwrap();
+            assert_eq!(stages, [2, 1, 0]);
+            assert_eq!(got.frame, expected, "tile {tile}, workers {workers}, bin {bin}");
+            assert!(count(&got.frame, RED, 0..32, 0..32) > 0);
+        }
+    }
+
+    #[test]
+    fn staged_density_updates_each_lower_layers_mask_and_keeps_the_frame() {
+        let original = RectRec { layer: 1, dt: 0, x: -20, y: -20, w: 180, h: 360, rep: Rep::One };
+        let squares = |layer, y, rows| RectRec {
+            layer, dt: 0, x: 160, y, w: 20, h: 20,
+            rep: Rep::Grid { na: 8, nb: rows, va: (20, 0), vb: (0, 20) },
+        };
+        let coarse = stack_scene(vec![(1, vec![original.clone()], Vec::new())], CUT_1);
+        let fine = Arc::new(stack_scene(vec![
+            (1, vec![original], Vec::new()),
+            (2, vec![squares(2, 0, 16)], Vec::new()),
+            (3, vec![squares(3, 160, 8)], Vec::new()),
+        ], CUT_2));
+        // Interior boxes at common checker slots, away from all boundaries.
+        let upper = [242.5, 232.5, 247.5, 237.5]; // device (24, 8)
+        let lower = [242.5, 72.5, 247.5, 77.5];   // device (24, 24)
+        let mut reference = None;
+        for (tile, workers, bin) in [(32, 1, true), (7, 3, true), (16, 2, false)] {
+            let mut request = stack_request(LayerFill::Solid, tile, workers);
+            request.raster.density_shapes_first = true;
+            request.raster.density_bright = 2.0;
+            request.raster.density_pattern = true;
+            let expected = density_frame(&coarse, &fine, CUT_1 as i64, &request, bin, &mut Vec::new()).frame;
+            let mut stages = Vec::new();
+            let mut initial_mask = None;
+            let got = LayerRasterSession::begin_with_density(&coarse, &request, bin, Some(CUT_1 as i64), None)
+                .unwrap().with_density_stages()
+                .render_layered_with(&coarse, &request, None, 1024, |_, demand| {
+                    let Some(plane) = demand.density_plane() else { return Ok(None); };
+                    stages.push(plane);
+                    let mask = demand.density_mask(true)?;
+                    assert!(mask.world_box_has_open(lower));
+                    if plane == 2 {
+                        assert!(mask.world_box_has_open(upper));
+                        initial_mask = Some(mask);
+                    } else {
+                        assert_eq!(plane, 1);
+                        assert!(!mask.world_box_has_open(upper), "higher density removes lower demand");
+                        assert!(initial_mask.as_ref().unwrap().world_box_has_open(upper), "an exported stage mask is immutable");
+                    }
+                    // Intentionally give both layers: collection must select
+                    // only this stage, including when it is a lower plane.
+                    Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: None, occ: None }))
+                }).unwrap();
+            assert_eq!(stages, [2, 1]);
+            assert_eq!(got.frame, expected, "tile {tile}, workers {workers}, bin {bin}");
+            if let Some(reference) = &reference { assert_eq!(&got.frame, reference); }
+            reference = Some(got.frame);
+        }
+    }
+
+    #[test]
+    fn density_mask_export_matches_pixels_across_unaligned_tiles_and_words() {
+        let scene = stack_scene(Vec::new(), CUT_1);
+        for tile_size in [7, 31, 64, 97] {
+            let mut request = stack_request(LayerFill::Solid, tile_size, 1);
+            request.raster.width = 97;
+            request.raster.height = 65;
+            request.raster.view = RasterViewBox::new(-15.0, 25.0, 955.0, 675.0).unwrap();
+            request.raster.density_shapes_first = true;
+            request.raster.density_bright = 2.0;
+            request.raster.density_pattern = true;
+            let mut session = LayerRasterSession::begin_with_density(&scene, &request, true, Some(CUT_1 as i64), None).unwrap();
+            for tile in &mut session.tiles {
+                tile.band.set_phase(StackPhase::Originals);
+                for row in tile.band.row0..tile.band.row1 {
+                    for col in tile.band.col0..tile.band.col1 {
+                        if (col + row * 3) % 5 != 0 {
+                            tile.band.write_once_pixel(row as usize, col as usize, GREEN);
+                        }
+                    }
+                }
+                tile.band.snapshot_top_blocked();
+            }
+            let tiles: Vec<_> = session.tiles.into_iter().map(std::sync::Mutex::new).collect();
+            let guards: Vec<_> = tiles.iter().map(|tile| tile.lock().unwrap()).collect();
+            let pages_by_plane = vec![Vec::new(); 3];
+            let demand = BlockDemand {
+                request: &request.raster, styled: &request, scene: &scene, bin: None,
+                tiles: &guards, pages_by_plane: &pages_by_plane, stroke_pixels: 0,
+                density_block: true, density_plane: Some(2),
+            };
+            let mask = demand.density_mask(true).unwrap();
+            for tile in &guards {
+                let band = &tile.band;
+                let stack = band.stack.as_ref().unwrap();
+                for row in band.row0..band.row1 {
+                    for col in band.col0..band.col1 {
+                        let index = (row - band.row0) as usize * stack.words + (col - band.col0) as usize / 64;
+                        let bit = 1u64 << ((col - band.col0) % 64);
+                        let expected = band.density_candidate_word(true, index) & bit != 0;
+                        let x = -15.0 + f64::from(col) * 10.0;
+                        let y = 675.0 - f64::from(row) * 10.0;
+                        assert_eq!(mask.world_box_has_open([x + 2.5, y - 7.5, x + 7.5, y - 2.5]), expected,
+                            "tile {tile_size}, ({col}, {row})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn staged_density_cancellation_between_layers_releases_worker_barriers() {
+        let done = std::thread::spawn(|| {
+            let coarse = stack_scene(Vec::new(), CUT_1);
+            let fine = Arc::new(stack_scene(vec![(3, vec![RectRec {
+                layer: 3, dt: 0, x: 20, y: 20, w: 15, h: 15, rep: Rep::One,
+            }], Vec::new())], CUT_2));
+            let mut request = stack_request(LayerFill::Solid, 7, 3);
+            request.raster.density_shapes_first = true;
+            request.raster.density_bright = 2.0;
+            request.raster.density_pattern = true;
+            let cancellation = RenderCancellation::new();
+            let session = LayerRasterSession::begin_with_density_cancellable(
+                &coarse, &request, true, Some(CUT_1 as i64), 1, &cancellation,
+            ).unwrap().with_density_stages();
+            let mut stages = Vec::new();
+            let result = session.render_layered_cancellable_with(&coarse, &request, 1, &cancellation, 1, |_, demand| {
+                let Some(plane) = demand.density_plane() else { return Ok(None); };
+                stages.push(plane);
+                if plane == 1 {
+                    cancellation.cancel_before(2);
+                }
+                Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: None, occ: None }))
+            });
+            assert_eq!(stages, [2, 1]);
+            result
+        });
+        let started = Instant::now();
+        while !done.is_finished() && started.elapsed() < std::time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(done.is_finished(), "density stage cancellation left workers at their barrier");
+        let result = done.join().unwrap();
+        assert!(matches!(&result, Err(error) if error.contains("render cancelled")), "{:?}", result.map(|_| ()));
+    }
+
     /// The colour a pixel shows under the density's brightness: `color` at
     /// min(1, g x area) over black.
     fn bright_px(color: [u8; 4], g: f32, area: f32) -> [u8; 4] {
@@ -13082,6 +14053,222 @@ mod tests {
             assert!(within_one(&at_once, &one_by_one), "array {k}: the lattice's cover is its members'");
             for (tile, workers) in [(8, 2u16), (16, 3)] {
                 assert!(within_one(&frame(array.clone(), tile, workers), &at_once), "array {k} tile {tile} workers {workers}");
+            }
+        }
+    }
+
+    fn pattern_band(request: &GeometryRasterRequest) -> RasterBand {
+        let mut band = RasterBand::new(request, 0, request.height).unwrap();
+        band.enable_write_once();
+        band.enable_density_stack(40, true, 2.0, request);
+        band.snapshot_top_blocked();
+        band
+    }
+
+    #[test]
+    fn density_pattern_counts_support_and_keeps_singleton_slots_apart() {
+        let mut request = area_true_request(32, 32, 1).raster;
+        request.density_pattern = true;
+        for (w, h, x, wanted) in [(3, 3, 0, 5), (3, 3, 1, 4), (2, 2, 0, 2), (3, 2, 0, 3)] {
+            let mut band = pattern_band(&request);
+            band.begin_density_plane(true);
+            band.bright_spread_px((x as f64, 0.0, (x + w) as f64, h as f64), (w * h) as f64);
+            assert_eq!(band.end_density_plane(GREEN, 2).1, wanted);
+            assert_eq!(band.density_totals().1, (w * h) as u64, "unlit support still claimed");
+            assert!(band.stack.as_ref().unwrap().cov.is_empty(), "no brightness buffer");
+        }
+        let mut band = pattern_band(&request);
+        band.begin_density_plane(true);
+        for y in 0..8 {
+            for x in 0..8 {
+                band.bright_spread_px((x as f64, y as f64, x as f64 + 1.0, y as f64 + 1.0), 1.0);
+            }
+        }
+        assert_eq!(band.end_density_plane(GREEN, 2).1, 16);
+        assert_eq!(band.density_totals().1, 16, "a rejected singleton claims nothing");
+        for y in 0..8 {
+            for x in 0..8 {
+                let at = (y * 32 + x) * 4;
+                assert_eq!(band.pixels[at..at + 4] == GREEN, x % 2 == 0 && y % 2 == 0);
+            }
+        }
+    }
+
+    #[test]
+    fn density_pattern_forbidden_holes_need_no_regions_and_keep_real_free_counts() {
+        let scene = stack_scene(Vec::new(), CUT_1);
+        for pan in [-10, 0, 10] {
+            let mut request = stack_request(LayerFill::Solid, 8, 1);
+            request.raster.density_bright = 2.0;
+            request.raster.density_pattern = true;
+            request.raster.density_shapes_first = true;
+            request.raster.view = RasterViewBox::new(pan as f64, -pan as f64, 320.0 + pan as f64, 320.0 - pan as f64).unwrap();
+            let tiles: Vec<_> = (0..4).flat_map(|ty| (0..4).map(move |tx| (tx, ty))).map(|(tx, ty)| {
+                let mut tile = TileWork::new(&request.raster, 0, true, Some(CUT_1 as i64), tx * 8, tx * 8 + 8, ty * 8, ty * 8 + 8).unwrap();
+                tile.band.set_phase(StackPhase::Originals);
+                let pattern = tile.band.stack.as_ref().unwrap().pattern.unwrap();
+                for row in 0..8 {
+                    for col in 0..8 {
+                        if pattern.selected(row * 8 + col, DensitySource::Shape { singleton: false }, 1.0, 2.0) {
+                            tile.band.write_once_pixel((ty * 8) as usize + row, (tx * 8) as usize + col, GREEN);
+                        }
+                    }
+                }
+                tile.band.snapshot_top_blocked();
+                std::sync::Mutex::new(tile)
+            }).collect();
+            let mut guards: Vec<_> = tiles.iter().map(|tile| tile.lock().unwrap()).collect();
+            let before: Vec<_> = guards.iter().map(|tile| tile.band.pixels.clone()).collect();
+            let pages_by_plane = vec![Vec::new(); 3];
+            let demand = BlockDemand {
+                request: &request.raster, styled: &request, scene: &scene, bin: None,
+                tiles: &guards, pages_by_plane: &pages_by_plane, stroke_pixels: 0, density_block: true, density_plane: None,
+            };
+            for top in [false, true] {
+                assert!(demand.eligible_regions(top).is_empty(), "no density source can light the remaining checker holes");
+                for min in [0.0, 0.125] {
+                    assert_eq!(demand.eligible_cells(top, 32, min), Some((Vec::new(), 0)));
+                }
+            }
+            drop(demand);
+            for (tile, expected) in guards.iter_mut().zip(&before) {
+                let covered = tile.band.density_totals().0;
+                tile.band.begin_density_plane(true);
+                assert!(tile.band.is_full(), "all drawable positions are blocked");
+                // Even an unconditionally supplied fine scene would light
+                // nothing else; pruning its demand leaves the same pixels.
+                tile.band.bright_spread_px((0.0, 0.0, 32.0, 32.0), 1024.0);
+                assert_eq!(tile.band.end_density_plane(RED, 2).1, 0);
+                assert_eq!(&tile.band.pixels, expected);
+                assert_eq!(tile.band.density_totals().0, covered, "coverage is physical coverage, not pattern slots");
+            }
+            // Mixed cells keep the existing minimum-free-share policy:
+            // the forbidden holes still count toward the physical share.
+            // Leave one drawable pixel open, with half the cell physically
+            // free. Counting only drawable pixels would wrongly reject it.
+            for tile in &mut guards {
+                tile.band.stack.as_mut().unwrap().claimed.fill(0);
+            }
+            // Use an interior tile: under the shifted origin the corner
+            // may belong to a clipped one-pixel cell, with no other holes.
+            let tile = &mut guards[5];
+            let at = tile.band.once.as_ref().unwrap().bits.iter().position(|&bits| bits != 0).unwrap();
+            let bit = 1u64 << tile.band.once.as_ref().unwrap().bits[at].trailing_zeros();
+            tile.band.once.as_mut().unwrap().bits[at] &= !bit;
+            tile.band.once.as_mut().unwrap().open += 1;
+            tile.band.stack.as_mut().unwrap().covered[at] &= !bit;
+            tile.band.snapshot_top_blocked();
+            let demand = BlockDemand {
+                request: &request.raster, styled: &request, scene: &scene, bin: None,
+                tiles: &guards, pages_by_plane: &pages_by_plane, stroke_pixels: 0, density_block: true, density_plane: None,
+            };
+            let (regions, free) = demand.eligible_cells(true, 32, 0.5).unwrap();
+            assert!(!regions.is_empty(), "one drawable hole must remain eligible");
+            assert!(free > 1, "diagnostic free count retains physical holes");
+        }
+    }
+
+    #[test]
+    fn density_pattern_summary_claims_only_dots_and_lower_walk_is_order_independent() {
+        let mut request = area_true_request(32, 32, 1).raster;
+        request.density_pattern = true;
+        let summary = DensitySource::Summary { singleton: false };
+        let mut alone = pattern_band(&request);
+        alone.begin_density_plane(true);
+        alone.bright_spread_source((0.0, 0.0, 32.0, 32.0), 32.0, summary);
+        let (_, written) = alone.end_density_plane(GREEN, 2);
+        assert!(written > 0 && written < 100);
+        assert_eq!(alone.density_totals().1, written, "a large sparse summary cannot claim its bbox");
+        let render = |order: &[u16]| {
+            let mut band = pattern_band(&request);
+            band.begin_density_lower();
+            for &plane in order {
+                band.set_density_plane(plane, if plane == 1 { RED } else { GREEN });
+                if plane == 1 {
+                    band.bright_spread_source((0.0, 0.0, 32.0, 32.0), 512.0, summary);
+                } else {
+                    band.bright_spread_source((0.0, 0.0, 32.0, 32.0), 32.0, summary);
+                    // A known upper member claims all nine pixels.
+                    band.bright_spread_px((10.0, 10.0, 13.0, 13.0), 9.0);
+                }
+            }
+            band.end_density_lower(&[RED, GREEN]);
+            assert!(band.stack.as_ref().unwrap().low_mix.is_empty());
+            (band.pixels.clone(), band.density_totals())
+        };
+        let (pixels, totals) = render(&[1, 2]);
+        assert_eq!(render(&[2, 1]), (pixels.clone(), totals));
+        assert_eq!(render(&[2, 1, 2, 1]), (pixels.clone(), totals), "duplicates do not fill pattern holes");
+        assert!(pixels.chunks_exact(4).any(|px| px == RED), "weak upper summary must not hide lower density over its whole bbox");
+        assert!(pixels.chunks_exact(4).any(|px| px == GREEN));
+        for y in 10..13 {
+            for x in 10..13 {
+                let at = (y * 32 + x) * 4;
+                assert_eq!(&pixels[at..at + 4], if (x + y) % 2 == 0 { &GREEN } else { &BLACK });
+            }
+        }
+    }
+
+    #[test]
+    fn density_pattern_singleton_rect_polygon_and_path_use_the_same_slots() {
+        let mut request = area_true_request(32, 32, 1).raster;
+        request.density_pattern = true;
+        for (x, y, side) in [(10, 0, 10), (0, 10, 10), (12, 2, 6), (2, 12, 6)] {
+            let world = BBox { x0: x, y0: y, x1: x + side, y1: y + side };
+            let points = [(x, y), (x + side, y), (x + side, y + side), (x, y + side)];
+            let mut outputs = Vec::new();
+            for kind in 0..3 {
+                let mut band = pattern_band(&request);
+                band.begin_density_plane(true);
+                match kind {
+                    0 => { bright_world_rect(&mut band, &request, world).unwrap(); }
+                    1 => { paint_world_polygon(&mut band, &request, &points, PaintStyle::solid(GREEN)).unwrap(); }
+                    _ => { paint_world_path(&mut band, &request, &points, &[(x, y), (x + side, y)], PaintStyle::solid(GREEN)).unwrap(); }
+                }
+                band.end_density_plane(GREEN, 2);
+                outputs.push((band.pixels.clone(), band.density_totals()));
+            }
+            assert!(outputs[0] == outputs[1] && outputs[0] == outputs[2], "source encoding must not change slots: {x}, {y}, {side}");
+        }
+    }
+
+    #[test]
+    fn density_pattern_grid_matches_explicit_members_tiles_workers_and_integer_pan() {
+        for (w, h, pitch) in [(26, 22, 35), (6, 6, 8), (10, 10, 10)] {
+            let array = RectRec { layer: 2, dt: 0, x: -25, y: -27, w, h, rep: Rep::Grid { na: 40, nb: 40, va: (pitch, 0), vb: (0, pitch) } };
+            let pts: Vec<_> = (0..40).flat_map(|j| (0..40).map(move |i| (i * pitch, j * pitch))).collect();
+            let listed = RectRec { rep: Rep::Pts(Arc::from(pts)), ..array.clone() };
+            let frame = |rect: RectRec, tile, workers, pan: i64| {
+                let pages = || vec![(2, vec![rect.clone()], Vec::new())];
+                let coarse = stack_scene(pages(), CUT_1);
+                let fine = Arc::new(stack_scene(pages(), CUT_2));
+                let mut request = stack_request(LayerFill::Clear, tile, workers);
+                request.raster.density_bright = 2.0;
+                request.raster.density_pattern = true;
+                request.raster.view = RasterViewBox::new(pan as f64, -pan as f64, 320.0 + pan as f64, 320.0 - pan as f64).unwrap();
+                density_frame(&coarse, &fine, CUT_1 as i64, &request, true, &mut Vec::new()).frame
+            };
+            let want = frame(array.clone(), 32, 1, 0);
+            assert!(!lit_set(&want, 32).is_empty());
+            assert!(frame(listed.clone(), 32, 1, 0) == want, "member support: {w}x{h}");
+            for (tile, workers) in [(8, 3), (16, 2)] {
+                assert_eq!(frame(array.clone(), tile, workers, 0), want);
+                let got = frame(listed.clone(), tile, workers, 0);
+                assert!(got == want, "listed {w}x{h} tile {tile}: want {} got {}, first differences {:?}", lit_set(&want, 32).len(), lit_set(&got, 32).len(), lit_set(&want, 32).symmetric_difference(&lit_set(&got, 32)).take(12).collect::<Vec<_>>());
+            }
+            for pan in [-13, 3] {
+                let phased = frame(array.clone(), 32, 1, pan);
+                assert!(frame(array.clone(), 8, 3, pan) == phased, "fractional pan tiled Grid: {w}x{h}, {pan}");
+                assert!(frame(listed.clone(), 8, 3, pan) == phased, "fractional pan listed: {w}x{h}, {pan}");
+            }
+            for pan in [-10, 10] {
+                let shifted = frame(array.clone(), 8, 2, pan);
+                let delta = pan / 10;
+                for y in 2..30 {
+                    for x in 2..30 {
+                        assert_eq!(pixel(&shifted, (x - delta) as usize, (y - delta) as usize), pixel(&want, x as usize, y as usize), "world-anchored integer pan {pan}, {w}x{h}");
+                    }
+                }
             }
         }
     }
@@ -13308,7 +14495,7 @@ mod tests {
                     // a newer generation, between the plan and the collection
                     cancellation.cancel_before(2);
                 }
-                Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: Some(Arc::clone(&fine)) }))
+                Ok(Some(DensityScenes { top: Some(Arc::clone(&fine)), others: Some(Arc::clone(&fine)), occ: None }))
             })
         });
         let started = Instant::now();
@@ -13425,6 +14612,7 @@ mod tests {
                 members: 1,
                 index: crate::PageIndex::build(&doc),
                 doc,
+                grown_bytes: 0,
             }));
         }
         let n = pages.len() as u32;
@@ -15451,6 +16639,7 @@ mod tests {
             members: 1,
             index: crate::PageIndex::build(&decoded_doc),
             doc: decoded_doc,
+            grown_bytes: 0,
         });
         let mut bounds = BTreeMap::new();
         bounds.insert(
@@ -15481,6 +16670,7 @@ mod tests {
             density_top_planes: 1,
             density_shapes_first: false,
             density_bright: 0.0,
+            density_pattern: false,
         };
         let report = render_geometry_occupancy(&scene, &raster_request).unwrap();
         raster_request.workers = 1;
@@ -15566,6 +16756,7 @@ mod tests {
             density_top_planes: 1,
             density_shapes_first: false,
             density_bright: 0.0,
+            density_pattern: false,
         }
     }
 

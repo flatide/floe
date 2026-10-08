@@ -1092,6 +1092,13 @@ struct WorkerState {
     density_floor_memory: BTreeMap<String, u8>,
     /// fit_whole for the density stack's pass 2, per scale and side.
     density_whole: BTreeSet<String>,
+    /// How far the planner's page estimates fell short of the pages' decoded
+    /// charge, per layer set, depth, root and the density stack on or off
+    /// (budget_scale_key): the charge of a frame's pages over their estimate
+    /// when it passed the generation budget (run_render: the frame is planned
+    /// again under the budget less that much, not failed). Every later frame
+    /// of the key plans its pages to the budget over it.
+    budget_scale: BTreeMap<String, f64>,
 }
 
 impl Default for WorkerState {
@@ -1109,6 +1116,7 @@ impl Default for WorkerState {
             density_fit_memory: BTreeMap::new(),
             density_floor_memory: BTreeMap::new(),
             density_whole: BTreeSet::new(),
+            budget_scale: BTreeMap::new(),
         }
     }
 }
@@ -1116,10 +1124,14 @@ impl Default for WorkerState {
 /// The key a budget fit is remembered under: the layers, depth, cut, thin
 /// mode and the scale (a pan keeps it, a zoom changes it).
 fn fit_memory_key(command: &RenderCommand, request: &PlanRequest) -> String {
-    format!(
-        "{:?}|{}|{}|{}|{}|{}|{}|{:?}",
-        command.visible_layers, command.depth, request.cut_dbu, scale_token(request.px_per_dbu), command.thin_keep, request.page_hairline, command.frames, command.root
-    )
+    let (head, tail) = fit_memory_scope(command);
+    format!("{head}{}|{}|{}|{}|{}{tail}", request.cut_dbu, scale_token(request.px_per_dbu), command.thin_keep, request.page_hairline, command.frames)
+}
+
+/// What a fit_memory_key begins and ends with: the layers and the depth, and
+/// the root - every key of a layer set between them (forget_fits).
+fn fit_memory_scope(command: &RenderCommand) -> (String, String) {
+    (format!("{:?}|{}|", command.visible_layers, command.depth), format!("|{:?}", command.root))
 }
 
 /// The scale as the fit memory keys it: nine significant digits. The exact
@@ -1211,8 +1223,15 @@ struct FramePixels {
     /// (HierOpts::dot_occ_decode, 2026-10-03); ...; then the dot blocks left
     /// out as too sparse and the dots a block needed (HierOpts::dot_gate,
     /// 2026-10-04); then the brightness's gain in thousandths
-    /// (density_bright_gain, 2026-10-05; 0: the dots as lit pixels)
-    density_plan2: Option<[u64; 35]>,
+    /// (density_bright_gain, 2026-10-05; 0: the dots as lit pixels); then the
+    /// pages a budget left out that their occupancy records stand in for
+    /// (floe_vfs HierOpts::dot_stand_in, 2026-10-05); then whether a sub-cut
+    /// cell stands for its cover (1; 0: for its box - floe_render_core
+    /// Cache::cell_cover), the cells whose cover the plans worked out, and
+    /// the nodes that counted what their placements hold (HierOpts::
+    /// dot_node_sample, 2026-10-05); then whether the density draws an
+    /// opaque pattern (1) instead of accumulated brightness (0)
+    density_plan2: Option<[u64; 48]>,
 }
 
 fn render_worker(
@@ -1331,6 +1350,8 @@ fn run_clip(
         page_wash: true,
         lod_swap: true,
         regions: Vec::new(),
+        density_mask: None,
+        density_layers: None,
         visible_indices: None,
         fixed_fit: None,
         root: command.root,
@@ -1340,6 +1361,8 @@ fn run_clip(
         free_pages: None,
         empty_top: true,
         dot_bright: None,
+        dot_occ_first: None,
+        fit_rank: None,
     };
     let plan_started = Instant::now();
     let planned = cache.plan(&request)?;
@@ -1482,6 +1505,7 @@ fn handle_open(
                 state.density_floor_memory.clear();
                 state.fit_whole.clear();
                 state.density_whole.clear();
+                state.budget_scale.clear();
                 state.jobs = command.jobs;
                 state.styles.clear();
                 state.style_epoch = None;
@@ -1538,6 +1562,7 @@ fn handle_open(
                 state.density_floor_memory.clear();
                 state.fit_whole.clear();
                 state.density_whole.clear();
+                state.budget_scale.clear();
             state.jobs = command.jobs;
             state.styles.clear();
             state.style_epoch = None;
@@ -2548,6 +2573,61 @@ fn density_shapes_first() -> bool {
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_SHAPES_FIRST").as_deref() != Ok("off"))
 }
 
+/// Diagnostic staged planning for opaque density: every layer observes
+/// reservations of its predecessors. Opt-in while repeated hierarchy walks
+/// remain more expensive than the joint plan on wide many-layer views.
+fn density_stages(styled: &StyledGeometryRasterRequest) -> bool {
+    styled.raster.density_pattern && styled.raster.density_shapes_first
+        && std::env::var("FLOE_RUST_DENSITY_STAGES").as_deref() == Ok("on")
+}
+
+/// Pass 2 from the occupancy density (design.ovs, floe_render_core::occ;
+/// 2026-10-06; on by default since 0.12.317, user 2026-10-07 after the field
+/// chip's 20 s pass 2 took under 0.2 s: "turn OCC on by default";
+/// FLOE_RUST_DENSITY_OCC=off, the kill switch, plans as before) - no plan, no walk:
+/// each layer present where design.ovs's cell bit is set, at the mean cover
+/// of its group. The synthetic MAIN01 1/10 at full depth: pass 2's plan
+/// 53-170 ms to none, frames about a third sooner, 75-83 % of the walk's
+/// dots; the field's full-depth view walked 25 M nodes in 20 s. A view the
+/// file cannot serve (a root without its file, a frame not cut by the larger side, a level
+/// whose cut reaches pass 1's with a cell past FLOE_RUST_DENSITY_OCC_PX
+/// pixels, layers past FLOE_RUST_DENSITY_OCC_MB, no design.ovs or one that
+/// will not read) plans as before.
+fn density_occ_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_OCC").as_deref() != Ok("off"))
+}
+
+/// The largest occupancy cell, in screen pixels, the occupancy density is
+/// drawn with: FLOE_RUST_DENSITY_OCC_PX (default 2; a dot in a coarser cell
+/// would show the cells as blocks); a closer view plans as before.
+fn density_occ_max_px() -> f64 {
+    std::env::var("FLOE_RUST_DENSITY_OCC_PX")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(2.0)
+}
+
+/// What the occupancy density's layers of one frame may hold, bytes:
+/// FLOE_RUST_DENSITY_OCC_MB (default 256) - each visible layer's cell bits
+/// and group means over the whole chip at the level drawn (a 20 mm chip at
+/// 16 um cells: about 0.2 MB a layer); past it a coarser level, else the
+/// plans.
+fn density_occ_cap_bytes() -> u64 {
+    let mb = std::env::var("FLOE_RUST_DENSITY_OCC_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(256.0);
+    (mb * 1048576.0) as u64
+}
+
+fn density_mask_enabled(styled: &StyledGeometryRasterRequest) -> bool {
+    styled.raster.density_pattern && styled.raster.density_shapes_first
+        && std::env::var("FLOE_RUST_DENSITY_MASK").as_deref() != Ok("off")
+}
+
 /// The density stack's pass 2 alone (user 2026-10-04: "789's dots still go
 /// when 787 is on - it may be pass 1's budget; an option to pass the shapes
 /// by and draw the density alone, to compare"): pass 1 decodes no page and
@@ -2572,6 +2652,62 @@ fn density_only() -> bool {
 fn density_top_first() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_TOP_FIRST").as_deref() != Ok("off"))
+}
+
+/// Pass 1's budget fit top plane first (user 2026-10-07, the field chip: with
+/// 7.59 and 14.367 on, 7.59 alone drew - `none below x28.2` - its pages of
+/// larger shapes first in a fit that ranked every layer's pages by size
+/// alone; "the drawing goes from the top, so 14.367 should have been drawn";
+/// the speckle leaves the lower shapes' lines showing, and a screen full of
+/// them is how it is - unlike pass 2, pass 1 draws the lower shapes in the
+/// upper ones' speckle holes, as the write-once tiles do): the fit keeps the
+/// visible layers' pages in the drawing order - the planes above the one the
+/// budget ends in whole, that one by size class largest first, none under it
+/// (floe_vfs::hier::HierOpts::fit_rank, pass1_fit_rank). Pass 2 keeps its
+/// own order (density_top_first). FLOE_RUST_FIT_TOP_FIRST=off is the kill
+/// switch: by size class alone, every layer at once, as before.
+fn fit_top_first() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_FIT_TOP_FIRST").as_deref() != Ok("off"))
+}
+
+/// Pass 1's drawing ranks (fit_top_first): per cache layer index the rank of
+/// a visible layer from the top plane (0) down - the style list's order, its
+/// last line the top, as the raster's planes (every layer in the cache's
+/// order when the list is empty); a visible layer the list does not hold
+/// after them all - and u16::MAX for the rest. None when off, or for an
+/// exact frame (no fit).
+fn pass1_fit_rank(cache: &Cache, command: &RenderCommand, styles: &[LayerStyle]) -> Option<Arc<[u16]>> {
+    if !fit_top_first() || command.exact {
+        return None;
+    }
+    let layers = cache.layers();
+    let visible: Option<BTreeSet<u32>> =
+        command.visible_layers.as_deref().map(|specs| specs.iter().filter_map(|spec| resolve_layer(spec, &layers).map(|layer| layer.index)).collect());
+    let shown = |idx: u32| visible.as_ref().is_none_or(|visible| visible.contains(&idx));
+    let planes: Vec<u32> = if styles.is_empty() { layers.iter().map(|layer| layer.index).collect() } else { styles.iter().map(|style| style.layer_idx).collect() };
+    let mut ranks = vec![u16::MAX; layers.iter().map(|layer| layer.index as usize + 1).max().unwrap_or(0)];
+    let mut next = 0u16;
+    for &idx in planes.iter().rev() {
+        if let Some(rank) = ranks.get_mut(idx as usize).filter(|rank| **rank == u16::MAX && shown(idx)) {
+            *rank = next;
+            next = next.saturating_add(1);
+        }
+    }
+    for layer in &layers {
+        if let Some(rank) = ranks.get_mut(layer.index as usize).filter(|rank| **rank == u16::MAX && shown(layer.index)) {
+            *rank = next;
+        }
+    }
+    Some(Arc::from(ranks))
+}
+
+/// The layer a top-plane-first fit ended in (PlanCullCounts::fit_layer_edge,
+/// its index + 1) as `layer/datatype`; `-` for none.
+fn fit_edge_spec(cache: &Cache, edge: u64) -> String {
+    edge.checked_sub(1)
+        .and_then(|idx| cache.layers().into_iter().find(|layer| u64::from(layer.index) == idx))
+        .map_or_else(|| "-".to_string(), |layer| format!("{}/{}", layer.layer, layer.datatype))
 }
 
 /// The viewer's fit view: the die and this margin (floe gui._fit_spp).
@@ -2867,6 +3003,26 @@ fn density_under_floor_drawn(cache: &Cache) -> bool {
     spread && std::env::var("FLOE_RUST_DENSITY_UNDER_FLOOR").as_deref() != Ok("drop")
 }
 
+/// The occupancy first (floe_vfs HierOpts::dot_occ_first; a reviewer
+/// 2026-10-05, then the exact cover: on the routing chip's fit view the pages
+/// pass 2 decoded from 1 px up were 277, 110 of them within 1 GB - x0.49 of
+/// what all of them draw - where their occupancy grids draw x1.01 in a third
+/// of the time): under the brightness, on an index with design.ovb, pass 2's
+/// pages are cut at pass 1's cut, not at the density cut - a page all under
+/// it is spread by its occupancy grid while the grid's cells show no larger
+/// than FLOE_RUST_DENSITY_OCC_CELL_PX (4), decoded past that or with no grid
+/// to go by; no floor is probed. FLOE_RUST_DENSITY_OVB_FIRST=off is the kill
+/// switch: the pages from the density cut up decoded, as 0.12.298.
+fn density_ovb_first(cache: &Cache, command: &RenderCommand) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_OVB_FIRST").as_deref() != Ok("off"))
+        && density_bright_gain(command).is_some()
+        && floe_render_core::dot_page_occ()
+        && floe_render_core::dot_occ_decode()
+        && cache.has_page_occ()
+        && density_under_floor_drawn(cache)
+}
+
 /// What pass 2 may decode on top of pass 1 (bytes, encoded x 2 as the
 /// estimate): FLOE_RUST_DENSITY_BUDGET_MB, diagnostic, default 256 MB - and
 /// never more than half of what the generation budget has left.
@@ -2915,6 +3071,25 @@ fn density_frame_reserve(budget: u64, pass1_bytes: u64) -> u64 {
     } else {
         fixed.max(budget.saturating_sub(pass1_bytes))
     }
+}
+
+/// The density stack counts its pages as the parser read them
+/// (DecodedPage::grown_charge), their record lists holding the room they
+/// grew to: on. Since 0.12.301 a decoded page's lists are cut to their
+/// length (floe_render_core decode_shrink) and a page is charged a fifth to
+/// a third less; pass 2 has what pass 1's pages leave of the budget
+/// (density_frame_reserve), so counted as held pass 2 would have more and
+/// decode more - the synthetic MAIN01 1/10 at full depth 8-17 % slower at
+/// fit and 14-20 % two steps out for the same picture, the routing chip two
+/// steps in with 133 pages decoded for 86 (2026-10-05).
+/// Counted as read, pass 2's reserve and its last check are what they were
+/// and a density frame is the same picture in the same time; the pages
+/// themselves are held smaller. FLOE_RUST_DENSITY_AS_READ=off counts them as
+/// held: pass 2 has what the cut lists free - the user's to choose, with
+/// pass 2's reserve.
+fn density_as_read() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DENSITY_AS_READ").as_deref() != Ok("off"))
 }
 
 /// The error a margin's pass 2 raises when its budget fit does not hold the
@@ -3236,11 +3411,41 @@ fn run_render(
     // wall_us counts from here, queue_us up to here (see RenderCommand::received)
     let run_started = Instant::now();
     let queue_us = queued_us(command, run_started);
+    // a frame whose pages pass the generation budget is planned anew under
+    // less of it (budget_refit_enabled)
+    let mut refits = 0u32;
+    loop {
+        match run_render_attempt(state, command, responses, cancellation, published_scene, run_started, queue_us, refits) {
+            Err(error) if error == REFIT_BUDGET => refits += 1,
+            result => return result,
+        }
+    }
+}
+
+/// run_render once: `refits` plans of this frame before it passed the budget.
+#[allow(clippy::too_many_arguments)]
+fn run_render_attempt(
+    state: &mut WorkerState,
+    command: &RenderCommand,
+    responses: &Sender<String>,
+    cancellation: &RenderCancellation,
+    published_scene: &SharedPublishedScene,
+    run_started: Instant,
+    queue_us: u64,
+    refits: u32,
+) -> Result<(), String> {
+    // the layers' pages decode larger than estimated by this much
+    // (WorkerState::budget_scale): planned to the budget over it
+    let scale_key = budget_scale_key(command);
+    let budget_scale = state.budget_scale.get(&scale_key).copied();
     let mut command = command.clone();
     let cache = state
         .cache
         .as_ref()
         .ok_or_else(|| "cache not open".to_string())?;
+    // Cell coverage is initialized only after pass 1 leaves space for
+    // density (render_density_frame). A fully covered frame needs neither
+    // pass-2 plans nor a whole-hierarchy coverage warm-up.
     // occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): decided per
     // request before any reuse, since the retained-frame and published-
     // scene keys carry it; FLOE_RUST_OCCUPANCY=off is the kill switch
@@ -3268,7 +3473,7 @@ fn run_render(
     let (expected_fit, expected_whole) = if command.exact {
         (None, None)
     } else {
-        let pre = make_plan_request(cache, &command, pass1_decode_budget(state.page_cache.budget_bytes(), &command))?;
+        let pre = make_plan_request(cache, &command, scaled_decode_budget(state.page_cache.budget_bytes(), &command, budget_scale))?;
         if pre.decode_budget > 0 {
             (state.fit_memory.get(&fit_memory_key(&command, &pre)).copied(), Some(floe_render_core::FixedFit::everything(pre.cut_dbu)))
         } else {
@@ -3287,7 +3492,10 @@ fn run_render(
     check_generation(cancellation, command.generation)?;
     // the density stack's pass 2 decodes within a reserve of its own
     // (density_budget_bytes): pass 1 plans to what the generation has left
-    let request = make_plan_request(cache, command, pass1_decode_budget(state.page_cache.budget_bytes(), command))?;
+    let mut request = make_plan_request(cache, command, scaled_decode_budget(state.page_cache.budget_bytes(), command, budget_scale))?;
+    // its budget fit top plane first (fit_top_first) - the probe of a new
+    // scale's too, made of this request
+    request.fit_rank = pass1_fit_rank(cache, command, &state.styles);
     // the summarized layers leave the page plan (§6 step 3): no page
     // selection, page BVH or child walk for them
     let mut page_request = cache.page_plan_request(&request, &summary, !command.frames)?;
@@ -3318,6 +3526,11 @@ fn run_render(
     // viewer's margin frame will have - twice the view per axis - so the
     // margin, when it lands, thins as the viewport did (no flip after a zoom)
     let fit_key = fit_memory_key(command, &request);
+    // what that decision took (the frame line's fit_probe_us): it is no part
+    // of the plan's time, and was time under no phase (field 2026-10-05)
+    let mut fit_probe_us = 0u64;
+    // (it walked every cell of the extent: no hierarchy summary to go by)
+    let mut fit_probe_walked = false;
     if !command.exact && !label_only && page_request.decode_budget > 0 {
         if let Some(decision) = state.fit_memory.get(&fit_key).copied() {
             page_request.fixed_fit = Some(decision);
@@ -3338,9 +3551,14 @@ fn run_render(
                 )?,
                 ..page_request.clone()
             };
-            let decided = cache.plan_cancellable(&probe, command.generation, cancellation)?.plan.stats.fit_decision;
+            // (for its decision alone: cells the extent covers whole are
+            // not walked, floe_render_core Cache::fit_decision_cancellable)
+            let probe_started = Instant::now();
+            let probed = cache.fit_decision_cancellable(&probe, command.generation, cancellation)?;
+            fit_probe_us = elapsed_us(probe_started);
+            fit_probe_walked = probed.walked;
             check_generation(cancellation, command.generation)?;
-            if let Some(decision) = decided {
+            if let Some(decision) = probed.decision {
                 state.fit_memory.insert(fit_key.clone(), decision);
                 page_request.fixed_fit = Some(decision);
             }
@@ -3438,6 +3656,11 @@ fn run_render(
         .collect();
     let raster_workers = command.jobs.unwrap_or(state.jobs);
     let decode_workers = command.decode_jobs.or(command.jobs).unwrap_or(state.jobs);
+    let density_bright = if !command.exact && area_true_enabled() && density_stack_on(command) {
+        density_bright_gain(command).unwrap_or(0.0) as f32
+    } else {
+        0.0
+    };
     let raster_request = GeometryRasterRequest {
         view: RasterViewBox::new(
             command.view[0],
@@ -3472,12 +3695,11 @@ fn run_render(
         density_top_planes: 1,
         // pass 1's shapes first: every plane's density in the space they left
         density_shapes_first: density_shapes_first(),
-        // the density's brightness by the area it covers (density_bright_gain)
-        density_bright: if !command.exact && area_true_enabled() && density_stack_on(command) {
-            density_bright_gain(command).unwrap_or(0.0) as f32
-        } else {
-            0.0
-        },
+        // Both forms use the same covered-area planning; the switch restores
+        // the accumulated brightness instead of the opaque display pattern.
+        density_bright,
+        density_pattern: density_bright > 0.0
+            && std::env::var("FLOE_RUST_DENSITY_PATTERN").as_deref() != Ok("off"),
     };
     let styles = if state.styles.is_empty() && (command.frames || command.labels) {
         cache
@@ -3588,8 +3810,14 @@ fn run_render(
     })?;
     let mut decoded_pages = Vec::with_capacity(selected.len());
     let mut generation_bytes = 0u64;
+    // the same pages as the parser read them (DecodedPage::grown_charge):
+    // what the density stack counts pass 1 by (density_as_read)
+    let mut generation_grown = 0u64;
     let mut round_index = 0usize;
     let mut drain_representatives = false;
+    // the budget's last resort (budget_refit_enabled): the frame draws the
+    // pages the budget holds and reports the rest as over it
+    let mut cut_short = false;
     while round_index < rounds.len() {
         if round_index > 0 && planned.representative_stream.is_some() {
             // COW preserves the previously published query scene. Resume the
@@ -3618,11 +3846,88 @@ fn run_render(
                 .checked_add(page.estimated_bytes())
                 .ok_or_else(|| "decoded generation byte charge overflow".to_string())
         })?;
-        generation_bytes = checked_generation_bytes(
-            generation_bytes,
-            round_bytes,
-            state.page_cache.budget_bytes(),
-        )?;
+        generation_bytes = match checked_generation_bytes(generation_bytes, round_bytes, state.page_cache.budget_bytes()) {
+            Ok(bytes) => bytes,
+            // the pages read so far pass the budget: their charge over their
+            // estimate is what the planner's fit was short by - remembered
+            // for these layers, and the frame planned anew (budget_refit_enabled)
+            Err(error) => {
+                // (an exact frame is every page or none; a frame the planner
+                // does not fit - no budget, no cut, or its fit switched off,
+                // FLOE_RUST_FIT_BUDGET=off - is as it was: an export at cut 0
+                // must not come out short of pages)
+                let fitted = request.decode_budget > 0 && request.cut_dbu > 0 && std::env::var("FLOE_RUST_FIT_BUDGET").as_deref() != Ok("off");
+                if !budget_refit_enabled() || command.exact || !fitted {
+                    return Err(error);
+                }
+                if !plan.stats.fit_over {
+                    // (a plan over by its own estimate, `STILL OVER`, says
+                    // nothing of the pages' charge)
+                    let read: Vec<u32> = decoded_pages.iter().chain(round_pages.iter()).map(|page| page.page_id).collect();
+                    let estimate = cache.pages_memory(&read).max(1);
+                    let charged = generation_bytes.saturating_add(round_bytes);
+                    let short = charged as f64 / estimate as f64;
+                    // (at least 5 % past the scale it was planned under: a next
+                    // plan is a smaller one)
+                    let scale = (short * 1.03).max(budget_scale.unwrap_or(1.0) * 1.05);
+                    eprintln!(
+                        "[renderd] gen {}: {} pages charged {} bytes for {} estimated ({short:.3}x) pass the budget {}: the layers are planned at 1/{scale:.3} of it",
+                        command.generation,
+                        read.len(),
+                        charged,
+                        estimate,
+                        state.page_cache.budget_bytes(),
+                    );
+                    state.budget_scale.insert(scale_key.clone(), scale);
+                    // the fits decided under the budget as it was go with it
+                    forget_fits(&mut state.fit_memory, &mut state.fit_whole, command);
+                }
+                if command.background {
+                    // the viewer's margin: its viewport is on the screen as
+                    // planned under the budget as it was, and a margin
+                    // planned under less - or cut short - would change the
+                    // picture when it lands. Dropped, as one its scale's fit
+                    // does not hold; the next viewport frame decides anew
+                    // over its margin's extent
+                    respond(responses, format!("dropped gen={} reason=budget", command.generation));
+                    return Ok(());
+                }
+                if plan.stats.fit_over || refits >= BUDGET_REFITS {
+                    // no plan under less of the budget holds either - the
+                    // fit's reach is spent (its plan was over by its own
+                    // estimate, `STILL OVER`): the pages the budget holds are
+                    // drawn, nearest the view's centre first as they were
+                    // read, and the rest are the frame's pages over the
+                    // budget (`deferred`, the viewer's `N pages over budget
+                    // (not drawn)`)
+                    let budget = state.page_cache.budget_bytes();
+                    let mut held = generation_bytes;
+                    let asked = round_pages.len();
+                    round_pages.retain(|page| {
+                        let next = held.saturating_add(page.estimated_bytes());
+                        let fits = next <= budget;
+                        if fits {
+                            held = next;
+                        }
+                        fits
+                    });
+                    eprintln!(
+                        "[renderd] gen {}: the pages pass the budget {} after {} plans: {} of this round's {} pages drawn, the rest left out",
+                        command.generation,
+                        budget,
+                        refits + 1,
+                        round_pages.len(),
+                        asked,
+                    );
+                    rounds.truncate(round_index + 1);
+                    cut_short = true;
+                    held
+                } else {
+                    return Err(REFIT_BUDGET.to_string());
+                }
+            }
+        };
+        generation_grown = round_pages.iter().fold(generation_grown, |total, page| total.saturating_add(page.grown_charge()));
         decoded_pages.append(&mut round_pages);
         check_generation(cancellation, command.generation)?;
         let scene_started = Instant::now();
@@ -3644,7 +3949,7 @@ fn run_render(
         let mut density_us: Option<[u64; 6]> = None;
         let mut density_dots: Option<[u64; 2]> = None;
         let mut density_floor: Option<f64> = None;
-        let mut density_plan2: Option<[u64; 35]> = None;
+        let mut density_plan2: Option<[u64; 48]> = None;
         let mut pixels = {
             let report = if styles.is_empty() && !command.frames {
                 render_geometry_occupancy_cancellable(
@@ -3704,7 +4009,7 @@ fn run_render(
                         &plan,
                         &decoded_pages,
                         decode_workers,
-                        &mut generation_bytes,
+                        if density_as_read() { &mut generation_grown } else { &mut generation_bytes },
                         &fit_key,
                         &mut state.density_fit_memory,
                         &mut state.density_floor_memory,
@@ -3875,7 +4180,9 @@ fn run_render(
                     None
                 }
             });
-            if let Some(frame) = geometry {
+            // (a frame cut short at the budget serves no other: its pages
+            // are not its plan's)
+            if let Some(frame) = geometry.filter(|_| !cut_short) {
                 store_retained(
                     &mut state.retained,
                     RetainedFrame {
@@ -3896,7 +4203,7 @@ fn run_render(
         respond(
             responses,
             format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={} fit_ranked={} fit_layers_whole={} fit_layer_edge={} fit_layers_out={}",
                 command.generation,
                 round_index + 1,
                 final_round as u8,
@@ -4052,6 +4359,21 @@ fn run_render(
                 // up to this frame's response: the phases above account for
                 // part of it, the rest is time no phase timer covers
                 elapsed_us(run_started),
+                // the layers' pages decode larger than estimated: the scale
+                // the plan's budget was cut by, thousandths (0: none), and
+                // the plans of this frame that passed the budget before it
+                budget_scale.map_or(0, |scale| (scale * 1000.0).round() as u64),
+                refits,
+                // the new scale's fit decision before the plan (0: a scale
+                // decided before, or no fit), and whether it walked
+                fit_probe_us,
+                fit_probe_walked as u8,
+                // the fit top plane first (fit_top_first): the layers kept
+                // whole above the one it ended in, that layer, those left out
+                planned.summary.culls.fit_ranked,
+                planned.summary.culls.fit_layers_whole,
+                fit_edge_spec(cache, planned.summary.culls.fit_layer_edge),
+                planned.summary.culls.fit_layers_out,
             ),
         );
         // Representative batches bound query work, not the number of full
@@ -4143,6 +4465,67 @@ fn refinement_batches(
         batches[0] = first;
     }
     Ok(batches)
+}
+
+/// A frame whose pages' decoded charge passes the generation budget is
+/// planned again under less of it, not failed (field 2026-10-05, 787 and 789
+/// alone with the density off: "most frames fail with `decoded generation
+/// budget exceeded: 1093017130 > 1073741824 bytes`; with every layer on
+/// hardly ever"). The planner fits a frame's pages to the budget by an
+/// estimate of their decoded size (floe_vfs page_memory: its record count
+/// and stored bytes); pages that decode larger than it - with every layer
+/// on the others' generous estimates covered them - passed the budget, and
+/// the frame was an error. Now the charge of the pages read so far over
+/// their estimate is remembered for the layer set (WorkerState::
+/// budget_scale, 3 % added) and the frame is planned anew to the budget over
+/// it - a fitted plan under what its pages really take, not the first one
+/// cut short - up to BUDGET_REFITS times; every later frame of the layers
+/// starts there. FLOE_RUST_BUDGET_REFIT=off is the kill switch: the error,
+/// as 0.12.300.
+fn budget_refit_enabled() -> bool {
+    std::env::var("FLOE_RUST_BUDGET_REFIT").as_deref() != Ok("off")
+}
+
+/// budget_refit_enabled: the most a frame is planned anew
+const BUDGET_REFITS: u32 = 4;
+
+/// run_render_attempt's answer when its pages passed the budget and the
+/// frame is to be planned anew (WorkerState::budget_scale raised)
+const REFIT_BUDGET: &str = "refit:budget";
+
+/// The key of WorkerState::budget_scale: what decides which pages a frame
+/// reads - the layers, the depth and the root - whatever the view, and
+/// whether the density stack is on: with it pass 1 plans to the budget less
+/// pass 2's reserve (pass1_decode_budget), which holds what its pages take
+/// past their estimates - a scale the plain frames of the layers needed
+/// would only take pages from it.
+fn budget_scale_key(command: &RenderCommand) -> String {
+    format!("{:?}|{}|{:?}|{}", command.visible_layers, command.depth, command.root, density_stack_on(command) as u8)
+}
+
+/// The budget fits remembered for a command's layers, depth and root, at
+/// every scale and cut (WorkerState::fit_memory, fit_whole; fit_memory_key),
+/// are forgotten when their budget scale is raised (budget_refit_enabled):
+/// they were decided under the budget as it was. A viewport frame a decision
+/// still held for would keep it, and its margin - wider - be dropped under
+/// it every time (the two layers of the synthetic MAIN01 1/10 two steps in
+/// under 24 MB: the viewport drew, each margin was dropped). The next
+/// viewport frame decides anew, over its margin's extent.
+fn forget_fits(fits: &mut BTreeMap<String, floe_render_core::FixedFit>, whole: &mut BTreeSet<String>, command: &RenderCommand) {
+    let (head, tail) = fit_memory_scope(command);
+    fits.retain(|key, _| !(key.starts_with(&head) && key.ends_with(&tail)));
+    whole.retain(|key| !(key.starts_with(&head) && key.ends_with(&tail)));
+}
+
+/// Pass 1's decode budget (pass1_decode_budget) over the layers' remembered
+/// scale (WorkerState::budget_scale): what the planner fits the pages'
+/// estimates to, so their charge stays within the budget.
+fn scaled_decode_budget(budget: u64, command: &RenderCommand, scale: Option<f64>) -> u64 {
+    let pass1 = pass1_decode_budget(budget, command);
+    match scale {
+        Some(scale) if scale > 1.0 && pass1 > 0 => ((pass1 as f64 / scale) as u64).max(1),
+        _ => pass1,
+    }
 }
 
 fn checked_generation_bytes(current: u64, incoming: u64, budget: u64) -> Result<u64, String> {
@@ -4398,7 +4781,7 @@ fn render_density_frame(
     whole_memory: &mut BTreeSet<String>,
     background: bool,
     mut first_round: Option<&mut dyn FnMut(&floe_render_core::RgbaFrame) -> Result<(), String>>,
-) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 35]), String> {
+) -> Result<(floe_render_core::GeometryRasterReport, [u64; 6], [u64; 4], Option<f64>, [u64; 48]), String> {
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -4409,10 +4792,16 @@ fn render_density_frame(
         command.generation,
         cancellation,
     )?;
+    let session = if density_stages(styled) { session.with_density_stages() } else { session };
     let block = session.density_block();
     let budget_bytes = page_cache.budget_bytes();
     // pass 2's reserve: the fixed one or what pass 1 left (density_frame_reserve)
     let reserve_bytes = density_frame_reserve(budget_bytes, *generation_bytes);
+    let initial_generation_bytes = *generation_bytes;
+    let mut density_started = false;
+    // Every layer consults the same immutable index. Learn unknown BVH
+    // layer unions once for this frame, while keeping demand stage-local.
+    let density_layers = density_stages(styled).then(|| Arc::new(floe_render_core::DensityLayerMemo::new()));
     // the top planes (density_top_group): their layers plan as the top side
     let top_planes = (styled.raster.density_top_planes as usize).clamp(1, styled.layers.len().max(1));
     let top_layers: Vec<u32> = styled.layers[styled.layers.len().saturating_sub(top_planes)..].iter().map(|layer| layer.layer_idx).collect();
@@ -4433,15 +4822,21 @@ fn render_density_frame(
     };
     let mut times = [0u64; 4];
     // the plans' breakdown (RenderPixels::density_plan2)
-    let mut plan2 = [0u64; 35];
+    let mut plan2 = [0u64; 48];
     plan2[22] = reserve_bytes >> 20;
     // the dots' gain past the fit view, in thousandths (density_zoom_gain)
     plan2[31] = (dot_gain * 1000.0).round() as u64;
     // the brightness's gain, in thousandths (density_bright_gain; 0: off)
     plan2[34] = density_bright_gain(command).map_or(0, |g| (g * 1000.0).round() as u64);
+    // Report the raster's actual display mode, including fully covered
+    // frames that need no pass-2 plans.
+    plan2[39] = u64::from(styled.raster.density_pattern);
     // the dot block the plans take and merge by (64 px at most under the
     // brightness: floe_vfs dot_block_px_of)
     let dot_block = floe_render_core::dot_block_px_of(floe_render_core::dot_block_px(), plan2[34] > 0);
+    // the cut pass 2's dots plans take their pages at, px: the density cut, or
+    // pass 1's under the occupancy first (density_ovb_first)
+    let page_cut_px = if density_ovb_first(cache, command) { command.cut_px } else { density_cut_px() };
     // pass 1's pages: pass 2 holds them already, so they cost its reserve
     // nothing (floe_vfs HierOpts::free_pages; user 2026-10-01: 37 pages of
     // pass 1's, 201 MB by estimate, failed the 0 px floor's probe of a 128 MB
@@ -4453,6 +4848,7 @@ fn render_density_frame(
         pages.dedup();
         Arc::from(pages)
     };
+    let held_by_id: BTreeMap<_, _> = decoded_pages.iter().map(|page| (page.page_id, page)).collect();
     let mut failed: Option<String> = None;
     let (report, _pool_us) = cache.with_decode_pool(
         decode_workers,
@@ -4468,23 +4864,82 @@ fn render_density_frame(
                     if !demand.density_block() {
                         return Ok(None);
                     }
+                    let staged_plane = demand.density_plane();
+                    let first_density = !density_started;
+                    density_started = true;
                     // pass 1 is painted: shown first, while pass 2 plans, decodes
                     // and draws (FLOE_RUST_DENSITY_PROGRESSIVE)
-                    if let Some(publish) = first_round.as_mut() {
+                    if let Some(publish) = first_round.take() {
                         publish(&demand.snapshot()?)?;
                     }
                     // between pass 2's steps a newer generation stops this one:
                     // its plans end at their next look, its decode is pooled
                     // under the guard, its passes check per tile
                     check_generation(cancellation, command.generation)?;
+                    // the occupancy density (on unless FLOE_RUST_DENSITY_OCC=off):
+                    // design.ovs's cell bits and mean cover stand for the
+                    // plans - every density plane paints its layer from
+                    // them, no walk and no decode (floe_render_core::occ)
+                    // design.ovs classes shapes by the larger side: frames cut
+                    // so alone (ShapeCut::Larger, the default), at the plan's
+                    // cut (upper_cut; a budget's raise in it); a view root by
+                    // its cell's design.ovs.<cell> (none: the plans draw)
+                    if density_occ_enabled()
+                        && styled.raster.density_pattern
+                        && staged_plane.is_none()
+                        && !command.exact
+                        && command.thin_keep
+                        && shape_cut_mode() == ShapeCut::Larger
+                        && upper_cut > 0
+                    {
+                        // pass 1 covered the frame: nothing for pass 2, its
+                        // layers not made (review 2026-10-07: a covered frame
+                        // made them for nothing - 78 ms, 240 ms at 8 um cells)
+                        if !demand.has_density_candidate() {
+                            return Ok(None);
+                        }
+                        let occ_started = Instant::now();
+                        let px_dbu = ((command.view[2] - command.view[0]) / f64::from(command.width))
+                            .max((command.view[3] - command.view[1]) / f64::from(command.height));
+                        let ids: Vec<u32> = styled.layers.iter().map(|layer| layer.layer_idx).collect();
+                        let depth = (command.depth < FULL_DEPTH).then_some(command.depth);
+                        // a newer frame stops the layers being made (those
+                        // made kept for it)
+                        let stale = || cancellation.is_cancelled(command.generation);
+                        let made = cache.occ_density(&ids, px_dbu, upper_cut as f64, density_occ_max_px(), density_occ_cap_bytes(), depth, command.root, &stale);
+                        check_generation(cancellation, command.generation)?;
+                        if let Some(occ) = made {
+                            let built = elapsed_us(occ_started);
+                            times[0] += built;
+                            plan2[1] += built;
+                            plan2[44] = occ.layers_present() as u64;
+                            plan2[45] = (occ.cell_um * 1000.0).round() as u64;
+                            plan2[46] = u64::from(occ.made);
+                            plan2[47] = occ.held_bytes >> 10;
+                            return Ok(Some(floe_render_core::DensityScenes { top: None, others: None, occ: Some(occ) }));
+                        }
+                    }
                     let regions_started = Instant::now();
+                    let density_mask = if density_mask_enabled(styled) {
+                        Some(demand.density_mask(true)?)
+                    } else {
+                        None
+                    };
+                    if density_mask.as_ref().is_some_and(|mask| mask.is_empty()) {
+                        times[2] += elapsed_us(regions_started);
+                        return Ok(None);
+                    }
                     // by cells (density_free_cells): the top plane's where any
                     // pixel is free, the others' where enough is to add to; else
                     // a tile's bounding box of its free pixels, by area
                     let cells = density_free_cells();
                     let by_cells = cells.and_then(|(cell, others_min)| {
                         let (top, top_free) = demand.eligible_cells(true, cell, 0.0)?;
-                        let (others, others_free) = demand.eligible_cells(false, cell, others_min)?;
+                        let (others, others_free) = if staged_plane.is_some() {
+                            (Vec::new(), top_free)
+                        } else {
+                            demand.eligible_cells(false, cell, others_min)?
+                        };
                         Some((top, others, top_free as f64, others_free as f64))
                     });
                     let cells = cells.filter(|_| by_cells.is_some());
@@ -4500,15 +4955,27 @@ fn render_density_frame(
                         }
                     };
                     times[2] += elapsed_us(regions_started);
-                    if cells.is_some() {
+                    if cells.is_some() && first_density {
                         // the free pixels of the cells planned: the top plane's,
                         // the others'
                         plan2[29] = top_free as u64;
                         plan2[30] = others_free as u64;
                     }
+                    if regions_top.is_empty() && regions_others.is_empty() {
+                        // Every density plane is blocked. In particular, do
+                        // not initialize/warm the hierarchy's cell coverage
+                        // when pass 1 already covers the frame.
+                        return Ok(None);
+                    }
+                    // A sub-cut cell stands for the area its shapes cover,
+                    // not its box (design.ovb and a hierarchy summary).
+                    plan2[36] = u64::from(density_bright_gain(command).is_some() && cache.cell_cover().is_some());
                     // the finer plans: the top plane's layer over its regions,
-                    // the other layers over theirs
-                    let mut sides: [Option<Arc<FrameScene>>; 2] = [None, None];
+                    // the other layers over theirs: each side's plan is kept until
+                    // the decode below is settled - a page it leaves out is drawn
+                    // by its occupancy record instead (Cache::stand_in_pages) - and
+                    // its scene made then
+                    let mut side_plans: Vec<(usize, HierPlan)> = Vec::new();
                     // the pages to decode: the top plane's first (density_top_first),
                     // then by the plan's priority
                     let mut wanted: Vec<(u16, u64, u32)> = Vec::new();
@@ -4529,32 +4996,38 @@ fn render_density_frame(
                     // plan walked every layer over the whole top space, where the
                     // originals may have left the others little (a reviewer,
                     // 2026-10-03: an all-layer fit view at full depth)
-                    let joint = dots && cells.is_none() && !regions_top.is_empty() && 2.0 * others_free >= top_free;
+                    let joint = staged_plane.is_none() && dots && cells.is_none() && !regions_top.is_empty() && 2.0 * others_free >= top_free;
                     // the jobs: (side, regions, layers) - the top planes each on its own
                     // (a plan counts a sub-cut item for its topmost layer alone: the
                     // top planes planned as one lost the lower ones' dots), merged
                     // into the top side; the others in one plan
-                    let jobs: Vec<(usize, _, Vec<u32>)> = if joint {
+                    let jobs: Vec<(usize, _, Vec<u32>)> = if let Some(plane) = staged_plane {
+                        vec![(0, regions_top, vec![styled.layers[plane].layer_idx])]
+                    } else if joint {
                         vec![(0, regions_top, styled.layers.iter().map(|layer| layer.layer_idx).collect::<Vec<u32>>())]
                     } else {
                         let mut jobs: Vec<(usize, _, Vec<u32>)> = top_layers.iter().rev().map(|&layer| (0, regions_top.clone(), vec![layer])).collect();
                         jobs.push((1, regions_others, other_layers.clone()));
                         jobs
                     };
-                    let top_jobs = if joint { 1 } else { top_layers.len() };
+                    let top_jobs = if joint || staged_plane.is_some() { 1 } else { top_layers.len() };
                     let mut top_plans: Vec<HierPlan> = Vec::new();
                     for (side, regions, layers) in jobs {
                         if regions.is_empty() || layers.is_empty() {
                             continue;
                         }
+                        plan2[43] += u64::from(staged_plane.is_some());
                         plan2[4] += regions.len() as u64;
                         let plan_started = Instant::now();
                         let region_boxes = regions
                             .iter()
                             .map(|b| ViewBox::new(b.x0, b.y0, b.x1, b.y1))
                             .collect::<Result<Vec<_>, _>>()?;
-                        let side_key = if side == 0 && top_jobs > 1 { format!("{fit_key}|density0|{}", layers[0]) } else { format!("{fit_key}|density{side}") };
-                        let reserve = reserve_bytes;
+                        let side_key = if side == 0 && (top_jobs > 1 || staged_plane.is_some()) { format!("{fit_key}|density0|{}", layers[0]) } else { format!("{fit_key}|density{side}") };
+                        // Every stage spends the same frame reserve, rather than
+                        // receiving a fresh reserve for each layer. Zero means
+                        // unlimited to the planner, so keep its limit positive.
+                        let reserve = reserve_bytes.saturating_sub(generation_bytes.saturating_sub(initial_generation_bytes)).max(1);
                         // one plan of this side: the sub-cut dots' (the cells at pass 1's
                         // cut - a cell under it is a dot item, never walked into or
                         // decoded - and the pages at `floor` px) or the plain finer cut;
@@ -4571,6 +5044,8 @@ fn render_density_frame(
                                 None => make_plan_request_cut(cache, command, budget, density_cut_px())?,
                             };
                             fine.regions = region_boxes.clone();
+                            fine.density_mask = density_mask.clone();
+                            fine.density_layers = density_layers.clone();
                             fine.visible_indices = Some(layers.clone());
                             fine.free_pages = Some(Arc::clone(&held));
                             if fit {
@@ -4596,6 +5071,8 @@ fn render_density_frame(
                             fine.sub_cut_dots = Some(1.0);
                             fine.dot_records = Some((dot_record_floor_px() / command.cut_px).clamp(0.0, 1.0));
                             fine.regions = region_boxes.clone();
+                            fine.density_mask = density_mask.clone();
+                            fine.density_layers = density_layers.clone();
                             fine.visible_indices = Some(layers.clone());
                             let fine = cache.page_plan_request(&fine, summary, !command.frames)?;
                             floored = Some(cache.plan_cancellable(&fine, command.generation, cancellation)?.plan);
@@ -4614,11 +5091,13 @@ fn render_density_frame(
                                 let handles: Vec<_> = dealt
                                     .iter()
                                     .map(|regions| {
-                                        let (regions, layers, held) = (regions.clone(), layers.clone(), Arc::clone(&held));
+                                        let (regions, layers, held, density_mask, density_layers) = (regions.clone(), layers.clone(), Arc::clone(&held), density_mask.clone(), density_layers.clone());
                                         scope.spawn(move || -> Result<HierPlan, String> {
                                             let mut fine = make_plan_request_cut(cache, command, 0, command.cut_px)?;
                                             fine.sub_cut_dots = Some((floor / command.cut_px).clamp(0.0, 1.0));
                                             fine.regions = regions;
+                                            fine.density_mask = density_mask;
+                                            fine.density_layers = density_layers;
                                             fine.visible_indices = Some(layers);
                                             fine.free_pages = Some(held);
                                             fine.probe_limit = reserve;
@@ -4640,7 +5119,9 @@ fn render_density_frame(
                             merged.stats.fit_over = over;
                             Ok(Some((merged, groups)))
                         };
-                        let floors = dot_page_floors();
+                        // (the occupancy first probes no floor: its pages are spread
+                        // or decoded by their grids' cells, whatever fits)
+                        let floors = if density_ovb_first(cache, command) { Vec::new() } else { dot_page_floors() };
                         if dots && !one_walk {
                             // the last viewport's rung: a margin must plan at it (it
                             // starts there and is dropped past it); a viewport probes
@@ -4703,11 +5184,13 @@ fn render_density_frame(
                                         let handles: Vec<_> = dealt
                                             .iter()
                                             .map(|regions| {
-                                                let (regions, layers) = (regions.clone(), layers.clone());
+                                                let (regions, layers, density_mask, density_layers) = (regions.clone(), layers.clone(), density_mask.clone(), density_layers.clone());
                                                 scope.spawn(move || -> Result<HierPlan, String> {
                                                     let mut fine = make_plan_request_cut(cache, command, 0, command.cut_px)?;
-                                                    fine.sub_cut_dots = Some((density_cut_px() / command.cut_px).clamp(0.0, 1.0));
+                                                    fine.sub_cut_dots = Some((page_cut_px / command.cut_px).clamp(0.0, 1.0));
                                                     fine.regions = regions;
+                                                    fine.density_mask = density_mask;
+                                                    fine.density_layers = density_layers;
                                                     fine.visible_indices = Some(layers);
                                                     let fine = cache.page_plan_request(&fine, summary, !command.frames)?;
                                                     Ok(cache.plan_cancellable(&fine, command.generation, cancellation)?.plan)
@@ -4722,8 +5205,10 @@ fn render_density_frame(
                                     let groups = plans.len() as u64;
                                     let merged = floe_render_core::Cache::merge_plans(plans, dot_block / px_per_dbu);
                                     let mut fit = make_plan_request_cut(cache, command, reserve, command.cut_px)?;
-                                    fit.sub_cut_dots = Some((density_cut_px() / command.cut_px).clamp(0.0, 1.0));
+                                    fit.sub_cut_dots = Some((page_cut_px / command.cut_px).clamp(0.0, 1.0));
                                     fit.regions = region_boxes.clone();
+                                    fit.density_mask = density_mask.clone();
+                                    fit.density_layers = density_layers.clone();
                                     fit.visible_indices = Some(layers.clone());
                                     fit.free_pages = Some(Arc::clone(&held));
                                     fit.fixed_fit = density_memory.get(&side_key).copied();
@@ -4737,7 +5222,7 @@ fn render_density_frame(
                                         plan2[8] = plan2[8].max(groups);
                                         plan
                                     }
-                                    None => plan_at(dots.then(density_cut_px), true)?,
+                                    None => plan_at(dots.then_some(page_cut_px), true)?,
                                 };
                                 plan2[3] += u64::from(planned_fine.stats.fit_passes.max(1));
                                 let whole = planned_fine.stats.fit_whole || planned_fine.stats.fit_decision.is_none();
@@ -4774,6 +5259,9 @@ fn render_density_frame(
                         plan2[5] += planned_fine.stats.visited_bvh;
                         plan2[6] += planned_fine.stats.visited_page_bvh;
                         plan2[7] += planned_fine.stats.page_candidates;
+                        plan2[40] += planned_fine.stats.dot_mask_tests;
+                        plan2[41] += planned_fine.stats.dot_mask_pruned;
+                        plan2[42] += planned_fine.stats.dot_mask_fallbacks;
                         plan2[8] = plan2[8].max(1);
                         plan2[9] += planned_fine.stats.sub_cut_box_reads;
                         plan2[10] += planned_fine.stats.sub_cut_dot_items;
@@ -4816,18 +5304,17 @@ fn render_density_frame(
                             }
                             planned_fine = floe_render_core::Cache::merge_plans(std::mem::take(&mut top_plans), dot_block / px_per_dbu);
                         }
-                        let density_plan = Arc::new(planned_fine);
+                        // the pages the planner's own fit left out and their occupancy
+                        // records stand in for (floe_vfs HierOpts::dot_stand_in)
+                        plan2[35] += planned_fine.stats.dot_stood_in;
+                        plan2[37] += planned_fine.stats.dot_cover_cells;
+                        plan2[38] += planned_fine.stats.dot_node_sampled;
+                        let density_plan = planned_fine;
                         times[0] += elapsed_us(plan_started);
-                        let scene_started = Instant::now();
-                        let density_scene = Arc::new(FrameScene::new_metadata(cache, Arc::clone(&density_plan), Arc::from([]), command.label_font_px)?);
-                        for page in decoded_pages {
-                            // pass 1's pages the finer plan holds too; the rest are not its
-                            let _ = density_scene.set_decoded_page(Arc::clone(page));
-                        }
-                        times[1] += elapsed_us(scene_started);
                         counts[0] += density_plan.pages.len() as u64;
                         for (&page_id, &prio) in density_plan.pages.iter().zip(density_plan.page_prio.iter()) {
-                            if density_scene.page(page_id).is_some() {
+                            // pass 1's pages the finer plan holds too are in hand
+                            if held.binary_search(&page_id).is_ok() {
                                 counts[1] += 1;
                             } else if one_walk {
                                 // the one walk reads no page: one pass 1 left
@@ -4844,22 +5331,8 @@ fn render_density_frame(
                                 wanted.push((rank, prio, page_id));
                             }
                         }
-                        if joint {
-                            // the lower planes' walk reads the whole plan (its plane
-                            // table leaves the top layer out), the top plane's side
-                            // that layer's pages and dots (Cache::plan_layer_only)
-                            if !top_layers.is_empty() {
-                                let top_plan = Arc::new(cache.plan_layers_only(&density_plan, &top_layers));
-                                let top_scene = Arc::new(FrameScene::new_metadata(cache, top_plan, Arc::from([]), command.label_font_px)?);
-                                for page in decoded_pages {
-                                    let _ = top_scene.set_decoded_page(Arc::clone(page));
-                                }
-                                sides[0] = Some(top_scene);
-                            }
-                            sides[1] = Some(density_scene);
-                        } else {
-                            sides[side] = Some(density_scene);
-                        }
+                        // (a joint plan is both sides': side 2 marks it)
+                        side_plans.push((if joint { 2 } else { side }, density_plan));
                     }
                     // the plans are within the reserve by the planner's estimate; the
                     // decode takes them in their order (the priority) under the reserve
@@ -4868,42 +5341,86 @@ fn render_density_frame(
                     wanted.sort_unstable();
                     let mut seen = std::collections::HashSet::with_capacity(wanted.len());
                     wanted.retain(|entry| seen.insert(entry.2));
-                    let limit = reserve_bytes;
+                    let limit = reserve_bytes.saturating_sub(generation_bytes.saturating_sub(initial_generation_bytes));
                     let mut estimate = 0u64;
                     let mut take = Vec::with_capacity(wanted.len());
+                    // the pages this budget leaves out after all
+                    let mut left_out: Vec<u32> = Vec::new();
                     for (_, _, page_id) in wanted {
                         let bytes = cache.page_encoded_bytes(page_id).saturating_mul(2).max(1);
                         if estimate.saturating_add(bytes) > limit {
                             counts[3] += 1;
+                            left_out.push(page_id);
                             continue;
                         }
                         estimate += bytes;
                         take.push(page_id);
                     }
+                    let mut decoded_fine: Vec<Arc<floe_render_core::DecodedPage>> = Vec::new();
                     if !take.is_empty() {
                         let decode_started = Instant::now();
                         let (pages, _decode_stats) = page_cache.load_pooled(pool, &take)?;
                         times[3] += elapsed_us(decode_started);
                         for page in pages {
-                            let bytes = page.estimated_bytes();
+                            // (as the parser read it or as it is held: the
+                            // count pass 1's pages came in by, density_as_read)
+                            let bytes = if density_as_read() { page.grown_charge() } else { page.estimated_bytes() };
                             if generation_bytes.saturating_add(bytes) > budget_bytes {
                                 counts[3] += 1;
+                                left_out.push(page.page_id);
                                 continue;
                             }
                             *generation_bytes += bytes;
                             counts[2] += 1;
-                            for side in sides.iter().flatten() {
-                                // a page of the other side's plan is not this one's
-                                if let Err(error) = side.set_decoded_page(Arc::clone(&page)) {
-                                    if !error.contains("outside the plan") && !error.contains("already in the scene") {
-                                        failed.get_or_insert(error);
-                                    }
-                                }
-                            }
+                            decoded_fine.push(page);
                         }
                     }
+                    // the sides' scenes: a page left out drawn by its occupancy
+                    // record (floe_vfs HierOpts::dot_stand_in), pass 1's pages the
+                    // finer plan holds too and those decoded here set
+                    let scene_started = Instant::now();
+                    left_out.sort_unstable();
+                    left_out.dedup();
+                    let stand_in_request = if left_out.is_empty() { None } else { Some(make_plan_request_cut(cache, command, 0, command.cut_px)?) };
+                    let mut sides: [Option<Arc<FrameScene>>; 2] = [None, None];
+                    let fine_by_id: BTreeMap<_, _> = decoded_fine.iter().map(|page| (page.page_id, page)).collect();
+                    let scene_of = |plan: Arc<HierPlan>, failed: &mut Option<String>| -> Result<Arc<FrameScene>, String> {
+                        let scene = Arc::new(FrameScene::new_metadata(cache, plan, Arc::from([]), command.label_font_px)?);
+                        // A stage needs its own pages only. Do not retry every
+                        // pass-1 page against every one of hundreds of layers.
+                        for page_id in &scene.plan().pages {
+                            let Some(page) = held_by_id.get(page_id).or_else(|| fine_by_id.get(page_id)) else { continue; };
+                            if let Err(error) = scene.set_decoded_page(Arc::clone(page)) {
+                                failed.get_or_insert(error);
+                            }
+                        }
+                        Ok(scene)
+                    };
+                    for (side, mut density_plan) in side_plans {
+                        if let Some(request) = &stand_in_request {
+                            let stood = cache.stand_in_pages(request, &mut density_plan, &left_out)?;
+                            plan2[35] += stood;
+                            // (pages placed by their occupancy records, as the others)
+                            plan2[20] += stood;
+                            plan2[23] += stood;
+                        }
+                        let density_plan = Arc::new(density_plan);
+                        if side == 2 {
+                            // the lower planes' walk reads the whole plan (its plane
+                            // table leaves the top layer out), the top plane's side
+                            // that layer's pages and dots (Cache::plan_layer_only)
+                            if !top_layers.is_empty() {
+                                let top_plan = Arc::new(cache.plan_layers_only(&density_plan, &top_layers));
+                                sides[0] = Some(scene_of(top_plan, &mut failed)?);
+                            }
+                            sides[1] = Some(scene_of(density_plan, &mut failed)?);
+                        } else {
+                            sides[side] = Some(scene_of(density_plan, &mut failed)?);
+                        }
+                    }
+                    times[1] += elapsed_us(scene_started);
                     let [top, others] = sides;
-                    Ok(Some(floe_render_core::DensityScenes { top, others }))
+                    Ok(Some(floe_render_core::DensityScenes { top, others, occ: None }))
                 },
             )
         },
@@ -4976,6 +5493,8 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         // FLOE_RUST_LOD=on (see lod_enabled)
         lod_swap: lod_enabled(),
         regions: Vec::new(),
+        density_mask: None,
+        density_layers: None,
         visible_indices: None,
         fixed_fit: None,
         root: command.root,
@@ -4987,6 +5506,13 @@ fn make_plan_request_cut(cache: &Cache, command: &RenderCommand, decode_budget: 
         empty_top: true,
         // the dots' brightness by the detail (density_bright_gain)
         dot_bright: density_bright_gain(command),
+        // the occupancy first (density_ovb_first): in a dots plan at the cells'
+        // cut, a page with no grid to spread it by is decoded from the
+        // density cut up, as before
+        dot_occ_first: density_ovb_first(cache, command).then(|| (density_cut_px() / command.cut_px).clamp(0.0, 1.0)),
+        // pass 1's is set where it is planned (pass1_fit_rank); pass 2's
+        // keep the size classes
+        fit_rank: None,
     };
     request.validate()?;
     if cache.unit() <= 0.0 {
@@ -5414,6 +5940,39 @@ mod tests {
         assert!(parse_command("render gen=1 view=0,0,320,320 w=32 h=32 frames=off density=maybe out=/tmp/a.raw").is_err());
     }
 
+    /// budget_refit_enabled: pass 1's decode budget over what the layers'
+    /// pages took past their estimates, and the key it is remembered by.
+    #[test]
+    fn a_layer_sets_budget_scale_cuts_the_plans_budget() {
+        let parse = |extra: &str| {
+            render(
+                parse_command(&format!("render gen=1 view=0,0,320,320 w=32 h=32 frames=off {extra} out=/tmp/a.raw"))
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
+        let (off, on) = (parse("density=off"), parse("density=on"));
+        let budget = 1024u64 << 20;
+        // no scale, or one that is none: pass 1's budget as it is
+        assert_eq!(scaled_decode_budget(budget, &off, None), budget);
+        assert_eq!(scaled_decode_budget(budget, &off, Some(0.8)), budget);
+        assert_eq!(scaled_decode_budget(budget, &off, Some(1.25)), (budget as f64 / 1.25) as u64);
+        // with the density stack, of what pass 1 has: the budget less pass 2's reserve
+        let pass1 = pass1_decode_budget(budget, &on);
+        assert!(pass1 < budget);
+        assert_eq!(scaled_decode_budget(budget, &on, Some(2.0)), pass1 / 2);
+        assert_eq!(scaled_decode_budget(0, &off, Some(2.0)), 0);
+        // the key: the layers, the depth, the root and the density stack on
+        // or off (its pass 1 has pass 2's reserve to spare) - not the view
+        let key = |extra: &str| budget_scale_key(&parse(extra));
+        assert_ne!(key("density=off"), key("density=on"));
+        assert_eq!(key("density=off"), key("density=off"));
+        assert_eq!(budget_scale_key(&parse("")), budget_scale_key(&render(parse_command("render gen=2 view=50,50,90,90 w=64 h=64 frames=off out=/tmp/b.raw").unwrap().unwrap())));
+        assert_ne!(key("layers=1/0"), key("layers=2/0"));
+        assert_ne!(key("depth=1"), key("depth=2"));
+        assert_ne!(key("root=3"), key(""));
+    }
+
     fn snap(command: InputCommand) -> SnapCommand {
         match command {
             InputCommand::Snap(snap) => snap,
@@ -5619,21 +6178,9 @@ mod tests {
         assert_eq!(wire_f64_box(&[1.0, 2.5, -3.0, 4e9]), "1,2.5,-3,4000000000");
     }
 
-    #[test]
-    fn a_view_root_is_part_of_the_render_state() {
-        let render = |line: &str| match parse_command(line).unwrap().unwrap() {
-            InputCommand::Worker(WorkerCommand::Render(command)) => command,
-            _ => panic!("expected a render command"),
-        };
-        let top = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
-        let rooted = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off root=17 out=/tmp/a.raw");
-        assert_eq!(top.root, None);
-        assert_eq!(rooted.root, Some(17));
-        // another root is another retained state and another fit memory
-        assert_ne!(RetainedKey::new(&top, Some(1)), RetainedKey::new(&rooted, Some(1)));
-        assert_eq!(RetainedKey::new(&rooted, Some(1)), RetainedKey::new(&render(
-            "render gen=2 view=5,5,325,325 w=32 h=32 frames=off root=17 out=/tmp/b.raw"), Some(1)));
-        let request = |command: &RenderCommand| PlanRequest {
+    /// A plan request of a render command for the fit memory's keys.
+    fn fit_request(command: &RenderCommand) -> PlanRequest {
+        PlanRequest {
             view: ViewBox::new(0, 0, 320, 320).unwrap(),
             cut_dbu: 3,
             visible_layers: None,
@@ -5653,6 +6200,8 @@ mod tests {
             page_wash: false,
             lod_swap: false,
             regions: Vec::new(),
+            density_mask: None,
+            density_layers: None,
             visible_indices: None,
             fixed_fit: None,
             root: command.root,
@@ -5662,8 +6211,58 @@ mod tests {
             free_pages: None,
             empty_top: true,
             dot_bright: None,
+            dot_occ_first: None,
+            fit_rank: None,
+        }
+    }
+
+    /// forget_fits (budget_refit_enabled): when a layer set's budget scale is
+    /// raised its fits go, at every cut and scale; another layer set's,
+    /// depth's or root's stay.
+    #[test]
+    fn a_raised_budget_scale_forgets_the_layer_sets_fits() {
+        let render = |extra: &str| match parse_command(&format!("render gen=1 view=0,0,320,320 w=32 h=32 frames=off {extra} out=/tmp/a.raw")).unwrap().unwrap() {
+            InputCommand::Worker(WorkerCommand::Render(command)) => command,
+            _ => panic!("expected a render command"),
         };
-        assert_ne!(fit_memory_key(&top, &request(&top)), fit_memory_key(&rooted, &request(&rooted)));
+        let (top, layered, shallow, rooted) = (render(""), render("layers=1/0"), render("depth=1"), render("root=17"));
+        let fine = |command: &RenderCommand| PlanRequest { cut_dbu: 1, px_per_dbu: 0.4, ..fit_request(command) };
+        let mut fits = BTreeMap::new();
+        let mut whole = BTreeSet::new();
+        for command in [&top, &layered, &shallow, &rooted] {
+            for key in [fit_memory_key(command, &fit_request(command)), fit_memory_key(command, &fine(command))] {
+                fits.insert(key.clone(), floe_render_core::FixedFit::everything(3));
+                whole.insert(key);
+            }
+        }
+        assert_eq!((fits.len(), whole.len()), (8, 8));
+        forget_fits(&mut fits, &mut whole, &top);
+        let kept: BTreeSet<String> = [&layered, &shallow, &rooted]
+            .into_iter()
+            .flat_map(|command| [fit_memory_key(command, &fit_request(command)), fit_memory_key(command, &fine(command))])
+            .collect();
+        assert_eq!(fits.keys().cloned().collect::<BTreeSet<_>>(), kept);
+        assert_eq!(whole, kept);
+        // the margin's key is its viewport's: the same layers at the same scale
+        let margin = render("bg=on");
+        assert_eq!(fit_memory_key(&margin, &fit_request(&margin)), fit_memory_key(&top, &fit_request(&top)));
+    }
+
+    #[test]
+    fn a_view_root_is_part_of_the_render_state() {
+        let render = |line: &str| match parse_command(line).unwrap().unwrap() {
+            InputCommand::Worker(WorkerCommand::Render(command)) => command,
+            _ => panic!("expected a render command"),
+        };
+        let top = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
+        let rooted = render("render gen=1 view=0,0,320,320 w=32 h=32 frames=off root=17 out=/tmp/a.raw");
+        assert_eq!(top.root, None);
+        assert_eq!(rooted.root, Some(17));
+        // another root is another retained state and another fit memory
+        assert_ne!(RetainedKey::new(&top, Some(1)), RetainedKey::new(&rooted, Some(1)));
+        assert_eq!(RetainedKey::new(&rooted, Some(1)), RetainedKey::new(&render(
+            "render gen=2 view=5,5,325,325 w=32 h=32 frames=off root=17 out=/tmp/b.raw"), Some(1)));
+        assert_ne!(fit_memory_key(&top, &fit_request(&top)), fit_memory_key(&rooted, &fit_request(&rooted)));
         // the clip and the cell queries carry it too
         match parse_command("clip seq=1 box=0,0,10,10 root=17 out=/tmp/c.oas").unwrap().unwrap() {
             InputCommand::Worker(WorkerCommand::Clip(clip)) => assert_eq!(clip.root, Some(17)),
@@ -5993,8 +6592,8 @@ mod tests {
             fit,
         };
         let (a, b) = (
-            Some(floe_render_core::FixedFit { cut_dbu: 5, class: 3, phase: 7, page: 9 }),
-            Some(floe_render_core::FixedFit { cut_dbu: 5, class: 4, phase: 7, page: 9 }),
+            Some(floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 3, phase: 7, page: 9, below: u32::MAX }),
+            Some(floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 4, phase: 7, page: 9, below: u32::MAX }),
         );
         let mut retained = vec![frame(64, [-160.0, -160.0, 480.0, 480.0], a)];
         // the same fit: the containing margin stays
@@ -6015,7 +6614,7 @@ mod tests {
         let a_cmd = cmd("render gen=0 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw");
         let b_cmd = cmd("render gen=1 view=0,0,640,640 w=32 h=32 frames=off out=/tmp/b.raw");
         let frame = |px: u32| floe_render_core::RgbaFrame::from_pixels(px, px, vec![3u8; (px * px * 4) as usize]).unwrap();
-        let fit = floe_render_core::FixedFit { cut_dbu: 5, class: 3, phase: 7, page: 9 };
+        let fit = floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 3, phase: 7, page: 9, below: u32::MAX };
         state.retained = vec![
             RetainedFrame { key: RetainedKey::new(&a_cmd, None), view: [0.0, 0.0, 320.0, 320.0], frame: frame(32), fit: Some(fit) },
             RetainedFrame { key: RetainedKey::new(&b_cmd, None), view: [0.0, 0.0, 640.0, 640.0], frame: frame(32), fit: Some(fit) },
@@ -6023,7 +6622,7 @@ mod tests {
         let mut again = cmd("render gen=2 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/c.raw");
         let reuse = prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), Some(fit)).expect("the older frame at this scale serves");
         assert_eq!(reuse.valid, [0, 0, 32, 32]);
-        let other = floe_render_core::FixedFit { cut_dbu: 5, class: 4, phase: 7, page: 9 };
+        let other = floe_render_core::FixedFit { cut_dbu: 5, rank: 0, class: 4, phase: 7, page: 9, below: u32::MAX };
         assert!(prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), Some(other)).is_none(), "another decision: nothing to reuse");
         assert!(prepare_pan_reuse(&state, &mut again, &SummaryKey::default(), None).is_none());
     }

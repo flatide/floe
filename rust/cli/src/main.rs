@@ -113,6 +113,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "hier" {
         return vfs::hier_cmd(&args[2..]);
     }
+    if args.len() >= 3 && args[1] == "ovs" {
+        return vfs::ovs_cmd(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "vfsd" {
         return vfs::vfsd_cmd(&args[2..]);
     }
@@ -141,7 +144,7 @@ fn main() {
              floe-index vfs <file.oas> [outdir] [--jobs N] \
              [--plan-batch N] [--encode-batch N] \
              [--page-target-mb N] \
-             [--coverage | --coverage-only] [--no-lod] [--no-hier] [--frontier-only] \
+             [--coverage | --coverage-only] [--no-lod] [--no-hier] [--no-ovs] [--frontier-only] \
              [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1] [--occupancy-prune 0|1] \
              [--slow-cell-s S] [--p2-shard-limit-mb N] \
              [--profile-cell NAME | --profile-cell-ci N] \
@@ -156,6 +159,7 @@ fn main() {
              [--dump]\n       \
              floe-index bvh <outdir> --cell NAME  (TSV dump of a cell's child BVH: nodes and leaf placements)\n       \
              floe-index hier <outdir> [--check]  (add design.ovh, the cell tree's index, to a cache; --check = report it)\n       \
+             floe-index ovs <outdir> [--um F] [--jobs N] [--roots F]  (add design.ovs, the occupancy density pass 2 draws by - FLOE_RUST_DENSITY_OCC=off: the plans; --roots: the cells under the top this share of its box or more get design.ovs.<cell>, default 0.25)\n       \
              floe-index drc <results.db> [out.tray] \
              [--pack] [--jobs N]\n       \
              floe-index drc-prepare <results.db|pack.tray> [--svrf RULES_JSON] [--jobs N] [--rule NAME] [--backend auto|rust|python] [--spatial-only|--delta-only]\n       \

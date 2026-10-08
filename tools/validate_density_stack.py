@@ -1227,7 +1227,8 @@ def bright_checks(temp):
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_GATE': 'on', 'FLOE_RUST_DENSITY_ZOOM_OUT': 'on'}
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_GATE': 'on', 'FLOE_RUST_DENSITY_ZOOM_OUT': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': 'off'}
     workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='off'))}
     try:
         dbu = float(workers['on'].cache.meta['dbu'])
@@ -1301,7 +1302,8 @@ def bright_checks(temp):
     done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
-    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on'}
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': 'off'}
     workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_BRIGHT='off'))}
     try:
         low_alone = frame(workers['on'], 1, (LOW,))[0]
@@ -1312,6 +1314,56 @@ def bright_checks(temp):
         shown = {(c, r) for r in range(H) for c in range(W) if px(on, c, r) != BLACK} - low_px
         assert shown, 'TOP\'s density where LOW leaves the frame dark'
         print('density stack: the brightness keeps pass 1 - LOW\'s %d px as with it off and alone, TOP\'s density on %d px around it' % (len(low_px), len(shown)))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
+def pattern_checks(temp):
+    """The default density display uses opaque layer-colour dots. Its switch
+    off restores accumulated brightness, with the same originals and plans.
+    A speckled original's holes remain protected, and tile size or raster
+    worker count cannot change the pattern.
+    """
+    src = Path(temp) / 'pattern.oas'
+    shapes_first_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {
+        'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
+        'FLOE_RUST_DENSITY_BRIGHT': 'on', 'FLOE_RUST_DENSITY_PATTERN': None,
+        'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on',
+        # This check isolates the display mode; the evolving-mask planner
+        # is tested separately by staged_density_checks.
+        'FLOE_RUST_DENSITY_STAGES': 'off',
+        'FLOE_RUST_TILE_PX': '64', 'FLOE_RUST_RASTER_JOBS': '1',
+    }
+    workers = {
+        'default': worker(src, env),
+        'on': worker(src, dict(env, FLOE_RUST_DENSITY_PATTERN='on')),
+        'off': worker(src, dict(env, FLOE_RUST_DENSITY_PATTERN='off')),
+        'parallel': worker(src, dict(env, FLOE_RUST_TILE_PX='127', FLOE_RUST_RASTER_JOBS='4')),
+    }
+    try:
+        low_c, top_c = layer_colour(workers['default'], LOW), layer_colour(workers['default'], TOP)
+        frames = {name: frame(w, 1, (LOW, TOP)) for name, w in workers.items()}
+        on, result = frames['default']
+        legacy, legacy_result = frames['off']
+        for name, (_, reported) in frames.items():
+            assert reported['density_plan2']['pattern'] == int(name != 'off'), (name, reported['density_plan2'])
+        assert on == frames['on'][0] == frames['parallel'][0], 'default, explicit on, or tile/worker pattern differs'
+        assert on != legacy, 'pattern switch must restore the legacy brightness'
+        palette = (BLACK, low_c, top_c)
+        assert all(on[i:i + 4] in palette for i in range(0, len(on), 4)), 'pattern contains blended colours'
+        assert any(legacy[i:i + 4] not in palette for i in range(0, len(legacy), 4)), 'legacy brightness needs fractional coverage'
+        alone, _ = frame(workers['default'], 2, (LOW,))
+        covered = ((c, r) for r in range(20, 180) for c in range(20, 200))
+        assert all(px(on, c, r) == px(legacy, c, r) == px(alone, c, r) for c, r in covered), 'original or its speckle holes changed'
+        shown = sum(on[i:i + 4] == top_c for i in range(0, len(on), 4))
+        assert shown > 0 and result['density_stack']['lit'] > 0, 'pattern lost the open-space density'
+        assert result['density_pages'] == legacy_result['density_pages'], ('pattern changed page planning', result['density_pages'], legacy_result['density_pages'])
+        print('density stack: opaque pattern default/on, legacy brightness off, originals protected; %d density px, identical across tiles/workers' % shown)
     finally:
         for w in workers.values():
             w.stop()
@@ -1376,6 +1428,387 @@ def toggle_checks(temp):
         print('density stack: the viewer\'s toggle - density=on draws as FLOE_RUST_DENSITY_STACK=top + DOTS=on (%d px lit), density=off as '
               'without them (%d px); at one view off -> on -> off the retained frames keep to their setting (reused %d / %d tiles)'
               % (len(lit(on, range(W), range(H))), len(lit(off, range(W), range(H))), toggled_res.get('tiles_reused', 0), again_res.get('tiles_reused', 0)))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
+def first_layout(path):
+    """MID's own shapes, 0.6 um squares - 1.5 px at 0.4 um a pixel: under the
+    3 px cut, over the 1 px density cut: 1,000 at random over the left 60 x 60
+    um (about a tenth of it), a 20 x 20 um field of them every 1.2 um (a
+    quarter) on the right, and 16,000 more over the strip above both (y 62-78
+    um) - the page (one point list) past a 128 KB reserve."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    mid = ly.layer(*MID)
+    rnd = random.Random(17)
+    for _ in range(1000):
+        x, y = rnd.randrange(59_000) / 1000.0, rnd.randrange(59_000) / 1000.0
+        top.shapes(mid).insert(kdb.DBox(x, y, x + 0.6, y + 0.6))
+    for i in range(16):
+        for j in range(16):
+            x, y = 70 + i * 1.2, 10 + j * 1.2
+            top.shapes(mid).insert(kdb.DBox(x, y, x + 0.6, y + 0.6))
+    for _ in range(16000):
+        x, y = rnd.randrange(88_000) / 1000.0, 62 + rnd.randrange(16_000) / 1000.0
+        top.shapes(mid).insert(kdb.DBox(x, y, x + 0.6, y + 0.6))
+    options = kdb.SaveLayoutOptions()
+    options.format = 'OASIS'
+    options.oasis_compression_level = 10
+    ly.write(str(path), options)
+
+
+def first_checks(temp):
+    """The occupancy first and the stand-in for a page a budget leaves out (a
+    reviewer 2026-10-05, then the exact cover: on the routing chip's fit view
+    pass 2 kept 110 of the 277 pages it decodes from 1 px up under 1 GB and
+    drew x0.49 of them; their occupancy grids draw x1.01 in a third of the
+    time). first_layout's 1.5 px squares at 0.4 um a pixel under the
+    brightness: by default (renderd density_ovb_first) pass 2 decodes no page
+    - the page is spread by its grid, whose cells show 3 px - and the kill
+    switch (FLOE_RUST_DENSITY_OVB_FIRST=off) decodes it. Spread, the alphas
+    add up to g x the squares' area and the field shows a half of the colour;
+    decoded, each square is drawn where it is and a pixel it covers stops at
+    the colour (min(1, g x cover) a pixel: about 3.3 of the 4.5 a 1.5 px
+    square's area makes), so the sum is less - the two agree by 16 px cells
+    within that. Under a reserve that holds no page (1 MB, the
+    fixed 128 KB) with the page decoded as before, its grid stands in (floe_vfs
+    HierOpts::dot_stand_in: density_plan2 stood_in) and draws that area too;
+    FLOE_RUST_DENSITY_STAND_IN=off draws nothing, as 0.12.298."""
+    src = Path(temp) / 'first.oas'
+    first_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': 'off'}
+    tight = dict(env, FLOE_RUST_BUDGET_MB='1', FLOE_RUST_DENSITY_RESERVE_LEFT='off', FLOE_RUST_DENSITY_OVB_FIRST='off')
+    workers = {'first': worker(src, env), 'decode': worker(src, dict(env, FLOE_RUST_DENSITY_OVB_FIRST='off')),
+               'stand_in': worker(src, tight), 'none': worker(src, dict(tight, FLOE_RUST_DENSITY_STAND_IN='off'))}
+    try:
+        dbu = float(workers['first'].cache.meta['dbu'])
+        colour = layer_colour(workers['first'], MID)
+        k = max(range(3), key=lambda i: colour[i])
+        spp, x0, y0 = 0.4, -10.0, -10.0
+
+        def view(w):
+            box = (x0, y0, x0 + W * spp, y0 + H * spp)
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': None, 'w': W, 'h': H,
+                      'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': [MID],
+                      'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('first frame timeout')
+
+        def alpha(pixels, c, r):
+            p = px(pixels, c, r)
+            assert all(p[i] <= colour[i] for i in range(3)), ('past the colour', (c, r), tuple(p))
+            return p[k] / colour[k]
+
+        def total(pixels, um):
+            cs = range(max(0, int((um[0] - x0) / spp)), min(W, int((um[2] - x0) / spp)))
+            rs = range(max(0, int((y0 + H * spp - um[3]) / spp)), min(H, int((y0 + H * spp - um[1]) / spp)))
+            return sum(alpha(pixels, c, r) for r in rs for c in cs), len(cs) * len(rs)
+
+        frames = {name: view(w) for name, w in workers.items()}
+        pages = {name: res.get('density_pages') or {} for name, (_, res) in frames.items()}
+        plan2 = {name: res.get('density_plan2') or {} for name, (_, res) in frames.items()}
+        sparse, field = (-1, -1, 61, 61), (70.2, 10.2, 88.8, 28.8)
+        # the squares' area on screen, px^2 (overlaps counted twice: about 2 %), and g = 2
+        want = 2 * 1000 * (0.6 / spp) ** 2
+        got = {name: total(pixels, sparse)[0] for name, (pixels, _) in frames.items()}
+        assert pages['first']['decoded'] == 0 and plan2['first']['occ_pages'] >= 1, (pages['first'], plan2['first'])
+        assert pages['decode']['decoded'] >= 1, pages['decode']
+        # spread: the area itself; decoded: each pixel a square covers stops at
+        # the colour - 3.3 to 3.5 of the 4.5 a square's area makes at g = 2
+        assert abs(got['first'] - want) < 0.15 * want, ('spread', got['first'], want)
+        assert 0.62 * want < got['decode'] < 0.85 * want, ('decoded', got['decode'], want)
+        fields = {name: total(frames[name][0], field) for name in ('first', 'decode')}
+        assert abs(fields['first'][0] / fields['first'][1] - 0.5) < 0.08, ('the field, spread', fields['first'][0] / fields['first'][1])
+        assert 0.3 < fields['decode'][0] / fields['decode'][1] < 0.45, ('the field, decoded', fields['decode'][0] / fields['decode'][1])
+        # by 16 px cells the two agree within that: the mean difference under
+        # two fifths of the mean
+        cells = [(c, r) for r in range(0, H - 15, 16) for c in range(0, W - 15, 16)]
+        sums = {name: [sum(alpha(frames[name][0], c + i, r + j) for j in range(16) for i in range(16)) for (c, r) in cells] for name in ('first', 'decode')}
+        mean = sum(sums['decode']) / len(cells)
+        differ = sum(abs(a - b) for a, b in zip(sums['first'], sums['decode'])) / len(cells)
+        assert mean > 0 and differ < 0.4 * mean, ('16 px cells', differ, mean)
+        # the page left out: its grid stands in, or nothing does
+        assert plan2['stand_in']['stood_in'] >= 1 and pages['stand_in']['decoded'] == 0, (plan2['stand_in'], pages['stand_in'])
+        assert abs(got['stand_in'] - want) < 0.15 * want, ('the stand-in', got['stand_in'], want)
+        assert plan2['none']['stood_in'] == 0 and got['none'] == 0 and not lit(frames['none'][0], range(W), range(H)), (plan2['none'], got['none'])
+        print('density stack: the occupancy first - the 1.5 px squares\' page spread by its grid, no page decoded: alphas %.0f for g x %.0f px^2 '
+              '(decoded, the switch off: %.0f; by 16 px cells they differ by %.2f of %.2f); a reserve that holds no page: its grid stands in, '
+              '%.0f (%d pages) - the stand-in off: nothing'
+              % (got['first'], want / 2, got['decode'], differ, mean, got['stand_in'], plan2['stand_in']['stood_in']))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
+def sums_layout(single_path, list_path):
+    """2,000 cells of 0.32 um (0.32 px at 1 um a pixel: 0.1024 px^2, 1.64
+    sixteenths) at random over 990 x 190 um: each its own cell placed once
+    (lone placements), and one cell placed 2,000 times (KLayout writes a point
+    list)."""
+    import random
+    import klayout.db as kdb
+    for path, lone in ((single_path, True), (list_path, False)):
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        mid = ly.layer(*MID)
+        rnd = random.Random(5)
+        leaf = None
+        for n in range(2000):
+            if lone or leaf is None:
+                leaf = ly.create_cell('L%d' % n)
+                leaf.shapes(mid).insert(kdb.Box(0, 0, 320, 320))
+            top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(rnd.randrange(390_000), rnd.randrange(190_000))))
+        ly.write(str(path))
+
+
+def sums_checks(temp):
+    """Under the brightness an item's cover keeps its fraction (a reviewer
+    2026-10-05: "0.1 px^2 is 1.6 sixteenths, cut to 1"; floe_vfs
+    HierOpts::dot_bright_sums, FLOE_RUST_DENSITY_BRIGHT_SUMS=off the kill
+    switch). sums_layout's 2,000 cells of 0.1024 px^2 at 1 um a pixel, g = 2:
+    as lone placements their alphas add up to g x their area (410) - the
+    switch off 0.61 of it, each cut to a sixteenth; as one point list read one
+    member for a window, each window stands over its block's part of the
+    chunk - the area again, no pixel past half the colour - where the switch
+    off gathers it on the member's own pixel (pixels at the colour itself)."""
+    single, listed = Path(temp) / 'sums_single.oas', Path(temp) / 'sums_list.oas'
+    sums_layout(single, listed)
+    for src in (single, listed):
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': 'off'}
+    off = dict(env, FLOE_RUST_DENSITY_BRIGHT_SUMS='off')
+    workers = {('single', 'on'): worker(single, env), ('single', 'off'): worker(single, off), ('list', 'on'): worker(listed, env), ('list', 'off'): worker(listed, off)}
+    try:
+        w0 = workers[('single', 'on')]
+        dbu = float(w0.cache.meta['dbu'])
+        colour = layer_colour(w0, MID)
+        k = max(range(3), key=lambda i: colour[i])
+
+        def view(w):
+            box = (0.0, 0.0, float(W), float(H))
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': None, 'w': W, 'h': H,
+                      'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': [MID],
+                      'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('sums frame timeout')
+
+        alphas = {}
+        for key, w in workers.items():
+            pixels, res = view(w)
+            alphas[key] = [px(pixels, c, r)[k] / colour[k] for r in range(H) for c in range(W)]
+        want = 2 * 2000 * 0.32 ** 2
+        got = {key: sum(a) for key, a in alphas.items()}
+        top = {key: max(a) for key, a in alphas.items()}
+        assert abs(got[('single', 'on')] - want) < 0.06 * want, ('lone cells', got[('single', 'on')], want)
+        assert abs(got[('single', 'off')] - want / 1.6384) < 0.06 * want, ('lone cells, the switch off', got[('single', 'off')], want / 1.6384)
+        assert abs(got[('list', 'on')] - want) < 0.06 * want and top[('list', 'on')] <= 0.5, ('the list', got[('list', 'on')], want, top[('list', 'on')])
+        assert got[('list', 'off')] < 0.85 * want and top[('list', 'off')] >= 0.99, ('the list, the switch off', got[('list', 'off')], top[('list', 'off')])
+        print('density stack: the brightness keeps an item\'s fraction - 2,000 lone cells of 1.64 sixteenths: alphas %.0f for g x area %.0f '
+              '(the switch off %.0f); as one point list %.0f, no pixel past %.2f of the colour (off %.0f, pixels at %.2f)'
+              % (got[('single', 'on')], want, got[('single', 'off')], got[('list', 'on')], top[('list', 'on')], got[('list', 'off')], top[('list', 'off')]))
+    finally:
+        for w in workers.values():
+            w.stop()
+
+
+def hier_layouts(flat_path, cells_path, cover_path, even_path):
+    """At 1 um a pixel. flat / cells: 160 x 160 squares of 0.05 um (0.0025
+    px^2) every 0.25 um from (10, 10) um - 64 px^2 over 40 x 40 px, a 25th of
+    it - as TOP's own shapes, and each a cell of its own placed once (256
+    placements under a 4 px node: as many as its box has sixteenths). cover:
+    a cell of 1 um (a 1/0 box) holding a 2/0 square of 0.2 um, a 25th of it -
+    as an array of 60 x 60 from (10, 100), 2,000 at random over 150 x 60 um
+    from (100, 10) (a point list) and 500 cells of their own placed once over
+    150 x 60 um from (100, 100). even: 48 x 48 cells of their own, a 2/0
+    square of 0.5 um each, every 1 um from (10, 10) - a quarter covered - and
+    an array of 40 x 40 every 1.5 um from (100, 10) of a cell of 1.2 um (a
+    1/0 box) holding a 2/0 square of 0.6 um (two or three of its members a
+    side to a 4 px block; 0.36 px^2 of every 2.25 covered)."""
+    import random
+    import klayout.db as kdb
+    for path, lone in ((flat_path, False), (cells_path, True)):
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        mid = ly.layer(*MID)
+        for j in range(160):
+            for i in range(160):
+                x, y = 10_000 + i * 250, 10_000 + j * 250
+                if lone:
+                    leaf = ly.create_cell('S%d_%d' % (i, j))
+                    leaf.shapes(mid).insert(kdb.Box(0, 0, 50, 50))
+                    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(x, y)))
+                else:
+                    top.shapes(mid).insert(kdb.Box(x, y, x + 50, y + 50))
+        ly.write(str(path))
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    low, mid = ly.layer(*LOW), ly.layer(*MID)
+
+    def cell(name):
+        c = ly.create_cell(name)
+        c.shapes(low).insert(kdb.Box(0, 0, 1000, 1000))
+        c.shapes(mid).insert(kdb.Box(400, 400, 600, 600))
+        return c.cell_index()
+
+    one = cell('C')
+    top.insert(kdb.CellInstArray(one, kdb.Trans(10_000, 100_000), kdb.Vector(1000, 0), kdb.Vector(0, 1000), 60, 60))
+    rnd = random.Random(7)
+    for _ in range(2000):
+        top.insert(kdb.CellInstArray(one, kdb.Trans(100_000 + rnd.randrange(149_000), 10_000 + rnd.randrange(59_000))))
+    for n in range(500):
+        top.insert(kdb.CellInstArray(cell('D%d' % n), kdb.Trans(100_000 + rnd.randrange(149_000), 100_000 + rnd.randrange(59_000))))
+    ly.write(str(cover_path))
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    mid = ly.layer(*MID)
+    for j in range(48):
+        for i in range(48):
+            leaf = ly.create_cell('E%d_%d' % (i, j))
+            leaf.shapes(mid).insert(kdb.Box(0, 0, 500, 500))
+            top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(10_000 + i * 1000, 10_000 + j * 1000)))
+    member = ly.create_cell('F')
+    member.shapes(ly.layer(*LOW)).insert(kdb.Box(0, 0, 1200, 1200))
+    member.shapes(mid).insert(kdb.Box(300, 300, 900, 900))
+    top.insert(kdb.CellInstArray(member.cell_index(), kdb.Trans(100_000, 10_000), kdb.Vector(1500, 0), kdb.Vector(0, 1500), 40, 40))
+    ly.write(str(even_path))
+
+
+def hier_checks(temp):
+    """The brightness does not depend on the hierarchy the shapes are stored
+    in (a reviewer 2026-10-05: 4,096 squares of 1 dbu drew 0 px flat and 121
+    px at full colour as a cell each; the standard-cell layout's 2/0 alone
+    drew x6.9 of its exact cover). hier_layouts at 1 um a pixel, 2/0 alone,
+    g = 2. A node counts what its placements hold (floe_vfs HierOpts::
+    dot_node_sample, FLOE_RUST_DENSITY_NODE_SAMPLE=off the kill switch): the
+    squares as cells of their own draw what they draw as TOP's shapes, g x
+    their area - the switch off, their nodes' boxes at the colour. A cell
+    stands for the area its shapes cover (HierOpts::cell_cover, render-core
+    Cache::cell_cover, FLOE_RUST_DENSITY_CELL_COVER=off): the array's, the
+    list's and the lone cells' members g x their 2/0 square each - the switch
+    off, their 1 um boxes. An item across a block boundary is shared between
+    the blocks (HierOpts::dot_item_share, FLOE_RUST_DENSITY_ITEM_SHARE=off):
+    the even field is even - the switch off, blocks at the colour beside
+    blocks left dark - and so is an array whose pitch does not divide the
+    block (the switch off: blocks of four, six and nine members)."""
+    names = ('hier_flat', 'hier_cells', 'hier_cover', 'hier_even')
+    paths = {name: Path(temp) / (name + '.oas') for name in names}
+    hier_layouts(*(paths[name] for name in names))
+    for src in paths.values():
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': 'off'}
+    workers = {
+        'flat': worker(paths['hier_flat'], env),
+        'cells': worker(paths['hier_cells'], env),
+        'cells_off': worker(paths['hier_cells'], dict(env, FLOE_RUST_DENSITY_NODE_SAMPLE='off')),
+        'cover': worker(paths['hier_cover'], env),
+        'cover_off': worker(paths['hier_cover'], dict(env, FLOE_RUST_DENSITY_CELL_COVER='off')),
+        'even': worker(paths['hier_even'], env),
+        'even_off': worker(paths['hier_even'], dict(env, FLOE_RUST_DENSITY_ITEM_SHARE='off')),
+    }
+    try:
+        w0 = workers['flat']
+        dbu = float(w0.cache.meta['dbu'])
+        colour = layer_colour(w0, MID)
+        k = max(range(3), key=lambda i: colour[i])
+
+        def view(w):
+            box = (0.0, 0.0, float(W), float(H))
+            w.submit({'kind': 'render', 'gen': 1, 'scope': 'live', 'bbox': tuple(v / dbu for v in box), 'view': None, 'w': W, 'h': H,
+                      'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False, 'abstract': False, 'visible': [MID],
+                      'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                assert res.get('kind') not in ('error', 'dropped'), res
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    return bytes(res.pop('rgba')), res
+            raise AssertionError('hier frame timeout')
+
+        # (rows count from the top: y um from the bottom is row H - y)
+        def alphas(pixels, x, y):
+            return [px(pixels, c, H - 1 - r)[k] / colour[k] for r in range(*y) for c in range(*x)]
+
+        got, plan2 = {}, {}
+        for key, w in workers.items():
+            got[key], res = view(w)
+            plan2[key] = res.get('density_plan2') or {}
+        # a node counts what its placements hold
+        want = 2 * 160 * 160 * 0.05 ** 2
+        field = ((5, 55), (5, 55))
+        flat, cells, boxed = (sum(alphas(got[key], *field)) for key in ('flat', 'cells', 'cells_off'))
+        assert abs(flat - want) < 0.12 * want, ('the squares as shapes', flat, want)
+        assert abs(cells - want) < 0.2 * want, ('the squares as cells', cells, want)
+        assert plan2['cells'].get('by_nodes', 0) > 0 and plan2['cells'].get('node_sampled', 0) > 0, plan2['cells']
+        assert boxed > 5 * want and plan2['cells_off'].get('node_sampled', 0) == 0, ('the switch off', boxed, want, plan2['cells_off'])
+        print('density stack: a node counts what its placements hold - 25,600 squares of 0.0025 px^2: alphas %.0f as shapes, %.0f as a cell '
+              'each (g x area %.0f; %d nodes by their placements) - the switch off %.0f, the nodes\' boxes'
+              % (flat, cells, want, plan2['cells'].get('node_sampled', 0), boxed))
+        # a cell stands for the area its shapes cover
+        regions = {'array': ((8, 72), (98, 162)), 'list': ((98, 252), (8, 72)), 'lone': ((98, 252), (98, 162))}
+        members = {'array': 3600, 'list': 2000, 'lone': 500}
+        said = []
+        for name, region in regions.items():
+            want = 2 * members[name] * 0.2 ** 2
+            on, off = sum(alphas(got['cover'], *region)), sum(alphas(got['cover_off'], *region))
+            assert abs(on - want) < 0.15 * want, (name, on, want)
+            assert off > 4 * want, (name, 'the switch off', off, want)
+            said.append('%s %.0f for %.0f (off %.0f)' % (name, on, want, off))
+        assert plan2['cover'].get('cell_cover') == 1 and plan2['cover'].get('cover_cells', 0) >= 1, plan2['cover']
+        assert plan2['cover_off'].get('cell_cover') == 0 and plan2['cover_off'].get('cover_cells', 0) == 0, plan2['cover_off']
+        print('density stack: a cell stands for its shapes\' cover - a 2/0 square of 0.04 px^2 in a 1 px cell: %s' % ', '.join(said))
+        # an item across a block boundary is shared between the blocks
+        inner = ((14, 54), (14, 54))
+        on, off = alphas(got['even'], *inner), alphas(got['even_off'], *inner)
+        mean_on, mean_off = sum(on) / len(on), sum(off) / len(off)
+        dev_on = (sum((v - mean_on) ** 2 for v in on) / len(on)) ** 0.5 / mean_on
+        dev_off = (sum((v - mean_off) ** 2 for v in off) / len(off)) ** 0.5 / mean_off
+        assert abs(mean_on - 0.5) < 0.06 and dev_on < 0.35 and 0.05 < min(on) and max(on) < 0.8, ('the even field', mean_on, dev_on, min(on), max(on))
+        assert abs(mean_off - 0.5) < 0.06 and dev_off > 0.5 and min(off) == 0.0 and max(off) >= 0.99, ('the even field, the switch off', mean_off, dev_off, min(off), max(off))
+        print('density stack: an item across blocks is shared between them - cells a quarter covered, every 1 px: alpha %.2f, deviation %.2f '
+              'of it, %.2f to %.2f - the switch off %.2f, deviation %.2f, %.2f to %.2f (blocks at the colour beside dark ones)'
+              % (mean_on, dev_on, min(on), max(on), mean_off, dev_off, min(off), max(off)))
+        # an array every 1.5 px: by 4 px blocks (the frame's own: the view starts at a block's corner)
+        def by_blocks(pixels):
+            cells = []
+            for by in range(4, 13):
+                for bx in range(26, 39):
+                    cells.append(sum(alphas(pixels, (bx * 4, bx * 4 + 4), (by * 4, by * 4 + 4))) / 16.0)
+            mean = sum(cells) / len(cells)
+            return mean, (sum((v - mean) ** 2 for v in cells) / len(cells)) ** 0.5 / mean
+        (mean_on, dev_on), (mean_off, dev_off) = by_blocks(got['even']), by_blocks(got['even_off'])
+        assert abs(mean_on - 0.32) < 0.03 and dev_on < 0.12, ('the array', mean_on, dev_on)
+        assert abs(mean_off - 0.32) < 0.03 and dev_off > 0.18, ('the array, the switch off', mean_off, dev_off)
+        print('density stack: an array every 1.5 px takes its members\' parts in a block by their area - alpha %.2f for 0.32, its 4 px blocks '
+              'within %.2f of it - the switch off %.2f (blocks of four, six and nine members)' % (mean_on, dev_on, dev_off))
     finally:
         for w in workers.values():
             w.stop()
@@ -1673,6 +2106,324 @@ def shapes_first_checks(temp):
     finally:
         for w in workers.values():
             w.stop()
+
+
+def full_shapes_first_checks(temp):
+    """A full tile stops before the last original plane. Freeze its mask
+    at the pass-2 boundary anyway: no density plans, decode or coverage
+    initialization, and the same frame as with density off. Abutting 1 px
+    hairlines exercise the early exit with the viewer's speckle fill; one
+    large speckled shape blocks density through coverage instead of ink.
+    With only half covered, keep drawing density into the other half.
+    """
+    import klayout.db as kdb
+    env = {
+        'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
+        'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_TOP_PLANES': '2',
+        'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
+        'FLOE_RUST_DENSITY_PATTERN': None,
+        'FLOE_RUST_DENSITY_FREE_CELLS': 'on', 'FLOE_RUST_OCCUPANCY': 'off',
+        'FLOE_RUST_SHAPE_CUT': 'max',
+    }
+    for kind in ('solid', 'hairlines', 'speckle', 'half'):
+        src = Path(temp) / ('full_shapes_first_%s.oas' % kind)
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        top.shapes(ly.layer(*LOW)).insert(kdb.Box(50_000, 30_000, 51_000, 31_000))
+        for y in range(50, 20_000, 500):
+            for x in range(50, 40_000, 500):
+                top.shapes(ly.layer(*MID)).insert(kdb.Box(x, y, x + 150, y + 150))
+        layer = ly.layer(*TOP)
+        if kind == 'hairlines':
+            for x in range(0, 40_000, 100):
+                top.shapes(layer).insert(kdb.Box(x, -1_000, x + 100, 21_000))
+        else:
+            top.shapes(layer).insert(kdb.Box(-1_000, -1_000, 20_000 if kind == 'half' else 41_000, 21_000))
+        ly.write(str(src))
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+        # An edge tile as well as full tiles, and a one-tile frame.
+        for tile in (64, 512):
+            settings = dict(env, FLOE_RUST_TILE_PX=str(tile))
+            workers = {
+                'on': worker(src, settings),
+                'off': worker(src, dict(settings, FLOE_RUST_DENSITY_STACK='off')),
+            }
+            try:
+                for w in workers.values():
+                    if kind in ('solid', 'half'):
+                        w._fills[TOP] = 'solid'
+                        w._publish_style(wait=True)
+                off, _ = frame(workers['off'], 1, (LOW, MID, TOP))
+                on, res = frame(workers['on'], 1, (LOW, MID, TOP))
+                p2, pages, stack = res['density_plan2'], res['density_pages'], res['density_stack']
+                assert p2['pattern'] == 1, p2
+                assert p2['stages'] == 0, 'layer staging must remain opt-in'
+                if kind == 'half':
+                    assert all(px(on, c, r) == px(off, c, r) for r in range(H) for c in range(W // 2)), 'covered half changed'
+                    assert any(px(on, c, r) != px(off, c, r) for r in range(H) for c in range(W // 2 + 2, W)), 'open half lost its density'
+                    assert 0 < p2['free_top'] < W * H and p2['passes'] > 0, p2
+                else:
+                    assert on == off, (kind, tile, 'density changed a fully covered frame')
+                    assert p2['free_top'] == p2['free_others'] == p2['passes'] == p2['regions'] == p2['cell_cover'] == 0, p2
+                    assert p2['nodes'] == p2['page_nodes'] == p2['page_candidates'] == p2['reads'] == p2['items'] == 0, p2
+                    assert pages['planned'] == pages['decoded'] == 0, pages
+                    assert res['density_us']['plan2_us'] == res['density_us']['scene2_us'] == res['density_us']['decode2_us'] == 0, res['density_us']
+                    assert stack['covered'] == W * H and stack['lit'] == stack['top'] == stack['lower'] == 0, stack
+                    if kind != 'speckle':
+                        assert res['once_full_tiles'] > 0, 'must exercise early full-tile exit'
+                print('density stack: shapes first, %s tile %d - free %d/%d px, %d plans, %d decoded pages'
+                      % (kind, tile, p2['free_top'], p2['free_others'], p2['passes'], pages['decoded']))
+            finally:
+                for w in workers.values():
+                    w.stop()
+
+
+def nearly_full_pattern_checks(temp):
+    """One open pixel per 32 x 32 block must not request density when
+    every hole is on the shared pattern's forbidden parity. The old demand
+    planned all eight top layers over the whole view for zero added pixels.
+    Move the holes one column: real drawable gaps must remain eligible.
+    """
+    import klayout.db as kdb
+    size = 512
+    visible = [(i, 0) for i in range(9)]
+    env = {
+        'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
+        'FLOE_RUST_DENSITY_BRIGHT': 'on', 'FLOE_RUST_DENSITY_PATTERN': 'on',
+        'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_TOP_PLANES': '8',
+        'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on', 'FLOE_RUST_DENSITY_FREE_CELLS': 'on',
+        'FLOE_RUST_DENSITY_FREE_CELL_PX': '32', 'FLOE_RUST_DENSITY_OTHERS_MIN': '0.125',
+        'FLOE_RUST_OCCUPANCY': 'off', 'FLOE_RUST_SHAPE_CUT': 'max',
+        'FLOE_RUST_EDGE_EXACT': 'on',
+    }
+    for allowed in (False, True):
+        src = Path(temp) / ('nearly_full_%s.oas' % allowed)
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        own = top.shapes(ly.layer(0, 0))
+        hx = 30 if allowed else 29
+        for y in range(0, size, 32):
+            for x in range(0, size, 32):
+                # The edge-exact rim leaves only (x+hx, y+31) open.
+                # The right strip is tall enough to survive the 3 px cut.
+                own.insert(kdb.Box(x * 100, y * 100, (x + 32) * 100, (y + 30) * 100))
+                own.insert(kdb.Box(x * 100, (y + 30) * 100, (x + hx - 1) * 100, (y + 32) * 100))
+                own.insert(kdb.Box((x + hx + 1) * 100, y * 100, (x + 32) * 100, (y + 32) * 100))
+        for layer in range(1, 9):
+            leaf = ly.create_cell('DOT%d' % layer)
+            leaf.shapes(ly.layer(layer, 0)).insert(kdb.Box(0, 0, 150, 150))
+            top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(hx * 100 - 25, 3075),
+                                        kdb.Vector(3200, 0), kdb.Vector(0, 3200), 16, 16))
+        ly.write(str(src))
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+        images = []
+        for tile in (64, 127):
+            w = worker(src, dict(env, FLOE_RUST_TILE_PX=str(tile)))
+            try:
+                frames = []
+                for gen, density in ((1, False), (2, True)):
+                    w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless',
+                              'bbox': (0, 0, size * 100, size * 100), 'w': size, 'h': size,
+                              'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False,
+                              'labels': False, 'abstract': False, 'visible': visible,
+                              'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False,
+                              'density': density})
+                    deadline = time.monotonic() + 60
+                    while True:
+                        res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                        assert res.get('kind') != 'error', res
+                        if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                            frames.append(bytes(res.pop('rgba')))
+                            break
+                p2, stack = res['density_plan2'], res['density_stack']
+                assert stack['covered'] == size * size - 256, stack
+                if allowed:
+                    assert frames[0] != frames[1] and stack['top'] > 0, 'drawable holes lost their density'
+                    assert p2['free_top'] == 256 and p2['passes'] > 0, p2
+                else:
+                    assert frames[0] == frames[1], 'forbidden holes changed the frame'
+                    assert p2['passes'] == p2['regions'] == p2['cell_cover'] == 0, p2
+                    assert res['density_pages']['planned'] == res['density_pages']['decoded'] == 0, res
+                    assert res['density_us']['plan2_us'] == 0, res
+                images.append(frames[1])
+                print('density stack: 99.9%% covered, %s holes, tile %d - %d plans, %d added px'
+                      % ('drawable' if allowed else 'forbidden', tile, p2['passes'], stack['top']))
+            finally:
+                w.stop()
+        assert images[0] == images[1], 'near-full pattern depends on tile size'
+
+
+def masked_density_frame(w, gen, visible, size=128, density=True):
+    """A square 0.1 um/px view for the direct-mask and staged-plan cases."""
+    w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless',
+              'bbox': (0, 0, size * 100, size * 100), 'w': size, 'h': size,
+              'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False,
+              'labels': False, 'abstract': False, 'visible': list(visible),
+              'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False,
+              'density': density})
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+        assert res.get('kind') not in ('error', 'dropped'), res
+        if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+            return bytes(res.pop('rgba')), res
+    raise AssertionError('masked density frame timeout')
+
+
+def masked_density_env():
+    return {
+        'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on',
+        'FLOE_RUST_DENSITY_BRIGHT': 'on', 'FLOE_RUST_DENSITY_PATTERN': 'on',
+        'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_TOP_PLANES': '8',
+        'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on', 'FLOE_RUST_DENSITY_FREE_CELLS': 'on',
+        'FLOE_RUST_DENSITY_FREE_CELL_PX': '32', 'FLOE_RUST_DENSITY_OTHERS_MIN': '0',
+        'FLOE_RUST_DENSITY_STAGES': None, 'FLOE_RUST_DENSITY_MASK': None,
+        'FLOE_RUST_OCCUPANCY': 'off', 'FLOE_RUST_SHAPE_CUT': 'max',
+        'FLOE_RUST_EDGE_EXACT': 'on', 'FLOE_RUST_DENSITY_OVB_FIRST': 'off',
+        'FLOE_RUST_RETAINED_MB': '0',
+    }
+
+
+def planner_mask_checks(temp):
+    """Every 32px demand cell has one drawable hole. Its covered interior
+    contains shared, rotated and mirrored repeated subtrees: the planner's
+    pixel mask must skip them before walking their dots, while preserving
+    repeated, rotated instances of the same dot cell at each hole. Both
+    modes use staged planning;
+    only FLOE_RUST_DENSITY_MASK=off removes the direct mask query.
+    """
+    import klayout.db as kdb
+    src = Path(temp) / 'planner_mask.oas'
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    own = top.shapes(ly.layer(0, 0))
+    for y in range(0, 128, 32):
+        for x in range(0, 128, 32):
+            own.insert(kdb.Box(x * 100, y * 100, (x + 32) * 100, (y + 30) * 100))
+            own.insert(kdb.Box(x * 100, (y + 30) * 100, (x + 29) * 100, (y + 32) * 100))
+            own.insert(kdb.Box((x + 31) * 100, y * 100, (x + 32) * 100, (y + 32) * 100))
+    leaf = ly.create_cell('BLOCKED_DOT')
+    leaf.shapes(ly.layer(1, 0)).insert(kdb.Box(0, 0, 150, 150))
+    group = ly.create_cell('BLOCKED_GROUP')
+    # Distinct cells require a real BVH walk; a single regular array can
+    # aggregate all its members in one item without visiting child nodes.
+    for row in range(12):
+        for col in range(12):
+            dot = leaf if row == col == 0 else ly.create_cell('BLOCKED_%d_%d' % (row, col))
+            if dot != leaf:
+                dot.shapes(ly.layer(1, 0)).insert(kdb.Box(0, 0, 150 + row, 150 + col))
+            group.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(col * 200, row * 200)))
+    for row, y in enumerate(range(0, 128, 32)):
+        for col, x in enumerate(range(0, 128, 32)):
+            transform = kdb.Trans((row + col) % 4, bool(row % 2), 0, 0)
+            box = group.bbox().transformed(transform)
+            placed = kdb.Trans(transform.rot, transform.is_mirror(),
+                               (x + 2) * 100 - box.left, (y + 2) * 100 - box.bottom)
+            top.insert(kdb.CellInstArray(group.cell_index(), placed))
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(2975, 3075),
+                                kdb.Vector(3200, 0), kdb.Vector(0, 3200), 4, 2))
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(1, False, 3125, 9475),
+                                kdb.Vector(3200, 0), kdb.Vector(0, 3200), 4, 2))
+    ly.write(str(src))
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    images = []
+    for tile in (64, 127):
+        frames = {}
+        for mode in ('on', 'off'):
+            env = dict(masked_density_env(), FLOE_RUST_TILE_PX=str(tile),
+                       FLOE_RUST_DENSITY_MASK=mode, FLOE_RUST_DENSITY_STAGES='on')
+            w = worker(src, env)
+            try:
+                baseline, _ = masked_density_frame(w, 1, [(0, 0), (1, 0)], density=False)
+                frames[mode] = masked_density_frame(w, 2, [(0, 0), (1, 0)])
+                pixels, result = frames[mode]
+                assert result['density_stack']['covered'] == 128 * 128 - 16, result['density_stack']
+                assert sum(pixels[i:i + 4] != baseline[i:i + 4] for i in range(0, len(pixels), 4)) == 16, 'visible repeated dots lost'
+            finally:
+                w.stop()
+        assert frames['on'][0] == frames['off'][0], 'direct mask changed visible density'
+        on, off = (frames[mode][1]['density_plan2'] for mode in ('on', 'off'))
+        assert on['mask_tests'] > 0 and on['mask_pruned'] > 0 and off['mask_tests'] == 0, (on, off)
+        assert on['nodes'] < off['nodes'] and on['items'] < off['items'], (on, off)
+        images.append(frames['on'][0])
+        print('density stack: direct mask tile %d - nodes %d/%d, items %d/%d, same 16 visible dots'
+              % (tile, on['nodes'], off['nodes'], on['items'], off['items']))
+    assert images[0] == images[1], 'direct mask depends on tile size'
+
+
+def staged_density_checks(temp):
+    """A density shape fills the drawable slots of each 3x3 original hole.
+    Plans below it must observe the completed draw, including its unlit
+    pattern support. Twelve visible layers put the filling layer either
+    first or ninth, beyond the former eight top planes. The lower layers
+    have identical support, making the legacy frame an exact oracle. The
+    default retains legacy planning; staged planning is explicitly enabled.
+    """
+    import klayout.db as kdb
+    visible = [(layer, 0) for layer in range(12)]
+    for active in (11, 3):
+        src = Path(temp) / ('staged_density_%d.oas' % active)
+        ly = kdb.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell('TOP')
+        own = top.shapes(ly.layer(0, 0))
+        for y in range(0, 128, 32):
+            for x in range(0, 128, 32):
+                own.insert(kdb.Box(x * 100, y * 100, (x + 32) * 100, (y + 12) * 100))
+                own.insert(kdb.Box(x * 100, (y + 16) * 100, (x + 32) * 100, (y + 32) * 100))
+                own.insert(kdb.Box(x * 100, (y + 12) * 100, (x + 12) * 100, (y + 16) * 100))
+                own.insert(kdb.Box((x + 16) * 100, (y + 12) * 100, (x + 32) * 100, (y + 16) * 100))
+        for layer in range(1, 12):
+            shapes = top.shapes(ly.layer(layer, 0))
+            at = 1325 if layer <= active else 400
+            for y in range(0, 128, 32):
+                for x in range(0, 128, 32):
+                    shapes.insert(kdb.Box(x * 100 + at, y * 100 + at,
+                                          x * 100 + at + 250, y * 100 + at + 250))
+        ly.write(str(src))
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+        frames = {}
+        for mode, tile, workers in (('default', 64, 1), ('on', 64, 1), ('parallel', 127, 4), ('off', 64, 1)):
+            stages = {'default': None, 'off': 'off'}.get(mode, 'on')
+            env = dict(masked_density_env(), FLOE_RUST_TILE_PX=str(tile),
+                       FLOE_RUST_RASTER_JOBS=str(workers),
+                       FLOE_RUST_DENSITY_STAGES=stages)
+            w = worker(src, env)
+            try:
+                baseline, _ = masked_density_frame(w, 1, visible, density=False)
+                frames[mode] = masked_density_frame(w, 2, visible)
+                pixels, result = frames[mode]
+                assert result['density_stack']['covered'] == 128 * 128 - 16 * 9, result['density_stack']
+                assert sum(pixels[i:i + 4] != baseline[i:i + 4] for i in range(0, len(pixels), 4)) == 64, 'density shape lost its visible slots'
+                colour = layer_colour(w, (active, 0))
+                assert sum(pixels[i:i + 4] == colour for i in range(0, len(pixels), 4)) == 64, 'wrong staged layer owns the density'
+            finally:
+                w.stop()
+        assert frames['default'][0] == frames['on'][0] == frames['parallel'][0] == frames['off'][0], 'staged pattern, tile or worker count changed this controlled frame'
+        current, legacy = frames['on'][1], frames['off'][1]
+        default = frames['default'][1]
+        assert default['density_plan2']['stages'] == 0 and default['density_plan2']['passes'] == 9, default['density_plan2']
+        assert default['density_pages'] == legacy['density_pages'], (default['density_pages'], legacy['density_pages'])
+        assert current['density_plan2']['stages'] == 12 - active and legacy['density_plan2']['stages'] == 0, (current['density_plan2'], legacy['density_plan2'])
+        assert current['density_pages']['decoded'] < legacy['density_pages']['decoded'], (current['density_pages'], legacy['density_pages'])
+        if active == 11:
+            assert current['density_plan2']['passes'] == 1 < legacy['density_plan2']['passes'], (current['density_plan2'], legacy['density_plan2'])
+        else:
+            assert current['density_pages']['decoded'] <= 9, current['density_pages']
+        print('density stack: staged layer %d - %d/%d plans, %d/%d decoded pages, same 64 visible pixels'
+              % (active, current['density_plan2']['passes'], legacy['density_plan2']['passes'],
+                 current['density_pages']['decoded'], legacy['density_pages']['decoded']))
 
 
 def own_layout(path):
@@ -2073,6 +2824,569 @@ def mixed_checks(temp):
             w.stop()
 
 
+OCC_DOT = 0.5               # um: the occupancy density's DOT square
+OCC_PITCH = 3.0             # um: its array's pitch (not a multiple of the checker's 2 px)
+OCC_ARRAY = (66, 33)        # its columns and rows: x 0-198, y 0-99 um
+OCC_BIG = (220.0, 20.0, 300.0, 100.0)  # TOP's own 3/0 box, over the cut
+OCC_SPECKS = (310.0, 20.0, 3.0, 26)    # TOP's own 3/0 0.4 um squares: x, y, pitch, n per side
+# (pitches of 3 px: at 2 every member falls on the dot checker's other parity)
+
+
+def occ_density_layout(path):
+    """A 1/0 DOT cell (a 0.5 um square) placed as a 66 x 33 array at 3 um,
+    and TOP's own 3/0: an 80 um box and 26 x 26 squares of 0.4 um at 3 um
+    beside it - a page holding a shape over the cut and many under it."""
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    dot = ly.create_cell('DOT')
+    dot.shapes(ly.layer(*LOW)).insert(kdb.DBox(0.25, 0.25, 0.25 + OCC_DOT, 0.25 + OCC_DOT))
+    pitch = int(OCC_PITCH * 1000)
+    top.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(), kdb.Vector(pitch, 0), kdb.Vector(0, pitch), *OCC_ARRAY))
+    alone = ly.layer(*ALONE)
+    top.shapes(alone).insert(kdb.DBox(*OCC_BIG))
+    x0, y0, step, n = OCC_SPECKS
+    for j in range(n):
+        for i in range(n):
+            x, y = x0 + i * step + 0.3, y0 + j * step + 0.3
+            top.shapes(alone).insert(kdb.DBox(x, y, x + 0.4, y + 0.4))
+    ly.write(str(path))
+
+
+def occ_density_checks(temp):
+    """Pass 2 from the occupancy density (FLOE_RUST_DENSITY_OCC=on, user
+    2026-10-06: "push it, I will try it on a real chip"; then, design.ovo
+    taking 3,362 s on the synthetic chip: "this won't do"): `floe-index ovs`
+    adds design.ovs to a plain index, its bits and means in one walk (a cache
+    without design.ovb refused), the same bytes built twice; at 1 um a pixel
+    over 1 um cells the frame draws pass 2 with no plan (density_plan2
+    occ_layers 2, occ_cell_nm 1000, no region, no node) - the DOT array's
+    dots within its extent and in 1/0's colour, the 3/0 squares' within
+    theirs, though their page holds a box over the cut (decoded at the build
+    for its smaller shapes), nothing elsewhere but the box pass 1 draws, the
+    same frame over other tiles and raster workers and with the layers made
+    one at a time (FLOE_RUST_DENSITY_OCC_THREADS=1); at depth 0 TOP's own
+    squares alone; the plans draw a view whose cells pass
+    FLOE_RUST_DENSITY_OCC_PX pixels, one whose layers pass
+    FLOE_RUST_DENSITY_OCC_MB, and a cache without design.ovs - that one byte
+    for byte the frame without the switch."""
+    import shutil
+    src = Path(temp) / 'occd.oas'
+    occ_density_layout(src)
+    plain = Path(temp) / 'occd_plain.oas'
+    shutil.copyfile(src, plain)
+    said = {}
+    for path, extra in ((src, []), (plain, ['--no-page-occupancy'])):
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path)] + extra,
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+        said[path] = done.stderr
+    ice, plain_ice = Path(temp) / '.occd.oas.ice', Path(temp) / '.occd_plain.oas.ice'
+    assert not (ice / 'design.ovo').exists(), 'the occupancy density needs no design.ovo'
+    # the index makes design.ovs (user 2026-10-07: "include ovs in indexing
+    # by default"); without design.ovb it says why it made none
+    assert (ice / 'design.ovs').read_bytes()[:8] == b'FLOEOVS1' and '[vfs] ovs design.ovs: ' in said[src], said[src][-2000:]
+    assert not (plain_ice / 'design.ovs').exists() and '[vfs] ovs: none' in said[plain], said[plain][-2000:]
+    # indexed again with --no-ovs: the last one gone, none made
+    again = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--force', '--no-ovs'],
+                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert again.returncode == 0 and not (ice / 'design.ovs').exists() and '[vfs] ovs' not in again.stderr, again.stderr[-2000:]
+    index_bin = os.environ['FLOE_INDEX_BIN']
+    refused = subprocess.run([index_bin, 'ovs', str(plain_ice)], capture_output=True, text=True, timeout=600)
+    assert refused.returncode == 1 and 'design.ovb' in refused.stderr and not (plain_ice / 'design.ovs').exists(), refused.stderr
+    built = subprocess.run([index_bin, 'ovs', str(ice), '--um', '1'], capture_output=True, text=True, timeout=600)
+    assert built.returncode == 0 and (ice / 'design.ovs').read_bytes()[:8] == b'FLOEOVS1', built.stdout + built.stderr
+    stats = dict(kv.split('=', 1) for kv in built.stdout.split()[1:])
+    assert int(stats['big_pages']) >= 1 and int(stats['decoded']) >= 1 and stats['base_um'] == '1', stats
+    # where the build is (user 2026-10-07: no log for 11 minutes on the real
+    # chip): its phases, and at FLOE_OVS_PROGRESS_S=0 the long ones' lines
+    for phase in ('index open', 'grid 1 um', 'decoded', 'walked in', 'settled in', 'written in'):
+        assert '[ovs] ' in built.stderr and phase in built.stderr, (phase, built.stderr)
+    first = (ice / 'design.ovs').read_bytes()
+    again = subprocess.run([index_bin, 'ovs', str(ice), '--um', '1', '--jobs', '1'], capture_output=True, text=True, timeout=600,
+                           env=dict(os.environ, FLOE_OVS_PROGRESS_S='0'))
+    assert again.returncode == 0 and (ice / 'design.ovs').read_bytes() == first, 'design.ovs differs built again (one decode thread)'
+    for beat in ('listing the pages to decode: ', 'settle: 0/', 'write: layer 0/'):
+        assert '[ovs] ' + beat in again.stderr, (beat, again.stderr)
+    env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
+           'FLOE_RUST_DENSITY_PATTERN': None, 'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on',
+           'FLOE_RUST_DENSITY_STAGES': 'off', 'FLOE_RUST_TILE_PX': '64', 'FLOE_RUST_RASTER_JOBS': '1'}
+    occ = dict(env, FLOE_RUST_DENSITY_OCC='on')
+    workers = {'walk': worker(src, env), 'occ': worker(src, occ),
+               'tiles': worker(src, dict(occ, FLOE_RUST_TILE_PX='127', FLOE_RUST_RASTER_JOBS='4')),
+               'serial': worker(src, dict(occ, FLOE_RUST_DENSITY_OCC_THREADS='1')),
+               'capped': worker(src, dict(occ, FLOE_RUST_DENSITY_OCC_MB='0.0001')),
+               'default': worker(src, dict(env, FLOE_RUST_DENSITY_OCC=None))}
+    side_w, side_h = 400, 200
+
+    def view(w, gen, box_um=(0.0, 0.0, 400.0, 200.0), depth=None):
+        dbu = float(w.cache.meta['dbu'])
+        w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in box_um), 'view': None,
+                  'w': side_w, 'h': side_h, 'depth': depth, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                  'abstract': False, 'visible': [LOW, ALONE], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+            assert res.get('kind') != 'error', res
+            if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                return bytes(res.pop('rgba')), res
+        raise AssertionError('occupancy density frame timeout')
+
+    try:
+        low_c, alone_c = layer_colour(workers['occ'], LOW), layer_colour(workers['occ'], ALONE)
+        # 1 um a pixel, rows from the top: the array's extent, the squares',
+        # the box pass 1 draws (a pixel of slack about each)
+        cols_um, rows_um = OCC_PITCH * OCC_ARRAY[0], OCC_PITCH * OCC_ARRAY[1]
+        array = (range(0, int(cols_um) + 1), range(side_h - int(rows_um) - 1, side_h))
+        x0, y0, step, n = OCC_SPECKS
+        specks = (range(int(x0) - 1, int(x0 + step * n) + 2), range(side_h - int(y0 + step * n) - 2, side_h - int(y0) + 1))
+        box = (range(int(OCC_BIG[0]) - 1, int(OCC_BIG[2]) + 2), range(side_h - int(OCC_BIG[3]) - 1, side_h - int(OCC_BIG[1]) + 2))
+
+        def where(pixels):
+            """lit pixels by colour and place: (1/0 in the array, 3/0 in the
+            squares, the rest outside the box)"""
+            a = s = 0
+            rest = []
+            for r in range(side_h):
+                for c in range(side_w):
+                    p = pixels[(r * side_w + c) * 4:(r * side_w + c) * 4 + 4]
+                    if p == BLACK or (c in box[0] and r in box[1]):
+                        continue
+                    if p == low_c and c in array[0] and r in array[1]:
+                        a += 1
+                    elif p == alone_c and c in specks[0] and r in specks[1]:
+                        s += 1
+                    else:
+                        rest.append((c, r, p))
+            return a, s, rest
+
+        walk, walk_res = view(workers['walk'], 1)
+        on, on_res = view(workers['occ'], 1)
+        tiles, _ = view(workers['tiles'], 1)
+        # the switch unset: the occupancy density (user 2026-10-07: "turn
+        # OCC on by default")
+        default, default_res = view(workers['default'], 1)
+        assert default == on and default_res['density_plan2']['occ_layers'] == 2, default_res['density_plan2']
+        p2 = on_res['density_plan2']
+        assert (p2['occ_layers'], p2['occ_cell_nm'], p2['regions'], p2['nodes']) == (2, 1000, 0, 0), p2
+        assert walk_res['density_plan2']['occ_layers'] == 0 and walk_res['density_plan2']['regions'] > 0, walk_res['density_plan2']
+        a, s, rest = where(on)
+        wa, ws, wrest = where(walk)
+        assert a > 0 and s > 0 and not rest, (a, s, rest[:5])
+        assert not wrest and wa > 0 and ws > 0, (wa, ws, wrest[:5])
+        # as many dots as the walk's within a few times: the DOT array at
+        # its cover, about a quarter of its cells' pixels (2178 cells); the
+        # squares at theirs (a sixth of 676), where the walk lights half
+        assert 300 <= a <= 900 and 0.25 * wa <= a <= 4 * wa and 0.15 * ws <= s <= 2 * ws, (a, wa, s, ws)
+        assert tiles == on, 'the occupancy density differs over other tiles and workers'
+        serial, serial_res = view(workers['serial'], 1)
+        assert serial == on and serial_res['density_plan2']['occ_layers'] == 2, 'the layers made one at a time differ'
+        # depth 0: TOP's own squares, not the DOT cells a level down
+        top_only, top_res = view(workers['occ'], 2, depth=0)
+        ta, ts, trest = where(top_only)
+        assert top_res['density_plan2']['occ_layers'] == 1 and ta == 0 and ts == s and not trest, (top_res['density_plan2'], ta, ts, s)
+        # 4 px a cell, past the 2 allowed: the plans
+        close, close_res = view(workers['occ'], 3, box_um=(0.0, 0.0, 100.0, 50.0))
+        close_walk, _ = view(workers['walk'], 3, box_um=(0.0, 0.0, 100.0, 50.0))
+        assert close_res['density_plan2']['occ_layers'] == 0 and close == close_walk, close_res['density_plan2']
+        # the layers past the cap at every level within two pixels: the plans
+        capped, capped_res = view(workers['capped'], 4)
+        assert capped_res['density_plan2']['occ_layers'] == 0 and capped == walk, capped_res['density_plan2']
+        print('density stack: occupancy density (design.ovs %d B, %s pages decoded) draws pass 2 with no plan - %d DOT px, %d square px '
+              '(the walk %d, %d), none elsewhere, the same over tiles; depth 0 its own squares alone; 4 px cells and the cap plan'
+              % ((ice / 'design.ovs').stat().st_size, stats['decoded'], a, s, wa, ws))
+    finally:
+        for w in workers.values():
+            w.stop()
+    occ_cost_checks(src, ice, env, occ)
+    # no design.ovs: the plans, byte for byte the frame without the switch
+    (ice / 'design.ovs').unlink()
+    bare = worker(src, occ)
+    try:
+        pixels, res = view(bare, 1)
+        assert res['density_plan2']['occ_layers'] == 0 and pixels == walk, res['density_plan2']
+    finally:
+        bare.stop()
+    print('density stack: no design.ovs - the walk\'s frame; floe-index ovs refuses a cache without design.ovb, builds the same bytes again')
+    occ_review_checks(temp, env, occ)
+    occ_root_checks(temp, env, occ)
+
+
+def occ_cost_checks(src, ice, env, occ):
+    """What the occupancy density costs (review 2026-10-07): a frame pass 1
+    covers - the 3/0 box filling the view - makes no layer (density_plan2
+    occ_made 0, the walk's frame byte for byte); the layers turned on and off
+    at one zoom keep the cache within FLOE_RUST_DENSITY_OCC_MB - one layer's
+    worth and a half: 1/0, 3/0, 1/0 each made again (the first let go for the
+    second), the cache at most a layer, the frames those the default cap
+    draws."""
+    import struct
+    head = (ice / 'design.ovs').read_bytes()[:80]
+    w, h = struct.unpack_from('<II', head, 64)
+    layer = -(-w // 8) * (h + -(-h // 8))
+    cap = layer * 3 // 2
+    workers = {'walk': worker(src, env), 'occ': worker(src, occ),
+               'capped': worker(src, dict(occ, FLOE_RUST_DENSITY_OCC_MB=repr(cap / 1048576.0)))}
+
+    def view(w, gen, box_um, size, visible):
+        dbu = float(w.cache.meta['dbu'])
+        w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in box_um), 'view': None,
+                  'w': size[0], 'h': size[1], 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                  'abstract': False, 'visible': list(visible), 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+            assert res.get('kind') != 'error', res
+            if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                return bytes(res.pop('rgba')), res
+        raise AssertionError('occupancy cost frame timeout')
+
+    try:
+        covered = ((225.0, 25.0, 295.0, 95.0), (70, 70), (ALONE,))
+        walked, _ = view(workers['walk'], 1, *covered)
+        drawn, res = view(workers['occ'], 1, *covered)
+        p2 = res['density_plan2']
+        assert drawn == walked and p2['occ_made'] == 0 and p2['occ_layers'] == 0, p2
+        whole = ((0.0, 0.0, 400.0, 200.0), (400, 200))
+        made, held = [], []
+        for gen, visible in enumerate(((LOW,), (ALONE,), (LOW,)), 2):
+            free, _ = view(workers['occ'], gen, *whole, visible)
+            capped, res = view(workers['capped'], gen, *whole, visible)
+            p2 = res['density_plan2']
+            assert capped == free and p2['occ_layers'] == 1, (visible, p2)
+            made.append(p2['occ_made'])
+            held.append(p2['occ_cache_kb'])
+        assert made == [1, 1, 1] and all(kb * 1024 <= cap for kb in held), (made, held, cap)
+    finally:
+        for w in workers.values():
+            w.stop()
+    print('density stack: occupancy density - a covered frame makes no layer (the walk\'s frame); layers turned on and off '
+          'keep its cache within the cap (%d B: made %s, held %s KiB)' % (cap, made, held))
+
+
+def ovs_table(path):
+    """design.ovs's table (version 3): (version, n_levels, per layer [(depth,
+    [(bits off, len, means off, len) per level])])."""
+    import struct
+    data = Path(path).read_bytes()
+    assert data[:8] == b'FLOEOVS1', data[:8]
+    version, n_levels, n_layers = struct.unpack_from('<I', data, 8)[0], *struct.unpack_from('<II', data, 72)
+    at, layers = 80, []
+    for _ in range(n_layers):
+        n_planes, at = data[at], at + 1
+        planes = []
+        for _ in range(n_planes):
+            depth, at = data[at], at + 1
+            planes.append((depth, [struct.unpack_from('<4Q', data, at + 32 * lv) for lv in range(n_levels)]))
+            at += 32 * n_levels
+        layers.append(planes)
+    return version, n_levels, layers
+
+
+CUT_SQUARES = (2.0, 2.0, 8.0, 40, 20)       # um: x, y, pitch, columns, rows of 3.5 um squares (1/0)
+CUT_WIRES = (330.0, 100.0, 2.0, 32)         # um: x, y, pitch, count of 0.4 x 32 um wires (2/0)
+
+
+def occ_cut_layout(path, tiny_path):
+    """1/0: 3.5 um squares at 8 um, a 40 x 20 array - under a 3 px cut from
+    1.17 um a pixel on, over the 3 um cut of 1 um cells; 2/0: 32 wires of
+    0.4 x 32 um at 2 um - under the cut by their smaller side alone. And a
+    TOP that is a 0.4 um square of 1/0 alone."""
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    x0, y0, pitch, nx, ny = CUT_SQUARES
+    low = ly.layer(*LOW)
+    for j in range(ny):
+        for i in range(nx):
+            x, y = x0 + i * pitch, y0 + j * pitch
+            top.shapes(low).insert(kdb.DBox(x, y, x + 3.5, y + 3.5))
+    x0, y0, pitch, n = CUT_WIRES
+    mid = ly.layer(*MID)
+    for i in range(n):
+        x = x0 + i * pitch
+        top.shapes(mid).insert(kdb.DBox(x, y0, x + 0.4, y0 + 32.0))
+    ly.write(str(path))
+    tiny = kdb.Layout()
+    tiny.dbu = 0.001
+    tiny.create_cell('TOP').shapes(tiny.layer(*LOW)).insert(kdb.DBox(1.0, 1.0, 1.4, 1.4))
+    tiny.write(str(tiny_path))
+
+
+def occ_review_checks(temp, env, occ):
+    """The occupancy density against the frame's own cut (review 2026-10-07,
+    each reproduced first): design.ovs classes shapes by their larger side at
+    the level whose cut reaches the frame's - 3.5 um squares over 1 um cells
+    at 1.5 um a pixel (cut 4.5 um) light dots where they lit none (level 0's 3
+    um cut left them out, pass 1's 4.5 um too), and 0.4 x 32 um wires, pass
+    1's hairlines, come back as no dot (by their smaller side they did: 639 px
+    for 396) - the frame byte for byte the walk's and the one without the
+    stack; a TOP under the cut (a 0.4 um square alone) has its plane; a
+    design.ovs plane that will not read sends the frame to the plans, byte for
+    byte the walk's; a page that will not read fails `floe-index ovs`, the
+    last design.ovs left as it was."""
+    import shutil
+    src, tiny = Path(temp) / 'occcut.oas', Path(temp) / 'occtiny.oas'
+    occ_cut_layout(src, tiny)
+    for path in (src, tiny):
+        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path)],
+                              cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+    ice, tiny_ice = Path(temp) / '.occcut.oas.ice', Path(temp) / '.occtiny.oas.ice'
+    index_bin = os.environ['FLOE_INDEX_BIN']
+    for cache, extra in ((ice, ['--um', '1']), (tiny_ice, [])):
+        built = subprocess.run([index_bin, 'ovs', str(cache)] + extra, capture_output=True, text=True, timeout=600)
+        assert built.returncode == 0, built.stdout + built.stderr
+    # the tiny TOP: a plane of 1/0 at depth 0 with cells set
+    version, _, layers = ovs_table(tiny_ice / 'design.ovs')
+    assert version == 3 and any(depth == 0 and levels[0][1] > 0 for planes in layers for depth, levels in planes), layers
+
+    def view(w, gen, box_um, size, visible):
+        dbu = float(w.cache.meta['dbu'])
+        w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in box_um), 'view': None,
+                  'w': size[0], 'h': size[1], 'depth': None, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                  'abstract': False, 'visible': list(visible), 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False})
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+            assert res.get('kind') != 'error', res
+            if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                return bytes(res.pop('rgba')), res
+        raise AssertionError('occupancy review frame timeout')
+
+    def lit_px(pixels):
+        return sum(1 for i in range(0, len(pixels), 4) if pixels[i:i + 4] != BLACK)
+
+    squares = ((0.0, 0.0, 300.0, 150.0), (200, 100), (LOW,))
+    wires = ((320.0, 90.0, 400.0, 140.0), (80, 50), (MID,))
+    plain = {name: value for name, value in env.items() if not name.startswith('FLOE_RUST_DENSITY')}
+    workers = {'walk': worker(src, env), 'occ': worker(src, occ), 'off': worker(src, plain)}
+    try:
+        sq = {name: view(w, 1, *squares) for name, w in workers.items()}
+        p2 = sq['occ'][1]['density_plan2']
+        # level 1 (2 um cells, 6 um cut) for the 4.5 um cut
+        assert p2['occ_layers'] == 1 and p2['occ_cell_nm'] == 2000, p2
+        dots, walk_dots, bare = lit_px(sq['occ'][0]), lit_px(sq['walk'][0]), lit_px(sq['off'][0])
+        assert bare == 0 and walk_dots > 0 and 0.25 * walk_dots <= dots <= 4 * walk_dots, (dots, walk_dots, bare)
+        wi = {name: view(w, 2, *wires) for name, w in workers.items()}
+        assert wi['occ'][1]['density_plan2']['occ_layers'] == 0, wi['occ'][1]['density_plan2']
+        assert wi['occ'][0] == wi['walk'][0] == wi['off'][0], 'the wires: %d px with the occupancy density, %d walked, %d without the stack' % (
+            lit_px(wi['occ'][0]), lit_px(wi['walk'][0]), lit_px(wi['off'][0]))
+    finally:
+        for w in workers.values():
+            w.stop()
+    # a plane that will not read: the squares' level 1 bits (the frame's;
+    # level 0 holds none of them) overwritten - the plans draw
+    table = ovs_table(ice / 'design.ovs')[2]
+    assert table[0] and table[0][0][1][0][1] == 0 < table[0][0][1][1][1], table[0]
+    off, length = table[0][0][1][1][:2]
+    data = bytearray((ice / 'design.ovs').read_bytes())
+    data[off:off + length] = b'\xff' * length
+    good = (ice / 'design.ovs').read_bytes()
+    (ice / 'design.ovs').write_bytes(bytes(data))
+    workers = {'walk': worker(src, env), 'bad': worker(src, occ)}
+    try:
+        walked, _ = view(workers['walk'], 3, *squares)
+        bad, bad_res = view(workers['bad'], 3, *squares)
+        assert bad == walked and bad_res['density_plan2']['occ_layers'] == 0, bad_res['density_plan2']
+    finally:
+        for w in workers.values():
+            w.stop()
+    (ice / 'design.ovs').write_bytes(good)
+    # a page that will not read: the build fails, the last file stays
+    broken = Path(temp) / 'occbroken.oas'
+    shutil.copy2(src, broken)
+    shutil.copytree(ice, Path(temp) / '.occbroken.oas.ice')
+    broken_ice = Path(temp) / '.occbroken.oas.ice'
+    with open(broken_ice / 'design.ovp', 'r+b') as fh:
+        fh.truncate(16)
+    failed = subprocess.run([index_bin, 'ovs', str(broken_ice), '--um', '1'], capture_output=True, text=True, timeout=600)
+    assert failed.returncode == 1 and 'page' in failed.stderr and (broken_ice / 'design.ovs').read_bytes() == good, (failed.returncode, failed.stderr)
+    print('density stack: occupancy density at the frame\'s cut - 3.5 um squares at 1.5 um/px %d px over 2 um cells (walk %d, none '
+          'without the stack), 0.4 x 32 um wires the walk\'s frame byte for byte; a TOP under the cut has its plane; a plane that '
+          'will not read draws the walk\'s frame; a page that will not read fails the build, the last file kept' % (dots, walk_dots))
+
+
+ROOT_ARRAY = (40, 20)        # a big cell's DOT array at OCC_PITCH: x 0-118, y 0-58 um
+ROOT_SPECKS = (0.0, 70.0, 3.0, 26, 10)  # its own 3/0 0.4 um squares: x, y, pitch, columns, rows - y 70-98 um
+ROOT_VIEW = (0.0, 0.0, 120.0, 100.0)    # um: a big cell's box in its own coordinates
+
+
+def occ_root_layout(path):
+    """TOP over 215 x 200 um: BLK - a DOT array and squares of its own -
+    turned a quarter (R90) at (100, 0), BLK2 - the same content - mirrored
+    at (100, 100) and (100, 200), each a quarter of TOP's box and more; and
+    SML, a 5 x 5 DOT array, at (10, 130)."""
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell('TOP')
+    dot = ly.create_cell('DOT')
+    dot.shapes(ly.layer(*LOW)).insert(kdb.DBox(0.25, 0.25, 0.25 + OCC_DOT, 0.25 + OCC_DOT))
+    pitch = int(OCC_PITCH * 1000)
+    alone = ly.layer(*ALONE)
+    for name, trans in (('BLK', ((1, False, 100000, 0),)), ('BLK2', ((0, True, 100000, 100000), (0, True, 100000, 200000)))):
+        cell = ly.create_cell(name)
+        cell.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(), kdb.Vector(pitch, 0), kdb.Vector(0, pitch), *ROOT_ARRAY))
+        x0, y0, step, nx, ny = ROOT_SPECKS
+        for j in range(ny):
+            for i in range(nx):
+                x, y = x0 + i * step + 0.3, y0 + j * step + 0.3
+                cell.shapes(alone).insert(kdb.DBox(x, y, x + 0.4, y + 0.4))
+        for rot, mirror, x, y in trans:
+            top.insert(kdb.CellInstArray(cell.cell_index(), kdb.Trans(rot, mirror, x, y)))
+    sml = ly.create_cell('SML')
+    sml.insert(kdb.CellInstArray(dot.cell_index(), kdb.Trans(), kdb.Vector(pitch, 0), kdb.Vector(0, pitch), 5, 5))
+    top.insert(kdb.CellInstArray(sml.cell_index(), kdb.Trans(10000, 130000)))
+    ly.write(str(path))
+
+
+def occ_root_checks(temp, env, occ):
+    """A view root by its cell's own occupancy density (user 2026-10-07: two
+    cells under the field chip's top drew their root views by the plans,
+    1.6 s; "record the cells over 25 % as the top unfolds and make them at
+    once"): `floe-index ovs` writes design.ovs.<cell> for BLK and BLK2 - a
+    quarter of TOP's box and more - in the same walk (roots=2, version 4,
+    their placements in it), none for SML; design.ovs the same bytes as with
+    --roots 0 (TOP's own made of the cells' at their places). BLK's root view
+    - turned a quarter in TOP - and BLK2's - mirrored, placed twice - draw
+    pass 2 with no plan over 1 um cells, the DOT array's dots within its
+    extent and the squares' within theirs in their own coordinates, as many
+    as the walk's within a few times, nothing elsewhere; at depth 0 their own
+    squares alone; SML's root view the plans, byte for byte the walk's; built
+    again with --roots 0, the cells' files go and BLK's root view is the
+    walk's frame byte for byte."""
+    import struct
+    src = Path(temp) / 'occroot.oas'
+    occ_root_layout(src)
+    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    ice = Path(temp) / '.occroot.oas.ice'
+    index_bin = os.environ['FLOE_INDEX_BIN']
+    # the index makes the cells' files with design.ovs; indexed again (here
+    # with --no-ovs) they all go first
+    assert len(list(ice.glob('design.ovs.*'))) == 2 and "cell BLK's root views" in done.stderr, done.stderr[-2000:]
+    again = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--force', '--no-ovs'],
+                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert again.returncode == 0 and not list(ice.glob('design.ovs*')), (again.returncode, list(ice.glob('design.ovs*')))
+
+    def ovs(*extra):
+        built = subprocess.run([index_bin, 'ovs', str(ice), '--um', '1'] + list(extra), capture_output=True, text=True, timeout=600)
+        assert built.returncode == 0, built.stdout + built.stderr
+        return dict(kv.split('=', 1) for kv in built.stdout.split()[1:]), built.stderr
+
+    stats, _ = ovs('--roots', '0')
+    assert stats['roots'] == '0' and not list(ice.glob('design.ovs.*')), (stats, list(ice.glob('design.ovs.*')))
+    alone_top = (ice / 'design.ovs').read_bytes()
+    stats, said = ovs()
+    roots = {}
+    for line in said.splitlines():
+        if line.startswith('[ovs] ') and "'s root views" in line:
+            path, _, rest = line[len('[ovs] '):].partition(': cell ')
+            roots[rest.split("'s root views")[0]] = int(path.rsplit('.', 1)[1])
+    assert stats['roots'] == '2' and sorted(roots) == ['BLK', 'BLK2'], (stats, said)
+    assert (ice / 'design.ovs').read_bytes() == alone_top, 'design.ovs differs made of the cells\' own'
+    placed = {}
+    for name, ci in roots.items():
+        data = (ice / ('design.ovs.%d' % ci)).read_bytes()
+        assert data[:8] == b'FLOEOVS1' and struct.unpack_from('<I', data, 8)[0] == 4, data[:12]
+        placed[name] = (struct.unpack_from('<I', data, 80)[0], data[84], data[85], *struct.unpack_from('<qq', data, 88))
+    assert placed['BLK'] == (roots['BLK'], 1, 0, 100000, 0), placed
+    assert placed['BLK2'][:3] == (roots['BLK2'], 0, 1) and placed['BLK2'][3] == 100000, placed
+    side_w, side_h = int(ROOT_VIEW[2] - ROOT_VIEW[0]), int(ROOT_VIEW[3] - ROOT_VIEW[1])
+
+    def view(w, gen, root, depth=None):
+        dbu = float(w.cache.meta['dbu'])
+        w.submit({'kind': 'render', 'gen': gen, 'scope': 'headless', 'bbox': tuple(v / dbu for v in ROOT_VIEW), 'view': None,
+                  'w': side_w, 'h': side_h, 'depth': depth, 'cut_px': 3.0, 'lod': False, 'frames': False, 'labels': False,
+                  'abstract': False, 'visible': [LOW, ALONE], 'frame_format': 'raw', 'thin': 'keep', 'frame_cache': False,
+                  'root': root})
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+            assert res.get('kind') not in ('error', 'dropped'), res
+            if res.get('kind') == 'frame' and res.get('gen') == gen and not res.get('refining'):
+                return bytes(res.pop('rgba')), res
+        raise AssertionError('occupancy root frame timeout')
+
+    def cell_of(w, name):
+        w.submit({'kind': 'cell_find', 'seq': 7, 'pattern': name})
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+            assert res.get('kind') != 'error', res
+            if res.get('kind') == 'cell_find' and res.get('seq') == 7:
+                return [m['cell'] for m in res['matches'] if m['name'] == name][0]
+        raise AssertionError('cell_find timeout')
+
+    # the array's extent and the squares', in the cell's own coordinates
+    # (rows from the top; a pixel of slack about each)
+    array = (range(0, int(OCC_PITCH * ROOT_ARRAY[0]) + 1), range(side_h - int(OCC_PITCH * ROOT_ARRAY[1]) - 1, side_h))
+    x0, y0, step, nx, ny = ROOT_SPECKS
+    specks = (range(int(x0), int(x0 + step * nx) + 2), range(side_h - int(y0 + step * ny) - 2, side_h - int(y0) + 1))
+    workers = {'walk': worker(src, env), 'occ': worker(src, occ)}
+    try:
+        low_c, alone_c = layer_colour(workers['occ'], LOW), layer_colour(workers['occ'], ALONE)
+
+        def where(pixels):
+            a = s = 0
+            rest = []
+            for r in range(side_h):
+                for c in range(side_w):
+                    p = pixels[(r * side_w + c) * 4:(r * side_w + c) * 4 + 4]
+                    if p == BLACK:
+                        continue
+                    if p == low_c and c in array[0] and r in array[1]:
+                        a += 1
+                    elif p == alone_c and c in specks[0] and r in specks[1]:
+                        s += 1
+                    else:
+                        rest.append((c, r, p))
+            return a, s, rest
+
+        counts = {}
+        # a worker's generations rise (an older one is dropped)
+        for gen, name in ((1, 'BLK'), (3, 'BLK2')):
+            walked, walk_res = view(workers['walk'], gen, roots[name])
+            drawn, res = view(workers['occ'], gen, roots[name])
+            p2 = res['density_plan2']
+            assert (p2['occ_layers'], p2['occ_cell_nm'], p2['regions'], p2['nodes']) == (2, 1000, 0, 0), (name, p2)
+            assert walk_res['density_plan2']['occ_layers'] == 0, walk_res['density_plan2']
+            (a, s, rest), (wa, ws, wrest) = where(drawn), where(walked)
+            assert not wrest and wa > 0 and ws > 0, (name, wa, ws, wrest[:5])
+            assert a > 0 and s > 0 and not rest, (name, a, s, rest[:5])
+            assert 0.25 * wa <= a <= 4 * wa and 0.15 * ws <= s <= 2 * ws, (name, a, wa, s, ws)
+            # depth 0: the cell's own squares alone
+            own, own_res = view(workers['occ'], gen + 1, roots[name], depth=0)
+            oa, os_, orest = where(own)
+            assert own_res['density_plan2']['occ_layers'] == 1 and oa == 0 and os_ == s and not orest, (name, own_res['density_plan2'], oa, os_, s)
+            counts[name] = (a, s, wa, ws)
+        sml = cell_of(workers['occ'], 'SML')
+        walked, _ = view(workers['walk'], 20, sml)
+        drawn, res = view(workers['occ'], 20, sml)
+        assert res['density_plan2']['occ_layers'] == 0 and drawn == walked, res['density_plan2']
+    finally:
+        for w in workers.values():
+            w.stop()
+    # built again with --roots 0: the cells' files go, the plans draw BLK
+    stats, said = ovs('--roots', '0')
+    assert stats['roots'] == '0' and not list(ice.glob('design.ovs.*')) and 'removed' in said, (stats, said)
+    workers = {'walk': worker(src, env), 'occ': worker(src, occ)}
+    try:
+        walked, _ = view(workers['walk'], 30, roots['BLK'])
+        drawn, res = view(workers['occ'], 30, roots['BLK'])
+        assert res['density_plan2']['occ_layers'] == 0 and drawn == walked, res['density_plan2']
+    finally:
+        for w in workers.values():
+            w.stop()
+    print('density stack: occupancy density by view root - design.ovs.<cell> for BLK (R90) and BLK2 (mirrored, placed twice) '
+          'in the same walk, design.ovs the same bytes; their root views by their files (DOT px, square px; the walk\'s): %s; '
+          'depth 0 their own squares alone; SML and BLK without its file the walk\'s frame' % counts)
+
+
 def frames_of(w, gen, visible, bg=False):
     """Every frame answer of one render, the refining rounds first: [(pixels,
     result)], the last one final."""
@@ -2131,7 +3445,10 @@ def zoom_during_pass2(w, gen_a, gen_b, visible):
 def worker(src, env):
     saved = {name: os.environ.get(name) for name in env}
     for name, value in env.items():
-        os.environ[name] = value
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
     cache = Cache(str(src))
     cache.load()
     w = RustRenderWorker(cache)
@@ -2190,7 +3507,8 @@ def main():
     os.environ['FLOE_INDEX_BIN'] = str(ROOT / 'rust/target/release/floe-index')
     os.environ['FLOE_RENDERD_BIN'] = str(ROOT / 'rust/target/release/floe-renderd')
     os.environ['FLOE_RUST_RETAINED_MB'] = '0'
-    for name in ('FLOE_RUST_DENSITY_STACK', 'FLOE_RUST_DENSITY_DOTS', 'FLOE_RUST_AREA_TRUE', 'FLOE_RUST_WRITE_ONCE'):
+    for name in ('FLOE_RUST_DENSITY_STACK', 'FLOE_RUST_DENSITY_DOTS', 'FLOE_RUST_AREA_TRUE', 'FLOE_RUST_WRITE_ONCE',
+                 'FLOE_RUST_DENSITY_PATTERN', 'FLOE_RUST_DENSITY_MASK', 'FLOE_RUST_DENSITY_STAGES'):
         os.environ.pop(name, None)
     # the fixed VIEW (W x H at PX_UM) is wider than most of these dies: past
     # their fit views the dots would thin (density_zoom_gain); the checks
@@ -2213,6 +3531,11 @@ def main():
     # density_bright_gain: a pixel shows its covered area's brightness):
     # bright_checks alone draws the brightness
     os.environ['FLOE_RUST_DENSITY_BRIGHT'] = 'off'
+    # and pass 2 by the plans, as these checks were made (the occupancy
+    # density, on by default since 0.12.317 where an index has design.ovs -
+    # every index here makes it): occ_density_checks turn it on, one with
+    # the switch unset
+    os.environ['FLOE_RUST_DENSITY_OCC'] = 'off'
     with tempfile.TemporaryDirectory(prefix='floe-density-stack-') as temp:
         src = Path(temp) / 'stack.oas'
         layout(src)
@@ -2310,11 +3633,20 @@ def main():
         density_only_checks(temp)
         top_group_checks(temp)
         shapes_first_checks(temp)
+        full_shapes_first_checks(temp)
+        nearly_full_pattern_checks(temp)
+        planner_mask_checks(temp)
+        staged_density_checks(temp)
         bright_checks(temp)
+        pattern_checks(temp)
         toggle_checks(temp)
+        first_checks(temp)
+        sums_checks(temp)
+        hier_checks(temp)
         left_checks(temp)
         ladder_checks(temp)
         occ_checks(temp)
+        occ_density_checks(temp)
     print('density stack gate: OK')
 
 
