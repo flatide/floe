@@ -15,6 +15,34 @@ renderd의 webui 전용 scene-pinned 질의 바인딩(`query_summary_layers`)과
 모두 유지했다. `validate_rust.sh`는 `cell_tree` 게이트를 `WEB_APP_GATES` 옆에 둔다.
 renderd 0.12.231, `design.ovh` 색인 단계, `floe-index svrf`가 함께 들어왔다.
 
+## 1b. 2026-10-08 병합
+
+사용자 요청 "feature/jobdeck 브랜치를 여기로 머지해줘."에 따라 `feature/jobdeck`
+(99519258, 77커밋)을 병합했다(4b3536e). density stack의 sub-cut dots와 occupancy
+density(`design.ovs`, 기본 켜짐), pass 1의 top-plane-first budget fit, 아무 셀에도 없는
+레이어만 켠 화면의 빈 그림(`PlanRequest::empty_top`), 잡덱 칩 캡처, linked work tree의
+재빌드 수정, `validate_rust.sh --changed`와 게이트별 소요 시간이 들어왔다(renderd 0.12.296).
+
+- 충돌 92 hunk 대부분은 rustfmt 줄바꿈 차이였다. base·ours·theirs를 모두 rustfmt한 뒤
+  3-way 병합을 다시 해 남은 실제 충돌 8곳만 손으로 풀었다. webui가 추가한 줄은 의도적으로
+  바꾼 빈 plan 조건 외에 모두, jobdeck이 추가한 줄은 build.rs의 `git_dirs` 외에 모두
+  결과에 있음을 줄 단위로 확인했다.
+- `cli/build.rs`, `renderd/build.rs`: 공용 `native_revision::emit()`을 유지했다. 이미
+  `git rev-parse --git-path`로 linked work tree의 HEAD·index·ref를 감시하므로 jobdeck의
+  `git_dirs` 수정과 같은 문제를 다룬다.
+- `render-core/cache.rs`: 빈 plan 정규화는 jobdeck 조건(`empty_top`·summary·view root·
+  pass 2 regions)으로 바꿨다. 뷰어 요청(renderd frame·clip, render-cli)은 모두
+  `empty_top: true`라서 §1의 `pages.is_empty()`가 맡던 경우를 포함하고, 잡덱 소스의 빈
+  plan은 다시 skipped pass가 된다. `_revision_lease`는 여전히 마지막 필드다.
+- `renderd/main.rs`: `query_summary_layers`와 frame 줄의 query scene 꼬리(`scene_*`)를
+  jobdeck의 `(expected_fit, expected_whole)`·density/fit 필드 옆에 유지했다.
+- `validate_rust.sh`: `unit_renderd`를 `WEB_APP_GATES`와 함께 두고, 웹 게이트에도 `lap`을
+  붙여 게이트별 시간에 잡히게 했으며, `--changed`에서 `tools/validate_web_ui.cjs`가
+  `web_ui`를 고르게 했다.
+- GTK 메뉴에 View > density under the cut(`_toggle_density`, 6c5a69f4)이 생겼다. 웹에는
+  아직 대응이 없어 메뉴 인벤토리에 `open`으로 기록했다(§6). 그래서
+  `validate_web_menu_inventory.py --require-complete`는 이 항목 하나로 실패한다.
+
 ## 2. 소유자 화면(`index.html`)의 배치
 
 GTK `floe/gui.py`(feature/jobdeck)와 같은 구성이다. 모든 기존 컨트롤 id는 그대로이며
@@ -291,3 +319,12 @@ view root도 WS `view.set`의 `root`로 가며 해결(`root_ticket`)은 같은 �
   cells 탭만 있다(DRC·inspect 없음).
 - 실제 RHEL/ETX/Electron 화면 수용, 회사 서버 배포는 별도다. UI가 실행 파일에 내장되므로
   `floe2-web` 재빌드·교체·재시작이 필요하다.
+- density 토글(§1b): 웹 worker는 `density=`를 보내지 않는다. 환경변수로
+  `FLOE_RUST_DENSITY_STACK=top`과 `FLOE_RUST_DENSITY_DOTS=on`을 둘 다 켜면 renderd가
+  `frame ... round=1 final=0 ... density_round=1`(style_epoch·scene 필드 없음)을 먼저 보내고
+  최종 frame도 같은 round로 보낸다. worker-client는 이를 protocol error로 거부한다(valmini에서
+  재현). 둘 다 진단용 opt-in이라 기본 설정에서는 생기지 않는다. 토글을 구현할 때 이 pass-1
+  round를 받아들이는 frame 계약을 함께 정해야 한다.
+- 2026-10-08 병합으로 들어온 GTK 전용 동작 중 웹에 아직 없는 것: 셀 트리 더블클릭이 view
+  root 지정(root/top 버튼 제거, 08d9da35 — 웹은 더블클릭이 줌), view root 아래 depth를
+  root 높이로 셈(5d386641), 도형·텍스트가 없는 레이어를 목록에서 숨김(99519258).
